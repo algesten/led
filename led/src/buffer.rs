@@ -8,6 +8,7 @@ pub struct Buffer {
     pub cursor_col: usize,
     pub path: Option<PathBuf>,
     pub dirty: bool,
+    pub scroll_offset: usize,
 }
 
 impl Buffer {
@@ -18,6 +19,7 @@ impl Buffer {
             cursor_col: 0,
             path: None,
             dirty: false,
+            scroll_offset: 0,
         }
     }
 
@@ -33,6 +35,7 @@ impl Buffer {
             cursor_col: 0,
             path: Some(PathBuf::from(path)),
             dirty: false,
+            scroll_offset: 0,
         })
     }
 

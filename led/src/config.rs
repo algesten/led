@@ -31,6 +31,8 @@ pub enum Action {
     ExpandDir,
     CollapseDir,
     OpenSelected,
+    PrevTab,
+    NextTab,
 }
 
 // ---------------------------------------------------------------------------
@@ -170,6 +172,8 @@ pub const DEFAULT_KEYS_TOML: &str = r#"# led keybindings
 "tab" = "insert_tab"
 "ctrl+o" = "toggle_focus"
 "ctrl+b" = "toggle_side_panel"
+"ctrl+left" = "prev_tab"
+"ctrl+right" = "next_tab"
 
 [keys."ctrl+x"]
 "ctrl+c" = "quit"

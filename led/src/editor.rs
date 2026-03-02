@@ -20,7 +20,11 @@ enum ChordState {
 
 enum Mode {
     Normal,
-    Prompt { label: String, input: String, action: PromptAction },
+    Prompt {
+        label: String,
+        input: String,
+        action: PromptAction,
+    },
 }
 
 enum PromptAction {
@@ -34,8 +38,8 @@ pub enum Focus {
 }
 
 pub struct Editor {
-    pub buffer: Buffer,
-    pub scroll_offset: usize,
+    buffers: Vec<Buffer>,
+    active_tab: usize,
     pub message: Option<String>,
     chord: ChordState,
     mode: Mode,
@@ -43,21 +47,43 @@ pub struct Editor {
     pub focus: Focus,
     pub file_browser: FileBrowser,
     pub show_side_panel: bool,
+    pub debug: bool,
 }
 
 impl Editor {
-    pub fn new(buffer: Buffer, keymap: Keymap, root: PathBuf) -> Self {
+    pub fn new(buffer: Option<Buffer>, keymap: Keymap, root: PathBuf) -> Self {
+        let (buffers, focus) = match buffer {
+            Some(b) => (vec![b], Focus::Editor),
+            None => (Vec::new(), Focus::Browser),
+        };
         Self {
-            buffer,
-            scroll_offset: 0,
+            buffers,
+            active_tab: 0,
             message: None,
             chord: ChordState::None,
             mode: Mode::Normal,
             keymap,
-            focus: Focus::Editor,
+            focus,
             file_browser: FileBrowser::new(root),
             show_side_panel: true,
+            debug: false,
         }
+    }
+
+    pub fn active_buffer(&self) -> Option<&Buffer> {
+        self.buffers.get(self.active_tab)
+    }
+
+    pub fn active_buffer_mut(&mut self) -> Option<&mut Buffer> {
+        self.buffers.get_mut(self.active_tab)
+    }
+
+    pub fn buffers(&self) -> &[Buffer] {
+        &self.buffers
+    }
+
+    pub fn active_tab(&self) -> usize {
+        self.active_tab
     }
 
     pub fn is_chord_pending(&self) -> bool {
@@ -86,10 +112,7 @@ impl Editor {
             }
             KeyCode::Enter => {
                 // Extract prompt state
-                let mode = std::mem::replace(
-                    &mut self.mode,
-                    Mode::Normal,
-                );
+                let mode = std::mem::replace(&mut self.mode, Mode::Normal);
                 if let Mode::Prompt { input, action, .. } = mode {
                     self.execute_prompt(action, &input);
                 }
@@ -143,13 +166,13 @@ impl Editor {
             KeymapLookup::Unbound => {
                 // Printable character fallback: insert if no ctrl/alt modifier
                 // and only when editor is focused
-                if self.focus == Focus::Editor {
-                    let has_ctrl_alt = key.modifiers.intersects(
-                        KeyModifiers::CONTROL | KeyModifiers::ALT,
-                    );
+                if self.focus == Focus::Editor && !self.buffers.is_empty() {
+                    let has_ctrl_alt = key
+                        .modifiers
+                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
                     if let KeyCode::Char(c) = key.code {
                         if !has_ctrl_alt {
-                            self.buffer.insert_char(c);
+                            self.active_buffer_mut().unwrap().insert_char(c);
                         }
                     }
                 }
@@ -165,13 +188,14 @@ impl Editor {
                 if self.show_side_panel {
                     self.focus = match self.focus {
                         Focus::Editor => Focus::Browser,
-                        Focus::Browser => Focus::Editor,
+                        Focus::Browser if !self.buffers.is_empty() => Focus::Editor,
+                        _ => self.focus,
                     };
                 }
             }
             Action::ToggleSidePanel => {
                 self.show_side_panel = !self.show_side_panel;
-                if !self.show_side_panel {
+                if !self.show_side_panel && !self.buffers.is_empty() {
                     self.focus = Focus::Editor;
                 }
             }
@@ -187,33 +211,71 @@ impl Editor {
                 }
             }
 
+            // Tab switching
+            Action::PrevTab => {
+                if self.buffers.len() > 1 {
+                    if self.active_tab == 0 {
+                        self.active_tab = self.buffers.len() - 1;
+                    } else {
+                        self.active_tab -= 1;
+                    }
+                }
+            }
+            Action::NextTab => {
+                if self.buffers.len() > 1 {
+                    self.active_tab = (self.active_tab + 1) % self.buffers.len();
+                }
+            }
+
             // Shared movement (routed by focus)
             Action::MoveUp => {
                 if self.focus == Focus::Browser {
                     self.file_browser.move_up();
-                } else {
-                    self.buffer.move_up();
+                } else if let Some(buf) = self.active_buffer_mut() {
+                    buf.move_up();
                 }
             }
             Action::MoveDown => {
                 if self.focus == Focus::Browser {
                     self.file_browser.move_down();
-                } else {
-                    self.buffer.move_down();
+                } else if let Some(buf) = self.active_buffer_mut() {
+                    buf.move_down();
                 }
             }
 
-            // Editor-only actions
-            Action::MoveLeft => self.buffer.move_left(),
-            Action::MoveRight => self.buffer.move_right(),
-            Action::LineStart => self.buffer.move_to_line_start(),
-            Action::LineEnd => self.buffer.move_to_line_end(),
-            Action::InsertNewline => self.buffer.insert_newline(),
-            Action::DeleteBackward => self.buffer.delete_char_backward(),
-            Action::DeleteForward => self.buffer.delete_char_forward(),
-            Action::InsertTab => self.buffer.insert_char('\t'),
-            Action::KillLine => self.buffer.kill_line(),
-            Action::Save => self.save_file(),
+            // Editor-only actions (require an active buffer)
+            Action::MoveLeft
+            | Action::MoveRight
+            | Action::LineStart
+            | Action::LineEnd
+            | Action::InsertNewline
+            | Action::DeleteBackward
+            | Action::DeleteForward
+            | Action::InsertTab
+            | Action::KillLine
+            | Action::Save => {
+                if let Some(buf) = self.active_buffer_mut() {
+                    match action {
+                        Action::MoveLeft => buf.move_left(),
+                        Action::MoveRight => buf.move_right(),
+                        Action::LineStart => buf.move_to_line_start(),
+                        Action::LineEnd => buf.move_to_line_end(),
+                        Action::InsertNewline => buf.insert_newline(),
+                        Action::DeleteBackward => buf.delete_char_backward(),
+                        Action::DeleteForward => buf.delete_char_forward(),
+                        Action::InsertTab => buf.insert_char('\t'),
+                        Action::KillLine => buf.kill_line(),
+                        Action::Save => match buf.save() {
+                            Ok(()) => {
+                                let name = buf.filename().to_string();
+                                self.message = Some(format!("Saved {name}."));
+                            }
+                            Err(e) => self.message = Some(format!("Save failed: {e}")),
+                        },
+                        _ => unreachable!(),
+                    }
+                }
+            }
             Action::OpenFile => {
                 self.mode = Mode::Prompt {
                     label: "Open file: ".into(),
@@ -225,19 +287,24 @@ impl Editor {
         InputResult::Continue
     }
 
-    fn save_file(&mut self) {
-        match self.buffer.save() {
-            Ok(()) => self.message = Some(format!("Saved {}.", self.buffer.filename())),
-            Err(e) => self.message = Some(format!("Save failed: {e}")),
-        }
-    }
-
     fn open_file(&mut self, path: &str) {
+        // If the file is already open, switch to that tab
+        if let Some(idx) = self
+            .buffers
+            .iter()
+            .position(|b| b.path.as_ref().map(|p| p.as_path()) == Some(std::path::Path::new(path)))
+        {
+            self.active_tab = idx;
+            let name = self.active_buffer().unwrap().filename().to_string();
+            self.message = Some(format!("Switched to {name}."));
+            return;
+        }
+
         match Buffer::from_file(path) {
             Ok(buf) => {
                 self.message = Some(format!("Opened {}.", buf.filename()));
-                self.buffer = buf;
-                self.scroll_offset = 0;
+                self.buffers.push(buf);
+                self.active_tab = self.buffers.len() - 1;
             }
             Err(e) => self.message = Some(format!("Open failed: {e}")),
         }
