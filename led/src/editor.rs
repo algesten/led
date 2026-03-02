@@ -5,6 +5,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use crate::buffer::Buffer;
 use crate::config::{Action, KeyCombo, Keymap, KeymapLookup};
 use crate::file_browser::FileBrowser;
+use crate::session::{BufferState, SessionData};
 
 pub enum InputResult {
     Continue,
@@ -308,5 +309,65 @@ impl Editor {
             }
             Err(e) => self.message = Some(format!("Open failed: {e}")),
         }
+    }
+
+    pub fn capture_session(&self) -> SessionData {
+        let buffers = self
+            .buffers
+            .iter()
+            .filter_map(|b| {
+                let path = b.path.as_ref()?;
+                Some(BufferState {
+                    file_path: path.clone(),
+                    cursor_row: b.cursor_row,
+                    cursor_col: b.cursor_col,
+                    scroll_offset: b.scroll_offset,
+                })
+            })
+            .collect();
+
+        SessionData {
+            buffers,
+            active_tab: self.active_tab,
+            focus_is_editor: self.focus == Focus::Editor,
+            show_side_panel: self.show_side_panel,
+            browser_selected: self.file_browser.selected,
+            browser_expanded_dirs: self.file_browser.expanded_dirs().clone(),
+        }
+    }
+
+    pub fn restore_session(&mut self, session: SessionData) {
+        self.buffers.clear();
+        for bs in &session.buffers {
+            let path_str = bs.file_path.to_string_lossy();
+            if let Ok(mut buf) = Buffer::from_file(&path_str) {
+                // Clamp cursor to valid ranges
+                buf.cursor_row = buf.cursor_row.min(buf.lines.len().saturating_sub(1));
+                buf.cursor_row = bs.cursor_row.min(buf.lines.len().saturating_sub(1));
+                let line_len = buf.lines[buf.cursor_row].len();
+                buf.cursor_col = bs.cursor_col.min(line_len);
+                buf.scroll_offset = bs.scroll_offset;
+                self.buffers.push(buf);
+            }
+        }
+
+        if self.buffers.is_empty() {
+            self.active_tab = 0;
+        } else {
+            self.active_tab = session.active_tab.min(self.buffers.len() - 1);
+        }
+
+        self.show_side_panel = session.show_side_panel;
+
+        self.focus = if session.focus_is_editor && !self.buffers.is_empty() {
+            Focus::Editor
+        } else {
+            Focus::Browser
+        };
+
+        self.file_browser.set_expanded_dirs(session.browser_expanded_dirs);
+        self.file_browser.selected = session
+            .browser_selected
+            .min(self.file_browser.entries.len().saturating_sub(1));
     }
 }

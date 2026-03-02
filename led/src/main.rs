@@ -2,6 +2,7 @@ mod buffer;
 mod config;
 mod editor;
 mod file_browser;
+mod session;
 mod ui;
 
 use std::io;
@@ -37,6 +38,8 @@ fn main() -> io::Result<()> {
             Ok(()) => eprintln!("Config reset to defaults."),
             Err(e) => eprintln!("Failed to reset config: {e}"),
         }
+        session::reset_db();
+        eprintln!("Session database reset.");
     }
 
     // Load keymap before ratatui::init() so parse errors print to stderr normally
@@ -83,8 +86,21 @@ fn main() -> io::Result<()> {
     };
     let root = std::fs::canonicalize(&root).unwrap_or(root);
 
-    let mut editor = Editor::new(buffer, keymap, root);
+    // Open session DB before ratatui::init() so errors print to stderr
+    let db = session::open_db();
+
+    let explicit_file = buffer.is_some();
+    let mut editor = Editor::new(buffer, keymap, root.clone());
     editor.debug = cli.debug;
+
+    // Restore session only when no explicit file was passed
+    if !explicit_file {
+        if let Some(ref conn) = db {
+            if let Some(session) = session::load_session(conn, &root) {
+                editor.restore_session(session);
+            }
+        }
+    }
 
     // Install panic hook that restores terminal before printing panic info
     let original_hook = std::panic::take_hook();
@@ -96,6 +112,13 @@ fn main() -> io::Result<()> {
     let mut terminal = ratatui::init();
     let result = run(&mut terminal, &mut editor);
     ratatui::restore();
+
+    // Save session on exit
+    if let Some(ref conn) = db {
+        let session_data = editor.capture_session();
+        session::save_session(conn, &root, &session_data);
+    }
+
     result
 }
 

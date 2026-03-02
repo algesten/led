@@ -163,6 +163,15 @@ impl FileBrowser {
         }
     }
 
+    pub fn expanded_dirs(&self) -> &HashSet<PathBuf> {
+        &self.expanded_dirs
+    }
+
+    pub fn set_expanded_dirs(&mut self, dirs: HashSet<PathBuf>) {
+        self.expanded_dirs = dirs;
+        self.rebuild();
+    }
+
     pub fn display_name(entry: &TreeEntry) -> String {
         let name = entry
             .path
