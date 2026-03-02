@@ -1,9 +1,11 @@
 mod buffer;
 mod config;
 mod editor;
+mod file_browser;
 mod ui;
 
 use std::io;
+use std::path::PathBuf;
 
 use crossterm::event::{self, Event};
 use ratatui::DefaultTerminal;
@@ -12,6 +14,15 @@ use buffer::Buffer;
 use editor::{Editor, InputResult};
 
 fn main() -> io::Result<()> {
+    let args: Vec<String> = std::env::args().collect();
+
+    if args.iter().any(|a| a == "--reset-config") {
+        match config::reset_config() {
+            Ok(()) => eprintln!("Config reset to defaults."),
+            Err(e) => eprintln!("Failed to reset config: {e}"),
+        }
+    }
+
     // Load keymap before ratatui::init() so parse errors print to stderr normally
     let keymap = match config::load_or_create_config() {
         Ok(km) => km,
@@ -21,8 +32,10 @@ fn main() -> io::Result<()> {
         }
     };
 
-    let buffer = match std::env::args().nth(1) {
-        Some(path) => Buffer::from_file(&path).unwrap_or_else(|_| {
+    let file_arg = args.iter().skip(1).find(|a| !a.starts_with("--")).cloned();
+
+    let buffer = match &file_arg {
+        Some(path) => Buffer::from_file(path).unwrap_or_else(|_| {
             let mut buf = Buffer::empty();
             buf.path = Some(path.into());
             buf
@@ -30,7 +43,23 @@ fn main() -> io::Result<()> {
         None => Buffer::empty(),
     };
 
-    let mut editor = Editor::new(buffer, keymap);
+    // Compute root dir: file arg's parent dir, else CWD
+    let root: PathBuf = file_arg
+        .as_ref()
+        .and_then(|p| {
+            let path = PathBuf::from(p);
+            path.parent().map(|parent| {
+                if parent.as_os_str().is_empty() {
+                    PathBuf::from(".")
+                } else {
+                    parent.to_path_buf()
+                }
+            })
+        })
+        .unwrap_or_else(|| PathBuf::from("."));
+    let root = std::fs::canonicalize(&root).unwrap_or(root);
+
+    let mut editor = Editor::new(buffer, keymap, root);
 
     // Install panic hook that restores terminal before printing panic info
     let original_hook = std::panic::take_hook();

@@ -26,6 +26,11 @@ pub enum Action {
     Save,
     OpenFile,
     Quit,
+    ToggleFocus,
+    ToggleSidePanel,
+    ExpandDir,
+    CollapseDir,
+    OpenSelected,
 }
 
 // ---------------------------------------------------------------------------
@@ -70,10 +75,20 @@ pub enum KeymapLookup {
 pub struct Keymap {
     direct: HashMap<KeyCombo, Action>,
     chords: HashMap<KeyCombo, HashMap<KeyCombo, Action>>,
+    contexts: HashMap<String, HashMap<KeyCombo, Action>>,
 }
 
 impl Keymap {
-    pub fn lookup(&self, combo: &KeyCombo) -> KeymapLookup {
+    pub fn lookup(&self, combo: &KeyCombo, context: Option<&str>) -> KeymapLookup {
+        // Check context-specific bindings first
+        if let Some(ctx) = context {
+            if let Some(ctx_map) = self.contexts.get(ctx) {
+                if let Some(&action) = ctx_map.get(combo) {
+                    return KeymapLookup::Action(action);
+                }
+            }
+        }
+        // Fall back to global
         if let Some(&action) = self.direct.get(combo) {
             KeymapLookup::Action(action)
         } else if self.chords.contains_key(combo) {
@@ -153,19 +168,40 @@ pub const DEFAULT_KEYS_TOML: &str = r#"# led keybindings
 "backspace" = "delete_backward"
 "delete" = "delete_forward"
 "tab" = "insert_tab"
+"ctrl+o" = "toggle_focus"
+"ctrl+b" = "toggle_side_panel"
 
 [keys."ctrl+x"]
 "ctrl+c" = "quit"
 "ctrl+s" = "save"
 "ctrl+f" = "open_file"
+
+[browser]
+"left" = "collapse_dir"
+"right" = "expand_dir"
+"enter" = "open_selected"
 "#;
 
 // ---------------------------------------------------------------------------
 // TOML → Keymap conversion
 // ---------------------------------------------------------------------------
 
+fn parse_flat_table(table: &toml::map::Map<String, toml::Value>) -> Result<HashMap<KeyCombo, Action>, String> {
+    let mut map = HashMap::new();
+    for (key_str, val) in table {
+        let combo = parse_key_combo(key_str)?;
+        let action_str = val.as_str()
+            .ok_or(format!("expected string action for key \"{key_str}\""))?;
+        let action: Action = Action::deserialize(val.clone())
+            .map_err(|e| format!("unknown action \"{action_str}\": {e}"))?;
+        map.insert(combo, action);
+    }
+    Ok(map)
+}
+
 fn toml_to_keymap(toml_str: &str) -> Result<Keymap, String> {
     let doc: toml::Value = toml::from_str(toml_str).map_err(|e| format!("TOML parse error: {e}"))?;
+    let doc_table = doc.as_table().ok_or("expected top-level table")?;
 
     let keys_table = doc
         .get("keys")
@@ -185,23 +221,25 @@ fn toml_to_keymap(toml_str: &str) -> Result<Keymap, String> {
                 direct.insert(combo, action);
             }
             toml::Value::Table(sub) => {
-                let mut chord_map = HashMap::new();
-                for (sub_key_str, sub_val) in sub {
-                    let sub_combo = parse_key_combo(sub_key_str)?;
-                    let action_str = sub_val
-                        .as_str()
-                        .ok_or(format!("expected string action for chord {key_str} {sub_key_str}"))?;
-                    let action: Action = Action::deserialize(sub_val.clone())
-                        .map_err(|e| format!("unknown action \"{action_str}\": {e}"))?;
-                    chord_map.insert(sub_combo, action);
-                }
+                let chord_map = parse_flat_table(sub)?;
                 chords.insert(combo, chord_map);
             }
             _ => return Err(format!("unexpected value type for key \"{key_str}\"")),
         }
     }
 
-    Ok(Keymap { direct, chords })
+    // Parse context sections (any top-level table other than "keys")
+    let mut contexts = HashMap::new();
+    for (section, value) in doc_table {
+        if section == "keys" {
+            continue;
+        }
+        if let Some(table) = value.as_table() {
+            contexts.insert(section.clone(), parse_flat_table(table)?);
+        }
+    }
+
+    Ok(Keymap { direct, chords, contexts })
 }
 
 // ---------------------------------------------------------------------------
@@ -228,6 +266,17 @@ pub fn load_or_create_config() -> Result<Keymap, String> {
     let content = fs::read_to_string(&path)
         .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
     toml_to_keymap(&content)
+}
+
+pub fn reset_config() -> Result<(), String> {
+    let path = config_path().ok_or("could not determine config directory")?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|e| format!("failed to create config dir: {e}"))?;
+    }
+    fs::write(&path, DEFAULT_KEYS_TOML)
+        .map_err(|e| format!("failed to write default config: {e}"))?;
+    Ok(())
 }
 
 pub fn default_keymap() -> Keymap {
