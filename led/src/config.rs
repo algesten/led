@@ -31,6 +31,7 @@ pub enum Action {
     ExpandDir,
     CollapseDir,
     OpenSelected,
+    OpenSelectedBg,
     PrevTab,
     NextTab,
 }
@@ -184,6 +185,7 @@ pub const DEFAULT_KEYS_TOML: &str = r#"# led keybindings
 "left" = "collapse_dir"
 "right" = "expand_dir"
 "enter" = "open_selected"
+"alt+enter" = "open_selected_bg"
 "#;
 
 // ---------------------------------------------------------------------------

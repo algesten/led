@@ -211,6 +211,11 @@ impl Editor {
                     self.focus = Focus::Editor;
                 }
             }
+            Action::OpenSelectedBg => {
+                if let Some(path) = self.file_browser.open_selected() {
+                    self.open_file(&path.to_string_lossy());
+                }
+            }
 
             // Tab switching
             Action::PrevTab => {
