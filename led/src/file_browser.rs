@@ -172,6 +172,31 @@ impl FileBrowser {
         self.rebuild();
     }
 
+    /// Expand all ancestor directories of `path` and select it in the tree.
+    pub fn reveal(&mut self, path: &std::path::Path) {
+        // Expand every ancestor between root and the file
+        let mut ancestors = Vec::new();
+        let mut current = path.parent();
+        while let Some(dir) = current {
+            if dir == self.root {
+                break;
+            }
+            ancestors.push(dir.to_path_buf());
+            current = dir.parent();
+        }
+        for dir in ancestors {
+            self.expanded_dirs.insert(dir);
+        }
+        self.rebuild();
+        // Select the entry matching the path
+        for (i, entry) in self.entries.iter().enumerate() {
+            if entry.path == path {
+                self.selected = i;
+                return;
+            }
+        }
+    }
+
     pub fn display_name(entry: &TreeEntry) -> String {
         let name = entry
             .path

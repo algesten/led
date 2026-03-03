@@ -3,17 +3,31 @@ mod config;
 mod editor;
 mod file_browser;
 mod session;
+mod theme;
 mod ui;
 
 use std::io;
 use std::path::PathBuf;
+use std::sync::mpsc;
 
 use clap::Parser;
-use crossterm::event::{self, Event};
+use crossterm::event::{self, Event, KeyEvent};
+use notify::{EventKind, RecursiveMode, Watcher};
 use ratatui::DefaultTerminal;
 
 use buffer::Buffer;
 use editor::{Editor, InputResult};
+
+#[derive(Debug)]
+enum ConfigFile {
+    Keys,
+    Theme,
+}
+
+enum AppEvent {
+    Key(KeyEvent),
+    ConfigChanged(ConfigFile),
+}
 
 #[derive(Parser)]
 #[command(name = "led", about = "A lightweight text editor")]
@@ -38,11 +52,13 @@ fn main() -> io::Result<()> {
             Ok(()) => eprintln!("Config reset to defaults."),
             Err(e) => eprintln!("Failed to reset config: {e}"),
         }
+        theme::reset_theme();
+        eprintln!("Theme reset to defaults.");
         session::reset_db();
         eprintln!("Session database reset.");
     }
 
-    // Load keymap before ratatui::init() so parse errors print to stderr normally
+    // Load keymap and theme before ratatui::init() so parse errors print to stderr normally
     let keymap = match config::load_or_create_config() {
         Ok(km) => km,
         Err(e) => {
@@ -50,6 +66,7 @@ fn main() -> io::Result<()> {
             config::default_keymap()
         }
     };
+    let theme = theme::load_theme();
 
     let arg_path = cli.path.as_ref().map(PathBuf::from);
     let arg_is_dir = arg_path.as_ref().map_or(false, |p: &PathBuf| p.is_dir());
@@ -90,7 +107,7 @@ fn main() -> io::Result<()> {
     let db = session::open_db();
 
     let explicit_file = buffer.is_some();
-    let mut editor = Editor::new(buffer, keymap, root.clone());
+    let mut editor = Editor::new(buffer, keymap, root.clone(), theme);
     editor.debug = cli.debug;
 
     // Restore session only when no explicit file was passed
@@ -109,8 +126,28 @@ fn main() -> io::Result<()> {
         original_hook(info);
     }));
 
+    // Build event channel
+    let (tx, rx) = mpsc::channel::<AppEvent>();
+
+    // Thread 1: crossterm key events
+    let key_tx = tx.clone();
+    std::thread::spawn(move || {
+        loop {
+            if let Ok(Event::Key(key)) = event::read() {
+                if key_tx.send(AppEvent::Key(key)).is_err() {
+                    break;
+                }
+            }
+        }
+    });
+
+    // Thread 2: config file watcher
+    let keys_path = config::config_path();
+    let theme_p = theme::theme_path();
+    let _watcher = spawn_config_watcher(tx, keys_path.as_deref(), theme_p.as_deref());
+
     let mut terminal = ratatui::init();
-    let result = run(&mut terminal, &mut editor);
+    let result = run(&mut terminal, &mut editor, &rx);
     ratatui::restore();
 
     // Save session on exit
@@ -122,18 +159,68 @@ fn main() -> io::Result<()> {
     result
 }
 
-fn run(terminal: &mut DefaultTerminal, editor: &mut Editor) -> io::Result<()> {
+fn run(
+    terminal: &mut DefaultTerminal,
+    editor: &mut Editor,
+    rx: &mpsc::Receiver<AppEvent>,
+) -> io::Result<()> {
     loop {
         terminal.draw(|frame| ui::render(editor, frame))?;
 
-        if let Event::Key(key) = event::read()? {
-            if editor.debug {
-                editor.message = Some(format!("{key:?}"));
+        match rx.recv() {
+            Ok(AppEvent::Key(key)) => {
+                if editor.debug {
+                    editor.message = Some(format!("{key:?}"));
+                }
+                match editor.handle_key_event(key) {
+                    InputResult::Continue => {}
+                    InputResult::Quit => return Ok(()),
+                }
             }
-            match editor.handle_key_event(key) {
-                InputResult::Continue => {}
-                InputResult::Quit => return Ok(()),
+            Ok(AppEvent::ConfigChanged(file)) => {
+                match file {
+                    ConfigFile::Keys => {
+                        if let Some(km) = config::reload_keymap() {
+                            editor.set_keymap(km);
+                            editor.message = Some("Reloaded keys.toml.".into());
+                        }
+                    }
+                    ConfigFile::Theme => {
+                        editor.set_theme(theme::load_theme());
+                        editor.message = Some("Reloaded theme.toml.".into());
+                    }
+                }
             }
+            Err(_) => return Ok(()),
         }
     }
+}
+
+fn spawn_config_watcher(
+    tx: mpsc::Sender<AppEvent>,
+    keys_path: Option<&std::path::Path>,
+    theme_path: Option<&std::path::Path>,
+) -> Option<notify::RecommendedWatcher> {
+    let config_dir = keys_path.or(theme_path)?.parent()?;
+    let keys_name = keys_path.and_then(|p| p.file_name()).map(|n| n.to_os_string());
+    let theme_name = theme_path.and_then(|p| p.file_name()).map(|n| n.to_os_string());
+
+    let mut watcher = notify::recommended_watcher(move |res: Result<notify::Event, notify::Error>| {
+        let Ok(ev) = res else { return };
+        match ev.kind {
+            EventKind::Create(_) | EventKind::Modify(_) => {}
+            _ => return,
+        }
+        for path in &ev.paths {
+            let fname = path.file_name();
+            if fname == keys_name.as_deref() {
+                let _ = tx.send(AppEvent::ConfigChanged(ConfigFile::Keys));
+            } else if fname == theme_name.as_deref() {
+                let _ = tx.send(AppEvent::ConfigChanged(ConfigFile::Theme));
+            }
+        }
+    }).ok()?;
+
+    watcher.watch(config_dir, RecursiveMode::NonRecursive).ok()?;
+    Some(watcher)
 }

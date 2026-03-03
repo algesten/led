@@ -11,3 +11,4 @@ toml = { workspace = true }
 dirs = { workspace = true }
 clap = { version = "4.5.60", features = ["derive"] }
 rusqlite = { workspace = true }
+notify = { workspace = true }

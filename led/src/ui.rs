@@ -1,29 +1,29 @@
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Position, Rect};
-use ratatui::style::{Color, Modifier, Style};
+
+
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 
 use crate::editor::{Editor, Focus};
 use crate::file_browser::FileBrowser;
+use crate::theme::Theme;
 
-const GUTTER_WIDTH: u16 = 4; // "NNN│" = 3 digits + separator
+const GUTTER_WIDTH: u16 = 2; // indicator + space
 const SIDE_PANEL_WIDTH: u16 = 25;
 
 pub fn render(editor: &mut Editor, frame: &mut Frame) {
     let area = frame.area();
 
-    // Layout: main content area, status bar, message bar
+    // Layout: main content area, status bar
     let vertical = Layout::vertical([
         Constraint::Min(1),
-        Constraint::Length(1),
         Constraint::Length(1),
     ])
     .split(area);
 
     let main_area = vertical[0];
     let status_area = vertical[1];
-    let message_area = vertical[2];
 
     // Determine if we show the side panel
     let show_panel = editor.show_side_panel && main_area.width > SIDE_PANEL_WIDTH + 2;
@@ -36,22 +36,22 @@ pub fn render(editor: &mut Editor, frame: &mut Frame) {
         let browser_area = horizontal[0];
         let editor_area = horizontal[1];
 
-        render_file_browser(&editor.file_browser, editor.focus, frame, browser_area);
+        render_file_browser(&editor.file_browser, editor.focus, &editor.theme, frame, browser_area);
         render_editor_content(editor, frame, editor_area);
     } else {
         render_editor_content(editor, frame, main_area);
     }
 
     render_status_bar(editor, frame, status_area);
-    render_message_bar(editor, frame, message_area);
 }
 
 fn render_tab_bar(editor: &Editor, frame: &mut Frame, area: Rect) {
     let buffers = editor.buffers();
     let active = editor.active_tab();
+    let theme = &editor.theme;
 
     let buf = frame.buffer_mut();
-    let mut x = area.x;
+    let mut x = area.x + GUTTER_WIDTH - 1; // align tab text with buffer text
     let max_x = area.x + area.width;
 
     for (i, b) in buffers.iter().enumerate() {
@@ -75,13 +75,9 @@ fn render_tab_bar(editor: &Editor, frame: &mut Frame, area: Rect) {
         }
 
         let style = if i == active {
-            Style::default()
-                .fg(Color::Black)
-                .bg(Color::White)
+            theme.tab_active.to_style()
         } else {
-            Style::default()
-                .fg(Color::Gray)
-                .bg(Color::DarkGray)
+            theme.tab_inactive.to_style()
         };
 
         buf.set_string(x, area.y, &label, style);
@@ -133,36 +129,38 @@ fn render_text(editor: &Editor, frame: &mut Frame, area: Rect, scroll: usize) {
     let height = area.height as usize;
     let buf = editor.active_buffer().unwrap();
     let total_lines = buf.lines.len();
-    let line_num_width = total_lines.to_string().len().max(3);
+    let gutter_style = editor.theme.gutter.to_style();
+    let text_style = editor.theme.editor_text.to_style();
 
     let mut display_lines = Vec::with_capacity(height);
 
     for i in 0..height {
         let line_idx = scroll + i;
         if line_idx < total_lines {
-            let num = format!("{:>width$}", line_idx + 1, width = line_num_width);
-            let gutter = Span::styled(
-                format!("{num}\u{2502}"),
-                Style::default().fg(Color::DarkGray),
-            );
-            let text = Span::raw(buf.lines[line_idx].replace('\t', "    "));
+            let gutter = Span::styled("  ", gutter_style);
+            let text = Span::styled(buf.lines[line_idx].replace('\t', "    "), text_style);
             display_lines.push(Line::from(vec![gutter, text]));
         } else {
-            let gutter = Span::styled(
-                format!("{:>width$}\u{2502}", "~", width = line_num_width),
-                Style::default().fg(Color::DarkGray),
-            );
+            let gutter = Span::styled("~ ", gutter_style);
             display_lines.push(Line::from(vec![gutter]));
         }
     }
 
-    let paragraph = Paragraph::new(display_lines);
+    let paragraph = Paragraph::new(display_lines).style(text_style);
     frame.render_widget(paragraph, area);
 }
 
-fn render_file_browser(browser: &FileBrowser, focus: Focus, frame: &mut Frame, area: Rect) {
+fn render_file_browser(
+    browser: &FileBrowser,
+    focus: Focus,
+    theme: &Theme,
+    frame: &mut Frame,
+    area: Rect,
+) {
     // Block with right border to separate from editor
-    let block = Block::default().borders(Borders::RIGHT);
+    let block = Block::default()
+        .borders(Borders::RIGHT)
+        .border_style(theme.browser_border.to_style());
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -199,14 +197,14 @@ fn render_file_browser(browser: &FileBrowser, focus: Focus, frame: &mut Frame, a
 
             let style = if is_selected {
                 if focus == Focus::Browser {
-                    Style::default().bg(Color::White).fg(Color::Black)
+                    theme.browser_selected.to_style()
                 } else {
-                    Style::default().bg(Color::DarkGray).fg(Color::White)
+                    theme.browser_selected_unfocused.to_style()
                 }
             } else if is_dir {
-                Style::default().fg(Color::Blue)
+                theme.browser_dir.to_style()
             } else {
-                Style::default()
+                theme.browser_file.to_style()
             };
 
             // Pad to fill the line
@@ -219,7 +217,6 @@ fn render_file_browser(browser: &FileBrowser, focus: Focus, frame: &mut Frame, a
 
     let paragraph = Paragraph::new(lines);
     frame.render_widget(paragraph, inner);
-
 }
 
 fn render_status_bar(editor: &Editor, frame: &mut Frame, area: Rect) {
@@ -235,26 +232,9 @@ fn render_status_bar(editor: &Editor, frame: &mut Frame, area: Rect) {
     let padding = (area.width as usize).saturating_sub(left.len() + right.len());
     let bar = format!("{left}{:padding$}{right}", "");
 
-    let style = Style::default()
-        .fg(Color::Black)
-        .bg(Color::White)
-        .add_modifier(Modifier::BOLD);
+    let style = editor.theme.status_bar.to_style();
 
     let paragraph = Paragraph::new(bar).style(style);
     frame.render_widget(paragraph, area);
 }
 
-fn render_message_bar(editor: &Editor, frame: &mut Frame, area: Rect) {
-    let content = if let Some((label, input)) = editor.prompt_display() {
-        format!("{label}{input}")
-    } else if editor.is_chord_pending() {
-        "Ctrl-X-".into()
-    } else if let Some(ref msg) = editor.message {
-        msg.clone()
-    } else {
-        String::new()
-    };
-
-    let paragraph = Paragraph::new(content);
-    frame.render_widget(paragraph, area);
-}

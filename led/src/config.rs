@@ -24,7 +24,6 @@ pub enum Action {
     InsertTab,
     KillLine,
     Save,
-    OpenFile,
     Quit,
     ToggleFocus,
     ToggleSidePanel,
@@ -179,7 +178,6 @@ pub const DEFAULT_KEYS_TOML: &str = r#"# led keybindings
 [keys."ctrl+x"]
 "ctrl+c" = "quit"
 "ctrl+s" = "save"
-"ctrl+f" = "open_file"
 
 [browser]
 "left" = "collapse_dir"
@@ -252,7 +250,7 @@ fn toml_to_keymap(toml_str: &str) -> Result<Keymap, String> {
 // Load or create config
 // ---------------------------------------------------------------------------
 
-fn config_path() -> Option<PathBuf> {
+pub fn config_path() -> Option<PathBuf> {
     dirs::home_dir().map(|d| d.join(".config").join("led").join("keys.toml"))
 }
 
@@ -283,6 +281,12 @@ pub fn reset_config() -> Result<(), String> {
     fs::write(&path, DEFAULT_KEYS_TOML)
         .map_err(|e| format!("failed to write default config: {e}"))?;
     Ok(())
+}
+
+pub fn reload_keymap() -> Option<Keymap> {
+    let path = config_path()?;
+    let content = fs::read_to_string(&path).ok()?;
+    toml_to_keymap(&content).ok()
 }
 
 pub fn default_keymap() -> Keymap {

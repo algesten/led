@@ -6,6 +6,7 @@ use crate::buffer::Buffer;
 use crate::config::{Action, KeyCombo, Keymap, KeymapLookup};
 use crate::file_browser::FileBrowser;
 use crate::session::{BufferState, SessionData};
+use crate::theme::Theme;
 
 pub enum InputResult {
     Continue,
@@ -19,19 +20,6 @@ enum ChordState {
     Pending(KeyCombo),
 }
 
-enum Mode {
-    Normal,
-    Prompt {
-        label: String,
-        input: String,
-        action: PromptAction,
-    },
-}
-
-enum PromptAction {
-    OpenFile,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Focus {
     Editor,
@@ -43,16 +31,16 @@ pub struct Editor {
     active_tab: usize,
     pub message: Option<String>,
     chord: ChordState,
-    mode: Mode,
     keymap: Keymap,
     pub focus: Focus,
     pub file_browser: FileBrowser,
     pub show_side_panel: bool,
     pub debug: bool,
+    pub theme: Theme,
 }
 
 impl Editor {
-    pub fn new(buffer: Option<Buffer>, keymap: Keymap, root: PathBuf) -> Self {
+    pub fn new(buffer: Option<Buffer>, keymap: Keymap, root: PathBuf, theme: Theme) -> Self {
         let (buffers, focus) = match buffer {
             Some(b) => (vec![b], Focus::Editor),
             None => (Vec::new(), Focus::Browser),
@@ -62,12 +50,12 @@ impl Editor {
             active_tab: 0,
             message: None,
             chord: ChordState::None,
-            mode: Mode::Normal,
             keymap,
             focus,
             file_browser: FileBrowser::new(root),
             show_side_panel: true,
             debug: false,
+            theme,
         }
     }
 
@@ -87,59 +75,7 @@ impl Editor {
         self.active_tab
     }
 
-    pub fn is_chord_pending(&self) -> bool {
-        matches!(self.chord, ChordState::Pending(_))
-    }
-
-    pub fn prompt_display(&self) -> Option<(&str, &str)> {
-        match &self.mode {
-            Mode::Prompt { label, input, .. } => Some((label.as_str(), input.as_str())),
-            _ => None,
-        }
-    }
-
     pub fn handle_key_event(&mut self, key: KeyEvent) -> InputResult {
-        match &self.mode {
-            Mode::Prompt { .. } => self.handle_prompt_key(key),
-            Mode::Normal => self.handle_normal_key(key),
-        }
-    }
-
-    fn handle_prompt_key(&mut self, key: KeyEvent) -> InputResult {
-        match key.code {
-            KeyCode::Esc => {
-                self.mode = Mode::Normal;
-                self.message = Some("Cancelled.".into());
-            }
-            KeyCode::Enter => {
-                // Extract prompt state
-                let mode = std::mem::replace(&mut self.mode, Mode::Normal);
-                if let Mode::Prompt { input, action, .. } = mode {
-                    self.execute_prompt(action, &input);
-                }
-            }
-            KeyCode::Backspace => {
-                if let Mode::Prompt { input, .. } = &mut self.mode {
-                    input.pop();
-                }
-            }
-            KeyCode::Char(c) => {
-                if let Mode::Prompt { input, .. } = &mut self.mode {
-                    input.push(c);
-                }
-            }
-            _ => {}
-        }
-        InputResult::Continue
-    }
-
-    fn execute_prompt(&mut self, action: PromptAction, input: &str) {
-        match action {
-            PromptAction::OpenFile => self.open_file(input),
-        }
-    }
-
-    fn handle_normal_key(&mut self, key: KeyEvent) -> InputResult {
         let combo = KeyCombo::from_key_event(&key);
 
         // Handle chord state first
@@ -225,11 +161,13 @@ impl Editor {
                     } else {
                         self.active_tab -= 1;
                     }
+                    self.sync_browser_selection();
                 }
             }
             Action::NextTab => {
                 if self.buffers.len() > 1 {
                     self.active_tab = (self.active_tab + 1) % self.buffers.len();
+                    self.sync_browser_selection();
                 }
             }
 
@@ -282,15 +220,16 @@ impl Editor {
                     }
                 }
             }
-            Action::OpenFile => {
-                self.mode = Mode::Prompt {
-                    label: "Open file: ".into(),
-                    input: String::new(),
-                    action: PromptAction::OpenFile,
-                };
-            }
         }
         InputResult::Continue
+    }
+
+    fn sync_browser_selection(&mut self) {
+        if let Some(buf) = self.active_buffer() {
+            if let Some(path) = buf.path.clone() {
+                self.file_browser.reveal(&path);
+            }
+        }
     }
 
     fn open_file(&mut self, path: &str) {
@@ -339,6 +278,14 @@ impl Editor {
             browser_selected: self.file_browser.selected,
             browser_expanded_dirs: self.file_browser.expanded_dirs().clone(),
         }
+    }
+
+    pub fn set_keymap(&mut self, keymap: Keymap) {
+        self.keymap = keymap;
+    }
+
+    pub fn set_theme(&mut self, theme: Theme) {
+        self.theme = theme;
     }
 
     pub fn restore_session(&mut self, session: SessionData) {
