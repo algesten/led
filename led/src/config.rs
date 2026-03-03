@@ -86,10 +86,10 @@ impl KeyCombo {
                     s.push(ch);
                 }
             }
-            KeyCode::Up => s.push_str("Up"),
-            KeyCode::Down => s.push_str("Down"),
-            KeyCode::Left => s.push_str("Left"),
-            KeyCode::Right => s.push_str("Right"),
+            KeyCode::Up => s.push('\u{2191}'),
+            KeyCode::Down => s.push('\u{2193}'),
+            KeyCode::Left => s.push('\u{2190}'),
+            KeyCode::Right => s.push('\u{2192}'),
             KeyCode::Home => s.push_str("Home"),
             KeyCode::End => s.push_str("End"),
             KeyCode::PageUp => s.push_str("PageUp"),

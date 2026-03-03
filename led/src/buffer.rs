@@ -20,6 +20,7 @@ struct UndoEntry {
     op: EditOp,
     cursor_before: (usize, usize),
     cursor_after: (usize, usize),
+    direction: i32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,6 +55,7 @@ pub struct Buffer {
     undo_history: Vec<UndoEntry>,
     undo_cursor: Option<usize>,
     pending_group: Option<PendingGroup>,
+    distance_from_save: i32,
 }
 
 impl Buffer {
@@ -70,6 +72,7 @@ impl Buffer {
             undo_history: Vec::new(),
             undo_cursor: None,
             pending_group: None,
+            distance_from_save: 0,
         }
     }
 
@@ -87,10 +90,12 @@ impl Buffer {
             undo_history: Vec::new(),
             undo_cursor: None,
             pending_group: None,
+            distance_from_save: 0,
         })
     }
 
     pub fn save(&mut self) -> io::Result<()> {
+        self.flush_pending();
         if let Some(ref path) = self.path {
             // Ensure trailing newline
             let len = self.rope.len_chars();
@@ -100,6 +105,7 @@ impl Buffer {
             let file = File::create(path)?;
             self.rope.write_to(BufWriter::new(file))?;
             self.dirty = false;
+            self.distance_from_save = 0;
             Ok(())
         } else {
             Err(io::Error::new(io::ErrorKind::Other, "No file path set"))
@@ -241,6 +247,7 @@ impl Buffer {
                 },
                 cursor_before,
                 cursor_after,
+                direction: 1,
             });
         } else {
             self.record_edit(
@@ -277,6 +284,7 @@ impl Buffer {
                     },
                     cursor_before,
                     cursor_after,
+                    direction: 1,
                 });
             } else {
                 self.record_edit(
@@ -306,6 +314,7 @@ impl Buffer {
                 },
                 cursor_before,
                 cursor_after,
+                direction: 1,
             });
         }
     }
@@ -342,6 +351,7 @@ impl Buffer {
                 },
                 cursor_before,
                 cursor_after,
+                direction: 1,
             });
         }
     }
@@ -366,6 +376,7 @@ impl Buffer {
                 },
                 cursor_before,
                 cursor_after,
+                direction: 1,
             });
         } else if self.cursor_row + 1 < self.rope.len_lines() {
             // Kill the newline, joining with next line
@@ -381,6 +392,7 @@ impl Buffer {
                 },
                 cursor_before,
                 cursor_after,
+                direction: 1,
             });
         }
     }
@@ -406,7 +418,8 @@ impl Buffer {
         self.apply_op(&inverse.op);
         self.cursor_row = inverse.cursor_after.0;
         self.cursor_col = inverse.cursor_after.1;
-        self.dirty = true;
+        self.distance_from_save -= entry.direction;
+        self.dirty = self.distance_from_save != 0;
 
         // Push the inverse to history (for redo-via-undo)
         self.undo_history.push(inverse);
@@ -428,6 +441,7 @@ impl Buffer {
             op: inv_op,
             cursor_before: entry.cursor_after,
             cursor_after: entry.cursor_before,
+            direction: -entry.direction,
         }
     }
 
@@ -520,16 +534,19 @@ impl Buffer {
 
     fn flush_pending_inner(&mut self) {
         if let Some(pg) = self.pending_group.take() {
+            self.distance_from_save += 1;
             self.undo_history.push(UndoEntry {
                 op: pg.op,
                 cursor_before: pg.cursor_before,
                 cursor_after: pg.cursor_after,
+                direction: 1,
             });
             self.undo_cursor = None;
         }
     }
 
     fn push_undo(&mut self, entry: UndoEntry) {
+        self.distance_from_save += 1;
         self.undo_history.push(entry);
         self.undo_cursor = None;
     }
