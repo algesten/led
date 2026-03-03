@@ -98,6 +98,7 @@ fn render_editor_content(editor: &mut Editor, frame: &mut Frame, area: Rect) {
     let cursor_row = buf.cursor_row;
     let current_scroll = buf.scroll_offset;
     let visible_height = text_area.height as usize;
+    editor.viewport_height = visible_height;
     let scroll = compute_scroll(current_scroll, cursor_row, visible_height);
     editor.active_buffer_mut().unwrap().scroll_offset = scroll;
 

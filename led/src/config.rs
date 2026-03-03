@@ -18,6 +18,10 @@ pub enum Action {
     MoveRight,
     LineStart,
     LineEnd,
+    PageUp,
+    PageDown,
+    FileStart,
+    FileEnd,
     InsertNewline,
     DeleteBackward,
     DeleteForward,
@@ -134,6 +138,8 @@ fn parse_key_combo(s: &str) -> Result<KeyCombo, String> {
         "right" => KeyCode::Right,
         "home" => KeyCode::Home,
         "end" => KeyCode::End,
+        "pageup" => KeyCode::PageUp,
+        "pagedown" => KeyCode::PageDown,
         "enter" => KeyCode::Enter,
         "backspace" => KeyCode::Backspace,
         "delete" => KeyCode::Delete,
@@ -159,6 +165,7 @@ pub const DEFAULT_KEYS_TOML: &str = r#"# led keybindings
 [keys]
 "ctrl+a" = "line_start"
 "ctrl+e" = "line_end"
+"ctrl+d" = "delete_forward"
 "ctrl+k" = "kill_line"
 "up" = "move_up"
 "down" = "move_down"
@@ -166,6 +173,10 @@ pub const DEFAULT_KEYS_TOML: &str = r#"# led keybindings
 "right" = "move_right"
 "home" = "line_start"
 "end" = "line_end"
+"pageup" = "page_up"
+"pagedown" = "page_down"
+"ctrl+home" = "file_start"
+"ctrl+end" = "file_end"
 "enter" = "insert_newline"
 "backspace" = "delete_backward"
 "delete" = "delete_forward"

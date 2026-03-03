@@ -101,6 +101,26 @@ impl Buffer {
         self.cursor_col = self.current_line_len();
     }
 
+    pub fn page_up(&mut self, page_size: usize) {
+        self.cursor_row = self.cursor_row.saturating_sub(page_size);
+        self.clamp_cursor_col();
+    }
+
+    pub fn page_down(&mut self, page_size: usize) {
+        self.cursor_row = (self.cursor_row + page_size).min(self.lines.len().saturating_sub(1));
+        self.clamp_cursor_col();
+    }
+
+    pub fn move_to_file_start(&mut self) {
+        self.cursor_row = 0;
+        self.cursor_col = 0;
+    }
+
+    pub fn move_to_file_end(&mut self) {
+        self.cursor_row = self.lines.len().saturating_sub(1);
+        self.cursor_col = self.current_line_len();
+    }
+
     // --- Text editing ---
 
     pub fn insert_char(&mut self, ch: char) {

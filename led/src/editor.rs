@@ -37,6 +37,7 @@ pub struct Editor {
     pub show_side_panel: bool,
     pub debug: bool,
     pub theme: Theme,
+    pub viewport_height: usize,
 }
 
 impl Editor {
@@ -56,6 +57,7 @@ impl Editor {
             show_side_panel: true,
             debug: false,
             theme,
+            viewport_height: 24,
         }
     }
 
@@ -192,18 +194,27 @@ impl Editor {
             | Action::MoveRight
             | Action::LineStart
             | Action::LineEnd
+            | Action::PageUp
+            | Action::PageDown
+            | Action::FileStart
+            | Action::FileEnd
             | Action::InsertNewline
             | Action::DeleteBackward
             | Action::DeleteForward
             | Action::InsertTab
             | Action::KillLine
             | Action::Save => {
+                let vh = self.viewport_height;
                 if let Some(buf) = self.active_buffer_mut() {
                     match action {
                         Action::MoveLeft => buf.move_left(),
                         Action::MoveRight => buf.move_right(),
                         Action::LineStart => buf.move_to_line_start(),
                         Action::LineEnd => buf.move_to_line_end(),
+                        Action::PageUp => buf.page_up(vh),
+                        Action::PageDown => buf.page_down(vh),
+                        Action::FileStart => buf.move_to_file_start(),
+                        Action::FileEnd => buf.move_to_file_end(),
                         Action::InsertNewline => buf.insert_newline(),
                         Action::DeleteBackward => buf.delete_char_backward(),
                         Action::DeleteForward => buf.delete_char_forward(),
