@@ -59,15 +59,19 @@ fn render_tab_bar(editor: &Editor, frame: &mut Frame, area: Rect) {
             x += 1;
         }
 
-        let mut name = b.filename().to_string();
-        if b.dirty {
-            name.push('\u{25cf}');
-        }
-        if name.len() > 15 {
-            name.truncate(14);
-            name.push('…');
-        }
-        let label = format!(" {name} ");
+        let filename = b.filename();
+        let prefix = if b.dirty { "\u{25cf}" } else { "" };
+        let max_chars = 15;
+        let char_count = prefix.chars().count() + filename.chars().count();
+        let truncated = char_count > max_chars;
+        let take = if truncated { max_chars - prefix.chars().count() - 1 } else { filename.chars().count() };
+        let label: String = " "
+            .chars()
+            .chain(prefix.chars())
+            .chain(filename.chars().take(take))
+            .chain(if truncated { Some('…') } else { None })
+            .chain(" ".chars())
+            .collect();
         let tab_width = label.chars().count() as u16;
 
         if x + tab_width > max_x {
