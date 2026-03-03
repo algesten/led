@@ -37,6 +37,7 @@ pub enum Action {
     OpenSelectedBg,
     PrevTab,
     NextTab,
+    Undo,
 }
 
 // ---------------------------------------------------------------------------
@@ -65,6 +66,45 @@ impl KeyCombo {
             code: event.code,
             modifiers: mods,
         }
+    }
+
+    pub fn display_name(&self) -> String {
+        let mut s = String::new();
+        if self.modifiers.contains(KeyModifiers::CONTROL) {
+            s.push_str("Ctrl-");
+        }
+        if self.modifiers.contains(KeyModifiers::ALT) {
+            s.push_str("Alt-");
+        }
+        if self.modifiers.contains(KeyModifiers::SHIFT) {
+            s.push_str("Shift-");
+        }
+        match self.code {
+            KeyCode::Char(' ') => s.push_str("Space"),
+            KeyCode::Char(c) => {
+                for ch in c.to_uppercase() {
+                    s.push(ch);
+                }
+            }
+            KeyCode::Up => s.push_str("Up"),
+            KeyCode::Down => s.push_str("Down"),
+            KeyCode::Left => s.push_str("Left"),
+            KeyCode::Right => s.push_str("Right"),
+            KeyCode::Home => s.push_str("Home"),
+            KeyCode::End => s.push_str("End"),
+            KeyCode::PageUp => s.push_str("PageUp"),
+            KeyCode::PageDown => s.push_str("PageDown"),
+            KeyCode::Enter => s.push_str("Enter"),
+            KeyCode::Backspace => s.push_str("Backspace"),
+            KeyCode::Delete => s.push_str("Delete"),
+            KeyCode::Tab => s.push_str("Tab"),
+            KeyCode::Esc => s.push_str("Esc"),
+            other => {
+                let d = format!("{other:?}");
+                s.push_str(&d);
+            }
+        }
+        s
     }
 }
 
@@ -185,6 +225,9 @@ pub const DEFAULT_KEYS_TOML: &str = r#"# led keybindings
 "ctrl+b" = "toggle_side_panel"
 "ctrl+left" = "prev_tab"
 "ctrl+right" = "next_tab"
+"ctrl+/" = "undo"
+"ctrl+_" = "undo"
+"ctrl+7" = "undo"
 
 [keys."ctrl+x"]
 "ctrl+c" = "quit"

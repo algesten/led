@@ -10,3 +10,4 @@ toml = "0.8"
 dirs = "6"
 rusqlite = { version = "0.38.0", features = ["bundled"] }
 notify = "7"
+ropey = "1.6"

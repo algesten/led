@@ -92,6 +92,18 @@ fn render_editor_content(editor: &mut Editor, frame: &mut Frame, area: Rect) {
 
     let chunks = Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).split(area);
     render_tab_bar(editor, frame, chunks[0]);
+
+    // Debug flash at top right of tab bar
+    if let Some(text) = editor.debug_flash_text() {
+        let tab_area = chunks[0];
+        let flash_width = text.len() as u16;
+        if flash_width < tab_area.width {
+            let x = tab_area.x + tab_area.width - flash_width;
+            let style = editor.theme.gutter.to_style();
+            frame.buffer_mut().set_string(x, tab_area.y, text, style);
+        }
+    }
+
     let text_area = chunks[1];
 
     let buf = editor.active_buffer().unwrap();
@@ -129,7 +141,7 @@ fn compute_scroll(current: usize, cursor_row: usize, height: usize) -> usize {
 fn render_text(editor: &Editor, frame: &mut Frame, area: Rect, scroll: usize) {
     let height = area.height as usize;
     let buf = editor.active_buffer().unwrap();
-    let total_lines = buf.lines.len();
+    let total_lines = buf.line_count();
     let gutter_style = editor.theme.gutter.to_style();
     let text_style = editor.theme.editor_text.to_style();
 
@@ -139,7 +151,7 @@ fn render_text(editor: &Editor, frame: &mut Frame, area: Rect, scroll: usize) {
         let line_idx = scroll + i;
         if line_idx < total_lines {
             let gutter = Span::styled("  ", gutter_style);
-            let text = Span::styled(buf.lines[line_idx].replace('\t', "    "), text_style);
+            let text = Span::styled(buf.line(line_idx).replace('\t', "    "), text_style);
             display_lines.push(Line::from(vec![gutter, text]));
         } else {
             let gutter = Span::styled("~ ", gutter_style);

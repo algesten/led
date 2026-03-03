@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -38,6 +39,7 @@ pub struct Editor {
     pub debug: bool,
     pub theme: Theme,
     pub viewport_height: usize,
+    debug_flash: Option<(String, Instant)>,
 }
 
 impl Editor {
@@ -58,6 +60,7 @@ impl Editor {
             debug: false,
             theme,
             viewport_height: 24,
+            debug_flash: None,
         }
     }
 
@@ -79,6 +82,16 @@ impl Editor {
 
     pub fn handle_key_event(&mut self, key: KeyEvent) -> InputResult {
         let combo = KeyCombo::from_key_event(&key);
+
+        // Debug flash (before chord resolution so Pending state is visible)
+        if self.debug {
+            let display = if let ChordState::Pending(prefix) = &self.chord {
+                format!("{} -> {}", prefix.display_name(), combo.display_name())
+            } else {
+                combo.display_name()
+            };
+            self.debug_flash = Some((display, Instant::now()));
+        }
 
         // Handle chord state first
         if let ChordState::Pending(prefix) = self.chord {
@@ -217,7 +230,8 @@ impl Editor {
             | Action::DeleteForward
             | Action::InsertTab
             | Action::KillLine
-            | Action::Save => {
+            | Action::Save
+            | Action::Undo => {
                 if let Some(buf) = self.active_buffer_mut() {
                     match action {
                         Action::MoveLeft => buf.move_left(),
@@ -231,6 +245,7 @@ impl Editor {
                         Action::DeleteForward => buf.delete_char_forward(),
                         Action::InsertTab => buf.insert_char('\t'),
                         Action::KillLine => buf.kill_line(),
+                        Action::Undo => buf.undo(),
                         Action::Save => match buf.save() {
                             Ok(()) => {
                                 let name = buf.filename().to_string();
@@ -310,16 +325,34 @@ impl Editor {
         self.theme = theme;
     }
 
+    pub fn debug_flash_text(&self) -> Option<&str> {
+        if let Some((ref text, instant)) = self.debug_flash {
+            if instant.elapsed().as_millis() < 500 {
+                return Some(text);
+            }
+        }
+        None
+    }
+
+    pub fn needs_redraw_in(&self) -> Option<Duration> {
+        if let Some((_, instant)) = &self.debug_flash {
+            let elapsed = instant.elapsed();
+            let deadline = Duration::from_millis(500);
+            if elapsed < deadline {
+                return Some(deadline - elapsed);
+            }
+        }
+        None
+    }
+
     pub fn restore_session(&mut self, session: SessionData) {
         self.buffers.clear();
         for bs in &session.buffers {
             let path_str = bs.file_path.to_string_lossy();
             if let Ok(mut buf) = Buffer::from_file(&path_str) {
                 // Clamp cursor to valid ranges
-                buf.cursor_row = buf.cursor_row.min(buf.lines.len().saturating_sub(1));
-                buf.cursor_row = bs.cursor_row.min(buf.lines.len().saturating_sub(1));
-                let line_len = buf.lines[buf.cursor_row].len();
-                buf.cursor_col = bs.cursor_col.min(line_len);
+                buf.cursor_row = bs.cursor_row.min(buf.line_count().saturating_sub(1));
+                buf.cursor_col = bs.cursor_col.min(buf.line_len(buf.cursor_row));
                 buf.scroll_offset = bs.scroll_offset;
                 self.buffers.push(buf);
             }

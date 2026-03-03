@@ -167,17 +167,27 @@ fn run(
     loop {
         terminal.draw(|frame| ui::render(editor, frame))?;
 
-        match rx.recv() {
-            Ok(AppEvent::Key(key)) => {
-                if editor.debug {
-                    editor.message = Some(format!("{key:?}"));
-                }
+        let event = if let Some(timeout) = editor.needs_redraw_in() {
+            match rx.recv_timeout(timeout) {
+                Ok(ev) => Some(ev),
+                Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(()),
+            }
+        } else {
+            match rx.recv() {
+                Ok(ev) => Some(ev),
+                Err(_) => return Ok(()),
+            }
+        };
+
+        match event {
+            Some(AppEvent::Key(key)) => {
                 match editor.handle_key_event(key) {
                     InputResult::Continue => {}
                     InputResult::Quit => return Ok(()),
                 }
             }
-            Ok(AppEvent::ConfigChanged(file)) => {
+            Some(AppEvent::ConfigChanged(file)) => {
                 match file {
                     ConfigFile::Keys => {
                         if let Some(km) = config::reload_keymap() {
@@ -191,7 +201,7 @@ fn run(
                     }
                 }
             }
-            Err(_) => return Ok(()),
+            None => return Ok(()),
         }
     }
 }
