@@ -104,6 +104,14 @@ impl FileBrowser {
         }
     }
 
+    pub fn page_up(&mut self, page_size: usize) {
+        self.selected = self.selected.saturating_sub(page_size);
+    }
+
+    pub fn page_down(&mut self, page_size: usize) {
+        self.selected = (self.selected + page_size).min(self.entries.len().saturating_sub(1));
+    }
+
     /// If file, returns path for the caller to open.
     /// If directory, toggles expansion.
     pub fn open_selected(&mut self) -> Option<PathBuf> {

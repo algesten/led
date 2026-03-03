@@ -61,7 +61,7 @@ fn render_tab_bar(editor: &Editor, frame: &mut Frame, area: Rect) {
 
         let mut name = b.filename().to_string();
         if b.dirty {
-            name.push('*');
+            name.push('\u{25cf}');
         }
         if name.len() > 15 {
             name.truncate(14);
@@ -223,7 +223,7 @@ fn render_file_browser(
 fn render_status_bar(editor: &Editor, frame: &mut Frame, area: Rect) {
     let (left, right) = if let Some(buf) = editor.active_buffer() {
         let filename = buf.filename();
-        let modified = if buf.dirty { " [modified]" } else { "" };
+        let modified = if buf.dirty { " \u{25cf}" } else { "" };
         let pos = format!("L{}:C{}", buf.cursor_row + 1, buf.cursor_col + 1,);
         (format!(" led: {filename}{modified}"), format!("{pos} "))
     } else {

@@ -188,14 +188,28 @@ impl Editor {
                     buf.move_down();
                 }
             }
+            Action::PageUp => {
+                let vh = self.viewport_height;
+                if self.focus == Focus::Browser {
+                    self.file_browser.page_up(vh);
+                } else if let Some(buf) = self.active_buffer_mut() {
+                    buf.page_up(vh);
+                }
+            }
+            Action::PageDown => {
+                let vh = self.viewport_height;
+                if self.focus == Focus::Browser {
+                    self.file_browser.page_down(vh);
+                } else if let Some(buf) = self.active_buffer_mut() {
+                    buf.page_down(vh);
+                }
+            }
 
             // Editor-only actions (require an active buffer)
             Action::MoveLeft
             | Action::MoveRight
             | Action::LineStart
             | Action::LineEnd
-            | Action::PageUp
-            | Action::PageDown
             | Action::FileStart
             | Action::FileEnd
             | Action::InsertNewline
@@ -204,15 +218,12 @@ impl Editor {
             | Action::InsertTab
             | Action::KillLine
             | Action::Save => {
-                let vh = self.viewport_height;
                 if let Some(buf) = self.active_buffer_mut() {
                     match action {
                         Action::MoveLeft => buf.move_left(),
                         Action::MoveRight => buf.move_right(),
                         Action::LineStart => buf.move_to_line_start(),
                         Action::LineEnd => buf.move_to_line_end(),
-                        Action::PageUp => buf.page_up(vh),
-                        Action::PageDown => buf.page_down(vh),
                         Action::FileStart => buf.move_to_file_start(),
                         Action::FileEnd => buf.move_to_file_end(),
                         Action::InsertNewline => buf.insert_newline(),
