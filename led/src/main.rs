@@ -51,8 +51,8 @@ fn main() -> io::Result<()> {
     let arg_path = cli.path.as_ref().map(PathBuf::from);
     let arg_is_dir = arg_path.as_ref().map_or(false, |p: &PathBuf| p.is_dir());
 
-    // Compute root dir
-    let root: PathBuf = if arg_is_dir {
+    // Compute starting directory, then walk up to find a .git root
+    let start_dir: PathBuf = if arg_is_dir {
         arg_path.unwrap()
     } else {
         cli.path
@@ -69,7 +69,8 @@ fn main() -> io::Result<()> {
             })
             .unwrap_or_else(|| PathBuf::from("."))
     };
-    let root = std::fs::canonicalize(&root).unwrap_or(root);
+    let start_dir = std::fs::canonicalize(&start_dir).unwrap_or(start_dir);
+    let root = find_git_root(&start_dir);
 
     // Build component list — the ONLY place concrete types appear
     let initial_buffer = if arg_is_dir {
@@ -338,6 +339,19 @@ fn restore_session(
             break;
         }
     }
+}
+
+fn find_git_root(start: &std::path::Path) -> PathBuf {
+    let mut dir = start.to_path_buf();
+    loop {
+        if dir.join(".git").exists() {
+            return dir;
+        }
+        if !dir.pop() {
+            break;
+        }
+    }
+    start.to_path_buf()
 }
 
 fn spawn_config_watcher(
