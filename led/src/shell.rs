@@ -5,7 +5,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use rusqlite::Connection;
 
 use led_core::{
-    Action, Component, Context, Effect, PanelSlot,
+    Action, Component, Context, Effect, Event, PanelSlot,
 };
 use crate::config::{KeyCombo, Keymap, KeymapLookup};
 use crate::theme::Theme;
@@ -13,6 +13,7 @@ use crate::theme::Theme;
 pub enum InputResult {
     Continue,
     Quit,
+    Suspend,
 }
 
 #[derive(Default)]
@@ -294,6 +295,7 @@ impl Shell {
                 }
             }
             Action::Quit => return InputResult::Quit,
+            Action::Suspend => return InputResult::Suspend,
 
             Action::PrevTab => {
                 let tabs = self.tabbed_components();
@@ -520,6 +522,10 @@ impl Shell {
 
     pub fn db(&self) -> Option<&Connection> {
         self.db.as_ref()
+    }
+
+    pub fn emit(&mut self, event: Event) {
+        self.process_effects(vec![Effect::Emit(event)]);
     }
 
     pub fn handle_notification(&mut self, hash: &str) {

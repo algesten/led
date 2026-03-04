@@ -221,6 +221,25 @@ fn run(
                 match shell.handle_key_event(key) {
                     InputResult::Continue => {}
                     InputResult::Quit => return Ok(()),
+                    InputResult::Suspend => {
+                        shell.flush_to_db();
+                        crossterm::terminal::disable_raw_mode()?;
+                        crossterm::execute!(
+                            io::stdout(),
+                            crossterm::terminal::LeaveAlternateScreen,
+                            crossterm::cursor::Show
+                        )?;
+                        // SAFETY: raise(SIGTSTP) is the standard way to suspend a process.
+                        unsafe { libc::raise(libc::SIGTSTP); }
+                        crossterm::terminal::enable_raw_mode()?;
+                        crossterm::execute!(
+                            io::stdout(),
+                            crossterm::terminal::EnterAlternateScreen,
+                            crossterm::cursor::Hide
+                        )?;
+                        shell.emit(led_core::Event::Resume);
+                        terminal.clear()?;
+                    }
                 }
             }
             Some(AppEvent::ConfigChanged(file)) => {

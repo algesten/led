@@ -15,4 +15,5 @@ rmp-serde = "1"
 twox-hash = "2"
 led_core = { path = "crates/core" }
 led_buffer = { path = "crates/buffer" }
+libc = "0.2"
 led_file_browser = { path = "crates/file-browser" }

@@ -296,6 +296,9 @@ impl Component for FileBrowser {
             Event::TabActivated { path: Some(path) } => {
                 self.reveal(path);
             }
+            Event::Resume => {
+                self.rebuild();
+            }
             _ => {}
         }
         vec![]

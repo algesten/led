@@ -916,7 +916,13 @@ impl Component for Buffer {
         }
     }
 
-    fn handle_event(&mut self, _event: &Event, _ctx: &mut Context) -> Vec<Effect> {
+    fn handle_event(&mut self, event: &Event, ctx: &mut Context) -> Vec<Effect> {
+        match event {
+            Event::Resume => {
+                self.handle_notification(ctx);
+            }
+            _ => {}
+        }
         vec![]
     }
 
@@ -1028,15 +1034,16 @@ impl Component for Buffer {
         };
         let root_str = ctx.root.to_string_lossy();
 
-        // Single joined query: fetch chain_id and any new entries in one round-trip
+        // Single joined query: fetch chain_id, content_hash and any new entries in one round-trip
         struct Row {
             chain_id: String,
+            content_hash: i64,
             seq: Option<i64>,
             entry_data: Option<Vec<u8>>,
         }
         let rows: Vec<Row> = conn
             .prepare(
-                "SELECT s.chain_id, e.seq, e.entry_data
+                "SELECT s.chain_id, s.content_hash, e.seq, e.entry_data
                  FROM buffer_undo_state s
                  LEFT JOIN undo_entries e
                    ON e.root_path = s.root_path AND e.file_path = s.file_path AND e.seq > ?3
@@ -1049,8 +1056,9 @@ impl Component for Buffer {
                     |row| {
                         Ok(Row {
                             chain_id: row.get(0)?,
-                            seq: row.get(1)?,
-                            entry_data: row.get(2)?,
+                            content_hash: row.get(1)?,
+                            seq: row.get(2)?,
+                            entry_data: row.get(3)?,
                         })
                     },
                 )?;
@@ -1068,6 +1076,7 @@ impl Component for Buffer {
         }
 
         let remote_chain_id = &rows[0].chain_id;
+        let remote_content_hash = rows[0].content_hash as u64;
         let same_chain = self.chain_id.as_deref() == Some(remote_chain_id);
 
         if same_chain {
@@ -1086,8 +1095,10 @@ impl Component for Buffer {
                 self.apply_remote_entries(entries, max_seq);
             }
         } else {
-            // Chain changed — reload from disk, then replay all entries for new chain
-            self.reload_from_disk();
+            // Chain changed — check if base content still matches before replaying
+            if self.base_content_hash != remote_content_hash {
+                self.reload_from_disk();
+            }
             let new_chain = remote_chain_id.clone();
             let all_entries = Self::load_entries_after(conn, &root_str, &file_str, 0);
             let max_seq = all_entries.last().map(|(s, _)| *s).unwrap_or(0);

@@ -781,6 +781,7 @@ dependencies = [
  "led_buffer",
  "led_core",
  "led_file_browser",
+ "libc",
  "notify",
  "ratatui",
  "rmp-serde",

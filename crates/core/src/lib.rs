@@ -43,6 +43,7 @@ pub enum Action {
     Undo,
     KillBuffer,
     Abort,
+    Suspend,
 }
 
 // ---------------------------------------------------------------------------
@@ -75,6 +76,7 @@ pub struct TabDescriptor {
 pub enum Event {
     OpenFile(PathBuf),
     TabActivated { path: Option<PathBuf> },
+    Resume,
 }
 
 pub enum Effect {

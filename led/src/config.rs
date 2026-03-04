@@ -197,6 +197,7 @@ pub const DEFAULT_KEYS_TOML: &str = r#"# led keybindings
 "ctrl+7" = "undo"
 "ctrl+g" = "abort"
 "esc" = "abort"
+"ctrl+z" = "suspend"
 
 [keys."ctrl+x"]
 "ctrl+c" = "quit"
