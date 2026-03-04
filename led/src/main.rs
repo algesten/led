@@ -127,6 +127,7 @@ fn main() -> io::Result<()> {
     if had_initial_buffer {
         shell.set_focus(PanelSlot::Main);
     }
+    shell.single_file_mode = explicit_file;
 
     // Restore session only when no explicit file was passed
     if !explicit_file {
@@ -174,12 +175,14 @@ fn main() -> io::Result<()> {
     let result = run(&mut terminal, &mut shell, &rx);
     ratatui::restore();
 
-    // Save session on exit
+    // Save session on exit (skip if we stayed in single-file mode)
     shell.flush_to_db();
-    if let Some(conn) = shell.db() {
-        let snapshot = shell.capture_session();
-        let session_data = capture_session_data(&shell, &snapshot);
-        session::save_session(conn, &root, &session_data);
+    if !shell.single_file_mode {
+        if let Some(conn) = shell.db() {
+            let snapshot = shell.capture_session();
+            let session_data = capture_session_data(&shell, &snapshot);
+            session::save_session(conn, &root, &session_data);
+        }
     }
 
     result

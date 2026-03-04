@@ -48,6 +48,7 @@ pub struct Shell {
     last_persist: Instant,
     db: Option<Connection>,
     root: PathBuf,
+    pub single_file_mode: bool,
 }
 
 impl Shell {
@@ -68,6 +69,7 @@ impl Shell {
             last_persist: Instant::now(),
             db,
             root,
+            single_file_mode: false,
         }
     }
 
@@ -83,6 +85,9 @@ impl Shell {
             }
         }
         let has_tab = component.tab().is_some();
+        if has_tab && self.single_file_mode {
+            self.single_file_mode = false;
+        }
         self.components.push(component);
         if has_tab {
             let last = self.components.len() - 1;
