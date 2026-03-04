@@ -168,6 +168,7 @@ pub struct Buffer {
     kill_accumulator: Option<String>,
     cursor_screen_pos: Option<(u16, u16)>,
     text_width: usize,
+    scroll_sub_line: usize,
 }
 
 impl Buffer {
@@ -197,6 +198,7 @@ impl Buffer {
             kill_accumulator: None,
             cursor_screen_pos: None,
             text_width: 0,
+            scroll_sub_line: 0,
         }
     }
 
@@ -226,6 +228,7 @@ impl Buffer {
             kill_accumulator: None,
             cursor_screen_pos: None,
             text_width: 0,
+            scroll_sub_line: 0,
         })
     }
 
@@ -912,16 +915,27 @@ impl Buffer {
         }
     }
 
-    /// Adjust scroll_offset so that the cursor is visible within `height` visual rows.
+    /// Adjust scroll so the cursor is visible within `height` visual rows.
+    /// Scroll is tracked as (scroll_offset, scroll_sub_line) — a logical line
+    /// plus a sub-line offset within it — so scrolling is visual-line granular.
     fn adjust_scroll(&mut self, text_width: usize, height: usize) {
         if height == 0 || text_width == 0 {
             return;
         }
 
-        // Cursor above viewport — snap to cursor's logical line
-        if self.cursor_row < self.scroll_offset {
-            self.scroll_offset = self.cursor_row;
-            return;
+        let total = self.line_count();
+
+        // Clamp scroll_offset / scroll_sub_line to valid range
+        if self.scroll_offset >= total {
+            self.scroll_offset = total.saturating_sub(1);
+            self.scroll_sub_line = 0;
+        }
+        let scroll_vl = visual_line_count(
+            expand_tabs(&self.line(self.scroll_offset)).0.len(),
+            text_width,
+        );
+        if self.scroll_sub_line >= scroll_vl {
+            self.scroll_sub_line = scroll_vl.saturating_sub(1);
         }
 
         // Compute cursor's sub-line within its logical line
@@ -933,37 +947,83 @@ impl Buffer {
         let cursor_chunks = compute_chunks(cursor_display.len(), text_width);
         let cursor_sub = find_sub_line(&cursor_chunks, cursor_dc);
 
-        // Check if cursor is visible from current scroll_offset
-        if self.cursor_row - self.scroll_offset < height {
-            let mut vrow = 0;
-            let mut visible = true;
-            for li in self.scroll_offset..self.cursor_row {
-                let dw = expand_tabs(&self.line(li)).0.len();
-                vrow += visual_line_count(dw, text_width);
+        // Case 1: cursor above viewport
+        if self.cursor_row < self.scroll_offset
+            || (self.cursor_row == self.scroll_offset && cursor_sub < self.scroll_sub_line)
+        {
+            self.scroll_offset = self.cursor_row;
+            self.scroll_sub_line = cursor_sub;
+            return;
+        }
+
+        // Case 2: check if cursor is visible
+        let mut vrow: usize = 0;
+
+        if self.cursor_row == self.scroll_offset {
+            // Same line — just check sub-line distance
+            let cursor_vrow = cursor_sub - self.scroll_sub_line;
+            if cursor_vrow < height {
+                return;
+            }
+        } else {
+            // First logical line: only count sub-lines from scroll_sub_line onward
+            vrow += scroll_vl - self.scroll_sub_line;
+
+            // Intermediate lines
+            let limit = self.cursor_row.min(self.scroll_offset + height);
+            for li in (self.scroll_offset + 1)..limit {
+                vrow += visual_line_count(
+                    expand_tabs(&self.line(li)).0.len(),
+                    text_width,
+                );
                 if vrow >= height {
-                    visible = false;
                     break;
                 }
             }
-            if visible && vrow + cursor_sub < height {
+
+            if vrow + cursor_sub < height {
                 return;
             }
         }
 
-        // Cursor not visible — scroll so cursor is near bottom.
-        // Walk backward from cursor_row accumulating visual lines.
-        let mut budget = height.saturating_sub(cursor_sub + 1);
+        // Case 3: cursor not visible — place cursor near bottom.
+        // We need (height - 1) visual rows above cursor's sub-line.
+        let mut remaining = height - 1;
+
+        if cursor_sub <= remaining {
+            remaining -= cursor_sub;
+        } else {
+            // Line itself is taller than viewport at cursor's sub-line
+            self.scroll_offset = self.cursor_row;
+            self.scroll_sub_line = cursor_sub.saturating_sub(height - 1);
+            return;
+        }
+
         let mut new_scroll = self.cursor_row;
+        let mut new_sub: usize = 0;
+
         for li in (0..self.cursor_row).rev() {
-            let dw = expand_tabs(&self.line(li)).0.len();
-            let vl = visual_line_count(dw, text_width);
-            if vl > budget {
+            if remaining == 0 {
                 break;
             }
-            budget -= vl;
-            new_scroll = li;
+            let vl = visual_line_count(
+                expand_tabs(&self.line(li)).0.len(),
+                text_width,
+            );
+            if vl <= remaining {
+                remaining -= vl;
+                new_scroll = li;
+                new_sub = 0;
+            } else {
+                // Partially fits — start from a sub-line within this line
+                new_scroll = li;
+                new_sub = vl - remaining;
+                break;
+            }
         }
+
         self.scroll_offset = new_scroll;
+        self.scroll_sub_line = new_sub;
     }
 
     // --- Undo persistence ---
@@ -1311,7 +1371,13 @@ impl Component for Buffer {
                 None
             };
 
+            // Skip sub-lines for partial-line scroll on the first visible line
+            let skip = if line_idx == self.scroll_offset { self.scroll_sub_line } else { 0 };
+
             for (chunk_i, &(cs, ce)) in chunks.iter().enumerate() {
+                if chunk_i < skip {
+                    continue;
+                }
                 if screen_row >= height {
                     break;
                 }
