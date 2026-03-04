@@ -1329,7 +1329,7 @@ impl Component for BufferFactory {
 [editor]
 text      = "$normal"
 gutter    = "$muted"
-selection = { reversed = true }
+selection = "$selected"
 "#
     }
 }

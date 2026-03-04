@@ -341,6 +341,7 @@ accent           = "$bright_magenta"
 muted            = "$magenta"
 inverse_active   = { fg = "$bright_yellow", bg = "$magenta", bold = true }
 inverse_inactive = { fg = "term_reset", bg = "$bright_black", bold = true }
+selected         = { fg = "term_reset", bg = "$bright_black" }
 
 
 ####################################################################
