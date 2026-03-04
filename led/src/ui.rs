@@ -1,21 +1,16 @@
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout, Position, Rect};
-
-
-use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 
-use crate::editor::{Editor, Focus, Modal};
-use crate::file_browser::FileBrowser;
-use crate::theme::Theme;
+use led_core::{DrawContext, PanelSlot};
+use crate::editor::{Editor, Modal};
 
-const GUTTER_WIDTH: u16 = 2; // indicator + space
+const GUTTER_WIDTH: u16 = 2;
 const SIDE_PANEL_WIDTH: u16 = 25;
 
 pub fn render(editor: &mut Editor, frame: &mut Frame) {
     let area = frame.area();
 
-    // Layout: main content area, status bar
     let vertical = Layout::vertical([
         Constraint::Min(1),
         Constraint::Length(1),
@@ -25,7 +20,6 @@ pub fn render(editor: &mut Editor, frame: &mut Frame) {
     let main_area = vertical[0];
     let status_area = vertical[1];
 
-    // Determine if we show the side panel
     let show_panel = editor.show_side_panel && main_area.width > SIDE_PANEL_WIDTH + 2;
 
     if show_panel {
@@ -36,7 +30,16 @@ pub fn render(editor: &mut Editor, frame: &mut Frame) {
         let browser_area = horizontal[0];
         let editor_area = horizontal[1];
 
-        render_file_browser(&editor.file_browser, editor.focus, &editor.theme, frame, browser_area);
+        // Draw side panel component
+        {
+            let focused = editor.focus == PanelSlot::Side;
+            let theme = editor.theme.clone();
+            let ctx = DrawContext { theme: &theme, focused };
+            if let Some(comp) = editor.side_component_mut() {
+                comp.draw(frame, browser_area, &ctx);
+            }
+        }
+
         render_editor_content(editor, frame, editor_area);
     } else {
         render_editor_content(editor, frame, main_area);
@@ -44,32 +47,37 @@ pub fn render(editor: &mut Editor, frame: &mut Frame) {
 
     render_status_bar(editor, frame, status_area);
 
-    // Modal overlay (rendered last so it's on top)
     if let Some(modal) = &editor.modal {
         render_modal(modal, frame, area);
     }
 }
 
 fn render_tab_bar(editor: &Editor, frame: &mut Frame, area: Rect) {
-    let buffers = editor.buffers();
-    let active = editor.active_tab();
     let theme = &editor.theme;
+    let active = editor.active_tab();
 
     let buf = frame.buffer_mut();
-    let mut x = area.x + GUTTER_WIDTH - 1; // align tab text with buffer text
+    let mut x = area.x + GUTTER_WIDTH - 1;
     let max_x = area.x + area.width;
 
-    for (i, b) in buffers.iter().enumerate() {
-        if i > 0 {
+    let mut tab_idx: usize = 0;
+    for comp in editor.components().iter() {
+        let Some(tab) = comp.tab() else { continue };
+
+        if tab_idx > 0 {
             x += 1;
         }
 
-        let filename = b.filename();
-        let prefix = if b.dirty { "\u{25cf}" } else { "" };
+        let prefix = if tab.dirty { "\u{25cf}" } else { "" };
+        let filename = &tab.label;
         let max_chars = 15;
         let char_count = prefix.chars().count() + filename.chars().count();
         let truncated = char_count > max_chars;
-        let take = if truncated { max_chars - prefix.chars().count() - 1 } else { filename.chars().count() };
+        let take = if truncated {
+            max_chars - prefix.chars().count() - 1
+        } else {
+            filename.chars().count()
+        };
         let label: String = " "
             .chars()
             .chain(prefix.chars())
@@ -83,7 +91,7 @@ fn render_tab_bar(editor: &Editor, frame: &mut Frame, area: Rect) {
             break;
         }
 
-        let style = if i == active {
+        let style = if tab_idx == active {
             theme.tab_active.to_style()
         } else {
             theme.tab_inactive.to_style()
@@ -91,11 +99,12 @@ fn render_tab_bar(editor: &Editor, frame: &mut Frame, area: Rect) {
 
         buf.set_string(x, area.y, &label, style);
         x += tab_width;
+        tab_idx += 1;
     }
 }
 
 fn render_editor_content(editor: &mut Editor, frame: &mut Frame, area: Rect) {
-    if editor.buffers().is_empty() {
+    if !editor.has_tabs() {
         return;
     }
 
@@ -115,25 +124,34 @@ fn render_editor_content(editor: &mut Editor, frame: &mut Frame, area: Rect) {
 
     let text_area = chunks[1];
 
-    let buf = editor.active_buffer().unwrap();
-    let cursor_row = buf.cursor_row;
-    let current_scroll = buf.scroll_offset;
+    // Get cursor/scroll info from active component
+    let comp = editor.active_buffer().unwrap();
+    let cursor_row = comp.cursor_position().map_or(0, |(r, _)| r);
+    let current_scroll = comp.scroll_offset();
     let visible_height = text_area.height as usize;
     editor.viewport_height = visible_height;
     let scroll = compute_scroll(current_scroll, cursor_row, visible_height);
-    editor.active_buffer_mut().unwrap().scroll_offset = scroll;
+    editor.active_buffer_mut().unwrap().set_scroll_offset(scroll);
 
-    render_text(editor, frame, text_area, scroll);
+    // Draw the active buffer component
+    {
+        let focused = editor.focus == PanelSlot::Main;
+        let theme = editor.theme.clone();
+        let ctx = DrawContext { theme: &theme, focused };
+        editor.active_buffer_mut().unwrap().draw(frame, text_area, &ctx);
+    }
 
     // Place cursor (only when editor focused)
-    if editor.focus == Focus::Editor {
-        let buf = editor.active_buffer().unwrap();
-        let cursor_screen_row = buf.cursor_row.saturating_sub(scroll) as u16;
-        let cursor_screen_col = buf.cursor_col as u16 + GUTTER_WIDTH;
-        frame.set_cursor_position(Position::new(
-            text_area.x + cursor_screen_col,
-            text_area.y + cursor_screen_row,
-        ));
+    if editor.focus == PanelSlot::Main {
+        let comp = editor.active_buffer().unwrap();
+        if let Some((row, col)) = comp.cursor_position() {
+            let cursor_screen_row = row.saturating_sub(scroll) as u16;
+            let cursor_screen_col = col as u16 + GUTTER_WIDTH;
+            frame.set_cursor_position(Position::new(
+                text_area.x + cursor_screen_col,
+                text_area.y + cursor_screen_row,
+            ));
+        }
     }
 }
 
@@ -147,105 +165,19 @@ fn compute_scroll(current: usize, cursor_row: usize, height: usize) -> usize {
     scroll
 }
 
-fn render_text(editor: &Editor, frame: &mut Frame, area: Rect, scroll: usize) {
-    let height = area.height as usize;
-    let buf = editor.active_buffer().unwrap();
-    let total_lines = buf.line_count();
-    let gutter_style = editor.theme.gutter.to_style();
-    let text_style = editor.theme.editor_text.to_style();
-
-    let mut display_lines = Vec::with_capacity(height);
-
-    for i in 0..height {
-        let line_idx = scroll + i;
-        if line_idx < total_lines {
-            let gutter = Span::styled("  ", gutter_style);
-            let text = Span::styled(buf.line(line_idx).replace('\t', "    "), text_style);
-            display_lines.push(Line::from(vec![gutter, text]));
-        } else {
-            let gutter = Span::styled("~ ", gutter_style);
-            display_lines.push(Line::from(vec![gutter]));
-        }
-    }
-
-    let paragraph = Paragraph::new(display_lines).style(text_style);
-    frame.render_widget(paragraph, area);
-}
-
-fn render_file_browser(
-    browser: &FileBrowser,
-    focus: Focus,
-    theme: &Theme,
-    frame: &mut Frame,
-    area: Rect,
-) {
-    // Block with right border to separate from editor
-    let block = Block::default()
-        .borders(Borders::RIGHT)
-        .border_style(theme.browser_border.to_style());
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-
-    let height = inner.height as usize;
-    if height == 0 {
-        return;
-    }
-
-    // Compute scroll for browser
-    let browser_scroll = if browser.selected >= height {
-        browser.selected - height + 1
-    } else {
-        0
-    };
-
-    let mut lines = Vec::with_capacity(height);
-
-    for i in 0..height {
-        let idx = browser_scroll + i;
-        if idx < browser.entries.len() {
-            let entry = &browser.entries[idx];
-            let name = FileBrowser::display_name(entry);
-
-            // Truncate to fit panel width
-            let max_width = inner.width as usize;
-            let display: String = if name.len() > max_width {
-                name[..max_width].to_string()
-            } else {
-                name
-            };
-
-            let is_selected = idx == browser.selected;
-            let is_dir = matches!(entry.kind, crate::file_browser::EntryKind::Directory { .. });
-
-            let style = if is_selected {
-                if focus == Focus::Browser {
-                    theme.browser_selected.to_style()
-                } else {
-                    theme.browser_selected_unfocused.to_style()
-                }
-            } else if is_dir {
-                theme.browser_dir.to_style()
-            } else {
-                theme.browser_file.to_style()
-            };
-
-            // Pad to fill the line
-            let padded = format!("{:<width$}", display, width = max_width);
-            lines.push(Line::from(Span::styled(padded, style)));
-        } else {
-            lines.push(Line::from(""));
-        }
-    }
-
-    let paragraph = Paragraph::new(lines);
-    frame.render_widget(paragraph, inner);
-}
-
 fn render_status_bar(editor: &Editor, frame: &mut Frame, area: Rect) {
-    let (left, right) = if let Some(buf) = editor.active_buffer() {
-        let filename = buf.filename();
-        let modified = if buf.dirty { " \u{25cf}" } else { "" };
-        let pos = format!("L{}:C{}", buf.cursor_row + 1, buf.cursor_col + 1,);
+    let (left, right) = if let Some(comp) = editor.active_buffer() {
+        let tab = comp.tab().unwrap_or(led_core::TabDescriptor {
+            label: comp.name().to_string(),
+            dirty: false,
+        });
+        let modified = if tab.dirty { " \u{25cf}" } else { "" };
+        let filename = &tab.label;
+
+        let (line, col) = comp
+            .status_info()
+            .map_or((1, 1), |(_, l, c)| (l, c));
+        let pos = format!("L{}:C{}", line, col);
         (format!(" led: {filename}{modified}"), format!("{pos} "))
     } else {
         (" led".to_string(), String::new())
@@ -255,7 +187,6 @@ fn render_status_bar(editor: &Editor, frame: &mut Frame, area: Rect) {
     let bar = format!("{left}{:padding$}{right}", "");
 
     let style = editor.theme.status_bar.to_style();
-
     let paragraph = Paragraph::new(bar).style(style);
     frame.render_widget(paragraph, area);
 }
@@ -264,7 +195,7 @@ fn render_modal(modal: &Modal, frame: &mut Frame, area: Rect) {
     use ratatui::widgets::Clear;
 
     let width = (modal.prompt.len() as u16 + 4).min(area.width);
-    let height: u16 = 4; // border + prompt + input + border
+    let height: u16 = 4;
     let x = area.x + (area.width.saturating_sub(width)) / 2;
     let y = area.y + (area.height.saturating_sub(height)) / 2;
     let modal_area = Rect::new(x, y, width, height);
@@ -275,14 +206,12 @@ fn render_modal(modal: &Modal, frame: &mut Frame, area: Rect) {
     let inner = block.inner(modal_area);
     frame.render_widget(block, modal_area);
 
-    // Prompt line
     if inner.height > 0 {
         let prompt = Paragraph::new(modal.prompt.as_str()).alignment(Alignment::Left);
         let prompt_area = Rect::new(inner.x, inner.y, inner.width, 1);
         frame.render_widget(prompt, prompt_area);
     }
 
-    // Input line + cursor
     if inner.height > 1 {
         let input_area = Rect::new(inner.x, inner.y + 1, inner.width, 1);
         let input = Paragraph::new(modal.input.as_str());
@@ -292,4 +221,3 @@ fn render_modal(modal: &Modal, frame: &mut Frame, area: Rect) {
         frame.set_cursor_position(Position::new(cursor_x, input_area.y));
     }
 }
-

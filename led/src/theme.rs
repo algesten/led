@@ -2,79 +2,14 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::Color;
 
-// ---------------------------------------------------------------------------
-// ElementStyle
-// ---------------------------------------------------------------------------
+pub use led_core::{Theme, ElementStyle};
 
-pub struct ElementStyle {
-    pub fg: Color,
-    pub bg: Color,
-    pub bold: bool,
-    pub reversed: bool,
-}
-
-impl ElementStyle {
-    pub fn to_style(&self) -> Style {
-        let mut s = Style::default().fg(self.fg).bg(self.bg);
-        if self.bold {
-            s = s.add_modifier(Modifier::BOLD);
-        }
-        if self.reversed {
-            s = s.add_modifier(Modifier::REVERSED);
-        }
-        s
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Theme
-// ---------------------------------------------------------------------------
-
-pub struct Theme {
-    pub editor_text: ElementStyle,
-    pub gutter: ElementStyle,
-    pub tab_active: ElementStyle,
-    pub tab_inactive: ElementStyle,
-    pub status_bar: ElementStyle,
-    pub browser_dir: ElementStyle,
-    pub browser_file: ElementStyle,
-    pub browser_selected: ElementStyle,
-    pub browser_selected_unfocused: ElementStyle,
-    pub browser_border: ElementStyle,
-}
-
-const BLANK_STYLE: ElementStyle = ElementStyle {
-    fg: Color::Reset,
-    bg: Color::Reset,
-    bold: false,
-    reversed: false,
-};
-
-impl Theme {
-    fn blank() -> Self {
-        Self {
-            editor_text: BLANK_STYLE,
-            gutter: BLANK_STYLE,
-            tab_active: BLANK_STYLE,
-            tab_inactive: BLANK_STYLE,
-            status_bar: BLANK_STYLE,
-            browser_dir: BLANK_STYLE,
-            browser_file: BLANK_STYLE,
-            browser_selected: BLANK_STYLE,
-            browser_selected_unfocused: BLANK_STYLE,
-            browser_border: BLANK_STYLE,
-        }
-    }
-}
-
-impl Default for Theme {
-    fn default() -> Self {
-        let doc: toml::Value = toml::from_str(DEFAULT_THEME_TOML)
-            .expect("built-in theme.toml must parse");
-        theme_from_toml(&doc)
-    }
+pub fn default_theme() -> Theme {
+    let doc: toml::Value = toml::from_str(DEFAULT_THEME_TOML)
+        .expect("built-in theme.toml must parse");
+    theme_from_toml(&doc)
 }
 
 // ---------------------------------------------------------------------------
@@ -134,31 +69,26 @@ enum ColorEntry {
 }
 
 fn resolve(name: &str, colors: &HashMap<String, ColorEntry>) -> Option<Color> {
-    // First, look up in the palette
     if let Some(entry) = colors.get(name) {
         match entry {
             ColorEntry::Value(v) => return parse_ansi(v),
             ColorEntry::Style(so) => return so.fg.as_ref().and_then(|f| resolve_color(f, colors)),
             ColorEntry::Alias(target) => {
-                // Follow one level of alias
                 if let Some(target_entry) = colors.get(target.as_str()) {
                     match target_entry {
                         ColorEntry::Value(v) => return parse_ansi(v),
                         ColorEntry::Style(so) => return so.fg.as_ref().and_then(|f| resolve_color(f, colors)),
                         ColorEntry::Alias(t2) => {
-                            // One more level for chains like accent -> blue -> ansi_blue
                             if let Some(ColorEntry::Value(v)) = colors.get(t2.as_str()) {
                                 return parse_ansi(v);
                             }
                         }
                     }
                 }
-                // Target not found in palette — try parsing alias target directly
                 return parse_ansi(target);
             }
         }
     }
-    // Not in palette — try parsing as direct ansi/hex
     parse_ansi(name)
 }
 
@@ -193,7 +123,6 @@ fn apply_style_override(
     }
 }
 
-/// Resolve a `$ref` to a StyleOverride if it points to one, following aliases.
 fn resolve_style_override<'a>(
     name: &str,
     colors: &'a HashMap<String, ColorEntry>,
@@ -260,8 +189,6 @@ fn apply_element_style(
     colors: &HashMap<String, ColorEntry>,
     style: &mut ElementStyle,
 ) {
-    // Check each string field for a $ref to a style override — apply it first,
-    // then let explicit fields in this table override on top.
     for field in ["fg", "bg"] {
         if let Some(s) = section.get(field).and_then(|v| v.as_str()) {
             if let Some(name) = s.strip_prefix('$') {
@@ -272,7 +199,6 @@ fn apply_element_style(
         }
     }
 
-    // Now apply explicit fields (these win over anything inherited from a style ref)
     if let Some(fg) = section.get("fg").and_then(|v| v.as_str()) {
         if let Some(c) = resolve_color(fg, colors) {
             style.fg = c;
@@ -327,24 +253,20 @@ fn theme_from_toml(doc: &toml::Value) -> Theme {
         .map(|t| parse_colors_section(t))
         .unwrap_or_default();
 
-    // [editor]
     if let Some(section) = table.get("editor").and_then(|v| v.as_table()) {
         apply_inline_element(section, "text", &colors, &mut theme.editor_text);
         apply_inline_element(section, "gutter", &colors, &mut theme.gutter);
     }
 
-    // [tabs]
     if let Some(section) = table.get("tabs").and_then(|v| v.as_table()) {
         apply_inline_element(section, "active", &colors, &mut theme.tab_active);
         apply_inline_element(section, "inactive", &colors, &mut theme.tab_inactive);
     }
 
-    // [status_bar]
     if let Some(section) = table.get("status_bar").and_then(|v| v.as_table()) {
         apply_inline_element(section, "style", &colors, &mut theme.status_bar);
     }
 
-    // [browser]
     if let Some(section) = table.get("browser").and_then(|v| v.as_table()) {
         apply_inline_element(section, "directory", &colors, &mut theme.browser_dir);
         apply_inline_element(section, "file", &colors, &mut theme.browser_file);
@@ -428,7 +350,7 @@ border             = "$muted"
 pub fn load_theme() -> Theme {
     let path = match theme_path() {
         Some(p) => p,
-        None => return Theme::default(),
+        None => return default_theme(),
     };
 
     if !path.exists() {
@@ -436,19 +358,19 @@ pub fn load_theme() -> Theme {
             let _ = fs::create_dir_all(parent);
         }
         let _ = fs::write(&path, DEFAULT_THEME_TOML);
-        return Theme::default();
+        return default_theme();
     }
 
     let content = match fs::read_to_string(&path) {
         Ok(c) => c,
-        Err(_) => return Theme::default(),
+        Err(_) => return default_theme(),
     };
 
     match toml::from_str::<toml::Value>(&content) {
         Ok(doc) => theme_from_toml(&doc),
         Err(e) => {
             eprintln!("warning: failed to parse theme.toml: {e}; using defaults");
-            Theme::default()
+            default_theme()
         }
     }
 }

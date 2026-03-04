@@ -3,44 +3,9 @@ use std::fs;
 use std::path::PathBuf;
 
 use crossterm::event::{KeyCode, KeyModifiers};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
-// ---------------------------------------------------------------------------
-// Action
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Action {
-    MoveUp,
-    MoveDown,
-    MoveLeft,
-    MoveRight,
-    LineStart,
-    LineEnd,
-    PageUp,
-    PageDown,
-    FileStart,
-    FileEnd,
-    InsertNewline,
-    DeleteBackward,
-    DeleteForward,
-    InsertTab,
-    KillLine,
-    Save,
-    Quit,
-    ToggleFocus,
-    ToggleSidePanel,
-    ExpandDir,
-    CollapseDir,
-    OpenSelected,
-    OpenSelectedBg,
-    PrevTab,
-    NextTab,
-    Undo,
-    KillBuffer,
-    Abort,
-}
+pub use led_core::Action;
 
 // ---------------------------------------------------------------------------
 // KeyCombo

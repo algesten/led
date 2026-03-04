@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["led"]
+members = ["led", "crates/core", "crates/buffer", "crates/file-browser"]
 
 [workspace.dependencies]
 ratatui = "0.30"
@@ -13,3 +13,6 @@ notify = "7"
 ropey = "1.6"
 rmp-serde = "1"
 twox-hash = "2"
+led_core = { path = "crates/core" }
+led_buffer = { path = "crates/buffer" }
+led_file_browser = { path = "crates/file-browser" }

@@ -1,0 +1,212 @@
+use std::path::PathBuf;
+
+use ratatui::Frame;
+use ratatui::layout::Rect;
+use ratatui::style::{Color, Modifier, Style};
+use rusqlite::Connection;
+use serde::{Deserialize, Serialize};
+
+// ---------------------------------------------------------------------------
+// Action
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Action {
+    MoveUp,
+    MoveDown,
+    MoveLeft,
+    MoveRight,
+    LineStart,
+    LineEnd,
+    PageUp,
+    PageDown,
+    FileStart,
+    FileEnd,
+    InsertChar(char),
+    InsertNewline,
+    DeleteBackward,
+    DeleteForward,
+    InsertTab,
+    KillLine,
+    Save,
+    Quit,
+    ToggleFocus,
+    ToggleSidePanel,
+    ExpandDir,
+    CollapseDir,
+    OpenSelected,
+    OpenSelectedBg,
+    PrevTab,
+    NextTab,
+    Undo,
+    KillBuffer,
+    Abort,
+}
+
+// ---------------------------------------------------------------------------
+// Panel system
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PanelSlot {
+    Main,
+    Side,
+}
+
+#[derive(Debug, Clone)]
+pub struct PanelClaim {
+    pub slot: PanelSlot,
+    pub priority: u32,
+}
+
+#[derive(Debug, Clone)]
+pub struct TabDescriptor {
+    pub label: String,
+    pub dirty: bool,
+}
+
+// ---------------------------------------------------------------------------
+// Events & Effects
+// ---------------------------------------------------------------------------
+
+pub enum Event {
+    OpenFile(PathBuf),
+}
+
+pub enum Effect {
+    Emit(Event),
+    Spawn(Box<dyn Component>),
+    SetMessage(String),
+    FocusPanel(PanelSlot),
+    SavedFile(PathBuf),
+    Quit,
+}
+
+// ---------------------------------------------------------------------------
+// Context
+// ---------------------------------------------------------------------------
+
+pub struct Context<'a> {
+    pub db: Option<&'a Connection>,
+    pub root: &'a std::path::Path,
+    pub viewport_height: usize,
+}
+
+pub struct DrawContext<'a> {
+    pub theme: &'a Theme,
+    pub focused: bool,
+}
+
+// ---------------------------------------------------------------------------
+// Theme / ElementStyle
+// ---------------------------------------------------------------------------
+
+#[derive(Clone)]
+pub struct ElementStyle {
+    pub fg: Color,
+    pub bg: Color,
+    pub bold: bool,
+    pub reversed: bool,
+}
+
+impl ElementStyle {
+    pub fn to_style(&self) -> Style {
+        let mut s = Style::default().fg(self.fg).bg(self.bg);
+        if self.bold {
+            s = s.add_modifier(Modifier::BOLD);
+        }
+        if self.reversed {
+            s = s.add_modifier(Modifier::REVERSED);
+        }
+        s
+    }
+}
+
+pub const BLANK_STYLE: ElementStyle = ElementStyle {
+    fg: Color::Reset,
+    bg: Color::Reset,
+    bold: false,
+    reversed: false,
+};
+
+#[derive(Clone)]
+pub struct Theme {
+    pub editor_text: ElementStyle,
+    pub gutter: ElementStyle,
+    pub tab_active: ElementStyle,
+    pub tab_inactive: ElementStyle,
+    pub status_bar: ElementStyle,
+    pub browser_dir: ElementStyle,
+    pub browser_file: ElementStyle,
+    pub browser_selected: ElementStyle,
+    pub browser_selected_unfocused: ElementStyle,
+    pub browser_border: ElementStyle,
+}
+
+impl Theme {
+    pub fn blank() -> Self {
+        Self {
+            editor_text: BLANK_STYLE,
+            gutter: BLANK_STYLE,
+            tab_active: BLANK_STYLE,
+            tab_inactive: BLANK_STYLE,
+            status_bar: BLANK_STYLE,
+            browser_dir: BLANK_STYLE,
+            browser_file: BLANK_STYLE,
+            browser_selected: BLANK_STYLE,
+            browser_selected_unfocused: BLANK_STYLE,
+            browser_border: BLANK_STYLE,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Component trait
+// ---------------------------------------------------------------------------
+
+pub trait Component: std::any::Any {
+    fn as_any(&self) -> &dyn std::any::Any;
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any;
+    fn name(&self) -> &str;
+
+    fn panel_claims(&self) -> &[PanelClaim];
+
+    fn tab(&self) -> Option<TabDescriptor> {
+        None
+    }
+
+    fn handle_action(&mut self, action: Action, ctx: &mut Context) -> Vec<Effect>;
+
+    fn handle_event(&mut self, event: &Event, ctx: &mut Context) -> Vec<Effect>;
+
+    fn draw(&mut self, frame: &mut Frame, area: Rect, ctx: &DrawContext);
+
+    /// Cursor position (row, col) within the component — used by the shell for cursor placement.
+    fn cursor_position(&self) -> Option<(usize, usize)> {
+        None
+    }
+
+    /// Scroll offset — used by the shell for scroll computation.
+    fn scroll_offset(&self) -> usize {
+        0
+    }
+
+    /// Set scroll offset after shell computes it.
+    fn set_scroll_offset(&mut self, _offset: usize) {}
+
+    /// Status bar info: (label, line, col) — used by the shell for status bar rendering.
+    fn status_info(&self) -> Option<(&str, usize, usize)> {
+        None
+    }
+
+    fn save_session(&self, ctx: &Context);
+
+    fn restore_session(&mut self, ctx: &mut Context);
+
+    fn needs_flush(&self) -> bool {
+        false
+    }
+
+    fn flush(&mut self, _ctx: &mut Context) {}
+}

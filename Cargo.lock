@@ -778,14 +778,45 @@ dependencies = [
  "clap",
  "crossterm",
  "dirs",
+ "led_buffer",
+ "led_core",
+ "led_file_browser",
  "notify",
+ "ratatui",
+ "rmp-serde",
+ "rusqlite",
+ "serde",
+ "toml",
+]
+
+[[package]]
+name = "led_buffer"
+version = "0.1.0"
+dependencies = [
+ "led_core",
  "ratatui",
  "rmp-serde",
  "ropey",
  "rusqlite",
  "serde",
- "toml",
  "twox-hash",
+]
+
+[[package]]
+name = "led_core"
+version = "0.1.0"
+dependencies = [
+ "ratatui",
+ "rusqlite",
+ "serde",
+]
+
+[[package]]
+name = "led_file_browser"
+version = "0.1.0"
+dependencies = [
+ "led_core",
+ "ratatui",
 ]
 
 [[package]]

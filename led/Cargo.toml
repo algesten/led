@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+led_core = { workspace = true }
+led_buffer = { workspace = true }
+led_file_browser = { workspace = true }
 ratatui = { workspace = true }
 crossterm = { workspace = true }
 serde = { workspace = true }
@@ -12,6 +15,4 @@ dirs = { workspace = true }
 clap = { version = "4.5.60", features = ["derive"] }
 rusqlite = { workspace = true }
 notify = { workspace = true }
-ropey = { workspace = true }
 rmp-serde = { workspace = true }
-twox-hash = { workspace = true }

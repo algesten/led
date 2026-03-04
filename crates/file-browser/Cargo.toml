@@ -1,0 +1,8 @@
+[package]
+name = "led_file_browser"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+led_core = { workspace = true }
+ratatui = { workspace = true }

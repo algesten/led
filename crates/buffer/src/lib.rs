@@ -4,6 +4,13 @@ use std::io::{self, BufReader, BufWriter};
 use std::path::PathBuf;
 use std::time::Instant;
 
+use led_core::{
+    Action, Component, Context, DrawContext, Effect, Event, PanelClaim, PanelSlot, TabDescriptor,
+};
+use ratatui::Frame;
+use ratatui::layout::Rect;
+use ratatui::text::{Line, Span};
+use ratatui::widgets::Paragraph;
 use ropey::Rope;
 use serde::{Deserialize, Serialize};
 use twox_hash::XxHash64;
@@ -86,7 +93,6 @@ impl Buffer {
     pub fn from_file(path: &str) -> io::Result<Self> {
         let file = File::open(path)?;
         let rope = Rope::from_reader(BufReader::new(file))?;
-        // Ensure at least one line (empty file → empty rope is fine, len_lines() == 1)
         Ok(Self {
             rope,
             cursor_row: 0,
@@ -106,7 +112,6 @@ impl Buffer {
     pub fn save(&mut self) -> io::Result<()> {
         self.flush_pending();
         if let Some(ref path) = self.path {
-            // Ensure trailing newline
             let len = self.rope.len_chars();
             if len == 0 || self.rope.char(len - 1) != '\n' {
                 self.rope.insert_char(len, '\n');
@@ -140,14 +145,12 @@ impl Buffer {
     pub fn line(&self, idx: usize) -> String {
         let rope_line = self.rope.line(idx);
         let s = rope_line.to_string();
-        // Strip trailing newline (ropey includes it for all lines except possibly the last)
         s.trim_end_matches('\n').to_string()
     }
 
     pub fn line_len(&self, idx: usize) -> usize {
         let rope_line = self.rope.line(idx);
         let len = rope_line.len_chars();
-        // Subtract trailing newline if present
         if len > 0 && rope_line.char(len - 1) == '\n' {
             len - 1
         } else {
@@ -248,7 +251,6 @@ impl Buffer {
         self.dirty = true;
         let cursor_after = (self.cursor_row, self.cursor_col);
 
-        // Newlines break grouping, just push directly
         if ch == '\n' {
             self.flush_pending();
             self.push_undo(UndoEntry {
@@ -309,7 +311,6 @@ impl Buffer {
                 );
             }
         } else if self.cursor_row > 0 {
-            // Join with previous line: remove the \n at end of previous line
             let idx = self.char_idx(self.cursor_row, 0);
             let new_col = self.line_len(self.cursor_row - 1);
             self.rope.remove(idx - 1..idx);
@@ -349,7 +350,6 @@ impl Buffer {
                 cursor_after,
             );
         } else if self.cursor_row + 1 < self.rope.len_lines() {
-            // Join with next line: remove the \n at current position
             let idx = self.char_idx(self.cursor_row, self.cursor_col);
             self.rope.remove(idx..idx + 1);
             self.dirty = true;
@@ -372,7 +372,6 @@ impl Buffer {
         let col = self.cursor_col;
         let len = self.current_line_len();
         if col < len {
-            // Kill from cursor to end of line (not including newline)
             let start = self.char_idx(self.cursor_row, col);
             let end = self.char_idx(self.cursor_row, len);
             let text: String = self.rope.slice(start..end).to_string();
@@ -390,7 +389,6 @@ impl Buffer {
                 direction: 1,
             });
         } else if self.cursor_row + 1 < self.rope.len_lines() {
-            // Kill the newline, joining with next line
             let idx = self.char_idx(self.cursor_row, col);
             self.rope.remove(idx..idx + 1);
             self.dirty = true;
@@ -425,14 +423,12 @@ impl Buffer {
         let entry = self.undo_history[pos - 1].clone();
         let inverse = self.invert_entry(&entry);
 
-        // Apply the inverse operation
         self.apply_op(&inverse.op);
         self.cursor_row = inverse.cursor_after.0;
         self.cursor_col = inverse.cursor_after.1;
         self.distance_from_save -= entry.direction;
         self.dirty = self.distance_from_save != 0;
 
-        // Push the inverse to history (for redo-via-undo)
         self.undo_history.push(inverse);
         self.undo_cursor = Some(pos - 1);
     }
@@ -482,7 +478,6 @@ impl Buffer {
         if let Some(ref mut pg) = self.pending_group {
             let elapsed = now.duration_since(pg.last_time).as_millis();
             if pg.kind == kind && elapsed < GROUP_TIMEOUT_MS {
-                // Merge into existing group
                 match (&mut pg.op, &op) {
                     (EditOp::Insert { text: acc, .. }, EditOp::Insert { text: new, .. }) => {
                         acc.push_str(new);
@@ -498,16 +493,13 @@ impl Buffer {
                         },
                     ) => {
                         if kind == EditKind::DeleteBackward {
-                            // Backspace: new char goes before existing text
                             acc.insert_str(0, new);
                             *acc_idx = *new_idx;
                         } else {
-                            // Delete forward: new char appends
                             acc.push_str(new);
                         }
                     }
                     _ => {
-                        // Kind mismatch within group — shouldn't happen, flush and start new
                         self.flush_pending_inner();
                         self.pending_group = Some(PendingGroup {
                             kind,
@@ -525,7 +517,6 @@ impl Buffer {
             }
         }
 
-        // Flush any existing group and start a new one
         self.flush_pending();
         self.pending_group = Some(PendingGroup {
             kind,
@@ -613,8 +604,6 @@ impl Buffer {
         undo_cursor: Option<usize>,
         distance_from_save: i32,
     ) {
-        // Rebuild rope from scratch: start from file contents and replay all ops
-        // The rope was just loaded from file, so we need to replay to get the edited state
         for entry in &entries {
             self.apply_op(&entry.op);
         }
@@ -624,10 +613,233 @@ impl Buffer {
         self.dirty = distance_from_save != 0;
         self.persisted_undo_len = self.undo_history.len();
         self.save_history_len = 0;
-        // Position cursor at end of last entry if available
         if let Some(last) = self.undo_history.last() {
             self.cursor_row = last.cursor_after.0;
             self.cursor_col = last.cursor_after.1;
         }
     }
+
+    /// Whether this buffer was saved (and undo should be cleared from DB).
+    /// Returns the path if save happened, then clears the flag.
+    pub fn take_saved_path(&mut self) -> Option<PathBuf> {
+        // We track this via save_history_len matching persisted_undo_len after save
+        None // Shell tracks saved_paths separately
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Component implementation for Buffer
+// ---------------------------------------------------------------------------
+
+impl Component for Buffer {
+    fn as_any(&self) -> &dyn std::any::Any { self }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
+
+    fn name(&self) -> &str {
+        self.path
+            .as_ref()
+            .and_then(|p| p.to_str())
+            .unwrap_or("[scratch]")
+    }
+
+    fn panel_claims(&self) -> &[PanelClaim] {
+        &[PanelClaim {
+            slot: PanelSlot::Main,
+            priority: 10,
+        }]
+    }
+
+    fn tab(&self) -> Option<TabDescriptor> {
+        Some(TabDescriptor {
+            label: self.filename().to_string(),
+            dirty: self.dirty,
+        })
+    }
+
+    fn handle_action(&mut self, action: Action, ctx: &mut Context) -> Vec<Effect> {
+        match action {
+            Action::InsertChar(c) => {
+                self.insert_char(c);
+                vec![]
+            }
+            Action::MoveUp => {
+                self.move_up();
+                vec![]
+            }
+            Action::MoveDown => {
+                self.move_down();
+                vec![]
+            }
+            Action::MoveLeft => {
+                self.move_left();
+                vec![]
+            }
+            Action::MoveRight => {
+                self.move_right();
+                vec![]
+            }
+            Action::LineStart => {
+                self.move_to_line_start();
+                vec![]
+            }
+            Action::LineEnd => {
+                self.move_to_line_end();
+                vec![]
+            }
+            Action::PageUp => {
+                self.page_up(ctx.viewport_height);
+                vec![]
+            }
+            Action::PageDown => {
+                self.page_down(ctx.viewport_height);
+                vec![]
+            }
+            Action::FileStart => {
+                self.move_to_file_start();
+                vec![]
+            }
+            Action::FileEnd => {
+                self.move_to_file_end();
+                vec![]
+            }
+            Action::InsertNewline => {
+                self.insert_newline();
+                vec![]
+            }
+            Action::DeleteBackward => {
+                self.delete_char_backward();
+                vec![]
+            }
+            Action::DeleteForward => {
+                self.delete_char_forward();
+                vec![]
+            }
+            Action::InsertTab => {
+                self.insert_char('\t');
+                vec![]
+            }
+            Action::KillLine => {
+                self.kill_line();
+                vec![]
+            }
+            Action::Undo => {
+                self.undo();
+                vec![]
+            }
+            Action::Save => match self.save() {
+                Ok(()) => {
+                    let name = self.filename().to_string();
+                    let mut effects = vec![Effect::SetMessage(format!("Saved {name}."))];
+                    if let Some(ref path) = self.path {
+                        effects.push(Effect::SavedFile(path.clone()));
+                    }
+                    effects
+                }
+                Err(e) => vec![Effect::SetMessage(format!("Save failed: {e}"))],
+            },
+            _ => vec![],
+        }
+    }
+
+    fn handle_event(&mut self, _event: &Event, _ctx: &mut Context) -> Vec<Effect> {
+        vec![]
+    }
+
+    fn draw(&mut self, frame: &mut Frame, area: Rect, ctx: &DrawContext) {
+        let height = area.height as usize;
+        let total_lines = self.line_count();
+        let gutter_style = ctx.theme.gutter.to_style();
+        let text_style = ctx.theme.editor_text.to_style();
+
+        let mut display_lines = Vec::with_capacity(height);
+
+        for i in 0..height {
+            let line_idx = self.scroll_offset + i;
+            if line_idx < total_lines {
+                let gutter = Span::styled("  ", gutter_style);
+                let text =
+                    Span::styled(self.line(line_idx).replace('\t', "    "), text_style);
+                display_lines.push(Line::from(vec![gutter, text]));
+            } else {
+                let gutter = Span::styled("~ ", gutter_style);
+                display_lines.push(Line::from(vec![gutter]));
+            }
+        }
+
+        let paragraph = Paragraph::new(display_lines).style(text_style);
+        frame.render_widget(paragraph, area);
+    }
+
+    fn cursor_position(&self) -> Option<(usize, usize)> {
+        Some((self.cursor_row, self.cursor_col))
+    }
+
+    fn scroll_offset(&self) -> usize {
+        self.scroll_offset
+    }
+
+    fn set_scroll_offset(&mut self, offset: usize) {
+        self.scroll_offset = offset;
+    }
+
+    fn status_info(&self) -> Option<(&str, usize, usize)> {
+        Some((self.filename(), self.cursor_row + 1, self.cursor_col + 1))
+    }
+
+    fn save_session(&self, _ctx: &Context) {
+        // Session persistence handled by shell
+    }
+
+    fn restore_session(&mut self, _ctx: &mut Context) {
+        // Session persistence handled by shell
+    }
+
+    fn needs_flush(&self) -> bool {
+        self.has_unpersisted_undo()
+    }
+
+    fn flush(&mut self, _ctx: &mut Context) {
+        self.flush_pending();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// BufferFactory
+// ---------------------------------------------------------------------------
+
+pub struct BufferFactory;
+
+impl Component for BufferFactory {
+    fn as_any(&self) -> &dyn std::any::Any { self }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
+
+    fn name(&self) -> &str {
+        "buffer-factory"
+    }
+
+    fn panel_claims(&self) -> &[PanelClaim] {
+        &[]
+    }
+
+    fn handle_action(&mut self, _action: Action, _ctx: &mut Context) -> Vec<Effect> {
+        vec![]
+    }
+
+    fn handle_event(&mut self, event: &Event, _ctx: &mut Context) -> Vec<Effect> {
+        match event {
+            Event::OpenFile(path) => {
+                let path_str = path.to_string_lossy();
+                match Buffer::from_file(&path_str) {
+                    Ok(buf) => vec![Effect::Spawn(Box::new(buf))],
+                    Err(e) => vec![Effect::SetMessage(format!("Open failed: {e}"))],
+                }
+            }
+        }
+    }
+
+    fn draw(&mut self, _frame: &mut Frame, _area: Rect, _ctx: &DrawContext) {}
+
+    fn save_session(&self, _ctx: &Context) {}
+
+    fn restore_session(&mut self, _ctx: &mut Context) {}
 }

@@ -3,7 +3,8 @@ use std::path::{Path, PathBuf};
 
 use rusqlite::{Connection, params};
 
-use crate::buffer::UndoEntry;
+use led_buffer::{Buffer, UndoEntry};
+use led_core::Component;
 
 pub struct BufferState {
     pub file_path: PathBuf,
@@ -252,7 +253,6 @@ pub fn flush_undo_entries(
 }
 
 pub fn clear_undo(conn: &Connection, root_path: &str, file_path: &str) {
-    // Foreign key cascade will remove undo_entries
     let _ = conn.execute(
         "DELETE FROM buffer_undo_state WHERE root_path = ?1 AND file_path = ?2",
         params![root_path, file_path],
@@ -301,6 +301,43 @@ pub fn load_undo(
         distance_from_save,
         content_hash as u64,
     ))
+}
+
+/// Flush undo entries for all Buffer components. Downcasts to Buffer via Any.
+pub fn flush_component_undo(
+    conn: &Connection,
+    root: &Path,
+    components: &mut [Box<dyn Component>],
+) {
+    let root_str = root.to_string_lossy();
+
+    for comp in components.iter_mut() {
+        let Some(buf) = comp.as_any_mut().downcast_mut::<Buffer>() else {
+            continue;
+        };
+        if !buf.has_unpersisted_undo() {
+            continue;
+        }
+        let Some(path) = buf.path.clone() else {
+            continue;
+        };
+        let file_str = path.to_string_lossy().into_owned();
+        let entries = buf.drain_unpersisted_undo();
+        if entries.is_empty() {
+            continue;
+        }
+        let (undo_cursor, distance_from_save) = buf.undo_metadata();
+        let content_hash = buf.content_hash();
+        flush_undo_entries(
+            conn,
+            &root_str,
+            &file_str,
+            &entries,
+            undo_cursor,
+            distance_from_save,
+            content_hash,
+        );
+    }
 }
 
 pub fn reset_db() {

@@ -1,7 +1,5 @@
-mod buffer;
 mod config;
 mod editor;
-mod file_browser;
 mod session;
 mod theme;
 mod ui;
@@ -15,8 +13,11 @@ use crossterm::event::{self, Event, KeyEvent};
 use notify::{EventKind, RecursiveMode, Watcher};
 use ratatui::DefaultTerminal;
 
-use buffer::Buffer;
+use led_core::PanelSlot;
+use led_buffer::{Buffer, BufferFactory};
+use led_file_browser::FileBrowser;
 use editor::{Editor, InputResult};
+use session::{BufferState, SessionData};
 
 #[derive(Debug)]
 enum ConfigFile {
@@ -58,7 +59,6 @@ fn main() -> io::Result<()> {
         eprintln!("Session database reset.");
     }
 
-    // Load keymap and theme before ratatui::init() so parse errors print to stderr normally
     let keymap = match config::load_or_create_config() {
         Ok(km) => km,
         Err(e) => {
@@ -66,12 +66,12 @@ fn main() -> io::Result<()> {
             config::default_keymap()
         }
     };
-    let theme = theme::load_theme();
+    let the_theme = theme::load_theme();
 
     let arg_path = cli.path.as_ref().map(PathBuf::from);
     let arg_is_dir = arg_path.as_ref().map_or(false, |p: &PathBuf| p.is_dir());
 
-    let buffer = if arg_is_dir {
+    let initial_buffer = if arg_is_dir {
         None
     } else {
         cli.path.as_ref().map(|path| {
@@ -83,7 +83,7 @@ fn main() -> io::Result<()> {
         })
     };
 
-    // Compute root dir: directory arg directly, file arg's parent, else CWD
+    // Compute root dir
     let root: PathBuf = if arg_is_dir {
         arg_path.unwrap()
     } else {
@@ -103,23 +103,31 @@ fn main() -> io::Result<()> {
     };
     let root = std::fs::canonicalize(&root).unwrap_or(root);
 
-    // Open session DB before ratatui::init() so errors print to stderr
     let db = session::open_db();
 
-    let explicit_file = buffer.is_some();
-    let mut editor = Editor::new(buffer, keymap, root.clone(), theme);
+    let explicit_file = initial_buffer.is_some();
+    let mut editor = Editor::new(keymap, the_theme);
     editor.debug = cli.debug;
+
+    // Register components — the ONLY place concrete types appear
+    editor.register(Box::new(BufferFactory));
+    editor.register(Box::new(FileBrowser::new(root.clone())));
+
+    if let Some(buf) = initial_buffer {
+        editor.register(Box::new(buf));
+        editor.set_focus(PanelSlot::Main);
+    }
 
     // Restore session only when no explicit file was passed
     if !explicit_file {
         if let Some(ref conn) = db {
             if let Some(session) = session::load_session(conn, &root) {
-                editor.restore_session(session, Some(conn), &root);
+                restore_session(&mut editor, session, Some(conn), &root);
             }
         }
     }
 
-    // Install panic hook that restores terminal before printing panic info
+    // Install panic hook
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let _ = ratatui::restore();
@@ -152,9 +160,9 @@ fn main() -> io::Result<()> {
 
     // Save session on exit
     if let Some(ref conn) = db {
-        // Final flush of any pending undo entries
         editor.flush_to_db(conn, &root);
-        let session_data = editor.capture_session();
+        let snapshot = editor.capture_session();
+        let session_data = capture_session_data(&editor, &snapshot);
         session::save_session(conn, &root, &session_data);
     }
 
@@ -171,7 +179,6 @@ fn run(
     loop {
         terminal.draw(|frame| ui::render(editor, frame))?;
 
-        // Combine redraw and persist timeouts — use the shorter one
         let timeout = match (editor.needs_redraw_in(), editor.needs_persist_in()) {
             (Some(a), Some(b)) => Some(a.min(b)),
             (Some(a), None) => Some(a),
@@ -216,11 +223,111 @@ fn run(
             None => {}
         }
 
-        // Periodic undo persistence
         if let Some(conn) = db {
             if editor.needs_persist() {
                 editor.flush_to_db(conn, root);
             }
+        }
+    }
+}
+
+// --- Session helpers (composition root uses concrete types) ---
+
+fn capture_session_data(
+    editor: &Editor,
+    snapshot: &editor::SessionSnapshot,
+) -> SessionData {
+    let mut buffers = Vec::new();
+    for comp in editor.components() {
+        if comp.tab().is_none() {
+            continue;
+        }
+        if let Some(buf) = comp.as_any().downcast_ref::<Buffer>() {
+            if let Some(ref path) = buf.path {
+                buffers.push(BufferState {
+                    file_path: path.clone(),
+                    cursor_row: buf.cursor_row,
+                    cursor_col: buf.cursor_col,
+                    scroll_offset: buf.scroll_offset,
+                });
+            }
+        }
+    }
+
+    // Get browser state
+    let (browser_selected, browser_expanded_dirs) = editor
+        .components()
+        .iter()
+        .find_map(|c| {
+            c.as_any().downcast_ref::<FileBrowser>().map(|fb| {
+                (fb.selected, fb.expanded_dirs().clone())
+            })
+        })
+        .unwrap_or_default();
+
+    SessionData {
+        buffers,
+        active_tab: snapshot.active_tab,
+        focus_is_editor: snapshot.focus == PanelSlot::Main,
+        show_side_panel: snapshot.show_side_panel,
+        browser_selected,
+        browser_expanded_dirs,
+    }
+}
+
+fn restore_session(
+    editor: &mut Editor,
+    session: SessionData,
+    conn: Option<&rusqlite::Connection>,
+    root: &std::path::Path,
+) {
+    let root_str = root.to_string_lossy();
+
+    // Restore buffers
+    for bs in &session.buffers {
+        let path_str = bs.file_path.to_string_lossy();
+        if let Ok(mut buf) = Buffer::from_file(&path_str) {
+            // Try to restore undo state
+            if let Some(conn) = conn {
+                if let Some((entries, undo_cursor, distance_from_save, stored_hash)) =
+                    session::load_undo(conn, &root_str, &path_str)
+                {
+                    let current_hash = buf.content_hash();
+                    if current_hash == stored_hash {
+                        buf.restore_undo(entries, undo_cursor, distance_from_save);
+                    }
+                }
+            }
+            // Clamp cursor to valid ranges
+            buf.cursor_row = bs.cursor_row.min(buf.line_count().saturating_sub(1));
+            buf.cursor_col = bs.cursor_col.min(buf.line_len(buf.cursor_row));
+            buf.scroll_offset = bs.scroll_offset;
+            editor.register(Box::new(buf));
+        }
+    }
+
+    // Set active tab
+    editor.set_active_tab(session.active_tab);
+
+    // Set show side panel
+    editor.show_side_panel = session.show_side_panel;
+
+    // Set focus
+    let has_tabs = editor.has_tabs();
+    if session.focus_is_editor && has_tabs {
+        editor.set_focus(PanelSlot::Main);
+    } else {
+        editor.set_focus(PanelSlot::Side);
+    }
+
+    // Restore browser state
+    for comp in editor.components_mut() {
+        if let Some(fb) = comp.as_any_mut().downcast_mut::<FileBrowser>() {
+            fb.set_expanded_dirs(session.browser_expanded_dirs.clone());
+            fb.selected = session
+                .browser_selected
+                .min(fb.entries.len().saturating_sub(1));
+            break;
         }
     }
 }

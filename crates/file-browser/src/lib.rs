@@ -2,6 +2,18 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::PathBuf;
 
+use led_core::{
+    Action, Component, Context, DrawContext, Effect, Event, PanelClaim, PanelSlot,
+};
+use ratatui::Frame;
+use ratatui::layout::Rect;
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, Borders, Paragraph};
+
+// ---------------------------------------------------------------------------
+// Tree types
+// ---------------------------------------------------------------------------
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EntryKind {
     File,
@@ -14,6 +26,10 @@ pub struct TreeEntry {
     pub depth: usize,
     pub kind: EntryKind,
 }
+
+// ---------------------------------------------------------------------------
+// FileBrowser
+// ---------------------------------------------------------------------------
 
 pub struct FileBrowser {
     pub root: PathBuf,
@@ -55,7 +71,6 @@ impl FileBrowser {
             let name = entry.file_name();
             let name_str = name.to_string_lossy();
 
-            // Filter hidden files
             if name_str.starts_with('.') {
                 continue;
             }
@@ -70,7 +85,6 @@ impl FileBrowser {
         dirs.sort();
         files.sort();
 
-        // Directories first, then files
         for path in dirs {
             let expanded = self.expanded_dirs.contains(&path);
             self.entries.push(TreeEntry {
@@ -112,8 +126,6 @@ impl FileBrowser {
         self.selected = (self.selected + page_size).min(self.entries.len().saturating_sub(1));
     }
 
-    /// If file, returns path for the caller to open.
-    /// If directory, toggles expansion.
     pub fn open_selected(&mut self) -> Option<PathBuf> {
         let entry = self.entries.get(self.selected)?.clone();
         match entry.kind {
@@ -130,9 +142,10 @@ impl FileBrowser {
         }
     }
 
-    /// If directory and collapsed, expand it.
     pub fn expand_selected(&mut self) {
-        let Some(entry) = self.entries.get(self.selected) else { return };
+        let Some(entry) = self.entries.get(self.selected) else {
+            return;
+        };
         if matches!(entry.kind, EntryKind::Directory { expanded: false }) {
             let path = entry.path.clone();
             self.expanded_dirs.insert(path);
@@ -140,7 +153,6 @@ impl FileBrowser {
         }
     }
 
-    /// Collapse current dir, or walk up to parent dir and collapse it.
     pub fn collapse_selected(&mut self) {
         let Some(entry) = self.entries.get(self.selected).cloned() else {
             return;
@@ -152,12 +164,10 @@ impl FileBrowser {
                 self.rebuild();
             }
             _ => {
-                // Find parent directory entry and collapse it
                 if let Some(parent) = entry.path.parent() {
                     let parent_path = parent.to_path_buf();
                     if parent_path != self.root {
                         self.expanded_dirs.remove(&parent_path);
-                        // Move selection to the parent
                         self.rebuild();
                         for (i, e) in self.entries.iter().enumerate() {
                             if e.path == parent_path {
@@ -180,9 +190,7 @@ impl FileBrowser {
         self.rebuild();
     }
 
-    /// Expand all ancestor directories of `path` and select it in the tree.
     pub fn reveal(&mut self, path: &std::path::Path) {
-        // Expand every ancestor between root and the file
         let mut ancestors = Vec::new();
         let mut current = path.parent();
         while let Some(dir) = current {
@@ -196,7 +204,6 @@ impl FileBrowser {
             self.expanded_dirs.insert(dir);
         }
         self.rebuild();
-        // Select the entry matching the path
         for (i, entry) in self.entries.iter().enumerate() {
             if entry.path == path {
                 self.selected = i;
@@ -219,5 +226,143 @@ impl FileBrowser {
             EntryKind::Directory { expanded: false } => format!("{indent}\u{25b7} {name}"),
             EntryKind::File => format!("{indent}  {name}"),
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Component implementation
+// ---------------------------------------------------------------------------
+
+impl Component for FileBrowser {
+    fn as_any(&self) -> &dyn std::any::Any { self }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
+
+    fn name(&self) -> &str {
+        "file-browser"
+    }
+
+    fn panel_claims(&self) -> &[PanelClaim] {
+        &[PanelClaim {
+            slot: PanelSlot::Side,
+            priority: 10,
+        }]
+    }
+
+    fn handle_action(&mut self, action: Action, ctx: &mut Context) -> Vec<Effect> {
+        match action {
+            Action::MoveUp => {
+                self.move_up();
+                vec![]
+            }
+            Action::MoveDown => {
+                self.move_down();
+                vec![]
+            }
+            Action::PageUp => {
+                self.page_up(ctx.viewport_height);
+                vec![]
+            }
+            Action::PageDown => {
+                self.page_down(ctx.viewport_height);
+                vec![]
+            }
+            Action::ExpandDir => {
+                self.expand_selected();
+                vec![]
+            }
+            Action::CollapseDir => {
+                self.collapse_selected();
+                vec![]
+            }
+            Action::OpenSelected => {
+                if let Some(path) = self.open_selected() {
+                    vec![
+                        Effect::Emit(Event::OpenFile(path)),
+                        Effect::FocusPanel(PanelSlot::Main),
+                    ]
+                } else {
+                    vec![]
+                }
+            }
+            Action::OpenSelectedBg => {
+                if let Some(path) = self.open_selected() {
+                    vec![Effect::Emit(Event::OpenFile(path))]
+                } else {
+                    vec![]
+                }
+            }
+            _ => vec![],
+        }
+    }
+
+    fn handle_event(&mut self, _event: &Event, _ctx: &mut Context) -> Vec<Effect> {
+        vec![]
+    }
+
+    fn draw(&mut self, frame: &mut Frame, area: Rect, ctx: &DrawContext) {
+        let block = Block::default()
+            .borders(Borders::RIGHT)
+            .border_style(ctx.theme.browser_border.to_style());
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+
+        let height = inner.height as usize;
+        if height == 0 {
+            return;
+        }
+
+        let browser_scroll = if self.selected >= height {
+            self.selected - height + 1
+        } else {
+            0
+        };
+
+        let mut lines = Vec::with_capacity(height);
+
+        for i in 0..height {
+            let idx = browser_scroll + i;
+            if idx < self.entries.len() {
+                let entry = &self.entries[idx];
+                let name = FileBrowser::display_name(entry);
+
+                let max_width = inner.width as usize;
+                let display: String = if name.len() > max_width {
+                    name[..max_width].to_string()
+                } else {
+                    name
+                };
+
+                let is_selected = idx == self.selected;
+                let is_dir = matches!(entry.kind, EntryKind::Directory { .. });
+
+                let style = if is_selected {
+                    if ctx.focused {
+                        ctx.theme.browser_selected.to_style()
+                    } else {
+                        ctx.theme.browser_selected_unfocused.to_style()
+                    }
+                } else if is_dir {
+                    ctx.theme.browser_dir.to_style()
+                } else {
+                    ctx.theme.browser_file.to_style()
+                };
+
+                let padded = format!("{:<width$}", display, width = max_width);
+                lines.push(Line::from(Span::styled(padded, style)));
+            } else {
+                lines.push(Line::from(""));
+            }
+        }
+
+        let paragraph = Paragraph::new(lines);
+        frame.render_widget(paragraph, inner);
+    }
+
+    fn save_session(&self, _ctx: &Context) {
+        // Session persistence handled by shell
+    }
+
+    fn restore_session(&mut self, _ctx: &mut Context) {
+        // Session persistence handled by shell
     }
 }
