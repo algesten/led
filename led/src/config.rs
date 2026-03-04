@@ -38,6 +38,8 @@ pub enum Action {
     PrevTab,
     NextTab,
     Undo,
+    KillBuffer,
+    Abort,
 }
 
 // ---------------------------------------------------------------------------
@@ -228,10 +230,13 @@ pub const DEFAULT_KEYS_TOML: &str = r#"# led keybindings
 "ctrl+/" = "undo"
 "ctrl+_" = "undo"
 "ctrl+7" = "undo"
+"ctrl+g" = "abort"
+"esc" = "abort"
 
 [keys."ctrl+x"]
 "ctrl+c" = "quit"
 "ctrl+s" = "save"
+"k" = "kill_buffer"
 
 [browser]
 "left" = "collapse_dir"

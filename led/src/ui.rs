@@ -1,11 +1,11 @@
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Layout, Position, Rect};
+use ratatui::layout::{Alignment, Constraint, Layout, Position, Rect};
 
 
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 
-use crate::editor::{Editor, Focus};
+use crate::editor::{Editor, Focus, Modal};
 use crate::file_browser::FileBrowser;
 use crate::theme::Theme;
 
@@ -43,6 +43,11 @@ pub fn render(editor: &mut Editor, frame: &mut Frame) {
     }
 
     render_status_bar(editor, frame, status_area);
+
+    // Modal overlay (rendered last so it's on top)
+    if let Some(modal) = &editor.modal {
+        render_modal(modal, frame, area);
+    }
 }
 
 fn render_tab_bar(editor: &Editor, frame: &mut Frame, area: Rect) {
@@ -253,5 +258,38 @@ fn render_status_bar(editor: &Editor, frame: &mut Frame, area: Rect) {
 
     let paragraph = Paragraph::new(bar).style(style);
     frame.render_widget(paragraph, area);
+}
+
+fn render_modal(modal: &Modal, frame: &mut Frame, area: Rect) {
+    use ratatui::widgets::Clear;
+
+    let width = (modal.prompt.len() as u16 + 4).min(area.width);
+    let height: u16 = 4; // border + prompt + input + border
+    let x = area.x + (area.width.saturating_sub(width)) / 2;
+    let y = area.y + (area.height.saturating_sub(height)) / 2;
+    let modal_area = Rect::new(x, y, width, height);
+
+    frame.render_widget(Clear, modal_area);
+
+    let block = Block::default().borders(Borders::ALL);
+    let inner = block.inner(modal_area);
+    frame.render_widget(block, modal_area);
+
+    // Prompt line
+    if inner.height > 0 {
+        let prompt = Paragraph::new(modal.prompt.as_str()).alignment(Alignment::Left);
+        let prompt_area = Rect::new(inner.x, inner.y, inner.width, 1);
+        frame.render_widget(prompt, prompt_area);
+    }
+
+    // Input line + cursor
+    if inner.height > 1 {
+        let input_area = Rect::new(inner.x, inner.y + 1, inner.width, 1);
+        let input = Paragraph::new(modal.input.as_str());
+        frame.render_widget(input, input_area);
+
+        let cursor_x = input_area.x + modal.input.len() as u16;
+        frame.set_cursor_position(Position::new(cursor_x, input_area.y));
+    }
 }
 

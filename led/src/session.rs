@@ -3,6 +3,8 @@ use std::path::{Path, PathBuf};
 
 use rusqlite::{Connection, params};
 
+use crate::buffer::UndoEntry;
+
 pub struct BufferState {
     pub file_path: PathBuf,
     pub cursor_row: usize,
@@ -55,6 +57,25 @@ fn run_schema(conn: &Connection) -> rusqlite::Result<()> {
             root_path   TEXT NOT NULL REFERENCES workspaces(root_path) ON DELETE CASCADE,
             dir_path    TEXT NOT NULL,
             PRIMARY KEY (root_path, dir_path)
+        );
+
+        CREATE TABLE IF NOT EXISTS buffer_undo_state (
+            root_path        TEXT NOT NULL,
+            file_path        TEXT NOT NULL,
+            content_hash     INTEGER NOT NULL,
+            undo_cursor      INTEGER,
+            distance_from_save INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (root_path, file_path)
+        );
+
+        CREATE TABLE IF NOT EXISTS undo_entries (
+            root_path   TEXT NOT NULL,
+            file_path   TEXT NOT NULL,
+            seq         INTEGER NOT NULL,
+            entry_data  BLOB NOT NULL,
+            PRIMARY KEY (root_path, file_path, seq),
+            FOREIGN KEY (root_path, file_path)
+                REFERENCES buffer_undo_state(root_path, file_path) ON DELETE CASCADE
         );",
     )
 }
@@ -189,6 +210,97 @@ pub fn load_session(conn: &Connection, root_path: &Path) -> Option<SessionData> 
         browser_selected,
         browser_expanded_dirs,
     })
+}
+
+pub fn flush_undo_entries(
+    conn: &Connection,
+    root_path: &str,
+    file_path: &str,
+    entries: &[(usize, Vec<u8>)],
+    undo_cursor: Option<usize>,
+    distance_from_save: i32,
+    content_hash: u64,
+) {
+    let result: rusqlite::Result<()> = (|| {
+        let tx = conn.unchecked_transaction()?;
+
+        tx.execute(
+            "INSERT INTO buffer_undo_state (root_path, file_path, content_hash, undo_cursor, distance_from_save)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(root_path, file_path) DO UPDATE SET
+                content_hash = excluded.content_hash,
+                undo_cursor = excluded.undo_cursor,
+                distance_from_save = excluded.distance_from_save",
+            params![root_path, file_path, content_hash as i64, undo_cursor.map(|v| v as i64), distance_from_save],
+        )?;
+
+        for (seq, data) in entries {
+            tx.execute(
+                "INSERT OR REPLACE INTO undo_entries (root_path, file_path, seq, entry_data)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![root_path, file_path, *seq as i64, data],
+            )?;
+        }
+
+        tx.commit()?;
+        Ok(())
+    })();
+
+    if let Err(e) = result {
+        eprintln!("warning: failed to flush undo entries: {e}");
+    }
+}
+
+pub fn clear_undo(conn: &Connection, root_path: &str, file_path: &str) {
+    // Foreign key cascade will remove undo_entries
+    let _ = conn.execute(
+        "DELETE FROM buffer_undo_state WHERE root_path = ?1 AND file_path = ?2",
+        params![root_path, file_path],
+    );
+}
+
+pub fn load_undo(
+    conn: &Connection,
+    root_path: &str,
+    file_path: &str,
+) -> Option<(Vec<UndoEntry>, Option<usize>, i32, u64)> {
+    let (content_hash, undo_cursor, distance_from_save): (i64, Option<i64>, i32) = conn
+        .query_row(
+            "SELECT content_hash, undo_cursor, distance_from_save
+             FROM buffer_undo_state WHERE root_path = ?1 AND file_path = ?2",
+            params![root_path, file_path],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .ok()?;
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT entry_data FROM undo_entries
+             WHERE root_path = ?1 AND file_path = ?2
+             ORDER BY seq",
+        )
+        .ok()?;
+
+    let entries: Vec<UndoEntry> = stmt
+        .query_map(params![root_path, file_path], |row| {
+            let data: Vec<u8> = row.get(0)?;
+            rmp_serde::from_slice(&data)
+                .map_err(|e| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Blob, Box::new(e)))
+        })
+        .ok()?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    if entries.is_empty() {
+        return None;
+    }
+
+    Some((
+        entries,
+        undo_cursor.map(|v| v as usize),
+        distance_from_save,
+        content_hash as u64,
+    ))
 }
 
 pub fn reset_db() {

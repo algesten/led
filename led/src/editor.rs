@@ -1,12 +1,13 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use rusqlite::Connection;
 
 use crate::buffer::Buffer;
 use crate::config::{Action, KeyCombo, Keymap, KeymapLookup};
 use crate::file_browser::FileBrowser;
-use crate::session::{BufferState, SessionData};
+use crate::session::{self, BufferState, SessionData};
 use crate::theme::Theme;
 
 pub enum InputResult {
@@ -27,6 +28,16 @@ pub enum Focus {
     Browser,
 }
 
+pub enum PendingAction {
+    KillBuffer,
+}
+
+pub struct Modal {
+    pub prompt: String,
+    pub input: String,
+    pub action: PendingAction,
+}
+
 pub struct Editor {
     buffers: Vec<Buffer>,
     active_tab: usize,
@@ -40,6 +51,9 @@ pub struct Editor {
     pub theme: Theme,
     pub viewport_height: usize,
     debug_flash: Option<(String, Instant)>,
+    pub modal: Option<Modal>,
+    last_persist: Instant,
+    saved_paths: Vec<PathBuf>,
 }
 
 impl Editor {
@@ -61,6 +75,9 @@ impl Editor {
             theme,
             viewport_height: 24,
             debug_flash: None,
+            modal: None,
+            last_persist: Instant::now(),
+            saved_paths: Vec::new(),
         }
     }
 
@@ -91,6 +108,41 @@ impl Editor {
                 combo.display_name()
             };
             self.debug_flash = Some((display, Instant::now()));
+        }
+
+        // Handle modal input — intercepts all keys before normal dispatch
+        if self.modal.is_some() {
+            let is_abort = matches!(key.code, KeyCode::Esc)
+                || (key.code == KeyCode::Char('g')
+                    && key.modifiers.contains(KeyModifiers::CONTROL));
+            if is_abort {
+                self.modal = None;
+                self.message = Some("Aborted.".into());
+            } else if key.code == KeyCode::Enter {
+                let confirmed = self.modal.as_ref().unwrap().input == "yes";
+                if confirmed {
+                    let action = &self.modal.as_ref().unwrap().action;
+                    match action {
+                        PendingAction::KillBuffer => self.kill_current_buffer(),
+                    }
+                } else {
+                    self.message = Some("Aborted.".into());
+                }
+                self.modal = None;
+            } else if key.code == KeyCode::Backspace {
+                if let Some(ref mut modal) = self.modal {
+                    modal.input.pop();
+                }
+            } else if let KeyCode::Char(c) = key.code {
+                let has_ctrl_alt =
+                    key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
+                if !has_ctrl_alt {
+                    if let Some(ref mut modal) = self.modal {
+                        modal.input.push(c);
+                    }
+                }
+            }
+            return InputResult::Continue;
         }
 
         // Handle chord state first
@@ -186,6 +238,29 @@ impl Editor {
                 }
             }
 
+            Action::KillBuffer => {
+                if !self.buffers.is_empty() {
+                    if self.buffers[self.active_tab].dirty {
+                        self.modal = Some(Modal {
+                            prompt: "Buffer modified; kill anyway? (yes/no)".into(),
+                            input: String::new(),
+                            action: PendingAction::KillBuffer,
+                        });
+                    } else {
+                        self.kill_current_buffer();
+                    }
+                }
+            }
+
+            Action::Abort => {
+                if self.modal.is_some() {
+                    self.modal = None;
+                    self.message = Some("Aborted.".into());
+                } else {
+                    self.message = None;
+                }
+            }
+
             // Shared movement (routed by focus)
             Action::MoveUp => {
                 if self.focus == Focus::Browser {
@@ -249,6 +324,9 @@ impl Editor {
                         Action::Save => match buf.save() {
                             Ok(()) => {
                                 let name = buf.filename().to_string();
+                                if let Some(p) = buf.path.clone() {
+                                    self.saved_paths.push(p);
+                                }
                                 self.message = Some(format!("Saved {name}."));
                             }
                             Err(e) => self.message = Some(format!("Save failed: {e}")),
@@ -259,6 +337,21 @@ impl Editor {
             }
         }
         InputResult::Continue
+    }
+
+    fn kill_current_buffer(&mut self) {
+        if !self.buffers.is_empty() {
+            let name = self.buffers[self.active_tab].filename().to_string();
+            self.buffers.remove(self.active_tab);
+            if self.buffers.is_empty() {
+                self.active_tab = 0;
+                self.focus = Focus::Browser;
+            } else if self.active_tab >= self.buffers.len() {
+                self.active_tab = self.buffers.len() - 1;
+            }
+            self.message = Some(format!("Killed {name}."));
+            self.sync_browser_selection();
+        }
     }
 
     fn sync_browser_selection(&mut self) {
@@ -345,11 +438,80 @@ impl Editor {
         None
     }
 
-    pub fn restore_session(&mut self, session: SessionData) {
+    pub fn needs_persist_in(&self) -> Option<Duration> {
+        let has_unpersisted = self.buffers.iter().any(|b| b.has_unpersisted_undo())
+            || !self.saved_paths.is_empty();
+        if !has_unpersisted {
+            return None;
+        }
+        let elapsed = self.last_persist.elapsed();
+        let deadline = Duration::from_millis(200);
+        if elapsed >= deadline {
+            Some(Duration::ZERO)
+        } else {
+            Some(deadline - elapsed)
+        }
+    }
+
+    pub fn needs_persist(&self) -> bool {
+        let has_unpersisted = self.buffers.iter().any(|b| b.has_unpersisted_undo())
+            || !self.saved_paths.is_empty();
+        has_unpersisted && self.last_persist.elapsed() >= Duration::from_millis(200)
+    }
+
+    pub fn flush_to_db(&mut self, conn: &Connection, root: &Path) {
+        let root_str = root.to_string_lossy();
+
+        // Process saves: clear undo from DB for saved buffers
+        for path in self.saved_paths.drain(..) {
+            let file_str = path.to_string_lossy();
+            session::clear_undo(conn, &root_str, &file_str);
+        }
+
+        // Flush unpersisted undo entries
+        for buf in &mut self.buffers {
+            if !buf.has_unpersisted_undo() {
+                continue;
+            }
+            let Some(path) = buf.path.clone() else { continue };
+            let file_str = path.to_string_lossy().into_owned();
+            let entries = buf.drain_unpersisted_undo();
+            if entries.is_empty() {
+                continue;
+            }
+            let (undo_cursor, distance_from_save) = buf.undo_metadata();
+            let content_hash = buf.content_hash();
+            session::flush_undo_entries(
+                conn,
+                &root_str,
+                &file_str,
+                &entries,
+                undo_cursor,
+                distance_from_save,
+                content_hash,
+            );
+        }
+
+        self.last_persist = Instant::now();
+    }
+
+    pub fn restore_session(&mut self, session: SessionData, conn: Option<&Connection>, root: &Path) {
         self.buffers.clear();
+        let root_str = root.to_string_lossy();
         for bs in &session.buffers {
             let path_str = bs.file_path.to_string_lossy();
             if let Ok(mut buf) = Buffer::from_file(&path_str) {
+                // Try to restore undo state
+                if let Some(conn) = conn {
+                    if let Some((entries, undo_cursor, distance_from_save, stored_hash)) =
+                        session::load_undo(conn, &root_str, &path_str)
+                    {
+                        let current_hash = buf.content_hash();
+                        if current_hash == stored_hash {
+                            buf.restore_undo(entries, undo_cursor, distance_from_save);
+                        }
+                    }
+                }
                 // Clamp cursor to valid ranges
                 buf.cursor_row = bs.cursor_row.min(buf.line_count().saturating_sub(1));
                 buf.cursor_col = bs.cursor_col.min(buf.line_len(buf.cursor_row));

@@ -1,26 +1,29 @@
 use std::fs::File;
+use std::hash::Hasher;
 use std::io::{self, BufReader, BufWriter};
 use std::path::PathBuf;
 use std::time::Instant;
 
 use ropey::Rope;
+use serde::{Deserialize, Serialize};
+use twox_hash::XxHash64;
 
 // ---------------------------------------------------------------------------
 // Undo data structures
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone)]
-enum EditOp {
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum EditOp {
     Insert { char_idx: usize, text: String },
     Remove { char_idx: usize, text: String },
 }
 
-#[derive(Debug, Clone)]
-struct UndoEntry {
-    op: EditOp,
-    cursor_before: (usize, usize),
-    cursor_after: (usize, usize),
-    direction: i32,
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UndoEntry {
+    pub op: EditOp,
+    pub cursor_before: (usize, usize),
+    pub cursor_after: (usize, usize),
+    pub direction: i32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,6 +59,8 @@ pub struct Buffer {
     undo_cursor: Option<usize>,
     pending_group: Option<PendingGroup>,
     distance_from_save: i32,
+    save_history_len: usize,
+    persisted_undo_len: usize,
 }
 
 impl Buffer {
@@ -73,6 +78,8 @@ impl Buffer {
             undo_cursor: None,
             pending_group: None,
             distance_from_save: 0,
+            save_history_len: 0,
+            persisted_undo_len: 0,
         }
     }
 
@@ -91,6 +98,8 @@ impl Buffer {
             undo_cursor: None,
             pending_group: None,
             distance_from_save: 0,
+            save_history_len: 0,
+            persisted_undo_len: 0,
         })
     }
 
@@ -106,6 +115,8 @@ impl Buffer {
             self.rope.write_to(BufWriter::new(file))?;
             self.dirty = false;
             self.distance_from_save = 0;
+            self.save_history_len = self.undo_history.len();
+            self.persisted_undo_len = self.save_history_len;
             Ok(())
         } else {
             Err(io::Error::new(io::ErrorKind::Other, "No file path set"))
@@ -473,10 +484,7 @@ impl Buffer {
             if pg.kind == kind && elapsed < GROUP_TIMEOUT_MS {
                 // Merge into existing group
                 match (&mut pg.op, &op) {
-                    (
-                        EditOp::Insert { text: acc, .. },
-                        EditOp::Insert { text: new, .. },
-                    ) => {
+                    (EditOp::Insert { text: acc, .. }, EditOp::Insert { text: new, .. }) => {
                         acc.push_str(new);
                     }
                     (
@@ -566,6 +574,60 @@ impl Buffer {
         let len = self.current_line_len();
         if self.cursor_col > len {
             self.cursor_col = len;
+        }
+    }
+
+    // --- Undo persistence ---
+
+    pub fn content_hash(&self) -> u64 {
+        let mut hasher = XxHash64::with_seed(0);
+        for chunk in self.rope.chunks() {
+            hasher.write(chunk.as_bytes());
+        }
+        hasher.finish()
+    }
+
+    pub fn has_unpersisted_undo(&self) -> bool {
+        self.pending_group.is_some() || self.undo_history.len() > self.persisted_undo_len
+    }
+
+    pub fn drain_unpersisted_undo(&mut self) -> Vec<(usize, Vec<u8>)> {
+        self.flush_pending();
+        let start = self.persisted_undo_len;
+        let mut result = Vec::new();
+        for (i, entry) in self.undo_history[start..].iter().enumerate() {
+            let bytes = rmp_serde::to_vec(entry).expect("serialize undo entry");
+            result.push((start + i, bytes));
+        }
+        self.persisted_undo_len = self.undo_history.len();
+        result
+    }
+
+    pub fn undo_metadata(&self) -> (Option<usize>, i32) {
+        (self.undo_cursor, self.distance_from_save)
+    }
+
+    pub fn restore_undo(
+        &mut self,
+        entries: Vec<UndoEntry>,
+        undo_cursor: Option<usize>,
+        distance_from_save: i32,
+    ) {
+        // Rebuild rope from scratch: start from file contents and replay all ops
+        // The rope was just loaded from file, so we need to replay to get the edited state
+        for entry in &entries {
+            self.apply_op(&entry.op);
+        }
+        self.undo_history = entries;
+        self.undo_cursor = undo_cursor;
+        self.distance_from_save = distance_from_save;
+        self.dirty = distance_from_save != 0;
+        self.persisted_undo_len = self.undo_history.len();
+        self.save_history_len = 0;
+        // Position cursor at end of last entry if available
+        if let Some(last) = self.undo_history.last() {
+            self.cursor_row = last.cursor_after.0;
+            self.cursor_col = last.cursor_after.1;
         }
     }
 }

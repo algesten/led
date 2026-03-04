@@ -114,7 +114,7 @@ fn main() -> io::Result<()> {
     if !explicit_file {
         if let Some(ref conn) = db {
             if let Some(session) = session::load_session(conn, &root) {
-                editor.restore_session(session);
+                editor.restore_session(session, Some(conn), &root);
             }
         }
     }
@@ -147,11 +147,13 @@ fn main() -> io::Result<()> {
     let _watcher = spawn_config_watcher(tx, keys_path.as_deref(), theme_p.as_deref());
 
     let mut terminal = ratatui::init();
-    let result = run(&mut terminal, &mut editor, &rx);
+    let result = run(&mut terminal, &mut editor, &rx, db.as_ref(), &root);
     ratatui::restore();
 
     // Save session on exit
     if let Some(ref conn) = db {
+        // Final flush of any pending undo entries
+        editor.flush_to_db(conn, &root);
         let session_data = editor.capture_session();
         session::save_session(conn, &root, &session_data);
     }
@@ -163,14 +165,24 @@ fn run(
     terminal: &mut DefaultTerminal,
     editor: &mut Editor,
     rx: &mpsc::Receiver<AppEvent>,
+    db: Option<&rusqlite::Connection>,
+    root: &std::path::Path,
 ) -> io::Result<()> {
     loop {
         terminal.draw(|frame| ui::render(editor, frame))?;
 
-        let event = if let Some(timeout) = editor.needs_redraw_in() {
+        // Combine redraw and persist timeouts — use the shorter one
+        let timeout = match (editor.needs_redraw_in(), editor.needs_persist_in()) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (Some(a), None) => Some(a),
+            (None, Some(b)) => Some(b),
+            (None, None) => None,
+        };
+
+        let event = if let Some(timeout) = timeout {
             match rx.recv_timeout(timeout) {
                 Ok(ev) => Some(ev),
-                Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(mpsc::RecvTimeoutError::Timeout) => None,
                 Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(()),
             }
         } else {
@@ -201,7 +213,14 @@ fn run(
                     }
                 }
             }
-            None => return Ok(()),
+            None => {}
+        }
+
+        // Periodic undo persistence
+        if let Some(conn) = db {
+            if editor.needs_persist() {
+                editor.flush_to_db(conn, root);
+            }
         }
     }
 }

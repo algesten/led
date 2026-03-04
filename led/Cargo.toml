@@ -13,3 +13,5 @@ clap = { version = "4.5.60", features = ["derive"] }
 rusqlite = { workspace = true }
 notify = { workspace = true }
 ropey = { workspace = true }
+rmp-serde = { workspace = true }
+twox-hash = { workspace = true }
