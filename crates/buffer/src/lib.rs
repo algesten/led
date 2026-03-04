@@ -55,6 +55,10 @@ const GROUP_TIMEOUT_MS: u128 = 1000;
 // Buffer
 // ---------------------------------------------------------------------------
 
+pub fn notify_dir() -> Option<PathBuf> {
+    Some(dirs::config_dir()?.join("led/notify"))
+}
+
 pub struct Buffer {
     rope: Rope,
     pub cursor_row: usize,
@@ -68,14 +72,20 @@ pub struct Buffer {
     distance_from_save: i32,
     save_history_len: usize,
     persisted_undo_len: usize,
+    base_content_hash: u64,
+    self_notified: bool,
+    chain_id: Option<String>,
+    last_seen_seq: i64,
 }
 
 impl Buffer {
     // --- Constructors ---
 
     pub fn empty() -> Self {
+        let rope = Rope::from_str("");
+        let base_content_hash = Self::hash_rope(&rope);
         Self {
-            rope: Rope::from_str(""),
+            rope,
             cursor_row: 0,
             cursor_col: 0,
             path: None,
@@ -87,6 +97,10 @@ impl Buffer {
             distance_from_save: 0,
             save_history_len: 0,
             persisted_undo_len: 0,
+            base_content_hash,
+            self_notified: false,
+            chain_id: None,
+            last_seen_seq: 0,
         }
     }
 
@@ -94,6 +108,7 @@ impl Buffer {
         let file = File::open(path)?;
         let rope = Rope::from_reader(BufReader::new(file))?;
         let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| PathBuf::from(path));
+        let base_content_hash = Self::hash_rope(&rope);
         Ok(Self {
             rope,
             cursor_row: 0,
@@ -107,10 +122,84 @@ impl Buffer {
             distance_from_save: 0,
             save_history_len: 0,
             persisted_undo_len: 0,
+            base_content_hash,
+            self_notified: false,
+            chain_id: None,
+            last_seen_seq: 0,
         })
     }
 
-    pub fn save(&mut self) -> io::Result<()> {
+    fn notify_hash_for_path(path: &std::path::Path) -> String {
+        use std::hash::Hash;
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        path.hash(&mut hasher);
+        format!("{:016x}", std::hash::Hasher::finish(&hasher))
+    }
+
+    fn touch_notify(&mut self) {
+        let Some(ref path) = self.path else { return };
+        let Some(dir) = notify_dir() else { return };
+        let hash = Self::notify_hash_for_path(path);
+        let _ = std::fs::create_dir_all(&dir);
+        let _ = std::fs::write(dir.join(&hash), b"");
+        self.self_notified = true;
+    }
+
+    fn generate_chain_id() -> String {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        format!("{}-{}", std::process::id(), ts)
+    }
+
+    fn reload_from_disk(&mut self) {
+        let Some(ref path) = self.path else { return };
+        let Ok(file) = File::open(path) else { return };
+        let Ok(rope) = Rope::from_reader(BufReader::new(file)) else { return };
+        self.rope = rope;
+        self.base_content_hash = Self::hash_rope(&self.rope);
+        self.undo_history.clear();
+        self.undo_cursor = None;
+        self.pending_group = None;
+        self.distance_from_save = 0;
+        self.save_history_len = 0;
+        self.persisted_undo_len = 0;
+        self.dirty = false;
+    }
+
+    fn load_entries_after(
+        conn: &rusqlite::Connection,
+        root: &str,
+        file: &str,
+        after_seq: i64,
+    ) -> Vec<(i64, UndoEntry)> {
+        conn.prepare(
+            "SELECT seq, entry_data FROM undo_entries
+             WHERE root_path = ?1 AND file_path = ?2 AND seq > ?3
+             ORDER BY seq",
+        )
+        .and_then(|mut stmt| {
+            let rows = stmt.query_map(
+                rusqlite::params![root, file, after_seq],
+                |row| {
+                    let seq: i64 = row.get(0)?;
+                    let data: Vec<u8> = row.get(1)?;
+                    let entry: UndoEntry = rmp_serde::from_slice(&data).map_err(|e| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            0, rusqlite::types::Type::Blob, Box::new(e),
+                        )
+                    })?;
+                    Ok((seq, entry))
+                },
+            )?;
+            Ok(rows.filter_map(|r| r.ok()).collect())
+        })
+        .unwrap_or_default()
+    }
+
+    pub fn save(&mut self, ctx: &Context) -> io::Result<()> {
         self.flush_pending();
         if let Some(ref path) = self.path {
             let len = self.rope.len_chars();
@@ -123,6 +212,20 @@ impl Buffer {
             self.distance_from_save = 0;
             self.save_history_len = self.undo_history.len();
             self.persisted_undo_len = self.save_history_len;
+            self.base_content_hash = self.content_hash();
+            self.chain_id = None;
+            self.last_seen_seq = 0;
+
+            if let Some(conn) = ctx.db {
+                let root_str = ctx.root.to_string_lossy();
+                let file_str = path.to_string_lossy();
+                let _ = conn.execute(
+                    "DELETE FROM buffer_undo_state WHERE root_path = ?1 AND file_path = ?2",
+                    rusqlite::params![&*root_str, &*file_str],
+                );
+            }
+            self.touch_notify();
+
             Ok(())
         } else {
             Err(io::Error::new(io::ErrorKind::Other, "No file path set"))
@@ -571,32 +674,119 @@ impl Buffer {
 
     // --- Undo persistence ---
 
-    pub fn content_hash(&self) -> u64 {
+    fn hash_rope(rope: &Rope) -> u64 {
         let mut hasher = XxHash64::with_seed(0);
-        for chunk in self.rope.chunks() {
+        for chunk in rope.chunks() {
             hasher.write(chunk.as_bytes());
         }
         hasher.finish()
     }
 
-    pub fn has_unpersisted_undo(&self) -> bool {
+    pub fn base_content_hash(&self) -> u64 {
+        self.base_content_hash
+    }
+
+    pub fn content_hash(&self) -> u64 {
+        Self::hash_rope(&self.rope)
+    }
+
+    fn has_unpersisted_undo(&self) -> bool {
         self.pending_group.is_some() || self.undo_history.len() > self.persisted_undo_len
     }
 
-    pub fn drain_unpersisted_undo(&mut self) -> Vec<(usize, Vec<u8>)> {
+    fn flush_undo_to_db(&mut self, ctx: &Context) {
+        let Some(conn) = ctx.db else { return };
+        let file_str = match self.path {
+            Some(ref p) => p.to_string_lossy().into_owned(),
+            None => return,
+        };
+        let root_str = ctx.root.to_string_lossy();
+
         self.flush_pending();
         let start = self.persisted_undo_len;
-        let mut result = Vec::new();
-        for (i, entry) in self.undo_history[start..].iter().enumerate() {
-            let bytes = rmp_serde::to_vec(entry).expect("serialize undo entry");
-            result.push((start + i, bytes));
+        if start >= self.undo_history.len() {
+            return;
         }
+
+        if self.chain_id.is_none() {
+            self.chain_id = Some(Self::generate_chain_id());
+        }
+        let chain_id = self.chain_id.as_ref().unwrap();
+
+        let entries: Vec<Vec<u8>> = self.undo_history[start..]
+            .iter()
+            .map(|entry| rmp_serde::to_vec(entry).expect("serialize undo entry"))
+            .collect();
         self.persisted_undo_len = self.undo_history.len();
-        result
+
+        let result: rusqlite::Result<()> = (|| {
+            let tx = conn.unchecked_transaction()?;
+            tx.execute(
+                "INSERT INTO buffer_undo_state (root_path, file_path, chain_id, content_hash, undo_cursor, distance_from_save)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                 ON CONFLICT(root_path, file_path) DO UPDATE SET
+                    chain_id = excluded.chain_id,
+                    content_hash = excluded.content_hash,
+                    undo_cursor = excluded.undo_cursor,
+                    distance_from_save = excluded.distance_from_save",
+                rusqlite::params![
+                    &*root_str, &*file_str, chain_id,
+                    self.base_content_hash as i64,
+                    self.undo_cursor.map(|v| v as i64),
+                    self.distance_from_save
+                ],
+            )?;
+            for data in &entries {
+                tx.execute(
+                    "INSERT INTO undo_entries (root_path, file_path, entry_data)
+                     VALUES (?1, ?2, ?3)",
+                    rusqlite::params![&*root_str, &*file_str, data],
+                )?;
+            }
+            tx.commit()?;
+            Ok(())
+        })();
+
+        if let Err(e) = result {
+            eprintln!("warning: failed to flush undo entries: {e}");
+        }
+
+        if let Ok(max_seq) = conn.query_row(
+            "SELECT COALESCE(MAX(seq), 0) FROM undo_entries WHERE root_path = ?1 AND file_path = ?2",
+            rusqlite::params![&*root_str, &*file_str],
+            |row| row.get::<_, i64>(0),
+        ) {
+            self.last_seen_seq = max_seq;
+        }
+
+        self.touch_notify();
     }
 
-    pub fn undo_metadata(&self) -> (Option<usize>, i32) {
-        (self.undo_cursor, self.distance_from_save)
+    fn mark_externally_saved(&mut self) {
+        self.dirty = false;
+        self.distance_from_save = 0;
+        self.base_content_hash = self.content_hash();
+        self.undo_history.clear();
+        self.undo_cursor = None;
+        self.save_history_len = 0;
+        self.persisted_undo_len = 0;
+        self.chain_id = None;
+        self.last_seen_seq = 0;
+    }
+
+    fn apply_remote_entries(&mut self, entries: Vec<UndoEntry>, new_last_seen_seq: i64) {
+        self.flush_pending();
+        for entry in &entries {
+            self.apply_op(&entry.op);
+        }
+        self.undo_history.extend(entries);
+        self.persisted_undo_len = self.undo_history.len();
+        self.last_seen_seq = new_last_seen_seq;
+        if let Some(last) = self.undo_history.last() {
+            self.cursor_row = last.cursor_after.0;
+            self.cursor_col = last.cursor_after.1;
+        }
+        self.dirty = true;
     }
 
     pub fn restore_undo(
@@ -620,12 +810,6 @@ impl Buffer {
         }
     }
 
-    /// Whether this buffer was saved (and undo should be cleared from DB).
-    /// Returns the path if save happened, then clears the flag.
-    pub fn take_saved_path(&mut self) -> Option<PathBuf> {
-        // We track this via save_history_len matching persisted_undo_len after save
-        None // Shell tracks saved_paths separately
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -721,14 +905,10 @@ impl Component for Buffer {
                 self.undo();
                 vec![]
             }
-            Action::Save => match self.save() {
+            Action::Save => match self.save(ctx) {
                 Ok(()) => {
                     let name = self.filename().to_string();
-                    let mut effects = vec![Effect::SetMessage(format!("Saved {name}."))];
-                    if let Some(ref path) = self.path {
-                        effects.push(Effect::SavedFile(path.clone()));
-                    }
-                    effects
+                    vec![Effect::SetMessage(format!("Saved {name}."))]
                 }
                 Err(e) => vec![Effect::SetMessage(format!("Save failed: {e}"))],
             },
@@ -781,20 +961,144 @@ impl Component for Buffer {
         Some((self.filename(), self.cursor_row + 1, self.cursor_col + 1))
     }
 
-    fn save_session(&self, _ctx: &Context) {
-        // Session persistence handled by shell
-    }
+    fn save_session(&self, _ctx: &Context) {}
 
-    fn restore_session(&mut self, _ctx: &mut Context) {
-        // Session persistence handled by shell
+    fn restore_session(&mut self, ctx: &mut Context) {
+        let Some(conn) = ctx.db else { return };
+        let Some(ref path) = self.path else { return };
+        let root_str = ctx.root.to_string_lossy();
+        let file_str = path.to_string_lossy();
+
+        let row: Option<(i64, Option<i64>, i32, String)> = conn
+            .query_row(
+                "SELECT content_hash, undo_cursor, distance_from_save, chain_id
+                 FROM buffer_undo_state WHERE root_path = ?1 AND file_path = ?2",
+                rusqlite::params![root_str, file_str],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .ok();
+
+        let Some((stored_hash, undo_cursor_raw, distance_from_save, chain_id)) = row else {
+            return;
+        };
+
+        if self.content_hash() != stored_hash as u64 {
+            return;
+        }
+
+        let loaded = Self::load_entries_after(conn, &root_str, &file_str, 0);
+        if loaded.is_empty() {
+            return;
+        }
+
+        let max_seq = loaded.last().unwrap().0;
+        let entries: Vec<UndoEntry> = loaded.into_iter().map(|(_, e)| e).collect();
+
+        self.chain_id = Some(chain_id);
+        self.last_seen_seq = max_seq;
+
+        self.restore_undo(
+            entries,
+            undo_cursor_raw.map(|v| v as usize),
+            distance_from_save,
+        );
     }
 
     fn needs_flush(&self) -> bool {
         self.has_unpersisted_undo()
     }
 
-    fn flush(&mut self, _ctx: &mut Context) {
-        self.flush_pending();
+    fn flush(&mut self, ctx: &mut Context) {
+        self.flush_undo_to_db(ctx);
+    }
+
+    fn notify_hash(&self) -> Option<String> {
+        self.path.as_ref().map(|p| Self::notify_hash_for_path(p))
+    }
+
+    fn handle_notification(&mut self, ctx: &mut Context) {
+        if self.self_notified {
+            self.self_notified = false;
+            return;
+        }
+        let Some(conn) = ctx.db else { return };
+        let file_str = match self.path {
+            Some(ref p) => p.to_string_lossy().into_owned(),
+            None => return,
+        };
+        let root_str = ctx.root.to_string_lossy();
+
+        // Single joined query: fetch chain_id and any new entries in one round-trip
+        struct Row {
+            chain_id: String,
+            seq: Option<i64>,
+            entry_data: Option<Vec<u8>>,
+        }
+        let rows: Vec<Row> = conn
+            .prepare(
+                "SELECT s.chain_id, e.seq, e.entry_data
+                 FROM buffer_undo_state s
+                 LEFT JOIN undo_entries e
+                   ON e.root_path = s.root_path AND e.file_path = s.file_path AND e.seq > ?3
+                 WHERE s.root_path = ?1 AND s.file_path = ?2
+                 ORDER BY e.seq",
+            )
+            .and_then(|mut stmt| {
+                let mapped = stmt.query_map(
+                    rusqlite::params![&*root_str, &*file_str, self.last_seen_seq],
+                    |row| {
+                        Ok(Row {
+                            chain_id: row.get(0)?,
+                            seq: row.get(1)?,
+                            entry_data: row.get(2)?,
+                        })
+                    },
+                )?;
+                Ok(mapped.filter_map(|r| r.ok()).collect())
+            })
+            .unwrap_or_default();
+
+        // Zero rows → no buffer_undo_state row → file was saved externally
+        if rows.is_empty() {
+            if self.dirty {
+                self.reload_from_disk();
+                self.mark_externally_saved();
+            }
+            return;
+        }
+
+        let remote_chain_id = &rows[0].chain_id;
+        let same_chain = self.chain_id.as_deref() == Some(remote_chain_id);
+
+        if same_chain {
+            // Same chain — apply only new entries incrementally
+            let mut entries = Vec::new();
+            let mut max_seq = self.last_seen_seq;
+            for row in &rows {
+                if let (Some(seq), Some(data)) = (row.seq, &row.entry_data) {
+                    if let Ok(entry) = rmp_serde::from_slice::<UndoEntry>(data) {
+                        entries.push(entry);
+                        max_seq = max_seq.max(seq);
+                    }
+                }
+            }
+            if !entries.is_empty() {
+                self.apply_remote_entries(entries, max_seq);
+            }
+        } else {
+            // Chain changed — reload from disk, then replay all entries for new chain
+            self.reload_from_disk();
+            let new_chain = remote_chain_id.clone();
+            let all_entries = Self::load_entries_after(conn, &root_str, &file_str, 0);
+            let max_seq = all_entries.last().map(|(s, _)| *s).unwrap_or(0);
+            let entries: Vec<UndoEntry> = all_entries.into_iter().map(|(_, e)| e).collect();
+            if !entries.is_empty() {
+                self.apply_remote_entries(entries, max_seq);
+            } else {
+                self.last_seen_seq = max_seq;
+            }
+            self.chain_id = Some(new_chain);
+        }
     }
 
 }

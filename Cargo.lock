@@ -793,6 +793,7 @@ dependencies = [
 name = "led_buffer"
 version = "0.1.0"
 dependencies = [
+ "dirs",
  "led_core",
  "ratatui",
  "rmp-serde",

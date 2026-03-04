@@ -82,7 +82,6 @@ pub enum Effect {
     Spawn(Box<dyn Component>),
     SetMessage(String),
     FocusPanel(PanelSlot),
-    SavedFile(PathBuf),
     Quit,
 }
 
@@ -199,6 +198,12 @@ pub trait Component: std::any::Any {
     }
 
     fn flush(&mut self, _ctx: &mut Context) {}
+
+    fn notify_hash(&self) -> Option<String> {
+        None
+    }
+
+    fn handle_notification(&mut self, _ctx: &mut Context) {}
 
     /// TOML fragment for this component's default theme styles.
     fn default_theme_toml(&self) -> &'static str {

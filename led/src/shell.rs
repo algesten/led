@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -46,11 +46,12 @@ pub struct Shell {
     debug_flash: Option<(String, Instant)>,
     pub modal: Option<Modal>,
     last_persist: Instant,
-    saved_paths: Vec<PathBuf>,
+    db: Option<Connection>,
+    root: PathBuf,
 }
 
 impl Shell {
-    pub fn new(keymap: Keymap, theme: Theme) -> Self {
+    pub fn new(keymap: Keymap, theme: Theme, db: Option<Connection>, root: PathBuf) -> Self {
         Self {
             components: Vec::new(),
             active_tab: 0,
@@ -65,7 +66,8 @@ impl Shell {
             debug_flash: None,
             modal: None,
             last_persist: Instant::now(),
-            saved_paths: Vec::new(),
+            db,
+            root,
         }
     }
 
@@ -84,6 +86,12 @@ impl Shell {
         self.components.push(component);
         if has_tab {
             let last = self.components.len() - 1;
+            let mut ctx = Context {
+                db: self.db.as_ref(),
+                root: &self.root,
+                viewport_height: self.viewport_height,
+            };
+            self.components[last].restore_session(&mut ctx);
             self.active_tab = self.tabbed_index_of(last).unwrap_or(0);
             self.notify_active_buffer();
         }
@@ -339,8 +347,8 @@ impl Shell {
 
     fn dispatch_action(&mut self, action: Action) -> Vec<Effect> {
         let mut ctx = Context {
-            db: None,
-            root: Path::new("."),
+            db: self.db.as_ref(),
+            root: &self.root,
             viewport_height: self.viewport_height,
         };
 
@@ -368,8 +376,8 @@ impl Shell {
                 Effect::Emit(event) => {
                     let mut more_effects = Vec::new();
                     let mut ctx = Context {
-                        db: None,
-                        root: Path::new("."),
+                        db: self.db.as_ref(),
+                        root: &self.root,
                         viewport_height: self.viewport_height,
                     };
                     for comp in &mut self.components {
@@ -386,9 +394,6 @@ impl Shell {
                 }
                 Effect::FocusPanel(slot) => {
                     self.focus = slot;
-                }
-                Effect::SavedFile(path) => {
-                    self.saved_paths.push(path);
                 }
                 Effect::Quit => {
                     // Handled at top level
@@ -475,8 +480,7 @@ impl Shell {
     }
 
     pub fn needs_persist_in(&self) -> Option<Duration> {
-        let has_unpersisted = self.components.iter().any(|c| c.needs_flush())
-            || !self.saved_paths.is_empty();
+        let has_unpersisted = self.components.iter().any(|c| c.needs_flush());
         if !has_unpersisted {
             return None;
         }
@@ -490,24 +494,44 @@ impl Shell {
     }
 
     pub fn needs_persist(&self) -> bool {
-        let has_unpersisted = self.components.iter().any(|c| c.needs_flush())
-            || !self.saved_paths.is_empty();
+        let has_unpersisted = self.components.iter().any(|c| c.needs_flush());
         has_unpersisted && self.last_persist.elapsed() >= Duration::from_millis(200)
     }
 
-    pub fn flush_to_db(&mut self, conn: &Connection, root: &Path) {
-        let root_str = root.to_string_lossy();
-
-        for path in self.saved_paths.drain(..) {
-            let file_str = path.to_string_lossy();
-            crate::session::clear_undo(conn, &root_str, &file_str);
+    pub fn flush_to_db(&mut self) {
+        for i in 0..self.components.len() {
+            if !self.components[i].needs_flush() {
+                continue;
+            }
+            let mut ctx = Context {
+                db: self.db.as_ref(),
+                root: &self.root,
+                viewport_height: self.viewport_height,
+            };
+            self.components[i].flush(&mut ctx);
         }
-
-        // Flush components that need it — we need to downcast to Buffer
-        // to get undo entries. Use the flush_buffer_undo helper.
-        crate::session::flush_component_undo(conn, root, &mut self.components);
-
         self.last_persist = Instant::now();
+    }
+
+    pub fn db(&self) -> Option<&Connection> {
+        self.db.as_ref()
+    }
+
+    pub fn handle_notification(&mut self, hash: &str) {
+        let indices: Vec<usize> = self.components.iter()
+            .enumerate()
+            .filter(|(_, c)| c.notify_hash().as_deref() == Some(hash))
+            .map(|(i, _)| i)
+            .collect();
+
+        for idx in indices {
+            let mut ctx = Context {
+                db: self.db.as_ref(),
+                root: &self.root,
+                viewport_height: self.viewport_height,
+            };
+            self.components[idx].handle_notification(&mut ctx);
+        }
     }
 
 }

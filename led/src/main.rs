@@ -28,6 +28,7 @@ enum ConfigFile {
 enum AppEvent {
     Key(KeyEvent),
     ConfigChanged(ConfigFile),
+    BufferNotification(String),
 }
 
 #[derive(Parser)]
@@ -116,7 +117,7 @@ fn main() -> io::Result<()> {
     let db = session::open_db();
 
     let explicit_file = components.len() > 2; // more than BufferFactory + FileBrowser
-    let mut shell = Shell::new(keymap, the_theme);
+    let mut shell = Shell::new(keymap, the_theme, db, root.clone());
     shell.debug = cli.debug;
 
     let had_initial_buffer = explicit_file;
@@ -129,10 +130,8 @@ fn main() -> io::Result<()> {
 
     // Restore session only when no explicit file was passed
     if !explicit_file {
-        if let Some(ref conn) = db {
-            if let Some(session) = session::load_session(conn, &root) {
-                restore_session(&mut shell, session, Some(conn), &root);
-            }
+        if let Some(session) = shell.db().and_then(|conn| session::load_session(conn, &root)) {
+            restore_session(&mut shell, session);
         }
     }
 
@@ -158,18 +157,26 @@ fn main() -> io::Result<()> {
         }
     });
 
-    // Thread 2: config file watcher
+    // Thread 2: notify directory watcher for cross-instance sync
+    let notify_dir = led_buffer::notify_dir();
+    if let Some(ref dir) = notify_dir {
+        cleanup_notify_dir(dir);
+    }
+    let notify_tx = tx.clone();
+    let _notify_watcher = spawn_notify_watcher(notify_tx, notify_dir.as_deref());
+
+    // Thread 3: config file watcher
     let keys_path = config::config_path();
     let theme_p = theme::theme_path();
     let _watcher = spawn_config_watcher(tx, keys_path.as_deref(), theme_p.as_deref());
 
     let mut terminal = ratatui::init();
-    let result = run(&mut terminal, &mut shell, &rx, db.as_ref(), &root);
+    let result = run(&mut terminal, &mut shell, &rx);
     ratatui::restore();
 
     // Save session on exit
-    if let Some(ref conn) = db {
-        shell.flush_to_db(conn, &root);
+    shell.flush_to_db();
+    if let Some(conn) = shell.db() {
         let snapshot = shell.capture_session();
         let session_data = capture_session_data(&shell, &snapshot);
         session::save_session(conn, &root, &session_data);
@@ -182,8 +189,6 @@ fn run(
     terminal: &mut DefaultTerminal,
     shell: &mut Shell,
     rx: &mpsc::Receiver<AppEvent>,
-    db: Option<&rusqlite::Connection>,
-    root: &std::path::Path,
 ) -> io::Result<()> {
     loop {
         terminal.draw(|frame| ui::render(shell, frame))?;
@@ -229,13 +234,14 @@ fn run(
                     }
                 }
             }
+            Some(AppEvent::BufferNotification(hash)) => {
+                shell.handle_notification(&hash);
+            }
             None => {}
         }
 
-        if let Some(conn) = db {
-            if shell.needs_persist() {
-                shell.flush_to_db(conn, root);
-            }
+        if shell.needs_persist() {
+            shell.flush_to_db();
         }
     }
 }
@@ -287,31 +293,28 @@ fn capture_session_data(
 fn restore_session(
     shell: &mut Shell,
     session: SessionData,
-    conn: Option<&rusqlite::Connection>,
-    root: &std::path::Path,
 ) {
-    let root_str = root.to_string_lossy();
-
-    // Restore buffers
+    // Restore buffers — undo state is loaded by Buffer::restore_session via register()
     for bs in &session.buffers {
         let path_str = bs.file_path.to_string_lossy();
-        if let Ok(mut buf) = Buffer::from_file(&path_str) {
-            // Try to restore undo state
-            if let Some(conn) = conn {
-                if let Some((entries, undo_cursor, distance_from_save, stored_hash)) =
-                    session::load_undo(conn, &root_str, &path_str)
-                {
-                    let current_hash = buf.content_hash();
-                    if current_hash == stored_hash {
-                        buf.restore_undo(entries, undo_cursor, distance_from_save);
-                    }
-                }
-            }
-            // Clamp cursor to valid ranges
-            buf.cursor_row = bs.cursor_row.min(buf.line_count().saturating_sub(1));
-            buf.cursor_col = bs.cursor_col.min(buf.line_len(buf.cursor_row));
-            buf.scroll_offset = bs.scroll_offset;
+        if let Ok(buf) = Buffer::from_file(&path_str) {
             shell.register(Box::new(buf));
+        }
+    }
+
+    // Restore cursor/scroll positions after undo replay
+    for bs in &session.buffers {
+        for comp in shell.components_mut() {
+            let Some(buf) = comp.as_any_mut().downcast_mut::<Buffer>() else {
+                continue;
+            };
+            let Some(ref path) = buf.path else { continue };
+            if *path == bs.file_path {
+                buf.cursor_row = bs.cursor_row.min(buf.line_count().saturating_sub(1));
+                buf.cursor_col = bs.cursor_col.min(buf.line_len(buf.cursor_row));
+                buf.scroll_offset = bs.scroll_offset;
+                break;
+            }
         }
     }
 
@@ -382,3 +385,42 @@ fn spawn_config_watcher(
     watcher.watch(config_dir, RecursiveMode::NonRecursive).ok()?;
     Some(watcher)
 }
+
+fn spawn_notify_watcher(
+    tx: mpsc::Sender<AppEvent>,
+    dir: Option<&std::path::Path>,
+) -> Option<notify::RecommendedWatcher> {
+    let dir = dir?;
+    std::fs::create_dir_all(dir).ok()?;
+
+    let mut watcher = notify::recommended_watcher(move |res: Result<notify::Event, notify::Error>| {
+        let Ok(ev) = res else { return };
+        match ev.kind {
+            EventKind::Create(_) | EventKind::Modify(_) => {}
+            _ => return,
+        }
+        for path in &ev.paths {
+            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                let _ = tx.send(AppEvent::BufferNotification(name.to_string()));
+            }
+        }
+    }).ok()?;
+
+    watcher.watch(dir, RecursiveMode::NonRecursive).ok()?;
+    Some(watcher)
+}
+
+fn cleanup_notify_dir(dir: &std::path::Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let cutoff = std::time::SystemTime::now() - std::time::Duration::from_secs(24 * 60 * 60);
+    for entry in entries.flatten() {
+        if let Ok(meta) = entry.metadata() {
+            if let Ok(modified) = meta.modified() {
+                if modified < cutoff {
+                    let _ = std::fs::remove_file(entry.path());
+                }
+            }
+        }
+    }
+}
+
