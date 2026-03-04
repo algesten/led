@@ -93,11 +93,12 @@ impl Buffer {
     pub fn from_file(path: &str) -> io::Result<Self> {
         let file = File::open(path)?;
         let rope = Rope::from_reader(BufReader::new(file))?;
+        let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| PathBuf::from(path));
         Ok(Self {
             rope,
             cursor_row: 0,
             cursor_col: 0,
-            path: Some(PathBuf::from(path)),
+            path: Some(canonical),
             dirty: false,
             scroll_offset: 0,
             undo_history: Vec::new(),
@@ -635,13 +636,6 @@ impl Component for Buffer {
     fn as_any(&self) -> &dyn std::any::Any { self }
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
 
-    fn name(&self) -> &str {
-        self.path
-            .as_ref()
-            .and_then(|p| p.to_str())
-            .unwrap_or("[scratch]")
-    }
-
     fn panel_claims(&self) -> &[PanelClaim] {
         &[PanelClaim {
             slot: PanelSlot::Main,
@@ -653,6 +647,7 @@ impl Component for Buffer {
         Some(TabDescriptor {
             label: self.filename().to_string(),
             dirty: self.dirty,
+            path: self.path.clone(),
         })
     }
 
@@ -814,10 +809,6 @@ impl Component for BufferFactory {
     fn as_any(&self) -> &dyn std::any::Any { self }
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
 
-    fn name(&self) -> &str {
-        "buffer-factory"
-    }
-
     fn panel_claims(&self) -> &[PanelClaim] {
         &[]
     }
@@ -835,6 +826,7 @@ impl Component for BufferFactory {
                     Err(e) => vec![Effect::SetMessage(format!("Open failed: {e}"))],
                 }
             }
+            _ => vec![],
         }
     }
 

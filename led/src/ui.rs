@@ -3,12 +3,12 @@ use ratatui::layout::{Alignment, Constraint, Layout, Position, Rect};
 use ratatui::widgets::{Block, Borders, Paragraph};
 
 use led_core::{DrawContext, PanelSlot};
-use crate::editor::{Editor, Modal};
+use crate::shell::{Shell, Modal};
 
 const GUTTER_WIDTH: u16 = 2;
 const SIDE_PANEL_WIDTH: u16 = 25;
 
-pub fn render(editor: &mut Editor, frame: &mut Frame) {
+pub fn render(shell: &mut Shell, frame: &mut Frame) {
     let area = frame.area();
 
     let vertical = Layout::vertical([
@@ -20,7 +20,7 @@ pub fn render(editor: &mut Editor, frame: &mut Frame) {
     let main_area = vertical[0];
     let status_area = vertical[1];
 
-    let show_panel = editor.show_side_panel && main_area.width > SIDE_PANEL_WIDTH + 2;
+    let show_panel = shell.show_side_panel && main_area.width > SIDE_PANEL_WIDTH + 2;
 
     if show_panel {
         let horizontal =
@@ -28,40 +28,40 @@ pub fn render(editor: &mut Editor, frame: &mut Frame) {
                 .split(main_area);
 
         let browser_area = horizontal[0];
-        let editor_area = horizontal[1];
+        let main_area_inner = horizontal[1];
 
         // Draw side panel component
         {
-            let focused = editor.focus == PanelSlot::Side;
-            let theme = editor.theme.clone();
+            let focused = shell.focus == PanelSlot::Side;
+            let theme = shell.theme.clone();
             let ctx = DrawContext { theme: &theme, focused };
-            if let Some(comp) = editor.side_component_mut() {
+            if let Some(comp) = shell.side_component_mut() {
                 comp.draw(frame, browser_area, &ctx);
             }
         }
 
-        render_editor_content(editor, frame, editor_area);
+        render_main_content(shell, frame, main_area_inner);
     } else {
-        render_editor_content(editor, frame, main_area);
+        render_main_content(shell, frame, main_area);
     }
 
-    render_status_bar(editor, frame, status_area);
+    render_status_bar(shell, frame, status_area);
 
-    if let Some(modal) = &editor.modal {
+    if let Some(modal) = &shell.modal {
         render_modal(modal, frame, area);
     }
 }
 
-fn render_tab_bar(editor: &Editor, frame: &mut Frame, area: Rect) {
-    let theme = &editor.theme;
-    let active = editor.active_tab();
+fn render_tab_bar(shell: &Shell, frame: &mut Frame, area: Rect) {
+    let theme = &shell.theme;
+    let active = shell.active_tab();
 
     let buf = frame.buffer_mut();
     let mut x = area.x + GUTTER_WIDTH - 1;
     let max_x = area.x + area.width;
 
     let mut tab_idx: usize = 0;
-    for comp in editor.components().iter() {
+    for comp in shell.components().iter() {
         let Some(tab) = comp.tab() else { continue };
 
         if tab_idx > 0 {
@@ -103,21 +103,21 @@ fn render_tab_bar(editor: &Editor, frame: &mut Frame, area: Rect) {
     }
 }
 
-fn render_editor_content(editor: &mut Editor, frame: &mut Frame, area: Rect) {
-    if !editor.has_tabs() {
+fn render_main_content(shell: &mut Shell, frame: &mut Frame, area: Rect) {
+    if !shell.has_tabs() {
         return;
     }
 
     let chunks = Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).split(area);
-    render_tab_bar(editor, frame, chunks[0]);
+    render_tab_bar(shell, frame, chunks[0]);
 
     // Debug flash at top right of tab bar
-    if let Some(text) = editor.debug_flash_text() {
+    if let Some(text) = shell.debug_flash_text() {
         let tab_area = chunks[0];
         let flash_width = text.len() as u16;
         if flash_width < tab_area.width {
             let x = tab_area.x + tab_area.width - flash_width;
-            let style = editor.theme.get("editor.gutter").to_style();
+            let style = shell.theme.get("editor.gutter").to_style();
             frame.buffer_mut().set_string(x, tab_area.y, text, style);
         }
     }
@@ -125,25 +125,25 @@ fn render_editor_content(editor: &mut Editor, frame: &mut Frame, area: Rect) {
     let text_area = chunks[1];
 
     // Get cursor/scroll info from active component
-    let comp = editor.active_buffer().unwrap();
+    let comp = shell.active_buffer().unwrap();
     let cursor_row = comp.cursor_position().map_or(0, |(r, _)| r);
     let current_scroll = comp.scroll_offset();
     let visible_height = text_area.height as usize;
-    editor.viewport_height = visible_height;
+    shell.viewport_height = visible_height;
     let scroll = compute_scroll(current_scroll, cursor_row, visible_height);
-    editor.active_buffer_mut().unwrap().set_scroll_offset(scroll);
+    shell.active_buffer_mut().unwrap().set_scroll_offset(scroll);
 
     // Draw the active buffer component
     {
-        let focused = editor.focus == PanelSlot::Main;
-        let theme = editor.theme.clone();
+        let focused = shell.focus == PanelSlot::Main;
+        let theme = shell.theme.clone();
         let ctx = DrawContext { theme: &theme, focused };
-        editor.active_buffer_mut().unwrap().draw(frame, text_area, &ctx);
+        shell.active_buffer_mut().unwrap().draw(frame, text_area, &ctx);
     }
 
-    // Place cursor (only when editor focused)
-    if editor.focus == PanelSlot::Main {
-        let comp = editor.active_buffer().unwrap();
+    // Place cursor (only when main panel focused)
+    if shell.focus == PanelSlot::Main {
+        let comp = shell.active_buffer().unwrap();
         if let Some((row, col)) = comp.cursor_position() {
             let cursor_screen_row = row.saturating_sub(scroll) as u16;
             let cursor_screen_col = col as u16 + GUTTER_WIDTH;
@@ -165,11 +165,12 @@ fn compute_scroll(current: usize, cursor_row: usize, height: usize) -> usize {
     scroll
 }
 
-fn render_status_bar(editor: &Editor, frame: &mut Frame, area: Rect) {
-    let (left, right) = if let Some(comp) = editor.active_buffer() {
+fn render_status_bar(shell: &Shell, frame: &mut Frame, area: Rect) {
+    let (left, right) = if let Some(comp) = shell.active_buffer() {
         let tab = comp.tab().unwrap_or(led_core::TabDescriptor {
-            label: comp.name().to_string(),
+            label: String::new(),
             dirty: false,
+            path: None,
         });
         let modified = if tab.dirty { " \u{25cf}" } else { "" };
         let filename = &tab.label;
@@ -186,7 +187,7 @@ fn render_status_bar(editor: &Editor, frame: &mut Frame, area: Rect) {
     let padding = (area.width as usize).saturating_sub(left.len() + right.len());
     let bar = format!("{left}{:padding$}{right}", "");
 
-    let style = editor.theme.get("status_bar.style").to_style();
+    let style = shell.theme.get("status_bar.style").to_style();
     let paragraph = Paragraph::new(bar).style(style);
     frame.render_widget(paragraph, area);
 }

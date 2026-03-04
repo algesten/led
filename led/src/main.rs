@@ -1,5 +1,5 @@
 mod config;
-mod editor;
+mod shell;
 mod session;
 mod theme;
 mod ui;
@@ -16,7 +16,7 @@ use ratatui::DefaultTerminal;
 use led_core::PanelSlot;
 use led_buffer::{Buffer, BufferFactory};
 use led_file_browser::FileBrowser;
-use editor::{Editor, InputResult};
+use shell::{Shell, InputResult};
 use session::{BufferState, SessionData};
 
 #[derive(Debug)]
@@ -116,22 +116,22 @@ fn main() -> io::Result<()> {
     let db = session::open_db();
 
     let explicit_file = components.len() > 2; // more than BufferFactory + FileBrowser
-    let mut editor = Editor::new(keymap, the_theme);
-    editor.debug = cli.debug;
+    let mut shell = Shell::new(keymap, the_theme);
+    shell.debug = cli.debug;
 
     let had_initial_buffer = explicit_file;
     for comp in components {
-        editor.register(comp);
+        shell.register(comp);
     }
     if had_initial_buffer {
-        editor.set_focus(PanelSlot::Main);
+        shell.set_focus(PanelSlot::Main);
     }
 
     // Restore session only when no explicit file was passed
     if !explicit_file {
         if let Some(ref conn) = db {
             if let Some(session) = session::load_session(conn, &root) {
-                restore_session(&mut editor, session, Some(conn), &root);
+                restore_session(&mut shell, session, Some(conn), &root);
             }
         }
     }
@@ -164,14 +164,14 @@ fn main() -> io::Result<()> {
     let _watcher = spawn_config_watcher(tx, keys_path.as_deref(), theme_p.as_deref());
 
     let mut terminal = ratatui::init();
-    let result = run(&mut terminal, &mut editor, &rx, db.as_ref(), &root);
+    let result = run(&mut terminal, &mut shell, &rx, db.as_ref(), &root);
     ratatui::restore();
 
     // Save session on exit
     if let Some(ref conn) = db {
-        editor.flush_to_db(conn, &root);
-        let snapshot = editor.capture_session();
-        let session_data = capture_session_data(&editor, &snapshot);
+        shell.flush_to_db(conn, &root);
+        let snapshot = shell.capture_session();
+        let session_data = capture_session_data(&shell, &snapshot);
         session::save_session(conn, &root, &session_data);
     }
 
@@ -180,15 +180,15 @@ fn main() -> io::Result<()> {
 
 fn run(
     terminal: &mut DefaultTerminal,
-    editor: &mut Editor,
+    shell: &mut Shell,
     rx: &mpsc::Receiver<AppEvent>,
     db: Option<&rusqlite::Connection>,
     root: &std::path::Path,
 ) -> io::Result<()> {
     loop {
-        terminal.draw(|frame| ui::render(editor, frame))?;
+        terminal.draw(|frame| ui::render(shell, frame))?;
 
-        let timeout = match (editor.needs_redraw_in(), editor.needs_persist_in()) {
+        let timeout = match (shell.needs_redraw_in(), shell.needs_persist_in()) {
             (Some(a), Some(b)) => Some(a.min(b)),
             (Some(a), None) => Some(a),
             (None, Some(b)) => Some(b),
@@ -210,7 +210,7 @@ fn run(
 
         match event {
             Some(AppEvent::Key(key)) => {
-                match editor.handle_key_event(key) {
+                match shell.handle_key_event(key) {
                     InputResult::Continue => {}
                     InputResult::Quit => return Ok(()),
                 }
@@ -219,13 +219,13 @@ fn run(
                 match file {
                     ConfigFile::Keys => {
                         if let Some(km) = config::reload_keymap() {
-                            editor.set_keymap(km);
-                            editor.message = Some("Reloaded keys.toml.".into());
+                            shell.set_keymap(km);
+                            shell.message = Some("Reloaded keys.toml.".into());
                         }
                     }
                     ConfigFile::Theme => {
-                        editor.set_theme(theme::load_theme(editor.components()));
-                        editor.message = Some("Reloaded theme.toml.".into());
+                        shell.set_theme(theme::load_theme(shell.components()));
+                        shell.message = Some("Reloaded theme.toml.".into());
                     }
                 }
             }
@@ -233,8 +233,8 @@ fn run(
         }
 
         if let Some(conn) = db {
-            if editor.needs_persist() {
-                editor.flush_to_db(conn, root);
+            if shell.needs_persist() {
+                shell.flush_to_db(conn, root);
             }
         }
     }
@@ -243,11 +243,11 @@ fn run(
 // --- Session helpers (composition root uses concrete types) ---
 
 fn capture_session_data(
-    editor: &Editor,
-    snapshot: &editor::SessionSnapshot,
+    shell: &Shell,
+    snapshot: &shell::SessionSnapshot,
 ) -> SessionData {
     let mut buffers = Vec::new();
-    for comp in editor.components() {
+    for comp in shell.components() {
         if comp.tab().is_none() {
             continue;
         }
@@ -264,7 +264,7 @@ fn capture_session_data(
     }
 
     // Get browser state
-    let (browser_selected, browser_expanded_dirs) = editor
+    let (browser_selected, browser_expanded_dirs) = shell
         .components()
         .iter()
         .find_map(|c| {
@@ -285,7 +285,7 @@ fn capture_session_data(
 }
 
 fn restore_session(
-    editor: &mut Editor,
+    shell: &mut Shell,
     session: SessionData,
     conn: Option<&rusqlite::Connection>,
     root: &std::path::Path,
@@ -311,26 +311,26 @@ fn restore_session(
             buf.cursor_row = bs.cursor_row.min(buf.line_count().saturating_sub(1));
             buf.cursor_col = bs.cursor_col.min(buf.line_len(buf.cursor_row));
             buf.scroll_offset = bs.scroll_offset;
-            editor.register(Box::new(buf));
+            shell.register(Box::new(buf));
         }
     }
 
     // Set active tab
-    editor.set_active_tab(session.active_tab);
+    shell.set_active_tab(session.active_tab);
 
     // Set show side panel
-    editor.show_side_panel = session.show_side_panel;
+    shell.show_side_panel = session.show_side_panel;
 
     // Set focus
-    let has_tabs = editor.has_tabs();
+    let has_tabs = shell.has_tabs();
     if session.focus_is_editor && has_tabs {
-        editor.set_focus(PanelSlot::Main);
+        shell.set_focus(PanelSlot::Main);
     } else {
-        editor.set_focus(PanelSlot::Side);
+        shell.set_focus(PanelSlot::Side);
     }
 
     // Restore browser state
-    for comp in editor.components_mut() {
+    for comp in shell.components_mut() {
         if let Some(fb) = comp.as_any_mut().downcast_mut::<FileBrowser>() {
             fb.set_expanded_dirs(session.browser_expanded_dirs.clone());
             fb.selected = session

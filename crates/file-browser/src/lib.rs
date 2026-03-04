@@ -237,10 +237,6 @@ impl Component for FileBrowser {
     fn as_any(&self) -> &dyn std::any::Any { self }
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
 
-    fn name(&self) -> &str {
-        "file-browser"
-    }
-
     fn panel_claims(&self) -> &[PanelClaim] {
         &[PanelClaim {
             slot: PanelSlot::Side,
@@ -295,7 +291,13 @@ impl Component for FileBrowser {
         }
     }
 
-    fn handle_event(&mut self, _event: &Event, _ctx: &mut Context) -> Vec<Effect> {
+    fn handle_event(&mut self, event: &Event, _ctx: &mut Context) -> Vec<Effect> {
+        match event {
+            Event::TabActivated { path: Some(path) } => {
+                self.reveal(path);
+            }
+            _ => {}
+        }
         vec![]
     }
 

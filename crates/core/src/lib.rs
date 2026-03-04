@@ -65,6 +65,7 @@ pub struct PanelClaim {
 pub struct TabDescriptor {
     pub label: String,
     pub dirty: bool,
+    pub path: Option<PathBuf>,
 }
 
 // ---------------------------------------------------------------------------
@@ -73,6 +74,7 @@ pub struct TabDescriptor {
 
 pub enum Event {
     OpenFile(PathBuf),
+    TabActivated { path: Option<PathBuf> },
 }
 
 pub enum Effect {
@@ -157,7 +159,6 @@ impl Theme {
 pub trait Component: std::any::Any {
     fn as_any(&self) -> &dyn std::any::Any;
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any;
-    fn name(&self) -> &str;
 
     fn panel_claims(&self) -> &[PanelClaim];
 

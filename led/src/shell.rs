@@ -32,7 +32,7 @@ pub struct Modal {
     pub action: PendingAction,
 }
 
-pub struct Editor {
+pub struct Shell {
     components: Vec<Box<dyn Component>>,
     active_tab: usize,
     pub message: Option<String>,
@@ -49,7 +49,7 @@ pub struct Editor {
     saved_paths: Vec<PathBuf>,
 }
 
-impl Editor {
+impl Shell {
     pub fn new(keymap: Keymap, theme: Theme) -> Self {
         Self {
             components: Vec::new(),
@@ -70,20 +70,22 @@ impl Editor {
     }
 
     pub fn register(&mut self, component: Box<dyn Component>) {
-        // Dedup by name: if exists, just activate that tab
-        let name = component.name().to_string();
-        if let Some(idx) = self.components.iter().position(|c| c.name() == name) {
-            // If it has a tab, switch to it
-            if self.components[idx].tab().is_some() {
+        // Dedup by path: if a tab with the same path exists, just focus it
+        if let Some(path) = component.tab().and_then(|t| t.path) {
+            if let Some(idx) = self.components.iter().position(|c| {
+                c.tab().and_then(|t| t.path).as_ref() == Some(&path)
+            }) {
                 self.activate_tab_for_component(idx);
+                self.notify_active_buffer();
+                return;
             }
-            return;
         }
+        let has_tab = component.tab().is_some();
         self.components.push(component);
-        // If the new component has a tab, make it active
-        let last = self.components.len() - 1;
-        if self.components[last].tab().is_some() {
+        if has_tab {
+            let last = self.components.len() - 1;
             self.active_tab = self.tabbed_index_of(last).unwrap_or(0);
+            self.notify_active_buffer();
         }
     }
 
@@ -288,14 +290,14 @@ impl Editor {
                     } else {
                         self.active_tab -= 1;
                     }
-                    self.sync_browser_selection();
+                    self.notify_active_buffer();
                 }
             }
             Action::NextTab => {
                 let tabs = self.tabbed_components();
                 if tabs.len() > 1 {
                     self.active_tab = (self.active_tab + 1) % tabs.len();
-                    self.sync_browser_selection();
+                    self.notify_active_buffer();
                 }
             }
 
@@ -397,12 +399,10 @@ impl Editor {
 
     fn kill_current_buffer(&mut self) {
         if let Some(comp_idx) = self.active_tab_component_idx() {
-            let name = self.components[comp_idx].name().to_string();
-            // Get the tab label for the message
             let label = self.components[comp_idx]
                 .tab()
                 .map(|t| t.label.clone())
-                .unwrap_or_else(|| name.clone());
+                .unwrap_or_default();
             self.components.remove(comp_idx);
 
             let tabs = self.tabbed_components();
@@ -413,24 +413,15 @@ impl Editor {
                 self.active_tab = tabs.len() - 1;
             }
             self.message = Some(format!("Killed {label}."));
-            self.sync_browser_selection();
+            self.notify_active_buffer();
         }
     }
 
-    fn sync_browser_selection(&mut self) {
-        // If the active buffer has a path-based name, reveal it in the file browser
+    fn notify_active_buffer(&mut self) {
         if let Some(idx) = self.active_tab_component_idx() {
-            let name = self.components[idx].name().to_string();
-            let path = PathBuf::from(&name);
-            if path.exists() {
-                if let Some(side_idx) = self.side_component_idx() {
-                    // We need to downcast to FileBrowser to call reveal().
-                    // Instead, we accept this limitation: the side component doesn't
-                    // know about reveal in the trait. We'll handle it differently:
-                    // just skip sync for now. The browser will still work.
-                    let _ = side_idx;
-                }
-            }
+            let path = self.components[idx].tab().and_then(|t| t.path);
+            let effects = vec![Effect::Emit(led_core::Event::TabActivated { path })];
+            self.process_effects(effects);
         }
     }
 
