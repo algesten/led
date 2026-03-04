@@ -4,6 +4,8 @@ use std::io::{self, BufReader, BufWriter};
 use std::path::PathBuf;
 use std::time::Instant;
 
+use std::sync::Arc;
+
 use led_core::{
     Action, Component, Context, DrawContext, Effect, Event, PanelClaim, PanelSlot, TabDescriptor,
 };
@@ -76,6 +78,8 @@ pub struct Buffer {
     self_notified: bool,
     chain_id: Option<String>,
     last_seen_seq: i64,
+    mark: Option<(usize, usize)>,
+    kill_accumulator: Option<String>,
 }
 
 impl Buffer {
@@ -101,6 +105,8 @@ impl Buffer {
             self_notified: false,
             chain_id: None,
             last_seen_seq: 0,
+            mark: None,
+            kill_accumulator: None,
         }
     }
 
@@ -126,6 +132,8 @@ impl Buffer {
             self_notified: false,
             chain_id: None,
             last_seen_seq: 0,
+            mark: None,
+            kill_accumulator: None,
         })
     }
 
@@ -471,7 +479,7 @@ impl Buffer {
         }
     }
 
-    pub fn kill_line(&mut self) {
+    pub fn kill_line(&mut self) -> Option<String> {
         let cursor_before = (self.cursor_row, self.cursor_col);
         let col = self.cursor_col;
         let len = self.current_line_len();
@@ -486,12 +494,13 @@ impl Buffer {
             self.push_undo(UndoEntry {
                 op: EditOp::Remove {
                     char_idx: start,
-                    text,
+                    text: text.clone(),
                 },
                 cursor_before,
                 cursor_after,
                 direction: 1,
             });
+            Some(text)
         } else if self.cursor_row + 1 < self.rope.len_lines() {
             let idx = self.char_idx(self.cursor_row, col);
             self.rope.remove(idx..idx + 1);
@@ -507,7 +516,90 @@ impl Buffer {
                 cursor_after,
                 direction: 1,
             });
+            Some("\n".to_string())
+        } else {
+            None
         }
+    }
+
+    // --- Mark / Selection ---
+
+    fn set_mark(&mut self) {
+        self.mark = Some((self.cursor_row, self.cursor_col));
+    }
+
+    fn clear_mark(&mut self) {
+        self.mark = None;
+    }
+
+    fn selection_range(&self) -> Option<((usize, usize), (usize, usize))> {
+        let mark = self.mark?;
+        let cursor = (self.cursor_row, self.cursor_col);
+        if mark <= cursor {
+            Some((mark, cursor))
+        } else {
+            Some((cursor, mark))
+        }
+    }
+
+    fn kill_region(&mut self) -> Option<String> {
+        let ((sr, sc), (er, ec)) = self.selection_range()?;
+        let start_idx = self.char_idx(sr, sc);
+        let end_idx = self.char_idx(er, ec);
+        if start_idx == end_idx {
+            self.clear_mark();
+            return None;
+        }
+        let text: String = self.rope.slice(start_idx..end_idx).to_string();
+        let cursor_before = (self.cursor_row, self.cursor_col);
+        self.rope.remove(start_idx..end_idx);
+        self.cursor_row = sr;
+        self.cursor_col = sc;
+        self.dirty = true;
+        let cursor_after = (self.cursor_row, self.cursor_col);
+        self.flush_pending();
+        self.push_undo(UndoEntry {
+            op: EditOp::Remove {
+                char_idx: start_idx,
+                text: text.clone(),
+            },
+            cursor_before,
+            cursor_after,
+            direction: 1,
+        });
+        self.clear_mark();
+        Some(text)
+    }
+
+    fn yank_text(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        let cursor_before = (self.cursor_row, self.cursor_col);
+        let idx = self.char_idx(self.cursor_row, self.cursor_col);
+        self.rope.insert(idx, text);
+        // Advance cursor past inserted text
+        let inserted_chars: usize = text.chars().count();
+        let newlines: usize = text.chars().filter(|&c| c == '\n').count();
+        if newlines > 0 {
+            self.cursor_row += newlines;
+            let last_line_len = text.rsplit('\n').next().unwrap_or("").chars().count();
+            self.cursor_col = last_line_len;
+        } else {
+            self.cursor_col += inserted_chars;
+        }
+        self.dirty = true;
+        let cursor_after = (self.cursor_row, self.cursor_col);
+        self.flush_pending();
+        self.push_undo(UndoEntry {
+            op: EditOp::Insert {
+                char_idx: idx,
+                text: text.to_string(),
+            },
+            cursor_before,
+            cursor_after,
+            direction: 1,
+        });
     }
 
     // --- Undo system ---
@@ -836,8 +928,14 @@ impl Component for Buffer {
     }
 
     fn handle_action(&mut self, action: Action, ctx: &mut Context) -> Vec<Effect> {
+        // Clear kill accumulator for non-KillLine actions
+        if !matches!(action, Action::KillLine) {
+            self.kill_accumulator = None;
+        }
+
         match action {
             Action::InsertChar(c) => {
+                self.clear_mark();
                 self.insert_char(c);
                 vec![]
             }
@@ -882,24 +980,33 @@ impl Component for Buffer {
                 vec![]
             }
             Action::InsertNewline => {
+                self.clear_mark();
                 self.insert_newline();
                 vec![]
             }
             Action::DeleteBackward => {
+                self.clear_mark();
                 self.delete_char_backward();
                 vec![]
             }
             Action::DeleteForward => {
+                self.clear_mark();
                 self.delete_char_forward();
                 vec![]
             }
             Action::InsertTab => {
+                self.clear_mark();
                 self.insert_char('\t');
                 vec![]
             }
             Action::KillLine => {
-                self.kill_line();
-                vec![]
+                if let Some(killed) = self.kill_line() {
+                    let acc = self.kill_accumulator.get_or_insert_with(String::new);
+                    acc.push_str(&killed);
+                    vec![Effect::SetClipboard(Arc::new(acc.clone()))]
+                } else {
+                    vec![]
+                }
             }
             Action::Undo => {
                 self.undo();
@@ -912,6 +1019,28 @@ impl Component for Buffer {
                 }
                 Err(e) => vec![Effect::SetMessage(format!("Save failed: {e}"))],
             },
+            Action::SetMark => {
+                self.set_mark();
+                vec![Effect::SetMessage("Mark set".into())]
+            }
+            Action::KillRegion => {
+                if let Some(text) = self.kill_region() {
+                    vec![Effect::SetClipboard(Arc::new(text))]
+                } else {
+                    vec![Effect::SetMessage("No region".into())]
+                }
+            }
+            Action::Yank => {
+                if let Some(text) = ctx.yank() {
+                    self.clear_mark();
+                    self.yank_text(&text);
+                }
+                vec![]
+            }
+            Action::Abort => {
+                self.clear_mark();
+                vec![]
+            }
             _ => vec![],
         }
     }
@@ -931,16 +1060,60 @@ impl Component for Buffer {
         let total_lines = self.line_count();
         let gutter_style = ctx.theme.get("editor.gutter").to_style();
         let text_style = ctx.theme.get("editor.text").to_style();
+        let sel_style = ctx.theme.get("editor.selection").to_style();
+        let sel_range = self.selection_range();
 
+        let gutter_width: usize = 2;
+        let text_width = (area.width as usize).saturating_sub(gutter_width);
         let mut display_lines = Vec::with_capacity(height);
 
         for i in 0..height {
             let line_idx = self.scroll_offset + i;
             if line_idx < total_lines {
                 let gutter = Span::styled("  ", gutter_style);
-                let text =
-                    Span::styled(self.line(line_idx).replace('\t', "    "), text_style);
-                display_lines.push(Line::from(vec![gutter, text]));
+                let raw = self.line(line_idx).replace('\t', "    ");
+
+                if let Some(((sr, sc), (er, ec))) = sel_range {
+                    if line_idx >= sr && line_idx <= er {
+                        let line_len = raw.len();
+                        let sel_start = if line_idx == sr { sc.min(line_len) } else { 0 };
+                        let sel_end = if line_idx == er { ec.min(line_len) } else { line_len };
+
+                        let mut spans = vec![gutter];
+                        if sel_start > 0 {
+                            spans.push(Span::styled(raw[..sel_start].to_string(), text_style));
+                        }
+                        if sel_end > sel_start {
+                            spans.push(Span::styled(raw[sel_start..sel_end].to_string(), sel_style));
+                        }
+                        if sel_end < line_len {
+                            spans.push(Span::styled(raw[sel_end..].to_string(), text_style));
+                        }
+                        // If selection boundaries are both at line end, show plain text
+                        if sel_start >= line_len && spans.len() == 1 {
+                            spans.push(Span::styled(raw, text_style));
+                        }
+                        // Pad selection highlight to fill remaining line width
+                        if sel_end >= line_len && line_idx < er {
+                            let used = if sel_start > 0 { line_len } else { line_len };
+                            let pad = text_width.saturating_sub(used);
+                            if pad > 0 {
+                                spans.push(Span::styled(" ".repeat(pad), sel_style));
+                            }
+                        }
+                        display_lines.push(Line::from(spans));
+                    } else {
+                        display_lines.push(Line::from(vec![
+                            gutter,
+                            Span::styled(raw, text_style),
+                        ]));
+                    }
+                } else {
+                    display_lines.push(Line::from(vec![
+                        gutter,
+                        Span::styled(raw, text_style),
+                    ]));
+                }
             } else {
                 let gutter = Span::styled("~ ", gutter_style);
                 display_lines.push(Line::from(vec![gutter]));
@@ -1154,8 +1327,9 @@ impl Component for BufferFactory {
     fn default_theme_toml(&self) -> &'static str {
         r#"
 [editor]
-text   = "$normal"
-gutter = "$muted"
+text      = "$normal"
+gutter    = "$muted"
+selection = { reversed = true }
 "#
     }
 }

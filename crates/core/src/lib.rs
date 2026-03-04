@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -11,7 +12,7 @@ use serde::{Deserialize, Serialize};
 // Action
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Action {
     MoveUp,
@@ -44,6 +45,9 @@ pub enum Action {
     KillBuffer,
     Abort,
     Suspend,
+    SetMark,
+    KillRegion,
+    Yank,
 }
 
 // ---------------------------------------------------------------------------
@@ -84,6 +88,7 @@ pub enum Effect {
     Spawn(Box<dyn Component>),
     SetMessage(String),
     FocusPanel(PanelSlot),
+    SetClipboard(Arc<String>),
     Quit,
 }
 
@@ -95,6 +100,13 @@ pub struct Context<'a> {
     pub db: Option<&'a Connection>,
     pub root: &'a std::path::Path,
     pub viewport_height: usize,
+    pub yank_fn: Option<&'a mut dyn FnMut() -> Option<String>>,
+}
+
+impl<'a> Context<'a> {
+    pub fn yank(&mut self) -> Option<String> {
+        self.yank_fn.as_mut().and_then(|f| f())
+    }
 }
 
 pub struct DrawContext<'a> {

@@ -50,6 +50,7 @@ pub struct Shell {
     db: Option<Connection>,
     root: PathBuf,
     pub single_file_mode: bool,
+    clipboard: Option<arboard::Clipboard>,
 }
 
 impl Shell {
@@ -71,6 +72,7 @@ impl Shell {
             db,
             root,
             single_file_mode: false,
+            clipboard: arboard::Clipboard::new().ok(),
         }
     }
 
@@ -96,6 +98,7 @@ impl Shell {
                 db: self.db.as_ref(),
                 root: &self.root,
                 viewport_height: self.viewport_height,
+                yank_fn: None,
             };
             self.components[last].restore_session(&mut ctx);
             self.active_tab = self.tabbed_index_of(last).unwrap_or(0);
@@ -340,6 +343,9 @@ impl Shell {
                     self.message = Some("Aborted.".into());
                 } else {
                     self.message = None;
+                    // Dispatch to active buffer to clear mark
+                    let effects = self.dispatch_action(Action::Abort);
+                    self.process_effects(effects);
                 }
             }
 
@@ -353,13 +359,22 @@ impl Shell {
     }
 
     fn dispatch_action(&mut self, action: Action) -> Vec<Effect> {
+        let is_yank = matches!(action, Action::Yank);
+
+        // For Yank, temporarily extract clipboard so we can create a closure
+        let mut clipboard_tmp = if is_yank { self.clipboard.take() } else { None };
+        let mut yank_closure = move || -> Option<String> {
+            clipboard_tmp.as_mut()?.get_text().ok()
+        };
+
         let mut ctx = Context {
             db: self.db.as_ref(),
             root: &self.root,
             viewport_height: self.viewport_height,
+            yank_fn: if is_yank { Some(&mut yank_closure) } else { None },
         };
 
-        match self.focus {
+        let effects = match self.focus {
             PanelSlot::Main => {
                 if let Some(idx) = self.active_tab_component_idx() {
                     self.components[idx].handle_action(action, &mut ctx)
@@ -374,7 +389,20 @@ impl Shell {
                     vec![]
                 }
             }
+        };
+
+        // Put clipboard back if we took it
+        if is_yank {
+            // Extract from closure — drop ctx first
+            drop(ctx);
+            // yank_closure captured clipboard_tmp by move; we need to get it back
+            // Since we can't extract from the closure, re-init if needed
+            if self.clipboard.is_none() {
+                self.clipboard = arboard::Clipboard::new().ok();
+            }
         }
+
+        effects
     }
 
     fn process_effects(&mut self, effects: Vec<Effect>) {
@@ -386,6 +414,7 @@ impl Shell {
                         db: self.db.as_ref(),
                         root: &self.root,
                         viewport_height: self.viewport_height,
+                        yank_fn: None,
                     };
                     for comp in &mut self.components {
                         more_effects.extend(comp.handle_event(&event, &mut ctx));
@@ -401,6 +430,11 @@ impl Shell {
                 }
                 Effect::FocusPanel(slot) => {
                     self.focus = slot;
+                }
+                Effect::SetClipboard(text) => {
+                    if let Some(ref mut cb) = self.clipboard {
+                        let _ = cb.set_text(text.as_str());
+                    }
                 }
                 Effect::Quit => {
                     // Handled at top level
@@ -514,6 +548,7 @@ impl Shell {
                 db: self.db.as_ref(),
                 root: &self.root,
                 viewport_height: self.viewport_height,
+                yank_fn: None,
             };
             self.components[i].flush(&mut ctx);
         }
@@ -540,6 +575,7 @@ impl Shell {
                 db: self.db.as_ref(),
                 root: &self.root,
                 viewport_height: self.viewport_height,
+                yank_fn: None,
             };
             self.components[idx].handle_notification(&mut ctx);
         }

@@ -96,14 +96,14 @@ impl Keymap {
         // Check context-specific bindings first
         if let Some(ctx) = context {
             if let Some(ctx_map) = self.contexts.get(ctx) {
-                if let Some(&action) = ctx_map.get(combo) {
-                    return KeymapLookup::Action(action);
+                if let Some(action) = ctx_map.get(combo) {
+                    return KeymapLookup::Action(action.clone());
                 }
             }
         }
         // Fall back to global
-        if let Some(&action) = self.direct.get(combo) {
-            KeymapLookup::Action(action)
+        if let Some(action) = self.direct.get(combo) {
+            KeymapLookup::Action(action.clone())
         } else if self.chords.contains_key(combo) {
             KeymapLookup::ChordPrefix
         } else {
@@ -112,7 +112,7 @@ impl Keymap {
     }
 
     pub fn lookup_chord(&self, prefix: &KeyCombo, combo: &KeyCombo) -> Option<Action> {
-        self.chords.get(prefix).and_then(|m| m.get(combo)).copied()
+        self.chords.get(prefix).and_then(|m| m.get(combo)).cloned()
     }
 }
 
@@ -198,6 +198,9 @@ pub const DEFAULT_KEYS_TOML: &str = r#"# led keybindings
 "ctrl+g" = "abort"
 "esc" = "abort"
 "ctrl+z" = "suspend"
+"ctrl+space" = "set_mark"
+"ctrl+w" = "kill_region"
+"ctrl+y" = "yank"
 
 [keys."ctrl+x"]
 "ctrl+c" = "quit"
