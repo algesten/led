@@ -378,15 +378,16 @@ fn restore_session(
 
 fn find_git_root(start: &std::path::Path) -> PathBuf {
     let mut dir = start.to_path_buf();
+    let mut root = None;
     loop {
         if dir.join(".git").exists() {
-            return dir;
+            root = Some(dir.clone());
         }
         if !dir.pop() {
             break;
         }
     }
-    start.to_path_buf()
+    root.unwrap_or_else(|| start.to_path_buf())
 }
 
 fn spawn_config_watcher(
