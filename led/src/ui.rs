@@ -123,17 +123,9 @@ fn render_main_content(shell: &mut Shell, frame: &mut Frame, area: Rect) {
     }
 
     let text_area = chunks[1];
+    shell.viewport_height = text_area.height as usize;
 
-    // Get cursor/scroll info from active component
-    let comp = shell.active_buffer().unwrap();
-    let cursor_row = comp.cursor_position().map_or(0, |(r, _)| r);
-    let current_scroll = comp.scroll_offset();
-    let visible_height = text_area.height as usize;
-    shell.viewport_height = visible_height;
-    let scroll = compute_scroll(current_scroll, cursor_row, visible_height);
-    shell.active_buffer_mut().unwrap().set_scroll_offset(scroll);
-
-    // Draw the active buffer component
+    // Draw the active buffer component (scroll is managed internally by draw)
     {
         let focused = shell.focus == PanelSlot::Main;
         let theme = shell.theme.clone();
@@ -144,25 +136,10 @@ fn render_main_content(shell: &mut Shell, frame: &mut Frame, area: Rect) {
     // Place cursor (only when main panel focused)
     if shell.focus == PanelSlot::Main {
         let comp = shell.active_buffer().unwrap();
-        if let Some((row, col)) = comp.cursor_position() {
-            let cursor_screen_row = row.saturating_sub(scroll) as u16;
-            let cursor_screen_col = col as u16 + GUTTER_WIDTH;
-            frame.set_cursor_position(Position::new(
-                text_area.x + cursor_screen_col,
-                text_area.y + cursor_screen_row,
-            ));
+        if let Some((x, y)) = comp.cursor_screen_pos() {
+            frame.set_cursor_position(Position::new(x, y));
         }
     }
-}
-
-fn compute_scroll(current: usize, cursor_row: usize, height: usize) -> usize {
-    let mut scroll = current;
-    if cursor_row < scroll {
-        scroll = cursor_row;
-    } else if cursor_row >= scroll + height {
-        scroll = cursor_row - height + 1;
-    }
-    scroll
 }
 
 fn render_status_bar(shell: &Shell, frame: &mut Frame, area: Rect) {

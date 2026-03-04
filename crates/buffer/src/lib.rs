@@ -54,6 +54,92 @@ struct PendingGroup {
 const GROUP_TIMEOUT_MS: u128 = 1000;
 
 // ---------------------------------------------------------------------------
+// Soft-wrap helpers
+// ---------------------------------------------------------------------------
+
+/// Expand tabs to 4 spaces, returning display chars and char-index-to-display-column map.
+/// The map has len = num_source_chars + 1 (sentinel at end == display.len()).
+fn expand_tabs(line: &str) -> (Vec<char>, Vec<usize>) {
+    let mut display: Vec<char> = Vec::with_capacity(line.len());
+    let mut char_map = Vec::with_capacity(line.len() + 1);
+    for ch in line.chars() {
+        char_map.push(display.len());
+        if ch == '\t' {
+            display.extend([' ', ' ', ' ', ' ']);
+        } else {
+            display.push(ch);
+        }
+    }
+    char_map.push(display.len());
+    (display, char_map)
+}
+
+/// Collect a slice of chars into a String.
+fn chars_to_string(chars: &[char]) -> String {
+    chars.iter().collect()
+}
+
+/// How many screen rows a line of `display_width` occupies at the given `text_width`.
+fn visual_line_count(display_width: usize, text_width: usize) -> usize {
+    if text_width <= 1 || display_width <= text_width {
+        return 1;
+    }
+    let wrap_width = text_width - 1;
+    let mut count = 0;
+    let mut remaining = display_width;
+    while remaining > text_width {
+        count += 1;
+        remaining -= wrap_width;
+    }
+    count + 1
+}
+
+/// Split a line into (start, end) display-column char ranges per visual line.
+/// Non-last chunks have `wrap_width = text_width - 1` content columns (room for `\`).
+fn compute_chunks(display_width: usize, text_width: usize) -> Vec<(usize, usize)> {
+    if text_width <= 1 || display_width <= text_width {
+        return vec![(0, display_width)];
+    }
+    let wrap_width = text_width - 1;
+    let mut chunks = Vec::new();
+    let mut start = 0;
+    while start < display_width {
+        let remaining = display_width - start;
+        if remaining <= text_width {
+            chunks.push((start, display_width));
+            break;
+        }
+        chunks.push((start, start + wrap_width));
+        start += wrap_width;
+    }
+    chunks
+}
+
+/// Find which sub-line (chunk index) contains display column `dcol`.
+fn find_sub_line(chunks: &[(usize, usize)], dcol: usize) -> usize {
+    for (i, &(_cs, ce)) in chunks.iter().enumerate() {
+        if dcol < ce || i == chunks.len() - 1 {
+            return i;
+        }
+    }
+    0
+}
+
+/// Reverse map from display column to logical char index.
+fn display_col_to_char_idx(char_map: &[usize], target_dcol: usize) -> usize {
+    let num_chars = char_map.len().saturating_sub(1);
+    if num_chars > 0 && target_dcol >= char_map[num_chars] {
+        return num_chars;
+    }
+    for i in (0..num_chars).rev() {
+        if char_map[i] <= target_dcol {
+            return i;
+        }
+    }
+    0
+}
+
+// ---------------------------------------------------------------------------
 // Buffer
 // ---------------------------------------------------------------------------
 
@@ -80,6 +166,8 @@ pub struct Buffer {
     last_seen_seq: i64,
     mark: Option<(usize, usize)>,
     kill_accumulator: Option<String>,
+    cursor_screen_pos: Option<(u16, u16)>,
+    text_width: usize,
 }
 
 impl Buffer {
@@ -107,6 +195,8 @@ impl Buffer {
             last_seen_seq: 0,
             mark: None,
             kill_accumulator: None,
+            cursor_screen_pos: None,
+            text_width: 0,
         }
     }
 
@@ -134,6 +224,8 @@ impl Buffer {
             last_seen_seq: 0,
             mark: None,
             kill_accumulator: None,
+            cursor_screen_pos: None,
+            text_width: 0,
         })
     }
 
@@ -278,16 +370,72 @@ impl Buffer {
 
     pub fn move_up(&mut self) {
         self.break_undo_chain();
-        if self.cursor_row > 0 {
+        let tw = self.text_width;
+        if tw == 0 {
+            if self.cursor_row > 0 {
+                self.cursor_row -= 1;
+                self.clamp_cursor_col();
+            }
+            return;
+        }
+
+        let (display, char_map) = expand_tabs(&self.line(self.cursor_row));
+        let cursor_dcol = char_map
+            .get(self.cursor_col)
+            .copied()
+            .unwrap_or_else(|| char_map.last().copied().unwrap_or(0));
+        let chunks = compute_chunks(display.len(), tw);
+        let sub = find_sub_line(&chunks, cursor_dcol);
+        let visual_col = cursor_dcol - chunks[sub].0;
+
+        if sub > 0 {
+            let (cs, ce) = chunks[sub - 1];
+            let target_dcol = cs + visual_col.min(ce - cs);
+            self.cursor_col = display_col_to_char_idx(&char_map, target_dcol);
+            self.clamp_cursor_col();
+        } else if self.cursor_row > 0 {
             self.cursor_row -= 1;
+            let (prev_display, prev_cm) = expand_tabs(&self.line(self.cursor_row));
+            let prev_chunks = compute_chunks(prev_display.len(), tw);
+            let (cs, ce) = *prev_chunks.last().unwrap();
+            let target_dcol = cs + visual_col.min(ce - cs);
+            self.cursor_col = display_col_to_char_idx(&prev_cm, target_dcol);
             self.clamp_cursor_col();
         }
     }
 
     pub fn move_down(&mut self) {
         self.break_undo_chain();
-        if self.cursor_row + 1 < self.rope.len_lines() {
+        let tw = self.text_width;
+        if tw == 0 {
+            if self.cursor_row + 1 < self.rope.len_lines() {
+                self.cursor_row += 1;
+                self.clamp_cursor_col();
+            }
+            return;
+        }
+
+        let (display, char_map) = expand_tabs(&self.line(self.cursor_row));
+        let cursor_dcol = char_map
+            .get(self.cursor_col)
+            .copied()
+            .unwrap_or_else(|| char_map.last().copied().unwrap_or(0));
+        let chunks = compute_chunks(display.len(), tw);
+        let sub = find_sub_line(&chunks, cursor_dcol);
+        let visual_col = cursor_dcol - chunks[sub].0;
+
+        if sub + 1 < chunks.len() {
+            let (cs, ce) = chunks[sub + 1];
+            let target_dcol = cs + visual_col.min(ce - cs);
+            self.cursor_col = display_col_to_char_idx(&char_map, target_dcol);
+            self.clamp_cursor_col();
+        } else if self.cursor_row + 1 < self.rope.len_lines() {
             self.cursor_row += 1;
+            let (next_display, next_cm) = expand_tabs(&self.line(self.cursor_row));
+            let next_chunks = compute_chunks(next_display.len(), tw);
+            let (cs, ce) = next_chunks[0];
+            let target_dcol = cs + visual_col.min(ce - cs);
+            self.cursor_col = display_col_to_char_idx(&next_cm, target_dcol);
             self.clamp_cursor_col();
         }
     }
@@ -764,6 +912,60 @@ impl Buffer {
         }
     }
 
+    /// Adjust scroll_offset so that the cursor is visible within `height` visual rows.
+    fn adjust_scroll(&mut self, text_width: usize, height: usize) {
+        if height == 0 || text_width == 0 {
+            return;
+        }
+
+        // Cursor above viewport — snap to cursor's logical line
+        if self.cursor_row < self.scroll_offset {
+            self.scroll_offset = self.cursor_row;
+            return;
+        }
+
+        // Compute cursor's sub-line within its logical line
+        let (cursor_display, cursor_cm) = expand_tabs(&self.line(self.cursor_row));
+        let cursor_dc = cursor_cm
+            .get(self.cursor_col)
+            .copied()
+            .unwrap_or_else(|| cursor_cm.last().copied().unwrap_or(0));
+        let cursor_chunks = compute_chunks(cursor_display.len(), text_width);
+        let cursor_sub = find_sub_line(&cursor_chunks, cursor_dc);
+
+        // Check if cursor is visible from current scroll_offset
+        if self.cursor_row - self.scroll_offset < height {
+            let mut vrow = 0;
+            let mut visible = true;
+            for li in self.scroll_offset..self.cursor_row {
+                let dw = expand_tabs(&self.line(li)).0.len();
+                vrow += visual_line_count(dw, text_width);
+                if vrow >= height {
+                    visible = false;
+                    break;
+                }
+            }
+            if visible && vrow + cursor_sub < height {
+                return;
+            }
+        }
+
+        // Cursor not visible — scroll so cursor is near bottom.
+        // Walk backward from cursor_row accumulating visual lines.
+        let mut budget = height.saturating_sub(cursor_sub + 1);
+        let mut new_scroll = self.cursor_row;
+        for li in (0..self.cursor_row).rev() {
+            let dw = expand_tabs(&self.line(li)).0.len();
+            let vl = visual_line_count(dw, text_width);
+            if vl > budget {
+                break;
+            }
+            budget -= vl;
+            new_scroll = li;
+        }
+        self.scroll_offset = new_scroll;
+    }
+
     // --- Undo persistence ---
 
     fn hash_rope(rope: &Rope) -> u64 {
@@ -1057,75 +1259,149 @@ impl Component for Buffer {
 
     fn draw(&mut self, frame: &mut Frame, area: Rect, ctx: &DrawContext) {
         let height = area.height as usize;
+        let gutter_width: usize = 2;
+        let text_width = (area.width as usize).saturating_sub(gutter_width);
+        self.text_width = text_width;
+
+        self.adjust_scroll(text_width, height);
+
         let total_lines = self.line_count();
         let gutter_style = ctx.theme.get("editor.gutter").to_style();
         let text_style = ctx.theme.get("editor.text").to_style();
         let sel_style = ctx.theme.get("editor.selection").to_style();
         let sel_range = self.selection_range();
 
-        let gutter_width: usize = 2;
-        let text_width = (area.width as usize).saturating_sub(gutter_width);
-        let mut display_lines = Vec::with_capacity(height);
+        let mut display_lines: Vec<Line> = Vec::with_capacity(height);
+        let mut cursor_pos: Option<(u16, u16)> = None;
+        let mut screen_row: usize = 0;
+        let mut line_idx = self.scroll_offset;
 
-        for i in 0..height {
-            let line_idx = self.scroll_offset + i;
-            if line_idx < total_lines {
-                let gutter = Span::styled("  ", gutter_style);
-                let raw = self.line(line_idx).replace('\t', "    ");
+        while screen_row < height && line_idx < total_lines {
+            let raw = self.line(line_idx);
+            let (display, char_map) = expand_tabs(&raw);
+            let chunks = compute_chunks(display.len(), text_width);
 
-                if let Some(((sr, sc), (er, ec))) = sel_range {
-                    if line_idx >= sr && line_idx <= er {
-                        let line_len = raw.len();
-                        let sel_start = if line_idx == sr { sc.min(line_len) } else { 0 };
-                        let sel_end = if line_idx == er { ec.min(line_len) } else { line_len };
+            // Selection display-column range for this line
+            let sel_dcols = match sel_range {
+                Some(((sr, sc), (er, ec))) if line_idx >= sr && line_idx <= er => {
+                    let sd = if line_idx == sr {
+                        char_map.get(sc).copied().unwrap_or(display.len())
+                    } else {
+                        0
+                    };
+                    let ed = if line_idx == er {
+                        char_map.get(ec).copied().unwrap_or(display.len())
+                    } else {
+                        display.len()
+                    };
+                    Some((sd, ed))
+                }
+                _ => None,
+            };
 
-                        let mut spans = vec![gutter];
-                        if sel_start > 0 {
-                            spans.push(Span::styled(raw[..sel_start].to_string(), text_style));
+            // Cursor display column
+            let cursor_dcol = if line_idx == self.cursor_row {
+                Some(
+                    char_map
+                        .get(self.cursor_col)
+                        .copied()
+                        .unwrap_or_else(|| char_map.last().copied().unwrap_or(0)),
+                )
+            } else {
+                None
+            };
+
+            for (chunk_i, &(cs, ce)) in chunks.iter().enumerate() {
+                if screen_row >= height {
+                    break;
+                }
+                let is_last = chunk_i == chunks.len() - 1;
+                let chunk_text = &display[cs..ce];
+                let mut spans: Vec<Span> = Vec::new();
+
+                // Gutter
+                spans.push(Span::styled("  ", gutter_style));
+
+                // Content with optional selection highlighting
+                if let Some((ss, se)) = sel_dcols {
+                    let rel_s = ss.clamp(cs, ce) - cs;
+                    let rel_e = se.clamp(cs, ce) - cs;
+
+                    if rel_e > rel_s {
+                        if rel_s > 0 {
+                            spans.push(Span::styled(
+                                chars_to_string(&chunk_text[..rel_s]),
+                                text_style,
+                            ));
                         }
-                        if sel_end > sel_start {
-                            spans.push(Span::styled(raw[sel_start..sel_end].to_string(), sel_style));
+                        spans.push(Span::styled(
+                            chars_to_string(&chunk_text[rel_s..rel_e]),
+                            sel_style,
+                        ));
+                        if rel_e < chunk_text.len() {
+                            spans.push(Span::styled(
+                                chars_to_string(&chunk_text[rel_e..]),
+                                text_style,
+                            ));
                         }
-                        if sel_end < line_len {
-                            spans.push(Span::styled(raw[sel_end..].to_string(), text_style));
-                        }
-                        // If selection boundaries are both at line end, show plain text
-                        if sel_start >= line_len && spans.len() == 1 {
-                            spans.push(Span::styled(raw, text_style));
-                        }
-                        // Pad selection highlight to fill remaining line width
-                        if sel_end >= line_len && line_idx < er {
-                            let used = if sel_start > 0 { line_len } else { line_len };
-                            let pad = text_width.saturating_sub(used);
-                            if pad > 0 {
-                                spans.push(Span::styled(" ".repeat(pad), sel_style));
+                    } else if !chunk_text.is_empty() {
+                        spans.push(Span::styled(chars_to_string(chunk_text), text_style));
+                    }
+
+                    // Pad selection to line edge on last chunk when selection continues
+                    if is_last {
+                        if let Some(((_, _), (er, _))) = sel_range {
+                            if line_idx < er {
+                                let content_len = ce - cs;
+                                let pad = text_width.saturating_sub(content_len);
+                                if pad > 0 {
+                                    spans.push(Span::styled(" ".repeat(pad), sel_style));
+                                }
                             }
                         }
-                        display_lines.push(Line::from(spans));
-                    } else {
-                        display_lines.push(Line::from(vec![
-                            gutter,
-                            Span::styled(raw, text_style),
-                        ]));
                     }
-                } else {
-                    display_lines.push(Line::from(vec![
-                        gutter,
-                        Span::styled(raw, text_style),
-                    ]));
+                } else if !chunk_text.is_empty() {
+                    spans.push(Span::styled(chars_to_string(chunk_text), text_style));
                 }
-            } else {
-                let gutter = Span::styled("~ ", gutter_style);
-                display_lines.push(Line::from(vec![gutter]));
+
+                // Continuation indicator
+                if !is_last {
+                    spans.push(Span::styled("\\", gutter_style));
+                }
+
+                // Track cursor screen position
+                if let Some(dc) = cursor_dcol {
+                    if (dc >= cs && dc < ce) || (is_last && dc >= cs) {
+                        let cx = gutter_width as u16 + (dc - cs) as u16;
+                        cursor_pos = Some((area.x + cx, area.y + screen_row as u16));
+                    }
+                }
+
+                display_lines.push(Line::from(spans));
+                screen_row += 1;
             }
+
+            line_idx += 1;
+        }
+
+        // Fill remaining rows with ~
+        while screen_row < height {
+            display_lines.push(Line::from(vec![Span::styled("~ ", gutter_style)]));
+            screen_row += 1;
         }
 
         let paragraph = Paragraph::new(display_lines).style(text_style);
         frame.render_widget(paragraph, area);
+
+        self.cursor_screen_pos = cursor_pos;
     }
 
     fn cursor_position(&self) -> Option<(usize, usize)> {
         Some((self.cursor_row, self.cursor_col))
+    }
+
+    fn cursor_screen_pos(&self) -> Option<(u16, u16)> {
+        self.cursor_screen_pos
     }
 
     fn scroll_offset(&self) -> usize {

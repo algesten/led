@@ -27,6 +27,7 @@ enum ConfigFile {
 
 enum AppEvent {
     Key(KeyEvent),
+    Resize,
     ConfigChanged(ConfigFile),
     BufferNotification(String),
 }
@@ -150,10 +151,18 @@ fn main() -> io::Result<()> {
     let key_tx = tx.clone();
     std::thread::spawn(move || {
         loop {
-            if let Ok(Event::Key(key)) = event::read() {
-                if key_tx.send(AppEvent::Key(key)).is_err() {
-                    break;
+            match event::read() {
+                Ok(Event::Key(key)) => {
+                    if key_tx.send(AppEvent::Key(key)).is_err() {
+                        break;
+                    }
                 }
+                Ok(Event::Resize(_, _)) => {
+                    if key_tx.send(AppEvent::Resize).is_err() {
+                        break;
+                    }
+                }
+                _ => {}
             }
         }
     });
@@ -259,6 +268,7 @@ fn run(
             Some(AppEvent::BufferNotification(hash)) => {
                 shell.handle_notification(&hash);
             }
+            Some(AppEvent::Resize) => {} // just redraw on next loop iteration
             None => {}
         }
 

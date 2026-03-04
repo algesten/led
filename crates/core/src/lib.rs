@@ -190,6 +190,11 @@ pub trait Component: std::any::Any {
         None
     }
 
+    /// Absolute screen position (x, y) for the cursor — computed during draw().
+    fn cursor_screen_pos(&self) -> Option<(u16, u16)> {
+        None
+    }
+
     /// Scroll offset — used by the shell for scroll computation.
     fn scroll_offset(&self) -> usize {
         0
