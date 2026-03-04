@@ -4,11 +4,26 @@ use std::path::PathBuf;
 
 use ratatui::style::Color;
 
-pub use led_core::{Theme, ElementStyle};
+use led_core::Component;
 
-pub fn default_theme() -> Theme {
-    let doc: toml::Value = toml::from_str(DEFAULT_THEME_TOML)
-        .expect("built-in theme.toml must parse");
+pub use led_core::{BLANK_STYLE, Theme, ElementStyle};
+
+pub fn build_default_theme_toml(components: &[Box<dyn Component>]) -> String {
+    let mut toml = String::from(SHELL_THEME_TOML);
+    let mut seen = std::collections::HashSet::new();
+    for comp in components {
+        let fragment = comp.default_theme_toml();
+        if !fragment.is_empty() && seen.insert(fragment as *const str) {
+            toml.push_str(fragment);
+        }
+    }
+    toml
+}
+
+pub fn default_theme(components: &[Box<dyn Component>]) -> Theme {
+    let toml_str = build_default_theme_toml(components);
+    let doc: toml::Value = toml_str.parse()
+        .expect("built-in theme must parse");
     theme_from_toml(&doc)
 }
 
@@ -240,8 +255,18 @@ fn apply_inline_element(
     }
 }
 
+fn resolve_inline_element(
+    section: &toml::map::Map<String, toml::Value>,
+    key: &str,
+    colors: &HashMap<String, ColorEntry>,
+) -> ElementStyle {
+    let mut style = BLANK_STYLE;
+    apply_inline_element(section, key, colors, &mut style);
+    style
+}
+
 fn theme_from_toml(doc: &toml::Value) -> Theme {
-    let mut theme = Theme::blank();
+    let mut theme = Theme::new();
     let table = match doc.as_table() {
         Some(t) => t,
         None => return theme,
@@ -253,26 +278,18 @@ fn theme_from_toml(doc: &toml::Value) -> Theme {
         .map(|t| parse_colors_section(t))
         .unwrap_or_default();
 
-    if let Some(section) = table.get("editor").and_then(|v| v.as_table()) {
-        apply_inline_element(section, "text", &colors, &mut theme.editor_text);
-        apply_inline_element(section, "gutter", &colors, &mut theme.gutter);
-    }
-
-    if let Some(section) = table.get("tabs").and_then(|v| v.as_table()) {
-        apply_inline_element(section, "active", &colors, &mut theme.tab_active);
-        apply_inline_element(section, "inactive", &colors, &mut theme.tab_inactive);
-    }
-
-    if let Some(section) = table.get("status_bar").and_then(|v| v.as_table()) {
-        apply_inline_element(section, "style", &colors, &mut theme.status_bar);
-    }
-
-    if let Some(section) = table.get("browser").and_then(|v| v.as_table()) {
-        apply_inline_element(section, "directory", &colors, &mut theme.browser_dir);
-        apply_inline_element(section, "file", &colors, &mut theme.browser_file);
-        apply_inline_element(section, "selected", &colors, &mut theme.browser_selected);
-        apply_inline_element(section, "selected_unfocused", &colors, &mut theme.browser_selected_unfocused);
-        apply_inline_element(section, "border", &colors, &mut theme.browser_border);
+    for (section_name, section_value) in table {
+        if section_name == "COLORS" {
+            continue;
+        }
+        let Some(section) = section_value.as_table() else {
+            continue;
+        };
+        for key in section.keys() {
+            let dotted = format!("{section_name}.{key}");
+            let style = resolve_inline_element(section, key, &colors);
+            theme.set(dotted, style);
+        }
     }
 
     theme
@@ -286,7 +303,7 @@ pub fn theme_path() -> Option<PathBuf> {
     dirs::home_dir().map(|d| d.join(".config").join("led").join("theme.toml"))
 }
 
-pub const DEFAULT_THEME_TOML: &str = r##"# led theme
+const SHELL_THEME_TOML: &str = r##"# led theme
 # Colors: ansi_black, ansi_red, ansi_green, ansi_yellow, ansi_blue,
 #   ansi_magenta, ansi_cyan, ansi_white, ansi_bright_black (ansi_gray),
 #   ansi_bright_red, ansi_bright_green, ansi_bright_yellow,
@@ -328,57 +345,48 @@ inverse_inactive = { fg = "term_reset", bg = "$bright_black", bold = true }
 
 ####################################################################
 
-[editor]
-text   = "$normal"
-gutter = "$muted"
-
 [tabs]
 active   = "$inverse_active"
 inactive = "$inverse_inactive"
 
 [status_bar]
 style = "$inverse_active"
-
-[browser]
-directory          = "$accent"
-file               = "$normal"
-selected           = "$inverse_active"
-selected_unfocused = "$inverse_inactive"
-border             = "$muted"
 "##;
 
-pub fn load_theme() -> Theme {
+pub fn load_theme(components: &[Box<dyn Component>]) -> Theme {
     let path = match theme_path() {
         Some(p) => p,
-        None => return default_theme(),
+        None => return default_theme(components),
     };
 
     if !path.exists() {
+        let full_toml = build_default_theme_toml(components);
         if let Some(parent) = path.parent() {
             let _ = fs::create_dir_all(parent);
         }
-        let _ = fs::write(&path, DEFAULT_THEME_TOML);
-        return default_theme();
+        let _ = fs::write(&path, &full_toml);
+        return default_theme(components);
     }
 
     let content = match fs::read_to_string(&path) {
         Ok(c) => c,
-        Err(_) => return default_theme(),
+        Err(_) => return default_theme(components),
     };
 
     match toml::from_str::<toml::Value>(&content) {
         Ok(doc) => theme_from_toml(&doc),
         Err(e) => {
             eprintln!("warning: failed to parse theme.toml: {e}; using defaults");
-            default_theme()
+            default_theme(components)
         }
     }
 }
 
-pub fn reset_theme() {
+pub fn reset_theme(components: &[Box<dyn Component>]) {
     let Some(path) = theme_path() else { return };
+    let full_toml = build_default_theme_toml(components);
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
     }
-    let _ = fs::write(&path, DEFAULT_THEME_TOML);
+    let _ = fs::write(&path, &full_toml);
 }

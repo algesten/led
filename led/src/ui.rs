@@ -92,9 +92,9 @@ fn render_tab_bar(editor: &Editor, frame: &mut Frame, area: Rect) {
         }
 
         let style = if tab_idx == active {
-            theme.tab_active.to_style()
+            theme.get("tabs.active").to_style()
         } else {
-            theme.tab_inactive.to_style()
+            theme.get("tabs.inactive").to_style()
         };
 
         buf.set_string(x, area.y, &label, style);
@@ -117,7 +117,7 @@ fn render_editor_content(editor: &mut Editor, frame: &mut Frame, area: Rect) {
         let flash_width = text.len() as u16;
         if flash_width < tab_area.width {
             let x = tab_area.x + tab_area.width - flash_width;
-            let style = editor.theme.gutter.to_style();
+            let style = editor.theme.get("editor.gutter").to_style();
             frame.buffer_mut().set_string(x, tab_area.y, text, style);
         }
     }
@@ -186,7 +186,7 @@ fn render_status_bar(editor: &Editor, frame: &mut Frame, area: Rect) {
     let padding = (area.width as usize).saturating_sub(left.len() + right.len());
     let bar = format!("{left}{:padding$}{right}", "");
 
-    let style = editor.theme.status_bar.to_style();
+    let style = editor.theme.get("status_bar.style").to_style();
     let paragraph = Paragraph::new(bar).style(style);
     frame.render_widget(paragraph, area);
 }

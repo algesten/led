@@ -48,40 +48,8 @@ struct Cli {
 fn main() -> io::Result<()> {
     let cli = Cli::parse();
 
-    if cli.reset_config {
-        match config::reset_config() {
-            Ok(()) => eprintln!("Config reset to defaults."),
-            Err(e) => eprintln!("Failed to reset config: {e}"),
-        }
-        theme::reset_theme();
-        eprintln!("Theme reset to defaults.");
-        session::reset_db();
-        eprintln!("Session database reset.");
-    }
-
-    let keymap = match config::load_or_create_config() {
-        Ok(km) => km,
-        Err(e) => {
-            eprintln!("warning: failed to load keys.toml: {e}; using defaults");
-            config::default_keymap()
-        }
-    };
-    let the_theme = theme::load_theme();
-
     let arg_path = cli.path.as_ref().map(PathBuf::from);
     let arg_is_dir = arg_path.as_ref().map_or(false, |p: &PathBuf| p.is_dir());
-
-    let initial_buffer = if arg_is_dir {
-        None
-    } else {
-        cli.path.as_ref().map(|path| {
-            Buffer::from_file(path).unwrap_or_else(|_| {
-                let mut buf = Buffer::empty();
-                buf.path = Some(path.into());
-                buf
-            })
-        })
-    };
 
     // Compute root dir
     let root: PathBuf = if arg_is_dir {
@@ -103,18 +71,58 @@ fn main() -> io::Result<()> {
     };
     let root = std::fs::canonicalize(&root).unwrap_or(root);
 
+    // Build component list — the ONLY place concrete types appear
+    let initial_buffer = if arg_is_dir {
+        None
+    } else {
+        cli.path.as_ref().map(|path| {
+            Buffer::from_file(path).unwrap_or_else(|_| {
+                let mut buf = Buffer::empty();
+                buf.path = Some(path.into());
+                buf
+            })
+        })
+    };
+
+    let mut components: Vec<Box<dyn led_core::Component>> = vec![
+        Box::new(BufferFactory),
+        Box::new(FileBrowser::new(root.clone())),
+    ];
+    if let Some(buf) = initial_buffer {
+        components.push(Box::new(buf));
+    }
+
+    if cli.reset_config {
+        match config::reset_config() {
+            Ok(()) => eprintln!("Config reset to defaults."),
+            Err(e) => eprintln!("Failed to reset config: {e}"),
+        }
+        theme::reset_theme(&components);
+        eprintln!("Theme reset to defaults.");
+        session::reset_db();
+        eprintln!("Session database reset.");
+    }
+
+    let keymap = match config::load_or_create_config() {
+        Ok(km) => km,
+        Err(e) => {
+            eprintln!("warning: failed to load keys.toml: {e}; using defaults");
+            config::default_keymap()
+        }
+    };
+    let the_theme = theme::load_theme(&components);
+
     let db = session::open_db();
 
-    let explicit_file = initial_buffer.is_some();
+    let explicit_file = components.len() > 2; // more than BufferFactory + FileBrowser
     let mut editor = Editor::new(keymap, the_theme);
     editor.debug = cli.debug;
 
-    // Register components — the ONLY place concrete types appear
-    editor.register(Box::new(BufferFactory));
-    editor.register(Box::new(FileBrowser::new(root.clone())));
-
-    if let Some(buf) = initial_buffer {
-        editor.register(Box::new(buf));
+    let had_initial_buffer = explicit_file;
+    for comp in components {
+        editor.register(comp);
+    }
+    if had_initial_buffer {
         editor.set_focus(PanelSlot::Main);
     }
 
@@ -215,7 +223,7 @@ fn run(
                         }
                     }
                     ConfigFile::Theme => {
-                        editor.set_theme(theme::load_theme());
+                        editor.set_theme(theme::load_theme(editor.components()));
                         editor.message = Some("Reloaded theme.toml.".into());
                     }
                 }

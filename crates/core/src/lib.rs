@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use ratatui::Frame;
@@ -132,32 +133,20 @@ pub const BLANK_STYLE: ElementStyle = ElementStyle {
 
 #[derive(Clone)]
 pub struct Theme {
-    pub editor_text: ElementStyle,
-    pub gutter: ElementStyle,
-    pub tab_active: ElementStyle,
-    pub tab_inactive: ElementStyle,
-    pub status_bar: ElementStyle,
-    pub browser_dir: ElementStyle,
-    pub browser_file: ElementStyle,
-    pub browser_selected: ElementStyle,
-    pub browser_selected_unfocused: ElementStyle,
-    pub browser_border: ElementStyle,
+    styles: HashMap<String, ElementStyle>,
 }
 
 impl Theme {
-    pub fn blank() -> Self {
-        Self {
-            editor_text: BLANK_STYLE,
-            gutter: BLANK_STYLE,
-            tab_active: BLANK_STYLE,
-            tab_inactive: BLANK_STYLE,
-            status_bar: BLANK_STYLE,
-            browser_dir: BLANK_STYLE,
-            browser_file: BLANK_STYLE,
-            browser_selected: BLANK_STYLE,
-            browser_selected_unfocused: BLANK_STYLE,
-            browser_border: BLANK_STYLE,
-        }
+    pub fn new() -> Self {
+        Self { styles: HashMap::new() }
+    }
+
+    pub fn get(&self, key: &str) -> ElementStyle {
+        self.styles.get(key).cloned().unwrap_or(BLANK_STYLE)
+    }
+
+    pub fn set(&mut self, key: String, style: ElementStyle) {
+        self.styles.insert(key, style);
     }
 }
 
@@ -209,4 +198,9 @@ pub trait Component: std::any::Any {
     }
 
     fn flush(&mut self, _ctx: &mut Context) {}
+
+    /// TOML fragment for this component's default theme styles.
+    fn default_theme_toml(&self) -> &'static str {
+        ""
+    }
 }

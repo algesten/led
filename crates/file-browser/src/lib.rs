@@ -302,7 +302,7 @@ impl Component for FileBrowser {
     fn draw(&mut self, frame: &mut Frame, area: Rect, ctx: &DrawContext) {
         let block = Block::default()
             .borders(Borders::RIGHT)
-            .border_style(ctx.theme.browser_border.to_style());
+            .border_style(ctx.theme.get("browser.border").to_style());
         let inner = block.inner(area);
         frame.render_widget(block, area);
 
@@ -337,14 +337,14 @@ impl Component for FileBrowser {
 
                 let style = if is_selected {
                     if ctx.focused {
-                        ctx.theme.browser_selected.to_style()
+                        ctx.theme.get("browser.selected").to_style()
                     } else {
-                        ctx.theme.browser_selected_unfocused.to_style()
+                        ctx.theme.get("browser.selected_unfocused").to_style()
                     }
                 } else if is_dir {
-                    ctx.theme.browser_dir.to_style()
+                    ctx.theme.get("browser.directory").to_style()
                 } else {
-                    ctx.theme.browser_file.to_style()
+                    ctx.theme.get("browser.file").to_style()
                 };
 
                 let padded = format!("{:<width$}", display, width = max_width);
@@ -364,5 +364,16 @@ impl Component for FileBrowser {
 
     fn restore_session(&mut self, _ctx: &mut Context) {
         // Session persistence handled by shell
+    }
+
+    fn default_theme_toml(&self) -> &'static str {
+        r#"
+[browser]
+directory          = "$accent"
+file               = "$normal"
+selected           = "$inverse_active"
+selected_unfocused = "$inverse_inactive"
+border             = "$muted"
+"#
     }
 }

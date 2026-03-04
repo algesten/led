@@ -748,8 +748,8 @@ impl Component for Buffer {
     fn draw(&mut self, frame: &mut Frame, area: Rect, ctx: &DrawContext) {
         let height = area.height as usize;
         let total_lines = self.line_count();
-        let gutter_style = ctx.theme.gutter.to_style();
-        let text_style = ctx.theme.editor_text.to_style();
+        let gutter_style = ctx.theme.get("editor.gutter").to_style();
+        let text_style = ctx.theme.get("editor.text").to_style();
 
         let mut display_lines = Vec::with_capacity(height);
 
@@ -801,6 +801,7 @@ impl Component for Buffer {
     fn flush(&mut self, _ctx: &mut Context) {
         self.flush_pending();
     }
+
 }
 
 // ---------------------------------------------------------------------------
@@ -842,4 +843,12 @@ impl Component for BufferFactory {
     fn save_session(&self, _ctx: &Context) {}
 
     fn restore_session(&mut self, _ctx: &mut Context) {}
+
+    fn default_theme_toml(&self) -> &'static str {
+        r#"
+[editor]
+text   = "$normal"
+gutter = "$muted"
+"#
+    }
 }
