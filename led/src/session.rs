@@ -43,29 +43,7 @@ fn run_schema(conn: &Connection) -> rusqlite::Result<()> {
             key         TEXT NOT NULL,
             value       TEXT NOT NULL,
             PRIMARY KEY (root_path, key)
-        );
-
-        CREATE TABLE IF NOT EXISTS buffer_undo_state (
-            root_path        TEXT NOT NULL,
-            file_path        TEXT NOT NULL,
-            chain_id         TEXT NOT NULL,
-            content_hash     INTEGER NOT NULL,
-            undo_cursor      INTEGER,
-            distance_from_save INTEGER NOT NULL DEFAULT 0,
-            PRIMARY KEY (root_path, file_path)
-        );
-
-        CREATE TABLE IF NOT EXISTS undo_entries (
-            seq         INTEGER PRIMARY KEY AUTOINCREMENT,
-            root_path   TEXT NOT NULL,
-            file_path   TEXT NOT NULL,
-            entry_data  BLOB NOT NULL,
-            FOREIGN KEY (root_path, file_path)
-                REFERENCES buffer_undo_state(root_path, file_path) ON DELETE CASCADE
-        );
-
-        CREATE INDEX IF NOT EXISTS idx_undo_entries_file
-        ON undo_entries(root_path, file_path, seq);",
+        );",
     )
 }
 

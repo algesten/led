@@ -152,8 +152,10 @@ impl Shell {
             self.single_file_mode = false;
         }
         self.components.push(component);
+        let last = self.components.len() - 1;
+        let ctx = self.env.ctx();
+        self.components[last].ensure_schema(&ctx);
         if has_tab {
-            let last = self.components.len() - 1;
             let mut ctx = self.env.ctx();
             self.components[last].restore_session(&mut ctx);
             self.active_tab = self.tabbed_index_of(last).unwrap_or(0);
