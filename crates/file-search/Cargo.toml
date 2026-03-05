@@ -11,3 +11,4 @@ grep-matcher = "0.1"
 grep-searcher = "0.1"
 ignore = "0.4"
 regex-syntax = "0.8"
+tokio = { workspace = true }

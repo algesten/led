@@ -175,7 +175,7 @@ impl Buffer {
             let pending = pending_syntax.clone();
             let cancel = syntax_cancel.clone();
             let waker = waker.clone();
-            std::thread::spawn(move || {
+            tokio::task::spawn_blocking(move || {
                 if cancel.load(std::sync::atomic::Ordering::Acquire) {
                     return;
                 }

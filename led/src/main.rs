@@ -6,12 +6,14 @@ mod ui;
 
 use std::io;
 use std::path::PathBuf;
-use std::sync::{Arc, mpsc};
+use std::sync::Arc;
 
 use clap::Parser;
-use crossterm::event::{self, Event, KeyEvent};
+use crossterm::event::{Event, EventStream};
+use futures::StreamExt;
 use notify::{EventKind, RecursiveMode, Watcher};
 use ratatui::DefaultTerminal;
+use tokio::sync::mpsc;
 
 use led_buffer::{Buffer, BufferFactory};
 use led_core::PanelSlot;
@@ -27,8 +29,6 @@ enum ConfigFile {
 }
 
 enum AppEvent {
-    Key(KeyEvent),
-    Resize,
     ConfigChanged(ConfigFile),
     Wakeup,
 }
@@ -48,7 +48,8 @@ struct Cli {
     debug: bool,
 }
 
-fn main() -> io::Result<()> {
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> io::Result<()> {
     let cli = Cli::parse();
 
     let arg_path = cli.path.as_ref().map(|p| {
@@ -70,7 +71,7 @@ fn main() -> io::Result<()> {
     let root = find_git_root(&start_dir);
 
     // Build event channel and waker early so buffers can use them
-    let (tx, rx) = mpsc::channel::<AppEvent>();
+    let (tx, rx) = mpsc::unbounded_channel::<AppEvent>();
     let waker_tx = tx.clone();
     let waker: led_core::Waker = Arc::new(move || {
         let _ = waker_tx.send(AppEvent::Wakeup);
@@ -153,33 +154,13 @@ fn main() -> io::Result<()> {
         original_hook(info);
     }));
 
-    // Thread 1: crossterm key events
-    let key_tx = tx.clone();
-    std::thread::spawn(move || {
-        loop {
-            match event::read() {
-                Ok(Event::Key(key)) => {
-                    if key_tx.send(AppEvent::Key(key)).is_err() {
-                        break;
-                    }
-                }
-                Ok(Event::Resize(_, _)) => {
-                    if key_tx.send(AppEvent::Resize).is_err() {
-                        break;
-                    }
-                }
-                _ => {}
-            }
-        }
-    });
-
-    // Thread 2: config file watcher
+    // Config file watcher
     let keys_path = config::config_path();
     let theme_p = theme::theme_path();
     let _watcher = spawn_config_watcher(tx, keys_path.as_deref(), theme_p.as_deref());
 
     let mut terminal = ratatui::init();
-    let result = run(&mut terminal, &mut shell, &rx);
+    let result = run(&mut terminal, &mut shell, rx).await;
     ratatui::restore();
 
     // Save session on exit (skip if we stayed in single-file mode)
@@ -207,11 +188,13 @@ fn main() -> io::Result<()> {
     result
 }
 
-fn run(
+async fn run(
     terminal: &mut DefaultTerminal,
     shell: &mut Shell,
-    rx: &mpsc::Receiver<AppEvent>,
+    mut rx: mpsc::UnboundedReceiver<AppEvent>,
 ) -> io::Result<()> {
+    let mut event_stream = EventStream::new();
+
     loop {
         terminal.draw(|frame| ui::render(shell, frame))?;
 
@@ -222,21 +205,53 @@ fn run(
             (None, None) => None,
         };
 
-        let event = if let Some(timeout) = timeout {
-            match rx.recv_timeout(timeout) {
-                Ok(ev) => Some(ev),
-                Err(mpsc::RecvTimeoutError::Timeout) => None,
-                Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(()),
+        enum Received {
+            CrosstermEvent(Event),
+            AppEvent(AppEvent),
+            Timeout,
+        }
+
+        let received = if let Some(timeout) = timeout {
+            tokio::select! {
+                biased;
+                ev = event_stream.next() => {
+                    match ev {
+                        Some(Ok(event)) => Received::CrosstermEvent(event),
+                        Some(Err(_)) => return Ok(()),
+                        None => return Ok(()),
+                    }
+                }
+                ev = rx.recv() => {
+                    match ev {
+                        Some(event) => Received::AppEvent(event),
+                        None => return Ok(()),
+                    }
+                }
+                _ = tokio::time::sleep(timeout) => {
+                    Received::Timeout
+                }
             }
         } else {
-            match rx.recv() {
-                Ok(ev) => Some(ev),
-                Err(_) => return Ok(()),
+            tokio::select! {
+                biased;
+                ev = event_stream.next() => {
+                    match ev {
+                        Some(Ok(event)) => Received::CrosstermEvent(event),
+                        Some(Err(_)) => return Ok(()),
+                        None => return Ok(()),
+                    }
+                }
+                ev = rx.recv() => {
+                    match ev {
+                        Some(event) => Received::AppEvent(event),
+                        None => return Ok(()),
+                    }
+                }
             }
         };
 
-        match event {
-            Some(AppEvent::Key(key)) => {
+        match received {
+            Received::CrosstermEvent(Event::Key(key)) => {
                 match shell.handle_key_event(key) {
                     InputResult::Continue => {}
                     InputResult::Quit => return Ok(()),
@@ -263,7 +278,9 @@ fn run(
                     }
                 }
             }
-            Some(AppEvent::ConfigChanged(file)) => match file {
+            Received::CrosstermEvent(Event::Resize(_, _)) => {} // redraw on next iteration
+            Received::CrosstermEvent(_) => {}
+            Received::AppEvent(AppEvent::ConfigChanged(file)) => match file {
                 ConfigFile::Keys => {
                     if let Some(km) = config::reload_keymap() {
                         shell.set_keymap(km);
@@ -275,11 +292,10 @@ fn run(
                     shell.message = Some("Reloaded theme.toml.".into());
                 }
             },
-            Some(AppEvent::Wakeup) => {
+            Received::AppEvent(AppEvent::Wakeup) => {
                 shell.tick();
             }
-            Some(AppEvent::Resize) => {} // just redraw on next loop iteration
-            None => {}
+            Received::Timeout => {}
         }
 
         if shell.needs_persist() {
@@ -329,7 +345,7 @@ fn find_git_root(start: &std::path::Path) -> PathBuf {
 }
 
 fn spawn_config_watcher(
-    tx: mpsc::Sender<AppEvent>,
+    tx: mpsc::UnboundedSender<AppEvent>,
     keys_path: Option<&std::path::Path>,
     theme_path: Option<&std::path::Path>,
 ) -> Option<notify::RecommendedWatcher> {

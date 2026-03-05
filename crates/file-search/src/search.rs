@@ -1,4 +1,4 @@
-use std::sync::mpsc;
+use tokio::sync::mpsc;
 
 use grep_matcher::Matcher;
 use grep_regex::RegexMatcherBuilder;
@@ -9,19 +9,21 @@ use led_core::Waker;
 
 use crate::types::{FileGroup, SearchHit, SearchRequest};
 
-pub(crate) fn search_worker(
-    rx: mpsc::Receiver<SearchRequest>,
-    tx: mpsc::Sender<Vec<FileGroup>>,
+pub(crate) async fn search_worker(
+    mut rx: mpsc::UnboundedReceiver<SearchRequest>,
+    tx: mpsc::UnboundedSender<Vec<FileGroup>>,
     waker: Option<Waker>,
 ) {
-    while let Ok(req) = rx.recv() {
+    while let Some(req) = rx.recv().await {
         // Drain any queued requests, only process the latest
         let mut latest = req;
         while let Ok(newer) = rx.try_recv() {
             latest = newer;
         }
 
-        let results = run_search(&latest);
+        let results = tokio::task::spawn_blocking(move || run_search(&latest))
+            .await
+            .unwrap_or_default();
         let _ = tx.send(results);
         if let Some(ref w) = waker {
             w();

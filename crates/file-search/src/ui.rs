@@ -1,6 +1,6 @@
 use std::path::PathBuf;
-use std::sync::mpsc;
-use std::thread;
+
+use tokio::sync::mpsc;
 
 use led_core::{
     Action, Component, Context, DrawContext, Effect, Event, PanelClaim, PanelSlot, Waker,
@@ -25,8 +25,8 @@ pub struct FileSearch {
     selected: usize,
     scroll_offset: usize,
     root: PathBuf,
-    search_tx: mpsc::Sender<SearchRequest>,
-    result_rx: mpsc::Receiver<Vec<FileGroup>>,
+    search_tx: mpsc::UnboundedSender<SearchRequest>,
+    result_rx: mpsc::UnboundedReceiver<Vec<FileGroup>>,
     #[allow(dead_code)]
     waker: Option<Waker>,
     cursor_screen_pos: Option<(u16, u16)>,
@@ -36,11 +36,11 @@ pub struct FileSearch {
 
 impl FileSearch {
     pub fn new(root: PathBuf, waker: Option<Waker>) -> Self {
-        let (search_tx, search_rx) = mpsc::channel::<SearchRequest>();
-        let (result_tx, result_rx) = mpsc::channel::<Vec<FileGroup>>();
+        let (search_tx, search_rx) = mpsc::unbounded_channel::<SearchRequest>();
+        let (result_tx, result_rx) = mpsc::unbounded_channel::<Vec<FileGroup>>();
 
         let waker_clone = waker.clone();
-        thread::spawn(move || search_worker(search_rx, result_tx, waker_clone));
+        tokio::task::spawn(search_worker(search_rx, result_tx, waker_clone));
 
         Self {
             active: false,

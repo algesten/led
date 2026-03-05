@@ -19,3 +19,5 @@ notify = { workspace = true }
 rmp-serde = { workspace = true }
 libc = { workspace = true }
 arboard = { version = "3", default-features = false }
+tokio = { workspace = true }
+futures = { workspace = true }
