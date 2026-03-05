@@ -280,7 +280,7 @@ theme_bright     = "$x216"
 theme_bright_i   = { fg = "$x232", bg = "$x216" }
 theme_bold       = "$x223"
 theme_bold_i     = { fg = "$x232", bg = "$x223" }
-theme_selected   = { fg = "term_reset", bg = "$x234" }
+theme_selected   = { fg = "term_reset", bg = "$x053" }
 theme_inactive   = { fg = "$x216", bg = "$x238"  }
 
 # Semantic aliases
@@ -292,8 +292,64 @@ inverse_active   = "$theme_bright_i"
 inverse_inactive = "$theme_inactive"
 selected         = "$theme_selected"
 
+# Syntax
+
+syntax_keyword   = "$x032"
+syntax_type      = "$x030"
+syntax_string    = "$x034"
+syntax_number    = "$magenta"
+syntax_comment   = "$x237"
+syntax_attribute = "$x098"
+syntax_tag       = "$x160"
+syntax_label     = "$x172"
 
 ####################################################################
+
+[syntax]
+keyword          = "$syntax_keyword"
+function         = "$syntax_keyword"
+module           = "$syntax_keyword"
+conditional      = "$syntax_keyword"
+include          = "$syntax_keyword"
+repeat           = "$syntax_keyword"
+exception        = "$syntax_keyword"
+
+type             = "$syntax_type"
+"type.builtin"   = "$syntax_type"
+constructor      = "$syntax_type"
+
+string           = "$syntax_string"
+"string.regex"   = "$syntax_string"
+"text.literal"   = "$syntax_string"
+
+number           = "$syntax_number"
+boolean          = "$syntax_number"
+constant         = "$syntax_number"
+"constant.builtin" = "$syntax_number"
+escape           = "$syntax_number"
+"string.special" = "$syntax_number"
+
+comment          = "$syntax_comment"
+
+operator         = "$normal"
+punctuation      = "$normal"
+variable         = "$normal"
+
+"variable.builtin" = "$syntax_attribute"
+"variable.parameter" = "$syntax_attribute"
+"variable.member" = "$syntax_attribute"
+property         = "$syntax_attribute"
+attribute        = "$syntax_attribute"
+"text.reference" = "$syntax_attribute"
+
+tag              = "$syntax_tag"
+
+label            = "$syntax_label"
+embedded         = "$syntax_label"
+"text.title"     = { fg = "$syntax_label", bold = true }
+"text.strong"    = { fg = "$bright_white", bold = true }
+"text.emphasis"  = "$bright_white"
+"text.uri"       = "$syntax_keyword"
 
 [tabs]
 active           = "$inverse_active"
@@ -308,25 +364,6 @@ style = { fg = "$bold", bg = "$muted" }
 text      = "$normal"
 gutter    = "$muted"
 selection = "$selected"
-
-[syntax]
-keyword          = { fg = "$blue", bold = true }
-function         = "$bright_blue"
-type             = "$yellow"
-"type.builtin"   = "$yellow"
-string           = "$green"
-number           = "$magenta"
-"constant.builtin" = "$magenta"
-comment          = "$bright_black"
-operator         = "$normal"
-punctuation      = "$normal"
-"variable.builtin" = "$bright_cyan"
-property         = "$cyan"
-attribute        = "$cyan"
-escape           = "$bright_magenta"
-constructor      = "$yellow"
-module           = "$bright_blue"
-tag              = "$red"
 
 [search]
 border             = "$muted"

@@ -79,6 +79,20 @@ fn lang_for_ext(ext: &str) -> Option<LangEntry> {
             language: tree_sitter_cpp::LANGUAGE.into(),
             highlights_query: tree_sitter_cpp::HIGHLIGHT_QUERY,
         }),
+        "mk" => Some(LangEntry {
+            language: tree_sitter_make::LANGUAGE.into(),
+            highlights_query: tree_sitter_make::HIGHLIGHTS_QUERY,
+        }),
+        _ => None,
+    }
+}
+
+fn lang_for_filename(name: &str) -> Option<LangEntry> {
+    match name {
+        "Makefile" | "makefile" | "GNUmakefile" => Some(LangEntry {
+            language: tree_sitter_make::LANGUAGE.into(),
+            highlights_query: tree_sitter_make::HIGHLIGHTS_QUERY,
+        }),
         _ => None,
     }
 }
@@ -141,8 +155,15 @@ pub(crate) struct SyntaxState {
 
 impl SyntaxState {
     pub(crate) fn from_path_and_rope(path: &Path, rope: &Rope) -> Option<Self> {
-        let ext = path.extension()?.to_str()?;
-        let entry = lang_for_ext(ext)?;
+        let entry = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .and_then(lang_for_ext)
+            .or_else(|| {
+                path.file_name()
+                    .and_then(|n| n.to_str())
+                    .and_then(lang_for_filename)
+            })?;
 
         let mut parser = Parser::new();
         parser.set_language(&entry.language).ok()?;
