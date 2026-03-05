@@ -239,6 +239,7 @@ impl Buffer {
         let Ok(file) = File::open(path) else { return };
         let Ok(rope) = Rope::from_reader(BufReader::new(file)) else { return };
         self.rope = rope;
+        self.syntax = crate::syntax::SyntaxState::from_path_and_rope(path, &self.rope);
         self.base_content_hash = Self::hash_rope(&self.rope);
         self.undo_history.clear();
         self.undo_cursor = None;
@@ -251,36 +252,36 @@ impl Buffer {
 
     pub fn save(&mut self, ctx: &Context) -> io::Result<()> {
         self.flush_pending();
-        if let Some(ref path) = self.path {
-            let len = self.rope.len_chars();
-            if len == 0 || self.rope.char(len - 1) != '\n' {
-                self.rope.insert_char(len, '\n');
-            }
-            let file = File::create(path)?;
-            self.rope.write_to(BufWriter::new(file))?;
-            self.dirty = false;
-            self.distance_from_save = 0;
-            self.save_history_len = self.undo_history.len();
-            self.persisted_undo_len = self.save_history_len;
-            self.base_content_hash = self.content_hash();
-            self.chain_id = None;
-            self.last_seen_seq = 0;
-            self.disk_modified = false;
-            self.disk_deleted = false;
-
-            if let Some(conn) = ctx.db {
-                let root_str = ctx.root.to_string_lossy();
-                let file_str = path.to_string_lossy();
-                let _ = conn.execute(
-                    "DELETE FROM buffer_undo_state WHERE root_path = ?1 AND file_path = ?2",
-                    rusqlite::params![&*root_str, &*file_str],
-                );
-            }
-            self.touch_notify();
-
-            Ok(())
-        } else {
-            Err(io::Error::new(io::ErrorKind::Other, "No file path set"))
+        let Some(path) = self.path.clone() else {
+            return Err(io::Error::new(io::ErrorKind::Other, "No file path set"));
+        };
+        let len = self.rope.len_chars();
+        if len == 0 || self.rope.char(len - 1) != '\n' {
+            self.rope.insert_char(len, '\n');
+            self.reparse_syntax();
         }
+        let file = File::create(&path)?;
+        self.rope.write_to(BufWriter::new(file))?;
+        self.dirty = false;
+        self.distance_from_save = 0;
+        self.save_history_len = self.undo_history.len();
+        self.persisted_undo_len = self.save_history_len;
+        self.base_content_hash = self.content_hash();
+        self.chain_id = None;
+        self.last_seen_seq = 0;
+        self.disk_modified = false;
+        self.disk_deleted = false;
+
+        if let Some(conn) = ctx.db {
+            let root_str = ctx.root.to_string_lossy();
+            let file_str = path.to_string_lossy();
+            let _ = conn.execute(
+                "DELETE FROM buffer_undo_state WHERE root_path = ?1 AND file_path = ?2",
+                rusqlite::params![&*root_str, &*file_str],
+            );
+        }
+        self.touch_notify();
+
+        Ok(())
     }
 }

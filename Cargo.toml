@@ -18,3 +18,10 @@ led_buffer = { path = "crates/buffer" }
 libc = "0.2"
 led_file_browser = { path = "crates/file-browser" }
 led_file_search = { path = "crates/file-search" }
+tree-sitter = "0.25"
+tree-sitter-rust = "0.23"
+tree-sitter-toml-ng = "0.7"
+tree-sitter-json = "0.24"
+tree-sitter-javascript = "0.23"
+tree-sitter-typescript = "0.23"
+tree-sitter-md = "0.5"

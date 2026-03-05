@@ -1,20 +1,39 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use led_core::{
-    Action, Component, Context, DrawContext, Effect, ElementStyle, Event, PanelClaim, PanelSlot,
-    TabDescriptor,
+    Action, BLANK_STYLE, Component, Context, DrawContext, Effect, ElementStyle, Event, PanelClaim,
+    PanelSlot, TabDescriptor, Theme,
 };
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::Color;
+use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
 use crate::color_hint::{evaluate_theme_line, parse_color_defs, scan_hex_color};
+use crate::syntax::HighlightSpan;
 use crate::wrap::{
     chars_to_string, compute_chunks, expand_tabs, find_sub_line, visual_line_count,
 };
 use crate::{Buffer, UndoEntry};
+
+fn resolve_capture_style(theme: &Theme, capture_name: &str, text_style: Style) -> Style {
+    let blank = BLANK_STYLE.to_style();
+    let key = format!("syntax.{capture_name}");
+    let s = theme.get(&key).to_style();
+    if s != blank {
+        return s;
+    }
+    if let Some(dot) = capture_name.find('.') {
+        let parent_key = format!("syntax.{}", &capture_name[..dot]);
+        let s = theme.get(&parent_key).to_style();
+        if s != blank {
+            return s;
+        }
+    }
+    text_style
+}
 
 impl Buffer {
     /// Adjust scroll so the cursor is visible within `height` visual rows.
@@ -375,6 +394,18 @@ impl Component for Buffer {
         let sel_style = ctx.theme.get("editor.selection").to_style();
         let sel_range = self.selection_range();
 
+        // Pre-compute syntax highlights for visible lines
+        let end_line = (self.scroll_offset + height).min(total_lines);
+        let raw_highlights = if let Some(ref syntax) = self.syntax {
+            syntax.highlights_for_lines(&self.rope, self.scroll_offset, end_line)
+        } else {
+            Vec::new()
+        };
+        let mut hl_map: HashMap<usize, Vec<&HighlightSpan>> = HashMap::new();
+        for (line, span) in &raw_highlights {
+            hl_map.entry(*line).or_default().push(span);
+        }
+
         let is_theme = self.path.as_ref()
             .and_then(|p| p.file_name())
             .map_or(false, |n| n == "theme.toml");
@@ -493,33 +524,48 @@ impl Component for Buffer {
                     spans.push(Span::styled("  ", gutter_style));
                 }
 
-                // Content with optional selection highlighting
-                if let Some((ss, se)) = sel_dcols {
-                    let rel_s = ss.clamp(cs, ce) - cs;
-                    let rel_e = se.clamp(cs, ce) - cs;
+                // Content with syntax highlighting + selection overlay
+                if !chunk_text.is_empty() {
+                    let chunk_len = ce - cs;
+                    let mut col_styles = vec![text_style; chunk_len];
 
-                    if rel_e > rel_s {
-                        if rel_s > 0 {
-                            spans.push(Span::styled(
-                                chars_to_string(&chunk_text[..rel_s]),
-                                text_style,
-                            ));
+                    // Apply syntax highlighting
+                    if let Some(line_hl) = hl_map.get(&line_idx) {
+                        for hs in line_hl {
+                            let ds = char_map.get(hs.char_start).copied().unwrap_or(display.len());
+                            let de = char_map.get(hs.char_end).copied().unwrap_or(display.len());
+                            let style = resolve_capture_style(ctx.theme, hs.capture_name, text_style);
+                            for i in ds.max(cs)..de.min(ce) {
+                                col_styles[i - cs] = style;
+                            }
                         }
-                        spans.push(Span::styled(
-                            chars_to_string(&chunk_text[rel_s..rel_e]),
-                            sel_style,
-                        ));
-                        if rel_e < chunk_text.len() {
-                            spans.push(Span::styled(
-                                chars_to_string(&chunk_text[rel_e..]),
-                                text_style,
-                            ));
-                        }
-                    } else if !chunk_text.is_empty() {
-                        spans.push(Span::styled(chars_to_string(chunk_text), text_style));
                     }
 
-                    // Pad selection to line edge on last chunk when selection continues
+                    // Apply selection overlay
+                    if let Some((ss, se)) = sel_dcols {
+                        for i in ss.max(cs)..se.min(ce) {
+                            col_styles[i - cs] = sel_style;
+                        }
+                    }
+
+                    // Group consecutive same-style columns into spans
+                    let mut pos = 0;
+                    while pos < chunk_len {
+                        let style = col_styles[pos];
+                        let mut end = pos + 1;
+                        while end < chunk_len && col_styles[end] == style {
+                            end += 1;
+                        }
+                        spans.push(Span::styled(
+                            chars_to_string(&chunk_text[pos..end]),
+                            style,
+                        ));
+                        pos = end;
+                    }
+                }
+
+                // Pad selection to line edge on last chunk when selection continues
+                if let Some((_, _)) = sel_dcols {
                     if is_last {
                         if let Some(((_, _), (er, _))) = sel_range {
                             if line_idx < er {
@@ -531,8 +577,6 @@ impl Component for Buffer {
                             }
                         }
                     }
-                } else if !chunk_text.is_empty() {
-                    spans.push(Span::styled(chars_to_string(chunk_text), text_style));
                 }
 
                 // Continuation indicator

@@ -309,6 +309,25 @@ text      = "$normal"
 gutter    = "$muted"
 selection = "$selected"
 
+[syntax]
+keyword          = { fg = "$blue", bold = true }
+function         = "$bright_blue"
+type             = "$yellow"
+"type.builtin"   = "$yellow"
+string           = "$green"
+number           = "$magenta"
+"constant.builtin" = "$magenta"
+comment          = "$bright_black"
+operator         = "$normal"
+punctuation      = "$normal"
+"variable.builtin" = "$bright_cyan"
+property         = "$cyan"
+attribute        = "$cyan"
+escape           = "$bright_magenta"
+constructor      = "$yellow"
+module           = "$bright_blue"
+tag              = "$red"
+
 [search]
 border             = "$muted"
 input              = { bg = "$bright_black" }

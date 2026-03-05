@@ -138,6 +138,7 @@ impl Buffer {
         let cursor_before = (self.cursor_row, self.cursor_col);
         let idx = self.char_idx(self.cursor_row, self.cursor_col);
         self.rope.insert_char(idx, ch);
+        self.reparse_syntax();
         if ch == '\n' {
             self.cursor_row += 1;
             self.cursor_col = 0;
@@ -181,6 +182,7 @@ impl Buffer {
             let idx = self.char_idx(self.cursor_row, self.cursor_col);
             let removed = self.rope.char(idx - 1);
             self.rope.remove(idx - 1..idx);
+            self.reparse_syntax();
             self.cursor_col -= 1;
             self.dirty = true;
             let cursor_after = (self.cursor_row, self.cursor_col);
@@ -210,6 +212,7 @@ impl Buffer {
             let idx = self.char_idx(self.cursor_row, 0);
             let new_col = self.line_len(self.cursor_row - 1);
             self.rope.remove(idx - 1..idx);
+            self.reparse_syntax();
             self.cursor_row -= 1;
             self.cursor_col = new_col;
             self.dirty = true;
@@ -234,6 +237,7 @@ impl Buffer {
             let idx = self.char_idx(self.cursor_row, self.cursor_col);
             let removed = self.rope.char(idx);
             self.rope.remove(idx..idx + 1);
+            self.reparse_syntax();
             self.dirty = true;
             let cursor_after = (self.cursor_row, self.cursor_col);
             self.record_edit(
@@ -248,6 +252,7 @@ impl Buffer {
         } else if self.cursor_row + 1 < self.rope.len_lines() {
             let idx = self.char_idx(self.cursor_row, self.cursor_col);
             self.rope.remove(idx..idx + 1);
+            self.reparse_syntax();
             self.dirty = true;
             let cursor_after = (self.cursor_row, self.cursor_col);
             self.flush_pending();
@@ -272,6 +277,7 @@ impl Buffer {
             let end = self.char_idx(self.cursor_row, len);
             let text: String = self.rope.slice(start..end).to_string();
             self.rope.remove(start..end);
+            self.reparse_syntax();
             self.dirty = true;
             let cursor_after = (self.cursor_row, self.cursor_col);
             self.flush_pending();
@@ -288,6 +294,7 @@ impl Buffer {
         } else if self.cursor_row + 1 < self.rope.len_lines() {
             let idx = self.char_idx(self.cursor_row, col);
             self.rope.remove(idx..idx + 1);
+            self.reparse_syntax();
             self.dirty = true;
             let cursor_after = (self.cursor_row, self.cursor_col);
             self.flush_pending();
@@ -358,6 +365,7 @@ impl Buffer {
         let text: String = self.rope.slice(start_idx..end_idx).to_string();
         let cursor_before = (self.cursor_row, self.cursor_col);
         self.rope.remove(start_idx..end_idx);
+        self.reparse_syntax();
         self.cursor_row = sr;
         self.cursor_col = sc;
         self.dirty = true;
@@ -383,6 +391,7 @@ impl Buffer {
         let cursor_before = (self.cursor_row, self.cursor_col);
         let idx = self.char_idx(self.cursor_row, self.cursor_col);
         self.rope.insert(idx, text);
+        self.reparse_syntax();
         // Advance cursor past inserted text
         let inserted_chars: usize = text.chars().count();
         let newlines: usize = text.chars().filter(|&c| c == '\n').count();

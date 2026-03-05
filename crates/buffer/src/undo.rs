@@ -21,6 +21,7 @@ impl Buffer {
         let inverse = self.invert_entry(&entry);
 
         self.apply_op(&inverse.op);
+        self.reparse_syntax();
         self.cursor_row = inverse.cursor_after.0;
         self.cursor_col = inverse.cursor_after.1;
         self.distance_from_save -= entry.direction;
@@ -244,6 +245,7 @@ impl Buffer {
             self.apply_op(&entry.op);
             self.distance_from_save += entry.direction;
         }
+        self.reparse_syntax();
         self.undo_history.extend(entries);
         self.persisted_undo_len = self.undo_history.len();
         self.last_seen_seq = new_last_seen_seq;
@@ -263,6 +265,7 @@ impl Buffer {
         for entry in &entries {
             self.apply_op(&entry.op);
         }
+        self.reparse_syntax();
         self.undo_history = entries;
         self.undo_cursor = undo_cursor;
         self.distance_from_save = distance_from_save;

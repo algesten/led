@@ -4,6 +4,7 @@ mod undo;
 mod watcher;
 mod component;
 mod color_hint;
+pub(crate) mod syntax;
 
 pub use component::BufferFactory;
 
@@ -94,6 +95,7 @@ pub struct Buffer {
     pub(crate) disk_modified: bool,
     pub(crate) disk_deleted: bool,
     pub preview: bool,
+    pub(crate) syntax: Option<syntax::SyntaxState>,
 }
 
 impl Buffer {
@@ -130,6 +132,7 @@ impl Buffer {
             disk_modified: false,
             disk_deleted: false,
             preview: false,
+            syntax: None,
         }
     }
 
@@ -153,6 +156,7 @@ impl Buffer {
         let base_content_hash = Self::hash_rope(&rope);
         let changed = Arc::new(AtomicBool::new(false));
         let _watcher = Self::create_watcher(&canonical, &changed, waker.as_ref());
+        let syntax = syntax::SyntaxState::from_path_and_rope(&canonical, &rope);
         Ok(Self {
             rope,
             cursor_row: 0,
@@ -181,6 +185,7 @@ impl Buffer {
             disk_modified: false,
             disk_deleted: false,
             preview: false,
+            syntax,
         })
     }
 
@@ -225,6 +230,14 @@ impl Buffer {
 
     pub(crate) fn char_idx(&self, row: usize, col: usize) -> usize {
         self.rope.line_to_char(row) + col
+    }
+
+    // --- Syntax ---
+
+    pub(crate) fn reparse_syntax(&mut self) {
+        if let Some(ref mut s) = self.syntax {
+            s.reparse_full(&self.rope);
+        }
     }
 
     // --- Helpers ---

@@ -13,3 +13,10 @@ twox-hash = { workspace = true }
 rusqlite = { workspace = true }
 notify = { workspace = true }
 dirs = { workspace = true }
+tree-sitter = { workspace = true }
+tree-sitter-rust = { workspace = true }
+tree-sitter-toml-ng = { workspace = true }
+tree-sitter-json = { workspace = true }
+tree-sitter-javascript = { workspace = true }
+tree-sitter-typescript = { workspace = true }
+tree-sitter-md = { workspace = true }
