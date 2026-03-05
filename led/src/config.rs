@@ -188,7 +188,8 @@ pub const DEFAULT_KEYS_TOML: &str = r#"# led keybindings
 "backspace" = "delete_backward"
 "delete" = "delete_forward"
 "tab" = "insert_tab"
-"ctrl+f" = "toggle_focus"
+"ctrl+f" = "open_file_search"
+"ctrl+v" = "toggle_focus"
 "ctrl+b" = "toggle_side_panel"
 "ctrl+left" = "prev_tab"
 "ctrl+right" = "next_tab"
@@ -212,6 +213,12 @@ pub const DEFAULT_KEYS_TOML: &str = r#"# led keybindings
 "right" = "expand_dir"
 "enter" = "open_selected"
 "alt+enter" = "open_selected_bg"
+
+[file_search]
+"alt+1" = "toggle_search_case"
+"alt+2" = "toggle_search_regex"
+"esc" = "close_file_search"
+"enter" = "open_selected"
 "#;
 
 // ---------------------------------------------------------------------------

@@ -40,6 +40,15 @@ pub fn render(shell: &mut Shell, frame: &mut Frame) {
             }
         }
 
+        // Place cursor for side panel when focused
+        if shell.focus == PanelSlot::Side {
+            if let Some(comp) = shell.side_component() {
+                if let Some((x, y)) = comp.cursor_screen_pos() {
+                    frame.set_cursor_position(Position::new(x, y));
+                }
+            }
+        }
+
         render_main_content(shell, frame, main_area_inner);
     } else {
         render_main_content(shell, frame, main_area);

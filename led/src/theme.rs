@@ -374,13 +374,56 @@ pub fn load_theme(components: &[Box<dyn Component>]) -> Theme {
         Err(_) => return default_theme(components),
     };
 
-    match toml::from_str::<toml::Value>(&content) {
-        Ok(doc) => theme_from_toml(&doc),
+    let mut doc: toml::Value = match toml::from_str(&content) {
+        Ok(d) => d,
         Err(e) => {
             eprintln!("warning: failed to parse theme.toml: {e}; using defaults");
-            default_theme(components)
+            return default_theme(components);
+        }
+    };
+
+    // Backfill missing sections/keys from defaults
+    let defaults_toml = build_default_theme_toml(components);
+    if let Ok(defaults) = toml::from_str::<toml::Value>(&defaults_toml) {
+        if backfill_missing(&mut doc, &defaults) {
+            // Re-serialize and write back
+            if let Ok(updated) = toml::to_string_pretty(&doc) {
+                let _ = fs::write(&path, &updated);
+            }
         }
     }
+
+    theme_from_toml(&doc)
+}
+
+/// Merge missing sections and keys from `defaults` into `doc`.
+/// Returns true if anything was added.
+fn backfill_missing(doc: &mut toml::Value, defaults: &toml::Value) -> bool {
+    let (Some(doc_table), Some(def_table)) = (doc.as_table_mut(), defaults.as_table()) else {
+        return false;
+    };
+    let mut changed = false;
+    for (section, def_value) in def_table {
+        match doc_table.get_mut(section) {
+            None => {
+                doc_table.insert(section.clone(), def_value.clone());
+                changed = true;
+            }
+            Some(existing) => {
+                if let (Some(existing_tbl), Some(def_tbl)) =
+                    (existing.as_table_mut(), def_value.as_table())
+                {
+                    for (key, val) in def_tbl {
+                        if !existing_tbl.contains_key(key) {
+                            existing_tbl.insert(key.clone(), val.clone());
+                            changed = true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    changed
 }
 
 pub fn reset_theme(components: &[Box<dyn Component>]) {

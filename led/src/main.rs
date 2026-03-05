@@ -16,6 +16,7 @@ use ratatui::DefaultTerminal;
 use led_core::PanelSlot;
 use led_buffer::{Buffer, BufferFactory};
 use led_file_browser::FileBrowser;
+use led_file_search::FileSearch;
 use shell::{Shell, InputResult};
 use session::{BufferState, SessionData};
 
@@ -96,6 +97,7 @@ fn main() -> io::Result<()> {
 
     let mut components: Vec<Box<dyn led_core::Component>> = vec![
         Box::new(BufferFactory),
+        Box::new(FileSearch::new(root.clone(), Some(waker.clone()))),
         Box::new(FileBrowser::new(root.clone())),
     ];
     if let Some(buf) = initial_buffer {
@@ -143,6 +145,11 @@ fn main() -> io::Result<()> {
         if let Some(session) = shell.db().and_then(|conn| session::load_session(conn, &root)) {
             restore_session(&mut shell, session);
         }
+    }
+
+    // Safety: if there are no tabs, ensure focus is on the side panel
+    if !shell.has_tabs() {
+        shell.set_focus(PanelSlot::Side);
     }
 
     // Install panic hook

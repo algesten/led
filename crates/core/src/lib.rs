@@ -52,6 +52,10 @@ pub enum Action {
     SetMark,
     KillRegion,
     Yank,
+    OpenFileSearch,
+    CloseFileSearch,
+    ToggleSearchCase,
+    ToggleSearchRegex,
 }
 
 // ---------------------------------------------------------------------------
@@ -85,6 +89,8 @@ pub enum Event {
     OpenFile(PathBuf),
     TabActivated { path: Option<PathBuf> },
     Resume,
+    FileSearchOpened { selected_text: Option<String> },
+    GoToPosition { path: PathBuf, row: usize, col: usize },
 }
 
 pub enum Effect {
@@ -229,6 +235,11 @@ pub trait Component: std::any::Any {
     }
 
     fn handle_notification(&mut self, _ctx: &mut Context) {}
+
+    /// Keymap context name used when this component has focus.
+    fn context_name(&self) -> Option<&str> {
+        None
+    }
 
     /// TOML fragment for this component's default theme styles.
     fn default_theme_toml(&self) -> &'static str {

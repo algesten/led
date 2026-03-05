@@ -157,6 +157,11 @@ impl Shell {
     }
 
     /// Find the component claiming the Side panel (highest priority).
+    pub fn side_component(&self) -> Option<&Box<dyn Component>> {
+        let idx = self.side_component_idx()?;
+        Some(&self.components[idx])
+    }
+
     fn side_component_idx(&self) -> Option<usize> {
         self.components
             .iter()
@@ -263,12 +268,15 @@ impl Shell {
             return InputResult::Continue;
         }
 
-        let context = match self.focus {
-            PanelSlot::Side => Some("browser"),
+        let context: Option<String> = match self.focus {
+            PanelSlot::Side => self
+                .side_component()
+                .and_then(|c| c.context_name())
+                .map(|s| s.to_string()),
             PanelSlot::Main => None,
         };
 
-        match self.keymap.lookup(&combo, context) {
+        match self.keymap.lookup(&combo, context.as_deref()) {
             KeymapLookup::Action(action) => self.execute_action(action),
             KeymapLookup::ChordPrefix => {
                 self.chord = ChordState::Pending(combo);
@@ -277,7 +285,14 @@ impl Shell {
             }
             KeymapLookup::Unbound => {
                 // Printable character fallback: insert if no ctrl/alt modifier
-                if self.focus == PanelSlot::Main && self.has_tabs() {
+                let allow_insert = match self.focus {
+                    PanelSlot::Main => self.has_tabs(),
+                    PanelSlot::Side => self
+                        .side_component()
+                        .and_then(|c| c.context_name())
+                        == Some("file_search"),
+                };
+                if allow_insert {
                     let has_ctrl_alt = key
                         .modifiers
                         .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
@@ -348,6 +363,26 @@ impl Shell {
                         self.kill_current_buffer();
                     }
                 }
+            }
+
+            Action::OpenFileSearch => {
+                self.show_side_panel = true;
+                // Always dispatch to the active buffer (not the focused component)
+                // so it can grab selected text and emit FileSearchOpened
+                let effects = if let Some(idx) = self.active_tab_component_idx() {
+                    let mut ctx = Context {
+                        db: self.db.as_ref(),
+                        root: &self.root,
+                        viewport_height: self.viewport_height,
+                        yank_fn: None,
+                        waker: self.waker.clone(),
+                    };
+                    self.components[idx].handle_action(Action::OpenFileSearch, &mut ctx)
+                } else {
+                    vec![Effect::Emit(Event::FileSearchOpened { selected_text: None })]
+                };
+                self.process_effects(effects);
+                self.focus = PanelSlot::Side;
             }
 
             Action::Abort => {

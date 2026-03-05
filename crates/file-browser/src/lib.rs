@@ -371,6 +371,10 @@ impl Component for FileBrowser {
         // Session persistence handled by shell
     }
 
+    fn context_name(&self) -> Option<&str> {
+        Some("browser")
+    }
+
     fn default_theme_toml(&self) -> &'static str {
         r#"
 [browser]

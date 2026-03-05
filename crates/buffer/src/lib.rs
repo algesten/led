@@ -221,6 +221,15 @@ impl Buffer {
     }
 
     pub fn from_file_with_waker(path: &str, waker: Option<Waker>) -> io::Result<Self> {
+        // Reject binary files by checking for null bytes in the first 8KB
+        {
+            let mut probe = File::open(path)?;
+            let mut buf = [0u8; 8192];
+            let n = io::Read::read(&mut probe, &mut buf)?;
+            if buf[..n].contains(&0) {
+                return Err(io::Error::new(io::ErrorKind::InvalidData, "binary file"));
+            }
+        }
         let file = File::open(path)?;
         let rope = Rope::from_reader(BufReader::new(file))?;
         let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| PathBuf::from(path));
@@ -928,6 +937,16 @@ impl Buffer {
         }
     }
 
+    fn selected_text(&self) -> Option<String> {
+        let ((sr, sc), (er, ec)) = self.selection_range()?;
+        let start = self.char_idx(sr, sc);
+        let end = self.char_idx(er, ec);
+        if start == end {
+            return None;
+        }
+        Some(self.rope.slice(start..end).to_string())
+    }
+
     fn kill_region(&mut self) -> Option<String> {
         let ((sr, sc), (er, ec)) = self.selection_range()?;
         let start_idx = self.char_idx(sr, sc);
@@ -1554,6 +1573,11 @@ impl Component for Buffer {
                 }
                 vec![]
             }
+            Action::OpenFileSearch => {
+                let selected_text = self.selected_text();
+                self.clear_mark();
+                vec![Effect::Emit(Event::FileSearchOpened { selected_text })]
+            }
             Action::Abort => {
                 self.clear_mark();
                 vec![]
@@ -1566,6 +1590,13 @@ impl Component for Buffer {
         match event {
             Event::Resume => {
                 self.handle_notification(ctx);
+            }
+            Event::GoToPosition { path, row, col } => {
+                if self.path.as_deref() == Some(path.as_path()) {
+                    self.cursor_row = (*row).min(self.line_count().saturating_sub(1));
+                    self.cursor_col = (*col).min(self.line_len(self.cursor_row));
+                    self.clear_mark();
+                }
             }
             _ => {}
         }
