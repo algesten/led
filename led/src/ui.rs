@@ -77,19 +77,18 @@ fn render_tab_bar(shell: &Shell, frame: &mut Frame, area: Rect) {
             x += 1;
         }
 
-        let prefix = if tab.dirty { "\u{25cf}" } else { "" };
+        let lead = if tab.dirty { "\u{25cf}" } else { " " };
         let filename = &tab.label;
         let max_chars = 15;
-        let char_count = prefix.chars().count() + filename.chars().count();
-        let truncated = char_count > max_chars;
+        let char_count = filename.chars().count();
+        let truncated = char_count + 1 > max_chars; // +1 for lead char
         let take = if truncated {
-            max_chars - prefix.chars().count() - 1
+            max_chars - 2 // lead + ellipsis
         } else {
-            filename.chars().count()
+            char_count
         };
-        let label: String = " "
+        let label: String = lead
             .chars()
-            .chain(prefix.chars())
             .chain(filename.chars().take(take))
             .chain(if truncated { Some('…') } else { None })
             .chain(" ".chars())
@@ -123,12 +122,15 @@ fn render_main_content(shell: &mut Shell, frame: &mut Frame, area: Rect) {
         return;
     }
 
-    let chunks = Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).split(area);
-    render_tab_bar(shell, frame, chunks[0]);
+    let chunks = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(area);
+    let text_area = chunks[0];
+    let tab_area = chunks[1];
 
-    // Debug flash at top right of tab bar
+    shell.set_tab_bar_width(tab_area.width);
+    render_tab_bar(shell, frame, tab_area);
+
+    // Debug flash at right of tab bar
     if let Some(text) = shell.debug_flash_text() {
-        let tab_area = chunks[0];
         let flash_width = text.len() as u16;
         if flash_width < tab_area.width {
             let x = tab_area.x + tab_area.width - flash_width;
@@ -136,8 +138,6 @@ fn render_main_content(shell: &mut Shell, frame: &mut Frame, area: Rect) {
             frame.buffer_mut().set_string(x, tab_area.y, text, style);
         }
     }
-
-    let text_area = chunks[1];
     shell.set_viewport_height(text_area.height as usize);
 
     // Draw the active buffer component (scroll is managed internally by draw)

@@ -51,25 +51,19 @@ struct Cli {
 fn main() -> io::Result<()> {
     let cli = Cli::parse();
 
-    let arg_path = cli.path.as_ref().map(PathBuf::from);
-    let arg_is_dir = arg_path.as_ref().map_or(false, |p: &PathBuf| p.is_dir());
+    let arg_path = cli.path.as_ref().map(|p| {
+        let path = PathBuf::from(p);
+        std::fs::canonicalize(&path).unwrap_or(path)
+    });
 
     // Compute starting directory, then walk up to find a .git root
-    let start_dir: PathBuf = if arg_is_dir {
-        arg_path.unwrap()
+    let start_dir: PathBuf = if arg_path.as_ref().map_or(false, |p| p.is_dir()) {
+        arg_path.clone().unwrap()
     } else {
-        cli.path
+        arg_path
             .as_ref()
-            .and_then(|p| {
-                let path = PathBuf::from(p);
-                path.parent().map(|parent| {
-                    if parent.as_os_str().is_empty() {
-                        PathBuf::from(".")
-                    } else {
-                        parent.to_path_buf()
-                    }
-                })
-            })
+            .and_then(|p| p.parent())
+            .map(|parent| parent.to_path_buf())
             .unwrap_or_else(|| PathBuf::from("."))
     };
     let start_dir = std::fs::canonicalize(&start_dir).unwrap_or(start_dir);
@@ -83,17 +77,16 @@ fn main() -> io::Result<()> {
     });
 
     // Build component list — the ONLY place concrete types appear
-    let initial_buffer = if arg_is_dir {
-        None
-    } else {
-        cli.path.as_ref().map(|path| {
-            Buffer::from_file_with_waker(path, Some(waker.clone())).unwrap_or_else(|_| {
+    let initial_buffer = arg_path.as_ref()
+        .filter(|p| p.is_file())
+        .map(|path| {
+            let path_str = path.to_string_lossy();
+            Buffer::from_file_with_waker(&path_str, Some(waker.clone())).unwrap_or_else(|_| {
                 let mut buf = Buffer::empty();
-                buf.path = Some(path.into());
+                buf.path = Some(path.clone());
                 buf
             })
-        })
-    };
+        });
 
     let mut components: Vec<Box<dyn led_core::Component>> = vec![
         Box::new(BufferFactory::new()),
@@ -126,7 +119,7 @@ fn main() -> io::Result<()> {
 
     let db = session::open_db();
 
-    let explicit_file = components.len() > 2; // more than BufferFactory + FileBrowser
+    let explicit_file = arg_path.as_ref().map_or(false, |p| p.is_file());
     let mut shell = Shell::new(keymap, the_theme, db, root.clone());
     shell.debug = cli.debug;
     shell.set_waker(waker);
@@ -191,7 +184,7 @@ fn main() -> io::Result<()> {
     // Save session on exit (skip if we stayed in single-file mode)
     shell.flush_to_db();
     if !shell.single_file_mode {
-        shell.save_all_sessions();
+        // Save session rows first (DELETE + INSERT), then update cursor data
         if let Some(conn) = shell.db() {
             let snapshot = shell.capture_session();
             let buffer_paths: Vec<_> = shell.components().iter()
@@ -205,6 +198,7 @@ fn main() -> io::Result<()> {
             };
             session::save_session(conn, &root, &session_data);
         }
+        shell.save_all_sessions();
     }
 
     result

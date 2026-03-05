@@ -83,6 +83,7 @@ impl Env {
 
 pub struct Shell {
     components: Vec<Box<dyn Component>>,
+    last_touched: Vec<Instant>,
     active_tab: usize,
     pub message: Option<String>,
     chord: ChordState,
@@ -96,6 +97,7 @@ pub struct Shell {
     last_persist: Instant,
     pub single_file_mode: bool,
     pre_preview_tab: Option<usize>,
+    tab_bar_width: u16,
     env: Env,
 }
 
@@ -103,6 +105,7 @@ impl Shell {
     pub fn new(keymap: Keymap, theme: Theme, db: Option<Connection>, root: PathBuf) -> Self {
         Self {
             components: Vec::new(),
+            last_touched: Vec::new(),
             active_tab: 0,
             message: None,
             chord: ChordState::None,
@@ -116,6 +119,7 @@ impl Shell {
             last_persist: Instant::now(),
             single_file_mode: false,
             pre_preview_tab: None,
+            tab_bar_width: 0,
             env: Env {
                 db,
                 root,
@@ -151,7 +155,12 @@ impl Shell {
         if has_tab && self.single_file_mode {
             self.single_file_mode = false;
         }
+        // Evict LRU clean tabs if the tab bar would overflow
+        if has_tab && !is_preview {
+            self.evict_for_new_tab(&component);
+        }
         self.components.push(component);
+        self.last_touched.push(Instant::now());
         let last = self.components.len() - 1;
         let ctx = self.env.ctx();
         self.components[last].ensure_schema(&ctx);
@@ -357,11 +366,17 @@ impl Shell {
             // Shell-level actions
             Action::ToggleFocus => {
                 if self.show_side_panel {
+                    let leaving_browser = self.focus == PanelSlot::Side
+                        && self.side_component().and_then(|c| c.context_name())
+                            == Some("browser");
                     self.focus = match self.focus {
                         PanelSlot::Main => PanelSlot::Side,
                         PanelSlot::Side if self.has_tabs() => PanelSlot::Main,
                         _ => self.focus,
                     };
+                    if leaving_browser && self.focus == PanelSlot::Main {
+                        self.process_effects(vec![Effect::Emit(Event::PreviewClosed)]);
+                    }
                 }
             }
             Action::ToggleSidePanel => {
@@ -454,6 +469,9 @@ impl Shell {
     }
 
     fn dispatch_action(&mut self, action: Action) -> Vec<Effect> {
+        if self.focus == PanelSlot::Main {
+            self.touch_active_buffer();
+        }
         let mut ctx = self.env.ctx();
 
         match self.focus {
@@ -531,6 +549,7 @@ impl Shell {
                         c.tab().map_or(false, |t| t.preview)
                     }) {
                         self.components.remove(idx);
+                        self.last_touched.remove(idx);
                         let tabs = self.tabbed_components();
                         if tabs.is_empty() {
                             self.active_tab = 0;
@@ -553,6 +572,7 @@ impl Shell {
                 .map(|t| t.label.clone())
                 .unwrap_or_default();
             self.components.remove(comp_idx);
+            self.last_touched.remove(comp_idx);
 
             let tabs = self.tabbed_components();
             if tabs.is_empty() {
@@ -566,7 +586,88 @@ impl Shell {
         }
     }
 
+    fn touch_active_buffer(&mut self) {
+        if let Some(idx) = self.active_tab_component_idx() {
+            self.last_touched[idx] = Instant::now();
+        }
+    }
+
+    fn tab_display_width(tab: &led_core::TabDescriptor) -> u16 {
+        let char_count = tab.label.chars().count() + 1; // +1 for lead char
+        (char_count.min(15) + 1) as u16 // +1 for trailing space
+    }
+
+    fn total_tab_bar_width(&self) -> u16 {
+        let tabs = self.tabbed_components();
+        let mut width: u16 = 0;
+        for (i, &comp_idx) in tabs.iter().enumerate() {
+            if let Some(tab) = self.components[comp_idx].tab() {
+                if i > 0 {
+                    width += 1; // gap
+                }
+                width += Self::tab_display_width(&tab);
+            }
+        }
+        width
+    }
+
+    fn evict_for_new_tab(&mut self, new_component: &Box<dyn Component>) {
+        if self.tab_bar_width == 0 {
+            return;
+        }
+        let gutter_offset: u16 = 1; // GUTTER_WIDTH - 1
+        let available = self.tab_bar_width.saturating_sub(gutter_offset);
+        let new_tab_width = new_component
+            .tab()
+            .map(|t| Self::tab_display_width(&t))
+            .unwrap_or(0);
+
+        loop {
+            let existing_width = self.total_tab_bar_width();
+            let gap = if existing_width > 0 { 1u16 } else { 0 };
+            let total = existing_width + gap + new_tab_width;
+            if total <= available {
+                break;
+            }
+            // Find oldest non-dirty, non-preview, non-active tabbed component
+            let active_comp_idx = self.active_tab_component_idx();
+            let tabs = self.tabbed_components();
+            let candidate = tabs
+                .iter()
+                .filter(|&&ci| {
+                    Some(ci) != active_comp_idx
+                        && self.components[ci]
+                            .tab()
+                            .map_or(true, |t| !t.dirty && !t.preview)
+                })
+                .min_by_key(|&&ci| self.last_touched[ci])
+                .copied();
+            if let Some(ci) = candidate {
+                // Adjust active_tab before removal
+                let removed_tab_idx = self.tabbed_index_of(ci);
+                self.components.remove(ci);
+                self.last_touched.remove(ci);
+                // Fix active_tab after removal
+                let tabs = self.tabbed_components();
+                if let Some(rt) = removed_tab_idx {
+                    if rt < self.active_tab {
+                        self.active_tab -= 1;
+                    } else if self.active_tab >= tabs.len() && !tabs.is_empty() {
+                        self.active_tab = tabs.len() - 1;
+                    }
+                }
+            } else {
+                break; // no eviction candidates
+            }
+        }
+    }
+
+    pub fn set_tab_bar_width(&mut self, width: u16) {
+        self.tab_bar_width = width;
+    }
+
     fn notify_active_buffer(&mut self) {
+        self.touch_active_buffer();
         if let Some(idx) = self.active_tab_component_idx() {
             let path = self.components[idx].tab().and_then(|t| t.path);
             let effects = vec![Effect::Emit(led_core::Event::TabActivated { path })];

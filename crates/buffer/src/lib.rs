@@ -13,6 +13,7 @@ use std::hash::Hasher;
 use std::io::{self, BufReader};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
 use std::time::Instant;
 
@@ -96,6 +97,9 @@ pub struct Buffer {
     pub(crate) disk_deleted: bool,
     pub preview: bool,
     pub(crate) syntax: Option<syntax::SyntaxState>,
+    pub(crate) pending_syntax: Arc<Mutex<Option<syntax::SyntaxState>>>,
+    pub(crate) syntax_ready: Arc<AtomicBool>,
+    pub(crate) syntax_cancel: Arc<AtomicBool>,
 }
 
 impl Buffer {
@@ -133,6 +137,9 @@ impl Buffer {
             disk_deleted: false,
             preview: false,
             syntax: None,
+            pending_syntax: Arc::new(Mutex::new(None)),
+            syntax_ready: Arc::new(AtomicBool::new(false)),
+            syntax_cancel: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -156,7 +163,35 @@ impl Buffer {
         let base_content_hash = Self::hash_rope(&rope);
         let changed = Arc::new(AtomicBool::new(false));
         let _watcher = Self::create_watcher(&canonical, &changed, waker.as_ref());
-        let syntax = syntax::SyntaxState::from_path_and_rope(&canonical, &rope);
+        let pending_syntax: Arc<Mutex<Option<syntax::SyntaxState>>> = Arc::new(Mutex::new(None));
+        let syntax_ready = Arc::new(AtomicBool::new(false));
+        let syntax_cancel = Arc::new(AtomicBool::new(false));
+
+        // Parse syntax on a background thread
+        {
+            let path = canonical.clone();
+            let rope = rope.clone();
+            let ready = syntax_ready.clone();
+            let pending = pending_syntax.clone();
+            let cancel = syntax_cancel.clone();
+            let waker = waker.clone();
+            std::thread::spawn(move || {
+                if cancel.load(std::sync::atomic::Ordering::Acquire) {
+                    return;
+                }
+                if let Some(state) = syntax::SyntaxState::from_path_and_rope(&path, &rope) {
+                    if cancel.load(std::sync::atomic::Ordering::Acquire) {
+                        return;
+                    }
+                    *pending.lock().unwrap() = Some(state);
+                    ready.store(true, std::sync::atomic::Ordering::Release);
+                    if let Some(w) = waker.as_ref() {
+                        w();
+                    }
+                }
+            });
+        }
+
         Ok(Self {
             rope,
             cursor_row: 0,
@@ -185,7 +220,10 @@ impl Buffer {
             disk_modified: false,
             disk_deleted: false,
             preview: false,
-            syntax,
+            syntax: None,
+            pending_syntax,
+            syntax_ready,
+            syntax_cancel,
         })
     }
 
@@ -198,6 +236,15 @@ impl Buffer {
         format!("{}-{}", std::process::id(), ts)
     }
 
+}
+
+impl Drop for Buffer {
+    fn drop(&mut self) {
+        self.syntax_cancel.store(true, std::sync::atomic::Ordering::Release);
+    }
+}
+
+impl Buffer {
     // --- Accessors ---
 
     pub fn filename(&self) -> &str {
@@ -234,9 +281,40 @@ impl Buffer {
 
     // --- Syntax ---
 
-    pub(crate) fn reparse_syntax(&mut self) {
-        if let Some(ref mut s) = self.syntax {
-            s.reparse_full(&self.rope);
+    /// Notify syntax state of an insert. Call BEFORE mutating the rope.
+    /// Returns an opaque edit to pass to `apply_syntax_edit` after mutation.
+    pub(crate) fn syntax_edit_insert(&self, char_idx: usize, text: &str) -> Option<tree_sitter::InputEdit> {
+        if self.syntax.is_some() {
+            Some(syntax::edit_for_insert(&self.rope, char_idx, text))
+        } else {
+            None
+        }
+    }
+
+    /// Notify syntax state of a remove. Call BEFORE mutating the rope.
+    pub(crate) fn syntax_edit_remove(&self, char_start: usize, char_end: usize) -> Option<tree_sitter::InputEdit> {
+        if self.syntax.is_some() {
+            Some(syntax::edit_for_remove(&self.rope, char_start, char_end))
+        } else {
+            None
+        }
+    }
+
+    /// Apply a previously computed edit to the syntax tree. Call AFTER mutating the rope.
+    pub(crate) fn apply_syntax_edit(&mut self, edit: Option<tree_sitter::InputEdit>) {
+        if let (Some(edit), Some(s)) = (edit, &mut self.syntax) {
+            s.apply_edit(&edit, &self.rope);
+        }
+    }
+
+    /// Compute a syntax edit for an EditOp. Call BEFORE applying the op.
+    pub(crate) fn syntax_edit_for_op(&self, op: &EditOp) -> Option<tree_sitter::InputEdit> {
+        match op {
+            EditOp::Insert { char_idx, text } => self.syntax_edit_insert(*char_idx, text),
+            EditOp::Remove { char_idx, text } => {
+                let end = *char_idx + text.chars().count();
+                self.syntax_edit_remove(*char_idx, end)
+            }
         }
     }
 

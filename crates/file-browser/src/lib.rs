@@ -36,6 +36,7 @@ pub struct FileBrowser {
     pub entries: Vec<TreeEntry>,
     pub selected: usize,
     expanded_dirs: HashSet<PathBuf>,
+    scroll_offset: usize,
 }
 
 impl FileBrowser {
@@ -45,6 +46,7 @@ impl FileBrowser {
             entries: Vec::new(),
             selected: 0,
             expanded_dirs: HashSet::new(),
+            scroll_offset: 0,
         };
         browser.rebuild();
         browser
@@ -212,6 +214,27 @@ impl FileBrowser {
         }
     }
 
+    fn selected_file_path(&self) -> Option<&PathBuf> {
+        let entry = self.entries.get(self.selected)?;
+        match entry.kind {
+            EntryKind::File => Some(&entry.path),
+            _ => None,
+        }
+    }
+
+    fn preview_selected(&self) -> Vec<Effect> {
+        if let Some(path) = self.selected_file_path() {
+            vec![Effect::Emit(Event::PreviewFile {
+                path: path.clone(),
+                row: 0,
+                col: 0,
+                match_len: 0,
+            })]
+        } else {
+            vec![Effect::Emit(Event::PreviewClosed)]
+        }
+    }
+
     pub fn display_name(entry: &TreeEntry) -> String {
         let name = entry
             .path
@@ -248,34 +271,37 @@ impl Component for FileBrowser {
         match action {
             Action::MoveUp => {
                 self.move_up();
-                vec![]
+                self.preview_selected()
             }
             Action::MoveDown => {
                 self.move_down();
-                vec![]
+                self.preview_selected()
             }
             Action::PageUp => {
                 self.page_up(ctx.viewport_height);
-                vec![]
+                self.preview_selected()
             }
             Action::PageDown => {
                 self.page_down(ctx.viewport_height);
-                vec![]
+                self.preview_selected()
             }
             Action::ExpandDir => {
                 self.expand_selected();
-                vec![]
+                self.preview_selected()
             }
             Action::CollapseDir => {
                 self.collapse_selected();
-                vec![]
+                self.preview_selected()
             }
             Action::OpenSelected => {
-                if let Some(path) = self.open_selected() {
-                    vec![
-                        Effect::Emit(Event::OpenFile(path)),
-                        Effect::FocusPanel(PanelSlot::Main),
-                    ]
+                if let Some(entry) = self.entries.get(self.selected) {
+                    if matches!(entry.kind, EntryKind::File) {
+                        let path = entry.path.clone();
+                        vec![Effect::Emit(Event::ConfirmSearch { path, row: 0, col: 0 })]
+                    } else {
+                        self.open_selected();
+                        self.preview_selected()
+                    }
                 } else {
                     vec![]
                 }
@@ -316,11 +342,13 @@ impl Component for FileBrowser {
             return;
         }
 
-        let browser_scroll = if self.selected >= height {
-            self.selected - height + 1
-        } else {
-            0
-        };
+        // Scroll-into-view: adjust offset only when selection escapes the viewport
+        if self.selected < self.scroll_offset {
+            self.scroll_offset = self.selected;
+        } else if self.selected >= self.scroll_offset + height {
+            self.scroll_offset = self.selected - height + 1;
+        }
+        let browser_scroll = self.scroll_offset;
 
         let mut lines = Vec::with_capacity(height);
 
@@ -365,6 +393,7 @@ impl Component for FileBrowser {
 
     fn save_session(&self, ctx: &mut Context) {
         ctx.kv.insert("browser.selected".into(), self.selected.to_string());
+        ctx.kv.insert("browser.scroll_offset".into(), self.scroll_offset.to_string());
         let dirs: Vec<String> = self.expanded_dirs.iter()
             .map(|d| d.to_string_lossy().into_owned())
             .collect();
@@ -375,6 +404,9 @@ impl Component for FileBrowser {
         let selected: usize = ctx.kv.get("browser.selected")
             .and_then(|s| s.parse().ok())
             .unwrap_or(0);
+        let scroll_offset: usize = ctx.kv.get("browser.scroll_offset")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
 
         let dirs: HashSet<PathBuf> = ctx.kv.get("browser.expanded_dirs")
             .map(|s| s.lines().filter(|l| !l.is_empty()).map(PathBuf::from).collect())
@@ -382,6 +414,7 @@ impl Component for FileBrowser {
 
         self.set_expanded_dirs(dirs);
         self.selected = selected.min(self.entries.len().saturating_sub(1));
+        self.scroll_offset = scroll_offset;
     }
 
     fn context_name(&self) -> Option<&str> {

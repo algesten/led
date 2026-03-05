@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use ropey::Rope;
-use tree_sitter::{Language, Parser, Point, Query, QueryCursor, StreamingIterator, Tree};
+use tree_sitter::{InputEdit, Language, Parser, Point, Query, QueryCursor, StreamingIterator, Tree};
 
 // ---------------------------------------------------------------------------
 // Highlight span returned to the renderer
@@ -56,6 +56,26 @@ fn lang_for_ext(ext: &str) -> Option<LangEntry> {
         "md" | "markdown" => Some(LangEntry {
             language: tree_sitter_md::LANGUAGE.into(),
             highlights_query: tree_sitter_md::HIGHLIGHT_QUERY_BLOCK,
+        }),
+        "py" => Some(LangEntry {
+            language: tree_sitter_python::LANGUAGE.into(),
+            highlights_query: tree_sitter_python::HIGHLIGHTS_QUERY,
+        }),
+        "sh" | "bash" => Some(LangEntry {
+            language: tree_sitter_bash::LANGUAGE.into(),
+            highlights_query: tree_sitter_bash::HIGHLIGHT_QUERY,
+        }),
+        "swift" => Some(LangEntry {
+            language: tree_sitter_swift::LANGUAGE.into(),
+            highlights_query: tree_sitter_swift::HIGHLIGHTS_QUERY,
+        }),
+        "c" | "h" => Some(LangEntry {
+            language: tree_sitter_c::LANGUAGE.into(),
+            highlights_query: tree_sitter_c::HIGHLIGHT_QUERY,
+        }),
+        "cpp" | "cc" | "cxx" | "hpp" | "hxx" => Some(LangEntry {
+            language: tree_sitter_cpp::LANGUAGE.into(),
+            highlights_query: tree_sitter_cpp::HIGHLIGHT_QUERY,
         }),
         _ => None,
     }
@@ -139,7 +159,8 @@ impl SyntaxState {
         })
     }
 
-    pub(crate) fn reparse_full(&mut self, rope: &Rope) {
+    pub(crate) fn apply_edit(&mut self, edit: &InputEdit, rope: &Rope) {
+        self.tree.edit(edit);
         if let Some(new_tree) = parse_rope(&mut self.parser, rope, Some(&self.tree)) {
             self.tree = new_tree;
         }
@@ -242,6 +263,58 @@ impl SyntaxState {
         }
 
         result
+    }
+}
+
+// ---------------------------------------------------------------------------
+// InputEdit helpers — call BEFORE mutating the rope
+// ---------------------------------------------------------------------------
+
+/// Byte offset and Point for a char index in the rope.
+fn byte_and_point(rope: &Rope, char_idx: usize) -> (usize, Point) {
+    let byte = rope.char_to_byte(char_idx);
+    let line = rope.char_to_line(char_idx);
+    let line_byte = rope.line_to_byte(line);
+    (byte, Point { row: line, column: byte - line_byte })
+}
+
+/// Build an InputEdit for inserting `text` at `char_idx`.
+/// Must be called BEFORE the rope is mutated.
+pub(crate) fn edit_for_insert(rope: &Rope, char_idx: usize, text: &str) -> InputEdit {
+    let (start_byte, start_pos) = byte_and_point(rope, char_idx);
+    let new_end_byte = start_byte + text.len();
+    let mut end_row = start_pos.row;
+    let mut end_col = start_pos.column;
+    for b in text.bytes() {
+        if b == b'\n' {
+            end_row += 1;
+            end_col = 0;
+        } else {
+            end_col += 1;
+        }
+    }
+    InputEdit {
+        start_byte,
+        old_end_byte: start_byte,
+        new_end_byte,
+        start_position: start_pos,
+        old_end_position: start_pos,
+        new_end_position: Point { row: end_row, column: end_col },
+    }
+}
+
+/// Build an InputEdit for removing chars [char_start, char_end).
+/// Must be called BEFORE the rope is mutated.
+pub(crate) fn edit_for_remove(rope: &Rope, char_start: usize, char_end: usize) -> InputEdit {
+    let (start_byte, start_pos) = byte_and_point(rope, char_start);
+    let (end_byte, end_pos) = byte_and_point(rope, char_end);
+    InputEdit {
+        start_byte,
+        old_end_byte: end_byte,
+        new_end_byte: start_byte,
+        start_position: start_pos,
+        old_end_position: end_pos,
+        new_end_position: start_pos,
     }
 }
 

@@ -20,8 +20,9 @@ impl Buffer {
         let entry = self.undo_history[pos - 1].clone();
         let inverse = self.invert_entry(&entry);
 
+        let se = self.syntax_edit_for_op(&inverse.op);
         self.apply_op(&inverse.op);
-        self.reparse_syntax();
+        self.apply_syntax_edit(se);
         self.cursor_row = inverse.cursor_after.0;
         self.cursor_col = inverse.cursor_after.1;
         self.distance_from_save -= entry.direction;
@@ -242,10 +243,11 @@ impl Buffer {
     pub(crate) fn apply_remote_entries(&mut self, entries: Vec<UndoEntry>, new_last_seen_seq: i64) {
         self.flush_pending();
         for entry in &entries {
+            let se = self.syntax_edit_for_op(&entry.op);
             self.apply_op(&entry.op);
+            self.apply_syntax_edit(se);
             self.distance_from_save += entry.direction;
         }
-        self.reparse_syntax();
         self.undo_history.extend(entries);
         self.persisted_undo_len = self.undo_history.len();
         self.last_seen_seq = new_last_seen_seq;
@@ -263,9 +265,10 @@ impl Buffer {
         distance_from_save: i32,
     ) {
         for entry in &entries {
+            let se = self.syntax_edit_for_op(&entry.op);
             self.apply_op(&entry.op);
+            self.apply_syntax_edit(se);
         }
-        self.reparse_syntax();
         self.undo_history = entries;
         self.undo_cursor = undo_cursor;
         self.distance_from_save = distance_from_save;

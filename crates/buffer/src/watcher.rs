@@ -63,6 +63,13 @@ impl Buffer {
     }
 
     pub(crate) fn handle_tick(&mut self, ctx: &mut Context) -> Vec<Effect> {
+        // Adopt background syntax parsing result
+        if self.syntax_ready.swap(false, Ordering::SeqCst) {
+            if let Ok(mut guard) = self.pending_syntax.lock() {
+                self.syntax = guard.take();
+            }
+        }
+
         if !self.changed.swap(false, Ordering::SeqCst) {
             return vec![];
         }
@@ -257,8 +264,9 @@ impl Buffer {
         };
         let len = self.rope.len_chars();
         if len == 0 || self.rope.char(len - 1) != '\n' {
+            let se = self.syntax_edit_insert(len, "\n");
             self.rope.insert_char(len, '\n');
-            self.reparse_syntax();
+            self.apply_syntax_edit(se);
         }
         let file = File::create(&path)?;
         self.rope.write_to(BufWriter::new(file))?;
