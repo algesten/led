@@ -83,6 +83,15 @@ pub struct TabDescriptor {
 }
 
 // ---------------------------------------------------------------------------
+// Clipboard
+// ---------------------------------------------------------------------------
+
+pub trait Clipboard {
+    fn get_text(&self) -> Option<String>;
+    fn set_text(&self, text: &str);
+}
+
+// ---------------------------------------------------------------------------
 // Events & Effects
 // ---------------------------------------------------------------------------
 
@@ -102,7 +111,6 @@ pub enum Effect {
     Spawn(Box<dyn Component>),
     SetMessage(String),
     FocusPanel(PanelSlot),
-    SetClipboard(Arc<String>),
     ConfirmAction { prompt: String, action: Action },
     ActivateBuffer(PathBuf),
     KillPreview,
@@ -117,14 +125,8 @@ pub struct Context<'a> {
     pub db: Option<&'a Connection>,
     pub root: &'a std::path::Path,
     pub viewport_height: usize,
-    pub yank_fn: Option<&'a mut dyn FnMut() -> Option<String>>,
+    pub clipboard: &'a dyn Clipboard,
     pub waker: Option<Waker>,
-}
-
-impl<'a> Context<'a> {
-    pub fn yank(&mut self) -> Option<String> {
-        self.yank_fn.as_mut().and_then(|f| f())
-    }
 }
 
 pub struct DrawContext<'a> {

@@ -138,7 +138,7 @@ fn render_main_content(shell: &mut Shell, frame: &mut Frame, area: Rect) {
     }
 
     let text_area = chunks[1];
-    shell.viewport_height = text_area.height as usize;
+    shell.set_viewport_height(text_area.height as usize);
 
     // Draw the active buffer component (scroll is managed internally by draw)
     {

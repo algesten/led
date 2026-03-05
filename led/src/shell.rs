@@ -4,11 +4,37 @@ use std::time::{Duration, Instant};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use rusqlite::Connection;
 
+use std::sync::Arc;
+
 use led_core::{
-    Action, Component, Context, Effect, Event, PanelSlot, Waker,
+    Action, Clipboard, Component, Context, Effect, Event, PanelSlot, Waker,
 };
 use crate::config::{KeyCombo, Keymap, KeymapLookup};
 use crate::theme::Theme;
+
+struct ArboardClipboard {
+    inner: std::sync::Mutex<Option<arboard::Clipboard>>,
+}
+
+impl ArboardClipboard {
+    fn new() -> Self {
+        Self { inner: std::sync::Mutex::new(arboard::Clipboard::new().ok()) }
+    }
+}
+
+impl Clipboard for ArboardClipboard {
+    fn get_text(&self) -> Option<String> {
+        self.inner.lock().ok()?.as_mut()?.get_text().ok()
+    }
+
+    fn set_text(&self, text: &str) {
+        if let Ok(mut guard) = self.inner.lock() {
+            if let Some(cb) = guard.as_mut() {
+                let _ = cb.set_text(text);
+            }
+        }
+    }
+}
 
 pub enum InputResult {
     Continue,
@@ -34,6 +60,26 @@ pub struct Modal {
     pub action: PendingAction,
 }
 
+struct Env {
+    db: Option<Connection>,
+    root: PathBuf,
+    viewport_height: usize,
+    clipboard: Arc<dyn Clipboard>,
+    waker: Option<Waker>,
+}
+
+impl Env {
+    fn ctx(&self) -> Context<'_> {
+        Context {
+            db: self.db.as_ref(),
+            root: &self.root,
+            viewport_height: self.viewport_height,
+            clipboard: self.clipboard.as_ref(),
+            waker: self.waker.clone(),
+        }
+    }
+}
+
 pub struct Shell {
     components: Vec<Box<dyn Component>>,
     active_tab: usize,
@@ -44,16 +90,12 @@ pub struct Shell {
     pub show_side_panel: bool,
     pub debug: bool,
     pub theme: Theme,
-    pub viewport_height: usize,
     debug_flash: Option<(String, Instant)>,
     pub modal: Option<Modal>,
     last_persist: Instant,
-    db: Option<Connection>,
-    root: PathBuf,
     pub single_file_mode: bool,
-    clipboard: Option<arboard::Clipboard>,
-    waker: Option<Waker>,
     pre_preview_tab: Option<usize>,
+    env: Env,
 }
 
 impl Shell {
@@ -68,22 +110,25 @@ impl Shell {
             show_side_panel: true,
             debug: false,
             theme,
-            viewport_height: 24,
             debug_flash: None,
             modal: None,
             last_persist: Instant::now(),
-            db,
-            root,
             single_file_mode: false,
-            clipboard: arboard::Clipboard::new().ok(),
-            waker: None,
             pre_preview_tab: None,
+            env: Env {
+                db,
+                root,
+                viewport_height: 24,
+                clipboard: Arc::new(ArboardClipboard::new()),
+                waker: None,
+            },
         }
     }
 
     pub fn set_waker(&mut self, waker: Waker) {
-        self.waker = Some(waker);
+        self.env.waker = Some(waker);
     }
+
 
     pub fn register(&mut self, component: Box<dyn Component>) {
         // Save pre_preview_tab before registering a preview buffer
@@ -108,13 +153,7 @@ impl Shell {
         self.components.push(component);
         if has_tab {
             let last = self.components.len() - 1;
-            let mut ctx = Context {
-                db: self.db.as_ref(),
-                root: &self.root,
-                viewport_height: self.viewport_height,
-                yank_fn: None,
-                waker: self.waker.clone(),
-            };
+            let mut ctx = self.env.ctx();
             self.components[last].restore_session(&mut ctx);
             self.active_tab = self.tabbed_index_of(last).unwrap_or(0);
             self.notify_active_buffer();
@@ -377,13 +416,7 @@ impl Shell {
                 // Always dispatch to the active buffer (not the focused component)
                 // so it can grab selected text and emit FileSearchOpened
                 let effects = if let Some(idx) = self.active_tab_component_idx() {
-                    let mut ctx = Context {
-                        db: self.db.as_ref(),
-                        root: &self.root,
-                        viewport_height: self.viewport_height,
-                        yank_fn: None,
-                        waker: self.waker.clone(),
-                    };
+                    let mut ctx = self.env.ctx();
                     self.components[idx].handle_action(Action::OpenFileSearch, &mut ctx)
                 } else {
                     vec![Effect::Emit(Event::FileSearchOpened { selected_text: None })]
@@ -401,6 +434,14 @@ impl Shell {
                     // Dispatch to active buffer to clear mark
                     let effects = self.dispatch_action(Action::Abort);
                     self.process_effects(effects);
+                    // Close file search panel if open
+                    if self.side_component().and_then(|c| c.context_name()) == Some("file_search") {
+                        let mut ctx = self.env.ctx();
+                        if let Some(idx) = self.side_component_idx() {
+                            let effects = self.components[idx].handle_action(Action::CloseFileSearch, &mut ctx);
+                            self.process_effects(effects);
+                        }
+                    }
                 }
             }
 
@@ -414,23 +455,9 @@ impl Shell {
     }
 
     fn dispatch_action(&mut self, action: Action) -> Vec<Effect> {
-        let is_yank = matches!(action, Action::Yank);
+        let mut ctx = self.env.ctx();
 
-        // For Yank, temporarily extract clipboard so we can create a closure
-        let mut clipboard_tmp = if is_yank { self.clipboard.take() } else { None };
-        let mut yank_closure = move || -> Option<String> {
-            clipboard_tmp.as_mut()?.get_text().ok()
-        };
-
-        let mut ctx = Context {
-            db: self.db.as_ref(),
-            root: &self.root,
-            viewport_height: self.viewport_height,
-            yank_fn: if is_yank { Some(&mut yank_closure) } else { None },
-            waker: self.waker.clone(),
-        };
-
-        let effects = match self.focus {
+        match self.focus {
             PanelSlot::Main => {
                 if let Some(idx) = self.active_tab_component_idx() {
                     self.components[idx].handle_action(action, &mut ctx)
@@ -445,20 +472,7 @@ impl Shell {
                     vec![]
                 }
             }
-        };
-
-        // Put clipboard back if we took it
-        if is_yank {
-            // Extract from closure — drop ctx first
-            drop(ctx);
-            // yank_closure captured clipboard_tmp by move; we need to get it back
-            // Since we can't extract from the closure, re-init if needed
-            if self.clipboard.is_none() {
-                self.clipboard = arboard::Clipboard::new().ok();
-            }
         }
-
-        effects
     }
 
     fn process_effects(&mut self, effects: Vec<Effect>) {
@@ -466,13 +480,7 @@ impl Shell {
             match effect {
                 Effect::Emit(event) => {
                     let mut more_effects = Vec::new();
-                    let mut ctx = Context {
-                        db: self.db.as_ref(),
-                        root: &self.root,
-                        viewport_height: self.viewport_height,
-                        yank_fn: None,
-                        waker: self.waker.clone(),
-                    };
+                    let mut ctx = self.env.ctx();
                     for comp in &mut self.components {
                         more_effects.extend(comp.handle_event(&event, &mut ctx));
                     }
@@ -501,11 +509,6 @@ impl Shell {
                 }
                 Effect::FocusPanel(slot) => {
                     self.focus = slot;
-                }
-                Effect::SetClipboard(text) => {
-                    if let Some(ref mut cb) = self.clipboard {
-                        let _ = cb.set_text(text.as_str());
-                    }
                 }
                 Effect::ConfirmAction { prompt, action } => {
                     self.modal = Some(Modal {
@@ -601,6 +604,10 @@ impl Shell {
         self.theme = theme;
     }
 
+    pub fn set_viewport_height(&mut self, h: usize) {
+        self.env.viewport_height = h;
+    }
+
     pub fn debug_flash_text(&self) -> Option<&str> {
         if let Some((ref text, instant)) = self.debug_flash {
             if instant.elapsed().as_millis() < 500 {
@@ -645,24 +652,18 @@ impl Shell {
             if !self.components[i].needs_flush() {
                 continue;
             }
-            let mut ctx = Context {
-                db: self.db.as_ref(),
-                root: &self.root,
-                viewport_height: self.viewport_height,
-                yank_fn: None,
-                waker: self.waker.clone(),
-            };
+            let mut ctx = self.env.ctx();
             self.components[i].flush(&mut ctx);
         }
         self.last_persist = Instant::now();
     }
 
     pub fn db(&self) -> Option<&Connection> {
-        self.db.as_ref()
+        self.env.db.as_ref()
     }
 
     pub fn waker(&self) -> Option<&Waker> {
-        self.waker.as_ref()
+        self.env.waker.as_ref()
     }
 
     pub fn emit(&mut self, event: Event) {
@@ -672,13 +673,7 @@ impl Shell {
     pub fn tick(&mut self) {
         let mut all_effects = Vec::new();
         for i in 0..self.components.len() {
-            let mut ctx = Context {
-                db: self.db.as_ref(),
-                root: &self.root,
-                viewport_height: self.viewport_height,
-                yank_fn: None,
-                waker: self.waker.clone(),
-            };
+            let mut ctx = self.env.ctx();
             let effects = self.components[i].handle_action(Action::Tick, &mut ctx);
             all_effects.extend(effects);
         }

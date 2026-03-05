@@ -1400,6 +1400,7 @@ impl Buffer {
         self.flush_pending();
         for entry in &entries {
             self.apply_op(&entry.op);
+            self.distance_from_save += entry.direction;
         }
         self.undo_history.extend(entries);
         self.persisted_undo_len = self.undo_history.len();
@@ -1408,7 +1409,7 @@ impl Buffer {
             self.cursor_row = last.cursor_after.0;
             self.cursor_col = last.cursor_after.1;
         }
-        self.dirty = true;
+        self.dirty = self.distance_from_save != 0;
     }
 
     pub fn restore_undo(
@@ -1534,7 +1535,8 @@ impl Component for Buffer {
                 if let Some(killed) = self.kill_line() {
                     let acc = self.kill_accumulator.get_or_insert_with(String::new);
                     acc.push_str(&killed);
-                    vec![Effect::SetClipboard(Arc::new(acc.clone()))]
+                    ctx.clipboard.set_text(&acc);
+                    vec![]
                 } else {
                     vec![]
                 }
@@ -1576,13 +1578,14 @@ impl Component for Buffer {
             }
             Action::KillRegion => {
                 if let Some(text) = self.kill_region() {
-                    vec![Effect::SetClipboard(Arc::new(text))]
+                    ctx.clipboard.set_text(&text);
+                    vec![]
                 } else {
                     vec![Effect::SetMessage("No region".into())]
                 }
             }
             Action::Yank => {
-                if let Some(text) = ctx.yank() {
+                if let Some(text) = ctx.clipboard.get_text() {
                     self.clear_mark();
                     self.yank_text(&text);
                 }
