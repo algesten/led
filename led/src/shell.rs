@@ -76,6 +76,7 @@ impl Env {
             viewport_height: self.viewport_height,
             clipboard: self.clipboard.as_ref(),
             waker: self.waker.clone(),
+            kv: std::collections::HashMap::new(),
         }
     }
 }
@@ -235,10 +236,6 @@ impl Shell {
 
     pub fn components(&self) -> &[Box<dyn Component>] {
         &self.components
-    }
-
-    pub fn components_mut(&mut self) -> &mut [Box<dyn Component>] {
-        &mut self.components
     }
 
     pub fn active_tab(&self) -> usize {
@@ -576,6 +573,30 @@ impl Shell {
     }
 
     // --- Session helpers ---
+
+    pub fn save_all_sessions(&mut self) {
+        let mut ctx = self.env.ctx();
+        for comp in &self.components {
+            comp.save_session(&mut ctx);
+        }
+        // Flush kv to DB
+        if let Some(conn) = self.env.db.as_ref() {
+            crate::session::save_kv(conn, &self.env.root, &ctx.kv);
+        }
+    }
+
+    pub fn restore_sidepanel_sessions(&mut self) {
+        // Load kv from DB
+        let kv = self.env.db.as_ref()
+            .map(|conn| crate::session::load_kv(conn, &self.env.root))
+            .unwrap_or_default();
+        for i in 0..self.components.len() {
+            if self.components[i].tab().is_some() { continue; }
+            let mut ctx = self.env.ctx();
+            ctx.kv = kv.clone();
+            self.components[i].restore_session(&mut ctx);
+        }
+    }
 
     pub fn capture_session(&self) -> SessionSnapshot {
         SessionSnapshot {

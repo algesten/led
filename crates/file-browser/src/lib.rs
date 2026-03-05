@@ -363,12 +363,25 @@ impl Component for FileBrowser {
         frame.render_widget(paragraph, inner);
     }
 
-    fn save_session(&self, _ctx: &Context) {
-        // Session persistence handled by shell
+    fn save_session(&self, ctx: &mut Context) {
+        ctx.kv.insert("browser.selected".into(), self.selected.to_string());
+        let dirs: Vec<String> = self.expanded_dirs.iter()
+            .map(|d| d.to_string_lossy().into_owned())
+            .collect();
+        ctx.kv.insert("browser.expanded_dirs".into(), dirs.join("\n"));
     }
 
-    fn restore_session(&mut self, _ctx: &mut Context) {
-        // Session persistence handled by shell
+    fn restore_session(&mut self, ctx: &mut Context) {
+        let selected: usize = ctx.kv.get("browser.selected")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+
+        let dirs: HashSet<PathBuf> = ctx.kv.get("browser.expanded_dirs")
+            .map(|s| s.lines().filter(|l| !l.is_empty()).map(PathBuf::from).collect())
+            .unwrap_or_default();
+
+        self.set_expanded_dirs(dirs);
+        self.selected = selected.min(self.entries.len().saturating_sub(1));
     }
 
     fn context_name(&self) -> Option<&str> {

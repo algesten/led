@@ -646,7 +646,7 @@ impl Component for FileSearch {
         }
     }
 
-    fn save_session(&self, _ctx: &Context) {}
+    fn save_session(&self, _ctx: &mut Context) {}
     fn restore_session(&mut self, _ctx: &mut Context) {}
 
     fn default_theme_toml(&self) -> &'static str {

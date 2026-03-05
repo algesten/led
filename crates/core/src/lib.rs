@@ -127,6 +127,7 @@ pub struct Context<'a> {
     pub viewport_height: usize,
     pub clipboard: &'a dyn Clipboard,
     pub waker: Option<Waker>,
+    pub kv: HashMap<String, String>,
 }
 
 pub struct DrawContext<'a> {
@@ -228,7 +229,7 @@ pub trait Component: std::any::Any {
         None
     }
 
-    fn save_session(&self, ctx: &Context);
+    fn save_session(&self, ctx: &mut Context);
 
     fn restore_session(&mut self, ctx: &mut Context);
 

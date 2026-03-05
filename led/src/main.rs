@@ -18,7 +18,7 @@ use led_buffer::{Buffer, BufferFactory};
 use led_file_browser::FileBrowser;
 use led_file_search::FileSearch;
 use shell::{Shell, InputResult};
-use session::{BufferState, SessionData};
+use session::SessionData;
 
 #[derive(Debug)]
 enum ConfigFile {
@@ -191,9 +191,18 @@ fn main() -> io::Result<()> {
     // Save session on exit (skip if we stayed in single-file mode)
     shell.flush_to_db();
     if !shell.single_file_mode {
+        shell.save_all_sessions();
         if let Some(conn) = shell.db() {
             let snapshot = shell.capture_session();
-            let session_data = capture_session_data(&shell, &snapshot);
+            let buffer_paths: Vec<_> = shell.components().iter()
+                .filter_map(|c| c.tab().and_then(|t| t.path))
+                .collect();
+            let session_data = SessionData {
+                buffer_paths,
+                active_tab: snapshot.active_tab,
+                focus_is_editor: snapshot.focus == PanelSlot::Main,
+                show_side_panel: snapshot.show_side_panel,
+            };
             session::save_session(conn, &root, &session_data);
         }
     }
@@ -282,86 +291,24 @@ fn run(
     }
 }
 
-// --- Session helpers (composition root uses concrete types) ---
-
-fn capture_session_data(
-    shell: &Shell,
-    snapshot: &shell::SessionSnapshot,
-) -> SessionData {
-    let mut buffers = Vec::new();
-    for comp in shell.components() {
-        if comp.tab().is_none() {
-            continue;
-        }
-        if let Some(buf) = comp.as_any().downcast_ref::<Buffer>() {
-            if let Some(ref path) = buf.path {
-                buffers.push(BufferState {
-                    file_path: path.clone(),
-                    cursor_row: buf.cursor_row,
-                    cursor_col: buf.cursor_col,
-                    scroll_offset: buf.scroll_offset,
-                });
-            }
-        }
-    }
-
-    // Get browser state
-    let (browser_selected, browser_expanded_dirs) = shell
-        .components()
-        .iter()
-        .find_map(|c| {
-            c.as_any().downcast_ref::<FileBrowser>().map(|fb| {
-                (fb.selected, fb.expanded_dirs().clone())
-            })
-        })
-        .unwrap_or_default();
-
-    SessionData {
-        buffers,
-        active_tab: snapshot.active_tab,
-        focus_is_editor: snapshot.focus == PanelSlot::Main,
-        show_side_panel: snapshot.show_side_panel,
-        browser_selected,
-        browser_expanded_dirs,
-    }
-}
+// --- Session helpers ---
 
 fn restore_session(
     shell: &mut Shell,
     session: SessionData,
 ) {
-    // Restore buffers — undo state is loaded by Buffer::restore_session via register()
+    // Restore buffers — undo + cursor state loaded by Buffer::restore_session via register()
     let waker = shell.waker().cloned();
-    for bs in &session.buffers {
-        let path_str = bs.file_path.to_string_lossy();
+    for path in &session.buffer_paths {
+        let path_str = path.to_string_lossy();
         if let Ok(buf) = Buffer::from_file_with_waker(&path_str, waker.clone()) {
             shell.register(Box::new(buf));
         }
     }
 
-    // Restore cursor/scroll positions after undo replay
-    for bs in &session.buffers {
-        for comp in shell.components_mut() {
-            let Some(buf) = comp.as_any_mut().downcast_mut::<Buffer>() else {
-                continue;
-            };
-            let Some(ref path) = buf.path else { continue };
-            if *path == bs.file_path {
-                buf.cursor_row = bs.cursor_row.min(buf.line_count().saturating_sub(1));
-                buf.cursor_col = bs.cursor_col.min(buf.line_len(buf.cursor_row));
-                buf.scroll_offset = bs.scroll_offset;
-                break;
-            }
-        }
-    }
-
-    // Set active tab
+    // Set shell state
     shell.set_active_tab(session.active_tab);
-
-    // Set show side panel
     shell.show_side_panel = session.show_side_panel;
-
-    // Set focus
     let has_tabs = shell.has_tabs();
     if session.focus_is_editor && has_tabs {
         shell.set_focus(PanelSlot::Main);
@@ -369,16 +316,8 @@ fn restore_session(
         shell.set_focus(PanelSlot::Side);
     }
 
-    // Restore browser state
-    for comp in shell.components_mut() {
-        if let Some(fb) = comp.as_any_mut().downcast_mut::<FileBrowser>() {
-            fb.set_expanded_dirs(session.browser_expanded_dirs.clone());
-            fb.selected = session
-                .browser_selected
-                .min(fb.entries.len().saturating_sub(1));
-            break;
-        }
-    }
+    // Restore side panel components (FileBrowser loads its own state from DB via kv)
+    shell.restore_sidepanel_sessions();
 }
 
 fn find_git_root(start: &std::path::Path) -> PathBuf {

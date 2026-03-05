@@ -1809,7 +1809,23 @@ impl Component for Buffer {
         Some((self.filename(), self.cursor_row + 1, self.cursor_col + 1))
     }
 
-    fn save_session(&self, _ctx: &Context) {}
+    fn save_session(&self, ctx: &mut Context) {
+        let Some(conn) = ctx.db else { return };
+        let Some(ref path) = self.path else { return };
+        let root_str = ctx.root.to_string_lossy();
+        let file_str = path.to_string_lossy();
+        let _ = conn.execute(
+            "UPDATE buffers SET cursor_row = ?1, cursor_col = ?2, scroll_offset = ?3
+             WHERE root_path = ?4 AND file_path = ?5",
+            rusqlite::params![
+                self.cursor_row as i64,
+                self.cursor_col as i64,
+                self.scroll_offset as i64,
+                root_str,
+                file_str,
+            ],
+        );
+    }
 
     fn restore_session(&mut self, ctx: &mut Context) {
         let Some(conn) = ctx.db else { return };
@@ -1817,7 +1833,18 @@ impl Component for Buffer {
         let root_str = ctx.root.to_string_lossy();
         let file_str = path.to_string_lossy();
 
-        let row: Option<(i64, Option<i64>, i32, String)> = conn
+        // Load cursor/scroll from buffers table (independent of undo state)
+        let cursor_data: Option<(i64, i64, i64)> = conn
+            .query_row(
+                "SELECT cursor_row, cursor_col, scroll_offset
+                 FROM buffers WHERE root_path = ?1 AND file_path = ?2",
+                rusqlite::params![root_str, file_str],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .ok();
+
+        // Restore undo state
+        let undo_row: Option<(i64, Option<i64>, i32, String)> = conn
             .query_row(
                 "SELECT content_hash, undo_cursor, distance_from_save, chain_id
                  FROM buffer_undo_state WHERE root_path = ?1 AND file_path = ?2",
@@ -1826,30 +1853,33 @@ impl Component for Buffer {
             )
             .ok();
 
-        let Some((stored_hash, undo_cursor_raw, distance_from_save, chain_id)) = row else {
-            return;
-        };
+        if let Some((stored_hash, undo_cursor_raw, distance_from_save, chain_id)) = undo_row {
+            if self.content_hash() == stored_hash as u64 {
+                let loaded = Self::load_entries_after(conn, &root_str, &file_str, 0);
+                if !loaded.is_empty() {
+                    let max_seq = loaded.last().unwrap().0;
+                    let entries: Vec<UndoEntry> = loaded.into_iter().map(|(_, e)| e).collect();
 
-        if self.content_hash() != stored_hash as u64 {
-            return;
+                    self.chain_id = Some(chain_id);
+                    self.last_seen_seq = max_seq;
+
+                    self.restore_undo(
+                        entries,
+                        undo_cursor_raw.map(|v| v as usize),
+                        distance_from_save,
+                    );
+                }
+            }
         }
 
-        let loaded = Self::load_entries_after(conn, &root_str, &file_str, 0);
-        if loaded.is_empty() {
-            return;
+        // Apply cursor/scroll after undo replay (line_count/line_len are now correct)
+        if let Some((row, col, scroll)) = cursor_data {
+            let row = row as usize;
+            let col = col as usize;
+            self.cursor_row = row.min(self.line_count().saturating_sub(1));
+            self.cursor_col = col.min(self.line_len(self.cursor_row));
+            self.scroll_offset = scroll as usize;
         }
-
-        let max_seq = loaded.last().unwrap().0;
-        let entries: Vec<UndoEntry> = loaded.into_iter().map(|(_, e)| e).collect();
-
-        self.chain_id = Some(chain_id);
-        self.last_seen_seq = max_seq;
-
-        self.restore_undo(
-            entries,
-            undo_cursor_raw.map(|v| v as usize),
-            distance_from_save,
-        );
     }
 
     fn needs_flush(&self) -> bool {
@@ -1950,7 +1980,7 @@ impl Component for BufferFactory {
 
     fn draw(&mut self, _frame: &mut Frame, _area: Rect, _ctx: &DrawContext) {}
 
-    fn save_session(&self, _ctx: &Context) {}
+    fn save_session(&self, _ctx: &mut Context) {}
 
     fn restore_session(&mut self, _ctx: &mut Context) {}
 
