@@ -347,8 +347,10 @@ selected         = { fg = "term_reset", bg = "$bright_black" }
 ####################################################################
 
 [tabs]
-active   = "$inverse_active"
-inactive = "$inverse_inactive"
+active           = "$inverse_active"
+inactive         = "$inverse_inactive"
+preview_active   = "$inverse_active"
+preview_inactive = "$inverse_inactive"
 
 [status_bar]
 style = "$inverse_active"

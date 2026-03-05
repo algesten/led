@@ -100,7 +100,13 @@ fn render_tab_bar(shell: &Shell, frame: &mut Frame, area: Rect) {
             break;
         }
 
-        let style = if tab_idx == active {
+        let style = if tab.preview {
+            if tab_idx == active {
+                theme.get("tabs.preview_active").to_style()
+            } else {
+                theme.get("tabs.preview_inactive").to_style()
+            }
+        } else if tab_idx == active {
             theme.get("tabs.active").to_style()
         } else {
             theme.get("tabs.inactive").to_style()
@@ -157,6 +163,7 @@ fn render_status_bar(shell: &Shell, frame: &mut Frame, area: Rect) {
             label: String::new(),
             dirty: false,
             path: None,
+            preview: false,
         });
         let modified = if tab.dirty { " \u{25cf}" } else { "" };
         let filename = &tab.label;

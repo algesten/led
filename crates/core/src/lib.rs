@@ -79,6 +79,7 @@ pub struct TabDescriptor {
     pub label: String,
     pub dirty: bool,
     pub path: Option<PathBuf>,
+    pub preview: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -91,6 +92,9 @@ pub enum Event {
     Resume,
     FileSearchOpened { selected_text: Option<String> },
     GoToPosition { path: PathBuf, row: usize, col: usize },
+    PreviewFile { path: PathBuf, row: usize, col: usize, match_len: usize },
+    PreviewClosed,
+    ConfirmSearch { path: PathBuf, row: usize, col: usize },
 }
 
 pub enum Effect {
@@ -100,6 +104,8 @@ pub enum Effect {
     FocusPanel(PanelSlot),
     SetClipboard(Arc<String>),
     ConfirmAction { prompt: String, action: Action },
+    ActivateBuffer(PathBuf),
+    KillPreview,
     Quit,
 }
 

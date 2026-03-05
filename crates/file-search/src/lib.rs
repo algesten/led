@@ -136,7 +136,7 @@ impl FileSearch {
         }
     }
 
-    fn poll_results(&mut self) {
+    fn poll_results(&mut self) -> Vec<Effect> {
         let mut got_results = false;
         while let Ok(results) = self.result_rx.try_recv() {
             self.results = results;
@@ -144,6 +144,22 @@ impl FileSearch {
         }
         if got_results {
             self.rebuild_flat_hits();
+            return self.preview_selected();
+        }
+        vec![]
+    }
+
+    fn preview_selected(&self) -> Vec<Effect> {
+        if let Some((group, hit)) = self.selected_hit() {
+            let match_len = hit.line_text[hit.match_start..hit.match_end].chars().count();
+            vec![Effect::Emit(Event::PreviewFile {
+                path: group.path.clone(),
+                row: hit.row,
+                col: hit.col,
+                match_len,
+            })]
+        } else {
+            vec![]
         }
     }
 
@@ -213,12 +229,14 @@ impl Component for FileSearch {
 
     fn handle_action(&mut self, action: Action, ctx: &mut Context) -> Vec<Effect> {
         // Always poll for search results
-        self.poll_results();
+        let mut effects = self.poll_results();
 
         match action {
             Action::CloseFileSearch | Action::Abort => {
                 self.active = false;
-                vec![Effect::FocusPanel(PanelSlot::Main)]
+                effects.push(Effect::Emit(Event::PreviewClosed));
+                effects.push(Effect::FocusPanel(PanelSlot::Main));
+                return effects;
             }
             Action::InsertChar(c) => {
                 if self.select_all {
@@ -237,7 +255,7 @@ impl Component for FileSearch {
                 self.selected = 0;
                 self.scroll_offset = 0;
                 self.trigger_search();
-                vec![]
+                effects
             }
             Action::DeleteBackward => {
                 if self.select_all && !self.query.is_empty() {
@@ -247,7 +265,7 @@ impl Component for FileSearch {
                     self.results.clear();
                     self.flat_hits.clear();
                     self.selected = 0;
-                    return vec![];
+                    return effects;
                 }
                 if self.cursor_pos > 0 {
                     let byte_pos = self
@@ -273,7 +291,7 @@ impl Component for FileSearch {
                         self.trigger_search();
                     }
                 }
-                vec![]
+                effects
             }
             Action::DeleteForward => {
                 let char_len = self.query.chars().count();
@@ -300,14 +318,33 @@ impl Component for FileSearch {
                         self.trigger_search();
                     }
                 }
-                vec![]
+                effects
+            }
+            Action::KillLine => {
+                self.select_all = false;
+                let byte_pos = self
+                    .query
+                    .char_indices()
+                    .nth(self.cursor_pos)
+                    .map(|(i, _)| i)
+                    .unwrap_or(self.query.len());
+                self.query.truncate(byte_pos);
+                self.selected = 0;
+                self.scroll_offset = 0;
+                if self.query.is_empty() {
+                    self.results.clear();
+                    self.flat_hits.clear();
+                } else {
+                    self.trigger_search();
+                }
+                effects
             }
             Action::MoveLeft => {
                 self.select_all = false;
                 if self.cursor_pos > 0 {
                     self.cursor_pos -= 1;
                 }
-                vec![]
+                effects
             }
             Action::MoveRight => {
                 self.select_all = false;
@@ -315,36 +352,39 @@ impl Component for FileSearch {
                 if self.cursor_pos < char_len {
                     self.cursor_pos += 1;
                 }
-                vec![]
+                effects
             }
             Action::LineStart => {
                 self.select_all = false;
                 self.cursor_pos = 0;
-                vec![]
+                effects
             }
             Action::LineEnd => {
                 self.select_all = false;
                 self.cursor_pos = self.query.chars().count();
-                vec![]
+                effects
             }
             Action::MoveUp => {
                 self.select_all = false;
                 if self.selected > 0 {
                     self.selected -= 1;
                 }
-                vec![]
+                effects.extend(self.preview_selected());
+                return effects;
             }
             Action::MoveDown => {
                 self.select_all = false;
                 if !self.flat_hits.is_empty() && self.selected + 1 < self.flat_hits.len() {
                     self.selected += 1;
                 }
-                vec![]
+                effects.extend(self.preview_selected());
+                return effects;
             }
             Action::PageUp => {
                 self.select_all = false;
                 self.selected = self.selected.saturating_sub(ctx.viewport_height);
-                vec![]
+                effects.extend(self.preview_selected());
+                return effects;
             }
             Action::PageDown => {
                 self.select_all = false;
@@ -352,37 +392,35 @@ impl Component for FileSearch {
                     self.selected =
                         (self.selected + ctx.viewport_height).min(self.flat_hits.len() - 1);
                 }
-                vec![]
+                effects.extend(self.preview_selected());
+                return effects;
             }
             Action::OpenSelected | Action::InsertNewline => {
                 if let Some((group, hit)) = self.selected_hit() {
                     let path = group.path.clone();
                     let row = hit.row;
                     let col = hit.col;
-                    vec![
-                        Effect::Emit(Event::OpenFile(path.clone())),
-                        Effect::Emit(Event::GoToPosition { path, row, col }),
-                        Effect::FocusPanel(PanelSlot::Main),
-                    ]
+                    effects.push(Effect::Emit(Event::ConfirmSearch { path, row, col }));
+                    return effects;
                 } else {
-                    vec![]
+                    return effects;
                 }
             }
             Action::ToggleSearchCase => {
                 self.case_sensitive = !self.case_sensitive;
                 self.trigger_search();
-                vec![]
+                effects
             }
             Action::ToggleSearchRegex => {
                 self.use_regex = !self.use_regex;
                 self.trigger_search();
-                vec![]
+                effects
             }
             Action::Tick => {
-                self.poll_results();
-                vec![]
+                effects.extend(self.poll_results());
+                return effects;
             }
-            _ => vec![],
+            _ => return effects,
         }
     }
 
@@ -407,7 +445,7 @@ impl Component for FileSearch {
     }
 
     fn draw(&mut self, frame: &mut Frame, area: Rect, ctx: &DrawContext) {
-        self.poll_results();
+        let _ = self.poll_results();
 
         let block = Block::default()
             .borders(Borders::RIGHT)
@@ -421,8 +459,30 @@ impl Component for FileSearch {
 
         let width = inner.width as usize;
 
-        // Row 0: search input box
-        let input_y = inner.y;
+        // Row 0: modifier toggles
+        let toggle_y = inner.y;
+        {
+            let on_style = ctx.theme.get("search.toggle_on").to_style();
+            let off_style = ctx.theme.get("search.toggle_off").to_style();
+
+            let case_style = if self.case_sensitive {
+                on_style
+            } else {
+                off_style
+            };
+            let regex_style = if self.use_regex { on_style } else { off_style };
+
+            let spans = vec![
+                Span::styled(" Aa ", case_style),
+                Span::raw(" "),
+                Span::styled(" .* ", regex_style),
+            ];
+            let toggle_area = Rect::new(inner.x, toggle_y, inner.width, 1);
+            frame.render_widget(Paragraph::new(Line::from(spans)), toggle_area);
+        }
+
+        // Row 1: search input box
+        let input_y = inner.y + 1;
         {
             let input_style = if ctx.focused {
                 ctx.theme.get("search.input").to_style()
@@ -444,28 +504,6 @@ impl Component for FileSearch {
                 let cursor_x = inner.x + self.cursor_pos.min(width) as u16;
                 self.cursor_screen_pos = Some((cursor_x, input_y));
             }
-        }
-
-        // Row 1: modifier toggles
-        let toggle_y = inner.y + 1;
-        {
-            let on_style = ctx.theme.get("search.toggle_on").to_style();
-            let off_style = ctx.theme.get("search.toggle_off").to_style();
-
-            let case_style = if self.case_sensitive {
-                on_style
-            } else {
-                off_style
-            };
-            let regex_style = if self.use_regex { on_style } else { off_style };
-
-            let spans = vec![
-                Span::styled(" Aa ", case_style),
-                Span::raw(" "),
-                Span::styled(" .* ", regex_style),
-            ];
-            let toggle_area = Rect::new(inner.x, toggle_y, inner.width, 1);
-            frame.render_widget(Paragraph::new(Line::from(spans)), toggle_area);
         }
 
         // Rows 2+: search results

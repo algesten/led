@@ -53,6 +53,7 @@ pub struct Shell {
     pub single_file_mode: bool,
     clipboard: Option<arboard::Clipboard>,
     waker: Option<Waker>,
+    pre_preview_tab: Option<usize>,
 }
 
 impl Shell {
@@ -76,6 +77,7 @@ impl Shell {
             single_file_mode: false,
             clipboard: arboard::Clipboard::new().ok(),
             waker: None,
+            pre_preview_tab: None,
         }
     }
 
@@ -84,6 +86,11 @@ impl Shell {
     }
 
     pub fn register(&mut self, component: Box<dyn Component>) {
+        // Save pre_preview_tab before registering a preview buffer
+        let is_preview = component.tab().map_or(false, |t| t.preview);
+        if is_preview && self.pre_preview_tab.is_none() {
+            self.pre_preview_tab = Some(self.active_tab);
+        }
         // Dedup by path: if a tab with the same path exists, just focus it
         if let Some(path) = component.tab().and_then(|t| t.path) {
             if let Some(idx) = self.components.iter().position(|c| {
@@ -469,8 +476,22 @@ impl Shell {
                     for comp in &mut self.components {
                         more_effects.extend(comp.handle_event(&event, &mut ctx));
                     }
-                    // Process spawned effects (but don't recurse infinitely)
                     self.process_effects(more_effects);
+                    // Post-broadcast hook for preview tab management
+                    match &event {
+                        Event::PreviewClosed => {
+                            if let Some(tab) = self.pre_preview_tab.take() {
+                                let tabs = self.tabbed_components();
+                                if !tabs.is_empty() {
+                                    self.active_tab = tab.min(tabs.len() - 1);
+                                }
+                            }
+                        }
+                        Event::ConfirmSearch { .. } => {
+                            self.pre_preview_tab = None;
+                        }
+                        _ => {}
+                    }
                 }
                 Effect::Spawn(component) => {
                     self.register(component);
@@ -492,6 +513,29 @@ impl Shell {
                         input: String::new(),
                         action: PendingAction::Confirmed(action),
                     });
+                }
+                Effect::ActivateBuffer(path) => {
+                    if self.pre_preview_tab.is_none() {
+                        self.pre_preview_tab = Some(self.active_tab);
+                    }
+                    if let Some(idx) = self.components.iter().position(|c| {
+                        c.tab().and_then(|t| t.path).as_deref() == Some(path.as_path())
+                    }) {
+                        self.activate_tab_for_component(idx);
+                    }
+                }
+                Effect::KillPreview => {
+                    if let Some(idx) = self.components.iter().position(|c| {
+                        c.tab().map_or(false, |t| t.preview)
+                    }) {
+                        self.components.remove(idx);
+                        let tabs = self.tabbed_components();
+                        if tabs.is_empty() {
+                            self.active_tab = 0;
+                        } else if self.active_tab >= tabs.len() {
+                            self.active_tab = tabs.len() - 1;
+                        }
+                    }
                 }
                 Effect::Quit => {
                     // Handled at top level

@@ -178,6 +178,7 @@ pub struct Buffer {
     changed: Arc<AtomicBool>,
     disk_modified: bool,
     disk_deleted: bool,
+    pub preview: bool,
 }
 
 impl Buffer {
@@ -213,6 +214,7 @@ impl Buffer {
             changed: Arc::new(AtomicBool::new(false)),
             disk_modified: false,
             disk_deleted: false,
+            preview: false,
         }
     }
 
@@ -263,6 +265,7 @@ impl Buffer {
             changed,
             disk_modified: false,
             disk_deleted: false,
+            preview: false,
         })
     }
 
@@ -927,6 +930,17 @@ impl Buffer {
         self.mark = None;
     }
 
+    /// Set a visible highlight from (row, col) spanning `len` chars.
+    /// Sets mark at start, cursor at end so the selection system renders it.
+    pub fn highlight_match(&mut self, row: usize, col: usize, len: usize) {
+        let r = row.min(self.line_count().saturating_sub(1));
+        let line_len = self.line_len(r);
+        let c = col.min(line_len);
+        self.mark = Some((r, c));
+        self.cursor_row = r;
+        self.cursor_col = (c + len).min(line_len);
+    }
+
     fn selection_range(&self) -> Option<((usize, usize), (usize, usize))> {
         let mark = self.mark?;
         let cursor = (self.cursor_row, self.cursor_col);
@@ -1440,6 +1454,7 @@ impl Component for Buffer {
             label: self.filename().to_string(),
             dirty: self.dirty,
             path: self.path.clone(),
+            preview: self.preview,
         })
     }
 
@@ -1596,6 +1611,29 @@ impl Component for Buffer {
                     self.cursor_row = (*row).min(self.line_count().saturating_sub(1));
                     self.cursor_col = (*col).min(self.line_len(self.cursor_row));
                     self.clear_mark();
+                }
+            }
+            Event::PreviewFile { path, row, col, match_len } => {
+                if self.path.as_deref() == Some(path.as_path()) {
+                    let r = (*row).min(self.line_count().saturating_sub(1));
+                    self.cursor_row = r;
+                    self.cursor_col = (*col).min(self.line_len(r));
+                    self.scroll_offset = r.saturating_sub(ctx.viewport_height / 2);
+                    self.highlight_match(*row, *col, *match_len);
+                    return vec![Effect::ActivateBuffer(path.clone())];
+                }
+            }
+            Event::ConfirmSearch { path, row, col } => {
+                if self.path.as_deref() == Some(path.as_path()) {
+                    self.preview = false;
+                    let r = (*row).min(self.line_count().saturating_sub(1));
+                    self.cursor_row = r;
+                    self.cursor_col = (*col).min(self.line_len(r));
+                    self.clear_mark();
+                    return vec![
+                        Effect::ActivateBuffer(path.clone()),
+                        Effect::FocusPanel(PanelSlot::Main),
+                    ];
                 }
             }
             _ => {}
@@ -1829,7 +1867,15 @@ impl Component for Buffer {
 // BufferFactory
 // ---------------------------------------------------------------------------
 
-pub struct BufferFactory;
+pub struct BufferFactory {
+    preview_path: Option<PathBuf>,
+}
+
+impl BufferFactory {
+    pub fn new() -> Self {
+        Self { preview_path: None }
+    }
+}
 
 impl Component for BufferFactory {
     fn as_any(&self) -> &dyn std::any::Any { self }
@@ -1844,16 +1890,59 @@ impl Component for BufferFactory {
     }
 
     fn handle_event(&mut self, event: &Event, ctx: &mut Context) -> Vec<Effect> {
+        let mut effects = Vec::new();
         match event {
             Event::OpenFile(path) => {
                 let path_str = path.to_string_lossy();
                 match Buffer::from_file_with_waker(&path_str, ctx.waker.clone()) {
-                    Ok(buf) => vec![Effect::Spawn(Box::new(buf))],
-                    Err(e) => vec![Effect::SetMessage(format!("Open failed: {e}"))],
+                    Ok(buf) => effects.push(Effect::Spawn(Box::new(buf))),
+                    Err(e) => effects.push(Effect::SetMessage(format!("Open failed: {e}"))),
                 }
             }
-            _ => vec![],
+            Event::PreviewFile { path, row, col, match_len } => {
+                if self.preview_path.as_ref() == Some(path) {
+                    return effects; // existing preview buffer handles repositioning
+                }
+                if self.preview_path.is_some() {
+                    effects.push(Effect::KillPreview);
+                }
+                let path_str = path.to_string_lossy();
+                match Buffer::from_file_with_waker(&path_str, ctx.waker.clone()) {
+                    Ok(mut buf) => {
+                        buf.preview = true;
+                        let r = (*row).min(buf.line_count().saturating_sub(1));
+                        buf.cursor_row = r;
+                        buf.cursor_col = (*col).min(buf.line_len(r));
+                        buf.scroll_offset = r.saturating_sub(ctx.viewport_height / 2);
+                        buf.highlight_match(*row, *col, *match_len);
+                        self.preview_path = Some(path.clone());
+                        effects.push(Effect::Spawn(Box::new(buf)));
+                    }
+                    Err(e) => effects.push(Effect::SetMessage(format!("Preview failed: {e}"))),
+                }
+            }
+            Event::PreviewClosed => {
+                if self.preview_path.take().is_some() {
+                    effects.push(Effect::KillPreview);
+                }
+            }
+            Event::ConfirmSearch { path, row, col } => {
+                if self.preview_path.as_ref() == Some(path) {
+                    self.preview_path = None;
+                    // Preview buffer promotes itself via Buffer.handle_event
+                } else {
+                    // No preview for this path — ensure buffer exists
+                    self.preview_path = None;
+                    effects.push(Effect::Emit(Event::OpenFile(path.clone())));
+                    effects.push(Effect::Emit(Event::GoToPosition {
+                        path: path.clone(), row: *row, col: *col,
+                    }));
+                    effects.push(Effect::FocusPanel(PanelSlot::Main));
+                }
+            }
+            _ => {}
         }
+        effects
     }
 
     fn draw(&mut self, _frame: &mut Frame, _area: Rect, _ctx: &DrawContext) {}

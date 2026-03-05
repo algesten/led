@@ -96,7 +96,7 @@ fn main() -> io::Result<()> {
     };
 
     let mut components: Vec<Box<dyn led_core::Component>> = vec![
-        Box::new(BufferFactory),
+        Box::new(BufferFactory::new()),
         Box::new(FileSearch::new(root.clone(), Some(waker.clone()))),
         Box::new(FileBrowser::new(root.clone())),
     ];
