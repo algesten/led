@@ -605,20 +605,4 @@ impl Component for FileSearch {
 
     fn save_session(&self, _ctx: &mut Context) {}
     fn restore_session(&mut self, _ctx: &mut Context) {}
-
-    fn default_theme_toml(&self) -> &'static str {
-        r#"
-[search]
-border             = "$muted"
-input              = { bg = "$bright_black" }
-input_unfocused    = { bg = "$bright_black" }
-toggle_on          = "$inverse_active"
-toggle_off         = "$inverse_inactive"
-file_header        = "$accent"
-hit                = "$normal"
-match              = { fg = "$bright_yellow", bold = true }
-selected           = "$inverse_active"
-selected_unfocused = "$inverse_inactive"
-"#
-    }
 }

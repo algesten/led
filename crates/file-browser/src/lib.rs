@@ -387,15 +387,4 @@ impl Component for FileBrowser {
     fn context_name(&self) -> Option<&str> {
         Some("browser")
     }
-
-    fn default_theme_toml(&self) -> &'static str {
-        r#"
-[browser]
-directory          = "$accent"
-file               = "$normal"
-selected           = "$inverse_active"
-selected_unfocused = "$inverse_inactive"
-border             = "$muted"
-"#
-    }
 }

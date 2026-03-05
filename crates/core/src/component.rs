@@ -143,9 +143,4 @@ pub trait Component: std::any::Any {
     fn context_name(&self) -> Option<&str> {
         None
     }
-
-    /// TOML fragment for this component's default theme styles.
-    fn default_theme_toml(&self) -> &'static str {
-        ""
-    }
 }

@@ -109,7 +109,7 @@ fn main() -> io::Result<()> {
             Ok(()) => eprintln!("Config reset to defaults."),
             Err(e) => eprintln!("Failed to reset config: {e}"),
         }
-        theme::reset_theme(&components);
+        theme::reset_theme();
         eprintln!("Theme reset to defaults.");
         session::reset_db();
         eprintln!("Session database reset.");
@@ -122,7 +122,7 @@ fn main() -> io::Result<()> {
             config::default_keymap()
         }
     };
-    let the_theme = theme::load_theme(&components);
+    let the_theme = theme::load_theme();
 
     let db = session::open_db();
 
@@ -273,7 +273,7 @@ fn run(
                         }
                     }
                     ConfigFile::Theme => {
-                        shell.set_theme(theme::load_theme(shell.components()));
+                        shell.set_theme(theme::load_theme());
                         shell.message = Some("Reloaded theme.toml.".into());
                     }
                 }

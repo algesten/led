@@ -1,3 +1,4 @@
+pub mod color;
 mod types;
 mod component;
 

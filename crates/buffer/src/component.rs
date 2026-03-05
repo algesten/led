@@ -1,13 +1,16 @@
 use std::path::PathBuf;
 
 use led_core::{
-    Action, Component, Context, DrawContext, Effect, Event, PanelClaim, PanelSlot, TabDescriptor,
+    Action, Component, Context, DrawContext, Effect, ElementStyle, Event, PanelClaim, PanelSlot,
+    TabDescriptor,
 };
 use ratatui::Frame;
 use ratatui::layout::Rect;
+use ratatui::style::Color;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
+use crate::color_hint::{evaluate_theme_line, parse_color_defs, scan_hex_color};
 use crate::wrap::{
     chars_to_string, compute_chunks, expand_tabs, find_sub_line, visual_line_count,
 };
@@ -372,10 +375,37 @@ impl Component for Buffer {
         let sel_style = ctx.theme.get("editor.selection").to_style();
         let sel_range = self.selection_range();
 
+        let is_theme = self.path.as_ref()
+            .and_then(|p| p.file_name())
+            .map_or(false, |n| n == "theme.toml");
+
+        let color_defs = if is_theme {
+            let all_lines: Vec<String> = (0..total_lines).map(|i| self.line(i)).collect();
+            Some(parse_color_defs(all_lines.iter().map(|s| s.as_str())))
+        } else {
+            None
+        };
+
+        // Track current TOML section for theme files
+        let mut current_section = String::new();
+
         let mut display_lines: Vec<Line> = Vec::with_capacity(height);
         let mut cursor_pos: Option<(u16, u16)> = None;
         let mut screen_row: usize = 0;
         let mut line_idx = self.scroll_offset;
+
+        // Pre-scan to find the section header for the scroll_offset line
+        if is_theme {
+            for i in 0..self.scroll_offset.min(total_lines) {
+                let l = self.line(i);
+                let t = l.trim();
+                if t.starts_with('[') && !t.starts_with("[[") {
+                    if let Some(end) = t.find(']') {
+                        current_section = t[1..end].to_string();
+                    }
+                }
+            }
+        }
 
         while screen_row < height && line_idx < total_lines {
             let raw = self.line(line_idx);
@@ -415,6 +445,27 @@ impl Component for Buffer {
             // Skip sub-lines for partial-line scroll on the first visible line
             let skip = if line_idx == self.scroll_offset { self.scroll_sub_line } else { 0 };
 
+            // Color hint for gutter preview (first chunk only)
+            let color_hint = if is_theme {
+                // Track section headers
+                let trimmed = raw.trim();
+                if trimmed.starts_with('[') && !trimmed.starts_with("[[") {
+                    if let Some(end) = trimmed.find(']') {
+                        current_section = trimmed[1..end].to_string();
+                    }
+                }
+                color_defs.as_ref().and_then(|defs| {
+                    evaluate_theme_line(&raw, &current_section, defs)
+                })
+            } else {
+                scan_hex_color(&raw).map(|c| ElementStyle {
+                    fg: c,
+                    bg: Color::Reset,
+                    bold: false,
+                    reversed: false,
+                })
+            };
+
             for (chunk_i, &(cs, ce)) in chunks.iter().enumerate() {
                 if chunk_i < skip {
                     continue;
@@ -426,8 +477,21 @@ impl Component for Buffer {
                 let chunk_text = &display[cs..ce];
                 let mut spans: Vec<Span> = Vec::new();
 
-                // Gutter
-                spans.push(Span::styled("  ", gutter_style));
+                // Gutter — show color preview on first visible chunk
+                if chunk_i == skip {
+                    if let Some(ref hint) = color_hint {
+                        if hint.bg != Color::Reset {
+                            spans.push(Span::styled("A ", hint.to_style()));
+                        } else {
+                            let block_style = ratatui::style::Style::default().bg(hint.fg);
+                            spans.push(Span::styled("  ", block_style));
+                        }
+                    } else {
+                        spans.push(Span::styled("  ", gutter_style));
+                    }
+                } else {
+                    spans.push(Span::styled("  ", gutter_style));
+                }
 
                 // Content with optional selection highlighting
                 if let Some((ss, se)) = sel_dcols {
@@ -696,13 +760,4 @@ impl Component for BufferFactory {
     fn save_session(&self, _ctx: &mut Context) {}
 
     fn restore_session(&mut self, _ctx: &mut Context) {}
-
-    fn default_theme_toml(&self) -> &'static str {
-        r#"
-[editor]
-text      = "$normal"
-gutter    = "$muted"
-selection = "$selected"
-"#
-    }
 }

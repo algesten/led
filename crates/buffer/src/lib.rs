@@ -3,6 +3,7 @@ mod editing;
 mod undo;
 mod watcher;
 mod component;
+mod color_hint;
 
 pub use component::BufferFactory;
 
