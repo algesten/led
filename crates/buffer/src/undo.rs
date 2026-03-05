@@ -2,7 +2,7 @@ use std::time::Instant;
 
 use led_core::Context;
 
-use crate::{Buffer, EditKind, EditOp, PendingGroup, UndoEntry, GROUP_TIMEOUT_MS};
+use crate::{Buffer, EditKind, EditOp, GROUP_TIMEOUT_MS, PendingGroup, UndoEntry};
 
 impl Buffer {
     pub fn undo(&mut self) {
@@ -293,19 +293,18 @@ impl Buffer {
              ORDER BY seq",
         )
         .and_then(|mut stmt| {
-            let rows = stmt.query_map(
-                rusqlite::params![root, file, after_seq],
-                |row| {
-                    let seq: i64 = row.get(0)?;
-                    let data: Vec<u8> = row.get(1)?;
-                    let entry: UndoEntry = rmp_serde::from_slice(&data).map_err(|e| {
-                        rusqlite::Error::FromSqlConversionFailure(
-                            0, rusqlite::types::Type::Blob, Box::new(e),
-                        )
-                    })?;
-                    Ok((seq, entry))
-                },
-            )?;
+            let rows = stmt.query_map(rusqlite::params![root, file, after_seq], |row| {
+                let seq: i64 = row.get(0)?;
+                let data: Vec<u8> = row.get(1)?;
+                let entry: UndoEntry = rmp_serde::from_slice(&data).map_err(|e| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        0,
+                        rusqlite::types::Type::Blob,
+                        Box::new(e),
+                    )
+                })?;
+                Ok((seq, entry))
+            })?;
             Ok(rows.filter_map(|r| r.ok()).collect())
         })
         .unwrap_or_default()

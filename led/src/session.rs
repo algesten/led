@@ -3,7 +3,6 @@ use std::path::{Path, PathBuf};
 
 use rusqlite::{Connection, params};
 
-
 pub struct SessionData {
     pub buffer_paths: Vec<PathBuf>,
     pub active_tab: usize,
@@ -86,17 +85,17 @@ fn migrate_schema(conn: &Connection) {
             [],
             |row| row.get::<_, i64>(0),
         )
-        .unwrap_or(0) > 0;
+        .unwrap_or(0)
+        > 0;
 
     if has_browser_state {
         // Migrate selected_index
         let _ = (|| -> rusqlite::Result<()> {
-            let mut stmt = conn.prepare(
-                "SELECT root_path, selected_index FROM browser_state"
-            )?;
-            let rows: Vec<(String, i64)> = stmt.query_map([], |row| {
-                Ok((row.get(0)?, row.get(1)?))
-            })?.filter_map(|r| r.ok()).collect();
+            let mut stmt = conn.prepare("SELECT root_path, selected_index FROM browser_state")?;
+            let rows: Vec<(String, i64)> = stmt
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .filter_map(|r| r.ok())
+                .collect();
             for (root, sel) in rows {
                 conn.execute(
                     "INSERT OR IGNORE INTO session_kv (root_path, key, value) VALUES (?1, ?2, ?3)",
@@ -117,12 +116,12 @@ fn migrate_schema(conn: &Connection) {
 
         if has_expanded {
             let _ = (|| -> rusqlite::Result<()> {
-                let mut stmt = conn.prepare(
-                    "SELECT root_path, dir_path FROM browser_expanded_dirs"
-                )?;
-                let rows: Vec<(String, String)> = stmt.query_map([], |row| {
-                    Ok((row.get(0)?, row.get(1)?))
-                })?.filter_map(|r| r.ok()).collect();
+                let mut stmt =
+                    conn.prepare("SELECT root_path, dir_path FROM browser_expanded_dirs")?;
+                let rows: Vec<(String, String)> = stmt
+                    .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+                    .filter_map(|r| r.ok())
+                    .collect();
 
                 // Group by root_path
                 let mut by_root: HashMap<String, Vec<String>> = HashMap::new();
@@ -157,7 +156,11 @@ pub fn open_db() -> Option<Connection> {
 
 pub fn save_session(conn: &Connection, root_path: &Path, session: &SessionData) {
     let root = root_path.to_string_lossy();
-    let focus = if session.focus_is_editor { "editor" } else { "browser" };
+    let focus = if session.focus_is_editor {
+        "editor"
+    } else {
+        "browser"
+    };
     let side = if session.show_side_panel { 1 } else { 0 };
 
     let result: rusqlite::Result<()> = (|| {
@@ -203,9 +206,7 @@ pub fn load_session(conn: &Connection, root_path: &Path) -> Option<SessionData> 
         .ok()?;
 
     let mut stmt = conn
-        .prepare(
-            "SELECT file_path FROM buffers WHERE root_path = ?1 ORDER BY tab_index",
-        )
+        .prepare("SELECT file_path FROM buffers WHERE root_path = ?1 ORDER BY tab_index")
         .ok()?;
     let buffer_paths: Vec<PathBuf> = stmt
         .query_map(params![root], |row| {
@@ -227,9 +228,8 @@ pub fn load_session(conn: &Connection, root_path: &Path) -> Option<SessionData> 
 pub fn load_kv(conn: &Connection, root_path: &Path) -> HashMap<String, String> {
     let root = root_path.to_string_lossy();
     let mut map = HashMap::new();
-    let Ok(mut stmt) = conn.prepare(
-        "SELECT key, value FROM session_kv WHERE root_path = ?1"
-    ) else {
+    let Ok(mut stmt) = conn.prepare("SELECT key, value FROM session_kv WHERE root_path = ?1")
+    else {
         return map;
     };
     let Ok(rows) = stmt.query_map(params![root], |row| {

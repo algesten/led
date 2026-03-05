@@ -1,24 +1,24 @@
 mod config;
-mod shell;
 mod session;
+mod shell;
 mod theme;
 mod ui;
 
 use std::io;
 use std::path::PathBuf;
-use std::sync::{mpsc, Arc};
+use std::sync::{Arc, mpsc};
 
 use clap::Parser;
 use crossterm::event::{self, Event, KeyEvent};
 use notify::{EventKind, RecursiveMode, Watcher};
 use ratatui::DefaultTerminal;
 
-use led_core::PanelSlot;
 use led_buffer::{Buffer, BufferFactory};
+use led_core::PanelSlot;
 use led_file_browser::FileBrowser;
 use led_file_search::FileSearch;
-use shell::{Shell, InputResult};
 use session::SessionData;
+use shell::{InputResult, Shell};
 
 #[derive(Debug)]
 enum ConfigFile {
@@ -77,16 +77,14 @@ fn main() -> io::Result<()> {
     });
 
     // Build component list — the ONLY place concrete types appear
-    let initial_buffer = arg_path.as_ref()
-        .filter(|p| p.is_file())
-        .map(|path| {
-            let path_str = path.to_string_lossy();
-            Buffer::from_file_with_waker(&path_str, Some(waker.clone())).unwrap_or_else(|_| {
-                let mut buf = Buffer::empty();
-                buf.path = Some(path.clone());
-                buf
-            })
-        });
+    let initial_buffer = arg_path.as_ref().filter(|p| p.is_file()).map(|path| {
+        let path_str = path.to_string_lossy();
+        Buffer::from_file_with_waker(&path_str, Some(waker.clone())).unwrap_or_else(|_| {
+            let mut buf = Buffer::empty();
+            buf.path = Some(path.clone());
+            buf
+        })
+    });
 
     let mut components: Vec<Box<dyn led_core::Component>> = vec![
         Box::new(BufferFactory::new()),
@@ -135,7 +133,10 @@ fn main() -> io::Result<()> {
 
     // Restore session only when no explicit file was passed
     if !explicit_file {
-        if let Some(session) = shell.db().and_then(|conn| session::load_session(conn, &root)) {
+        if let Some(session) = shell
+            .db()
+            .and_then(|conn| session::load_session(conn, &root))
+        {
             restore_session(&mut shell, session);
         }
     }
@@ -187,7 +188,9 @@ fn main() -> io::Result<()> {
         // Save session rows first (DELETE + INSERT), then update cursor data
         if let Some(conn) = shell.db() {
             let snapshot = shell.capture_session();
-            let buffer_paths: Vec<_> = shell.components().iter()
+            let buffer_paths: Vec<_> = shell
+                .components()
+                .iter()
                 .filter_map(|c| c.tab().and_then(|t| t.path))
                 .collect();
             let session_data = SessionData {
@@ -246,7 +249,9 @@ fn run(
                             crossterm::cursor::Show
                         )?;
                         // SAFETY: raise(SIGTSTP) is the standard way to suspend a process.
-                        unsafe { libc::raise(libc::SIGTSTP); }
+                        unsafe {
+                            libc::raise(libc::SIGTSTP);
+                        }
                         crossterm::terminal::enable_raw_mode()?;
                         crossterm::execute!(
                             io::stdout(),
@@ -258,20 +263,18 @@ fn run(
                     }
                 }
             }
-            Some(AppEvent::ConfigChanged(file)) => {
-                match file {
-                    ConfigFile::Keys => {
-                        if let Some(km) = config::reload_keymap() {
-                            shell.set_keymap(km);
-                            shell.message = Some("Reloaded keys.toml.".into());
-                        }
-                    }
-                    ConfigFile::Theme => {
-                        shell.set_theme(theme::load_theme());
-                        shell.message = Some("Reloaded theme.toml.".into());
+            Some(AppEvent::ConfigChanged(file)) => match file {
+                ConfigFile::Keys => {
+                    if let Some(km) = config::reload_keymap() {
+                        shell.set_keymap(km);
+                        shell.message = Some("Reloaded keys.toml.".into());
                     }
                 }
-            }
+                ConfigFile::Theme => {
+                    shell.set_theme(theme::load_theme());
+                    shell.message = Some("Reloaded theme.toml.".into());
+                }
+            },
             Some(AppEvent::Wakeup) => {
                 shell.tick();
             }
@@ -287,10 +290,7 @@ fn run(
 
 // --- Session helpers ---
 
-fn restore_session(
-    shell: &mut Shell,
-    session: SessionData,
-) {
+fn restore_session(shell: &mut Shell, session: SessionData) {
     // Restore buffers — undo + cursor state loaded by Buffer::restore_session via register()
     let waker = shell.waker().cloned();
     for path in &session.buffer_paths {
@@ -334,27 +334,33 @@ fn spawn_config_watcher(
     theme_path: Option<&std::path::Path>,
 ) -> Option<notify::RecommendedWatcher> {
     let config_dir = keys_path.or(theme_path)?.parent()?;
-    let keys_name = keys_path.and_then(|p| p.file_name()).map(|n| n.to_os_string());
-    let theme_name = theme_path.and_then(|p| p.file_name()).map(|n| n.to_os_string());
+    let keys_name = keys_path
+        .and_then(|p| p.file_name())
+        .map(|n| n.to_os_string());
+    let theme_name = theme_path
+        .and_then(|p| p.file_name())
+        .map(|n| n.to_os_string());
 
-    let mut watcher = notify::recommended_watcher(move |res: Result<notify::Event, notify::Error>| {
-        let Ok(ev) = res else { return };
-        match ev.kind {
-            EventKind::Create(_) | EventKind::Modify(_) => {}
-            _ => return,
-        }
-        for path in &ev.paths {
-            let fname = path.file_name();
-            if fname == keys_name.as_deref() {
-                let _ = tx.send(AppEvent::ConfigChanged(ConfigFile::Keys));
-            } else if fname == theme_name.as_deref() {
-                let _ = tx.send(AppEvent::ConfigChanged(ConfigFile::Theme));
+    let mut watcher =
+        notify::recommended_watcher(move |res: Result<notify::Event, notify::Error>| {
+            let Ok(ev) = res else { return };
+            match ev.kind {
+                EventKind::Create(_) | EventKind::Modify(_) => {}
+                _ => return,
             }
-        }
-    }).ok()?;
+            for path in &ev.paths {
+                let fname = path.file_name();
+                if fname == keys_name.as_deref() {
+                    let _ = tx.send(AppEvent::ConfigChanged(ConfigFile::Keys));
+                } else if fname == theme_name.as_deref() {
+                    let _ = tx.send(AppEvent::ConfigChanged(ConfigFile::Theme));
+                }
+            }
+        })
+        .ok()?;
 
-    watcher.watch(config_dir, RecursiveMode::NonRecursive).ok()?;
+    watcher
+        .watch(config_dir, RecursiveMode::NonRecursive)
+        .ok()?;
     Some(watcher)
 }
-
-

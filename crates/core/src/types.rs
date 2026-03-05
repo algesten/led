@@ -92,13 +92,30 @@ pub trait Clipboard {
 
 pub enum Event {
     OpenFile(PathBuf),
-    TabActivated { path: Option<PathBuf> },
+    TabActivated {
+        path: Option<PathBuf>,
+    },
     Resume,
-    FileSearchOpened { selected_text: Option<String> },
-    GoToPosition { path: PathBuf, row: usize, col: usize },
-    PreviewFile { path: PathBuf, row: usize, col: usize, match_len: usize },
+    FileSearchOpened {
+        selected_text: Option<String>,
+    },
+    GoToPosition {
+        path: PathBuf,
+        row: usize,
+        col: usize,
+    },
+    PreviewFile {
+        path: PathBuf,
+        row: usize,
+        col: usize,
+        match_len: usize,
+    },
     PreviewClosed,
-    ConfirmSearch { path: PathBuf, row: usize, col: usize },
+    ConfirmSearch {
+        path: PathBuf,
+        row: usize,
+        col: usize,
+    },
 }
 
 pub enum Effect {

@@ -108,7 +108,9 @@ impl FileSearch {
 
     fn preview_selected(&self) -> Vec<Effect> {
         if let Some((group, hit)) = self.selected_hit() {
-            let match_len = hit.line_text[hit.match_start..hit.match_end].chars().count();
+            let match_len = hit.line_text[hit.match_start..hit.match_end]
+                .chars()
+                .count();
             vec![Effect::Emit(Event::PreviewFile {
                 path: group.path.clone(),
                 row: hit.row,
@@ -512,8 +514,7 @@ impl Component for FileSearch {
                 };
                 let padded = format!("{:<w$}", header_text, w = width);
                 let line = Line::from(Span::styled(padded, header_style));
-                let row_area =
-                    Rect::new(inner.x, results_y + rendered as u16, inner.width, 1);
+                let row_area = Rect::new(inner.x, results_y + rendered as u16, inner.width, 1);
                 frame.render_widget(Paragraph::new(vec![line]), row_area);
                 rendered += 1;
             }
@@ -525,8 +526,8 @@ impl Component for FileSearch {
                     if rendered >= results_height {
                         break;
                     }
-                    let is_selected = selected_flat
-                        .map_or(false, |f| f.group_idx == gi && f.hit_idx == hi);
+                    let is_selected =
+                        selected_flat.map_or(false, |f| f.group_idx == gi && f.hit_idx == hi);
 
                     let base_style = if is_selected {
                         selected_style
@@ -560,8 +561,11 @@ impl Component for FileSearch {
                         (match_char_end.saturating_sub(win_start)).min(visible.chars().count());
 
                     let before: String = visible.chars().take(ms_in_win).collect();
-                    let matched: String =
-                        visible.chars().skip(ms_in_win).take(me_in_win - ms_in_win).collect();
+                    let matched: String = visible
+                        .chars()
+                        .skip(ms_in_win)
+                        .take(me_in_win - ms_in_win)
+                        .collect();
                     let after: String = visible.chars().skip(me_in_win).collect();
 
                     let pad_needed = avail.saturating_sub(visible.chars().count());
@@ -572,15 +576,18 @@ impl Component for FileSearch {
                         spans.push(Span::styled(before, base_style));
                     }
                     if !matched.is_empty() {
-                        let ms = if is_selected { selected_style } else { match_style };
+                        let ms = if is_selected {
+                            selected_style
+                        } else {
+                            match_style
+                        };
                         spans.push(Span::styled(matched, ms));
                     }
                     if !after_padded.is_empty() {
                         spans.push(Span::styled(after_padded, base_style));
                     }
 
-                    let row_area =
-                        Rect::new(inner.x, results_y + rendered as u16, inner.width, 1);
+                    let row_area = Rect::new(inner.x, results_y + rendered as u16, inner.width, 1);
                     frame.render_widget(Paragraph::new(Line::from(spans)), row_area);
                     rendered += 1;
                 }

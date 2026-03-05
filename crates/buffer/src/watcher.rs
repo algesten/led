@@ -23,34 +23,38 @@ impl Buffer {
         let notify_dir = notify_dir();
         let notify_dir_for_closure = notify_dir.clone();
 
-        let mut watcher = notify::recommended_watcher(move |res: Result<notify::Event, notify::Error>| {
-            let Ok(ev) = res else { return };
-            match ev.kind {
-                notify::EventKind::Create(_)
-                | notify::EventKind::Modify(_)
-                | notify::EventKind::Remove(_) => {}
-                _ => return,
-            }
-            let dominated = ev.paths.iter().any(|p| {
-                if p == &source_file {
-                    return true;
+        let mut watcher =
+            notify::recommended_watcher(move |res: Result<notify::Event, notify::Error>| {
+                let Ok(ev) = res else { return };
+                match ev.kind {
+                    notify::EventKind::Create(_)
+                    | notify::EventKind::Modify(_)
+                    | notify::EventKind::Remove(_) => {}
+                    _ => return,
                 }
-                if let Some(ref nd) = notify_dir_for_closure {
-                    if *p == nd.join(&notify_hash) {
+                let dominated = ev.paths.iter().any(|p| {
+                    if p == &source_file {
                         return true;
                     }
+                    if let Some(ref nd) = notify_dir_for_closure {
+                        if *p == nd.join(&notify_hash) {
+                            return true;
+                        }
+                    }
+                    false
+                });
+                if dominated {
+                    changed.store(true, Ordering::SeqCst);
+                    if let Some(ref w) = waker {
+                        w();
+                    }
                 }
-                false
-            });
-            if dominated {
-                changed.store(true, Ordering::SeqCst);
-                if let Some(ref w) = waker {
-                    w();
-                }
-            }
-        }).ok()?;
+            })
+            .ok()?;
 
-        watcher.watch(&source_parent, RecursiveMode::NonRecursive).ok()?;
+        watcher
+            .watch(&source_parent, RecursiveMode::NonRecursive)
+            .ok()?;
         if let Some(ref nd) = notify_dir {
             let _ = std::fs::create_dir_all(nd);
             let _ = watcher.watch(nd, RecursiveMode::NonRecursive);
@@ -95,12 +99,10 @@ impl Buffer {
 
         // File exists — read and hash it
         let disk_hash = match File::open(path) {
-            Ok(f) => {
-                match Rope::from_reader(BufReader::new(f)) {
-                    Ok(rope) => Self::hash_rope(&rope),
-                    Err(_) => return vec![],
-                }
-            }
+            Ok(f) => match Rope::from_reader(BufReader::new(f)) {
+                Ok(rope) => Self::hash_rope(&rope),
+                Err(_) => return vec![],
+            },
             Err(_) => return vec![],
         };
 
@@ -244,7 +246,9 @@ impl Buffer {
     pub(crate) fn reload_from_disk(&mut self) {
         let Some(ref path) = self.path else { return };
         let Ok(file) = File::open(path) else { return };
-        let Ok(rope) = Rope::from_reader(BufReader::new(file)) else { return };
+        let Ok(rope) = Rope::from_reader(BufReader::new(file)) else {
+            return;
+        };
         self.rope = rope;
         self.syntax = crate::syntax::SyntaxState::from_path_and_rope(path, &self.rope);
         self.base_content_hash = Self::hash_rope(&self.rope);

@@ -1,7 +1,9 @@
 use std::path::Path;
 
 use ropey::Rope;
-use tree_sitter::{InputEdit, Language, Parser, Point, Query, QueryCursor, StreamingIterator, Tree};
+use tree_sitter::{
+    InputEdit, Language, Parser, Point, Query, QueryCursor, StreamingIterator, Tree,
+};
 
 // ---------------------------------------------------------------------------
 // Highlight span returned to the renderer
@@ -146,8 +148,11 @@ impl SyntaxState {
         parser.set_language(&entry.language).ok()?;
 
         let query = Query::new(&entry.language, entry.highlights_query).ok()?;
-        let _capture_names: Vec<String> =
-            query.capture_names().iter().map(|s| s.to_string()).collect();
+        let _capture_names: Vec<String> = query
+            .capture_names()
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
 
         let tree = parse_rope(&mut parser, rope, None)?;
 
@@ -192,12 +197,11 @@ impl SyntaxState {
         let capture_names = self.query.capture_names();
         let mut result = Vec::new();
 
-        let mut matches = cursor.matches(
-            &self.query,
-            self.tree.root_node(),
-            RopeProvider { rope },
-        );
-        while let Some(m) = { matches.advance(); matches.get() } {
+        let mut matches = cursor.matches(&self.query, self.tree.root_node(), RopeProvider { rope });
+        while let Some(m) = {
+            matches.advance();
+            matches.get()
+        } {
             for cap in m.captures {
                 let name = capture_names[cap.index as usize];
                 let node = cap.node;
@@ -206,7 +210,8 @@ impl SyntaxState {
 
                 // Convert byte range to per-line char spans
                 let node_start_line = rope.byte_to_line(node_start_byte);
-                let node_end_line = rope.byte_to_line(node_end_byte.min(rope.len_bytes().max(1) - 1));
+                let node_end_line =
+                    rope.byte_to_line(node_end_byte.min(rope.len_bytes().max(1) - 1));
 
                 for line in node_start_line..=node_end_line {
                     if line < start_line || line >= end_line {
@@ -275,7 +280,13 @@ fn byte_and_point(rope: &Rope, char_idx: usize) -> (usize, Point) {
     let byte = rope.char_to_byte(char_idx);
     let line = rope.char_to_line(char_idx);
     let line_byte = rope.line_to_byte(line);
-    (byte, Point { row: line, column: byte - line_byte })
+    (
+        byte,
+        Point {
+            row: line,
+            column: byte - line_byte,
+        },
+    )
 }
 
 /// Build an InputEdit for inserting `text` at `char_idx`.
@@ -299,7 +310,10 @@ pub(crate) fn edit_for_insert(rope: &Rope, char_idx: usize, text: &str) -> Input
         new_end_byte,
         start_position: start_pos,
         old_end_position: start_pos,
-        new_end_position: Point { row: end_row, column: end_col },
+        new_end_position: Point {
+            row: end_row,
+            column: end_col,
+        },
     }
 }
 

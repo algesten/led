@@ -5,9 +5,7 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use rusqlite::Connection;
 
-use crate::{
-    Action, Clipboard, Effect, Event, PanelClaim, TabDescriptor, Waker,
-};
+use crate::{Action, Clipboard, Effect, Event, PanelClaim, TabDescriptor, Waker};
 
 // ---------------------------------------------------------------------------
 // Context
@@ -66,7 +64,9 @@ pub struct Theme {
 
 impl Theme {
     pub fn new() -> Self {
-        Self { styles: HashMap::new() }
+        Self {
+            styles: HashMap::new(),
+        }
     }
 
     pub fn get(&self, key: &str) -> ElementStyle {

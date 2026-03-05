@@ -13,9 +13,7 @@ use ratatui::widgets::Paragraph;
 
 use crate::color_hint::{evaluate_theme_line, parse_color_defs, scan_hex_color};
 use crate::syntax::HighlightSpan;
-use crate::wrap::{
-    chars_to_string, compute_chunks, expand_tabs, find_sub_line, visual_line_count,
-};
+use crate::wrap::{chars_to_string, compute_chunks, expand_tabs, find_sub_line, visual_line_count};
 use crate::{Buffer, UndoEntry};
 
 fn resolve_capture_style(theme: &Theme, capture_name: &str, text_style: Style) -> Style {
@@ -93,10 +91,7 @@ impl Buffer {
             // Intermediate lines
             let limit = self.cursor_row.min(self.scroll_offset + height);
             for li in (self.scroll_offset + 1)..limit {
-                vrow += visual_line_count(
-                    expand_tabs(&self.line(li)).0.len(),
-                    text_width,
-                );
+                vrow += visual_line_count(expand_tabs(&self.line(li)).0.len(), text_width);
                 if vrow >= height {
                     break;
                 }
@@ -127,10 +122,7 @@ impl Buffer {
             if remaining == 0 {
                 break;
             }
-            let vl = visual_line_count(
-                expand_tabs(&self.line(li)).0.len(),
-                text_width,
-            );
+            let vl = visual_line_count(expand_tabs(&self.line(li)).0.len(), text_width);
             if vl <= remaining {
                 remaining -= vl;
                 new_scroll = li;
@@ -149,8 +141,12 @@ impl Buffer {
 }
 
 impl Component for Buffer {
-    fn as_any(&self) -> &dyn std::any::Any { self }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
 
     fn ensure_schema(&self, ctx: &Context) {
         let Some(conn) = ctx.db else { return };
@@ -352,7 +348,12 @@ impl Component for Buffer {
                     self.clear_mark();
                 }
             }
-            Event::PreviewFile { path, row, col, match_len } => {
+            Event::PreviewFile {
+                path,
+                row,
+                col,
+                match_len,
+            } => {
                 if self.path.as_deref() == Some(path.as_path()) {
                     let r = (*row).min(self.line_count().saturating_sub(1));
                     self.cursor_row = r;
@@ -406,7 +407,9 @@ impl Component for Buffer {
             hl_map.entry(*line).or_default().push(span);
         }
 
-        let is_theme = self.path.as_ref()
+        let is_theme = self
+            .path
+            .as_ref()
             .and_then(|p| p.file_name())
             .map_or(false, |n| n == "theme.toml");
 
@@ -474,7 +477,11 @@ impl Component for Buffer {
             };
 
             // Skip sub-lines for partial-line scroll on the first visible line
-            let skip = if line_idx == self.scroll_offset { self.scroll_sub_line } else { 0 };
+            let skip = if line_idx == self.scroll_offset {
+                self.scroll_sub_line
+            } else {
+                0
+            };
 
             // Color hint for gutter preview (first chunk only)
             let color_hint = if is_theme {
@@ -485,9 +492,9 @@ impl Component for Buffer {
                         current_section = trimmed[1..end].to_string();
                     }
                 }
-                color_defs.as_ref().and_then(|defs| {
-                    evaluate_theme_line(&raw, &current_section, defs)
-                })
+                color_defs
+                    .as_ref()
+                    .and_then(|defs| evaluate_theme_line(&raw, &current_section, defs))
             } else {
                 scan_hex_color(&raw).map(|c| ElementStyle {
                     fg: c,
@@ -535,9 +542,13 @@ impl Component for Buffer {
                         let mut sorted_hl: Vec<_> = line_hl.iter().collect();
                         sorted_hl.sort_by_key(|hs| std::cmp::Reverse(hs.char_end - hs.char_start));
                         for hs in sorted_hl {
-                            let ds = char_map.get(hs.char_start).copied().unwrap_or(display.len());
+                            let ds = char_map
+                                .get(hs.char_start)
+                                .copied()
+                                .unwrap_or(display.len());
                             let de = char_map.get(hs.char_end).copied().unwrap_or(display.len());
-                            let style = resolve_capture_style(ctx.theme, hs.capture_name, text_style);
+                            let style =
+                                resolve_capture_style(ctx.theme, hs.capture_name, text_style);
                             for i in ds.max(cs)..de.min(ce) {
                                 col_styles[i - cs] = style;
                             }
@@ -559,10 +570,7 @@ impl Component for Buffer {
                         while end < chunk_len && col_styles[end] == style {
                             end += 1;
                         }
-                        spans.push(Span::styled(
-                            chars_to_string(&chunk_text[pos..end]),
-                            style,
-                        ));
+                        spans.push(Span::styled(chars_to_string(&chunk_text[pos..end]), style));
                         pos = end;
                     }
                 }
@@ -735,8 +743,12 @@ impl BufferFactory {
 }
 
 impl Component for BufferFactory {
-    fn as_any(&self) -> &dyn std::any::Any { self }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
 
     fn panel_claims(&self) -> &[PanelClaim] {
         &[]
@@ -756,7 +768,12 @@ impl Component for BufferFactory {
                     Err(e) => effects.push(Effect::SetMessage(format!("Open failed: {e}"))),
                 }
             }
-            Event::PreviewFile { path, row, col, match_len } => {
+            Event::PreviewFile {
+                path,
+                row,
+                col,
+                match_len,
+            } => {
                 if self.preview_path.as_ref() == Some(path) {
                     return effects; // existing preview buffer handles repositioning
                 }
@@ -792,7 +809,9 @@ impl Component for BufferFactory {
                     self.preview_path = None;
                     effects.push(Effect::Emit(Event::OpenFile(path.clone())));
                     effects.push(Effect::Emit(Event::GoToPosition {
-                        path: path.clone(), row: *row, col: *col,
+                        path: path.clone(),
+                        row: *row,
+                        col: *col,
                     }));
                     effects.push(Effect::FocusPanel(PanelSlot::Main));
                 }

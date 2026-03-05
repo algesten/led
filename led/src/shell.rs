@@ -6,11 +6,9 @@ use rusqlite::Connection;
 
 use std::sync::Arc;
 
-use led_core::{
-    Action, Clipboard, Component, Context, Effect, Event, PanelSlot, Waker,
-};
 use crate::config::{KeyCombo, Keymap, KeymapLookup};
 use crate::theme::Theme;
+use led_core::{Action, Clipboard, Component, Context, Effect, Event, PanelSlot, Waker};
 
 struct ArboardClipboard {
     inner: std::sync::Mutex<Option<arboard::Clipboard>>,
@@ -18,7 +16,9 @@ struct ArboardClipboard {
 
 impl ArboardClipboard {
     fn new() -> Self {
-        Self { inner: std::sync::Mutex::new(arboard::Clipboard::new().ok()) }
+        Self {
+            inner: std::sync::Mutex::new(arboard::Clipboard::new().ok()),
+        }
     }
 }
 
@@ -134,7 +134,6 @@ impl Shell {
         self.env.waker = Some(waker);
     }
 
-
     pub fn register(&mut self, component: Box<dyn Component>) {
         // Save pre_preview_tab before registering a preview buffer
         let is_preview = component.tab().map_or(false, |t| t.preview);
@@ -143,9 +142,11 @@ impl Shell {
         }
         // Dedup by path: if a tab with the same path exists, just focus it
         if let Some(path) = component.tab().and_then(|t| t.path) {
-            if let Some(idx) = self.components.iter().position(|c| {
-                c.tab().and_then(|t| t.path).as_ref() == Some(&path)
-            }) {
+            if let Some(idx) = self
+                .components
+                .iter()
+                .position(|c| c.tab().and_then(|t| t.path).as_ref() == Some(&path))
+            {
                 self.activate_tab_for_component(idx);
                 self.notify_active_buffer();
                 return;
@@ -224,11 +225,7 @@ impl Shell {
         self.components
             .iter()
             .enumerate()
-            .filter(|(_, c)| {
-                c.panel_claims()
-                    .iter()
-                    .any(|cl| cl.slot == PanelSlot::Side)
-            })
+            .filter(|(_, c)| c.panel_claims().iter().any(|cl| cl.slot == PanelSlot::Side))
             .max_by_key(|(_, c)| {
                 c.panel_claims()
                     .iter()
@@ -301,8 +298,9 @@ impl Shell {
                     modal.input.pop();
                 }
             } else if let KeyCode::Char(c) = key.code {
-                let has_ctrl_alt =
-                    key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
+                let has_ctrl_alt = key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
                 if !has_ctrl_alt {
                     if let Some(ref mut modal) = self.modal {
                         modal.input.push(c);
@@ -341,10 +339,9 @@ impl Shell {
                 // Printable character fallback: insert if no ctrl/alt modifier
                 let allow_insert = match self.focus {
                     PanelSlot::Main => self.has_tabs(),
-                    PanelSlot::Side => self
-                        .side_component()
-                        .and_then(|c| c.context_name())
-                        == Some("file_search"),
+                    PanelSlot::Side => {
+                        self.side_component().and_then(|c| c.context_name()) == Some("file_search")
+                    }
                 };
                 if allow_insert {
                     let has_ctrl_alt = key
@@ -367,8 +364,7 @@ impl Shell {
             Action::ToggleFocus => {
                 if self.show_side_panel {
                     let leaving_browser = self.focus == PanelSlot::Side
-                        && self.side_component().and_then(|c| c.context_name())
-                            == Some("browser");
+                        && self.side_component().and_then(|c| c.context_name()) == Some("browser");
                     self.focus = match self.focus {
                         PanelSlot::Main => PanelSlot::Side,
                         PanelSlot::Side if self.has_tabs() => PanelSlot::Main,
@@ -410,7 +406,8 @@ impl Shell {
             Action::KillBuffer => {
                 if self.has_tabs() {
                     // Check if the active tab component is dirty
-                    let is_dirty = self.active_tab_component_idx()
+                    let is_dirty = self
+                        .active_tab_component_idx()
                         .and_then(|idx| self.components[idx].tab())
                         .map_or(false, |t| t.dirty);
                     if is_dirty {
@@ -433,7 +430,9 @@ impl Shell {
                     let mut ctx = self.env.ctx();
                     self.components[idx].handle_action(Action::OpenFileSearch, &mut ctx)
                 } else {
-                    vec![Effect::Emit(Event::FileSearchOpened { selected_text: None })]
+                    vec![Effect::Emit(Event::FileSearchOpened {
+                        selected_text: None,
+                    })]
                 };
                 self.process_effects(effects);
                 self.focus = PanelSlot::Side;
@@ -452,7 +451,8 @@ impl Shell {
                     if self.side_component().and_then(|c| c.context_name()) == Some("file_search") {
                         let mut ctx = self.env.ctx();
                         if let Some(idx) = self.side_component_idx() {
-                            let effects = self.components[idx].handle_action(Action::CloseFileSearch, &mut ctx);
+                            let effects = self.components[idx]
+                                .handle_action(Action::CloseFileSearch, &mut ctx);
                             self.process_effects(effects);
                         }
                     }
@@ -545,9 +545,11 @@ impl Shell {
                     }
                 }
                 Effect::KillPreview => {
-                    if let Some(idx) = self.components.iter().position(|c| {
-                        c.tab().map_or(false, |t| t.preview)
-                    }) {
+                    if let Some(idx) = self
+                        .components
+                        .iter()
+                        .position(|c| c.tab().map_or(false, |t| t.preview))
+                    {
                         self.components.remove(idx);
                         self.last_touched.remove(idx);
                         let tabs = self.tabbed_components();
@@ -690,11 +692,16 @@ impl Shell {
 
     pub fn restore_sidepanel_sessions(&mut self) {
         // Load kv from DB
-        let kv = self.env.db.as_ref()
+        let kv = self
+            .env
+            .db
+            .as_ref()
             .map(|conn| crate::session::load_kv(conn, &self.env.root))
             .unwrap_or_default();
         for i in 0..self.components.len() {
-            if self.components[i].tab().is_some() { continue; }
+            if self.components[i].tab().is_some() {
+                continue;
+            }
             let mut ctx = self.env.ctx();
             ctx.kv = kv.clone();
             self.components[i].restore_session(&mut ctx);
@@ -803,7 +810,6 @@ impl Shell {
         }
         self.process_effects(all_effects);
     }
-
 }
 
 pub struct SessionSnapshot {

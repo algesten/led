@@ -6,12 +6,13 @@ use ratatui::style::Color;
 
 use led_core::color::parse_ansi;
 
-pub use led_core::{BLANK_STYLE, Theme, ElementStyle};
+pub use led_core::{BLANK_STYLE, ElementStyle, Theme};
 
 const DEFAULT_THEME_TOML: &str = include_str!("default_theme.toml");
 
 pub fn default_theme() -> Theme {
-    let doc: toml::Value = DEFAULT_THEME_TOML.parse()
+    let doc: toml::Value = DEFAULT_THEME_TOML
+        .parse()
         .expect("built-in theme must parse");
     theme_from_toml(&doc)
 }
@@ -36,16 +37,28 @@ enum ColorEntry {
 const MAX_RESOLVE_DEPTH: usize = 8;
 
 fn resolve(name: &str, colors: &HashMap<String, ColorEntry>, depth: usize) -> Option<Color> {
-    if depth == 0 { return None; }
+    if depth == 0 {
+        return None;
+    }
     if let Some(entry) = colors.get(name) {
         match entry {
             ColorEntry::Value(v) => return parse_ansi(v),
-            ColorEntry::Style(so) => return so.fg.as_ref().and_then(|f| resolve_color(f, colors, depth - 1)),
+            ColorEntry::Style(so) => {
+                return so
+                    .fg
+                    .as_ref()
+                    .and_then(|f| resolve_color(f, colors, depth - 1));
+            }
             ColorEntry::Alias(target) => {
                 if let Some(target_entry) = colors.get(target.as_str()) {
                     match target_entry {
                         ColorEntry::Value(v) => return parse_ansi(v),
-                        ColorEntry::Style(so) => return so.fg.as_ref().and_then(|f| resolve_color(f, colors, depth - 1)),
+                        ColorEntry::Style(so) => {
+                            return so
+                                .fg
+                                .as_ref()
+                                .and_then(|f| resolve_color(f, colors, depth - 1));
+                        }
                         ColorEntry::Alias(t2) => {
                             if let Some(ColorEntry::Value(v)) = colors.get(t2.as_str()) {
                                 return parse_ansi(v);
@@ -61,7 +74,9 @@ fn resolve(name: &str, colors: &HashMap<String, ColorEntry>, depth: usize) -> Op
 }
 
 fn resolve_color(value: &str, colors: &HashMap<String, ColorEntry>, depth: usize) -> Option<Color> {
-    if depth == 0 { return None; }
+    if depth == 0 {
+        return None;
+    }
     if let Some(name) = value.strip_prefix('$') {
         resolve(name, colors, depth - 1)
     } else {
@@ -98,12 +113,10 @@ fn resolve_style_override<'a>(
 ) -> Option<&'a StyleOverride> {
     match colors.get(name)? {
         ColorEntry::Style(so) => Some(so),
-        ColorEntry::Alias(target) => {
-            match colors.get(target.as_str())? {
-                ColorEntry::Style(so) => Some(so),
-                _ => None,
-            }
-        }
+        ColorEntry::Alias(target) => match colors.get(target.as_str())? {
+            ColorEntry::Style(so) => Some(so),
+            _ => None,
+        },
         ColorEntry::Value(_) => None,
     }
 }
@@ -126,8 +139,10 @@ fn parse_color_entry(value: &toml::Value) -> Option<ColorEntry> {
                 Some(ColorEntry::Value(v.to_string()))
             } else if let Some(a) = t.get("alias").and_then(|v| v.as_str()) {
                 Some(ColorEntry::Alias(a.to_string()))
-            } else if t.contains_key("fg") || t.contains_key("bg")
-                || t.contains_key("bold") || t.contains_key("reversed")
+            } else if t.contains_key("fg")
+                || t.contains_key("bg")
+                || t.contains_key("bold")
+                || t.contains_key("reversed")
             {
                 Some(ColorEntry::Style(StyleOverride {
                     fg: t.get("fg").and_then(|v| v.as_str()).map(String::from),
@@ -143,7 +158,9 @@ fn parse_color_entry(value: &toml::Value) -> Option<ColorEntry> {
     }
 }
 
-fn parse_colors_section(table: &toml::map::Map<String, toml::Value>) -> HashMap<String, ColorEntry> {
+fn parse_colors_section(
+    table: &toml::map::Map<String, toml::Value>,
+) -> HashMap<String, ColorEntry> {
     let mut colors = HashMap::new();
     for (name, value) in table {
         if let Some(entry) = parse_color_entry(value) {

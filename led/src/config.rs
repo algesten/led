@@ -225,11 +225,14 @@ pub const DEFAULT_KEYS_TOML: &str = r#"# led keybindings
 // TOML → Keymap conversion
 // ---------------------------------------------------------------------------
 
-fn parse_flat_table(table: &toml::map::Map<String, toml::Value>) -> Result<HashMap<KeyCombo, Action>, String> {
+fn parse_flat_table(
+    table: &toml::map::Map<String, toml::Value>,
+) -> Result<HashMap<KeyCombo, Action>, String> {
     let mut map = HashMap::new();
     for (key_str, val) in table {
         let combo = parse_key_combo(key_str)?;
-        let action_str = val.as_str()
+        let action_str = val
+            .as_str()
             .ok_or(format!("expected string action for key \"{key_str}\""))?;
         let action: Action = Action::deserialize(val.clone())
             .map_err(|e| format!("unknown action \"{action_str}\": {e}"))?;
@@ -239,7 +242,8 @@ fn parse_flat_table(table: &toml::map::Map<String, toml::Value>) -> Result<HashM
 }
 
 fn toml_to_keymap(toml_str: &str) -> Result<Keymap, String> {
-    let doc: toml::Value = toml::from_str(toml_str).map_err(|e| format!("TOML parse error: {e}"))?;
+    let doc: toml::Value =
+        toml::from_str(toml_str).map_err(|e| format!("TOML parse error: {e}"))?;
     let doc_table = doc.as_table().ok_or("expected top-level table")?;
 
     let keys_table = doc
@@ -278,7 +282,11 @@ fn toml_to_keymap(toml_str: &str) -> Result<Keymap, String> {
         }
     }
 
-    Ok(Keymap { direct, chords, contexts })
+    Ok(Keymap {
+        direct,
+        chords,
+        contexts,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -294,24 +302,22 @@ pub fn load_or_create_config() -> Result<Keymap, String> {
 
     if !path.exists() {
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
-                .map_err(|e| format!("failed to create config dir: {e}"))?;
+            fs::create_dir_all(parent).map_err(|e| format!("failed to create config dir: {e}"))?;
         }
         fs::write(&path, DEFAULT_KEYS_TOML)
             .map_err(|e| format!("failed to write default config: {e}"))?;
         return toml_to_keymap(DEFAULT_KEYS_TOML);
     }
 
-    let content = fs::read_to_string(&path)
-        .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
+    let content =
+        fs::read_to_string(&path).map_err(|e| format!("failed to read {}: {e}", path.display()))?;
     toml_to_keymap(&content)
 }
 
 pub fn reset_config() -> Result<(), String> {
     let path = config_path().ok_or("could not determine config directory")?;
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|e| format!("failed to create config dir: {e}"))?;
+        fs::create_dir_all(parent).map_err(|e| format!("failed to create config dir: {e}"))?;
     }
     fs::write(&path, DEFAULT_KEYS_TOML)
         .map_err(|e| format!("failed to write default config: {e}"))?;

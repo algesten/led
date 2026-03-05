@@ -45,7 +45,12 @@ pub(crate) fn scan_hex_color(line: &str) -> Option<Color> {
 pub(crate) enum ColorDef {
     Value(String),
     Alias(String),
-    Style { fg: Option<String>, bg: Option<String>, bold: bool, reversed: bool },
+    Style {
+        fg: Option<String>,
+        bg: Option<String>,
+        bold: bool,
+        reversed: bool,
+    },
 }
 
 pub(crate) struct ColorDefs {
@@ -60,7 +65,9 @@ impl ColorDefs {
     }
 
     fn resolve_value_depth(&self, value: &str, depth: usize) -> Option<Color> {
-        if depth == 0 { return None; }
+        if depth == 0 {
+            return None;
+        }
         if let Some(name) = value.strip_prefix('$') {
             self.resolve_name_depth(name, depth - 1)
         } else {
@@ -69,11 +76,15 @@ impl ColorDefs {
     }
 
     fn resolve_name_depth(&self, name: &str, depth: usize) -> Option<Color> {
-        if depth == 0 { return None; }
+        if depth == 0 {
+            return None;
+        }
         match self.map.get(name)? {
             ColorDef::Value(v) => parse_ansi(v),
             ColorDef::Alias(target) => self.resolve_value_depth(&format!("${target}"), depth - 1),
-            ColorDef::Style { fg, .. } => fg.as_ref().and_then(|f| self.resolve_value_depth(f, depth - 1)),
+            ColorDef::Style { fg, .. } => fg
+                .as_ref()
+                .and_then(|f| self.resolve_value_depth(f, depth - 1)),
         }
     }
 
@@ -82,23 +93,53 @@ impl ColorDefs {
     }
 
     fn resolve_style_depth(&self, value: &str, depth: usize) -> Option<ElementStyle> {
-        if depth == 0 { return None; }
+        if depth == 0 {
+            return None;
+        }
         if let Some(name) = value.strip_prefix('$') {
             match self.map.get(name)? {
                 ColorDef::Value(v) => {
                     let c = parse_ansi(v)?;
-                    Some(ElementStyle { fg: c, bg: Color::Reset, bold: false, reversed: false })
+                    Some(ElementStyle {
+                        fg: c,
+                        bg: Color::Reset,
+                        bold: false,
+                        reversed: false,
+                    })
                 }
-                ColorDef::Alias(target) => self.resolve_style_depth(&format!("${target}"), depth - 1),
-                ColorDef::Style { fg, bg, bold, reversed } => {
-                    let fg_c = fg.as_ref().and_then(|f| self.resolve_value_depth(f, depth - 1)).unwrap_or(Color::Reset);
-                    let bg_c = bg.as_ref().and_then(|b| self.resolve_value_depth(b, depth - 1)).unwrap_or(Color::Reset);
-                    Some(ElementStyle { fg: fg_c, bg: bg_c, bold: *bold, reversed: *reversed })
+                ColorDef::Alias(target) => {
+                    self.resolve_style_depth(&format!("${target}"), depth - 1)
+                }
+                ColorDef::Style {
+                    fg,
+                    bg,
+                    bold,
+                    reversed,
+                } => {
+                    let fg_c = fg
+                        .as_ref()
+                        .and_then(|f| self.resolve_value_depth(f, depth - 1))
+                        .unwrap_or(Color::Reset);
+                    let bg_c = bg
+                        .as_ref()
+                        .and_then(|b| self.resolve_value_depth(b, depth - 1))
+                        .unwrap_or(Color::Reset);
+                    Some(ElementStyle {
+                        fg: fg_c,
+                        bg: bg_c,
+                        bold: *bold,
+                        reversed: *reversed,
+                    })
                 }
             }
         } else {
             let c = parse_ansi(value)?;
-            Some(ElementStyle { fg: c, bg: Color::Reset, bold: false, reversed: false })
+            Some(ElementStyle {
+                fg: c,
+                bg: Color::Reset,
+                bold: false,
+                reversed: false,
+            })
         }
     }
 }
@@ -154,7 +195,15 @@ fn parse_key_value(line: &str) -> Option<(String, ColorDef)> {
                 }
             }
         }
-        Some((key, ColorDef::Style { fg, bg, bold, reversed }))
+        Some((
+            key,
+            ColorDef::Style {
+                fg,
+                bg,
+                bold,
+                reversed,
+            },
+        ))
     } else {
         // Simple string value: "value" or "$alias"
         let val = raw_value.trim_matches('"');
@@ -213,9 +262,20 @@ pub(crate) fn evaluate_theme_line(
                     }
                 }
             }
-            let fg_c = fg.as_ref().and_then(|f| defs.resolve_value(f)).unwrap_or(Color::Reset);
-            let bg_c = bg.as_ref().and_then(|b| defs.resolve_value(b)).unwrap_or(Color::Reset);
-            Some(ElementStyle { fg: fg_c, bg: bg_c, bold, reversed })
+            let fg_c = fg
+                .as_ref()
+                .and_then(|f| defs.resolve_value(f))
+                .unwrap_or(Color::Reset);
+            let bg_c = bg
+                .as_ref()
+                .and_then(|b| defs.resolve_value(b))
+                .unwrap_or(Color::Reset);
+            Some(ElementStyle {
+                fg: fg_c,
+                bg: bg_c,
+                bold,
+                reversed,
+            })
         } else {
             let val = raw_value.trim_matches('"');
             defs.resolve_style(val)

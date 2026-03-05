@@ -1,10 +1,10 @@
-mod wrap;
+mod color_hint;
+mod component;
 mod editing;
+pub(crate) mod syntax;
 mod undo;
 mod watcher;
-mod component;
-mod color_hint;
-pub(crate) mod syntax;
+mod wrap;
 
 pub use component::BufferFactory;
 
@@ -235,12 +235,12 @@ impl Buffer {
             .as_nanos();
         format!("{}-{}", std::process::id(), ts)
     }
-
 }
 
 impl Drop for Buffer {
     fn drop(&mut self) {
-        self.syntax_cancel.store(true, std::sync::atomic::Ordering::Release);
+        self.syntax_cancel
+            .store(true, std::sync::atomic::Ordering::Release);
     }
 }
 
@@ -283,7 +283,11 @@ impl Buffer {
 
     /// Notify syntax state of an insert. Call BEFORE mutating the rope.
     /// Returns an opaque edit to pass to `apply_syntax_edit` after mutation.
-    pub(crate) fn syntax_edit_insert(&self, char_idx: usize, text: &str) -> Option<tree_sitter::InputEdit> {
+    pub(crate) fn syntax_edit_insert(
+        &self,
+        char_idx: usize,
+        text: &str,
+    ) -> Option<tree_sitter::InputEdit> {
         if self.syntax.is_some() {
             Some(syntax::edit_for_insert(&self.rope, char_idx, text))
         } else {
@@ -292,7 +296,11 @@ impl Buffer {
     }
 
     /// Notify syntax state of a remove. Call BEFORE mutating the rope.
-    pub(crate) fn syntax_edit_remove(&self, char_start: usize, char_end: usize) -> Option<tree_sitter::InputEdit> {
+    pub(crate) fn syntax_edit_remove(
+        &self,
+        char_start: usize,
+        char_end: usize,
+    ) -> Option<tree_sitter::InputEdit> {
         if self.syntax.is_some() {
             Some(syntax::edit_for_remove(&self.rope, char_start, char_end))
         } else {

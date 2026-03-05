@@ -2,8 +2,8 @@ use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout, Position, Rect};
 use ratatui::widgets::{Block, Borders, Paragraph};
 
+use crate::shell::{Modal, Shell};
 use led_core::{DrawContext, PanelSlot};
-use crate::shell::{Shell, Modal};
 
 const GUTTER_WIDTH: u16 = 2;
 const SIDE_PANEL_WIDTH: u16 = 25;
@@ -11,11 +11,7 @@ const SIDE_PANEL_WIDTH: u16 = 25;
 pub fn render(shell: &mut Shell, frame: &mut Frame) {
     let area = frame.area();
 
-    let vertical = Layout::vertical([
-        Constraint::Min(1),
-        Constraint::Length(1),
-    ])
-    .split(area);
+    let vertical = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(area);
 
     let main_area = vertical[0];
     let status_area = vertical[1];
@@ -34,7 +30,10 @@ pub fn render(shell: &mut Shell, frame: &mut Frame) {
         {
             let focused = shell.focus == PanelSlot::Side;
             let theme = shell.theme.clone();
-            let ctx = DrawContext { theme: &theme, focused };
+            let ctx = DrawContext {
+                theme: &theme,
+                focused,
+            };
             if let Some(comp) = shell.side_component_mut() {
                 comp.draw(frame, browser_area, &ctx);
             }
@@ -144,8 +143,14 @@ fn render_main_content(shell: &mut Shell, frame: &mut Frame, area: Rect) {
     {
         let focused = shell.focus == PanelSlot::Main;
         let theme = shell.theme.clone();
-        let ctx = DrawContext { theme: &theme, focused };
-        shell.active_buffer_mut().unwrap().draw(frame, text_area, &ctx);
+        let ctx = DrawContext {
+            theme: &theme,
+            focused,
+        };
+        shell
+            .active_buffer_mut()
+            .unwrap()
+            .draw(frame, text_area, &ctx);
     }
 
     // Place cursor (only when main panel focused)
@@ -168,9 +173,7 @@ fn render_status_bar(shell: &Shell, frame: &mut Frame, area: Rect) {
         let modified = if tab.dirty { " \u{25cf}" } else { "" };
         let filename = &tab.label;
 
-        let (line, col) = comp
-            .status_info()
-            .map_or((1, 1), |(_, l, c)| (l, c));
+        let (line, col) = comp.status_info().map_or((1, 1), |(_, l, c)| (l, c));
         let pos = format!("L{}:C{}", line, col);
         (format!(" led: {filename}{modified}"), format!("{pos} "))
     } else {

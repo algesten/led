@@ -2,9 +2,7 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::PathBuf;
 
-use led_core::{
-    Action, Component, Context, DrawContext, Effect, Event, PanelClaim, PanelSlot,
-};
+use led_core::{Action, Component, Context, DrawContext, Effect, Event, PanelClaim, PanelSlot};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
@@ -257,8 +255,12 @@ impl FileBrowser {
 // ---------------------------------------------------------------------------
 
 impl Component for FileBrowser {
-    fn as_any(&self) -> &dyn std::any::Any { self }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
 
     fn panel_claims(&self) -> &[PanelClaim] {
         &[PanelClaim {
@@ -297,7 +299,11 @@ impl Component for FileBrowser {
                 if let Some(entry) = self.entries.get(self.selected) {
                     if matches!(entry.kind, EntryKind::File) {
                         let path = entry.path.clone();
-                        vec![Effect::Emit(Event::ConfirmSearch { path, row: 0, col: 0 })]
+                        vec![Effect::Emit(Event::ConfirmSearch {
+                            path,
+                            row: 0,
+                            col: 0,
+                        })]
                     } else {
                         self.open_selected();
                         self.preview_selected()
@@ -392,24 +398,42 @@ impl Component for FileBrowser {
     }
 
     fn save_session(&self, ctx: &mut Context) {
-        ctx.kv.insert("browser.selected".into(), self.selected.to_string());
-        ctx.kv.insert("browser.scroll_offset".into(), self.scroll_offset.to_string());
-        let dirs: Vec<String> = self.expanded_dirs.iter()
+        ctx.kv
+            .insert("browser.selected".into(), self.selected.to_string());
+        ctx.kv.insert(
+            "browser.scroll_offset".into(),
+            self.scroll_offset.to_string(),
+        );
+        let dirs: Vec<String> = self
+            .expanded_dirs
+            .iter()
             .map(|d| d.to_string_lossy().into_owned())
             .collect();
-        ctx.kv.insert("browser.expanded_dirs".into(), dirs.join("\n"));
+        ctx.kv
+            .insert("browser.expanded_dirs".into(), dirs.join("\n"));
     }
 
     fn restore_session(&mut self, ctx: &mut Context) {
-        let selected: usize = ctx.kv.get("browser.selected")
+        let selected: usize = ctx
+            .kv
+            .get("browser.selected")
             .and_then(|s| s.parse().ok())
             .unwrap_or(0);
-        let scroll_offset: usize = ctx.kv.get("browser.scroll_offset")
+        let scroll_offset: usize = ctx
+            .kv
+            .get("browser.scroll_offset")
             .and_then(|s| s.parse().ok())
             .unwrap_or(0);
 
-        let dirs: HashSet<PathBuf> = ctx.kv.get("browser.expanded_dirs")
-            .map(|s| s.lines().filter(|l| !l.is_empty()).map(PathBuf::from).collect())
+        let dirs: HashSet<PathBuf> = ctx
+            .kv
+            .get("browser.expanded_dirs")
+            .map(|s| {
+                s.lines()
+                    .filter(|l| !l.is_empty())
+                    .map(PathBuf::from)
+                    .collect()
+            })
             .unwrap_or_default();
 
         self.set_expanded_dirs(dirs);

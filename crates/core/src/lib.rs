@@ -1,6 +1,6 @@
 pub mod color;
-mod types;
 mod component;
+mod types;
 
-pub use types::*;
 pub use component::*;
+pub use types::*;
