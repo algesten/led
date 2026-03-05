@@ -363,22 +363,18 @@ impl Shell {
             // Shell-level actions
             Action::ToggleFocus => {
                 if self.show_side_panel {
-                    let leaving_browser = self.focus == PanelSlot::Side
-                        && self.side_component().and_then(|c| c.context_name()) == Some("browser");
-                    self.focus = match self.focus {
+                    let new_focus = match self.focus {
                         PanelSlot::Main => PanelSlot::Side,
                         PanelSlot::Side if self.has_tabs() => PanelSlot::Main,
-                        _ => self.focus,
+                        _ => return InputResult::Continue,
                     };
-                    if leaving_browser && self.focus == PanelSlot::Main {
-                        self.process_effects(vec![Effect::Emit(Event::PreviewClosed)]);
-                    }
+                    self.set_focus(new_focus);
                 }
             }
             Action::ToggleSidePanel => {
                 self.show_side_panel = !self.show_side_panel;
                 if !self.show_side_panel && self.has_tabs() {
-                    self.focus = PanelSlot::Main;
+                    self.set_focus(PanelSlot::Main);
                 }
             }
             Action::Quit => return InputResult::Quit,
@@ -435,7 +431,7 @@ impl Shell {
                     })]
                 };
                 self.process_effects(effects);
-                self.focus = PanelSlot::Side;
+                self.set_focus(PanelSlot::Side);
             }
 
             Action::Abort => {
@@ -525,7 +521,7 @@ impl Shell {
                     self.message = Some(msg);
                 }
                 Effect::FocusPanel(slot) => {
-                    self.focus = slot;
+                    self.set_focus(slot);
                 }
                 Effect::ConfirmAction { prompt, action } => {
                     self.modal = Some(Modal {
@@ -579,7 +575,7 @@ impl Shell {
             let tabs = self.tabbed_components();
             if tabs.is_empty() {
                 self.active_tab = 0;
-                self.focus = PanelSlot::Side;
+                self.set_focus(PanelSlot::Side);
             } else if self.active_tab >= tabs.len() {
                 self.active_tab = tabs.len() - 1;
             }
@@ -724,7 +720,38 @@ impl Shell {
     }
 
     pub fn set_focus(&mut self, focus: PanelSlot) {
+        if self.focus == focus {
+            return;
+        }
+        let old = self.focus;
         self.focus = focus;
+        self.notify_focus_change(old, focus);
+    }
+
+    fn notify_focus_change(&mut self, old: PanelSlot, new: PanelSlot) {
+        let mut effects = Vec::new();
+        let mut ctx = self.env.ctx();
+
+        // Notify the component losing focus
+        let old_idx = match old {
+            PanelSlot::Main => self.active_tab_component_idx(),
+            PanelSlot::Side => self.side_component_idx(),
+        };
+        if let Some(idx) = old_idx {
+            effects.extend(self.components[idx].focus_changed(false, &mut ctx));
+        }
+
+        // Notify the component gaining focus
+        let new_idx = match new {
+            PanelSlot::Main => self.active_tab_component_idx(),
+            PanelSlot::Side => self.side_component_idx(),
+        };
+        if let Some(idx) = new_idx {
+            effects.extend(self.components[idx].focus_changed(true, &mut ctx));
+        }
+
+        drop(ctx);
+        self.process_effects(effects);
     }
 
     pub fn set_keymap(&mut self, keymap: Keymap) {

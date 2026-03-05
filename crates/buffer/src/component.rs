@@ -191,6 +191,14 @@ impl Component for Buffer {
         })
     }
 
+    fn focus_changed(&mut self, focused: bool, _ctx: &mut Context) -> Vec<Effect> {
+        if focused && self.preview_highlight {
+            self.preview_highlight = false;
+            self.clear_mark();
+        }
+        vec![]
+    }
+
     fn handle_action(&mut self, action: Action, ctx: &mut Context) -> Vec<Effect> {
         // Clear kill accumulator for non-KillLine actions
         if !matches!(action, Action::KillLine) {

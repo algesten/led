@@ -339,6 +339,7 @@ impl Buffer {
         self.mark = Some((r, c));
         self.cursor_row = r;
         self.cursor_col = (c + len).min(line_len);
+        self.preview_highlight = true;
     }
 
     pub(crate) fn selection_range(&self) -> Option<((usize, usize), (usize, usize))> {

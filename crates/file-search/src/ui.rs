@@ -186,6 +186,14 @@ impl Component for FileSearch {
         }
     }
 
+    fn focus_changed(&mut self, focused: bool, _ctx: &mut Context) -> Vec<Effect> {
+        if focused {
+            self.preview_selected()
+        } else {
+            vec![]
+        }
+    }
+
     fn handle_action(&mut self, action: Action, ctx: &mut Context) -> Vec<Effect> {
         // Always poll for search results
         let mut effects = self.poll_results();
@@ -376,7 +384,6 @@ impl Component for FileSearch {
                 effects
             }
             Action::Tick => {
-                effects.extend(self.poll_results());
                 return effects;
             }
             _ => return effects,

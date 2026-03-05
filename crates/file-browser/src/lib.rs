@@ -262,6 +262,14 @@ impl Component for FileBrowser {
         self
     }
 
+    fn focus_changed(&mut self, focused: bool, _ctx: &mut Context) -> Vec<Effect> {
+        if !focused {
+            vec![Effect::Emit(Event::PreviewClosed)]
+        } else {
+            vec![]
+        }
+    }
+
     fn panel_claims(&self) -> &[PanelClaim] {
         &[PanelClaim {
             slot: PanelSlot::Side,

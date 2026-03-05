@@ -92,6 +92,10 @@ pub trait Component: std::any::Any {
         None
     }
 
+    fn focus_changed(&mut self, _focused: bool, _ctx: &mut Context) -> Vec<Effect> {
+        vec![]
+    }
+
     fn handle_action(&mut self, action: Action, ctx: &mut Context) -> Vec<Effect>;
 
     fn handle_event(&mut self, event: &Event, ctx: &mut Context) -> Vec<Effect>;
