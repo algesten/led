@@ -2,13 +2,15 @@ use std::fs::File;
 use std::hash::Hasher;
 use std::io::{self, BufReader, BufWriter};
 use std::path::PathBuf;
-use std::time::Instant;
-
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Instant;
 
 use led_core::{
     Action, Component, Context, DrawContext, Effect, Event, PanelClaim, PanelSlot, TabDescriptor,
+    Waker,
 };
+use notify::{RecursiveMode, Watcher};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
@@ -169,6 +171,13 @@ pub struct Buffer {
     cursor_screen_pos: Option<(u16, u16)>,
     text_width: usize,
     scroll_sub_line: usize,
+    // File watching
+    _watcher: Option<notify::RecommendedWatcher>,
+    #[allow(dead_code)]
+    waker: Option<Waker>,
+    changed: Arc<AtomicBool>,
+    disk_modified: bool,
+    disk_deleted: bool,
 }
 
 impl Buffer {
@@ -199,14 +208,25 @@ impl Buffer {
             cursor_screen_pos: None,
             text_width: 0,
             scroll_sub_line: 0,
+            _watcher: None,
+            waker: None,
+            changed: Arc::new(AtomicBool::new(false)),
+            disk_modified: false,
+            disk_deleted: false,
         }
     }
 
     pub fn from_file(path: &str) -> io::Result<Self> {
+        Self::from_file_with_waker(path, None)
+    }
+
+    pub fn from_file_with_waker(path: &str, waker: Option<Waker>) -> io::Result<Self> {
         let file = File::open(path)?;
         let rope = Rope::from_reader(BufReader::new(file))?;
         let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| PathBuf::from(path));
         let base_content_hash = Self::hash_rope(&rope);
+        let changed = Arc::new(AtomicBool::new(false));
+        let _watcher = Self::create_watcher(&canonical, &changed, waker.as_ref());
         Ok(Self {
             rope,
             cursor_row: 0,
@@ -229,7 +249,220 @@ impl Buffer {
             cursor_screen_pos: None,
             text_width: 0,
             scroll_sub_line: 0,
+            _watcher,
+            waker,
+            changed,
+            disk_modified: false,
+            disk_deleted: false,
         })
+    }
+
+    fn create_watcher(
+        source_path: &std::path::Path,
+        changed: &Arc<AtomicBool>,
+        waker: Option<&Waker>,
+    ) -> Option<notify::RecommendedWatcher> {
+        let changed = changed.clone();
+        let waker = waker.cloned();
+        let source_file = source_path.to_path_buf();
+        let source_parent = source_path.parent()?.to_path_buf();
+        let notify_hash = Self::notify_hash_for_path(source_path);
+        let notify_dir = notify_dir();
+        let notify_dir_for_closure = notify_dir.clone();
+
+        let mut watcher = notify::recommended_watcher(move |res: Result<notify::Event, notify::Error>| {
+            let Ok(ev) = res else { return };
+            match ev.kind {
+                notify::EventKind::Create(_)
+                | notify::EventKind::Modify(_)
+                | notify::EventKind::Remove(_) => {}
+                _ => return,
+            }
+            let dominated = ev.paths.iter().any(|p| {
+                if p == &source_file {
+                    return true;
+                }
+                if let Some(ref nd) = notify_dir_for_closure {
+                    if *p == nd.join(&notify_hash) {
+                        return true;
+                    }
+                }
+                false
+            });
+            if dominated {
+                changed.store(true, Ordering::SeqCst);
+                if let Some(ref w) = waker {
+                    w();
+                }
+            }
+        }).ok()?;
+
+        watcher.watch(&source_parent, RecursiveMode::NonRecursive).ok()?;
+        if let Some(ref nd) = notify_dir {
+            let _ = std::fs::create_dir_all(nd);
+            let _ = watcher.watch(nd, RecursiveMode::NonRecursive);
+        }
+        Some(watcher)
+    }
+
+    fn has_local_changes(&self) -> bool {
+        self.dirty
+    }
+
+    fn handle_tick(&mut self, ctx: &mut Context) -> Vec<Effect> {
+        if !self.changed.swap(false, Ordering::SeqCst) {
+            return vec![];
+        }
+
+        // Check cross-instance sync first
+        self.check_cross_instance_sync(ctx);
+
+        // Check disk state for external modifications
+        let Some(ref path) = self.path else {
+            return vec![];
+        };
+
+        if !path.exists() {
+            if !self.disk_deleted {
+                self.disk_deleted = true;
+                return vec![Effect::SetMessage(format!(
+                    "Warning: {} deleted externally.",
+                    self.filename()
+                ))];
+            }
+            return vec![];
+        }
+
+        // File exists — read and hash it
+        let disk_hash = match File::open(path) {
+            Ok(f) => {
+                match Rope::from_reader(BufReader::new(f)) {
+                    Ok(rope) => Self::hash_rope(&rope),
+                    Err(_) => return vec![],
+                }
+            }
+            Err(_) => return vec![],
+        };
+
+        // If disk hash matches our base, no external change (covers own save)
+        if disk_hash == self.base_content_hash {
+            return vec![];
+        }
+
+        // Clear deleted flag since file exists now
+        self.disk_deleted = false;
+
+        if self.has_local_changes() {
+            // Buffer is dirty — flag conflict, don't reload
+            if !self.disk_modified {
+                self.disk_modified = true;
+                return vec![Effect::SetMessage(format!(
+                    "Warning: {} changed on disk (you have unsaved changes).",
+                    self.filename()
+                ))];
+            }
+            vec![]
+        } else {
+            // Buffer is clean — auto-reload
+            self.reload_from_disk();
+            self.disk_modified = false;
+            self.disk_deleted = false;
+            let max_line = self.line_count().saturating_sub(1);
+            if self.cursor_row > max_line {
+                self.cursor_row = max_line;
+            }
+            self.clamp_cursor_col();
+            vec![Effect::SetMessage(format!(
+                "Reloaded {} (changed on disk).",
+                self.filename()
+            ))]
+        }
+    }
+
+    fn check_cross_instance_sync(&mut self, ctx: &mut Context) {
+        if self.self_notified {
+            self.self_notified = false;
+            return;
+        }
+        let Some(conn) = ctx.db else { return };
+        let file_str = match self.path {
+            Some(ref p) => p.to_string_lossy().into_owned(),
+            None => return,
+        };
+        let root_str = ctx.root.to_string_lossy();
+
+        struct Row {
+            chain_id: String,
+            content_hash: i64,
+            seq: Option<i64>,
+            entry_data: Option<Vec<u8>>,
+        }
+        let rows: Vec<Row> = conn
+            .prepare(
+                "SELECT s.chain_id, s.content_hash, e.seq, e.entry_data
+                 FROM buffer_undo_state s
+                 LEFT JOIN undo_entries e
+                   ON e.root_path = s.root_path AND e.file_path = s.file_path AND e.seq > ?3
+                 WHERE s.root_path = ?1 AND s.file_path = ?2
+                 ORDER BY e.seq",
+            )
+            .and_then(|mut stmt| {
+                let mapped = stmt.query_map(
+                    rusqlite::params![&*root_str, &*file_str, self.last_seen_seq],
+                    |row| {
+                        Ok(Row {
+                            chain_id: row.get(0)?,
+                            content_hash: row.get(1)?,
+                            seq: row.get(2)?,
+                            entry_data: row.get(3)?,
+                        })
+                    },
+                )?;
+                Ok(mapped.filter_map(|r| r.ok()).collect())
+            })
+            .unwrap_or_default();
+
+        if rows.is_empty() {
+            if self.dirty {
+                self.reload_from_disk();
+                self.mark_externally_saved();
+            }
+            return;
+        }
+
+        let remote_chain_id = &rows[0].chain_id;
+        let remote_content_hash = rows[0].content_hash as u64;
+        let same_chain = self.chain_id.as_deref() == Some(remote_chain_id);
+
+        if same_chain {
+            let mut entries = Vec::new();
+            let mut max_seq = self.last_seen_seq;
+            for row in &rows {
+                if let (Some(seq), Some(data)) = (row.seq, &row.entry_data) {
+                    if let Ok(entry) = rmp_serde::from_slice::<UndoEntry>(data) {
+                        entries.push(entry);
+                        max_seq = max_seq.max(seq);
+                    }
+                }
+            }
+            if !entries.is_empty() {
+                self.apply_remote_entries(entries, max_seq);
+            }
+        } else {
+            if self.base_content_hash != remote_content_hash {
+                self.reload_from_disk();
+            }
+            let new_chain = remote_chain_id.clone();
+            let all_entries = Self::load_entries_after(conn, &root_str, &file_str, 0);
+            let max_seq = all_entries.last().map(|(s, _)| *s).unwrap_or(0);
+            let entries: Vec<UndoEntry> = all_entries.into_iter().map(|(_, e)| e).collect();
+            if !entries.is_empty() {
+                self.apply_remote_entries(entries, max_seq);
+            } else {
+                self.last_seen_seq = max_seq;
+            }
+            self.chain_id = Some(new_chain);
+        }
     }
 
     fn notify_hash_for_path(path: &std::path::Path) -> String {
@@ -318,6 +551,8 @@ impl Buffer {
             self.base_content_hash = self.content_hash();
             self.chain_id = None;
             self.last_seen_seq = 0;
+            self.disk_modified = false;
+            self.disk_deleted = false;
 
             if let Some(conn) = ctx.db {
                 let root_str = ctx.root.to_string_lossy();
@@ -1274,13 +1509,33 @@ impl Component for Buffer {
                 self.undo();
                 vec![]
             }
-            Action::Save => match self.save(ctx) {
+            Action::Save => {
+                if self.disk_modified {
+                    vec![Effect::ConfirmAction {
+                        prompt: format!(
+                            "{} changed on disk; save anyway? (yes/no)",
+                            self.filename()
+                        ),
+                        action: Action::SaveForce,
+                    }]
+                } else {
+                    match self.save(ctx) {
+                        Ok(()) => {
+                            let name = self.filename().to_string();
+                            vec![Effect::SetMessage(format!("Saved {name}."))]
+                        }
+                        Err(e) => vec![Effect::SetMessage(format!("Save failed: {e}"))],
+                    }
+                }
+            }
+            Action::SaveForce => match self.save(ctx) {
                 Ok(()) => {
                     let name = self.filename().to_string();
                     vec![Effect::SetMessage(format!("Saved {name}."))]
                 }
                 Err(e) => vec![Effect::SetMessage(format!("Save failed: {e}"))],
             },
+            Action::Tick => self.handle_tick(ctx),
             Action::SetMark => {
                 self.set_mark();
                 vec![Effect::SetMessage("Mark set".into())]
@@ -1537,96 +1792,6 @@ impl Component for Buffer {
         self.path.as_ref().map(|p| Self::notify_hash_for_path(p))
     }
 
-    fn handle_notification(&mut self, ctx: &mut Context) {
-        if self.self_notified {
-            self.self_notified = false;
-            return;
-        }
-        let Some(conn) = ctx.db else { return };
-        let file_str = match self.path {
-            Some(ref p) => p.to_string_lossy().into_owned(),
-            None => return,
-        };
-        let root_str = ctx.root.to_string_lossy();
-
-        // Single joined query: fetch chain_id, content_hash and any new entries in one round-trip
-        struct Row {
-            chain_id: String,
-            content_hash: i64,
-            seq: Option<i64>,
-            entry_data: Option<Vec<u8>>,
-        }
-        let rows: Vec<Row> = conn
-            .prepare(
-                "SELECT s.chain_id, s.content_hash, e.seq, e.entry_data
-                 FROM buffer_undo_state s
-                 LEFT JOIN undo_entries e
-                   ON e.root_path = s.root_path AND e.file_path = s.file_path AND e.seq > ?3
-                 WHERE s.root_path = ?1 AND s.file_path = ?2
-                 ORDER BY e.seq",
-            )
-            .and_then(|mut stmt| {
-                let mapped = stmt.query_map(
-                    rusqlite::params![&*root_str, &*file_str, self.last_seen_seq],
-                    |row| {
-                        Ok(Row {
-                            chain_id: row.get(0)?,
-                            content_hash: row.get(1)?,
-                            seq: row.get(2)?,
-                            entry_data: row.get(3)?,
-                        })
-                    },
-                )?;
-                Ok(mapped.filter_map(|r| r.ok()).collect())
-            })
-            .unwrap_or_default();
-
-        // Zero rows → no buffer_undo_state row → file was saved externally
-        if rows.is_empty() {
-            if self.dirty {
-                self.reload_from_disk();
-                self.mark_externally_saved();
-            }
-            return;
-        }
-
-        let remote_chain_id = &rows[0].chain_id;
-        let remote_content_hash = rows[0].content_hash as u64;
-        let same_chain = self.chain_id.as_deref() == Some(remote_chain_id);
-
-        if same_chain {
-            // Same chain — apply only new entries incrementally
-            let mut entries = Vec::new();
-            let mut max_seq = self.last_seen_seq;
-            for row in &rows {
-                if let (Some(seq), Some(data)) = (row.seq, &row.entry_data) {
-                    if let Ok(entry) = rmp_serde::from_slice::<UndoEntry>(data) {
-                        entries.push(entry);
-                        max_seq = max_seq.max(seq);
-                    }
-                }
-            }
-            if !entries.is_empty() {
-                self.apply_remote_entries(entries, max_seq);
-            }
-        } else {
-            // Chain changed — check if base content still matches before replaying
-            if self.base_content_hash != remote_content_hash {
-                self.reload_from_disk();
-            }
-            let new_chain = remote_chain_id.clone();
-            let all_entries = Self::load_entries_after(conn, &root_str, &file_str, 0);
-            let max_seq = all_entries.last().map(|(s, _)| *s).unwrap_or(0);
-            let entries: Vec<UndoEntry> = all_entries.into_iter().map(|(_, e)| e).collect();
-            if !entries.is_empty() {
-                self.apply_remote_entries(entries, max_seq);
-            } else {
-                self.last_seen_seq = max_seq;
-            }
-            self.chain_id = Some(new_chain);
-        }
-    }
-
 }
 
 // ---------------------------------------------------------------------------
@@ -1647,11 +1812,11 @@ impl Component for BufferFactory {
         vec![]
     }
 
-    fn handle_event(&mut self, event: &Event, _ctx: &mut Context) -> Vec<Effect> {
+    fn handle_event(&mut self, event: &Event, ctx: &mut Context) -> Vec<Effect> {
         match event {
             Event::OpenFile(path) => {
                 let path_str = path.to_string_lossy();
-                match Buffer::from_file(&path_str) {
+                match Buffer::from_file_with_waker(&path_str, ctx.waker.clone()) {
                     Ok(buf) => vec![Effect::Spawn(Box::new(buf))],
                     Err(e) => vec![Effect::SetMessage(format!("Open failed: {e}"))],
                 }

@@ -6,7 +6,7 @@ mod ui;
 
 use std::io;
 use std::path::PathBuf;
-use std::sync::mpsc;
+use std::sync::{mpsc, Arc};
 
 use clap::Parser;
 use crossterm::event::{self, Event, KeyEvent};
@@ -29,7 +29,7 @@ enum AppEvent {
     Key(KeyEvent),
     Resize,
     ConfigChanged(ConfigFile),
-    BufferNotification(String),
+    Wakeup,
 }
 
 #[derive(Parser)]
@@ -74,12 +74,19 @@ fn main() -> io::Result<()> {
     let start_dir = std::fs::canonicalize(&start_dir).unwrap_or(start_dir);
     let root = find_git_root(&start_dir);
 
+    // Build event channel and waker early so buffers can use them
+    let (tx, rx) = mpsc::channel::<AppEvent>();
+    let waker_tx = tx.clone();
+    let waker: led_core::Waker = Arc::new(move || {
+        let _ = waker_tx.send(AppEvent::Wakeup);
+    });
+
     // Build component list — the ONLY place concrete types appear
     let initial_buffer = if arg_is_dir {
         None
     } else {
         cli.path.as_ref().map(|path| {
-            Buffer::from_file(path).unwrap_or_else(|_| {
+            Buffer::from_file_with_waker(path, Some(waker.clone())).unwrap_or_else(|_| {
                 let mut buf = Buffer::empty();
                 buf.path = Some(path.into());
                 buf
@@ -120,6 +127,7 @@ fn main() -> io::Result<()> {
     let explicit_file = components.len() > 2; // more than BufferFactory + FileBrowser
     let mut shell = Shell::new(keymap, the_theme, db, root.clone());
     shell.debug = cli.debug;
+    shell.set_waker(waker);
 
     let had_initial_buffer = explicit_file;
     for comp in components {
@@ -144,9 +152,6 @@ fn main() -> io::Result<()> {
         original_hook(info);
     }));
 
-    // Build event channel
-    let (tx, rx) = mpsc::channel::<AppEvent>();
-
     // Thread 1: crossterm key events
     let key_tx = tx.clone();
     std::thread::spawn(move || {
@@ -167,15 +172,7 @@ fn main() -> io::Result<()> {
         }
     });
 
-    // Thread 2: notify directory watcher for cross-instance sync
-    let notify_dir = led_buffer::notify_dir();
-    if let Some(ref dir) = notify_dir {
-        cleanup_notify_dir(dir);
-    }
-    let notify_tx = tx.clone();
-    let _notify_watcher = spawn_notify_watcher(notify_tx, notify_dir.as_deref());
-
-    // Thread 3: config file watcher
+    // Thread 2: config file watcher
     let keys_path = config::config_path();
     let theme_p = theme::theme_path();
     let _watcher = spawn_config_watcher(tx, keys_path.as_deref(), theme_p.as_deref());
@@ -265,8 +262,8 @@ fn run(
                     }
                 }
             }
-            Some(AppEvent::BufferNotification(hash)) => {
-                shell.handle_notification(&hash);
+            Some(AppEvent::Wakeup) => {
+                shell.tick();
             }
             Some(AppEvent::Resize) => {} // just redraw on next loop iteration
             None => {}
@@ -327,9 +324,10 @@ fn restore_session(
     session: SessionData,
 ) {
     // Restore buffers — undo state is loaded by Buffer::restore_session via register()
+    let waker = shell.waker().cloned();
     for bs in &session.buffers {
         let path_str = bs.file_path.to_string_lossy();
-        if let Ok(buf) = Buffer::from_file(&path_str) {
+        if let Ok(buf) = Buffer::from_file_with_waker(&path_str, waker.clone()) {
             shell.register(Box::new(buf));
         }
     }
@@ -419,41 +417,4 @@ fn spawn_config_watcher(
     Some(watcher)
 }
 
-fn spawn_notify_watcher(
-    tx: mpsc::Sender<AppEvent>,
-    dir: Option<&std::path::Path>,
-) -> Option<notify::RecommendedWatcher> {
-    let dir = dir?;
-    std::fs::create_dir_all(dir).ok()?;
-
-    let mut watcher = notify::recommended_watcher(move |res: Result<notify::Event, notify::Error>| {
-        let Ok(ev) = res else { return };
-        match ev.kind {
-            EventKind::Create(_) | EventKind::Modify(_) => {}
-            _ => return,
-        }
-        for path in &ev.paths {
-            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                let _ = tx.send(AppEvent::BufferNotification(name.to_string()));
-            }
-        }
-    }).ok()?;
-
-    watcher.watch(dir, RecursiveMode::NonRecursive).ok()?;
-    Some(watcher)
-}
-
-fn cleanup_notify_dir(dir: &std::path::Path) {
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
-    let cutoff = std::time::SystemTime::now() - std::time::Duration::from_secs(24 * 60 * 60);
-    for entry in entries.flatten() {
-        if let Ok(meta) = entry.metadata() {
-            if let Ok(modified) = meta.modified() {
-                if modified < cutoff {
-                    let _ = std::fs::remove_file(entry.path());
-                }
-            }
-        }
-    }
-}
 

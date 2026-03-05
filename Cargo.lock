@@ -849,6 +849,7 @@ version = "0.1.0"
 dependencies = [
  "dirs",
  "led_core",
+ "notify",
  "ratatui",
  "rmp-serde",
  "ropey",

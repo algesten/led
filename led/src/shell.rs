@@ -5,7 +5,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use rusqlite::Connection;
 
 use led_core::{
-    Action, Component, Context, Effect, Event, PanelSlot,
+    Action, Component, Context, Effect, Event, PanelSlot, Waker,
 };
 use crate::config::{KeyCombo, Keymap, KeymapLookup};
 use crate::theme::Theme;
@@ -25,6 +25,7 @@ enum ChordState {
 
 pub enum PendingAction {
     KillBuffer,
+    Confirmed(Action),
 }
 
 pub struct Modal {
@@ -51,6 +52,7 @@ pub struct Shell {
     root: PathBuf,
     pub single_file_mode: bool,
     clipboard: Option<arboard::Clipboard>,
+    waker: Option<Waker>,
 }
 
 impl Shell {
@@ -73,7 +75,12 @@ impl Shell {
             root,
             single_file_mode: false,
             clipboard: arboard::Clipboard::new().ok(),
+            waker: None,
         }
+    }
+
+    pub fn set_waker(&mut self, waker: Waker) {
+        self.waker = Some(waker);
     }
 
     pub fn register(&mut self, component: Box<dyn Component>) {
@@ -99,6 +106,7 @@ impl Shell {
                 root: &self.root,
                 viewport_height: self.viewport_height,
                 yank_fn: None,
+                waker: self.waker.clone(),
             };
             self.components[last].restore_session(&mut ctx);
             self.active_tab = self.tabbed_index_of(last).unwrap_or(0);
@@ -216,9 +224,14 @@ impl Shell {
             } else if key.code == KeyCode::Enter {
                 let confirmed = self.modal.as_ref().unwrap().input == "yes";
                 if confirmed {
-                    let action = &self.modal.as_ref().unwrap().action;
-                    match action {
+                    // Take the modal to own the pending action
+                    let modal = self.modal.take().unwrap();
+                    match modal.action {
                         PendingAction::KillBuffer => self.kill_current_buffer(),
+                        PendingAction::Confirmed(action) => {
+                            let effects = self.dispatch_action(action);
+                            self.process_effects(effects);
+                        }
                     }
                 } else {
                     self.message = Some("Aborted.".into());
@@ -372,6 +385,7 @@ impl Shell {
             root: &self.root,
             viewport_height: self.viewport_height,
             yank_fn: if is_yank { Some(&mut yank_closure) } else { None },
+            waker: self.waker.clone(),
         };
 
         let effects = match self.focus {
@@ -415,6 +429,7 @@ impl Shell {
                         root: &self.root,
                         viewport_height: self.viewport_height,
                         yank_fn: None,
+                        waker: self.waker.clone(),
                     };
                     for comp in &mut self.components {
                         more_effects.extend(comp.handle_event(&event, &mut ctx));
@@ -435,6 +450,13 @@ impl Shell {
                     if let Some(ref mut cb) = self.clipboard {
                         let _ = cb.set_text(text.as_str());
                     }
+                }
+                Effect::ConfirmAction { prompt, action } => {
+                    self.modal = Some(Modal {
+                        prompt,
+                        input: String::new(),
+                        action: PendingAction::Confirmed(action),
+                    });
                 }
                 Effect::Quit => {
                     // Handled at top level
@@ -549,6 +571,7 @@ impl Shell {
                 root: &self.root,
                 viewport_height: self.viewport_height,
                 yank_fn: None,
+                waker: self.waker.clone(),
             };
             self.components[i].flush(&mut ctx);
         }
@@ -559,26 +582,28 @@ impl Shell {
         self.db.as_ref()
     }
 
+    pub fn waker(&self) -> Option<&Waker> {
+        self.waker.as_ref()
+    }
+
     pub fn emit(&mut self, event: Event) {
         self.process_effects(vec![Effect::Emit(event)]);
     }
 
-    pub fn handle_notification(&mut self, hash: &str) {
-        let indices: Vec<usize> = self.components.iter()
-            .enumerate()
-            .filter(|(_, c)| c.notify_hash().as_deref() == Some(hash))
-            .map(|(i, _)| i)
-            .collect();
-
-        for idx in indices {
+    pub fn tick(&mut self) {
+        let mut all_effects = Vec::new();
+        for i in 0..self.components.len() {
             let mut ctx = Context {
                 db: self.db.as_ref(),
                 root: &self.root,
                 viewport_height: self.viewport_height,
                 yank_fn: None,
+                waker: self.waker.clone(),
             };
-            self.components[idx].handle_notification(&mut ctx);
+            let effects = self.components[i].handle_action(Action::Tick, &mut ctx);
+            all_effects.extend(effects);
         }
+        self.process_effects(all_effects);
     }
 
 }

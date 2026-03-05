@@ -8,6 +8,8 @@ use ratatui::style::{Color, Modifier, Style};
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 
+pub type Waker = Arc<dyn Fn() + Send + Sync>;
+
 // ---------------------------------------------------------------------------
 // Action
 // ---------------------------------------------------------------------------
@@ -32,6 +34,8 @@ pub enum Action {
     InsertTab,
     KillLine,
     Save,
+    SaveForce,
+    Tick,
     Quit,
     ToggleFocus,
     ToggleSidePanel,
@@ -89,6 +93,7 @@ pub enum Effect {
     SetMessage(String),
     FocusPanel(PanelSlot),
     SetClipboard(Arc<String>),
+    ConfirmAction { prompt: String, action: Action },
     Quit,
 }
 
@@ -101,6 +106,7 @@ pub struct Context<'a> {
     pub root: &'a std::path::Path,
     pub viewport_height: usize,
     pub yank_fn: Option<&'a mut dyn FnMut() -> Option<String>>,
+    pub waker: Option<Waker>,
 }
 
 impl<'a> Context<'a> {

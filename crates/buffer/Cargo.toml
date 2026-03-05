@@ -11,4 +11,5 @@ serde = { workspace = true }
 rmp-serde = { workspace = true }
 twox-hash = { workspace = true }
 rusqlite = { workspace = true }
+notify = { workspace = true }
 dirs = { workspace = true }
