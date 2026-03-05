@@ -529,9 +529,12 @@ impl Component for Buffer {
                     let chunk_len = ce - cs;
                     let mut col_styles = vec![text_style; chunk_len];
 
-                    // Apply syntax highlighting
+                    // Apply syntax highlighting — sort by span size descending
+                    // so inner (more specific) captures overwrite outer ones.
                     if let Some(line_hl) = hl_map.get(&line_idx) {
-                        for hs in line_hl {
+                        let mut sorted_hl: Vec<_> = line_hl.iter().collect();
+                        sorted_hl.sort_by_key(|hs| std::cmp::Reverse(hs.char_end - hs.char_start));
+                        for hs in sorted_hl {
                             let ds = char_map.get(hs.char_start).copied().unwrap_or(display.len());
                             let de = char_map.get(hs.char_end).copied().unwrap_or(display.len());
                             let style = resolve_capture_style(ctx.theme, hs.capture_name, text_style);
