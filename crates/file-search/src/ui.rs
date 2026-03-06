@@ -430,7 +430,7 @@ impl Component for FileSearch {
 
         let block = Block::default()
             .borders(Borders::RIGHT)
-            .border_style(ctx.theme.get("search.border").to_style());
+            .border_style(ctx.theme.get("file_search.border").to_style());
         let inner = block.inner(area);
         frame.render_widget(block, area);
 
@@ -443,8 +443,8 @@ impl Component for FileSearch {
         // Row 0: modifier toggles
         let toggle_y = inner.y;
         {
-            let on_style = ctx.theme.get("search.toggle_on").to_style();
-            let off_style = ctx.theme.get("search.toggle_off").to_style();
+            let on_style = ctx.theme.get("file_search.toggle_on").to_style();
+            let off_style = ctx.theme.get("file_search.toggle_off").to_style();
 
             let case_style = if self.case_sensitive {
                 on_style
@@ -466,9 +466,9 @@ impl Component for FileSearch {
         let input_y = inner.y + 1;
         {
             let input_style = if ctx.focused {
-                ctx.theme.get("search.input").to_style()
+                ctx.theme.get("file_search.input").to_style()
             } else {
-                ctx.theme.get("search.input_unfocused").to_style()
+                ctx.theme.get("file_search.input_unfocused").to_style()
             };
 
             let display_query: String = if self.query.len() > width {
@@ -505,13 +505,13 @@ impl Component for FileSearch {
         }
 
         // Build display rows
-        let header_style = ctx.theme.get("search.file_header").to_style();
-        let hit_style = ctx.theme.get("search.hit").to_style();
-        let match_style = ctx.theme.get("search.match").to_style();
+        let header_style = ctx.theme.get("file_search.file_header").to_style();
+        let hit_style = ctx.theme.get("file_search.hit").to_style();
+        let match_style = ctx.theme.get("file_search.match").to_style();
         let selected_style = if ctx.focused {
-            ctx.theme.get("search.selected").to_style()
+            ctx.theme.get("file_search.selected").to_style()
         } else {
-            ctx.theme.get("search.selected_unfocused").to_style()
+            ctx.theme.get("file_search.selected_unfocused").to_style()
         };
 
         let selected_flat = if self.flat_hits.is_empty() {

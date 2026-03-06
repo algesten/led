@@ -204,6 +204,7 @@ pub const DEFAULT_KEYS_TOML: &str = r#"# led keybindings
 "ctrl+space" = "set_mark"
 "ctrl+w" = "kill_region"
 "ctrl+y" = "yank"
+"ctrl+s" = "in_buffer_search"
 
 [keys."ctrl+x"]
 "ctrl+c" = "quit"

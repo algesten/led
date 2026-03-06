@@ -1,6 +1,7 @@
 mod color_hint;
 mod component;
 mod editing;
+mod search;
 pub(crate) mod syntax;
 mod undo;
 mod watcher;
@@ -59,6 +60,20 @@ pub(crate) struct PendingGroup {
 pub(crate) const GROUP_TIMEOUT_MS: u128 = 1000;
 
 // ---------------------------------------------------------------------------
+// Incremental search state
+// ---------------------------------------------------------------------------
+
+pub struct ISearchState {
+    pub query: String,
+    pub origin: (usize, usize),
+    pub origin_scroll: usize,
+    pub origin_sub_line: usize,
+    pub failed: bool,
+    pub matches: Vec<(usize, usize, usize)>, // (row, col, char_len)
+    pub match_idx: Option<usize>,
+}
+
+// ---------------------------------------------------------------------------
 // Buffer
 // ---------------------------------------------------------------------------
 
@@ -101,6 +116,8 @@ pub struct Buffer {
     pub(crate) pending_syntax: Arc<Mutex<Option<syntax::SyntaxState>>>,
     pub(crate) syntax_ready: Arc<AtomicBool>,
     pub(crate) syntax_cancel: Arc<AtomicBool>,
+    pub isearch: Option<ISearchState>,
+    pub(crate) last_search: Option<String>,
 }
 
 impl Buffer {
@@ -142,6 +159,8 @@ impl Buffer {
             pending_syntax: Arc::new(Mutex::new(None)),
             syntax_ready: Arc::new(AtomicBool::new(false)),
             syntax_cancel: Arc::new(AtomicBool::new(false)),
+            isearch: None,
+            last_search: None,
         }
     }
 
@@ -227,6 +246,8 @@ impl Buffer {
             pending_syntax,
             syntax_ready,
             syntax_cancel,
+            isearch: None,
+            last_search: None,
         })
     }
 

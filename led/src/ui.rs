@@ -163,6 +163,28 @@ fn render_main_content(shell: &mut Shell, frame: &mut Frame, area: Rect) {
 }
 
 fn render_status_bar(shell: &Shell, frame: &mut Frame, area: Rect) {
+    // Check if the active buffer is in incremental search mode
+    if let Some(comp) = shell.active_buffer() {
+        if let Some(buf) = comp.as_any().downcast_ref::<led_buffer::Buffer>() {
+            if let Some(ref isearch) = buf.isearch {
+                let prompt = if isearch.failed {
+                    format!("Failing search: {}", isearch.query)
+                } else {
+                    format!("Search: {}", isearch.query)
+                };
+                let padding = (area.width as usize).saturating_sub(prompt.len() + 1);
+                let bar = format!(" {prompt}{:padding$}", "");
+                let style = shell.theme.get("status_bar.style").to_style();
+                let paragraph = Paragraph::new(bar).style(style);
+                frame.render_widget(paragraph, area);
+                // Place cursor at end of search query in status bar
+                let cursor_x = area.x + 1 + prompt.len() as u16;
+                frame.set_cursor_position(Position::new(cursor_x, area.y));
+                return;
+            }
+        }
+    }
+
     let (left, right) = if let Some(comp) = shell.active_buffer() {
         let tab = comp.tab().unwrap_or(led_core::TabDescriptor {
             label: String::new(),

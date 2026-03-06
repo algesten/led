@@ -51,6 +51,7 @@ pub enum Action {
     CloseFileSearch,
     ToggleSearchCase,
     ToggleSearchRegex,
+    InBufferSearch,
 }
 
 // ---------------------------------------------------------------------------

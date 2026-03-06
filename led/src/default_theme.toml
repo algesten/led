@@ -282,15 +282,18 @@ theme_bold       = "$x223"
 theme_bold_i     = { fg = "$x232", bg = "$x223" }
 theme_selected   = { fg = "term_reset", bg = "$x053" }
 theme_inactive   = { fg = "$x216", bg = "$x238"  }
+theme_selected2  = { fg = "$x232", bg = "$x075" }
 
 # Semantic aliases
 normal           = "term_reset"
 accent           = "$theme_bright"
 muted            = "$theme_dark"
 bold             = "$theme_bold"
+inverse_bold     = "$theme_bold_i"
 inverse_active   = "$theme_bright_i"
 inverse_inactive = "$theme_inactive"
 selected         = "$theme_selected"
+selected_2nd     = "$theme_selected2"
 
 # Syntax
 
@@ -361,11 +364,13 @@ preview_inactive = "$inverse_inactive"
 style = { fg = "$bold", bg = "$muted" }
 
 [editor]
-text      = "$normal"
-gutter    = "$muted"
-selection = "$selected"
+text           = "$normal"
+gutter         = "$muted"
+selection      = "$selected"
+search_match   = "$selected_2nd"
+search_current = "$inverse_bold"
 
-[search]
+[file_search]
 border             = "$muted"
 input              = { bg = "$bright_black" }
 input_unfocused    = { bg = "$bright_black" }

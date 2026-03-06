@@ -199,7 +199,75 @@ impl Component for Buffer {
         vec![]
     }
 
+    fn context_name(&self) -> Option<&str> {
+        if self.isearch.is_some() {
+            Some("isearch")
+        } else {
+            None
+        }
+    }
+
     fn handle_action(&mut self, action: Action, ctx: &mut Context) -> Vec<Effect> {
+        // Intercept actions during incremental search
+        if self.isearch.is_some() {
+            match action {
+                Action::InsertChar(c) => {
+                    self.isearch.as_mut().unwrap().query.push(c);
+                    self.update_search();
+                    return vec![];
+                }
+                Action::DeleteBackward => {
+                    let empty = {
+                        let is = self.isearch.as_mut().unwrap();
+                        is.query.pop();
+                        is.query.is_empty()
+                    };
+                    if empty {
+                        // Restore origin when query becomes empty
+                        let is = self.isearch.as_ref().unwrap();
+                        self.cursor_row = is.origin.0;
+                        self.cursor_col = is.origin.1;
+                        let is = self.isearch.as_mut().unwrap();
+                        is.matches.clear();
+                        is.match_idx = None;
+                        is.failed = false;
+                    } else {
+                        self.update_search();
+                    }
+                    return vec![];
+                }
+                Action::InBufferSearch => {
+                    self.search_next();
+                    return vec![];
+                }
+                Action::Abort => {
+                    self.search_cancel();
+                    return vec![];
+                }
+                Action::InsertNewline => {
+                    self.search_accept();
+                    return vec![];
+                }
+                Action::MoveUp
+                | Action::MoveDown
+                | Action::MoveLeft
+                | Action::MoveRight
+                | Action::LineStart
+                | Action::LineEnd
+                | Action::PageUp
+                | Action::PageDown
+                | Action::FileStart
+                | Action::FileEnd => {
+                    self.search_accept();
+                    // Fall through to normal handling below
+                }
+                _ => {
+                    self.search_accept();
+                    // Fall through to normal handling below
+                }
+            }
+        }
+
         // Clear kill accumulator for non-KillLine actions
         if !matches!(action, Action::KillLine) {
             self.kill_accumulator = None;
@@ -336,6 +404,10 @@ impl Component for Buffer {
                 self.clear_mark();
                 vec![Effect::Emit(Event::FileSearchOpened { selected_text })]
             }
+            Action::InBufferSearch => {
+                self.start_search();
+                vec![]
+            }
             Action::Abort => {
                 self.clear_mark();
                 vec![]
@@ -401,7 +473,26 @@ impl Component for Buffer {
         let gutter_style = ctx.theme.get("editor.gutter").to_style();
         let text_style = ctx.theme.get("editor.text").to_style();
         let sel_style = ctx.theme.get("editor.selection").to_style();
+        let search_match_style = ctx.theme.get("editor.search_match").to_style();
+        let search_current_style = ctx.theme.get("editor.search_current").to_style();
         let sel_range = self.selection_range();
+
+        // Pre-compute search match display ranges for visible lines
+        let search_info: Option<(Vec<&(usize, usize, usize)>, Option<usize>)> =
+            self.isearch.as_ref().and_then(|is| {
+                if is.matches.is_empty() {
+                    return None;
+                }
+                let visible: Vec<&(usize, usize, usize)> = is
+                    .matches
+                    .iter()
+                    .filter(|(r, _, _)| *r >= self.scroll_offset && *r < self.scroll_offset + height)
+                    .collect();
+                if visible.is_empty() {
+                    return None;
+                }
+                Some((visible, is.match_idx))
+            });
 
         // Pre-compute syntax highlights for visible lines
         let end_line = (self.scroll_offset + height).min(total_lines);
@@ -567,6 +658,25 @@ impl Component for Buffer {
                     if let Some((ss, se)) = sel_dcols {
                         for i in ss.max(cs)..se.min(ce) {
                             col_styles[i - cs] = sel_style;
+                        }
+                    }
+
+                    // Apply search match overlay
+                    if let Some((ref visible, _current_idx)) = search_info {
+                        let current_match = self.isearch.as_ref().and_then(|is| {
+                            is.match_idx.map(|i| &is.matches[i])
+                        });
+                        for &(mr, mc, mlen) in visible.iter() {
+                            if *mr != line_idx {
+                                continue;
+                            }
+                            let ms = char_map.get(*mc).copied().unwrap_or(display.len());
+                            let me = char_map.get(mc + mlen).copied().unwrap_or(display.len());
+                            let is_current = current_match.map_or(false, |cm| cm.0 == *mr && cm.1 == *mc);
+                            let style = if is_current { search_current_style } else { search_match_style };
+                            for i in ms.max(cs)..me.min(ce) {
+                                col_styles[i - cs] = style;
+                            }
                         }
                     }
 
