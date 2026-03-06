@@ -331,6 +331,9 @@ fn restore_session(shell: &mut Shell, session: SessionData) {
 
     // Restore side panel components (FileBrowser loads its own state from DB via kv)
     shell.restore_sidepanel_sessions();
+
+    // Trigger line-diff scan for the active buffer
+    shell.notify_active_buffer();
 }
 
 fn find_git_root(start: &std::path::Path) -> PathBuf {

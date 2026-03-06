@@ -750,13 +750,13 @@ impl Component for Buffer {
 
                 // Gutter — left column: git line status, right column: color preview
                 if chunk_i == skip {
-                    // Left gutter: git line status indicator
-                    let left = if let Some(kind) = self.path.as_ref()
-                        .and_then(|p| ctx.file_statuses.line_status_at(p, line_idx))
-                    {
+                    // Left gutter: line status indicator (git diff)
+                    let line_kind = self.path.as_ref()
+                        .and_then(|p| ctx.file_statuses.line_status_at(p, line_idx));
+                    let left = if let Some(kind) = line_kind {
                         let key = led_core::file_status::line_status_theme(kind);
                         let fg_color = ctx.theme.get(key).to_style().fg.unwrap_or(Color::Reset);
-                        Span::styled(" ", Style::default().bg(fg_color))
+                        Span::styled("▎", Style::default().fg(fg_color))
                     } else {
                         Span::styled(" ", gutter_style)
                     };

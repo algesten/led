@@ -741,7 +741,7 @@ impl Shell {
         self.tab_bar_width = width;
     }
 
-    fn notify_active_buffer(&mut self) {
+    pub fn notify_active_buffer(&mut self) {
         self.touch_active_buffer();
         if let Some(idx) = self.active_tab_component_idx() {
             let path = self.components[idx].tab().and_then(|t| t.path);

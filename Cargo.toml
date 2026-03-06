@@ -34,5 +34,6 @@ tree-sitter-swift = "0.7"
 tree-sitter-c = "0.24"
 tree-sitter-cpp = "0.23"
 tree-sitter-make = "1.1"
+similar = "2"
 led_git_status = { path = "crates/git-status" }
 git2 = { version = "0.20", features = ["vendored-libgit2"] }
