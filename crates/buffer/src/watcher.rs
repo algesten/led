@@ -3,7 +3,7 @@ use std::io::{self, BufReader, BufWriter};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use led_core::{Context, Effect, Waker};
+use led_core::{Context, Effect, Event, Waker};
 use notify::{RecursiveMode, Watcher};
 use ropey::Rope;
 
@@ -134,10 +134,14 @@ impl Buffer {
                 self.cursor_row = max_line;
             }
             self.clamp_cursor_col();
-            vec![Effect::SetMessage(format!(
+            let mut effects = vec![Effect::SetMessage(format!(
                 "Reloaded {} (changed on disk).",
                 self.filename()
-            ))]
+            ))];
+            if let Some(ref path) = self.path {
+                effects.push(Effect::Emit(Event::FileSaved(path.clone())));
+            }
+            effects
         }
     }
 

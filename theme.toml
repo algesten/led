@@ -280,18 +280,36 @@ theme_bright     = "$x216"
 theme_bright_i   = { fg = "$x232", bg = "$x216" }
 theme_bold       = "$x223"
 theme_bold_i     = { fg = "$x232", bg = "$x223" }
-theme_selected   = { fg = "term_reset", bg = "$x234" }
+theme_selected   = { fg = "term_reset", bg = "$x053" }
 theme_inactive   = { fg = "$x216", bg = "$x238"  }
+theme_inactive2  = { fg = "term_reset", bg = "$x238"  }
+theme_selected2  = { fg = "$x232", bg = "$x075" }
+theme_neutral    = "$x032"
 
 # Semantic aliases
 normal           = "term_reset"
 accent           = "$theme_bright"
 muted            = "$theme_dark"
 bold             = "$theme_bold"
+inverse_bold     = "$theme_bold_i"
 inverse_active   = "$theme_bright_i"
 inverse_inactive = "$theme_inactive"
+inverse_inactive2= "$theme_inactive2"
 selected         = "$theme_selected"
+selected_2nd     = "$theme_selected2"
+neutral          = "$theme_neutral"
 
+
+# Syntax
+
+syntax_keyword   = "$x032"
+syntax_type      = "$x030"
+syntax_string    = "$x034"
+syntax_number    = "$magenta"
+syntax_comment   = "$x237"
+syntax_attribute = "$x098"
+syntax_tag       = "$x160"
+syntax_label     = "$x172"
 
 ####################################################################
 
@@ -305,11 +323,20 @@ preview_inactive = "$inverse_inactive"
 style = { fg = "$bold", bg = "$muted" }
 
 [editor]
-text      = "$normal"
-gutter    = "$muted"
-selection = "$selected"
+text           = "$normal"
+gutter         = "$muted"
+selection      = "$selected"
+search_match   = "$selected_2nd"
+search_current = "$inverse_bold"
 
-[search]
+[browser]
+directory          = "$neutral"
+file               = "$normal"
+selected           = "$inverse_active"
+selected_unfocused = "$inverse_inactive2"
+border             = "$muted"
+
+[file_search]
 border             = "$muted"
 input              = { bg = "$bright_black" }
 input_unfocused    = { bg = "$bright_black" }
@@ -321,9 +348,55 @@ match              = { fg = "$bright_yellow", bold = true }
 selected           = "$inverse_active"
 selected_unfocused = "$inverse_inactive"
 
-[browser]
-directory          = "$accent"
-file               = "$normal"
-selected           = "$inverse_active"
-selected_unfocused = "$inverse_inactive"
-border             = "$muted"
+[git]
+modified        = "$x172"
+added           = "$x034"
+untracked       = "$x022"
+gutter_added    = "$x034"
+gutter_modified = "$x172"
+
+[syntax]
+keyword          = "$syntax_keyword"
+function         = "$syntax_keyword"
+module           = "$syntax_keyword"
+conditional      = "$syntax_keyword"
+include          = "$syntax_keyword"
+repeat           = "$syntax_keyword"
+exception        = "$syntax_keyword"
+
+type             = "$syntax_type"
+"type.builtin"   = "$syntax_type"
+constructor      = "$syntax_type"
+
+string           = "$syntax_string"
+"string.regex"   = "$syntax_string"
+"text.literal"   = "$syntax_string"
+
+number           = "$syntax_number"
+boolean          = "$syntax_number"
+constant         = "$syntax_number"
+"constant.builtin" = "$syntax_number"
+escape           = "$syntax_number"
+"string.special" = "$syntax_number"
+
+comment          = "$syntax_comment"
+
+operator         = "$normal"
+punctuation      = "$normal"
+variable         = "$normal"
+
+"variable.builtin" = "$syntax_attribute"
+"variable.parameter" = "$syntax_attribute"
+"variable.member" = "$syntax_attribute"
+property         = "$syntax_attribute"
+attribute        = "$syntax_attribute"
+"text.reference" = "$syntax_attribute"
+
+tag              = "$syntax_tag"
+
+label            = "$syntax_label"
+embedded         = "$syntax_label"
+"text.title"     = { fg = "$syntax_label", bold = true }
+"text.strong"    = { fg = "$bright_white", bold = true }
+"text.emphasis"  = "$bright_white"
+"text.uri"       = "$syntax_keyword"
