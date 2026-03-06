@@ -443,15 +443,6 @@ impl Shell {
                     // Dispatch to active buffer to clear mark
                     let effects = self.dispatch_action(Action::Abort);
                     self.process_effects(effects);
-                    // Close file search panel if open
-                    if self.side_component().and_then(|c| c.context_name()) == Some("file_search") {
-                        let mut ctx = self.env.ctx();
-                        if let Some(idx) = self.side_component_idx() {
-                            let effects = self.components[idx]
-                                .handle_action(Action::CloseFileSearch, &mut ctx);
-                            self.process_effects(effects);
-                        }
-                    }
                 }
             }
 

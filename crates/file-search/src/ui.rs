@@ -362,11 +362,26 @@ impl Component for FileSearch {
                 effects.extend(self.preview_selected());
                 return effects;
             }
+            Action::FileStart => {
+                self.select_all = false;
+                self.selected = 0;
+                effects.extend(self.preview_selected());
+                return effects;
+            }
+            Action::FileEnd => {
+                self.select_all = false;
+                if !self.flat_hits.is_empty() {
+                    self.selected = self.flat_hits.len() - 1;
+                }
+                effects.extend(self.preview_selected());
+                return effects;
+            }
             Action::OpenSelected | Action::InsertNewline => {
                 if let Some((group, hit)) = self.selected_hit() {
                     let path = group.path.clone();
                     let row = hit.row;
                     let col = hit.col;
+                    self.active = false;
                     effects.push(Effect::Emit(Event::ConfirmSearch { path, row, col }));
                     return effects;
                 } else {

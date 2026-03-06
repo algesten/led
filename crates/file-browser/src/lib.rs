@@ -295,6 +295,16 @@ impl Component for FileBrowser {
                 self.page_down(ctx.viewport_height);
                 self.preview_selected()
             }
+            Action::FileStart => {
+                self.selected = 0;
+                self.preview_selected()
+            }
+            Action::FileEnd => {
+                if !self.entries.is_empty() {
+                    self.selected = self.entries.len() - 1;
+                }
+                self.preview_selected()
+            }
             Action::ExpandDir => {
                 self.expand_selected();
                 self.preview_selected()

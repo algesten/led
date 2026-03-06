@@ -199,6 +199,8 @@ pub const DEFAULT_KEYS_TOML: &str = r#"# led keybindings
 "ctrl+g" = "abort"
 "esc" = "abort"
 "ctrl+z" = "suspend"
+"alt+<" = "file_start"
+"alt+>" = "file_end"
 "ctrl+space" = "set_mark"
 "ctrl+w" = "kill_region"
 "ctrl+y" = "yank"
@@ -217,8 +219,8 @@ pub const DEFAULT_KEYS_TOML: &str = r#"# led keybindings
 [file_search]
 "alt+1" = "toggle_search_case"
 "alt+2" = "toggle_search_regex"
-"esc" = "close_file_search"
 "enter" = "open_selected"
+"ctrl+v" = "open_selected"
 "#;
 
 // ---------------------------------------------------------------------------
