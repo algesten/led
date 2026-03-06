@@ -388,3 +388,10 @@ file               = "$normal"
 selected           = "$inverse_active"
 selected_unfocused = "$inverse_inactive"
 border             = "$muted"
+
+[git]
+modified        = "$x130"
+added           = "$x034"
+untracked       = "$x022"
+gutter_added    = "$x034"
+gutter_modified = "$x130"

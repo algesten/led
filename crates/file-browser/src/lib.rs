@@ -435,8 +435,43 @@ impl Component for FileBrowser {
                     ctx.theme.get("browser.file").to_style()
                 };
 
-                let padded = format!("{:<width$}", display, width = max_width);
-                lines.push(Line::from(Span::styled(padded, style)));
+                // Apply git status color to the entire entry
+                let file_status_set = match &entry.kind {
+                    EntryKind::File => ctx.file_statuses.file_statuses(&entry.path).cloned(),
+                    EntryKind::Directory { .. } => {
+                        let s = ctx.file_statuses.directory_statuses(&entry.path);
+                        if s.is_empty() { None } else { Some(s) }
+                    }
+                };
+                let status_display = file_status_set
+                    .as_ref()
+                    .and_then(|s| led_core::file_status::resolve_display(s));
+
+                if let Some(ref sd) = status_display {
+                    let status_fg = ctx.theme.get(sd.theme_key).to_style();
+                    let entry_style = if is_selected {
+                        ratatui::style::Style::default()
+                            .fg(status_fg.fg.unwrap_or(ratatui::style::Color::Reset))
+                            .bg(style.bg.unwrap_or(ratatui::style::Color::Reset))
+                    } else {
+                        status_fg
+                    };
+                    let name_width = max_width.saturating_sub(1);
+                    let truncated: String = if display.len() > name_width {
+                        display[..name_width].to_string()
+                    } else {
+                        display
+                    };
+                    let pad = name_width.saturating_sub(truncated.len());
+                    let name_part = format!("{truncated}{:pad$}", "");
+                    lines.push(Line::from(vec![
+                        Span::styled(name_part, entry_style),
+                        Span::styled(if is_dir { "\u{23fa}".to_string() } else { sd.letter.to_string() }, entry_style),
+                    ]));
+                } else {
+                    let padded = format!("{:<width$}", display, width = max_width);
+                    lines.push(Line::from(Span::styled(padded, style)));
+                }
             } else {
                 lines.push(Line::from(""));
             }

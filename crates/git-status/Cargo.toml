@@ -1,0 +1,10 @@
+[package]
+name = "led_git_status"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+led_core = { workspace = true }
+ratatui = { workspace = true }
+git2 = { workspace = true }
+tokio = { workspace = true }

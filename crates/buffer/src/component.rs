@@ -151,7 +151,9 @@ impl Buffer {
 
         let filename = self.filename();
         let modified = if self.dirty { " \u{25cf}" } else { "" };
-        let left = format!(" led: {filename}{modified}");
+        let branch = ctx.file_statuses.branch.as_deref().unwrap_or("");
+        let branch_display = if branch.is_empty() { String::new() } else { format!(" ({branch})") };
+        let left = format!(" led: {filename}{modified}{branch_display}");
         let pos = format!("L{}:C{} ", self.cursor_row + 1, self.cursor_col + 1);
         let padding = (area.width as usize).saturating_sub(left.len() + pos.len());
         let bar = format!("{left}{:padding$}{pos}", "");
@@ -459,7 +461,11 @@ impl Component for Buffer {
                     match self.save(ctx) {
                         Ok(()) => {
                             let name = self.filename().to_string();
-                            vec![Effect::SetMessage(format!("Saved {name}."))]
+                            let mut effects = vec![Effect::SetMessage(format!("Saved {name}."))];
+                            if let Some(ref path) = self.path {
+                                effects.push(Effect::Emit(Event::FileSaved(path.clone())));
+                            }
+                            effects
                         }
                         Err(e) => vec![Effect::SetMessage(format!("Save failed: {e}"))],
                     }
@@ -468,7 +474,11 @@ impl Component for Buffer {
             Action::SaveForce => match self.save(ctx) {
                 Ok(()) => {
                     let name = self.filename().to_string();
-                    vec![Effect::SetMessage(format!("Saved {name}."))]
+                    let mut effects = vec![Effect::SetMessage(format!("Saved {name}."))];
+                    if let Some(ref path) = self.path {
+                        effects.push(Effect::Emit(Event::FileSaved(path.clone())));
+                    }
+                    effects
                 }
                 Err(e) => vec![Effect::SetMessage(format!("Save failed: {e}"))],
             },
@@ -738,18 +748,31 @@ impl Component for Buffer {
                 let chunk_text = &display[cs..ce];
                 let mut spans: Vec<Span> = Vec::new();
 
-                // Gutter — show color preview on first visible chunk
+                // Gutter — left column: git line status, right column: color preview
                 if chunk_i == skip {
-                    if let Some(ref hint) = color_hint {
+                    // Left gutter: git line status indicator
+                    let left = if let Some(kind) = self.path.as_ref()
+                        .and_then(|p| ctx.file_statuses.line_status_at(p, line_idx))
+                    {
+                        let key = led_core::file_status::line_status_theme(kind);
+                        let fg_color = ctx.theme.get(key).to_style().fg.unwrap_or(Color::Reset);
+                        Span::styled(" ", Style::default().bg(fg_color))
+                    } else {
+                        Span::styled(" ", gutter_style)
+                    };
+                    // Right gutter: color preview
+                    let right = if let Some(ref hint) = color_hint {
                         if hint.bg != Color::Reset {
-                            spans.push(Span::styled("A ", hint.to_style()));
+                            Span::styled("A", hint.to_style())
                         } else {
                             let block_style = ratatui::style::Style::default().bg(hint.fg);
-                            spans.push(Span::styled("  ", block_style));
+                            Span::styled(" ", block_style)
                         }
                     } else {
-                        spans.push(Span::styled("  ", gutter_style));
-                    }
+                        Span::styled(" ", gutter_style)
+                    };
+                    spans.push(left);
+                    spans.push(right);
                 } else {
                     spans.push(Span::styled("  ", gutter_style));
                 }

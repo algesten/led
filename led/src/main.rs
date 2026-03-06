@@ -20,6 +20,7 @@ use led_core::PanelSlot;
 use led_file_browser::FileBrowser;
 use led_file_search::FileSearch;
 use led_find_file::FindFilePanel;
+use led_git_status::GitStatus;
 use session::SessionData;
 use shell::{InputResult, Shell};
 
@@ -94,6 +95,7 @@ async fn main() -> io::Result<()> {
         Box::new(FileSearch::new(root.clone(), Some(waker.clone()))),
         Box::new(FileBrowser::new(root.clone())),
         Box::new(FindFilePanel::new()),
+        Box::new(GitStatus::new(root.clone(), Some(waker.clone()))),
     ];
     if let Some(buf) = initial_buffer {
         components.push(Box::new(buf));

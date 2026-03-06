@@ -27,30 +27,22 @@ pub fn render(shell: &mut Shell, frame: &mut Frame) {
         let main_area_inner = horizontal[1];
 
         // Draw side panel component
-        if shell.focus == PanelSlot::Side {
-            let theme = shell.theme.clone();
-            let mut ctx = DrawContext {
-                theme: &theme,
-                focused: true,
-                cursor_pos: None,
-                slot: PanelSlot::Side,
-            };
-            if let Some(comp) = shell.side_component_mut() {
-                comp.draw(frame, browser_area, &mut ctx);
-            }
+        let focused = shell.focus == PanelSlot::Side;
+        let theme = shell.theme.clone();
+        let fs = shell.file_statuses.clone();
+        let mut ctx = DrawContext {
+            theme: &theme,
+            focused,
+            cursor_pos: None,
+            slot: PanelSlot::Side,
+            file_statuses: &fs,
+        };
+        if let Some(comp) = shell.side_component_mut() {
+            comp.draw(frame, browser_area, &mut ctx);
+        }
+        if focused {
             if let Some((x, y)) = ctx.cursor_pos {
                 frame.set_cursor_position(Position::new(x, y));
-            }
-        } else {
-            let theme = shell.theme.clone();
-            let mut ctx = DrawContext {
-                theme: &theme,
-                focused: false,
-                cursor_pos: None,
-                slot: PanelSlot::Side,
-            };
-            if let Some(comp) = shell.side_component_mut() {
-                comp.draw(frame, browser_area, &mut ctx);
             }
         }
 
@@ -148,11 +140,13 @@ fn render_main_content(shell: &mut Shell, frame: &mut Frame, area: Rect) {
     // Draw the active buffer component
     let focused = shell.focus == PanelSlot::Main;
     let theme = shell.theme.clone();
+    let fs = shell.file_statuses.clone();
     let mut ctx = DrawContext {
         theme: &theme,
         focused,
         cursor_pos: None,
         slot: PanelSlot::Main,
+        file_statuses: &fs,
     };
     shell
         .active_buffer_mut()
@@ -170,12 +164,14 @@ fn render_main_content(shell: &mut Shell, frame: &mut Frame, area: Rect) {
 fn render_status_bar(shell: &mut Shell, frame: &mut Frame, area: Rect) {
     // Check if any component claims the status bar
     let theme = shell.theme.clone();
+    let fs = shell.file_statuses.clone();
     if let Some(comp) = shell.status_bar_component_mut() {
         let mut ctx = DrawContext {
             theme: &theme,
             focused: true,
             cursor_pos: None,
             slot: PanelSlot::StatusBar,
+            file_statuses: &fs,
         };
         comp.draw(frame, area, &mut ctx);
         if let Some((x, y)) = ctx.cursor_pos {

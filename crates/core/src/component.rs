@@ -5,7 +5,7 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use rusqlite::Connection;
 
-use crate::{Action, Clipboard, Effect, Event, PanelClaim, PanelSlot, TabDescriptor, Waker};
+use crate::{Action, Clipboard, Effect, Event, FileStatusStore, PanelClaim, PanelSlot, TabDescriptor, Waker};
 
 // ---------------------------------------------------------------------------
 // Context
@@ -25,6 +25,7 @@ pub struct DrawContext<'a> {
     pub focused: bool,
     pub cursor_pos: Option<(u16, u16)>,
     pub slot: PanelSlot,
+    pub file_statuses: &'a FileStatusStore,
 }
 
 // ---------------------------------------------------------------------------

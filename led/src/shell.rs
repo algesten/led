@@ -25,7 +25,7 @@ use std::sync::Arc;
 
 use crate::config::{KeyCombo, Keymap, KeymapLookup};
 use crate::theme::Theme;
-use led_core::{Action, Clipboard, Component, Context, Effect, Event, PanelSlot, Waker};
+use led_core::{Action, Clipboard, Component, Context, Effect, Event, FileStatusStore, PanelSlot, Waker};
 
 struct ArboardClipboard {
     inner: std::sync::Mutex<Option<arboard::Clipboard>>,
@@ -116,6 +116,7 @@ pub struct Shell {
     pre_preview_tab: Option<usize>,
     tab_bar_width: u16,
     env: Env,
+    pub file_statuses: FileStatusStore,
 }
 
 impl Shell {
@@ -137,6 +138,7 @@ impl Shell {
             pending_flush: false,
             pre_preview_tab: None,
             tab_bar_width: 0,
+            file_statuses: FileStatusStore::default(),
             env: Env {
                 db,
                 root,
@@ -612,6 +614,13 @@ impl Shell {
                             self.active_tab = tabs.len() - 1;
                         }
                     }
+                }
+                Effect::SetFileStatuses { statuses, branch } => {
+                    self.file_statuses.set_file_statuses(statuses);
+                    self.file_statuses.branch = branch;
+                }
+                Effect::SetLineStatuses { path, statuses } => {
+                    self.file_statuses.set_line_statuses(path, statuses);
                 }
                 Effect::Quit => {
                     // Handled at top level

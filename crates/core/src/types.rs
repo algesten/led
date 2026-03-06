@@ -1,7 +1,10 @@
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
+
+use crate::file_status::{FileStatus, LineStatus};
 
 pub type Waker = Arc<dyn Fn() + Send + Sync>;
 
@@ -125,6 +128,7 @@ pub enum Event {
         col: usize,
     },
     FindFileOpened { dir: PathBuf },
+    FileSaved(PathBuf),
 }
 
 pub enum Effect {
@@ -135,5 +139,13 @@ pub enum Effect {
     ConfirmAction { prompt: String, action: Action },
     ActivateBuffer(PathBuf),
     KillPreview,
+    SetFileStatuses {
+        statuses: HashMap<PathBuf, HashSet<FileStatus>>,
+        branch: Option<String>,
+    },
+    SetLineStatuses {
+        path: PathBuf,
+        statuses: Vec<LineStatus>,
+    },
     Quit,
 }

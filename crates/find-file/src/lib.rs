@@ -370,12 +370,41 @@ impl FindFilePanel {
 
             let max = inner.width as usize;
             let name = &comp.name;
-            let display: String = if name.len() > max {
-                format!("{}…", &name[..max.saturating_sub(1)])
+
+            // Apply git status color to the entire entry + status letter
+            let sd = if !comp.is_dir {
+                ctx.file_statuses
+                    .file_statuses(&comp.full)
+                    .and_then(|s| led_core::file_status::resolve_display(s))
             } else {
-                format!("{name:max$}")
+                None
             };
-            buf.set_string(inner.x, y, &display, style);
+
+            if let Some(sd) = sd {
+                let status_fg = ctx.theme.get(sd.theme_key).to_style();
+                let entry_style = if is_selected {
+                    ratatui::style::Style::default()
+                        .fg(status_fg.fg.unwrap_or(ratatui::style::Color::Reset))
+                        .bg(style.bg.unwrap_or(ratatui::style::Color::Reset))
+                } else {
+                    status_fg
+                };
+                let name_width = max.saturating_sub(1);
+                let display: String = if name.len() > name_width {
+                    format!("{}…", &name[..name_width.saturating_sub(1)])
+                } else {
+                    format!("{name:name_width$}")
+                };
+                buf.set_string(inner.x, y, &display, entry_style);
+                buf.set_string(inner.x + name_width as u16, y, &sd.letter.to_string(), entry_style);
+            } else {
+                let display: String = if name.len() > max {
+                    format!("{}…", &name[..max.saturating_sub(1)])
+                } else {
+                    format!("{name:max$}")
+                };
+                buf.set_string(inner.x, y, &display, style);
+            }
         }
     }
 }
