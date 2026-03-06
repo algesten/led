@@ -1,3 +1,20 @@
+//! Shell — the orchestrator that owns components and routes input.
+//!
+//! # Rules for modifying this file
+//!
+//! Do NOT add feature logic here. The shell is a thin router. All behaviour
+//! lives inside components, communicated through three channels:
+//!
+//!   Action  (shell → component)  — via `handle_action`
+//!   Event   (broadcast)          — via `Effect::Emit` → `handle_event`
+//!   Effect  (component → shell)  — returned from `handle_action` / `handle_event`
+//!
+//! If you need new behaviour, add an Action, Event, or Effect variant and
+//! handle it in the relevant component. The shell may only react to Effects
+//! (spawn, focus, message, quit) — never inspect or manipulate component state.
+//!
+//! The shell MUST NOT downcast components to concrete types.
+
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
