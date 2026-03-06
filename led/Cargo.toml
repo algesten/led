@@ -8,6 +8,7 @@ led_core = { workspace = true }
 led_buffer = { workspace = true }
 led_file_browser = { workspace = true }
 led_file_search = { workspace = true }
+led_find_file = { workspace = true }
 ratatui = { workspace = true }
 crossterm = { workspace = true }
 serde = { workspace = true }

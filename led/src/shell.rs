@@ -273,6 +273,11 @@ impl Shell {
             .map(|(i, _)| i)
     }
 
+    pub fn status_bar_component(&self) -> Option<&Box<dyn Component>> {
+        let idx = self.status_bar_component_idx()?;
+        Some(&self.components[idx])
+    }
+
     pub fn status_bar_component_mut(&mut self) -> Option<&mut Box<dyn Component>> {
         let idx = self.status_bar_component_idx()?;
         Some(&mut self.components[idx])
@@ -361,7 +366,11 @@ impl Shell {
                 .side_component()
                 .and_then(|c| c.context_name())
                 .map(|s| s.to_string()),
-            PanelSlot::Main | PanelSlot::StatusBar => None,
+            PanelSlot::StatusBar => self
+                .status_bar_component()
+                .and_then(|c| c.context_name())
+                .map(|s| s.to_string()),
+            PanelSlot::Main => None,
         };
 
         match self.keymap.lookup(&combo, context.as_deref()) {
@@ -374,7 +383,11 @@ impl Shell {
             KeymapLookup::Unbound => {
                 // Printable character fallback: insert if no ctrl/alt modifier
                 let allow_insert = match self.focus {
-                    PanelSlot::Main | PanelSlot::StatusBar => self.has_tabs(),
+                    PanelSlot::Main => self.has_tabs(),
+                    PanelSlot::StatusBar => self
+                        .status_bar_component()
+                        .and_then(|c| c.context_name())
+                        .is_some(),
                     PanelSlot::Side => {
                         self.side_component().and_then(|c| c.context_name()) == Some("file_search")
                     }
@@ -470,6 +483,18 @@ impl Shell {
                 self.set_focus(PanelSlot::Side);
             }
 
+            Action::FindFile => {
+                let dir = self
+                    .active_buffer_mut()
+                    .and_then(|c| c.tab())
+                    .and_then(|t| t.path)
+                    .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+                    .unwrap_or_else(|| self.env.root.clone());
+                let effects = vec![Effect::Emit(Event::FindFileOpened { dir })];
+                self.process_effects(effects);
+                self.set_focus(PanelSlot::StatusBar);
+            }
+
             Action::Abort => {
                 if self.modal.is_some() {
                     self.modal = None;
@@ -499,8 +524,17 @@ impl Shell {
         let mut ctx = self.env.ctx();
 
         match self.focus {
-            PanelSlot::Main | PanelSlot::StatusBar => {
+            PanelSlot::Main => {
                 if let Some(idx) = self.active_tab_component_idx() {
+                    self.components[idx].handle_action(action, &mut ctx)
+                } else {
+                    vec![]
+                }
+            }
+            PanelSlot::StatusBar => {
+                if let Some(idx) = self.status_bar_component_idx() {
+                    self.components[idx].handle_action(action, &mut ctx)
+                } else if let Some(idx) = self.active_tab_component_idx() {
                     self.components[idx].handle_action(action, &mut ctx)
                 } else {
                     vec![]
@@ -758,7 +792,10 @@ impl Shell {
         let mut effects = Vec::new();
 
         let old_idx = match old {
-            PanelSlot::Main | PanelSlot::StatusBar => self.active_tab_component_idx(),
+            PanelSlot::Main => self.active_tab_component_idx(),
+            PanelSlot::StatusBar => self
+                .status_bar_component_idx()
+                .or_else(|| self.active_tab_component_idx()),
             PanelSlot::Side => self.side_component_idx(),
         };
         if let Some(idx) = old_idx {
@@ -767,7 +804,10 @@ impl Shell {
         }
 
         let new_idx = match new {
-            PanelSlot::Main | PanelSlot::StatusBar => self.active_tab_component_idx(),
+            PanelSlot::Main => self.active_tab_component_idx(),
+            PanelSlot::StatusBar => self
+                .status_bar_component_idx()
+                .or_else(|| self.active_tab_component_idx()),
             PanelSlot::Side => self.side_component_idx(),
         };
         if let Some(idx) = new_idx {

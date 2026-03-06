@@ -52,6 +52,7 @@ pub enum Action {
     ToggleSearchCase,
     ToggleSearchRegex,
     InBufferSearch,
+    FindFile,
     FocusGained,
     FocusLost,
     SaveSession,
@@ -123,6 +124,7 @@ pub enum Event {
         row: usize,
         col: usize,
     },
+    FindFileOpened { dir: PathBuf },
 }
 
 pub enum Effect {

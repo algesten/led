@@ -1045,6 +1045,7 @@ dependencies = [
  "led_core",
  "led_file_browser",
  "led_file_search",
+ "led_find_file",
  "libc",
  "notify",
  "ratatui",
@@ -1113,6 +1114,15 @@ dependencies = [
  "ratatui",
  "regex-syntax",
  "tokio",
+]
+
+[[package]]
+name = "led_find_file"
+version = "0.1.0"
+dependencies = [
+ "dirs",
+ "led_core",
+ "ratatui",
 ]
 
 [[package]]
