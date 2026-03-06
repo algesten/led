@@ -219,6 +219,7 @@ pub const DEFAULT_KEYS_TOML: &str = r#"# led keybindings
 "right" = "expand_dir"
 "enter" = "open_selected"
 "alt+enter" = "open_selected_bg"
+"ctrl+q" = "collapse_all"
 
 [file_search]
 "alt+1" = "toggle_search_case"

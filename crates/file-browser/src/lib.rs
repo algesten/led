@@ -298,6 +298,12 @@ impl Component for FileBrowser {
                 self.collapse_selected();
                 self.preview_selected()
             }
+            Action::CollapseAll => {
+                self.expanded_dirs.clear();
+                self.selected = 0;
+                self.rebuild();
+                self.preview_selected()
+            }
             Action::OpenSelected => {
                 if let Some(entry) = self.entries.get(self.selected) {
                     if matches!(entry.kind, EntryKind::File) {

@@ -39,6 +39,7 @@ pub enum Action {
     ToggleSidePanel,
     ExpandDir,
     CollapseDir,
+    CollapseAll,
     OpenSelected,
     OpenSelectedBg,
     PrevTab,
