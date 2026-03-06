@@ -70,6 +70,7 @@ async fn main() -> io::Result<()> {
     };
     let start_dir = std::fs::canonicalize(&start_dir).unwrap_or(start_dir);
     let root = find_git_root(&start_dir);
+    let primary_lock = try_become_primary(&root);
 
     // Build event channel and waker early so buffers can use them
     let (tx, rx) = mpsc::unbounded_channel::<AppEvent>();
@@ -132,10 +133,8 @@ async fn main() -> io::Result<()> {
     if had_initial_buffer {
         shell.set_focus(PanelSlot::Main);
     }
-    shell.single_file_mode = explicit_file;
-
-    // Restore session only when no explicit file was passed
-    if !explicit_file {
+    // Primary always restores the full workspace; secondary only shows the direct file
+    if primary_lock.is_some() {
         if let Some(session) = shell
             .db()
             .and_then(|conn| session::load_session(conn, &root))
@@ -165,9 +164,9 @@ async fn main() -> io::Result<()> {
     let result = run(&mut terminal, &mut shell, rx).await;
     ratatui::restore();
 
-    // Save session on exit (skip if we stayed in single-file mode)
+    // Save session on exit (only primary editor persists workspace state)
     shell.flush_to_db();
-    if !shell.single_file_mode {
+    if primary_lock.is_some() {
         // Save session rows first (DELETE + INSERT), then update cursor data
         if let Some(conn) = shell.db() {
             let snapshot = shell.capture_session();
@@ -344,6 +343,39 @@ fn find_git_root(start: &std::path::Path) -> PathBuf {
         }
     }
     root.unwrap_or_else(|| start.to_path_buf())
+}
+
+/// Try to acquire the primary-editor lock for this workspace.
+///
+/// Returns `Some(File)` if we became primary (the caller must keep the File
+/// alive for the whole process lifetime — dropping it releases the lock).
+/// Returns `None` if another editor already holds the lock.
+fn try_become_primary(root: &std::path::Path) -> Option<std::fs::File> {
+    use std::hash::{Hash, Hasher};
+    use std::os::unix::io::AsRawFd;
+
+    let lock_dir = dirs::home_dir()?
+        .join(".config")
+        .join("led")
+        .join("primary");
+    std::fs::create_dir_all(&lock_dir).ok()?;
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    root.hash(&mut hasher);
+    let hash = format!("{:016x}", hasher.finish());
+
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .open(lock_dir.join(&hash))
+        .ok()?;
+
+    let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    if rc == 0 {
+        Some(file)
+    } else {
+        None
+    }
 }
 
 fn spawn_config_watcher(

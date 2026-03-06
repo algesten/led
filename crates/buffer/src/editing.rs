@@ -336,9 +336,13 @@ impl Buffer {
         let r = row.min(self.line_count().saturating_sub(1));
         let line_len = self.line_len(r);
         let c = col.min(line_len);
-        self.mark = Some((r, c));
         self.cursor_row = r;
-        self.cursor_col = (c + len).min(line_len);
+        if len > 0 {
+            self.mark = Some((r, c));
+            self.cursor_col = (c + len).min(line_len);
+        } else {
+            self.cursor_col = c;
+        }
         self.preview_highlight = true;
     }
 

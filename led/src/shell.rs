@@ -113,7 +113,6 @@ pub struct Shell {
     pub modal: Option<Modal>,
     last_persist: Instant,
     pending_flush: bool,
-    pub single_file_mode: bool,
     pre_preview_tab: Option<usize>,
     tab_bar_width: u16,
     env: Env,
@@ -136,7 +135,6 @@ impl Shell {
             modal: None,
             last_persist: Instant::now(),
             pending_flush: false,
-            single_file_mode: false,
             pre_preview_tab: None,
             tab_bar_width: 0,
             env: Env {
@@ -172,9 +170,6 @@ impl Shell {
             }
         }
         let has_tab = component.tab().is_some();
-        if has_tab && self.single_file_mode {
-            self.single_file_mode = false;
-        }
         // Evict LRU clean tabs if the tab bar would overflow
         if has_tab && !is_preview {
             self.evict_for_new_tab(&component);
@@ -554,6 +549,12 @@ impl Shell {
         for effect in effects {
             match effect {
                 Effect::Emit(event) => {
+                    // Pre-broadcast: clear preview state before ConfirmSearch
+                    // effects run, so the FocusLost → PreviewClosed cascade
+                    // won't restore the pre-preview tab.
+                    if matches!(&event, Event::ConfirmSearch { .. }) {
+                        self.pre_preview_tab = None;
+                    }
                     let mut more_effects = Vec::new();
                     let mut ctx = self.env.ctx();
                     for comp in &mut self.components {
@@ -561,19 +562,13 @@ impl Shell {
                     }
                     self.process_effects(more_effects);
                     // Post-broadcast hook for preview tab management
-                    match &event {
-                        Event::PreviewClosed => {
-                            if let Some(tab) = self.pre_preview_tab.take() {
-                                let tabs = self.tabbed_components();
-                                if !tabs.is_empty() {
-                                    self.active_tab = tab.min(tabs.len() - 1);
-                                }
+                    if let Event::PreviewClosed = &event {
+                        if let Some(tab) = self.pre_preview_tab.take() {
+                            let tabs = self.tabbed_components();
+                            if !tabs.is_empty() {
+                                self.active_tab = tab.min(tabs.len() - 1);
                             }
                         }
-                        Event::ConfirmSearch { .. } => {
-                            self.pre_preview_tab = None;
-                        }
-                        _ => {}
                     }
                 }
                 Effect::Spawn(component) => {
@@ -631,6 +626,17 @@ impl Shell {
                 .tab()
                 .map(|t| t.label.clone())
                 .unwrap_or_default();
+            // Clear cursor/scroll data from the DB so reopening starts fresh
+            if let Some(path) = self.components[comp_idx].tab().and_then(|t| t.path) {
+                if let Some(conn) = self.env.db.as_ref() {
+                    let root_str = self.env.root.to_string_lossy();
+                    let file_str = path.to_string_lossy();
+                    let _ = conn.execute(
+                        "DELETE FROM buffers WHERE root_path = ?1 AND file_path = ?2",
+                        rusqlite::params![&*root_str, &*file_str],
+                    );
+                }
+            }
             self.components.remove(comp_idx);
             self.last_touched.remove(comp_idx);
 
