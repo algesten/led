@@ -5,7 +5,7 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use rusqlite::Connection;
 
-use crate::{Action, Clipboard, Effect, Event, PanelClaim, TabDescriptor, Waker};
+use crate::{Action, Clipboard, Effect, Event, PanelClaim, PanelSlot, TabDescriptor, Waker};
 
 // ---------------------------------------------------------------------------
 // Context
@@ -23,6 +23,8 @@ pub struct Context<'a> {
 pub struct DrawContext<'a> {
     pub theme: &'a Theme,
     pub focused: bool,
+    pub cursor_pos: Option<(u16, u16)>,
+    pub slot: PanelSlot,
 }
 
 // ---------------------------------------------------------------------------
@@ -82,66 +84,61 @@ impl Theme {
 // Component trait
 // ---------------------------------------------------------------------------
 
-pub trait Component: std::any::Any {
-    fn as_any(&self) -> &dyn std::any::Any;
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any;
-
+/// A Component is a self-contained UI unit managed by the Shell orchestrator.
+///
+/// # Architecture rules
+///
+/// The Shell MUST NOT downcast components or call any methods beyond this trait.
+/// All communication flows through three channels:
+///
+///   Action  (shell → component)  — user input and lifecycle signals
+///   Event   (broadcast)          — inter-component notifications via Effect::Emit
+///   Effect  (component → shell)  — requests back to the shell (spawn, focus, message, etc.)
+///
+/// To add new behaviour, use these channels — never add shell code that operates
+/// on a specific component type. If a component needs to expose state to the shell
+/// (e.g. dirty flag), do it through `tab()` metadata or a new Effect variant.
+///
+/// # Lifecycle actions
+///
+/// The shell dispatches these Action variants to components. Implementations of
+/// `handle_action` must handle them without disrupting component-internal modes
+/// (e.g. do not exit an interactive search when Tick arrives):
+///
+///   Tick            — periodic timer, used for polling async results
+///   FocusGained     — this component's panel just received focus
+///   FocusLost       — this component's panel just lost focus
+///   SaveSession     — persist state to ctx.kv
+///   RestoreSession  — restore state from ctx.kv / ctx.db
+///   Flush           — write pending changes to the database
+///
+/// # Panel claims
+///
+/// Components declare which panel slots they can draw in via `panel_claims()`.
+/// The shell picks the highest-priority claimer for each slot. A single component
+/// can claim multiple slots (e.g. Main + StatusBar) and `draw()` will be called
+/// once per slot with `ctx.slot` indicating which one.
+///
+/// Claims may be dynamic (e.g. toggling a status bar overlay), but the returned
+/// slice must not allocate — store pre-built slices on the struct.
+///
+/// # Drawing
+///
+/// `draw()` receives a `DrawContext` with a mutable `cursor_pos` field. If the
+/// component wants the terminal cursor placed, write to `ctx.cursor_pos`. The
+/// shell reads this after draw and positions the cursor accordingly.
+pub trait Component {
     fn panel_claims(&self) -> &[PanelClaim];
 
     fn tab(&self) -> Option<TabDescriptor> {
         None
     }
 
-    fn focus_changed(&mut self, _focused: bool, _ctx: &mut Context) -> Vec<Effect> {
-        vec![]
-    }
-
     fn handle_action(&mut self, action: Action, ctx: &mut Context) -> Vec<Effect>;
 
     fn handle_event(&mut self, event: &Event, ctx: &mut Context) -> Vec<Effect>;
 
-    fn draw(&mut self, frame: &mut Frame, area: Rect, ctx: &DrawContext);
-
-    /// Cursor position (row, col) within the component — used by the shell for cursor placement.
-    fn cursor_position(&self) -> Option<(usize, usize)> {
-        None
-    }
-
-    /// Absolute screen position (x, y) for the cursor — computed during draw().
-    fn cursor_screen_pos(&self) -> Option<(u16, u16)> {
-        None
-    }
-
-    /// Scroll offset — used by the shell for scroll computation.
-    fn scroll_offset(&self) -> usize {
-        0
-    }
-
-    /// Set scroll offset after shell computes it.
-    fn set_scroll_offset(&mut self, _offset: usize) {}
-
-    /// Status bar info: (label, line, col) — used by the shell for status bar rendering.
-    fn status_info(&self) -> Option<(&str, usize, usize)> {
-        None
-    }
-
-    fn ensure_schema(&self, _ctx: &Context) {}
-
-    fn save_session(&self, ctx: &mut Context);
-
-    fn restore_session(&mut self, ctx: &mut Context);
-
-    fn needs_flush(&self) -> bool {
-        false
-    }
-
-    fn flush(&mut self, _ctx: &mut Context) {}
-
-    fn notify_hash(&self) -> Option<String> {
-        None
-    }
-
-    fn handle_notification(&mut self, _ctx: &mut Context) {}
+    fn draw(&mut self, frame: &mut Frame, area: Rect, ctx: &mut DrawContext);
 
     /// Keymap context name used when this component has focus.
     fn context_name(&self) -> Option<&str> {

@@ -9,6 +9,7 @@ mod wrap;
 
 pub use component::BufferFactory;
 
+use led_core::{PanelClaim, PanelSlot};
 use std::fs::File;
 use std::hash::Hasher;
 use std::io::{self, BufReader};
@@ -118,6 +119,8 @@ pub struct Buffer {
     pub(crate) syntax_cancel: Arc<AtomicBool>,
     pub isearch: Option<ISearchState>,
     pub(crate) last_search: Option<String>,
+    claims: Vec<PanelClaim>,
+    claims_with_status: Vec<PanelClaim>,
 }
 
 impl Buffer {
@@ -161,6 +164,26 @@ impl Buffer {
             syntax_cancel: Arc::new(AtomicBool::new(false)),
             isearch: None,
             last_search: None,
+            claims: vec![
+                PanelClaim {
+                    slot: PanelSlot::Main,
+                    priority: 10,
+                },
+                PanelClaim {
+                    slot: PanelSlot::StatusBar,
+                    priority: 10,
+                },
+            ],
+            claims_with_status: vec![
+                PanelClaim {
+                    slot: PanelSlot::Main,
+                    priority: 10,
+                },
+                PanelClaim {
+                    slot: PanelSlot::StatusBar,
+                    priority: 20,
+                },
+            ],
         }
     }
 
@@ -248,6 +271,26 @@ impl Buffer {
             syntax_cancel,
             isearch: None,
             last_search: None,
+            claims: vec![
+                PanelClaim {
+                    slot: PanelSlot::Main,
+                    priority: 10,
+                },
+                PanelClaim {
+                    slot: PanelSlot::StatusBar,
+                    priority: 10,
+                },
+            ],
+            claims_with_status: vec![
+                PanelClaim {
+                    slot: PanelSlot::Main,
+                    priority: 10,
+                },
+                PanelClaim {
+                    slot: PanelSlot::StatusBar,
+                    priority: 20,
+                },
+            ],
         })
     }
 

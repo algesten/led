@@ -163,13 +163,6 @@ impl FileSearch {
 // ---------------------------------------------------------------------------
 
 impl Component for FileSearch {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
-
     fn panel_claims(&self) -> &[PanelClaim] {
         if self.active {
             &self.active_claims
@@ -183,14 +176,6 @@ impl Component for FileSearch {
             Some("file_search")
         } else {
             None
-        }
-    }
-
-    fn focus_changed(&mut self, focused: bool, _ctx: &mut Context) -> Vec<Effect> {
-        if focused {
-            self.preview_selected()
-        } else {
-            vec![]
         }
     }
 
@@ -398,6 +383,10 @@ impl Component for FileSearch {
                 self.trigger_search();
                 effects
             }
+            Action::FocusGained => {
+                effects.extend(self.preview_selected());
+                return effects;
+            }
             Action::Tick => {
                 return effects;
             }
@@ -425,7 +414,7 @@ impl Component for FileSearch {
         vec![]
     }
 
-    fn draw(&mut self, frame: &mut Frame, area: Rect, ctx: &DrawContext) {
+    fn draw(&mut self, frame: &mut Frame, area: Rect, ctx: &mut DrawContext) {
         let _ = self.poll_results();
 
         let block = Block::default()
@@ -484,6 +473,7 @@ impl Component for FileSearch {
             if ctx.focused {
                 let cursor_x = inner.x + self.cursor_pos.min(width) as u16;
                 self.cursor_screen_pos = Some((cursor_x, input_y));
+                ctx.cursor_pos = Some((cursor_x, input_y));
             }
         }
 
@@ -623,15 +613,4 @@ impl Component for FileSearch {
             frame.render_widget(Paragraph::new(""), row_area);
         }
     }
-
-    fn cursor_screen_pos(&self) -> Option<(u16, u16)> {
-        if self.active {
-            self.cursor_screen_pos
-        } else {
-            None
-        }
-    }
-
-    fn save_session(&self, _ctx: &mut Context) {}
-    fn restore_session(&mut self, _ctx: &mut Context) {}
 }

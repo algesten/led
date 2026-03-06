@@ -95,6 +95,7 @@ pub struct Shell {
     debug_flash: Option<(String, Instant)>,
     pub modal: Option<Modal>,
     last_persist: Instant,
+    pending_flush: bool,
     pub single_file_mode: bool,
     pre_preview_tab: Option<usize>,
     tab_bar_width: u16,
@@ -117,6 +118,7 @@ impl Shell {
             debug_flash: None,
             modal: None,
             last_persist: Instant::now(),
+            pending_flush: false,
             single_file_mode: false,
             pre_preview_tab: None,
             tab_bar_width: 0,
@@ -163,11 +165,9 @@ impl Shell {
         self.components.push(component);
         self.last_touched.push(Instant::now());
         let last = self.components.len() - 1;
-        let ctx = self.env.ctx();
-        self.components[last].ensure_schema(&ctx);
         if has_tab {
             let mut ctx = self.env.ctx();
-            self.components[last].restore_session(&mut ctx);
+            self.components[last].handle_action(Action::RestoreSession, &mut ctx);
             self.active_tab = self.tabbed_index_of(last).unwrap_or(0);
             self.notify_active_buffer();
         }
@@ -195,12 +195,6 @@ impl Shell {
     /// Get the component index for the active tab.
     fn active_tab_component_idx(&self) -> Option<usize> {
         self.tabbed_components().get(self.active_tab).copied()
-    }
-
-    /// Get a reference to the active tab's component.
-    pub fn active_buffer(&self) -> Option<&Box<dyn Component>> {
-        let idx = self.active_tab_component_idx()?;
-        Some(&self.components[idx])
     }
 
     /// Get a mutable reference to the active tab's component.
@@ -239,6 +233,31 @@ impl Shell {
 
     pub fn side_component_mut(&mut self) -> Option<&mut Box<dyn Component>> {
         let idx = self.side_component_idx()?;
+        Some(&mut self.components[idx])
+    }
+
+    pub fn status_bar_component_idx(&self) -> Option<usize> {
+        self.components
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| {
+                c.panel_claims()
+                    .iter()
+                    .any(|cl| cl.slot == PanelSlot::StatusBar)
+            })
+            .max_by_key(|(_, c)| {
+                c.panel_claims()
+                    .iter()
+                    .filter(|cl| cl.slot == PanelSlot::StatusBar)
+                    .map(|cl| cl.priority)
+                    .max()
+                    .unwrap_or(0)
+            })
+            .map(|(i, _)| i)
+    }
+
+    pub fn status_bar_component_mut(&mut self) -> Option<&mut Box<dyn Component>> {
+        let idx = self.status_bar_component_idx()?;
         Some(&mut self.components[idx])
     }
 
@@ -325,7 +344,7 @@ impl Shell {
                 .side_component()
                 .and_then(|c| c.context_name())
                 .map(|s| s.to_string()),
-            PanelSlot::Main => None,
+            PanelSlot::Main | PanelSlot::StatusBar => None,
         };
 
         match self.keymap.lookup(&combo, context.as_deref()) {
@@ -338,7 +357,7 @@ impl Shell {
             KeymapLookup::Unbound => {
                 // Printable character fallback: insert if no ctrl/alt modifier
                 let allow_insert = match self.focus {
-                    PanelSlot::Main => self.has_tabs(),
+                    PanelSlot::Main | PanelSlot::StatusBar => self.has_tabs(),
                     PanelSlot::Side => {
                         self.side_component().and_then(|c| c.context_name()) == Some("file_search")
                     }
@@ -459,10 +478,11 @@ impl Shell {
         if self.focus == PanelSlot::Main {
             self.touch_active_buffer();
         }
+        self.pending_flush = true;
         let mut ctx = self.env.ctx();
 
         match self.focus {
-            PanelSlot::Main => {
+            PanelSlot::Main | PanelSlot::StatusBar => {
                 if let Some(idx) = self.active_tab_component_idx() {
                     self.components[idx].handle_action(action, &mut ctx)
                 } else {
@@ -668,17 +688,15 @@ impl Shell {
 
     pub fn save_all_sessions(&mut self) {
         let mut ctx = self.env.ctx();
-        for comp in &self.components {
-            comp.save_session(&mut ctx);
+        for i in 0..self.components.len() {
+            self.components[i].handle_action(Action::SaveSession, &mut ctx);
         }
-        // Flush kv to DB
         if let Some(conn) = self.env.db.as_ref() {
             crate::session::save_kv(conn, &self.env.root, &ctx.kv);
         }
     }
 
     pub fn restore_sidepanel_sessions(&mut self) {
-        // Load kv from DB
         let kv = self
             .env
             .db
@@ -691,7 +709,7 @@ impl Shell {
             }
             let mut ctx = self.env.ctx();
             ctx.kv = kv.clone();
-            self.components[i].restore_session(&mut ctx);
+            self.components[i].handle_action(Action::RestoreSession, &mut ctx);
         }
     }
 
@@ -721,27 +739,25 @@ impl Shell {
 
     fn notify_focus_change(&mut self, old: PanelSlot, new: PanelSlot) {
         let mut effects = Vec::new();
-        let mut ctx = self.env.ctx();
 
-        // Notify the component losing focus
         let old_idx = match old {
-            PanelSlot::Main => self.active_tab_component_idx(),
+            PanelSlot::Main | PanelSlot::StatusBar => self.active_tab_component_idx(),
             PanelSlot::Side => self.side_component_idx(),
         };
         if let Some(idx) = old_idx {
-            effects.extend(self.components[idx].focus_changed(false, &mut ctx));
+            let mut ctx = self.env.ctx();
+            effects.extend(self.components[idx].handle_action(Action::FocusLost, &mut ctx));
         }
 
-        // Notify the component gaining focus
         let new_idx = match new {
-            PanelSlot::Main => self.active_tab_component_idx(),
+            PanelSlot::Main | PanelSlot::StatusBar => self.active_tab_component_idx(),
             PanelSlot::Side => self.side_component_idx(),
         };
         if let Some(idx) = new_idx {
-            effects.extend(self.components[idx].focus_changed(true, &mut ctx));
+            let mut ctx = self.env.ctx();
+            effects.extend(self.components[idx].handle_action(Action::FocusGained, &mut ctx));
         }
 
-        drop(ctx);
         self.process_effects(effects);
     }
 
@@ -778,8 +794,7 @@ impl Shell {
     }
 
     pub fn needs_persist_in(&self) -> Option<Duration> {
-        let has_unpersisted = self.components.iter().any(|c| c.needs_flush());
-        if !has_unpersisted {
+        if !self.pending_flush {
             return None;
         }
         let elapsed = self.last_persist.elapsed();
@@ -792,18 +807,15 @@ impl Shell {
     }
 
     pub fn needs_persist(&self) -> bool {
-        let has_unpersisted = self.components.iter().any(|c| c.needs_flush());
-        has_unpersisted && self.last_persist.elapsed() >= Duration::from_millis(200)
+        self.pending_flush && self.last_persist.elapsed() >= Duration::from_millis(200)
     }
 
     pub fn flush_to_db(&mut self) {
         for i in 0..self.components.len() {
-            if !self.components[i].needs_flush() {
-                continue;
-            }
             let mut ctx = self.env.ctx();
-            self.components[i].flush(&mut ctx);
+            self.components[i].handle_action(Action::Flush, &mut ctx);
         }
+        self.pending_flush = false;
         self.last_persist = Instant::now();
     }
 

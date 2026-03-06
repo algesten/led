@@ -52,6 +52,11 @@ pub enum Action {
     ToggleSearchCase,
     ToggleSearchRegex,
     InBufferSearch,
+    FocusGained,
+    FocusLost,
+    SaveSession,
+    RestoreSession,
+    Flush,
 }
 
 // ---------------------------------------------------------------------------
@@ -62,6 +67,7 @@ pub enum Action {
 pub enum PanelSlot {
     Main,
     Side,
+    StatusBar,
 }
 
 #[derive(Debug, Clone)]

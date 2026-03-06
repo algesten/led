@@ -255,21 +255,6 @@ impl FileBrowser {
 // ---------------------------------------------------------------------------
 
 impl Component for FileBrowser {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
-
-    fn focus_changed(&mut self, focused: bool, _ctx: &mut Context) -> Vec<Effect> {
-        if !focused {
-            vec![Effect::Emit(Event::PreviewClosed)]
-        } else {
-            vec![]
-        }
-    }
-
     fn panel_claims(&self) -> &[PanelClaim] {
         &[PanelClaim {
             slot: PanelSlot::Side,
@@ -337,6 +322,52 @@ impl Component for FileBrowser {
                     vec![]
                 }
             }
+            Action::FocusLost => {
+                vec![Effect::Emit(Event::PreviewClosed)]
+            }
+            Action::FocusGained => vec![],
+            Action::SaveSession => {
+                ctx.kv
+                    .insert("browser.selected".into(), self.selected.to_string());
+                ctx.kv.insert(
+                    "browser.scroll_offset".into(),
+                    self.scroll_offset.to_string(),
+                );
+                let dirs: Vec<String> = self
+                    .expanded_dirs
+                    .iter()
+                    .map(|d| d.to_string_lossy().into_owned())
+                    .collect();
+                ctx.kv
+                    .insert("browser.expanded_dirs".into(), dirs.join("\n"));
+                vec![]
+            }
+            Action::RestoreSession => {
+                let selected: usize = ctx
+                    .kv
+                    .get("browser.selected")
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0);
+                let scroll_offset: usize = ctx
+                    .kv
+                    .get("browser.scroll_offset")
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0);
+                let dirs: HashSet<PathBuf> = ctx
+                    .kv
+                    .get("browser.expanded_dirs")
+                    .map(|s| {
+                        s.lines()
+                            .filter(|l| !l.is_empty())
+                            .map(PathBuf::from)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                self.set_expanded_dirs(dirs);
+                self.selected = selected.min(self.entries.len().saturating_sub(1));
+                self.scroll_offset = scroll_offset;
+                vec![]
+            }
             _ => vec![],
         }
     }
@@ -354,7 +385,7 @@ impl Component for FileBrowser {
         vec![]
     }
 
-    fn draw(&mut self, frame: &mut Frame, area: Rect, ctx: &DrawContext) {
+    fn draw(&mut self, frame: &mut Frame, area: Rect, ctx: &mut DrawContext) {
         let block = Block::default()
             .borders(Borders::RIGHT)
             .border_style(ctx.theme.get("browser.border").to_style());
@@ -413,50 +444,6 @@ impl Component for FileBrowser {
 
         let paragraph = Paragraph::new(lines);
         frame.render_widget(paragraph, inner);
-    }
-
-    fn save_session(&self, ctx: &mut Context) {
-        ctx.kv
-            .insert("browser.selected".into(), self.selected.to_string());
-        ctx.kv.insert(
-            "browser.scroll_offset".into(),
-            self.scroll_offset.to_string(),
-        );
-        let dirs: Vec<String> = self
-            .expanded_dirs
-            .iter()
-            .map(|d| d.to_string_lossy().into_owned())
-            .collect();
-        ctx.kv
-            .insert("browser.expanded_dirs".into(), dirs.join("\n"));
-    }
-
-    fn restore_session(&mut self, ctx: &mut Context) {
-        let selected: usize = ctx
-            .kv
-            .get("browser.selected")
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(0);
-        let scroll_offset: usize = ctx
-            .kv
-            .get("browser.scroll_offset")
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(0);
-
-        let dirs: HashSet<PathBuf> = ctx
-            .kv
-            .get("browser.expanded_dirs")
-            .map(|s| {
-                s.lines()
-                    .filter(|l| !l.is_empty())
-                    .map(PathBuf::from)
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        self.set_expanded_dirs(dirs);
-        self.selected = selected.min(self.entries.len().saturating_sub(1));
-        self.scroll_offset = scroll_offset;
     }
 
     fn context_name(&self) -> Option<&str> {

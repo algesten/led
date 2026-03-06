@@ -34,6 +34,131 @@ fn resolve_capture_style(theme: &Theme, capture_name: &str, text_style: Style) -
 }
 
 impl Buffer {
+    fn ensure_schema(&self, ctx: &Context) {
+        let Some(conn) = ctx.db else { return };
+        let _ = conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS buffer_undo_state (
+                root_path        TEXT NOT NULL,
+                file_path        TEXT NOT NULL,
+                chain_id         TEXT NOT NULL,
+                content_hash     INTEGER NOT NULL,
+                undo_cursor      INTEGER,
+                distance_from_save INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (root_path, file_path)
+            );
+
+            CREATE TABLE IF NOT EXISTS undo_entries (
+                seq         INTEGER PRIMARY KEY AUTOINCREMENT,
+                root_path   TEXT NOT NULL,
+                file_path   TEXT NOT NULL,
+                entry_data  BLOB NOT NULL,
+                FOREIGN KEY (root_path, file_path)
+                    REFERENCES buffer_undo_state(root_path, file_path) ON DELETE CASCADE
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_undo_entries_file
+            ON undo_entries(root_path, file_path, seq);",
+        );
+    }
+
+    fn do_save_session(&self, ctx: &mut Context) {
+        let Some(conn) = ctx.db else { return };
+        let Some(ref path) = self.path else { return };
+        let root_str = ctx.root.to_string_lossy();
+        let file_str = path.to_string_lossy();
+        let _ = conn.execute(
+            "UPDATE buffers SET cursor_row = ?1, cursor_col = ?2, scroll_offset = ?3
+             WHERE root_path = ?4 AND file_path = ?5",
+            rusqlite::params![
+                self.cursor_row as i64,
+                self.cursor_col as i64,
+                self.scroll_offset as i64,
+                root_str,
+                file_str,
+            ],
+        );
+    }
+
+    fn do_restore_session(&mut self, ctx: &mut Context) {
+        let Some(conn) = ctx.db else { return };
+        let Some(ref path) = self.path else { return };
+        let root_str = ctx.root.to_string_lossy();
+        let file_str = path.to_string_lossy();
+
+        let cursor_data: Option<(i64, i64, i64)> = conn
+            .query_row(
+                "SELECT cursor_row, cursor_col, scroll_offset
+                 FROM buffers WHERE root_path = ?1 AND file_path = ?2",
+                rusqlite::params![root_str, file_str],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .ok();
+
+        let undo_row: Option<(i64, Option<i64>, i32, String)> = conn
+            .query_row(
+                "SELECT content_hash, undo_cursor, distance_from_save, chain_id
+                 FROM buffer_undo_state WHERE root_path = ?1 AND file_path = ?2",
+                rusqlite::params![root_str, file_str],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .ok();
+
+        if let Some((stored_hash, undo_cursor_raw, distance_from_save, chain_id)) = undo_row {
+            if self.content_hash() == stored_hash as u64 {
+                let loaded = Self::load_entries_after(conn, &root_str, &file_str, 0);
+                if !loaded.is_empty() {
+                    let max_seq = loaded.last().unwrap().0;
+                    let entries: Vec<UndoEntry> = loaded.into_iter().map(|(_, e)| e).collect();
+
+                    self.chain_id = Some(chain_id);
+                    self.last_seen_seq = max_seq;
+
+                    self.restore_undo(
+                        entries,
+                        undo_cursor_raw.map(|v| v as usize),
+                        distance_from_save,
+                    );
+                }
+            }
+        }
+
+        if let Some((row, col, scroll)) = cursor_data {
+            let row = row as usize;
+            let col = col as usize;
+            self.cursor_row = row.min(self.line_count().saturating_sub(1));
+            self.cursor_col = col.min(self.line_len(self.cursor_row));
+            self.scroll_offset = scroll as usize;
+        }
+    }
+
+    fn draw_status_bar(&self, frame: &mut Frame, area: Rect, ctx: &mut DrawContext) {
+        let style = ctx.theme.get("status_bar.style").to_style();
+
+        if let Some(ref isearch) = self.isearch {
+            let prompt = if isearch.failed {
+                format!("Failing search: {}", isearch.query)
+            } else {
+                format!("Search: {}", isearch.query)
+            };
+            let padding = (area.width as usize).saturating_sub(prompt.len() + 1);
+            let bar = format!(" {prompt}{:padding$}", "");
+            let paragraph = Paragraph::new(bar).style(style);
+            frame.render_widget(paragraph, area);
+            let cursor_x = area.x + 1 + prompt.len() as u16;
+            ctx.cursor_pos = Some((cursor_x, area.y));
+            return;
+        }
+
+        let filename = self.filename();
+        let modified = if self.dirty { " \u{25cf}" } else { "" };
+        let left = format!(" led: {filename}{modified}");
+        let pos = format!("L{}:C{} ", self.cursor_row + 1, self.cursor_col + 1);
+        let padding = (area.width as usize).saturating_sub(left.len() + pos.len());
+        let bar = format!("{left}{:padding$}{pos}", "");
+        let paragraph = Paragraph::new(bar).style(style);
+        frame.render_widget(paragraph, area);
+    }
+
     /// Adjust scroll so the cursor is visible within `height` visual rows.
     /// Scroll is tracked as (scroll_offset, scroll_sub_line) — a logical line
     /// plus a sub-line offset within it — so scrolling is visual-line granular.
@@ -141,45 +266,12 @@ impl Buffer {
 }
 
 impl Component for Buffer {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
-
-    fn ensure_schema(&self, ctx: &Context) {
-        let Some(conn) = ctx.db else { return };
-        let _ = conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS buffer_undo_state (
-                root_path        TEXT NOT NULL,
-                file_path        TEXT NOT NULL,
-                chain_id         TEXT NOT NULL,
-                content_hash     INTEGER NOT NULL,
-                undo_cursor      INTEGER,
-                distance_from_save INTEGER NOT NULL DEFAULT 0,
-                PRIMARY KEY (root_path, file_path)
-            );
-
-            CREATE TABLE IF NOT EXISTS undo_entries (
-                seq         INTEGER PRIMARY KEY AUTOINCREMENT,
-                root_path   TEXT NOT NULL,
-                file_path   TEXT NOT NULL,
-                entry_data  BLOB NOT NULL,
-                FOREIGN KEY (root_path, file_path)
-                    REFERENCES buffer_undo_state(root_path, file_path) ON DELETE CASCADE
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_undo_entries_file
-            ON undo_entries(root_path, file_path, seq);",
-        );
-    }
-
     fn panel_claims(&self) -> &[PanelClaim] {
-        &[PanelClaim {
-            slot: PanelSlot::Main,
-            priority: 10,
-        }]
+        if self.isearch.is_some() {
+            &self.claims_with_status
+        } else {
+            &self.claims
+        }
     }
 
     fn tab(&self) -> Option<TabDescriptor> {
@@ -189,14 +281,6 @@ impl Component for Buffer {
             path: self.path.clone(),
             preview: self.preview,
         })
-    }
-
-    fn focus_changed(&mut self, focused: bool, _ctx: &mut Context) -> Vec<Effect> {
-        if focused && self.preview_highlight {
-            self.preview_highlight = false;
-            self.clear_mark();
-        }
-        vec![]
     }
 
     fn context_name(&self) -> Option<&str> {
@@ -259,6 +343,15 @@ impl Component for Buffer {
                 | Action::FileStart
                 | Action::FileEnd => {
                     self.search_accept();
+                    // Fall through to normal handling below
+                }
+                // Lifecycle actions: pass through without exiting isearch
+                Action::Tick
+                | Action::Flush
+                | Action::SaveSession
+                | Action::RestoreSession
+                | Action::FocusGained
+                | Action::FocusLost => {
                     // Fall through to normal handling below
                 }
                 _ => {
@@ -412,6 +505,29 @@ impl Component for Buffer {
                 self.clear_mark();
                 vec![]
             }
+            Action::FocusGained => {
+                if self.preview_highlight {
+                    self.preview_highlight = false;
+                    self.clear_mark();
+                }
+                vec![]
+            }
+            Action::FocusLost => vec![],
+            Action::RestoreSession => {
+                self.ensure_schema(ctx);
+                self.do_restore_session(ctx);
+                vec![]
+            }
+            Action::SaveSession => {
+                self.do_save_session(ctx);
+                vec![]
+            }
+            Action::Flush => {
+                if self.has_unpersisted_undo() {
+                    self.flush_undo_to_db(ctx);
+                }
+                vec![]
+            }
             _ => vec![],
         }
     }
@@ -419,7 +535,8 @@ impl Component for Buffer {
     fn handle_event(&mut self, event: &Event, ctx: &mut Context) -> Vec<Effect> {
         match event {
             Event::Resume => {
-                self.handle_notification(ctx);
+                // Force a tick to check for disk changes after resume
+                return self.handle_tick(ctx);
             }
             Event::GoToPosition { path, row, col } => {
                 if self.path.as_deref() == Some(path.as_path()) {
@@ -461,7 +578,12 @@ impl Component for Buffer {
         vec![]
     }
 
-    fn draw(&mut self, frame: &mut Frame, area: Rect, ctx: &DrawContext) {
+    fn draw(&mut self, frame: &mut Frame, area: Rect, ctx: &mut DrawContext) {
+        if ctx.slot == PanelSlot::StatusBar {
+            self.draw_status_bar(frame, area, ctx);
+            return;
+        }
+
         let height = area.height as usize;
         let gutter_width: usize = 2;
         let text_width = (area.width as usize).saturating_sub(gutter_width);
@@ -486,7 +608,9 @@ impl Component for Buffer {
                 let visible: Vec<&(usize, usize, usize)> = is
                     .matches
                     .iter()
-                    .filter(|(r, _, _)| *r >= self.scroll_offset && *r < self.scroll_offset + height)
+                    .filter(|(r, _, _)| {
+                        *r >= self.scroll_offset && *r < self.scroll_offset + height
+                    })
                     .collect();
                 if visible.is_empty() {
                     return None;
@@ -663,17 +787,23 @@ impl Component for Buffer {
 
                     // Apply search match overlay
                     if let Some((ref visible, _current_idx)) = search_info {
-                        let current_match = self.isearch.as_ref().and_then(|is| {
-                            is.match_idx.map(|i| &is.matches[i])
-                        });
+                        let current_match = self
+                            .isearch
+                            .as_ref()
+                            .and_then(|is| is.match_idx.map(|i| &is.matches[i]));
                         for &(mr, mc, mlen) in visible.iter() {
                             if *mr != line_idx {
                                 continue;
                             }
                             let ms = char_map.get(*mc).copied().unwrap_or(display.len());
                             let me = char_map.get(mc + mlen).copied().unwrap_or(display.len());
-                            let is_current = current_match.map_or(false, |cm| cm.0 == *mr && cm.1 == *mc);
-                            let style = if is_current { search_current_style } else { search_match_style };
+                            let is_current =
+                                current_match.map_or(false, |cm| cm.0 == *mr && cm.1 == *mc);
+                            let style = if is_current {
+                                search_current_style
+                            } else {
+                                search_match_style
+                            };
                             for i in ms.max(cs)..me.min(ce) {
                                 col_styles[i - cs] = style;
                             }
@@ -738,111 +868,7 @@ impl Component for Buffer {
         frame.render_widget(paragraph, area);
 
         self.cursor_screen_pos = cursor_pos;
-    }
-
-    fn cursor_position(&self) -> Option<(usize, usize)> {
-        Some((self.cursor_row, self.cursor_col))
-    }
-
-    fn cursor_screen_pos(&self) -> Option<(u16, u16)> {
-        self.cursor_screen_pos
-    }
-
-    fn scroll_offset(&self) -> usize {
-        self.scroll_offset
-    }
-
-    fn set_scroll_offset(&mut self, offset: usize) {
-        self.scroll_offset = offset;
-    }
-
-    fn status_info(&self) -> Option<(&str, usize, usize)> {
-        Some((self.filename(), self.cursor_row + 1, self.cursor_col + 1))
-    }
-
-    fn save_session(&self, ctx: &mut Context) {
-        let Some(conn) = ctx.db else { return };
-        let Some(ref path) = self.path else { return };
-        let root_str = ctx.root.to_string_lossy();
-        let file_str = path.to_string_lossy();
-        let _ = conn.execute(
-            "UPDATE buffers SET cursor_row = ?1, cursor_col = ?2, scroll_offset = ?3
-             WHERE root_path = ?4 AND file_path = ?5",
-            rusqlite::params![
-                self.cursor_row as i64,
-                self.cursor_col as i64,
-                self.scroll_offset as i64,
-                root_str,
-                file_str,
-            ],
-        );
-    }
-
-    fn restore_session(&mut self, ctx: &mut Context) {
-        let Some(conn) = ctx.db else { return };
-        let Some(ref path) = self.path else { return };
-        let root_str = ctx.root.to_string_lossy();
-        let file_str = path.to_string_lossy();
-
-        // Load cursor/scroll from buffers table (independent of undo state)
-        let cursor_data: Option<(i64, i64, i64)> = conn
-            .query_row(
-                "SELECT cursor_row, cursor_col, scroll_offset
-                 FROM buffers WHERE root_path = ?1 AND file_path = ?2",
-                rusqlite::params![root_str, file_str],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .ok();
-
-        // Restore undo state
-        let undo_row: Option<(i64, Option<i64>, i32, String)> = conn
-            .query_row(
-                "SELECT content_hash, undo_cursor, distance_from_save, chain_id
-                 FROM buffer_undo_state WHERE root_path = ?1 AND file_path = ?2",
-                rusqlite::params![root_str, file_str],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-            )
-            .ok();
-
-        if let Some((stored_hash, undo_cursor_raw, distance_from_save, chain_id)) = undo_row {
-            if self.content_hash() == stored_hash as u64 {
-                let loaded = Self::load_entries_after(conn, &root_str, &file_str, 0);
-                if !loaded.is_empty() {
-                    let max_seq = loaded.last().unwrap().0;
-                    let entries: Vec<UndoEntry> = loaded.into_iter().map(|(_, e)| e).collect();
-
-                    self.chain_id = Some(chain_id);
-                    self.last_seen_seq = max_seq;
-
-                    self.restore_undo(
-                        entries,
-                        undo_cursor_raw.map(|v| v as usize),
-                        distance_from_save,
-                    );
-                }
-            }
-        }
-
-        // Apply cursor/scroll after undo replay (line_count/line_len are now correct)
-        if let Some((row, col, scroll)) = cursor_data {
-            let row = row as usize;
-            let col = col as usize;
-            self.cursor_row = row.min(self.line_count().saturating_sub(1));
-            self.cursor_col = col.min(self.line_len(self.cursor_row));
-            self.scroll_offset = scroll as usize;
-        }
-    }
-
-    fn needs_flush(&self) -> bool {
-        self.has_unpersisted_undo()
-    }
-
-    fn flush(&mut self, ctx: &mut Context) {
-        self.flush_undo_to_db(ctx);
-    }
-
-    fn notify_hash(&self) -> Option<String> {
-        self.path.as_ref().map(|p| Self::notify_hash_for_path(p))
+        ctx.cursor_pos = cursor_pos;
     }
 }
 
@@ -861,13 +887,6 @@ impl BufferFactory {
 }
 
 impl Component for BufferFactory {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
-
     fn panel_claims(&self) -> &[PanelClaim] {
         &[]
     }
@@ -939,9 +958,5 @@ impl Component for BufferFactory {
         effects
     }
 
-    fn draw(&mut self, _frame: &mut Frame, _area: Rect, _ctx: &DrawContext) {}
-
-    fn save_session(&self, _ctx: &mut Context) {}
-
-    fn restore_session(&mut self, _ctx: &mut Context) {}
+    fn draw(&mut self, _frame: &mut Frame, _area: Rect, _ctx: &mut DrawContext) {}
 }

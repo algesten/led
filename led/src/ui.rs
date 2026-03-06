@@ -27,24 +27,30 @@ pub fn render(shell: &mut Shell, frame: &mut Frame) {
         let main_area_inner = horizontal[1];
 
         // Draw side panel component
-        {
-            let focused = shell.focus == PanelSlot::Side;
+        if shell.focus == PanelSlot::Side {
             let theme = shell.theme.clone();
-            let ctx = DrawContext {
+            let mut ctx = DrawContext {
                 theme: &theme,
-                focused,
+                focused: true,
+                cursor_pos: None,
+                slot: PanelSlot::Side,
             };
             if let Some(comp) = shell.side_component_mut() {
-                comp.draw(frame, browser_area, &ctx);
+                comp.draw(frame, browser_area, &mut ctx);
             }
-        }
-
-        // Place cursor for side panel when focused
-        if shell.focus == PanelSlot::Side {
-            if let Some(comp) = shell.side_component() {
-                if let Some((x, y)) = comp.cursor_screen_pos() {
-                    frame.set_cursor_position(Position::new(x, y));
-                }
+            if let Some((x, y)) = ctx.cursor_pos {
+                frame.set_cursor_position(Position::new(x, y));
+            }
+        } else {
+            let theme = shell.theme.clone();
+            let mut ctx = DrawContext {
+                theme: &theme,
+                focused: false,
+                cursor_pos: None,
+                slot: PanelSlot::Side,
+            };
+            if let Some(comp) = shell.side_component_mut() {
+                comp.draw(frame, browser_area, &mut ctx);
             }
         }
 
@@ -139,72 +145,49 @@ fn render_main_content(shell: &mut Shell, frame: &mut Frame, area: Rect) {
     }
     shell.set_viewport_height(text_area.height as usize);
 
-    // Draw the active buffer component (scroll is managed internally by draw)
-    {
-        let focused = shell.focus == PanelSlot::Main;
-        let theme = shell.theme.clone();
-        let ctx = DrawContext {
-            theme: &theme,
-            focused,
-        };
-        shell
-            .active_buffer_mut()
-            .unwrap()
-            .draw(frame, text_area, &ctx);
-    }
+    // Draw the active buffer component
+    let focused = shell.focus == PanelSlot::Main;
+    let theme = shell.theme.clone();
+    let mut ctx = DrawContext {
+        theme: &theme,
+        focused,
+        cursor_pos: None,
+        slot: PanelSlot::Main,
+    };
+    shell
+        .active_buffer_mut()
+        .unwrap()
+        .draw(frame, text_area, &mut ctx);
 
     // Place cursor (only when main panel focused)
-    if shell.focus == PanelSlot::Main {
-        let comp = shell.active_buffer().unwrap();
-        if let Some((x, y)) = comp.cursor_screen_pos() {
+    if focused {
+        if let Some((x, y)) = ctx.cursor_pos {
             frame.set_cursor_position(Position::new(x, y));
         }
     }
 }
 
-fn render_status_bar(shell: &Shell, frame: &mut Frame, area: Rect) {
-    // Check if the active buffer is in incremental search mode
-    if let Some(comp) = shell.active_buffer() {
-        if let Some(buf) = comp.as_any().downcast_ref::<led_buffer::Buffer>() {
-            if let Some(ref isearch) = buf.isearch {
-                let prompt = if isearch.failed {
-                    format!("Failing search: {}", isearch.query)
-                } else {
-                    format!("Search: {}", isearch.query)
-                };
-                let padding = (area.width as usize).saturating_sub(prompt.len() + 1);
-                let bar = format!(" {prompt}{:padding$}", "");
-                let style = shell.theme.get("status_bar.style").to_style();
-                let paragraph = Paragraph::new(bar).style(style);
-                frame.render_widget(paragraph, area);
-                // Place cursor at end of search query in status bar
-                let cursor_x = area.x + 1 + prompt.len() as u16;
-                frame.set_cursor_position(Position::new(cursor_x, area.y));
-                return;
-            }
+fn render_status_bar(shell: &mut Shell, frame: &mut Frame, area: Rect) {
+    // Check if any component claims the status bar
+    let theme = shell.theme.clone();
+    if let Some(comp) = shell.status_bar_component_mut() {
+        let mut ctx = DrawContext {
+            theme: &theme,
+            focused: true,
+            cursor_pos: None,
+            slot: PanelSlot::StatusBar,
+        };
+        comp.draw(frame, area, &mut ctx);
+        if let Some((x, y)) = ctx.cursor_pos {
+            frame.set_cursor_position(Position::new(x, y));
         }
+        return;
     }
 
-    let (left, right) = if let Some(comp) = shell.active_buffer() {
-        let tab = comp.tab().unwrap_or(led_core::TabDescriptor {
-            label: String::new(),
-            dirty: false,
-            path: None,
-            preview: false,
-        });
-        let modified = if tab.dirty { " \u{25cf}" } else { "" };
-        let filename = &tab.label;
-
-        let (line, col) = comp.status_info().map_or((1, 1), |(_, l, c)| (l, c));
-        let pos = format!("L{}:C{}", line, col);
-        (format!(" led: {filename}{modified}"), format!("{pos} "))
-    } else {
-        (" led".to_string(), String::new())
-    };
-
-    let padding = (area.width as usize).saturating_sub(left.len() + right.len());
-    let bar = format!("{left}{:padding$}{right}", "");
-
+    // Fallback: no component claims the status bar
+    let left = " led";
+    let padding = (area.width as usize).saturating_sub(left.len());
+    let bar = format!("{left}{:padding$}", "");
     let style = shell.theme.get("status_bar.style").to_style();
     let paragraph = Paragraph::new(bar).style(style);
     frame.render_widget(paragraph, area);

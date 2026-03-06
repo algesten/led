@@ -45,7 +45,11 @@ impl Buffer {
     }
 
     /// Find index of first match at or after (row, col), or None.
-    fn first_match_from(matches: &[(usize, usize, usize)], row: usize, col: usize) -> Option<usize> {
+    fn first_match_from(
+        matches: &[(usize, usize, usize)],
+        row: usize,
+        col: usize,
+    ) -> Option<usize> {
         matches
             .iter()
             .position(|&(mr, mc, _)| mr > row || (mr == row && mc >= col))
@@ -88,10 +92,7 @@ impl Buffer {
     /// If failed (no forward hit), wrap to first match.
     pub(crate) fn search_next(&mut self) {
         // Recall last search query when current query is empty (Emacs C-s C-s)
-        let query_empty = self
-            .isearch
-            .as_ref()
-            .map_or(true, |s| s.query.is_empty());
+        let query_empty = self.isearch.as_ref().map_or(true, |s| s.query.is_empty());
         if query_empty {
             if let Some(ref last) = self.last_search {
                 let last = last.clone();
