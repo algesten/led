@@ -77,6 +77,21 @@ pub struct Modal {
     pub action: PendingAction,
 }
 
+pub struct RenameModal {
+    pub prompt: String,
+    pub input: String,
+    pub path: PathBuf,
+    pub row: usize,
+    pub col: usize,
+}
+
+pub struct PickerModal {
+    pub title: String,
+    pub items: Vec<String>,
+    pub selected: usize,
+    pub source_path: PathBuf,
+}
+
 struct Env {
     db: Option<Connection>,
     root: PathBuf,
@@ -111,6 +126,8 @@ pub struct Shell {
     pub theme: Theme,
     debug_flash: Option<(String, Instant)>,
     pub modal: Option<Modal>,
+    pub rename_modal: Option<RenameModal>,
+    pub picker_modal: Option<PickerModal>,
     last_persist: Instant,
     pending_flush: bool,
     pre_preview_tab: Option<usize>,
@@ -134,6 +151,8 @@ impl Shell {
             theme,
             debug_flash: None,
             modal: None,
+            rename_modal: None,
+            picker_modal: None,
             last_persist: Instant::now(),
             pending_flush: false,
             pre_preview_tab: None,
@@ -297,6 +316,9 @@ impl Shell {
     pub fn handle_key_event(&mut self, key: KeyEvent) -> InputResult {
         let combo = KeyCombo::from_key_event(&key);
 
+        // Clear transient message on any keypress
+        self.message = None;
+
         // Debug flash
         if self.debug {
             let display = if let ChordState::Pending(prefix) = &self.chord {
@@ -305,6 +327,72 @@ impl Shell {
                 combo.display_name()
             };
             self.debug_flash = Some((display, Instant::now()));
+        }
+
+        // Handle rename modal input
+        if self.rename_modal.is_some() {
+            let is_abort = matches!(key.code, KeyCode::Esc)
+                || (key.code == KeyCode::Char('g')
+                    && key.modifiers.contains(KeyModifiers::CONTROL));
+            if is_abort {
+                self.rename_modal = None;
+                self.message = Some("Aborted.".into());
+            } else if key.code == KeyCode::Enter {
+                let modal = self.rename_modal.take().unwrap();
+                if !modal.input.is_empty() {
+                    let effects = vec![Effect::Emit(Event::LspRename {
+                        path: modal.path,
+                        row: modal.row,
+                        col: modal.col,
+                        new_name: modal.input,
+                    })];
+                    self.process_effects(effects);
+                }
+            } else if key.code == KeyCode::Backspace {
+                if let Some(ref mut modal) = self.rename_modal {
+                    modal.input.pop();
+                }
+            } else if let KeyCode::Char(c) = key.code {
+                let has_ctrl_alt = key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
+                if !has_ctrl_alt {
+                    if let Some(ref mut modal) = self.rename_modal {
+                        modal.input.push(c);
+                    }
+                }
+            }
+            return InputResult::Continue;
+        }
+
+        // Handle picker modal input
+        if self.picker_modal.is_some() {
+            let is_abort = matches!(key.code, KeyCode::Esc)
+                || (key.code == KeyCode::Char('g')
+                    && key.modifiers.contains(KeyModifiers::CONTROL));
+            if is_abort {
+                self.picker_modal = None;
+            } else if key.code == KeyCode::Enter {
+                let modal = self.picker_modal.take().unwrap();
+                let effects = vec![Effect::Emit(Event::LspCodeActionResolve {
+                    path: modal.source_path,
+                    index: modal.selected,
+                })];
+                self.process_effects(effects);
+            } else if key.code == KeyCode::Up {
+                if let Some(ref mut modal) = self.picker_modal {
+                    if modal.selected > 0 {
+                        modal.selected -= 1;
+                    }
+                }
+            } else if key.code == KeyCode::Down {
+                if let Some(ref mut modal) = self.picker_modal {
+                    if modal.selected + 1 < modal.items.len() {
+                        modal.selected += 1;
+                    }
+                }
+            }
+            return InputResult::Continue;
         }
 
         // Handle modal input
@@ -551,6 +639,16 @@ impl Shell {
         for effect in effects {
             match effect {
                 Effect::Emit(event) => {
+                    // Intercept ShowCodeActions to open picker modal
+                    if let Event::ShowCodeActions { ref path, ref actions } = event {
+                        self.picker_modal = Some(PickerModal {
+                            title: "Code Actions".into(),
+                            items: actions.iter().map(|a| a.title.clone()).collect(),
+                            selected: 0,
+                            source_path: path.clone(),
+                        });
+                        continue;
+                    }
                     // Pre-broadcast: clear preview state before ConfirmSearch
                     // effects run, so the FocusLost → PreviewClosed cascade
                     // won't restore the pre-preview tab.
@@ -625,6 +723,33 @@ impl Shell {
                 Effect::Quit => {
                     // Handled at top level
                 }
+                Effect::PromptRename {
+                    prompt,
+                    initial,
+                    path,
+                    row,
+                    col,
+                } => {
+                    self.rename_modal = Some(RenameModal {
+                        prompt,
+                        input: initial,
+                        path,
+                        row,
+                        col,
+                    });
+                }
+                Effect::ShowPicker {
+                    title,
+                    items,
+                    source_path,
+                } => {
+                    self.picker_modal = Some(PickerModal {
+                        title,
+                        items,
+                        selected: 0,
+                        source_path,
+                    });
+                }
             }
         }
     }
@@ -635,8 +760,11 @@ impl Shell {
                 .tab()
                 .map(|t| t.label.clone())
                 .unwrap_or_default();
-            // Clear cursor/scroll data from the DB so reopening starts fresh
-            if let Some(path) = self.components[comp_idx].tab().and_then(|t| t.path) {
+            // Emit BufferClosed before removing the component
+            if let Some(path) = self.components[comp_idx].tab().and_then(|t| t.path.clone()) {
+                let effects = vec![Effect::Emit(Event::BufferClosed(path.clone()))];
+                self.process_effects(effects);
+                // Clear cursor/scroll data from the DB so reopening starts fresh
                 if let Some(conn) = self.env.db.as_ref() {
                     let root_str = self.env.root.to_string_lossy();
                     let file_str = path.to_string_lossy();

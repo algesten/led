@@ -20,6 +20,7 @@ use std::sync::atomic::AtomicBool;
 use std::time::Instant;
 
 use led_core::Waker;
+use led_core::lsp_types::{EditorDiagnostic, EditorInlayHint};
 use ropey::Rope;
 use serde::{Deserialize, Serialize};
 use twox_hash::XxHash64;
@@ -119,6 +120,10 @@ pub struct Buffer {
     pub(crate) syntax_cancel: Arc<AtomicBool>,
     pub isearch: Option<ISearchState>,
     pub(crate) last_search: Option<String>,
+    pub(crate) diagnostics: Vec<EditorDiagnostic>,
+    pub(crate) inlay_hints: Vec<EditorInlayHint>,
+    pub(crate) inlay_hints_enabled: bool,
+    pub(crate) last_hint_range: Option<(usize, usize)>,
     claims: Vec<PanelClaim>,
     claims_with_status: Vec<PanelClaim>,
 }
@@ -164,6 +169,10 @@ impl Buffer {
             syntax_cancel: Arc::new(AtomicBool::new(false)),
             isearch: None,
             last_search: None,
+            diagnostics: Vec::new(),
+            inlay_hints: Vec::new(),
+            inlay_hints_enabled: false,
+            last_hint_range: None,
             claims: vec![
                 PanelClaim {
                     slot: PanelSlot::Main,
@@ -271,6 +280,10 @@ impl Buffer {
             syntax_cancel,
             isearch: None,
             last_search: None,
+            diagnostics: Vec::new(),
+            inlay_hints: Vec::new(),
+            inlay_hints_enabled: false,
+            last_hint_range: None,
             claims: vec![
                 PanelClaim {
                     slot: PanelSlot::Main,

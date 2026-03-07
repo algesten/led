@@ -1,13 +1,14 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+use led_core::lsp_types::DiagnosticSeverity;
 use led_core::{
     Action, BLANK_STYLE, Component, Context, DrawContext, Effect, ElementStyle, Event, PanelClaim,
     PanelSlot, TabDescriptor, Theme,
 };
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
@@ -149,6 +150,25 @@ impl Buffer {
             return;
         }
 
+        // Check for diagnostic on current line
+        let diag_msg = self.diagnostics.iter().find_map(|d| {
+            if d.range.start.row <= self.cursor_row && d.range.end.row >= self.cursor_row {
+                Some(d.message.as_str())
+            } else {
+                None
+            }
+        });
+
+        if let Some(msg) = diag_msg {
+            let truncated: String = msg.chars().take(area.width as usize - 2).collect();
+            let padding = (area.width as usize).saturating_sub(truncated.len() + 2);
+            let bar = format!(" {truncated}{:padding$} ", "");
+            let diag_style = style.fg(Color::Yellow);
+            let paragraph = Paragraph::new(bar).style(diag_style);
+            frame.render_widget(paragraph, area);
+            return;
+        }
+
         let filename = self.filename();
         let modified = if self.dirty { " \u{25cf}" } else { "" };
         let branch = ctx.file_statuses.branch.as_deref().unwrap_or("");
@@ -159,6 +179,46 @@ impl Buffer {
         let bar = format!("{left}{:padding$}{pos}", "");
         let paragraph = Paragraph::new(bar).style(style);
         frame.render_widget(paragraph, area);
+    }
+
+    fn goto_next_diagnostic(&mut self) {
+        if self.diagnostics.is_empty() {
+            return;
+        }
+        // Find the next diagnostic after the cursor
+        let after = self
+            .diagnostics
+            .iter()
+            .find(|d| {
+                d.range.start.row > self.cursor_row
+                    || (d.range.start.row == self.cursor_row
+                        && d.range.start.col > self.cursor_col)
+            })
+            .or_else(|| self.diagnostics.first()); // wrap around
+        if let Some(d) = after {
+            self.cursor_row = d.range.start.row.min(self.line_count().saturating_sub(1));
+            self.cursor_col = d.range.start.col.min(self.line_len(self.cursor_row));
+        }
+    }
+
+    fn goto_prev_diagnostic(&mut self) {
+        if self.diagnostics.is_empty() {
+            return;
+        }
+        let before = self
+            .diagnostics
+            .iter()
+            .rev()
+            .find(|d| {
+                d.range.start.row < self.cursor_row
+                    || (d.range.start.row == self.cursor_row
+                        && d.range.start.col < self.cursor_col)
+            })
+            .or_else(|| self.diagnostics.last()); // wrap around
+        if let Some(d) = before {
+            self.cursor_row = d.range.start.row.min(self.line_count().saturating_sub(1));
+            self.cursor_col = d.range.start.col.min(self.line_len(self.cursor_row));
+        }
     }
 
     /// Adjust scroll so the cursor is visible within `height` visual rows.
@@ -482,7 +542,33 @@ impl Component for Buffer {
                 }
                 Err(e) => vec![Effect::SetMessage(format!("Save failed: {e}"))],
             },
-            Action::Tick => self.handle_tick(ctx),
+            Action::Tick => {
+                let mut effects = self.handle_tick(ctx);
+                // Request inlay hints when viewport changes
+                if self.inlay_hints_enabled {
+                    let start_row = self.scroll_offset;
+                    let end_row = start_row + ctx.viewport_height + 10;
+                    let new_range = (start_row, end_row);
+                    let should_request = match self.last_hint_range {
+                        Some((prev_start, prev_end)) => {
+                            (start_row as isize - prev_start as isize).unsigned_abs() >= 5
+                                || (end_row as isize - prev_end as isize).unsigned_abs() >= 5
+                        }
+                        None => true,
+                    };
+                    if should_request {
+                        self.last_hint_range = Some(new_range);
+                        if let Some(ref path) = self.path {
+                            effects.push(Effect::Emit(Event::LspInlayHints {
+                                path: path.clone(),
+                                start_row,
+                                end_row,
+                            }));
+                        }
+                    }
+                }
+                effects
+            }
             Action::SetMark => {
                 self.set_mark();
                 vec![Effect::SetMessage("Mark set".into())]
@@ -538,6 +624,91 @@ impl Component for Buffer {
                 }
                 vec![]
             }
+            Action::LspGotoDefinition => {
+                if let Some(ref path) = self.path {
+                    vec![
+                        Effect::SetMessage("LSP: goto definition...".into()),
+                        Effect::Emit(Event::LspGotoDefinition {
+                            path: path.clone(),
+                            row: self.cursor_row,
+                            col: self.cursor_col,
+                        }),
+                    ]
+                } else {
+                    vec![]
+                }
+            }
+            Action::LspRename => {
+                if let Some(ref path) = self.path {
+                    let initial = self.word_at_cursor().unwrap_or_default();
+                    vec![Effect::PromptRename {
+                        prompt: "Rename to:".into(),
+                        initial: initial.clone(),
+                        path: path.clone(),
+                        row: self.cursor_row,
+                        col: self.cursor_col,
+                    }]
+                } else {
+                    vec![]
+                }
+            }
+            Action::LspCodeAction => {
+                if let Some(ref path) = self.path {
+                    let (start_row, start_col, end_row, end_col) =
+                        if let Some(((sr, sc), (er, ec))) = self.selection_range() {
+                            (sr, sc, er, ec)
+                        } else {
+                            (self.cursor_row, self.cursor_col, self.cursor_row, self.cursor_col)
+                        };
+                    vec![Effect::Emit(Event::LspCodeAction {
+                        path: path.clone(),
+                        start_row,
+                        start_col,
+                        end_row,
+                        end_col,
+                    })]
+                } else {
+                    vec![]
+                }
+            }
+            Action::LspFormat => {
+                if let Some(ref path) = self.path {
+                    vec![Effect::Emit(Event::LspFormat { path: path.clone() })]
+                } else {
+                    vec![]
+                }
+            }
+            Action::LspNextDiagnostic => {
+                self.goto_next_diagnostic();
+                vec![]
+            }
+            Action::LspPrevDiagnostic => {
+                self.goto_prev_diagnostic();
+                vec![]
+            }
+            Action::LspToggleInlayHints => {
+                self.inlay_hints_enabled = !self.inlay_hints_enabled;
+                if self.inlay_hints_enabled {
+                    if let Some(ref path) = self.path {
+                        let start_row = self.scroll_offset;
+                        let end_row = start_row + ctx.viewport_height + 10;
+                        vec![
+                            Effect::SetMessage("Inlay hints enabled".into()),
+                            Effect::Emit(Event::LspInlayHints {
+                                path: path.clone(),
+                                start_row,
+                                end_row,
+                            }),
+                        ]
+                    } else {
+                        vec![]
+                    }
+                } else {
+                    self.inlay_hints.clear();
+                    self.last_hint_range = None;
+                    vec![Effect::SetMessage("Inlay hints disabled".into())]
+                }
+            }
             _ => vec![],
         }
     }
@@ -581,6 +752,21 @@ impl Component for Buffer {
                         Effect::ActivateBuffer(path.clone()),
                         Effect::FocusPanel(PanelSlot::Main),
                     ];
+                }
+            }
+            Event::SetDiagnostics { path, diagnostics } => {
+                if self.path.as_deref() == Some(path.as_path()) {
+                    self.diagnostics = diagnostics.clone();
+                }
+            }
+            Event::ApplyEdits { path, edits } => {
+                if self.path.as_deref() == Some(path.as_path()) {
+                    self.apply_text_edits(edits.clone());
+                }
+            }
+            Event::SetInlayHints { path, hints } => {
+                if self.path.as_deref() == Some(path.as_path()) && self.inlay_hints_enabled {
+                    self.inlay_hints = hints.clone();
                 }
             }
             _ => {}
@@ -748,17 +934,40 @@ impl Component for Buffer {
                 let chunk_text = &display[cs..ce];
                 let mut spans: Vec<Span> = Vec::new();
 
-                // Gutter — left column: git line status, right column: color preview
+                // Gutter — left column: diagnostic or git status, right column: color preview
                 if chunk_i == skip {
-                    // Left gutter: line status indicator (git diff)
-                    let line_kind = self.path.as_ref()
-                        .and_then(|p| ctx.file_statuses.line_status_at(p, line_idx));
-                    let left = if let Some(kind) = line_kind {
-                        let key = led_core::file_status::line_status_theme(kind);
-                        let fg_color = ctx.theme.get(key).to_style().fg.unwrap_or(Color::Reset);
+                    // Left gutter: diagnostic severity overrides git status
+                    let diag_severity = self.diagnostics.iter().find_map(|d| {
+                        if d.range.start.row <= line_idx && d.range.end.row >= line_idx {
+                            Some(d.severity)
+                        } else {
+                            None
+                        }
+                    });
+                    let left = if let Some(sev) = diag_severity {
+                        let key = match sev {
+                            DiagnosticSeverity::Error => "diagnostics.error",
+                            DiagnosticSeverity::Warning => "diagnostics.warning",
+                            DiagnosticSeverity::Info => "diagnostics.info",
+                            DiagnosticSeverity::Hint => "diagnostics.hint",
+                        };
+                        let fg_color = ctx.theme.get(key).to_style().fg.unwrap_or(match sev {
+                            DiagnosticSeverity::Error => Color::Red,
+                            DiagnosticSeverity::Warning => Color::Yellow,
+                            DiagnosticSeverity::Info => Color::Blue,
+                            DiagnosticSeverity::Hint => Color::Gray,
+                        });
                         Span::styled("▎", Style::default().fg(fg_color))
                     } else {
-                        Span::styled(" ", gutter_style)
+                        let line_kind = self.path.as_ref()
+                            .and_then(|p| ctx.file_statuses.line_status_at(p, line_idx));
+                        if let Some(kind) = line_kind {
+                            let key = led_core::file_status::line_status_theme(kind);
+                            let fg_color = ctx.theme.get(key).to_style().fg.unwrap_or(Color::Reset);
+                            Span::styled("▎", Style::default().fg(fg_color))
+                        } else {
+                            Span::styled(" ", gutter_style)
+                        }
                     };
                     // Right gutter: color preview
                     let right = if let Some(ref hint) = color_hint {
@@ -805,6 +1014,33 @@ impl Component for Buffer {
                     if let Some((ss, se)) = sel_dcols {
                         for i in ss.max(cs)..se.min(ce) {
                             col_styles[i - cs] = sel_style;
+                        }
+                    }
+
+                    // Apply diagnostic underlines
+                    for diag in &self.diagnostics {
+                        if diag.range.start.row <= line_idx && diag.range.end.row >= line_idx {
+                            let ds = if diag.range.start.row == line_idx {
+                                char_map.get(diag.range.start.col).copied().unwrap_or(0)
+                            } else {
+                                0
+                            };
+                            let de = if diag.range.end.row == line_idx {
+                                char_map.get(diag.range.end.col).copied().unwrap_or(display.len())
+                            } else {
+                                display.len()
+                            };
+                            let fg_color = match diag.severity {
+                                DiagnosticSeverity::Error => Color::Red,
+                                DiagnosticSeverity::Warning => Color::Yellow,
+                                DiagnosticSeverity::Info => Color::Blue,
+                                DiagnosticSeverity::Hint => Color::Gray,
+                            };
+                            for i in ds.max(cs)..de.min(ce) {
+                                col_styles[i - cs] = col_styles[i - cs]
+                                    .add_modifier(Modifier::UNDERLINED)
+                                    .fg(fg_color);
+                            }
                         }
                     }
 
@@ -857,6 +1093,21 @@ impl Component for Buffer {
                                     spans.push(Span::styled(" ".repeat(pad), sel_style));
                                 }
                             }
+                        }
+                    }
+                }
+
+                // Inlay hints as ghost text at end of line (only on last chunk)
+                if is_last && self.inlay_hints_enabled {
+                    let hint_style = ctx.theme.get("editor.inlay_hint").to_style();
+                    let hint_style = if hint_style == BLANK_STYLE.to_style() {
+                        Style::default().fg(Color::DarkGray)
+                    } else {
+                        hint_style
+                    };
+                    for hint in &self.inlay_hints {
+                        if hint.position.row == line_idx {
+                            spans.push(Span::styled(format!(" {}", hint.label), hint_style));
                         }
                     }
                 }

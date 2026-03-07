@@ -5,6 +5,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 use crate::file_status::{FileStatus, LineStatus};
+use crate::lsp_types::{EditorCodeAction, EditorDiagnostic, EditorInlayHint, EditorTextEdit};
 
 pub type Waker = Arc<dyn Fn() + Send + Sync>;
 
@@ -62,6 +63,13 @@ pub enum Action {
     SaveSession,
     RestoreSession,
     Flush,
+    LspGotoDefinition,
+    LspRename,
+    LspCodeAction,
+    LspFormat,
+    LspNextDiagnostic,
+    LspPrevDiagnostic,
+    LspToggleInlayHints,
 }
 
 // ---------------------------------------------------------------------------
@@ -130,6 +138,70 @@ pub enum Event {
     },
     FindFileOpened { dir: PathBuf },
     FileSaved(PathBuf),
+    /// An LSP notification arrived from a language server
+    LspNotification {
+        server_name: String,
+        method: String,
+        params: serde_json::Value,
+    },
+    /// A buffer was closed
+    BufferClosed(PathBuf),
+    /// LSP: go to definition request
+    LspGotoDefinition {
+        path: PathBuf,
+        row: usize,
+        col: usize,
+    },
+    /// LSP: rename request
+    LspRename {
+        path: PathBuf,
+        row: usize,
+        col: usize,
+        new_name: String,
+    },
+    /// LSP: code action request
+    LspCodeAction {
+        path: PathBuf,
+        start_row: usize,
+        start_col: usize,
+        end_row: usize,
+        end_col: usize,
+    },
+    /// LSP: resolve a selected code action
+    LspCodeActionResolve {
+        path: PathBuf,
+        index: usize,
+    },
+    /// LSP: format document
+    LspFormat {
+        path: PathBuf,
+    },
+    /// LSP: request inlay hints for visible range
+    LspInlayHints {
+        path: PathBuf,
+        start_row: usize,
+        end_row: usize,
+    },
+    /// LSP response: set diagnostics for a file
+    SetDiagnostics {
+        path: PathBuf,
+        diagnostics: Vec<EditorDiagnostic>,
+    },
+    /// LSP response: apply text edits to a file
+    ApplyEdits {
+        path: PathBuf,
+        edits: Vec<EditorTextEdit>,
+    },
+    /// LSP response: show code action picker
+    ShowCodeActions {
+        path: PathBuf,
+        actions: Vec<EditorCodeAction>,
+    },
+    /// LSP response: set inlay hints for a file
+    SetInlayHints {
+        path: PathBuf,
+        hints: Vec<EditorInlayHint>,
+    },
 }
 
 pub enum Effect {
@@ -149,4 +221,16 @@ pub enum Effect {
         statuses: Vec<LineStatus>,
     },
     Quit,
+    PromptRename {
+        prompt: String,
+        initial: String,
+        path: PathBuf,
+        row: usize,
+        col: usize,
+    },
+    ShowPicker {
+        title: String,
+        items: Vec<String>,
+        source_path: PathBuf,
+    },
 }

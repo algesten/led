@@ -2,7 +2,7 @@ use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout, Position, Rect};
 use ratatui::widgets::{Block, Borders, Paragraph};
 
-use crate::shell::{Modal, Shell};
+use crate::shell::{Modal, PickerModal, RenameModal, Shell};
 use led_core::{DrawContext, PanelSlot};
 
 const GUTTER_WIDTH: u16 = 2;
@@ -55,6 +55,12 @@ pub fn render(shell: &mut Shell, frame: &mut Frame) {
 
     if let Some(modal) = &shell.modal {
         render_modal(modal, frame, area);
+    }
+    if let Some(modal) = &shell.rename_modal {
+        render_rename_modal(modal, frame, area);
+    }
+    if let Some(modal) = &shell.picker_modal {
+        render_picker_modal(modal, frame, area);
     }
 }
 
@@ -162,6 +168,17 @@ fn render_main_content(shell: &mut Shell, frame: &mut Frame, area: Rect) {
 }
 
 fn render_status_bar(shell: &mut Shell, frame: &mut Frame, area: Rect) {
+    // Shell-level message takes priority
+    if let Some(ref msg) = shell.message {
+        let left = format!(" {msg}");
+        let padding = (area.width as usize).saturating_sub(left.len());
+        let bar = format!("{left}{:padding$}", "");
+        let style = shell.theme.get("status_bar.style").to_style();
+        let paragraph = Paragraph::new(bar).style(style);
+        frame.render_widget(paragraph, area);
+        return;
+    }
+
     // Check if any component claims the status bar
     let theme = shell.theme.clone();
     let fs = shell.file_statuses.clone();
@@ -217,5 +234,86 @@ fn render_modal(modal: &Modal, frame: &mut Frame, area: Rect) {
 
         let cursor_x = input_area.x + modal.input.len() as u16;
         frame.set_cursor_position(Position::new(cursor_x, input_area.y));
+    }
+}
+
+fn render_rename_modal(modal: &RenameModal, frame: &mut Frame, area: Rect) {
+    use ratatui::widgets::Clear;
+
+    let width = (modal.prompt.len() as u16 + 4).max(30).min(area.width);
+    let height: u16 = 4;
+    let x = area.x + (area.width.saturating_sub(width)) / 2;
+    let y = area.y + (area.height.saturating_sub(height)) / 2;
+    let modal_area = Rect::new(x, y, width, height);
+
+    frame.render_widget(Clear, modal_area);
+
+    let block = Block::default().borders(Borders::ALL);
+    let inner = block.inner(modal_area);
+    frame.render_widget(block, modal_area);
+
+    if inner.height > 0 {
+        let prompt = Paragraph::new(modal.prompt.as_str()).alignment(Alignment::Left);
+        let prompt_area = Rect::new(inner.x, inner.y, inner.width, 1);
+        frame.render_widget(prompt, prompt_area);
+    }
+
+    if inner.height > 1 {
+        let input_area = Rect::new(inner.x, inner.y + 1, inner.width, 1);
+        let input = Paragraph::new(modal.input.as_str());
+        frame.render_widget(input, input_area);
+
+        let cursor_x = input_area.x + modal.input.len() as u16;
+        frame.set_cursor_position(Position::new(cursor_x, input_area.y));
+    }
+}
+
+fn render_picker_modal(modal: &PickerModal, frame: &mut Frame, area: Rect) {
+    use ratatui::style::Style;
+    use ratatui::widgets::Clear;
+
+    let max_item_len = modal
+        .items
+        .iter()
+        .map(|s| s.len())
+        .max()
+        .unwrap_or(10);
+    let width = (max_item_len as u16 + 4)
+        .max(modal.title.len() as u16 + 4)
+        .min(area.width.saturating_sub(4));
+    let height = (modal.items.len() as u16 + 3).min(area.height.saturating_sub(2));
+    let x = area.x + (area.width.saturating_sub(width)) / 2;
+    let y = area.y + (area.height.saturating_sub(height)) / 2;
+    let modal_area = Rect::new(x, y, width, height);
+
+    frame.render_widget(Clear, modal_area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(format!(" {} ", modal.title));
+    let inner = block.inner(modal_area);
+    frame.render_widget(block, modal_area);
+
+    let visible_items = inner.height as usize;
+    let scroll = if modal.selected >= visible_items {
+        modal.selected - visible_items + 1
+    } else {
+        0
+    };
+
+    for (i, item) in modal.items.iter().enumerate().skip(scroll).take(visible_items) {
+        let row = (i - scroll) as u16;
+        if row >= inner.height {
+            break;
+        }
+        let style = if i == modal.selected {
+            Style::default().bg(ratatui::style::Color::DarkGray)
+        } else {
+            Style::default()
+        };
+        let truncated: String = item.chars().take(inner.width as usize).collect();
+        let item_area = Rect::new(inner.x, inner.y + row, inner.width, 1);
+        let paragraph = Paragraph::new(truncated).style(style);
+        frame.render_widget(paragraph, item_area);
     }
 }

@@ -1,3 +1,5 @@
+use led_core::lsp_types::EditorTextEdit;
+
 use crate::wrap::{compute_chunks, display_col_to_char_idx, expand_tabs, find_sub_line};
 use crate::{Buffer, EditKind, EditOp, UndoEntry};
 
@@ -429,4 +431,112 @@ impl Buffer {
             direction: 1,
         });
     }
+
+    // --- LSP support ---
+
+    /// Apply a set of text edits from LSP (formatting, rename, code actions).
+    /// Edits are applied in reverse document order to preserve positions.
+    pub fn apply_text_edits(&mut self, mut edits: Vec<EditorTextEdit>) {
+        if edits.is_empty() {
+            return;
+        }
+        self.flush_pending();
+        let cursor_before = (self.cursor_row, self.cursor_col);
+
+        // Sort edits in reverse document order (later positions first)
+        edits.sort_by(|a, b| {
+            b.range
+                .start
+                .row
+                .cmp(&a.range.start.row)
+                .then(b.range.start.col.cmp(&a.range.start.col))
+        });
+
+        // Snapshot the full text for a compound undo
+        let before_text: String = self.rope.to_string();
+
+        for edit in &edits {
+            let start_row = edit.range.start.row.min(self.line_count().saturating_sub(1));
+            let start_col = edit.range.start.col.min(self.line_len(start_row));
+            let end_row = edit.range.end.row.min(self.line_count().saturating_sub(1));
+            let end_col = edit.range.end.col.min(self.line_len(end_row));
+
+            let start_idx = self.char_idx(start_row, start_col);
+            let end_idx = self.char_idx(end_row, end_col);
+
+            if start_idx < end_idx {
+                let se = self.syntax_edit_remove(start_idx, end_idx);
+                self.rope.remove(start_idx..end_idx);
+                self.apply_syntax_edit(se);
+            }
+            if !edit.new_text.is_empty() {
+                let se = self.syntax_edit_insert(start_idx, &edit.new_text);
+                self.rope.insert(start_idx, &edit.new_text);
+                self.apply_syntax_edit(se);
+            }
+        }
+
+        self.dirty = true;
+        self.clamp_cursor_col();
+        let cursor_after = (self.cursor_row, self.cursor_col);
+
+        // Record compound undo: remove everything, insert before_text
+        self.push_undo(UndoEntry {
+            op: EditOp::Remove {
+                char_idx: 0,
+                text: self.rope.to_string(),
+            },
+            cursor_before,
+            cursor_after,
+            direction: 0, // special: won't be inverted normally
+        });
+        // Actually store a restorable undo: swap entire content
+        // Simpler approach: just record the before_text as an Insert undo
+        self.undo_history.pop(); // remove the placeholder
+        self.distance_from_save -= 1;
+        self.push_undo(UndoEntry {
+            op: EditOp::Insert {
+                char_idx: 0,
+                text: before_text,
+            },
+            cursor_before: cursor_after,
+            cursor_after: cursor_before,
+            direction: 1,
+        });
+    }
+
+    /// Get the word under the cursor (alphanumeric + underscore).
+    pub fn word_at_cursor(&self) -> Option<String> {
+        if self.cursor_row >= self.line_count() {
+            return None;
+        }
+        let line = self.line(self.cursor_row);
+        let chars: Vec<char> = line.chars().collect();
+        let col = self.cursor_col.min(chars.len());
+
+        if col >= chars.len() || !is_word_char(chars[col]) {
+            // Try one position back
+            if col == 0 || !is_word_char(chars[col - 1]) {
+                return None;
+            }
+        }
+
+        let mut start = col;
+        while start > 0 && is_word_char(chars[start - 1]) {
+            start -= 1;
+        }
+        let mut end = col;
+        while end < chars.len() && is_word_char(chars[end]) {
+            end += 1;
+        }
+
+        if start == end {
+            return None;
+        }
+        Some(chars[start..end].iter().collect())
+    }
+}
+
+fn is_word_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
 }

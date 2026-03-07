@@ -207,6 +207,12 @@ pub const DEFAULT_KEYS_TOML: &str = r#"# led keybindings
 "ctrl+w" = "kill_region"
 "ctrl+y" = "yank"
 "ctrl+s" = "in_buffer_search"
+"alt+." = "lsp_next_diagnostic"
+"alt+," = "lsp_prev_diagnostic"
+"alt+enter" = "lsp_goto_definition"
+"ctrl+r" = "lsp_rename"
+"alt+i" = "lsp_code_action"
+"ctrl+t" = "lsp_toggle_inlay_hints"
 
 [keys."ctrl+x"]
 "ctrl+c" = "quit"
