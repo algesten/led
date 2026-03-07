@@ -347,6 +347,7 @@ hit                = "$normal"
 match              = { fg = "$bright_yellow", bold = true }
 selected           = "$inverse_active"
 selected_unfocused = "$inverse_inactive"
+search_current     = "$inverse_bold"
 
 [git]
 modified        = "$x172"

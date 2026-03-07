@@ -815,7 +815,11 @@ impl Component for Buffer {
         let total_lines = self.line_count();
         let gutter_style = ctx.theme.get("editor.gutter").to_style();
         let text_style = ctx.theme.get("editor.text").to_style();
-        let sel_style = ctx.theme.get("editor.selection").to_style();
+        let sel_style = if self.preview_highlight {
+            ctx.theme.get("file_search.search_current").to_style()
+        } else {
+            ctx.theme.get("editor.selection").to_style()
+        };
         let search_match_style = ctx.theme.get("editor.search_match").to_style();
         let search_current_style = ctx.theme.get("editor.search_current").to_style();
         let sel_range = self.selection_range();
