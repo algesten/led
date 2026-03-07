@@ -3,7 +3,9 @@ use std::path::PathBuf;
 use led_core::{Action, Component, Context, DrawContext, Effect, Event, PanelClaim, PanelSlot};
 use ratatui::Frame;
 use ratatui::layout::Rect;
+use serde::{Deserialize, Serialize};
 
+#[derive(Serialize, Deserialize)]
 struct JumpPosition {
     path: PathBuf,
     row: usize,
@@ -30,7 +32,29 @@ impl Component for JumpList {
         &[]
     }
 
-    fn handle_action(&mut self, _action: Action, _ctx: &mut Context) -> Vec<Effect> {
+    fn handle_action(&mut self, action: Action, ctx: &mut Context) -> Vec<Effect> {
+        match action {
+            Action::SaveSession => {
+                if let Ok(json) = serde_json::to_string(&self.list) {
+                    ctx.kv.insert("jump_list.entries".into(), json);
+                    ctx.kv
+                        .insert("jump_list.index".into(), self.index.to_string());
+                }
+            }
+            Action::RestoreSession => {
+                if let Some(json) = ctx.kv.get("jump_list.entries") {
+                    if let Ok(entries) = serde_json::from_str::<Vec<JumpPosition>>(json) {
+                        self.list = entries;
+                        self.index = ctx
+                            .kv
+                            .get("jump_list.index")
+                            .and_then(|s| s.parse().ok())
+                            .unwrap_or(self.list.len());
+                    }
+                }
+            }
+            _ => {}
+        }
         vec![]
     }
 
@@ -78,6 +102,7 @@ impl Component for JumpList {
                 self.index -= 1;
                 let pos = &self.list[self.index];
                 vec![
+                    Effect::Emit(Event::PreviewClosed),
                     Effect::Emit(Event::OpenFile(pos.path.clone())),
                     Effect::Emit(Event::GoToPosition {
                         path: pos.path.clone(),
@@ -95,6 +120,7 @@ impl Component for JumpList {
                 self.index += 1;
                 let pos = &self.list[self.index];
                 vec![
+                    Effect::Emit(Event::PreviewClosed),
                     Effect::Emit(Event::OpenFile(pos.path.clone())),
                     Effect::Emit(Event::GoToPosition {
                         path: pos.path.clone(),

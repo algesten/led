@@ -759,12 +759,12 @@ impl LspManager {
             RequestResult::GotoDefinition { locations } => {
                 if let Some((path, row, col)) = locations.into_iter().next() {
                     vec![
-                        Effect::Emit(Event::OpenFile(path.clone())),
+                        Effect::Emit(Event::OpenDefinition(path.clone())),
                         Effect::Emit(Event::GoToPosition {
                             path,
                             row,
                             col,
-                            scroll_offset: None,
+                            scroll_offset: Some(row.saturating_sub(5)),
                         }),
                         Effect::FocusPanel(led_core::PanelSlot::Main),
                     ]
@@ -984,7 +984,7 @@ impl Component for LspManager {
 
     fn handle_event(&mut self, event: &Event, _ctx: &mut Context) -> Vec<Effect> {
         match event {
-            Event::OpenFile(path) => {
+            Event::OpenFile(path) | Event::OpenDefinition(path) => {
                 self.ensure_server_for_path(path);
                 self.send_did_open(path);
             }

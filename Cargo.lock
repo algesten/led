@@ -1309,6 +1309,8 @@ version = "0.1.0"
 dependencies = [
  "led_core",
  "ratatui",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

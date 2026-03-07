@@ -524,6 +524,7 @@ impl Shell {
                     } else {
                         self.active_tab -= 1;
                     }
+                    self.pre_preview_tab = None;
                     self.notify_active_buffer();
                 }
             }
@@ -531,6 +532,7 @@ impl Shell {
                 let tabs = self.tabbed_components();
                 if tabs.len() > 1 {
                     self.active_tab = (self.active_tab + 1) % tabs.len();
+                    self.pre_preview_tab = None;
                     self.notify_active_buffer();
                 }
             }
@@ -689,6 +691,9 @@ impl Shell {
                                 self.active_tab = tab.min(tabs.len() - 1);
                             }
                         }
+                    }
+                    if let Event::PreviewPromoted = &event {
+                        self.pre_preview_tab = None;
                     }
                 }
                 Effect::Spawn(component) => {

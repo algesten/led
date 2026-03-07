@@ -6,3 +6,5 @@ edition = "2024"
 [dependencies]
 led_core = { workspace = true }
 ratatui = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

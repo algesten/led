@@ -344,6 +344,7 @@ impl Component for Buffer {
             dirty: self.dirty,
             path: self.path.clone(),
             preview: self.preview,
+            read_only: self.read_only,
         })
     }
 
@@ -360,6 +361,44 @@ impl Component for Buffer {
     }
 
     fn handle_action(&mut self, action: Action, ctx: &mut Context) -> Vec<Effect> {
+        // Gate mutating actions on read-only buffers
+        if self.read_only {
+            match action {
+                Action::InsertChar(_)
+                | Action::InsertNewline
+                | Action::DeleteBackward
+                | Action::DeleteForward
+                | Action::InsertTab
+                | Action::KillLine
+                | Action::KillRegion
+                | Action::Yank
+                | Action::Save
+                | Action::SaveForce
+                | Action::LspFormat => {
+                    return vec![Effect::SetMessage("Buffer is read-only".into())];
+                }
+                _ => {}
+            }
+        }
+
+        // Promote preview buffer on first edit (consumes the keystroke)
+        if self.preview {
+            match action {
+                Action::InsertChar(_)
+                | Action::InsertNewline
+                | Action::DeleteBackward
+                | Action::DeleteForward
+                | Action::InsertTab
+                | Action::KillLine
+                | Action::KillRegion
+                | Action::Yank => {
+                    self.preview = false;
+                    return vec![Effect::Emit(Event::PreviewPromoted)];
+                }
+                _ => {}
+            }
+        }
+
         // Intercept actions during incremental search
         if self.isearch.is_some() {
             match action {
@@ -785,13 +824,18 @@ impl Component for Buffer {
                 }
             }
             Event::ApplyEdits { path, edits } => {
-                if self.path.as_deref() == Some(path.as_path()) {
+                if self.path.as_deref() == Some(path.as_path()) && !self.read_only {
                     self.apply_text_edits(edits.clone());
                 }
             }
             Event::SetInlayHints { path, hints } => {
                 if self.path.as_deref() == Some(path.as_path()) && self.inlay_hints_enabled {
                     self.inlay_hints = hints.clone();
+                }
+            }
+            Event::TabActivated { path } => {
+                if self.preview && path.as_ref() != self.path.as_ref() {
+                    return vec![Effect::Emit(Event::PreviewClosed)];
                 }
             }
             _ => {}
@@ -1184,6 +1228,19 @@ impl Component for Buffer {
 // BufferFactory
 // ---------------------------------------------------------------------------
 
+fn is_read_only_path(path: &std::path::Path) -> bool {
+    let Some(home) = dirs::home_dir() else {
+        return false;
+    };
+    let read_only_prefixes = [
+        home.join(".cargo/registry"),
+        home.join(".rustup/toolchains"),
+    ];
+    read_only_prefixes
+        .iter()
+        .any(|prefix| path.starts_with(prefix))
+}
+
 pub struct BufferFactory {
     preview_path: Option<PathBuf>,
 }
@@ -1209,7 +1266,25 @@ impl Component for BufferFactory {
             Event::OpenFile(path) => {
                 let path_str = path.to_string_lossy();
                 match Buffer::from_file_with_waker(&path_str, ctx.waker.clone()) {
-                    Ok(buf) => effects.push(Effect::Spawn(Box::new(buf))),
+                    Ok(mut buf) => {
+                        buf.read_only = is_read_only_path(path);
+                        effects.push(Effect::Spawn(Box::new(buf)));
+                    }
+                    Err(e) => effects.push(Effect::SetMessage(format!("Open failed: {e}"))),
+                }
+            }
+            Event::OpenDefinition(path) => {
+                if self.preview_path.is_some() {
+                    effects.push(Effect::KillPreview);
+                }
+                let path_str = path.to_string_lossy();
+                match Buffer::from_file_with_waker(&path_str, ctx.waker.clone()) {
+                    Ok(mut buf) => {
+                        buf.preview = true;
+                        buf.read_only = is_read_only_path(path);
+                        self.preview_path = Some(path.clone());
+                        effects.push(Effect::Spawn(Box::new(buf)));
+                    }
                     Err(e) => effects.push(Effect::SetMessage(format!("Open failed: {e}"))),
                 }
             }
@@ -1261,6 +1336,9 @@ impl Component for BufferFactory {
                     }));
                     effects.push(Effect::FocusPanel(PanelSlot::Main));
                 }
+            }
+            Event::PreviewPromoted => {
+                self.preview_path = None;
             }
             _ => {}
         }

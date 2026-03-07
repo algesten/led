@@ -80,7 +80,13 @@ fn render_tab_bar(shell: &Shell, frame: &mut Frame, area: Rect) {
             x += 1;
         }
 
-        let lead = if tab.dirty { "\u{25cf}" } else { " " };
+        let lead = if tab.dirty {
+            "\u{25cf}"
+        } else if tab.read_only {
+            "#"
+        } else {
+            " "
+        };
         let filename = &tab.label;
         let max_chars = 15;
         let char_count = filename.chars().count();

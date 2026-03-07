@@ -97,6 +97,7 @@ pub struct TabDescriptor {
     pub dirty: bool,
     pub path: Option<PathBuf>,
     pub preview: bool,
+    pub read_only: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -114,6 +115,7 @@ pub trait Clipboard {
 
 pub enum Event {
     OpenFile(PathBuf),
+    OpenDefinition(PathBuf),
     TabActivated {
         path: Option<PathBuf>,
     },
@@ -134,6 +136,7 @@ pub enum Event {
         match_len: usize,
     },
     PreviewClosed,
+    PreviewPromoted,
     ConfirmSearch {
         path: PathBuf,
         row: usize,
