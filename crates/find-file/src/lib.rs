@@ -185,11 +185,11 @@ impl FindFilePanel {
     }
 
     fn tab_complete(&mut self) {
-        self.show_side = true;
         let expanded = Self::expand_path(&self.input);
 
         // Rule 1: input ends with / and is a directory → show contents
         if self.input.ends_with('/') && expanded.is_dir() {
+            self.show_side = true;
             self.completions = Self::compute_completions(&expanded, "");
             self.selected = None;
             return;
@@ -234,7 +234,8 @@ impl FindFilePanel {
             return;
         }
 
-        // Rule 3: multiple matches — complete longest common prefix
+        // Rule 3: multiple matches — complete longest common prefix, open side panel
+        self.show_side = true;
         let common = Self::longest_common_prefix(&matches);
         if common.len() > prefix.len() {
             self.input = format!("{dir_prefix}{common}");
