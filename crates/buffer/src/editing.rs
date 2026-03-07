@@ -456,7 +456,11 @@ impl Buffer {
         let before_text: String = self.rope.to_string();
 
         for edit in &edits {
-            let start_row = edit.range.start.row.min(self.line_count().saturating_sub(1));
+            let start_row = edit
+                .range
+                .start
+                .row
+                .min(self.line_count().saturating_sub(1));
             let start_col = edit.range.start.col.min(self.line_len(start_row));
             let end_row = edit.range.end.row.min(self.line_count().saturating_sub(1));
             let end_col = edit.range.end.col.min(self.line_len(end_row));

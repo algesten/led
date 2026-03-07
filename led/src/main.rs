@@ -21,6 +21,7 @@ use led_file_browser::FileBrowser;
 use led_file_search::FileSearch;
 use led_find_file::FindFilePanel;
 use led_git_status::GitStatus;
+use led_jump_list::JumpList;
 use led_lsp::LspManager;
 use session::SessionData;
 use shell::{InputResult, Shell};
@@ -97,6 +98,7 @@ async fn main() -> io::Result<()> {
         Box::new(FileBrowser::new(root.clone())),
         Box::new(FindFilePanel::new()),
         Box::new(GitStatus::new(root.clone(), Some(waker.clone()))),
+        Box::new(JumpList::new()),
         Box::new(LspManager::new(root.clone(), Some(waker.clone()))),
     ];
     if let Some(buf) = initial_buffer {
@@ -378,11 +380,7 @@ fn try_become_primary(root: &std::path::Path) -> Option<std::fs::File> {
         .ok()?;
 
     let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-    if rc == 0 {
-        Some(file)
-    } else {
-        None
-    }
+    if rc == 0 { Some(file) } else { None }
 }
 
 fn spawn_config_watcher(

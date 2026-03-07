@@ -47,7 +47,9 @@ impl LanguageServer {
             .stderr(std::process::Stdio::null())
             .kill_on_drop(true);
 
-        let mut child = cmd.spawn().map_err(|e| format!("Failed to spawn {}: {}", config.command, e))?;
+        let mut child = cmd
+            .spawn()
+            .map_err(|e| format!("Failed to spawn {}: {}", config.command, e))?;
 
         let stdin = child.stdin.take().ok_or("No stdin")?;
         let stdout = child.stdout.take().ok_or("No stdout")?;
@@ -149,10 +151,7 @@ impl LanguageServer {
         });
 
         let (tx, rx) = oneshot::channel();
-        self.response_handlers
-            .lock()
-            .unwrap()
-            .insert(req_id, tx);
+        self.response_handlers.lock().unwrap().insert(req_id, tx);
 
         self.outbound_tx
             .send(msg.to_string())
@@ -208,11 +207,7 @@ impl LanguageServer {
 
         // Wait briefly for the child to exit
         if let Some(ref mut child) = self.child {
-            let _ = tokio::time::timeout(
-                std::time::Duration::from_secs(2),
-                child.wait(),
-            )
-            .await;
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(2), child.wait()).await;
         }
     }
 }

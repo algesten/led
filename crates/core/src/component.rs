@@ -5,7 +5,9 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use rusqlite::Connection;
 
-use crate::{Action, Clipboard, Effect, Event, FileStatusStore, PanelClaim, PanelSlot, TabDescriptor, Waker};
+use crate::{
+    Action, Clipboard, Effect, Event, FileStatusStore, PanelClaim, PanelSlot, TabDescriptor, Waker,
+};
 
 // ---------------------------------------------------------------------------
 // Context
@@ -143,6 +145,11 @@ pub trait Component {
 
     /// Keymap context name used when this component has focus.
     fn context_name(&self) -> Option<&str> {
+        None
+    }
+
+    /// Current cursor position (row, col, scroll_offset) for jump-list recording.
+    fn cursor_position(&self) -> Option<(usize, usize, usize)> {
         None
     }
 }

@@ -4,9 +4,7 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::widgets::{Block, Borders};
 
-use led_core::{
-    Action, Component, Context, DrawContext, Effect, Event, PanelClaim, PanelSlot,
-};
+use led_core::{Action, Component, Context, DrawContext, Effect, Event, PanelClaim, PanelSlot};
 
 // ---------------------------------------------------------------------------
 // Completion entry
@@ -151,9 +149,9 @@ impl FindFilePanel {
             .collect();
 
         completions.sort_by(|a, b| {
-            b.is_dir.cmp(&a.is_dir).then_with(|| {
-                a.name.to_lowercase().cmp(&b.name.to_lowercase())
-            })
+            b.is_dir
+                .cmp(&a.is_dir)
+                .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
         });
 
         completions
@@ -299,13 +297,11 @@ impl FindFilePanel {
         self.completions.clear();
         self.selected = None;
         self.show_side = false;
-        vec![
-            Effect::Emit(Event::ConfirmSearch {
-                path,
-                row: 0,
-                col: 0,
-            }),
-        ]
+        vec![Effect::Emit(Event::ConfirmSearch {
+            path,
+            row: 0,
+            col: 0,
+        })]
     }
 
     // -- Drawing helpers ----------------------------------------------------
@@ -353,7 +349,13 @@ impl FindFilePanel {
             0
         };
 
-        for (i, comp) in self.completions.iter().skip(scroll).take(height).enumerate() {
+        for (i, comp) in self
+            .completions
+            .iter()
+            .skip(scroll)
+            .take(height)
+            .enumerate()
+        {
             let y = inner.y + i as u16;
             let is_selected = self.selected == Some(scroll + i);
 
@@ -397,7 +399,12 @@ impl FindFilePanel {
                     format!("{name:name_width$}")
                 };
                 buf.set_string(inner.x, y, &display, entry_style);
-                buf.set_string(inner.x + name_width as u16, y, &sd.letter.to_string(), entry_style);
+                buf.set_string(
+                    inner.x + name_width as u16,
+                    y,
+                    &sd.letter.to_string(),
+                    entry_style,
+                );
             } else {
                 let display: String = if name.len() > max {
                     format!("{}…", &name[..max.saturating_sub(1)])
@@ -426,11 +433,7 @@ impl Component for FindFilePanel {
     }
 
     fn context_name(&self) -> Option<&str> {
-        if self.active {
-            Some("find_file")
-        } else {
-            None
-        }
+        if self.active { Some("find_file") } else { None }
     }
 
     fn handle_event(&mut self, event: &Event, _ctx: &mut Context) -> Vec<Effect> {

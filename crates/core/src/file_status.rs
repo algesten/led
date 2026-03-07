@@ -66,7 +66,6 @@ impl FileStatusStore {
             .ok()?;
         Some(statuses[idx].kind)
     }
-
 }
 
 pub struct StatusDisplay {

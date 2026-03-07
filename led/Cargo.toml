@@ -23,4 +23,5 @@ arboard = { version = "3", default-features = false }
 tokio = { workspace = true }
 futures = { workspace = true }
 led_git_status = { workspace = true }
+led_jump_list = { workspace = true }
 led_lsp = { workspace = true }

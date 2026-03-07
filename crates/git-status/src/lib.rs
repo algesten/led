@@ -3,9 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use led_core::file_status::{FileStatus, LineStatus, LineStatusKind};
-use led_core::{
-    Action, Component, Context, DrawContext, Effect, Event, PanelClaim, Waker,
-};
+use led_core::{Action, Component, Context, DrawContext, Effect, Event, PanelClaim, Waker};
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -66,12 +64,11 @@ impl GitStatus {
                     // Small delay to coalesce rapid saves
                     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-                    let result =
-                        tokio::task::spawn_blocking({
-                            let root = root.clone();
-                            move || scan_file_statuses(&root)
-                        })
-                        .await;
+                    let result = tokio::task::spawn_blocking({
+                        let root = root.clone();
+                        move || scan_file_statuses(&root)
+                    })
+                    .await;
 
                     if let Ok(Some((statuses, branch))) = result {
                         let _ = tx.send(WorkerResult::FileStatuses { statuses, branch });

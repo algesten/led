@@ -25,7 +25,9 @@ use std::sync::Arc;
 
 use crate::config::{KeyCombo, Keymap, KeymapLookup};
 use crate::theme::Theme;
-use led_core::{Action, Clipboard, Component, Context, Effect, Event, FileStatusStore, PanelSlot, Waker};
+use led_core::{
+    Action, Clipboard, Component, Context, Effect, Event, FileStatusStore, PanelSlot, Waker,
+};
 
 struct ArboardClipboard {
     inner: std::sync::Mutex<Option<arboard::Clipboard>>,
@@ -592,6 +594,20 @@ impl Shell {
                 }
             }
 
+            Action::JumpBack => {
+                if let Some((path, row, col, scroll_offset)) = self.active_buffer_position() {
+                    self.process_effects(vec![Effect::Emit(Event::JumpBack {
+                        path,
+                        row,
+                        col,
+                        scroll_offset,
+                    })]);
+                }
+            }
+            Action::JumpForward => {
+                self.process_effects(vec![Effect::Emit(Event::JumpForward)]);
+            }
+
             // All other actions → dispatch to focused component
             _ => {
                 let effects = self.dispatch_action(action);
@@ -640,7 +656,11 @@ impl Shell {
             match effect {
                 Effect::Emit(event) => {
                     // Intercept ShowCodeActions to open picker modal
-                    if let Event::ShowCodeActions { ref path, ref actions } = event {
+                    if let Event::ShowCodeActions {
+                        ref path,
+                        ref actions,
+                    } = event
+                    {
                         self.picker_modal = Some(PickerModal {
                             title: "Code Actions".into(),
                             items: actions.iter().map(|a| a.title.clone()).collect(),
@@ -1025,6 +1045,13 @@ impl Shell {
 
     pub fn waker(&self) -> Option<&Waker> {
         self.env.waker.as_ref()
+    }
+
+    fn active_buffer_position(&self) -> Option<(PathBuf, usize, usize, usize)> {
+        let idx = self.active_tab_component_idx()?;
+        let path = self.components[idx].tab()?.path?;
+        let (row, col, scroll_offset) = self.components[idx].cursor_position()?;
+        Some((path, row, col, scroll_offset))
     }
 
     pub fn emit(&mut self, event: Event) {

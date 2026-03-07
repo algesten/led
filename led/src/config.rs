@@ -213,6 +213,10 @@ pub const DEFAULT_KEYS_TOML: &str = r#"# led keybindings
 "ctrl+r" = "lsp_rename"
 "alt+i" = "lsp_code_action"
 "ctrl+t" = "lsp_toggle_inlay_hints"
+"alt+b" = "jump_back"
+"alt+left" = "jump_back"
+"alt+f" = "jump_forward"
+"alt+right" = "jump_forward"
 
 [keys."ctrl+x"]
 "ctrl+c" = "quit"

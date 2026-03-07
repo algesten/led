@@ -565,23 +565,18 @@ impl LspManager {
                         .enumerate()
                         .map(|(i, a)| {
                             let title = match a {
-                                lsp_types::CodeActionOrCommand::CodeAction(ca) => {
-                                    ca.title.clone()
-                                }
-                                lsp_types::CodeActionOrCommand::Command(cmd) => {
-                                    cmd.title.clone()
-                                }
+                                lsp_types::CodeActionOrCommand::CodeAction(ca) => ca.title.clone(),
+                                lsp_types::CodeActionOrCommand::Command(cmd) => cmd.title.clone(),
                             };
                             EditorCodeAction { title, index: i }
                         })
                         .collect();
-                    let _ = event_tx.send(LspManagerEvent::RequestResult(
-                        RequestResult::CodeActions {
+                    let _ =
+                        event_tx.send(LspManagerEvent::RequestResult(RequestResult::CodeActions {
                             path: action_path,
                             actions: editor_actions,
                             raw_actions: actions,
-                        },
-                    ));
+                        }));
                 }
                 Ok(None) => {
                     let _ = event_tx.send(LspManagerEvent::RequestResult(RequestResult::Error {
@@ -704,12 +699,11 @@ impl LspManager {
                             }
                         })
                         .collect();
-                    let _ = event_tx.send(LspManagerEvent::RequestResult(
-                        RequestResult::InlayHints {
+                    let _ =
+                        event_tx.send(LspManagerEvent::RequestResult(RequestResult::InlayHints {
                             path: hint_path,
                             hints: editor_hints,
-                        },
-                    ));
+                        }));
                 }
                 Ok(None) => {}
                 Err(_) => {}
@@ -766,7 +760,12 @@ impl LspManager {
                 if let Some((path, row, col)) = locations.into_iter().next() {
                     vec![
                         Effect::Emit(Event::OpenFile(path.clone())),
-                        Effect::Emit(Event::GoToPosition { path, row, col }),
+                        Effect::Emit(Event::GoToPosition {
+                            path,
+                            row,
+                            col,
+                            scroll_offset: None,
+                        }),
                         Effect::FocusPanel(led_core::PanelSlot::Main),
                     ]
                 } else {
@@ -804,8 +803,7 @@ impl LspManager {
                 if actions.is_empty() {
                     vec![Effect::SetMessage("No code actions available".into())]
                 } else {
-                    self.pending_code_actions
-                        .insert(path.clone(), raw_actions);
+                    self.pending_code_actions.insert(path.clone(), raw_actions);
                     vec![Effect::Emit(Event::ShowCodeActions { path, actions })]
                 }
             }
@@ -869,9 +867,7 @@ fn workspace_edit_to_file_edits(
                             .edits
                             .iter()
                             .filter_map(|e| match e {
-                                lsp_types::OneOf::Left(te) => {
-                                    Some(lsp_edit_to_editor(te, &lines))
-                                }
+                                lsp_types::OneOf::Left(te) => Some(lsp_edit_to_editor(te, &lines)),
                                 lsp_types::OneOf::Right(annotated) => {
                                     Some(lsp_edit_to_editor(&annotated.text_edit, &lines))
                                 }
@@ -972,9 +968,7 @@ impl Component for LspManager {
                         LspManagerEvent::ServerError { error, .. } => {
                             effects.push(Effect::SetMessage(format!("LSP error: {error}")));
                         }
-                        LspManagerEvent::Notification {
-                            method, params, ..
-                        } => {
+                        LspManagerEvent::Notification { method, params, .. } => {
                             effects.extend(self.handle_notification(&method, params));
                         }
                         LspManagerEvent::RequestResult(result) => {

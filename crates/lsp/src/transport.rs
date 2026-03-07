@@ -36,13 +36,11 @@ pub struct LspNotification {
     pub params: Value,
 }
 
-pub type ResponseHandlers = Arc<Mutex<HashMap<RequestId, oneshot::Sender<Result<Value, LspError>>>>>;
+pub type ResponseHandlers =
+    Arc<Mutex<HashMap<RequestId, oneshot::Sender<Result<Value, LspError>>>>>;
 
 /// Spawn writer task: reads JSON strings from channel, writes Content-Length framed messages to stdin.
-pub fn spawn_writer(
-    mut stdin: ChildStdin,
-    mut rx: mpsc::UnboundedReceiver<String>,
-) {
+pub fn spawn_writer(mut stdin: ChildStdin, mut rx: mpsc::UnboundedReceiver<String>) {
     tokio::spawn(async move {
         while let Some(msg) = rx.recv().await {
             let header = format!("Content-Length: {}\r\n\r\n", msg.len());

@@ -272,12 +272,7 @@ fn render_picker_modal(modal: &PickerModal, frame: &mut Frame, area: Rect) {
     use ratatui::style::Style;
     use ratatui::widgets::Clear;
 
-    let max_item_len = modal
-        .items
-        .iter()
-        .map(|s| s.len())
-        .max()
-        .unwrap_or(10);
+    let max_item_len = modal.items.iter().map(|s| s.len()).max().unwrap_or(10);
     let width = (max_item_len as u16 + 4)
         .max(modal.title.len() as u16 + 4)
         .min(area.width.saturating_sub(4));
@@ -301,7 +296,13 @@ fn render_picker_modal(modal: &PickerModal, frame: &mut Frame, area: Rect) {
         0
     };
 
-    for (i, item) in modal.items.iter().enumerate().skip(scroll).take(visible_items) {
+    for (i, item) in modal
+        .items
+        .iter()
+        .enumerate()
+        .skip(scroll)
+        .take(visible_items)
+    {
         let row = (i - scroll) as u16;
         if row >= inner.height {
             break;

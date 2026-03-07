@@ -70,6 +70,8 @@ pub enum Action {
     LspNextDiagnostic,
     LspPrevDiagnostic,
     LspToggleInlayHints,
+    JumpBack,
+    JumpForward,
 }
 
 // ---------------------------------------------------------------------------
@@ -123,6 +125,7 @@ pub enum Event {
         path: PathBuf,
         row: usize,
         col: usize,
+        scroll_offset: Option<usize>,
     },
     PreviewFile {
         path: PathBuf,
@@ -136,7 +139,9 @@ pub enum Event {
         row: usize,
         col: usize,
     },
-    FindFileOpened { dir: PathBuf },
+    FindFileOpened {
+        dir: PathBuf,
+    },
     FileSaved(PathBuf),
     /// An LSP notification arrived from a language server
     LspNotification {
@@ -202,6 +207,22 @@ pub enum Event {
         path: PathBuf,
         hints: Vec<EditorInlayHint>,
     },
+    /// Record current position before a navigation jump
+    RecordJump {
+        path: PathBuf,
+        row: usize,
+        col: usize,
+        scroll_offset: usize,
+    },
+    /// Navigate back in the jump list (carries current position for save-at-present)
+    JumpBack {
+        path: PathBuf,
+        row: usize,
+        col: usize,
+        scroll_offset: usize,
+    },
+    /// Navigate forward in the jump list
+    JumpForward,
 }
 
 pub enum Effect {
@@ -209,7 +230,10 @@ pub enum Effect {
     Spawn(Box<dyn super::Component>),
     SetMessage(String),
     FocusPanel(PanelSlot),
-    ConfirmAction { prompt: String, action: Action },
+    ConfirmAction {
+        prompt: String,
+        action: Action,
+    },
     ActivateBuffer(PathBuf),
     KillPreview,
     SetFileStatuses {

@@ -472,7 +472,14 @@ impl Component for FileBrowser {
                     let name_part = format!("{truncated}{:pad$}", "");
                     lines.push(Line::from(vec![
                         Span::styled(name_part, entry_style),
-                        Span::styled(if is_dir { "\u{23fa}".to_string() } else { sd.letter.to_string() }, entry_style),
+                        Span::styled(
+                            if is_dir {
+                                "\u{23fa}".to_string()
+                            } else {
+                                sd.letter.to_string()
+                            },
+                            entry_style,
+                        ),
                     ]));
                 } else {
                     let padded = format!("{:<width$}", display, width = max_width);

@@ -172,7 +172,11 @@ impl Buffer {
         let filename = self.filename();
         let modified = if self.dirty { " \u{25cf}" } else { "" };
         let branch = ctx.file_statuses.branch.as_deref().unwrap_or("");
-        let branch_display = if branch.is_empty() { String::new() } else { format!(" ({branch})") };
+        let branch_display = if branch.is_empty() {
+            String::new()
+        } else {
+            format!(" ({branch})")
+        };
         let left = format!(" led: {filename}{modified}{branch_display}");
         let pos = format!("L{}:C{} ", self.cursor_row + 1, self.cursor_col + 1);
         let padding = (area.width as usize).saturating_sub(left.len() + pos.len());
@@ -191,8 +195,7 @@ impl Buffer {
             .iter()
             .find(|d| {
                 d.range.start.row > self.cursor_row
-                    || (d.range.start.row == self.cursor_row
-                        && d.range.start.col > self.cursor_col)
+                    || (d.range.start.row == self.cursor_row && d.range.start.col > self.cursor_col)
             })
             .or_else(|| self.diagnostics.first()); // wrap around
         if let Some(d) = after {
@@ -211,8 +214,7 @@ impl Buffer {
             .rev()
             .find(|d| {
                 d.range.start.row < self.cursor_row
-                    || (d.range.start.row == self.cursor_row
-                        && d.range.start.col < self.cursor_col)
+                    || (d.range.start.row == self.cursor_row && d.range.start.col < self.cursor_col)
             })
             .or_else(|| self.diagnostics.last()); // wrap around
         if let Some(d) = before {
@@ -343,6 +345,10 @@ impl Component for Buffer {
             path: self.path.clone(),
             preview: self.preview,
         })
+    }
+
+    fn cursor_position(&self) -> Option<(usize, usize, usize)> {
+        Some((self.cursor_row, self.cursor_col, self.scroll_offset))
     }
 
     fn context_name(&self) -> Option<&str> {
@@ -627,6 +633,12 @@ impl Component for Buffer {
             Action::LspGotoDefinition => {
                 if let Some(ref path) = self.path {
                     vec![
+                        Effect::Emit(Event::RecordJump {
+                            path: path.clone(),
+                            row: self.cursor_row,
+                            col: self.cursor_col,
+                            scroll_offset: self.scroll_offset,
+                        }),
                         Effect::SetMessage("LSP: goto definition...".into()),
                         Effect::Emit(Event::LspGotoDefinition {
                             path: path.clone(),
@@ -658,7 +670,12 @@ impl Component for Buffer {
                         if let Some(((sr, sc), (er, ec))) = self.selection_range() {
                             (sr, sc, er, ec)
                         } else {
-                            (self.cursor_row, self.cursor_col, self.cursor_row, self.cursor_col)
+                            (
+                                self.cursor_row,
+                                self.cursor_col,
+                                self.cursor_row,
+                                self.cursor_col,
+                            )
                         };
                     vec![Effect::Emit(Event::LspCodeAction {
                         path: path.clone(),
@@ -719,10 +736,18 @@ impl Component for Buffer {
                 // Force a tick to check for disk changes after resume
                 return self.handle_tick(ctx);
             }
-            Event::GoToPosition { path, row, col } => {
+            Event::GoToPosition {
+                path,
+                row,
+                col,
+                scroll_offset,
+            } => {
                 if self.path.as_deref() == Some(path.as_path()) {
                     self.cursor_row = (*row).min(self.line_count().saturating_sub(1));
                     self.cursor_col = (*col).min(self.line_len(self.cursor_row));
+                    if let Some(offset) = scroll_offset {
+                        self.scroll_offset = (*offset).min(self.line_count().saturating_sub(1));
+                    }
                     self.clear_mark();
                 }
             }
@@ -959,7 +984,9 @@ impl Component for Buffer {
                         });
                         Span::styled("▎", Style::default().fg(fg_color))
                     } else {
-                        let line_kind = self.path.as_ref()
+                        let line_kind = self
+                            .path
+                            .as_ref()
                             .and_then(|p| ctx.file_statuses.line_status_at(p, line_idx));
                         if let Some(kind) = line_kind {
                             let key = led_core::file_status::line_status_theme(kind);
@@ -1026,7 +1053,10 @@ impl Component for Buffer {
                                 0
                             };
                             let de = if diag.range.end.row == line_idx {
-                                char_map.get(diag.range.end.col).copied().unwrap_or(display.len())
+                                char_map
+                                    .get(diag.range.end.col)
+                                    .copied()
+                                    .unwrap_or(display.len())
                             } else {
                                 display.len()
                             };
@@ -1223,6 +1253,7 @@ impl Component for BufferFactory {
                         path: path.clone(),
                         row: *row,
                         col: *col,
+                        scroll_offset: None,
                     }));
                     effects.push(Effect::FocusPanel(PanelSlot::Main));
                 }
