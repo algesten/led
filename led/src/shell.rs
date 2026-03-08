@@ -136,6 +136,7 @@ pub struct Shell {
     tab_bar_width: u16,
     env: Env,
     pub file_statuses: FileStatusStore,
+    pub lsp_status: Option<led_core::LspStatus>,
 }
 
 impl Shell {
@@ -160,6 +161,7 @@ impl Shell {
             pre_preview_tab: None,
             tab_bar_width: 0,
             file_statuses: FileStatusStore::default(),
+            lsp_status: None,
             env: Env {
                 db,
                 root,
@@ -689,12 +691,19 @@ impl Shell {
                     if matches!(&event, Event::ConfirmSearch { .. }) {
                         self.pre_preview_tab = None;
                     }
+                    let prev_comp = self.active_tab_component_idx();
                     let mut more_effects = Vec::new();
                     let mut ctx = self.env.ctx();
                     for comp in &mut self.components {
                         more_effects.extend(comp.handle_event(&event, &mut ctx));
                     }
                     self.process_effects(more_effects);
+                    // Stabilise: if the tab set changed, keep the same component active
+                    if let Some(ci) = prev_comp {
+                        if let Some(ti) = self.tabbed_index_of(ci) {
+                            self.active_tab = ti;
+                        }
+                    }
                     // Post-broadcast hook for preview tab management
                     if let Event::PreviewClosed = &event {
                         if let Some(tab) = self.pre_preview_tab.take() {
@@ -713,6 +722,9 @@ impl Shell {
                 }
                 Effect::SetMessage(msg) => {
                     self.message = Some(msg);
+                }
+                Effect::SetLspStatus(status) => {
+                    self.lsp_status = Some(status);
                 }
                 Effect::FocusPanel(slot) => {
                     self.set_focus(slot);
@@ -1027,6 +1039,14 @@ impl Shell {
                 return Some(deadline - elapsed);
             }
         }
+        // Redraw periodically while LSP spinner is active.
+        if self
+            .lsp_status
+            .as_ref()
+            .map_or(false, |s| s.busy)
+        {
+            return Some(Duration::from_millis(80));
+        }
         None
     }
 
@@ -1074,6 +1094,7 @@ impl Shell {
     pub fn emit(&mut self, event: Event) {
         self.process_effects(vec![Effect::Emit(event)]);
     }
+
 
     pub fn tick(&mut self) {
         let mut all_effects = Vec::new();

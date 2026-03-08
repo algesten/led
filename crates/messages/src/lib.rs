@@ -102,10 +102,7 @@ impl Component for Messages {
                 self.active = false;
                 vec![Effect::FocusPanel(PanelSlot::Main)]
             }
-            Action::Abort => {
-                self.active = false;
-                vec![Effect::FocusPanel(PanelSlot::Main)]
-            }
+            Action::Abort => self.buffer.handle_action(action, ctx),
             _ => self.buffer.handle_action(action, ctx),
         }
     }

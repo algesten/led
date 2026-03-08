@@ -9,6 +9,14 @@ use crate::lsp_types::{EditorCodeAction, EditorDiagnostic, EditorInlayHint, Edit
 
 pub type Waker = Arc<dyn Fn() + Send + Sync>;
 
+/// LSP server status for display in the status bar.
+#[derive(Clone, Debug, Default)]
+pub struct LspStatus {
+    pub server_name: String,
+    pub busy: bool,
+    pub detail: Option<String>,
+}
+
 // ---------------------------------------------------------------------------
 // Action
 // ---------------------------------------------------------------------------
@@ -258,6 +266,7 @@ pub enum Effect {
         row: usize,
         col: usize,
     },
+    SetLspStatus(LspStatus),
     ShowPicker {
         title: String,
         items: Vec<String>,

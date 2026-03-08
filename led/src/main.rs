@@ -162,6 +162,10 @@ async fn main() -> io::Result<()> {
         shell.set_focus(PanelSlot::Side);
     }
 
+    if cli.debug {
+        shell.emit(led_core::Event::OpenMessages);
+    }
+
     // Install panic hook
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {

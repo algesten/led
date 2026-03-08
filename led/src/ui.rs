@@ -30,12 +30,14 @@ pub fn render(shell: &mut Shell, frame: &mut Frame) {
         let focused = shell.focus == PanelSlot::Side;
         let theme = shell.theme.clone();
         let fs = shell.file_statuses.clone();
+        let lsp = shell.lsp_status.clone();
         let mut ctx = DrawContext {
             theme: &theme,
             focused,
             cursor_pos: None,
             slot: PanelSlot::Side,
             file_statuses: &fs,
+            lsp_status: lsp.as_ref(),
         };
         if let Some(comp) = shell.side_component_mut() {
             comp.draw(frame, browser_area, &mut ctx);
@@ -153,12 +155,14 @@ fn render_main_content(shell: &mut Shell, frame: &mut Frame, area: Rect) {
     let focused = shell.focus == PanelSlot::Main;
     let theme = shell.theme.clone();
     let fs = shell.file_statuses.clone();
+    let lsp = shell.lsp_status.clone();
     let mut ctx = DrawContext {
         theme: &theme,
         focused,
         cursor_pos: None,
         slot: PanelSlot::Main,
         file_statuses: &fs,
+        lsp_status: lsp.as_ref(),
     };
     shell
         .active_buffer_mut()
@@ -188,6 +192,7 @@ fn render_status_bar(shell: &mut Shell, frame: &mut Frame, area: Rect) {
     // Check if any component claims the status bar
     let theme = shell.theme.clone();
     let fs = shell.file_statuses.clone();
+    let lsp = shell.lsp_status.clone();
     if let Some(comp) = shell.status_bar_component_mut() {
         let mut ctx = DrawContext {
             theme: &theme,
@@ -195,6 +200,7 @@ fn render_status_bar(shell: &mut Shell, frame: &mut Frame, area: Rect) {
             cursor_pos: None,
             slot: PanelSlot::StatusBar,
             file_statuses: &fs,
+            lsp_status: lsp.as_ref(),
         };
         comp.draw(frame, area, &mut ctx);
         if let Some((x, y)) = ctx.cursor_pos {

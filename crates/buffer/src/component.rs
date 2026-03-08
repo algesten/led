@@ -177,7 +177,38 @@ impl Buffer {
         } else {
             format!(" ({branch})")
         };
-        let left = format!(" led: {filename}{modified}{branch_display}");
+        // Build LSP status string (placed after branch, left-aligned).
+        let lsp_str = if let Some(lsp) = ctx.lsp_status {
+            let tick = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis();
+            let spinner_char = |offset: u128| -> char {
+                const FRAMES: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+                FRAMES[((tick + offset) / 80) as usize % FRAMES.len()]
+            };
+            let spinner = if lsp.busy {
+                format!("{} ", spinner_char(0))
+            } else {
+                String::new()
+            };
+            let detail = lsp
+                .detail
+                .as_ref()
+                .map(|d| {
+                    if lsp.busy {
+                        format!("  {} {d}", spinner_char(400))
+                    } else {
+                        format!("  {d}")
+                    }
+                })
+                .unwrap_or_default();
+            format!("  {spinner}{}{detail}", lsp.server_name)
+        } else {
+            String::new()
+        };
+
+        let left = format!(" {filename}{modified}{branch_display}{lsp_str}");
         let pos = format!("L{}:C{} ", self.cursor_row + 1, self.cursor_col + 1);
         let padding = (area.width as usize).saturating_sub(left.len() + pos.len());
         let bar = format!("{left}{:padding$}{pos}", "");
@@ -369,8 +400,6 @@ impl Component for Buffer {
                 | Action::DeleteBackward
                 | Action::DeleteForward
                 | Action::InsertTab
-                | Action::KillLine
-                | Action::KillRegion
                 | Action::Yank
                 | Action::Save
                 | Action::SaveForce
@@ -540,7 +569,17 @@ impl Component for Buffer {
                 vec![]
             }
             Action::KillLine => {
-                if let Some(killed) = self.kill_line() {
+                if self.read_only {
+                    let col = self.cursor_col;
+                    let len = self.current_line_len();
+                    if col < len {
+                        let start = self.char_idx(self.cursor_row, col);
+                        let end = self.char_idx(self.cursor_row, len);
+                        let text = self.rope.slice(start..end).to_string();
+                        ctx.clipboard.set_text(&text);
+                    }
+                    vec![]
+                } else if let Some(killed) = self.kill_line() {
                     let acc = self.kill_accumulator.get_or_insert_with(String::new);
                     acc.push_str(&killed);
                     ctx.clipboard.set_text(&acc);
@@ -619,7 +658,15 @@ impl Component for Buffer {
                 vec![Effect::SetMessage("Mark set".into())]
             }
             Action::KillRegion => {
-                if let Some(text) = self.kill_region() {
+                if self.read_only {
+                    if let Some(text) = self.selected_text() {
+                        ctx.clipboard.set_text(&text);
+                        self.clear_mark();
+                        vec![]
+                    } else {
+                        vec![Effect::SetMessage("No region".into())]
+                    }
+                } else if let Some(text) = self.kill_region() {
                     ctx.clipboard.set_text(&text);
                     vec![]
                 } else {
