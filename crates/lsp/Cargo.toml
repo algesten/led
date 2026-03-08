@@ -12,3 +12,5 @@ lsp-types = { workspace = true }
 ratatui = { workspace = true }
 ropey = { workspace = true }
 log = { workspace = true }
+notify = { workspace = true }
+globset = { workspace = true }

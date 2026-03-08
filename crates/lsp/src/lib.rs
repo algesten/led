@@ -224,6 +224,7 @@ fn spawn_reader(
 
         loop {
             // Read headers
+            log::debug!("LSP reader: waiting for next message...");
             let mut content_length: Option<usize> = None;
             loop {
                 header_buf.clear();
@@ -263,6 +264,11 @@ fn spawn_reader(
                 continue;
             };
 
+            // Log raw message shape for debugging
+            let msg_method = msg.get("method").and_then(|v| v.as_str()).unwrap_or("-");
+            let msg_id = msg.get("id").map(|v| v.to_string()).unwrap_or("-".into());
+            log::debug!("LSP raw: id={} method={} len={}", msg_id, msg_method, len);
+
             // id: null counts as absent (some servers include it in notifications)
             let has_id = msg.get("id").is_some_and(|v| !v.is_null());
             let has_method = msg.get("method").is_some();
@@ -271,6 +277,18 @@ fn spawn_reader(
                 // Server request — auto-reply
                 let method = msg["method"].as_str().unwrap_or("");
                 log::info!("LSP <- server request: {}", method);
+                // Forward registerCapability as a notification for LspManager to handle
+                if method == "client/registerCapability" {
+                    let params = msg.get("params").cloned().unwrap_or(Value::Null);
+                    let _ = notification_tx.send(LspNotification {
+                        method: method.to_string(),
+                        params,
+                    });
+                    if let Some(ref w) = waker {
+                        w();
+                    }
+                }
+
                 if let Some(id) = msg.get("id") {
                     // workspace/configuration expects an array of config objects
                     let result = if method == "workspace/configuration" {
@@ -289,6 +307,7 @@ fn spawn_reader(
                         "id": id,
                         "result": result
                     });
+                    log::debug!("LSP -> auto-reply: id={} result={}", id, result);
                     let _ = writer_tx.send(reply.to_string());
                 }
             } else if has_id && !has_method {
@@ -319,6 +338,8 @@ fn spawn_reader(
                 if let Some(ref w) = waker {
                     w();
                 }
+            } else {
+                log::info!("LSP reader: unclassified message: {}", msg);
             }
         }
     });
@@ -451,6 +472,23 @@ impl LanguageServer {
                     work_done_progress: Some(true),
                     ..Default::default()
                 }),
+                workspace: Some(lsp_types::WorkspaceClientCapabilities {
+                    did_change_watched_files: Some(
+                        lsp_types::DidChangeWatchedFilesClientCapabilities {
+                            dynamic_registration: Some(true),
+                            relative_pattern_support: Some(false),
+                        },
+                    ),
+                    workspace_edit: Some(lsp_types::WorkspaceEditClientCapabilities {
+                        document_changes: Some(true),
+                        ..Default::default()
+                    }),
+                    configuration: Some(true),
+                    ..Default::default()
+                }),
+                experimental: Some(serde_json::json!({
+                    "serverStatusNotification": true,
+                })),
                 ..Default::default()
             },
             trace: None,
@@ -472,10 +510,19 @@ impl LanguageServer {
         };
 
         let result: InitializeResult = server.request("initialize", &init_params).await?;
+        log::debug!("LSP server capabilities: {:?}", result.capabilities);
         *server.capabilities.lock().unwrap() = Some(result.capabilities);
 
         // Send initialized notification
         server.notify("initialized", &InitializedParams {});
+
+        // Push empty config — rust-analyzer waits for this before indexing
+        server.notify(
+            "workspace/didChangeConfiguration",
+            &lsp_types::DidChangeConfigurationParams {
+                settings: Value::Object(serde_json::Map::new()),
+            },
+        );
 
         Ok(server)
     }
@@ -573,6 +620,7 @@ enum LspManagerEvent {
     },
     Notification(LspNotification),
     RequestResult(RequestResult),
+    FileChanged(PathBuf),
 }
 
 enum RequestResult {
@@ -787,6 +835,8 @@ pub struct LspManager {
     pending_code_actions: HashMap<PathBuf, Vec<CodeActionOrCommand>>,
     progress_tokens: HashMap<String, ProgressState>,
     quiescent: bool,
+    _file_watcher: Option<notify::RecommendedWatcher>,
+    file_watcher_globs: Option<globset::GlobSet>,
 }
 
 impl LspManager {
@@ -805,6 +855,8 @@ impl LspManager {
             pending_code_actions: HashMap::new(),
             progress_tokens: HashMap::new(),
             quiescent: true,
+            _file_watcher: None,
+            file_watcher_globs: None,
         }
     }
 
@@ -837,6 +889,119 @@ impl LspManager {
             busy: self.is_busy(),
             detail,
         })
+    }
+
+    // -- File watching -------------------------------------------------------
+
+    fn handle_register_capability(&mut self, params: &Value) {
+        let Some(registrations) = params.get("registrations").and_then(|r| r.as_array()) else {
+            return;
+        };
+
+        for reg in registrations {
+            let method = reg.get("method").and_then(|m| m.as_str()).unwrap_or("");
+            if method != "workspace/didChangeWatchedFiles" {
+                continue;
+            }
+
+            let Some(watchers) = reg
+                .get("registerOptions")
+                .and_then(|o| o.get("watchers"))
+                .and_then(|w| w.as_array())
+            else {
+                continue;
+            };
+
+            let mut builder = globset::GlobSetBuilder::new();
+            for w in watchers {
+                let Some(pattern) = w.get("globPattern").and_then(|g| g.as_str()) else {
+                    continue;
+                };
+                if let Ok(glob) = globset::Glob::new(pattern) {
+                    builder.add(glob);
+                }
+            }
+
+            let Ok(glob_set) = builder.build() else {
+                continue;
+            };
+
+            log::info!(
+                "LSP file watcher: {} patterns registered",
+                glob_set.len()
+            );
+
+            self.file_watcher_globs = Some(glob_set);
+            self.start_file_watcher();
+        }
+    }
+
+    fn start_file_watcher(&mut self) {
+        use notify::{RecursiveMode, Watcher};
+
+        let event_tx = self.event_tx.clone();
+        let waker = self.waker.clone();
+        let globs = match self.file_watcher_globs.as_ref() {
+            Some(g) => g.clone(),
+            None => return,
+        };
+        let root = self.root.clone();
+
+        let watcher = notify::recommended_watcher(move |res: Result<notify::Event, _>| {
+            let Ok(ev) = res else { return };
+            match ev.kind {
+                notify::EventKind::Create(_)
+                | notify::EventKind::Modify(_)
+                | notify::EventKind::Remove(_) => {}
+                _ => return,
+            }
+            for path in ev.paths {
+                if globs.is_match(&path) {
+                    let _ = event_tx.send(LspManagerEvent::FileChanged(path));
+                    if let Some(ref w) = waker {
+                        w();
+                    }
+                }
+            }
+        });
+
+        match watcher {
+            Ok(mut w) => {
+                if let Err(e) = w.watch(&root, RecursiveMode::Recursive) {
+                    log::info!("LSP file watcher: failed to watch {}: {}", root.display(), e);
+                    return;
+                }
+                log::info!("LSP file watcher: watching {}", root.display());
+                self._file_watcher = Some(w);
+            }
+            Err(e) => {
+                log::info!("LSP file watcher: failed to create: {}", e);
+            }
+        }
+    }
+
+    fn send_file_changed(&self, path: &Path) {
+        // Send to all servers — the server will filter by relevance
+        let Some(uri) = uri_from_path(path) else {
+            return;
+        };
+        let change_type = if path.exists() {
+            lsp_types::FileChangeType::CHANGED
+        } else {
+            lsp_types::FileChangeType::DELETED
+        };
+
+        for server in self.servers.values() {
+            server.notify(
+                "workspace/didChangeWatchedFiles",
+                &lsp_types::DidChangeWatchedFilesParams {
+                    changes: vec![lsp_types::FileEvent {
+                        uri: uri.clone(),
+                        typ: change_type,
+                    }],
+                },
+            );
+        }
     }
 
     // -- Server lifecycle ---------------------------------------------------
@@ -1437,6 +1602,9 @@ impl LspManager {
                     effects.push(self.lsp_status_effect());
                 }
             }
+            "client/registerCapability" => {
+                self.handle_register_capability(&notif.params);
+            }
             _ => {
                 log::info!("LSP unhandled notification: {}", notif.method);
             }
@@ -1601,6 +1769,9 @@ impl Component for LspManager {
                         }
                         LspManagerEvent::RequestResult(result) => {
                             effects.extend(self.handle_request_result(result));
+                        }
+                        LspManagerEvent::FileChanged(path) => {
+                            self.send_file_changed(&path);
                         }
                     }
                 }

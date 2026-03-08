@@ -1322,9 +1322,11 @@ dependencies = [
 name = "led_lsp"
 version = "0.1.0"
 dependencies = [
+ "globset",
  "led_core",
  "log",
  "lsp-types",
+ "notify",
  "ratatui",
  "ropey",
  "serde",
