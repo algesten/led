@@ -214,7 +214,7 @@ impl Buffer {
         })();
 
         if let Err(e) = result {
-            eprintln!("warning: failed to flush undo entries: {e}");
+            log::warn!("failed to flush undo entries: {e}");
         }
 
         if let Ok(max_seq) = conn.query_row(

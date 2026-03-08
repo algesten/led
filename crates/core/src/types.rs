@@ -72,6 +72,7 @@ pub enum Action {
     LspToggleInlayHints,
     JumpBack,
     JumpForward,
+    OpenMessages,
 }
 
 // ---------------------------------------------------------------------------
@@ -226,6 +227,8 @@ pub enum Event {
     },
     /// Navigate forward in the jump list
     JumpForward,
+    /// Open the *Messages* buffer
+    OpenMessages,
 }
 
 pub enum Effect {

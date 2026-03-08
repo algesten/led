@@ -1213,7 +1213,9 @@ dependencies = [
  "led_git_status",
  "led_jump_list",
  "led_lsp",
+ "led_messages",
  "libc",
+ "log",
  "notify",
  "ratatui",
  "rmp-serde",
@@ -1229,6 +1231,7 @@ version = "0.1.0"
 dependencies = [
  "dirs",
  "led_core",
+ "log",
  "notify",
  "ratatui",
  "rmp-serde",
@@ -1256,6 +1259,7 @@ dependencies = [
 name = "led_core"
 version = "0.1.0"
 dependencies = [
+ "log",
  "ratatui",
  "rusqlite",
  "serde",
@@ -1325,6 +1329,16 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+]
+
+[[package]]
+name = "led_messages"
+version = "0.1.0"
+dependencies = [
+ "led_buffer",
+ "led_core",
+ "log",
+ "ratatui",
 ]
 
 [[package]]

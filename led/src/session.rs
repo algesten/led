@@ -190,7 +190,7 @@ pub fn save_session(conn: &Connection, root_path: &Path, session: &SessionData) 
     })();
 
     if let Err(e) = result {
-        eprintln!("warning: failed to save session: {e}");
+        log::warn!("failed to save session: {e}");
     }
 }
 

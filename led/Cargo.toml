@@ -25,3 +25,5 @@ futures = { workspace = true }
 led_git_status = { workspace = true }
 led_jump_list = { workspace = true }
 led_lsp = { workspace = true }
+led_messages = { workspace = true }
+log = { workspace = true }

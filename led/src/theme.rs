@@ -296,7 +296,7 @@ pub fn load_theme() -> Theme {
     let doc: toml::Value = match toml::from_str(&content) {
         Ok(d) => d,
         Err(e) => {
-            eprintln!("warning: failed to parse theme.toml: {e}; using defaults");
+            log::warn!("failed to parse theme.toml: {e}; using defaults");
             return default_theme();
         }
     };

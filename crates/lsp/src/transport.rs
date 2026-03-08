@@ -82,6 +82,7 @@ pub fn spawn_reader(
             }
 
             let Ok(msg) = serde_json::from_slice::<Value>(&body) else {
+                log::debug!("LSP: failed to parse JSON message ({content_length} bytes)");
                 continue;
             };
 

@@ -1,4 +1,5 @@
 mod config;
+mod logger;
 mod session;
 mod shell;
 mod theme;
@@ -82,6 +83,12 @@ async fn main() -> io::Result<()> {
         let _ = waker_tx.send(AppEvent::Wakeup);
     });
 
+    let shared_log = logger::init(if cli.debug {
+        log::LevelFilter::Debug
+    } else {
+        log::LevelFilter::Info
+    });
+
     // Build component list — the ONLY place concrete types appear
     let initial_buffer = arg_path.as_ref().filter(|p| p.is_file()).map(|path| {
         let path_str = path.to_string_lossy();
@@ -100,6 +107,7 @@ async fn main() -> io::Result<()> {
         Box::new(GitStatus::new(root.clone(), Some(waker.clone()))),
         Box::new(JumpList::new()),
         Box::new(LspManager::new(root.clone(), Some(waker.clone()))),
+        Box::new(led_messages::Messages::new(shared_log)),
     ];
     if let Some(buf) = initial_buffer {
         components.push(Box::new(buf));
@@ -119,7 +127,7 @@ async fn main() -> io::Result<()> {
     let keymap = match config::load_or_create_config() {
         Ok(km) => km,
         Err(e) => {
-            eprintln!("warning: failed to load keys.toml: {e}; using defaults");
+            log::warn!("failed to load keys.toml: {e}; using defaults");
             config::default_keymap()
         }
     };

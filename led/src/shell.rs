@@ -539,19 +539,21 @@ impl Shell {
 
             Action::KillBuffer => {
                 if self.has_tabs() {
-                    // Check if the active tab component is dirty
-                    let is_dirty = self
-                        .active_tab_component_idx()
-                        .and_then(|idx| self.components[idx].tab())
-                        .map_or(false, |t| t.dirty);
-                    if is_dirty {
-                        self.modal = Some(Modal {
-                            prompt: "Buffer modified; kill anyway? (yes/no)".into(),
-                            input: String::new(),
-                            action: PendingAction::KillBuffer,
-                        });
-                    } else {
-                        self.kill_current_buffer();
+                    if let Some(idx) = self.active_tab_component_idx() {
+                        let tab = self.components[idx].tab();
+                        if tab.as_ref().map_or(false, |t| t.path.is_none()) {
+                            // Virtual buffer (e.g. *Messages*) — let the component handle hiding
+                            let effects = self.dispatch_action(Action::KillBuffer);
+                            self.process_effects(effects);
+                        } else if tab.map_or(false, |t| t.dirty) {
+                            self.modal = Some(Modal {
+                                prompt: "Buffer modified; kill anyway? (yes/no)".into(),
+                                input: String::new(),
+                                action: PendingAction::KillBuffer,
+                            });
+                        } else {
+                            self.kill_current_buffer();
+                        }
                     }
                 }
             }
@@ -593,6 +595,16 @@ impl Shell {
                     // Dispatch to active buffer to clear mark
                     let effects = self.dispatch_action(Action::Abort);
                     self.process_effects(effects);
+                }
+            }
+
+            Action::OpenMessages => {
+                self.process_effects(vec![Effect::Emit(Event::OpenMessages)]);
+                if let Some(idx) = self.components.iter().position(|c| {
+                    c.tab().map_or(false, |t| t.label == "*Messages*")
+                }) {
+                    self.activate_tab_for_component(idx);
+                    self.set_focus(PanelSlot::Main);
                 }
             }
 

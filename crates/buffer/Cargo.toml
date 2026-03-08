@@ -27,3 +27,4 @@ tree-sitter-c = { workspace = true }
 tree-sitter-cpp = { workspace = true }
 tree-sitter-make = { workspace = true }
 tokio = { workspace = true }
+log = { workspace = true }

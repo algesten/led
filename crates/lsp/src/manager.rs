@@ -213,12 +213,14 @@ impl LspManager {
             };
             match LanguageServer::start(&config, root_uri, notif_tx, waker).await {
                 Ok(server) => {
+                    log::info!("LSP: {} server ready for {lang_id}", config.command);
                     let _ = event_tx.send(LspManagerEvent::ServerStarted {
                         language_id: lang_id,
                         server: Arc::new(server),
                     });
                 }
                 Err(e) => {
+                    log::warn!("LSP: failed to start server: {e}");
                     let _ = event_tx.send(LspManagerEvent::ServerError { error: e });
                 }
             }

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["led", "crates/core", "crates/buffer", "crates/file-browser", "crates/file-search", "crates/find-file", "crates/git-status", "crates/jump-list", "crates/lsp"]
+members = ["led", "crates/core", "crates/buffer", "crates/file-browser", "crates/file-search", "crates/find-file", "crates/git-status", "crates/jump-list", "crates/lsp", "crates/messages"]
 
 [workspace.dependencies]
 ratatui = "0.30"
@@ -38,6 +38,8 @@ similar = "2"
 led_git_status = { path = "crates/git-status" }
 led_jump_list = { path = "crates/jump-list" }
 led_lsp = { path = "crates/lsp" }
+led_messages = { path = "crates/messages" }
 git2 = { version = "0.20", features = ["vendored-libgit2"] }
+log = "0.4"
 serde_json = "1"
 lsp-types = "0.97"

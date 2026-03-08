@@ -44,7 +44,7 @@ impl LanguageServer {
         cmd.args(&config.args)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
 
         let mut child = cmd
@@ -53,6 +53,18 @@ impl LanguageServer {
 
         let stdin = child.stdin.take().ok_or("No stdin")?;
         let stdout = child.stdout.take().ok_or("No stdout")?;
+
+        if let Some(stderr) = child.stderr.take() {
+            let server_name = config.command.clone();
+            tokio::spawn(async move {
+                use tokio::io::{AsyncBufReadExt, BufReader};
+                let reader = BufReader::new(stderr);
+                let mut lines = reader.lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    log::debug!("[{server_name} stderr] {line}");
+                }
+            });
+        }
 
         let (outbound_tx, outbound_rx) = mpsc::unbounded_channel::<String>();
         let response_handlers: ResponseHandlers = Arc::new(Mutex::new(HashMap::new()));
@@ -128,6 +140,8 @@ impl LanguageServer {
 
         // Send initialized notification
         server.notify::<lsp_types::notification::Initialized>(InitializedParams {});
+
+        log::info!("LSP: {} started", config.command);
 
         Ok(server)
     }

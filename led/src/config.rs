@@ -224,6 +224,9 @@ pub const DEFAULT_KEYS_TOML: &str = r#"# led keybindings
 "k" = "kill_buffer"
 "ctrl+f" = "find_file"
 
+[keys."ctrl+h"]
+"e" = "open_messages"
+
 [browser]
 "left" = "collapse_dir"
 "right" = "expand_dir"

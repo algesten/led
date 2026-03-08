@@ -439,4 +439,9 @@ impl Buffer {
     pub fn content_hash(&self) -> u64 {
         Self::hash_rope(&self.rope)
     }
+
+    pub fn append_text(&mut self, text: &str) {
+        let pos = self.rope.len_chars();
+        self.rope.insert(pos, text);
+    }
 }

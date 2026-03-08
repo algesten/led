@@ -11,4 +11,4 @@ serde_json = { workspace = true }
 lsp-types = { workspace = true }
 ratatui = { workspace = true }
 ropey = { workspace = true }
-log = "0.4"
+log = { workspace = true }
