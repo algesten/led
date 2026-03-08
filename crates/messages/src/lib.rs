@@ -1,8 +1,8 @@
+use led_buffer::Buffer;
 use led_core::logging::SharedLog;
 use led_core::{
     Action, Component, Context, DrawContext, Effect, Event, PanelClaim, PanelSlot, TabDescriptor,
 };
-use led_buffer::Buffer;
 use ratatui::Frame;
 use ratatui::layout::Rect;
 
@@ -48,21 +48,24 @@ impl Messages {
         // The new entries are in the tail of the deque
         let skip = entries.len().saturating_sub(new_count);
 
+        let doc = self.buffer.local_doc.as_mut().expect("messages local doc");
+
         // Check if cursor is at the last line before appending
-        let last_line = self.buffer.line_count().saturating_sub(1);
+        let last_line = doc.line_count().saturating_sub(1);
         let was_at_end = self.buffer.cursor_row >= last_line;
 
         for entry in entries.iter().skip(skip) {
             let secs = entry.elapsed.as_secs_f64();
             let line = format!("[{secs:>10.3}] {:<5} {}\n", entry.level, entry.message);
-            self.buffer.append_text(&line);
+            let len = doc.len_chars();
+            doc.insert(len, &line);
         }
 
         self.last_synced = total;
 
         // Auto-scroll if user was at the end
         if was_at_end {
-            let new_last = self.buffer.line_count().saturating_sub(1);
+            let new_last = doc.line_count().saturating_sub(1);
             self.buffer.cursor_row = new_last;
             self.buffer.cursor_col = 0;
             // Scroll so the last line is visible

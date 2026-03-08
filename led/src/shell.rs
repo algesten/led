@@ -26,7 +26,8 @@ use std::sync::Arc;
 use crate::config::{KeyCombo, Keymap, KeymapLookup};
 use crate::theme::Theme;
 use led_core::{
-    Action, Clipboard, Component, Context, Effect, Event, FileStatusStore, PanelSlot, Waker,
+    Action, Clipboard, Component, Context, DocStore, Effect, Event, FileStatusStore, PanelSlot,
+    Waker,
 };
 
 struct ArboardClipboard {
@@ -102,21 +103,20 @@ struct Env {
     waker: Option<Waker>,
 }
 
-impl Env {
-    fn ctx(&self) -> Context<'_> {
-        Context {
-            db: self.db.as_ref(),
-            root: &self.root,
-            viewport_height: self.viewport_height,
-            clipboard: self.clipboard.as_ref(),
-            waker: self.waker.clone(),
-            kv: std::collections::HashMap::new(),
-        }
+fn make_ctx<'a>(env: &'a Env, docs: &'a mut DocStore) -> Context<'a> {
+    Context {
+        db: env.db.as_ref(),
+        root: &env.root,
+        viewport_height: env.viewport_height,
+        clipboard: env.clipboard.as_ref(),
+        waker: env.waker.clone(),
+        kv: std::collections::HashMap::new(),
+        docs,
     }
 }
 
 pub struct Shell {
-    components: Vec<Box<dyn Component>>,
+    pub components: Vec<Box<dyn Component>>,
     last_touched: Vec<Instant>,
     active_tab: usize,
     pub message: Option<String>,
@@ -137,6 +137,7 @@ pub struct Shell {
     env: Env,
     pub file_statuses: FileStatusStore,
     pub lsp_status: Option<led_core::LspStatus>,
+    pub docs: DocStore,
 }
 
 impl Shell {
@@ -162,6 +163,7 @@ impl Shell {
             tab_bar_width: 0,
             file_statuses: FileStatusStore::default(),
             lsp_status: None,
+            docs: DocStore::new(),
             env: Env {
                 db,
                 root,
@@ -203,8 +205,10 @@ impl Shell {
         self.last_touched.push(Instant::now());
         let last = self.components.len() - 1;
         if has_tab {
-            let mut ctx = self.env.ctx();
-            self.components[last].handle_action(Action::RestoreSession, &mut ctx);
+            {
+                let mut ctx = make_ctx(&self.env, &mut self.docs);
+                self.components[last].handle_action(Action::RestoreSession, &mut ctx);
+            }
             self.active_tab = self.tabbed_index_of(last).unwrap_or(0);
             self.notify_active_buffer();
         }
@@ -230,7 +234,7 @@ impl Shell {
     }
 
     /// Get the component index for the active tab.
-    fn active_tab_component_idx(&self) -> Option<usize> {
+    pub fn active_tab_component_idx(&self) -> Option<usize> {
         self.tabbed_components().get(self.active_tab).copied()
     }
 
@@ -252,7 +256,7 @@ impl Shell {
         Some(&self.components[idx])
     }
 
-    fn side_component_idx(&self) -> Option<usize> {
+    pub fn side_component_idx(&self) -> Option<usize> {
         self.components
             .iter()
             .enumerate()
@@ -266,11 +270,6 @@ impl Shell {
                     .unwrap_or(0)
             })
             .map(|(i, _)| i)
-    }
-
-    pub fn side_component_mut(&mut self) -> Option<&mut Box<dyn Component>> {
-        let idx = self.side_component_idx()?;
-        Some(&mut self.components[idx])
     }
 
     pub fn status_bar_component_idx(&self) -> Option<usize> {
@@ -296,11 +295,6 @@ impl Shell {
     pub fn status_bar_component(&self) -> Option<&Box<dyn Component>> {
         let idx = self.status_bar_component_idx()?;
         Some(&self.components[idx])
-    }
-
-    pub fn status_bar_component_mut(&mut self) -> Option<&mut Box<dyn Component>> {
-        let idx = self.status_bar_component_idx()?;
-        Some(&mut self.components[idx])
     }
 
     pub fn components(&self) -> &[Box<dyn Component>] {
@@ -564,8 +558,9 @@ impl Shell {
                 self.show_side_panel = true;
                 // Always dispatch to the active buffer (not the focused component)
                 // so it can grab selected text and emit FileSearchOpened
-                let effects = if let Some(idx) = self.active_tab_component_idx() {
-                    let mut ctx = self.env.ctx();
+                let idx = self.active_tab_component_idx();
+                let effects = if let Some(idx) = idx {
+                    let mut ctx = make_ctx(&self.env, &mut self.docs);
                     self.components[idx].handle_action(Action::OpenFileSearch, &mut ctx)
                 } else {
                     vec![Effect::Emit(Event::FileSearchOpened {
@@ -602,9 +597,11 @@ impl Shell {
 
             Action::OpenMessages => {
                 self.process_effects(vec![Effect::Emit(Event::OpenMessages)]);
-                if let Some(idx) = self.components.iter().position(|c| {
-                    c.tab().map_or(false, |t| t.label == "*Messages*")
-                }) {
+                if let Some(idx) = self
+                    .components
+                    .iter()
+                    .position(|c| c.tab().map_or(false, |t| t.label == "*Messages*"))
+                {
                     self.activate_tab_for_component(idx);
                     self.set_focus(PanelSlot::Main);
                 }
@@ -638,32 +635,20 @@ impl Shell {
             self.touch_active_buffer();
         }
         self.pending_flush = true;
-        let mut ctx = self.env.ctx();
 
-        match self.focus {
-            PanelSlot::Main => {
-                if let Some(idx) = self.active_tab_component_idx() {
-                    self.components[idx].handle_action(action, &mut ctx)
-                } else {
-                    vec![]
-                }
-            }
-            PanelSlot::StatusBar => {
-                if let Some(idx) = self.status_bar_component_idx() {
-                    self.components[idx].handle_action(action, &mut ctx)
-                } else if let Some(idx) = self.active_tab_component_idx() {
-                    self.components[idx].handle_action(action, &mut ctx)
-                } else {
-                    vec![]
-                }
-            }
-            PanelSlot::Side => {
-                if let Some(idx) = self.side_component_idx() {
-                    self.components[idx].handle_action(action, &mut ctx)
-                } else {
-                    vec![]
-                }
-            }
+        let idx = match self.focus {
+            PanelSlot::Main => self.active_tab_component_idx(),
+            PanelSlot::StatusBar => self
+                .status_bar_component_idx()
+                .or_else(|| self.active_tab_component_idx()),
+            PanelSlot::Side => self.side_component_idx(),
+        };
+
+        if let Some(idx) = idx {
+            let mut ctx = make_ctx(&self.env, &mut self.docs);
+            self.components[idx].handle_action(action, &mut ctx)
+        } else {
+            vec![]
         }
     }
 
@@ -692,16 +677,22 @@ impl Shell {
                         self.pre_preview_tab = None;
                     }
                     let prev_comp = self.active_tab_component_idx();
+                    let prev_active_tab = self.active_tab;
                     let mut more_effects = Vec::new();
-                    let mut ctx = self.env.ctx();
+                    let mut ctx = make_ctx(&self.env, &mut self.docs);
                     for comp in &mut self.components {
                         more_effects.extend(comp.handle_event(&event, &mut ctx));
                     }
                     self.process_effects(more_effects);
-                    // Stabilise: if the tab set changed, keep the same component active
-                    if let Some(ci) = prev_comp {
-                        if let Some(ti) = self.tabbed_index_of(ci) {
-                            self.active_tab = ti;
+                    // Stabilise: if a tab was removed, correct the active_tab
+                    // index so it still points at the same component.  But if
+                    // active_tab was deliberately changed (e.g. by Spawn inside
+                    // OpenDefinition), don't revert it.
+                    if self.active_tab == prev_active_tab {
+                        if let Some(ci) = prev_comp {
+                            if let Some(ti) = self.tabbed_index_of(ci) {
+                                self.active_tab = ti;
+                            }
                         }
                     }
                     // Post-broadcast hook for preview tab management
@@ -930,12 +921,15 @@ impl Shell {
     // --- Session helpers ---
 
     pub fn save_all_sessions(&mut self) {
-        let mut ctx = self.env.ctx();
-        for i in 0..self.components.len() {
-            self.components[i].handle_action(Action::SaveSession, &mut ctx);
-        }
+        let kv = {
+            let mut ctx = make_ctx(&self.env, &mut self.docs);
+            for i in 0..self.components.len() {
+                self.components[i].handle_action(Action::SaveSession, &mut ctx);
+            }
+            std::mem::take(&mut ctx.kv)
+        };
         if let Some(conn) = self.env.db.as_ref() {
-            crate::session::save_kv(conn, &self.env.root, &ctx.kv);
+            crate::session::save_kv(conn, &self.env.root, &kv);
         }
     }
 
@@ -950,7 +944,7 @@ impl Shell {
             if self.components[i].tab().is_some() {
                 continue;
             }
-            let mut ctx = self.env.ctx();
+            let mut ctx = make_ctx(&self.env, &mut self.docs);
             ctx.kv = kv.clone();
             self.components[i].handle_action(Action::RestoreSession, &mut ctx);
         }
@@ -991,7 +985,7 @@ impl Shell {
             PanelSlot::Side => self.side_component_idx(),
         };
         if let Some(idx) = old_idx {
-            let mut ctx = self.env.ctx();
+            let mut ctx = make_ctx(&self.env, &mut self.docs);
             effects.extend(self.components[idx].handle_action(Action::FocusLost, &mut ctx));
         }
 
@@ -1003,7 +997,7 @@ impl Shell {
             PanelSlot::Side => self.side_component_idx(),
         };
         if let Some(idx) = new_idx {
-            let mut ctx = self.env.ctx();
+            let mut ctx = make_ctx(&self.env, &mut self.docs);
             effects.extend(self.components[idx].handle_action(Action::FocusGained, &mut ctx));
         }
 
@@ -1040,11 +1034,7 @@ impl Shell {
             }
         }
         // Redraw periodically while LSP spinner is active.
-        if self
-            .lsp_status
-            .as_ref()
-            .map_or(false, |s| s.busy)
-        {
+        if self.lsp_status.as_ref().map_or(false, |s| s.busy) {
             return Some(Duration::from_millis(80));
         }
         None
@@ -1069,7 +1059,7 @@ impl Shell {
 
     pub fn flush_to_db(&mut self) {
         for i in 0..self.components.len() {
-            let mut ctx = self.env.ctx();
+            let mut ctx = make_ctx(&self.env, &mut self.docs);
             self.components[i].handle_action(Action::Flush, &mut ctx);
         }
         self.pending_flush = false;
@@ -1095,7 +1085,6 @@ impl Shell {
         self.process_effects(vec![Effect::Emit(event)]);
     }
 
-
     pub fn run_action(&mut self, action: Action) -> InputResult {
         self.execute_action(action)
     }
@@ -1103,7 +1092,7 @@ impl Shell {
     pub fn tick(&mut self) {
         let mut all_effects = Vec::new();
         for i in 0..self.components.len() {
-            let mut ctx = self.env.ctx();
+            let mut ctx = make_ctx(&self.env, &mut self.docs);
             let effects = self.components[i].handle_action(Action::Tick, &mut ctx);
             all_effects.extend(effects);
         }

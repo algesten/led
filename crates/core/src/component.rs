@@ -6,7 +6,7 @@ use ratatui::style::{Color, Modifier, Style};
 use rusqlite::Connection;
 
 use crate::{
-    Action, Clipboard, Effect, Event, FileStatusStore, LspStatus, PanelClaim, PanelSlot,
+    Action, Clipboard, DocStore, Effect, Event, FileStatusStore, LspStatus, PanelClaim, PanelSlot,
     TabDescriptor, Waker,
 };
 
@@ -21,6 +21,7 @@ pub struct Context<'a> {
     pub clipboard: &'a dyn Clipboard,
     pub waker: Option<Waker>,
     pub kv: HashMap<String, String>,
+    pub docs: &'a mut DocStore,
 }
 
 pub struct DrawContext<'a> {
@@ -30,6 +31,7 @@ pub struct DrawContext<'a> {
     pub slot: PanelSlot,
     pub file_statuses: &'a FileStatusStore,
     pub lsp_status: Option<&'a LspStatus>,
+    pub docs: &'a DocStore,
 }
 
 // ---------------------------------------------------------------------------

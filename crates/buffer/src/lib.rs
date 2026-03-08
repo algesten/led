@@ -9,7 +9,7 @@ mod wrap;
 
 pub use component::BufferFactory;
 
-use led_core::{PanelClaim, PanelSlot};
+use led_core::{DocStore, PanelClaim, PanelSlot, TextDoc};
 use std::fs::File;
 use std::hash::Hasher;
 use std::io::{self, BufReader};
@@ -84,7 +84,7 @@ pub fn notify_dir() -> Option<PathBuf> {
 }
 
 pub struct Buffer {
-    pub(crate) rope: Rope,
+    pub local_doc: Option<TextDoc>,
     pub cursor_row: usize,
     pub cursor_col: usize,
     pub path: Option<PathBuf>,
@@ -133,10 +133,10 @@ impl Buffer {
     // --- Constructors ---
 
     pub fn empty() -> Self {
-        let rope = Rope::from_str("");
-        let base_content_hash = Self::hash_rope(&rope);
+        let doc = TextDoc::new();
+        let base_content_hash = Self::hash_rope(doc.rope());
         Self {
-            rope,
+            local_doc: Some(doc),
             cursor_row: 0,
             cursor_col: 0,
             path: None,
@@ -198,11 +198,15 @@ impl Buffer {
         }
     }
 
-    pub fn from_file(path: &str) -> io::Result<Self> {
-        Self::from_file_with_waker(path, None)
+    pub fn from_file(path: &str, docs: &mut DocStore) -> io::Result<Self> {
+        Self::from_file_with_waker(path, None, docs)
     }
 
-    pub fn from_file_with_waker(path: &str, waker: Option<Waker>) -> io::Result<Self> {
+    pub fn from_file_with_waker(
+        path: &str,
+        waker: Option<Waker>,
+        docs: &mut DocStore,
+    ) -> io::Result<Self> {
         // Reject binary files by checking for null bytes in the first 8KB
         {
             let mut probe = File::open(path)?;
@@ -213,19 +217,22 @@ impl Buffer {
             }
         }
         let file = File::open(path)?;
-        let rope = Rope::from_reader(BufReader::new(file))?;
+        let doc = TextDoc::from_reader(BufReader::new(file))?;
         let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| PathBuf::from(path));
-        let base_content_hash = Self::hash_rope(&rope);
+        let base_content_hash = Self::hash_rope(doc.rope());
         let changed = Arc::new(AtomicBool::new(false));
         let _watcher = Self::create_watcher(&canonical, &changed, waker.as_ref());
         let pending_syntax: Arc<Mutex<Option<syntax::SyntaxState>>> = Arc::new(Mutex::new(None));
         let syntax_ready = Arc::new(AtomicBool::new(false));
         let syntax_cancel = Arc::new(AtomicBool::new(false));
 
+        // Clone rope for background syntax parsing before inserting doc into store
+        let rope_for_syntax = doc.rope().clone();
+        docs.insert(canonical.clone(), doc);
+
         // Parse syntax on a background thread
         {
             let path = canonical.clone();
-            let rope = rope.clone();
             let ready = syntax_ready.clone();
             let pending = pending_syntax.clone();
             let cancel = syntax_cancel.clone();
@@ -234,7 +241,9 @@ impl Buffer {
                 if cancel.load(std::sync::atomic::Ordering::Acquire) {
                     return;
                 }
-                if let Some(state) = syntax::SyntaxState::from_path_and_rope(&path, &rope) {
+                if let Some(state) =
+                    syntax::SyntaxState::from_path_and_rope(&path, &rope_for_syntax)
+                {
                     if cancel.load(std::sync::atomic::Ordering::Acquire) {
                         return;
                     }
@@ -248,7 +257,7 @@ impl Buffer {
         }
 
         Ok(Self {
-            rope,
+            local_doc: None,
             cursor_row: 0,
             cursor_col: 0,
             path: Some(canonical),
@@ -338,41 +347,18 @@ impl Buffer {
             .unwrap_or("[scratch]")
     }
 
-    pub fn line_count(&self) -> usize {
-        self.rope.len_lines()
-    }
-
-    pub fn line(&self, idx: usize) -> String {
-        let rope_line = self.rope.line(idx);
-        let s = rope_line.to_string();
-        s.trim_end_matches('\n').to_string()
-    }
-
-    pub fn line_len(&self, idx: usize) -> usize {
-        let rope_line = self.rope.line(idx);
-        let len = rope_line.len_chars();
-        if len > 0 && rope_line.char(len - 1) == '\n' {
-            len - 1
-        } else {
-            len
-        }
-    }
-
-    pub(crate) fn char_idx(&self, row: usize, col: usize) -> usize {
-        self.rope.line_to_char(row) + col
-    }
-
     // --- Syntax ---
 
     /// Notify syntax state of an insert. Call BEFORE mutating the rope.
     /// Returns an opaque edit to pass to `apply_syntax_edit` after mutation.
     pub(crate) fn syntax_edit_insert(
         &self,
+        doc: &TextDoc,
         char_idx: usize,
         text: &str,
     ) -> Option<tree_sitter::InputEdit> {
         if self.syntax.is_some() {
-            Some(syntax::edit_for_insert(&self.rope, char_idx, text))
+            Some(syntax::edit_for_insert(doc.rope(), char_idx, text))
         } else {
             None
         }
@@ -381,42 +367,47 @@ impl Buffer {
     /// Notify syntax state of a remove. Call BEFORE mutating the rope.
     pub(crate) fn syntax_edit_remove(
         &self,
+        doc: &TextDoc,
         char_start: usize,
         char_end: usize,
     ) -> Option<tree_sitter::InputEdit> {
         if self.syntax.is_some() {
-            Some(syntax::edit_for_remove(&self.rope, char_start, char_end))
+            Some(syntax::edit_for_remove(doc.rope(), char_start, char_end))
         } else {
             None
         }
     }
 
     /// Apply a previously computed edit to the syntax tree. Call AFTER mutating the rope.
-    pub(crate) fn apply_syntax_edit(&mut self, edit: Option<tree_sitter::InputEdit>) {
+    pub(crate) fn apply_syntax_edit(
+        &mut self,
+        doc: &TextDoc,
+        edit: Option<tree_sitter::InputEdit>,
+    ) {
         if let (Some(edit), Some(s)) = (edit, &mut self.syntax) {
-            s.apply_edit(&edit, &self.rope);
+            s.apply_edit(&edit, doc.rope());
         }
     }
 
     /// Compute a syntax edit for an EditOp. Call BEFORE applying the op.
-    pub(crate) fn syntax_edit_for_op(&self, op: &EditOp) -> Option<tree_sitter::InputEdit> {
+    pub(crate) fn syntax_edit_for_op(
+        &self,
+        doc: &TextDoc,
+        op: &EditOp,
+    ) -> Option<tree_sitter::InputEdit> {
         match op {
-            EditOp::Insert { char_idx, text } => self.syntax_edit_insert(*char_idx, text),
+            EditOp::Insert { char_idx, text } => self.syntax_edit_insert(doc, *char_idx, text),
             EditOp::Remove { char_idx, text } => {
                 let end = *char_idx + text.chars().count();
-                self.syntax_edit_remove(*char_idx, end)
+                self.syntax_edit_remove(doc, *char_idx, end)
             }
         }
     }
 
     // --- Helpers ---
 
-    pub(crate) fn current_line_len(&self) -> usize {
-        self.line_len(self.cursor_row)
-    }
-
-    pub(crate) fn clamp_cursor_col(&mut self) {
-        let len = self.current_line_len();
+    pub(crate) fn clamp_cursor_col(&mut self, doc: &TextDoc) {
+        let len = doc.line_len(self.cursor_row);
         if self.cursor_col > len {
             self.cursor_col = len;
         }
@@ -436,12 +427,21 @@ impl Buffer {
         self.base_content_hash
     }
 
-    pub fn content_hash(&self) -> u64 {
-        Self::hash_rope(&self.rope)
+    /// Resolve the doc for this buffer: from DocStore for file-backed, from local_doc otherwise.
+    pub(crate) fn take_doc(&mut self, docs: &mut DocStore) -> TextDoc {
+        if let Some(ref path) = self.path {
+            docs.remove(path).expect("doc not in store")
+        } else {
+            self.local_doc.take().expect("no local doc")
+        }
     }
 
-    pub fn append_text(&mut self, text: &str) {
-        let pos = self.rope.len_chars();
-        self.rope.insert(pos, text);
+    /// Put the doc back after use.
+    pub(crate) fn put_doc(&mut self, docs: &mut DocStore, doc: TextDoc) {
+        if let Some(ref path) = self.path {
+            docs.insert(path.clone(), doc);
+        } else {
+            self.local_doc = Some(doc);
+        }
     }
 }

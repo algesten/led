@@ -1,11 +1,11 @@
 use std::time::Instant;
 
-use led_core::Context;
+use led_core::{Context, TextDoc};
 
 use crate::{Buffer, EditKind, EditOp, GROUP_TIMEOUT_MS, PendingGroup, UndoEntry};
 
 impl Buffer {
-    pub fn undo(&mut self) {
+    pub fn undo(&mut self, doc: &mut TextDoc) {
         self.flush_pending();
 
         if self.undo_cursor.is_none() {
@@ -20,9 +20,9 @@ impl Buffer {
         let entry = self.undo_history[pos - 1].clone();
         let inverse = self.invert_entry(&entry);
 
-        let se = self.syntax_edit_for_op(&inverse.op);
-        self.apply_op(&inverse.op);
-        self.apply_syntax_edit(se);
+        let se = self.syntax_edit_for_op(&*doc, &inverse.op);
+        self.apply_op(doc, &inverse.op);
+        self.apply_syntax_edit(&*doc, se);
         self.cursor_row = inverse.cursor_after.0;
         self.cursor_col = inverse.cursor_after.1;
         self.distance_from_save -= entry.direction;
@@ -51,14 +51,14 @@ impl Buffer {
         }
     }
 
-    pub(crate) fn apply_op(&mut self, op: &EditOp) {
+    pub(crate) fn apply_op(&mut self, doc: &mut TextDoc, op: &EditOp) {
         match op {
             EditOp::Insert { char_idx, text } => {
-                self.rope.insert(*char_idx, text);
+                doc.insert(*char_idx, text);
             }
             EditOp::Remove { char_idx, text } => {
                 let end = *char_idx + text.chars().count();
-                self.rope.remove(*char_idx..end);
+                doc.remove(*char_idx, end);
             }
         }
     }
@@ -228,10 +228,10 @@ impl Buffer {
         self.touch_notify();
     }
 
-    pub(crate) fn mark_externally_saved(&mut self) {
+    pub(crate) fn mark_externally_saved(&mut self, doc: &TextDoc) {
         self.dirty = false;
         self.distance_from_save = 0;
-        self.base_content_hash = self.content_hash();
+        self.base_content_hash = Self::hash_rope(doc.rope());
         self.undo_history.clear();
         self.undo_cursor = None;
         self.save_history_len = 0;
@@ -240,12 +240,17 @@ impl Buffer {
         self.last_seen_seq = 0;
     }
 
-    pub(crate) fn apply_remote_entries(&mut self, entries: Vec<UndoEntry>, new_last_seen_seq: i64) {
+    pub(crate) fn apply_remote_entries(
+        &mut self,
+        doc: &mut TextDoc,
+        entries: Vec<UndoEntry>,
+        new_last_seen_seq: i64,
+    ) {
         self.flush_pending();
         for entry in &entries {
-            let se = self.syntax_edit_for_op(&entry.op);
-            self.apply_op(&entry.op);
-            self.apply_syntax_edit(se);
+            let se = self.syntax_edit_for_op(&*doc, &entry.op);
+            self.apply_op(doc, &entry.op);
+            self.apply_syntax_edit(&*doc, se);
             self.distance_from_save += entry.direction;
         }
         self.undo_history.extend(entries);
@@ -260,14 +265,15 @@ impl Buffer {
 
     pub fn restore_undo(
         &mut self,
+        doc: &mut TextDoc,
         entries: Vec<UndoEntry>,
         undo_cursor: Option<usize>,
         distance_from_save: i32,
     ) {
         for entry in &entries {
-            let se = self.syntax_edit_for_op(&entry.op);
-            self.apply_op(&entry.op);
-            self.apply_syntax_edit(se);
+            let se = self.syntax_edit_for_op(&*doc, &entry.op);
+            self.apply_op(doc, &entry.op);
+            self.apply_syntax_edit(&*doc, se);
         }
         self.undo_history = entries;
         self.undo_cursor = undo_cursor;

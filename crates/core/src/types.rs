@@ -237,6 +237,10 @@ pub enum Event {
     JumpForward,
     /// Open the *Messages* buffer
     OpenMessages,
+    /// Signal that a buffer's content changed (LspManager reads changes from DocStore)
+    BufferChanged {
+        path: PathBuf,
+    },
 }
 
 pub enum Effect {

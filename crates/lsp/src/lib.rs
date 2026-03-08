@@ -7,15 +7,17 @@ use led_core::lsp_types::{
     DiagnosticSeverity as EditorSeverity, EditorCodeAction, EditorDiagnostic, EditorInlayHint,
     EditorPosition, EditorRange, EditorTextEdit,
 };
-use led_core::{Action, Component, Context, DrawContext, Effect, Event, LspStatus, PanelClaim, Waker};
+use led_core::{
+    Action, Component, Context, DrawContext, Effect, Event, LspStatus, PanelClaim, Waker,
+};
 
 use lsp_types::{
     CodeActionOrCommand, CodeActionParams, CodeActionResponse, DocumentFormattingParams,
-    FormattingOptions, GotoDefinitionParams, GotoDefinitionResponse, InlayHint, InlayHintLabel,
-    InlayHintParams, InitializeParams, InitializeResult, InitializedParams, Location,
-    NumberOrString, Position, PublishDiagnosticsParams, Range, RenameParams,
-    ServerCapabilities, TextDocumentIdentifier, TextDocumentItem, TextDocumentPositionParams,
-    TextEdit, Uri, WorkspaceEdit,
+    FormattingOptions, GotoDefinitionParams, GotoDefinitionResponse, InitializeParams,
+    InitializeResult, InitializedParams, InlayHint, InlayHintLabel, InlayHintParams, Location,
+    NumberOrString, Position, PublishDiagnosticsParams, Range, RenameParams, ServerCapabilities,
+    TextDocumentIdentifier, TextDocumentItem, TextDocumentPositionParams, TextEdit, Uri,
+    WorkspaceEdit,
 };
 
 use ratatui::Frame;
@@ -144,9 +146,7 @@ impl LspRegistry {
     }
 
     fn config_for_extension(&self, ext: &str) -> Option<&ServerConfig> {
-        self.configs
-            .iter()
-            .find(|c| c.extensions.contains(&ext))
+        self.configs.iter().find(|c| c.extensions.contains(&ext))
     }
 }
 
@@ -436,17 +436,15 @@ impl LanguageServer {
                     }),
                     code_action: Some(lsp_types::CodeActionClientCapabilities {
                         dynamic_registration: Some(false),
-                        code_action_literal_support: Some(
-                            lsp_types::CodeActionLiteralSupport {
-                                code_action_kind: lsp_types::CodeActionKindLiteralSupport {
-                                    value_set: vec![
-                                        lsp_types::CodeActionKind::QUICKFIX.as_str().to_string(),
-                                        lsp_types::CodeActionKind::REFACTOR.as_str().to_string(),
-                                        lsp_types::CodeActionKind::SOURCE.as_str().to_string(),
-                                    ],
-                                },
+                        code_action_literal_support: Some(lsp_types::CodeActionLiteralSupport {
+                            code_action_kind: lsp_types::CodeActionKindLiteralSupport {
+                                value_set: vec![
+                                    lsp_types::CodeActionKind::QUICKFIX.as_str().to_string(),
+                                    lsp_types::CodeActionKind::REFACTOR.as_str().to_string(),
+                                    lsp_types::CodeActionKind::SOURCE.as_str().to_string(),
+                                ],
                             },
-                        ),
+                        }),
                         resolve_support: Some(lsp_types::CodeActionCapabilityResolveSupport {
                             properties: vec!["edit".to_string()],
                         }),
@@ -549,16 +547,26 @@ impl LanguageServer {
             handlers.insert(req_id, tx);
         }
 
-        self.outbound_tx.send(msg.to_string()).map_err(|_| LspError {
-            message: "Server connection closed".to_string(),
-        })?;
+        self.outbound_tx
+            .send(msg.to_string())
+            .map_err(|_| LspError {
+                message: "Server connection closed".to_string(),
+            })?;
 
         let result = rx.await.map_err(|_| LspError {
             message: "Response channel closed".to_string(),
         })??;
 
-        serde_json::from_value(result).map_err(|e| LspError {
-            message: format!("Failed to deserialize response: {}", e),
+        serde_json::from_value(result.clone()).map_err(|e| {
+            log::error!(
+                "Failed to deserialize LSP response for {}: {} -- raw: {}",
+                method,
+                e,
+                &result.to_string()[..result.to_string().len().min(500)],
+            );
+            LspError {
+                message: format!("Failed to deserialize response: {}", e),
+            }
         })
     }
 
@@ -595,11 +603,7 @@ impl LanguageServer {
         // Wait for child to exit
         if let Some(mut child) = self.child.lock().unwrap().take() {
             tokio::spawn(async move {
-                let _ = tokio::time::timeout(
-                    std::time::Duration::from_secs(5),
-                    child.wait(),
-                )
-                .await;
+                let _ = tokio::time::timeout(std::time::Duration::from_secs(5), child.wait()).await;
                 let _ = child.kill().await;
             });
         }
@@ -687,8 +691,10 @@ fn workspace_edit_to_file_edits(edit: &WorkspaceEdit) -> Vec<(PathBuf, Vec<Edito
         for (uri, edits) in changes {
             if let Some(path) = path_from_uri(uri) {
                 let lines = read_file_lines(&path);
-                let editor_edits: Vec<EditorTextEdit> =
-                    edits.iter().map(|e| lsp_edit_to_editor(e, &lines)).collect();
+                let editor_edits: Vec<EditorTextEdit> = edits
+                    .iter()
+                    .map(|e| lsp_edit_to_editor(e, &lines))
+                    .collect();
                 result.entry(path).or_default().extend(editor_edits);
             }
         }
@@ -705,9 +711,7 @@ fn workspace_edit_to_file_edits(edit: &WorkspaceEdit) -> Vec<(PathBuf, Vec<Edito
                             .edits
                             .iter()
                             .filter_map(|e| match e {
-                                lsp_types::OneOf::Left(te) => {
-                                    Some(lsp_edit_to_editor(te, &lines))
-                                }
+                                lsp_types::OneOf::Left(te) => Some(lsp_edit_to_editor(te, &lines)),
                                 lsp_types::OneOf::Right(ate) => {
                                     Some(lsp_edit_to_editor(&ate.text_edit, &lines))
                                 }
@@ -773,10 +777,7 @@ fn apply_edits_to_disk(path: &Path, edits: &[EditorTextEdit]) {
 
         // Build the new content
         let prefix = if start_row < lines.len() {
-            lines[start_row]
-                .chars()
-                .take(start_col)
-                .collect::<String>()
+            lines[start_row].chars().take(start_col).collect::<String>()
         } else {
             String::new()
         };
@@ -926,10 +927,7 @@ impl LspManager {
                 continue;
             };
 
-            log::info!(
-                "LSP file watcher: {} patterns registered",
-                glob_set.len()
-            );
+            log::info!("LSP file watcher: {} patterns registered", glob_set.len());
 
             self.file_watcher_globs = Some(glob_set);
             self.start_file_watcher();
@@ -968,7 +966,11 @@ impl LspManager {
         match watcher {
             Ok(mut w) => {
                 if let Err(e) = w.watch(&root, RecursiveMode::Recursive) {
-                    log::info!("LSP file watcher: failed to watch {}: {}", root.display(), e);
+                    log::info!(
+                        "LSP file watcher: failed to watch {}: {}",
+                        root.display(),
+                        e
+                    );
                     return;
                 }
                 log::info!("LSP file watcher: watching {}", root.display());
@@ -1007,10 +1009,7 @@ impl LspManager {
     // -- Server lifecycle ---------------------------------------------------
 
     fn ensure_server_for_path(&mut self, path: &Path) {
-        let ext = path
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("");
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
 
         let Some(config) = self.registry.config_for_extension(ext).cloned() else {
             return;
@@ -1053,9 +1052,7 @@ impl LspManager {
                     }
                 }
                 Err(e) => {
-                    let _ = event_tx.send(LspManagerEvent::ServerError {
-                        error: e.message,
-                    });
+                    let _ = event_tx.send(LspManagerEvent::ServerError { error: e.message });
                     if let Some(ref w) = waker {
                         w();
                     }
@@ -1072,13 +1069,16 @@ impl LspManager {
 
     // -- Document sync ------------------------------------------------------
 
-    fn send_did_open(&mut self, path: &Path) {
+    fn send_did_open(&mut self, path: &Path, docs: &led_core::DocStore) {
         if self.opened_docs.contains(path) {
             return;
         }
         let Some(server) = self.server_for_path(path) else {
             // Server not ready yet — remember so we can open when it starts
-            log::info!("LSP didOpen deferred (server not ready): {}", path.display());
+            log::info!(
+                "LSP didOpen deferred (server not ready): {}",
+                path.display()
+            );
             self.pending_opens.insert(path.to_path_buf());
             return;
         };
@@ -1087,7 +1087,11 @@ impl LspManager {
         };
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
         let lang_id = language_id_for_extension(ext);
-        let text = std::fs::read_to_string(path).unwrap_or_default();
+        // Read content from DocStore (includes unsaved changes), fall back to disk
+        let text = docs
+            .content(path)
+            .unwrap_or_else(|| std::fs::read_to_string(path).unwrap_or_default());
+        let version = docs.version(path).unwrap_or(0);
 
         server.notify(
             "textDocument/didOpen",
@@ -1095,12 +1099,49 @@ impl LspManager {
                 text_document: TextDocumentItem {
                     uri,
                     language_id: lang_id.to_string(),
-                    version: 0,
+                    version,
                     text,
                 },
             },
         );
         self.opened_docs.insert(path.to_path_buf());
+    }
+
+    fn send_did_change(&self, path: &Path, changes: &[EditorTextEdit], version: i32) {
+        if !self.opened_docs.contains(path) {
+            return;
+        }
+        let Some(server) = self.server_for_path(path) else {
+            return;
+        };
+        let Some(uri) = uri_from_path(path) else {
+            return;
+        };
+        let content_changes: Vec<lsp_types::TextDocumentContentChangeEvent> = changes
+            .iter()
+            .map(|edit| lsp_types::TextDocumentContentChangeEvent {
+                range: Some(Range {
+                    start: Position {
+                        line: edit.range.start.row as u32,
+                        character: edit.range.start.col as u32,
+                    },
+                    end: Position {
+                        line: edit.range.end.row as u32,
+                        character: edit.range.end.col as u32,
+                    },
+                }),
+                range_length: None,
+                text: edit.new_text.clone(),
+            })
+            .collect();
+
+        server.notify(
+            "textDocument/didChange",
+            &lsp_types::DidChangeTextDocumentParams {
+                text_document: lsp_types::VersionedTextDocumentIdentifier { uri, version },
+                content_changes,
+            },
+        );
     }
 
     fn send_did_save(&self, path: &Path) {
@@ -1167,7 +1208,11 @@ impl LspManager {
 
             let locations = match result {
                 Ok(Some(resp)) => definition_response_to_locations(resp),
-                _ => vec![],
+                Ok(None) => vec![],
+                Err(e) => {
+                    log::error!("LSP goto definition failed: {}", e.message);
+                    vec![]
+                }
             };
 
             let _ = event_tx.send(LspManagerEvent::RequestResult(
@@ -1229,9 +1274,10 @@ impl LspManager {
                 _ => vec![],
             };
 
-            let _ = event_tx.send(LspManagerEvent::RequestResult(
-                RequestResult::InlayHints { path, hints },
-            ));
+            let _ = event_tx.send(LspManagerEvent::RequestResult(RequestResult::InlayHints {
+                path,
+                hints,
+            }));
             if let Some(ref w) = waker {
                 w();
             }
@@ -1266,20 +1312,16 @@ impl LspManager {
             match result {
                 Ok(Some(edit)) => {
                     let file_edits = workspace_edit_to_file_edits(&edit);
-                    let _ = event_tx.send(LspManagerEvent::RequestResult(
-                        RequestResult::Rename {
-                            primary_path: path,
-                            file_edits,
-                        },
-                    ));
+                    let _ = event_tx.send(LspManagerEvent::RequestResult(RequestResult::Rename {
+                        primary_path: path,
+                        file_edits,
+                    }));
                 }
                 Ok(None) => {}
                 Err(e) => {
-                    let _ = event_tx.send(LspManagerEvent::RequestResult(
-                        RequestResult::Error {
-                            message: e.message,
-                        },
-                    ));
+                    let _ = event_tx.send(LspManagerEvent::RequestResult(RequestResult::Error {
+                        message: e.message,
+                    }));
                 }
             }
             if let Some(ref w) = waker {
@@ -1340,21 +1382,18 @@ impl LspManager {
                         })
                         .collect();
 
-                    let _ = event_tx.send(LspManagerEvent::RequestResult(
-                        RequestResult::CodeActions {
+                    let _ =
+                        event_tx.send(LspManagerEvent::RequestResult(RequestResult::CodeActions {
                             path,
                             actions: editor_actions,
                             raw: actions,
-                        },
-                    ));
+                        }));
                 }
                 Ok(None) => {}
                 Err(e) => {
-                    let _ = event_tx.send(LspManagerEvent::RequestResult(
-                        RequestResult::Error {
-                            message: e.message,
-                        },
-                    ));
+                    let _ = event_tx.send(LspManagerEvent::RequestResult(RequestResult::Error {
+                        message: e.message,
+                    }));
                 }
             }
             if let Some(ref w) = waker {
@@ -1392,9 +1431,7 @@ impl LspManager {
                             Ok(resolved) => ca = resolved,
                             Err(e) => {
                                 let _ = event_tx.send(LspManagerEvent::RequestResult(
-                                    RequestResult::Error {
-                                        message: e.message,
-                                    },
+                                    RequestResult::Error { message: e.message },
                                 ));
                                 if let Some(ref w) = waker {
                                     w();
@@ -1452,22 +1489,20 @@ impl LspManager {
 
             match result {
                 Ok(Some(edits)) => {
-                    let editor_edits: Vec<EditorTextEdit> =
-                        edits.iter().map(|e| lsp_edit_to_editor(e, &lines)).collect();
-                    let _ = event_tx.send(LspManagerEvent::RequestResult(
-                        RequestResult::Format {
-                            path,
-                            edits: editor_edits,
-                        },
-                    ));
+                    let editor_edits: Vec<EditorTextEdit> = edits
+                        .iter()
+                        .map(|e| lsp_edit_to_editor(e, &lines))
+                        .collect();
+                    let _ = event_tx.send(LspManagerEvent::RequestResult(RequestResult::Format {
+                        path,
+                        edits: editor_edits,
+                    }));
                 }
                 Ok(None) => {}
                 Err(e) => {
-                    let _ = event_tx.send(LspManagerEvent::RequestResult(
-                        RequestResult::Error {
-                            message: e.message,
-                        },
-                    ));
+                    let _ = event_tx.send(LspManagerEvent::RequestResult(RequestResult::Error {
+                        message: e.message,
+                    }));
                 }
             }
             if let Some(ref w) = waker {
@@ -1483,8 +1518,7 @@ impl LspManager {
 
         match notif.method.as_str() {
             "textDocument/publishDiagnostics" => {
-                if let Ok(params) =
-                    serde_json::from_value::<PublishDiagnosticsParams>(notif.params)
+                if let Ok(params) = serde_json::from_value::<PublishDiagnosticsParams>(notif.params)
                 {
                     if let Some(path) = path_from_uri(&params.uri) {
                         log::info!(
@@ -1521,10 +1555,7 @@ impl LspManager {
                                 }
                             })
                             .collect();
-                        effects.push(Effect::Emit(Event::SetDiagnostics {
-                            path,
-                            diagnostics,
-                        }));
+                        effects.push(Effect::Emit(Event::SetDiagnostics { path, diagnostics }));
                     }
                 }
             }
@@ -1541,7 +1572,9 @@ impl LspManager {
                                 lsp_types::WorkDoneProgress::Begin(ref begin) => {
                                     log::info!(
                                         "LSP progress begin: token={} title={:?} message={:?}",
-                                        token, begin.title, begin.message
+                                        token,
+                                        begin.title,
+                                        begin.message
                                     );
                                     self.progress_tokens.insert(
                                         token,
@@ -1556,14 +1589,20 @@ impl LspManager {
                                 lsp_types::WorkDoneProgress::Report(ref report) => {
                                     log::info!(
                                         "LSP progress report: token={} message={:?} pct={:?}",
-                                        token, report.message, report.percentage
+                                        token,
+                                        report.message,
+                                        report.percentage
                                     );
                                     // Treat 100% as implicit End — rust-analyzer
                                     // delays the real End notification.
                                     if report.percentage == Some(100) {
-                                        log::info!("LSP progress 100%, auto-ending: token={}", token);
+                                        log::info!(
+                                            "LSP progress 100%, auto-ending: token={}",
+                                            token
+                                        );
                                         self.progress_tokens.remove(&token);
-                                    } else if let Some(state) = self.progress_tokens.get_mut(&token) {
+                                    } else if let Some(state) = self.progress_tokens.get_mut(&token)
+                                    {
                                         if report.message.is_some() {
                                             state.message = report.message.clone();
                                         }
@@ -1595,7 +1634,8 @@ impl LspManager {
                 let message = notif.params.get("message").and_then(|v| v.as_str());
                 log::info!(
                     "LSP serverStatus: quiescent={:?} message={:?}",
-                    quiescent, message
+                    quiescent,
+                    message
                 );
                 if let Some(q) = quiescent {
                     self.quiescent = q;
@@ -1696,12 +1736,8 @@ impl LspManager {
 
 fn definition_response_to_locations(resp: GotoDefinitionResponse) -> Vec<(PathBuf, usize, usize)> {
     match resp {
-        GotoDefinitionResponse::Scalar(loc) => {
-            location_to_tuple(&loc).into_iter().collect()
-        }
-        GotoDefinitionResponse::Array(locs) => {
-            locs.iter().filter_map(location_to_tuple).collect()
-        }
+        GotoDefinitionResponse::Scalar(loc) => location_to_tuple(&loc).into_iter().collect(),
+        GotoDefinitionResponse::Array(locs) => locs.iter().filter_map(location_to_tuple).collect(),
         GotoDefinitionResponse::Link(links) => links
             .iter()
             .filter_map(|link| {
@@ -1730,7 +1766,7 @@ impl Component for LspManager {
         &[]
     }
 
-    fn handle_action(&mut self, action: Action, _ctx: &mut Context) -> Vec<Effect> {
+    fn handle_action(&mut self, action: Action, ctx: &mut Context) -> Vec<Effect> {
         match action {
             Action::Tick => {
                 let mut effects = Vec::new();
@@ -1756,7 +1792,7 @@ impl Component for LspManager {
                             for path in pending {
                                 if self.server_for_path(&path).is_some() {
                                     self.pending_opens.remove(&path);
-                                    self.send_did_open(&path);
+                                    self.send_did_open(&path, &*ctx.docs);
                                 }
                             }
                         }
@@ -1781,11 +1817,18 @@ impl Component for LspManager {
         }
     }
 
-    fn handle_event(&mut self, event: &Event, _ctx: &mut Context) -> Vec<Effect> {
+    fn handle_event(&mut self, event: &Event, ctx: &mut Context) -> Vec<Effect> {
         match event {
             Event::TabActivated { path: Some(path) } => {
                 self.ensure_server_for_path(path);
-                self.send_did_open(path);
+                self.send_did_open(path, &*ctx.docs);
+            }
+            Event::BufferChanged { path } => {
+                let changes = ctx.docs.drain_changes(path);
+                if !changes.is_empty() {
+                    let version = ctx.docs.version(path).unwrap_or(0);
+                    self.send_did_change(path, &changes, version);
+                }
             }
             Event::FileSaved(path) => {
                 self.send_did_save(path);
@@ -1818,13 +1861,7 @@ impl Component for LspManager {
                 end_row,
                 end_col,
             } => {
-                self.spawn_code_action(
-                    path.clone(),
-                    *start_row,
-                    *start_col,
-                    *end_row,
-                    *end_col,
-                );
+                self.spawn_code_action(path.clone(), *start_row, *start_col, *end_row, *end_col);
             }
             Event::LspCodeActionResolve { path, index } => {
                 self.spawn_code_action_resolve(path.clone(), *index);

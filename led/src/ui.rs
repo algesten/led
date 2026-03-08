@@ -27,6 +27,7 @@ pub fn render(shell: &mut Shell, frame: &mut Frame) {
         let main_area_inner = horizontal[1];
 
         // Draw side panel component
+        let side_idx = shell.side_component_idx();
         let focused = shell.focus == PanelSlot::Side;
         let theme = shell.theme.clone();
         let fs = shell.file_statuses.clone();
@@ -38,9 +39,10 @@ pub fn render(shell: &mut Shell, frame: &mut Frame) {
             slot: PanelSlot::Side,
             file_statuses: &fs,
             lsp_status: lsp.as_ref(),
+            docs: &shell.docs,
         };
-        if let Some(comp) = shell.side_component_mut() {
-            comp.draw(frame, browser_area, &mut ctx);
+        if let Some(idx) = side_idx {
+            shell.components[idx].draw(frame, browser_area, &mut ctx);
         }
         if focused {
             if let Some((x, y)) = ctx.cursor_pos {
@@ -152,6 +154,7 @@ fn render_main_content(shell: &mut Shell, frame: &mut Frame, area: Rect) {
     shell.set_viewport_height(text_area.height as usize);
 
     // Draw the active buffer component
+    let active_idx = shell.active_tab_component_idx();
     let focused = shell.focus == PanelSlot::Main;
     let theme = shell.theme.clone();
     let fs = shell.file_statuses.clone();
@@ -163,11 +166,11 @@ fn render_main_content(shell: &mut Shell, frame: &mut Frame, area: Rect) {
         slot: PanelSlot::Main,
         file_statuses: &fs,
         lsp_status: lsp.as_ref(),
+        docs: &shell.docs,
     };
-    shell
-        .active_buffer_mut()
-        .unwrap()
-        .draw(frame, text_area, &mut ctx);
+    if let Some(idx) = active_idx {
+        shell.components[idx].draw(frame, text_area, &mut ctx);
+    }
 
     // Place cursor (only when main panel focused)
     if focused {
@@ -190,10 +193,11 @@ fn render_status_bar(shell: &mut Shell, frame: &mut Frame, area: Rect) {
     }
 
     // Check if any component claims the status bar
+    let sb_idx = shell.status_bar_component_idx();
     let theme = shell.theme.clone();
     let fs = shell.file_statuses.clone();
     let lsp = shell.lsp_status.clone();
-    if let Some(comp) = shell.status_bar_component_mut() {
+    if let Some(idx) = sb_idx {
         let mut ctx = DrawContext {
             theme: &theme,
             focused: true,
@@ -201,8 +205,9 @@ fn render_status_bar(shell: &mut Shell, frame: &mut Frame, area: Rect) {
             slot: PanelSlot::StatusBar,
             file_statuses: &fs,
             lsp_status: lsp.as_ref(),
+            docs: &shell.docs,
         };
-        comp.draw(frame, area, &mut ctx);
+        shell.components[idx].draw(frame, area, &mut ctx);
         if let Some((x, y)) = ctx.cursor_pos {
             frame.set_cursor_position(Position::new(x, y));
         }

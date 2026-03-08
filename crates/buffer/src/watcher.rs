@@ -3,7 +3,7 @@ use std::io::{self, BufReader, BufWriter};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use led_core::{Context, Effect, Event, Waker};
+use led_core::{Context, Effect, Event, TextDoc, Waker};
 use notify::{RecursiveMode, Watcher};
 use ropey::Rope;
 
@@ -66,7 +66,7 @@ impl Buffer {
         self.dirty
     }
 
-    pub(crate) fn handle_tick(&mut self, ctx: &mut Context) -> Vec<Effect> {
+    pub(crate) fn handle_tick(&mut self, doc: &mut TextDoc, ctx: &mut Context) -> Vec<Effect> {
         // Adopt background syntax parsing result
         if self.syntax_ready.swap(false, Ordering::SeqCst) {
             if let Ok(mut guard) = self.pending_syntax.lock() {
@@ -79,7 +79,7 @@ impl Buffer {
         }
 
         // Check cross-instance sync first
-        self.check_cross_instance_sync(ctx);
+        self.check_cross_instance_sync(doc, ctx);
 
         // Check disk state for external modifications
         let Some(ref path) = self.path else {
@@ -126,14 +126,14 @@ impl Buffer {
             vec![]
         } else {
             // Buffer is clean — auto-reload
-            self.reload_from_disk();
+            self.reload_from_disk(doc);
             self.disk_modified = false;
             self.disk_deleted = false;
-            let max_line = self.line_count().saturating_sub(1);
+            let max_line = doc.line_count().saturating_sub(1);
             if self.cursor_row > max_line {
                 self.cursor_row = max_line;
             }
-            self.clamp_cursor_col();
+            self.clamp_cursor_col(&*doc);
             let mut effects = vec![Effect::SetMessage(format!(
                 "Reloaded {} (changed on disk).",
                 self.filename()
@@ -145,7 +145,7 @@ impl Buffer {
         }
     }
 
-    fn check_cross_instance_sync(&mut self, ctx: &mut Context) {
+    fn check_cross_instance_sync(&mut self, doc: &mut TextDoc, ctx: &mut Context) {
         if self.self_notified {
             self.self_notified = false;
             return;
@@ -190,8 +190,8 @@ impl Buffer {
 
         if rows.is_empty() {
             if self.dirty {
-                self.reload_from_disk();
-                self.mark_externally_saved();
+                self.reload_from_disk(doc);
+                self.mark_externally_saved(doc);
             }
             return;
         }
@@ -212,18 +212,18 @@ impl Buffer {
                 }
             }
             if !entries.is_empty() {
-                self.apply_remote_entries(entries, max_seq);
+                self.apply_remote_entries(doc, entries, max_seq);
             }
         } else {
             if self.base_content_hash != remote_content_hash {
-                self.reload_from_disk();
+                self.reload_from_disk(doc);
             }
             let new_chain = remote_chain_id.clone();
             let all_entries = Self::load_entries_after(conn, &root_str, &file_str, 0);
             let max_seq = all_entries.last().map(|(s, _)| *s).unwrap_or(0);
             let entries: Vec<UndoEntry> = all_entries.into_iter().map(|(_, e)| e).collect();
             if !entries.is_empty() {
-                self.apply_remote_entries(entries, max_seq);
+                self.apply_remote_entries(doc, entries, max_seq);
             } else {
                 self.last_seen_seq = max_seq;
             }
@@ -247,15 +247,15 @@ impl Buffer {
         self.self_notified = true;
     }
 
-    pub(crate) fn reload_from_disk(&mut self) {
+    pub(crate) fn reload_from_disk(&mut self, doc: &mut TextDoc) {
         let Some(ref path) = self.path else { return };
         let Ok(file) = File::open(path) else { return };
         let Ok(rope) = Rope::from_reader(BufReader::new(file)) else {
             return;
         };
-        self.rope = rope;
-        self.syntax = crate::syntax::SyntaxState::from_path_and_rope(path, &self.rope);
-        self.base_content_hash = Self::hash_rope(&self.rope);
+        doc.replace_rope(rope);
+        self.syntax = crate::syntax::SyntaxState::from_path_and_rope(path, doc.rope());
+        self.base_content_hash = Self::hash_rope(doc.rope());
         self.undo_history.clear();
         self.undo_cursor = None;
         self.pending_group = None;
@@ -265,24 +265,24 @@ impl Buffer {
         self.dirty = false;
     }
 
-    pub fn save(&mut self, ctx: &Context) -> io::Result<()> {
+    pub fn save(&mut self, doc: &mut TextDoc, ctx: &Context) -> io::Result<()> {
         self.flush_pending();
         let Some(path) = self.path.clone() else {
             return Err(io::Error::new(io::ErrorKind::Other, "No file path set"));
         };
-        let len = self.rope.len_chars();
-        if len == 0 || self.rope.char(len - 1) != '\n' {
-            let se = self.syntax_edit_insert(len, "\n");
-            self.rope.insert_char(len, '\n');
-            self.apply_syntax_edit(se);
+        let len = doc.len_chars();
+        if len == 0 || doc.char(len - 1) != '\n' {
+            let se = self.syntax_edit_insert(&*doc, len, "\n");
+            doc.insert_char(len, '\n');
+            self.apply_syntax_edit(&*doc, se);
         }
         let file = File::create(&path)?;
-        self.rope.write_to(BufWriter::new(file))?;
+        doc.write_to(BufWriter::new(file))?;
         self.dirty = false;
         self.distance_from_save = 0;
         self.save_history_len = self.undo_history.len();
         self.persisted_undo_len = self.save_history_len;
-        self.base_content_hash = self.content_hash();
+        self.base_content_hash = Self::hash_rope(doc.rope());
         self.chain_id = None;
         self.last_seen_seq = 0;
         self.disk_modified = false;

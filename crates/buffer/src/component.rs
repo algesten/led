@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use led_core::lsp_types::DiagnosticSeverity;
 use led_core::{
     Action, BLANK_STYLE, Component, Context, DrawContext, Effect, ElementStyle, Event, PanelClaim,
-    PanelSlot, TabDescriptor, Theme,
+    PanelSlot, TabDescriptor, TextDoc, Theme,
 };
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -80,7 +80,7 @@ impl Buffer {
         );
     }
 
-    fn do_restore_session(&mut self, ctx: &mut Context) {
+    fn do_restore_session(&mut self, doc: &mut TextDoc, ctx: &mut Context) {
         let Some(conn) = ctx.db else { return };
         let Some(ref path) = self.path else { return };
         let root_str = ctx.root.to_string_lossy();
@@ -105,7 +105,7 @@ impl Buffer {
             .ok();
 
         if let Some((stored_hash, undo_cursor_raw, distance_from_save, chain_id)) = undo_row {
-            if self.content_hash() == stored_hash as u64 {
+            if Self::hash_rope(doc.rope()) == stored_hash as u64 {
                 let loaded = Self::load_entries_after(conn, &root_str, &file_str, 0);
                 if !loaded.is_empty() {
                     let max_seq = loaded.last().unwrap().0;
@@ -115,6 +115,7 @@ impl Buffer {
                     self.last_seen_seq = max_seq;
 
                     self.restore_undo(
+                        doc,
                         entries,
                         undo_cursor_raw.map(|v| v as usize),
                         distance_from_save,
@@ -126,8 +127,8 @@ impl Buffer {
         if let Some((row, col, scroll)) = cursor_data {
             let row = row as usize;
             let col = col as usize;
-            self.cursor_row = row.min(self.line_count().saturating_sub(1));
-            self.cursor_col = col.min(self.line_len(self.cursor_row));
+            self.cursor_row = row.min(doc.line_count().saturating_sub(1));
+            self.cursor_col = col.min(doc.line_len(self.cursor_row));
             self.scroll_offset = scroll as usize;
         }
     }
@@ -216,7 +217,7 @@ impl Buffer {
         frame.render_widget(paragraph, area);
     }
 
-    fn goto_next_diagnostic(&mut self) {
+    fn goto_next_diagnostic(&mut self, doc: &TextDoc) {
         if self.diagnostics.is_empty() {
             return;
         }
@@ -230,12 +231,12 @@ impl Buffer {
             })
             .or_else(|| self.diagnostics.first()); // wrap around
         if let Some(d) = after {
-            self.cursor_row = d.range.start.row.min(self.line_count().saturating_sub(1));
-            self.cursor_col = d.range.start.col.min(self.line_len(self.cursor_row));
+            self.cursor_row = d.range.start.row.min(doc.line_count().saturating_sub(1));
+            self.cursor_col = d.range.start.col.min(doc.line_len(self.cursor_row));
         }
     }
 
-    fn goto_prev_diagnostic(&mut self) {
+    fn goto_prev_diagnostic(&mut self, doc: &TextDoc) {
         if self.diagnostics.is_empty() {
             return;
         }
@@ -249,20 +250,20 @@ impl Buffer {
             })
             .or_else(|| self.diagnostics.last()); // wrap around
         if let Some(d) = before {
-            self.cursor_row = d.range.start.row.min(self.line_count().saturating_sub(1));
-            self.cursor_col = d.range.start.col.min(self.line_len(self.cursor_row));
+            self.cursor_row = d.range.start.row.min(doc.line_count().saturating_sub(1));
+            self.cursor_col = d.range.start.col.min(doc.line_len(self.cursor_row));
         }
     }
 
     /// Adjust scroll so the cursor is visible within `height` visual rows.
     /// Scroll is tracked as (scroll_offset, scroll_sub_line) — a logical line
     /// plus a sub-line offset within it — so scrolling is visual-line granular.
-    fn adjust_scroll(&mut self, text_width: usize, height: usize) {
+    fn adjust_scroll(&mut self, doc: &TextDoc, text_width: usize, height: usize) {
         if height == 0 || text_width == 0 {
             return;
         }
 
-        let total = self.line_count();
+        let total = doc.line_count();
 
         // Clamp scroll_offset / scroll_sub_line to valid range
         if self.scroll_offset >= total {
@@ -270,7 +271,7 @@ impl Buffer {
             self.scroll_sub_line = 0;
         }
         let scroll_vl = visual_line_count(
-            expand_tabs(&self.line(self.scroll_offset)).0.len(),
+            expand_tabs(&doc.line(self.scroll_offset)).0.len(),
             text_width,
         );
         if self.scroll_sub_line >= scroll_vl {
@@ -278,7 +279,7 @@ impl Buffer {
         }
 
         // Compute cursor's sub-line within its logical line
-        let (cursor_display, cursor_cm) = expand_tabs(&self.line(self.cursor_row));
+        let (cursor_display, cursor_cm) = expand_tabs(&doc.line(self.cursor_row));
         let cursor_dc = cursor_cm
             .get(self.cursor_col)
             .copied()
@@ -311,7 +312,7 @@ impl Buffer {
             // Intermediate lines
             let limit = self.cursor_row.min(self.scroll_offset + height);
             for li in (self.scroll_offset + 1)..limit {
-                vrow += visual_line_count(expand_tabs(&self.line(li)).0.len(), text_width);
+                vrow += visual_line_count(expand_tabs(&doc.line(li)).0.len(), text_width);
                 if vrow >= height {
                     break;
                 }
@@ -342,7 +343,7 @@ impl Buffer {
             if remaining == 0 {
                 break;
             }
-            let vl = visual_line_count(expand_tabs(&self.line(li)).0.len(), text_width);
+            let vl = visual_line_count(expand_tabs(&doc.line(li)).0.len(), text_width);
             if vl <= remaining {
                 remaining -= vl;
                 new_scroll = li;
@@ -428,12 +429,16 @@ impl Component for Buffer {
             }
         }
 
+        let mut doc = self.take_doc(ctx.docs);
+        let version_before = doc.version();
+
         // Intercept actions during incremental search
         if self.isearch.is_some() {
             match action {
                 Action::InsertChar(c) => {
                     self.isearch.as_mut().unwrap().query.push(c);
-                    self.update_search();
+                    self.update_search(&doc);
+                    self.put_doc(ctx.docs, doc);
                     return vec![];
                 }
                 Action::DeleteBackward => {
@@ -452,20 +457,24 @@ impl Component for Buffer {
                         is.match_idx = None;
                         is.failed = false;
                     } else {
-                        self.update_search();
+                        self.update_search(&doc);
                     }
+                    self.put_doc(ctx.docs, doc);
                     return vec![];
                 }
                 Action::InBufferSearch => {
-                    self.search_next();
+                    self.search_next(&doc);
+                    self.put_doc(ctx.docs, doc);
                     return vec![];
                 }
                 Action::Abort => {
                     self.search_cancel();
+                    self.put_doc(ctx.docs, doc);
                     return vec![];
                 }
                 Action::InsertNewline => {
                     self.search_accept();
+                    self.put_doc(ctx.docs, doc);
                     return vec![];
                 }
                 Action::MoveUp
@@ -502,26 +511,26 @@ impl Component for Buffer {
             self.kill_accumulator = None;
         }
 
-        match action {
+        let mut effects = match action {
             Action::InsertChar(c) => {
                 self.clear_mark();
-                self.insert_char(c);
+                self.insert_char(&mut doc, c);
                 vec![]
             }
             Action::MoveUp => {
-                self.move_up();
+                self.move_up(&doc);
                 vec![]
             }
             Action::MoveDown => {
-                self.move_down();
+                self.move_down(&doc);
                 vec![]
             }
             Action::MoveLeft => {
-                self.move_left();
+                self.move_left(&doc);
                 vec![]
             }
             Action::MoveRight => {
-                self.move_right();
+                self.move_right(&doc);
                 vec![]
             }
             Action::LineStart => {
@@ -529,15 +538,15 @@ impl Component for Buffer {
                 vec![]
             }
             Action::LineEnd => {
-                self.move_to_line_end();
+                self.move_to_line_end(&doc);
                 vec![]
             }
             Action::PageUp => {
-                self.page_up(ctx.viewport_height);
+                self.page_up(&doc, ctx.viewport_height);
                 vec![]
             }
             Action::PageDown => {
-                self.page_down(ctx.viewport_height);
+                self.page_down(&doc, ctx.viewport_height);
                 vec![]
             }
             Action::FileStart => {
@@ -545,41 +554,41 @@ impl Component for Buffer {
                 vec![]
             }
             Action::FileEnd => {
-                self.move_to_file_end();
+                self.move_to_file_end(&doc);
                 vec![]
             }
             Action::InsertNewline => {
                 self.clear_mark();
-                self.insert_newline();
+                self.insert_newline(&mut doc);
                 vec![]
             }
             Action::DeleteBackward => {
                 self.clear_mark();
-                self.delete_char_backward();
+                self.delete_char_backward(&mut doc);
                 vec![]
             }
             Action::DeleteForward => {
                 self.clear_mark();
-                self.delete_char_forward();
+                self.delete_char_forward(&mut doc);
                 vec![]
             }
             Action::InsertTab => {
                 self.clear_mark();
-                self.insert_char('\t');
+                self.insert_char(&mut doc, '\t');
                 vec![]
             }
             Action::KillLine => {
                 if self.read_only {
                     let col = self.cursor_col;
-                    let len = self.current_line_len();
+                    let len = doc.line_len(self.cursor_row);
                     if col < len {
-                        let start = self.char_idx(self.cursor_row, col);
-                        let end = self.char_idx(self.cursor_row, len);
-                        let text = self.rope.slice(start..end).to_string();
+                        let start = doc.char_idx(self.cursor_row, col);
+                        let end = doc.char_idx(self.cursor_row, len);
+                        let text = doc.slice(start, end).to_string();
                         ctx.clipboard.set_text(&text);
                     }
                     vec![]
-                } else if let Some(killed) = self.kill_line() {
+                } else if let Some(killed) = self.kill_line(&mut doc) {
                     let acc = self.kill_accumulator.get_or_insert_with(String::new);
                     acc.push_str(&killed);
                     ctx.clipboard.set_text(&acc);
@@ -589,7 +598,7 @@ impl Component for Buffer {
                 }
             }
             Action::Undo => {
-                self.undo();
+                self.undo(&mut doc);
                 vec![]
             }
             Action::Save => {
@@ -602,7 +611,7 @@ impl Component for Buffer {
                         action: Action::SaveForce,
                     }]
                 } else {
-                    match self.save(ctx) {
+                    match self.save(&mut doc, ctx) {
                         Ok(()) => {
                             let name = self.filename().to_string();
                             let mut effects = vec![Effect::SetMessage(format!("Saved {name}."))];
@@ -615,7 +624,7 @@ impl Component for Buffer {
                     }
                 }
             }
-            Action::SaveForce => match self.save(ctx) {
+            Action::SaveForce => match self.save(&mut doc, ctx) {
                 Ok(()) => {
                     let name = self.filename().to_string();
                     let mut effects = vec![Effect::SetMessage(format!("Saved {name}."))];
@@ -627,7 +636,7 @@ impl Component for Buffer {
                 Err(e) => vec![Effect::SetMessage(format!("Save failed: {e}"))],
             },
             Action::Tick => {
-                let mut effects = self.handle_tick(ctx);
+                let mut effects = self.handle_tick(&mut doc, ctx);
                 // Request inlay hints when viewport changes
                 if self.inlay_hints_enabled {
                     let start_row = self.scroll_offset;
@@ -659,14 +668,14 @@ impl Component for Buffer {
             }
             Action::KillRegion => {
                 if self.read_only {
-                    if let Some(text) = self.selected_text() {
+                    if let Some(text) = self.selected_text(&doc) {
                         ctx.clipboard.set_text(&text);
                         self.clear_mark();
                         vec![]
                     } else {
                         vec![Effect::SetMessage("No region".into())]
                     }
-                } else if let Some(text) = self.kill_region() {
+                } else if let Some(text) = self.kill_region(&mut doc) {
                     ctx.clipboard.set_text(&text);
                     vec![]
                 } else {
@@ -676,12 +685,12 @@ impl Component for Buffer {
             Action::Yank => {
                 if let Some(text) = ctx.clipboard.get_text() {
                     self.clear_mark();
-                    self.yank_text(&text);
+                    self.yank_text(&mut doc, &text);
                 }
                 vec![]
             }
             Action::OpenFileSearch => {
-                let selected_text = self.selected_text();
+                let selected_text = self.selected_text(&doc);
                 self.clear_mark();
                 vec![Effect::Emit(Event::FileSearchOpened { selected_text })]
             }
@@ -703,7 +712,7 @@ impl Component for Buffer {
             Action::FocusLost => vec![],
             Action::RestoreSession => {
                 self.ensure_schema(ctx);
-                self.do_restore_session(ctx);
+                self.do_restore_session(&mut doc, ctx);
                 vec![]
             }
             Action::SaveSession => {
@@ -738,7 +747,7 @@ impl Component for Buffer {
             }
             Action::LspRename => {
                 if let Some(ref path) = self.path {
-                    let initial = self.word_at_cursor().unwrap_or_default();
+                    let initial = self.word_at_cursor(&doc).unwrap_or_default();
                     vec![Effect::PromptRename {
                         prompt: "Rename to:".into(),
                         initial: initial.clone(),
@@ -782,11 +791,11 @@ impl Component for Buffer {
                 }
             }
             Action::LspNextDiagnostic => {
-                self.goto_next_diagnostic();
+                self.goto_next_diagnostic(&doc);
                 vec![]
             }
             Action::LspPrevDiagnostic => {
-                self.goto_prev_diagnostic();
+                self.goto_prev_diagnostic(&doc);
                 vec![]
             }
             Action::LspToggleInlayHints => {
@@ -813,14 +822,26 @@ impl Component for Buffer {
                 }
             }
             _ => vec![],
+        };
+
+        // Emit BufferChanged for file-backed buffers when doc was modified
+        if let Some(ref path) = self.path {
+            if doc.version() != version_before {
+                effects.push(Effect::Emit(Event::BufferChanged { path: path.clone() }));
+            }
         }
+
+        self.put_doc(ctx.docs, doc);
+        effects
     }
 
     fn handle_event(&mut self, event: &Event, ctx: &mut Context) -> Vec<Effect> {
-        match event {
+        let mut doc = self.take_doc(ctx.docs);
+        let version_before = doc.version();
+        let mut effects = match event {
             Event::Resume => {
                 // Force a tick to check for disk changes after resume
-                return self.handle_tick(ctx);
+                self.handle_tick(&mut doc, ctx)
             }
             Event::GoToPosition {
                 path,
@@ -829,13 +850,14 @@ impl Component for Buffer {
                 scroll_offset,
             } => {
                 if self.path.as_deref() == Some(path.as_path()) {
-                    self.cursor_row = (*row).min(self.line_count().saturating_sub(1));
-                    self.cursor_col = (*col).min(self.line_len(self.cursor_row));
+                    self.cursor_row = (*row).min(doc.line_count().saturating_sub(1));
+                    self.cursor_col = (*col).min(doc.line_len(self.cursor_row));
                     if let Some(offset) = scroll_offset {
-                        self.scroll_offset = (*offset).min(self.line_count().saturating_sub(1));
+                        self.scroll_offset = (*offset).min(doc.line_count().saturating_sub(1));
                     }
                     self.clear_mark();
                 }
+                vec![]
             }
             Event::PreviewFile {
                 path,
@@ -844,50 +866,67 @@ impl Component for Buffer {
                 match_len,
             } => {
                 if self.path.as_deref() == Some(path.as_path()) {
-                    let r = (*row).min(self.line_count().saturating_sub(1));
+                    let r = (*row).min(doc.line_count().saturating_sub(1));
                     self.cursor_row = r;
-                    self.cursor_col = (*col).min(self.line_len(r));
+                    self.cursor_col = (*col).min(doc.line_len(r));
                     self.scroll_offset = r.saturating_sub(ctx.viewport_height / 2);
-                    self.highlight_match(*row, *col, *match_len);
-                    return vec![Effect::ActivateBuffer(path.clone())];
+                    self.highlight_match(&doc, *row, *col, *match_len);
+                    vec![Effect::ActivateBuffer(path.clone())]
+                } else {
+                    vec![]
                 }
             }
             Event::ConfirmSearch { path, row, col } => {
                 if self.path.as_deref() == Some(path.as_path()) {
                     self.preview = false;
-                    let r = (*row).min(self.line_count().saturating_sub(1));
+                    let r = (*row).min(doc.line_count().saturating_sub(1));
                     self.cursor_row = r;
-                    self.cursor_col = (*col).min(self.line_len(r));
+                    self.cursor_col = (*col).min(doc.line_len(r));
                     self.clear_mark();
-                    return vec![
+                    vec![
                         Effect::ActivateBuffer(path.clone()),
                         Effect::FocusPanel(PanelSlot::Main),
-                    ];
+                    ]
+                } else {
+                    vec![]
                 }
             }
             Event::SetDiagnostics { path, diagnostics } => {
                 if self.path.as_deref() == Some(path.as_path()) {
                     self.diagnostics = diagnostics.clone();
                 }
+                vec![]
             }
             Event::ApplyEdits { path, edits } => {
                 if self.path.as_deref() == Some(path.as_path()) && !self.read_only {
-                    self.apply_text_edits(edits.clone());
+                    self.apply_text_edits(&mut doc, edits.clone());
                 }
+                vec![]
             }
             Event::SetInlayHints { path, hints } => {
                 if self.path.as_deref() == Some(path.as_path()) && self.inlay_hints_enabled {
                     self.inlay_hints = hints.clone();
                 }
+                vec![]
             }
             Event::TabActivated { path } => {
                 if self.preview && path.as_ref() != self.path.as_ref() {
-                    return vec![Effect::Emit(Event::PreviewClosed)];
+                    vec![Effect::Emit(Event::PreviewClosed)]
+                } else {
+                    vec![]
                 }
             }
-            _ => {}
+            _ => vec![],
+        };
+        // Emit BufferChanged for file-backed buffers when doc was modified
+        if let Some(ref path) = self.path {
+            if doc.version() != version_before {
+                effects.push(Effect::Emit(Event::BufferChanged { path: path.clone() }));
+            }
         }
-        vec![]
+
+        self.put_doc(ctx.docs, doc);
+        effects
     }
 
     fn draw(&mut self, frame: &mut Frame, area: Rect, ctx: &mut DrawContext) {
@@ -896,14 +935,31 @@ impl Component for Buffer {
             return;
         }
 
+        // Resolve doc: file-backed from store, local from self
+        if self.path.is_some() {
+            let docs = ctx.docs;
+            let doc = docs
+                .get(self.path.as_ref().unwrap())
+                .expect("doc not in store");
+            self.draw_main(frame, area, ctx, doc);
+        } else {
+            let doc = self.local_doc.take().expect("no local doc");
+            self.draw_main(frame, area, ctx, &doc);
+            self.local_doc = Some(doc);
+        }
+    }
+}
+
+impl Buffer {
+    fn draw_main(&mut self, frame: &mut Frame, area: Rect, ctx: &mut DrawContext, doc: &TextDoc) {
         let height = area.height as usize;
         let gutter_width: usize = 2;
         let text_width = (area.width as usize).saturating_sub(gutter_width);
         self.text_width = text_width;
 
-        self.adjust_scroll(text_width, height);
+        self.adjust_scroll(doc, text_width, height);
 
-        let total_lines = self.line_count();
+        let total_lines = doc.line_count();
         let gutter_style = ctx.theme.get("editor.gutter").to_style();
         let text_style = ctx.theme.get("editor.text").to_style();
         let sel_style = if self.preview_highlight {
@@ -937,7 +993,7 @@ impl Component for Buffer {
         // Pre-compute syntax highlights for visible lines
         let end_line = (self.scroll_offset + height).min(total_lines);
         let raw_highlights = if let Some(ref syntax) = self.syntax {
-            syntax.highlights_for_lines(&self.rope, self.scroll_offset, end_line)
+            syntax.highlights_for_lines(doc.rope(), self.scroll_offset, end_line)
         } else {
             Vec::new()
         };
@@ -953,7 +1009,7 @@ impl Component for Buffer {
             .map_or(false, |n| n == "theme.toml");
 
         let color_defs = if is_theme {
-            let all_lines: Vec<String> = (0..total_lines).map(|i| self.line(i)).collect();
+            let all_lines: Vec<String> = (0..total_lines).map(|i| doc.line(i)).collect();
             Some(parse_color_defs(all_lines.iter().map(|s| s.as_str())))
         } else {
             None
@@ -970,7 +1026,7 @@ impl Component for Buffer {
         // Pre-scan to find the section header for the scroll_offset line
         if is_theme {
             for i in 0..self.scroll_offset.min(total_lines) {
-                let l = self.line(i);
+                let l = doc.line(i);
                 let t = l.trim();
                 if t.starts_with('[') && !t.starts_with("[[") {
                     if let Some(end) = t.find(']') {
@@ -981,7 +1037,7 @@ impl Component for Buffer {
         }
 
         while screen_row < height && line_idx < total_lines {
-            let raw = self.line(line_idx);
+            let raw = doc.line(line_idx);
             let (display, char_map) = expand_tabs(&raw);
             let chunks = compute_chunks(display.len(), text_width);
 
@@ -1312,7 +1368,7 @@ impl Component for BufferFactory {
         match event {
             Event::OpenFile(path) => {
                 let path_str = path.to_string_lossy();
-                match Buffer::from_file_with_waker(&path_str, ctx.waker.clone()) {
+                match Buffer::from_file_with_waker(&path_str, ctx.waker.clone(), ctx.docs) {
                     Ok(mut buf) => {
                         buf.read_only = is_read_only_path(path);
                         effects.push(Effect::Spawn(Box::new(buf)));
@@ -1325,7 +1381,7 @@ impl Component for BufferFactory {
                     effects.push(Effect::KillPreview);
                 }
                 let path_str = path.to_string_lossy();
-                match Buffer::from_file_with_waker(&path_str, ctx.waker.clone()) {
+                match Buffer::from_file_with_waker(&path_str, ctx.waker.clone(), ctx.docs) {
                     Ok(mut buf) => {
                         buf.preview = true;
                         buf.read_only = is_read_only_path(path);
@@ -1348,14 +1404,16 @@ impl Component for BufferFactory {
                     effects.push(Effect::KillPreview);
                 }
                 let path_str = path.to_string_lossy();
-                match Buffer::from_file_with_waker(&path_str, ctx.waker.clone()) {
+                match Buffer::from_file_with_waker(&path_str, ctx.waker.clone(), ctx.docs) {
                     Ok(mut buf) => {
                         buf.preview = true;
-                        let r = (*row).min(buf.line_count().saturating_sub(1));
+                        let buf_path = buf.path.as_ref().unwrap().clone();
+                        let doc = ctx.docs.get(&buf_path).expect("doc not in store");
+                        let r = (*row).min(doc.line_count().saturating_sub(1));
                         buf.cursor_row = r;
-                        buf.cursor_col = (*col).min(buf.line_len(r));
+                        buf.cursor_col = (*col).min(doc.line_len(r));
                         buf.scroll_offset = r.saturating_sub(ctx.viewport_height / 2);
-                        buf.highlight_match(*row, *col, *match_len);
+                        buf.highlight_match(doc, *row, *col, *match_len);
                         self.preview_path = Some(path.clone());
                         effects.push(Effect::Spawn(Box::new(buf)));
                     }

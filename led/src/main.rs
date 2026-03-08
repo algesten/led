@@ -102,16 +102,7 @@ async fn main() -> io::Result<()> {
     );
 
     // Build component list — the ONLY place concrete types appear
-    let initial_buffer = arg_path.as_ref().filter(|p| p.is_file()).map(|path| {
-        let path_str = path.to_string_lossy();
-        Buffer::from_file_with_waker(&path_str, Some(waker.clone())).unwrap_or_else(|_| {
-            let mut buf = Buffer::empty();
-            buf.path = Some(path.clone());
-            buf
-        })
-    });
-
-    let mut components: Vec<Box<dyn led_core::Component>> = vec![
+    let components: Vec<Box<dyn led_core::Component>> = vec![
         Box::new(BufferFactory::new()),
         Box::new(FileSearch::new(root.clone(), Some(waker.clone()))),
         Box::new(FileBrowser::new(root.clone())),
@@ -121,9 +112,6 @@ async fn main() -> io::Result<()> {
         Box::new(LspManager::new(root.clone(), Some(waker.clone()))),
         Box::new(led_messages::Messages::new(shared_log)),
     ];
-    if let Some(buf) = initial_buffer {
-        components.push(Box::new(buf));
-    }
 
     if cli.reset_config {
         match config::reset_config() {
@@ -152,12 +140,24 @@ async fn main() -> io::Result<()> {
     shell.debug = cli.debug;
     shell.set_waker(waker);
 
-    let had_initial_buffer = explicit_file;
     for comp in components {
         shell.register(comp);
     }
-    if had_initial_buffer {
-        shell.set_focus(PanelSlot::Main);
+
+    // Create initial buffer after shell so we have access to shell.docs
+    if explicit_file {
+        if let Some(path) = arg_path.as_ref().filter(|p| p.is_file()) {
+            let path_str = path.to_string_lossy();
+            let w = shell.waker().cloned();
+            let buf =
+                Buffer::from_file_with_waker(&path_str, w, &mut shell.docs).unwrap_or_else(|_| {
+                    let mut buf = Buffer::empty();
+                    buf.path = Some(path.clone());
+                    buf
+                });
+            shell.register(Box::new(buf));
+            shell.set_focus(PanelSlot::Main);
+        }
     }
     // Primary always restores the full workspace; secondary only shows the direct file
     if primary_lock.is_some() {
@@ -355,12 +355,10 @@ async fn run(
             Received::AppEvent(AppEvent::Wakeup) => {
                 shell.tick();
             }
-            Received::AppEvent(AppEvent::ScriptAction(action)) => {
-                match shell.run_action(action) {
-                    InputResult::Quit => return Ok(()),
-                    InputResult::Continue | InputResult::Suspend => {}
-                }
-            }
+            Received::AppEvent(AppEvent::ScriptAction(action)) => match shell.run_action(action) {
+                InputResult::Quit => return Ok(()),
+                InputResult::Continue | InputResult::Suspend => {}
+            },
             Received::Timeout => {}
         }
 
@@ -379,12 +377,10 @@ async fn run_headless(
             Some(AppEvent::Wakeup) => {
                 shell.tick();
             }
-            Some(AppEvent::ScriptAction(action)) => {
-                match shell.run_action(action) {
-                    InputResult::Quit => return Ok(()),
-                    InputResult::Continue | InputResult::Suspend => {}
-                }
-            }
+            Some(AppEvent::ScriptAction(action)) => match shell.run_action(action) {
+                InputResult::Quit => return Ok(()),
+                InputResult::Continue | InputResult::Suspend => {}
+            },
             Some(AppEvent::ConfigChanged(_)) => {}
             None => return Ok(()),
         }
@@ -398,7 +394,7 @@ fn restore_session(shell: &mut Shell, session: SessionData) {
     let waker = shell.waker().cloned();
     for path in &session.buffer_paths {
         let path_str = path.to_string_lossy();
-        if let Ok(buf) = Buffer::from_file_with_waker(&path_str, waker.clone()) {
+        if let Ok(buf) = Buffer::from_file_with_waker(&path_str, waker.clone(), &mut shell.docs) {
             shell.register(Box::new(buf));
         }
     }
