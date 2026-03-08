@@ -36,6 +36,7 @@ enum ConfigFile {
 enum AppEvent {
     ConfigChanged(ConfigFile),
     Wakeup,
+    ScriptAction(led_core::Action),
 }
 
 #[derive(Parser)]
@@ -51,6 +52,14 @@ struct Cli {
     /// Show captured key presses in the message bar
     #[arg(long)]
     debug: bool,
+
+    /// Write log output to a file (in addition to the messages buffer)
+    #[arg(long)]
+    log_file: Option<String>,
+
+    /// Run a script of actions then quit (one action per line, supports "wait <ms>")
+    #[arg(long)]
+    script: Option<String>,
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -83,11 +92,14 @@ async fn main() -> io::Result<()> {
         let _ = waker_tx.send(AppEvent::Wakeup);
     });
 
-    let shared_log = logger::init(if cli.debug {
-        log::LevelFilter::Debug
-    } else {
-        log::LevelFilter::Info
-    });
+    let shared_log = logger::init(
+        if cli.debug {
+            log::LevelFilter::Debug
+        } else {
+            log::LevelFilter::Info
+        },
+        cli.log_file.as_deref(),
+    );
 
     // Build component list — the ONLY place concrete types appear
     let initial_buffer = arg_path.as_ref().filter(|p| p.is_file()).map(|path| {
@@ -173,14 +185,43 @@ async fn main() -> io::Result<()> {
         original_hook(info);
     }));
 
+    // Script runner
+    if let Some(ref script_path) = cli.script {
+        if let Ok(content) = std::fs::read_to_string(script_path) {
+            let tx_script = tx.clone();
+            tokio::spawn(async move {
+                for line in content.lines() {
+                    let line = line.trim();
+                    if line.is_empty() || line.starts_with('#') {
+                        continue;
+                    }
+                    if let Some(ms) = line.strip_prefix("wait ") {
+                        if let Ok(ms) = ms.trim().parse::<u64>() {
+                            tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+                        }
+                    } else if let Ok(action) = serde_json::from_value::<led_core::Action>(
+                        serde_json::Value::String(line.to_string()),
+                    ) {
+                        let _ = tx_script.send(AppEvent::ScriptAction(action));
+                    }
+                }
+            });
+        }
+    }
+
     // Config file watcher
     let keys_path = config::config_path();
     let theme_p = theme::theme_path();
     let _watcher = spawn_config_watcher(tx, keys_path.as_deref(), theme_p.as_deref());
 
-    let mut terminal = ratatui::init();
-    let result = run(&mut terminal, &mut shell, rx).await;
-    ratatui::restore();
+    let result = if cli.script.is_some() {
+        run_headless(&mut shell, rx).await
+    } else {
+        let mut terminal = ratatui::init();
+        let result = run(&mut terminal, &mut shell, rx).await;
+        ratatui::restore();
+        result
+    };
 
     // Save session on exit (only primary editor persists workspace state)
     shell.flush_to_db();
@@ -314,11 +355,38 @@ async fn run(
             Received::AppEvent(AppEvent::Wakeup) => {
                 shell.tick();
             }
+            Received::AppEvent(AppEvent::ScriptAction(action)) => {
+                match shell.run_action(action) {
+                    InputResult::Quit => return Ok(()),
+                    InputResult::Continue | InputResult::Suspend => {}
+                }
+            }
             Received::Timeout => {}
         }
 
         if shell.needs_persist() {
             shell.flush_to_db();
+        }
+    }
+}
+
+async fn run_headless(
+    shell: &mut Shell,
+    mut rx: mpsc::UnboundedReceiver<AppEvent>,
+) -> io::Result<()> {
+    loop {
+        match rx.recv().await {
+            Some(AppEvent::Wakeup) => {
+                shell.tick();
+            }
+            Some(AppEvent::ScriptAction(action)) => {
+                match shell.run_action(action) {
+                    InputResult::Quit => return Ok(()),
+                    InputResult::Continue | InputResult::Suspend => {}
+                }
+            }
+            Some(AppEvent::ConfigChanged(_)) => {}
+            None => return Ok(()),
         }
     }
 }

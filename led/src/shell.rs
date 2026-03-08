@@ -1096,6 +1096,10 @@ impl Shell {
     }
 
 
+    pub fn run_action(&mut self, action: Action) -> InputResult {
+        self.execute_action(action)
+    }
+
     pub fn tick(&mut self) {
         let mut all_effects = Vec::new();
         for i in 0..self.components.len() {
