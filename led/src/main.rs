@@ -203,6 +203,10 @@ async fn main() -> io::Result<()> {
                         serde_json::Value::String(line.to_string()),
                     ) {
                         let _ = tx_script.send(AppEvent::ScriptAction(action));
+                    } else if let Ok(action) =
+                        serde_json::from_str::<led_core::Action>(line)
+                    {
+                        let _ = tx_script.send(AppEvent::ScriptAction(action));
                     }
                 }
             });

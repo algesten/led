@@ -273,13 +273,16 @@ impl Shell {
     }
 
     pub fn status_bar_component_idx(&self) -> Option<usize> {
-        self.components
+        // If a component has elevated StatusBar priority (e.g. isearch at 20),
+        // it wins.  Otherwise the active tab draws the status bar.
+        let elevated = self
+            .components
             .iter()
             .enumerate()
             .filter(|(_, c)| {
                 c.panel_claims()
                     .iter()
-                    .any(|cl| cl.slot == PanelSlot::StatusBar)
+                    .any(|cl| cl.slot == PanelSlot::StatusBar && cl.priority > 10)
             })
             .max_by_key(|(_, c)| {
                 c.panel_claims()
@@ -289,7 +292,12 @@ impl Shell {
                     .max()
                     .unwrap_or(0)
             })
-            .map(|(i, _)| i)
+            .map(|(i, _)| i);
+        if elevated.is_some() {
+            return elevated;
+        }
+        // Default: the active tab component draws the status bar.
+        self.active_tab_component_idx()
     }
 
     pub fn status_bar_component(&self) -> Option<&Box<dyn Component>> {

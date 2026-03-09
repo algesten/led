@@ -893,6 +893,12 @@ impl Component for Buffer {
             }
             Event::SetDiagnostics { path, diagnostics } => {
                 if self.path.as_deref() == Some(path.as_path()) {
+                    log::info!(
+                        "Buffer {:?} set {} diagnostics: rows {:?}",
+                        self.path.as_ref().and_then(|p| p.file_name()),
+                        diagnostics.len(),
+                        diagnostics.iter().map(|d| (d.range.start.row, d.range.end.row)).collect::<Vec<_>>()
+                    );
                     self.diagnostics = diagnostics.clone();
                 }
                 vec![]
@@ -933,6 +939,15 @@ impl Component for Buffer {
         if ctx.slot == PanelSlot::StatusBar {
             self.draw_status_bar(frame, area, ctx);
             return;
+        }
+
+        if !self.diagnostics.is_empty() {
+            log::debug!(
+                "draw Main: {} diagnostics, cursor_row={}, scroll={}",
+                self.diagnostics.len(),
+                self.cursor_row,
+                self.scroll_offset,
+            );
         }
 
         // Resolve doc: file-backed from store, local from self

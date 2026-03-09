@@ -838,6 +838,8 @@ pub struct LspManager {
     quiescent: bool,
     _file_watcher: Option<notify::RecommendedWatcher>,
     file_watcher_globs: Option<globset::GlobSet>,
+    /// Generation counter for debouncing pull-diagnostics requests
+    pull_diag_gen: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl LspManager {
@@ -858,6 +860,7 @@ impl LspManager {
             quiescent: true,
             _file_watcher: None,
             file_watcher_globs: None,
+            pull_diag_gen: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
     }
 
@@ -1180,6 +1183,87 @@ impl LspManager {
     }
 
     // -- Feature methods (spawn tokio tasks) --------------------------------
+
+    fn spawn_pull_diagnostics(&self, path: PathBuf) {
+        let Some(server) = self.server_for_path(&path) else {
+            return;
+        };
+        let event_tx = self.event_tx.clone();
+        let waker = self.waker.clone();
+
+        // Debounce: bump generation so earlier pending pulls for any file are skipped.
+        let generation = self
+            .pull_diag_gen
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            + 1;
+        let gen_ref = self.pull_diag_gen.clone();
+
+        tokio::spawn(async move {
+            // Wait for rust-analyzer to process the didChange before pulling.
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+            // If a newer change arrived while we were waiting, skip this pull.
+            if gen_ref.load(std::sync::atomic::Ordering::Relaxed) != generation {
+                return;
+            }
+
+            let uri = match uri_from_path(&path) {
+                Some(u) => u,
+                None => return,
+            };
+            let params = lsp_types::DocumentDiagnosticParams {
+                text_document: TextDocumentIdentifier { uri },
+                identifier: None,
+                previous_result_id: None,
+                work_done_progress_params: Default::default(),
+                partial_result_params: Default::default(),
+            };
+
+            log::info!("LSP pull diagnostics request: {}", path.display());
+            let result: Result<lsp_types::DocumentDiagnosticReportResult, _> =
+                server.request("textDocument/diagnostic", &params).await;
+
+            let diags = match result {
+                Ok(lsp_types::DocumentDiagnosticReportResult::Report(
+                    lsp_types::DocumentDiagnosticReport::Full(report),
+                )) => report.full_document_diagnostic_report.items,
+                Ok(other) => {
+                    log::info!(
+                        "LSP pull diagnostics {}: non-full response: {:?}",
+                        path.display(),
+                        std::mem::discriminant(&other),
+                    );
+                    return;
+                }
+                Err(e) => {
+                    log::warn!(
+                        "LSP pull diagnostics {} failed: {}",
+                        path.display(),
+                        e.message
+                    );
+                    return;
+                }
+            };
+
+            log::info!(
+                "LSP pull diagnostics: {} count={}",
+                path.display(),
+                diags.len()
+            );
+            let _ = event_tx.send(LspManagerEvent::Notification(LspNotification {
+                method: "textDocument/publishDiagnostics".to_string(),
+                params: serde_json::to_value(PublishDiagnosticsParams {
+                    uri: uri_from_path(&path).unwrap(),
+                    diagnostics: diags,
+                    version: None,
+                })
+                .unwrap_or_default(),
+            }));
+            if let Some(ref w) = waker {
+                w();
+            }
+        });
+    }
 
     fn spawn_goto_definition(&self, path: PathBuf, row: usize, col: usize) {
         let Some(server) = self.server_for_path(&path) else {
@@ -1828,10 +1912,12 @@ impl Component for LspManager {
                 if !changes.is_empty() {
                     let version = ctx.docs.version(path).unwrap_or(0);
                     self.send_did_change(path, &changes, version);
+                    self.spawn_pull_diagnostics(path.clone());
                 }
             }
             Event::FileSaved(path) => {
                 self.send_did_save(path);
+                self.spawn_pull_diagnostics(path.clone());
             }
             Event::BufferClosed(path) => {
                 self.send_did_close(path);
