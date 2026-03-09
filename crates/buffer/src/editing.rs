@@ -566,6 +566,24 @@ impl Buffer {
         self.flush_pending();
         let cursor_before = (self.cursor_row, self.cursor_col);
 
+        // Compute cursor char offset and per-edit ranges against the original doc
+        let cursor_offset = doc.char_idx(self.cursor_row, self.cursor_col);
+        // Collect original char ranges for cursor adjustment (document order)
+        let mut edit_ranges: Vec<(usize, usize, usize)> = edits
+            .iter()
+            .map(|edit| {
+                let sr = edit.range.start.row.min(doc.line_count().saturating_sub(1));
+                let sc = edit.range.start.col.min(doc.line_len(sr));
+                let er = edit.range.end.row.min(doc.line_count().saturating_sub(1));
+                let ec = edit.range.end.col.min(doc.line_len(er));
+                let start = doc.char_idx(sr, sc);
+                let end = doc.char_idx(er, ec);
+                let new_len = edit.new_text.chars().count();
+                (start, end, new_len)
+            })
+            .collect();
+        edit_ranges.sort_by_key(|&(s, _, _)| s);
+
         // Sort edits in reverse document order (later positions first)
         edits.sort_by(|a, b| {
             b.range
@@ -598,6 +616,31 @@ impl Buffer {
                 self.apply_syntax_edit(&*doc, se);
             }
         }
+
+        // Adjust cursor through edit deltas (edits in document order, original coords)
+        let mut new_cursor = cursor_offset;
+        let mut delta: isize = 0;
+        for &(start, end, new_len) in &edit_ranges {
+            let old_len = end - start;
+            if cursor_offset < start {
+                break;
+            } else if cursor_offset >= end {
+                delta += new_len as isize - old_len as isize;
+            } else {
+                // Cursor inside the replaced range — snap to end of new text
+                new_cursor = start + new_len;
+                delta = 0; // already accounted for
+                break;
+            }
+        }
+        new_cursor = (new_cursor as isize + delta).max(0) as usize;
+        let total_chars = doc.len_chars();
+        if new_cursor > total_chars {
+            new_cursor = total_chars.saturating_sub(1);
+        }
+        self.cursor_row = doc.char_to_line(new_cursor);
+        let line_start = doc.line_to_char(self.cursor_row);
+        self.cursor_col = new_cursor - line_start;
 
         self.dirty = true;
         self.clamp_cursor_col(&*doc);

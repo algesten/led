@@ -44,6 +44,24 @@ impl LspRegistry {
                     args: &[],
                     extensions: &["swift"],
                 },
+                ServerConfig {
+                    language_id: "toml",
+                    command: "taplo",
+                    args: &["lsp", "stdio"],
+                    extensions: &["toml"],
+                },
+                ServerConfig {
+                    language_id: "json",
+                    command: "vscode-json-language-server",
+                    args: &["--stdio"],
+                    extensions: &["json"],
+                },
+                ServerConfig {
+                    language_id: "bash",
+                    command: "bash-language-server",
+                    args: &["start"],
+                    extensions: &["sh", "bash"],
+                },
             ],
         }
     }

@@ -270,6 +270,21 @@ impl Buffer {
         let Some(path) = self.path.clone() else {
             return Err(io::Error::new(io::ErrorKind::Other, "No file path set"));
         };
+        // Strip trailing whitespace from each line
+        for row in (0..doc.line_count()).rev() {
+            let line_len = doc.line_len(row);
+            let trimmed = doc.line(row).trim_end().chars().count();
+            if trimmed < line_len {
+                let start = doc.char_idx(row, trimmed);
+                let end = doc.char_idx(row, line_len);
+                let se = self.syntax_edit_remove(&*doc, start, end);
+                doc.remove(start, end);
+                self.apply_syntax_edit(&*doc, se);
+            }
+        }
+        // Clamp cursor in case trailing whitespace was removed from cursor line
+        self.clamp_cursor_col(doc);
+        // Ensure final newline
         let len = doc.len_chars();
         if len == 0 || doc.char(len - 1) != '\n' {
             let se = self.syntax_edit_insert(&*doc, len, "\n");

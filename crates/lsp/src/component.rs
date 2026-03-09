@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use led_core::{Action, Component, Context, DrawContext, Effect, Event, LspStatus, PanelClaim};
@@ -8,6 +8,16 @@ use ratatui::layout::Rect;
 use crate::LspManager;
 use crate::server::LanguageServer;
 use crate::types::LspManagerEvent;
+use crate::util::read_file_lines;
+
+/// Read buffer content lines from DocStore, falling back to disk.
+fn buffer_lines(path: &Path, ctx: &Context) -> Vec<String> {
+    if let Some(content) = ctx.docs.content(path) {
+        content.lines().map(|l| l.to_string()).collect()
+    } else {
+        read_file_lines(path)
+    }
+}
 
 impl Component for LspManager {
     fn panel_claims(&self) -> &[PanelClaim] {
@@ -115,7 +125,15 @@ impl Component for LspManager {
                 self.spawn_code_action_resolve(path.clone(), *index);
             }
             Event::LspFormat { path } => {
-                self.spawn_format(path.clone());
+                if self.server_for_path(path).is_some() {
+                    let lines = buffer_lines(path, ctx);
+                    self.spawn_format(path.clone(), lines);
+                } else {
+                    return vec![Effect::Emit(Event::FormatDone { path: path.clone() })];
+                }
+            }
+            Event::LspCompletion { path, row, col } => {
+                self.spawn_completion(path.clone(), *row, *col);
             }
             _ => {}
         }

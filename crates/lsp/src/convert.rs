@@ -147,6 +147,9 @@ pub(crate) fn language_id_for_extension(ext: &str) -> &'static str {
         "c" | "h" => "c",
         "cpp" | "hpp" | "cc" | "cxx" => "cpp",
         "swift" => "swift",
+        "toml" => "toml",
+        "json" => "json",
+        "sh" | "bash" => "shellscript",
         _ => "plaintext",
     }
 }

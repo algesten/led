@@ -381,6 +381,8 @@ impl Component for Buffer {
     fn context_name(&self) -> Option<&str> {
         if self.isearch.is_some() {
             Some("isearch")
+        } else if self.completion.is_some() {
+            Some("completion")
         } else {
             None
         }
@@ -501,6 +503,103 @@ impl Component for Buffer {
             }
         }
 
+        // Intercept actions during completion
+        if self.completion.is_some() {
+            match action {
+                Action::MoveUp => {
+                    let cs = self.completion.as_mut().unwrap();
+                    if cs.selected > 0 {
+                        cs.selected -= 1;
+                    }
+                    self.put_doc(ctx.docs, doc);
+                    return vec![];
+                }
+                Action::MoveDown => {
+                    let cs = self.completion.as_mut().unwrap();
+                    if cs.selected + 1 < cs.filtered.len() {
+                        cs.selected += 1;
+                    }
+                    self.put_doc(ctx.docs, doc);
+                    return vec![];
+                }
+                Action::InsertTab | Action::InsertNewline => {
+                    let mut effects = self.accept_completion(&mut doc);
+                    if let Some(ref path) = self.path {
+                        if doc.version() != version_before {
+                            effects.push(Effect::Emit(Event::BufferChanged { path: path.clone() }));
+                        }
+                    }
+                    self.put_doc(ctx.docs, doc);
+                    return effects;
+                }
+                Action::Abort => {
+                    self.completion = None;
+                    self.put_doc(ctx.docs, doc);
+                    return vec![];
+                }
+                Action::InsertChar(c) => {
+                    self.insert_char(&mut doc, c);
+                    self.update_completion_filter(&doc);
+                    if self
+                        .completion
+                        .as_ref()
+                        .map_or(true, |cs| cs.filtered.is_empty())
+                    {
+                        self.completion = None;
+                    }
+                    let mut effects = vec![];
+                    if let Some(ref path) = self.path {
+                        if doc.version() != version_before {
+                            effects.push(Effect::Emit(Event::BufferChanged { path: path.clone() }));
+                        }
+                    }
+                    self.put_doc(ctx.docs, doc);
+                    return effects;
+                }
+                Action::DeleteBackward => {
+                    self.delete_char_backward(&mut doc);
+                    // Dismiss if we've deleted past the prefix
+                    let dismiss = self
+                        .completion
+                        .as_ref()
+                        .map_or(true, |cs| self.cursor_col <= cs.prefix_start_col);
+                    if dismiss {
+                        self.completion = None;
+                    } else {
+                        self.update_completion_filter(&doc);
+                        if self
+                            .completion
+                            .as_ref()
+                            .map_or(true, |cs| cs.filtered.is_empty())
+                        {
+                            self.completion = None;
+                        }
+                    }
+                    let mut effects = vec![];
+                    if let Some(ref path) = self.path {
+                        if doc.version() != version_before {
+                            effects.push(Effect::Emit(Event::BufferChanged { path: path.clone() }));
+                        }
+                    }
+                    self.put_doc(ctx.docs, doc);
+                    return effects;
+                }
+                // Lifecycle actions: pass through without dismissing completion
+                Action::Tick
+                | Action::Flush
+                | Action::SaveSession
+                | Action::RestoreSession
+                | Action::FocusGained
+                | Action::FocusLost => {
+                    // Fall through to normal handling
+                }
+                // All other actions dismiss completion and fall through
+                _ => {
+                    self.completion = None;
+                }
+            }
+        }
+
         // Clear kill accumulator for non-KillLine actions
         if !matches!(action, Action::KillLine) {
             self.kill_accumulator = None;
@@ -569,6 +668,25 @@ impl Component for Buffer {
             }
             Action::InsertTab => {
                 self.clear_mark();
+                // Smart tab: if cursor follows a word char, trigger completion
+                let trigger_completion = if self.path.is_some() {
+                    self.cursor_col > 0 && {
+                        let line = doc.line(self.cursor_row);
+                        let ch = line.chars().nth(self.cursor_col - 1).unwrap_or(' ');
+                        ch.is_alphanumeric() || ch == '_'
+                    }
+                } else {
+                    false
+                };
+                if trigger_completion {
+                    let path = self.path.clone().unwrap();
+                    self.put_doc(ctx.docs, doc);
+                    return vec![Effect::Emit(Event::LspCompletion {
+                        path,
+                        row: self.cursor_row,
+                        col: self.cursor_col,
+                    })];
+                }
                 self.insert_char(&mut doc, '\t');
                 vec![]
             }
@@ -605,31 +723,41 @@ impl Component for Buffer {
                         ),
                         action: Action::SaveForce,
                     }]
+                } else if let Some(ref path) = self.path {
+                    // File-backed buffer: trigger format-on-save pipeline
+                    self.pending_save_after_format = true;
+                    vec![
+                        Effect::SetMessage("Formatting...".into()),
+                        Effect::Emit(Event::LspFormat { path: path.clone() }),
+                    ]
                 } else {
+                    // Scratch buffer: save directly (no LSP)
                     match self.save(&mut doc, ctx) {
                         Ok(()) => {
                             let name = self.filename().to_string();
-                            let mut effects = vec![Effect::SetMessage(format!("Saved {name}"))];
-                            if let Some(ref path) = self.path {
-                                effects.push(Effect::Emit(Event::FileSaved(path.clone())));
-                            }
-                            effects
+                            vec![Effect::SetMessage(format!("Saved {name}"))]
                         }
                         Err(e) => vec![Effect::SetMessage(format!("Save failed: {e}"))],
                     }
                 }
             }
-            Action::SaveForce => match self.save(&mut doc, ctx) {
-                Ok(()) => {
-                    let name = self.filename().to_string();
-                    let mut effects = vec![Effect::SetMessage(format!("Saved {name}"))];
-                    if let Some(ref path) = self.path {
-                        effects.push(Effect::Emit(Event::FileSaved(path.clone())));
+            Action::SaveForce => {
+                if let Some(ref path) = self.path {
+                    self.pending_save_after_format = true;
+                    vec![
+                        Effect::SetMessage("Formatting...".into()),
+                        Effect::Emit(Event::LspFormat { path: path.clone() }),
+                    ]
+                } else {
+                    match self.save(&mut doc, ctx) {
+                        Ok(()) => {
+                            let name = self.filename().to_string();
+                            vec![Effect::SetMessage(format!("Saved {name}"))]
+                        }
+                        Err(e) => vec![Effect::SetMessage(format!("Save failed: {e}"))],
                     }
-                    effects
                 }
-                Err(e) => vec![Effect::SetMessage(format!("Save failed: {e}"))],
-            },
+            }
             Action::Tick => {
                 let mut effects = self.handle_tick(&mut doc, ctx);
                 // Request inlay hints when viewport changes
@@ -1002,9 +1130,57 @@ impl Component for Buffer {
                 }
                 vec![]
             }
+            Event::FormatDone { path } => {
+                if self.path.as_deref() == Some(path.as_path()) && self.pending_save_after_format {
+                    self.pending_save_after_format = false;
+                    match self.save(&mut doc, ctx) {
+                        Ok(()) => {
+                            let name = self.filename().to_string();
+                            let mut effects = vec![Effect::SetMessage(format!("Saved {name}"))];
+                            if let Some(ref path) = self.path {
+                                effects.push(Effect::Emit(Event::FileSaved(path.clone())));
+                            }
+                            effects
+                        }
+                        Err(e) => vec![Effect::SetMessage(format!("Save failed: {e}"))],
+                    }
+                } else {
+                    vec![]
+                }
+            }
             Event::SetInlayHints { path, hints } => {
                 if self.path.as_deref() == Some(path.as_path()) && self.inlay_hints_enabled {
                     self.inlay_hints = hints.clone();
+                }
+                vec![]
+            }
+            Event::SetCompletions {
+                path,
+                items,
+                prefix_start_col,
+            } => {
+                if self.path.as_deref() == Some(path.as_path()) && !items.is_empty() {
+                    let mut items = items.clone();
+                    items.sort_by(|a, b| {
+                        let a_key = a.sort_text.as_deref().unwrap_or(&a.label);
+                        let b_key = b.sort_text.as_deref().unwrap_or(&b.label);
+                        a_key.cmp(b_key)
+                    });
+                    let filtered: Vec<usize> = (0..items.len()).collect();
+                    self.completion = Some(crate::CompletionState {
+                        items,
+                        filtered,
+                        selected: 0,
+                        prefix_start_col: *prefix_start_col,
+                    });
+                    self.update_completion_filter(&doc);
+                    if self
+                        .completion
+                        .as_ref()
+                        .map_or(true, |cs| cs.filtered.is_empty())
+                    {
+                        self.completion = None;
+                    }
                 }
                 vec![]
             }
@@ -1549,6 +1725,189 @@ impl Buffer {
 
         self.cursor_screen_pos = cursor_pos;
         ctx.cursor_pos = cursor_pos;
+
+        // Render completion popup
+        if let Some(ref cs) = self.completion {
+            if !cs.filtered.is_empty() {
+                if let Some((cx, cy)) = cursor_pos {
+                    let max_visible = 10usize;
+                    let item_count = cs.filtered.len();
+                    let visible_count = item_count.min(max_visible);
+                    let popup_height = visible_count as u16 + 2; // +2 for borders
+                    let popup_width = {
+                        let max_label = cs
+                            .filtered
+                            .iter()
+                            .map(|&i| {
+                                let item = &cs.items[i];
+                                let detail_len = item
+                                    .detail
+                                    .as_ref()
+                                    .map(|d| d.len() + 2) // " : detail"
+                                    .unwrap_or(0);
+                                item.label.len() + detail_len
+                            })
+                            .max()
+                            .unwrap_or(10);
+                        (max_label + 4).min(60) as u16 // +4 for padding/borders
+                    };
+
+                    // Position below cursor, or above if near bottom
+                    let frame_area = frame.area();
+                    let popup_y = if cy + 1 + popup_height <= frame_area.y + frame_area.height {
+                        cy + 1
+                    } else {
+                        cy.saturating_sub(popup_height)
+                    };
+                    let popup_x =
+                        cx.min((frame_area.x + frame_area.width).saturating_sub(popup_width));
+
+                    let popup_area = Rect::new(popup_x, popup_y, popup_width, popup_height);
+
+                    // Scroll the visible window to keep selected item visible
+                    let scroll_offset = if cs.selected >= max_visible {
+                        cs.selected - max_visible + 1
+                    } else {
+                        0
+                    };
+
+                    let visible_items: Vec<Line> = cs
+                        .filtered
+                        .iter()
+                        .enumerate()
+                        .skip(scroll_offset)
+                        .take(max_visible)
+                        .map(|(i, &idx)| {
+                            let item = &cs.items[idx];
+                            let inner_width = (popup_width as usize).saturating_sub(2);
+                            let is_selected = i == cs.selected;
+                            let base_style = if is_selected {
+                                Style::default().bg(Color::DarkGray).fg(Color::White)
+                            } else {
+                                Style::default()
+                            };
+                            let detail_style = if is_selected {
+                                Style::default()
+                                    .bg(Color::DarkGray)
+                                    .fg(Color::Rgb(140, 140, 140))
+                            } else {
+                                Style::default().fg(Color::DarkGray)
+                            };
+                            let mut spans = vec![Span::styled(&item.label, base_style)];
+                            let mut used = item.label.len();
+                            if let Some(ref detail) = item.detail {
+                                let remaining = inner_width.saturating_sub(used + 1);
+                                if remaining > 0 {
+                                    let truncated: String =
+                                        detail.chars().take(remaining).collect();
+                                    spans.push(Span::styled(
+                                        format!(" {}", truncated),
+                                        detail_style,
+                                    ));
+                                    used += 1 + truncated.len();
+                                }
+                            }
+                            // Pad remainder
+                            if used < inner_width {
+                                spans
+                                    .push(Span::styled(" ".repeat(inner_width - used), base_style));
+                            }
+                            Line::from(spans)
+                        })
+                        .collect();
+
+                    use ratatui::widgets::{Block, Borders, Clear};
+                    frame.render_widget(Clear, popup_area);
+                    let block = Block::default().borders(Borders::ALL);
+                    let inner = block.inner(popup_area);
+                    frame.render_widget(block, popup_area);
+                    let popup_paragraph = Paragraph::new(visible_items);
+                    frame.render_widget(popup_paragraph, inner);
+                }
+            }
+        }
+    }
+
+    fn accept_completion(&mut self, doc: &mut TextDoc) -> Vec<Effect> {
+        let cs = match self.completion.take() {
+            Some(cs) => cs,
+            None => return vec![],
+        };
+        let Some(&idx) = cs.filtered.get(cs.selected) else {
+            return vec![];
+        };
+        let item = &cs.items[idx];
+
+        if let Some(ref te) = item.text_edit {
+            let mut edits = vec![te.clone()];
+            edits.extend(item.additional_edits.iter().cloned());
+            // Compute cursor position after the primary edit's new_text
+            let new_text = &te.new_text;
+            let newlines = new_text.chars().filter(|&c| c == '\n').count();
+            let (end_row, end_col) = if newlines > 0 {
+                let last_line_len = new_text.rsplit('\n').next().unwrap_or("").chars().count();
+                (te.range.start.row + newlines, last_line_len)
+            } else {
+                (
+                    te.range.start.row,
+                    te.range.start.col + new_text.chars().count(),
+                )
+            };
+            self.apply_text_edits(doc, edits);
+            self.cursor_row = end_row;
+            self.cursor_col = end_col;
+        } else {
+            // Delete from prefix_start_col to cursor_col, then insert
+            let start_idx = doc.char_idx(self.cursor_row, cs.prefix_start_col);
+            let end_idx = doc.char_idx(self.cursor_row, self.cursor_col);
+            if start_idx < end_idx {
+                let se = self.syntax_edit_remove(doc, start_idx, end_idx);
+                doc.remove(start_idx, end_idx);
+                self.apply_syntax_edit(doc, se);
+                self.cursor_col = cs.prefix_start_col;
+            }
+            self.yank_text(doc, &item.insert_text);
+            if !item.additional_edits.is_empty() {
+                self.apply_text_edits(doc, item.additional_edits.clone());
+            }
+        }
+
+        self.dirty = true;
+        vec![]
+    }
+
+    fn update_completion_filter(&mut self, doc: &TextDoc) {
+        let cs = match self.completion.as_mut() {
+            Some(cs) => cs,
+            None => return,
+        };
+        let prefix: String = if self.cursor_col > cs.prefix_start_col {
+            let line = doc.line(self.cursor_row);
+            line.chars()
+                .skip(cs.prefix_start_col)
+                .take(self.cursor_col - cs.prefix_start_col)
+                .collect()
+        } else {
+            String::new()
+        };
+        let prefix_lower = prefix.to_lowercase();
+        cs.filtered = cs
+            .items
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| {
+                let text = item
+                    .filter_text
+                    .as_deref()
+                    .unwrap_or(&item.label)
+                    .to_lowercase();
+                text.starts_with(&prefix_lower)
+            })
+            .map(|(i, _)| i)
+            .collect();
+        if cs.selected >= cs.filtered.len() {
+            cs.selected = cs.filtered.len().saturating_sub(1);
+        }
     }
 }
 

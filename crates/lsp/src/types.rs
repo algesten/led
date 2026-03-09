@@ -1,7 +1,9 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use led_core::lsp_types::{EditorCodeAction, EditorDiagnostic, EditorInlayHint, EditorTextEdit};
+use led_core::lsp_types::{
+    EditorCodeAction, EditorCompletionItem, EditorDiagnostic, EditorInlayHint, EditorTextEdit,
+};
 use lsp_types::CodeActionOrCommand;
 
 use crate::server::LanguageServer;
@@ -52,8 +54,16 @@ pub(crate) enum RequestResult {
         path: PathBuf,
         diagnostics: Vec<EditorDiagnostic>,
     },
+    Completion {
+        path: PathBuf,
+        items: Vec<EditorCompletionItem>,
+        prefix_start_col: usize,
+    },
     Error {
         message: String,
+    },
+    FormatDone {
+        path: PathBuf,
     },
 }
 

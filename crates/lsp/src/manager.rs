@@ -2,15 +2,16 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use led_core::lsp_types::{
-    DiagnosticSeverity as EditorSeverity, EditorCodeAction, EditorDiagnostic, EditorInlayHint,
-    EditorRange, EditorTextEdit,
+    DiagnosticSeverity as EditorSeverity, EditorCodeAction, EditorCompletionItem, EditorDiagnostic,
+    EditorInlayHint, EditorRange, EditorTextEdit,
 };
 use led_core::{Effect, Event};
 use lsp_types::{
-    CodeActionOrCommand, CodeActionParams, CodeActionResponse, DocumentFormattingParams,
-    FormattingOptions, GotoDefinitionParams, GotoDefinitionResponse, InlayHint, InlayHintLabel,
-    InlayHintParams, NumberOrString, Position, PublishDiagnosticsParams, Range, RenameParams,
-    TextDocumentIdentifier, TextDocumentItem, TextDocumentPositionParams, TextEdit, WorkspaceEdit,
+    CodeActionOrCommand, CodeActionParams, CodeActionResponse, CompletionParams,
+    CompletionResponse, DocumentFormattingParams, FormattingOptions, GotoDefinitionParams,
+    GotoDefinitionResponse, InlayHint, InlayHintLabel, InlayHintParams, NumberOrString, Position,
+    PublishDiagnosticsParams, Range, RenameParams, TextDocumentIdentifier, TextDocumentItem,
+    TextDocumentPositionParams, TextEdit, WorkspaceEdit,
 };
 use serde_json::Value;
 
@@ -597,7 +598,122 @@ impl LspManager {
         });
     }
 
-    pub(crate) fn spawn_format(&self, path: PathBuf) {
+    pub(crate) fn spawn_format(&self, path: PathBuf, lines: Vec<String>) {
+        let Some(server) = self.server_for_path(&path) else {
+            return;
+        };
+        let event_tx = self.event_tx.clone();
+        let waker = self.waker.clone();
+
+        tokio::spawn(async move {
+            let uri = match uri_from_path(&path) {
+                Some(u) => u,
+                None => {
+                    let _ =
+                        event_tx.send(LspManagerEvent::RequestResult(RequestResult::FormatDone {
+                            path,
+                        }));
+                    if let Some(ref w) = waker {
+                        w();
+                    }
+                    return;
+                }
+            };
+
+            // Step 1: Organize imports via codeAction
+            let oi_params = CodeActionParams {
+                text_document: TextDocumentIdentifier { uri: uri.clone() },
+                range: Range {
+                    start: Position {
+                        line: 0,
+                        character: 0,
+                    },
+                    end: Position {
+                        line: 0,
+                        character: 0,
+                    },
+                },
+                context: lsp_types::CodeActionContext {
+                    diagnostics: vec![],
+                    only: Some(vec![lsp_types::CodeActionKind::new(
+                        "source.organizeImports",
+                    )]),
+                    trigger_kind: Some(lsp_types::CodeActionTriggerKind::AUTOMATIC),
+                },
+                work_done_progress_params: Default::default(),
+                partial_result_params: Default::default(),
+            };
+
+            let oi_result: Result<Option<CodeActionResponse>, _> =
+                server.request("textDocument/codeAction", &oi_params).await;
+
+            if let Ok(Some(actions)) = oi_result {
+                for action in actions {
+                    if let CodeActionOrCommand::CodeAction(ca) = action {
+                        if let Some(edit) = ca.edit {
+                            let file_edits = workspace_edit_to_file_edits(&edit);
+                            for (edit_path, edits) in file_edits {
+                                if edit_path == path && !edits.is_empty() {
+                                    let _ = event_tx.send(LspManagerEvent::RequestResult(
+                                        RequestResult::Format {
+                                            path: edit_path,
+                                            edits,
+                                        },
+                                    ));
+                                    if let Some(ref w) = waker {
+                                        w();
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Step 2: Format document
+            let fmt_params = DocumentFormattingParams {
+                text_document: TextDocumentIdentifier { uri },
+                options: FormattingOptions {
+                    tab_size: 4,
+                    insert_spaces: true,
+                    ..Default::default()
+                },
+                work_done_progress_params: Default::default(),
+            };
+
+            let result: Result<Option<Vec<TextEdit>>, _> =
+                server.request("textDocument/formatting", &fmt_params).await;
+
+            match result {
+                Ok(Some(edits)) => {
+                    let editor_edits: Vec<EditorTextEdit> = edits
+                        .iter()
+                        .map(|e| lsp_edit_to_editor(e, &lines))
+                        .collect();
+                    let _ = event_tx.send(LspManagerEvent::RequestResult(RequestResult::Format {
+                        path: path.clone(),
+                        edits: editor_edits,
+                    }));
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    let _ = event_tx.send(LspManagerEvent::RequestResult(RequestResult::Error {
+                        message: e.message,
+                    }));
+                }
+            }
+
+            // Step 3: Always signal format done
+            let _ = event_tx.send(LspManagerEvent::RequestResult(RequestResult::FormatDone {
+                path,
+            }));
+            if let Some(ref w) = waker {
+                w();
+            }
+        });
+    }
+
+    pub(crate) fn spawn_completion(&self, path: PathBuf, row: usize, col: usize) {
         let Some(server) = self.server_for_path(&path) else {
             return;
         };
@@ -610,37 +726,36 @@ impl LspManager {
                 Some(u) => u,
                 None => return,
             };
-            let params = DocumentFormattingParams {
-                text_document: TextDocumentIdentifier { uri },
-                options: FormattingOptions {
-                    tab_size: 4,
-                    insert_spaces: true,
-                    ..Default::default()
+            let params = CompletionParams {
+                text_document_position: TextDocumentPositionParams {
+                    text_document: TextDocumentIdentifier { uri },
+                    position: lsp_pos(row, col, &lines),
                 },
                 work_done_progress_params: Default::default(),
+                partial_result_params: Default::default(),
+                context: Some(lsp_types::CompletionContext {
+                    trigger_kind: lsp_types::CompletionTriggerKind::INVOKED,
+                    trigger_character: None,
+                }),
             };
 
-            let result: Result<Option<Vec<TextEdit>>, _> =
-                server.request("textDocument/formatting", &params).await;
+            let result: Result<Option<CompletionResponse>, _> =
+                server.request("textDocument/completion", &params).await;
 
-            match result {
-                Ok(Some(edits)) => {
-                    let editor_edits: Vec<EditorTextEdit> = edits
-                        .iter()
-                        .map(|e| lsp_edit_to_editor(e, &lines))
-                        .collect();
-                    let _ = event_tx.send(LspManagerEvent::RequestResult(RequestResult::Format {
-                        path,
-                        edits: editor_edits,
-                    }));
-                }
-                Ok(None) => {}
+            let (items, prefix_start_col) = match result {
+                Ok(Some(resp)) => convert_completion_response(resp, row, col, &lines),
+                Ok(None) => (vec![], col),
                 Err(e) => {
-                    let _ = event_tx.send(LspManagerEvent::RequestResult(RequestResult::Error {
-                        message: e.message,
-                    }));
+                    log::error!("LSP completion failed: {}", e.message);
+                    (vec![], col)
                 }
-            }
+            };
+
+            let _ = event_tx.send(LspManagerEvent::RequestResult(RequestResult::Completion {
+                path,
+                items,
+                prefix_start_col,
+            }));
             if let Some(ref w) = waker {
                 w();
             }
@@ -832,8 +947,22 @@ impl LspManager {
             RequestResult::Diagnostics { path, diagnostics } => {
                 effects.push(Effect::Emit(Event::SetDiagnostics { path, diagnostics }));
             }
+            RequestResult::Completion {
+                path,
+                items,
+                prefix_start_col,
+            } => {
+                effects.push(Effect::Emit(Event::SetCompletions {
+                    path,
+                    items,
+                    prefix_start_col,
+                }));
+            }
             RequestResult::Error { message } => {
                 effects.push(Effect::SetMessage(format!("LSP: {}", message)));
+            }
+            RequestResult::FormatDone { path } => {
+                effects.push(Effect::Emit(Event::FormatDone { path }));
             }
         }
 
@@ -912,6 +1041,103 @@ impl LspManager {
             }
         });
     }
+}
+
+fn convert_completion_response(
+    resp: CompletionResponse,
+    row: usize,
+    col: usize,
+    lines: &[String],
+) -> (Vec<EditorCompletionItem>, usize) {
+    let lsp_items = match resp {
+        CompletionResponse::Array(items) => items,
+        CompletionResponse::List(list) => list.items,
+    };
+
+    // Compute prefix_start_col from first text_edit, or scan backward for word chars
+    let prefix_start_col = lsp_items
+        .iter()
+        .find_map(|item| {
+            if let Some(lsp_types::CompletionTextEdit::Edit(ref te)) = item.text_edit {
+                let pos = from_lsp_pos(&te.range.start, lines);
+                Some(pos.col)
+            } else {
+                None
+            }
+        })
+        .unwrap_or_else(|| {
+            // Scan backward from col for word characters
+            if row < lines.len() {
+                let line: Vec<char> = lines[row].chars().collect();
+                let mut start = col;
+                while start > 0 {
+                    let ch = line[start - 1];
+                    if ch.is_alphanumeric() || ch == '_' {
+                        start -= 1;
+                    } else {
+                        break;
+                    }
+                }
+                start
+            } else {
+                col
+            }
+        });
+
+    let items: Vec<EditorCompletionItem> = lsp_items
+        .into_iter()
+        .map(|item| {
+            let label = item.label.clone();
+            let detail = item.detail.clone();
+
+            let (insert_text, text_edit) = match item.text_edit {
+                Some(lsp_types::CompletionTextEdit::Edit(ref te)) => {
+                    (te.new_text.clone(), Some(lsp_edit_to_editor(te, lines)))
+                }
+                Some(lsp_types::CompletionTextEdit::InsertAndReplace(ref te)) => {
+                    // Use the insert range
+                    let start = from_lsp_pos(&te.insert.start, lines);
+                    let end = from_lsp_pos(&te.insert.end, lines);
+                    (
+                        te.new_text.clone(),
+                        Some(EditorTextEdit {
+                            range: EditorRange { start, end },
+                            new_text: te.new_text.clone(),
+                        }),
+                    )
+                }
+                None => {
+                    let text = item
+                        .insert_text
+                        .as_deref()
+                        .unwrap_or(&item.label)
+                        .to_string();
+                    (text, None)
+                }
+            };
+
+            let additional_edits = item
+                .additional_text_edits
+                .as_ref()
+                .map(|edits| edits.iter().map(|e| lsp_edit_to_editor(e, lines)).collect())
+                .unwrap_or_default();
+
+            let sort_text = item.sort_text.clone();
+            let filter_text = item.filter_text.clone();
+
+            EditorCompletionItem {
+                label,
+                detail,
+                insert_text,
+                text_edit,
+                additional_edits,
+                sort_text,
+                filter_text,
+            }
+        })
+        .collect();
+
+    (items, prefix_start_col)
 }
 
 fn convert_diagnostics(path: &Path, lsp_diags: &[lsp_types::Diagnostic]) -> Vec<EditorDiagnostic> {

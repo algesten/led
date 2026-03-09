@@ -138,6 +138,14 @@ impl LanguageServer {
                         dynamic_registration: Some(false),
                         related_document_support: Some(false),
                     }),
+                    completion: Some(lsp_types::CompletionClientCapabilities {
+                        dynamic_registration: Some(false),
+                        completion_item: Some(lsp_types::CompletionItemCapability {
+                            snippet_support: Some(false),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    }),
                     ..Default::default()
                 }),
                 window: Some(lsp_types::WindowClientCapabilities {

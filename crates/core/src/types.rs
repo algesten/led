@@ -5,7 +5,9 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 use crate::file_status::{FileStatus, LineStatus};
-use crate::lsp_types::{EditorCodeAction, EditorDiagnostic, EditorInlayHint, EditorTextEdit};
+use crate::lsp_types::{
+    EditorCodeAction, EditorCompletionItem, EditorDiagnostic, EditorInlayHint, EditorTextEdit,
+};
 
 pub type Waker = Arc<dyn Fn() + Send + Sync>;
 
@@ -242,6 +244,22 @@ pub enum Event {
     OpenMessages,
     /// Signal that a buffer's content changed (LspManager reads changes from DocStore)
     BufferChanged {
+        path: PathBuf,
+    },
+    /// LSP: request completion at cursor position
+    LspCompletion {
+        path: PathBuf,
+        row: usize,
+        col: usize,
+    },
+    /// LSP response: set completion items for a file
+    SetCompletions {
+        path: PathBuf,
+        items: Vec<EditorCompletionItem>,
+        prefix_start_col: usize,
+    },
+    /// LSP format pipeline completed (always fires, even on error/no-server)
+    FormatDone {
         path: PathBuf,
     },
 }

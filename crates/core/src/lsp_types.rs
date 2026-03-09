@@ -43,6 +43,17 @@ pub struct EditorCodeAction {
     pub index: usize,
 }
 
+#[derive(Debug, Clone)]
+pub struct EditorCompletionItem {
+    pub label: String,
+    pub detail: Option<String>,
+    pub insert_text: String,
+    pub text_edit: Option<EditorTextEdit>,
+    pub additional_edits: Vec<EditorTextEdit>,
+    pub sort_text: Option<String>,
+    pub filter_text: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DiagnosticSeverity {
     Error,
