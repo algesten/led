@@ -344,12 +344,12 @@ async fn run(
                 ConfigFile::Keys => {
                     if let Some(km) = config::reload_keymap() {
                         shell.set_keymap(km);
-                        shell.message = Some("Reloaded keys.toml.".into());
+                        shell.set_message("Reloaded keys.toml");
                     }
                 }
                 ConfigFile::Theme => {
                     shell.set_theme(theme::load_theme());
-                    shell.message = Some("Reloaded theme.toml.".into());
+                    shell.set_message("Reloaded theme.toml");
                 }
             },
             Received::AppEvent(AppEvent::Wakeup) => {

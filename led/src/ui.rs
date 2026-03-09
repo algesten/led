@@ -182,7 +182,7 @@ fn render_main_content(shell: &mut Shell, frame: &mut Frame, area: Rect) {
 
 fn render_status_bar(shell: &mut Shell, frame: &mut Frame, area: Rect) {
     // Shell-level message takes priority
-    if let Some(ref msg) = shell.message {
+    if let Some(msg) = shell.message_text() {
         let left = format!(" {msg}");
         let padding = (area.width as usize).saturating_sub(left.len());
         let bar = format!("{left}{:padding$}", "");

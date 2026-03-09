@@ -119,7 +119,7 @@ pub struct Shell {
     pub components: Vec<Box<dyn Component>>,
     last_touched: Vec<Instant>,
     active_tab: usize,
-    pub message: Option<String>,
+    pub message: Option<(String, Instant)>,
     chord: ChordState,
     keymap: Keymap,
     pub focus: PanelSlot,
@@ -334,7 +334,7 @@ impl Shell {
                     && key.modifiers.contains(KeyModifiers::CONTROL));
             if is_abort {
                 self.rename_modal = None;
-                self.message = Some("Aborted.".into());
+                self.set_message("Aborted");
             } else if key.code == KeyCode::Enter {
                 let modal = self.rename_modal.take().unwrap();
                 if !modal.input.is_empty() {
@@ -400,7 +400,7 @@ impl Shell {
                     && key.modifiers.contains(KeyModifiers::CONTROL));
             if is_abort {
                 self.modal = None;
-                self.message = Some("Aborted.".into());
+                self.set_message("Aborted");
             } else if key.code == KeyCode::Enter {
                 let confirmed = self.modal.as_ref().unwrap().input == "yes";
                 if confirmed {
@@ -414,7 +414,7 @@ impl Shell {
                         }
                     }
                 } else {
-                    self.message = Some("Aborted.".into());
+                    self.set_message("Aborted");
                 }
                 self.modal = None;
             } else if key.code == KeyCode::Backspace {
@@ -440,7 +440,7 @@ impl Shell {
             if let Some(action) = self.keymap.lookup_chord(&prefix, &combo) {
                 return self.execute_action(action);
             }
-            self.message = Some("Unknown chord.".into());
+            self.set_message("Unknown chord");
             return InputResult::Continue;
         }
 
@@ -586,7 +586,7 @@ impl Shell {
             Action::Abort => {
                 if self.modal.is_some() {
                     self.modal = None;
-                    self.message = Some("Aborted.".into());
+                    self.set_message("Aborted");
                 } else {
                     self.message = None;
                     // Dispatch to active buffer to clear mark
@@ -677,21 +677,31 @@ impl Shell {
                     } = event
                     {
                         use led_core::lsp_types::DiagnosticSeverity;
-                        let worst = diagnostics.iter().fold(None, |acc: Option<DiagnosticSeverity>, d| {
-                            Some(match acc {
-                                None => d.severity,
-                                Some(prev) => {
-                                    // Error < Warning < Info < Hint (Error is worst)
-                                    match (prev, d.severity) {
-                                        (DiagnosticSeverity::Error, _) | (_, DiagnosticSeverity::Error) => DiagnosticSeverity::Error,
-                                        (DiagnosticSeverity::Warning, _) | (_, DiagnosticSeverity::Warning) => DiagnosticSeverity::Warning,
-                                        (DiagnosticSeverity::Info, _) | (_, DiagnosticSeverity::Info) => DiagnosticSeverity::Info,
-                                        _ => DiagnosticSeverity::Hint,
+                        // Compute worst severity, ignoring Hint (too noisy for the file browser)
+                        let worst = diagnostics
+                            .iter()
+                            .filter(|d| d.severity != DiagnosticSeverity::Hint)
+                            .fold(None, |acc: Option<DiagnosticSeverity>, d| {
+                                Some(match acc {
+                                    None => d.severity,
+                                    Some(prev) => {
+                                        // Error < Warning < Info (Error is worst)
+                                        match (prev, d.severity) {
+                                            (DiagnosticSeverity::Error, _)
+                                            | (_, DiagnosticSeverity::Error) => {
+                                                DiagnosticSeverity::Error
+                                            }
+                                            (DiagnosticSeverity::Warning, _)
+                                            | (_, DiagnosticSeverity::Warning) => {
+                                                DiagnosticSeverity::Warning
+                                            }
+                                            _ => DiagnosticSeverity::Info,
+                                        }
                                     }
-                                }
-                            })
-                        });
-                        self.file_statuses.set_diagnostic_severity(path.clone(), worst);
+                                })
+                            });
+                        self.file_statuses
+                            .set_diagnostic_severity(path.clone(), worst);
                     }
                     // Pre-broadcast: clear preview state before ConfirmSearch
                     // effects run, so the FocusLost → PreviewClosed cascade
@@ -735,7 +745,7 @@ impl Shell {
                     self.register(component);
                 }
                 Effect::SetMessage(msg) => {
-                    self.message = Some(msg);
+                    self.set_message(&msg);
                 }
                 Effect::SetLspStatus(status) => {
                     self.lsp_status = Some(status);
@@ -847,7 +857,7 @@ impl Shell {
             } else if self.active_tab >= tabs.len() {
                 self.active_tab = tabs.len() - 1;
             }
-            self.message = Some(format!("Killed {label}."));
+            self.set_message(&format!("Killed {label}"));
             self.notify_active_buffer();
         }
     }
@@ -1027,6 +1037,19 @@ impl Shell {
         self.process_effects(effects);
     }
 
+    pub fn set_message(&mut self, msg: &str) {
+        self.message = Some((msg.to_string(), Instant::now()));
+    }
+
+    pub fn message_text(&self) -> Option<&str> {
+        if let Some((ref text, instant)) = self.message {
+            if instant.elapsed() < Duration::from_millis(1500) {
+                return Some(text);
+            }
+        }
+        None
+    }
+
     pub fn set_keymap(&mut self, keymap: Keymap) {
         self.keymap = keymap;
     }
@@ -1049,18 +1072,29 @@ impl Shell {
     }
 
     pub fn needs_redraw_in(&self) -> Option<Duration> {
-        if let Some((_, instant)) = &self.debug_flash {
-            let elapsed = instant.elapsed();
-            let deadline = Duration::from_millis(500);
+        let mut soonest: Option<Duration> = None;
+        let mut consider = |deadline: Duration, elapsed: Duration| {
             if elapsed < deadline {
-                return Some(deadline - elapsed);
+                let remaining = deadline - elapsed;
+                soonest = Some(match soonest {
+                    Some(s) => s.min(remaining),
+                    None => remaining,
+                });
             }
+        };
+        if let Some((_, instant)) = &self.debug_flash {
+            consider(Duration::from_millis(500), instant.elapsed());
+        }
+        if let Some((_, instant)) = &self.message {
+            consider(Duration::from_millis(1500), instant.elapsed());
         }
         // Redraw periodically while LSP spinner is active.
         if self.lsp_status.as_ref().map_or(false, |s| s.busy) {
-            return Some(Duration::from_millis(80));
+            return Some(soonest.map_or(Duration::from_millis(80), |s| {
+                s.min(Duration::from_millis(80))
+            }));
         }
-        None
+        soonest
     }
 
     pub fn needs_persist_in(&self) -> Option<Duration> {
