@@ -217,12 +217,15 @@ pub const DEFAULT_KEYS_TOML: &str = r#"# led keybindings
 "alt+left" = "jump_back"
 "alt+f" = "jump_forward"
 "alt+right" = "jump_forward"
+"alt+o" = "outline"
+"alt+]" = "match_bracket"
 
 [keys."ctrl+x"]
 "ctrl+c" = "quit"
 "ctrl+s" = "save"
 "k" = "kill_buffer"
 "ctrl+f" = "find_file"
+"i" = "sort_imports"
 
 [keys."ctrl+h"]
 "e" = "open_messages"

@@ -81,6 +81,9 @@ pub enum Action {
     JumpBack,
     JumpForward,
     OpenMessages,
+    Outline,
+    SortImports,
+    MatchBracket,
 }
 
 // ---------------------------------------------------------------------------
@@ -243,6 +246,15 @@ pub enum Event {
     },
 }
 
+#[derive(Debug, Clone, Default)]
+pub enum PickerKind {
+    #[default]
+    CodeAction,
+    Outline {
+        rows: Vec<usize>,
+    },
+}
+
 pub enum Effect {
     Emit(Event),
     Spawn(Box<dyn super::Component>),
@@ -275,5 +287,6 @@ pub enum Effect {
         title: String,
         items: Vec<String>,
         source_path: PathBuf,
+        kind: PickerKind,
     },
 }

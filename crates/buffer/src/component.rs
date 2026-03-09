@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use led_core::lsp_types::DiagnosticSeverity;
 use led_core::{
     Action, BLANK_STYLE, Component, Context, DrawContext, Effect, ElementStyle, Event, PanelClaim,
-    PanelSlot, TabDescriptor, TextDoc, Theme,
+    PanelSlot, PickerKind, TabDescriptor, TextDoc, Theme,
 };
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -13,9 +13,11 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
 use crate::color_hint::{evaluate_theme_line, parse_color_defs, scan_hex_color};
-use crate::syntax::HighlightSpan;
+use crate::syntax::{HighlightSpan, ImportItem};
 use crate::wrap::{chars_to_string, compute_chunks, expand_tabs, find_sub_line, visual_line_count};
 use crate::{Buffer, UndoEntry};
+
+use ropey::Rope;
 
 fn resolve_capture_style(theme: &Theme, capture_name: &str, text_style: Style) -> Style {
     let blank = BLANK_STYLE.to_style();
@@ -487,6 +489,7 @@ impl Component for Buffer {
                 | Action::Flush
                 | Action::SaveSession
                 | Action::RestoreSession
+                | Action::KillBuffer
                 | Action::FocusGained
                 | Action::FocusLost => {
                     // Fall through to normal handling below
@@ -711,6 +714,21 @@ impl Component for Buffer {
                 self.do_save_session(ctx);
                 vec![]
             }
+            Action::KillBuffer => {
+                if let (Some(conn), Some(path)) = (ctx.db, &self.path) {
+                    let root_str = ctx.root.to_string_lossy();
+                    let file_str = path.to_string_lossy();
+                    let _ = conn.execute(
+                        "DELETE FROM buffers WHERE root_path = ?1 AND file_path = ?2",
+                        rusqlite::params![&*root_str, &*file_str],
+                    );
+                    let _ = conn.execute(
+                        "DELETE FROM buffer_undo_state WHERE root_path = ?1 AND file_path = ?2",
+                        rusqlite::params![&*root_str, &*file_str],
+                    );
+                }
+                vec![]
+            }
             Action::Flush => {
                 if self.has_unpersisted_undo() {
                     self.flush_undo_to_db(ctx);
@@ -812,6 +830,95 @@ impl Component for Buffer {
                     self.last_hint_range = None;
                     vec![Effect::SetMessage("Inlay hints disabled".into())]
                 }
+            }
+            Action::Outline => {
+                if let Some(ref syntax) = self.syntax {
+                    let items = syntax.outline(doc.rope());
+                    if items.is_empty() {
+                        vec![Effect::SetMessage("No symbols found".into())]
+                    } else {
+                        let rows: Vec<usize> = items.iter().map(|i| i.row).collect();
+                        let display_items: Vec<String> = items
+                            .iter()
+                            .map(|item| {
+                                let indent = "  ".repeat(item.depth);
+                                if item.context.is_empty() {
+                                    format!("{indent}{}", item.name)
+                                } else {
+                                    format!("{indent}{} {}", item.context, item.name)
+                                }
+                            })
+                            .collect();
+                        if let Some(ref path) = self.path {
+                            vec![Effect::ShowPicker {
+                                title: "Outline".into(),
+                                items: display_items,
+                                source_path: path.clone(),
+                                kind: PickerKind::Outline { rows },
+                            }]
+                        } else {
+                            vec![]
+                        }
+                    }
+                } else {
+                    vec![Effect::SetMessage("No syntax tree available".into())]
+                }
+            }
+            Action::SortImports => {
+                if let Some(ref syntax) = self.syntax {
+                    let imports = syntax.imports(doc.rope());
+                    if imports.is_empty() {
+                        vec![Effect::SetMessage("No imports found".into())]
+                    } else {
+                        // Find contiguous import groups and sort each
+                        let sorted_text = sort_imports_text(doc.rope(), &imports);
+                        if let Some((start_byte, end_byte, new_text)) = sorted_text {
+                            let start_char = doc.rope().byte_to_char(start_byte);
+                            let end_char = doc.rope().byte_to_char(end_byte);
+                            let old_text: String =
+                                doc.rope().slice(start_char..end_char).to_string();
+                            if old_text != new_text {
+                                let cursor_before = (self.cursor_row, self.cursor_col);
+                                let se = self.syntax_edit_remove(&doc, start_char, end_char);
+                                doc.remove(start_char, end_char);
+                                self.apply_syntax_edit(&doc, se);
+                                let se = self.syntax_edit_insert(&doc, start_char, &new_text);
+                                doc.insert(start_char, &new_text);
+                                self.apply_syntax_edit(&doc, se);
+                                self.dirty = true;
+                                let cursor_after = (self.cursor_row, self.cursor_col);
+                                self.flush_pending();
+                                self.push_undo(UndoEntry {
+                                    op: crate::EditOp::Insert {
+                                        char_idx: 0,
+                                        text: old_text,
+                                    },
+                                    cursor_before: cursor_after,
+                                    cursor_after: cursor_before,
+                                    direction: 1,
+                                });
+                                vec![Effect::SetMessage("Imports sorted".into())]
+                            } else {
+                                vec![Effect::SetMessage("Imports already sorted".into())]
+                            }
+                        } else {
+                            vec![Effect::SetMessage("No imports to sort".into())]
+                        }
+                    }
+                } else {
+                    vec![Effect::SetMessage("No syntax tree available".into())]
+                }
+            }
+            Action::MatchBracket => {
+                if let Some(ref syntax) = self.syntax {
+                    if let Some((row, col)) =
+                        syntax.matching_bracket(doc.rope(), self.cursor_row, self.cursor_col)
+                    {
+                        self.cursor_row = row;
+                        self.cursor_col = col;
+                    }
+                }
+                vec![]
             }
             _ => vec![],
         };
@@ -993,6 +1100,47 @@ impl Buffer {
         for (line, span) in &raw_highlights {
             hl_map.entry(*line).or_default().push(span);
         }
+
+        // Pre-compute bracket matches for visible range
+        let start_byte = doc.rope().line_to_byte(self.scroll_offset);
+        let end_byte_bracket = if end_line >= total_lines {
+            doc.rope().len_bytes()
+        } else {
+            doc.rope().line_to_byte(end_line)
+        };
+        let bracket_matches = if let Some(ref syntax) = self.syntax {
+            syntax.bracket_ranges(doc.rope(), start_byte..end_byte_bracket)
+        } else {
+            Vec::new()
+        };
+
+        // Find bracket pair enclosing cursor for highlighting
+        let cursor_bracket = if let Some(ref syntax) = self.syntax {
+            syntax.matching_bracket(doc.rope(), self.cursor_row, self.cursor_col)
+        } else {
+            None
+        };
+
+        // Rainbow bracket colors
+        let rainbow_colors: Vec<Style> = (0..6)
+            .map(|i| {
+                let key = format!("brackets.rainbow_{}", i);
+                let s = ctx.theme.get(&key).to_style();
+                if s == BLANK_STYLE.to_style() {
+                    text_style
+                } else {
+                    s
+                }
+            })
+            .collect();
+        let bracket_match_style = ctx.theme.get("brackets.match").to_style();
+        let bracket_match_style = if bracket_match_style == BLANK_STYLE.to_style() {
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            bracket_match_style
+        };
 
         let is_theme = self
             .path
@@ -1180,9 +1328,74 @@ impl Buffer {
                                 .unwrap_or(display.len());
                             let de = char_map.get(hs.char_end).copied().unwrap_or(display.len());
                             let style =
-                                resolve_capture_style(ctx.theme, hs.capture_name, text_style);
+                                resolve_capture_style(ctx.theme, &hs.capture_name, text_style);
                             for i in ds.max(cs)..de.min(ce) {
                                 col_styles[i - cs] = style;
+                            }
+                        }
+                    }
+
+                    // Apply rainbow bracket colors
+                    let line_start_byte = doc.rope().line_to_byte(line_idx);
+                    for bm in &bracket_matches {
+                        if let Some(ci) = bm.color_index {
+                            let style = &rainbow_colors[ci % rainbow_colors.len()];
+                            // Check open bracket
+                            if bm.open_range.start >= line_start_byte {
+                                let open_line = doc.rope().byte_to_line(bm.open_range.start);
+                                if open_line == line_idx {
+                                    let char_start = doc.rope().byte_to_char(bm.open_range.start)
+                                        - doc.rope().line_to_char(line_idx);
+                                    let char_end = doc.rope().byte_to_char(bm.open_range.end)
+                                        - doc.rope().line_to_char(line_idx);
+                                    let ds =
+                                        char_map.get(char_start).copied().unwrap_or(display.len());
+                                    let de =
+                                        char_map.get(char_end).copied().unwrap_or(display.len());
+                                    for i in ds.max(cs)..de.min(ce) {
+                                        col_styles[i - cs] = *style;
+                                    }
+                                }
+                            }
+                            // Check close bracket
+                            if bm.close_range.start >= line_start_byte {
+                                let close_line = doc.rope().byte_to_line(bm.close_range.start);
+                                if close_line == line_idx {
+                                    let char_start = doc.rope().byte_to_char(bm.close_range.start)
+                                        - doc.rope().line_to_char(line_idx);
+                                    let char_end = doc.rope().byte_to_char(bm.close_range.end)
+                                        - doc.rope().line_to_char(line_idx);
+                                    let ds =
+                                        char_map.get(char_start).copied().unwrap_or(display.len());
+                                    let de =
+                                        char_map.get(char_end).copied().unwrap_or(display.len());
+                                    for i in ds.max(cs)..de.min(ce) {
+                                        col_styles[i - cs] = *style;
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Highlight cursor bracket and its match
+                    if let Some((match_row, match_col)) = cursor_bracket {
+                        // Highlight the bracket at cursor position
+                        let cursor_char_dc = char_map
+                            .get(self.cursor_col)
+                            .copied()
+                            .unwrap_or(display.len());
+                        if line_idx == self.cursor_row
+                            && cursor_char_dc >= cs
+                            && cursor_char_dc < ce
+                        {
+                            col_styles[cursor_char_dc - cs] = bracket_match_style;
+                        }
+                        // Highlight the matching bracket
+                        if line_idx == match_row {
+                            let match_dc =
+                                char_map.get(match_col).copied().unwrap_or(display.len());
+                            if match_dc >= cs && match_dc < ce {
+                                col_styles[match_dc - cs] = bracket_match_style;
                             }
                         }
                     }
@@ -1463,4 +1676,56 @@ impl Component for BufferFactory {
     }
 
     fn draw(&mut self, _frame: &mut Frame, _area: Rect, _ctx: &mut DrawContext) {}
+}
+
+/// Sort imports: returns (start_byte, end_byte, sorted_text) or None.
+fn sort_imports_text(rope: &Rope, imports: &[ImportItem]) -> Option<(usize, usize, String)> {
+    if imports.is_empty() {
+        return None;
+    }
+
+    // Find contiguous groups of imports (separated by blank lines)
+    let mut groups: Vec<Vec<&ImportItem>> = Vec::new();
+    let mut current_group: Vec<&ImportItem> = vec![&imports[0]];
+
+    for i in 1..imports.len() {
+        let prev = &imports[i - 1];
+        let curr = &imports[i];
+        // If there's a gap of more than 1 line between imports, start a new group
+        if curr.start_row > prev.end_row + 1 {
+            groups.push(std::mem::take(&mut current_group));
+        }
+        current_group.push(curr);
+    }
+    if !current_group.is_empty() {
+        groups.push(current_group);
+    }
+
+    // Sort each group by full_text and reconstruct
+    let overall_start = imports.first()?.start_byte;
+    let overall_end = imports.last()?.end_byte;
+
+    let mut result = String::new();
+    for (gi, group) in groups.iter().enumerate() {
+        let mut sorted: Vec<&str> = group.iter().map(|i| i.full_text.as_str()).collect();
+        sorted.sort();
+        for text in &sorted {
+            result.push_str(text);
+            if !text.ends_with('\n') {
+                result.push('\n');
+            }
+        }
+        if gi + 1 < groups.len() {
+            result.push('\n');
+        }
+    }
+
+    // Remove trailing newline if the original didn't have one
+    let original_end_char = rope.byte_to_char(overall_end);
+    let end_is_newline = original_end_char > 0 && rope.char(original_end_char - 1) == '\n';
+    if !end_is_newline && result.ends_with('\n') {
+        result.pop();
+    }
+
+    Some((overall_start, overall_end, result))
 }

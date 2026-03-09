@@ -1235,6 +1235,7 @@ dependencies = [
  "log",
  "notify",
  "ratatui",
+ "regex",
  "rmp-serde",
  "ropey",
  "rusqlite",

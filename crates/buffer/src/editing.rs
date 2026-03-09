@@ -1,6 +1,8 @@
 use led_core::TextDoc;
 use led_core::lsp_types::EditorTextEdit;
+use ropey::Rope;
 
+use crate::syntax::IndentDelta;
 use crate::wrap::{compute_chunks, display_col_to_char_idx, expand_tabs, find_sub_line};
 use crate::{Buffer, EditKind, EditOp, UndoEntry};
 
@@ -176,7 +178,128 @@ impl Buffer {
     }
 
     pub fn insert_newline(&mut self, doc: &mut TextDoc) {
-        self.insert_char(doc, '\n');
+        let cursor_before = (self.cursor_row, self.cursor_col);
+
+        // Snapshot the tree before the edit for two-pass indent
+        let old_tree = self.syntax.as_ref().map(|s| s.clone_tree());
+
+        // Insert newline
+        let nl_idx = doc.char_idx(self.cursor_row, self.cursor_col);
+        let se = self.syntax_edit_insert(&*doc, nl_idx, "\n");
+        doc.insert_char(nl_idx, '\n');
+        self.apply_syntax_edit(&*doc, se);
+        self.cursor_row += 1;
+        self.cursor_col = 0;
+        self.dirty = true;
+
+        // Compute and insert auto-indent
+        let indent_text = self.compute_auto_indent(doc, self.cursor_row, old_tree.as_ref());
+        if !indent_text.is_empty() {
+            let indent_idx = doc.char_idx(self.cursor_row, self.cursor_col);
+            let se = self.syntax_edit_insert(&*doc, indent_idx, &indent_text);
+            doc.insert(indent_idx, &indent_text);
+            self.apply_syntax_edit(&*doc, se);
+            self.cursor_col = indent_text.chars().count();
+        }
+
+        // Single undo entry for the whole operation
+        let full_text = format!("\n{indent_text}");
+        let cursor_after = (self.cursor_row, self.cursor_col);
+        self.flush_pending();
+        self.push_undo(UndoEntry {
+            op: EditOp::Insert {
+                char_idx: nl_idx,
+                text: full_text,
+            },
+            cursor_before,
+            cursor_after,
+            direction: 1,
+        });
+    }
+
+    /// Compute auto-indent for a line using two-pass tree-sitter analysis with regex fallback.
+    fn compute_auto_indent(
+        &self,
+        doc: &TextDoc,
+        line: usize,
+        old_tree: Option<&tree_sitter::Tree>,
+    ) -> String {
+        let rope = doc.rope();
+
+        // Try tree-sitter based indent
+        if let Some(ref syntax) = self.syntax {
+            // Pass 1: compute suggestion using old tree (before newline)
+            let old_suggestion =
+                old_tree.and_then(|tree| syntax.suggest_indent_with_tree(rope, tree, line));
+
+            // Pass 2: compute suggestion using current tree (after newline)
+            let new_suggestion = syntax.suggest_indent(rope, line);
+
+            // Resolve: use new suggestion if it differs from old and passes error filter
+            let suggestion = match (old_suggestion, new_suggestion) {
+                (Some(old), Some(new)) => {
+                    if old.delta != new.delta && (!new.within_error || old.within_error) {
+                        Some(new)
+                    } else {
+                        Some(old)
+                    }
+                }
+                (None, Some(new)) => Some(new),
+                (Some(old), None) => Some(old),
+                (None, None) => None,
+            };
+
+            if let Some(suggestion) = suggestion {
+                // If within error and we have regex patterns, try regex fallback
+                if suggestion.within_error {
+                    if let Some(indent) = self.regex_indent(doc, line) {
+                        return indent;
+                    }
+                }
+
+                let basis_indent = get_line_indent(rope, suggestion.basis_row);
+                return apply_indent_delta(&basis_indent, suggestion.delta);
+            }
+        }
+
+        // Fallback: regex only
+        if let Some(indent) = self.regex_indent(doc, line) {
+            return indent;
+        }
+
+        // Last resort: copy previous line's indentation
+        if let Some(basis) = find_prev_nonempty_line(rope, line) {
+            return get_line_indent(rope, basis);
+        }
+
+        String::new()
+    }
+
+    /// Regex-based indent fallback for when tree is in error state.
+    fn regex_indent(&self, doc: &TextDoc, line: usize) -> Option<String> {
+        let syntax = self.syntax.as_ref()?;
+        let rope = doc.rope();
+
+        let basis = find_prev_nonempty_line(rope, line)?;
+        let basis_text: String = rope.line(basis).chars().collect();
+        let basis_indent = get_line_indent(rope, basis);
+
+        // Check if basis line matches increase_indent_pattern
+        if let Some(ref re) = syntax.increase_indent_pattern {
+            if re.is_match(&basis_text) {
+                return Some(apply_indent_delta(&basis_indent, IndentDelta::Greater));
+            }
+        }
+
+        // Check if current line matches decrease_indent_pattern
+        let current_text: String = rope.line(line).chars().collect();
+        if let Some(ref re) = syntax.decrease_indent_pattern {
+            if re.is_match(&current_text) {
+                return Some(apply_indent_delta(&basis_indent, IndentDelta::Less));
+            }
+        }
+
+        None
     }
 
     pub fn delete_char_backward(&mut self, doc: &mut TextDoc) {
@@ -539,4 +662,58 @@ impl Buffer {
 
 fn is_word_char(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
+}
+
+/// Get the leading whitespace of a line as a string.
+fn get_line_indent(rope: &Rope, line: usize) -> String {
+    let line_text = rope.line(line);
+    let mut indent = String::new();
+    for ch in line_text.chars() {
+        if ch == ' ' || ch == '\t' {
+            indent.push(ch);
+        } else {
+            break;
+        }
+    }
+    indent
+}
+
+/// Apply an indent delta to a basis indentation string.
+fn apply_indent_delta(basis_indent: &str, delta: IndentDelta) -> String {
+    match delta {
+        IndentDelta::Greater => {
+            let mut s = basis_indent.to_string();
+            s.push('\t');
+            s
+        }
+        IndentDelta::Less => {
+            // Remove one indent level (one tab or N spaces)
+            let s = basis_indent.to_string();
+            if s.ends_with('\t') {
+                s[..s.len() - 1].to_string()
+            } else {
+                // Remove up to 4 trailing spaces
+                let trimmed = s.trim_end_matches(' ');
+                let removed = s.len() - trimmed.len();
+                if removed > 0 {
+                    let remove_count = removed.min(4);
+                    s[..s.len() - remove_count].to_string()
+                } else {
+                    s
+                }
+            }
+        }
+        IndentDelta::Equal => basis_indent.to_string(),
+    }
+}
+
+/// Find the previous non-empty line before `line`.
+fn find_prev_nonempty_line(rope: &Rope, line: usize) -> Option<usize> {
+    for row in (0..line).rev() {
+        let line_text = rope.line(row);
+        if line_text.chars().any(|c| !c.is_whitespace()) {
+            return Some(row);
+        }
+    }
+    if line > 0 { Some(0) } else { None }
 }

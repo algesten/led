@@ -169,6 +169,15 @@ async fn main() -> io::Result<()> {
         }
     }
 
+    // If an explicit file was given on the CLI, ensure it's focused (session
+    // restore may have overridden focus/active-tab).
+    if explicit_file {
+        if let Some(path) = arg_path.as_ref() {
+            shell.activate_buffer_by_path(path);
+        }
+        shell.set_focus(PanelSlot::Main);
+    }
+
     // Safety: if there are no tabs, ensure focus is on the side panel
     if !shell.has_tabs() {
         shell.set_focus(PanelSlot::Side);

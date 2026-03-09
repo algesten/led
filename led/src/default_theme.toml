@@ -362,6 +362,15 @@ untracked       = "$x022"
 gutter_added    = "$x034"
 gutter_modified = "$x172"
 
+[brackets]
+match            = { fg = "$bright_yellow", bold = true }
+rainbow_0        = "$x033"
+rainbow_1        = "$x170"
+rainbow_2        = "$x034"
+rainbow_3        = "$x172"
+rainbow_4        = "$x069"
+rainbow_5        = "$x135"
+
 [syntax]
 keyword          = "$syntax_keyword"
 function         = "$syntax_keyword"

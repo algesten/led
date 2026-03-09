@@ -93,6 +93,7 @@ pub struct PickerModal {
     pub items: Vec<String>,
     pub selected: usize,
     pub source_path: PathBuf,
+    pub kind: led_core::PickerKind,
 }
 
 struct Env {
@@ -372,10 +373,26 @@ impl Shell {
                 self.picker_modal = None;
             } else if key.code == KeyCode::Enter {
                 let modal = self.picker_modal.take().unwrap();
-                let effects = vec![Effect::Emit(Event::LspCodeActionResolve {
-                    path: modal.source_path,
-                    index: modal.selected,
-                })];
+                let effects = match modal.kind {
+                    led_core::PickerKind::CodeAction => {
+                        vec![Effect::Emit(Event::LspCodeActionResolve {
+                            path: modal.source_path,
+                            index: modal.selected,
+                        })]
+                    }
+                    led_core::PickerKind::Outline { rows } => {
+                        if let Some(&row) = rows.get(modal.selected) {
+                            vec![Effect::Emit(Event::GoToPosition {
+                                path: modal.source_path,
+                                row,
+                                col: 0,
+                                scroll_offset: None,
+                            })]
+                        } else {
+                            vec![]
+                        }
+                    }
+                };
                 self.process_effects(effects);
             } else if key.code == KeyCode::Up {
                 if let Some(ref mut modal) = self.picker_modal {
@@ -667,6 +684,7 @@ impl Shell {
                             items: actions.iter().map(|a| a.title.clone()).collect(),
                             selected: 0,
                             source_path: path.clone(),
+                            kind: led_core::PickerKind::CodeAction,
                         });
                         continue;
                     }
@@ -815,12 +833,14 @@ impl Shell {
                     title,
                     items,
                     source_path,
+                    kind,
                 } => {
                     self.picker_modal = Some(PickerModal {
                         title,
                         items,
                         selected: 0,
                         source_path,
+                        kind,
                     });
                 }
             }
@@ -833,19 +853,15 @@ impl Shell {
                 .tab()
                 .map(|t| t.label.clone())
                 .unwrap_or_default();
+            // Let the component clean up its persisted state
+            {
+                let mut ctx = make_ctx(&self.env, &mut self.docs);
+                self.components[comp_idx].handle_action(Action::KillBuffer, &mut ctx);
+            }
             // Emit BufferClosed before removing the component
             if let Some(path) = self.components[comp_idx].tab().and_then(|t| t.path.clone()) {
                 let effects = vec![Effect::Emit(Event::BufferClosed(path.clone()))];
                 self.process_effects(effects);
-                // Clear cursor/scroll data from the DB so reopening starts fresh
-                if let Some(conn) = self.env.db.as_ref() {
-                    let root_str = self.env.root.to_string_lossy();
-                    let file_str = path.to_string_lossy();
-                    let _ = conn.execute(
-                        "DELETE FROM buffers WHERE root_path = ?1 AND file_path = ?2",
-                        rusqlite::params![&*root_str, &*file_str],
-                    );
-                }
             }
             self.components.remove(comp_idx);
             self.last_touched.remove(comp_idx);
@@ -988,6 +1004,16 @@ impl Shell {
             active_tab: self.active_tab,
             focus: self.focus,
             show_side_panel: self.show_side_panel,
+        }
+    }
+
+    pub fn activate_buffer_by_path(&mut self, path: &std::path::Path) {
+        if let Some(idx) = self
+            .components
+            .iter()
+            .position(|c| c.tab().and_then(|t| t.path).as_deref() == Some(path))
+        {
+            self.activate_tab_for_component(idx);
         }
     }
 
