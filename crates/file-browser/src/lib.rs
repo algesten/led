@@ -520,7 +520,11 @@ impl Component for FileBrowser {
                             ),
                         ]));
                     } else {
-                        let padded = format!("{name_part}{:w$}", "", w = max_width.saturating_sub(name_width));
+                        let padded = format!(
+                            "{name_part}{:w$}",
+                            "",
+                            w = max_width.saturating_sub(name_width)
+                        );
                         lines.push(Line::from(Span::styled(padded, name_style)));
                     }
                 } else {

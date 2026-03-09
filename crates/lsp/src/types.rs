@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use led_core::lsp_types::{EditorCodeAction, EditorInlayHint, EditorTextEdit};
+use led_core::lsp_types::{EditorCodeAction, EditorDiagnostic, EditorInlayHint, EditorTextEdit};
 use lsp_types::CodeActionOrCommand;
 
 use crate::server::LanguageServer;
@@ -47,6 +47,10 @@ pub(crate) enum RequestResult {
     InlayHints {
         path: PathBuf,
         hints: Vec<EditorInlayHint>,
+    },
+    Diagnostics {
+        path: PathBuf,
+        diagnostics: Vec<EditorDiagnostic>,
     },
     Error {
         message: String,

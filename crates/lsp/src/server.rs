@@ -134,6 +134,10 @@ impl LanguageServer {
                         dynamic_registration: Some(false),
                         resolve_support: None,
                     }),
+                    diagnostic: Some(lsp_types::DiagnosticClientCapabilities {
+                        dynamic_registration: Some(false),
+                        related_document_support: Some(false),
+                    }),
                     ..Default::default()
                 }),
                 window: Some(lsp_types::WindowClientCapabilities {
@@ -200,7 +204,7 @@ impl LanguageServer {
         method: &str,
         params: &P,
     ) -> Result<R, LspError> {
-        log::info!("LSP -> request: {}", method);
+        log::debug!("LSP -> request: {}", method);
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let req_id = RequestId::Int(id);
 
@@ -241,7 +245,7 @@ impl LanguageServer {
     }
 
     pub(crate) fn notify<P: serde::Serialize>(&self, method: &str, params: &P) {
-        log::info!("LSP -> notify: {}", method);
+        log::debug!("LSP -> notify: {}", method);
         let msg = serde_json::json!({
             "jsonrpc": "2.0",
             "method": method,

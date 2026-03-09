@@ -126,7 +126,7 @@ pub(crate) fn spawn_reader(
             if has_id && has_method {
                 // Server request — auto-reply
                 let method = msg["method"].as_str().unwrap_or("");
-                log::info!("LSP <- server request: {}", method);
+                log::debug!("LSP <- server request: {}", method);
                 // Forward registerCapability as a notification for LspManager to handle
                 if method == "client/registerCapability" {
                     let params = msg.get("params").cloned().unwrap_or(Value::Null);
@@ -174,7 +174,7 @@ pub(crate) fn spawn_reader(
                             log::info!("LSP <- response error id={:?}: {}", id, message);
                             let _ = sender.send(Err(LspError { message }));
                         } else {
-                            log::info!("LSP <- response id={:?}", id);
+                            log::debug!("LSP <- response id={:?}", id);
                             let result = msg.get("result").cloned().unwrap_or(Value::Null);
                             let _ = sender.send(Ok(result));
                         }

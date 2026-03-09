@@ -208,7 +208,7 @@ impl LspManager {
         }
         let Some(server) = self.server_for_path(path) else {
             // Server not ready yet — remember so we can open when it starts
-            log::info!(
+            log::debug!(
                 "LSP didOpen deferred (server not ready): {}",
                 path.display()
             );
@@ -238,6 +238,7 @@ impl LspManager {
             },
         );
         self.opened_docs.insert(path.to_path_buf());
+        self.spawn_pull_diagnostics(path.to_path_buf(), server);
     }
 
     pub(crate) fn send_did_change(&self, path: &Path, changes: &[EditorTextEdit], version: i32) {
@@ -275,6 +276,7 @@ impl LspManager {
                 content_changes,
             },
         );
+        self.spawn_pull_diagnostics(path.to_path_buf(), server.clone());
     }
 
     pub(crate) fn send_did_save(&self, path: &Path) {
@@ -292,6 +294,7 @@ impl LspManager {
                 text: Some(text),
             },
         );
+        self.spawn_pull_diagnostics(path.to_path_buf(), server.clone());
     }
 
     pub(crate) fn send_did_close(&mut self, path: &Path) {
@@ -659,35 +662,7 @@ impl LspManager {
                             path.display(),
                             params.diagnostics.len()
                         );
-                        let lines = read_file_lines(&path);
-                        let diagnostics: Vec<EditorDiagnostic> = params
-                            .diagnostics
-                            .iter()
-                            .map(|d| {
-                                let severity = match d.severity {
-                                    Some(lsp_types::DiagnosticSeverity::ERROR) => {
-                                        EditorSeverity::Error
-                                    }
-                                    Some(lsp_types::DiagnosticSeverity::WARNING) => {
-                                        EditorSeverity::Warning
-                                    }
-                                    Some(lsp_types::DiagnosticSeverity::INFORMATION) => {
-                                        EditorSeverity::Info
-                                    }
-                                    Some(lsp_types::DiagnosticSeverity::HINT) => {
-                                        EditorSeverity::Hint
-                                    }
-                                    _ => EditorSeverity::Error,
-                                };
-                                let start = from_lsp_pos(&d.range.start, &lines);
-                                let end = from_lsp_pos(&d.range.end, &lines);
-                                EditorDiagnostic {
-                                    range: EditorRange { start, end },
-                                    severity,
-                                    message: d.message.clone(),
-                                }
-                            })
-                            .collect();
+                        let diagnostics = convert_diagnostics(&path, &params.diagnostics);
                         effects.push(Effect::Emit(Event::SetDiagnostics { path, diagnostics }));
                     }
                 }
@@ -720,19 +695,9 @@ impl LspManager {
                                     effects.push(self.lsp_status_effect());
                                 }
                                 lsp_types::WorkDoneProgress::Report(ref report) => {
-                                    log::info!(
-                                        "LSP progress report: token={} message={:?} pct={:?}",
-                                        token,
-                                        report.message,
-                                        report.percentage
-                                    );
                                     // Treat 100% as implicit End — rust-analyzer
                                     // delays the real End notification.
                                     if report.percentage == Some(100) {
-                                        log::info!(
-                                            "LSP progress 100%, auto-ending: token={}",
-                                            token
-                                        );
                                         self.progress_tokens.remove(&token);
                                     } else if let Some(state) = self.progress_tokens.get_mut(&token)
                                     {
@@ -765,14 +730,20 @@ impl LspManager {
             "experimental/serverStatus" => {
                 let quiescent = notif.params.get("quiescent").and_then(|v| v.as_bool());
                 let message = notif.params.get("message").and_then(|v| v.as_str());
-                log::info!(
+                log::debug!(
                     "LSP serverStatus: quiescent={:?} message={:?}",
                     quiescent,
                     message
                 );
                 if let Some(q) = quiescent {
+                    let was_busy = !self.quiescent;
                     self.quiescent = q;
                     effects.push(self.lsp_status_effect());
+                    // When server becomes quiescent, pull fresh diagnostics
+                    // to replace any stale push diagnostics from early analysis.
+                    if was_busy && q {
+                        self.pull_all_diagnostics();
+                    }
                 }
             }
             "client/registerCapability" => {
@@ -858,6 +829,9 @@ impl LspManager {
             RequestResult::InlayHints { path, hints } => {
                 effects.push(Effect::Emit(Event::SetInlayHints { path, hints }));
             }
+            RequestResult::Diagnostics { path, diagnostics } => {
+                effects.push(Effect::Emit(Event::SetDiagnostics { path, diagnostics }));
+            }
             RequestResult::Error { message } => {
                 effects.push(Effect::SetMessage(format!("LSP: {}", message)));
             }
@@ -865,4 +839,100 @@ impl LspManager {
 
         effects
     }
+
+    /// Pull diagnostics for all open documents.
+    /// Called when the server transitions to quiescent.
+    pub(crate) fn pull_all_diagnostics(&self) {
+        for (path, server) in self.open_docs_with_servers() {
+            self.spawn_pull_diagnostics(path, server);
+        }
+    }
+
+    fn open_docs_with_servers(&self) -> Vec<(PathBuf, Arc<LanguageServer>)> {
+        self.opened_docs
+            .iter()
+            .filter_map(|path| {
+                let server = self.server_for_path(path)?;
+                Some((path.clone(), server))
+            })
+            .collect()
+    }
+
+    fn spawn_pull_diagnostics(&self, path: PathBuf, server: Arc<LanguageServer>) {
+        let event_tx = self.event_tx.clone();
+        let waker = self.waker.clone();
+
+        tokio::spawn(async move {
+            let uri = match uri_from_path(&path) {
+                Some(u) => u,
+                None => return,
+            };
+            let params = lsp_types::DocumentDiagnosticParams {
+                text_document: TextDocumentIdentifier { uri },
+                identifier: None,
+                previous_result_id: None,
+                work_done_progress_params: Default::default(),
+                partial_result_params: Default::default(),
+            };
+
+            let result: Result<lsp_types::DocumentDiagnosticReportResult, _> =
+                server.request("textDocument/diagnostic", &params).await;
+
+            let diagnostics = match result {
+                Ok(lsp_types::DocumentDiagnosticReportResult::Report(
+                    lsp_types::DocumentDiagnosticReport::Full(report),
+                )) => {
+                    log::info!(
+                        "LSP pull diagnostics: {} count={}",
+                        path.display(),
+                        report.full_document_diagnostic_report.items.len()
+                    );
+                    convert_diagnostics(&path, &report.full_document_diagnostic_report.items)
+                }
+                Ok(_) => {
+                    // Unchanged or partial — keep existing diagnostics
+                    return;
+                }
+                Err(e) => {
+                    log::debug!(
+                        "LSP pull diagnostics failed for {}: {}",
+                        path.display(),
+                        e.message
+                    );
+                    return;
+                }
+            };
+
+            let _ = event_tx.send(LspManagerEvent::RequestResult(RequestResult::Diagnostics {
+                path,
+                diagnostics,
+            }));
+            if let Some(ref w) = waker {
+                w();
+            }
+        });
+    }
+}
+
+fn convert_diagnostics(path: &Path, lsp_diags: &[lsp_types::Diagnostic]) -> Vec<EditorDiagnostic> {
+    let lines = read_file_lines(path);
+    lsp_diags
+        .iter()
+        .map(|d| {
+            let severity = match d.severity {
+                Some(lsp_types::DiagnosticSeverity::ERROR) => EditorSeverity::Error,
+                Some(lsp_types::DiagnosticSeverity::WARNING) => EditorSeverity::Warning,
+                Some(lsp_types::DiagnosticSeverity::INFORMATION) => EditorSeverity::Info,
+                Some(lsp_types::DiagnosticSeverity::HINT) => EditorSeverity::Hint,
+                _ => EditorSeverity::Error,
+            };
+            let start = from_lsp_pos(&d.range.start, &lines);
+            let end = from_lsp_pos(&d.range.end, &lines);
+            EditorDiagnostic {
+                range: EditorRange { start, end },
+                severity,
+                message: d.message.clone(),
+            }
+        })
+        .collect()
 }

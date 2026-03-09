@@ -90,7 +90,7 @@ impl Buffer {
             if !self.disk_deleted {
                 self.disk_deleted = true;
                 return vec![Effect::SetMessage(format!(
-                    "Warning: {} deleted externally.",
+                    "Warning: {} deleted externally",
                     self.filename()
                 ))];
             }
@@ -119,7 +119,7 @@ impl Buffer {
             if !self.disk_modified {
                 self.disk_modified = true;
                 return vec![Effect::SetMessage(format!(
-                    "Warning: {} changed on disk (you have unsaved changes).",
+                    "Warning: {} changed on disk (you have unsaved changes)",
                     self.filename()
                 ))];
             }
@@ -135,7 +135,7 @@ impl Buffer {
             }
             self.clamp_cursor_col(&*doc);
             let mut effects = vec![Effect::SetMessage(format!(
-                "Reloaded {} (changed on disk).",
+                "Reloaded {} (changed on disk)",
                 self.filename()
             ))];
             if let Some(ref path) = self.path {

@@ -56,8 +56,12 @@ impl FileStatusStore {
 
     pub fn set_diagnostic_severity(&mut self, path: PathBuf, severity: Option<DiagnosticSeverity>) {
         match severity {
-            Some(s) => { self.diagnostics.insert(path, s); }
-            None => { self.diagnostics.remove(&path); }
+            Some(s) => {
+                self.diagnostics.insert(path, s);
+            }
+            None => {
+                self.diagnostics.remove(&path);
+            }
         }
     }
 

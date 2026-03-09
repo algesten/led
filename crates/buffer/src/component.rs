@@ -202,15 +202,20 @@ impl Buffer {
         if self.diagnostics.is_empty() {
             return;
         }
-        // Find the next diagnostic after the cursor
+        // Find the next diagnostic after the cursor (skip hints)
         let after = self
             .diagnostics
             .iter()
+            .filter(|d| d.severity != DiagnosticSeverity::Hint)
             .find(|d| {
                 d.range.start.row > self.cursor_row
                     || (d.range.start.row == self.cursor_row && d.range.start.col > self.cursor_col)
             })
-            .or_else(|| self.diagnostics.first()); // wrap around
+            .or_else(|| {
+                self.diagnostics
+                    .iter()
+                    .find(|d| d.severity != DiagnosticSeverity::Hint)
+            }); // wrap around
         if let Some(d) = after {
             self.cursor_row = d.range.start.row.min(doc.line_count().saturating_sub(1));
             self.cursor_col = d.range.start.col.min(doc.line_len(self.cursor_row));
@@ -225,11 +230,17 @@ impl Buffer {
             .diagnostics
             .iter()
             .rev()
+            .filter(|d| d.severity != DiagnosticSeverity::Hint)
             .find(|d| {
                 d.range.start.row < self.cursor_row
                     || (d.range.start.row == self.cursor_row && d.range.start.col < self.cursor_col)
             })
-            .or_else(|| self.diagnostics.last()); // wrap around
+            .or_else(|| {
+                self.diagnostics
+                    .iter()
+                    .rev()
+                    .find(|d| d.severity != DiagnosticSeverity::Hint)
+            }); // wrap around
         if let Some(d) = before {
             self.cursor_row = d.range.start.row.min(doc.line_count().saturating_sub(1));
             self.cursor_col = d.range.start.col.min(doc.line_len(self.cursor_row));
@@ -595,7 +606,7 @@ impl Component for Buffer {
                     match self.save(&mut doc, ctx) {
                         Ok(()) => {
                             let name = self.filename().to_string();
-                            let mut effects = vec![Effect::SetMessage(format!("Saved {name}."))];
+                            let mut effects = vec![Effect::SetMessage(format!("Saved {name}"))];
                             if let Some(ref path) = self.path {
                                 effects.push(Effect::Emit(Event::FileSaved(path.clone())));
                             }
@@ -608,7 +619,7 @@ impl Component for Buffer {
             Action::SaveForce => match self.save(&mut doc, ctx) {
                 Ok(()) => {
                     let name = self.filename().to_string();
-                    let mut effects = vec![Effect::SetMessage(format!("Saved {name}."))];
+                    let mut effects = vec![Effect::SetMessage(format!("Saved {name}"))];
                     if let Some(ref path) = self.path {
                         effects.push(Effect::Emit(Event::FileSaved(path.clone())));
                     }
@@ -1109,7 +1120,10 @@ impl Buffer {
                     };
                     // Right gutter: diagnostic indicator (circle) or color preview
                     let diag_severity = self.diagnostics.iter().find_map(|d| {
-                        if d.range.start.row <= line_idx && d.range.end.row >= line_idx {
+                        if d.severity != DiagnosticSeverity::Hint
+                            && d.range.start.row <= line_idx
+                            && d.range.end.row >= line_idx
+                        {
                             Some(d.severity)
                         } else {
                             None
@@ -1213,9 +1227,12 @@ impl Buffer {
                                 c => c,
                             };
                             for i in ds.max(cs)..de.min(ce) {
-                                col_styles[i - cs] = col_styles[i - cs]
-                                    .add_modifier(Modifier::UNDERLINED)
-                                    .fg(fg_color);
+                                let s = col_styles[i - cs].fg(fg_color);
+                                col_styles[i - cs] = if diag.severity != DiagnosticSeverity::Hint {
+                                    s.add_modifier(Modifier::UNDERLINED)
+                                } else {
+                                    s
+                                };
                             }
                         }
                     }
