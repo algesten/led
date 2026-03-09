@@ -670,6 +670,29 @@ impl Shell {
                         });
                         continue;
                     }
+                    // Intercept SetDiagnostics to track per-file severity
+                    if let Event::SetDiagnostics {
+                        ref path,
+                        ref diagnostics,
+                    } = event
+                    {
+                        use led_core::lsp_types::DiagnosticSeverity;
+                        let worst = diagnostics.iter().fold(None, |acc: Option<DiagnosticSeverity>, d| {
+                            Some(match acc {
+                                None => d.severity,
+                                Some(prev) => {
+                                    // Error < Warning < Info < Hint (Error is worst)
+                                    match (prev, d.severity) {
+                                        (DiagnosticSeverity::Error, _) | (_, DiagnosticSeverity::Error) => DiagnosticSeverity::Error,
+                                        (DiagnosticSeverity::Warning, _) | (_, DiagnosticSeverity::Warning) => DiagnosticSeverity::Warning,
+                                        (DiagnosticSeverity::Info, _) | (_, DiagnosticSeverity::Info) => DiagnosticSeverity::Info,
+                                        _ => DiagnosticSeverity::Hint,
+                                    }
+                                }
+                            })
+                        });
+                        self.file_statuses.set_diagnostic_severity(path.clone(), worst);
+                    }
                     // Pre-broadcast: clear preview state before ConfirmSearch
                     // effects run, so the FocusLost → PreviewClosed cascade
                     // won't restore the pre-preview tab.

@@ -2,6 +2,8 @@ use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
+use crate::lsp_types::DiagnosticSeverity;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FileStatus {
     GitModified,
@@ -25,6 +27,7 @@ pub struct LineStatus {
 pub struct FileStatusStore {
     files: HashMap<PathBuf, HashSet<FileStatus>>,
     lines: HashMap<PathBuf, Vec<LineStatus>>,
+    diagnostics: HashMap<PathBuf, DiagnosticSeverity>,
     pub branch: Option<String>,
 }
 
@@ -49,6 +52,30 @@ impl FileStatusStore {
 
     pub fn set_line_statuses(&mut self, path: PathBuf, statuses: Vec<LineStatus>) {
         self.lines.insert(path, statuses);
+    }
+
+    pub fn set_diagnostic_severity(&mut self, path: PathBuf, severity: Option<DiagnosticSeverity>) {
+        match severity {
+            Some(s) => { self.diagnostics.insert(path, s); }
+            None => { self.diagnostics.remove(&path); }
+        }
+    }
+
+    pub fn diagnostic_severity(&self, path: &Path) -> Option<DiagnosticSeverity> {
+        self.diagnostics.get(path).copied()
+    }
+
+    pub fn directory_diagnostic_severity(&self, dir: &Path) -> Option<DiagnosticSeverity> {
+        let mut worst: Option<DiagnosticSeverity> = None;
+        for (path, &sev) in &self.diagnostics {
+            if path.starts_with(dir) && path != dir {
+                worst = Some(match worst {
+                    None => sev,
+                    Some(prev) => severity_worst(prev, sev),
+                });
+            }
+        }
+        worst
     }
 
     pub fn line_status_at(&self, path: &Path, row: usize) -> Option<LineStatusKind> {
@@ -128,6 +155,27 @@ pub fn resolve_display(statuses: &HashSet<FileStatus>) -> Option<StatusDisplay> 
         letter: lowest.letter,
         theme_key,
     })
+}
+
+fn severity_worst(a: DiagnosticSeverity, b: DiagnosticSeverity) -> DiagnosticSeverity {
+    fn rank(s: DiagnosticSeverity) -> u8 {
+        match s {
+            DiagnosticSeverity::Error => 0,
+            DiagnosticSeverity::Warning => 1,
+            DiagnosticSeverity::Info => 2,
+            DiagnosticSeverity::Hint => 3,
+        }
+    }
+    if rank(a) <= rank(b) { a } else { b }
+}
+
+pub fn diagnostic_theme(severity: DiagnosticSeverity) -> &'static str {
+    match severity {
+        DiagnosticSeverity::Error => "diagnostics.error",
+        DiagnosticSeverity::Warning => "diagnostics.warning",
+        DiagnosticSeverity::Info => "diagnostics.info",
+        DiagnosticSeverity::Hint => "diagnostics.hint",
+    }
 }
 
 pub fn line_status_theme(kind: LineStatusKind) -> &'static str {

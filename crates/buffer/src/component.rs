@@ -151,25 +151,6 @@ impl Buffer {
             return;
         }
 
-        // Check for diagnostic on current line
-        let diag_msg = self.diagnostics.iter().find_map(|d| {
-            if d.range.start.row <= self.cursor_row && d.range.end.row >= self.cursor_row {
-                Some(d.message.as_str())
-            } else {
-                None
-            }
-        });
-
-        if let Some(msg) = diag_msg {
-            let truncated: String = msg.chars().take(area.width as usize - 2).collect();
-            let padding = (area.width as usize).saturating_sub(truncated.len() + 2);
-            let bar = format!(" {truncated}{:padding$} ", "");
-            let diag_style = style.fg(Color::Yellow);
-            let paragraph = Paragraph::new(bar).style(diag_style);
-            frame.render_widget(paragraph, area);
-            return;
-        }
-
         let filename = self.filename();
         let modified = if self.dirty { " \u{25cf}" } else { "" };
         let branch = ctx.file_statuses.branch.as_deref().unwrap_or("");
@@ -1110,31 +1091,10 @@ impl Buffer {
                 let chunk_text = &display[cs..ce];
                 let mut spans: Vec<Span> = Vec::new();
 
-                // Gutter — left column: diagnostic or git status, right column: color preview
+                // Gutter — left column: git status, right column: diagnostic indicator
                 if chunk_i == skip {
-                    // Left gutter: diagnostic severity overrides git status
-                    let diag_severity = self.diagnostics.iter().find_map(|d| {
-                        if d.range.start.row <= line_idx && d.range.end.row >= line_idx {
-                            Some(d.severity)
-                        } else {
-                            None
-                        }
-                    });
-                    let left = if let Some(sev) = diag_severity {
-                        let key = match sev {
-                            DiagnosticSeverity::Error => "diagnostics.error",
-                            DiagnosticSeverity::Warning => "diagnostics.warning",
-                            DiagnosticSeverity::Info => "diagnostics.info",
-                            DiagnosticSeverity::Hint => "diagnostics.hint",
-                        };
-                        let fg_color = ctx.theme.get(key).to_style().fg.unwrap_or(match sev {
-                            DiagnosticSeverity::Error => Color::Red,
-                            DiagnosticSeverity::Warning => Color::Yellow,
-                            DiagnosticSeverity::Info => Color::Blue,
-                            DiagnosticSeverity::Hint => Color::Gray,
-                        });
-                        Span::styled("▎", Style::default().fg(fg_color))
-                    } else {
+                    // Left gutter: git change indicator
+                    let left = {
                         let line_kind = self
                             .path
                             .as_ref()
@@ -1147,8 +1107,33 @@ impl Buffer {
                             Span::styled(" ", gutter_style)
                         }
                     };
-                    // Right gutter: color preview
-                    let right = if let Some(ref hint) = color_hint {
+                    // Right gutter: diagnostic indicator (circle) or color preview
+                    let diag_severity = self.diagnostics.iter().find_map(|d| {
+                        if d.range.start.row <= line_idx && d.range.end.row >= line_idx {
+                            Some(d.severity)
+                        } else {
+                            None
+                        }
+                    });
+                    let right = if let Some(sev) = diag_severity {
+                        let key = match sev {
+                            DiagnosticSeverity::Error => "diagnostics.error",
+                            DiagnosticSeverity::Warning => "diagnostics.warning",
+                            DiagnosticSeverity::Info => "diagnostics.info",
+                            DiagnosticSeverity::Hint => "diagnostics.hint",
+                        };
+                        let fallback = match sev {
+                            DiagnosticSeverity::Error => Color::Red,
+                            DiagnosticSeverity::Warning => Color::Yellow,
+                            DiagnosticSeverity::Info => Color::Blue,
+                            DiagnosticSeverity::Hint => Color::Gray,
+                        };
+                        let fg_color = match ctx.theme.get(key).fg {
+                            Color::Reset => fallback,
+                            c => c,
+                        };
+                        Span::styled("●", Style::default().fg(fg_color))
+                    } else if let Some(ref hint) = color_hint {
                         if hint.bg != Color::Reset {
                             Span::styled("A", hint.to_style())
                         } else {
@@ -1211,11 +1196,21 @@ impl Buffer {
                             } else {
                                 display.len()
                             };
-                            let fg_color = match diag.severity {
+                            let fallback = match diag.severity {
                                 DiagnosticSeverity::Error => Color::Red,
                                 DiagnosticSeverity::Warning => Color::Yellow,
                                 DiagnosticSeverity::Info => Color::Blue,
                                 DiagnosticSeverity::Hint => Color::Gray,
+                            };
+                            let key = match diag.severity {
+                                DiagnosticSeverity::Error => "diagnostics.error",
+                                DiagnosticSeverity::Warning => "diagnostics.warning",
+                                DiagnosticSeverity::Info => "diagnostics.info",
+                                DiagnosticSeverity::Hint => "diagnostics.hint",
+                            };
+                            let fg_color = match ctx.theme.get(key).fg {
+                                Color::Reset => fallback,
+                                c => c,
                             };
                             for i in ds.max(cs)..de.min(ce) {
                                 col_styles[i - cs] = col_styles[i - cs]

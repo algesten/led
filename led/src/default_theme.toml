@@ -349,6 +349,12 @@ selected           = "$inverse_active"
 selected_unfocused = "$inverse_inactive"
 search_current     = "$inverse_bold"
 
+[diagnostics]
+error   = "$x196"
+warning = "$x178"
+info    = "$x033"
+hint    = "$x245"
+
 [git]
 modified        = "$x172"
 added           = "$x034"

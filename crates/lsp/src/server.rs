@@ -89,6 +89,12 @@ impl LanguageServer {
             initialization_options: None,
             capabilities: lsp_types::ClientCapabilities {
                 text_document: Some(lsp_types::TextDocumentClientCapabilities {
+                    synchronization: Some(lsp_types::TextDocumentSyncClientCapabilities {
+                        dynamic_registration: Some(false),
+                        will_save: Some(false),
+                        will_save_wait_until: Some(false),
+                        did_save: Some(true),
+                    }),
                     definition: Some(lsp_types::GotoCapability {
                         dynamic_registration: Some(false),
                         link_support: Some(true),
