@@ -25,6 +25,7 @@ use led_find_file::FindFilePanel;
 use led_git_status::GitStatus;
 use led_jump_list::JumpList;
 use led_lsp::LspManager;
+use led_workspace_watcher::WorkspaceWatcher;
 use session::SessionData;
 use shell::{InputResult, Shell};
 
@@ -111,6 +112,7 @@ async fn main() -> io::Result<()> {
         Box::new(GitStatus::new(root.clone(), Some(waker.clone()))),
         Box::new(JumpList::new()),
         Box::new(LspManager::new(root.clone(), Some(waker.clone()))),
+        Box::new(WorkspaceWatcher::new(root.clone(), Some(waker.clone()))),
         Box::new(led_messages::Messages::new(shared_log)),
         Box::new(picker::Picker::new()),
     ];

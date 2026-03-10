@@ -265,6 +265,8 @@ pub enum Event {
         path: PathBuf,
         generation: u64,
     },
+    /// The workspace file tree changed (files created/deleted/renamed externally).
+    WorkspaceChanged,
 }
 
 #[derive(Debug, Clone, Default)]

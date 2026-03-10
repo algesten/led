@@ -26,5 +26,6 @@ led_git_status = { workspace = true }
 led_jump_list = { workspace = true }
 led_lsp = { workspace = true }
 led_messages = { workspace = true }
+led_workspace_watcher = { workspace = true }
 log = { workspace = true }
 serde_json = { workspace = true }

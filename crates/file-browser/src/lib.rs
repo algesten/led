@@ -451,7 +451,7 @@ impl Component for FileBrowser {
             Event::TabActivated { path: Some(path) } => {
                 self.reveal(path);
             }
-            Event::Resume => {
+            Event::Resume | Event::WorkspaceChanged => {
                 self.rebuild();
             }
             _ => {}

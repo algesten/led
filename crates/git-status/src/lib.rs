@@ -273,7 +273,7 @@ impl Component for GitStatus {
             Event::TabActivated { path: Some(path) } => {
                 self.trigger_line_scan(path.clone());
             }
-            Event::Resume => {
+            Event::Resume | Event::WorkspaceChanged => {
                 self.trigger_file_scan();
             }
             _ => {}
