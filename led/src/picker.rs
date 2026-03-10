@@ -1,12 +1,51 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use led_core::{
     Action, Component, Context, DrawContext, Effect, Event, PanelClaim, PanelSlot, PickerKind,
 };
+use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
-use ratatui::Frame;
+
+// ---------------------------------------------------------------------------
+// Pure helpers
+// ---------------------------------------------------------------------------
+
+fn clamp_move_up(selected: usize) -> usize {
+    selected.saturating_sub(1)
+}
+
+fn clamp_move_down(selected: usize, len: usize) -> usize {
+    if selected + 1 < len {
+        selected + 1
+    } else {
+        selected
+    }
+}
+
+fn confirm_effects(kind: &PickerKind, source_path: &Path, selected: usize) -> Vec<Effect> {
+    match kind {
+        PickerKind::CodeAction => {
+            vec![Effect::Emit(Event::LspCodeActionResolve {
+                path: source_path.to_path_buf(),
+                index: selected,
+            })]
+        }
+        PickerKind::Outline { rows } => {
+            if let Some(&row) = rows.get(selected) {
+                vec![Effect::Emit(Event::GoToPosition {
+                    path: source_path.to_path_buf(),
+                    row,
+                    col: 0,
+                    scroll_offset: None,
+                })]
+            } else {
+                vec![]
+            }
+        }
+    }
+}
 
 pub struct Picker {
     active: bool,
@@ -35,29 +74,6 @@ impl Picker {
             inactive_claims: vec![],
         }
     }
-
-    fn confirm(&self) -> Vec<Effect> {
-        match &self.kind {
-            PickerKind::CodeAction => {
-                vec![Effect::Emit(Event::LspCodeActionResolve {
-                    path: self.source_path.clone(),
-                    index: self.selected,
-                })]
-            }
-            PickerKind::Outline { rows } => {
-                if let Some(&row) = rows.get(self.selected) {
-                    vec![Effect::Emit(Event::GoToPosition {
-                        path: self.source_path.clone(),
-                        row,
-                        col: 0,
-                        scroll_offset: None,
-                    })]
-                } else {
-                    vec![]
-                }
-            }
-        }
-    }
 }
 
 impl Component for Picker {
@@ -75,23 +91,18 @@ impl Component for Picker {
         }
         match action {
             Action::MoveUp => {
-                if self.selected > 0 {
-                    self.selected -= 1;
-                }
+                self.selected = clamp_move_up(self.selected);
                 vec![]
             }
             Action::MoveDown => {
-                if self.selected + 1 < self.items.len() {
-                    self.selected += 1;
-                }
+                self.selected = clamp_move_down(self.selected, self.items.len());
                 vec![]
             }
             Action::InsertNewline => {
-                let effects = self.confirm();
+                let mut effects = confirm_effects(&self.kind, &self.source_path, self.selected);
                 self.active = false;
-                let mut result = effects;
-                result.push(Effect::FocusPanel(PanelSlot::Main));
-                result
+                effects.push(Effect::FocusPanel(PanelSlot::Main));
+                effects
             }
             Action::Abort => {
                 self.active = false;
@@ -151,7 +162,13 @@ impl Component for Picker {
             0
         };
 
-        for (i, item) in self.items.iter().enumerate().skip(scroll).take(visible_items) {
+        for (i, item) in self
+            .items
+            .iter()
+            .enumerate()
+            .skip(scroll)
+            .take(visible_items)
+        {
             let row = (i - scroll) as u16;
             if row >= inner.height {
                 break;
@@ -169,10 +186,6 @@ impl Component for Picker {
     }
 
     fn context_name(&self) -> Option<&str> {
-        if self.active {
-            Some("picker")
-        } else {
-            None
-        }
+        if self.active { Some("picker") } else { None }
     }
 }

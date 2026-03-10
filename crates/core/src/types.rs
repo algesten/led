@@ -5,9 +5,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 use crate::file_status::{FileStatus, LineStatus};
-use crate::lsp_types::{
-    EditorCompletionItem, EditorDiagnostic, EditorInlayHint, EditorTextEdit,
-};
+use crate::lsp_types::{EditorCompletionItem, EditorDiagnostic, EditorInlayHint, EditorTextEdit};
 
 pub type Waker = Arc<dyn Fn() + Send + Sync>;
 

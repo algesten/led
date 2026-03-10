@@ -309,4 +309,3 @@ fn render_rename_modal(modal: &RenameModal, frame: &mut Frame, area: Rect) {
         frame.set_cursor_position(Position::new(cursor_x, input_area.y));
     }
 }
-
