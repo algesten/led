@@ -260,10 +260,26 @@ pub enum Event {
         items: Vec<EditorCompletionItem>,
         prefix_start_col: usize,
     },
+    /// LSP: resolve a completion item (fetch additionalTextEdits for auto-imports)
+    LspResolveCompletion {
+        path: PathBuf,
+        /// JSON-serialized lsp_types::CompletionItem
+        lsp_item_json: String,
+    },
+    /// LSP response: resolved completion's additional edits (auto-imports)
+    CompletionResolved {
+        path: PathBuf,
+        additional_edits: Vec<EditorTextEdit>,
+    },
     /// LSP format pipeline completed (always fires, even on error/no-server)
     FormatDone {
         path: PathBuf,
         generation: u64,
+    },
+    /// LSP server reports its completion trigger characters for a language.
+    SetCompletionTriggers {
+        extensions: Vec<String>,
+        triggers: Vec<String>,
     },
     /// The workspace file tree changed (files created/deleted/renamed externally).
     WorkspaceChanged,

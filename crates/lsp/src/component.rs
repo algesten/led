@@ -35,7 +35,7 @@ impl Component for LspManager {
                         } => {
                             log::info!("LSP server started: {} ({})", server.name, language_id);
                             self.pending_starts.remove(&language_id);
-                            self.servers.insert(language_id, server.clone());
+                            self.servers.insert(language_id.clone(), server.clone());
                             // Assume busy until server reports quiescent
                             self.quiescent = false;
                             effects.push(Effect::SetLspStatus(LspStatus {
@@ -43,6 +43,24 @@ impl Component for LspManager {
                                 busy: true,
                                 detail: None,
                             }));
+                            // Propagate completion trigger characters
+                            if let Some(caps) = server.capabilities.lock().unwrap().as_ref() {
+                                if let Some(ref cp) = caps.completion_provider {
+                                    if let Some(ref triggers) = cp.trigger_characters {
+                                        let extensions = self
+                                            .registry
+                                            .config_for_language(&language_id)
+                                            .map(|c| {
+                                                c.extensions.iter().map(|s| s.to_string()).collect()
+                                            })
+                                            .unwrap_or_default();
+                                        effects.push(Effect::Emit(Event::SetCompletionTriggers {
+                                            extensions,
+                                            triggers: triggers.clone(),
+                                        }));
+                                    }
+                                }
+                            }
                             // Send didOpen for any docs that were waiting for this server
                             let pending: Vec<std::path::PathBuf> =
                                 self.pending_opens.iter().cloned().collect();
@@ -152,6 +170,12 @@ impl Component for LspManager {
             Event::LspCompletion { path, row, col } => {
                 let line = doc_line(path, *row, ctx);
                 self.spawn_completion(path.clone(), *row, *col, line);
+            }
+            Event::LspResolveCompletion {
+                path,
+                lsp_item_json,
+            } => {
+                self.spawn_completion_resolve(path.clone(), lsp_item_json.clone());
             }
             _ => {}
         }

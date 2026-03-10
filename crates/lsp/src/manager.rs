@@ -859,6 +859,43 @@ impl LspManager {
         });
     }
 
+    pub(crate) fn spawn_completion_resolve(&self, path: PathBuf, lsp_item_json: String) {
+        let Some(server) = self.server_for_path(&path) else {
+            return;
+        };
+        let event_tx = self.event_tx.clone();
+        let waker = self.waker.clone();
+
+        tokio::spawn(async move {
+            let item: lsp_types::CompletionItem = match serde_json::from_str(&lsp_item_json) {
+                Ok(v) => v,
+                Err(_) => return,
+            };
+            let result: Result<lsp_types::CompletionItem, _> =
+                server.request("completionItem/resolve", &item).await;
+
+            if let Ok(resolved) = result {
+                if let Some(edits) = resolved.additional_text_edits {
+                    if !edits.is_empty() {
+                        let editor_edits: Vec<_> = edits
+                            .iter()
+                            .map(|e| lsp_edit_to_editor(e, &|_| None))
+                            .collect();
+                        let _ = event_tx.send(LspManagerEvent::RequestResult(
+                            RequestResult::CompletionResolved {
+                                path,
+                                additional_edits: editor_edits,
+                            },
+                        ));
+                    }
+                }
+            }
+            if let Some(ref w) = waker {
+                w();
+            }
+        });
+    }
+
     // -- Notification handling -----------------------------------------------
 
     pub(crate) fn handle_notification(
@@ -1097,6 +1134,15 @@ impl LspManager {
                     prefix_start_col,
                 }));
             }
+            RequestResult::CompletionResolved {
+                path,
+                additional_edits,
+            } => {
+                effects.push(Effect::Emit(Event::CompletionResolved {
+                    path,
+                    additional_edits,
+                }));
+            }
             RequestResult::Error { message } => {
                 effects.push(Effect::SetMessage(format!("LSP: {}", message)));
             }
@@ -1297,6 +1343,9 @@ fn convert_completion_response(
             let sort_text = item.sort_text.clone();
             let filter_text = item.filter_text.clone();
 
+            // Store raw LSP item as JSON for resolve requests
+            let lsp_completion = serde_json::to_string(&item).ok();
+
             EditorCompletionItem {
                 label,
                 detail,
@@ -1305,6 +1354,7 @@ fn convert_completion_response(
                 additional_edits,
                 sort_text,
                 filter_text,
+                lsp_completion,
             }
         })
         .collect();

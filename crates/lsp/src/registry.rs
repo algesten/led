@@ -69,4 +69,8 @@ impl LspRegistry {
     pub(crate) fn config_for_extension(&self, ext: &str) -> Option<&ServerConfig> {
         self.configs.iter().find(|c| c.extensions.contains(&ext))
     }
+
+    pub(crate) fn config_for_language(&self, language_id: &str) -> Option<&ServerConfig> {
+        self.configs.iter().find(|c| c.language_id == language_id)
+    }
 }

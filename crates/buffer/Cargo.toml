@@ -29,3 +29,4 @@ tree-sitter-make = { workspace = true }
 tokio = { workspace = true }
 log = { workspace = true }
 regex = { workspace = true }
+nucleo-matcher = { workspace = true }

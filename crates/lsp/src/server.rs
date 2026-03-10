@@ -142,6 +142,15 @@ impl LanguageServer {
                         dynamic_registration: Some(false),
                         completion_item: Some(lsp_types::CompletionItemCapability {
                             snippet_support: Some(false),
+                            resolve_support: Some(
+                                lsp_types::CompletionItemCapabilityResolveSupport {
+                                    properties: vec![
+                                        "additionalTextEdits".to_string(),
+                                        "detail".to_string(),
+                                    ],
+                                },
+                            ),
+                            insert_replace_support: Some(true),
                             ..Default::default()
                         }),
                         ..Default::default()

@@ -50,6 +50,8 @@ pub struct EditorCompletionItem {
     pub additional_edits: Vec<EditorTextEdit>,
     pub sort_text: Option<String>,
     pub filter_text: Option<String>,
+    /// Raw LSP completion item, kept for resolve requests.
+    pub lsp_completion: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

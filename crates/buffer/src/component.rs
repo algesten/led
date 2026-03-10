@@ -162,7 +162,7 @@ fn compute_preview_position(
 }
 
 fn build_completion_state(
-    mut items: Vec<led_core::lsp_types::EditorCompletionItem>,
+    items: Vec<led_core::lsp_types::EditorCompletionItem>,
     prefix_start_col: usize,
     cursor_col: usize,
     line: &str,
@@ -170,19 +170,6 @@ fn build_completion_state(
     if items.is_empty() {
         return None;
     }
-    items.sort_by(|a, b| {
-        let a_key = a.sort_text.as_deref().unwrap_or(&a.label);
-        let b_key = b.sort_text.as_deref().unwrap_or(&b.label);
-        a_key.cmp(b_key)
-    });
-    let filtered: Vec<usize> = (0..items.len()).collect();
-    let mut state = crate::CompletionState {
-        items,
-        filtered,
-        selected: 0,
-        prefix_start_col,
-    };
-    // Apply initial prefix filter
     let prefix: String = if cursor_col > prefix_start_col {
         line.chars()
             .skip(prefix_start_col)
@@ -191,33 +178,86 @@ fn build_completion_state(
     } else {
         String::new()
     };
-    let prefix_lower = prefix.to_lowercase();
-    state.filtered = state
-        .items
-        .iter()
-        .enumerate()
-        .filter(|(_, item)| {
-            let text = item
-                .filter_text
-                .as_deref()
-                .unwrap_or(&item.label)
-                .to_lowercase();
-            text.starts_with(&prefix_lower)
-        })
-        .map(|(i, _)| i)
-        .collect();
-    if state.filtered.is_empty() {
+    let filtered = fuzzy_filter_completions(&items, &prefix);
+    if filtered.is_empty() {
         None
     } else {
-        Some(state)
+        Some(crate::CompletionState {
+            items,
+            filtered,
+            selected: 0,
+            prefix_start_col,
+        })
     }
 }
 
-fn should_trigger_completion(cursor_col: usize, line: &str) -> bool {
-    cursor_col > 0 && {
-        let ch = line.chars().nth(cursor_col - 1).unwrap_or(' ');
-        ch.is_alphanumeric() || ch == '_'
+/// Filter and sort items by fuzzy matching, returning indices sorted by score.
+fn fuzzy_filter_completions(
+    items: &[led_core::lsp_types::EditorCompletionItem],
+    query: &str,
+) -> Vec<usize> {
+    use nucleo_matcher::pattern::{AtomKind, CaseMatching, Normalization, Pattern};
+    use nucleo_matcher::{Config, Matcher, Utf32Str};
+
+    if query.is_empty() {
+        let mut indices: Vec<usize> = (0..items.len()).collect();
+        indices.sort_by(|&a, &b| {
+            let a_key = items[a].sort_text.as_deref().unwrap_or(&items[a].label);
+            let b_key = items[b].sort_text.as_deref().unwrap_or(&items[b].label);
+            a_key.cmp(b_key)
+        });
+        return indices;
     }
+
+    let mut matcher = Matcher::new(Config::DEFAULT);
+    let pattern = Pattern::new(
+        query,
+        CaseMatching::Ignore,
+        Normalization::Smart,
+        AtomKind::Fuzzy,
+    );
+    let mut buf = Vec::new();
+
+    let mut scored: Vec<(usize, u32)> = items
+        .iter()
+        .enumerate()
+        .filter_map(|(i, item)| {
+            let text = item.filter_text.as_deref().unwrap_or(&item.label);
+            let haystack = Utf32Str::new(text, &mut buf);
+            let score = pattern.score(haystack, &mut matcher)?;
+            Some((i, score))
+        })
+        .collect();
+    scored.sort_by(|a, b| {
+        b.1.cmp(&a.1).then_with(|| {
+            let a_key = items[a.0].sort_text.as_deref().unwrap_or(&items[a.0].label);
+            let b_key = items[b.0].sort_text.as_deref().unwrap_or(&items[b.0].label);
+            a_key.cmp(b_key)
+        })
+    });
+    scored.into_iter().map(|(i, _)| i).collect()
+}
+
+fn should_trigger_completion(cursor_col: usize, line: &str, triggers: &[String]) -> bool {
+    if cursor_col == 0 {
+        return false;
+    }
+    let prev = line.chars().nth(cursor_col - 1).unwrap_or(' ');
+    if prev.is_alphanumeric() || prev == '_' {
+        return true;
+    }
+    // Check against LSP-declared trigger characters
+    let tail = &line[..line
+        .char_indices()
+        .nth(cursor_col)
+        .map(|(i, _)| i)
+        .unwrap_or(line.len())];
+    for trigger in triggers {
+        if tail.ends_with(trigger.as_str()) {
+            return true;
+        }
+    }
+    false
 }
 
 fn format_outline_item(item: &crate::syntax::OutlineItem) -> String {
@@ -860,7 +900,11 @@ impl Component for Buffer {
             Action::InsertTab => {
                 self.clear_mark();
                 let trigger_completion = self.path.is_some()
-                    && should_trigger_completion(self.cursor_col, &doc.line(self.cursor_row));
+                    && should_trigger_completion(
+                        self.cursor_col,
+                        &doc.line(self.cursor_row),
+                        &self.completion_triggers,
+                    );
                 if trigger_completion {
                     let path = self.path.clone().unwrap();
                     self.put_doc(ctx.docs, doc);
@@ -1329,6 +1373,29 @@ impl Component for Buffer {
                         self.cursor_col,
                         &line,
                     );
+                }
+                vec![]
+            }
+            Event::CompletionResolved {
+                path,
+                additional_edits,
+            } => {
+                if self.path.as_deref() == Some(path.as_path()) && !additional_edits.is_empty() {
+                    self.apply_text_edits(&mut doc, additional_edits.clone());
+                    self.dirty = true;
+                }
+                vec![]
+            }
+            Event::SetCompletionTriggers {
+                extensions,
+                triggers,
+            } => {
+                if let Some(ref path) = self.path {
+                    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+                        if extensions.iter().any(|e| e == ext) {
+                            self.completion_triggers = triggers.clone();
+                        }
+                    }
                 }
                 vec![]
             }
@@ -1956,6 +2023,7 @@ impl Buffer {
             return vec![];
         };
         let item = &cs.items[idx];
+        let mut effects = vec![];
 
         if let Some(ref te) = item.text_edit {
             let mut edits = vec![te.clone()];
@@ -1991,8 +2059,19 @@ impl Buffer {
             }
         }
 
+        // If no additional_edits were applied and we have raw LSP item, resolve
+        // to fetch auto-import edits
+        if item.additional_edits.is_empty() {
+            if let (Some(path), Some(json)) = (&self.path, &item.lsp_completion) {
+                effects.push(Effect::Emit(Event::LspResolveCompletion {
+                    path: path.clone(),
+                    lsp_item_json: json.clone(),
+                }));
+            }
+        }
+
         self.dirty = true;
-        vec![]
+        effects
     }
 
     fn update_completion_filter(&mut self, doc: &TextDoc) {
@@ -2009,21 +2088,7 @@ impl Buffer {
         } else {
             String::new()
         };
-        let prefix_lower = prefix.to_lowercase();
-        cs.filtered = cs
-            .items
-            .iter()
-            .enumerate()
-            .filter(|(_, item)| {
-                let text = item
-                    .filter_text
-                    .as_deref()
-                    .unwrap_or(&item.label)
-                    .to_lowercase();
-                text.starts_with(&prefix_lower)
-            })
-            .map(|(i, _)| i)
-            .collect();
+        cs.filtered = fuzzy_filter_completions(&cs.items, &prefix);
         if cs.selected >= cs.filtered.len() {
             cs.selected = cs.filtered.len().saturating_sub(1);
         }

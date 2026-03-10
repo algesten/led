@@ -57,6 +57,10 @@ pub(crate) enum RequestResult {
         row: usize,
         col: usize,
     },
+    CompletionResolved {
+        path: PathBuf,
+        additional_edits: Vec<EditorTextEdit>,
+    },
     Error {
         message: String,
     },
