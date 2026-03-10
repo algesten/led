@@ -647,16 +647,36 @@ impl Buffer {
         self.clamp_cursor_col(&*doc);
         let cursor_after = (self.cursor_row, self.cursor_col);
 
-        // Record compound undo: replace entire content with before_text.
-        // During format-on-save (pending_save_after_format), skip undo recording
-        // since format edits are transparent to the user.
-        if !self.pending_save_after_format {
+        if self.pending_save_after_format {
+            // Defer compound undo recording until save() so the entry also
+            // captures save-time cleanup (trailing-whitespace strip, final
+            // newline) in a single undo step.
+            self.pre_format_snapshot = Some((before_text, cursor_before));
+        } else {
+            // Record compound undo immediately: the two entries represent the
+            // forward operation (Remove old content, Insert new content) so
+            // that inverting them during undo correctly restores the old state.
             let after_text: String = doc.to_string();
-            self.flush_pending();
-            // Two entries: Remove current content, then Insert old content.
-            // Both have direction=0 so they pair as a single undo step.
+            // The undo loop scans backward from the highest index, continuing
+            // while direction==0 (continuation) and stopping at direction!=0
+            // (anchor).  So the anchor (d=1) goes at the lower index and the
+            // continuation (d=0) at the higher index.
+            //
+            // During undo the continuation is inverted first:
+            //   Invert Insert(after_text) → Remove(after_text)  (clears doc)
+            // Then the anchor:
+            //   Invert Remove(before_text) → Insert(before_text) (restores old)
             self.undo_history.push(UndoEntry {
                 op: EditOp::Remove {
+                    char_idx: 0,
+                    text: before_text,
+                },
+                cursor_before,
+                cursor_after: cursor_before,
+                direction: 1,
+            });
+            self.undo_history.push(UndoEntry {
+                op: EditOp::Insert {
                     char_idx: 0,
                     text: after_text,
                 },
@@ -664,15 +684,7 @@ impl Buffer {
                 cursor_after,
                 direction: 0,
             });
-            self.undo_history.push(UndoEntry {
-                op: EditOp::Insert {
-                    char_idx: 0,
-                    text: before_text,
-                },
-                cursor_before: cursor_after,
-                cursor_after: cursor_before,
-                direction: 1,
-            });
+            self.distance_from_save += 1;
             self.undo_cursor = None;
         }
     }

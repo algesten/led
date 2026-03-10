@@ -7,7 +7,7 @@ use led_core::{Context, Effect, Event, TextDoc, Waker};
 use notify::{RecursiveMode, Watcher};
 use ropey::Rope;
 
-use crate::{Buffer, UndoEntry, notify_dir};
+use crate::{Buffer, EditOp, UndoEntry, notify_dir};
 
 enum DiskState {
     Unchanged,
@@ -342,6 +342,34 @@ impl Buffer {
             let se = self.syntax_edit_insert(&*doc, len, "\n");
             doc.insert_char(len, '\n');
             self.apply_syntax_edit(&*doc, se);
+        }
+        // Record deferred compound undo for format-on-save.  The entry
+        // captures the full transformation (format edits + trailing-whitespace
+        // strip + final newline) as a single undo step.
+        if let Some((before_text, cursor_before)) = self.pre_format_snapshot.take() {
+            let after_text: String = doc.to_string();
+            let cursor_after = (self.cursor_row, self.cursor_col);
+            // Anchor (d=1) at lower index, continuation (d=0) at higher index.
+            // See apply_text_edits() for detailed explanation of the layout.
+            self.undo_history.push(UndoEntry {
+                op: EditOp::Remove {
+                    char_idx: 0,
+                    text: before_text,
+                },
+                cursor_before,
+                cursor_after: cursor_before,
+                direction: 1,
+            });
+            self.undo_history.push(UndoEntry {
+                op: EditOp::Insert {
+                    char_idx: 0,
+                    text: after_text,
+                },
+                cursor_before,
+                cursor_after,
+                direction: 0,
+            });
+            self.undo_cursor = None;
         }
         let file = File::create(&path)?;
         doc.write_to(BufWriter::new(file))?;
