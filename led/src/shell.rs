@@ -476,6 +476,7 @@ impl Shell {
     }
 
     pub fn status_bar_component_idx(&self) -> Option<usize> {
+        let active_tab_idx = self.active_tab_component_idx();
         self.components
             .iter()
             .enumerate()
@@ -484,13 +485,16 @@ impl Shell {
                     .iter()
                     .any(|cl| cl.slot == PanelSlot::StatusBar)
             })
-            .max_by_key(|(_, c)| {
-                c.panel_claims()
+            .max_by_key(|(i, c)| {
+                let priority = c
+                    .panel_claims()
                     .iter()
                     .filter(|cl| cl.slot == PanelSlot::StatusBar)
                     .map(|cl| cl.priority)
                     .max()
-                    .unwrap_or(0)
+                    .unwrap_or(0);
+                let is_active = Some(*i) == active_tab_idx;
+                (priority, is_active)
             })
             .map(|(i, _)| i)
     }
