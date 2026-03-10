@@ -152,6 +152,7 @@ impl Buffer {
             DiskState::Unchanged => vec![],
             DiskState::DeletedNew => {
                 self.disk_deleted = true;
+                log::warn!("File deleted externally: {}", self.filename());
                 vec![Effect::SetMessage(format!(
                     "Warning: {} deleted externally",
                     self.filename()
@@ -161,6 +162,10 @@ impl Buffer {
             DiskState::ConflictNew => {
                 self.disk_deleted = false;
                 self.disk_modified = true;
+                log::warn!(
+                    "File changed on disk with unsaved changes: {}",
+                    self.filename()
+                );
                 vec![Effect::SetMessage(format!(
                     "Warning: {} changed on disk (you have unsaved changes)",
                     self.filename()
@@ -171,6 +176,7 @@ impl Buffer {
                 vec![]
             }
             DiskState::Reloadable => {
+                log::info!("Reloaded {} (changed on disk)", self.filename());
                 self.reload_from_disk(doc);
                 self.disk_modified = false;
                 self.disk_deleted = false;

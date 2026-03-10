@@ -540,7 +540,7 @@ impl SyntaxState {
 
             if let Some(range) = node_range {
                 if range.start < range.end {
-                    merge_range(&mut indent_ranges, range);
+                    indent_ranges.push(range);
                 }
             }
 
@@ -638,7 +638,7 @@ impl SyntaxState {
 
             if let Some(range) = node_range {
                 if range.start < range.end {
-                    merge_range(&mut indent_ranges, range);
+                    indent_ranges.push(range);
                 }
             }
 
@@ -1270,26 +1270,6 @@ fn find_basis_row(rope: &Rope, line: usize) -> Option<usize> {
     if line > 0 { Some(0) } else { None }
 }
 
-fn merge_range(ranges: &mut Vec<Range<usize>>, new: Range<usize>) {
-    // Find insertion point
-    let pos = ranges.partition_point(|r| r.start < new.start);
-
-    // Check if we can merge with previous
-    if pos > 0 && ranges[pos - 1].end >= new.start {
-        ranges[pos - 1].end = ranges[pos - 1].end.max(new.end);
-        // Merge forward
-        while pos < ranges.len() && ranges[pos].start <= ranges[pos - 1].end {
-            ranges[pos - 1].end = ranges[pos - 1].end.max(ranges[pos].end);
-            ranges.remove(pos);
-        }
-    } else if pos < ranges.len() && new.end >= ranges[pos].start {
-        ranges[pos].start = new.start;
-        ranges[pos].end = ranges[pos].end.max(new.end);
-    } else {
-        ranges.insert(pos, new);
-    }
-}
-
 fn assign_rainbow_depth(pairs: &mut [BracketMatch]) {
     // Sort by open position for stack-based depth assignment
     let mut indexed: Vec<(usize, usize)> = pairs
@@ -1471,6 +1451,40 @@ mod tests {
             suggestion.delta,
             IndentDelta::Less,
             "closing '}}' line should outdent"
+        );
+    }
+
+    #[test]
+    fn rust_indent_nested_blocks() {
+        // fn inside trait inside mod — nested blocks must not merge
+        let code = "mod private {\n    use super::Config;\n\n    pub trait ConfigScope {\n    fn config(&mut self) -> &mut Config;\n    }\n}\n";
+        let rope = Rope::from_str(code);
+        let path = Path::new("test.rs");
+        let state = SyntaxState::from_path_and_rope(path, &rope).unwrap();
+
+        // line 4: `fn config` — basis is trait opener, should be Greater
+        let s = state.suggest_indent(&rope, 4).unwrap();
+        assert_eq!(s.basis_row, 3);
+        assert_eq!(
+            s.delta,
+            IndentDelta::Greater,
+            "fn inside trait should indent"
+        );
+
+        // line 5: `}` closing trait — should be Less
+        let s = state.suggest_indent(&rope, 5).unwrap();
+        assert_eq!(
+            s.delta,
+            IndentDelta::Less,
+            "closing trait '}}' should outdent"
+        );
+
+        // line 3: `pub trait` — same level as use, should be Equal
+        let s = state.suggest_indent(&rope, 3).unwrap();
+        assert_eq!(
+            s.delta,
+            IndentDelta::Equal,
+            "trait decl should be Equal to use"
         );
     }
 

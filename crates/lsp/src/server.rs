@@ -54,7 +54,7 @@ impl LanguageServer {
             let reader = tokio::io::BufReader::new(stderr);
             let mut lines = reader.lines();
             while let Ok(Some(line)) = lines.next_line().await {
-                log::info!("LSP stderr [{}]: {}", server_name, line);
+                log::warn!("LSP stderr [{}]: {}", server_name, line);
             }
         });
 
@@ -212,7 +212,6 @@ impl LanguageServer {
         method: &str,
         params: &P,
     ) -> Result<R, LspError> {
-        log::debug!("LSP -> request: {}", method);
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let req_id = RequestId::Int(id);
 
@@ -253,7 +252,6 @@ impl LanguageServer {
     }
 
     pub(crate) fn notify<P: serde::Serialize>(&self, method: &str, params: &P) {
-        log::debug!("LSP -> notify: {}", method);
         let msg = serde_json::json!({
             "jsonrpc": "2.0",
             "method": method,

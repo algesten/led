@@ -175,6 +175,28 @@ fn worst_diagnostic_severity(
         })
 }
 
+fn log_event(event: &Event) {
+    match event {
+        Event::OpenFile(path) => log::info!("Open {}", path.display()),
+        Event::FileSaved(path) => log::info!("Saved {}", path.display()),
+        Event::BufferClosed(path) => log::info!("Closed {}", path.display()),
+        Event::TabActivated { path: Some(path) } => log::info!("Tab {}", path.display()),
+        Event::GoToPosition { path, row, col, .. } => {
+            log::info!("Goto {}:{}:{}", path.display(), row + 1, col + 1)
+        }
+        Event::LspGotoDefinition { path, row, col } => {
+            log::info!("Goto definition {}:{}:{}", path.display(), row + 1, col + 1)
+        }
+        Event::LspRename { new_name, .. } => log::info!("Rename to '{new_name}'"),
+        Event::LspCodeAction { path, .. } => {
+            log::info!("Code action {}", path.display())
+        }
+        Event::LspFormat { path, .. } => log::info!("Format {}", path.display()),
+        Event::WorkspaceChanged => log::info!("Workspace changed"),
+        _ => {}
+    }
+}
+
 fn find_preview_idx(components: &[Box<dyn Component>]) -> Option<usize> {
     components
         .iter()
@@ -846,6 +868,7 @@ impl Shell {
         for effect in effects {
             match effect {
                 Effect::Emit(event) => {
+                    log_event(&event);
                     // Intercept SetDiagnostics to track per-file severity
                     if let Event::SetDiagnostics {
                         ref path,

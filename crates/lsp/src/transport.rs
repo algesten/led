@@ -74,18 +74,17 @@ pub(crate) fn spawn_reader(
 
         loop {
             // Read headers
-            log::debug!("LSP reader: waiting for next message...");
             let mut content_length: Option<usize> = None;
             loop {
                 header_buf.clear();
                 match reader.read_line(&mut header_buf).await {
                     Ok(0) => {
-                        log::info!("LSP reader: EOF");
+                        log::debug!("LSP reader: EOF");
                         return;
                     }
                     Ok(_) => {}
                     Err(e) => {
-                        log::info!("LSP reader: read error: {}", e);
+                        log::warn!("LSP reader: read error: {}", e);
                         return;
                     }
                 }
@@ -105,19 +104,14 @@ pub(crate) fn spawn_reader(
             // Read body
             let mut body = vec![0u8; len];
             if let Err(e) = reader.read_exact(&mut body).await {
-                log::info!("LSP reader: body read error: {}", e);
+                log::warn!("LSP reader: body read error: {}", e);
                 return;
             }
 
             let Ok(msg) = serde_json::from_slice::<Value>(&body) else {
-                log::info!("LSP reader: JSON parse error");
+                log::warn!("LSP reader: JSON parse error");
                 continue;
             };
-
-            // Log raw message shape for debugging
-            let msg_method = msg.get("method").and_then(|v| v.as_str()).unwrap_or("-");
-            let msg_id = msg.get("id").map(|v| v.to_string()).unwrap_or("-".into());
-            log::debug!("LSP raw: id={} method={} len={}", msg_id, msg_method, len);
 
             // id: null counts as absent (some servers include it in notifications)
             let has_id = msg.get("id").is_some_and(|v| !v.is_null());
@@ -126,7 +120,6 @@ pub(crate) fn spawn_reader(
             if has_id && has_method {
                 // Server request — auto-reply
                 let method = msg["method"].as_str().unwrap_or("");
-                log::debug!("LSP <- server request: {}", method);
                 // Forward registerCapability as a notification for LspManager to handle
                 if method == "client/registerCapability" {
                     let params = msg.get("params").cloned().unwrap_or(Value::Null);
@@ -157,7 +150,6 @@ pub(crate) fn spawn_reader(
                         "id": id,
                         "result": result
                     });
-                    log::debug!("LSP -> auto-reply: id={} result={}", id, result);
                     let _ = writer_tx.send(reply.to_string());
                 }
             } else if has_id && !has_method {
@@ -171,10 +163,9 @@ pub(crate) fn spawn_reader(
                                 .and_then(|m| m.as_str())
                                 .unwrap_or("unknown error")
                                 .to_string();
-                            log::info!("LSP <- response error id={:?}: {}", id, message);
+                            log::warn!("LSP response error: {}", message);
                             let _ = sender.send(Err(LspError { message }));
                         } else {
-                            log::debug!("LSP <- response id={:?}", id);
                             let result = msg.get("result").cloned().unwrap_or(Value::Null);
                             let _ = sender.send(Ok(result));
                         }
@@ -189,7 +180,7 @@ pub(crate) fn spawn_reader(
                     w();
                 }
             } else {
-                log::info!("LSP reader: unclassified message: {}", msg);
+                log::warn!("LSP reader: unclassified message: {}", msg);
             }
         }
     });

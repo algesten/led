@@ -237,6 +237,7 @@ impl Buffer {
         old_tree: Option<&tree_sitter::Tree>,
     ) -> String {
         let rope = doc.rope();
+        let indent_unit = detect_indent_unit(rope);
 
         // For closing brackets, match the opening bracket's line indent
         if let Some(ref syntax) = self.syntax {
@@ -271,18 +272,18 @@ impl Buffer {
             if let Some(suggestion) = suggestion {
                 // If within error and we have regex patterns, try regex fallback
                 if suggestion.within_error {
-                    if let Some(indent) = self.regex_indent(doc, line) {
+                    if let Some(indent) = self.regex_indent(doc, line, &indent_unit) {
                         return indent;
                     }
                 }
 
                 let basis_indent = get_line_indent(rope, suggestion.basis_row);
-                return apply_indent_delta(&basis_indent, suggestion.delta);
+                return apply_indent_delta(&basis_indent, suggestion.delta, &indent_unit);
             }
         }
 
         // Fallback: regex only
-        if let Some(indent) = self.regex_indent(doc, line) {
+        if let Some(indent) = self.regex_indent(doc, line, &indent_unit) {
             return indent;
         }
 
@@ -295,7 +296,7 @@ impl Buffer {
     }
 
     /// Regex-based indent fallback for when tree is in error state.
-    fn regex_indent(&self, doc: &TextDoc, line: usize) -> Option<String> {
+    fn regex_indent(&self, doc: &TextDoc, line: usize, indent_unit: &str) -> Option<String> {
         let syntax = self.syntax.as_ref()?;
         let rope = doc.rope();
 
@@ -306,7 +307,11 @@ impl Buffer {
         // Check if basis line matches increase_indent_pattern
         if let Some(ref re) = syntax.increase_indent_pattern {
             if re.is_match(&basis_text) {
-                return Some(apply_indent_delta(&basis_indent, IndentDelta::Greater));
+                return Some(apply_indent_delta(
+                    &basis_indent,
+                    IndentDelta::Greater,
+                    indent_unit,
+                ));
             }
         }
 
@@ -314,7 +319,11 @@ impl Buffer {
         let current_text: String = rope.line(line).chars().collect();
         if let Some(ref re) = syntax.decrease_indent_pattern {
             if re.is_match(&current_text) {
-                return Some(apply_indent_delta(&basis_indent, IndentDelta::Less));
+                return Some(apply_indent_delta(
+                    &basis_indent,
+                    IndentDelta::Less,
+                    indent_unit,
+                ));
             }
         }
 
@@ -845,24 +854,26 @@ pub(crate) fn get_line_indent(rope: &Rope, line: usize) -> String {
 }
 
 /// Apply an indent delta to a basis indentation string.
-fn apply_indent_delta(basis_indent: &str, delta: IndentDelta) -> String {
+/// `indent_unit` is the string for one indent level (e.g. "\t" or "    ").
+fn apply_indent_delta(basis_indent: &str, delta: IndentDelta, indent_unit: &str) -> String {
     match delta {
         IndentDelta::Greater => {
             let mut s = basis_indent.to_string();
-            s.push('\t');
+            s.push_str(indent_unit);
             s
         }
         IndentDelta::Less => {
-            // Remove one indent level (one tab or N spaces)
             let s = basis_indent.to_string();
-            if s.ends_with('\t') {
+            if s.ends_with(indent_unit) {
+                s[..s.len() - indent_unit.len()].to_string()
+            } else if s.ends_with('\t') {
                 s[..s.len() - 1].to_string()
             } else {
-                // Remove up to 4 trailing spaces
+                // Remove up to indent_unit.len() trailing spaces
                 let trimmed = s.trim_end_matches(' ');
                 let removed = s.len() - trimmed.len();
                 if removed > 0 {
-                    let remove_count = removed.min(4);
+                    let remove_count = removed.min(indent_unit.len());
                     s[..s.len() - remove_count].to_string()
                 } else {
                     s
@@ -871,6 +882,29 @@ fn apply_indent_delta(basis_indent: &str, delta: IndentDelta) -> String {
         }
         IndentDelta::Equal => basis_indent.to_string(),
     }
+}
+
+/// Detect the indent unit used in the file by scanning lines.
+/// Returns the leading whitespace of the first indented line (tab or spaces).
+fn detect_indent_unit(rope: &Rope) -> String {
+    let lines = rope.len_lines().min(100);
+    for i in 0..lines {
+        let line = rope.line(i);
+        let mut indent = String::new();
+        for ch in line.chars() {
+            if ch == '\t' {
+                return "\t".to_string();
+            } else if ch == ' ' {
+                indent.push(' ');
+            } else {
+                break;
+            }
+        }
+        if !indent.is_empty() {
+            return indent;
+        }
+    }
+    "    ".to_string()
 }
 
 /// Find the previous non-empty line before `line`.

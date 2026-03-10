@@ -204,7 +204,7 @@ impl LspManager {
         match watcher {
             Ok(mut w) => {
                 if let Err(e) = w.watch(&root, RecursiveMode::Recursive) {
-                    log::info!(
+                    log::warn!(
                         "LSP file watcher: failed to watch {}: {}",
                         root.display(),
                         e
@@ -215,7 +215,7 @@ impl LspManager {
                 self._file_watcher = Some(w);
             }
             Err(e) => {
-                log::info!("LSP file watcher: failed to create: {}", e);
+                log::warn!("LSP file watcher: failed to create: {}", e);
             }
         }
     }
@@ -874,7 +874,7 @@ impl LspManager {
                     serde_json::from_value::<lsp_types::PublishDiagnosticsParams>(notif.params)
                 {
                     if let Some(path) = crate::util::path_from_uri(&params.uri) {
-                        log::info!(
+                        log::debug!(
                             "LSP diagnostics: {} count={}",
                             path.display(),
                             params.diagnostics.len()
@@ -899,7 +899,7 @@ impl LspManager {
                         effects.push(self.lsp_status_effect());
                     }
                     Err(e) => {
-                        log::info!("LSP $/progress deserialize error: {}", e);
+                        log::debug!("LSP $/progress deserialize error: {}", e);
                     }
                 }
             }
@@ -926,7 +926,7 @@ impl LspManager {
                 self.handle_register_capability(&notif.params);
             }
             _ => {
-                log::info!("LSP unhandled notification: {}", notif.method);
+                log::debug!("LSP unhandled notification: {}", notif.method);
             }
         }
 
@@ -940,7 +940,7 @@ impl LspManager {
                 message,
                 percentage,
             } => {
-                log::info!(
+                log::debug!(
                     "LSP progress begin: token={} title={:?} message={:?}",
                     token,
                     title,
@@ -969,7 +969,7 @@ impl LspManager {
                 }
             }
             ProgressUpdate::End => {
-                log::info!(
+                log::debug!(
                     "LSP progress end: token={} (remaining={})",
                     token,
                     self.progress_tokens.len().saturating_sub(1)
@@ -1150,7 +1150,7 @@ impl LspManager {
                 Ok(lsp_types::DocumentDiagnosticReportResult::Report(
                     lsp_types::DocumentDiagnosticReport::Full(report),
                 )) => {
-                    log::info!(
+                    log::debug!(
                         "LSP pull diagnostics: {} count={}",
                         path.display(),
                         report.full_document_diagnostic_report.items.len()
