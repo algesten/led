@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::ops::Range;
 use std::path::Path;
 
@@ -23,7 +24,7 @@ pub(crate) struct HighlightSpan {
 
 struct LangEntry {
     language: Language,
-    highlights_query: &'static str,
+    highlights_query: Cow<'static, str>,
     indents_query: Option<&'static str>,
     brackets_query: Option<&'static str>,
     outline_query: Option<&'static str>,
@@ -37,7 +38,7 @@ impl LangEntry {
     fn new(language: Language, highlights_query: &'static str) -> Self {
         Self {
             language,
-            highlights_query,
+            highlights_query: Cow::Borrowed(highlights_query),
             indents_query: None,
             brackets_query: None,
             outline_query: None,
@@ -82,10 +83,16 @@ fn lang_for_ext(ext: &str) -> Option<LangEntry> {
             } else {
                 tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()
             };
-            Some(LangEntry::new(
-                lang,
+            // The TS highlights query is a supplement to JS; combine them.
+            let combined = format!(
+                "{}\n{}",
+                tree_sitter_javascript::HIGHLIGHT_QUERY,
                 tree_sitter_typescript::HIGHLIGHTS_QUERY,
-            ))
+            );
+            Some(LangEntry {
+                highlights_query: Cow::Owned(combined),
+                ..LangEntry::new(lang, "")
+            })
         }
         "md" | "markdown" => Some(LangEntry {
             injections_query: Some(include_str!("../queries/markdown/injections.scm")),
@@ -133,7 +140,7 @@ fn lang_for_filename(name: &str) -> Option<LangEntry> {
 }
 
 /// Look up a language by name (used for injections).
-pub(crate) fn lang_for_name(name: &str) -> Option<(Language, &'static str)> {
+pub(crate) fn lang_for_name(name: &str) -> Option<(Language, Cow<'static, str>)> {
     let entry = match name {
         "rust" => lang_for_ext("rs"),
         "python" => lang_for_ext("py"),
@@ -326,7 +333,7 @@ impl SyntaxState {
         let mut parser = Parser::new();
         parser.set_language(&entry.language).ok()?;
 
-        let highlights_query = Query::new(&entry.language, entry.highlights_query).ok()?;
+        let highlights_query = Query::new(&entry.language, &entry.highlights_query).ok()?;
         let tree = parse_rope(&mut parser, rope, None)?;
 
         let indents_config = entry
@@ -1105,7 +1112,7 @@ fn create_injection_layer(
     parser.set_language(&language).ok()?;
     parser.set_included_ranges(&ranges).ok()?;
     let tree = parse_rope(&mut parser, rope, None)?;
-    let highlights_query = Query::new(&language, hl_query_src).ok()?;
+    let highlights_query = Query::new(&language, &hl_query_src).ok()?;
 
     Some(InjectionLayer {
         tree,
