@@ -870,7 +870,7 @@ impl Component for Buffer {
                         col: self.cursor_col,
                     })];
                 }
-                self.insert_char(&mut doc, '\t');
+                self.indent_line(&mut doc);
                 vec![]
             }
             Action::KillLine => {

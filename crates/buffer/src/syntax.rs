@@ -7,6 +7,8 @@ use tree_sitter::{
     InputEdit, Language, Parser, Point, Query, QueryCursor, StreamingIterator, Tree,
 };
 
+use crate::editing::get_line_indent;
+
 // ---------------------------------------------------------------------------
 // Highlight span returned to the renderer
 // ---------------------------------------------------------------------------
@@ -460,6 +462,31 @@ impl SyntaxState {
     // Indentation
     // -----------------------------------------------------------------------
 
+    /// For a line whose first non-whitespace char is a closing bracket,
+    /// find the matching open bracket via tree-sitter and return its line's indent.
+    pub(crate) fn closing_bracket_indent(&self, rope: &Rope, line: usize) -> Option<String> {
+        let line_text = rope.line(line);
+        let mut char_offset = 0;
+        for ch in line_text.chars() {
+            if ch == ' ' || ch == '\t' {
+                char_offset += 1;
+                continue;
+            }
+            if ch != '}' && ch != ')' && ch != ']' {
+                return None;
+            }
+            break;
+        }
+        let bracket_char_idx = rope.line_to_char(line) + char_offset;
+        let bracket_byte = rope.char_to_byte(bracket_char_idx);
+        let node = self
+            .tree
+            .root_node()
+            .descendant_for_byte_range(bracket_byte, bracket_byte + 1)?;
+        let parent = node.parent()?;
+        Some(get_line_indent(rope, parent.start_position().row))
+    }
+
     pub(crate) fn suggest_indent(&self, rope: &Rope, line: usize) -> Option<IndentSuggestion> {
         let config = self.indents_config.as_ref()?;
 
@@ -468,7 +495,7 @@ impl SyntaxState {
 
         // Collect indent ranges from query
         let total_bytes = rope.len_bytes();
-        let query_start = rope.line_to_byte(basis_row);
+        let query_start = indent_query_start(rope, &self.tree, basis_row, line);
         let query_end = if line + 1 < rope.len_lines() {
             rope.line_to_byte(line + 1)
         } else {
@@ -569,7 +596,7 @@ impl SyntaxState {
         let basis_row = find_basis_row(rope, line)?;
 
         let total_bytes = rope.len_bytes();
-        let query_start = rope.line_to_byte(basis_row);
+        let query_start = indent_query_start(rope, tree, basis_row, line);
         let query_end = if line + 1 < rope.len_lines() {
             rope.line_to_byte(line + 1)
         } else {
@@ -1211,6 +1238,25 @@ fn node_text(rope: &Rope, node: &tree_sitter::Node) -> String {
     let start = rope.byte_to_char(node.start_byte());
     let end = rope.byte_to_char(node.end_byte().min(rope.len_bytes()));
     rope.slice(start..end).to_string()
+}
+
+/// Compute the query start byte for indent queries.
+/// Walks up the tree from the target line to find the innermost ancestor
+/// that starts before basis_row, ensuring the query captures the opening
+/// bracket of any enclosing block.
+fn indent_query_start(rope: &Rope, tree: &Tree, basis_row: usize, line: usize) -> usize {
+    let basis_start = rope.line_to_byte(basis_row);
+    let line_byte = rope.line_to_byte(line);
+    let mut node = tree
+        .root_node()
+        .descendant_for_byte_range(line_byte, line_byte);
+    while let Some(n) = node {
+        if n.start_byte() < basis_start {
+            return n.start_byte();
+        }
+        node = n.parent();
+    }
+    basis_start
 }
 
 fn find_basis_row(rope: &Rope, line: usize) -> Option<usize> {

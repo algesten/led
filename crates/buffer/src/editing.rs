@@ -158,6 +158,77 @@ impl Buffer {
         });
     }
 
+    /// Reindent the current line to the correct indentation level.
+    /// Computes the proper indent via tree-sitter / regex / copy-previous-line,
+    /// then replaces the existing leading whitespace. No-op if already correct.
+    pub fn indent_line(&mut self, doc: &mut TextDoc) {
+        let cursor_before = (self.cursor_row, self.cursor_col);
+
+        let new_indent = self.compute_auto_indent(doc, self.cursor_row, None);
+        let old_indent = get_line_indent(doc.rope(), self.cursor_row);
+
+        let old_indent_len = old_indent.chars().count();
+        let new_indent_len = new_indent.chars().count();
+
+        if new_indent == old_indent {
+            // No reindent needed, but still snap cursor to first content char
+            if self.cursor_col <= old_indent_len {
+                self.cursor_col = old_indent_len;
+            }
+            return;
+        }
+
+        let line_start_idx = doc.char_idx(self.cursor_row, 0);
+
+        // Remove old indent
+        if old_indent_len > 0 {
+            let end = line_start_idx + old_indent_len;
+            let se = self.syntax_edit_remove(&*doc, line_start_idx, end);
+            doc.remove(line_start_idx, end);
+            self.apply_syntax_edit(&*doc, se);
+        }
+
+        // Insert new indent
+        if !new_indent.is_empty() {
+            let se = self.syntax_edit_insert(&*doc, line_start_idx, &new_indent);
+            doc.insert(line_start_idx, &new_indent);
+            self.apply_syntax_edit(&*doc, se);
+        }
+
+        // Adjust cursor: snap to end of new indent if in the indent zone,
+        // otherwise shift by the difference.
+        if self.cursor_col <= old_indent_len {
+            self.cursor_col = new_indent_len;
+        } else {
+            self.cursor_col = self.cursor_col - old_indent_len + new_indent_len;
+        }
+
+        self.dirty = true;
+        let cursor_after = (self.cursor_row, self.cursor_col);
+
+        // Compound undo: primary Remove + continuation Insert
+        self.flush_pending();
+        self.push_undo(UndoEntry {
+            op: EditOp::Remove {
+                char_idx: line_start_idx,
+                text: old_indent,
+            },
+            cursor_before,
+            cursor_after,
+            direction: 1,
+        });
+        self.undo_history.push(UndoEntry {
+            op: EditOp::Insert {
+                char_idx: line_start_idx,
+                text: new_indent,
+            },
+            cursor_before: cursor_after,
+            cursor_after: cursor_before,
+            direction: 0,
+        });
+        self.undo_cursor = None;
+    }
+
     /// Compute auto-indent for a line using two-pass tree-sitter analysis with regex fallback.
     fn compute_auto_indent(
         &self,
@@ -166,6 +237,13 @@ impl Buffer {
         old_tree: Option<&tree_sitter::Tree>,
     ) -> String {
         let rope = doc.rope();
+
+        // For closing brackets, match the opening bracket's line indent
+        if let Some(ref syntax) = self.syntax {
+            if let Some(indent) = syntax.closing_bracket_indent(rope, line) {
+                return indent;
+            }
+        }
 
         // Try tree-sitter based indent
         if let Some(ref syntax) = self.syntax {
@@ -753,7 +831,7 @@ fn is_word_char(c: char) -> bool {
 }
 
 /// Get the leading whitespace of a line as a string.
-fn get_line_indent(rope: &Rope, line: usize) -> String {
+pub(crate) fn get_line_indent(rope: &Rope, line: usize) -> String {
     let line_text = rope.line(line);
     let mut indent = String::new();
     for ch in line_text.chars() {
