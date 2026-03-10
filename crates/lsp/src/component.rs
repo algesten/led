@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 use led_core::{Action, Component, Context, DrawContext, Effect, Event, LspStatus, PanelClaim};
@@ -8,15 +8,14 @@ use ratatui::layout::Rect;
 use crate::LspManager;
 use crate::server::LanguageServer;
 use crate::types::LspManagerEvent;
-use crate::util::read_file_lines;
 
-/// Read buffer content lines from DocStore, falling back to disk.
-fn buffer_lines(path: &Path, ctx: &Context) -> Vec<String> {
-    if let Some(content) = ctx.docs.content(path) {
-        content.lines().map(|l| l.to_string()).collect()
-    } else {
-        read_file_lines(path)
+/// Fetch a single line from DocStore, falling back to disk.
+fn doc_line(path: &Path, row: usize, ctx: &Context) -> Option<String> {
+    if let Some(line) = ctx.docs.line(path, row) {
+        return Some(line);
     }
+    let content = std::fs::read_to_string(path).ok()?;
+    content.lines().nth(row).map(|l| l.to_string())
 }
 
 impl Component for LspManager {
@@ -45,7 +44,7 @@ impl Component for LspManager {
                                 detail: None,
                             }));
                             // Send didOpen for any docs that were waiting for this server
-                            let pending: Vec<PathBuf> =
+                            let pending: Vec<std::path::PathBuf> =
                                 self.pending_opens.iter().cloned().collect();
                             for path in pending {
                                 if self.server_for_path(&path).is_some() {
@@ -59,10 +58,10 @@ impl Component for LspManager {
                             effects.push(Effect::SetMessage(format!("LSP: {}", error)));
                         }
                         LspManagerEvent::Notification(notif) => {
-                            effects.extend(self.handle_notification(notif));
+                            effects.extend(self.handle_notification(notif, &*ctx.docs));
                         }
                         LspManagerEvent::RequestResult(result) => {
-                            effects.extend(self.handle_request_result(result));
+                            effects.extend(self.handle_request_result(result, &*ctx.docs));
                         }
                         LspManagerEvent::FileChanged(path) => {
                             self.send_file_changed(&path);
@@ -85,7 +84,7 @@ impl Component for LspManager {
                 let changes = ctx.docs.drain_changes(path);
                 if !changes.is_empty() {
                     let version = ctx.docs.version(path).unwrap_or(0);
-                    self.send_did_change(path, &changes, version);
+                    self.send_did_change(path, &changes, version, &*ctx.docs);
                 }
             }
             Event::FileSaved(path) => {
@@ -95,7 +94,8 @@ impl Component for LspManager {
                 self.send_did_close(path);
             }
             Event::LspGotoDefinition { path, row, col } => {
-                self.spawn_goto_definition(path.clone(), *row, *col);
+                let line = doc_line(path, *row, ctx);
+                self.spawn_goto_definition(path.clone(), *row, *col, line);
             }
             Event::LspInlayHints {
                 path,
@@ -110,7 +110,8 @@ impl Component for LspManager {
                 col,
                 new_name,
             } => {
-                self.spawn_rename(path.clone(), *row, *col, new_name.clone());
+                let line = doc_line(path, *row, ctx);
+                self.spawn_rename(path.clone(), *row, *col, new_name.clone(), line);
             }
             Event::LspCodeAction {
                 path,
@@ -119,21 +120,38 @@ impl Component for LspManager {
                 end_row,
                 end_col,
             } => {
-                self.spawn_code_action(path.clone(), *start_row, *start_col, *end_row, *end_col);
+                let start_line = doc_line(path, *start_row, ctx);
+                let end_line = if *end_row == *start_row {
+                    start_line.clone()
+                } else {
+                    doc_line(path, *end_row, ctx)
+                };
+                self.spawn_code_action(
+                    path.clone(),
+                    *start_row,
+                    *start_col,
+                    *end_row,
+                    *end_col,
+                    start_line,
+                    end_line,
+                );
             }
             Event::LspCodeActionResolve { path, index } => {
                 self.spawn_code_action_resolve(path.clone(), *index);
             }
-            Event::LspFormat { path } => {
+            Event::LspFormat { path, generation } => {
                 if self.server_for_path(path).is_some() {
-                    let lines = buffer_lines(path, ctx);
-                    self.spawn_format(path.clone(), lines);
+                    self.spawn_format(path.clone(), *generation);
                 } else {
-                    return vec![Effect::Emit(Event::FormatDone { path: path.clone() })];
+                    return vec![Effect::Emit(Event::FormatDone {
+                        path: path.clone(),
+                        generation: *generation,
+                    })];
                 }
             }
             Event::LspCompletion { path, row, col } => {
-                self.spawn_completion(path.clone(), *row, *col);
+                let line = doc_line(path, *row, ctx);
+                self.spawn_completion(path.clone(), *row, *col, line);
             }
             _ => {}
         }

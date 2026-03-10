@@ -88,12 +88,232 @@ pub struct RenameModal {
     pub col: usize,
 }
 
-pub struct PickerModal {
-    pub title: String,
-    pub items: Vec<String>,
-    pub selected: usize,
-    pub source_path: PathBuf,
-    pub kind: led_core::PickerKind,
+enum RenameKeyResult {
+    Cancel,
+    Submit,
+    Backspace,
+    Char(char),
+    Ignore,
+}
+
+fn classify_rename_key(key: &KeyEvent) -> RenameKeyResult {
+    let is_abort = matches!(key.code, KeyCode::Esc)
+        || (key.code == KeyCode::Char('g') && key.modifiers.contains(KeyModifiers::CONTROL));
+    if is_abort {
+        return RenameKeyResult::Cancel;
+    }
+    if key.code == KeyCode::Enter {
+        return RenameKeyResult::Submit;
+    }
+    if key.code == KeyCode::Backspace {
+        return RenameKeyResult::Backspace;
+    }
+    if let KeyCode::Char(c) = key.code {
+        let has_ctrl_alt = key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
+        if !has_ctrl_alt {
+            return RenameKeyResult::Char(c);
+        }
+    }
+    RenameKeyResult::Ignore
+}
+
+enum ModalKeyResult {
+    Cancel,
+    Submit { confirmed: bool },
+    Backspace,
+    Char(char),
+    Ignore,
+}
+
+fn classify_modal_key(key: &KeyEvent, input: &str) -> ModalKeyResult {
+    let is_abort = matches!(key.code, KeyCode::Esc)
+        || (key.code == KeyCode::Char('g') && key.modifiers.contains(KeyModifiers::CONTROL));
+    if is_abort {
+        return ModalKeyResult::Cancel;
+    }
+    if key.code == KeyCode::Enter {
+        return ModalKeyResult::Submit {
+            confirmed: input == "yes",
+        };
+    }
+    if key.code == KeyCode::Backspace {
+        return ModalKeyResult::Backspace;
+    }
+    if let KeyCode::Char(c) = key.code {
+        let has_ctrl_alt = key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
+        if !has_ctrl_alt {
+            return ModalKeyResult::Char(c);
+        }
+    }
+    ModalKeyResult::Ignore
+}
+
+fn worst_diagnostic_severity(
+    diagnostics: &[led_core::lsp_types::EditorDiagnostic],
+) -> Option<led_core::lsp_types::DiagnosticSeverity> {
+    use led_core::lsp_types::DiagnosticSeverity;
+    diagnostics
+        .iter()
+        .filter(|d| d.severity != DiagnosticSeverity::Hint)
+        .fold(None, |acc: Option<DiagnosticSeverity>, d| {
+            Some(match acc {
+                None => d.severity,
+                Some(prev) => match (prev, d.severity) {
+                    (DiagnosticSeverity::Error, _) | (_, DiagnosticSeverity::Error) => {
+                        DiagnosticSeverity::Error
+                    }
+                    (DiagnosticSeverity::Warning, _) | (_, DiagnosticSeverity::Warning) => {
+                        DiagnosticSeverity::Warning
+                    }
+                    _ => DiagnosticSeverity::Info,
+                },
+            })
+        })
+}
+
+fn find_preview_idx(components: &[Box<dyn Component>]) -> Option<usize> {
+    components
+        .iter()
+        .position(|c| c.tab().map_or(false, |t| t.preview))
+}
+
+struct TabManager {
+    active: usize,
+    pre_preview: Option<usize>,
+    last_touched: Vec<Instant>,
+    bar_width: u16,
+}
+
+impl TabManager {
+    fn new() -> Self {
+        Self {
+            active: 0,
+            pre_preview: None,
+            last_touched: Vec::new(),
+            bar_width: 0,
+        }
+    }
+
+    // --- Index mapping (pure, takes tabbed slice) ---
+
+    fn active_component(&self, tabbed: &[usize]) -> Option<usize> {
+        tabbed.get(self.active).copied()
+    }
+
+    fn tab_index_of(&self, comp_idx: usize, tabbed: &[usize]) -> Option<usize> {
+        tabbed.iter().position(|&i| i == comp_idx)
+    }
+
+    // --- Navigation ---
+
+    fn next(&mut self, tabs_count: usize) {
+        if tabs_count > 1 {
+            self.active = (self.active + 1) % tabs_count;
+            self.pre_preview = None;
+        }
+    }
+
+    fn prev(&mut self, tabs_count: usize) {
+        if tabs_count > 1 {
+            self.active = if self.active == 0 {
+                tabs_count - 1
+            } else {
+                self.active - 1
+            };
+            self.pre_preview = None;
+        }
+    }
+
+    fn activate(&mut self, comp_idx: usize, tabbed: &[usize]) {
+        if let Some(tab_idx) = self.tab_index_of(comp_idx, tabbed) {
+            self.active = tab_idx;
+        }
+    }
+
+    fn set_active(&mut self, tab: usize, tabs_count: usize) {
+        if tabs_count > 0 {
+            self.active = tab.min(tabs_count - 1);
+        }
+    }
+
+    // --- Clamp / adjust after removal ---
+
+    fn clamp(&mut self, tabs_count: usize) {
+        if tabs_count == 0 {
+            self.active = 0;
+        } else if self.active >= tabs_count {
+            self.active = tabs_count - 1;
+        }
+    }
+
+    /// After removing a tab at `removed_tab_idx`, shift active left if needed.
+    fn adjust_after_removal(&mut self, removed_tab_idx: Option<usize>, tabs_count: usize) {
+        if let Some(rt) = removed_tab_idx {
+            if rt < self.active {
+                self.active -= 1;
+            } else {
+                self.clamp(tabs_count);
+            }
+        }
+    }
+
+    // --- Post-broadcast stabilization ---
+
+    fn stabilize(&mut self, prev_active: usize, prev_comp: Option<usize>, tabbed: &[usize]) {
+        if self.active == prev_active {
+            if let Some(ci) = prev_comp {
+                if let Some(ti) = self.tab_index_of(ci, tabbed) {
+                    self.active = ti;
+                }
+            }
+        }
+    }
+
+    // --- Preview state machine ---
+
+    fn save_preview(&mut self) {
+        if self.pre_preview.is_none() {
+            self.pre_preview = Some(self.active);
+        }
+    }
+
+    fn restore_preview(&mut self, tabs_count: usize) {
+        if let Some(tab) = self.pre_preview.take() {
+            if tabs_count > 0 {
+                self.active = tab.min(tabs_count - 1);
+            }
+        }
+    }
+
+    fn clear_preview(&mut self) {
+        self.pre_preview = None;
+    }
+
+    // --- LRU tracking ---
+
+    fn register(&mut self) {
+        self.last_touched.push(Instant::now());
+    }
+
+    fn remove(&mut self, comp_idx: usize) {
+        self.last_touched.remove(comp_idx);
+    }
+
+    fn touch(&mut self, comp_idx: usize) {
+        if comp_idx < self.last_touched.len() {
+            self.last_touched[comp_idx] = Instant::now();
+        }
+    }
+
+    fn touch_active(&mut self, tabbed: &[usize]) {
+        if let Some(idx) = self.active_component(tabbed) {
+            self.touch(idx);
+        }
+    }
 }
 
 struct Env {
@@ -118,8 +338,7 @@ fn make_ctx<'a>(env: &'a Env, docs: &'a mut DocStore) -> Context<'a> {
 
 pub struct Shell {
     pub components: Vec<Box<dyn Component>>,
-    last_touched: Vec<Instant>,
-    active_tab: usize,
+    tabs: TabManager,
     pub message: Option<(String, Instant)>,
     chord: ChordState,
     keymap: Keymap,
@@ -130,11 +349,8 @@ pub struct Shell {
     debug_flash: Option<(String, Instant)>,
     pub modal: Option<Modal>,
     pub rename_modal: Option<RenameModal>,
-    pub picker_modal: Option<PickerModal>,
     last_persist: Instant,
     pending_flush: bool,
-    pre_preview_tab: Option<usize>,
-    tab_bar_width: u16,
     env: Env,
     pub file_statuses: FileStatusStore,
     pub lsp_status: Option<led_core::LspStatus>,
@@ -145,8 +361,7 @@ impl Shell {
     pub fn new(keymap: Keymap, theme: Theme, db: Option<Connection>, root: PathBuf) -> Self {
         Self {
             components: Vec::new(),
-            last_touched: Vec::new(),
-            active_tab: 0,
+            tabs: TabManager::new(),
             message: None,
             chord: ChordState::None,
             keymap,
@@ -157,11 +372,8 @@ impl Shell {
             debug_flash: None,
             modal: None,
             rename_modal: None,
-            picker_modal: None,
             last_persist: Instant::now(),
             pending_flush: false,
-            pre_preview_tab: None,
-            tab_bar_width: 0,
             file_statuses: FileStatusStore::default(),
             lsp_status: None,
             docs: DocStore::new(),
@@ -182,8 +394,8 @@ impl Shell {
     pub fn register(&mut self, component: Box<dyn Component>) {
         // Save pre_preview_tab before registering a preview buffer
         let is_preview = component.tab().map_or(false, |t| t.preview);
-        if is_preview && self.pre_preview_tab.is_none() {
-            self.pre_preview_tab = Some(self.active_tab);
+        if is_preview {
+            self.tabs.save_preview();
         }
         // Dedup by path: if a tab with the same path exists, just focus it
         if let Some(path) = component.tab().and_then(|t| t.path) {
@@ -192,7 +404,8 @@ impl Shell {
                 .iter()
                 .position(|c| c.tab().and_then(|t| t.path).as_ref() == Some(&path))
             {
-                self.activate_tab_for_component(idx);
+                let tabbed = self.tabbed_components();
+                self.tabs.activate(idx, &tabbed);
                 self.notify_active_buffer();
                 return;
             }
@@ -203,14 +416,15 @@ impl Shell {
             self.evict_for_new_tab(&component);
         }
         self.components.push(component);
-        self.last_touched.push(Instant::now());
+        self.tabs.register();
         let last = self.components.len() - 1;
         if has_tab {
             {
                 let mut ctx = make_ctx(&self.env, &mut self.docs);
                 self.components[last].handle_action(Action::RestoreSession, &mut ctx);
             }
-            self.active_tab = self.tabbed_index_of(last).unwrap_or(0);
+            let tabbed = self.tabbed_components();
+            self.tabs.activate(last, &tabbed);
             self.notify_active_buffer();
         }
     }
@@ -227,28 +441,16 @@ impl Shell {
             .collect()
     }
 
-    /// Map a component index to its tab index.
-    fn tabbed_index_of(&self, component_idx: usize) -> Option<usize> {
-        self.tabbed_components()
-            .iter()
-            .position(|&i| i == component_idx)
-    }
-
     /// Get the component index for the active tab.
     pub fn active_tab_component_idx(&self) -> Option<usize> {
-        self.tabbed_components().get(self.active_tab).copied()
+        let tabbed = self.tabbed_components();
+        self.tabs.active_component(&tabbed)
     }
 
     /// Get a mutable reference to the active tab's component.
     pub fn active_buffer_mut(&mut self) -> Option<&mut Box<dyn Component>> {
         let idx = self.active_tab_component_idx()?;
         Some(&mut self.components[idx])
-    }
-
-    fn activate_tab_for_component(&mut self, component_idx: usize) {
-        if let Some(tab_idx) = self.tabbed_index_of(component_idx) {
-            self.active_tab = tab_idx;
-        }
     }
 
     /// Find the component claiming the Side panel (highest priority).
@@ -298,12 +500,32 @@ impl Shell {
         Some(&self.components[idx])
     }
 
+    pub fn overlay_component_idx(&self) -> Option<usize> {
+        self.components
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| {
+                c.panel_claims()
+                    .iter()
+                    .any(|cl| cl.slot == PanelSlot::Overlay)
+            })
+            .max_by_key(|(_, c)| {
+                c.panel_claims()
+                    .iter()
+                    .filter(|cl| cl.slot == PanelSlot::Overlay)
+                    .map(|cl| cl.priority)
+                    .max()
+                    .unwrap_or(0)
+            })
+            .map(|(i, _)| i)
+    }
+
     pub fn components(&self) -> &[Box<dyn Component>] {
         &self.components
     }
 
     pub fn active_tab(&self) -> usize {
-        self.active_tab
+        self.tabs.active
     }
 
     pub fn has_tabs(&self) -> bool {
@@ -330,123 +552,72 @@ impl Shell {
 
         // Handle rename modal input
         if self.rename_modal.is_some() {
-            let is_abort = matches!(key.code, KeyCode::Esc)
-                || (key.code == KeyCode::Char('g')
-                    && key.modifiers.contains(KeyModifiers::CONTROL));
-            if is_abort {
-                self.rename_modal = None;
-                self.set_message("Aborted");
-            } else if key.code == KeyCode::Enter {
-                let modal = self.rename_modal.take().unwrap();
-                if !modal.input.is_empty() {
-                    let effects = vec![Effect::Emit(Event::LspRename {
-                        path: modal.path,
-                        row: modal.row,
-                        col: modal.col,
-                        new_name: modal.input,
-                    })];
-                    self.process_effects(effects);
+            match classify_rename_key(&key) {
+                RenameKeyResult::Cancel => {
+                    self.rename_modal = None;
+                    self.set_message("Aborted");
                 }
-            } else if key.code == KeyCode::Backspace {
-                if let Some(ref mut modal) = self.rename_modal {
-                    modal.input.pop();
+                RenameKeyResult::Submit => {
+                    let modal = self.rename_modal.take().unwrap();
+                    if !modal.input.is_empty() {
+                        let effects = vec![Effect::Emit(Event::LspRename {
+                            path: modal.path,
+                            row: modal.row,
+                            col: modal.col,
+                            new_name: modal.input,
+                        })];
+                        self.process_effects(effects);
+                    }
                 }
-            } else if let KeyCode::Char(c) = key.code {
-                let has_ctrl_alt = key
-                    .modifiers
-                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
-                if !has_ctrl_alt {
+                RenameKeyResult::Backspace => {
+                    if let Some(ref mut modal) = self.rename_modal {
+                        modal.input.pop();
+                    }
+                }
+                RenameKeyResult::Char(c) => {
                     if let Some(ref mut modal) = self.rename_modal {
                         modal.input.push(c);
                     }
                 }
-            }
-            return InputResult::Continue;
-        }
-
-        // Handle picker modal input
-        if self.picker_modal.is_some() {
-            let is_abort = matches!(key.code, KeyCode::Esc)
-                || (key.code == KeyCode::Char('g')
-                    && key.modifiers.contains(KeyModifiers::CONTROL));
-            if is_abort {
-                self.picker_modal = None;
-            } else if key.code == KeyCode::Enter {
-                let modal = self.picker_modal.take().unwrap();
-                let effects = match modal.kind {
-                    led_core::PickerKind::CodeAction => {
-                        vec![Effect::Emit(Event::LspCodeActionResolve {
-                            path: modal.source_path,
-                            index: modal.selected,
-                        })]
-                    }
-                    led_core::PickerKind::Outline { rows } => {
-                        if let Some(&row) = rows.get(modal.selected) {
-                            vec![Effect::Emit(Event::GoToPosition {
-                                path: modal.source_path,
-                                row,
-                                col: 0,
-                                scroll_offset: None,
-                            })]
-                        } else {
-                            vec![]
-                        }
-                    }
-                };
-                self.process_effects(effects);
-            } else if key.code == KeyCode::Up {
-                if let Some(ref mut modal) = self.picker_modal {
-                    if modal.selected > 0 {
-                        modal.selected -= 1;
-                    }
-                }
-            } else if key.code == KeyCode::Down {
-                if let Some(ref mut modal) = self.picker_modal {
-                    if modal.selected + 1 < modal.items.len() {
-                        modal.selected += 1;
-                    }
-                }
+                RenameKeyResult::Ignore => {}
             }
             return InputResult::Continue;
         }
 
         // Handle modal input
         if self.modal.is_some() {
-            let is_abort = matches!(key.code, KeyCode::Esc)
-                || (key.code == KeyCode::Char('g')
-                    && key.modifiers.contains(KeyModifiers::CONTROL));
-            if is_abort {
-                self.modal = None;
-                self.set_message("Aborted");
-            } else if key.code == KeyCode::Enter {
-                let confirmed = self.modal.as_ref().unwrap().input == "yes";
-                if confirmed {
-                    // Take the modal to own the pending action
-                    let modal = self.modal.take().unwrap();
-                    match modal.action {
-                        PendingAction::KillBuffer => self.kill_current_buffer(),
-                        PendingAction::Confirmed(action) => {
-                            let effects = self.dispatch_action(action);
-                            self.process_effects(effects);
-                        }
-                    }
-                } else {
+            let input = self.modal.as_ref().unwrap().input.as_str();
+            match classify_modal_key(&key, input) {
+                ModalKeyResult::Cancel => {
+                    self.modal = None;
                     self.set_message("Aborted");
                 }
-                self.modal = None;
-            } else if key.code == KeyCode::Backspace {
-                if let Some(ref mut modal) = self.modal {
-                    modal.input.pop();
+                ModalKeyResult::Submit { confirmed } => {
+                    if confirmed {
+                        let modal = self.modal.take().unwrap();
+                        match modal.action {
+                            PendingAction::KillBuffer => self.kill_current_buffer(),
+                            PendingAction::Confirmed(action) => {
+                                let effects = self.dispatch_action(action);
+                                self.process_effects(effects);
+                            }
+                        }
+                    } else {
+                        self.set_message("Aborted");
+                    }
+                    self.modal = None;
                 }
-            } else if let KeyCode::Char(c) = key.code {
-                let has_ctrl_alt = key
-                    .modifiers
-                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
-                if !has_ctrl_alt {
+                ModalKeyResult::Backspace => {
+                    if let Some(ref mut modal) = self.modal {
+                        modal.input.pop();
+                    }
+                }
+                ModalKeyResult::Char(c) => {
                     if let Some(ref mut modal) = self.modal {
                         modal.input.push(c);
                     }
                 }
+                ModalKeyResult::Ignore => {}
             }
             return InputResult::Continue;
         }
@@ -470,6 +641,10 @@ impl Shell {
                 .status_bar_component()
                 .and_then(|c| c.context_name())
                 .map(|s| s.to_string()),
+            PanelSlot::Overlay => self
+                .overlay_component_idx()
+                .and_then(|i| self.components[i].context_name())
+                .map(|s| s.to_string()),
             PanelSlot::Main => None,
         };
 
@@ -491,6 +666,7 @@ impl Shell {
                     PanelSlot::Side => {
                         self.side_component().and_then(|c| c.context_name()) == Some("file_search")
                     }
+                    PanelSlot::Overlay => false,
                 };
                 if allow_insert {
                     let has_ctrl_alt = key
@@ -530,24 +706,14 @@ impl Shell {
             Action::Suspend => return InputResult::Suspend,
 
             Action::PrevTab => {
-                let tabs = self.tabbed_components();
-                if tabs.len() > 1 {
-                    if self.active_tab == 0 {
-                        self.active_tab = tabs.len() - 1;
-                    } else {
-                        self.active_tab -= 1;
-                    }
-                    self.pre_preview_tab = None;
-                    self.notify_active_buffer();
-                }
+                let count = self.tabbed_components().len();
+                self.tabs.prev(count);
+                self.notify_active_buffer();
             }
             Action::NextTab => {
-                let tabs = self.tabbed_components();
-                if tabs.len() > 1 {
-                    self.active_tab = (self.active_tab + 1) % tabs.len();
-                    self.pre_preview_tab = None;
-                    self.notify_active_buffer();
-                }
+                let count = self.tabbed_components().len();
+                self.tabs.next(count);
+                self.notify_active_buffer();
             }
 
             Action::KillBuffer => {
@@ -619,7 +785,8 @@ impl Shell {
                     .iter()
                     .position(|c| c.tab().map_or(false, |t| t.label == "*Messages*"))
                 {
-                    self.activate_tab_for_component(idx);
+                    let tabbed = self.tabbed_components();
+                    self.tabs.activate(idx, &tabbed);
                     self.set_focus(PanelSlot::Main);
                 }
             }
@@ -649,7 +816,8 @@ impl Shell {
 
     fn dispatch_action(&mut self, action: Action) -> Vec<Effect> {
         if self.focus == PanelSlot::Main {
-            self.touch_active_buffer();
+            let tabbed = self.tabbed_components();
+            self.tabs.touch_active(&tabbed);
         }
         self.pending_flush = true;
 
@@ -659,6 +827,7 @@ impl Shell {
                 .status_bar_component_idx()
                 .or_else(|| self.active_tab_component_idx()),
             PanelSlot::Side => self.side_component_idx(),
+            PanelSlot::Overlay => self.overlay_component_idx(),
         };
 
         if let Some(idx) = idx {
@@ -673,90 +842,35 @@ impl Shell {
         for effect in effects {
             match effect {
                 Effect::Emit(event) => {
-                    // Intercept ShowCodeActions to open picker modal
-                    if let Event::ShowCodeActions {
-                        ref path,
-                        ref actions,
-                    } = event
-                    {
-                        self.picker_modal = Some(PickerModal {
-                            title: "Code Actions".into(),
-                            items: actions.iter().map(|a| a.title.clone()).collect(),
-                            selected: 0,
-                            source_path: path.clone(),
-                            kind: led_core::PickerKind::CodeAction,
-                        });
-                        continue;
-                    }
                     // Intercept SetDiagnostics to track per-file severity
                     if let Event::SetDiagnostics {
                         ref path,
                         ref diagnostics,
                     } = event
                     {
-                        use led_core::lsp_types::DiagnosticSeverity;
-                        // Compute worst severity, ignoring Hint (too noisy for the file browser)
-                        let worst = diagnostics
-                            .iter()
-                            .filter(|d| d.severity != DiagnosticSeverity::Hint)
-                            .fold(None, |acc: Option<DiagnosticSeverity>, d| {
-                                Some(match acc {
-                                    None => d.severity,
-                                    Some(prev) => {
-                                        // Error < Warning < Info (Error is worst)
-                                        match (prev, d.severity) {
-                                            (DiagnosticSeverity::Error, _)
-                                            | (_, DiagnosticSeverity::Error) => {
-                                                DiagnosticSeverity::Error
-                                            }
-                                            (DiagnosticSeverity::Warning, _)
-                                            | (_, DiagnosticSeverity::Warning) => {
-                                                DiagnosticSeverity::Warning
-                                            }
-                                            _ => DiagnosticSeverity::Info,
-                                        }
-                                    }
-                                })
-                            });
+                        let worst = worst_diagnostic_severity(diagnostics);
                         self.file_statuses
                             .set_diagnostic_severity(path.clone(), worst);
                     }
-                    // Pre-broadcast: clear preview state before ConfirmSearch
-                    // effects run, so the FocusLost → PreviewClosed cascade
-                    // won't restore the pre-preview tab.
                     if matches!(&event, Event::ConfirmSearch { .. }) {
-                        self.pre_preview_tab = None;
+                        self.tabs.clear_preview();
                     }
-                    let prev_comp = self.active_tab_component_idx();
-                    let prev_active_tab = self.active_tab;
+                    let tabbed = self.tabbed_components();
+                    let prev_comp = self.tabs.active_component(&tabbed);
+                    let prev_active = self.tabs.active;
                     let mut more_effects = Vec::new();
                     let mut ctx = make_ctx(&self.env, &mut self.docs);
                     for comp in &mut self.components {
                         more_effects.extend(comp.handle_event(&event, &mut ctx));
                     }
                     self.process_effects(more_effects);
-                    // Stabilise: if a tab was removed, correct the active_tab
-                    // index so it still points at the same component.  But if
-                    // active_tab was deliberately changed (e.g. by Spawn inside
-                    // OpenDefinition), don't revert it.
-                    if self.active_tab == prev_active_tab {
-                        if let Some(ci) = prev_comp {
-                            if let Some(ti) = self.tabbed_index_of(ci) {
-                                self.active_tab = ti;
-                            }
-                        }
+                    let tabbed = self.tabbed_components();
+                    self.tabs.stabilize(prev_active, prev_comp, &tabbed);
+                    if matches!(&event, Event::PreviewClosed) {
+                        self.tabs.restore_preview(tabbed.len());
                     }
-                    // Post-broadcast hook for preview tab management
-                    if let Event::PreviewClosed = &event {
-                        if let Some(tab) = self.pre_preview_tab.take() {
-                            let tabs = self.tabbed_components();
-                            if !tabs.is_empty() {
-                                self.active_tab = tab.min(tabs.len() - 1);
-                            }
-                        }
-                    }
-                    if let Event::PreviewPromoted = &event {
-                        self.pre_preview_tab = None;
+                    if matches!(&event, Event::PreviewPromoted) {
+                        self.tabs.clear_preview();
                     }
                 }
                 Effect::Spawn(component) => {
@@ -779,29 +893,19 @@ impl Shell {
                     });
                 }
                 Effect::ActivateBuffer(path) => {
-                    if self.pre_preview_tab.is_none() {
-                        self.pre_preview_tab = Some(self.active_tab);
-                    }
+                    self.tabs.save_preview();
                     if let Some(idx) = self.components.iter().position(|c| {
                         c.tab().and_then(|t| t.path).as_deref() == Some(path.as_path())
                     }) {
-                        self.activate_tab_for_component(idx);
+                        let tabbed = self.tabbed_components();
+                        self.tabs.activate(idx, &tabbed);
                     }
                 }
                 Effect::KillPreview => {
-                    if let Some(idx) = self
-                        .components
-                        .iter()
-                        .position(|c| c.tab().map_or(false, |t| t.preview))
-                    {
+                    if let Some(idx) = find_preview_idx(&self.components) {
                         self.components.remove(idx);
-                        self.last_touched.remove(idx);
-                        let tabs = self.tabbed_components();
-                        if tabs.is_empty() {
-                            self.active_tab = 0;
-                        } else if self.active_tab >= tabs.len() {
-                            self.active_tab = tabs.len() - 1;
-                        }
+                        self.tabs.remove(idx);
+                        self.tabs.clamp(self.tabbed_components().len());
                     }
                 }
                 Effect::SetFileStatuses { statuses, branch } => {
@@ -829,20 +933,6 @@ impl Shell {
                         col,
                     });
                 }
-                Effect::ShowPicker {
-                    title,
-                    items,
-                    source_path,
-                    kind,
-                } => {
-                    self.picker_modal = Some(PickerModal {
-                        title,
-                        items,
-                        selected: 0,
-                        source_path,
-                        kind,
-                    });
-                }
             }
         }
     }
@@ -864,23 +954,14 @@ impl Shell {
                 self.process_effects(effects);
             }
             self.components.remove(comp_idx);
-            self.last_touched.remove(comp_idx);
-
-            let tabs = self.tabbed_components();
-            if tabs.is_empty() {
-                self.active_tab = 0;
+            self.tabs.remove(comp_idx);
+            let tabbed = self.tabbed_components();
+            self.tabs.clamp(tabbed.len());
+            if tabbed.is_empty() {
                 self.set_focus(PanelSlot::Side);
-            } else if self.active_tab >= tabs.len() {
-                self.active_tab = tabs.len() - 1;
             }
             self.set_message(&format!("Killed {label}"));
             self.notify_active_buffer();
-        }
-    }
-
-    fn touch_active_buffer(&mut self) {
-        if let Some(idx) = self.active_tab_component_idx() {
-            self.last_touched[idx] = Instant::now();
         }
     }
 
@@ -904,11 +985,11 @@ impl Shell {
     }
 
     fn evict_for_new_tab(&mut self, new_component: &Box<dyn Component>) {
-        if self.tab_bar_width == 0 {
+        if self.tabs.bar_width == 0 {
             return;
         }
         let gutter_offset: u16 = 1; // GUTTER_WIDTH - 1
-        let available = self.tab_bar_width.saturating_sub(gutter_offset);
+        let available = self.tabs.bar_width.saturating_sub(gutter_offset);
         let new_tab_width = new_component
             .tab()
             .map(|t| Self::tab_display_width(&t))
@@ -923,8 +1004,8 @@ impl Shell {
             }
             // Find oldest non-dirty, non-preview, non-active tabbed component
             let active_comp_idx = self.active_tab_component_idx();
-            let tabs = self.tabbed_components();
-            let candidate = tabs
+            let tabbed = self.tabbed_components();
+            let candidate = tabbed
                 .iter()
                 .filter(|&&ci| {
                     Some(ci) != active_comp_idx
@@ -932,22 +1013,14 @@ impl Shell {
                             .tab()
                             .map_or(true, |t| !t.dirty && !t.preview)
                 })
-                .min_by_key(|&&ci| self.last_touched[ci])
+                .min_by_key(|&&ci| self.tabs.last_touched[ci])
                 .copied();
             if let Some(ci) = candidate {
-                // Adjust active_tab before removal
-                let removed_tab_idx = self.tabbed_index_of(ci);
+                let removed_tab_idx = self.tabs.tab_index_of(ci, &tabbed);
                 self.components.remove(ci);
-                self.last_touched.remove(ci);
-                // Fix active_tab after removal
-                let tabs = self.tabbed_components();
-                if let Some(rt) = removed_tab_idx {
-                    if rt < self.active_tab {
-                        self.active_tab -= 1;
-                    } else if self.active_tab >= tabs.len() && !tabs.is_empty() {
-                        self.active_tab = tabs.len() - 1;
-                    }
-                }
+                self.tabs.remove(ci);
+                self.tabs
+                    .adjust_after_removal(removed_tab_idx, self.tabbed_components().len());
             } else {
                 break; // no eviction candidates
             }
@@ -955,12 +1028,13 @@ impl Shell {
     }
 
     pub fn set_tab_bar_width(&mut self, width: u16) {
-        self.tab_bar_width = width;
+        self.tabs.bar_width = width;
     }
 
     pub fn notify_active_buffer(&mut self) {
-        self.touch_active_buffer();
-        if let Some(idx) = self.active_tab_component_idx() {
+        let tabbed = self.tabbed_components();
+        self.tabs.touch_active(&tabbed);
+        if let Some(idx) = self.tabs.active_component(&tabbed) {
             let path = self.components[idx].tab().and_then(|t| t.path);
             let effects = vec![Effect::Emit(led_core::Event::TabActivated { path })];
             self.process_effects(effects);
@@ -1001,7 +1075,7 @@ impl Shell {
 
     pub fn capture_session(&self) -> SessionSnapshot {
         SessionSnapshot {
-            active_tab: self.active_tab,
+            active_tab: self.tabs.active,
             focus: self.focus,
             show_side_panel: self.show_side_panel,
         }
@@ -1013,15 +1087,14 @@ impl Shell {
             .iter()
             .position(|c| c.tab().and_then(|t| t.path).as_deref() == Some(path))
         {
-            self.activate_tab_for_component(idx);
+            let tabbed = self.tabbed_components();
+            self.tabs.activate(idx, &tabbed);
         }
     }
 
     pub fn set_active_tab(&mut self, tab: usize) {
-        let tabs = self.tabbed_components();
-        if !tabs.is_empty() {
-            self.active_tab = tab.min(tabs.len() - 1);
-        }
+        let count = self.tabbed_components().len();
+        self.tabs.set_active(tab, count);
     }
 
     pub fn set_focus(&mut self, focus: PanelSlot) {
@@ -1042,6 +1115,7 @@ impl Shell {
                 .status_bar_component_idx()
                 .or_else(|| self.active_tab_component_idx()),
             PanelSlot::Side => self.side_component_idx(),
+            PanelSlot::Overlay => self.overlay_component_idx(),
         };
         if let Some(idx) = old_idx {
             let mut ctx = make_ctx(&self.env, &mut self.docs);
@@ -1054,6 +1128,7 @@ impl Shell {
                 .status_bar_component_idx()
                 .or_else(|| self.active_tab_component_idx()),
             PanelSlot::Side => self.side_component_idx(),
+            PanelSlot::Overlay => self.overlay_component_idx(),
         };
         if let Some(idx) = new_idx {
             let mut ctx = make_ctx(&self.env, &mut self.docs);

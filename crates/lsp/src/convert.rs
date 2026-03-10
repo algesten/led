@@ -6,12 +6,25 @@ use lsp_types::{GotoDefinitionResponse, Location, TextEdit, WorkspaceEdit};
 
 use crate::util::{from_lsp_pos, path_from_uri, read_file_lines};
 
-pub(crate) fn lsp_edit_to_editor(te: &TextEdit, lines: &[String]) -> EditorTextEdit {
-    let start = from_lsp_pos(&te.range.start, lines);
-    let end = from_lsp_pos(&te.range.end, lines);
+pub(crate) fn lsp_edit_to_editor(
+    te: &TextEdit,
+    line_at: impl Fn(usize) -> Option<String>,
+) -> EditorTextEdit {
+    let start_row = te.range.start.line as usize;
+    let end_row = te.range.end.line as usize;
+    let start_line = line_at(start_row);
+    let end_line = if end_row == start_row {
+        start_line.clone()
+    } else {
+        line_at(end_row)
+    };
+    let start = from_lsp_pos(&te.range.start, start_line.as_deref());
+    let end = from_lsp_pos(&te.range.end, end_line.as_deref());
     EditorTextEdit {
         range: EditorRange { start, end },
         new_text: te.new_text.clone(),
+        start_line: None,
+        end_line: None,
     }
 }
 
@@ -24,9 +37,10 @@ pub(crate) fn workspace_edit_to_file_edits(
         for (uri, edits) in changes {
             if let Some(path) = path_from_uri(uri) {
                 let lines = read_file_lines(&path);
+                let line_at = |row: usize| lines.get(row).cloned();
                 let editor_edits: Vec<EditorTextEdit> = edits
                     .iter()
-                    .map(|e| lsp_edit_to_editor(e, &lines))
+                    .map(|e| lsp_edit_to_editor(e, &line_at))
                     .collect();
                 result.entry(path).or_default().extend(editor_edits);
             }
@@ -40,13 +54,16 @@ pub(crate) fn workspace_edit_to_file_edits(
                 for tde in edits {
                     if let Some(path) = path_from_uri(&tde.text_document.uri) {
                         let lines = read_file_lines(&path);
+                        let line_at = |row: usize| lines.get(row).cloned();
                         let editor_edits: Vec<EditorTextEdit> = tde
                             .edits
                             .iter()
                             .filter_map(|e| match e {
-                                lsp_types::OneOf::Left(te) => Some(lsp_edit_to_editor(te, &lines)),
+                                lsp_types::OneOf::Left(te) => {
+                                    Some(lsp_edit_to_editor(te, &line_at))
+                                }
                                 lsp_types::OneOf::Right(ate) => {
-                                    Some(lsp_edit_to_editor(&ate.text_edit, &lines))
+                                    Some(lsp_edit_to_editor(&ate.text_edit, &line_at))
                                 }
                             })
                             .collect();
@@ -59,15 +76,16 @@ pub(crate) fn workspace_edit_to_file_edits(
                     if let lsp_types::DocumentChangeOperation::Edit(tde) = op {
                         if let Some(path) = path_from_uri(&tde.text_document.uri) {
                             let lines = read_file_lines(&path);
+                            let line_at = |row: usize| lines.get(row).cloned();
                             let editor_edits: Vec<EditorTextEdit> = tde
                                 .edits
                                 .iter()
                                 .filter_map(|e| match e {
                                     lsp_types::OneOf::Left(te) => {
-                                        Some(lsp_edit_to_editor(te, &lines))
+                                        Some(lsp_edit_to_editor(te, &line_at))
                                     }
                                     lsp_types::OneOf::Right(ate) => {
-                                        Some(lsp_edit_to_editor(&ate.text_edit, &lines))
+                                        Some(lsp_edit_to_editor(&ate.text_edit, &line_at))
                                     }
                                 })
                                 .collect();
@@ -165,7 +183,9 @@ pub(crate) fn definition_response_to_locations(
             .filter_map(|link| {
                 let path = path_from_uri(&link.target_uri)?;
                 let lines = read_file_lines(&path);
-                let pos = from_lsp_pos(&link.target_selection_range.start, &lines);
+                let line = lines.get(link.target_selection_range.start.line as usize);
+                let pos =
+                    from_lsp_pos(&link.target_selection_range.start, line.map(|s| s.as_str()));
                 Some((path, pos.row, pos.col))
             })
             .collect(),
@@ -175,6 +195,7 @@ pub(crate) fn definition_response_to_locations(
 fn location_to_tuple(loc: &Location) -> Option<(PathBuf, usize, usize)> {
     let path = path_from_uri(&loc.uri)?;
     let lines = read_file_lines(&path);
-    let pos = from_lsp_pos(&loc.range.start, &lines);
+    let line = lines.get(loc.range.start.line as usize);
+    let pos = from_lsp_pos(&loc.range.start, line.map(|s| s.as_str()));
     Some((path, pos.row, pos.col))
 }

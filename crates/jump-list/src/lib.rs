@@ -5,7 +5,7 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use serde::{Deserialize, Serialize};
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 struct JumpPosition {
     path: PathBuf,
     row: usize,
@@ -16,6 +16,69 @@ struct JumpPosition {
 pub struct JumpList {
     list: Vec<JumpPosition>,
     index: usize,
+}
+
+// ---------------------------------------------------------------------------
+// Pure helpers
+// ---------------------------------------------------------------------------
+
+/// Compute the new list and index after recording a jump position.
+/// Truncates forward history and caps at 100 entries.
+fn record_jump_position(
+    list: &[JumpPosition],
+    index: usize,
+    pos: JumpPosition,
+) -> (Vec<JumpPosition>, usize) {
+    let mut new_list: Vec<JumpPosition> = list[..index].to_vec();
+    new_list.push(pos);
+    if new_list.len() > 100 {
+        new_list.remove(0);
+    }
+    let new_index = new_list.len();
+    (new_list, new_index)
+}
+
+/// Compute the new index and the position to jump to when going back.
+/// Returns `None` if already at the beginning.
+fn compute_jump_back(
+    list: &[JumpPosition],
+    index: usize,
+    current: JumpPosition,
+) -> Option<(Vec<JumpPosition>, usize)> {
+    if index == 0 {
+        return None;
+    }
+    let mut new_list = list.to_vec();
+    let mut new_index = index;
+    // If at present (past end), save current position first
+    if index == list.len() {
+        new_list.push(current);
+    }
+    new_index -= 1;
+    Some((new_list, new_index))
+}
+
+/// Compute the new index when jumping forward.
+/// Returns `None` if already at the end.
+fn compute_jump_forward(list: &[JumpPosition], index: usize) -> Option<usize> {
+    if index + 1 >= list.len() {
+        return None;
+    }
+    Some(index + 1)
+}
+
+fn jump_effects(pos: &JumpPosition) -> Vec<Effect> {
+    vec![
+        Effect::Emit(Event::PreviewClosed),
+        Effect::Emit(Event::OpenFile(pos.path.clone())),
+        Effect::Emit(Event::GoToPosition {
+            path: pos.path.clone(),
+            row: pos.row,
+            col: pos.col,
+            scroll_offset: Some(pos.scroll_offset),
+        }),
+        Effect::FocusPanel(PanelSlot::Main),
+    ]
 }
 
 impl JumpList {
@@ -66,19 +129,15 @@ impl Component for JumpList {
                 col,
                 scroll_offset,
             } => {
-                // Truncate forward history
-                self.list.truncate(self.index);
-                self.list.push(JumpPosition {
+                let pos = JumpPosition {
                     path: path.clone(),
                     row: *row,
                     col: *col,
                     scroll_offset: *scroll_offset,
-                });
-                // Cap at 100 entries
-                if self.list.len() > 100 {
-                    self.list.remove(0);
-                }
-                self.index = self.list.len();
+                };
+                let (new_list, new_index) = record_jump_position(&self.list, self.index, pos);
+                self.list = new_list;
+                self.index = new_index;
                 vec![]
             }
             Event::JumpBack {
@@ -87,49 +146,27 @@ impl Component for JumpList {
                 col,
                 scroll_offset,
             } => {
-                if self.index == 0 {
+                let current = JumpPosition {
+                    path: path.clone(),
+                    row: *row,
+                    col: *col,
+                    scroll_offset: *scroll_offset,
+                };
+                let Some((new_list, new_index)) =
+                    compute_jump_back(&self.list, self.index, current)
+                else {
                     return vec![];
-                }
-                // If at present (past end), save current position first
-                if self.index == self.list.len() {
-                    self.list.push(JumpPosition {
-                        path: path.clone(),
-                        row: *row,
-                        col: *col,
-                        scroll_offset: *scroll_offset,
-                    });
-                }
-                self.index -= 1;
-                let pos = &self.list[self.index];
-                vec![
-                    Effect::Emit(Event::PreviewClosed),
-                    Effect::Emit(Event::OpenFile(pos.path.clone())),
-                    Effect::Emit(Event::GoToPosition {
-                        path: pos.path.clone(),
-                        row: pos.row,
-                        col: pos.col,
-                        scroll_offset: Some(pos.scroll_offset),
-                    }),
-                    Effect::FocusPanel(PanelSlot::Main),
-                ]
+                };
+                self.list = new_list;
+                self.index = new_index;
+                jump_effects(&self.list[self.index])
             }
             Event::JumpForward => {
-                if self.index + 1 >= self.list.len() {
+                let Some(new_index) = compute_jump_forward(&self.list, self.index) else {
                     return vec![];
-                }
-                self.index += 1;
-                let pos = &self.list[self.index];
-                vec![
-                    Effect::Emit(Event::PreviewClosed),
-                    Effect::Emit(Event::OpenFile(pos.path.clone())),
-                    Effect::Emit(Event::GoToPosition {
-                        path: pos.path.clone(),
-                        row: pos.row,
-                        col: pos.col,
-                        scroll_offset: Some(pos.scroll_offset),
-                    }),
-                    Effect::FocusPanel(PanelSlot::Main),
-                ]
+                };
+                self.index = new_index;
+                jump_effects(&self.list[self.index])
             }
             _ => vec![],
         }

@@ -1,5 +1,6 @@
 mod config;
 mod logger;
+mod picker;
 mod session;
 mod shell;
 mod theme;
@@ -111,6 +112,7 @@ async fn main() -> io::Result<()> {
         Box::new(JumpList::new()),
         Box::new(LspManager::new(root.clone(), Some(waker.clone()))),
         Box::new(led_messages::Messages::new(shared_log)),
+        Box::new(picker::Picker::new()),
     ];
 
     if cli.reset_config {
@@ -208,9 +210,13 @@ async fn main() -> io::Result<()> {
                         if let Ok(ms) = ms.trim().parse::<u64>() {
                             tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
                         }
-                    } else if let Ok(action) = serde_json::from_value::<led_core::Action>(
-                        serde_json::Value::String(line.to_string()),
-                    ) {
+                    } else if let Ok(action) = serde_json::from_str::<led_core::Action>(line)
+                        .or_else(|_| {
+                            serde_json::from_value::<led_core::Action>(serde_json::Value::String(
+                                line.to_string(),
+                            ))
+                        })
+                    {
                         let _ = tx_script.send(AppEvent::ScriptAction(action));
                     }
                 }

@@ -36,21 +36,23 @@ pub(crate) fn char_col_to_utf16_col(line: &str, char_col: usize) -> u32 {
     utf16_offset
 }
 
-pub(crate) fn lsp_pos(row: usize, col: usize, lines: &[String]) -> Position {
-    let utf16_col = if row < lines.len() {
-        char_col_to_utf16_col(&lines[row], col)
-    } else {
-        col as u32
+/// Convert (row, col) to LSP Position using a single line for UTF-16 conversion.
+/// If no line is provided, col is used as-is (correct for ASCII).
+pub(crate) fn lsp_pos(row: usize, col: usize, line: Option<&str>) -> Position {
+    let utf16_col = match line {
+        Some(l) => char_col_to_utf16_col(l, col),
+        None => col as u32,
     };
     Position::new(row as u32, utf16_col)
 }
 
-pub(crate) fn from_lsp_pos(pos: &Position, lines: &[String]) -> EditorPosition {
+/// Convert LSP Position to EditorPosition using a single line for UTF-16 conversion.
+/// If no line is provided, character offset is used as-is (correct for ASCII).
+pub(crate) fn from_lsp_pos(pos: &Position, line: Option<&str>) -> EditorPosition {
     let row = pos.line as usize;
-    let col = if row < lines.len() {
-        utf16_col_to_char_col(&lines[row], pos.character)
-    } else {
-        pos.character as usize
+    let col = match line {
+        Some(l) => utf16_col_to_char_col(l, pos.character),
+        None => pos.character as usize,
     };
     EditorPosition { row, col }
 }

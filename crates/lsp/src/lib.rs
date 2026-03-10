@@ -62,29 +62,35 @@ impl LspManager {
     }
 
     fn lsp_status_effect(&self) -> Effect {
-        let server_name = self
-            .servers
-            .values()
-            .next()
-            .map(|s| s.name.clone())
-            .unwrap_or_default();
+        Effect::SetLspStatus(compute_lsp_status(
+            self.servers.values().next().map(|s| &*s.name),
+            &self.progress_tokens,
+            self.is_busy(),
+        ))
+    }
+}
 
-        let detail = if !self.progress_tokens.is_empty() {
-            self.progress_tokens.values().next().map(|p| {
-                if let Some(ref msg) = p.message {
-                    format!("{} {}", p.title, msg)
-                } else {
-                    p.title.clone()
-                }
-            })
+fn progress_detail(progress_tokens: &HashMap<String, ProgressState>) -> Option<String> {
+    if progress_tokens.is_empty() {
+        return None;
+    }
+    progress_tokens.values().next().map(|p| {
+        if let Some(ref msg) = p.message {
+            format!("{} {}", p.title, msg)
         } else {
-            None
-        };
+            p.title.clone()
+        }
+    })
+}
 
-        Effect::SetLspStatus(LspStatus {
-            server_name,
-            busy: self.is_busy(),
-            detail,
-        })
+fn compute_lsp_status(
+    server_name: Option<&str>,
+    progress_tokens: &HashMap<String, ProgressState>,
+    busy: bool,
+) -> LspStatus {
+    LspStatus {
+        server_name: server_name.unwrap_or_default().to_string(),
+        busy,
+        detail: progress_detail(progress_tokens),
     }
 }

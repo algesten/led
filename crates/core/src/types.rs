@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::file_status::{FileStatus, LineStatus};
 use crate::lsp_types::{
-    EditorCodeAction, EditorCompletionItem, EditorDiagnostic, EditorInlayHint, EditorTextEdit,
+    EditorCompletionItem, EditorDiagnostic, EditorInlayHint, EditorTextEdit,
 };
 
 pub type Waker = Arc<dyn Fn() + Send + Sync>;
@@ -97,6 +97,7 @@ pub enum PanelSlot {
     Main,
     Side,
     StatusBar,
+    Overlay,
 }
 
 #[derive(Debug, Clone)]
@@ -197,6 +198,7 @@ pub enum Event {
     /// LSP: format document
     LspFormat {
         path: PathBuf,
+        generation: u64,
     },
     /// LSP: request inlay hints for visible range
     LspInlayHints {
@@ -214,10 +216,12 @@ pub enum Event {
         path: PathBuf,
         edits: Vec<EditorTextEdit>,
     },
-    /// LSP response: show code action picker
-    ShowCodeActions {
-        path: PathBuf,
-        actions: Vec<EditorCodeAction>,
+    /// Show a picker overlay (code actions, outline, etc.)
+    ShowPicker {
+        title: String,
+        items: Vec<String>,
+        source_path: PathBuf,
+        kind: PickerKind,
     },
     /// LSP response: set inlay hints for a file
     SetInlayHints {
@@ -261,6 +265,7 @@ pub enum Event {
     /// LSP format pipeline completed (always fires, even on error/no-server)
     FormatDone {
         path: PathBuf,
+        generation: u64,
     },
 }
 
@@ -301,10 +306,4 @@ pub enum Effect {
         col: usize,
     },
     SetLspStatus(LspStatus),
-    ShowPicker {
-        title: String,
-        items: Vec<String>,
-        source_path: PathBuf,
-        kind: PickerKind,
-    },
 }

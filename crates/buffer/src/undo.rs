@@ -4,6 +4,34 @@ use led_core::{Context, TextDoc};
 
 use crate::{Buffer, EditKind, EditOp, GROUP_TIMEOUT_MS, PendingGroup, UndoEntry};
 
+enum GroupDecision {
+    ExtendCurrent,
+    FlushAndStart,
+    MismatchFlushAndStart,
+}
+
+fn should_extend_group(
+    pending: &PendingGroup,
+    kind: EditKind,
+    op: &EditOp,
+    now: Instant,
+) -> GroupDecision {
+    let elapsed = now.duration_since(pending.last_time).as_millis();
+    if pending.kind != kind || elapsed >= GROUP_TIMEOUT_MS {
+        return GroupDecision::FlushAndStart;
+    }
+    let compatible = matches!(
+        (&pending.op, op),
+        (EditOp::Insert { .. }, EditOp::Insert { .. })
+            | (EditOp::Remove { .. }, EditOp::Remove { .. })
+    );
+    if compatible {
+        GroupDecision::ExtendCurrent
+    } else {
+        GroupDecision::MismatchFlushAndStart
+    }
+}
+
 impl Buffer {
     pub fn undo(&mut self, doc: &mut TextDoc) {
         self.flush_pending();
@@ -12,24 +40,35 @@ impl Buffer {
             self.undo_cursor = Some(self.undo_history.len());
         }
 
-        let pos = self.undo_cursor.unwrap();
+        let mut pos = self.undo_cursor.unwrap();
         if pos == 0 {
             return;
         }
 
-        let entry = self.undo_history[pos - 1].clone();
-        let inverse = self.invert_entry(&entry);
+        // Process the entry and any preceding entries with direction=0
+        // (they form a compound undo group).
+        loop {
+            let entry = self.undo_history[pos - 1].clone();
+            let is_continuation = entry.direction == 0 && pos > 1;
+            let inverse = self.invert_entry(&entry);
 
-        let se = self.syntax_edit_for_op(&*doc, &inverse.op);
-        self.apply_op(doc, &inverse.op);
-        self.apply_syntax_edit(&*doc, se);
-        self.cursor_row = inverse.cursor_after.0;
-        self.cursor_col = inverse.cursor_after.1;
-        self.distance_from_save -= entry.direction;
+            let se = self.syntax_edit_for_op(&*doc, &inverse.op);
+            self.apply_op(doc, &inverse.op);
+            self.apply_syntax_edit(&*doc, se);
+            self.cursor_row = inverse.cursor_after.0;
+            self.cursor_col = inverse.cursor_after.1;
+            self.distance_from_save -= entry.direction;
+
+            self.undo_history.push(inverse);
+            pos -= 1;
+
+            if !is_continuation {
+                break;
+            }
+        }
+
         self.dirty = self.distance_from_save != 0;
-
-        self.undo_history.push(inverse);
-        self.undo_cursor = Some(pos - 1);
+        self.undo_cursor = Some(pos);
     }
 
     fn invert_entry(&self, entry: &UndoEntry) -> UndoEntry {
@@ -75,44 +114,49 @@ impl Buffer {
         let now = Instant::now();
 
         if let Some(ref mut pg) = self.pending_group {
-            let elapsed = now.duration_since(pg.last_time).as_millis();
-            if pg.kind == kind && elapsed < GROUP_TIMEOUT_MS {
-                match (&mut pg.op, &op) {
-                    (EditOp::Insert { text: acc, .. }, EditOp::Insert { text: new, .. }) => {
-                        acc.push_str(new);
-                    }
-                    (
-                        EditOp::Remove {
-                            char_idx: acc_idx,
-                            text: acc,
-                        },
-                        EditOp::Remove {
-                            char_idx: new_idx,
-                            text: new,
-                        },
-                    ) => {
-                        if kind == EditKind::DeleteBackward {
-                            acc.insert_str(0, new);
-                            *acc_idx = *new_idx;
-                        } else {
+            match should_extend_group(pg, kind, &op, now) {
+                GroupDecision::ExtendCurrent => {
+                    match (&mut pg.op, &op) {
+                        (EditOp::Insert { text: acc, .. }, EditOp::Insert { text: new, .. }) => {
                             acc.push_str(new);
                         }
+                        (
+                            EditOp::Remove {
+                                char_idx: acc_idx,
+                                text: acc,
+                            },
+                            EditOp::Remove {
+                                char_idx: new_idx,
+                                text: new,
+                            },
+                        ) => {
+                            if kind == EditKind::DeleteBackward {
+                                acc.insert_str(0, new);
+                                *acc_idx = *new_idx;
+                            } else {
+                                acc.push_str(new);
+                            }
+                        }
+                        _ => unreachable!(),
                     }
-                    _ => {
-                        self.flush_pending_inner();
-                        self.pending_group = Some(PendingGroup {
-                            kind,
-                            op,
-                            cursor_before,
-                            cursor_after,
-                            last_time: now,
-                        });
-                        return;
-                    }
+                    pg.cursor_after = cursor_after;
+                    pg.last_time = now;
+                    return;
                 }
-                pg.cursor_after = cursor_after;
-                pg.last_time = now;
-                return;
+                GroupDecision::MismatchFlushAndStart => {
+                    self.flush_pending_inner();
+                    self.pending_group = Some(PendingGroup {
+                        kind,
+                        op,
+                        cursor_before,
+                        cursor_after,
+                        last_time: now,
+                    });
+                    return;
+                }
+                GroupDecision::FlushAndStart => {
+                    // Fall through to flush + start below
+                }
             }
         }
 

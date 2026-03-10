@@ -104,6 +104,7 @@ pub struct StatusDisplay {
     pub theme_key: &'static str,
 }
 
+#[derive(Clone, Copy)]
 struct StatusInfo {
     letter: char,
     theme_key: &'static str,
@@ -132,27 +133,28 @@ fn status_info(s: FileStatus) -> StatusInfo {
 
 /// Compose a set of file statuses into a display.
 /// Letter from lowest priority, color from highest.
+///
+/// Both lowest and highest are tracked independently so iteration
+/// order of the HashSet cannot affect the result (fixes the
+/// directory-coloring instability bug).
 pub fn resolve_display(statuses: &HashSet<FileStatus>) -> Option<StatusDisplay> {
     if statuses.is_empty() {
         return None;
     }
     let mut lowest: Option<StatusInfo> = None;
-    let mut highest_key: Option<(&'static str, u8)> = None;
+    let mut highest: Option<StatusInfo> = None;
     for &s in statuses {
         let info = status_info(s);
-        if lowest.as_ref().map_or(true, |l| info.priority < l.priority) {
+        if lowest.map_or(true, |l| info.priority < l.priority) {
             lowest = Some(info);
-        } else {
-            // Still check for highest priority color
-            let info2 = status_info(s);
-            if highest_key.map_or(true, |(_, p)| info2.priority > p) {
-                highest_key = Some((info2.theme_key, info2.priority));
-            }
+        }
+        if highest.map_or(true, |h| info.priority > h.priority) {
+            highest = Some(info);
         }
     }
     let lowest = lowest?;
-    let theme_key = match highest_key {
-        Some((key, p)) if p > lowest.priority => key,
+    let theme_key = match highest {
+        Some(h) if h.priority > lowest.priority => h.theme_key,
         _ => lowest.theme_key,
     };
     Some(StatusDisplay {
@@ -161,7 +163,7 @@ pub fn resolve_display(statuses: &HashSet<FileStatus>) -> Option<StatusDisplay> 
     })
 }
 
-fn severity_worst(a: DiagnosticSeverity, b: DiagnosticSeverity) -> DiagnosticSeverity {
+pub fn severity_worst(a: DiagnosticSeverity, b: DiagnosticSeverity) -> DiagnosticSeverity {
     fn rank(s: DiagnosticSeverity) -> u8 {
         match s {
             DiagnosticSeverity::Error => 0,

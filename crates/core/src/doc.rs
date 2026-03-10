@@ -36,10 +36,19 @@ impl TextDoc {
 
     // --- Mutations (track changes) ---
 
+    fn rope_line_str(&self, row: usize) -> String {
+        self.rope
+            .line(row)
+            .to_string()
+            .trim_end_matches('\n')
+            .to_string()
+    }
+
     pub fn insert(&mut self, char_idx: usize, text: &str) {
         let row = self.rope.char_to_line(char_idx);
         let line_start = self.rope.line_to_char(row);
         let col = char_idx - line_start;
+        let line = self.rope_line_str(row);
 
         self.pending_changes.push(EditorTextEdit {
             range: EditorRange {
@@ -47,6 +56,8 @@ impl TextDoc {
                 end: EditorPosition { row, col },
             },
             new_text: text.to_string(),
+            start_line: Some(line.clone()),
+            end_line: Some(line),
         });
 
         self.rope.insert(char_idx, text);
@@ -57,6 +68,7 @@ impl TextDoc {
         let row = self.rope.char_to_line(char_idx);
         let line_start = self.rope.line_to_char(row);
         let col = char_idx - line_start;
+        let line = self.rope_line_str(row);
 
         self.pending_changes.push(EditorTextEdit {
             range: EditorRange {
@@ -64,6 +76,8 @@ impl TextDoc {
                 end: EditorPosition { row, col },
             },
             new_text: ch.to_string(),
+            start_line: Some(line.clone()),
+            end_line: Some(line),
         });
 
         self.rope.insert_char(char_idx, ch);
@@ -79,6 +93,13 @@ impl TextDoc {
         let end_line_start = self.rope.line_to_char(end_row);
         let end_col = end - end_line_start;
 
+        let sl = self.rope_line_str(start_row);
+        let el = if end_row == start_row {
+            sl.clone()
+        } else {
+            self.rope_line_str(end_row)
+        };
+
         self.pending_changes.push(EditorTextEdit {
             range: EditorRange {
                 start: EditorPosition {
@@ -91,6 +112,8 @@ impl TextDoc {
                 },
             },
             new_text: String::new(),
+            start_line: Some(sl),
+            end_line: Some(el),
         });
 
         self.rope.remove(start..end);
@@ -221,5 +244,15 @@ impl DocStore {
 
     pub fn version(&self, path: &Path) -> Option<i32> {
         self.docs.get(path).map(|d| d.version())
+    }
+
+    /// Get a single line from a buffer by row index.
+    pub fn line(&self, path: &Path, row: usize) -> Option<String> {
+        let doc = self.docs.get(path)?;
+        if row < doc.line_count() {
+            Some(doc.line(row))
+        } else {
+            None
+        }
     }
 }

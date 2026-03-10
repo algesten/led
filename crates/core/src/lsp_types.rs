@@ -16,6 +16,10 @@ pub struct EditorRange {
 pub struct EditorTextEdit {
     pub range: EditorRange,
     pub new_text: String,
+    /// Pre-edit line content for UTF-16 position conversion in didChange.
+    /// Set by TextDoc when recording changes; None for LSP-originated edits.
+    pub start_line: Option<String>,
+    pub end_line: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -35,12 +39,6 @@ pub struct EditorDiagnostic {
 pub struct EditorInlayHint {
     pub position: EditorPosition,
     pub label: String,
-}
-
-#[derive(Debug, Clone)]
-pub struct EditorCodeAction {
-    pub title: String,
-    pub index: usize,
 }
 
 #[derive(Debug, Clone)]

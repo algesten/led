@@ -138,6 +138,7 @@ pub struct Buffer {
     pub(crate) inlay_hints_enabled: bool,
     pub(crate) last_hint_range: Option<(usize, usize)>,
     pub(crate) pending_save_after_format: bool,
+    pub(crate) format_generation: u64,
     claims: Vec<PanelClaim>,
     claims_with_status: Vec<PanelClaim>,
 }
@@ -190,6 +191,7 @@ impl Buffer {
             inlay_hints_enabled: false,
             last_hint_range: None,
             pending_save_after_format: false,
+            format_generation: 0,
             claims: vec![
                 PanelClaim {
                     slot: PanelSlot::Main,
@@ -313,6 +315,7 @@ impl Buffer {
             inlay_hints_enabled: false,
             last_hint_range: None,
             pending_save_after_format: false,
+            format_generation: 0,
             claims: vec![
                 PanelClaim {
                     slot: PanelSlot::Main,

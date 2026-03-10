@@ -3,8 +3,8 @@ use std::path::PathBuf;
 
 use led_core::lsp_types::DiagnosticSeverity;
 use led_core::{
-    Action, BLANK_STYLE, Component, Context, DrawContext, Effect, ElementStyle, Event, PanelClaim,
-    PanelSlot, PickerKind, TabDescriptor, TextDoc, Theme,
+    Action, BLANK_STYLE, Component, Context, DrawContext, Effect, ElementStyle, Event, LspStatus,
+    PanelClaim, PanelSlot, PickerKind, TabDescriptor, TextDoc, Theme,
 };
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -34,6 +34,237 @@ fn resolve_capture_style(theme: &Theme, capture_name: &str, text_style: Style) -
         }
     }
     text_style
+}
+
+fn format_search_status(query: &str, failed: bool) -> String {
+    if failed {
+        format!("Failing search: {query}")
+    } else {
+        format!("Search: {query}")
+    }
+}
+
+fn format_lsp_status(lsp: &LspStatus) -> String {
+    let tick = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let spinner_char = |offset: u128| -> char {
+        const FRAMES: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+        FRAMES[((tick + offset) / 80) as usize % FRAMES.len()]
+    };
+    let spinner = if lsp.busy {
+        format!("{} ", spinner_char(0))
+    } else {
+        String::new()
+    };
+    let detail = lsp
+        .detail
+        .as_ref()
+        .map(|d| {
+            if lsp.busy {
+                format!("  {} {d}", spinner_char(400))
+            } else {
+                format!("  {d}")
+            }
+        })
+        .unwrap_or_default();
+    format!("  {spinner}{}{detail}", lsp.server_name)
+}
+
+fn format_status_bar(
+    filename: &str,
+    dirty: bool,
+    branch: &str,
+    lsp_str: &str,
+    cursor_row: usize,
+    cursor_col: usize,
+    width: usize,
+) -> String {
+    let modified = if dirty { " \u{25cf}" } else { "" };
+    let branch_display = if branch.is_empty() {
+        String::new()
+    } else {
+        format!(" ({branch})")
+    };
+    let left = format!(" {filename}{modified}{branch_display}{lsp_str}");
+    let pos = format!("L{}:C{} ", cursor_row + 1, cursor_col + 1);
+    let padding = width.saturating_sub(left.len() + pos.len());
+    format!("{left}{:padding$}{pos}", "")
+}
+
+fn find_next_diagnostic(
+    diagnostics: &[led_core::lsp_types::EditorDiagnostic],
+    cursor_row: usize,
+    cursor_col: usize,
+) -> Option<(usize, usize)> {
+    diagnostics
+        .iter()
+        .filter(|d| d.severity != DiagnosticSeverity::Hint)
+        .find(|d| {
+            d.range.start.row > cursor_row
+                || (d.range.start.row == cursor_row && d.range.start.col > cursor_col)
+        })
+        .or_else(|| {
+            diagnostics
+                .iter()
+                .find(|d| d.severity != DiagnosticSeverity::Hint)
+        })
+        .map(|d| (d.range.start.row, d.range.start.col))
+}
+
+fn find_prev_diagnostic(
+    diagnostics: &[led_core::lsp_types::EditorDiagnostic],
+    cursor_row: usize,
+    cursor_col: usize,
+) -> Option<(usize, usize)> {
+    diagnostics
+        .iter()
+        .rev()
+        .filter(|d| d.severity != DiagnosticSeverity::Hint)
+        .find(|d| {
+            d.range.start.row < cursor_row
+                || (d.range.start.row == cursor_row && d.range.start.col < cursor_col)
+        })
+        .or_else(|| {
+            diagnostics
+                .iter()
+                .rev()
+                .find(|d| d.severity != DiagnosticSeverity::Hint)
+        })
+        .map(|d| (d.range.start.row, d.range.start.col))
+}
+
+fn compute_goto_position(
+    row: usize,
+    col: usize,
+    scroll_offset: Option<usize>,
+    line_count: usize,
+    line_len_fn: impl Fn(usize) -> usize,
+) -> (usize, usize, Option<usize>) {
+    let r = row.min(line_count.saturating_sub(1));
+    let c = col.min(line_len_fn(r));
+    let s = scroll_offset.map(|o| o.min(line_count.saturating_sub(1)));
+    (r, c, s)
+}
+
+fn compute_preview_position(
+    row: usize,
+    col: usize,
+    line_count: usize,
+    line_len_fn: impl Fn(usize) -> usize,
+    viewport_height: usize,
+) -> (usize, usize, usize) {
+    let r = row.min(line_count.saturating_sub(1));
+    let c = col.min(line_len_fn(r));
+    let scroll = r.saturating_sub(viewport_height / 2);
+    (r, c, scroll)
+}
+
+fn build_completion_state(
+    mut items: Vec<led_core::lsp_types::EditorCompletionItem>,
+    prefix_start_col: usize,
+    cursor_col: usize,
+    line: &str,
+) -> Option<crate::CompletionState> {
+    if items.is_empty() {
+        return None;
+    }
+    items.sort_by(|a, b| {
+        let a_key = a.sort_text.as_deref().unwrap_or(&a.label);
+        let b_key = b.sort_text.as_deref().unwrap_or(&b.label);
+        a_key.cmp(b_key)
+    });
+    let filtered: Vec<usize> = (0..items.len()).collect();
+    let mut state = crate::CompletionState {
+        items,
+        filtered,
+        selected: 0,
+        prefix_start_col,
+    };
+    // Apply initial prefix filter
+    let prefix: String = if cursor_col > prefix_start_col {
+        line.chars()
+            .skip(prefix_start_col)
+            .take(cursor_col - prefix_start_col)
+            .collect()
+    } else {
+        String::new()
+    };
+    let prefix_lower = prefix.to_lowercase();
+    state.filtered = state
+        .items
+        .iter()
+        .enumerate()
+        .filter(|(_, item)| {
+            let text = item
+                .filter_text
+                .as_deref()
+                .unwrap_or(&item.label)
+                .to_lowercase();
+            text.starts_with(&prefix_lower)
+        })
+        .map(|(i, _)| i)
+        .collect();
+    if state.filtered.is_empty() {
+        None
+    } else {
+        Some(state)
+    }
+}
+
+fn should_trigger_completion(cursor_col: usize, line: &str) -> bool {
+    cursor_col > 0 && {
+        let ch = line.chars().nth(cursor_col - 1).unwrap_or(' ');
+        ch.is_alphanumeric() || ch == '_'
+    }
+}
+
+fn format_outline_item(item: &crate::syntax::OutlineItem) -> String {
+    let indent = "  ".repeat(item.depth);
+    if item.context.is_empty() {
+        format!("{indent}{}", item.name)
+    } else {
+        format!("{indent}{} {}", item.context, item.name)
+    }
+}
+
+fn diagnostic_overlay_style(severity: DiagnosticSeverity, theme: &Theme) -> (Color, bool) {
+    let fallback = match severity {
+        DiagnosticSeverity::Error => Color::Red,
+        DiagnosticSeverity::Warning => Color::Yellow,
+        DiagnosticSeverity::Info => Color::Blue,
+        DiagnosticSeverity::Hint => Color::Gray,
+    };
+    let key = match severity {
+        DiagnosticSeverity::Error => "diagnostics.error",
+        DiagnosticSeverity::Warning => "diagnostics.warning",
+        DiagnosticSeverity::Info => "diagnostics.info",
+        DiagnosticSeverity::Hint => "diagnostics.hint",
+    };
+    let fg_color = match theme.get(key).fg {
+        Color::Reset => fallback,
+        c => c,
+    };
+    let underline = severity != DiagnosticSeverity::Hint;
+    (fg_color, underline)
+}
+
+fn cursor_visual_position(
+    doc: &TextDoc,
+    cursor_row: usize,
+    cursor_col: usize,
+    text_width: usize,
+) -> (usize, usize) {
+    let (cursor_display, cursor_cm) = expand_tabs(&doc.line(cursor_row));
+    let cursor_dc = cursor_cm
+        .get(cursor_col)
+        .copied()
+        .unwrap_or_else(|| cursor_cm.last().copied().unwrap_or(0));
+    let cursor_chunks = compute_chunks(cursor_display.len(), text_width);
+    let cursor_sub = find_sub_line(&cursor_chunks, cursor_dc);
+    let cursor_vrow_count = cursor_chunks.len();
+    (cursor_sub, cursor_vrow_count)
 }
 
 impl Buffer {
@@ -139,11 +370,7 @@ impl Buffer {
         let style = ctx.theme.get("status_bar.style").to_style();
 
         if let Some(ref isearch) = self.isearch {
-            let prompt = if isearch.failed {
-                format!("Failing search: {}", isearch.query)
-            } else {
-                format!("Search: {}", isearch.query)
-            };
+            let prompt = format_search_status(&isearch.query, isearch.failed);
             let padding = (area.width as usize).saturating_sub(prompt.len() + 1);
             let bar = format!(" {prompt}{:padding$}", "");
             let paragraph = Paragraph::new(bar).style(style);
@@ -154,98 +381,222 @@ impl Buffer {
         }
 
         let filename = self.filename();
-        let modified = if self.dirty { " \u{25cf}" } else { "" };
+        let lsp_str = ctx.lsp_status.map(format_lsp_status).unwrap_or_default();
         let branch = ctx.file_statuses.branch.as_deref().unwrap_or("");
-        let branch_display = if branch.is_empty() {
-            String::new()
-        } else {
-            format!(" ({branch})")
-        };
-        // Build LSP status string (placed after branch, left-aligned).
-        let lsp_str = if let Some(lsp) = ctx.lsp_status {
-            let tick = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis();
-            let spinner_char = |offset: u128| -> char {
-                const FRAMES: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
-                FRAMES[((tick + offset) / 80) as usize % FRAMES.len()]
-            };
-            let spinner = if lsp.busy {
-                format!("{} ", spinner_char(0))
-            } else {
-                String::new()
-            };
-            let detail = lsp
-                .detail
-                .as_ref()
-                .map(|d| {
-                    if lsp.busy {
-                        format!("  {} {d}", spinner_char(400))
-                    } else {
-                        format!("  {d}")
-                    }
-                })
-                .unwrap_or_default();
-            format!("  {spinner}{}{detail}", lsp.server_name)
-        } else {
-            String::new()
-        };
-
-        let left = format!(" {filename}{modified}{branch_display}{lsp_str}");
-        let pos = format!("L{}:C{} ", self.cursor_row + 1, self.cursor_col + 1);
-        let padding = (area.width as usize).saturating_sub(left.len() + pos.len());
-        let bar = format!("{left}{:padding$}{pos}", "");
+        let bar = format_status_bar(
+            filename,
+            self.dirty,
+            branch,
+            &lsp_str,
+            self.cursor_row,
+            self.cursor_col,
+            area.width as usize,
+        );
         let paragraph = Paragraph::new(bar).style(style);
         frame.render_widget(paragraph, area);
     }
 
     fn goto_next_diagnostic(&mut self, doc: &TextDoc) {
-        if self.diagnostics.is_empty() {
-            return;
-        }
-        // Find the next diagnostic after the cursor (skip hints)
-        let after = self
-            .diagnostics
-            .iter()
-            .filter(|d| d.severity != DiagnosticSeverity::Hint)
-            .find(|d| {
-                d.range.start.row > self.cursor_row
-                    || (d.range.start.row == self.cursor_row && d.range.start.col > self.cursor_col)
-            })
-            .or_else(|| {
-                self.diagnostics
-                    .iter()
-                    .find(|d| d.severity != DiagnosticSeverity::Hint)
-            }); // wrap around
-        if let Some(d) = after {
-            self.cursor_row = d.range.start.row.min(doc.line_count().saturating_sub(1));
-            self.cursor_col = d.range.start.col.min(doc.line_len(self.cursor_row));
+        if let Some((row, col)) =
+            find_next_diagnostic(&self.diagnostics, self.cursor_row, self.cursor_col)
+        {
+            self.cursor_row = row.min(doc.line_count().saturating_sub(1));
+            self.cursor_col = col.min(doc.line_len(self.cursor_row));
         }
     }
 
     fn goto_prev_diagnostic(&mut self, doc: &TextDoc) {
-        if self.diagnostics.is_empty() {
-            return;
+        if let Some((row, col)) =
+            find_prev_diagnostic(&self.diagnostics, self.cursor_row, self.cursor_col)
+        {
+            self.cursor_row = row.min(doc.line_count().saturating_sub(1));
+            self.cursor_col = col.min(doc.line_len(self.cursor_row));
         }
-        let before = self
-            .diagnostics
-            .iter()
-            .rev()
-            .filter(|d| d.severity != DiagnosticSeverity::Hint)
-            .find(|d| {
-                d.range.start.row < self.cursor_row
-                    || (d.range.start.row == self.cursor_row && d.range.start.col < self.cursor_col)
-            })
-            .or_else(|| {
-                self.diagnostics
-                    .iter()
-                    .rev()
-                    .find(|d| d.severity != DiagnosticSeverity::Hint)
-            }); // wrap around
-        if let Some(d) = before {
-            self.cursor_row = d.range.start.row.min(doc.line_count().saturating_sub(1));
-            self.cursor_col = d.range.start.col.min(doc.line_len(self.cursor_row));
+    }
+
+    fn handle_isearch_action(&mut self, action: &Action, doc: &TextDoc) -> Option<Vec<Effect>> {
+        match action {
+            Action::InsertChar(c) => {
+                self.isearch.as_mut().unwrap().query.push(*c);
+                self.update_search(doc);
+                Some(vec![])
+            }
+            Action::DeleteBackward => {
+                let empty = {
+                    let is = self.isearch.as_mut().unwrap();
+                    is.query.pop();
+                    is.query.is_empty()
+                };
+                if empty {
+                    let is = self.isearch.as_ref().unwrap();
+                    self.cursor_row = is.origin.0;
+                    self.cursor_col = is.origin.1;
+                    let is = self.isearch.as_mut().unwrap();
+                    is.matches.clear();
+                    is.match_idx = None;
+                    is.failed = false;
+                } else {
+                    self.update_search(doc);
+                }
+                Some(vec![])
+            }
+            Action::InBufferSearch => {
+                self.search_next(doc);
+                Some(vec![])
+            }
+            Action::Abort => {
+                self.search_cancel();
+                Some(vec![])
+            }
+            Action::InsertNewline => {
+                self.search_accept();
+                Some(vec![])
+            }
+            Action::MoveUp
+            | Action::MoveDown
+            | Action::MoveLeft
+            | Action::MoveRight
+            | Action::LineStart
+            | Action::LineEnd
+            | Action::PageUp
+            | Action::PageDown
+            | Action::FileStart
+            | Action::FileEnd => {
+                self.search_accept();
+                None // fall through to normal handling
+            }
+            // Lifecycle actions: pass through without exiting isearch
+            Action::Tick
+            | Action::Flush
+            | Action::SaveSession
+            | Action::RestoreSession
+            | Action::KillBuffer
+            | Action::FocusGained
+            | Action::FocusLost => {
+                None // fall through to normal handling
+            }
+            _ => {
+                self.search_accept();
+                None // fall through to normal handling
+            }
+        }
+    }
+
+    fn handle_completion_action(
+        &mut self,
+        action: &Action,
+        doc: &mut TextDoc,
+        version_before: i32,
+    ) -> Option<Vec<Effect>> {
+        match action {
+            Action::MoveUp => {
+                let cs = self.completion.as_mut().unwrap();
+                if cs.selected > 0 {
+                    cs.selected -= 1;
+                }
+                Some(vec![])
+            }
+            Action::MoveDown => {
+                let cs = self.completion.as_mut().unwrap();
+                if cs.selected + 1 < cs.filtered.len() {
+                    cs.selected += 1;
+                }
+                Some(vec![])
+            }
+            Action::InsertTab | Action::InsertNewline => {
+                let mut effects = self.accept_completion(doc);
+                if let Some(ref path) = self.path {
+                    if doc.version() != version_before {
+                        effects.push(Effect::Emit(Event::BufferChanged { path: path.clone() }));
+                    }
+                }
+                Some(effects)
+            }
+            Action::Abort => {
+                self.completion = None;
+                Some(vec![])
+            }
+            Action::InsertChar(c) => {
+                self.insert_char(doc, *c);
+                self.update_completion_filter(doc);
+                if self
+                    .completion
+                    .as_ref()
+                    .map_or(true, |cs| cs.filtered.is_empty())
+                {
+                    self.completion = None;
+                }
+                let mut effects = vec![];
+                if let Some(ref path) = self.path {
+                    if doc.version() != version_before {
+                        effects.push(Effect::Emit(Event::BufferChanged { path: path.clone() }));
+                    }
+                }
+                Some(effects)
+            }
+            Action::DeleteBackward => {
+                self.delete_char_backward(doc);
+                let dismiss = self
+                    .completion
+                    .as_ref()
+                    .map_or(true, |cs| self.cursor_col <= cs.prefix_start_col);
+                if dismiss {
+                    self.completion = None;
+                } else {
+                    self.update_completion_filter(doc);
+                    if self
+                        .completion
+                        .as_ref()
+                        .map_or(true, |cs| cs.filtered.is_empty())
+                    {
+                        self.completion = None;
+                    }
+                }
+                let mut effects = vec![];
+                if let Some(ref path) = self.path {
+                    if doc.version() != version_before {
+                        effects.push(Effect::Emit(Event::BufferChanged { path: path.clone() }));
+                    }
+                }
+                Some(effects)
+            }
+            // Lifecycle actions: pass through without dismissing completion
+            Action::Tick
+            | Action::Flush
+            | Action::SaveSession
+            | Action::RestoreSession
+            | Action::FocusGained
+            | Action::FocusLost => {
+                None // fall through to normal handling
+            }
+            // All other actions dismiss completion and fall through
+            _ => {
+                self.completion = None;
+                None
+            }
+        }
+    }
+
+    fn do_format_or_save(&mut self, doc: &mut TextDoc, ctx: &mut Context) -> Vec<Effect> {
+        if let Some(ref path) = self.path {
+            self.format_generation += 1;
+            self.pending_save_after_format = true;
+            let fgen = self.format_generation;
+            vec![
+                Effect::SetMessage("Formatting...".into()),
+                Effect::Emit(Event::LspFormat {
+                    path: path.clone(),
+                    generation: fgen,
+                }),
+            ]
+        } else {
+            match self.save(doc, ctx) {
+                Ok(()) => {
+                    let name = self.filename().to_string();
+                    vec![Effect::SetMessage(format!("Saved {name}"))]
+                }
+                Err(e) => vec![Effect::SetMessage(format!("Save failed: {e}"))],
+            }
         }
     }
 
@@ -273,13 +624,8 @@ impl Buffer {
         }
 
         // Compute cursor's sub-line within its logical line
-        let (cursor_display, cursor_cm) = expand_tabs(&doc.line(self.cursor_row));
-        let cursor_dc = cursor_cm
-            .get(self.cursor_col)
-            .copied()
-            .unwrap_or_else(|| cursor_cm.last().copied().unwrap_or(0));
-        let cursor_chunks = compute_chunks(cursor_display.len(), text_width);
-        let cursor_sub = find_sub_line(&cursor_chunks, cursor_dc);
+        let (cursor_sub, _cursor_vrow_count) =
+            cursor_visual_position(doc, self.cursor_row, self.cursor_col, text_width);
 
         // Case 1: cursor above viewport
         if self.cursor_row < self.scroll_offset
@@ -430,173 +776,18 @@ impl Component for Buffer {
 
         // Intercept actions during incremental search
         if self.isearch.is_some() {
-            match action {
-                Action::InsertChar(c) => {
-                    self.isearch.as_mut().unwrap().query.push(c);
-                    self.update_search(&doc);
-                    self.put_doc(ctx.docs, doc);
-                    return vec![];
-                }
-                Action::DeleteBackward => {
-                    let empty = {
-                        let is = self.isearch.as_mut().unwrap();
-                        is.query.pop();
-                        is.query.is_empty()
-                    };
-                    if empty {
-                        // Restore origin when query becomes empty
-                        let is = self.isearch.as_ref().unwrap();
-                        self.cursor_row = is.origin.0;
-                        self.cursor_col = is.origin.1;
-                        let is = self.isearch.as_mut().unwrap();
-                        is.matches.clear();
-                        is.match_idx = None;
-                        is.failed = false;
-                    } else {
-                        self.update_search(&doc);
-                    }
-                    self.put_doc(ctx.docs, doc);
-                    return vec![];
-                }
-                Action::InBufferSearch => {
-                    self.search_next(&doc);
-                    self.put_doc(ctx.docs, doc);
-                    return vec![];
-                }
-                Action::Abort => {
-                    self.search_cancel();
-                    self.put_doc(ctx.docs, doc);
-                    return vec![];
-                }
-                Action::InsertNewline => {
-                    self.search_accept();
-                    self.put_doc(ctx.docs, doc);
-                    return vec![];
-                }
-                Action::MoveUp
-                | Action::MoveDown
-                | Action::MoveLeft
-                | Action::MoveRight
-                | Action::LineStart
-                | Action::LineEnd
-                | Action::PageUp
-                | Action::PageDown
-                | Action::FileStart
-                | Action::FileEnd => {
-                    self.search_accept();
-                    // Fall through to normal handling below
-                }
-                // Lifecycle actions: pass through without exiting isearch
-                Action::Tick
-                | Action::Flush
-                | Action::SaveSession
-                | Action::RestoreSession
-                | Action::KillBuffer
-                | Action::FocusGained
-                | Action::FocusLost => {
-                    // Fall through to normal handling below
-                }
-                _ => {
-                    self.search_accept();
-                    // Fall through to normal handling below
-                }
+            if let Some(effects) = self.handle_isearch_action(&action, &doc) {
+                self.put_doc(ctx.docs, doc);
+                return effects;
             }
         }
 
         // Intercept actions during completion
         if self.completion.is_some() {
-            match action {
-                Action::MoveUp => {
-                    let cs = self.completion.as_mut().unwrap();
-                    if cs.selected > 0 {
-                        cs.selected -= 1;
-                    }
-                    self.put_doc(ctx.docs, doc);
-                    return vec![];
-                }
-                Action::MoveDown => {
-                    let cs = self.completion.as_mut().unwrap();
-                    if cs.selected + 1 < cs.filtered.len() {
-                        cs.selected += 1;
-                    }
-                    self.put_doc(ctx.docs, doc);
-                    return vec![];
-                }
-                Action::InsertTab | Action::InsertNewline => {
-                    let mut effects = self.accept_completion(&mut doc);
-                    if let Some(ref path) = self.path {
-                        if doc.version() != version_before {
-                            effects.push(Effect::Emit(Event::BufferChanged { path: path.clone() }));
-                        }
-                    }
-                    self.put_doc(ctx.docs, doc);
-                    return effects;
-                }
-                Action::Abort => {
-                    self.completion = None;
-                    self.put_doc(ctx.docs, doc);
-                    return vec![];
-                }
-                Action::InsertChar(c) => {
-                    self.insert_char(&mut doc, c);
-                    self.update_completion_filter(&doc);
-                    if self
-                        .completion
-                        .as_ref()
-                        .map_or(true, |cs| cs.filtered.is_empty())
-                    {
-                        self.completion = None;
-                    }
-                    let mut effects = vec![];
-                    if let Some(ref path) = self.path {
-                        if doc.version() != version_before {
-                            effects.push(Effect::Emit(Event::BufferChanged { path: path.clone() }));
-                        }
-                    }
-                    self.put_doc(ctx.docs, doc);
-                    return effects;
-                }
-                Action::DeleteBackward => {
-                    self.delete_char_backward(&mut doc);
-                    // Dismiss if we've deleted past the prefix
-                    let dismiss = self
-                        .completion
-                        .as_ref()
-                        .map_or(true, |cs| self.cursor_col <= cs.prefix_start_col);
-                    if dismiss {
-                        self.completion = None;
-                    } else {
-                        self.update_completion_filter(&doc);
-                        if self
-                            .completion
-                            .as_ref()
-                            .map_or(true, |cs| cs.filtered.is_empty())
-                        {
-                            self.completion = None;
-                        }
-                    }
-                    let mut effects = vec![];
-                    if let Some(ref path) = self.path {
-                        if doc.version() != version_before {
-                            effects.push(Effect::Emit(Event::BufferChanged { path: path.clone() }));
-                        }
-                    }
-                    self.put_doc(ctx.docs, doc);
-                    return effects;
-                }
-                // Lifecycle actions: pass through without dismissing completion
-                Action::Tick
-                | Action::Flush
-                | Action::SaveSession
-                | Action::RestoreSession
-                | Action::FocusGained
-                | Action::FocusLost => {
-                    // Fall through to normal handling
-                }
-                // All other actions dismiss completion and fall through
-                _ => {
-                    self.completion = None;
-                }
+            if let Some(effects) = self.handle_completion_action(&action, &mut doc, version_before)
+            {
+                self.put_doc(ctx.docs, doc);
+                return effects;
             }
         }
 
@@ -668,16 +859,8 @@ impl Component for Buffer {
             }
             Action::InsertTab => {
                 self.clear_mark();
-                // Smart tab: if cursor follows a word char, trigger completion
-                let trigger_completion = if self.path.is_some() {
-                    self.cursor_col > 0 && {
-                        let line = doc.line(self.cursor_row);
-                        let ch = line.chars().nth(self.cursor_col - 1).unwrap_or(' ');
-                        ch.is_alphanumeric() || ch == '_'
-                    }
-                } else {
-                    false
-                };
+                let trigger_completion = self.path.is_some()
+                    && should_trigger_completion(self.cursor_col, &doc.line(self.cursor_row));
                 if trigger_completion {
                     let path = self.path.clone().unwrap();
                     self.put_doc(ctx.docs, doc);
@@ -723,41 +906,11 @@ impl Component for Buffer {
                         ),
                         action: Action::SaveForce,
                     }]
-                } else if let Some(ref path) = self.path {
-                    // File-backed buffer: trigger format-on-save pipeline
-                    self.pending_save_after_format = true;
-                    vec![
-                        Effect::SetMessage("Formatting...".into()),
-                        Effect::Emit(Event::LspFormat { path: path.clone() }),
-                    ]
                 } else {
-                    // Scratch buffer: save directly (no LSP)
-                    match self.save(&mut doc, ctx) {
-                        Ok(()) => {
-                            let name = self.filename().to_string();
-                            vec![Effect::SetMessage(format!("Saved {name}"))]
-                        }
-                        Err(e) => vec![Effect::SetMessage(format!("Save failed: {e}"))],
-                    }
+                    self.do_format_or_save(&mut doc, ctx)
                 }
             }
-            Action::SaveForce => {
-                if let Some(ref path) = self.path {
-                    self.pending_save_after_format = true;
-                    vec![
-                        Effect::SetMessage("Formatting...".into()),
-                        Effect::Emit(Event::LspFormat { path: path.clone() }),
-                    ]
-                } else {
-                    match self.save(&mut doc, ctx) {
-                        Ok(()) => {
-                            let name = self.filename().to_string();
-                            vec![Effect::SetMessage(format!("Saved {name}"))]
-                        }
-                        Err(e) => vec![Effect::SetMessage(format!("Save failed: {e}"))],
-                    }
-                }
-            }
+            Action::SaveForce => self.do_format_or_save(&mut doc, ctx),
             Action::Tick => {
                 let mut effects = self.handle_tick(&mut doc, ctx);
                 // Request inlay hints when viewport changes
@@ -923,7 +1076,10 @@ impl Component for Buffer {
             }
             Action::LspFormat => {
                 if let Some(ref path) = self.path {
-                    vec![Effect::Emit(Event::LspFormat { path: path.clone() })]
+                    vec![Effect::Emit(Event::LspFormat {
+                        path: path.clone(),
+                        generation: 0,
+                    })]
                 } else {
                     vec![]
                 }
@@ -966,24 +1122,15 @@ impl Component for Buffer {
                         vec![Effect::SetMessage("No symbols found".into())]
                     } else {
                         let rows: Vec<usize> = items.iter().map(|i| i.row).collect();
-                        let display_items: Vec<String> = items
-                            .iter()
-                            .map(|item| {
-                                let indent = "  ".repeat(item.depth);
-                                if item.context.is_empty() {
-                                    format!("{indent}{}", item.name)
-                                } else {
-                                    format!("{indent}{} {}", item.context, item.name)
-                                }
-                            })
-                            .collect();
+                        let display_items: Vec<String> =
+                            items.iter().map(format_outline_item).collect();
                         if let Some(ref path) = self.path {
-                            vec![Effect::ShowPicker {
+                            vec![Effect::Emit(Event::ShowPicker {
                                 title: "Outline".into(),
                                 items: display_items,
                                 source_path: path.clone(),
                                 kind: PickerKind::Outline { rows },
-                            }]
+                            })]
                         } else {
                             vec![]
                         }
@@ -1077,10 +1224,13 @@ impl Component for Buffer {
                 scroll_offset,
             } => {
                 if self.path.as_deref() == Some(path.as_path()) {
-                    self.cursor_row = (*row).min(doc.line_count().saturating_sub(1));
-                    self.cursor_col = (*col).min(doc.line_len(self.cursor_row));
-                    if let Some(offset) = scroll_offset {
-                        self.scroll_offset = (*offset).min(doc.line_count().saturating_sub(1));
+                    let lc = doc.line_count();
+                    let (r, c, s) =
+                        compute_goto_position(*row, *col, *scroll_offset, lc, |r| doc.line_len(r));
+                    self.cursor_row = r;
+                    self.cursor_col = c;
+                    if let Some(offset) = s {
+                        self.scroll_offset = offset;
                     }
                     self.clear_mark();
                 }
@@ -1093,10 +1243,16 @@ impl Component for Buffer {
                 match_len,
             } => {
                 if self.path.as_deref() == Some(path.as_path()) {
-                    let r = (*row).min(doc.line_count().saturating_sub(1));
+                    let (r, c, scroll) = compute_preview_position(
+                        *row,
+                        *col,
+                        doc.line_count(),
+                        |r| doc.line_len(r),
+                        ctx.viewport_height,
+                    );
                     self.cursor_row = r;
-                    self.cursor_col = (*col).min(doc.line_len(r));
-                    self.scroll_offset = r.saturating_sub(ctx.viewport_height / 2);
+                    self.cursor_col = c;
+                    self.scroll_offset = scroll;
                     self.highlight_match(&doc, *row, *col, *match_len);
                     vec![Effect::ActivateBuffer(path.clone())]
                 } else {
@@ -1106,9 +1262,11 @@ impl Component for Buffer {
             Event::ConfirmSearch { path, row, col } => {
                 if self.path.as_deref() == Some(path.as_path()) {
                     self.preview = false;
-                    let r = (*row).min(doc.line_count().saturating_sub(1));
+                    let lc = doc.line_count();
+                    let (r, c, _) =
+                        compute_goto_position(*row, *col, None, lc, |r| doc.line_len(r));
                     self.cursor_row = r;
-                    self.cursor_col = (*col).min(doc.line_len(r));
+                    self.cursor_col = c;
                     self.clear_mark();
                     vec![
                         Effect::ActivateBuffer(path.clone()),
@@ -1119,7 +1277,8 @@ impl Component for Buffer {
                 }
             }
             Event::SetDiagnostics { path, diagnostics } => {
-                if self.path.as_deref() == Some(path.as_path()) {
+                let matches = self.path.as_deref() == Some(path.as_path());
+                if matches {
                     self.diagnostics = diagnostics.clone();
                 }
                 vec![]
@@ -1130,8 +1289,11 @@ impl Component for Buffer {
                 }
                 vec![]
             }
-            Event::FormatDone { path } => {
-                if self.path.as_deref() == Some(path.as_path()) && self.pending_save_after_format {
+            Event::FormatDone { path, generation } => {
+                if self.path.as_deref() == Some(path.as_path())
+                    && self.pending_save_after_format
+                    && *generation == self.format_generation
+                {
                     self.pending_save_after_format = false;
                     match self.save(&mut doc, ctx) {
                         Ok(()) => {
@@ -1160,27 +1322,13 @@ impl Component for Buffer {
                 prefix_start_col,
             } => {
                 if self.path.as_deref() == Some(path.as_path()) && !items.is_empty() {
-                    let mut items = items.clone();
-                    items.sort_by(|a, b| {
-                        let a_key = a.sort_text.as_deref().unwrap_or(&a.label);
-                        let b_key = b.sort_text.as_deref().unwrap_or(&b.label);
-                        a_key.cmp(b_key)
-                    });
-                    let filtered: Vec<usize> = (0..items.len()).collect();
-                    self.completion = Some(crate::CompletionState {
-                        items,
-                        filtered,
-                        selected: 0,
-                        prefix_start_col: *prefix_start_col,
-                    });
-                    self.update_completion_filter(&doc);
-                    if self
-                        .completion
-                        .as_ref()
-                        .map_or(true, |cs| cs.filtered.is_empty())
-                    {
-                        self.completion = None;
-                    }
+                    let line = doc.line(self.cursor_row);
+                    self.completion = build_completion_state(
+                        items.clone(),
+                        *prefix_start_col,
+                        self.cursor_col,
+                        &line,
+                    );
                 }
                 vec![]
             }
@@ -1454,22 +1602,7 @@ impl Buffer {
                         }
                     });
                     let right = if let Some(sev) = diag_severity {
-                        let key = match sev {
-                            DiagnosticSeverity::Error => "diagnostics.error",
-                            DiagnosticSeverity::Warning => "diagnostics.warning",
-                            DiagnosticSeverity::Info => "diagnostics.info",
-                            DiagnosticSeverity::Hint => "diagnostics.hint",
-                        };
-                        let fallback = match sev {
-                            DiagnosticSeverity::Error => Color::Red,
-                            DiagnosticSeverity::Warning => Color::Yellow,
-                            DiagnosticSeverity::Info => Color::Blue,
-                            DiagnosticSeverity::Hint => Color::Gray,
-                        };
-                        let fg_color = match ctx.theme.get(key).fg {
-                            Color::Reset => fallback,
-                            c => c,
-                        };
+                        let (fg_color, _) = diagnostic_overlay_style(sev, ctx.theme);
                         Span::styled("●", Style::default().fg(fg_color))
                     } else if let Some(ref hint) = color_hint {
                         if hint.bg != Color::Reset {
@@ -1599,25 +1732,11 @@ impl Buffer {
                             } else {
                                 display.len()
                             };
-                            let fallback = match diag.severity {
-                                DiagnosticSeverity::Error => Color::Red,
-                                DiagnosticSeverity::Warning => Color::Yellow,
-                                DiagnosticSeverity::Info => Color::Blue,
-                                DiagnosticSeverity::Hint => Color::Gray,
-                            };
-                            let key = match diag.severity {
-                                DiagnosticSeverity::Error => "diagnostics.error",
-                                DiagnosticSeverity::Warning => "diagnostics.warning",
-                                DiagnosticSeverity::Info => "diagnostics.info",
-                                DiagnosticSeverity::Hint => "diagnostics.hint",
-                            };
-                            let fg_color = match ctx.theme.get(key).fg {
-                                Color::Reset => fallback,
-                                c => c,
-                            };
+                            let (fg_color, underline) =
+                                diagnostic_overlay_style(diag.severity, ctx.theme);
                             for i in ds.max(cs)..de.min(ce) {
                                 let s = col_styles[i - cs].fg(fg_color);
-                                col_styles[i - cs] = if diag.severity != DiagnosticSeverity::Hint {
+                                col_styles[i - cs] = if underline {
                                     s.add_modifier(Modifier::UNDERLINED)
                                 } else {
                                     s

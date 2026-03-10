@@ -2,9 +2,12 @@ use std::path::{Path, PathBuf};
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
+use ratatui::style::Style;
 use ratatui::widgets::{Block, Borders};
 
-use led_core::{Action, Component, Context, DrawContext, Effect, Event, PanelClaim, PanelSlot};
+use led_core::{
+    Action, Component, Context, DrawContext, Effect, Event, PanelClaim, PanelSlot, Theme,
+};
 
 // ---------------------------------------------------------------------------
 // Completion entry
@@ -14,6 +17,77 @@ struct Completion {
     name: String,
     full: PathBuf,
     is_dir: bool,
+}
+
+// ---------------------------------------------------------------------------
+// Pure helper functions
+// ---------------------------------------------------------------------------
+
+fn prev_char_boundary(s: &str, byte_pos: usize) -> usize {
+    s[..byte_pos]
+        .char_indices()
+        .next_back()
+        .map(|(i, _)| i)
+        .unwrap_or(0)
+}
+
+fn next_char_len(s: &str, byte_pos: usize) -> usize {
+    s[byte_pos..]
+        .chars()
+        .next()
+        .map(|c| c.len_utf8())
+        .unwrap_or(0)
+}
+
+fn wrap_selection_up(current: Option<usize>, len: usize) -> usize {
+    match current {
+        Some(0) | None => len - 1,
+        Some(i) => i - 1,
+    }
+}
+
+fn wrap_selection_down(current: Option<usize>, len: usize) -> usize {
+    match current {
+        None => 0,
+        Some(i) if i + 1 >= len => 0,
+        Some(i) => i + 1,
+    }
+}
+
+fn truncate_to_width(name: &str, max: usize) -> String {
+    if name.len() > max {
+        format!("{}…", &name[..max.saturating_sub(1)])
+    } else {
+        format!("{name:max$}")
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Style helpers
+// ---------------------------------------------------------------------------
+
+fn completion_row_style(is_selected: bool, is_dir: bool, focused: bool, theme: &Theme) -> Style {
+    if is_selected {
+        if focused {
+            theme.get("browser.selected").to_style()
+        } else {
+            theme.get("browser.selected_unfocused").to_style()
+        }
+    } else if is_dir {
+        theme.get("browser.directory").to_style()
+    } else {
+        theme.get("browser.file").to_style()
+    }
+}
+
+fn status_entry_style(is_selected: bool, base_style: Style, status_fg: Style) -> Style {
+    if is_selected {
+        Style::default()
+            .fg(status_fg.fg.unwrap_or(ratatui::style::Color::Reset))
+            .bg(base_style.bg.unwrap_or(ratatui::style::Color::Reset))
+    } else {
+        status_fg
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -358,18 +432,7 @@ impl FindFilePanel {
         {
             let y = inner.y + i as u16;
             let is_selected = self.selected == Some(scroll + i);
-
-            let style = if is_selected {
-                if ctx.focused {
-                    ctx.theme.get("browser.selected").to_style()
-                } else {
-                    ctx.theme.get("browser.selected_unfocused").to_style()
-                }
-            } else if comp.is_dir {
-                ctx.theme.get("browser.directory").to_style()
-            } else {
-                ctx.theme.get("browser.file").to_style()
-            };
+            let style = completion_row_style(is_selected, comp.is_dir, ctx.focused, &ctx.theme);
 
             let max = inner.width as usize;
             let name = &comp.name;
@@ -385,19 +448,9 @@ impl FindFilePanel {
 
             if let Some(sd) = sd {
                 let status_fg = ctx.theme.get(sd.theme_key).to_style();
-                let entry_style = if is_selected {
-                    ratatui::style::Style::default()
-                        .fg(status_fg.fg.unwrap_or(ratatui::style::Color::Reset))
-                        .bg(style.bg.unwrap_or(ratatui::style::Color::Reset))
-                } else {
-                    status_fg
-                };
+                let entry_style = status_entry_style(is_selected, style, status_fg);
                 let name_width = max.saturating_sub(1);
-                let display: String = if name.len() > name_width {
-                    format!("{}…", &name[..name_width.saturating_sub(1)])
-                } else {
-                    format!("{name:name_width$}")
-                };
+                let display = truncate_to_width(name, name_width);
                 buf.set_string(inner.x, y, &display, entry_style);
                 buf.set_string(
                     inner.x + name_width as u16,
@@ -406,11 +459,7 @@ impl FindFilePanel {
                     entry_style,
                 );
             } else {
-                let display: String = if name.len() > max {
-                    format!("{}…", &name[..max.saturating_sub(1)])
-                } else {
-                    format!("{name:max$}")
-                };
+                let display = truncate_to_width(name, max);
                 buf.set_string(inner.x, y, &display, style);
             }
         }
@@ -479,11 +528,7 @@ impl Component for FindFilePanel {
 
             Action::DeleteBackward => {
                 if self.cursor > 0 {
-                    let prev = self.input[..self.cursor]
-                        .char_indices()
-                        .next_back()
-                        .map(|(i, _)| i)
-                        .unwrap_or(0);
+                    let prev = prev_char_boundary(&self.input, self.cursor);
                     self.input.drain(prev..self.cursor);
                     self.cursor = prev;
                     self.recompute();
@@ -528,10 +573,7 @@ impl Component for FindFilePanel {
                     return Vec::new();
                 }
                 let dir_prefix = self.input_dir_prefix().to_string();
-                self.selected = Some(match self.selected {
-                    Some(0) | None => self.completions.len() - 1,
-                    Some(i) => i - 1,
-                });
+                self.selected = Some(wrap_selection_up(self.selected, self.completions.len()));
                 if let Some(sel) = self.selected {
                     if let Some(comp) = self.completions.get(sel) {
                         self.input = format!("{dir_prefix}{}", comp.name);
@@ -546,11 +588,7 @@ impl Component for FindFilePanel {
                     return Vec::new();
                 }
                 let dir_prefix = self.input_dir_prefix().to_string();
-                self.selected = Some(match self.selected {
-                    None => 0,
-                    Some(i) if i + 1 >= self.completions.len() => 0,
-                    Some(i) => i + 1,
-                });
+                self.selected = Some(wrap_selection_down(self.selected, self.completions.len()));
                 if let Some(sel) = self.selected {
                     if let Some(comp) = self.completions.get(sel) {
                         self.input = format!("{dir_prefix}{}", comp.name);
@@ -578,12 +616,8 @@ impl Component for FindFilePanel {
 
             Action::DeleteForward => {
                 if self.cursor < self.input.len() {
-                    let next_len = self.input[self.cursor..]
-                        .chars()
-                        .next()
-                        .map(|c| c.len_utf8())
-                        .unwrap_or(0);
-                    self.input.drain(self.cursor..self.cursor + next_len);
+                    let len = next_char_len(&self.input, self.cursor);
+                    self.input.drain(self.cursor..self.cursor + len);
                     self.recompute();
                 }
                 Vec::new()
@@ -593,22 +627,14 @@ impl Component for FindFilePanel {
 
             Action::MoveLeft => {
                 if self.cursor > 0 {
-                    self.cursor = self.input[..self.cursor]
-                        .char_indices()
-                        .next_back()
-                        .map(|(i, _)| i)
-                        .unwrap_or(0);
+                    self.cursor = prev_char_boundary(&self.input, self.cursor);
                 }
                 Vec::new()
             }
 
             Action::MoveRight => {
                 if self.cursor < self.input.len() {
-                    self.cursor += self.input[self.cursor..]
-                        .chars()
-                        .next()
-                        .map(|c| c.len_utf8())
-                        .unwrap_or(0);
+                    self.cursor += next_char_len(&self.input, self.cursor);
                 }
                 Vec::new()
             }

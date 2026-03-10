@@ -9,6 +9,48 @@ use ropey::Rope;
 
 use crate::{Buffer, UndoEntry, notify_dir};
 
+enum DiskState {
+    Unchanged,
+    DeletedNew,
+    DeletedAlready,
+    ConflictNew,
+    ConflictAlready,
+    Reloadable,
+}
+
+fn classify_disk_state(
+    disk_hash: Option<u64>,
+    base_hash: u64,
+    has_local_changes: bool,
+    disk_modified: bool,
+    disk_deleted: bool,
+) -> DiskState {
+    let Some(disk_hash) = disk_hash else {
+        // File doesn't exist on disk
+        return if disk_deleted {
+            DiskState::DeletedAlready
+        } else {
+            DiskState::DeletedNew
+        };
+    };
+
+    // Disk hash matches our base — no external change (covers own save)
+    if disk_hash == base_hash {
+        return DiskState::Unchanged;
+    }
+
+    // External change detected
+    if has_local_changes {
+        if disk_modified {
+            DiskState::ConflictAlready
+        } else {
+            DiskState::ConflictNew
+        }
+    } else {
+        DiskState::Reloadable
+    }
+}
+
 impl Buffer {
     pub(crate) fn create_watcher(
         source_path: &std::path::Path,
@@ -86,62 +128,66 @@ impl Buffer {
             return vec![];
         };
 
-        if !path.exists() {
-            if !self.disk_deleted {
-                self.disk_deleted = true;
-                return vec![Effect::SetMessage(format!(
-                    "Warning: {} deleted externally",
-                    self.filename()
-                ))];
-            }
-            return vec![];
-        }
-
-        // File exists — read and hash it
-        let disk_hash = match File::open(path) {
-            Ok(f) => match Rope::from_reader(BufReader::new(f)) {
-                Ok(rope) => Self::hash_rope(&rope),
+        let disk_hash = if path.exists() {
+            match File::open(path) {
+                Ok(f) => match Rope::from_reader(BufReader::new(f)) {
+                    Ok(rope) => Some(Self::hash_rope(&rope)),
+                    Err(_) => return vec![],
+                },
                 Err(_) => return vec![],
-            },
-            Err(_) => return vec![],
+            }
+        } else {
+            None
         };
 
-        // If disk hash matches our base, no external change (covers own save)
-        if disk_hash == self.base_content_hash {
-            return vec![];
-        }
+        let state = classify_disk_state(
+            disk_hash,
+            self.base_content_hash,
+            self.has_local_changes(),
+            self.disk_modified,
+            self.disk_deleted,
+        );
 
-        // Clear deleted flag since file exists now
-        self.disk_deleted = false;
-
-        if self.has_local_changes() {
-            // Buffer is dirty — flag conflict, don't reload
-            if !self.disk_modified {
+        match state {
+            DiskState::Unchanged => vec![],
+            DiskState::DeletedNew => {
+                self.disk_deleted = true;
+                vec![Effect::SetMessage(format!(
+                    "Warning: {} deleted externally",
+                    self.filename()
+                ))]
+            }
+            DiskState::DeletedAlready => vec![],
+            DiskState::ConflictNew => {
+                self.disk_deleted = false;
                 self.disk_modified = true;
-                return vec![Effect::SetMessage(format!(
+                vec![Effect::SetMessage(format!(
                     "Warning: {} changed on disk (you have unsaved changes)",
                     self.filename()
+                ))]
+            }
+            DiskState::ConflictAlready => {
+                self.disk_deleted = false;
+                vec![]
+            }
+            DiskState::Reloadable => {
+                self.reload_from_disk(doc);
+                self.disk_modified = false;
+                self.disk_deleted = false;
+                let max_line = doc.line_count().saturating_sub(1);
+                if self.cursor_row > max_line {
+                    self.cursor_row = max_line;
+                }
+                self.clamp_cursor_col(&*doc);
+                let mut effects = vec![Effect::SetMessage(format!(
+                    "Reloaded {} (changed on disk)",
+                    self.filename()
                 ))];
+                if let Some(ref path) = self.path {
+                    effects.push(Effect::Emit(Event::FileSaved(path.clone())));
+                }
+                effects
             }
-            vec![]
-        } else {
-            // Buffer is clean — auto-reload
-            self.reload_from_disk(doc);
-            self.disk_modified = false;
-            self.disk_deleted = false;
-            let max_line = doc.line_count().saturating_sub(1);
-            if self.cursor_row > max_line {
-                self.cursor_row = max_line;
-            }
-            self.clamp_cursor_col(&*doc);
-            let mut effects = vec![Effect::SetMessage(format!(
-                "Reloaded {} (changed on disk)",
-                self.filename()
-            ))];
-            if let Some(ref path) = self.path {
-                effects.push(Effect::Emit(Event::FileSaved(path.clone())));
-            }
-            effects
         }
     }
 
@@ -293,6 +339,9 @@ impl Buffer {
         }
         let file = File::create(&path)?;
         doc.write_to(BufWriter::new(file))?;
+        // Drain pending changes so the whitespace/newline mutations above
+        // aren't sent as didChange later — didSave with text handles it.
+        doc.drain_changes();
         self.dirty = false;
         self.distance_from_save = 0;
         self.save_history_len = self.undo_history.len();

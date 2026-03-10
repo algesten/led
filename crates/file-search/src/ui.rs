@@ -3,15 +3,117 @@ use std::path::PathBuf;
 use tokio::sync::mpsc;
 
 use led_core::{
-    Action, Component, Context, DrawContext, Effect, Event, PanelClaim, PanelSlot, Waker,
+    Action, Component, Context, DrawContext, Effect, Event, PanelClaim, PanelSlot, Theme, Waker,
 };
 use ratatui::Frame;
 use ratatui::layout::Rect;
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 
 use crate::search::search_worker;
-use crate::types::{FileGroup, FlatHit, SearchRequest};
+use crate::types::{FileGroup, FlatHit, SearchHit, SearchRequest};
+
+// ---------------------------------------------------------------------------
+// Pure helper functions
+// ---------------------------------------------------------------------------
+
+fn char_byte_position(s: &str, char_idx: usize) -> usize {
+    s.char_indices()
+        .nth(char_idx)
+        .map(|(i, _)| i)
+        .unwrap_or(s.len())
+}
+
+fn insert_char_at(s: &mut String, char_idx: usize, c: char) {
+    let byte_pos = char_byte_position(s, char_idx);
+    s.insert(byte_pos, c);
+}
+
+// ---------------------------------------------------------------------------
+// Style helpers
+// ---------------------------------------------------------------------------
+
+fn toggle_style(active: bool, theme: &Theme) -> Style {
+    if active {
+        theme.get("file_search.toggle_on").to_style()
+    } else {
+        theme.get("file_search.toggle_off").to_style()
+    }
+}
+
+fn hit_row_style(is_selected: bool, focused: bool, theme: &Theme) -> Style {
+    if is_selected {
+        if focused {
+            theme.get("file_search.selected").to_style()
+        } else {
+            theme.get("file_search.selected_unfocused").to_style()
+        }
+    } else {
+        theme.get("file_search.hit").to_style()
+    }
+}
+
+fn input_style(focused: bool, theme: &Theme) -> Style {
+    if focused {
+        theme.get("file_search.input").to_style()
+    } else {
+        theme.get("file_search.input_unfocused").to_style()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Hit span builder
+// ---------------------------------------------------------------------------
+
+fn build_hit_spans<'a>(
+    hit: &SearchHit,
+    prefix: &str,
+    avail: usize,
+    base_style: Style,
+    match_style: Style,
+) -> Vec<Span<'a>> {
+    let line_chars: Vec<char> = hit.line_text.chars().collect();
+    let match_char_start = hit.line_text[..hit.match_start].chars().count();
+    let match_char_end = hit.line_text[..hit.match_end].chars().count();
+
+    let match_len = match_char_end - match_char_start;
+    let context_before = avail.saturating_sub(match_len) / 2;
+    let win_start = match_char_start.saturating_sub(context_before);
+    let win_end = (win_start + avail).min(line_chars.len());
+    let win_start = if win_end.saturating_sub(avail) < win_start {
+        win_end.saturating_sub(avail)
+    } else {
+        win_start
+    };
+
+    let visible: String = line_chars[win_start..win_end].iter().collect();
+    let ms_in_win = match_char_start.saturating_sub(win_start);
+    let me_in_win = (match_char_end.saturating_sub(win_start)).min(visible.chars().count());
+
+    let before: String = visible.chars().take(ms_in_win).collect();
+    let matched: String = visible
+        .chars()
+        .skip(ms_in_win)
+        .take(me_in_win - ms_in_win)
+        .collect();
+    let after: String = visible.chars().skip(me_in_win).collect();
+
+    let pad_needed = avail.saturating_sub(visible.chars().count());
+    let after_padded = format!("{after}{:pad$}", "", pad = pad_needed);
+
+    let mut spans = vec![Span::styled(prefix.to_string(), base_style)];
+    if !before.is_empty() {
+        spans.push(Span::styled(before, base_style));
+    }
+    if !matched.is_empty() {
+        spans.push(Span::styled(matched, match_style));
+    }
+    if !after_padded.is_empty() {
+        spans.push(Span::styled(after_padded, base_style));
+    }
+    spans
+}
 
 pub struct FileSearch {
     active: bool,
@@ -122,7 +224,7 @@ impl FileSearch {
         }
     }
 
-    fn selected_hit(&self) -> Option<(&FileGroup, &crate::types::SearchHit)> {
+    fn selected_hit(&self) -> Option<(&FileGroup, &SearchHit)> {
         let flat = self.flat_hits.get(self.selected)?;
         let group = &self.results[flat.group_idx];
         let hit = &group.hits[flat.hit_idx];
@@ -196,13 +298,7 @@ impl Component for FileSearch {
                     self.cursor_pos = 0;
                     self.select_all = false;
                 }
-                let byte_pos = self
-                    .query
-                    .char_indices()
-                    .nth(self.cursor_pos)
-                    .map(|(i, _)| i)
-                    .unwrap_or(self.query.len());
-                self.query.insert(byte_pos, c);
+                insert_char_at(&mut self.query, self.cursor_pos, c);
                 self.cursor_pos += 1;
                 self.selected = 0;
                 self.scroll_offset = 0;
@@ -220,18 +316,8 @@ impl Component for FileSearch {
                     return effects;
                 }
                 if self.cursor_pos > 0 {
-                    let byte_pos = self
-                        .query
-                        .char_indices()
-                        .nth(self.cursor_pos - 1)
-                        .map(|(i, _)| i)
-                        .unwrap_or(0);
-                    let next_byte = self
-                        .query
-                        .char_indices()
-                        .nth(self.cursor_pos)
-                        .map(|(i, _)| i)
-                        .unwrap_or(self.query.len());
+                    let byte_pos = char_byte_position(&self.query, self.cursor_pos - 1);
+                    let next_byte = char_byte_position(&self.query, self.cursor_pos);
                     self.query.replace_range(byte_pos..next_byte, "");
                     self.cursor_pos -= 1;
                     self.selected = 0;
@@ -248,18 +334,8 @@ impl Component for FileSearch {
             Action::DeleteForward => {
                 let char_len = self.query.chars().count();
                 if self.cursor_pos < char_len {
-                    let byte_pos = self
-                        .query
-                        .char_indices()
-                        .nth(self.cursor_pos)
-                        .map(|(i, _)| i)
-                        .unwrap_or(self.query.len());
-                    let next_byte = self
-                        .query
-                        .char_indices()
-                        .nth(self.cursor_pos + 1)
-                        .map(|(i, _)| i)
-                        .unwrap_or(self.query.len());
+                    let byte_pos = char_byte_position(&self.query, self.cursor_pos);
+                    let next_byte = char_byte_position(&self.query, self.cursor_pos + 1);
                     self.query.replace_range(byte_pos..next_byte, "");
                     self.selected = 0;
                     self.scroll_offset = 0;
@@ -274,12 +350,7 @@ impl Component for FileSearch {
             }
             Action::KillLine => {
                 self.select_all = false;
-                let byte_pos = self
-                    .query
-                    .char_indices()
-                    .nth(self.cursor_pos)
-                    .map(|(i, _)| i)
-                    .unwrap_or(self.query.len());
+                let byte_pos = char_byte_position(&self.query, self.cursor_pos);
                 self.query.truncate(byte_pos);
                 self.selected = 0;
                 self.scroll_offset = 0;
@@ -432,15 +503,8 @@ impl Component for FileSearch {
         // Row 0: modifier toggles
         let toggle_y = inner.y;
         {
-            let on_style = ctx.theme.get("file_search.toggle_on").to_style();
-            let off_style = ctx.theme.get("file_search.toggle_off").to_style();
-
-            let case_style = if self.case_sensitive {
-                on_style
-            } else {
-                off_style
-            };
-            let regex_style = if self.use_regex { on_style } else { off_style };
+            let case_style = toggle_style(self.case_sensitive, &ctx.theme);
+            let regex_style = toggle_style(self.use_regex, &ctx.theme);
 
             let spans = vec![
                 Span::styled(" Aa ", case_style),
@@ -454,11 +518,7 @@ impl Component for FileSearch {
         // Row 1: search input box
         let input_y = inner.y + 1;
         {
-            let input_style = if ctx.focused {
-                ctx.theme.get("file_search.input").to_style()
-            } else {
-                ctx.theme.get("file_search.input_unfocused").to_style()
-            };
+            let input_style = input_style(ctx.focused, &ctx.theme);
 
             let display_query: String = if self.query.len() > width {
                 self.query.chars().take(width).collect()
@@ -496,13 +556,7 @@ impl Component for FileSearch {
 
         // Build display rows
         let header_style = ctx.theme.get("file_search.file_header").to_style();
-        let hit_style = ctx.theme.get("file_search.hit").to_style();
         let match_style = ctx.theme.get("file_search.match").to_style();
-        let selected_style = if ctx.focused {
-            ctx.theme.get("file_search.selected").to_style()
-        } else {
-            ctx.theme.get("file_search.selected_unfocused").to_style()
-        };
 
         let selected_flat = if self.flat_hits.is_empty() {
             None
@@ -541,63 +595,17 @@ impl Component for FileSearch {
                     let is_selected =
                         selected_flat.map_or(false, |f| f.group_idx == gi && f.hit_idx == hi);
 
-                    let base_style = if is_selected {
-                        selected_style
-                    } else {
-                        hit_style
-                    };
+                    let base_style = hit_row_style(is_selected, ctx.focused, &ctx.theme);
+                    let effective_match = hit_row_style(is_selected, ctx.focused, &ctx.theme);
 
-                    // Build spans with match highlighting
                     let prefix = format!("{:>4}: ", hit.row + 1);
                     let avail = width.saturating_sub(prefix.len());
-
-                    // Compute a window around the match
-                    let line_chars: Vec<char> = hit.line_text.chars().collect();
-                    let match_char_start = hit.line_text[..hit.match_start].chars().count();
-                    let match_char_end = hit.line_text[..hit.match_end].chars().count();
-
-                    // Center the match in the available width
-                    let match_len = match_char_end - match_char_start;
-                    let context_before = avail.saturating_sub(match_len) / 2;
-                    let win_start = match_char_start.saturating_sub(context_before);
-                    let win_end = (win_start + avail).min(line_chars.len());
-                    let win_start = if win_end.saturating_sub(avail) < win_start {
-                        win_end.saturating_sub(avail)
+                    let ms = if is_selected {
+                        effective_match
                     } else {
-                        win_start
+                        match_style
                     };
-
-                    let visible: String = line_chars[win_start..win_end].iter().collect();
-                    let ms_in_win = match_char_start.saturating_sub(win_start);
-                    let me_in_win =
-                        (match_char_end.saturating_sub(win_start)).min(visible.chars().count());
-
-                    let before: String = visible.chars().take(ms_in_win).collect();
-                    let matched: String = visible
-                        .chars()
-                        .skip(ms_in_win)
-                        .take(me_in_win - ms_in_win)
-                        .collect();
-                    let after: String = visible.chars().skip(me_in_win).collect();
-
-                    let pad_needed = avail.saturating_sub(visible.chars().count());
-                    let after_padded = format!("{after}{:pad$}", "", pad = pad_needed);
-
-                    let mut spans = vec![Span::styled(prefix, base_style)];
-                    if !before.is_empty() {
-                        spans.push(Span::styled(before, base_style));
-                    }
-                    if !matched.is_empty() {
-                        let ms = if is_selected {
-                            selected_style
-                        } else {
-                            match_style
-                        };
-                        spans.push(Span::styled(matched, ms));
-                    }
-                    if !after_padded.is_empty() {
-                        spans.push(Span::styled(after_padded, base_style));
-                    }
+                    let spans = build_hit_spans(hit, &prefix, avail, base_style, ms);
 
                     let row_area = Rect::new(inner.x, results_y + rendered as u16, inner.width, 1);
                     frame.render_widget(Paragraph::new(Line::from(spans)), row_area);

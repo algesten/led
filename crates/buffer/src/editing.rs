@@ -11,74 +11,18 @@ impl Buffer {
 
     pub fn move_up(&mut self, doc: &TextDoc) {
         self.break_undo_chain();
-        let tw = self.text_width;
-        if tw == 0 {
-            if self.cursor_row > 0 {
-                self.cursor_row -= 1;
-                self.clamp_cursor_col(doc);
-            }
-            return;
-        }
-
-        let (display, char_map) = expand_tabs(&doc.line(self.cursor_row));
-        let cursor_dcol = char_map
-            .get(self.cursor_col)
-            .copied()
-            .unwrap_or_else(|| char_map.last().copied().unwrap_or(0));
-        let chunks = compute_chunks(display.len(), tw);
-        let sub = find_sub_line(&chunks, cursor_dcol);
-        let visual_col = cursor_dcol - chunks[sub].0;
-
-        if sub > 0 {
-            let (cs, ce) = chunks[sub - 1];
-            let target_dcol = cs + visual_col.min(ce - cs);
-            self.cursor_col = display_col_to_char_idx(&char_map, target_dcol);
-            self.clamp_cursor_col(doc);
-        } else if self.cursor_row > 0 {
-            self.cursor_row -= 1;
-            let (prev_display, prev_cm) = expand_tabs(&doc.line(self.cursor_row));
-            let prev_chunks = compute_chunks(prev_display.len(), tw);
-            let (cs, ce) = *prev_chunks.last().unwrap();
-            let target_dcol = cs + visual_col.min(ce - cs);
-            self.cursor_col = display_col_to_char_idx(&prev_cm, target_dcol);
-            self.clamp_cursor_col(doc);
-        }
+        let (row, col) = compute_move_up(self.cursor_row, self.cursor_col, self.text_width, doc);
+        self.cursor_row = row;
+        self.cursor_col = col;
+        self.clamp_cursor_col(doc);
     }
 
     pub fn move_down(&mut self, doc: &TextDoc) {
         self.break_undo_chain();
-        let tw = self.text_width;
-        if tw == 0 {
-            if self.cursor_row + 1 < doc.line_count() {
-                self.cursor_row += 1;
-                self.clamp_cursor_col(doc);
-            }
-            return;
-        }
-
-        let (display, char_map) = expand_tabs(&doc.line(self.cursor_row));
-        let cursor_dcol = char_map
-            .get(self.cursor_col)
-            .copied()
-            .unwrap_or_else(|| char_map.last().copied().unwrap_or(0));
-        let chunks = compute_chunks(display.len(), tw);
-        let sub = find_sub_line(&chunks, cursor_dcol);
-        let visual_col = cursor_dcol - chunks[sub].0;
-
-        if sub + 1 < chunks.len() {
-            let (cs, ce) = chunks[sub + 1];
-            let target_dcol = cs + visual_col.min(ce - cs);
-            self.cursor_col = display_col_to_char_idx(&char_map, target_dcol);
-            self.clamp_cursor_col(doc);
-        } else if self.cursor_row + 1 < doc.line_count() {
-            self.cursor_row += 1;
-            let (next_display, next_cm) = expand_tabs(&doc.line(self.cursor_row));
-            let next_chunks = compute_chunks(next_display.len(), tw);
-            let (cs, ce) = next_chunks[0];
-            let target_dcol = cs + visual_col.min(ce - cs);
-            self.cursor_col = display_col_to_char_idx(&next_cm, target_dcol);
-            self.clamp_cursor_col(doc);
-        }
+        let (row, col) = compute_move_down(self.cursor_row, self.cursor_col, self.text_width, doc);
+        self.cursor_row = row;
+        self.cursor_col = col;
+        self.clamp_cursor_col(doc);
     }
 
     pub fn move_left(&mut self, doc: &TextDoc) {
@@ -144,12 +88,9 @@ impl Buffer {
         let se = self.syntax_edit_insert(&*doc, idx, &ch.to_string());
         doc.insert_char(idx, ch);
         self.apply_syntax_edit(&*doc, se);
-        if ch == '\n' {
-            self.cursor_row += 1;
-            self.cursor_col = 0;
-        } else {
-            self.cursor_col += 1;
-        }
+        let (new_row, new_col) = cursor_after_insert(self.cursor_row, self.cursor_col, ch);
+        self.cursor_row = new_row;
+        self.cursor_col = new_col;
         self.dirty = true;
         let cursor_after = (self.cursor_row, self.cursor_col);
 
@@ -531,16 +472,9 @@ impl Buffer {
         let se = self.syntax_edit_insert(&*doc, idx, text);
         doc.insert(idx, text);
         self.apply_syntax_edit(&*doc, se);
-        // Advance cursor past inserted text
-        let inserted_chars: usize = text.chars().count();
-        let newlines: usize = text.chars().filter(|&c| c == '\n').count();
-        if newlines > 0 {
-            self.cursor_row += newlines;
-            let last_line_len = text.rsplit('\n').next().unwrap_or("").chars().count();
-            self.cursor_col = last_line_len;
-        } else {
-            self.cursor_col += inserted_chars;
-        }
+        let (new_row, new_col) = cursor_after_yank(self.cursor_row, self.cursor_col, text);
+        self.cursor_row = new_row;
+        self.cursor_col = new_col;
         self.dirty = true;
         let cursor_after = (self.cursor_row, self.cursor_col);
         self.flush_pending();
@@ -617,27 +551,7 @@ impl Buffer {
             }
         }
 
-        // Adjust cursor through edit deltas (edits in document order, original coords)
-        let mut new_cursor = cursor_offset;
-        let mut delta: isize = 0;
-        for &(start, end, new_len) in &edit_ranges {
-            let old_len = end - start;
-            if cursor_offset < start {
-                break;
-            } else if cursor_offset >= end {
-                delta += new_len as isize - old_len as isize;
-            } else {
-                // Cursor inside the replaced range — snap to end of new text
-                new_cursor = start + new_len;
-                delta = 0; // already accounted for
-                break;
-            }
-        }
-        new_cursor = (new_cursor as isize + delta).max(0) as usize;
-        let total_chars = doc.len_chars();
-        if new_cursor > total_chars {
-            new_cursor = total_chars.saturating_sub(1);
-        }
+        let new_cursor = adjust_cursor_through_edits(cursor_offset, &edit_ranges, doc.len_chars());
         self.cursor_row = doc.char_to_line(new_cursor);
         let line_start = doc.line_to_char(self.cursor_row);
         self.cursor_col = new_cursor - line_start;
@@ -646,29 +560,34 @@ impl Buffer {
         self.clamp_cursor_col(&*doc);
         let cursor_after = (self.cursor_row, self.cursor_col);
 
-        // Record compound undo: remove everything, insert before_text
-        self.push_undo(UndoEntry {
-            op: EditOp::Remove {
-                char_idx: 0,
-                text: doc.to_string(),
-            },
-            cursor_before,
-            cursor_after,
-            direction: 0, // special: won't be inverted normally
-        });
-        // Actually store a restorable undo: swap entire content
-        // Simpler approach: just record the before_text as an Insert undo
-        self.undo_history.pop(); // remove the placeholder
-        self.distance_from_save -= 1;
-        self.push_undo(UndoEntry {
-            op: EditOp::Insert {
-                char_idx: 0,
-                text: before_text,
-            },
-            cursor_before: cursor_after,
-            cursor_after: cursor_before,
-            direction: 1,
-        });
+        // Record compound undo: replace entire content with before_text.
+        // During format-on-save (pending_save_after_format), skip undo recording
+        // since format edits are transparent to the user.
+        if !self.pending_save_after_format {
+            let after_text: String = doc.to_string();
+            self.flush_pending();
+            // Two entries: Remove current content, then Insert old content.
+            // Both have direction=0 so they pair as a single undo step.
+            self.undo_history.push(UndoEntry {
+                op: EditOp::Remove {
+                    char_idx: 0,
+                    text: after_text,
+                },
+                cursor_before,
+                cursor_after,
+                direction: 0,
+            });
+            self.undo_history.push(UndoEntry {
+                op: EditOp::Insert {
+                    char_idx: 0,
+                    text: before_text,
+                },
+                cursor_before: cursor_after,
+                cursor_after: cursor_before,
+                direction: 1,
+            });
+            self.undo_cursor = None;
+        }
     }
 
     /// Get the word under the cursor (alphanumeric + underscore).
@@ -701,6 +620,132 @@ impl Buffer {
         }
         Some(chars[start..end].iter().collect())
     }
+}
+
+fn compute_move_up(
+    cursor_row: usize,
+    cursor_col: usize,
+    tw: usize,
+    doc: &TextDoc,
+) -> (usize, usize) {
+    if tw == 0 {
+        if cursor_row > 0 {
+            return (cursor_row - 1, cursor_col);
+        }
+        return (cursor_row, cursor_col);
+    }
+
+    let (display, char_map) = expand_tabs(&doc.line(cursor_row));
+    let cursor_dcol = char_map
+        .get(cursor_col)
+        .copied()
+        .unwrap_or_else(|| char_map.last().copied().unwrap_or(0));
+    let chunks = compute_chunks(display.len(), tw);
+    let sub = find_sub_line(&chunks, cursor_dcol);
+    let visual_col = cursor_dcol - chunks[sub].0;
+
+    if sub > 0 {
+        let (cs, ce) = chunks[sub - 1];
+        let target_dcol = cs + visual_col.min(ce - cs);
+        let col = display_col_to_char_idx(&char_map, target_dcol);
+        (cursor_row, col)
+    } else if cursor_row > 0 {
+        let new_row = cursor_row - 1;
+        let (prev_display, prev_cm) = expand_tabs(&doc.line(new_row));
+        let prev_chunks = compute_chunks(prev_display.len(), tw);
+        let (cs, ce) = *prev_chunks.last().unwrap();
+        let target_dcol = cs + visual_col.min(ce - cs);
+        let col = display_col_to_char_idx(&prev_cm, target_dcol);
+        (new_row, col)
+    } else {
+        (cursor_row, cursor_col)
+    }
+}
+
+fn compute_move_down(
+    cursor_row: usize,
+    cursor_col: usize,
+    tw: usize,
+    doc: &TextDoc,
+) -> (usize, usize) {
+    if tw == 0 {
+        if cursor_row + 1 < doc.line_count() {
+            return (cursor_row + 1, cursor_col);
+        }
+        return (cursor_row, cursor_col);
+    }
+
+    let (display, char_map) = expand_tabs(&doc.line(cursor_row));
+    let cursor_dcol = char_map
+        .get(cursor_col)
+        .copied()
+        .unwrap_or_else(|| char_map.last().copied().unwrap_or(0));
+    let chunks = compute_chunks(display.len(), tw);
+    let sub = find_sub_line(&chunks, cursor_dcol);
+    let visual_col = cursor_dcol - chunks[sub].0;
+
+    if sub + 1 < chunks.len() {
+        let (cs, ce) = chunks[sub + 1];
+        let target_dcol = cs + visual_col.min(ce - cs);
+        let col = display_col_to_char_idx(&char_map, target_dcol);
+        (cursor_row, col)
+    } else if cursor_row + 1 < doc.line_count() {
+        let new_row = cursor_row + 1;
+        let (next_display, next_cm) = expand_tabs(&doc.line(new_row));
+        let next_chunks = compute_chunks(next_display.len(), tw);
+        let (cs, ce) = next_chunks[0];
+        let target_dcol = cs + visual_col.min(ce - cs);
+        let col = display_col_to_char_idx(&next_cm, target_dcol);
+        (new_row, col)
+    } else {
+        (cursor_row, cursor_col)
+    }
+}
+
+fn cursor_after_insert(cursor_row: usize, cursor_col: usize, ch: char) -> (usize, usize) {
+    if ch == '\n' {
+        (cursor_row + 1, 0)
+    } else {
+        (cursor_row, cursor_col + 1)
+    }
+}
+
+fn cursor_after_yank(cursor_row: usize, cursor_col: usize, text: &str) -> (usize, usize) {
+    let newlines: usize = text.chars().filter(|&c| c == '\n').count();
+    if newlines > 0 {
+        let last_line_len = text.rsplit('\n').next().unwrap_or("").chars().count();
+        (cursor_row + newlines, last_line_len)
+    } else {
+        let inserted_chars: usize = text.chars().count();
+        (cursor_row, cursor_col + inserted_chars)
+    }
+}
+
+fn adjust_cursor_through_edits(
+    cursor_offset: usize,
+    edit_ranges: &[(usize, usize, usize)],
+    total_chars: usize,
+) -> usize {
+    let mut new_cursor = cursor_offset;
+    let mut delta: isize = 0;
+    for &(start, end, new_len) in edit_ranges {
+        let old_len = end - start;
+        if cursor_offset < start {
+            break;
+        } else if cursor_offset >= end {
+            delta += new_len as isize - old_len as isize;
+        } else {
+            // Cursor inside the replaced range — snap to end of new text
+            new_cursor = start + new_len;
+            delta = 0; // already accounted for
+            break;
+        }
+    }
+    new_cursor = (new_cursor as isize + delta).max(0) as usize;
+    if new_cursor > total_chars {
+        new_cursor = total_chars.saturating_sub(1);
+    }
+    new_cursor
 }
 
 fn is_word_char(c: char) -> bool {

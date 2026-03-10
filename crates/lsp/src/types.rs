@@ -1,9 +1,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use led_core::lsp_types::{
-    EditorCodeAction, EditorCompletionItem, EditorDiagnostic, EditorInlayHint, EditorTextEdit,
-};
+use led_core::lsp_types::EditorTextEdit;
 use lsp_types::CodeActionOrCommand;
 
 use crate::server::LanguageServer;
@@ -31,7 +29,7 @@ pub(crate) enum RequestResult {
     },
     Format {
         path: PathBuf,
-        edits: Vec<EditorTextEdit>,
+        edits: Vec<lsp_types::TextEdit>,
     },
     Rename {
         primary_path: PathBuf,
@@ -39,7 +37,6 @@ pub(crate) enum RequestResult {
     },
     CodeActions {
         path: PathBuf,
-        actions: Vec<EditorCodeAction>,
         raw: Vec<CodeActionOrCommand>,
     },
     CodeActionResolved {
@@ -48,22 +45,24 @@ pub(crate) enum RequestResult {
     },
     InlayHints {
         path: PathBuf,
-        hints: Vec<EditorInlayHint>,
+        hints: Vec<lsp_types::InlayHint>,
     },
     Diagnostics {
         path: PathBuf,
-        diagnostics: Vec<EditorDiagnostic>,
+        raw: Vec<lsp_types::Diagnostic>,
     },
     Completion {
         path: PathBuf,
-        items: Vec<EditorCompletionItem>,
-        prefix_start_col: usize,
+        response: lsp_types::CompletionResponse,
+        row: usize,
+        col: usize,
     },
     Error {
         message: String,
     },
     FormatDone {
         path: PathBuf,
+        generation: u64,
     },
 }
 

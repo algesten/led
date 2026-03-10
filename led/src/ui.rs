@@ -1,12 +1,55 @@
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout, Position, Rect};
+use ratatui::style::Style;
 use ratatui::widgets::{Block, Borders, Paragraph};
 
-use crate::shell::{Modal, PickerModal, RenameModal, Shell};
-use led_core::{DrawContext, PanelSlot};
+use crate::shell::{Modal, RenameModal, Shell};
+use led_core::{DrawContext, PanelSlot, TabDescriptor, Theme};
 
 const GUTTER_WIDTH: u16 = 2;
 const SIDE_PANEL_WIDTH: u16 = 25;
+const MAX_TAB_CHARS: usize = 15;
+
+// ---------------------------------------------------------------------------
+// Pure display helpers
+// ---------------------------------------------------------------------------
+
+fn format_tab_label(tab: &TabDescriptor) -> String {
+    let lead = if tab.dirty {
+        "\u{25cf}"
+    } else if tab.read_only {
+        "#"
+    } else {
+        " "
+    };
+    let filename = &tab.label;
+    let char_count = filename.chars().count();
+    let truncated = char_count + 1 > MAX_TAB_CHARS; // +1 for lead char
+    let take = if truncated {
+        MAX_TAB_CHARS - 2 // lead + ellipsis
+    } else {
+        char_count
+    };
+    lead.chars()
+        .chain(filename.chars().take(take))
+        .chain(if truncated { Some('\u{2026}') } else { None })
+        .chain(" ".chars())
+        .collect()
+}
+
+fn tab_style(tab: &TabDescriptor, is_active: bool, theme: &Theme) -> Style {
+    if tab.preview {
+        if is_active {
+            theme.get("tabs.preview_active").to_style()
+        } else {
+            theme.get("tabs.preview_inactive").to_style()
+        }
+    } else if is_active {
+        theme.get("tabs.active").to_style()
+    } else {
+        theme.get("tabs.inactive").to_style()
+    }
+}
 
 pub fn render(shell: &mut Shell, frame: &mut Frame) {
     let area = frame.area();
@@ -63,8 +106,21 @@ pub fn render(shell: &mut Shell, frame: &mut Frame) {
     if let Some(modal) = &shell.rename_modal {
         render_rename_modal(modal, frame, area);
     }
-    if let Some(modal) = &shell.picker_modal {
-        render_picker_modal(modal, frame, area);
+    if let Some(idx) = shell.overlay_component_idx() {
+        let focused = shell.focus == PanelSlot::Overlay;
+        let theme = shell.theme.clone();
+        let fs = shell.file_statuses.clone();
+        let lsp = shell.lsp_status.clone();
+        let mut ctx = DrawContext {
+            theme: &theme,
+            focused,
+            cursor_pos: None,
+            slot: PanelSlot::Overlay,
+            file_statuses: &fs,
+            lsp_status: lsp.as_ref(),
+            docs: &shell.docs,
+        };
+        shell.components[idx].draw(frame, area, &mut ctx);
     }
 }
 
@@ -84,45 +140,14 @@ fn render_tab_bar(shell: &Shell, frame: &mut Frame, area: Rect) {
             x += 1;
         }
 
-        let lead = if tab.dirty {
-            "\u{25cf}"
-        } else if tab.read_only {
-            "#"
-        } else {
-            " "
-        };
-        let filename = &tab.label;
-        let max_chars = 15;
-        let char_count = filename.chars().count();
-        let truncated = char_count + 1 > max_chars; // +1 for lead char
-        let take = if truncated {
-            max_chars - 2 // lead + ellipsis
-        } else {
-            char_count
-        };
-        let label: String = lead
-            .chars()
-            .chain(filename.chars().take(take))
-            .chain(if truncated { Some('…') } else { None })
-            .chain(" ".chars())
-            .collect();
+        let label = format_tab_label(&tab);
         let tab_width = label.chars().count() as u16;
 
         if x + tab_width > max_x {
             break;
         }
 
-        let style = if tab.preview {
-            if tab_idx == active {
-                theme.get("tabs.preview_active").to_style()
-            } else {
-                theme.get("tabs.preview_inactive").to_style()
-            }
-        } else if tab_idx == active {
-            theme.get("tabs.active").to_style()
-        } else {
-            theme.get("tabs.inactive").to_style()
-        };
+        let style = tab_style(&tab, tab_idx == active, theme);
 
         buf.set_string(x, area.y, &label, style);
         x += tab_width;
@@ -285,53 +310,3 @@ fn render_rename_modal(modal: &RenameModal, frame: &mut Frame, area: Rect) {
     }
 }
 
-fn render_picker_modal(modal: &PickerModal, frame: &mut Frame, area: Rect) {
-    use ratatui::style::Style;
-    use ratatui::widgets::Clear;
-
-    let max_item_len = modal.items.iter().map(|s| s.len()).max().unwrap_or(10);
-    let width = (max_item_len as u16 + 4)
-        .max(modal.title.len() as u16 + 4)
-        .min(area.width.saturating_sub(4));
-    let height = (modal.items.len() as u16 + 3).min(area.height.saturating_sub(2));
-    let x = area.x + (area.width.saturating_sub(width)) / 2;
-    let y = area.y + (area.height.saturating_sub(height)) / 2;
-    let modal_area = Rect::new(x, y, width, height);
-
-    frame.render_widget(Clear, modal_area);
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(format!(" {} ", modal.title));
-    let inner = block.inner(modal_area);
-    frame.render_widget(block, modal_area);
-
-    let visible_items = inner.height as usize;
-    let scroll = if modal.selected >= visible_items {
-        modal.selected - visible_items + 1
-    } else {
-        0
-    };
-
-    for (i, item) in modal
-        .items
-        .iter()
-        .enumerate()
-        .skip(scroll)
-        .take(visible_items)
-    {
-        let row = (i - scroll) as u16;
-        if row >= inner.height {
-            break;
-        }
-        let style = if i == modal.selected {
-            Style::default().bg(ratatui::style::Color::DarkGray)
-        } else {
-            Style::default()
-        };
-        let truncated: String = item.chars().take(inner.width as usize).collect();
-        let item_area = Rect::new(inner.x, inner.y + row, inner.width, 1);
-        let paragraph = Paragraph::new(truncated).style(style);
-        frame.render_widget(paragraph, item_area);
-    }
-}

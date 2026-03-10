@@ -2,9 +2,14 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::PathBuf;
 
-use led_core::{Action, Component, Context, DrawContext, Effect, Event, PanelClaim, PanelSlot};
+use led_core::file_status::StatusDisplay;
+use led_core::lsp_types::DiagnosticSeverity;
+use led_core::{
+    Action, Component, Context, DrawContext, Effect, Event, PanelClaim, PanelSlot, Theme,
+};
 use ratatui::Frame;
 use ratatui::layout::Rect;
+use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 
@@ -251,6 +256,69 @@ impl FileBrowser {
 }
 
 // ---------------------------------------------------------------------------
+// Pure display helpers
+// ---------------------------------------------------------------------------
+
+fn diagnostic_fallback_color(sev: DiagnosticSeverity) -> Color {
+    match sev {
+        DiagnosticSeverity::Error => Color::Red,
+        DiagnosticSeverity::Warning => Color::Yellow,
+        DiagnosticSeverity::Info => Color::Blue,
+        DiagnosticSeverity::Hint => Color::Gray,
+    }
+}
+
+fn entry_name_fg(
+    diag_severity: Option<DiagnosticSeverity>,
+    status_display: Option<&StatusDisplay>,
+    theme: &Theme,
+) -> Option<Color> {
+    // Diagnostics take priority for color
+    if let Some(sev) = diag_severity {
+        let key = led_core::file_status::diagnostic_theme(sev);
+        let color = theme.get(key).fg;
+        return Some(if color == Color::Reset {
+            diagnostic_fallback_color(sev)
+        } else {
+            color
+        });
+    }
+    // Git status color
+    if let Some(sd) = status_display {
+        return theme.get(sd.theme_key).to_style().fg;
+    }
+    None
+}
+
+fn entry_base_style(is_selected: bool, is_dir: bool, focused: bool, theme: &Theme) -> Style {
+    if is_selected {
+        if focused {
+            theme.get("browser.selected").to_style()
+        } else {
+            theme.get("browser.selected_unfocused").to_style()
+        }
+    } else if is_dir {
+        theme.get("browser.directory").to_style()
+    } else {
+        theme.get("browser.file").to_style()
+    }
+}
+
+fn entry_name_style(name_fg: Option<Color>, base_style: Style, is_selected: bool) -> Style {
+    if let Some(fg) = name_fg {
+        if is_selected {
+            Style::default()
+                .fg(fg)
+                .bg(base_style.bg.unwrap_or(Color::Reset))
+        } else {
+            Style::default().fg(fg)
+        }
+    } else {
+        base_style
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Component implementation
 // ---------------------------------------------------------------------------
 
@@ -410,129 +478,90 @@ impl Component for FileBrowser {
             self.scroll_offset = self.selected - height + 1;
         }
         let browser_scroll = self.scroll_offset;
+        let max_width = inner.width as usize;
 
         let mut lines = Vec::with_capacity(height);
 
         for i in 0..height {
             let idx = browser_scroll + i;
-            if idx < self.entries.len() {
-                let entry = &self.entries[idx];
-                let name = FileBrowser::display_name(entry);
+            if idx >= self.entries.len() {
+                lines.push(Line::from(""));
+                continue;
+            }
 
-                let max_width = inner.width as usize;
-                let display: String = if name.len() > max_width {
-                    name[..max_width].to_string()
+            let entry = &self.entries[idx];
+            let name = FileBrowser::display_name(entry);
+            let display: String = if name.len() > max_width {
+                name[..max_width].to_string()
+            } else {
+                name
+            };
+
+            let is_selected = idx == self.selected;
+            let is_dir = matches!(entry.kind, EntryKind::Directory { .. });
+            let base = entry_base_style(is_selected, is_dir, ctx.focused, ctx.theme);
+
+            // Diagnostic severity for the file/directory
+            let diag_severity = match &entry.kind {
+                EntryKind::File => ctx.file_statuses.diagnostic_severity(&entry.path),
+                EntryKind::Directory { .. } => {
+                    ctx.file_statuses.directory_diagnostic_severity(&entry.path)
+                }
+            };
+
+            // Git status for the status letter
+            let file_status_set = match &entry.kind {
+                EntryKind::File => ctx.file_statuses.file_statuses(&entry.path).cloned(),
+                EntryKind::Directory { .. } => {
+                    let s = ctx.file_statuses.directory_statuses(&entry.path);
+                    if s.is_empty() { None } else { Some(s) }
+                }
+            };
+            let status_display = file_status_set
+                .as_ref()
+                .and_then(|s| led_core::file_status::resolve_display(s));
+
+            let name_fg = entry_name_fg(diag_severity, status_display.as_ref(), ctx.theme);
+
+            if name_fg.is_some() || status_display.is_some() {
+                let name_style = entry_name_style(name_fg, base, is_selected);
+
+                let name_width = if status_display.is_some() {
+                    max_width.saturating_sub(1)
                 } else {
-                    name
+                    max_width
                 };
-
-                let is_selected = idx == self.selected;
-                let is_dir = matches!(entry.kind, EntryKind::Directory { .. });
-
-                let style = if is_selected {
-                    if ctx.focused {
-                        ctx.theme.get("browser.selected").to_style()
-                    } else {
-                        ctx.theme.get("browser.selected_unfocused").to_style()
-                    }
-                } else if is_dir {
-                    ctx.theme.get("browser.directory").to_style()
+                let truncated: String = if display.len() > name_width {
+                    display[..name_width].to_string()
                 } else {
-                    ctx.theme.get("browser.file").to_style()
+                    display
                 };
+                let pad = name_width.saturating_sub(truncated.len());
+                let name_part = format!("{truncated}{:pad$}", "");
 
-                // Diagnostic severity for the file/directory
-                let diag_severity = match &entry.kind {
-                    EntryKind::File => ctx.file_statuses.diagnostic_severity(&entry.path),
-                    EntryKind::Directory { .. } => {
-                        ctx.file_statuses.directory_diagnostic_severity(&entry.path)
-                    }
-                };
-
-                // Git status for the status letter
-                let file_status_set = match &entry.kind {
-                    EntryKind::File => ctx.file_statuses.file_statuses(&entry.path).cloned(),
-                    EntryKind::Directory { .. } => {
-                        let s = ctx.file_statuses.directory_statuses(&entry.path);
-                        if s.is_empty() { None } else { Some(s) }
-                    }
-                };
-                let status_display = file_status_set
-                    .as_ref()
-                    .and_then(|s| led_core::file_status::resolve_display(s));
-
-                // Determine name color: diagnostics > git status > default
-                let name_fg = if let Some(sev) = diag_severity {
-                    use led_core::lsp_types::DiagnosticSeverity;
-                    let key = led_core::file_status::diagnostic_theme(sev);
-                    let fallback = match sev {
-                        DiagnosticSeverity::Error => ratatui::style::Color::Red,
-                        DiagnosticSeverity::Warning => ratatui::style::Color::Yellow,
-                        DiagnosticSeverity::Info => ratatui::style::Color::Blue,
-                        DiagnosticSeverity::Hint => ratatui::style::Color::Gray,
-                    };
-                    match ctx.theme.get(key).fg {
-                        ratatui::style::Color::Reset => Some(fallback),
-                        c => Some(c),
-                    }
-                } else if let Some(ref sd) = status_display {
-                    ctx.theme.get(sd.theme_key).to_style().fg
+                if let Some(ref sd) = status_display {
+                    lines.push(Line::from(vec![
+                        Span::styled(name_part, name_style),
+                        Span::styled(
+                            if is_dir {
+                                "\u{23fa}".to_string()
+                            } else {
+                                sd.letter.to_string()
+                            },
+                            name_style,
+                        ),
+                    ]));
                 } else {
-                    None
-                };
-
-                if name_fg.is_some() || status_display.is_some() {
-                    let name_style = if let Some(fg) = name_fg {
-                        if is_selected {
-                            ratatui::style::Style::default()
-                                .fg(fg)
-                                .bg(style.bg.unwrap_or(ratatui::style::Color::Reset))
-                        } else {
-                            ratatui::style::Style::default().fg(fg)
-                        }
-                    } else {
-                        style
-                    };
-
-                    let name_width = if status_display.is_some() {
-                        max_width.saturating_sub(1)
-                    } else {
-                        max_width
-                    };
-                    let truncated: String = if display.len() > name_width {
-                        display[..name_width].to_string()
-                    } else {
-                        display
-                    };
-                    let pad = name_width.saturating_sub(truncated.len());
-                    let name_part = format!("{truncated}{:pad$}", "");
-
-                    if let Some(ref sd) = status_display {
-                        lines.push(Line::from(vec![
-                            Span::styled(name_part, name_style),
-                            Span::styled(
-                                if is_dir {
-                                    "\u{23fa}".to_string()
-                                } else {
-                                    sd.letter.to_string()
-                                },
-                                name_style,
-                            ),
-                        ]));
-                    } else {
-                        let padded = format!(
-                            "{name_part}{:w$}",
-                            "",
-                            w = max_width.saturating_sub(name_width)
-                        );
-                        lines.push(Line::from(Span::styled(padded, name_style)));
-                    }
-                } else {
-                    let padded = format!("{:<width$}", display, width = max_width);
-                    lines.push(Line::from(Span::styled(padded, style)));
+                    let padded = format!(
+                        "{name_part}{:w$}",
+                        "",
+                        w = max_width.saturating_sub(name_width)
+                    );
+                    lines.push(Line::from(Span::styled(padded, name_style)));
                 }
             } else {
-                lines.push(Line::from(""));
+                let padded = format!("{:<width$}", display, width = max_width);
+                lines.push(Line::from(Span::styled(padded, base)));
             }
         }
 
