@@ -2141,6 +2141,10 @@ impl Component for BufferFactory {
                         buf.read_only = is_read_only_path(path);
                         effects.push(Effect::Spawn(Box::new(buf)));
                     }
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                        let buf = Buffer::new_file(path.clone(), ctx.waker.clone(), ctx.docs);
+                        effects.push(Effect::Spawn(Box::new(buf)));
+                    }
                     Err(e) => effects.push(Effect::SetMessage(format!("Open failed: {e}"))),
                 }
             }

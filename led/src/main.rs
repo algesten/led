@@ -139,7 +139,7 @@ async fn main() -> io::Result<()> {
 
     let db = session::open_db();
 
-    let explicit_file = arg_path.as_ref().map_or(false, |p| p.is_file());
+    let explicit_file = arg_path.as_ref().map_or(false, |p| !p.is_dir());
     let mut shell = Shell::new(keymap, the_theme, db, root.clone());
     shell.debug = cli.debug;
     shell.set_waker(waker);
@@ -150,15 +150,15 @@ async fn main() -> io::Result<()> {
 
     // Create initial buffer after shell so we have access to shell.docs
     if explicit_file {
-        if let Some(path) = arg_path.as_ref().filter(|p| p.is_file()) {
-            let path_str = path.to_string_lossy();
+        if let Some(path) = arg_path.as_ref().filter(|p| !p.is_dir()) {
             let w = shell.waker().cloned();
-            let buf =
-                Buffer::from_file_with_waker(&path_str, w, &mut shell.docs).unwrap_or_else(|_| {
-                    let mut buf = Buffer::empty();
-                    buf.path = Some(path.clone());
-                    buf
-                });
+            let buf = if path.is_file() {
+                let path_str = path.to_string_lossy();
+                Buffer::from_file_with_waker(&path_str, w.clone(), &mut shell.docs)
+                    .unwrap_or_else(|_| Buffer::new_file(path.clone(), w, &mut shell.docs))
+            } else {
+                Buffer::new_file(path.clone(), w, &mut shell.docs)
+            };
             shell.register(Box::new(buf));
             shell.set_focus(PanelSlot::Main);
         }

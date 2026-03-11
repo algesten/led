@@ -371,8 +371,22 @@ impl Buffer {
             });
             self.undo_cursor = None;
         }
+        // Ensure parent directories exist (for new files in new directories)
+        if let Some(parent) = path.parent() {
+            if !parent.exists() {
+                std::fs::create_dir_all(parent)?;
+            }
+        }
+        let first_save = self._watcher.is_none();
         let file = File::create(&path)?;
         doc.write_to(BufWriter::new(file))?;
+        // On first save of a new file, canonicalize the path and start watching
+        if first_save {
+            if let Ok(canon) = std::fs::canonicalize(&path) {
+                self._watcher = Self::create_watcher(&canon, &self.changed, self.waker.as_ref());
+                self.path = Some(canon);
+            }
+        }
         // Drain pending changes so the whitespace/newline mutations above
         // aren't sent as didChange later — didSave with text handles it.
         doc.drain_changes();

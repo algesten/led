@@ -565,6 +565,10 @@ impl Component for FindFilePanel {
                     self.recompute();
                     return Vec::new();
                 }
+                // Non-existent path that looks like a file — create new buffer
+                if !self.input.ends_with('/') && !self.input.is_empty() {
+                    return self.open_file(expanded);
+                }
                 Vec::new()
             }
 

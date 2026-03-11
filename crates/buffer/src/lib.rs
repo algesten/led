@@ -222,6 +222,111 @@ impl Buffer {
         }
     }
 
+    /// Create a buffer for a file that does not yet exist on disk.
+    /// The file will be created on first save.
+    pub fn new_file(path: PathBuf, waker: Option<Waker>, docs: &mut DocStore) -> Self {
+        let doc = TextDoc::new();
+        let base_content_hash = Self::hash_rope(doc.rope());
+        let pending_syntax: Arc<Mutex<Option<syntax::SyntaxState>>> = Arc::new(Mutex::new(None));
+        let syntax_ready = Arc::new(AtomicBool::new(false));
+        let syntax_cancel = Arc::new(AtomicBool::new(false));
+
+        // Parse syntax on a background thread based on file extension
+        let rope_for_syntax = doc.rope().clone();
+        docs.insert(path.clone(), doc);
+        {
+            let path2 = path.clone();
+            let ready = syntax_ready.clone();
+            let pending = pending_syntax.clone();
+            let cancel = syntax_cancel.clone();
+            let waker2 = waker.clone();
+            tokio::task::spawn_blocking(move || {
+                if cancel.load(std::sync::atomic::Ordering::Acquire) {
+                    return;
+                }
+                if let Some(state) =
+                    syntax::SyntaxState::from_path_and_rope(&path2, &rope_for_syntax)
+                {
+                    if cancel.load(std::sync::atomic::Ordering::Acquire) {
+                        return;
+                    }
+                    *pending.lock().unwrap() = Some(state);
+                    ready.store(true, std::sync::atomic::Ordering::Release);
+                    if let Some(w) = waker2.as_ref() {
+                        w();
+                    }
+                }
+            });
+        }
+
+        Self {
+            local_doc: None,
+            cursor_row: 0,
+            cursor_col: 0,
+            path: Some(path),
+            dirty: false,
+            scroll_offset: 0,
+            undo_history: Vec::new(),
+            undo_cursor: None,
+            pending_group: None,
+            distance_from_save: 0,
+            save_history_len: 0,
+            persisted_undo_len: 0,
+            base_content_hash,
+            self_notified: false,
+            chain_id: None,
+            last_seen_seq: 0,
+            mark: None,
+            preview_highlight: false,
+            kill_accumulator: None,
+            cursor_screen_pos: None,
+            text_width: 0,
+            scroll_sub_line: 0,
+            _watcher: None,
+            waker,
+            changed: Arc::new(AtomicBool::new(false)),
+            disk_modified: false,
+            disk_deleted: false,
+            preview: false,
+            read_only: false,
+            syntax: None,
+            pending_syntax,
+            syntax_ready,
+            syntax_cancel,
+            isearch: None,
+            last_search: None,
+            completion: None,
+            completion_triggers: Vec::new(),
+            diagnostics: Vec::new(),
+            inlay_hints: Vec::new(),
+            inlay_hints_enabled: false,
+            last_hint_range: None,
+            pending_save_after_format: false,
+            format_generation: 0,
+            pre_format_snapshot: None,
+            claims: vec![
+                PanelClaim {
+                    slot: PanelSlot::Main,
+                    priority: 10,
+                },
+                PanelClaim {
+                    slot: PanelSlot::StatusBar,
+                    priority: 10,
+                },
+            ],
+            claims_with_status: vec![
+                PanelClaim {
+                    slot: PanelSlot::Main,
+                    priority: 10,
+                },
+                PanelClaim {
+                    slot: PanelSlot::StatusBar,
+                    priority: 20,
+                },
+            ],
+        }
+    }
+
     pub fn from_file(path: &str, docs: &mut DocStore) -> io::Result<Self> {
         Self::from_file_with_waker(path, None, docs)
     }
@@ -373,7 +478,7 @@ impl Buffer {
             .as_ref()
             .and_then(|p| p.file_name())
             .and_then(|n| n.to_str())
-            .unwrap_or("[scratch]")
+            .unwrap_or("[unsaved]")
     }
 
     // --- Syntax ---
