@@ -8,6 +8,5 @@ led-core = { workspace = true }
 led-workspace = { workspace = true }
 
 clap = { workspace = true }
-futures = { workspace = true }
 tokio = { workspace = true }
 tokio-stream = { workspace = true }

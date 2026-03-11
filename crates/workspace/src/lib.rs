@@ -1,21 +1,14 @@
+use std::fs;
 use std::path::{Path, PathBuf};
 
-use led_core::FanoutStream;
-use tokio::sync;
+use led_core::AStream;
 use tokio_stream::{Stream, StreamExt};
 
-pub fn driver(mut input: impl Stream<Item = PathBuf> + Unpin + Send + 'static) -> impl Stream<Item = PathBuf> {
-    let (tx, rx) = sync::broadcast::channel(10);
-
-    tokio::spawn(async move {
-        while let Some(dir) = input.next().await {
-            let dir = std::fs::canonicalize(&dir).unwrap_or(dir);
-            let root = find_git_root(&dir);
-            tx.send(root).ok();
-        }
-    });
-
-    FanoutStream::new(rx)
+pub fn driver(input: impl AStream<PathBuf>) -> impl Stream<Item = PathBuf> {
+    input.map(|dir| {
+        let dir = fs::canonicalize(&dir).unwrap_or(dir);
+        find_git_root(&dir)
+    })
 }
 
 fn find_git_root(start: &Path) -> PathBuf {
