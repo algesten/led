@@ -2,7 +2,8 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use led_core::{FanoutStreamExt, State};
+use led_core::FanoutStreamExt;
+use led_state::AppState;
 use tokio::sync::broadcast::Sender;
 use tokio_stream::{Stream, StreamExt};
 
@@ -11,8 +12,8 @@ pub struct Derived {
 }
 
 impl Derived {
-    pub fn new(state_tx: &Sender<Arc<State>>) -> Self {
-        let workspace = state_tx.latest().filter_map(|s| s.workspace.clone());
+    pub fn new(state_tx: &Sender<Arc<AppState>>) -> Self {
+        let workspace = state_tx.latest().map(|s| s.config.start_dir.clone());
 
         Derived {
             workspace: Box::pin(workspace),

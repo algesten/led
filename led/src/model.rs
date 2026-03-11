@@ -1,12 +1,12 @@
-use std::path::PathBuf;
 use std::sync::Arc;
 
-use led_core::{State, StreamOpsExt};
+use led_core::StreamOpsExt;
+use led_state::{AppState, Workspace};
 use tokio_stream::{Stream, StreamExt};
 
 use crate::Drivers;
 
-pub fn model(drivers: Drivers, init: State) -> impl Stream<Item = Arc<State>> {
+pub fn model(drivers: Drivers, init: AppState) -> impl Stream<Item = Arc<AppState>> {
     let mut_workspace = drivers.workspace.map(|v| Mut::Workspace(v));
 
     mut_workspace
@@ -17,5 +17,5 @@ pub fn model(drivers: Drivers, init: State) -> impl Stream<Item = Arc<State>> {
 }
 
 enum Mut {
-    Workspace(PathBuf),
+    Workspace(Workspace),
 }

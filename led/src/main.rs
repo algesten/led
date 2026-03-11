@@ -2,7 +2,9 @@ use std::path::PathBuf;
 use std::pin::Pin;
 
 use clap::Parser;
-use led_core::{Config, State};
+use led_core::Config;
+use led_state::AppState;
+use led_workspace::Workspace;
 use tokio::sync;
 use tokio_stream::{Stream, StreamExt};
 
@@ -46,7 +48,7 @@ async fn main() {
         start_dir,
     };
 
-    let state = State::new(config);
+    let state = AppState::new(config);
 
     // Channel to "hoist" the state output from Model as
     // input into Derived.
@@ -72,5 +74,5 @@ async fn main() {
 }
 
 pub struct Drivers {
-    workspace: Pin<Box<dyn Stream<Item = PathBuf> + Send>>,
+    workspace: Pin<Box<dyn Stream<Item = Workspace> + Send>>,
 }

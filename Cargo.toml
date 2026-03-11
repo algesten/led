@@ -1,9 +1,10 @@
 [workspace]
 resolver = "2"
-members = ["led", "crates/core", "crates/workspace"]
+members = ["led", "crates/core", "crates/state", "crates/workspace"]
 
 [workspace.dependencies]
 led-core = { path = "crates/core" }
+led-state = { path = "crates/state" }
 led-workspace = { path = "crates/workspace" }
 
 pin-project-lite = "0.2"

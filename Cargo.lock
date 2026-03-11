@@ -134,6 +134,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "led-core",
+ "led-state",
  "led-workspace",
  "tokio",
  "tokio-stream",
@@ -147,6 +148,14 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tokio-util",
+]
+
+[[package]]
+name = "led-state"
+version = "0.1.0"
+dependencies = [
+ "led-core",
+ "led-workspace",
 ]
 
 [[package]]
