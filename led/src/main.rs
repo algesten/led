@@ -7,7 +7,9 @@ use led_config_file::ConfigFile;
 use led_core::keys::Keys;
 use led_core::theme::Theme;
 use led_core::{AStream, Alert, FanoutStreamExt, Startup};
+use led_input::TerminalInput;
 use led_state::AppState;
+use led_ui::Ui;
 use led_workspace::Workspace;
 use tokio::sync;
 use tokio_stream::StreamExt;
@@ -70,6 +72,8 @@ async fn main() {
             workspace: Box::pin(led_workspace::driver(derived.workspace)),
             config_file_keys: Box::pin(f),
             config_file_theme: Box::pin(t),
+            input: Box::pin(led_input::driver()),
+            ui: led_ui::driver(state_tx.latest()),
         }
     };
 
@@ -88,4 +92,7 @@ pub struct Drivers {
     workspace: Pin<Box<dyn AStream<Workspace> + Send>>,
     config_file_keys: Pin<Box<dyn AStream<Result<ConfigFile<Keys>, Alert>>>>,
     config_file_theme: Pin<Box<dyn AStream<Result<ConfigFile<Theme>, Alert>>>>,
+    input: Pin<Box<dyn AStream<TerminalInput>>>,
+    #[allow(unused)]
+    ui: Ui,
 }

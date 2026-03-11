@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use led_core::keys::Keys;
 use led_core::theme::Theme;
@@ -21,7 +22,13 @@ pub struct ConfigDir {
 
 #[derive(Debug, Clone)]
 pub struct ConfigFile<File: TomlFile> {
-    pub file: File,
+    pub file: Arc<File>,
+}
+
+impl<File: TomlFile + PartialEq> PartialEq for ConfigFile<File> {
+    fn eq(&self, other: &Self) -> bool {
+        self.file == other.file
+    }
 }
 
 pub trait TomlFile: serde::de::DeserializeOwned + Send + 'static {
@@ -82,7 +89,9 @@ async fn read_file<F: TomlFile>(c: ConfigDir) -> Result<ConfigFile<F>, Alert> {
     // Report error in parsing as info since the user might have screwed up the format
     let file: F = toml::from_str(&toml).as_info()?;
 
-    Ok(ConfigFile { file })
+    Ok(ConfigFile {
+        file: Arc::new(file),
+    })
 }
 
 impl TomlFile for Theme {

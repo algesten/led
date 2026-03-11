@@ -8,8 +8,11 @@ led-config-file = { workspace = true }
 led-core = { workspace = true }
 led-state = { workspace = true }
 led-workspace = { workspace = true }
+led-input = { workspace = true }
+led-ui = { workspace = true }
 
 clap = { workspace = true }
+crossterm = { workspace = true }
+log = { workspace = true }
 tokio = { workspace = true }
 tokio-stream = { workspace = true }
-log = { workspace = true }

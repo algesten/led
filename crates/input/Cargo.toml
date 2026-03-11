@@ -1,15 +1,12 @@
 [package]
-name = "led-core"
+name = "led-input"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
 crossterm = { workspace = true }
+led-core = { workspace = true }
 log = { workspace = true }
-notify = { workspace = true }
-pin-project-lite = { workspace = true }
-serde = { workspace = true }
-tokio-stream = { workspace = true }
 tokio = { workspace = true }
+tokio-stream = { workspace = true }
 tokio-util = { workspace = true }
-toml = { workspace = true }

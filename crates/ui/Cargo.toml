@@ -1,0 +1,10 @@
+[package]
+name = "led-ui"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+led-core = { workspace = true }
+led-state = { workspace = true }
+
+ratatui = { workspace = true }

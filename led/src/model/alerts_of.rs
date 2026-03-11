@@ -3,7 +3,7 @@ use tokio_stream::StreamExt;
 
 use crate::model::Mut;
 
-pub fn all_alerts(alert_s: impl AStream<Alert>) -> (impl AStream<Mut>, impl AStream<Mut>) {
+pub fn alerts_of(alert_s: impl AStream<Alert>) -> (impl AStream<Mut>, impl AStream<Mut>) {
     let b = alert_s.broadcast();
 
     let i = b.latest().map(|a| match a {
