@@ -43,12 +43,12 @@ async fn main() {
             .unwrap_or_else(|| PathBuf::from("."))
     };
 
-    let config = Startup {
+    let startup = Startup {
         arg_path,
         start_dir,
     };
 
-    let state = AppState::new(config);
+    let state = AppState::new(startup);
 
     // Channel to "hoist" the state output from Model as
     // input into Derived.

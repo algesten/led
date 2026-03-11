@@ -10,9 +10,9 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub fn new(config: Startup) -> Self {
+    pub fn new(startup: Startup) -> Self {
         Self {
-            startup: Arc::new(config),
+            startup: Arc::new(startup),
             ..Default::default()
         }
     }
