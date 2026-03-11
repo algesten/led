@@ -1,12 +1,16 @@
 [workspace]
 resolver = "2"
-members = ["led", "crates/core"]
+members = ["led", "crates/core", "crates/workspace"]
 
 [workspace.dependencies]
+led-core = { path = "crates/core" }
+led-workspace = { path = "crates/workspace" }
+
+futures = { version = "0.3.32", default-features = false, features = ["alloc"] }
 tokio = { version = "1", features = ["macros", "sync", "time", "rt-multi-thread"] }
 tokio-stream = { version = "0.1.18", features = ["sync"] }
+tokio-util = "0.7.18"
 clap = { version = "4.5.60", features = ["derive"] }
-led_core = { path = "crates/core" }
 
 # crossterm = { version = "0.29", features = ["event-stream"] }
 # dirs = "6"
