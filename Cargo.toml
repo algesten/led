@@ -5,47 +5,49 @@ members = ["led", "crates/core"]
 [workspace.dependencies]
 tokio = { version = "1", features = ["macros", "sync", "time", "rt-multi-thread"] }
 tokio-stream = { version = "0.1.18", features = ["sync"] }
-
-ratatui = "0.30"
-crossterm = { version = "0.29", features = ["event-stream"] }
-futures = "0.3"
-serde = { version = "1", features = ["derive"] }
-toml = "0.8"
-dirs = "6"
-rusqlite = { version = "0.38.0", features = ["bundled"] }
-notify = "7"
-ropey = "1.6"
-rmp-serde = "1"
-twox-hash = "2"
+clap = { version = "4.5.60", features = ["derive"] }
 led_core = { path = "crates/core" }
-led_buffer = { path = "crates/buffer" }
-libc = "0.2"
-led_file_browser = { path = "crates/file-browser" }
-led_file_search = { path = "crates/file-search" }
-led_find_file = { path = "crates/find-file" }
-tree-sitter = "0.25"
-tree-sitter-rust = "0.23"
-tree-sitter-toml-ng = "0.7"
-tree-sitter-json = "0.24"
-tree-sitter-javascript = "0.23"
-tree-sitter-typescript = "0.23"
-tree-sitter-md = "0.5"
-tree-sitter-python = "0.25"
-tree-sitter-bash = "0.25"
-tree-sitter-swift = "0.7"
-tree-sitter-c = "0.24"
-tree-sitter-cpp = "0.23"
-tree-sitter-make = "1.1"
-similar = "2"
-led_git_status = { path = "crates/git-status" }
-led_jump_list = { path = "crates/jump-list" }
-led_lsp = { path = "crates/lsp" }
-led_messages = { path = "crates/messages" }
-led_workspace_watcher = { path = "crates/workspace-watcher" }
-git2 = { version = "0.20", features = ["vendored-libgit2"] }
-log = "0.4"
-serde_json = "1"
-lsp-types = "0.97"
-globset = "0.4"
-regex = "1"
-nucleo-matcher = "0.3"
+
+# crossterm = { version = "0.29", features = ["event-stream"] }
+# dirs = "6"
+# futures = "0.3"
+# git2 = { version = "0.20", features = ["vendored-libgit2"] }
+# globset = "0.4"
+# led_buffer = { path = "crates/buffer" }
+# led_core = { path = "crates/core" }
+# led_file_browser = { path = "crates/file-browser" }
+# led_file_search = { path = "crates/file-search" }
+# led_find_file = { path = "crates/find-file" }
+# led_git_status = { path = "crates/git-status" }
+# led_jump_list = { path = "crates/jump-list" }
+# led_lsp = { path = "crates/lsp" }
+# led_messages = { path = "crates/messages" }
+# led_workspace_watcher = { path = "crates/workspace-watcher" }
+# libc = "0.2"
+# log = "0.4"
+# lsp-types = "0.97"
+# notify = "7"
+# nucleo-matcher = "0.3"
+# ratatui = "0.30"
+# regex = "1"
+# rmp-serde = "1"
+# ropey = "1.6"
+# rusqlite = { version = "0.38.0", features = ["bundled"] }
+# serde = { version = "1", features = ["derive"] }
+# serde_json = "1"
+# similar = "2"
+# toml = "0.8"
+# tree-sitter = "0.25"
+# tree-sitter-bash = "0.25"
+# tree-sitter-c = "0.24"
+# tree-sitter-cpp = "0.23"
+# tree-sitter-javascript = "0.23"
+# tree-sitter-json = "0.24"
+# tree-sitter-make = "1.1"
+# tree-sitter-md = "0.5"
+# tree-sitter-python = "0.25"
+# tree-sitter-rust = "0.23"
+# tree-sitter-swift = "0.7"
+# tree-sitter-toml-ng = "0.7"
+# tree-sitter-typescript = "0.23"
+# twox-hash = "2"

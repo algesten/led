@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+clap = { workspace = true }
 led_core = { workspace = true }
 tokio = { workspace = true }
 tokio-stream = { workspace = true }
