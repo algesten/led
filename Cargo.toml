@@ -11,6 +11,7 @@ clap = { version = "4.5.60", features = ["derive"] }
 dirs = "6"
 libc = "0.2"
 log = "0.4"
+notify = "7"
 pin-project-lite = "0.2"
 tokio = { version = "1", features = ["macros", "sync", "time", "rt-multi-thread"] }
 tokio-stream = { version = "0.1.18", features = ["sync"] }
@@ -31,7 +32,6 @@ tokio-util = "0.7.18"
 # led_messages = { path = "crates/messages" }
 # led_workspace_watcher = { path = "crates/workspace-watcher" }
 # lsp-types = "0.97"
-# notify = "7"
 # nucleo-matcher = "0.3"
 # ratatui = "0.30"
 # regex = "1"

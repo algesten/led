@@ -5,6 +5,11 @@ use std::path::{Path, PathBuf};
 use led_core::AStream;
 use tokio_stream::{Stream, StreamExt};
 
+const CONFIG_DIR: &str = ".config";
+const LED_DIR: &str = "led";
+const GIT_DIR: &str = ".git";
+const PRIMARY_DIR: &str = "primary";
+
 #[derive(Clone, Default, Debug)]
 pub struct Workspace {
     /// Workspace root. The project that is open.
@@ -26,8 +31,8 @@ pub fn driver(input: impl AStream<PathBuf>) -> impl Stream<Item = Workspace> {
 
         let config = dirs::home_dir()
             .unwrap_or_default()
-            .join(".config")
-            .join("led");
+            .join(CONFIG_DIR)
+            .join(LED_DIR);
 
         let editor = match try_become_primary(&config, &root) {
             Some(lock_file) => {
@@ -51,7 +56,7 @@ fn find_git_root(start: &Path) -> PathBuf {
     let mut dir = start.to_path_buf();
     let mut root = None;
     loop {
-        let git = dir.join(".git");
+        let git = dir.join(GIT_DIR);
         if git.exists() && git.is_dir() {
             root = Some(dir.clone());
         }
@@ -71,7 +76,7 @@ fn try_become_primary(config: &Path, root: &Path) -> Option<File> {
     use std::hash::{Hash, Hasher};
     use std::os::unix::io::AsRawFd;
 
-    let lock_dir = config.join("primary");
+    let lock_dir = config.join(PRIMARY_DIR);
     std::fs::create_dir_all(&lock_dir).ok()?;
 
     let mut hasher = DefaultHasher::new();

@@ -6,10 +6,6 @@ The fundamental rule: **every side effect lives in a Driver**. The Model is a pu
 
 ---
 
-## Phase 1: Core State & Action Types
-
-Before anything else, the `State` struct and the vocabulary types that flow through the system must exist. Right now `State` only holds `config` and `workspace`. By the end of this phase it will hold placeholders for every domain.
-
 ### 1A. Action Enum
 
 The old codebase defines 48 `Action` variants in `core/types.rs`. These are the user-intent signals that flow from the terminal driver into the model. Port the full enum into `led_core`:
@@ -27,42 +23,9 @@ The old codebase defines 48 `Action` variants in `core/types.rs`. These are the 
 
 These are pure data. No side effects, no Driver involvement. They go into `crates/core/src/types.rs` and re-export from `lib.rs`.
 
-### 1B. Expand State
+### 1C. PanelSlot
 
-Define every domain as a sub-struct of `State`. These start mostly empty and get populated in later phases. The point is to establish the shape early:
-
-```
-State {
-    config: Arc<Config>,
-    workspace: Option<PathBuf>,
-    focus: PanelSlot,
-    show_side_panel: bool,
-    tabs: TabState,
-    buffers: HashMap<PathBuf, BufferState>,
-    active_buffer: Option<PathBuf>,
-    file_browser: FileBrowserState,
-    file_search: FileSearchState,
-    find_file: FindFileState,
-    jump_list: JumpListState,
-    picker: PickerState,
-    messages: MessagesState,
-    git: GitState,
-    lsp: LspState,
-    keymap: Keymap,
-    theme: Theme,
-    modal: Option<ModalState>,
-    rename_modal: Option<RenameModalState>,
-    message_bar: Option<(String, Instant)>,
-    viewport: Viewport,
-    session: SessionState,
-}
-```
-
-Each sub-struct is defined in its own module under `crates/core/src/` or relevant crate. `State` must remain `Clone` since the hoist loop broadcasts `Arc<State>`.
-
-### 1C. PanelSlot and Layout Types
-
-Port `PanelSlot` (Main, Side, StatusBar, Overlay), `TabDescriptor`, `LspStatus`, `FileStatus`, `LineStatus`, `LineStatusKind`, `DiagnosticSeverity`, and all supporting types from `core/types.rs` and `core/lsp_types.rs`. These are pure data enums used throughout the system.
+Port `PanelSlot` (Main, Side, StatusBar, Overlay),
 
 ---
 
