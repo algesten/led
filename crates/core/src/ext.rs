@@ -238,6 +238,38 @@ where
     }
 }
 
+// === Inspect ===
+
+pin_project! {
+    /// Calls a closure on each item by reference, passing the item through unchanged.
+    /// Useful for logging/debugging without altering the stream.
+    pub struct Inspect<S, F> {
+        #[pin]
+        stream: S,
+        f: F,
+    }
+}
+
+impl<S, F> Stream for Inspect<S, F>
+where
+    S: Stream,
+    F: FnMut(&S::Item),
+{
+    type Item = S::Item;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.project();
+        match this.stream.poll_next(cx) {
+            Poll::Ready(Some(item)) => {
+                (this.f)(&item);
+                Poll::Ready(Some(item))
+            }
+            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
 // === Extension trait ===
 
 pub trait StreamOpsExt: Stream {
@@ -317,6 +349,19 @@ pub trait StreamOpsExt: Stream {
             inner: None,
             outer_done: false,
         }
+    }
+
+    /// Inspect each item by reference without altering it.
+    ///
+    /// ```ignore
+    /// stream.inspect(|x| log::trace!("{:#?}", x))
+    /// ```
+    fn inspect<F>(self, f: F) -> Inspect<Self, F>
+    where
+        Self: Sized,
+        F: FnMut(&Self::Item),
+    {
+        Inspect { stream: self, f }
     }
 }
 

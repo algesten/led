@@ -13,7 +13,7 @@ pub struct Derived {
 
 impl Derived {
     pub fn new(state_tx: &Sender<Arc<AppState>>) -> Self {
-        let workspace = state_tx.latest().map(|s| s.config.start_dir.clone());
+        let workspace = state_tx.latest().map(|s| s.startup.start_dir.clone());
 
         Derived {
             workspace: Box::pin(workspace),

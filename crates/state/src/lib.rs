@@ -1,18 +1,18 @@
 use std::sync::Arc;
 
-use led_core::Config;
+use led_core::Startup;
 pub use led_workspace::Workspace;
 
-#[derive(Clone, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct AppState {
-    pub config: Arc<Config>,
+    pub startup: Arc<Startup>,
     pub workspace: Option<Workspace>,
 }
 
 impl AppState {
-    pub fn new(config: Config) -> Self {
+    pub fn new(config: Startup) -> Self {
         Self {
-            config: Arc::new(config),
+            startup: Arc::new(config),
             ..Default::default()
         }
     }

@@ -11,3 +11,4 @@ led-workspace = { workspace = true }
 clap = { workspace = true }
 tokio = { workspace = true }
 tokio-stream = { workspace = true }
+log = { workspace = true }

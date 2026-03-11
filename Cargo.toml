@@ -7,14 +7,16 @@ led-core = { path = "crates/core" }
 led-state = { path = "crates/state" }
 led-workspace = { path = "crates/workspace" }
 
+clap = { version = "4.5.60", features = ["derive"] }
+dirs = "6"
+libc = "0.2"
+log = "0.4"
 pin-project-lite = "0.2"
 tokio = { version = "1", features = ["macros", "sync", "time", "rt-multi-thread"] }
 tokio-stream = { version = "0.1.18", features = ["sync"] }
 tokio-util = "0.7.18"
-clap = { version = "4.5.60", features = ["derive"] }
 
 # crossterm = { version = "0.29", features = ["event-stream"] }
-# dirs = "6"
 # futures = "0.3"
 # git2 = { version = "0.20", features = ["vendored-libgit2"] }
 # globset = "0.4"
@@ -28,8 +30,6 @@ clap = { version = "4.5.60", features = ["derive"] }
 # led_lsp = { path = "crates/lsp" }
 # led_messages = { path = "crates/messages" }
 # led_workspace_watcher = { path = "crates/workspace-watcher" }
-# libc = "0.2"
-# log = "0.4"
 # lsp-types = "0.97"
 # notify = "7"
 # nucleo-matcher = "0.3"

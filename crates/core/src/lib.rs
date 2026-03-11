@@ -1,6 +1,6 @@
 use tokio_stream::Stream;
 
-pub use config::Config;
+pub use config::Startup;
 pub use ext::{Combine, Flatten, Reduce, SampleCombine, StreamOpsExt};
 pub use fanout::{FanoutStream, FanoutStreamExt, LatestStream};
 

@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::pin::Pin;
 
 use clap::Parser;
-use led_core::Config;
+use led_core::Startup;
 use led_state::AppState;
 use led_workspace::Workspace;
 use tokio::sync;
@@ -43,7 +43,7 @@ async fn main() {
             .unwrap_or_else(|| PathBuf::from("."))
     };
 
-    let config = Config {
+    let config = Startup {
         arg_path,
         start_dir,
     };
