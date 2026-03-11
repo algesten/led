@@ -2,7 +2,10 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 
 use pin_project_lite::pin_project;
-use tokio_stream::Stream;
+use tokio::sync::broadcast;
+use tokio_stream::{Stream, StreamExt};
+
+use crate::{AStream, FanoutStreamExt};
 
 // === Reduce ===
 
@@ -106,6 +109,61 @@ where
         }
 
         Poll::Pending
+    }
+}
+
+// === Merge ===
+
+pin_project! {
+    /// Merges two streams: emits items from either stream as they arrive.
+    /// Completes when both input streams have completed.
+    pub struct Merge<S1, S2>
+    where
+        S1: Stream,
+        S2: Stream<Item = S1::Item>,
+    {
+        #[pin]
+        stream1: S1,
+        #[pin]
+        stream2: S2,
+        done1: bool,
+        done2: bool,
+    }
+}
+
+impl<S1, S2> Stream for Merge<S1, S2>
+where
+    S1: Stream,
+    S2: Stream<Item = S1::Item>,
+{
+    type Item = S1::Item;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let mut this = self.project();
+
+        // Poll stream1
+        if !*this.done1 {
+            match this.stream1.as_mut().poll_next(cx) {
+                Poll::Ready(Some(item)) => return Poll::Ready(Some(item)),
+                Poll::Ready(None) => *this.done1 = true,
+                Poll::Pending => {}
+            }
+        }
+
+        // Poll stream2
+        if !*this.done2 {
+            match this.stream2.as_mut().poll_next(cx) {
+                Poll::Ready(Some(item)) => return Poll::Ready(Some(item)),
+                Poll::Ready(None) => *this.done2 = true,
+                Poll::Pending => {}
+            }
+        }
+
+        if *this.done1 && *this.done2 {
+            Poll::Ready(None)
+        } else {
+            Poll::Pending
+        }
     }
 }
 
@@ -238,6 +296,46 @@ where
     }
 }
 
+// === Dedupe ===
+
+pin_project! {
+    /// Emits items only when they differ from the previous one.
+    /// Filters out consecutive duplicates.
+    pub struct Dedupe<S>
+    where
+        S: Stream,
+    {
+        #[pin]
+        stream: S,
+        prev: Option<S::Item>,
+    }
+}
+
+impl<S> Stream for Dedupe<S>
+where
+    S: Stream,
+    S::Item: Clone + PartialEq,
+{
+    type Item = S::Item;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let mut this = self.project();
+        loop {
+            match this.stream.as_mut().poll_next(cx) {
+                Poll::Ready(Some(item)) => {
+                    if this.prev.as_ref() != Some(&item) {
+                        *this.prev = Some(item.clone());
+                        return Poll::Ready(Some(item));
+                    }
+                    // Item equals previous, skip and continue polling
+                }
+                Poll::Ready(None) => return Poll::Ready(None),
+                Poll::Pending => return Poll::Pending,
+            }
+        }
+    }
+}
+
 // === Inspect ===
 
 pin_project! {
@@ -288,6 +386,25 @@ pub trait StreamOpsExt: Stream {
             stream: self,
             acc: seed,
             f,
+        }
+    }
+
+    /// Merge: emits items from either stream as they arrive.
+    /// Completes when both streams have completed.
+    ///
+    /// ```ignore
+    /// stream_a.or(stream_b) // -> Stream<Item = T> where both have Item = T
+    /// ```
+    fn or<S2>(self, other: S2) -> Merge<Self, S2>
+    where
+        Self: Sized,
+        S2: Stream<Item = Self::Item>,
+    {
+        Merge {
+            stream1: self,
+            stream2: other,
+            done1: false,
+            done2: false,
         }
     }
 
@@ -351,6 +468,23 @@ pub trait StreamOpsExt: Stream {
         }
     }
 
+    /// Filter out consecutive duplicate items.
+    /// Only emits when an item differs from the previous one.
+    ///
+    /// ```ignore
+    /// stream.dedupe() // Stream<1, 1, 2, 2, 3> -> Stream<1, 2, 3>
+    /// ```
+    fn dedupe(self) -> Dedupe<Self>
+    where
+        Self: Sized,
+        Self::Item: Clone + PartialEq,
+    {
+        Dedupe {
+            stream: self,
+            prev: None,
+        }
+    }
+
     /// Inspect each item by reference without altering it.
     ///
     /// ```ignore
@@ -362,6 +496,46 @@ pub trait StreamOpsExt: Stream {
         F: FnMut(&Self::Item),
     {
         Inspect { stream: self, f }
+    }
+
+    /// Convert a stream to a broadcast channel sender.
+    /// Spawns a background task that forwards all stream items to the channel.
+    /// Multiple subscribers can then call `.fanout()` on the sender.
+    ///
+    /// ```ignore
+    /// let tx = stream.broadcast();
+    /// let rx1 = tx.fanout();
+    /// let rx2 = tx.fanout();
+    /// ```
+    fn broadcast<T: Clone + Send + 'static>(self) -> broadcast::Sender<T>
+    where
+        Self: AStream<T> + Sized,
+    {
+        let (tx, _rx) = broadcast::channel(10);
+        let tx_clone = tx.clone();
+        tokio::spawn(async move {
+            let _rx = _rx;
+            use tokio_stream::StreamExt;
+            let mut stream = Box::pin(self);
+            while let Some(item) = stream.next().await {
+                let _ = tx_clone.send(item);
+            }
+        });
+        tx
+    }
+
+    fn split_result<T, E>(self) -> (impl AStream<T>, impl AStream<E>)
+    where
+        T: Clone + Send + 'static,
+        E: Clone + Send + 'static,
+        Self: AStream<Result<T, E>> + Sized,
+    {
+        let b = self.broadcast();
+
+        let ok = b.one_by_one().filter_map(Result::ok);
+        let err = b.one_by_one().filter_map(Result::err);
+
+        (ok, err)
     }
 }
 

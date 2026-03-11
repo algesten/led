@@ -1,12 +1,16 @@
 use std::path::PathBuf;
 use std::pin::Pin;
+use std::sync::Arc;
 
 use clap::Parser;
-use led_core::Startup;
+use led_config_file::ConfigFile;
+use led_core::keys::Keys;
+use led_core::theme::Theme;
+use led_core::{AStream, Alert, FanoutStreamExt, Startup};
 use led_state::AppState;
 use led_workspace::Workspace;
 use tokio::sync;
-use tokio_stream::{Stream, StreamExt};
+use tokio_stream::StreamExt;
 
 use crate::derived::Derived;
 use crate::model::model;
@@ -45,7 +49,7 @@ async fn main() {
 
     let startup = Startup {
         arg_path,
-        start_dir,
+        start_dir: Arc::new(start_dir),
     };
 
     let state = AppState::new(startup);
@@ -58,8 +62,15 @@ async fn main() {
     let derived = Derived::new(&state_tx);
 
     // Drivers is the input from the drivers
-    let drivers = Drivers {
-        workspace: Box::pin(led_workspace::driver(derived.workspace)),
+    let drivers = {
+        let f = led_config_file::driver(derived.config_file_out.one_by_one());
+        let t = led_config_file::driver(derived.config_file_out.one_by_one());
+
+        Drivers {
+            workspace: Box::pin(led_workspace::driver(derived.workspace)),
+            config_file_keys: Box::pin(f),
+            config_file_theme: Box::pin(t),
+        }
     };
 
     // And model is a reducer that takes input from drivers to make new state.
@@ -74,5 +85,7 @@ async fn main() {
 }
 
 pub struct Drivers {
-    workspace: Pin<Box<dyn Stream<Item = Workspace> + Send>>,
+    workspace: Pin<Box<dyn AStream<Workspace> + Send>>,
+    config_file_keys: Pin<Box<dyn AStream<Result<ConfigFile<Keys>, Alert>>>>,
+    config_file_theme: Pin<Box<dyn AStream<Result<ConfigFile<Theme>, Alert>>>>,
 }

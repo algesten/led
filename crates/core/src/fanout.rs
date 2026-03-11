@@ -1,6 +1,6 @@
 use std::pin::Pin;
 use tokio::sync::broadcast::error::{RecvError, TryRecvError};
-use tokio::sync::broadcast::{Receiver, Sender};
+use tokio::sync::broadcast::{self, Receiver};
 use tokio_stream::Stream;
 use tokio_util::sync::ReusableBoxFuture;
 
@@ -84,13 +84,13 @@ impl<T: 'static + Clone + Send> Stream for LatestStream<T> {
 
 pub trait FanoutStreamExt<T> {
     /// Lossless stream. Every value is delivered. Panics if the receiver falls behind.
-    fn fanout(&self) -> FanoutStream<T>;
+    fn one_by_one(&self) -> FanoutStream<T>;
     /// Latest-wins stream. Drains pending values, yields only the most recent.
     fn latest(&self) -> LatestStream<T>;
 }
 
-impl<T: 'static + Clone + Send> FanoutStreamExt<T> for Sender<T> {
-    fn fanout(&self) -> FanoutStream<T> {
+impl<T: 'static + Clone + Send> FanoutStreamExt<T> for broadcast::Sender<T> {
+    fn one_by_one(&self) -> FanoutStream<T> {
         FanoutStream::new(self.subscribe())
     }
 

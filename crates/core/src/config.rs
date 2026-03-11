@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::sync::Arc;
 
 #[derive(Debug, Default)]
 pub struct Startup {
@@ -7,5 +8,5 @@ pub struct Startup {
 
     /// Directory derived from the command line, or the directory
     /// where the binary started.
-    pub start_dir: PathBuf,
+    pub start_dir: Arc<PathBuf>,
 }

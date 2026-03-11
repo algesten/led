@@ -1,0 +1,11 @@
+[package]
+name = "led-config-file"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+led-core = { workspace = true }
+serde = { workspace = true }
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+toml = { workspace = true }

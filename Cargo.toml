@@ -1,8 +1,9 @@
 [workspace]
 resolver = "2"
-members = ["led", "crates/core", "crates/state", "crates/workspace"]
+members = ["led", "crates/config-file", "crates/core", "crates/state", "crates/workspace"]
 
 [workspace.dependencies]
+led-config-file = { path = "crates/config-file" }
 led-core = { path = "crates/core" }
 led-state = { path = "crates/state" }
 led-workspace = { path = "crates/workspace" }
@@ -13,9 +14,11 @@ libc = "0.2"
 log = "0.4"
 notify = "7"
 pin-project-lite = "0.2"
-tokio = { version = "1", features = ["macros", "sync", "time", "rt-multi-thread"] }
+serde = { version = "1", features = ["derive"] }
+tokio = { version = "1", features = ["macros", "sync", "time", "rt-multi-thread", "fs"] }
 tokio-stream = { version = "0.1.18", features = ["sync"] }
 tokio-util = "0.7.18"
+toml = "0.8"
 
 # crossterm = { version = "0.29", features = ["event-stream"] }
 # futures = "0.3"
@@ -38,10 +41,8 @@ tokio-util = "0.7.18"
 # rmp-serde = "1"
 # ropey = "1.6"
 # rusqlite = { version = "0.38.0", features = ["bundled"] }
-# serde = { version = "1", features = ["derive"] }
 # serde_json = "1"
 # similar = "2"
-# toml = "0.8"
 # tree-sitter = "0.25"
 # tree-sitter-bash = "0.25"
 # tree-sitter-c = "0.24"

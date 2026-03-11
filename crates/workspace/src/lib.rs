@@ -1,16 +1,17 @@
 use std::fs::{self, File, OpenOptions};
 use std::hash::DefaultHasher;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use led_core::AStream;
-use tokio_stream::{Stream, StreamExt};
+use tokio_stream::StreamExt;
 
 const CONFIG_DIR: &str = ".config";
 const LED_DIR: &str = "led";
 const GIT_DIR: &str = ".git";
 const PRIMARY_DIR: &str = "primary";
 
-pub struct StartDir(pub PathBuf);
+pub struct StartDir(pub Arc<PathBuf>);
 
 #[derive(Clone, Default, Debug)]
 pub struct Workspace {
@@ -22,12 +23,12 @@ pub struct Workspace {
 
     /// Whether this is the primary editor (persisting workspace changes etc),
     /// or secondary that just edits files.
-    pub editor: bool,
+    pub primary: bool,
 }
 
-pub fn driver(input: impl AStream<StartDir>) -> impl Stream<Item = Workspace> {
+pub fn driver(input: impl AStream<StartDir>) -> impl AStream<Workspace> {
     input.map(|dir| {
-        let dir = fs::canonicalize(&dir.0).unwrap_or(dir.0);
+        let dir = fs::canonicalize(&*dir.0).unwrap_or_else(|_| dir.0.as_ref().clone());
 
         let root = find_git_root(&dir);
 
@@ -48,7 +49,7 @@ pub fn driver(input: impl AStream<StartDir>) -> impl Stream<Item = Workspace> {
         Workspace {
             root,
             config,
-            editor,
+            primary: editor,
         }
     })
 }
