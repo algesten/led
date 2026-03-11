@@ -81,10 +81,15 @@ impl Component for LspManager {
                         LspManagerEvent::RequestResult(result) => {
                             effects.extend(self.handle_request_result(result, &*ctx.docs));
                         }
-                        LspManagerEvent::FileChanged(path) => {
-                            self.send_file_changed(&path);
+                        LspManagerEvent::FileChanged(path, kind) => {
+                            self.send_file_changed(&path, kind);
+                            self.need_diagnostics = true;
                         }
                     }
+                }
+                if self.need_diagnostics {
+                    self.need_diagnostics = false;
+                    self.pull_all_diagnostics();
                 }
                 effects
             }

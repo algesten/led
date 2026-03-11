@@ -7,6 +7,13 @@ use lsp_types::CodeActionOrCommand;
 use crate::server::LanguageServer;
 use crate::transport::LspNotification;
 
+#[derive(Clone, Copy)]
+pub(crate) enum FileChangeKind {
+    Created,
+    Changed,
+    Deleted,
+}
+
 pub(crate) enum LspManagerEvent {
     ServerStarted {
         language_id: String,
@@ -17,7 +24,7 @@ pub(crate) enum LspManagerEvent {
     },
     Notification(LspNotification),
     RequestResult(RequestResult),
-    FileChanged(PathBuf),
+    FileChanged(PathBuf, FileChangeKind),
 }
 
 pub(crate) enum RequestResult {

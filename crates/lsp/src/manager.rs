@@ -185,15 +185,15 @@ impl LspManager {
 
         let watcher = notify::recommended_watcher(move |res: Result<notify::Event, _>| {
             let Ok(ev) = res else { return };
-            match ev.kind {
-                notify::EventKind::Create(_)
-                | notify::EventKind::Modify(_)
-                | notify::EventKind::Remove(_) => {}
+            let kind = match ev.kind {
+                notify::EventKind::Create(_) => crate::types::FileChangeKind::Created,
+                notify::EventKind::Modify(_) => crate::types::FileChangeKind::Changed,
+                notify::EventKind::Remove(_) => crate::types::FileChangeKind::Deleted,
                 _ => return,
-            }
+            };
             for path in ev.paths {
                 if globs.is_match(&path) {
-                    let _ = event_tx.send(LspManagerEvent::FileChanged(path));
+                    let _ = event_tx.send(LspManagerEvent::FileChanged(path, kind));
                     if let Some(ref w) = waker {
                         w();
                     }
@@ -220,15 +220,15 @@ impl LspManager {
         }
     }
 
-    pub(crate) fn send_file_changed(&self, path: &Path) {
+    pub(crate) fn send_file_changed(&self, path: &Path, kind: crate::types::FileChangeKind) {
         // Send to all servers — the server will filter by relevance
         let Some(uri) = uri_from_path(path) else {
             return;
         };
-        let change_type = if path.exists() {
-            lsp_types::FileChangeType::CHANGED
-        } else {
-            lsp_types::FileChangeType::DELETED
+        let change_type = match kind {
+            crate::types::FileChangeKind::Created => lsp_types::FileChangeType::CREATED,
+            crate::types::FileChangeKind::Changed => lsp_types::FileChangeType::CHANGED,
+            crate::types::FileChangeKind::Deleted => lsp_types::FileChangeType::DELETED,
         };
 
         for server in self.servers.values() {
@@ -343,11 +343,11 @@ impl LspManager {
             },
         );
         self.opened_docs.insert(path.to_path_buf());
-        self.spawn_pull_diagnostics(path.to_path_buf(), server);
+        self.need_diagnostics = true;
     }
 
     pub(crate) fn send_did_change(
-        &self,
+        &mut self,
         path: &Path,
         changes: &[EditorTextEdit],
         version: i32,
@@ -389,10 +389,10 @@ impl LspManager {
                 content_changes,
             },
         );
-        self.spawn_pull_diagnostics(path.to_path_buf(), server.clone());
+        self.need_diagnostics = true;
     }
 
-    pub(crate) fn send_did_save(&self, path: &Path) {
+    pub(crate) fn send_did_save(&mut self, path: &Path) {
         let Some(server) = self.server_for_path(path) else {
             return;
         };
@@ -407,7 +407,7 @@ impl LspManager {
                 text: Some(text),
             },
         );
-        self.spawn_pull_diagnostics(path.to_path_buf(), server.clone());
+        self.need_diagnostics = true;
     }
 
     pub(crate) fn send_did_close(&mut self, path: &Path) {
@@ -955,7 +955,7 @@ impl LspManager {
                     // When server becomes quiescent, pull fresh diagnostics
                     // to replace any stale push diagnostics from early analysis.
                     if was_busy && q {
-                        self.pull_all_diagnostics();
+                        self.need_diagnostics = true;
                     }
                 }
             }

@@ -32,6 +32,7 @@ pub struct LspManager {
     pending_code_actions: HashMap<PathBuf, Vec<CodeActionOrCommand>>,
     progress_tokens: HashMap<String, ProgressState>,
     quiescent: bool,
+    need_diagnostics: bool,
     _file_watcher: Option<notify::RecommendedWatcher>,
     file_watcher_globs: Option<globset::GlobSet>,
 }
@@ -52,6 +53,7 @@ impl LspManager {
             pending_code_actions: HashMap::new(),
             progress_tokens: HashMap::new(),
             quiescent: true,
+            need_diagnostics: false,
             _file_watcher: None,
             file_watcher_globs: None,
         }
