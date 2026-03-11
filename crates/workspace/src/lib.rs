@@ -10,6 +10,8 @@ const LED_DIR: &str = "led";
 const GIT_DIR: &str = ".git";
 const PRIMARY_DIR: &str = "primary";
 
+pub struct StartDir(pub PathBuf);
+
 #[derive(Clone, Default, Debug)]
 pub struct Workspace {
     /// Workspace root. The project that is open.
@@ -23,9 +25,9 @@ pub struct Workspace {
     pub editor: bool,
 }
 
-pub fn driver(input: impl AStream<PathBuf>) -> impl Stream<Item = Workspace> {
+pub fn driver(input: impl AStream<StartDir>) -> impl Stream<Item = Workspace> {
     input.map(|dir| {
-        let dir = fs::canonicalize(&dir).unwrap_or(dir);
+        let dir = fs::canonicalize(&dir.0).unwrap_or(dir.0);
 
         let root = find_git_root(&dir);
 
