@@ -15,6 +15,15 @@ pub use ext::{Combine, Dedupe, Flatten, Merge, Reduce, SampleCombine};
 pub use fanout::{FanoutStream, FanoutStreamExt, LatestStream};
 pub use watch::watch;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PanelSlot {
+    #[default]
+    Main,
+    Side,
+    StatusBar,
+    Overlay,
+}
+
 pub trait AStream<T>: Stream<Item = T> + Send + 'static {}
 impl<S, T> AStream<T> for S where S: Stream<Item = T> + Send + 'static {}
 

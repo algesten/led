@@ -2,6 +2,7 @@ use std::cell::Cell;
 use std::sync::Arc;
 
 use crossterm::event::KeyCode;
+use led_core::PanelSlot;
 use led_core::keys::{KeyCombo, KeymapLookup};
 use led_core::{AStream, Action, StreamOpsExt};
 use led_input::TerminalInput;
@@ -69,39 +70,24 @@ fn map_input(
 }
 
 /// Determine the keymap context name from the current focus and active component.
-fn resolve_context(_state: &AppState) -> Option<&'static str> {
-    // TODO: once AppState has focus/panel state, resolve context from it:
-    //
-    // match state.focus {
-    //     PanelSlot::Side => {
-    //         if state.file_search.active {
-    //             Some("file_search")
-    //         } else {
-    //             Some("browser")
-    //         }
-    //     }
-    //     PanelSlot::Overlay => None,
-    //     PanelSlot::StatusBar => None,
-    //     PanelSlot::Main => None,
-    // }
-    None
+fn resolve_context(state: &AppState) -> Option<&'static str> {
+    match state.focus {
+        PanelSlot::Side => {
+            // TODO: if state.file_search.active { Some("file_search") } else
+            Some("browser")
+        }
+        PanelSlot::Main => None,
+        PanelSlot::StatusBar => None,
+        PanelSlot::Overlay => None,
+    }
 }
 
 /// Whether the current focus allows unbound keys to be inserted as characters.
-fn allow_char_insert(_state: &AppState) -> bool {
-    // TODO: once AppState has focus/panel state:
-    //
-    // match state.focus {
-    //     PanelSlot::Main => state.has_tabs(),
-    //     PanelSlot::StatusBar => {
-    //         // Allow insert when find-file or similar input is active
-    //         state.status_bar_context().is_some()
-    //     }
-    //     PanelSlot::Side => {
-    //         // Allow insert in file search query input
-    //         state.file_search.active
-    //     }
-    //     PanelSlot::Overlay => false,
-    // }
-    true
+fn allow_char_insert(state: &AppState) -> bool {
+    match state.focus {
+        PanelSlot::Main => true, // TODO: gate on state.has_tabs() once tabs exist
+        PanelSlot::StatusBar => false, // TODO: allow when find-file input is active
+        PanelSlot::Side => false, // TODO: allow when file search query is active
+        PanelSlot::Overlay => false,
+    }
 }
