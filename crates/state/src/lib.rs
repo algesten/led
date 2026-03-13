@@ -14,6 +14,11 @@ pub struct AppState {
     pub config_theme: Option<ConfigFile<Theme>>,
     pub keymap: Option<Arc<Keymap>>,
     pub focus: PanelSlot,
+    pub show_side_panel: bool,
+    pub viewport: (u16, u16),
+    pub quit: bool,
+    pub suspend: bool,
+    pub force_redraw: u64,
     pub info: Option<String>,
     pub warn: Option<String>,
 }
@@ -22,6 +27,7 @@ impl AppState {
     pub fn new(startup: Startup) -> Self {
         Self {
             startup: Arc::new(startup),
+            show_side_panel: true,
             ..Default::default()
         }
     }

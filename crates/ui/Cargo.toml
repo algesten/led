@@ -7,4 +7,7 @@ edition = "2024"
 led-core = { workspace = true }
 led-state = { workspace = true }
 
+log = { workspace = true }
 ratatui = { workspace = true }
+tokio = { workspace = true }
+tokio-stream = { workspace = true }

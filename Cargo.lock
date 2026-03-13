@@ -766,6 +766,7 @@ dependencies = [
  "led-storage",
  "led-ui",
  "led-workspace",
+ "libc",
  "log",
  "tokio",
  "tokio-stream",
@@ -836,7 +837,10 @@ version = "0.1.0"
 dependencies = [
  "led-core",
  "led-state",
+ "log",
  "ratatui",
+ "tokio",
+ "tokio-stream",
 ]
 
 [[package]]

@@ -1,15 +1,17 @@
+use std::io;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 
 use clap::Parser;
+use crossterm::event::{DisableBracketedPaste, DisableMouseCapture};
+use crossterm::terminal::{LeaveAlternateScreen, disable_raw_mode};
 use led_config_file::ConfigFile;
 use led_core::keys::Keys;
 use led_core::theme::Theme;
 use led_core::{AStream, Alert, FanoutStreamExt, Startup};
 use led_input::TerminalInput;
 use led_state::AppState;
-use led_ui::Ui;
 use led_workspace::Workspace;
 use tokio::sync;
 use tokio_stream::StreamExt;
@@ -26,8 +28,6 @@ struct Cli {
     /// File or directory to open
     path: Option<String>,
 }
-
-mod ui;
 
 #[tokio::main]
 async fn main() {
@@ -63,6 +63,14 @@ async fn main() {
     // Derived makes output to Drivers
     let derived = Derived::new(&state_tx);
 
+    // UI driver: renders latest state to the terminal.
+    let _ui = led_ui::driver(state_tx.latest());
+
+    // Seed the hoisting channel so Derived and UI have an initial state
+    // to work with. Without this, the system deadlocks: Derived waits for
+    // state, drivers wait for Derived, model waits for drivers.
+    state_tx.send(Arc::new(state.clone())).ok();
+
     // Drivers is the input from the drivers
     let drivers = {
         let f = led_config_file::driver(derived.config_file_out.one_by_one());
@@ -74,7 +82,6 @@ async fn main() {
             config_file_theme: Box::pin(t),
             storage: Box::pin(led_storage::driver(derived.storage)),
             input: Box::pin(led_input::driver()),
-            ui: led_ui::driver(state_tx.latest()),
         }
     };
 
@@ -83,10 +90,25 @@ async fn main() {
 
     // Hoisting loop.
     while let Some(v) = state_s_real.next().await {
+        let quit = v.quit;
         if let Err(e) = state_tx.send(v) {
             panic!("State hoist error: {}", e);
         }
+        if quit {
+            break;
+        }
     }
+
+    // Restore terminal state on exit.
+    disable_raw_mode().ok();
+    crossterm::execute!(
+        io::stdout(),
+        crossterm::cursor::Show,
+        LeaveAlternateScreen,
+        DisableMouseCapture,
+        DisableBracketedPaste
+    )
+    .ok();
 }
 
 pub struct Drivers {
@@ -95,6 +117,4 @@ pub struct Drivers {
     config_file_theme: Pin<Box<dyn AStream<Result<ConfigFile<Theme>, Alert>>>>,
     storage: Pin<Box<dyn AStream<Result<led_storage::StorageIn, Alert>>>>,
     input: Pin<Box<dyn AStream<TerminalInput>>>,
-    #[allow(unused)]
-    ui: Ui,
 }

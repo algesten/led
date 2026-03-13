@@ -15,7 +15,7 @@ pin_project! {
     pub struct Reduce<S, B, F> {
         #[pin]
         stream: S,
-        acc: B,
+        acc: Option<B>,
         f: F,
     }
 }
@@ -24,7 +24,7 @@ impl<S, B, F> Stream for Reduce<S, B, F>
 where
     S: Stream,
     B: Clone,
-    F: FnMut(&mut B, S::Item),
+    F: FnMut(B, S::Item) -> B,
 {
     type Item = B;
 
@@ -32,8 +32,9 @@ where
         let this = self.project();
         match this.stream.poll_next(cx) {
             Poll::Ready(Some(item)) => {
-                (this.f)(this.acc, item);
-                Poll::Ready(Some(this.acc.clone()))
+                let acc = this.acc.take().unwrap();
+                *this.acc = Some((this.f)(acc, item));
+                Poll::Ready(Some(this.acc.clone().unwrap()))
             }
             Poll::Ready(None) => Poll::Ready(None),
             Poll::Pending => Poll::Pending,
@@ -380,11 +381,11 @@ pub trait StreamOpsExt: Stream {
     where
         Self: Sized,
         B: Clone,
-        F: FnMut(&mut B, Self::Item),
+        F: FnMut(B, Self::Item) -> B,
     {
         Reduce {
             stream: self,
-            acc: seed,
+            acc: Some(seed),
             f,
         }
     }

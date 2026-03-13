@@ -9,10 +9,17 @@ use led_input::TerminalInput;
 use led_state::AppState;
 use tokio_stream::StreamExt;
 
+/// Events produced from terminal input: resolved actions or terminal-level events.
+#[derive(Debug, Clone)]
+pub enum TerminalEvent {
+    Action(Action),
+    Resize(u16, u16),
+}
+
 pub fn actions_of(
     state: impl AStream<Arc<AppState>>,
     input: impl AStream<TerminalInput>,
-) -> impl AStream<Action> {
+) -> impl AStream<TerminalEvent> {
     let chord: Cell<Option<KeyCombo>> = Cell::new(None);
 
     input
@@ -24,13 +31,10 @@ fn map_input(
     input: TerminalInput,
     state: &AppState,
     chord: &Cell<Option<KeyCombo>>,
-) -> Option<Action> {
+) -> Option<TerminalEvent> {
     let combo = match input {
         TerminalInput::Key(combo) => combo,
-        // TODO: TerminalInput::Resize -> update viewport dimensions in state
-        // TODO: TerminalInput::FocusGained -> trigger git refresh
-        // TODO: TerminalInput::FocusLost -> (no action needed currently)
-        // TODO: TerminalInput::Mouse -> mouse handling
+        TerminalInput::Resize(w, h) => return Some(TerminalEvent::Resize(w, h)),
         _ => return None,
     };
 
@@ -42,7 +46,7 @@ fn map_input(
     // Handle chord state: if we're waiting for a chord's second key
     if let Some(prefix) = chord.take() {
         if let Some(action) = keymap.lookup_chord(&prefix, &combo) {
-            return Some(action);
+            return Some(TerminalEvent::Action(action));
         }
         // Unknown chord second key — swallow it
         return None;
@@ -50,7 +54,7 @@ fn map_input(
 
     // Main keymap lookup
     match keymap.lookup(&combo, context) {
-        KeymapLookup::Action(action) => Some(action),
+        KeymapLookup::Action(action) => Some(TerminalEvent::Action(action)),
 
         KeymapLookup::ChordPrefix => {
             chord.set(Some(combo));
@@ -61,7 +65,7 @@ fn map_input(
             // Fallback: insert printable characters when in an insertable context
             if allow_char_insert(state) && !combo.ctrl && !combo.alt {
                 if let KeyCode::Char(c) = combo.code {
-                    return Some(Action::InsertChar(c));
+                    return Some(TerminalEvent::Action(Action::InsertChar(c)));
                 }
             }
             None
