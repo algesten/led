@@ -763,6 +763,7 @@ dependencies = [
  "led-core",
  "led-input",
  "led-state",
+ "led-storage",
  "led-ui",
  "led-workspace",
  "log",
@@ -816,6 +817,17 @@ dependencies = [
  "led-core",
  "led-workspace",
  "log",
+]
+
+[[package]]
+name = "led-storage"
+version = "0.1.0"
+dependencies = [
+ "led-core",
+ "log",
+ "notify",
+ "tokio",
+ "tokio-stream",
 ]
 
 [[package]]

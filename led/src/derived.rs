@@ -4,6 +4,7 @@ use std::sync::Arc;
 use led_config_file::{ConfigDir, ConfigFileOut};
 use led_core::{AStream, FanoutStreamExt, StreamOpsExt};
 use led_state::AppState;
+use led_storage::StorageOut;
 use led_workspace::StartDir;
 use tokio::sync::broadcast;
 use tokio_stream::StreamExt;
@@ -11,6 +12,7 @@ use tokio_stream::StreamExt;
 pub struct Derived {
     pub workspace: Pin<Box<dyn AStream<StartDir>>>,
     pub config_file_out: broadcast::Sender<ConfigFileOut>,
+    pub storage: Pin<Box<dyn AStream<StorageOut>>>,
 }
 
 impl Derived {
@@ -35,9 +37,13 @@ impl Derived {
             .dedupe()
             .broadcast();
 
+        // Placeholder: no storage commands until buffers exist on AppState.
+        let storage = tokio_stream::pending();
+
         Derived {
             workspace: Box::pin(workspace),
             config_file_out,
+            storage: Box::pin(storage),
         }
     }
 }

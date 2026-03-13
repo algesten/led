@@ -9,6 +9,7 @@ use led_core::keys::{Keymap, Keys};
 use led_core::theme::Theme;
 use led_core::{AStream, FanoutStreamExt, StreamOpsExt};
 use led_state::{AppState, Workspace};
+use led_storage::StorageIn;
 use tokio::sync::broadcast;
 use tokio_stream::StreamExt;
 
@@ -33,6 +34,11 @@ pub fn model(drivers: Drivers, init: AppState) -> impl AStream<Arc<AppState>> {
         (o.map(Mut::ConfigTheme), e)
     };
 
+    let (storage_s, storage_alert_s) = {
+        let (o, e) = drivers.storage.split_result();
+        (o.map(Mut::Storage), e)
+    };
+
     let (keymap_s, keymap_alert_s) = {
         let keys_s = state_tx
             .latest()
@@ -44,13 +50,15 @@ pub fn model(drivers: Drivers, init: AppState) -> impl AStream<Arc<AppState>> {
 
     let alert_s = config_keys_alert_s
         .or(config_theme_alert_s)
-        .or(keymap_alert_s);
+        .or(keymap_alert_s)
+        .or(storage_alert_s);
     let (alert_info_s, alert_warn_s) = alerts_of(alert_s);
 
     workspace_s
         .or(config_keys_s)
         .or(keymap_s)
         .or(config_theme_s)
+        .or(storage_s)
         .or(alert_info_s)
         .or(alert_warn_s)
         //
@@ -60,6 +68,7 @@ pub fn model(drivers: Drivers, init: AppState) -> impl AStream<Arc<AppState>> {
             Mut::ConfigKeys(v) => s.config_keys = Some(v),
             Mut::ConfigTheme(v) => s.config_theme = Some(v),
             Mut::Keymap(v) => s.keymap = Some(v),
+            Mut::Storage(_v) => { /* placeholder until BufferState exists */ }
             Mut::Info(v) => s.info = v,
             Mut::Warn(v) => s.warn = v,
         })
@@ -76,6 +85,7 @@ enum Mut {
     ConfigKeys(ConfigFile<Keys>),
     ConfigTheme(ConfigFile<Theme>),
     Keymap(Arc<Keymap>),
+    Storage(StorageIn),
     Info(Option<String>),
     Warn(Option<String>),
 }

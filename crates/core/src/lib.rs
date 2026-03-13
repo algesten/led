@@ -1,3 +1,5 @@
+use std::io;
+
 use tokio_stream::Stream;
 
 mod alert;
@@ -14,6 +16,10 @@ pub use ext::StreamOpsExt;
 pub use ext::{Combine, Dedupe, Flatten, Merge, Reduce, SampleCombine};
 pub use fanout::{FanoutStream, FanoutStreamExt, LatestStream};
 pub use watch::watch;
+
+pub trait WriteContent: Send + Sync + 'static {
+    fn write_to(&self, writer: &mut dyn io::Write) -> io::Result<()>;
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PanelSlot {

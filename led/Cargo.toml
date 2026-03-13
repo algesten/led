@@ -9,6 +9,7 @@ led-core = { workspace = true }
 led-state = { workspace = true }
 led-workspace = { workspace = true }
 led-input = { workspace = true }
+led-storage = { workspace = true }
 led-ui = { workspace = true }
 
 clap = { workspace = true }

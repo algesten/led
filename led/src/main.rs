@@ -72,6 +72,7 @@ async fn main() {
             workspace: Box::pin(led_workspace::driver(derived.workspace)),
             config_file_keys: Box::pin(f),
             config_file_theme: Box::pin(t),
+            storage: Box::pin(led_storage::driver(derived.storage)),
             input: Box::pin(led_input::driver()),
             ui: led_ui::driver(state_tx.latest()),
         }
@@ -92,6 +93,7 @@ pub struct Drivers {
     workspace: Pin<Box<dyn AStream<Workspace> + Send>>,
     config_file_keys: Pin<Box<dyn AStream<Result<ConfigFile<Keys>, Alert>>>>,
     config_file_theme: Pin<Box<dyn AStream<Result<ConfigFile<Theme>, Alert>>>>,
+    storage: Pin<Box<dyn AStream<Result<led_storage::StorageIn, Alert>>>>,
     input: Pin<Box<dyn AStream<TerminalInput>>>,
     #[allow(unused)]
     ui: Ui,

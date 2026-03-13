@@ -19,5 +19,9 @@ pub fn watch(path: &Path) -> mpsc::Receiver<notify::Event> {
         .watch(path, RecursiveMode::Recursive)
         .expect("watch path");
 
+    // Keep the watcher alive for the process lifetime. It will stop
+    // producing events once all receivers are dropped.
+    std::mem::forget(watcher);
+
     rx
 }
