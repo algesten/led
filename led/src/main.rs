@@ -41,6 +41,7 @@ async fn main() {
         .join("led");
 
     let startup = Startup {
+        headless: false,
         arg_path,
         start_dir: Arc::new(start_dir),
         config_dir,
@@ -51,7 +52,7 @@ async fn main() {
         .run_until(async {
             let (tx, rx) = oneshot::channel();
 
-            let (_state, _input_guard, _ui) = led::run(startup, Stream::new(), tx);
+            let (_state, _guards) = led::run(startup, Stream::new(), tx);
 
             let _ = rx.await;
         })

@@ -24,20 +24,22 @@ pub struct Drivers {
     pub config_theme_in: Stream<Result<ConfigFile<Theme>, Alert>>,
 }
 
-/// Set up and run the editor. Returns the hoisted state stream and guards
-/// that must be kept alive.
+pub struct RunGuards {
+    pub input_guard: Option<led_terminal_in::InputGuard>,
+    pub ui: Option<led_ui::Ui>,
+}
+
+/// Set up and run the editor.
 ///
-/// `actions_in` — direct action injection stream (empty in production, programmable in tests).
+/// When `startup.headless` is true, skips terminal setup and UI driver.
+/// `actions_in` — direct action injection stream (empty in production).
 /// `quit_tx` — signalled when `state.quit` becomes true.
 pub fn run(
     startup: Startup,
     actions_in: Stream<Action>,
     quit_tx: oneshot::Sender<()>,
-) -> (
-    Stream<Arc<AppState>>,
-    led_terminal_in::InputGuard,
-    led_ui::Ui,
-) {
+) -> (Stream<Arc<AppState>>, RunGuards) {
+    let headless = startup.headless;
     let init = AppState::new(startup);
     let seed = Arc::new(init.clone());
 
@@ -48,11 +50,17 @@ pub fn run(
     let d = derived(state.clone());
 
     // 3. Drivers
-    let input_guard = led_terminal_in::setup_terminal();
-    let ui = led_ui::driver(d.ui);
+    let (input_guard, ui, terminal_in) = if headless {
+        (None, None, Stream::new())
+    } else {
+        let guard = led_terminal_in::setup_terminal();
+        let ui = led_ui::driver(d.ui);
+        let terminal_in = led_terminal_in::driver();
+        (Some(guard), Some(ui), terminal_in)
+    };
 
     let drivers = Drivers {
-        terminal_in: led_terminal_in::driver(),
+        terminal_in,
         actions_in,
         workspace_in: led_workspace::driver(d.workspace_out),
         docstore_in: led_docstore::driver(d.docstore_out),
@@ -79,53 +87,5 @@ pub fn run(
         }
     });
 
-    (state, input_guard, ui)
-}
-
-/// Run headlessly for integration tests. No terminal setup, no UI driver.
-/// Injects actions via `actions_in`, returns final state after quit.
-pub fn run_headless(
-    startup: Startup,
-    actions_in: Stream<Action>,
-    quit_tx: oneshot::Sender<()>,
-) -> Stream<Arc<AppState>> {
-    let init = AppState::new(startup);
-    let seed = Arc::new(init.clone());
-
-    // 1. Hoisted AppState
-    let state: Stream<Arc<AppState>> = Stream::new();
-
-    // 2. Derived
-    let d = derived(state.clone());
-
-    // 3. Drivers — no terminal_in, no UI
-    let drivers = Drivers {
-        terminal_in: Stream::new(),
-        actions_in,
-        workspace_in: led_workspace::driver(d.workspace_out),
-        docstore_in: led_docstore::driver(d.docstore_out),
-        config_keys_in: led_config_file::driver::<Keys>(d.config_file_out.clone()),
-        config_theme_in: led_config_file::driver::<Theme>(d.config_file_out),
-    };
-
-    // 4. Model
-    let real_state = model(drivers, init);
-
-    // 5. Hoist
-    real_state.forward(&state);
-
-    // 6. Seed
-    state.push(seed);
-
-    // Signal quit
-    let mut quit_tx = Some(quit_tx);
-    state.on(move |s: &Arc<AppState>| {
-        if s.quit {
-            if let Some(tx) = quit_tx.take() {
-                let _ = tx.send(());
-            }
-        }
-    });
-
-    state
+    (state, RunGuards { input_guard, ui })
 }

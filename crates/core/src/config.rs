@@ -3,6 +3,9 @@ use std::sync::Arc;
 
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct Startup {
+    /// Run headless, used in tests.
+    pub headless: bool,
+
     /// Argument given on the command line, if any.
     pub arg_path: Option<PathBuf>,
 

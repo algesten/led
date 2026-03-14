@@ -74,6 +74,7 @@ impl TestHarness {
             .unwrap_or_else(|| tmpdir.clone());
 
         let startup = Startup {
+            headless: true,
             arg_path,
             start_dir: Arc::new(start_dir),
             config_dir,
@@ -95,7 +96,7 @@ impl TestHarness {
                         let actions_in: Stream<Action> = Stream::new();
                         let (quit_tx, _) = oneshot::channel::<()>();
 
-                        let state = led::run_headless(startup, actions_in.clone(), quit_tx);
+                        let (state, _guards) = led::run(startup, actions_in.clone(), quit_tx);
 
                         let last_state: Rc<RefCell<Option<Arc<AppState>>>> =
                             Rc::new(RefCell::new(None));
