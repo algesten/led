@@ -1,4 +1,6 @@
 use std::collections::HashSet;
+use std::fmt;
+use std::io::{BufReader, Read};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -13,12 +15,22 @@ pub enum StorageOut {
     Save(PathBuf, Arc<dyn WriteContent>),
 }
 
-#[derive(Debug, Clone)]
 pub enum StorageIn {
-    Opened(PathBuf),
+    Opened(PathBuf, Box<dyn Read + Send>),
     Saved(PathBuf),
     Changed(PathBuf),
     Removed(PathBuf),
+}
+
+impl fmt::Debug for StorageIn {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            StorageIn::Opened(path, _) => f.debug_tuple("Opened").field(path).field(&"<reader>").finish(),
+            StorageIn::Saved(path) => f.debug_tuple("Saved").field(path).finish(),
+            StorageIn::Changed(path) => f.debug_tuple("Changed").field(path).finish(),
+            StorageIn::Removed(path) => f.debug_tuple("Removed").field(path).finish(),
+        }
+    }
 }
 
 pub fn driver(out: impl AStream<StorageOut>) -> impl AStream<Result<StorageIn, Alert>> {
@@ -41,8 +53,6 @@ pub fn driver(out: impl AStream<StorageOut>) -> impl AStream<Result<StorageIn, A
                     let Some(cmd) = maybe_cmd else { break };
                     match cmd {
                         StorageOut::Open(path) => {
-                            open_files.insert(path.clone());
-
                             if let Some(parent) = path.parent() {
                                 if watched_dirs.insert(parent.to_path_buf()) {
                                     let mut watch_rx = watch(parent);
@@ -55,7 +65,18 @@ pub fn driver(out: impl AStream<StorageOut>) -> impl AStream<Result<StorageIn, A
                                 }
                             }
 
-                            let _ = tx.send(Ok(StorageIn::Opened(path))).await;
+                            match std::fs::File::open(&path) {
+                                Ok(file) => {
+                                    open_files.insert(path.clone());
+                                    let reader: Box<dyn Read + Send> = Box::new(BufReader::new(file));
+                                    let _ = tx.send(Ok(StorageIn::Opened(path, reader))).await;
+                                }
+                                Err(e) => {
+                                    let _ = tx.send(Err(Alert::Warn(format!(
+                                        "Cannot open {}: {e}", path.display()
+                                    )))).await;
+                                }
+                            }
                         }
                         StorageOut::Close(path) => {
                             open_files.remove(&path);

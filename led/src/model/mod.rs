@@ -2,21 +2,22 @@ use std::sync::Arc;
 
 mod actions_of;
 mod alerts_of;
+mod buffers_of;
 mod keymap_of;
 mod process_of;
 
 use led_config_file::ConfigFile;
 use led_core::keys::{Keymap, Keys};
 use led_core::theme::Theme;
-use led_core::{AStream, Action, FanoutStreamExt, PanelSlot, StreamOpsExt};
-use led_state::{AppState, Workspace};
-use led_storage::StorageIn;
+use led_core::{AStream, Action, BufferId, FanoutStreamExt, PanelSlot, StreamOpsExt};
+use led_state::{AppState, BufferState, Workspace};
 use tokio::sync::broadcast;
 use tokio_stream::StreamExt;
 
 use crate::Drivers;
 use crate::model::actions_of::{TerminalEvent, actions_of};
 use crate::model::alerts_of::alerts_of;
+use crate::model::buffers_of::buffers_of;
 use crate::model::keymap_of::keymap_of;
 use crate::model::process_of::process_of;
 
@@ -38,10 +39,7 @@ pub fn model(drivers: Drivers, init: AppState) -> impl AStream<Arc<AppState>> {
         (o.map(Mut::ConfigTheme), e)
     };
 
-    let (storage_s, storage_alert_s) = {
-        let (o, e) = drivers.storage.split_result();
-        (o.map(Mut::Storage), e)
-    };
+    let buffer_s = buffers_of(drivers.storage, state_tx.latest());
 
     let (keymap_s, keymap_alert_s) = {
         let keys_s = state_tx
@@ -54,8 +52,7 @@ pub fn model(drivers: Drivers, init: AppState) -> impl AStream<Arc<AppState>> {
 
     let alert_s = config_keys_alert_s
         .or(config_theme_alert_s)
-        .or(keymap_alert_s)
-        .or(storage_alert_s);
+        .or(keymap_alert_s);
     let (alert_info_s, alert_warn_s) = alerts_of(alert_s);
 
     let terminal_mut_s = terminal_s.map(|ev| match ev {
@@ -68,7 +65,7 @@ pub fn model(drivers: Drivers, init: AppState) -> impl AStream<Arc<AppState>> {
         .or(config_keys_s)
         .or(keymap_s)
         .or(config_theme_s)
-        .or(storage_s)
+        .or(buffer_s)
         .or(alert_info_s)
         .or(alert_warn_s)
         .or(terminal_mut_s)
@@ -76,17 +73,22 @@ pub fn model(drivers: Drivers, init: AppState) -> impl AStream<Arc<AppState>> {
         .inspect(|m| log::trace!("{:#?}", m))
         .reduce(init, |mut s, m| {
             match m {
-                Mut::Info(v) => s.info = v,
-                Mut::Warn(v) => s.warn = v,
-                Mut::ForceRedraw(v) => s.force_redraw = v,
-                Mut::Suspend(v) => s.suspend = v,
-                Mut::Keymap(v) => s.keymap = Some(v),
                 Mut::Action(a) => handle_action(&mut s, a),
-                Mut::Resize(w, h) => s.viewport = (w, h),
-                Mut::Workspace(v) => s.workspace = Some(v),
+                Mut::BufferOpen(buf, next_id) => {
+                    s.active_buffer = Some(buf.id);
+                    s.buffers.insert(buf.id, buf);
+                    s.next_buffer_id = next_id;
+                }
+                Mut::BufferUpdate(id, buf) => { s.buffers.insert(id, buf); }
                 Mut::ConfigKeys(v) => s.config_keys = Some(v),
                 Mut::ConfigTheme(v) => s.config_theme = Some(v),
-                Mut::Storage(_v) => { /* placeholder until BufferState exists */ }
+                Mut::ForceRedraw(v) => s.force_redraw = v,
+                Mut::Info(v) => s.info = v,
+                Mut::Keymap(v) => s.keymap = Some(v),
+                Mut::Resize(w, h) => s.viewport = (w, h),
+                Mut::Suspend(v) => s.suspend = v,
+                Mut::Warn(v) => s.warn = v,
+                Mut::Workspace(v) => s.workspace = Some(v),
             }
             s
         })
@@ -121,15 +123,16 @@ fn handle_action(state: &mut AppState, action: Action) {
 
 #[derive(Debug)]
 enum Mut {
-    ForceRedraw(u64),
-    Suspend(bool),
     Action(Action),
-    Resize(u16, u16),
-    Storage(StorageIn),
-    Keymap(Arc<Keymap>),
-    Workspace(Workspace),
-    Info(Option<String>),
-    Warn(Option<String>),
+    BufferOpen(BufferState, u64),
+    BufferUpdate(BufferId, BufferState),
     ConfigKeys(ConfigFile<Keys>),
     ConfigTheme(ConfigFile<Theme>),
+    ForceRedraw(u64),
+    Info(Option<String>),
+    Keymap(Arc<Keymap>),
+    Resize(u16, u16),
+    Suspend(bool),
+    Warn(Option<String>),
+    Workspace(Workspace),
 }

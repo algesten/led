@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -37,8 +38,20 @@ impl Derived {
             .dedupe()
             .broadcast();
 
-        // Placeholder: no storage commands until buffers exist on AppState.
-        let storage = tokio_stream::pending();
+        let requested = Cell::new(false);
+        let storage = state_tx
+            .latest()
+            .filter_map(move |s| {
+                if requested.get() {
+                    return None;
+                }
+                let path = s.startup.arg_path.as_ref()?;
+                if path.is_dir() {
+                    return None;
+                }
+                requested.set(true);
+                Some(StorageOut::Open(path.clone()))
+            });
 
         Derived {
             workspace: Box::pin(workspace),

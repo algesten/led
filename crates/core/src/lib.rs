@@ -4,6 +4,7 @@ use tokio_stream::Stream;
 
 mod alert;
 mod config;
+mod doc;
 mod ext;
 mod fanout;
 pub mod keys;
@@ -12,10 +13,14 @@ mod watch;
 
 pub use alert::{Alert, AlertExt};
 pub use config::Startup;
+pub use doc::{Doc, TextDoc};
 pub use ext::StreamOpsExt;
 pub use ext::{Combine, Dedupe, Flatten, Merge, Reduce, SampleCombine};
 pub use fanout::{FanoutStream, FanoutStreamExt, LatestStream};
 pub use watch::watch;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct BufferId(pub u64);
 
 pub trait WriteContent: Send + Sync + 'static {
     fn write_to(&self, writer: &mut dyn io::Write) -> io::Result<()>;
