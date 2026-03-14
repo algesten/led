@@ -221,7 +221,6 @@ impl Doc for TextDoc {
 
         // Apply ops in reverse to undo
         let mut rope = self.rope.clone();
-        let mut inverse_ops = Vec::with_capacity(group.ops.len());
         for op in group.ops.iter().rev() {
             // Remove what was inserted
             if !op.new_text.is_empty() {
@@ -232,19 +231,10 @@ impl Doc for TextDoc {
             if !op.old_text.is_empty() {
                 rope.insert(op.offset, &op.old_text);
             }
-            // Inverse op for redo
-            inverse_ops.push(EditOp {
-                offset: op.offset,
-                old_text: op.new_text.clone(),
-                new_text: op.old_text.clone(),
-            });
         }
-        inverse_ops.reverse();
 
-        undo.push_redo(UndoGroup {
-            ops: inverse_ops,
-            cursor_before: cursor,
-        });
+        // Push the original group to redo — redo replays the same ops forward
+        undo.push_redo(group);
 
         let doc = TextDoc {
             rope,
@@ -259,35 +249,26 @@ impl Doc for TextDoc {
         let mut undo = self.undo.clone();
         let group = undo.pop_redo()?;
 
-        // Apply ops forward to redo
+        // Apply ops forward to redo (same as the original edits)
         let mut rope = self.rope.clone();
         let mut cursor = 0usize;
-        let mut inverse_ops = Vec::with_capacity(group.ops.len());
         for op in &group.ops {
-            // Remove what was there (old_text)
+            // Remove old text (for delete ops)
             if !op.old_text.is_empty() {
                 let end = op.offset + op.old_text.chars().count();
                 rope.remove(op.offset..end);
             }
-            // Insert the new text
+            // Insert new text (for insert ops)
             if !op.new_text.is_empty() {
                 rope.insert(op.offset, &op.new_text);
                 cursor = op.offset + op.new_text.chars().count();
             } else {
                 cursor = op.offset;
             }
-            // Inverse op for undo
-            inverse_ops.push(EditOp {
-                offset: op.offset,
-                old_text: op.new_text.clone(),
-                new_text: op.old_text.clone(),
-            });
         }
 
-        undo.undo_stack.push(UndoGroup {
-            ops: inverse_ops,
-            cursor_before: group.cursor_before,
-        });
+        // Push back to undo stack so it can be undone again
+        undo.undo_stack.push(group);
 
         let doc = TextDoc {
             rope,

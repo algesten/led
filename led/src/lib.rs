@@ -33,7 +33,11 @@ pub fn run(
     startup: Startup,
     actions_in: Stream<Action>,
     quit_tx: oneshot::Sender<()>,
-) -> (Stream<Arc<AppState>>, led_terminal_in::InputGuard, led_ui::Ui) {
+) -> (
+    Stream<Arc<AppState>>,
+    led_terminal_in::InputGuard,
+    led_ui::Ui,
+) {
     let init = AppState::new(startup);
     let seed = Arc::new(init.clone());
 

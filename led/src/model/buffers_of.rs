@@ -3,7 +3,7 @@ use std::sync::Arc;
 use led_core::rx::Stream;
 use led_core::{Alert, BufferId, DocId};
 use led_docstore::DocStoreIn;
-use led_state::{AppState, BufferState};
+use led_state::{AppState, BufferState, SaveState};
 
 use super::Mut;
 
@@ -29,6 +29,7 @@ pub fn buffers_of(
                     scroll_row: 0,
                     tab_order,
                     last_edit_kind: None,
+                    save_state: SaveState::Clean,
                 };
                 Some(Mut::BufferOpen(buf, state.next_buffer_id + 1))
             }
@@ -36,6 +37,7 @@ pub fn buffers_of(
                 let buf = find_buf_by_doc_id(&state, id)?;
                 let mut buf = buf.clone();
                 buf.doc = buf.doc.mark_saved();
+                buf.save_state = SaveState::Clean;
                 Some(Mut::BufferUpdate(buf.id, buf))
             }
             Ok(DocStoreIn::ExternalChange { id, doc }) => {

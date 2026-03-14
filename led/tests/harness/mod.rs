@@ -1,13 +1,31 @@
 use std::cell::Cell;
 use std::cell::RefCell;
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::time::Duration;
 
 use led_core::rx::Stream;
 use led_core::{Action, Startup};
 use led_state::AppState;
 use tempfile::TempDir;
 use tokio::sync::oneshot;
+
+pub enum TestStep {
+    Do(Action),
+    WaitFor(fn(&AppState) -> bool),
+}
+
+impl From<Action> for TestStep {
+    fn from(a: Action) -> Self {
+        TestStep::Do(a)
+    }
+}
+
+pub struct TestResult {
+    pub state: Arc<AppState>,
+    pub file_path: Option<PathBuf>,
+}
 
 pub struct TestHarness {
     tmpdir: TempDir,
@@ -35,7 +53,8 @@ impl TestHarness {
         self
     }
 
-    pub fn run(self, actions: Vec<Action>) -> Arc<AppState> {
+    pub fn run(self, steps: Vec<TestStep>) -> TestResult {
+        let has_file = self.file_content.is_some();
         let file_content = self.file_content;
         let tmpdir = self.tmpdir.keep();
         let config_dir = tmpdir.join("config");
@@ -46,6 +65,7 @@ impl TestHarness {
             std::fs::write(&path, &content).expect("write test file");
             path
         });
+        let file_path = arg_path.clone();
 
         let start_dir = arg_path
             .as_ref()
@@ -89,16 +109,20 @@ impl TestHarness {
                         let stream = actions_in.clone();
                         let done = Rc::new(Cell::new(false));
                         let done2 = done.clone();
+                        let last_for_wait = last_state.clone();
                         tokio::task::spawn_local(async move {
-                            for action in actions {
-                                match action {
-                                    Action::Wait(ms) => {
-                                        std::thread::sleep(std::time::Duration::from_millis(ms));
-                                        for _ in 0..20 {
-                                            tokio::task::yield_now().await;
-                                        }
+                            // Auto-wait for file to open if one was provided
+                            if has_file {
+                                wait_for_condition(&last_for_wait, |s| s.active_buffer.is_some())
+                                    .await;
+                            }
+
+                            for step in steps {
+                                match step {
+                                    TestStep::Do(action) => stream.push(action),
+                                    TestStep::WaitFor(pred) => {
+                                        wait_for_condition(&last_for_wait, pred).await;
                                     }
-                                    other => stream.push(other),
                                 }
                             }
                             done2.set(true);
@@ -115,8 +139,24 @@ impl TestHarness {
             });
         });
 
-        let result = done_rx.recv().expect("test thread died");
+        let state = done_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("test timed out");
         std::mem::forget(handle);
-        result
+        TestResult { state, file_path }
+    }
+}
+
+async fn wait_for_condition(
+    state: &Rc<RefCell<Option<Arc<AppState>>>>,
+    pred: fn(&AppState) -> bool,
+) {
+    loop {
+        if let Some(ref s) = *state.borrow() {
+            if pred(s) {
+                return;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(1)).await;
     }
 }

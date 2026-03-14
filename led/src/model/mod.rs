@@ -10,7 +10,7 @@ use led_core::keys::{Keymap, Keys};
 use led_core::rx::Stream;
 use led_core::theme::Theme;
 use led_core::{Action, Alert, BufferId, PanelSlot};
-use led_state::{AppState, BufferState, EditKind};
+use led_state::{AppState, BufferState, EditKind, SaveState};
 use led_workspace::Workspace;
 
 use crate::Drivers;
@@ -289,6 +289,7 @@ fn handle_action(state: &mut AppState, action: Action) {
             if let Some(id) = state.active_buffer {
                 if let Some(buf) = state.buffers.get_mut(&id) {
                     close_group_on_move(buf);
+                    buf.save_state = SaveState::Saving;
                 }
             }
             state.save_request += 1;
@@ -305,6 +306,10 @@ fn with_buf(state: &mut AppState, viewport_height: usize, f: impl FnOnce(&mut Bu
             f(buf, viewport_height);
             buf.scroll_row =
                 edit::ensure_cursor_visible(buf.cursor_row, buf.scroll_row, viewport_height);
+            // Track save state: transition to Modified when doc becomes dirty
+            if buf.doc.dirty() && buf.save_state == SaveState::Clean {
+                buf.save_state = SaveState::Modified;
+            }
         }
     }
 }

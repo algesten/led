@@ -15,6 +15,14 @@ pub enum EditKind {
     Delete,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SaveState {
+    #[default]
+    Clean,
+    Modified,
+    Saving,
+}
+
 #[derive(Clone)]
 pub struct BufferState {
     pub id: BufferId,
@@ -27,6 +35,7 @@ pub struct BufferState {
     pub scroll_row: usize,
     pub tab_order: usize,
     pub last_edit_kind: Option<EditKind>,
+    pub save_state: SaveState,
 }
 
 impl fmt::Debug for BufferState {

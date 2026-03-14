@@ -14,10 +14,8 @@ pub fn watch(path: &Path) -> mpsc::Receiver<notify::Event> {
         Err(e) => log::warn!("watch failed: {:?}", e),
     };
 
-    let config = notify::Config::default()
-        .with_poll_interval(Duration::from_secs(1));
-    let mut watcher =
-        notify::PollWatcher::new(notify_cb, config).expect("start a watcher");
+    let config = notify::Config::default().with_poll_interval(Duration::from_secs(1));
+    let mut watcher = notify::PollWatcher::new(notify_cb, config).expect("start a watcher");
 
     watcher
         .watch(path, RecursiveMode::Recursive)
