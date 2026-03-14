@@ -155,7 +155,12 @@ fn render_tab_bar(state: &AppState, theme: &Theme, frame: &mut Frame, area: Rect
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| format!("[{}]", buf.id.0));
 
-        let label = format!(" {} ", name);
+        let dirty = buf.doc.dirty();
+        let label = if dirty {
+            format!(" {} \u{25CF} ", name)
+        } else {
+            format!(" {} ", name)
+        };
         let width = label.len() as u16;
 
         if x + width > area.x + area.width {

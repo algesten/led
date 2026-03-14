@@ -6,24 +6,34 @@ use std::sync::Arc;
 use led_config_file::ConfigFile;
 use led_core::keys::{Keymap, Keys};
 use led_core::theme::Theme;
-use led_core::{BufferId, Doc, PanelSlot, Startup};
+use led_core::{BufferId, Doc, DocId, PanelSlot, Startup};
 pub use led_workspace::Workspace;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EditKind {
+    Insert,
+    Delete,
+}
 
 #[derive(Clone)]
 pub struct BufferState {
     pub id: BufferId,
+    pub doc_id: DocId,
     pub doc: Arc<dyn Doc>,
     pub path: Option<PathBuf>,
     pub cursor_row: usize,
     pub cursor_col: usize,
+    pub cursor_col_affinity: usize,
     pub scroll_row: usize,
     pub tab_order: usize,
+    pub last_edit_kind: Option<EditKind>,
 }
 
 impl fmt::Debug for BufferState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("BufferState")
             .field("id", &self.id)
+            .field("doc_id", &self.doc_id)
             .field("path", &self.path)
             .field("cursor_row", &self.cursor_row)
             .field("cursor_col", &self.cursor_col)
@@ -51,6 +61,7 @@ pub struct AppState {
     pub buffers: HashMap<BufferId, BufferState>,
     pub active_buffer: Option<BufferId>,
     pub next_buffer_id: u64,
+    pub save_request: u64,
 }
 
 impl AppState {

@@ -8,7 +8,7 @@ mod watch;
 
 pub use alert::{Alert, AlertExt};
 pub use config::Startup;
-pub use doc::{Doc, TextDoc, UndoHistory};
+pub use doc::{Doc, EditOp, TextDoc, UndoGroup, UndoHistory};
 pub use watch::watch;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -74,6 +74,7 @@ pub enum Action {
 
     // Edit
     Undo,
+    Redo,
     SetMark,
     KillRegion,
     Yank,

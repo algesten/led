@@ -27,11 +27,25 @@ pub fn derived(state: Stream<Arc<AppState>>) -> Derived {
         .map(ConfigFileOut::ConfigDir)
         .stream();
 
-    let docstore_out = state
+    let open_out = state
         .filter_map(|s| s.startup.arg_path.clone())
         .dedupe()
         .map(|path| DocStoreOut::Open { path })
         .stream();
+
+    let save_out = state
+        .dedupe_by(|s| s.save_request)
+        .filter(|s| s.save_request > 0)
+        .filter_map(|s| {
+            let buf = s.buffers.get(&s.active_buffer?)?;
+            Some((buf.doc_id, buf.doc.clone()))
+        })
+        .map(|(id, doc)| DocStoreOut::Save { id, doc })
+        .stream();
+
+    let docstore_out: Stream<DocStoreOut> = Stream::new();
+    open_out.forward(&docstore_out);
+    save_out.forward(&docstore_out);
 
     Derived {
         ui,

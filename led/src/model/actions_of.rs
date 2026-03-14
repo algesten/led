@@ -13,48 +13,36 @@ use super::Mut;
 
 /// Derive actions from terminal input + state (for keymap context).
 pub fn actions_of(input: &Stream<TerminalInput>, state: &Stream<Arc<AppState>>) -> Stream<Mut> {
+    // Resize doesn't need state — extract it directly so it's never lost
+    let resize_s = input.filter_map(|i| match i {
+        TerminalInput::Resize(w, h) => Some(Mut::Resize(w, h)),
+        _ => None,
+    });
+
+    // Key events need the keymap from state
     let chord: Cell<Option<KeyCombo>> = Cell::new(None);
-
-    input
+    let key_input_s = input
+        .filter_map(|i| match i {
+            TerminalInput::Key(combo) => Some(combo),
+            _ => None,
+        })
         .sample_combine(state)
-        .filter_map(
-            move |(input, state)| match map_input(input, &state, &chord) {
-                Some(TerminalEvent::Action(a)) => Some(Mut::Action(a)),
-                Some(TerminalEvent::Resize(w, h)) => Some(Mut::Resize(w, h)),
-                None => None,
-            },
-        )
-        .stream()
+        .filter_map(move |(combo, state)| map_key(combo, &state, &chord))
+        .map(|a| Mut::Action(a));
+
+    resize_s.or(key_input_s)
 }
 
-enum TerminalEvent {
-    Action(Action),
-    Resize(u16, u16),
-}
-
-fn map_input(
-    input: TerminalInput,
-    state: &AppState,
-    chord: &Cell<Option<KeyCombo>>,
-) -> Option<TerminalEvent> {
-    let combo = match input {
-        TerminalInput::Key(combo) => combo,
-        TerminalInput::Resize(w, h) => return Some(TerminalEvent::Resize(w, h)),
-        _ => return None,
-    };
-
+fn map_key(combo: KeyCombo, state: &AppState, chord: &Cell<Option<KeyCombo>>) -> Option<Action> {
     let keymap = state.keymap.as_ref()?;
     let context = resolve_context(state);
 
     if let Some(prefix) = chord.take() {
-        if let Some(action) = keymap.lookup_chord(&prefix, &combo) {
-            return Some(TerminalEvent::Action(action));
-        }
-        return None;
+        return keymap.lookup_chord(&prefix, &combo);
     }
 
     match keymap.lookup(&combo, context) {
-        KeymapLookup::Action(action) => Some(TerminalEvent::Action(action)),
+        KeymapLookup::Action(action) => Some(action),
         KeymapLookup::ChordPrefix => {
             chord.set(Some(combo));
             None
@@ -62,7 +50,7 @@ fn map_input(
         KeymapLookup::Unbound => {
             if allow_char_insert(state) && !combo.ctrl && !combo.alt {
                 if let KeyCode::Char(c) = combo.code {
-                    return Some(TerminalEvent::Action(Action::InsertChar(c)));
+                    return Some(Action::InsertChar(c));
                 }
             }
             None

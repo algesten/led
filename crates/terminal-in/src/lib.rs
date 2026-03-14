@@ -21,6 +21,11 @@ pub fn driver() -> Stream<TerminalInput> {
 
     // OS thread: blocking crossterm reads → channel
     std::thread::spawn(move || {
+        // Emit initial terminal size
+        if let Ok((w, h)) = crossterm::terminal::size() {
+            let _ = tx.blocking_send(TerminalInput::Resize(w, h));
+        }
+
         loop {
             match crossterm::event::read() {
                 Ok(event) => {

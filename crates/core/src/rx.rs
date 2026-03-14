@@ -77,9 +77,9 @@ impl<T: 'static> Stream<T> {
     }
 
     /// Subscribe another pipe to this stream (fan-in).
-    pub fn or<'a, S2: 'static, F2: FnMut(&S2) -> Option<T> + 'static>(
+    pub fn or<S2: 'static, F2: FnMut(&S2) -> Option<T> + 'static>(
         &self,
-        pipe: Pipe<'a, S2, T, F2>,
+        pipe: Pipe<S2, T, F2>,
     ) -> Stream<T> {
         pipe.into(self);
         self.clone()
@@ -91,9 +91,9 @@ impl<T: Clone + 'static> Stream<T> {
     pub fn map<U: 'static>(
         &self,
         mut f: impl FnMut(T) -> U + 'static,
-    ) -> Pipe<'_, T, U, impl FnMut(&T) -> Option<U> + 'static> {
+    ) -> Pipe<T, U, impl FnMut(&T) -> Option<U> + 'static> {
         Pipe {
-            source: self,
+            source: self.clone(),
             f: move |t: &T| Some(f(t.clone())),
             _t: PhantomData,
         }
@@ -103,9 +103,9 @@ impl<T: Clone + 'static> Stream<T> {
     pub fn filter_map<U: 'static>(
         &self,
         mut f: impl FnMut(T) -> Option<U> + 'static,
-    ) -> Pipe<'_, T, U, impl FnMut(&T) -> Option<U> + 'static> {
+    ) -> Pipe<T, U, impl FnMut(&T) -> Option<U> + 'static> {
         Pipe {
-            source: self,
+            source: self.clone(),
             f: move |t: &T| f(t.clone()),
             _t: PhantomData,
         }
@@ -115,9 +115,9 @@ impl<T: Clone + 'static> Stream<T> {
     pub fn filter(
         &self,
         mut pred: impl FnMut(&T) -> bool + 'static,
-    ) -> Pipe<'_, T, T, impl FnMut(&T) -> Option<T> + 'static> {
+    ) -> Pipe<T, T, impl FnMut(&T) -> Option<T> + 'static> {
         Pipe {
-            source: self,
+            source: self.clone(),
             f: move |t: &T| {
                 if pred(t) { Some(t.clone()) } else { None }
             },
@@ -702,12 +702,9 @@ impl<T: Clone + 'static> MemoryStream<T> {
     pub fn map<U: 'static>(
         &self,
         mut f: impl FnMut(T) -> U + 'static,
-    ) -> Pipe<'_, T, U, impl FnMut(&T) -> Option<U> + 'static> {
-        // Delegate to the underlying stream for the pipe source.
-        // The replay happens via MemoryStream::on which is called by Pipe::into/on.
-        // However, Pipe stores &Stream<S> as source. We need to expose the inner stream.
+    ) -> Pipe<T, U, impl FnMut(&T) -> Option<U> + 'static> {
         Pipe {
-            source: &self.inner.stream,
+            source: self.inner.stream.clone(),
             f: move |t: &T| Some(f(t.clone())),
             _t: PhantomData,
         }
@@ -725,18 +722,18 @@ impl<T: Clone + 'static> MemoryStream<T> {
 /// single closure. Dynamic dispatch only at the `Stream` boundary (fan-out).
 ///
 /// All combinators take and produce owned values (`T -> U`).
-pub struct Pipe<'a, S: 'static, T, F> {
-    source: &'a Stream<S>,
+pub struct Pipe<S: 'static, T, F> {
+    source: Stream<S>,
     f: F,
     _t: PhantomData<T>,
 }
 
-impl<'a, S: 'static, T: 'static, F: FnMut(&S) -> Option<T> + 'static> Pipe<'a, S, T, F> {
+impl<S: 'static, T: 'static, F: FnMut(&S) -> Option<T> + 'static> Pipe<S, T, F> {
     /// Chain a map. `g` receives owned `T`, produces `U`.
     pub fn map<U: 'static>(
         self,
         mut g: impl FnMut(T) -> U + 'static,
-    ) -> Pipe<'a, S, U, impl FnMut(&S) -> Option<U> + 'static> {
+    ) -> Pipe<S, U, impl FnMut(&S) -> Option<U> + 'static> {
         let mut f = self.f;
         Pipe {
             source: self.source,
@@ -749,7 +746,7 @@ impl<'a, S: 'static, T: 'static, F: FnMut(&S) -> Option<T> + 'static> Pipe<'a, S
     pub fn filter_map<U: 'static>(
         self,
         mut g: impl FnMut(T) -> Option<U> + 'static,
-    ) -> Pipe<'a, S, U, impl FnMut(&S) -> Option<U> + 'static> {
+    ) -> Pipe<S, U, impl FnMut(&S) -> Option<U> + 'static> {
         let mut f = self.f;
         Pipe {
             source: self.source,
@@ -762,7 +759,7 @@ impl<'a, S: 'static, T: 'static, F: FnMut(&S) -> Option<T> + 'static> Pipe<'a, S
     pub fn filter(
         self,
         mut pred: impl FnMut(&T) -> bool + 'static,
-    ) -> Pipe<'a, S, T, impl FnMut(&S) -> Option<T> + 'static> {
+    ) -> Pipe<S, T, impl FnMut(&S) -> Option<T> + 'static> {
         let mut f = self.f;
         Pipe {
             source: self.source,
@@ -775,7 +772,7 @@ impl<'a, S: 'static, T: 'static, F: FnMut(&S) -> Option<T> + 'static> Pipe<'a, S
     pub fn inspect(
         self,
         mut g: impl FnMut(&T) + 'static,
-    ) -> Pipe<'a, S, T, impl FnMut(&S) -> Option<T> + 'static> {
+    ) -> Pipe<S, T, impl FnMut(&S) -> Option<T> + 'static> {
         let mut f = self.f;
         Pipe {
             source: self.source,
@@ -785,7 +782,7 @@ impl<'a, S: 'static, T: 'static, F: FnMut(&S) -> Option<T> + 'static> Pipe<'a, S
     }
 
     /// Chain dedupe. Suppresses consecutive equal values.
-    pub fn dedupe(self) -> Pipe<'a, S, T, impl FnMut(&S) -> Option<T> + 'static>
+    pub fn dedupe(self) -> Pipe<S, T, impl FnMut(&S) -> Option<T> + 'static>
     where
         T: PartialEq + Clone,
     {
@@ -809,7 +806,7 @@ impl<'a, S: 'static, T: 'static, F: FnMut(&S) -> Option<T> + 'static> Pipe<'a, S
     pub fn dedupe_by<K: PartialEq + 'static>(
         self,
         mut key_fn: impl FnMut(&T) -> K + 'static,
-    ) -> Pipe<'a, S, T, impl FnMut(&S) -> Option<T> + 'static> {
+    ) -> Pipe<S, T, impl FnMut(&S) -> Option<T> + 'static> {
         let mut f = self.f;
         let mut prev_key: Option<K> = None;
         Pipe {
@@ -827,10 +824,18 @@ impl<'a, S: 'static, T: 'static, F: FnMut(&S) -> Option<T> + 'static> Pipe<'a, S
         }
     }
 
+    /// Materialize into a stream, then sample-combine with another stream.
+    pub fn sample_combine<B: Clone + 'static>(self, sampler: &Stream<B>) -> Stream<(T, B)>
+    where
+        T: Clone,
+    {
+        self.stream().sample_combine(sampler)
+    }
+
     /// Merge with another pipe. Creates a Stream that both pipes push into.
-    pub fn or<'b, S2: 'static, F2: FnMut(&S2) -> Option<T> + 'static>(
+    pub fn or<S2: 'static, F2: FnMut(&S2) -> Option<T> + 'static>(
         self,
-        other: Pipe<'b, S2, T, F2>,
+        other: Pipe<S2, T, F2>,
     ) -> Stream<T> {
         let stream = Stream::new();
         self.into(&stream);
