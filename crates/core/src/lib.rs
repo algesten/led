@@ -103,4 +103,8 @@ pub enum Action {
     // Lifecycle
     Quit,
     Suspend,
+
+    // Test / headless
+    Wait(u64),
+    Resize(u16, u16),
 }

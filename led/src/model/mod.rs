@@ -58,9 +58,12 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Arc<AppState>> {
             Err(a) => Mut::alert(a),
         }));
 
+    let direct_actions_s = drivers.actions_in.map(|a| Mut::Action(a)).stream();
+
     workspace_s.forward(&muts);
     keymap_s.forward(&muts);
     actions_s.forward(&muts);
+    direct_actions_s.forward(&muts);
     buffers_s.forward(&muts);
     process_s.forward(&muts);
 
@@ -275,6 +278,11 @@ fn handle_action(state: &mut AppState, action: Action) {
                 buf.cursor_col_affinity = col;
             }
         }),
+
+        // ── Resize ──
+        Action::Resize(w, h) => {
+            state.viewport = (w, h);
+        }
 
         // ── Save ──
         Action::Save => {

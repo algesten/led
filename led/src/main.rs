@@ -5,19 +5,9 @@ use std::sync::Arc;
 use clap::Parser;
 use crossterm::event::{DisableBracketedPaste, DisableMouseCapture};
 use crossterm::terminal::{LeaveAlternateScreen, disable_raw_mode};
-use led_config_file::ConfigFile;
-use led_core::keys::Keys;
+use led_core::Startup;
 use led_core::rx::Stream;
-use led_core::theme::Theme;
-use led_core::{Alert, Startup};
-use led_state::{AppState, Workspace};
 use tokio::sync::oneshot;
-
-use crate::derived::derived;
-use crate::model::model;
-
-mod derived;
-mod model;
 
 #[derive(Parser)]
 #[command(name = "led", about = "A lightweight text editor")]
@@ -45,9 +35,15 @@ async fn main() {
             .unwrap_or_else(|| PathBuf::from("."))
     };
 
+    let config_dir = dirs::home_dir()
+        .unwrap_or_default()
+        .join(".config")
+        .join("led");
+
     let startup = Startup {
         arg_path,
         start_dir: Arc::new(start_dir),
+        config_dir,
     };
 
     let local = tokio::task::LocalSet::new();
@@ -55,7 +51,7 @@ async fn main() {
         .run_until(async {
             let (tx, rx) = oneshot::channel();
 
-            let _guards = run(startup, tx);
+            let (_state, _input_guard, _ui) = led::run(startup, Stream::new(), tx);
 
             let _ = rx.await;
         })
@@ -71,56 +67,4 @@ async fn main() {
         DisableBracketedPaste
     )
     .ok();
-}
-
-fn run(startup: Startup, tx: oneshot::Sender<()>) -> (led_terminal_in::InputGuard, led_ui::Ui) {
-    let init = AppState::new(startup);
-    let seed = Arc::new(init.clone());
-
-    // 1. Hoisted AppState
-    let state: Stream<Arc<AppState>> = Stream::new();
-
-    // 2. Derived
-    let d = derived(state.clone());
-
-    // 3. Drivers
-    let input_guard = led_terminal_in::setup_terminal();
-    let ui = led_ui::driver(d.ui);
-
-    let drivers = Drivers {
-        terminal_in: led_terminal_in::driver(),
-        workspace_in: led_workspace::driver(d.workspace_out),
-        docstore_in: led_docstore::driver(d.docstore_out),
-        config_keys_in: led_config_file::driver::<Keys>(d.config_file_out.clone()),
-        config_theme_in: led_config_file::driver::<Theme>(d.config_file_out),
-    };
-
-    // 4. Model
-    let real_state = model(drivers, init);
-
-    // 5. Hoist
-    real_state.forward(&state);
-
-    // 6. Seed — triggers derived → drivers → first events
-    state.push(seed);
-
-    // Signal quit
-    let mut tx = Some(tx);
-    state.on(move |s: &Arc<AppState>| {
-        if s.quit {
-            if let Some(tx) = tx.take() {
-                let _ = tx.send(());
-            }
-        }
-    });
-
-    (input_guard, ui)
-}
-
-pub struct Drivers {
-    pub terminal_in: Stream<led_terminal_in::TerminalInput>,
-    pub workspace_in: Stream<Workspace>,
-    pub docstore_in: Stream<Result<led_docstore::DocStoreIn, Alert>>,
-    pub config_keys_in: Stream<Result<ConfigFile<Keys>, Alert>>,
-    pub config_theme_in: Stream<Result<ConfigFile<Theme>, Alert>>,
 }

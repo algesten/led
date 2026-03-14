@@ -9,4 +9,7 @@ pub struct Startup {
     /// Directory derived from the command line, or the directory
     /// where the binary started.
     pub start_dir: Arc<PathBuf>,
+
+    /// Config directory (e.g. ~/.config/led).
+    pub config_dir: PathBuf,
 }

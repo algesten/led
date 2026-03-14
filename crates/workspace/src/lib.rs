@@ -7,8 +7,6 @@ use led_core::Startup;
 use led_core::rx::Stream;
 use tokio::sync::mpsc;
 
-const CONFIG_DIR: &str = ".config";
-const LED_DIR: &str = "led";
 const GIT_DIR: &str = ".git";
 const PRIMARY_DIR: &str = "primary";
 
@@ -39,10 +37,7 @@ pub fn driver(out: Stream<Arc<Startup>>) -> Stream<Workspace> {
 
             let root = find_git_root(&dir);
 
-            let config = dirs::home_dir()
-                .unwrap_or_default()
-                .join(CONFIG_DIR)
-                .join(LED_DIR);
+            let config = startup.config_dir.clone();
 
             let primary = match try_become_primary(&config, &root) {
                 Some(lock_file) => {
