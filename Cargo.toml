@@ -1,18 +1,18 @@
 [workspace]
 resolver = "2"
-members = ["led", "crates/config-file", "crates/core", "crates/state", "crates/input", "crates/storage", "crates/workspace", "crates/ui"]
+members = ["led", "crates/config-file", "crates/core", "crates/state", "crates/terminal-in", "crates/storage", "crates/workspace", "crates/ui"]
 
 [workspace.dependencies]
 led-config-file = { path = "crates/config-file" }
 led-core = { path = "crates/core" }
 led-state = { path = "crates/state" }
-led-input = { path = "crates/input" }
+led-terminal-in = { path = "crates/terminal-in" }
 led-storage = { path = "crates/storage" }
 led-workspace = { path = "crates/workspace" }
 led-ui = { path = "crates/ui" }
 
 clap = { version = "4.5.60", features = ["derive"] }
-crossterm = { version = "0.29", features = ["event-stream"] }
+crossterm = { version = "0.29" }
 dirs = "6"
 libc = "0.2"
 log = "0.4"
@@ -21,7 +21,7 @@ pin-project-lite = "0.2"
 ratatui = "0.30"
 serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["macros", "sync", "time", "rt-multi-thread", "fs"] }
-tokio-stream = { version = "0.1.18", features = ["sync"] }
+# tokio-stream = { version = "0.1.18", features = ["sync"] }
 tokio-util = "0.7.18"
 toml = "0.8"
 

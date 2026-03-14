@@ -1,22 +1,16 @@
 use std::io;
 
-use tokio_stream::Stream;
-
 mod alert;
 mod config;
 mod doc;
-mod ext;
-mod fanout;
 pub mod keys;
+pub mod rx;
 pub mod theme;
 mod watch;
 
 pub use alert::{Alert, AlertExt};
 pub use config::Startup;
 pub use doc::{Doc, TextDoc};
-pub use ext::StreamOpsExt;
-pub use ext::{Combine, Dedupe, Flatten, Merge, Reduce, SampleCombine};
-pub use fanout::{FanoutStream, FanoutStreamExt, LatestStream};
 pub use watch::watch;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -34,9 +28,6 @@ pub enum PanelSlot {
     StatusBar,
     Overlay,
 }
-
-pub trait AStream<T>: Stream<Item = T> + Send + 'static {}
-impl<S, T> AStream<T> for S where S: Stream<Item = T> + Send + 'static {}
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]

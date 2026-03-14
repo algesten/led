@@ -5,7 +5,6 @@ edition = "2024"
 
 [dependencies]
 led-core = { workspace = true }
-tokio-stream = { workspace = true }
 tokio = { workspace = true }
 dirs = { workspace = true }
 libc = { workspace = true }

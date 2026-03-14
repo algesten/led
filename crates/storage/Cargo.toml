@@ -8,4 +8,3 @@ led-core = { workspace = true }
 log = { workspace = true }
 notify = { workspace = true }
 tokio = { workspace = true }
-tokio-stream = { workspace = true }

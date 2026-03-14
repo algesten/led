@@ -2,11 +2,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use led_core::keys::Keys;
+use led_core::rx::Stream;
 use led_core::theme::Theme;
-use led_core::{AStream, Alert, AlertExt, FanoutStreamExt, StreamOpsExt, watch};
-use tokio::fs;
-use tokio_stream::StreamExt;
-use tokio_stream::wrappers::ReceiverStream;
+use led_core::{Alert, AlertExt, watch};
+use tokio::sync::mpsc;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ConfigFileOut {
@@ -31,62 +30,84 @@ impl<File: TomlFile + PartialEq> PartialEq for ConfigFile<File> {
     }
 }
 
-pub trait TomlFile: serde::de::DeserializeOwned + Send + 'static {
+pub trait TomlFile: serde::de::DeserializeOwned + Send + Sync + 'static {
     fn default_toml() -> &'static str;
     fn file_name() -> &'static str;
 }
 
-// ============================================================================
-// Driver implementation
-// ============================================================================
+/// Start a config-file driver. Takes a stream of commands, returns a stream of results.
+pub fn driver<F: TomlFile>(out: Stream<ConfigFileOut>) -> Stream<Result<ConfigFile<F>, Alert>> {
+    let stream: Stream<Result<ConfigFile<F>, Alert>> = Stream::new();
+    let (cmd_tx, mut cmd_rx) = mpsc::channel::<ConfigFileOut>(64);
+    let (result_tx, mut result_rx) = mpsc::channel::<Result<ConfigFile<F>, Alert>>(64);
 
-pub fn driver<F: TomlFile>(
-    out: impl AStream<ConfigFileOut>,
-) -> impl AStream<Result<ConfigFile<F>, Alert>> {
-    let out = out.broadcast();
+    // Bridge out: rx::Stream → channel
+    out.on(move |cmd: &ConfigFileOut| {
+        cmd_tx.try_send(cmd.clone()).ok();
+    });
 
-    // All ConfigDir
-    let config_s = out
-        .latest()
-        .filter_map(|o| match o {
-            ConfigFileOut::ConfigDir(v) => Some(v),
-            _ => None,
-        })
-        .broadcast();
+    // Async driver task
+    tokio::spawn(async move {
+        let mut config_dir: Option<ConfigDir> = None;
+        let (watch_fwd_tx, mut watch_fwd_rx) = mpsc::channel::<()>(16);
 
-    // Watcher for ConfigDir
-    let watch_s = config_s
-        .latest()
-        .map(|c| watch(&c.config))
-        .map(ReceiverStream::new)
-        .flatten()
-        .map(|_| ());
+        loop {
+            tokio::select! {
+                maybe_cmd = cmd_rx.recv() => {
+                    let Some(cmd) = maybe_cmd else { break };
+                    match cmd {
+                        ConfigFileOut::ConfigDir(dir) => {
+                            if config_dir.as_ref().map(|d| &d.config) != Some(&dir.config) {
+                                let mut watch_rx = watch(&dir.config);
+                                let fwd = watch_fwd_tx.clone();
+                                tokio::spawn(async move {
+                                    while let Some(_event) = watch_rx.recv().await {
+                                        let _ = fwd.send(()).await;
+                                    }
+                                });
+                            }
+                            config_dir = Some(dir);
+                            if let Some(ref dir) = config_dir {
+                                read_and_send::<F>(dir, &result_tx).await;
+                            }
+                        }
+                        ConfigFileOut::Persist => {}
+                    }
+                }
+                Some(()) = watch_fwd_rx.recv() => {
+                    if let Some(ref dir) = config_dir {
+                        read_and_send::<F>(dir, &result_tx).await;
+                    }
+                }
+            }
+        }
+    });
 
-    let new_s = config_s.latest().map(|_| ());
+    // Bridge in: channel → rx::Stream
+    let s = stream.clone();
+    tokio::task::spawn_local(async move {
+        while let Some(v) = result_rx.recv().await {
+            s.push(v);
+        }
+    });
 
-    // Trigger for re-reading config
-    let trig_s =
-        // watcher or new incoming file
-        watch_s.or(new_s);
-
-    // On trigger, read the config
-    let read_s = trig_s
-        // Whatever the config_s is when the trigger comes
-        .sample_combine(config_s.latest())
-        .map(|(_, c)| c)
-        .then(read_file);
-
-    read_s
+    stream
 }
 
-async fn read_file<F: TomlFile>(c: ConfigDir) -> Result<ConfigFile<F>, Alert> {
+async fn read_and_send<F: TomlFile>(
+    dir: &ConfigDir,
+    tx: &mpsc::Sender<Result<ConfigFile<F>, Alert>>,
+) {
+    let result = read_file::<F>(dir);
+    let _ = tx.send(result).await;
+}
+
+fn read_file<F: TomlFile>(c: &ConfigDir) -> Result<ConfigFile<F>, Alert> {
     let file_path = c.config.join(F::file_name());
 
-    let toml = fs::read_to_string(&file_path)
-        .await
-        .unwrap_or_else(|_| F::default_toml().to_string());
+    let toml =
+        std::fs::read_to_string(&file_path).unwrap_or_else(|_| F::default_toml().to_string());
 
-    // Report error in parsing as info since the user might have screwed up the format
     let file: F = toml::from_str(&toml).as_info()?;
 
     Ok(ConfigFile {

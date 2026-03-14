@@ -1,6 +1,5 @@
 use std::io;
 use std::path::PathBuf;
-use std::pin::Pin;
 use std::sync::Arc;
 
 use clap::Parser;
@@ -8,15 +7,15 @@ use crossterm::event::{DisableBracketedPaste, DisableMouseCapture};
 use crossterm::terminal::{LeaveAlternateScreen, disable_raw_mode};
 use led_config_file::ConfigFile;
 use led_core::keys::Keys;
+use led_core::rx::Stream;
 use led_core::theme::Theme;
-use led_core::{AStream, Alert, FanoutStreamExt, Startup};
-use led_input::TerminalInput;
-use led_state::AppState;
-use led_workspace::Workspace;
-use tokio::sync;
-use tokio_stream::StreamExt;
+use led_core::{Alert, Startup};
+use led_state::{AppState, Workspace};
+use led_terminal_in::InputGuard;
+use led_ui::Ui;
+use tokio::sync::oneshot;
 
-use crate::derived::Derived;
+use crate::derived::derived;
 use crate::model::model;
 
 mod derived;
@@ -29,7 +28,7 @@ struct Cli {
     path: Option<String>,
 }
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() {
     let cli = Cli::parse();
 
@@ -38,7 +37,6 @@ async fn main() {
         std::fs::canonicalize(&path).unwrap_or(path)
     });
 
-    // Compute starting directory
     let start_dir: PathBuf = if arg_path.as_ref().map_or(false, |p| p.is_dir()) {
         arg_path.clone().unwrap()
     } else {
@@ -54,50 +52,16 @@ async fn main() {
         start_dir: Arc::new(start_dir),
     };
 
-    let state = AppState::new(startup);
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (tx, rx) = oneshot::channel();
 
-    // Channel to "hoist" the state output from Model as
-    // input into Derived.
-    let (state_tx, _rx) = sync::broadcast::channel(10);
+            run(startup, tx);
 
-    // Derived makes output to Drivers
-    let derived = Derived::new(&state_tx);
-
-    // UI driver: renders latest state to the terminal.
-    let _ui = led_ui::driver(state_tx.latest());
-
-    // Seed the hoisting channel so Derived and UI have an initial state
-    // to work with. Without this, the system deadlocks: Derived waits for
-    // state, drivers wait for Derived, model waits for drivers.
-    state_tx.send(Arc::new(state.clone())).ok();
-
-    // Drivers is the input from the drivers
-    let drivers = {
-        let f = led_config_file::driver(derived.config_file_out.one_by_one());
-        let t = led_config_file::driver(derived.config_file_out.one_by_one());
-
-        Drivers {
-            workspace: Box::pin(led_workspace::driver(derived.workspace)),
-            config_file_keys: Box::pin(f),
-            config_file_theme: Box::pin(t),
-            storage: Box::pin(led_storage::driver(derived.storage)),
-            input: Box::pin(led_input::driver()),
-        }
-    };
-
-    // And model is a reducer that takes input from drivers to make new state.
-    let mut state_s_real = model(drivers, state);
-
-    // Hoisting loop.
-    while let Some(v) = state_s_real.next().await {
-        let quit = v.quit;
-        if let Err(e) = state_tx.send(v) {
-            panic!("State hoist error: {}", e);
-        }
-        if quit {
-            break;
-        }
-    }
+            let _ = rx.await;
+        })
+        .await;
 
     // Restore terminal state on exit.
     disable_raw_mode().ok();
@@ -111,10 +75,50 @@ async fn main() {
     .ok();
 }
 
+fn run(startup: Startup, tx: oneshot::Sender<()>) {
+    let init = AppState::new(startup);
+
+    // 1. Hoisted AppState
+    let state: Stream<Arc<AppState>> = Stream::new();
+
+    // 2. Derived
+    let d = derived(state.clone());
+
+    // 3. Drivers
+
+    let drivers = Drivers {
+        input_guard: led_terminal_in::setup_terminal(),
+        terminal_in: led_terminal_in::driver(),
+        workspace_in: led_workspace::driver(d.workspace_out),
+        storage_in: led_storage::driver(d.storage_out),
+        config_keys_in: led_config_file::driver::<Keys>(d.config_file_out.clone()),
+        config_theme_in: led_config_file::driver::<Theme>(d.config_file_out),
+        ui: led_ui::driver(d.ui),
+    };
+
+    // 4. Model
+    let real_state = model(drivers, init);
+
+    // 5. Hoist
+    real_state.forward(&state);
+
+    // Signal quit
+    let mut tx = Some(tx);
+    state.on(move |s: &Arc<AppState>| {
+        if s.quit {
+            if let Some(tx) = tx.take() {
+                let _ = tx.send(());
+            }
+        }
+    });
+}
+
 pub struct Drivers {
-    workspace: Pin<Box<dyn AStream<Workspace> + Send>>,
-    config_file_keys: Pin<Box<dyn AStream<Result<ConfigFile<Keys>, Alert>>>>,
-    config_file_theme: Pin<Box<dyn AStream<Result<ConfigFile<Theme>, Alert>>>>,
-    storage: Pin<Box<dyn AStream<Result<led_storage::StorageIn, Alert>>>>,
-    input: Pin<Box<dyn AStream<TerminalInput>>>,
+    pub input_guard: InputGuard,
+    pub terminal_in: Stream<led_terminal_in::TerminalInput>,
+    pub workspace_in: Stream<Workspace>,
+    pub storage_in: Stream<Result<led_storage::StorageIn, Alert>>,
+    pub config_keys_in: Stream<Result<ConfigFile<Keys>, Alert>>,
+    pub config_theme_in: Stream<Result<ConfigFile<Theme>, Alert>>,
+    pub ui: Ui,
 }

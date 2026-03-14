@@ -36,7 +36,7 @@ impl fmt::Debug for BufferState {
 #[derive(Debug, Clone, Default)]
 pub struct AppState {
     pub startup: Arc<Startup>,
-    pub workspace: Option<Workspace>,
+    pub workspace: Option<Arc<Workspace>>,
     pub config_keys: Option<ConfigFile<Keys>>,
     pub config_theme: Option<ConfigFile<Theme>>,
     pub keymap: Option<Arc<Keymap>>,

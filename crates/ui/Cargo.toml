@@ -10,4 +10,3 @@ led-state = { workspace = true }
 log = { workspace = true }
 ratatui = { workspace = true }
 tokio = { workspace = true }
-tokio-stream = { workspace = true }

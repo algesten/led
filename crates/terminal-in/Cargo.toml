@@ -1,5 +1,5 @@
 [package]
-name = "led-input"
+name = "led-terminal-in"
 version = "0.1.0"
 edition = "2024"
 
@@ -8,5 +8,4 @@ crossterm = { workspace = true }
 led-core = { workspace = true }
 log = { workspace = true }
 tokio = { workspace = true }
-tokio-stream = { workspace = true }
 tokio-util = { workspace = true }

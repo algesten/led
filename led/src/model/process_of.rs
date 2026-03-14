@@ -1,36 +1,44 @@
 use std::io;
 use std::sync::Arc;
 
-use led_core::{AStream, FanoutStreamExt, StreamOpsExt};
+use led_core::rx::Stream;
 use led_state::AppState;
-use tokio_stream::StreamExt;
 
 use super::Mut;
 
-/// Watches AppState for one-shot flags, performs the side effect,
-/// and emits Muts to clear the flag.
-pub fn process_of(state: impl AStream<Arc<AppState>>) -> impl AStream<Mut> {
-    let state_tx = state.broadcast();
+/// Derive suspend/resume side effects from state.
+pub fn process_of(state: &Stream<Arc<AppState>>) -> Stream<Mut> {
+    // Suspend: perform terminal restore/re-init, then clear the flag
+    let suspend_s = state
+        .filter_map(|s| {
+            if s.suspend {
+                suspend();
+                Some(Mut::Suspend(false))
+            } else {
+                None
+            }
+        })
+        .stream();
 
-    let redraw_on_resume_suspend = state_tx
-        .one_by_one()
-        .map(|a| a.suspend)
-        .reduce((false, false), |p, c| (p.1, c))
-        .dedupe()
-        .filter(|(p, c)| *p && !c)
-        .sample_combine(state_tx.latest())
-        .map(|(_, s)| Mut::ForceRedraw(s.force_redraw + 1));
+    // Force redraw after resuming from suspend (true→false transition)
+    let redraw_s = state
+        .map(|s| (s.suspend, s.force_redraw))
+        .fold((false, false, 0u64), |(_, prev_suspend, _), (suspend, redraw)| {
+            (prev_suspend, suspend, redraw)
+        })
+        .filter_map(|(prev, curr, redraw)| {
+            if prev && !curr {
+                Some(Mut::ForceRedraw(redraw + 1))
+            } else {
+                None
+            }
+        })
+        .stream();
 
-    let unsuspend = state_tx.one_by_one().filter_map(|s| {
-        if s.suspend {
-            suspend();
-            Some(Mut::Suspend(false))
-        } else {
-            None
-        }
-    });
-
-    redraw_on_resume_suspend.or(unsuspend)
+    let merged = Stream::new();
+    suspend_s.forward(&merged);
+    redraw_s.forward(&merged);
+    merged
 }
 
 fn suspend() {

@@ -17,6 +17,7 @@ impl Clone for Box<dyn Doc> {
     }
 }
 
+#[derive(Clone)]
 pub struct TextDoc {
     rope: Rope,
 }

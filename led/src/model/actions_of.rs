@@ -4,27 +4,32 @@ use std::sync::Arc;
 use crossterm::event::KeyCode;
 use led_core::PanelSlot;
 use led_core::keys::{KeyCombo, KeymapLookup};
-use led_core::{AStream, Action, StreamOpsExt};
-use led_input::TerminalInput;
+use led_core::rx::Stream;
+use led_core::Action;
+use led_terminal_in::TerminalInput;
 use led_state::AppState;
-use tokio_stream::StreamExt;
 
-/// Events produced from terminal input: resolved actions or terminal-level events.
-#[derive(Debug, Clone)]
-pub enum TerminalEvent {
-    Action(Action),
-    Resize(u16, u16),
-}
+use super::Mut;
 
+/// Derive actions from terminal input + state (for keymap context).
 pub fn actions_of(
-    state: impl AStream<Arc<AppState>>,
-    input: impl AStream<TerminalInput>,
-) -> impl AStream<TerminalEvent> {
+    input: &Stream<TerminalInput>,
+    state: &Stream<Arc<AppState>>,
+) -> Stream<Mut> {
     let chord: Cell<Option<KeyCombo>> = Cell::new(None);
 
-    input
-        .sample_combine(state)
-        .filter_map(move |(input, state)| map_input(input, &state, &chord))
+    input.sample_combine(state).filter_map(move |(input, state)| {
+        match map_input(input, &state, &chord) {
+            Some(TerminalEvent::Action(a)) => Some(Mut::Action(a)),
+            Some(TerminalEvent::Resize(w, h)) => Some(Mut::Resize(w, h)),
+            None => None,
+        }
+    }).stream()
+}
+
+enum TerminalEvent {
+    Action(Action),
+    Resize(u16, u16),
 }
 
 fn map_input(
@@ -39,30 +44,22 @@ fn map_input(
     };
 
     let keymap = state.keymap.as_ref()?;
-
-    // Determine context from current focus
     let context = resolve_context(state);
 
-    // Handle chord state: if we're waiting for a chord's second key
     if let Some(prefix) = chord.take() {
         if let Some(action) = keymap.lookup_chord(&prefix, &combo) {
             return Some(TerminalEvent::Action(action));
         }
-        // Unknown chord second key — swallow it
         return None;
     }
 
-    // Main keymap lookup
     match keymap.lookup(&combo, context) {
         KeymapLookup::Action(action) => Some(TerminalEvent::Action(action)),
-
         KeymapLookup::ChordPrefix => {
             chord.set(Some(combo));
             None
         }
-
         KeymapLookup::Unbound => {
-            // Fallback: insert printable characters when in an insertable context
             if allow_char_insert(state) && !combo.ctrl && !combo.alt {
                 if let KeyCode::Char(c) = combo.code {
                     return Some(TerminalEvent::Action(Action::InsertChar(c)));
@@ -73,25 +70,18 @@ fn map_input(
     }
 }
 
-/// Determine the keymap context name from the current focus and active component.
 fn resolve_context(state: &AppState) -> Option<&'static str> {
     match state.focus {
-        PanelSlot::Side => {
-            // TODO: if state.file_search.active { Some("file_search") } else
-            Some("browser")
-        }
+        PanelSlot::Side => Some("browser"),
         PanelSlot::Main => None,
         PanelSlot::StatusBar => None,
         PanelSlot::Overlay => None,
     }
 }
 
-/// Whether the current focus allows unbound keys to be inserted as characters.
 fn allow_char_insert(state: &AppState) -> bool {
     match state.focus {
-        PanelSlot::Main => true, // TODO: gate on state.has_tabs() once tabs exist
-        PanelSlot::StatusBar => false, // TODO: allow when find-file input is active
-        PanelSlot::Side => false, // TODO: allow when file search query is active
-        PanelSlot::Overlay => false,
+        PanelSlot::Main => true,
+        _ => false,
     }
 }

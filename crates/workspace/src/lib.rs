@@ -3,58 +3,78 @@ use std::hash::DefaultHasher;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use led_core::AStream;
-use tokio_stream::StreamExt;
+use led_core::Startup;
+use led_core::rx::Stream;
+use tokio::sync::mpsc;
 
 const CONFIG_DIR: &str = ".config";
 const LED_DIR: &str = "led";
 const GIT_DIR: &str = ".git";
 const PRIMARY_DIR: &str = "primary";
 
-pub struct StartDir(pub Arc<PathBuf>);
-
-#[derive(Clone, Default, Debug)]
+#[derive(Clone, Default, Debug, PartialEq)]
 pub struct Workspace {
-    /// Workspace root. The project that is open.
     pub root: PathBuf,
-
-    /// Path to directory holding config.
     pub config: PathBuf,
-
-    /// Whether this is the primary editor (persisting workspace changes etc),
-    /// or secondary that just edits files.
     pub primary: bool,
 }
 
-pub fn driver(input: impl AStream<StartDir>) -> impl AStream<Workspace> {
-    input.map(|dir| {
-        let dir = fs::canonicalize(&*dir.0).unwrap_or_else(|_| dir.0.as_ref().clone());
+/// Start the workspace driver. Takes a stream of Startup commands,
+/// returns a stream of computed Workspaces.
+pub fn driver(out: Stream<Arc<Startup>>) -> Stream<Workspace> {
+    let stream: Stream<Workspace> = Stream::new();
+    let (cmd_tx, mut cmd_rx) = mpsc::channel::<Arc<Startup>>(64);
+    let (result_tx, mut result_rx) = mpsc::channel::<Workspace>(64);
 
-        let root = find_git_root(&dir);
+    // Bridge out: rx::Stream → channel
+    out.on(move |cmd: &Arc<Startup>| {
+        cmd_tx.try_send(cmd.clone()).ok();
+    });
 
-        let config = dirs::home_dir()
-            .unwrap_or_default()
-            .join(CONFIG_DIR)
-            .join(LED_DIR);
+    // Async task: compute workspace
+    tokio::spawn(async move {
+        while let Some(startup) = cmd_rx.recv().await {
+            let dir = fs::canonicalize(&*startup.start_dir)
+                .unwrap_or_else(|_| startup.start_dir.as_ref().clone());
 
-        let editor = match try_become_primary(&config, &root) {
-            Some(lock_file) => {
-                // Keep the lock alive for the process lifetime.
-                std::mem::forget(lock_file);
-                true
+            let root = find_git_root(&dir);
+
+            let config = dirs::home_dir()
+                .unwrap_or_default()
+                .join(CONFIG_DIR)
+                .join(LED_DIR);
+
+            let primary = match try_become_primary(&config, &root) {
+                Some(lock_file) => {
+                    std::mem::forget(lock_file);
+                    true
+                }
+                None => false,
+            };
+
+            let workspace = Workspace {
+                root,
+                config,
+                primary,
+            };
+
+            if result_tx.send(workspace).await.is_err() {
+                break;
             }
-            None => false,
-        };
-
-        Workspace {
-            root,
-            config,
-            primary: editor,
         }
-    })
+    });
+
+    // Bridge in: channel → rx::Stream
+    let s = stream.clone();
+    tokio::task::spawn_local(async move {
+        while let Some(v) = result_rx.recv().await {
+            s.push(v);
+        }
+    });
+
+    stream
 }
 
-/// The closest git root, which is also the workspace
 fn find_git_root(start: &Path) -> PathBuf {
     let mut dir = start.to_path_buf();
     let mut root = None;
@@ -70,11 +90,6 @@ fn find_git_root(start: &Path) -> PathBuf {
     root.unwrap_or_else(|| start.to_path_buf())
 }
 
-/// Try to acquire the primary-editor lock for this workspace.
-///
-/// Returns `Some(File)` if we became primary (the caller must keep the File
-/// alive for the whole process lifetime — dropping it releases the lock).
-/// Returns `None` if another editor already holds the lock.
 fn try_become_primary(config: &Path, root: &Path) -> Option<File> {
     use std::hash::{Hash, Hasher};
     use std::os::unix::io::AsRawFd;

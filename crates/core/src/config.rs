@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone, PartialEq)]
 pub struct Startup {
     /// Argument given on the command line, if any.
     pub arg_path: Option<PathBuf>,
