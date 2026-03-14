@@ -11,8 +11,6 @@ use led_core::rx::Stream;
 use led_core::theme::Theme;
 use led_core::{Alert, Startup};
 use led_state::{AppState, Workspace};
-use led_terminal_in::InputGuard;
-use led_ui::Ui;
 use tokio::sync::oneshot;
 
 use crate::derived::derived;
@@ -57,7 +55,7 @@ async fn main() {
         .run_until(async {
             let (tx, rx) = oneshot::channel();
 
-            run(startup, tx);
+            let _guards = run(startup, tx);
 
             let _ = rx.await;
         })
@@ -75,8 +73,9 @@ async fn main() {
     .ok();
 }
 
-fn run(startup: Startup, tx: oneshot::Sender<()>) {
+fn run(startup: Startup, tx: oneshot::Sender<()>) -> (led_terminal_in::InputGuard, led_ui::Ui) {
     let init = AppState::new(startup);
+    let seed = Arc::new(init.clone());
 
     // 1. Hoisted AppState
     let state: Stream<Arc<AppState>> = Stream::new();
@@ -85,15 +84,15 @@ fn run(startup: Startup, tx: oneshot::Sender<()>) {
     let d = derived(state.clone());
 
     // 3. Drivers
+    let input_guard = led_terminal_in::setup_terminal();
+    let ui = led_ui::driver(d.ui);
 
     let drivers = Drivers {
-        input_guard: led_terminal_in::setup_terminal(),
         terminal_in: led_terminal_in::driver(),
         workspace_in: led_workspace::driver(d.workspace_out),
-        storage_in: led_storage::driver(d.storage_out),
+        docstore_in: led_docstore::driver(d.docstore_out),
         config_keys_in: led_config_file::driver::<Keys>(d.config_file_out.clone()),
         config_theme_in: led_config_file::driver::<Theme>(d.config_file_out),
-        ui: led_ui::driver(d.ui),
     };
 
     // 4. Model
@@ -101,6 +100,9 @@ fn run(startup: Startup, tx: oneshot::Sender<()>) {
 
     // 5. Hoist
     real_state.forward(&state);
+
+    // 6. Seed — triggers derived → drivers → first events
+    state.push(seed);
 
     // Signal quit
     let mut tx = Some(tx);
@@ -111,14 +113,14 @@ fn run(startup: Startup, tx: oneshot::Sender<()>) {
             }
         }
     });
+
+    (input_guard, ui)
 }
 
 pub struct Drivers {
-    pub input_guard: InputGuard,
     pub terminal_in: Stream<led_terminal_in::TerminalInput>,
     pub workspace_in: Stream<Workspace>,
-    pub storage_in: Stream<Result<led_storage::StorageIn, Alert>>,
+    pub docstore_in: Stream<Result<led_docstore::DocStoreIn, Alert>>,
     pub config_keys_in: Stream<Result<ConfigFile<Keys>, Alert>>,
     pub config_theme_in: Stream<Result<ConfigFile<Theme>, Alert>>,
-    pub ui: Ui,
 }

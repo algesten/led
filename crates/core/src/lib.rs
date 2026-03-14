@@ -1,5 +1,3 @@
-use std::io;
-
 mod alert;
 mod config;
 mod doc;
@@ -10,15 +8,14 @@ mod watch;
 
 pub use alert::{Alert, AlertExt};
 pub use config::Startup;
-pub use doc::{Doc, TextDoc};
+pub use doc::{Doc, TextDoc, UndoHistory};
 pub use watch::watch;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct BufferId(pub u64);
 
-pub trait WriteContent: Send + Sync + 'static {
-    fn write_to(&self, writer: &mut dyn io::Write) -> io::Result<()>;
-}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct DocId(pub u64);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PanelSlot {

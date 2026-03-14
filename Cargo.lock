@@ -760,8 +760,8 @@ dependencies = [
  "crossterm",
  "led-config-file",
  "led-core",
+ "led-docstore",
  "led-state",
- "led-storage",
  "led-terminal-in",
  "led-ui",
  "led-workspace",
@@ -794,6 +794,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "led-docstore"
+version = "0.1.0"
+dependencies = [
+ "led-core",
+ "log",
+ "notify",
+ "tokio",
+]
+
+[[package]]
 name = "led-state"
 version = "0.1.0"
 dependencies = [
@@ -801,16 +811,6 @@ dependencies = [
  "led-core",
  "led-workspace",
  "log",
-]
-
-[[package]]
-name = "led-storage"
-version = "0.1.0"
-dependencies = [
- "led-core",
- "log",
- "notify",
- "tokio",
 ]
 
 [[package]]

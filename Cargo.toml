@@ -1,13 +1,13 @@
 [workspace]
 resolver = "2"
-members = ["led", "crates/config-file", "crates/core", "crates/state", "crates/terminal-in", "crates/storage", "crates/workspace", "crates/ui"]
+members = ["led", "crates/config-file", "crates/core", "crates/state", "crates/terminal-in", "crates/docstore", "crates/workspace", "crates/ui"]
 
 [workspace.dependencies]
 led-config-file = { path = "crates/config-file" }
 led-core = { path = "crates/core" }
 led-state = { path = "crates/state" }
 led-terminal-in = { path = "crates/terminal-in" }
-led-storage = { path = "crates/storage" }
+led-docstore = { path = "crates/docstore" }
 led-workspace = { path = "crates/workspace" }
 led-ui = { path = "crates/ui" }
 

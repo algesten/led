@@ -41,7 +41,7 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Arc<AppState>> {
         .stream();
 
     let actions_s = actions_of(&drivers.terminal_in, &state);
-    let buffers_s = buffers_of(&drivers.storage_in, &state);
+    let buffers_s = buffers_of(&drivers.docstore_in, &state);
     let process_s = process_of(&state);
 
     // ── 2. Build up muts from driver input and derived streams ──

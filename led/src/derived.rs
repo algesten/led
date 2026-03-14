@@ -3,13 +3,13 @@ use std::sync::Arc;
 use led_config_file::{ConfigDir, ConfigFileOut};
 use led_core::Startup;
 use led_core::rx::Stream;
+use led_docstore::DocStoreOut;
 use led_state::AppState;
-use led_storage::StorageOut;
 
 pub struct Derived {
     pub ui: Stream<Arc<AppState>>,
     pub workspace_out: Stream<Arc<Startup>>,
-    pub storage_out: Stream<StorageOut>,
+    pub docstore_out: Stream<DocStoreOut>,
     pub config_file_out: Stream<ConfigFileOut>,
 }
 
@@ -27,16 +27,16 @@ pub fn derived(state: Stream<Arc<AppState>>) -> Derived {
         .map(ConfigFileOut::ConfigDir)
         .stream();
 
-    let storage_out = state
+    let docstore_out = state
         .filter_map(|s| s.startup.arg_path.clone())
         .dedupe()
-        .map(StorageOut::Open)
+        .map(|path| DocStoreOut::Open { path })
         .stream();
 
     Derived {
         ui,
         workspace_out,
-        storage_out,
+        docstore_out,
         config_file_out,
     }
 }

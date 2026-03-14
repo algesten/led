@@ -2,29 +2,29 @@ use std::cell::Cell;
 use std::sync::Arc;
 
 use crossterm::event::KeyCode;
+use led_core::Action;
 use led_core::PanelSlot;
 use led_core::keys::{KeyCombo, KeymapLookup};
 use led_core::rx::Stream;
-use led_core::Action;
-use led_terminal_in::TerminalInput;
 use led_state::AppState;
+use led_terminal_in::TerminalInput;
 
 use super::Mut;
 
 /// Derive actions from terminal input + state (for keymap context).
-pub fn actions_of(
-    input: &Stream<TerminalInput>,
-    state: &Stream<Arc<AppState>>,
-) -> Stream<Mut> {
+pub fn actions_of(input: &Stream<TerminalInput>, state: &Stream<Arc<AppState>>) -> Stream<Mut> {
     let chord: Cell<Option<KeyCombo>> = Cell::new(None);
 
-    input.sample_combine(state).filter_map(move |(input, state)| {
-        match map_input(input, &state, &chord) {
-            Some(TerminalEvent::Action(a)) => Some(Mut::Action(a)),
-            Some(TerminalEvent::Resize(w, h)) => Some(Mut::Resize(w, h)),
-            None => None,
-        }
-    }).stream()
+    input
+        .sample_combine(state)
+        .filter_map(
+            move |(input, state)| match map_input(input, &state, &chord) {
+                Some(TerminalEvent::Action(a)) => Some(Mut::Action(a)),
+                Some(TerminalEvent::Resize(w, h)) => Some(Mut::Resize(w, h)),
+                None => None,
+            },
+        )
+        .stream()
 }
 
 enum TerminalEvent {

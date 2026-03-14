@@ -190,11 +190,8 @@ fn render_buffer(buf: &BufferState, theme: &Theme, frame: &mut Frame, area: Rect
     let line_count = buf.doc.line_count();
     let gutter_w = gutter_width(line_count);
 
-    let [gutter_area, text_area] = Layout::horizontal([
-        Constraint::Length(gutter_w),
-        Constraint::Min(1),
-    ])
-    .areas(area);
+    let [gutter_area, text_area] =
+        Layout::horizontal([Constraint::Length(gutter_w), Constraint::Min(1)]).areas(area);
 
     let gutter_style = style::resolve(theme, &theme.editor.gutter);
     let text_style = style::resolve(theme, &theme.editor.text);

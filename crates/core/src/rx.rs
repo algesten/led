@@ -119,11 +119,7 @@ impl<T: Clone + 'static> Stream<T> {
         Pipe {
             source: self,
             f: move |t: &T| {
-                if pred(t) {
-                    Some(t.clone())
-                } else {
-                    None
-                }
+                if pred(t) { Some(t.clone()) } else { None }
             },
             _t: PhantomData,
         }
@@ -203,10 +199,7 @@ impl<T: Clone + 'static> Stream<T> {
 
     /// When this stream fires, pair the value with the latest from `sampler`.
     /// Does not emit until the sampler has produced at least one value.
-    pub fn sample_combine<B: Clone + 'static>(
-        &self,
-        sampler: &Stream<B>,
-    ) -> Stream<(T, B)> {
+    pub fn sample_combine<B: Clone + 'static>(&self, sampler: &Stream<B>) -> Stream<(T, B)> {
         let target = Stream::new();
         let target2 = target.clone();
         let latest: Rc<RefCell<Option<B>>> = Rc::new(RefCell::new(None));
@@ -219,8 +212,9 @@ impl<T: Clone + 'static> Stream<T> {
 
         // When source fires, pair with latest sampler value
         self.on(move |t: &T| {
-            if let Some(b) = latest.borrow().as_ref() {
-                target2.push((t.clone(), b.clone()));
+            let b = latest.borrow().clone();
+            if let Some(b) = b {
+                target2.push((t.clone(), b));
             }
         });
 
@@ -307,8 +301,8 @@ impl<T: Clone + 'static> Stream<Stream<T>> {
 #[macro_export]
 macro_rules! combine {
     ($s0:expr, $s1:expr $(,)?) => {{
-        use std::rc::Rc;
         use std::cell::RefCell;
+        use std::rc::Rc;
         let __target = $crate::rx::Stream::new();
         let __v0 = Rc::new(RefCell::new(None));
         let __v1 = Rc::new(RefCell::new(None));
@@ -317,8 +311,8 @@ macro_rules! combine {
         __target
     }};
     ($s0:expr, $s1:expr, $s2:expr $(,)?) => {{
-        use std::rc::Rc;
         use std::cell::RefCell;
+        use std::rc::Rc;
         let __target = $crate::rx::Stream::new();
         let __v0 = Rc::new(RefCell::new(None));
         let __v1 = Rc::new(RefCell::new(None));
@@ -329,8 +323,8 @@ macro_rules! combine {
         __target
     }};
     ($s0:expr, $s1:expr, $s2:expr, $s3:expr $(,)?) => {{
-        use std::rc::Rc;
         use std::cell::RefCell;
+        use std::rc::Rc;
         let __target = $crate::rx::Stream::new();
         let __v0 = Rc::new(RefCell::new(None));
         let __v1 = Rc::new(RefCell::new(None));
@@ -343,8 +337,8 @@ macro_rules! combine {
         __target
     }};
     ($s0:expr, $s1:expr, $s2:expr, $s3:expr, $s4:expr $(,)?) => {{
-        use std::rc::Rc;
         use std::cell::RefCell;
+        use std::rc::Rc;
         let __target = $crate::rx::Stream::new();
         let __v0 = Rc::new(RefCell::new(None));
         let __v1 = Rc::new(RefCell::new(None));
@@ -359,8 +353,8 @@ macro_rules! combine {
         __target
     }};
     ($s0:expr, $s1:expr, $s2:expr, $s3:expr, $s4:expr, $s5:expr $(,)?) => {{
-        use std::rc::Rc;
         use std::cell::RefCell;
+        use std::rc::Rc;
         let __target = $crate::rx::Stream::new();
         let __v0 = Rc::new(RefCell::new(None));
         let __v1 = Rc::new(RefCell::new(None));
@@ -377,8 +371,8 @@ macro_rules! combine {
         __target
     }};
     ($s0:expr, $s1:expr, $s2:expr, $s3:expr, $s4:expr, $s5:expr, $s6:expr $(,)?) => {{
-        use std::rc::Rc;
         use std::cell::RefCell;
+        use std::rc::Rc;
         let __target = $crate::rx::Stream::new();
         let __v0 = Rc::new(RefCell::new(None));
         let __v1 = Rc::new(RefCell::new(None));
@@ -387,18 +381,53 @@ macro_rules! combine {
         let __v4 = Rc::new(RefCell::new(None));
         let __v5 = Rc::new(RefCell::new(None));
         let __v6 = Rc::new(RefCell::new(None));
-        $crate::_combine_sub!($s0, __target, __v0, [__v0, __v1, __v2, __v3, __v4, __v5, __v6]);
-        $crate::_combine_sub!($s1, __target, __v1, [__v0, __v1, __v2, __v3, __v4, __v5, __v6]);
-        $crate::_combine_sub!($s2, __target, __v2, [__v0, __v1, __v2, __v3, __v4, __v5, __v6]);
-        $crate::_combine_sub!($s3, __target, __v3, [__v0, __v1, __v2, __v3, __v4, __v5, __v6]);
-        $crate::_combine_sub!($s4, __target, __v4, [__v0, __v1, __v2, __v3, __v4, __v5, __v6]);
-        $crate::_combine_sub!($s5, __target, __v5, [__v0, __v1, __v2, __v3, __v4, __v5, __v6]);
-        $crate::_combine_sub!($s6, __target, __v6, [__v0, __v1, __v2, __v3, __v4, __v5, __v6]);
+        $crate::_combine_sub!(
+            $s0,
+            __target,
+            __v0,
+            [__v0, __v1, __v2, __v3, __v4, __v5, __v6]
+        );
+        $crate::_combine_sub!(
+            $s1,
+            __target,
+            __v1,
+            [__v0, __v1, __v2, __v3, __v4, __v5, __v6]
+        );
+        $crate::_combine_sub!(
+            $s2,
+            __target,
+            __v2,
+            [__v0, __v1, __v2, __v3, __v4, __v5, __v6]
+        );
+        $crate::_combine_sub!(
+            $s3,
+            __target,
+            __v3,
+            [__v0, __v1, __v2, __v3, __v4, __v5, __v6]
+        );
+        $crate::_combine_sub!(
+            $s4,
+            __target,
+            __v4,
+            [__v0, __v1, __v2, __v3, __v4, __v5, __v6]
+        );
+        $crate::_combine_sub!(
+            $s5,
+            __target,
+            __v5,
+            [__v0, __v1, __v2, __v3, __v4, __v5, __v6]
+        );
+        $crate::_combine_sub!(
+            $s6,
+            __target,
+            __v6,
+            [__v0, __v1, __v2, __v3, __v4, __v5, __v6]
+        );
         __target
     }};
     ($s0:expr, $s1:expr, $s2:expr, $s3:expr, $s4:expr, $s5:expr, $s6:expr, $s7:expr $(,)?) => {{
-        use std::rc::Rc;
         use std::cell::RefCell;
+        use std::rc::Rc;
         let __target = $crate::rx::Stream::new();
         let __v0 = Rc::new(RefCell::new(None));
         let __v1 = Rc::new(RefCell::new(None));
@@ -408,19 +437,59 @@ macro_rules! combine {
         let __v5 = Rc::new(RefCell::new(None));
         let __v6 = Rc::new(RefCell::new(None));
         let __v7 = Rc::new(RefCell::new(None));
-        $crate::_combine_sub!($s0, __target, __v0, [__v0, __v1, __v2, __v3, __v4, __v5, __v6, __v7]);
-        $crate::_combine_sub!($s1, __target, __v1, [__v0, __v1, __v2, __v3, __v4, __v5, __v6, __v7]);
-        $crate::_combine_sub!($s2, __target, __v2, [__v0, __v1, __v2, __v3, __v4, __v5, __v6, __v7]);
-        $crate::_combine_sub!($s3, __target, __v3, [__v0, __v1, __v2, __v3, __v4, __v5, __v6, __v7]);
-        $crate::_combine_sub!($s4, __target, __v4, [__v0, __v1, __v2, __v3, __v4, __v5, __v6, __v7]);
-        $crate::_combine_sub!($s5, __target, __v5, [__v0, __v1, __v2, __v3, __v4, __v5, __v6, __v7]);
-        $crate::_combine_sub!($s6, __target, __v6, [__v0, __v1, __v2, __v3, __v4, __v5, __v6, __v7]);
-        $crate::_combine_sub!($s7, __target, __v7, [__v0, __v1, __v2, __v3, __v4, __v5, __v6, __v7]);
+        $crate::_combine_sub!(
+            $s0,
+            __target,
+            __v0,
+            [__v0, __v1, __v2, __v3, __v4, __v5, __v6, __v7]
+        );
+        $crate::_combine_sub!(
+            $s1,
+            __target,
+            __v1,
+            [__v0, __v1, __v2, __v3, __v4, __v5, __v6, __v7]
+        );
+        $crate::_combine_sub!(
+            $s2,
+            __target,
+            __v2,
+            [__v0, __v1, __v2, __v3, __v4, __v5, __v6, __v7]
+        );
+        $crate::_combine_sub!(
+            $s3,
+            __target,
+            __v3,
+            [__v0, __v1, __v2, __v3, __v4, __v5, __v6, __v7]
+        );
+        $crate::_combine_sub!(
+            $s4,
+            __target,
+            __v4,
+            [__v0, __v1, __v2, __v3, __v4, __v5, __v6, __v7]
+        );
+        $crate::_combine_sub!(
+            $s5,
+            __target,
+            __v5,
+            [__v0, __v1, __v2, __v3, __v4, __v5, __v6, __v7]
+        );
+        $crate::_combine_sub!(
+            $s6,
+            __target,
+            __v6,
+            [__v0, __v1, __v2, __v3, __v4, __v5, __v6, __v7]
+        );
+        $crate::_combine_sub!(
+            $s7,
+            __target,
+            __v7,
+            [__v0, __v1, __v2, __v3, __v4, __v5, __v6, __v7]
+        );
         __target
     }};
     ($s0:expr, $s1:expr, $s2:expr, $s3:expr, $s4:expr, $s5:expr, $s6:expr, $s7:expr, $s8:expr $(,)?) => {{
-        use std::rc::Rc;
         use std::cell::RefCell;
+        use std::rc::Rc;
         let __target = $crate::rx::Stream::new();
         let __v0 = Rc::new(RefCell::new(None));
         let __v1 = Rc::new(RefCell::new(None));
@@ -431,20 +500,65 @@ macro_rules! combine {
         let __v6 = Rc::new(RefCell::new(None));
         let __v7 = Rc::new(RefCell::new(None));
         let __v8 = Rc::new(RefCell::new(None));
-        $crate::_combine_sub!($s0, __target, __v0, [__v0, __v1, __v2, __v3, __v4, __v5, __v6, __v7, __v8]);
-        $crate::_combine_sub!($s1, __target, __v1, [__v0, __v1, __v2, __v3, __v4, __v5, __v6, __v7, __v8]);
-        $crate::_combine_sub!($s2, __target, __v2, [__v0, __v1, __v2, __v3, __v4, __v5, __v6, __v7, __v8]);
-        $crate::_combine_sub!($s3, __target, __v3, [__v0, __v1, __v2, __v3, __v4, __v5, __v6, __v7, __v8]);
-        $crate::_combine_sub!($s4, __target, __v4, [__v0, __v1, __v2, __v3, __v4, __v5, __v6, __v7, __v8]);
-        $crate::_combine_sub!($s5, __target, __v5, [__v0, __v1, __v2, __v3, __v4, __v5, __v6, __v7, __v8]);
-        $crate::_combine_sub!($s6, __target, __v6, [__v0, __v1, __v2, __v3, __v4, __v5, __v6, __v7, __v8]);
-        $crate::_combine_sub!($s7, __target, __v7, [__v0, __v1, __v2, __v3, __v4, __v5, __v6, __v7, __v8]);
-        $crate::_combine_sub!($s8, __target, __v8, [__v0, __v1, __v2, __v3, __v4, __v5, __v6, __v7, __v8]);
+        $crate::_combine_sub!(
+            $s0,
+            __target,
+            __v0,
+            [__v0, __v1, __v2, __v3, __v4, __v5, __v6, __v7, __v8]
+        );
+        $crate::_combine_sub!(
+            $s1,
+            __target,
+            __v1,
+            [__v0, __v1, __v2, __v3, __v4, __v5, __v6, __v7, __v8]
+        );
+        $crate::_combine_sub!(
+            $s2,
+            __target,
+            __v2,
+            [__v0, __v1, __v2, __v3, __v4, __v5, __v6, __v7, __v8]
+        );
+        $crate::_combine_sub!(
+            $s3,
+            __target,
+            __v3,
+            [__v0, __v1, __v2, __v3, __v4, __v5, __v6, __v7, __v8]
+        );
+        $crate::_combine_sub!(
+            $s4,
+            __target,
+            __v4,
+            [__v0, __v1, __v2, __v3, __v4, __v5, __v6, __v7, __v8]
+        );
+        $crate::_combine_sub!(
+            $s5,
+            __target,
+            __v5,
+            [__v0, __v1, __v2, __v3, __v4, __v5, __v6, __v7, __v8]
+        );
+        $crate::_combine_sub!(
+            $s6,
+            __target,
+            __v6,
+            [__v0, __v1, __v2, __v3, __v4, __v5, __v6, __v7, __v8]
+        );
+        $crate::_combine_sub!(
+            $s7,
+            __target,
+            __v7,
+            [__v0, __v1, __v2, __v3, __v4, __v5, __v6, __v7, __v8]
+        );
+        $crate::_combine_sub!(
+            $s8,
+            __target,
+            __v8,
+            [__v0, __v1, __v2, __v3, __v4, __v5, __v6, __v7, __v8]
+        );
         __target
     }};
     ($s0:expr, $s1:expr, $s2:expr, $s3:expr, $s4:expr, $s5:expr, $s6:expr, $s7:expr, $s8:expr, $s9:expr $(,)?) => {{
-        use std::rc::Rc;
         use std::cell::RefCell;
+        use std::rc::Rc;
         let __target = $crate::rx::Stream::new();
         let __v0 = Rc::new(RefCell::new(None));
         let __v1 = Rc::new(RefCell::new(None));
@@ -456,16 +570,66 @@ macro_rules! combine {
         let __v7 = Rc::new(RefCell::new(None));
         let __v8 = Rc::new(RefCell::new(None));
         let __v9 = Rc::new(RefCell::new(None));
-        $crate::_combine_sub!($s0, __target, __v0, [__v0, __v1, __v2, __v3, __v4, __v5, __v6, __v7, __v8, __v9]);
-        $crate::_combine_sub!($s1, __target, __v1, [__v0, __v1, __v2, __v3, __v4, __v5, __v6, __v7, __v8, __v9]);
-        $crate::_combine_sub!($s2, __target, __v2, [__v0, __v1, __v2, __v3, __v4, __v5, __v6, __v7, __v8, __v9]);
-        $crate::_combine_sub!($s3, __target, __v3, [__v0, __v1, __v2, __v3, __v4, __v5, __v6, __v7, __v8, __v9]);
-        $crate::_combine_sub!($s4, __target, __v4, [__v0, __v1, __v2, __v3, __v4, __v5, __v6, __v7, __v8, __v9]);
-        $crate::_combine_sub!($s5, __target, __v5, [__v0, __v1, __v2, __v3, __v4, __v5, __v6, __v7, __v8, __v9]);
-        $crate::_combine_sub!($s6, __target, __v6, [__v0, __v1, __v2, __v3, __v4, __v5, __v6, __v7, __v8, __v9]);
-        $crate::_combine_sub!($s7, __target, __v7, [__v0, __v1, __v2, __v3, __v4, __v5, __v6, __v7, __v8, __v9]);
-        $crate::_combine_sub!($s8, __target, __v8, [__v0, __v1, __v2, __v3, __v4, __v5, __v6, __v7, __v8, __v9]);
-        $crate::_combine_sub!($s9, __target, __v9, [__v0, __v1, __v2, __v3, __v4, __v5, __v6, __v7, __v8, __v9]);
+        $crate::_combine_sub!(
+            $s0,
+            __target,
+            __v0,
+            [__v0, __v1, __v2, __v3, __v4, __v5, __v6, __v7, __v8, __v9]
+        );
+        $crate::_combine_sub!(
+            $s1,
+            __target,
+            __v1,
+            [__v0, __v1, __v2, __v3, __v4, __v5, __v6, __v7, __v8, __v9]
+        );
+        $crate::_combine_sub!(
+            $s2,
+            __target,
+            __v2,
+            [__v0, __v1, __v2, __v3, __v4, __v5, __v6, __v7, __v8, __v9]
+        );
+        $crate::_combine_sub!(
+            $s3,
+            __target,
+            __v3,
+            [__v0, __v1, __v2, __v3, __v4, __v5, __v6, __v7, __v8, __v9]
+        );
+        $crate::_combine_sub!(
+            $s4,
+            __target,
+            __v4,
+            [__v0, __v1, __v2, __v3, __v4, __v5, __v6, __v7, __v8, __v9]
+        );
+        $crate::_combine_sub!(
+            $s5,
+            __target,
+            __v5,
+            [__v0, __v1, __v2, __v3, __v4, __v5, __v6, __v7, __v8, __v9]
+        );
+        $crate::_combine_sub!(
+            $s6,
+            __target,
+            __v6,
+            [__v0, __v1, __v2, __v3, __v4, __v5, __v6, __v7, __v8, __v9]
+        );
+        $crate::_combine_sub!(
+            $s7,
+            __target,
+            __v7,
+            [__v0, __v1, __v2, __v3, __v4, __v5, __v6, __v7, __v8, __v9]
+        );
+        $crate::_combine_sub!(
+            $s8,
+            __target,
+            __v8,
+            [__v0, __v1, __v2, __v3, __v4, __v5, __v6, __v7, __v8, __v9]
+        );
+        $crate::_combine_sub!(
+            $s9,
+            __target,
+            __v9,
+            [__v0, __v1, __v2, __v3, __v4, __v5, __v6, __v7, __v8, __v9]
+        );
         __target
     }};
 }
@@ -615,9 +779,7 @@ impl<'a, S: 'static, T: 'static, F: FnMut(&S) -> Option<T> + 'static> Pipe<'a, S
         let mut f = self.f;
         Pipe {
             source: self.source,
-            f: move |s: &S| {
-                f(s).inspect(|t| g(t))
-            },
+            f: move |s: &S| f(s).inspect(|t| g(t)),
             _t: PhantomData,
         }
     }
@@ -738,7 +900,10 @@ mod tests {
         let log = Rc::new(RefCell::new(Vec::new()));
 
         let l = log.clone();
-        source.map(|x| x * 2).map(|x| x + 1).on(move |x| l.borrow_mut().push(x));
+        source
+            .map(|x| x * 2)
+            .map(|x| x + 1)
+            .on(move |x| l.borrow_mut().push(x));
 
         source.push(5);
         source.push(10);
@@ -775,7 +940,9 @@ mod tests {
         let log = Rc::new(RefCell::new(Vec::new()));
 
         let l = log.clone();
-        source.filter(|x| *x > 0).on(move |x| l.borrow_mut().push(x));
+        source
+            .filter(|x| *x > 0)
+            .on(move |x| l.borrow_mut().push(x));
 
         source.push(-1);
         source.push(3);
@@ -829,10 +996,7 @@ mod tests {
         let log = Rc::new(RefCell::new(Vec::new()));
 
         let l = log.clone();
-        let merged = a
-            .map(|x| x)
-            .or(b.map(|x| x))
-            .or(c.map(|x| x));
+        let merged = a.map(|x| x).or(b.map(|x| x)).or(c.map(|x| x));
         merged.on(move |x: &i32| l.borrow_mut().push(*x));
 
         a.push(1);
@@ -1113,7 +1277,9 @@ mod tests {
         let log = Rc::new(RefCell::new(Vec::new()));
 
         let l = log.clone();
-        outer.flatten_switch().on(move |x: &i32| l.borrow_mut().push(*x));
+        outer
+            .flatten_switch()
+            .on(move |x: &i32| l.borrow_mut().push(*x));
 
         let inner1: Stream<i32> = Stream::new();
         let inner2: Stream<i32> = Stream::new();

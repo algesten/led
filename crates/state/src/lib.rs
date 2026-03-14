@@ -12,7 +12,7 @@ pub use led_workspace::Workspace;
 #[derive(Clone)]
 pub struct BufferState {
     pub id: BufferId,
-    pub doc: Box<dyn Doc>,
+    pub doc: Arc<dyn Doc>,
     pub path: Option<PathBuf>,
     pub cursor_row: usize,
     pub cursor_col: usize,

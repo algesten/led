@@ -23,9 +23,10 @@ pub fn process_of(state: &Stream<Arc<AppState>>) -> Stream<Mut> {
     // Force redraw after resuming from suspend (true→false transition)
     let redraw_s = state
         .map(|s| (s.suspend, s.force_redraw))
-        .fold((false, false, 0u64), |(_, prev_suspend, _), (suspend, redraw)| {
-            (prev_suspend, suspend, redraw)
-        })
+        .fold(
+            (false, false, 0u64),
+            |(_, prev_suspend, _), (suspend, redraw)| (prev_suspend, suspend, redraw),
+        )
         .filter_map(|(prev, curr, redraw)| {
             if prev && !curr {
                 Some(Mut::ForceRedraw(redraw + 1))
