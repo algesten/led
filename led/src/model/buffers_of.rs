@@ -27,6 +27,7 @@ pub fn buffers_of(
                     cursor_col: 0,
                     cursor_col_affinity: 0,
                     scroll_row: 0,
+                    scroll_sub_line: 0,
                     tab_order,
                     last_edit_kind: None,
                     save_state: SaveState::Clean,

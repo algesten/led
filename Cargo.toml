@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = ["led", "crates/config-file", "crates/core", "crates/state", "crates/terminal-in", "crates/docstore", "crates/workspace", "crates/ui"]
+default-members = ["led"]
 
 [workspace.dependencies]
 led-config-file = { path = "crates/config-file" }

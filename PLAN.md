@@ -8,21 +8,6 @@ Every side effect lives in a Driver. The Model is a pure reduce: `(State, Mut) -
 
 ## Next: Phase 5 — Editor Styling, Gutter & Line Wrapping
 
-The current render loop uses theme colors for text and gutter but does not match the old editor's gutter design or fill behaviors. Line wrapping must come now because it fundamentally changes how every line is rendered, how the cursor is positioned, and how scrolling works — every later phase (selection, search, syntax) builds on top of the wrap-aware display model.
-
-### 5A. Line Wrapping
-
-Line wrapping is not cosmetic — it defines the mapping between logical lines and screen rows that all rendering and cursor logic depends on.
-
-- `expand_tabs()` — convert tabs to 4 spaces, produce `char_map` (logical char index → display column)
-- `compute_chunks()` — split display line into `(start, end)` display-column ranges at `text_width - 1`
-- Continuation indicator `\` in gutter style at end of non-last chunks
-- Gutter shows `"  "` (spaces) on continuation lines (only first chunk gets the real gutter content)
-- `scroll_sub_line` on BufferState for partial-line scroll when first visible line is wrapped
-- Cursor movement (up/down) navigates visual sub-lines, preserving display column
-- `visual_line_count()` computes how many screen rows a logical line occupies
-- `adjust_scroll()` keeps cursor visible accounting for wrapped lines
-
 ### 5B. Gutter Redesign
 
 Old editor uses a 2-char fixed gutter (no line numbers in the gutter itself). Each row has two columns:

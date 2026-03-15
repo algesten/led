@@ -1,13 +1,11 @@
 use led_core::theme::Theme;
-use led_state::{AppState, BufferState};
+use led_core::wrap::{chars_to_string, compute_chunks, expand_tabs, find_sub_line};
+use led_state::{AppState, BufferState, Dimensions};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Position, Rect};
 use ratatui::widgets::{Block, Borders, Paragraph};
 
 use crate::style;
-
-const SIDE_PANEL_WIDTH: u16 = 25;
-const MIN_EDITOR_WIDTH: u16 = 25;
 
 pub fn render(state: &AppState, frame: &mut Frame) {
     let theme = match state.config_theme.as_ref() {
@@ -15,26 +13,32 @@ pub fn render(state: &AppState, frame: &mut Frame) {
         None => return,
     };
 
+    let dims = match state.dims {
+        Some(d) => d,
+        None => return,
+    };
+
     let area = frame.area();
 
-    // Vertical split: main area + status bar (1 line at bottom)
-    let [main_area, status_area] =
-        Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(area);
+    // Vertical split: main area + status bar
+    let [main_area, status_area] = Layout::vertical([
+        Constraint::Min(1),
+        Constraint::Length(dims.status_bar_height),
+    ])
+    .areas(area);
 
     render_status_bar(state, theme, frame, status_area);
 
     // Horizontal split: optional side panel + editor area
-    let show_side = state.show_side_panel && main_area.width > SIDE_PANEL_WIDTH + MIN_EDITOR_WIDTH;
-
-    if show_side {
+    if dims.side_panel_visible() {
         let [side_area, editor_area] =
-            Layout::horizontal([Constraint::Length(SIDE_PANEL_WIDTH), Constraint::Min(1)])
+            Layout::horizontal([Constraint::Length(dims.side_width()), Constraint::Min(1)])
                 .areas(main_area);
 
         render_side_panel(theme, frame, side_area);
-        render_editor_area(state, theme, frame, editor_area);
+        render_editor_area(state, &dims, theme, frame, editor_area);
     } else {
-        render_editor_area(state, theme, frame, main_area);
+        render_editor_area(state, &dims, theme, frame, main_area);
     }
 }
 
@@ -120,15 +124,21 @@ fn render_side_panel(theme: &Theme, frame: &mut Frame, area: Rect) {
     frame.render_widget(block, area);
 }
 
-fn render_editor_area(state: &AppState, theme: &Theme, frame: &mut Frame, area: Rect) {
-    // Vertical split: buffer content + tab bar (1 line at bottom)
+fn render_editor_area(
+    state: &AppState,
+    dims: &Dimensions,
+    theme: &Theme,
+    frame: &mut Frame,
+    area: Rect,
+) {
+    // Vertical split: buffer content + tab bar
     let [buffer_area, tab_area] =
-        Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(area);
+        Layout::vertical([Constraint::Min(1), Constraint::Length(dims.tab_bar_height)]).areas(area);
 
     render_tab_bar(state, theme, frame, tab_area);
 
     if let Some(buf) = active_buffer(state) {
-        render_buffer(buf, theme, frame, buffer_area);
+        render_buffer(buf, dims, theme, frame, buffer_area);
     } else {
         // Empty editor background
         let editor_style = style::resolve(theme, &theme.editor.text);
@@ -181,19 +191,15 @@ fn render_tab_bar(state: &AppState, theme: &Theme, frame: &mut Frame, area: Rect
     }
 }
 
-fn gutter_width(line_count: usize) -> u16 {
-    let mut n = line_count.max(1);
-    let mut digits: u16 = 0;
-    while n > 0 {
-        digits += 1;
-        n /= 10;
-    }
-    digits + 2
-}
-
-fn render_buffer(buf: &BufferState, theme: &Theme, frame: &mut Frame, area: Rect) {
-    let line_count = buf.doc.line_count();
-    let gutter_w = gutter_width(line_count);
+fn render_buffer(
+    buf: &BufferState,
+    dims: &Dimensions,
+    theme: &Theme,
+    frame: &mut Frame,
+    area: Rect,
+) {
+    let gutter_w = dims.gutter_width;
+    let text_width = dims.text_width();
 
     let [gutter_area, text_area] =
         Layout::horizontal([Constraint::Length(gutter_w), Constraint::Min(1)]).areas(area);
@@ -206,31 +212,99 @@ fn render_buffer(buf: &BufferState, theme: &Theme, frame: &mut Frame, area: Rect
     frame.render_widget(Block::default().style(text_style), text_area);
 
     let visible_rows = area.height as usize;
-    let scroll = buf.scroll_row;
-    let num_width = (gutter_w - 2) as usize;
+    let line_count = buf.doc.line_count();
+    let mut screen_row: usize = 0;
+    let mut cursor_screen_pos: Option<(u16, u16)> = None;
 
-    for row in 0..visible_rows {
-        let line_idx = scroll + row;
-        let y = area.y + row as u16;
+    let mut line_idx = buf.scroll_row;
+    let mut skip_sub_lines = buf.scroll_sub_line;
 
-        if line_idx < line_count {
-            // Gutter: right-aligned line number with padding
-            let num = format!(" {:>width$} ", line_idx + 1, width = num_width);
+    while screen_row < visible_rows && line_idx < line_count {
+        let line = buf.doc.line(line_idx);
+        let (display, char_map) = expand_tabs(&line);
+        let chunks = compute_chunks(display.len(), text_width);
+
+        for (chunk_idx, &(cs, ce)) in chunks.iter().enumerate() {
+            // Skip sub-lines on the first logical line (scroll_sub_line)
+            if skip_sub_lines > 0 {
+                skip_sub_lines -= 1;
+                continue;
+            }
+
+            if screen_row >= visible_rows {
+                break;
+            }
+
+            let y = area.y + screen_row as u16;
+
+            // Gutter
+            let gutter_content = if chunk_idx == 0 {
+                let num = line_idx + 1;
+                format!(
+                    "{:>width$}",
+                    num,
+                    width = (gutter_w as usize).saturating_sub(1)
+                )
+            } else {
+                // Continuation line: show wrap indicator
+                let pad = (gutter_w as usize).saturating_sub(1);
+                format!("{:>width$}", "\\", width = pad)
+            };
             let gutter_line_area = Rect::new(gutter_area.x, y, gutter_w, 1);
-            frame.render_widget(Paragraph::new(num).style(gutter_style), gutter_line_area);
+            frame.render_widget(
+                Paragraph::new(gutter_content).style(gutter_style),
+                gutter_line_area,
+            );
 
-            // Text content
-            let line = buf.doc.line(line_idx);
+            // Text content for this chunk
+            let chunk_text = chars_to_string(&display[cs..ce]);
+
+            // Append wrap indicator for non-last chunks
+            let content = if chunk_idx < chunks.len() - 1 {
+                format!("{}{}", chunk_text, "\\")
+            } else {
+                chunk_text
+            };
+
             let text_line_area = Rect::new(text_area.x, y, text_area.width, 1);
-            frame.render_widget(Paragraph::new(line).style(text_style), text_line_area);
+            frame.render_widget(Paragraph::new(content).style(text_style), text_line_area);
+
+            // Track cursor position
+            if line_idx == buf.cursor_row {
+                let cursor_dcol = char_map
+                    .get(buf.cursor_col)
+                    .copied()
+                    .unwrap_or_else(|| char_map.last().copied().unwrap_or(0));
+                let cursor_sub = find_sub_line(&chunks, cursor_dcol);
+                if cursor_sub == chunk_idx {
+                    let cursor_x = text_area.x + (cursor_dcol - cs) as u16;
+                    let cursor_y = y;
+                    cursor_screen_pos = Some((cursor_x, cursor_y));
+                }
+            }
+
+            screen_row += 1;
         }
+
+        line_idx += 1;
+        skip_sub_lines = 0;
     }
 
-    // Cursor
-    let cursor_row_on_screen = buf.cursor_row.saturating_sub(scroll);
-    if cursor_row_on_screen < visible_rows {
-        let cursor_x = text_area.x + buf.cursor_col as u16;
-        let cursor_y = text_area.y + cursor_row_on_screen as u16;
-        frame.set_cursor_position(Position::new(cursor_x, cursor_y));
+    // Fill remaining rows with ~ in gutter
+    while screen_row < visible_rows {
+        let y = area.y + screen_row as u16;
+        let tilde = format!(
+            "{:>width$}",
+            "~",
+            width = (gutter_w as usize).saturating_sub(1)
+        );
+        let gutter_line_area = Rect::new(gutter_area.x, y, gutter_w, 1);
+        frame.render_widget(Paragraph::new(tilde).style(gutter_style), gutter_line_area);
+        screen_row += 1;
+    }
+
+    // Set cursor
+    if let Some((cx, cy)) = cursor_screen_pos {
+        frame.set_cursor_position(Position::new(cx, cy));
     }
 }

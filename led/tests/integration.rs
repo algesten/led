@@ -538,5 +538,115 @@ fn toggle_side_panel() {
 fn viewport_set() {
     let t = TestHarness::new().with_viewport(120, 40).run(vec![]);
 
-    assert_eq!(t.state.viewport, (120, 40));
+    let dims = t.state.dims.expect("dims should be set after resize");
+    assert_eq!(dims.viewport_width, 120);
+    assert_eq!(dims.viewport_height, 40);
+}
+
+// ── Dimensions ──
+
+#[test]
+fn dims_side_panel_visible() {
+    // Wide terminal: side panel visible
+    let t = TestHarness::new().with_viewport(80, 24).run(vec![]);
+    let dims = t.state.dims.unwrap();
+    assert!(dims.side_panel_visible());
+
+    // Narrow terminal: side panel hidden
+    let t = TestHarness::new().with_viewport(40, 24).run(vec![]);
+    let dims = t.state.dims.unwrap();
+    assert!(!dims.side_panel_visible());
+}
+
+#[test]
+fn dims_toggle_side_panel_updates_dims() {
+    let t = TestHarness::new()
+        .with_viewport(80, 24)
+        .run(actions(vec![ToggleSidePanel]));
+
+    let dims = t.state.dims.unwrap();
+    assert!(!dims.show_side_panel);
+    assert!(!dims.side_panel_visible());
+}
+
+#[test]
+fn dims_text_width() {
+    // 80 wide, side panel visible (25), gutter (2) → text_width = 80 - 25 - 2 = 53
+    let t = TestHarness::new().with_viewport(80, 24).run(vec![]);
+    let dims = t.state.dims.unwrap();
+    assert_eq!(dims.text_width(), 53);
+}
+
+#[test]
+fn dims_buffer_height() {
+    // 24 tall, status bar (1), tab bar (1) → buffer_height = 22
+    let t = TestHarness::new().with_viewport(80, 24).run(vec![]);
+    let dims = t.state.dims.unwrap();
+    assert_eq!(dims.buffer_height(), 22);
+}
+
+// ── Line Wrapping ──
+
+#[test]
+fn wrap_move_down_through_wrapped_line() {
+    // Viewport: 12 cols wide, side panel hidden (too narrow).
+    // gutter_width=2, text_width=10, wrap_width=9
+    // "abcdefghijklmno" = 15 chars → chunks: [0..9, 9..15] (2 visual lines)
+    let t = TestHarness::new()
+        .with_viewport(12, 10)
+        .with_file("abcdefghijklmno\nshort\n")
+        .run(actions(vec![MoveDown]));
+
+    // First MoveDown should move to the second sub-line of the first logical line
+    assert_eq!(buf(&t).cursor_row, 0, "still on first logical line");
+    assert!(buf(&t).cursor_col >= 9, "should be on second sub-line");
+}
+
+#[test]
+fn wrap_move_down_crosses_to_next_line() {
+    // From second sub-line of wrapped line, MoveDown should go to next logical line
+    let t = TestHarness::new()
+        .with_viewport(12, 10)
+        .with_file("abcdefghijklmno\nshort\n")
+        .run(actions(vec![MoveDown, MoveDown]));
+
+    assert_eq!(buf(&t).cursor_row, 1, "should be on second logical line");
+}
+
+#[test]
+fn wrap_move_up_through_wrapped_line() {
+    // Start on line 1, MoveUp should land on last sub-line of line 0
+    let t = TestHarness::new()
+        .with_viewport(12, 10)
+        .with_file("abcdefghijklmno\nshort\n")
+        .run(actions(vec![MoveDown, MoveDown, MoveUp]));
+
+    assert_eq!(buf(&t).cursor_row, 0, "back on first logical line");
+    assert!(buf(&t).cursor_col >= 9, "on last sub-line");
+}
+
+#[test]
+fn wrap_scroll_sub_line() {
+    // Make a file with a very long line in a small viewport
+    let long_line = "a".repeat(100);
+    let mut content = long_line.clone();
+    content.push('\n');
+    for i in 0..20 {
+        content.push_str(&format!("line{i}\n"));
+    }
+
+    let t = TestHarness::new()
+        .with_viewport(12, 5)
+        .with_file(&content)
+        .run(actions(vec![
+            // Move down through all sub-lines of the long wrapped line
+            MoveDown, MoveDown, MoveDown, MoveDown, MoveDown, MoveDown, MoveDown, MoveDown,
+            MoveDown, MoveDown, MoveDown, MoveDown,
+        ]));
+
+    // After many MoveDowns through a 100-char wrapped line, scroll should have adjusted
+    assert!(
+        buf(&t).scroll_row > 0 || buf(&t).scroll_sub_line > 0,
+        "scroll should have moved for wrapped content"
+    );
 }

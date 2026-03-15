@@ -5,6 +5,7 @@ pub mod keys;
 pub mod rx;
 pub mod theme;
 mod watch;
+pub mod wrap;
 
 pub use alert::{Alert, AlertExt};
 pub use config::Startup;
