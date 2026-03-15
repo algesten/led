@@ -6,26 +6,7 @@ Every side effect lives in a Driver. The Model is a pure reduce: `(State, Mut) -
 
 ---
 
-## Next: Phase 5 — Editor Styling, Gutter & Line Wrapping
-
-### 5B. Gutter Redesign
-
-Old editor uses a 2-char fixed gutter (no line numbers in the gutter itself). Each row has two columns:
-
-- **Left column (1 char):** Git line-status indicator — `▎` colored by `git.gutter_added` / `git.gutter_modified`, or space with `editor.gutter` background when no status.
-- **Right column (1 char):** Diagnostic indicator `●` colored by `diagnostics.error/warning/info`, OR color preview block (hex color / theme value), OR space with `editor.gutter` background.
-- **Continuation lines** (wrapped): 2 spaces with `editor.gutter` background.
-- **Past-EOF lines:** `~ ` (tilde + space) in `editor.gutter` style.
-
-For now (no git, no diagnostics): render 2-char gutter as `"  "` in `editor.gutter` style on first chunk of each line, `"  "` on continuation chunks. Remove the line-number display. Past-EOF rows show `~ `.
-
-### 5C. Text Area Background Fill
-
-Old editor fills the entire text area with `editor.text` background via `Paragraph::new(display_lines).style(text_style)` rendered into the full area. Current code uses per-line `Paragraph` widgets — switch to building a `Vec<Line>` (one entry per screen row, accounting for wrapped chunks) rendered as a single `Paragraph` so the background covers the full region uniformly.
-
-### 5D. Tab Bar Gutter Alignment
-
-Old editor starts tab labels at `x + GUTTER_WIDTH - 1` (1 char into the gutter). Tab bar background uses `tabs.inactive` style. Currently correct but verify alignment matches old behavior once gutter width changes to 2.
+## Next: Phase 6 — Status Bar & Input Bar
 
 ---
 

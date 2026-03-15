@@ -9,7 +9,7 @@ use led_core::theme::Theme;
 use led_core::{BufferId, Doc, DocId, PanelSlot, Startup};
 pub use led_workspace::Workspace;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Dimensions {
     // ── Inputs ──
     pub viewport_width: u16,
