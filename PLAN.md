@@ -6,33 +6,6 @@ Every side effect lives in a Driver. The Model is a pure reduce: `(State, Mut) -
 
 ---
 
-## Phase 8: File Browser
-
-### 8A. FileBrowserState
-
-```
-FileBrowserState {
-    entries: Vec<TreeEntry>,
-    selected: usize,
-    expanded_dirs: HashSet<PathBuf>,
-    scroll_offset: usize,
-}
-```
-
-### 8B. File Browser Driver
-
-Walks directory tree from workspace root, respects expanded_dirs. Skips dotfiles, sorts dirs before files.
-
-### 8C. Browser Actions
-
-ExpandDir, CollapseDir, CollapseAll, OpenSelected, OpenSelectedBg — all wired to the existing Action variants.
-
-### 8D. Browser Rendering
-
-Tree with indentation in the Side panel. Selected entry highlight. Scroll viewport. `▼`/`▶` icons for expanded/collapsed dirs. Status indicators from git/diagnostics once those exist.
-
----
-
 ## Phase 9: Session Persistence & Cross-Instance Sync
 
 SQLite at config_dir/db.sqlite. Workspace, buffer positions, undo chains. Restore on startup if primary.

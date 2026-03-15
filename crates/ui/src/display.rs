@@ -1,9 +1,9 @@
 use std::rc::Rc;
 use std::sync::Arc;
 
-use led_core::Doc;
 use led_core::PanelSlot;
 use led_core::wrap::{chars_to_string, compute_chunks, expand_tabs, find_sub_line};
+use led_core::{BufferId, Doc};
 use led_state::{AppState, Dimensions, EntryKind};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
@@ -14,6 +14,7 @@ use crate::style;
 
 #[derive(Clone)]
 pub struct DisplayInputs {
+    buffer_id: BufferId,
     doc: Arc<dyn Doc>,
     scroll_row: usize,
     scroll_sub_line: usize,
@@ -25,7 +26,8 @@ pub struct DisplayInputs {
 
 impl PartialEq for DisplayInputs {
     fn eq(&self, other: &Self) -> bool {
-        self.doc.version() == other.doc.version()
+        self.buffer_id == other.buffer_id
+            && self.doc.version() == other.doc.version()
             && self.scroll_row == other.scroll_row
             && self.scroll_sub_line == other.scroll_sub_line
             && self.text_width == other.text_width
@@ -42,6 +44,7 @@ pub fn display_inputs(s: &AppState) -> Option<DisplayInputs> {
     let buf = s.buffers.get(&id)?;
     let theme = theme.file.as_ref();
     Some(DisplayInputs {
+        buffer_id: id,
         doc: buf.doc.clone(),
         scroll_row: buf.scroll_row,
         scroll_sub_line: buf.scroll_sub_line,
@@ -109,6 +112,7 @@ pub fn build_display_lines(d: &DisplayInputs) -> Rc<Vec<Line<'static>>> {
 
 #[derive(Clone)]
 pub struct CursorInputs {
+    buffer_id: BufferId,
     doc: Arc<dyn Doc>,
     cursor_row: usize,
     cursor_col: usize,
@@ -120,7 +124,8 @@ pub struct CursorInputs {
 
 impl PartialEq for CursorInputs {
     fn eq(&self, other: &Self) -> bool {
-        self.doc.version() == other.doc.version()
+        self.buffer_id == other.buffer_id
+            && self.doc.version() == other.doc.version()
             && self.cursor_row == other.cursor_row
             && self.cursor_col == other.cursor_col
             && self.scroll_row == other.scroll_row
@@ -135,6 +140,7 @@ pub fn cursor_inputs(s: &AppState) -> Option<CursorInputs> {
     let id = s.active_buffer?;
     let buf = s.buffers.get(&id)?;
     Some(CursorInputs {
+        buffer_id: id,
         doc: buf.doc.clone(),
         cursor_row: buf.cursor_row,
         cursor_col: buf.cursor_col,
