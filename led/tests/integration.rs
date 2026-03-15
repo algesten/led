@@ -523,6 +523,118 @@ fn version_increments_on_edit() {
     assert!(buf(&t).doc.version() > v0);
 }
 
+// ── Tabs ──
+
+#[test]
+fn kill_buffer_clean() {
+    let t = TestHarness::new()
+        .with_file("hello\n")
+        .run(actions(vec![KillBuffer]));
+
+    assert!(t.state.active_buffer.is_none());
+    assert!(t.state.buffers.is_empty());
+    assert!(
+        t.state.info.as_deref().unwrap_or("").contains("Killed"),
+        "should show killed message"
+    );
+}
+
+#[test]
+fn kill_buffer_dirty_warns() {
+    let t = TestHarness::new()
+        .with_file("hello\n")
+        .run(actions(vec![InsertChar('x'), KillBuffer]));
+
+    // Buffer should NOT be killed
+    assert!(t.state.active_buffer.is_some());
+    assert!(!t.state.buffers.is_empty());
+    assert!(
+        t.state.warn.as_deref().unwrap_or("").contains("unsaved"),
+        "should warn about unsaved changes"
+    );
+}
+
+#[test]
+fn next_tab_cycles_through_buffers() {
+    let t = TestHarness::new()
+        .with_named_file("aaa.txt", "a\n")
+        .with_named_file("bbb.txt", "b\n")
+        .with_named_file("ccc.txt", "c\n")
+        .run(vec![]);
+
+    // Last opened file should be active
+    assert_eq!(t.state.buffers.len(), 3);
+    let active = buf(&t);
+    assert_eq!(active.doc.line(0), "c");
+
+    // NextTab wraps to first
+    let t = TestHarness::new()
+        .with_named_file("aaa.txt", "a\n")
+        .with_named_file("bbb.txt", "b\n")
+        .with_named_file("ccc.txt", "c\n")
+        .run(actions(vec![NextTab]));
+
+    let active = buf(&t);
+    assert_eq!(
+        active.doc.line(0),
+        "a",
+        "NextTab from last should wrap to first"
+    );
+}
+
+#[test]
+fn prev_tab_cycles_backwards() {
+    let t = TestHarness::new()
+        .with_named_file("aaa.txt", "a\n")
+        .with_named_file("bbb.txt", "b\n")
+        .with_named_file("ccc.txt", "c\n")
+        .run(actions(vec![PrevTab]));
+
+    let active = buf(&t);
+    assert_eq!(
+        active.doc.line(0),
+        "b",
+        "PrevTab from last should go to middle"
+    );
+}
+
+#[test]
+fn tab_cycle_roundtrip() {
+    // NextTab 3 times from a 3-tab state should return to start
+    let t = TestHarness::new()
+        .with_named_file("aaa.txt", "a\n")
+        .with_named_file("bbb.txt", "b\n")
+        .with_named_file("ccc.txt", "c\n")
+        .run(actions(vec![NextTab, NextTab, NextTab]));
+
+    let active = buf(&t);
+    assert_eq!(
+        active.doc.line(0),
+        "c",
+        "3 NextTabs in 3-tab set should cycle back"
+    );
+}
+
+#[test]
+fn kill_buffer_activates_next() {
+    let t = TestHarness::new()
+        .with_named_file("aaa.txt", "a\n")
+        .with_named_file("bbb.txt", "b\n")
+        .with_named_file("ccc.txt", "c\n")
+        .run(actions(vec![
+            PrevTab, // go to bbb
+            KillBuffer,
+        ]));
+
+    assert_eq!(t.state.buffers.len(), 2);
+    let active = buf(&t);
+    assert_eq!(
+        active.doc.line(0),
+        "c",
+        "killing middle tab should activate next"
+    );
+}
+
 // ── UI ──
 
 #[test]

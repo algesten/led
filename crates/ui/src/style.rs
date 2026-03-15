@@ -422,7 +422,7 @@ mod tests {
 
         let mut state = AppState::new(Startup {
             headless: true,
-            arg_path: None,
+            arg_paths: vec![],
             start_dir: Arc::new("/tmp".into()),
             config_dir: "/tmp/config".into(),
         });

@@ -79,8 +79,14 @@ fn render_editor_area(
 
 fn render_tab_bar(tabs: &TabsInputs, layout: &LayoutInfo, frame: &mut Frame, area: Rect) {
     let mut x = area.x + layout.dims.gutter_width - 1;
+    let mut first = true;
 
     for entry in &tabs.entries {
+        if !first {
+            x += 1;
+        }
+        first = false;
+
         let width = entry.label.len() as u16;
 
         if x + width > area.x + area.width {

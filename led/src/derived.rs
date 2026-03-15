@@ -31,10 +31,10 @@ pub fn derived(state: Stream<Arc<AppState>>) -> Derived {
         .stream();
 
     let open_out = state
-        .filter_map(|s| s.startup.arg_path.clone())
+        .map(|s| s.startup.arg_paths.clone())
+        .filter(|paths| !paths.is_empty())
         .dedupe()
-        .map(|path| DocStoreOut::Open { path })
-        .stream();
+        .flat_map(|paths| paths.into_iter().map(|path| DocStoreOut::Open { path }));
 
     let save_out = state
         .dedupe_by(|s| s.save_request)

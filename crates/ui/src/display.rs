@@ -290,11 +290,7 @@ pub fn tabs_inputs(s: &AppState) -> Option<TabsInputs> {
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_else(|| format!("[{}]", buf.id.0));
             let dirty = buf.doc.dirty();
-            let label = if dirty {
-                format!(" {} \u{25CF} ", name)
-            } else {
-                format!(" {} ", name)
-            };
+            let label = format_tab_label(&name, dirty);
             let is_active = s.active_buffer == Some(buf.id);
             let entry_style = if is_active {
                 active_style
@@ -314,6 +310,24 @@ pub fn tabs_inputs(s: &AppState) -> Option<TabsInputs> {
         inactive_style,
         gutter_width: dims.gutter_width,
     })
+}
+
+const MAX_TAB_CHARS: usize = 15;
+
+fn format_tab_label(name: &str, dirty: bool) -> String {
+    let lead = if dirty { "\u{25cf}" } else { " " };
+    let char_count = name.chars().count();
+    let truncated = char_count + 1 > MAX_TAB_CHARS;
+    let take = if truncated {
+        MAX_TAB_CHARS - 2
+    } else {
+        char_count
+    };
+    lead.chars()
+        .chain(name.chars().take(take))
+        .chain(if truncated { Some('\u{2026}') } else { None })
+        .chain(" ".chars())
+        .collect()
 }
 
 pub fn build_tab_entries(t: &TabsInputs) -> Rc<TabsInputs> {

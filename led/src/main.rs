@@ -42,7 +42,7 @@ async fn main() {
 
     let startup = Startup {
         headless: false,
-        arg_path,
+        arg_paths: arg_path.into_iter().collect(),
         start_dir: Arc::new(start_dir),
         config_dir,
     };

@@ -29,7 +29,7 @@ pub struct TestResult {
 
 pub struct TestHarness {
     tmpdir: TempDir,
-    file_content: Option<String>,
+    files: Vec<(String, String)>,
     viewport: (u16, u16),
 }
 
@@ -37,13 +37,20 @@ impl TestHarness {
     pub fn new() -> Self {
         TestHarness {
             tmpdir: TempDir::new().expect("create tmpdir"),
-            file_content: None,
+            files: Vec::new(),
             viewport: (80, 24),
         }
     }
 
     pub fn with_file(mut self, content: &str) -> Self {
-        self.file_content = Some(content.to_string());
+        let name = format!("test_file_{}.txt", self.files.len());
+        self.files.push((name, content.to_string()));
+        self
+    }
+
+    #[allow(dead_code)]
+    pub fn with_named_file(mut self, name: &str, content: &str) -> Self {
+        self.files.push((name.to_string(), content.to_string()));
         self
     }
 
@@ -54,28 +61,31 @@ impl TestHarness {
     }
 
     pub fn run(self, steps: Vec<TestStep>) -> TestResult {
-        let has_file = self.file_content.is_some();
-        let file_content = self.file_content;
+        let file_count = self.files.len();
+        let files = self.files;
         let tmpdir = self.tmpdir.keep();
         let config_dir = tmpdir.join("config");
         std::fs::create_dir_all(&config_dir).expect("create config dir");
 
-        let arg_path = file_content.map(|content| {
-            let path = tmpdir.join("test_file.txt");
-            std::fs::write(&path, &content).expect("write test file");
-            path
-        });
-        let file_path = arg_path.clone();
+        let arg_paths: Vec<PathBuf> = files
+            .into_iter()
+            .map(|(name, content)| {
+                let path = tmpdir.join(name);
+                std::fs::write(&path, &content).expect("write test file");
+                path
+            })
+            .collect();
+        let file_path = arg_paths.first().cloned();
 
-        let start_dir = arg_path
-            .as_ref()
+        let start_dir = arg_paths
+            .first()
             .and_then(|p| p.parent())
             .map(|p| p.to_path_buf())
             .unwrap_or_else(|| tmpdir.clone());
 
         let startup = Startup {
             headless: true,
-            arg_path,
+            arg_paths,
             start_dir: Arc::new(start_dir),
             config_dir,
         };
@@ -112,10 +122,16 @@ impl TestHarness {
                         let done2 = done.clone();
                         let last_for_wait = last_state.clone();
                         tokio::task::spawn_local(async move {
-                            // Auto-wait for file to open if one was provided
-                            if has_file {
-                                wait_for_condition(&last_for_wait, |s| s.active_buffer.is_some())
-                                    .await;
+                            // Auto-wait for all files to open
+                            if file_count > 0 {
+                                loop {
+                                    if let Some(ref s) = *last_for_wait.borrow() {
+                                        if s.buffers.len() >= file_count {
+                                            break;
+                                        }
+                                    }
+                                    tokio::time::sleep(Duration::from_millis(1)).await;
+                                }
                             }
 
                             for step in steps {

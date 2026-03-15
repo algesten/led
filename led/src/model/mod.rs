@@ -75,6 +75,7 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Arc<AppState>> {
     muts.fold_into(&state, Arc::new(init), |s, m| {
         let mut s = Arc::unwrap_or_clone(s);
         match m {
+            Mut::ActivateBuffer(id) => s.active_buffer = Some(id),
             Mut::Action(a) => handle_action(&mut s, a),
             Mut::Alert { info, warn } => {
                 s.info = info;
@@ -301,8 +302,79 @@ fn handle_action(state: &mut AppState, action: Action) {
             state.save_request += 1;
         }
 
+        // ── Tabs ──
+        Action::NextTab => cycle_tab(state, 1),
+        Action::PrevTab => cycle_tab(state, -1),
+        Action::KillBuffer => kill_buffer(state),
+
         _ => {}
     }
+}
+
+fn cycle_tab(state: &mut AppState, direction: i32) {
+    let Some(active_id) = state.active_buffer else {
+        return;
+    };
+    let mut tabs: Vec<(BufferId, usize)> = state
+        .buffers
+        .iter()
+        .map(|(id, buf)| (*id, buf.tab_order))
+        .collect();
+    tabs.sort_by_key(|&(_, order)| order);
+
+    let Some(pos) = tabs.iter().position(|&(id, _)| id == active_id) else {
+        return;
+    };
+    let len = tabs.len() as i32;
+    let next = ((pos as i32 + direction).rem_euclid(len)) as usize;
+    state.active_buffer = Some(tabs[next].0);
+}
+
+fn kill_buffer(state: &mut AppState) {
+    let Some(active_id) = state.active_buffer else {
+        return;
+    };
+    let Some(buf) = state.buffers.get(&active_id) else {
+        return;
+    };
+
+    // Don't kill dirty buffers (no modal yet)
+    if buf.doc.dirty() {
+        state.warn = Some("Buffer has unsaved changes".into());
+        return;
+    }
+
+    let filename = buf
+        .path
+        .as_ref()
+        .and_then(|p| p.file_name())
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let killed_order = buf.tab_order;
+
+    // Find next buffer to activate (next by tab_order, wrapping)
+    let mut tabs: Vec<(BufferId, usize)> = state
+        .buffers
+        .iter()
+        .filter(|(id, _)| **id != active_id)
+        .map(|(id, buf)| (*id, buf.tab_order))
+        .collect();
+    tabs.sort_by_key(|&(_, order)| order);
+
+    let next_active = tabs
+        .iter()
+        .find(|&&(_, order)| order > killed_order)
+        .or_else(|| tabs.last())
+        .map(|&(id, _)| id);
+
+    state.buffers.remove(&active_id);
+    state.active_buffer = next_active;
+
+    if state.buffers.is_empty() {
+        state.focus = PanelSlot::Side;
+    }
+
+    state.info = Some(format!("Killed {filename}"));
 }
 
 fn handle_timer(state: &mut AppState, name: &'static str) {
@@ -363,6 +435,7 @@ fn maybe_close_group(buf: &mut BufferState, kind: EditKind, ch: char) {
 
 #[derive(Debug, Clone)]
 enum Mut {
+    ActivateBuffer(BufferId),
     Action(Action),
     Alert {
         info: Option<String>,

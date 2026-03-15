@@ -6,8 +6,8 @@ pub struct Startup {
     /// Run headless, used in tests.
     pub headless: bool,
 
-    /// Argument given on the command line, if any.
-    pub arg_path: Option<PathBuf>,
+    /// Files to open on startup.
+    pub arg_paths: Vec<PathBuf>,
 
     /// Directory derived from the command line, or the directory
     /// where the binary started.

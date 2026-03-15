@@ -864,6 +864,25 @@ impl<S: 'static, T: 'static, F: FnMut(&S) -> Option<T> + 'static> Pipe<S, T, F> 
         target
     }
 
+    /// Finalize: one-to-many expansion. Each `T` produces an iterator of `U`s,
+    /// all pushed to the returned stream.
+    pub fn flat_map<U: 'static, I: IntoIterator<Item = U>>(
+        self,
+        mut g: impl FnMut(T) -> I + 'static,
+    ) -> Stream<U> {
+        let target = Stream::new();
+        let target2 = target.clone();
+        let mut f = self.f;
+        self.source.on(move |s: &S| {
+            if let Some(t) = f(s) {
+                for u in g(t) {
+                    target2.push(u);
+                }
+            }
+        });
+        target
+    }
+
     /// Finalize: materialize into a new Stream (fan-out point).
     pub fn stream(self) -> Stream<T> {
         let s = Stream::new();

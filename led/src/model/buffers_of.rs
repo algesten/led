@@ -16,6 +16,15 @@ pub fn buffers_of(
         .sample_combine(state)
         .filter_map(move |(result, state)| match result {
             Ok(DocStoreIn::Opened { id, path, doc }) => {
+                // Duplicate detection: activate existing tab if same path is already open
+                if let Some(existing) = state
+                    .buffers
+                    .values()
+                    .find(|b| b.path.as_ref() == Some(&path))
+                {
+                    return Some(Mut::ActivateBuffer(existing.id));
+                }
+
                 let buf_id = BufferId(state.next_buffer_id);
                 let tab_order = state.buffers.len();
                 let buf = BufferState {

@@ -10,14 +10,9 @@ use super::Mut;
 pub fn process_of(state: &Stream<Arc<AppState>>) -> Stream<Mut> {
     // Suspend: perform terminal restore/re-init, then clear the flag
     let suspend_s = state
-        .filter_map(|s| {
-            if s.suspend {
-                suspend();
-                Some(Mut::Suspend(false))
-            } else {
-                None
-            }
-        })
+        .filter(|s| s.suspend)
+        .inspect(|_| suspend())
+        .map(|_| Mut::Suspend(false))
         .stream();
 
     // Force redraw after resuming from suspend (true→false transition)
@@ -27,13 +22,8 @@ pub fn process_of(state: &Stream<Arc<AppState>>) -> Stream<Mut> {
             (false, false, 0u64),
             |(_, prev_suspend, _), (suspend, redraw)| (prev_suspend, suspend, redraw),
         )
-        .filter_map(|(prev, curr, redraw)| {
-            if prev && !curr {
-                Some(Mut::ForceRedraw(redraw + 1))
-            } else {
-                None
-            }
-        })
+        .filter(|(prev, curr, _)| *prev && !*curr)
+        .map(|(_, _, redraw)| Mut::ForceRedraw(redraw + 1))
         .stream();
 
     let merged = Stream::new();
