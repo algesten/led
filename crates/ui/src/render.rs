@@ -78,9 +78,6 @@ fn render_editor_area(
 }
 
 fn render_tab_bar(tabs: &TabsInputs, layout: &LayoutInfo, frame: &mut Frame, area: Rect) {
-    // Fill background
-    frame.render_widget(Block::default().style(tabs.inactive_style), area);
-
     let mut x = area.x + layout.dims.gutter_width - 1;
 
     for entry in &tabs.entries {

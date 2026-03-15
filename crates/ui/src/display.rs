@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use led_core::Doc;
 use led_core::wrap::{chars_to_string, compute_chunks, expand_tabs, find_sub_line};
-use led_state::{AppState, Dimensions, SaveState};
+use led_state::{AppState, Dimensions};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 
@@ -190,38 +190,17 @@ pub fn compute_cursor_pos(c: &CursorInputs) -> Option<(u16, u16)> {
 
 #[derive(Clone, PartialEq)]
 pub struct StatusInputs {
-    pub workspace_name: String,
     pub file_name: String,
+    pub is_dirty: bool,
     pub cursor_row: usize,
     pub cursor_col: usize,
     pub info: Option<String>,
     pub warn: Option<String>,
-    pub save_state: SaveState,
-    pub status_style: Style,
     pub viewport_width: u16,
 }
 
 pub fn status_inputs(s: &AppState) -> StatusInputs {
-    let workspace_name = s
-        .workspace
-        .as_ref()
-        .map(|w| {
-            w.root
-                .file_name()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .into_owned()
-        })
-        .unwrap_or_else(|| {
-            s.startup
-                .start_dir
-                .file_name()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .into_owned()
-        });
-
-    let (file_name, cursor_row, cursor_col, save_state) = s
+    let (file_name, is_dirty, cursor_row, cursor_col) = s
         .active_buffer
         .and_then(|id| s.buffers.get(&id))
         .map(|buf| {
@@ -231,65 +210,48 @@ pub fn status_inputs(s: &AppState) -> StatusInputs {
                 .and_then(|p| p.file_name())
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            (fname, buf.cursor_row, buf.cursor_col, buf.save_state)
+            (fname, buf.doc.dirty(), buf.cursor_row, buf.cursor_col)
         })
         .unwrap_or_default();
 
-    let status_style = s
-        .config_theme
-        .as_ref()
-        .map(|ct| style::resolve(ct.file.as_ref(), &ct.file.status_bar.style))
-        .unwrap_or_default();
+    let file_name = if file_name.is_empty() {
+        "led".to_string()
+    } else {
+        file_name
+    };
 
     let viewport_width = s.dims.map_or(0, |d| d.viewport_width);
 
     StatusInputs {
-        workspace_name,
         file_name,
+        is_dirty,
         cursor_row,
         cursor_col,
         info: s.info.clone(),
         warn: s.warn.clone(),
-        save_state,
-        status_style,
         viewport_width,
     }
 }
 
 pub fn build_status_content(s: &StatusInputs) -> Rc<String> {
-    let left = format!(" led: {}", s.workspace_name);
+    let modified = if s.is_dirty { " \u{25cf}" } else { "" };
+    let default_left = format!(" {}{}", s.file_name, modified);
+    let right = format!("L{}:C{} ", s.cursor_row + 1, s.cursor_col + 1);
 
-    let msg = s.warn.as_deref().or(s.info.as_deref()).unwrap_or("");
-
-    let right = if !s.file_name.is_empty() {
-        format!(
-            "{} L{}:C{} ",
-            s.file_name,
-            s.cursor_row + 1,
-            s.cursor_col + 1
-        )
-    } else {
-        String::new()
+    let left = match s.warn.as_deref().or(s.info.as_deref()) {
+        Some(m) => format!(" {}", m),
+        None => default_left,
     };
 
     let total = s.viewport_width as usize;
-    let content = if msg.is_empty() && right.is_empty() {
-        format!("{:<width$}", left, width = total)
-    } else if msg.is_empty() {
-        let pad = total.saturating_sub(left.len() + right.len());
-        format!("{}{:>pad$}{}", left, "", right, pad = pad)
-    } else {
-        let gap = 2;
-        let used = left.len() + gap + msg.len() + gap + right.len();
-        if used <= total {
-            let mid_pad = total.saturating_sub(left.len() + gap + msg.len() + right.len());
-            format!("{}  {}{:>pad$}{}", left, msg, "", right, pad = mid_pad)
-        } else {
-            format!("{:<width$}", left, width = total)
-        }
-    };
-
-    Rc::new(content)
+    let padding = total.saturating_sub(left.len() + right.len());
+    Rc::new(format!(
+        "{}{:padding$}{}",
+        left,
+        "",
+        right,
+        padding = padding
+    ))
 }
 
 // ── Tab bar ──

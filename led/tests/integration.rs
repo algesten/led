@@ -650,3 +650,36 @@ fn wrap_scroll_sub_line() {
         "scroll should have moved for wrapped content"
     );
 }
+
+// ── Theme ──
+
+#[test]
+fn theme_loads() {
+    let t = TestHarness::new()
+        .with_file("hello\n")
+        .run(vec![WaitFor(|s| s.config_theme.is_some())]);
+
+    let theme = t.state.config_theme.as_ref().expect("theme should load");
+    let theme = theme.file.as_ref();
+
+    // Verify COLORS section parsed
+    assert!(
+        theme.colors.contains_key("muted"),
+        "COLORS should contain 'muted'"
+    );
+    assert!(
+        theme.colors.contains_key("bold"),
+        "COLORS should contain 'bold'"
+    );
+
+    // Verify status_bar.style is a table with fg and bg
+    match &theme.status_bar.style {
+        led_core::theme::StyleValue::Style(st) => {
+            assert!(st.fg.is_some(), "status_bar.style should have fg");
+            assert!(st.bg.is_some(), "status_bar.style should have bg");
+        }
+        led_core::theme::StyleValue::Scalar(s) => {
+            panic!("status_bar.style should be a table, got scalar: {}", s);
+        }
+    }
+}

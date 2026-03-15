@@ -79,7 +79,5 @@ pub fn driver(state: Stream<Arc<AppState>>) -> Ui {
 
 fn setup() -> Terminal<CrosstermBackend<io::Stdout>> {
     let backend = CrosstermBackend::new(io::stdout());
-    let mut terminal = Terminal::new(backend).expect("create terminal");
-    terminal.clear().ok();
-    terminal
+    Terminal::new(backend).expect("create terminal")
 }

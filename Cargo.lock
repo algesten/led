@@ -770,6 +770,7 @@ dependencies = [
  "led-docstore",
  "led-state",
  "led-terminal-in",
+ "led-timers",
  "led-ui",
  "led-workspace",
  "libc",
@@ -833,14 +834,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "led-timers"
+version = "0.1.0"
+dependencies = [
+ "led-core",
+ "tokio",
+]
+
+[[package]]
 name = "led-ui"
 version = "0.1.0"
 dependencies = [
+ "led-config-file",
  "led-core",
  "led-state",
  "log",
  "ratatui",
  "tokio",
+ "toml",
 ]
 
 [[package]]

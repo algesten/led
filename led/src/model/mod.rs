@@ -60,6 +60,7 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Arc<AppState>> {
         }));
 
     let direct_actions_s = drivers.actions_in.map(|a| Mut::Action(a)).stream();
+    let timers_s = drivers.timers_in.map(|t| Mut::TimerFired(t.name)).stream();
 
     workspace_s.forward(&muts);
     keymap_s.forward(&muts);
@@ -67,6 +68,7 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Arc<AppState>> {
     direct_actions_s.forward(&muts);
     buffers_s.forward(&muts);
     process_s.forward(&muts);
+    timers_s.forward(&muts);
 
     // ── 3. Reduce ──
 
@@ -94,6 +96,7 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Arc<AppState>> {
                 s.dims = Some(Dimensions::new(w, h, s.show_side_panel));
             }
             Mut::Suspend(v) => s.suspend = v,
+            Mut::TimerFired(name) => handle_timer(&mut s, name),
             Mut::Workspace(v) => s.workspace = Some(Arc::new(v)),
         }
         Arc::new(s)
@@ -302,6 +305,16 @@ fn handle_action(state: &mut AppState, action: Action) {
     }
 }
 
+fn handle_timer(state: &mut AppState, name: &'static str) {
+    match name {
+        "alert_clear" => {
+            state.info = None;
+            state.warn = None;
+        }
+        _ => {}
+    }
+}
+
 /// Run `f` on the active buffer, then ensure cursor stays visible.
 fn with_buf(state: &mut AppState, f: impl FnOnce(&mut BufferState, &Dimensions)) {
     let dims = match state.dims {
@@ -363,6 +376,7 @@ enum Mut {
     Keymap(Arc<Keymap>),
     Resize(u16, u16),
     Suspend(bool),
+    TimerFired(&'static str),
     Workspace(Workspace),
 }
 

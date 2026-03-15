@@ -1,16 +1,19 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use led_config_file::{ConfigDir, ConfigFileOut};
 use led_core::Startup;
 use led_core::rx::Stream;
 use led_docstore::DocStoreOut;
 use led_state::AppState;
+use led_timers::{Schedule, TimersOut};
 
 pub struct Derived {
     pub ui: Stream<Arc<AppState>>,
     pub workspace_out: Stream<Arc<Startup>>,
     pub docstore_out: Stream<DocStoreOut>,
     pub config_file_out: Stream<ConfigFileOut>,
+    pub timers_out: Stream<TimersOut>,
 }
 
 pub fn derived(state: Stream<Arc<AppState>>) -> Derived {
@@ -47,10 +50,23 @@ pub fn derived(state: Stream<Arc<AppState>>) -> Derived {
     open_out.forward(&docstore_out);
     save_out.forward(&docstore_out);
 
+    // Timers: schedule alert clear when info/warn appears
+    let timers_out = state
+        .map(|s| s.info.is_some() || s.warn.is_some())
+        .dedupe()
+        .filter(|has_alert| *has_alert)
+        .map(|_| TimersOut::Set {
+            name: "alert_clear",
+            duration: Duration::from_secs(3),
+            schedule: Schedule::Replace,
+        })
+        .stream();
+
     Derived {
         ui,
         workspace_out,
         docstore_out,
         config_file_out,
+        timers_out,
     }
 }

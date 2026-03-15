@@ -11,6 +11,7 @@ led-workspace = { workspace = true }
 led-terminal-in = { workspace = true }
 led-docstore = { workspace = true }
 led-ui = { workspace = true }
+led-timers = { workspace = true }
 
 clap = { workspace = true }
 crossterm = { workspace = true }

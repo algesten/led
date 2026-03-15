@@ -6,46 +6,7 @@ Every side effect lives in a Driver. The Model is a pure reduce: `(State, Mut) -
 
 ---
 
-## Next: Phase 6 — Status Bar & Input Bar
-
----
-
-## Phase 6 — Status Bar & Input Bar
-
-The old editor's status bar is driven by the active buffer component and doubles as an input bar during incremental search.
-
-### 6A. Default Status Bar Content
-
-When no special mode is active, the status bar shows a single line:
-
-```
- {filename}{dirty_dot}{branch}{lsp_status}              L{row}:C{col}
-```
-
-- **Left:** ` {filename}` — space-prefixed filename from active buffer
-- **Dirty indicator:** ` ●` (U+25CF) if buffer is modified
-- **Branch:** ` ({branch})` from git status (empty string if no branch yet)
-- **LSP status:** `  {spinner}{server_name}  {spinner} {detail}` — spinner is braille animation when busy (skip for now, leave room in format)
-- **Right:** `L{row+1}:C{col+1} ` — cursor position, right-aligned with trailing space
-- **Style:** `status_bar.style` from theme
-
-### 6B. Search Prompt Mode (ISearch — later phase)
-
-When incremental search is active, the status bar becomes an input bar:
-
-```
- Search: {query}|
-```
-
-or `Failing search: {query}|` if no matches. Cursor is positioned after the query text. This replaces the normal status bar content entirely.
-
-### 6C. Transient Messages
-
-Shell-level messages (warnings, info) take priority over the normal status bar when present. Show ` {message}` left-aligned, padded to full width, in `status_bar.style`. Messages auto-clear after a timeout (handled by model).
-
-### 6D. Implementation
-
-Currently `render_status_bar` shows `led: {workspace}` on the left and `{file} L:C` on the right. Change to match the old format: filename-first left side, no workspace name in status bar. The workspace name belongs in the tab bar or title — not the status bar.
+## Next: Phase 7 — Tab Management
 
 ---
 

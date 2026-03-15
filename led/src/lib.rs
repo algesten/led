@@ -7,6 +7,7 @@ use led_core::theme::Theme;
 use led_core::{Action, Alert, Startup};
 use led_state::AppState;
 use led_terminal_in::TerminalInput;
+use led_timers::TimersIn;
 use tokio::sync::oneshot;
 
 pub mod derived;
@@ -22,6 +23,7 @@ pub struct Drivers {
     pub docstore_in: Stream<Result<led_docstore::DocStoreIn, Alert>>,
     pub config_keys_in: Stream<Result<ConfigFile<Keys>, Alert>>,
     pub config_theme_in: Stream<Result<ConfigFile<Theme>, Alert>>,
+    pub timers_in: Stream<TimersIn>,
 }
 
 pub struct RunGuards {
@@ -59,6 +61,8 @@ pub fn run(
         (Some(guard), Some(ui), terminal_in)
     };
 
+    let timers_in = led_timers::driver(d.timers_out);
+
     let drivers = Drivers {
         terminal_in,
         actions_in,
@@ -66,6 +70,7 @@ pub fn run(
         docstore_in: led_docstore::driver(d.docstore_out),
         config_keys_in: led_config_file::driver::<Keys>(d.config_file_out.clone()),
         config_theme_in: led_config_file::driver::<Theme>(d.config_file_out),
+        timers_in,
     };
 
     // 4. Model
