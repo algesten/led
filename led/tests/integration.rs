@@ -635,6 +635,186 @@ fn kill_buffer_activates_next() {
     );
 }
 
+// ── Browser ──
+
+fn has_browser_entries(s: &led_state::AppState) -> bool {
+    !s.browser.entries.is_empty()
+}
+
+#[test]
+fn browser_populates_on_workspace() {
+    let t = TestHarness::new()
+        .with_file("hello\n")
+        .run(vec![WaitFor(has_browser_entries)]);
+
+    assert!(
+        !t.state.browser.entries.is_empty(),
+        "browser should have entries after workspace loads"
+    );
+}
+
+#[test]
+fn browser_root_entries_are_sorted() {
+    // Create a dir and files to ensure sorting: dirs first, then files, alphabetical
+    let t = TestHarness::new()
+        .with_named_file("bbb.txt", "b\n")
+        .with_named_file("aaa.txt", "a\n")
+        .run(vec![WaitFor(has_browser_entries)]);
+
+    let names: Vec<&str> = t
+        .state
+        .browser
+        .entries
+        .iter()
+        .map(|e| e.name.as_str())
+        .collect();
+
+    // config/ dir should come first (created by harness), then files alphabetically
+    // Exact entries depend on tmpdir contents but files should be sorted
+    let file_names: Vec<&str> = t
+        .state
+        .browser
+        .entries
+        .iter()
+        .filter(|e| matches!(e.kind, led_state::EntryKind::File))
+        .map(|e| e.name.as_str())
+        .collect();
+
+    let mut sorted = file_names.clone();
+    sorted.sort();
+    assert_eq!(file_names, sorted, "files should be alphabetically sorted");
+}
+
+#[test]
+fn browser_hides_dotfiles() {
+    let t = TestHarness::new()
+        .with_named_file(".hidden", "secret\n")
+        .with_named_file("visible.txt", "hello\n")
+        .run(vec![WaitFor(has_browser_entries)]);
+
+    let names: Vec<&str> = t
+        .state
+        .browser
+        .entries
+        .iter()
+        .map(|e| e.name.as_str())
+        .collect();
+
+    assert!(
+        !names.contains(&".hidden"),
+        "dotfiles should be filtered out"
+    );
+    assert!(
+        names.contains(&"visible.txt"),
+        "regular files should be present"
+    );
+}
+
+#[test]
+fn browser_move_down_selects_next() {
+    let t = TestHarness::new()
+        .with_named_file("aaa.txt", "a\n")
+        .with_named_file("bbb.txt", "b\n")
+        .run(vec![
+            WaitFor(has_browser_entries),
+            Do(ToggleFocus), // focus → Side
+            Do(MoveDown),
+        ]);
+
+    assert_eq!(t.state.browser.selected, 1, "MoveDown should advance selection");
+}
+
+#[test]
+fn browser_move_up_at_top_stays() {
+    let t = TestHarness::new()
+        .with_file("hello\n")
+        .run(vec![
+            WaitFor(has_browser_entries),
+            Do(ToggleFocus),
+            Do(MoveUp),
+        ]);
+
+    assert_eq!(t.state.browser.selected, 0, "MoveUp at top should stay at 0");
+}
+
+#[test]
+fn move_down_in_main_moves_cursor_not_browser() {
+    let t = TestHarness::new()
+        .with_file("aaa\nbbb\nccc\n")
+        .run(vec![
+            WaitFor(has_browser_entries),
+            Do(MoveDown), // focus is Main → should move editor cursor
+        ]);
+
+    assert_eq!(buf(&t).cursor_row, 1, "MoveDown in Main should move editor cursor");
+    assert_eq!(t.state.browser.selected, 0, "browser selection should not change");
+}
+
+#[test]
+fn browser_open_selected_file() {
+    // Navigate past any directories to find a file, then open it
+    let t = TestHarness::new()
+        .with_named_file("aaa.txt", "a\n")
+        .run(vec![
+            WaitFor(has_browser_entries),
+            Do(ToggleFocus), // focus → Side
+            Do(MoveDown),    // skip past config/ dir if present
+            Do(MoveDown),
+            Do(MoveDown),
+        ]);
+
+    // Find a file entry's index
+    let file_idx = t.state.browser.entries.iter().position(|e| {
+        matches!(e.kind, led_state::EntryKind::File)
+    });
+
+    if let Some(_) = file_idx {
+        // Re-run with focus on a file entry and OpenSelected
+        let t = TestHarness::new()
+            .with_named_file("zzz.txt", "z\n") // name sorts after config/
+            .run(vec![
+                WaitFor(has_browser_entries),
+                Do(ToggleFocus),
+                Do(FileEnd), // jump to last entry — guaranteed to be a file (sorted after dirs)
+                Do(OpenSelected),
+            ]);
+
+        // Opening a file should switch focus back to Main
+        assert_eq!(t.state.focus, led_core::PanelSlot::Main);
+    }
+}
+
+#[test]
+fn browser_open_selected_dir_toggles() {
+    let t = TestHarness::new()
+        .with_file("hello\n")
+        .run(vec![WaitFor(has_browser_entries)]);
+
+    // Check if there's a directory entry (config/ is created by harness)
+    let has_dir = t
+        .state
+        .browser
+        .entries
+        .iter()
+        .any(|e| matches!(e.kind, led_state::EntryKind::Directory { .. }));
+
+    if has_dir {
+        let t = TestHarness::new()
+            .with_file("hello\n")
+            .run(vec![
+                WaitFor(has_browser_entries),
+                Do(ToggleFocus),
+                Do(OpenSelected), // should expand the directory
+            ]);
+
+        // After expanding, there should be more entries (or expanded_dirs should be non-empty)
+        assert!(
+            !t.state.browser.expanded_dirs.is_empty(),
+            "opening a dir should expand it"
+        );
+    }
+}
+
 // ── UI ──
 
 #[test]

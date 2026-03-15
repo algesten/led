@@ -2,11 +2,13 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 #[derive(Debug, Default, Clone, PartialEq)]
+/// Immutable configuration captured at startup. Do not mutate after construction —
+/// runtime file opens go through `AppState::pending_opens` instead.
 pub struct Startup {
     /// Run headless, used in tests.
     pub headless: bool,
 
-    /// Files to open on startup.
+    /// Files to open on startup (from CLI args). Immutable after construction.
     pub arg_paths: Vec<PathBuf>,
 
     /// Directory derived from the command line, or the directory

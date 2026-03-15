@@ -11,7 +11,7 @@ use led_core::keys::{Keymap, Keys};
 use led_core::rx::Stream;
 use led_core::theme::Theme;
 use led_core::{Action, Alert, BufferId, PanelSlot};
-use led_state::{AppState, BufferState, Dimensions, EditKind, SaveState};
+use led_state::{AppState, BufferState, Dimensions, EditKind, EntryKind, SaveState};
 use led_workspace::Workspace;
 
 use crate::Drivers;
@@ -61,6 +61,12 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Arc<AppState>> {
 
     let direct_actions_s = drivers.actions_in.map(|a| Mut::Action(a)).stream();
     let timers_s = drivers.timers_in.map(|t| Mut::TimerFired(t.name)).stream();
+    let fs_s = drivers
+        .fs_in
+        .map(|ev| match ev {
+            led_fs::FsIn::DirListed { path, entries } => Mut::DirListed(path, entries),
+        })
+        .stream();
 
     workspace_s.forward(&muts);
     keymap_s.forward(&muts);
@@ -69,6 +75,7 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Arc<AppState>> {
     buffers_s.forward(&muts);
     process_s.forward(&muts);
     timers_s.forward(&muts);
+    fs_s.forward(&muts);
 
     // ── 3. Reduce ──
 
@@ -90,6 +97,10 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Arc<AppState>> {
                 s.buffers.insert(id, buf);
             }
             Mut::ConfigKeys(v) => s.config_keys = Some(v),
+            Mut::DirListed(path, entries) => {
+                s.browser.dir_contents.insert(path, entries);
+                s.browser.rebuild_entries();
+            }
             Mut::ConfigTheme(v) => s.config_theme = Some(v),
             Mut::ForceRedraw(v) => s.force_redraw = v,
             Mut::Keymap(v) => s.keymap = Some(v),
@@ -98,7 +109,17 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Arc<AppState>> {
             }
             Mut::Suspend(v) => s.suspend = v,
             Mut::TimerFired(name) => handle_timer(&mut s, name),
-            Mut::Workspace(v) => s.workspace = Some(Arc::new(v)),
+            Mut::Workspace(v) => {
+                let root = v.root.clone();
+                s.workspace = Some(Arc::new(v));
+                // Initialize or refresh browser tree
+                s.browser.root = Some(root.clone());
+                s.browser.dir_contents.clear();
+                let mut dirs_to_list = vec![root];
+                dirs_to_list.extend(s.browser.expanded_dirs.iter().cloned());
+                s.pending_lists.set(dirs_to_list);
+                s.browser.rebuild_entries();
+            }
         }
         Arc::new(s)
     });
@@ -134,21 +155,19 @@ fn handle_action(state: &mut AppState, action: Action) {
             state.dims = Some(Dimensions::new(w, h, state.show_side_panel));
         }
 
-        // ── Movement ──
-        Action::MoveUp => with_buf(state, |buf, dims| {
-            let (r, c, a) = mov::move_up(buf, dims);
-            buf.cursor_row = r;
-            buf.cursor_col = c;
-            buf.cursor_col_affinity = a;
-            close_group_on_move(buf);
-        }),
-        Action::MoveDown => with_buf(state, |buf, dims| {
-            let (r, c, a) = mov::move_down(buf, dims);
-            buf.cursor_row = r;
-            buf.cursor_col = c;
-            buf.cursor_col_affinity = a;
-            close_group_on_move(buf);
-        }),
+        // ── Movement (routed by focus) ──
+        Action::MoveUp
+        | Action::MoveDown
+        | Action::PageUp
+        | Action::PageDown
+        | Action::FileStart
+        | Action::FileEnd => {
+            if state.focus == PanelSlot::Side {
+                handle_browser_nav(state, &action);
+            } else {
+                handle_editor_movement(state, &action);
+            }
+        }
         Action::MoveLeft => with_buf(state, |buf, dims| {
             let (r, c, _) = mov::move_left(buf);
             buf.cursor_row = r;
@@ -177,34 +196,12 @@ fn handle_action(state: &mut AppState, action: Action) {
             buf.cursor_col_affinity = mov::reset_affinity(buf, dims);
             close_group_on_move(buf);
         }),
-        Action::PageUp => with_buf(state, |buf, dims| {
-            let (r, c, a) = mov::page_up(buf, dims);
-            buf.cursor_row = r;
-            buf.cursor_col = c;
-            buf.cursor_col_affinity = a;
-            close_group_on_move(buf);
-        }),
-        Action::PageDown => with_buf(state, |buf, dims| {
-            let (r, c, a) = mov::page_down(buf, dims);
-            buf.cursor_row = r;
-            buf.cursor_col = c;
-            buf.cursor_col_affinity = a;
-            close_group_on_move(buf);
-        }),
-        Action::FileStart => with_buf(state, |buf, dims| {
-            let (r, c, _) = mov::file_start();
-            buf.cursor_row = r;
-            buf.cursor_col = c;
-            buf.cursor_col_affinity = mov::reset_affinity(buf, dims);
-            close_group_on_move(buf);
-        }),
-        Action::FileEnd => with_buf(state, |buf, dims| {
-            let (r, c, _) = mov::file_end(&*buf.doc);
-            buf.cursor_row = r;
-            buf.cursor_col = c;
-            buf.cursor_col_affinity = mov::reset_affinity(buf, dims);
-            close_group_on_move(buf);
-        }),
+
+        // ── Browser ──
+        Action::ExpandDir => handle_browser_expand(state),
+        Action::CollapseDir => handle_browser_collapse(state),
+        Action::CollapseAll => handle_browser_collapse_all(state),
+        Action::OpenSelected => handle_browser_open(state),
 
         // ── Editing ──
         Action::InsertChar(ch) => with_buf(state, |buf, dims| {
@@ -299,7 +296,7 @@ fn handle_action(state: &mut AppState, action: Action) {
                     buf.save_state = SaveState::Saving;
                 }
             }
-            state.save_request += 1;
+            state.save_request.set(());
         }
 
         // ── Tabs ──
@@ -387,6 +384,164 @@ fn handle_timer(state: &mut AppState, name: &'static str) {
     }
 }
 
+// ── Editor movement (focus = Main) ──
+
+fn handle_editor_movement(state: &mut AppState, action: &Action) {
+    match action {
+        Action::MoveUp => with_buf(state, |buf, dims| {
+            let (r, c, a) = mov::move_up(buf, dims);
+            buf.cursor_row = r;
+            buf.cursor_col = c;
+            buf.cursor_col_affinity = a;
+            close_group_on_move(buf);
+        }),
+        Action::MoveDown => with_buf(state, |buf, dims| {
+            let (r, c, a) = mov::move_down(buf, dims);
+            buf.cursor_row = r;
+            buf.cursor_col = c;
+            buf.cursor_col_affinity = a;
+            close_group_on_move(buf);
+        }),
+        Action::PageUp => with_buf(state, |buf, dims| {
+            let (r, c, a) = mov::page_up(buf, dims);
+            buf.cursor_row = r;
+            buf.cursor_col = c;
+            buf.cursor_col_affinity = a;
+            close_group_on_move(buf);
+        }),
+        Action::PageDown => with_buf(state, |buf, dims| {
+            let (r, c, a) = mov::page_down(buf, dims);
+            buf.cursor_row = r;
+            buf.cursor_col = c;
+            buf.cursor_col_affinity = a;
+            close_group_on_move(buf);
+        }),
+        Action::FileStart => with_buf(state, |buf, dims| {
+            let (r, c, _) = mov::file_start();
+            buf.cursor_row = r;
+            buf.cursor_col = c;
+            buf.cursor_col_affinity = mov::reset_affinity(buf, dims);
+            close_group_on_move(buf);
+        }),
+        Action::FileEnd => with_buf(state, |buf, dims| {
+            let (r, c, _) = mov::file_end(&*buf.doc);
+            buf.cursor_row = r;
+            buf.cursor_col = c;
+            buf.cursor_col_affinity = mov::reset_affinity(buf, dims);
+            close_group_on_move(buf);
+        }),
+        _ => {}
+    }
+}
+
+// ── Browser navigation (focus = Side) ──
+
+fn handle_browser_nav(state: &mut AppState, action: &Action) {
+    let len = state.browser.entries.len();
+    if len == 0 {
+        return;
+    }
+    let height = state.dims.map_or(20, |d| d.buffer_height());
+    match action {
+        Action::MoveUp => {
+            state.browser.selected = state.browser.selected.saturating_sub(1);
+        }
+        Action::MoveDown => {
+            state.browser.selected = (state.browser.selected + 1).min(len - 1);
+        }
+        Action::PageUp => {
+            state.browser.selected = state.browser.selected.saturating_sub(height);
+        }
+        Action::PageDown => {
+            state.browser.selected = (state.browser.selected + height).min(len - 1);
+        }
+        Action::FileStart => {
+            state.browser.selected = 0;
+        }
+        Action::FileEnd => {
+            state.browser.selected = len - 1;
+        }
+        _ => {}
+    }
+    // Keep selection visible
+    if state.browser.selected < state.browser.scroll_offset {
+        state.browser.scroll_offset = state.browser.selected;
+    } else if state.browser.selected >= state.browser.scroll_offset + height {
+        state.browser.scroll_offset = state.browser.selected + 1 - height;
+    }
+}
+
+fn handle_browser_expand(state: &mut AppState) {
+    let Some(entry) = state.browser.entries.get(state.browser.selected) else {
+        return;
+    };
+    if !matches!(entry.kind, EntryKind::Directory { expanded: false }) {
+        return;
+    }
+    let path = entry.path.clone();
+    state.browser.expanded_dirs.insert(path.clone());
+    if state.browser.dir_contents.contains_key(&path) {
+        state.browser.rebuild_entries();
+    } else {
+        state.pending_lists.set(vec![path]);
+    }
+}
+
+fn handle_browser_collapse(state: &mut AppState) {
+    let Some(entry) = state.browser.entries.get(state.browser.selected) else {
+        return;
+    };
+    let collapse_path = match &entry.kind {
+        EntryKind::Directory { expanded: true } => entry.path.clone(),
+        _ => {
+            // File or collapsed dir — collapse parent
+            match entry.path.parent() {
+                Some(parent) if state.browser.expanded_dirs.contains(parent) => {
+                    parent.to_path_buf()
+                }
+                _ => return,
+            }
+        }
+    };
+    state.browser.expanded_dirs.remove(&collapse_path);
+    state.browser.rebuild_entries();
+    // Move selection to the collapsed directory
+    if let Some(pos) = state
+        .browser
+        .entries
+        .iter()
+        .position(|e| e.path == collapse_path)
+    {
+        state.browser.selected = pos;
+    }
+}
+
+fn handle_browser_collapse_all(state: &mut AppState) {
+    state.browser.expanded_dirs.clear();
+    state.browser.rebuild_entries();
+    state.browser.selected = 0;
+    state.browser.scroll_offset = 0;
+}
+
+fn handle_browser_open(state: &mut AppState) {
+    let Some(entry) = state.browser.entries.get(state.browser.selected) else {
+        return;
+    };
+    match &entry.kind {
+        EntryKind::File => {
+            state.pending_open.set(Some(entry.path.clone()));
+            state.focus = PanelSlot::Main;
+        }
+        EntryKind::Directory { expanded } => {
+            if *expanded {
+                handle_browser_collapse(state);
+            } else {
+                handle_browser_expand(state);
+            }
+        }
+    }
+}
+
 /// Run `f` on the active buffer, then ensure cursor stays visible.
 fn with_buf(state: &mut AppState, f: impl FnOnce(&mut BufferState, &Dimensions)) {
     let dims = match state.dims {
@@ -445,6 +600,7 @@ enum Mut {
     BufferUpdate(BufferId, BufferState),
     ConfigKeys(ConfigFile<Keys>),
     ConfigTheme(ConfigFile<Theme>),
+    DirListed(std::path::PathBuf, Vec<led_fs::DirEntry>),
     ForceRedraw(u64),
     Keymap(Arc<Keymap>),
     Resize(u16, u16),

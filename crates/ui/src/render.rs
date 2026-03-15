@@ -12,6 +12,7 @@ pub fn render(
     cursor: Option<(u16, u16)>,
     status: &str,
     tabs: &TabsInputs,
+    browser: &[Line],
 ) {
     let dims = layout.dims;
     let area = frame.area();
@@ -31,7 +32,7 @@ pub fn render(
             Layout::horizontal([Constraint::Length(dims.side_width()), Constraint::Min(1)])
                 .areas(main_area);
 
-        render_side_panel(layout, frame, side_area);
+        render_side_panel(browser, layout, frame, side_area);
         render_editor_area(lines, cursor, tabs, layout, frame, editor_area);
     } else {
         render_editor_area(lines, cursor, tabs, layout, frame, main_area);
@@ -45,13 +46,19 @@ fn render_status_bar(status: &str, layout: &LayoutInfo, frame: &mut Frame, area:
     );
 }
 
-fn render_side_panel(layout: &LayoutInfo, frame: &mut Frame, area: Rect) {
+fn render_side_panel(browser: &[Line], layout: &LayoutInfo, frame: &mut Frame, area: Rect) {
     let block = Block::default()
         .borders(Borders::RIGHT)
         .border_style(layout.side_border_style)
         .style(layout.side_bg_style);
 
+    let inner = block.inner(area);
     frame.render_widget(block, area);
+
+    if !browser.is_empty() {
+        let paragraph = Paragraph::new(browser.to_vec()).style(layout.side_bg_style);
+        frame.render_widget(paragraph, inner);
+    }
 }
 
 fn render_editor_area(

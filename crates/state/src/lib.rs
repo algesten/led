@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -6,7 +6,7 @@ use std::sync::Arc;
 use led_config_file::ConfigFile;
 use led_core::keys::{Keymap, Keys};
 use led_core::theme::Theme;
-use led_core::{BufferId, Doc, DocId, PanelSlot, Startup};
+use led_core::{BufferId, Doc, DocId, PanelSlot, Startup, Versioned};
 pub use led_workspace::Workspace;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -118,6 +118,81 @@ impl fmt::Debug for BufferState {
     }
 }
 
+// ── File browser ──
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EntryKind {
+    File,
+    Directory { expanded: bool },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TreeEntry {
+    pub path: PathBuf,
+    pub name: String,
+    pub depth: usize,
+    pub kind: EntryKind,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct FileBrowserState {
+    pub root: Option<PathBuf>,
+    pub dir_contents: HashMap<PathBuf, Vec<led_fs::DirEntry>>,
+    pub expanded_dirs: HashSet<PathBuf>,
+    pub entries: Vec<TreeEntry>,
+    pub selected: usize,
+    pub scroll_offset: usize,
+}
+
+impl FileBrowserState {
+    /// Rebuild the flat `entries` list from `dir_contents` and `expanded_dirs`.
+    /// Pure — no I/O.
+    pub fn rebuild_entries(&mut self) {
+        self.entries.clear();
+        let Some(ref root) = self.root else { return };
+        let root = root.clone();
+        walk_tree(
+            &root,
+            0,
+            &self.dir_contents,
+            &self.expanded_dirs,
+            &mut self.entries,
+        );
+    }
+}
+
+fn walk_tree(
+    dir: &PathBuf,
+    depth: usize,
+    dir_contents: &HashMap<PathBuf, Vec<led_fs::DirEntry>>,
+    expanded_dirs: &HashSet<PathBuf>,
+    entries: &mut Vec<TreeEntry>,
+) {
+    let Some(contents) = dir_contents.get(dir) else {
+        return;
+    };
+    for entry in contents {
+        let path = dir.join(&entry.name);
+        let expanded = entry.is_dir && expanded_dirs.contains(&path);
+        let kind = if entry.is_dir {
+            EntryKind::Directory { expanded }
+        } else {
+            EntryKind::File
+        };
+        entries.push(TreeEntry {
+            path: path.clone(),
+            name: entry.name.clone(),
+            depth,
+            kind,
+        });
+        if expanded {
+            walk_tree(&path, depth + 1, dir_contents, expanded_dirs, entries);
+        }
+    }
+}
+
+// ── App state ──
+
 #[derive(Debug, Clone, Default)]
 pub struct AppState {
     pub startup: Arc<Startup>,
@@ -136,7 +211,10 @@ pub struct AppState {
     pub buffers: HashMap<BufferId, BufferState>,
     pub active_buffer: Option<BufferId>,
     pub next_buffer_id: u64,
-    pub save_request: u64,
+    pub save_request: Versioned<()>,
+    pub browser: FileBrowserState,
+    pub pending_open: Versioned<Option<PathBuf>>,
+    pub pending_lists: Versioned<Vec<PathBuf>>,
 }
 
 impl AppState {

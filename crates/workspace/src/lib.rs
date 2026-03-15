@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use led_core::Startup;
 use led_core::rx::Stream;
+use notify::{EventKind, RecursiveMode, Watcher};
 use tokio::sync::mpsc;
 
 const GIT_DIR: &str = ".git";
@@ -29,32 +30,50 @@ pub fn driver(out: Stream<Arc<Startup>>) -> Stream<Workspace> {
         cmd_tx.try_send(cmd.clone()).ok();
     });
 
-    // Async task: compute workspace
+    // Async task: compute workspace + start watcher
     tokio::spawn(async move {
-        while let Some(startup) = cmd_rx.recv().await {
-            let dir = fs::canonicalize(&*startup.start_dir)
-                .unwrap_or_else(|_| startup.start_dir.as_ref().clone());
+        let (watch_tx, mut watch_rx) = mpsc::channel::<()>(16);
+        let mut _watcher: Option<notify::RecommendedWatcher> = None;
+        let mut current: Option<Workspace> = None;
 
-            let root = find_git_root(&dir);
+        loop {
+            tokio::select! {
+                maybe_cmd = cmd_rx.recv() => {
+                    let Some(startup) = maybe_cmd else { break };
+                    let dir = fs::canonicalize(&*startup.start_dir)
+                        .unwrap_or_else(|_| startup.start_dir.as_ref().clone());
 
-            let config = startup.config_dir.clone();
+                    let root = find_git_root(&dir);
+                    let config = startup.config_dir.clone();
 
-            let primary = match try_become_primary(&config, &root) {
-                Some(lock_file) => {
-                    std::mem::forget(lock_file);
-                    true
+                    let primary = match try_become_primary(&config, &root) {
+                        Some(lock_file) => {
+                            std::mem::forget(lock_file);
+                            true
+                        }
+                        None => false,
+                    };
+
+                    let workspace = Workspace { root: root.clone(), config, primary };
+
+                    // Start recursive watcher on workspace root (skip in headless/test mode)
+                    if !startup.headless {
+                        _watcher = start_watcher(&root, watch_tx.clone());
+                    }
+
+                    current = Some(workspace.clone());
+                    if result_tx.send(workspace).await.is_err() {
+                        break;
+                    }
                 }
-                None => false,
-            };
-
-            let workspace = Workspace {
-                root,
-                config,
-                primary,
-            };
-
-            if result_tx.send(workspace).await.is_err() {
-                break;
+                Some(()) = watch_rx.recv() => {
+                    // Workspace tree changed — re-emit to trigger browser rebuild
+                    if let Some(ref ws) = current {
+                        if result_tx.send(ws.clone()).await.is_err() {
+                            break;
+                        }
+                    }
+                }
             }
         }
     });
@@ -68,6 +87,30 @@ pub fn driver(out: Stream<Arc<Startup>>) -> Stream<Workspace> {
     });
 
     stream
+}
+
+fn start_watcher(root: &Path, tx: mpsc::Sender<()>) -> Option<notify::RecommendedWatcher> {
+    let mut watcher =
+        notify::recommended_watcher(move |res: Result<notify::Event, notify::Error>| {
+            let Ok(ev) = res else { return };
+            match ev.kind {
+                EventKind::Create(_) | EventKind::Remove(_) => {}
+                _ => return,
+            }
+            // Skip .git internal changes
+            if ev
+                .paths
+                .iter()
+                .all(|p| p.components().any(|c| c.as_os_str() == ".git"))
+            {
+                return;
+            }
+            tx.try_send(()).ok();
+        })
+        .ok()?;
+
+    watcher.watch(root, RecursiveMode::Recursive).ok()?;
+    Some(watcher)
 }
 
 fn find_git_root(start: &Path) -> PathBuf {

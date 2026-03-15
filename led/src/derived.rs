@@ -5,6 +5,7 @@ use led_config_file::{ConfigDir, ConfigFileOut};
 use led_core::Startup;
 use led_core::rx::Stream;
 use led_docstore::DocStoreOut;
+use led_fs::FsOut;
 use led_state::AppState;
 use led_timers::{Schedule, TimersOut};
 
@@ -14,6 +15,7 @@ pub struct Derived {
     pub docstore_out: Stream<DocStoreOut>,
     pub config_file_out: Stream<ConfigFileOut>,
     pub timers_out: Stream<TimersOut>,
+    pub fs_out: Stream<FsOut>,
 }
 
 pub fn derived(state: Stream<Arc<AppState>>) -> Derived {
@@ -30,24 +32,40 @@ pub fn derived(state: Stream<Arc<AppState>>) -> Derived {
         .map(ConfigFileOut::ConfigDir)
         .stream();
 
-    let open_out = state
+    // File opens from startup args
+    let startup_open = state
         .map(|s| s.startup.arg_paths.clone())
         .filter(|paths| !paths.is_empty())
         .dedupe()
         .flat_map(|paths| paths.into_iter().map(|path| DocStoreOut::Open { path }));
 
-    let save_out = state
-        .dedupe_by(|s| s.save_request)
-        .filter(|s| s.save_request > 0)
-        .filter_map(|s| {
-            let buf = s.buffers.get(&s.active_buffer?)?;
-            Some((buf.doc_id, buf.doc.clone()))
+    // File opens from browser
+    let browser_open = state
+        .dedupe_by(|s| s.pending_open.version())
+        .filter(|s| s.pending_open.version() > 0)
+        .filter(|s| s.pending_open.is_some())
+        .map(|s| DocStoreOut::Open {
+            path: (*s.pending_open).clone().unwrap(),
         })
-        .map(|(id, doc)| DocStoreOut::Save { id, doc })
+        .stream();
+
+    // Save
+    let save_out = state
+        .dedupe_by(|s| s.save_request.version())
+        .filter(|s| s.save_request.version() > 0)
+        .filter(|s| s.active_buffer.is_some())
+        .map(|s| {
+            let buf = &s.buffers[&s.active_buffer.unwrap()];
+            DocStoreOut::Save {
+                id: buf.doc_id,
+                doc: buf.doc.clone(),
+            }
+        })
         .stream();
 
     let docstore_out: Stream<DocStoreOut> = Stream::new();
-    open_out.forward(&docstore_out);
+    startup_open.forward(&docstore_out);
+    browser_open.forward(&docstore_out);
     save_out.forward(&docstore_out);
 
     // Timers: schedule alert clear when info/warn appears
@@ -62,11 +80,19 @@ pub fn derived(state: Stream<Arc<AppState>>) -> Derived {
         })
         .stream();
 
+    // FS: directory listing requests
+    let fs_out = state
+        .dedupe_by(|s| s.pending_lists.version())
+        .filter(|s| s.pending_lists.version() > 0)
+        .map(|s| (*s.pending_lists).clone())
+        .flat_map(|paths| paths.into_iter().map(|path| FsOut::ListDir { path }));
+
     Derived {
         ui,
         workspace_out,
         docstore_out,
         config_file_out,
         timers_out,
+        fs_out,
     }
 }

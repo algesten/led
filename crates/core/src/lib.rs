@@ -7,9 +7,12 @@ pub mod theme;
 mod watch;
 pub mod wrap;
 
+mod versioned;
+
 pub use alert::{Alert, AlertExt};
 pub use config::Startup;
 pub use doc::{Doc, EditOp, TextDoc, UndoGroup, UndoHistory};
+pub use versioned::Versioned;
 pub use watch::watch;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

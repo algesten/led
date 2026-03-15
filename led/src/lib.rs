@@ -5,6 +5,7 @@ use led_core::keys::Keys;
 use led_core::rx::Stream;
 use led_core::theme::Theme;
 use led_core::{Action, Alert, Startup};
+use led_fs::FsIn;
 use led_state::AppState;
 use led_terminal_in::TerminalInput;
 use led_timers::TimersIn;
@@ -24,6 +25,7 @@ pub struct Drivers {
     pub config_keys_in: Stream<Result<ConfigFile<Keys>, Alert>>,
     pub config_theme_in: Stream<Result<ConfigFile<Theme>, Alert>>,
     pub timers_in: Stream<TimersIn>,
+    pub fs_in: Stream<FsIn>,
 }
 
 pub struct RunGuards {
@@ -62,6 +64,7 @@ pub fn run(
     };
 
     let timers_in = led_timers::driver(d.timers_out);
+    let fs_in = led_fs::driver(d.fs_out);
 
     let drivers = Drivers {
         terminal_in,
@@ -71,6 +74,7 @@ pub fn run(
         config_keys_in: led_config_file::driver::<Keys>(d.config_file_out.clone()),
         config_theme_in: led_config_file::driver::<Theme>(d.config_file_out),
         timers_in,
+        fs_in,
     };
 
     // 4. Model

@@ -2,8 +2,9 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use led_core::Doc;
+use led_core::PanelSlot;
 use led_core::wrap::{chars_to_string, compute_chunks, expand_tabs, find_sub_line};
-use led_state::{AppState, Dimensions};
+use led_state::{AppState, Dimensions, EntryKind};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 
@@ -397,4 +398,74 @@ pub fn build_layout(l: &LayoutInputs) -> Option<LayoutInfo> {
         text_style: l.text_style,
         status_style: l.status_style,
     })
+}
+
+// ── Browser ──
+
+#[derive(Clone, PartialEq)]
+pub struct BrowserInputs {
+    pub entries: Vec<led_state::TreeEntry>,
+    pub selected: usize,
+    pub scroll_offset: usize,
+    pub focused: bool,
+    pub height: usize,
+    pub dir_style: Style,
+    pub file_style: Style,
+    pub selected_style: Style,
+    pub selected_unfocused_style: Style,
+}
+
+pub fn browser_inputs(s: &AppState) -> Option<BrowserInputs> {
+    let dims = s.dims?;
+    let theme = s.config_theme.as_ref()?.file.as_ref();
+    Some(BrowserInputs {
+        entries: s.browser.entries.clone(),
+        selected: s.browser.selected,
+        scroll_offset: s.browser.scroll_offset,
+        focused: s.focus == PanelSlot::Side,
+        height: dims.buffer_height(),
+        dir_style: style::resolve(theme, &theme.browser.directory),
+        file_style: style::resolve(theme, &theme.browser.file),
+        selected_style: style::resolve(theme, &theme.browser.selected),
+        selected_unfocused_style: style::resolve(theme, &theme.browser.selected_unfocused),
+    })
+}
+
+pub fn build_browser_lines(b: &BrowserInputs) -> Rc<Vec<Line<'static>>> {
+    let end = (b.scroll_offset + b.height).min(b.entries.len());
+    let visible = &b.entries[b.scroll_offset..end];
+
+    let lines: Vec<Line<'static>> = visible
+        .iter()
+        .enumerate()
+        .map(|(i, entry)| {
+            let abs_idx = b.scroll_offset + i;
+            let is_selected = abs_idx == b.selected;
+
+            let indent = "  ".repeat(entry.depth);
+            let icon = match &entry.kind {
+                EntryKind::Directory { expanded: true } => "\u{25bd} ",
+                EntryKind::Directory { expanded: false } => "\u{25b7} ",
+                EntryKind::File => "  ",
+            };
+            let text = format!("{}{}{}", indent, icon, entry.name);
+
+            let entry_style = if is_selected {
+                if b.focused {
+                    b.selected_style
+                } else {
+                    b.selected_unfocused_style
+                }
+            } else {
+                match &entry.kind {
+                    EntryKind::Directory { .. } => b.dir_style,
+                    EntryKind::File => b.file_style,
+                }
+            };
+
+            Line::from(Span::styled(text, entry_style))
+        })
+        .collect();
+
+    Rc::new(lines)
 }

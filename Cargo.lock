@@ -768,6 +768,7 @@ dependencies = [
  "led-config-file",
  "led-core",
  "led-docstore",
+ "led-fs",
  "led-state",
  "led-terminal-in",
  "led-timers",
@@ -813,11 +814,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "led-fs"
+version = "0.1.0"
+dependencies = [
+ "led-core",
+ "log",
+ "tokio",
+]
+
+[[package]]
 name = "led-state"
 version = "0.1.0"
 dependencies = [
  "led-config-file",
  "led-core",
+ "led-fs",
  "led-workspace",
  "log",
 ]
@@ -861,6 +872,7 @@ dependencies = [
  "dirs",
  "led-core",
  "libc",
+ "notify",
  "tokio",
 ]
 

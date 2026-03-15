@@ -355,7 +355,7 @@ mod tests {
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
         let frame = terminal
             .draw(|f| {
-                render::render(f, &layout, &display_lines, Some((2, 0)), status, &tabs);
+                render::render(f, &layout, &display_lines, Some((2, 0)), status, &tabs, &[]);
             })
             .unwrap();
 
@@ -368,12 +368,12 @@ mod tests {
             status_cell.bg
         );
 
-        // Tab bar (row 8) background
-        let tab_cell = &frame.buffer[(0, 8)];
+        // Tab label (row 8, offset by gutter_width-1=1)
+        let tab_cell = &frame.buffer[(2, 8)];
         assert_ne!(
             tab_cell.bg,
             Color::Reset,
-            "tab bar bg should be themed, got {:?}",
+            "tab label bg should be themed, got {:?}",
             tab_cell.bg
         );
 
@@ -447,7 +447,7 @@ mod tests {
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
         let frame = terminal
             .draw(|f| {
-                render::render(f, &layout, &lines, cursor, &status, &tabs);
+                render::render(f, &layout, &lines, cursor, &status, &tabs, &[]);
             })
             .unwrap();
 
@@ -460,12 +460,12 @@ mod tests {
             status_cell.bg,
         );
 
-        // Tab bar (row 8) background
-        let tab_bg_cell = &frame.buffer[(0, 8)];
+        // Tab label (row 8, offset by gutter_width-1=1)
+        let tab_bg_cell = &frame.buffer[(2, 8)];
         assert_ne!(
             tab_bg_cell.bg,
             Color::Reset,
-            "tab bar bg should be themed, got {:?}",
+            "tab label bg should be themed, got {:?}",
             tab_bg_cell.bg,
         );
     }

@@ -49,17 +49,24 @@ pub fn driver(state: Stream<Arc<AppState>>) -> Ui {
         .filter_map(|l| display::build_layout(&l))
         .stream();
 
-    let render_s = combine!(display_s, cursor_s, status_s, tabs_s, layout_s);
+    let browser_s = state
+        .filter_map(|s| display::browser_inputs(&s))
+        .dedupe()
+        .map(|b| display::build_browser_lines(&b))
+        .stream();
+
+    let render_s = combine!(display_s, cursor_s, status_s, tabs_s, layout_s, browser_s);
 
     let mut last_redraw = 0u64;
 
     render_s.on(
-        move |(lines, cursor, status, tabs, layout): &(
+        move |(lines, cursor, status, tabs, layout, browser): &(
             Rc<Vec<Line<'static>>>,
             Option<(u16, u16)>,
             Rc<String>,
             Rc<display::TabsInputs>,
             display::LayoutInfo,
+            Rc<Vec<Line<'static>>>,
         )| {
             let clear = layout.force_redraw != last_redraw;
             last_redraw = layout.force_redraw;
@@ -67,7 +74,7 @@ pub fn driver(state: Stream<Arc<AppState>>) -> Ui {
                 terminal.clear().ok();
             }
             if let Err(e) = terminal.draw(|frame| {
-                render::render(frame, layout, lines, *cursor, status, tabs);
+                render::render(frame, layout, lines, *cursor, status, tabs, browser);
             }) {
                 log::error!("render error: {}", e);
             }

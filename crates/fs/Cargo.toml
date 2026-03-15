@@ -1,11 +1,9 @@
 [package]
-name = "led-workspace"
+name = "led-fs"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
 led-core = { workspace = true }
-notify = { workspace = true }
+log = { workspace = true }
 tokio = { workspace = true }
-dirs = { workspace = true }
-libc = { workspace = true }

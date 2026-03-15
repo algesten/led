@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["led", "crates/config-file", "crates/core", "crates/state", "crates/terminal-in", "crates/docstore", "crates/workspace", "crates/ui", "crates/timers"]
+members = ["led", "crates/config-file", "crates/core", "crates/state", "crates/terminal-in", "crates/docstore", "crates/workspace", "crates/ui", "crates/timers", "crates/fs"]
 default-members = ["led"]
 
 [workspace.dependencies]
@@ -12,6 +12,7 @@ led-docstore = { path = "crates/docstore" }
 led-workspace = { path = "crates/workspace" }
 led-ui = { path = "crates/ui" }
 led-timers = { path = "crates/timers" }
+led-fs = { path = "crates/fs" }
 
 clap = { version = "4.5.60", features = ["derive"] }
 crossterm = { version = "0.29" }
