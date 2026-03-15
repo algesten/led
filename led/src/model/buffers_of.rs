@@ -26,17 +26,30 @@ pub fn buffers_of(
                 }
 
                 let buf_id = BufferId(state.next_buffer_id);
-                let tab_order = state.buffers.len();
+
+                // Apply restored session positions if available
+                let (cursor_row, cursor_col, scroll_row, scroll_sub_line, tab_order) =
+                    match state.session_positions.get(&path) {
+                        Some(sp) => (
+                            sp.cursor_row.min(doc.line_count().saturating_sub(1)),
+                            sp.cursor_col,
+                            sp.scroll_row,
+                            sp.scroll_sub_line,
+                            sp.tab_order,
+                        ),
+                        None => (0, 0, 0, 0, state.buffers.len()),
+                    };
+
                 let buf = BufferState {
                     id: buf_id,
                     doc_id: id,
                     doc,
                     path: Some(path),
-                    cursor_row: 0,
-                    cursor_col: 0,
-                    cursor_col_affinity: 0,
-                    scroll_row: 0,
-                    scroll_sub_line: 0,
+                    cursor_row,
+                    cursor_col,
+                    cursor_col_affinity: cursor_col,
+                    scroll_row,
+                    scroll_sub_line,
                     tab_order,
                     last_edit_kind: None,
                     save_state: SaveState::Clean,

@@ -977,3 +977,88 @@ fn theme_loads() {
         }
     }
 }
+
+// ── Session persistence ──
+
+#[test]
+fn session_restore_tabs() {
+    // Run 1: open two files, quit, wait for session save
+    let t = TestHarness::new()
+        .with_named_file("aaa.txt", "hello\n")
+        .with_named_file("bbb.txt", "world\n")
+        .run(vec![Do(Quit), WaitFor(|s| s.session_saved)]);
+
+    assert_eq!(t.state.buffers.len(), 2);
+    let dir = t.tmpdir.clone();
+
+    // Run 2: reuse same dir with no arg files — session should restore
+    let t2 = TestHarness::with_dir(dir).run(vec![WaitFor(|s| s.buffers.len() >= 2)]);
+
+    assert_eq!(t2.state.buffers.len(), 2);
+    let mut paths: Vec<String> = t2
+        .state
+        .buffers
+        .values()
+        .filter_map(|b| b.path.as_ref())
+        .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+        .collect();
+    paths.sort();
+    assert_eq!(paths, vec!["aaa.txt", "bbb.txt"]);
+}
+
+#[test]
+fn session_restore_cursor() {
+    // Run 1: open file, move cursor down 3 lines, quit
+    let t = TestHarness::new()
+        .with_file("line1\nline2\nline3\nline4\nline5\n")
+        .run(vec![
+            Do(MoveDown),
+            Do(MoveDown),
+            Do(MoveDown),
+            Do(Quit),
+            WaitFor(|s| s.session_saved),
+        ]);
+
+    assert_eq!(buf(&t).cursor_row, 3);
+    let dir = t.tmpdir.clone();
+
+    // Run 2: restore — cursor should be at row 3
+    let t2 = TestHarness::with_dir(dir).run(vec![WaitFor(|s| !s.buffers.is_empty())]);
+
+    let id = t2.state.active_buffer.unwrap();
+    let b = &t2.state.buffers[&id];
+    assert_eq!(b.cursor_row, 3, "cursor row should be restored");
+}
+
+#[test]
+fn session_restore_active_tab() {
+    // Run 1: open two files, switch to first tab (last opened is active), quit
+    let t = TestHarness::new()
+        .with_named_file("first.txt", "a\n")
+        .with_named_file("second.txt", "b\n")
+        .run(vec![Do(PrevTab), Do(Quit), WaitFor(|s| s.session_saved)]);
+
+    let active_name = buf(&t)
+        .path
+        .as_ref()
+        .unwrap()
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    assert_eq!(active_name, "first.txt");
+    let dir = t.tmpdir.clone();
+
+    // Run 2: restore — first tab should be active
+    let t2 = TestHarness::with_dir(dir).run(vec![WaitFor(|s| s.buffers.len() >= 2)]);
+
+    let active_name2 = buf(&t2)
+        .path
+        .as_ref()
+        .unwrap()
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    assert_eq!(active_name2, "first.txt", "active tab should be restored");
+}

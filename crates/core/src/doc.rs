@@ -1,18 +1,20 @@
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io;
 use std::sync::Arc;
 
 use ropey::Rope;
+use serde::{Deserialize, Serialize};
 
 // ── Undo types ──
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct EditOp {
     pub offset: usize,
     pub old_text: String,
     pub new_text: String,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct UndoGroup {
     pub ops: Vec<EditOp>,
     pub cursor_before: usize,
@@ -58,6 +60,26 @@ impl UndoHistory {
     pub fn pop_redo(&mut self) -> Option<UndoGroup> {
         self.redo_stack.pop()
     }
+
+    /// Number of closed groups on the undo stack.
+    pub fn undo_len(&self) -> usize {
+        self.undo_stack.len()
+    }
+
+    /// Slice of undo groups from `start` onwards (for incremental flush).
+    pub fn undo_slice(&self, start: usize) -> &[UndoGroup] {
+        &self.undo_stack[start..]
+    }
+
+    /// The full undo stack.
+    pub fn undo_stack(&self) -> &[UndoGroup] {
+        &self.undo_stack
+    }
+
+    /// The full redo stack.
+    pub fn redo_stack(&self) -> &[UndoGroup] {
+        &self.redo_stack
+    }
 }
 
 // ── Doc trait ──
@@ -75,6 +97,8 @@ pub trait Doc: Send + Sync {
     // Identity & change detection
     fn version(&self) -> u64;
     fn dirty(&self) -> bool;
+    fn content_hash(&self) -> u64;
+    fn undo_history_len(&self) -> usize;
 
     // Edits — record undo ops into the open group
     fn insert(&self, char_idx: usize, text: &str) -> Arc<dyn Doc>;
@@ -170,6 +194,18 @@ impl Doc for TextDoc {
 
     fn dirty(&self) -> bool {
         self.version != self.saved_version
+    }
+
+    fn content_hash(&self) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        for chunk in self.rope.chunks() {
+            chunk.hash(&mut hasher);
+        }
+        hasher.finish()
+    }
+
+    fn undo_history_len(&self) -> usize {
+        self.undo.undo_len()
     }
 
     fn insert(&self, char_idx: usize, text: &str) -> Arc<dyn Doc> {

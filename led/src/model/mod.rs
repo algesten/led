@@ -11,7 +11,9 @@ use led_core::keys::{Keymap, Keys};
 use led_core::rx::Stream;
 use led_core::theme::Theme;
 use led_core::{Action, Alert, BufferId, PanelSlot};
-use led_state::{AppState, BufferState, Dimensions, EditKind, EntryKind, SaveState};
+use led_state::{
+    AppState, BufferState, Dimensions, EditKind, EntryKind, SaveState, SessionRestorePhase,
+};
 use led_workspace::Workspace;
 
 use crate::Drivers;
@@ -24,7 +26,17 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Arc<AppState>> {
 
     // ── 1. Derive from hoisted state ──
 
-    let workspace_s = drivers.workspace_in.map(|w| Mut::Workspace(w)).stream();
+    let workspace_s = drivers
+        .workspace_in
+        .map(|ev| match ev {
+            led_workspace::WorkspaceIn::Workspace { workspace } => Mut::Workspace(workspace),
+            led_workspace::WorkspaceIn::SessionRestored { session } => {
+                Mut::SessionRestored(session)
+            }
+            led_workspace::WorkspaceIn::SessionSaved => Mut::SessionSaved,
+            led_workspace::WorkspaceIn::WorkspaceChanged { workspace } => Mut::Workspace(workspace),
+        })
+        .stream();
 
     let keymap_s = state
         .filter_map(|s| s.config_keys.as_ref().map(|ck| ck.file.clone()))
@@ -89,9 +101,33 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Arc<AppState>> {
                 s.warn = warn;
             }
             Mut::BufferOpen(buf, next_id) => {
-                s.active_buffer = Some(buf.id);
+                // During session restore, only activate the tab matching
+                // session_active_tab_order. Otherwise activate every new buffer.
+                let is_restoring = s.session_restore_phase == SessionRestorePhase::Restoring;
+                let should_activate = if is_restoring {
+                    s.session_active_tab_order == Some(buf.tab_order)
+                } else {
+                    true
+                };
+                if should_activate {
+                    s.active_buffer = Some(buf.id);
+                } else if s.active_buffer.is_none() {
+                    s.active_buffer = Some(buf.id);
+                }
+
+                // Remove from pending session positions
+                if let Some(ref path) = buf.path {
+                    s.session_positions.remove(path);
+                }
+
                 s.buffers.insert(buf.id, buf);
                 s.next_buffer_id = next_id;
+
+                // Check if session restore is complete
+                if is_restoring && s.session_positions.is_empty() {
+                    s.session_restore_phase = SessionRestorePhase::Done;
+                    s.session_active_tab_order = None;
+                }
             }
             Mut::BufferUpdate(id, buf) => {
                 s.buffers.insert(id, buf);
@@ -106,6 +142,12 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Arc<AppState>> {
             Mut::Keymap(v) => s.keymap = Some(v),
             Mut::Resize(w, h) => {
                 s.dims = Some(Dimensions::new(w, h, s.show_side_panel));
+            }
+            Mut::SessionRestored(session) => {
+                handle_session_restored(&mut s, session);
+            }
+            Mut::SessionSaved => {
+                s.session_saved = true;
             }
             Mut::Suspend(v) => s.suspend = v,
             Mut::TimerFired(name) => handle_timer(&mut s, name),
@@ -374,6 +416,26 @@ fn kill_buffer(state: &mut AppState) {
     state.info = Some(format!("Killed {filename}"));
 }
 
+fn handle_session_restored(state: &mut AppState, session: Option<led_workspace::RestoredSession>) {
+    use led_workspace::SessionRestorePhase;
+
+    match session {
+        Some(session) => {
+            state.session_restore_phase = SessionRestorePhase::Restoring;
+            state.session_active_tab_order = Some(session.active_tab_order);
+            state.show_side_panel = session.show_side_panel;
+            for buf in session.buffers {
+                state.session_positions.insert(buf.file_path.clone(), buf);
+            }
+            let paths: Vec<_> = state.session_positions.keys().cloned().collect();
+            state.pending_session_opens.set(paths);
+        }
+        None => {
+            state.session_restore_phase = SessionRestorePhase::Done;
+        }
+    }
+}
+
 fn handle_timer(state: &mut AppState, name: &'static str) {
     match name {
         "alert_clear" => {
@@ -604,6 +666,8 @@ enum Mut {
     ForceRedraw(u64),
     Keymap(Arc<Keymap>),
     Resize(u16, u16),
+    SessionRestored(Option<led_workspace::RestoredSession>),
+    SessionSaved,
     Suspend(bool),
     TimerFired(&'static str),
     Workspace(Workspace),

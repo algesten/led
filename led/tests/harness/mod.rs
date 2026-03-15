@@ -25,10 +25,12 @@ impl From<Action> for TestStep {
 pub struct TestResult {
     pub state: Arc<AppState>,
     pub file_path: Option<PathBuf>,
+    pub tmpdir: PathBuf,
 }
 
 pub struct TestHarness {
-    tmpdir: TempDir,
+    tmpdir: Option<TempDir>,
+    reuse_dir: Option<PathBuf>,
     files: Vec<(String, String)>,
     viewport: (u16, u16),
 }
@@ -36,7 +38,20 @@ pub struct TestHarness {
 impl TestHarness {
     pub fn new() -> Self {
         TestHarness {
-            tmpdir: TempDir::new().expect("create tmpdir"),
+            tmpdir: Some(TempDir::new().expect("create tmpdir")),
+            reuse_dir: None,
+            files: Vec::new(),
+            viewport: (80, 24),
+        }
+    }
+
+    /// Reuse an existing directory (for session restore tests).
+    /// Files are created in this directory. Config dir is `{dir}/config`.
+    #[allow(dead_code)]
+    pub fn with_dir(dir: PathBuf) -> Self {
+        TestHarness {
+            tmpdir: None,
+            reuse_dir: Some(dir),
             files: Vec::new(),
             viewport: (80, 24),
         }
@@ -63,7 +78,11 @@ impl TestHarness {
     pub fn run(self, steps: Vec<TestStep>) -> TestResult {
         let file_count = self.files.len();
         let files = self.files;
-        let tmpdir = self.tmpdir.keep();
+        let tmpdir = match (self.tmpdir, self.reuse_dir) {
+            (Some(td), _) => td.keep(),
+            (None, Some(d)) => d,
+            _ => unreachable!(),
+        };
         let config_dir = tmpdir.join("config");
         std::fs::create_dir_all(&config_dir).expect("create config dir");
 
@@ -92,6 +111,7 @@ impl TestHarness {
 
         let viewport = self.viewport;
         let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let tmpdir2 = tmpdir.clone();
 
         let handle = std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
@@ -144,6 +164,7 @@ impl TestHarness {
                                     }
                                 }
                             }
+
                             done2.set(true);
                         });
 
@@ -154,11 +175,6 @@ impl TestHarness {
                         let result = last_state.borrow().clone().expect("state was never set");
                         let _ = done_tx.send(result);
                         drop(guards);
-
-                        // Yield to let driver tasks notice closed channels and exit.
-                        for _ in 0..10 {
-                            tokio::task::yield_now().await;
-                        }
                     })
                     .await;
             });
@@ -171,7 +187,11 @@ impl TestHarness {
             .recv_timeout(Duration::from_secs(5))
             .expect("test timed out");
         handle.join().ok();
-        TestResult { state, file_path }
+        TestResult {
+            state,
+            file_path,
+            tmpdir: tmpdir2,
+        }
     }
 }
 

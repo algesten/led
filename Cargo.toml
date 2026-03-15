@@ -45,9 +45,9 @@ toml = "0.8"
 # lsp-types = "0.97"
 # nucleo-matcher = "0.3"
 # regex = "1"
-# rmp-serde = "1"
+rmp-serde = "1"
 ropey = "1.6"
-# rusqlite = { version = "0.38.0", features = ["bundled"] }
+rusqlite = { version = "0.38.0", features = ["bundled"] }
 # serde_json = "1"
 # similar = "2"
 # tree-sitter = "0.25"

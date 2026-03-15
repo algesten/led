@@ -9,6 +9,7 @@ use led_fs::FsIn;
 use led_state::AppState;
 use led_terminal_in::TerminalInput;
 use led_timers::TimersIn;
+use led_workspace::WorkspaceIn;
 use tokio::sync::oneshot;
 
 pub mod derived;
@@ -20,7 +21,7 @@ use model::model;
 pub struct Drivers {
     pub terminal_in: Stream<TerminalInput>,
     pub actions_in: Stream<Action>,
-    pub workspace_in: Stream<led_state::Workspace>,
+    pub workspace_in: Stream<WorkspaceIn>,
     pub docstore_in: Stream<Result<led_docstore::DocStoreIn, Alert>>,
     pub config_keys_in: Stream<Result<ConfigFile<Keys>, Alert>>,
     pub config_theme_in: Stream<Result<ConfigFile<Theme>, Alert>>,

@@ -8,6 +8,7 @@ use led_core::keys::{Keymap, Keys};
 use led_core::theme::Theme;
 use led_core::{BufferId, Doc, DocId, PanelSlot, Startup, Versioned};
 pub use led_workspace::Workspace;
+pub use led_workspace::{SessionBuffer, SessionRestorePhase};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Dimensions {
@@ -215,6 +216,13 @@ pub struct AppState {
     pub browser: FileBrowserState,
     pub pending_open: Versioned<Option<PathBuf>>,
     pub pending_lists: Versioned<Vec<PathBuf>>,
+
+    // Session persistence
+    pub session_restore_phase: SessionRestorePhase,
+    pub session_positions: HashMap<PathBuf, SessionBuffer>,
+    pub session_active_tab_order: Option<usize>,
+    pub pending_session_opens: Versioned<Vec<PathBuf>>,
+    pub session_saved: bool,
 }
 
 impl AppState {
