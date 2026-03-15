@@ -42,8 +42,10 @@ pub fn driver<F: TomlFile>(out: Stream<ConfigFileOut>) -> Stream<Result<ConfigFi
     let (result_tx, mut result_rx) = mpsc::channel::<Result<ConfigFile<F>, Alert>>(64);
 
     // Bridge out: rx::Stream → channel
-    out.on(move |cmd: &ConfigFileOut| {
-        cmd_tx.try_send(cmd.clone()).ok();
+    out.on(move |opt: Option<&ConfigFileOut>| {
+        if let Some(cmd) = opt {
+            cmd_tx.try_send(cmd.clone()).ok();
+        }
     });
 
     // Async driver task

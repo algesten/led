@@ -40,8 +40,10 @@ pub fn driver(out: Stream<TimersOut>) -> Stream<TimersIn> {
     let (result_tx, mut result_rx) = mpsc::channel::<TimersIn>(64);
 
     // Bridge: rx::Stream → channel
-    out.on(move |cmd: &TimersOut| {
-        cmd_tx.try_send(cmd.clone()).ok();
+    out.on(move |opt: Option<&TimersOut>| {
+        if let Some(cmd) = opt {
+            cmd_tx.try_send(cmd.clone()).ok();
+        }
     });
 
     // Async task: manage named timers

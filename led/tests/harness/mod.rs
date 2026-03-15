@@ -106,13 +106,15 @@ impl TestHarness {
                         let actions_in: Stream<Action> = Stream::new();
                         let (quit_tx, _) = oneshot::channel::<()>();
 
-                        let (state, _guards) = led::run(startup, actions_in.clone(), quit_tx);
+                        let (state, guards) = led::run(startup, actions_in.clone(), quit_tx);
 
                         let last_state: Rc<RefCell<Option<Arc<AppState>>>> =
                             Rc::new(RefCell::new(None));
                         let capture = last_state.clone();
-                        state.on(move |s: &Arc<AppState>| {
-                            *capture.borrow_mut() = Some(s.clone());
+                        state.on(move |opt: Option<&Arc<AppState>>| {
+                            if let Some(s) = opt {
+                                *capture.borrow_mut() = Some(s.clone());
+                            }
                         });
 
                         actions_in.push(Action::Resize(viewport.0, viewport.1));
@@ -151,15 +153,24 @@ impl TestHarness {
 
                         let result = last_state.borrow().clone().expect("state was never set");
                         let _ = done_tx.send(result);
+                        drop(guards);
+
+                        // Yield to let driver tasks notice closed channels and exit.
+                        for _ in 0..10 {
+                            tokio::task::yield_now().await;
+                        }
                     })
                     .await;
             });
+
+            // Safety net: cancel any lingering tasks (e.g. filesystem watchers).
+            rt.shutdown_timeout(Duration::from_millis(100));
         });
 
         let state = done_rx
             .recv_timeout(Duration::from_secs(5))
             .expect("test timed out");
-        std::mem::forget(handle);
+        handle.join().ok();
         TestResult { state, file_path }
     }
 }

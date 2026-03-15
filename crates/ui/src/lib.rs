@@ -60,14 +60,17 @@ pub fn driver(state: Stream<Arc<AppState>>) -> Ui {
     let mut last_redraw = 0u64;
 
     render_s.on(
-        move |(lines, cursor, status, tabs, layout, browser): &(
+        move |opt: Option<&(
             Rc<Vec<Line<'static>>>,
             Option<(u16, u16)>,
             Rc<String>,
             Rc<display::TabsInputs>,
             display::LayoutInfo,
             Rc<Vec<Line<'static>>>,
-        )| {
+        )>| {
+            let Some((lines, cursor, status, tabs, layout, browser)) = opt else {
+                return;
+            };
             let clear = layout.force_redraw != last_redraw;
             last_redraw = layout.force_redraw;
             if clear {

@@ -15,9 +15,10 @@ use std::rc::Rc;
 // ── Stream ──
 
 struct StreamInner<T> {
-    listeners: RefCell<Vec<Box<dyn FnMut(&T)>>>,
+    listeners: RefCell<Vec<Box<dyn FnMut(Option<&T>)>>>,
     queue: RefCell<VecDeque<T>>,
     draining: Cell<bool>,
+    closed: Cell<bool>,
 }
 
 /// A node in the push-based reactive graph.
@@ -44,13 +45,19 @@ impl<T: 'static> Stream<T> {
                 listeners: RefCell::new(Vec::new()),
                 queue: RefCell::new(VecDeque::new()),
                 draining: Cell::new(false),
+                closed: Cell::new(false),
             }),
         }
     }
 
     /// Push a value. All listeners fire synchronously.
     /// Re-entrant pushes are queued and drained before returning.
+    /// No-op if the stream is closed.
     pub fn push(&self, value: T) {
+        if self.inner.closed.get() {
+            return;
+        }
+
         self.inner.queue.borrow_mut().push_back(value);
 
         if self.inner.draining.get() {
@@ -64,15 +71,34 @@ impl<T: 'static> Stream<T> {
             // queue borrow is released — listeners may re-enter push()
             let mut listeners = self.inner.listeners.borrow_mut();
             for listener in listeners.iter_mut() {
-                listener(&value);
+                listener(Some(&value));
             }
         }
         self.inner.draining.set(false);
     }
 
-    /// Low-level subscribe. Listener receives `&T` (shared across fan-out).
+    /// Close the stream. Fires all listeners with `None`, then clears
+    /// listeners and queue. Further `push()` calls are no-ops.
+    pub fn close(&self) {
+        if self.inner.closed.get() {
+            return;
+        }
+        self.inner.closed.set(true);
+
+        {
+            let mut listeners = self.inner.listeners.borrow_mut();
+            for listener in listeners.iter_mut() {
+                listener(None);
+            }
+            listeners.clear();
+        }
+        self.inner.queue.borrow_mut().clear();
+    }
+
+    /// Low-level subscribe. Listener receives `Option<&T>`:
+    /// `Some(&val)` for normal values, `None` when the stream closes.
     /// Prefer combinators (`map`, `filter_map`) for the owned-value API.
-    pub fn on(&self, f: impl FnMut(&T) + 'static) {
+    pub fn on(&self, f: impl FnMut(Option<&T>) + 'static) {
         self.inner.listeners.borrow_mut().push(Box::new(f));
     }
 
@@ -128,7 +154,10 @@ impl<T: Clone + 'static> Stream<T> {
     /// Forward all values to another stream (fan-in).
     pub fn forward(&self, target: &Stream<T>) {
         let target = target.clone();
-        self.on(move |t: &T| target.push(t.clone()));
+        self.on(move |opt: Option<&T>| match opt {
+            Some(t) => target.push(t.clone()),
+            None => target.close(),
+        });
     }
 
     /// Accumulate values. Emits the accumulator after each input.
@@ -152,11 +181,14 @@ impl<T: Clone + 'static> Stream<T> {
     ) {
         let target = target.clone();
         let mut acc = Some(seed);
-        self.on(move |t: &T| {
-            let a = acc.take().unwrap();
-            let new_a = f(a, t.clone());
-            target.push(new_a.clone());
-            acc = Some(new_a);
+        self.on(move |opt: Option<&T>| match opt {
+            Some(t) => {
+                let a = acc.take().unwrap();
+                let new_a = f(a, t.clone());
+                target.push(new_a.clone());
+                acc = Some(new_a);
+            }
+            None => target.close(),
         });
     }
 
@@ -168,12 +200,15 @@ impl<T: Clone + 'static> Stream<T> {
         let target = Stream::new();
         let target2 = target.clone();
         let mut prev: Option<T> = None;
-        self.on(move |t: &T| {
-            let dominated = prev.as_ref() == Some(t);
-            if !dominated {
-                prev = Some(t.clone());
-                target2.push(t.clone());
+        self.on(move |opt: Option<&T>| match opt {
+            Some(t) => {
+                let dominated = prev.as_ref() == Some(t);
+                if !dominated {
+                    prev = Some(t.clone());
+                    target2.push(t.clone());
+                }
             }
+            None => target2.close(),
         });
         target
     }
@@ -186,13 +221,16 @@ impl<T: Clone + 'static> Stream<T> {
         let target = Stream::new();
         let target2 = target.clone();
         let mut prev_key: Option<K> = None;
-        self.on(move |t: &T| {
-            let k = key_fn(t);
-            let dominated = prev_key.as_ref() == Some(&k);
-            if !dominated {
-                prev_key = Some(k);
-                target2.push(t.clone());
+        self.on(move |opt: Option<&T>| match opt {
+            Some(t) => {
+                let k = key_fn(t);
+                let dominated = prev_key.as_ref() == Some(&k);
+                if !dominated {
+                    prev_key = Some(k);
+                    target2.push(t.clone());
+                }
             }
+            None => target2.close(),
         });
         target
     }
@@ -202,20 +240,25 @@ impl<T: Clone + 'static> Stream<T> {
     pub fn sample_combine<B: Clone + 'static>(&self, sampler: &Stream<B>) -> Stream<(T, B)> {
         let target = Stream::new();
         let target2 = target.clone();
+        let target3 = target.clone();
         let latest: Rc<RefCell<Option<B>>> = Rc::new(RefCell::new(None));
         let latest2 = latest.clone();
 
         // Track the sampler's latest value
-        sampler.on(move |b: &B| {
-            *latest2.borrow_mut() = Some(b.clone());
+        sampler.on(move |opt: Option<&B>| match opt {
+            Some(b) => *latest2.borrow_mut() = Some(b.clone()),
+            None => target3.close(),
         });
 
         // When source fires, pair with latest sampler value
-        self.on(move |t: &T| {
-            let b = latest.borrow().clone();
-            if let Some(b) = b {
-                target2.push((t.clone(), b));
+        self.on(move |opt: Option<&T>| match opt {
+            Some(t) => {
+                let b = latest.borrow().clone();
+                if let Some(b) = b {
+                    target2.push((t.clone(), b));
+                }
             }
+            None => target2.close(),
         });
 
         target
@@ -225,9 +268,12 @@ impl<T: Clone + 'static> Stream<T> {
     pub fn inspect(&self, mut f: impl FnMut(&T) + 'static) -> Stream<T> {
         let target = Stream::new();
         let target2 = target.clone();
-        self.on(move |t: &T| {
-            f(t);
-            target2.push(t.clone());
+        self.on(move |opt: Option<&T>| match opt {
+            Some(t) => {
+                f(t);
+                target2.push(t.clone());
+            }
+            None => target2.close(),
         });
         target
     }
@@ -237,7 +283,10 @@ impl<T: Clone + 'static> Stream<T> {
     pub fn remember(&self) -> MemoryStream<T> {
         let mem = MemoryStream::new();
         let mem2 = mem.clone();
-        self.on(move |t: &T| mem2.push(t.clone()));
+        self.on(move |opt: Option<&T>| match opt {
+            Some(t) => mem2.push(t.clone()),
+            None => mem2.close(),
+        });
         mem
     }
 
@@ -246,7 +295,10 @@ impl<T: Clone + 'static> Stream<T> {
         let mem = MemoryStream::new();
         mem.inner.last.replace(Some(value));
         let mem2 = mem.clone();
-        self.on(move |t: &T| mem2.push(t.clone()));
+        self.on(move |opt: Option<&T>| match opt {
+            Some(t) => mem2.push(t.clone()),
+            None => mem2.close(),
+        });
         mem
     }
 
@@ -272,18 +324,24 @@ impl<T: Clone + 'static> Stream<Stream<T>> {
         let epoch = Rc::new(Cell::new(0u64));
         let epoch2 = epoch.clone();
 
-        self.on(move |inner: &Stream<T>| {
-            let current = epoch2.get() + 1;
-            epoch2.set(current);
+        self.on(move |opt: Option<&Stream<T>>| match opt {
+            Some(inner) => {
+                let current = epoch2.get() + 1;
+                epoch2.set(current);
 
-            let target3 = target2.clone();
-            let epoch3 = epoch.clone();
-            inner.on(move |t: &T| {
-                // Only forward if we're still the current epoch
-                if epoch3.get() == current {
-                    target3.push(t.clone());
-                }
-            });
+                let target3 = target2.clone();
+                let epoch3 = epoch.clone();
+                inner.on(move |opt: Option<&T>| match opt {
+                    Some(t) => {
+                        // Only forward if we're still the current epoch
+                        if epoch3.get() == current {
+                            target3.push(t.clone());
+                        }
+                    }
+                    None => target3.close(),
+                });
+            }
+            None => target2.close(),
         });
 
         target
@@ -642,12 +700,15 @@ macro_rules! _combine_sub {
         {
             $(let $slot = $slot.clone();)+
             let __target = $target.clone();
-            $stream.on(move |v: &_| {
-                *$mine.borrow_mut() = Some(v.clone());
-                $(let $slot = $slot.borrow().clone();)+
-                if let ($(Some($slot),)+) = ($($slot,)+) {
-                    __target.push(($($slot,)+));
+            $stream.on(move |opt: Option<&_>| match opt {
+                Some(v) => {
+                    *$mine.borrow_mut() = Some(v.clone());
+                    $(let $slot = $slot.borrow().clone();)+
+                    if let ($(Some($slot),)+) = ($($slot,)+) {
+                        __target.push(($($slot,)+));
+                    }
                 }
+                None => __target.close(),
             });
         }
     };
@@ -690,10 +751,16 @@ impl<T: Clone + 'static> MemoryStream<T> {
         self.inner.stream.push(value);
     }
 
+    /// Close the underlying stream.
+    pub fn close(&self) {
+        self.inner.stream.close();
+    }
+
     /// Subscribe. If a value has been cached, the listener receives it immediately.
-    pub fn on(&self, mut f: impl FnMut(&T) + 'static) {
+    /// Listener receives `Option<&T>`: `Some` for values, `None` on close.
+    pub fn on(&self, mut f: impl FnMut(Option<&T>) + 'static) {
         if let Some(v) = self.inner.last.borrow().as_ref() {
-            f(v);
+            f(Some(v));
         }
         self.inner.stream.on(f);
     }
@@ -853,13 +920,16 @@ impl<S: 'static, T: 'static, F: FnMut(&S) -> Option<T> + 'static> Pipe<S, T, F> 
         let target2 = target.clone();
         let mut acc = Some(seed);
         let mut f = self.f;
-        self.source.on(move |s: &S| {
-            if let Some(t) = f(s) {
-                let a = acc.take().unwrap();
-                let new_a = acc_fn(a, t);
-                target2.push(new_a.clone());
-                acc = Some(new_a);
+        self.source.on(move |opt: Option<&S>| match opt {
+            Some(s) => {
+                if let Some(t) = f(s) {
+                    let a = acc.take().unwrap();
+                    let new_a = acc_fn(a, t);
+                    target2.push(new_a.clone());
+                    acc = Some(new_a);
+                }
             }
+            None => target2.close(),
         });
         target
     }
@@ -873,12 +943,15 @@ impl<S: 'static, T: 'static, F: FnMut(&S) -> Option<T> + 'static> Pipe<S, T, F> 
         let target = Stream::new();
         let target2 = target.clone();
         let mut f = self.f;
-        self.source.on(move |s: &S| {
-            if let Some(t) = f(s) {
-                for u in g(t) {
-                    target2.push(u);
+        self.source.on(move |opt: Option<&S>| match opt {
+            Some(s) => {
+                if let Some(t) = f(s) {
+                    for u in g(t) {
+                        target2.push(u);
+                    }
                 }
             }
+            None => target2.close(),
         });
         target
     }
@@ -894,19 +967,24 @@ impl<S: 'static, T: 'static, F: FnMut(&S) -> Option<T> + 'static> Pipe<S, T, F> 
     pub fn into(self, target: &Stream<T>) {
         let target = target.clone();
         let mut f = self.f;
-        self.source.on(move |s: &S| {
-            if let Some(t) = f(s) {
-                target.push(t);
+        self.source.on(move |opt: Option<&S>| match opt {
+            Some(s) => {
+                if let Some(t) = f(s) {
+                    target.push(t);
+                }
             }
+            None => target.close(),
         });
     }
 
     /// Finalize: call a callback with each transformed value (owned).
     pub fn on(self, mut callback: impl FnMut(T) + 'static) {
         let mut f = self.f;
-        self.source.on(move |s: &S| {
-            if let Some(t) = f(s) {
-                callback(t);
+        self.source.on(move |opt: Option<&S>| {
+            if let Some(s) = opt {
+                if let Some(t) = f(s) {
+                    callback(t);
+                }
             }
         });
     }
@@ -1003,7 +1081,11 @@ mod tests {
 
         let l = log.clone();
         let merged = a.map(|x| x * 10).or(b.map(|x| x * 100));
-        merged.on(move |x: &i32| l.borrow_mut().push(*x));
+        merged.on(move |opt: Option<&i32>| {
+            if let Some(x) = opt {
+                l.borrow_mut().push(*x);
+            }
+        });
 
         a.push(1);
         b.push(2);
@@ -1021,7 +1103,11 @@ mod tests {
 
         let l = log.clone();
         let merged = a.map(|x| x).or(b.map(|x| x)).or(c.map(|x| x));
-        merged.on(move |x: &i32| l.borrow_mut().push(*x));
+        merged.on(move |opt: Option<&i32>| {
+            if let Some(x) = opt {
+                l.borrow_mut().push(*x);
+            }
+        });
 
         a.push(1);
         b.push(2);
@@ -1039,7 +1125,11 @@ mod tests {
 
         let l = log.clone();
         let state = source.fold(0, |acc, x| acc + x);
-        state.on(move |x: &i32| l.borrow_mut().push(*x));
+        state.on(move |opt: Option<&i32>| {
+            if let Some(x) = opt {
+                l.borrow_mut().push(*x);
+            }
+        });
 
         source.push(1);
         source.push(2);
@@ -1055,7 +1145,11 @@ mod tests {
 
         let l = log.clone();
         let state = source.map(|x| x * 10).fold(0, |acc, x| acc + x);
-        state.on(move |x: &i32| l.borrow_mut().push(*x));
+        state.on(move |opt: Option<&i32>| {
+            if let Some(x) = opt {
+                l.borrow_mut().push(*x);
+            }
+        });
 
         source.push(1);
         source.push(2);
@@ -1072,7 +1166,11 @@ mod tests {
         let log = Rc::new(RefCell::new(Vec::new()));
 
         let l = log.clone();
-        source.dedupe().on(move |x: &i32| l.borrow_mut().push(*x));
+        source.dedupe().on(move |opt: Option<&i32>| {
+            if let Some(x) = opt {
+                l.borrow_mut().push(*x);
+            }
+        });
 
         source.push(1);
         source.push(1);
@@ -1113,7 +1211,11 @@ mod tests {
         let l = log.clone();
         source
             .dedupe_by(|t| t.0)
-            .on(move |t: &(i32, &str)| l.borrow_mut().push(t.1.to_string()));
+            .on(move |opt: Option<&(i32, &str)>| {
+                if let Some(t) = opt {
+                    l.borrow_mut().push(t.1.to_string());
+                }
+            });
 
         source.push((1, "a"));
         source.push((1, "b")); // suppressed — same key
@@ -1131,7 +1233,7 @@ mod tests {
         source
             .map(|t| t)
             .dedupe_by(|t| t.0)
-            .on(move |t| l.borrow_mut().push(t.1.to_string()));
+            .on(move |t: (i32, &str)| l.borrow_mut().push(t.1.to_string()));
 
         source.push((1, "a"));
         source.push((1, "b")); // suppressed
@@ -1151,7 +1253,11 @@ mod tests {
         let l = log.clone();
         source
             .sample_combine(&sampler)
-            .on(move |pair: &(&str, i32)| l.borrow_mut().push(format!("{}:{}", pair.0, pair.1)));
+            .on(move |opt: Option<&(&str, i32)>| {
+                if let Some(pair) = opt {
+                    l.borrow_mut().push(format!("{}:{}", pair.0, pair.1));
+                }
+            });
 
         // No sampler value yet — nothing emitted
         source.push("a");
@@ -1182,7 +1288,11 @@ mod tests {
         let l = log.clone();
         source
             .inspect(move |x: &i32| s.borrow_mut().push(format!("saw:{x}")))
-            .on(move |x: &i32| l.borrow_mut().push(*x));
+            .on(move |opt: Option<&i32>| {
+                if let Some(x) = opt {
+                    l.borrow_mut().push(*x);
+                }
+            });
 
         source.push(1);
         source.push(2);
@@ -1223,7 +1333,11 @@ mod tests {
         // Late subscriber gets the cached value
         let log = Rc::new(RefCell::new(Vec::new()));
         let l = log.clone();
-        mem.on(move |x: &i32| l.borrow_mut().push(*x));
+        mem.on(move |opt: Option<&i32>| {
+            if let Some(x) = opt {
+                l.borrow_mut().push(*x);
+            }
+        });
 
         // Receives 42 (replayed) immediately
         assert_eq!(*log.borrow(), vec![42]);
@@ -1241,7 +1355,11 @@ mod tests {
         let mem = source.start_with(0);
 
         let l = log.clone();
-        mem.on(move |x: &i32| l.borrow_mut().push(*x));
+        mem.on(move |opt: Option<&i32>| {
+            if let Some(x) = opt {
+                l.borrow_mut().push(*x);
+            }
+        });
 
         // Receives seed immediately
         assert_eq!(*log.borrow(), vec![0]);
@@ -1260,8 +1378,10 @@ mod tests {
         let log = Rc::new(RefCell::new(Vec::new()));
 
         let l = log.clone();
-        combine!(a, b).on(move |pair: &(i32, &str)| {
-            l.borrow_mut().push(format!("{}:{}", pair.0, pair.1));
+        combine!(a, b).on(move |opt: Option<&(i32, &str)>| {
+            if let Some(pair) = opt {
+                l.borrow_mut().push(format!("{}:{}", pair.0, pair.1));
+            }
         });
 
         a.push(1); // b has no value yet — no emit
@@ -1280,8 +1400,10 @@ mod tests {
         let log = Rc::new(RefCell::new(Vec::new()));
 
         let l = log.clone();
-        combine!(a, b, c).on(move |t: &(i32, i32, i32)| {
-            l.borrow_mut().push(format!("{},{},{}", t.0, t.1, t.2));
+        combine!(a, b, c).on(move |opt: Option<&(i32, i32, i32)>| {
+            if let Some(t) = opt {
+                l.borrow_mut().push(format!("{},{},{}", t.0, t.1, t.2));
+            }
         });
 
         a.push(1);
@@ -1301,9 +1423,11 @@ mod tests {
         let log = Rc::new(RefCell::new(Vec::new()));
 
         let l = log.clone();
-        outer
-            .flatten_switch()
-            .on(move |x: &i32| l.borrow_mut().push(*x));
+        outer.flatten_switch().on(move |opt: Option<&i32>| {
+            if let Some(x) = opt {
+                l.borrow_mut().push(*x);
+            }
+        });
 
         let inner1: Stream<i32> = Stream::new();
         let inner2: Stream<i32> = Stream::new();
@@ -1328,10 +1452,18 @@ mod tests {
         let log = Rc::new(RefCell::new(Vec::new()));
 
         let l = log.clone();
-        source.on(move |x: &i32| l.borrow_mut().push(format!("a:{x}")));
+        source.on(move |opt: Option<&i32>| {
+            if let Some(x) = opt {
+                l.borrow_mut().push(format!("a:{x}"));
+            }
+        });
 
         let l = log.clone();
-        source.on(move |x: &i32| l.borrow_mut().push(format!("b:{x}")));
+        source.on(move |opt: Option<&i32>| {
+            if let Some(x) = opt {
+                l.borrow_mut().push(format!("b:{x}"));
+            }
+        });
 
         source.push(1);
 
@@ -1349,7 +1481,11 @@ mod tests {
         b.forward(&merged);
 
         let l = log.clone();
-        merged.on(move |x: &i32| l.borrow_mut().push(*x));
+        merged.on(move |opt: Option<&i32>| {
+            if let Some(x) = opt {
+                l.borrow_mut().push(*x);
+            }
+        });
 
         a.push(1);
         b.push(2);
@@ -1364,7 +1500,8 @@ mod tests {
 
         let s = sink.clone();
         let l = log.clone();
-        sink.on(move |x: &i32| {
+        sink.on(move |opt: Option<&i32>| {
+            let Some(x) = opt else { return };
             l.borrow_mut().push(*x);
             if *x < 3 {
                 s.push(*x + 1);
@@ -1386,8 +1523,10 @@ mod tests {
 
         input.map(|x| format!("result:{}", x * 2)).into(&output);
 
-        output.on(move |s: &String| {
-            out_tx.send(s.clone()).ok();
+        output.on(move |opt: Option<&String>| {
+            if let Some(s) = opt {
+                out_tx.send(s.clone()).ok();
+            }
         });
 
         in_tx.send(21).unwrap();

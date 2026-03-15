@@ -31,6 +31,13 @@ pub struct Drivers {
 pub struct RunGuards {
     pub input_guard: Option<led_terminal_in::InputGuard>,
     pub ui: Option<led_ui::Ui>,
+    state: Stream<Arc<AppState>>,
+}
+
+impl Drop for RunGuards {
+    fn drop(&mut self) {
+        self.state.close();
+    }
 }
 
 /// Set up and run the editor.
@@ -88,13 +95,20 @@ pub fn run(
 
     // Signal quit
     let mut quit_tx = Some(quit_tx);
-    state.on(move |s: &Arc<AppState>| {
-        if s.quit {
-            if let Some(tx) = quit_tx.take() {
-                let _ = tx.send(());
+    state.on(move |opt: Option<&Arc<AppState>>| {
+        if let Some(s) = opt {
+            if s.quit {
+                if let Some(tx) = quit_tx.take() {
+                    let _ = tx.send(());
+                }
             }
         }
     });
 
-    (state, RunGuards { input_guard, ui })
+    let guards = RunGuards {
+        input_guard,
+        ui,
+        state: state.clone(),
+    };
+    (state, guards)
 }

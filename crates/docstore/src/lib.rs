@@ -70,8 +70,10 @@ pub fn driver(out: Stream<DocStoreOut>) -> Stream<Result<DocStoreIn, Alert>> {
     let (result_tx, mut result_rx) = mpsc::channel::<Result<DocStoreIn, Alert>>(64);
 
     // Bridge out: rx::Stream → channel
-    out.on(move |cmd: &DocStoreOut| {
-        cmd_tx.try_send(cmd.clone()).ok();
+    out.on(move |opt: Option<&DocStoreOut>| {
+        if let Some(cmd) = opt {
+            cmd_tx.try_send(cmd.clone()).ok();
+        }
     });
 
     // Async driver task

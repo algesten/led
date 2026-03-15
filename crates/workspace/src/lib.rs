@@ -26,8 +26,10 @@ pub fn driver(out: Stream<Arc<Startup>>) -> Stream<Workspace> {
     let (result_tx, mut result_rx) = mpsc::channel::<Workspace>(64);
 
     // Bridge out: rx::Stream → channel
-    out.on(move |cmd: &Arc<Startup>| {
-        cmd_tx.try_send(cmd.clone()).ok();
+    out.on(move |opt: Option<&Arc<Startup>>| {
+        if let Some(cmd) = opt {
+            cmd_tx.try_send(cmd.clone()).ok();
+        }
     });
 
     // Async task: compute workspace + start watcher
@@ -44,7 +46,7 @@ pub fn driver(out: Stream<Arc<Startup>>) -> Stream<Workspace> {
                         .unwrap_or_else(|_| startup.start_dir.as_ref().clone());
 
                     let root = find_git_root(&dir);
-                    let config = startup.config_dir.clone();
+                    let config = PathBuf::clone(&startup.config_dir);
 
                     let primary = match try_become_primary(&config, &root) {
                         Some(lock_file) => {
@@ -56,15 +58,22 @@ pub fn driver(out: Stream<Arc<Startup>>) -> Stream<Workspace> {
 
                     let workspace = Workspace { root: root.clone(), config, primary };
 
-                    // Start recursive watcher on workspace root (skip in headless/test mode)
-                    if !startup.headless {
-                        _watcher = start_watcher(&root, watch_tx.clone());
-                    }
-
                     current = Some(workspace.clone());
                     if result_tx.send(workspace).await.is_err() {
                         break;
                     }
+
+                    // Start recursive watcher on workspace root.
+                    // spawn_blocking so the (potentially slow) OS watcher
+                    // setup doesn't block the event loop.
+                    let watch_tx2 = watch_tx.clone();
+                    let root2 = root.clone();
+                    _watcher = tokio::task::spawn_blocking(move || {
+                        start_watcher(&root2, watch_tx2)
+                    })
+                    .await
+                    .ok()
+                    .flatten();
                 }
                 Some(()) = watch_rx.recv() => {
                     // Workspace tree changed — re-emit to trigger browser rebuild

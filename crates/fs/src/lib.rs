@@ -31,8 +31,10 @@ pub fn driver(out: Stream<FsOut>) -> Stream<FsIn> {
     let (result_tx, mut result_rx) = mpsc::channel::<FsIn>(64);
 
     // Bridge: rx::Stream → channel
-    out.on(move |cmd: &FsOut| {
-        cmd_tx.try_send(cmd.clone()).ok();
+    out.on(move |opt: Option<&FsOut>| {
+        if let Some(cmd) = opt {
+            cmd_tx.try_send(cmd.clone()).ok();
+        }
     });
 
     // Async task: handle filesystem operations
