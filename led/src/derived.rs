@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -43,6 +44,7 @@ pub fn derived(state: Stream<Arc<AppState>>) -> Derived {
                     cursor_col: b.cursor_col,
                     scroll_row: b.scroll_row,
                     scroll_sub_line: b.scroll_sub_line,
+                    undo: None,
                 })
                 .collect();
 
@@ -57,6 +59,7 @@ pub fn derived(state: Stream<Arc<AppState>>) -> Derived {
                     buffers,
                     active_tab_order,
                     show_side_panel: s.show_side_panel,
+                    kv: build_session_kv(&s),
                 },
             }
         })
@@ -73,7 +76,7 @@ pub fn derived(state: Stream<Arc<AppState>>) -> Derived {
                 chain_id: f.chain_id.clone(),
                 content_hash: f.content_hash,
                 undo_cursor: f.undo_cursor,
-                distance_from_save: 0,
+                distance_from_save: f.distance_from_save,
                 entries: f.entries.clone(),
             }
         })
@@ -191,7 +194,7 @@ pub fn derived(state: Stream<Arc<AppState>>) -> Derived {
         .map(|s| {
             s.buffers
                 .values()
-                .any(|b| b.path.is_some() && b.doc.undo_history_len() > b.persisted_undo_len)
+                .any(|b| b.path.is_some() && b.doc.dirty())
         })
         .dedupe()
         .filter(|dirty| *dirty)
@@ -221,4 +224,23 @@ pub fn derived(state: Stream<Arc<AppState>>) -> Derived {
         timers_out,
         fs_out,
     }
+}
+
+fn build_session_kv(s: &AppState) -> HashMap<String, String> {
+    let mut kv = HashMap::new();
+    kv.insert("browser.selected".into(), s.browser.selected.to_string());
+    kv.insert(
+        "browser.scroll_offset".into(),
+        s.browser.scroll_offset.to_string(),
+    );
+    let dirs: Vec<String> = s
+        .browser
+        .expanded_dirs
+        .iter()
+        .map(|d| d.to_string_lossy().into_owned())
+        .collect();
+    if !dirs.is_empty() {
+        kv.insert("browser.expanded_dirs".into(), dirs.join("\n"));
+    }
+    kv
 }

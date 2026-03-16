@@ -1113,3 +1113,108 @@ fn save_format_is_undoable() {
     let line = buf(&t).doc.line(0);
     assert_eq!(line, "hello   ", "undo should restore trailing whitespace");
 }
+
+// ── Undo persistence ──
+
+#[test]
+fn undo_persist_and_restore() {
+    // Run 1: open file, type some chars, wait for undo flush, quit
+    let t = TestHarness::new().with_file("hello\n").run(vec![
+        Do(LineEnd),
+        Do(InsertChar('!')),
+        Do(InsertChar('!')),
+        WaitFor(|s| {
+            s.active_buffer
+                .and_then(|id| s.buffers.get(&id))
+                .is_some_and(|b| b.persisted_undo_len > 0)
+        }),
+        Do(Quit),
+        WaitFor(|s| s.session_saved),
+    ]);
+    assert!(buf(&t).doc.dirty(), "buffer should be dirty");
+    let dir = t.tmpdir.clone();
+
+    // Run 2: restore — undo should work and revert the edits
+    let t2 = TestHarness::with_dir(dir).run(vec![WaitFor(|s| !s.buffers.is_empty()), Do(Undo)]);
+    let line = buf(&t2).doc.line(0);
+    assert_eq!(line, "hello", "undo should revert persisted edits");
+}
+
+#[test]
+fn undo_cleared_after_save() {
+    // Run 1: edit, save, quit
+    let t = TestHarness::new().with_file("hello\n").run(vec![
+        Do(LineEnd),
+        Do(InsertChar('!')),
+        Do(Save),
+        WaitFor(|s| {
+            s.active_buffer
+                .and_then(|id| s.buffers.get(&id))
+                .is_some_and(|b| b.save_state == SaveState::Clean)
+        }),
+        Do(Quit),
+        WaitFor(|s| s.session_saved),
+    ]);
+    let dir = t.tmpdir.clone();
+
+    // Run 2: restore — buffer should be clean (save cleared undo in DB)
+    let t2 = TestHarness::with_dir(dir).run(vec![WaitFor(|s| !s.buffers.is_empty())]);
+    assert!(
+        !buf(&t2).doc.dirty(),
+        "buffer should be clean after save+restore"
+    );
+}
+
+#[test]
+fn session_restores_dirty_state() {
+    // Run 1: edit without saving, wait for undo flush, then quit
+    let t = TestHarness::new().with_file("hello\n").run(vec![
+        Do(LineEnd),
+        Do(InsertChar('X')),
+        // Wait for undo to be flushed to DB
+        WaitFor(|s| {
+            s.active_buffer
+                .and_then(|id| s.buffers.get(&id))
+                .is_some_and(|b| b.persisted_undo_len > 0)
+        }),
+        Do(Quit),
+        WaitFor(|s| s.session_saved),
+    ]);
+    let dir = t.tmpdir.clone();
+
+    // Run 2: restore — buffer should be dirty (distance_from_save != 0)
+    let t2 = TestHarness::with_dir(dir).run(vec![WaitFor(|s| !s.buffers.is_empty())]);
+    assert!(
+        buf(&t2).doc.dirty(),
+        "buffer should be dirty after restore of unsaved edits"
+    );
+}
+
+// ── Browser state persistence ──
+
+#[test]
+fn session_restores_browser_expanded_dirs() {
+    // Run 1: expand a directory, quit
+    let t = TestHarness::new().with_file("hello\n").run(vec![
+        WaitFor(has_browser_entries),
+        Do(ToggleFocus),
+        Do(ExpandDir), // expand first dir entry (config/)
+        Do(Quit),
+        WaitFor(|s| s.session_saved),
+    ]);
+    assert!(
+        !t.state.browser.expanded_dirs.is_empty(),
+        "should have expanded dirs"
+    );
+    let dir = t.tmpdir.clone();
+
+    // Run 2: restore — expanded dirs should be restored
+    let t2 = TestHarness::with_dir(dir).run(vec![
+        WaitFor(|s| !s.buffers.is_empty()),
+        WaitFor(has_browser_entries),
+    ]);
+    assert!(
+        !t2.state.browser.expanded_dirs.is_empty(),
+        "expanded dirs should be restored from session"
+    );
+}

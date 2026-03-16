@@ -12,6 +12,8 @@ use led_config_file::ConfigFile;
 use led_core::keys::{Keymap, Keys};
 use led_core::rx::Stream;
 use led_core::theme::Theme;
+use std::path::PathBuf;
+
 use led_core::{Action, Alert, BufferId, Doc};
 use led_state::{AppState, BufferState, Dimensions, SessionRestorePhase};
 use led_workspace::Workspace;
@@ -145,26 +147,30 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Arc<AppState>> {
             s.buffers
                 .values()
                 .filter(|b| b.path.is_some())
-                .filter(|b| b.doc.undo_history_len() > b.persisted_undo_len)
+                .filter(|b| b.doc.dirty())
                 .map(|b| {
                     let file_path = b.path.clone().unwrap();
                     let chain_id = b
                         .chain_id
                         .clone()
                         .unwrap_or_else(led_workspace::new_chain_id);
-                    let entries: Vec<Vec<u8>> = b
-                        .doc
+                    // Close the open group before serializing so in-progress
+                    // edits are captured (matching old flush_pending behavior).
+                    let closed_doc = b.doc.close_undo_group();
+                    let entries: Vec<Vec<u8>> = closed_doc
                         .undo_groups_from(b.persisted_undo_len)
                         .iter()
                         .filter_map(|g| rmp_serde::to_vec(g).ok())
                         .collect();
+                    let undo_cursor = closed_doc.undo_history_len();
                     Mut::UndoFlushReady {
                         buf_id: b.id,
                         flush: led_state::UndoFlush {
                             file_path,
                             chain_id,
-                            content_hash: b.doc.content_hash(),
-                            undo_cursor: b.doc.undo_history_len(),
+                            content_hash: b.content_hash,
+                            undo_cursor,
+                            distance_from_save: if b.doc.dirty() { undo_cursor as i32 } else { 0 },
                             entries,
                         },
                     }
@@ -261,6 +267,20 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Arc<AppState>> {
                         .collect();
                     for buf in session.buffers {
                         s.session_positions.insert(buf.file_path.clone(), buf);
+                    }
+                    // Restore browser state from KV
+                    if let Some(v) = session.kv.get("browser.selected") {
+                        s.browser.selected = v.parse().unwrap_or(0);
+                    }
+                    if let Some(v) = session.kv.get("browser.scroll_offset") {
+                        s.browser.scroll_offset = v.parse().unwrap_or(0);
+                    }
+                    if let Some(v) = session.kv.get("browser.expanded_dirs") {
+                        s.browser.expanded_dirs = v
+                            .lines()
+                            .filter(|l| !l.is_empty())
+                            .map(PathBuf::from)
+                            .collect();
                     }
                     s.pending_session_opens.set(paths);
                 }

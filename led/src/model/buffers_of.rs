@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use led_core::rx::Stream;
-use led_core::{Alert, BufferId, DocId};
+use led_core::{Alert, BufferId, Doc, DocId};
 use led_docstore::DocStoreIn;
 use led_state::{AppState, BufferState, SaveState};
 
@@ -27,23 +27,46 @@ pub fn buffers_of(
 
                 let buf_id = BufferId(state.next_buffer_id);
 
-                // Apply restored session positions if available
-                let (cursor_row, cursor_col, scroll_row, scroll_sub_line, tab_order) =
-                    match state.session_positions.get(&path) {
-                        Some(sp) => (
-                            sp.cursor_row.min(doc.line_count().saturating_sub(1)),
-                            sp.cursor_col,
-                            sp.scroll_row,
-                            sp.scroll_sub_line,
-                            sp.tab_order,
-                        ),
-                        None => (0, 0, 0, 0, state.buffers.len()),
+                // Apply restored session positions + undo if available
+                let sp = state.session_positions.get(&path);
+                let (cursor_row, cursor_col, scroll_row, scroll_sub_line, tab_order) = match sp {
+                    Some(sp) => (
+                        sp.cursor_row.min(doc.line_count().saturating_sub(1)),
+                        sp.cursor_col,
+                        sp.scroll_row,
+                        sp.scroll_sub_line,
+                        sp.tab_order,
+                    ),
+                    None => (0, 0, 0, 0, state.buffers.len()),
+                };
+
+                // Restore undo history if content hash matches
+                let undo_data = sp.and_then(|sp| sp.undo.as_ref());
+                let (doc, chain_id, persisted_undo_len, last_seen_seq, distance_from_save) =
+                    match undo_data {
+                        Some(undo) if undo.content_hash == doc.content_hash() => {
+                            let restored = apply_undo_entries(&doc, &undo.entries);
+                            (
+                                restored,
+                                Some(undo.chain_id.clone()),
+                                undo.entries.len(),
+                                undo.last_seen_seq,
+                                undo.distance_from_save,
+                            )
+                        }
+                        _ => (doc, None, 0, 0, 0),
                     };
 
-                let is_session_restore = state.session_positions.contains_key(&path);
+                let is_session_restore = sp.is_some();
                 let notify_hash = led_workspace::path_hash(&path);
-
                 let content_hash = doc.content_hash();
+
+                let save_state = if distance_from_save != 0 {
+                    SaveState::Modified
+                } else {
+                    SaveState::Clean
+                };
+
                 let buf = BufferState {
                     id: buf_id,
                     doc_id: id,
@@ -56,10 +79,10 @@ pub fn buffers_of(
                     scroll_sub_line,
                     tab_order,
                     last_edit_kind: None,
-                    save_state: SaveState::Clean,
-                    persisted_undo_len: 0,
-                    chain_id: None,
-                    last_seen_seq: 0,
+                    save_state,
+                    persisted_undo_len,
+                    chain_id,
+                    last_seen_seq,
                     content_hash,
                 };
                 Some(Mut::BufferOpen {
@@ -110,4 +133,25 @@ pub fn buffers_of(
 
 fn find_buf_by_doc_id<'a>(state: &'a AppState, doc_id: DocId) -> Option<&'a BufferState> {
     state.buffers.values().find(|b| b.doc_id == doc_id)
+}
+
+/// Apply persisted undo entries to a doc, restoring edit history.
+fn apply_undo_entries(doc: &Arc<dyn Doc>, entries: &[Vec<u8>]) -> Arc<dyn Doc> {
+    let mut doc = doc.close_undo_group();
+    for entry_data in entries {
+        let Ok(group) = rmp_serde::from_slice::<led_core::UndoGroup>(entry_data) else {
+            continue;
+        };
+        for op in &group.ops {
+            if !op.old_text.is_empty() {
+                let end = op.offset + op.old_text.chars().count();
+                doc = doc.remove(op.offset, end);
+            }
+            if !op.new_text.is_empty() {
+                doc = doc.insert(op.offset, &op.new_text);
+            }
+        }
+        doc = doc.close_undo_group();
+    }
+    doc
 }

@@ -81,6 +81,7 @@ pub struct UndoFlush {
     pub chain_id: String,
     pub content_hash: u64,
     pub undo_cursor: usize,
+    pub distance_from_save: i32,
     pub entries: Vec<Vec<u8>>,
 }
 

@@ -1,6 +1,6 @@
 mod db;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::hash::DefaultHasher;
 use std::path::{Path, PathBuf};
@@ -100,6 +100,7 @@ pub struct SessionData {
     pub buffers: Vec<SessionBuffer>,
     pub active_tab_order: usize,
     pub show_side_panel: bool,
+    pub kv: HashMap<String, String>,
 }
 
 #[derive(Clone, Debug)]
@@ -110,6 +111,18 @@ pub struct SessionBuffer {
     pub cursor_col: usize,
     pub scroll_row: usize,
     pub scroll_sub_line: usize,
+    /// Undo restore data (loaded from DB during session restore).
+    pub undo: Option<UndoRestoreData>,
+}
+
+#[derive(Clone, Debug)]
+pub struct UndoRestoreData {
+    pub chain_id: String,
+    pub content_hash: u64,
+    pub undo_cursor: Option<usize>,
+    pub distance_from_save: i32,
+    pub entries: Vec<Vec<u8>>,
+    pub last_seen_seq: i64,
 }
 
 #[derive(Clone, Debug)]
@@ -117,6 +130,7 @@ pub struct RestoredSession {
     pub buffers: Vec<SessionBuffer>,
     pub active_tab_order: usize,
     pub show_side_panel: bool,
+    pub kv: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -155,6 +169,7 @@ pub fn driver(out: Stream<WorkspaceOut>) -> Stream<WorkspaceIn> {
             mpsc::channel::<notify::RecommendedWatcher>(1);
         let mut self_notified: HashSet<String> = HashSet::new();
         let mut current: Option<Workspace> = None;
+        let mut root_str = String::new();
         let mut _db: Option<rusqlite::Connection> = None;
         let mut _lock_file: Option<File> = None;
 
@@ -165,7 +180,7 @@ pub fn driver(out: Stream<WorkspaceOut>) -> Stream<WorkspaceIn> {
                     match cmd {
                         WorkspaceOut::SaveSession { data } => {
                             if let Some(ref conn) = _db {
-                                if let Err(e) = db::save_session(conn, &data) {
+                                if let Err(e) = db::save_session(conn, &root_str, &data) {
                                     log::warn!("failed to save session: {e}");
                                 }
                             }
@@ -186,6 +201,7 @@ pub fn driver(out: Stream<WorkspaceOut>) -> Stream<WorkspaceIn> {
                                 None => false,
                             };
 
+                            root_str = root.to_string_lossy().into_owned();
                             let workspace = Workspace { root: root.clone(), config: config.clone(), primary };
 
                             current = Some(workspace.clone());
@@ -193,14 +209,30 @@ pub fn driver(out: Stream<WorkspaceOut>) -> Stream<WorkspaceIn> {
                                 break;
                             }
 
-                            // Open DB and load session
+                            // Open DB and load session + undo state
                             let session = match db::open_db(&config) {
                                 Ok(conn) => {
-                                    let session = if primary {
-                                        db::load_session(&conn).ok().flatten()
+                                    let mut session = if primary {
+                                        db::load_session(&conn, &root_str).ok().flatten()
                                     } else {
                                         None
                                     };
+                                    // Load undo data per buffer
+                                    if let Some(ref mut s) = session {
+                                        for buf in &mut s.buffers {
+                                            let path_str = buf.file_path.to_string_lossy();
+                                            if let Ok(Some(state)) = db::load_undo_all(&conn, &root_str, &path_str) {
+                                                buf.undo = Some(UndoRestoreData {
+                                                    chain_id: state.chain_id,
+                                                    content_hash: state.content_hash,
+                                                    undo_cursor: state.undo_cursor,
+                                                    distance_from_save: state.distance_from_save,
+                                                    entries: state.entries,
+                                                    last_seen_seq: state.last_seq,
+                                                });
+                                            }
+                                        }
+                                    }
                                     _db = Some(conn);
                                     session
                                 }
@@ -252,6 +284,7 @@ pub fn driver(out: Stream<WorkspaceOut>) -> Stream<WorkspaceIn> {
                                 let path_str = file_path.to_string_lossy();
                                 match db::flush_undo(
                                     conn,
+                                    &root_str,
                                     &path_str,
                                     &chain_id,
                                     content_hash,
@@ -285,7 +318,7 @@ pub fn driver(out: Stream<WorkspaceOut>) -> Stream<WorkspaceIn> {
                         WorkspaceOut::ClearUndo { file_path } => {
                             if let Some(ref conn) = _db {
                                 let path_str = file_path.to_string_lossy();
-                                if let Err(e) = db::clear_undo(conn, &path_str) {
+                                if let Err(e) = db::clear_undo(conn, &root_str, &path_str) {
                                     log::warn!("failed to clear undo: {e}");
                                 }
                                 // Touch notify to wake other instances
@@ -304,7 +337,7 @@ pub fn driver(out: Stream<WorkspaceOut>) -> Stream<WorkspaceIn> {
                         } => {
                             if let Some(ref conn) = _db {
                                 let path_str = file_path.to_string_lossy();
-                                let result = match db::load_undo_after(conn, &path_str, last_seen_seq) {
+                                let result = match db::load_undo_after(conn, &root_str, &path_str, last_seen_seq) {
                                     Ok(Some(state)) => {
                                         let same_chain = current_chain_id
                                             .as_ref()
