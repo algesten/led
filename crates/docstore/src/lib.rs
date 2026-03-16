@@ -24,6 +24,7 @@ pub enum DocStoreIn {
     },
     Saved {
         id: DocId,
+        doc: Arc<dyn Doc>,
     },
     ExternalChange {
         id: DocId,
@@ -42,7 +43,7 @@ impl fmt::Debug for DocStoreIn {
                 .field("id", id)
                 .field("path", path)
                 .finish(),
-            DocStoreIn::Saved { id } => f.debug_struct("Saved").field("id", id).finish(),
+            DocStoreIn::Saved { id, .. } => f.debug_struct("Saved").field("id", id).finish(),
             DocStoreIn::ExternalChange { id, .. } => {
                 f.debug_struct("ExternalChange").field("id", id).finish()
             }
@@ -154,6 +155,35 @@ pub fn driver(out: Stream<DocStoreOut>) -> Stream<Result<DocStoreIn, Alert>> {
     stream
 }
 
+/// Apply format-on-save: strip trailing whitespace per line, ensure final newline.
+/// Returns the formatted doc with edits recorded as an undo group.
+fn format_on_save(doc: &Arc<dyn Doc>) -> Arc<dyn Doc> {
+    let mut doc = doc.close_undo_group();
+    let line_count = doc.line_count();
+
+    // Strip trailing whitespace (iterate in reverse so offsets stay valid)
+    for line_idx in (0..line_count).rev() {
+        let line = doc.line(line_idx); // already stripped of \n
+        let trimmed = line.trim_end();
+        if trimmed.len() < line.len() {
+            let line_start = doc.line_to_char(line_idx);
+            let start = line_start + trimmed.len();
+            let end = line_start + line.len();
+            doc = doc.remove(start, end);
+        }
+    }
+
+    // Ensure final newline
+    let len_chars = doc.line_to_char(doc.line_count().saturating_sub(1))
+        + doc.line_len(doc.line_count().saturating_sub(1));
+    let last_line = doc.line(doc.line_count().saturating_sub(1));
+    if !last_line.is_empty() {
+        doc = doc.insert(len_chars, "\n");
+    }
+
+    doc.close_undo_group()
+}
+
 async fn handle_save(
     path: &PathBuf,
     doc: &Arc<dyn Doc>,
@@ -163,6 +193,9 @@ async fn handle_save(
 ) {
     let parent = path.parent().unwrap_or(std::path::Path::new("."));
     let tmp_path = parent.join(format!(".led-save-{}", std::process::id()));
+
+    // Format on save: strip trailing whitespace, ensure final newline
+    let doc = format_on_save(doc);
 
     // Serialize to memory, then write async
     let mut buf = Vec::new();
@@ -189,7 +222,8 @@ async fn handle_save(
     match tokio::fs::rename(&tmp_path, path).await {
         Ok(()) => {
             self_notified.insert(path.clone());
-            let _ = tx.send(Ok(DocStoreIn::Saved { id })).await;
+            let doc = doc.mark_saved();
+            let _ = tx.send(Ok(DocStoreIn::Saved { id, doc })).await;
         }
         Err(e) => {
             let _ = tokio::fs::remove_file(&tmp_path).await;

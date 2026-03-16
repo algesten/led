@@ -26,8 +26,9 @@ pub fn derived(state: Stream<Arc<AppState>>) -> Derived {
         .map(|startup| WorkspaceOut::Init { startup })
         .stream();
 
-    // Session save: triggered when quit is set and instance is primary
+    // Session save: triggered once when quit transitions to true (primary only)
     let session_save = state
+        .dedupe_by(|s| s.quit)
         .filter(|s| s.quit)
         .filter(|s| s.workspace.as_ref().is_some_and(|w| w.primary))
         .map(|s| {
@@ -61,9 +62,61 @@ pub fn derived(state: Stream<Arc<AppState>>) -> Derived {
         })
         .stream();
 
+    // Undo flush: convert domain UndoFlush data into WorkspaceOut commands
+    let undo_flush = state
+        .dedupe_by(|s| s.pending_undo_flushes.version())
+        .filter(|s| s.pending_undo_flushes.version() > 0)
+        .flat_map(|s| {
+            (*s.pending_undo_flushes)
+                .iter()
+                .map(|f| WorkspaceOut::FlushUndo {
+                    file_path: f.file_path.clone(),
+                    chain_id: f.chain_id.clone(),
+                    content_hash: f.content_hash,
+                    undo_cursor: f.undo_cursor,
+                    distance_from_save: 0,
+                    entries: f.entries.clone(),
+                })
+                .collect::<Vec<_>>()
+        });
+
+    // Undo clear: triggered after save completes
+    let undo_clear = state
+        .dedupe_by(|s| s.pending_undo_clear.version())
+        .filter(|s| s.pending_undo_clear.version() > 0)
+        .map(|s| WorkspaceOut::ClearUndo {
+            file_path: (*s.pending_undo_clear).clone(),
+        })
+        .stream();
+
+    // Sync check: triggered by notify events
+    let sync_check = state
+        .dedupe_by(|s| s.pending_sync_check.version())
+        .filter(|s| s.pending_sync_check.version() > 0)
+        .flat_map(|s| {
+            let checks: Vec<_> = (*s.pending_sync_check)
+                .iter()
+                .filter_map(|file_path| {
+                    let buf = s
+                        .buffers
+                        .values()
+                        .find(|b| b.path.as_ref() == Some(file_path))?;
+                    Some(WorkspaceOut::CheckSync {
+                        file_path: file_path.clone(),
+                        last_seen_seq: buf.last_seen_seq,
+                        current_chain_id: buf.chain_id.clone(),
+                    })
+                })
+                .collect();
+            checks
+        });
+
     let workspace_out: Stream<WorkspaceOut> = Stream::new();
     workspace_init.forward(&workspace_out);
     session_save.forward(&workspace_out);
+    undo_flush.forward(&workspace_out);
+    undo_clear.forward(&workspace_out);
+    sync_check.forward(&workspace_out);
 
     let config_file_out = state
         .filter_map(|s| s.workspace.clone())
@@ -121,7 +174,7 @@ pub fn derived(state: Stream<Arc<AppState>>) -> Derived {
     save_out.forward(&docstore_out);
 
     // Timers: schedule alert clear when info/warn appears
-    let timers_out = state
+    let alert_timer = state
         .map(|s| s.info.is_some() || s.warn.is_some())
         .dedupe()
         .filter(|has_alert| *has_alert)
@@ -131,6 +184,28 @@ pub fn derived(state: Stream<Arc<AppState>>) -> Derived {
             schedule: Schedule::Replace,
         })
         .stream();
+
+    // Undo flush rate limiter: when any buffer has unpersisted undo,
+    // schedule a 200ms one-shot. KeepExisting means it won't reset if
+    // already counting down — flush at most once per 200ms.
+    let undo_timer = state
+        .map(|s| {
+            s.buffers
+                .values()
+                .any(|b| b.path.is_some() && b.doc.undo_history_len() > b.persisted_undo_len)
+        })
+        .dedupe()
+        .filter(|dirty| *dirty)
+        .map(|_| TimersOut::Set {
+            name: "undo_flush",
+            duration: Duration::from_millis(200),
+            schedule: Schedule::KeepExisting,
+        })
+        .stream();
+
+    let timers_out: Stream<TimersOut> = Stream::new();
+    alert_timer.forward(&timers_out);
+    undo_timer.forward(&timers_out);
 
     // FS: directory listing requests
     let fs_out = state

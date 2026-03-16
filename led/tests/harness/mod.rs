@@ -83,6 +83,16 @@ impl TestHarness {
             (None, Some(d)) => d,
             _ => unreachable!(),
         };
+        // Initialize logging once (via RUST_LOG env or default off).
+        // Tests use --log-file or RUST_LOG=trace to enable.
+        use std::sync::Once;
+        static INIT_LOG: Once = Once::new();
+        INIT_LOG.call_once(|| {
+            if let Ok(path) = std::env::var("LED_LOG_FILE") {
+                led::logging::init_file_logger(std::path::Path::new(&path));
+            }
+        });
+
         let config_dir = tmpdir.join("config");
         std::fs::create_dir_all(&config_dir).expect("create config dir");
 
@@ -144,16 +154,17 @@ impl TestHarness {
                         let done2 = done.clone();
                         let last_for_wait = last_state.clone();
                         tokio::task::spawn_local(async move {
-                            // Auto-wait for all files to open
-                            if file_count > 0 {
-                                loop {
-                                    if let Some(ref s) = *last_for_wait.borrow() {
-                                        if s.buffers.len() >= file_count {
-                                            break;
-                                        }
+                            // Wait for session restore to complete, then for files to open
+                            loop {
+                                if let Some(ref s) = *last_for_wait.borrow() {
+                                    let phase_done = s.session_restore_phase
+                                        == led_state::SessionRestorePhase::Done;
+                                    let files_ready = s.buffers.len() >= file_count;
+                                    if phase_done && files_ready {
+                                        break;
                                     }
-                                    tokio::time::sleep(Duration::from_millis(1)).await;
                                 }
+                                tokio::time::sleep(Duration::from_millis(1)).await;
                             }
 
                             for step in steps {

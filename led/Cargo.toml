@@ -17,8 +17,10 @@ led-fs = { workspace = true }
 clap = { workspace = true }
 crossterm = { workspace = true }
 dirs = { workspace = true }
+env_logger = "0.11"
 libc = { workspace = true }
 log = { workspace = true }
+rmp-serde = { workspace = true }
 tokio = { workspace = true }
 
 [dev-dependencies]

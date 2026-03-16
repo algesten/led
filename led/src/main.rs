@@ -14,11 +14,19 @@ use tokio::sync::oneshot;
 struct Cli {
     /// File or directory to open
     path: Option<String>,
+
+    /// Write logs to a file (e.g. --log-file /tmp/led.log)
+    #[arg(long)]
+    log_file: Option<PathBuf>,
 }
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
     let cli = Cli::parse();
+
+    if let Some(ref log_path) = cli.log_file {
+        led::logging::init_file_logger(log_path);
+    }
 
     let arg_path = cli.path.as_ref().map(|p| {
         let path = PathBuf::from(p);

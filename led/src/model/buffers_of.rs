@@ -40,6 +40,7 @@ pub fn buffers_of(
                         None => (0, 0, 0, 0, state.buffers.len()),
                     };
 
+                let content_hash = doc.content_hash();
                 let buf = BufferState {
                     id: buf_id,
                     doc_id: id,
@@ -53,14 +54,23 @@ pub fn buffers_of(
                     tab_order,
                     last_edit_kind: None,
                     save_state: SaveState::Clean,
+                    persisted_undo_len: 0,
+                    chain_id: None,
+                    last_seen_seq: 0,
+                    content_hash,
                 };
                 Some(Mut::BufferOpen(buf, state.next_buffer_id + 1))
             }
-            Ok(DocStoreIn::Saved { id }) => {
+            Ok(DocStoreIn::Saved { id, doc }) => {
                 let buf = find_buf_by_doc_id(&state, id)?;
                 let mut buf = buf.clone();
-                buf.doc = buf.doc.mark_saved();
+                buf.doc = doc;
                 buf.save_state = SaveState::Clean;
+                // Reset undo persistence tracking
+                buf.persisted_undo_len = 0;
+                buf.chain_id = None;
+                buf.last_seen_seq = 0;
+                buf.content_hash = buf.doc.content_hash();
                 Some(Mut::BufferUpdate(buf.id, buf))
             }
             Ok(DocStoreIn::ExternalChange { id, doc }) => {

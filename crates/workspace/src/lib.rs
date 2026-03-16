@@ -1,5 +1,6 @@
 mod db;
 
+use std::collections::HashSet;
 use std::fs::{self, File, OpenOptions};
 use std::hash::DefaultHasher;
 use std::path::{Path, PathBuf};
@@ -28,6 +29,23 @@ pub enum WorkspaceOut {
     Init { startup: Arc<Startup> },
     /// Save full session (on quit, primary only).
     SaveSession { data: SessionData },
+    /// Flush unpersisted undo entries for a buffer.
+    FlushUndo {
+        file_path: PathBuf,
+        chain_id: String,
+        content_hash: u64,
+        undo_cursor: usize,
+        distance_from_save: i32,
+        entries: Vec<Vec<u8>>,
+    },
+    /// Delete undo state after save.
+    ClearUndo { file_path: PathBuf },
+    /// Query for cross-instance sync.
+    CheckSync {
+        file_path: PathBuf,
+        last_seen_seq: i64,
+        current_chain_id: Option<String>,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -38,8 +56,41 @@ pub enum WorkspaceIn {
     SessionRestored { session: Option<RestoredSession> },
     /// Session saved to DB.
     SessionSaved,
+    /// Undo entries flushed.
+    UndoFlushed {
+        file_path: PathBuf,
+        chain_id: String,
+        persisted_undo_len: usize,
+        last_seen_seq: i64,
+    },
+    /// Cross-instance sync result.
+    SyncResult { result: SyncResultKind },
+    /// Another instance touched the notify dir for a file we have open.
+    NotifyEvent { file_path_hash: String },
     /// Workspace tree changed (watcher event — re-emits the workspace).
     WorkspaceChanged { workspace: Workspace },
+}
+
+#[derive(Clone, Debug)]
+pub enum SyncResultKind {
+    ReplayEntries {
+        file_path: PathBuf,
+        entries: Vec<Vec<u8>>,
+        new_last_seen_seq: i64,
+    },
+    ReloadAndReplay {
+        file_path: PathBuf,
+        new_chain_id: String,
+        content_hash: u64,
+        entries: Vec<Vec<u8>>,
+        new_last_seen_seq: i64,
+    },
+    ExternalSave {
+        file_path: PathBuf,
+    },
+    NoChange {
+        file_path: PathBuf,
+    },
 }
 
 // ── Session types ──
@@ -98,6 +149,11 @@ pub fn driver(out: Stream<WorkspaceOut>) -> Stream<WorkspaceIn> {
         let mut _watcher: Option<notify::RecommendedWatcher> = None;
         let (watcher_ready_tx, mut watcher_ready_rx) =
             mpsc::channel::<notify::RecommendedWatcher>(1);
+        let (notify_event_tx, mut notify_event_rx) = mpsc::channel::<String>(16);
+        let mut _notify_watcher: Option<notify::RecommendedWatcher> = None;
+        let (notify_watcher_ready_tx, mut notify_watcher_ready_rx) =
+            mpsc::channel::<notify::RecommendedWatcher>(1);
+        let mut self_notified: HashSet<String> = HashSet::new();
         let mut current: Option<Workspace> = None;
         let mut _db: Option<rusqlite::Connection> = None;
         let mut _lock_file: Option<File> = None;
@@ -170,11 +226,132 @@ pub fn driver(out: Stream<WorkspaceOut>) -> Stream<WorkspaceIn> {
                                     watcher_tx.blocking_send(w).ok();
                                 }
                             });
+
+                            // Start notify directory watcher for cross-instance sync.
+                            // spawn_blocking so the (potentially slow) OS watcher
+                            // setup doesn't block the driver task.
+                            let notify_dir = config.join("notify");
+                            std::fs::create_dir_all(&notify_dir).ok();
+                            let notify_tx2 = notify_event_tx.clone();
+                            let nw_tx = notify_watcher_ready_tx.clone();
+                            tokio::task::spawn_blocking(move || {
+                                if let Some(w) = start_notify_watcher(&notify_dir, notify_tx2) {
+                                    nw_tx.blocking_send(w).ok();
+                                }
+                            });
+                        }
+                        WorkspaceOut::FlushUndo {
+                            file_path,
+                            chain_id,
+                            content_hash,
+                            undo_cursor,
+                            distance_from_save,
+                            entries,
+                        } => {
+                            if let Some(ref conn) = _db {
+                                let path_str = file_path.to_string_lossy();
+                                match db::flush_undo(
+                                    conn,
+                                    &path_str,
+                                    &chain_id,
+                                    content_hash,
+                                    undo_cursor,
+                                    distance_from_save,
+                                    &entries,
+                                ) {
+                                    Ok(last_seq) => {
+                                        // Touch notify to wake other instances
+                                        let hash = path_hash(&file_path);
+                                        touch_notify_file(
+                                            current.as_ref().map(|w| &w.config),
+                                            &hash,
+                                            &mut self_notified,
+                                        );
+                                        let _ = result_tx
+                                            .send(WorkspaceIn::UndoFlushed {
+                                                file_path,
+                                                chain_id,
+                                                persisted_undo_len: undo_cursor,
+                                                last_seen_seq: last_seq,
+                                            })
+                                            .await;
+                                    }
+                                    Err(e) => {
+                                        log::warn!("failed to flush undo: {e}");
+                                    }
+                                }
+                            }
+                        }
+                        WorkspaceOut::ClearUndo { file_path } => {
+                            if let Some(ref conn) = _db {
+                                let path_str = file_path.to_string_lossy();
+                                if let Err(e) = db::clear_undo(conn, &path_str) {
+                                    log::warn!("failed to clear undo: {e}");
+                                }
+                                // Touch notify to wake other instances
+                                let hash = path_hash(&file_path);
+                                touch_notify_file(
+                                    current.as_ref().map(|w| &w.config),
+                                    &hash,
+                                    &mut self_notified,
+                                );
+                            }
+                        }
+                        WorkspaceOut::CheckSync {
+                            file_path,
+                            last_seen_seq,
+                            current_chain_id,
+                        } => {
+                            if let Some(ref conn) = _db {
+                                let path_str = file_path.to_string_lossy();
+                                let result = match db::load_undo_after(conn, &path_str, last_seen_seq) {
+                                    Ok(Some(state)) => {
+                                        let same_chain = current_chain_id
+                                            .as_ref()
+                                            .is_some_and(|c| c == &state.chain_id);
+                                        if state.entries.is_empty() && same_chain {
+                                            SyncResultKind::NoChange { file_path }
+                                        } else if same_chain {
+                                            SyncResultKind::ReplayEntries {
+                                                file_path,
+                                                entries: state.entries,
+                                                new_last_seen_seq: state.last_seq,
+                                            }
+                                        } else {
+                                            SyncResultKind::ReloadAndReplay {
+                                                file_path,
+                                                new_chain_id: state.chain_id,
+                                                content_hash: state.content_hash,
+                                                entries: state.entries,
+                                                new_last_seen_seq: state.last_seq,
+                                            }
+                                        }
+                                    }
+                                    Ok(None) => SyncResultKind::ExternalSave { file_path },
+                                    Err(e) => {
+                                        log::warn!("failed to check sync: {e}");
+                                        SyncResultKind::NoChange { file_path }
+                                    }
+                                };
+                                let _ = result_tx
+                                    .send(WorkspaceIn::SyncResult { result })
+                                    .await;
+                            }
                         }
                     }
                 }
                 Some(w) = watcher_ready_rx.recv() => {
                     _watcher = Some(w);
+                }
+                Some(w) = notify_watcher_ready_rx.recv() => {
+                    _notify_watcher = Some(w);
+                }
+                Some(hash) = notify_event_rx.recv() => {
+                    if !self_notified.remove(&hash) {
+                        let _ = result_tx
+                            .send(WorkspaceIn::NotifyEvent { file_path_hash: hash })
+                            .await;
+                    }
                 }
                 Some(()) = watch_rx.recv() => {
                     // Workspace tree changed — re-emit to trigger browser rebuild
@@ -259,4 +436,56 @@ fn try_become_primary(config: &Path, root: &Path) -> Option<File> {
 
     let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
     if rc == 0 { Some(file) } else { None }
+}
+
+fn start_notify_watcher(
+    dir: &Path,
+    tx: mpsc::Sender<String>,
+) -> Option<notify::RecommendedWatcher> {
+    let mut watcher =
+        notify::recommended_watcher(move |res: Result<notify::Event, notify::Error>| {
+            let Ok(ev) = res else { return };
+            match ev.kind {
+                EventKind::Create(_) | EventKind::Modify(_) => {}
+                _ => return,
+            }
+            for path in &ev.paths {
+                if let Some(name) = path.file_name() {
+                    tx.try_send(name.to_string_lossy().into_owned()).ok();
+                }
+            }
+        })
+        .ok()?;
+
+    watcher.watch(dir, RecursiveMode::NonRecursive).ok()?;
+    Some(watcher)
+}
+
+/// Generate a unique chain_id for undo persistence sessions.
+pub fn new_chain_id() -> String {
+    use std::hash::{Hash, Hasher};
+    use std::time::SystemTime;
+    let t = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let mut hasher = DefaultHasher::new();
+    t.hash(&mut hasher);
+    std::process::id().hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
+pub fn path_hash(path: &Path) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    path.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
+fn touch_notify_file(config: Option<&PathBuf>, hash: &str, self_notified: &mut HashSet<String>) {
+    let Some(config) = config else { return };
+    let notify_dir = config.join("notify");
+    let path = notify_dir.join(hash);
+    self_notified.insert(hash.to_string());
+    std::fs::write(&path, b"").ok();
 }

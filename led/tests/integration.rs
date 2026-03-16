@@ -1062,3 +1062,54 @@ fn session_restore_active_tab() {
         .into_owned();
     assert_eq!(active_name2, "first.txt", "active tab should be restored");
 }
+
+// ── Save flow enhancements ──
+
+#[test]
+fn save_strips_trailing_whitespace() {
+    let t = TestHarness::new()
+        .with_file("hello   \nworld  \n")
+        .run(vec![
+            Do(Save),
+            WaitFor(|s| {
+                s.active_buffer
+                    .and_then(|id| s.buffers.get(&id))
+                    .is_some_and(|b| b.save_state == SaveState::Clean)
+            }),
+        ]);
+
+    let content = std::fs::read_to_string(t.file_path.as_ref().unwrap()).unwrap();
+    assert_eq!(content, "hello\nworld\n");
+}
+
+#[test]
+fn save_ensures_final_newline() {
+    let t = TestHarness::new().with_file("no newline at end").run(vec![
+        Do(Save),
+        WaitFor(|s| {
+            s.active_buffer
+                .and_then(|id| s.buffers.get(&id))
+                .is_some_and(|b| b.save_state == SaveState::Clean)
+        }),
+    ]);
+
+    let content = std::fs::read_to_string(t.file_path.as_ref().unwrap()).unwrap();
+    assert!(content.ends_with('\n'), "file should end with newline");
+}
+
+#[test]
+fn save_format_is_undoable() {
+    let t = TestHarness::new().with_file("hello   \n").run(vec![
+        Do(Save),
+        WaitFor(|s| {
+            s.active_buffer
+                .and_then(|id| s.buffers.get(&id))
+                .is_some_and(|b| b.save_state == SaveState::Clean)
+        }),
+        Do(Undo),
+    ]);
+
+    // After undo, trailing whitespace should be back
+    let line = buf(&t).doc.line(0);
+    assert_eq!(line, "hello   ", "undo should restore trailing whitespace");
+}

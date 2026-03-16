@@ -13,6 +13,7 @@ use led_workspace::WorkspaceIn;
 use tokio::sync::oneshot;
 
 pub mod derived;
+pub mod logging;
 pub mod model;
 
 use derived::derived;

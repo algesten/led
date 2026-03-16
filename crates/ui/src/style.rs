@@ -418,6 +418,10 @@ mod tests {
             tab_order: 0,
             last_edit_kind: None,
             save_state: SaveState::Clean,
+            persisted_undo_len: 0,
+            chain_id: None,
+            last_seen_seq: 0,
+            content_hash: 0,
         };
 
         let mut state = AppState::new(Startup {

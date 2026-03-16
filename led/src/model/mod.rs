@@ -34,6 +34,21 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Arc<AppState>> {
                 Mut::SessionRestored(session)
             }
             led_workspace::WorkspaceIn::SessionSaved => Mut::SessionSaved,
+            led_workspace::WorkspaceIn::UndoFlushed {
+                file_path,
+                chain_id,
+                persisted_undo_len,
+                last_seen_seq,
+            } => Mut::UndoFlushed {
+                file_path,
+                chain_id,
+                persisted_undo_len,
+                last_seen_seq,
+            },
+            led_workspace::WorkspaceIn::SyncResult { result } => Mut::SyncResult { result },
+            led_workspace::WorkspaceIn::NotifyEvent { file_path_hash } => {
+                Mut::NotifyEvent { file_path_hash }
+            }
             led_workspace::WorkspaceIn::WorkspaceChanged { workspace } => Mut::Workspace(workspace),
         })
         .stream();
@@ -92,6 +107,7 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Arc<AppState>> {
     // ── 3. Reduce ──
 
     muts.fold_into(&state, Arc::new(init), |s, m| {
+        log::trace!("model: {}", m.name());
         let mut s = Arc::unwrap_or_clone(s);
         match m {
             Mut::ActivateBuffer(id) => s.active_buffer = Some(id),
@@ -115,9 +131,11 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Arc<AppState>> {
                     s.active_buffer = Some(buf.id);
                 }
 
-                // Remove from pending session positions
+                // Remove from pending session positions and register notify hash
                 if let Some(ref path) = buf.path {
                     s.session_positions.remove(path);
+                    let hash = led_workspace::path_hash(path);
+                    s.notify_hash_to_buffer.insert(hash, buf.id);
                 }
 
                 s.buffers.insert(buf.id, buf);
@@ -130,6 +148,16 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Arc<AppState>> {
                 }
             }
             Mut::BufferUpdate(id, buf) => {
+                // If save just completed (transition to Clean), trigger undo clear
+                let was_saving = s
+                    .buffers
+                    .get(&id)
+                    .is_some_and(|b| b.save_state == SaveState::Saving);
+                if was_saving && buf.save_state == SaveState::Clean {
+                    if let Some(ref path) = buf.path {
+                        s.pending_undo_clear.set(path.clone());
+                    }
+                }
                 s.buffers.insert(id, buf);
             }
             Mut::ConfigKeys(v) => s.config_keys = Some(v),
@@ -148,6 +176,37 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Arc<AppState>> {
             }
             Mut::SessionSaved => {
                 s.session_saved = true;
+            }
+            Mut::NotifyEvent { file_path_hash } => {
+                // Look up which buffer this notify is for
+                if let Some(&buf_id) = s.notify_hash_to_buffer.get(&file_path_hash) {
+                    if let Some(buf) = s.buffers.get(&buf_id) {
+                        if let Some(ref path) = buf.path {
+                            let mut pending = (*s.pending_sync_check).clone();
+                            pending.push(path.clone());
+                            s.pending_sync_check.set(pending);
+                        }
+                    }
+                }
+            }
+            Mut::SyncResult { result } => {
+                handle_sync_result(&mut s, result);
+            }
+            Mut::UndoFlushed {
+                file_path,
+                chain_id,
+                persisted_undo_len,
+                last_seen_seq,
+            } => {
+                if let Some(buf) = s
+                    .buffers
+                    .values_mut()
+                    .find(|b| b.path.as_ref() == Some(&file_path))
+                {
+                    buf.chain_id = Some(chain_id);
+                    buf.persisted_undo_len = persisted_undo_len;
+                    buf.last_seen_seq = last_seen_seq;
+                }
             }
             Mut::Suspend(v) => s.suspend = v,
             Mut::TimerFired(name) => handle_timer(&mut s, name),
@@ -416,6 +475,97 @@ fn kill_buffer(state: &mut AppState) {
     state.info = Some(format!("Killed {filename}"));
 }
 
+fn handle_sync_result(state: &mut AppState, result: led_workspace::SyncResultKind) {
+    use led_workspace::SyncResultKind;
+    match result {
+        SyncResultKind::NoChange { .. } => {}
+        SyncResultKind::ExternalSave { file_path } => {
+            // Another instance saved and cleared undo — reload from disk
+            if let Some(buf) = state
+                .buffers
+                .values_mut()
+                .find(|b| b.path.as_ref() == Some(&file_path))
+            {
+                // Mark as needing reload — the docstore watcher will handle
+                // the actual disk read via ExternalChange
+                buf.last_seen_seq = 0;
+                buf.chain_id = None;
+                buf.persisted_undo_len = 0;
+            }
+        }
+        SyncResultKind::ReplayEntries {
+            file_path,
+            entries,
+            new_last_seen_seq,
+        } => {
+            if let Some(buf) = state
+                .buffers
+                .values_mut()
+                .find(|b| b.path.as_ref() == Some(&file_path))
+            {
+                // Deserialize and apply undo entries from another instance
+                for entry_data in &entries {
+                    if let Ok(group) = rmp_serde::from_slice::<led_core::UndoGroup>(entry_data) {
+                        // Apply the group's ops forward (same as the original edits)
+                        let mut doc = buf.doc.close_undo_group();
+                        for op in &group.ops {
+                            if !op.old_text.is_empty() {
+                                let end = op.offset + op.old_text.chars().count();
+                                doc = doc.remove(op.offset, end);
+                            }
+                            if !op.new_text.is_empty() {
+                                doc = doc.insert(op.offset, &op.new_text);
+                            }
+                        }
+                        buf.doc = doc.close_undo_group();
+                    }
+                }
+                buf.last_seen_seq = new_last_seen_seq;
+            }
+        }
+        SyncResultKind::ReloadAndReplay {
+            file_path,
+            new_chain_id,
+            content_hash,
+            entries,
+            new_last_seen_seq,
+        } => {
+            // Different chain — if content hash differs, we need a disk reload
+            // (handled by the docstore watcher). Apply entries regardless.
+            if let Some(buf) = state
+                .buffers
+                .values_mut()
+                .find(|b| b.path.as_ref() == Some(&file_path))
+            {
+                if buf.content_hash != content_hash {
+                    log::info!(
+                        "sync: content hash mismatch for {}, expecting docstore reload",
+                        file_path.display()
+                    );
+                }
+                for entry_data in &entries {
+                    if let Ok(group) = rmp_serde::from_slice::<led_core::UndoGroup>(entry_data) {
+                        let mut doc = buf.doc.close_undo_group();
+                        for op in &group.ops {
+                            if !op.old_text.is_empty() {
+                                let end = op.offset + op.old_text.chars().count();
+                                doc = doc.remove(op.offset, end);
+                            }
+                            if !op.new_text.is_empty() {
+                                doc = doc.insert(op.offset, &op.new_text);
+                            }
+                        }
+                        buf.doc = doc.close_undo_group();
+                    }
+                }
+                buf.chain_id = Some(new_chain_id);
+                buf.last_seen_seq = new_last_seen_seq;
+                buf.persisted_undo_len = 0;
+            }
+        }
+    }
+}
+
 fn handle_session_restored(state: &mut AppState, session: Option<led_workspace::RestoredSession>) {
     use led_workspace::SessionRestorePhase;
 
@@ -441,6 +591,36 @@ fn handle_timer(state: &mut AppState, name: &'static str) {
         "alert_clear" => {
             state.info = None;
             state.warn = None;
+        }
+        "undo_flush" => {
+            let mut flushes = Vec::new();
+            for buf in state.buffers.values_mut() {
+                let Some(ref path) = buf.path else { continue };
+                let len = buf.doc.undo_history_len();
+                if len <= buf.persisted_undo_len {
+                    continue;
+                }
+                if buf.chain_id.is_none() {
+                    buf.chain_id = Some(led_workspace::new_chain_id());
+                }
+                let entries: Vec<Vec<u8>> = buf
+                    .doc
+                    .undo_groups_from(buf.persisted_undo_len)
+                    .iter()
+                    .filter_map(|g| rmp_serde::to_vec(g).ok())
+                    .collect();
+                flushes.push(led_state::UndoFlush {
+                    file_path: path.clone(),
+                    chain_id: buf.chain_id.clone().unwrap(),
+                    content_hash: buf.doc.content_hash(),
+                    undo_cursor: len,
+                    entries,
+                });
+                buf.persisted_undo_len = len;
+            }
+            if !flushes.is_empty() {
+                state.pending_undo_flushes.set(flushes);
+            }
         }
         _ => {}
     }
@@ -666,14 +846,50 @@ enum Mut {
     ForceRedraw(u64),
     Keymap(Arc<Keymap>),
     Resize(u16, u16),
+    NotifyEvent {
+        file_path_hash: String,
+    },
     SessionRestored(Option<led_workspace::RestoredSession>),
     SessionSaved,
+    SyncResult {
+        result: led_workspace::SyncResultKind,
+    },
     Suspend(bool),
+    UndoFlushed {
+        file_path: std::path::PathBuf,
+        chain_id: String,
+        persisted_undo_len: usize,
+        last_seen_seq: i64,
+    },
     TimerFired(&'static str),
     Workspace(Workspace),
 }
 
 impl Mut {
+    fn name(&self) -> &'static str {
+        match self {
+            Mut::ActivateBuffer(_) => "ActivateBuffer",
+            Mut::Action(_) => "Action",
+            Mut::Alert { .. } => "Alert",
+            Mut::BufferOpen(_, _) => "BufferOpen",
+            Mut::BufferUpdate(_, _) => "BufferUpdate",
+            Mut::ConfigKeys(_) => "ConfigKeys",
+            Mut::ConfigTheme(_) => "ConfigTheme",
+            Mut::DirListed(_, _) => "DirListed",
+            Mut::ForceRedraw(_) => "ForceRedraw",
+            Mut::Keymap(_) => "Keymap",
+            Mut::Resize(_, _) => "Resize",
+            Mut::NotifyEvent { .. } => "NotifyEvent",
+            Mut::SessionRestored(_) => "SessionRestored",
+            Mut::SessionSaved => "SessionSaved",
+            Mut::SyncResult { .. } => "SyncResult",
+            Mut::Suspend(_) => "Suspend",
+            Mut::UndoFlushed { .. } => "UndoFlushed",
+            Mut::TimerFired(_) => "TimerFired",
+            Mut::Workspace(_) => "Workspace",
+        }
+    }
+
     fn alert(a: Alert) -> Self {
         match a {
             Alert::Info(v) => Mut::Alert {

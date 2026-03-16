@@ -99,6 +99,7 @@ pub trait Doc: Send + Sync {
     fn dirty(&self) -> bool;
     fn content_hash(&self) -> u64;
     fn undo_history_len(&self) -> usize;
+    fn undo_groups_from(&self, start: usize) -> Vec<UndoGroup>;
 
     // Edits — record undo ops into the open group
     fn insert(&self, char_idx: usize, text: &str) -> Arc<dyn Doc>;
@@ -206,6 +207,10 @@ impl Doc for TextDoc {
 
     fn undo_history_len(&self) -> usize {
         self.undo.undo_len()
+    }
+
+    fn undo_groups_from(&self, start: usize) -> Vec<UndoGroup> {
+        self.undo.undo_slice(start).to_vec()
     }
 
     fn insert(&self, char_idx: usize, text: &str) -> Arc<dyn Doc> {

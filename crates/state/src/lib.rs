@@ -75,6 +75,15 @@ impl Dimensions {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct UndoFlush {
+    pub file_path: PathBuf,
+    pub chain_id: String,
+    pub content_hash: u64,
+    pub undo_cursor: usize,
+    pub entries: Vec<Vec<u8>>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EditKind {
     Insert,
@@ -103,6 +112,11 @@ pub struct BufferState {
     pub tab_order: usize,
     pub last_edit_kind: Option<EditKind>,
     pub save_state: SaveState,
+    // Undo persistence
+    pub persisted_undo_len: usize,
+    pub chain_id: Option<String>,
+    pub last_seen_seq: i64,
+    pub content_hash: u64,
 }
 
 impl fmt::Debug for BufferState {
@@ -223,6 +237,10 @@ pub struct AppState {
     pub session_active_tab_order: Option<usize>,
     pub pending_session_opens: Versioned<Vec<PathBuf>>,
     pub session_saved: bool,
+    pub pending_undo_flushes: Versioned<Vec<UndoFlush>>,
+    pub pending_undo_clear: Versioned<PathBuf>,
+    pub pending_sync_check: Versioned<Vec<PathBuf>>,
+    pub notify_hash_to_buffer: HashMap<String, BufferId>,
 }
 
 impl AppState {
