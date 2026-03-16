@@ -95,13 +95,16 @@ pub fn run(
     // 6. Seed — triggers derived → drivers → first events
     state.push(seed);
 
-    // Signal quit
+    // Signal quit — wait for session save to complete (primary only)
     let mut quit_tx = Some(quit_tx);
     state.on(move |opt: Option<&Arc<AppState>>| {
         if let Some(s) = opt {
             if s.quit {
-                if let Some(tx) = quit_tx.take() {
-                    let _ = tx.send(());
+                let needs_save = s.workspace.as_ref().is_some_and(|w| w.primary);
+                if s.session_saved || !needs_save {
+                    if let Some(tx) = quit_tx.take() {
+                        let _ = tx.send(());
+                    }
                 }
             }
         }

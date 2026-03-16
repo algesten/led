@@ -130,10 +130,18 @@ pub fn derived(state: Stream<Arc<AppState>>) -> Derived {
         .map(ConfigFileOut::ConfigDir)
         .stream();
 
-    // File opens from startup args — gated on session restore being done
+    // File opens from startup args — gated on session restore being done.
+    // Skip files already opened by session restore to avoid overriding the active tab.
     let startup_open = state
         .filter(|s| s.session_restore_phase == SessionRestorePhase::Done)
-        .map(|s| s.startup.arg_paths.clone())
+        .map(|s| {
+            s.startup
+                .arg_paths
+                .iter()
+                .filter(|p| !s.buffers.values().any(|b| b.path.as_ref() == Some(p)))
+                .cloned()
+                .collect::<Vec<_>>()
+        })
         .filter(|paths| !paths.is_empty())
         .dedupe()
         .flat_map(|paths| paths.into_iter().map(|path| DocStoreOut::Open { path }));

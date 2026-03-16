@@ -14,6 +14,9 @@ use tokio::sync::oneshot;
 pub enum TestStep {
     Do(Action),
     WaitFor(fn(&AppState) -> bool),
+    /// Dispatch Quit and wait for the real quit signal (like the app does).
+    /// This tests that session save completes before the app would exit.
+    QuitAndWait,
 }
 
 impl From<Action> for TestStep {
@@ -32,6 +35,7 @@ pub struct TestHarness {
     tmpdir: Option<TempDir>,
     reuse_dir: Option<PathBuf>,
     files: Vec<(String, String)>,
+    arg_paths: Vec<PathBuf>,
     viewport: (u16, u16),
 }
 
@@ -41,6 +45,7 @@ impl TestHarness {
             tmpdir: Some(TempDir::new().expect("create tmpdir")),
             reuse_dir: None,
             files: Vec::new(),
+            arg_paths: Vec::new(),
             viewport: (80, 24),
         }
     }
@@ -53,8 +58,16 @@ impl TestHarness {
             tmpdir: None,
             reuse_dir: Some(dir),
             files: Vec::new(),
+            arg_paths: Vec::new(),
             viewport: (80, 24),
         }
+    }
+
+    /// Add an existing file (already on disk) as an arg path for the second run.
+    #[allow(dead_code)]
+    pub fn with_arg(mut self, path: PathBuf) -> Self {
+        self.arg_paths.push(path);
+        self
     }
 
     pub fn with_file(mut self, content: &str) -> Self {
@@ -76,8 +89,9 @@ impl TestHarness {
     }
 
     pub fn run(self, steps: Vec<TestStep>) -> TestResult {
-        let file_count = self.files.len();
+        let file_count = self.files.len() + self.arg_paths.len();
         let files = self.files;
+        let extra_args = self.arg_paths;
         let tmpdir = match (self.tmpdir, self.reuse_dir) {
             (Some(td), _) => td.keep(),
             (None, Some(d)) => d,
@@ -96,7 +110,7 @@ impl TestHarness {
         let config_dir = tmpdir.join("config");
         std::fs::create_dir_all(&config_dir).expect("create config dir");
 
-        let arg_paths: Vec<PathBuf> = files
+        let mut arg_paths: Vec<PathBuf> = files
             .into_iter()
             .map(|(name, content)| {
                 let path = tmpdir.join(name);
@@ -104,6 +118,7 @@ impl TestHarness {
                 path
             })
             .collect();
+        arg_paths.extend(extra_args);
         let file_path = arg_paths.first().cloned();
 
         let start_dir = arg_paths
@@ -134,7 +149,7 @@ impl TestHarness {
                 local
                     .run_until(async {
                         let actions_in: Stream<Action> = Stream::new();
-                        let (quit_tx, _) = oneshot::channel::<()>();
+                        let (quit_tx, quit_rx) = oneshot::channel::<()>();
 
                         let (state, guards) = led::run(startup, actions_in.clone(), quit_tx);
 
@@ -152,6 +167,8 @@ impl TestHarness {
                         let stream = actions_in.clone();
                         let done = Rc::new(Cell::new(false));
                         let done2 = done.clone();
+                        let quit_rx = Rc::new(RefCell::new(Some(quit_rx)));
+                        let quit_rx2 = quit_rx.clone();
                         let last_for_wait = last_state.clone();
                         tokio::task::spawn_local(async move {
                             // Wait for session restore to complete, then for files to open
@@ -172,6 +189,13 @@ impl TestHarness {
                                     TestStep::Do(action) => stream.push(action),
                                     TestStep::WaitFor(pred) => {
                                         wait_for_condition(&last_for_wait, pred).await;
+                                    }
+                                    TestStep::QuitAndWait => {
+                                        stream.push(Action::Quit);
+                                        // Wait for the real quit signal — same as main.rs
+                                        if let Some(rx) = quit_rx2.borrow_mut().take() {
+                                            let _ = rx.await;
+                                        }
                                     }
                                 }
                             }

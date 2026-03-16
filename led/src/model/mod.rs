@@ -283,6 +283,11 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Arc<AppState>> {
                             .collect();
                     }
                     s.pending_session_opens.set(paths);
+                    // Request dir listings for restored expanded dirs
+                    if !s.browser.expanded_dirs.is_empty() {
+                        s.pending_lists
+                            .set(s.browser.expanded_dirs.iter().cloned().collect());
+                    }
                 }
                 None => {
                     s.session_restore_phase = SessionRestorePhase::Done;

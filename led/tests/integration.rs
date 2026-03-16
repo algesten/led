@@ -3,7 +3,7 @@ mod harness;
 use led_core::Action::*;
 use led_state::SaveState;
 
-use TestStep::{Do, WaitFor};
+use TestStep::{Do, QuitAndWait, WaitFor};
 use harness::{TestHarness, TestStep};
 
 // ── Helpers ──
@@ -1007,6 +1007,77 @@ fn session_restore_tabs() {
 }
 
 #[test]
+fn session_restore_with_arg_file() {
+    // Exact repro: start with ONE arg file, open a second from browser, quit, restart with same arg.
+    let tmpdir = tempfile::TempDir::new().unwrap().keep();
+    std::fs::write(tmpdir.join("Cargo.toml"), "[package]\n").unwrap();
+    std::fs::write(tmpdir.join("lib.rs"), "fn main() {}\n").unwrap();
+    let cargo_path = tmpdir.join("Cargo.toml");
+
+    // Run 1: start with only Cargo.toml, open lib.rs from browser
+    let t = TestHarness::with_dir(tmpdir.clone())
+        .with_arg(cargo_path.clone())
+        .run(vec![
+            WaitFor(has_browser_entries),
+            Do(ToggleFocus),  // focus browser
+            Do(FileEnd),      // select last entry (lib.rs — files sorted after dirs)
+            Do(OpenSelected), // open lib.rs from browser
+            WaitFor(|s| s.buffers.len() >= 2),
+            QuitAndWait, // dispatch Quit and wait for quit signal (like real app)
+        ]);
+
+    assert_eq!(t.state.buffers.len(), 2);
+    assert!(
+        t.state.session_saved,
+        "session must be saved BEFORE quit signal fires"
+    );
+
+    // Verify the session was actually written to the DB
+    let db_path = tmpdir.join("config").join("db.sqlite");
+    let conn = rusqlite::Connection::open(&db_path).expect("open DB");
+    let buf_count: i64 = conn
+        .query_row("SELECT count(*) FROM buffers", [], |row| row.get(0))
+        .expect("query buffers");
+    assert_eq!(buf_count, 2, "DB should have 2 buffer rows after save");
+    drop(conn);
+
+    // Run 2: restart with only Cargo.toml as arg — session should also restore lib.rs
+    // lib.rs was the last opened (from browser), so it should be the active tab.
+    let t2 = TestHarness::with_dir(tmpdir)
+        .with_arg(cargo_path)
+        .run(vec![WaitFor(|s| s.buffers.len() >= 2)]);
+
+    assert_eq!(
+        t2.state.buffers.len(),
+        2,
+        "session should restore both files"
+    );
+    let mut paths: Vec<String> = t2
+        .state
+        .buffers
+        .values()
+        .filter_map(|b| b.path.as_ref())
+        .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+        .collect();
+    paths.sort();
+    assert_eq!(paths, vec!["Cargo.toml", "lib.rs"]);
+
+    // Active tab should be what the session saved, NOT overridden by the arg file
+    let active_name = buf(&t2)
+        .path
+        .as_ref()
+        .unwrap()
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    assert_eq!(
+        active_name, "lib.rs",
+        "active tab should be session's choice, not the arg file"
+    );
+}
+
+#[test]
 fn session_restore_cursor() {
     // Run 1: open file, move cursor down 3 lines, quit
     let t = TestHarness::new()
@@ -1048,9 +1119,12 @@ fn session_restore_active_tab() {
         .into_owned();
     assert_eq!(active_name, "first.txt");
     let dir = t.tmpdir.clone();
+    let second_path = dir.join("second.txt");
 
-    // Run 2: restore — first tab should be active
-    let t2 = TestHarness::with_dir(dir).run(vec![WaitFor(|s| s.buffers.len() >= 2)]);
+    // Run 2: restart with second.txt as arg — first.txt should still be the active tab
+    let t2 = TestHarness::with_dir(dir)
+        .with_arg(second_path)
+        .run(vec![WaitFor(|s| s.buffers.len() >= 2)]);
 
     let active_name2 = buf(&t2)
         .path
@@ -1206,15 +1280,27 @@ fn session_restores_browser_expanded_dirs() {
         !t.state.browser.expanded_dirs.is_empty(),
         "should have expanded dirs"
     );
+    let expanded_dir = t.state.browser.expanded_dirs.iter().next().unwrap().clone();
     let dir = t.tmpdir.clone();
 
-    // Run 2: restore — expanded dirs should be restored
+    // Run 2: restore — expanded dirs should be restored AND their contents loaded
     let t2 = TestHarness::with_dir(dir).run(vec![
         WaitFor(|s| !s.buffers.is_empty()),
         WaitFor(has_browser_entries),
+        // Wait for expanded dir contents to actually be loaded
+        WaitFor(|s| {
+            s.browser
+                .expanded_dirs
+                .iter()
+                .all(|d| s.browser.dir_contents.contains_key(d))
+        }),
     ]);
     assert!(
         !t2.state.browser.expanded_dirs.is_empty(),
         "expanded dirs should be restored from session"
+    );
+    assert!(
+        t2.state.browser.dir_contents.contains_key(&expanded_dir),
+        "expanded dir contents should be loaded"
     );
 }

@@ -24,4 +24,5 @@ rmp-serde = { workspace = true }
 tokio = { workspace = true }
 
 [dev-dependencies]
+rusqlite = { workspace = true }
 tempfile = "3"

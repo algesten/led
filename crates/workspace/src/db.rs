@@ -15,7 +15,25 @@ pub fn open_db(config_dir: &Path) -> rusqlite::Result<Connection> {
     Ok(conn)
 }
 
+const SCHEMA_VERSION: i64 = 2;
+
 fn run_schema(conn: &Connection) -> rusqlite::Result<()> {
+    let version: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+
+    if version != SCHEMA_VERSION {
+        conn.execute_batch(
+            "
+            DROP TABLE IF EXISTS undo_entries;
+            DROP TABLE IF EXISTS buffer_undo_state;
+            DROP TABLE IF EXISTS session_kv;
+            DROP TABLE IF EXISTS buffers;
+            DROP TABLE IF EXISTS workspaces;
+            DROP TABLE IF EXISTS session_buffers;
+            DROP TABLE IF EXISTS session_meta;
+            ",
+        )?;
+    }
+
     conn.execute_batch(
         "
         CREATE TABLE IF NOT EXISTS workspaces (
@@ -62,7 +80,9 @@ fn run_schema(conn: &Connection) -> rusqlite::Result<()> {
         CREATE INDEX IF NOT EXISTS idx_undo_entries_file
             ON undo_entries(root_path, file_path, seq);
         ",
-    )
+    )?;
+
+    conn.pragma_update(None, "user_version", SCHEMA_VERSION)
 }
 
 // ── Session ──
