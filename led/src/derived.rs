@@ -62,23 +62,22 @@ pub fn derived(state: Stream<Arc<AppState>>) -> Derived {
         })
         .stream();
 
-    // Undo flush: convert domain UndoFlush data into WorkspaceOut commands
+    // Undo flush: convert domain UndoFlush into WorkspaceOut command
     let undo_flush = state
-        .dedupe_by(|s| s.pending_undo_flushes.version())
-        .filter(|s| s.pending_undo_flushes.version() > 0)
-        .flat_map(|s| {
-            (*s.pending_undo_flushes)
-                .iter()
-                .map(|f| WorkspaceOut::FlushUndo {
-                    file_path: f.file_path.clone(),
-                    chain_id: f.chain_id.clone(),
-                    content_hash: f.content_hash,
-                    undo_cursor: f.undo_cursor,
-                    distance_from_save: 0,
-                    entries: f.entries.clone(),
-                })
-                .collect::<Vec<_>>()
-        });
+        .dedupe_by(|s| s.pending_undo_flush.version())
+        .filter(|s| s.pending_undo_flush.is_some())
+        .map(|s| {
+            let f = (*s.pending_undo_flush).as_ref().unwrap();
+            WorkspaceOut::FlushUndo {
+                file_path: f.file_path.clone(),
+                chain_id: f.chain_id.clone(),
+                content_hash: f.content_hash,
+                undo_cursor: f.undo_cursor,
+                distance_from_save: 0,
+                entries: f.entries.clone(),
+            }
+        })
+        .stream();
 
     // Undo clear: triggered after save completes
     let undo_clear = state
@@ -89,27 +88,27 @@ pub fn derived(state: Stream<Arc<AppState>>) -> Derived {
         })
         .stream();
 
-    // Sync check: triggered by notify events
+    // Sync check: triggered by notify events (single file path)
     let sync_check = state
         .dedupe_by(|s| s.pending_sync_check.version())
         .filter(|s| s.pending_sync_check.version() > 0)
-        .flat_map(|s| {
-            let checks: Vec<_> = (*s.pending_sync_check)
-                .iter()
-                .filter_map(|file_path| {
-                    let buf = s
-                        .buffers
-                        .values()
-                        .find(|b| b.path.as_ref() == Some(file_path))?;
-                    Some(WorkspaceOut::CheckSync {
-                        file_path: file_path.clone(),
-                        last_seen_seq: buf.last_seen_seq,
-                        current_chain_id: buf.chain_id.clone(),
-                    })
-                })
-                .collect();
-            checks
-        });
+        .map(|s| {
+            let file_path: std::path::PathBuf = (*s.pending_sync_check).clone();
+            let buf = s
+                .buffers
+                .values()
+                .find(|b| b.path.as_ref() == Some(&file_path));
+            let (last_seen_seq, current_chain_id) = match buf {
+                Some(b) => (b.last_seen_seq, b.chain_id.clone()),
+                None => (0, None),
+            };
+            WorkspaceOut::CheckSync {
+                file_path,
+                last_seen_seq,
+                current_chain_id,
+            }
+        })
+        .stream();
 
     let workspace_out: Stream<WorkspaceOut> = Stream::new();
     workspace_init.forward(&workspace_out);

@@ -273,7 +273,7 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Arc<AppState>> {
             }
             Mut::NotifyEvent { path } => {
                 if let Some(path) = path {
-                    s.pending_sync_check.set(vec![path]);
+                    s.pending_sync_check.set(path);
                 }
             }
             Mut::SyncApply {
@@ -301,7 +301,7 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Arc<AppState>> {
                     buf.chain_id = Some(flush.chain_id.clone());
                     buf.persisted_undo_len = flush.undo_cursor;
                 }
-                s.pending_undo_flushes.set(vec![flush]);
+                s.pending_undo_flush.set(Some(flush));
             }
             Mut::UndoFlushed {
                 buf_id,

@@ -237,9 +237,9 @@ pub struct AppState {
     pub session_active_tab_order: Option<usize>,
     pub pending_session_opens: Versioned<Vec<PathBuf>>,
     pub session_saved: bool,
-    pub pending_undo_flushes: Versioned<Vec<UndoFlush>>,
+    pub pending_undo_flush: Versioned<Option<UndoFlush>>,
     pub pending_undo_clear: Versioned<PathBuf>,
-    pub pending_sync_check: Versioned<Vec<PathBuf>>,
+    pub pending_sync_check: Versioned<PathBuf>,
     pub notify_hash_to_buffer: HashMap<String, BufferId>,
 }
 
