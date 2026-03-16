@@ -40,6 +40,9 @@ pub fn buffers_of(
                         None => (0, 0, 0, 0, state.buffers.len()),
                     };
 
+                let is_session_restore = state.session_positions.contains_key(&path);
+                let notify_hash = led_workspace::path_hash(&path);
+
                 let content_hash = doc.content_hash();
                 let buf = BufferState {
                     id: buf_id,
@@ -59,19 +62,34 @@ pub fn buffers_of(
                     last_seen_seq: 0,
                     content_hash,
                 };
-                Some(Mut::BufferOpen(buf, state.next_buffer_id + 1))
+                Some(Mut::BufferOpen {
+                    buf,
+                    next_id: state.next_buffer_id + 1,
+                    activate: !is_session_restore
+                        || state.session_active_tab_order == Some(tab_order),
+                    notify_hash,
+                    session_restore_done: is_session_restore && state.session_positions.len() == 1,
+                })
             }
             Ok(DocStoreIn::Saved { id, doc }) => {
                 let buf = find_buf_by_doc_id(&state, id)?;
+                let undo_clear_path = if buf.save_state == SaveState::Saving {
+                    buf.path.clone()
+                } else {
+                    None
+                };
                 let mut buf = buf.clone();
                 buf.doc = doc;
                 buf.save_state = SaveState::Clean;
-                // Reset undo persistence tracking
                 buf.persisted_undo_len = 0;
                 buf.chain_id = None;
                 buf.last_seen_seq = 0;
                 buf.content_hash = buf.doc.content_hash();
-                Some(Mut::BufferUpdate(buf.id, buf))
+                Some(Mut::BufferSaved {
+                    id: buf.id,
+                    buf,
+                    undo_clear_path,
+                })
             }
             Ok(DocStoreIn::ExternalChange { id, doc }) => {
                 let buf = find_buf_by_doc_id(&state, id)?;

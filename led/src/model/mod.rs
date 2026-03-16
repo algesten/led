@@ -1,57 +1,97 @@
 use std::sync::Arc;
 
+mod action;
 mod actions_of;
 mod buffers_of;
 mod edit;
 mod mov;
 mod process_of;
+mod sync_of;
 
 use led_config_file::ConfigFile;
 use led_core::keys::{Keymap, Keys};
 use led_core::rx::Stream;
 use led_core::theme::Theme;
-use led_core::{Action, Alert, BufferId, PanelSlot};
-use led_state::{
-    AppState, BufferState, Dimensions, EditKind, EntryKind, SaveState, SessionRestorePhase,
-};
+use led_core::{Action, Alert, BufferId, Doc};
+use led_state::{AppState, BufferState, Dimensions, SessionRestorePhase};
 use led_workspace::Workspace;
 
 use crate::Drivers;
 use crate::model::actions_of::actions_of;
 use crate::model::buffers_of::buffers_of;
 use crate::model::process_of::process_of;
+use crate::model::sync_of::sync_of;
 
 pub fn model(drivers: Drivers, init: AppState) -> Stream<Arc<AppState>> {
     let state: Stream<Arc<AppState>> = Stream::new();
 
     // ── 1. Derive from hoisted state ──
 
+    use led_workspace::WorkspaceIn as WI;
+
     let workspace_s = drivers
         .workspace_in
         .map(|ev| match ev {
-            led_workspace::WorkspaceIn::Workspace { workspace } => Mut::Workspace(workspace),
-            led_workspace::WorkspaceIn::SessionRestored { session } => {
-                Mut::SessionRestored(session)
+            WI::Workspace { workspace } | WI::WorkspaceChanged { workspace } => {
+                Some(Mut::Workspace(workspace))
             }
-            led_workspace::WorkspaceIn::SessionSaved => Mut::SessionSaved,
-            led_workspace::WorkspaceIn::UndoFlushed {
+            WI::SessionRestored { session } => Some(Mut::SessionRestored(session)),
+            WI::SessionSaved => Some(Mut::SessionSaved),
+            _ => None, // handled by undo_flushed_s, notify_s, sync_s
+        })
+        .filter(|opt| opt.is_some())
+        .map(|opt| opt.unwrap())
+        .stream();
+
+    // UndoFlushed needs buffer lookup → sample_combine with state
+    let undo_flushed_s = drivers
+        .workspace_in
+        .filter(|ev| matches!(ev, WI::UndoFlushed { .. }))
+        .sample_combine(&state)
+        .map(|(ev, s)| {
+            let WI::UndoFlushed {
                 file_path,
                 chain_id,
-                persisted_undo_len,
                 last_seen_seq,
-            } => Mut::UndoFlushed {
-                file_path,
+                ..
+            } = ev
+            else {
+                unreachable!()
+            };
+            let buf_id = s
+                .buffers
+                .values()
+                .find(|b| b.path.as_ref() == Some(&file_path))
+                .map(|b| b.id)
+                .unwrap_or(BufferId(u64::MAX));
+            Mut::UndoFlushed {
+                buf_id,
                 chain_id,
-                persisted_undo_len,
                 last_seen_seq,
-            },
-            led_workspace::WorkspaceIn::SyncResult { result } => Mut::SyncResult { result },
-            led_workspace::WorkspaceIn::NotifyEvent { file_path_hash } => {
-                Mut::NotifyEvent { file_path_hash }
             }
-            led_workspace::WorkspaceIn::WorkspaceChanged { workspace } => Mut::Workspace(workspace),
         })
         .stream();
+
+    // NotifyEvent needs hash→path lookup → sample_combine with state
+    let notify_s = drivers
+        .workspace_in
+        .filter(|ev| matches!(ev, WI::NotifyEvent { .. }))
+        .sample_combine(&state)
+        .map(|(ev, s)| {
+            let WI::NotifyEvent { file_path_hash } = ev else {
+                unreachable!()
+            };
+            let path = s
+                .notify_hash_to_buffer
+                .get(&file_path_hash)
+                .and_then(|id| s.buffers.get(id))
+                .and_then(|b| b.path.clone());
+            Mut::NotifyEvent { path }
+        })
+        .stream();
+
+    // Sync results: full doc application in combinator chain
+    let sync_s = sync_of(&drivers.workspace_in, &state);
 
     let keymap_s = state
         .filter_map(|s| s.config_keys.as_ref().map(|ck| ck.file.clone()))
@@ -87,7 +127,51 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Arc<AppState>> {
         }));
 
     let direct_actions_s = drivers.actions_in.map(|a| Mut::Action(a)).stream();
-    let timers_s = drivers.timers_in.map(|t| Mut::TimerFired(t.name)).stream();
+
+    // Split timers: undo_flush goes through a chain that samples state,
+    // other timers go directly to the reducer.
+    let timers_s = drivers
+        .timers_in
+        .filter(|t| t.name != "undo_flush")
+        .map(|t| Mut::TimerFired(t.name))
+        .stream();
+
+    let undo_flush_s = drivers
+        .timers_in
+        .filter(|t| t.name == "undo_flush")
+        .sample_combine(&state)
+        .map(|(_, s)| s)
+        .flat_map(|s: Arc<AppState>| {
+            s.buffers
+                .values()
+                .filter(|b| b.path.is_some())
+                .filter(|b| b.doc.undo_history_len() > b.persisted_undo_len)
+                .map(|b| {
+                    let file_path = b.path.clone().unwrap();
+                    let chain_id = b
+                        .chain_id
+                        .clone()
+                        .unwrap_or_else(led_workspace::new_chain_id);
+                    let entries: Vec<Vec<u8>> = b
+                        .doc
+                        .undo_groups_from(b.persisted_undo_len)
+                        .iter()
+                        .filter_map(|g| rmp_serde::to_vec(g).ok())
+                        .collect();
+                    Mut::UndoFlushReady {
+                        buf_id: b.id,
+                        flush: led_state::UndoFlush {
+                            file_path,
+                            chain_id,
+                            content_hash: b.doc.content_hash(),
+                            undo_cursor: b.doc.undo_history_len(),
+                            entries,
+                        },
+                    }
+                })
+                .collect::<Vec<_>>()
+        });
+
     let fs_s = drivers
         .fs_in
         .map(|ev| match ev {
@@ -96,12 +180,16 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Arc<AppState>> {
         .stream();
 
     workspace_s.forward(&muts);
+    undo_flushed_s.forward(&muts);
+    notify_s.forward(&muts);
+    sync_s.forward(&muts);
     keymap_s.forward(&muts);
     actions_s.forward(&muts);
     direct_actions_s.forward(&muts);
     buffers_s.forward(&muts);
     process_s.forward(&muts);
     timers_s.forward(&muts);
+    undo_flush_s.forward(&muts);
     fs_s.forward(&muts);
 
     // ── 3. Reduce ──
@@ -111,59 +199,49 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Arc<AppState>> {
         let mut s = Arc::unwrap_or_clone(s);
         match m {
             Mut::ActivateBuffer(id) => s.active_buffer = Some(id),
-            Mut::Action(a) => handle_action(&mut s, a),
+            Mut::Action(a) => action::handle_action(&mut s, a),
             Mut::Alert { info, warn } => {
                 s.info = info;
                 s.warn = warn;
             }
-            Mut::BufferOpen(buf, next_id) => {
-                // During session restore, only activate the tab matching
-                // session_active_tab_order. Otherwise activate every new buffer.
-                let is_restoring = s.session_restore_phase == SessionRestorePhase::Restoring;
-                let should_activate = if is_restoring {
-                    s.session_active_tab_order == Some(buf.tab_order)
-                } else {
-                    true
-                };
-                if should_activate {
-                    s.active_buffer = Some(buf.id);
-                } else if s.active_buffer.is_none() {
+            Mut::BufferOpen {
+                buf,
+                next_id,
+                activate,
+                notify_hash,
+                session_restore_done,
+            } => {
+                if activate || s.active_buffer.is_none() {
                     s.active_buffer = Some(buf.id);
                 }
-
-                // Remove from pending session positions and register notify hash
                 if let Some(ref path) = buf.path {
                     s.session_positions.remove(path);
-                    let hash = led_workspace::path_hash(path);
-                    s.notify_hash_to_buffer.insert(hash, buf.id);
                 }
-
+                s.notify_hash_to_buffer.insert(notify_hash, buf.id);
                 s.buffers.insert(buf.id, buf);
                 s.next_buffer_id = next_id;
-
-                // Check if session restore is complete
-                if is_restoring && s.session_positions.is_empty() {
+                if session_restore_done {
                     s.session_restore_phase = SessionRestorePhase::Done;
                     s.session_active_tab_order = None;
                 }
             }
-            Mut::BufferUpdate(id, buf) => {
-                // If save just completed (transition to Clean), trigger undo clear
-                let was_saving = s
-                    .buffers
-                    .get(&id)
-                    .is_some_and(|b| b.save_state == SaveState::Saving);
-                if was_saving && buf.save_state == SaveState::Clean {
-                    if let Some(ref path) = buf.path {
-                        s.pending_undo_clear.set(path.clone());
-                    }
+            Mut::BufferSaved {
+                id,
+                buf,
+                undo_clear_path,
+            } => {
+                s.buffers.insert(id, buf);
+                if let Some(path) = undo_clear_path {
+                    s.pending_undo_clear.set(path);
                 }
+            }
+            Mut::BufferUpdate(id, buf) => {
                 s.buffers.insert(id, buf);
             }
             Mut::ConfigKeys(v) => s.config_keys = Some(v),
             Mut::DirListed(path, entries) => {
                 s.browser.dir_contents.insert(path, entries);
-                s.browser.rebuild_entries();
+                s.browser.rebuild_entries(); // denormalize flat entry list
             }
             Mut::ConfigTheme(v) => s.config_theme = Some(v),
             Mut::ForceRedraw(v) => s.force_redraw = v,
@@ -171,419 +249,86 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Arc<AppState>> {
             Mut::Resize(w, h) => {
                 s.dims = Some(Dimensions::new(w, h, s.show_side_panel));
             }
-            Mut::SessionRestored(session) => {
-                handle_session_restored(&mut s, session);
-            }
+            Mut::SessionRestored(session) => match session {
+                Some(session) => {
+                    s.session_restore_phase = SessionRestorePhase::Restoring;
+                    s.session_active_tab_order = Some(session.active_tab_order);
+                    s.show_side_panel = session.show_side_panel;
+                    let paths: Vec<_> = session
+                        .buffers
+                        .iter()
+                        .map(|b| b.file_path.clone())
+                        .collect();
+                    for buf in session.buffers {
+                        s.session_positions.insert(buf.file_path.clone(), buf);
+                    }
+                    s.pending_session_opens.set(paths);
+                }
+                None => {
+                    s.session_restore_phase = SessionRestorePhase::Done;
+                }
+            },
             Mut::SessionSaved => {
                 s.session_saved = true;
             }
-            Mut::NotifyEvent { file_path_hash } => {
-                // Look up which buffer this notify is for
-                if let Some(&buf_id) = s.notify_hash_to_buffer.get(&file_path_hash) {
-                    if let Some(buf) = s.buffers.get(&buf_id) {
-                        if let Some(ref path) = buf.path {
-                            let mut pending = (*s.pending_sync_check).clone();
-                            pending.push(path.clone());
-                            s.pending_sync_check.set(pending);
-                        }
-                    }
+            Mut::NotifyEvent { path } => {
+                if let Some(path) = path {
+                    s.pending_sync_check.set(vec![path]);
                 }
             }
-            Mut::SyncResult { result } => {
-                handle_sync_result(&mut s, result);
-            }
-            Mut::UndoFlushed {
-                file_path,
+            Mut::SyncApply {
+                buf_id,
+                doc,
                 chain_id,
-                persisted_undo_len,
                 last_seen_seq,
             } => {
-                if let Some(buf) = s
-                    .buffers
-                    .values_mut()
-                    .find(|b| b.path.as_ref() == Some(&file_path))
-                {
+                if let Some(buf) = s.buffers.get_mut(&buf_id) {
+                    buf.doc = doc;
+                    buf.chain_id = chain_id;
+                    buf.last_seen_seq = last_seen_seq;
+                    buf.persisted_undo_len = 0;
+                }
+            }
+            Mut::SyncReset { buf_id } => {
+                if let Some(buf) = s.buffers.get_mut(&buf_id) {
+                    buf.last_seen_seq = 0;
+                    buf.chain_id = None;
+                    buf.persisted_undo_len = 0;
+                }
+            }
+            Mut::UndoFlushReady { buf_id, flush } => {
+                if let Some(buf) = s.buffers.get_mut(&buf_id) {
+                    buf.chain_id = Some(flush.chain_id.clone());
+                    buf.persisted_undo_len = flush.undo_cursor;
+                }
+                s.pending_undo_flushes.set(vec![flush]);
+            }
+            Mut::UndoFlushed {
+                buf_id,
+                chain_id,
+                last_seen_seq,
+            } => {
+                if let Some(buf) = s.buffers.get_mut(&buf_id) {
                     buf.chain_id = Some(chain_id);
-                    buf.persisted_undo_len = persisted_undo_len;
                     buf.last_seen_seq = last_seen_seq;
                 }
             }
             Mut::Suspend(v) => s.suspend = v,
             Mut::TimerFired(name) => handle_timer(&mut s, name),
             Mut::Workspace(v) => {
-                let root = v.root.clone();
-                s.workspace = Some(Arc::new(v));
-                // Initialize or refresh browser tree
-                s.browser.root = Some(root.clone());
+                s.browser.root = Some(v.root.clone());
                 s.browser.dir_contents.clear();
-                let mut dirs_to_list = vec![root];
-                dirs_to_list.extend(s.browser.expanded_dirs.iter().cloned());
-                s.pending_lists.set(dirs_to_list);
                 s.browser.rebuild_entries();
+                let mut dirs = vec![v.root.clone()];
+                dirs.extend(s.browser.expanded_dirs.iter().cloned());
+                s.pending_lists.set(dirs);
+                s.workspace = Some(Arc::new(v));
             }
         }
         Arc::new(s)
     });
 
     state
-}
-
-fn handle_action(state: &mut AppState, action: Action) {
-    match action {
-        // ── UI ──
-        Action::ToggleSidePanel => {
-            state.show_side_panel = !state.show_side_panel;
-            if let Some(ref mut dims) = state.dims {
-                dims.show_side_panel = state.show_side_panel;
-            }
-        }
-        Action::ToggleFocus => {
-            state.focus = match state.focus {
-                PanelSlot::Main => PanelSlot::Side,
-                PanelSlot::Side => PanelSlot::Main,
-                other => other,
-            };
-        }
-        Action::Quit => {
-            state.quit = true;
-        }
-        Action::Suspend => {
-            state.suspend = true;
-        }
-
-        // ── Resize ──
-        Action::Resize(w, h) => {
-            state.dims = Some(Dimensions::new(w, h, state.show_side_panel));
-        }
-
-        // ── Movement (routed by focus) ──
-        Action::MoveUp
-        | Action::MoveDown
-        | Action::PageUp
-        | Action::PageDown
-        | Action::FileStart
-        | Action::FileEnd => {
-            if state.focus == PanelSlot::Side {
-                handle_browser_nav(state, &action);
-            } else {
-                handle_editor_movement(state, &action);
-            }
-        }
-        Action::MoveLeft => with_buf(state, |buf, dims| {
-            let (r, c, _) = mov::move_left(buf);
-            buf.cursor_row = r;
-            buf.cursor_col = c;
-            buf.cursor_col_affinity = mov::reset_affinity(buf, dims);
-            close_group_on_move(buf);
-        }),
-        Action::MoveRight => with_buf(state, |buf, dims| {
-            let (r, c, _) = mov::move_right(buf);
-            buf.cursor_row = r;
-            buf.cursor_col = c;
-            buf.cursor_col_affinity = mov::reset_affinity(buf, dims);
-            close_group_on_move(buf);
-        }),
-        Action::LineStart => with_buf(state, |buf, dims| {
-            let (r, c, _) = mov::line_start(buf);
-            buf.cursor_row = r;
-            buf.cursor_col = c;
-            buf.cursor_col_affinity = mov::reset_affinity(buf, dims);
-            close_group_on_move(buf);
-        }),
-        Action::LineEnd => with_buf(state, |buf, dims| {
-            let (r, c, _) = mov::line_end(buf);
-            buf.cursor_row = r;
-            buf.cursor_col = c;
-            buf.cursor_col_affinity = mov::reset_affinity(buf, dims);
-            close_group_on_move(buf);
-        }),
-
-        // ── Browser ──
-        Action::ExpandDir => handle_browser_expand(state),
-        Action::CollapseDir => handle_browser_collapse(state),
-        Action::CollapseAll => handle_browser_collapse_all(state),
-        Action::OpenSelected => handle_browser_open(state),
-
-        // ── Editing ──
-        Action::InsertChar(ch) => with_buf(state, |buf, dims| {
-            maybe_close_group(buf, EditKind::Insert, ch);
-            let (doc, r, c, _) = edit::insert_char(buf, ch);
-            buf.doc = doc;
-            buf.cursor_row = r;
-            buf.cursor_col = c;
-            buf.cursor_col_affinity = mov::reset_affinity(buf, dims);
-            buf.last_edit_kind = Some(EditKind::Insert);
-        }),
-        Action::InsertNewline => with_buf(state, |buf, dims| {
-            close_group_on_move(buf);
-            let (doc, r, c, _) = edit::insert_newline(buf);
-            buf.doc = doc;
-            buf.cursor_row = r;
-            buf.cursor_col = c;
-            buf.cursor_col_affinity = mov::reset_affinity(buf, dims);
-        }),
-        Action::InsertTab => with_buf(state, |buf, dims| {
-            maybe_close_group(buf, EditKind::Insert, ' ');
-            let (doc, r, c, _) = edit::insert_tab(buf, dims);
-            buf.doc = doc;
-            buf.cursor_row = r;
-            buf.cursor_col = c;
-            buf.cursor_col_affinity = mov::reset_affinity(buf, dims);
-            buf.last_edit_kind = Some(EditKind::Insert);
-        }),
-        Action::DeleteBackward => with_buf(state, |buf, dims| {
-            if buf.last_edit_kind != Some(EditKind::Delete) {
-                buf.doc = buf.doc.close_undo_group();
-            }
-            if let Some((doc, r, c, _)) = edit::delete_backward(buf) {
-                buf.doc = doc;
-                buf.cursor_row = r;
-                buf.cursor_col = c;
-                buf.cursor_col_affinity = mov::reset_affinity(buf, dims);
-                buf.last_edit_kind = Some(EditKind::Delete);
-            }
-        }),
-        Action::DeleteForward => with_buf(state, |buf, dims| {
-            if buf.last_edit_kind != Some(EditKind::Delete) {
-                buf.doc = buf.doc.close_undo_group();
-            }
-            if let Some((doc, r, c, _)) = edit::delete_forward(buf) {
-                buf.doc = doc;
-                buf.cursor_row = r;
-                buf.cursor_col = c;
-                buf.cursor_col_affinity = mov::reset_affinity(buf, dims);
-                buf.last_edit_kind = Some(EditKind::Delete);
-            }
-        }),
-        Action::KillLine => with_buf(state, |buf, dims| {
-            close_group_on_move(buf);
-            if let Some((doc, r, c, _)) = edit::kill_line(buf) {
-                buf.doc = doc;
-                buf.cursor_row = r;
-                buf.cursor_col = c;
-                buf.cursor_col_affinity = mov::reset_affinity(buf, dims);
-            }
-        }),
-
-        // ── Undo / Redo ──
-        Action::Undo => with_buf(state, |buf, dims| {
-            close_group_on_move(buf);
-            if let Some((doc, cursor)) = buf.doc.undo() {
-                let row = doc.char_to_line(cursor);
-                let col = cursor - doc.line_to_char(row);
-                buf.doc = doc;
-                buf.cursor_row = row;
-                buf.cursor_col = col;
-                buf.cursor_col_affinity = mov::reset_affinity(buf, dims);
-            }
-        }),
-        Action::Redo => with_buf(state, |buf, dims| {
-            close_group_on_move(buf);
-            if let Some((doc, cursor)) = buf.doc.redo() {
-                let row = doc.char_to_line(cursor);
-                let col = cursor - doc.line_to_char(row);
-                buf.doc = doc;
-                buf.cursor_row = row;
-                buf.cursor_col = col;
-                buf.cursor_col_affinity = mov::reset_affinity(buf, dims);
-            }
-        }),
-
-        // ── Save ──
-        Action::Save => {
-            if let Some(id) = state.active_buffer {
-                if let Some(buf) = state.buffers.get_mut(&id) {
-                    close_group_on_move(buf);
-                    buf.save_state = SaveState::Saving;
-                }
-            }
-            state.save_request.set(());
-        }
-
-        // ── Tabs ──
-        Action::NextTab => cycle_tab(state, 1),
-        Action::PrevTab => cycle_tab(state, -1),
-        Action::KillBuffer => kill_buffer(state),
-
-        _ => {}
-    }
-}
-
-fn cycle_tab(state: &mut AppState, direction: i32) {
-    let Some(active_id) = state.active_buffer else {
-        return;
-    };
-    let mut tabs: Vec<(BufferId, usize)> = state
-        .buffers
-        .iter()
-        .map(|(id, buf)| (*id, buf.tab_order))
-        .collect();
-    tabs.sort_by_key(|&(_, order)| order);
-
-    let Some(pos) = tabs.iter().position(|&(id, _)| id == active_id) else {
-        return;
-    };
-    let len = tabs.len() as i32;
-    let next = ((pos as i32 + direction).rem_euclid(len)) as usize;
-    state.active_buffer = Some(tabs[next].0);
-}
-
-fn kill_buffer(state: &mut AppState) {
-    let Some(active_id) = state.active_buffer else {
-        return;
-    };
-    let Some(buf) = state.buffers.get(&active_id) else {
-        return;
-    };
-
-    // Don't kill dirty buffers (no modal yet)
-    if buf.doc.dirty() {
-        state.warn = Some("Buffer has unsaved changes".into());
-        return;
-    }
-
-    let filename = buf
-        .path
-        .as_ref()
-        .and_then(|p| p.file_name())
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let killed_order = buf.tab_order;
-
-    // Find next buffer to activate (next by tab_order, wrapping)
-    let mut tabs: Vec<(BufferId, usize)> = state
-        .buffers
-        .iter()
-        .filter(|(id, _)| **id != active_id)
-        .map(|(id, buf)| (*id, buf.tab_order))
-        .collect();
-    tabs.sort_by_key(|&(_, order)| order);
-
-    let next_active = tabs
-        .iter()
-        .find(|&&(_, order)| order > killed_order)
-        .or_else(|| tabs.last())
-        .map(|&(id, _)| id);
-
-    state.buffers.remove(&active_id);
-    state.active_buffer = next_active;
-
-    if state.buffers.is_empty() {
-        state.focus = PanelSlot::Side;
-    }
-
-    state.info = Some(format!("Killed {filename}"));
-}
-
-fn handle_sync_result(state: &mut AppState, result: led_workspace::SyncResultKind) {
-    use led_workspace::SyncResultKind;
-    match result {
-        SyncResultKind::NoChange { .. } => {}
-        SyncResultKind::ExternalSave { file_path } => {
-            // Another instance saved and cleared undo — reload from disk
-            if let Some(buf) = state
-                .buffers
-                .values_mut()
-                .find(|b| b.path.as_ref() == Some(&file_path))
-            {
-                // Mark as needing reload — the docstore watcher will handle
-                // the actual disk read via ExternalChange
-                buf.last_seen_seq = 0;
-                buf.chain_id = None;
-                buf.persisted_undo_len = 0;
-            }
-        }
-        SyncResultKind::ReplayEntries {
-            file_path,
-            entries,
-            new_last_seen_seq,
-        } => {
-            if let Some(buf) = state
-                .buffers
-                .values_mut()
-                .find(|b| b.path.as_ref() == Some(&file_path))
-            {
-                // Deserialize and apply undo entries from another instance
-                for entry_data in &entries {
-                    if let Ok(group) = rmp_serde::from_slice::<led_core::UndoGroup>(entry_data) {
-                        // Apply the group's ops forward (same as the original edits)
-                        let mut doc = buf.doc.close_undo_group();
-                        for op in &group.ops {
-                            if !op.old_text.is_empty() {
-                                let end = op.offset + op.old_text.chars().count();
-                                doc = doc.remove(op.offset, end);
-                            }
-                            if !op.new_text.is_empty() {
-                                doc = doc.insert(op.offset, &op.new_text);
-                            }
-                        }
-                        buf.doc = doc.close_undo_group();
-                    }
-                }
-                buf.last_seen_seq = new_last_seen_seq;
-            }
-        }
-        SyncResultKind::ReloadAndReplay {
-            file_path,
-            new_chain_id,
-            content_hash,
-            entries,
-            new_last_seen_seq,
-        } => {
-            // Different chain — if content hash differs, we need a disk reload
-            // (handled by the docstore watcher). Apply entries regardless.
-            if let Some(buf) = state
-                .buffers
-                .values_mut()
-                .find(|b| b.path.as_ref() == Some(&file_path))
-            {
-                if buf.content_hash != content_hash {
-                    log::info!(
-                        "sync: content hash mismatch for {}, expecting docstore reload",
-                        file_path.display()
-                    );
-                }
-                for entry_data in &entries {
-                    if let Ok(group) = rmp_serde::from_slice::<led_core::UndoGroup>(entry_data) {
-                        let mut doc = buf.doc.close_undo_group();
-                        for op in &group.ops {
-                            if !op.old_text.is_empty() {
-                                let end = op.offset + op.old_text.chars().count();
-                                doc = doc.remove(op.offset, end);
-                            }
-                            if !op.new_text.is_empty() {
-                                doc = doc.insert(op.offset, &op.new_text);
-                            }
-                        }
-                        buf.doc = doc.close_undo_group();
-                    }
-                }
-                buf.chain_id = Some(new_chain_id);
-                buf.last_seen_seq = new_last_seen_seq;
-                buf.persisted_undo_len = 0;
-            }
-        }
-    }
-}
-
-fn handle_session_restored(state: &mut AppState, session: Option<led_workspace::RestoredSession>) {
-    use led_workspace::SessionRestorePhase;
-
-    match session {
-        Some(session) => {
-            state.session_restore_phase = SessionRestorePhase::Restoring;
-            state.session_active_tab_order = Some(session.active_tab_order);
-            state.show_side_panel = session.show_side_panel;
-            for buf in session.buffers {
-                state.session_positions.insert(buf.file_path.clone(), buf);
-            }
-            let paths: Vec<_> = state.session_positions.keys().cloned().collect();
-            state.pending_session_opens.set(paths);
-        }
-        None => {
-            state.session_restore_phase = SessionRestorePhase::Done;
-        }
-    }
 }
 
 fn handle_timer(state: &mut AppState, name: &'static str) {
@@ -593,244 +338,14 @@ fn handle_timer(state: &mut AppState, name: &'static str) {
             state.warn = None;
         }
         "undo_flush" => {
-            let mut flushes = Vec::new();
-            for buf in state.buffers.values_mut() {
-                let Some(ref path) = buf.path else { continue };
-                let len = buf.doc.undo_history_len();
-                if len <= buf.persisted_undo_len {
-                    continue;
-                }
-                if buf.chain_id.is_none() {
-                    buf.chain_id = Some(led_workspace::new_chain_id());
-                }
-                let entries: Vec<Vec<u8>> = buf
-                    .doc
-                    .undo_groups_from(buf.persisted_undo_len)
-                    .iter()
-                    .filter_map(|g| rmp_serde::to_vec(g).ok())
-                    .collect();
-                flushes.push(led_state::UndoFlush {
-                    file_path: path.clone(),
-                    chain_id: buf.chain_id.clone().unwrap(),
-                    content_hash: buf.doc.content_hash(),
-                    undo_cursor: len,
-                    entries,
-                });
-                buf.persisted_undo_len = len;
-            }
-            if !flushes.is_empty() {
-                state.pending_undo_flushes.set(flushes);
-            }
+            // Handled by the undo_flush_s combinator chain, not here.
+            // The timer fires → chain samples state → produces UndoFlushReady.
         }
         _ => {}
     }
 }
 
-// ── Editor movement (focus = Main) ──
-
-fn handle_editor_movement(state: &mut AppState, action: &Action) {
-    match action {
-        Action::MoveUp => with_buf(state, |buf, dims| {
-            let (r, c, a) = mov::move_up(buf, dims);
-            buf.cursor_row = r;
-            buf.cursor_col = c;
-            buf.cursor_col_affinity = a;
-            close_group_on_move(buf);
-        }),
-        Action::MoveDown => with_buf(state, |buf, dims| {
-            let (r, c, a) = mov::move_down(buf, dims);
-            buf.cursor_row = r;
-            buf.cursor_col = c;
-            buf.cursor_col_affinity = a;
-            close_group_on_move(buf);
-        }),
-        Action::PageUp => with_buf(state, |buf, dims| {
-            let (r, c, a) = mov::page_up(buf, dims);
-            buf.cursor_row = r;
-            buf.cursor_col = c;
-            buf.cursor_col_affinity = a;
-            close_group_on_move(buf);
-        }),
-        Action::PageDown => with_buf(state, |buf, dims| {
-            let (r, c, a) = mov::page_down(buf, dims);
-            buf.cursor_row = r;
-            buf.cursor_col = c;
-            buf.cursor_col_affinity = a;
-            close_group_on_move(buf);
-        }),
-        Action::FileStart => with_buf(state, |buf, dims| {
-            let (r, c, _) = mov::file_start();
-            buf.cursor_row = r;
-            buf.cursor_col = c;
-            buf.cursor_col_affinity = mov::reset_affinity(buf, dims);
-            close_group_on_move(buf);
-        }),
-        Action::FileEnd => with_buf(state, |buf, dims| {
-            let (r, c, _) = mov::file_end(&*buf.doc);
-            buf.cursor_row = r;
-            buf.cursor_col = c;
-            buf.cursor_col_affinity = mov::reset_affinity(buf, dims);
-            close_group_on_move(buf);
-        }),
-        _ => {}
-    }
-}
-
-// ── Browser navigation (focus = Side) ──
-
-fn handle_browser_nav(state: &mut AppState, action: &Action) {
-    let len = state.browser.entries.len();
-    if len == 0 {
-        return;
-    }
-    let height = state.dims.map_or(20, |d| d.buffer_height());
-    match action {
-        Action::MoveUp => {
-            state.browser.selected = state.browser.selected.saturating_sub(1);
-        }
-        Action::MoveDown => {
-            state.browser.selected = (state.browser.selected + 1).min(len - 1);
-        }
-        Action::PageUp => {
-            state.browser.selected = state.browser.selected.saturating_sub(height);
-        }
-        Action::PageDown => {
-            state.browser.selected = (state.browser.selected + height).min(len - 1);
-        }
-        Action::FileStart => {
-            state.browser.selected = 0;
-        }
-        Action::FileEnd => {
-            state.browser.selected = len - 1;
-        }
-        _ => {}
-    }
-    // Keep selection visible
-    if state.browser.selected < state.browser.scroll_offset {
-        state.browser.scroll_offset = state.browser.selected;
-    } else if state.browser.selected >= state.browser.scroll_offset + height {
-        state.browser.scroll_offset = state.browser.selected + 1 - height;
-    }
-}
-
-fn handle_browser_expand(state: &mut AppState) {
-    let Some(entry) = state.browser.entries.get(state.browser.selected) else {
-        return;
-    };
-    if !matches!(entry.kind, EntryKind::Directory { expanded: false }) {
-        return;
-    }
-    let path = entry.path.clone();
-    state.browser.expanded_dirs.insert(path.clone());
-    if state.browser.dir_contents.contains_key(&path) {
-        state.browser.rebuild_entries();
-    } else {
-        state.pending_lists.set(vec![path]);
-    }
-}
-
-fn handle_browser_collapse(state: &mut AppState) {
-    let Some(entry) = state.browser.entries.get(state.browser.selected) else {
-        return;
-    };
-    let collapse_path = match &entry.kind {
-        EntryKind::Directory { expanded: true } => entry.path.clone(),
-        _ => {
-            // File or collapsed dir — collapse parent
-            match entry.path.parent() {
-                Some(parent) if state.browser.expanded_dirs.contains(parent) => {
-                    parent.to_path_buf()
-                }
-                _ => return,
-            }
-        }
-    };
-    state.browser.expanded_dirs.remove(&collapse_path);
-    state.browser.rebuild_entries();
-    // Move selection to the collapsed directory
-    if let Some(pos) = state
-        .browser
-        .entries
-        .iter()
-        .position(|e| e.path == collapse_path)
-    {
-        state.browser.selected = pos;
-    }
-}
-
-fn handle_browser_collapse_all(state: &mut AppState) {
-    state.browser.expanded_dirs.clear();
-    state.browser.rebuild_entries();
-    state.browser.selected = 0;
-    state.browser.scroll_offset = 0;
-}
-
-fn handle_browser_open(state: &mut AppState) {
-    let Some(entry) = state.browser.entries.get(state.browser.selected) else {
-        return;
-    };
-    match &entry.kind {
-        EntryKind::File => {
-            state.pending_open.set(Some(entry.path.clone()));
-            state.focus = PanelSlot::Main;
-        }
-        EntryKind::Directory { expanded } => {
-            if *expanded {
-                handle_browser_collapse(state);
-            } else {
-                handle_browser_expand(state);
-            }
-        }
-    }
-}
-
-/// Run `f` on the active buffer, then ensure cursor stays visible.
-fn with_buf(state: &mut AppState, f: impl FnOnce(&mut BufferState, &Dimensions)) {
-    let dims = match state.dims {
-        Some(d) => d,
-        None => return,
-    };
-    if let Some(id) = state.active_buffer {
-        if let Some(buf) = state.buffers.get_mut(&id) {
-            f(buf, &dims);
-            let (sr, ssl) = mov::adjust_scroll(buf, &dims);
-            buf.scroll_row = sr;
-            buf.scroll_sub_line = ssl;
-            // Track save state: transition to Modified when doc becomes dirty
-            if buf.doc.dirty() && buf.save_state == SaveState::Clean {
-                buf.save_state = SaveState::Modified;
-            }
-        }
-    }
-}
-
-/// Close undo group and clear edit kind tracking.
-fn close_group_on_move(buf: &mut BufferState) {
-    if buf.last_edit_kind.is_some() {
-        buf.doc = buf.doc.close_undo_group();
-        buf.last_edit_kind = None;
-    }
-}
-
-/// Close undo group if the edit kind changes or on word boundary (whitespace after non-whitespace).
-fn maybe_close_group(buf: &mut BufferState, kind: EditKind, ch: char) {
-    if buf.last_edit_kind != Some(kind) {
-        buf.doc = buf.doc.close_undo_group();
-    } else if kind == EditKind::Insert {
-        // Word boundary: whitespace after non-whitespace
-        if ch.is_whitespace() {
-            let line = buf.doc.line(buf.cursor_row);
-            let prev = line.chars().nth(buf.cursor_col.saturating_sub(1));
-            if let Some(p) = prev {
-                if !p.is_whitespace() {
-                    buf.doc = buf.doc.close_undo_group();
-                }
-            }
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 enum Mut {
     ActivateBuffer(BufferId),
     Action(Action),
@@ -838,7 +353,18 @@ enum Mut {
         info: Option<String>,
         warn: Option<String>,
     },
-    BufferOpen(BufferState, u64),
+    BufferOpen {
+        buf: BufferState,
+        next_id: u64,
+        activate: bool,
+        notify_hash: String,
+        session_restore_done: bool,
+    },
+    BufferSaved {
+        id: BufferId,
+        buf: BufferState,
+        undo_clear_path: Option<std::path::PathBuf>,
+    },
     BufferUpdate(BufferId, BufferState),
     ConfigKeys(ConfigFile<Keys>),
     ConfigTheme(ConfigFile<Theme>),
@@ -847,19 +373,28 @@ enum Mut {
     Keymap(Arc<Keymap>),
     Resize(u16, u16),
     NotifyEvent {
-        file_path_hash: String,
+        path: Option<std::path::PathBuf>,
     },
     SessionRestored(Option<led_workspace::RestoredSession>),
     SessionSaved,
-    SyncResult {
-        result: led_workspace::SyncResultKind,
+    SyncApply {
+        buf_id: BufferId,
+        doc: Arc<dyn Doc>,
+        chain_id: Option<String>,
+        last_seen_seq: i64,
+    },
+    SyncReset {
+        buf_id: BufferId,
     },
     Suspend(bool),
     UndoFlushed {
-        file_path: std::path::PathBuf,
+        buf_id: BufferId,
         chain_id: String,
-        persisted_undo_len: usize,
         last_seen_seq: i64,
+    },
+    UndoFlushReady {
+        buf_id: BufferId,
+        flush: led_state::UndoFlush,
     },
     TimerFired(&'static str),
     Workspace(Workspace),
@@ -871,7 +406,8 @@ impl Mut {
             Mut::ActivateBuffer(_) => "ActivateBuffer",
             Mut::Action(_) => "Action",
             Mut::Alert { .. } => "Alert",
-            Mut::BufferOpen(_, _) => "BufferOpen",
+            Mut::BufferOpen { .. } => "BufferOpen",
+            Mut::BufferSaved { .. } => "BufferSaved",
             Mut::BufferUpdate(_, _) => "BufferUpdate",
             Mut::ConfigKeys(_) => "ConfigKeys",
             Mut::ConfigTheme(_) => "ConfigTheme",
@@ -882,9 +418,11 @@ impl Mut {
             Mut::NotifyEvent { .. } => "NotifyEvent",
             Mut::SessionRestored(_) => "SessionRestored",
             Mut::SessionSaved => "SessionSaved",
-            Mut::SyncResult { .. } => "SyncResult",
+            Mut::SyncApply { .. } => "SyncApply",
+            Mut::SyncReset { .. } => "SyncReset",
             Mut::Suspend(_) => "Suspend",
             Mut::UndoFlushed { .. } => "UndoFlushed",
+            Mut::UndoFlushReady { .. } => "UndoFlushReady",
             Mut::TimerFired(_) => "TimerFired",
             Mut::Workspace(_) => "Workspace",
         }
