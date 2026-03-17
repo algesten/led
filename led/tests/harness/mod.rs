@@ -1,6 +1,6 @@
 use std::cell::Cell;
 use std::cell::RefCell;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
@@ -17,6 +17,8 @@ pub enum TestStep {
     /// Dispatch Quit and wait for the real quit signal (like the app does).
     /// This tests that session save completes before the app would exit.
     QuitAndWait,
+    /// Run arbitrary code during the test (receives tmpdir path).
+    RunFn(Box<dyn FnOnce(&Path) + Send>),
 }
 
 impl From<Action> for TestStep {
@@ -170,6 +172,7 @@ impl TestHarness {
                         let quit_rx = Rc::new(RefCell::new(Some(quit_rx)));
                         let quit_rx2 = quit_rx.clone();
                         let last_for_wait = last_state.clone();
+                        let tmpdir_for_steps = tmpdir.clone();
                         tokio::task::spawn_local(async move {
                             // Wait for session restore to complete, then for files to open
                             loop {
@@ -197,6 +200,9 @@ impl TestHarness {
                                             let _ = rx.await;
                                         }
                                     }
+                                    TestStep::RunFn(f) => {
+                                        f(&tmpdir_for_steps);
+                                    }
                                 }
                             }
 
@@ -219,8 +225,8 @@ impl TestHarness {
         });
 
         let state = done_rx
-            .recv_timeout(Duration::from_secs(5))
-            .expect("test timed out");
+            .recv_timeout(Duration::from_secs(30))
+            .expect("test timed out: Timeout");
         handle.join().ok();
         TestResult {
             state,

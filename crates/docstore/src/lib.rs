@@ -95,10 +95,10 @@ pub fn driver(out: Stream<DocStoreOut>) -> Stream<Result<DocStoreIn, Alert>> {
                         DocStoreOut::Open { path } => {
                             if let Some(parent) = path.parent() {
                                 if watched_dirs.insert(parent.to_path_buf()) {
-                                    let mut watch_rx = watch(parent);
+                                    let mut watcher = watch(parent);
                                     let fwd = watcher_tx.clone();
                                     tokio::spawn(async move {
-                                        while let Some(event) = watch_rx.recv().await {
+                                        while let Some(event) = watcher.recv().await {
                                             let _ = fwd.send(event).await;
                                         }
                                     });

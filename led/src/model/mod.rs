@@ -39,6 +39,7 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Arc<AppState>> {
             }
             WI::SessionRestored { session } => Some(Mut::SessionRestored(session)),
             WI::SessionSaved => Some(Mut::SessionSaved),
+            WI::WatchersReady => Some(Mut::WatchersReady),
             _ => None, // handled by undo_flushed_s, notify_s, sync_s
         })
         .filter(|opt| opt.is_some())
@@ -296,6 +297,9 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Arc<AppState>> {
             Mut::SessionSaved => {
                 s.session_saved = true;
             }
+            Mut::WatchersReady => {
+                s.watchers_ready = true;
+            }
             Mut::NotifyEvent { path } => {
                 if let Some(path) = path {
                     s.pending_sync_check.set(path);
@@ -402,6 +406,7 @@ enum Mut {
     },
     SessionRestored(Option<led_workspace::RestoredSession>),
     SessionSaved,
+    WatchersReady,
     SyncApply {
         buf_id: BufferId,
         doc: Arc<dyn Doc>,
@@ -443,6 +448,7 @@ impl Mut {
             Mut::NotifyEvent { .. } => "NotifyEvent",
             Mut::SessionRestored(_) => "SessionRestored",
             Mut::SessionSaved => "SessionSaved",
+            Mut::WatchersReady => "WatchersReady",
             Mut::SyncApply { .. } => "SyncApply",
             Mut::SyncReset { .. } => "SyncReset",
             Mut::Suspend(_) => "Suspend",

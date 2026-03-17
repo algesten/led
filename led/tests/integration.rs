@@ -1,6 +1,9 @@
 mod harness;
 
+use std::path::Path;
+
 use led_core::Action::*;
+use led_core::{EditOp, UndoGroup};
 use led_state::SaveState;
 
 use TestStep::{Do, QuitAndWait, WaitFor};
@@ -1303,4 +1306,253 @@ fn session_restores_browser_expanded_dirs() {
         t2.state.browser.dir_contents.contains_key(&expanded_dir),
         "expanded dir contents should be loaded"
     );
+}
+
+// ── Cross-instance sync ──
+
+/// Simulate an external instance's edit by writing undo entries to the DB
+/// and touching the notify file to wake the instance under test.
+fn simulate_external_edit(
+    tmpdir: &Path,
+    file_path: &Path,
+    chain_id: &str,
+    content_hash: u64,
+    groups: &[UndoGroup],
+) {
+    let config_dir = tmpdir.join("config");
+    let db_path = config_dir.join("db.sqlite");
+    let conn = rusqlite::Connection::open(&db_path).expect("open DB");
+
+    // Must canonicalize to match the workspace driver (resolves /var → /private/var on macOS)
+    let canonical_root = std::fs::canonicalize(tmpdir).unwrap_or_else(|_| tmpdir.to_path_buf());
+    let root_str = canonical_root.to_string_lossy();
+    let path_str = file_path.to_string_lossy();
+
+    let entries: Vec<Vec<u8>> = groups
+        .iter()
+        .map(|g| rmp_serde::to_vec(g).unwrap())
+        .collect();
+
+    led_workspace::db::flush_undo(
+        &conn,
+        &root_str,
+        &path_str,
+        chain_id,
+        content_hash,
+        groups.len(),
+        0,
+        &entries,
+    )
+    .expect("flush_undo");
+    drop(conn);
+
+    // Touch notify file to wake the instance
+    let hash = led_workspace::path_hash(file_path);
+    let notify_dir = config_dir.join("notify");
+    std::fs::create_dir_all(&notify_dir).ok();
+    std::fs::write(notify_dir.join(&hash), b"").ok();
+}
+
+fn make_insert_group(offset: usize, text: &str) -> UndoGroup {
+    UndoGroup {
+        ops: vec![EditOp {
+            offset,
+            old_text: String::new(),
+            new_text: text.to_string(),
+        }],
+        cursor_before: offset,
+    }
+}
+
+fn make_remove_group(offset: usize, old_text: &str) -> UndoGroup {
+    UndoGroup {
+        ops: vec![EditOp {
+            offset,
+            old_text: old_text.to_string(),
+            new_text: String::new(),
+        }],
+        cursor_before: offset,
+    }
+}
+
+#[test]
+fn cross_instance_sync_insert_newline() {
+    // Bug 1 repro: instance B inserts a newline, instance A should see exactly one newline.
+    let t = TestHarness::new().with_file("aaa\nbbb\nccc\n").run(vec![
+        WaitFor(|s| !s.buffers.is_empty()),
+        WaitFor(|s| s.watchers_ready),
+        // Simulate instance B inserting a newline after "aaa"
+        TestStep::RunFn(Box::new(|tmpdir| {
+            let file_path = std::fs::read_dir(tmpdir)
+                .unwrap()
+                .filter_map(|e| e.ok())
+                .find(|e| e.file_name().to_string_lossy().ends_with(".txt"))
+                .unwrap()
+                .path();
+
+            // Get the real content hash from the Doc (hash ropey chunks)
+            // For small files, ropey uses a single chunk, equivalent to hashing the string.
+            let content_hash = {
+                use std::hash::{Hash, Hasher};
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                "aaa\nbbb\nccc\n".hash(&mut h);
+                h.finish()
+            };
+
+            simulate_external_edit(
+                tmpdir,
+                &file_path,
+                "ext-chain-1",
+                content_hash,
+                &[make_insert_group(3, "\n")], // insert newline after "aaa"
+            );
+        })),
+        // Wait for sync to apply
+        WaitFor(|s| {
+            s.active_buffer
+                .and_then(|id| s.buffers.get(&id))
+                .is_some_and(|b| b.doc.line_count() == 5) // was 4, now 5
+        }),
+    ]);
+
+    let b = buf(&t);
+    assert_eq!(b.doc.line(0), "aaa");
+    assert_eq!(b.doc.line(1), ""); // the inserted newline
+    assert_eq!(b.doc.line(2), "bbb");
+    assert_eq!(b.doc.line(3), "ccc");
+    assert_eq!(
+        b.doc.line_count(),
+        5,
+        "should have exactly one extra newline, not double"
+    );
+}
+
+#[test]
+fn cross_instance_sync_multiple_edits() {
+    // Bug 2 repro: instance B makes multiple edits, all should be replayed on A.
+    let t = TestHarness::new().with_file("hello\n").run(vec![
+        WaitFor(|s| !s.buffers.is_empty()),
+        WaitFor(|s| s.watchers_ready),
+        TestStep::RunFn(Box::new(|tmpdir| {
+            let file_path = std::fs::read_dir(tmpdir)
+                .unwrap()
+                .filter_map(|e| e.ok())
+                .find(|e| e.file_name().to_string_lossy().ends_with(".txt"))
+                .unwrap()
+                .path();
+
+            let content_hash = {
+                use std::hash::{Hash, Hasher};
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                "hello\n".hash(&mut h);
+                h.finish()
+            };
+
+            // Three separate undo groups: insert "X", "Y", "Z" at start
+            simulate_external_edit(
+                tmpdir,
+                &file_path,
+                "ext-chain-2",
+                content_hash,
+                &[
+                    make_insert_group(0, "X"),
+                    make_insert_group(1, "Y"),
+                    make_insert_group(2, "Z"),
+                ],
+            );
+        })),
+        WaitFor(|s| {
+            s.active_buffer
+                .and_then(|id| s.buffers.get(&id))
+                .is_some_and(|b| b.doc.line(0).contains("XYZ"))
+        }),
+    ]);
+
+    let b = buf(&t);
+    assert_eq!(
+        b.doc.line(0),
+        "XYZhello",
+        "all three edits should be replayed"
+    );
+}
+
+#[test]
+fn cross_instance_sync_after_save() {
+    // Bug 3 repro: instance B saves the file, instance A should detect the external save.
+    let t = TestHarness::new().with_file("original\n").run(vec![
+        WaitFor(|s| !s.buffers.is_empty()),
+        WaitFor(|s| s.watchers_ready),
+        // First, simulate B editing
+        TestStep::RunFn(Box::new(|tmpdir| {
+            let file_path = std::fs::read_dir(tmpdir)
+                .unwrap()
+                .filter_map(|e| e.ok())
+                .find(|e| e.file_name().to_string_lossy().ends_with(".txt"))
+                .unwrap()
+                .path();
+
+            let content_hash = {
+                use std::hash::{Hash, Hasher};
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                "original\n".hash(&mut h);
+                h.finish()
+            };
+
+            simulate_external_edit(
+                tmpdir,
+                &file_path,
+                "ext-chain-3",
+                content_hash,
+                &[make_insert_group(0, "X")],
+            );
+        })),
+        // Wait for first sync
+        WaitFor(|s| {
+            s.active_buffer
+                .and_then(|id| s.buffers.get(&id))
+                .is_some_and(|b| b.doc.line(0).starts_with("X"))
+        }),
+        // Now simulate B saving: write new content to disk and clear undo in DB
+        TestStep::RunFn(Box::new(|tmpdir| {
+            let file_path = std::fs::read_dir(tmpdir)
+                .unwrap()
+                .filter_map(|e| e.ok())
+                .find(|e| e.file_name().to_string_lossy().ends_with(".txt"))
+                .unwrap()
+                .path();
+
+            // Write new content to disk (simulating save)
+            std::fs::write(&file_path, "Xoriginal\n").unwrap();
+
+            // Clear undo in DB (like ClearUndo does after save)
+            let config_dir = tmpdir.join("config");
+            let db_path = config_dir.join("db.sqlite");
+            let conn = rusqlite::Connection::open(&db_path).expect("open DB");
+            let canonical_root =
+                std::fs::canonicalize(tmpdir).unwrap_or_else(|_| tmpdir.to_path_buf());
+            let root_str = canonical_root.to_string_lossy();
+            let path_str = file_path.to_string_lossy();
+            led_workspace::db::clear_undo(&conn, &root_str, &path_str).expect("clear_undo");
+            drop(conn);
+
+            // Touch notify to wake A
+            let hash = led_workspace::path_hash(&file_path);
+            let notify_dir = config_dir.join("notify");
+            std::fs::write(notify_dir.join(&hash), b"").ok();
+        })),
+        // Wait for A to detect the external save (chain_id should be reset)
+        WaitFor(|s| {
+            s.active_buffer
+                .and_then(|id| s.buffers.get(&id))
+                .is_some_and(|b| b.chain_id.is_none())
+        }),
+    ]);
+
+    let b = buf(&t);
+    // After external save detection, A should have reset its undo chain
+    assert!(
+        b.chain_id.is_none(),
+        "chain_id should be reset after external save"
+    );
+    assert_eq!(b.last_seen_seq, 0, "last_seen_seq should be reset");
 }

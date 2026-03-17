@@ -1,4 +1,4 @@
-mod db;
+pub mod db;
 
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
@@ -69,6 +69,8 @@ pub enum WorkspaceIn {
     NotifyEvent { file_path_hash: String },
     /// Workspace tree changed (watcher event — re-emits the workspace).
     WorkspaceChanged { workspace: Workspace },
+    /// Notify watcher is ready (for cross-instance sync tests).
+    WatchersReady,
 }
 
 #[derive(Clone, Debug)]
@@ -246,27 +248,19 @@ pub fn driver(out: Stream<WorkspaceOut>) -> Stream<WorkspaceIn> {
                                 break;
                             }
 
-                            // Start recursive watcher on workspace root.
-                            // spawn_blocking so the (potentially slow) OS watcher
-                            // setup doesn't block the driver task. The watcher
-                            // is delivered via watcher_ready_rx in the select loop.
-                            let watch_tx2 = watch_tx.clone();
+                            // Start watchers in a single spawn_blocking to avoid
+                            // paying the macOS FSEvents ~4s registration cost twice.
                             let root2 = root.clone();
+                            let watch_tx2 = watch_tx.clone();
                             let watcher_tx = watcher_ready_tx.clone();
-                            tokio::task::spawn_blocking(move || {
-                                if let Some(w) = start_watcher(&root2, watch_tx2) {
-                                    watcher_tx.blocking_send(w).ok();
-                                }
-                            });
-
-                            // Start notify directory watcher for cross-instance sync.
-                            // spawn_blocking so the (potentially slow) OS watcher
-                            // setup doesn't block the driver task.
                             let notify_dir = config.join("notify");
                             std::fs::create_dir_all(&notify_dir).ok();
                             let notify_tx2 = notify_event_tx.clone();
                             let nw_tx = notify_watcher_ready_tx.clone();
-                            tokio::task::spawn_blocking(move || {
+                            std::thread::spawn(move || {
+                                if let Some(w) = start_watcher(&root2, watch_tx2) {
+                                    watcher_tx.blocking_send(w).ok();
+                                }
                                 if let Some(w) = start_notify_watcher(&notify_dir, notify_tx2) {
                                     nw_tx.blocking_send(w).ok();
                                 }
@@ -378,6 +372,7 @@ pub fn driver(out: Stream<WorkspaceOut>) -> Stream<WorkspaceIn> {
                 }
                 Some(w) = notify_watcher_ready_rx.recv() => {
                     _notify_watcher = Some(w);
+                    let _ = result_tx.send(WorkspaceIn::WatchersReady).await;
                 }
                 Some(hash) = notify_event_rx.recv() => {
                     if !self_notified.remove(&hash) {

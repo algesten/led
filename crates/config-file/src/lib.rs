@@ -60,10 +60,10 @@ pub fn driver<F: TomlFile>(out: Stream<ConfigFileOut>) -> Stream<Result<ConfigFi
                     match cmd {
                         ConfigFileOut::ConfigDir(dir) => {
                             if config_dir.as_ref().map(|d| &d.config) != Some(&dir.config) {
-                                let mut watch_rx = watch(&dir.config);
+                                let mut watcher = watch(&dir.config);
                                 let fwd = watch_fwd_tx.clone();
                                 tokio::spawn(async move {
-                                    while let Some(_event) = watch_rx.recv().await {
+                                    while let Some(_event) = watcher.recv().await {
                                         let _ = fwd.send(()).await;
                                     }
                                 });

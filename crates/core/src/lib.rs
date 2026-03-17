@@ -13,7 +13,7 @@ pub use alert::{Alert, AlertExt};
 pub use config::Startup;
 pub use doc::{Doc, EditOp, TextDoc, UndoGroup, UndoHistory};
 pub use versioned::Versioned;
-pub use watch::watch;
+pub use watch::{FileWatcher, watch};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct BufferId(pub u64);

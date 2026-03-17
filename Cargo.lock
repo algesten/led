@@ -861,6 +861,7 @@ dependencies = [
  "led-workspace",
  "libc",
  "log",
+ "notify",
  "rmp-serde",
  "rusqlite",
  "tempfile",

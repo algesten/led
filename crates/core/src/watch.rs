@@ -3,11 +3,26 @@ use std::path::Path;
 use notify::{RecursiveMode, Watcher};
 use tokio::sync::mpsc;
 
+/// A file-watcher guard. Dropping it shuts down the watcher thread and
+/// releases all OS file descriptors associated with the watcher.
+pub struct FileWatcher {
+    rx: mpsc::Receiver<notify::Event>,
+    /// Dropping this sender signals the watcher thread to exit.
+    _stop: std::sync::mpsc::Sender<()>,
+}
+
+impl FileWatcher {
+    pub async fn recv(&mut self) -> Option<notify::Event> {
+        self.rx.recv().await
+    }
+}
+
 /// Watch a directory for changes. The watcher is created on a dedicated
 /// thread so that platform-specific event loops (e.g. FSEvents' CFRunLoop
 /// on macOS) don't interfere with the tokio runtime's I/O driver.
-pub fn watch(path: &Path) -> mpsc::Receiver<notify::Event> {
+pub fn watch(path: &Path) -> FileWatcher {
     let (tx, rx) = mpsc::channel(3);
+    let (stop_tx, stop_rx) = std::sync::mpsc::channel::<()>();
     let path = path.to_path_buf();
 
     std::thread::spawn(move || {
@@ -24,13 +39,10 @@ pub fn watch(path: &Path) -> mpsc::Receiver<notify::Event> {
             .watch(&path, RecursiveMode::Recursive)
             .expect("watch path");
 
-        // Keep the watcher alive by parking this thread forever.
-        // The watcher (and its internal event loop) lives here.
-        std::mem::forget(watcher);
-        loop {
-            std::thread::park();
-        }
+        // Block until the stop channel closes (FileWatcher dropped).
+        // The watcher stays alive as long as we're blocked here.
+        let _ = stop_rx.recv();
     });
 
-    rx
+    FileWatcher { rx, _stop: stop_tx }
 }
