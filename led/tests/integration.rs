@@ -1,9 +1,10 @@
 mod harness;
 
 use std::path::Path;
+use std::sync::Arc;
 
 use led_core::Action::*;
-use led_core::{EditOp, UndoGroup};
+use led_core::{EditOp, Startup, UndoGroup};
 use led_state::SaveState;
 
 use TestStep::{Do, QuitAndWait, WaitFor};
@@ -1308,6 +1309,58 @@ fn session_restores_browser_expanded_dirs() {
     );
 }
 
+#[test]
+fn session_restores_focus_on_browser() {
+    // Run 1: switch focus to browser, quit
+    let t = TestHarness::new().with_file("hello\n").run(vec![
+        WaitFor(|s| !s.buffers.is_empty()),
+        Do(ToggleFocus), // Main → Side
+        QuitAndWait,
+    ]);
+    assert_eq!(t.state.focus, led_core::PanelSlot::Side);
+    let dir = t.tmpdir.clone();
+
+    // Run 2: restore — focus should be on the browser
+    let t2 = TestHarness::with_dir(dir).run(vec![WaitFor(|s| !s.buffers.is_empty())]);
+    assert_eq!(
+        t2.state.focus,
+        led_core::PanelSlot::Side,
+        "focus should be restored to browser"
+    );
+}
+
+#[test]
+fn session_restores_focus_on_editor() {
+    // Run 1: leave focus on editor (default), quit
+    let t = TestHarness::new()
+        .with_file("hello\n")
+        .run(vec![WaitFor(|s| !s.buffers.is_empty()), QuitAndWait]);
+    assert_eq!(t.state.focus, led_core::PanelSlot::Main);
+    let dir = t.tmpdir.clone();
+
+    // Run 2: restore — focus should be on the editor
+    let t2 = TestHarness::with_dir(dir).run(vec![WaitFor(|s| !s.buffers.is_empty())]);
+    assert_eq!(
+        t2.state.focus,
+        led_core::PanelSlot::Main,
+        "focus should be restored to editor"
+    );
+}
+
+#[test]
+fn no_buffers_focus_falls_back_to_browser() {
+    // Single instance, no file arguments — focus should land on browser
+    let t = TestHarness::new().run(vec![WaitFor(|s| {
+        s.session_restore_phase == led_state::SessionRestorePhase::Done
+    })]);
+    assert_eq!(
+        t.state.focus,
+        led_core::PanelSlot::Side,
+        "no buffers: focus should fall back to file browser"
+    );
+    assert!(t.state.buffers.is_empty());
+}
+
 // ── Cross-instance sync ──
 
 /// Simulate an external instance's edit by writing undo entries to the DB
@@ -1847,6 +1900,90 @@ fn two_instance_remote_save_clears_dirty() {
             "line {i} mismatch between A and B"
         );
     }
+
+    a.stop();
+    b.stop();
+}
+
+#[test]
+fn two_instance_no_args_browser_visible() {
+    // Repro: open two instances with no file arguments (just PWD).
+    // B (non-primary) should still show the file browser.
+    let (tmpdir, _paths) =
+        shared_workspace(&[("file_a.txt", "hello\n"), ("file_b.txt", "world\n")]);
+    // Real workspaces have a .git dir — this changes how find_git_root resolves
+    std::fs::create_dir_all(tmpdir.join(".git")).expect("create .git");
+
+    // Start both with no arg_paths — like running `led` with no arguments
+    let no_files_a = Startup {
+        headless: true,
+        arg_paths: vec![],
+        start_dir: Arc::new(tmpdir.clone()),
+        config_dir: tmpdir.join("config"),
+    };
+    let no_files_b = Startup {
+        headless: true,
+        arg_paths: vec![],
+        start_dir: Arc::new(tmpdir.clone()),
+        config_dir: tmpdir.join("config"),
+    };
+
+    let mut a = Instance::start(no_files_a);
+    a.wait_for(
+        |s| s.watchers_ready && !s.browser.entries.is_empty(),
+        WAIT,
+        "A browser populated",
+    );
+
+    let mut b = Instance::start(no_files_b);
+    b.wait_for(
+        |s| s.watchers_ready && !s.browser.entries.is_empty(),
+        WAIT,
+        "B browser populated",
+    );
+
+    // Both should have the workspace resolved and browser entries
+    let a_state = a.state().unwrap();
+    let b_state = b.state().unwrap();
+
+    assert!(a_state.workspace.is_some(), "A should have a workspace");
+    assert!(b_state.workspace.is_some(), "B should have a workspace");
+
+    // With no files open, focus should be on the file browser
+    assert_eq!(
+        a_state.focus,
+        led_core::PanelSlot::Side,
+        "A focus should be on browser when no files open"
+    );
+    assert_eq!(
+        b_state.focus,
+        led_core::PanelSlot::Side,
+        "B focus should be on browser when no files open"
+    );
+
+    assert!(
+        !a_state.browser.entries.is_empty(),
+        "A browser should have entries"
+    );
+    assert!(
+        !b_state.browser.entries.is_empty(),
+        "B browser should have entries, got empty (black screen)"
+    );
+
+    // Both should see the same files
+    let a_names: Vec<&str> = a_state
+        .browser
+        .entries
+        .iter()
+        .map(|e| e.name.as_str())
+        .collect();
+    let b_names: Vec<&str> = b_state
+        .browser
+        .entries
+        .iter()
+        .map(|e| e.name.as_str())
+        .collect();
+    assert_eq!(a_names, b_names, "both instances should see same files");
 
     a.stop();
     b.stop();

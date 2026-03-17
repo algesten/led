@@ -7,6 +7,7 @@ use led_core::rx::Stream;
 use led_state::AppState;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
+use ratatui::style::Style;
 use ratatui::text::Line;
 
 mod display;
@@ -20,15 +21,18 @@ pub fn driver(state: Stream<Arc<AppState>>) -> Ui {
     let mut terminal = setup();
 
     let display_s = state
-        .filter_map(|s| display::display_inputs(&s))
+        .map(|s| display::display_inputs(&s))
         .dedupe()
-        .map(|d| display::build_display_lines(&d))
+        .map(|opt| match opt {
+            Some(d) => display::build_display_lines(&d),
+            None => Rc::new(Vec::new()),
+        })
         .stream();
 
     let cursor_s = state
-        .filter_map(|s| display::cursor_inputs(&s))
+        .map(|s| display::cursor_inputs(&s))
         .dedupe()
-        .map(|c| display::compute_cursor_pos(&c))
+        .map(|opt| opt.and_then(|c| display::compute_cursor_pos(&c)))
         .stream();
 
     let status_s = state
@@ -38,9 +42,16 @@ pub fn driver(state: Stream<Arc<AppState>>) -> Ui {
         .stream();
 
     let tabs_s = state
-        .filter_map(|s| display::tabs_inputs(&s))
+        .map(|s| display::tabs_inputs(&s))
         .dedupe()
-        .map(|t| display::build_tab_entries(&t))
+        .map(|opt| match opt {
+            Some(t) => display::build_tab_entries(&t),
+            None => Rc::new(display::TabsInputs {
+                entries: vec![],
+                inactive_style: Style::default(),
+                gutter_width: 2,
+            }),
+        })
         .stream();
 
     let layout_s = state
@@ -50,9 +61,12 @@ pub fn driver(state: Stream<Arc<AppState>>) -> Ui {
         .stream();
 
     let browser_s = state
-        .filter_map(|s| display::browser_inputs(&s))
+        .map(|s| display::browser_inputs(&s))
         .dedupe()
-        .map(|b| display::build_browser_lines(&b))
+        .map(|opt| match opt {
+            Some(b) => display::build_browser_lines(&b),
+            None => Rc::new(Vec::new()),
+        })
         .stream();
 
     let render_s = combine!(display_s, cursor_s, status_s, tabs_s, layout_s, browser_s);

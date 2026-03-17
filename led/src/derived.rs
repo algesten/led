@@ -239,6 +239,12 @@ pub fn derived(state: Stream<Arc<AppState>>) -> Derived {
 
 fn build_session_kv(s: &AppState) -> HashMap<String, String> {
     let mut kv = HashMap::new();
+    let focus_str = match s.focus {
+        led_core::PanelSlot::Main => "main",
+        led_core::PanelSlot::Side => "side",
+        _ => "main",
+    };
+    kv.insert("focus".into(), focus_str.into());
     kv.insert("browser.selected".into(), s.browser.selected.to_string());
     kv.insert(
         "browser.scroll_offset".into(),

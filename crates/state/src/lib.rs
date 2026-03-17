@@ -237,6 +237,7 @@ pub struct AppState {
 
     // Session persistence
     pub session_restore_phase: SessionRestorePhase,
+    pub session_restored_focus: Option<PanelSlot>,
     pub session_positions: HashMap<PathBuf, SessionBuffer>,
     pub session_active_tab_order: Option<usize>,
     pub pending_session_opens: Versioned<Vec<PathBuf>>,

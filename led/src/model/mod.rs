@@ -14,7 +14,7 @@ use led_core::rx::Stream;
 use led_core::theme::Theme;
 use std::path::PathBuf;
 
-use led_core::{Action, Alert, BufferId, Doc, next_change_seq};
+use led_core::{Action, Alert, BufferId, Doc, PanelSlot, next_change_seq};
 use led_state::{AppState, BufferState, Dimensions, SaveState, SessionRestorePhase};
 use led_workspace::Workspace;
 
@@ -238,6 +238,10 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Arc<AppState>> {
                     s.session_restore_phase = SessionRestorePhase::Done;
                     s.session_active_tab_order = None;
                 }
+                // Resolve focus once restore is done and buffers exist
+                if s.session_restore_phase == SessionRestorePhase::Done {
+                    resolve_focus(&mut s);
+                }
             }
             Mut::BufferSaved {
                 id,
@@ -271,6 +275,11 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Arc<AppState>> {
                     s.session_restore_phase = SessionRestorePhase::Restoring;
                     s.session_active_tab_order = Some(session.active_tab_order);
                     s.show_side_panel = session.show_side_panel;
+                    // Parse persisted focus for later application
+                    s.session_restored_focus = session.kv.get("focus").map(|v| match v.as_str() {
+                        "side" => PanelSlot::Side,
+                        _ => PanelSlot::Main,
+                    });
                     let paths: Vec<_> = session
                         .buffers
                         .iter()
@@ -302,6 +311,10 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Arc<AppState>> {
                 }
                 None => {
                     s.session_restore_phase = SessionRestorePhase::Done;
+                    // Only resolve now if no arg_paths will open buffers later
+                    if s.startup.arg_paths.is_empty() {
+                        resolve_focus(&mut s);
+                    }
                 }
             },
             Mut::SessionSaved => {
@@ -389,6 +402,20 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Arc<AppState>> {
     });
 
     state
+}
+
+/// Apply focus after session restore completes.
+/// Priority: restored focus (if valid) → open buffer → file browser.
+fn resolve_focus(s: &mut AppState) {
+    let restored = s.session_restored_focus.take();
+    if !s.buffers.is_empty() {
+        // There are open buffers. Honour restored focus if it's Main
+        // (the buffer exists to receive it) or Side.
+        s.focus = restored.unwrap_or(PanelSlot::Main);
+    } else {
+        // No buffers — file browser is the only usable panel.
+        s.focus = PanelSlot::Side;
+    }
 }
 
 fn handle_timer(state: &mut AppState, name: &'static str) {
