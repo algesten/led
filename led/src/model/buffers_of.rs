@@ -46,6 +46,11 @@ pub fn buffers_of(
                     match undo_data {
                         Some(undo) if undo.content_hash == doc.content_hash() => {
                             let restored = apply_undo_entries(&doc, &undo.entries);
+                            // Override distance_from_save to match persisted value,
+                            // since replay accumulates directions which may differ
+                            // from the distance at the time of the last flush.
+                            let restored =
+                                restored.with_distance_from_save(undo.distance_from_save);
                             (
                                 restored,
                                 Some(undo.chain_id.clone()),
@@ -86,11 +91,12 @@ pub fn buffers_of(
                     content_hash,
                     change_seq: 0,
                 };
+                let activate =
+                    !is_session_restore || state.session_active_tab_order == Some(tab_order);
                 Some(Mut::BufferOpen {
                     buf,
                     next_id: state.next_buffer_id + 1,
-                    activate: !is_session_restore
-                        || state.session_active_tab_order == Some(tab_order),
+                    activate,
                     notify_hash,
                     session_restore_done: is_session_restore && state.session_positions.len() == 1,
                 })
@@ -157,19 +163,10 @@ fn find_buf_by_doc_id<'a>(state: &'a AppState, doc_id: DocId) -> Option<&'a Buff
 fn apply_undo_entries(doc: &Arc<dyn Doc>, entries: &[Vec<u8>]) -> Arc<dyn Doc> {
     let mut doc = doc.close_undo_group();
     for entry_data in entries {
-        let Ok(group) = rmp_serde::from_slice::<led_core::UndoGroup>(entry_data) else {
+        let Ok(entry) = rmp_serde::from_slice::<led_core::UndoEntry>(entry_data) else {
             continue;
         };
-        for op in &group.ops {
-            if !op.old_text.is_empty() {
-                let end = op.offset + op.old_text.chars().count();
-                doc = doc.remove(op.offset, end);
-            }
-            if !op.new_text.is_empty() {
-                doc = doc.insert(op.offset, &op.new_text);
-            }
-        }
-        doc = doc.close_undo_group();
+        doc = doc.apply_remote_entry(&entry);
     }
     doc
 }

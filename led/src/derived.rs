@@ -133,18 +133,17 @@ pub fn derived(state: Stream<Arc<AppState>>) -> Derived {
     // File opens from startup args — gated on session restore being done.
     // Skip files already opened by session restore to avoid overriding the active tab.
     let startup_open = state
+        .dedupe_by(|s| s.session_restore_phase == SessionRestorePhase::Done)
         .filter(|s| s.session_restore_phase == SessionRestorePhase::Done)
-        .map(|s| {
+        .flat_map(|s| {
             s.startup
                 .arg_paths
                 .iter()
                 .filter(|p| !s.buffers.values().any(|b| b.path.as_ref() == Some(p)))
                 .cloned()
+                .map(|path| DocStoreOut::Open { path })
                 .collect::<Vec<_>>()
-        })
-        .filter(|paths| !paths.is_empty())
-        .dedupe()
-        .flat_map(|paths| paths.into_iter().map(|path| DocStoreOut::Open { path }));
+        });
 
     // File opens from session restore
     let session_open = state
@@ -195,15 +194,19 @@ pub fn derived(state: Stream<Arc<AppState>>) -> Derived {
         })
         .stream();
 
-    // Undo flush rate limiter: schedule a 200ms one-shot when any dirty
-    // buffer's doc version changes. Dedupe on max version so each new
-    // edit re-fires (unlike a boolean dirty check which stays true).
-    // KeepExisting means rapid edits don't reset the countdown.
+    // Undo flush rate limiter: schedule a 200ms one-shot when any buffer
+    // has unpersisted entries (dirty or undo-inverse entries beyond
+    // persisted_undo_len). Dedupe on max version so each new edit or
+    // undo re-fires. KeepExisting means rapid edits don't reset the
+    // countdown.
     let undo_timer = state
         .map(|s| {
             s.buffers
                 .values()
-                .filter(|b| b.path.is_some() && b.doc.dirty())
+                .filter(|b| {
+                    b.path.is_some()
+                        && (b.doc.undo_history_len() > b.persisted_undo_len || b.doc.dirty())
+                })
                 .map(|b| b.doc.version())
                 .max()
         })

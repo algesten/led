@@ -149,24 +149,23 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Arc<AppState>> {
             s.buffers
                 .values()
                 .filter(|b| b.path.is_some())
-                .filter(|b| b.doc.dirty())
+                .filter(|b| b.doc.undo_history_len() > b.persisted_undo_len || b.doc.dirty())
                 .filter_map(|b| {
                     let file_path = b.path.clone().unwrap();
                     let chain_id = b
                         .chain_id
                         .clone()
                         .unwrap_or_else(led_workspace::new_chain_id);
-                    // Close the open group before serializing so in-progress
-                    // edits are captured (matching old flush_pending behavior).
+                    // Flush pending edits so in-progress ops are captured.
                     let closed_doc = b.doc.close_undo_group();
                     let entries: Vec<Vec<u8>> = closed_doc
-                        .undo_groups_from(b.persisted_undo_len)
+                        .undo_entries_from(b.persisted_undo_len)
                         .iter()
-                        .filter_map(|g| rmp_serde::to_vec(g).ok())
+                        .filter_map(|e| rmp_serde::to_vec(e).ok())
                         .collect();
                     // Skip flush if there are no new entries to persist.
                     // This prevents ping-pong cascades where SyncApply makes
-                    // a buffer dirty but there are no actual new undo groups.
+                    // a buffer dirty but there are no actual new undo entries.
                     if entries.is_empty() {
                         return None;
                     }
@@ -178,7 +177,7 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Arc<AppState>> {
                             chain_id,
                             content_hash: b.content_hash,
                             undo_cursor,
-                            distance_from_save: if b.doc.dirty() { undo_cursor as i32 } else { 0 },
+                            distance_from_save: closed_doc.distance_from_save(),
                             entries,
                         },
                     })

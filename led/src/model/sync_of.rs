@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use led_core::rx::Stream;
-use led_core::{Doc, UndoGroup};
+use led_core::{Doc, UndoEntry};
 use led_state::AppState;
 use led_workspace::{SyncResultKind, WorkspaceIn};
 
@@ -9,7 +9,7 @@ use super::Mut;
 
 /// Derive sync mutations from workspace events + latest state.
 ///
-/// Resolves buffer lookups, deserializes undo groups, and applies doc
+/// Resolves buffer lookups, deserializes undo entries, and applies doc
 /// edits in the combinator chain — the reducer only assigns fields.
 pub fn sync_of(workspace_in: &Stream<WorkspaceIn>, state: &Stream<Arc<AppState>>) -> Stream<Mut> {
     workspace_in
@@ -93,19 +93,10 @@ fn resolve_sync(result: SyncResultKind, state: &AppState) -> Option<Mut> {
 fn apply_remote_entries(doc: &Arc<dyn Doc>, entries: &[Vec<u8>]) -> Arc<dyn Doc> {
     let mut doc = doc.close_undo_group();
     for entry_data in entries {
-        let Ok(group) = rmp_serde::from_slice::<UndoGroup>(entry_data) else {
+        let Ok(entry) = rmp_serde::from_slice::<UndoEntry>(entry_data) else {
             continue;
         };
-        for op in &group.ops {
-            if !op.old_text.is_empty() {
-                let end = op.offset + op.old_text.chars().count();
-                doc = doc.remove(op.offset, end);
-            }
-            if !op.new_text.is_empty() {
-                doc = doc.insert(op.offset, &op.new_text);
-            }
-        }
-        doc = doc.close_undo_group();
+        doc = doc.apply_remote_entry(&entry);
     }
     doc
 }

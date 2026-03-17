@@ -4,7 +4,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use led_core::Action::*;
-use led_core::{EditOp, Startup, UndoGroup};
+use led_core::{EditOp, Startup, UndoEntry};
 use led_state::SaveState;
 
 use TestStep::{Do, QuitAndWait, WaitFor};
@@ -444,6 +444,21 @@ fn multiple_undo() {
 }
 
 #[test]
+fn undo_all_clears_dirty() {
+    // Repro: insert newline, undo — content is restored but dirty flag stays.
+    // Undoing back to the saved state should clear dirty.
+    let t = TestHarness::new()
+        .with_file("hello\n")
+        .run(actions(vec![InsertNewline, Undo]));
+
+    assert_eq!(buf(&t).doc.line(0), "hello", "content should be restored");
+    assert!(
+        !buf(&t).doc.dirty(),
+        "undoing back to saved state should clear dirty"
+    );
+}
+
+#[test]
 fn undo_nothing_is_noop() {
     let t = TestHarness::new()
         .with_file("hello\n")
@@ -459,6 +474,58 @@ fn redo_nothing_is_noop() {
         .run(actions(vec![Redo]));
 
     assert_eq!(buf(&t).doc.line(0), "hello");
+}
+
+/// Full Emacs undo chain test:
+/// 1. Type "1\n2\n3\n" → buffer "1\n2\n3\n"
+/// 2. Undo ×4 → buffer "1\n"
+/// 3. Type "a\nb\n" (breaks undo chain) → buffer "1\na\nb\n"
+/// 4. Undo ×4 → buffer "1\n"
+/// 5. Undo ×4 → buffer "1\n2\n3\n" (undoing the undos restores original)
+#[test]
+fn emacs_undo_undo_restores_original() {
+    // Step 1: Type "1\n2\n3\n" into an empty file.
+    // InsertChar + InsertNewline are each their own undo group because
+    // InsertNewline calls close_group_on_move (clearing last_edit_kind).
+    let mut steps: Vec<led_core::Action> = vec![
+        InsertChar('1'),
+        InsertNewline,
+        InsertChar('2'),
+        InsertNewline,
+        InsertChar('3'),
+        InsertNewline,
+    ];
+
+    // Step 2: Undo ×4 — removes "\n", "3", "\n", "2"
+    // (Leaves "1\n". Each undo reverts one group.)
+    steps.extend([Undo, Undo, Undo, Undo]);
+
+    // Break the undo chain: any non-undo edit does this.
+    // Step 3: Type "a\nb\n"
+    steps.extend([
+        InsertChar('a'),
+        InsertNewline,
+        InsertChar('b'),
+        InsertNewline,
+    ]);
+
+    // Step 4: Undo ×4 — removes "\n", "b", "\n", "a"
+    steps.extend([Undo, Undo, Undo, Undo]);
+
+    // Step 5: Undo ×4 — undoes the step-2 inverses, re-applying "2\n3\n"
+    steps.extend([Undo, Undo, Undo, Undo]);
+
+    let t = TestHarness::new().with_file("").run(actions(steps));
+
+    let b = buf(&t);
+    assert_eq!(b.doc.line(0), "1", "first line should be '1'");
+    assert_eq!(b.doc.line(1), "2", "second line should be '2'");
+    assert_eq!(b.doc.line(2), "3", "third line should be '3'");
+    assert_eq!(
+        b.doc.line_count(),
+        4,
+        "should have 4 lines: '1\\n2\\n3\\n' + trailing empty"
+    );
 }
 
 // ── Save state ──
@@ -1370,7 +1437,7 @@ fn simulate_external_edit(
     file_path: &Path,
     chain_id: &str,
     content_hash: u64,
-    groups: &[UndoGroup],
+    undo_entries: &[UndoEntry],
 ) {
     let config_dir = tmpdir.join("config");
     let db_path = config_dir.join("db.sqlite");
@@ -1381,10 +1448,13 @@ fn simulate_external_edit(
     let root_str = canonical_root.to_string_lossy();
     let path_str = file_path.to_string_lossy();
 
-    let entries: Vec<Vec<u8>> = groups
+    let entries: Vec<Vec<u8>> = undo_entries
         .iter()
-        .map(|g| rmp_serde::to_vec(g).unwrap())
+        .map(|e| rmp_serde::to_vec(e).unwrap())
         .collect();
+
+    // distance_from_save = count of d=1 entries (each forward group adds 1)
+    let distance: i32 = undo_entries.iter().map(|e| e.direction).sum();
 
     led_workspace::db::flush_undo(
         &conn,
@@ -1392,8 +1462,8 @@ fn simulate_external_edit(
         &path_str,
         chain_id,
         content_hash,
-        groups.len(),
-        0,
+        undo_entries.len(),
+        distance,
         &entries,
     )
     .expect("flush_undo");
@@ -1406,25 +1476,29 @@ fn simulate_external_edit(
     std::fs::write(notify_dir.join(&hash), b"").ok();
 }
 
-fn make_insert_group(offset: usize, text: &str) -> UndoGroup {
-    UndoGroup {
-        ops: vec![EditOp {
+fn make_insert_entry(offset: usize, text: &str) -> UndoEntry {
+    UndoEntry {
+        op: EditOp {
             offset,
             old_text: String::new(),
             new_text: text.to_string(),
-        }],
+        },
         cursor_before: offset,
+        cursor_after: offset + text.chars().count(),
+        direction: 1,
     }
 }
 
-fn make_remove_group(offset: usize, old_text: &str) -> UndoGroup {
-    UndoGroup {
-        ops: vec![EditOp {
+fn make_remove_entry(offset: usize, old_text: &str) -> UndoEntry {
+    UndoEntry {
+        op: EditOp {
             offset,
             old_text: old_text.to_string(),
             new_text: String::new(),
-        }],
+        },
         cursor_before: offset,
+        cursor_after: offset,
+        direction: 1,
     }
 }
 
@@ -1457,7 +1531,7 @@ fn cross_instance_sync_insert_newline() {
                 &file_path,
                 "ext-chain-1",
                 content_hash,
-                &[make_insert_group(3, "\n")], // insert newline after "aaa"
+                &[make_insert_entry(3, "\n")], // insert newline after "aaa"
             );
         })),
         // Wait for sync to apply
@@ -1508,9 +1582,9 @@ fn cross_instance_sync_multiple_edits() {
                 "ext-chain-2",
                 content_hash,
                 &[
-                    make_insert_group(0, "X"),
-                    make_insert_group(1, "Y"),
-                    make_insert_group(2, "Z"),
+                    make_insert_entry(0, "X"),
+                    make_insert_entry(1, "Y"),
+                    make_insert_entry(2, "Z"),
                 ],
             );
         })),
@@ -1556,7 +1630,7 @@ fn cross_instance_sync_after_save() {
                 &file_path,
                 "ext-chain-3",
                 content_hash,
-                &[make_insert_group(0, "X")],
+                &[make_insert_entry(0, "X")],
             );
         })),
         // Wait for first sync
@@ -1984,6 +2058,101 @@ fn two_instance_no_args_browser_visible() {
         .map(|e| e.name.as_str())
         .collect();
     assert_eq!(a_names, b_names, "both instances should see same files");
+
+    a.stop();
+    b.stop();
+}
+
+#[test]
+fn two_instance_undo_syncs_and_clears_dirty() {
+    // Repro:
+    //   1. A opens file, B opens file
+    //   2. A inserts newline → B syncs (both dirty)
+    //   3. A undoes → both should sync back and neither should be dirty
+    let (tmpdir, paths) = shared_workspace(&[("test.txt", "aaa\nbbb\n")]);
+
+    let mut a = Instance::start(startup_for(&tmpdir, &paths));
+    a.wait_for(
+        |s| s.watchers_ready && !s.buffers.is_empty(),
+        WAIT,
+        "A ready",
+    );
+
+    let mut b = Instance::start(startup_for(&tmpdir, &paths));
+    b.wait_for(
+        |s| s.watchers_ready && !s.buffers.is_empty(),
+        WAIT,
+        "B ready",
+    );
+
+    let original_lines = active_buf(&a.state().unwrap()).unwrap().doc.line_count();
+
+    // Step 2: A inserts newline
+    a.push(InsertNewline);
+    a.wait_for(
+        |s| active_buf(s).is_some_and(|b| b.chain_id.is_some()),
+        WAIT,
+        "A undo flushed",
+    );
+
+    // B syncs the newline
+    b.wait_for(
+        |s| active_buf(s).is_some_and(|b| b.doc.line_count() > original_lines),
+        WAIT,
+        "B synced newline",
+    );
+
+    // Both should be dirty
+    assert!(
+        active_buf(&a.state().unwrap()).unwrap().doc.dirty(),
+        "A should be dirty after edit"
+    );
+    assert!(
+        active_buf(&b.state().unwrap()).unwrap().doc.dirty(),
+        "B should be dirty after sync"
+    );
+
+    // Step 3: A undoes
+    a.push(Undo);
+    a.wait_for(
+        |s| active_buf(s).is_some_and(|b| b.doc.line_count() == original_lines),
+        WAIT,
+        "A undid the newline",
+    );
+
+    // A should be clean (undo back to saved state)
+    a.wait_for(
+        |s| active_buf(s).is_some_and(|b| !b.doc.dirty()),
+        WAIT,
+        "A clean after undo",
+    );
+
+    // B should sync the undo and also be clean
+    b.wait_for(
+        |s| active_buf(s).is_some_and(|b| b.doc.line_count() == original_lines),
+        WAIT,
+        "B synced the undo",
+    );
+    b.wait_for(
+        |s| active_buf(s).is_some_and(|b| !b.doc.dirty()),
+        WAIT,
+        "B clean after synced undo",
+    );
+
+    // Content should match original
+    let a_state = a.state().unwrap();
+    let b_state = b.state().unwrap();
+    let a_buf = active_buf(&a_state).unwrap();
+    let b_buf = active_buf(&b_state).unwrap();
+    assert_eq!(a_buf.doc.line_count(), original_lines);
+    assert_eq!(b_buf.doc.line_count(), original_lines);
+    for i in 0..a_buf.doc.line_count() {
+        assert_eq!(
+            a_buf.doc.line(i),
+            b_buf.doc.line(i),
+            "line {i} mismatch between A and B"
+        );
+    }
 
     a.stop();
     b.stop();

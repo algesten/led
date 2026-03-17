@@ -15,7 +15,7 @@ pub fn open_db(config_dir: &Path) -> rusqlite::Result<Connection> {
     Ok(conn)
 }
 
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 
 fn run_schema(conn: &Connection) -> rusqlite::Result<()> {
     let version: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;

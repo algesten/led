@@ -11,7 +11,7 @@ mod versioned;
 
 pub use alert::{Alert, AlertExt};
 pub use config::Startup;
-pub use doc::{Doc, EditOp, TextDoc, UndoGroup, UndoHistory};
+pub use doc::{Doc, EditOp, TextDoc, UndoEntry, UndoHistory};
 pub use versioned::Versioned;
 pub use watch::{FileWatcher, watch};
 
