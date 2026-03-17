@@ -15,6 +15,27 @@ pub use doc::{Doc, EditOp, TextDoc, UndoGroup, UndoHistory};
 pub use versioned::Versioned;
 pub use watch::{FileWatcher, watch};
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static CHANGE_SEQ: AtomicU64 = AtomicU64::new(1);
+
+pub fn next_change_seq() -> u64 {
+    CHANGE_SEQ.fetch_add(1, Ordering::Relaxed)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Origin {
+    Local,
+    Remote,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChangeStamp {
+    pub seq: u64,
+    pub origin: Origin,
+    pub content_hash: u64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct BufferId(pub u64);
 

@@ -14,8 +14,8 @@ use led_core::rx::Stream;
 use led_core::theme::Theme;
 use std::path::PathBuf;
 
-use led_core::{Action, Alert, BufferId, Doc};
-use led_state::{AppState, BufferState, Dimensions, SessionRestorePhase};
+use led_core::{Action, Alert, BufferId, Doc, next_change_seq};
+use led_state::{AppState, BufferState, Dimensions, SaveState, SessionRestorePhase};
 use led_workspace::Workspace;
 
 use crate::Drivers;
@@ -75,7 +75,8 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Arc<AppState>> {
         })
         .stream();
 
-    // NotifyEvent needs hash→path lookup → sample_combine with state
+    // NotifyEvent needs hash→path lookup → sample_combine with state.
+    // All filtering/dedup is handled by the model (change_seq, content_hash).
     let notify_s = drivers
         .workspace_in
         .filter(|ev| matches!(ev, WI::NotifyEvent { .. }))
@@ -149,7 +150,7 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Arc<AppState>> {
                 .values()
                 .filter(|b| b.path.is_some())
                 .filter(|b| b.doc.dirty())
-                .map(|b| {
+                .filter_map(|b| {
                     let file_path = b.path.clone().unwrap();
                     let chain_id = b
                         .chain_id
@@ -163,8 +164,14 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Arc<AppState>> {
                         .iter()
                         .filter_map(|g| rmp_serde::to_vec(g).ok())
                         .collect();
+                    // Skip flush if there are no new entries to persist.
+                    // This prevents ping-pong cascades where SyncApply makes
+                    // a buffer dirty but there are no actual new undo groups.
+                    if entries.is_empty() {
+                        return None;
+                    }
                     let undo_cursor = closed_doc.undo_history_len();
-                    Mut::UndoFlushReady {
+                    Some(Mut::UndoFlushReady {
                         buf_id: b.id,
                         flush: led_state::UndoFlush {
                             file_path,
@@ -174,7 +181,7 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Arc<AppState>> {
                             distance_from_save: if b.doc.dirty() { undo_cursor as i32 } else { 0 },
                             entries,
                         },
-                    }
+                    })
                 })
                 .collect::<Vec<_>>()
         });
@@ -238,6 +245,9 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Arc<AppState>> {
                 undo_clear_path,
             } => {
                 s.buffers.insert(id, buf);
+                if let Some(buf) = s.buffers.get_mut(&id) {
+                    buf.change_seq = next_change_seq();
+                }
                 if let Some(path) = undo_clear_path {
                     s.pending_undo_clear.set(path);
                 }
@@ -312,23 +322,44 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Arc<AppState>> {
                 last_seen_seq,
             } => {
                 if let Some(buf) = s.buffers.get_mut(&buf_id) {
-                    buf.doc = doc;
-                    buf.chain_id = chain_id;
-                    buf.last_seen_seq = last_seen_seq;
-                    buf.persisted_undo_len = 0;
+                    // Guard: skip duplicate application when multiple
+                    // FSEvents trigger parallel CheckSyncs for the same data.
+                    if last_seen_seq > buf.last_seen_seq {
+                        buf.doc = doc;
+                        buf.chain_id = chain_id;
+                        buf.last_seen_seq = last_seen_seq;
+                        buf.persisted_undo_len = buf.doc.undo_history_len();
+                        buf.content_hash = buf.doc.content_hash();
+                        buf.change_seq = next_change_seq();
+                    }
                 }
             }
             Mut::SyncReset { buf_id } => {
                 if let Some(buf) = s.buffers.get_mut(&buf_id) {
                     buf.last_seen_seq = 0;
                     buf.chain_id = None;
-                    buf.persisted_undo_len = 0;
+                    buf.persisted_undo_len = buf.doc.undo_history_len();
+                    buf.change_seq = next_change_seq();
+                    // SyncReset means the undo chain was cleared by a save.
+                    // If the buffer is dirty only from remote sync (save_state
+                    // still Clean — the user hasn't made local edits), mark
+                    // the doc as saved since the file was saved by the other
+                    // instance.
+                    if buf.doc.dirty() && buf.save_state == SaveState::Clean {
+                        buf.doc = buf.doc.mark_saved();
+                    }
                 }
             }
             Mut::UndoFlushReady { buf_id, flush } => {
                 if let Some(buf) = s.buffers.get_mut(&buf_id) {
+                    // Close the undo group on the actual buffer doc to keep
+                    // it consistent with persisted_undo_len. Without this,
+                    // subsequent edits can append to the already-flushed open
+                    // group, making undo_groups_from(persisted) return empty.
+                    buf.doc = buf.doc.close_undo_group();
                     buf.chain_id = Some(flush.chain_id.clone());
                     buf.persisted_undo_len = flush.undo_cursor;
+                    buf.change_seq = next_change_seq();
                 }
                 s.pending_undo_flush.set(Some(flush));
             }

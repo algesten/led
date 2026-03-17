@@ -422,6 +422,7 @@ mod tests {
             chain_id: None,
             last_seen_seq: 0,
             content_hash: 0,
+            change_seq: 0,
         };
 
         let mut state = AppState::new(Startup {

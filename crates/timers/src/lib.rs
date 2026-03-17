@@ -63,6 +63,10 @@ pub fn driver(out: Stream<TimersOut>) -> Stream<TimersIn> {
                         timers.insert(name, vec![handle]);
                     }
                     Schedule::KeepExisting => {
+                        // Prune finished handles before checking
+                        if let Some(handles) = timers.get_mut(name) {
+                            handles.retain(|h| !h.is_finished());
+                        }
                         let active = timers.get(name).is_some_and(|v| !v.is_empty());
                         if !active {
                             let handle = spawn_oneshot(name, duration, &result_tx);

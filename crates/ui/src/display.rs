@@ -251,7 +251,9 @@ pub fn build_status_content(s: &StatusInputs) -> Rc<String> {
     };
 
     let total = s.viewport_width as usize;
-    let padding = total.saturating_sub(left.len() + right.len());
+    let left_width = left.chars().count();
+    let right_width = right.chars().count();
+    let padding = total.saturating_sub(left_width + right_width);
     Rc::new(format!(
         "{}{:padding$}{}",
         left,

@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fmt;
 use std::io::Cursor;
 use std::path::PathBuf;
@@ -84,8 +84,7 @@ pub fn driver(out: Stream<DocStoreOut>) -> Stream<Result<DocStoreIn, Alert>> {
         let mut next_doc_id: u64 = 0;
         let mut open_docs: HashMap<DocId, OpenDoc> = HashMap::new();
         let mut path_to_id: HashMap<PathBuf, DocId> = HashMap::new();
-        let mut watched_dirs: HashSet<PathBuf> = HashSet::new();
-        let mut self_notified: HashSet<PathBuf> = HashSet::new();
+        let mut watched_dirs: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
 
         loop {
             tokio::select! {
@@ -124,7 +123,7 @@ pub fn driver(out: Stream<DocStoreOut>) -> Stream<Result<DocStoreIn, Alert>> {
                         DocStoreOut::Save { id, doc } => {
                             if let Some(open) = open_docs.get(&id) {
                                 handle_save(
-                                    &open.path, &doc, &mut self_notified, &result_tx, id,
+                                    &open.path, &doc, &result_tx, id,
                                 ).await;
                             }
                         }
@@ -137,7 +136,7 @@ pub fn driver(out: Stream<DocStoreOut>) -> Stream<Result<DocStoreIn, Alert>> {
                 }
                 Some(event) = watcher_rx.recv() => {
                     handle_watcher_event(
-                        event, &path_to_id, &mut self_notified, &result_tx,
+                        event, &path_to_id, &result_tx,
                     ).await;
                 }
             }
@@ -187,7 +186,6 @@ fn format_on_save(doc: &Arc<dyn Doc>) -> Arc<dyn Doc> {
 async fn handle_save(
     path: &PathBuf,
     doc: &Arc<dyn Doc>,
-    self_notified: &mut HashSet<PathBuf>,
     tx: &mpsc::Sender<Result<DocStoreIn, Alert>>,
     id: DocId,
 ) {
@@ -221,7 +219,6 @@ async fn handle_save(
 
     match tokio::fs::rename(&tmp_path, path).await {
         Ok(()) => {
-            self_notified.insert(path.clone());
             let doc = doc.mark_saved();
             let _ = tx.send(Ok(DocStoreIn::Saved { id, doc })).await;
         }
@@ -240,7 +237,6 @@ async fn handle_save(
 async fn handle_watcher_event(
     event: notify::Event,
     path_to_id: &HashMap<PathBuf, DocId>,
-    self_notified: &mut HashSet<PathBuf>,
     tx: &mpsc::Sender<Result<DocStoreIn, Alert>>,
 ) {
     use notify::EventKind;
@@ -249,10 +245,6 @@ async fn handle_watcher_event(
         let Some(&id) = path_to_id.get(path) else {
             continue;
         };
-
-        if self_notified.remove(path) {
-            continue;
-        }
 
         let msg = match event.kind {
             EventKind::Create(_) | EventKind::Modify(_) => match read_doc(path).await {

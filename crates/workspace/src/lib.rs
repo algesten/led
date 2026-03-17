@@ -1,10 +1,11 @@
 pub mod db;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::hash::DefaultHasher;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Instant;
 
 use led_core::Startup;
 use led_core::rx::Stream;
@@ -169,7 +170,7 @@ pub fn driver(out: Stream<WorkspaceOut>) -> Stream<WorkspaceIn> {
         let mut _notify_watcher: Option<notify::RecommendedWatcher> = None;
         let (notify_watcher_ready_tx, mut notify_watcher_ready_rx) =
             mpsc::channel::<notify::RecommendedWatcher>(1);
-        let mut self_notified: HashSet<String> = HashSet::new();
+        let mut pending_notify: HashMap<String, Instant> = HashMap::new();
         let mut current: Option<Workspace> = None;
         let mut root_str = String::new();
         let mut _db: Option<rusqlite::Connection> = None;
@@ -292,7 +293,6 @@ pub fn driver(out: Stream<WorkspaceOut>) -> Stream<WorkspaceIn> {
                                         touch_notify_file(
                                             current.as_ref().map(|w| &w.config),
                                             &hash,
-                                            &mut self_notified,
                                         );
                                         let _ = result_tx
                                             .send(WorkspaceIn::UndoFlushed {
@@ -320,7 +320,6 @@ pub fn driver(out: Stream<WorkspaceOut>) -> Stream<WorkspaceIn> {
                                 touch_notify_file(
                                     current.as_ref().map(|w| &w.config),
                                     &hash,
-                                    &mut self_notified,
                                 );
                             }
                         }
@@ -375,7 +374,18 @@ pub fn driver(out: Stream<WorkspaceOut>) -> Stream<WorkspaceIn> {
                     let _ = result_tx.send(WorkspaceIn::WatchersReady).await;
                 }
                 Some(hash) = notify_event_rx.recv() => {
-                    if !self_notified.remove(&hash) {
+                    pending_notify.insert(hash, Instant::now());
+                }
+                _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {
+                    let now = Instant::now();
+                    let quiet = std::time::Duration::from_millis(100);
+                    let ready: Vec<String> = pending_notify
+                        .iter()
+                        .filter(|(_, t)| now.duration_since(**t) >= quiet)
+                        .map(|(h, _)| h.clone())
+                        .collect();
+                    for hash in ready {
+                        pending_notify.remove(&hash);
                         let _ = result_tx
                             .send(WorkspaceIn::NotifyEvent { file_path_hash: hash })
                             .await;
@@ -510,10 +520,9 @@ pub fn path_hash(path: &Path) -> String {
     format!("{:016x}", hasher.finish())
 }
 
-fn touch_notify_file(config: Option<&PathBuf>, hash: &str, self_notified: &mut HashSet<String>) {
+fn touch_notify_file(config: Option<&PathBuf>, hash: &str) {
     let Some(config) = config else { return };
     let notify_dir = config.join("notify");
     let path = notify_dir.join(hash);
-    self_notified.insert(hash.to_string());
     std::fs::write(&path, b"").ok();
 }

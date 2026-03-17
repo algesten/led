@@ -1,3 +1,5 @@
+pub mod two_instance;
+
 use std::cell::Cell;
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};

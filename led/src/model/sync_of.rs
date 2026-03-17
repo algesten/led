@@ -64,6 +64,15 @@ fn resolve_sync(result: SyncResultKind, state: &AppState) -> Option<Mut> {
                 .buffers
                 .values()
                 .find(|b| b.path.as_ref() == Some(&file_path))?;
+            // Safety check: skip if buffer is dirty and content_hash
+            // mismatches — prevents clobbering local unsaved edits.
+            if buf.doc.dirty() && buf.content_hash != content_hash {
+                log::info!(
+                    "sync: skipping ReloadAndReplay for dirty buffer {}, content hash mismatch",
+                    file_path.display()
+                );
+                return None;
+            }
             if buf.content_hash != content_hash {
                 log::info!(
                     "sync: content hash mismatch for {}, expecting docstore reload",

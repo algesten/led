@@ -94,7 +94,7 @@ fn render_tab_bar(tabs: &TabsInputs, layout: &LayoutInfo, frame: &mut Frame, are
         }
         first = false;
 
-        let width = entry.label.len() as u16;
+        let width = entry.label.chars().count() as u16;
 
         if x + width > area.x + area.width {
             break;

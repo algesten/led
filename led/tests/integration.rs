@@ -1556,3 +1556,298 @@ fn cross_instance_sync_after_save() {
     );
     assert_eq!(b.last_seen_seq, 0, "last_seen_seq should be reset");
 }
+
+// ── Core bug: after save, only post-save undo groups should be flushed ──
+
+#[test]
+fn persisted_undo_len_preserved_after_save() {
+    // After save, persisted_undo_len must match the undo history length —
+    // NOT reset to 0.  The old code (see _old/crates/buffer/src/watcher.rs:396)
+    // did this correctly:
+    //     self.persisted_undo_len = self.save_history_len;
+    // Without this, the next flush re-sends ALL undo groups (including
+    // pre-save ones), which corrupts cross-instance sync on the receiver.
+    let t = TestHarness::new().with_file("hello\n").run(vec![
+        WaitFor(|s| !s.buffers.is_empty()),
+        Do(InsertChar('X')),
+        WaitFor(|s| {
+            s.active_buffer
+                .and_then(|id| s.buffers.get(&id))
+                .is_some_and(|b| b.persisted_undo_len > 0)
+        }),
+        Do(Save),
+        WaitFor(|s| {
+            s.active_buffer
+                .and_then(|id| s.buffers.get(&id))
+                .is_some_and(|b| b.save_state == SaveState::Clean)
+        }),
+    ]);
+
+    let b = buf(&t);
+    assert!(
+        b.persisted_undo_len > 0,
+        "persisted_undo_len should reflect saved undo history, got 0"
+    );
+}
+
+// ── Two-instance tests ──
+
+use harness::two_instance::{Instance, shared_workspace, startup_for};
+use led_state::AppState;
+
+fn active_buf(s: &AppState) -> Option<&led_state::BufferState> {
+    s.active_buffer.and_then(|id| s.buffers.get(&id))
+}
+
+const WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
+#[test]
+fn two_instance_sync_after_save() {
+    // Exact repro of the user's bug:
+    //   1. A opens file (primary)
+    //   2. B opens file (non-primary)
+    //   3. B adds newline → A syncs
+    //   4. B saves
+    //   5. B adds another newline → A must sync
+    let (tmpdir, paths) = shared_workspace(&[("test.txt", "aaa\nbbb\n")]);
+
+    let mut a = Instance::start(startup_for(&tmpdir, &paths));
+    a.wait_for(
+        |s| s.watchers_ready && !s.buffers.is_empty(),
+        WAIT,
+        "A ready",
+    );
+
+    let mut b = Instance::start(startup_for(&tmpdir, &paths));
+    b.wait_for(
+        |s| s.watchers_ready && !s.buffers.is_empty(),
+        WAIT,
+        "B ready",
+    );
+
+    // Verify A is primary, B is not
+    assert!(a.state().unwrap().workspace.as_ref().unwrap().primary);
+    assert!(!b.state().unwrap().workspace.as_ref().unwrap().primary);
+
+    let a_lines_before = active_buf(&a.state().unwrap()).unwrap().doc.line_count();
+
+    // Step 3: B adds a newline
+    b.push(InsertNewline);
+    b.wait_for(
+        |s| active_buf(s).is_some_and(|b| b.chain_id.is_some()),
+        WAIT,
+        "B undo flushed",
+    );
+    a.wait_for(
+        |s| active_buf(s).is_some_and(|b| b.doc.line_count() > a_lines_before),
+        WAIT,
+        "A synced first newline",
+    );
+
+    let a_lines_after_sync1 = active_buf(&a.state().unwrap()).unwrap().doc.line_count();
+    assert_eq!(
+        a_lines_after_sync1,
+        a_lines_before + 1,
+        "A should have synced the first newline"
+    );
+
+    // Step 4: B saves
+    b.push(Save);
+    b.wait_for(
+        |s| active_buf(s).is_some_and(|b| b.save_state == SaveState::Clean),
+        WAIT,
+        "B saved",
+    );
+
+    // Step 5: B adds another newline
+    b.push(InsertNewline);
+    b.wait_for(
+        |s| active_buf(s).is_some_and(|b| b.chain_id.is_some() && b.doc.dirty()),
+        WAIT,
+        "B second edit flushed",
+    );
+
+    // A must sync the second newline
+    a.wait_for(
+        |s| active_buf(s).is_some_and(|b| b.doc.line_count() > a_lines_after_sync1),
+        WAIT,
+        "A synced second newline",
+    );
+
+    let a_state = a.state().unwrap();
+    let b_state = b.state().unwrap();
+    let a_final = active_buf(&a_state).unwrap();
+    let b_final = active_buf(&b_state).unwrap();
+    assert_eq!(
+        a_final.doc.line_count(),
+        a_lines_before + 2,
+        "A should have both newlines: {} lines, expected {}",
+        a_final.doc.line_count(),
+        a_lines_before + 2,
+    );
+    // Content should match between A and B
+    for i in 0..b_final.doc.line_count() {
+        assert_eq!(
+            a_final.doc.line(i),
+            b_final.doc.line(i),
+            "line {i} mismatch between A and B"
+        );
+    }
+
+    a.stop();
+    b.stop();
+}
+
+#[test]
+fn two_instance_second_edit_syncs_without_save() {
+    // Repro: B makes two edits (no save between them), only the first
+    // newline is visible in A.
+    //   1. A opens file (primary)
+    //   2. B opens file (non-primary)
+    //   3. B inserts newline → A syncs
+    //   4. B waits 1000ms
+    //   5. B inserts another newline → A must sync
+    let (tmpdir, paths) = shared_workspace(&[("test.txt", "aaa\nbbb\n")]);
+
+    let mut a = Instance::start(startup_for(&tmpdir, &paths));
+    a.wait_for(
+        |s| s.watchers_ready && !s.buffers.is_empty(),
+        WAIT,
+        "A ready",
+    );
+
+    let mut b = Instance::start(startup_for(&tmpdir, &paths));
+    b.wait_for(
+        |s| s.watchers_ready && !s.buffers.is_empty(),
+        WAIT,
+        "B ready",
+    );
+
+    let a_lines_before = active_buf(&a.state().unwrap()).unwrap().doc.line_count();
+
+    // Step 3: B inserts newline
+    b.push(InsertNewline);
+    b.wait_for(
+        |s| active_buf(s).is_some_and(|b| b.chain_id.is_some()),
+        WAIT,
+        "B first edit flushed",
+    );
+    a.wait_for(
+        |s| active_buf(s).is_some_and(|b| b.doc.line_count() > a_lines_before),
+        WAIT,
+        "A synced first newline",
+    );
+
+    let a_lines_after_sync1 = active_buf(&a.state().unwrap()).unwrap().doc.line_count();
+    assert_eq!(a_lines_after_sync1, a_lines_before + 1);
+
+    // Step 4: wait 1000ms for the first flush to fully propagate
+    std::thread::sleep(std::time::Duration::from_millis(1000));
+
+    // Step 5: B inserts another newline (no save)
+    b.push(InsertNewline);
+    b.wait_for(
+        |s| active_buf(s).is_some_and(|b| b.doc.line_count() > a_lines_after_sync1),
+        WAIT,
+        "B has second newline",
+    );
+
+    // A must sync the second newline
+    a.wait_for(
+        |s| active_buf(s).is_some_and(|b| b.doc.line_count() > a_lines_after_sync1),
+        WAIT,
+        "A synced second newline",
+    );
+
+    let a_state = a.state().unwrap();
+    let b_state = b.state().unwrap();
+    let a_final = active_buf(&a_state).unwrap();
+    let b_final = active_buf(&b_state).unwrap();
+    assert_eq!(
+        a_final.doc.line_count(),
+        a_lines_before + 2,
+        "A should have both newlines: {} lines, expected {}",
+        a_final.doc.line_count(),
+        a_lines_before + 2,
+    );
+    for i in 0..b_final.doc.line_count() {
+        assert_eq!(
+            a_final.doc.line(i),
+            b_final.doc.line(i),
+            "line {i} mismatch between A and B"
+        );
+    }
+
+    a.stop();
+    b.stop();
+}
+
+#[test]
+fn two_instance_remote_save_clears_dirty() {
+    // Repro:
+    //   1. A opens file (primary)
+    //   2. B opens file (non-primary)
+    //   3. B inserts newline → A syncs (both dirty)
+    //   4. B saves → B clean, A must also become clean
+    let (tmpdir, paths) = shared_workspace(&[("test.txt", "aaa\nbbb\n")]);
+
+    let mut a = Instance::start(startup_for(&tmpdir, &paths));
+    a.wait_for(
+        |s| s.watchers_ready && !s.buffers.is_empty(),
+        WAIT,
+        "A ready",
+    );
+
+    let mut b = Instance::start(startup_for(&tmpdir, &paths));
+    b.wait_for(
+        |s| s.watchers_ready && !s.buffers.is_empty(),
+        WAIT,
+        "B ready",
+    );
+
+    // Step 3: B inserts newline
+    b.push(InsertNewline);
+    b.wait_for(
+        |s| active_buf(s).is_some_and(|b| b.chain_id.is_some()),
+        WAIT,
+        "B undo flushed",
+    );
+
+    // A syncs → A becomes dirty
+    a.wait_for(
+        |s| active_buf(s).is_some_and(|b| b.doc.dirty()),
+        WAIT,
+        "A dirty after sync",
+    );
+
+    // Step 4: B saves
+    b.push(Save);
+    b.wait_for(
+        |s| active_buf(s).is_some_and(|b| b.save_state == SaveState::Clean && !b.doc.dirty()),
+        WAIT,
+        "B clean after save",
+    );
+
+    // A must also become clean: the file on disk now matches A's content
+    a.wait_for(
+        |s| active_buf(s).is_some_and(|b| !b.doc.dirty()),
+        WAIT,
+        "A clean after remote save",
+    );
+
+    // Content should still match
+    let a_state = a.state().unwrap();
+    let b_state = b.state().unwrap();
+    let a_buf = active_buf(&a_state).unwrap();
+    let b_buf = active_buf(&b_state).unwrap();
+    for i in 0..b_buf.doc.line_count() {
+        assert_eq!(
+            a_buf.doc.line(i),
+            b_buf.doc.line(i),
+            "line {i} mismatch between A and B"
+        );
+    }
+
+    a.stop();
+    b.stop();
+}

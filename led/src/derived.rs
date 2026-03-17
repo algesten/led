@@ -195,17 +195,20 @@ pub fn derived(state: Stream<Arc<AppState>>) -> Derived {
         })
         .stream();
 
-    // Undo flush rate limiter: when any buffer has unpersisted undo,
-    // schedule a 200ms one-shot. KeepExisting means it won't reset if
-    // already counting down — flush at most once per 200ms.
+    // Undo flush rate limiter: schedule a 200ms one-shot when any dirty
+    // buffer's doc version changes. Dedupe on max version so each new
+    // edit re-fires (unlike a boolean dirty check which stays true).
+    // KeepExisting means rapid edits don't reset the countdown.
     let undo_timer = state
         .map(|s| {
             s.buffers
                 .values()
-                .any(|b| b.path.is_some() && b.doc.dirty())
+                .filter(|b| b.path.is_some() && b.doc.dirty())
+                .map(|b| b.doc.version())
+                .max()
         })
         .dedupe()
-        .filter(|dirty| *dirty)
+        .filter(|v| v.is_some())
         .map(|_| TimersOut::Set {
             name: "undo_flush",
             duration: Duration::from_millis(200),

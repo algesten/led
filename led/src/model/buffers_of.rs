@@ -84,6 +84,7 @@ pub fn buffers_of(
                     chain_id,
                     last_seen_seq,
                     content_hash,
+                    change_seq: 0,
                 };
                 Some(Mut::BufferOpen {
                     buf,
@@ -104,7 +105,7 @@ pub fn buffers_of(
                 let mut buf = buf.clone();
                 buf.doc = doc;
                 buf.save_state = SaveState::Clean;
-                buf.persisted_undo_len = 0;
+                buf.persisted_undo_len = buf.doc.undo_history_len();
                 buf.chain_id = None;
                 buf.last_seen_seq = 0;
                 buf.content_hash = buf.doc.content_hash();
@@ -116,8 +117,25 @@ pub fn buffers_of(
             }
             Ok(DocStoreIn::ExternalChange { id, doc }) => {
                 let buf = find_buf_by_doc_id(&state, id)?;
+                let incoming_hash = doc.content_hash();
+                // Content-hash comparison: if the incoming doc has the same
+                // content as our buffer, the file wasn't meaningfully changed.
+                // If we're dirty (e.g. from SyncApply), mark as saved — the
+                // disk now matches our content (another instance saved it).
+                // If we're already clean, skip entirely (self-echo).
+                if incoming_hash == buf.content_hash {
+                    if buf.doc.dirty() {
+                        let mut buf = buf.clone();
+                        buf.doc = buf.doc.mark_saved();
+                        buf.save_state = led_state::SaveState::Clean;
+                        return Some(Mut::BufferUpdate(buf.id, buf));
+                    }
+                    return None;
+                }
                 let mut buf = buf.clone();
                 buf.doc = doc;
+                buf.content_hash = incoming_hash;
+                buf.change_seq = led_core::next_change_seq();
                 // Clamp cursor to new document bounds
                 buf.cursor_row = buf.cursor_row.min(buf.doc.line_count().saturating_sub(1));
                 buf.cursor_col = buf.cursor_col.min(buf.doc.line_len(buf.cursor_row));

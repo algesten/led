@@ -1,4 +1,4 @@
-use std::hash::{DefaultHasher, Hash, Hasher};
+use std::hash::{DefaultHasher, Hasher};
 use std::io;
 use std::sync::Arc;
 
@@ -67,7 +67,10 @@ impl UndoHistory {
     }
 
     /// Slice of undo groups from `start` onwards (for incremental flush).
+    /// Clamped to the stack length so callers never panic if undo shrinks
+    /// the stack below `start` (e.g. user undoes after save).
     pub fn undo_slice(&self, start: usize) -> &[UndoGroup] {
+        let start = start.min(self.undo_stack.len());
         &self.undo_stack[start..]
     }
 
@@ -200,7 +203,10 @@ impl Doc for TextDoc {
     fn content_hash(&self) -> u64 {
         let mut hasher = DefaultHasher::new();
         for chunk in self.rope.chunks() {
-            chunk.hash(&mut hasher);
+            // Use write() not hash() — hash() adds a per-chunk discriminator
+            // byte, making the result depend on Rope's internal chunking.
+            // write() concatenates raw bytes so the hash is text-level.
+            hasher.write(chunk.as_bytes());
         }
         hasher.finish()
     }

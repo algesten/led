@@ -118,6 +118,9 @@ pub struct BufferState {
     pub chain_id: Option<String>,
     pub last_seen_seq: i64,
     pub content_hash: u64,
+    /// Monotonically increasing stamp, bumped on every meaningful modification
+    /// (flush, save, sync apply). Used to detect self-echoes at the model level.
+    pub change_seq: u64,
 }
 
 impl fmt::Debug for BufferState {
