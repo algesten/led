@@ -35,6 +35,9 @@ pub enum DocStoreIn {
     ExternalRemove {
         id: DocId,
     },
+    OpenFailed {
+        path: PathBuf,
+    },
 }
 
 impl fmt::Debug for DocStoreIn {
@@ -51,6 +54,9 @@ impl fmt::Debug for DocStoreIn {
             }
             DocStoreIn::ExternalRemove { id } => {
                 f.debug_struct("ExternalRemove").field("id", id).finish()
+            }
+            DocStoreIn::OpenFailed { path } => {
+                f.debug_struct("OpenFailed").field("path", path).finish()
             }
         }
     }
@@ -128,9 +134,10 @@ pub fn driver(
                                     let _ = result_tx.send(Ok(DocStoreIn::Opened { id, path, doc })).await;
                                 }
                                 Err(e) => {
-                                    let _ = result_tx.send(Err(Alert::Warn(format!(
-                                        "Cannot open {}: {e}", path.display()
-                                    )))).await;
+                                    log::debug!("Cannot open {}: {e}", path.display());
+                                    let _ = result_tx
+                                        .send(Ok(DocStoreIn::OpenFailed { path }))
+                                        .await;
                                 }
                             }
                         }

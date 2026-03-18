@@ -156,6 +156,7 @@ pub fn buffers_of(
                 Some(Mut::BufferUpdate(buf.id, buf))
             }
             Ok(DocStoreIn::ExternalRemove { .. }) => None,
+            Ok(DocStoreIn::OpenFailed { path }) => Some(Mut::SessionOpenFailed { path }),
             Err(a) => Some(Mut::alert(a)),
         })
         .stream()

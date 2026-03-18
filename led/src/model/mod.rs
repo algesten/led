@@ -269,6 +269,15 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Arc<AppState>> {
             Mut::Resize(w, h) => {
                 s.dims = Some(Dimensions::new(w, h, s.show_side_panel));
             }
+            Mut::SessionOpenFailed { path } => {
+                s.session_positions.remove(&path);
+                if s.session_restore_phase == SessionRestorePhase::Restoring
+                    && s.session_positions.is_empty()
+                {
+                    s.session_restore_phase = SessionRestorePhase::Done;
+                    resolve_focus(&mut s);
+                }
+            }
             Mut::SessionRestored(session) => match session {
                 Some(session) => {
                     s.session_restore_phase = SessionRestorePhase::Restoring;
@@ -461,6 +470,9 @@ enum Mut {
     NotifyEvent {
         path: Option<std::path::PathBuf>,
     },
+    SessionOpenFailed {
+        path: std::path::PathBuf,
+    },
     SessionRestored(Option<led_workspace::RestoredSession>),
     SessionSaved,
     WatchersReady,
@@ -503,6 +515,7 @@ impl Mut {
             Mut::Keymap(_) => "Keymap",
             Mut::Resize(_, _) => "Resize",
             Mut::NotifyEvent { .. } => "NotifyEvent",
+            Mut::SessionOpenFailed { .. } => "SessionOpenFailed",
             Mut::SessionRestored(_) => "SessionRestored",
             Mut::SessionSaved => "SessionSaved",
             Mut::WatchersReady => "WatchersReady",

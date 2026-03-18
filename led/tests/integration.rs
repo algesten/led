@@ -1078,6 +1078,98 @@ fn session_restore_tabs() {
 }
 
 #[test]
+fn session_restore_missing_file() {
+    // Run 1: open two files, quit, save session
+    let t = TestHarness::new()
+        .with_named_file("fileA.txt", "aaa\n")
+        .with_named_file("fileB.txt", "bbb\n")
+        .run(vec![Do(Quit), WaitFor(|s| s.session_saved)]);
+
+    assert_eq!(t.state.buffers.len(), 2);
+    let dir = t.dirs.root.clone();
+
+    // Delete fileA.txt between runs
+    std::fs::remove_file(t.dirs.workspace.join("fileA.txt")).expect("remove fileA.txt");
+
+    // Run 2: restore with fileB.txt as arg — session restore should not hang
+    // even though fileA.txt (from the session) no longer exists.
+    let file_b = t.dirs.workspace.join("fileB.txt");
+    let t2 = TestHarness::with_dir(dir)
+        .with_arg(file_b)
+        .run(vec![WaitFor(|s| {
+            s.session_restore_phase == led_state::SessionRestorePhase::Done && !s.buffers.is_empty()
+        })]);
+
+    // fileB.txt should be open; fileA.txt silently skipped
+    assert_eq!(t2.state.buffers.len(), 1);
+    let name = buf(&t2)
+        .path
+        .as_ref()
+        .unwrap()
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    assert_eq!(name, "fileB.txt");
+}
+
+#[test]
+fn session_restore_all_files_missing() {
+    // Run 1: open two files, quit, save session
+    let t = TestHarness::new()
+        .with_named_file("one.txt", "1\n")
+        .with_named_file("two.txt", "2\n")
+        .run(vec![Do(Quit), WaitFor(|s| s.session_saved)]);
+
+    assert_eq!(t.state.buffers.len(), 2);
+    let dir = t.dirs.root.clone();
+
+    // Delete both files — every session file is gone
+    std::fs::remove_file(t.dirs.workspace.join("one.txt")).expect("remove one.txt");
+    std::fs::remove_file(t.dirs.workspace.join("two.txt")).expect("remove two.txt");
+
+    // Run 2: session restore should complete (not hang) with zero buffers
+    let t2 = TestHarness::with_dir(dir).run(vec![WaitFor(|s| {
+        s.session_restore_phase == led_state::SessionRestorePhase::Done
+    })]);
+
+    assert!(t2.state.buffers.is_empty());
+}
+
+#[test]
+fn session_restore_multiple_missing() {
+    // Run 1: open three files, quit, save session
+    let t = TestHarness::new()
+        .with_named_file("a.txt", "a\n")
+        .with_named_file("b.txt", "b\n")
+        .with_named_file("c.txt", "c\n")
+        .run(vec![Do(Quit), WaitFor(|s| s.session_saved)]);
+
+    assert_eq!(t.state.buffers.len(), 3);
+    let dir = t.dirs.root.clone();
+
+    // Delete two of three — mix of success and failure
+    std::fs::remove_file(t.dirs.workspace.join("a.txt")).expect("remove a.txt");
+    std::fs::remove_file(t.dirs.workspace.join("c.txt")).expect("remove c.txt");
+
+    // Run 2: only b.txt should survive
+    let t2 = TestHarness::with_dir(dir).run(vec![WaitFor(|s| {
+        s.session_restore_phase == led_state::SessionRestorePhase::Done && !s.buffers.is_empty()
+    })]);
+
+    assert_eq!(t2.state.buffers.len(), 1);
+    let name = buf(&t2)
+        .path
+        .as_ref()
+        .unwrap()
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    assert_eq!(name, "b.txt");
+}
+
+#[test]
 fn session_restore_with_arg_file() {
     // Exact repro: start with ONE arg file, open a second from browser, quit, restart with same arg.
     let tmpdir = tempfile::TempDir::new().unwrap().keep();
