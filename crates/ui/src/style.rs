@@ -424,6 +424,8 @@ mod tests {
             last_seen_seq: 0,
             content_hash: 0,
             change_seq: 0,
+            isearch: None,
+            last_search: None,
         };
 
         let mut state = AppState::new(Startup {

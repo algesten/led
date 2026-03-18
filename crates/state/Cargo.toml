@@ -9,3 +9,4 @@ led-config-file = { workspace = true }
 led-fs = { workspace = true }
 led-workspace = { workspace = true }
 log = { workspace = true }
+serde = { workspace = true }

@@ -6,23 +6,6 @@ Every side effect lives in a Driver. The Model is a pure reduce: `(State, Mut) -
 
 ---
 
-## Phase 10b: Confirmation prompt for dirty buffer kill
-
-- Confirmation prompt for dirty buffer kill (minibuffer y/n, not a modal overlay)
-
-
-## Phase 11: In-Buffer Search (ISearch)
-
-ISearchState with query, origin, matches, match_idx, failed flag.
-
-- Actions: InBufferSearch (open/next), character input, DeleteBackward, Abort (cancel), Enter (accept)
-- `find_all_matches()` — case-insensitive substring search across all lines
-- Visible matches rendered with `editor.search_match`, current match with `editor.search_current`
-- Status bar switches to search prompt mode (Phase 6B)
-- Cancel restores origin cursor/scroll position
-
----
-
 ## Phase 12: Jump List
 
 Navigation history for `JumpBack` / `JumpForward` actions.

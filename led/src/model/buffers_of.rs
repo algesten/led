@@ -95,6 +95,8 @@ pub fn buffers_of(
                     last_seen_seq,
                     content_hash,
                     change_seq: 0,
+                    isearch: None,
+                    last_search: None,
                 };
                 let activate =
                     !is_session_restore || state.session_active_tab_order == Some(tab_order);

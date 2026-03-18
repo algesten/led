@@ -917,6 +917,7 @@ dependencies = [
  "notify",
  "rmp-serde",
  "rusqlite",
+ "serde_json",
  "tempfile",
  "tokio",
 ]
@@ -979,6 +980,7 @@ dependencies = [
  "led-fs",
  "led-workspace",
  "log",
+ "serde",
 ]
 
 [[package]]

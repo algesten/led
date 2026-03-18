@@ -25,6 +25,11 @@ pub struct DisplayInputs {
     /// Normalized selection range: ((start_row, start_col), (end_row, end_col)) where start <= end.
     selection: Option<((usize, usize), (usize, usize))>,
     selection_style: Style,
+    // Search match highlighting
+    search_matches: Vec<(usize, usize, usize)>,
+    search_match_idx: Option<usize>,
+    search_match_style: Style,
+    search_current_style: Style,
 }
 
 impl PartialEq for DisplayInputs {
@@ -39,6 +44,10 @@ impl PartialEq for DisplayInputs {
             && self.text_style == other.text_style
             && self.selection == other.selection
             && self.selection_style == other.selection_style
+            && self.search_matches == other.search_matches
+            && self.search_match_idx == other.search_match_idx
+            && self.search_match_style == other.search_match_style
+            && self.search_current_style == other.search_current_style
     }
 }
 
@@ -59,6 +68,12 @@ pub fn display_inputs(s: &AppState) -> Option<DisplayInputs> {
         }
     });
 
+    let (search_matches, search_match_idx) = buf
+        .isearch
+        .as_ref()
+        .map(|is| (is.matches.clone(), is.match_idx))
+        .unwrap_or_default();
+
     Some(DisplayInputs {
         buffer_id: id,
         doc: buf.doc.clone(),
@@ -70,6 +85,10 @@ pub fn display_inputs(s: &AppState) -> Option<DisplayInputs> {
         text_style: style::resolve(theme, &theme.editor.text),
         selection,
         selection_style: style::resolve(theme, &theme.editor.selection),
+        search_matches,
+        search_match_idx,
+        search_match_style: style::resolve(theme, &theme.editor.search_match),
+        search_current_style: style::resolve(theme, &theme.editor.search_current),
     })
 }
 
@@ -125,38 +144,97 @@ pub fn build_display_lines(d: &DisplayInputs) -> Rc<Vec<Line<'static>>> {
             // Gutter: 2 spaces
             spans.push(Span::styled("  ", d.gutter_style));
 
-            // Text content — with selection overlay if applicable
+            // Text content — with selection and search overlays
             let chunk_len = ce - cs;
-            match sel_dcols {
-                Some((ss, se)) if ss < ce && se > cs => {
-                    // Selection overlaps this chunk — build per-column styles
-                    let sel_start = ss.max(cs) - cs;
-                    let sel_end = se.min(ce) - cs;
 
-                    // Before selection
-                    if sel_start > 0 {
-                        spans.push(Span::styled(
-                            chars_to_string(&display[cs..cs + sel_start]),
-                            d.text_style,
-                        ));
+            // Check if any search matches overlap this chunk
+            let has_search = !d.search_matches.is_empty()
+                && d.search_matches.iter().any(|&(mr, mc, mlen)| {
+                    mr == line_idx && {
+                        let ms = char_map.get(mc).copied().unwrap_or(display.len());
+                        let me = char_map.get(mc + mlen).copied().unwrap_or(display.len());
+                        ms < ce && me > cs
                     }
-                    // Selected region
-                    spans.push(Span::styled(
-                        chars_to_string(&display[cs + sel_start..cs + sel_end]),
-                        d.selection_style,
-                    ));
-                    // After selection
-                    if sel_end < chunk_len {
-                        spans.push(Span::styled(
-                            chars_to_string(&display[cs + sel_end..ce]),
-                            d.text_style,
-                        ));
+                });
+
+            if has_search {
+                // Per-column style approach: base styles, then search overlay
+                let mut col_styles = vec![d.text_style; chunk_len];
+
+                // Apply selection
+                if let Some((ss, se)) = sel_dcols {
+                    if ss < ce && se > cs {
+                        let s = ss.max(cs) - cs;
+                        let e = se.min(ce) - cs;
+                        for st in &mut col_styles[s..e] {
+                            *st = d.selection_style;
+                        }
                     }
                 }
-                _ => {
-                    // No selection on this chunk — simple path
-                    let chunk_text = chars_to_string(&display[cs..ce]);
-                    spans.push(Span::styled(chunk_text, d.text_style));
+
+                // Apply search matches on top
+                for (mi, &(mr, mc, mlen)) in d.search_matches.iter().enumerate() {
+                    if mr != line_idx {
+                        continue;
+                    }
+                    let ms = char_map.get(mc).copied().unwrap_or(display.len());
+                    let me = char_map.get(mc + mlen).copied().unwrap_or(display.len());
+                    if ms >= ce || me <= cs {
+                        continue;
+                    }
+                    let is_current = d.search_match_idx == Some(mi);
+                    let style = if is_current {
+                        d.search_current_style
+                    } else {
+                        d.search_match_style
+                    };
+                    for i in ms.max(cs)..me.min(ce) {
+                        col_styles[i - cs] = style;
+                    }
+                }
+
+                // Group consecutive same-style columns into spans
+                let mut pos = 0;
+                while pos < chunk_len {
+                    let style = col_styles[pos];
+                    let mut end = pos + 1;
+                    while end < chunk_len && col_styles[end] == style {
+                        end += 1;
+                    }
+                    spans.push(Span::styled(
+                        chars_to_string(&display[cs + pos..cs + end]),
+                        style,
+                    ));
+                    pos = end;
+                }
+            } else {
+                // No search matches — use the faster selection-only path
+                match sel_dcols {
+                    Some((ss, se)) if ss < ce && se > cs => {
+                        let sel_start = ss.max(cs) - cs;
+                        let sel_end = se.min(ce) - cs;
+
+                        if sel_start > 0 {
+                            spans.push(Span::styled(
+                                chars_to_string(&display[cs..cs + sel_start]),
+                                d.text_style,
+                            ));
+                        }
+                        spans.push(Span::styled(
+                            chars_to_string(&display[cs + sel_start..cs + sel_end]),
+                            d.selection_style,
+                        ));
+                        if sel_end < chunk_len {
+                            spans.push(Span::styled(
+                                chars_to_string(&display[cs + sel_end..ce]),
+                                d.text_style,
+                            ));
+                        }
+                    }
+                    _ => {
+                        let chunk_text = chars_to_string(&display[cs..ce]);
+                        spans.push(Span::styled(chunk_text, d.text_style));
+                    }
                 }
             }
 
@@ -288,6 +366,7 @@ pub struct StatusInputs {
     pub info: Option<String>,
     pub warn: Option<String>,
     pub viewport_width: u16,
+    pub search_prompt: Option<String>,
 }
 
 pub fn status_inputs(s: &AppState) -> StatusInputs {
@@ -313,6 +392,19 @@ pub fn status_inputs(s: &AppState) -> StatusInputs {
 
     let viewport_width = s.dims.map_or(0, |d| d.viewport_width);
 
+    let search_prompt = s
+        .active_buffer
+        .and_then(|id| s.buffers.get(&id))
+        .and_then(|buf| {
+            buf.isearch.as_ref().map(|is| {
+                if is.failed {
+                    format!("Failing search: {}", is.query)
+                } else {
+                    format!("Search: {}", is.query)
+                }
+            })
+        });
+
     StatusInputs {
         file_name,
         is_dirty,
@@ -321,10 +413,19 @@ pub fn status_inputs(s: &AppState) -> StatusInputs {
         info: s.info.clone(),
         warn: s.warn.clone(),
         viewport_width,
+        search_prompt,
     }
 }
 
 pub fn build_status_content(s: &StatusInputs) -> Rc<String> {
+    // During search, show search prompt instead of normal status
+    if let Some(ref prompt) = s.search_prompt {
+        let left = format!(" {}", prompt);
+        let total = s.viewport_width as usize;
+        let padding = total.saturating_sub(left.chars().count());
+        return Rc::new(format!("{}{:padding$}", left, "", padding = padding));
+    }
+
     let modified = if s.is_dirty { " \u{25cf}" } else { "" };
     let default_left = format!(" {}{}", s.file_name, modified);
     let right = format!("L{}:C{} ", s.cursor_row + 1, s.cursor_col + 1);

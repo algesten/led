@@ -2758,3 +2758,276 @@ fn non_kill_line_clears_accumulator() {
 
     assert_eq!(t.state.kill_ring, "bbb");
 }
+
+// ── In-Buffer Search ──
+
+#[test]
+fn search_opens_and_finds() {
+    let t = TestHarness::new()
+        .with_file("hello world\nhello again\n")
+        .run(actions(vec![
+            InBufferSearch,
+            InsertChar('h'),
+            InsertChar('e'),
+        ]));
+
+    let b = buf(&t);
+    let is = b.isearch.as_ref().expect("isearch should be active");
+    assert_eq!(is.query, "he");
+    assert_eq!(is.matches.len(), 2);
+    assert_eq!(b.cursor_row, 0);
+    assert_eq!(b.cursor_col, 0);
+}
+
+#[test]
+fn search_next_advances() {
+    let t = TestHarness::new()
+        .with_file("aaa\naaa\naaa\n")
+        .run(actions(vec![
+            InBufferSearch,
+            InsertChar('a'),
+            InsertChar('a'),
+            InsertChar('a'),
+            InBufferSearch, // advance to next match
+        ]));
+
+    let b = buf(&t);
+    assert_eq!(b.cursor_row, 1);
+    assert_eq!(b.cursor_col, 0);
+}
+
+#[test]
+fn search_cancel_restores_cursor() {
+    let t = TestHarness::new()
+        .with_file("hello\nworld\n")
+        .run(actions(vec![
+            MoveDown, // move to (1,0)
+            InBufferSearch,
+            InsertChar('x'), // no match
+            Abort,           // cancel
+        ]));
+
+    let b = buf(&t);
+    assert!(b.isearch.is_none(), "isearch should be cleared");
+    assert_eq!(b.cursor_row, 1);
+    assert_eq!(b.cursor_col, 0);
+}
+
+#[test]
+fn search_accept_keeps_position() {
+    let t = TestHarness::new()
+        .with_file("aaa\nbbb\naaa\n")
+        .run(actions(vec![
+            InBufferSearch,
+            InsertChar('b'),
+            InsertNewline, // accept
+        ]));
+
+    let b = buf(&t);
+    assert!(b.isearch.is_none(), "isearch should be cleared");
+    assert_eq!(b.cursor_row, 1);
+    assert_eq!(b.cursor_col, 0);
+}
+
+#[test]
+fn search_wraps_on_failed() {
+    let t = TestHarness::new().with_file("aaa\nbbb\n").run(actions(vec![
+        MoveDown, // move to (1,0)
+        InBufferSearch,
+        InsertChar('a'), // match at (0,0) — but cursor is at (1,0), so failed
+    ]));
+
+    let b = buf(&t);
+    let is = b.isearch.as_ref().expect("isearch should be active");
+    assert!(is.failed, "should be in failed state");
+
+    // Now wrap
+    let t = TestHarness::new().with_file("aaa\nbbb\n").run(actions(vec![
+        MoveDown,
+        InBufferSearch,
+        InsertChar('a'),
+        InBufferSearch, // wrap to first match
+    ]));
+
+    let b = buf(&t);
+    let is = b.isearch.as_ref().expect("isearch should be active");
+    assert!(!is.failed, "should not be failed after wrap");
+    assert_eq!(b.cursor_row, 0);
+    assert_eq!(b.cursor_col, 0);
+}
+
+#[test]
+fn search_recall_last() {
+    let t = TestHarness::new()
+        .with_file("hello world\nhello again\n")
+        .run(actions(vec![
+            InBufferSearch,
+            InsertChar('h'),
+            InsertChar('e'),
+            InsertChar('l'),
+            InsertNewline, // accept, saves "hel" as last_search
+            InBufferSearch,
+            InBufferSearch, // recall last search (C-s C-s)
+        ]));
+
+    let b = buf(&t);
+    let is = b.isearch.as_ref().expect("isearch should be active");
+    assert_eq!(is.query, "hel");
+    assert_eq!(is.matches.len(), 2);
+}
+
+#[test]
+fn search_delete_backward() {
+    let t = TestHarness::new().with_file("abc\n").run(actions(vec![
+        InBufferSearch,
+        InsertChar('a'),
+        InsertChar('b'),
+        DeleteBackward,
+    ]));
+
+    let b = buf(&t);
+    let is = b.isearch.as_ref().expect("isearch should be active");
+    assert_eq!(is.query, "a");
+}
+
+#[test]
+fn search_movement_accepts() {
+    let t = TestHarness::new().with_file("aaa\nbbb\n").run(actions(vec![
+        InBufferSearch,
+        InsertChar('a'),
+        MoveDown,
+    ]));
+
+    let b = buf(&t);
+    assert!(b.isearch.is_none(), "movement should accept search");
+}
+
+// ── Jump list ──
+
+#[test]
+fn jump_back_restores_position() {
+    // Start at (0,0), search for 'c' → cursor moves to (2,0), accept records origin (0,0).
+    // JumpBack → cursor returns to (0,0).
+    let t = TestHarness::new()
+        .with_file("aaa\nbbb\nccc\n")
+        .run(actions(vec![
+            InBufferSearch,
+            InsertChar('c'),
+            InsertNewline, // accept search at (2,0), records origin (0,0)
+            JumpBack,      // should jump back to (0,0)
+        ]));
+
+    let b = buf(&t);
+    assert_eq!(b.cursor_row, 0, "JumpBack should restore row");
+    assert_eq!(b.cursor_col, 0, "JumpBack should restore col");
+}
+
+#[test]
+fn jump_forward_after_back() {
+    // Start at (0,0), search for 'c' → (2,0), accept. JumpBack → (0,0). JumpForward → (2,0).
+    let t = TestHarness::new()
+        .with_file("aaa\nbbb\nccc\n")
+        .run(actions(vec![
+            InBufferSearch,
+            InsertChar('c'),
+            InsertNewline, // accept at (2,0), records origin (0,0)
+            JumpBack,      // cursor at (0,0)
+            JumpForward,   // cursor at (2,0)
+        ]));
+
+    let b = buf(&t);
+    assert_eq!(b.cursor_row, 2, "JumpForward should go to (2,0)");
+    assert_eq!(b.cursor_col, 0);
+}
+
+#[test]
+fn jump_back_at_empty_list() {
+    // No recorded jumps. JumpBack → no crash, cursor unchanged.
+    let t = TestHarness::new().with_file("aaa\nbbb\n").run(actions(vec![
+        MoveDown, // cursor at (1,0)
+        JumpBack, // no jump history, should be a no-op
+    ]));
+
+    let b = buf(&t);
+    assert_eq!(
+        b.cursor_row, 1,
+        "JumpBack with empty list should not move cursor"
+    );
+    assert_eq!(b.cursor_col, 0);
+}
+
+#[test]
+fn jump_forward_at_end() {
+    // After a jump back+forward cycle, JumpForward at end → no crash, cursor unchanged.
+    let t = TestHarness::new()
+        .with_file("aaa\nbbb\nccc\n")
+        .run(actions(vec![
+            InBufferSearch,
+            InsertChar('c'),
+            InsertNewline, // accept at (2,0), records origin (0,0)
+            JumpBack,      // back to (0,0)
+            JumpForward,   // forward to (2,0)
+            JumpForward,   // already at end, no-op
+        ]));
+
+    let b = buf(&t);
+    assert_eq!(b.cursor_row, 2, "JumpForward at end should not move cursor");
+    assert_eq!(b.cursor_col, 0);
+}
+
+#[test]
+fn jump_back_cross_buffer() {
+    // Open two files. In aaa.txt at (0,0), search for 'c' → (2,0), accept.
+    // Switch to zzz.txt. JumpBack → active buffer is aaa.txt, cursor at (0,0).
+    let t = TestHarness::new()
+        .with_named_file("aaa.txt", "aaa\nbbb\nccc\n")
+        .with_named_file("zzz.txt", "zzz\n")
+        .run(actions(vec![
+            PrevTab, // go to aaa.txt (first by tab order)
+            InBufferSearch,
+            InsertChar('c'),
+            InsertNewline, // accept at (2,0), records origin (0,0) in aaa.txt
+            NextTab,       // switch to zzz.txt
+            JumpBack,      // should jump back to aaa.txt at (0,0)
+        ]));
+
+    let b = buf(&t);
+    assert_eq!(
+        b.path
+            .as_ref()
+            .unwrap()
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "aaa.txt",
+        "JumpBack should switch to the correct buffer"
+    );
+    assert_eq!(b.cursor_row, 0);
+    assert_eq!(b.cursor_col, 0);
+}
+
+#[test]
+fn jump_truncates_forward_history() {
+    // Record a jump, jump back, then record a new jump → forward history is truncated.
+    let t = TestHarness::new()
+        .with_file("aaa\nbbb\nccc\nddd\n")
+        .run(actions(vec![
+            InBufferSearch,
+            InsertChar('c'),
+            InsertNewline, // accept at (2,0), records origin (0,0)
+            JumpBack,      // back to (0,0)
+            // Now record a new jump (search to 'd')
+            InBufferSearch,
+            InsertChar('d'),
+            InsertNewline, // accept at (3,0), records origin (0,0)
+            JumpForward,   // should be no-op — forward history was truncated
+        ]));
+
+    let b = buf(&t);
+    assert_eq!(
+        b.cursor_row, 3,
+        "Forward history should have been truncated"
+    );
+    assert_eq!(b.cursor_col, 0);
+}

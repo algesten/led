@@ -312,5 +312,10 @@ fn build_session_kv(s: &AppState) -> HashMap<String, String> {
     if !dirs.is_empty() {
         kv.insert("browser.expanded_dirs".into(), dirs.join("\n"));
     }
+    // Jump list
+    if let Ok(json) = serde_json::to_string(&s.jump_list) {
+        kv.insert("jump_list.entries".into(), json);
+        kv.insert("jump_list.index".into(), s.jump_list_index.to_string());
+    }
     kv
 }

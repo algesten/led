@@ -4,8 +4,10 @@ mod action;
 mod actions_of;
 mod buffers_of;
 mod edit;
+mod jump;
 mod mov;
 mod process_of;
+mod search;
 mod sync_of;
 
 use led_config_file::ConfigFile;
@@ -243,12 +245,27 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Arc<AppState>> {
                     s.session_positions.remove(path);
                 }
                 s.notify_hash_to_buffer.insert(notify_hash, buf.id);
+                let buf_id = buf.id;
+                let buf_path = buf.path.clone();
                 s.buffers.insert(buf.id, buf);
                 s.next_buffer_id = next_id;
                 action::renumber_tabs(&mut s);
                 if session_restore_done {
                     s.session_restore_phase = SessionRestorePhase::Done;
                     s.session_active_tab_order = None;
+                }
+                // Apply pending jump position if this buffer matches
+                if let Some(ref pending) = s.pending_jump_position {
+                    if buf_path.as_ref() == Some(&pending.path) {
+                        let pending = s.pending_jump_position.take().unwrap();
+                        if let Some(buf) = s.buffers.get_mut(&buf_id) {
+                            buf.cursor_row =
+                                pending.row.min(buf.doc.line_count().saturating_sub(1));
+                            buf.cursor_col = pending.col;
+                            buf.cursor_col_affinity = pending.col;
+                            buf.scroll_row = pending.scroll_offset;
+                        }
+                    }
                 }
                 // Resolve focus once restore is done and buffers exist
                 if s.session_restore_phase == SessionRestorePhase::Done {
@@ -330,6 +347,20 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Arc<AppState>> {
                             .filter(|l| !l.is_empty())
                             .map(PathBuf::from)
                             .collect();
+                    }
+                    // Restore jump list from KV
+                    if let Some(json) = session.kv.get("jump_list.entries") {
+                        if let Ok(entries) = serde_json::from_str::<
+                            std::collections::VecDeque<led_state::JumpPosition>,
+                        >(json)
+                        {
+                            s.jump_list = entries;
+                            s.jump_list_index = session
+                                .kv
+                                .get("jump_list.index")
+                                .and_then(|v| v.parse().ok())
+                                .unwrap_or(s.jump_list.len());
+                        }
                     }
                     s.pending_session_opens.set(paths);
                     // Request dir listings for restored expanded dirs

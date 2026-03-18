@@ -1,7 +1,9 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+
+use serde::{Deserialize, Serialize};
 
 use led_config_file::ConfigFile;
 use led_core::keys::{Keymap, Keys};
@@ -9,6 +11,14 @@ use led_core::theme::Theme;
 use led_core::{BufferId, Doc, DocId, PanelSlot, Startup, Versioned};
 pub use led_workspace::Workspace;
 pub use led_workspace::{SessionBuffer, SessionRestorePhase};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JumpPosition {
+    pub path: PathBuf,
+    pub row: usize,
+    pub col: usize,
+    pub scroll_offset: usize,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Dimensions {
@@ -99,6 +109,19 @@ pub enum SaveState {
     Saving,
 }
 
+// ── Incremental search state ──
+
+#[derive(Debug, Clone)]
+pub struct ISearchState {
+    pub query: String,
+    pub origin: (usize, usize),
+    pub origin_scroll: usize,
+    pub origin_sub_line: usize,
+    pub failed: bool,
+    pub matches: Vec<(usize, usize, usize)>, // (row, col, char_len)
+    pub match_idx: Option<usize>,
+}
+
 #[derive(Clone)]
 pub struct BufferState {
     pub id: BufferId,
@@ -122,6 +145,9 @@ pub struct BufferState {
     /// Monotonically increasing stamp, bumped on every meaningful modification
     /// (flush, save, sync apply). Used to detect self-echoes at the model level.
     pub change_seq: u64,
+    // Incremental search
+    pub isearch: Option<ISearchState>,
+    pub last_search: Option<String>,
 }
 
 impl fmt::Debug for BufferState {
@@ -299,6 +325,11 @@ pub struct AppState {
     pub kill_ring: String,
     pub kill_accumulator: Option<String>,
     pub pending_yank: Versioned<()>,
+
+    // Jump list
+    pub jump_list: VecDeque<JumpPosition>,
+    pub jump_list_index: usize,
+    pub pending_jump_position: Option<JumpPosition>,
 }
 
 impl AppState {
