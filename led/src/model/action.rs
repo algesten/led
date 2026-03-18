@@ -136,6 +136,16 @@ pub fn handle_action(state: &mut AppState, action: Action) {
             buf.cursor_col_affinity = mov::reset_affinity(buf, dims);
             buf.last_edit_kind = Some(EditKind::Insert);
         }),
+        Action::InsertCloseBracket(ch) => with_buf(state, |buf, dims| {
+            buf.mark = None;
+            maybe_close_group(buf, EditKind::Insert, ch);
+            let (doc, r, c, _) = edit::insert_close_bracket(buf, ch);
+            buf.doc = doc;
+            buf.cursor_row = r;
+            buf.cursor_col = c;
+            buf.cursor_col_affinity = mov::reset_affinity(buf, dims);
+            buf.last_edit_kind = Some(EditKind::Insert);
+        }),
         Action::InsertNewline => with_buf(state, |buf, dims| {
             buf.mark = None;
             close_group_on_move(buf);
@@ -283,6 +293,45 @@ pub fn handle_action(state: &mut AppState, action: Action) {
         // ── Jump list ──
         Action::JumpBack => jump::jump_back(state),
         Action::JumpForward => jump::jump_forward(state),
+
+        // ── Bracket matching ──
+        Action::MatchBracket => with_buf(state, |buf, dims| {
+            if let Some((row, col)) = buf.matching_bracket {
+                buf.cursor_row = row;
+                buf.cursor_col = col;
+                buf.cursor_col_affinity = mov::reset_affinity(buf, dims);
+                close_group_on_move(buf);
+            }
+        }),
+
+        // ── Sort imports ──
+        Action::SortImports => {
+            if let Some(id) = state.active_buffer {
+                if let Some(buf) = state.buffers.get(&id) {
+                    if let Some(path) = &buf.path {
+                        if let Some(ss) =
+                            led_syntax::SyntaxState::from_path_and_doc(path, &*buf.doc)
+                        {
+                            let import_items = ss.imports(&*buf.doc);
+                            if let Some((start_byte, end_byte, replacement)) =
+                                led_syntax::import::sort_imports_text(&*buf.doc, &import_items)
+                            {
+                                let start_char = buf.doc.byte_to_char(start_byte);
+                                let end_char = buf.doc.byte_to_char(end_byte);
+                                let buf = state.buffers.get_mut(&id).unwrap();
+                                close_group_on_move(buf);
+                                let doc = buf.doc.remove(start_char, end_char);
+                                let doc = doc.insert(start_char, &replacement);
+                                buf.doc = doc;
+                                state.info = Some("Imports sorted".into());
+                            } else {
+                                state.info = Some("Imports already sorted".into());
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
         _ => {}
     }

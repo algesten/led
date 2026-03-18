@@ -97,6 +97,9 @@ pub fn buffers_of(
                     change_seq: 0,
                     isearch: None,
                     last_search: None,
+                    syntax_highlights: Vec::new(),
+                    bracket_pairs: Vec::new(),
+                    matching_bracket: None,
                 };
                 let activate =
                     !is_session_restore || state.session_active_tab_order == Some(tab_order);
@@ -128,16 +131,33 @@ pub fn buffers_of(
                     undo_clear_path,
                 })
             }
-            Ok(DocStoreIn::ExternalChange { id, doc }) => {
-                let buf = find_buf_by_doc_id(&state, id)?;
+            Ok(DocStoreIn::ExternalChange { id, path, doc }) => {
+                // Try DocId first, fall back to path — DocId mismatch happens
+                // when a file was re-opened as a duplicate (ActivateBuffer
+                // instead of BufferOpen): the buffer keeps the original DocId
+                // but the docstore assigned a new one for the watcher.
+                let buf = find_buf_by_doc_id(&state, id).or_else(|| {
+                    state
+                        .buffers
+                        .values()
+                        .find(|b| b.path.as_ref() == Some(&path))
+                });
+                let buf = match buf {
+                    Some(b) => b,
+                    None => {
+                        log::trace!(
+                            "ExternalChange: no buffer for doc_id {:?} or path {}",
+                            id,
+                            path.display()
+                        );
+                        return None;
+                    }
+                };
                 let incoming_hash = doc.content_hash();
-                // Content-hash comparison: if the incoming doc has the same
-                // content as our buffer, the file wasn't meaningfully changed.
-                // If we're dirty from sync (save_state still Clean — no local
-                // edits), mark as saved: the disk now matches our content
-                // (another instance saved it). Otherwise skip (self-echo or
-                // user has local edits whose dirty flag must not be erased).
                 if incoming_hash == buf.content_hash {
+                    log::trace!(
+                        "ExternalChange: content_hash unchanged ({incoming_hash:#x}), skipping"
+                    );
                     if buf.doc.dirty() && buf.save_state == SaveState::Clean {
                         let mut buf = buf.clone();
                         buf.doc = buf.doc.mark_saved();
@@ -145,12 +165,14 @@ pub fn buffers_of(
                     }
                     return None;
                 }
-                // Don't clobber local unsaved edits with stale disk content.
-                // This guards against the race: save → user edits → watcher
-                // fires with the old saved content.
                 if buf.doc.dirty() {
+                    log::trace!("ExternalChange: buffer is dirty, skipping");
                     return None;
                 }
+                log::trace!(
+                    "ExternalChange: applying, hash {:#x} -> {incoming_hash:#x}",
+                    buf.content_hash
+                );
                 let mut buf = buf.clone();
                 buf.doc = doc;
                 buf.content_hash = incoming_hash;

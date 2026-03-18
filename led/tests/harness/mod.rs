@@ -97,6 +97,13 @@ impl TestHarness {
         self
     }
 
+    /// Create a test file with a specific extension (e.g. "rs" for Rust syntax).
+    pub fn with_file_ext(mut self, content: &str, ext: &str) -> Self {
+        let name = format!("test_file_{}.{}", self.files.len(), ext);
+        self.files.push((name, content.to_string()));
+        self
+    }
+
     /// Enable file system watchers for this test (docstore + workspace).
     /// Only needed for tests that depend on external-change detection or
     /// cross-instance sync.

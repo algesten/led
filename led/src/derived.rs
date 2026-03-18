@@ -1,12 +1,16 @@
-use std::collections::HashMap;
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
 use led_config_file::{ConfigDir, ConfigFileOut};
+use led_core::BufferId;
 use led_core::rx::Stream;
 use led_docstore::DocStoreOut;
 use led_fs::FsOut;
 use led_state::{AppState, SessionRestorePhase};
+use led_syntax::SyntaxOut;
 use led_timers::{Schedule, TimersOut};
 use led_workspace::{SessionBuffer, SessionData, WorkspaceOut};
 
@@ -18,6 +22,7 @@ pub struct Derived {
     pub timers_out: Stream<TimersOut>,
     pub fs_out: Stream<FsOut>,
     pub clipboard_out: Stream<led_clipboard::ClipboardOut>,
+    pub syntax_out: Stream<SyntaxOut>,
 }
 
 pub fn derived(state: Stream<Arc<AppState>>) -> Derived {
@@ -132,13 +137,18 @@ pub fn derived(state: Stream<Arc<AppState>>) -> Derived {
         .stream();
 
     // File opens from startup args — gated on session restore being done.
-    // Always emitted (even for already-open files) so duplicate detection
-    // in buffers_of activates the correct tab.
+    // Only opens files that aren't already in a buffer; already-open files
+    // are activated directly via ActivateBuffer in the model (see process_of).
     let startup_open = state
         .dedupe_by(|s| s.session_restore_phase == SessionRestorePhase::Done)
         .filter(|s| s.session_restore_phase == SessionRestorePhase::Done)
         .filter(|s| !s.startup.arg_paths.is_empty())
         .flat_map(|s| {
+            let open_paths: std::collections::HashSet<&std::path::Path> = s
+                .buffers
+                .values()
+                .filter_map(|b| b.path.as_deref())
+                .collect();
             let base = s
                 .buffers
                 .values()
@@ -148,6 +158,7 @@ pub fn derived(state: Stream<Arc<AppState>>) -> Derived {
             s.startup
                 .arg_paths
                 .iter()
+                .filter(|p| !open_paths.contains(p.as_path()))
                 .cloned()
                 .enumerate()
                 .map(move |(i, path)| DocStoreOut::Open {
@@ -279,6 +290,79 @@ pub fn derived(state: Stream<Arc<AppState>>) -> Derived {
     clipboard_write.forward(&clipboard_out);
     clipboard_read.forward(&clipboard_out);
 
+    // Syntax: derive from active buffer's doc version + cursor/scroll changes.
+    let syntax_key = |s: &Arc<AppState>| -> (Option<(BufferId, u64, usize, usize, usize)>, usize) {
+        let buf_info = s.active_buffer.and_then(|id| {
+            let buf = s.buffers.get(&id)?;
+            Some((
+                id,
+                buf.doc.version(),
+                buf.scroll_row,
+                buf.cursor_row,
+                buf.cursor_col,
+            ))
+        });
+        (buf_info, s.buffers.len())
+    };
+    let known_bufs: Rc<RefCell<HashSet<BufferId>>> = Rc::new(RefCell::new(HashSet::new()));
+    let known_bufs2 = known_bufs.clone();
+
+    let syntax_changed = state
+        .dedupe_by(syntax_key)
+        .filter(|s| s.active_buffer.is_some())
+        .filter_map(|s| {
+            let id = s.active_buffer?;
+            let buf = s.buffers.get(&id)?;
+            let path = buf.path.clone()?;
+            let buffer_height = s.dims.map_or(50, |d| d.buffer_height());
+            Some(SyntaxOut::BufferChanged {
+                buf_id: id,
+                path,
+                doc: buf.doc.clone(),
+                version: buf.doc.version(),
+                edit_ops: buf.doc.pending_edit_ops(),
+                scroll_row: buf.scroll_row,
+                buffer_height,
+                cursor_row: buf.cursor_row,
+                cursor_col: buf.cursor_col,
+                needs_indent: false,
+            })
+        })
+        .stream();
+
+    // Track buffer lifecycle: emit BufferClosed for removed buffers
+    let syntax_lifecycle = state
+        .dedupe_by(|s| s.buffers.len())
+        .map(move |s| {
+            let mut known = known_bufs2.borrow_mut();
+            let current: HashSet<BufferId> = s.buffers.keys().copied().collect();
+            let removed: Vec<BufferId> = known.difference(&current).copied().collect();
+            *known = current;
+            removed
+        })
+        .filter(|removed| !removed.is_empty())
+        .map(|removed| {
+            removed
+                .into_iter()
+                .map(|buf_id| SyntaxOut::BufferClosed { buf_id })
+                .collect::<Vec<_>>()
+        })
+        .stream();
+
+    let syntax_out: Stream<SyntaxOut> = Stream::new();
+    syntax_changed.forward(&syntax_out);
+    // Fan-in lifecycle events
+    {
+        let target = syntax_out.clone();
+        syntax_lifecycle.on(move |opt: Option<&Vec<SyntaxOut>>| {
+            if let Some(events) = opt {
+                for ev in events {
+                    target.push(ev.clone());
+                }
+            }
+        });
+    }
+
     Derived {
         ui,
         workspace_out,
@@ -287,6 +371,7 @@ pub fn derived(state: Stream<Arc<AppState>>) -> Derived {
         timers_out,
         fs_out,
         clipboard_out,
+        syntax_out,
     }
 }
 

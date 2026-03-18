@@ -146,6 +146,13 @@ impl UndoHistory {
         self.distance_from_save
     }
 
+    pub fn pending_edit_ops(&self) -> Vec<EditOp> {
+        self.pending
+            .as_ref()
+            .map(|p| p.ops.clone())
+            .unwrap_or_default()
+    }
+
     /// Append a remote entry directly to history with its original direction.
     pub fn push_remote_entry(&mut self, entry: UndoEntry) {
         self.undo_cursor = None;
@@ -166,6 +173,15 @@ pub trait Doc: Send + Sync {
     fn char_to_line(&self, char_idx: usize) -> usize;
     fn line_len(&self, line_idx: usize) -> usize;
 
+    // Byte-level access (needed by tree-sitter)
+    fn len_bytes(&self) -> usize;
+    fn line_to_byte(&self, line_idx: usize) -> usize;
+    fn byte_to_line(&self, byte_idx: usize) -> usize;
+    fn byte_to_char(&self, byte_idx: usize) -> usize;
+    fn char_to_byte(&self, char_idx: usize) -> usize;
+    /// Returns (chunk_str, chunk_byte_start) for the chunk containing `byte_offset`.
+    fn chunk_at_byte(&self, byte_offset: usize) -> (&str, usize);
+
     // Identity & change detection
     fn version(&self) -> u64;
     fn dirty(&self) -> bool;
@@ -174,6 +190,8 @@ pub trait Doc: Send + Sync {
     fn undo_entries_from(&self, start: usize) -> Vec<UndoEntry>;
     fn undo_cursor(&self) -> Option<usize>;
     fn distance_from_save(&self) -> i32;
+    /// Return the edit ops accumulated in the current (unflushed) pending group.
+    fn pending_edit_ops(&self) -> Vec<EditOp>;
 
     // Edits — record undo ops into pending
     fn insert(&self, char_idx: usize, text: &str) -> Arc<dyn Doc>;
@@ -267,6 +285,31 @@ impl Doc for TextDoc {
         s.trim_end_matches(&['\n', '\r'][..]).len()
     }
 
+    fn len_bytes(&self) -> usize {
+        self.rope.len_bytes()
+    }
+
+    fn line_to_byte(&self, line_idx: usize) -> usize {
+        self.rope.line_to_byte(line_idx)
+    }
+
+    fn byte_to_line(&self, byte_idx: usize) -> usize {
+        self.rope.byte_to_line(byte_idx)
+    }
+
+    fn byte_to_char(&self, byte_idx: usize) -> usize {
+        self.rope.byte_to_char(byte_idx)
+    }
+
+    fn char_to_byte(&self, char_idx: usize) -> usize {
+        self.rope.char_to_byte(char_idx)
+    }
+
+    fn chunk_at_byte(&self, byte_offset: usize) -> (&str, usize) {
+        let (chunk, chunk_byte_start, _, _) = self.rope.chunk_at_byte(byte_offset);
+        (chunk, chunk_byte_start)
+    }
+
     fn version(&self) -> u64 {
         self.version
     }
@@ -297,6 +340,10 @@ impl Doc for TextDoc {
 
     fn distance_from_save(&self) -> i32 {
         self.undo.distance_from_save()
+    }
+
+    fn pending_edit_ops(&self) -> Vec<EditOp> {
+        self.undo.pending_edit_ops()
     }
 
     fn insert(&self, char_idx: usize, text: &str) -> Arc<dyn Doc> {

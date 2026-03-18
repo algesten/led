@@ -1,10 +1,11 @@
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
 use led_core::PanelSlot;
 use led_core::wrap::{chars_to_string, compute_chunks, expand_tabs, find_sub_line};
 use led_core::{BufferId, Doc};
-use led_state::{AppState, Dimensions, EntryKind};
+use led_state::{AppState, BracketPair, Dimensions, EntryKind, HighlightSpan};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 
@@ -30,12 +31,23 @@ pub struct DisplayInputs {
     search_match_idx: Option<usize>,
     search_match_style: Style,
     search_current_style: Style,
+    // Syntax highlighting
+    syntax_highlights: Vec<(usize, HighlightSpan)>,
+    bracket_pairs: Vec<BracketPair>,
+    matching_bracket: Option<(usize, usize)>,
+    cursor_row: usize,
+    cursor_col: usize,
+    content_hash: u64,
+    syntax_styles: HashMap<String, Style>,
+    bracket_match_style: Style,
+    rainbow_styles: [Style; 6],
 }
 
 impl PartialEq for DisplayInputs {
     fn eq(&self, other: &Self) -> bool {
         self.buffer_id == other.buffer_id
             && self.doc.version() == other.doc.version()
+            && self.content_hash == other.content_hash
             && self.scroll_row == other.scroll_row
             && self.scroll_sub_line == other.scroll_sub_line
             && self.text_width == other.text_width
@@ -48,6 +60,11 @@ impl PartialEq for DisplayInputs {
             && self.search_match_idx == other.search_match_idx
             && self.search_match_style == other.search_match_style
             && self.search_current_style == other.search_current_style
+            && self.syntax_highlights == other.syntax_highlights
+            && self.bracket_pairs == other.bracket_pairs
+            && self.matching_bracket == other.matching_bracket
+            && self.cursor_row == other.cursor_row
+            && self.cursor_col == other.cursor_col
     }
 }
 
@@ -89,6 +106,22 @@ pub fn display_inputs(s: &AppState) -> Option<DisplayInputs> {
         search_match_idx,
         search_match_style: style::resolve(theme, &theme.editor.search_match),
         search_current_style: style::resolve(theme, &theme.editor.search_current),
+        syntax_highlights: buf.syntax_highlights.clone(),
+        bracket_pairs: buf.bracket_pairs.clone(),
+        matching_bracket: buf.matching_bracket,
+        cursor_row: buf.cursor_row,
+        cursor_col: buf.cursor_col,
+        content_hash: buf.content_hash,
+        syntax_styles: style::resolve_syntax_map(theme),
+        bracket_match_style: style::resolve(theme, &theme.brackets.match_),
+        rainbow_styles: [
+            style::resolve(theme, &theme.brackets.rainbow_0),
+            style::resolve(theme, &theme.brackets.rainbow_1),
+            style::resolve(theme, &theme.brackets.rainbow_2),
+            style::resolve(theme, &theme.brackets.rainbow_3),
+            style::resolve(theme, &theme.brackets.rainbow_4),
+            style::resolve(theme, &theme.brackets.rainbow_5),
+        ],
     })
 }
 
@@ -144,98 +177,130 @@ pub fn build_display_lines(d: &DisplayInputs) -> Rc<Vec<Line<'static>>> {
             // Gutter: 2 spaces
             spans.push(Span::styled("  ", d.gutter_style));
 
-            // Text content — with selection and search overlays
+            // Per-column style pipeline
             let chunk_len = ce - cs;
 
-            // Check if any search matches overlap this chunk
-            let has_search = !d.search_matches.is_empty()
-                && d.search_matches.iter().any(|&(mr, mc, mlen)| {
-                    mr == line_idx && {
-                        let ms = char_map.get(mc).copied().unwrap_or(display.len());
-                        let me = char_map.get(mc + mlen).copied().unwrap_or(display.len());
-                        ms < ce && me > cs
+            // 1. Base: text_style
+            let mut col_styles = vec![d.text_style; chunk_len];
+
+            // 2. Syntax captures: sort by span size descending (larger first)
+            //    so inner (smaller) spans overwrite outer ones
+            let has_syntax = !d.syntax_highlights.is_empty();
+            if has_syntax {
+                let mut spans_for_line: Vec<&HighlightSpan> = d
+                    .syntax_highlights
+                    .iter()
+                    .filter(|(l, _)| *l == line_idx)
+                    .map(|(_, span)| span)
+                    .collect();
+                spans_for_line.sort_by_key(|s| std::cmp::Reverse(s.char_end - s.char_start));
+
+                for span in spans_for_line {
+                    let span_style = style::resolve_capture_style(
+                        &span.capture_name,
+                        &d.syntax_styles,
+                        d.text_style,
+                    );
+                    let s_dcol = char_map
+                        .get(span.char_start)
+                        .copied()
+                        .unwrap_or(display.len());
+                    let e_dcol = char_map
+                        .get(span.char_end)
+                        .copied()
+                        .unwrap_or(display.len());
+                    let s = s_dcol.max(cs).saturating_sub(cs);
+                    let e = e_dcol.min(ce).saturating_sub(cs);
+                    for st in col_styles.get_mut(s..e).into_iter().flatten() {
+                        *st = span_style;
                     }
-                });
+                }
+            }
 
-            if has_search {
-                // Per-column style approach: base styles, then search overlay
-                let mut col_styles = vec![d.text_style; chunk_len];
-
-                // Apply selection
-                if let Some((ss, se)) = sel_dcols {
-                    if ss < ce && se > cs {
-                        let s = ss.max(cs) - cs;
-                        let e = se.min(ce) - cs;
-                        for st in &mut col_styles[s..e] {
-                            *st = d.selection_style;
+            // 3. Rainbow brackets
+            for bp in &d.bracket_pairs {
+                if let Some(ci) = bp.color_index {
+                    let rainbow_style = d.rainbow_styles[ci % 6];
+                    // Open bracket
+                    if bp.open_line == line_idx {
+                        let dcol = char_map.get(bp.open_col).copied().unwrap_or(display.len());
+                        if dcol >= cs && dcol < ce {
+                            col_styles[dcol - cs] = rainbow_style;
+                        }
+                    }
+                    // Close bracket
+                    if bp.close_line == line_idx {
+                        let dcol = char_map.get(bp.close_col).copied().unwrap_or(display.len());
+                        if dcol >= cs && dcol < ce {
+                            col_styles[dcol - cs] = rainbow_style;
                         }
                     }
                 }
+            }
 
-                // Apply search matches on top
-                for (mi, &(mr, mc, mlen)) in d.search_matches.iter().enumerate() {
-                    if mr != line_idx {
-                        continue;
-                    }
-                    let ms = char_map.get(mc).copied().unwrap_or(display.len());
-                    let me = char_map.get(mc + mlen).copied().unwrap_or(display.len());
-                    if ms >= ce || me <= cs {
-                        continue;
-                    }
-                    let is_current = d.search_match_idx == Some(mi);
-                    let style = if is_current {
-                        d.search_current_style
-                    } else {
-                        d.search_match_style
-                    };
-                    for i in ms.max(cs)..me.min(ce) {
-                        col_styles[i - cs] = style;
+            // 4. Matching bracket at cursor
+            if let Some((match_row, match_col)) = d.matching_bracket {
+                // Highlight the bracket under cursor
+                if d.cursor_row == line_idx {
+                    let dcol = char_map.get(d.cursor_col).copied().unwrap_or(display.len());
+                    if dcol >= cs && dcol < ce {
+                        col_styles[dcol - cs] = d.bracket_match_style;
                     }
                 }
-
-                // Group consecutive same-style columns into spans
-                let mut pos = 0;
-                while pos < chunk_len {
-                    let style = col_styles[pos];
-                    let mut end = pos + 1;
-                    while end < chunk_len && col_styles[end] == style {
-                        end += 1;
-                    }
-                    spans.push(Span::styled(
-                        chars_to_string(&display[cs + pos..cs + end]),
-                        style,
-                    ));
-                    pos = end;
-                }
-            } else {
-                // No search matches — use the faster selection-only path
-                match sel_dcols {
-                    Some((ss, se)) if ss < ce && se > cs => {
-                        let sel_start = ss.max(cs) - cs;
-                        let sel_end = se.min(ce) - cs;
-
-                        if sel_start > 0 {
-                            spans.push(Span::styled(
-                                chars_to_string(&display[cs..cs + sel_start]),
-                                d.text_style,
-                            ));
-                        }
-                        spans.push(Span::styled(
-                            chars_to_string(&display[cs + sel_start..cs + sel_end]),
-                            d.selection_style,
-                        ));
-                        if sel_end < chunk_len {
-                            spans.push(Span::styled(
-                                chars_to_string(&display[cs + sel_end..ce]),
-                                d.text_style,
-                            ));
-                        }
-                    }
-                    _ => {
-                        let chunk_text = chars_to_string(&display[cs..ce]);
-                        spans.push(Span::styled(chunk_text, d.text_style));
+                // Highlight the matching bracket
+                if match_row == line_idx {
+                    let dcol = char_map.get(match_col).copied().unwrap_or(display.len());
+                    if dcol >= cs && dcol < ce {
+                        col_styles[dcol - cs] = d.bracket_match_style;
                     }
                 }
+            }
+
+            // 5. Selection overlay
+            if let Some((ss, se)) = sel_dcols {
+                if ss < ce && se > cs {
+                    let s = ss.max(cs) - cs;
+                    let e = se.min(ce) - cs;
+                    for st in &mut col_styles[s..e] {
+                        *st = d.selection_style;
+                    }
+                }
+            }
+
+            // 6. Search matches on top
+            for (mi, &(mr, mc, mlen)) in d.search_matches.iter().enumerate() {
+                if mr != line_idx {
+                    continue;
+                }
+                let ms = char_map.get(mc).copied().unwrap_or(display.len());
+                let me = char_map.get(mc + mlen).copied().unwrap_or(display.len());
+                if ms >= ce || me <= cs {
+                    continue;
+                }
+                let is_current = d.search_match_idx == Some(mi);
+                let match_style = if is_current {
+                    d.search_current_style
+                } else {
+                    d.search_match_style
+                };
+                for i in ms.max(cs)..me.min(ce) {
+                    col_styles[i - cs] = match_style;
+                }
+            }
+
+            // 7. Group consecutive same-style columns into spans
+            let mut pos = 0;
+            while pos < chunk_len {
+                let col_style = col_styles[pos];
+                let mut end = pos + 1;
+                while end < chunk_len && col_styles[end] == col_style {
+                    end += 1;
+                }
+                spans.push(Span::styled(
+                    chars_to_string(&display[cs + pos..cs + end]),
+                    col_style,
+                ));
+                pos = end;
             }
 
             // Selection padding: on the last visual chunk of a line,

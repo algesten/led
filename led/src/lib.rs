@@ -29,6 +29,7 @@ pub struct Drivers {
     pub timers_in: Stream<TimersIn>,
     pub fs_in: Stream<FsIn>,
     pub clipboard_in: Stream<led_clipboard::ClipboardIn>,
+    pub syntax_in: Stream<led_syntax::SyntaxIn>,
 }
 
 pub struct RunGuards {
@@ -88,6 +89,8 @@ pub fn run(
         led_clipboard::driver(d.clipboard_out)
     };
 
+    let syntax_in = led_syntax::driver(d.syntax_out);
+
     let drivers = Drivers {
         terminal_in,
         actions_in,
@@ -98,6 +101,7 @@ pub fn run(
         timers_in,
         fs_in,
         clipboard_in,
+        syntax_in,
     };
 
     // 4. Model

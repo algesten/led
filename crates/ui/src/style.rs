@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use led_core::theme::{StyleTable, StyleValue, Theme};
 use ratatui::style::{Color, Modifier, Style};
 
@@ -6,6 +8,34 @@ const MAX_DEPTH: usize = 16;
 /// Resolve a theme StyleValue to a ratatui Style.
 pub fn resolve(theme: &Theme, sv: &StyleValue) -> Style {
     resolve_depth(theme, sv, MAX_DEPTH)
+}
+
+/// Pre-resolve all syntax.{name} entries from the theme into a style map.
+pub fn resolve_syntax_map(theme: &Theme) -> HashMap<String, Style> {
+    theme
+        .syntax
+        .iter()
+        .map(|(name, sv)| (name.clone(), resolve(theme, sv)))
+        .collect()
+}
+
+/// Resolve a capture name to a style, with parent fallback.
+/// E.g. "function.call" → try "function.call", then "function", then text_style.
+pub fn resolve_capture_style(
+    capture_name: &str,
+    syntax_styles: &HashMap<String, Style>,
+    text_style: Style,
+) -> Style {
+    if let Some(s) = syntax_styles.get(capture_name) {
+        return *s;
+    }
+    if let Some(dot) = capture_name.find('.') {
+        let parent = &capture_name[..dot];
+        if let Some(s) = syntax_styles.get(parent) {
+            return *s;
+        }
+    }
+    text_style
 }
 
 fn resolve_depth(theme: &Theme, sv: &StyleValue, depth: usize) -> Style {
@@ -426,6 +456,9 @@ mod tests {
             change_seq: 0,
             isearch: None,
             last_search: None,
+            syntax_highlights: Vec::new(),
+            bracket_pairs: Vec::new(),
+            matching_bracket: None,
         };
 
         let mut state = AppState::new(Startup {

@@ -6,51 +6,18 @@ Every side effect lives in a Driver. The Model is a pure reduce: `(State, Mut) -
 
 ---
 
-## Phase 12: Jump List
+## Phase 14: Find File Panel
 
-Navigation history for `JumpBack` / `JumpForward` actions.
+Directory completion, tilde expansion, path abbreviation.
 
-- Record cursor position on significant movements (goto definition, search accept, file switch)
-- Max 100 entries, deduplicated by proximity
-- Session-persisted across restarts
-
----
-
-## Phase 13: Syntax Highlighting
-
-Tree-sitter driver for incremental parsing. Highlight spans stored per-buffer. Language detection from extension.
-
-Old editor supports: Rust, Python, JS/TS/TSX, JSON, TOML, Markdown, Bash, C/C++, Swift, Make.
-
-### Rendering pipeline
-
-Per-visible-line, per-display-column style array:
-1. Base: `editor.text`
-2. Syntax captures applied (sorted by span size descending — inner overwrites outer)
-3. Capture name resolution: `syntax.{capture_name}`, fallback to `syntax.{parent}`, fallback to text style
-4. Rainbow bracket coloring (6 depth levels, wrapping)
-5. Cursor bracket + matching bracket highlight (`brackets.match`)
-6. Selection overlay
-7. Diagnostic underlines (fg from `diagnostics.*`, underline modifier except for hints)
-8. Search match overlay (applied last to ensure visibility)
-
-Spans grouped by consecutive same-style runs.
-
-### Auto-indent
-
-Two-pass tree-sitter analysis for newline indentation, with regex fallback when tree is in error state.
-
-### Match bracket
-
-Simple bracket matching (`()`, `[]`, `{}`) for `MatchBracket` action. Cursor bracket + matching bracket highlighted with `brackets.match` style. Rainbow bracket coloring covered by rendering pipeline above.
-
-### Sort imports
-
-`SortImports` action: tree-sitter to identify import block, sort lines alphabetically.
+- Status bar shows `Find file: {input}` with cursor
+- Side panel shows completion list with directory icons
+- Tab completion: single match → complete, multiple → longest common prefix
+- Wrapping selection through completions
 
 ---
 
-## Phase 14: Git Integration
+## Phase 15: Git Integration
 
 git2 driver for branch, file statuses, line statuses.
 
@@ -62,7 +29,7 @@ git2 driver for branch, file statuses, line statuses.
 
 ---
 
-## Phase 15: File Search (Ripgrep)
+## Phase 16: File Search (Ripgrep)
 
 `grep_searcher` + `ignore::WalkBuilder`. Background worker with request coalescing (only process latest query).
 
@@ -72,17 +39,6 @@ git2 driver for branch, file statuses, line statuses.
 - Row 1: search input with cursor
 - Rows 2+: results grouped by file with line numbers, highlighted matches (`file_search.match_`)
 - Scroll-into-view, max 1000 hits
-
----
-
-## Phase 16: Find File Panel
-
-Directory completion, tilde expansion, path abbreviation.
-
-- Status bar shows `Find file: {input}` with cursor
-- Side panel shows completion list with directory icons
-- Tab completion: single match → complete, multiple → longest common prefix
-- Wrapping selection through completions
 
 ---
 

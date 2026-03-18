@@ -2,7 +2,7 @@ use std::io;
 use std::sync::Arc;
 
 use led_core::rx::Stream;
-use led_state::AppState;
+use led_state::{AppState, SessionRestorePhase};
 
 use super::Mut;
 
@@ -26,9 +26,26 @@ pub fn process_of(state: &Stream<Arc<AppState>>) -> Stream<Mut> {
         .map(|(_, _, redraw)| Mut::ForceRedraw(redraw + 1))
         .stream();
 
+    // Activate arg-file tab after session restore completes.
+    // If the arg file was already opened by session restore, activate it
+    // without re-opening through the docstore.
+    let activate_arg_s = state
+        .dedupe_by(|s| s.session_restore_phase == SessionRestorePhase::Done)
+        .filter(|s| s.session_restore_phase == SessionRestorePhase::Done)
+        .filter_map(|s| {
+            let first_arg = s.startup.arg_paths.first()?;
+            let buf = s
+                .buffers
+                .values()
+                .find(|b| b.path.as_ref() == Some(first_arg))?;
+            Some(Mut::ActivateBuffer(buf.id))
+        })
+        .stream();
+
     let merged = Stream::new();
     suspend_s.forward(&merged);
     redraw_s.forward(&merged);
+    activate_arg_s.forward(&merged);
     merged
 }
 

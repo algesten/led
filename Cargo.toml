@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["led", "crates/clipboard", "crates/config-file", "crates/core", "crates/state", "crates/terminal-in", "crates/docstore", "crates/workspace", "crates/ui", "crates/timers", "crates/fs"]
+members = ["led", "crates/clipboard", "crates/config-file", "crates/core", "crates/state", "crates/terminal-in", "crates/docstore", "crates/workspace", "crates/ui", "crates/timers", "crates/fs", "crates/syntax"]
 default-members = ["led"]
 
 [workspace.dependencies]
@@ -14,6 +14,7 @@ led-workspace = { path = "crates/workspace" }
 led-ui = { path = "crates/ui" }
 led-timers = { path = "crates/timers" }
 led-fs = { path = "crates/fs" }
+led-syntax = { path = "crates/syntax" }
 
 arboard = { version = "3", default-features = false }
 clap = { version = "4.5.60", features = ["derive"] }
@@ -46,23 +47,23 @@ toml = "0.8"
 # led_workspace_watcher = { path = "crates/workspace-watcher" }
 # lsp-types = "0.97"
 # nucleo-matcher = "0.3"
-# regex = "1"
+regex = "1"
 rmp-serde = "1"
 ropey = "1.6"
 rusqlite = { version = "0.38.0", features = ["bundled"] }
 serde_json = "1"
 # similar = "2"
-# tree-sitter = "0.25"
-# tree-sitter-bash = "0.25"
-# tree-sitter-c = "0.24"
-# tree-sitter-cpp = "0.23"
-# tree-sitter-javascript = "0.23"
-# tree-sitter-json = "0.24"
-# tree-sitter-make = "1.1"
-# tree-sitter-md = "0.5"
-# tree-sitter-python = "0.25"
-# tree-sitter-rust = "0.23"
-# tree-sitter-swift = "0.7"
-# tree-sitter-toml-ng = "0.7"
-# tree-sitter-typescript = "0.23"
+tree-sitter = "0.25"
+tree-sitter-bash = "0.25"
+tree-sitter-c = "0.24"
+tree-sitter-cpp = "0.23"
+tree-sitter-javascript = "0.23"
+tree-sitter-json = "0.24"
+tree-sitter-make = "1.1"
+tree-sitter-md = "0.5"
+tree-sitter-python = "0.25"
+tree-sitter-rust = "0.23"
+tree-sitter-swift = "0.7"
+tree-sitter-toml-ng = "0.7"
+tree-sitter-typescript = "0.23"
 # twox-hash = "2"

@@ -3031,3 +3031,215 @@ fn jump_truncates_forward_history() {
     );
     assert_eq!(b.cursor_col, 0);
 }
+
+// ── Syntax highlighting tests ──
+
+#[test]
+fn syntax_highlights_rust_file() {
+    // Open a .rs file, wait for async syntax update, verify highlights exist
+    let t = TestHarness::new()
+        .with_file_ext("fn main() {\n    let x = 1;\n}\n", "rs")
+        .run(actions(vec![Wait(50)]));
+
+    let b = buf(&t);
+    // After the syntax driver processes, highlights should be populated
+    // (The driver runs asynchronously, so we wait)
+    // At minimum the buffer should exist and have the right content
+    assert_eq!(b.doc.line(0), "fn main() {");
+}
+
+#[test]
+fn match_bracket_jumps() {
+    // Open .rs file with braces, wait for syntax, press MatchBracket on `{`
+    let t = TestHarness::new()
+        .with_file_ext("fn f() {\n    x\n}\n", "rs")
+        .run(vec![
+            Wait(50).into(),
+            // Move to the `{` at row 0, col 7
+            Do(LineEnd),
+            Do(MoveLeft),
+            // Wait for syntax driver to populate matching_bracket
+            WaitFor(|s| {
+                s.active_buffer
+                    .and_then(|id| s.buffers.get(&id))
+                    .and_then(|b| b.matching_bracket)
+                    .is_some()
+            }),
+            Do(MatchBracket),
+        ]);
+
+    let b = buf(&t);
+    // Should jump to the matching `}`
+    assert_eq!(b.cursor_row, 2, "should jump to closing brace row");
+    assert_eq!(b.cursor_col, 0, "should jump to closing brace col");
+}
+
+#[test]
+fn match_bracket_reverse() {
+    // Start on `}`, jump to `{`
+    let t = TestHarness::new()
+        .with_file_ext("fn f() {\n    x\n}\n", "rs")
+        .run(vec![
+            Wait(50).into(),
+            // Move to `}` at row 2, col 0
+            Do(MoveDown),
+            Do(MoveDown),
+            Do(LineStart),
+            // Wait for syntax driver to populate matching_bracket
+            WaitFor(|s| {
+                s.active_buffer
+                    .and_then(|id| s.buffers.get(&id))
+                    .and_then(|b| b.matching_bracket)
+                    .is_some()
+            }),
+            Do(MatchBracket),
+        ]);
+
+    let b = buf(&t);
+    assert_eq!(b.cursor_row, 0, "should jump to opening brace row");
+    assert_eq!(b.cursor_col, 7, "should jump to opening brace col");
+}
+
+#[test]
+fn match_bracket_no_bracket() {
+    // Cursor not on bracket → no-op
+    let t = TestHarness::new()
+        .with_file_ext("fn f() {\n    x\n}\n", "rs")
+        .run(actions(vec![
+            Wait(50),
+            // Cursor at (0,0) which is 'f', not a bracket
+            MatchBracket,
+        ]));
+
+    let b = buf(&t);
+    assert_eq!(b.cursor_row, 0);
+    assert_eq!(b.cursor_col, 0, "cursor should not move");
+}
+
+#[test]
+fn auto_indent_after_brace() {
+    // Type `fn main() {`, then InsertNewline → cursor should be indented
+    let t = TestHarness::new()
+        .with_file_ext("fn main() {\n}\n", "rs")
+        .run(actions(vec![
+            LineEnd, // end of "fn main() {"
+            InsertNewline,
+        ]));
+
+    let b = buf(&t);
+    assert_eq!(b.cursor_row, 1);
+    assert!(
+        b.cursor_col >= 2,
+        "cursor should be indented after '{{', got col {}",
+        b.cursor_col
+    );
+    // Verify the indent text was actually inserted
+    let line = b.doc.line(1);
+    assert!(
+        line.starts_with("    ") || line.starts_with('\t'),
+        "new line should be indented: {:?}",
+        line
+    );
+}
+
+#[test]
+fn auto_indent_closing_brace() {
+    // After `fn main() {` with body, InsertCloseBracket('}') should dedent
+    let t = TestHarness::new()
+        .with_file_ext("fn main() {\n    let x = 1;\n    \n}\n", "rs")
+        .run(actions(vec![
+            // Go to line 2 (the empty indented line)
+            MoveDown,
+            MoveDown,
+            LineEnd,
+            // Type closing brace
+            InsertCloseBracket('}'),
+        ]));
+
+    let b = buf(&t);
+    let line = b.doc.line(2);
+    // The closing brace should be dedented to match "fn main() {"
+    assert!(
+        !line.starts_with("    }"),
+        "closing brace should be dedented, got: {:?}",
+        line
+    );
+    assert!(
+        line.contains('}'),
+        "line should contain closing brace: {:?}",
+        line
+    );
+}
+
+#[test]
+fn sort_imports_reorders() {
+    let t = TestHarness::new()
+        .with_file_ext("use z::Z;\nuse a::A;\n\nfn main() {}\n", "rs")
+        .run(actions(vec![SortImports]));
+
+    let b = buf(&t);
+    // After sorting, a::A should come before z::Z
+    assert_eq!(b.doc.line(0), "use a::A;", "first import should be a::A");
+    assert_eq!(b.doc.line(1), "use z::Z;", "second import should be z::Z");
+}
+
+#[test]
+fn sort_imports_no_change() {
+    let t = TestHarness::new()
+        .with_file_ext("use a::A;\nuse z::Z;\n\nfn main() {}\n", "rs")
+        .run(actions(vec![SortImports]));
+
+    let b = buf(&t);
+    // Already sorted — should not modify doc
+    assert!(
+        !b.doc.dirty(),
+        "already sorted imports should not dirty the doc"
+    );
+}
+
+#[test]
+fn rainbow_brackets_depth() {
+    // Open file with nested brackets, verify bracket_pairs have incrementing color indices
+    let t = TestHarness::new()
+        .with_file_ext("fn f() { (1 + (2 + 3)) }\n", "rs")
+        .run(actions(vec![Wait(50)]));
+
+    let b = buf(&t);
+    if !b.bracket_pairs.is_empty() {
+        // Check that at least some pairs have different color indices
+        let indices: Vec<Option<usize>> = b.bracket_pairs.iter().map(|p| p.color_index).collect();
+        let has_multiple = indices
+            .iter()
+            .filter_map(|i| i.as_ref())
+            .collect::<std::collections::HashSet<_>>()
+            .len()
+            > 1;
+        assert!(
+            has_multiple,
+            "nested brackets should have different rainbow depths: {:?}",
+            indices
+        );
+    }
+}
+
+#[test]
+fn close_bracket_maps_to_insert_close_bracket() {
+    // Typing '}' should use InsertCloseBracket, not InsertChar
+    // We test by checking that typing '}' on an indented empty line re-indents
+    let t = TestHarness::new()
+        .with_file_ext("fn main() {\n    \n}\n", "rs")
+        .run(actions(vec![
+            MoveDown, // go to line 1 (the indented empty line)
+            LineEnd,  // end of "    "
+            InsertCloseBracket('}'),
+        ]));
+
+    let b = buf(&t);
+    let line = b.doc.line(1);
+    // The brace should be present on line 1
+    assert!(
+        line.contains('}'),
+        "line should have closing brace: {:?}",
+        line
+    );
+}

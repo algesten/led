@@ -17,7 +17,9 @@ use led_core::theme::Theme;
 use std::path::PathBuf;
 
 use led_core::{Action, Alert, BufferId, Doc, PanelSlot, next_change_seq};
-use led_state::{AppState, BufferState, Dimensions, SaveState, SessionRestorePhase};
+use led_state::{
+    AppState, BracketPair, BufferState, Dimensions, HighlightSpan, SaveState, SessionRestorePhase,
+};
 use led_workspace::Workspace;
 
 use crate::Drivers;
@@ -201,6 +203,18 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Arc<AppState>> {
         })
         .stream();
 
+    let syntax_s = drivers
+        .syntax_in
+        .map(|syn| Mut::SyntaxUpdate {
+            buf_id: syn.buf_id,
+            version: syn.doc_version,
+            highlights: syn.highlights,
+            bracket_pairs: syn.bracket_pairs,
+            matching_bracket: syn.matching_bracket,
+            indent: syn.indent,
+        })
+        .stream();
+
     workspace_s.forward(&muts);
     undo_flushed_s.forward(&muts);
     notify_s.forward(&muts);
@@ -214,6 +228,7 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Arc<AppState>> {
     undo_flush_s.forward(&muts);
     fs_s.forward(&muts);
     clipboard_s.forward(&muts);
+    syntax_s.forward(&muts);
 
     // ── 3. Reduce ──
 
@@ -446,6 +461,22 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Arc<AppState>> {
                     buf.last_seen_seq = last_seen_seq;
                 }
             }
+            Mut::SyntaxUpdate {
+                buf_id,
+                version,
+                highlights,
+                bracket_pairs,
+                matching_bracket,
+                indent: _,
+            } => {
+                if let Some(buf) = s.buffers.get_mut(&buf_id) {
+                    if buf.doc.version() == version {
+                        buf.syntax_highlights = highlights;
+                        buf.bracket_pairs = bracket_pairs;
+                        buf.matching_bracket = matching_bracket;
+                    }
+                }
+            }
             Mut::Suspend(v) => s.suspend = v,
             Mut::TimerFired(name) => handle_timer(&mut s, name),
             Mut::Workspace(v) => {
@@ -539,6 +570,15 @@ enum Mut {
         buf_id: BufferId,
     },
     Suspend(bool),
+    SyntaxUpdate {
+        buf_id: BufferId,
+        version: u64,
+        highlights: Vec<(usize, HighlightSpan)>,
+        bracket_pairs: Vec<BracketPair>,
+        matching_bracket: Option<(usize, usize)>,
+        #[allow(dead_code)]
+        indent: Option<String>,
+    },
     UndoFlushed {
         buf_id: BufferId,
         chain_id: String,
@@ -576,6 +616,7 @@ impl Mut {
             Mut::SyncApply { .. } => "SyncApply",
             Mut::SyncReset { .. } => "SyncReset",
             Mut::Suspend(_) => "Suspend",
+            Mut::SyntaxUpdate { .. } => "SyntaxUpdate",
             Mut::UndoFlushed { .. } => "UndoFlushed",
             Mut::UndoFlushReady { .. } => "UndoFlushReady",
             Mut::TimerFired(_) => "TimerFired",

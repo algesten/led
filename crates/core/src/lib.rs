@@ -68,6 +68,7 @@ pub enum Action {
 
     // Insert/Delete
     InsertChar(char),
+    InsertCloseBracket(char),
     InsertNewline,
     DeleteBackward,
     DeleteForward,

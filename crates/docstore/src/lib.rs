@@ -31,6 +31,7 @@ pub enum DocStoreIn {
     },
     ExternalChange {
         id: DocId,
+        path: PathBuf,
         doc: Arc<dyn Doc>,
     },
     ExternalRemove {
@@ -56,9 +57,11 @@ impl fmt::Debug for DocStoreIn {
                 .field("tab_order", tab_order)
                 .finish(),
             DocStoreIn::Saved { id, .. } => f.debug_struct("Saved").field("id", id).finish(),
-            DocStoreIn::ExternalChange { id, .. } => {
-                f.debug_struct("ExternalChange").field("id", id).finish()
-            }
+            DocStoreIn::ExternalChange { id, path, .. } => f
+                .debug_struct("ExternalChange")
+                .field("id", id)
+                .field("path", path)
+                .finish(),
             DocStoreIn::ExternalRemove { id } => {
                 f.debug_struct("ExternalRemove").field("id", id).finish()
             }
@@ -130,13 +133,21 @@ pub fn driver(
                                 }
                             }
 
+                            let canonical = canonicalize(&path);
                             match read_doc(&path).await {
                                 Ok(doc) => {
-                                    let id = DocId(next_doc_id);
-                                    next_doc_id += 1;
-                                    open_docs.insert(id, OpenDoc { path: path.clone() });
-                                    let canonical = canonicalize(&path);
-                                    path_to_id.insert(canonical, id);
+                                    // Reuse existing DocId if already tracked,
+                                    // otherwise allocate a new one.
+                                    let id = match path_to_id.get(&canonical) {
+                                        Some(&existing) => existing,
+                                        None => {
+                                            let id = DocId(next_doc_id);
+                                            next_doc_id += 1;
+                                            open_docs.insert(id, OpenDoc { path: path.clone() });
+                                            path_to_id.insert(canonical, id);
+                                            id
+                                        }
+                                    };
                                     let doc: Arc<dyn Doc> = Arc::new(doc);
                                     let _ = result_tx.send(Ok(DocStoreIn::Opened { id, path, doc, tab_order })).await;
                                 }
@@ -287,7 +298,11 @@ async fn handle_watcher_event(
                 Ok(doc) => {
                     log::trace!("[docstore] read_doc ok, sending ExternalChange");
                     let doc: Arc<dyn Doc> = Arc::new(doc);
-                    Some(Ok(DocStoreIn::ExternalChange { id, doc }))
+                    Some(Ok(DocStoreIn::ExternalChange {
+                        id,
+                        path: path.clone(),
+                        doc,
+                    }))
                 }
                 Err(e) => {
                     log::warn!("Failed to re-read {}: {e}", path.display());

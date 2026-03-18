@@ -50,7 +50,10 @@ fn map_key(combo: KeyCombo, state: &AppState, chord: &Cell<Option<KeyCombo>>) ->
         KeymapLookup::Unbound => {
             if allow_char_insert(state) && !combo.ctrl && !combo.alt {
                 if let KeyCode::Char(c) = combo.code {
-                    return Some(Action::InsertChar(c));
+                    return match c {
+                        '}' | ')' | ']' => Some(Action::InsertCloseBracket(c)),
+                        _ => Some(Action::InsertChar(c)),
+                    };
                 }
             }
             None

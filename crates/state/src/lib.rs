@@ -109,6 +109,24 @@ pub enum SaveState {
     Saving,
 }
 
+// ── Syntax highlight types ──
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct HighlightSpan {
+    pub char_start: usize,
+    pub char_end: usize,
+    pub capture_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct BracketPair {
+    pub open_line: usize,
+    pub open_col: usize,
+    pub close_line: usize,
+    pub close_col: usize,
+    pub color_index: Option<usize>,
+}
+
 // ── Incremental search state ──
 
 #[derive(Debug, Clone)]
@@ -148,6 +166,10 @@ pub struct BufferState {
     // Incremental search
     pub isearch: Option<ISearchState>,
     pub last_search: Option<String>,
+    // Syntax highlighting
+    pub syntax_highlights: Vec<(usize, HighlightSpan)>,
+    pub bracket_pairs: Vec<BracketPair>,
+    pub matching_bracket: Option<(usize, usize)>,
 }
 
 impl fmt::Debug for BufferState {
