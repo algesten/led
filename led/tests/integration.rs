@@ -1060,7 +1060,7 @@ fn session_restore_tabs() {
         .run(vec![Do(Quit), WaitFor(|s| s.session_saved)]);
 
     assert_eq!(t.state.buffers.len(), 2);
-    let dir = t.tmpdir.clone();
+    let dir = t.dirs.root.clone();
 
     // Run 2: reuse same dir with no arg files — session should restore
     let t2 = TestHarness::with_dir(dir).run(vec![WaitFor(|s| s.buffers.len() >= 2)]);
@@ -1081,9 +1081,12 @@ fn session_restore_tabs() {
 fn session_restore_with_arg_file() {
     // Exact repro: start with ONE arg file, open a second from browser, quit, restart with same arg.
     let tmpdir = tempfile::TempDir::new().unwrap().keep();
-    std::fs::write(tmpdir.join("Cargo.toml"), "[package]\n").unwrap();
-    std::fs::write(tmpdir.join("lib.rs"), "fn main() {}\n").unwrap();
-    let cargo_path = tmpdir.join("Cargo.toml");
+    let workspace_dir = tmpdir.join("workspace");
+    std::fs::create_dir_all(&workspace_dir).unwrap();
+    std::fs::create_dir_all(tmpdir.join("config")).unwrap();
+    std::fs::write(workspace_dir.join("Cargo.toml"), "[package]\n").unwrap();
+    std::fs::write(workspace_dir.join("lib.rs"), "fn main() {}\n").unwrap();
+    let cargo_path = workspace_dir.join("Cargo.toml");
 
     // Run 1: start with only Cargo.toml, open lib.rs from browser
     let t = TestHarness::with_dir(tmpdir.clone())
@@ -1162,7 +1165,7 @@ fn session_restore_cursor() {
         ]);
 
     assert_eq!(buf(&t).cursor_row, 3);
-    let dir = t.tmpdir.clone();
+    let dir = t.dirs.root.clone();
 
     // Run 2: restore — cursor should be at row 3
     let t2 = TestHarness::with_dir(dir).run(vec![WaitFor(|s| !s.buffers.is_empty())]);
@@ -1189,8 +1192,8 @@ fn session_restore_active_tab() {
         .to_string_lossy()
         .into_owned();
     assert_eq!(active_name, "first.txt");
-    let dir = t.tmpdir.clone();
-    let second_path = dir.join("second.txt");
+    let dir = t.dirs.root.clone();
+    let second_path = t.dirs.workspace.join("second.txt");
 
     // Run 2: restart with second.txt as arg — first.txt should still be the active tab
     let t2 = TestHarness::with_dir(dir)
@@ -1277,7 +1280,7 @@ fn undo_persist_and_restore() {
         WaitFor(|s| s.session_saved),
     ]);
     assert!(buf(&t).doc.dirty(), "buffer should be dirty");
-    let dir = t.tmpdir.clone();
+    let dir = t.dirs.root.clone();
 
     // Run 2: restore — undo should work and revert the edits
     let t2 = TestHarness::with_dir(dir).run(vec![WaitFor(|s| !s.buffers.is_empty()), Do(Undo)]);
@@ -1300,7 +1303,7 @@ fn undo_cleared_after_save() {
         Do(Quit),
         WaitFor(|s| s.session_saved),
     ]);
-    let dir = t.tmpdir.clone();
+    let dir = t.dirs.root.clone();
 
     // Run 2: restore — buffer should be clean (save cleared undo in DB)
     let t2 = TestHarness::with_dir(dir).run(vec![WaitFor(|s| !s.buffers.is_empty())]);
@@ -1325,7 +1328,7 @@ fn session_restores_dirty_state() {
         Do(Quit),
         WaitFor(|s| s.session_saved),
     ]);
-    let dir = t.tmpdir.clone();
+    let dir = t.dirs.root.clone();
 
     // Run 2: restore — buffer should be dirty (distance_from_save != 0)
     let t2 = TestHarness::with_dir(dir).run(vec![WaitFor(|s| !s.buffers.is_empty())]);
@@ -1340,19 +1343,24 @@ fn session_restores_dirty_state() {
 #[test]
 fn session_restores_browser_expanded_dirs() {
     // Run 1: expand a directory, quit
-    let t = TestHarness::new().with_file("hello\n").run(vec![
-        WaitFor(has_browser_entries),
-        Do(ToggleFocus),
-        Do(ExpandDir), // expand first dir entry (config/)
-        Do(Quit),
-        WaitFor(|s| s.session_saved),
-    ]);
+    // Need a file at workspace root (so start_dir is workspace/) plus a
+    // subdirectory so the browser has a directory entry to expand.
+    let t = TestHarness::new()
+        .with_file("hello\n")
+        .with_named_file("subdir/child.txt", "x\n")
+        .run(vec![
+            WaitFor(has_browser_entries),
+            Do(ToggleFocus),
+            Do(ExpandDir), // expand first dir entry (subdir/)
+            Do(Quit),
+            WaitFor(|s| s.session_saved),
+        ]);
     assert!(
         !t.state.browser.expanded_dirs.is_empty(),
         "should have expanded dirs"
     );
     let expanded_dir = t.state.browser.expanded_dirs.iter().next().unwrap().clone();
-    let dir = t.tmpdir.clone();
+    let dir = t.dirs.root.clone();
 
     // Run 2: restore — expanded dirs should be restored AND their contents loaded
     let t2 = TestHarness::with_dir(dir).run(vec![
@@ -1385,7 +1393,7 @@ fn session_restores_focus_on_browser() {
         QuitAndWait,
     ]);
     assert_eq!(t.state.focus, led_core::PanelSlot::Side);
-    let dir = t.tmpdir.clone();
+    let dir = t.dirs.root.clone();
 
     // Run 2: restore — focus should be on the browser
     let t2 = TestHarness::with_dir(dir).run(vec![WaitFor(|s| !s.buffers.is_empty())]);
@@ -1403,7 +1411,7 @@ fn session_restores_focus_on_editor() {
         .with_file("hello\n")
         .run(vec![WaitFor(|s| !s.buffers.is_empty()), QuitAndWait]);
     assert_eq!(t.state.focus, led_core::PanelSlot::Main);
-    let dir = t.tmpdir.clone();
+    let dir = t.dirs.root.clone();
 
     // Run 2: restore — focus should be on the editor
     let t2 = TestHarness::with_dir(dir).run(vec![WaitFor(|s| !s.buffers.is_empty())]);
@@ -1428,23 +1436,114 @@ fn no_buffers_focus_falls_back_to_browser() {
     assert!(t.state.buffers.is_empty());
 }
 
+// ── External editor (file watcher) ──
+
+/// Repro: open led + emacs on same file. First emacs save shows up in led,
+/// second emacs save does not. Root cause was path mismatch in the docstore's
+/// file watcher (/var vs /private/var on macOS).
+///
+/// Atomic save variant (write tmp + rename) — matches emacs behavior.
+#[test]
+fn external_editor_second_save_detected() {
+    let (dirs, paths) = shared_workspace(&[("test.txt", "original\n")]);
+    let file_path = paths[0].clone();
+
+    let mut inst = Instance::start(startup_for(&dirs, &paths));
+    inst.wait_for(
+        |s| s.watchers_ready && !s.buffers.is_empty(),
+        WAIT,
+        "instance ready",
+    );
+
+    // First external save (atomic: write tmp + rename, like emacs)
+    let tmp = file_path.with_extension("tmp");
+    std::fs::write(&tmp, "first\n").unwrap();
+    std::fs::rename(&tmp, &file_path).unwrap();
+
+    inst.wait_for(
+        |s| active_buf(s).is_some_and(|b| b.doc.line(0) == "first"),
+        WAIT,
+        "first external save detected",
+    );
+
+    // Second external save (same atomic pattern)
+    let tmp = file_path.with_extension("tmp");
+    std::fs::write(&tmp, "second\n").unwrap();
+    std::fs::rename(&tmp, &file_path).unwrap();
+
+    inst.wait_for(
+        |s| active_buf(s).is_some_and(|b| b.doc.line(0) == "second"),
+        WAIT,
+        "second external save detected",
+    );
+
+    inst.stop();
+}
+
+/// Direct write variant (non-atomic).
+#[test]
+fn external_editor_second_direct_write_detected() {
+    let (dirs, paths) = shared_workspace(&[("test.txt", "original\n")]);
+    let file_path = paths[0].clone();
+    log::trace!(
+        "[test:direct_write] workspace={} file={}",
+        dirs.workspace.display(),
+        file_path.display()
+    );
+
+    let mut inst = Instance::start(startup_for(&dirs, &paths));
+    inst.wait_for(
+        |s| s.watchers_ready && !s.buffers.is_empty(),
+        WAIT,
+        "instance ready",
+    );
+
+    // First external save (direct overwrite)
+    log::trace!(
+        "[test:direct_write] writing 'first' to {}",
+        file_path.display()
+    );
+    std::fs::write(&file_path, "first\n").unwrap();
+
+    inst.wait_for(
+        |s| active_buf(s).is_some_and(|b| b.doc.line(0) == "first"),
+        WAIT,
+        "first external save detected",
+    );
+
+    // Second external save (direct overwrite)
+    log::trace!(
+        "[test:direct_write] writing 'second' to {}",
+        file_path.display()
+    );
+    std::fs::write(&file_path, "second\n").unwrap();
+
+    inst.wait_for(
+        |s| active_buf(s).is_some_and(|b| b.doc.line(0) == "second"),
+        WAIT,
+        "second external save detected",
+    );
+
+    inst.stop();
+}
+
 // ── Cross-instance sync ──
 
 /// Simulate an external instance's edit by writing undo entries to the DB
 /// and touching the notify file to wake the instance under test.
 fn simulate_external_edit(
-    tmpdir: &Path,
+    dirs: &harness::TestDirs,
     file_path: &Path,
     chain_id: &str,
     content_hash: u64,
     undo_entries: &[UndoEntry],
 ) {
-    let config_dir = tmpdir.join("config");
-    let db_path = config_dir.join("db.sqlite");
+    let db_path = dirs.config.join("db.sqlite");
     let conn = rusqlite::Connection::open(&db_path).expect("open DB");
 
     // Must canonicalize to match the workspace driver (resolves /var → /private/var on macOS)
-    let canonical_root = std::fs::canonicalize(tmpdir).unwrap_or_else(|_| tmpdir.to_path_buf());
+    let canonical_root =
+        std::fs::canonicalize(&dirs.workspace).unwrap_or_else(|_| dirs.workspace.clone());
     let root_str = canonical_root.to_string_lossy();
     let path_str = file_path.to_string_lossy();
 
@@ -1471,7 +1570,7 @@ fn simulate_external_edit(
 
     // Touch notify file to wake the instance
     let hash = led_workspace::path_hash(file_path);
-    let notify_dir = config_dir.join("notify");
+    let notify_dir = dirs.config.join("notify");
     std::fs::create_dir_all(&notify_dir).ok();
     std::fs::write(notify_dir.join(&hash), b"").ok();
 }
@@ -1489,58 +1588,48 @@ fn make_insert_entry(offset: usize, text: &str) -> UndoEntry {
     }
 }
 
-fn make_remove_entry(offset: usize, old_text: &str) -> UndoEntry {
-    UndoEntry {
-        op: EditOp {
-            offset,
-            old_text: old_text.to_string(),
-            new_text: String::new(),
-        },
-        cursor_before: offset,
-        cursor_after: offset,
-        direction: 1,
-    }
-}
-
 #[test]
 fn cross_instance_sync_insert_newline() {
     // Bug 1 repro: instance B inserts a newline, instance A should see exactly one newline.
-    let t = TestHarness::new().with_file("aaa\nbbb\nccc\n").run(vec![
-        WaitFor(|s| !s.buffers.is_empty()),
-        WaitFor(|s| s.watchers_ready),
-        // Simulate instance B inserting a newline after "aaa"
-        TestStep::RunFn(Box::new(|tmpdir| {
-            let file_path = std::fs::read_dir(tmpdir)
-                .unwrap()
-                .filter_map(|e| e.ok())
-                .find(|e| e.file_name().to_string_lossy().ends_with(".txt"))
-                .unwrap()
-                .path();
+    let t = TestHarness::new()
+        .with_watchers()
+        .with_file("aaa\nbbb\nccc\n")
+        .run(vec![
+            WaitFor(|s| !s.buffers.is_empty()),
+            WaitFor(|s| s.watchers_ready),
+            // Simulate instance B inserting a newline after "aaa"
+            TestStep::RunFn(Box::new(|dirs| {
+                let file_path = std::fs::read_dir(&dirs.workspace)
+                    .unwrap()
+                    .filter_map(|e| e.ok())
+                    .find(|e| e.file_name().to_string_lossy().ends_with(".txt"))
+                    .unwrap()
+                    .path();
 
-            // Get the real content hash from the Doc (hash ropey chunks)
-            // For small files, ropey uses a single chunk, equivalent to hashing the string.
-            let content_hash = {
-                use std::hash::{Hash, Hasher};
-                let mut h = std::collections::hash_map::DefaultHasher::new();
-                "aaa\nbbb\nccc\n".hash(&mut h);
-                h.finish()
-            };
+                // Get the real content hash from the Doc (hash ropey chunks)
+                // For small files, ropey uses a single chunk, equivalent to hashing the string.
+                let content_hash = {
+                    use std::hash::{Hash, Hasher};
+                    let mut h = std::collections::hash_map::DefaultHasher::new();
+                    "aaa\nbbb\nccc\n".hash(&mut h);
+                    h.finish()
+                };
 
-            simulate_external_edit(
-                tmpdir,
-                &file_path,
-                "ext-chain-1",
-                content_hash,
-                &[make_insert_entry(3, "\n")], // insert newline after "aaa"
-            );
-        })),
-        // Wait for sync to apply
-        WaitFor(|s| {
-            s.active_buffer
-                .and_then(|id| s.buffers.get(&id))
-                .is_some_and(|b| b.doc.line_count() == 5) // was 4, now 5
-        }),
-    ]);
+                simulate_external_edit(
+                    dirs,
+                    &file_path,
+                    "ext-chain-1",
+                    content_hash,
+                    &[make_insert_entry(3, "\n")], // insert newline after "aaa"
+                );
+            })),
+            // Wait for sync to apply
+            WaitFor(|s| {
+                s.active_buffer
+                    .and_then(|id| s.buffers.get(&id))
+                    .is_some_and(|b| b.doc.line_count() == 5) // was 4, now 5
+            }),
+        ]);
 
     let b = buf(&t);
     assert_eq!(b.doc.line(0), "aaa");
@@ -1557,43 +1646,46 @@ fn cross_instance_sync_insert_newline() {
 #[test]
 fn cross_instance_sync_multiple_edits() {
     // Bug 2 repro: instance B makes multiple edits, all should be replayed on A.
-    let t = TestHarness::new().with_file("hello\n").run(vec![
-        WaitFor(|s| !s.buffers.is_empty()),
-        WaitFor(|s| s.watchers_ready),
-        TestStep::RunFn(Box::new(|tmpdir| {
-            let file_path = std::fs::read_dir(tmpdir)
-                .unwrap()
-                .filter_map(|e| e.ok())
-                .find(|e| e.file_name().to_string_lossy().ends_with(".txt"))
-                .unwrap()
-                .path();
+    let t = TestHarness::new()
+        .with_watchers()
+        .with_file("hello\n")
+        .run(vec![
+            WaitFor(|s| !s.buffers.is_empty()),
+            WaitFor(|s| s.watchers_ready),
+            TestStep::RunFn(Box::new(|dirs| {
+                let file_path = std::fs::read_dir(&dirs.workspace)
+                    .unwrap()
+                    .filter_map(|e| e.ok())
+                    .find(|e| e.file_name().to_string_lossy().ends_with(".txt"))
+                    .unwrap()
+                    .path();
 
-            let content_hash = {
-                use std::hash::{Hash, Hasher};
-                let mut h = std::collections::hash_map::DefaultHasher::new();
-                "hello\n".hash(&mut h);
-                h.finish()
-            };
+                let content_hash = {
+                    use std::hash::{Hash, Hasher};
+                    let mut h = std::collections::hash_map::DefaultHasher::new();
+                    "hello\n".hash(&mut h);
+                    h.finish()
+                };
 
-            // Three separate undo groups: insert "X", "Y", "Z" at start
-            simulate_external_edit(
-                tmpdir,
-                &file_path,
-                "ext-chain-2",
-                content_hash,
-                &[
-                    make_insert_entry(0, "X"),
-                    make_insert_entry(1, "Y"),
-                    make_insert_entry(2, "Z"),
-                ],
-            );
-        })),
-        WaitFor(|s| {
-            s.active_buffer
-                .and_then(|id| s.buffers.get(&id))
-                .is_some_and(|b| b.doc.line(0).contains("XYZ"))
-        }),
-    ]);
+                // Three separate undo groups: insert "X", "Y", "Z" at start
+                simulate_external_edit(
+                    dirs,
+                    &file_path,
+                    "ext-chain-2",
+                    content_hash,
+                    &[
+                        make_insert_entry(0, "X"),
+                        make_insert_entry(1, "Y"),
+                        make_insert_entry(2, "Z"),
+                    ],
+                );
+            })),
+            WaitFor(|s| {
+                s.active_buffer
+                    .and_then(|id| s.buffers.get(&id))
+                    .is_some_and(|b| b.doc.line(0).contains("XYZ"))
+            }),
+        ]);
 
     let b = buf(&t);
     assert_eq!(
@@ -1606,74 +1698,76 @@ fn cross_instance_sync_multiple_edits() {
 #[test]
 fn cross_instance_sync_after_save() {
     // Bug 3 repro: instance B saves the file, instance A should detect the external save.
-    let t = TestHarness::new().with_file("original\n").run(vec![
-        WaitFor(|s| !s.buffers.is_empty()),
-        WaitFor(|s| s.watchers_ready),
-        // First, simulate B editing
-        TestStep::RunFn(Box::new(|tmpdir| {
-            let file_path = std::fs::read_dir(tmpdir)
-                .unwrap()
-                .filter_map(|e| e.ok())
-                .find(|e| e.file_name().to_string_lossy().ends_with(".txt"))
-                .unwrap()
-                .path();
+    let t = TestHarness::new()
+        .with_watchers()
+        .with_file("original\n")
+        .run(vec![
+            WaitFor(|s| !s.buffers.is_empty()),
+            WaitFor(|s| s.watchers_ready),
+            // First, simulate B editing
+            TestStep::RunFn(Box::new(|dirs| {
+                let file_path = std::fs::read_dir(&dirs.workspace)
+                    .unwrap()
+                    .filter_map(|e| e.ok())
+                    .find(|e| e.file_name().to_string_lossy().ends_with(".txt"))
+                    .unwrap()
+                    .path();
 
-            let content_hash = {
-                use std::hash::{Hash, Hasher};
-                let mut h = std::collections::hash_map::DefaultHasher::new();
-                "original\n".hash(&mut h);
-                h.finish()
-            };
+                let content_hash = {
+                    use std::hash::{Hash, Hasher};
+                    let mut h = std::collections::hash_map::DefaultHasher::new();
+                    "original\n".hash(&mut h);
+                    h.finish()
+                };
 
-            simulate_external_edit(
-                tmpdir,
-                &file_path,
-                "ext-chain-3",
-                content_hash,
-                &[make_insert_entry(0, "X")],
-            );
-        })),
-        // Wait for first sync
-        WaitFor(|s| {
-            s.active_buffer
-                .and_then(|id| s.buffers.get(&id))
-                .is_some_and(|b| b.doc.line(0).starts_with("X"))
-        }),
-        // Now simulate B saving: write new content to disk and clear undo in DB
-        TestStep::RunFn(Box::new(|tmpdir| {
-            let file_path = std::fs::read_dir(tmpdir)
-                .unwrap()
-                .filter_map(|e| e.ok())
-                .find(|e| e.file_name().to_string_lossy().ends_with(".txt"))
-                .unwrap()
-                .path();
+                simulate_external_edit(
+                    dirs,
+                    &file_path,
+                    "ext-chain-3",
+                    content_hash,
+                    &[make_insert_entry(0, "X")],
+                );
+            })),
+            // Wait for first sync
+            WaitFor(|s| {
+                s.active_buffer
+                    .and_then(|id| s.buffers.get(&id))
+                    .is_some_and(|b| b.doc.line(0).starts_with("X"))
+            }),
+            // Now simulate B saving: write new content to disk and clear undo in DB
+            TestStep::RunFn(Box::new(|dirs| {
+                let file_path = std::fs::read_dir(&dirs.workspace)
+                    .unwrap()
+                    .filter_map(|e| e.ok())
+                    .find(|e| e.file_name().to_string_lossy().ends_with(".txt"))
+                    .unwrap()
+                    .path();
 
-            // Write new content to disk (simulating save)
-            std::fs::write(&file_path, "Xoriginal\n").unwrap();
+                // Write new content to disk (simulating save)
+                std::fs::write(&file_path, "Xoriginal\n").unwrap();
 
-            // Clear undo in DB (like ClearUndo does after save)
-            let config_dir = tmpdir.join("config");
-            let db_path = config_dir.join("db.sqlite");
-            let conn = rusqlite::Connection::open(&db_path).expect("open DB");
-            let canonical_root =
-                std::fs::canonicalize(tmpdir).unwrap_or_else(|_| tmpdir.to_path_buf());
-            let root_str = canonical_root.to_string_lossy();
-            let path_str = file_path.to_string_lossy();
-            led_workspace::db::clear_undo(&conn, &root_str, &path_str).expect("clear_undo");
-            drop(conn);
+                // Clear undo in DB (like ClearUndo does after save)
+                let db_path = dirs.config.join("db.sqlite");
+                let conn = rusqlite::Connection::open(&db_path).expect("open DB");
+                let canonical_root = std::fs::canonicalize(&dirs.workspace)
+                    .unwrap_or_else(|_| dirs.workspace.clone());
+                let root_str = canonical_root.to_string_lossy();
+                let path_str = file_path.to_string_lossy();
+                led_workspace::db::clear_undo(&conn, &root_str, &path_str).expect("clear_undo");
+                drop(conn);
 
-            // Touch notify to wake A
-            let hash = led_workspace::path_hash(&file_path);
-            let notify_dir = config_dir.join("notify");
-            std::fs::write(notify_dir.join(&hash), b"").ok();
-        })),
-        // Wait for A to detect the external save (chain_id should be reset)
-        WaitFor(|s| {
-            s.active_buffer
-                .and_then(|id| s.buffers.get(&id))
-                .is_some_and(|b| b.chain_id.is_none())
-        }),
-    ]);
+                // Touch notify to wake A
+                let hash = led_workspace::path_hash(&file_path);
+                let notify_dir = dirs.config.join("notify");
+                std::fs::write(notify_dir.join(&hash), b"").ok();
+            })),
+            // Wait for A to detect the external save (chain_id should be reset)
+            WaitFor(|s| {
+                s.active_buffer
+                    .and_then(|id| s.buffers.get(&id))
+                    .is_some_and(|b| b.chain_id.is_none())
+            }),
+        ]);
 
     let b = buf(&t);
     // After external save detection, A should have reset its undo chain
@@ -1736,16 +1830,16 @@ fn two_instance_sync_after_save() {
     //   3. B adds newline → A syncs
     //   4. B saves
     //   5. B adds another newline → A must sync
-    let (tmpdir, paths) = shared_workspace(&[("test.txt", "aaa\nbbb\n")]);
+    let (dirs, paths) = shared_workspace(&[("test.txt", "aaa\nbbb\n")]);
 
-    let mut a = Instance::start(startup_for(&tmpdir, &paths));
+    let mut a = Instance::start(startup_for(&dirs, &paths));
     a.wait_for(
         |s| s.watchers_ready && !s.buffers.is_empty(),
         WAIT,
         "A ready",
     );
 
-    let mut b = Instance::start(startup_for(&tmpdir, &paths));
+    let mut b = Instance::start(startup_for(&dirs, &paths));
     b.wait_for(
         |s| s.watchers_ready && !s.buffers.is_empty(),
         WAIT,
@@ -1834,16 +1928,16 @@ fn two_instance_second_edit_syncs_without_save() {
     //   3. B inserts newline → A syncs
     //   4. B waits 1000ms
     //   5. B inserts another newline → A must sync
-    let (tmpdir, paths) = shared_workspace(&[("test.txt", "aaa\nbbb\n")]);
+    let (dirs, paths) = shared_workspace(&[("test.txt", "aaa\nbbb\n")]);
 
-    let mut a = Instance::start(startup_for(&tmpdir, &paths));
+    let mut a = Instance::start(startup_for(&dirs, &paths));
     a.wait_for(
         |s| s.watchers_ready && !s.buffers.is_empty(),
         WAIT,
         "A ready",
     );
 
-    let mut b = Instance::start(startup_for(&tmpdir, &paths));
+    let mut b = Instance::start(startup_for(&dirs, &paths));
     b.wait_for(
         |s| s.watchers_ready && !s.buffers.is_empty(),
         WAIT,
@@ -1916,16 +2010,16 @@ fn two_instance_remote_save_clears_dirty() {
     //   2. B opens file (non-primary)
     //   3. B inserts newline → A syncs (both dirty)
     //   4. B saves → B clean, A must also become clean
-    let (tmpdir, paths) = shared_workspace(&[("test.txt", "aaa\nbbb\n")]);
+    let (dirs, paths) = shared_workspace(&[("test.txt", "aaa\nbbb\n")]);
 
-    let mut a = Instance::start(startup_for(&tmpdir, &paths));
+    let mut a = Instance::start(startup_for(&dirs, &paths));
     a.wait_for(
         |s| s.watchers_ready && !s.buffers.is_empty(),
         WAIT,
         "A ready",
     );
 
-    let mut b = Instance::start(startup_for(&tmpdir, &paths));
+    let mut b = Instance::start(startup_for(&dirs, &paths));
     b.wait_for(
         |s| s.watchers_ready && !s.buffers.is_empty(),
         WAIT,
@@ -1983,23 +2077,24 @@ fn two_instance_remote_save_clears_dirty() {
 fn two_instance_no_args_browser_visible() {
     // Repro: open two instances with no file arguments (just PWD).
     // B (non-primary) should still show the file browser.
-    let (tmpdir, _paths) =
-        shared_workspace(&[("file_a.txt", "hello\n"), ("file_b.txt", "world\n")]);
+    let (dirs, _paths) = shared_workspace(&[("file_a.txt", "hello\n"), ("file_b.txt", "world\n")]);
     // Real workspaces have a .git dir — this changes how find_git_root resolves
-    std::fs::create_dir_all(tmpdir.join(".git")).expect("create .git");
+    std::fs::create_dir_all(dirs.workspace.join(".git")).expect("create .git");
 
     // Start both with no arg_paths — like running `led` with no arguments
     let no_files_a = Startup {
         headless: true,
+        enable_watchers: true,
         arg_paths: vec![],
-        start_dir: Arc::new(tmpdir.clone()),
-        config_dir: tmpdir.join("config"),
+        start_dir: Arc::new(dirs.workspace.clone()),
+        config_dir: dirs.config.clone(),
     };
     let no_files_b = Startup {
         headless: true,
+        enable_watchers: true,
         arg_paths: vec![],
-        start_dir: Arc::new(tmpdir.clone()),
-        config_dir: tmpdir.join("config"),
+        start_dir: Arc::new(dirs.workspace.clone()),
+        config_dir: dirs.config.clone(),
     };
 
     let mut a = Instance::start(no_files_a);
@@ -2069,16 +2164,16 @@ fn two_instance_undo_syncs_and_clears_dirty() {
     //   1. A opens file, B opens file
     //   2. A inserts newline → B syncs (both dirty)
     //   3. A undoes → both should sync back and neither should be dirty
-    let (tmpdir, paths) = shared_workspace(&[("test.txt", "aaa\nbbb\n")]);
+    let (dirs, paths) = shared_workspace(&[("test.txt", "aaa\nbbb\n")]);
 
-    let mut a = Instance::start(startup_for(&tmpdir, &paths));
+    let mut a = Instance::start(startup_for(&dirs, &paths));
     a.wait_for(
         |s| s.watchers_ready && !s.buffers.is_empty(),
         WAIT,
         "A ready",
     );
 
-    let mut b = Instance::start(startup_for(&tmpdir, &paths));
+    let mut b = Instance::start(startup_for(&dirs, &paths));
     b.wait_for(
         |s| s.watchers_ready && !s.buffers.is_empty(),
         WAIT,

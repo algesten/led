@@ -7,6 +7,8 @@ use led_core::{Action, Startup};
 use led_state::AppState;
 use tokio::sync::oneshot;
 
+use super::TestDirs;
+
 enum Cmd {
     Action(Action),
     Stop,
@@ -20,8 +22,6 @@ pub struct Instance {
 
 impl Instance {
     /// Spawn an editor instance on its own thread + tokio runtime.
-    /// Shares the same config_dir / DB / notify dir as any other instance
-    /// pointed at the same tmpdir.
     pub fn start(startup: Startup) -> Self {
         let (cmd_tx, cmd_rx) = std::sync::mpsc::channel::<Cmd>();
         let state: Arc<Mutex<Option<Arc<AppState>>>> = Arc::new(Mutex::new(None));
@@ -145,10 +145,15 @@ impl Drop for Instance {
     }
 }
 
-/// Create a shared workspace directory with files, returning (tmpdir, file_paths).
-pub fn shared_workspace(files: &[(&str, &str)]) -> (PathBuf, Vec<PathBuf>) {
-    let tmpdir = tempfile::TempDir::new().expect("create tmpdir").keep();
-    let config_dir = tmpdir.join("config");
+/// Create a shared workspace with the standard layout:
+///   root/workspace/  — project files
+///   root/config/     — DB, notify dir, etc.
+/// Returns (dirs, file_paths).
+pub fn shared_workspace(files: &[(&str, &str)]) -> (TestDirs, Vec<PathBuf>) {
+    let root = tempfile::TempDir::new().expect("create tmpdir").keep();
+    let workspace_dir = root.join("workspace");
+    let config_dir = root.join("config");
+    std::fs::create_dir_all(&workspace_dir).expect("create workspace dir");
     std::fs::create_dir_all(&config_dir).expect("create config dir");
 
     // Init logging once
@@ -163,26 +168,34 @@ pub fn shared_workspace(files: &[(&str, &str)]) -> (PathBuf, Vec<PathBuf>) {
     let paths: Vec<PathBuf> = files
         .iter()
         .map(|(name, content)| {
-            let path = tmpdir.join(name);
+            let path = workspace_dir.join(name);
             std::fs::write(&path, content).expect("write test file");
             path
         })
         .collect();
 
-    (tmpdir, paths)
+    (
+        TestDirs {
+            root,
+            workspace: workspace_dir,
+            config: config_dir,
+        },
+        paths,
+    )
 }
 
-pub fn startup_for(tmpdir: &PathBuf, file_paths: &[PathBuf]) -> Startup {
+pub fn startup_for(dirs: &TestDirs, file_paths: &[PathBuf]) -> Startup {
     let start_dir = file_paths
         .first()
         .and_then(|p| p.parent())
         .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| tmpdir.clone());
+        .unwrap_or_else(|| dirs.workspace.clone());
 
     Startup {
         headless: true,
+        enable_watchers: true,
         arg_paths: file_paths.to_vec(),
         start_dir: Arc::new(start_dir),
-        config_dir: tmpdir.join("config"),
+        config_dir: dirs.config.clone(),
     }
 }

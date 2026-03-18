@@ -897,7 +897,6 @@ version = "0.1.0"
 dependencies = [
  "led-core",
  "log",
- "notify",
  "tokio",
 ]
 
@@ -961,7 +960,6 @@ dependencies = [
  "led-core",
  "libc",
  "log",
- "notify",
  "rmp-serde",
  "rusqlite",
  "serde",

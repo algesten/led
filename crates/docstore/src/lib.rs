@@ -5,7 +5,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use led_core::rx::Stream;
-use led_core::{Alert, Doc, DocId, TextDoc, watch};
+use led_core::{
+    Alert, Doc, DocId, FileWatcher, Registration, TextDoc, WatchEvent, WatchEventKind, WatchMode,
+};
 use tokio::sync::mpsc;
 
 #[derive(Clone)]
@@ -65,7 +67,14 @@ async fn read_doc(path: &PathBuf) -> std::io::Result<TextDoc> {
 }
 
 /// Start the docstore driver. Takes a stream of commands, returns a stream of results.
-pub fn driver(out: Stream<DocStoreOut>) -> Stream<Result<DocStoreIn, Alert>> {
+///
+/// `file_watcher`: when `Some`, the driver registers parent directories of
+/// opened files so that external changes are detected.  Pass `None` to
+/// disable watching (tests that don't need it).
+pub fn driver(
+    out: Stream<DocStoreOut>,
+    file_watcher: Arc<FileWatcher>,
+) -> Stream<Result<DocStoreIn, Alert>> {
     let stream: Stream<Result<DocStoreIn, Alert>> = Stream::new();
     let (cmd_tx, mut cmd_rx) = mpsc::channel::<DocStoreOut>(64);
     let (result_tx, mut result_rx) = mpsc::channel::<Result<DocStoreIn, Alert>>(64);
@@ -77,14 +86,17 @@ pub fn driver(out: Stream<DocStoreOut>) -> Stream<Result<DocStoreIn, Alert>> {
         }
     });
 
-    // Async driver task
-    tokio::spawn(async move {
-        let (watcher_tx, mut watcher_rx) = mpsc::channel::<notify::Event>(256);
+    // Async driver task (spawn_local so it is scheduled by the LocalSet
+    // alongside the rest of the app on the single-threaded runtime).
+    tokio::task::spawn_local(async move {
+        let (watcher_tx, mut watcher_rx) = mpsc::channel::<WatchEvent>(256);
 
         let mut next_doc_id: u64 = 0;
         let mut open_docs: HashMap<DocId, OpenDoc> = HashMap::new();
+        // Keyed by canonical path so lookups match what the notify crate
+        // reports (e.g. /var → /private/var on macOS).
         let mut path_to_id: HashMap<PathBuf, DocId> = HashMap::new();
-        let mut watched_dirs: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+        let mut registrations: HashMap<PathBuf, Registration> = HashMap::new();
 
         loop {
             tokio::select! {
@@ -93,14 +105,15 @@ pub fn driver(out: Stream<DocStoreOut>) -> Stream<Result<DocStoreIn, Alert>> {
                     match cmd {
                         DocStoreOut::Open { path } => {
                             if let Some(parent) = path.parent() {
-                                if watched_dirs.insert(parent.to_path_buf()) {
-                                    let mut watcher = watch(parent);
-                                    let fwd = watcher_tx.clone();
-                                    tokio::spawn(async move {
-                                        while let Some(event) = watcher.recv().await {
-                                            let _ = fwd.send(event).await;
-                                        }
-                                    });
+                                let canonical = std::fs::canonicalize(parent)
+                                    .unwrap_or_else(|_| parent.to_path_buf());
+                                if !registrations.contains_key(&canonical) {
+                                    let reg = file_watcher.register(
+                                        parent,
+                                        WatchMode::NonRecursive,
+                                        watcher_tx.clone(),
+                                    );
+                                    registrations.insert(canonical, reg);
                                 }
                             }
 
@@ -109,7 +122,8 @@ pub fn driver(out: Stream<DocStoreOut>) -> Stream<Result<DocStoreIn, Alert>> {
                                     let id = DocId(next_doc_id);
                                     next_doc_id += 1;
                                     open_docs.insert(id, OpenDoc { path: path.clone() });
-                                    path_to_id.insert(path.clone(), id);
+                                    let canonical = canonicalize(&path);
+                                    path_to_id.insert(canonical, id);
                                     let doc: Arc<dyn Doc> = Arc::new(doc);
                                     let _ = result_tx.send(Ok(DocStoreIn::Opened { id, path, doc })).await;
                                 }
@@ -129,15 +143,18 @@ pub fn driver(out: Stream<DocStoreOut>) -> Stream<Result<DocStoreIn, Alert>> {
                         }
                         DocStoreOut::Close { id, .. } => {
                             if let Some(open) = open_docs.remove(&id) {
-                                path_to_id.remove(&open.path);
+                                let canonical = canonicalize(&open.path);
+                                path_to_id.remove(&canonical);
                             }
                         }
                     }
                 }
                 Some(event) = watcher_rx.recv() => {
+                    log::trace!("[docstore] select got watcher event: {:?}", event.kind);
                     handle_watcher_event(
                         event, &path_to_id, &result_tx,
                     ).await;
+                    log::trace!("[docstore] handle_watcher_event done");
                 }
             }
         }
@@ -235,20 +252,26 @@ async fn handle_save(
 }
 
 async fn handle_watcher_event(
-    event: notify::Event,
+    event: WatchEvent,
     path_to_id: &HashMap<PathBuf, DocId>,
     tx: &mpsc::Sender<Result<DocStoreIn, Alert>>,
 ) {
-    use notify::EventKind;
-
     for path in &event.paths {
         let Some(&id) = path_to_id.get(path) else {
+            log::trace!("[docstore] path not in path_to_id: {}", path.display());
             continue;
         };
 
+        log::trace!(
+            "[docstore] path matched: {} kind={:?}",
+            path.display(),
+            event.kind
+        );
+
         let msg = match event.kind {
-            EventKind::Create(_) | EventKind::Modify(_) => match read_doc(path).await {
+            WatchEventKind::Create | WatchEventKind::Modify => match read_doc(path).await {
                 Ok(doc) => {
+                    log::trace!("[docstore] read_doc ok, sending ExternalChange");
                     let doc: Arc<dyn Doc> = Arc::new(doc);
                     Some(Ok(DocStoreIn::ExternalChange { id, doc }))
                 }
@@ -257,12 +280,15 @@ async fn handle_watcher_event(
                     None
                 }
             },
-            EventKind::Remove(_) => Some(Ok(DocStoreIn::ExternalRemove { id })),
-            _ => None,
+            WatchEventKind::Remove => Some(Ok(DocStoreIn::ExternalRemove { id })),
         };
 
         if let Some(msg) = msg {
             let _ = tx.send(msg).await;
         }
     }
+}
+
+fn canonicalize(path: &PathBuf) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.clone())
 }

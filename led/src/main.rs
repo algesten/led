@@ -50,6 +50,7 @@ async fn main() {
 
     let startup = Startup {
         headless: false,
+        enable_watchers: true,
         arg_paths: arg_path.into_iter().collect(),
         start_dir: Arc::new(start_dir),
         config_dir,

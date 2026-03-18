@@ -4,7 +4,7 @@ use std::sync::Arc;
 use led_core::keys::Keys;
 use led_core::rx::Stream;
 use led_core::theme::Theme;
-use led_core::{Alert, AlertExt, watch};
+use led_core::{Alert, AlertExt};
 use tokio::sync::mpsc;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -49,38 +49,13 @@ pub fn driver<F: TomlFile>(out: Stream<ConfigFileOut>) -> Stream<Result<ConfigFi
     });
 
     // Async driver task
-    tokio::spawn(async move {
-        let mut config_dir: Option<ConfigDir> = None;
-        let (watch_fwd_tx, mut watch_fwd_rx) = mpsc::channel::<()>(16);
-
-        loop {
-            tokio::select! {
-                maybe_cmd = cmd_rx.recv() => {
-                    let Some(cmd) = maybe_cmd else { break };
-                    match cmd {
-                        ConfigFileOut::ConfigDir(dir) => {
-                            if config_dir.as_ref().map(|d| &d.config) != Some(&dir.config) {
-                                let mut watcher = watch(&dir.config);
-                                let fwd = watch_fwd_tx.clone();
-                                tokio::spawn(async move {
-                                    while let Some(_event) = watcher.recv().await {
-                                        let _ = fwd.send(()).await;
-                                    }
-                                });
-                            }
-                            config_dir = Some(dir);
-                            if let Some(ref dir) = config_dir {
-                                read_and_send::<F>(dir, &result_tx).await;
-                            }
-                        }
-                        ConfigFileOut::Persist => {}
-                    }
+    tokio::task::spawn_local(async move {
+        while let Some(cmd) = cmd_rx.recv().await {
+            match cmd {
+                ConfigFileOut::ConfigDir(dir) => {
+                    read_and_send::<F>(&dir, &result_tx).await;
                 }
-                Some(()) = watch_fwd_rx.recv() => {
-                    if let Some(ref dir) = config_dir {
-                        read_and_send::<F>(dir, &result_tx).await;
-                    }
-                }
+                ConfigFileOut::Persist => {}
             }
         }
     });

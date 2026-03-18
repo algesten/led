@@ -4,7 +4,7 @@ use led_config_file::ConfigFile;
 use led_core::keys::Keys;
 use led_core::rx::Stream;
 use led_core::theme::Theme;
-use led_core::{Action, Alert, Startup};
+use led_core::{Action, Alert, FileWatcher, Startup};
 use led_fs::FsIn;
 use led_state::AppState;
 use led_terminal_in::TerminalInput;
@@ -53,6 +53,13 @@ pub fn run(
     quit_tx: oneshot::Sender<()>,
 ) -> (Stream<Arc<AppState>>, RunGuards) {
     let headless = startup.headless;
+
+    let file_watcher = if startup.enable_watchers {
+        FileWatcher::new()
+    } else {
+        FileWatcher::inert()
+    };
+
     let init = AppState::new(startup);
     let seed = Arc::new(init.clone());
 
@@ -78,8 +85,8 @@ pub fn run(
     let drivers = Drivers {
         terminal_in,
         actions_in,
-        workspace_in: led_workspace::driver(d.workspace_out),
-        docstore_in: led_docstore::driver(d.docstore_out),
+        workspace_in: led_workspace::driver(d.workspace_out, file_watcher.clone()),
+        docstore_in: led_docstore::driver(d.docstore_out, file_watcher),
         config_keys_in: led_config_file::driver::<Keys>(d.config_file_out.clone()),
         config_theme_in: led_config_file::driver::<Theme>(d.config_file_out),
         timers_in,

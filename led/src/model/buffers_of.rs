@@ -126,16 +126,22 @@ pub fn buffers_of(
                 let incoming_hash = doc.content_hash();
                 // Content-hash comparison: if the incoming doc has the same
                 // content as our buffer, the file wasn't meaningfully changed.
-                // If we're dirty (e.g. from SyncApply), mark as saved — the
-                // disk now matches our content (another instance saved it).
-                // If we're already clean, skip entirely (self-echo).
+                // If we're dirty from sync (save_state still Clean — no local
+                // edits), mark as saved: the disk now matches our content
+                // (another instance saved it). Otherwise skip (self-echo or
+                // user has local edits whose dirty flag must not be erased).
                 if incoming_hash == buf.content_hash {
-                    if buf.doc.dirty() {
+                    if buf.doc.dirty() && buf.save_state == SaveState::Clean {
                         let mut buf = buf.clone();
                         buf.doc = buf.doc.mark_saved();
-                        buf.save_state = led_state::SaveState::Clean;
                         return Some(Mut::BufferUpdate(buf.id, buf));
                     }
+                    return None;
+                }
+                // Don't clobber local unsaved edits with stale disk content.
+                // This guards against the race: save → user edits → watcher
+                // fires with the old saved content.
+                if buf.doc.dirty() {
                     return None;
                 }
                 let mut buf = buf.clone();

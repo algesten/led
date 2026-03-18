@@ -8,6 +8,12 @@ pub struct Startup {
     /// Run headless, used in tests.
     pub headless: bool,
 
+    /// Enable file system watchers (docstore + workspace).
+    /// Always true in production. Tests that don't need external-change
+    /// or cross-instance-sync detection leave this false to avoid
+    /// saturating macOS FSEvents under parallel test load.
+    pub enable_watchers: bool,
+
     /// Files to open on startup (from CLI args). Immutable after construction.
     pub arg_paths: Vec<PathBuf>,
 

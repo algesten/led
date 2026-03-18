@@ -2,7 +2,7 @@ pub mod two_instance;
 
 use std::cell::Cell;
 use std::cell::RefCell;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
@@ -13,14 +13,22 @@ use led_state::AppState;
 use tempfile::TempDir;
 use tokio::sync::oneshot;
 
+/// Paths available to RunFn callbacks and TestResult.
+pub struct TestDirs {
+    /// Root tmpdir (pass to `TestHarness::with_dir` for session restore).
+    pub root: PathBuf,
+    pub workspace: PathBuf,
+    pub config: PathBuf,
+}
+
 pub enum TestStep {
     Do(Action),
     WaitFor(fn(&AppState) -> bool),
     /// Dispatch Quit and wait for the real quit signal (like the app does).
     /// This tests that session save completes before the app would exit.
     QuitAndWait,
-    /// Run arbitrary code during the test (receives tmpdir path).
-    RunFn(Box<dyn FnOnce(&Path) + Send>),
+    /// Run arbitrary code during the test.
+    RunFn(Box<dyn FnOnce(&TestDirs) + Send>),
 }
 
 impl From<Action> for TestStep {
@@ -32,7 +40,7 @@ impl From<Action> for TestStep {
 pub struct TestResult {
     pub state: Arc<AppState>,
     pub file_path: Option<PathBuf>,
-    pub tmpdir: PathBuf,
+    pub dirs: TestDirs,
 }
 
 pub struct TestHarness {
@@ -41,6 +49,7 @@ pub struct TestHarness {
     files: Vec<(String, String)>,
     arg_paths: Vec<PathBuf>,
     viewport: (u16, u16),
+    enable_watchers: bool,
 }
 
 impl TestHarness {
@@ -51,11 +60,12 @@ impl TestHarness {
             files: Vec::new(),
             arg_paths: Vec::new(),
             viewport: (80, 24),
+            enable_watchers: false,
         }
     }
 
-    /// Reuse an existing directory (for session restore tests).
-    /// Files are created in this directory. Config dir is `{dir}/config`.
+    /// Reuse an existing root directory (for session restore tests).
+    /// Expects the `workspace/` and `config/` subdirs to already exist.
     #[allow(dead_code)]
     pub fn with_dir(dir: PathBuf) -> Self {
         TestHarness {
@@ -64,6 +74,7 @@ impl TestHarness {
             files: Vec::new(),
             arg_paths: Vec::new(),
             viewport: (80, 24),
+            enable_watchers: false,
         }
     }
 
@@ -86,6 +97,15 @@ impl TestHarness {
         self
     }
 
+    /// Enable file system watchers for this test (docstore + workspace).
+    /// Only needed for tests that depend on external-change detection or
+    /// cross-instance sync.
+    #[allow(dead_code)]
+    pub fn with_watchers(mut self) -> Self {
+        self.enable_watchers = true;
+        self
+    }
+
     #[allow(dead_code)]
     pub fn with_viewport(mut self, w: u16, h: u16) -> Self {
         self.viewport = (w, h);
@@ -96,7 +116,7 @@ impl TestHarness {
         let file_count = self.files.len() + self.arg_paths.len();
         let files = self.files;
         let extra_args = self.arg_paths;
-        let tmpdir = match (self.tmpdir, self.reuse_dir) {
+        let root = match (self.tmpdir, self.reuse_dir) {
             (Some(td), _) => td.keep(),
             (None, Some(d)) => d,
             _ => unreachable!(),
@@ -111,13 +131,19 @@ impl TestHarness {
             }
         });
 
-        let config_dir = tmpdir.join("config");
+        // Layout: root/{workspace,config} — separate trees like production.
+        let workspace_dir = root.join("workspace");
+        let config_dir = root.join("config");
+        std::fs::create_dir_all(&workspace_dir).expect("create workspace dir");
         std::fs::create_dir_all(&config_dir).expect("create config dir");
 
         let mut arg_paths: Vec<PathBuf> = files
             .into_iter()
             .map(|(name, content)| {
-                let path = tmpdir.join(name);
+                let path = workspace_dir.join(name);
+                if let Some(parent) = path.parent() {
+                    std::fs::create_dir_all(parent).expect("create parent dir");
+                }
                 std::fs::write(&path, &content).expect("write test file");
                 path
             })
@@ -129,18 +155,31 @@ impl TestHarness {
             .first()
             .and_then(|p| p.parent())
             .map(|p| p.to_path_buf())
-            .unwrap_or_else(|| tmpdir.clone());
+            .unwrap_or_else(|| workspace_dir.clone());
 
         let startup = Startup {
             headless: true,
+            enable_watchers: self.enable_watchers,
             arg_paths,
             start_dir: Arc::new(start_dir),
-            config_dir,
+            config_dir: config_dir.clone(),
+        };
+
+        let dirs = TestDirs {
+            root: root.clone(),
+            workspace: workspace_dir,
+            config: config_dir,
         };
 
         let viewport = self.viewport;
         let (done_tx, done_rx) = std::sync::mpsc::channel();
-        let tmpdir2 = tmpdir.clone();
+
+        // Clone dirs for the spawned thread (RunFn needs Send)
+        let dirs_for_thread = TestDirs {
+            root: dirs.root.clone(),
+            workspace: dirs.workspace.clone(),
+            config: dirs.config.clone(),
+        };
 
         let handle = std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
@@ -174,7 +213,7 @@ impl TestHarness {
                         let quit_rx = Rc::new(RefCell::new(Some(quit_rx)));
                         let quit_rx2 = quit_rx.clone();
                         let last_for_wait = last_state.clone();
-                        let tmpdir_for_steps = tmpdir.clone();
+                        let test_dirs = dirs_for_thread;
                         tokio::task::spawn_local(async move {
                             // Wait for session restore to complete, then for files to open
                             loop {
@@ -203,7 +242,7 @@ impl TestHarness {
                                         }
                                     }
                                     TestStep::RunFn(f) => {
-                                        f(&tmpdir_for_steps);
+                                        f(&test_dirs);
                                     }
                                 }
                             }
@@ -233,7 +272,7 @@ impl TestHarness {
         TestResult {
             state,
             file_path,
-            tmpdir: tmpdir2,
+            dirs,
         }
     }
 }

@@ -7,9 +7,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
-use led_core::Startup;
 use led_core::rx::Stream;
-use notify::{EventKind, RecursiveMode, Watcher};
+use led_core::{FileWatcher, Registration, Startup, WatchEvent, WatchEventKind, WatchMode};
 use tokio::sync::mpsc;
 
 const GIT_DIR: &str = ".git";
@@ -148,7 +147,7 @@ pub enum SessionRestorePhase {
 
 /// Start the workspace driver. Takes a stream of commands,
 /// returns a stream of events.
-pub fn driver(out: Stream<WorkspaceOut>) -> Stream<WorkspaceIn> {
+pub fn driver(out: Stream<WorkspaceOut>, file_watcher: Arc<FileWatcher>) -> Stream<WorkspaceIn> {
     let stream: Stream<WorkspaceIn> = Stream::new();
     let (cmd_tx, mut cmd_rx) = mpsc::channel::<WorkspaceOut>(64);
     let (result_tx, mut result_rx) = mpsc::channel::<WorkspaceIn>(64);
@@ -160,16 +159,17 @@ pub fn driver(out: Stream<WorkspaceOut>) -> Stream<WorkspaceIn> {
         }
     });
 
-    // Async task: compute workspace, manage DB, start watchers
+    // Async task: compute workspace, manage DB, dispatch watcher events
     tokio::spawn(async move {
-        let (watch_tx, mut watch_rx) = mpsc::channel::<()>(16);
-        let mut _watcher: Option<notify::RecommendedWatcher> = None;
-        let (watcher_ready_tx, mut watcher_ready_rx) =
-            mpsc::channel::<notify::RecommendedWatcher>(1);
-        let (notify_event_tx, mut notify_event_rx) = mpsc::channel::<String>(16);
-        let mut _notify_watcher: Option<notify::RecommendedWatcher> = None;
-        let (notify_watcher_ready_tx, mut notify_watcher_ready_rx) =
-            mpsc::channel::<notify::RecommendedWatcher>(1);
+        // Channels for watcher events — senders are moved into registrations
+        // on Init.  Before Init the receivers block (sender exists, no events).
+        let (root_watch_tx, mut root_watch_rx) = mpsc::channel::<WatchEvent>(128);
+        let (notify_watch_tx, mut notify_watch_rx) = mpsc::channel::<WatchEvent>(128);
+        let mut root_sender: Option<mpsc::Sender<WatchEvent>> = Some(root_watch_tx);
+        let mut notify_sender: Option<mpsc::Sender<WatchEvent>> = Some(notify_watch_tx);
+
+        let mut _root_reg: Option<Registration> = None;
+        let mut _notify_reg: Option<Registration> = None;
         let mut pending_notify: HashMap<String, Instant> = HashMap::new();
         let mut current: Option<Workspace> = None;
         let mut root_str = String::new();
@@ -249,23 +249,26 @@ pub fn driver(out: Stream<WorkspaceOut>) -> Stream<WorkspaceIn> {
                                 break;
                             }
 
-                            // Start watchers in a single spawn_blocking to avoid
-                            // paying the macOS FSEvents ~4s registration cost twice.
-                            let root2 = root.clone();
-                            let watch_tx2 = watch_tx.clone();
-                            let watcher_tx = watcher_ready_tx.clone();
                             let notify_dir = config.join("notify");
                             std::fs::create_dir_all(&notify_dir).ok();
-                            let notify_tx2 = notify_event_tx.clone();
-                            let nw_tx = notify_watcher_ready_tx.clone();
-                            std::thread::spawn(move || {
-                                if let Some(w) = start_watcher(&root2, watch_tx2) {
-                                    watcher_tx.blocking_send(w).ok();
-                                }
-                                if let Some(w) = start_notify_watcher(&notify_dir, notify_tx2) {
-                                    nw_tx.blocking_send(w).ok();
-                                }
-                            });
+
+                            // Register watchers with the shared FileWatcher
+                            // (inert watcher silently accepts but never delivers)
+                            if let Some(tx) = root_sender.take() {
+                                _root_reg = Some(file_watcher.register(
+                                    &root,
+                                    WatchMode::Recursive,
+                                    tx,
+                                ));
+                            }
+                            if let Some(tx) = notify_sender.take() {
+                                _notify_reg = Some(file_watcher.register(
+                                    &notify_dir,
+                                    WatchMode::NonRecursive,
+                                    tx,
+                                ));
+                            }
+                            let _ = result_tx.send(WorkspaceIn::WatchersReady).await;
                         }
                         WorkspaceOut::FlushUndo {
                             file_path,
@@ -366,15 +369,40 @@ pub fn driver(out: Stream<WorkspaceOut>) -> Stream<WorkspaceIn> {
                         }
                     }
                 }
-                Some(w) = watcher_ready_rx.recv() => {
-                    _watcher = Some(w);
+                Some(ev) = root_watch_rx.recv() => {
+                    match ev.kind {
+                        WatchEventKind::Create | WatchEventKind::Remove => {
+                            // Skip .git internal changes
+                            if ev.paths.iter().all(|p| {
+                                p.components().any(|c| c.as_os_str() == ".git")
+                            }) {
+                                continue;
+                            }
+                            if let Some(ref ws) = current {
+                                if result_tx.send(WorkspaceIn::WorkspaceChanged {
+                                    workspace: ws.clone(),
+                                }).await.is_err() {
+                                    break;
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
                 }
-                Some(w) = notify_watcher_ready_rx.recv() => {
-                    _notify_watcher = Some(w);
-                    let _ = result_tx.send(WorkspaceIn::WatchersReady).await;
-                }
-                Some(hash) = notify_event_rx.recv() => {
-                    pending_notify.insert(hash, Instant::now());
+                Some(ev) = notify_watch_rx.recv() => {
+                    match ev.kind {
+                        WatchEventKind::Create | WatchEventKind::Modify => {
+                            for path in &ev.paths {
+                                if let Some(name) = path.file_name() {
+                                    pending_notify.insert(
+                                        name.to_string_lossy().into_owned(),
+                                        Instant::now(),
+                                    );
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
                 }
                 _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {
                     let now = Instant::now();
@@ -389,14 +417,6 @@ pub fn driver(out: Stream<WorkspaceOut>) -> Stream<WorkspaceIn> {
                         let _ = result_tx
                             .send(WorkspaceIn::NotifyEvent { file_path_hash: hash })
                             .await;
-                    }
-                }
-                Some(()) = watch_rx.recv() => {
-                    // Workspace tree changed — re-emit to trigger browser rebuild
-                    if let Some(ref ws) = current {
-                        if result_tx.send(WorkspaceIn::WorkspaceChanged { workspace: ws.clone() }).await.is_err() {
-                            break;
-                        }
                     }
                 }
             }
@@ -415,30 +435,6 @@ pub fn driver(out: Stream<WorkspaceOut>) -> Stream<WorkspaceIn> {
 }
 
 // ── Internals ──
-
-fn start_watcher(root: &Path, tx: mpsc::Sender<()>) -> Option<notify::RecommendedWatcher> {
-    let mut watcher =
-        notify::recommended_watcher(move |res: Result<notify::Event, notify::Error>| {
-            let Ok(ev) = res else { return };
-            match ev.kind {
-                EventKind::Create(_) | EventKind::Remove(_) => {}
-                _ => return,
-            }
-            // Skip .git internal changes
-            if ev
-                .paths
-                .iter()
-                .all(|p| p.components().any(|c| c.as_os_str() == ".git"))
-            {
-                return;
-            }
-            tx.try_send(()).ok();
-        })
-        .ok()?;
-
-    watcher.watch(root, RecursiveMode::Recursive).ok()?;
-    Some(watcher)
-}
 
 fn find_git_root(start: &Path) -> PathBuf {
     let mut dir = start.to_path_buf();
@@ -474,29 +470,6 @@ fn try_become_primary(config: &Path, root: &Path) -> Option<File> {
 
     let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
     if rc == 0 { Some(file) } else { None }
-}
-
-fn start_notify_watcher(
-    dir: &Path,
-    tx: mpsc::Sender<String>,
-) -> Option<notify::RecommendedWatcher> {
-    let mut watcher =
-        notify::recommended_watcher(move |res: Result<notify::Event, notify::Error>| {
-            let Ok(ev) = res else { return };
-            match ev.kind {
-                EventKind::Create(_) | EventKind::Modify(_) => {}
-                _ => return,
-            }
-            for path in &ev.paths {
-                if let Some(name) = path.file_name() {
-                    tx.try_send(name.to_string_lossy().into_owned()).ok();
-                }
-            }
-        })
-        .ok()?;
-
-    watcher.watch(dir, RecursiveMode::NonRecursive).ok()?;
-    Some(watcher)
 }
 
 /// Generate a unique chain_id for undo persistence sessions.
