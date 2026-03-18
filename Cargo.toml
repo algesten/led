@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["led", "crates/clipboard", "crates/config-file", "crates/core", "crates/state", "crates/terminal-in", "crates/docstore", "crates/workspace", "crates/ui", "crates/timers", "crates/fs", "crates/syntax"]
+members = ["led", "crates/clipboard", "crates/config-file", "crates/core", "crates/state", "crates/terminal-in", "crates/docstore", "crates/workspace", "crates/ui", "crates/timers", "crates/fs", "crates/syntax", "crates/git"]
 default-members = ["led"]
 
 [workspace.dependencies]
@@ -14,6 +14,7 @@ led-workspace = { path = "crates/workspace" }
 led-ui = { path = "crates/ui" }
 led-timers = { path = "crates/timers" }
 led-fs = { path = "crates/fs" }
+led-git = { path = "crates/git" }
 led-syntax = { path = "crates/syntax" }
 
 arboard = { version = "3", default-features = false }
@@ -33,7 +34,7 @@ toml = "0.8"
 
 # crossterm = { version = "0.29", features = ["event-stream"] }
 # futures = "0.3"
-# git2 = { version = "0.20", features = ["vendored-libgit2"] }
+git2 = { version = "0.20", features = ["vendored-libgit2"] }
 # globset = "0.4"
 # led_buffer = { path = "crates/buffer" }
 # led_core = { path = "crates/core" }

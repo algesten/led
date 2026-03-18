@@ -3,6 +3,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use led_core::PanelSlot;
+use led_core::git::{self, FileStatus, LineStatus};
 use led_core::wrap::{chars_to_string, compute_chunks, expand_tabs, find_sub_line};
 use led_core::{BufferId, Doc};
 use led_state::{AppState, BracketPair, Dimensions, EntryKind, HighlightSpan};
@@ -41,6 +42,9 @@ pub struct DisplayInputs {
     syntax_styles: HashMap<String, Style>,
     bracket_match_style: Style,
     rainbow_styles: [Style; 6],
+    git_line_statuses: Vec<LineStatus>,
+    gutter_added_style: Style,
+    gutter_modified_style: Style,
 }
 
 impl PartialEq for DisplayInputs {
@@ -65,6 +69,7 @@ impl PartialEq for DisplayInputs {
             && self.matching_bracket == other.matching_bracket
             && self.cursor_row == other.cursor_row
             && self.cursor_col == other.cursor_col
+            && self.git_line_statuses == other.git_line_statuses
     }
 }
 
@@ -90,6 +95,15 @@ pub fn display_inputs(s: &AppState) -> Option<DisplayInputs> {
         .as_ref()
         .map(|is| (is.matches.clone(), is.match_idx))
         .unwrap_or_default();
+
+    let git_line_statuses = buf
+        .path
+        .as_ref()
+        .and_then(|p| s.git_line_statuses.get(p))
+        .cloned()
+        .unwrap_or_default();
+    let gutter_added_style = style::resolve(theme, &theme.git.gutter_added);
+    let gutter_modified_style = style::resolve(theme, &theme.git.gutter_modified);
 
     Some(DisplayInputs {
         buffer_id: id,
@@ -122,6 +136,9 @@ pub fn display_inputs(s: &AppState) -> Option<DisplayInputs> {
             style::resolve(theme, &theme.brackets.rainbow_4),
             style::resolve(theme, &theme.brackets.rainbow_5),
         ],
+        git_line_statuses,
+        gutter_added_style,
+        gutter_modified_style,
     })
 }
 
@@ -174,8 +191,17 @@ pub fn build_display_lines(d: &DisplayInputs) -> Rc<Vec<Line<'static>>> {
             let is_last = chunk_idx == chunks.len() - 1;
             let mut spans: Vec<Span<'static>> = Vec::with_capacity(4);
 
-            // Gutter: 2 spaces
-            spans.push(Span::styled("  ", d.gutter_style));
+            // Gutter: diff marker or blank
+            let gutter = match led_core::git::line_status_at(&d.git_line_statuses, line_idx) {
+                Some(led_core::git::LineStatusKind::GitAdded) if chunk_idx == 0 => {
+                    Span::styled("\u{258E} ", d.gutter_added_style)
+                }
+                Some(led_core::git::LineStatusKind::GitModified) if chunk_idx == 0 => {
+                    Span::styled("\u{258E} ", d.gutter_modified_style)
+                }
+                _ => Span::styled("  ", d.gutter_style),
+            };
+            spans.push(gutter);
 
             // Per-column style pipeline
             let chunk_len = ce - cs;
@@ -436,6 +462,7 @@ pub struct StatusInputs {
     pub viewport_width: u16,
     pub search_prompt: Option<String>,
     pub find_file_prompt: Option<(String, usize)>,
+    pub branch: Option<String>,
 }
 
 pub fn status_inputs(s: &AppState) -> StatusInputs {
@@ -475,6 +502,7 @@ pub fn status_inputs(s: &AppState) -> StatusInputs {
         });
 
     let find_file_prompt = s.find_file.as_ref().map(|ff| (ff.input.clone(), ff.cursor));
+    let branch = s.git_branch.clone();
 
     StatusInputs {
         file_name,
@@ -486,6 +514,7 @@ pub fn status_inputs(s: &AppState) -> StatusInputs {
         viewport_width,
         search_prompt,
         find_file_prompt,
+        branch,
     }
 }
 
@@ -508,7 +537,10 @@ pub fn build_status_content(s: &StatusInputs) -> Rc<String> {
 
     let modified = if s.is_dirty { " \u{25cf}" } else { "" };
     let default_left = format!(" {}{}", s.file_name, modified);
-    let right = format!("L{}:C{} ", s.cursor_row + 1, s.cursor_col + 1);
+    let right = match &s.branch {
+        Some(b) => format!("{}  L{}:C{} ", b, s.cursor_row + 1, s.cursor_col + 1),
+        None => format!("L{}:C{} ", s.cursor_row + 1, s.cursor_col + 1),
+    };
 
     let left = match s.warn.as_deref().or(s.info.as_deref()) {
         Some(m) => format!(" {}", m),
@@ -693,10 +725,15 @@ pub struct BrowserInputs {
     pub scroll_offset: usize,
     pub focused: bool,
     pub height: usize,
+    pub side_width: u16,
     pub dir_style: Style,
     pub file_style: Style,
     pub selected_style: Style,
     pub selected_unfocused_style: Style,
+    pub git_file_statuses: HashMap<std::path::PathBuf, std::collections::HashSet<FileStatus>>,
+    pub git_modified_style: Style,
+    pub git_added_style: Style,
+    pub git_untracked_style: Style,
 }
 
 pub fn browser_inputs(s: &AppState) -> Option<BrowserInputs> {
@@ -711,22 +748,30 @@ pub fn browser_inputs(s: &AppState) -> Option<BrowserInputs> {
         scroll_offset: s.browser.scroll_offset,
         focused: s.focus == PanelSlot::Side,
         height: dims.buffer_height(),
+        side_width: dims.side_panel_width,
         dir_style: style::resolve(theme, &theme.browser.directory),
         file_style: style::resolve(theme, &theme.browser.file),
         selected_style: style::resolve(theme, &theme.browser.selected),
         selected_unfocused_style: style::resolve(theme, &theme.browser.selected_unfocused),
+        git_file_statuses: s.git_file_statuses.clone(),
+        git_modified_style: style::resolve(theme, &theme.git.modified),
+        git_added_style: style::resolve(theme, &theme.git.added),
+        git_untracked_style: style::resolve(theme, &theme.git.untracked),
     })
 }
 
 pub fn build_browser_lines(b: &BrowserInputs) -> Rc<Vec<Line<'static>>> {
-    let end = (b.scroll_offset + b.height).min(b.entries.len());
-    let visible = &b.entries[b.scroll_offset..end];
+    let offset = b.scroll_offset.min(b.entries.len());
+    let end = (offset + b.height).min(b.entries.len());
+    let visible = &b.entries[offset..end];
+    // Usable width inside the side panel (subtract 1 for border)
+    let max_width = (b.side_width as usize).saturating_sub(1);
 
     let lines: Vec<Line<'static>> = visible
         .iter()
         .enumerate()
         .map(|(i, entry)| {
-            let abs_idx = b.scroll_offset + i;
+            let abs_idx = offset + i;
             let is_selected = abs_idx == b.selected;
 
             let indent = "  ".repeat(entry.depth);
@@ -735,7 +780,25 @@ pub fn build_browser_lines(b: &BrowserInputs) -> Rc<Vec<Line<'static>>> {
                 EntryKind::Directory { expanded: false } => "\u{25b7} ",
                 EntryKind::File => "  ",
             };
-            let text = format!("{}{}{}", indent, icon, entry.name);
+
+            // Resolve git status for this entry
+            let status_display = match &entry.kind {
+                EntryKind::File => {
+                    let statuses = b.git_file_statuses.get(&entry.path);
+                    statuses.and_then(git::resolve_display)
+                }
+                EntryKind::Directory { .. } => {
+                    let statuses = git::directory_statuses(&b.git_file_statuses, &entry.path);
+                    git::resolve_display(&statuses)
+                }
+            };
+
+            let git_style = status_display.as_ref().map(|sd| match sd.theme_key {
+                "git.modified" => b.git_modified_style,
+                "git.added" => b.git_added_style,
+                "git.untracked" => b.git_untracked_style,
+                _ => b.file_style,
+            });
 
             let entry_style = if is_selected {
                 if b.focused {
@@ -744,13 +807,45 @@ pub fn build_browser_lines(b: &BrowserInputs) -> Rc<Vec<Line<'static>>> {
                     b.selected_unfocused_style
                 }
             } else {
-                match &entry.kind {
+                git_style.unwrap_or(match &entry.kind {
                     EntryKind::Directory { .. } => b.dir_style,
                     EntryKind::File => b.file_style,
-                }
+                })
             };
 
-            Line::from(Span::styled(text, entry_style))
+            match status_display {
+                Some(sd) => {
+                    let status_char = match &entry.kind {
+                        EntryKind::Directory { .. } => '\u{2022}', // bullet for dirs
+                        EntryKind::File => sd.letter,
+                    };
+                    let name_text = format!("{}{}{}", indent, icon, entry.name);
+                    let name_width = name_text.chars().count();
+                    // Reserve 1 column for status character
+                    let avail = max_width.saturating_sub(1);
+                    let pad = avail.saturating_sub(name_width);
+                    let name_part: String = if name_width > avail {
+                        name_text.chars().take(avail).collect()
+                    } else {
+                        name_text
+                    };
+                    Line::from(vec![
+                        Span::styled(format!("{}{:pad$}", name_part, "", pad = pad), entry_style),
+                        Span::styled(
+                            status_char.to_string(),
+                            if is_selected {
+                                entry_style
+                            } else {
+                                git_style.unwrap_or(entry_style)
+                            },
+                        ),
+                    ])
+                }
+                None => {
+                    let text = format!("{}{}{}", indent, icon, entry.name);
+                    Line::from(Span::styled(text, entry_style))
+                }
+            }
         })
         .collect();
 

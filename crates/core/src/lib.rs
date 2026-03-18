@@ -1,6 +1,7 @@
 mod alert;
 mod config;
 mod doc;
+pub mod git;
 pub mod keys;
 pub mod rx;
 pub mod theme;

@@ -6,29 +6,6 @@ Every side effect lives in a Driver. The Model is a pure reduce: `(State, Mut) -
 
 ---
 
-## Phase 14: Find File Panel
-
-Directory completion, tilde expansion, path abbreviation.
-
-- Status bar shows `Find file: {input}` with cursor
-- Side panel shows completion list with directory icons
-- Tab completion: single match → complete, multiple → longest common prefix
-- Wrapping selection through completions
-
----
-
-## Phase 15: Git Integration
-
-git2 driver for branch, file statuses, line statuses.
-
-- **File status worker:** scans entire repo on save/resume (50ms coalescing)
-- **Line status worker:** per-file diff on tab activation
-- Status bar branch display
-- File browser status icons (later)
-- Gutter diff markers: `▎` colored by `git.gutter_added` / `git.gutter_modified`
-
----
-
 ## Phase 16: File Search (Ripgrep)
 
 `grep_searcher` + `ignore::WalkBuilder`. Background worker with request coalescing (only process latest query).

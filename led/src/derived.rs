@@ -23,6 +23,7 @@ pub struct Derived {
     pub fs_out: Stream<FsOut>,
     pub clipboard_out: Stream<led_clipboard::ClipboardOut>,
     pub syntax_out: Stream<SyntaxOut>,
+    pub git_out: Stream<led_git::GitOut>,
 }
 
 pub fn derived(state: Stream<Arc<AppState>>) -> Derived {
@@ -382,6 +383,47 @@ pub fn derived(state: Stream<Arc<AppState>>) -> Derived {
         });
     }
 
+    // Git: schedule 50ms coalescing timer when file scan requested
+    let git_file_timer = state
+        .dedupe_by(|s| s.pending_git_file_scan.version())
+        .filter(|s| s.pending_git_file_scan.version() > 0)
+        .map(|_| TimersOut::Set {
+            name: "git_file_scan",
+            duration: Duration::from_millis(50),
+            schedule: Schedule::Replace,
+        })
+        .stream();
+
+    // Git: emit ScanFiles after timer fires (git_scan_seq bumped by handle_timer)
+    let git_file_scan = state
+        .dedupe_by(|s| s.git_scan_seq.version())
+        .filter(|s| s.git_scan_seq.version() > 0)
+        .filter(|s| s.workspace.is_some())
+        .map(|s| {
+            let root = s.workspace.as_ref().unwrap().root.clone();
+            led_git::GitOut::ScanFiles { root }
+        })
+        .stream();
+
+    // Git: emit ScanLines immediately on tab switch / save
+    let git_line_scan = state
+        .dedupe_by(|s| s.pending_git_line_scan.version())
+        .filter(|s| s.pending_git_line_scan.version() > 0)
+        .filter(|s| s.pending_git_line_scan.is_some())
+        .filter(|s| s.workspace.is_some())
+        .map(|s| {
+            let root = s.workspace.as_ref().unwrap().root.clone();
+            let path = (*s.pending_git_line_scan).clone().unwrap();
+            led_git::GitOut::ScanLines { root, path }
+        })
+        .stream();
+
+    git_file_timer.forward(&timers_out);
+
+    let git_out: Stream<led_git::GitOut> = Stream::new();
+    git_file_scan.forward(&git_out);
+    git_line_scan.forward(&git_out);
+
     Derived {
         ui,
         workspace_out,
@@ -391,6 +433,7 @@ pub fn derived(state: Stream<Arc<AppState>>) -> Derived {
         fs_out,
         clipboard_out,
         syntax_out,
+        git_out,
     }
 }
 

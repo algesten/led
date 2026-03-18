@@ -1,3 +1,4 @@
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 mod action;
@@ -12,6 +13,7 @@ mod search;
 mod sync_of;
 
 use led_config_file::ConfigFile;
+use led_core::git::FileStatus;
 use led_core::keys::{Keymap, Keys};
 use led_core::rx::Stream;
 use led_core::theme::Theme;
@@ -227,6 +229,28 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Arc<AppState>> {
         })
         .stream();
 
+    let git_file_s = drivers
+        .git_in
+        .filter(|ev| matches!(ev, led_git::GitIn::FileStatuses { .. }))
+        .map(|ev| match ev {
+            led_git::GitIn::FileStatuses { statuses, branch } => {
+                Mut::GitFileStatuses { statuses, branch }
+            }
+            _ => unreachable!(),
+        })
+        .stream();
+
+    let git_line_s = drivers
+        .git_in
+        .filter(|ev| matches!(ev, led_git::GitIn::LineStatuses { .. }))
+        .map(|ev| match ev {
+            led_git::GitIn::LineStatuses { path, statuses } => {
+                Mut::GitLineStatuses { path, statuses }
+            }
+            _ => unreachable!(),
+        })
+        .stream();
+
     workspace_s.forward(&muts);
     undo_flushed_s.forward(&muts);
     notify_s.forward(&muts);
@@ -242,6 +266,8 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Arc<AppState>> {
     fs_find_file_listed_s.forward(&muts);
     clipboard_s.forward(&muts);
     syntax_s.forward(&muts);
+    git_file_s.forward(&muts);
+    git_line_s.forward(&muts);
 
     // ── 3. Reduce ──
 
@@ -251,6 +277,9 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Arc<AppState>> {
         match m {
             Mut::ActivateBuffer(id) => {
                 s.active_buffer = Some(id);
+                if let Some(path) = s.buffers.get(&id).and_then(|b| b.path.clone()) {
+                    s.pending_git_line_scan.set(Some(path));
+                }
                 action::reveal_active_buffer(&mut s);
             }
             Mut::Action(a) => action::handle_action(&mut s, a),
@@ -312,6 +341,10 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Arc<AppState>> {
                 if let Some(buf) = s.buffers.get_mut(&id) {
                     buf.change_seq = next_change_seq();
                 }
+                s.pending_git_file_scan.set(());
+                if let Some(path) = s.buffers.get(&id).and_then(|b| b.path.clone()) {
+                    s.pending_git_line_scan.set(Some(path));
+                }
                 if let Some(path) = undo_clear_path {
                     s.pending_undo_clear.set(path);
                 }
@@ -333,6 +366,13 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Arc<AppState>> {
                 find_file::handle_listed(&mut s, dir, entries);
             }
             Mut::ConfigTheme(v) => s.config_theme = Some(v),
+            Mut::GitFileStatuses { statuses, branch } => {
+                s.git_branch = branch;
+                s.git_file_statuses = statuses;
+            }
+            Mut::GitLineStatuses { path, statuses } => {
+                s.git_line_statuses.insert(path, statuses);
+            }
             Mut::ForceRedraw(v) => s.force_redraw = v,
             Mut::Keymap(v) => s.keymap = Some(v),
             Mut::Resize(w, h) => {
@@ -493,7 +533,12 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Arc<AppState>> {
                     }
                 }
             }
-            Mut::Suspend(v) => s.suspend = v,
+            Mut::Suspend(v) => {
+                s.suspend = v;
+                if !v {
+                    s.pending_git_file_scan.set(());
+                }
+            }
             Mut::TimerFired(name) => handle_timer(&mut s, name),
             Mut::Workspace(v) => {
                 s.browser.root = Some(v.root.clone());
@@ -502,6 +547,7 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Arc<AppState>> {
                 let mut dirs = vec![v.root.clone()];
                 dirs.extend(s.browser.expanded_dirs.iter().cloned());
                 s.pending_lists.set(dirs);
+                s.pending_git_file_scan.set(());
                 s.workspace = Some(Arc::new(v));
             }
         }
@@ -530,6 +576,9 @@ fn handle_timer(state: &mut AppState, name: &'static str) {
         "alert_clear" => {
             state.info = None;
             state.warn = None;
+        }
+        "git_file_scan" => {
+            state.git_scan_seq.set(());
         }
         "undo_flush" => {
             // Handled by the undo_flush_s combinator chain, not here.
@@ -565,6 +614,14 @@ enum Mut {
     ConfigTheme(ConfigFile<Theme>),
     DirListed(std::path::PathBuf, Vec<led_fs::DirEntry>),
     FindFileListed(std::path::PathBuf, Vec<led_fs::FindFileEntry>),
+    GitFileStatuses {
+        statuses: HashMap<PathBuf, HashSet<FileStatus>>,
+        branch: Option<String>,
+    },
+    GitLineStatuses {
+        path: PathBuf,
+        statuses: Vec<led_core::git::LineStatus>,
+    },
     ForceRedraw(u64),
     Keymap(Arc<Keymap>),
     Resize(u16, u16),
@@ -623,6 +680,8 @@ impl Mut {
             Mut::ConfigTheme(_) => "ConfigTheme",
             Mut::DirListed(_, _) => "DirListed",
             Mut::FindFileListed(_, _) => "FindFileListed",
+            Mut::GitFileStatuses { .. } => "GitFileStatuses",
+            Mut::GitLineStatuses { .. } => "GitLineStatuses",
             Mut::ForceRedraw(_) => "ForceRedraw",
             Mut::Keymap(_) => "Keymap",
             Mut::Resize(_, _) => "Resize",

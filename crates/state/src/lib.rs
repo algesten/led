@@ -368,6 +368,14 @@ pub struct AppState {
     // Find file
     pub find_file: Option<FindFileState>,
     pub pending_find_file_list: Versioned<Option<(PathBuf, String, bool)>>,
+
+    // Git
+    pub git_branch: Option<String>,
+    pub git_file_statuses: HashMap<PathBuf, HashSet<led_core::git::FileStatus>>,
+    pub git_line_statuses: HashMap<PathBuf, Vec<led_core::git::LineStatus>>,
+    pub pending_git_file_scan: Versioned<()>,
+    pub pending_git_line_scan: Versioned<Option<PathBuf>>,
+    pub git_scan_seq: Versioned<()>,
 }
 
 impl AppState {
