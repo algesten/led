@@ -1034,6 +1034,7 @@ version = "0.1.0"
 dependencies = [
  "led-config-file",
  "led-core",
+ "led-fs",
  "led-state",
  "log",
  "ratatui",

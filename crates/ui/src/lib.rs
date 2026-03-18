@@ -30,9 +30,28 @@ pub fn driver(state: Stream<Arc<AppState>>) -> Ui {
         .stream();
 
     let cursor_s = state
-        .map(|s| display::cursor_inputs(&s))
+        .map(|s| {
+            let dims = s.dims?;
+
+            // Find-file cursor: absolute position on the status bar
+            if let Some(ref ff) = s.find_file {
+                let prefix_len = " Find file: ".len() as u16;
+                let cx = prefix_len + ff.cursor as u16;
+                let cy = dims.viewport_height.saturating_sub(dims.status_bar_height);
+                if cx < dims.viewport_width {
+                    return Some((cx, cy));
+                }
+                return None;
+            }
+
+            // Buffer cursor: compute relative, then add buffer area offset
+            let (rel_cx, rel_cy) =
+                display::cursor_inputs(&s).and_then(|c| display::compute_cursor_pos(&c))?;
+            let buf_x = dims.side_width();
+            let buf_y = 0u16; // buffer area starts at top of editor area
+            Some((buf_x + rel_cx, buf_y + rel_cy))
+        })
         .dedupe()
-        .map(|opt| opt.and_then(|c| display::compute_cursor_pos(&c)))
         .stream();
 
     let status_s = state
@@ -61,11 +80,23 @@ pub fn driver(state: Stream<Arc<AppState>>) -> Ui {
         .stream();
 
     let browser_s = state
-        .map(|s| display::browser_inputs(&s))
+        .map(|s| {
+            let ff = display::find_file_completion_inputs(&s);
+            let browser = if ff.is_none() {
+                display::browser_inputs(&s)
+            } else {
+                None
+            };
+            (ff, browser)
+        })
         .dedupe()
-        .map(|opt| match opt {
-            Some(b) => display::build_browser_lines(&b),
-            None => Rc::new(Vec::new()),
+        .map(|(ff, browser)| {
+            if let Some(f) = ff {
+                return display::build_find_file_completion_lines(&f);
+            }
+            browser
+                .map(|b| display::build_browser_lines(&b))
+                .unwrap_or_else(|| Rc::new(Vec::new()))
         })
         .stream();
 

@@ -6,7 +6,14 @@ use tokio::sync::mpsc;
 /// Commands sent to the filesystem driver.
 #[derive(Clone, Debug)]
 pub enum FsOut {
-    ListDir { path: PathBuf },
+    ListDir {
+        path: PathBuf,
+    },
+    FindFileList {
+        dir: PathBuf,
+        prefix: String,
+        show_hidden: bool,
+    },
 }
 
 /// Results returned from the filesystem driver.
@@ -16,12 +23,24 @@ pub enum FsIn {
         path: PathBuf,
         entries: Vec<DirEntry>,
     },
+    FindFileListed {
+        dir: PathBuf,
+        entries: Vec<FindFileEntry>,
+    },
 }
 
 /// A single directory entry (file or subdirectory).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DirEntry {
     pub name: String,
+    pub is_dir: bool,
+}
+
+/// A find-file completion entry.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FindFileEntry {
+    pub name: String,  // display name: dirs get trailing "/"
+    pub full: PathBuf, // full path
     pub is_dir: bool,
 }
 
@@ -45,6 +64,17 @@ pub fn driver(out: Stream<FsOut>) -> Stream<FsIn> {
                     let entries = list_dir(&path);
                     result_tx.send(FsIn::DirListed { path, entries }).await.ok();
                 }
+                FsOut::FindFileList {
+                    dir,
+                    prefix,
+                    show_hidden,
+                } => {
+                    let entries = find_file_list(&dir, &prefix, show_hidden);
+                    result_tx
+                        .send(FsIn::FindFileListed { dir, entries })
+                        .await
+                        .ok();
+                }
             }
         }
     });
@@ -58,6 +88,56 @@ pub fn driver(out: Stream<FsOut>) -> Stream<FsIn> {
     });
 
     stream
+}
+
+fn find_file_list(dir: &std::path::Path, prefix: &str, show_hidden: bool) -> Vec<FindFileEntry> {
+    let read = match std::fs::read_dir(dir) {
+        Ok(r) => r,
+        Err(e) => {
+            log::warn!(
+                "find_file_list: failed to read dir {}: {}",
+                dir.display(),
+                e
+            );
+            return Vec::new();
+        }
+    };
+
+    let prefix_lower = prefix.to_lowercase();
+
+    let mut entries: Vec<FindFileEntry> = read
+        .filter_map(|e| e.ok())
+        .filter_map(|e| {
+            let raw_name = e.file_name().to_string_lossy().into_owned();
+            if !show_hidden && raw_name.starts_with('.') {
+                return None;
+            }
+            if !raw_name.to_lowercase().starts_with(&prefix_lower) {
+                return None;
+            }
+            let is_dir = e.file_type().ok()?.is_dir();
+            let display_name = if is_dir {
+                format!("{raw_name}/")
+            } else {
+                raw_name
+            };
+            let full = dir.join(e.file_name());
+            Some(FindFileEntry {
+                name: display_name,
+                full,
+                is_dir,
+            })
+        })
+        .collect();
+
+    // Sort: dirs first, then case-insensitive alphabetical
+    entries.sort_by(|a, b| {
+        b.is_dir
+            .cmp(&a.is_dir)
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
+
+    entries
 }
 
 fn list_dir(path: &std::path::Path) -> Vec<DirEntry> {

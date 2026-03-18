@@ -3243,3 +3243,178 @@ fn close_bracket_maps_to_insert_close_bracket() {
         line
     );
 }
+
+// ── Find file ──
+
+#[test]
+fn find_file_activates_and_aborts() {
+    let t = TestHarness::new().with_file("hello\n").run(vec![
+        Do(FindFile),
+        WaitFor(|s| s.find_file.is_some()),
+        Do(Abort),
+        WaitFor(|s| s.find_file.is_none()),
+    ]);
+
+    assert!(t.state.find_file.is_none());
+}
+
+#[test]
+fn find_file_initial_input_has_dir() {
+    let t = TestHarness::new()
+        .with_file("hello\n")
+        .run(vec![Do(FindFile), WaitFor(|s| s.find_file.is_some())]);
+
+    let ff = t.state.find_file.as_ref().unwrap();
+    assert!(
+        ff.input.ends_with('/'),
+        "input should end with /: {}",
+        ff.input
+    );
+    assert!(ff.cursor == ff.input.len(), "cursor should be at end");
+}
+
+#[test]
+fn find_file_receives_completions() {
+    let t = TestHarness::new().with_file("hello\n").run(vec![
+        Do(FindFile),
+        WaitFor(|s| {
+            s.find_file
+                .as_ref()
+                .map_or(false, |ff| !ff.completions.is_empty())
+        }),
+    ]);
+
+    let ff = t.state.find_file.as_ref().unwrap();
+    assert!(
+        !ff.completions.is_empty(),
+        "completions should be populated after activation"
+    );
+}
+
+#[test]
+fn find_file_typing_filters_completions() {
+    // Create two files so we can filter
+    let t = TestHarness::new()
+        .with_named_file("alpha.txt", "a\n")
+        .with_named_file("beta.txt", "b\n")
+        .run(vec![
+            Do(FindFile),
+            // Wait for initial completions
+            WaitFor(|s| {
+                s.find_file
+                    .as_ref()
+                    .map_or(false, |ff| ff.completions.len() >= 2)
+            }),
+            // Type 'a' to filter
+            Do(InsertChar('a')),
+            // Wait for filtered completions
+            WaitFor(|s| {
+                s.find_file.as_ref().map_or(false, |ff| {
+                    ff.completions.len() == 1 && ff.completions[0].name.starts_with("alpha")
+                })
+            }),
+        ]);
+
+    let ff = t.state.find_file.as_ref().unwrap();
+    assert_eq!(ff.completions.len(), 1);
+    assert!(ff.completions[0].name.starts_with("alpha"));
+}
+
+#[test]
+fn find_file_tab_shows_side_panel() {
+    let t = TestHarness::new().with_file("hello\n").run(vec![
+        Do(FindFile),
+        // Wait for completions to arrive (input ends with / → rule 1 applies)
+        WaitFor(|s| {
+            s.find_file
+                .as_ref()
+                .map_or(false, |ff| !ff.completions.is_empty())
+        }),
+        Do(InsertTab),
+        WaitFor(|s| s.find_file.as_ref().map_or(false, |ff| ff.show_side)),
+    ]);
+
+    assert!(t.state.find_file.as_ref().unwrap().show_side);
+}
+
+#[test]
+fn find_file_opens_existing() {
+    // Create a file, then use find-file to open a second file
+    let t = TestHarness::new()
+        .with_named_file("first.txt", "first\n")
+        .with_named_file("second.txt", "second\n")
+        .run(vec![
+            // Activate find-file
+            Do(FindFile),
+            WaitFor(|s| {
+                s.find_file
+                    .as_ref()
+                    .map_or(false, |ff| !ff.completions.is_empty())
+            }),
+            // Type 'second.txt'
+            Do(InsertChar('s')),
+            Do(InsertChar('e')),
+            Do(InsertChar('c')),
+            Do(InsertChar('o')),
+            Do(InsertChar('n')),
+            Do(InsertChar('d')),
+            Do(InsertChar('.')),
+            Do(InsertChar('t')),
+            Do(InsertChar('x')),
+            Do(InsertChar('t')),
+            // Wait for completions to match
+            WaitFor(|s| {
+                s.find_file
+                    .as_ref()
+                    .map_or(false, |ff| ff.completions.len() == 1)
+            }),
+            // Press enter to open
+            Do(InsertNewline),
+            // Wait for find-file to close and file to open
+            WaitFor(|s| s.find_file.is_none()),
+            WaitFor(|s| s.buffers.len() >= 2),
+        ]);
+
+    assert!(t.state.find_file.is_none());
+    // The second file should be open
+    let has_second = t.state.buffers.values().any(|b| {
+        b.path
+            .as_ref()
+            .and_then(|p| p.file_name())
+            .map_or(false, |n| n == "second.txt")
+    });
+    assert!(has_second, "second.txt should be open");
+}
+
+#[test]
+fn find_file_up_down_wraps() {
+    let t = TestHarness::new()
+        .with_named_file("aaa.txt", "a\n")
+        .with_named_file("bbb.txt", "b\n")
+        .run(vec![
+            Do(FindFile),
+            // Wait for completions
+            WaitFor(|s| {
+                s.find_file
+                    .as_ref()
+                    .map_or(false, |ff| ff.completions.len() >= 2)
+            }),
+            // MoveDown → selects first (index 0)
+            Do(MoveDown),
+            WaitFor(|s| {
+                s.find_file
+                    .as_ref()
+                    .map_or(false, |ff| ff.selected == Some(0))
+            }),
+            // MoveUp from 0 → wraps to last
+            Do(MoveUp),
+            WaitFor(|s| {
+                s.find_file
+                    .as_ref()
+                    .map_or(false, |ff| ff.selected == Some(ff.completions.len() - 1))
+            }),
+        ]);
+
+    let ff = t.state.find_file.as_ref().unwrap();
+    assert_eq!(ff.selected, Some(ff.completions.len() - 1));
+}

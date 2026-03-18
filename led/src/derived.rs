@@ -264,12 +264,31 @@ pub fn derived(state: Stream<Arc<AppState>>) -> Derived {
     alert_timer.forward(&timers_out);
     undo_timer.forward(&timers_out);
 
-    // FS: directory listing requests
-    let fs_out = state
+    // FS: browser directory listing requests
+    let browser_list = state
         .dedupe_by(|s| s.pending_lists.version())
         .filter(|s| s.pending_lists.version() > 0)
         .map(|s| (*s.pending_lists).clone())
         .flat_map(|paths| paths.into_iter().map(|path| FsOut::ListDir { path }));
+
+    // FS: find-file listing requests
+    let ff_list = state
+        .dedupe_by(|s| s.pending_find_file_list.version())
+        .filter(|s| s.pending_find_file_list.version() > 0)
+        .filter(|s| s.pending_find_file_list.is_some())
+        .map(|s| {
+            let (dir, prefix, show_hidden) = (*s.pending_find_file_list).clone().unwrap();
+            FsOut::FindFileList {
+                dir,
+                prefix,
+                show_hidden,
+            }
+        })
+        .stream();
+
+    let fs_out: Stream<FsOut> = Stream::new();
+    browser_list.forward(&fs_out);
+    ff_list.forward(&fs_out);
 
     // Clipboard: sync kill_ring to system clipboard on change
     let clipboard_write = state

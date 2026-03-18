@@ -4,6 +4,7 @@ mod action;
 mod actions_of;
 mod buffers_of;
 mod edit;
+pub(crate) mod find_file;
 mod jump;
 mod mov;
 mod process_of;
@@ -189,10 +190,21 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Arc<AppState>> {
                 .collect::<Vec<_>>()
         });
 
-    let fs_s = drivers
+    let fs_dir_listed_s = drivers
         .fs_in
-        .map(|ev| match ev {
-            led_fs::FsIn::DirListed { path, entries } => Mut::DirListed(path, entries),
+        .filter_map(|ev| match ev {
+            led_fs::FsIn::DirListed { path, entries } => Some(Mut::DirListed(path, entries)),
+            _ => None,
+        })
+        .stream();
+
+    let fs_find_file_listed_s = drivers
+        .fs_in
+        .filter_map(|ev| match ev {
+            led_fs::FsIn::FindFileListed { dir, entries } => {
+                Some(Mut::FindFileListed(dir, entries))
+            }
+            _ => None,
         })
         .stream();
 
@@ -226,7 +238,8 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Arc<AppState>> {
     process_s.forward(&muts);
     timers_s.forward(&muts);
     undo_flush_s.forward(&muts);
-    fs_s.forward(&muts);
+    fs_dir_listed_s.forward(&muts);
+    fs_find_file_listed_s.forward(&muts);
     clipboard_s.forward(&muts);
     syntax_s.forward(&muts);
 
@@ -315,6 +328,9 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Arc<AppState>> {
                 s.browser.rebuild_entries();
                 s.browser.complete_pending_reveal();
                 action::browser_scroll_to_selected(&mut s);
+            }
+            Mut::FindFileListed(dir, entries) => {
+                find_file::handle_listed(&mut s, dir, entries);
             }
             Mut::ConfigTheme(v) => s.config_theme = Some(v),
             Mut::ForceRedraw(v) => s.force_redraw = v,
@@ -548,6 +564,7 @@ enum Mut {
     ConfigKeys(ConfigFile<Keys>),
     ConfigTheme(ConfigFile<Theme>),
     DirListed(std::path::PathBuf, Vec<led_fs::DirEntry>),
+    FindFileListed(std::path::PathBuf, Vec<led_fs::FindFileEntry>),
     ForceRedraw(u64),
     Keymap(Arc<Keymap>),
     Resize(u16, u16),
@@ -605,6 +622,7 @@ impl Mut {
             Mut::ConfigKeys(_) => "ConfigKeys",
             Mut::ConfigTheme(_) => "ConfigTheme",
             Mut::DirListed(_, _) => "DirListed",
+            Mut::FindFileListed(_, _) => "FindFileListed",
             Mut::ForceRedraw(_) => "ForceRedraw",
             Mut::Keymap(_) => "Keymap",
             Mut::Resize(_, _) => "Resize",

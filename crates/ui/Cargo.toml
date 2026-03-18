@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 led-core = { workspace = true }
+led-fs = { workspace = true }
 led-state = { workspace = true }
 
 log = { workspace = true }

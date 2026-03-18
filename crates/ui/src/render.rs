@@ -33,9 +33,14 @@ pub fn render(
                 .areas(main_area);
 
         render_side_panel(browser, layout, frame, side_area);
-        render_editor_area(lines, cursor, tabs, layout, frame, editor_area);
+        render_editor_area(lines, tabs, layout, frame, editor_area);
     } else {
-        render_editor_area(lines, cursor, tabs, layout, frame, main_area);
+        render_editor_area(lines, tabs, layout, frame, main_area);
+    }
+
+    // Cursor: absolute terminal coordinates
+    if let Some((cx, cy)) = cursor {
+        frame.set_cursor_position(Position::new(cx, cy));
     }
 }
 
@@ -63,7 +68,6 @@ fn render_side_panel(browser: &[Line], layout: &LayoutInfo, frame: &mut Frame, a
 
 fn render_editor_area(
     lines: &[Line],
-    cursor: Option<(u16, u16)>,
     tabs: &TabsInputs,
     layout: &LayoutInfo,
     frame: &mut Frame,
@@ -78,7 +82,7 @@ fn render_editor_area(
     render_tab_bar(tabs, layout, frame, tab_area);
 
     if !lines.is_empty() {
-        render_buffer(lines, cursor, layout, frame, buffer_area);
+        render_buffer(lines, layout, frame, buffer_area);
     } else {
         frame.render_widget(Block::default().style(layout.text_style), buffer_area);
     }
@@ -110,18 +114,7 @@ fn render_tab_bar(tabs: &TabsInputs, layout: &LayoutInfo, frame: &mut Frame, are
     }
 }
 
-fn render_buffer(
-    lines: &[Line],
-    cursor: Option<(u16, u16)>,
-    layout: &LayoutInfo,
-    frame: &mut Frame,
-    area: Rect,
-) {
+fn render_buffer(lines: &[Line], layout: &LayoutInfo, frame: &mut Frame, area: Rect) {
     let paragraph = Paragraph::new(lines.to_vec()).style(layout.text_style);
     frame.render_widget(paragraph, area);
-
-    // Cursor: offset by buffer area position
-    if let Some((cx, cy)) = cursor {
-        frame.set_cursor_position(Position::new(area.x + cx, area.y + cy));
-    }
 }

@@ -302,6 +302,18 @@ fn walk_tree(
     }
 }
 
+// ── Find file ──
+
+#[derive(Debug, Clone)]
+pub struct FindFileState {
+    pub input: String,
+    pub cursor: usize,                           // byte position in input
+    pub base_input: String,                      // input before arrow selection; dir prefix source
+    pub completions: Vec<led_fs::FindFileEntry>, // from driver, already filtered+sorted
+    pub selected: Option<usize>,
+    pub show_side: bool,
+}
+
 // ── App state ──
 
 #[derive(Debug, Clone, Default)]
@@ -352,6 +364,10 @@ pub struct AppState {
     pub jump_list: VecDeque<JumpPosition>,
     pub jump_list_index: usize,
     pub pending_jump_position: Option<JumpPosition>,
+
+    // Find file
+    pub find_file: Option<FindFileState>,
+    pub pending_find_file_list: Versioned<Option<(PathBuf, String, bool)>>,
 }
 
 impl AppState {

@@ -363,6 +363,9 @@ impl PartialEq for CursorInputs {
 }
 
 pub fn cursor_inputs(s: &AppState) -> Option<CursorInputs> {
+    if s.find_file.is_some() {
+        return None;
+    }
     let dims = s.dims?;
     let id = s.active_buffer?;
     let buf = s.buffers.get(&id)?;
@@ -432,6 +435,7 @@ pub struct StatusInputs {
     pub warn: Option<String>,
     pub viewport_width: u16,
     pub search_prompt: Option<String>,
+    pub find_file_prompt: Option<(String, usize)>,
 }
 
 pub fn status_inputs(s: &AppState) -> StatusInputs {
@@ -470,6 +474,8 @@ pub fn status_inputs(s: &AppState) -> StatusInputs {
             })
         });
 
+    let find_file_prompt = s.find_file.as_ref().map(|ff| (ff.input.clone(), ff.cursor));
+
     StatusInputs {
         file_name,
         is_dirty,
@@ -479,10 +485,19 @@ pub fn status_inputs(s: &AppState) -> StatusInputs {
         warn: s.warn.clone(),
         viewport_width,
         search_prompt,
+        find_file_prompt,
     }
 }
 
 pub fn build_status_content(s: &StatusInputs) -> Rc<String> {
+    // During find-file, show find-file prompt
+    if let Some((ref input, _cursor)) = s.find_file_prompt {
+        let left = format!(" Find file: {}", input);
+        let total = s.viewport_width as usize;
+        let padding = total.saturating_sub(left.chars().count());
+        return Rc::new(format!("{}{:padding$}", left, "", padding = padding));
+    }
+
     // During search, show search prompt instead of normal status
     if let Some(ref prompt) = s.search_prompt {
         let left = format!(" {}", prompt);
@@ -622,8 +637,19 @@ pub fn layout_inputs(s: &AppState) -> LayoutInputs {
         })
         .unwrap_or_default();
 
+    // Force side panel when find-file completions should show
+    let dims = match s.dims {
+        Some(mut d) => {
+            if s.find_file.as_ref().is_some_and(|ff| ff.show_side) {
+                d.show_side_panel = true;
+            }
+            Some(d)
+        }
+        None => None,
+    };
+
     LayoutInputs {
-        dims: s.dims,
+        dims,
         has_theme: s.config_theme.is_some(),
         force_redraw: s.force_redraw,
         side_border_style,
@@ -674,6 +700,9 @@ pub struct BrowserInputs {
 }
 
 pub fn browser_inputs(s: &AppState) -> Option<BrowserInputs> {
+    if s.find_file.as_ref().is_some_and(|ff| ff.show_side) {
+        return None;
+    }
     let dims = s.dims?;
     let theme = s.config_theme.as_ref()?.file.as_ref();
     Some(BrowserInputs {
@@ -719,6 +748,86 @@ pub fn build_browser_lines(b: &BrowserInputs) -> Rc<Vec<Line<'static>>> {
                     EntryKind::Directory { .. } => b.dir_style,
                     EntryKind::File => b.file_style,
                 }
+            };
+
+            Line::from(Span::styled(text, entry_style))
+        })
+        .collect();
+
+    Rc::new(lines)
+}
+
+// ── Find file completions ──
+
+#[derive(Clone, PartialEq)]
+pub struct FindFileCompletionInputs {
+    pub completions: Vec<led_fs::FindFileEntry>,
+    pub selected: Option<usize>,
+    pub height: usize,
+    pub dir_style: Style,
+    pub file_style: Style,
+    pub selected_style: Style,
+    pub side_width: u16,
+}
+
+pub fn find_file_completion_inputs(s: &AppState) -> Option<FindFileCompletionInputs> {
+    let ff = s.find_file.as_ref()?;
+    if !ff.show_side {
+        return None;
+    }
+    let dims = s.dims?;
+    let theme = s.config_theme.as_ref()?.file.as_ref();
+    Some(FindFileCompletionInputs {
+        completions: ff.completions.clone(),
+        selected: ff.selected,
+        height: dims.buffer_height(),
+        dir_style: style::resolve(theme, &theme.browser.directory),
+        file_style: style::resolve(theme, &theme.browser.file),
+        selected_style: style::resolve(theme, &theme.browser.selected),
+        side_width: dims.side_panel_width,
+    })
+}
+
+pub fn build_find_file_completion_lines(f: &FindFileCompletionInputs) -> Rc<Vec<Line<'static>>> {
+    if f.completions.is_empty() {
+        return Rc::new(Vec::new());
+    }
+
+    // Scroll to keep selected visible
+    let scroll = if let Some(sel) = f.selected {
+        if sel < f.height {
+            0
+        } else {
+            sel - f.height + 1
+        }
+    } else {
+        0
+    };
+
+    // Usable width inside the side panel (subtract 1 for border)
+    let max_width = (f.side_width as usize).saturating_sub(1);
+
+    let lines: Vec<Line<'static>> = f
+        .completions
+        .iter()
+        .skip(scroll)
+        .take(f.height)
+        .enumerate()
+        .map(|(i, comp)| {
+            let is_selected = f.selected == Some(scroll + i);
+            let entry_style = if is_selected {
+                f.selected_style
+            } else if comp.is_dir {
+                f.dir_style
+            } else {
+                f.file_style
+            };
+
+            let name = &comp.name;
+            let text = if name.len() > max_width && max_width > 1 {
+                format!("{}\u{2026}", &name[..max_width.saturating_sub(1)])
+            } else {
+                format!("{name:max_width$}")
             };
 
             Line::from(Span::styled(text, entry_style))

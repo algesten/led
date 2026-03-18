@@ -3,7 +3,7 @@ use led_state::{AppState, BufferState, Dimensions, EditKind, EntryKind, SaveStat
 
 use led_state::JumpPosition;
 
-use super::{edit, jump, mov, search};
+use super::{edit, find_file, jump, mov, search};
 
 pub fn handle_action(state: &mut AppState, action: Action) {
     // Handle confirmation prompt for dirty buffer kill
@@ -16,6 +16,13 @@ pub fn handle_action(state: &mut AppState, action: Action) {
         }
         // Any other action: cancel and fall through to normal handling
         if matches!(action, Action::Abort) {
+            return;
+        }
+    }
+
+    // Intercept actions during find-file
+    if state.find_file.is_some() {
+        if find_file::handle_find_file_action(state, &action) {
             return;
         }
     }
@@ -303,6 +310,9 @@ pub fn handle_action(state: &mut AppState, action: Action) {
                 close_group_on_move(buf);
             }
         }),
+
+        // ── Find file ──
+        Action::FindFile => find_file::activate(state),
 
         // ── Sort imports ──
         Action::SortImports => {
