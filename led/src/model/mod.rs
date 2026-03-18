@@ -245,6 +245,7 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Arc<AppState>> {
                 s.notify_hash_to_buffer.insert(notify_hash, buf.id);
                 s.buffers.insert(buf.id, buf);
                 s.next_buffer_id = next_id;
+                action::renumber_tabs(&mut s);
                 if session_restore_done {
                     s.session_restore_phase = SessionRestorePhase::Done;
                     s.session_active_tab_order = None;

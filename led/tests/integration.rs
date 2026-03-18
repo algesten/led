@@ -611,18 +611,64 @@ fn kill_buffer_clean() {
 }
 
 #[test]
-fn kill_buffer_dirty_warns() {
+fn kill_buffer_dirty_prompts() {
     let t = TestHarness::new()
         .with_file("hello\n")
         .run(actions(vec![InsertChar('x'), KillBuffer]));
 
-    // Buffer should NOT be killed
+    // Buffer should NOT be killed — waiting for confirmation
     assert!(t.state.active_buffer.is_some());
     assert!(!t.state.buffers.is_empty());
+    assert!(t.state.confirm_kill);
     assert!(
-        t.state.warn.as_deref().unwrap_or("").contains("unsaved"),
-        "should warn about unsaved changes"
+        t.state
+            .warn
+            .as_deref()
+            .unwrap_or("")
+            .contains("kill anyway"),
+        "should prompt for confirmation"
     );
+}
+
+#[test]
+fn kill_buffer_dirty_confirm_yes() {
+    let t = TestHarness::new().with_file("hello\n").run(actions(vec![
+        InsertChar('x'),
+        KillBuffer,
+        InsertChar('y'),
+    ]));
+
+    assert!(t.state.active_buffer.is_none());
+    assert!(t.state.buffers.is_empty());
+    assert!(!t.state.confirm_kill);
+}
+
+#[test]
+fn kill_buffer_dirty_confirm_no() {
+    let t = TestHarness::new().with_file("hello\n").run(actions(vec![
+        InsertChar('x'),
+        KillBuffer,
+        InsertChar('n'),
+    ]));
+
+    // Buffer should NOT be killed — user said no
+    assert!(t.state.active_buffer.is_some());
+    assert!(!t.state.buffers.is_empty());
+    assert!(!t.state.confirm_kill);
+}
+
+#[test]
+fn kill_buffer_dirty_confirm_abort() {
+    let t = TestHarness::new().with_file("hello\n").run(actions(vec![
+        InsertChar('x'),
+        KillBuffer,
+        Abort,
+    ]));
+
+    // Buffer should NOT be killed — user aborted
+    assert!(t.state.active_buffer.is_some());
+    assert!(!t.state.buffers.is_empty());
+    assert!(!t.state.confirm_kill);
 }
 
 #[test]
@@ -1170,6 +1216,166 @@ fn session_restore_tabs() {
 }
 
 #[test]
+fn session_restore_tab_order_with_arg_repeated() {
+    // Simulate: `led Cargo.toml` with lib.rs already in session, repeated quit/open cycles
+    // Run 1: open two files as args (simulates Cargo.toml opened via arg + lib.rs from session)
+    let t = TestHarness::new()
+        .with_named_file("Cargo.toml", "[package]\n")
+        .with_named_file("lib.rs", "fn main() {}\n")
+        .run(vec![Do(Quit), WaitFor(|s| s.session_saved)]);
+
+    let order1: Vec<(String, usize)> = {
+        let mut v: Vec<_> = t
+            .state
+            .buffers
+            .values()
+            .map(|b| {
+                let name = b
+                    .path
+                    .as_ref()
+                    .unwrap()
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned();
+                (name, b.tab_order)
+            })
+            .collect();
+        v.sort_by_key(|(_, o)| *o);
+        v
+    };
+
+    let dir = t.dirs.root.clone();
+    let cargo_path = t.dirs.workspace.join("Cargo.toml");
+
+    // Run 2: restart with Cargo.toml as arg — session restores both
+    let t2 = TestHarness::with_dir(dir.clone())
+        .with_arg(cargo_path.clone())
+        .run(vec![WaitFor(|s| s.buffers.len() >= 2)]);
+
+    let order2: Vec<(String, usize)> = {
+        let mut v: Vec<_> = t2
+            .state
+            .buffers
+            .values()
+            .map(|b| {
+                let name = b
+                    .path
+                    .as_ref()
+                    .unwrap()
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned();
+                (name, b.tab_order)
+            })
+            .collect();
+        v.sort_by_key(|(_, o)| *o);
+        v
+    };
+    assert_eq!(
+        order1, order2,
+        "tab order should be stable after first restart"
+    );
+
+    // Run 3: quit and restart again — should still be stable
+    let t2b = TestHarness::with_dir(dir.clone())
+        .with_arg(cargo_path.clone())
+        .run(vec![Do(Quit), WaitFor(|s| s.session_saved)]);
+
+    let dir2 = t2b.dirs.root.clone();
+
+    let t3 = TestHarness::with_dir(dir2)
+        .with_arg(cargo_path)
+        .run(vec![WaitFor(|s| s.buffers.len() >= 2)]);
+
+    let order3: Vec<(String, usize)> = {
+        let mut v: Vec<_> = t3
+            .state
+            .buffers
+            .values()
+            .map(|b| {
+                let name = b
+                    .path
+                    .as_ref()
+                    .unwrap()
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned();
+                (name, b.tab_order)
+            })
+            .collect();
+        v.sort_by_key(|(_, o)| *o);
+        v
+    };
+    assert_eq!(
+        order1, order3,
+        "tab order should be stable after second restart"
+    );
+}
+
+#[test]
+fn session_restore_tab_order() {
+    // Run 1: open 3 files — tab_order 0, 1, 2
+    let t = TestHarness::new()
+        .with_named_file("aaa.txt", "a\n")
+        .with_named_file("bbb.txt", "b\n")
+        .with_named_file("ccc.txt", "c\n")
+        .run(vec![Do(Quit), WaitFor(|s| s.session_saved)]);
+
+    // Capture original tab orders
+    let original: Vec<(String, usize)> = {
+        let mut v: Vec<_> = t
+            .state
+            .buffers
+            .values()
+            .map(|b| {
+                let name = b
+                    .path
+                    .as_ref()
+                    .unwrap()
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned();
+                (name, b.tab_order)
+            })
+            .collect();
+        v.sort_by_key(|(_, o)| *o);
+        v
+    };
+
+    let dir = t.dirs.root.clone();
+
+    // Run 2: restore session — tab_order should be preserved
+    let t2 = TestHarness::with_dir(dir).run(vec![WaitFor(|s| s.buffers.len() >= 3)]);
+
+    let mut restored: Vec<(String, usize)> = t2
+        .state
+        .buffers
+        .values()
+        .map(|b| {
+            let name = b
+                .path
+                .as_ref()
+                .unwrap()
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned();
+            (name, b.tab_order)
+        })
+        .collect();
+    restored.sort_by_key(|(_, o)| *o);
+
+    assert_eq!(
+        original, restored,
+        "tab order should be preserved across restart"
+    );
+}
+
+#[test]
 fn session_restore_missing_file() {
     // Run 1: open two files, quit, save session
     let t = TestHarness::new()
@@ -1320,7 +1526,7 @@ fn session_restore_with_arg_file() {
     paths.sort();
     assert_eq!(paths, vec!["Cargo.toml", "lib.rs"]);
 
-    // Active tab should be what the session saved, NOT overridden by the arg file
+    // Active tab should be the arg file — explicit arg overrides session's choice
     let active_name = buf(&t2)
         .path
         .as_ref()
@@ -1330,8 +1536,8 @@ fn session_restore_with_arg_file() {
         .to_string_lossy()
         .into_owned();
     assert_eq!(
-        active_name, "lib.rs",
-        "active tab should be session's choice, not the arg file"
+        active_name, "Cargo.toml",
+        "arg file should be active tab, overriding session"
     );
 }
 
@@ -1379,7 +1585,7 @@ fn session_restore_active_tab() {
     let dir = t.dirs.root.clone();
     let second_path = t.dirs.workspace.join("second.txt");
 
-    // Run 2: restart with second.txt as arg — first.txt should still be the active tab
+    // Run 2: restart with second.txt as arg — arg file should be active
     let t2 = TestHarness::with_dir(dir)
         .with_arg(second_path)
         .run(vec![WaitFor(|s| s.buffers.len() >= 2)]);
@@ -1392,7 +1598,43 @@ fn session_restore_active_tab() {
         .unwrap()
         .to_string_lossy()
         .into_owned();
-    assert_eq!(active_name2, "first.txt", "active tab should be restored");
+    assert_eq!(active_name2, "second.txt", "arg file should be active tab");
+}
+
+#[test]
+fn session_restore_active_tab_no_args() {
+    // Run 1: open two files, switch to first tab, quit
+    let t = TestHarness::new()
+        .with_named_file("first.txt", "a\n")
+        .with_named_file("second.txt", "b\n")
+        .run(vec![Do(PrevTab), Do(Quit), WaitFor(|s| s.session_saved)]);
+
+    let active_name = buf(&t)
+        .path
+        .as_ref()
+        .unwrap()
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    assert_eq!(active_name, "first.txt");
+    let dir = t.dirs.root.clone();
+
+    // Run 2: restart with no args — session's active tab should be restored
+    let t2 = TestHarness::with_dir(dir).run(vec![WaitFor(|s| s.buffers.len() >= 2)]);
+
+    let active_name2 = buf(&t2)
+        .path
+        .as_ref()
+        .unwrap()
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    assert_eq!(
+        active_name2, "first.txt",
+        "session active tab should be restored when no args"
+    );
 }
 
 // ── Save flow enhancements ──

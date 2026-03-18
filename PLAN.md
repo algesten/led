@@ -6,15 +6,10 @@ Every side effect lives in a Driver. The Model is a pure reduce: `(State, Mut) -
 
 ---
 
-## Phase 10: Selection & Kill Ring
+## Phase 10b: Confirmation prompt for dirty buffer kill
 
-- `SetMark` — toggle mark at cursor
-- `KillRegion` — delete selection, push to kill ring
-- `Yank` — paste from kill ring
-- Selection rendering in UI (highlight between mark and cursor using `editor.selection` style)
-- Selection extends padding to line edge on last visual line of each selected row
+- Confirmation prompt for dirty buffer kill (minibuffer y/n, not a modal overlay)
 
----
 
 ## Phase 11: In-Buffer Search (ISearch)
 
@@ -28,7 +23,17 @@ ISearchState with query, origin, matches, match_idx, failed flag.
 
 ---
 
-## Phase 12: Syntax Highlighting
+## Phase 12: Jump List
+
+Navigation history for `JumpBack` / `JumpForward` actions.
+
+- Record cursor position on significant movements (goto definition, search accept, file switch)
+- Max 100 entries, deduplicated by proximity
+- Session-persisted across restarts
+
+---
+
+## Phase 13: Syntax Highlighting
 
 Tree-sitter driver for incremental parsing. Highlight spans stored per-buffer. Language detection from extension.
 
@@ -52,9 +57,17 @@ Spans grouped by consecutive same-style runs.
 
 Two-pass tree-sitter analysis for newline indentation, with regex fallback when tree is in error state.
 
+### Match bracket
+
+Simple bracket matching (`()`, `[]`, `{}`) for `MatchBracket` action. Cursor bracket + matching bracket highlighted with `brackets.match` style. Rainbow bracket coloring covered by rendering pipeline above.
+
+### Sort imports
+
+`SortImports` action: tree-sitter to identify import block, sort lines alphabetically.
+
 ---
 
-## Phase 13: Git Integration
+## Phase 14: Git Integration
 
 git2 driver for branch, file statuses, line statuses.
 
@@ -66,7 +79,7 @@ git2 driver for branch, file statuses, line statuses.
 
 ---
 
-## Phase 14: File Search (Ripgrep)
+## Phase 15: File Search (Ripgrep)
 
 `grep_searcher` + `ignore::WalkBuilder`. Background worker with request coalescing (only process latest query).
 
@@ -79,7 +92,7 @@ git2 driver for branch, file statuses, line statuses.
 
 ---
 
-## Phase 15: Find File Panel
+## Phase 16: Find File Panel
 
 Directory completion, tilde expansion, path abbreviation.
 
@@ -90,7 +103,7 @@ Directory completion, tilde expansion, path abbreviation.
 
 ---
 
-## Phase 16: LSP Integration
+## Phase 17: LSP Integration
 
 Full server lifecycle, JSON-RPC transport, request tracking.
 
@@ -115,15 +128,16 @@ Hardcoded configs: rust-analyzer, typescript-language-server, pyright, clangd, s
 - Max 10 visible items with scroll
 - Fuzzy filtered via nucleo (case-insensitive, smart normalization)
 
+### Outline
+
+`Outline` action: uses `textDocument/documentSymbol` to show symbol list. Fuzzy-filtered selection panel.
+
+### Rename dialog
+
+Modal input overlay for `LspRename` — captures new name, renders centered overlay, applies workspace edit.
+
 ---
 
-## Phase 17: Remaining
+## Phase 18: Message buffer
 
-- Modal dialogs (dirty buffer kill, quit with unsaved, LSP rename)
-- Clipboard driver (arboard)
-- Match bracket, sort imports, outline
-- Jump list (record, back, forward — max 100 entries, session-persisted)
-- Messages panel (log viewer — read-only buffer syncing from SharedLog)
-- Color hint (theme file editing): `scan_hex_color()` for `#rrggbb` / `#rgb`, `parse_color_defs()` + `evaluate_theme_line()` for theme.toml
-- CLI flags (--reset-config, --debug)
-
+- Messages panel (`OpenMessages`): read-only buffer syncing from SharedLog, auto-scroll, claims Main panel slot

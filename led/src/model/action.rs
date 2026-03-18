@@ -4,6 +4,20 @@ use led_state::{AppState, BufferState, Dimensions, EditKind, EntryKind, SaveStat
 use super::{edit, mov};
 
 pub fn handle_action(state: &mut AppState, action: Action) {
+    // Handle confirmation prompt for dirty buffer kill
+    if state.confirm_kill {
+        state.confirm_kill = false;
+        state.warn = None;
+        if matches!(action, Action::InsertChar('y' | 'Y')) {
+            force_kill_buffer(state);
+            return;
+        }
+        // Any other action: cancel and fall through to normal handling
+        if matches!(action, Action::Abort) {
+            return;
+        }
+    }
+
     // Any action other than KillLine breaks kill accumulation
     if !matches!(action, Action::KillLine) {
         state.kill_accumulator = None;
@@ -278,11 +292,32 @@ fn kill_buffer(state: &mut AppState) {
         return;
     };
 
-    // Don't kill dirty buffers (no modal yet)
     if buf.doc.dirty() {
-        state.warn = Some("Buffer has unsaved changes".into());
+        let filename = buf
+            .path
+            .as_ref()
+            .and_then(|p| p.file_name())
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| format!("[{}]", active_id.0));
+        state.confirm_kill = true;
+        state.warn = Some(format!("Buffer {filename} modified; kill anyway? (y or n)"));
         return;
     }
+
+    do_kill_buffer(state, active_id);
+}
+
+fn force_kill_buffer(state: &mut AppState) {
+    let Some(active_id) = state.active_buffer else {
+        return;
+    };
+    do_kill_buffer(state, active_id);
+}
+
+fn do_kill_buffer(state: &mut AppState, id: BufferId) {
+    let Some(buf) = state.buffers.get(&id) else {
+        return;
+    };
 
     let filename = buf
         .path
@@ -296,8 +331,8 @@ fn kill_buffer(state: &mut AppState) {
     let mut tabs: Vec<(BufferId, usize)> = state
         .buffers
         .iter()
-        .filter(|(id, _)| **id != active_id)
-        .map(|(id, buf)| (*id, buf.tab_order))
+        .filter(|(bid, _)| *bid != &id)
+        .map(|(bid, buf)| (*bid, buf.tab_order))
         .collect();
     tabs.sort_by_key(|&(_, order)| order);
 
@@ -305,11 +340,12 @@ fn kill_buffer(state: &mut AppState) {
         .iter()
         .find(|&&(_, order)| order > killed_order)
         .or_else(|| tabs.last())
-        .map(|&(id, _)| id);
+        .map(|&(bid, _)| bid);
 
-    state.buffers.remove(&active_id);
+    state.buffers.remove(&id);
     state.active_buffer = next_active;
     reveal_active_buffer(state);
+    renumber_tabs(state);
 
     if state.buffers.is_empty() {
         state.focus = PanelSlot::Side;
@@ -525,6 +561,15 @@ fn close_group_on_move(buf: &mut BufferState) {
     if buf.last_edit_kind.is_some() {
         buf.doc = buf.doc.close_undo_group();
         buf.last_edit_kind = None;
+    }
+}
+
+/// Renumber tab_order to be contiguous 0..n, preserving relative order.
+pub(super) fn renumber_tabs(state: &mut AppState) {
+    let mut ordered: Vec<BufferId> = state.buffers.keys().copied().collect();
+    ordered.sort_by_key(|bid| state.buffers[bid].tab_order);
+    for (i, bid) in ordered.into_iter().enumerate() {
+        state.buffers.get_mut(&bid).unwrap().tab_order = i;
     }
 }
 

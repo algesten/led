@@ -12,7 +12,7 @@ use tokio::sync::mpsc;
 
 #[derive(Clone)]
 pub enum DocStoreOut {
-    Open { path: PathBuf },
+    Open { path: PathBuf, tab_order: usize },
     Save { id: DocId, doc: Arc<dyn Doc> },
     Close { id: DocId, doc: Arc<dyn Doc> },
 }
@@ -23,6 +23,7 @@ pub enum DocStoreIn {
         id: DocId,
         path: PathBuf,
         doc: Arc<dyn Doc>,
+        tab_order: usize,
     },
     Saved {
         id: DocId,
@@ -43,10 +44,16 @@ pub enum DocStoreIn {
 impl fmt::Debug for DocStoreIn {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            DocStoreIn::Opened { id, path, .. } => f
+            DocStoreIn::Opened {
+                id,
+                path,
+                tab_order,
+                ..
+            } => f
                 .debug_struct("Opened")
                 .field("id", id)
                 .field("path", path)
+                .field("tab_order", tab_order)
                 .finish(),
             DocStoreIn::Saved { id, .. } => f.debug_struct("Saved").field("id", id).finish(),
             DocStoreIn::ExternalChange { id, .. } => {
@@ -109,7 +116,7 @@ pub fn driver(
                 maybe_cmd = cmd_rx.recv() => {
                     let Some(cmd) = maybe_cmd else { break };
                     match cmd {
-                        DocStoreOut::Open { path } => {
+                        DocStoreOut::Open { path, tab_order } => {
                             if let Some(parent) = path.parent() {
                                 let canonical = std::fs::canonicalize(parent)
                                     .unwrap_or_else(|_| parent.to_path_buf());
@@ -131,7 +138,7 @@ pub fn driver(
                                     let canonical = canonicalize(&path);
                                     path_to_id.insert(canonical, id);
                                     let doc: Arc<dyn Doc> = Arc::new(doc);
-                                    let _ = result_tx.send(Ok(DocStoreIn::Opened { id, path, doc })).await;
+                                    let _ = result_tx.send(Ok(DocStoreIn::Opened { id, path, doc, tab_order })).await;
                                 }
                                 Err(e) => {
                                     log::debug!("Cannot open {}: {e}", path.display());

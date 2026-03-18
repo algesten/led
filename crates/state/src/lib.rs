@@ -292,6 +292,9 @@ pub struct AppState {
     pub pending_sync_check: Versioned<PathBuf>,
     pub notify_hash_to_buffer: HashMap<String, BufferId>,
 
+    // Confirmation prompts
+    pub confirm_kill: bool,
+
     // Kill ring & clipboard
     pub kill_ring: String,
     pub kill_accumulator: Option<String>,

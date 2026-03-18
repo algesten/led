@@ -15,7 +15,12 @@ pub fn buffers_of(
     docstore
         .sample_combine(state)
         .filter_map(move |(result, state)| match result {
-            Ok(DocStoreIn::Opened { id, path, doc }) => {
+            Ok(DocStoreIn::Opened {
+                id,
+                path,
+                doc,
+                tab_order,
+            }) => {
                 // Duplicate detection: activate existing tab if same path is already open
                 if let Some(existing) = state
                     .buffers
@@ -29,15 +34,14 @@ pub fn buffers_of(
 
                 // Apply restored session positions + undo if available
                 let sp = state.session_positions.get(&path);
-                let (cursor_row, cursor_col, scroll_row, scroll_sub_line, tab_order) = match sp {
+                let (cursor_row, cursor_col, scroll_row, scroll_sub_line) = match sp {
                     Some(sp) => (
                         sp.cursor_row.min(doc.line_count().saturating_sub(1)),
                         sp.cursor_col,
                         sp.scroll_row,
                         sp.scroll_sub_line,
-                        sp.tab_order,
                     ),
-                    None => (0, 0, 0, 0, state.buffers.len()),
+                    None => (0, 0, 0, 0),
                 };
 
                 // Restore undo history if content hash matches

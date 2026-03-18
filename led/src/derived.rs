@@ -132,26 +132,49 @@ pub fn derived(state: Stream<Arc<AppState>>) -> Derived {
         .stream();
 
     // File opens from startup args — gated on session restore being done.
-    // Skip files already opened by session restore to avoid overriding the active tab.
+    // Always emitted (even for already-open files) so duplicate detection
+    // in buffers_of activates the correct tab.
     let startup_open = state
         .dedupe_by(|s| s.session_restore_phase == SessionRestorePhase::Done)
         .filter(|s| s.session_restore_phase == SessionRestorePhase::Done)
+        .filter(|s| !s.startup.arg_paths.is_empty())
         .flat_map(|s| {
+            let base = s
+                .buffers
+                .values()
+                .map(|b| b.tab_order)
+                .max()
+                .map_or(0, |m| m + 1);
             s.startup
                 .arg_paths
                 .iter()
-                .filter(|p| !s.buffers.values().any(|b| b.path.as_ref() == Some(p)))
                 .cloned()
-                .map(|path| DocStoreOut::Open { path })
+                .enumerate()
+                .map(move |(i, path)| DocStoreOut::Open {
+                    path,
+                    tab_order: base + i,
+                })
                 .collect::<Vec<_>>()
         });
 
-    // File opens from session restore
+    // File opens from session restore — tab_order from session positions
     let session_open = state
         .dedupe_by(|s| s.pending_session_opens.version())
         .filter(|s| s.pending_session_opens.version() > 0)
-        .map(|s| (*s.pending_session_opens).clone())
-        .flat_map(|paths| paths.into_iter().map(|path| DocStoreOut::Open { path }));
+        .map(|s| {
+            let positions = &s.session_positions;
+            (*s.pending_session_opens)
+                .iter()
+                .map(|path| {
+                    let tab_order = positions.get(path).map(|sp| sp.tab_order).unwrap_or(0);
+                    DocStoreOut::Open {
+                        path: path.clone(),
+                        tab_order,
+                    }
+                })
+                .collect::<Vec<_>>()
+        })
+        .flat_map(|cmds| cmds);
 
     // File opens from browser
     let browser_open = state
@@ -160,6 +183,12 @@ pub fn derived(state: Stream<Arc<AppState>>) -> Derived {
         .filter(|s| s.pending_open.is_some())
         .map(|s| DocStoreOut::Open {
             path: (*s.pending_open).clone().unwrap(),
+            tab_order: s
+                .buffers
+                .values()
+                .map(|b| b.tab_order)
+                .max()
+                .map_or(0, |m| m + 1),
         })
         .stream();
 
