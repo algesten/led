@@ -83,6 +83,7 @@ pub fn buffers_of(
                     scroll_row,
                     scroll_sub_line,
                     tab_order,
+                    mark: None,
                     last_edit_kind: None,
                     save_state,
                     persisted_undo_len,

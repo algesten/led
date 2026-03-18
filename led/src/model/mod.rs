@@ -192,6 +192,13 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Arc<AppState>> {
         })
         .stream();
 
+    let clipboard_s = drivers
+        .clipboard_in
+        .map(|ev| match ev {
+            led_clipboard::ClipboardIn::Text(text) => Mut::ClipboardText(text),
+        })
+        .stream();
+
     workspace_s.forward(&muts);
     undo_flushed_s.forward(&muts);
     notify_s.forward(&muts);
@@ -204,6 +211,7 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Arc<AppState>> {
     timers_s.forward(&muts);
     undo_flush_s.forward(&muts);
     fs_s.forward(&muts);
+    clipboard_s.forward(&muts);
 
     // ── 3. Reduce ──
 
@@ -264,6 +272,9 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Arc<AppState>> {
             }
             Mut::BufferUpdate(id, buf) => {
                 s.buffers.insert(id, buf);
+            }
+            Mut::ClipboardText(text) => {
+                action::yank_text(&mut s, text);
             }
             Mut::ConfigKeys(v) => s.config_keys = Some(v),
             Mut::DirListed(path, entries) => {
@@ -470,6 +481,7 @@ enum Mut {
         undo_clear_path: Option<std::path::PathBuf>,
     },
     BufferUpdate(BufferId, BufferState),
+    ClipboardText(String),
     ConfigKeys(ConfigFile<Keys>),
     ConfigTheme(ConfigFile<Theme>),
     DirListed(std::path::PathBuf, Vec<led_fs::DirEntry>),
@@ -517,6 +529,7 @@ impl Mut {
             Mut::BufferOpen { .. } => "BufferOpen",
             Mut::BufferSaved { .. } => "BufferSaved",
             Mut::BufferUpdate(_, _) => "BufferUpdate",
+            Mut::ClipboardText(_) => "ClipboardText",
             Mut::ConfigKeys(_) => "ConfigKeys",
             Mut::ConfigTheme(_) => "ConfigTheme",
             Mut::DirListed(_, _) => "DirListed",

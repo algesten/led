@@ -28,6 +28,7 @@ pub struct Drivers {
     pub config_theme_in: Stream<Result<ConfigFile<Theme>, Alert>>,
     pub timers_in: Stream<TimersIn>,
     pub fs_in: Stream<FsIn>,
+    pub clipboard_in: Stream<led_clipboard::ClipboardIn>,
 }
 
 pub struct RunGuards {
@@ -81,6 +82,11 @@ pub fn run(
 
     let timers_in = led_timers::driver(d.timers_out);
     let fs_in = led_fs::driver(d.fs_out);
+    let clipboard_in = if headless {
+        led_clipboard::driver_headless(d.clipboard_out)
+    } else {
+        led_clipboard::driver(d.clipboard_out)
+    };
 
     let drivers = Drivers {
         terminal_in,
@@ -91,6 +97,7 @@ pub fn run(
         config_theme_in: led_config_file::driver::<Theme>(d.config_file_out),
         timers_in,
         fs_in,
+        clipboard_in,
     };
 
     // 4. Model

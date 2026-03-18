@@ -22,6 +22,9 @@ pub struct DisplayInputs {
     buffer_height: usize,
     gutter_style: Style,
     text_style: Style,
+    /// Normalized selection range: ((start_row, start_col), (end_row, end_col)) where start <= end.
+    selection: Option<((usize, usize), (usize, usize))>,
+    selection_style: Style,
 }
 
 impl PartialEq for DisplayInputs {
@@ -34,6 +37,8 @@ impl PartialEq for DisplayInputs {
             && self.buffer_height == other.buffer_height
             && self.gutter_style == other.gutter_style
             && self.text_style == other.text_style
+            && self.selection == other.selection
+            && self.selection_style == other.selection_style
     }
 }
 
@@ -43,6 +48,17 @@ pub fn display_inputs(s: &AppState) -> Option<DisplayInputs> {
     let id = s.active_buffer?;
     let buf = s.buffers.get(&id)?;
     let theme = theme.file.as_ref();
+
+    // Compute normalized selection from mark + cursor
+    let selection = buf.mark.map(|(mr, mc)| {
+        let (cr, cc) = (buf.cursor_row, buf.cursor_col);
+        if (mr, mc) <= (cr, cc) {
+            ((mr, mc), (cr, cc))
+        } else {
+            ((cr, cc), (mr, mc))
+        }
+    });
+
     Some(DisplayInputs {
         buffer_id: id,
         doc: buf.doc.clone(),
@@ -52,6 +68,8 @@ pub fn display_inputs(s: &AppState) -> Option<DisplayInputs> {
         buffer_height: dims.buffer_height(),
         gutter_style: style::resolve(theme, &theme.editor.gutter),
         text_style: style::resolve(theme, &theme.editor.text),
+        selection,
+        selection_style: style::resolve(theme, &theme.editor.selection),
     })
 }
 
@@ -64,8 +82,33 @@ pub fn build_display_lines(d: &DisplayInputs) -> Rc<Vec<Line<'static>>> {
 
     while screen_row < d.buffer_height && line_idx < line_count {
         let line = d.doc.line(line_idx);
-        let (display, _char_map) = expand_tabs(&line);
+        let (display, char_map) = expand_tabs(&line);
         let chunks = compute_chunks(display.len(), d.text_width);
+
+        // Compute selected display-column range for this line
+        let sel_dcols = match d.selection {
+            Some(((sr, sc), (er, ec))) if line_idx >= sr && line_idx <= er => {
+                let sd = if line_idx == sr {
+                    char_map.get(sc).copied().unwrap_or(display.len())
+                } else {
+                    0
+                };
+                let ed = if line_idx == er {
+                    char_map.get(ec).copied().unwrap_or(display.len())
+                } else {
+                    display.len()
+                };
+                if sd < ed { Some((sd, ed)) } else { None }
+            }
+            _ => None,
+        };
+
+        // Whether this line is within the selection and selection continues past its end
+        // (used for padding the full line width with selection style)
+        let line_selected_through = match d.selection {
+            Some(((sr, _), (er, _))) => line_idx >= sr && line_idx < er,
+            None => false,
+        };
 
         for (chunk_idx, &(cs, ce)) in chunks.iter().enumerate() {
             if skip_sub_lines > 0 {
@@ -77,14 +120,55 @@ pub fn build_display_lines(d: &DisplayInputs) -> Rc<Vec<Line<'static>>> {
             }
 
             let is_last = chunk_idx == chunks.len() - 1;
-            let mut spans: Vec<Span<'static>> = Vec::with_capacity(3);
+            let mut spans: Vec<Span<'static>> = Vec::with_capacity(4);
 
             // Gutter: 2 spaces
             spans.push(Span::styled("  ", d.gutter_style));
 
-            // Text content
-            let chunk_text = chars_to_string(&display[cs..ce]);
-            spans.push(Span::styled(chunk_text, d.text_style));
+            // Text content — with selection overlay if applicable
+            let chunk_len = ce - cs;
+            match sel_dcols {
+                Some((ss, se)) if ss < ce && se > cs => {
+                    // Selection overlaps this chunk — build per-column styles
+                    let sel_start = ss.max(cs) - cs;
+                    let sel_end = se.min(ce) - cs;
+
+                    // Before selection
+                    if sel_start > 0 {
+                        spans.push(Span::styled(
+                            chars_to_string(&display[cs..cs + sel_start]),
+                            d.text_style,
+                        ));
+                    }
+                    // Selected region
+                    spans.push(Span::styled(
+                        chars_to_string(&display[cs + sel_start..cs + sel_end]),
+                        d.selection_style,
+                    ));
+                    // After selection
+                    if sel_end < chunk_len {
+                        spans.push(Span::styled(
+                            chars_to_string(&display[cs + sel_end..ce]),
+                            d.text_style,
+                        ));
+                    }
+                }
+                _ => {
+                    // No selection on this chunk — simple path
+                    let chunk_text = chars_to_string(&display[cs..ce]);
+                    spans.push(Span::styled(chunk_text, d.text_style));
+                }
+            }
+
+            // Selection padding: on the last visual chunk of a line,
+            // if selection continues to the next line, pad to text_width.
+            // This covers both lines with content and empty lines.
+            if is_last && line_selected_through {
+                let pad = d.text_width.saturating_sub(chunk_len);
+                if pad > 0 {
+                    spans.push(Span::styled(" ".repeat(pad), d.selection_style));
+                }
+            }
 
             // Wrap indicator on non-last chunks
             if !is_last {

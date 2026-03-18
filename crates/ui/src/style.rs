@@ -416,6 +416,7 @@ mod tests {
             scroll_row: 0,
             scroll_sub_line: 0,
             tab_order: 0,
+            mark: None,
             last_edit_kind: None,
             save_state: SaveState::Clean,
             persisted_undo_len: 0,

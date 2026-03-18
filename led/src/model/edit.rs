@@ -70,20 +70,65 @@ pub fn delete_forward(buf: &BufferState) -> Option<(Arc<dyn Doc>, usize, usize, 
     }
 }
 
-pub fn kill_line(buf: &BufferState) -> Option<(Arc<dyn Doc>, usize, usize, usize)> {
+/// Kill from cursor to end of line (or the newline if at EOL).
+/// Returns (doc, killed_text, row, col, affinity).
+pub fn kill_line(buf: &BufferState) -> Option<(Arc<dyn Doc>, String, usize, usize, usize)> {
     let len = buf.doc.line_len(buf.cursor_row);
     if buf.cursor_col < len {
         // Kill from cursor to end of line
         let start = row_col_to_char(&*buf.doc, buf.cursor_row, buf.cursor_col);
         let end = row_col_to_char(&*buf.doc, buf.cursor_row, len);
+        let killed = buf.doc.slice(start, end);
         let doc = buf.doc.remove(start, end);
-        Some((doc, buf.cursor_row, buf.cursor_col, buf.cursor_col))
+        Some((doc, killed, buf.cursor_row, buf.cursor_col, buf.cursor_col))
     } else if buf.cursor_row < buf.doc.line_count().saturating_sub(1) {
         // Kill the newline — join with next line
         let idx = row_col_to_char(&*buf.doc, buf.cursor_row, len);
+        let killed = buf.doc.slice(idx, idx + 1);
         let doc = buf.doc.remove(idx, idx + 1);
-        Some((doc, buf.cursor_row, buf.cursor_col, buf.cursor_col))
+        Some((doc, killed, buf.cursor_row, buf.cursor_col, buf.cursor_col))
     } else {
         None
+    }
+}
+
+/// Kill the region between mark and cursor.
+/// Returns (doc, killed_text, row, col, affinity).
+pub fn kill_region(buf: &BufferState) -> Option<(Arc<dyn Doc>, String, usize, usize, usize)> {
+    let (mark_row, mark_col) = buf.mark?;
+    let start = row_col_to_char(&*buf.doc, mark_row, mark_col);
+    let end = row_col_to_char(&*buf.doc, buf.cursor_row, buf.cursor_col);
+    let (start, end) = if start <= end {
+        (start, end)
+    } else {
+        (end, start)
+    };
+    if start == end {
+        return None;
+    }
+    let killed = buf.doc.slice(start, end);
+    let doc = buf.doc.remove(start, end);
+    let row = doc.char_to_line(start);
+    let col = start - doc.line_to_char(row);
+    Some((doc, killed, row, col, col))
+}
+
+/// Insert text at cursor (yank from kill ring).
+/// Returns (doc, row, col, affinity).
+pub fn yank(buf: &BufferState, text: &str) -> (Arc<dyn Doc>, usize, usize, usize) {
+    let idx = row_col_to_char(&*buf.doc, buf.cursor_row, buf.cursor_col);
+    let doc = buf.doc.insert(idx, text);
+    let (row, col) = cursor_after_yank(buf.cursor_row, buf.cursor_col, text);
+    (doc, row, col, col)
+}
+
+/// Compute cursor position after inserting `text` at (row, col).
+fn cursor_after_yank(row: usize, col: usize, text: &str) -> (usize, usize) {
+    let newline_count = text.chars().filter(|&c| c == '\n').count();
+    if newline_count == 0 {
+        (row, col + text.chars().count())
+    } else {
+        let last_line_len = text.rsplit('\n').next().map_or(0, |s| s.chars().count());
+        (row + newline_count, last_line_len)
     }
 }

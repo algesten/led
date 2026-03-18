@@ -188,6 +188,9 @@ pub trait Doc: Send + Sync {
     fn apply_remote_entry(&self, entry: &UndoEntry) -> Arc<dyn Doc>;
     fn with_distance_from_save(&self, distance: i32) -> Arc<dyn Doc>;
 
+    // Text extraction
+    fn slice(&self, start: usize, end: usize) -> String;
+
     // Persistence
     fn write_to(&self, writer: &mut dyn io::Write) -> io::Result<()>;
     fn mark_saved(&self) -> Arc<dyn Doc>;
@@ -493,6 +496,10 @@ impl Doc for TextDoc {
             version: self.version,
             undo,
         })
+    }
+
+    fn slice(&self, start: usize, end: usize) -> String {
+        self.rope.slice(start..end).to_string()
     }
 
     fn write_to(&self, writer: &mut dyn io::Write) -> io::Result<()> {

@@ -4,6 +4,11 @@ use led_state::{AppState, BufferState, Dimensions, EditKind, EntryKind, SaveStat
 use super::{edit, mov};
 
 pub fn handle_action(state: &mut AppState, action: Action) {
+    // Any action other than KillLine breaks kill accumulation
+    if !matches!(action, Action::KillLine) {
+        state.kill_accumulator = None;
+    }
+
     match action {
         // ── UI ──
         Action::ToggleSidePanel => {
@@ -79,8 +84,21 @@ pub fn handle_action(state: &mut AppState, action: Action) {
         Action::CollapseAll => handle_browser_collapse_all(state),
         Action::OpenSelected => handle_browser_open(state),
 
+        // ── Mark / Kill ring ──
+        Action::SetMark => {
+            with_buf(state, |buf, _dims| {
+                buf.mark = Some((buf.cursor_row, buf.cursor_col));
+            });
+            state.info = Some("Mark set".into());
+        }
+
+        Action::Abort => with_buf(state, |buf, _dims| {
+            buf.mark = None;
+        }),
+
         // ── Editing ──
         Action::InsertChar(ch) => with_buf(state, |buf, dims| {
+            buf.mark = None;
             maybe_close_group(buf, EditKind::Insert, ch);
             let (doc, r, c, _) = edit::insert_char(buf, ch);
             buf.doc = doc;
@@ -90,6 +108,7 @@ pub fn handle_action(state: &mut AppState, action: Action) {
             buf.last_edit_kind = Some(EditKind::Insert);
         }),
         Action::InsertNewline => with_buf(state, |buf, dims| {
+            buf.mark = None;
             close_group_on_move(buf);
             let (doc, r, c, _) = edit::insert_newline(buf);
             buf.doc = doc;
@@ -98,6 +117,7 @@ pub fn handle_action(state: &mut AppState, action: Action) {
             buf.cursor_col_affinity = mov::reset_affinity(buf, dims);
         }),
         Action::InsertTab => with_buf(state, |buf, dims| {
+            buf.mark = None;
             maybe_close_group(buf, EditKind::Insert, ' ');
             let (doc, r, c, _) = edit::insert_tab(buf, dims);
             buf.doc = doc;
@@ -107,6 +127,7 @@ pub fn handle_action(state: &mut AppState, action: Action) {
             buf.last_edit_kind = Some(EditKind::Insert);
         }),
         Action::DeleteBackward => with_buf(state, |buf, dims| {
+            buf.mark = None;
             if buf.last_edit_kind != Some(EditKind::Delete) {
                 buf.doc = buf.doc.close_undo_group();
             }
@@ -119,6 +140,7 @@ pub fn handle_action(state: &mut AppState, action: Action) {
             }
         }),
         Action::DeleteForward => with_buf(state, |buf, dims| {
+            buf.mark = None;
             if buf.last_edit_kind != Some(EditKind::Delete) {
                 buf.doc = buf.doc.close_undo_group();
             }
@@ -130,15 +152,59 @@ pub fn handle_action(state: &mut AppState, action: Action) {
                 buf.last_edit_kind = Some(EditKind::Delete);
             }
         }),
-        Action::KillLine => with_buf(state, |buf, dims| {
-            close_group_on_move(buf);
-            if let Some((doc, r, c, _)) = edit::kill_line(buf) {
-                buf.doc = doc;
-                buf.cursor_row = r;
-                buf.cursor_col = c;
-                buf.cursor_col_affinity = mov::reset_affinity(buf, dims);
+        Action::KillLine => {
+            if let (Some(dims), Some(id)) = (state.dims, state.active_buffer) {
+                if let Some(buf) = state.buffers.get_mut(&id) {
+                    close_group_on_move(buf);
+                    if let Some((doc, killed, r, c, a)) = edit::kill_line(buf) {
+                        buf.doc = doc;
+                        buf.cursor_row = r;
+                        buf.cursor_col = c;
+                        buf.cursor_col_affinity = a;
+                        state
+                            .kill_accumulator
+                            .get_or_insert_with(String::new)
+                            .push_str(&killed);
+                        state.kill_ring = state.kill_accumulator.clone().unwrap();
+                    }
+                    let (sr, ssl) = mov::adjust_scroll(buf, &dims);
+                    buf.scroll_row = sr;
+                    buf.scroll_sub_line = ssl;
+                    if buf.doc.dirty() && buf.save_state == SaveState::Clean {
+                        buf.save_state = SaveState::Modified;
+                    }
+                }
             }
-        }),
+        }
+        Action::KillRegion => {
+            if let (Some(dims), Some(id)) = (state.dims, state.active_buffer) {
+                if let Some(buf) = state.buffers.get_mut(&id) {
+                    close_group_on_move(buf);
+                    if let Some((doc, killed, r, c, a)) = edit::kill_region(buf) {
+                        buf.doc = doc;
+                        buf.cursor_row = r;
+                        buf.cursor_col = c;
+                        buf.cursor_col_affinity = a;
+                        buf.mark = None;
+                        state.kill_ring = killed;
+                    } else {
+                        buf.mark = None;
+                        state.warn = Some("No region".into());
+                    }
+                    let (sr, ssl) = mov::adjust_scroll(buf, &dims);
+                    buf.scroll_row = sr;
+                    buf.scroll_sub_line = ssl;
+                    if buf.doc.dirty() && buf.save_state == SaveState::Clean {
+                        buf.save_state = SaveState::Modified;
+                    }
+                }
+            } else {
+                state.warn = Some("No region".into());
+            }
+        }
+        Action::Yank => {
+            state.pending_yank.set(());
+        }
 
         // ── Undo / Redo ──
         Action::Undo => with_buf(state, |buf, dims| {
@@ -423,6 +489,30 @@ fn with_buf(state: &mut AppState, f: impl FnOnce(&mut BufferState, &Dimensions))
             buf.scroll_row = sr;
             buf.scroll_sub_line = ssl;
             // Track save state: transition to Modified when doc becomes dirty
+            if buf.doc.dirty() && buf.save_state == SaveState::Clean {
+                buf.save_state = SaveState::Modified;
+            }
+        }
+    }
+}
+
+/// Yank (paste) text into the active buffer. Called when clipboard text arrives.
+pub fn yank_text(state: &mut AppState, text: String) {
+    if text.is_empty() {
+        return;
+    }
+    if let (Some(dims), Some(id)) = (state.dims, state.active_buffer) {
+        if let Some(buf) = state.buffers.get_mut(&id) {
+            close_group_on_move(buf);
+            buf.mark = None;
+            let (doc, r, c, a) = edit::yank(buf, &text);
+            buf.doc = doc;
+            buf.cursor_row = r;
+            buf.cursor_col = c;
+            buf.cursor_col_affinity = a;
+            let (sr, ssl) = mov::adjust_scroll(buf, &dims);
+            buf.scroll_row = sr;
+            buf.scroll_sub_line = ssl;
             if buf.doc.dirty() && buf.save_state == SaveState::Clean {
                 buf.save_state = SaveState::Modified;
             }

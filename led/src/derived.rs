@@ -17,6 +17,7 @@ pub struct Derived {
     pub config_file_out: Stream<ConfigFileOut>,
     pub timers_out: Stream<TimersOut>,
     pub fs_out: Stream<FsOut>,
+    pub clipboard_out: Stream<led_clipboard::ClipboardOut>,
 }
 
 pub fn derived(state: Stream<Arc<AppState>>) -> Derived {
@@ -230,6 +231,25 @@ pub fn derived(state: Stream<Arc<AppState>>) -> Derived {
         .map(|s| (*s.pending_lists).clone())
         .flat_map(|paths| paths.into_iter().map(|path| FsOut::ListDir { path }));
 
+    // Clipboard: sync kill_ring to system clipboard on change
+    let clipboard_write = state
+        .map(|s| s.kill_ring.clone())
+        .dedupe()
+        .filter(|s| !s.is_empty())
+        .map(led_clipboard::ClipboardOut::Write)
+        .stream();
+
+    // Clipboard: read from system clipboard on yank request
+    let clipboard_read = state
+        .dedupe_by(|s| s.pending_yank.version())
+        .filter(|s| s.pending_yank.version() > 0)
+        .map(|_| led_clipboard::ClipboardOut::Read)
+        .stream();
+
+    let clipboard_out: Stream<led_clipboard::ClipboardOut> = Stream::new();
+    clipboard_write.forward(&clipboard_out);
+    clipboard_read.forward(&clipboard_out);
+
     Derived {
         ui,
         workspace_out,
@@ -237,6 +257,7 @@ pub fn derived(state: Stream<Arc<AppState>>) -> Derived {
         config_file_out,
         timers_out,
         fs_out,
+        clipboard_out,
     }
 }
 

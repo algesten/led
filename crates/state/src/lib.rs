@@ -111,6 +111,7 @@ pub struct BufferState {
     pub scroll_row: usize,
     pub scroll_sub_line: usize,
     pub tab_order: usize,
+    pub mark: Option<(usize, usize)>,
     pub last_edit_kind: Option<EditKind>,
     pub save_state: SaveState,
     // Undo persistence
@@ -290,6 +291,11 @@ pub struct AppState {
     pub pending_undo_clear: Versioned<PathBuf>,
     pub pending_sync_check: Versioned<PathBuf>,
     pub notify_hash_to_buffer: HashMap<String, BufferId>,
+
+    // Kill ring & clipboard
+    pub kill_ring: String,
+    pub kill_accumulator: Option<String>,
+    pub pending_yank: Versioned<()>,
 }
 
 impl AppState {

@@ -2436,3 +2436,83 @@ fn two_instance_undo_syncs_and_clears_dirty() {
     a.stop();
     b.stop();
 }
+
+// ── Selection & Kill Ring ──
+
+#[test]
+fn set_mark_sets_mark() {
+    let t = TestHarness::new()
+        .with_file("aaa\nbbb\n")
+        .run(actions(vec![SetMark]));
+
+    assert_eq!(buf(&t).mark, Some((0, 0)));
+}
+
+#[test]
+fn mark_persists_on_movement() {
+    let t = TestHarness::new()
+        .with_file("aaa\nbbb\n")
+        .run(actions(vec![SetMark, MoveDown]));
+
+    assert_eq!(buf(&t).mark, Some((0, 0)));
+    assert_eq!(buf(&t).cursor_row, 1);
+}
+
+#[test]
+fn insert_clears_mark() {
+    let t = TestHarness::new()
+        .with_file("aaa\nbbb\n")
+        .run(actions(vec![SetMark, InsertChar('x')]));
+
+    assert!(buf(&t).mark.is_none());
+}
+
+#[test]
+fn kill_region_deletes_selection() {
+    let t = TestHarness::new()
+        .with_file("aaa\nbbb\n")
+        .run(actions(vec![SetMark, MoveDown, KillRegion]));
+
+    assert_eq!(buf(&t).doc.line(0), "bbb");
+    assert_eq!(buf(&t).cursor_row, 0);
+    assert_eq!(buf(&t).cursor_col, 0);
+    assert!(buf(&t).mark.is_none());
+    assert_eq!(t.state.kill_ring, "aaa\n");
+}
+
+#[test]
+fn kill_region_no_mark_warns() {
+    let t = TestHarness::new()
+        .with_file("aaa\nbbb\n")
+        .run(actions(vec![KillRegion]));
+
+    assert_eq!(t.state.warn.as_deref(), Some("No region"));
+}
+
+#[test]
+fn yank_inserts_killed_text() {
+    let t = TestHarness::new()
+        .with_file("aaa\nbbb\n")
+        .run(actions(vec![SetMark, MoveDown, KillRegion, Yank]));
+
+    assert_eq!(buf(&t).doc.line(0), "aaa");
+    assert_eq!(buf(&t).doc.line(1), "bbb");
+}
+
+#[test]
+fn kill_line_accumulates_to_kill_ring() {
+    let t = TestHarness::new()
+        .with_file("aaa\nbbb\nccc\n")
+        .run(actions(vec![KillLine, KillLine]));
+
+    assert_eq!(t.state.kill_ring, "aaa\n");
+}
+
+#[test]
+fn non_kill_line_clears_accumulator() {
+    let t = TestHarness::new()
+        .with_file("aaa\nbbb\nccc\n")
+        .run(actions(vec![KillLine, MoveDown, KillLine]));
+
+    assert_eq!(t.state.kill_ring, "bbb");
+}
