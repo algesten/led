@@ -211,7 +211,10 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Arc<AppState>> {
         log::trace!("model: {}", m.name());
         let mut s = Arc::unwrap_or_clone(s);
         match m {
-            Mut::ActivateBuffer(id) => s.active_buffer = Some(id),
+            Mut::ActivateBuffer(id) => {
+                s.active_buffer = Some(id);
+                action::reveal_active_buffer(&mut s);
+            }
             Mut::Action(a) => action::handle_action(&mut s, a),
             Mut::Alert { info, warn } => {
                 s.info = info;
@@ -224,7 +227,8 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Arc<AppState>> {
                 notify_hash,
                 session_restore_done,
             } => {
-                if activate || s.active_buffer.is_none() {
+                let will_activate = activate || s.active_buffer.is_none();
+                if will_activate {
                     s.active_buffer = Some(buf.id);
                 }
                 if let Some(ref path) = buf.path {
@@ -240,6 +244,9 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Arc<AppState>> {
                 // Resolve focus once restore is done and buffers exist
                 if s.session_restore_phase == SessionRestorePhase::Done {
                     resolve_focus(&mut s);
+                }
+                if will_activate {
+                    action::reveal_active_buffer(&mut s);
                 }
             }
             Mut::BufferSaved {
@@ -261,7 +268,9 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Arc<AppState>> {
             Mut::ConfigKeys(v) => s.config_keys = Some(v),
             Mut::DirListed(path, entries) => {
                 s.browser.dir_contents.insert(path, entries);
-                s.browser.rebuild_entries(); // denormalize flat entry list
+                s.browser.rebuild_entries();
+                s.browser.complete_pending_reveal();
+                action::browser_scroll_to_selected(&mut s);
             }
             Mut::ConfigTheme(v) => s.config_theme = Some(v),
             Mut::ForceRedraw(v) => s.force_redraw = v,

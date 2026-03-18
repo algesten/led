@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use led_config_file::ConfigFile;
@@ -161,6 +161,7 @@ pub struct FileBrowserState {
     pub entries: Vec<TreeEntry>,
     pub selected: usize,
     pub scroll_offset: usize,
+    pub pending_reveal: Option<PathBuf>,
 }
 
 impl FileBrowserState {
@@ -177,6 +178,48 @@ impl FileBrowserState {
             &self.expanded_dirs,
             &mut self.entries,
         );
+    }
+
+    /// Expand ancestors of `path`, rebuild entries, and try to select it.
+    /// Sets `pending_reveal` for retry when dir listings arrive asynchronously.
+    /// Returns newly expanded directories that need listing.
+    pub fn reveal(&mut self, path: &Path) -> Vec<PathBuf> {
+        self.pending_reveal = Some(path.to_path_buf());
+
+        let Some(ref root) = self.root else {
+            return vec![];
+        };
+        let root = root.clone();
+
+        // Expand ancestor directories from parent up to (but not including) root
+        let mut newly_expanded = Vec::new();
+        let mut ancestor = path.parent();
+        while let Some(dir) = ancestor {
+            if dir == root || !dir.starts_with(&root) {
+                break;
+            }
+            if self.expanded_dirs.insert(dir.to_path_buf()) {
+                newly_expanded.push(dir.to_path_buf());
+            }
+            ancestor = dir.parent();
+        }
+
+        self.rebuild_entries();
+        self.complete_pending_reveal();
+
+        newly_expanded
+    }
+
+    /// If `pending_reveal` is set, search entries for a match and select it.
+    /// Clears `pending_reveal` on success.
+    pub fn complete_pending_reveal(&mut self) {
+        let Some(ref path) = self.pending_reveal else {
+            return;
+        };
+        if let Some(idx) = self.entries.iter().position(|e| e.path == *path) {
+            self.selected = idx;
+            self.pending_reveal = None;
+        }
     }
 }
 

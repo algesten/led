@@ -201,6 +201,7 @@ fn cycle_tab(state: &mut AppState, direction: i32) {
     let len = tabs.len() as i32;
     let next = ((pos as i32 + direction).rem_euclid(len)) as usize;
     state.active_buffer = Some(tabs[next].0);
+    reveal_active_buffer(state);
 }
 
 fn kill_buffer(state: &mut AppState) {
@@ -242,6 +243,7 @@ fn kill_buffer(state: &mut AppState) {
 
     state.buffers.remove(&active_id);
     state.active_buffer = next_active;
+    reveal_active_buffer(state);
 
     if state.buffers.is_empty() {
         state.focus = PanelSlot::Side;
@@ -433,6 +435,31 @@ fn close_group_on_move(buf: &mut BufferState) {
     if buf.last_edit_kind.is_some() {
         buf.doc = buf.doc.close_undo_group();
         buf.last_edit_kind = None;
+    }
+}
+
+pub(super) fn reveal_active_buffer(state: &mut AppState) {
+    let path = state
+        .active_buffer
+        .and_then(|id| state.buffers.get(&id))
+        .and_then(|b| b.path.clone());
+    let Some(path) = path else { return };
+    // Canonicalize to match browser.root (which is canonicalized by the workspace driver)
+    let path = std::fs::canonicalize(&path).unwrap_or(path);
+    let new_dirs = state.browser.reveal(&path);
+    if !new_dirs.is_empty() {
+        state.pending_lists.set(new_dirs);
+    }
+    browser_scroll_to_selected(state);
+}
+
+pub(super) fn browser_scroll_to_selected(state: &mut AppState) {
+    let height = state.dims.map_or(20, |d| d.buffer_height());
+    let sel = state.browser.selected;
+    if sel < state.browser.scroll_offset {
+        state.browser.scroll_offset = sel;
+    } else if sel >= state.browser.scroll_offset + height {
+        state.browser.scroll_offset = sel + 1 - height;
     }
 }
 

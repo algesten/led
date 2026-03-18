@@ -888,6 +888,98 @@ fn browser_open_selected_dir_toggles() {
     }
 }
 
+// ── Browser reveal ──
+
+fn browser_reveal_done(s: &led_state::AppState) -> bool {
+    s.browser.pending_reveal.is_none() && !s.browser.entries.is_empty()
+}
+
+#[test]
+fn browser_reveals_opened_file() {
+    let t = TestHarness::new()
+        .with_named_file("hello.txt", "hello\n")
+        .run(vec![WaitFor(browser_reveal_done)]);
+
+    let id = t.state.active_buffer.unwrap();
+    let buf_path = t.state.buffers[&id].path.as_ref().unwrap();
+    let canonical = std::fs::canonicalize(buf_path).unwrap_or_else(|_| buf_path.clone());
+    let selected_entry = &t.state.browser.entries[t.state.browser.selected];
+    assert_eq!(
+        selected_entry.path, canonical,
+        "browser should select the opened file"
+    );
+}
+
+#[test]
+fn browser_reveals_on_tab_switch() {
+    let t = TestHarness::new()
+        .with_named_file("aaa.txt", "a\n")
+        .with_named_file("bbb.txt", "b\n")
+        .run(vec![
+            WaitFor(browser_reveal_done),
+            Do(PrevTab),
+            WaitFor(browser_reveal_done),
+        ]);
+
+    let id = t.state.active_buffer.unwrap();
+    let active_path = t.state.buffers[&id].path.as_ref().unwrap();
+    let canonical = std::fs::canonicalize(active_path).unwrap_or_else(|_| active_path.clone());
+    let selected_entry = &t.state.browser.entries[t.state.browser.selected];
+    assert_eq!(
+        selected_entry.path, canonical,
+        "browser should select the active buffer's file after tab switch"
+    );
+}
+
+#[test]
+fn browser_reveals_file_in_subdir() {
+    // First file anchors start_dir at workspace root; second file is in a subdir.
+    let t = TestHarness::new()
+        .with_file("root\n")
+        .with_named_file("subdir/nested.txt", "nested\n")
+        .run(vec![WaitFor(browser_reveal_done)]);
+
+    // The subdir should have been expanded when nested.txt was opened
+    let root = t.state.browser.root.as_ref().unwrap();
+    let subdir = root.join("subdir");
+    assert!(
+        t.state.browser.expanded_dirs.contains(&subdir),
+        "ancestor directory should be expanded"
+    );
+
+    // The active buffer's file should be selected in the browser
+    let active_id = t.state.active_buffer.unwrap();
+    let active_path = t.state.buffers[&active_id].path.as_ref().unwrap();
+    let active_canonical =
+        std::fs::canonicalize(active_path).unwrap_or_else(|_| active_path.clone());
+    let selected_entry = &t.state.browser.entries[t.state.browser.selected];
+    assert_eq!(
+        selected_entry.path, active_canonical,
+        "browser should select the active buffer's file"
+    );
+}
+
+#[test]
+fn browser_reveals_after_kill_buffer() {
+    let t = TestHarness::new()
+        .with_named_file("aaa.txt", "a\n")
+        .with_named_file("bbb.txt", "b\n")
+        .run(vec![
+            WaitFor(browser_reveal_done),
+            Do(KillBuffer),
+            WaitFor(browser_reveal_done),
+        ]);
+
+    let id = t.state.active_buffer.unwrap();
+    let active_path = t.state.buffers[&id].path.as_ref().unwrap();
+    let canonical = std::fs::canonicalize(active_path).unwrap_or_else(|_| active_path.clone());
+    let selected_entry = &t.state.browser.entries[t.state.browser.selected];
+    assert_eq!(
+        selected_entry.path, canonical,
+        "browser should select the remaining file after kill"
+    );
+}
+
 // ── UI ──
 
 #[test]
