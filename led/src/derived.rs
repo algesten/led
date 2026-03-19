@@ -167,6 +167,7 @@ pub fn derived(state: Stream<Arc<AppState>>) -> Derived {
                 .map(move |(i, path)| DocStoreOut::Open {
                     path,
                     tab_order: base + i,
+                    create_if_missing: true,
                 })
                 .collect::<Vec<_>>()
         });
@@ -184,6 +185,7 @@ pub fn derived(state: Stream<Arc<AppState>>) -> Derived {
                     DocStoreOut::Open {
                         path: path.clone(),
                         tab_order,
+                        create_if_missing: false,
                     }
                 })
                 .collect::<Vec<_>>()
@@ -203,6 +205,7 @@ pub fn derived(state: Stream<Arc<AppState>>) -> Derived {
                 .map(|b| b.tab_order)
                 .max()
                 .map_or(0, |m| m + 1),
+            create_if_missing: true,
         })
         .stream();
 
@@ -239,6 +242,7 @@ pub fn derived(state: Stream<Arc<AppState>>) -> Derived {
                     .map(|b| b.tab_order)
                     .max()
                     .map_or(0, |m| m + 1),
+                create_if_missing: false,
             }
         })
         .stream();

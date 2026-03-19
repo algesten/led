@@ -12,9 +12,22 @@ use tokio::sync::mpsc;
 
 #[derive(Clone)]
 pub enum DocStoreOut {
-    Open { path: PathBuf, tab_order: usize },
-    Save { id: DocId, doc: Arc<dyn Doc> },
-    Close { id: DocId, doc: Arc<dyn Doc> },
+    Open {
+        path: PathBuf,
+        tab_order: usize,
+        /// When true, opening a non-existent path creates an empty buffer
+        /// instead of reporting OpenFailed.  Used for user-initiated opens
+        /// (CLI arg, find-file); session restore passes false.
+        create_if_missing: bool,
+    },
+    Save {
+        id: DocId,
+        doc: Arc<dyn Doc>,
+    },
+    Close {
+        id: DocId,
+        doc: Arc<dyn Doc>,
+    },
 }
 
 #[derive(Clone)]
@@ -119,7 +132,7 @@ pub fn driver(
                 maybe_cmd = cmd_rx.recv() => {
                     let Some(cmd) = maybe_cmd else { break };
                     match cmd {
-                        DocStoreOut::Open { path, tab_order } => {
+                        DocStoreOut::Open { path, tab_order, create_if_missing } => {
                             if let Some(parent) = path.parent() {
                                 let canonical = std::fs::canonicalize(parent)
                                     .unwrap_or_else(|_| parent.to_path_buf());
@@ -134,7 +147,18 @@ pub fn driver(
                             }
 
                             let canonical = canonicalize(&path);
-                            match read_doc(&path).await {
+                            let doc_result = match read_doc(&path).await {
+                                Ok(doc) => Ok(doc),
+                                Err(e) if create_if_missing
+                                    && e.kind() == std::io::ErrorKind::NotFound =>
+                                {
+                                    // New file: create an empty document.
+                                    // The file will be created on disk when the user saves.
+                                    Ok(TextDoc::from_reader(Cursor::new(b"" as &[u8])).unwrap())
+                                }
+                                Err(e) => Err(e),
+                            };
+                            match doc_result {
                                 Ok(doc) => {
                                     // Reuse existing DocId if already tracked,
                                     // otherwise allocate a new one.
@@ -232,6 +256,18 @@ async fn handle_save(
     id: DocId,
 ) {
     let parent = path.parent().unwrap_or(std::path::Path::new("."));
+    // Create parent directories for new files that don't exist on disk yet.
+    if !parent.exists() {
+        if let Err(e) = tokio::fs::create_dir_all(parent).await {
+            let _ = tx
+                .send(Err(Alert::Warn(format!(
+                    "Failed to create directory {}: {e}",
+                    parent.display()
+                ))))
+                .await;
+            return;
+        }
+    }
     let tmp_path = parent.join(format!(".led-save-{}", std::process::id()));
 
     // Format on save: strip trailing whitespace, ensure final newline

@@ -34,7 +34,13 @@ async fn main() {
 
     let arg_path = cli.path.as_ref().map(|p| {
         let path = PathBuf::from(p);
-        std::fs::canonicalize(&path).unwrap_or(path)
+        std::fs::canonicalize(&path).unwrap_or_else(|_| {
+            // Non-existent file: resolve relative to CWD so start_dir is valid.
+            let parent = path.parent().unwrap_or(std::path::Path::new("."));
+            let canonical_parent = std::fs::canonicalize(parent)
+                .unwrap_or_else(|_| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+            canonical_parent.join(path.file_name().unwrap_or_default())
+        })
     });
 
     let start_dir: PathBuf = if arg_path.as_ref().map_or(false, |p| p.is_dir()) {
