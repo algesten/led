@@ -1,21 +1,40 @@
+use std::path::Path;
+
 use led_core::{Action, BufferId, PanelSlot};
-use led_state::{AppState, BufferState, Dimensions, EditKind, EntryKind, SaveState};
+use led_state::{
+    AppState, BufferState, Dimensions, EditKind, EntryKind, PreviewRequest, SaveState,
+};
 
 use led_state::JumpPosition;
 
-use super::{edit, find_file, jump, mov, search};
+use super::{edit, file_search, find_file, jump, mov, search};
 
 pub fn handle_action(state: &mut AppState, action: Action) {
     // Handle confirmation prompt for dirty buffer kill
     if state.confirm_kill {
         state.confirm_kill = false;
-        state.warn = None;
+        state.alerts.warn = None;
         if matches!(action, Action::InsertChar('y' | 'Y')) {
             force_kill_buffer(state);
             return;
         }
         // Any other action: cancel and fall through to normal handling
         if matches!(action, Action::Abort) {
+            return;
+        }
+    }
+
+    // Auto-promote preview if user edits in it
+    if state.preview.buffer.is_some()
+        && state.active_buffer == state.preview.buffer
+        && is_editing_action(&action)
+    {
+        promote_preview_active(state);
+    }
+
+    // Intercept actions during file search
+    if state.file_search.is_some() {
+        if file_search::handle_file_search_action(state, &action) {
             return;
         }
     }
@@ -42,7 +61,7 @@ pub fn handle_action(state: &mut AppState, action: Action) {
 
     // Any action other than KillLine breaks kill accumulation
     if !matches!(action, Action::KillLine) {
-        state.kill_accumulator = None;
+        state.kill_ring.break_accumulation();
     }
 
     match action {
@@ -125,7 +144,7 @@ pub fn handle_action(state: &mut AppState, action: Action) {
             with_buf(state, |buf, _dims| {
                 buf.mark = Some((buf.cursor_row, buf.cursor_col));
             });
-            state.info = Some("Mark set".into());
+            state.alerts.info = Some("Mark set".into());
         }
 
         Action::Abort => with_buf(state, |buf, _dims| {
@@ -207,11 +226,7 @@ pub fn handle_action(state: &mut AppState, action: Action) {
                         buf.cursor_row = r;
                         buf.cursor_col = c;
                         buf.cursor_col_affinity = a;
-                        state
-                            .kill_accumulator
-                            .get_or_insert_with(String::new)
-                            .push_str(&killed);
-                        state.kill_ring = state.kill_accumulator.clone().unwrap();
+                        state.kill_ring.accumulate(&killed);
                     }
                     let (sr, ssl) = mov::adjust_scroll(buf, &dims);
                     buf.scroll_row = sr;
@@ -232,10 +247,10 @@ pub fn handle_action(state: &mut AppState, action: Action) {
                         buf.cursor_col = c;
                         buf.cursor_col_affinity = a;
                         buf.mark = None;
-                        state.kill_ring = killed;
+                        state.kill_ring.set(killed);
                     } else {
                         buf.mark = None;
-                        state.warn = Some("No region".into());
+                        state.alerts.warn = Some("No region".into());
                     }
                     let (sr, ssl) = mov::adjust_scroll(buf, &dims);
                     buf.scroll_row = sr;
@@ -245,11 +260,11 @@ pub fn handle_action(state: &mut AppState, action: Action) {
                     }
                 }
             } else {
-                state.warn = Some("No region".into());
+                state.alerts.warn = Some("No region".into());
             }
         }
         Action::Yank => {
-            state.pending_yank.set(());
+            state.kill_ring.pending_yank.set(());
         }
 
         // ── Undo / Redo ──
@@ -314,6 +329,9 @@ pub fn handle_action(state: &mut AppState, action: Action) {
         // ── Find file ──
         Action::FindFile => find_file::activate(state),
 
+        // ── File search ──
+        Action::OpenFileSearch => file_search::activate(state),
+
         // ── Sort imports ──
         Action::SortImports => {
             if let Some(id) = state.active_buffer {
@@ -333,9 +351,9 @@ pub fn handle_action(state: &mut AppState, action: Action) {
                                 let doc = buf.doc.remove(start_char, end_char);
                                 let doc = doc.insert(start_char, &replacement);
                                 buf.doc = doc;
-                                state.info = Some("Imports sorted".into());
+                                state.alerts.info = Some("Imports sorted".into());
                             } else {
-                                state.info = Some("Imports already sorted".into());
+                                state.alerts.info = Some("Imports already sorted".into());
                             }
                         }
                     }
@@ -450,6 +468,7 @@ fn cycle_tab(state: &mut AppState, direction: i32) {
     let mut tabs: Vec<(BufferId, usize)> = state
         .buffers
         .iter()
+        .filter(|(_, buf)| !buf.is_preview)
         .map(|(id, buf)| (*id, buf.tab_order))
         .collect();
     tabs.sort_by_key(|&(_, order)| order);
@@ -479,7 +498,7 @@ fn kill_buffer(state: &mut AppState) {
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| format!("[{}]", active_id.0));
         state.confirm_kill = true;
-        state.warn = Some(format!("Buffer {filename} modified; kill anyway? (y or n)"));
+        state.alerts.warn = Some(format!("Buffer {filename} modified; kill anyway? (y or n)"));
         return;
     }
 
@@ -494,6 +513,11 @@ fn force_kill_buffer(state: &mut AppState) {
 }
 
 fn do_kill_buffer(state: &mut AppState, id: BufferId) {
+    if state.preview.buffer == Some(id) {
+        close_preview(state);
+        return;
+    }
+
     let Some(buf) = state.buffers.get(&id) else {
         return;
     };
@@ -530,7 +554,7 @@ fn do_kill_buffer(state: &mut AppState, id: BufferId) {
         state.focus = PanelSlot::Side;
     }
 
-    state.info = Some(format!("Killed {filename}"));
+    state.alerts.info = Some(format!("Killed {filename}"));
 }
 
 // ── Editor movement (focus = Main) ──
@@ -618,6 +642,22 @@ fn handle_browser_nav(state: &mut AppState, action: &Action) {
     } else if state.browser.selected >= state.browser.scroll_offset + height {
         state.browser.scroll_offset = state.browser.selected + 1 - height;
     }
+
+    // Emit preview for selected entry
+    if let Some(entry) = state.browser.entries.get(state.browser.selected) {
+        match &entry.kind {
+            EntryKind::File => {
+                state.preview.pending.set(Some(PreviewRequest {
+                    path: entry.path.clone(),
+                    row: 0,
+                    col: 0,
+                }));
+            }
+            EntryKind::Directory { .. } => {
+                close_preview(state);
+            }
+        }
+    }
 }
 
 fn handle_browser_expand(state: &mut AppState) {
@@ -673,11 +713,18 @@ fn handle_browser_collapse_all(state: &mut AppState) {
 }
 
 fn handle_browser_open(state: &mut AppState) {
-    let Some(entry) = state.browser.entries.get(state.browser.selected) else {
+    let Some(entry) = state.browser.entries.get(state.browser.selected).cloned() else {
         return;
     };
     match &entry.kind {
         EntryKind::File => {
+            if promote_preview(state, &entry.path) {
+                state.focus = PanelSlot::Main;
+                return;
+            }
+            // Clear pending_preview so the preview stream doesn't race
+            state.preview.pending.set(None);
+            close_preview(state);
             state.pending_open.set(Some(entry.path.clone()));
             state.focus = PanelSlot::Main;
         }
@@ -711,32 +758,8 @@ fn with_buf(state: &mut AppState, f: impl FnOnce(&mut BufferState, &Dimensions))
     }
 }
 
-/// Yank (paste) text into the active buffer. Called when clipboard text arrives.
-pub fn yank_text(state: &mut AppState, text: String) {
-    if text.is_empty() {
-        return;
-    }
-    if let (Some(dims), Some(id)) = (state.dims, state.active_buffer) {
-        if let Some(buf) = state.buffers.get_mut(&id) {
-            close_group_on_move(buf);
-            buf.mark = None;
-            let (doc, r, c, a) = edit::yank(buf, &text);
-            buf.doc = doc;
-            buf.cursor_row = r;
-            buf.cursor_col = c;
-            buf.cursor_col_affinity = a;
-            let (sr, ssl) = mov::adjust_scroll(buf, &dims);
-            buf.scroll_row = sr;
-            buf.scroll_sub_line = ssl;
-            if buf.doc.dirty() && buf.save_state == SaveState::Clean {
-                buf.save_state = SaveState::Modified;
-            }
-        }
-    }
-}
-
 /// Close undo group and clear edit kind tracking.
-fn close_group_on_move(buf: &mut BufferState) {
+pub(super) fn close_group_on_move(buf: &mut BufferState) {
     if buf.last_edit_kind.is_some() {
         buf.doc = buf.doc.close_undo_group();
         buf.last_edit_kind = None;
@@ -793,4 +816,70 @@ fn maybe_close_group(buf: &mut BufferState, kind: EditKind, ch: char) {
             }
         }
     }
+}
+
+// ── Preview helpers ──
+
+pub(super) fn close_preview(state: &mut AppState) {
+    if let Some(preview_id) = state.preview.buffer.take() {
+        state.buffers.remove(&preview_id);
+        state.notify_hash_to_buffer.retain(|_, v| *v != preview_id);
+        renumber_tabs(state);
+    }
+    if let Some(restore_id) = state.preview.pre_preview_buffer.take() {
+        if state.buffers.contains_key(&restore_id) {
+            state.active_buffer = Some(restore_id);
+            reveal_active_buffer(state);
+        }
+    }
+    if state.buffers.is_empty() {
+        state.focus = PanelSlot::Side;
+    }
+}
+
+pub(super) fn promote_preview(state: &mut AppState, path: &Path) -> bool {
+    let Some(preview_id) = state.preview.buffer else {
+        return false;
+    };
+    let matches = state
+        .buffers
+        .get(&preview_id)
+        .and_then(|b| b.path.as_ref())
+        .map_or(false, |p| p == path);
+    if !matches {
+        return false;
+    }
+    if let Some(buf) = state.buffers.get_mut(&preview_id) {
+        buf.is_preview = false;
+    }
+    state.preview.buffer = None;
+    state.preview.pre_preview_buffer = None;
+    true
+}
+
+fn promote_preview_active(state: &mut AppState) {
+    if let Some(preview_id) = state.preview.buffer.take() {
+        if let Some(buf) = state.buffers.get_mut(&preview_id) {
+            buf.is_preview = false;
+        }
+        state.preview.pre_preview_buffer = None;
+    }
+}
+
+fn is_editing_action(action: &Action) -> bool {
+    matches!(
+        action,
+        Action::InsertChar(_)
+            | Action::InsertNewline
+            | Action::DeleteBackward
+            | Action::DeleteForward
+            | Action::InsertTab
+            | Action::KillLine
+            | Action::KillRegion
+            | Action::Yank
+            | Action::Undo
+            | Action::Redo
+            | Action::InsertCloseBracket(_)
+            | Action::SortImports
+    )
 }

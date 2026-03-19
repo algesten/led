@@ -33,6 +33,16 @@ pub fn driver(state: Stream<Arc<AppState>>) -> Ui {
         .map(|s| {
             let dims = s.dims?;
 
+            // File search cursor: position in side panel input row
+            if let Some(ref fs) = s.file_search {
+                let cx = fs
+                    .cursor_pos
+                    .min(dims.side_panel_width.saturating_sub(2) as usize)
+                    as u16;
+                let cy = 1u16; // row 1 of side panel (row 0 = toggles)
+                return Some((cx, cy));
+            }
+
             // Find-file cursor: absolute position on the status bar
             if let Some(ref ff) = s.find_file {
                 let prefix_len = " Find file: ".len() as u16;
@@ -81,16 +91,24 @@ pub fn driver(state: Stream<Arc<AppState>>) -> Ui {
 
     let browser_s = state
         .map(|s| {
-            let ff = display::find_file_completion_inputs(&s);
-            let browser = if ff.is_none() {
+            let fs = display::file_search_inputs(&s);
+            let ff = if fs.is_none() {
+                display::find_file_completion_inputs(&s)
+            } else {
+                None
+            };
+            let browser = if fs.is_none() && ff.is_none() {
                 display::browser_inputs(&s)
             } else {
                 None
             };
-            (ff, browser)
+            (fs, ff, browser)
         })
         .dedupe()
-        .map(|(ff, browser)| {
+        .map(|(fs, ff, browser)| {
+            if let Some(f) = fs {
+                return display::build_file_search_lines(&f);
+            }
             if let Some(f) = ff {
                 return display::build_find_file_completion_lines(&f);
             }

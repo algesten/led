@@ -99,7 +99,7 @@ pub fn display_inputs(s: &AppState) -> Option<DisplayInputs> {
     let git_line_statuses = buf
         .path
         .as_ref()
-        .and_then(|p| s.git_line_statuses.get(p))
+        .and_then(|p| s.git.line_statuses.get(p))
         .cloned()
         .unwrap_or_default();
     let gutter_added_style = style::resolve(theme, &theme.git.gutter_added);
@@ -389,6 +389,9 @@ impl PartialEq for CursorInputs {
 }
 
 pub fn cursor_inputs(s: &AppState) -> Option<CursorInputs> {
+    if s.file_search.is_some() {
+        return None;
+    }
     if s.find_file.is_some() {
         return None;
     }
@@ -502,15 +505,15 @@ pub fn status_inputs(s: &AppState) -> StatusInputs {
         });
 
     let find_file_prompt = s.find_file.as_ref().map(|ff| (ff.input.clone(), ff.cursor));
-    let branch = s.git_branch.clone();
+    let branch = s.git.branch.clone();
 
     StatusInputs {
         file_name,
         is_dirty,
         cursor_row,
         cursor_col,
-        info: s.info.clone(),
-        warn: s.warn.clone(),
+        info: s.alerts.info.clone(),
+        warn: s.alerts.warn.clone(),
         viewport_width,
         search_prompt,
         find_file_prompt,
@@ -582,6 +585,8 @@ pub fn tabs_inputs(s: &AppState) -> Option<TabsInputs> {
     let theme = theme.file.as_ref();
     let active_style = style::resolve(theme, &theme.tabs.active);
     let inactive_style = style::resolve(theme, &theme.tabs.inactive);
+    let preview_active_style = style::resolve(theme, &theme.tabs.preview_active);
+    let preview_inactive_style = style::resolve(theme, &theme.tabs.preview_inactive);
 
     let mut bufs: Vec<_> = s.buffers.values().collect();
     bufs.sort_by_key(|b| b.tab_order);
@@ -598,7 +603,13 @@ pub fn tabs_inputs(s: &AppState) -> Option<TabsInputs> {
             let dirty = buf.doc.dirty();
             let label = format_tab_label(&name, dirty);
             let is_active = s.active_buffer == Some(buf.id);
-            let entry_style = if is_active {
+            let entry_style = if buf.is_preview {
+                if is_active {
+                    preview_active_style
+                } else {
+                    preview_inactive_style
+                }
+            } else if is_active {
                 active_style
             } else {
                 inactive_style
@@ -655,13 +666,25 @@ pub struct LayoutInputs {
 }
 
 pub fn layout_inputs(s: &AppState) -> LayoutInputs {
-    let (side_border_style, side_bg_style, text_style, status_style) = s
+    let side_border_style = s
+        .config_theme
+        .as_ref()
+        .map(|ct| {
+            let t = ct.file.as_ref();
+            if s.file_search.is_some() {
+                style::resolve(t, &t.file_search.border)
+            } else {
+                style::resolve(t, &t.browser.border)
+            }
+        })
+        .unwrap_or_default();
+
+    let (side_bg_style, text_style, status_style) = s
         .config_theme
         .as_ref()
         .map(|ct| {
             let t = ct.file.as_ref();
             (
-                style::resolve(t, &t.browser.border),
                 style::resolve(t, &t.browser.file),
                 style::resolve(t, &t.editor.text),
                 style::resolve(t, &t.status_bar.style),
@@ -669,9 +692,12 @@ pub fn layout_inputs(s: &AppState) -> LayoutInputs {
         })
         .unwrap_or_default();
 
-    // Force side panel when find-file completions should show
+    // Force side panel when file search or find-file completions should show
     let dims = match s.dims {
         Some(mut d) => {
+            if s.file_search.is_some() {
+                d.show_side_panel = true;
+            }
             if s.find_file.as_ref().is_some_and(|ff| ff.show_side) {
                 d.show_side_panel = true;
             }
@@ -737,6 +763,9 @@ pub struct BrowserInputs {
 }
 
 pub fn browser_inputs(s: &AppState) -> Option<BrowserInputs> {
+    if s.file_search.is_some() {
+        return None;
+    }
     if s.find_file.as_ref().is_some_and(|ff| ff.show_side) {
         return None;
     }
@@ -753,7 +782,7 @@ pub fn browser_inputs(s: &AppState) -> Option<BrowserInputs> {
         file_style: style::resolve(theme, &theme.browser.file),
         selected_style: style::resolve(theme, &theme.browser.selected),
         selected_unfocused_style: style::resolve(theme, &theme.browser.selected_unfocused),
-        git_file_statuses: s.git_file_statuses.clone(),
+        git_file_statuses: s.git.file_statuses.clone(),
         git_modified_style: style::resolve(theme, &theme.git.modified),
         git_added_style: style::resolve(theme, &theme.git.added),
         git_untracked_style: style::resolve(theme, &theme.git.untracked),
@@ -930,4 +959,205 @@ pub fn build_find_file_completion_lines(f: &FindFileCompletionInputs) -> Rc<Vec<
         .collect();
 
     Rc::new(lines)
+}
+
+// ── File search ──
+
+#[derive(Clone, PartialEq)]
+pub struct FileSearchInputs {
+    pub query: String,
+    pub cursor_pos: usize,
+    pub case_sensitive: bool,
+    pub use_regex: bool,
+    pub results: Vec<led_state::file_search::FileGroup>,
+    pub flat_hits: Vec<led_state::file_search::FlatHit>,
+    pub selected: usize,
+    pub scroll_offset: usize,
+    pub focused: bool,
+    pub height: usize,
+    pub side_width: u16,
+    // Styles
+    pub input_style: Style,
+    pub toggle_on_style: Style,
+    pub toggle_off_style: Style,
+    pub file_header_style: Style,
+    pub hit_style: Style,
+    pub match_style: Style,
+    pub selected_style: Style,
+    pub selected_unfocused_style: Style,
+}
+
+pub fn file_search_inputs(s: &AppState) -> Option<FileSearchInputs> {
+    let fs = s.file_search.as_ref()?;
+    let dims = s.dims?;
+    let theme = s.config_theme.as_ref()?.file.as_ref();
+    Some(FileSearchInputs {
+        query: fs.query.clone(),
+        cursor_pos: fs.cursor_pos,
+        case_sensitive: fs.case_sensitive,
+        use_regex: fs.use_regex,
+        results: fs.results.clone(),
+        flat_hits: fs.flat_hits.clone(),
+        selected: fs.selected,
+        scroll_offset: fs.scroll_offset,
+        focused: s.focus == PanelSlot::Side,
+        height: dims.buffer_height(),
+        side_width: dims.side_panel_width,
+        input_style: style::resolve(theme, &theme.file_search.input),
+        toggle_on_style: style::resolve(theme, &theme.file_search.toggle_on),
+        toggle_off_style: style::resolve(theme, &theme.file_search.toggle_off),
+        file_header_style: style::resolve(theme, &theme.file_search.file_header),
+        hit_style: style::resolve(theme, &theme.file_search.hit),
+        match_style: style::resolve(theme, &theme.file_search.match_),
+        selected_style: style::resolve(theme, &theme.file_search.selected),
+        selected_unfocused_style: style::resolve(theme, &theme.file_search.selected_unfocused),
+    })
+}
+
+pub fn build_file_search_lines(f: &FileSearchInputs) -> Rc<Vec<Line<'static>>> {
+    let width = (f.side_width as usize).saturating_sub(1);
+    let mut lines: Vec<Line<'static>> = Vec::new();
+
+    // Row 0: toggle buttons
+    let case_style = if f.case_sensitive {
+        f.toggle_on_style
+    } else {
+        f.toggle_off_style
+    };
+    let regex_style = if f.use_regex {
+        f.toggle_on_style
+    } else {
+        f.toggle_off_style
+    };
+    lines.push(Line::from(vec![
+        Span::styled(" Aa ", case_style),
+        Span::raw(" "),
+        Span::styled(" .* ", regex_style),
+    ]));
+
+    // Row 1: query input
+    let display_query: String = if f.query.chars().count() > width {
+        f.query.chars().take(width).collect()
+    } else {
+        format!("{:<w$}", f.query, w = width)
+    };
+    lines.push(Line::from(Span::styled(display_query, f.input_style)));
+
+    // Rows 2+: results
+    let results_height = f.height.saturating_sub(2);
+    if results_height == 0 {
+        return Rc::new(lines);
+    }
+
+    let selected_flat = if f.flat_hits.is_empty() {
+        None
+    } else {
+        Some(&f.flat_hits[f.selected])
+    };
+
+    let mut display_row: usize = 0;
+    let mut rendered: usize = 0;
+
+    for (gi, group) in f.results.iter().enumerate() {
+        // File header row
+        if display_row >= f.scroll_offset {
+            if rendered >= results_height {
+                break;
+            }
+            let header_text: String = if group.relative.chars().count() > width {
+                group.relative.chars().take(width).collect()
+            } else {
+                group.relative.clone()
+            };
+            let padded = format!("{:<w$}", header_text, w = width);
+            lines.push(Line::from(Span::styled(padded, f.file_header_style)));
+            rendered += 1;
+        }
+        display_row += 1;
+
+        // Hit rows
+        for (hi, hit) in group.hits.iter().enumerate() {
+            if display_row >= f.scroll_offset {
+                if rendered >= results_height {
+                    break;
+                }
+                let is_selected =
+                    selected_flat.map_or(false, |fl| fl.group_idx == gi && fl.hit_idx == hi);
+
+                let base_style = if is_selected {
+                    if f.focused {
+                        f.selected_style
+                    } else {
+                        f.selected_unfocused_style
+                    }
+                } else {
+                    f.hit_style
+                };
+
+                let match_s = if is_selected {
+                    base_style
+                } else {
+                    f.match_style
+                };
+
+                let prefix = format!("{:>4}: ", hit.row + 1);
+                let avail = width.saturating_sub(prefix.chars().count());
+                let spans = build_hit_spans(hit, &prefix, avail, base_style, match_s);
+                lines.push(Line::from(spans));
+                rendered += 1;
+            }
+            display_row += 1;
+        }
+    }
+
+    Rc::new(lines)
+}
+
+fn build_hit_spans<'a>(
+    hit: &led_state::file_search::SearchHit,
+    prefix: &str,
+    avail: usize,
+    base_style: Style,
+    match_style: Style,
+) -> Vec<Span<'a>> {
+    let line_chars: Vec<char> = hit.line_text.chars().collect();
+    let match_char_start = hit.line_text[..hit.match_start].chars().count();
+    let match_char_end = hit.line_text[..hit.match_end].chars().count();
+
+    let match_len = match_char_end - match_char_start;
+    let context_before = avail.saturating_sub(match_len) / 2;
+    let win_start = match_char_start.saturating_sub(context_before);
+    let win_end = (win_start + avail).min(line_chars.len());
+    let win_start = if win_end.saturating_sub(avail) < win_start {
+        win_end.saturating_sub(avail)
+    } else {
+        win_start
+    };
+
+    let visible: String = line_chars[win_start..win_end].iter().collect();
+    let ms_in_win = match_char_start.saturating_sub(win_start);
+    let me_in_win = (match_char_end.saturating_sub(win_start)).min(visible.chars().count());
+
+    let before: String = visible.chars().take(ms_in_win).collect();
+    let matched: String = visible
+        .chars()
+        .skip(ms_in_win)
+        .take(me_in_win - ms_in_win)
+        .collect();
+    let after: String = visible.chars().skip(me_in_win).collect();
+
+    let pad_needed = avail.saturating_sub(visible.chars().count());
+    let after_padded = format!("{after}{:pad$}", "", pad = pad_needed);
+
+    let mut spans = vec![Span::styled(prefix.to_string(), base_style)];
+    if !before.is_empty() {
+        spans.push(Span::styled(before, base_style));
+    }
+    if !matched.is_empty() {
+        spans.push(Span::styled(matched, match_style));
+    }
+    if !after_padded.is_empty() {
+        spans.push(Span::styled(after_padded, base_style));
+    }
+    spans
 }

@@ -1,0 +1,15 @@
+[package]
+name = "led-file-search"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+led-core = { workspace = true }
+led-state = { workspace = true }
+grep-regex = { workspace = true }
+grep-matcher = { workspace = true }
+grep-searcher = { workspace = true }
+ignore = { workspace = true }
+regex-syntax = { workspace = true }
+log = { workspace = true }
+tokio = { workspace = true }

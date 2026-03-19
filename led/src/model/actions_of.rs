@@ -62,6 +62,9 @@ fn map_key(combo: KeyCombo, state: &AppState, chord: &Cell<Option<KeyCombo>>) ->
 }
 
 fn resolve_context(state: &AppState) -> Option<&'static str> {
+    if state.file_search.is_some() {
+        return Some("file_search");
+    }
     match state.focus {
         PanelSlot::Side => Some("browser"),
         PanelSlot::Main => None,
@@ -71,8 +74,8 @@ fn resolve_context(state: &AppState) -> Option<&'static str> {
 }
 
 fn allow_char_insert(state: &AppState) -> bool {
-    match state.focus {
-        PanelSlot::Main => true,
-        _ => false,
+    if state.file_search.is_some() || state.find_file.is_some() {
+        return true;
     }
+    matches!(state.focus, PanelSlot::Main)
 }

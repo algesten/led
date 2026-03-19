@@ -605,7 +605,12 @@ fn kill_buffer_clean() {
     assert!(t.state.active_buffer.is_none());
     assert!(t.state.buffers.is_empty());
     assert!(
-        t.state.info.as_deref().unwrap_or("").contains("Killed"),
+        t.state
+            .alerts
+            .info
+            .as_deref()
+            .unwrap_or("")
+            .contains("Killed"),
         "should show killed message"
     );
 }
@@ -622,6 +627,7 @@ fn kill_buffer_dirty_prompts() {
     assert!(t.state.confirm_kill);
     assert!(
         t.state
+            .alerts
             .warn
             .as_deref()
             .unwrap_or("")
@@ -1195,7 +1201,7 @@ fn session_restore_tabs() {
     let t = TestHarness::new()
         .with_named_file("aaa.txt", "hello\n")
         .with_named_file("bbb.txt", "world\n")
-        .run(vec![Do(Quit), WaitFor(|s| s.session_saved)]);
+        .run(vec![Do(Quit), WaitFor(|s| s.session.saved)]);
 
     assert_eq!(t.state.buffers.len(), 2);
     let dir = t.dirs.root.clone();
@@ -1222,7 +1228,7 @@ fn session_restore_tab_order_with_arg_repeated() {
     let t = TestHarness::new()
         .with_named_file("Cargo.toml", "[package]\n")
         .with_named_file("lib.rs", "fn main() {}\n")
-        .run(vec![Do(Quit), WaitFor(|s| s.session_saved)]);
+        .run(vec![Do(Quit), WaitFor(|s| s.session.saved)]);
 
     let order1: Vec<(String, usize)> = {
         let mut v: Vec<_> = t
@@ -1281,7 +1287,7 @@ fn session_restore_tab_order_with_arg_repeated() {
     // Run 3: quit and restart again — should still be stable
     let t2b = TestHarness::with_dir(dir.clone())
         .with_arg(cargo_path.clone())
-        .run(vec![Do(Quit), WaitFor(|s| s.session_saved)]);
+        .run(vec![Do(Quit), WaitFor(|s| s.session.saved)]);
 
     let dir2 = t2b.dirs.root.clone();
 
@@ -1322,7 +1328,7 @@ fn session_restore_tab_order() {
         .with_named_file("aaa.txt", "a\n")
         .with_named_file("bbb.txt", "b\n")
         .with_named_file("ccc.txt", "c\n")
-        .run(vec![Do(Quit), WaitFor(|s| s.session_saved)]);
+        .run(vec![Do(Quit), WaitFor(|s| s.session.saved)]);
 
     // Capture original tab orders
     let original: Vec<(String, usize)> = {
@@ -1381,7 +1387,7 @@ fn session_restore_missing_file() {
     let t = TestHarness::new()
         .with_named_file("fileA.txt", "aaa\n")
         .with_named_file("fileB.txt", "bbb\n")
-        .run(vec![Do(Quit), WaitFor(|s| s.session_saved)]);
+        .run(vec![Do(Quit), WaitFor(|s| s.session.saved)]);
 
     assert_eq!(t.state.buffers.len(), 2);
     let dir = t.dirs.root.clone();
@@ -1395,7 +1401,7 @@ fn session_restore_missing_file() {
     let t2 = TestHarness::with_dir(dir)
         .with_arg(file_b)
         .run(vec![WaitFor(|s| {
-            s.session_restore_phase == led_state::SessionRestorePhase::Done && !s.buffers.is_empty()
+            s.session.restore_phase == led_state::SessionRestorePhase::Done && !s.buffers.is_empty()
         })]);
 
     // fileB.txt should be open; fileA.txt silently skipped
@@ -1417,7 +1423,7 @@ fn session_restore_all_files_missing() {
     let t = TestHarness::new()
         .with_named_file("one.txt", "1\n")
         .with_named_file("two.txt", "2\n")
-        .run(vec![Do(Quit), WaitFor(|s| s.session_saved)]);
+        .run(vec![Do(Quit), WaitFor(|s| s.session.saved)]);
 
     assert_eq!(t.state.buffers.len(), 2);
     let dir = t.dirs.root.clone();
@@ -1428,7 +1434,7 @@ fn session_restore_all_files_missing() {
 
     // Run 2: session restore should complete (not hang) with zero buffers
     let t2 = TestHarness::with_dir(dir).run(vec![WaitFor(|s| {
-        s.session_restore_phase == led_state::SessionRestorePhase::Done
+        s.session.restore_phase == led_state::SessionRestorePhase::Done
     })]);
 
     assert!(t2.state.buffers.is_empty());
@@ -1441,7 +1447,7 @@ fn session_restore_multiple_missing() {
         .with_named_file("a.txt", "a\n")
         .with_named_file("b.txt", "b\n")
         .with_named_file("c.txt", "c\n")
-        .run(vec![Do(Quit), WaitFor(|s| s.session_saved)]);
+        .run(vec![Do(Quit), WaitFor(|s| s.session.saved)]);
 
     assert_eq!(t.state.buffers.len(), 3);
     let dir = t.dirs.root.clone();
@@ -1452,7 +1458,7 @@ fn session_restore_multiple_missing() {
 
     // Run 2: only b.txt should survive
     let t2 = TestHarness::with_dir(dir).run(vec![WaitFor(|s| {
-        s.session_restore_phase == led_state::SessionRestorePhase::Done && !s.buffers.is_empty()
+        s.session.restore_phase == led_state::SessionRestorePhase::Done && !s.buffers.is_empty()
     })]);
 
     assert_eq!(t2.state.buffers.len(), 1);
@@ -1492,7 +1498,7 @@ fn session_restore_with_arg_file() {
 
     assert_eq!(t.state.buffers.len(), 2);
     assert!(
-        t.state.session_saved,
+        t.state.session.saved,
         "session must be saved BEFORE quit signal fires"
     );
 
@@ -1551,7 +1557,7 @@ fn session_restore_cursor() {
             Do(MoveDown),
             Do(MoveDown),
             Do(Quit),
-            WaitFor(|s| s.session_saved),
+            WaitFor(|s| s.session.saved),
         ]);
 
     assert_eq!(buf(&t).cursor_row, 3);
@@ -1571,7 +1577,7 @@ fn session_restore_active_tab() {
     let t = TestHarness::new()
         .with_named_file("first.txt", "a\n")
         .with_named_file("second.txt", "b\n")
-        .run(vec![Do(PrevTab), Do(Quit), WaitFor(|s| s.session_saved)]);
+        .run(vec![Do(PrevTab), Do(Quit), WaitFor(|s| s.session.saved)]);
 
     let active_name = buf(&t)
         .path
@@ -1607,7 +1613,7 @@ fn session_restore_active_tab_no_args() {
     let t = TestHarness::new()
         .with_named_file("first.txt", "a\n")
         .with_named_file("second.txt", "b\n")
-        .run(vec![Do(PrevTab), Do(Quit), WaitFor(|s| s.session_saved)]);
+        .run(vec![Do(PrevTab), Do(Quit), WaitFor(|s| s.session.saved)]);
 
     let active_name = buf(&t)
         .path
@@ -1703,7 +1709,7 @@ fn undo_persist_and_restore() {
                 .is_some_and(|b| b.persisted_undo_len > 0)
         }),
         Do(Quit),
-        WaitFor(|s| s.session_saved),
+        WaitFor(|s| s.session.saved),
     ]);
     assert!(buf(&t).doc.dirty(), "buffer should be dirty");
     let dir = t.dirs.root.clone();
@@ -1727,7 +1733,7 @@ fn undo_cleared_after_save() {
                 .is_some_and(|b| b.save_state == SaveState::Clean)
         }),
         Do(Quit),
-        WaitFor(|s| s.session_saved),
+        WaitFor(|s| s.session.saved),
     ]);
     let dir = t.dirs.root.clone();
 
@@ -1752,7 +1758,7 @@ fn session_restores_dirty_state() {
                 .is_some_and(|b| b.persisted_undo_len > 0)
         }),
         Do(Quit),
-        WaitFor(|s| s.session_saved),
+        WaitFor(|s| s.session.saved),
     ]);
     let dir = t.dirs.root.clone();
 
@@ -1779,7 +1785,7 @@ fn session_restores_browser_expanded_dirs() {
             Do(ToggleFocus),
             Do(ExpandDir), // expand first dir entry (subdir/)
             Do(Quit),
-            WaitFor(|s| s.session_saved),
+            WaitFor(|s| s.session.saved),
         ]);
     assert!(
         !t.state.browser.expanded_dirs.is_empty(),
@@ -1852,7 +1858,7 @@ fn session_restores_focus_on_editor() {
 fn no_buffers_focus_falls_back_to_browser() {
     // Single instance, no file arguments — focus should land on browser
     let t = TestHarness::new().run(vec![WaitFor(|s| {
-        s.session_restore_phase == led_state::SessionRestorePhase::Done
+        s.session.restore_phase == led_state::SessionRestorePhase::Done
     })]);
     assert_eq!(
         t.state.focus,
@@ -1876,7 +1882,7 @@ fn external_editor_second_save_detected() {
 
     let mut inst = Instance::start(startup_for(&dirs, &paths));
     inst.wait_for(
-        |s| s.watchers_ready && !s.buffers.is_empty(),
+        |s| s.session.watchers_ready && !s.buffers.is_empty(),
         WAIT,
         "instance ready",
     );
@@ -1919,7 +1925,7 @@ fn external_editor_second_direct_write_detected() {
 
     let mut inst = Instance::start(startup_for(&dirs, &paths));
     inst.wait_for(
-        |s| s.watchers_ready && !s.buffers.is_empty(),
+        |s| s.session.watchers_ready && !s.buffers.is_empty(),
         WAIT,
         "instance ready",
     );
@@ -2022,7 +2028,7 @@ fn cross_instance_sync_insert_newline() {
         .with_file("aaa\nbbb\nccc\n")
         .run(vec![
             WaitFor(|s| !s.buffers.is_empty()),
-            WaitFor(|s| s.watchers_ready),
+            WaitFor(|s| s.session.watchers_ready),
             // Simulate instance B inserting a newline after "aaa"
             TestStep::RunFn(Box::new(|dirs| {
                 let file_path = std::fs::read_dir(&dirs.workspace)
@@ -2077,7 +2083,7 @@ fn cross_instance_sync_multiple_edits() {
         .with_file("hello\n")
         .run(vec![
             WaitFor(|s| !s.buffers.is_empty()),
-            WaitFor(|s| s.watchers_ready),
+            WaitFor(|s| s.session.watchers_ready),
             TestStep::RunFn(Box::new(|dirs| {
                 let file_path = std::fs::read_dir(&dirs.workspace)
                     .unwrap()
@@ -2129,7 +2135,7 @@ fn cross_instance_sync_after_save() {
         .with_file("original\n")
         .run(vec![
             WaitFor(|s| !s.buffers.is_empty()),
-            WaitFor(|s| s.watchers_ready),
+            WaitFor(|s| s.session.watchers_ready),
             // First, simulate B editing
             TestStep::RunFn(Box::new(|dirs| {
                 let file_path = std::fs::read_dir(&dirs.workspace)
@@ -2260,14 +2266,14 @@ fn two_instance_sync_after_save() {
 
     let mut a = Instance::start(startup_for(&dirs, &paths));
     a.wait_for(
-        |s| s.watchers_ready && !s.buffers.is_empty(),
+        |s| s.session.watchers_ready && !s.buffers.is_empty(),
         WAIT,
         "A ready",
     );
 
     let mut b = Instance::start(startup_for(&dirs, &paths));
     b.wait_for(
-        |s| s.watchers_ready && !s.buffers.is_empty(),
+        |s| s.session.watchers_ready && !s.buffers.is_empty(),
         WAIT,
         "B ready",
     );
@@ -2358,14 +2364,14 @@ fn two_instance_second_edit_syncs_without_save() {
 
     let mut a = Instance::start(startup_for(&dirs, &paths));
     a.wait_for(
-        |s| s.watchers_ready && !s.buffers.is_empty(),
+        |s| s.session.watchers_ready && !s.buffers.is_empty(),
         WAIT,
         "A ready",
     );
 
     let mut b = Instance::start(startup_for(&dirs, &paths));
     b.wait_for(
-        |s| s.watchers_ready && !s.buffers.is_empty(),
+        |s| s.session.watchers_ready && !s.buffers.is_empty(),
         WAIT,
         "B ready",
     );
@@ -2440,14 +2446,14 @@ fn two_instance_remote_save_clears_dirty() {
 
     let mut a = Instance::start(startup_for(&dirs, &paths));
     a.wait_for(
-        |s| s.watchers_ready && !s.buffers.is_empty(),
+        |s| s.session.watchers_ready && !s.buffers.is_empty(),
         WAIT,
         "A ready",
     );
 
     let mut b = Instance::start(startup_for(&dirs, &paths));
     b.wait_for(
-        |s| s.watchers_ready && !s.buffers.is_empty(),
+        |s| s.session.watchers_ready && !s.buffers.is_empty(),
         WAIT,
         "B ready",
     );
@@ -2525,14 +2531,14 @@ fn two_instance_no_args_browser_visible() {
 
     let mut a = Instance::start(no_files_a);
     a.wait_for(
-        |s| s.watchers_ready && !s.browser.entries.is_empty(),
+        |s| s.session.watchers_ready && !s.browser.entries.is_empty(),
         WAIT,
         "A browser populated",
     );
 
     let mut b = Instance::start(no_files_b);
     b.wait_for(
-        |s| s.watchers_ready && !s.browser.entries.is_empty(),
+        |s| s.session.watchers_ready && !s.browser.entries.is_empty(),
         WAIT,
         "B browser populated",
     );
@@ -2594,14 +2600,14 @@ fn two_instance_undo_syncs_and_clears_dirty() {
 
     let mut a = Instance::start(startup_for(&dirs, &paths));
     a.wait_for(
-        |s| s.watchers_ready && !s.buffers.is_empty(),
+        |s| s.session.watchers_ready && !s.buffers.is_empty(),
         WAIT,
         "A ready",
     );
 
     let mut b = Instance::start(startup_for(&dirs, &paths));
     b.wait_for(
-        |s| s.watchers_ready && !s.buffers.is_empty(),
+        |s| s.session.watchers_ready && !s.buffers.is_empty(),
         WAIT,
         "B ready",
     );
@@ -2719,7 +2725,7 @@ fn kill_region_deletes_selection() {
     assert_eq!(buf(&t).cursor_row, 0);
     assert_eq!(buf(&t).cursor_col, 0);
     assert!(buf(&t).mark.is_none());
-    assert_eq!(t.state.kill_ring, "aaa\n");
+    assert_eq!(t.state.kill_ring.content, "aaa\n");
 }
 
 #[test]
@@ -2728,7 +2734,7 @@ fn kill_region_no_mark_warns() {
         .with_file("aaa\nbbb\n")
         .run(actions(vec![KillRegion]));
 
-    assert_eq!(t.state.warn.as_deref(), Some("No region"));
+    assert_eq!(t.state.alerts.warn.as_deref(), Some("No region"));
 }
 
 #[test]
@@ -2747,7 +2753,7 @@ fn kill_line_accumulates_to_kill_ring() {
         .with_file("aaa\nbbb\nccc\n")
         .run(actions(vec![KillLine, KillLine]));
 
-    assert_eq!(t.state.kill_ring, "aaa\n");
+    assert_eq!(t.state.kill_ring.content, "aaa\n");
 }
 
 #[test]
@@ -2756,7 +2762,7 @@ fn non_kill_line_clears_accumulator() {
         .with_file("aaa\nbbb\nccc\n")
         .run(actions(vec![KillLine, MoveDown, KillLine]));
 
-    assert_eq!(t.state.kill_ring, "bbb");
+    assert_eq!(t.state.kill_ring.content, "bbb");
 }
 
 // ── In-Buffer Search ──

@@ -459,6 +459,7 @@ mod tests {
             syntax_highlights: Vec::new(),
             bracket_pairs: Vec::new(),
             matching_bracket: None,
+            is_preview: false,
         };
 
         let mut state = AppState::new(Startup {

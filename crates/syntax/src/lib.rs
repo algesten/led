@@ -128,15 +128,21 @@ pub fn driver(out: Stream<SyntaxOut>) -> Stream<SyntaxIn> {
                     }
                     let (ss, last_ver) = states.get_mut(&buf_id).unwrap();
 
-                    // Update the parse tree to match the new doc
+                    // Update the parse tree to match the new doc.
+                    //
+                    // Each doc version bump corresponds to exactly one EditOp
+                    // pushed to the pending group.  `edit_ops` is the full
+                    // pending list (cumulative).  We only need the NEW ops
+                    // since `last_ver` — the last `version - last_ver` items.
+                    // If the list is shorter (undo-group flush happened in
+                    // between), fall back to a full re-parse.
                     if version != *last_ver {
-                        if !edit_ops.is_empty() {
-                            // Incremental: apply edits then re-parse with old tree
-                            for op in &edit_ops {
+                        let new_op_count = (version - *last_ver) as usize;
+                        if !edit_ops.is_empty() && edit_ops.len() >= new_op_count {
+                            for op in &edit_ops[edit_ops.len() - new_op_count..] {
                                 ss.apply_edit_op(op, &*doc);
                             }
                         } else {
-                            // Doc changed but no edit ops (undo/redo/sync) — full re-parse
                             ss.reparse(&*doc);
                         }
                         *last_ver = version;

@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use led_core::Action;
 use led_fs::FindFileEntry;
-use led_state::{AppState, FindFileState};
+use led_state::{AppState, FindFileState, PreviewRequest};
 
 // ── Path helpers ──
 
@@ -16,7 +16,7 @@ fn abbreviate_home(path: &str) -> String {
     path.to_string()
 }
 
-fn expand_path(input: &str) -> PathBuf {
+pub(super) fn expand_path(input: &str) -> PathBuf {
     let input = if input.starts_with('~') {
         if let Some(home) = dirs::home_dir() {
             home.join(&input[1..].trim_start_matches('/'))
@@ -239,31 +239,29 @@ pub fn activate(state: &mut AppState) {
 }
 
 fn deactivate(state: &mut AppState) {
+    super::action::close_preview(state);
     state.find_file = None;
 }
 
-// ── FindFileListed handling ──
+fn deactivate_without_close_preview(state: &mut AppState) {
+    state.find_file = None;
+}
 
-pub fn handle_listed(state: &mut AppState, dir: PathBuf, entries: Vec<FindFileEntry>) {
+fn preview_selected(state: &mut AppState) {
     let Some(ref ff) = state.find_file else {
         return;
     };
-
-    // Verify the listing matches what we expect from current input
-    let expanded = expand_path(&ff.input);
-    let expected_dir = if ff.input.ends_with('/') {
-        expanded
-    } else {
-        expanded.parent().unwrap_or(Path::new("/")).to_path_buf()
-    };
-
-    if dir != expected_dir {
+    let Some(sel) = ff.selected else { return };
+    let Some(comp) = ff.completions.get(sel) else {
         return;
+    };
+    if !comp.is_dir {
+        state.preview.pending.set(Some(PreviewRequest {
+            path: comp.full.clone(),
+            row: 0,
+            col: 0,
+        }));
     }
-
-    let ff = state.find_file.as_mut().unwrap();
-    ff.completions = entries;
-    ff.selected = None;
 }
 
 // ── Action handling ──
@@ -325,6 +323,7 @@ pub fn handle_find_file_action(state: &mut AppState, action: &Action) -> bool {
                     ff.cursor = ff.input.len();
                 }
             }
+            preview_selected(state);
             true
         }
 
@@ -342,6 +341,7 @@ pub fn handle_find_file_action(state: &mut AppState, action: &Action) -> bool {
                     ff.cursor = ff.input.len();
                 }
             }
+            preview_selected(state);
             true
         }
 
@@ -412,9 +412,13 @@ fn handle_enter(state: &mut AppState) {
                 ff.cursor = ff.input.len();
                 request_completions(state);
             } else {
-                // Open file
-                state.pending_open.set(Some(comp.full));
-                deactivate(state);
+                // Promote preview if it matches
+                if super::action::promote_preview(state, &comp.full) {
+                    deactivate_without_close_preview(state);
+                } else {
+                    state.pending_open.set(Some(comp.full));
+                    deactivate(state);
+                }
             }
             return;
         }
@@ -422,28 +426,36 @@ fn handle_enter(state: &mut AppState) {
 
     // Path B: no selection — check completions for exact match
     let expanded = expand_path(&ff.input);
+    let input = ff.input.clone();
 
-    // Check if it's an exact match to a file in completions
-    for comp in &ff.completions {
-        if comp.full == expanded {
-            if comp.is_dir {
-                if ff.input.ends_with('/') {
-                    request_completions(state);
-                }
-                return;
-            } else {
-                state.pending_open.set(Some(comp.full.clone()));
-                deactivate(state);
-                return;
+    // Find matching completion (clone to release borrow)
+    let matched = ff.completions.iter().find(|c| c.full == expanded).cloned();
+
+    if let Some(comp) = matched {
+        if comp.is_dir {
+            if input.ends_with('/') {
+                request_completions(state);
             }
+            return;
+        } else {
+            if super::action::promote_preview(state, &comp.full) {
+                deactivate_without_close_preview(state);
+            } else {
+                state.pending_open.set(Some(comp.full));
+                deactivate(state);
+            }
+            return;
         }
     }
 
     // Path C: non-existent path (not ending /, not empty) → open (creates new file)
-    let input = ff.input.clone();
     if !input.ends_with('/') && !input.is_empty() {
-        state.pending_open.set(Some(expanded));
-        deactivate(state);
+        if super::action::promote_preview(state, &expanded) {
+            deactivate_without_close_preview(state);
+        } else {
+            state.pending_open.set(Some(expanded));
+            deactivate(state);
+        }
         return;
     }
 }

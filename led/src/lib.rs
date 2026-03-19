@@ -31,6 +31,7 @@ pub struct Drivers {
     pub clipboard_in: Stream<led_clipboard::ClipboardIn>,
     pub syntax_in: Stream<led_syntax::SyntaxIn>,
     pub git_in: Stream<led_git::GitIn>,
+    pub file_search_in: Stream<led_file_search::FileSearchIn>,
 }
 
 pub struct RunGuards {
@@ -92,6 +93,7 @@ pub fn run(
 
     let syntax_in = led_syntax::driver(d.syntax_out);
     let git_in = led_git::driver(d.git_out);
+    let file_search_in = led_file_search::driver(d.file_search_out);
 
     let drivers = Drivers {
         terminal_in,
@@ -105,6 +107,7 @@ pub fn run(
         clipboard_in,
         syntax_in,
         git_in,
+        file_search_in,
     };
 
     // 4. Model
@@ -122,7 +125,7 @@ pub fn run(
         if let Some(s) = opt {
             if s.quit {
                 let needs_save = s.workspace.as_ref().is_some_and(|w| w.primary);
-                if s.session_saved || !needs_save {
+                if s.session.saved || !needs_save {
                     if let Some(tx) = quit_tx.take() {
                         let _ = tx.send(());
                     }

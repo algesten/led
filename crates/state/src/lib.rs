@@ -12,6 +12,15 @@ use led_core::{BufferId, Doc, DocId, PanelSlot, Startup, Versioned};
 pub use led_workspace::Workspace;
 pub use led_workspace::{SessionBuffer, SessionRestorePhase};
 
+pub mod file_search;
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PreviewRequest {
+    pub path: PathBuf,
+    pub row: usize,
+    pub col: usize,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JumpPosition {
     pub path: PathBuf,
@@ -170,6 +179,7 @@ pub struct BufferState {
     pub syntax_highlights: Vec<(usize, HighlightSpan)>,
     pub bracket_pairs: Vec<BracketPair>,
     pub matching_bracket: Option<(usize, usize)>,
+    pub is_preview: bool,
 }
 
 impl fmt::Debug for BufferState {
@@ -314,6 +324,94 @@ pub struct FindFileState {
     pub show_side: bool,
 }
 
+// ── Alerts ──
+
+#[derive(Debug, Clone, Default)]
+pub struct AlertState {
+    pub info: Option<String>,
+    pub warn: Option<String>,
+}
+
+impl AlertState {
+    pub fn has_alert(&self) -> bool {
+        self.info.is_some() || self.warn.is_some()
+    }
+
+    pub fn clear(&mut self) {
+        self.info = None;
+        self.warn = None;
+    }
+}
+
+// ── Git ──
+
+#[derive(Debug, Clone, Default)]
+pub struct GitState {
+    pub branch: Option<String>,
+    pub file_statuses: HashMap<PathBuf, HashSet<led_core::git::FileStatus>>,
+    pub line_statuses: HashMap<PathBuf, Vec<led_core::git::LineStatus>>,
+    pub pending_file_scan: Versioned<()>,
+    pub pending_line_scan: Versioned<Option<PathBuf>>,
+    pub scan_seq: Versioned<()>,
+}
+
+// ── Session ──
+
+#[derive(Debug, Clone, Default)]
+pub struct SessionState {
+    pub restore_phase: SessionRestorePhase,
+    pub restored_focus: Option<PanelSlot>,
+    pub positions: HashMap<PathBuf, SessionBuffer>,
+    pub active_tab_order: Option<usize>,
+    pub pending_opens: Versioned<Vec<PathBuf>>,
+    pub saved: bool,
+    pub watchers_ready: bool,
+}
+
+// ── Jump list ──
+
+#[derive(Debug, Clone, Default)]
+pub struct JumpListState {
+    pub entries: VecDeque<JumpPosition>,
+    pub index: usize,
+    pub pending_position: Option<JumpPosition>,
+}
+
+// ── Kill ring ──
+
+#[derive(Debug, Clone, Default)]
+pub struct KillRingState {
+    pub content: String,
+    pub accumulator: Option<String>,
+    pub pending_yank: Versioned<()>,
+}
+
+impl KillRingState {
+    pub fn accumulate(&mut self, text: &str) {
+        self.accumulator
+            .get_or_insert_with(String::new)
+            .push_str(text);
+        self.content = self.accumulator.clone().unwrap();
+    }
+
+    pub fn set(&mut self, text: String) {
+        self.content = text;
+    }
+
+    pub fn break_accumulation(&mut self) {
+        self.accumulator = None;
+    }
+}
+
+// ── Preview ──
+
+#[derive(Debug, Clone, Default)]
+pub struct PreviewState {
+    pub buffer: Option<BufferId>,
+    pub pre_preview_buffer: Option<BufferId>,
+    pub pending: Versioned<Option<PreviewRequest>>,
+}
+
 // ── App state ──
 
 #[derive(Debug, Clone, Default)]
@@ -329,8 +427,7 @@ pub struct AppState {
     pub quit: bool,
     pub suspend: bool,
     pub force_redraw: u64,
-    pub info: Option<String>,
-    pub warn: Option<String>,
+    pub alerts: AlertState,
     pub buffers: HashMap<BufferId, BufferState>,
     pub active_buffer: Option<BufferId>,
     pub next_buffer_id: u64,
@@ -340,13 +437,7 @@ pub struct AppState {
     pub pending_lists: Versioned<Vec<PathBuf>>,
 
     // Session persistence
-    pub session_restore_phase: SessionRestorePhase,
-    pub session_restored_focus: Option<PanelSlot>,
-    pub session_positions: HashMap<PathBuf, SessionBuffer>,
-    pub session_active_tab_order: Option<usize>,
-    pub pending_session_opens: Versioned<Vec<PathBuf>>,
-    pub session_saved: bool,
-    pub watchers_ready: bool,
+    pub session: SessionState,
     pub pending_undo_flush: Versioned<Option<UndoFlush>>,
     pub pending_undo_clear: Versioned<PathBuf>,
     pub pending_sync_check: Versioned<PathBuf>,
@@ -356,26 +447,24 @@ pub struct AppState {
     pub confirm_kill: bool,
 
     // Kill ring & clipboard
-    pub kill_ring: String,
-    pub kill_accumulator: Option<String>,
-    pub pending_yank: Versioned<()>,
+    pub kill_ring: KillRingState,
 
     // Jump list
-    pub jump_list: VecDeque<JumpPosition>,
-    pub jump_list_index: usize,
-    pub pending_jump_position: Option<JumpPosition>,
+    pub jump: JumpListState,
 
     // Find file
     pub find_file: Option<FindFileState>,
     pub pending_find_file_list: Versioned<Option<(PathBuf, String, bool)>>,
 
+    // File search
+    pub file_search: Option<file_search::FileSearchState>,
+    pub pending_file_search: Versioned<Option<file_search::FileSearchRequest>>,
+
+    // Preview buffer
+    pub preview: PreviewState,
+
     // Git
-    pub git_branch: Option<String>,
-    pub git_file_statuses: HashMap<PathBuf, HashSet<led_core::git::FileStatus>>,
-    pub git_line_statuses: HashMap<PathBuf, Vec<led_core::git::LineStatus>>,
-    pub pending_git_file_scan: Versioned<()>,
-    pub pending_git_line_scan: Versioned<Option<PathBuf>>,
-    pub git_scan_seq: Versioned<()>,
+    pub git: GitState,
 }
 
 impl AppState {

@@ -15,6 +15,7 @@ led-timers = { workspace = true }
 led-fs = { workspace = true }
 
 led-clipboard = { workspace = true }
+led-file-search = { workspace = true }
 led-git = { workspace = true }
 led-syntax = { workspace = true }
 clap = { workspace = true }

@@ -5,11 +5,13 @@ mod action;
 mod actions_of;
 mod buffers_of;
 mod edit;
+pub(crate) mod file_search;
 pub(crate) mod find_file;
 mod jump;
 mod mov;
 mod process_of;
 mod search;
+mod session_of;
 mod sync_of;
 
 use led_config_file::ConfigFile;
@@ -19,9 +21,9 @@ use led_core::rx::Stream;
 use led_core::theme::Theme;
 use std::path::PathBuf;
 
-use led_core::{Action, Alert, BufferId, Doc, PanelSlot, next_change_seq};
+use led_core::{Action, Alert, BufferId, PanelSlot, next_change_seq};
 use led_state::{
-    AppState, BracketPair, BufferState, Dimensions, HighlightSpan, SaveState, SessionRestorePhase,
+    AppState, BracketPair, BufferState, Dimensions, HighlightSpan, SessionRestorePhase,
 };
 use led_workspace::Workspace;
 
@@ -38,20 +40,33 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Arc<AppState>> {
 
     use led_workspace::WorkspaceIn as WI;
 
-    let workspace_s = drivers
+    let workspace_misc_s = drivers
         .workspace_in
-        .map(|ev| match ev {
-            WI::Workspace { workspace } | WI::WorkspaceChanged { workspace } => {
-                Some(Mut::Workspace(workspace))
-            }
-            WI::SessionRestored { session } => Some(Mut::SessionRestored(session)),
+        .filter_map(|ev| match ev {
             WI::SessionSaved => Some(Mut::SessionSaved),
             WI::WatchersReady => Some(Mut::WatchersReady),
-            _ => None, // handled by undo_flushed_s, notify_s, sync_s
+            _ => None,
         })
-        .filter(|opt| opt.is_some())
-        .map(|opt| opt.unwrap())
         .stream();
+
+    let workspace_s = drivers
+        .workspace_in
+        .filter_map(|ev| match ev {
+            WI::Workspace { workspace } | WI::WorkspaceChanged { workspace } => Some(workspace),
+            _ => None,
+        })
+        .sample_combine(&state)
+        .map(|(workspace, s)| {
+            let mut dirs = vec![workspace.root.clone()];
+            dirs.extend(s.browser.expanded_dirs.iter().cloned());
+            Mut::Workspace {
+                workspace,
+                initial_dirs: dirs,
+            }
+        })
+        .stream();
+
+    let session_s = session_of::session_of(&drivers.workspace_in);
 
     // UndoFlushed needs buffer lookup → sample_combine with state
     let undo_flushed_s = drivers
@@ -123,6 +138,7 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Arc<AppState>> {
     let actions_s = actions_of(&drivers.terminal_in, &state);
     let buffers_s = buffers_of(&drivers.docstore_in, &state);
     let process_s = process_of(&state);
+    let preview_s = preview_of(&state);
 
     // ── 2. Build up muts from driver input and derived streams ──
 
@@ -156,6 +172,7 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Arc<AppState>> {
             s.buffers
                 .values()
                 .filter(|b| b.path.is_some())
+                .filter(|b| !b.is_preview)
                 .filter(|b| b.doc.undo_history_len() > b.persisted_undo_len || b.doc.dirty())
                 .filter_map(|b| {
                     let file_path = b.path.clone().unwrap();
@@ -203,17 +220,58 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Arc<AppState>> {
     let fs_find_file_listed_s = drivers
         .fs_in
         .filter_map(|ev| match ev {
-            led_fs::FsIn::FindFileListed { dir, entries } => {
-                Some(Mut::FindFileListed(dir, entries))
-            }
+            led_fs::FsIn::FindFileListed { dir, entries } => Some((dir, entries)),
             _ => None,
+        })
+        .sample_combine(&state)
+        .filter_map(|((dir, entries), s)| {
+            let ff = s.find_file.as_ref()?;
+            // Validate the listing matches current input
+            let expanded = find_file::expand_path(&ff.input);
+            let expected_dir = if ff.input.ends_with('/') {
+                expanded
+            } else {
+                expanded
+                    .parent()
+                    .unwrap_or(std::path::Path::new("/"))
+                    .to_path_buf()
+            };
+            if dir != expected_dir {
+                return None;
+            }
+            let mut ff = ff.clone();
+            ff.completions = entries;
+            ff.selected = None;
+            Some(Mut::FindFileListed(ff))
         })
         .stream();
 
     let clipboard_s = drivers
         .clipboard_in
         .map(|ev| match ev {
-            led_clipboard::ClipboardIn::Text(text) => Mut::ClipboardText(text),
+            led_clipboard::ClipboardIn::Text(text) => text,
+        })
+        .filter(|text| !text.is_empty())
+        .sample_combine(&state)
+        .filter_map(|(text, s)| {
+            let dims = s.dims?;
+            let id = s.active_buffer?;
+            let buf = s.buffers.get(&id)?;
+            let mut buf = buf.clone();
+            action::close_group_on_move(&mut buf);
+            buf.mark = None;
+            let (doc, r, c, a) = edit::yank(&buf, &text);
+            buf.doc = doc;
+            buf.cursor_row = r;
+            buf.cursor_col = c;
+            buf.cursor_col_affinity = a;
+            let (sr, ssl) = mov::adjust_scroll(&buf, &dims);
+            buf.scroll_row = sr;
+            buf.scroll_sub_line = ssl;
+            if buf.doc.dirty() && buf.save_state == led_state::SaveState::Clean {
+                buf.save_state = led_state::SaveState::Modified;
+            }
+            Some(Mut::BufferUpdate(id, buf))
         })
         .stream();
 
@@ -251,7 +309,30 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Arc<AppState>> {
         })
         .stream();
 
+    let file_search_s = drivers
+        .file_search_in
+        .map(|ev| match ev {
+            led_file_search::FileSearchIn::Results { results } => results,
+        })
+        .sample_combine(&state)
+        .filter_map(|(results, s)| {
+            let mut fs = s.file_search.clone()?;
+            fs.results = results;
+            fs.rebuild_flat_hits();
+            let preview = fs
+                .selected_hit()
+                .map(|(group, hit)| led_state::PreviewRequest {
+                    path: group.path.clone(),
+                    row: hit.row,
+                    col: hit.col,
+                });
+            Some(Mut::FileSearchResults(fs, preview))
+        })
+        .stream();
+
     workspace_s.forward(&muts);
+    workspace_misc_s.forward(&muts);
+    session_s.forward(&muts);
     undo_flushed_s.forward(&muts);
     notify_s.forward(&muts);
     sync_s.forward(&muts);
@@ -268,6 +349,8 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Arc<AppState>> {
     syntax_s.forward(&muts);
     git_file_s.forward(&muts);
     git_line_s.forward(&muts);
+    file_search_s.forward(&muts);
+    preview_s.forward(&muts);
 
     // ── 3. Reduce ──
 
@@ -278,14 +361,14 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Arc<AppState>> {
             Mut::ActivateBuffer(id) => {
                 s.active_buffer = Some(id);
                 if let Some(path) = s.buffers.get(&id).and_then(|b| b.path.clone()) {
-                    s.pending_git_line_scan.set(Some(path));
+                    s.git.pending_line_scan.set(Some(path));
                 }
                 action::reveal_active_buffer(&mut s);
             }
             Mut::Action(a) => action::handle_action(&mut s, a),
             Mut::Alert { info, warn } => {
-                s.info = info;
-                s.warn = warn;
+                s.alerts.info = info;
+                s.alerts.warn = warn;
             }
             Mut::BufferOpen {
                 buf,
@@ -293,39 +376,27 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Arc<AppState>> {
                 activate,
                 notify_hash,
                 session_restore_done,
+                clear_pending_jump,
             } => {
                 let will_activate = activate || s.active_buffer.is_none();
                 if will_activate {
                     s.active_buffer = Some(buf.id);
                 }
                 if let Some(ref path) = buf.path {
-                    s.session_positions.remove(path);
+                    s.session.positions.remove(path);
                 }
                 s.notify_hash_to_buffer.insert(notify_hash, buf.id);
-                let buf_id = buf.id;
-                let buf_path = buf.path.clone();
                 s.buffers.insert(buf.id, buf);
                 s.next_buffer_id = next_id;
                 action::renumber_tabs(&mut s);
                 if session_restore_done {
-                    s.session_restore_phase = SessionRestorePhase::Done;
-                    s.session_active_tab_order = None;
+                    s.session.restore_phase = SessionRestorePhase::Done;
+                    s.session.active_tab_order = None;
                 }
-                // Apply pending jump position if this buffer matches
-                if let Some(ref pending) = s.pending_jump_position {
-                    if buf_path.as_ref() == Some(&pending.path) {
-                        let pending = s.pending_jump_position.take().unwrap();
-                        if let Some(buf) = s.buffers.get_mut(&buf_id) {
-                            buf.cursor_row =
-                                pending.row.min(buf.doc.line_count().saturating_sub(1));
-                            buf.cursor_col = pending.col;
-                            buf.cursor_col_affinity = pending.col;
-                            buf.scroll_row = pending.scroll_offset;
-                        }
-                    }
+                if clear_pending_jump {
+                    s.jump.pending_position = None;
                 }
-                // Resolve focus once restore is done and buffers exist
-                if s.session_restore_phase == SessionRestorePhase::Done {
+                if s.session.restore_phase == SessionRestorePhase::Done {
                     resolve_focus(&mut s);
                 }
                 if will_activate {
@@ -341,9 +412,9 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Arc<AppState>> {
                 if let Some(buf) = s.buffers.get_mut(&id) {
                     buf.change_seq = next_change_seq();
                 }
-                s.pending_git_file_scan.set(());
+                s.git.pending_file_scan.set(());
                 if let Some(path) = s.buffers.get(&id).and_then(|b| b.path.clone()) {
-                    s.pending_git_line_scan.set(Some(path));
+                    s.git.pending_line_scan.set(Some(path));
                 }
                 if let Some(path) = undo_clear_path {
                     s.pending_undo_clear.set(path);
@@ -352,9 +423,6 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Arc<AppState>> {
             Mut::BufferUpdate(id, buf) => {
                 s.buffers.insert(id, buf);
             }
-            Mut::ClipboardText(text) => {
-                action::yank_text(&mut s, text);
-            }
             Mut::ConfigKeys(v) => s.config_keys = Some(v),
             Mut::DirListed(path, entries) => {
                 s.browser.dir_contents.insert(path, entries);
@@ -362,136 +430,122 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Arc<AppState>> {
                 s.browser.complete_pending_reveal();
                 action::browser_scroll_to_selected(&mut s);
             }
-            Mut::FindFileListed(dir, entries) => {
-                find_file::handle_listed(&mut s, dir, entries);
+            Mut::FileSearchResults(fs, preview) => {
+                s.file_search = Some(fs);
+                if let Some(req) = preview {
+                    s.preview.pending.set(Some(req));
+                }
+            }
+            Mut::FindFileListed(ff) => {
+                s.find_file = Some(ff);
             }
             Mut::ConfigTheme(v) => s.config_theme = Some(v),
             Mut::GitFileStatuses { statuses, branch } => {
-                s.git_branch = branch;
-                s.git_file_statuses = statuses;
+                s.git.branch = branch;
+                s.git.file_statuses = statuses;
             }
             Mut::GitLineStatuses { path, statuses } => {
-                s.git_line_statuses.insert(path, statuses);
+                s.git.line_statuses.insert(path, statuses);
             }
             Mut::ForceRedraw(v) => s.force_redraw = v,
             Mut::Keymap(v) => s.keymap = Some(v),
+            Mut::PreviewOpen {
+                buf,
+                next_id,
+                notify_hash,
+                remove_old_id,
+                remove_old_hash,
+                pre_preview_buffer,
+            } => {
+                remove_old_id.map(|id| s.buffers.remove(&id));
+                remove_old_hash.map(|h| s.notify_hash_to_buffer.remove(&h));
+                s.preview.pre_preview_buffer = pre_preview_buffer;
+                let buf_id = buf.id;
+                s.notify_hash_to_buffer.insert(notify_hash, buf_id);
+                s.buffers.insert(buf_id, buf);
+                s.active_buffer = Some(buf_id);
+                s.preview.buffer = Some(buf_id);
+                s.next_buffer_id = next_id;
+                action::renumber_tabs(&mut s);
+            }
+            Mut::PreviewActivateExisting {
+                id,
+                row,
+                col,
+                remove_old_id,
+                remove_old_hash,
+                pre_preview_buffer,
+            } => {
+                remove_old_id.map(|id| s.buffers.remove(&id));
+                remove_old_hash.map(|h| s.notify_hash_to_buffer.remove(&h));
+                s.preview.pre_preview_buffer = pre_preview_buffer;
+                s.active_buffer = Some(id);
+                s.buffers.get_mut(&id).map(|buf| {
+                    buf.cursor_row = row;
+                    buf.cursor_col = col;
+                    buf.cursor_col_affinity = col;
+                });
+                action::reveal_active_buffer(&mut s);
+                action::renumber_tabs(&mut s);
+            }
             Mut::Resize(w, h) => {
                 s.dims = Some(Dimensions::new(w, h, s.show_side_panel));
             }
             Mut::SessionOpenFailed { path } => {
-                s.session_positions.remove(&path);
-                if s.session_restore_phase == SessionRestorePhase::Restoring
-                    && s.session_positions.is_empty()
+                s.session.positions.remove(&path);
+                if s.session.restore_phase == SessionRestorePhase::Restoring
+                    && s.session.positions.is_empty()
                 {
-                    s.session_restore_phase = SessionRestorePhase::Done;
+                    s.session.restore_phase = SessionRestorePhase::Done;
                     resolve_focus(&mut s);
                 }
             }
-            Mut::SessionRestored(session) => match session {
-                Some(session) => {
-                    s.session_restore_phase = SessionRestorePhase::Restoring;
-                    s.session_active_tab_order = Some(session.active_tab_order);
-                    s.show_side_panel = session.show_side_panel;
-                    // Parse persisted focus for later application
-                    s.session_restored_focus = session.kv.get("focus").map(|v| match v.as_str() {
-                        "side" => PanelSlot::Side,
-                        _ => PanelSlot::Main,
-                    });
-                    let paths: Vec<_> = session
-                        .buffers
-                        .iter()
-                        .map(|b| b.file_path.clone())
-                        .collect();
-                    for buf in session.buffers {
-                        s.session_positions.insert(buf.file_path.clone(), buf);
-                    }
-                    // Restore browser state from KV
-                    if let Some(v) = session.kv.get("browser.selected") {
-                        s.browser.selected = v.parse().unwrap_or(0);
-                    }
-                    if let Some(v) = session.kv.get("browser.scroll_offset") {
-                        s.browser.scroll_offset = v.parse().unwrap_or(0);
-                    }
-                    if let Some(v) = session.kv.get("browser.expanded_dirs") {
-                        s.browser.expanded_dirs = v
-                            .lines()
-                            .filter(|l| !l.is_empty())
-                            .map(PathBuf::from)
-                            .collect();
-                    }
-                    // Restore jump list from KV
-                    if let Some(json) = session.kv.get("jump_list.entries") {
-                        if let Ok(entries) = serde_json::from_str::<
-                            std::collections::VecDeque<led_state::JumpPosition>,
-                        >(json)
-                        {
-                            s.jump_list = entries;
-                            s.jump_list_index = session
-                                .kv
-                                .get("jump_list.index")
-                                .and_then(|v| v.parse().ok())
-                                .unwrap_or(s.jump_list.len());
-                        }
-                    }
-                    s.pending_session_opens.set(paths);
-                    // Request dir listings for restored expanded dirs
-                    if !s.browser.expanded_dirs.is_empty() {
-                        s.pending_lists
-                            .set(s.browser.expanded_dirs.iter().cloned().collect());
-                    }
+            Mut::SessionRestored {
+                restore_phase,
+                active_tab_order,
+                show_side_panel,
+                restored_focus,
+                positions,
+                pending_opens,
+                browser_selected,
+                browser_scroll_offset,
+                browser_expanded_dirs,
+                jump_entries,
+                jump_index,
+                pending_lists,
+            } => {
+                s.session.restore_phase = restore_phase;
+                s.session.active_tab_order = active_tab_order;
+                s.show_side_panel = show_side_panel;
+                s.session.restored_focus = restored_focus;
+                s.session.positions = positions;
+                s.browser.selected = browser_selected;
+                s.browser.scroll_offset = browser_scroll_offset;
+                s.browser.expanded_dirs = browser_expanded_dirs;
+                s.jump.entries = jump_entries;
+                s.jump.index = jump_index;
+                if !pending_opens.is_empty() {
+                    s.session.pending_opens.set(pending_opens);
                 }
-                None => {
-                    s.session_restore_phase = SessionRestorePhase::Done;
-                    // Only resolve now if no arg_paths will open buffers later
-                    if s.startup.arg_paths.is_empty() {
-                        resolve_focus(&mut s);
-                    }
+                if !pending_lists.is_empty() {
+                    s.pending_lists.set(pending_lists);
                 }
-            },
+                // Resolve focus for the None case (Done with no session)
+                if s.session.restore_phase == SessionRestorePhase::Done
+                    && s.startup.arg_paths.is_empty()
+                {
+                    resolve_focus(&mut s);
+                }
+            }
             Mut::SessionSaved => {
-                s.session_saved = true;
+                s.session.saved = true;
             }
             Mut::WatchersReady => {
-                s.watchers_ready = true;
+                s.session.watchers_ready = true;
             }
             Mut::NotifyEvent { path } => {
                 if let Some(path) = path {
                     s.pending_sync_check.set(path);
-                }
-            }
-            Mut::SyncApply {
-                buf_id,
-                doc,
-                chain_id,
-                last_seen_seq,
-            } => {
-                if let Some(buf) = s.buffers.get_mut(&buf_id) {
-                    // Guard: skip duplicate application when multiple
-                    // FSEvents trigger parallel CheckSyncs for the same data.
-                    if last_seen_seq > buf.last_seen_seq {
-                        buf.doc = doc;
-                        buf.chain_id = chain_id;
-                        buf.last_seen_seq = last_seen_seq;
-                        buf.persisted_undo_len = buf.doc.undo_history_len();
-                        buf.content_hash = buf.doc.content_hash();
-                        buf.change_seq = next_change_seq();
-                    }
-                }
-            }
-            Mut::SyncReset { buf_id } => {
-                if let Some(buf) = s.buffers.get_mut(&buf_id) {
-                    buf.last_seen_seq = 0;
-                    buf.chain_id = None;
-                    buf.persisted_undo_len = buf.doc.undo_history_len();
-                    buf.change_seq = next_change_seq();
-                    // SyncReset means the undo chain was cleared by a save.
-                    // If the buffer is dirty only from remote sync (save_state
-                    // still Clean — the user hasn't made local edits), mark
-                    // the doc as saved since the file was saved by the other
-                    // instance.
-                    if buf.doc.dirty() && buf.save_state == SaveState::Clean {
-                        buf.doc = buf.doc.mark_saved();
-                    }
                 }
             }
             Mut::UndoFlushReady { buf_id, flush } => {
@@ -536,19 +590,20 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Arc<AppState>> {
             Mut::Suspend(v) => {
                 s.suspend = v;
                 if !v {
-                    s.pending_git_file_scan.set(());
+                    s.git.pending_file_scan.set(());
                 }
             }
             Mut::TimerFired(name) => handle_timer(&mut s, name),
-            Mut::Workspace(v) => {
-                s.browser.root = Some(v.root.clone());
+            Mut::Workspace {
+                workspace,
+                initial_dirs,
+            } => {
+                s.browser.root = Some(workspace.root.clone());
                 s.browser.dir_contents.clear();
                 s.browser.rebuild_entries();
-                let mut dirs = vec![v.root.clone()];
-                dirs.extend(s.browser.expanded_dirs.iter().cloned());
-                s.pending_lists.set(dirs);
-                s.pending_git_file_scan.set(());
-                s.workspace = Some(Arc::new(v));
+                s.pending_lists.set(initial_dirs);
+                s.git.pending_file_scan.set(());
+                s.workspace = Some(Arc::new(workspace));
             }
         }
         Arc::new(s)
@@ -560,7 +615,8 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Arc<AppState>> {
 /// Apply focus after session restore completes.
 /// Priority: restored focus (if valid) → open buffer → file browser.
 fn resolve_focus(s: &mut AppState) {
-    let restored = s.session_restored_focus.take();
+    let restored = s.session.restored_focus.take();
+
     if !s.buffers.is_empty() {
         // There are open buffers. Honour restored focus if it's Main
         // (the buffer exists to receive it) or Side.
@@ -574,11 +630,10 @@ fn resolve_focus(s: &mut AppState) {
 fn handle_timer(state: &mut AppState, name: &'static str) {
     match name {
         "alert_clear" => {
-            state.info = None;
-            state.warn = None;
+            state.alerts.clear();
         }
         "git_file_scan" => {
-            state.git_scan_seq.set(());
+            state.git.scan_seq.set(());
         }
         "undo_flush" => {
             // Handled by the undo_flush_s combinator chain, not here.
@@ -602,6 +657,7 @@ enum Mut {
         activate: bool,
         notify_hash: String,
         session_restore_done: bool,
+        clear_pending_jump: bool,
     },
     BufferSaved {
         id: BufferId,
@@ -609,11 +665,14 @@ enum Mut {
         undo_clear_path: Option<std::path::PathBuf>,
     },
     BufferUpdate(BufferId, BufferState),
-    ClipboardText(String),
     ConfigKeys(ConfigFile<Keys>),
     ConfigTheme(ConfigFile<Theme>),
     DirListed(std::path::PathBuf, Vec<led_fs::DirEntry>),
-    FindFileListed(std::path::PathBuf, Vec<led_fs::FindFileEntry>),
+    FileSearchResults(
+        led_state::file_search::FileSearchState,
+        Option<led_state::PreviewRequest>,
+    ),
+    FindFileListed(led_state::FindFileState),
     GitFileStatuses {
         statuses: HashMap<PathBuf, HashSet<FileStatus>>,
         branch: Option<String>,
@@ -624,6 +683,22 @@ enum Mut {
     },
     ForceRedraw(u64),
     Keymap(Arc<Keymap>),
+    PreviewOpen {
+        buf: BufferState,
+        next_id: u64,
+        notify_hash: String,
+        remove_old_id: Option<BufferId>,
+        remove_old_hash: Option<String>,
+        pre_preview_buffer: Option<BufferId>,
+    },
+    PreviewActivateExisting {
+        id: BufferId,
+        row: usize,
+        col: usize,
+        remove_old_id: Option<BufferId>,
+        remove_old_hash: Option<String>,
+        pre_preview_buffer: Option<BufferId>,
+    },
     Resize(u16, u16),
     NotifyEvent {
         path: Option<std::path::PathBuf>,
@@ -631,18 +706,22 @@ enum Mut {
     SessionOpenFailed {
         path: std::path::PathBuf,
     },
-    SessionRestored(Option<led_workspace::RestoredSession>),
+    SessionRestored {
+        restore_phase: SessionRestorePhase,
+        active_tab_order: Option<usize>,
+        show_side_panel: bool,
+        restored_focus: Option<PanelSlot>,
+        positions: HashMap<PathBuf, led_workspace::SessionBuffer>,
+        pending_opens: Vec<PathBuf>,
+        browser_selected: usize,
+        browser_scroll_offset: usize,
+        browser_expanded_dirs: HashSet<PathBuf>,
+        jump_entries: std::collections::VecDeque<led_state::JumpPosition>,
+        jump_index: usize,
+        pending_lists: Vec<PathBuf>,
+    },
     SessionSaved,
     WatchersReady,
-    SyncApply {
-        buf_id: BufferId,
-        doc: Arc<dyn Doc>,
-        chain_id: Option<String>,
-        last_seen_seq: i64,
-    },
-    SyncReset {
-        buf_id: BufferId,
-    },
     Suspend(bool),
     SyntaxUpdate {
         buf_id: BufferId,
@@ -663,7 +742,10 @@ enum Mut {
         flush: led_state::UndoFlush,
     },
     TimerFired(&'static str),
-    Workspace(Workspace),
+    Workspace {
+        workspace: Workspace,
+        initial_dirs: Vec<PathBuf>,
+    },
 }
 
 impl Mut {
@@ -675,29 +757,29 @@ impl Mut {
             Mut::BufferOpen { .. } => "BufferOpen",
             Mut::BufferSaved { .. } => "BufferSaved",
             Mut::BufferUpdate(_, _) => "BufferUpdate",
-            Mut::ClipboardText(_) => "ClipboardText",
             Mut::ConfigKeys(_) => "ConfigKeys",
             Mut::ConfigTheme(_) => "ConfigTheme",
             Mut::DirListed(_, _) => "DirListed",
-            Mut::FindFileListed(_, _) => "FindFileListed",
+            Mut::FileSearchResults(..) => "FileSearchResults",
+            Mut::FindFileListed(_) => "FindFileListed",
             Mut::GitFileStatuses { .. } => "GitFileStatuses",
             Mut::GitLineStatuses { .. } => "GitLineStatuses",
             Mut::ForceRedraw(_) => "ForceRedraw",
             Mut::Keymap(_) => "Keymap",
+            Mut::PreviewOpen { .. } => "PreviewOpen",
+            Mut::PreviewActivateExisting { .. } => "PreviewActivateExisting",
             Mut::Resize(_, _) => "Resize",
             Mut::NotifyEvent { .. } => "NotifyEvent",
             Mut::SessionOpenFailed { .. } => "SessionOpenFailed",
-            Mut::SessionRestored(_) => "SessionRestored",
+            Mut::SessionRestored { .. } => "SessionRestored",
             Mut::SessionSaved => "SessionSaved",
             Mut::WatchersReady => "WatchersReady",
-            Mut::SyncApply { .. } => "SyncApply",
-            Mut::SyncReset { .. } => "SyncReset",
             Mut::Suspend(_) => "Suspend",
             Mut::SyntaxUpdate { .. } => "SyntaxUpdate",
             Mut::UndoFlushed { .. } => "UndoFlushed",
             Mut::UndoFlushReady { .. } => "UndoFlushReady",
             Mut::TimerFired(_) => "TimerFired",
-            Mut::Workspace(_) => "Workspace",
+            Mut::Workspace { .. } => "Workspace",
         }
     }
 
@@ -713,4 +795,78 @@ impl Mut {
             },
         }
     }
+}
+
+// ── Preview combinator ──
+
+/// Helper: look up the notify hash for a buffer ID.
+fn notify_hash_for(s: &AppState, buf_id: BufferId) -> Option<String> {
+    s.notify_hash_to_buffer
+        .iter()
+        .find(|(_, v)| **v == buf_id)
+        .map(|(k, _)| k.clone())
+}
+
+/// Classify a pending_preview request against current state and produce
+/// the appropriate Mut. Cases A and B are handled here; Case C (new file)
+/// returns None — the derived docstore stream handles it.
+fn resolve_preview(s: &AppState) -> Option<Mut> {
+    let req = (*s.preview.pending).as_ref()?;
+
+    // Case A: same file already previewed → reposition via BufferUpdate
+    if let Some(preview_id) = s.preview.buffer {
+        if let Some(buf) = s.buffers.get(&preview_id) {
+            if buf.path.as_ref() == Some(&req.path) {
+                let mut buf = buf.clone();
+                let row = req.row.min(buf.doc.line_count().saturating_sub(1));
+                buf.cursor_row = row;
+                buf.cursor_col = req.col;
+                buf.cursor_col_affinity = req.col;
+                let buffer_height = s.dims.map_or(20, |d| d.buffer_height());
+                buf.scroll_row = row.saturating_sub(buffer_height / 2);
+                return Some(Mut::BufferUpdate(preview_id, buf));
+            }
+        }
+    }
+
+    // Case B: already open as real buffer → activate temporarily
+    if let Some(existing) = s
+        .buffers
+        .values()
+        .find(|b| b.path.as_ref() == Some(&req.path) && !b.is_preview)
+    {
+        let id = existing.id;
+        let row = req.row.min(existing.doc.line_count().saturating_sub(1));
+        let col = req.col;
+
+        let remove_old_id = s.preview.buffer;
+        let remove_old_hash = remove_old_id.and_then(|pid| notify_hash_for(s, pid));
+        let pre_preview_buffer =
+            if s.preview.buffer.is_none() && s.preview.pre_preview_buffer.is_none() {
+                s.active_buffer
+            } else {
+                s.preview.pre_preview_buffer
+            };
+
+        return Some(Mut::PreviewActivateExisting {
+            id,
+            row,
+            col,
+            remove_old_id,
+            remove_old_hash,
+            pre_preview_buffer,
+        });
+    }
+
+    // Case C: new file — handled by derived, not here
+    None
+}
+
+fn preview_of(state: &Stream<Arc<AppState>>) -> Stream<Mut> {
+    state
+        .dedupe_by(|s| s.preview.pending.version())
+        .filter(|s| s.preview.pending.version() > 0)
+        .filter(|s| s.preview.pending.is_some())
+        .filter_map(|s| resolve_preview(&s))
+        .stream()
 }

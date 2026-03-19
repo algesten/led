@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use led_core::rx::Stream;
-use led_core::{Doc, UndoEntry};
-use led_state::AppState;
+use led_core::{Doc, UndoEntry, next_change_seq};
+use led_state::{AppState, SaveState};
 use led_workspace::{SyncResultKind, WorkspaceIn};
 
 use super::Mut;
@@ -14,12 +14,10 @@ use super::Mut;
 pub fn sync_of(workspace_in: &Stream<WorkspaceIn>, state: &Stream<Arc<AppState>>) -> Stream<Mut> {
     workspace_in
         .sample_combine(state)
-        .map(|(ev, s)| match ev {
+        .filter_map(|(ev, s)| match ev {
             WorkspaceIn::SyncResult { result } => resolve_sync(result, &s),
             _ => None,
         })
-        .filter(|opt| opt.is_some())
-        .map(|opt| opt.unwrap())
         .stream()
 }
 
@@ -32,7 +30,15 @@ fn resolve_sync(result: SyncResultKind, state: &AppState) -> Option<Mut> {
                 .buffers
                 .values()
                 .find(|b| b.path.as_ref() == Some(&file_path))?;
-            Some(Mut::SyncReset { buf_id: buf.id })
+            let mut buf = buf.clone();
+            buf.last_seen_seq = 0;
+            buf.chain_id = None;
+            buf.persisted_undo_len = buf.doc.undo_history_len();
+            buf.change_seq = next_change_seq();
+            if buf.doc.dirty() && buf.save_state == SaveState::Clean {
+                buf.doc = buf.doc.mark_saved();
+            }
+            Some(Mut::BufferUpdate(buf.id, buf))
         }
 
         SyncResultKind::ReplayEntries {
@@ -44,13 +50,18 @@ fn resolve_sync(result: SyncResultKind, state: &AppState) -> Option<Mut> {
                 .buffers
                 .values()
                 .find(|b| b.path.as_ref() == Some(&file_path))?;
+            // Guard: skip duplicate application
+            if new_last_seen_seq <= buf.last_seen_seq {
+                return None;
+            }
             let doc = apply_remote_entries(&buf.doc, &entries);
-            Some(Mut::SyncApply {
-                buf_id: buf.id,
-                doc,
-                chain_id: buf.chain_id.clone(),
-                last_seen_seq: new_last_seen_seq,
-            })
+            let mut buf = buf.clone();
+            buf.doc = doc;
+            buf.last_seen_seq = new_last_seen_seq;
+            buf.persisted_undo_len = buf.doc.undo_history_len();
+            buf.content_hash = buf.doc.content_hash();
+            buf.change_seq = next_change_seq();
+            Some(Mut::BufferUpdate(buf.id, buf))
         }
 
         SyncResultKind::ReloadAndReplay {
@@ -79,13 +90,19 @@ fn resolve_sync(result: SyncResultKind, state: &AppState) -> Option<Mut> {
                     file_path.display()
                 );
             }
+            // Guard: skip duplicate application
+            if new_last_seen_seq <= buf.last_seen_seq {
+                return None;
+            }
             let doc = apply_remote_entries(&buf.doc, &entries);
-            Some(Mut::SyncApply {
-                buf_id: buf.id,
-                doc,
-                chain_id: Some(new_chain_id),
-                last_seen_seq: new_last_seen_seq,
-            })
+            let mut buf = buf.clone();
+            buf.doc = doc;
+            buf.chain_id = Some(new_chain_id);
+            buf.last_seen_seq = new_last_seen_seq;
+            buf.persisted_undo_len = buf.doc.undo_history_len();
+            buf.content_hash = buf.doc.content_hash();
+            buf.change_seq = next_change_seq();
+            Some(Mut::BufferUpdate(buf.id, buf))
         }
     }
 }

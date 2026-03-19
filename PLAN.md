@@ -6,6 +6,10 @@ Every side effect lives in a Driver. The Model is a pure reduce: `(State, Mut) -
 
 ---
 
+## Phase 15b: Preview buffer
+
+
+
 ## Phase 16: File Search (Ripgrep)
 
 `grep_searcher` + `ignore::WalkBuilder`. Background worker with request coalescing (only process latest query).

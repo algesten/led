@@ -30,8 +30,8 @@ pub fn process_of(state: &Stream<Arc<AppState>>) -> Stream<Mut> {
     // If the arg file was already opened by session restore, activate it
     // without re-opening through the docstore.
     let activate_arg_s = state
-        .dedupe_by(|s| s.session_restore_phase == SessionRestorePhase::Done)
-        .filter(|s| s.session_restore_phase == SessionRestorePhase::Done)
+        .dedupe_by(|s| s.session.restore_phase == SessionRestorePhase::Done)
+        .filter(|s| s.session.restore_phase == SessionRestorePhase::Done)
         .filter_map(|s| {
             let first_arg = s.startup.arg_paths.first()?;
             let buf = s

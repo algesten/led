@@ -24,6 +24,7 @@ pub struct Derived {
     pub clipboard_out: Stream<led_clipboard::ClipboardOut>,
     pub syntax_out: Stream<SyntaxOut>,
     pub git_out: Stream<led_git::GitOut>,
+    pub file_search_out: Stream<led_file_search::FileSearchOut>,
 }
 
 pub fn derived(state: Stream<Arc<AppState>>) -> Derived {
@@ -44,6 +45,7 @@ pub fn derived(state: Stream<Arc<AppState>>) -> Derived {
                 .buffers
                 .values()
                 .filter(|b| b.path.is_some())
+                .filter(|b| !b.is_preview)
                 .map(|b| SessionBuffer {
                     file_path: b.path.clone().unwrap(),
                     tab_order: b.tab_order,
@@ -141,8 +143,8 @@ pub fn derived(state: Stream<Arc<AppState>>) -> Derived {
     // Only opens files that aren't already in a buffer; already-open files
     // are activated directly via ActivateBuffer in the model (see process_of).
     let startup_open = state
-        .dedupe_by(|s| s.session_restore_phase == SessionRestorePhase::Done)
-        .filter(|s| s.session_restore_phase == SessionRestorePhase::Done)
+        .dedupe_by(|s| s.session.restore_phase == SessionRestorePhase::Done)
+        .filter(|s| s.session.restore_phase == SessionRestorePhase::Done)
         .filter(|s| !s.startup.arg_paths.is_empty())
         .flat_map(|s| {
             let open_paths: std::collections::HashSet<&std::path::Path> = s
@@ -171,11 +173,11 @@ pub fn derived(state: Stream<Arc<AppState>>) -> Derived {
 
     // File opens from session restore — tab_order from session positions
     let session_open = state
-        .dedupe_by(|s| s.pending_session_opens.version())
-        .filter(|s| s.pending_session_opens.version() > 0)
+        .dedupe_by(|s| s.session.pending_opens.version())
+        .filter(|s| s.session.pending_opens.version() > 0)
         .map(|s| {
-            let positions = &s.session_positions;
-            (*s.pending_session_opens)
+            let positions = &s.session.positions;
+            (*s.session.pending_opens)
                 .iter()
                 .map(|path| {
                     let tab_order = positions.get(path).map(|sp| sp.tab_order).unwrap_or(0);
@@ -218,15 +220,39 @@ pub fn derived(state: Stream<Arc<AppState>>) -> Derived {
         })
         .stream();
 
+    // Preview open: Case C (new file, not already in any buffer)
+    let preview_open = state
+        .dedupe_by(|s| s.preview.pending.version())
+        .filter(|s| s.preview.pending.version() > 0)
+        .filter(|s| s.preview.pending.is_some())
+        .filter(|s| {
+            let req_path = (*s.preview.pending).as_ref().map(|r| &r.path);
+            !s.buffers.values().any(|b| b.path.as_ref() == req_path)
+        })
+        .map(|s| {
+            let req = (*s.preview.pending).as_ref().unwrap();
+            DocStoreOut::Open {
+                path: req.path.clone(),
+                tab_order: s
+                    .buffers
+                    .values()
+                    .map(|b| b.tab_order)
+                    .max()
+                    .map_or(0, |m| m + 1),
+            }
+        })
+        .stream();
+
     let docstore_out: Stream<DocStoreOut> = Stream::new();
     startup_open.forward(&docstore_out);
     session_open.forward(&docstore_out);
     browser_open.forward(&docstore_out);
     save_out.forward(&docstore_out);
+    preview_open.forward(&docstore_out);
 
     // Timers: schedule alert clear when info/warn appears
     let alert_timer = state
-        .map(|s| s.info.is_some() || s.warn.is_some())
+        .map(|s| s.alerts.has_alert())
         .dedupe()
         .filter(|has_alert| *has_alert)
         .map(|_| TimersOut::Set {
@@ -247,6 +273,7 @@ pub fn derived(state: Stream<Arc<AppState>>) -> Derived {
                 .values()
                 .filter(|b| {
                     b.path.is_some()
+                        && !b.is_preview
                         && (b.doc.undo_history_len() > b.persisted_undo_len || b.doc.dirty())
                 })
                 .map(|b| b.doc.version())
@@ -293,7 +320,7 @@ pub fn derived(state: Stream<Arc<AppState>>) -> Derived {
 
     // Clipboard: sync kill_ring to system clipboard on change
     let clipboard_write = state
-        .map(|s| s.kill_ring.clone())
+        .map(|s| s.kill_ring.content.clone())
         .dedupe()
         .filter(|s| !s.is_empty())
         .map(led_clipboard::ClipboardOut::Write)
@@ -301,8 +328,8 @@ pub fn derived(state: Stream<Arc<AppState>>) -> Derived {
 
     // Clipboard: read from system clipboard on yank request
     let clipboard_read = state
-        .dedupe_by(|s| s.pending_yank.version())
-        .filter(|s| s.pending_yank.version() > 0)
+        .dedupe_by(|s| s.kill_ring.pending_yank.version())
+        .filter(|s| s.kill_ring.pending_yank.version() > 0)
         .map(|_| led_clipboard::ClipboardOut::Read)
         .stream();
 
@@ -385,8 +412,8 @@ pub fn derived(state: Stream<Arc<AppState>>) -> Derived {
 
     // Git: schedule 50ms coalescing timer when file scan requested
     let git_file_timer = state
-        .dedupe_by(|s| s.pending_git_file_scan.version())
-        .filter(|s| s.pending_git_file_scan.version() > 0)
+        .dedupe_by(|s| s.git.pending_file_scan.version())
+        .filter(|s| s.git.pending_file_scan.version() > 0)
         .map(|_| TimersOut::Set {
             name: "git_file_scan",
             duration: Duration::from_millis(50),
@@ -396,8 +423,8 @@ pub fn derived(state: Stream<Arc<AppState>>) -> Derived {
 
     // Git: emit ScanFiles after timer fires (git_scan_seq bumped by handle_timer)
     let git_file_scan = state
-        .dedupe_by(|s| s.git_scan_seq.version())
-        .filter(|s| s.git_scan_seq.version() > 0)
+        .dedupe_by(|s| s.git.scan_seq.version())
+        .filter(|s| s.git.scan_seq.version() > 0)
         .filter(|s| s.workspace.is_some())
         .map(|s| {
             let root = s.workspace.as_ref().unwrap().root.clone();
@@ -407,13 +434,13 @@ pub fn derived(state: Stream<Arc<AppState>>) -> Derived {
 
     // Git: emit ScanLines immediately on tab switch / save
     let git_line_scan = state
-        .dedupe_by(|s| s.pending_git_line_scan.version())
-        .filter(|s| s.pending_git_line_scan.version() > 0)
-        .filter(|s| s.pending_git_line_scan.is_some())
+        .dedupe_by(|s| s.git.pending_line_scan.version())
+        .filter(|s| s.git.pending_line_scan.version() > 0)
+        .filter(|s| s.git.pending_line_scan.is_some())
         .filter(|s| s.workspace.is_some())
         .map(|s| {
             let root = s.workspace.as_ref().unwrap().root.clone();
-            let path = (*s.pending_git_line_scan).clone().unwrap();
+            let path = (*s.git.pending_line_scan).clone().unwrap();
             led_git::GitOut::ScanLines { root, path }
         })
         .stream();
@@ -423,6 +450,21 @@ pub fn derived(state: Stream<Arc<AppState>>) -> Derived {
     let git_out: Stream<led_git::GitOut> = Stream::new();
     git_file_scan.forward(&git_out);
     git_line_scan.forward(&git_out);
+
+    let file_search_out = state
+        .dedupe_by(|s| s.pending_file_search.version())
+        .filter(|s| s.pending_file_search.version() > 0)
+        .filter(|s| s.pending_file_search.is_some())
+        .map(|s| {
+            let req = (*s.pending_file_search).as_ref().unwrap();
+            led_file_search::FileSearchOut::Search {
+                query: req.query.clone(),
+                root: req.root.clone(),
+                case_sensitive: req.case_sensitive,
+                use_regex: req.use_regex,
+            }
+        })
+        .stream();
 
     Derived {
         ui,
@@ -434,6 +476,7 @@ pub fn derived(state: Stream<Arc<AppState>>) -> Derived {
         clipboard_out,
         syntax_out,
         git_out,
+        file_search_out,
     }
 }
 
@@ -460,9 +503,9 @@ fn build_session_kv(s: &AppState) -> HashMap<String, String> {
         kv.insert("browser.expanded_dirs".into(), dirs.join("\n"));
     }
     // Jump list
-    if let Ok(json) = serde_json::to_string(&s.jump_list) {
+    if let Ok(json) = serde_json::to_string(&s.jump.entries) {
         kv.insert("jump_list.entries".into(), json);
-        kv.insert("jump_list.index".into(), s.jump_list_index.to_string());
+        kv.insert("jump_list.index".into(), s.jump.index.to_string());
     }
     kv
 }

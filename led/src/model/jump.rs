@@ -4,45 +4,44 @@ const MAX_JUMP_LIST: usize = 100;
 
 /// Record a jump position. Truncates forward history and caps at 100 entries.
 pub fn record_jump(state: &mut AppState, pos: JumpPosition) {
-    state.jump_list.truncate(state.jump_list_index);
-    state.jump_list.push_back(pos);
-    if state.jump_list.len() > MAX_JUMP_LIST {
-        state.jump_list.pop_front();
-        // index stays at len after pop_front since we added one and removed one
+    state.jump.entries.truncate(state.jump.index);
+    state.jump.entries.push_back(pos);
+    if state.jump.entries.len() > MAX_JUMP_LIST {
+        state.jump.entries.pop_front();
     }
-    state.jump_list_index = state.jump_list.len();
+    state.jump.index = state.jump.entries.len();
 }
 
 /// Jump back in the jump list. If at present (index == len), saves current
 /// position first so forward can return to it.
 pub fn jump_back(state: &mut AppState) {
-    if state.jump_list_index == 0 {
+    if state.jump.index == 0 {
         return;
     }
 
     // If at present (past end of list), save current position
-    if state.jump_list_index == state.jump_list.len() {
+    if state.jump.index == state.jump.entries.len() {
         if let Some(pos) = current_position(state) {
-            state.jump_list.push_back(pos);
+            state.jump.entries.push_back(pos);
         }
     }
 
-    state.jump_list_index -= 1;
+    state.jump.index -= 1;
 
-    if let Some(pos) = state.jump_list.get(state.jump_list_index).cloned() {
+    if let Some(pos) = state.jump.entries.get(state.jump.index).cloned() {
         navigate_to_position(state, pos);
     }
 }
 
 /// Jump forward in the jump list.
 pub fn jump_forward(state: &mut AppState) {
-    if state.jump_list_index + 1 >= state.jump_list.len() {
+    if state.jump.index + 1 >= state.jump.entries.len() {
         return;
     }
 
-    state.jump_list_index += 1;
+    state.jump.index += 1;
 
-    if let Some(pos) = state.jump_list.get(state.jump_list_index).cloned() {
+    if let Some(pos) = state.jump.entries.get(state.jump.index).cloned() {
         navigate_to_position(state, pos);
     }
 }
@@ -83,6 +82,6 @@ fn navigate_to_position(state: &mut AppState, pos: JumpPosition) {
     } else {
         // File not open — request open and store pending position
         state.pending_open.set(Some(pos.path.clone()));
-        state.pending_jump_position = Some(pos);
+        state.jump.pending_position = Some(pos);
     }
 }

@@ -21,6 +21,69 @@ pub fn buffers_of(
                 doc,
                 tab_order,
             }) => {
+                // Preview open: check if pending_preview matches this path
+                let is_preview = (*state.preview.pending)
+                    .as_ref()
+                    .map_or(false, |req| req.path == path);
+
+                if is_preview {
+                    let req = (*state.preview.pending).as_ref().unwrap();
+                    let row = req.row.min(doc.line_count().saturating_sub(1));
+                    let col = req.col;
+                    let buffer_height = state.dims.map_or(20, |d| d.buffer_height());
+                    let content_hash = doc.content_hash();
+                    let notify_hash = led_workspace::path_hash(&path);
+
+                    let buf = BufferState {
+                        id: BufferId(state.next_buffer_id),
+                        doc_id: id,
+                        doc,
+                        path: Some(path),
+                        cursor_row: row,
+                        cursor_col: col,
+                        cursor_col_affinity: col,
+                        scroll_row: row.saturating_sub(buffer_height / 2),
+                        scroll_sub_line: 0,
+                        tab_order,
+                        mark: None,
+                        last_edit_kind: None,
+                        save_state: SaveState::Clean,
+                        persisted_undo_len: 0,
+                        chain_id: None,
+                        last_seen_seq: 0,
+                        content_hash,
+                        change_seq: 0,
+                        isearch: None,
+                        last_search: None,
+                        syntax_highlights: Vec::new(),
+                        bracket_pairs: Vec::new(),
+                        matching_bracket: None,
+                        is_preview: true,
+                    };
+                    let remove_old_id = state.preview.buffer;
+                    let remove_old_hash = remove_old_id.and_then(|pid| {
+                        state
+                            .notify_hash_to_buffer
+                            .iter()
+                            .find(|(_, v)| **v == pid)
+                            .map(|(k, _)| k.clone())
+                    });
+                    let pre_preview_buffer = if state.preview.pre_preview_buffer.is_some() {
+                        state.preview.pre_preview_buffer
+                    } else {
+                        state.active_buffer
+                    };
+
+                    return Some(Mut::PreviewOpen {
+                        buf,
+                        next_id: state.next_buffer_id + 1,
+                        notify_hash,
+                        remove_old_id,
+                        remove_old_hash,
+                        pre_preview_buffer,
+                    });
+                }
+
                 // Duplicate detection: activate existing tab if same path is already open
                 if let Some(existing) = state
                     .buffers
@@ -33,7 +96,7 @@ pub fn buffers_of(
                 let buf_id = BufferId(state.next_buffer_id);
 
                 // Apply restored session positions + undo if available
-                let sp = state.session_positions.get(&path);
+                let sp = state.session.positions.get(&path);
                 let (cursor_row, cursor_col, scroll_row, scroll_sub_line) = match sp {
                     Some(sp) => (
                         sp.cursor_row.min(doc.line_count().saturating_sub(1)),
@@ -76,6 +139,25 @@ pub fn buffers_of(
                     SaveState::Clean
                 };
 
+                // Apply pending jump position if this buffer matches
+                let pending_jump = state.jump.pending_position.as_ref().and_then(|p| {
+                    if Some(&p.path) == Some(&path) {
+                        Some(p.clone())
+                    } else {
+                        None
+                    }
+                });
+                let clear_pending_jump = pending_jump.is_some();
+
+                let (cursor_row, cursor_col, scroll_row) = match &pending_jump {
+                    Some(p) => (
+                        p.row.min(doc.line_count().saturating_sub(1)),
+                        p.col,
+                        p.scroll_offset,
+                    ),
+                    None => (cursor_row, cursor_col, scroll_row),
+                };
+
                 let buf = BufferState {
                     id: buf_id,
                     doc_id: id,
@@ -100,15 +182,17 @@ pub fn buffers_of(
                     syntax_highlights: Vec::new(),
                     bracket_pairs: Vec::new(),
                     matching_bracket: None,
+                    is_preview: false,
                 };
                 let activate =
-                    !is_session_restore || state.session_active_tab_order == Some(tab_order);
+                    !is_session_restore || state.session.active_tab_order == Some(tab_order);
                 Some(Mut::BufferOpen {
                     buf,
                     next_id: state.next_buffer_id + 1,
                     activate,
                     notify_hash,
-                    session_restore_done: is_session_restore && state.session_positions.len() == 1,
+                    session_restore_done: is_session_restore && state.session.positions.len() == 1,
+                    clear_pending_jump,
                 })
             }
             Ok(DocStoreIn::Saved { id, doc }) => {
