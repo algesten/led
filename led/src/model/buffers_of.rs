@@ -93,6 +93,19 @@ pub fn buffers_of(
                     return Some(Mut::ActivateBuffer(existing.id));
                 }
 
+                // Stale preview detection: when a preview buffer is active,
+                // the preview_open derived stream may have in-flight opens
+                // for files the user has already scrolled past.  Drop them
+                // unless they were explicitly requested by a user action.
+                if state.preview.buffer.is_some() {
+                    let requested_by_user = (*state.pending_open).as_ref() == Some(&path)
+                        || state.startup.arg_paths.contains(&path)
+                        || state.session.positions.contains_key(&path);
+                    if !requested_by_user {
+                        return None;
+                    }
+                }
+
                 let buf_id = BufferId(state.next_buffer_id);
 
                 // Apply restored session positions + undo if available

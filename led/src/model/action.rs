@@ -843,7 +843,12 @@ pub(super) fn close_preview(state: &mut AppState) {
     if let Some(restore_id) = state.preview.pre_preview_buffer.take() {
         if state.buffers.contains_key(&restore_id) {
             state.active_buffer = Some(restore_id);
-            reveal_active_buffer(state);
+            // Only reveal in the browser when focus is on the editor.
+            // When browsing the side panel, revealing would jump the
+            // browser selection away from where the user is navigating.
+            if state.focus == PanelSlot::Main {
+                reveal_active_buffer(state);
+            }
         }
     }
     if state.buffers.is_empty() {

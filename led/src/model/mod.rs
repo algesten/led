@@ -484,7 +484,6 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Arc<AppState>> {
                     buf.cursor_col = col;
                     buf.cursor_col_affinity = col;
                 });
-                action::reveal_active_buffer(&mut s);
                 action::renumber_tabs(&mut s);
             }
             Mut::Resize(w, h) => {
