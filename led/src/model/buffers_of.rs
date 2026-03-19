@@ -55,8 +55,8 @@ pub fn buffers_of(
                         change_seq: 0,
                         isearch: None,
                         last_search: None,
-                        syntax_highlights: Vec::new(),
-                        bracket_pairs: Vec::new(),
+                        syntax_highlights: Arc::new(Vec::new()),
+                        bracket_pairs: Arc::new(Vec::new()),
                         matching_bracket: None,
                         is_preview: true,
                     };
@@ -179,8 +179,8 @@ pub fn buffers_of(
                     change_seq: 0,
                     isearch: None,
                     last_search: None,
-                    syntax_highlights: Vec::new(),
-                    bracket_pairs: Vec::new(),
+                    syntax_highlights: Arc::new(Vec::new()),
+                    bracket_pairs: Arc::new(Vec::new()),
                     matching_bracket: None,
                     is_preview: false,
                 };
@@ -202,7 +202,7 @@ pub fn buffers_of(
                 } else {
                     None
                 };
-                let mut buf = buf.clone();
+                let mut buf = (**buf).clone();
                 buf.doc = doc;
                 buf.save_state = SaveState::Clean;
                 buf.persisted_undo_len = buf.doc.undo_history_len();
@@ -243,7 +243,7 @@ pub fn buffers_of(
                         "ExternalChange: content_hash unchanged ({incoming_hash:#x}), skipping"
                     );
                     if buf.doc.dirty() && buf.save_state == SaveState::Clean {
-                        let mut buf = buf.clone();
+                        let mut buf = (**buf).clone();
                         buf.doc = buf.doc.mark_saved();
                         return Some(Mut::BufferUpdate(buf.id, buf));
                     }
@@ -257,7 +257,7 @@ pub fn buffers_of(
                     "ExternalChange: applying, hash {:#x} -> {incoming_hash:#x}",
                     buf.content_hash
                 );
-                let mut buf = buf.clone();
+                let mut buf = (**buf).clone();
                 buf.doc = doc;
                 buf.content_hash = incoming_hash;
                 buf.change_seq = led_core::next_change_seq();
@@ -275,7 +275,7 @@ pub fn buffers_of(
         .stream()
 }
 
-fn find_buf_by_doc_id<'a>(state: &'a AppState, doc_id: DocId) -> Option<&'a BufferState> {
+fn find_buf_by_doc_id<'a>(state: &'a AppState, doc_id: DocId) -> Option<&'a Arc<BufferState>> {
     state.buffers.values().find(|b| b.doc_id == doc_id)
 }
 

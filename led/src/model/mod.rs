@@ -180,16 +180,15 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Arc<AppState>> {
                         .chain_id
                         .clone()
                         .unwrap_or_else(led_workspace::new_chain_id);
-                    // Flush pending edits so in-progress ops are captured.
                     let closed_doc = b.doc.close_undo_group();
-                    let entries: Vec<Vec<u8>> = closed_doc
-                        .undo_entries_from(b.persisted_undo_len)
+                    let raw_entries = closed_doc.undo_entries_from(b.persisted_undo_len);
+                    if raw_entries.is_empty() {
+                        return None;
+                    }
+                    let entries: Vec<Vec<u8>> = raw_entries
                         .iter()
                         .filter_map(|e| rmp_serde::to_vec(e).ok())
                         .collect();
-                    // Skip flush if there are no new entries to persist.
-                    // This prevents ping-pong cascades where SyncApply makes
-                    // a buffer dirty but there are no actual new undo entries.
                     if entries.is_empty() {
                         return None;
                     }
@@ -257,7 +256,7 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Arc<AppState>> {
             let dims = s.dims?;
             let id = s.active_buffer?;
             let buf = s.buffers.get(&id)?;
-            let mut buf = buf.clone();
+            let mut buf = (**buf).clone();
             action::close_group_on_move(&mut buf);
             buf.mark = None;
             let (doc, r, c, a) = edit::yank(&buf, &text);
@@ -282,7 +281,6 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Arc<AppState>> {
             version: syn.doc_version,
             highlights: syn.highlights,
             bracket_pairs: syn.bracket_pairs,
-            matching_bracket: syn.matching_bracket,
             indent: syn.indent,
         })
         .stream();
@@ -361,7 +359,7 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Arc<AppState>> {
             Mut::ActivateBuffer(id) => {
                 s.active_buffer = Some(id);
                 if let Some(path) = s.buffers.get(&id).and_then(|b| b.path.clone()) {
-                    s.git.pending_line_scan.set(Some(path));
+                    s.git_mut().pending_line_scan.set(Some(path));
                 }
                 action::reveal_active_buffer(&mut s);
             }
@@ -386,7 +384,7 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Arc<AppState>> {
                     s.session.positions.remove(path);
                 }
                 s.notify_hash_to_buffer.insert(notify_hash, buf.id);
-                s.buffers.insert(buf.id, buf);
+                s.buffers_mut().insert(buf.id, Arc::new(buf));
                 s.next_buffer_id = next_id;
                 action::renumber_tabs(&mut s);
                 if session_restore_done {
@@ -408,26 +406,27 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Arc<AppState>> {
                 buf,
                 undo_clear_path,
             } => {
-                s.buffers.insert(id, buf);
-                if let Some(buf) = s.buffers.get_mut(&id) {
+                s.buffers_mut().insert(id, Arc::new(buf));
+                if let Some(buf) = s.buf_mut(id) {
                     buf.change_seq = next_change_seq();
                 }
-                s.git.pending_file_scan.set(());
+                s.git_mut().pending_file_scan.set(());
                 if let Some(path) = s.buffers.get(&id).and_then(|b| b.path.clone()) {
-                    s.git.pending_line_scan.set(Some(path));
+                    s.git_mut().pending_line_scan.set(Some(path));
                 }
                 if let Some(path) = undo_clear_path {
                     s.pending_undo_clear.set(path);
                 }
             }
             Mut::BufferUpdate(id, buf) => {
-                s.buffers.insert(id, buf);
+                s.buffers_mut().insert(id, Arc::new(buf));
             }
             Mut::ConfigKeys(v) => s.config_keys = Some(v),
             Mut::DirListed(path, entries) => {
-                s.browser.dir_contents.insert(path, entries);
-                s.browser.rebuild_entries();
-                s.browser.complete_pending_reveal();
+                let b = s.browser_mut();
+                b.dir_contents.insert(path, entries);
+                b.rebuild_entries();
+                b.complete_pending_reveal();
                 action::browser_scroll_to_selected(&mut s);
             }
             Mut::FileSearchResults(fs, preview) => {
@@ -441,11 +440,11 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Arc<AppState>> {
             }
             Mut::ConfigTheme(v) => s.config_theme = Some(v),
             Mut::GitFileStatuses { statuses, branch } => {
-                s.git.branch = branch;
-                s.git.file_statuses = statuses;
+                s.git_mut().branch = branch;
+                s.git_mut().file_statuses = statuses;
             }
             Mut::GitLineStatuses { path, statuses } => {
-                s.git.line_statuses.insert(path, statuses);
+                s.git_mut().line_statuses.insert(path, statuses);
             }
             Mut::ForceRedraw(v) => s.force_redraw = v,
             Mut::Keymap(v) => s.keymap = Some(v),
@@ -457,12 +456,12 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Arc<AppState>> {
                 remove_old_hash,
                 pre_preview_buffer,
             } => {
-                remove_old_id.map(|id| s.buffers.remove(&id));
+                remove_old_id.map(|id| s.buffers_mut().remove(&id));
                 remove_old_hash.map(|h| s.notify_hash_to_buffer.remove(&h));
                 s.preview.pre_preview_buffer = pre_preview_buffer;
                 let buf_id = buf.id;
                 s.notify_hash_to_buffer.insert(notify_hash, buf_id);
-                s.buffers.insert(buf_id, buf);
+                s.buffers_mut().insert(buf_id, Arc::new(buf));
                 s.active_buffer = Some(buf_id);
                 s.preview.buffer = Some(buf_id);
                 s.next_buffer_id = next_id;
@@ -476,11 +475,11 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Arc<AppState>> {
                 remove_old_hash,
                 pre_preview_buffer,
             } => {
-                remove_old_id.map(|id| s.buffers.remove(&id));
+                remove_old_id.map(|id| s.buffers_mut().remove(&id));
                 remove_old_hash.map(|h| s.notify_hash_to_buffer.remove(&h));
                 s.preview.pre_preview_buffer = pre_preview_buffer;
                 s.active_buffer = Some(id);
-                s.buffers.get_mut(&id).map(|buf| {
+                s.buf_mut(id).map(|buf| {
                     buf.cursor_row = row;
                     buf.cursor_col = col;
                     buf.cursor_col_affinity = col;
@@ -519,9 +518,10 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Arc<AppState>> {
                 s.show_side_panel = show_side_panel;
                 s.session.restored_focus = restored_focus;
                 s.session.positions = positions;
-                s.browser.selected = browser_selected;
-                s.browser.scroll_offset = browser_scroll_offset;
-                s.browser.expanded_dirs = browser_expanded_dirs;
+                let b = s.browser_mut();
+                b.selected = browser_selected;
+                b.scroll_offset = browser_scroll_offset;
+                b.expanded_dirs = browser_expanded_dirs;
                 s.jump.entries = jump_entries;
                 s.jump.index = jump_index;
                 if !pending_opens.is_empty() {
@@ -549,7 +549,7 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Arc<AppState>> {
                 }
             }
             Mut::UndoFlushReady { buf_id, flush } => {
-                if let Some(buf) = s.buffers.get_mut(&buf_id) {
+                if let Some(buf) = s.buf_mut(buf_id) {
                     // Close the undo group on the actual buffer doc to keep
                     // it consistent with persisted_undo_len. Without this,
                     // subsequent edits can append to the already-flushed open
@@ -566,7 +566,7 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Arc<AppState>> {
                 chain_id,
                 last_seen_seq,
             } => {
-                if let Some(buf) = s.buffers.get_mut(&buf_id) {
+                if let Some(buf) = s.buf_mut(buf_id) {
                     buf.chain_id = Some(chain_id);
                     buf.last_seen_seq = last_seen_seq;
                 }
@@ -576,21 +576,24 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Arc<AppState>> {
                 version,
                 highlights,
                 bracket_pairs,
-                matching_bracket,
                 indent: _,
             } => {
-                if let Some(buf) = s.buffers.get_mut(&buf_id) {
+                if let Some(buf) = s.buf_mut(buf_id) {
                     if buf.doc.version() == version {
-                        buf.syntax_highlights = highlights;
-                        buf.bracket_pairs = bracket_pairs;
-                        buf.matching_bracket = matching_bracket;
+                        buf.syntax_highlights = Arc::new(highlights);
+                        buf.bracket_pairs = Arc::new(bracket_pairs);
+                        buf.matching_bracket = led_state::BracketPair::find_match(
+                            &buf.bracket_pairs,
+                            buf.cursor_row,
+                            buf.cursor_col,
+                        );
                     }
                 }
             }
             Mut::Suspend(v) => {
                 s.suspend = v;
                 if !v {
-                    s.git.pending_file_scan.set(());
+                    s.git_mut().pending_file_scan.set(());
                 }
             }
             Mut::TimerFired(name) => handle_timer(&mut s, name),
@@ -598,11 +601,12 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Arc<AppState>> {
                 workspace,
                 initial_dirs,
             } => {
-                s.browser.root = Some(workspace.root.clone());
-                s.browser.dir_contents.clear();
-                s.browser.rebuild_entries();
+                let b = s.browser_mut();
+                b.root = Some(workspace.root.clone());
+                b.dir_contents.clear();
+                b.rebuild_entries();
                 s.pending_lists.set(initial_dirs);
-                s.git.pending_file_scan.set(());
+                s.git_mut().pending_file_scan.set(());
                 s.workspace = Some(Arc::new(workspace));
             }
         }
@@ -633,7 +637,7 @@ fn handle_timer(state: &mut AppState, name: &'static str) {
             state.alerts.clear();
         }
         "git_file_scan" => {
-            state.git.scan_seq.set(());
+            state.git_mut().scan_seq.set(());
         }
         "undo_flush" => {
             // Handled by the undo_flush_s combinator chain, not here.
@@ -728,7 +732,6 @@ enum Mut {
         version: u64,
         highlights: Vec<(usize, HighlightSpan)>,
         bracket_pairs: Vec<BracketPair>,
-        matching_bracket: Option<(usize, usize)>,
         #[allow(dead_code)]
         indent: Option<String>,
     },
@@ -817,7 +820,7 @@ fn resolve_preview(s: &AppState) -> Option<Mut> {
     if let Some(preview_id) = s.preview.buffer {
         if let Some(buf) = s.buffers.get(&preview_id) {
             if buf.path.as_ref() == Some(&req.path) {
-                let mut buf = buf.clone();
+                let mut buf = (**buf).clone();
                 let row = req.row.min(buf.doc.line_count().saturating_sub(1));
                 buf.cursor_row = row;
                 buf.cursor_col = req.col;

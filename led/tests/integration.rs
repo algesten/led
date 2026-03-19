@@ -2249,7 +2249,9 @@ use harness::two_instance::{Instance, shared_workspace, startup_for};
 use led_state::AppState;
 
 fn active_buf(s: &AppState) -> Option<&led_state::BufferState> {
-    s.active_buffer.and_then(|id| s.buffers.get(&id))
+    s.active_buffer
+        .and_then(|id| s.buffers.get(&id))
+        .map(|v| &**v)
 }
 
 const WAIT: std::time::Duration = std::time::Duration::from_secs(10);

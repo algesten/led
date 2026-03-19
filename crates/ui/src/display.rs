@@ -33,13 +33,13 @@ pub struct DisplayInputs {
     search_match_style: Style,
     search_current_style: Style,
     // Syntax highlighting
-    syntax_highlights: Vec<(usize, HighlightSpan)>,
-    bracket_pairs: Vec<BracketPair>,
+    syntax_highlights: Arc<Vec<(usize, HighlightSpan)>>,
+    bracket_pairs: Arc<Vec<BracketPair>>,
     matching_bracket: Option<(usize, usize)>,
     cursor_row: usize,
     cursor_col: usize,
     content_hash: u64,
-    syntax_styles: HashMap<String, Style>,
+    syntax_styles: Arc<HashMap<String, Style>>,
     bracket_match_style: Style,
     rainbow_styles: [Style; 6],
     git_line_statuses: Vec<LineStatus>,
@@ -75,10 +75,11 @@ impl PartialEq for DisplayInputs {
 
 pub fn display_inputs(s: &AppState) -> Option<DisplayInputs> {
     let dims = s.dims?;
-    let theme = s.config_theme.as_ref()?;
+    let config_theme = s.config_theme.as_ref()?;
     let id = s.active_buffer?;
     let buf = s.buffers.get(&id)?;
-    let theme = theme.file.as_ref();
+    let theme_arc = &config_theme.file;
+    let theme = theme_arc.as_ref();
 
     // Compute normalized selection from mark + cursor
     let selection = buf.mark.map(|(mr, mc)| {
@@ -122,11 +123,15 @@ pub fn display_inputs(s: &AppState) -> Option<DisplayInputs> {
         search_current_style: style::resolve(theme, &theme.editor.search_current),
         syntax_highlights: buf.syntax_highlights.clone(),
         bracket_pairs: buf.bracket_pairs.clone(),
-        matching_bracket: buf.matching_bracket,
+        matching_bracket: BracketPair::find_match(
+            &buf.bracket_pairs,
+            buf.cursor_row,
+            buf.cursor_col,
+        ),
         cursor_row: buf.cursor_row,
         cursor_col: buf.cursor_col,
         content_hash: buf.content_hash,
-        syntax_styles: style::resolve_syntax_map(theme),
+        syntax_styles: style::resolve_syntax_map(theme_arc),
         bracket_match_style: style::resolve(theme, &theme.brackets.match_),
         rainbow_styles: [
             style::resolve(theme, &theme.brackets.rainbow_0),
@@ -244,7 +249,7 @@ pub fn build_display_lines(d: &DisplayInputs) -> Rc<Vec<Line<'static>>> {
             }
 
             // 3. Rainbow brackets
-            for bp in &d.bracket_pairs {
+            for bp in d.bracket_pairs.iter() {
                 if let Some(ci) = bp.color_index {
                     let rainbow_style = d.rainbow_styles[ci % 6];
                     // Open bracket
@@ -746,7 +751,7 @@ pub fn build_layout(l: &LayoutInputs) -> Option<LayoutInfo> {
 
 #[derive(Clone, PartialEq)]
 pub struct BrowserInputs {
-    pub entries: Vec<led_state::TreeEntry>,
+    pub entries: Arc<Vec<led_state::TreeEntry>>,
     pub selected: usize,
     pub scroll_offset: usize,
     pub focused: bool,

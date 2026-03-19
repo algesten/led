@@ -79,20 +79,37 @@ pub fn driver(out: Stream<SyntaxOut>) -> Stream<SyntaxIn> {
     // Async task: handle syntax work
     let tx = result_tx;
     tokio::task::spawn_local(async move {
-        let mut states: HashMap<BufferId, (SyntaxState, u64)> = HashMap::new();
+        struct BufSyntax {
+            state: SyntaxState,
+            last_ver: u64,
+            last_scroll: usize,
+            last_end_line: usize,
+            cached_highlights: Vec<(usize, led_state::HighlightSpan)>,
+            cached_brackets: Vec<led_state::BracketPair>,
+        }
+        let mut states: HashMap<BufferId, BufSyntax> = HashMap::new();
 
         while let Some(cmd) = cmd_rx.recv().await {
             match cmd {
                 SyntaxOut::BufferOpened { buf_id, path, doc } => {
                     if let Some(ss) = SyntaxState::from_path_and_doc(&path, &*doc) {
-                        // Collect initial highlights for the first screen
                         let highlights = ss.highlights_for_lines(&*doc, 0, 50);
                         let state_highlights = to_state_highlights(&highlights);
                         let bracket_pairs = to_state_brackets(&ss, &*doc, 0, 50);
                         let matching = ss.matching_bracket(&*doc, 0, 0);
 
                         let ver = doc.version();
-                        states.insert(buf_id, (ss, ver));
+                        states.insert(
+                            buf_id,
+                            BufSyntax {
+                                state: ss,
+                                last_ver: ver,
+                                last_scroll: 0,
+                                last_end_line: 50,
+                                cached_highlights: state_highlights.clone(),
+                                cached_brackets: bracket_pairs.clone(),
+                            },
+                        );
 
                         let _ = tx
                             .send(SyntaxIn {
@@ -115,51 +132,62 @@ pub fn driver(out: Stream<SyntaxOut>) -> Stream<SyntaxIn> {
                     scroll_row,
                     buffer_height,
                     cursor_row,
-                    cursor_col,
+                    cursor_col: _,
                     needs_indent,
                 } => {
                     // Auto-initialize if not yet opened
                     if !states.contains_key(&buf_id) {
                         if let Some(ss) = SyntaxState::from_path_and_doc(&path, &*doc) {
-                            states.insert(buf_id, (ss, version));
+                            states.insert(
+                                buf_id,
+                                BufSyntax {
+                                    state: ss,
+                                    last_ver: version,
+                                    last_scroll: usize::MAX,
+                                    last_end_line: 0,
+                                    cached_highlights: Vec::new(),
+                                    cached_brackets: Vec::new(),
+                                },
+                            );
                         } else {
                             continue;
                         }
                     }
-                    let (ss, last_ver) = states.get_mut(&buf_id).unwrap();
+                    let bs = states.get_mut(&buf_id).unwrap();
 
-                    // Update the parse tree to match the new doc.
-                    //
-                    // Each doc version bump corresponds to exactly one EditOp
-                    // pushed to the pending group.  `edit_ops` is the full
-                    // pending list (cumulative).  We only need the NEW ops
-                    // since `last_ver` — the last `version - last_ver` items.
-                    // If the list is shorter (undo-group flush happened in
-                    // between), fall back to a full re-parse.
-                    if version != *last_ver {
-                        let new_op_count = (version - *last_ver) as usize;
+                    // Update parse tree if doc changed
+                    if version != bs.last_ver {
+                        let new_op_count = (version - bs.last_ver) as usize;
                         if !edit_ops.is_empty() && edit_ops.len() >= new_op_count {
                             for op in &edit_ops[edit_ops.len() - new_op_count..] {
-                                ss.apply_edit_op(op, &*doc);
+                                bs.state.apply_edit_op(op, &*doc);
                             }
                         } else {
-                            ss.reparse(&*doc);
+                            bs.state.reparse(&*doc);
                         }
-                        *last_ver = version;
+                        bs.last_ver = version;
                     }
 
-                    // Collect highlights for visible lines
+                    // Recompute highlights/brackets only when doc or viewport changed
                     let end_line = (scroll_row + buffer_height + 5).min(doc.line_count());
-                    let highlights = ss.highlights_for_lines(&*doc, scroll_row, end_line);
-                    let state_highlights = to_state_highlights(&highlights);
+                    let viewport_changed =
+                        scroll_row != bs.last_scroll || end_line != bs.last_end_line;
 
-                    let bracket_pairs = to_state_brackets(ss, &*doc, scroll_row, end_line);
+                    if viewport_changed || bs.cached_highlights.is_empty() {
+                        bs.cached_highlights = to_state_highlights(
+                            &bs.state.highlights_for_lines(&*doc, scroll_row, end_line),
+                        );
+                        bs.cached_brackets =
+                            to_state_brackets(&bs.state, &*doc, scroll_row, end_line);
+                        bs.last_scroll = scroll_row;
+                        bs.last_end_line = end_line;
+                    }
 
-                    let matching = ss.matching_bracket(&*doc, cursor_row, cursor_col);
+                    // matching_bracket is computed from cached bracket_pairs
+                    // in the model layer — no tree-sitter query needed.
 
-                    // Compute indent if needed
                     let indent = if needs_indent {
-                        ss.compute_auto_indent(&*doc, cursor_row)
+                        bs.state.compute_auto_indent(&*doc, cursor_row)
                     } else {
                         None
                     };
@@ -168,9 +196,9 @@ pub fn driver(out: Stream<SyntaxOut>) -> Stream<SyntaxIn> {
                         .send(SyntaxIn {
                             buf_id,
                             doc_version: version,
-                            highlights: state_highlights,
-                            bracket_pairs,
-                            matching_bracket: matching,
+                            highlights: bs.cached_highlights.clone(),
+                            bracket_pairs: bs.cached_brackets.clone(),
+                            matching_bracket: None,
                             indent,
                         })
                         .await;

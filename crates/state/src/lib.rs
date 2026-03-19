@@ -136,6 +136,25 @@ pub struct BracketPair {
     pub color_index: Option<usize>,
 }
 
+impl BracketPair {
+    /// Find the matching bracket for the cursor from cached pairs.
+    pub fn find_match(
+        pairs: &[BracketPair],
+        cursor_row: usize,
+        cursor_col: usize,
+    ) -> Option<(usize, usize)> {
+        for bp in pairs {
+            if bp.open_line == cursor_row && bp.open_col == cursor_col {
+                return Some((bp.close_line, bp.close_col));
+            }
+            if bp.close_line == cursor_row && bp.close_col == cursor_col {
+                return Some((bp.open_line, bp.open_col));
+            }
+        }
+        None
+    }
+}
+
 // ── Incremental search state ──
 
 #[derive(Debug, Clone)]
@@ -176,8 +195,8 @@ pub struct BufferState {
     pub isearch: Option<ISearchState>,
     pub last_search: Option<String>,
     // Syntax highlighting
-    pub syntax_highlights: Vec<(usize, HighlightSpan)>,
-    pub bracket_pairs: Vec<BracketPair>,
+    pub syntax_highlights: Arc<Vec<(usize, HighlightSpan)>>,
+    pub bracket_pairs: Arc<Vec<BracketPair>>,
     pub matching_bracket: Option<(usize, usize)>,
     pub is_preview: bool,
 }
@@ -217,7 +236,7 @@ pub struct FileBrowserState {
     pub root: Option<PathBuf>,
     pub dir_contents: HashMap<PathBuf, Vec<led_fs::DirEntry>>,
     pub expanded_dirs: HashSet<PathBuf>,
-    pub entries: Vec<TreeEntry>,
+    pub entries: Arc<Vec<TreeEntry>>,
     pub selected: usize,
     pub scroll_offset: usize,
     pub pending_reveal: Option<PathBuf>,
@@ -227,16 +246,11 @@ impl FileBrowserState {
     /// Rebuild the flat `entries` list from `dir_contents` and `expanded_dirs`.
     /// Pure — no I/O.
     pub fn rebuild_entries(&mut self) {
-        self.entries.clear();
+        let entries = Arc::make_mut(&mut self.entries);
+        entries.clear();
         let Some(ref root) = self.root else { return };
         let root = root.clone();
-        walk_tree(
-            &root,
-            0,
-            &self.dir_contents,
-            &self.expanded_dirs,
-            &mut self.entries,
-        );
+        walk_tree(&root, 0, &self.dir_contents, &self.expanded_dirs, entries);
     }
 
     /// Expand ancestors of `path`, rebuild entries, and try to select it.
@@ -428,11 +442,11 @@ pub struct AppState {
     pub suspend: bool,
     pub force_redraw: u64,
     pub alerts: AlertState,
-    pub buffers: HashMap<BufferId, BufferState>,
+    pub buffers: Arc<HashMap<BufferId, Arc<BufferState>>>,
     pub active_buffer: Option<BufferId>,
     pub next_buffer_id: u64,
     pub save_request: Versioned<()>,
-    pub browser: FileBrowserState,
+    pub browser: Arc<FileBrowserState>,
     pub pending_open: Versioned<Option<PathBuf>>,
     pub pending_lists: Versioned<Vec<PathBuf>>,
 
@@ -464,7 +478,7 @@ pub struct AppState {
     pub preview: PreviewState,
 
     // Git
-    pub git: GitState,
+    pub git: Arc<GitState>,
 }
 
 impl AppState {
@@ -474,5 +488,24 @@ impl AppState {
             show_side_panel: true,
             ..Default::default()
         }
+    }
+
+    pub fn buffers_mut(&mut self) -> &mut HashMap<BufferId, Arc<BufferState>> {
+        Arc::make_mut(&mut self.buffers)
+    }
+
+    /// Get a mutable reference to a single buffer via copy-on-write.
+    pub fn buf_mut(&mut self, id: BufferId) -> Option<&mut BufferState> {
+        Arc::make_mut(&mut self.buffers)
+            .get_mut(&id)
+            .map(|arc| Arc::make_mut(arc))
+    }
+
+    pub fn browser_mut(&mut self) -> &mut FileBrowserState {
+        Arc::make_mut(&mut self.browser)
+    }
+
+    pub fn git_mut(&mut self) -> &mut GitState {
+        Arc::make_mut(&mut self.git)
     }
 }

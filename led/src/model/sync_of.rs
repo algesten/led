@@ -30,7 +30,7 @@ fn resolve_sync(result: SyncResultKind, state: &AppState) -> Option<Mut> {
                 .buffers
                 .values()
                 .find(|b| b.path.as_ref() == Some(&file_path))?;
-            let mut buf = buf.clone();
+            let mut buf = (**buf).clone();
             buf.last_seen_seq = 0;
             buf.chain_id = None;
             buf.persisted_undo_len = buf.doc.undo_history_len();
@@ -55,7 +55,7 @@ fn resolve_sync(result: SyncResultKind, state: &AppState) -> Option<Mut> {
                 return None;
             }
             let doc = apply_remote_entries(&buf.doc, &entries);
-            let mut buf = buf.clone();
+            let mut buf = (**buf).clone();
             buf.doc = doc;
             buf.last_seen_seq = new_last_seen_seq;
             buf.persisted_undo_len = buf.doc.undo_history_len();
@@ -95,7 +95,7 @@ fn resolve_sync(result: SyncResultKind, state: &AppState) -> Option<Mut> {
                 return None;
             }
             let doc = apply_remote_entries(&buf.doc, &entries);
-            let mut buf = buf.clone();
+            let mut buf = (**buf).clone();
             buf.doc = doc;
             buf.chain_id = Some(new_chain_id);
             buf.last_seen_seq = new_last_seen_seq;

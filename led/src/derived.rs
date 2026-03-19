@@ -337,20 +337,22 @@ pub fn derived(state: Stream<Arc<AppState>>) -> Derived {
     clipboard_write.forward(&clipboard_out);
     clipboard_read.forward(&clipboard_out);
 
-    // Syntax: derive from active buffer's doc version + cursor/scroll changes.
-    let syntax_key = |s: &Arc<AppState>| -> (Option<(BufferId, u64, usize, usize, usize)>, usize) {
+    // Syntax: only recompute on doc version or scroll changes.
+    // Cursor-only moves don't trigger syntax work — bracket matching
+    // updates on the next edit or scroll, which is fast enough.
+    // Only trigger syntax on doc version and scroll changes.
+    // cursor_row included so bracket matching updates per-line during
+    // vertical movement; cursor_col excluded so horizontal movement
+    // within a line skips syntax entirely — bracket match updates
+    // on next vertical move or edit.
+    let syntax_key = |s: &Arc<AppState>| -> (Option<(BufferId, u64, usize, usize)>, usize) {
         let buf_info = s.active_buffer.and_then(|id| {
             let buf = s.buffers.get(&id)?;
-            Some((
-                id,
-                buf.doc.version(),
-                buf.scroll_row,
-                buf.cursor_row,
-                buf.cursor_col,
-            ))
+            Some((id, buf.doc.version(), buf.scroll_row, buf.cursor_row))
         });
         (buf_info, s.buffers.len())
     };
+
     let known_bufs: Rc<RefCell<HashSet<BufferId>>> = Rc::new(RefCell::new(HashSet::new()));
     let known_bufs2 = known_bufs.clone();
 

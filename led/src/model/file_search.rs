@@ -291,7 +291,7 @@ fn confirm_selected(state: &mut AppState) {
     // Promote preview if it matches
     if super::action::promote_preview(state, &path) {
         if let Some(preview_id) = state.active_buffer {
-            if let Some(buf) = state.buffers.get_mut(&preview_id) {
+            if let Some(buf) = state.buf_mut(preview_id) {
                 buf.cursor_row = row.min(buf.doc.line_count().saturating_sub(1));
                 buf.cursor_col = col;
                 buf.cursor_col_affinity = col;
@@ -311,7 +311,7 @@ fn confirm_selected(state: &mut AppState) {
     if let Some(id) = existing {
         // Activate and set cursor
         state.active_buffer = Some(id);
-        if let Some(buf) = state.buffers.get_mut(&id) {
+        if let Some(buf) = state.buf_mut(id) {
             buf.cursor_row = row.min(buf.doc.line_count().saturating_sub(1));
             buf.cursor_col = col;
             buf.cursor_col_affinity = col;

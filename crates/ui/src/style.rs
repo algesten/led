@@ -1,4 +1,6 @@
+use std::cell::RefCell;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use led_core::theme::{StyleTable, StyleValue, Theme};
 use ratatui::style::{Color, Modifier, Style};
@@ -11,12 +13,29 @@ pub fn resolve(theme: &Theme, sv: &StyleValue) -> Style {
 }
 
 /// Pre-resolve all syntax.{name} entries from the theme into a style map.
-pub fn resolve_syntax_map(theme: &Theme) -> HashMap<String, Style> {
-    theme
-        .syntax
-        .iter()
-        .map(|(name, sv)| (name.clone(), resolve(theme, sv)))
-        .collect()
+/// Cached by Arc pointer identity — only recomputes when the theme Arc changes.
+pub fn resolve_syntax_map(theme: &Arc<Theme>) -> Arc<HashMap<String, Style>> {
+    thread_local! {
+        static CACHE: RefCell<Option<(usize, Arc<HashMap<String, Style>>)>> = RefCell::new(None);
+    }
+    let ptr = Arc::as_ptr(theme) as usize;
+    CACHE.with(|cell| {
+        let mut cache = cell.borrow_mut();
+        if let Some((cached_ptr, ref map)) = *cache {
+            if cached_ptr == ptr {
+                return map.clone();
+            }
+        }
+        let map: Arc<HashMap<String, Style>> = Arc::new(
+            theme
+                .syntax
+                .iter()
+                .map(|(name, sv)| (name.clone(), resolve(theme, sv)))
+                .collect(),
+        );
+        *cache = Some((ptr, map.clone()));
+        map
+    })
 }
 
 /// Resolve a capture name to a style, with parent fallback.

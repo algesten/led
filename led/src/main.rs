@@ -18,6 +18,10 @@ struct Cli {
     /// Write logs to a file (e.g. --log-file /tmp/led.log)
     #[arg(long)]
     log_file: Option<PathBuf>,
+
+    /// After 5s, spam MoveUp for flamegraph profiling
+    #[arg(long)]
+    flamegraph: bool,
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -61,7 +65,25 @@ async fn main() {
         .run_until(async {
             let (tx, rx) = oneshot::channel();
 
-            let (_state, _guards) = led::run(startup, Stream::new(), tx);
+            let actions_in: Stream<led_core::Action> = Stream::new();
+            let (_state, _guards) = led::run(startup, actions_in.clone(), tx);
+
+            if cli.flamegraph {
+                let stream = actions_in.clone();
+                tokio::task::spawn_local(async move {
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                    loop {
+                        stream.push(led_core::Action::FileStart);
+                        tokio::task::yield_now().await;
+                        stream.push(led_core::Action::PageDown);
+                        tokio::task::yield_now().await;
+                        for _ in 0..80 {
+                            stream.push(led_core::Action::MoveDown);
+                            tokio::task::yield_now().await;
+                        }
+                    }
+                });
+            }
 
             let _ = rx.await;
         })

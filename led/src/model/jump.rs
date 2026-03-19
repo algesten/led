@@ -72,7 +72,7 @@ fn navigate_to_position(state: &mut AppState, pos: JumpPosition) {
 
     if let Some(buf_id) = existing {
         state.active_buffer = Some(buf_id);
-        if let Some(buf) = state.buffers.get_mut(&buf_id) {
+        if let Some(buf) = state.buf_mut(buf_id) {
             buf.cursor_row = pos.row.min(buf.doc.line_count().saturating_sub(1));
             buf.cursor_col = pos.col;
             buf.cursor_col_affinity = pos.col;

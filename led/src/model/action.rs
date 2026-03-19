@@ -218,15 +218,16 @@ pub fn handle_action(state: &mut AppState, action: Action) {
             }
         }),
         Action::KillLine => {
+            let mut killed_text = None;
             if let (Some(dims), Some(id)) = (state.dims, state.active_buffer) {
-                if let Some(buf) = state.buffers.get_mut(&id) {
+                if let Some(buf) = state.buf_mut(id) {
                     close_group_on_move(buf);
                     if let Some((doc, killed, r, c, a)) = edit::kill_line(buf) {
                         buf.doc = doc;
                         buf.cursor_row = r;
                         buf.cursor_col = c;
                         buf.cursor_col_affinity = a;
-                        state.kill_ring.accumulate(&killed);
+                        killed_text = Some(killed);
                     }
                     let (sr, ssl) = mov::adjust_scroll(buf, &dims);
                     buf.scroll_row = sr;
@@ -236,10 +237,15 @@ pub fn handle_action(state: &mut AppState, action: Action) {
                     }
                 }
             }
+            if let Some(killed) = killed_text {
+                state.kill_ring.accumulate(&killed);
+            }
         }
         Action::KillRegion => {
+            let mut killed_text = None;
+            let mut no_region = false;
             if let (Some(dims), Some(id)) = (state.dims, state.active_buffer) {
-                if let Some(buf) = state.buffers.get_mut(&id) {
+                if let Some(buf) = state.buf_mut(id) {
                     close_group_on_move(buf);
                     if let Some((doc, killed, r, c, a)) = edit::kill_region(buf) {
                         buf.doc = doc;
@@ -247,10 +253,10 @@ pub fn handle_action(state: &mut AppState, action: Action) {
                         buf.cursor_col = c;
                         buf.cursor_col_affinity = a;
                         buf.mark = None;
-                        state.kill_ring.set(killed);
+                        killed_text = Some(killed);
                     } else {
                         buf.mark = None;
-                        state.alerts.warn = Some("No region".into());
+                        no_region = true;
                     }
                     let (sr, ssl) = mov::adjust_scroll(buf, &dims);
                     buf.scroll_row = sr;
@@ -260,6 +266,12 @@ pub fn handle_action(state: &mut AppState, action: Action) {
                     }
                 }
             } else {
+                no_region = true;
+            }
+            if let Some(killed) = killed_text {
+                state.kill_ring.set(killed);
+            }
+            if no_region {
                 state.alerts.warn = Some("No region".into());
             }
         }
@@ -294,7 +306,7 @@ pub fn handle_action(state: &mut AppState, action: Action) {
         // ── Save ──
         Action::Save => {
             if let Some(id) = state.active_buffer {
-                if let Some(buf) = state.buffers.get_mut(&id) {
+                if let Some(buf) = state.buf_mut(id) {
                     close_group_on_move(buf);
                     buf.save_state = SaveState::Saving;
                 }
@@ -346,7 +358,7 @@ pub fn handle_action(state: &mut AppState, action: Action) {
                             {
                                 let start_char = buf.doc.byte_to_char(start_byte);
                                 let end_char = buf.doc.byte_to_char(end_byte);
-                                let buf = state.buffers.get_mut(&id).unwrap();
+                                let buf = state.buf_mut(id).unwrap();
                                 close_group_on_move(buf);
                                 let doc = buf.doc.remove(start_char, end_char);
                                 let doc = doc.insert(start_char, &replacement);
@@ -545,7 +557,7 @@ fn do_kill_buffer(state: &mut AppState, id: BufferId) {
         .or_else(|| tabs.last())
         .map(|&(bid, _)| bid);
 
-    state.buffers.remove(&id);
+    state.buffers_mut().remove(&id);
     state.active_buffer = next_active;
     reveal_active_buffer(state);
     renumber_tabs(state);
@@ -615,32 +627,35 @@ fn handle_browser_nav(state: &mut AppState, action: &Action) {
         return;
     }
     let height = state.dims.map_or(20, |d| d.buffer_height());
+    let selected = state.browser.selected;
+    let scroll_offset = state.browser.scroll_offset;
+    let b = state.browser_mut();
     match action {
         Action::MoveUp => {
-            state.browser.selected = state.browser.selected.saturating_sub(1);
+            b.selected = selected.saturating_sub(1);
         }
         Action::MoveDown => {
-            state.browser.selected = (state.browser.selected + 1).min(len - 1);
+            b.selected = (selected + 1).min(len - 1);
         }
         Action::PageUp => {
-            state.browser.selected = state.browser.selected.saturating_sub(height);
+            b.selected = selected.saturating_sub(height);
         }
         Action::PageDown => {
-            state.browser.selected = (state.browser.selected + height).min(len - 1);
+            b.selected = (selected + height).min(len - 1);
         }
         Action::FileStart => {
-            state.browser.selected = 0;
+            b.selected = 0;
         }
         Action::FileEnd => {
-            state.browser.selected = len - 1;
+            b.selected = len - 1;
         }
         _ => {}
     }
     // Keep selection visible
-    if state.browser.selected < state.browser.scroll_offset {
-        state.browser.scroll_offset = state.browser.selected;
-    } else if state.browser.selected >= state.browser.scroll_offset + height {
-        state.browser.scroll_offset = state.browser.selected + 1 - height;
+    if b.selected < scroll_offset {
+        b.scroll_offset = b.selected;
+    } else if b.selected >= scroll_offset + height {
+        b.scroll_offset = b.selected + 1 - height;
     }
 
     // Emit preview for selected entry
@@ -668,9 +683,11 @@ fn handle_browser_expand(state: &mut AppState) {
         return;
     }
     let path = entry.path.clone();
-    state.browser.expanded_dirs.insert(path.clone());
-    if state.browser.dir_contents.contains_key(&path) {
-        state.browser.rebuild_entries();
+    let has_contents = state.browser.dir_contents.contains_key(&path);
+    let b = state.browser_mut();
+    b.expanded_dirs.insert(path.clone());
+    if has_contents {
+        b.rebuild_entries();
     } else {
         state.pending_lists.set(vec![path]);
     }
@@ -682,34 +699,25 @@ fn handle_browser_collapse(state: &mut AppState) {
     };
     let collapse_path = match &entry.kind {
         EntryKind::Directory { expanded: true } => entry.path.clone(),
-        _ => {
-            // File or collapsed dir — collapse parent
-            match entry.path.parent() {
-                Some(parent) if state.browser.expanded_dirs.contains(parent) => {
-                    parent.to_path_buf()
-                }
-                _ => return,
-            }
-        }
+        _ => match entry.path.parent() {
+            Some(parent) if state.browser.expanded_dirs.contains(parent) => parent.to_path_buf(),
+            _ => return,
+        },
     };
-    state.browser.expanded_dirs.remove(&collapse_path);
-    state.browser.rebuild_entries();
-    // Move selection to the collapsed directory
-    if let Some(pos) = state
-        .browser
-        .entries
-        .iter()
-        .position(|e| e.path == collapse_path)
-    {
-        state.browser.selected = pos;
+    let b = state.browser_mut();
+    b.expanded_dirs.remove(&collapse_path);
+    b.rebuild_entries();
+    if let Some(pos) = b.entries.iter().position(|e| e.path == collapse_path) {
+        b.selected = pos;
     }
 }
 
 fn handle_browser_collapse_all(state: &mut AppState) {
-    state.browser.expanded_dirs.clear();
-    state.browser.rebuild_entries();
-    state.browser.selected = 0;
-    state.browser.scroll_offset = 0;
+    let b = state.browser_mut();
+    b.expanded_dirs.clear();
+    b.rebuild_entries();
+    b.selected = 0;
+    b.scroll_offset = 0;
 }
 
 fn handle_browser_open(state: &mut AppState) {
@@ -745,11 +753,16 @@ fn with_buf(state: &mut AppState, f: impl FnOnce(&mut BufferState, &Dimensions))
         None => return,
     };
     if let Some(id) = state.active_buffer {
-        if let Some(buf) = state.buffers.get_mut(&id) {
+        if let Some(buf) = state.buf_mut(id) {
             f(buf, &dims);
             let (sr, ssl) = mov::adjust_scroll(buf, &dims);
             buf.scroll_row = sr;
             buf.scroll_sub_line = ssl;
+            buf.matching_bracket = led_state::BracketPair::find_match(
+                &buf.bracket_pairs,
+                buf.cursor_row,
+                buf.cursor_col,
+            );
             // Track save state: transition to Modified when doc becomes dirty
             if buf.doc.dirty() && buf.save_state == SaveState::Clean {
                 buf.save_state = SaveState::Modified;
@@ -771,7 +784,7 @@ pub(super) fn renumber_tabs(state: &mut AppState) {
     let mut ordered: Vec<BufferId> = state.buffers.keys().copied().collect();
     ordered.sort_by_key(|bid| state.buffers[bid].tab_order);
     for (i, bid) in ordered.into_iter().enumerate() {
-        state.buffers.get_mut(&bid).unwrap().tab_order = i;
+        state.buf_mut(bid).unwrap().tab_order = i;
     }
 }
 
@@ -783,7 +796,7 @@ pub(super) fn reveal_active_buffer(state: &mut AppState) {
     let Some(path) = path else { return };
     // Canonicalize to match browser.root (which is canonicalized by the workspace driver)
     let path = std::fs::canonicalize(&path).unwrap_or(path);
-    let new_dirs = state.browser.reveal(&path);
+    let new_dirs = state.browser_mut().reveal(&path);
     if !new_dirs.is_empty() {
         state.pending_lists.set(new_dirs);
     }
@@ -793,10 +806,11 @@ pub(super) fn reveal_active_buffer(state: &mut AppState) {
 pub(super) fn browser_scroll_to_selected(state: &mut AppState) {
     let height = state.dims.map_or(20, |d| d.buffer_height());
     let sel = state.browser.selected;
-    if sel < state.browser.scroll_offset {
-        state.browser.scroll_offset = sel;
-    } else if sel >= state.browser.scroll_offset + height {
-        state.browser.scroll_offset = sel + 1 - height;
+    let scroll_offset = state.browser.scroll_offset;
+    if sel < scroll_offset {
+        state.browser_mut().scroll_offset = sel;
+    } else if sel >= scroll_offset + height {
+        state.browser_mut().scroll_offset = sel + 1 - height;
     }
 }
 
@@ -822,7 +836,7 @@ fn maybe_close_group(buf: &mut BufferState, kind: EditKind, ch: char) {
 
 pub(super) fn close_preview(state: &mut AppState) {
     if let Some(preview_id) = state.preview.buffer.take() {
-        state.buffers.remove(&preview_id);
+        state.buffers_mut().remove(&preview_id);
         state.notify_hash_to_buffer.retain(|_, v| *v != preview_id);
         renumber_tabs(state);
     }
@@ -849,7 +863,7 @@ pub(super) fn promote_preview(state: &mut AppState, path: &Path) -> bool {
     if !matches {
         return false;
     }
-    if let Some(buf) = state.buffers.get_mut(&preview_id) {
+    if let Some(buf) = state.buf_mut(preview_id) {
         buf.is_preview = false;
     }
     state.preview.buffer = None;
@@ -859,7 +873,7 @@ pub(super) fn promote_preview(state: &mut AppState, path: &Path) -> bool {
 
 fn promote_preview_active(state: &mut AppState) {
     if let Some(preview_id) = state.preview.buffer.take() {
-        if let Some(buf) = state.buffers.get_mut(&preview_id) {
+        if let Some(buf) = state.buf_mut(preview_id) {
             buf.is_preview = false;
         }
         state.preview.pre_preview_buffer = None;
