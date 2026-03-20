@@ -24,6 +24,15 @@ pub fn handle_action(state: &mut AppState, action: Action) {
         }
     }
 
+    // Filter mutating input while indent is in flight
+    if let Some(id) = state.active_buffer {
+        if let Some(buf) = state.buffers.get(&id) {
+            if buf.pending_indent_row.is_some() && is_editing_action(&action) {
+                return;
+            }
+        }
+    }
+
     // Auto-promote preview if user edits in it
     if state.preview.buffer.is_some()
         && state.active_buffer == state.preview.buffer
@@ -165,31 +174,29 @@ pub fn handle_action(state: &mut AppState, action: Action) {
         Action::InsertCloseBracket(ch) => with_buf(state, |buf, dims| {
             buf.mark = None;
             maybe_close_group(buf, EditKind::Insert, ch);
-            let (doc, r, c, _) = edit::insert_close_bracket(buf, ch);
+            let (doc, r, c, _) = edit::insert_char(buf, ch);
             buf.doc = doc;
             buf.cursor_row = r;
             buf.cursor_col = c;
             buf.cursor_col_affinity = mov::reset_affinity(buf, dims);
             buf.last_edit_kind = Some(EditKind::Insert);
+            buf.pending_indent_row = Some(r);
         }),
-        Action::InsertNewline => with_buf(state, |buf, dims| {
+        Action::InsertNewline => with_buf(state, |buf, _dims| {
             buf.mark = None;
             close_group_on_move(buf);
-            let (doc, r, c, _) = edit::insert_newline(buf);
+            let (doc, r, c, a) = edit::insert_newline(buf);
             buf.doc = doc;
             buf.cursor_row = r;
             buf.cursor_col = c;
-            buf.cursor_col_affinity = mov::reset_affinity(buf, dims);
+            buf.cursor_col_affinity = a;
+            buf.pending_indent_row = Some(r);
         }),
-        Action::InsertTab => with_buf(state, |buf, dims| {
+        Action::InsertTab => with_buf(state, |buf, _dims| {
             buf.mark = None;
-            maybe_close_group(buf, EditKind::Insert, ' ');
-            let (doc, r, c, _) = edit::insert_tab(buf, dims);
-            buf.doc = doc;
-            buf.cursor_row = r;
-            buf.cursor_col = c;
-            buf.cursor_col_affinity = mov::reset_affinity(buf, dims);
-            buf.last_edit_kind = Some(EditKind::Insert);
+            close_group_on_move(buf);
+            buf.pending_indent_row = Some(buf.cursor_row);
+            buf.pending_tab_fallback = true;
         }),
         Action::DeleteBackward => with_buf(state, |buf, dims| {
             buf.mark = None;

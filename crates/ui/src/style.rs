@@ -478,6 +478,8 @@ mod tests {
             syntax_highlights: Vec::new(),
             bracket_pairs: Vec::new(),
             matching_bracket: None,
+            pending_indent_row: None,
+            pending_tab_fallback: false,
             is_preview: false,
         };
 

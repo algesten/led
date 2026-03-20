@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use led_core::Doc;
-use led_state::{BufferState, Dimensions};
+use led_state::BufferState;
 
 // ── Coordinate conversion ──
 
@@ -23,140 +23,69 @@ pub fn insert_char(buf: &BufferState, ch: char) -> (Arc<dyn Doc>, usize, usize, 
 
 pub fn insert_newline(buf: &BufferState) -> (Arc<dyn Doc>, usize, usize, usize) {
     let idx = row_col_to_char(&*buf.doc, buf.cursor_row, buf.cursor_col);
-    let indent = compute_newline_indent(&*buf.doc, buf.cursor_row, buf.cursor_col);
-    let text = format!("\n{indent}");
-    let doc = buf.doc.insert(idx, &text);
-    let col = indent.chars().count();
-    (doc, buf.cursor_row + 1, col, col)
+    let doc = buf.doc.insert(idx, "\n");
+    (doc, buf.cursor_row + 1, 0, 0)
 }
 
-/// Compute the indentation to insert after a newline.
-/// Uses a simple heuristic: copy previous line's indent, increase if the
-/// line before cursor ends with an opener (`{`, `(`, `[`), decrease if the
-/// first non-whitespace of the upcoming text is a closer.
-fn compute_newline_indent(doc: &dyn Doc, row: usize, col: usize) -> String {
-    let line = doc.line(row);
-    let indent_unit = detect_indent_unit(doc);
+/// Apply computed indent to a line, replacing existing leading whitespace.
+pub fn apply_indent(buf: &mut BufferState, row: usize, new_indent: &str, adjust_cursor: bool) {
+    let old_indent = get_line_indent(&*buf.doc, row);
+    let old_len = old_indent.chars().count();
+    let new_len = new_indent.chars().count();
 
-    // Get the text before the cursor on this line
-    let before_cursor: String = line.chars().take(col).collect();
+    if *new_indent == old_indent {
+        if adjust_cursor && buf.cursor_col <= old_len {
+            buf.cursor_col = old_len;
+            buf.cursor_col_affinity = old_len;
+        }
+        return;
+    }
 
-    // Base indent: copy current line's leading whitespace
-    let mut base = String::new();
-    for ch in line.chars() {
+    let line_start = buf.doc.line_to_char(row);
+    let doc = if old_len > 0 {
+        buf.doc.remove(line_start, line_start + old_len)
+    } else {
+        buf.doc.clone()
+    };
+    let doc = if !new_indent.is_empty() {
+        doc.insert(line_start, new_indent)
+    } else {
+        doc
+    };
+    buf.doc = doc;
+
+    if adjust_cursor {
+        let col = if buf.cursor_col <= old_len {
+            new_len
+        } else {
+            buf.cursor_col - old_len + new_len
+        };
+        buf.cursor_col = col;
+        buf.cursor_col_affinity = col;
+    }
+}
+
+fn get_line_indent(doc: &dyn Doc, line: usize) -> String {
+    let line_text = doc.line(line);
+    let mut indent = String::new();
+    for ch in line_text.chars() {
         if ch == ' ' || ch == '\t' {
-            base.push(ch);
+            indent.push(ch);
         } else {
             break;
         }
     }
-
-    // Check if the text before cursor ends with an opener
-    let trimmed = before_cursor.trim_end();
-    let opens = trimmed.ends_with('{') || trimmed.ends_with('(') || trimmed.ends_with('[');
-
-    if opens {
-        base.push_str(&indent_unit);
-    }
-
-    base
+    indent
 }
 
-fn detect_indent_unit(doc: &dyn Doc) -> String {
-    let lines = doc.line_count().min(100);
-    for i in 0..lines {
-        let line = doc.line(i);
-        let mut indent = String::new();
-        for ch in line.chars() {
-            if ch == '\t' {
-                return "\t".to_string();
-            } else if ch == ' ' {
-                indent.push(' ');
-            } else {
-                break;
-            }
-        }
-        if !indent.is_empty() {
-            return indent;
-        }
-    }
-    "    ".to_string()
-}
-
-/// Insert a closing bracket character. If the line before the cursor is all
-/// whitespace (i.e., the bracket will be the first non-whitespace char),
-/// re-indent the line to one level less than the previous non-blank line.
-pub fn insert_close_bracket(buf: &BufferState, ch: char) -> (Arc<dyn Doc>, usize, usize, usize) {
-    let line = buf.doc.line(buf.cursor_row);
-    let before_cursor: String = line.chars().take(buf.cursor_col).collect();
-    let all_ws = before_cursor.chars().all(|c| c == ' ' || c == '\t');
-
-    if all_ws && buf.cursor_row > 0 {
-        // Re-indent: find the matching opener's line indent
-        let indent_unit = detect_indent_unit(&*buf.doc);
-        let target_indent = find_dedent_for_close(&*buf.doc, buf.cursor_row, &indent_unit);
-
-        // Replace the whitespace before cursor with the target indent + bracket
-        let line_start = buf.doc.line_to_char(buf.cursor_row);
-        let cursor_char = line_start + buf.cursor_col;
-
-        // Remove existing whitespace
-        let doc = if buf.cursor_col > 0 {
-            buf.doc.remove(line_start, cursor_char)
-        } else {
-            buf.doc.clone()
-        };
-        // Insert target_indent + bracket
-        let text = format!("{target_indent}{ch}");
-        let col = text.chars().count();
-        let doc = doc.insert(line_start, &text);
-        (doc, buf.cursor_row, col, col)
-    } else {
-        insert_char(buf, ch)
-    }
-}
-
-/// Find the indent to apply for a closing bracket on `line`.
-/// Looks backwards for the matching opener line's indent.
-fn find_dedent_for_close(doc: &dyn Doc, line: usize, indent_unit: &str) -> String {
-    // Simple heuristic: find the previous non-blank line and dedent by one level
-    // from its indent. This works because the previous line is typically inside the
-    // block that the closing bracket is terminating.
-    for row in (0..line).rev() {
-        let text = doc.line(row);
-        if text.chars().all(|c| c.is_whitespace()) {
-            continue;
-        }
-        let mut indent = String::new();
-        for ch in text.chars() {
-            if ch == ' ' || ch == '\t' {
-                indent.push(ch);
-            } else {
-                break;
-            }
-        }
-        // If this line opened a block (ends with opener), return its indent
-        let trimmed = text.trim_end();
-        if trimmed.ends_with('{') || trimmed.ends_with('(') || trimmed.ends_with('[') {
-            return indent;
-        }
-        // Otherwise dedent one level from this line's indent
-        if indent.ends_with(indent_unit) {
-            return indent[..indent.len() - indent_unit.len()].to_string();
-        }
-        return indent;
-    }
-    String::new()
-}
-
-pub fn insert_tab(buf: &BufferState, dims: &Dimensions) -> (Arc<dyn Doc>, usize, usize, usize) {
-    let tab_width = dims.tab_stop;
-    let spaces = tab_width - (buf.cursor_col % tab_width);
+/// Insert spaces to the next tab stop at the cursor position.
+pub fn insert_soft_tab(buf: &mut BufferState, tab_stop: usize) {
+    let spaces = tab_stop - (buf.cursor_col % tab_stop);
     let text: String = " ".repeat(spaces);
-    let idx = row_col_to_char(&*buf.doc, buf.cursor_row, buf.cursor_col);
-    let doc = buf.doc.insert(idx, &text);
-    let col = buf.cursor_col + spaces;
-    (doc, buf.cursor_row, col, col)
+    let idx = buf.doc.line_to_char(buf.cursor_row) + buf.cursor_col;
+    buf.doc = buf.doc.insert(idx, &text);
+    buf.cursor_col += spaces;
+    buf.cursor_col_affinity = buf.cursor_col;
 }
 
 pub fn delete_backward(buf: &BufferState) -> Option<(Arc<dyn Doc>, usize, usize, usize)> {

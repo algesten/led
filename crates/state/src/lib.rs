@@ -198,6 +198,8 @@ pub struct BufferState {
     pub syntax_highlights: Arc<Vec<(usize, HighlightSpan)>>,
     pub bracket_pairs: Arc<Vec<BracketPair>>,
     pub matching_bracket: Option<(usize, usize)>,
+    pub pending_indent_row: Option<usize>,
+    pub pending_tab_fallback: bool,
     pub is_preview: bool,
 }
 

@@ -3,7 +3,7 @@
 (_ "(" ")" @end) @indent
 (_ "[" "]" @end) @indent
 
-; Continuation constructs
+; Continuation constructs (method chains, multi-line lets, etc.)
 [
   (where_clause)
   (field_expression)

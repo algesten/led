@@ -28,6 +28,12 @@ fn is_clean(s: &led_state::AppState) -> bool {
         .map_or(false, |b| b.save_state == SaveState::Clean)
 }
 
+fn indent_done(s: &led_state::AppState) -> bool {
+    s.active_buffer
+        .and_then(|id| s.buffers.get(&id))
+        .map_or(true, |b| b.pending_indent_row.is_none())
+}
+
 // ── File open ──
 
 #[test]
@@ -267,9 +273,10 @@ fn insert_newline() {
 
 #[test]
 fn insert_tab() {
+    // Plain text file: no tree-sitter grammar, falls back to soft tab
     let t = TestHarness::new()
         .with_file("hello\n")
-        .run(actions(vec![InsertTab]));
+        .run(vec![Do(InsertTab), WaitFor(indent_done)]);
 
     assert_eq!(buf(&t).doc.line(0), "    hello");
     assert_eq!(buf(&t).cursor_col, 4);
@@ -277,9 +284,12 @@ fn insert_tab() {
 
 #[test]
 fn insert_tab_alignment() {
-    let t = TestHarness::new()
-        .with_file("hello\n")
-        .run(actions(vec![InsertChar('x'), InsertTab]));
+    // Plain text file: soft tab aligns to next tab stop
+    let t = TestHarness::new().with_file("hello\n").run(vec![
+        Do(InsertChar('x')),
+        Do(InsertTab),
+        WaitFor(indent_done),
+    ]);
 
     assert_eq!(buf(&t).cursor_col, 4);
 }
@@ -447,9 +457,11 @@ fn multiple_undo() {
 fn undo_all_clears_dirty() {
     // Repro: insert newline, undo — content is restored but dirty flag stays.
     // Undoing back to the saved state should clear dirty.
-    let t = TestHarness::new()
-        .with_file("hello\n")
-        .run(actions(vec![InsertNewline, Undo]));
+    let t = TestHarness::new().with_file("hello\n").run(vec![
+        Do(InsertNewline),
+        WaitFor(indent_done),
+        Do(Undo),
+    ]);
 
     assert_eq!(buf(&t).doc.line(0), "hello", "content should be restored");
     assert!(
@@ -487,35 +499,42 @@ fn emacs_undo_undo_restores_original() {
     // Step 1: Type "1\n2\n3\n" into an empty file.
     // InsertChar + InsertNewline are each their own undo group because
     // InsertNewline calls close_group_on_move (clearing last_edit_kind).
-    let mut steps: Vec<led_core::Action> = vec![
-        InsertChar('1'),
-        InsertNewline,
-        InsertChar('2'),
-        InsertNewline,
-        InsertChar('3'),
-        InsertNewline,
+    // Each InsertNewline triggers async indent, so we WaitFor completion
+    // before issuing the next editing action.
+    let mut steps: Vec<TestStep> = vec![
+        Do(InsertChar('1')),
+        Do(InsertNewline),
+        WaitFor(indent_done),
+        Do(InsertChar('2')),
+        Do(InsertNewline),
+        WaitFor(indent_done),
+        Do(InsertChar('3')),
+        Do(InsertNewline),
+        WaitFor(indent_done),
     ];
 
     // Step 2: Undo ×4 — removes "\n", "3", "\n", "2"
     // (Leaves "1\n". Each undo reverts one group.)
-    steps.extend([Undo, Undo, Undo, Undo]);
+    steps.extend([Do(Undo), Do(Undo), Do(Undo), Do(Undo)]);
 
     // Break the undo chain: any non-undo edit does this.
     // Step 3: Type "a\nb\n"
     steps.extend([
-        InsertChar('a'),
-        InsertNewline,
-        InsertChar('b'),
-        InsertNewline,
+        Do(InsertChar('a')),
+        Do(InsertNewline),
+        WaitFor(indent_done),
+        Do(InsertChar('b')),
+        Do(InsertNewline),
+        WaitFor(indent_done),
     ]);
 
     // Step 4: Undo ×4 — removes "\n", "b", "\n", "a"
-    steps.extend([Undo, Undo, Undo, Undo]);
+    steps.extend([Do(Undo), Do(Undo), Do(Undo), Do(Undo)]);
 
     // Step 5: Undo ×4 — undoes the step-2 inverses, re-applying "2\n3\n"
-    steps.extend([Undo, Undo, Undo, Undo]);
+    steps.extend([Do(Undo), Do(Undo), Do(Undo), Do(Undo)]);
 
-    let t = TestHarness::new().with_file("").run(actions(steps));
+    let t = TestHarness::new().with_file("").run(steps);
 
     let b = buf(&t);
     assert_eq!(b.doc.line(0), "1", "first line should be '1'");
@@ -3126,13 +3145,14 @@ fn match_bracket_no_bracket() {
 
 #[test]
 fn auto_indent_after_brace() {
-    // Type `fn main() {`, then InsertNewline → cursor should be indented
+    // Type `fn main() {`, then InsertNewline → async indent adds spaces
     let t = TestHarness::new()
         .with_file_ext("fn main() {\n}\n", "rs")
-        .run(actions(vec![
-            LineEnd, // end of "fn main() {"
-            InsertNewline,
-        ]));
+        .run(vec![
+            Do(LineEnd), // end of "fn main() {"
+            Do(InsertNewline),
+            WaitFor(indent_done),
+        ]);
 
     let b = buf(&t);
     assert_eq!(b.cursor_row, 1);
@@ -3155,14 +3175,15 @@ fn auto_indent_closing_brace() {
     // After `fn main() {` with body, InsertCloseBracket('}') should dedent
     let t = TestHarness::new()
         .with_file_ext("fn main() {\n    let x = 1;\n    \n}\n", "rs")
-        .run(actions(vec![
+        .run(vec![
             // Go to line 2 (the empty indented line)
-            MoveDown,
-            MoveDown,
-            LineEnd,
+            Do(MoveDown),
+            Do(MoveDown),
+            Do(LineEnd),
             // Type closing brace
-            InsertCloseBracket('}'),
-        ]));
+            Do(InsertCloseBracket('}')),
+            WaitFor(indent_done),
+        ]);
 
     let b = buf(&t);
     let line = b.doc.line(2);
@@ -3236,11 +3257,12 @@ fn close_bracket_maps_to_insert_close_bracket() {
     // We test by checking that typing '}' on an indented empty line re-indents
     let t = TestHarness::new()
         .with_file_ext("fn main() {\n    \n}\n", "rs")
-        .run(actions(vec![
-            MoveDown, // go to line 1 (the indented empty line)
-            LineEnd,  // end of "    "
-            InsertCloseBracket('}'),
-        ]));
+        .run(vec![
+            Do(MoveDown), // go to line 1 (the indented empty line)
+            Do(LineEnd),  // end of "    "
+            Do(InsertCloseBracket('}')),
+            WaitFor(indent_done),
+        ]);
 
     let b = buf(&t);
     let line = b.doc.line(1);

@@ -601,4 +601,128 @@ mod tests {
             "indent should not be empty after '{{': {indent_text:?}"
         );
     }
+
+    /// Helper: assert indent for a specific line in a Rust file.
+    fn assert_indent(source: &str, line: usize, expected: &str) {
+        let doc = make_doc(source);
+        let path = Path::new("test.rs");
+        let state = SyntaxState::from_path_and_doc(path, &*doc).unwrap();
+        let indent = state.compute_auto_indent(&*doc, line);
+        let actual = indent.as_deref().unwrap_or("");
+        assert_eq!(
+            actual,
+            expected,
+            "line {line}: expected {:?} ({} spaces), got {:?} ({} spaces)\n\
+             line content: {:?}",
+            expected,
+            expected.len(),
+            actual,
+            actual.len(),
+            doc.line(line),
+        );
+    }
+
+    #[test]
+    fn indent_method_chain_continuation() {
+        // .bar() should be indented one level deeper than foo
+        let src = "\
+fn main() {
+    foo
+    .bar()
+    .baz();
+}
+";
+        assert_indent(src, 2, "        "); // .bar() → 8 spaces
+        assert_indent(src, 3, "        "); // .baz() → 8 spaces
+    }
+
+    #[test]
+    fn indent_after_multiline_let_ends() {
+        // After a multi-line let ends with ;, the next statement
+        // returns to the let's indent level, not the continuation's.
+        let src = "\
+fn main() {
+    let x = foo
+        .bar();
+    let y = 1;
+}
+";
+        assert_indent(src, 2, "        "); // .bar() → 8 (continuation)
+        assert_indent(src, 3, "    "); // let y → 4 (back to block level)
+    }
+
+    #[test]
+    fn indent_closing_brace() {
+        let src = "\
+fn main() {
+    let x = 1;
+}
+";
+        assert_indent(src, 2, ""); // } → 0 spaces (matches fn)
+    }
+
+    #[test]
+    fn indent_nested_blocks() {
+        let src = "\
+fn main() {
+    if true {
+        let x = 1;
+    }
+}
+";
+        assert_indent(src, 2, "        "); // let x → 8
+        assert_indent(src, 3, "    "); // } → 4 (matches if)
+        assert_indent(src, 4, ""); // } → 0 (matches fn)
+    }
+
+    #[test]
+    fn indent_match_arm_body() {
+        let src = "\
+fn main() {
+    match x {
+        Ok(v) => {
+            let y = v;
+        }
+        Err(_) => {}
+    }
+}
+";
+        assert_indent(src, 3, "            "); // let y → 12
+        assert_indent(src, 4, "        "); // } → 8 (matches Ok =>)
+    }
+
+    #[test]
+    fn indent_chained_filter_map() {
+        // Real-world pattern: chained combinators inside a function body
+        let src = "\
+fn run() {
+    stream
+        .filter(|x| x > 0)
+        .map(|x| x + 1)
+        .collect();
+}
+";
+        assert_indent(src, 2, "        "); // .filter → 8
+        assert_indent(src, 3, "        "); // .map → 8
+        assert_indent(src, 4, "        "); // .collect → 8
+    }
+
+    #[test]
+    fn indent_closure_match_body() {
+        // match body inside a closure on a method chain — the line after
+        // `match result {` must be indented relative to the match, not
+        // unwrapped back to the chain start.
+        let src = "\
+fn run() {
+    stream
+        .filter_map(|x| match x {
+            Ok(v) => Some(v),
+            Err(_) => None,
+        });
+}
+";
+        assert_indent(src, 3, "            "); // Ok(v) → 12
+        assert_indent(src, 4, "            "); // Err(_) → 12
+        assert_indent(src, 5, "        "); // }) → 8
+    }
 }

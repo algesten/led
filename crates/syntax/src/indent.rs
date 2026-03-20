@@ -38,7 +38,11 @@ pub(crate) fn suggest_indent_with_tree(
     let mut cursor = QueryCursor::new();
     cursor.set_byte_range(query_start..query_end);
 
-    let mut indent_ranges: Vec<Range<usize>> = Vec::new();
+    // (range, explicitly_terminated) — only ranges narrowed by @end or
+    // truncated by @outdent should participate in the outdent check.
+    // Bare continuation constructs (call_expression, field_expression, etc.)
+    // have no @end, so their natural node end must not trigger outdent.
+    let mut indent_ranges: Vec<(Range<usize>, bool)> = Vec::new();
 
     let mut matches = cursor.matches(&config.query, tree.root_node(), DocProvider { doc });
     while let Some(m) = {
@@ -47,6 +51,7 @@ pub(crate) fn suggest_indent_with_tree(
     } {
         let mut node_range: Option<Range<usize>> = None;
         let mut outdent_pos: Option<usize> = None;
+        let mut has_end = false;
 
         for cap in m.captures {
             if cap.index == config.indent_capture_ix {
@@ -59,6 +64,7 @@ pub(crate) fn suggest_indent_with_tree(
                     node_range = Some(end_pos..query_end);
                 }
             } else if Some(cap.index) == config.end_capture_ix {
+                has_end = true;
                 let start_pos = cap.node.start_byte();
                 if let Some(ref mut nr) = node_range {
                     nr.end = start_pos;
@@ -70,14 +76,15 @@ pub(crate) fn suggest_indent_with_tree(
 
         if let Some(range) = node_range {
             if range.start < range.end {
-                indent_ranges.push(range);
+                indent_ranges.push((range, has_end));
             }
         }
 
         if let Some(pos) = outdent_pos {
-            for r in &mut indent_ranges {
+            for (r, terminated) in &mut indent_ranges {
                 if r.start <= pos && pos < r.end {
                     r.end = pos;
+                    *terminated = true;
                 }
             }
         }
@@ -88,15 +95,47 @@ pub(crate) fn suggest_indent_with_tree(
     let len = doc.len_bytes();
     let line_start = doc.line_to_byte(line);
 
+    // Unwrap basis_row from continuation constructs: if the basis row is
+    // inside a non-terminated indent range that ends before the current line,
+    // the basis indent is inflated by the continuation. Fall back to the
+    // range's start line to get the true indent level.
+    //
+    // BUT: don't unwrap if the basis row opens a block (any indent range
+    // starts on basis_row and extends past the current line). In that case
+    // the "inflated" indent is the correct base for the block's content.
+    let basis_row = {
+        let basis_byte = doc.line_to_byte(basis_row);
+        let opens_block = indent_ranges.iter().any(|(r, _)| {
+            r.start < len && doc.byte_to_line(r.start) == basis_row && r.end > line_start
+        });
+        if opens_block {
+            basis_row
+        } else {
+            let mut row = basis_row;
+            for (r, terminated) in &indent_ranges {
+                if *terminated {
+                    continue;
+                }
+                if r.start < basis_byte && r.end > basis_byte && r.end <= line_start {
+                    let start_line = doc.byte_to_line(r.start);
+                    if start_line < row {
+                        row = start_line;
+                    }
+                }
+            }
+            row
+        }
+    };
+
     let basis_opens_indent = indent_ranges
         .iter()
-        .filter(|r| r.start < len)
-        .any(|r| doc.byte_to_line(r.start) == basis_row && r.end > line_start);
+        .filter(|(r, _)| r.start < len)
+        .any(|(r, _)| doc.byte_to_line(r.start) == basis_row && r.end > line_start);
 
     let line_at_outdent = indent_ranges
         .iter()
-        .filter(|r| r.end > 0 && r.end <= len)
-        .any(|r| doc.byte_to_line(r.end) == line && r.start < line_start);
+        .filter(|(r, terminated)| *terminated && r.end > 0 && r.end <= len)
+        .any(|(r, _)| doc.byte_to_line(r.end) == line && r.start < line_start);
 
     let delta = if line_at_outdent {
         IndentDelta::Less

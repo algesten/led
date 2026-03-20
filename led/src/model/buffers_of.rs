@@ -58,6 +58,8 @@ pub fn buffers_of(
                         syntax_highlights: Arc::new(Vec::new()),
                         bracket_pairs: Arc::new(Vec::new()),
                         matching_bracket: None,
+                        pending_indent_row: None,
+                        pending_tab_fallback: false,
                         is_preview: true,
                     };
                     let remove_old_id = state.preview.buffer;
@@ -195,6 +197,8 @@ pub fn buffers_of(
                     syntax_highlights: Arc::new(Vec::new()),
                     bracket_pairs: Arc::new(Vec::new()),
                     matching_bracket: None,
+                    pending_indent_row: None,
+                    pending_tab_fallback: false,
                     is_preview: false,
                 };
                 let activate =

@@ -282,6 +282,7 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Arc<AppState>> {
             highlights: syn.highlights,
             bracket_pairs: syn.bracket_pairs,
             indent: syn.indent,
+            indent_row: syn.indent_row,
         })
         .stream();
 
@@ -575,8 +576,10 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Arc<AppState>> {
                 version,
                 highlights,
                 bracket_pairs,
-                indent: _,
+                indent,
+                indent_row,
             } => {
+                let tab_stop = s.dims.map(|d| d.tab_stop);
                 if let Some(buf) = s.buf_mut(buf_id) {
                     if buf.doc.version() == version {
                         buf.syntax_highlights = Arc::new(highlights);
@@ -586,6 +589,24 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Arc<AppState>> {
                             buf.cursor_row,
                             buf.cursor_col,
                         );
+                    }
+                    if let Some(row) = indent_row {
+                        if buf.pending_indent_row == Some(row) {
+                            buf.pending_indent_row = None;
+                            let was_tab = buf.pending_tab_fallback;
+                            buf.pending_tab_fallback = false;
+                            if let Some(new_indent) = &indent {
+                                let cursor_on_row = buf.cursor_row == row;
+                                edit::apply_indent(buf, row, new_indent, cursor_on_row);
+                            } else if was_tab {
+                                if let Some(ts) = tab_stop {
+                                    edit::insert_soft_tab(buf, ts);
+                                }
+                            }
+                            if buf.doc.dirty() && buf.save_state == led_state::SaveState::Clean {
+                                buf.save_state = led_state::SaveState::Modified;
+                            }
+                        }
                     }
                 }
             }
@@ -731,8 +752,8 @@ enum Mut {
         version: u64,
         highlights: Vec<(usize, HighlightSpan)>,
         bracket_pairs: Vec<BracketPair>,
-        #[allow(dead_code)]
         indent: Option<String>,
+        indent_row: Option<usize>,
     },
     UndoFlushed {
         buf_id: BufferId,

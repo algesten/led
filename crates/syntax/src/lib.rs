@@ -45,7 +45,7 @@ pub enum SyntaxOut {
         buffer_height: usize,
         cursor_row: usize,
         cursor_col: usize,
-        needs_indent: bool,
+        indent_row: Option<usize>,
     },
     BufferClosed {
         buf_id: BufferId,
@@ -60,6 +60,7 @@ pub struct SyntaxIn {
     pub bracket_pairs: Vec<BracketPair>,
     pub matching_bracket: Option<(usize, usize)>,
     pub indent: Option<String>,
+    pub indent_row: Option<usize>,
 }
 
 // ── Driver ──
@@ -119,6 +120,7 @@ pub fn driver(out: Stream<SyntaxOut>) -> Stream<SyntaxIn> {
                                 bracket_pairs,
                                 matching_bracket: matching,
                                 indent: None,
+                                indent_row: None,
                             })
                             .await;
                     }
@@ -131,9 +133,9 @@ pub fn driver(out: Stream<SyntaxOut>) -> Stream<SyntaxIn> {
                     edit_ops,
                     scroll_row,
                     buffer_height,
-                    cursor_row,
+                    cursor_row: _,
                     cursor_col: _,
-                    needs_indent,
+                    indent_row,
                 } => {
                     // Auto-initialize if not yet opened
                     if !states.contains_key(&buf_id) {
@@ -150,6 +152,19 @@ pub fn driver(out: Stream<SyntaxOut>) -> Stream<SyntaxIn> {
                                 },
                             );
                         } else {
+                            if indent_row.is_some() {
+                                let _ = tx
+                                    .send(SyntaxIn {
+                                        buf_id,
+                                        doc_version: version,
+                                        highlights: vec![],
+                                        bracket_pairs: vec![],
+                                        matching_bracket: None,
+                                        indent: None,
+                                        indent_row,
+                                    })
+                                    .await;
+                            }
                             continue;
                         }
                     }
@@ -186,8 +201,8 @@ pub fn driver(out: Stream<SyntaxOut>) -> Stream<SyntaxIn> {
                     // matching_bracket is computed from cached bracket_pairs
                     // in the model layer — no tree-sitter query needed.
 
-                    let indent = if needs_indent {
-                        bs.state.compute_auto_indent(&*doc, cursor_row)
+                    let indent = if let Some(row) = indent_row {
+                        bs.state.compute_auto_indent(&*doc, row)
                     } else {
                         None
                     };
@@ -200,6 +215,7 @@ pub fn driver(out: Stream<SyntaxOut>) -> Stream<SyntaxIn> {
                             bracket_pairs: bs.cached_brackets.clone(),
                             matching_bracket: None,
                             indent,
+                            indent_row,
                         })
                         .await;
                 }
