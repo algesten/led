@@ -92,6 +92,9 @@ fn resolve_table(theme: &Theme, st: &StyleTable, depth: usize) -> Style {
     if st.bold {
         style = style.add_modifier(Modifier::BOLD);
     }
+    if st.italic {
+        style = style.add_modifier(Modifier::ITALIC);
+    }
     style
 }
 
@@ -566,6 +569,7 @@ mod tests {
                 fg: Some("$cyc".into()),
                 bg: None,
                 bold: false,
+                italic: false,
             }),
         );
         let style = resolve(&theme, &StyleValue::Scalar("$cyc".into()));

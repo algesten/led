@@ -171,7 +171,8 @@ pub fn driver(out: Stream<SyntaxOut>) -> Stream<SyntaxIn> {
                     let bs = states.get_mut(&buf_id).unwrap();
 
                     // Update parse tree if doc changed
-                    if version != bs.last_ver {
+                    let doc_changed = version != bs.last_ver;
+                    if doc_changed {
                         let new_op_count = (version - bs.last_ver) as usize;
                         if !edit_ops.is_empty() && edit_ops.len() >= new_op_count {
                             for op in &edit_ops[edit_ops.len() - new_op_count..] {
@@ -183,12 +184,12 @@ pub fn driver(out: Stream<SyntaxOut>) -> Stream<SyntaxIn> {
                         bs.last_ver = version;
                     }
 
-                    // Recompute highlights/brackets only when doc or viewport changed
+                    // Recompute highlights/brackets when doc or viewport changed
                     let end_line = (scroll_row + buffer_height + 5).min(doc.line_count());
                     let viewport_changed =
                         scroll_row != bs.last_scroll || end_line != bs.last_end_line;
 
-                    if viewport_changed || bs.cached_highlights.is_empty() {
+                    if doc_changed || viewport_changed || bs.cached_highlights.is_empty() {
                         bs.cached_highlights = to_state_highlights(
                             &bs.state.highlights_for_lines(&*doc, scroll_row, end_line),
                         );

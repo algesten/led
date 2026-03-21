@@ -6,23 +6,6 @@ Every side effect lives in a Driver. The Model is a pure reduce: `(State, Mut) -
 
 ---
 
-## Phase 15b: Preview buffer
-
-
-
-## Phase 16: File Search (Ripgrep)
-
-`grep_searcher` + `ignore::WalkBuilder`. Background worker with request coalescing (only process latest query).
-
-### UI
-- Claims Side panel (priority 20)
-- Row 0: toggle buttons (case-sensitive, regex) with `file_search.toggle_on/off` styles
-- Row 1: search input with cursor
-- Rows 2+: results grouped by file with line numbers, highlighted matches (`file_search.match_`)
-- Scroll-into-view, max 1000 hits
-
----
-
 ## Phase 17: LSP Integration
 
 Full server lifecycle, JSON-RPC transport, request tracking.

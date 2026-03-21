@@ -3076,6 +3076,184 @@ fn syntax_highlights_rust_file() {
 }
 
 #[test]
+fn kill_line_keeps_highlights_in_sync() {
+    // Repro: open a file, kill a line, check highlights match the new doc.
+    // Regression test: highlights must not have stale character offsets
+    // from before the kill.
+    let src = "fn aaa() {}\n\nfn bbb() {}\n\nfn ccc() {}\n";
+    let t = TestHarness::new().with_file_ext(src, "rs").run(vec![
+        // Wait for initial syntax highlights
+        WaitFor(|s| {
+            s.active_buffer
+                .and_then(|id| s.buffers.get(&id))
+                .map_or(false, |b| !b.syntax_highlights.is_empty())
+        }),
+        // Kill "fn aaa() {}" (line 0 text)
+        Do(KillLine),
+        // Kill the now-empty line (newline char)
+        Do(KillLine),
+        // Kill the blank line
+        Do(KillLine),
+        // Now line 0 should be "fn bbb() {}"
+        // Wait for syntax to catch up
+        WaitFor(|s| {
+            let b = s.active_buffer.and_then(|id| s.buffers.get(&id)).unwrap();
+            // Highlights should contain a span for the current doc's content.
+            // "fn" keyword should be highlighted on line 0 (bbb) after kills.
+            b.syntax_highlights
+                .iter()
+                .any(|(line, span)| *line == 0 && span.capture_name.contains("keyword"))
+        }),
+    ]);
+
+    let b = buf(&t);
+    assert_eq!(b.doc.line(0), "fn bbb() {}");
+
+    // All highlight lines must be within document bounds
+    let line_count = b.doc.line_count();
+    for (line, span) in b.syntax_highlights.iter() {
+        assert!(
+            *line < line_count,
+            "highlight on line {} but doc has {} lines, span: {:?}",
+            line,
+            line_count,
+            span.capture_name,
+        );
+    }
+
+    // "fn" keyword must appear on line 0 (where "fn bbb" now lives)
+    let has_fn_on_line0 = b
+        .syntax_highlights
+        .iter()
+        .any(|(line, span)| *line == 0 && span.capture_name.contains("keyword"));
+    assert!(
+        has_fn_on_line0,
+        "expected 'fn' keyword highlight on line 0 after kill"
+    );
+}
+
+#[test]
+fn kill_line_long_file_highlights_recover() {
+    // Repro: in a file LONGER than the viewport, killing a line doesn't
+    // change scroll_row or end_line, so the driver's highlight cache must
+    // be invalidated when the doc version changes.
+    //
+    // Key: line 0 is a function, line 1 is a comment. After killing line 0
+    // + newline, line 0 becomes the comment. Stale highlights would show
+    // the keyword capture on line 0 (from the old fn), but the correct
+    // highlights should show a comment capture on line 0.
+    let mut src = String::from("fn aaa() {}\n");
+    src.push_str("// this is a comment\n");
+    src.push_str("fn bbb() {}\n");
+    // Pad to 50 lines so the file exceeds the viewport (24 lines)
+    for i in 0..47 {
+        src.push_str(&format!("fn pad_{i}() {{}}\n"));
+    }
+    let t = TestHarness::new().with_file_ext(&src, "rs").run(vec![
+        WaitFor(|s| {
+            s.active_buffer
+                .and_then(|id| s.buffers.get(&id))
+                .map_or(false, |b| !b.syntax_highlights.is_empty())
+        }),
+        // Kill "fn aaa() {}" text, then the newline
+        Do(KillLine),
+        Do(KillLine),
+        // Now line 0 = "// this is a comment"
+        // Wait for highlights: line 0 must have a comment capture,
+        // NOT a keyword capture (which would indicate stale cache).
+        WaitFor(|s| {
+            let b = s.active_buffer.and_then(|id| s.buffers.get(&id)).unwrap();
+            b.syntax_highlights
+                .iter()
+                .any(|(line, span)| *line == 0 && span.capture_name.contains("comment"))
+        }),
+    ]);
+
+    let b = buf(&t);
+    assert_eq!(b.doc.line(0), "// this is a comment");
+
+    // Line 0 must have comment highlight, not keyword
+    let has_comment = b
+        .syntax_highlights
+        .iter()
+        .any(|(line, span)| *line == 0 && span.capture_name.contains("comment"));
+    assert!(
+        has_comment,
+        "line 0 should have comment highlight after kill"
+    );
+
+    let has_keyword_on_0 = b
+        .syntax_highlights
+        .iter()
+        .any(|(line, span)| *line == 0 && span.capture_name.contains("keyword"));
+    assert!(
+        !has_keyword_on_0,
+        "line 0 should NOT have keyword highlight (stale cache!)"
+    );
+}
+
+#[test]
+fn kill_line_md_highlights_recover() {
+    // Repro from user: open markdown, kill a heading line, highlights go wrong.
+    // After killing "## Section A", the highlights for "## Section B" must
+    // still appear on the correct (now shifted) line.
+    let src = "\
+# Title
+
+## Section A
+
+Some text
+
+## Section B
+
+More text
+";
+    // Record initial version before kills
+    let t = TestHarness::new().with_file_ext(src, "md").run(vec![
+        // Wait for initial highlights
+        WaitFor(|s| {
+            s.active_buffer
+                .and_then(|id| s.buffers.get(&id))
+                .map_or(false, |b| !b.syntax_highlights.is_empty())
+        }),
+        // Move to "## Section A" (line 2)
+        Do(MoveDown),
+        Do(MoveDown),
+        // Kill heading text "## Section A"
+        Do(KillLine),
+        // Kill remaining empty line (newline)
+        Do(KillLine),
+        // Kill next blank line (newline)
+        Do(KillLine),
+        // Now line 2 = "Some text"
+        // Wait for syntax highlights to update for the new doc version.
+        // The doc version after 3 kills is initial + 3 (at minimum).
+        WaitFor(|s| {
+            let b = s.active_buffer.and_then(|id| s.buffers.get(&id)).unwrap();
+            let lc = b.doc.line_count();
+            // Highlights must be non-empty and fully within bounds
+            !b.syntax_highlights.is_empty()
+                && b.syntax_highlights.iter().all(|(line, _)| *line < lc)
+        }),
+    ]);
+
+    let b = buf(&t);
+    assert_eq!(b.doc.line(2), "Some text");
+
+    // All highlight line numbers must be within doc bounds
+    let lc = b.doc.line_count();
+    for (line, span) in b.syntax_highlights.iter() {
+        assert!(
+            *line < lc,
+            "stale highlight: line {} >= line_count {}, capture: {:?}",
+            line,
+            lc,
+            span.capture_name,
+        );
+    }
+}
+
+#[test]
 fn match_bracket_jumps() {
     // Open .rs file with braces, wait for syntax, press MatchBracket on `{`
     let t = TestHarness::new()

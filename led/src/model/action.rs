@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::sync::Arc;
 
 use led_core::{Action, BufferId, PanelSlot};
 use led_state::{
@@ -228,6 +229,8 @@ pub fn handle_action(state: &mut AppState, action: Action) {
             let mut killed_text = None;
             if let (Some(dims), Some(id)) = (state.dims, state.active_buffer) {
                 if let Some(buf) = state.buf_mut(id) {
+                    let old_lines = buf.doc.line_count();
+                    let edit_row = buf.cursor_row;
                     close_group_on_move(buf);
                     if let Some((doc, killed, r, c, a)) = edit::kill_line(buf) {
                         buf.doc = doc;
@@ -236,6 +239,7 @@ pub fn handle_action(state: &mut AppState, action: Action) {
                         buf.cursor_col_affinity = a;
                         killed_text = Some(killed);
                     }
+                    shift_highlights(buf, edit_row, old_lines);
                     let (sr, ssl) = mov::adjust_scroll(buf, &dims);
                     buf.scroll_row = sr;
                     buf.scroll_sub_line = ssl;
@@ -253,6 +257,8 @@ pub fn handle_action(state: &mut AppState, action: Action) {
             let mut no_region = false;
             if let (Some(dims), Some(id)) = (state.dims, state.active_buffer) {
                 if let Some(buf) = state.buf_mut(id) {
+                    let old_lines = buf.doc.line_count();
+                    let edit_row = buf.cursor_row;
                     close_group_on_move(buf);
                     if let Some((doc, killed, r, c, a)) = edit::kill_region(buf) {
                         buf.doc = doc;
@@ -265,6 +271,7 @@ pub fn handle_action(state: &mut AppState, action: Action) {
                         buf.mark = None;
                         no_region = true;
                     }
+                    shift_highlights(buf, edit_row, old_lines);
                     let (sr, ssl) = mov::adjust_scroll(buf, &dims);
                     buf.scroll_row = sr;
                     buf.scroll_sub_line = ssl;
@@ -761,7 +768,10 @@ fn with_buf(state: &mut AppState, f: impl FnOnce(&mut BufferState, &Dimensions))
     };
     if let Some(id) = state.active_buffer {
         if let Some(buf) = state.buf_mut(id) {
+            let old_lines = buf.doc.line_count();
+            let edit_row = buf.cursor_row;
             f(buf, &dims);
+            shift_highlights(buf, edit_row, old_lines);
             let (sr, ssl) = mov::adjust_scroll(buf, &dims);
             buf.scroll_row = sr;
             buf.scroll_sub_line = ssl;
@@ -776,6 +786,34 @@ fn with_buf(state: &mut AppState, f: impl FnOnce(&mut BufferState, &Dimensions))
             }
         }
     }
+}
+
+/// Adjust cached highlight line numbers when lines are inserted or removed.
+/// Pure coordinate shift — the driver's full recompute replaces these within
+/// one frame.
+fn shift_highlights(buf: &mut BufferState, edit_row: usize, old_line_count: usize) {
+    let new_line_count = buf.doc.line_count();
+    if new_line_count == old_line_count {
+        return;
+    }
+    let delta = new_line_count as isize - old_line_count as isize;
+    let shifted: Vec<_> = buf
+        .syntax_highlights
+        .iter()
+        .filter_map(|(line, span)| {
+            if *line <= edit_row {
+                Some((*line, span.clone()))
+            } else {
+                let new_line = (*line as isize + delta) as usize;
+                if new_line < new_line_count {
+                    Some((new_line, span.clone()))
+                } else {
+                    None
+                }
+            }
+        })
+        .collect();
+    buf.syntax_highlights = Arc::new(shifted);
 }
 
 /// Close undo group and clear edit kind tracking.

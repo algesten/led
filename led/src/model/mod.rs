@@ -581,7 +581,17 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Arc<AppState>> {
             } => {
                 let tab_stop = s.dims.map(|d| d.tab_stop);
                 if let Some(buf) = s.buf_mut(buf_id) {
-                    if buf.doc.version() == version {
+                    // Check if indent will modify the doc — if so, skip
+                    // storing highlights from this response (their character
+                    // offsets would be wrong after the doc changes). The
+                    // indent change triggers a new SyntaxOut which produces
+                    // correct highlights for the indented doc.
+                    let will_indent = indent_row.is_some_and(|row| {
+                        buf.pending_indent_row == Some(row)
+                            && (indent.is_some()
+                                || (buf.pending_tab_fallback && tab_stop.is_some()))
+                    });
+                    if buf.doc.version() == version && !will_indent {
                         buf.syntax_highlights = Arc::new(highlights);
                         buf.bracket_pairs = Arc::new(bracket_pairs);
                         buf.matching_bracket = led_state::BracketPair::find_match(
@@ -591,7 +601,7 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Arc<AppState>> {
                         );
                     }
                     if let Some(row) = indent_row {
-                        if buf.pending_indent_row == Some(row) {
+                        if buf.pending_indent_row == Some(row) && buf.doc.version() == version {
                             buf.pending_indent_row = None;
                             let was_tab = buf.pending_tab_fallback;
                             buf.pending_tab_fallback = false;

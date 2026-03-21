@@ -19,6 +19,8 @@ pub struct StyleTable {
     pub bg: Option<String>,
     #[serde(default)]
     pub bold: bool,
+    #[serde(default)]
+    pub italic: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
