@@ -31,10 +31,6 @@ Hardcoded configs: rust-analyzer, typescript-language-server, pyright, clangd, s
 - Max 10 visible items with scroll
 - Fuzzy filtered via nucleo (case-insensitive, smart normalization)
 
-### Outline
-
-`Outline` action: uses `textDocument/documentSymbol` to show symbol list. Fuzzy-filtered selection panel.
-
 ### Rename dialog
 
 Modal input overlay for `LspRename` — captures new name, renders centered overlay, applies workspace edit.
@@ -44,3 +40,8 @@ Modal input overlay for `LspRename` — captures new name, renders centered over
 ## Phase 18: Message buffer
 
 - Messages panel (`OpenMessages`): read-only buffer syncing from SharedLog, auto-scroll, claims Main panel slot
+
+## Phase 19: Outline
+
+`Outline` action: uses `textDocument/documentSymbol` to show symbol list. Fuzzy-filtered selection panel.
+
