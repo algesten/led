@@ -27,6 +27,19 @@ pub fn insert_newline(buf: &BufferState) -> (Arc<dyn Doc>, usize, usize, usize) 
     (doc, buf.cursor_row + 1, 0, 0)
 }
 
+fn get_line_indent(doc: &dyn Doc, line: usize) -> String {
+    let text = doc.line(line);
+    let mut indent = String::new();
+    for ch in text.chars() {
+        if ch == ' ' || ch == '\t' {
+            indent.push(ch);
+        } else {
+            break;
+        }
+    }
+    indent
+}
+
 /// Apply computed indent to a line, replacing existing leading whitespace.
 pub fn apply_indent(buf: &mut BufferState, row: usize, new_indent: &str, adjust_cursor: bool) {
     let old_indent = get_line_indent(&*buf.doc, row);
@@ -63,19 +76,6 @@ pub fn apply_indent(buf: &mut BufferState, row: usize, new_indent: &str, adjust_
         buf.cursor_col = col;
         buf.cursor_col_affinity = col;
     }
-}
-
-fn get_line_indent(doc: &dyn Doc, line: usize) -> String {
-    let line_text = doc.line(line);
-    let mut indent = String::new();
-    for ch in line_text.chars() {
-        if ch == ' ' || ch == '\t' {
-            indent.push(ch);
-        } else {
-            break;
-        }
-    }
-    indent
 }
 
 /// Insert spaces to the next tab stop at the cursor position.

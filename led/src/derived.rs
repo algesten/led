@@ -28,7 +28,17 @@ pub struct Derived {
 }
 
 pub fn derived(state: Stream<Arc<AppState>>) -> Derived {
-    let ui = state.map(|s| s).stream();
+    // Suppress render while an async indent is in flight — the next
+    // render after the driver responds shows newline + correct indent
+    // in one atomic visual update, eliminating cursor flash.
+    let ui = state
+        .filter(|s| {
+            s.active_buffer
+                .and_then(|id| s.buffers.get(&id))
+                .map_or(true, |b| b.pending_indent_row.is_none())
+        })
+        .map(|s| s)
+        .stream();
     let workspace_init = state
         .map(|s| s.startup.clone())
         .dedupe()
