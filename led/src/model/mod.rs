@@ -439,6 +439,11 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Arc<AppState>> {
                 buf,
                 undo_clear_path,
             } => {
+                let filename = buf
+                    .path
+                    .as_ref()
+                    .and_then(|p| p.file_name())
+                    .map(|n| n.to_string_lossy().into_owned());
                 s.buffers_mut().insert(id, Arc::new(buf));
                 if let Some(buf) = s.buf_mut(id) {
                     buf.change_seq = next_change_seq();
@@ -449,6 +454,9 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Arc<AppState>> {
                 }
                 if let Some(path) = undo_clear_path {
                     s.pending_undo_clear.set(path);
+                }
+                if let Some(name) = filename {
+                    s.alerts.info = Some(format!("Saved {name}"));
                 }
             }
             Mut::BufferUpdate(id, buf) => {
