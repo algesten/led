@@ -194,6 +194,9 @@ pub fn handle_action(state: &mut AppState, action: Action) {
                 buf.cursor_col = c;
                 buf.cursor_col_affinity = mov::reset_affinity(buf, dims);
                 buf.last_edit_kind = Some(EditKind::Insert);
+                if buf.reindent_chars.contains(&ch) {
+                    buf.pending_indent_row = Some(r);
+                }
             });
             // Auto-trigger completion when no popup is showing
             if state.lsp.completion.is_none() {
@@ -216,17 +219,6 @@ pub fn handle_action(state: &mut AppState, action: Action) {
                 }
             }
         }
-        Action::InsertCloseBracket(ch) => with_buf(state, |buf, dims| {
-            buf.mark = None;
-            maybe_close_group(buf, EditKind::Insert, ch);
-            let (doc, r, c, _) = edit::insert_char(buf, ch);
-            buf.doc = doc;
-            buf.cursor_row = r;
-            buf.cursor_col = c;
-            buf.cursor_col_affinity = mov::reset_affinity(buf, dims);
-            buf.last_edit_kind = Some(EditKind::Insert);
-            buf.pending_indent_row = Some(r);
-        }),
         Action::InsertNewline => with_buf(state, |buf, _dims| {
             buf.mark = None;
             close_group_on_move(buf);
@@ -1303,7 +1295,6 @@ fn is_editing_action(action: &Action) -> bool {
             | Action::Yank
             | Action::Undo
             | Action::Redo
-            | Action::InsertCloseBracket(_)
             | Action::SortImports
     )
 }

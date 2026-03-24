@@ -3365,7 +3365,8 @@ fn auto_indent_after_brace() {
 
 #[test]
 fn auto_indent_closing_brace() {
-    // After `fn main() {` with body, InsertCloseBracket('}') should dedent
+    // After `fn main() {` with body, InsertChar('}') should dedent
+    // when the buffer's syntax highlighter declares '}' as a reindent char.
     let t = TestHarness::new()
         .with_file_ext("fn main() {\n    let x = 1;\n    \n}\n", "rs")
         .run(vec![
@@ -3374,7 +3375,7 @@ fn auto_indent_closing_brace() {
             Do(MoveDown),
             Do(LineEnd),
             // Type closing brace
-            Do(InsertCloseBracket('}')),
+            Do(InsertChar('}')),
             WaitFor(indent_done),
         ]);
 
@@ -3445,15 +3446,14 @@ fn rainbow_brackets_depth() {
 }
 
 #[test]
-fn close_bracket_maps_to_insert_close_bracket() {
-    // Typing '}' should use InsertCloseBracket, not InsertChar
-    // We test by checking that typing '}' on an indented empty line re-indents
+fn close_bracket_reindents_with_syntax() {
+    // Typing '}' in a buffer with syntax indent triggers re-indentation
     let t = TestHarness::new()
         .with_file_ext("fn main() {\n    \n}\n", "rs")
         .run(vec![
             Do(MoveDown), // go to line 1 (the indented empty line)
             Do(LineEnd),  // end of "    "
-            Do(InsertCloseBracket('}')),
+            Do(InsertChar('}')),
             WaitFor(indent_done),
         ]);
 

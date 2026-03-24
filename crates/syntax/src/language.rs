@@ -12,6 +12,8 @@ pub(crate) struct LangEntry {
     pub imports_query: Option<&'static str>,
     pub increase_indent_pattern: Option<&'static str>,
     pub decrease_indent_pattern: Option<&'static str>,
+    /// Characters that trigger re-indentation when typed (e.g. closing brackets).
+    pub reindent_chars: &'static [char],
 }
 
 impl LangEntry {
@@ -26,6 +28,7 @@ impl LangEntry {
             imports_query: None,
             increase_indent_pattern: None,
             decrease_indent_pattern: None,
+            reindent_chars: &[],
         }
     }
 }
@@ -40,6 +43,7 @@ pub(crate) fn lang_for_ext(ext: &str) -> Option<LangEntry> {
             imports_query: Some(include_str!("../queries/rust/imports.scm")),
             increase_indent_pattern: Some(r"\{[^}]*$"),
             decrease_indent_pattern: Some(r"^\s*\}"),
+            reindent_chars: &['}', ')', ']'],
             ..LangEntry::new(
                 tree_sitter_rust::LANGUAGE.into(),
                 tree_sitter_rust::HIGHLIGHTS_QUERY,

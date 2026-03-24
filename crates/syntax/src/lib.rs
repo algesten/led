@@ -61,6 +61,8 @@ pub struct SyntaxIn {
     pub matching_bracket: Option<(usize, usize)>,
     pub indent: Option<String>,
     pub indent_row: Option<usize>,
+    /// Characters that trigger re-indentation when typed, as declared by the language.
+    pub reindent_chars: Arc<[char]>,
 }
 
 // ── Driver ──
@@ -87,6 +89,7 @@ pub fn driver(out: Stream<SyntaxOut>) -> Stream<SyntaxIn> {
             last_end_line: usize,
             cached_highlights: Vec<(usize, led_state::HighlightSpan)>,
             cached_brackets: Vec<led_state::BracketPair>,
+            reindent_chars: Arc<[char]>,
         }
         let mut states: HashMap<BufferId, BufSyntax> = HashMap::new();
 
@@ -100,6 +103,7 @@ pub fn driver(out: Stream<SyntaxOut>) -> Stream<SyntaxIn> {
                         let matching = ss.matching_bracket(&*doc, 0, 0);
 
                         let ver = doc.version();
+                        let reindent_chars = ss.reindent_chars().clone();
                         states.insert(
                             buf_id,
                             BufSyntax {
@@ -109,6 +113,7 @@ pub fn driver(out: Stream<SyntaxOut>) -> Stream<SyntaxIn> {
                                 last_end_line: 50,
                                 cached_highlights: state_highlights.clone(),
                                 cached_brackets: bracket_pairs.clone(),
+                                reindent_chars: reindent_chars.clone(),
                             },
                         );
 
@@ -121,6 +126,7 @@ pub fn driver(out: Stream<SyntaxOut>) -> Stream<SyntaxIn> {
                                 matching_bracket: matching,
                                 indent: None,
                                 indent_row: None,
+                                reindent_chars,
                             })
                             .await;
                     }
@@ -140,6 +146,7 @@ pub fn driver(out: Stream<SyntaxOut>) -> Stream<SyntaxIn> {
                     // Auto-initialize if not yet opened
                     if !states.contains_key(&buf_id) {
                         if let Some(ss) = SyntaxState::from_path_and_doc(&path, &*doc) {
+                            let reindent_chars = ss.reindent_chars().clone();
                             states.insert(
                                 buf_id,
                                 BufSyntax {
@@ -149,6 +156,7 @@ pub fn driver(out: Stream<SyntaxOut>) -> Stream<SyntaxIn> {
                                     last_end_line: 0,
                                     cached_highlights: Vec::new(),
                                     cached_brackets: Vec::new(),
+                                    reindent_chars,
                                 },
                             );
                         } else {
@@ -162,6 +170,7 @@ pub fn driver(out: Stream<SyntaxOut>) -> Stream<SyntaxIn> {
                                         matching_bracket: None,
                                         indent: None,
                                         indent_row,
+                                        reindent_chars: Arc::from([]),
                                     })
                                     .await;
                             }
@@ -217,6 +226,7 @@ pub fn driver(out: Stream<SyntaxOut>) -> Stream<SyntaxIn> {
                             matching_bracket: None,
                             indent,
                             indent_row,
+                            reindent_chars: bs.reindent_chars.clone(),
                         })
                         .await;
                 }

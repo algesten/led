@@ -61,6 +61,7 @@ pub fn buffers_of(
                         matching_bracket: None,
                         pending_indent_row: None,
                         pending_tab_fallback: false,
+                        reindent_chars: Arc::from([]),
                         completion_triggers: Vec::new(),
                         is_preview: true,
                     };
@@ -201,6 +202,7 @@ pub fn buffers_of(
                     matching_bracket: None,
                     pending_indent_row: None,
                     pending_tab_fallback: false,
+                    reindent_chars: Arc::from([]),
                     completion_triggers: Vec::new(),
                     is_preview: false,
                 };

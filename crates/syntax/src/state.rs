@@ -1,5 +1,6 @@
 use std::ops::Range;
 use std::path::Path;
+use std::sync::Arc;
 
 use tree_sitter::{InputEdit, Parser, Query, Tree};
 
@@ -27,6 +28,7 @@ pub struct SyntaxState {
     injection_query_cache: QueryCache,
     increase_indent_pattern: Option<regex::Regex>,
     decrease_indent_pattern: Option<regex::Regex>,
+    reindent_chars: Arc<[char]>,
 }
 
 impl SyntaxState {
@@ -82,6 +84,8 @@ impl SyntaxState {
             );
         }
 
+        let reindent_chars: Arc<[char]> = entry.reindent_chars.into();
+
         Some(Self {
             parser,
             tree,
@@ -96,6 +100,7 @@ impl SyntaxState {
             injection_query_cache,
             increase_indent_pattern,
             decrease_indent_pattern,
+            reindent_chars,
         })
     }
 
@@ -284,6 +289,10 @@ impl SyntaxState {
     }
 
     // ── Indentation ──
+
+    pub fn reindent_chars(&self) -> &Arc<[char]> {
+        &self.reindent_chars
+    }
 
     pub fn suggest_indent(&self, doc: &dyn Doc, line: usize) -> Option<IndentSuggestion> {
         let config = self.indents_config.as_ref()?;

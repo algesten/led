@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
+use std::sync::Arc;
 
 mod action;
 mod actions_of;
@@ -313,6 +314,7 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
             bracket_pairs: syn.bracket_pairs,
             indent: syn.indent,
             indent_row: syn.indent_row,
+            reindent_chars: syn.reindent_chars,
         })
         .stream();
 
@@ -653,9 +655,11 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
                 bracket_pairs,
                 indent,
                 indent_row,
+                reindent_chars,
             } => {
                 let tab_stop = s.dims.map(|d| d.tab_stop);
                 if let Some(buf) = s.buf_mut(buf_id) {
+                    buf.reindent_chars = reindent_chars;
                     // Check if indent will modify the doc — if so, skip
                     // storing highlights from this response (their character
                     // offsets would be wrong after the doc changes). The
@@ -985,6 +989,7 @@ enum Mut {
         bracket_pairs: Vec<BracketPair>,
         indent: Option<String>,
         indent_row: Option<usize>,
+        reindent_chars: Arc<[char]>,
     },
     UndoFlushed {
         buf_id: BufferId,

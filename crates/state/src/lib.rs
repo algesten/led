@@ -201,6 +201,8 @@ pub struct BufferState {
     pub matching_bracket: Option<(usize, usize)>,
     pub pending_indent_row: Option<usize>,
     pub pending_tab_fallback: bool,
+    /// Characters that trigger re-indentation when typed, declared by the syntax highlighter.
+    pub reindent_chars: Arc<[char]>,
     pub completion_triggers: Vec<String>,
     pub is_preview: bool,
 }

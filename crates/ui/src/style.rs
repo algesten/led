@@ -493,6 +493,7 @@ mod tests {
             matching_bracket: None,
             pending_indent_row: None,
             pending_tab_fallback: false,
+            reindent_chars: std::sync::Arc::from([]),
             completion_triggers: Vec::new(),
             is_preview: false,
         };
