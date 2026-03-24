@@ -5,8 +5,11 @@ use std::sync::Arc;
 use clap::Parser;
 use crossterm::event::{DisableBracketedPaste, DisableMouseCapture};
 use crossterm::terminal::{LeaveAlternateScreen, disable_raw_mode};
+use led_config_file::TomlFile;
 use led_core::Startup;
+use led_core::keys::Keys;
 use led_core::rx::Stream;
+use led_core::theme::Theme;
 use tokio::sync::oneshot;
 
 #[derive(Parser)]
@@ -18,6 +21,10 @@ struct Cli {
     /// Write logs to a file (e.g. --log-file /tmp/led.log)
     #[arg(long)]
     log_file: Option<PathBuf>,
+
+    /// Reset keybinding and theme config to defaults, and clear session database
+    #[arg(long)]
+    reset_config: bool,
 
     /// After 5s, spam MoveUp for flamegraph profiling
     #[arg(long)]
@@ -61,6 +68,28 @@ async fn main() {
         .unwrap_or_default()
         .join(".config")
         .join("led");
+
+    if cli.reset_config {
+        std::fs::create_dir_all(&config_dir).ok();
+
+        match std::fs::write(config_dir.join(Keys::file_name()), Keys::default_toml()) {
+            Ok(()) => eprintln!("Config reset to defaults."),
+            Err(e) => eprintln!("Failed to reset config: {e}"),
+        }
+
+        match std::fs::write(config_dir.join(Theme::file_name()), Theme::default_toml()) {
+            Ok(()) => eprintln!("Theme reset to defaults."),
+            Err(e) => eprintln!("Failed to reset theme: {e}"),
+        }
+
+        match std::fs::remove_file(config_dir.join("db.sqlite")) {
+            Ok(()) => eprintln!("Session database reset."),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                eprintln!("Session database reset.")
+            }
+            Err(e) => eprintln!("Failed to reset session database: {e}"),
+        }
+    }
 
     let startup = Startup {
         headless: false,
