@@ -609,7 +609,9 @@ pub struct StatusInputs {
     pub search_prompt: Option<String>,
     pub find_file_prompt: Option<(String, usize)>,
     pub branch: Option<String>,
-    pub lsp_status: Option<String>,
+    pub lsp_server_name: String,
+    pub lsp_busy: bool,
+    pub lsp_detail: Option<String>,
 }
 
 pub fn status_inputs(s: &AppState) -> StatusInputs {
@@ -651,19 +653,13 @@ pub fn status_inputs(s: &AppState) -> StatusInputs {
     let find_file_prompt = s.find_file.as_ref().map(|ff| (ff.input.clone(), ff.cursor));
     let branch = s.git.branch.clone();
 
-    // Build LSP status: "server_name [●]" when busy, or "server_name" + detail
-    let lsp_status = if s.lsp.server_name.is_empty() {
-        None
-    } else if s.lsp.busy {
-        let detail = s.lsp.progress.as_ref().map(|p| p.title.as_str()).unwrap_or("");
-        if detail.is_empty() {
-            Some(format!("{} \u{25cf}", s.lsp.server_name))
+    let lsp_detail = s.lsp.progress.as_ref().map(|p| {
+        if let Some(ref msg) = p.message {
+            format!("{} {}", p.title, msg)
         } else {
-            Some(format!("{} {}", s.lsp.server_name, detail))
+            p.title.clone()
         }
-    } else {
-        Some(s.lsp.server_name.clone())
-    };
+    });
 
     StatusInputs {
         file_name,
@@ -676,8 +672,40 @@ pub fn status_inputs(s: &AppState) -> StatusInputs {
         search_prompt,
         find_file_prompt,
         branch,
-        lsp_status,
+        lsp_server_name: s.lsp.server_name.clone(),
+        lsp_busy: s.lsp.busy,
+        lsp_detail,
     }
+}
+
+fn format_lsp_status(server_name: &str, busy: bool, detail: Option<&str>) -> String {
+    if server_name.is_empty() {
+        return String::new();
+    }
+    let tick = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let spinner_char = |offset: u128| -> char {
+        const FRAMES: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+        FRAMES[((tick + offset) / 80) as usize % FRAMES.len()]
+    };
+    let spinner = if busy {
+        format!("{} ", spinner_char(0))
+    } else {
+        String::new()
+    };
+    let detail_str = detail
+        .filter(|d| !d.is_empty())
+        .map(|d| {
+            if busy {
+                format!("  {} {d}", spinner_char(400))
+            } else {
+                format!("  {d}")
+            }
+        })
+        .unwrap_or_default();
+    format!("  {spinner}{server_name}{detail_str}")
 }
 
 pub fn build_status_content(s: &StatusInputs) -> Rc<String> {
@@ -698,30 +726,32 @@ pub fn build_status_content(s: &StatusInputs) -> Rc<String> {
     }
 
     let modified = if s.is_dirty { " \u{25cf}" } else { "" };
-    let default_left = format!(" {}{}", s.file_name, modified);
 
-    let cursor = format!("L{}:C{} ", s.cursor_row + 1, s.cursor_col + 1);
-    let right = match (&s.branch, &s.lsp_status) {
-        (Some(b), Some(lsp)) => format!("{}  {}  {} ", lsp, b, cursor.trim_end()),
-        (Some(b), None) => format!("{}  {}", b, cursor),
-        (None, Some(lsp)) => format!("{}  {}", lsp, cursor),
-        (None, None) => cursor,
+    let branch_display = match &s.branch {
+        Some(b) if !b.is_empty() => format!(" ({b})"),
+        _ => String::new(),
     };
+
+    let lsp_str = format_lsp_status(&s.lsp_server_name, s.lsp_busy, s.lsp_detail.as_deref());
+
+    let default_left = format!(" {}{}{}{}", s.file_name, modified, branch_display, lsp_str);
 
     let left = match s.warn.as_deref().or(s.info.as_deref()) {
         Some(m) => format!(" {}", m),
         None => default_left,
     };
 
+    let pos = format!("L{}:C{} ", s.cursor_row + 1, s.cursor_col + 1);
+
     let total = s.viewport_width as usize;
     let left_width = left.chars().count();
-    let right_width = right.chars().count();
+    let right_width = pos.chars().count();
     let padding = total.saturating_sub(left_width + right_width);
     Rc::new(format!(
         "{}{:padding$}{}",
         left,
         "",
-        right,
+        pos,
         padding = padding
     ))
 }
