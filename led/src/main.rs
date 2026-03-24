@@ -22,6 +22,10 @@ struct Cli {
     /// After 5s, spam MoveUp for flamegraph profiling
     #[arg(long)]
     flamegraph: bool,
+
+    /// After 10s (LSP warm-up), type chars then C-a C-k in a loop
+    #[arg(long)]
+    flamegraph2: bool,
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -87,6 +91,27 @@ async fn main() {
                             stream.push(led_core::Action::MoveDown);
                             tokio::task::yield_now().await;
                         }
+                    }
+                });
+            }
+
+            if cli.flamegraph2 {
+                let stream = actions_in.clone();
+                tokio::task::spawn_local(async move {
+                    // Wait for LSP to start up
+                    tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                    let chars = "abcdefghihjklkjasd";
+                    loop {
+                        for c in chars.chars() {
+                            stream.push(led_core::Action::InsertChar(c));
+                            tokio::task::yield_now().await;
+                        }
+                        // C-a: go to line start
+                        stream.push(led_core::Action::LineStart);
+                        tokio::task::yield_now().await;
+                        // C-k: kill line
+                        stream.push(led_core::Action::KillLine);
+                        tokio::task::yield_now().await;
                     }
                 });
             }

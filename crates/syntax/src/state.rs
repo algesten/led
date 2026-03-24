@@ -9,7 +9,7 @@ use crate::bracket;
 use crate::config::*;
 use crate::highlight::{HighlightSpan, collect_highlights};
 use crate::indent;
-use crate::injection::{self, InjectionLayer};
+use crate::injection::{self, InjectionLayer, QueryCache};
 use crate::language::{lang_for_ext, lang_for_filename};
 use crate::parse::parse_doc;
 
@@ -24,6 +24,7 @@ pub struct SyntaxState {
     imports_config: Option<ImportsConfig>,
     error_query: Option<Query>,
     injection_layers: Vec<InjectionLayer>,
+    injection_query_cache: QueryCache,
     increase_indent_pattern: Option<regex::Regex>,
     decrease_indent_pattern: Option<regex::Regex>,
 }
@@ -70,9 +71,15 @@ impl SyntaxState {
             .decrease_indent_pattern
             .and_then(|p| regex::Regex::new(p).ok());
 
+        let mut injection_query_cache = QueryCache::new();
         let mut injection_layers = Vec::new();
         if let Some(ref inj_config) = injections_config {
-            injection_layers = injection::build_injection_layers(inj_config, &tree, doc);
+            injection_layers = injection::build_injection_layers(
+                inj_config,
+                &tree,
+                doc,
+                &mut injection_query_cache,
+            );
         }
 
         Some(Self {
@@ -86,6 +93,7 @@ impl SyntaxState {
             imports_config,
             error_query,
             injection_layers,
+            injection_query_cache,
             increase_indent_pattern,
             decrease_indent_pattern,
         })
@@ -155,7 +163,12 @@ impl SyntaxState {
         }
 
         if let Some(ref inj_config) = self.injections_config {
-            self.injection_layers = injection::build_injection_layers(inj_config, &self.tree, doc);
+            self.injection_layers = injection::build_injection_layers(
+                inj_config,
+                &self.tree,
+                doc,
+                &mut self.injection_query_cache,
+            );
         }
     }
 
@@ -167,7 +180,12 @@ impl SyntaxState {
             self.tree = new_tree;
         }
         if let Some(ref inj_config) = self.injections_config {
-            self.injection_layers = injection::build_injection_layers(inj_config, &self.tree, doc);
+            self.injection_layers = injection::build_injection_layers(
+                inj_config,
+                &self.tree,
+                doc,
+                &mut self.injection_query_cache,
+            );
         }
     }
 
