@@ -24,6 +24,11 @@ pub enum DocStoreOut {
         id: DocId,
         doc: Arc<dyn Doc>,
     },
+    SaveAs {
+        id: DocId,
+        doc: Arc<dyn Doc>,
+        path: PathBuf,
+    },
     Close {
         id: DocId,
         doc: Arc<dyn Doc>,
@@ -40,6 +45,11 @@ pub enum DocStoreIn {
     },
     Saved {
         id: DocId,
+        doc: Arc<dyn Doc>,
+    },
+    SavedAs {
+        id: DocId,
+        path: PathBuf,
         doc: Arc<dyn Doc>,
     },
     ExternalChange {
@@ -70,6 +80,11 @@ impl fmt::Debug for DocStoreIn {
                 .field("tab_order", tab_order)
                 .finish(),
             DocStoreIn::Saved { id, .. } => f.debug_struct("Saved").field("id", id).finish(),
+            DocStoreIn::SavedAs { id, path, .. } => f
+                .debug_struct("SavedAs")
+                .field("id", id)
+                .field("path", path)
+                .finish(),
             DocStoreIn::ExternalChange { id, path, .. } => f
                 .debug_struct("ExternalChange")
                 .field("id", id)
@@ -190,6 +205,34 @@ pub fn driver(
                                 ).await;
                             }
                         }
+                        DocStoreOut::SaveAs { id, doc, path } => {
+                            // Update internal path tracking
+                            let old_canonical = open_docs.get(&id).map(|o| canonicalize(&o.path));
+                            if let Some(old_canonical) = old_canonical {
+                                path_to_id.remove(&old_canonical);
+                            }
+                            let new_canonical = canonicalize(&path);
+                            open_docs.insert(id, OpenDoc { path: path.clone() });
+                            path_to_id.insert(new_canonical, id);
+
+                            // Register watcher for new parent directory
+                            if let Some(parent) = path.parent() {
+                                let canonical_parent = std::fs::canonicalize(parent)
+                                    .unwrap_or_else(|_| parent.to_path_buf());
+                                if !registrations.contains_key(&canonical_parent) {
+                                    let reg = file_watcher.register(
+                                        parent,
+                                        WatchMode::NonRecursive,
+                                        watcher_tx.clone(),
+                                    );
+                                    registrations.insert(canonical_parent, reg);
+                                }
+                            }
+
+                            handle_save_as(
+                                &path, &doc, &result_tx, id,
+                            ).await;
+                        }
                         DocStoreOut::Close { id, .. } => {
                             if let Some(open) = open_docs.remove(&id) {
                                 let canonical = canonicalize(&open.path);
@@ -299,6 +342,72 @@ async fn handle_save(
         Ok(()) => {
             let doc = doc.mark_saved();
             let _ = tx.send(Ok(DocStoreIn::Saved { id, doc })).await;
+        }
+        Err(e) => {
+            let _ = tokio::fs::remove_file(&tmp_path).await;
+            let _ = tx
+                .send(Err(Alert::Warn(format!(
+                    "Failed to save {}: {e}",
+                    path.display()
+                ))))
+                .await;
+        }
+    }
+}
+
+async fn handle_save_as(
+    path: &PathBuf,
+    doc: &Arc<dyn Doc>,
+    tx: &mpsc::Sender<Result<DocStoreIn, Alert>>,
+    id: DocId,
+) {
+    let parent = path.parent().unwrap_or(std::path::Path::new("."));
+    if !parent.exists() {
+        if let Err(e) = tokio::fs::create_dir_all(parent).await {
+            let _ = tx
+                .send(Err(Alert::Warn(format!(
+                    "Failed to create directory {}: {e}",
+                    parent.display()
+                ))))
+                .await;
+            return;
+        }
+    }
+    let tmp_path = parent.join(format!(".led-save-{}", std::process::id()));
+
+    let doc = format_on_save(doc);
+
+    let mut buf = Vec::new();
+    if let Err(e) = doc.write_to(&mut buf) {
+        let _ = tx
+            .send(Err(Alert::Warn(format!(
+                "Failed to serialize {}: {e}",
+                path.display()
+            ))))
+            .await;
+        return;
+    }
+
+    if let Err(e) = tokio::fs::write(&tmp_path, &buf).await {
+        let _ = tx
+            .send(Err(Alert::Warn(format!(
+                "Failed to save {}: {e}",
+                path.display()
+            ))))
+            .await;
+        return;
+    }
+
+    match tokio::fs::rename(&tmp_path, path).await {
+        Ok(()) => {
+            let doc = doc.mark_saved();
+            let _ = tx
+                .send(Ok(DocStoreIn::SavedAs {
+                    id,
+                    path: path.clone(),
+                    doc,
+                }))
+                .await;
         }
         Err(e) => {
             let _ = tokio::fs::remove_file(&tmp_path).await;

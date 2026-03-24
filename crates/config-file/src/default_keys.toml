@@ -57,6 +57,7 @@
 [keys."ctrl+x"]
 "ctrl+c" = "quit"
 "ctrl+s" = "save"
+"ctrl+w" = "save_as"
 "k" = "kill_buffer"
 "ctrl+f" = "find_file"
 "i" = "sort_imports"

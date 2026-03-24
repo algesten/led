@@ -236,6 +236,23 @@ pub fn derived(state: Stream<Arc<AppState>>) -> Derived {
         })
         .stream();
 
+    // Save as: write active buffer to a new path
+    let save_as_out = state
+        .dedupe_by(|s| s.pending_save_as.version())
+        .filter(|s| s.pending_save_as.version() > 0)
+        .filter(|s| s.pending_save_as.is_some())
+        .filter(|s| s.active_buffer.is_some())
+        .map(|s| {
+            let buf = &s.buffers[&s.active_buffer.unwrap()];
+            let path = (*s.pending_save_as).clone().unwrap();
+            DocStoreOut::SaveAs {
+                id: buf.doc_id,
+                doc: buf.doc.clone(),
+                path,
+            }
+        })
+        .stream();
+
     // Preview open: Case C (new file, not already in any buffer)
     let preview_open = state
         .dedupe_by(|s| s.preview.pending.version())
@@ -265,6 +282,7 @@ pub fn derived(state: Stream<Arc<AppState>>) -> Derived {
     session_open.forward(&docstore_out);
     browser_open.forward(&docstore_out);
     save_out.forward(&docstore_out);
+    save_as_out.forward(&docstore_out);
     preview_open.forward(&docstore_out);
 
     // Timers: schedule alert clear when info/warn appears

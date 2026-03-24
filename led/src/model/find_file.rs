@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use led_core::Action;
 use led_fs::FindFileEntry;
-use led_state::{AppState, FindFileState, PreviewRequest};
+use led_state::{AppState, FindFileMode, FindFileState, PreviewRequest, SaveState};
 
 // ── Path helpers ──
 
@@ -223,6 +223,7 @@ pub fn activate(state: &mut AppState) {
     let cursor = input.len();
 
     state.find_file = Some(FindFileState {
+        mode: FindFileMode::Open,
         input: input.clone(),
         cursor,
         base_input: input,
@@ -236,6 +237,46 @@ pub fn activate(state: &mut AppState) {
     state
         .pending_find_file_list
         .set(Some((expanded, String::new(), false)));
+}
+
+pub fn activate_save_as(state: &mut AppState) {
+    // Start with the current buffer's full path (or parent dir like find_file)
+    let input = state
+        .active_buffer
+        .and_then(|id| state.buffers.get(&id))
+        .and_then(|buf| buf.path.as_ref())
+        .map(|p| abbreviate_home(&p.to_string_lossy()))
+        .unwrap_or_else(|| {
+            let dir = (*state.startup.start_dir).to_string_lossy().into_owned();
+            let mut s = abbreviate_home(&dir);
+            if !s.ends_with('/') {
+                s.push('/');
+            }
+            s
+        });
+    let cursor = input.len();
+
+    state.find_file = Some(FindFileState {
+        mode: FindFileMode::SaveAs,
+        input: input.clone(),
+        cursor,
+        base_input: input,
+        completions: Vec::new(),
+        selected: None,
+        show_side: false,
+    });
+
+    // Request initial listing for the directory
+    let expanded = expand_path(&state.find_file.as_ref().unwrap().input);
+    let dir = expanded.parent().unwrap_or(Path::new("/")).to_path_buf();
+    let prefix = expanded
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let show_hidden = prefix.starts_with('.');
+    state
+        .pending_find_file_list
+        .set(Some((dir, prefix, show_hidden)));
 }
 
 fn deactivate(state: &mut AppState) {
@@ -399,6 +440,14 @@ pub fn handle_find_file_action(state: &mut AppState, action: &Action) -> bool {
 // ── Enter logic ──
 
 fn handle_enter(state: &mut AppState) {
+    let mode = state.find_file.as_ref().unwrap().mode;
+    match mode {
+        FindFileMode::Open => handle_enter_open(state),
+        FindFileMode::SaveAs => handle_enter_save_as(state),
+    }
+}
+
+fn handle_enter_open(state: &mut AppState) {
     let ff = state.find_file.as_ref().unwrap();
 
     // Path A: selected completion
@@ -458,4 +507,58 @@ fn handle_enter(state: &mut AppState) {
         }
         return;
     }
+}
+
+fn handle_enter_save_as(state: &mut AppState) {
+    let ff = state.find_file.as_ref().unwrap();
+
+    // Resolve the target path — from selection or input
+    let path = if let Some(sel) = ff.selected {
+        if let Some(comp) = ff.completions.get(sel).cloned() {
+            if comp.is_dir {
+                // Descend into directory
+                let dir_prefix = input_dir_prefix(&ff.base_input).to_string();
+                let ff = state.find_file.as_mut().unwrap();
+                ff.input = format!("{dir_prefix}{}", comp.name);
+                ff.cursor = ff.input.len();
+                request_completions(state);
+                return;
+            }
+            comp.full
+        } else {
+            return;
+        }
+    } else {
+        let expanded = expand_path(&ff.input);
+        let input = ff.input.clone();
+
+        // Check completions for exact dir match → descend
+        let matched = ff.completions.iter().find(|c| c.full == expanded).cloned();
+        if let Some(comp) = matched {
+            if comp.is_dir {
+                if input.ends_with('/') {
+                    request_completions(state);
+                }
+                return;
+            }
+        }
+
+        // Don't save to a directory path
+        if input.ends_with('/') || input.is_empty() {
+            return;
+        }
+
+        expanded
+    };
+
+    // Save the active buffer to the new path
+    if let Some(id) = state.active_buffer {
+        if let Some(buf) = state.buf_mut(id) {
+            super::action::close_group_on_move(buf);
+            buf.save_state = SaveState::Saving;
+        }
+        state.pending_save_as.set(Some(path));
+    }
+
+    deactivate(state);
 }

@@ -600,7 +600,7 @@ pub struct StatusInputs {
     pub warn: Option<String>,
     pub viewport_width: u16,
     pub search_prompt: Option<String>,
-    pub find_file_prompt: Option<(String, usize)>,
+    pub find_file_prompt: Option<(String, usize, led_state::FindFileMode)>,
     pub branch: Option<String>,
     pub lsp_server_name: String,
     pub lsp_busy: bool,
@@ -644,7 +644,10 @@ pub fn status_inputs(s: &AppState) -> StatusInputs {
             })
         });
 
-    let find_file_prompt = s.find_file.as_ref().map(|ff| (ff.input.clone(), ff.cursor));
+    let find_file_prompt = s
+        .find_file
+        .as_ref()
+        .map(|ff| (ff.input.clone(), ff.cursor, ff.mode));
     let branch = s.git.branch.clone();
 
     let lsp_detail = s.lsp.progress.as_ref().map(|p| {
@@ -704,9 +707,13 @@ fn format_lsp_status(server_name: &str, busy: bool, detail: Option<&str>) -> Str
 }
 
 pub fn build_status_content(s: &StatusInputs) -> Rc<String> {
-    // During find-file, show find-file prompt
-    if let Some((ref input, _cursor)) = s.find_file_prompt {
-        let left = format!(" Find file: {}", input);
+    // During find-file or save-as, show prompt
+    if let Some((ref input, _cursor, mode)) = s.find_file_prompt {
+        let label = match mode {
+            led_state::FindFileMode::Open => "Find file",
+            led_state::FindFileMode::SaveAs => "Save as",
+        };
+        let left = format!(" {label}: {input}");
         let total = s.viewport_width as usize;
         let padding = total.saturating_sub(left.chars().count());
         return Rc::new(format!("{}{:padding$}", left, "", padding = padding));

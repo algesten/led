@@ -43,9 +43,13 @@ pub fn driver(state: Stream<Arc<AppState>>) -> Ui {
                 return Some((cx, cy));
             }
 
-            // Find-file cursor: absolute position on the status bar
+            // Find-file / save-as cursor: absolute position on the status bar
             if let Some(ref ff) = s.find_file {
-                let prefix_len = " Find file: ".len() as u16;
+                let label = match ff.mode {
+                    led_state::FindFileMode::Open => " Find file: ",
+                    led_state::FindFileMode::SaveAs => " Save as: ",
+                };
+                let prefix_len = label.len() as u16;
                 let cx = prefix_len + ff.cursor as u16;
                 let cy = dims.viewport_height.saturating_sub(dims.status_bar_height);
                 if cx < dims.viewport_width {

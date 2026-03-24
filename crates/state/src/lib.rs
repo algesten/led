@@ -331,8 +331,15 @@ fn walk_tree(
 
 // ── Find file ──
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FindFileMode {
+    Open,
+    SaveAs,
+}
+
 #[derive(Debug, Clone)]
 pub struct FindFileState {
+    pub mode: FindFileMode,
     pub input: String,
     pub cursor: usize,                           // byte position in input
     pub base_input: String,                      // input before arrow selection; dir prefix source
@@ -533,9 +540,10 @@ pub struct AppState {
     // Jump list
     pub jump: JumpListState,
 
-    // Find file
+    // Find file / Save as
     pub find_file: Option<FindFileState>,
     pub pending_find_file_list: Versioned<Option<(PathBuf, String, bool)>>,
+    pub pending_save_as: Versioned<Option<PathBuf>>,
 
     // File search
     pub file_search: Option<file_search::FileSearchState>,

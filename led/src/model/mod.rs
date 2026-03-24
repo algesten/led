@@ -459,6 +459,41 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Arc<AppState>> {
                     s.alerts.info = Some(format!("Saved {name}"));
                 }
             }
+            Mut::BufferSavedAs {
+                id,
+                buf,
+                new_path,
+                undo_clear_path,
+            } => {
+                // Update notify hash: remove old, insert new
+                let old_hash = s
+                    .notify_hash_to_buffer
+                    .iter()
+                    .find(|(_, v)| **v == id)
+                    .map(|(k, _)| k.clone());
+                if let Some(h) = old_hash {
+                    s.notify_hash_to_buffer.remove(&h);
+                }
+                let new_hash = led_workspace::path_hash(&new_path);
+                s.notify_hash_to_buffer.insert(new_hash, id);
+
+                let filename = new_path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned());
+                s.buffers_mut().insert(id, Arc::new(buf));
+                if let Some(buf) = s.buf_mut(id) {
+                    buf.change_seq = next_change_seq();
+                }
+                s.git_mut().pending_file_scan.set(());
+                s.git_mut().pending_line_scan.set(Some(new_path));
+                if let Some(path) = undo_clear_path {
+                    s.pending_undo_clear.set(path);
+                }
+                if let Some(name) = filename {
+                    s.alerts.info = Some(format!("Saved {name}"));
+                }
+                action::reveal_active_buffer(&mut s);
+            }
             Mut::BufferUpdate(id, buf) => {
                 s.buffers_mut().insert(id, Arc::new(buf));
             }
@@ -878,6 +913,12 @@ enum Mut {
         buf: BufferState,
         undo_clear_path: Option<std::path::PathBuf>,
     },
+    BufferSavedAs {
+        id: BufferId,
+        buf: BufferState,
+        new_path: std::path::PathBuf,
+        undo_clear_path: Option<std::path::PathBuf>,
+    },
     BufferUpdate(BufferId, BufferState),
     ConfigKeys(ConfigFile<Keys>),
     ConfigTheme(ConfigFile<Theme>),
@@ -1005,6 +1046,7 @@ impl Mut {
             Mut::Alert { .. } => "Alert",
             Mut::BufferOpen { .. } => "BufferOpen",
             Mut::BufferSaved { .. } => "BufferSaved",
+            Mut::BufferSavedAs { .. } => "BufferSavedAs",
             Mut::BufferUpdate(_, _) => "BufferUpdate",
             Mut::ConfigKeys(_) => "ConfigKeys",
             Mut::ConfigTheme(_) => "ConfigTheme",

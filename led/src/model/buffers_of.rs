@@ -234,6 +234,28 @@ pub fn buffers_of(
                     undo_clear_path,
                 })
             }
+            Ok(DocStoreIn::SavedAs { id, path, doc }) => {
+                let buf = find_buf_by_doc_id(&state, id)?;
+                let undo_clear_path = if buf.save_state == SaveState::Saving {
+                    buf.path.clone()
+                } else {
+                    None
+                };
+                let mut buf = (**buf).clone();
+                buf.path = Some(path.clone());
+                buf.doc = doc;
+                buf.save_state = SaveState::Clean;
+                buf.persisted_undo_len = buf.doc.undo_history_len();
+                buf.chain_id = None;
+                buf.last_seen_seq = 0;
+                buf.content_hash = buf.doc.content_hash();
+                Some(Mut::BufferSavedAs {
+                    id: buf.id,
+                    buf,
+                    new_path: path,
+                    undo_clear_path,
+                })
+            }
             Ok(DocStoreIn::ExternalChange { id, path, doc }) => {
                 // Try DocId first, fall back to path — DocId mismatch happens
                 // when a file was re-opened as a duplicate (ActivateBuffer

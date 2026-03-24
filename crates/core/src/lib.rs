@@ -78,6 +78,7 @@ pub enum Action {
 
     // File
     Save,
+    SaveAs,
     SaveForce,
     KillBuffer,
 
