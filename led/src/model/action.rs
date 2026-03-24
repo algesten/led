@@ -377,7 +377,10 @@ pub fn handle_action(state: &mut AppState, action: Action) {
                 .is_some_and(|_| !state.lsp.server_name.is_empty());
             if has_lsp {
                 state.lsp_mut().pending_save_after_format = true;
-                state.lsp_mut().pending_request.set(Some(LspRequest::Format));
+                state
+                    .lsp_mut()
+                    .pending_request
+                    .set(Some(LspRequest::Format));
                 state.alerts.info = Some("Formatting...".into());
             } else {
                 state.save_request.set(());
@@ -593,7 +596,8 @@ fn handle_completion_action(state: &mut AppState, action: &Action) -> bool {
                             start_col: comp.prefix_start_col,
                             end_row: cursor_row,
                             end_col: cursor_col,
-                            new_text: item.text_edit
+                            new_text: item
+                                .text_edit
                                 .as_ref()
                                 .map(|e| e.new_text.clone())
                                 .unwrap_or_else(|| item.insert_text.clone()),
@@ -1057,9 +1061,9 @@ fn handle_browser_expand(state: &mut AppState) {
     b.expanded_dirs.insert(path.clone());
     if has_contents {
         b.rebuild_entries();
-    } else {
-        state.pending_lists.set(vec![path]);
     }
+    // Always request a fresh listing so changes made while collapsed become visible.
+    state.pending_lists.set(vec![path]);
 }
 
 fn handle_browser_collapse(state: &mut AppState) {
@@ -1302,4 +1306,3 @@ fn is_editing_action(action: &Action) -> bool {
             | Action::SortImports
     )
 }
-

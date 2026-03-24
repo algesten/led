@@ -60,7 +60,11 @@ fn render_overlay(overlay: &OverlayContent, frame: &mut Frame, area: Rect) {
             if items.is_empty() {
                 return;
             }
-            let max_label = items.iter().map(|(l, _, _)| l.chars().count()).max().unwrap_or(10);
+            let max_label = items
+                .iter()
+                .map(|(l, _, _)| l.chars().count())
+                .max()
+                .unwrap_or(10);
             let max_detail = items
                 .iter()
                 .filter_map(|(_, d, _)| d.as_ref().map(|d| d.chars().count()))
@@ -70,7 +74,8 @@ fn render_overlay(overlay: &OverlayContent, frame: &mut Frame, area: Rect) {
                 .min(area.width as usize);
             let height = items.len().min(10);
 
-            let x = (*anchor_x as usize).min(area.width.saturating_sub(width as u16) as usize) as u16;
+            let x =
+                (*anchor_x as usize).min(area.width.saturating_sub(width as u16) as usize) as u16;
             let y = if *anchor_y as usize + height + 1 > area.height as usize {
                 anchor_y.saturating_sub(height as u16 + 1)
             } else {
@@ -105,11 +110,16 @@ fn render_overlay(overlay: &OverlayContent, frame: &mut Frame, area: Rect) {
             if items.is_empty() {
                 return;
             }
-            let max_w = items.iter().map(|(t, _)| t.chars().count()).max().unwrap_or(10);
+            let max_w = items
+                .iter()
+                .map(|(t, _)| t.chars().count())
+                .max()
+                .unwrap_or(10);
             let width = (max_w + 2).min(area.width as usize);
             let height = items.len().min(15);
 
-            let x = (*anchor_x as usize).min(area.width.saturating_sub(width as u16) as usize) as u16;
+            let x =
+                (*anchor_x as usize).min(area.width.saturating_sub(width as u16) as usize) as u16;
             let y = if *anchor_y as usize + height + 1 > area.height as usize {
                 anchor_y.saturating_sub(height as u16 + 1)
             } else {
@@ -140,7 +150,8 @@ fn render_overlay(overlay: &OverlayContent, frame: &mut Frame, area: Rect) {
         } => {
             let label = "Rename: ";
             let width = (label.len() + input.len() + 4).min(area.width as usize);
-            let x = (*anchor_x as usize).min(area.width.saturating_sub(width as u16) as usize) as u16;
+            let x =
+                (*anchor_x as usize).min(area.width.saturating_sub(width as u16) as usize) as u16;
             let y = *anchor_y;
             let rect = Rect::new(x, y, width as u16, 1);
             frame.render_widget(Clear, rect);

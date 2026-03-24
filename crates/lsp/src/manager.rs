@@ -303,8 +303,7 @@ impl LspManager {
                 };
                 if let Some(triggers) = trigger_chars {
                     self.trigger_characters = triggers.clone();
-                    let extensions =
-                        self.registry.extensions_for_language(&language_id);
+                    let extensions = self.registry.extensions_for_language(&language_id);
                     let _ = result_tx
                         .send(LspIn::TriggerChars {
                             extensions,
@@ -429,12 +428,7 @@ impl LspManager {
         self.need_diagnostics = true;
     }
 
-    fn send_did_change(
-        &mut self,
-        path: &Path,
-        edit_ops: &[EditOp],
-        old_doc: Option<&dyn Doc>,
-    ) {
+    fn send_did_change(&mut self, path: &Path, edit_ops: &[EditOp], old_doc: Option<&dyn Doc>) {
         if !self.opened_docs.contains(path) {
             return;
         }
@@ -807,7 +801,9 @@ impl LspManager {
     fn spawn_format(&self, path: PathBuf) {
         let Some(server) = self.server_for_path(&path) else {
             // No server → send FormatDone immediately so save proceeds
-            let _ = self.event_tx.send(ManagerEvent::RequestResult(RequestResult::FormatDone));
+            let _ = self
+                .event_tx
+                .send(ManagerEvent::RequestResult(RequestResult::FormatDone));
             return;
         };
         let event_tx = self.event_tx.clone();
@@ -1008,8 +1004,7 @@ impl LspManager {
                 }
             }
             RequestResult::Format { path, edits } => {
-                let line_at =
-                    |row: usize| self.docs.get(&path).and_then(|d| doc_line(&**d, row));
+                let line_at = |row: usize| self.docs.get(&path).and_then(|d| doc_line(&**d, row));
                 let domain_edits: Vec<crate::TextEdit> = edits
                     .iter()
                     .map(|e| lsp_text_edit_to_domain(e, &line_at))
@@ -1123,9 +1118,7 @@ impl LspManager {
             }
             RequestResult::FormatDone => {
                 // Send empty edits to trigger pending save-after-format
-                let _ = result_tx
-                    .send(LspIn::Edits { edits: vec![] })
-                    .await;
+                let _ = result_tx.send(LspIn::Edits { edits: vec![] }).await;
             }
             RequestResult::Error { message } => {
                 let _ = result_tx.send(LspIn::Error { message }).await;
@@ -1176,10 +1169,7 @@ impl LspManager {
 
     /// Send progress to UI at most once per 200ms to avoid flooding.
     /// Always sends immediately on busy→idle transitions.
-    async fn send_progress_throttled(
-        &mut self,
-        result_tx: &tokio::sync::mpsc::Sender<LspIn>,
-    ) {
+    async fn send_progress_throttled(&mut self, result_tx: &tokio::sync::mpsc::Sender<LspIn>) {
         let now = std::time::Instant::now();
         let is_idle = !self.is_busy();
         let elapsed = now.duration_since(self.last_progress_sent);
@@ -1569,10 +1559,7 @@ fn fuzzy_filter_completions(
         })
     });
 
-    scored
-        .into_iter()
-        .map(|(i, _)| items[i].clone())
-        .collect()
+    scored.into_iter().map(|(i, _)| items[i].clone()).collect()
 }
 
 fn extract_raw_edits_for_path(edit: &WorkspaceEdit, target: &Path) -> Vec<TextEdit> {

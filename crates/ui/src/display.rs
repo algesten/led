@@ -144,11 +144,7 @@ pub fn display_inputs(s: &AppState) -> Option<DisplayInputs> {
                 .get(p)
                 .or_else(|| lookup_canonical(&s.lsp.inlay_hints, p))
         })
-        .map(|hs| {
-            hs.iter()
-                .map(|h| (h.row, h.col, h.label.clone()))
-                .collect()
-        })
+        .map(|hs| hs.iter().map(|h| (h.row, h.col, h.label.clone())).collect())
         .unwrap_or_default();
 
     let diagnostic_error_style = style::resolve(theme, &theme.diagnostics.error);
@@ -479,10 +475,7 @@ pub fn build_display_lines(d: &DisplayInputs) -> Rc<Vec<Line<'static>>> {
             if is_last && d.inlay_hints_enabled {
                 for (hr, _hc, label) in &d.inlay_hints {
                     if *hr == line_idx {
-                        spans.push(Span::styled(
-                            format!(" {}", label),
-                            d.inlay_hint_style,
-                        ));
+                        spans.push(Span::styled(format!(" {}", label), d.inlay_hint_style));
                     }
                 }
             }
@@ -747,13 +740,7 @@ pub fn build_status_content(s: &StatusInputs) -> Rc<String> {
     let left_width = left.chars().count();
     let right_width = pos.chars().count();
     let padding = total.saturating_sub(left_width + right_width);
-    Rc::new(format!(
-        "{}{:padding$}{}",
-        left,
-        "",
-        pos,
-        padding = padding
-    ))
+    Rc::new(format!("{}{:padding$}{}", left, "", pos, padding = padding))
 }
 
 // ── Overlay (completion popup, code action picker, rename input) ──
@@ -786,7 +773,8 @@ pub fn overlay_inputs(s: &AppState) -> OverlayContent {
     };
     let (cursor_x, cursor_y) = match s.active_buffer.and_then(|id| s.buffers.get(&id)) {
         Some(buf) => {
-            let x = dims.side_width() + dims.gutter_width
+            let x = dims.side_width()
+                + dims.gutter_width
                 + (buf.cursor_col as u16).min(dims.text_width() as u16);
             let y = buf.cursor_row.saturating_sub(buf.scroll_row) as u16;
             (x, y)

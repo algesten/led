@@ -3702,20 +3702,19 @@ fn lsp_format() {
         return;
     }
     // Unformatted: extra spaces. Unused variable `y` produces a warning diagnostic.
-    let (root, main_rs) =
-        lsp_project("fn   main(  )  {\n    let   x  =  1;\n    let y = 2;\n    println!(\"{}\",  x);\n}\n");
+    let (root, main_rs) = lsp_project(
+        "fn   main(  )  {\n    let   x  =  1;\n    let y = 2;\n    println!(\"{}\",  x);\n}\n",
+    );
 
-    let t = TestHarness::with_dir(root)
-        .with_arg(main_rs)
-        .run(vec![
-            WaitFor(lsp_server_ready),
-            Do(LspFormat),
-            WaitFor(|s| {
-                s.active_buffer
-                    .and_then(|id| s.buffers.get(&id))
-                    .map_or(false, |b| b.doc.line(0).starts_with("fn main()"))
-            }),
-        ]);
+    let t = TestHarness::with_dir(root).with_arg(main_rs).run(vec![
+        WaitFor(lsp_server_ready),
+        Do(LspFormat),
+        WaitFor(|s| {
+            s.active_buffer
+                .and_then(|id| s.buffers.get(&id))
+                .map_or(false, |b| b.doc.line(0).starts_with("fn main()"))
+        }),
+    ]);
 
     let b = buf(&t);
     assert!(
@@ -3737,30 +3736,31 @@ fn lsp_goto_definition() {
     let (root, main_rs) =
         lsp_project("fn greet() {}\n\nfn main() {\n    let y = 0;\n    greet();\n}\n");
 
-    let t = TestHarness::with_dir(root)
-        .with_arg(main_rs)
-        .run(vec![
-            WaitFor(lsp_server_ready),
-            // Move to line 4, col 4 (on `greet()`)
-            Do(MoveDown),
-            Do(MoveDown),
-            Do(MoveDown),
-            Do(MoveDown),
-            Do(MoveRight),
-            Do(MoveRight),
-            Do(MoveRight),
-            Do(MoveRight),
-            Do(LspGotoDefinition),
-            // Wait for cursor to land on the definition (line 0)
-            WaitFor(|s| {
-                s.active_buffer
-                    .and_then(|id| s.buffers.get(&id))
-                    .map_or(false, |b| b.cursor_row == 0)
-            }),
-        ]);
+    let t = TestHarness::with_dir(root).with_arg(main_rs).run(vec![
+        WaitFor(lsp_server_ready),
+        // Move to line 4, col 4 (on `greet()`)
+        Do(MoveDown),
+        Do(MoveDown),
+        Do(MoveDown),
+        Do(MoveDown),
+        Do(MoveRight),
+        Do(MoveRight),
+        Do(MoveRight),
+        Do(MoveRight),
+        Do(LspGotoDefinition),
+        // Wait for cursor to land on the definition (line 0)
+        WaitFor(|s| {
+            s.active_buffer
+                .and_then(|id| s.buffers.get(&id))
+                .map_or(false, |b| b.cursor_row == 0)
+        }),
+    ]);
 
     let b = buf(&t);
-    assert_eq!(b.cursor_row, 0, "expected cursor on definition line (fn greet)");
+    assert_eq!(
+        b.cursor_row, 0,
+        "expected cursor on definition line (fn greet)"
+    );
 }
 
 #[test]
@@ -3770,24 +3770,16 @@ fn lsp_next_prev_diagnostic() {
         return;
     }
     // Two errors on different lines
-    let (root, main_rs) = lsp_project(
-        "fn main() {\n    let _x: i32 = \"a\";\n    let _y: i32 = \"b\";\n}\n",
-    );
+    let (root, main_rs) =
+        lsp_project("fn main() {\n    let _x: i32 = \"a\";\n    let _y: i32 = \"b\";\n}\n");
 
-    let t = TestHarness::with_dir(root)
-        .with_arg(main_rs)
-        .run(vec![
-            WaitFor(|s| {
-                // Wait for at least two diagnostics
-                s.lsp
-                    .diagnostics
-                    .values()
-                    .flat_map(|d| d.iter())
-                    .count()
-                    >= 2
-            }),
-            Do(LspNextDiagnostic),
-        ]);
+    let t = TestHarness::with_dir(root).with_arg(main_rs).run(vec![
+        WaitFor(|s| {
+            // Wait for at least two diagnostics
+            s.lsp.diagnostics.values().flat_map(|d| d.iter()).count() >= 2
+        }),
+        Do(LspNextDiagnostic),
+    ]);
 
     let b = buf(&t);
     // Cursor should have moved to the first diagnostic (line 1)
@@ -3805,25 +3797,24 @@ fn lsp_rename_opens_overlay() {
         return;
     }
     // Unused `z` produces a warning so diagnostics appear (server-ready signal).
-    let (root, main_rs) =
-        lsp_project("fn main() {\n    let hello = 1;\n    let z = 0;\n    println!(\"{}\", hello);\n}\n");
+    let (root, main_rs) = lsp_project(
+        "fn main() {\n    let hello = 1;\n    let z = 0;\n    println!(\"{}\", hello);\n}\n",
+    );
 
-    let t = TestHarness::with_dir(root)
-        .with_arg(main_rs)
-        .run(vec![
-            WaitFor(lsp_server_ready),
-            // Move to line 1, col 8 (on `hello`)
-            Do(MoveDown),
-            Do(MoveRight),
-            Do(MoveRight),
-            Do(MoveRight),
-            Do(MoveRight),
-            Do(MoveRight),
-            Do(MoveRight),
-            Do(MoveRight),
-            Do(MoveRight),
-            Do(LspRename),
-        ]);
+    let t = TestHarness::with_dir(root).with_arg(main_rs).run(vec![
+        WaitFor(lsp_server_ready),
+        // Move to line 1, col 8 (on `hello`)
+        Do(MoveDown),
+        Do(MoveRight),
+        Do(MoveRight),
+        Do(MoveRight),
+        Do(MoveRight),
+        Do(MoveRight),
+        Do(MoveRight),
+        Do(MoveRight),
+        Do(MoveRight),
+        Do(LspRename),
+    ]);
 
     assert!(
         t.state.lsp.rename.is_some(),
@@ -3846,42 +3837,41 @@ fn lsp_rename_submit() {
         return;
     }
     // Unused `z` produces a warning so diagnostics appear (server-ready signal).
-    let (root, main_rs) =
-        lsp_project("fn main() {\n    let hello = 1;\n    let z = 0;\n    println!(\"{}\", hello);\n}\n");
+    let (root, main_rs) = lsp_project(
+        "fn main() {\n    let hello = 1;\n    let z = 0;\n    println!(\"{}\", hello);\n}\n",
+    );
 
-    let t = TestHarness::with_dir(root)
-        .with_arg(main_rs)
-        .run(vec![
-            WaitFor(lsp_server_ready),
-            Do(MoveDown),
-            Do(MoveRight),
-            Do(MoveRight),
-            Do(MoveRight),
-            Do(MoveRight),
-            Do(MoveRight),
-            Do(MoveRight),
-            Do(MoveRight),
-            Do(MoveRight),
-            Do(LspRename),
-            // Clear existing text, type new name
-            Do(DeleteBackward),
-            Do(DeleteBackward),
-            Do(DeleteBackward),
-            Do(DeleteBackward),
-            Do(DeleteBackward),
-            Do(InsertChar('w')),
-            Do(InsertChar('o')),
-            Do(InsertChar('r')),
-            Do(InsertChar('l')),
-            Do(InsertChar('d')),
-            Do(InsertNewline), // submit
-            // Wait for rename to complete — both occurrences should be renamed
-            WaitFor(|s| {
-                s.active_buffer
-                    .and_then(|id| s.buffers.get(&id))
-                    .map_or(false, |b| b.doc.line(1).contains("world"))
-            }),
-        ]);
+    let t = TestHarness::with_dir(root).with_arg(main_rs).run(vec![
+        WaitFor(lsp_server_ready),
+        Do(MoveDown),
+        Do(MoveRight),
+        Do(MoveRight),
+        Do(MoveRight),
+        Do(MoveRight),
+        Do(MoveRight),
+        Do(MoveRight),
+        Do(MoveRight),
+        Do(MoveRight),
+        Do(LspRename),
+        // Clear existing text, type new name
+        Do(DeleteBackward),
+        Do(DeleteBackward),
+        Do(DeleteBackward),
+        Do(DeleteBackward),
+        Do(DeleteBackward),
+        Do(InsertChar('w')),
+        Do(InsertChar('o')),
+        Do(InsertChar('r')),
+        Do(InsertChar('l')),
+        Do(InsertChar('d')),
+        Do(InsertNewline), // submit
+        // Wait for rename to complete — both occurrences should be renamed
+        WaitFor(|s| {
+            s.active_buffer
+                .and_then(|id| s.buffers.get(&id))
+                .map_or(false, |b| b.doc.line(1).contains("world"))
+        }),
+    ]);
 
     let b = buf(&t);
     assert!(
@@ -3922,23 +3912,21 @@ fn lsp_code_action() {
     // unused variable should trigger code action
     let (root, main_rs) = lsp_project("fn main() {\n    let x = 1;\n}\n");
 
-    let t = TestHarness::with_dir(root)
-        .with_arg(main_rs)
-        .run(vec![
-            WaitFor(lsp_server_ready),
-            // Move cursor to 'x' on line 1
-            Do(MoveDown),
-            Do(MoveRight),
-            Do(MoveRight),
-            Do(MoveRight),
-            Do(MoveRight),
-            Do(MoveRight),
-            Do(MoveRight),
-            Do(MoveRight),
-            Do(MoveRight),
-            Do(LspCodeAction),
-            WaitFor(|s| s.lsp.code_actions.is_some()),
-        ]);
+    let t = TestHarness::with_dir(root).with_arg(main_rs).run(vec![
+        WaitFor(lsp_server_ready),
+        // Move cursor to 'x' on line 1
+        Do(MoveDown),
+        Do(MoveRight),
+        Do(MoveRight),
+        Do(MoveRight),
+        Do(MoveRight),
+        Do(MoveRight),
+        Do(MoveRight),
+        Do(MoveRight),
+        Do(MoveRight),
+        Do(LspCodeAction),
+        WaitFor(|s| s.lsp.code_actions.is_some()),
+    ]);
 
     let actions = t.state.lsp.code_actions.as_ref().unwrap();
     assert!(
@@ -3961,23 +3949,21 @@ fn lsp_code_action_dismiss() {
     }
     let (root, main_rs) = lsp_project("fn main() {\n    let x = 1;\n}\n");
 
-    let t = TestHarness::with_dir(root)
-        .with_arg(main_rs)
-        .run(vec![
-            WaitFor(lsp_server_ready),
-            Do(MoveDown),
-            Do(MoveRight),
-            Do(MoveRight),
-            Do(MoveRight),
-            Do(MoveRight),
-            Do(MoveRight),
-            Do(MoveRight),
-            Do(MoveRight),
-            Do(MoveRight),
-            Do(LspCodeAction),
-            WaitFor(|s| s.lsp.code_actions.is_some()),
-            Do(Abort), // dismiss
-        ]);
+    let t = TestHarness::with_dir(root).with_arg(main_rs).run(vec![
+        WaitFor(lsp_server_ready),
+        Do(MoveDown),
+        Do(MoveRight),
+        Do(MoveRight),
+        Do(MoveRight),
+        Do(MoveRight),
+        Do(MoveRight),
+        Do(MoveRight),
+        Do(MoveRight),
+        Do(MoveRight),
+        Do(LspCodeAction),
+        WaitFor(|s| s.lsp.code_actions.is_some()),
+        Do(Abort), // dismiss
+    ]);
 
     assert!(
         t.state.lsp.code_actions.is_none(),
@@ -4026,27 +4012,25 @@ fn lsp_completion_appears_on_typing() {
     // Then we type `let y: Opt` which should trigger completion with `Option`.
     let (root, main_rs) = lsp_project("fn main() {\n    let x = 0;\n    \n}\n");
 
-    let t = TestHarness::with_dir(root)
-        .with_arg(main_rs)
-        .run(vec![
-            WaitFor(lsp_server_ready),
-            // Move to line 2 (the empty line)
-            Do(MoveDown),
-            Do(MoveDown),
-            // Type "let y: Opt"
-            Do(InsertChar('l')),
-            Do(InsertChar('e')),
-            Do(InsertChar('t')),
-            Do(InsertChar(' ')),
-            Do(InsertChar('y')),
-            Do(InsertChar(':')),
-            Do(InsertChar(' ')),
-            Do(InsertChar('O')),
-            Do(InsertChar('p')),
-            Do(InsertChar('t')),
-            // Wait for completion popup
-            WaitFor(has_completion),
-        ]);
+    let t = TestHarness::with_dir(root).with_arg(main_rs).run(vec![
+        WaitFor(lsp_server_ready),
+        // Move to line 2 (the empty line)
+        Do(MoveDown),
+        Do(MoveDown),
+        // Type "let y: Opt"
+        Do(InsertChar('l')),
+        Do(InsertChar('e')),
+        Do(InsertChar('t')),
+        Do(InsertChar(' ')),
+        Do(InsertChar('y')),
+        Do(InsertChar(':')),
+        Do(InsertChar(' ')),
+        Do(InsertChar('O')),
+        Do(InsertChar('p')),
+        Do(InsertChar('t')),
+        // Wait for completion popup
+        WaitFor(has_completion),
+    ]);
 
     let comp = t.state.lsp.completion.as_ref().unwrap();
     assert!(
@@ -4067,29 +4051,27 @@ fn lsp_completion_filters_as_you_type() {
     // Then type "ri" → should narrow to String, str only.
     let (root, main_rs) = lsp_project("fn main() {\n    let x = 0;\n    \n}\n");
 
-    let t = TestHarness::with_dir(root)
-        .with_arg(main_rs)
-        .run(vec![
-            WaitFor(lsp_server_ready),
-            Do(MoveDown),
-            Do(MoveDown),
-            // Type "let y: St"
-            Do(InsertChar('l')),
-            Do(InsertChar('e')),
-            Do(InsertChar('t')),
-            Do(InsertChar(' ')),
-            Do(InsertChar('y')),
-            Do(InsertChar(':')),
-            Do(InsertChar(' ')),
-            Do(InsertChar('S')),
-            Do(InsertChar('t')),
-            WaitFor(has_completion),
-            // Now type "ri" — should narrow results
-            Do(InsertChar('r')),
-            Do(InsertChar('i')),
-            // Small wait for re-filter
-            WaitFor(has_completion),
-        ]);
+    let t = TestHarness::with_dir(root).with_arg(main_rs).run(vec![
+        WaitFor(lsp_server_ready),
+        Do(MoveDown),
+        Do(MoveDown),
+        // Type "let y: St"
+        Do(InsertChar('l')),
+        Do(InsertChar('e')),
+        Do(InsertChar('t')),
+        Do(InsertChar(' ')),
+        Do(InsertChar('y')),
+        Do(InsertChar(':')),
+        Do(InsertChar(' ')),
+        Do(InsertChar('S')),
+        Do(InsertChar('t')),
+        WaitFor(has_completion),
+        // Now type "ri" — should narrow results
+        Do(InsertChar('r')),
+        Do(InsertChar('i')),
+        // Small wait for re-filter
+        WaitFor(has_completion),
+    ]);
 
     let comp = t.state.lsp.completion.as_ref().unwrap();
     // All visible items should contain "Stri"
@@ -4112,22 +4094,20 @@ fn lsp_completion_accept_moves_cursor() {
     }
     let (root, main_rs) = lsp_project("fn main() {\n    let x = 0;\n    \n}\n");
 
-    let t = TestHarness::with_dir(root)
-        .with_arg(main_rs)
-        .run(vec![
-            WaitFor(lsp_server_ready),
-            Do(MoveDown),
-            Do(MoveDown),
-            // Type "Opt"
-            Do(InsertChar('O')),
-            Do(InsertChar('p')),
-            Do(InsertChar('t')),
-            WaitFor(has_completion),
-            // Accept with Tab
-            Do(InsertTab),
-            // Completion should be dismissed
-            WaitFor(|s| s.lsp.completion.is_none()),
-        ]);
+    let t = TestHarness::with_dir(root).with_arg(main_rs).run(vec![
+        WaitFor(lsp_server_ready),
+        Do(MoveDown),
+        Do(MoveDown),
+        // Type "Opt"
+        Do(InsertChar('O')),
+        Do(InsertChar('p')),
+        Do(InsertChar('t')),
+        WaitFor(has_completion),
+        // Accept with Tab
+        Do(InsertTab),
+        // Completion should be dismissed
+        WaitFor(|s| s.lsp.completion.is_none()),
+    ]);
 
     let b = buf(&t);
     let line = b.doc.line(2);
@@ -4154,18 +4134,16 @@ fn lsp_completion_dismiss_on_escape() {
     }
     let (root, main_rs) = lsp_project("fn main() {\n    let x = 0;\n    \n}\n");
 
-    let t = TestHarness::with_dir(root)
-        .with_arg(main_rs)
-        .run(vec![
-            WaitFor(lsp_server_ready),
-            Do(MoveDown),
-            Do(MoveDown),
-            Do(InsertChar('O')),
-            Do(InsertChar('p')),
-            Do(InsertChar('t')),
-            WaitFor(has_completion),
-            Do(Abort),
-        ]);
+    let t = TestHarness::with_dir(root).with_arg(main_rs).run(vec![
+        WaitFor(lsp_server_ready),
+        Do(MoveDown),
+        Do(MoveDown),
+        Do(InsertChar('O')),
+        Do(InsertChar('p')),
+        Do(InsertChar('t')),
+        WaitFor(has_completion),
+        Do(Abort),
+    ]);
 
     assert!(
         t.state.lsp.completion.is_none(),
@@ -4184,23 +4162,21 @@ fn lsp_completion_trigger_char_fresh_request() {
     // showing enum-like items (Some, None) or associated items.
     let (root, main_rs) = lsp_project("fn main() {\n    let x = 0;\n    \n}\n");
 
-    let t = TestHarness::with_dir(root)
-        .with_arg(main_rs)
-        .run(vec![
-            WaitFor(lsp_server_ready),
-            Do(MoveDown),
-            Do(MoveDown),
-            Do(InsertChar('O')),
-            Do(InsertChar('p')),
-            Do(InsertChar('t')),
-            Do(InsertChar('i')),
-            Do(InsertChar('o')),
-            Do(InsertChar('n')),
-            // Typing "::" should trigger fresh completion for variants
-            Do(InsertChar(':')),
-            Do(InsertChar(':')),
-            WaitFor(has_completion),
-        ]);
+    let t = TestHarness::with_dir(root).with_arg(main_rs).run(vec![
+        WaitFor(lsp_server_ready),
+        Do(MoveDown),
+        Do(MoveDown),
+        Do(InsertChar('O')),
+        Do(InsertChar('p')),
+        Do(InsertChar('t')),
+        Do(InsertChar('i')),
+        Do(InsertChar('o')),
+        Do(InsertChar('n')),
+        // Typing "::" should trigger fresh completion for variants
+        Do(InsertChar(':')),
+        Do(InsertChar(':')),
+        WaitFor(has_completion),
+    ]);
 
     let comp = t.state.lsp.completion.as_ref().unwrap();
     // Should show Option's associated items (Some, None, etc.)
@@ -4219,24 +4195,23 @@ fn lsp_format_on_save() {
         return;
     }
     // Unformatted code + unused var for diagnostics
-    let (root, main_rs) =
-        lsp_project("fn   main(  )  {\n    let   x  =  1;\n    let y = 2;\n    println!(\"{}\",  x);\n}\n");
+    let (root, main_rs) = lsp_project(
+        "fn   main(  )  {\n    let   x  =  1;\n    let y = 2;\n    println!(\"{}\",  x);\n}\n",
+    );
 
-    let t = TestHarness::with_dir(root)
-        .with_arg(main_rs)
-        .run(vec![
-            WaitFor(lsp_server_ready),
-            Do(Save),
-            // Wait for format-then-save to complete (file becomes clean)
-            WaitFor(|s| {
-                s.active_buffer
-                    .and_then(|id| s.buffers.get(&id))
-                    .map_or(false, |b| {
-                        b.save_state == led_state::SaveState::Clean
-                            && b.doc.line(0).starts_with("fn main()")
-                    })
-            }),
-        ]);
+    let t = TestHarness::with_dir(root).with_arg(main_rs).run(vec![
+        WaitFor(lsp_server_ready),
+        Do(Save),
+        // Wait for format-then-save to complete (file becomes clean)
+        WaitFor(|s| {
+            s.active_buffer
+                .and_then(|id| s.buffers.get(&id))
+                .map_or(false, |b| {
+                    b.save_state == led_state::SaveState::Clean
+                        && b.doc.line(0).starts_with("fn main()")
+                })
+        }),
+    ]);
 
     let b = buf(&t);
     assert!(

@@ -53,7 +53,7 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Arc<AppState>> {
     let workspace_s = drivers
         .workspace_in
         .filter_map(|ev| match ev {
-            WI::Workspace { workspace } | WI::WorkspaceChanged { workspace } => Some(workspace),
+            WI::Workspace { workspace } => Some(workspace),
             _ => None,
         })
         .sample_combine(&state)
@@ -63,6 +63,34 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Arc<AppState>> {
             Mut::Workspace {
                 workspace,
                 initial_dirs: dirs,
+            }
+        })
+        .stream();
+
+    let workspace_changed_s = drivers
+        .workspace_in
+        .filter_map(|ev| match ev {
+            WI::WorkspaceChanged { paths } => Some(paths),
+            _ => None,
+        })
+        .sample_combine(&state)
+        .map(|(paths, s)| {
+            let b = &s.browser;
+            let Some(ref root) = b.root else {
+                return Mut::WorkspaceChanged { dirs: vec![] };
+            };
+            // Collect parent dirs of changed paths that are currently visible
+            // (root is always visible, expanded dirs are visible).
+            let mut dirs_to_refresh = HashSet::new();
+            for p in &paths {
+                if let Some(parent) = p.parent() {
+                    if parent == root.as_path() || b.expanded_dirs.contains(parent) {
+                        dirs_to_refresh.insert(parent.to_path_buf());
+                    }
+                }
+            }
+            Mut::WorkspaceChanged {
+                dirs: dirs_to_refresh.into_iter().collect(),
             }
         })
         .stream();
@@ -332,6 +360,7 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Arc<AppState>> {
         .stream();
 
     workspace_s.forward(&muts);
+    workspace_changed_s.forward(&muts);
     workspace_misc_s.forward(&muts);
     session_s.forward(&muts);
     undo_flushed_s.forward(&muts);
@@ -642,6 +671,12 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Arc<AppState>> {
                 s.git_mut().pending_file_scan.set(());
                 s.workspace = Some(Arc::new(workspace));
             }
+            Mut::WorkspaceChanged { dirs } => {
+                if !dirs.is_empty() {
+                    s.pending_lists.set(dirs);
+                }
+                s.git_mut().pending_file_scan.set(());
+            }
 
             // ── LSP ──
             Mut::LspNavigate { path, row, col } => {
@@ -660,15 +695,13 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Arc<AppState>> {
                     }
                 }
                 // Check if file is already open
-                let canonical =
-                    std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+                let canonical = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
                 let existing = s
                     .buffers
                     .values()
                     .find(|b| {
                         b.path.as_ref().map_or(false, |p| {
-                            std::fs::canonicalize(p).unwrap_or_else(|_| p.clone())
-                                == canonical
+                            std::fs::canonicalize(p).unwrap_or_else(|_| p.clone()) == canonical
                         })
                     })
                     .map(|b| b.id);
@@ -915,6 +948,9 @@ enum Mut {
         workspace: Workspace,
         initial_dirs: Vec<PathBuf>,
     },
+    WorkspaceChanged {
+        dirs: Vec<PathBuf>,
+    },
     // LSP
     LspNavigate {
         path: PathBuf,
@@ -982,6 +1018,7 @@ impl Mut {
             Mut::UndoFlushReady { .. } => "UndoFlushReady",
             Mut::TimerFired(_) => "TimerFired",
             Mut::Workspace { .. } => "Workspace",
+            Mut::WorkspaceChanged { .. } => "WorkspaceChanged",
             Mut::LspNavigate { .. } => "LspNavigate",
             Mut::LspEdits { .. } => "LspEdits",
             Mut::LspCompletion { .. } => "LspCompletion",

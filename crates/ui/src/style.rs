@@ -407,7 +407,16 @@ mod tests {
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
         let frame = terminal
             .draw(|f| {
-                render::render(f, &layout, &display_lines, Some((2, 0)), status, &tabs, &[], &display::OverlayContent::None);
+                render::render(
+                    f,
+                    &layout,
+                    &display_lines,
+                    Some((2, 0)),
+                    status,
+                    &tabs,
+                    &[],
+                    &display::OverlayContent::None,
+                );
             })
             .unwrap();
 
@@ -515,7 +524,16 @@ mod tests {
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
         let frame = terminal
             .draw(|f| {
-                render::render(f, &layout, &lines, cursor, &status, &tabs, &[], &display::OverlayContent::None);
+                render::render(
+                    f,
+                    &layout,
+                    &lines,
+                    cursor,
+                    &status,
+                    &tabs,
+                    &[],
+                    &display::OverlayContent::None,
+                );
             })
             .unwrap();
 

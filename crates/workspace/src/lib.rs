@@ -67,8 +67,8 @@ pub enum WorkspaceIn {
     SyncResult { result: SyncResultKind },
     /// Another instance touched the notify dir for a file we have open.
     NotifyEvent { file_path_hash: String },
-    /// Workspace tree changed (watcher event — re-emits the workspace).
-    WorkspaceChanged { workspace: Workspace },
+    /// Workspace tree changed (watcher event — paths that were created/removed).
+    WorkspaceChanged { paths: Vec<PathBuf> },
     /// Notify watcher is ready (for cross-instance sync tests).
     WatchersReady,
 }
@@ -378,9 +378,9 @@ pub fn driver(out: Stream<WorkspaceOut>, file_watcher: Arc<FileWatcher>) -> Stre
                             }) {
                                 continue;
                             }
-                            if let Some(ref ws) = current {
+                            if current.is_some() {
                                 if result_tx.send(WorkspaceIn::WorkspaceChanged {
-                                    workspace: ws.clone(),
+                                    paths: ev.paths,
                                 }).await.is_err() {
                                     break;
                                 }

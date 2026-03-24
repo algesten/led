@@ -118,12 +118,11 @@ pub fn driver(state: Stream<Arc<AppState>>) -> Ui {
         })
         .stream();
 
-    let overlay_s = state
-        .map(|s| display::overlay_inputs(&s))
-        .dedupe()
-        .stream();
+    let overlay_s = state.map(|s| display::overlay_inputs(&s)).dedupe().stream();
 
-    let render_s = combine!(display_s, cursor_s, status_s, tabs_s, layout_s, browser_s, overlay_s);
+    let render_s = combine!(
+        display_s, cursor_s, status_s, tabs_s, layout_s, browser_s, overlay_s
+    );
 
     let mut last_redraw = 0u64;
 
@@ -146,7 +145,9 @@ pub fn driver(state: Stream<Arc<AppState>>) -> Ui {
                 terminal.clear().ok();
             }
             if let Err(e) = terminal.draw(|frame| {
-                render::render(frame, layout, lines, *cursor, status, tabs, browser, overlay);
+                render::render(
+                    frame, layout, lines, *cursor, status, tabs, browser, overlay,
+                );
             }) {
                 log::error!("render error: {}", e);
             }
