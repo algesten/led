@@ -1,3 +1,4 @@
+use std::rc::Rc;
 use std::sync::Arc;
 
 use led_core::rx::Stream;
@@ -10,7 +11,7 @@ use super::Mut;
 /// Derive buffer state from docstore events + latest state.
 pub fn buffers_of(
     docstore: &Stream<Result<DocStoreIn, Alert>>,
-    state: &Stream<Arc<AppState>>,
+    state: &Stream<Rc<AppState>>,
 ) -> Stream<Mut> {
     docstore
         .sample_combine(state)
@@ -55,8 +56,8 @@ pub fn buffers_of(
                         change_seq: 0,
                         isearch: None,
                         last_search: None,
-                        syntax_highlights: Arc::new(Vec::new()),
-                        bracket_pairs: Arc::new(Vec::new()),
+                        syntax_highlights: Rc::new(Vec::new()),
+                        bracket_pairs: Rc::new(Vec::new()),
                         matching_bracket: None,
                         pending_indent_row: None,
                         pending_tab_fallback: false,
@@ -195,8 +196,8 @@ pub fn buffers_of(
                     change_seq: 0,
                     isearch: None,
                     last_search: None,
-                    syntax_highlights: Arc::new(Vec::new()),
-                    bracket_pairs: Arc::new(Vec::new()),
+                    syntax_highlights: Rc::new(Vec::new()),
+                    bracket_pairs: Rc::new(Vec::new()),
                     matching_bracket: None,
                     pending_indent_row: None,
                     pending_tab_fallback: false,
@@ -316,7 +317,7 @@ pub fn buffers_of(
         .stream()
 }
 
-fn find_buf_by_doc_id<'a>(state: &'a AppState, doc_id: DocId) -> Option<&'a Arc<BufferState>> {
+fn find_buf_by_doc_id<'a>(state: &'a AppState, doc_id: DocId) -> Option<&'a Rc<BufferState>> {
     state.buffers.values().find(|b| b.doc_id == doc_id)
 }
 

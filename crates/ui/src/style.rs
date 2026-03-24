@@ -1,5 +1,6 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use led_core::theme::{StyleTable, StyleValue, Theme};
@@ -14,9 +15,9 @@ pub fn resolve(theme: &Theme, sv: &StyleValue) -> Style {
 
 /// Pre-resolve all syntax.{name} entries from the theme into a style map.
 /// Cached by Arc pointer identity — only recomputes when the theme Arc changes.
-pub fn resolve_syntax_map(theme: &Arc<Theme>) -> Arc<HashMap<String, Style>> {
+pub fn resolve_syntax_map(theme: &Arc<Theme>) -> Rc<HashMap<String, Style>> {
     thread_local! {
-        static CACHE: RefCell<Option<(usize, Arc<HashMap<String, Style>>)>> = RefCell::new(None);
+        static CACHE: RefCell<Option<(usize, Rc<HashMap<String, Style>>)>> = RefCell::new(None);
     }
     let ptr = Arc::as_ptr(theme) as usize;
     CACHE.with(|cell| {
@@ -26,7 +27,7 @@ pub fn resolve_syntax_map(theme: &Arc<Theme>) -> Arc<HashMap<String, Style>> {
                 return map.clone();
             }
         }
-        let map: Arc<HashMap<String, Style>> = Arc::new(
+        let map: Rc<HashMap<String, Style>> = Rc::new(
             theme
                 .syntax
                 .iter()
@@ -487,8 +488,8 @@ mod tests {
             change_seq: 0,
             isearch: None,
             last_search: None,
-            syntax_highlights: Arc::new(Vec::new()),
-            bracket_pairs: Arc::new(Vec::new()),
+            syntax_highlights: std::rc::Rc::new(Vec::new()),
+            bracket_pairs: std::rc::Rc::new(Vec::new()),
             matching_bracket: None,
             pending_indent_row: None,
             pending_tab_fallback: false,
@@ -506,7 +507,7 @@ mod tests {
         state.dims = Some(Dimensions::new(40, 10, false));
         state.config_theme = Some(config_theme);
         state.active_buffer = Some(BufferId(1));
-        Arc::make_mut(&mut state.buffers).insert(BufferId(1), Arc::new(buf));
+        std::rc::Rc::make_mut(&mut state.buffers).insert(BufferId(1), std::rc::Rc::new(buf));
 
         let display_inputs = display::display_inputs(&state).expect("display_inputs");
         let cursor_inputs = display::cursor_inputs(&state).expect("cursor_inputs");

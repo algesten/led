@@ -1,5 +1,6 @@
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::rc::Rc;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use led_core::rx::Stream;
@@ -9,14 +10,19 @@ use tokio::sync::oneshot;
 
 use super::TestDirs;
 
+type QueryFn = Box<dyn FnOnce(&AppState) -> Box<dyn std::any::Any + Send> + Send>;
+
 enum Cmd {
     Action(Action),
+    Query {
+        f: QueryFn,
+        reply: std::sync::mpsc::Sender<Box<dyn std::any::Any + Send>>,
+    },
     Stop,
 }
 
 pub struct Instance {
     cmd_tx: std::sync::mpsc::Sender<Cmd>,
-    state: Arc<Mutex<Option<Arc<AppState>>>>,
     handle: Option<std::thread::JoinHandle<()>>,
 }
 
@@ -24,8 +30,6 @@ impl Instance {
     /// Spawn an editor instance on its own thread + tokio runtime.
     pub fn start(startup: Startup) -> Self {
         let (cmd_tx, cmd_rx) = std::sync::mpsc::channel::<Cmd>();
-        let state: Arc<Mutex<Option<Arc<AppState>>>> = Arc::new(Mutex::new(None));
-        let state2 = state.clone();
 
         let handle = std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
@@ -42,11 +46,13 @@ impl Instance {
 
                         let (state_stream, guards) = led::run(startup, actions_in.clone(), quit_tx);
 
-                        // Capture every state update for the test thread to read.
-                        let capture = state2.clone();
-                        state_stream.on(move |opt: Option<&Arc<AppState>>| {
+                        // Capture every state update on this thread.
+                        let last_state: Rc<std::cell::RefCell<Option<Rc<AppState>>>> =
+                            Rc::new(std::cell::RefCell::new(None));
+                        let capture = last_state.clone();
+                        state_stream.on(move |opt: Option<&Rc<AppState>>| {
                             if let Some(s) = opt {
-                                *capture.lock().unwrap() = Some(s.clone());
+                                *capture.borrow_mut() = Some(s.clone());
                             }
                         });
 
@@ -54,12 +60,19 @@ impl Instance {
 
                         // Command loop: read from test thread, push into FRP.
                         let stream = actions_in.clone();
+                        let state_for_query = last_state.clone();
                         tokio::task::spawn_local(async move {
                             loop {
                                 tokio::time::sleep(Duration::from_millis(1)).await;
                                 while let Ok(cmd) = cmd_rx.try_recv() {
                                     match cmd {
                                         Cmd::Action(a) => stream.push(a),
+                                        Cmd::Query { f, reply } => {
+                                            if let Some(ref s) = *state_for_query.borrow() {
+                                                let result = f(s);
+                                                reply.send(result).ok();
+                                            }
+                                        }
                                         Cmd::Stop => return,
                                     }
                                 }
@@ -78,7 +91,6 @@ impl Instance {
 
         Instance {
             cmd_tx,
-            state,
             handle: Some(handle),
         }
     }
@@ -87,38 +99,57 @@ impl Instance {
         self.cmd_tx.send(Cmd::Action(action)).ok();
     }
 
-    pub fn state(&self) -> Option<Arc<AppState>> {
-        self.state.lock().unwrap().clone()
+    /// Execute a closure on the instance thread with access to the current AppState.
+    /// Returns the closure's result (which must be Send).
+    pub fn with_state<R: Send + 'static>(
+        &self,
+        f: impl FnOnce(&AppState) -> R + Send + 'static,
+    ) -> R {
+        let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+        self.cmd_tx
+            .send(Cmd::Query {
+                f: Box::new(move |s| Box::new(f(s)) as Box<dyn std::any::Any + Send>),
+                reply: reply_tx,
+            })
+            .expect("send query");
+        let result = reply_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("recv state query");
+        *result.downcast::<R>().expect("downcast query result")
     }
 
     /// Block the test thread until `pred` returns true or `timeout` elapses.
     /// Panics on timeout with the given label.
-    pub fn wait_for(&self, pred: impl Fn(&AppState) -> bool, timeout: Duration, label: &str) {
+    pub fn wait_for(
+        &self,
+        pred: impl Fn(&AppState) -> bool + Send + Clone + 'static,
+        timeout: Duration,
+        label: &str,
+    ) {
         let start = Instant::now();
         loop {
-            if let Some(ref s) = *self.state.lock().unwrap() {
-                if pred(s) {
-                    return;
-                }
+            let result = self.with_state(pred.clone());
+            if result {
+                return;
             }
             if start.elapsed() > timeout {
-                let state_desc = match self.state.lock().unwrap().as_ref() {
-                    Some(s) => {
-                        let buf_info = s.active_buffer.and_then(|id| s.buffers.get(&id)).map(|b| {
-                            format!(
+                let state_desc: String = self.with_state(|s| {
+                    let buf_info =
+                        s.active_buffer
+                            .and_then(|id| s.buffers.get(&id))
+                            .map(|b| {
+                                format!(
                                 "chain_id={:?} dirty={} save={:?} persisted={} seq={} change_seq={} lines={}",
                                 b.chain_id, b.doc.dirty(), b.save_state, b.persisted_undo_len,
                                 b.last_seen_seq, b.change_seq, b.doc.line_count()
                             )
-                        });
-                        format!(
-                            "buffers={} active_buf=[{}]",
-                            s.buffers.len(),
-                            buf_info.unwrap_or_default()
-                        )
-                    }
-                    None => "no state".to_string(),
-                };
+                            });
+                    format!(
+                        "buffers={} active_buf=[{}]",
+                        s.buffers.len(),
+                        buf_info.unwrap_or_default()
+                    )
+                });
                 panic!(
                     "Instance::wait_for({label}) timed out after {:?}\n  state: {state_desc}",
                     timeout

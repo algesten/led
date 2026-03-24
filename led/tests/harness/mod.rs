@@ -13,7 +13,12 @@ use led_state::AppState;
 use tempfile::TempDir;
 use tokio::sync::oneshot;
 
+/// A Send-safe wrapper that runs RunFn closures on the tokio thread.
+/// The closure is extracted before the async block, so only the result
+/// (nothing) crosses the boundary.
+
 /// Paths available to RunFn callbacks and TestResult.
+#[derive(Clone)]
 pub struct TestDirs {
     /// Root tmpdir (pass to `TestHarness::with_dir` for session restore).
     pub root: PathBuf,
@@ -28,7 +33,7 @@ pub enum TestStep {
     /// This tests that session save completes before the app would exit.
     QuitAndWait,
     /// Run arbitrary code during the test.
-    RunFn(Box<dyn FnOnce(&TestDirs) + Send>),
+    RunFn(Box<dyn FnOnce(&TestDirs)>),
 }
 
 impl From<Action> for TestStep {
@@ -38,7 +43,7 @@ impl From<Action> for TestStep {
 }
 
 pub struct TestResult {
-    pub state: Arc<AppState>,
+    pub state: Rc<AppState>,
     pub file_path: Option<PathBuf>,
     pub dirs: TestDirs,
 }
@@ -179,113 +184,99 @@ impl TestHarness {
         };
 
         let viewport = self.viewport;
-        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let result_dirs = dirs.clone();
 
-        // Clone dirs for the spawned thread (RunFn needs Send)
-        let dirs_for_thread = TestDirs {
-            root: dirs.root.clone(),
-            workspace: dirs.workspace.clone(),
-            config: dirs.config.clone(),
-        };
+        // Run everything on the current thread — AppState contains Rc and is !Send.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("create runtime");
 
-        let handle = std::thread::spawn(move || {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("create runtime");
+        let state = rt.block_on(async {
+            let local = tokio::task::LocalSet::new();
+            local
+                .run_until(async {
+                    let actions_in: Stream<Action> = Stream::new();
+                    let (quit_tx, quit_rx) = oneshot::channel::<()>();
 
-            rt.block_on(async {
-                let local = tokio::task::LocalSet::new();
-                local
-                    .run_until(async {
-                        let actions_in: Stream<Action> = Stream::new();
-                        let (quit_tx, quit_rx) = oneshot::channel::<()>();
+                    let (state, guards) = led::run(startup, actions_in.clone(), quit_tx);
 
-                        let (state, guards) = led::run(startup, actions_in.clone(), quit_tx);
+                    let last_state: Rc<RefCell<Option<Rc<AppState>>>> = Rc::new(RefCell::new(None));
+                    let capture = last_state.clone();
+                    state.on(move |opt: Option<&Rc<AppState>>| {
+                        if let Some(s) = opt {
+                            *capture.borrow_mut() = Some(s.clone());
+                        }
+                    });
 
-                        let last_state: Rc<RefCell<Option<Arc<AppState>>>> =
-                            Rc::new(RefCell::new(None));
-                        let capture = last_state.clone();
-                        state.on(move |opt: Option<&Arc<AppState>>| {
-                            if let Some(s) = opt {
-                                *capture.borrow_mut() = Some(s.clone());
-                            }
-                        });
+                    actions_in.push(Action::Resize(viewport.0, viewport.1));
 
-                        actions_in.push(Action::Resize(viewport.0, viewport.1));
-
-                        let stream = actions_in.clone();
-                        let done = Rc::new(Cell::new(false));
-                        let done2 = done.clone();
-                        let quit_rx = Rc::new(RefCell::new(Some(quit_rx)));
-                        let quit_rx2 = quit_rx.clone();
-                        let last_for_wait = last_state.clone();
-                        let test_dirs = dirs_for_thread;
-                        tokio::task::spawn_local(async move {
-                            // Wait for session restore to complete, then for files to open
-                            loop {
-                                if let Some(ref s) = *last_for_wait.borrow() {
-                                    let phase_done = s.session.restore_phase
-                                        == led_state::SessionRestorePhase::Done;
-                                    let files_ready = s.buffers.len() >= file_count;
-                                    if phase_done && files_ready {
-                                        break;
-                                    }
-                                }
-                                tokio::time::sleep(Duration::from_millis(1)).await;
-                            }
-
-                            for step in steps {
-                                match step {
-                                    TestStep::Do(action) => stream.push(action),
-                                    TestStep::WaitFor(pred) => {
-                                        wait_for_condition(&last_for_wait, pred).await;
-                                    }
-                                    TestStep::QuitAndWait => {
-                                        stream.push(Action::Quit);
-                                        // Wait for the real quit signal — same as main.rs
-                                        if let Some(rx) = quit_rx2.borrow_mut().take() {
-                                            let _ = rx.await;
-                                        }
-                                    }
-                                    TestStep::RunFn(f) => {
-                                        f(&test_dirs);
-                                    }
+                    let stream = actions_in.clone();
+                    let done = Rc::new(Cell::new(false));
+                    let done2 = done.clone();
+                    let quit_rx = Rc::new(RefCell::new(Some(quit_rx)));
+                    let quit_rx2 = quit_rx.clone();
+                    let last_for_wait = last_state.clone();
+                    tokio::task::spawn_local(async move {
+                        // Wait for session restore to complete, then for files to open
+                        loop {
+                            if let Some(ref s) = *last_for_wait.borrow() {
+                                let phase_done =
+                                    s.session.restore_phase == led_state::SessionRestorePhase::Done;
+                                let files_ready = s.buffers.len() >= file_count;
+                                if phase_done && files_ready {
+                                    break;
                                 }
                             }
-
-                            done2.set(true);
-                        });
-
-                        while !done.get() {
-                            tokio::task::yield_now().await;
+                            tokio::time::sleep(Duration::from_millis(1)).await;
                         }
 
-                        let result = last_state.borrow().clone().expect("state was never set");
-                        let _ = done_tx.send(result);
-                        drop(guards);
-                    })
-                    .await;
-            });
+                        for step in steps {
+                            match step {
+                                TestStep::Do(action) => stream.push(action),
+                                TestStep::WaitFor(pred) => {
+                                    wait_for_condition(&last_for_wait, pred).await;
+                                }
+                                TestStep::QuitAndWait => {
+                                    stream.push(Action::Quit);
+                                    // Wait for the real quit signal — same as main.rs
+                                    if let Some(rx) = quit_rx2.borrow_mut().take() {
+                                        let _ = rx.await;
+                                    }
+                                }
+                                TestStep::RunFn(f) => {
+                                    f(&dirs);
+                                }
+                            }
+                        }
 
-            // Safety net: cancel any lingering tasks (e.g. filesystem watchers).
-            rt.shutdown_timeout(Duration::from_millis(100));
+                        done2.set(true);
+                    });
+
+                    while !done.get() {
+                        tokio::task::yield_now().await;
+                    }
+
+                    let result = last_state.borrow().clone().expect("state was never set");
+                    drop(guards);
+                    result
+                })
+                .await
         });
 
-        let state = done_rx
-            .recv_timeout(Duration::from_secs(30))
-            .expect("test timed out: Timeout");
-        handle.join().ok();
+        // Safety net: cancel any lingering tasks (e.g. filesystem watchers).
+        rt.shutdown_timeout(Duration::from_millis(100));
+
         TestResult {
             state,
             file_path,
-            dirs,
+            dirs: result_dirs,
         }
     }
 }
 
 async fn wait_for_condition(
-    state: &Rc<RefCell<Option<Arc<AppState>>>>,
+    state: &Rc<RefCell<Option<Rc<AppState>>>>,
     pred: fn(&AppState) -> bool,
 ) {
     loop {

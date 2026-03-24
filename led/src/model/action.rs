@@ -1,5 +1,5 @@
 use std::path::Path;
-use std::sync::Arc;
+use std::rc::Rc;
 
 use led_core::{Action, BufferId, PanelSlot};
 use led_state::{
@@ -1173,7 +1173,7 @@ fn shift_highlights(buf: &mut BufferState, edit_row: usize, old_line_count: usiz
             }
         })
         .collect();
-    buf.syntax_highlights = Arc::new(shifted);
+    buf.syntax_highlights = Rc::new(shifted);
 }
 
 /// Close undo group and clear edit kind tracking.

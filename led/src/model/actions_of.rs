@@ -1,5 +1,5 @@
 use std::cell::Cell;
-use std::sync::Arc;
+use std::rc::Rc;
 
 use crossterm::event::KeyCode;
 use led_core::Action;
@@ -12,7 +12,7 @@ use led_terminal_in::TerminalInput;
 use super::Mut;
 
 /// Derive actions from terminal input + state (for keymap context).
-pub fn actions_of(input: &Stream<TerminalInput>, state: &Stream<Arc<AppState>>) -> Stream<Mut> {
+pub fn actions_of(input: &Stream<TerminalInput>, state: &Stream<Rc<AppState>>) -> Stream<Mut> {
     // Resize doesn't need state — extract it directly so it's never lost
     let resize_s = input.filter_map(|i| match i {
         TerminalInput::Resize(w, h) => Some(Mut::Resize(w, h)),

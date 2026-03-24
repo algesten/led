@@ -2,7 +2,6 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::sync::Arc;
 use std::time::Duration;
 
 use led_config_file::{ConfigDir, ConfigFileOut};
@@ -17,7 +16,7 @@ use led_timers::{Schedule, TimersOut};
 use led_workspace::{SessionBuffer, SessionData, WorkspaceOut};
 
 pub struct Derived {
-    pub ui: Stream<Arc<AppState>>,
+    pub ui: Stream<Rc<AppState>>,
     pub workspace_out: Stream<WorkspaceOut>,
     pub docstore_out: Stream<DocStoreOut>,
     pub config_file_out: Stream<ConfigFileOut>,
@@ -30,7 +29,7 @@ pub struct Derived {
     pub lsp_out: Stream<LspOut>,
 }
 
-pub fn derived(state: Stream<Arc<AppState>>) -> Derived {
+pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
     // Suppress render while an async indent is in flight — the next
     // render after the driver responds shows newline + correct indent
     // in one atomic visual update, eliminating cursor flash.
@@ -399,7 +398,7 @@ pub fn derived(state: Stream<Arc<AppState>>) -> Derived {
     // within a line skips syntax entirely — bracket match updates
     // on next vertical move or edit.
     let syntax_key =
-        |s: &Arc<AppState>| -> (Option<(BufferId, u64, usize, usize, Option<usize>)>, usize) {
+        |s: &Rc<AppState>| -> (Option<(BufferId, u64, usize, usize, Option<usize>)>, usize) {
             let buf_info = s.active_buffer.and_then(|id| {
                 let buf = s.buffers.get(&id)?;
                 Some((
@@ -547,7 +546,7 @@ pub fn derived(state: Stream<Arc<AppState>>) -> Derived {
     // BufferOpened/Closed: track paths entering/leaving buffers
     let lsp_buf_opened = state
         .dedupe_by(|s| s.buffers.len())
-        .map(move |s: Arc<AppState>| {
+        .map(move |s: Rc<AppState>| {
             let mut known = lsp_known_bufs.borrow_mut();
             let current: HashSet<PathBuf> =
                 s.buffers.values().filter_map(|b| b.path.clone()).collect();

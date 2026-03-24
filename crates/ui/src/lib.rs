@@ -1,6 +1,5 @@
 use std::io;
 use std::rc::Rc;
-use std::sync::Arc;
 
 use led_core::combine;
 use led_core::rx::Stream;
@@ -17,7 +16,7 @@ mod style;
 pub struct Ui;
 
 /// One-way driver: renders state to the terminal.
-pub fn driver(state: Stream<Arc<AppState>>) -> Ui {
+pub fn driver(state: Stream<Rc<AppState>>) -> Ui {
     let mut terminal = setup();
 
     let display_s = state

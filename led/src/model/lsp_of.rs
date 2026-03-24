@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::rc::Rc;
 
 use led_core::rx::Stream;
 use led_lsp::LspIn;
@@ -6,7 +6,7 @@ use led_state::AppState;
 
 use super::Mut;
 
-pub fn lsp_of(lsp_in: &Stream<LspIn>, state: &Stream<Arc<AppState>>) -> Stream<Mut> {
+pub fn lsp_of(lsp_in: &Stream<LspIn>, state: &Stream<Rc<AppState>>) -> Stream<Mut> {
     let navigate_s = lsp_in
         .filter(|ev| matches!(ev, LspIn::Navigate { .. }))
         .map(|ev| match ev {

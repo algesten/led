@@ -1,3 +1,4 @@
+use std::rc::Rc;
 use std::sync::Arc;
 
 use led_core::rx::Stream;
@@ -11,7 +12,7 @@ use super::Mut;
 ///
 /// Resolves buffer lookups, deserializes undo entries, and applies doc
 /// edits in the combinator chain — the reducer only assigns fields.
-pub fn sync_of(workspace_in: &Stream<WorkspaceIn>, state: &Stream<Arc<AppState>>) -> Stream<Mut> {
+pub fn sync_of(workspace_in: &Stream<WorkspaceIn>, state: &Stream<Rc<AppState>>) -> Stream<Mut> {
     workspace_in
         .sample_combine(state)
         .filter_map(|(ev, s)| match ev {

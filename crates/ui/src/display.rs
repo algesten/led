@@ -34,13 +34,13 @@ pub struct DisplayInputs {
     search_match_style: Style,
     search_current_style: Style,
     // Syntax highlighting
-    syntax_highlights: Arc<Vec<(usize, HighlightSpan)>>,
-    bracket_pairs: Arc<Vec<BracketPair>>,
+    syntax_highlights: Rc<Vec<(usize, HighlightSpan)>>,
+    bracket_pairs: Rc<Vec<BracketPair>>,
     matching_bracket: Option<(usize, usize)>,
     cursor_row: usize,
     cursor_col: usize,
     content_hash: u64,
-    syntax_styles: Arc<HashMap<String, Style>>,
+    syntax_styles: Rc<HashMap<String, Style>>,
     bracket_match_style: Style,
     rainbow_styles: [Style; 6],
     git_line_statuses: Vec<LineStatus>,
@@ -1018,7 +1018,7 @@ pub fn build_layout(l: &LayoutInputs) -> Option<LayoutInfo> {
 
 #[derive(Clone, PartialEq)]
 pub struct BrowserInputs {
-    pub entries: Arc<Vec<led_state::TreeEntry>>,
+    pub entries: Rc<Vec<led_state::TreeEntry>>,
     pub selected: usize,
     pub scroll_offset: usize,
     pub focused: bool,

@@ -1,5 +1,5 @@
 use std::io;
-use std::sync::Arc;
+use std::rc::Rc;
 
 use led_core::rx::Stream;
 use led_state::{AppState, SessionRestorePhase};
@@ -7,7 +7,7 @@ use led_state::{AppState, SessionRestorePhase};
 use super::Mut;
 
 /// Derive suspend/resume side effects from state.
-pub fn process_of(state: &Stream<Arc<AppState>>) -> Stream<Mut> {
+pub fn process_of(state: &Stream<Rc<AppState>>) -> Stream<Mut> {
     // Suspend: perform terminal restore/re-init, then clear the flag
     let suspend_s = state
         .filter(|s| s.suspend)

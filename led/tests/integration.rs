@@ -2300,10 +2300,10 @@ fn two_instance_sync_after_save() {
     );
 
     // Verify A is primary, B is not
-    assert!(a.state().unwrap().workspace.as_ref().unwrap().primary);
-    assert!(!b.state().unwrap().workspace.as_ref().unwrap().primary);
+    assert!(a.with_state(|s| s.workspace.as_ref().unwrap().primary));
+    assert!(!b.with_state(|s| s.workspace.as_ref().unwrap().primary));
 
-    let a_lines_before = active_buf(&a.state().unwrap()).unwrap().doc.line_count();
+    let a_lines_before = a.with_state(|s| active_buf(s).unwrap().doc.line_count());
 
     // Step 3: B adds a newline
     b.push(InsertNewline);
@@ -2313,12 +2313,12 @@ fn two_instance_sync_after_save() {
         "B undo flushed",
     );
     a.wait_for(
-        |s| active_buf(s).is_some_and(|b| b.doc.line_count() > a_lines_before),
+        move |s| active_buf(s).is_some_and(|b| b.doc.line_count() > a_lines_before),
         WAIT,
         "A synced first newline",
     );
 
-    let a_lines_after_sync1 = active_buf(&a.state().unwrap()).unwrap().doc.line_count();
+    let a_lines_after_sync1 = a.with_state(|s| active_buf(s).unwrap().doc.line_count());
     assert_eq!(
         a_lines_after_sync1,
         a_lines_before + 1,
@@ -2343,29 +2343,34 @@ fn two_instance_sync_after_save() {
 
     // A must sync the second newline
     a.wait_for(
-        |s| active_buf(s).is_some_and(|b| b.doc.line_count() > a_lines_after_sync1),
+        move |s| active_buf(s).is_some_and(|b| b.doc.line_count() > a_lines_after_sync1),
         WAIT,
         "A synced second newline",
     );
 
-    let a_state = a.state().unwrap();
-    let b_state = b.state().unwrap();
-    let a_final = active_buf(&a_state).unwrap();
-    let b_final = active_buf(&b_state).unwrap();
+    let a_final_lines = a.with_state(|s| active_buf(s).unwrap().doc.line_count());
     assert_eq!(
-        a_final.doc.line_count(),
+        a_final_lines,
         a_lines_before + 2,
         "A should have both newlines: {} lines, expected {}",
-        a_final.doc.line_count(),
+        a_final_lines,
         a_lines_before + 2,
     );
     // Content should match between A and B
-    for i in 0..b_final.doc.line_count() {
-        assert_eq!(
-            a_final.doc.line(i),
-            b_final.doc.line(i),
-            "line {i} mismatch between A and B"
-        );
+    let a_lines: Vec<String> = a.with_state(|s| {
+        let buf = active_buf(s).unwrap();
+        (0..buf.doc.line_count())
+            .map(|i| buf.doc.line(i).to_string())
+            .collect()
+    });
+    let b_lines: Vec<String> = b.with_state(|s| {
+        let buf = active_buf(s).unwrap();
+        (0..buf.doc.line_count())
+            .map(|i| buf.doc.line(i).to_string())
+            .collect()
+    });
+    for (i, (a_line, b_line)) in a_lines.iter().zip(b_lines.iter()).enumerate() {
+        assert_eq!(a_line, b_line, "line {i} mismatch between A and B");
     }
 
     a.stop();
@@ -2397,7 +2402,7 @@ fn two_instance_second_edit_syncs_without_save() {
         "B ready",
     );
 
-    let a_lines_before = active_buf(&a.state().unwrap()).unwrap().doc.line_count();
+    let a_lines_before = a.with_state(|s| active_buf(s).unwrap().doc.line_count());
 
     // Step 3: B inserts newline
     b.push(InsertNewline);
@@ -2407,12 +2412,12 @@ fn two_instance_second_edit_syncs_without_save() {
         "B first edit flushed",
     );
     a.wait_for(
-        |s| active_buf(s).is_some_and(|b| b.doc.line_count() > a_lines_before),
+        move |s| active_buf(s).is_some_and(|b| b.doc.line_count() > a_lines_before),
         WAIT,
         "A synced first newline",
     );
 
-    let a_lines_after_sync1 = active_buf(&a.state().unwrap()).unwrap().doc.line_count();
+    let a_lines_after_sync1 = a.with_state(|s| active_buf(s).unwrap().doc.line_count());
     assert_eq!(a_lines_after_sync1, a_lines_before + 1);
 
     // Step 4: wait 1000ms for the first flush to fully propagate
@@ -2421,35 +2426,40 @@ fn two_instance_second_edit_syncs_without_save() {
     // Step 5: B inserts another newline (no save)
     b.push(InsertNewline);
     b.wait_for(
-        |s| active_buf(s).is_some_and(|b| b.doc.line_count() > a_lines_after_sync1),
+        move |s| active_buf(s).is_some_and(|b| b.doc.line_count() > a_lines_after_sync1),
         WAIT,
         "B has second newline",
     );
 
     // A must sync the second newline
     a.wait_for(
-        |s| active_buf(s).is_some_and(|b| b.doc.line_count() > a_lines_after_sync1),
+        move |s| active_buf(s).is_some_and(|b| b.doc.line_count() > a_lines_after_sync1),
         WAIT,
         "A synced second newline",
     );
 
-    let a_state = a.state().unwrap();
-    let b_state = b.state().unwrap();
-    let a_final = active_buf(&a_state).unwrap();
-    let b_final = active_buf(&b_state).unwrap();
+    let a_final_lines = a.with_state(|s| active_buf(s).unwrap().doc.line_count());
     assert_eq!(
-        a_final.doc.line_count(),
+        a_final_lines,
         a_lines_before + 2,
         "A should have both newlines: {} lines, expected {}",
-        a_final.doc.line_count(),
+        a_final_lines,
         a_lines_before + 2,
     );
-    for i in 0..b_final.doc.line_count() {
-        assert_eq!(
-            a_final.doc.line(i),
-            b_final.doc.line(i),
-            "line {i} mismatch between A and B"
-        );
+    let a_lines: Vec<String> = a.with_state(|s| {
+        let buf = active_buf(s).unwrap();
+        (0..buf.doc.line_count())
+            .map(|i| buf.doc.line(i).to_string())
+            .collect()
+    });
+    let b_lines: Vec<String> = b.with_state(|s| {
+        let buf = active_buf(s).unwrap();
+        (0..buf.doc.line_count())
+            .map(|i| buf.doc.line(i).to_string())
+            .collect()
+    });
+    for (i, (a_line, b_line)) in a_lines.iter().zip(b_lines.iter()).enumerate() {
+        assert_eq!(a_line, b_line, "line {i} mismatch between A and B");
     }
 
     a.stop();
@@ -2510,16 +2520,20 @@ fn two_instance_remote_save_clears_dirty() {
     );
 
     // Content should still match
-    let a_state = a.state().unwrap();
-    let b_state = b.state().unwrap();
-    let a_buf = active_buf(&a_state).unwrap();
-    let b_buf = active_buf(&b_state).unwrap();
-    for i in 0..b_buf.doc.line_count() {
-        assert_eq!(
-            a_buf.doc.line(i),
-            b_buf.doc.line(i),
-            "line {i} mismatch between A and B"
-        );
+    let a_lines: Vec<String> = a.with_state(|s| {
+        let buf = active_buf(s).unwrap();
+        (0..buf.doc.line_count())
+            .map(|i| buf.doc.line(i).to_string())
+            .collect()
+    });
+    let b_lines: Vec<String> = b.with_state(|s| {
+        let buf = active_buf(s).unwrap();
+        (0..buf.doc.line_count())
+            .map(|i| buf.doc.line(i).to_string())
+            .collect()
+    });
+    for (i, (a_line, b_line)) in a_lines.iter().zip(b_lines.iter()).enumerate() {
+        assert_eq!(a_line, b_line, "line {i} mismatch between A and B");
     }
 
     a.stop();
@@ -2565,46 +2579,41 @@ fn two_instance_no_args_browser_visible() {
     );
 
     // Both should have the workspace resolved and browser entries
-    let a_state = a.state().unwrap();
-    let b_state = b.state().unwrap();
-
-    assert!(a_state.workspace.is_some(), "A should have a workspace");
-    assert!(b_state.workspace.is_some(), "B should have a workspace");
+    assert!(
+        a.with_state(|s| s.workspace.is_some()),
+        "A should have a workspace"
+    );
+    assert!(
+        b.with_state(|s| s.workspace.is_some()),
+        "B should have a workspace"
+    );
 
     // With no files open, focus should be on the file browser
     assert_eq!(
-        a_state.focus,
+        a.with_state(|s| s.focus),
         led_core::PanelSlot::Side,
         "A focus should be on browser when no files open"
     );
     assert_eq!(
-        b_state.focus,
+        b.with_state(|s| s.focus),
         led_core::PanelSlot::Side,
         "B focus should be on browser when no files open"
     );
 
     assert!(
-        !a_state.browser.entries.is_empty(),
+        a.with_state(|s| !s.browser.entries.is_empty()),
         "A browser should have entries"
     );
     assert!(
-        !b_state.browser.entries.is_empty(),
+        b.with_state(|s| !s.browser.entries.is_empty()),
         "B browser should have entries, got empty (black screen)"
     );
 
     // Both should see the same files
-    let a_names: Vec<&str> = a_state
-        .browser
-        .entries
-        .iter()
-        .map(|e| e.name.as_str())
-        .collect();
-    let b_names: Vec<&str> = b_state
-        .browser
-        .entries
-        .iter()
-        .map(|e| e.name.as_str())
-        .collect();
+    let a_names: Vec<String> =
+        a.with_state(|s| s.browser.entries.iter().map(|e| e.name.clone()).collect());
+    let b_names: Vec<String> =
+        b.with_state(|s| s.browser.entries.iter().map(|e| e.name.clone()).collect());
     assert_eq!(a_names, b_names, "both instances should see same files");
 
     a.stop();
@@ -2633,7 +2642,7 @@ fn two_instance_undo_syncs_and_clears_dirty() {
         "B ready",
     );
 
-    let original_lines = active_buf(&a.state().unwrap()).unwrap().doc.line_count();
+    let original_lines = a.with_state(|s| active_buf(s).unwrap().doc.line_count());
 
     // Step 2: A inserts newline
     a.push(InsertNewline);
@@ -2645,25 +2654,25 @@ fn two_instance_undo_syncs_and_clears_dirty() {
 
     // B syncs the newline
     b.wait_for(
-        |s| active_buf(s).is_some_and(|b| b.doc.line_count() > original_lines),
+        move |s| active_buf(s).is_some_and(|b| b.doc.line_count() > original_lines),
         WAIT,
         "B synced newline",
     );
 
     // Both should be dirty
     assert!(
-        active_buf(&a.state().unwrap()).unwrap().doc.dirty(),
+        a.with_state(|s| active_buf(s).unwrap().doc.dirty()),
         "A should be dirty after edit"
     );
     assert!(
-        active_buf(&b.state().unwrap()).unwrap().doc.dirty(),
+        b.with_state(|s| active_buf(s).unwrap().doc.dirty()),
         "B should be dirty after sync"
     );
 
     // Step 3: A undoes
     a.push(Undo);
     a.wait_for(
-        |s| active_buf(s).is_some_and(|b| b.doc.line_count() == original_lines),
+        move |s| active_buf(s).is_some_and(|b| b.doc.line_count() == original_lines),
         WAIT,
         "A undid the newline",
     );
@@ -2677,7 +2686,7 @@ fn two_instance_undo_syncs_and_clears_dirty() {
 
     // B should sync the undo and also be clean
     b.wait_for(
-        |s| active_buf(s).is_some_and(|b| b.doc.line_count() == original_lines),
+        move |s| active_buf(s).is_some_and(|b| b.doc.line_count() == original_lines),
         WAIT,
         "B synced the undo",
     );
@@ -2688,18 +2697,24 @@ fn two_instance_undo_syncs_and_clears_dirty() {
     );
 
     // Content should match original
-    let a_state = a.state().unwrap();
-    let b_state = b.state().unwrap();
-    let a_buf = active_buf(&a_state).unwrap();
-    let b_buf = active_buf(&b_state).unwrap();
-    assert_eq!(a_buf.doc.line_count(), original_lines);
-    assert_eq!(b_buf.doc.line_count(), original_lines);
-    for i in 0..a_buf.doc.line_count() {
-        assert_eq!(
-            a_buf.doc.line(i),
-            b_buf.doc.line(i),
-            "line {i} mismatch between A and B"
-        );
+    let a_line_count = a.with_state(|s| active_buf(s).unwrap().doc.line_count());
+    let b_line_count = b.with_state(|s| active_buf(s).unwrap().doc.line_count());
+    assert_eq!(a_line_count, original_lines);
+    assert_eq!(b_line_count, original_lines);
+    let a_lines: Vec<String> = a.with_state(|s| {
+        let buf = active_buf(s).unwrap();
+        (0..buf.doc.line_count())
+            .map(|i| buf.doc.line(i).to_string())
+            .collect()
+    });
+    let b_lines: Vec<String> = b.with_state(|s| {
+        let buf = active_buf(s).unwrap();
+        (0..buf.doc.line_count())
+            .map(|i| buf.doc.line(i).to_string())
+            .collect()
+    });
+    for (i, (a_line, b_line)) in a_lines.iter().zip(b_lines.iter()).enumerate() {
+        assert_eq!(a_line, b_line, "line {i} mismatch between A and B");
     }
 
     a.stop();

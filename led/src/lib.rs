@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::rc::Rc;
 
 use led_config_file::ConfigFile;
 use led_core::keys::Keys;
@@ -38,7 +38,7 @@ pub struct Drivers {
 pub struct RunGuards {
     pub input_guard: Option<led_terminal_in::InputGuard>,
     pub ui: Option<led_ui::Ui>,
-    state: Stream<Arc<AppState>>,
+    state: Stream<Rc<AppState>>,
 }
 
 impl Drop for RunGuards {
@@ -56,7 +56,7 @@ pub fn run(
     startup: Startup,
     actions_in: Stream<Action>,
     quit_tx: oneshot::Sender<()>,
-) -> (Stream<Arc<AppState>>, RunGuards) {
+) -> (Stream<Rc<AppState>>, RunGuards) {
     let headless = startup.headless;
 
     let file_watcher = if startup.enable_watchers {
@@ -66,10 +66,10 @@ pub fn run(
     };
 
     let init = AppState::new(startup);
-    let seed = Arc::new(init.clone());
+    let seed = Rc::new(init.clone());
 
     // 1. Hoisted AppState
-    let state: Stream<Arc<AppState>> = Stream::new();
+    let state: Stream<Rc<AppState>> = Stream::new();
 
     // 2. Derived
     let d = derived(state.clone());
@@ -124,7 +124,7 @@ pub fn run(
 
     // Signal quit — wait for session save to complete (primary only)
     let mut quit_tx = Some(quit_tx);
-    state.on(move |opt: Option<&Arc<AppState>>| {
+    state.on(move |opt: Option<&Rc<AppState>>| {
         if let Some(s) = opt {
             if s.quit {
                 let needs_save = s.workspace.as_ref().is_some_and(|w| w.primary);

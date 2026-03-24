@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -195,8 +196,8 @@ pub struct BufferState {
     pub isearch: Option<ISearchState>,
     pub last_search: Option<String>,
     // Syntax highlighting
-    pub syntax_highlights: Arc<Vec<(usize, HighlightSpan)>>,
-    pub bracket_pairs: Arc<Vec<BracketPair>>,
+    pub syntax_highlights: Rc<Vec<(usize, HighlightSpan)>>,
+    pub bracket_pairs: Rc<Vec<BracketPair>>,
     pub matching_bracket: Option<(usize, usize)>,
     pub pending_indent_row: Option<usize>,
     pub pending_tab_fallback: bool,
@@ -239,7 +240,7 @@ pub struct FileBrowserState {
     pub root: Option<PathBuf>,
     pub dir_contents: HashMap<PathBuf, Vec<led_fs::DirEntry>>,
     pub expanded_dirs: HashSet<PathBuf>,
-    pub entries: Arc<Vec<TreeEntry>>,
+    pub entries: Rc<Vec<TreeEntry>>,
     pub selected: usize,
     pub scroll_offset: usize,
     pub pending_reveal: Option<PathBuf>,
@@ -249,7 +250,7 @@ impl FileBrowserState {
     /// Rebuild the flat `entries` list from `dir_contents` and `expanded_dirs`.
     /// Pure — no I/O.
     pub fn rebuild_entries(&mut self) {
-        let entries = Arc::make_mut(&mut self.entries);
+        let entries = Rc::make_mut(&mut self.entries);
         entries.clear();
         let Some(ref root) = self.root else { return };
         let root = root.clone();
@@ -505,10 +506,10 @@ pub struct PreviewState {
 #[derive(Debug, Clone, Default)]
 pub struct AppState {
     pub startup: Arc<Startup>,
-    pub workspace: Option<Arc<Workspace>>,
+    pub workspace: Option<Rc<Workspace>>,
     pub config_keys: Option<ConfigFile<Keys>>,
     pub config_theme: Option<ConfigFile<Theme>>,
-    pub keymap: Option<Arc<Keymap>>,
+    pub keymap: Option<Rc<Keymap>>,
     pub focus: PanelSlot,
     pub show_side_panel: bool,
     pub dims: Option<Dimensions>,
@@ -516,11 +517,11 @@ pub struct AppState {
     pub suspend: bool,
     pub force_redraw: u64,
     pub alerts: AlertState,
-    pub buffers: Arc<HashMap<BufferId, Arc<BufferState>>>,
+    pub buffers: Rc<HashMap<BufferId, Rc<BufferState>>>,
     pub active_buffer: Option<BufferId>,
     pub next_buffer_id: u64,
     pub save_request: Versioned<()>,
-    pub browser: Arc<FileBrowserState>,
+    pub browser: Rc<FileBrowserState>,
     pub pending_open: Versioned<Option<PathBuf>>,
     pub pending_lists: Versioned<Vec<PathBuf>>,
 
@@ -553,10 +554,10 @@ pub struct AppState {
     pub preview: PreviewState,
 
     // Git
-    pub git: Arc<GitState>,
+    pub git: Rc<GitState>,
 
     // LSP
-    pub lsp: Arc<LspState>,
+    pub lsp: Rc<LspState>,
 }
 
 impl AppState {
@@ -568,26 +569,26 @@ impl AppState {
         }
     }
 
-    pub fn buffers_mut(&mut self) -> &mut HashMap<BufferId, Arc<BufferState>> {
-        Arc::make_mut(&mut self.buffers)
+    pub fn buffers_mut(&mut self) -> &mut HashMap<BufferId, Rc<BufferState>> {
+        Rc::make_mut(&mut self.buffers)
     }
 
     /// Get a mutable reference to a single buffer via copy-on-write.
     pub fn buf_mut(&mut self, id: BufferId) -> Option<&mut BufferState> {
-        Arc::make_mut(&mut self.buffers)
+        Rc::make_mut(&mut self.buffers)
             .get_mut(&id)
-            .map(|arc| Arc::make_mut(arc))
+            .map(|rc| Rc::make_mut(rc))
     }
 
     pub fn browser_mut(&mut self) -> &mut FileBrowserState {
-        Arc::make_mut(&mut self.browser)
+        Rc::make_mut(&mut self.browser)
     }
 
     pub fn git_mut(&mut self) -> &mut GitState {
-        Arc::make_mut(&mut self.git)
+        Rc::make_mut(&mut self.git)
     }
 
     pub fn lsp_mut(&mut self) -> &mut LspState {
-        Arc::make_mut(&mut self.lsp)
+        Rc::make_mut(&mut self.lsp)
     }
 }
