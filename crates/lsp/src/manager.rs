@@ -32,7 +32,7 @@ enum ManagerEvent {
     ServerError {
         error: String,
     },
-    Notification(LspNotification),
+    Notification(String, LspNotification),
     RequestResult(RequestResult),
     FileChanged(PathBuf, FileChangeKind),
 }
@@ -126,7 +126,7 @@ struct LspManager {
     /// Domain items from last server response (unfiltered)
     completion_domain_items: Vec<crate::CompletionItem>,
     progress_tokens: HashMap<String, ProgressState>,
-    quiescent: bool,
+    quiescent: HashMap<String, bool>,
     need_diagnostics: bool,
     _file_watcher: Option<notify::RecommendedWatcher>,
     file_watcher_globs: Option<globset::GlobSet>,
@@ -162,7 +162,7 @@ pub(crate) async fn run(
         completion_prefix_start_col: 0,
         completion_domain_items: Vec::new(),
         progress_tokens: HashMap::new(),
-        quiescent: true,
+        quiescent: HashMap::new(),
         need_diagnostics: false,
         _file_watcher: None,
         file_watcher_globs: None,
@@ -322,8 +322,9 @@ impl LspManager {
                 log::error!("LSP server error: {}", error);
                 let _ = result_tx.send(LspIn::Error { message: error }).await;
             }
-            ManagerEvent::Notification(notif) => {
-                self.handle_notification(notif, result_tx).await;
+            ManagerEvent::Notification(language_id, notif) => {
+                self.handle_notification(&language_id, notif, result_tx)
+                    .await;
             }
             ManagerEvent::RequestResult(result) => {
                 self.handle_request_result(result, result_tx).await;
@@ -356,9 +357,10 @@ impl LspManager {
         // Notification channel
         let (notif_tx, mut notif_rx) = tokio::sync::mpsc::unbounded_channel::<LspNotification>();
         let event_tx2 = event_tx.clone();
+        let notif_lang_id = lang_id.clone();
         tokio::spawn(async move {
             while let Some(notif) = notif_rx.recv().await {
-                let _ = event_tx2.send(ManagerEvent::Notification(notif));
+                let _ = event_tx2.send(ManagerEvent::Notification(notif_lang_id.clone(), notif));
             }
         });
 
@@ -930,6 +932,7 @@ impl LspManager {
 
     async fn handle_notification(
         &mut self,
+        language_id: &str,
         notif: LspNotification,
         result_tx: &tokio::sync::mpsc::Sender<LspIn>,
     ) {
@@ -975,10 +978,9 @@ impl LspManager {
             "experimental/serverStatus" => {
                 let quiescent = notif.params.get("quiescent").and_then(|v| v.as_bool());
                 if let Some(q) = quiescent {
-                    let was_busy = !self.quiescent;
-                    self.quiescent = q;
-                    if was_busy && q {
-                        self.need_diagnostics = true;
+                    let was_busy = !*self.quiescent.get(language_id).unwrap_or(&true);
+                    self.quiescent.insert(language_id.to_string(), q);
+                    if was_busy && q && self.need_diagnostics {
                         self.pull_all_diagnostics();
                     }
                     self.send_progress_throttled(result_tx).await;
@@ -1167,7 +1169,7 @@ impl LspManager {
     }
 
     fn is_busy(&self) -> bool {
-        !self.quiescent || !self.progress_tokens.is_empty()
+        self.quiescent.values().any(|q| !q) || !self.progress_tokens.is_empty()
     }
 
     /// Send progress to UI at most once per 200ms to avoid flooding.
