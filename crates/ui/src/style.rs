@@ -363,7 +363,7 @@ mod tests {
         use ratatui::backend::TestBackend;
         use ratatui::text::{Line, Span};
 
-        use crate::display::{LayoutInfo, TabEntry, TabsInputs};
+        use crate::display::{LayoutInfo, OverlayContent, TabEntry, TabsInputs};
         use crate::render;
         use led_state::Dimensions;
 
@@ -407,7 +407,7 @@ mod tests {
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
         let frame = terminal
             .draw(|f| {
-                render::render(f, &layout, &display_lines, Some((2, 0)), status, &tabs, &[]);
+                render::render(f, &layout, &display_lines, Some((2, 0)), status, &tabs, &[], &display::OverlayContent::None);
             })
             .unwrap();
 
@@ -478,11 +478,12 @@ mod tests {
             change_seq: 0,
             isearch: None,
             last_search: None,
-            syntax_highlights: Vec::new(),
-            bracket_pairs: Vec::new(),
+            syntax_highlights: Arc::new(Vec::new()),
+            bracket_pairs: Arc::new(Vec::new()),
             matching_bracket: None,
             pending_indent_row: None,
             pending_tab_fallback: false,
+            completion_triggers: Vec::new(),
             is_preview: false,
         };
 
@@ -496,7 +497,7 @@ mod tests {
         state.dims = Some(Dimensions::new(40, 10, false));
         state.config_theme = Some(config_theme);
         state.active_buffer = Some(BufferId(1));
-        state.buffers.insert(BufferId(1), buf);
+        Arc::make_mut(&mut state.buffers).insert(BufferId(1), Arc::new(buf));
 
         let display_inputs = display::display_inputs(&state).expect("display_inputs");
         let cursor_inputs = display::cursor_inputs(&state).expect("cursor_inputs");
@@ -514,7 +515,7 @@ mod tests {
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
         let frame = terminal
             .draw(|f| {
-                render::render(f, &layout, &lines, cursor, &status, &tabs, &[]);
+                render::render(f, &layout, &lines, cursor, &status, &tabs, &[], &display::OverlayContent::None);
             })
             .unwrap();
 

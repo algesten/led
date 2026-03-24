@@ -18,6 +18,7 @@ led-clipboard = { workspace = true }
 led-file-search = { workspace = true }
 led-git = { workspace = true }
 led-syntax = { workspace = true }
+led-lsp = { workspace = true }
 clap = { workspace = true }
 crossterm = { workspace = true }
 dirs = { workspace = true }

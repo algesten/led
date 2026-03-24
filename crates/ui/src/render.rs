@@ -1,9 +1,10 @@
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Position, Rect};
-use ratatui::text::Line;
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
-use crate::display::{LayoutInfo, TabsInputs};
+use crate::display::{LayoutInfo, OverlayContent, TabsInputs};
 
 pub fn render(
     frame: &mut Frame,
@@ -13,6 +14,7 @@ pub fn render(
     status: &str,
     tabs: &TabsInputs,
     browser: &[Line],
+    overlay: &OverlayContent,
 ) {
     let dims = layout.dims;
     let area = frame.area();
@@ -38,9 +40,126 @@ pub fn render(
         render_editor_area(lines, tabs, layout, frame, main_area);
     }
 
+    // Overlay (completion, code actions, rename)
+    render_overlay(overlay, frame, area);
+
     // Cursor: absolute terminal coordinates
     if let Some((cx, cy)) = cursor {
         frame.set_cursor_position(Position::new(cx, cy));
+    }
+}
+
+fn render_overlay(overlay: &OverlayContent, frame: &mut Frame, area: Rect) {
+    match overlay {
+        OverlayContent::None => {}
+        OverlayContent::Completion {
+            items,
+            anchor_x,
+            anchor_y,
+        } => {
+            if items.is_empty() {
+                return;
+            }
+            let max_label = items.iter().map(|(l, _, _)| l.chars().count()).max().unwrap_or(10);
+            let max_detail = items
+                .iter()
+                .filter_map(|(_, d, _)| d.as_ref().map(|d| d.chars().count()))
+                .max()
+                .unwrap_or(0);
+            let width = (max_label + if max_detail > 0 { max_detail + 2 } else { 0 } + 2)
+                .min(area.width as usize);
+            let height = items.len().min(10);
+
+            let x = (*anchor_x as usize).min(area.width.saturating_sub(width as u16) as usize) as u16;
+            let y = if *anchor_y as usize + height + 1 > area.height as usize {
+                anchor_y.saturating_sub(height as u16 + 1)
+            } else {
+                *anchor_y
+            };
+            let rect = Rect::new(x, y, width as u16, height as u16);
+            frame.render_widget(Clear, rect);
+
+            let normal = Style::default().bg(Color::DarkGray).fg(Color::White);
+            let selected = Style::default().bg(Color::Blue).fg(Color::White);
+
+            let lines: Vec<Line> = items
+                .iter()
+                .map(|(label, detail, is_sel)| {
+                    let sty = if *is_sel { selected } else { normal };
+                    let mut text = format!(" {:<w$}", label, w = max_label);
+                    if let Some(d) = detail {
+                        text.push_str(&format!("  {}", d));
+                    }
+                    let padded: String = text.chars().take(width).collect();
+                    let pad = width.saturating_sub(padded.chars().count());
+                    Line::from(Span::styled(format!("{padded}{:pad$}", ""), sty))
+                })
+                .collect();
+            frame.render_widget(Paragraph::new(lines), rect);
+        }
+        OverlayContent::CodeActions {
+            items,
+            anchor_x,
+            anchor_y,
+        } => {
+            if items.is_empty() {
+                return;
+            }
+            let max_w = items.iter().map(|(t, _)| t.chars().count()).max().unwrap_or(10);
+            let width = (max_w + 2).min(area.width as usize);
+            let height = items.len().min(15);
+
+            let x = (*anchor_x as usize).min(area.width.saturating_sub(width as u16) as usize) as u16;
+            let y = if *anchor_y as usize + height + 1 > area.height as usize {
+                anchor_y.saturating_sub(height as u16 + 1)
+            } else {
+                *anchor_y
+            };
+            let rect = Rect::new(x, y, width as u16, height as u16);
+            frame.render_widget(Clear, rect);
+
+            let normal = Style::default().bg(Color::DarkGray).fg(Color::White);
+            let selected = Style::default().bg(Color::Blue).fg(Color::White);
+
+            let lines: Vec<Line> = items
+                .iter()
+                .map(|(title, is_sel)| {
+                    let sty = if *is_sel { selected } else { normal };
+                    let text: String = format!(" {}", title).chars().take(width).collect();
+                    let pad = width.saturating_sub(text.chars().count());
+                    Line::from(Span::styled(format!("{text}{:pad$}", ""), sty))
+                })
+                .collect();
+            frame.render_widget(Paragraph::new(lines), rect);
+        }
+        OverlayContent::Rename {
+            input,
+            cursor: _,
+            anchor_x,
+            anchor_y,
+        } => {
+            let label = "Rename: ";
+            let width = (label.len() + input.len() + 4).min(area.width as usize);
+            let x = (*anchor_x as usize).min(area.width.saturating_sub(width as u16) as usize) as u16;
+            let y = *anchor_y;
+            let rect = Rect::new(x, y, width as u16, 1);
+            frame.render_widget(Clear, rect);
+
+            let sty = Style::default()
+                .bg(Color::DarkGray)
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD);
+            let text = format!(" {}{} ", label, input);
+            let padded: String = text.chars().take(width).collect();
+            let pad = width.saturating_sub(padded.chars().count());
+            frame.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    format!("{padded}{:pad$}", ""),
+                    sty,
+                ))),
+                rect,
+            );
+        }
     }
 }
 

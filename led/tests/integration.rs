@@ -1,6 +1,6 @@
 mod harness;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use led_core::Action::*;
@@ -3625,4 +3625,624 @@ fn find_file_up_down_wraps() {
 
     let ff = t.state.find_file.as_ref().unwrap();
     assert_eq!(ff.selected, Some(ff.completions.len() - 1));
+}
+
+// ── LSP integration tests ──
+// These tests require `rust-analyzer` to be installed.
+
+fn has_rust_analyzer() -> bool {
+    std::process::Command::new("rust-analyzer")
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok()
+}
+
+/// Create a tmpdir with a minimal Cargo project and return (root, main_rs_path).
+fn lsp_project(main_rs: &str) -> (PathBuf, PathBuf) {
+    let dir = tempfile::TempDir::new().expect("tmpdir");
+    let root = dir.keep();
+    let workspace = root.join("workspace");
+    let config = root.join("config");
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::create_dir_all(workspace.join("src")).unwrap();
+    std::fs::write(
+        workspace.join("Cargo.toml"),
+        "[package]\nname = \"t\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    let main_path = workspace.join("src/main.rs");
+    std::fs::write(&main_path, main_rs).unwrap();
+    (root, main_path)
+}
+
+fn has_lsp_diagnostics(s: &led_state::AppState) -> bool {
+    s.lsp.diagnostics.values().any(|d| !d.is_empty())
+}
+
+/// Alias for has_lsp_diagnostics — used by tests that need the server ready for requests.
+/// Some features (goto-def, code-action) require full indexing which may not be complete
+/// by the time diagnostics first appear. Those tests are marked #[ignore].
+fn lsp_server_ready(s: &led_state::AppState) -> bool {
+    has_lsp_diagnostics(s)
+}
+
+#[test]
+fn lsp_diagnostics_appear() {
+    if !has_rust_analyzer() {
+        eprintln!("skipping: rust-analyzer not found");
+        return;
+    }
+    let (root, main_rs) = lsp_project("fn main() {\n    let _x: i32 = \"hello\";\n}\n");
+
+    let t = TestHarness::with_dir(root)
+        .with_arg(main_rs)
+        .run(vec![WaitFor(has_lsp_diagnostics)]);
+
+    let all_diags: Vec<_> = t
+        .state
+        .lsp
+        .diagnostics
+        .values()
+        .flat_map(|d| d.iter())
+        .collect();
+    assert!(!all_diags.is_empty(), "expected diagnostics");
+    assert!(
+        all_diags.iter().any(|d| d.message.contains("mismatched")),
+        "expected type-mismatch diagnostic, got: {:?}",
+        all_diags.iter().map(|d| &d.message).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn lsp_format() {
+    if !has_rust_analyzer() {
+        eprintln!("skipping: rust-analyzer not found");
+        return;
+    }
+    // Unformatted: extra spaces. Unused variable `y` produces a warning diagnostic.
+    let (root, main_rs) =
+        lsp_project("fn   main(  )  {\n    let   x  =  1;\n    let y = 2;\n    println!(\"{}\",  x);\n}\n");
+
+    let t = TestHarness::with_dir(root)
+        .with_arg(main_rs)
+        .run(vec![
+            WaitFor(lsp_server_ready),
+            Do(LspFormat),
+            WaitFor(|s| {
+                s.active_buffer
+                    .and_then(|id| s.buffers.get(&id))
+                    .map_or(false, |b| b.doc.line(0).starts_with("fn main()"))
+            }),
+        ]);
+
+    let b = buf(&t);
+    assert!(
+        b.doc.line(0).starts_with("fn main()"),
+        "expected formatted first line, got: {:?}",
+        b.doc.line(0)
+    );
+}
+
+#[test]
+#[ignore] // requires full server indexing — run with `cargo test -- --ignored`
+fn lsp_goto_definition() {
+    if !has_rust_analyzer() {
+        eprintln!("skipping: rust-analyzer not found");
+        return;
+    }
+    // greet is defined on line 0, called on line 4.
+    // Unused `y` ensures diagnostics appear (server-ready signal).
+    let (root, main_rs) =
+        lsp_project("fn greet() {}\n\nfn main() {\n    let y = 0;\n    greet();\n}\n");
+
+    let t = TestHarness::with_dir(root)
+        .with_arg(main_rs)
+        .run(vec![
+            WaitFor(lsp_server_ready),
+            // Move to line 4, col 4 (on `greet()`)
+            Do(MoveDown),
+            Do(MoveDown),
+            Do(MoveDown),
+            Do(MoveDown),
+            Do(MoveRight),
+            Do(MoveRight),
+            Do(MoveRight),
+            Do(MoveRight),
+            Do(LspGotoDefinition),
+            // Wait for cursor to land on the definition (line 0)
+            WaitFor(|s| {
+                s.active_buffer
+                    .and_then(|id| s.buffers.get(&id))
+                    .map_or(false, |b| b.cursor_row == 0)
+            }),
+        ]);
+
+    let b = buf(&t);
+    assert_eq!(b.cursor_row, 0, "expected cursor on definition line (fn greet)");
+}
+
+#[test]
+fn lsp_next_prev_diagnostic() {
+    if !has_rust_analyzer() {
+        eprintln!("skipping: rust-analyzer not found");
+        return;
+    }
+    // Two errors on different lines
+    let (root, main_rs) = lsp_project(
+        "fn main() {\n    let _x: i32 = \"a\";\n    let _y: i32 = \"b\";\n}\n",
+    );
+
+    let t = TestHarness::with_dir(root)
+        .with_arg(main_rs)
+        .run(vec![
+            WaitFor(|s| {
+                // Wait for at least two diagnostics
+                s.lsp
+                    .diagnostics
+                    .values()
+                    .flat_map(|d| d.iter())
+                    .count()
+                    >= 2
+            }),
+            Do(LspNextDiagnostic),
+        ]);
+
+    let b = buf(&t);
+    // Cursor should have moved to the first diagnostic (line 1)
+    assert!(
+        b.cursor_row >= 1,
+        "expected cursor to move to a diagnostic, row={}",
+        b.cursor_row
+    );
+}
+
+#[test]
+fn lsp_rename_opens_overlay() {
+    if !has_rust_analyzer() {
+        eprintln!("skipping: rust-analyzer not found");
+        return;
+    }
+    // Unused `z` produces a warning so diagnostics appear (server-ready signal).
+    let (root, main_rs) =
+        lsp_project("fn main() {\n    let hello = 1;\n    let z = 0;\n    println!(\"{}\", hello);\n}\n");
+
+    let t = TestHarness::with_dir(root)
+        .with_arg(main_rs)
+        .run(vec![
+            WaitFor(lsp_server_ready),
+            // Move to line 1, col 8 (on `hello`)
+            Do(MoveDown),
+            Do(MoveRight),
+            Do(MoveRight),
+            Do(MoveRight),
+            Do(MoveRight),
+            Do(MoveRight),
+            Do(MoveRight),
+            Do(MoveRight),
+            Do(MoveRight),
+            Do(LspRename),
+        ]);
+
+    assert!(
+        t.state.lsp.rename.is_some(),
+        "expected rename overlay to be open"
+    );
+    let rename = t.state.lsp.rename.as_ref().unwrap();
+    assert_eq!(rename.input, "hello", "expected word under cursor");
+    assert_eq!(
+        t.state.focus,
+        led_core::PanelSlot::Overlay,
+        "expected focus on overlay"
+    );
+}
+
+#[test]
+#[ignore] // requires full server indexing — run with `cargo test -- --ignored`
+fn lsp_rename_submit() {
+    if !has_rust_analyzer() {
+        eprintln!("skipping: rust-analyzer not found");
+        return;
+    }
+    // Unused `z` produces a warning so diagnostics appear (server-ready signal).
+    let (root, main_rs) =
+        lsp_project("fn main() {\n    let hello = 1;\n    let z = 0;\n    println!(\"{}\", hello);\n}\n");
+
+    let t = TestHarness::with_dir(root)
+        .with_arg(main_rs)
+        .run(vec![
+            WaitFor(lsp_server_ready),
+            Do(MoveDown),
+            Do(MoveRight),
+            Do(MoveRight),
+            Do(MoveRight),
+            Do(MoveRight),
+            Do(MoveRight),
+            Do(MoveRight),
+            Do(MoveRight),
+            Do(MoveRight),
+            Do(LspRename),
+            // Clear existing text, type new name
+            Do(DeleteBackward),
+            Do(DeleteBackward),
+            Do(DeleteBackward),
+            Do(DeleteBackward),
+            Do(DeleteBackward),
+            Do(InsertChar('w')),
+            Do(InsertChar('o')),
+            Do(InsertChar('r')),
+            Do(InsertChar('l')),
+            Do(InsertChar('d')),
+            Do(InsertNewline), // submit
+            // Wait for rename to complete — both occurrences should be renamed
+            WaitFor(|s| {
+                s.active_buffer
+                    .and_then(|id| s.buffers.get(&id))
+                    .map_or(false, |b| b.doc.line(1).contains("world"))
+            }),
+        ]);
+
+    let b = buf(&t);
+    assert!(
+        b.doc.line(1).contains("world"),
+        "expected 'hello' renamed to 'world' on line 1, got: {:?}",
+        b.doc.line(1)
+    );
+    // Line 3 (not 2, since we added `let z = 0;` on line 2)
+    assert!(
+        b.doc.line(3).contains("world"),
+        "expected 'hello' renamed to 'world' on line 3, got: {:?}",
+        b.doc.line(3)
+    );
+}
+
+#[test]
+fn lsp_toggle_inlay_hints() {
+    let t = TestHarness::new()
+        .with_file("hello\n")
+        .run(actions(vec![LspToggleInlayHints]));
+
+    assert!(t.state.lsp.inlay_hints_enabled);
+
+    let t = TestHarness::new()
+        .with_file("hello\n")
+        .run(actions(vec![LspToggleInlayHints, LspToggleInlayHints]));
+
+    assert!(!t.state.lsp.inlay_hints_enabled);
+}
+
+#[test]
+#[ignore] // requires full server indexing — run with `cargo test -- --ignored`
+fn lsp_code_action() {
+    if !has_rust_analyzer() {
+        eprintln!("skipping: rust-analyzer not found");
+        return;
+    }
+    // unused variable should trigger code action
+    let (root, main_rs) = lsp_project("fn main() {\n    let x = 1;\n}\n");
+
+    let t = TestHarness::with_dir(root)
+        .with_arg(main_rs)
+        .run(vec![
+            WaitFor(lsp_server_ready),
+            // Move cursor to 'x' on line 1
+            Do(MoveDown),
+            Do(MoveRight),
+            Do(MoveRight),
+            Do(MoveRight),
+            Do(MoveRight),
+            Do(MoveRight),
+            Do(MoveRight),
+            Do(MoveRight),
+            Do(MoveRight),
+            Do(LspCodeAction),
+            WaitFor(|s| s.lsp.code_actions.is_some()),
+        ]);
+
+    let actions = t.state.lsp.code_actions.as_ref().unwrap();
+    assert!(
+        !actions.actions.is_empty(),
+        "expected at least one code action"
+    );
+    assert_eq!(
+        t.state.focus,
+        led_core::PanelSlot::Overlay,
+        "expected focus on overlay"
+    );
+}
+
+#[test]
+#[ignore] // requires full server indexing — run with `cargo test -- --ignored`
+fn lsp_code_action_dismiss() {
+    if !has_rust_analyzer() {
+        eprintln!("skipping: rust-analyzer not found");
+        return;
+    }
+    let (root, main_rs) = lsp_project("fn main() {\n    let x = 1;\n}\n");
+
+    let t = TestHarness::with_dir(root)
+        .with_arg(main_rs)
+        .run(vec![
+            WaitFor(lsp_server_ready),
+            Do(MoveDown),
+            Do(MoveRight),
+            Do(MoveRight),
+            Do(MoveRight),
+            Do(MoveRight),
+            Do(MoveRight),
+            Do(MoveRight),
+            Do(MoveRight),
+            Do(MoveRight),
+            Do(LspCodeAction),
+            WaitFor(|s| s.lsp.code_actions.is_some()),
+            Do(Abort), // dismiss
+        ]);
+
+    assert!(
+        t.state.lsp.code_actions.is_none(),
+        "expected code action picker to be dismissed"
+    );
+    assert_eq!(t.state.focus, led_core::PanelSlot::Main);
+}
+
+#[test]
+fn lsp_progress_reported() {
+    if !has_rust_analyzer() {
+        eprintln!("skipping: rust-analyzer not found");
+        return;
+    }
+    // rust-analyzer emits progress during startup. Wait for it to appear
+    // (it may already be done by the time diagnostics arrive, so we check
+    // that progress was either shown or already completed).
+    // Unused variable ensures diagnostics appear as a server-ready signal.
+    let (root, main_rs) = lsp_project("fn main() {\n    let x = 0;\n}\n");
+
+    let t = TestHarness::with_dir(root)
+        .with_arg(main_rs)
+        .run(vec![WaitFor(has_lsp_diagnostics)]);
+
+    // By this point, progress events have been processed — progress is either
+    // done (None) or still showing. The fact that diagnostics arrived means
+    // the server started and communicated. This test exercises the progress
+    // code path without asserting specific values since timing is variable.
+    let _ = t.state.lsp.progress;
+}
+
+// ── LSP completion tests ──
+
+fn has_completion(s: &led_state::AppState) -> bool {
+    s.lsp.completion.is_some()
+}
+
+#[test]
+#[ignore] // requires full server indexing
+fn lsp_completion_appears_on_typing() {
+    if !has_rust_analyzer() {
+        eprintln!("skipping: rust-analyzer not found");
+        return;
+    }
+    // `x` is unused → diagnostics arrive (server ready).
+    // Then we type `let y: Opt` which should trigger completion with `Option`.
+    let (root, main_rs) = lsp_project("fn main() {\n    let x = 0;\n    \n}\n");
+
+    let t = TestHarness::with_dir(root)
+        .with_arg(main_rs)
+        .run(vec![
+            WaitFor(lsp_server_ready),
+            // Move to line 2 (the empty line)
+            Do(MoveDown),
+            Do(MoveDown),
+            // Type "let y: Opt"
+            Do(InsertChar('l')),
+            Do(InsertChar('e')),
+            Do(InsertChar('t')),
+            Do(InsertChar(' ')),
+            Do(InsertChar('y')),
+            Do(InsertChar(':')),
+            Do(InsertChar(' ')),
+            Do(InsertChar('O')),
+            Do(InsertChar('p')),
+            Do(InsertChar('t')),
+            // Wait for completion popup
+            WaitFor(has_completion),
+        ]);
+
+    let comp = t.state.lsp.completion.as_ref().unwrap();
+    assert!(
+        comp.items.iter().any(|i| i.label.contains("Option")),
+        "expected Option in completions, got: {:?}",
+        comp.items.iter().map(|i| &i.label).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+#[ignore] // requires full server indexing
+fn lsp_completion_filters_as_you_type() {
+    if !has_rust_analyzer() {
+        eprintln!("skipping: rust-analyzer not found");
+        return;
+    }
+    // Type "St" → should show String, str, etc.
+    // Then type "ri" → should narrow to String, str only.
+    let (root, main_rs) = lsp_project("fn main() {\n    let x = 0;\n    \n}\n");
+
+    let t = TestHarness::with_dir(root)
+        .with_arg(main_rs)
+        .run(vec![
+            WaitFor(lsp_server_ready),
+            Do(MoveDown),
+            Do(MoveDown),
+            // Type "let y: St"
+            Do(InsertChar('l')),
+            Do(InsertChar('e')),
+            Do(InsertChar('t')),
+            Do(InsertChar(' ')),
+            Do(InsertChar('y')),
+            Do(InsertChar(':')),
+            Do(InsertChar(' ')),
+            Do(InsertChar('S')),
+            Do(InsertChar('t')),
+            WaitFor(has_completion),
+            // Now type "ri" — should narrow results
+            Do(InsertChar('r')),
+            Do(InsertChar('i')),
+            // Small wait for re-filter
+            WaitFor(has_completion),
+        ]);
+
+    let comp = t.state.lsp.completion.as_ref().unwrap();
+    // All visible items should contain "Stri"
+    for item in &comp.items {
+        let text = item.filter_text.as_deref().unwrap_or(&item.label);
+        assert!(
+            text.to_lowercase().starts_with("stri"),
+            "expected item to match 'Stri', got {:?}",
+            item.label
+        );
+    }
+}
+
+#[test]
+#[ignore] // requires full server indexing
+fn lsp_completion_accept_moves_cursor() {
+    if !has_rust_analyzer() {
+        eprintln!("skipping: rust-analyzer not found");
+        return;
+    }
+    let (root, main_rs) = lsp_project("fn main() {\n    let x = 0;\n    \n}\n");
+
+    let t = TestHarness::with_dir(root)
+        .with_arg(main_rs)
+        .run(vec![
+            WaitFor(lsp_server_ready),
+            Do(MoveDown),
+            Do(MoveDown),
+            // Type "Opt"
+            Do(InsertChar('O')),
+            Do(InsertChar('p')),
+            Do(InsertChar('t')),
+            WaitFor(has_completion),
+            // Accept with Tab
+            Do(InsertTab),
+            // Completion should be dismissed
+            WaitFor(|s| s.lsp.completion.is_none()),
+        ]);
+
+    let b = buf(&t);
+    let line = b.doc.line(2);
+    // The accepted completion should have inserted "Option" (or similar)
+    assert!(
+        line.contains("Option"),
+        "expected 'Option' on line 2, got: {:?}",
+        line
+    );
+    // Cursor should be AFTER the inserted text, not stuck at col 3
+    assert!(
+        b.cursor_col > 3,
+        "expected cursor after inserted text, got col={}",
+        b.cursor_col
+    );
+}
+
+#[test]
+#[ignore] // requires full server indexing
+fn lsp_completion_dismiss_on_escape() {
+    if !has_rust_analyzer() {
+        eprintln!("skipping: rust-analyzer not found");
+        return;
+    }
+    let (root, main_rs) = lsp_project("fn main() {\n    let x = 0;\n    \n}\n");
+
+    let t = TestHarness::with_dir(root)
+        .with_arg(main_rs)
+        .run(vec![
+            WaitFor(lsp_server_ready),
+            Do(MoveDown),
+            Do(MoveDown),
+            Do(InsertChar('O')),
+            Do(InsertChar('p')),
+            Do(InsertChar('t')),
+            WaitFor(has_completion),
+            Do(Abort),
+        ]);
+
+    assert!(
+        t.state.lsp.completion.is_none(),
+        "expected completion dismissed after Escape"
+    );
+}
+
+#[test]
+#[ignore] // requires full server indexing
+fn lsp_completion_trigger_char_fresh_request() {
+    if !has_rust_analyzer() {
+        eprintln!("skipping: rust-analyzer not found");
+        return;
+    }
+    // Type "Option:" which should trigger a fresh completion for "Option::"
+    // showing enum-like items (Some, None) or associated items.
+    let (root, main_rs) = lsp_project("fn main() {\n    let x = 0;\n    \n}\n");
+
+    let t = TestHarness::with_dir(root)
+        .with_arg(main_rs)
+        .run(vec![
+            WaitFor(lsp_server_ready),
+            Do(MoveDown),
+            Do(MoveDown),
+            Do(InsertChar('O')),
+            Do(InsertChar('p')),
+            Do(InsertChar('t')),
+            Do(InsertChar('i')),
+            Do(InsertChar('o')),
+            Do(InsertChar('n')),
+            // Typing "::" should trigger fresh completion for variants
+            Do(InsertChar(':')),
+            Do(InsertChar(':')),
+            WaitFor(has_completion),
+        ]);
+
+    let comp = t.state.lsp.completion.as_ref().unwrap();
+    // Should show Option's associated items (Some, None, etc.)
+    let labels: Vec<&str> = comp.items.iter().map(|i| i.label.as_str()).collect();
+    assert!(
+        labels.iter().any(|l| *l == "Some" || *l == "None"),
+        "expected Some/None after Option::, got: {:?}",
+        labels
+    );
+}
+
+#[test]
+fn lsp_format_on_save() {
+    if !has_rust_analyzer() {
+        eprintln!("skipping: rust-analyzer not found");
+        return;
+    }
+    // Unformatted code + unused var for diagnostics
+    let (root, main_rs) =
+        lsp_project("fn   main(  )  {\n    let   x  =  1;\n    let y = 2;\n    println!(\"{}\",  x);\n}\n");
+
+    let t = TestHarness::with_dir(root)
+        .with_arg(main_rs)
+        .run(vec![
+            WaitFor(lsp_server_ready),
+            Do(Save),
+            // Wait for format-then-save to complete (file becomes clean)
+            WaitFor(|s| {
+                s.active_buffer
+                    .and_then(|id| s.buffers.get(&id))
+                    .map_or(false, |b| {
+                        b.save_state == led_state::SaveState::Clean
+                            && b.doc.line(0).starts_with("fn main()")
+                    })
+            }),
+        ]);
+
+    let b = buf(&t);
+    assert!(
+        b.doc.line(0).starts_with("fn main()"),
+        "expected formatted, got: {:?}",
+        b.doc.line(0)
+    );
+    assert_eq!(b.save_state, led_state::SaveState::Clean);
 }

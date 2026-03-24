@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["led", "crates/clipboard", "crates/config-file", "crates/core", "crates/state", "crates/terminal-in", "crates/docstore", "crates/workspace", "crates/ui", "crates/timers", "crates/fs", "crates/file-search", "crates/syntax", "crates/git"]
+members = ["led", "crates/clipboard", "crates/config-file", "crates/core", "crates/state", "crates/terminal-in", "crates/docstore", "crates/workspace", "crates/ui", "crates/timers", "crates/fs", "crates/file-search", "crates/syntax", "crates/git", "crates/lsp"]
 default-members = ["led"]
 
 [workspace.dependencies]
@@ -17,6 +17,7 @@ led-fs = { path = "crates/fs" }
 led-file-search = { path = "crates/file-search" }
 led-git = { path = "crates/git" }
 led-syntax = { path = "crates/syntax" }
+led-lsp = { path = "crates/lsp" }
 
 arboard = { version = "3", default-features = false }
 clap = { version = "4.5.60", features = ["derive"] }
@@ -36,7 +37,7 @@ toml = "0.8"
 # crossterm = { version = "0.29", features = ["event-stream"] }
 # futures = "0.3"
 git2 = { version = "0.20", features = ["vendored-libgit2"] }
-# globset = "0.4"
+globset = "0.4"
 # led_buffer = { path = "crates/buffer" }
 # led_core = { path = "crates/core" }
 # led_file_browser = { path = "crates/file-browser" }
@@ -47,8 +48,8 @@ git2 = { version = "0.20", features = ["vendored-libgit2"] }
 # led_lsp = { path = "crates/lsp" }
 # led_messages = { path = "crates/messages" }
 # led_workspace_watcher = { path = "crates/workspace-watcher" }
-# lsp-types = "0.97"
-# nucleo-matcher = "0.3"
+lsp-types = "0.97"
+nucleo-matcher = "0.3"
 grep-regex = "0.1"
 grep-matcher = "0.1"
 grep-searcher = "0.1"

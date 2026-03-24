@@ -1,5 +1,6 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
@@ -9,7 +10,8 @@ use led_core::BufferId;
 use led_core::rx::Stream;
 use led_docstore::DocStoreOut;
 use led_fs::FsOut;
-use led_state::{AppState, SessionRestorePhase};
+use led_lsp::LspOut;
+use led_state::{AppState, LspRequest, SessionRestorePhase};
 use led_syntax::SyntaxOut;
 use led_timers::{Schedule, TimersOut};
 use led_workspace::{SessionBuffer, SessionData, WorkspaceOut};
@@ -25,6 +27,7 @@ pub struct Derived {
     pub syntax_out: Stream<SyntaxOut>,
     pub git_out: Stream<led_git::GitOut>,
     pub file_search_out: Stream<led_file_search::FileSearchOut>,
+    pub lsp_out: Stream<LspOut>,
 }
 
 pub fn derived(state: Stream<Arc<AppState>>) -> Derived {
@@ -489,6 +492,185 @@ pub fn derived(state: Stream<Arc<AppState>>) -> Derived {
         })
         .stream();
 
+    // ── LSP ──
+
+    // Init: emit when workspace root becomes available
+    let lsp_init = state
+        .filter_map(|s| s.workspace.clone())
+        .dedupe()
+        .map(|w| LspOut::Init {
+            root: w.root.clone(),
+        })
+        .stream();
+
+    let lsp_out: Stream<LspOut> = Stream::new();
+
+    // Buffer lifecycle: track open/close
+    let lsp_known_bufs: Rc<RefCell<HashSet<PathBuf>>> = Rc::new(RefCell::new(HashSet::new()));
+
+    // BufferOpened/Closed: track paths entering/leaving buffers
+    let lsp_buf_opened = state
+        .dedupe_by(|s| s.buffers.len())
+        .map(move |s: Arc<AppState>| {
+            let mut known = lsp_known_bufs.borrow_mut();
+            let current: HashSet<PathBuf> =
+                s.buffers.values().filter_map(|b| b.path.clone()).collect();
+            let added: Vec<PathBuf> = current.difference(&known).cloned().collect();
+            let removed: Vec<PathBuf> = known.difference(&current).cloned().collect();
+            *known = current;
+            // Emit opened events
+            let mut events: Vec<LspOut> = Vec::new();
+            for path in added {
+                if let Some(buf) = s.buffers.values().find(|b| b.path.as_ref() == Some(&path)) {
+                    events.push(LspOut::BufferOpened {
+                        path,
+                        doc: buf.doc.clone(),
+                    });
+                }
+            }
+            for path in removed {
+                events.push(LspOut::BufferClosed { path });
+            }
+            events
+        })
+        .filter(|events| !events.is_empty())
+        .stream();
+
+    // Fan-in lifecycle events
+    {
+        let target = lsp_out.clone();
+        lsp_buf_opened.on(move |opt: Option<&Vec<LspOut>>| {
+            if let Some(events) = opt {
+                for ev in events {
+                    target.push(ev.clone());
+                }
+            }
+        });
+    }
+
+    // BufferChanged: dedupe on (active_buffer, doc.version())
+    let lsp_buf_changed = state
+        .dedupe_by(|s| {
+            s.active_buffer.and_then(|id| {
+                let buf = s.buffers.get(&id)?;
+                Some((id, buf.doc.version()))
+            })
+        })
+        .filter(|s| s.active_buffer.is_some())
+        .filter_map(|s| {
+            let id = s.active_buffer?;
+            let buf = s.buffers.get(&id)?;
+            let path = buf.path.clone()?;
+            Some(LspOut::BufferChanged {
+                path,
+                doc: buf.doc.clone(),
+                edit_ops: buf.doc.pending_edit_ops(),
+            })
+        })
+        .stream();
+
+    // BufferSaved: dedupe on save_request.version()
+    let lsp_buf_saved = state
+        .dedupe_by(|s| s.save_request.version())
+        .filter(|s| s.save_request.version() > 0)
+        .filter(|s| s.active_buffer.is_some())
+        .filter_map(|s| {
+            let id = s.active_buffer?;
+            let buf = s.buffers.get(&id)?;
+            let path = buf.path.clone()?;
+            Some(LspOut::BufferSaved { path })
+        })
+        .stream();
+
+    // InlayHints: viewport-driven request
+    let lsp_inlay_hints = state
+        .dedupe_by(|s| {
+            if !s.lsp.inlay_hints_enabled {
+                return None;
+            }
+            s.active_buffer.and_then(|id| {
+                let buf = s.buffers.get(&id)?;
+                Some((id, buf.scroll_row / 5, buf.doc.version()))
+            })
+        })
+        .filter(|s| s.lsp.inlay_hints_enabled)
+        .filter(|s| s.active_buffer.is_some())
+        .filter_map(|s| {
+            let id = s.active_buffer?;
+            let buf = s.buffers.get(&id)?;
+            let path = buf.path.clone()?;
+            let start_row = buf.scroll_row;
+            let buffer_height = s.dims.map_or(50, |d| d.buffer_height());
+            let end_row = start_row + buffer_height + 10;
+            Some(LspOut::InlayHints {
+                path,
+                start_row,
+                end_row,
+            })
+        })
+        .stream();
+
+    // Feature requests: watch pending_request version
+    let lsp_requests = state
+        .dedupe_by(|s| s.lsp.pending_request.version())
+        .filter(|s| s.lsp.pending_request.version() > 0)
+        .filter(|s| s.lsp.pending_request.is_some())
+        .filter_map(|s| {
+            let req = (*s.lsp.pending_request).as_ref()?;
+            let id = s.active_buffer?;
+            let buf = s.buffers.get(&id)?;
+            let path = buf.path.clone()?;
+            let row = buf.cursor_row;
+            let col = buf.cursor_col;
+            match req {
+                LspRequest::GotoDefinition => Some(LspOut::GotoDefinition { path, row, col }),
+                LspRequest::Format => Some(LspOut::Format { path }),
+                LspRequest::CodeAction => {
+                    let (end_row, end_col) = buf.mark.unwrap_or((row, col));
+                    let (sr, sc, er, ec) = if (row, col) <= (end_row, end_col) {
+                        (row, col, end_row, end_col)
+                    } else {
+                        (end_row, end_col, row, col)
+                    };
+                    Some(LspOut::CodeAction {
+                        path,
+                        start_row: sr,
+                        start_col: sc,
+                        end_row: er,
+                        end_col: ec,
+                    })
+                }
+                LspRequest::Rename { new_name } => Some(LspOut::Rename {
+                    path,
+                    row,
+                    col,
+                    new_name: new_name.clone(),
+                }),
+                LspRequest::Complete => Some(LspOut::Complete { path, row, col }),
+                LspRequest::CodeActionSelect { index } => {
+                    Some(LspOut::CodeActionSelect { index: *index })
+                }
+                LspRequest::CompleteAccept { index } => {
+                    Some(LspOut::CompleteAccept { index: *index })
+                }
+            }
+        })
+        .stream();
+
+    // Shutdown
+    let lsp_shutdown = state
+        .dedupe_by(|s| s.quit)
+        .filter(|s| s.quit)
+        .map(|_| LspOut::Shutdown)
+        .stream();
+
+    lsp_init.forward(&lsp_out);
+    lsp_buf_changed.forward(&lsp_out);
+    lsp_buf_saved.forward(&lsp_out);
+    lsp_inlay_hints.forward(&lsp_out);
+    lsp_requests.forward(&lsp_out);
+    lsp_shutdown.forward(&lsp_out);
+
     Derived {
         ui,
         workspace_out,
@@ -500,6 +682,7 @@ pub fn derived(state: Stream<Arc<AppState>>) -> Derived {
         syntax_out,
         git_out,
         file_search_out,
+        lsp_out,
     }
 }
 

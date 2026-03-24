@@ -3,7 +3,8 @@ use std::sync::Arc;
 
 use led_core::{Action, BufferId, PanelSlot};
 use led_state::{
-    AppState, BufferState, Dimensions, EditKind, EntryKind, PreviewRequest, SaveState,
+    AppState, BufferState, Dimensions, EditKind, EntryKind, LspRequest, PreviewRequest,
+    RenameState, SaveState,
 };
 
 use led_state::JumpPosition;
@@ -40,6 +41,27 @@ pub fn handle_action(state: &mut AppState, action: Action) {
         && is_editing_action(&action)
     {
         promote_preview_active(state);
+    }
+
+    // Intercept actions during LSP completion
+    if state.lsp.completion.is_some() {
+        if handle_completion_action(state, &action) {
+            return;
+        }
+    }
+
+    // Intercept actions during LSP code action picker
+    if state.lsp.code_actions.is_some() {
+        if handle_code_action_picker(state, &action) {
+            return;
+        }
+    }
+
+    // Intercept actions during LSP rename
+    if state.lsp.rename.is_some() && state.focus == PanelSlot::Overlay {
+        if handle_rename_action(state, &action) {
+            return;
+        }
     }
 
     // Intercept actions during file search
@@ -162,16 +184,38 @@ pub fn handle_action(state: &mut AppState, action: Action) {
         }),
 
         // ── Editing ──
-        Action::InsertChar(ch) => with_buf(state, |buf, dims| {
-            buf.mark = None;
-            maybe_close_group(buf, EditKind::Insert, ch);
-            let (doc, r, c, _) = edit::insert_char(buf, ch);
-            buf.doc = doc;
-            buf.cursor_row = r;
-            buf.cursor_col = c;
-            buf.cursor_col_affinity = mov::reset_affinity(buf, dims);
-            buf.last_edit_kind = Some(EditKind::Insert);
-        }),
+        Action::InsertChar(ch) => {
+            with_buf(state, |buf, dims| {
+                buf.mark = None;
+                maybe_close_group(buf, EditKind::Insert, ch);
+                let (doc, r, c, _) = edit::insert_char(buf, ch);
+                buf.doc = doc;
+                buf.cursor_row = r;
+                buf.cursor_col = c;
+                buf.cursor_col_affinity = mov::reset_affinity(buf, dims);
+                buf.last_edit_kind = Some(EditKind::Insert);
+            });
+            // Auto-trigger completion when no popup is showing
+            if state.lsp.completion.is_none() {
+                if let Some(id) = state.active_buffer {
+                    if let Some(buf) = state.buffers.get(&id) {
+                        if !buf.completion_triggers.is_empty() {
+                            let line = buf.doc.line(buf.cursor_row);
+                            let col = buf.cursor_col;
+                            if col > 0 {
+                                let prev = line.chars().nth(col - 1).unwrap_or(' ');
+                                if prev.is_alphanumeric() || prev == '_' {
+                                    state
+                                        .lsp_mut()
+                                        .pending_request
+                                        .set(Some(LspRequest::Complete));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
         Action::InsertCloseBracket(ch) => with_buf(state, |buf, dims| {
             buf.mark = None;
             maybe_close_group(buf, EditKind::Insert, ch);
@@ -325,7 +369,19 @@ pub fn handle_action(state: &mut AppState, action: Action) {
                     buf.save_state = SaveState::Saving;
                 }
             }
-            state.save_request.set(());
+            // If we have an LSP server for this file, format first then save
+            let has_lsp = state
+                .active_buffer
+                .and_then(|id| state.buffers.get(&id))
+                .and_then(|b| b.path.as_ref())
+                .is_some_and(|_| !state.lsp.server_name.is_empty());
+            if has_lsp {
+                state.lsp_mut().pending_save_after_format = true;
+                state.lsp_mut().pending_request.set(Some(LspRequest::Format));
+                state.alerts.info = Some("Formatting...".into());
+            } else {
+                state.save_request.set(());
+            }
         }
 
         // ── Tabs ──
@@ -387,7 +443,306 @@ pub fn handle_action(state: &mut AppState, action: Action) {
             }
         }
 
+        // ── LSP ──
+        Action::LspGotoDefinition => {
+            state
+                .lsp_mut()
+                .pending_request
+                .set(Some(LspRequest::GotoDefinition));
+        }
+        Action::LspFormat => {
+            state
+                .lsp_mut()
+                .pending_request
+                .set(Some(LspRequest::Format));
+        }
+        Action::LspCodeAction => {
+            state
+                .lsp_mut()
+                .pending_request
+                .set(Some(LspRequest::CodeAction));
+        }
+        Action::LspRename => {
+            // Open rename overlay with word under cursor
+            if let Some(id) = state.active_buffer {
+                if let Some(buf) = state.buffers.get(&id) {
+                    let word = word_under_cursor(buf);
+                    let cursor = word.len();
+                    state.lsp_mut().rename = Some(RenameState {
+                        input: word,
+                        cursor,
+                    });
+                    state.focus = PanelSlot::Overlay;
+                }
+            }
+        }
+        Action::LspNextDiagnostic => {
+            navigate_diagnostic(state, true);
+        }
+        Action::LspPrevDiagnostic => {
+            navigate_diagnostic(state, false);
+        }
+        Action::LspToggleInlayHints => {
+            let lsp = state.lsp_mut();
+            lsp.inlay_hints_enabled = !lsp.inlay_hints_enabled;
+            if !lsp.inlay_hints_enabled {
+                lsp.inlay_hints.clear();
+            }
+        }
+
         _ => {}
+    }
+}
+
+/// Extract the word under the cursor.
+fn word_under_cursor(buf: &BufferState) -> String {
+    let line = buf.doc.line(buf.cursor_row);
+    let chars: Vec<char> = line.chars().collect();
+    let col = buf.cursor_col;
+    if col >= chars.len() {
+        return String::new();
+    }
+    let mut start = col;
+    while start > 0 && (chars[start - 1].is_alphanumeric() || chars[start - 1] == '_') {
+        start -= 1;
+    }
+    let mut end = col;
+    while end < chars.len() && (chars[end].is_alphanumeric() || chars[end] == '_') {
+        end += 1;
+    }
+    chars[start..end].iter().collect()
+}
+
+/// Navigate to the next or previous diagnostic in the current file.
+fn navigate_diagnostic(state: &mut AppState, forward: bool) {
+    let Some(id) = state.active_buffer else {
+        return;
+    };
+    let Some(buf) = state.buffers.get(&id) else {
+        return;
+    };
+    let Some(ref path) = buf.path else { return };
+    let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.clone());
+    let Some(diags) = state.lsp.diagnostics.get(&canonical) else {
+        return;
+    };
+    if diags.is_empty() {
+        return;
+    }
+
+    let row = buf.cursor_row;
+    let col = buf.cursor_col;
+
+    let target = if forward {
+        diags
+            .iter()
+            .find(|d| (d.start_row, d.start_col) > (row, col))
+            .or_else(|| diags.first())
+    } else {
+        diags
+            .iter()
+            .rev()
+            .find(|d| (d.start_row, d.start_col) < (row, col))
+            .or_else(|| diags.last())
+    };
+
+    if let Some(d) = target {
+        let target_row = d.start_row;
+        let target_col = d.start_col;
+        if let Some(buf) = state.buf_mut(id) {
+            super::action::close_group_on_move(buf);
+            buf.cursor_row = target_row;
+            buf.cursor_col = target_col;
+            buf.cursor_col_affinity = target_col;
+        }
+    }
+}
+
+// ── LSP completion interception ──
+
+fn handle_completion_action(state: &mut AppState, action: &Action) -> bool {
+    match action {
+        Action::MoveUp => {
+            let lsp = state.lsp_mut();
+            if let Some(ref mut comp) = lsp.completion {
+                comp.selected = comp.selected.saturating_sub(1);
+            }
+            true
+        }
+        Action::MoveDown => {
+            let lsp = state.lsp_mut();
+            if let Some(ref mut comp) = lsp.completion {
+                comp.selected = (comp.selected + 1).min(comp.items.len().saturating_sub(1));
+            }
+            true
+        }
+        Action::InsertNewline | Action::InsertTab => {
+            // Accept completion
+            let comp = state.lsp.completion.clone();
+            if let Some(comp) = comp {
+                let index = comp.selected;
+                if let Some(item) = comp.items.get(index) {
+                    if let Some(id) = state.active_buffer {
+                        let buf = &state.buffers[&id];
+                        let cursor_row = buf.cursor_row;
+                        let cursor_col = buf.cursor_col;
+
+                        // Build text edit: replace from prefix_start to current cursor
+                        let te = led_lsp::TextEdit {
+                            start_row: cursor_row,
+                            start_col: comp.prefix_start_col,
+                            end_row: cursor_row,
+                            end_col: cursor_col,
+                            new_text: item.text_edit
+                                .as_ref()
+                                .map(|e| e.new_text.clone())
+                                .unwrap_or_else(|| item.insert_text.clone()),
+                        };
+
+                        // Apply edit and move cursor to end of inserted text
+                        if let Some(buf) = state.buf_mut(id) {
+                            super::apply_text_edits(buf, &[te.clone()]);
+                            let new_text = &te.new_text;
+                            let newline_count = new_text.chars().filter(|c| *c == '\n').count();
+                            if newline_count == 0 {
+                                buf.cursor_row = te.start_row;
+                                buf.cursor_col = te.start_col + new_text.chars().count();
+                            } else {
+                                buf.cursor_row = te.start_row + newline_count;
+                                buf.cursor_col = new_text
+                                    .rsplit('\n')
+                                    .next()
+                                    .map(|l| l.chars().count())
+                                    .unwrap_or(0);
+                            }
+                            buf.cursor_col_affinity = buf.cursor_col;
+                        }
+
+                        // Apply additional edits (auto-imports etc.)
+                        if !item.additional_edits.is_empty() {
+                            if let Some(buf) = state.buf_mut(id) {
+                                super::apply_text_edits(buf, &item.additional_edits);
+                            }
+                        }
+                    }
+                    // Request resolve for additional edits from server
+                    state
+                        .lsp_mut()
+                        .pending_request
+                        .set(Some(LspRequest::CompleteAccept { index }));
+                }
+                state.lsp_mut().completion = None;
+            }
+            true
+        }
+        Action::Abort => {
+            state.lsp_mut().completion = None;
+            true
+        }
+        // Printable chars / backspace: pass through to normal editing, then re-filter
+        Action::InsertChar(_) | Action::DeleteBackward => false,
+        _ => {
+            // Any other action dismisses completion
+            state.lsp_mut().completion = None;
+            false
+        }
+    }
+}
+
+// ── LSP code action picker interception ──
+
+fn handle_code_action_picker(state: &mut AppState, action: &Action) -> bool {
+    match action {
+        Action::MoveUp => {
+            let lsp = state.lsp_mut();
+            if let Some(ref mut picker) = lsp.code_actions {
+                picker.selected = picker.selected.saturating_sub(1);
+            }
+            true
+        }
+        Action::MoveDown => {
+            let lsp = state.lsp_mut();
+            if let Some(ref mut picker) = lsp.code_actions {
+                picker.selected = (picker.selected + 1).min(picker.actions.len().saturating_sub(1));
+            }
+            true
+        }
+        Action::InsertNewline => {
+            // Accept selection
+            let index = state
+                .lsp
+                .code_actions
+                .as_ref()
+                .map(|p| p.selected)
+                .unwrap_or(0);
+            state.lsp_mut().code_actions = None;
+            state.focus = PanelSlot::Main;
+            state
+                .lsp_mut()
+                .pending_request
+                .set(Some(LspRequest::CodeActionSelect { index }));
+            true
+        }
+        Action::Abort => {
+            state.lsp_mut().code_actions = None;
+            state.focus = PanelSlot::Main;
+            true
+        }
+        _ => true, // Absorb all other actions while picker is open
+    }
+}
+
+// ── LSP rename interception ──
+
+fn handle_rename_action(state: &mut AppState, action: &Action) -> bool {
+    match action {
+        Action::InsertChar(ch) => {
+            let lsp = state.lsp_mut();
+            if let Some(ref mut rename) = lsp.rename {
+                rename.input.insert(rename.cursor, *ch);
+                rename.cursor += ch.len_utf8();
+            }
+            true
+        }
+        Action::DeleteBackward => {
+            let lsp = state.lsp_mut();
+            if let Some(ref mut rename) = lsp.rename {
+                if rename.cursor > 0 {
+                    let ch = rename.input[..rename.cursor]
+                        .chars()
+                        .last()
+                        .map(|c| c.len_utf8())
+                        .unwrap_or(1);
+                    rename.cursor -= ch;
+                    rename.input.remove(rename.cursor);
+                }
+            }
+            true
+        }
+        Action::InsertNewline => {
+            // Submit rename
+            let new_name = state
+                .lsp
+                .rename
+                .as_ref()
+                .map(|r| r.input.clone())
+                .unwrap_or_default();
+            state.lsp_mut().rename = None;
+            state.focus = PanelSlot::Main;
+            if !new_name.is_empty() {
+                state
+                    .lsp_mut()
+                    .pending_request
+                    .set(Some(LspRequest::Rename { new_name }));
+            }
+            true
+        }
+        Action::Abort => {
+            state.lsp_mut().rename = None;
+            state.focus = PanelSlot::Main;
+            true
+        }
+        _ => true, // Absorb all other actions while rename overlay is open
     }
 }
 
@@ -947,3 +1302,4 @@ fn is_editing_action(action: &Action) -> bool {
             | Action::SortImports
     )
 }
+

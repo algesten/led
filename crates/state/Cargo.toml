@@ -8,5 +8,6 @@ led-core = { workspace = true }
 led-config-file = { workspace = true }
 led-fs = { workspace = true }
 led-workspace = { workspace = true }
+led-lsp = { workspace = true }
 log = { workspace = true }
 serde = { workspace = true }

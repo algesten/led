@@ -32,6 +32,7 @@ pub struct Drivers {
     pub syntax_in: Stream<led_syntax::SyntaxIn>,
     pub git_in: Stream<led_git::GitIn>,
     pub file_search_in: Stream<led_file_search::FileSearchIn>,
+    pub lsp_in: Stream<led_lsp::LspIn>,
 }
 
 pub struct RunGuards {
@@ -94,6 +95,7 @@ pub fn run(
     let syntax_in = led_syntax::driver(d.syntax_out);
     let git_in = led_git::driver(d.git_out);
     let file_search_in = led_file_search::driver(d.file_search_out);
+    let lsp_in = led_lsp::driver(d.lsp_out);
 
     let drivers = Drivers {
         terminal_in,
@@ -108,6 +110,7 @@ pub fn run(
         syntax_in,
         git_in,
         file_search_in,
+        lsp_in,
     };
 
     // 4. Model

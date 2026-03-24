@@ -118,7 +118,12 @@ pub fn driver(state: Stream<Arc<AppState>>) -> Ui {
         })
         .stream();
 
-    let render_s = combine!(display_s, cursor_s, status_s, tabs_s, layout_s, browser_s);
+    let overlay_s = state
+        .map(|s| display::overlay_inputs(&s))
+        .dedupe()
+        .stream();
+
+    let render_s = combine!(display_s, cursor_s, status_s, tabs_s, layout_s, browser_s, overlay_s);
 
     let mut last_redraw = 0u64;
 
@@ -130,8 +135,9 @@ pub fn driver(state: Stream<Arc<AppState>>) -> Ui {
             Rc<display::TabsInputs>,
             display::LayoutInfo,
             Rc<Vec<Line<'static>>>,
+            display::OverlayContent,
         )>| {
-            let Some((lines, cursor, status, tabs, layout, browser)) = opt else {
+            let Some((lines, cursor, status, tabs, layout, browser, overlay)) = opt else {
                 return;
             };
             let clear = layout.force_redraw != last_redraw;
@@ -140,7 +146,7 @@ pub fn driver(state: Stream<Arc<AppState>>) -> Ui {
                 terminal.clear().ok();
             }
             if let Err(e) = terminal.draw(|frame| {
-                render::render(frame, layout, lines, *cursor, status, tabs, browser);
+                render::render(frame, layout, lines, *cursor, status, tabs, browser, overlay);
             }) {
                 log::error!("render error: {}", e);
             }

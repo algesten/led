@@ -8,6 +8,7 @@ mod edit;
 pub(crate) mod file_search;
 pub(crate) mod find_file;
 mod jump;
+mod lsp_of;
 mod mov;
 mod process_of;
 mod search;
@@ -139,6 +140,7 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Arc<AppState>> {
     let buffers_s = buffers_of(&drivers.docstore_in, &state);
     let process_s = process_of(&state);
     let preview_s = preview_of(&state);
+    let lsp_s = lsp_of::lsp_of(&drivers.lsp_in, &state);
 
     // ── 2. Build up muts from driver input and derived streams ──
 
@@ -350,6 +352,7 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Arc<AppState>> {
     git_line_s.forward(&muts);
     file_search_s.forward(&muts);
     preview_s.forward(&muts);
+    lsp_s.forward(&muts);
 
     // ── 3. Reduce ──
 
@@ -639,6 +642,139 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Arc<AppState>> {
                 s.git_mut().pending_file_scan.set(());
                 s.workspace = Some(Arc::new(workspace));
             }
+
+            // ── LSP ──
+            Mut::LspNavigate { path, row, col } => {
+                // Record current position in jump list
+                if let Some(id) = s.active_buffer {
+                    if let Some(buf) = s.buffers.get(&id) {
+                        if let Some(ref p) = buf.path {
+                            let pos = led_state::JumpPosition {
+                                path: p.clone(),
+                                row: buf.cursor_row,
+                                col: buf.cursor_col,
+                                scroll_offset: buf.scroll_row,
+                            };
+                            jump::record_jump(&mut s, pos);
+                        }
+                    }
+                }
+                // Check if file is already open
+                let canonical =
+                    std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+                let existing = s
+                    .buffers
+                    .values()
+                    .find(|b| {
+                        b.path.as_ref().map_or(false, |p| {
+                            std::fs::canonicalize(p).unwrap_or_else(|_| p.clone())
+                                == canonical
+                        })
+                    })
+                    .map(|b| b.id);
+                if let Some(id) = existing {
+                    s.active_buffer = Some(id);
+                    let half = s.dims.map_or(10, |d| d.buffer_height() / 2);
+                    if let Some(buf) = s.buf_mut(id) {
+                        buf.cursor_row = row.min(buf.doc.line_count().saturating_sub(1));
+                        buf.cursor_col = col;
+                        buf.cursor_col_affinity = col;
+                        buf.scroll_row = buf.cursor_row.saturating_sub(half);
+                    }
+                    action::reveal_active_buffer(&mut s);
+                } else {
+                    s.pending_open.set(Some(path.clone()));
+                    s.jump.pending_position = Some(led_state::JumpPosition {
+                        path,
+                        row,
+                        col,
+                        scroll_offset: 0,
+                    });
+                }
+            }
+            Mut::LspEdits { edits } => {
+                let is_empty = edits.iter().all(|fe| fe.edits.is_empty());
+                for fe in edits {
+                    let buf_id = s
+                        .buffers
+                        .values()
+                        .find(|b| b.path.as_ref() == Some(&fe.path))
+                        .map(|b| b.id);
+                    if let Some(id) = buf_id {
+                        if let Some(buf) = s.buf_mut(id) {
+                            apply_text_edits(buf, &fe.edits);
+                        }
+                    }
+                }
+                // Format-done signal (empty edits) → trigger pending save
+                if is_empty && s.lsp.pending_save_after_format {
+                    s.lsp_mut().pending_save_after_format = false;
+                    s.save_request.set(());
+                }
+            }
+            Mut::LspCompletion {
+                items,
+                prefix_start_col,
+            } => {
+                if items.is_empty() {
+                    s.lsp_mut().completion = None;
+                } else {
+                    s.lsp_mut().completion = Some(led_state::CompletionState {
+                        items,
+                        prefix_start_col,
+                        selected: 0,
+                        scroll_offset: 0,
+                    });
+                }
+            }
+            Mut::LspCodeActions { actions } => {
+                if actions.is_empty() {
+                    s.lsp_mut().code_actions = None;
+                } else {
+                    s.lsp_mut().code_actions = Some(led_state::CodeActionPickerState {
+                        actions,
+                        selected: 0,
+                    });
+                    s.focus = PanelSlot::Overlay;
+                }
+            }
+            Mut::LspDiagnostics { path, diagnostics } => {
+                let key = std::fs::canonicalize(&path).unwrap_or(path);
+                s.lsp_mut().diagnostics.insert(key, diagnostics);
+            }
+            Mut::LspInlayHints { path, hints } => {
+                let key = std::fs::canonicalize(&path).unwrap_or(path);
+                s.lsp_mut().inlay_hints.insert(key, hints);
+            }
+            Mut::LspProgress {
+                server_name,
+                busy,
+                detail,
+            } => {
+                let lsp = s.lsp_mut();
+                lsp.server_name = server_name;
+                lsp.busy = busy;
+                lsp.progress = detail.map(|d| led_state::LspProgress {
+                    title: d,
+                    message: None,
+                });
+            }
+            Mut::LspTriggerChars {
+                extensions,
+                triggers,
+            } => {
+                for buf in s.buffers_mut().values_mut() {
+                    let ext = buf
+                        .path
+                        .as_ref()
+                        .and_then(|p| p.extension())
+                        .and_then(|e| e.to_str())
+                        .unwrap_or("");
+                    if extensions.iter().any(|x| x == ext) {
+                        Arc::make_mut(buf).completion_triggers = triggers.clone();
+                    }
+                }
+            }
         }
         Arc::new(s)
     });
@@ -779,6 +915,39 @@ enum Mut {
         workspace: Workspace,
         initial_dirs: Vec<PathBuf>,
     },
+    // LSP
+    LspNavigate {
+        path: PathBuf,
+        row: usize,
+        col: usize,
+    },
+    LspEdits {
+        edits: Vec<led_lsp::FileEdit>,
+    },
+    LspCompletion {
+        items: Vec<led_lsp::CompletionItem>,
+        prefix_start_col: usize,
+    },
+    LspCodeActions {
+        actions: Vec<String>,
+    },
+    LspDiagnostics {
+        path: PathBuf,
+        diagnostics: Vec<led_lsp::Diagnostic>,
+    },
+    LspInlayHints {
+        path: PathBuf,
+        hints: Vec<led_lsp::InlayHint>,
+    },
+    LspProgress {
+        server_name: String,
+        busy: bool,
+        detail: Option<String>,
+    },
+    LspTriggerChars {
+        extensions: Vec<String>,
+        triggers: Vec<String>,
+    },
 }
 
 impl Mut {
@@ -813,6 +982,14 @@ impl Mut {
             Mut::UndoFlushReady { .. } => "UndoFlushReady",
             Mut::TimerFired(_) => "TimerFired",
             Mut::Workspace { .. } => "Workspace",
+            Mut::LspNavigate { .. } => "LspNavigate",
+            Mut::LspEdits { .. } => "LspEdits",
+            Mut::LspCompletion { .. } => "LspCompletion",
+            Mut::LspCodeActions { .. } => "LspCodeActions",
+            Mut::LspDiagnostics { .. } => "LspDiagnostics",
+            Mut::LspInlayHints { .. } => "LspInlayHints",
+            Mut::LspProgress { .. } => "LspProgress",
+            Mut::LspTriggerChars { .. } => "LspTriggerChars",
         }
     }
 
@@ -827,6 +1004,36 @@ impl Mut {
                 warn: Some(v),
             },
         }
+    }
+}
+
+// ── LSP edit helper ──
+
+/// Apply text edits to a buffer in reverse document order.
+fn apply_text_edits(buf: &mut BufferState, edits: &[led_lsp::TextEdit]) {
+    let mut sorted: Vec<&led_lsp::TextEdit> = edits.iter().collect();
+    sorted.sort_by(|a, b| {
+        let row_cmp = b.start_row.cmp(&a.start_row);
+        if row_cmp == std::cmp::Ordering::Equal {
+            b.start_col.cmp(&a.start_col)
+        } else {
+            row_cmp
+        }
+    });
+
+    action::close_group_on_move(buf);
+    for te in sorted {
+        let start = buf.doc.line_to_char(te.start_row) + te.start_col;
+        let end = buf.doc.line_to_char(te.end_row) + te.end_col;
+        if start != end {
+            buf.doc = buf.doc.remove(start, end);
+        }
+        if !te.new_text.is_empty() {
+            buf.doc = buf.doc.insert(start, &te.new_text);
+        }
+    }
+    if buf.doc.dirty() && buf.save_state == led_state::SaveState::Clean {
+        buf.save_state = led_state::SaveState::Modified;
     }
 }
 

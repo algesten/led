@@ -60,6 +60,7 @@ pub fn buffers_of(
                         matching_bracket: None,
                         pending_indent_row: None,
                         pending_tab_fallback: false,
+                        completion_triggers: Vec::new(),
                         is_preview: true,
                     };
                     let remove_old_id = state.preview.buffer;
@@ -199,6 +200,7 @@ pub fn buffers_of(
                     matching_bracket: None,
                     pending_indent_row: None,
                     pending_tab_fallback: false,
+                    completion_triggers: Vec::new(),
                     is_preview: false,
                 };
                 let activate =

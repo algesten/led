@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -45,6 +46,14 @@ pub struct DisplayInputs {
     git_line_statuses: Vec<LineStatus>,
     gutter_added_style: Style,
     gutter_modified_style: Style,
+    diagnostics: Vec<(usize, usize, usize, usize, led_lsp::DiagnosticSeverity)>,
+    inlay_hints: Vec<(usize, usize, String)>,
+    diagnostic_error_style: Style,
+    diagnostic_warning_style: Style,
+    diagnostic_info_style: Style,
+    diagnostic_hint_style: Style,
+    inlay_hint_style: Style,
+    inlay_hints_enabled: bool,
 }
 
 impl PartialEq for DisplayInputs {
@@ -70,6 +79,9 @@ impl PartialEq for DisplayInputs {
             && self.cursor_row == other.cursor_row
             && self.cursor_col == other.cursor_col
             && self.git_line_statuses == other.git_line_statuses
+            && self.diagnostics == other.diagnostics
+            && self.inlay_hints == other.inlay_hints
+            && self.inlay_hints_enabled == other.inlay_hints_enabled
     }
 }
 
@@ -105,6 +117,51 @@ pub fn display_inputs(s: &AppState) -> Option<DisplayInputs> {
         .unwrap_or_default();
     let gutter_added_style = style::resolve(theme, &theme.git.gutter_added);
     let gutter_modified_style = style::resolve(theme, &theme.git.gutter_modified);
+
+    // Diagnostics & inlay hints: try path directly first, then canonical
+    let diagnostics: Vec<(usize, usize, usize, usize, led_lsp::DiagnosticSeverity)> = buf
+        .path
+        .as_ref()
+        .and_then(|p| {
+            s.lsp
+                .diagnostics
+                .get(p)
+                .or_else(|| lookup_canonical(&s.lsp.diagnostics, p))
+        })
+        .map(|ds| {
+            ds.iter()
+                .map(|d| (d.start_row, d.start_col, d.end_row, d.end_col, d.severity))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let inlay_hints: Vec<(usize, usize, String)> = buf
+        .path
+        .as_ref()
+        .and_then(|p| {
+            s.lsp
+                .inlay_hints
+                .get(p)
+                .or_else(|| lookup_canonical(&s.lsp.inlay_hints, p))
+        })
+        .map(|hs| {
+            hs.iter()
+                .map(|h| (h.row, h.col, h.label.clone()))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let diagnostic_error_style = style::resolve(theme, &theme.diagnostics.error);
+    let diagnostic_warning_style = style::resolve(theme, &theme.diagnostics.warning);
+    let diagnostic_info_style = style::resolve(theme, &theme.diagnostics.info);
+    let diagnostic_hint_style = style::resolve(theme, &theme.diagnostics.hint);
+    let inlay_hint_style = theme
+        .editor
+        .inlay_hint
+        .as_ref()
+        .map(|sv| style::resolve(theme, sv))
+        .unwrap_or_else(|| Style::default().fg(ratatui::style::Color::DarkGray));
+    let inlay_hints_enabled = s.lsp.inlay_hints_enabled;
 
     Some(DisplayInputs {
         buffer_id: id,
@@ -144,6 +201,14 @@ pub fn display_inputs(s: &AppState) -> Option<DisplayInputs> {
         git_line_statuses,
         gutter_added_style,
         gutter_modified_style,
+        diagnostics,
+        inlay_hints,
+        diagnostic_error_style,
+        diagnostic_warning_style,
+        diagnostic_info_style,
+        diagnostic_hint_style,
+        inlay_hint_style,
+        inlay_hints_enabled,
     })
 }
 
@@ -196,17 +261,49 @@ pub fn build_display_lines(d: &DisplayInputs) -> Rc<Vec<Line<'static>>> {
             let is_last = chunk_idx == chunks.len() - 1;
             let mut spans: Vec<Span<'static>> = Vec::with_capacity(4);
 
-            // Gutter: diff marker or blank
-            let gutter = match led_core::git::line_status_at(&d.git_line_statuses, line_idx) {
+            // Gutter col 1: git diff marker
+            let git_char = match led_core::git::line_status_at(&d.git_line_statuses, line_idx) {
                 Some(led_core::git::LineStatusKind::GitAdded) if chunk_idx == 0 => {
-                    Span::styled("\u{258E} ", d.gutter_added_style)
+                    Span::styled("\u{258E}", d.gutter_added_style)
                 }
                 Some(led_core::git::LineStatusKind::GitModified) if chunk_idx == 0 => {
-                    Span::styled("\u{258E} ", d.gutter_modified_style)
+                    Span::styled("\u{258E}", d.gutter_modified_style)
                 }
-                _ => Span::styled("  ", d.gutter_style),
+                _ => Span::styled(" ", d.gutter_style),
             };
-            spans.push(gutter);
+            spans.push(git_char);
+
+            // Gutter col 2: diagnostic severity indicator (most severe on this line)
+            let diag_sev = if chunk_idx == 0 {
+                d.diagnostics
+                    .iter()
+                    .filter(|(sr, _, _, _, _)| *sr == line_idx)
+                    .map(|(_, _, _, _, s)| s)
+                    .min_by_key(|s| match s {
+                        led_lsp::DiagnosticSeverity::Error => 0,
+                        led_lsp::DiagnosticSeverity::Warning => 1,
+                        led_lsp::DiagnosticSeverity::Info => 2,
+                        led_lsp::DiagnosticSeverity::Hint => 3,
+                    })
+            } else {
+                None
+            };
+            let diag_char = match diag_sev {
+                Some(led_lsp::DiagnosticSeverity::Error) => {
+                    Span::styled("\u{25CF}", d.diagnostic_error_style)
+                }
+                Some(led_lsp::DiagnosticSeverity::Warning) => {
+                    Span::styled("\u{25CF}", d.diagnostic_warning_style)
+                }
+                Some(led_lsp::DiagnosticSeverity::Info) => {
+                    Span::styled("\u{25CF}", d.diagnostic_info_style)
+                }
+                Some(led_lsp::DiagnosticSeverity::Hint) => {
+                    Span::styled("\u{25CF}", d.diagnostic_hint_style)
+                }
+                None => Span::styled(" ", d.gutter_style),
+            };
+            spans.push(diag_char);
 
             // Per-column style pipeline
             let chunk_len = ce - cs;
@@ -319,6 +416,35 @@ pub fn build_display_lines(d: &DisplayInputs) -> Rc<Vec<Line<'static>>> {
                 }
             }
 
+            // 6.5. Diagnostic underlines
+            for &(dr_start, dc_start, dr_end, dc_end, ref sev) in &d.diagnostics {
+                if line_idx < dr_start || line_idx > dr_end {
+                    continue;
+                }
+                let diag_style = match sev {
+                    led_lsp::DiagnosticSeverity::Error => d.diagnostic_error_style,
+                    led_lsp::DiagnosticSeverity::Warning => d.diagnostic_warning_style,
+                    led_lsp::DiagnosticSeverity::Info => d.diagnostic_info_style,
+                    led_lsp::DiagnosticSeverity::Hint => continue,
+                };
+                let ds = if line_idx == dr_start {
+                    char_map.get(dc_start).copied().unwrap_or(display.len())
+                } else {
+                    0
+                };
+                let de = if line_idx == dr_end {
+                    char_map.get(dc_end).copied().unwrap_or(display.len())
+                } else {
+                    display.len()
+                };
+                for i in ds.max(cs)..de.min(ce) {
+                    let idx = i - cs;
+                    col_styles[idx] = col_styles[idx]
+                        .fg(diag_style.fg.unwrap_or(ratatui::style::Color::Red))
+                        .add_modifier(ratatui::style::Modifier::UNDERLINED);
+                }
+            }
+
             // 7. Group consecutive same-style columns into spans
             let mut pos = 0;
             while pos < chunk_len {
@@ -347,6 +473,18 @@ pub fn build_display_lines(d: &DisplayInputs) -> Rc<Vec<Line<'static>>> {
             // Wrap indicator on non-last chunks
             if !is_last {
                 spans.push(Span::styled("\\", d.gutter_style));
+            }
+
+            // Inlay hints: ghost text at end of line
+            if is_last && d.inlay_hints_enabled {
+                for (hr, _hc, label) in &d.inlay_hints {
+                    if *hr == line_idx {
+                        spans.push(Span::styled(
+                            format!(" {}", label),
+                            d.inlay_hint_style,
+                        ));
+                    }
+                }
             }
 
             display_lines.push(Line::from(spans));
@@ -471,6 +609,7 @@ pub struct StatusInputs {
     pub search_prompt: Option<String>,
     pub find_file_prompt: Option<(String, usize)>,
     pub branch: Option<String>,
+    pub lsp_status: Option<String>,
 }
 
 pub fn status_inputs(s: &AppState) -> StatusInputs {
@@ -512,6 +651,20 @@ pub fn status_inputs(s: &AppState) -> StatusInputs {
     let find_file_prompt = s.find_file.as_ref().map(|ff| (ff.input.clone(), ff.cursor));
     let branch = s.git.branch.clone();
 
+    // Build LSP status: "server_name [●]" when busy, or "server_name" + detail
+    let lsp_status = if s.lsp.server_name.is_empty() {
+        None
+    } else if s.lsp.busy {
+        let detail = s.lsp.progress.as_ref().map(|p| p.title.as_str()).unwrap_or("");
+        if detail.is_empty() {
+            Some(format!("{} \u{25cf}", s.lsp.server_name))
+        } else {
+            Some(format!("{} {}", s.lsp.server_name, detail))
+        }
+    } else {
+        Some(s.lsp.server_name.clone())
+    };
+
     StatusInputs {
         file_name,
         is_dirty,
@@ -523,6 +676,7 @@ pub fn status_inputs(s: &AppState) -> StatusInputs {
         search_prompt,
         find_file_prompt,
         branch,
+        lsp_status,
     }
 }
 
@@ -545,9 +699,13 @@ pub fn build_status_content(s: &StatusInputs) -> Rc<String> {
 
     let modified = if s.is_dirty { " \u{25cf}" } else { "" };
     let default_left = format!(" {}{}", s.file_name, modified);
-    let right = match &s.branch {
-        Some(b) => format!("{}  L{}:C{} ", b, s.cursor_row + 1, s.cursor_col + 1),
-        None => format!("L{}:C{} ", s.cursor_row + 1, s.cursor_col + 1),
+
+    let cursor = format!("L{}:C{} ", s.cursor_row + 1, s.cursor_col + 1);
+    let right = match (&s.branch, &s.lsp_status) {
+        (Some(b), Some(lsp)) => format!("{}  {}  {} ", lsp, b, cursor.trim_end()),
+        (Some(b), None) => format!("{}  {}", b, cursor),
+        (None, Some(lsp)) => format!("{}  {}", lsp, cursor),
+        (None, None) => cursor,
     };
 
     let left = match s.warn.as_deref().or(s.info.as_deref()) {
@@ -566,6 +724,88 @@ pub fn build_status_content(s: &StatusInputs) -> Rc<String> {
         right,
         padding = padding
     ))
+}
+
+// ── Overlay (completion popup, code action picker, rename input) ──
+
+#[derive(Clone, PartialEq)]
+pub enum OverlayContent {
+    None,
+    Completion {
+        items: Vec<(String, Option<String>, bool)>, // (label, detail, selected)
+        anchor_x: u16,
+        anchor_y: u16,
+    },
+    CodeActions {
+        items: Vec<(String, bool)>, // (title, selected)
+        anchor_x: u16,
+        anchor_y: u16,
+    },
+    Rename {
+        input: String,
+        cursor: usize,
+        anchor_x: u16,
+        anchor_y: u16,
+    },
+}
+
+pub fn overlay_inputs(s: &AppState) -> OverlayContent {
+    let dims = match s.dims {
+        Some(d) => d,
+        None => return OverlayContent::None,
+    };
+    let (cursor_x, cursor_y) = match s.active_buffer.and_then(|id| s.buffers.get(&id)) {
+        Some(buf) => {
+            let x = dims.side_width() + dims.gutter_width
+                + (buf.cursor_col as u16).min(dims.text_width() as u16);
+            let y = buf.cursor_row.saturating_sub(buf.scroll_row) as u16;
+            (x, y)
+        }
+        None => return OverlayContent::None,
+    };
+
+    if let Some(ref comp) = s.lsp.completion {
+        let max_items = 10usize;
+        let start = comp.scroll_offset;
+        let items: Vec<(String, Option<String>, bool)> = comp
+            .items
+            .iter()
+            .enumerate()
+            .skip(start)
+            .take(max_items)
+            .map(|(i, item)| (item.label.clone(), item.detail.clone(), i == comp.selected))
+            .collect();
+        return OverlayContent::Completion {
+            items,
+            anchor_x: cursor_x,
+            anchor_y: cursor_y + 1,
+        };
+    }
+
+    if let Some(ref picker) = s.lsp.code_actions {
+        let items: Vec<(String, bool)> = picker
+            .actions
+            .iter()
+            .enumerate()
+            .map(|(i, title)| (title.clone(), i == picker.selected))
+            .collect();
+        return OverlayContent::CodeActions {
+            items,
+            anchor_x: cursor_x,
+            anchor_y: cursor_y + 1,
+        };
+    }
+
+    if let Some(ref rename) = s.lsp.rename {
+        return OverlayContent::Rename {
+            input: rename.input.clone(),
+            cursor: rename.cursor,
+            anchor_x: cursor_x,
+            anchor_y: cursor_y + 1,
+        };
+    }
+
+    OverlayContent::None
 }
 
 // ── Tab bar ──
@@ -1116,6 +1356,13 @@ pub fn build_file_search_lines(f: &FileSearchInputs) -> Rc<Vec<Line<'static>>> {
     }
 
     Rc::new(lines)
+}
+
+/// Fallback lookup: canonicalize the buffer path and try again.
+/// Only called when the direct path lookup misses (macOS /var → /private/var).
+fn lookup_canonical<'a, V>(map: &'a HashMap<PathBuf, V>, path: &Path) -> Option<&'a V> {
+    let canonical = std::fs::canonicalize(path).ok()?;
+    map.get(&canonical)
 }
 
 fn build_hit_spans<'a>(

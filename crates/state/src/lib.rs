@@ -200,6 +200,7 @@ pub struct BufferState {
     pub matching_bracket: Option<(usize, usize)>,
     pub pending_indent_row: Option<usize>,
     pub pending_tab_fallback: bool,
+    pub completion_triggers: Vec<String>,
     pub is_preview: bool,
 }
 
@@ -419,6 +420,69 @@ impl KillRingState {
     }
 }
 
+// ── LSP ──
+
+#[derive(Debug, Clone, Default)]
+pub struct LspState {
+    // Annotations (per-file, for rendering)
+    pub diagnostics: HashMap<PathBuf, Vec<led_lsp::Diagnostic>>,
+    pub inlay_hints: HashMap<PathBuf, Vec<led_lsp::InlayHint>>,
+    pub inlay_hints_enabled: bool,
+
+    // Popups
+    pub completion: Option<CompletionState>,
+    pub code_actions: Option<CodeActionPickerState>,
+    pub rename: Option<RenameState>,
+
+    // Status bar — two indicators
+    pub server_name: String,
+    pub busy: bool,
+    pub progress: Option<LspProgress>,
+
+    // Single pending request
+    pub pending_request: Versioned<Option<LspRequest>>,
+
+    // Format-on-save: trigger save after format completes
+    pub pending_save_after_format: bool,
+}
+
+#[derive(Debug, Clone)]
+pub enum LspRequest {
+    GotoDefinition,
+    Format,
+    CodeAction,
+    Complete,
+    Rename { new_name: String },
+    CodeActionSelect { index: usize },
+    CompleteAccept { index: usize },
+}
+
+#[derive(Debug, Clone)]
+pub struct CompletionState {
+    pub items: Vec<led_lsp::CompletionItem>,
+    pub prefix_start_col: usize,
+    pub selected: usize,
+    pub scroll_offset: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct CodeActionPickerState {
+    pub actions: Vec<String>,
+    pub selected: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct RenameState {
+    pub input: String,
+    pub cursor: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct LspProgress {
+    pub title: String,
+    pub message: Option<String>,
+}
+
 // ── Preview ──
 
 #[derive(Debug, Clone, Default)]
@@ -481,6 +545,9 @@ pub struct AppState {
 
     // Git
     pub git: Arc<GitState>,
+
+    // LSP
+    pub lsp: Arc<LspState>,
 }
 
 impl AppState {
@@ -509,5 +576,9 @@ impl AppState {
 
     pub fn git_mut(&mut self) -> &mut GitState {
         Arc::make_mut(&mut self.git)
+    }
+
+    pub fn lsp_mut(&mut self) -> &mut LspState {
+        Arc::make_mut(&mut self.lsp)
     }
 }

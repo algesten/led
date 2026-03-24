@@ -43,6 +43,8 @@ pub struct EditorTheme {
     pub selection: StyleValue,
     pub search_match: StyleValue,
     pub search_current: StyleValue,
+    #[serde(default)]
+    pub inlay_hint: Option<StyleValue>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
