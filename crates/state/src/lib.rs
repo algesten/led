@@ -438,6 +438,7 @@ pub struct LspState {
     pub server_name: String,
     pub busy: bool,
     pub progress: Option<LspProgress>,
+    pub spinner_tick: u32,
 
     // Single pending request
     pub pending_request: Versioned<Option<LspRequest>>,

@@ -846,6 +846,9 @@ fn handle_timer(state: &mut AppState, name: &'static str) {
         "git_file_scan" => {
             state.git_mut().scan_seq.set(());
         }
+        "spinner" => {
+            state.lsp_mut().spinner_tick = state.lsp.spinner_tick.wrapping_add(1);
+        }
         "undo_flush" => {
             // Handled by the undo_flush_s combinator chain, not here.
             // The timer fires → chain samples state → produces UndoFlushReady.

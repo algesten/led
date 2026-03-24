@@ -305,9 +305,27 @@ pub fn derived(state: Stream<Arc<AppState>>) -> Derived {
         })
         .stream();
 
+    // Spinner: start a repeated 80ms timer while LSP is busy, cancel when idle.
+    let spinner_timer = state
+        .map(|s| s.lsp.busy)
+        .dedupe()
+        .map(|busy| {
+            if busy {
+                TimersOut::Set {
+                    name: "spinner",
+                    duration: Duration::from_millis(80),
+                    schedule: Schedule::Repeated,
+                }
+            } else {
+                TimersOut::Cancel { name: "spinner" }
+            }
+        })
+        .stream();
+
     let timers_out: Stream<TimersOut> = Stream::new();
     alert_timer.forward(&timers_out);
     undo_timer.forward(&timers_out);
+    spinner_timer.forward(&timers_out);
 
     // FS: browser directory listing requests
     let browser_list = state

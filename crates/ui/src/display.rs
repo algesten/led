@@ -605,6 +605,7 @@ pub struct StatusInputs {
     pub lsp_server_name: String,
     pub lsp_busy: bool,
     pub lsp_detail: Option<String>,
+    pub spinner_tick: u32,
 }
 
 pub fn status_inputs(s: &AppState) -> StatusInputs {
@@ -668,6 +669,7 @@ pub fn status_inputs(s: &AppState) -> StatusInputs {
         lsp_server_name: s.lsp.server_name.clone(),
         lsp_busy: s.lsp.busy,
         lsp_detail,
+        spinner_tick: s.lsp.spinner_tick,
     }
 }
 
