@@ -3,6 +3,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
+use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 
@@ -205,6 +206,7 @@ pub struct BufferState {
     pub reindent_chars: Arc<[char]>,
     pub completion_triggers: Vec<String>,
     pub is_preview: bool,
+    pub last_used: Instant,
 }
 
 impl fmt::Debug for BufferState {
@@ -217,6 +219,7 @@ impl fmt::Debug for BufferState {
             .field("cursor_col", &self.cursor_col)
             .field("scroll_row", &self.scroll_row)
             .field("tab_order", &self.tab_order)
+            .field("last_used", &self.last_used)
             .finish()
     }
 }

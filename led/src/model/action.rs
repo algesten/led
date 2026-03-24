@@ -1,5 +1,6 @@
 use std::path::Path;
 use std::rc::Rc;
+use std::time::Instant;
 
 use led_core::{Action, BufferId, PanelSlot};
 use led_state::{
@@ -282,6 +283,7 @@ pub fn handle_action(state: &mut AppState, action: Action) {
                     if buf.doc.dirty() && buf.save_state == SaveState::Clean {
                         buf.save_state = SaveState::Modified;
                     }
+                    buf.last_used = Instant::now();
                 }
             }
             if let Some(killed) = killed_text {
@@ -314,6 +316,7 @@ pub fn handle_action(state: &mut AppState, action: Action) {
                     if buf.doc.dirty() && buf.save_state == SaveState::Clean {
                         buf.save_state = SaveState::Modified;
                     }
+                    buf.last_used = Instant::now();
                 }
             } else {
                 no_region = true;
@@ -359,6 +362,7 @@ pub fn handle_action(state: &mut AppState, action: Action) {
                 if let Some(buf) = state.buf_mut(id) {
                     close_group_on_move(buf);
                     buf.save_state = SaveState::Saving;
+                    buf.last_used = Instant::now();
                 }
             }
             // If we have an LSP server for this file, format first then save
@@ -429,6 +433,7 @@ pub fn handle_action(state: &mut AppState, action: Action) {
                                 let doc = buf.doc.remove(start_char, end_char);
                                 let doc = doc.insert(start_char, &replacement);
                                 buf.doc = doc;
+                                buf.last_used = Instant::now();
                                 state.alerts.info = Some("Imports sorted".into());
                             } else {
                                 state.alerts.info = Some("Imports already sorted".into());
@@ -1136,6 +1141,7 @@ fn with_buf(state: &mut AppState, f: impl FnOnce(&mut BufferState, &Dimensions))
             if buf.doc.dirty() && buf.save_state == SaveState::Clean {
                 buf.save_state = SaveState::Modified;
             }
+            buf.last_used = Instant::now();
         }
     }
 }
@@ -1297,4 +1303,20 @@ fn is_editing_action(action: &Action) -> bool {
             | Action::Redo
             | Action::SortImports
     )
+}
+
+pub(super) fn evict_one_buffer(state: &mut AppState) {
+    let victim = state
+        .buffers
+        .values()
+        .filter(|b| !b.is_preview)
+        .filter(|b| Some(b.id) != state.active_buffer)
+        .filter(|b| !b.doc.dirty())
+        .min_by_key(|b| b.last_used)
+        .map(|b| b.id);
+    if let Some(id) = victim {
+        state.buffers_mut().remove(&id);
+        state.notify_hash_to_buffer.retain(|_, v| *v != id);
+        renumber_tabs(state);
+    }
 }

@@ -385,6 +385,14 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
     preview_s.forward(&muts);
     lsp_s.forward(&muts);
 
+    let ui_evict_s = drivers
+        .ui_in
+        .map(|ev| match ev {
+            led_ui::UiIn::EvictOneBuffer => Mut::EvictOneBuffer,
+        })
+        .stream();
+    ui_evict_s.forward(&muts);
+
     // ── 3. Reduce ──
 
     muts.fold_into(&state, Rc::new(init), |s, m| {
@@ -399,6 +407,7 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
                 action::reveal_active_buffer(&mut s);
             }
             Mut::Action(a) => action::handle_action(&mut s, a),
+            Mut::EvictOneBuffer => action::evict_one_buffer(&mut s),
             Mut::Alert { info, warn } => {
                 s.alerts.info = info;
                 s.alerts.warn = warn;
@@ -888,6 +897,13 @@ fn handle_timer(state: &mut AppState, name: &'static str) {
         "spinner" => {
             state.lsp_mut().spinner_tick = state.lsp.spinner_tick.wrapping_add(1);
         }
+        "tab_linger" => {
+            if let Some(id) = state.active_buffer {
+                if let Some(buf) = state.buf_mut(id) {
+                    buf.last_used = std::time::Instant::now();
+                }
+            }
+        }
         "undo_flush" => {
             // Handled by the undo_flush_s combinator chain, not here.
             // The timer fires → chain samples state → produces UndoFlushReady.
@@ -900,6 +916,7 @@ fn handle_timer(state: &mut AppState, name: &'static str) {
 enum Mut {
     ActivateBuffer(BufferId),
     Action(Action),
+    EvictOneBuffer,
     Alert {
         info: Option<String>,
         warn: Option<String>,
@@ -1085,6 +1102,7 @@ impl Mut {
             Mut::LspInlayHints { .. } => "LspInlayHints",
             Mut::LspProgress { .. } => "LspProgress",
             Mut::LspTriggerChars { .. } => "LspTriggerChars",
+            Mut::EvictOneBuffer => "EvictOneBuffer",
         }
     }
 

@@ -1,5 +1,6 @@
 use std::rc::Rc;
 use std::sync::Arc;
+use std::time::Instant;
 
 use led_core::rx::Stream;
 use led_core::{Alert, BufferId, Doc, DocId};
@@ -64,6 +65,7 @@ pub fn buffers_of(
                         reindent_chars: Arc::from([]),
                         completion_triggers: Vec::new(),
                         is_preview: true,
+                        last_used: Instant::now(),
                     };
                     let remove_old_id = state.preview.buffer;
                     let remove_old_hash = remove_old_id.and_then(|pid| {
@@ -205,6 +207,7 @@ pub fn buffers_of(
                     reindent_chars: Arc::from([]),
                     completion_triggers: Vec::new(),
                     is_preview: false,
+                    last_used: Instant::now(),
                 };
                 let activate =
                     !is_session_restore || state.session.active_tab_order == Some(tab_order);

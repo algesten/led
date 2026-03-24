@@ -339,10 +339,24 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
         })
         .stream();
 
+    // Tab linger: reset 3s timer whenever active buffer changes.
+    // If the user stays on a tab for 3s, the timer fires and updates last_used.
+    // Rapid NextTab/PrevTab resets the timer, so stepping past doesn't count.
+    let linger_timer = state
+        .dedupe_by(|s| s.active_buffer)
+        .filter(|s| s.active_buffer.is_some())
+        .map(|_| TimersOut::Set {
+            name: "tab_linger",
+            duration: Duration::from_secs(3),
+            schedule: Schedule::Replace,
+        })
+        .stream();
+
     let timers_out: Stream<TimersOut> = Stream::new();
     alert_timer.forward(&timers_out);
     undo_timer.forward(&timers_out);
     spinner_timer.forward(&timers_out);
+    linger_timer.forward(&timers_out);
 
     // FS: browser directory listing requests
     let browser_list = state

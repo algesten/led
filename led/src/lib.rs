@@ -33,11 +33,11 @@ pub struct Drivers {
     pub git_in: Stream<led_git::GitIn>,
     pub file_search_in: Stream<led_file_search::FileSearchIn>,
     pub lsp_in: Stream<led_lsp::LspIn>,
+    pub ui_in: Stream<led_ui::UiIn>,
 }
 
 pub struct RunGuards {
     pub input_guard: Option<led_terminal_in::InputGuard>,
-    pub ui: Option<led_ui::Ui>,
     state: Stream<Rc<AppState>>,
 }
 
@@ -75,13 +75,13 @@ pub fn run(
     let d = derived(state.clone());
 
     // 3. Drivers
-    let (input_guard, ui, terminal_in) = if headless {
-        (None, None, Stream::new())
+    let (input_guard, terminal_in, ui_in) = if headless {
+        (None, Stream::new(), Stream::new())
     } else {
         let guard = led_terminal_in::setup_terminal();
-        let ui = led_ui::driver(d.ui);
+        let ui_in = led_ui::driver(d.ui);
         let terminal_in = led_terminal_in::driver();
-        (Some(guard), Some(ui), terminal_in)
+        (Some(guard), terminal_in, ui_in)
     };
 
     let timers_in = led_timers::driver(d.timers_out);
@@ -111,6 +111,7 @@ pub fn run(
         git_in,
         file_search_in,
         lsp_in,
+        ui_in,
     };
 
     // 4. Model
@@ -139,7 +140,6 @@ pub fn run(
 
     let guards = RunGuards {
         input_guard,
-        ui,
         state: state.clone(),
     };
     (state, guards)

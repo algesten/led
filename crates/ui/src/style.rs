@@ -496,6 +496,7 @@ mod tests {
             reindent_chars: std::sync::Arc::from([]),
             completion_triggers: Vec::new(),
             is_preview: false,
+            last_used: std::time::Instant::now(),
         };
 
         let mut state = AppState::new(Startup {

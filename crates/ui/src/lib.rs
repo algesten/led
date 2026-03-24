@@ -13,10 +13,13 @@ mod display;
 mod render;
 mod style;
 
-pub struct Ui;
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum UiIn {
+    EvictOneBuffer,
+}
 
-/// One-way driver: renders state to the terminal.
-pub fn driver(state: Stream<Rc<AppState>>) -> Ui {
+/// Two-way driver: renders state to the terminal, reports tab overflow.
+pub fn driver(state: Stream<Rc<AppState>>) -> Stream<UiIn> {
     let mut terminal = setup();
 
     let display_s = state
@@ -157,7 +160,36 @@ pub fn driver(state: Stream<Rc<AppState>>) -> Ui {
         },
     );
 
-    Ui
+    // Tab overflow detection: emit EvictOneBuffer when any tab doesn't fit
+    let overflow_s = state
+        .filter(|s| tabs_overflow(s))
+        .map(|_| UiIn::EvictOneBuffer)
+        .stream();
+
+    overflow_s
+}
+
+/// Check whether any buffer tab overflows the tab bar.
+fn tabs_overflow(s: &AppState) -> bool {
+    let Some(dims) = s.dims else { return false };
+    let Some(tabs) = display::tabs_inputs(s) else {
+        return false;
+    };
+    let editor_width = dims.editor_width();
+    let mut x = tabs.gutter_width.saturating_sub(1);
+    let mut first = true;
+    for entry in &tabs.entries {
+        if !first {
+            x += 1;
+        }
+        first = false;
+        let width = entry.label.chars().count() as u16;
+        if x + width > editor_width {
+            return true;
+        }
+        x += width;
+    }
+    false
 }
 
 fn setup() -> Terminal<CrosstermBackend<io::Stdout>> {
