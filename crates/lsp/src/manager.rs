@@ -486,7 +486,7 @@ impl LspManager {
                 content_changes,
             },
         );
-        self.need_diagnostics = true;
+        self.need_diagnostics = false;
     }
 
     fn send_did_save(&mut self, path: &Path) {
@@ -935,6 +935,9 @@ impl LspManager {
     ) {
         match notif.method.as_str() {
             "textDocument/publishDiagnostics" => {
+                if !self.need_diagnostics {
+                    return;
+                }
                 if let Ok(params) =
                     serde_json::from_value::<lsp_types::PublishDiagnosticsParams>(notif.params)
                 {
