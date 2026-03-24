@@ -162,7 +162,7 @@ pub(crate) async fn run(
         completion_prefix_start_col: 0,
         completion_domain_items: Vec::new(),
         progress_tokens: HashMap::new(),
-        quiescent: false,
+        quiescent: true,
         need_diagnostics: false,
         _file_watcher: None,
         file_watcher_globs: None,
