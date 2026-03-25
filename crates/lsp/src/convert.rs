@@ -91,24 +91,6 @@ pub(crate) fn doc_full_text(doc: &dyn Doc) -> String {
     String::from_utf8(buf).unwrap_or_default()
 }
 
-// ── Language ID ──
-
-pub(crate) fn language_id_for_extension(ext: &str) -> &'static str {
-    match ext {
-        "rs" => "rust",
-        "ts" | "tsx" => "typescript",
-        "js" | "jsx" => "javascript",
-        "py" => "python",
-        "c" | "h" => "c",
-        "cpp" | "hpp" | "cc" | "cxx" => "cpp",
-        "swift" => "swift",
-        "toml" => "toml",
-        "json" => "json",
-        "sh" | "bash" => "shellscript",
-        _ => "plaintext",
-    }
-}
-
 // ── TextEdit conversion ──
 
 pub(crate) fn lsp_text_edit_to_domain(

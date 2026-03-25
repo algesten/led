@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use led_core::{Doc, EditOp};
+use led_core::{Doc, EditOp, LanguageId};
 use lsp_types::{
     CodeActionOrCommand, CodeActionParams, CodeActionResponse, CompletionParams,
     CompletionResponse, DocumentFormattingParams, FormattingOptions, GotoDefinitionParams,
@@ -13,9 +13,8 @@ use serde_json::Value;
 
 use crate::convert::{
     apply_edits_to_disk, code_action_titles, convert_completion_response, convert_diagnostics,
-    convert_inlay_hints, definition_response_to_locations, doc_full_text, doc_line,
-    language_id_for_extension, lsp_pos, lsp_text_edit_to_domain, uri_from_path,
-    workspace_edit_to_file_edits,
+    convert_inlay_hints, definition_response_to_locations, doc_full_text, doc_line, lsp_pos,
+    lsp_text_edit_to_domain, uri_from_path, workspace_edit_to_file_edits,
 };
 use crate::registry::LspRegistry;
 use crate::server::LanguageServer;
@@ -26,14 +25,14 @@ use crate::{FileEdit, LspIn, LspOut};
 
 enum ManagerEvent {
     ServerStarted {
-        language_id: String,
+        language: LanguageId,
         server: Arc<LanguageServer>,
     },
     ServerError {
         error: String,
         not_found: bool,
     },
-    Notification(String, LspNotification),
+    Notification(LanguageId, LspNotification),
     RequestResult(RequestResult),
     FileChanged(PathBuf, FileChangeKind),
 }
@@ -114,10 +113,10 @@ enum ProgressUpdate {
 
 struct LspManager {
     registry: LspRegistry,
-    servers: HashMap<String, Arc<LanguageServer>>,
+    servers: HashMap<LanguageId, Arc<LanguageServer>>,
     root: PathBuf,
     event_tx: tokio::sync::mpsc::UnboundedSender<ManagerEvent>,
-    pending_starts: HashSet<String>,
+    pending_starts: HashSet<LanguageId>,
     opened_docs: HashSet<PathBuf>,
     /// Reverse map: canonical path → original path (for macOS /var → /private/var).
     canonical_to_original: HashMap<PathBuf, PathBuf>,
@@ -133,7 +132,7 @@ struct LspManager {
     /// Domain items from last server response (unfiltered)
     completion_domain_items: Vec<crate::CompletionItem>,
     progress_tokens: HashMap<String, ProgressState>,
-    quiescent: HashMap<String, bool>,
+    quiescent: HashMap<LanguageId, bool>,
     need_diagnostics: bool,
     buffered_diagnostics: HashMap<PathBuf, Vec<crate::Diagnostic>>,
     _file_watcher: Option<notify::RecommendedWatcher>,
@@ -312,13 +311,10 @@ impl LspManager {
         result_tx: &tokio::sync::mpsc::Sender<LspIn>,
     ) {
         match event {
-            ManagerEvent::ServerStarted {
-                language_id,
-                server,
-            } => {
-                log::info!("LSP server started: {}", language_id);
-                self.pending_starts.remove(&language_id);
-                self.servers.insert(language_id.clone(), server.clone());
+            ManagerEvent::ServerStarted { language, server } => {
+                log::info!("LSP server started: {:?}", language);
+                self.pending_starts.remove(&language);
+                self.servers.insert(language, server.clone());
 
                 // Extract trigger characters from server capabilities
                 let trigger_chars = {
@@ -329,7 +325,7 @@ impl LspManager {
                 };
                 if let Some(triggers) = trigger_chars {
                     self.trigger_characters = triggers.clone();
-                    let extensions = self.registry.extensions_for_language(&language_id);
+                    let extensions = self.registry.extensions_for_language(language);
                     let _ = result_tx
                         .send(LspIn::TriggerChars {
                             extensions,
@@ -352,9 +348,8 @@ impl LspManager {
                     let _ = result_tx.send(LspIn::Error { message: error }).await;
                 }
             }
-            ManagerEvent::Notification(language_id, notif) => {
-                self.handle_notification(&language_id, notif, result_tx)
-                    .await;
+            ManagerEvent::Notification(language, notif) => {
+                self.handle_notification(language, notif, result_tx).await;
             }
             ManagerEvent::RequestResult(result) => {
                 self.handle_request_result(result, result_tx).await;
@@ -373,13 +368,13 @@ impl LspManager {
             return;
         };
 
-        let lang_id = config.language_id.to_string();
-        if self.servers.contains_key(&lang_id) || self.pending_starts.contains(&lang_id) {
+        let language = config.language;
+        if self.servers.contains_key(&language) || self.pending_starts.contains(&language) {
             return;
         }
 
-        log::info!("LSP starting server for language: {}", lang_id);
-        self.pending_starts.insert(lang_id.clone());
+        log::info!("LSP starting server for language: {:?}", language);
+        self.pending_starts.insert(language);
 
         let root = self.root.clone();
         let event_tx = self.event_tx.clone();
@@ -387,20 +382,16 @@ impl LspManager {
         // Notification channel
         let (notif_tx, mut notif_rx) = tokio::sync::mpsc::unbounded_channel::<LspNotification>();
         let event_tx2 = event_tx.clone();
-        let notif_lang_id = lang_id.clone();
         tokio::spawn(async move {
             while let Some(notif) = notif_rx.recv().await {
-                let _ = event_tx2.send(ManagerEvent::Notification(notif_lang_id.clone(), notif));
+                let _ = event_tx2.send(ManagerEvent::Notification(language, notif));
             }
         });
 
         tokio::spawn(async move {
             match LanguageServer::start(&config, &root, notif_tx).await {
                 Ok(server) => {
-                    let _ = event_tx.send(ManagerEvent::ServerStarted {
-                        language_id: lang_id,
-                        server,
-                    });
+                    let _ = event_tx.send(ManagerEvent::ServerStarted { language, server });
                 }
                 Err(e) => {
                     let _ = event_tx.send(ManagerEvent::ServerError {
@@ -415,7 +406,7 @@ impl LspManager {
     fn server_for_path(&self, path: &Path) -> Option<Arc<LanguageServer>> {
         let ext = path.extension().and_then(|e| e.to_str())?;
         let config = self.registry.config_for_extension(ext)?;
-        self.servers.get(config.language_id).cloned()
+        self.servers.get(&config.language).cloned()
     }
 
     async fn shutdown_all(&mut self) {
@@ -438,7 +429,9 @@ impl LspManager {
             return;
         };
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-        let lang_id = language_id_for_extension(ext);
+        let lang_id = LanguageId::from_extension(ext)
+            .map(|l| l.as_lsp_str())
+            .unwrap_or("plaintext");
 
         let text = self
             .docs
@@ -989,7 +982,7 @@ impl LspManager {
 
     async fn handle_notification(
         &mut self,
-        language_id: &str,
+        language: LanguageId,
         notif: LspNotification,
         result_tx: &tokio::sync::mpsc::Sender<LspIn>,
     ) {
@@ -1037,8 +1030,8 @@ impl LspManager {
             "experimental/serverStatus" => {
                 let quiescent = notif.params.get("quiescent").and_then(|v| v.as_bool());
                 if let Some(q) = quiescent {
-                    let was_busy = !*self.quiescent.get(language_id).unwrap_or(&true);
-                    self.quiescent.insert(language_id.to_string(), q);
+                    let was_busy = !*self.quiescent.get(&language).unwrap_or(&true);
+                    self.quiescent.insert(language, q);
                     if was_busy && q && self.need_diagnostics {
                         self.pull_all_diagnostics();
                     }

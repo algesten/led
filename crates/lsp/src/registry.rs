@@ -1,6 +1,8 @@
+use led_core::LanguageId;
+
 #[derive(Clone)]
 pub(crate) struct ServerConfig {
-    pub(crate) language_id: &'static str,
+    pub(crate) language: LanguageId,
     pub(crate) command: &'static str,
     pub(crate) args: &'static [&'static str],
     pub(crate) extensions: &'static [&'static str],
@@ -15,49 +17,49 @@ impl LspRegistry {
         let mut registry = Self {
             configs: vec![
                 ServerConfig {
-                    language_id: "rust",
+                    language: LanguageId::Rust,
                     command: "rust-analyzer",
                     args: &[],
                     extensions: &["rs"],
                 },
                 ServerConfig {
-                    language_id: "typescript",
+                    language: LanguageId::TypeScript,
                     command: "typescript-language-server",
                     args: &["--stdio"],
                     extensions: &["ts", "tsx", "js", "jsx"],
                 },
                 ServerConfig {
-                    language_id: "python",
+                    language: LanguageId::Python,
                     command: "pyright-langserver",
                     args: &["--stdio"],
                     extensions: &["py"],
                 },
                 ServerConfig {
-                    language_id: "c",
+                    language: LanguageId::C,
                     command: "clangd",
                     args: &[],
                     extensions: &["c", "h", "cpp", "hpp", "cc", "cxx"],
                 },
                 ServerConfig {
-                    language_id: "swift",
+                    language: LanguageId::Swift,
                     command: "sourcekit-lsp",
                     args: &[],
                     extensions: &["swift"],
                 },
                 ServerConfig {
-                    language_id: "toml",
+                    language: LanguageId::Toml,
                     command: "taplo",
                     args: &["lsp", "stdio"],
                     extensions: &["toml"],
                 },
                 ServerConfig {
-                    language_id: "json",
+                    language: LanguageId::Json,
                     command: "vscode-json-language-server",
                     args: &["--stdio"],
                     extensions: &["json"],
                 },
                 ServerConfig {
-                    language_id: "bash",
+                    language: LanguageId::Bash,
                     command: "bash-language-server",
                     args: &["start"],
                     extensions: &["sh", "bash"],
@@ -80,10 +82,10 @@ impl LspRegistry {
         self.configs.iter().find(|c| c.extensions.contains(&ext))
     }
 
-    pub(crate) fn extensions_for_language(&self, language_id: &str) -> Vec<String> {
+    pub(crate) fn extensions_for_language(&self, language: LanguageId) -> Vec<String> {
         self.configs
             .iter()
-            .find(|c| c.language_id == language_id)
+            .find(|c| c.language == language)
             .map(|c| c.extensions.iter().map(|s| s.to_string()).collect())
             .unwrap_or_default()
     }
