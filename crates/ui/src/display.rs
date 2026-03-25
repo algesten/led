@@ -1101,12 +1101,8 @@ pub fn build_browser_lines(b: &BrowserInputs) -> Rc<Vec<Line<'static>>> {
                 _ => b.file_style,
             });
 
-            let entry_style = if is_selected {
-                if b.focused {
-                    b.selected_style
-                } else {
-                    b.selected_unfocused_style
-                }
+            let entry_style = if is_selected && b.focused {
+                b.selected_style
             } else {
                 git_style.unwrap_or(match &entry.kind {
                     EntryKind::Directory { .. } => b.dir_style,
@@ -1134,7 +1130,7 @@ pub fn build_browser_lines(b: &BrowserInputs) -> Rc<Vec<Line<'static>>> {
                         Span::styled(format!("{}{:pad$}", name_part, "", pad = pad), entry_style),
                         Span::styled(
                             status_char.to_string(),
-                            if is_selected {
+                            if is_selected && b.focused {
                                 entry_style
                             } else {
                                 git_style.unwrap_or(entry_style)
