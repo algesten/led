@@ -69,6 +69,8 @@ pub enum WorkspaceIn {
     NotifyEvent { file_path_hash: String },
     /// Workspace tree changed (watcher event — paths that were created/removed).
     WorkspaceChanged { paths: Vec<PathBuf> },
+    /// Git internal state changed (external git command detected).
+    GitChanged,
     /// Notify watcher is ready (for cross-instance sync tests).
     WatchersReady,
 }
@@ -370,14 +372,19 @@ pub fn driver(out: Stream<WorkspaceOut>, file_watcher: Arc<FileWatcher>) -> Stre
                     }
                 }
                 Some(ev) = root_watch_rx.recv() => {
+                    let is_git_internal = ev.paths.iter().all(|p| {
+                        p.components().any(|c| c.as_os_str() == ".git")
+                    });
+
+                    if is_git_internal {
+                        if current.is_some() && ev.paths.iter().any(|p| is_git_sentinel(p)) {
+                            let _ = result_tx.send(WorkspaceIn::GitChanged).await;
+                        }
+                        continue;
+                    }
+
                     match ev.kind {
                         WatchEventKind::Create | WatchEventKind::Remove => {
-                            // Skip .git internal changes
-                            if ev.paths.iter().all(|p| {
-                                p.components().any(|c| c.as_os_str() == ".git")
-                            }) {
-                                continue;
-                            }
                             if current.is_some() {
                                 if result_tx.send(WorkspaceIn::WorkspaceChanged {
                                     paths: ev.paths,
@@ -491,6 +498,27 @@ pub fn path_hash(path: &Path) -> String {
     let mut hasher = DefaultHasher::new();
     path.hash(&mut hasher);
     format!("{:016x}", hasher.finish())
+}
+
+fn is_git_sentinel(path: &Path) -> bool {
+    let mut saw_dot_git = false;
+    for component in path.components() {
+        let name = component.as_os_str();
+        if name == ".git" {
+            saw_dot_git = true;
+        } else if saw_dot_git {
+            // .git/index or .git/HEAD
+            if name == "index" || name == "HEAD" {
+                return true;
+            }
+            // .git/refs/...
+            if name == "refs" {
+                return true;
+            }
+            return false;
+        }
+    }
+    false
 }
 
 fn touch_notify_file(config: Option<&PathBuf>, hash: &str) {

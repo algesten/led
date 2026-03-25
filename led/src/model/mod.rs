@@ -96,6 +96,12 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
         })
         .stream();
 
+    let git_changed_s = drivers
+        .workspace_in
+        .filter(|ev| matches!(ev, WI::GitChanged))
+        .map(|_| Mut::GitChanged)
+        .stream();
+
     let session_s = session_of::session_of(&drivers.workspace_in);
 
     // UndoFlushed needs buffer lookup → sample_combine with state
@@ -373,6 +379,7 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
 
     workspace_s.forward(&muts);
     workspace_changed_s.forward(&muts);
+    git_changed_s.forward(&muts);
     workspace_misc_s.forward(&muts);
     session_s.forward(&muts);
     undo_flushed_s.forward(&muts);
@@ -753,6 +760,14 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
                 }
                 s.git_mut().pending_file_scan.set(());
             }
+            Mut::GitChanged => {
+                s.git_mut().pending_file_scan.set(());
+                if let Some(id) = s.active_buffer {
+                    if let Some(path) = s.buffers.get(&id).and_then(|b| b.path.clone()) {
+                        s.git_mut().pending_line_scan.set(Some(path));
+                    }
+                }
+            }
 
             // ── LSP ──
             Mut::LspNavigate { path, row, col } => {
@@ -1058,6 +1073,7 @@ enum Mut {
     WorkspaceChanged {
         dirs: Vec<PathBuf>,
     },
+    GitChanged,
     // LSP
     LspNavigate {
         path: PathBuf,
@@ -1128,6 +1144,7 @@ impl Mut {
             Mut::TouchArgFiles { .. } => "TouchArgFiles",
             Mut::Workspace { .. } => "Workspace",
             Mut::WorkspaceChanged { .. } => "WorkspaceChanged",
+            Mut::GitChanged => "GitChanged",
             Mut::LspNavigate { .. } => "LspNavigate",
             Mut::LspEdits { .. } => "LspEdits",
             Mut::LspCompletion { .. } => "LspCompletion",
