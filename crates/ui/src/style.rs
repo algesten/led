@@ -416,7 +416,7 @@ mod tests {
                     status,
                     &tabs,
                     &[],
-                    &display::OverlayContent::None,
+                    &OverlayContent::None,
                 );
             })
             .unwrap();
@@ -455,7 +455,7 @@ mod tests {
 
         use ratatui::backend::TestBackend;
 
-        use crate::display;
+        use crate::display::{self, OverlayContent};
         use crate::render;
         use led_core::{BufferId, DocId, Startup, TextDoc};
         use led_state::{AppState, BufferState, Dimensions, SaveState};
@@ -537,7 +537,7 @@ mod tests {
                     &status,
                     &tabs,
                     &[],
-                    &display::OverlayContent::None,
+                    &OverlayContent::None,
                 );
             })
             .unwrap();
