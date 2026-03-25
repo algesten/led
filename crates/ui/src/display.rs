@@ -1016,6 +1016,12 @@ pub fn build_layout(l: &LayoutInputs) -> Option<LayoutInfo> {
 
 // ── Browser ──
 
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum BrowserSeverity {
+    Warning,
+    Error,
+}
+
 #[derive(Clone, PartialEq)]
 pub struct BrowserInputs {
     pub entries: Rc<Vec<led_state::TreeEntry>>,
@@ -1032,6 +1038,9 @@ pub struct BrowserInputs {
     pub git_modified_style: Style,
     pub git_added_style: Style,
     pub git_untracked_style: Style,
+    pub diag_file_severities: HashMap<PathBuf, BrowserSeverity>,
+    pub diag_error_style: Style,
+    pub diag_warning_style: Style,
 }
 
 pub fn browser_inputs(s: &AppState) -> Option<BrowserInputs> {
@@ -1043,6 +1052,9 @@ pub fn browser_inputs(s: &AppState) -> Option<BrowserInputs> {
     }
     let dims = s.dims?;
     let theme = s.config_theme.as_ref()?.file.as_ref();
+
+    let diag_file_severities = build_diag_severities(&s.lsp.diagnostics);
+
     Some(BrowserInputs {
         entries: s.browser.entries.clone(),
         selected: s.browser.selected,
@@ -1058,7 +1070,50 @@ pub fn browser_inputs(s: &AppState) -> Option<BrowserInputs> {
         git_modified_style: style::resolve(theme, &theme.git.modified),
         git_added_style: style::resolve(theme, &theme.git.added),
         git_untracked_style: style::resolve(theme, &theme.git.untracked),
+        diag_file_severities,
+        diag_error_style: style::resolve(theme, &theme.diagnostics.error),
+        diag_warning_style: style::resolve(theme, &theme.diagnostics.warning),
     })
+}
+
+fn build_diag_severities(
+    diagnostics: &HashMap<PathBuf, Vec<led_lsp::Diagnostic>>,
+) -> HashMap<PathBuf, BrowserSeverity> {
+    let mut result = HashMap::new();
+    for (path, diags) in diagnostics {
+        let mut worst: Option<BrowserSeverity> = None;
+        for d in diags {
+            let sev = match d.severity {
+                led_lsp::DiagnosticSeverity::Error => BrowserSeverity::Error,
+                led_lsp::DiagnosticSeverity::Warning => BrowserSeverity::Warning,
+                _ => continue,
+            };
+            worst = Some(match worst {
+                Some(w) => w.max(sev),
+                None => sev,
+            });
+        }
+        if let Some(w) = worst {
+            result.insert(path.clone(), w);
+        }
+    }
+    result
+}
+
+fn directory_severity(
+    file_severities: &HashMap<PathBuf, BrowserSeverity>,
+    dir: &Path,
+) -> Option<BrowserSeverity> {
+    let mut worst: Option<BrowserSeverity> = None;
+    for (path, &sev) in file_severities {
+        if path.starts_with(dir) && path != dir {
+            worst = Some(match worst {
+                Some(w) => w.max(sev),
+                None => sev,
+            });
+        }
+    }
+    worst
 }
 
 pub fn build_browser_lines(b: &BrowserInputs) -> Rc<Vec<Line<'static>>> {
@@ -1101,21 +1156,50 @@ pub fn build_browser_lines(b: &BrowserInputs) -> Rc<Vec<Line<'static>>> {
                 _ => b.file_style,
             });
 
+            // Resolve diagnostic severity for this entry
+            let diag_sev = match &entry.kind {
+                EntryKind::File => b.diag_file_severities.get(&entry.path).copied(),
+                EntryKind::Directory { .. } => {
+                    directory_severity(&b.diag_file_severities, &entry.path)
+                }
+            };
+
+            let diag_style = diag_sev.map(|sev| match sev {
+                BrowserSeverity::Error => b.diag_error_style,
+                BrowserSeverity::Warning => b.diag_warning_style,
+            });
+
+            // Priority: Error > Warn > Git dirty > selected(unfocused) > normal
             let entry_style = if is_selected && b.focused {
                 b.selected_style
             } else {
-                git_style.unwrap_or(match &entry.kind {
+                diag_style.or(git_style).unwrap_or(match &entry.kind {
                     EntryKind::Directory { .. } => b.dir_style,
                     EntryKind::File => b.file_style,
                 })
             };
 
-            match status_display {
-                Some(sd) => {
-                    let status_char = match &entry.kind {
-                        EntryKind::Directory { .. } => '\u{2022}', // bullet for dirs
-                        EntryKind::File => sd.letter,
+            // Determine status character and its style
+            let status = diag_sev
+                .map(|sev| {
+                    let ch = match sev {
+                        BrowserSeverity::Error => '\u{25CF}', // ●
+                        BrowserSeverity::Warning => '\u{25CF}',
                     };
+                    (ch, diag_style.unwrap_or(entry_style))
+                })
+                .or_else(|| {
+                    status_display.as_ref().map(|sd| {
+                        let ch = match &entry.kind {
+                            EntryKind::Directory { .. } => '\u{2022}', // •
+                            EntryKind::File => sd.letter,
+                        };
+                        (ch, git_style.unwrap_or(entry_style))
+                    })
+                });
+
+            match status {
+                Some((status_char, marker_style)) => {
                     let name_text = format!("{}{}{}", indent, icon, entry.name);
                     let name_width = name_text.chars().count();
                     // Reserve 1 column for status character
@@ -1133,7 +1217,7 @@ pub fn build_browser_lines(b: &BrowserInputs) -> Rc<Vec<Line<'static>>> {
                             if is_selected && b.focused {
                                 entry_style
                             } else {
-                                git_style.unwrap_or(entry_style)
+                                marker_style
                             },
                         ),
                     ])
