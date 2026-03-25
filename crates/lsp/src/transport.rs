@@ -22,6 +22,7 @@ impl RequestId {
 #[derive(Debug)]
 pub(crate) struct LspError {
     pub(crate) message: String,
+    pub(crate) not_found: bool,
 }
 
 impl std::fmt::Display for LspError {
@@ -159,7 +160,10 @@ pub(crate) fn spawn_reader(
                                 .unwrap_or("unknown error")
                                 .to_string();
                             log::warn!("LSP response error: {}", message);
-                            let _ = sender.send(Err(LspError { message }));
+                            let _ = sender.send(Err(LspError {
+                                message,
+                                not_found: false,
+                            }));
                         } else {
                             let result = msg.get("result").cloned().unwrap_or(Value::Null);
                             let _ = sender.send(Ok(result));

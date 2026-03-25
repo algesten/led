@@ -444,12 +444,12 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
                 if session_restore_done {
                     s.session.restore_phase = SessionRestorePhase::Done;
                     s.session.active_tab_order = None;
+                    resolve_focus(&mut s);
+                } else if s.session.restore_phase == SessionRestorePhase::Done && will_activate {
+                    s.focus = PanelSlot::Main;
                 }
                 if clear_pending_jump {
                     s.jump.pending_position = None;
-                }
-                if s.session.restore_phase == SessionRestorePhase::Done {
-                    resolve_focus(&mut s);
                 }
                 if will_activate {
                     action::reveal_active_buffer(&mut s);

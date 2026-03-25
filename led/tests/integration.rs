@@ -3656,6 +3656,130 @@ fn find_file_up_down_wraps() {
     assert_eq!(ff.selected, Some(ff.completions.len() - 1));
 }
 
+#[test]
+fn find_file_opens_nonexistent() {
+    // Opening a non-existent filename should create a new empty buffer
+    let t = TestHarness::new()
+        .with_named_file("existing.txt", "hello\n")
+        .run(vec![
+            Do(FindFile),
+            WaitFor(|s| {
+                s.find_file
+                    .as_ref()
+                    .map_or(false, |ff| !ff.completions.is_empty())
+            }),
+            // Type 'newfile.txt' — a file that does not exist on disk
+            Do(InsertChar('n')),
+            Do(InsertChar('e')),
+            Do(InsertChar('w')),
+            Do(InsertChar('f')),
+            Do(InsertChar('i')),
+            Do(InsertChar('l')),
+            Do(InsertChar('e')),
+            Do(InsertChar('.')),
+            Do(InsertChar('t')),
+            Do(InsertChar('x')),
+            Do(InsertChar('t')),
+            // Press enter to open
+            Do(InsertNewline),
+            // Wait for find-file to close and new buffer to appear
+            WaitFor(|s| s.find_file.is_none()),
+            WaitFor(|s| s.buffers.len() >= 2),
+        ]);
+
+    assert!(t.state.find_file.is_none());
+    let has_new = t.state.buffers.values().any(|b| {
+        b.path
+            .as_ref()
+            .and_then(|p| p.file_name())
+            .map_or(false, |n| n == "newfile.txt")
+    });
+    assert!(has_new, "newfile.txt buffer should be open");
+    // The file should NOT exist on disk
+    let new_path = t.dirs.workspace.join("newfile.txt");
+    assert!(
+        !new_path.exists(),
+        "newfile.txt should not be created on disk until saved"
+    );
+}
+
+#[test]
+fn find_file_opens_nonexistent_no_buffers() {
+    // Opening a non-existent file when no buffers are open (project directory only)
+    let t = TestHarness::new().run(vec![
+        Do(FindFile),
+        WaitFor(|s| s.find_file.is_some()),
+        // Type 'newfile.txt'
+        Do(InsertChar('n')),
+        Do(InsertChar('e')),
+        Do(InsertChar('w')),
+        Do(InsertChar('f')),
+        Do(InsertChar('i')),
+        Do(InsertChar('l')),
+        Do(InsertChar('e')),
+        Do(InsertChar('.')),
+        Do(InsertChar('t')),
+        Do(InsertChar('x')),
+        Do(InsertChar('t')),
+        Do(InsertNewline),
+        WaitFor(|s| s.find_file.is_none()),
+        WaitFor(|s| !s.buffers.is_empty()),
+    ]);
+
+    assert!(t.state.find_file.is_none());
+    let has_new = t.state.buffers.values().any(|b| {
+        b.path
+            .as_ref()
+            .and_then(|p| p.file_name())
+            .map_or(false, |n| n == "newfile.txt")
+    });
+    assert!(has_new, "newfile.txt buffer should be open");
+}
+
+#[test]
+fn find_file_opens_nonexistent_in_project_dir() {
+    // When opened with a project directory (arg_dir), find-file to a
+    // non-existent file should open a buffer AND focus the editor.
+    let td = tempfile::TempDir::new().expect("tmpdir");
+    let root = td.keep();
+    let workspace = root.join("workspace");
+    let config = root.join("config");
+    std::fs::create_dir_all(&workspace).expect("mkdir");
+    std::fs::create_dir_all(&config).expect("mkdir");
+    std::fs::write(workspace.join("existing.txt"), "hello\n").expect("write");
+
+    let t = TestHarness::with_dir(root)
+        .with_arg_dir(workspace)
+        .run(vec![
+            WaitFor(|s| s.session.restore_phase == led_state::SessionRestorePhase::Done),
+            Do(FindFile),
+            WaitFor(|s| s.find_file.is_some()),
+            Do(InsertChar('n')),
+            Do(InsertChar('e')),
+            Do(InsertChar('w')),
+            Do(InsertChar('.')),
+            Do(InsertChar('t')),
+            Do(InsertChar('x')),
+            Do(InsertChar('t')),
+            Do(InsertNewline),
+            WaitFor(|s| s.find_file.is_none()),
+            WaitFor(|s| !s.buffers.is_empty()),
+        ]);
+
+    let has_new = t.state.buffers.values().any(|b| {
+        b.path
+            .as_ref()
+            .and_then(|p| p.file_name())
+            .map_or(false, |n| n == "new.txt")
+    });
+    assert!(has_new, "new.txt buffer should be open");
+    assert_eq!(
+        t.state.focus,
+        led_core::PanelSlot::Main,
+        "focus should be on editor, not file browser"
+    );
+}
+
 // ── LSP integration tests ──
 // These tests require `rust-analyzer` to be installed.
 

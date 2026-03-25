@@ -37,8 +37,16 @@ impl LanguageServer {
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true)
             .spawn()
-            .map_err(|e| LspError {
-                message: format!("Failed to start {}: {}", config.command, e),
+            .map_err(|e| {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    log::info!("LSP server not found: {}", config.command);
+                } else {
+                    log::error!("Failed to start {}: {}", config.command, e);
+                }
+                LspError {
+                    not_found: e.kind() == std::io::ErrorKind::NotFound,
+                    message: format!("Failed to start {}: {}", config.command, e),
+                }
             })?;
 
         let stdin = child.stdin.take().unwrap();
@@ -238,10 +246,12 @@ impl LanguageServer {
             .send(msg.to_string())
             .map_err(|_| LspError {
                 message: "Server connection closed".to_string(),
+                not_found: false,
             })?;
 
         let result = rx.await.map_err(|_| LspError {
             message: "Response channel closed".to_string(),
+            not_found: false,
         })??;
 
         serde_json::from_value(result.clone()).map_err(|e| {
@@ -253,6 +263,7 @@ impl LanguageServer {
             );
             LspError {
                 message: format!("Failed to deserialize response: {}", e),
+                not_found: false,
             }
         })
     }

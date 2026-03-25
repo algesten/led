@@ -31,6 +31,7 @@ enum ManagerEvent {
     },
     ServerError {
         error: String,
+        not_found: bool,
     },
     Notification(String, LspNotification),
     RequestResult(RequestResult),
@@ -342,9 +343,13 @@ impl LspManager {
                     self.send_did_open(&path);
                 }
             }
-            ManagerEvent::ServerError { error } => {
-                log::error!("LSP server error: {}", error);
-                let _ = result_tx.send(LspIn::Error { message: error }).await;
+            ManagerEvent::ServerError { error, not_found } => {
+                if not_found {
+                    log::info!("{}", error);
+                } else {
+                    log::error!("LSP server error: {}", error);
+                    let _ = result_tx.send(LspIn::Error { message: error }).await;
+                }
             }
             ManagerEvent::Notification(language_id, notif) => {
                 self.handle_notification(&language_id, notif, result_tx)
@@ -397,7 +402,10 @@ impl LspManager {
                     });
                 }
                 Err(e) => {
-                    let _ = event_tx.send(ManagerEvent::ServerError { error: e.message });
+                    let _ = event_tx.send(ManagerEvent::ServerError {
+                        error: e.message,
+                        not_found: e.not_found,
+                    });
                 }
             }
         });

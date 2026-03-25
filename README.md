@@ -25,6 +25,35 @@ Full LSP integration with out-of-the-box support for:
 | JSON                  | vscode-json-language-server |
 | Bash                  | bash-language-server        |
 
+Language servers are not bundled — install them separately and make sure they are on your `PATH`. led will automatically start the right server when you open a file.
+
+```
+# Rust
+rustup component add rust-analyzer
+
+# TypeScript / JavaScript
+npm install -g typescript-language-server typescript
+
+# Python
+npm install -g pyright
+
+# C / C++
+brew install llvm            # macOS
+apt install clangd           # Debian/Ubuntu
+
+# Swift (included with Xcode)
+# sourcekit-lsp is available after installing Xcode or the Swift toolchain
+
+# TOML
+cargo install taplo-cli --locked
+
+# JSON
+npm install -g vscode-langservers-extracted
+
+# Bash
+npm install -g bash-language-server
+```
+
 - **Completions** — fuzzy-filtered popup with auto-imports
 - **Go to definition**
 - **Rename** — workspace-wide symbol rename
