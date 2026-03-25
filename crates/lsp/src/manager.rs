@@ -842,7 +842,7 @@ impl LspManager {
             return;
         };
         let event_tx = self.event_tx.clone();
-        let prettier = find_prettier(&self.root);
+        let prettier = find_prettier(&path);
 
         tokio::spawn(async move {
             let Some(uri) = uri_from_path(&path) else {
@@ -1695,10 +1695,16 @@ fn extract_raw_edits_for_path(edit: &WorkspaceEdit, target: &Path) -> Vec<TextEd
 
 // ── Prettier integration ──
 
-/// Check for a project-local prettier binary.
-fn find_prettier(root: &Path) -> Option<PathBuf> {
-    let bin = root.join("node_modules/.bin/prettier");
-    if bin.exists() { Some(bin) } else { None }
+/// Walk up from the file's directory looking for `node_modules/.bin/prettier`.
+fn find_prettier(file_path: &Path) -> Option<PathBuf> {
+    let mut dir = file_path.parent()?;
+    loop {
+        let bin = dir.join("node_modules/.bin/prettier");
+        if bin.exists() {
+            return Some(bin);
+        }
+        dir = dir.parent()?;
+    }
 }
 
 /// Run prettier on buffer content and return a full-file replacement edit.
