@@ -806,6 +806,89 @@ fn run() {
         }
     }
 
+    #[test]
+    fn python_queries_parse() {
+        let lang: tree_sitter::Language = tree_sitter_python::LANGUAGE.into();
+        for (name, src) in [
+            ("indents", include_str!("../queries/python/indents.scm")),
+            ("brackets", include_str!("../queries/python/brackets.scm")),
+        ] {
+            Query::new(&lang, src)
+                .unwrap_or_else(|e| panic!("python/{name}.scm failed to parse: {e}"));
+        }
+    }
+
+    #[test]
+    fn c_queries_parse() {
+        let lang: tree_sitter::Language = tree_sitter_c::LANGUAGE.into();
+        for (name, src) in [
+            ("indents", include_str!("../queries/c/indents.scm")),
+            ("brackets", include_str!("../queries/c/brackets.scm")),
+        ] {
+            Query::new(&lang, src).unwrap_or_else(|e| panic!("c/{name}.scm failed to parse: {e}"));
+        }
+    }
+
+    #[test]
+    fn cpp_queries_parse() {
+        let lang: tree_sitter::Language = tree_sitter_cpp::LANGUAGE.into();
+        for (name, src) in [
+            ("indents", include_str!("../queries/c/indents.scm")),
+            ("brackets", include_str!("../queries/c/brackets.scm")),
+        ] {
+            Query::new(&lang, src)
+                .unwrap_or_else(|e| panic!("cpp/{name}.scm failed to parse: {e}"));
+        }
+    }
+
+    #[test]
+    fn swift_queries_parse() {
+        let lang: tree_sitter::Language = tree_sitter_swift::LANGUAGE.into();
+        for (name, src) in [
+            ("indents", include_str!("../queries/swift/indents.scm")),
+            ("brackets", include_str!("../queries/swift/brackets.scm")),
+        ] {
+            Query::new(&lang, src)
+                .unwrap_or_else(|e| panic!("swift/{name}.scm failed to parse: {e}"));
+        }
+    }
+
+    #[test]
+    fn bash_queries_parse() {
+        let lang: tree_sitter::Language = tree_sitter_bash::LANGUAGE.into();
+        for (name, src) in [
+            ("indents", include_str!("../queries/bash/indents.scm")),
+            ("brackets", include_str!("../queries/bash/brackets.scm")),
+        ] {
+            Query::new(&lang, src)
+                .unwrap_or_else(|e| panic!("bash/{name}.scm failed to parse: {e}"));
+        }
+    }
+
+    #[test]
+    fn json_queries_parse() {
+        let lang: tree_sitter::Language = tree_sitter_json::LANGUAGE.into();
+        for (name, src) in [
+            ("indents", include_str!("../queries/json/indents.scm")),
+            ("brackets", include_str!("../queries/json/brackets.scm")),
+        ] {
+            Query::new(&lang, src)
+                .unwrap_or_else(|e| panic!("json/{name}.scm failed to parse: {e}"));
+        }
+    }
+
+    #[test]
+    fn toml_queries_parse() {
+        let lang: tree_sitter::Language = tree_sitter_toml_ng::LANGUAGE.into();
+        for (name, src) in [
+            ("indents", include_str!("../queries/toml/indents.scm")),
+            ("brackets", include_str!("../queries/toml/brackets.scm")),
+        ] {
+            Query::new(&lang, src)
+                .unwrap_or_else(|e| panic!("toml/{name}.scm failed to parse: {e}"));
+        }
+    }
+
     fn assert_ts_indent(source: &str, line: usize, expected: &str) {
         let doc = make_doc(source);
         let path = Path::new("test.ts");

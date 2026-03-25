@@ -49,14 +49,28 @@ pub(crate) fn lang_for_ext(ext: &str) -> Option<LangEntry> {
                 tree_sitter_rust::HIGHLIGHTS_QUERY,
             )
         }),
-        "toml" => Some(LangEntry::new(
-            tree_sitter_toml_ng::LANGUAGE.into(),
-            tree_sitter_toml_ng::HIGHLIGHTS_QUERY,
-        )),
-        "json" => Some(LangEntry::new(
-            tree_sitter_json::LANGUAGE.into(),
-            tree_sitter_json::HIGHLIGHTS_QUERY,
-        )),
+        "toml" => Some(LangEntry {
+            indents_query: Some(include_str!("../queries/toml/indents.scm")),
+            brackets_query: Some(include_str!("../queries/toml/brackets.scm")),
+            increase_indent_pattern: Some(r"[\{\[]\s*$"),
+            decrease_indent_pattern: Some(r"^\s*[}\]]"),
+            reindent_chars: &['}', ']'],
+            ..LangEntry::new(
+                tree_sitter_toml_ng::LANGUAGE.into(),
+                tree_sitter_toml_ng::HIGHLIGHTS_QUERY,
+            )
+        }),
+        "json" => Some(LangEntry {
+            indents_query: Some(include_str!("../queries/json/indents.scm")),
+            brackets_query: Some(include_str!("../queries/json/brackets.scm")),
+            increase_indent_pattern: Some(r"[\{\[]\s*$"),
+            decrease_indent_pattern: Some(r"^\s*[}\]]"),
+            reindent_chars: &['}', ']'],
+            ..LangEntry::new(
+                tree_sitter_json::LANGUAGE.into(),
+                tree_sitter_json::HIGHLIGHTS_QUERY,
+            )
+        }),
         "js" | "jsx" | "mjs" => Some(LangEntry {
             indents_query: Some(include_str!("../queries/javascript/indents.scm")),
             brackets_query: Some(include_str!("../queries/javascript/brackets.scm")),
@@ -96,26 +110,61 @@ pub(crate) fn lang_for_ext(ext: &str) -> Option<LangEntry> {
                 tree_sitter_md::HIGHLIGHT_QUERY_BLOCK,
             )
         }),
-        "py" => Some(LangEntry::new(
-            tree_sitter_python::LANGUAGE.into(),
-            tree_sitter_python::HIGHLIGHTS_QUERY,
-        )),
-        "sh" | "bash" => Some(LangEntry::new(
-            tree_sitter_bash::LANGUAGE.into(),
-            tree_sitter_bash::HIGHLIGHT_QUERY,
-        )),
-        "swift" => Some(LangEntry::new(
-            tree_sitter_swift::LANGUAGE.into(),
-            tree_sitter_swift::HIGHLIGHTS_QUERY,
-        )),
-        "c" | "h" => Some(LangEntry::new(
-            tree_sitter_c::LANGUAGE.into(),
-            tree_sitter_c::HIGHLIGHT_QUERY,
-        )),
-        "cpp" | "cc" | "cxx" | "hpp" | "hxx" => Some(LangEntry::new(
-            tree_sitter_cpp::LANGUAGE.into(),
-            tree_sitter_cpp::HIGHLIGHT_QUERY,
-        )),
+        "py" => Some(LangEntry {
+            indents_query: Some(include_str!("../queries/python/indents.scm")),
+            brackets_query: Some(include_str!("../queries/python/brackets.scm")),
+            increase_indent_pattern: Some(r":\s*(#.*)?$"),
+            decrease_indent_pattern: Some(r"^\s*(return|pass|break|continue|raise)\b"),
+            reindent_chars: &['}', ')', ']'],
+            ..LangEntry::new(
+                tree_sitter_python::LANGUAGE.into(),
+                tree_sitter_python::HIGHLIGHTS_QUERY,
+            )
+        }),
+        "sh" | "bash" => Some(LangEntry {
+            indents_query: Some(include_str!("../queries/bash/indents.scm")),
+            brackets_query: Some(include_str!("../queries/bash/brackets.scm")),
+            increase_indent_pattern: Some(r"(then|do|else|\{)\s*(#.*)?$"),
+            decrease_indent_pattern: Some(r"^\s*(fi|done|else|elif|esac|\})"),
+            reindent_chars: &['}'],
+            ..LangEntry::new(
+                tree_sitter_bash::LANGUAGE.into(),
+                tree_sitter_bash::HIGHLIGHT_QUERY,
+            )
+        }),
+        "swift" => Some(LangEntry {
+            indents_query: Some(include_str!("../queries/swift/indents.scm")),
+            brackets_query: Some(include_str!("../queries/swift/brackets.scm")),
+            increase_indent_pattern: Some(r"[\{\[\(]\s*$"),
+            decrease_indent_pattern: Some(r"^\s*[}\]\)]"),
+            reindent_chars: &['}', ')', ']'],
+            ..LangEntry::new(
+                tree_sitter_swift::LANGUAGE.into(),
+                tree_sitter_swift::HIGHLIGHTS_QUERY,
+            )
+        }),
+        "c" | "h" => Some(LangEntry {
+            indents_query: Some(include_str!("../queries/c/indents.scm")),
+            brackets_query: Some(include_str!("../queries/c/brackets.scm")),
+            increase_indent_pattern: Some(r"[\{\[\(]\s*$"),
+            decrease_indent_pattern: Some(r"^\s*[}\]\)]"),
+            reindent_chars: &['}', ')', ']'],
+            ..LangEntry::new(
+                tree_sitter_c::LANGUAGE.into(),
+                tree_sitter_c::HIGHLIGHT_QUERY,
+            )
+        }),
+        "cpp" | "cc" | "cxx" | "hpp" | "hxx" => Some(LangEntry {
+            indents_query: Some(include_str!("../queries/c/indents.scm")),
+            brackets_query: Some(include_str!("../queries/c/brackets.scm")),
+            increase_indent_pattern: Some(r"[\{\[\(]\s*$"),
+            decrease_indent_pattern: Some(r"^\s*[}\]\)]"),
+            reindent_chars: &['}', ')', ']'],
+            ..LangEntry::new(
+                tree_sitter_cpp::LANGUAGE.into(),
+                tree_sitter_cpp::HIGHLIGHT_QUERY,
+            )
+        }),
         "mk" => Some(LangEntry::new(
             tree_sitter_make::LANGUAGE.into(),
             tree_sitter_make::HIGHLIGHTS_QUERY,
