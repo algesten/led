@@ -2553,6 +2553,7 @@ fn two_instance_no_args_browser_visible() {
         headless: true,
         enable_watchers: true,
         arg_paths: vec![],
+        arg_dir: None,
         start_dir: Arc::new(dirs.workspace.clone()),
         config_dir: dirs.config.clone(),
     };
@@ -2560,6 +2561,7 @@ fn two_instance_no_args_browser_visible() {
         headless: true,
         enable_watchers: true,
         arg_paths: vec![],
+        arg_dir: None,
         start_dir: Arc::new(dirs.workspace.clone()),
         config_dir: dirs.config.clone(),
     };
@@ -4230,4 +4232,221 @@ fn lsp_format_on_save() {
         b.doc.line(0)
     );
     assert_eq!(b.save_state, led_state::SaveState::Clean);
+}
+
+// ── Multi-file and directory CLI opening ──
+
+fn tab_names_sorted(state: &led_state::AppState) -> Vec<String> {
+    let mut tabs: Vec<_> = state
+        .buffers
+        .values()
+        .map(|b| {
+            let name = b
+                .path
+                .as_ref()
+                .unwrap()
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned();
+            (name, b.tab_order)
+        })
+        .collect();
+    tabs.sort_by_key(|(_, o)| *o);
+    tabs.into_iter().map(|(n, _)| n).collect()
+}
+
+#[test]
+fn multi_file_tab_order_and_activation() {
+    let t = TestHarness::new()
+        .with_named_file("aaa.txt", "aaa\n")
+        .with_named_file("bbb.txt", "bbb\n")
+        .with_named_file("ccc.txt", "ccc\n")
+        .run(vec![]);
+
+    assert_eq!(t.state.buffers.len(), 3);
+
+    // Last file should be active
+    let active = buf(&t);
+    assert_eq!(active.doc.line(0), "ccc");
+
+    // Tab order should follow arg order
+    assert_eq!(
+        tab_names_sorted(&t.state),
+        vec!["aaa.txt", "bbb.txt", "ccc.txt"]
+    );
+}
+
+#[test]
+fn multi_file_session_last_arg_active() {
+    // Run 1: open 3 files, quit to save session
+    let t = TestHarness::new()
+        .with_named_file("a.txt", "aaa\n")
+        .with_named_file("b.txt", "bbb\n")
+        .with_named_file("c.txt", "ccc\n")
+        .run(vec![Do(Quit), WaitFor(|s| s.session.saved)]);
+
+    let dir = t.dirs.root.clone();
+    let a_path = t.dirs.workspace.join("a.txt");
+    let c_path = t.dirs.workspace.join("c.txt");
+
+    // Run 2: restart with args [a, c]. All 3 files from session, but c should be active.
+    let t2 = TestHarness::with_dir(dir)
+        .with_arg(a_path)
+        .with_arg(c_path)
+        .run(vec![WaitFor(|s| s.buffers.len() >= 3)]);
+
+    let active = buf(&t2);
+    assert_eq!(
+        active.doc.line(0),
+        "ccc",
+        "last arg file (c.txt) should be active"
+    );
+}
+
+#[test]
+fn multi_file_session_last_used_bumped() {
+    // Run 1: open 2 files, quit to save session
+    let t = TestHarness::new()
+        .with_named_file("keep.txt", "keep\n")
+        .with_named_file("other.txt", "other\n")
+        .run(vec![Do(Quit), WaitFor(|s| s.session.saved)]);
+
+    let dir = t.dirs.root.clone();
+    let keep_path = t.dirs.workspace.join("keep.txt");
+
+    // Run 2: restart with keep.txt as arg — its last_used should be bumped
+    let t2 = TestHarness::with_dir(dir)
+        .with_arg(keep_path.clone())
+        .run(vec![WaitFor(|s| s.buffers.len() >= 2)]);
+
+    let keep_buf = t2
+        .state
+        .buffers
+        .values()
+        .find(|b| b.path.as_deref() == Some(keep_path.as_path()))
+        .expect("keep.txt should be open");
+    let other_buf = t2
+        .state
+        .buffers
+        .values()
+        .find(|b| {
+            b.path
+                .as_ref()
+                .and_then(|p| p.file_name())
+                .map_or(false, |n| n == "other.txt")
+        })
+        .expect("other.txt should be open");
+
+    assert!(
+        keep_buf.last_used >= other_buf.last_used,
+        "arg file's last_used should be >= non-arg file's last_used"
+    );
+}
+
+#[test]
+fn multi_file_session_arg_tab_order() {
+    // Run 1: open 3 files, quit to save session
+    let t = TestHarness::new()
+        .with_named_file("a.txt", "aaa\n")
+        .with_named_file("b.txt", "bbb\n")
+        .with_named_file("c.txt", "ccc\n")
+        .run(vec![Do(Quit), WaitFor(|s| s.session.saved)]);
+
+    let dir = t.dirs.root.clone();
+    let a_path = t.dirs.workspace.join("a.txt");
+    let c_path = t.dirs.workspace.join("c.txt");
+
+    // Run 2: restart with args [a, c]. b is non-arg, a and c are args.
+    // Arg files should be reordered to the end in arg order.
+    let t2 = TestHarness::with_dir(dir)
+        .with_arg(a_path)
+        .with_arg(c_path)
+        .run(vec![WaitFor(|s| s.buffers.len() >= 3)]);
+
+    let names = tab_names_sorted(&t2.state);
+    assert_eq!(
+        names,
+        vec!["b.txt", "a.txt", "c.txt"],
+        "non-arg (b) first, then args in order (a, c)"
+    );
+}
+
+#[test]
+fn directory_opens_browser_focused() {
+    let td = tempfile::TempDir::new().expect("tmpdir");
+    let root = td.keep();
+    let workspace = root.join("workspace");
+    let config = root.join("config");
+    std::fs::create_dir_all(&workspace).expect("mkdir");
+    std::fs::create_dir_all(&config).expect("mkdir");
+    std::fs::write(workspace.join("hello.txt"), "hi\n").expect("write");
+
+    let t = TestHarness::with_dir(root)
+        .with_arg_dir(workspace)
+        .run(vec![WaitFor(|s| {
+            s.session.restore_phase == led_state::SessionRestorePhase::Done
+        })]);
+
+    assert_eq!(
+        t.state.focus,
+        led_core::PanelSlot::Side,
+        "focus should be on file browser"
+    );
+    assert!(t.state.browser.root.is_some(), "browser root should be set");
+    assert!(t.state.buffers.is_empty(), "no files should be opened");
+}
+
+#[test]
+fn directory_in_workspace_reveals_subdir() {
+    let td = tempfile::TempDir::new().expect("tmpdir");
+    let root = td.keep();
+    let workspace = root.join("workspace");
+    let config = root.join("config");
+    std::fs::create_dir_all(&workspace).expect("mkdir");
+    std::fs::create_dir_all(&config).expect("mkdir");
+
+    // Create a .git dir so workspace resolves to this root
+    std::fs::create_dir_all(workspace.join(".git")).expect("mkdir .git");
+
+    // Create nested directory structure
+    let deep_dir = workspace.join("src").join("deep");
+    std::fs::create_dir_all(&deep_dir).expect("mkdir deep");
+    std::fs::write(deep_dir.join("file.txt"), "content\n").expect("write");
+
+    let t = TestHarness::with_dir(root)
+        .with_arg_dir(deep_dir)
+        .run(vec![WaitFor(browser_reveal_done)]);
+
+    // Canonicalize for comparison (macOS /var → /private/var)
+    let workspace = std::fs::canonicalize(&workspace).unwrap();
+    let src_dir = workspace.join("src");
+    let canonical_deep = src_dir.join("deep");
+
+    assert_eq!(
+        t.state.focus,
+        led_core::PanelSlot::Side,
+        "focus should be on file browser"
+    );
+
+    // Browser root should be the git root (workspace dir)
+    let browser_root = t.state.browser.root.as_ref().expect("browser root set");
+    assert_eq!(
+        *browser_root, workspace,
+        "browser root should be the workspace (git root)"
+    );
+
+    // Ancestor dirs should be expanded
+    assert!(
+        t.state.browser.expanded_dirs.contains(&src_dir),
+        "src/ should be expanded, expanded_dirs: {:?}",
+        t.state.browser.expanded_dirs,
+    );
+
+    // The target directory should be selected
+    let selected = &t.state.browser.entries[t.state.browser.selected];
+    assert_eq!(
+        selected.path, canonical_deep,
+        "selected entry should be the target directory"
+    );
 }

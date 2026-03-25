@@ -26,19 +26,62 @@ pub fn process_of(state: &Stream<Rc<AppState>>) -> Stream<Mut> {
         .map(|(_, _, redraw)| Mut::ForceRedraw(redraw + 1))
         .stream();
 
-    // Activate arg-file tab after session restore completes.
+    // Activate last arg-file tab after session restore completes.
     // If the arg file was already opened by session restore, activate it
     // without re-opening through the docstore.
     let activate_arg_s = state
         .dedupe_by(|s| s.session.restore_phase == SessionRestorePhase::Done)
         .filter(|s| s.session.restore_phase == SessionRestorePhase::Done)
         .filter_map(|s| {
-            let first_arg = s.startup.arg_paths.first()?;
+            let last_arg = s.startup.arg_paths.last()?;
             let buf = s
                 .buffers
                 .values()
-                .find(|b| b.path.as_ref() == Some(first_arg))?;
+                .find(|b| b.path.as_ref() == Some(last_arg))?;
             Some(Mut::ActivateBuffer(buf.id))
+        })
+        .stream();
+
+    // Bump last_used for arg files already open from session restore,
+    // making them resistant to auto-close. For multi-file args, also
+    // reorder their tab_order to the end of the tab bar in arg order.
+    let touch_args_s = state
+        .dedupe_by(|s| s.session.restore_phase == SessionRestorePhase::Done)
+        .filter(|s| s.session.restore_phase == SessionRestorePhase::Done)
+        .filter(|s| !s.startup.arg_paths.is_empty())
+        .filter_map(|s| {
+            let reorder = s.startup.arg_paths.len() > 1;
+            let base = if reorder {
+                s.buffers
+                    .values()
+                    .filter(|b| {
+                        !s.startup
+                            .arg_paths
+                            .iter()
+                            .any(|ap| b.path.as_ref() == Some(ap))
+                    })
+                    .map(|b| b.tab_order)
+                    .max()
+                    .map_or(0, |m| m + 1)
+            } else {
+                0 // unused when not reordering
+            };
+            let entries: Vec<_> = s
+                .startup
+                .arg_paths
+                .iter()
+                .enumerate()
+                .filter_map(|(i, p)| {
+                    let buf = s.buffers.values().find(|b| b.path.as_ref() == Some(p))?;
+                    let tab_order = if reorder { base + i } else { buf.tab_order };
+                    Some((buf.id, tab_order))
+                })
+                .collect();
+            if entries.is_empty() {
+                None
+            } else {
+                Some(Mut::TouchArgFiles { entries })
+            }
         })
         .stream();
 
@@ -46,6 +89,7 @@ pub fn process_of(state: &Stream<Rc<AppState>>) -> Stream<Mut> {
     suspend_s.forward(&merged);
     redraw_s.forward(&merged);
     activate_arg_s.forward(&merged);
+    touch_args_s.forward(&merged);
     merged
 }
 

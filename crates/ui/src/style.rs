@@ -503,6 +503,7 @@ mod tests {
             headless: true,
             enable_watchers: false,
             arg_paths: vec![],
+            arg_dir: None,
             start_dir: Arc::new("/tmp".into()),
             config_dir: "/tmp/config".into(),
         });

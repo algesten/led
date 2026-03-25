@@ -15,8 +15,8 @@ use tokio::sync::oneshot;
 #[derive(Parser)]
 #[command(name = "led", about = "A lightweight text editor")]
 struct Cli {
-    /// File or directory to open
-    path: Option<String>,
+    /// Files or directory to open
+    paths: Vec<String>,
 
     /// Write logs to a file (e.g. --log-file /tmp/led.log)
     #[arg(long)]
@@ -43,7 +43,7 @@ async fn main() {
         led::logging::init_file_logger(log_path);
     }
 
-    let arg_path = cli.path.as_ref().map(|p| {
+    let canonicalize_path = |p: &str| -> PathBuf {
         let path = PathBuf::from(p);
         std::fs::canonicalize(&path).unwrap_or_else(|_| {
             // Non-existent file: resolve relative to CWD so start_dir is valid.
@@ -52,16 +52,24 @@ async fn main() {
                 .unwrap_or_else(|_| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
             canonical_parent.join(path.file_name().unwrap_or_default())
         })
-    });
+    };
 
-    let start_dir: PathBuf = if arg_path.as_ref().map_or(false, |p| p.is_dir()) {
-        arg_path.clone().unwrap()
+    let resolved: Vec<PathBuf> = cli.paths.iter().map(|p| canonicalize_path(p)).collect();
+
+    // Single directory: open in file browser, no files.
+    // Otherwise: filter out directories, open remaining files.
+    let (arg_dir, arg_paths, start_dir) = if resolved.len() == 1 && resolved[0].is_dir() {
+        let dir = resolved.into_iter().next().unwrap();
+        let start = dir.clone();
+        (Some(dir), vec![], start)
     } else {
-        arg_path
-            .as_ref()
+        let files: Vec<PathBuf> = resolved.into_iter().filter(|p| !p.is_dir()).collect();
+        let start = files
+            .first()
             .and_then(|p| p.parent())
             .map(|parent| parent.to_path_buf())
-            .unwrap_or_else(|| PathBuf::from("."))
+            .unwrap_or_else(|| PathBuf::from("."));
+        (None, files, start)
     };
 
     let config_dir = dirs::home_dir()
@@ -94,7 +102,8 @@ async fn main() {
     let startup = Startup {
         headless: false,
         enable_watchers: true,
-        arg_paths: arg_path.into_iter().collect(),
+        arg_paths,
+        arg_dir,
         start_dir: Arc::new(start_dir),
         config_dir,
     };

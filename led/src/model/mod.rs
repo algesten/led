@@ -715,6 +715,15 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
                 }
             }
             Mut::TimerFired(name) => handle_timer(&mut s, name),
+            Mut::TouchArgFiles { entries } => {
+                for (id, tab_order) in entries {
+                    if let Some(buf) = s.buf_mut(id) {
+                        buf.last_used = std::time::Instant::now();
+                        buf.tab_order = tab_order;
+                    }
+                }
+                action::renumber_tabs(&mut s);
+            }
             Mut::Workspace {
                 workspace,
                 initial_dirs,
@@ -870,8 +879,20 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
 }
 
 /// Apply focus after session restore completes.
-/// Priority: restored focus (if valid) → open buffer → file browser.
+/// Priority: arg_dir (browser reveal) → restored focus (if valid) → open buffer → file browser.
 fn resolve_focus(s: &mut AppState) {
+    if let Some(ref dir) = s.startup.arg_dir {
+        let dir = dir.clone();
+        s.session.restored_focus.take(); // consume
+        let new_dirs = s.browser_mut().reveal(&dir);
+        if !new_dirs.is_empty() {
+            s.pending_lists.set(new_dirs);
+        }
+        action::browser_scroll_to_selected(s);
+        s.focus = PanelSlot::Side;
+        return;
+    }
+
     let restored = s.session.restored_focus.take();
 
     if !s.buffers.is_empty() {
@@ -1016,6 +1037,9 @@ enum Mut {
         flush: led_state::UndoFlush,
     },
     TimerFired(&'static str),
+    TouchArgFiles {
+        entries: Vec<(BufferId, usize)>,
+    },
     Workspace {
         workspace: Workspace,
         initial_dirs: Vec<PathBuf>,
@@ -1090,6 +1114,7 @@ impl Mut {
             Mut::UndoFlushed { .. } => "UndoFlushed",
             Mut::UndoFlushReady { .. } => "UndoFlushReady",
             Mut::TimerFired(_) => "TimerFired",
+            Mut::TouchArgFiles { .. } => "TouchArgFiles",
             Mut::Workspace { .. } => "Workspace",
             Mut::WorkspaceChanged { .. } => "WorkspaceChanged",
             Mut::LspNavigate { .. } => "LspNavigate",

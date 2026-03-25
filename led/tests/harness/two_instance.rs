@@ -226,6 +226,7 @@ pub fn startup_for(dirs: &TestDirs, file_paths: &[PathBuf]) -> Startup {
         headless: true,
         enable_watchers: true,
         arg_paths: file_paths.to_vec(),
+        arg_dir: None,
         start_dir: Arc::new(start_dir),
         config_dir: dirs.config.clone(),
     }

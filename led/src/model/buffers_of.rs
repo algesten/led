@@ -150,6 +150,8 @@ pub fn buffers_of(
                     };
 
                 let is_session_restore = sp.is_some();
+                let is_startup_arg = state.startup.arg_paths.contains(&path);
+                let is_last_arg = state.startup.arg_paths.last() == Some(&path);
                 let notify_hash = led_workspace::path_hash(&path);
                 let content_hash = doc.content_hash();
 
@@ -209,8 +211,11 @@ pub fn buffers_of(
                     is_preview: false,
                     last_used: Instant::now(),
                 };
-                let activate =
-                    !is_session_restore || state.session.active_tab_order == Some(tab_order);
+                let activate = if is_startup_arg {
+                    is_last_arg
+                } else {
+                    !is_session_restore || state.session.active_tab_order == Some(tab_order)
+                };
                 Some(Mut::BufferOpen {
                     buf,
                     next_id: state.next_buffer_id + 1,

@@ -21,6 +21,11 @@ pub struct Startup {
     /// where the binary started.
     pub start_dir: Arc<PathBuf>,
 
+    /// Directory to reveal in the file browser (from CLI `led <dir>` invocation).
+    /// When set, the browser focuses this directory on startup instead of
+    /// opening files.
+    pub arg_dir: Option<PathBuf>,
+
     /// Config directory (e.g. ~/.config/led).
     pub config_dir: PathBuf,
 }

@@ -53,6 +53,7 @@ pub struct TestHarness {
     reuse_dir: Option<PathBuf>,
     files: Vec<(String, String)>,
     arg_paths: Vec<PathBuf>,
+    arg_dir: Option<PathBuf>,
     viewport: (u16, u16),
     enable_watchers: bool,
 }
@@ -64,6 +65,7 @@ impl TestHarness {
             reuse_dir: None,
             files: Vec::new(),
             arg_paths: Vec::new(),
+            arg_dir: None,
             viewport: (80, 24),
             enable_watchers: false,
         }
@@ -78,6 +80,7 @@ impl TestHarness {
             reuse_dir: Some(dir),
             files: Vec::new(),
             arg_paths: Vec::new(),
+            arg_dir: None,
             viewport: (80, 24),
             enable_watchers: false,
         }
@@ -87,6 +90,13 @@ impl TestHarness {
     #[allow(dead_code)]
     pub fn with_arg(mut self, path: PathBuf) -> Self {
         self.arg_paths.push(path);
+        self
+    }
+
+    /// Set a directory to reveal in the file browser on startup.
+    #[allow(dead_code)]
+    pub fn with_arg_dir(mut self, dir: PathBuf) -> Self {
+        self.arg_dir = Some(dir);
         self
     }
 
@@ -163,16 +173,22 @@ impl TestHarness {
         arg_paths.extend(extra_args);
         let file_path = arg_paths.first().cloned();
 
-        let start_dir = arg_paths
-            .first()
-            .and_then(|p| p.parent())
-            .map(|p| p.to_path_buf())
-            .unwrap_or_else(|| workspace_dir.clone());
+        let arg_dir = self.arg_dir.map(|d| std::fs::canonicalize(&d).unwrap_or(d));
+        let start_dir = if let Some(ref dir) = arg_dir {
+            dir.clone()
+        } else {
+            arg_paths
+                .first()
+                .and_then(|p| p.parent())
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(|| workspace_dir.clone())
+        };
 
         let startup = Startup {
             headless: true,
             enable_watchers: self.enable_watchers,
             arg_paths,
+            arg_dir,
             start_dir: Arc::new(start_dir),
             config_dir: config_dir.clone(),
         };

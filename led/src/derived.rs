@@ -173,11 +173,10 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
             s.startup
                 .arg_paths
                 .iter()
-                .filter(|p| !open_paths.contains(p.as_path()))
-                .cloned()
                 .enumerate()
+                .filter(|(_, p)| !open_paths.contains(p.as_path()))
                 .map(move |(i, path)| DocStoreOut::Open {
-                    path,
+                    path: path.clone(),
                     tab_order: base + i,
                     create_if_missing: true,
                 })
