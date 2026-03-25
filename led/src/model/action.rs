@@ -523,8 +523,7 @@ fn navigate_diagnostic(state: &mut AppState, forward: bool) {
         return;
     };
     let Some(ref path) = buf.path else { return };
-    let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.clone());
-    let Some(diags) = state.lsp.diagnostics.get(&canonical) else {
+    let Some(diags) = state.lsp.diagnostics.get(path) else {
         return;
     };
     if diags.is_empty() {

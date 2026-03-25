@@ -828,12 +828,10 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
                 }
             }
             Mut::LspDiagnostics { path, diagnostics } => {
-                let key = std::fs::canonicalize(&path).unwrap_or(path);
-                s.lsp_mut().diagnostics.insert(key, diagnostics);
+                s.lsp_mut().diagnostics.insert(path, diagnostics);
             }
             Mut::LspInlayHints { path, hints } => {
-                let key = std::fs::canonicalize(&path).unwrap_or(path);
-                s.lsp_mut().inlay_hints.insert(key, hints);
+                s.lsp_mut().inlay_hints.insert(path, hints);
             }
             Mut::LspProgress {
                 server_name,

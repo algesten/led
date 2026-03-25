@@ -11,7 +11,8 @@ use crate::{CompletionItem, Diagnostic, DiagnosticSeverity, FileEdit, InlayHint}
 // ── URI / path ──
 
 pub(crate) fn uri_from_path(path: &Path) -> Option<Uri> {
-    let s = format!("file://{}", path.to_str()?);
+    let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let s = format!("file://{}", canonical.to_str()?);
     s.parse().ok()
 }
 

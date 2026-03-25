@@ -114,6 +114,8 @@ struct LspManager {
     event_tx: tokio::sync::mpsc::UnboundedSender<ManagerEvent>,
     pending_starts: HashSet<String>,
     opened_docs: HashSet<PathBuf>,
+    /// Reverse map: canonical path → original path (for macOS /var → /private/var).
+    canonical_to_original: HashMap<PathBuf, PathBuf>,
     pending_opens: HashSet<PathBuf>,
     docs: HashMap<PathBuf, Arc<dyn Doc>>,
     doc_versions: HashMap<PathBuf, i32>,
@@ -152,6 +154,7 @@ pub(crate) async fn run(
         event_tx,
         pending_starts: HashSet::new(),
         opened_docs: HashSet::new(),
+        canonical_to_original: HashMap::new(),
         pending_opens: HashSet::new(),
         docs: HashMap::new(),
         doc_versions: HashMap::new(),
@@ -427,6 +430,12 @@ impl LspManager {
             },
         );
         self.opened_docs.insert(path.to_path_buf());
+        if let Ok(canonical) = std::fs::canonicalize(path) {
+            if canonical != path {
+                self.canonical_to_original
+                    .insert(canonical, path.to_path_buf());
+            }
+        }
         self.need_diagnostics = true;
     }
 
@@ -512,6 +521,9 @@ impl LspManager {
     fn send_did_close(&mut self, path: &Path) {
         if !self.opened_docs.remove(path) {
             return;
+        }
+        if let Ok(canonical) = std::fs::canonicalize(path) {
+            self.canonical_to_original.remove(&canonical);
         }
         let Some(server) = self.server_for_path(path) else {
             return;
@@ -944,7 +956,8 @@ impl LspManager {
                 if let Ok(params) =
                     serde_json::from_value::<lsp_types::PublishDiagnosticsParams>(notif.params)
                 {
-                    if let Some(path) = crate::convert::path_from_uri(&params.uri) {
+                    if let Some(raw_path) = crate::convert::path_from_uri(&params.uri) {
+                        let path = self.resolve_path(raw_path);
                         let line_at = |row: usize| {
                             self.docs
                                 .get(&path)
@@ -1005,6 +1018,7 @@ impl LspManager {
         match result {
             RequestResult::GotoDefinition { locations } => {
                 if let Some((path, row, col)) = locations.into_iter().next() {
+                    let path = self.resolve_path(path);
                     let _ = result_tx.send(LspIn::Navigate { path, row, col }).await;
                 }
             }
@@ -1027,7 +1041,8 @@ impl LspManager {
             RequestResult::Rename { file_edits } => {
                 // Apply non-open file edits to disk
                 let mut open_edits = Vec::new();
-                for fe in file_edits {
+                for mut fe in file_edits {
+                    fe.path = self.resolve_path(fe.path);
                     if self.opened_docs.contains(&fe.path) {
                         open_edits.push(fe);
                     } else {
@@ -1047,7 +1062,8 @@ impl LspManager {
             }
             RequestResult::CodeActionResolved { file_edits } => {
                 let mut open_edits = Vec::new();
-                for fe in file_edits {
+                for mut fe in file_edits {
+                    fe.path = self.resolve_path(fe.path);
                     if self.opened_docs.contains(&fe.path) {
                         open_edits.push(fe);
                     } else {
@@ -1495,6 +1511,15 @@ impl LspManager {
 
     // ── Helpers ──
 
+    /// Resolve a canonical path (from server responses) back to the original
+    /// path used by the rest of the system. On macOS, /private/var/… → /var/….
+    fn resolve_path(&self, path: PathBuf) -> PathBuf {
+        self.canonical_to_original
+            .get(&path)
+            .cloned()
+            .unwrap_or(path)
+    }
+
     fn line_at(&self, path: &Path, row: usize) -> Option<String> {
         self.docs.get(path).and_then(|d| doc_line(&**d, row))
     }
@@ -1569,11 +1594,12 @@ fn fuzzy_filter_completions(
 
 fn extract_raw_edits_for_path(edit: &WorkspaceEdit, target: &Path) -> Vec<TextEdit> {
     let mut result = Vec::new();
+    let canonical_target = std::fs::canonicalize(target).unwrap_or_else(|_| target.to_path_buf());
 
     if let Some(changes) = &edit.changes {
         for (uri, edits) in changes {
             if let Some(path) = crate::convert::path_from_uri(uri) {
-                if path == target {
+                if path == target || path == canonical_target {
                     result.extend(edits.iter().cloned());
                 }
             }
@@ -1586,7 +1612,7 @@ fn extract_raw_edits_for_path(edit: &WorkspaceEdit, target: &Path) -> Vec<TextEd
             DocumentChanges::Edits(edits) => {
                 for tde in edits {
                     if let Some(path) = crate::convert::path_from_uri(&tde.text_document.uri) {
-                        if path == target {
+                        if path == target || path == canonical_target {
                             for e in &tde.edits {
                                 match e {
                                     lsp_types::OneOf::Left(te) => result.push(te.clone()),
@@ -1603,7 +1629,7 @@ fn extract_raw_edits_for_path(edit: &WorkspaceEdit, target: &Path) -> Vec<TextEd
                 for op in ops {
                     if let lsp_types::DocumentChangeOperation::Edit(tde) = op {
                         if let Some(path) = crate::convert::path_from_uri(&tde.text_document.uri) {
-                            if path == target {
+                            if path == target || path == canonical_target {
                                 for e in &tde.edits {
                                     match e {
                                         lsp_types::OneOf::Left(te) => result.push(te.clone()),
