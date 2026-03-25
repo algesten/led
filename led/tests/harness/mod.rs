@@ -56,6 +56,7 @@ pub struct TestHarness {
     arg_dir: Option<PathBuf>,
     viewport: (u16, u16),
     enable_watchers: bool,
+    test_lsp_server: Option<PathBuf>,
 }
 
 impl TestHarness {
@@ -68,6 +69,7 @@ impl TestHarness {
             arg_dir: None,
             viewport: (80, 24),
             enable_watchers: false,
+            test_lsp_server: None,
         }
     }
 
@@ -83,7 +85,15 @@ impl TestHarness {
             arg_dir: None,
             viewport: (80, 24),
             enable_watchers: false,
+            test_lsp_server: None,
         }
+    }
+
+    /// Set a fake LSP server binary for this test.
+    #[allow(dead_code)]
+    pub fn with_lsp_server(mut self, path: PathBuf) -> Self {
+        self.test_lsp_server = Some(path);
+        self
     }
 
     /// Add an existing file (already on disk) as an arg path for the second run.
@@ -191,6 +201,7 @@ impl TestHarness {
             arg_dir,
             start_dir: Arc::new(start_dir),
             config_dir: config_dir.clone(),
+            test_lsp_server: self.test_lsp_server.clone(),
         };
 
         let dirs = TestDirs {

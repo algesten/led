@@ -11,8 +11,8 @@ pub(crate) struct LspRegistry {
 }
 
 impl LspRegistry {
-    pub(crate) fn new() -> Self {
-        Self {
+    pub(crate) fn new(server_override: Option<String>) -> Self {
+        let mut registry = Self {
             configs: vec![
                 ServerConfig {
                     language_id: "rust",
@@ -63,7 +63,17 @@ impl LspRegistry {
                     extensions: &["sh", "bash"],
                 },
             ],
+        };
+
+        if let Some(cmd) = server_override {
+            let cmd: &'static str = Box::leak(cmd.into_boxed_str());
+            for config in &mut registry.configs {
+                config.command = cmd;
+                config.args = &[];
+            }
         }
+
+        registry
     }
 
     pub(crate) fn config_for_extension(&self, ext: &str) -> Option<&ServerConfig> {

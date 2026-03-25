@@ -506,6 +506,7 @@ mod tests {
             arg_dir: None,
             start_dir: Arc::new("/tmp".into()),
             config_dir: "/tmp/config".into(),
+            test_lsp_server: None,
         });
         state.dims = Some(Dimensions::new(40, 10, false));
         state.config_theme = Some(config_theme);

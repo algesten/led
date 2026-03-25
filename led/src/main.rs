@@ -106,6 +106,7 @@ async fn main() {
         arg_dir,
         start_dir: Arc::new(start_dir),
         config_dir,
+        test_lsp_server: None,
     };
 
     let local = tokio::task::LocalSet::new();

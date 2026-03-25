@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["led", "crates/clipboard", "crates/config-file", "crates/core", "crates/state", "crates/terminal-in", "crates/docstore", "crates/workspace", "crates/ui", "crates/timers", "crates/fs", "crates/file-search", "crates/syntax", "crates/git", "crates/lsp"]
+members = ["led", "crates/clipboard", "crates/config-file", "crates/core", "crates/state", "crates/terminal-in", "crates/docstore", "crates/workspace", "crates/ui", "crates/timers", "crates/fs", "crates/file-search", "crates/syntax", "crates/git", "crates/lsp", "led/tests/fake-lsp"]
 default-members = ["led"]
 
 [workspace.dependencies]

@@ -150,11 +150,12 @@ struct LspManager {
 pub(crate) async fn run(
     mut cmd_rx: tokio::sync::mpsc::Receiver<LspOut>,
     result_tx: tokio::sync::mpsc::Sender<LspIn>,
+    server_override: Option<String>,
 ) {
     let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
 
     let mut mgr = LspManager {
-        registry: LspRegistry::new(),
+        registry: LspRegistry::new(server_override),
         servers: HashMap::new(),
         root: PathBuf::new(),
         event_tx,

@@ -28,4 +28,7 @@ pub struct Startup {
 
     /// Config directory (e.g. ~/.config/led).
     pub config_dir: PathBuf,
+
+    /// Override the LSP server command for all languages (testing only).
+    pub test_lsp_server: Option<PathBuf>,
 }

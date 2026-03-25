@@ -229,5 +229,6 @@ pub fn startup_for(dirs: &TestDirs, file_paths: &[PathBuf]) -> Startup {
         arg_dir: None,
         start_dir: Arc::new(start_dir),
         config_dir: dirs.config.clone(),
+        test_lsp_server: None,
     }
 }

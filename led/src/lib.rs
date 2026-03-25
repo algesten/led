@@ -58,6 +58,10 @@ pub fn run(
     quit_tx: oneshot::Sender<()>,
 ) -> (Stream<Rc<AppState>>, RunGuards) {
     let headless = startup.headless;
+    let lsp_server_override = startup
+        .test_lsp_server
+        .as_ref()
+        .map(|p| p.to_string_lossy().to_string());
 
     let file_watcher = if startup.enable_watchers {
         FileWatcher::new()
@@ -95,7 +99,7 @@ pub fn run(
     let syntax_in = led_syntax::driver(d.syntax_out);
     let git_in = led_git::driver(d.git_out);
     let file_search_in = led_file_search::driver(d.file_search_out);
-    let lsp_in = led_lsp::driver(d.lsp_out);
+    let lsp_in = led_lsp::driver(d.lsp_out, lsp_server_override);
 
     let drivers = Drivers {
         terminal_in,

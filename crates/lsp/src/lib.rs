@@ -188,7 +188,7 @@ pub enum LspIn {
 
 // ── Driver ──
 
-pub fn driver(out: Stream<LspOut>) -> Stream<LspIn> {
+pub fn driver(out: Stream<LspOut>, server_override: Option<String>) -> Stream<LspIn> {
     let stream: Stream<LspIn> = Stream::new();
     let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel::<LspOut>(64);
     let (result_tx, mut result_rx) = tokio::sync::mpsc::channel::<LspIn>(64);
@@ -202,7 +202,7 @@ pub fn driver(out: Stream<LspOut>) -> Stream<LspIn> {
 
     // Async manager task
     tokio::spawn(async move {
-        manager::run(cmd_rx, result_tx).await;
+        manager::run(cmd_rx, result_tx, server_override).await;
     });
 
     // Bridge: mpsc channel → rx::Stream
