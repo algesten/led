@@ -275,8 +275,8 @@ fn format_on_save(doc: &Arc<dyn Doc>) -> Arc<dyn Doc> {
         let trimmed = line.trim_end();
         if trimmed.len() < line.len() {
             let line_start = doc.line_to_char(line_idx);
-            let start = line_start + trimmed.len();
-            let end = line_start + line.len();
+            let start = line_start + trimmed.chars().count();
+            let end = line_start + line.chars().count();
             doc = doc.remove(start, end);
         }
     }

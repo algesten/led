@@ -149,7 +149,7 @@ fn render_overlay(overlay: &OverlayContent, frame: &mut Frame, area: Rect) {
             anchor_y,
         } => {
             let label = "Rename: ";
-            let width = (label.len() + input.len() + 4).min(area.width as usize);
+            let width = (label.len() + input.chars().count() + 4).min(area.width as usize);
             let x =
                 (*anchor_x as usize).min(area.width.saturating_sub(width as u16) as usize) as u16;
             let y = *anchor_y;

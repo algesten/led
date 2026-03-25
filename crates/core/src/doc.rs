@@ -281,8 +281,11 @@ impl Doc for TextDoc {
             return 0;
         }
         let line = self.rope.line(line_idx);
-        let s = line.to_string();
-        s.trim_end_matches(&['\n', '\r'][..]).len()
+        let mut n = line.len_chars();
+        while n > 0 && matches!(line.char(n - 1), '\n' | '\r') {
+            n -= 1;
+        }
+        n
     }
 
     fn len_bytes(&self) -> usize {

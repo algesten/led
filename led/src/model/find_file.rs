@@ -133,17 +133,19 @@ fn longest_common_prefix(completions: &[FindFileEntry]) -> String {
         .collect();
 
     let first = &names[0];
-    let mut prefix_len = first.len();
+    let first_chars: Vec<char> = first.chars().collect();
+    let mut prefix_len = first_chars.len();
     for name in &names[1..] {
-        prefix_len = prefix_len.min(name.len());
-        for (i, (a, b)) in first.chars().zip(name.chars()).enumerate() {
+        let name_chars: Vec<char> = name.chars().collect();
+        prefix_len = prefix_len.min(name_chars.len());
+        for (i, (a, b)) in first_chars.iter().zip(name_chars.iter()).enumerate() {
             if a.to_lowercase().ne(b.to_lowercase()) {
                 prefix_len = prefix_len.min(i);
                 break;
             }
         }
     }
-    first[..prefix_len].to_string()
+    first_chars[..prefix_len].iter().collect()
 }
 
 // ── Tab completion ──

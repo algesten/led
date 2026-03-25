@@ -372,6 +372,18 @@ fn kill_line_at_end_joins_next() {
     assert_eq!(buf(&t).doc.line(0), "helloworld");
 }
 
+#[test]
+fn kill_line_multibyte_char() {
+    // Em-dash (—) is 3 bytes / 1 char. kill_line must not overshoot.
+    let t = TestHarness::new()
+        .with_file("a — b\nsecond\n")
+        .run(actions(vec![KillLine]));
+
+    assert_eq!(buf(&t).doc.line(0), "");
+    assert_eq!(buf(&t).doc.line(1), "second");
+    assert_eq!(buf(&t).doc.line_count(), 3); // empty + second + trailing
+}
+
 // ── Undo / Redo ──
 
 #[test]

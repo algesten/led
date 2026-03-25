@@ -1303,8 +1303,10 @@ pub fn build_find_file_completion_lines(f: &FindFileCompletionInputs) -> Rc<Vec<
             };
 
             let name = &comp.name;
-            let text = if name.len() > max_width && max_width > 1 {
-                format!("{}\u{2026}", &name[..max_width.saturating_sub(1)])
+            let char_count = name.chars().count();
+            let text = if char_count > max_width && max_width > 1 {
+                let truncated: String = name.chars().take(max_width.saturating_sub(1)).collect();
+                format!("{truncated}\u{2026}")
             } else {
                 format!("{name:max_width$}")
             };
