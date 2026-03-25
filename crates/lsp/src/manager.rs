@@ -130,6 +130,7 @@ struct LspManager {
     progress_tokens: HashMap<String, ProgressState>,
     quiescent: HashMap<String, bool>,
     need_diagnostics: bool,
+    buffered_diagnostics: HashMap<PathBuf, Vec<crate::Diagnostic>>,
     _file_watcher: Option<notify::RecommendedWatcher>,
     file_watcher_globs: Option<globset::GlobSet>,
     /// Rate-limit progress updates to the UI.
@@ -167,6 +168,7 @@ pub(crate) async fn run(
         progress_tokens: HashMap::new(),
         quiescent: HashMap::new(),
         need_diagnostics: false,
+        buffered_diagnostics: HashMap::new(),
         _file_watcher: None,
         file_watcher_globs: None,
         last_progress_sent: std::time::Instant::now(),
@@ -233,6 +235,16 @@ impl LspManager {
             }
             LspOut::BufferSaved { path } => {
                 self.send_did_save(&path);
+                // Flush diagnostics that arrived while need_diagnostics was false
+                // (e.g. from format-on-save didChange before didSave).
+                for (diag_path, diagnostics) in self.buffered_diagnostics.drain() {
+                    let _ = result_tx
+                        .send(LspIn::Diagnostics {
+                            path: diag_path,
+                            diagnostics,
+                        })
+                        .await;
+                }
             }
             LspOut::BufferClosed { path } => {
                 self.send_did_close(&path);
@@ -950,9 +962,6 @@ impl LspManager {
     ) {
         match notif.method.as_str() {
             "textDocument/publishDiagnostics" => {
-                if !self.need_diagnostics {
-                    return;
-                }
                 if let Ok(params) =
                     serde_json::from_value::<lsp_types::PublishDiagnosticsParams>(notif.params)
                 {
@@ -969,9 +978,13 @@ impl LspManager {
                                 })
                         };
                         let diagnostics = convert_diagnostics(&params.diagnostics, &line_at);
-                        let _ = result_tx
-                            .send(LspIn::Diagnostics { path, diagnostics })
-                            .await;
+                        if self.need_diagnostics {
+                            let _ = result_tx
+                                .send(LspIn::Diagnostics { path, diagnostics })
+                                .await;
+                        } else {
+                            self.buffered_diagnostics.insert(path, diagnostics);
+                        }
                     }
                 }
             }

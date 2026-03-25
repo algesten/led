@@ -85,6 +85,7 @@ pub fn driver(out: Stream<SyntaxOut>) -> Stream<SyntaxIn> {
         struct BufSyntax {
             state: SyntaxState,
             last_ver: u64,
+            last_doc: Arc<dyn Doc>,
             last_scroll: usize,
             last_end_line: usize,
             cached_highlights: Vec<(usize, led_state::HighlightSpan)>,
@@ -109,6 +110,7 @@ pub fn driver(out: Stream<SyntaxOut>) -> Stream<SyntaxIn> {
                             BufSyntax {
                                 state: ss,
                                 last_ver: ver,
+                                last_doc: doc.clone(),
                                 last_scroll: 0,
                                 last_end_line: 50,
                                 cached_highlights: state_highlights.clone(),
@@ -152,6 +154,7 @@ pub fn driver(out: Stream<SyntaxOut>) -> Stream<SyntaxIn> {
                                 BufSyntax {
                                     state: ss,
                                     last_ver: version,
+                                    last_doc: doc.clone(),
                                     last_scroll: usize::MAX,
                                     last_end_line: 0,
                                     cached_highlights: Vec::new(),
@@ -184,13 +187,35 @@ pub fn driver(out: Stream<SyntaxOut>) -> Stream<SyntaxIn> {
                     if doc_changed {
                         let new_op_count = (version - bs.last_ver) as usize;
                         if !edit_ops.is_empty() && edit_ops.len() >= new_op_count {
-                            for op in &edit_ops[edit_ops.len() - new_op_count..] {
-                                bs.state.apply_edit_op(op, &*doc);
+                            let ops = &edit_ops[edit_ops.len() - new_op_count..];
+                            if new_op_count == 1 {
+                                bs.state.apply_edit_op(&ops[0], &*doc);
+                            } else {
+                                // Replay ops against a shadow doc so each
+                                // op gets byte positions from the correct
+                                // intermediate state.
+                                let mut shadow: Arc<dyn Doc> = bs.last_doc.clone();
+                                for op in ops {
+                                    // Apply to tree using pre-edit doc for
+                                    // correct char→byte mapping.
+                                    bs.state.apply_edit_op(op, &*shadow);
+                                    // Advance shadow to match post-edit state.
+                                    let off =
+                                        op.offset.min(shadow.byte_to_char(shadow.len_bytes()));
+                                    if !op.old_text.is_empty() {
+                                        let end = off + op.old_text.chars().count();
+                                        shadow = shadow.remove(off, end);
+                                    }
+                                    if !op.new_text.is_empty() {
+                                        shadow = shadow.insert(off, &op.new_text);
+                                    }
+                                }
                             }
                         } else {
                             bs.state.reparse(&*doc);
                         }
                         bs.last_ver = version;
+                        bs.last_doc = doc.clone();
                     }
 
                     // Recompute highlights/brackets when doc or viewport changed
