@@ -752,4 +752,191 @@ fn run() {
         assert_indent(src, 4, "            "); // Err(_) → 12
         assert_indent(src, 5, "        "); // }) → 8
     }
+
+    // ── JavaScript / TypeScript ──
+
+    #[test]
+    fn javascript_queries_parse() {
+        let lang: tree_sitter::Language = tree_sitter_javascript::LANGUAGE.into();
+        let queries = [
+            ("indents", include_str!("../queries/javascript/indents.scm")),
+            (
+                "brackets",
+                include_str!("../queries/javascript/brackets.scm"),
+            ),
+        ];
+        for (name, src) in queries {
+            Query::new(&lang, src).unwrap_or_else(|e| {
+                panic!("javascript/{name}.scm failed to parse: {e}");
+            });
+        }
+    }
+
+    #[test]
+    fn typescript_queries_parse() {
+        let lang: tree_sitter::Language = tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into();
+        let queries = [
+            ("indents", include_str!("../queries/javascript/indents.scm")),
+            (
+                "brackets",
+                include_str!("../queries/javascript/brackets.scm"),
+            ),
+        ];
+        for (name, src) in queries {
+            Query::new(&lang, src).unwrap_or_else(|e| {
+                panic!("typescript/{name}.scm failed to parse: {e}");
+            });
+        }
+    }
+
+    #[test]
+    fn tsx_queries_parse() {
+        let lang: tree_sitter::Language = tree_sitter_typescript::LANGUAGE_TSX.into();
+        let queries = [
+            ("indents", include_str!("../queries/javascript/indents.scm")),
+            (
+                "brackets",
+                include_str!("../queries/javascript/brackets.scm"),
+            ),
+        ];
+        for (name, src) in queries {
+            Query::new(&lang, src).unwrap_or_else(|e| {
+                panic!("tsx/{name}.scm failed to parse: {e}");
+            });
+        }
+    }
+
+    fn assert_ts_indent(source: &str, line: usize, expected: &str) {
+        let doc = make_doc(source);
+        let path = Path::new("test.ts");
+        let state = SyntaxState::from_path_and_doc(path, &*doc).unwrap();
+        let indent = state.compute_auto_indent(&*doc, line);
+        let actual = indent.as_deref().unwrap_or("");
+        assert_eq!(
+            actual,
+            expected,
+            "line {line}: expected {:?} ({} spaces), got {:?} ({} spaces)\n\
+             line content: {:?}",
+            expected,
+            expected.len(),
+            actual,
+            actual.len(),
+            doc.line(line),
+        );
+    }
+
+    #[test]
+    fn ts_indent_after_open_brace() {
+        let src = "function main() {\n  const x = 1;\n\n}\n";
+        assert_ts_indent(src, 2, "  "); // blank line after indented content
+    }
+
+    #[test]
+    fn ts_indent_closing_brace() {
+        let src = "function main() {\n  const x = 1;\n}\n";
+        assert_ts_indent(src, 2, "");
+    }
+
+    #[test]
+    fn ts_indent_object_in_array() {
+        let src = "\
+const items = [
+  {
+    id: 1,
+    name: 'hello',
+  },
+  {
+    id: 2,
+    name: 'world',
+  },
+];
+";
+        assert_ts_indent(src, 2, "    "); // id: 1 → 4 spaces
+        assert_ts_indent(src, 4, "  "); // }, → 2 (matches {)
+        assert_ts_indent(src, 6, "    "); // id: 2 → 4 spaces
+    }
+
+    #[test]
+    fn ts_highlights_consistent_across_objects() {
+        // Regression: highlighting should not break partway through an array of objects
+        let src = "\
+const products = [
+  {
+    id: ProductId.Enterprise,
+    name: 'Enterprise',
+    active: true,
+    type: 'service',
+    lookback_limits: null,
+  },
+  {
+    id: ProductId.PackageBasic,
+    name: 'Package Basic',
+    active: true,
+    type: 'good',
+    lookback_limits: null,
+  },
+  {
+    id: ProductId.PackageAdvanced,
+    name: 'Package Advanced',
+    active: true,
+    type: 'good',
+    lookback_limits: null,
+  },
+];
+";
+        let doc = make_doc(src);
+        let path = Path::new("test.ts");
+        let state = SyntaxState::from_path_and_doc(path, &*doc).unwrap();
+        let highlights = state.highlights_for_lines(&*doc, 0, doc.line_count());
+
+        // Check that each object's block has highlights
+        let first_obj_hl: Vec<_> = highlights
+            .iter()
+            .filter(|(l, _)| *l >= 2 && *l <= 7)
+            .collect();
+        let second_obj_hl: Vec<_> = highlights
+            .iter()
+            .filter(|(l, _)| *l >= 9 && *l <= 14)
+            .collect();
+        let third_obj_hl: Vec<_> = highlights
+            .iter()
+            .filter(|(l, _)| *l >= 16 && *l <= 21)
+            .collect();
+
+        assert!(
+            !first_obj_hl.is_empty(),
+            "first object should have highlights"
+        );
+        assert!(
+            !second_obj_hl.is_empty(),
+            "second object should have highlights"
+        );
+        assert!(
+            !third_obj_hl.is_empty(),
+            "third object should have highlights, got none"
+        );
+
+        // The number of highlights per object should be roughly similar
+        let ratio = third_obj_hl.len() as f64 / first_obj_hl.len() as f64;
+        assert!(
+            ratio > 0.5,
+            "third object has significantly fewer highlights ({}) than first ({})",
+            third_obj_hl.len(),
+            first_obj_hl.len()
+        );
+    }
+
+    #[test]
+    fn ts_indent_nested_block() {
+        let src = "\
+if (true) {
+  if (false) {
+    console.log('hi');
+  }
+}
+";
+        assert_ts_indent(src, 2, "    "); // console.log → 4
+        assert_ts_indent(src, 3, "  "); // } → 2 (matches inner if)
+        assert_ts_indent(src, 4, ""); // } → 0 (matches outer if)
+    }
 }

@@ -57,10 +57,17 @@ pub(crate) fn lang_for_ext(ext: &str) -> Option<LangEntry> {
             tree_sitter_json::LANGUAGE.into(),
             tree_sitter_json::HIGHLIGHTS_QUERY,
         )),
-        "js" | "jsx" | "mjs" => Some(LangEntry::new(
-            tree_sitter_javascript::LANGUAGE.into(),
-            tree_sitter_javascript::HIGHLIGHT_QUERY,
-        )),
+        "js" | "jsx" | "mjs" => Some(LangEntry {
+            indents_query: Some(include_str!("../queries/javascript/indents.scm")),
+            brackets_query: Some(include_str!("../queries/javascript/brackets.scm")),
+            increase_indent_pattern: Some(r"[\{\[\(]\s*$"),
+            decrease_indent_pattern: Some(r"^\s*[}\]\)]"),
+            reindent_chars: &['}', ')', ']'],
+            ..LangEntry::new(
+                tree_sitter_javascript::LANGUAGE.into(),
+                tree_sitter_javascript::HIGHLIGHT_QUERY,
+            )
+        }),
         "ts" | "tsx" => {
             let lang = if ext == "tsx" {
                 tree_sitter_typescript::LANGUAGE_TSX.into()
@@ -74,6 +81,11 @@ pub(crate) fn lang_for_ext(ext: &str) -> Option<LangEntry> {
             );
             Some(LangEntry {
                 highlights_query: Cow::Owned(combined),
+                indents_query: Some(include_str!("../queries/javascript/indents.scm")),
+                brackets_query: Some(include_str!("../queries/javascript/brackets.scm")),
+                increase_indent_pattern: Some(r"[\{\[\(]\s*$"),
+                decrease_indent_pattern: Some(r"^\s*[}\]\)]"),
+                reindent_chars: &['}', ')', ']'],
                 ..LangEntry::new(lang, "")
             })
         }
