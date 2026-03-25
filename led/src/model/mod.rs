@@ -281,8 +281,18 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
         .map(|ev| match ev {
             led_clipboard::ClipboardIn::Text(text) => text,
         })
-        .filter(|text| !text.is_empty())
         .sample_combine(&state)
+        .map(|(text, s)| {
+            // Fall back to kill ring content when system clipboard has no text
+            // (e.g. an image is in the clipboard).
+            let text = if text.is_empty() {
+                s.kill_ring.content.clone()
+            } else {
+                text
+            };
+            (text, s)
+        })
+        .filter(|(text, _)| !text.is_empty())
         .filter_map(|(text, s)| {
             let dims = s.dims?;
             let id = s.active_buffer?;
