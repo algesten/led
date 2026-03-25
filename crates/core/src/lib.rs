@@ -79,6 +79,7 @@ pub enum Action {
     Save,
     SaveAs,
     SaveForce,
+    SaveNoFormat,
     KillBuffer,
 
     // Navigation

@@ -383,6 +383,17 @@ pub fn handle_action(state: &mut AppState, action: Action) {
             }
         }
 
+        Action::SaveNoFormat => {
+            if let Some(id) = state.active_buffer {
+                if let Some(buf) = state.buf_mut(id) {
+                    close_group_on_move(buf);
+                    buf.save_state = SaveState::Saving;
+                    buf.last_used = Instant::now();
+                }
+            }
+            state.save_request.set(());
+        }
+
         // ── Tabs ──
         Action::NextTab => cycle_tab(state, 1),
         Action::PrevTab => cycle_tab(state, -1),

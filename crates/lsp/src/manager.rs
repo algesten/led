@@ -73,6 +73,10 @@ enum RequestResult {
     CompletionResolved {
         additional_edits: Vec<crate::TextEdit>,
     },
+    FormatRaw {
+        path: PathBuf,
+        edits: Vec<crate::TextEdit>,
+    },
     FormatDone,
     Error {
         message: String,
@@ -281,7 +285,12 @@ impl LspManager {
                 self.spawn_code_action_resolve(index);
             }
             LspOut::Format { path } => {
-                self.spawn_format(path);
+                let doc_content = self.docs.get(&path).map(|doc| {
+                    let mut buf = Vec::new();
+                    let _ = doc.write_to(&mut buf);
+                    buf
+                });
+                self.spawn_format(path, doc_content);
             }
             LspOut::InlayHints {
                 path,
@@ -824,7 +833,7 @@ impl LspManager {
         });
     }
 
-    fn spawn_format(&self, path: PathBuf) {
+    fn spawn_format(&self, path: PathBuf, doc_content: Option<Vec<u8>>) {
         let Some(server) = self.server_for_path(&path) else {
             // No server → send FormatDone immediately so save proceeds
             let _ = self
@@ -833,13 +842,14 @@ impl LspManager {
             return;
         };
         let event_tx = self.event_tx.clone();
+        let prettier = find_prettier(&self.root);
 
         tokio::spawn(async move {
             let Some(uri) = uri_from_path(&path) else {
                 return;
             };
 
-            // Step 1: Organize imports
+            // Step 1: Organize imports (always via LSP)
             let oi_params = CodeActionParams {
                 text_document: TextDocumentIdentifier { uri: uri.clone() },
                 range: Range {
@@ -885,31 +895,45 @@ impl LspManager {
             }
 
             // Step 2: Format document
-            let fmt_params = DocumentFormattingParams {
-                text_document: TextDocumentIdentifier { uri },
-                options: FormattingOptions {
-                    tab_size: 4,
-                    insert_spaces: true,
-                    ..Default::default()
-                },
-                work_done_progress_params: Default::default(),
-            };
-
-            let result: Result<Option<Vec<TextEdit>>, _> =
-                server.request("textDocument/formatting", &fmt_params).await;
-
-            match result {
-                Ok(Some(edits)) if !edits.is_empty() => {
-                    let _ = event_tx.send(ManagerEvent::RequestResult(RequestResult::Format {
-                        path: path.clone(),
-                        edits,
-                    }));
+            if let Some(ref prettier_bin) = prettier {
+                // Prettier: pipe buffer content through CLI
+                if let Some(content) = doc_content {
+                    if let Some(edits) = run_prettier(prettier_bin, &path, &content).await {
+                        let _ =
+                            event_tx.send(ManagerEvent::RequestResult(RequestResult::FormatRaw {
+                                path: path.clone(),
+                                edits,
+                            }));
+                    }
                 }
-                Ok(_) => {}
-                Err(e) => {
-                    let _ = event_tx.send(ManagerEvent::RequestResult(RequestResult::Error {
-                        message: e.message,
-                    }));
+            } else {
+                // LSP formatting
+                let fmt_params = DocumentFormattingParams {
+                    text_document: TextDocumentIdentifier { uri },
+                    options: FormattingOptions {
+                        tab_size: 4,
+                        insert_spaces: true,
+                        ..Default::default()
+                    },
+                    work_done_progress_params: Default::default(),
+                };
+
+                let result: Result<Option<Vec<TextEdit>>, _> =
+                    server.request("textDocument/formatting", &fmt_params).await;
+
+                match result {
+                    Ok(Some(edits)) if !edits.is_empty() => {
+                        let _ = event_tx.send(ManagerEvent::RequestResult(RequestResult::Format {
+                            path: path.clone(),
+                            edits,
+                        }));
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        let _ = event_tx.send(ManagerEvent::RequestResult(RequestResult::Error {
+                            message: e.message,
+                        }));
+                    }
                 }
             }
 
@@ -1048,6 +1072,13 @@ impl LspManager {
                             path,
                             edits: domain_edits,
                         }],
+                    })
+                    .await;
+            }
+            RequestResult::FormatRaw { path, edits } => {
+                let _ = result_tx
+                    .send(LspIn::Edits {
+                        edits: vec![FileEdit { path, edits }],
                     })
                     .await;
             }
@@ -1660,4 +1691,69 @@ fn extract_raw_edits_for_path(edit: &WorkspaceEdit, target: &Path) -> Vec<TextEd
     }
 
     result
+}
+
+// ── Prettier integration ──
+
+/// Check for a project-local prettier binary.
+fn find_prettier(root: &Path) -> Option<PathBuf> {
+    let bin = root.join("node_modules/.bin/prettier");
+    if bin.exists() { Some(bin) } else { None }
+}
+
+/// Run prettier on buffer content and return a full-file replacement edit.
+async fn run_prettier(
+    prettier_bin: &Path,
+    file_path: &Path,
+    content: &[u8],
+) -> Option<Vec<crate::TextEdit>> {
+    use tokio::process::Command;
+
+    let mut child = Command::new(prettier_bin)
+        .arg("--stdin-filepath")
+        .arg(file_path)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .ok()?;
+
+    // Write content to stdin
+    if let Some(mut stdin) = child.stdin.take() {
+        use tokio::io::AsyncWriteExt;
+        let _ = stdin.write_all(content).await;
+        drop(stdin);
+    }
+
+    let output = child.wait_with_output().await.ok()?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        log::debug!("prettier failed: {}", stderr);
+        return None;
+    }
+
+    let formatted = String::from_utf8(output.stdout).ok()?;
+
+    // No change — skip
+    let original = std::str::from_utf8(content).ok()?;
+    if formatted == original {
+        return None;
+    }
+
+    // Count lines in the original to build the replacement range
+    let line_count = original.lines().count();
+    let last_line = if line_count == 0 { 0 } else { line_count - 1 };
+    let last_col = original
+        .lines()
+        .last()
+        .map(|l| l.chars().count())
+        .unwrap_or(0);
+
+    Some(vec![crate::TextEdit {
+        start_row: 0,
+        start_col: 0,
+        end_row: last_line,
+        end_col: last_col,
+        new_text: formatted,
+    }])
 }

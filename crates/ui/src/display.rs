@@ -54,11 +54,13 @@ pub struct DisplayInputs {
     diagnostic_hint_style: Style,
     inlay_hint_style: Style,
     inlay_hints_enabled: bool,
+    focused: bool,
 }
 
 impl PartialEq for DisplayInputs {
     fn eq(&self, other: &Self) -> bool {
-        self.buffer_id == other.buffer_id
+        self.focused == other.focused
+            && self.buffer_id == other.buffer_id
             && self.doc.version() == other.doc.version()
             && self.content_hash == other.content_hash
             && self.scroll_row == other.scroll_row
@@ -205,6 +207,7 @@ pub fn display_inputs(s: &AppState) -> Option<DisplayInputs> {
         diagnostic_hint_style,
         inlay_hint_style,
         inlay_hints_enabled,
+        focused: s.focus == PanelSlot::Main && s.find_file.is_none() && s.file_search.is_none(),
     })
 }
 
