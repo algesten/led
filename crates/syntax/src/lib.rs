@@ -50,6 +50,10 @@ pub enum SyntaxOut {
     BufferClosed {
         buf_id: BufferId,
     },
+    Reparse {
+        buf_id: BufferId,
+        doc: Arc<dyn Doc>,
+    },
 }
 
 #[derive(Clone)]
@@ -257,6 +261,33 @@ pub fn driver(out: Stream<SyntaxOut>) -> Stream<SyntaxIn> {
                 }
                 SyntaxOut::BufferClosed { buf_id } => {
                     states.remove(&buf_id);
+                }
+                SyntaxOut::Reparse { buf_id, doc } => {
+                    if let Some(bs) = states.get_mut(&buf_id) {
+                        bs.state.reparse(&*doc);
+                        let version = doc.version();
+                        bs.last_ver = version;
+                        bs.last_doc = doc.clone();
+                        let scroll_row = bs.last_scroll;
+                        let end_line = bs.last_end_line.max(1);
+                        let end = end_line.min(doc.line_count());
+                        bs.cached_highlights = to_state_highlights(
+                            &bs.state.highlights_for_lines(&*doc, scroll_row, end),
+                        );
+                        bs.cached_brackets = to_state_brackets(&bs.state, &*doc, scroll_row, end);
+                        let _ = tx
+                            .send(SyntaxIn {
+                                buf_id,
+                                doc_version: version,
+                                highlights: bs.cached_highlights.clone(),
+                                bracket_pairs: bs.cached_brackets.clone(),
+                                matching_bracket: None,
+                                indent: None,
+                                indent_row: None,
+                                reindent_chars: bs.reindent_chars.clone(),
+                            })
+                            .await;
+                    }
                 }
             }
         }

@@ -470,8 +470,25 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
         })
         .stream();
 
+    // Reparse on save: when save completes, force a full reparse so
+    // highlights are guaranteed in sync with the saved (possibly
+    // formatted) content.
+    let syntax_saved = state
+        .dedupe_by(|s| s.save_done.version())
+        .filter(|s| s.save_done.version() > 0)
+        .filter_map(|s| {
+            let id = s.active_buffer?;
+            let buf = s.buffers.get(&id)?;
+            Some(SyntaxOut::Reparse {
+                buf_id: id,
+                doc: buf.doc.clone(),
+            })
+        })
+        .stream();
+
     let syntax_out: Stream<SyntaxOut> = Stream::new();
     syntax_changed.forward(&syntax_out);
+    syntax_saved.forward(&syntax_out);
     // Fan-in lifecycle events
     {
         let target = syntax_out.clone();

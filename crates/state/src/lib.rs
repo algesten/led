@@ -526,6 +526,7 @@ pub struct AppState {
     pub active_buffer: Option<BufferId>,
     pub next_buffer_id: u64,
     pub save_request: Versioned<()>,
+    pub save_done: Versioned<()>,
     pub browser: Rc<FileBrowserState>,
     pub pending_open: Versioned<Option<PathBuf>>,
     pub pending_lists: Versioned<Vec<PathBuf>>,

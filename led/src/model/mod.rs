@@ -476,6 +476,7 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
                 if let Some(path) = undo_clear_path {
                     s.pending_undo_clear.set(path);
                 }
+                s.save_done.set(());
                 if let Some(name) = filename {
                     s.alerts.info = Some(format!("Saved {name}"));
                 }
