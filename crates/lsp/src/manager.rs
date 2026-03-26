@@ -215,27 +215,42 @@ impl LspManager {
                 path,
                 doc,
                 edit_ops,
+                external,
             } => {
                 let old_doc = self.docs.insert(path.clone(), doc);
                 self.send_did_change(&path, &edit_ops, old_doc.as_deref());
-                // Check if last edit was a trigger character → fresh completion
-                let triggered = self.check_trigger_char(&path, &edit_ops);
-                if triggered {
-                    self.completion_path = None;
-                    self.completion_domain_items.clear();
-                    // Compute cursor position from edit_ops
-                    if let Some(op) = edit_ops.last() {
-                        let new_doc = self.docs.get(&path);
-                        if let Some(d) = new_doc {
-                            let cursor_offset = op.offset + op.new_text.chars().count();
-                            let row = d.char_to_line(cursor_offset);
-                            let col = cursor_offset - d.line_to_char(row);
-                            self.spawn_completion(path.clone(), row, col);
-                        }
+                if external {
+                    // The file is already saved on disk — send didSave so
+                    // the server re-diagnoses, and flush any buffered diagnostics.
+                    self.send_did_save(&path);
+                    for (diag_path, diagnostics) in self.buffered_diagnostics.drain() {
+                        let _ = result_tx
+                            .send(LspIn::Diagnostics {
+                                path: diag_path,
+                                diagnostics,
+                            })
+                            .await;
                     }
                 } else {
-                    // Re-filter active completion
-                    self.refilter_completion(&path, &edit_ops, result_tx).await;
+                    // Check if last edit was a trigger character → fresh completion
+                    let triggered = self.check_trigger_char(&path, &edit_ops);
+                    if triggered {
+                        self.completion_path = None;
+                        self.completion_domain_items.clear();
+                        // Compute cursor position from edit_ops
+                        if let Some(op) = edit_ops.last() {
+                            let new_doc = self.docs.get(&path);
+                            if let Some(d) = new_doc {
+                                let cursor_offset = op.offset + op.new_text.chars().count();
+                                let row = d.char_to_line(cursor_offset);
+                                let col = cursor_offset - d.line_to_char(row);
+                                self.spawn_completion(path.clone(), row, col);
+                            }
+                        }
+                    } else {
+                        // Re-filter active completion
+                        self.refilter_completion(&path, &edit_ops, result_tx).await;
+                    }
                 }
             }
             LspOut::BufferSaved { path } => {

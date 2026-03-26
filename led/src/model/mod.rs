@@ -25,7 +25,8 @@ use std::path::PathBuf;
 
 use led_core::{Action, Alert, BufferId, PanelSlot, next_change_seq};
 use led_state::{
-    AppState, BracketPair, BufferState, Dimensions, HighlightSpan, SessionRestorePhase,
+    AppState, BracketPair, BufferState, ChangeReason, Dimensions, HighlightSpan,
+    SessionRestorePhase,
 };
 use led_workspace::Workspace;
 
@@ -317,7 +318,7 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
             if buf.doc.dirty() && buf.save_state == led_state::SaveState::Clean {
                 buf.save_state = led_state::SaveState::Modified;
             }
-            Some(Mut::BufferUpdate(id, buf))
+            Some(Mut::BufferUpdate(id, buf, ChangeReason::Edit))
         })
         .stream();
 
@@ -523,7 +524,8 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
                 }
                 action::reveal_active_buffer(&mut s);
             }
-            Mut::BufferUpdate(id, buf) => {
+            Mut::BufferUpdate(id, mut buf, reason) => {
+                buf.change_reason = reason;
                 s.buffers_mut().insert(id, Rc::new(buf));
             }
             Mut::ConfigKeys(v) => s.config_keys = Some(v),
@@ -985,7 +987,7 @@ enum Mut {
         new_path: std::path::PathBuf,
         undo_clear_path: Option<std::path::PathBuf>,
     },
-    BufferUpdate(BufferId, BufferState),
+    BufferUpdate(BufferId, BufferState, ChangeReason),
     ConfigKeys(ConfigFile<Keys>),
     ConfigTheme(ConfigFile<Theme>),
     DirListed(std::path::PathBuf, Vec<led_fs::DirEntry>),
@@ -1118,7 +1120,7 @@ impl Mut {
             Mut::BufferOpen { .. } => "BufferOpen",
             Mut::BufferSaved { .. } => "BufferSaved",
             Mut::BufferSavedAs { .. } => "BufferSavedAs",
-            Mut::BufferUpdate(_, _) => "BufferUpdate",
+            Mut::BufferUpdate(_, _, _) => "BufferUpdate",
             Mut::ConfigKeys(_) => "ConfigKeys",
             Mut::ConfigTheme(_) => "ConfigTheme",
             Mut::DirListed(_, _) => "DirListed",
@@ -1228,7 +1230,7 @@ fn resolve_preview(s: &AppState) -> Option<Mut> {
                 buf.cursor_col_affinity = req.col;
                 let buffer_height = s.dims.map_or(20, |d| d.buffer_height());
                 buf.scroll_row = row.saturating_sub(buffer_height / 2);
-                return Some(Mut::BufferUpdate(preview_id, buf));
+                return Some(Mut::BufferUpdate(preview_id, buf, ChangeReason::Edit));
             }
         }
     }

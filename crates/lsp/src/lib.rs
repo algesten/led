@@ -84,6 +84,9 @@ pub enum LspOut {
         path: PathBuf,
         doc: Arc<dyn Doc>,
         edit_ops: Vec<EditOp>,
+        /// True when the change originated from disk (e.g. external `git checkout`).
+        /// The file is already saved, so the LSP should also receive didSave.
+        external: bool,
     },
     BufferSaved {
         path: PathBuf,

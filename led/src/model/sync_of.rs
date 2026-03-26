@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use led_core::rx::Stream;
 use led_core::{Doc, UndoEntry, next_change_seq};
-use led_state::{AppState, SaveState};
+use led_state::{AppState, ChangeReason, SaveState};
 use led_workspace::{SyncResultKind, WorkspaceIn};
 
 use super::Mut;
@@ -39,7 +39,7 @@ fn resolve_sync(result: SyncResultKind, state: &AppState) -> Option<Mut> {
             if buf.doc.dirty() && buf.save_state == SaveState::Clean {
                 buf.doc = buf.doc.mark_saved();
             }
-            Some(Mut::BufferUpdate(buf.id, buf))
+            Some(Mut::BufferUpdate(buf.id, buf, ChangeReason::Edit))
         }
 
         SyncResultKind::ReplayEntries {
@@ -62,7 +62,7 @@ fn resolve_sync(result: SyncResultKind, state: &AppState) -> Option<Mut> {
             buf.persisted_undo_len = buf.doc.undo_history_len();
             buf.content_hash = buf.doc.content_hash();
             buf.change_seq = next_change_seq();
-            Some(Mut::BufferUpdate(buf.id, buf))
+            Some(Mut::BufferUpdate(buf.id, buf, ChangeReason::Edit))
         }
 
         SyncResultKind::ReloadAndReplay {
@@ -103,7 +103,7 @@ fn resolve_sync(result: SyncResultKind, state: &AppState) -> Option<Mut> {
             buf.persisted_undo_len = buf.doc.undo_history_len();
             buf.content_hash = buf.doc.content_hash();
             buf.change_seq = next_change_seq();
-            Some(Mut::BufferUpdate(buf.id, buf))
+            Some(Mut::BufferUpdate(buf.id, buf, ChangeReason::Edit))
         }
     }
 }

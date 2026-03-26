@@ -120,6 +120,23 @@ pub enum SaveState {
     Saving,
 }
 
+/// Why a buffer's content last changed.
+///
+/// Carried on every `Mut::BufferUpdate` so the compiler enforces that
+/// callers always declare intent. Stored on `BufferState` by the reducer
+/// so derived streams can branch on it (e.g. LSP didSave for external changes).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ChangeReason {
+    /// Buffer just opened — initial content load from disk.
+    #[default]
+    Init,
+    /// User edit, yank, undo, or cross-instance sync.
+    Edit,
+    /// Content reloaded from disk (e.g. external `git checkout .`).
+    /// The file is already saved — no user-initiated save will follow.
+    ExternalFileChange,
+}
+
 // ── Syntax highlight types ──
 
 #[derive(Debug, Clone, PartialEq)]
@@ -193,6 +210,10 @@ pub struct BufferState {
     /// Monotonically increasing stamp, bumped on every meaningful modification
     /// (flush, save, sync apply). Used to detect self-echoes at the model level.
     pub change_seq: u64,
+    /// Why the buffer content last changed. Set by the reducer on every
+    /// `Mut::BufferUpdate` (compiler-enforced) and after `Mut::Action`.
+    /// Read by derived to decide e.g. whether the LSP needs a didSave.
+    pub change_reason: ChangeReason,
     // Incremental search
     pub isearch: Option<ISearchState>,
     pub last_search: Option<String>,
@@ -207,6 +228,44 @@ pub struct BufferState {
     pub completion_triggers: Vec<String>,
     pub is_preview: bool,
     pub last_used: Instant,
+}
+
+impl BufferState {
+    pub fn new(id: BufferId, doc_id: DocId, doc: Arc<dyn Doc>, path: Option<PathBuf>) -> Self {
+        let content_hash = doc.content_hash();
+        Self {
+            id,
+            doc_id,
+            doc,
+            path,
+            cursor_row: 0,
+            cursor_col: 0,
+            cursor_col_affinity: 0,
+            scroll_row: 0,
+            scroll_sub_line: 0,
+            tab_order: 0,
+            mark: None,
+            last_edit_kind: None,
+            save_state: SaveState::Clean,
+            persisted_undo_len: 0,
+            chain_id: None,
+            last_seen_seq: 0,
+            content_hash,
+            change_seq: 0,
+            change_reason: ChangeReason::Init,
+            isearch: None,
+            last_search: None,
+            syntax_highlights: Rc::new(Vec::new()),
+            bracket_pairs: Rc::new(Vec::new()),
+            matching_bracket: None,
+            pending_indent_row: None,
+            pending_tab_fallback: false,
+            reindent_chars: Arc::from([]),
+            completion_triggers: Vec::new(),
+            is_preview: false,
+            last_used: Instant::now(),
+        }
+    }
 }
 
 impl fmt::Debug for BufferState {

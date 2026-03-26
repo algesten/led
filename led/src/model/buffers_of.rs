@@ -1,11 +1,10 @@
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::Instant;
 
 use led_core::rx::Stream;
 use led_core::{Alert, BufferId, Doc, DocId};
 use led_docstore::DocStoreIn;
-use led_state::{AppState, BufferState, SaveState};
+use led_state::{AppState, BufferState, ChangeReason, SaveState};
 
 use super::Mut;
 
@@ -33,40 +32,16 @@ pub fn buffers_of(
                     let row = req.row.min(doc.line_count().saturating_sub(1));
                     let col = req.col;
                     let buffer_height = state.dims.map_or(20, |d| d.buffer_height());
-                    let content_hash = doc.content_hash();
                     let notify_hash = led_workspace::path_hash(&path);
 
-                    let buf = BufferState {
-                        id: BufferId(state.next_buffer_id),
-                        doc_id: id,
-                        doc,
-                        path: Some(path),
-                        cursor_row: row,
-                        cursor_col: col,
-                        cursor_col_affinity: col,
-                        scroll_row: row.saturating_sub(buffer_height / 2),
-                        scroll_sub_line: 0,
-                        tab_order,
-                        mark: None,
-                        last_edit_kind: None,
-                        save_state: SaveState::Clean,
-                        persisted_undo_len: 0,
-                        chain_id: None,
-                        last_seen_seq: 0,
-                        content_hash,
-                        change_seq: 0,
-                        isearch: None,
-                        last_search: None,
-                        syntax_highlights: Rc::new(Vec::new()),
-                        bracket_pairs: Rc::new(Vec::new()),
-                        matching_bracket: None,
-                        pending_indent_row: None,
-                        pending_tab_fallback: false,
-                        reindent_chars: Arc::from([]),
-                        completion_triggers: Vec::new(),
-                        is_preview: true,
-                        last_used: Instant::now(),
-                    };
+                    let mut buf =
+                        BufferState::new(BufferId(state.next_buffer_id), id, doc, Some(path));
+                    buf.cursor_row = row;
+                    buf.cursor_col = col;
+                    buf.cursor_col_affinity = col;
+                    buf.scroll_row = row.saturating_sub(buffer_height / 2);
+                    buf.tab_order = tab_order;
+                    buf.is_preview = true;
                     let remove_old_id = state.preview.buffer;
                     let remove_old_hash = remove_old_id.and_then(|pid| {
                         state
@@ -180,37 +155,18 @@ pub fn buffers_of(
                     None => (cursor_row, cursor_col, scroll_row),
                 };
 
-                let buf = BufferState {
-                    id: buf_id,
-                    doc_id: id,
-                    doc,
-                    path: Some(path),
-                    cursor_row,
-                    cursor_col,
-                    cursor_col_affinity: cursor_col,
-                    scroll_row,
-                    scroll_sub_line,
-                    tab_order,
-                    mark: None,
-                    last_edit_kind: None,
-                    save_state,
-                    persisted_undo_len,
-                    chain_id,
-                    last_seen_seq,
-                    content_hash,
-                    change_seq: 0,
-                    isearch: None,
-                    last_search: None,
-                    syntax_highlights: Rc::new(Vec::new()),
-                    bracket_pairs: Rc::new(Vec::new()),
-                    matching_bracket: None,
-                    pending_indent_row: None,
-                    pending_tab_fallback: false,
-                    reindent_chars: Arc::from([]),
-                    completion_triggers: Vec::new(),
-                    is_preview: false,
-                    last_used: Instant::now(),
-                };
+                let mut buf = BufferState::new(buf_id, id, doc, Some(path));
+                buf.cursor_row = cursor_row;
+                buf.cursor_col = cursor_col;
+                buf.cursor_col_affinity = cursor_col;
+                buf.scroll_row = scroll_row;
+                buf.scroll_sub_line = scroll_sub_line;
+                buf.tab_order = tab_order;
+                buf.save_state = save_state;
+                buf.persisted_undo_len = persisted_undo_len;
+                buf.chain_id = chain_id;
+                buf.last_seen_seq = last_seen_seq;
+                buf.content_hash = content_hash;
                 let activate = if is_startup_arg {
                     is_last_arg
                 } else {
@@ -297,7 +253,11 @@ pub fn buffers_of(
                     if buf.doc.dirty() && buf.save_state == SaveState::Clean {
                         let mut buf = (**buf).clone();
                         buf.doc = buf.doc.mark_saved();
-                        return Some(Mut::BufferUpdate(buf.id, buf));
+                        return Some(Mut::BufferUpdate(
+                            buf.id,
+                            buf,
+                            ChangeReason::ExternalFileChange,
+                        ));
                     }
                     return None;
                 }
@@ -318,7 +278,11 @@ pub fn buffers_of(
                 buf.cursor_col = buf.cursor_col.min(buf.doc.line_len(buf.cursor_row));
                 buf.cursor_col_affinity = buf.cursor_col;
                 buf.last_edit_kind = None;
-                Some(Mut::BufferUpdate(buf.id, buf))
+                Some(Mut::BufferUpdate(
+                    buf.id,
+                    buf,
+                    ChangeReason::ExternalFileChange,
+                ))
             }
             Ok(DocStoreIn::ExternalRemove { .. }) => None,
             Ok(DocStoreIn::OpenFailed { path }) => Some(Mut::SessionOpenFailed { path }),

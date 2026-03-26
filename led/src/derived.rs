@@ -10,7 +10,7 @@ use led_core::rx::Stream;
 use led_docstore::DocStoreOut;
 use led_fs::FsOut;
 use led_lsp::LspOut;
-use led_state::{AppState, LspRequest, SessionRestorePhase};
+use led_state::{AppState, ChangeReason, LspRequest, SessionRestorePhase};
 use led_syntax::SyntaxOut;
 use led_timers::{Schedule, TimersOut};
 use led_workspace::{SessionBuffer, SessionData, WorkspaceOut};
@@ -630,6 +630,7 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
                 path,
                 doc: buf.doc.clone(),
                 edit_ops: buf.doc.pending_edit_ops(),
+                external: buf.change_reason == ChangeReason::ExternalFileChange,
             })
         })
         .stream();

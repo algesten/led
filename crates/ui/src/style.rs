@@ -458,7 +458,7 @@ mod tests {
         use crate::display::{self, OverlayContent};
         use crate::render;
         use led_core::{BufferId, DocId, Startup, TextDoc};
-        use led_state::{AppState, BufferState, Dimensions, SaveState};
+        use led_state::{AppState, BufferState, Dimensions};
 
         let theme_toml = include_str!("../../config-file/src/default_theme.toml");
         let theme: led_core::theme::Theme = toml::from_str(theme_toml).unwrap();
@@ -467,37 +467,7 @@ mod tests {
         };
 
         let doc = TextDoc::from_reader("hello world\n".as_bytes()).unwrap();
-        let buf = BufferState {
-            id: BufferId(1),
-            doc_id: DocId(1),
-            doc: Arc::new(doc),
-            path: Some("test.rs".into()),
-            cursor_row: 0,
-            cursor_col: 0,
-            cursor_col_affinity: 0,
-            scroll_row: 0,
-            scroll_sub_line: 0,
-            tab_order: 0,
-            mark: None,
-            last_edit_kind: None,
-            save_state: SaveState::Clean,
-            persisted_undo_len: 0,
-            chain_id: None,
-            last_seen_seq: 0,
-            content_hash: 0,
-            change_seq: 0,
-            isearch: None,
-            last_search: None,
-            syntax_highlights: std::rc::Rc::new(Vec::new()),
-            bracket_pairs: std::rc::Rc::new(Vec::new()),
-            matching_bracket: None,
-            pending_indent_row: None,
-            pending_tab_fallback: false,
-            reindent_chars: std::sync::Arc::from([]),
-            completion_triggers: Vec::new(),
-            is_preview: false,
-            last_used: std::time::Instant::now(),
-        };
+        let buf = BufferState::new(BufferId(1), DocId(1), Arc::new(doc), Some("test.rs".into()));
 
         let mut state = AppState::new(Startup {
             headless: true,
