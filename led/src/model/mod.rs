@@ -622,6 +622,9 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
                 s.session.restore_phase = restore_phase;
                 s.session.active_tab_order = active_tab_order;
                 s.show_side_panel = show_side_panel;
+                if let Some(ref mut dims) = s.dims {
+                    dims.show_side_panel = show_side_panel;
+                }
                 s.session.restored_focus = restored_focus;
                 s.session.positions = positions;
                 let b = s.browser_mut();
