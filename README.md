@@ -181,7 +181,7 @@ Context-specific bindings for the file browser and search panel use `[browser]` 
 | `Delete` / `Ctrl+d` | Delete forward                 |
 | `Tab`               | Insert tab / accept completion |
 | `Ctrl+k`            | Kill line                      |
-| `Ctrl+/` / `Ctrl+_` | Undo                           |
+| `Ctrl+/` / `Ctrl+_` / `Ctrl+7` | Undo              |
 | `Ctrl+Space`        | Set mark                       |
 | `Ctrl+w`            | Kill region                    |
 | `Ctrl+y`            | Yank (paste)                   |
@@ -210,11 +210,13 @@ Context-specific bindings for the file browser and search panel use `[browser]` 
 
 ### Files
 
-| Key             | Action    |
-|-----------------|-----------|
-| `Ctrl+x Ctrl+s` | Save      |
-| `Ctrl+x Ctrl+w` | Save as   |
-| `Ctrl+x Ctrl+f` | Find file |
+| Key              | Action              |
+|------------------|---------------------|
+| `Ctrl+x Ctrl+s`  | Save                |
+| `Ctrl+x Ctrl+a`  | Save all            |
+| `Ctrl+x Ctrl+d`  | Save (no format)    |
+| `Ctrl+x Ctrl+w`  | Save as             |
+| `Ctrl+x Ctrl+f`  | Find file           |
 
 ### Search
 
@@ -224,6 +226,10 @@ Context-specific bindings for the file browser and search panel use `[browser]` 
 | `Ctrl+s`            | Buffer search           |
 | `Alt+1` (in search) | Toggle case sensitivity |
 | `Alt+2` (in search) | Toggle regex            |
+| `Alt+3` (in search) | Toggle replace mode     |
+| `Alt+Enter` (in search) | Replace all         |
+
+In replace mode, the search input, replace input, and results form a single vertical list navigated with `Up`/`Down`. `Tab` switches between the search and replace inputs. On a result row, `Right` replaces the selected match, `Left` undoes the last replace. `Enter` closes the panel. `Alt+Enter` replaces all remaining matches and closes.
 
 ### LSP
 
