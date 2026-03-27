@@ -223,10 +223,10 @@ impl TestHarness {
             let local = tokio::task::LocalSet::new();
             local
                 .run_until(async {
-                    let actions_in: Stream<Action> = Stream::new();
+                    let foobars_in: Stream<Action> = Stream::new();
                     let (quit_tx, quit_rx) = oneshot::channel::<()>();
 
-                    let (state, guards) = led::run(startup, actions_in.clone(), quit_tx);
+                    let (state, guards) = led::run(startup, foobars_in.clone(), quit_tx);
 
                     let last_state: Rc<RefCell<Option<Rc<AppState>>>> = Rc::new(RefCell::new(None));
                     let capture = last_state.clone();
@@ -236,9 +236,9 @@ impl TestHarness {
                         }
                     });
 
-                    actions_in.push(Action::Resize(viewport.0, viewport.1));
+                    foobars_in.push(Action::Resize(viewport.0, viewport.1));
 
-                    let stream = actions_in.clone();
+                    let stream = foobars_in.clone();
                     let done = Rc::new(Cell::new(false));
                     let done2 = done.clone();
                     let quit_rx = Rc::new(RefCell::new(Some(quit_rx)));

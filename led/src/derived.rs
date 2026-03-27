@@ -253,6 +253,22 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
         })
         .stream();
 
+    // Save all dirty buffers
+    let save_all_out = state
+        .dedupe_by(|s| s.save_all_request.version())
+        .filter(|s| s.save_all_request.version() > 0)
+        .map(|s| {
+            s.buffers
+                .values()
+                .filter(|b| b.save_state == led_state::SaveState::Saving && b.path.is_some())
+                .map(|b| DocStoreOut::Save {
+                    id: b.doc_id,
+                    doc: b.doc.clone(),
+                })
+                .collect::<Vec<_>>()
+        })
+        .flat_map(|cmds| cmds);
+
     // Save as: write active buffer to a new path
     let save_as_out = state
         .dedupe_by(|s| s.pending_save_as.version())
@@ -300,6 +316,7 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
     replace_open.forward(&docstore_out);
     browser_open.forward(&docstore_out);
     save_out.forward(&docstore_out);
+    save_all_out.forward(&docstore_out);
     save_as_out.forward(&docstore_out);
     preview_open.forward(&docstore_out);
 

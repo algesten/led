@@ -172,9 +172,15 @@ pub fn driver(state: Stream<Rc<AppState>>) -> Stream<UiIn> {
         },
     );
 
-    // Tab overflow detection: emit EvictOneBuffer when any tab doesn't fit
+    // Tab overflow detection: emit EvictOneBuffer when tabs overflow
+    // and there is a non-active clean buffer that can actually be evicted.
     let overflow_s = state
         .filter(|s| tabs_overflow(s))
+        .filter(|s| {
+            s.buffers.values().any(|b| {
+                !b.is_preview && Some(b.id) != s.active_buffer && !b.doc.dirty()
+            })
+        })
         .map(|_| UiIn::EvictOneBuffer)
         .stream();
 

@@ -57,7 +57,8 @@
 [keys."ctrl+x"]
 "ctrl+c" = "quit"
 "ctrl+s" = "save"
-"ctrl+a" = "save_no_format"
+"ctrl+a" = "save_all"
+"ctrl+d" = "save_no_format"
 "ctrl+w" = "save_as"
 "k" = "kill_buffer"
 "ctrl+f" = "find_file"

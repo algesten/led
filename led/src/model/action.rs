@@ -383,6 +383,24 @@ pub fn handle_action(state: &mut AppState, action: Action) {
             }
         }
 
+        Action::SaveAll => {
+            let dirty_ids: Vec<_> = state
+                .buffers
+                .values()
+                .filter(|b| b.doc.dirty() && b.path.is_some())
+                .map(|b| b.id)
+                .collect();
+            for id in &dirty_ids {
+                if let Some(buf) = state.buf_mut(*id) {
+                    close_group_on_move(buf);
+                    buf.save_state = SaveState::Saving;
+                }
+            }
+            if !dirty_ids.is_empty() {
+                state.save_all_request.set(());
+            }
+        }
+
         Action::SaveNoFormat => {
             if let Some(id) = state.active_buffer {
                 if let Some(buf) = state.buf_mut(id) {
