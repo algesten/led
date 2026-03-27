@@ -765,31 +765,11 @@ fn replace_all(state: &mut AppState) {
         }
     }
 
+    // Only open-buffer replacements are applied (undoable).
+    // Non-open files stay in results for individual replace via Right arrow.
     let fs = state.file_search.as_mut().unwrap();
     fs.results.retain(|g| !open_paths.contains(&g.path));
     fs.rebuild_flat_hits();
-
-    let root = state
-        .workspace
-        .as_ref()
-        .map(|w| w.root.clone())
-        .unwrap_or_else(|| (*state.startup.start_dir).clone());
-
-    let has_non_open = hits_by_buf.keys().any(|p| !open_paths.contains(p));
-    if has_non_open {
-        let fs = state.file_search.as_ref().unwrap();
-        state
-            .pending_file_replace
-            .set(Some(led_state::file_search::FileSearchReplaceRequest {
-                query: fs.query.clone(),
-                replacement: fs.replace_text.clone(),
-                root,
-                case_sensitive: fs.case_sensitive,
-                use_regex: fs.use_regex,
-                scope: led_state::file_search::ReplaceScope::All,
-                skip_paths: open_paths,
-            }));
-    }
 }
 
 fn replace_in_buffer(
