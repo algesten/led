@@ -19,8 +19,22 @@ fn insert_char_at(s: &mut String, char_idx: usize, c: char) {
 // ── Activation ──
 
 pub fn activate(state: &mut AppState) {
-    // Preserve existing query/case/regex if re-opening
-    let fs = state.file_search.take().unwrap_or(FileSearchState {
+    // Grab selected text from active buffer (if any) to seed the query
+    let selected = state
+        .active_buffer
+        .and_then(|id| state.buffers.get(&id))
+        .and_then(|buf| super::edit::selected_text(buf));
+
+    // Clear the mark after grabbing the selection
+    if selected.is_some() {
+        if let Some(id) = state.active_buffer {
+            if let Some(buf) = state.buf_mut(id) {
+                buf.mark = None;
+            }
+        }
+    }
+
+    let mut fs = state.file_search.take().unwrap_or(FileSearchState {
         query: String::new(),
         cursor_pos: 0,
         case_sensitive: false,
@@ -31,11 +45,29 @@ pub fn activate(state: &mut AppState) {
         scroll_offset: 0,
     });
 
+    // If we have selected text, replace the query with it
+    let has_selected = if let Some(text) = selected {
+        fs.query = text;
+        fs.cursor_pos = fs.query.chars().count();
+        fs.results.clear();
+        fs.flat_hits.clear();
+        fs.selected = 0;
+        fs.scroll_offset = 0;
+        true
+    } else {
+        false
+    };
+
     state.file_search = Some(fs);
     state.focus = PanelSlot::Side;
     state.show_side_panel = true;
     if let Some(ref mut dims) = state.dims {
         dims.show_side_panel = true;
+    }
+
+    // Kick off the search if we seeded a query from the selection
+    if has_selected {
+        trigger_search(state);
     }
 }
 

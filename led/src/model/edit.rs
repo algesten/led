@@ -143,6 +143,22 @@ pub fn kill_line(buf: &BufferState) -> Option<(Arc<dyn Doc>, String, usize, usiz
     }
 }
 
+/// Return the text between mark and cursor without modifying the document.
+pub fn selected_text(buf: &BufferState) -> Option<String> {
+    let (mark_row, mark_col) = buf.mark?;
+    let start = row_col_to_char(&*buf.doc, mark_row, mark_col);
+    let end = row_col_to_char(&*buf.doc, buf.cursor_row, buf.cursor_col);
+    let (start, end) = if start <= end {
+        (start, end)
+    } else {
+        (end, start)
+    };
+    if start == end {
+        return None;
+    }
+    Some(buf.doc.slice(start, end))
+}
+
 /// Kill the region between mark and cursor.
 /// Returns (doc, killed_text, row, col, affinity).
 pub fn kill_region(buf: &BufferState) -> Option<(Arc<dyn Doc>, String, usize, usize, usize)> {

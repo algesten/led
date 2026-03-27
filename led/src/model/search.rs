@@ -38,9 +38,15 @@ fn first_match_from(matches: &[(usize, usize, usize)], row: usize, col: usize) -
 }
 
 /// Begin incremental search, saving current cursor+scroll as origin.
+/// If a mark is active, seed the query with the selected text.
 pub fn start_search(buf: &mut BufferState) {
+    let selected = super::edit::selected_text(buf);
+    buf.mark = None;
+
+    let query = selected.unwrap_or_default();
+
     buf.isearch = Some(ISearchState {
-        query: String::new(),
+        query: query.clone(),
         origin: (buf.cursor_row, buf.cursor_col),
         origin_scroll: buf.scroll_row,
         origin_sub_line: buf.scroll_sub_line,
@@ -48,6 +54,10 @@ pub fn start_search(buf: &mut BufferState) {
         matches: Vec::new(),
         match_idx: None,
     });
+
+    if !query.is_empty() {
+        update_search(buf);
+    }
 }
 
 /// Recompute matches from query, jump cursor to first match at or after current position.
