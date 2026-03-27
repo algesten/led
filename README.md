@@ -219,6 +219,10 @@ Context-specific bindings for the file browser and search panel use `[browser]` 
 | `Ctrl+Space`        | Set mark                       |
 | `Ctrl+w`            | Kill region                    |
 | `Ctrl+y`            | Yank (paste)                   |
+| `Ctrl+x (`          | Start recording macro          |
+| `Ctrl+x )`          | Stop recording macro           |
+| `Ctrl+x e`          | Play macro (`e` repeats)       |
+| `Ctrl+x N e`        | Play macro N times (0=until error) |
 
 ### Navigation
 

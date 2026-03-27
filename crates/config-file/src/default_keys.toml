@@ -63,6 +63,9 @@
 "k" = "kill_buffer"
 "ctrl+f" = "find_file"
 "i" = "sort_imports"
+"(" = "kbd_macro_start"
+")" = "kbd_macro_end"
+"e" = "kbd_macro_execute"
 
 [keys."ctrl+h"]
 "e" = "open_messages"

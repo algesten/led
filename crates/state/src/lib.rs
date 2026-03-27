@@ -434,6 +434,17 @@ impl AlertState {
     }
 }
 
+// ── Keyboard macros ──
+
+#[derive(Debug, Clone, Default)]
+pub struct KbdMacroState {
+    pub recording: bool,
+    pub current: Vec<led_core::Action>,
+    pub last: Option<Vec<led_core::Action>>,
+    pub playback_depth: usize,
+    pub execute_count: Option<usize>,
+}
+
 // ── Git ──
 
 #[derive(Debug, Clone, Default)]
@@ -605,6 +616,9 @@ pub struct AppState {
 
     // Kill ring & clipboard
     pub kill_ring: KillRingState,
+
+    // Keyboard macros
+    pub kbd_macro: KbdMacroState,
 
     // Jump list
     pub jump: JumpListState,

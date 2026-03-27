@@ -648,6 +648,7 @@ pub struct StatusInputs {
     pub lsp_busy: bool,
     pub lsp_detail: Option<String>,
     pub spinner_tick: u32,
+    pub recording_macro: bool,
 }
 
 pub fn status_inputs(s: &AppState) -> StatusInputs {
@@ -715,6 +716,7 @@ pub fn status_inputs(s: &AppState) -> StatusInputs {
         lsp_busy: s.lsp.busy,
         lsp_detail,
         spinner_tick: s.lsp.spinner_tick,
+        recording_macro: s.kbd_macro.recording,
     }
 }
 
@@ -782,6 +784,7 @@ pub fn build_status_content(s: &StatusInputs) -> Rc<String> {
 
     let left = match s.warn.as_deref().or(s.info.as_deref()) {
         Some(m) => format!(" {}", m),
+        None if s.recording_macro => " Defining kbd macro...".to_string(),
         None => default_left,
     };
 

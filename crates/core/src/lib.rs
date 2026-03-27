@@ -133,6 +133,11 @@ pub enum Action {
     OpenMessages,
     Abort,
 
+    // Macros
+    KbdMacroStart,
+    KbdMacroEnd,
+    KbdMacroExecute,
+
     // Lifecycle
     Quit,
     Suspend,

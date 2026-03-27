@@ -456,7 +456,12 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
                 }
                 action::reveal_active_buffer(&mut s);
             }
-            Mut::Action(a) => action::handle_action(&mut s, a),
+            Mut::Action(a) => {
+                action::handle_action(&mut s, a);
+            }
+            Mut::KbdMacroSetCount(n) => {
+                s.kbd_macro.execute_count = Some(n);
+            }
             Mut::EvictOneBuffer => action::evict_one_buffer(&mut s),
             Mut::Alert { info, warn } => {
                 s.alerts.info = info;
@@ -1009,6 +1014,7 @@ enum Mut {
     ActivateBuffer(BufferId),
     Action(Action),
     EvictOneBuffer,
+    KbdMacroSetCount(usize),
     Alert {
         info: Option<String>,
         warn: Option<String>,
@@ -1207,6 +1213,7 @@ impl Mut {
             Mut::LspProgress { .. } => "LspProgress",
             Mut::LspTriggerChars { .. } => "LspTriggerChars",
             Mut::EvictOneBuffer => "EvictOneBuffer",
+            Mut::KbdMacroSetCount(_) => "KbdMacroSetCount",
         }
     }
 

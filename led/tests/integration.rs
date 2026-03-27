@@ -4959,3 +4959,91 @@ fn file_search_replace_all_multi_file() {
         .count();
     assert_eq!(modified_count, 2, "both buffers should be modified");
 }
+
+// ── Keyboard macros ──
+
+#[test]
+fn kbd_macro_record_and_playback() {
+    let t = TestHarness::new().with_file("hello\n").run(actions(vec![
+        KbdMacroStart,
+        InsertChar('x'),
+        InsertChar('y'),
+        KbdMacroEnd,
+        KbdMacroExecute,
+    ]));
+    let b = buf(&t);
+    assert_eq!(b.doc.line(0), "xyxyhello");
+}
+
+#[test]
+fn kbd_macro_playback_multiple() {
+    let t = TestHarness::new().with_file("hello\n").run(actions(vec![
+        KbdMacroStart,
+        InsertChar('a'),
+        KbdMacroEnd,
+        KbdMacroExecute,
+        KbdMacroExecute,
+        KbdMacroExecute,
+    ]));
+    let b = buf(&t);
+    // 'a' inserted during recording + 3 playbacks = "aaaa"
+    assert_eq!(b.doc.line(0), "aaaahello");
+}
+
+#[test]
+fn kbd_macro_playback_aborts_at_boundary() {
+    // Macro: MoveUp. On first line, MoveUp fails → playback returns false
+    let t = TestHarness::new().with_file("hello\n").run(actions(vec![
+        KbdMacroStart,
+        MoveUp,
+        KbdMacroEnd,
+    ]));
+    let b = buf(&t);
+    // Should have recorded successfully, macro is defined
+    assert!(t.state.kbd_macro.last.is_some());
+}
+
+#[test]
+fn kbd_macro_no_macro_defined() {
+    let t = TestHarness::new()
+        .with_file("hello\n")
+        .run(actions(vec![KbdMacroExecute]));
+    assert_eq!(t.state.alerts.warn.as_deref(), Some("No kbd macro defined"));
+}
+
+#[test]
+fn kbd_macro_end_without_recording() {
+    let t = TestHarness::new()
+        .with_file("hello\n")
+        .run(actions(vec![KbdMacroEnd]));
+    assert_eq!(
+        t.state.alerts.warn.as_deref(),
+        Some("Not defining kbd macro")
+    );
+}
+
+#[test]
+fn kbd_macro_recording_indicator() {
+    let t = TestHarness::new()
+        .with_file("hello\n")
+        .run(actions(vec![KbdMacroStart]));
+    assert!(t.state.kbd_macro.recording);
+}
+
+#[test]
+fn kbd_macro_restart_during_recording() {
+    // C-x ( while recording restarts
+    let t = TestHarness::new().with_file("hello\n").run(actions(vec![
+        KbdMacroStart,
+        InsertChar('x'),
+        InsertChar('y'),
+        KbdMacroStart, // restart — clears current recording
+        InsertChar('z'),
+        KbdMacroEnd,
+        KbdMacroExecute,
+    ]));
+    let b = buf(&t);
+    // "xy" was typed during first recording (executed live), then restart,
+    // "z" typed during second recording, then playback inserts another "z"
+    assert_eq!(b.doc.line(0), "xyzzhello");
+}

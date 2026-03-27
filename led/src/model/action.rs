@@ -12,18 +12,40 @@ use led_state::JumpPosition;
 
 use super::{edit, file_search, find_file, jump, mov, search};
 
-pub fn handle_action(state: &mut AppState, action: Action) {
+pub fn handle_action(state: &mut AppState, action: Action) -> bool {
+    // ── Keyboard macro recording ──
+    if state.kbd_macro.recording {
+        match &action {
+            Action::KbdMacroEnd => {
+                state.kbd_macro.recording = false;
+                state.kbd_macro.last = Some(std::mem::take(&mut state.kbd_macro.current));
+                state.alerts.info = Some("Keyboard macro defined".into());
+                return true;
+            }
+            Action::KbdMacroStart => {
+                state.kbd_macro.current.clear();
+                return true;
+            }
+            _ => {
+                if should_record(&action) {
+                    state.kbd_macro.current.push(action.clone());
+                }
+                // fall through to execute normally
+            }
+        }
+    }
+
     // Handle confirmation prompt for dirty buffer kill
     if state.confirm_kill {
         state.confirm_kill = false;
         state.alerts.warn = None;
         if matches!(action, Action::InsertChar('y' | 'Y')) {
             force_kill_buffer(state);
-            return;
+            return true;
         }
         // Any other action: cancel and fall through to normal handling
         if matches!(action, Action::Abort) {
-            return;
+            return true;
         }
     }
 
@@ -31,7 +53,7 @@ pub fn handle_action(state: &mut AppState, action: Action) {
     if let Some(id) = state.active_buffer {
         if let Some(buf) = state.buffers.get(&id) {
             if buf.pending_indent_row.is_some() && is_editing_action(&action) {
-                return;
+                return true;
             }
         }
     }
@@ -47,35 +69,35 @@ pub fn handle_action(state: &mut AppState, action: Action) {
     // Intercept actions during LSP completion
     if state.lsp.completion.is_some() {
         if handle_completion_action(state, &action) {
-            return;
+            return true;
         }
     }
 
     // Intercept actions during LSP code action picker
     if state.lsp.code_actions.is_some() {
         if handle_code_action_picker(state, &action) {
-            return;
+            return true;
         }
     }
 
     // Intercept actions during LSP rename
     if state.lsp.rename.is_some() && state.focus == PanelSlot::Overlay {
         if handle_rename_action(state, &action) {
-            return;
+            return true;
         }
     }
 
     // Intercept actions during file search
     if state.file_search.is_some() {
         if file_search::handle_file_search_action(state, &action) {
-            return;
+            return true;
         }
     }
 
     // Intercept actions during find-file
     if state.find_file.is_some() {
         if find_file::handle_find_file_action(state, &action) {
-            return;
+            return true;
         }
     }
 
@@ -87,7 +109,7 @@ pub fn handle_action(state: &mut AppState, action: Action) {
             .map_or(false, |b| b.isearch.is_some());
         if in_search {
             if handle_isearch_action(state, &action) {
-                return;
+                return true;
             }
         }
     }
@@ -520,8 +542,55 @@ pub fn handle_action(state: &mut AppState, action: Action) {
             }
         }
 
+        // ── Macros ──
+        Action::KbdMacroStart => {
+            state.kbd_macro.recording = true;
+            state.kbd_macro.current.clear();
+            state.alerts.info = Some("Defining kbd macro...".into());
+        }
+        Action::KbdMacroEnd => {
+            state.alerts.warn = Some("Not defining kbd macro".into());
+        }
+        Action::KbdMacroExecute => {
+            if state.kbd_macro.playback_depth >= 100 {
+                state.alerts.warn = Some("Keyboard macro recursion limit".into());
+                return false;
+            }
+            let Some(actions) = state.kbd_macro.last.clone() else {
+                state.alerts.warn = Some("No kbd macro defined".into());
+                return false;
+            };
+            let count = state.kbd_macro.execute_count.take().unwrap_or(1);
+            let iterations = if count == 0 { usize::MAX } else { count };
+            state.kbd_macro.playback_depth += 1;
+            let mut ok = true;
+            for _ in 0..iterations {
+                for a in &actions {
+                    if !handle_action(state, a.clone()) {
+                        ok = false;
+                        break;
+                    }
+                }
+                if !ok {
+                    break;
+                }
+            }
+            state.kbd_macro.playback_depth -= 1;
+            if !ok {
+                return false;
+            }
+        }
+
         _ => {}
     }
+    true
+}
+
+fn should_record(action: &Action) -> bool {
+    !matches!(
+        action,
+        Action::Quit | Action::Suspend | Action::Resize(..) | Action::Wait(..)
+    )
 }
 
 /// Extract the word under the cursor.
