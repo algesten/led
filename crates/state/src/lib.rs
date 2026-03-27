@@ -46,6 +46,7 @@ pub struct Dimensions {
     pub gutter_width: u16,
     pub scroll_margin: usize,
     pub tab_stop: usize,
+    pub ruler_column: Option<usize>,
 }
 
 impl Dimensions {
@@ -61,6 +62,7 @@ impl Dimensions {
             gutter_width: 2,
             scroll_margin: 3,
             tab_stop: 4,
+            ruler_column: Some(110),
         }
     }
 

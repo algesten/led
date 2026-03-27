@@ -54,6 +54,8 @@ pub struct DisplayInputs {
     diagnostic_hint_style: Style,
     inlay_hint_style: Style,
     inlay_hints_enabled: bool,
+    ruler_col: Option<usize>,
+    ruler_style: Style,
     focused: bool,
 }
 
@@ -84,6 +86,7 @@ impl PartialEq for DisplayInputs {
             && self.diagnostics == other.diagnostics
             && self.inlay_hints == other.inlay_hints
             && self.inlay_hints_enabled == other.inlay_hints_enabled
+            && self.ruler_col == other.ruler_col
     }
 }
 
@@ -161,6 +164,14 @@ pub fn display_inputs(s: &AppState) -> Option<DisplayInputs> {
         .unwrap_or_else(|| Style::default().fg(ratatui::style::Color::DarkGray));
     let inlay_hints_enabled = s.lsp.inlay_hints_enabled;
 
+    let ruler_col = dims.ruler_column;
+    let ruler_style = theme
+        .editor
+        .ruler
+        .as_ref()
+        .map(|sv| style::resolve(theme, sv))
+        .unwrap_or_else(|| Style::default().fg(ratatui::style::Color::DarkGray));
+
     Some(DisplayInputs {
         buffer_id: id,
         doc: buf.doc.clone(),
@@ -207,6 +218,8 @@ pub fn display_inputs(s: &AppState) -> Option<DisplayInputs> {
         diagnostic_hint_style,
         inlay_hint_style,
         inlay_hints_enabled,
+        ruler_col,
+        ruler_style,
         focused: s.focus == PanelSlot::Main && s.find_file.is_none() && s.file_search.is_none(),
     })
 }
@@ -475,10 +488,27 @@ pub fn build_display_lines(d: &DisplayInputs) -> Rc<Vec<Line<'static>>> {
             }
 
             // Inlay hints: ghost text at end of line
+            let mut hint_width = 0usize;
             if is_last && d.inlay_hints_enabled {
                 for (hr, _hc, label) in &d.inlay_hints {
                     if *hr == line_idx {
-                        spans.push(Span::styled(format!(" {}", label), d.inlay_hint_style));
+                        let text = format!(" {}", label);
+                        hint_width += text.len();
+                        spans.push(Span::styled(text, d.inlay_hint_style));
+                    }
+                }
+            }
+
+            // Ruler: vertical line at ruler column, hidden when text/hints reach it
+            if is_last && !line_selected_through {
+                if let Some(ruler_col) = d.ruler_col {
+                    let occupied = chunk_len + hint_width;
+                    if ruler_col < d.text_width && occupied <= ruler_col {
+                        let pad = ruler_col - occupied;
+                        if pad > 0 {
+                            spans.push(Span::styled(" ".repeat(pad), d.text_style));
+                        }
+                        spans.push(Span::styled("\u{2502}", d.ruler_style));
                     }
                 }
             }
@@ -493,7 +523,16 @@ pub fn build_display_lines(d: &DisplayInputs) -> Rc<Vec<Line<'static>>> {
 
     // Past-EOF rows
     while screen_row < d.buffer_height {
-        display_lines.push(Line::from(vec![Span::styled("~ ", d.gutter_style)]));
+        let mut eof_spans = vec![Span::styled("~ ", d.gutter_style)];
+        if let Some(ruler_col) = d.ruler_col {
+            if ruler_col < d.text_width {
+                if ruler_col > 0 {
+                    eof_spans.push(Span::styled(" ".repeat(ruler_col), d.text_style));
+                }
+                eof_spans.push(Span::styled("\u{2502}", d.ruler_style));
+            }
+        }
+        display_lines.push(Line::from(eof_spans));
         screen_row += 1;
     }
 
