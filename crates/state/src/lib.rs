@@ -615,6 +615,8 @@ pub struct AppState {
     pub file_search: Option<file_search::FileSearchState>,
     pub pending_file_search: Versioned<Option<file_search::FileSearchRequest>>,
     pub pending_file_replace: Versioned<Option<file_search::FileSearchReplaceRequest>>,
+    pub pending_replace_opens: Versioned<Vec<std::path::PathBuf>>,
+    pub pending_replace_all: Option<file_search::PendingReplaceAll>,
 
     // Preview buffer
     pub preview: PreviewState,

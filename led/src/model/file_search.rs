@@ -765,11 +765,90 @@ fn replace_all(state: &mut AppState) {
         }
     }
 
-    // Only open-buffer replacements are applied (undoable).
-    // Non-open files stay in results for individual replace via Right arrow.
+    // Remove results for files we already replaced in-buffer
     let fs = state.file_search.as_mut().unwrap();
     fs.results.retain(|g| !open_paths.contains(&g.path));
     fs.rebuild_flat_hits();
+
+    // For non-open files: stash the hits and open the files as buffers.
+    // Replacements will be applied when the buffers arrive (BufferOpen).
+    let non_open_paths: Vec<std::path::PathBuf> = hits_by_buf
+        .keys()
+        .filter(|p| !open_paths.contains(p))
+        .cloned()
+        .collect();
+
+    if !non_open_paths.is_empty() {
+        let mut pending = led_state::file_search::PendingReplaceAll {
+            replacement: replacement.clone(),
+            hits: std::collections::HashMap::new(),
+        };
+        for path in &non_open_paths {
+            if let Some(hits) = hits_by_buf.get(path) {
+                let stashed: Vec<(usize, usize, usize, String)> = hits
+                    .iter()
+                    .map(|(_fi, row, ms, me, original)| (*row, *ms, *me, original.clone()))
+                    .collect();
+                pending.hits.insert(path.clone(), stashed);
+            }
+        }
+        state.pending_replace_all = Some(pending);
+        state.pending_replace_opens.set(non_open_paths);
+    }
+}
+
+/// Called from BufferOpen handler. If this buffer's path has pending replace hits,
+/// apply them all in one undo group.
+pub fn apply_pending_replace(state: &mut AppState, buf_id: led_core::BufferId) {
+    let path = match state.buffers.get(&buf_id).and_then(|b| b.path.clone()) {
+        Some(p) => p,
+        None => return,
+    };
+
+    let pending = match state.pending_replace_all.as_mut() {
+        Some(p) => p,
+        None => return,
+    };
+
+    // Try direct path match, then canonical
+    let hits = pending.hits.remove(&path).or_else(|| {
+        let canonical = std::fs::canonicalize(&path).ok()?;
+        let key = pending
+            .hits
+            .keys()
+            .find(|k| std::fs::canonicalize(k).ok().as_deref() == Some(canonical.as_path()))?
+            .clone();
+        pending.hits.remove(&key)
+    });
+    let Some(hits) = hits else { return };
+
+    let replacement = state
+        .pending_replace_all
+        .as_ref()
+        .unwrap()
+        .replacement
+        .clone();
+
+    // All done? Clear pending state.
+    if state.pending_replace_all.as_ref().unwrap().hits.is_empty() {
+        state.pending_replace_all = None;
+    }
+
+    // Remove matching results from the search panel (if still open)
+    if let Some(ref mut fs) = state.file_search {
+        fs.results.retain(|g| {
+            g.path != path
+                && std::fs::canonicalize(&g.path).ok().as_deref()
+                    != std::fs::canonicalize(&path).ok().as_deref()
+        });
+        fs.rebuild_flat_hits();
+    }
+
+    // Apply replacements in reverse order (one undo group)
+    close_undo_group(state, buf_id);
+    for (row, ms, me, _original) in hits.iter().rev() {
+        replace_in_buffer(state, buf_id, *row, *ms, *me, &replacement);
+    }
 }
 
 fn replace_in_buffer(

@@ -470,15 +470,16 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
                 session_restore_done,
                 clear_pending_jump,
             } => {
+                let buf_id = buf.id;
                 let will_activate = activate || s.active_buffer.is_none();
                 if will_activate {
-                    s.active_buffer = Some(buf.id);
+                    s.active_buffer = Some(buf_id);
                 }
                 if let Some(ref path) = buf.path {
                     s.session.positions.remove(path);
                 }
-                s.notify_hash_to_buffer.insert(notify_hash, buf.id);
-                s.buffers_mut().insert(buf.id, Rc::new(buf));
+                s.notify_hash_to_buffer.insert(notify_hash, buf_id);
+                s.buffers_mut().insert(buf_id, Rc::new(buf));
                 s.next_buffer_id = next_id;
                 action::renumber_tabs(&mut s);
                 if session_restore_done {
@@ -494,6 +495,8 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
                 if will_activate {
                     action::reveal_active_buffer(&mut s);
                 }
+                // Apply pending search-replace if this file was opened for replace_all
+                file_search::apply_pending_replace(&mut s, buf_id);
             }
             Mut::BufferSaved {
                 id,

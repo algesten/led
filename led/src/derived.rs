@@ -203,6 +203,25 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
         })
         .flat_map(|cmds| cmds);
 
+    // File opens from replace-all (non-open files)
+    let replace_open = state
+        .dedupe_by(|s| s.pending_replace_opens.version())
+        .filter(|s| s.pending_replace_opens.version() > 0)
+        .filter(|s| !s.pending_replace_opens.is_empty())
+        .map(|s| {
+            let max_tab = s.buffers.values().map(|b| b.tab_order).max().unwrap_or(0);
+            (*s.pending_replace_opens)
+                .iter()
+                .enumerate()
+                .map(|(i, path)| DocStoreOut::Open {
+                    path: path.clone(),
+                    tab_order: max_tab + 1 + i,
+                    create_if_missing: false,
+                })
+                .collect::<Vec<_>>()
+        })
+        .flat_map(|cmds| cmds);
+
     // File opens from browser
     let browser_open = state
         .dedupe_by(|s| s.pending_open.version())
@@ -278,6 +297,7 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
     let docstore_out: Stream<DocStoreOut> = Stream::new();
     startup_open.forward(&docstore_out);
     session_open.forward(&docstore_out);
+    replace_open.forward(&docstore_out);
     browser_open.forward(&docstore_out);
     save_out.forward(&docstore_out);
     save_as_out.forward(&docstore_out);

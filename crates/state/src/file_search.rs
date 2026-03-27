@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -94,6 +95,14 @@ pub struct FileSearchState {
     pub replace_text: String,
     pub replace_cursor_pos: usize,
     pub replace_stack: Vec<ReplaceEntry>,
+}
+
+/// Pending replace-all state that outlives the file search panel.
+/// Lives on AppState so it survives deactivate().
+#[derive(Debug, Clone, Default)]
+pub struct PendingReplaceAll {
+    pub hits: HashMap<PathBuf, Vec<(usize, usize, usize, String)>>,
+    pub replacement: String,
 }
 
 impl FileSearchState {
