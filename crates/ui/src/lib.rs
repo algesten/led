@@ -177,9 +177,9 @@ pub fn driver(state: Stream<Rc<AppState>>) -> Stream<UiIn> {
     let overflow_s = state
         .filter(|s| tabs_overflow(s))
         .filter(|s| {
-            s.buffers.values().any(|b| {
-                !b.is_preview && Some(b.id) != s.active_buffer && !b.doc.dirty()
-            })
+            s.buffers
+                .values()
+                .any(|b| !b.is_preview && Some(b.id) != s.active_buffer && !b.doc.dirty())
         })
         .map(|_| UiIn::EvictOneBuffer)
         .stream();
