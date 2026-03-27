@@ -169,22 +169,42 @@ pub(crate) fn lang_for_ext(ext: &str) -> Option<LangEntry> {
             tree_sitter_make::LANGUAGE.into(),
             tree_sitter_make::HIGHLIGHTS_QUERY,
         )),
+        "rb" => Some(LangEntry {
+            increase_indent_pattern: Some(
+                r"(def|class|module|if|unless|while|until|for|begin|do|case|else|elsif|when|rescue|ensure)\b.*$|\{[^}]*$|\bdo\s*(\|[^|]*\|)?\s*$",
+            ),
+            decrease_indent_pattern: Some(r"^\s*(end|else|elsif|when|rescue|ensure|\})"),
+            reindent_chars: &['}', ']', ')'],
+            ..LangEntry::new(
+                tree_sitter_ruby::LANGUAGE.into(),
+                tree_sitter_ruby::HIGHLIGHTS_QUERY,
+            )
+        }),
         _ => None,
     }
 }
 
 pub(crate) fn lang_for_filename(name: &str) -> Option<LangEntry> {
     match name {
-        "Makefile" | "makefile" | "GNUmakefile" => Some(LangEntry::new(
+        "Makefile" | "makefile" | "GNUmakefile" | "BSDmakefile" => Some(LangEntry::new(
             tree_sitter_make::LANGUAGE.into(),
             tree_sitter_make::HIGHLIGHTS_QUERY,
         )),
+        "Gemfile" | "Rakefile" | "Vagrantfile" | "Guardfile" | "Podfile" | "Capfile"
+        | "Brewfile" | "Thorfile" | "Dangerfile" | "Berksfile" | "Puppetfile" | "Steepfile"
+        | "Fastfile" | "Appfile" | "Matchfile" | "Deliverfile" | "Snapfile" | "Scanfile"
+        | "Gymfile" => lang_for_ext("rb"),
+        ".bashrc" | ".bash_profile" | ".bash_logout" | ".bash_aliases" | ".profile" | ".envrc"
+        | "PKGBUILD" => lang_for_ext("sh"),
+        "SConstruct" | "SConscript" | "Snakefile" | "wscript" => lang_for_ext("py"),
+        "Pipfile" => lang_for_ext("toml"),
+        ".babelrc" => lang_for_ext("json"),
         _ => None,
     }
 }
 
-pub(crate) fn lang_for_name(name: &str) -> Option<(Language, Cow<'static, str>)> {
-    let entry = match name {
+pub(crate) fn lang_entry_for_name(name: &str) -> Option<LangEntry> {
+    match name {
         "rust" => lang_for_ext("rs"),
         "python" => lang_for_ext("py"),
         "javascript" | "js" => lang_for_ext("js"),
@@ -198,7 +218,11 @@ pub(crate) fn lang_for_name(name: &str) -> Option<(Language, Cow<'static, str>)>
         "cpp" | "c++" => lang_for_ext("cpp"),
         "swift" => lang_for_ext("swift"),
         "make" => lang_for_ext("mk"),
+        "ruby" => lang_for_ext("rb"),
         _ => None,
-    };
-    entry.map(|e| (e.language, e.highlights_query))
+    }
+}
+
+pub(crate) fn lang_for_name(name: &str) -> Option<(Language, Cow<'static, str>)> {
+    lang_entry_for_name(name).map(|e| (e.language, e.highlights_query))
 }

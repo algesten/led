@@ -43,18 +43,18 @@ async fn main() {
         led::logging::init_file_logger(log_path);
     }
 
-    let canonicalize_path = |p: &str| -> PathBuf {
+    let resolve_path = |p: &str| -> PathBuf {
+        // Make absolute by canonicalizing the parent directory, but preserve
+        // the original filename so that symlink names are kept intact
+        // (important for language detection: .profile → dotfiles/profile).
         let path = PathBuf::from(p);
-        std::fs::canonicalize(&path).unwrap_or_else(|_| {
-            // Non-existent file: resolve relative to CWD so start_dir is valid.
-            let parent = path.parent().unwrap_or(std::path::Path::new("."));
-            let canonical_parent = std::fs::canonicalize(parent)
-                .unwrap_or_else(|_| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-            canonical_parent.join(path.file_name().unwrap_or_default())
-        })
+        let parent = path.parent().unwrap_or(std::path::Path::new("."));
+        let canonical_parent = std::fs::canonicalize(parent)
+            .unwrap_or_else(|_| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+        canonical_parent.join(path.file_name().unwrap_or_default())
     };
 
-    let resolved: Vec<PathBuf> = cli.paths.iter().map(|p| canonicalize_path(p)).collect();
+    let resolved: Vec<PathBuf> = cli.paths.iter().map(|p| resolve_path(p)).collect();
 
     // Single directory: open in file browser, no files.
     // Otherwise: filter out directories, open remaining files.

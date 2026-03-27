@@ -4,6 +4,7 @@ mod highlight;
 mod indent;
 mod injection;
 mod language;
+mod modeline;
 mod outline;
 mod parse;
 mod state;

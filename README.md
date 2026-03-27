@@ -71,10 +71,44 @@ npm install -g bash-language-server
 
 ### Syntax Highlighting
 
-Tree-sitter powered highlighting for Bash, C, C++, JavaScript, JSON, Make, Markdown, Python, Rust, Swift, TOML, and TypeScript. Rainbow bracket coloring with matching bracket highlighting.
+Tree-sitter powered highlighting for Bash, C, C++, JavaScript, JSON, Make, Markdown, Python, Ruby, Rust, Swift, TOML, and TypeScript. Rainbow bracket coloring with matching bracket highlighting.
 
 <!-- SCREENSHOT: syntax — a file showing rich syntax highlighting and rainbow brackets,
      ideally with a matching bracket pair visible -->
+
+### Language Detection
+
+led detects a file's language using three methods, in priority order:
+
+1. **File extension** — `.rs` → Rust, `.py` → Python, `.rb` → Ruby, etc.
+2. **Filename** — `Makefile`, `Gemfile`, `Rakefile`, `Vagrantfile`
+3. **Editor modeline** — if the extension and filename don't match a known language, led scans the first 5 lines for Emacs or Vim modelines:
+
+```
+# -*- mode: ruby -*-
+# vim: set ft=ruby :
+```
+
+This is useful for scripts and config files that lack a recognized extension.
+
+The following mode strings are recognized in modelines:
+
+| Mode string        | Language   |
+|--------------------|------------|
+| `rust`             | Rust       |
+| `python`           | Python     |
+| `javascript`, `js` | JavaScript |
+| `typescript`, `ts` | TypeScript |
+| `tsx`              | TSX        |
+| `json`             | JSON       |
+| `toml`             | TOML       |
+| `markdown`, `md`   | Markdown   |
+| `bash`, `sh`       | Bash       |
+| `c`                | C          |
+| `cpp`, `c++`       | C++        |
+| `swift`            | Swift      |
+| `make`             | Make       |
+| `ruby`             | Ruby       |
 
 ### Search
 

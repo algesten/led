@@ -1,5 +1,5 @@
 use std::ops::Range;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use tree_sitter::{InputEdit, Parser, Query, Tree};
@@ -11,7 +11,8 @@ use crate::config::*;
 use crate::highlight::{HighlightSpan, collect_highlights};
 use crate::indent;
 use crate::injection::{self, InjectionLayer, QueryCache};
-use crate::language::{lang_for_ext, lang_for_filename};
+use crate::language::{lang_entry_for_name, lang_for_ext, lang_for_filename};
+use crate::modeline::detect_language_from_modeline;
 use crate::parse::parse_doc;
 
 pub struct SyntaxState {
@@ -33,14 +34,19 @@ pub struct SyntaxState {
 
 impl SyntaxState {
     pub fn from_path_and_doc(path: &Path, doc: &dyn Doc) -> Option<Self> {
-        let entry = path
-            .extension()
-            .and_then(|e| e.to_str())
-            .and_then(lang_for_ext)
+        let entry = detect_language_from_modeline(|i| doc.line(i), doc.line_count())
+            .and_then(|name| lang_entry_for_name(&name))
             .or_else(|| {
-                path.file_name()
-                    .and_then(|n| n.to_str())
-                    .and_then(lang_for_filename)
+                symlink_chain(path).iter().find_map(|p| {
+                    p.extension()
+                        .and_then(|e| e.to_str())
+                        .and_then(lang_for_ext)
+                        .or_else(|| {
+                            p.file_name()
+                                .and_then(|n| n.to_str())
+                                .and_then(lang_for_filename)
+                        })
+                })
             })?;
 
         let mut parser = Parser::new();
@@ -360,6 +366,31 @@ impl SyntaxState {
 
         None
     }
+}
+
+/// Walk a symlink chain, returning the original path followed by each hop's
+/// resolved target.  Stops when we reach a non-symlink or detect a cycle.
+fn symlink_chain(path: &Path) -> Vec<PathBuf> {
+    let mut chain = vec![path.to_path_buf()];
+    let mut current = path.to_path_buf();
+    loop {
+        match std::fs::read_link(&current) {
+            Ok(target) => {
+                let resolved = if target.is_relative() {
+                    current.parent().unwrap_or(Path::new(".")).join(&target)
+                } else {
+                    target
+                };
+                if chain.contains(&resolved) {
+                    break;
+                }
+                chain.push(resolved.clone());
+                current = resolved;
+            }
+            Err(_) => break,
+        }
+    }
+    chain
 }
 
 #[cfg(test)]
@@ -1021,5 +1052,84 @@ if (true) {
         assert_ts_indent(src, 2, "    "); // console.log → 4
         assert_ts_indent(src, 3, "  "); // } → 2 (matches inner if)
         assert_ts_indent(src, 4, ""); // } → 0 (matches outer if)
+    }
+
+    // ── Ruby ──
+
+    #[test]
+    fn ruby_highlights_contain_keyword() {
+        let doc = make_doc("def hello\n  puts 'world'\nend\n");
+        let path = Path::new("test.rb");
+        let state = SyntaxState::from_path_and_doc(path, &*doc).unwrap();
+        let highlights = state.highlights_for_lines(&*doc, 0, 3);
+        let names: Vec<&str> = highlights
+            .iter()
+            .map(|(_, s)| s.capture_name.as_str())
+            .collect();
+        assert!(
+            names.iter().any(|n| n.contains("keyword")),
+            "expected keyword capture in Ruby highlights: {names:?}"
+        );
+    }
+
+    #[test]
+    fn ruby_detected_for_gemfile() {
+        let doc = make_doc("source 'https://rubygems.org'\ngem 'rails'\n");
+        let path = Path::new("Gemfile");
+        assert!(
+            SyntaxState::from_path_and_doc(path, &*doc).is_some(),
+            "Gemfile should be detected as Ruby"
+        );
+    }
+
+    // ── Modeline detection ──
+
+    #[test]
+    fn modeline_vim_detects_ruby() {
+        let doc = make_doc("# vim: set ft=ruby :\ndef hello\n  puts 'hi'\nend\n");
+        let path = Path::new("script.xyz");
+        let state = SyntaxState::from_path_and_doc(path, &*doc);
+        assert!(
+            state.is_some(),
+            "vim modeline should detect ruby for unknown extension"
+        );
+    }
+
+    #[test]
+    fn modeline_emacs_detects_python() {
+        let doc = make_doc("# -*- mode: python -*-\nimport os\nprint('hello')\n");
+        let path = Path::new("myscript");
+        let state = SyntaxState::from_path_and_doc(path, &*doc);
+        assert!(
+            state.is_some(),
+            "emacs modeline should detect python for extensionless file"
+        );
+    }
+
+    #[test]
+    fn modeline_takes_priority_over_extension() {
+        // Ruby modeline should win over .py extension.
+        let doc = make_doc("# vim: set ft=ruby :\ndef hello\n  puts 'hi'\nend\n");
+        let path = Path::new("test.py");
+        let state = SyntaxState::from_path_and_doc(path, &*doc).unwrap();
+        let highlights = state.highlights_for_lines(&*doc, 0, 4);
+        let names: Vec<&str> = highlights
+            .iter()
+            .map(|(_, s)| s.capture_name.as_str())
+            .collect();
+        assert!(
+            names.iter().any(|n| n.contains("keyword")),
+            "expected Ruby-style highlights, got: {names:?}"
+        );
+    }
+
+    #[test]
+    fn no_modeline_no_extension_returns_none() {
+        let doc = make_doc("just some plain text\nnothing special here\n");
+        let path = Path::new("unknownfile");
+        assert!(
+            SyntaxState::from_path_and_doc(path, &*doc).is_none(),
+            "should return None when no detection method matches"
+        );
     }
 }
