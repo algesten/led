@@ -317,8 +317,11 @@ fn compute_move_up(
     let sub = find_sub_line(&chunks, cursor_dcol);
 
     if sub > 0 {
+        // chunks[sub - 1] is always a non-last chunk; clamp to ce - 1 so
+        // we don't land on the boundary that find_sub_line assigns to the
+        // *next* chunk (which would keep the cursor on the same visual row).
         let (cs, ce) = chunks[sub - 1];
-        let target_dcol = cs + visual_col_affinity.min(ce - cs);
+        let target_dcol = cs + visual_col_affinity.min((ce - cs).saturating_sub(1));
         let col = display_col_to_char_idx(&char_map, target_dcol);
         (cursor_row, col)
     } else if cursor_row > 0 {
@@ -358,7 +361,15 @@ fn compute_move_down(
 
     if sub + 1 < chunks.len() {
         let (cs, ce) = chunks[sub + 1];
-        let target_dcol = cs + visual_col_affinity.min(ce - cs);
+        let is_last_chunk = sub + 1 == chunks.len() - 1;
+        // For non-last chunks, clamp to ce - 1 to avoid landing on the
+        // boundary that find_sub_line assigns to the next chunk.
+        let max_offset = if is_last_chunk {
+            ce - cs
+        } else {
+            (ce - cs).saturating_sub(1)
+        };
+        let target_dcol = cs + visual_col_affinity.min(max_offset);
         let col = display_col_to_char_idx(&char_map, target_dcol);
         (cursor_row, col)
     } else if cursor_row + 1 < doc.line_count() {
@@ -366,7 +377,14 @@ fn compute_move_down(
         let (next_display, next_cm) = expand_tabs(&doc.line(new_row));
         let next_chunks = compute_chunks(next_display.len(), tw);
         let (cs, ce) = next_chunks[0];
-        let target_dcol = cs + visual_col_affinity.min(ce - cs);
+        // For a single-chunk line, allow the full range (end-of-line cursor).
+        // For a multi-chunk line, chunk 0 is non-last; clamp to ce - 1.
+        let max_offset = if next_chunks.len() == 1 {
+            ce - cs
+        } else {
+            (ce - cs).saturating_sub(1)
+        };
+        let target_dcol = cs + visual_col_affinity.min(max_offset);
         let col = display_col_to_char_idx(&next_cm, target_dcol);
         (new_row, col)
     } else {

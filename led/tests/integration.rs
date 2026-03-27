@@ -1191,6 +1191,68 @@ fn wrap_scroll_sub_line() {
     );
 }
 
+#[test]
+fn wrap_move_up_not_stuck_at_chunk_boundary() {
+    // Regression: cursor got stuck when affinity >= chunk width.
+    // Viewport: 12 cols wide → text_width=10, wrap_width=9
+    // "abcdefghijklmnopqrstuvwxy" = 25 chars → chunks: [0..9, 9..18, 18..25]
+    // KillLine + Yank restores text with cursor at end (col=25, affinity=25).
+    // MoveUp should step through each sub-line, not get stuck.
+    let t = TestHarness::new()
+        .with_viewport(12, 10)
+        .with_file("abcdefghijklmnopqrstuvwxy\n")
+        .run(vec![
+            Do(KillLine),
+            Do(Yank),
+            // Wait for async clipboard round-trip to apply the yank
+            WaitFor(|s| {
+                s.active_buffer
+                    .and_then(|id| s.buffers.get(&id))
+                    .map_or(false, |b| b.doc.line_len(0) >= 25)
+            }),
+            Do(MoveUp),
+        ]);
+
+    assert_eq!(buf(&t).cursor_row, 0, "should stay on first logical line");
+    // After yank cursor is at col=25 (sub-line 2). One MoveUp → sub-line 1.
+    assert!(
+        buf(&t).cursor_col >= 9 && buf(&t).cursor_col < 18,
+        "should be on sub-line 1 (col in [9,18)), got col={}",
+        buf(&t).cursor_col
+    );
+}
+
+#[test]
+fn wrap_move_down_no_skip_at_chunk_boundary() {
+    // Regression: MoveDown with high affinity skipped a sub-line.
+    // Viewport: 12 cols wide → text_width=10, wrap_width=9
+    // "abcdefghijklmnopqrstuvwxy" = 25 chars → chunks: [0..9, 9..18, 18..25]
+    // KillLine + Yank → cursor at col=25 (sub-line 2), affinity=25.
+    // MoveUp ×2 → sub-line 0. MoveDown should land on sub-line 1, not skip.
+    let t = TestHarness::new()
+        .with_viewport(12, 10)
+        .with_file("abcdefghijklmnopqrstuvwxy\n")
+        .run(vec![
+            Do(KillLine),
+            Do(Yank),
+            WaitFor(|s| {
+                s.active_buffer
+                    .and_then(|id| s.buffers.get(&id))
+                    .map_or(false, |b| b.doc.line_len(0) >= 25)
+            }),
+            Do(MoveUp),
+            Do(MoveUp),
+            Do(MoveDown),
+        ]);
+
+    assert_eq!(buf(&t).cursor_row, 0, "should stay on first logical line");
+    assert!(
+        buf(&t).cursor_col >= 9 && buf(&t).cursor_col < 18,
+        "should be on sub-line 1 (col in [9,18)), got col={}",
+        buf(&t).cursor_col
+    );
+}
+
 // ── Theme ──
 
 #[test]
