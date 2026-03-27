@@ -37,12 +37,24 @@ pub fn driver(state: Stream<Rc<AppState>>) -> Stream<UiIn> {
 
             // File search cursor: position in side panel input row
             if let Some(ref fs) = s.file_search {
-                let cx = fs
-                    .cursor_pos
-                    .min(dims.side_panel_width.saturating_sub(2) as usize)
-                    as u16;
-                let cy = 1u16; // row 1 of side panel (row 0 = toggles)
-                return Some((cx, cy));
+                use led_state::file_search::FileSearchSelection;
+                let max_col = dims.side_panel_width.saturating_sub(2) as usize;
+                match fs.selection {
+                    FileSearchSelection::SearchInput => {
+                        let cx = fs.cursor_pos.min(max_col) as u16;
+                        let cy = 1u16; // row 1 (row 0 = toggles)
+                        return Some((cx, cy));
+                    }
+                    FileSearchSelection::ReplaceInput => {
+                        let cx = fs.replace_cursor_pos.min(max_col) as u16;
+                        let cy = 2u16; // row 2
+                        return Some((cx, cy));
+                    }
+                    FileSearchSelection::Result(_) => {
+                        // No text cursor on result rows
+                        return None;
+                    }
+                }
             }
 
             // Find-file / save-as cursor: absolute position on the status bar

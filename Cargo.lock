@@ -1263,6 +1263,7 @@ dependencies = [
  "led-core",
  "led-state",
  "log",
+ "regex",
  "regex-syntax",
  "tokio",
 ]

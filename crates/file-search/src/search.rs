@@ -1,9 +1,11 @@
+use std::path::PathBuf;
+
 use grep_matcher::Matcher;
 use grep_regex::RegexMatcherBuilder;
 use grep_searcher::sinks::UTF8;
 use ignore::WalkBuilder;
 
-use led_state::file_search::{FileGroup, SearchHit};
+use led_state::file_search::{FileGroup, ReplaceScope, SearchHit};
 
 pub fn run_search(
     query: &str,
@@ -102,4 +104,108 @@ pub fn run_search(
 
     groups.sort_by(|a, b| a.relative.cmp(&b.relative));
     groups
+}
+
+pub fn run_replace(
+    query: &str,
+    replacement: &str,
+    root: &std::path::Path,
+    case_sensitive: bool,
+    use_regex: bool,
+    scope: &ReplaceScope,
+    skip_paths: &[PathBuf],
+) -> (Vec<FileGroup>, usize) {
+    let pattern = if use_regex {
+        query.to_string()
+    } else {
+        regex_syntax::escape(query)
+    };
+
+    let re = match regex::RegexBuilder::new(&pattern)
+        .case_insensitive(!case_sensitive)
+        .build()
+    {
+        Ok(r) => r,
+        Err(_) => return (run_search(query, root, case_sensitive, use_regex), 0),
+    };
+
+    let mut replaced_count: usize = 0;
+
+    match scope {
+        ReplaceScope::Single {
+            path,
+            row,
+            match_start,
+            match_end,
+        } => {
+            if let Ok(content) = std::fs::read_to_string(path) {
+                let lines: Vec<&str> = content.lines().collect();
+                if *row < lines.len() {
+                    let line = lines[*row];
+                    if *match_start <= line.len() && *match_end <= line.len() {
+                        let mut new_content = String::with_capacity(content.len());
+                        for (i, l) in content.lines().enumerate() {
+                            if i > 0 {
+                                new_content.push('\n');
+                            }
+                            if i == *row {
+                                new_content.push_str(&l[..*match_start]);
+                                new_content.push_str(replacement);
+                                new_content.push_str(&l[*match_end..]);
+                                replaced_count += 1;
+                            } else {
+                                new_content.push_str(l);
+                            }
+                        }
+                        // Preserve trailing newline
+                        if content.ends_with('\n') {
+                            new_content.push('\n');
+                        }
+                        write_atomic(path, &new_content);
+                    }
+                }
+            }
+        }
+        ReplaceScope::All => {
+            let walker = WalkBuilder::new(root)
+                .hidden(true)
+                .git_ignore(true)
+                .git_global(true)
+                .git_exclude(true)
+                .build();
+
+            for entry in walker.flatten() {
+                if !entry.file_type().map_or(false, |ft| ft.is_file()) {
+                    continue;
+                }
+                let path = entry.path().to_path_buf();
+                if skip_paths.contains(&path) {
+                    continue;
+                }
+
+                let Ok(content) = std::fs::read_to_string(&path) else {
+                    continue;
+                };
+
+                let new_content = re.replace_all(&content, replacement);
+                if new_content != content {
+                    let count = re.find_iter(&content).count();
+                    replaced_count += count;
+                    write_atomic(&path, &new_content);
+                }
+            }
+        }
+    }
+
+    // Re-search to get updated results
+    let results = run_search(query, root, case_sensitive, use_regex);
+    (results, replaced_count)
+}
+
+fn write_atomic(path: &std::path::Path, content: &str) {
+    let dir = path.parent().unwrap_or(path);
+    let tmp = dir.join(format!(".led-replace-{}", std::process::id()));
+    if std::fs::write(&tmp, content).is_ok() {
+        let _ = std::fs::rename(&tmp, path);
+    }
 }

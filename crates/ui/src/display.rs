@@ -1328,11 +1328,14 @@ pub struct FileSearchInputs {
     pub use_regex: bool,
     pub results: Vec<led_state::file_search::FileGroup>,
     pub flat_hits: Vec<led_state::file_search::FlatHit>,
-    pub selected: usize,
+    pub selection: led_state::file_search::FileSearchSelection,
     pub scroll_offset: usize,
     pub focused: bool,
     pub height: usize,
     pub side_width: u16,
+    // Replace
+    pub replace_mode: bool,
+    pub replace_text: String,
     // Styles
     pub input_style: Style,
     pub toggle_on_style: Style,
@@ -1355,11 +1358,13 @@ pub fn file_search_inputs(s: &AppState) -> Option<FileSearchInputs> {
         use_regex: fs.use_regex,
         results: fs.results.clone(),
         flat_hits: fs.flat_hits.clone(),
-        selected: fs.selected,
+        selection: fs.selection,
         scroll_offset: fs.scroll_offset,
         focused: s.focus == PanelSlot::Side,
         height: dims.buffer_height(),
         side_width: dims.side_panel_width,
+        replace_mode: fs.replace_mode,
+        replace_text: fs.replace_text.clone(),
         input_style: style::resolve(theme, &theme.file_search.input),
         toggle_on_style: style::resolve(theme, &theme.file_search.toggle_on),
         toggle_off_style: style::resolve(theme, &theme.file_search.toggle_off),
@@ -1375,6 +1380,11 @@ pub fn build_file_search_lines(f: &FileSearchInputs) -> Rc<Vec<Line<'static>>> {
     let width = (f.side_width as usize).saturating_sub(1);
     let mut lines: Vec<Line<'static>> = Vec::new();
 
+    let selected_result_idx = match f.selection {
+        led_state::file_search::FileSearchSelection::Result(i) => Some(i),
+        _ => None,
+    };
+
     // Row 0: toggle buttons
     let case_style = if f.case_sensitive {
         f.toggle_on_style
@@ -1386,31 +1396,58 @@ pub fn build_file_search_lines(f: &FileSearchInputs) -> Rc<Vec<Line<'static>>> {
     } else {
         f.toggle_off_style
     };
+    let replace_toggle_style = if f.replace_mode {
+        f.toggle_on_style
+    } else {
+        f.toggle_off_style
+    };
     lines.push(Line::from(vec![
         Span::styled(" Aa ", case_style),
         Span::raw(" "),
         Span::styled(" .* ", regex_style),
+        Span::raw(" "),
+        Span::styled(" => ", replace_toggle_style),
     ]));
 
-    // Row 1: query input
+    // Row 1: query input (highlight when selected)
+    let query_style = if f.selection == led_state::file_search::FileSearchSelection::SearchInput {
+        f.selected_style
+    } else {
+        f.input_style
+    };
     let display_query: String = if f.query.chars().count() > width {
         f.query.chars().take(width).collect()
     } else {
         format!("{:<w$}", f.query, w = width)
     };
-    lines.push(Line::from(Span::styled(display_query, f.input_style)));
+    lines.push(Line::from(Span::styled(display_query, query_style)));
 
-    // Rows 2+: results
-    let results_height = f.height.saturating_sub(2);
+    // Row 2 (optional): replace input
+    let header_rows = if f.replace_mode {
+        let replace_style =
+            if f.selection == led_state::file_search::FileSearchSelection::ReplaceInput {
+                f.selected_style
+            } else {
+                f.input_style
+            };
+        let display_replace: String = if f.replace_text.chars().count() > width {
+            f.replace_text.chars().take(width).collect()
+        } else {
+            format!("{:<w$}", f.replace_text, w = width)
+        };
+        lines.push(Line::from(Span::styled(display_replace, replace_style)));
+        3
+    } else {
+        2
+    };
+
+    // Remaining rows: results
+    let results_height = f.height.saturating_sub(header_rows);
     if results_height == 0 {
         return Rc::new(lines);
     }
 
-    let selected_flat = if f.flat_hits.is_empty() {
-        None
-    } else {
-        Some(&f.flat_hits[f.selected])
-    };
+    let selected_flat = selected_result_idx.and_then(|i| f.flat_hits.get(i));
 
     let mut display_row: usize = 0;
     let mut rendered: usize = 0;

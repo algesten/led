@@ -614,6 +614,7 @@ pub struct AppState {
     // File search
     pub file_search: Option<file_search::FileSearchState>,
     pub pending_file_search: Versioned<Option<file_search::FileSearchRequest>>,
+    pub pending_file_replace: Versioned<Option<file_search::FileSearchReplaceRequest>>,
 
     // Preview buffer
     pub preview: PreviewState,

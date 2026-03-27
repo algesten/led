@@ -3,7 +3,7 @@ mod search;
 use std::path::PathBuf;
 
 use led_core::rx::Stream;
-use led_state::file_search::FileGroup;
+use led_state::file_search::{FileGroup, ReplaceScope};
 use tokio::sync::mpsc;
 
 #[derive(Clone, Debug)]
@@ -14,11 +14,26 @@ pub enum FileSearchOut {
         case_sensitive: bool,
         use_regex: bool,
     },
+    Replace {
+        query: String,
+        replacement: String,
+        root: PathBuf,
+        case_sensitive: bool,
+        use_regex: bool,
+        scope: ReplaceScope,
+        skip_paths: Vec<PathBuf>,
+    },
 }
 
 #[derive(Clone, Debug)]
 pub enum FileSearchIn {
-    Results { results: Vec<FileGroup> },
+    Results {
+        results: Vec<FileGroup>,
+    },
+    ReplaceComplete {
+        results: Vec<FileGroup>,
+        replaced_count: usize,
+    },
 }
 
 pub fn driver(out: Stream<FileSearchOut>) -> Stream<FileSearchIn> {
@@ -42,20 +57,53 @@ pub fn driver(out: Stream<FileSearchOut>) -> Stream<FileSearchIn> {
                 latest = newer;
             }
 
-            let FileSearchOut::Search {
-                query,
-                root,
-                case_sensitive,
-                use_regex,
-            } = latest;
+            match latest {
+                FileSearchOut::Search {
+                    query,
+                    root,
+                    case_sensitive,
+                    use_regex,
+                } => {
+                    let results = tokio::task::spawn_blocking(move || {
+                        search::run_search(&query, &root, case_sensitive, use_regex)
+                    })
+                    .await
+                    .unwrap_or_default();
 
-            let results = tokio::task::spawn_blocking(move || {
-                search::run_search(&query, &root, case_sensitive, use_regex)
-            })
-            .await
-            .unwrap_or_default();
+                    result_tx.send(FileSearchIn::Results { results }).await.ok();
+                }
+                FileSearchOut::Replace {
+                    query,
+                    replacement,
+                    root,
+                    case_sensitive,
+                    use_regex,
+                    scope,
+                    skip_paths,
+                } => {
+                    let (results, replaced_count) = tokio::task::spawn_blocking(move || {
+                        search::run_replace(
+                            &query,
+                            &replacement,
+                            &root,
+                            case_sensitive,
+                            use_regex,
+                            &scope,
+                            &skip_paths,
+                        )
+                    })
+                    .await
+                    .unwrap_or_default();
 
-            result_tx.send(FileSearchIn::Results { results }).await.ok();
+                    result_tx
+                        .send(FileSearchIn::ReplaceComplete {
+                            results,
+                            replaced_count,
+                        })
+                        .await
+                        .ok();
+                }
+            }
         }
     });
 

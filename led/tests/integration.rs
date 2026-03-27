@@ -4664,3 +4664,236 @@ fn directory_in_workspace_reveals_subdir() {
         "selected entry should be the target directory"
     );
 }
+
+// ── File search replace ──
+
+fn file_search_has_results(s: &led_state::AppState) -> bool {
+    s.file_search
+        .as_ref()
+        .is_some_and(|fs| !fs.flat_hits.is_empty())
+}
+
+#[test]
+fn file_search_toggle_replace_mode() {
+    let t = TestHarness::new()
+        .with_named_file("a.txt", "hello world\n")
+        .run(vec![
+            WaitFor(has_browser_entries),
+            Do(OpenFileSearch),
+            Do(ToggleSearchReplace),
+        ]);
+    let fs = t.state.file_search.as_ref().unwrap();
+    assert!(fs.replace_mode);
+}
+
+#[test]
+fn file_search_replace_unified_navigation() {
+    use led_state::file_search::FileSearchSelection;
+    let t = TestHarness::new()
+        .with_named_file("a.txt", "hello world\n")
+        .run(vec![
+            WaitFor(has_browser_entries),
+            Do(OpenFileSearch),
+            Do(ToggleSearchReplace),
+            Do(InsertChar('h')),
+            Do(InsertChar('e')),
+            Do(InsertChar('l')),
+            WaitFor(file_search_has_results),
+            Do(MoveDown), // → ReplaceInput
+            Do(MoveDown), // → Result(0)
+            Do(MoveUp),   // → ReplaceInput
+            Do(MoveUp),   // → SearchInput
+        ]);
+    let fs = t.state.file_search.as_ref().unwrap();
+    assert_eq!(fs.selection, FileSearchSelection::SearchInput);
+}
+
+#[test]
+fn file_search_replace_input_no_retrigger() {
+    let t = TestHarness::new()
+        .with_named_file("a.txt", "hello world\nhello again\n")
+        .run(vec![
+            WaitFor(has_browser_entries),
+            Do(OpenFileSearch),
+            Do(InsertChar('h')),
+            Do(InsertChar('e')),
+            WaitFor(file_search_has_results),
+            Do(ToggleSearchReplace),
+            Do(MoveDown), // → ReplaceInput
+            Do(InsertChar('H')),
+            Do(InsertChar('E')),
+        ]);
+    let fs = t.state.file_search.as_ref().unwrap();
+    assert_eq!(fs.replace_text, "HE");
+    assert!(!fs.flat_hits.is_empty());
+}
+
+#[test]
+fn file_search_replace_single_in_buffer() {
+    let t = TestHarness::new()
+        .with_named_file("a.txt", "aaa\nbbb\naaa\n")
+        .run(vec![
+            WaitFor(has_browser_entries),
+            Do(OpenFileSearch),
+            Do(InsertChar('a')),
+            Do(InsertChar('a')),
+            Do(InsertChar('a')),
+            WaitFor(file_search_has_results),
+            Do(ToggleSearchReplace),
+            Do(MoveDown), // → ReplaceInput
+            Do(InsertChar('x')),
+            Do(InsertChar('x')),
+            Do(InsertChar('x')),
+            Do(MoveDown),  // → Result(0)
+            Do(MoveRight), // replace first match
+        ]);
+    let b = buf(&t);
+    assert_eq!(b.doc.line(0), "xxx");
+    assert_eq!(b.doc.line(2), "aaa");
+    assert_eq!(b.save_state, SaveState::Modified);
+}
+
+#[test]
+fn file_search_unreplace_single() {
+    let t = TestHarness::new()
+        .with_named_file("a.txt", "aaa\nbbb\naaa\n")
+        .run(vec![
+            WaitFor(has_browser_entries),
+            Do(OpenFileSearch),
+            Do(InsertChar('a')),
+            Do(InsertChar('a')),
+            Do(InsertChar('a')),
+            WaitFor(file_search_has_results),
+            Do(ToggleSearchReplace),
+            Do(MoveDown), // → ReplaceInput
+            Do(InsertChar('x')),
+            Do(MoveDown),  // → Result(0)
+            Do(MoveRight), // replace first match
+            Do(MoveLeft),  // unreplace
+        ]);
+    let b = buf(&t);
+    assert_eq!(b.doc.line(0), "aaa");
+}
+
+#[test]
+fn file_search_replace_all() {
+    let t = TestHarness::new()
+        .with_named_file("a.txt", "aaa\nbbb\naaa\n")
+        .run(vec![
+            WaitFor(has_browser_entries),
+            Do(OpenFileSearch),
+            Do(InsertChar('a')),
+            Do(InsertChar('a')),
+            Do(InsertChar('a')),
+            WaitFor(file_search_has_results),
+            Do(ToggleSearchReplace),
+            Do(MoveDown), // → ReplaceInput
+            Do(InsertChar('z')),
+            Do(ReplaceAll),
+        ]);
+    assert!(t.state.file_search.is_none());
+    let b = buf(&t);
+    assert_eq!(b.doc.line(0), "z");
+    assert_eq!(b.doc.line(2), "z");
+}
+
+#[test]
+fn file_search_replace_all_then_undo() {
+    // ReplaceAll puts all replacements in one undo group — one Undo reverts all.
+    let t = TestHarness::new()
+        .with_named_file("a.txt", "aaa\nbbb\naaa\n")
+        .run(vec![
+            WaitFor(has_browser_entries),
+            Do(OpenFileSearch),
+            Do(InsertChar('a')),
+            Do(InsertChar('a')),
+            Do(InsertChar('a')),
+            WaitFor(file_search_has_results),
+            Do(ToggleSearchReplace),
+            Do(MoveDown),
+            Do(InsertChar('z')),
+            Do(ReplaceAll), // replaces both, closes file search
+            Do(Undo),       // one undo should revert ALL replacements
+        ]);
+    let b = buf(&t);
+    assert_eq!(b.doc.line(0), "aaa");
+    assert_eq!(b.doc.line(2), "aaa");
+}
+
+#[test]
+fn file_search_replace_undo_chain() {
+    // Right, Right replaces two matches. Close file search. Undo reverses them one by one.
+    let t = TestHarness::new()
+        .with_named_file("a.txt", "aaa\nbbb\naaa\n")
+        .run(vec![
+            WaitFor(has_browser_entries),
+            Do(OpenFileSearch),
+            Do(InsertChar('a')),
+            Do(InsertChar('a')),
+            Do(InsertChar('a')),
+            WaitFor(file_search_has_results),
+            Do(ToggleSearchReplace),
+            Do(MoveDown),
+            Do(InsertChar('z')),
+            Do(MoveDown),  // → Result(0)
+            Do(MoveRight), // replace first "aaa" → "z"
+            Do(MoveRight), // replace second "aaa" → "z"
+            Do(Abort),     // close file search
+            Do(Undo),      // undo second replace
+        ]);
+    let b = buf(&t);
+    assert_eq!(b.doc.line(0), "z"); // first replace still applied
+    assert_eq!(b.doc.line(2), "aaa"); // second was undone
+}
+
+#[test]
+fn file_search_no_replace_mode_arrows_noop() {
+    let t = TestHarness::new()
+        .with_named_file("a.txt", "hello\n")
+        .run(vec![
+            WaitFor(has_browser_entries),
+            Do(OpenFileSearch),
+            Do(InsertChar('h')),
+            WaitFor(file_search_has_results),
+            Do(MoveDown),  // → Result(0)
+            Do(MoveRight), // no-op, replace mode off
+        ]);
+    let b = buf(&t);
+    assert_eq!(b.doc.line(0), "hello");
+}
+
+#[test]
+fn file_search_replace_all_multi_file() {
+    let t = TestHarness::new()
+        .with_named_file("a.txt", "hello\n")
+        .with_named_file("b.txt", "hello\n")
+        .run(vec![
+            WaitFor(has_browser_entries),
+            Do(OpenFileSearch),
+            Do(InsertChar('h')),
+            Do(InsertChar('e')),
+            Do(InsertChar('l')),
+            Do(InsertChar('l')),
+            Do(InsertChar('o')),
+            WaitFor(file_search_has_results),
+            Do(ToggleSearchReplace),
+            Do(MoveDown),
+            Do(InsertChar('b')),
+            Do(InsertChar('y')),
+            Do(InsertChar('e')),
+            Do(ReplaceAll),
+        ]);
+    assert!(t.state.file_search.is_none());
+    let modified_count = t
+        .state
+        .buffers
+        .values()
+        .filter(|b| {
+            b.path
+                .as_ref()
+                .is_some_and(|p| p.ends_with("a.txt") || p.ends_with("b.txt"))
+                && b.doc.line(0) == "bye"
+        })
+        .count();
+    assert_eq!(modified_count, 2, "both buffers should be modified");
+}

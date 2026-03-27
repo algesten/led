@@ -98,6 +98,8 @@ pub enum Action {
     CloseFileSearch,
     ToggleSearchCase,
     ToggleSearchRegex,
+    ToggleSearchReplace,
+    ReplaceAll,
 
     // Find
     FindFile,

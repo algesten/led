@@ -76,4 +76,6 @@
 [file_search]
 "alt+1" = "toggle_search_case"
 "alt+2" = "toggle_search_regex"
+"alt+3" = "toggle_search_replace"
 "enter" = "open_selected"
+"alt+enter" = "replace_all"

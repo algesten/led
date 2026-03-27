@@ -357,10 +357,12 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
         })
         .stream();
 
-    let file_search_s = drivers
+    let file_search_results_s = drivers
         .file_search_in
+        .filter(|ev| matches!(ev, led_file_search::FileSearchIn::Results { .. }))
         .map(|ev| match ev {
             led_file_search::FileSearchIn::Results { results } => results,
+            _ => unreachable!(),
         })
         .sample_combine(&state)
         .filter_map(|(results, s)| {
@@ -377,6 +379,36 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
             Some(Mut::FileSearchResults(fs, preview))
         })
         .stream();
+
+    let file_search_replace_s = drivers
+        .file_search_in
+        .filter(|ev| matches!(ev, led_file_search::FileSearchIn::ReplaceComplete { .. }))
+        .map(|ev| match ev {
+            led_file_search::FileSearchIn::ReplaceComplete {
+                results,
+                replaced_count,
+            } => (results, replaced_count),
+            _ => unreachable!(),
+        })
+        .sample_combine(&state)
+        .filter_map(|((results, count), s)| {
+            let mut fs = s.file_search.clone()?;
+            fs.results = results;
+            fs.rebuild_flat_hits();
+            let preview = fs
+                .selected_hit()
+                .map(|(group, hit)| led_state::PreviewRequest {
+                    path: group.path.clone(),
+                    row: hit.row,
+                    col: hit.col,
+                });
+            Some(Mut::FileSearchReplaceComplete(fs, preview, count))
+        })
+        .stream();
+
+    let file_search_s: Stream<Mut> = Stream::new();
+    file_search_results_s.forward(&file_search_s);
+    file_search_replace_s.forward(&file_search_s);
 
     workspace_s.forward(&muts);
     workspace_changed_s.forward(&muts);
@@ -541,6 +573,13 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
                 if let Some(req) = preview {
                     s.preview.pending.set(Some(req));
                 }
+            }
+            Mut::FileSearchReplaceComplete(fs, preview, count) => {
+                s.file_search = Some(fs);
+                if let Some(req) = preview {
+                    s.preview.pending.set(Some(req));
+                }
+                s.alerts.info = Some(format!("Replaced {count} occurrence(s)"));
             }
             Mut::FindFileListed(ff) => {
                 s.find_file = Some(ff);
@@ -998,6 +1037,11 @@ enum Mut {
         led_state::file_search::FileSearchState,
         Option<led_state::PreviewRequest>,
     ),
+    FileSearchReplaceComplete(
+        led_state::file_search::FileSearchState,
+        Option<led_state::PreviewRequest>,
+        usize,
+    ),
     FindFileListed(led_state::FindFileState),
     GitFileStatuses {
         statuses: HashMap<PathBuf, HashSet<FileStatus>>,
@@ -1128,6 +1172,7 @@ impl Mut {
             Mut::ConfigTheme(_) => "ConfigTheme",
             Mut::DirListed(_, _) => "DirListed",
             Mut::FileSearchResults(..) => "FileSearchResults",
+            Mut::FileSearchReplaceComplete(..) => "FileSearchReplaceComplete",
             Mut::FindFileListed(_) => "FindFileListed",
             Mut::GitFileStatuses { .. } => "GitFileStatuses",
             Mut::GitLineStatuses { .. } => "GitLineStatuses",

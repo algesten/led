@@ -542,7 +542,7 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
     git_file_scan.forward(&git_out);
     git_line_scan.forward(&git_out);
 
-    let file_search_out = state
+    let file_search_search_out = state
         .dedupe_by(|s| s.pending_file_search.version())
         .filter(|s| s.pending_file_search.version() > 0)
         .filter(|s| s.pending_file_search.is_some())
@@ -556,6 +556,28 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
             }
         })
         .stream();
+
+    let file_search_replace_out = state
+        .dedupe_by(|s| s.pending_file_replace.version())
+        .filter(|s| s.pending_file_replace.version() > 0)
+        .filter(|s| s.pending_file_replace.is_some())
+        .map(|s| {
+            let req = (*s.pending_file_replace).as_ref().unwrap();
+            led_file_search::FileSearchOut::Replace {
+                query: req.query.clone(),
+                replacement: req.replacement.clone(),
+                root: req.root.clone(),
+                case_sensitive: req.case_sensitive,
+                use_regex: req.use_regex,
+                scope: req.scope.clone(),
+                skip_paths: req.skip_paths.clone(),
+            }
+        })
+        .stream();
+
+    let file_search_out: Stream<led_file_search::FileSearchOut> = Stream::new();
+    file_search_search_out.forward(&file_search_out);
+    file_search_replace_out.forward(&file_search_out);
 
     // ── LSP ──
 
