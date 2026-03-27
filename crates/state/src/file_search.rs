@@ -103,6 +103,7 @@ pub struct FileSearchState {
 pub struct PendingReplaceAll {
     pub hits: HashMap<PathBuf, Vec<(usize, usize, usize, String)>>,
     pub replacement: String,
+    pub query: String,
 }
 
 impl FileSearchState {

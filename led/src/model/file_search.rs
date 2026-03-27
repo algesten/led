@@ -586,6 +586,7 @@ fn replace_selected(state: &mut AppState) {
     let match_end = hit.match_end;
     let original_text = hit.line_text[match_start..match_end].to_string();
     let replacement = fs.replace_text.clone();
+    let query = fs.query.clone();
 
     let entry = ReplaceEntry {
         flat_hit_idx: result_idx,
@@ -602,7 +603,15 @@ fn replace_selected(state: &mut AppState) {
     if let Some(id) = buf_id {
         // Each individual replace gets its own undo group
         close_undo_group(state, id);
-        replace_in_buffer(state, id, row, match_start, match_end, &replacement);
+        replace_in_buffer(
+            state,
+            id,
+            row,
+            match_start,
+            match_end,
+            &replacement,
+            Some(&query),
+        );
         let fs = state.file_search.as_mut().unwrap();
         fs.replace_stack.push(entry);
         remove_hit_from_results(fs, result_idx);
@@ -666,6 +675,7 @@ fn unreplace_selected(state: &mut AppState) {
             entry.match_start,
             entry.match_start + entry.replacement_len,
             &entry.original_text,
+            None, // unreplace: always literal
         );
         let line_text = state
             .buffers
@@ -722,6 +732,7 @@ fn replace_all(state: &mut AppState) {
         return;
     }
     let replacement = fs.replace_text.clone();
+    let query = fs.query.clone();
 
     let mut hits_by_buf: std::collections::HashMap<
         std::path::PathBuf,
@@ -750,7 +761,7 @@ fn replace_all(state: &mut AppState) {
             // ONE undo group for all replacements in this buffer
             close_undo_group(state, id);
             for (fi, row, ms, me, original) in hits.iter().rev() {
-                replace_in_buffer(state, id, *row, *ms, *me, &replacement);
+                replace_in_buffer(state, id, *row, *ms, *me, &replacement, Some(&query));
                 let fs = state.file_search.as_mut().unwrap();
                 fs.replace_stack.push(ReplaceEntry {
                     flat_hit_idx: *fi,
@@ -781,6 +792,7 @@ fn replace_all(state: &mut AppState) {
     if !non_open_paths.is_empty() {
         let mut pending = led_state::file_search::PendingReplaceAll {
             replacement: replacement.clone(),
+            query: query.clone(),
             hits: std::collections::HashMap::new(),
         };
         for path in &non_open_paths {
@@ -822,12 +834,9 @@ pub fn apply_pending_replace(state: &mut AppState, buf_id: led_core::BufferId) {
     });
     let Some(hits) = hits else { return };
 
-    let replacement = state
-        .pending_replace_all
-        .as_ref()
-        .unwrap()
-        .replacement
-        .clone();
+    let pending_ref = state.pending_replace_all.as_ref().unwrap();
+    let replacement = pending_ref.replacement.clone();
+    let query = pending_ref.query.clone();
 
     // All done? Clear pending state.
     if state.pending_replace_all.as_ref().unwrap().hits.is_empty() {
@@ -847,10 +856,107 @@ pub fn apply_pending_replace(state: &mut AppState, buf_id: led_core::BufferId) {
     // Apply replacements in reverse order (one undo group)
     close_undo_group(state, buf_id);
     for (row, ms, me, _original) in hits.iter().rev() {
-        replace_in_buffer(state, buf_id, *row, *ms, *me, &replacement);
+        replace_in_buffer(state, buf_id, *row, *ms, *me, &replacement, Some(&query));
     }
 }
 
+/// Emacs-style case-preserving replacement.
+/// Only activates when both search query and replacement are all-lowercase.
+/// Then: ALL CAPS match → ALL CAPS replacement, Capitalized match → Capitalized replacement,
+/// anything else → literal.
+fn case_adjusted_replacement(search_query: &str, replacement: &str, matched_text: &str) -> String {
+    let search_all_lower = search_query.chars().all(|c| !c.is_uppercase());
+    let replace_all_lower = replacement.chars().all(|c| !c.is_uppercase());
+    if !search_all_lower || !replace_all_lower {
+        return replacement.to_string();
+    }
+
+    let mut chars = matched_text.chars();
+    let first = chars.next();
+    let rest_all_lower = chars.all(|c| !c.is_uppercase());
+
+    if matched_text.chars().all(|c| !c.is_lowercase())
+        && matched_text.chars().any(|c| c.is_uppercase())
+    {
+        // All uppercase
+        replacement.to_uppercase()
+    } else if first.is_some_and(|c| c.is_uppercase()) && rest_all_lower {
+        // Capitalized
+        let mut result = String::with_capacity(replacement.len());
+        let mut chars = replacement.chars();
+        if let Some(c) = chars.next() {
+            for uc in c.to_uppercase() {
+                result.push(uc);
+            }
+        }
+        result.extend(chars);
+        result
+    } else {
+        replacement.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::case_adjusted_replacement;
+
+    #[test]
+    fn case_replace_lowercase_match() {
+        assert_eq!(case_adjusted_replacement("foo", "bar", "foo"), "bar");
+    }
+
+    #[test]
+    fn case_replace_capitalized_match() {
+        assert_eq!(case_adjusted_replacement("foo", "bar", "Foo"), "Bar");
+    }
+
+    #[test]
+    fn case_replace_all_caps_match() {
+        assert_eq!(case_adjusted_replacement("foo", "bar", "FOO"), "BAR");
+    }
+
+    #[test]
+    fn case_replace_mixed_case_match_literal() {
+        assert_eq!(case_adjusted_replacement("foo", "bar", "fOo"), "bar");
+        assert_eq!(case_adjusted_replacement("foo", "bar", "fOO"), "bar");
+        assert_eq!(case_adjusted_replacement("foo", "bar", "foO"), "bar");
+    }
+
+    #[test]
+    fn case_replace_search_has_uppercase_literal() {
+        assert_eq!(case_adjusted_replacement("Foo", "bar", "Foo"), "bar");
+        assert_eq!(case_adjusted_replacement("FOO", "bar", "FOO"), "bar");
+    }
+
+    #[test]
+    fn case_replace_replacement_has_uppercase_literal() {
+        assert_eq!(case_adjusted_replacement("foo", "Bar", "FOO"), "Bar");
+        assert_eq!(case_adjusted_replacement("foo", "Bar", "Foo"), "Bar");
+        assert_eq!(case_adjusted_replacement("foo", "Bar", "foo"), "Bar");
+    }
+
+    #[test]
+    fn case_replace_multi_word() {
+        assert_eq!(
+            case_adjusted_replacement("hello world", "good bye", "HELLO WORLD"),
+            "GOOD BYE"
+        );
+        assert_eq!(
+            case_adjusted_replacement("hello world", "good bye", "Hello world"),
+            "Good bye"
+        );
+    }
+
+    #[test]
+    fn case_replace_empty_strings() {
+        assert_eq!(case_adjusted_replacement("foo", "", "FOO"), "");
+        assert_eq!(case_adjusted_replacement("foo", "", "Foo"), "");
+        assert_eq!(case_adjusted_replacement("", "bar", ""), "bar");
+    }
+}
+
+/// If `search_query` is Some, apply Emacs-style case-preserving replacement.
+/// If None, insert replacement literally.
 fn replace_in_buffer(
     state: &mut AppState,
     buf_id: led_core::BufferId,
@@ -858,6 +964,7 @@ fn replace_in_buffer(
     match_start_byte: usize,
     match_end_byte: usize,
     replacement: &str,
+    search_query: Option<&str>,
 ) {
     let Some(buf) = state.buf_mut(buf_id) else {
         return;
@@ -867,6 +974,15 @@ fn replace_in_buffer(
     }
 
     let line_text = buf.doc.line(row);
+    let actual_replacement = if let Some(query) = search_query {
+        let matched_text = line_text
+            .get(match_start_byte..match_end_byte)
+            .unwrap_or("");
+        case_adjusted_replacement(query, replacement, matched_text)
+    } else {
+        replacement.to_string()
+    };
+
     let match_start_char = line_text
         .get(..match_start_byte)
         .map(|s| s.chars().count())
@@ -880,7 +996,7 @@ fn replace_in_buffer(
     let abs_end = line_start + match_end_char;
 
     let doc = buf.doc.remove(abs_start, abs_end);
-    let doc = doc.insert(abs_start, replacement);
+    let doc = doc.insert(abs_start, &actual_replacement);
     buf.doc = doc;
     buf.save_state = led_state::SaveState::Modified;
 }
