@@ -878,7 +878,10 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
                         .map(|b| b.id);
                     if let Some(id) = buf_id {
                         if let Some(buf) = s.buf_mut(id) {
+                            let old_lines = buf.doc.line_count();
+                            let edit_row = fe.edits.iter().map(|e| e.start_row).min().unwrap_or(0);
                             apply_text_edits(buf, &fe.edits);
+                            mov::shift_highlights(buf, edit_row, old_lines);
                         }
                     }
                 }

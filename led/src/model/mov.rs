@@ -2,6 +2,8 @@ use led_core::Doc;
 use led_core::wrap::{
     compute_chunks, display_col_to_char_idx, expand_tabs, find_sub_line, visual_line_count,
 };
+use std::rc::Rc;
+
 use led_state::{BufferState, Dimensions};
 
 // ── Scroll ──
@@ -390,4 +392,34 @@ fn compute_move_down(
     } else {
         (cursor_row, cursor_col)
     }
+}
+
+// ── Highlight shift ──
+
+/// Adjust cached highlight line numbers when lines are inserted or removed.
+/// Pure coordinate shift — the driver's full recompute replaces these within
+/// one frame.
+pub fn shift_highlights(buf: &mut BufferState, edit_row: usize, old_line_count: usize) {
+    let new_line_count = buf.doc.line_count();
+    if new_line_count == old_line_count {
+        return;
+    }
+    let delta = new_line_count as isize - old_line_count as isize;
+    let shifted: Vec<_> = buf
+        .syntax_highlights
+        .iter()
+        .filter_map(|(line, span)| {
+            if *line <= edit_row {
+                Some((*line, span.clone()))
+            } else {
+                let new_line = (*line as isize + delta) as usize;
+                if new_line < new_line_count {
+                    Some((new_line, span.clone()))
+                } else {
+                    None
+                }
+            }
+        })
+        .collect();
+    buf.syntax_highlights = Rc::new(shifted);
 }

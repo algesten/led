@@ -1,5 +1,4 @@
 use std::path::Path;
-use std::rc::Rc;
 use std::time::Instant;
 
 use led_core::{Action, BufferId, PanelSlot};
@@ -298,7 +297,7 @@ pub fn handle_action(state: &mut AppState, action: Action) -> bool {
                         buf.cursor_col_affinity = a;
                         killed_text = Some(killed);
                     }
-                    shift_highlights(buf, edit_row, old_lines);
+                    mov::shift_highlights(buf, edit_row, old_lines);
                     let (sr, ssl) = mov::adjust_scroll(buf, &dims);
                     buf.scroll_row = sr;
                     buf.scroll_sub_line = ssl;
@@ -331,7 +330,7 @@ pub fn handle_action(state: &mut AppState, action: Action) -> bool {
                         buf.mark = None;
                         no_region = true;
                     }
-                    shift_highlights(buf, edit_row, old_lines);
+                    mov::shift_highlights(buf, edit_row, old_lines);
                     let (sr, ssl) = mov::adjust_scroll(buf, &dims);
                     buf.scroll_row = sr;
                     buf.scroll_sub_line = ssl;
@@ -764,6 +763,8 @@ fn handle_completion_action(state: &mut AppState, action: &Action) -> bool {
 
                         // Apply edit and move cursor to end of inserted text
                         if let Some(buf) = state.buf_mut(id) {
+                            let old_lines = buf.doc.line_count();
+                            let edit_row = te.start_row;
                             super::apply_text_edits(buf, &[te.clone()]);
                             let new_text = &te.new_text;
                             let newline_count = new_text.chars().filter(|c| *c == '\n').count();
@@ -779,12 +780,21 @@ fn handle_completion_action(state: &mut AppState, action: &Action) -> bool {
                                     .unwrap_or(0);
                             }
                             buf.cursor_col_affinity = buf.cursor_col;
+                            mov::shift_highlights(buf, edit_row, old_lines);
                         }
 
                         // Apply additional edits (auto-imports etc.)
                         if !item.additional_edits.is_empty() {
                             if let Some(buf) = state.buf_mut(id) {
+                                let old_lines = buf.doc.line_count();
+                                let edit_row = item
+                                    .additional_edits
+                                    .iter()
+                                    .map(|e| e.start_row)
+                                    .min()
+                                    .unwrap_or(0);
                                 super::apply_text_edits(buf, &item.additional_edits);
+                                mov::shift_highlights(buf, edit_row, old_lines);
                             }
                         }
                     }
@@ -1289,7 +1299,7 @@ fn with_buf(state: &mut AppState, f: impl FnOnce(&mut BufferState, &Dimensions))
             let old_lines = buf.doc.line_count();
             let edit_row = buf.cursor_row;
             f(buf, &dims);
-            shift_highlights(buf, edit_row, old_lines);
+            mov::shift_highlights(buf, edit_row, old_lines);
             let (sr, ssl) = mov::adjust_scroll(buf, &dims);
             buf.scroll_row = sr;
             buf.scroll_sub_line = ssl;
@@ -1305,34 +1315,6 @@ fn with_buf(state: &mut AppState, f: impl FnOnce(&mut BufferState, &Dimensions))
             buf.last_used = Instant::now();
         }
     }
-}
-
-/// Adjust cached highlight line numbers when lines are inserted or removed.
-/// Pure coordinate shift — the driver's full recompute replaces these within
-/// one frame.
-fn shift_highlights(buf: &mut BufferState, edit_row: usize, old_line_count: usize) {
-    let new_line_count = buf.doc.line_count();
-    if new_line_count == old_line_count {
-        return;
-    }
-    let delta = new_line_count as isize - old_line_count as isize;
-    let shifted: Vec<_> = buf
-        .syntax_highlights
-        .iter()
-        .filter_map(|(line, span)| {
-            if *line <= edit_row {
-                Some((*line, span.clone()))
-            } else {
-                let new_line = (*line as isize + delta) as usize;
-                if new_line < new_line_count {
-                    Some((new_line, span.clone()))
-                } else {
-                    None
-                }
-            }
-        })
-        .collect();
-    buf.syntax_highlights = Rc::new(shifted);
 }
 
 /// Close undo group and clear edit kind tracking.
