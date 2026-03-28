@@ -72,6 +72,11 @@ pub fn driver(state: Stream<Rc<AppState>>) -> Stream<UiIn> {
                 return None;
             }
 
+            // Hide cursor when focus is not on the editor
+            if s.focus != led_core::PanelSlot::Main {
+                return None;
+            }
+
             // Buffer cursor: compute relative, then add buffer area offset
             let (rel_cx, rel_cy) =
                 display::cursor_inputs(&s).and_then(|c| display::compute_cursor_pos(&c))?;
