@@ -647,11 +647,17 @@ fn navigate_diagnostic(state: &mut AppState, forward: bool) {
     if let Some(d) = target {
         let target_row = d.start_row;
         let target_col = d.start_col;
+        let dims = state.dims;
         if let Some(buf) = state.buf_mut(id) {
             super::action::close_group_on_move(buf);
             buf.cursor_row = target_row;
             buf.cursor_col = target_col;
             buf.cursor_col_affinity = target_col;
+            if let Some(dims) = dims {
+                let (sr, ssl) = super::mov::adjust_scroll(buf, &dims);
+                buf.scroll_row = sr;
+                buf.scroll_sub_line = ssl;
+            }
         }
     }
 }
