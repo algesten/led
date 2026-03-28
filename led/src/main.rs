@@ -68,7 +68,7 @@ async fn main() {
             .first()
             .and_then(|p| p.parent())
             .map(|parent| parent.to_path_buf())
-            .unwrap_or_else(|| PathBuf::from("."));
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")));
         (None, files, start)
     };
 

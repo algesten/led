@@ -3649,6 +3649,39 @@ fn find_file_tab_shows_side_panel() {
 }
 
 #[test]
+fn find_file_tab_completions_no_buffer() {
+    // Tab completion must work when no buffer is open (start_dir fallback).
+    let td = tempfile::TempDir::new().expect("tmpdir");
+    let root = td.keep();
+    let workspace = root.join("workspace");
+    let config = root.join("config");
+    std::fs::create_dir_all(&workspace).expect("mkdir");
+    std::fs::create_dir_all(&config).expect("mkdir");
+    std::fs::write(workspace.join("hello.txt"), "hi\n").expect("write");
+
+    let t = TestHarness::with_dir(root)
+        .with_arg_dir(workspace)
+        .run(vec![
+            WaitFor(|s| s.session.restore_phase == led_state::SessionRestorePhase::Done),
+            Do(FindFile),
+            WaitFor(|s| {
+                s.find_file
+                    .as_ref()
+                    .map_or(false, |ff| !ff.completions.is_empty())
+            }),
+            Do(InsertTab),
+            WaitFor(|s| s.find_file.as_ref().map_or(false, |ff| ff.show_side)),
+        ]);
+
+    let ff = t.state.find_file.as_ref().unwrap();
+    assert!(ff.show_side, "side panel should be shown after Tab");
+    assert!(
+        !ff.completions.is_empty(),
+        "completions should be populated"
+    );
+}
+
+#[test]
 fn find_file_opens_existing() {
     // Create a file, then use find-file to open a second file
     let t = TestHarness::new()
