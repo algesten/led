@@ -33,6 +33,9 @@ pub struct DisplayInputs {
     search_match_idx: Option<usize>,
     search_match_style: Style,
     search_current_style: Style,
+    // File search (C-f) match highlight in preview buffer
+    file_search_match: Option<(usize, usize, usize)>,
+    file_search_match_style: Style,
     // Syntax highlighting
     syntax_highlights: Rc<Vec<(usize, HighlightSpan)>>,
     bracket_pairs: Rc<Vec<BracketPair>>,
@@ -77,6 +80,8 @@ impl PartialEq for DisplayInputs {
             && self.search_match_idx == other.search_match_idx
             && self.search_match_style == other.search_match_style
             && self.search_current_style == other.search_current_style
+            && self.file_search_match == other.file_search_match
+            && self.file_search_match_style == other.file_search_match_style
             && self.syntax_highlights == other.syntax_highlights
             && self.bracket_pairs == other.bracket_pairs
             && self.matching_bracket == other.matching_bracket
@@ -113,6 +118,19 @@ pub fn display_inputs(s: &AppState) -> Option<DisplayInputs> {
         .as_ref()
         .map(|is| (is.matches.clone(), is.match_idx))
         .unwrap_or_default();
+
+    let file_search_match = s.file_search.as_ref().and_then(|fs| {
+        let (group, hit) = fs.selected_hit()?;
+        if buf.path.as_ref() != Some(&group.path) {
+            return None;
+        }
+        let char_len = hit
+            .line_text
+            .get(hit.match_start..hit.match_end)
+            .map(|s| s.chars().count())
+            .unwrap_or(0);
+        Some((hit.row, hit.col, char_len))
+    });
 
     let git_line_statuses = buf
         .path
@@ -187,6 +205,8 @@ pub fn display_inputs(s: &AppState) -> Option<DisplayInputs> {
         search_match_idx,
         search_match_style: style::resolve(theme, &theme.editor.search_match),
         search_current_style: style::resolve(theme, &theme.editor.search_current),
+        file_search_match,
+        file_search_match_style: style::resolve(theme, &theme.editor.file_search_match),
         syntax_highlights: buf.syntax_highlights.clone(),
         bracket_pairs: buf.bracket_pairs.clone(),
         matching_bracket: BracketPair::find_match(
@@ -425,6 +445,19 @@ pub fn build_display_lines(d: &DisplayInputs) -> Rc<Vec<Line<'static>>> {
                 };
                 for i in ms.max(cs)..me.min(ce) {
                     col_styles[i - cs] = match_style;
+                }
+            }
+
+            // 6b. File search match highlight (C-f preview)
+            if let Some((fr, fc, flen)) = d.file_search_match {
+                if fr == line_idx {
+                    let fs = char_map.get(fc).copied().unwrap_or(display.len());
+                    let fe = char_map.get(fc + flen).copied().unwrap_or(display.len());
+                    if fs < ce && fe > cs {
+                        for i in fs.max(cs)..fe.min(ce) {
+                            col_styles[i - cs] = d.file_search_match_style;
+                        }
+                    }
                 }
             }
 
