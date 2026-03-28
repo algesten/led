@@ -331,7 +331,11 @@ pub fn handle_action(state: &mut AppState, action: Action) -> bool {
                 let (old_lines, edit_row, old_ver) = state
                     .buffers
                     .get(&id)
-                    .map(|b| (b.doc.line_count(), b.cursor_row, b.doc.version()))
+                    .map(|b| {
+                        let mark_row = b.mark.map(|(r, _)| r).unwrap_or(b.cursor_row);
+                        let row = mark_row.min(b.cursor_row);
+                        (b.doc.line_count(), row, b.doc.version())
+                    })
                     .unwrap_or((0, 0, 0));
                 if let Some(buf) = state.buf_mut(id) {
                     close_group_on_move(buf);
