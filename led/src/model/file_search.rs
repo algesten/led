@@ -1020,6 +1020,7 @@ fn confirm_selected(state: &mut AppState) {
                 buf.cursor_col_affinity = col;
             }
         }
+        super::action::reveal_active_buffer(state);
         deactivate_without_close_preview(state);
         return;
     }
@@ -1037,6 +1038,7 @@ fn confirm_selected(state: &mut AppState) {
             buf.cursor_col = col;
             buf.cursor_col_affinity = col;
         }
+        super::action::reveal_active_buffer(state);
     } else {
         state.pending_open.set(Some(path.clone()));
         state.jump.pending_position = Some(JumpPosition {

@@ -1247,9 +1247,11 @@ pub fn build_browser_lines(b: &BrowserInputs) -> Rc<Vec<Line<'static>>> {
                 BrowserSeverity::Warning => b.diag_warning_style,
             });
 
-            // Priority: Error > Warn > Git dirty > selected(unfocused) > normal
             let entry_style = if is_selected && b.focused {
                 b.selected_style
+            } else if is_selected {
+                b.selected_unfocused_style
+                    .patch(diag_style.or(git_style).unwrap_or_default())
             } else {
                 diag_style.or(git_style).unwrap_or(match &entry.kind {
                     EntryKind::Directory { .. } => b.dir_style,
@@ -1292,7 +1294,7 @@ pub fn build_browser_lines(b: &BrowserInputs) -> Rc<Vec<Line<'static>>> {
                         Span::styled(format!("{}{:pad$}", name_part, "", pad = pad), entry_style),
                         Span::styled(
                             status_char.to_string(),
-                            if is_selected && b.focused {
+                            if is_selected {
                                 entry_style
                             } else {
                                 marker_style
