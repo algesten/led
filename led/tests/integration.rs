@@ -4998,7 +4998,6 @@ fn kbd_macro_playback_aborts_at_boundary() {
         MoveUp,
         KbdMacroEnd,
     ]));
-    let b = buf(&t);
     // Should have recorded successfully, macro is defined
     assert!(t.state.kbd_macro.last.is_some());
 }

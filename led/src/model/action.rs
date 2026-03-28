@@ -614,42 +614,68 @@ fn word_under_cursor(buf: &BufferState) -> String {
 
 /// Navigate to the next or previous diagnostic in the current file.
 fn navigate_diagnostic(state: &mut AppState, forward: bool) {
-    let Some(id) = state.active_buffer else {
-        return;
-    };
-    let Some(buf) = state.buffers.get(&id) else {
-        return;
-    };
-    let Some(ref path) = buf.path else { return };
-    let Some(diags) = state.lsp.diagnostics.get(path) else {
-        return;
-    };
-    if diags.is_empty() {
+    let cur_path = state
+        .active_buffer
+        .and_then(|id| state.buffers.get(&id))
+        .and_then(|b| b.path.clone());
+
+    let (row, col) = state
+        .active_buffer
+        .and_then(|id| state.buffers.get(&id))
+        .map(|b| (b.cursor_row, b.cursor_col))
+        .unwrap_or((0, 0));
+
+    // Build a sorted list of all (path, diag) across the workspace.
+    let mut all: Vec<(&std::path::PathBuf, &led_lsp::Diagnostic)> = state
+        .lsp
+        .diagnostics
+        .iter()
+        .flat_map(|(p, ds)| ds.iter().map(move |d| (p, d)))
+        .collect();
+    all.sort_by(|a, b| {
+        a.0.cmp(b.0)
+            .then(a.1.start_row.cmp(&b.1.start_row))
+            .then(a.1.start_col.cmp(&b.1.start_col))
+    });
+
+    if all.is_empty() {
         return;
     }
 
-    let row = buf.cursor_row;
-    let col = buf.cursor_col;
-
+    // Find next/prev diagnostic across all files.
+    let cur_key = cur_path.as_ref().map(|p| (p, row, col));
     let target = if forward {
-        diags
-            .iter()
-            .find(|d| (d.start_row, d.start_col) > (row, col))
-            .or_else(|| diags.first())
+        all.iter()
+            .find(|(p, d)| {
+                cur_key.map_or(true, |(cp, cr, cc)| {
+                    (*p, d.start_row, d.start_col) > (cp, cr, cc)
+                })
+            })
+            .or_else(|| all.first())
     } else {
-        diags
-            .iter()
+        all.iter()
             .rev()
-            .find(|d| (d.start_row, d.start_col) < (row, col))
-            .or_else(|| diags.last())
+            .find(|(p, d)| {
+                cur_key.map_or(true, |(cp, cr, cc)| {
+                    (*p, d.start_row, d.start_col) < (cp, cr, cc)
+                })
+            })
+            .or_else(|| all.last())
     };
 
-    if let Some(d) = target {
-        let target_row = d.start_row;
-        let target_col = d.start_col;
+    let Some(&(target_path, target_diag)) = target else {
+        return;
+    };
+    let target_row = target_diag.start_row;
+    let target_col = target_diag.start_col;
+    let target_path = target_path.clone();
+
+    // If the target is in the current buffer, just move the cursor.
+    if cur_path.as_ref() == Some(&target_path) {
+        let id = state.active_buffer.unwrap();
         let dims = state.dims;
         if let Some(buf) = state.buf_mut(id) {
-            super::action::close_group_on_move(buf);
+            close_group_on_move(buf);
             buf.cursor_row = target_row;
             buf.cursor_col = target_col;
             buf.cursor_col_affinity = target_col;
@@ -659,6 +685,38 @@ fn navigate_diagnostic(state: &mut AppState, forward: bool) {
                 buf.scroll_sub_line = ssl;
             }
         }
+        return;
+    }
+
+    // Target is in a different file — check if it's already open.
+    let canonical = std::fs::canonicalize(&target_path).unwrap_or_else(|_| target_path.clone());
+    let existing = state
+        .buffers
+        .values()
+        .find(|b| {
+            b.path.as_ref().map_or(false, |p| {
+                std::fs::canonicalize(p).unwrap_or_else(|_| p.clone()) == canonical
+            })
+        })
+        .map(|b| b.id);
+    if let Some(id) = existing {
+        state.active_buffer = Some(id);
+        let half = state.dims.map_or(10, |d| d.buffer_height() / 2);
+        if let Some(buf) = state.buf_mut(id) {
+            buf.cursor_row = target_row.min(buf.doc.line_count().saturating_sub(1));
+            buf.cursor_col = target_col;
+            buf.cursor_col_affinity = target_col;
+            buf.scroll_row = buf.cursor_row.saturating_sub(half);
+        }
+        reveal_active_buffer(state);
+    } else {
+        state.pending_open.set(Some(target_path.clone()));
+        state.jump.pending_position = Some(led_state::JumpPosition {
+            path: target_path,
+            row: target_row,
+            col: target_col,
+            scroll_offset: 0,
+        });
     }
 }
 
