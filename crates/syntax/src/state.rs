@@ -612,6 +612,9 @@ mod tests {
             fn pending_edit_ops(&self) -> Vec<led_core::EditOp> {
                 vec![]
             }
+            fn begin_undo_group(&self, _: usize) -> Arc<dyn Doc> {
+                unimplemented!()
+            }
             fn insert(&self, _: usize, _: &str) -> Arc<dyn Doc> {
                 unimplemented!()
             }

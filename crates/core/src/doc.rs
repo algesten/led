@@ -83,6 +83,20 @@ fn apply_op(rope: &mut Rope, op: &EditOp) {
 }
 
 impl UndoHistory {
+    /// Pre-create a pending group with the given cursor position.
+    /// If a pending group already exists, this is a no-op.
+    /// Subsequent `push_op` calls will join this group.
+    pub fn begin_group(&mut self, cursor_before: usize) {
+        if self.undo_cursor.is_some() {
+            self.flush_pending();
+            self.undo_cursor = None;
+        }
+        self.pending.get_or_insert_with(|| PendingEdit {
+            cursor_before,
+            ops: Vec::new(),
+        });
+    }
+
     /// Append an op to pending (creates one if none exists).
     /// Any new edit breaks the undo chain.
     pub fn push_op(&mut self, op: EditOp, cursor_before: usize) {
@@ -194,6 +208,7 @@ pub trait Doc: Send + Sync {
     fn pending_edit_ops(&self) -> Vec<EditOp>;
 
     // Edits — record undo ops into pending
+    fn begin_undo_group(&self, cursor_before: usize) -> Arc<dyn Doc>;
     fn insert(&self, char_idx: usize, text: &str) -> Arc<dyn Doc>;
     fn remove(&self, start: usize, end: usize) -> Arc<dyn Doc>;
 
@@ -347,6 +362,12 @@ impl Doc for TextDoc {
 
     fn pending_edit_ops(&self) -> Vec<EditOp> {
         self.undo.pending_edit_ops()
+    }
+
+    fn begin_undo_group(&self, cursor_before: usize) -> Arc<dyn Doc> {
+        let mut undo = self.undo.clone();
+        undo.begin_group(cursor_before);
+        Arc::new(self.with_rope_and_undo(self.rope.clone(), undo))
     }
 
     fn insert(&self, char_idx: usize, text: &str) -> Arc<dyn Doc> {

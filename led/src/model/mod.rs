@@ -918,7 +918,17 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
                 }
             }
             Mut::LspDiagnostics { path, diagnostics } => {
-                s.lsp_mut().diagnostics.insert(path, diagnostics);
+                // Drop stale diagnostics: if the buffer's live content differs
+                // from what was last saved (content_hash), these diagnostics
+                // refer to old line numbers and would highlight wrong locations.
+                let is_stale = s
+                    .buffers
+                    .values()
+                    .find(|b| b.path.as_ref() == Some(&path))
+                    .is_some_and(|b| b.doc.content_hash() != b.content_hash);
+                if !is_stale {
+                    s.lsp_mut().diagnostics.insert(path, diagnostics);
+                }
             }
             Mut::LspInlayHints { path, hints } => {
                 s.lsp_mut().inlay_hints.insert(path, hints);
@@ -1249,6 +1259,10 @@ fn apply_text_edits(buf: &mut BufferState, edits: &[led_lsp::TextEdit]) {
     });
 
     action::close_group_on_move(buf);
+    // Pre-seed the undo group with the actual cursor position so that
+    // undo restores the cursor correctly (not to the edit start).
+    let cursor_char = buf.doc.line_to_char(buf.cursor_row) + buf.cursor_col;
+    buf.doc = buf.doc.begin_undo_group(cursor_char);
     for te in sorted {
         let start = buf.doc.line_to_char(te.start_row) + te.start_col;
         let end = buf.doc.line_to_char(te.end_row) + te.end_col;
