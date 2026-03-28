@@ -530,6 +530,10 @@ pub struct LspState {
 
     // Format-on-save: trigger save after format completes
     pub pending_save_after_format: bool,
+
+    // Monotonic counter bumped on every save per path.
+    // Diagnostics carry the seq at request time; stale ones are rejected.
+    pub diagnostics_seq: HashMap<PathBuf, u64>,
 }
 
 #[derive(Debug, Clone)]

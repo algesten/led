@@ -12,11 +12,15 @@ pub(super) fn with_buf(state: &mut AppState, f: impl FnOnce(&mut BufferState, &D
         None => return,
     };
     if let Some(id) = state.active_buffer {
+        let snapshot = state
+            .buffers
+            .get(&id)
+            .map(|b| (b.doc.line_count(), b.cursor_row, b.doc.version()));
+        let Some((old_lines, edit_row, old_ver)) = snapshot else {
+            return;
+        };
         if let Some(buf) = state.buf_mut(id) {
-            let old_lines = buf.doc.line_count();
-            let edit_row = buf.cursor_row;
             f(buf, &dims);
-            mov::shift_highlights(buf, edit_row, old_lines);
             let (sr, ssl) = mov::adjust_scroll(buf, &dims);
             buf.scroll_row = sr;
             buf.scroll_sub_line = ssl;
@@ -25,12 +29,12 @@ pub(super) fn with_buf(state: &mut AppState, f: impl FnOnce(&mut BufferState, &D
                 buf.cursor_row,
                 buf.cursor_col,
             );
-            // Track save state: transition to Modified when doc becomes dirty
             if buf.doc.dirty() && buf.save_state == SaveState::Clean {
                 buf.save_state = SaveState::Modified;
             }
             buf.last_used = Instant::now();
         }
+        mov::shift_annotations(state, id, edit_row, old_lines, old_ver);
     }
 }
 

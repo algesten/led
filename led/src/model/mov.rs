@@ -4,7 +4,7 @@ use led_core::wrap::{
 };
 use std::rc::Rc;
 
-use led_state::{BufferState, Dimensions};
+use led_state::{AppState, BufferState, Dimensions};
 
 // ── Scroll ──
 
@@ -394,32 +394,83 @@ fn compute_move_down(
     }
 }
 
-// ── Highlight shift ──
+// ── Annotation shift ──
 
-/// Adjust cached highlight line numbers when lines are inserted or removed.
-/// Pure coordinate shift — the driver's full recompute replaces these within
-/// one frame.
-pub fn shift_highlights(buf: &mut BufferState, edit_row: usize, old_line_count: usize) {
-    let new_line_count = buf.doc.line_count();
-    if new_line_count == old_line_count {
+/// Shift cached syntax highlights and diagnostics when lines are inserted
+/// or removed.  Pure coordinate shift — the respective drivers send fresh
+/// data within one frame.
+/// `old_doc_version` is the `doc.version()` before the action ran.
+/// Pass it so we can detect whether the document actually changed.
+pub fn shift_annotations(
+    state: &mut AppState,
+    buf_id: led_core::BufferId,
+    edit_row: usize,
+    old_line_count: usize,
+    old_doc_version: u64,
+) {
+    let (new_line_count, path, new_doc_version) = {
+        let Some(buf) = state.buffers.get(&buf_id) else {
+            return;
+        };
+        (buf.doc.line_count(), buf.path.clone(), buf.doc.version())
+    };
+
+    // Nothing to do if the document wasn't modified by this action
+    if new_doc_version == old_doc_version {
         return;
     }
     let delta = new_line_count as isize - old_line_count as isize;
-    let shifted: Vec<_> = buf
-        .syntax_highlights
-        .iter()
-        .filter_map(|(line, span)| {
-            if *line <= edit_row {
-                Some((*line, span.clone()))
-            } else {
-                let new_line = (*line as isize + delta) as usize;
-                if new_line < new_line_count {
-                    Some((new_line, span.clone()))
-                } else {
-                    None
+
+    // 1. Syntax highlights (only shift when line count changed)
+    if delta != 0 {
+        if let Some(buf) = state.buf_mut(buf_id) {
+            let shifted: Vec<_> = buf
+                .syntax_highlights
+                .iter()
+                .filter_map(|(line, span)| {
+                    if *line <= edit_row {
+                        Some((*line, span.clone()))
+                    } else {
+                        let new_line = (*line as isize + delta) as usize;
+                        if new_line < new_line_count {
+                            Some((new_line, span.clone()))
+                        } else {
+                            None
+                        }
+                    }
+                })
+                .collect();
+            buf.syntax_highlights = Rc::new(shifted);
+        }
+    }
+
+    // 2. Diagnostics: invalidate on the edited row (content changed),
+    //    remove diagnostics on deleted lines, and shift lines below.
+    if let Some(path) = path {
+        let lsp = state.lsp_mut();
+        if let Some(diags) = lsp.diagnostics.get_mut(&path) {
+            diags.retain_mut(|d| {
+                // Remove diagnostics that touch the edited row
+                if d.start_row == edit_row || d.end_row == edit_row {
+                    return false;
                 }
-            }
-        })
-        .collect();
-    buf.syntax_highlights = Rc::new(shifted);
+                // Remove diagnostics within deleted line range
+                if delta < 0 {
+                    let deleted_start = edit_row + 1;
+                    let deleted_end = edit_row + (-delta) as usize;
+                    if d.start_row >= deleted_start && d.end_row <= deleted_end {
+                        return false;
+                    }
+                }
+                // Shift diagnostics below the edit
+                if d.start_row > edit_row {
+                    d.start_row = (d.start_row as isize + delta).max(0) as usize;
+                }
+                if d.end_row > edit_row {
+                    d.end_row = (d.end_row as isize + delta).max(0) as usize;
+                }
+                true
+            });
+        }
+    }
 }

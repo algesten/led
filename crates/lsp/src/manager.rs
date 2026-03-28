@@ -135,6 +135,7 @@ struct LspManager {
     quiescent: HashMap<LanguageId, bool>,
     need_diagnostics: bool,
     buffered_diagnostics: HashMap<PathBuf, Vec<crate::Diagnostic>>,
+    diagnostics_seq: HashMap<PathBuf, u64>,
     _file_watcher: Option<notify::RecommendedWatcher>,
     file_watcher_globs: Option<globset::GlobSet>,
     /// Rate-limit progress updates to the UI.
@@ -174,6 +175,7 @@ pub(crate) async fn run(
         quiescent: HashMap::new(),
         need_diagnostics: false,
         buffered_diagnostics: HashMap::new(),
+        diagnostics_seq: HashMap::new(),
         _file_watcher: None,
         file_watcher_globs: None,
         last_progress_sent: std::time::Instant::now(),
@@ -224,10 +226,12 @@ impl LspManager {
                     // the server re-diagnoses, and flush any buffered diagnostics.
                     self.send_did_save(&path);
                     for (diag_path, diagnostics) in self.buffered_diagnostics.drain() {
+                        let s = self.diagnostics_seq.get(&diag_path).copied().unwrap_or(0);
                         let _ = result_tx
                             .send(LspIn::Diagnostics {
                                 path: diag_path,
                                 diagnostics,
+                                seq: s,
                             })
                             .await;
                     }
@@ -253,15 +257,18 @@ impl LspManager {
                     }
                 }
             }
-            LspOut::BufferSaved { path } => {
+            LspOut::BufferSaved { path, seq } => {
+                self.diagnostics_seq.insert(path.clone(), seq);
                 self.send_did_save(&path);
                 // Flush diagnostics that arrived while need_diagnostics was false
                 // (e.g. from format-on-save didChange before didSave).
                 for (diag_path, diagnostics) in self.buffered_diagnostics.drain() {
+                    let s = self.diagnostics_seq.get(&diag_path).copied().unwrap_or(0);
                     let _ = result_tx
                         .send(LspIn::Diagnostics {
                             path: diag_path,
                             diagnostics,
+                            seq: s,
                         })
                         .await;
                 }
@@ -1020,8 +1027,13 @@ impl LspManager {
                         };
                         let diagnostics = convert_diagnostics(&params.diagnostics, &line_at);
                         if self.need_diagnostics {
+                            let s = self.diagnostics_seq.get(&path).copied().unwrap_or(0);
                             let _ = result_tx
-                                .send(LspIn::Diagnostics { path, diagnostics })
+                                .send(LspIn::Diagnostics {
+                                    path,
+                                    diagnostics,
+                                    seq: s,
+                                })
                                 .await;
                         } else {
                             self.buffered_diagnostics.insert(path, diagnostics);
@@ -1148,8 +1160,13 @@ impl LspManager {
             RequestResult::Diagnostics { path, raw } => {
                 let line_at = |row: usize| self.docs.get(&path).and_then(|d| doc_line(&**d, row));
                 let diagnostics = convert_diagnostics(&raw, &line_at);
+                let seq = self.diagnostics_seq.get(&path).copied().unwrap_or(0);
                 let _ = result_tx
-                    .send(LspIn::Diagnostics { path, diagnostics })
+                    .send(LspIn::Diagnostics {
+                        path,
+                        diagnostics,
+                        seq,
+                    })
                     .await;
             }
             RequestResult::Completion {

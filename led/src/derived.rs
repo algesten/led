@@ -703,7 +703,10 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
             let id = s.active_buffer?;
             let buf = s.buffers.get(&id)?;
             let path = buf.path.clone()?;
-            Some(LspOut::BufferSaved { path })
+            Some(LspOut::BufferSaved {
+                path,
+                seq: s.save_request.version(),
+            })
         })
         .stream();
 

@@ -49,7 +49,15 @@ pub fn lsp_of(lsp_in: &Stream<LspIn>, state: &Stream<Rc<AppState>>) -> Stream<Mu
     let diagnostics_s = lsp_in
         .filter(|ev| matches!(ev, LspIn::Diagnostics { .. }))
         .map(|ev| match ev {
-            LspIn::Diagnostics { path, diagnostics } => Mut::LspDiagnostics { path, diagnostics },
+            LspIn::Diagnostics {
+                path,
+                diagnostics,
+                seq,
+            } => Mut::LspDiagnostics {
+                path,
+                diagnostics,
+                seq,
+            },
             _ => unreachable!(),
         })
         .stream();

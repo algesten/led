@@ -45,9 +45,13 @@ pub(super) fn handle_completion_action(state: &mut AppState, action: &Action) ->
                         };
 
                         // Apply edit and move cursor to end of inserted text
+                        let (old_lines, old_ver) = state
+                            .buffers
+                            .get(&id)
+                            .map(|b| (b.doc.line_count(), b.doc.version()))
+                            .unwrap_or((0, 0));
+                        let edit_row = te.start_row;
                         if let Some(buf) = state.buf_mut(id) {
-                            let old_lines = buf.doc.line_count();
-                            let edit_row = te.start_row;
                             super::super::apply_text_edits(buf, &[te.clone()]);
                             let new_text = &te.new_text;
                             let newline_count = new_text.chars().filter(|c| *c == '\n').count();
@@ -63,22 +67,26 @@ pub(super) fn handle_completion_action(state: &mut AppState, action: &Action) ->
                                     .unwrap_or(0);
                             }
                             buf.cursor_col_affinity = buf.cursor_col;
-                            mov::shift_highlights(buf, edit_row, old_lines);
                         }
+                        mov::shift_annotations(state, id, edit_row, old_lines, old_ver);
 
                         // Apply additional edits (auto-imports etc.)
                         if !item.additional_edits.is_empty() {
+                            let (old_lines, old_ver) = state
+                                .buffers
+                                .get(&id)
+                                .map(|b| (b.doc.line_count(), b.doc.version()))
+                                .unwrap_or((0, 0));
+                            let edit_row = item
+                                .additional_edits
+                                .iter()
+                                .map(|e| e.start_row)
+                                .min()
+                                .unwrap_or(0);
                             if let Some(buf) = state.buf_mut(id) {
-                                let old_lines = buf.doc.line_count();
-                                let edit_row = item
-                                    .additional_edits
-                                    .iter()
-                                    .map(|e| e.start_row)
-                                    .min()
-                                    .unwrap_or(0);
                                 super::super::apply_text_edits(buf, &item.additional_edits);
-                                mov::shift_highlights(buf, edit_row, old_lines);
                             }
+                            mov::shift_annotations(state, id, edit_row, old_lines, old_ver);
                         }
                     }
                     // Request resolve for additional edits from server

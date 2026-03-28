@@ -296,9 +296,12 @@ pub fn handle_action(state: &mut AppState, action: Action) -> bool {
         Action::KillLine => {
             let mut killed_text = None;
             if let (Some(dims), Some(id)) = (state.dims, state.active_buffer) {
+                let (old_lines, edit_row, old_ver) = state
+                    .buffers
+                    .get(&id)
+                    .map(|b| (b.doc.line_count(), b.cursor_row, b.doc.version()))
+                    .unwrap_or((0, 0, 0));
                 if let Some(buf) = state.buf_mut(id) {
-                    let old_lines = buf.doc.line_count();
-                    let edit_row = buf.cursor_row;
                     close_group_on_move(buf);
                     if let Some((doc, killed, r, c, a)) = edit::kill_line(buf) {
                         buf.doc = doc;
@@ -307,7 +310,6 @@ pub fn handle_action(state: &mut AppState, action: Action) -> bool {
                         buf.cursor_col_affinity = a;
                         killed_text = Some(killed);
                     }
-                    mov::shift_highlights(buf, edit_row, old_lines);
                     let (sr, ssl) = mov::adjust_scroll(buf, &dims);
                     buf.scroll_row = sr;
                     buf.scroll_sub_line = ssl;
@@ -316,6 +318,7 @@ pub fn handle_action(state: &mut AppState, action: Action) -> bool {
                     }
                     buf.last_used = Instant::now();
                 }
+                mov::shift_annotations(state, id, edit_row, old_lines, old_ver);
             }
             if let Some(killed) = killed_text {
                 state.kill_ring.accumulate(&killed);
@@ -325,9 +328,12 @@ pub fn handle_action(state: &mut AppState, action: Action) -> bool {
             let mut killed_text = None;
             let mut no_region = false;
             if let (Some(dims), Some(id)) = (state.dims, state.active_buffer) {
+                let (old_lines, edit_row, old_ver) = state
+                    .buffers
+                    .get(&id)
+                    .map(|b| (b.doc.line_count(), b.cursor_row, b.doc.version()))
+                    .unwrap_or((0, 0, 0));
                 if let Some(buf) = state.buf_mut(id) {
-                    let old_lines = buf.doc.line_count();
-                    let edit_row = buf.cursor_row;
                     close_group_on_move(buf);
                     if let Some((doc, killed, r, c, a)) = edit::kill_region(buf) {
                         buf.doc = doc;
@@ -340,7 +346,6 @@ pub fn handle_action(state: &mut AppState, action: Action) -> bool {
                         buf.mark = None;
                         no_region = true;
                     }
-                    mov::shift_highlights(buf, edit_row, old_lines);
                     let (sr, ssl) = mov::adjust_scroll(buf, &dims);
                     buf.scroll_row = sr;
                     buf.scroll_sub_line = ssl;
@@ -349,6 +354,7 @@ pub fn handle_action(state: &mut AppState, action: Action) -> bool {
                     }
                     buf.last_used = Instant::now();
                 }
+                mov::shift_annotations(state, id, edit_row, old_lines, old_ver);
             } else {
                 no_region = true;
             }

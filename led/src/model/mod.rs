@@ -513,6 +513,12 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
                     .as_ref()
                     .and_then(|p| p.file_name())
                     .map(|n| n.to_string_lossy().into_owned());
+                // Record the save_request version as the diagnostics seq for this path,
+                // so we can reject stale diagnostics from earlier saves.
+                let save_ver = s.save_request.version();
+                if let Some(path) = buf.path.as_ref() {
+                    s.lsp_mut().diagnostics_seq.insert(path.clone(), save_ver);
+                }
                 s.buffers_mut().insert(id, Rc::new(buf));
                 if let Some(buf) = s.buf_mut(id) {
                     buf.change_seq = next_change_seq();
@@ -877,12 +883,16 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
                         .find(|b| b.path.as_ref() == Some(&fe.path))
                         .map(|b| b.id);
                     if let Some(id) = buf_id {
+                        let (old_lines, old_ver) = s
+                            .buffers
+                            .get(&id)
+                            .map(|b| (b.doc.line_count(), b.doc.version()))
+                            .unwrap_or((0, 0));
+                        let edit_row = fe.edits.iter().map(|e| e.start_row).min().unwrap_or(0);
                         if let Some(buf) = s.buf_mut(id) {
-                            let old_lines = buf.doc.line_count();
-                            let edit_row = fe.edits.iter().map(|e| e.start_row).min().unwrap_or(0);
                             apply_text_edits(buf, &fe.edits);
-                            mov::shift_highlights(buf, edit_row, old_lines);
                         }
+                        mov::shift_annotations(&mut s, id, edit_row, old_lines, old_ver);
                     }
                 }
                 // Format-done signal (empty edits) → trigger pending save
@@ -917,16 +927,13 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
                     s.focus = PanelSlot::Overlay;
                 }
             }
-            Mut::LspDiagnostics { path, diagnostics } => {
-                // Drop stale diagnostics: if the buffer's live content differs
-                // from what was last saved (content_hash), these diagnostics
-                // refer to old line numbers and would highlight wrong locations.
-                let is_stale = s
-                    .buffers
-                    .values()
-                    .find(|b| b.path.as_ref() == Some(&path))
-                    .is_some_and(|b| b.doc.content_hash() != b.content_hash);
-                if !is_stale {
+            Mut::LspDiagnostics {
+                path,
+                diagnostics,
+                seq,
+            } => {
+                let current_seq = s.lsp.diagnostics_seq.get(&path).copied().unwrap_or(0);
+                if seq >= current_seq {
                     s.lsp_mut().diagnostics.insert(path, diagnostics);
                 }
             }
@@ -1164,6 +1171,7 @@ enum Mut {
     LspDiagnostics {
         path: PathBuf,
         diagnostics: Vec<led_lsp::Diagnostic>,
+        seq: u64,
     },
     LspInlayHints {
         path: PathBuf,
@@ -1259,9 +1267,10 @@ fn apply_text_edits(buf: &mut BufferState, edits: &[led_lsp::TextEdit]) {
     });
 
     action::close_group_on_move(buf);
-    // Pre-seed the undo group with the actual cursor position so that
-    // undo restores the cursor correctly (not to the edit start).
+    // Flush any pending undo group and pre-seed a new one with the actual
+    // cursor position so that undo restores the cursor correctly.
     let cursor_char = buf.doc.line_to_char(buf.cursor_row) + buf.cursor_col;
+    buf.doc = buf.doc.close_undo_group();
     buf.doc = buf.doc.begin_undo_group(cursor_char);
     for te in sorted {
         let start = buf.doc.line_to_char(te.start_row) + te.start_col;
