@@ -196,14 +196,12 @@ pub fn driver(out: Stream<SyntaxOut>) -> Stream<SyntaxIn> {
                             if new_op_count == 1 {
                                 bs.state.apply_edit_op(&ops[0], &*doc);
                             } else {
-                                // Replay ops against a shadow doc so each
-                                // op gets byte positions from the correct
-                                // intermediate state.
+                                // Replay ops: mark each edit using the pre-edit
+                                // doc for correct byte positions, then reparse
+                                // once with the final doc.
                                 let mut shadow: Arc<dyn Doc> = bs.last_doc.clone();
                                 for op in ops {
-                                    // Apply to tree using pre-edit doc for
-                                    // correct char→byte mapping.
-                                    bs.state.apply_edit_op(op, &*shadow);
+                                    bs.state.mark_edit(op, &*shadow);
                                     // Advance shadow to match post-edit state.
                                     let off =
                                         op.offset.min(shadow.byte_to_char(shadow.len_bytes()));
@@ -215,6 +213,7 @@ pub fn driver(out: Stream<SyntaxOut>) -> Stream<SyntaxIn> {
                                         shadow = shadow.insert(off, &op.new_text);
                                     }
                                 }
+                                bs.state.finish_edits(&*doc);
                             }
                         } else {
                             bs.state.reparse(&*doc);

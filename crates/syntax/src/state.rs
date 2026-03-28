@@ -113,19 +113,25 @@ impl SyntaxState {
     /// Apply an EditOp from the document to the parse tree.
     /// The doc should already be the NEW doc (after the edit was applied).
     /// We reconstruct the InputEdit from the EditOp and re-parse.
-    pub fn apply_edit_op(&mut self, op: &EditOp, doc: &dyn Doc) {
-        // Reconstruct InputEdit from EditOp
-        // EditOp { offset (char), old_text, new_text }
-        let start_byte = doc.char_to_byte(op.offset.min(doc.byte_to_char(doc.len_bytes())));
-        let start_line = doc.char_to_line(op.offset.min(doc.byte_to_char(doc.len_bytes())));
-        let start_line_byte = doc.line_to_byte(start_line);
+    /// Mark the tree with an edit (tree.edit()) using byte positions from
+    /// `pre_edit_doc`, but do NOT reparse yet.  Call `finish_edits` once
+    /// after all edits to reparse with the final doc.
+    pub fn mark_edit(&mut self, op: &EditOp, pre_edit_doc: &dyn Doc) {
+        let start_byte = pre_edit_doc.char_to_byte(
+            op.offset
+                .min(pre_edit_doc.byte_to_char(pre_edit_doc.len_bytes())),
+        );
+        let start_line = pre_edit_doc.char_to_line(
+            op.offset
+                .min(pre_edit_doc.byte_to_char(pre_edit_doc.len_bytes())),
+        );
+        let start_line_byte = pre_edit_doc.line_to_byte(start_line);
 
         let start_position = tree_sitter::Point {
             row: start_line,
             column: start_byte - start_line_byte,
         };
 
-        // Compute old_end from old_text
         let old_len_bytes = op.old_text.len();
         let old_end_byte = start_byte + old_len_bytes;
         let mut old_end_row = start_position.row;
@@ -139,7 +145,6 @@ impl SyntaxState {
             }
         }
 
-        // Compute new_end from new_text
         let new_len_bytes = op.new_text.len();
         let new_end_byte = start_byte + new_len_bytes;
         let mut new_end_row = start_position.row;
@@ -169,10 +174,13 @@ impl SyntaxState {
         };
 
         self.tree.edit(&edit);
+    }
+
+    /// Reparse the tree after one or more `mark_edit` calls.
+    pub fn finish_edits(&mut self, doc: &dyn Doc) {
         if let Some(new_tree) = parse_doc(&mut self.parser, doc, Some(&self.tree)) {
             self.tree = new_tree;
         }
-
         if let Some(ref inj_config) = self.injections_config {
             self.injection_layers = injection::build_injection_layers(
                 inj_config,
@@ -181,6 +189,13 @@ impl SyntaxState {
                 &mut self.injection_query_cache,
             );
         }
+    }
+
+    /// Apply a single edit op: mark the edit and reparse in one step.
+    /// `doc` must be the post-edit document.
+    pub fn apply_edit_op(&mut self, op: &EditOp, doc: &dyn Doc) {
+        self.mark_edit(op, doc);
+        self.finish_edits(doc);
     }
 
     /// Full re-parse without incremental info.  Use when edit ops are
