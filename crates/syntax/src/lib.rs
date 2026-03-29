@@ -23,7 +23,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use led_core::rx::Stream;
-use led_core::{BufferId, Doc, EditOp};
+use led_core::{Doc, EditOp};
 use led_state::{BracketPair, HighlightSpan as StateHighlightSpan};
 use tokio::sync::mpsc;
 
@@ -32,12 +32,11 @@ use tokio::sync::mpsc;
 #[derive(Clone)]
 pub enum SyntaxOut {
     BufferOpened {
-        buf_id: BufferId,
         path: PathBuf,
         doc: Arc<dyn Doc>,
+        version: u64,
     },
     BufferChanged {
-        buf_id: BufferId,
         path: PathBuf,
         doc: Arc<dyn Doc>,
         version: u64,
@@ -49,17 +48,18 @@ pub enum SyntaxOut {
         indent_row: Option<usize>,
     },
     BufferClosed {
-        buf_id: BufferId,
+        path: PathBuf,
     },
     Reparse {
-        buf_id: BufferId,
+        path: PathBuf,
         doc: Arc<dyn Doc>,
+        version: u64,
     },
 }
 
 #[derive(Clone)]
 pub struct SyntaxIn {
-    pub buf_id: BufferId,
+    pub path: PathBuf,
     pub doc_version: u64,
     pub highlights: Vec<(usize, StateHighlightSpan)>,
     pub bracket_pairs: Vec<BracketPair>,
@@ -97,21 +97,21 @@ pub fn driver(out: Stream<SyntaxOut>) -> Stream<SyntaxIn> {
             cached_brackets: Vec<led_state::BracketPair>,
             reindent_chars: Arc<[char]>,
         }
-        let mut states: HashMap<BufferId, BufSyntax> = HashMap::new();
+        let mut states: HashMap<PathBuf, BufSyntax> = HashMap::new();
 
         while let Some(cmd) = cmd_rx.recv().await {
             match cmd {
-                SyntaxOut::BufferOpened { buf_id, path, doc } => {
+                SyntaxOut::BufferOpened { path, doc, version } => {
                     if let Some(ss) = SyntaxState::from_path_and_doc(&path, &*doc) {
                         let highlights = ss.highlights_for_lines(&*doc, 0, 50);
                         let state_highlights = to_state_highlights(&highlights);
                         let bracket_pairs = to_state_brackets(&ss, &*doc, 0, 50);
                         let matching = ss.matching_bracket(&*doc, 0, 0);
 
-                        let ver = doc.version();
+                        let ver = version;
                         let reindent_chars = ss.reindent_chars().clone();
                         states.insert(
-                            buf_id,
+                            path.clone(),
                             BufSyntax {
                                 state: ss,
                                 last_ver: ver,
@@ -126,7 +126,7 @@ pub fn driver(out: Stream<SyntaxOut>) -> Stream<SyntaxIn> {
 
                         let _ = tx
                             .send(SyntaxIn {
-                                buf_id,
+                                path,
                                 doc_version: ver,
                                 highlights: state_highlights,
                                 bracket_pairs,
@@ -139,7 +139,6 @@ pub fn driver(out: Stream<SyntaxOut>) -> Stream<SyntaxIn> {
                     }
                 }
                 SyntaxOut::BufferChanged {
-                    buf_id,
                     path,
                     doc,
                     version,
@@ -151,11 +150,11 @@ pub fn driver(out: Stream<SyntaxOut>) -> Stream<SyntaxIn> {
                     indent_row,
                 } => {
                     // Auto-initialize if not yet opened
-                    if !states.contains_key(&buf_id) {
+                    if !states.contains_key(&path) {
                         if let Some(ss) = SyntaxState::from_path_and_doc(&path, &*doc) {
                             let reindent_chars = ss.reindent_chars().clone();
                             states.insert(
-                                buf_id,
+                                path.clone(),
                                 BufSyntax {
                                     state: ss,
                                     last_ver: version,
@@ -171,7 +170,7 @@ pub fn driver(out: Stream<SyntaxOut>) -> Stream<SyntaxIn> {
                             if indent_row.is_some() {
                                 let _ = tx
                                     .send(SyntaxIn {
-                                        buf_id,
+                                        path,
                                         doc_version: version,
                                         highlights: vec![],
                                         bracket_pairs: vec![],
@@ -185,7 +184,7 @@ pub fn driver(out: Stream<SyntaxOut>) -> Stream<SyntaxIn> {
                             continue;
                         }
                     }
-                    let bs = states.get_mut(&buf_id).unwrap();
+                    let bs = states.get_mut(&path).unwrap();
 
                     // Update parse tree if doc changed
                     let doc_changed = version != bs.last_ver;
@@ -248,7 +247,7 @@ pub fn driver(out: Stream<SyntaxOut>) -> Stream<SyntaxIn> {
 
                     let _ = tx
                         .send(SyntaxIn {
-                            buf_id,
+                            path,
                             doc_version: version,
                             highlights: bs.cached_highlights.clone(),
                             bracket_pairs: bs.cached_brackets.clone(),
@@ -259,13 +258,12 @@ pub fn driver(out: Stream<SyntaxOut>) -> Stream<SyntaxIn> {
                         })
                         .await;
                 }
-                SyntaxOut::BufferClosed { buf_id } => {
-                    states.remove(&buf_id);
+                SyntaxOut::BufferClosed { path } => {
+                    states.remove(&path);
                 }
-                SyntaxOut::Reparse { buf_id, doc } => {
-                    if let Some(bs) = states.get_mut(&buf_id) {
+                SyntaxOut::Reparse { path, doc, version } => {
+                    if let Some(bs) = states.get_mut(&path) {
                         bs.state.reparse(&*doc);
-                        let version = doc.version();
                         bs.last_ver = version;
                         bs.last_doc = doc.clone();
                         let scroll_row = bs.last_scroll;
@@ -277,7 +275,7 @@ pub fn driver(out: Stream<SyntaxOut>) -> Stream<SyntaxIn> {
                         bs.cached_brackets = to_state_brackets(&bs.state, &*doc, scroll_row, end);
                         let _ = tx
                             .send(SyntaxIn {
-                                buf_id,
+                                path,
                                 doc_version: version,
                                 highlights: bs.cached_highlights.clone(),
                                 bracket_pairs: bs.cached_brackets.clone(),

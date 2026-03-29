@@ -457,7 +457,9 @@ mod tests {
 
         use crate::display::{self, OverlayContent};
         use crate::render;
-        use led_core::{BufferId, DocId, Startup, TextDoc};
+        use std::path::PathBuf;
+
+        use led_core::{DocId, Startup, TextDoc};
         use led_state::{AppState, BufferState, Dimensions};
 
         let theme_toml = include_str!("../../config-file/src/default_theme.toml");
@@ -466,8 +468,9 @@ mod tests {
             file: Arc::new(theme),
         };
 
+        let test_path: PathBuf = "test.rs".into();
         let doc = TextDoc::from_reader("hello world\n".as_bytes()).unwrap();
-        let buf = BufferState::new(BufferId(1), DocId(1), Arc::new(doc), Some("test.rs".into()));
+        let buf = BufferState::new(DocId(1), Arc::new(doc), Some(test_path.clone()), Default::default());
 
         let mut state = AppState::new(Startup {
             headless: true,
@@ -480,8 +483,8 @@ mod tests {
         });
         state.dims = Some(Dimensions::new(40, 10, false));
         state.config_theme = Some(config_theme);
-        state.active_buffer = Some(BufferId(1));
-        std::rc::Rc::make_mut(&mut state.buffers).insert(BufferId(1), std::rc::Rc::new(buf));
+        state.active_buffer = Some(test_path.clone());
+        std::rc::Rc::make_mut(&mut state.buffers).insert(test_path, std::rc::Rc::new(buf));
 
         let display_inputs = display::display_inputs(&state).expect("display_inputs");
         let cursor_inputs = display::cursor_inputs(&state).expect("cursor_inputs");

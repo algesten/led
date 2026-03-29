@@ -10,11 +10,81 @@ use serde::{Deserialize, Serialize};
 use led_config_file::ConfigFile;
 use led_core::keys::{Keymap, Keys};
 use led_core::theme::Theme;
-use led_core::{BufferId, Doc, DocId, PanelSlot, Startup, Versioned};
+use led_core::{Doc, DocId, EditOp, PanelSlot, Startup, UndoHistory, Versioned};
 pub use led_workspace::Workspace;
 pub use led_workspace::{SessionBuffer, SessionRestorePhase};
 
 pub mod file_search;
+
+// ── BufferStatus ──
+
+/// Per-file annotations that must stay in sync with content.
+/// Lives inside `BufferState` for open buffers, in a global map for unopened files.
+#[derive(Debug, Clone, Default)]
+pub struct BufferStatus {
+    diagnostics: Vec<led_lsp::Diagnostic>,
+    inlay_hints: Vec<led_lsp::InlayHint>,
+    git_line_statuses: Vec<led_core::git::LineStatus>,
+}
+
+impl BufferStatus {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn diagnostics(&self) -> &[led_lsp::Diagnostic] {
+        &self.diagnostics
+    }
+
+    pub fn inlay_hints(&self) -> &[led_lsp::InlayHint] {
+        &self.inlay_hints
+    }
+
+    pub fn git_line_statuses(&self) -> &[led_core::git::LineStatus] {
+        &self.git_line_statuses
+    }
+
+    fn set_diagnostics(&mut self, diags: Vec<led_lsp::Diagnostic>) {
+        self.diagnostics = diags;
+    }
+
+    fn set_inlay_hints(&mut self, hints: Vec<led_lsp::InlayHint>) {
+        self.inlay_hints = hints;
+    }
+
+    fn clear_inlay_hints(&mut self) {
+        self.inlay_hints.clear();
+    }
+
+    fn set_git_line_statuses(&mut self, statuses: Vec<led_core::git::LineStatus>) {
+        self.git_line_statuses = statuses;
+    }
+
+    /// Shift line positions after a structural edit.
+    fn shift_lines(&mut self, edit_row: usize, delta: isize) {
+        self.diagnostics.retain_mut(|d| {
+            // Remove diagnostics on deleted lines
+            if delta < 0 {
+                let deleted_start = edit_row + 1;
+                let deleted_end = edit_row + (-delta) as usize;
+                if d.start_row >= deleted_start && d.end_row <= deleted_end {
+                    return false;
+                }
+            }
+            // Shift diagnostics below the edit
+            if d.start_row > edit_row {
+                d.start_row = (d.start_row as isize + delta).max(0) as usize;
+            }
+            if d.end_row > edit_row {
+                d.end_row = (d.end_row as isize + delta).max(0) as usize;
+            }
+            true
+        });
+        // Git line statuses become stale on structural edits — clear them.
+        // The driver will re-fetch after the next save.
+        self.git_line_statuses.clear();
+    }
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct PreviewRequest {
@@ -191,54 +261,123 @@ pub struct ISearchState {
 
 #[derive(Clone)]
 pub struct BufferState {
-    pub id: BufferId,
-    pub doc_id: DocId,
-    pub doc: Arc<dyn Doc>,
-    pub path: Option<PathBuf>,
-    pub cursor_row: usize,
-    pub cursor_col: usize,
-    pub cursor_col_affinity: usize,
-    pub scroll_row: usize,
-    pub scroll_sub_line: usize,
-    pub tab_order: usize,
-    pub mark: Option<(usize, usize)>,
-    pub last_edit_kind: Option<EditKind>,
-    pub save_state: SaveState,
+    // Identity
+    doc_id: DocId,
+    path: Option<PathBuf>,
+
+    // Content (None for ghost buffers — path known but file not loaded)
+    doc: Option<Arc<dyn Doc>>,
+
+    // Editing state (owned by buffer, not doc)
+    version: u64,
+    undo: UndoHistory,
+
+    // Cursor
+    cursor_row: usize,
+    cursor_col: usize,
+    cursor_col_affinity: usize,
+    mark: Option<(usize, usize)>,
+
+    // Scroll
+    scroll_row: usize,
+    scroll_sub_line: usize,
+
+    // Edit tracking
+    last_edit_kind: Option<EditKind>,
+    save_state: SaveState,
+
     // Undo persistence
-    pub persisted_undo_len: usize,
-    pub chain_id: Option<String>,
-    pub last_seen_seq: i64,
-    pub content_hash: u64,
-    /// Monotonically increasing stamp, bumped on every meaningful modification
-    /// (flush, save, sync apply). Used to detect self-echoes at the model level.
-    pub change_seq: u64,
-    /// Why the buffer content last changed. Set by the reducer on every
-    /// `Mut::BufferUpdate` (compiler-enforced) and after `Mut::Action`.
-    /// Read by derived to decide e.g. whether the LSP needs a didSave.
-    pub change_reason: ChangeReason,
+    persisted_undo_len: usize,
+    chain_id: Option<String>,
+    last_seen_seq: i64,
+    content_hash: u64,
+    change_seq: u64,
+    change_reason: ChangeReason,
+
     // Incremental search
     pub isearch: Option<ISearchState>,
     pub last_search: Option<String>,
-    // Syntax highlighting
-    pub syntax_highlights: Rc<Vec<(usize, HighlightSpan)>>,
-    pub bracket_pairs: Rc<Vec<BracketPair>>,
-    pub matching_bracket: Option<(usize, usize)>,
-    pub pending_indent_row: Option<usize>,
-    pub pending_tab_fallback: bool,
-    /// Characters that trigger re-indentation when typed, declared by the syntax highlighter.
-    pub reindent_chars: Arc<[char]>,
-    pub completion_triggers: Vec<String>,
-    pub is_preview: bool,
-    pub last_used: Instant,
+
+    // Cached annotations (from syntax driver)
+    syntax_highlights: Rc<Vec<(usize, HighlightSpan)>>,
+    bracket_pairs: Rc<Vec<BracketPair>>,
+    matching_bracket: Option<(usize, usize)>,
+
+    // Indent
+    pending_indent_row: Option<usize>,
+    pending_tab_fallback: bool,
+    reindent_chars: Arc<[char]>,
+
+    // LSP
+    completion_triggers: Vec<String>,
+
+    // UI
+    tab_order: usize,
+    is_preview: bool,
+    last_used: Instant,
+
+    // Per-file annotations (diagnostics, inlay hints, git line status)
+    status: BufferStatus,
+
+    // Guards against double-shifting annotations when edit() and an outer
+    // helper both call sync_annotations for the same doc transition.
+    annotations_synced_ver: u64,
 }
 
 impl BufferState {
-    pub fn new(id: BufferId, doc_id: DocId, doc: Arc<dyn Doc>, path: Option<PathBuf>) -> Self {
+    /// Create a ghost buffer — path known, no doc loaded.
+    /// Holds annotations (diagnostics, git status) until the file is opened.
+    pub fn ghost(path: PathBuf) -> Self {
+        Self {
+            doc_id: DocId(0),
+            doc: None,
+            version: 0,
+            undo: UndoHistory::default(),
+            path: Some(path),
+            cursor_row: 0,
+            cursor_col: 0,
+            cursor_col_affinity: 0,
+            scroll_row: 0,
+            scroll_sub_line: 0,
+            tab_order: 0,
+            mark: None,
+            last_edit_kind: None,
+            save_state: SaveState::Clean,
+            persisted_undo_len: 0,
+            chain_id: None,
+            last_seen_seq: 0,
+            content_hash: 0,
+            change_seq: 0,
+            change_reason: ChangeReason::Init,
+            isearch: None,
+            last_search: None,
+            syntax_highlights: Rc::new(Vec::new()),
+            bracket_pairs: Rc::new(Vec::new()),
+            matching_bracket: None,
+            pending_indent_row: None,
+            pending_tab_fallback: false,
+            reindent_chars: Arc::from([]),
+            completion_triggers: Vec::new(),
+            is_preview: false,
+            last_used: Instant::now(),
+            status: BufferStatus::new(),
+            annotations_synced_ver: 0,
+        }
+    }
+
+    /// Create a loaded buffer with doc present.
+    pub fn new(
+        doc_id: DocId,
+        doc: Arc<dyn Doc>,
+        path: Option<PathBuf>,
+        status: BufferStatus,
+    ) -> Self {
         let content_hash = doc.content_hash();
         Self {
-            id,
             doc_id,
-            doc,
+            doc: Some(doc),
+            version: 0,
+            undo: UndoHistory::default(),
             path,
             cursor_row: 0,
             cursor_col: 0,
@@ -266,6 +405,618 @@ impl BufferState {
             completion_triggers: Vec::new(),
             is_preview: false,
             last_used: Instant::now(),
+            status,
+            annotations_synced_ver: 0,
+        }
+    }
+
+    // ── Identity ──
+
+    pub fn doc_id(&self) -> DocId { self.doc_id }
+    pub fn path(&self) -> Option<&Path> { self.path.as_deref() }
+    pub fn path_buf(&self) -> Option<&PathBuf> { self.path.as_ref() }
+    pub fn is_preview(&self) -> bool { self.is_preview }
+    pub fn set_preview(&mut self, preview: bool) { self.is_preview = preview; }
+
+    // ── Editing state ──
+
+    /// Monotonic version counter. Incremented on every content edit, undo, redo.
+    pub fn version(&self) -> u64 { self.version }
+
+    /// Whether the buffer has unsaved changes.
+    pub fn is_dirty(&self) -> bool {
+        self.undo.has_pending() || self.undo.distance_from_save() != 0
+    }
+
+    /// Access the undo history (read-only, for persistence).
+    pub fn undo_history(&self) -> &UndoHistory { &self.undo }
+
+    /// Number of committed undo entries (excludes pending).
+    pub fn undo_history_len(&self) -> usize { self.undo.entry_count() }
+
+    /// Return the edit ops accumulated in the current (unflushed) pending group.
+    pub fn pending_edit_ops(&self) -> Vec<EditOp> { self.undo.pending_edit_ops() }
+
+    // ── Document ──
+
+    /// Whether this buffer has a loaded document (not a ghost).
+    pub fn is_loaded(&self) -> bool { self.doc.is_some() }
+
+    /// Get the document. Panics on ghost buffers.
+    pub fn doc(&self) -> &Arc<dyn Doc> {
+        self.doc.as_ref().unwrap_or_else(|| {
+            panic!("doc() called on ghost buffer: path={:?}", self.path)
+        })
+    }
+
+    /// Load a document into a ghost buffer.
+    pub fn load_doc(&mut self, doc_id: DocId, doc: Arc<dyn Doc>) {
+        self.doc_id = doc_id;
+        self.content_hash = doc.content_hash();
+        self.doc = Some(doc);
+    }
+
+    /// Edit the document at the cursor row. Shifts annotations and marks
+    /// modified automatically. The closure returns `(new_doc, R)` where `R`
+    /// is forwarded to the caller (typically cursor position info).
+    pub fn edit<R>(&mut self, f: impl FnOnce(&Arc<dyn Doc>) -> (Arc<dyn Doc>, R)) -> R {
+        let doc = self.doc.as_ref().expect("edit() called on ghost buffer");
+        let old_lines = doc.line_count();
+        let old_ver = self.version;
+        let edit_row = self.cursor_row;
+        let (new_doc, result) = f(doc);
+        self.version += 1;
+        self.doc = Some(new_doc);
+        self.sync_annotations(edit_row, old_lines, old_ver);
+        result
+    }
+
+    /// Edit the document at a specific row. Shifts annotations and marks
+    /// modified automatically. The closure returns `(new_doc, R)`.
+    pub fn edit_at<R>(&mut self, edit_row: usize, f: impl FnOnce(&Arc<dyn Doc>) -> (Arc<dyn Doc>, R)) -> R {
+        let doc = self.doc.as_ref().expect("edit_at() called on ghost buffer");
+        let old_lines = doc.line_count();
+        let old_ver = self.version;
+        let (new_doc, result) = f(doc);
+        self.version += 1;
+        self.doc = Some(new_doc);
+        self.sync_annotations(edit_row, old_lines, old_ver);
+        result
+    }
+
+    // ── Primitive text mutations ──
+
+    /// Insert text at a character offset. Records undo op, shifts annotations.
+    pub fn insert_text(&mut self, char_idx: usize, text: &str) {
+        let doc = self.doc.as_ref().expect("insert_text on ghost");
+        let old_lines = doc.line_count();
+        let old_ver = self.version;
+        let new_doc = doc.insert(char_idx, text);
+        self.undo.push_op(
+            EditOp { offset: char_idx, old_text: String::new(), new_text: text.to_string() },
+            char_idx,
+        );
+        self.version += 1;
+        self.doc = Some(new_doc);
+        self.sync_annotations(self.cursor_row, old_lines, old_ver);
+    }
+
+    /// Remove text between two character offsets. Records undo op, shifts annotations.
+    pub fn remove_text(&mut self, start: usize, end: usize) {
+        let doc = self.doc.as_ref().expect("remove_text on ghost");
+        let old_lines = doc.line_count();
+        let old_ver = self.version;
+        let old_text = doc.slice(start, end);
+        let new_doc = doc.remove(start, end);
+        self.undo.push_op(
+            EditOp { offset: start, old_text, new_text: String::new() },
+            start,
+        );
+        self.version += 1;
+        self.doc = Some(new_doc);
+        self.sync_annotations(self.cursor_row, old_lines, old_ver);
+    }
+
+    /// Replace the document wholesale (undo, redo, external reload, sync).
+    /// Clears all cached annotations and invalidates in-flight diagnostics.
+    fn replace_doc(&mut self, doc: Arc<dyn Doc>) {
+        self.doc = Some(doc);
+        self.syntax_highlights = Rc::new(Vec::new());
+        self.bracket_pairs = Rc::new(Vec::new());
+        self.matching_bracket = None;
+        self.status = BufferStatus::new();
+        self.mark_modified_if_dirty();
+    }
+
+    // ── Save lifecycle ──
+
+    /// Save completed: docstore confirmed save. Updates doc (undo state
+    /// Apply pre-save cleanup: strip trailing whitespace, ensure final newline.
+    /// Edits are recorded in undo so they can be undone.
+    pub fn apply_save_cleanup(&mut self) {
+        // Collect edits first to avoid borrow conflict
+        let doc = self.doc.as_ref().expect("cleanup on ghost");
+        let line_count = doc.line_count();
+        let mut removals: Vec<(usize, usize)> = Vec::new();
+
+        for line_idx in (0..line_count).rev() {
+            let line = doc.line(line_idx);
+            let trimmed = line.trim_end();
+            if trimmed.len() < line.len() {
+                let line_start = doc.line_to_char(line_idx);
+                let start = line_start + trimmed.chars().count();
+                let end = line_start + line.chars().count();
+                removals.push((start, end));
+            }
+        }
+
+        let needs_final_newline = {
+            let last = doc.line(doc.line_count().saturating_sub(1));
+            !last.is_empty()
+        };
+
+        // Apply removals (already in reverse order)
+        for (start, end) in removals {
+            self.remove_text(start, end);
+        }
+
+        // Ensure final newline
+        if needs_final_newline {
+            let doc = self.doc.as_ref().unwrap();
+            let len = doc.line_to_char(doc.line_count().saturating_sub(1))
+                + doc.line_len(doc.line_count().saturating_sub(1));
+            self.insert_text(len, "\n");
+        }
+    }
+
+    /// Save completed: docstore confirmed save. Updates doc (undo state
+    /// flushed), marks clean, resets persistence, bumps change seq.
+    /// Preserves annotations (content unchanged).
+    pub fn save_completed(&mut self, doc: Arc<dyn Doc>) {
+        self.doc = Some(doc);
+        self.save_state = SaveState::Clean;
+        self.undo.flush_pending();
+        self.undo.reset_distance_from_save();
+        self.persisted_undo_len = self.undo.entry_count();
+        self.chain_id = None;
+        self.last_seen_seq = 0;
+        self.content_hash = self.doc().content_hash();
+        self.change_seq = led_core::next_change_seq();
+    }
+
+    /// Save-as completed: docstore confirmed save to new path.
+    /// Same as save_completed but also updates path.
+    pub fn save_as_completed(&mut self, doc: Arc<dyn Doc>, new_path: PathBuf) {
+        self.path = Some(new_path);
+        self.save_completed(doc);
+    }
+
+    // ── External changes ──
+
+    /// File changed on disk with different content. Replaces doc,
+    /// clears annotations, clamps cursor.
+    pub fn reload_from_disk(&mut self, doc: Arc<dyn Doc>) {
+        let hash = doc.content_hash();
+        self.replace_doc(doc);
+        self.content_hash = hash;
+        self.change_seq = led_core::next_change_seq();
+        // Clamp cursor to new document bounds
+        let max_row = self.doc().line_count().saturating_sub(1);
+        self.cursor_row = self.cursor_row.min(max_row);
+        let max_col = self.doc().line_len(self.cursor_row);
+        self.cursor_col = self.cursor_col.min(max_col);
+        self.cursor_col_affinity = self.cursor_col;
+        self.close_group_on_move();
+    }
+
+    /// File was saved externally (detected by sync). Marks doc clean
+    /// without changing content. Preserves annotations.
+    pub fn mark_externally_saved(&mut self) {
+        self.last_seen_seq = 0;
+        self.chain_id = None;
+        self.persisted_undo_len = self.undo.entry_count();
+        self.change_seq = led_core::next_change_seq();
+        if self.is_dirty() && self.save_state == SaveState::Clean {
+            self.undo.reset_distance_from_save();
+        }
+    }
+
+    // ── Workspace sync ──
+
+    /// Apply a single remote undo entry: update doc content and record in undo history.
+    pub fn apply_remote_entry(&mut self, doc: Arc<dyn Doc>, entry: led_core::UndoEntry) {
+        self.doc = Some(doc);
+        self.undo.push_remote_entry(entry);
+        self.version += 1;
+    }
+
+    /// Replay remote undo entries completed. Clears annotations, updates persistence.
+    /// Call after applying entries via `apply_remote_entry`.
+    pub fn apply_sync_replay(&mut self, last_seen_seq: i64) {
+        // Annotations are stale after remote edits — clear them.
+        self.syntax_highlights = Rc::new(Vec::new());
+        self.bracket_pairs = Rc::new(Vec::new());
+        self.matching_bracket = None;
+        self.status = BufferStatus::new();
+        self.last_seen_seq = last_seen_seq;
+        self.persisted_undo_len = self.undo.entry_count();
+        self.content_hash = self.doc().content_hash();
+        self.change_seq = led_core::next_change_seq();
+    }
+
+    /// Reload from persisted state with new chain. Clears annotations, updates persistence.
+    /// Call after applying entries via `apply_remote_entry`.
+    pub fn apply_sync_reload(&mut self, chain_id: String, last_seen_seq: i64) {
+        // Annotations are stale after remote edits — clear them.
+        self.syntax_highlights = Rc::new(Vec::new());
+        self.bracket_pairs = Rc::new(Vec::new());
+        self.matching_bracket = None;
+        self.status = BufferStatus::new();
+        self.chain_id = Some(chain_id);
+        self.last_seen_seq = last_seen_seq;
+        self.persisted_undo_len = self.undo.entry_count();
+        self.content_hash = self.doc().content_hash();
+        self.change_seq = led_core::next_change_seq();
+    }
+
+    // ── Undo flush ──
+
+    /// Undo entries flushed to workspace (pending confirmation).
+    pub fn undo_flush_started(&mut self, chain_id: String, undo_cursor: usize) {
+        self.chain_id = Some(chain_id);
+        self.persisted_undo_len = undo_cursor;
+        self.change_seq = led_core::next_change_seq();
+    }
+
+    /// Undo flush confirmed by workspace.
+    pub fn undo_flush_confirmed(&mut self, chain_id: String, last_seen_seq: i64) {
+        self.chain_id = Some(chain_id);
+        self.last_seen_seq = last_seen_seq;
+    }
+
+    // ── Undo group management ──
+
+    pub fn close_undo_group(&mut self) {
+        self.undo.flush_pending();
+    }
+
+    pub fn begin_undo_group(&mut self, cursor_char: usize) {
+        self.undo.begin_group(cursor_char);
+    }
+
+    pub fn undo(&mut self) -> Option<usize> {
+        self.undo.flush_pending();
+
+        if self.undo.entries_from(0).is_empty() {
+            return None;
+        }
+
+        // Start undo chain if not already in one
+        if self.undo.undo_cursor().is_none() {
+            self.undo.start_undo_chain();
+        }
+
+        let cursor = self.undo.undo_cursor()?;
+        if cursor == 0 {
+            return None;
+        }
+
+        // Collect entries to undo (avoids borrow conflict)
+        let entries = self.undo.entries_from(0);
+        let mut pos = cursor - 1;
+        let mut ops: Vec<(EditOp, i32, usize, usize)> = Vec::new(); // (inv_op, direction, inv_cb, inv_ca)
+        loop {
+            let entry = &entries[pos];
+            let inv_op = EditOp {
+                offset: entry.op.offset,
+                old_text: entry.op.new_text.clone(),
+                new_text: entry.op.old_text.clone(),
+            };
+            ops.push((inv_op, entry.direction, entry.cursor_after, entry.cursor_before));
+            if entry.direction != 0 || pos == 0 {
+                break;
+            }
+            pos -= 1;
+        }
+
+        // Apply collected inverse ops
+        let mut doc = self.doc.as_ref().expect("undo on ghost").clone();
+        let mut restore_cursor = 0;
+        for (inv_op, direction, inv_cb, inv_ca) in ops {
+            if !inv_op.old_text.is_empty() {
+                let end = inv_op.offset + inv_op.old_text.chars().count();
+                doc = doc.remove(inv_op.offset, end);
+            }
+            if !inv_op.new_text.is_empty() {
+                doc = doc.insert(inv_op.offset, &inv_op.new_text);
+            }
+            restore_cursor = inv_ca;
+            self.undo.push_undo_inverse(led_core::UndoEntry {
+                op: inv_op,
+                cursor_before: inv_cb,
+                cursor_after: inv_ca,
+                direction: -direction,
+            }, direction);
+        }
+
+        self.undo.set_undo_cursor(Some(pos));
+        self.version += 1;
+        self.doc = Some(doc);
+        Some(restore_cursor)
+    }
+
+    pub fn redo(&mut self) -> Option<usize> {
+        let (cursor, chain_base) = match (self.undo.undo_cursor(), self.undo.undo_chain_base()) {
+            (Some(c), Some(b)) => (c, b),
+            _ => return None,
+        };
+        if cursor >= chain_base {
+            return None;
+        }
+
+        // Collect ops to replay (avoids borrow conflict)
+        let entries = self.undo.entries_from(0);
+        let mut ops: Vec<(EditOp, i32, usize)> = Vec::new(); // (op, direction, cursor_after)
+        let mut pos = cursor;
+        loop {
+            if pos >= chain_base {
+                break;
+            }
+            let entry = &entries[pos];
+            ops.push((entry.op.clone(), entry.direction, entry.cursor_after));
+            pos += 1;
+            if entry.direction != 0 && pos < chain_base {
+                if entries[pos].direction != 0 {
+                    break;
+                }
+            }
+        }
+
+        // Apply collected ops
+        let mut doc = self.doc.as_ref().expect("redo on ghost").clone();
+        let mut restore_cursor = 0;
+        for (op, direction, cursor_after) in &ops {
+            if !op.old_text.is_empty() {
+                let end = op.offset + op.old_text.chars().count();
+                doc = doc.remove(op.offset, end);
+            }
+            if !op.new_text.is_empty() {
+                doc = doc.insert(op.offset, &op.new_text);
+            }
+            self.undo.apply_redo_entry(*direction);
+            restore_cursor = *cursor_after;
+        }
+
+        if pos >= chain_base {
+            self.undo.set_undo_cursor(None);
+        } else {
+            self.undo.set_undo_cursor(Some(pos));
+        }
+
+        self.version += 1;
+        self.doc = Some(doc);
+        Some(restore_cursor)
+    }
+
+    // ── Cursor ──
+
+    pub fn cursor_row(&self) -> usize { self.cursor_row }
+    pub fn cursor_col(&self) -> usize { self.cursor_col }
+    pub fn cursor_col_affinity(&self) -> usize { self.cursor_col_affinity }
+    pub fn set_cursor(&mut self, row: usize, col: usize, affinity: usize) {
+        let max_row = self.doc().line_count().saturating_sub(1);
+        self.cursor_row = row.min(max_row);
+        let max_col = self.doc().line_len(self.cursor_row);
+        self.cursor_col = col.min(max_col);
+        self.cursor_col_affinity = affinity;
+    }
+    pub fn set_cursor_row(&mut self, row: usize) {
+        let max_row = self.doc().line_count().saturating_sub(1);
+        self.cursor_row = row.min(max_row);
+    }
+
+    // ── Mark ──
+
+    pub fn mark(&self) -> Option<(usize, usize)> { self.mark }
+    pub fn set_mark(&mut self) {
+        self.mark = Some((self.cursor_row, self.cursor_col));
+    }
+    pub fn set_mark_at(&mut self, row: usize, col: usize) {
+        self.mark = Some((row, col));
+    }
+    pub fn clear_mark(&mut self) { self.mark = None; }
+
+    // ── Scroll ──
+
+    pub fn scroll_row(&self) -> usize { self.scroll_row }
+    pub fn scroll_sub_line(&self) -> usize { self.scroll_sub_line }
+    pub fn set_scroll(&mut self, row: usize, sub_line: usize) {
+        self.scroll_row = row.min(self.doc().line_count().saturating_sub(1));
+        self.scroll_sub_line = sub_line;
+    }
+
+    // ── Save state ──
+
+    pub fn save_state(&self) -> SaveState { self.save_state }
+    pub fn mark_saving(&mut self) { self.save_state = SaveState::Saving; }
+
+    // ── Edit kind tracking ──
+
+    pub fn last_edit_kind(&self) -> Option<EditKind> { self.last_edit_kind }
+    pub fn set_last_edit_kind(&mut self, kind: EditKind) { self.last_edit_kind = Some(kind); }
+    pub fn close_group_on_move(&mut self) {
+        if self.last_edit_kind.is_some() {
+            self.close_undo_group();
+            self.last_edit_kind = None;
+        }
+    }
+
+    // ── Annotations (offer pattern) ──
+
+    /// Accept diagnostics if they match the current document content.
+    /// Ghost buffers (no doc) always accept — no content to go stale against.
+    pub fn offer_diagnostics(&mut self, diags: Vec<led_lsp::Diagnostic>, content_hash: u64) -> bool {
+        if let Some(doc) = &self.doc {
+            let my_hash = doc.content_hash();
+            if content_hash == my_hash {
+                self.status.set_diagnostics(diags);
+                true
+            } else {
+                log::debug!(
+                    "offer_diagnostics rejected: incoming={} buffer={} path={:?} n_diags={}",
+                    content_hash, my_hash, self.path, diags.len()
+                );
+                false
+            }
+        } else {
+            // Ghost buffer — always accept
+            self.status.set_diagnostics(diags);
+            true
+        }
+    }
+
+    /// Accept syntax highlights only if doc version matches.
+    pub fn offer_syntax(
+        &mut self,
+        highlights: Vec<(usize, HighlightSpan)>,
+        bracket_pairs: Vec<BracketPair>,
+        version: u64,
+    ) -> bool {
+        if self.version == version {
+            self.syntax_highlights = Rc::new(highlights);
+            self.bracket_pairs = Rc::new(bracket_pairs);
+            self.update_matching_bracket();
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn set_inlay_hints(&mut self, hints: Vec<led_lsp::InlayHint>) {
+        self.status.set_inlay_hints(hints);
+    }
+    pub fn clear_inlay_hints(&mut self) {
+        self.status.clear_inlay_hints();
+    }
+    pub fn set_git_line_statuses(&mut self, statuses: Vec<led_core::git::LineStatus>) {
+        self.status.set_git_line_statuses(statuses);
+    }
+
+    // ── Reading annotations (for display) ──
+
+    pub fn syntax_highlights(&self) -> &Rc<Vec<(usize, HighlightSpan)>> { &self.syntax_highlights }
+    pub fn bracket_pairs(&self) -> &Rc<Vec<BracketPair>> { &self.bracket_pairs }
+    pub fn matching_bracket(&self) -> Option<(usize, usize)> { self.matching_bracket }
+    pub fn update_matching_bracket(&mut self) {
+        self.matching_bracket = BracketPair::find_match(
+            &self.bracket_pairs,
+            self.cursor_row,
+            self.cursor_col,
+        );
+    }
+    pub fn status(&self) -> &BufferStatus { &self.status }
+
+    // ── Persistence & sync (read-only for external code) ──
+
+    pub fn content_hash(&self) -> u64 { self.content_hash }
+    pub fn change_seq(&self) -> u64 { self.change_seq }
+    pub fn change_reason(&self) -> ChangeReason { self.change_reason }
+    pub fn set_change_reason(&mut self, reason: ChangeReason) { self.change_reason = reason; }
+    pub fn chain_id(&self) -> Option<&str> { self.chain_id.as_deref() }
+    pub fn last_seen_seq(&self) -> i64 { self.last_seen_seq }
+    pub fn persisted_undo_len(&self) -> usize { self.persisted_undo_len }
+
+    /// Restore session state during buffer open. Sets persistence fields
+    /// that were saved from a previous session.
+    pub fn restore_session(
+        &mut self,
+        persisted_undo_len: usize,
+        chain_id: Option<String>,
+        last_seen_seq: i64,
+        content_hash: u64,
+    ) {
+        self.persisted_undo_len = persisted_undo_len;
+        self.chain_id = chain_id;
+        self.last_seen_seq = last_seen_seq;
+        self.content_hash = content_hash;
+    }
+
+    /// Override the undo history's distance_from_save (e.g. during session restore).
+    pub fn set_undo_distance_from_save(&mut self, distance: i32) {
+        self.undo.set_distance_from_save(distance);
+    }
+
+    // ── Tab management & activity ──
+
+    pub fn tab_order(&self) -> usize { self.tab_order }
+    pub fn set_tab_order(&mut self, order: usize) { self.tab_order = order; }
+    pub fn last_used(&self) -> Instant { self.last_used }
+    pub fn touch(&mut self) { self.last_used = Instant::now(); }
+
+    // ── LSP configuration ──
+
+    pub fn completion_triggers(&self) -> &[String] { &self.completion_triggers }
+    pub fn set_completion_triggers(&mut self, triggers: Vec<String>) { self.completion_triggers = triggers; }
+    pub fn reindent_chars(&self) -> &[char] { &self.reindent_chars }
+    pub fn set_reindent_chars(&mut self, chars: Arc<[char]>) { self.reindent_chars = chars; }
+    pub fn pending_indent_row(&self) -> Option<usize> { self.pending_indent_row }
+    pub fn set_pending_indent_row(&mut self, row: Option<usize>) { self.pending_indent_row = row; }
+    pub fn pending_tab_fallback(&self) -> bool { self.pending_tab_fallback }
+    pub fn set_pending_tab_fallback(&mut self, fallback: bool) { self.pending_tab_fallback = fallback; }
+
+    /// Shift cached annotations (syntax highlights, diagnostics, git line
+    /// statuses) after a document edit.  This is the public entry-point used
+    /// by callers that perform multi-step edits outside `edit()`/`edit_at()`.
+    pub fn shift_annotations(&mut self, edit_row: usize, old_lines: usize, old_ver: u64) {
+        self.sync_annotations(edit_row, old_lines, old_ver);
+    }
+
+    // ── Private ──
+
+    fn sync_annotations(&mut self, edit_row: usize, old_lines: usize, old_ver: u64) {
+        let cur_ver = self.version;
+        if cur_ver == old_ver {
+            return;
+        }
+        // Mark modified on any doc change, regardless of line count delta.
+        self.mark_modified_if_dirty();
+        // Already synced for this doc version (e.g. edit() + with_buf both call us).
+        if cur_ver == self.annotations_synced_ver {
+            return;
+        }
+        let new_lines = self.doc().line_count();
+        let delta = new_lines as isize - old_lines as isize;
+        if delta == 0 {
+            self.annotations_synced_ver = cur_ver;
+            return;
+        }
+        // Shift syntax highlights
+        let shifted: Vec<_> = self.syntax_highlights
+            .iter()
+            .filter_map(|(line, span)| {
+                if *line <= edit_row {
+                    Some((*line, span.clone()))
+                } else {
+                    let new_line = (*line as isize + delta) as usize;
+                    if new_line < new_lines {
+                        Some((new_line, span.clone()))
+                    } else {
+                        None
+                    }
+                }
+            })
+            .collect();
+        self.syntax_highlights = Rc::new(shifted);
+        // Shift diagnostics + clear git line statuses
+        self.status.shift_lines(edit_row, delta);
+        // Mark modified if dirty
+        self.mark_modified_if_dirty();
+        self.annotations_synced_ver = cur_ver;
+    }
+
+    pub fn mark_modified_if_dirty(&mut self) {
+        if self.is_dirty() && self.save_state == SaveState::Clean {
+            self.save_state = SaveState::Modified;
         }
     }
 }
@@ -273,7 +1024,6 @@ impl BufferState {
 impl fmt::Debug for BufferState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("BufferState")
-            .field("id", &self.id)
             .field("doc_id", &self.doc_id)
             .field("path", &self.path)
             .field("cursor_row", &self.cursor_row)
@@ -451,7 +1201,6 @@ pub struct KbdMacroState {
 pub struct GitState {
     pub branch: Option<String>,
     pub file_statuses: HashMap<PathBuf, HashSet<led_core::git::FileStatus>>,
-    pub line_statuses: HashMap<PathBuf, Vec<led_core::git::LineStatus>>,
     pub pending_file_scan: Versioned<()>,
     pub pending_line_scan: Versioned<Option<PathBuf>>,
     pub scan_seq: Versioned<()>,
@@ -509,9 +1258,6 @@ impl KillRingState {
 
 #[derive(Debug, Clone, Default)]
 pub struct LspState {
-    // Annotations (per-file, for rendering)
-    pub diagnostics: HashMap<PathBuf, Vec<led_lsp::Diagnostic>>,
-    pub inlay_hints: HashMap<PathBuf, Vec<led_lsp::InlayHint>>,
     pub inlay_hints_enabled: bool,
 
     // Popups
@@ -530,10 +1276,6 @@ pub struct LspState {
 
     // Format-on-save: trigger save after format completes
     pub pending_save_after_format: bool,
-
-    // Monotonic counter bumped on every save per path.
-    // Diagnostics carry the seq at request time; stale ones are rejected.
-    pub diagnostics_seq: HashMap<PathBuf, u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -577,8 +1319,8 @@ pub struct LspProgress {
 
 #[derive(Debug, Clone, Default)]
 pub struct PreviewState {
-    pub buffer: Option<BufferId>,
-    pub pre_preview_buffer: Option<BufferId>,
+    pub buffer: Option<PathBuf>,
+    pub pre_preview_buffer: Option<PathBuf>,
     pub pending: Versioned<Option<PreviewRequest>>,
 }
 
@@ -598,9 +1340,8 @@ pub struct AppState {
     pub suspend: bool,
     pub force_redraw: u64,
     pub alerts: AlertState,
-    pub buffers: Rc<HashMap<BufferId, Rc<BufferState>>>,
-    pub active_buffer: Option<BufferId>,
-    pub next_buffer_id: u64,
+    pub buffers: Rc<HashMap<PathBuf, Rc<BufferState>>>,
+    pub active_buffer: Option<PathBuf>,
     pub save_request: Versioned<()>,
     pub save_all_request: Versioned<()>,
     pub save_done: Versioned<()>,
@@ -613,7 +1354,7 @@ pub struct AppState {
     pub pending_undo_flush: Versioned<Option<UndoFlush>>,
     pub pending_undo_clear: Versioned<PathBuf>,
     pub pending_sync_check: Versioned<PathBuf>,
-    pub notify_hash_to_buffer: HashMap<String, BufferId>,
+    pub notify_hash_to_buffer: HashMap<String, PathBuf>,
 
     // Confirmation prompts
     pub confirm_kill: bool,
@@ -658,14 +1399,14 @@ impl AppState {
         }
     }
 
-    pub fn buffers_mut(&mut self) -> &mut HashMap<BufferId, Rc<BufferState>> {
+    pub fn buffers_mut(&mut self) -> &mut HashMap<PathBuf, Rc<BufferState>> {
         Rc::make_mut(&mut self.buffers)
     }
 
     /// Get a mutable reference to a single buffer via copy-on-write.
-    pub fn buf_mut(&mut self, id: BufferId) -> Option<&mut BufferState> {
+    pub fn buf_mut(&mut self, path: &Path) -> Option<&mut BufferState> {
         Rc::make_mut(&mut self.buffers)
-            .get_mut(&id)
+            .get_mut(path)
             .map(|rc| Rc::make_mut(rc))
     }
 

@@ -1,8 +1,7 @@
 use std::rc::Rc;
-use std::sync::Arc;
 
 use led_core::rx::Stream;
-use led_core::{Alert, BufferId, Doc, DocId};
+use led_core::{Alert, DocId};
 use led_docstore::DocStoreIn;
 use led_state::{AppState, BufferState, ChangeReason, SaveState};
 
@@ -35,44 +34,38 @@ pub fn buffers_of(
                     let notify_hash = led_workspace::path_hash(&path);
 
                     let mut buf =
-                        BufferState::new(BufferId(state.next_buffer_id), id, doc, Some(path));
-                    buf.cursor_row = row;
-                    buf.cursor_col = col;
-                    buf.cursor_col_affinity = col;
-                    buf.scroll_row = row.saturating_sub(buffer_height / 2);
-                    buf.tab_order = tab_order;
-                    buf.is_preview = true;
-                    let remove_old_id = state.preview.buffer;
-                    let remove_old_hash = remove_old_id.and_then(|pid| {
+                        BufferState::new(id, doc, Some(path), Default::default());
+                    buf.set_cursor(row, col, col);
+                    buf.set_scroll(row.saturating_sub(buffer_height / 2), 0);
+                    buf.set_tab_order(tab_order);
+                    buf.set_preview(true);
+                    let remove_old_path = state.preview.buffer.clone();
+                    let remove_old_hash = remove_old_path.as_ref().and_then(|pp| {
                         state
                             .notify_hash_to_buffer
                             .iter()
-                            .find(|(_, v)| **v == pid)
+                            .find(|(_, v)| *v == pp)
                             .map(|(k, _)| k.clone())
                     });
                     let pre_preview_buffer = if state.preview.pre_preview_buffer.is_some() {
-                        state.preview.pre_preview_buffer
+                        state.preview.pre_preview_buffer.clone()
                     } else {
-                        state.active_buffer
+                        state.active_buffer.clone()
                     };
 
                     return Some(Mut::PreviewOpen {
                         buf,
-                        next_id: state.next_buffer_id + 1,
                         notify_hash,
-                        remove_old_id,
+                        remove_old_path,
                         remove_old_hash,
                         pre_preview_buffer,
                     });
                 }
 
                 // Duplicate detection: activate existing tab if same path is already open
-                if let Some(existing) = state
-                    .buffers
-                    .values()
-                    .find(|b| b.path.as_ref() == Some(&path))
-                {
-                    return Some(Mut::ActivateBuffer(existing.id));
+                // (only if it's a loaded buffer, not a ghost)
+                if state.buffers.get(&path).is_some_and(|b| b.is_loaded()) {
+                    return Some(Mut::ActivateBuffer(path));
                 }
 
                 // Stale preview detection: when a preview buffer is active,
@@ -88,8 +81,6 @@ pub fn buffers_of(
                     }
                 }
 
-                let buf_id = BufferId(state.next_buffer_id);
-
                 // Apply restored session positions + undo if available
                 let sp = state.session.positions.get(&path);
                 let (cursor_row, cursor_col, scroll_row, scroll_sub_line) = match sp {
@@ -104,24 +95,17 @@ pub fn buffers_of(
 
                 // Restore undo history if content hash matches
                 let undo_data = sp.and_then(|sp| sp.undo.as_ref());
-                let (doc, chain_id, persisted_undo_len, last_seen_seq, distance_from_save) =
+                let (chain_id, persisted_undo_len, last_seen_seq, distance_from_save) =
                     match undo_data {
                         Some(undo) if undo.content_hash == doc.content_hash() => {
-                            let restored = apply_undo_entries(&doc, &undo.entries);
-                            // Override distance_from_save to match persisted value,
-                            // since replay accumulates directions which may differ
-                            // from the distance at the time of the last flush.
-                            let restored =
-                                restored.with_distance_from_save(undo.distance_from_save);
                             (
-                                restored,
                                 Some(undo.chain_id.clone()),
                                 undo.entries.len(),
                                 undo.last_seen_seq,
                                 undo.distance_from_save,
                             )
                         }
-                        _ => (doc, None, 0, 0, 0),
+                        _ => (None, 0, 0, 0),
                     };
 
                 let is_session_restore = sp.is_some();
@@ -155,26 +139,34 @@ pub fn buffers_of(
                     None => (cursor_row, cursor_col, scroll_row),
                 };
 
-                let mut buf = BufferState::new(buf_id, id, doc, Some(path));
-                buf.cursor_row = cursor_row;
-                buf.cursor_col = cursor_col;
-                buf.cursor_col_affinity = cursor_col;
-                buf.scroll_row = scroll_row;
-                buf.scroll_sub_line = scroll_sub_line;
-                buf.tab_order = tab_order;
-                buf.save_state = save_state;
-                buf.persisted_undo_len = persisted_undo_len;
-                buf.chain_id = chain_id;
-                buf.last_seen_seq = last_seen_seq;
-                buf.content_hash = content_hash;
+                let mut buf = BufferState::new(id, doc, Some(path.clone()), Default::default());
+
+                // Replay persisted undo entries into the buffer
+                if let Some(undo) = undo_data {
+                    if undo.content_hash == content_hash {
+                        apply_undo_entries(&mut buf, &undo.entries);
+                        // Override distance_from_save to match persisted value,
+                        // since replay accumulates directions which may differ
+                        // from the distance at the time of the last flush.
+                        buf.set_undo_distance_from_save(undo.distance_from_save);
+                    }
+                }
+
+                buf.set_cursor(cursor_row, cursor_col, cursor_col);
+                buf.set_scroll(scroll_row, scroll_sub_line);
+                buf.set_tab_order(tab_order);
+                if save_state == SaveState::Modified {
+                    buf.mark_modified_if_dirty();
+                }
+                buf.restore_session(persisted_undo_len, chain_id, last_seen_seq, content_hash);
                 let activate = if is_startup_arg {
                     is_last_arg
                 } else {
                     !is_session_restore || state.session.active_tab_order == Some(tab_order)
                 };
                 Some(Mut::BufferOpen {
+                    path,
                     buf,
-                    next_id: state.next_buffer_id + 1,
                     activate,
                     notify_hash,
                     session_restore_done: is_session_restore && state.session.positions.len() == 1,
@@ -183,41 +175,32 @@ pub fn buffers_of(
             }
             Ok(DocStoreIn::Saved { id, doc }) => {
                 let buf = find_buf_by_doc_id(&state, id)?;
-                let undo_clear_path = if buf.save_state == SaveState::Saving {
-                    buf.path.clone()
+                let path = buf.path_buf().cloned()?;
+                let undo_clear_path = if buf.save_state() == SaveState::Saving {
+                    Some(path.clone())
                 } else {
                     None
                 };
                 let mut buf = (**buf).clone();
-                buf.doc = doc;
-                buf.save_state = SaveState::Clean;
-                buf.persisted_undo_len = buf.doc.undo_history_len();
-                buf.chain_id = None;
-                buf.last_seen_seq = 0;
-                buf.content_hash = buf.doc.content_hash();
+                buf.save_completed(doc);
                 Some(Mut::BufferSaved {
-                    id: buf.id,
+                    path,
                     buf,
                     undo_clear_path,
                 })
             }
             Ok(DocStoreIn::SavedAs { id, path, doc }) => {
                 let buf = find_buf_by_doc_id(&state, id)?;
-                let undo_clear_path = if buf.save_state == SaveState::Saving {
-                    buf.path.clone()
+                let old_path = buf.path_buf().cloned()?;
+                let undo_clear_path = if buf.save_state() == SaveState::Saving {
+                    Some(old_path.clone())
                 } else {
                     None
                 };
                 let mut buf = (**buf).clone();
-                buf.path = Some(path.clone());
-                buf.doc = doc;
-                buf.save_state = SaveState::Clean;
-                buf.persisted_undo_len = buf.doc.undo_history_len();
-                buf.chain_id = None;
-                buf.last_seen_seq = 0;
-                buf.content_hash = buf.doc.content_hash();
+                buf.save_as_completed(doc, path.clone());
                 Some(Mut::BufferSavedAs {
-                    id: buf.id,
+                    path: old_path,
                     buf,
                     new_path: path,
                     undo_clear_path,
@@ -229,10 +212,7 @@ pub fn buffers_of(
                 // instead of BufferOpen): the buffer keeps the original DocId
                 // but the docstore assigned a new one for the watcher.
                 let buf = find_buf_by_doc_id(&state, id).or_else(|| {
-                    state
-                        .buffers
-                        .values()
-                        .find(|b| b.path.as_ref() == Some(&path))
+                    state.buffers.get(&path)
                 });
                 let buf = match buf {
                     Some(b) => b,
@@ -245,41 +225,35 @@ pub fn buffers_of(
                         return None;
                     }
                 };
+                let buf_path = buf.path_buf().cloned().unwrap_or_else(|| path.clone());
                 let incoming_hash = doc.content_hash();
-                if incoming_hash == buf.content_hash {
+                if incoming_hash == buf.content_hash() {
                     log::trace!(
                         "ExternalChange: content_hash unchanged ({incoming_hash:#x}), skipping"
                     );
-                    if buf.doc.dirty() && buf.save_state == SaveState::Clean {
+                    if buf.is_dirty() && buf.save_state() == SaveState::Clean {
                         let mut buf = (**buf).clone();
-                        buf.doc = buf.doc.mark_saved();
+                        buf.mark_externally_saved();
                         return Some(Mut::BufferUpdate(
-                            buf.id,
+                            buf_path,
                             buf,
                             ChangeReason::ExternalFileChange,
                         ));
                     }
                     return None;
                 }
-                if buf.doc.dirty() {
+                if buf.is_dirty() {
                     log::trace!("ExternalChange: buffer is dirty, skipping");
                     return None;
                 }
                 log::trace!(
                     "ExternalChange: applying, hash {:#x} -> {incoming_hash:#x}",
-                    buf.content_hash
+                    buf.content_hash()
                 );
                 let mut buf = (**buf).clone();
-                buf.doc = doc;
-                buf.content_hash = incoming_hash;
-                buf.change_seq = led_core::next_change_seq();
-                // Clamp cursor to new document bounds
-                buf.cursor_row = buf.cursor_row.min(buf.doc.line_count().saturating_sub(1));
-                buf.cursor_col = buf.cursor_col.min(buf.doc.line_len(buf.cursor_row));
-                buf.cursor_col_affinity = buf.cursor_col;
-                buf.last_edit_kind = None;
+                buf.reload_from_disk(doc);
                 Some(Mut::BufferUpdate(
-                    buf.id,
+                    buf_path,
                     buf,
                     ChangeReason::ExternalFileChange,
                 ))
@@ -292,17 +266,17 @@ pub fn buffers_of(
 }
 
 fn find_buf_by_doc_id<'a>(state: &'a AppState, doc_id: DocId) -> Option<&'a Rc<BufferState>> {
-    state.buffers.values().find(|b| b.doc_id == doc_id)
+    state.buffers.values().find(|b| b.doc_id() == doc_id)
 }
 
-/// Apply persisted undo entries to a doc, restoring edit history.
-fn apply_undo_entries(doc: &Arc<dyn Doc>, entries: &[Vec<u8>]) -> Arc<dyn Doc> {
-    let mut doc = doc.close_undo_group();
+/// Apply persisted undo entries to a buffer, restoring edit history.
+fn apply_undo_entries(buf: &mut BufferState, entries: &[Vec<u8>]) {
+    buf.close_undo_group();
     for entry_data in entries {
         let Ok(entry) = rmp_serde::from_slice::<led_core::UndoEntry>(entry_data) else {
             continue;
         };
-        doc = doc.apply_remote_entry(&entry);
+        let doc = led_core::apply_op_to_doc(buf.doc(), &entry.op);
+        buf.apply_remote_entry(doc, entry);
     }
-    doc
 }

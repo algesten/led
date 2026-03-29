@@ -37,8 +37,8 @@ pub fn process_of(state: &Stream<Rc<AppState>>) -> Stream<Mut> {
             let buf = s
                 .buffers
                 .values()
-                .find(|b| b.path.as_ref() == Some(last_arg))?;
-            Some(Mut::ActivateBuffer(buf.id))
+                .find(|b| b.is_loaded() && b.path_buf() == Some(last_arg))?;
+            Some(Mut::ActivateBuffer(buf.path_buf()?.clone()))
         })
         .stream();
 
@@ -58,9 +58,9 @@ pub fn process_of(state: &Stream<Rc<AppState>>) -> Stream<Mut> {
                         !s.startup
                             .arg_paths
                             .iter()
-                            .any(|ap| b.path.as_ref() == Some(ap))
+                            .any(|ap| b.path_buf() == Some(ap))
                     })
-                    .map(|b| b.tab_order)
+                    .map(|b| b.tab_order())
                     .max()
                     .map_or(0, |m| m + 1)
             } else {
@@ -72,9 +72,9 @@ pub fn process_of(state: &Stream<Rc<AppState>>) -> Stream<Mut> {
                 .iter()
                 .enumerate()
                 .filter_map(|(i, p)| {
-                    let buf = s.buffers.values().find(|b| b.path.as_ref() == Some(p))?;
-                    let tab_order = if reorder { base + i } else { buf.tab_order };
-                    Some((buf.id, tab_order))
+                    let buf = s.buffers.values().find(|b| b.path_buf() == Some(p))?;
+                    let tab_order = if reorder { base + i } else { buf.tab_order() };
+                    Some((buf.path_buf()?.clone(), tab_order))
                 })
                 .collect();
             if entries.is_empty() {

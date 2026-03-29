@@ -6,7 +6,7 @@ use std::sync::Arc;
 use led_core::PanelSlot;
 use led_core::git::{self, FileStatus, LineStatus};
 use led_core::wrap::{chars_to_string, compute_chunks, expand_tabs, find_sub_line};
-use led_core::{BufferId, Doc};
+use led_core::Doc;
 use led_state::{AppState, BracketPair, Dimensions, EntryKind, HighlightSpan};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
@@ -17,7 +17,7 @@ use crate::style;
 
 #[derive(Clone)]
 pub struct DisplayInputs {
-    buffer_id: BufferId,
+    buffer_path: Option<PathBuf>,
     doc: Arc<dyn Doc>,
     scroll_row: usize,
     scroll_sub_line: usize,
@@ -65,8 +65,7 @@ pub struct DisplayInputs {
 impl PartialEq for DisplayInputs {
     fn eq(&self, other: &Self) -> bool {
         self.focused == other.focused
-            && self.buffer_id == other.buffer_id
-            && self.doc.version() == other.doc.version()
+            && self.buffer_path == other.buffer_path
             && self.content_hash == other.content_hash
             && self.scroll_row == other.scroll_row
             && self.scroll_sub_line == other.scroll_sub_line
@@ -98,14 +97,14 @@ impl PartialEq for DisplayInputs {
 pub fn display_inputs(s: &AppState) -> Option<DisplayInputs> {
     let dims = s.dims?;
     let config_theme = s.config_theme.as_ref()?;
-    let id = s.active_buffer?;
-    let buf = s.buffers.get(&id)?;
+    let path = s.active_buffer.as_ref()?;
+    let buf = s.buffers.get(path).filter(|b| b.is_loaded())?;
     let theme_arc = &config_theme.file;
     let theme = theme_arc.as_ref();
 
     // Compute normalized selection from mark + cursor
-    let selection = buf.mark.map(|(mr, mc)| {
-        let (cr, cc) = (buf.cursor_row, buf.cursor_col);
+    let selection = buf.mark().map(|(mr, mc)| {
+        let (cr, cc) = (buf.cursor_row(), buf.cursor_col());
         if (mr, mc) <= (cr, cc) {
             ((mr, mc), (cr, cc))
         } else {
@@ -121,7 +120,7 @@ pub fn display_inputs(s: &AppState) -> Option<DisplayInputs> {
 
     let file_search_match = s.file_search.as_ref().and_then(|fs| {
         let (group, hit) = fs.selected_hit()?;
-        if buf.path.as_ref() != Some(&group.path) {
+        if buf.path_buf() != Some(&group.path) {
             return None;
         }
         let char_len = hit
@@ -132,43 +131,23 @@ pub fn display_inputs(s: &AppState) -> Option<DisplayInputs> {
         Some((hit.row, hit.col, char_len))
     });
 
-    let git_line_statuses = buf
-        .path
-        .as_ref()
-        .and_then(|p| s.git.line_statuses.get(p))
-        .cloned()
-        .unwrap_or_default();
+    let git_line_statuses = buf.status().git_line_statuses().to_vec();
     let gutter_added_style = style::resolve(theme, &theme.git.gutter_added);
     let gutter_modified_style = style::resolve(theme, &theme.git.gutter_modified);
 
-    // Diagnostics & inlay hints: try path directly first, then canonical
     let diagnostics: Vec<(usize, usize, usize, usize, led_lsp::DiagnosticSeverity)> = buf
-        .path
-        .as_ref()
-        .and_then(|p| {
-            s.lsp
-                .diagnostics
-                .get(p)
-                .or_else(|| lookup_canonical(&s.lsp.diagnostics, p))
-        })
-        .map(|ds| {
-            ds.iter()
-                .map(|d| (d.start_row, d.start_col, d.end_row, d.end_col, d.severity))
-                .collect()
-        })
-        .unwrap_or_default();
+        .status()
+        .diagnostics()
+        .iter()
+        .map(|d| (d.start_row, d.start_col, d.end_row, d.end_col, d.severity))
+        .collect();
 
     let inlay_hints: Vec<(usize, usize, String)> = buf
-        .path
-        .as_ref()
-        .and_then(|p| {
-            s.lsp
-                .inlay_hints
-                .get(p)
-                .or_else(|| lookup_canonical(&s.lsp.inlay_hints, p))
-        })
-        .map(|hs| hs.iter().map(|h| (h.row, h.col, h.label.clone())).collect())
-        .unwrap_or_default();
+        .status()
+        .inlay_hints()
+        .iter()
+        .map(|h| (h.row, h.col, h.label.clone()))
+        .collect();
 
     let diagnostic_error_style = style::resolve(theme, &theme.diagnostics.error);
     let diagnostic_warning_style = style::resolve(theme, &theme.diagnostics.warning);
@@ -191,10 +170,10 @@ pub fn display_inputs(s: &AppState) -> Option<DisplayInputs> {
         .unwrap_or_else(|| Style::default().fg(ratatui::style::Color::DarkGray));
 
     Some(DisplayInputs {
-        buffer_id: id,
-        doc: buf.doc.clone(),
-        scroll_row: buf.scroll_row,
-        scroll_sub_line: buf.scroll_sub_line,
+        buffer_path: buf.path_buf().cloned(),
+        doc: buf.doc().clone(),
+        scroll_row: buf.scroll_row(),
+        scroll_sub_line: buf.scroll_sub_line(),
         text_width: dims.text_width(),
         buffer_height: dims.buffer_height(),
         gutter_style: style::resolve(theme, &theme.editor.gutter),
@@ -207,16 +186,16 @@ pub fn display_inputs(s: &AppState) -> Option<DisplayInputs> {
         search_current_style: style::resolve(theme, &theme.editor.search_current),
         file_search_match,
         file_search_match_style: style::resolve(theme, &theme.editor.file_search_match),
-        syntax_highlights: buf.syntax_highlights.clone(),
-        bracket_pairs: buf.bracket_pairs.clone(),
+        syntax_highlights: buf.syntax_highlights().clone(),
+        bracket_pairs: buf.bracket_pairs().clone(),
         matching_bracket: BracketPair::find_match(
-            &buf.bracket_pairs,
-            buf.cursor_row,
-            buf.cursor_col,
+            buf.bracket_pairs(),
+            buf.cursor_row(),
+            buf.cursor_col(),
         ),
-        cursor_row: buf.cursor_row,
-        cursor_col: buf.cursor_col,
-        content_hash: buf.content_hash,
+        cursor_row: buf.cursor_row(),
+        cursor_col: buf.cursor_col(),
+        content_hash: buf.content_hash(),
         syntax_styles: style::resolve_syntax_map(theme_arc),
         bracket_match_style: style::resolve(theme, &theme.brackets.match_),
         rainbow_styles: [
@@ -576,7 +555,7 @@ pub fn build_display_lines(d: &DisplayInputs) -> Rc<Vec<Line<'static>>> {
 
 #[derive(Clone)]
 pub struct CursorInputs {
-    buffer_id: BufferId,
+    buffer_path: Option<PathBuf>,
     doc: Arc<dyn Doc>,
     cursor_row: usize,
     cursor_col: usize,
@@ -588,8 +567,7 @@ pub struct CursorInputs {
 
 impl PartialEq for CursorInputs {
     fn eq(&self, other: &Self) -> bool {
-        self.buffer_id == other.buffer_id
-            && self.doc.version() == other.doc.version()
+        self.buffer_path == other.buffer_path
             && self.cursor_row == other.cursor_row
             && self.cursor_col == other.cursor_col
             && self.scroll_row == other.scroll_row
@@ -607,15 +585,15 @@ pub fn cursor_inputs(s: &AppState) -> Option<CursorInputs> {
         return None;
     }
     let dims = s.dims?;
-    let id = s.active_buffer?;
-    let buf = s.buffers.get(&id)?;
+    let path = s.active_buffer.as_ref()?;
+    let buf = s.buffers.get(path)?;
     Some(CursorInputs {
-        buffer_id: id,
-        doc: buf.doc.clone(),
-        cursor_row: buf.cursor_row,
-        cursor_col: buf.cursor_col,
-        scroll_row: buf.scroll_row,
-        scroll_sub_line: buf.scroll_sub_line,
+        buffer_path: buf.path_buf().cloned(),
+        doc: buf.doc().clone(),
+        cursor_row: buf.cursor_row(),
+        cursor_col: buf.cursor_col(),
+        scroll_row: buf.scroll_row(),
+        scroll_sub_line: buf.scroll_sub_line(),
         text_width: dims.text_width(),
         gutter_width: dims.gutter_width,
     })
@@ -687,15 +665,15 @@ pub struct StatusInputs {
 pub fn status_inputs(s: &AppState) -> StatusInputs {
     let (file_name, is_dirty, cursor_row, cursor_col) = s
         .active_buffer
-        .and_then(|id| s.buffers.get(&id))
+        .as_ref()
+        .and_then(|path| s.buffers.get(path).filter(|b| b.is_loaded()))
         .map(|buf| {
             let fname = buf
-                .path
-                .as_ref()
+                .path()
                 .and_then(|p| p.file_name())
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            (fname, buf.doc.dirty(), buf.cursor_row, buf.cursor_col)
+            (fname, buf.is_dirty(), buf.cursor_row(), buf.cursor_col())
         })
         .unwrap_or_default();
 
@@ -709,7 +687,8 @@ pub fn status_inputs(s: &AppState) -> StatusInputs {
 
     let search_prompt = s
         .active_buffer
-        .and_then(|id| s.buffers.get(&id))
+        .as_ref()
+        .and_then(|path| s.buffers.get(path))
         .and_then(|buf| {
             buf.isearch.as_ref().map(|is| {
                 if is.failed {
@@ -858,12 +837,12 @@ pub fn overlay_inputs(s: &AppState) -> OverlayContent {
         Some(d) => d,
         None => return OverlayContent::None,
     };
-    let (cursor_x, cursor_y) = match s.active_buffer.and_then(|id| s.buffers.get(&id)) {
+    let (cursor_x, cursor_y) = match s.active_buffer.as_ref().and_then(|path| s.buffers.get(path)) {
         Some(buf) => {
             let x = dims.side_width()
                 + dims.gutter_width
-                + (buf.cursor_col as u16).min(dims.text_width() as u16);
-            let y = buf.cursor_row.saturating_sub(buf.scroll_row) as u16;
+                + (buf.cursor_col() as u16).min(dims.text_width() as u16);
+            let y = buf.cursor_row().saturating_sub(buf.scroll_row()) as u16;
             (x, y)
         }
         None => return OverlayContent::None,
@@ -938,22 +917,21 @@ pub fn tabs_inputs(s: &AppState) -> Option<TabsInputs> {
     let preview_active_style = style::resolve(theme, &theme.tabs.preview_active);
     let preview_inactive_style = style::resolve(theme, &theme.tabs.preview_inactive);
 
-    let mut bufs: Vec<_> = s.buffers.values().collect();
-    bufs.sort_by_key(|b| b.tab_order);
+    let mut bufs: Vec<_> = s.buffers.values().filter(|b| b.is_loaded()).collect();
+    bufs.sort_by_key(|b| b.tab_order());
 
     let entries = bufs
         .iter()
         .map(|buf| {
             let name = buf
-                .path
-                .as_ref()
+                .path()
                 .and_then(|p| p.file_name())
                 .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| format!("[{}]", buf.id.0));
-            let dirty = buf.doc.dirty();
+                .unwrap_or_else(|| "[untitled]".to_string());
+            let dirty = buf.is_dirty();
             let label = format_tab_label(&name, dirty);
-            let is_active = s.active_buffer == Some(buf.id);
-            let entry_style = if buf.is_preview {
+            let is_active = s.active_buffer.as_ref() == buf.path_buf();
+            let entry_style = if buf.is_preview() {
                 if is_active {
                     preview_active_style
                 } else {
@@ -1131,7 +1109,7 @@ pub fn browser_inputs(s: &AppState) -> Option<BrowserInputs> {
     let dims = s.dims?;
     let theme = s.config_theme.as_ref()?.file.as_ref();
 
-    let diag_file_severities = build_diag_severities(&s.lsp.diagnostics);
+    let diag_file_severities = build_diag_severities(s);
 
     Some(BrowserInputs {
         entries: s.browser.entries.clone(),
@@ -1154,25 +1132,30 @@ pub fn browser_inputs(s: &AppState) -> Option<BrowserInputs> {
     })
 }
 
-fn build_diag_severities(
-    diagnostics: &HashMap<PathBuf, Vec<led_lsp::Diagnostic>>,
-) -> HashMap<PathBuf, BrowserSeverity> {
+fn worst_severity(diags: &[led_lsp::Diagnostic]) -> Option<BrowserSeverity> {
+    let mut worst: Option<BrowserSeverity> = None;
+    for d in diags {
+        let sev = match d.severity {
+            led_lsp::DiagnosticSeverity::Error => BrowserSeverity::Error,
+            led_lsp::DiagnosticSeverity::Warning => BrowserSeverity::Warning,
+            _ => continue,
+        };
+        worst = Some(match worst {
+            Some(w) => w.max(sev),
+            None => sev,
+        });
+    }
+    worst
+}
+
+fn build_diag_severities(s: &led_state::AppState) -> HashMap<PathBuf, BrowserSeverity> {
     let mut result = HashMap::new();
-    for (path, diags) in diagnostics {
-        let mut worst: Option<BrowserSeverity> = None;
-        for d in diags {
-            let sev = match d.severity {
-                led_lsp::DiagnosticSeverity::Error => BrowserSeverity::Error,
-                led_lsp::DiagnosticSeverity::Warning => BrowserSeverity::Warning,
-                _ => continue,
-            };
-            worst = Some(match worst {
-                Some(w) => w.max(sev),
-                None => sev,
-            });
-        }
-        if let Some(w) = worst {
-            result.insert(path.clone(), w);
+    // Open buffers
+    for buf in s.buffers.values() {
+        if let Some(path) = buf.path_buf() {
+            if let Some(w) = worst_severity(buf.status().diagnostics()) {
+                result.insert(path.clone(), w);
+            }
         }
     }
     result
@@ -1582,13 +1565,6 @@ pub fn build_file_search_lines(f: &FileSearchInputs) -> Rc<Vec<Line<'static>>> {
     }
 
     Rc::new(lines)
-}
-
-/// Fallback lookup: canonicalize the buffer path and try again.
-/// Only called when the direct path lookup misses (macOS /var → /private/var).
-fn lookup_canonical<'a, V>(map: &'a HashMap<PathBuf, V>, path: &Path) -> Option<&'a V> {
-    let canonical = std::fs::canonicalize(path).ok()?;
-    map.get(&canonical)
 }
 
 fn build_hit_spans<'a>(

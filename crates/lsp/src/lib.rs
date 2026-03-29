@@ -90,7 +90,7 @@ pub enum LspOut {
     },
     BufferSaved {
         path: PathBuf,
-        seq: u64,
+        content_hash: u64,
     },
     BufferClosed {
         path: PathBuf,
@@ -167,7 +167,7 @@ pub enum LspIn {
     Diagnostics {
         path: PathBuf,
         diagnostics: Vec<Diagnostic>,
-        seq: u64,
+        content_hash: u64,
     },
     InlayHints {
         path: PathBuf,

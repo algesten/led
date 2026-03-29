@@ -72,14 +72,16 @@ fn compute_cursor_after(op: &EditOp) -> usize {
 }
 
 /// Apply an EditOp forward: remove old_text, insert new_text.
-fn apply_op(rope: &mut Rope, op: &EditOp) {
+pub fn apply_op_to_doc(doc: &Arc<dyn Doc>, op: &EditOp) -> Arc<dyn Doc> {
+    let mut d = doc.clone();
     if !op.old_text.is_empty() {
         let end = op.offset + op.old_text.chars().count();
-        rope.remove(op.offset..end);
+        d = d.remove(op.offset, end);
     }
     if !op.new_text.is_empty() {
-        rope.insert(op.offset, &op.new_text);
+        d = d.insert(op.offset, &op.new_text);
     }
+    d
 }
 
 impl UndoHistory {
@@ -173,10 +175,60 @@ impl UndoHistory {
         self.distance_from_save += entry.direction;
         self.entries.push(entry);
     }
+
+    /// Start a new undo chain at the current end of history.
+    pub fn start_undo_chain(&mut self) {
+        self.undo_cursor = Some(self.entries.len());
+        self.undo_chain_base = self.entries.len();
+    }
+
+    /// Set the undo cursor position.
+    pub fn set_undo_cursor(&mut self, cursor: Option<usize>) {
+        self.undo_cursor = cursor;
+    }
+
+    /// Get the undo chain base.
+    pub fn undo_chain_base(&self) -> Option<usize> {
+        if self.undo_cursor.is_some() {
+            Some(self.undo_chain_base)
+        } else {
+            None
+        }
+    }
+
+    /// Append an inverse entry during undo and adjust distance_from_save.
+    pub fn push_undo_inverse(&mut self, entry: UndoEntry, original_direction: i32) {
+        self.distance_from_save -= original_direction;
+        self.entries.push(entry);
+    }
+
+    /// During redo, adjust distance_from_save for a replayed entry.
+    pub fn apply_redo_entry(&mut self, direction: i32) {
+        self.distance_from_save += direction;
+    }
+
+    /// Reset distance from save to 0 (called after save completes).
+    pub fn reset_distance_from_save(&mut self) {
+        self.flush_pending();
+        self.distance_from_save = 0;
+    }
+
+    /// Set distance_from_save to a specific value (for session restore).
+    pub fn set_distance_from_save(&mut self, distance: i32) {
+        self.distance_from_save = distance;
+    }
+
+    /// Number of committed entries (excludes pending).
+    pub fn entry_count(&self) -> usize {
+        self.entries.len()
+    }
 }
 
 // ── Doc trait ──
 
+/// Pure content interface for text documents.
+///
+/// No undo, no version tracking, no dirty state. Those live on BufferState.
 pub trait Doc: Send + Sync {
     // Display
     fn line_count(&self) -> usize;
@@ -196,37 +248,18 @@ pub trait Doc: Send + Sync {
     /// Returns (chunk_str, chunk_byte_start) for the chunk containing `byte_offset`.
     fn chunk_at_byte(&self, byte_offset: usize) -> (&str, usize);
 
-    // Identity & change detection
-    fn version(&self) -> u64;
-    fn dirty(&self) -> bool;
+    // Identity
     fn content_hash(&self) -> u64;
-    fn undo_history_len(&self) -> usize;
-    fn undo_entries_from(&self, start: usize) -> Vec<UndoEntry>;
-    fn undo_cursor(&self) -> Option<usize>;
-    fn distance_from_save(&self) -> i32;
-    /// Return the edit ops accumulated in the current (unflushed) pending group.
-    fn pending_edit_ops(&self) -> Vec<EditOp>;
 
-    // Edits — record undo ops into pending
-    fn begin_undo_group(&self, cursor_before: usize) -> Arc<dyn Doc>;
+    // Edits — pure rope mutations
     fn insert(&self, char_idx: usize, text: &str) -> Arc<dyn Doc>;
     fn remove(&self, start: usize, end: usize) -> Arc<dyn Doc>;
-
-    // Undo
-    fn close_undo_group(&self) -> Arc<dyn Doc>;
-    fn undo(&self) -> Option<(Arc<dyn Doc>, usize)>;
-    fn redo(&self) -> Option<(Arc<dyn Doc>, usize)>;
-
-    // Remote entry application (preserves original direction for sync)
-    fn apply_remote_entry(&self, entry: &UndoEntry) -> Arc<dyn Doc>;
-    fn with_distance_from_save(&self, distance: i32) -> Arc<dyn Doc>;
 
     // Text extraction
     fn slice(&self, start: usize, end: usize) -> String;
 
     // Persistence
     fn write_to(&self, writer: &mut dyn io::Write) -> io::Result<()>;
-    fn mark_saved(&self) -> Arc<dyn Doc>;
 
     // Clone support
     fn clone_box(&self) -> Box<dyn Doc>;
@@ -242,30 +275,16 @@ impl Clone for Box<dyn Doc> {
 
 pub struct TextDoc {
     rope: Rope,
-    version: u64,
-    undo: UndoHistory,
 }
 
 impl TextDoc {
     pub fn from_reader(reader: impl io::Read) -> io::Result<Self> {
         let rope = Rope::from_reader(reader)?;
-        Ok(TextDoc {
-            rope,
-            version: 0,
-            undo: UndoHistory::default(),
-        })
+        Ok(TextDoc { rope })
     }
 
     pub fn rope(&self) -> &Rope {
         &self.rope
-    }
-
-    fn with_rope_and_undo(&self, rope: Rope, undo: UndoHistory) -> Self {
-        TextDoc {
-            rope,
-            version: self.version + 1,
-            undo,
-        }
     }
 }
 
@@ -328,14 +347,6 @@ impl Doc for TextDoc {
         (chunk, chunk_byte_start)
     }
 
-    fn version(&self) -> u64 {
-        self.version
-    }
-
-    fn dirty(&self) -> bool {
-        self.undo.has_pending() || self.undo.distance_from_save != 0
-    }
-
     fn content_hash(&self) -> u64 {
         let mut hasher = DefaultHasher::new();
         for chunk in self.rope.chunks() {
@@ -344,229 +355,16 @@ impl Doc for TextDoc {
         hasher.finish()
     }
 
-    fn undo_history_len(&self) -> usize {
-        self.undo.len()
-    }
-
-    fn undo_entries_from(&self, start: usize) -> Vec<UndoEntry> {
-        self.undo.entries_from(start).to_vec()
-    }
-
-    fn undo_cursor(&self) -> Option<usize> {
-        self.undo.undo_cursor()
-    }
-
-    fn distance_from_save(&self) -> i32 {
-        self.undo.distance_from_save()
-    }
-
-    fn pending_edit_ops(&self) -> Vec<EditOp> {
-        self.undo.pending_edit_ops()
-    }
-
-    fn begin_undo_group(&self, cursor_before: usize) -> Arc<dyn Doc> {
-        let mut undo = self.undo.clone();
-        undo.begin_group(cursor_before);
-        Arc::new(self.with_rope_and_undo(self.rope.clone(), undo))
-    }
-
     fn insert(&self, char_idx: usize, text: &str) -> Arc<dyn Doc> {
         let mut rope = self.rope.clone();
         rope.insert(char_idx, text);
-        let mut undo = self.undo.clone();
-        undo.push_op(
-            EditOp {
-                offset: char_idx,
-                old_text: String::new(),
-                new_text: text.to_string(),
-            },
-            char_idx,
-        );
-        Arc::new(self.with_rope_and_undo(rope, undo))
+        Arc::new(TextDoc { rope })
     }
 
     fn remove(&self, start: usize, end: usize) -> Arc<dyn Doc> {
-        let old_text: String = self.rope.slice(start..end).to_string();
         let mut rope = self.rope.clone();
         rope.remove(start..end);
-        let mut undo = self.undo.clone();
-        undo.push_op(
-            EditOp {
-                offset: start,
-                old_text,
-                new_text: String::new(),
-            },
-            start,
-        );
-        Arc::new(self.with_rope_and_undo(rope, undo))
-    }
-
-    fn close_undo_group(&self) -> Arc<dyn Doc> {
-        let mut undo = self.undo.clone();
-        undo.flush_pending();
-        Arc::new(TextDoc {
-            rope: self.rope.clone(),
-            version: self.version,
-            undo,
-        })
-    }
-
-    fn undo(&self) -> Option<(Arc<dyn Doc>, usize)> {
-        let mut rope = self.rope.clone();
-        let mut undo = self.undo.clone();
-
-        undo.flush_pending();
-
-        if undo.entries.is_empty() {
-            return None;
-        }
-
-        // Start a new undo chain if not already in one
-        if undo.undo_cursor.is_none() {
-            undo.undo_cursor = Some(undo.entries.len());
-            undo.undo_chain_base = undo.entries.len();
-        }
-
-        let cursor = undo.undo_cursor.unwrap();
-        if cursor == 0 {
-            return None;
-        }
-
-        let mut pos = cursor - 1;
-        let mut restore_cursor;
-
-        loop {
-            let (inv_op, inv_cb, inv_ca, direction) = {
-                let entry = &undo.entries[pos];
-                let inv_op = EditOp {
-                    offset: entry.op.offset,
-                    old_text: entry.op.new_text.clone(),
-                    new_text: entry.op.old_text.clone(),
-                };
-                (
-                    inv_op,
-                    entry.cursor_after,
-                    entry.cursor_before,
-                    entry.direction,
-                )
-            };
-
-            apply_op(&mut rope, &inv_op);
-            undo.distance_from_save -= direction;
-            restore_cursor = inv_ca; // = original entry's cursor_before
-
-            undo.entries.push(UndoEntry {
-                op: inv_op,
-                cursor_before: inv_cb,
-                cursor_after: inv_ca,
-                direction: -direction,
-            });
-
-            // Stop after processing the group start (d != 0)
-            if direction != 0 {
-                break;
-            }
-            if pos == 0 {
-                break;
-            }
-            pos -= 1;
-        }
-
-        undo.undo_cursor = Some(pos);
-
-        let doc = TextDoc {
-            rope,
-            version: self.version + 1,
-            undo,
-        };
-        Some((Arc::new(doc), restore_cursor))
-    }
-
-    fn redo(&self) -> Option<(Arc<dyn Doc>, usize)> {
-        let mut rope = self.rope.clone();
-        let mut undo = self.undo.clone();
-
-        let cursor = undo.undo_cursor?;
-        if cursor >= undo.undo_chain_base {
-            return None;
-        }
-
-        let mut pos = cursor;
-        let mut last_cursor_after;
-
-        loop {
-            let (op_clone, cb, ca, direction) = {
-                let entry = &undo.entries[pos];
-                (
-                    entry.op.clone(),
-                    entry.cursor_before,
-                    entry.cursor_after,
-                    entry.direction,
-                )
-            };
-
-            apply_op(&mut rope, &op_clone);
-            undo.distance_from_save += direction;
-            last_cursor_after = ca;
-
-            undo.entries.push(UndoEntry {
-                op: op_clone,
-                cursor_before: cb,
-                cursor_after: ca,
-                direction,
-            });
-
-            pos += 1;
-
-            // Stop at chain boundary or when next entry is not a continuation
-            if pos >= undo.undo_chain_base {
-                break;
-            }
-            if undo.entries[pos].direction != 0 {
-                break;
-            }
-        }
-
-        if pos >= undo.undo_chain_base {
-            undo.undo_cursor = None;
-        } else {
-            undo.undo_cursor = Some(pos);
-        }
-
-        let doc = TextDoc {
-            rope,
-            version: self.version + 1,
-            undo,
-        };
-        Some((Arc::new(doc), last_cursor_after))
-    }
-
-    fn apply_remote_entry(&self, entry: &UndoEntry) -> Arc<dyn Doc> {
-        let mut rope = self.rope.clone();
-        let mut undo = self.undo.clone();
-
-        // Break any active undo chain
-        undo.undo_cursor = None;
-
-        apply_op(&mut rope, &entry.op);
-        undo.distance_from_save += entry.direction;
-        undo.entries.push(entry.clone());
-
-        Arc::new(TextDoc {
-            rope,
-            version: self.version + 1,
-            undo,
-        })
-    }
-
-    fn with_distance_from_save(&self, distance: i32) -> Arc<dyn Doc> {
-        let mut undo = self.undo.clone();
-        undo.distance_from_save = distance;
-        Arc::new(TextDoc {
-            rope: self.rope.clone(),
-            version: self.version,
-            undo,
-        })
+        Arc::new(TextDoc { rope })
     }
 
     fn slice(&self, start: usize, end: usize) -> String {
@@ -580,22 +378,9 @@ impl Doc for TextDoc {
         Ok(())
     }
 
-    fn mark_saved(&self) -> Arc<dyn Doc> {
-        let mut undo = self.undo.clone();
-        undo.flush_pending();
-        undo.distance_from_save = 0;
-        Arc::new(TextDoc {
-            rope: self.rope.clone(),
-            version: self.version,
-            undo,
-        })
-    }
-
     fn clone_box(&self) -> Box<dyn Doc> {
         Box::new(TextDoc {
             rope: self.rope.clone(),
-            version: self.version,
-            undo: self.undo.clone(),
         })
     }
 }

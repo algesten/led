@@ -48,14 +48,14 @@ pub fn jump_forward(state: &mut AppState) {
 
 /// Get the current cursor position as a JumpPosition, if there's an active buffer with a path.
 fn current_position(state: &AppState) -> Option<JumpPosition> {
-    let id = state.active_buffer?;
-    let buf = state.buffers.get(&id)?;
-    let path = buf.path.clone()?;
+    let active_path = state.active_buffer.as_ref()?;
+    let buf = state.buffers.get(active_path)?;
+    let path = buf.path_buf()?.clone();
     Some(JumpPosition {
         path,
-        row: buf.cursor_row,
-        col: buf.cursor_col,
-        scroll_offset: buf.scroll_row,
+        row: buf.cursor_row(),
+        col: buf.cursor_col(),
+        scroll_offset: buf.scroll_row(),
     })
 }
 
@@ -67,16 +67,15 @@ fn navigate_to_position(state: &mut AppState, pos: JumpPosition) {
     let existing = state
         .buffers
         .values()
-        .find(|b| b.path.as_deref() == Some(&pos.path))
-        .map(|b| b.id);
+        .find(|b| b.path() == Some(pos.path.as_path()))
+        .and_then(|b| b.path_buf().cloned());
 
-    if let Some(buf_id) = existing {
-        state.active_buffer = Some(buf_id);
-        if let Some(buf) = state.buf_mut(buf_id) {
-            buf.cursor_row = pos.row.min(buf.doc.line_count().saturating_sub(1));
-            buf.cursor_col = pos.col;
-            buf.cursor_col_affinity = pos.col;
-            buf.scroll_row = pos.scroll_offset;
+    if let Some(buf_path) = existing {
+        state.active_buffer = Some(buf_path.clone());
+        if let Some(buf) = state.buf_mut(&buf_path) {
+            let row = pos.row.min(buf.doc().line_count().saturating_sub(1));
+            buf.set_cursor(row, pos.col, pos.col);
+            buf.set_scroll(pos.scroll_offset, buf.scroll_sub_line());
         }
         super::action::reveal_active_buffer(state);
     } else {

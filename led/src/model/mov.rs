@@ -2,7 +2,6 @@ use led_core::Doc;
 use led_core::wrap::{
     compute_chunks, display_col_to_char_idx, expand_tabs, find_sub_line, visual_line_count,
 };
-use std::rc::Rc;
 
 use led_state::{AppState, BufferState, Dimensions};
 
@@ -14,38 +13,38 @@ pub fn adjust_scroll(buf: &BufferState, dims: &Dimensions) -> (usize, usize) {
     let height = dims.buffer_height();
 
     if height == 0 || text_width == 0 {
-        return (buf.scroll_row, buf.scroll_sub_line);
+        return (buf.scroll_row(), buf.scroll_sub_line());
     }
 
     let margin = dims.scroll_margin.min(height / 2);
-    let total = buf.doc.line_count();
+    let total = buf.doc().line_count();
 
     // Clamp scroll to valid range
-    let mut sr = buf.scroll_row;
-    let mut ssl = buf.scroll_sub_line;
+    let mut sr = buf.scroll_row();
+    let mut ssl = buf.scroll_sub_line();
     if sr >= total {
         sr = total.saturating_sub(1);
         ssl = 0;
     }
-    let scroll_vl = visual_line_count(expand_tabs(&buf.doc.line(sr)).0.len(), text_width);
+    let scroll_vl = visual_line_count(expand_tabs(&buf.doc().line(sr)).0.len(), text_width);
     if ssl >= scroll_vl {
         ssl = scroll_vl.saturating_sub(1);
     }
 
     // Compute cursor's sub-line within its logical line
     let (cursor_sub, _cursor_vrow_count) =
-        cursor_visual_position(&*buf.doc, buf.cursor_row, buf.cursor_col, text_width);
+        cursor_visual_position(&**buf.doc(), buf.cursor_row(), buf.cursor_col(), text_width);
 
     // Compute cursor's visual row relative to scroll position
     let cursor_vrow =
-        compute_cursor_vrow(&*buf.doc, buf.cursor_row, cursor_sub, sr, ssl, text_width);
+        compute_cursor_vrow(&**buf.doc(), buf.cursor_row(), cursor_sub, sr, ssl, text_width);
 
     // Case 1: cursor too close to top — scroll up
     if let Some(vrow) = cursor_vrow {
         if vrow < margin {
             return scroll_to_place_cursor_at_vrow(
-                &*buf.doc,
-                buf.cursor_row,
+                &**buf.doc(),
+                buf.cursor_row(),
                 cursor_sub,
                 margin,
                 text_width,
@@ -55,8 +54,8 @@ pub fn adjust_scroll(buf: &BufferState, dims: &Dimensions) -> (usize, usize) {
         if vrow >= height.saturating_sub(margin) {
             let target_vrow = height.saturating_sub(margin + 1);
             return scroll_to_place_cursor_at_vrow(
-                &*buf.doc,
-                buf.cursor_row,
+                &**buf.doc(),
+                buf.cursor_row(),
                 cursor_sub,
                 target_vrow,
                 text_width,
@@ -67,11 +66,11 @@ pub fn adjust_scroll(buf: &BufferState, dims: &Dimensions) -> (usize, usize) {
     }
 
     // Cursor is not in the visible range at all
-    if buf.cursor_row < sr || (buf.cursor_row == sr && cursor_sub < ssl) {
+    if buf.cursor_row() < sr || (buf.cursor_row() == sr && cursor_sub < ssl) {
         // Cursor above viewport — place at margin from top
         return scroll_to_place_cursor_at_vrow(
-            &*buf.doc,
-            buf.cursor_row,
+            &**buf.doc(),
+            buf.cursor_row(),
             cursor_sub,
             margin,
             text_width,
@@ -81,8 +80,8 @@ pub fn adjust_scroll(buf: &BufferState, dims: &Dimensions) -> (usize, usize) {
     // Cursor below viewport — place at margin from bottom
     let target_vrow = height.saturating_sub(margin + 1);
     scroll_to_place_cursor_at_vrow(
-        &*buf.doc,
-        buf.cursor_row,
+        &**buf.doc(),
+        buf.cursor_row(),
         cursor_sub,
         target_vrow,
         text_width,
@@ -197,7 +196,7 @@ fn visual_col_of(doc: &dyn Doc, row: usize, col: usize, text_width: usize) -> us
 
 /// Reset affinity to current visual column.
 pub fn reset_affinity(buf: &BufferState, dims: &Dimensions) -> usize {
-    visual_col_of(&*buf.doc, buf.cursor_row, buf.cursor_col, dims.text_width())
+    visual_col_of(&**buf.doc(), buf.cursor_row(), buf.cursor_col(), dims.text_width())
 }
 
 // ── Movement ──
@@ -205,38 +204,38 @@ pub fn reset_affinity(buf: &BufferState, dims: &Dimensions) -> usize {
 pub fn move_up(buf: &BufferState, dims: &Dimensions) -> (usize, usize, usize) {
     let tw = dims.text_width();
     let (row, col) = compute_move_up(
-        buf.cursor_row,
-        buf.cursor_col,
-        buf.cursor_col_affinity,
+        buf.cursor_row(),
+        buf.cursor_col(),
+        buf.cursor_col_affinity(),
         tw,
-        &*buf.doc,
+        &**buf.doc(),
     );
-    let len = buf.doc.line_len(row);
+    let len = buf.doc().line_len(row);
     let col = col.min(len);
-    (row, col, buf.cursor_col_affinity)
+    (row, col, buf.cursor_col_affinity())
 }
 
 pub fn move_down(buf: &BufferState, dims: &Dimensions) -> (usize, usize, usize) {
     let tw = dims.text_width();
     let (row, col) = compute_move_down(
-        buf.cursor_row,
-        buf.cursor_col,
-        buf.cursor_col_affinity,
+        buf.cursor_row(),
+        buf.cursor_col(),
+        buf.cursor_col_affinity(),
         tw,
-        &*buf.doc,
+        &**buf.doc(),
     );
-    let len = buf.doc.line_len(row);
+    let len = buf.doc().line_len(row);
     let col = col.min(len);
-    (row, col, buf.cursor_col_affinity)
+    (row, col, buf.cursor_col_affinity())
 }
 
 pub fn move_left(buf: &BufferState) -> (usize, usize, usize) {
-    if buf.cursor_col > 0 {
-        let col = buf.cursor_col - 1;
-        (buf.cursor_row, col, col)
-    } else if buf.cursor_row > 0 {
-        let row = buf.cursor_row - 1;
-        let col = buf.doc.line_len(row);
+    if buf.cursor_col() > 0 {
+        let col = buf.cursor_col() - 1;
+        (buf.cursor_row(), col, col)
+    } else if buf.cursor_row() > 0 {
+        let row = buf.cursor_row() - 1;
+        let col = buf.doc().line_len(row);
         (row, col, col)
     } else {
         (0, 0, 0)
@@ -244,44 +243,44 @@ pub fn move_left(buf: &BufferState) -> (usize, usize, usize) {
 }
 
 pub fn move_right(buf: &BufferState) -> (usize, usize, usize) {
-    let len = buf.doc.line_len(buf.cursor_row);
-    if buf.cursor_col < len {
-        let col = buf.cursor_col + 1;
-        (buf.cursor_row, col, col)
-    } else if buf.cursor_row < buf.doc.line_count().saturating_sub(1) {
-        let row = buf.cursor_row + 1;
+    let len = buf.doc().line_len(buf.cursor_row());
+    if buf.cursor_col() < len {
+        let col = buf.cursor_col() + 1;
+        (buf.cursor_row(), col, col)
+    } else if buf.cursor_row() < buf.doc().line_count().saturating_sub(1) {
+        let row = buf.cursor_row() + 1;
         (row, 0, 0)
     } else {
-        (buf.cursor_row, len, len)
+        (buf.cursor_row(), len, len)
     }
 }
 
 pub fn line_start(buf: &BufferState) -> (usize, usize, usize) {
-    (buf.cursor_row, 0, 0)
+    (buf.cursor_row(), 0, 0)
 }
 
 pub fn line_end(buf: &BufferState) -> (usize, usize, usize) {
-    let col = buf.doc.line_len(buf.cursor_row);
-    (buf.cursor_row, col, col)
+    let col = buf.doc().line_len(buf.cursor_row());
+    (buf.cursor_row(), col, col)
 }
 
 pub fn page_up(buf: &BufferState, dims: &Dimensions) -> (usize, usize, usize) {
     let height = dims.buffer_height();
     let page = height.saturating_sub(1).max(1);
-    let row = buf.cursor_row.saturating_sub(page);
-    let len = buf.doc.line_len(row);
-    let col = buf.cursor_col_affinity.min(len);
-    (row, col, buf.cursor_col_affinity)
+    let row = buf.cursor_row().saturating_sub(page);
+    let len = buf.doc().line_len(row);
+    let col = buf.cursor_col_affinity().min(len);
+    (row, col, buf.cursor_col_affinity())
 }
 
 pub fn page_down(buf: &BufferState, dims: &Dimensions) -> (usize, usize, usize) {
     let height = dims.buffer_height();
     let page = height.saturating_sub(1).max(1);
-    let max_row = buf.doc.line_count().saturating_sub(1);
-    let row = (buf.cursor_row + page).min(max_row);
-    let len = buf.doc.line_len(row);
-    let col = buf.cursor_col_affinity.min(len);
-    (row, col, buf.cursor_col_affinity)
+    let max_row = buf.doc().line_count().saturating_sub(1);
+    let row = (buf.cursor_row() + page).min(max_row);
+    let len = buf.doc().line_len(row);
+    let col = buf.cursor_col_affinity().min(len);
+    (row, col, buf.cursor_col_affinity())
 }
 
 pub fn file_start() -> (usize, usize, usize) {
@@ -403,74 +402,12 @@ fn compute_move_down(
 /// Pass it so we can detect whether the document actually changed.
 pub fn shift_annotations(
     state: &mut AppState,
-    buf_id: led_core::BufferId,
+    buf_path: &std::path::Path,
     edit_row: usize,
     old_line_count: usize,
     old_doc_version: u64,
 ) {
-    let (new_line_count, path, new_doc_version) = {
-        let Some(buf) = state.buffers.get(&buf_id) else {
-            return;
-        };
-        (buf.doc.line_count(), buf.path.clone(), buf.doc.version())
-    };
-
-    // Nothing to do if the document wasn't modified by this action
-    if new_doc_version == old_doc_version {
-        return;
-    }
-    let delta = new_line_count as isize - old_line_count as isize;
-
-    // 1. Syntax highlights (only shift when line count changed)
-    if delta != 0 {
-        if let Some(buf) = state.buf_mut(buf_id) {
-            let shifted: Vec<_> = buf
-                .syntax_highlights
-                .iter()
-                .filter_map(|(line, span)| {
-                    if *line <= edit_row {
-                        Some((*line, span.clone()))
-                    } else {
-                        let new_line = (*line as isize + delta) as usize;
-                        if new_line < new_line_count {
-                            Some((new_line, span.clone()))
-                        } else {
-                            None
-                        }
-                    }
-                })
-                .collect();
-            buf.syntax_highlights = Rc::new(shifted);
-        }
-    }
-
-    // 2. Diagnostics: invalidate on the edited row (content changed),
-    //    remove diagnostics on deleted lines, and shift lines below.
-    if let Some(path) = path {
-        let lsp = state.lsp_mut();
-        if let Some(diags) = lsp.diagnostics.get_mut(&path) {
-            diags.retain_mut(|d| {
-                // Remove diagnostics that touch the edited row
-                if d.start_row == edit_row || d.end_row == edit_row {
-                    return false;
-                }
-                // Remove diagnostics within deleted line range
-                if delta < 0 {
-                    let deleted_start = edit_row + 1;
-                    let deleted_end = edit_row + (-delta) as usize;
-                    if d.start_row >= deleted_start && d.end_row <= deleted_end {
-                        return false;
-                    }
-                }
-                // Shift diagnostics below the edit
-                if d.start_row > edit_row {
-                    d.start_row = (d.start_row as isize + delta).max(0) as usize;
-                }
-                if d.end_row > edit_row {
-                    d.end_row = (d.end_row as isize + delta).max(0) as usize;
-                }
-                true
-            });
-        }
+    if let Some(buf) = state.buf_mut(buf_path) {
+        buf.shift_annotations(edit_row, old_line_count, old_doc_version);
     }
 }

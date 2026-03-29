@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use led_core::Doc;
 use led_state::BufferState;
 
@@ -14,17 +12,19 @@ fn row_col_to_char(doc: &dyn Doc, row: usize, col: usize) -> usize {
 
 // ── Editing ──
 
-pub fn insert_char(buf: &BufferState, ch: char) -> (Arc<dyn Doc>, usize, usize, usize) {
-    let idx = row_col_to_char(&*buf.doc, buf.cursor_row, buf.cursor_col);
-    let doc = buf.doc.insert(idx, &ch.to_string());
-    let col = buf.cursor_col + 1;
-    (doc, buf.cursor_row, col, col)
+/// Insert a character at cursor. Returns (row, col, affinity).
+pub fn insert_char(buf: &mut BufferState, ch: char) -> (usize, usize, usize) {
+    let idx = row_col_to_char(&**buf.doc(), buf.cursor_row(), buf.cursor_col());
+    buf.insert_text(idx, &ch.to_string());
+    let col = buf.cursor_col() + 1;
+    (buf.cursor_row(), col, col)
 }
 
-pub fn insert_newline(buf: &BufferState) -> (Arc<dyn Doc>, usize, usize, usize) {
-    let idx = row_col_to_char(&*buf.doc, buf.cursor_row, buf.cursor_col);
-    let doc = buf.doc.insert(idx, "\n");
-    (doc, buf.cursor_row + 1, 0, 0)
+/// Insert newline at cursor. Returns (row, col, affinity).
+pub fn insert_newline(buf: &mut BufferState) -> (usize, usize, usize) {
+    let idx = row_col_to_char(&**buf.doc(), buf.cursor_row(), buf.cursor_col());
+    buf.insert_text(idx, "\n");
+    (buf.cursor_row() + 1, 0, 0)
 }
 
 fn get_line_indent(doc: &dyn Doc, line: usize) -> String {
@@ -42,102 +42,94 @@ fn get_line_indent(doc: &dyn Doc, line: usize) -> String {
 
 /// Apply computed indent to a line, replacing existing leading whitespace.
 pub fn apply_indent(buf: &mut BufferState, row: usize, new_indent: &str, adjust_cursor: bool) {
-    let old_indent = get_line_indent(&*buf.doc, row);
+    let old_indent = get_line_indent(&**buf.doc(), row);
     let old_len = old_indent.chars().count();
     let new_len = new_indent.chars().count();
 
     if *new_indent == old_indent {
-        if adjust_cursor && buf.cursor_col <= old_len {
-            buf.cursor_col = old_len;
-            buf.cursor_col_affinity = old_len;
+        if adjust_cursor && buf.cursor_col() <= old_len {
+            buf.set_cursor(buf.cursor_row(), old_len, old_len);
         }
         return;
     }
 
-    let line_start = buf.doc.line_to_char(row);
-    let doc = if old_len > 0 {
-        buf.doc.remove(line_start, line_start + old_len)
-    } else {
-        buf.doc.clone()
-    };
-    let doc = if !new_indent.is_empty() {
-        doc.insert(line_start, new_indent)
-    } else {
-        doc
-    };
-    buf.doc = doc;
+    let line_start = buf.doc().line_to_char(row);
+    if old_len > 0 {
+        buf.remove_text(line_start, line_start + old_len);
+    }
+    if !new_indent.is_empty() {
+        buf.insert_text(line_start, new_indent);
+    }
 
     if adjust_cursor {
-        let col = if buf.cursor_col <= old_len {
+        let col = if buf.cursor_col() <= old_len {
             new_len
         } else {
-            buf.cursor_col - old_len + new_len
+            buf.cursor_col() - old_len + new_len
         };
-        buf.cursor_col = col;
-        buf.cursor_col_affinity = col;
+        buf.set_cursor(buf.cursor_row(), col, col);
     }
 }
 
 /// Insert spaces to the next tab stop at the cursor position.
 pub fn insert_soft_tab(buf: &mut BufferState, tab_stop: usize) {
-    let spaces = tab_stop - (buf.cursor_col % tab_stop);
+    let spaces = tab_stop - (buf.cursor_col() % tab_stop);
     let text: String = " ".repeat(spaces);
-    let idx = buf.doc.line_to_char(buf.cursor_row) + buf.cursor_col;
-    buf.doc = buf.doc.insert(idx, &text);
-    buf.cursor_col += spaces;
-    buf.cursor_col_affinity = buf.cursor_col;
+    let idx = buf.doc().line_to_char(buf.cursor_row()) + buf.cursor_col();
+    buf.insert_text(idx, &text);
+    let new_col = buf.cursor_col() + spaces;
+    buf.set_cursor(buf.cursor_row(), new_col, new_col);
 }
 
-pub fn delete_backward(buf: &BufferState) -> Option<(Arc<dyn Doc>, usize, usize, usize)> {
-    if buf.cursor_col > 0 {
-        let idx = row_col_to_char(&*buf.doc, buf.cursor_row, buf.cursor_col);
-        let doc = buf.doc.remove(idx - 1, idx);
-        let col = buf.cursor_col - 1;
-        Some((doc, buf.cursor_row, col, col))
-    } else if buf.cursor_row > 0 {
+/// Delete backward. Returns Some((row, col, affinity)) or None.
+pub fn delete_backward(buf: &mut BufferState) -> Option<(usize, usize, usize)> {
+    if buf.cursor_col() > 0 {
+        let idx = row_col_to_char(&**buf.doc(), buf.cursor_row(), buf.cursor_col());
+        buf.remove_text(idx - 1, idx);
+        let col = buf.cursor_col() - 1;
+        Some((buf.cursor_row(), col, col))
+    } else if buf.cursor_row() > 0 {
         // Join with previous line
-        let idx = buf.doc.line_to_char(buf.cursor_row);
-        let col = buf.doc.line_len(buf.cursor_row - 1);
-        let doc = buf.doc.remove(idx - 1, idx);
-        Some((doc, buf.cursor_row - 1, col, col))
+        let idx = buf.doc().line_to_char(buf.cursor_row());
+        let col = buf.doc().line_len(buf.cursor_row() - 1);
+        buf.remove_text(idx - 1, idx);
+        Some((buf.cursor_row() - 1, col, col))
     } else {
         None
     }
 }
 
-pub fn delete_forward(buf: &BufferState) -> Option<(Arc<dyn Doc>, usize, usize, usize)> {
-    let len = buf.doc.line_len(buf.cursor_row);
-    if buf.cursor_col < len {
-        let idx = row_col_to_char(&*buf.doc, buf.cursor_row, buf.cursor_col);
-        let doc = buf.doc.remove(idx, idx + 1);
-        Some((doc, buf.cursor_row, buf.cursor_col, buf.cursor_col))
-    } else if buf.cursor_row < buf.doc.line_count().saturating_sub(1) {
-        // Join with next line — remove the newline at end of current line
-        let idx = row_col_to_char(&*buf.doc, buf.cursor_row, len);
-        let doc = buf.doc.remove(idx, idx + 1);
-        Some((doc, buf.cursor_row, buf.cursor_col, buf.cursor_col))
+/// Delete forward. Returns Some((row, col, affinity)) or None.
+pub fn delete_forward(buf: &mut BufferState) -> Option<(usize, usize, usize)> {
+    let len = buf.doc().line_len(buf.cursor_row());
+    if buf.cursor_col() < len {
+        let idx = row_col_to_char(&**buf.doc(), buf.cursor_row(), buf.cursor_col());
+        buf.remove_text(idx, idx + 1);
+        Some((buf.cursor_row(), buf.cursor_col(), buf.cursor_col()))
+    } else if buf.cursor_row() < buf.doc().line_count().saturating_sub(1) {
+        let idx = row_col_to_char(&**buf.doc(), buf.cursor_row(), len);
+        buf.remove_text(idx, idx + 1);
+        Some((buf.cursor_row(), buf.cursor_col(), buf.cursor_col()))
     } else {
         None
     }
 }
 
 /// Kill from cursor to end of line (or the newline if at EOL).
-/// Returns (doc, killed_text, row, col, affinity).
-pub fn kill_line(buf: &BufferState) -> Option<(Arc<dyn Doc>, String, usize, usize, usize)> {
-    let len = buf.doc.line_len(buf.cursor_row);
-    if buf.cursor_col < len {
-        // Kill from cursor to end of line
-        let start = row_col_to_char(&*buf.doc, buf.cursor_row, buf.cursor_col);
-        let end = row_col_to_char(&*buf.doc, buf.cursor_row, len);
-        let killed = buf.doc.slice(start, end);
-        let doc = buf.doc.remove(start, end);
-        Some((doc, killed, buf.cursor_row, buf.cursor_col, buf.cursor_col))
-    } else if buf.cursor_row < buf.doc.line_count().saturating_sub(1) {
-        // Kill the newline — join with next line
-        let idx = row_col_to_char(&*buf.doc, buf.cursor_row, len);
-        let killed = buf.doc.slice(idx, idx + 1);
-        let doc = buf.doc.remove(idx, idx + 1);
-        Some((doc, killed, buf.cursor_row, buf.cursor_col, buf.cursor_col))
+/// Returns Some((killed_text, row, col, affinity)) or None.
+pub fn kill_line(buf: &mut BufferState) -> Option<(String, usize, usize, usize)> {
+    let len = buf.doc().line_len(buf.cursor_row());
+    if buf.cursor_col() < len {
+        let start = row_col_to_char(&**buf.doc(), buf.cursor_row(), buf.cursor_col());
+        let end = row_col_to_char(&**buf.doc(), buf.cursor_row(), len);
+        let killed = buf.doc().slice(start, end);
+        buf.remove_text(start, end);
+        Some((killed, buf.cursor_row(), buf.cursor_col(), buf.cursor_col()))
+    } else if buf.cursor_row() < buf.doc().line_count().saturating_sub(1) {
+        let idx = row_col_to_char(&**buf.doc(), buf.cursor_row(), len);
+        let killed = buf.doc().slice(idx, idx + 1);
+        buf.remove_text(idx, idx + 1);
+        Some((killed, buf.cursor_row(), buf.cursor_col(), buf.cursor_col()))
     } else {
         None
     }
@@ -145,9 +137,9 @@ pub fn kill_line(buf: &BufferState) -> Option<(Arc<dyn Doc>, String, usize, usiz
 
 /// Return the text between mark and cursor without modifying the document.
 pub fn selected_text(buf: &BufferState) -> Option<String> {
-    let (mark_row, mark_col) = buf.mark?;
-    let start = row_col_to_char(&*buf.doc, mark_row, mark_col);
-    let end = row_col_to_char(&*buf.doc, buf.cursor_row, buf.cursor_col);
+    let (mark_row, mark_col) = buf.mark()?;
+    let start = row_col_to_char(&**buf.doc(), mark_row, mark_col);
+    let end = row_col_to_char(&**buf.doc(), buf.cursor_row(), buf.cursor_col());
     let (start, end) = if start <= end {
         (start, end)
     } else {
@@ -156,15 +148,15 @@ pub fn selected_text(buf: &BufferState) -> Option<String> {
     if start == end {
         return None;
     }
-    Some(buf.doc.slice(start, end))
+    Some(buf.doc().slice(start, end))
 }
 
 /// Kill the region between mark and cursor.
-/// Returns (doc, killed_text, row, col, affinity).
-pub fn kill_region(buf: &BufferState) -> Option<(Arc<dyn Doc>, String, usize, usize, usize)> {
-    let (mark_row, mark_col) = buf.mark?;
-    let start = row_col_to_char(&*buf.doc, mark_row, mark_col);
-    let end = row_col_to_char(&*buf.doc, buf.cursor_row, buf.cursor_col);
+/// Returns Some((killed_text, row, col, affinity)) or None.
+pub fn kill_region(buf: &mut BufferState) -> Option<(String, usize, usize, usize)> {
+    let (mark_row, mark_col) = buf.mark()?;
+    let start = row_col_to_char(&**buf.doc(), mark_row, mark_col);
+    let end = row_col_to_char(&**buf.doc(), buf.cursor_row(), buf.cursor_col());
     let (start, end) = if start <= end {
         (start, end)
     } else {
@@ -173,20 +165,19 @@ pub fn kill_region(buf: &BufferState) -> Option<(Arc<dyn Doc>, String, usize, us
     if start == end {
         return None;
     }
-    let killed = buf.doc.slice(start, end);
-    let doc = buf.doc.remove(start, end);
-    let row = doc.char_to_line(start);
-    let col = start - doc.line_to_char(row);
-    Some((doc, killed, row, col, col))
+    let killed = buf.doc().slice(start, end);
+    buf.remove_text(start, end);
+    let row = buf.doc().char_to_line(start);
+    let col = start - buf.doc().line_to_char(row);
+    Some((killed, row, col, col))
 }
 
-/// Insert text at cursor (yank from kill ring).
-/// Returns (doc, row, col, affinity).
-pub fn yank(buf: &BufferState, text: &str) -> (Arc<dyn Doc>, usize, usize, usize) {
-    let idx = row_col_to_char(&*buf.doc, buf.cursor_row, buf.cursor_col);
-    let doc = buf.doc.insert(idx, text);
-    let (row, col) = cursor_after_yank(buf.cursor_row, buf.cursor_col, text);
-    (doc, row, col, col)
+/// Insert text at cursor (yank from kill ring). Returns (row, col, affinity).
+pub fn yank(buf: &mut BufferState, text: &str) -> (usize, usize, usize) {
+    let idx = row_col_to_char(&**buf.doc(), buf.cursor_row(), buf.cursor_col());
+    buf.insert_text(idx, text);
+    let (row, col) = cursor_after_yank(buf.cursor_row(), buf.cursor_col(), text);
+    (row, col, col)
 }
 
 /// Compute cursor position after inserting `text` at (row, col).

@@ -41,15 +41,15 @@ fn first_match_from(matches: &[(usize, usize, usize)], row: usize, col: usize) -
 /// If a mark is active, seed the query with the selected text.
 pub fn start_search(buf: &mut BufferState) {
     let selected = super::edit::selected_text(buf);
-    buf.mark = None;
+    buf.clear_mark();
 
     let query = selected.unwrap_or_default();
 
     buf.isearch = Some(ISearchState {
         query: query.clone(),
-        origin: (buf.cursor_row, buf.cursor_col),
-        origin_scroll: buf.scroll_row,
-        origin_sub_line: buf.scroll_sub_line,
+        origin: (buf.cursor_row(), buf.cursor_col()),
+        origin_scroll: buf.scroll_row(),
+        origin_sub_line: buf.scroll_sub_line(),
         failed: false,
         matches: Vec::new(),
         match_idx: None,
@@ -67,8 +67,8 @@ pub fn update_search(buf: &mut BufferState) {
         Some(s) => s.query.clone(),
         None => return,
     };
-    let matches = find_all_matches(&*buf.doc, &query);
-    let (row, col) = (buf.cursor_row, buf.cursor_col);
+    let matches = find_all_matches(&**buf.doc(), &query);
+    let (row, col) = (buf.cursor_row(), buf.cursor_col());
 
     let (match_idx, failed) = if query.is_empty() {
         (None, false)
@@ -83,8 +83,7 @@ pub fn update_search(buf: &mut BufferState) {
 
     if let Some(idx) = match_idx {
         let (r, c, _) = matches[idx];
-        buf.cursor_row = r;
-        buf.cursor_col = c;
+        buf.set_cursor(r, c, c);
     }
 
     let isearch = buf.isearch.as_mut().unwrap();
@@ -121,8 +120,7 @@ pub fn search_next(buf: &mut BufferState) {
     if failed {
         // Wrap to first match
         let (row, col, _) = buf.isearch.as_ref().unwrap().matches[0];
-        buf.cursor_row = row;
-        buf.cursor_col = col;
+        buf.set_cursor(row, col, col);
         let isearch = buf.isearch.as_mut().unwrap();
         isearch.match_idx = Some(0);
         isearch.failed = false;
@@ -135,8 +133,7 @@ pub fn search_next(buf: &mut BufferState) {
         let len = buf.isearch.as_ref().unwrap().matches.len();
         if next < len {
             let (row, col, _) = buf.isearch.as_ref().unwrap().matches[next];
-            buf.cursor_row = row;
-            buf.cursor_col = col;
+            buf.set_cursor(row, col, col);
             let isearch = buf.isearch.as_mut().unwrap();
             isearch.match_idx = Some(next);
         } else {
@@ -160,10 +157,8 @@ fn save_last_search(buf: &mut BufferState) {
 pub fn search_cancel(buf: &mut BufferState) {
     save_last_search(buf);
     if let Some(isearch) = buf.isearch.take() {
-        buf.cursor_row = isearch.origin.0;
-        buf.cursor_col = isearch.origin.1;
-        buf.scroll_row = isearch.origin_scroll;
-        buf.scroll_sub_line = isearch.origin_sub_line;
+        buf.set_cursor(isearch.origin.0, isearch.origin.1, isearch.origin.1);
+        buf.set_scroll(isearch.origin_scroll, isearch.origin_sub_line);
     }
 }
 

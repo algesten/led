@@ -13,7 +13,7 @@ mod versioned;
 
 pub use alert::{Alert, AlertExt};
 pub use config::Startup;
-pub use doc::{Doc, EditOp, TextDoc, UndoEntry, UndoHistory};
+pub use doc::{Doc, EditOp, TextDoc, UndoEntry, UndoHistory, apply_op_to_doc};
 pub use language::{LanguageId, LspContextId};
 pub use versioned::Versioned;
 pub use watch::{FileWatcher, Registration, WatchEvent, WatchEventKind, WatchMode};
@@ -44,6 +44,62 @@ pub struct BufferId(pub u64);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct DocId(pub u64);
+
+// ── Domain newtypes ──
+
+macro_rules! newtype_usize {
+    ($($(#[$meta:meta])* $name:ident),+ $(,)?) => {$(
+        $(#[$meta])*
+        #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+        pub struct $name(pub usize);
+        impl std::ops::Deref for $name {
+            type Target = usize;
+            fn deref(&self) -> &usize { &self.0 }
+        }
+        impl From<usize> for $name {
+            fn from(v: usize) -> Self { Self(v) }
+        }
+    )+};
+}
+
+macro_rules! newtype_u64 {
+    ($($(#[$meta:meta])* $name:ident),+ $(,)?) => {$(
+        $(#[$meta])*
+        #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+        pub struct $name(pub u64);
+        impl std::ops::Deref for $name {
+            type Target = u64;
+            fn deref(&self) -> &u64 { &self.0 }
+        }
+        impl From<u64> for $name {
+            fn from(v: u64) -> Self { Self(v) }
+        }
+    )+};
+}
+
+newtype_usize! {
+    /// Line number in a document (0-based).
+    Row,
+    /// Character column within a line (0-based).
+    Col,
+    /// Absolute character offset in a document.
+    CharOffset,
+    /// Visual sub-line index within a wrapped line.
+    SubLine,
+    /// Tab display order (0-based).
+    TabOrder,
+}
+
+newtype_u64! {
+    /// Monotonic document version (increments on every insert/remove).
+    DocVersion,
+    /// Save generation counter (increments on every save).
+    SaveSeq,
+    /// Monotonic change sequence (increments on every observable buffer change).
+    ChangeSeq,
+    /// Content hash for comparing on-disk vs in-memory state.
+    ContentHash,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PanelSlot {

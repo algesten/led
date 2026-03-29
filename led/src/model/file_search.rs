@@ -39,13 +39,14 @@ fn is_search_input(fs: &FileSearchState) -> bool {
 pub fn activate(state: &mut AppState) {
     let selected = state
         .active_buffer
-        .and_then(|id| state.buffers.get(&id))
+        .as_ref()
+        .and_then(|path| state.buffers.get(path))
         .and_then(|buf| super::edit::selected_text(buf));
 
     if selected.is_some() {
-        if let Some(id) = state.active_buffer {
-            if let Some(buf) = state.buf_mut(id) {
-                buf.mark = None;
+        if let Some(path) = state.active_buffer.clone() {
+            if let Some(buf) = state.buf_mut(&path) {
+                buf.clear_mark();
             }
         }
     }
@@ -484,26 +485,25 @@ pub fn handle_file_search_action(state: &mut AppState, action: &Action) -> bool 
 
 // ── Buffer lookup ──
 
-fn find_buf_for_path(state: &AppState, path: &std::path::Path) -> Option<led_core::BufferId> {
+fn find_buf_for_path(state: &AppState, path: &std::path::Path) -> Option<std::path::PathBuf> {
     if let Some(b) = state
         .buffers
         .values()
-        .find(|b| b.path.as_deref() == Some(path))
+        .find(|b| b.path() == Some(path))
     {
-        return Some(b.id);
+        return b.path_buf().cloned();
     }
     let canonical = std::fs::canonicalize(path).ok()?;
     state
         .buffers
         .values()
         .find(|b| {
-            b.path
-                .as_ref()
+            b.path_buf()
                 .and_then(|p| std::fs::canonicalize(p).ok())
                 .as_deref()
                 == Some(canonical.as_path())
         })
-        .map(|b| b.id)
+        .and_then(|b| b.path_buf().cloned())
 }
 
 // ── Replace execution ──
@@ -562,9 +562,9 @@ fn reinsert_hit_into_results(fs: &mut FileSearchState, entry: &ReplaceEntry, lin
     fs.rebuild_flat_hits();
 }
 
-fn close_undo_group(state: &mut AppState, buf_id: led_core::BufferId) {
-    if let Some(buf) = state.buf_mut(buf_id) {
-        buf.doc = buf.doc.close_undo_group();
+fn close_undo_group(state: &mut AppState, buf_path: &std::path::Path) {
+    if let Some(buf) = state.buf_mut(buf_path) {
+        buf.close_undo_group();
     }
 }
 
@@ -598,14 +598,14 @@ fn replace_selected(state: &mut AppState) {
         replacement_len: replacement.len(),
     };
 
-    let buf_id = find_buf_for_path(state, &path);
+    let buf_path = find_buf_for_path(state, &path);
 
-    if let Some(id) = buf_id {
+    if let Some(bp) = buf_path {
         // Each individual replace gets its own undo group
-        close_undo_group(state, id);
+        close_undo_group(state, &bp);
         replace_in_buffer(
             state,
-            id,
+            &bp,
             row,
             match_start,
             match_end,
@@ -664,13 +664,13 @@ fn unreplace_selected(state: &mut AppState) {
         return;
     };
 
-    let buf_id = find_buf_for_path(state, &entry.path);
+    let buf_path = find_buf_for_path(state, &entry.path);
 
-    if let Some(id) = buf_id {
-        close_undo_group(state, id);
+    if let Some(bp) = buf_path {
+        close_undo_group(state, &bp);
         replace_in_buffer(
             state,
-            id,
+            &bp,
             entry.row,
             entry.match_start,
             entry.match_start + entry.replacement_len,
@@ -679,8 +679,8 @@ fn unreplace_selected(state: &mut AppState) {
         );
         let line_text = state
             .buffers
-            .get(&id)
-            .map(|b| b.doc.line(entry.row).to_string())
+            .get(&bp)
+            .map(|b| b.doc().line(entry.row).to_string())
             .unwrap_or_default();
         let fs = state.file_search.as_mut().unwrap();
         reinsert_hit_into_results(fs, &entry, &line_text);
@@ -754,14 +754,14 @@ fn replace_all(state: &mut AppState) {
 
     let mut open_paths = Vec::new();
     for (path, hits) in &hits_by_buf {
-        let buf_id = find_buf_for_path(state, path);
+        let buf_path = find_buf_for_path(state, path);
 
-        if let Some(id) = buf_id {
+        if let Some(bp) = buf_path {
             open_paths.push(path.clone());
             // ONE undo group for all replacements in this buffer
-            close_undo_group(state, id);
+            close_undo_group(state, &bp);
             for (fi, row, ms, me, original) in hits.iter().rev() {
-                replace_in_buffer(state, id, *row, *ms, *me, &replacement, Some(&query));
+                replace_in_buffer(state, &bp, *row, *ms, *me, &replacement, Some(&query));
                 let fs = state.file_search.as_mut().unwrap();
                 fs.replace_stack.push(ReplaceEntry {
                     flat_hit_idx: *fi,
@@ -811,8 +811,8 @@ fn replace_all(state: &mut AppState) {
 
 /// Called from BufferOpen handler. If this buffer's path has pending replace hits,
 /// apply them all in one undo group.
-pub fn apply_pending_replace(state: &mut AppState, buf_id: led_core::BufferId) {
-    let path = match state.buffers.get(&buf_id).and_then(|b| b.path.clone()) {
+pub fn apply_pending_replace(state: &mut AppState, buf_path: &std::path::Path) {
+    let path = match state.buffers.get(buf_path).and_then(|b| b.path_buf().cloned()) {
         Some(p) => p,
         None => return,
     };
@@ -854,9 +854,9 @@ pub fn apply_pending_replace(state: &mut AppState, buf_id: led_core::BufferId) {
     }
 
     // Apply replacements in reverse order (one undo group)
-    close_undo_group(state, buf_id);
+    close_undo_group(state, buf_path);
     for (row, ms, me, _original) in hits.iter().rev() {
-        replace_in_buffer(state, buf_id, *row, *ms, *me, &replacement, Some(&query));
+        replace_in_buffer(state, buf_path, *row, *ms, *me, &replacement, Some(&query));
     }
 }
 
@@ -959,21 +959,21 @@ mod tests {
 /// If None, insert replacement literally.
 fn replace_in_buffer(
     state: &mut AppState,
-    buf_id: led_core::BufferId,
+    buf_path: &std::path::Path,
     row: usize,
     match_start_byte: usize,
     match_end_byte: usize,
     replacement: &str,
     search_query: Option<&str>,
 ) {
-    let Some(buf) = state.buf_mut(buf_id) else {
+    let Some(buf) = state.buf_mut(buf_path) else {
         return;
     };
-    if row >= buf.doc.line_count() {
+    if row >= buf.doc().line_count() {
         return;
     }
 
-    let line_text = buf.doc.line(row);
+    let line_text = buf.doc().line(row);
     let actual_replacement = if let Some(query) = search_query {
         let matched_text = line_text
             .get(match_start_byte..match_end_byte)
@@ -991,14 +991,12 @@ fn replace_in_buffer(
         .get(..match_end_byte)
         .map(|s| s.chars().count())
         .unwrap_or(match_start_char);
-    let line_start = buf.doc.line_to_char(row);
+    let line_start = buf.doc().line_to_char(row);
     let abs_start = line_start + match_start_char;
     let abs_end = line_start + match_end_char;
 
-    let doc = buf.doc.remove(abs_start, abs_end);
-    let doc = doc.insert(abs_start, &actual_replacement);
-    buf.doc = doc;
-    buf.save_state = led_state::SaveState::Modified;
+    buf.remove_text(abs_start, abs_end);
+    buf.insert_text(abs_start, &actual_replacement);
 }
 
 // ── Confirm selected hit ──
@@ -1013,11 +1011,10 @@ fn confirm_selected(state: &mut AppState) {
     };
 
     if super::action::promote_preview(state, &path) {
-        if let Some(preview_id) = state.active_buffer {
-            if let Some(buf) = state.buf_mut(preview_id) {
-                buf.cursor_row = row.min(buf.doc.line_count().saturating_sub(1));
-                buf.cursor_col = col;
-                buf.cursor_col_affinity = col;
+        if let Some(active_path) = state.active_buffer.clone() {
+            if let Some(buf) = state.buf_mut(&active_path) {
+                let r = row.min(buf.doc().line_count().saturating_sub(1));
+                buf.set_cursor(r, col, col);
             }
         }
         super::action::reveal_active_buffer(state);
@@ -1028,15 +1025,14 @@ fn confirm_selected(state: &mut AppState) {
     let existing = state
         .buffers
         .values()
-        .find(|b| b.path.as_ref() == Some(&path))
-        .map(|b| b.id);
+        .find(|b| b.path_buf() == Some(&path))
+        .and_then(|b| b.path_buf().cloned());
 
-    if let Some(id) = existing {
-        state.active_buffer = Some(id);
-        if let Some(buf) = state.buf_mut(id) {
-            buf.cursor_row = row.min(buf.doc.line_count().saturating_sub(1));
-            buf.cursor_col = col;
-            buf.cursor_col_affinity = col;
+    if let Some(buf_path) = existing {
+        state.active_buffer = Some(buf_path.clone());
+        if let Some(buf) = state.buf_mut(&buf_path) {
+            let r = row.min(buf.doc().line_count().saturating_sub(1));
+            buf.set_cursor(r, col, col);
         }
         super::action::reveal_active_buffer(state);
     } else {

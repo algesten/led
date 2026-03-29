@@ -5,7 +5,6 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use led_config_file::{ConfigDir, ConfigFileOut};
-use led_core::BufferId;
 use led_core::rx::Stream;
 use led_docstore::DocStoreOut;
 use led_fs::FsOut;
@@ -14,6 +13,18 @@ use led_state::{AppState, ChangeReason, LspRequest, SessionRestorePhase};
 use led_syntax::SyntaxOut;
 use led_timers::{Schedule, TimersOut};
 use led_workspace::{SessionBuffer, SessionData, WorkspaceOut};
+
+/// Key for deduping on loaded (non-ghost) buffer paths.
+fn loaded_buf_paths(s: &Rc<AppState>) -> Vec<PathBuf> {
+    let mut paths: Vec<PathBuf> = s
+        .buffers
+        .values()
+        .filter(|b| b.is_loaded())
+        .filter_map(|b| b.path_buf().cloned())
+        .collect();
+    paths.sort();
+    paths
+}
 
 pub struct Derived {
     pub ui: Stream<Rc<AppState>>,
@@ -36,8 +47,9 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
     let ui = state
         .filter(|s| {
             s.active_buffer
-                .and_then(|id| s.buffers.get(&id))
-                .map_or(true, |b| b.pending_indent_row.is_none())
+                .as_ref()
+                .and_then(|path| s.buffers.get(path))
+                .map_or(true, |b| b.pending_indent_row().is_none())
         })
         .map(|s| s)
         .stream();
@@ -56,23 +68,24 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
             let buffers: Vec<SessionBuffer> = s
                 .buffers
                 .values()
-                .filter(|b| b.path.is_some())
-                .filter(|b| !b.is_preview)
+                .filter(|b| b.is_loaded() && b.path().is_some())
+                .filter(|b| !b.is_preview())
                 .map(|b| SessionBuffer {
-                    file_path: b.path.clone().unwrap(),
-                    tab_order: b.tab_order,
-                    cursor_row: b.cursor_row,
-                    cursor_col: b.cursor_col,
-                    scroll_row: b.scroll_row,
-                    scroll_sub_line: b.scroll_sub_line,
+                    file_path: b.path_buf().cloned().unwrap(),
+                    tab_order: b.tab_order(),
+                    cursor_row: b.cursor_row(),
+                    cursor_col: b.cursor_col(),
+                    scroll_row: b.scroll_row(),
+                    scroll_sub_line: b.scroll_sub_line(),
                     undo: None,
                 })
                 .collect();
 
             let active_tab_order = s
                 .active_buffer
-                .and_then(|id| s.buffers.get(&id))
-                .map(|b| b.tab_order)
+                .as_ref()
+                .and_then(|path| s.buffers.get(path))
+                .map(|b| b.tab_order())
                 .unwrap_or(0);
 
             WorkspaceOut::SaveSession {
@@ -121,9 +134,9 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
             let buf = s
                 .buffers
                 .values()
-                .find(|b| b.path.as_ref() == Some(&file_path));
+                .find(|b| b.path_buf() == Some(&file_path));
             let (last_seen_seq, current_chain_id) = match buf {
-                Some(b) => (b.last_seen_seq, b.chain_id.clone()),
+                Some(b) => (b.last_seen_seq(), b.chain_id().map(|s| s.to_owned())),
                 None => (0, None),
             };
             WorkspaceOut::CheckSync {
@@ -159,15 +172,12 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
         .filter(|s| s.session.restore_phase == SessionRestorePhase::Done)
         .filter(|s| !s.startup.arg_paths.is_empty())
         .flat_map(|s| {
-            let open_paths: std::collections::HashSet<&std::path::Path> = s
-                .buffers
-                .values()
-                .filter_map(|b| b.path.as_deref())
-                .collect();
+            let open_paths: std::collections::HashSet<&std::path::Path> =
+                s.buffers.values().filter_map(|b| b.path()).collect();
             let base = s
                 .buffers
                 .values()
-                .map(|b| b.tab_order)
+                .map(|b| b.tab_order())
                 .max()
                 .map_or(0, |m| m + 1);
             s.startup
@@ -209,7 +219,7 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
         .filter(|s| s.pending_replace_opens.version() > 0)
         .filter(|s| !s.pending_replace_opens.is_empty())
         .map(|s| {
-            let max_tab = s.buffers.values().map(|b| b.tab_order).max().unwrap_or(0);
+            let max_tab = s.buffers.values().map(|b| b.tab_order()).max().unwrap_or(0);
             (*s.pending_replace_opens)
                 .iter()
                 .enumerate()
@@ -232,7 +242,7 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
             tab_order: s
                 .buffers
                 .values()
-                .map(|b| b.tab_order)
+                .map(|b| b.tab_order())
                 .max()
                 .map_or(0, |m| m + 1),
             create_if_missing: true,
@@ -245,10 +255,10 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
         .filter(|s| s.save_request.version() > 0)
         .filter(|s| s.active_buffer.is_some())
         .map(|s| {
-            let buf = &s.buffers[&s.active_buffer.unwrap()];
+            let buf = &s.buffers[s.active_buffer.as_ref().unwrap()];
             DocStoreOut::Save {
-                id: buf.doc_id,
-                doc: buf.doc.clone(),
+                id: buf.doc_id(),
+                doc: buf.doc().clone(),
             }
         })
         .stream();
@@ -260,10 +270,10 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
         .map(|s| {
             s.buffers
                 .values()
-                .filter(|b| b.save_state == led_state::SaveState::Saving && b.path.is_some())
+                .filter(|b| b.is_loaded() && b.save_state() == led_state::SaveState::Saving && b.path().is_some())
                 .map(|b| DocStoreOut::Save {
-                    id: b.doc_id,
-                    doc: b.doc.clone(),
+                    id: b.doc_id(),
+                    doc: b.doc().clone(),
                 })
                 .collect::<Vec<_>>()
         })
@@ -276,11 +286,11 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
         .filter(|s| s.pending_save_as.is_some())
         .filter(|s| s.active_buffer.is_some())
         .map(|s| {
-            let buf = &s.buffers[&s.active_buffer.unwrap()];
+            let buf = &s.buffers[s.active_buffer.as_ref().unwrap()];
             let path = (*s.pending_save_as).clone().unwrap();
             DocStoreOut::SaveAs {
-                id: buf.doc_id,
-                doc: buf.doc.clone(),
+                id: buf.doc_id(),
+                doc: buf.doc().clone(),
                 path,
             }
         })
@@ -293,7 +303,7 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
         .filter(|s| s.preview.pending.is_some())
         .filter(|s| {
             let req_path = (*s.preview.pending).as_ref().map(|r| &r.path);
-            !s.buffers.values().any(|b| b.path.as_ref() == req_path)
+            !s.buffers.values().any(|b| b.path_buf() == req_path)
         })
         .map(|s| {
             let req = (*s.preview.pending).as_ref().unwrap();
@@ -302,7 +312,7 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
                 tab_order: s
                     .buffers
                     .values()
-                    .map(|b| b.tab_order)
+                    .map(|b| b.tab_order())
                     .max()
                     .map_or(0, |m| m + 1),
                 create_if_missing: false,
@@ -342,11 +352,12 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
             s.buffers
                 .values()
                 .filter(|b| {
-                    b.path.is_some()
-                        && !b.is_preview
-                        && (b.doc.undo_history_len() > b.persisted_undo_len || b.doc.dirty())
+                    b.is_loaded()
+                        && b.path().is_some()
+                        && !b.is_preview()
+                        && (b.undo_history_len() > b.persisted_undo_len() || b.is_dirty())
                 })
-                .map(|b| b.doc.version())
+                .map(|b| b.version())
                 .max()
         })
         .dedupe()
@@ -379,7 +390,7 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
     // If the user stays on a tab for 3s, the timer fires and updates last_used.
     // Rapid NextTab/PrevTab resets the timer, so stepping past doesn't count.
     let linger_timer = state
-        .dedupe_by(|s| s.active_buffer)
+        .dedupe_by(|s| s.active_buffer.clone())
         .filter(|s| s.active_buffer.is_some())
         .map(|_| TimersOut::Set {
             name: "tab_linger",
@@ -448,53 +459,54 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
     // within a line skips syntax entirely — bracket match updates
     // on next vertical move or edit.
     let syntax_key =
-        |s: &Rc<AppState>| -> (Option<(BufferId, u64, usize, usize, Option<usize>)>, usize) {
-            let buf_info = s.active_buffer.and_then(|id| {
-                let buf = s.buffers.get(&id)?;
+        |s: &Rc<AppState>| -> (Option<(u64, usize, usize, Option<usize>)>, usize) {
+            let buf_info = s.active_buffer.as_ref().and_then(|path| {
+                let buf = s.buffers.get(path)?;
                 Some((
-                    id,
-                    buf.doc.version(),
-                    buf.scroll_row,
-                    buf.cursor_row,
-                    buf.pending_indent_row,
+                    buf.version(),
+                    buf.scroll_row(),
+                    buf.cursor_row(),
+                    buf.pending_indent_row(),
                 ))
             });
             (buf_info, s.buffers.len())
         };
 
-    let known_bufs: Rc<RefCell<HashSet<BufferId>>> = Rc::new(RefCell::new(HashSet::new()));
+    let known_bufs: Rc<RefCell<HashSet<PathBuf>>> = Rc::new(RefCell::new(HashSet::new()));
     let known_bufs2 = known_bufs.clone();
 
     let syntax_changed = state
         .dedupe_by(syntax_key)
         .filter(|s| s.active_buffer.is_some())
         .filter_map(|s| {
-            let id = s.active_buffer?;
-            let buf = s.buffers.get(&id)?;
-            let path = buf.path.clone()?;
+            let active_path = s.active_buffer.as_ref()?;
+            let buf = s.buffers.get(active_path)?;
+            let path = buf.path_buf().cloned()?;
             let buffer_height = s.dims.map_or(50, |d| d.buffer_height());
             Some(SyntaxOut::BufferChanged {
-                buf_id: id,
                 path,
-                doc: buf.doc.clone(),
-                version: buf.doc.version(),
-                edit_ops: buf.doc.pending_edit_ops(),
-                scroll_row: buf.scroll_row,
+                doc: buf.doc().clone(),
+                version: buf.version(),
+                edit_ops: buf.pending_edit_ops(),
+                scroll_row: buf.scroll_row(),
                 buffer_height,
-                cursor_row: buf.cursor_row,
-                cursor_col: buf.cursor_col,
-                indent_row: buf.pending_indent_row,
+                cursor_row: buf.cursor_row(),
+                cursor_col: buf.cursor_col(),
+                indent_row: buf.pending_indent_row(),
             })
         })
         .stream();
 
-    // Track buffer lifecycle: emit BufferClosed for removed buffers
+    // Track buffer lifecycle: emit BufferClosed for removed loaded buffers
     let syntax_lifecycle = state
-        .dedupe_by(|s| s.buffers.len())
+        .dedupe_by(loaded_buf_paths)
         .map(move |s| {
             let mut known = known_bufs2.borrow_mut();
-            let current: HashSet<BufferId> = s.buffers.keys().copied().collect();
-            let removed: Vec<BufferId> = known.difference(&current).copied().collect();
+            let current: HashSet<PathBuf> = s.buffers.values()
+                .filter(|b| b.is_loaded())
+                .filter_map(|b| b.path_buf().cloned())
+                .collect();
+            let removed: Vec<PathBuf> = known.difference(&current).cloned().collect();
             *known = current;
             removed
         })
@@ -502,7 +514,7 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
         .map(|removed| {
             removed
                 .into_iter()
-                .map(|buf_id| SyntaxOut::BufferClosed { buf_id })
+                .map(|path| SyntaxOut::BufferClosed { path })
                 .collect::<Vec<_>>()
         })
         .stream();
@@ -514,11 +526,13 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
         .dedupe_by(|s| s.save_done.version())
         .filter(|s| s.save_done.version() > 0)
         .filter_map(|s| {
-            let id = s.active_buffer?;
-            let buf = s.buffers.get(&id)?;
+            let active_path = s.active_buffer.as_ref()?;
+            let buf = s.buffers.get(active_path)?;
+            let path = buf.path_buf().cloned()?;
             Some(SyntaxOut::Reparse {
-                buf_id: id,
-                doc: buf.doc.clone(),
+                path,
+                doc: buf.doc().clone(),
+                version: buf.version(),
             })
         })
         .stream();
@@ -632,23 +646,26 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
     // Buffer lifecycle: track open/close
     let lsp_known_bufs: Rc<RefCell<HashSet<PathBuf>>> = Rc::new(RefCell::new(HashSet::new()));
 
-    // BufferOpened/Closed: track paths entering/leaving buffers
     let lsp_buf_opened = state
-        .dedupe_by(|s| s.buffers.len())
+        .dedupe_by(loaded_buf_paths)
         .map(move |s: Rc<AppState>| {
             let mut known = lsp_known_bufs.borrow_mut();
-            let current: HashSet<PathBuf> =
-                s.buffers.values().filter_map(|b| b.path.clone()).collect();
+            let current: HashSet<PathBuf> = s
+                .buffers
+                .values()
+                .filter(|b| b.is_loaded())
+                .filter_map(|b| b.path_buf().cloned())
+                .collect();
             let added: Vec<PathBuf> = current.difference(&known).cloned().collect();
             let removed: Vec<PathBuf> = known.difference(&current).cloned().collect();
             *known = current;
             // Emit opened events
             let mut events: Vec<LspOut> = Vec::new();
             for path in added {
-                if let Some(buf) = s.buffers.values().find(|b| b.path.as_ref() == Some(&path)) {
+                if let Some(buf) = s.buffers.values().find(|b| b.path_buf() == Some(&path)) {
                     events.push(LspOut::BufferOpened {
                         path,
-                        doc: buf.doc.clone(),
+                        doc: buf.doc().clone(),
                     });
                 }
             }
@@ -675,21 +692,21 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
     // BufferChanged: dedupe on (active_buffer, doc.version())
     let lsp_buf_changed = state
         .dedupe_by(|s| {
-            s.active_buffer.and_then(|id| {
-                let buf = s.buffers.get(&id)?;
-                Some((id, buf.doc.version()))
+            s.active_buffer.as_ref().and_then(|path| {
+                let buf = s.buffers.get(path)?;
+                Some((path.clone(), buf.version()))
             })
         })
         .filter(|s| s.active_buffer.is_some())
         .filter_map(|s| {
-            let id = s.active_buffer?;
-            let buf = s.buffers.get(&id)?;
-            let path = buf.path.clone()?;
+            let active_path = s.active_buffer.as_ref()?;
+            let buf = s.buffers.get(active_path)?;
+            let path = buf.path_buf().cloned()?;
             Some(LspOut::BufferChanged {
                 path,
-                doc: buf.doc.clone(),
-                edit_ops: buf.doc.pending_edit_ops(),
-                external: buf.change_reason == ChangeReason::ExternalFileChange,
+                doc: buf.doc().clone(),
+                edit_ops: buf.pending_edit_ops(),
+                external: buf.change_reason() == ChangeReason::ExternalFileChange,
             })
         })
         .stream();
@@ -700,12 +717,12 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
         .filter(|s| s.save_request.version() > 0)
         .filter(|s| s.active_buffer.is_some())
         .filter_map(|s| {
-            let id = s.active_buffer?;
-            let buf = s.buffers.get(&id)?;
-            let path = buf.path.clone()?;
+            let active_path = s.active_buffer.as_ref()?;
+            let buf = s.buffers.get(active_path)?;
+            let path = buf.path_buf().cloned()?;
             Some(LspOut::BufferSaved {
                 path,
-                seq: s.save_request.version(),
+                content_hash: buf.doc().content_hash(),
             })
         })
         .stream();
@@ -716,18 +733,18 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
             if !s.lsp.inlay_hints_enabled {
                 return None;
             }
-            s.active_buffer.and_then(|id| {
-                let buf = s.buffers.get(&id)?;
-                Some((id, buf.scroll_row / 5, buf.doc.version()))
+            s.active_buffer.as_ref().and_then(|path| {
+                let buf = s.buffers.get(path)?;
+                Some((path.clone(), buf.scroll_row() / 5, buf.version()))
             })
         })
         .filter(|s| s.lsp.inlay_hints_enabled)
         .filter(|s| s.active_buffer.is_some())
         .filter_map(|s| {
-            let id = s.active_buffer?;
-            let buf = s.buffers.get(&id)?;
-            let path = buf.path.clone()?;
-            let start_row = buf.scroll_row;
+            let active_path = s.active_buffer.as_ref()?;
+            let buf = s.buffers.get(active_path)?;
+            let path = buf.path_buf().cloned()?;
+            let start_row = buf.scroll_row();
             let buffer_height = s.dims.map_or(50, |d| d.buffer_height());
             let end_row = start_row + buffer_height + 10;
             Some(LspOut::InlayHints {
@@ -745,16 +762,16 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
         .filter(|s| s.lsp.pending_request.is_some())
         .filter_map(|s| {
             let req = (*s.lsp.pending_request).as_ref()?;
-            let id = s.active_buffer?;
-            let buf = s.buffers.get(&id)?;
-            let path = buf.path.clone()?;
-            let row = buf.cursor_row;
-            let col = buf.cursor_col;
+            let active_path = s.active_buffer.as_ref()?;
+            let buf = s.buffers.get(active_path)?;
+            let path = buf.path_buf().cloned()?;
+            let row = buf.cursor_row();
+            let col = buf.cursor_col();
             match req {
                 LspRequest::GotoDefinition => Some(LspOut::GotoDefinition { path, row, col }),
                 LspRequest::Format => Some(LspOut::Format { path }),
                 LspRequest::CodeAction => {
-                    let (end_row, end_col) = buf.mark.unwrap_or((row, col));
+                    let (end_row, end_col) = buf.mark().unwrap_or((row, col));
                     let (sr, sc, er, ec) = if (row, col) <= (end_row, end_col) {
                         (row, col, end_row, end_col)
                     } else {

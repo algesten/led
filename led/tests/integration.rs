@@ -13,8 +13,8 @@ use harness::{TestHarness, TestStep};
 // ── Helpers ──
 
 fn buf(t: &harness::TestResult) -> &led_state::BufferState {
-    let id = t.state.active_buffer.expect("no active buffer");
-    &t.state.buffers[&id]
+    let path = t.state.active_buffer.as_ref().expect("no active buffer");
+    &t.state.buffers[path]
 }
 
 /// Shorthand: wrap a list of Actions into TestSteps
@@ -24,14 +24,16 @@ fn actions(acts: Vec<led_core::Action>) -> Vec<TestStep> {
 
 fn is_clean(s: &led_state::AppState) -> bool {
     s.active_buffer
-        .and_then(|id| s.buffers.get(&id))
-        .map_or(false, |b| b.save_state == SaveState::Clean)
+        .as_ref()
+        .and_then(|path| s.buffers.get(path))
+        .map_or(false, |b| b.save_state() == SaveState::Clean)
 }
 
 fn indent_done(s: &led_state::AppState) -> bool {
     s.active_buffer
-        .and_then(|id| s.buffers.get(&id))
-        .map_or(true, |b| b.pending_indent_row.is_none())
+        .as_ref()
+        .and_then(|path| s.buffers.get(path))
+        .map_or(true, |b| b.pending_indent_row().is_none())
 }
 
 // ── File open ──
@@ -40,17 +42,17 @@ fn indent_done(s: &led_state::AppState) -> bool {
 fn open_file() {
     let t = TestHarness::new().with_file("hello\nworld\n").run(vec![]);
 
-    assert_eq!(buf(&t).doc.line(0), "hello");
-    assert_eq!(buf(&t).doc.line(1), "world");
-    assert_eq!(buf(&t).doc.line_count(), 3);
+    assert_eq!(buf(&t).doc().line(0), "hello");
+    assert_eq!(buf(&t).doc().line(1), "world");
+    assert_eq!(buf(&t).doc().line_count(), 3);
 }
 
 #[test]
 fn open_empty_file() {
     let t = TestHarness::new().with_file("").run(vec![]);
 
-    assert_eq!(buf(&t).doc.line_count(), 1);
-    assert_eq!(buf(&t).doc.line(0), "");
+    assert_eq!(buf(&t).doc().line_count(), 1);
+    assert_eq!(buf(&t).doc().line(0), "");
 }
 
 #[test]
@@ -69,8 +71,8 @@ fn move_down() {
         .with_file("aaa\nbbb\nccc\n")
         .run(actions(vec![MoveDown, MoveDown]));
 
-    assert_eq!(buf(&t).cursor_row, 2);
-    assert_eq!(buf(&t).cursor_col, 0);
+    assert_eq!(buf(&t).cursor_row(), 2);
+    assert_eq!(buf(&t).cursor_col(), 0);
 }
 
 #[test]
@@ -79,7 +81,7 @@ fn move_up() {
         .with_file("aaa\nbbb\nccc\n")
         .run(actions(vec![MoveDown, MoveDown, MoveUp]));
 
-    assert_eq!(buf(&t).cursor_row, 1);
+    assert_eq!(buf(&t).cursor_row(), 1);
 }
 
 #[test]
@@ -88,8 +90,8 @@ fn move_right_and_left() {
         .with_file("hello\n")
         .run(actions(vec![MoveRight, MoveRight, MoveRight, MoveLeft]));
 
-    assert_eq!(buf(&t).cursor_row, 0);
-    assert_eq!(buf(&t).cursor_col, 2);
+    assert_eq!(buf(&t).cursor_row(), 0);
+    assert_eq!(buf(&t).cursor_col(), 2);
 }
 
 #[test]
@@ -98,8 +100,8 @@ fn move_up_at_top() {
         .with_file("hello\n")
         .run(actions(vec![MoveUp, MoveUp]));
 
-    assert_eq!(buf(&t).cursor_row, 0);
-    assert_eq!(buf(&t).cursor_col, 0);
+    assert_eq!(buf(&t).cursor_row(), 0);
+    assert_eq!(buf(&t).cursor_col(), 0);
 }
 
 #[test]
@@ -108,8 +110,8 @@ fn move_down_at_bottom() {
         .with_file("hello\n")
         .run(actions(vec![MoveDown, MoveDown, MoveDown]));
 
-    let max_row = buf(&t).doc.line_count() - 1;
-    assert_eq!(buf(&t).cursor_row, max_row);
+    let max_row = buf(&t).doc().line_count() - 1;
+    assert_eq!(buf(&t).cursor_row(), max_row);
 }
 
 #[test]
@@ -118,8 +120,8 @@ fn move_left_at_start() {
         .with_file("hello\n")
         .run(actions(vec![MoveLeft]));
 
-    assert_eq!(buf(&t).cursor_row, 0);
-    assert_eq!(buf(&t).cursor_col, 0);
+    assert_eq!(buf(&t).cursor_row(), 0);
+    assert_eq!(buf(&t).cursor_col(), 0);
 }
 
 // ── Movement: wrapping ──
@@ -130,8 +132,8 @@ fn move_right_wraps_to_next_line() {
         .with_file("ab\ncd\n")
         .run(actions(vec![MoveRight, MoveRight, MoveRight]));
 
-    assert_eq!(buf(&t).cursor_row, 1);
-    assert_eq!(buf(&t).cursor_col, 0);
+    assert_eq!(buf(&t).cursor_row(), 1);
+    assert_eq!(buf(&t).cursor_col(), 0);
 }
 
 #[test]
@@ -140,8 +142,8 @@ fn move_left_wraps_to_previous_line() {
         .with_file("ab\ncd\n")
         .run(actions(vec![MoveDown, MoveLeft]));
 
-    assert_eq!(buf(&t).cursor_row, 0);
-    assert_eq!(buf(&t).cursor_col, 2);
+    assert_eq!(buf(&t).cursor_row(), 0);
+    assert_eq!(buf(&t).cursor_col(), 2);
 }
 
 // ── Movement: line start/end ──
@@ -152,13 +154,13 @@ fn line_start_and_end() {
         .with_file("hello world\n")
         .run(actions(vec![MoveRight, MoveRight, MoveRight, LineStart]));
 
-    assert_eq!(buf(&t).cursor_col, 0);
+    assert_eq!(buf(&t).cursor_col(), 0);
 
     let t = TestHarness::new()
         .with_file("hello world\n")
         .run(actions(vec![LineEnd]));
 
-    assert_eq!(buf(&t).cursor_col, 11);
+    assert_eq!(buf(&t).cursor_col(), 11);
 }
 
 // ── Movement: file start/end ──
@@ -169,15 +171,15 @@ fn file_start_and_end() {
         .with_file("aaa\nbbb\nccc\n")
         .run(actions(vec![FileEnd]));
 
-    let max_row = buf(&t).doc.line_count() - 1;
-    assert_eq!(buf(&t).cursor_row, max_row);
+    let max_row = buf(&t).doc().line_count() - 1;
+    assert_eq!(buf(&t).cursor_row(), max_row);
 
     let t = TestHarness::new()
         .with_file("aaa\nbbb\nccc\n")
         .run(actions(vec![MoveDown, MoveDown, FileStart]));
 
-    assert_eq!(buf(&t).cursor_row, 0);
-    assert_eq!(buf(&t).cursor_col, 0);
+    assert_eq!(buf(&t).cursor_row(), 0);
+    assert_eq!(buf(&t).cursor_col(), 0);
 }
 
 // ── Movement: column affinity ──
@@ -188,8 +190,8 @@ fn column_affinity_preserved_across_short_line() {
         .with_file("hello\nhi\nworld\n")
         .run(actions(vec![LineEnd, MoveDown, MoveDown]));
 
-    assert_eq!(buf(&t).cursor_row, 2);
-    assert_eq!(buf(&t).cursor_col, 5);
+    assert_eq!(buf(&t).cursor_row(), 2);
+    assert_eq!(buf(&t).cursor_col(), 5);
 }
 
 // ── Movement: page up/down ──
@@ -206,14 +208,14 @@ fn page_down_and_up() {
         .with_file(&lines)
         .run(actions(vec![PageDown]));
 
-    assert!(buf(&t).cursor_row > 0);
+    assert!(buf(&t).cursor_row() > 0);
 
     let t = TestHarness::new()
         .with_viewport(80, 24)
         .with_file(&lines)
         .run(actions(vec![PageDown, PageUp]));
 
-    assert_eq!(buf(&t).cursor_row, 0);
+    assert_eq!(buf(&t).cursor_row(), 0);
 }
 
 // ── Movement: scroll ──
@@ -230,7 +232,7 @@ fn scroll_follows_cursor() {
         .with_file(&lines)
         .run(actions(vec![PageDown]));
 
-    assert!(buf(&t).scroll_row > 0, "scroll should have moved");
+    assert!(buf(&t).scroll_row() > 0, "scroll should have moved");
 }
 
 // ── Editing: insert ──
@@ -241,8 +243,8 @@ fn insert_chars() {
         .with_file("hello\n")
         .run(actions(vec![InsertChar('x'), InsertChar('y')]));
 
-    assert_eq!(buf(&t).doc.line(0), "xyhello");
-    assert_eq!(buf(&t).cursor_col, 2);
+    assert_eq!(buf(&t).doc().line(0), "xyhello");
+    assert_eq!(buf(&t).cursor_col(), 2);
 }
 
 #[test]
@@ -253,8 +255,8 @@ fn insert_in_middle() {
         InsertChar('X'),
     ]));
 
-    assert_eq!(buf(&t).doc.line(0), "heXllo");
-    assert_eq!(buf(&t).cursor_col, 3);
+    assert_eq!(buf(&t).doc().line(0), "heXllo");
+    assert_eq!(buf(&t).cursor_col(), 3);
 }
 
 #[test]
@@ -265,10 +267,10 @@ fn insert_newline() {
         InsertNewline,
     ]));
 
-    assert_eq!(buf(&t).doc.line(0), "he");
-    assert_eq!(buf(&t).doc.line(1), "llo");
-    assert_eq!(buf(&t).cursor_row, 1);
-    assert_eq!(buf(&t).cursor_col, 0);
+    assert_eq!(buf(&t).doc().line(0), "he");
+    assert_eq!(buf(&t).doc().line(1), "llo");
+    assert_eq!(buf(&t).cursor_row(), 1);
+    assert_eq!(buf(&t).cursor_col(), 0);
 }
 
 #[test]
@@ -278,8 +280,8 @@ fn insert_tab() {
         .with_file("hello\n")
         .run(vec![Do(InsertTab), WaitFor(indent_done)]);
 
-    assert_eq!(buf(&t).doc.line(0), "    hello");
-    assert_eq!(buf(&t).cursor_col, 4);
+    assert_eq!(buf(&t).doc().line(0), "    hello");
+    assert_eq!(buf(&t).cursor_col(), 4);
 }
 
 #[test]
@@ -291,7 +293,7 @@ fn insert_tab_alignment() {
         WaitFor(indent_done),
     ]);
 
-    assert_eq!(buf(&t).cursor_col, 4);
+    assert_eq!(buf(&t).cursor_col(), 4);
 }
 
 // ── Editing: delete backward ──
@@ -304,8 +306,8 @@ fn delete_backward() {
         DeleteBackward,
     ]));
 
-    assert_eq!(buf(&t).doc.line(0), "hllo");
-    assert_eq!(buf(&t).cursor_col, 1);
+    assert_eq!(buf(&t).doc().line(0), "hllo");
+    assert_eq!(buf(&t).cursor_col(), 1);
 }
 
 #[test]
@@ -314,8 +316,8 @@ fn delete_backward_at_start_does_nothing() {
         .with_file("hello\n")
         .run(actions(vec![DeleteBackward]));
 
-    assert_eq!(buf(&t).doc.line(0), "hello");
-    assert_eq!(buf(&t).cursor_col, 0);
+    assert_eq!(buf(&t).doc().line(0), "hello");
+    assert_eq!(buf(&t).cursor_col(), 0);
 }
 
 #[test]
@@ -324,9 +326,9 @@ fn delete_backward_joins_lines() {
         .with_file("hello\nworld\n")
         .run(actions(vec![MoveDown, DeleteBackward]));
 
-    assert_eq!(buf(&t).doc.line(0), "helloworld");
-    assert_eq!(buf(&t).cursor_row, 0);
-    assert_eq!(buf(&t).cursor_col, 5);
+    assert_eq!(buf(&t).doc().line(0), "helloworld");
+    assert_eq!(buf(&t).cursor_row(), 0);
+    assert_eq!(buf(&t).cursor_col(), 5);
 }
 
 // ── Editing: delete forward ──
@@ -337,8 +339,8 @@ fn delete_forward() {
         .with_file("hello\n")
         .run(actions(vec![DeleteForward]));
 
-    assert_eq!(buf(&t).doc.line(0), "ello");
-    assert_eq!(buf(&t).cursor_col, 0);
+    assert_eq!(buf(&t).doc().line(0), "ello");
+    assert_eq!(buf(&t).cursor_col(), 0);
 }
 
 #[test]
@@ -347,8 +349,8 @@ fn delete_forward_joins_lines() {
         .with_file("hello\nworld\n")
         .run(actions(vec![LineEnd, DeleteForward]));
 
-    assert_eq!(buf(&t).doc.line(0), "helloworld");
-    assert_eq!(buf(&t).cursor_row, 0);
+    assert_eq!(buf(&t).doc().line(0), "helloworld");
+    assert_eq!(buf(&t).cursor_row(), 0);
 }
 
 // ── Editing: kill line ──
@@ -359,8 +361,8 @@ fn kill_line_deletes_to_end() {
         .with_file("hello world\n")
         .run(actions(vec![MoveRight, MoveRight, KillLine]));
 
-    assert_eq!(buf(&t).doc.line(0), "he");
-    assert_eq!(buf(&t).cursor_col, 2);
+    assert_eq!(buf(&t).doc().line(0), "he");
+    assert_eq!(buf(&t).cursor_col(), 2);
 }
 
 #[test]
@@ -369,7 +371,7 @@ fn kill_line_at_end_joins_next() {
         .with_file("hello\nworld\n")
         .run(actions(vec![LineEnd, KillLine]));
 
-    assert_eq!(buf(&t).doc.line(0), "helloworld");
+    assert_eq!(buf(&t).doc().line(0), "helloworld");
 }
 
 #[test]
@@ -379,9 +381,9 @@ fn kill_line_multibyte_char() {
         .with_file("a — b\nsecond\n")
         .run(actions(vec![KillLine]));
 
-    assert_eq!(buf(&t).doc.line(0), "");
-    assert_eq!(buf(&t).doc.line(1), "second");
-    assert_eq!(buf(&t).doc.line_count(), 3); // empty + second + trailing
+    assert_eq!(buf(&t).doc().line(0), "");
+    assert_eq!(buf(&t).doc().line(1), "second");
+    assert_eq!(buf(&t).doc().line_count(), 3); // empty + second + trailing
 }
 
 // ── Undo / Redo ──
@@ -394,7 +396,7 @@ fn undo_reverts_insert_group() {
         Undo,
     ]));
 
-    assert_eq!(buf(&t).doc.line(0), "hello");
+    assert_eq!(buf(&t).doc().line(0), "hello");
 }
 
 #[test]
@@ -406,7 +408,7 @@ fn undo_then_redo() {
         Redo,
     ]));
 
-    assert_eq!(buf(&t).doc.line(0), "xyhello");
+    assert_eq!(buf(&t).doc().line(0), "xyhello");
 }
 
 #[test]
@@ -420,7 +422,7 @@ fn undo_groups_split_on_movement() {
         Undo, // only reverts "cd"
     ]));
 
-    assert_eq!(buf(&t).doc.line(0), "abhello");
+    assert_eq!(buf(&t).doc().line(0), "abhello");
 }
 
 #[test]
@@ -433,7 +435,7 @@ fn undo_groups_split_on_word_boundary() {
         Undo, // reverts " c" (space + c are in the same group)
     ]));
 
-    assert_eq!(buf(&t).doc.line(0), "ab");
+    assert_eq!(buf(&t).doc().line(0), "ab");
 }
 
 #[test]
@@ -446,7 +448,7 @@ fn redo_cleared_by_new_edit() {
         Redo,            // redoes 'b' (original 'a' redo is gone)
     ]));
 
-    assert_eq!(buf(&t).doc.line(0), "bhello");
+    assert_eq!(buf(&t).doc().line(0), "bhello");
 }
 
 #[test]
@@ -462,7 +464,7 @@ fn multiple_undo() {
         Undo, // reverts 'a'
     ]));
 
-    assert_eq!(buf(&t).doc.line(0), "hello");
+    assert_eq!(buf(&t).doc().line(0), "hello");
 }
 
 #[test]
@@ -475,9 +477,9 @@ fn undo_all_clears_dirty() {
         Do(Undo),
     ]);
 
-    assert_eq!(buf(&t).doc.line(0), "hello", "content should be restored");
+    assert_eq!(buf(&t).doc().line(0), "hello", "content should be restored");
     assert!(
-        !buf(&t).doc.dirty(),
+        !buf(&t).is_dirty(),
         "undoing back to saved state should clear dirty"
     );
 }
@@ -488,7 +490,7 @@ fn undo_nothing_is_noop() {
         .with_file("hello\n")
         .run(actions(vec![Undo]));
 
-    assert_eq!(buf(&t).doc.line(0), "hello");
+    assert_eq!(buf(&t).doc().line(0), "hello");
 }
 
 #[test]
@@ -497,7 +499,7 @@ fn redo_nothing_is_noop() {
         .with_file("hello\n")
         .run(actions(vec![Redo]));
 
-    assert_eq!(buf(&t).doc.line(0), "hello");
+    assert_eq!(buf(&t).doc().line(0), "hello");
 }
 
 /// Full Emacs undo chain test:
@@ -549,11 +551,11 @@ fn emacs_undo_undo_restores_original() {
     let t = TestHarness::new().with_file("").run(steps);
 
     let b = buf(&t);
-    assert_eq!(b.doc.line(0), "1", "first line should be '1'");
-    assert_eq!(b.doc.line(1), "2", "second line should be '2'");
-    assert_eq!(b.doc.line(2), "3", "third line should be '3'");
+    assert_eq!(b.doc().line(0), "1", "first line should be '1'");
+    assert_eq!(b.doc().line(1), "2", "second line should be '2'");
+    assert_eq!(b.doc().line(2), "3", "third line should be '3'");
     assert_eq!(
-        b.doc.line_count(),
+        b.doc().line_count(),
         4,
         "should have 4 lines: '1\\n2\\n3\\n' + trailing empty"
     );
@@ -565,8 +567,8 @@ fn emacs_undo_undo_restores_original() {
 fn clean_after_open() {
     let t = TestHarness::new().with_file("hello\n").run(vec![]);
 
-    assert_eq!(buf(&t).save_state, SaveState::Clean);
-    assert!(!buf(&t).doc.dirty());
+    assert_eq!(buf(&t).save_state(), SaveState::Clean);
+    assert!(!buf(&t).is_dirty());
 }
 
 #[test]
@@ -575,8 +577,8 @@ fn modified_after_edit() {
         .with_file("hello\n")
         .run(actions(vec![InsertChar('x')]));
 
-    assert_eq!(buf(&t).save_state, SaveState::Modified);
-    assert!(buf(&t).doc.dirty());
+    assert_eq!(buf(&t).save_state(), SaveState::Modified);
+    assert!(buf(&t).is_dirty());
 }
 
 #[test]
@@ -587,7 +589,7 @@ fn saving_after_save_action() {
         .run(actions(vec![InsertChar('x'), Save]));
 
     // State should be Saving (the async save hasn't completed yet)
-    assert_eq!(buf(&t).save_state, SaveState::Saving);
+    assert_eq!(buf(&t).save_state(), SaveState::Saving);
 }
 
 #[test]
@@ -598,8 +600,8 @@ fn clean_after_save_completes() {
         WaitFor(is_clean),
     ]);
 
-    assert_eq!(buf(&t).save_state, SaveState::Clean);
-    assert!(!buf(&t).doc.dirty());
+    assert_eq!(buf(&t).save_state(), SaveState::Clean);
+    assert!(!buf(&t).is_dirty());
 }
 
 #[test]
@@ -617,12 +619,12 @@ fn save_writes_to_disk() {
 #[test]
 fn version_increments_on_edit() {
     let t = TestHarness::new().with_file("hello\n").run(vec![]);
-    let v0 = buf(&t).doc.version();
+    let v0 = buf(&t).version();
 
     let t = TestHarness::new()
         .with_file("hello\n")
         .run(actions(vec![InsertChar('x')]));
-    assert!(buf(&t).doc.version() > v0);
+    assert!(buf(&t).version() > v0);
 }
 
 // ── Tabs ──
@@ -719,7 +721,7 @@ fn next_tab_cycles_through_buffers() {
     // Last opened file should be active
     assert_eq!(t.state.buffers.len(), 3);
     let active = buf(&t);
-    assert_eq!(active.doc.line(0), "c");
+    assert_eq!(active.doc().line(0), "c");
 
     // NextTab wraps to first
     let t = TestHarness::new()
@@ -730,7 +732,7 @@ fn next_tab_cycles_through_buffers() {
 
     let active = buf(&t);
     assert_eq!(
-        active.doc.line(0),
+        active.doc().line(0),
         "a",
         "NextTab from last should wrap to first"
     );
@@ -746,7 +748,7 @@ fn prev_tab_cycles_backwards() {
 
     let active = buf(&t);
     assert_eq!(
-        active.doc.line(0),
+        active.doc().line(0),
         "b",
         "PrevTab from last should go to middle"
     );
@@ -763,7 +765,7 @@ fn tab_cycle_roundtrip() {
 
     let active = buf(&t);
     assert_eq!(
-        active.doc.line(0),
+        active.doc().line(0),
         "c",
         "3 NextTabs in 3-tab set should cycle back"
     );
@@ -783,7 +785,7 @@ fn kill_buffer_activates_next() {
     assert_eq!(t.state.buffers.len(), 2);
     let active = buf(&t);
     assert_eq!(
-        active.doc.line(0),
+        active.doc().line(0),
         "c",
         "killing middle tab should activate next"
     );
@@ -895,7 +897,7 @@ fn move_down_in_main_moves_cursor_not_browser() {
     ]);
 
     assert_eq!(
-        buf(&t).cursor_row,
+        buf(&t).cursor_row(),
         1,
         "MoveDown in Main should move editor cursor"
     );
@@ -983,8 +985,8 @@ fn browser_reveals_opened_file() {
         .with_named_file("hello.txt", "hello\n")
         .run(vec![WaitFor(browser_reveal_done)]);
 
-    let id = t.state.active_buffer.unwrap();
-    let buf_path = t.state.buffers[&id].path.as_ref().unwrap();
+    let active_path = t.state.active_buffer.as_ref().unwrap();
+    let buf_path = t.state.buffers[active_path].path_buf().unwrap();
     let canonical = std::fs::canonicalize(buf_path).unwrap_or_else(|_| buf_path.clone());
     let selected_entry = &t.state.browser.entries[t.state.browser.selected];
     assert_eq!(
@@ -1004,8 +1006,8 @@ fn browser_reveals_on_tab_switch() {
             WaitFor(browser_reveal_done),
         ]);
 
-    let id = t.state.active_buffer.unwrap();
-    let active_path = t.state.buffers[&id].path.as_ref().unwrap();
+    let ap = t.state.active_buffer.as_ref().unwrap();
+    let active_path = t.state.buffers[ap].path_buf().unwrap();
     let canonical = std::fs::canonicalize(active_path).unwrap_or_else(|_| active_path.clone());
     let selected_entry = &t.state.browser.entries[t.state.browser.selected];
     assert_eq!(
@@ -1031,8 +1033,8 @@ fn browser_reveals_file_in_subdir() {
     );
 
     // The active buffer's file should be selected in the browser
-    let active_id = t.state.active_buffer.unwrap();
-    let active_path = t.state.buffers[&active_id].path.as_ref().unwrap();
+    let active_p = t.state.active_buffer.as_ref().unwrap();
+    let active_path = t.state.buffers[active_p].path_buf().unwrap();
     let active_canonical =
         std::fs::canonicalize(active_path).unwrap_or_else(|_| active_path.clone());
     let selected_entry = &t.state.browser.entries[t.state.browser.selected];
@@ -1053,8 +1055,8 @@ fn browser_reveals_after_kill_buffer() {
             WaitFor(browser_reveal_done),
         ]);
 
-    let id = t.state.active_buffer.unwrap();
-    let active_path = t.state.buffers[&id].path.as_ref().unwrap();
+    let ap = t.state.active_buffer.as_ref().unwrap();
+    let active_path = t.state.buffers[ap].path_buf().unwrap();
     let canonical = std::fs::canonicalize(active_path).unwrap_or_else(|_| active_path.clone());
     let selected_entry = &t.state.browser.entries[t.state.browser.selected];
     assert_eq!(
@@ -1138,8 +1140,8 @@ fn wrap_move_down_through_wrapped_line() {
         .run(actions(vec![MoveDown]));
 
     // First MoveDown should move to the second sub-line of the first logical line
-    assert_eq!(buf(&t).cursor_row, 0, "still on first logical line");
-    assert!(buf(&t).cursor_col >= 9, "should be on second sub-line");
+    assert_eq!(buf(&t).cursor_row(), 0, "still on first logical line");
+    assert!(buf(&t).cursor_col() >= 9, "should be on second sub-line");
 }
 
 #[test]
@@ -1150,7 +1152,7 @@ fn wrap_move_down_crosses_to_next_line() {
         .with_file("abcdefghijklmno\nshort\n")
         .run(actions(vec![MoveDown, MoveDown]));
 
-    assert_eq!(buf(&t).cursor_row, 1, "should be on second logical line");
+    assert_eq!(buf(&t).cursor_row(), 1, "should be on second logical line");
 }
 
 #[test]
@@ -1161,8 +1163,8 @@ fn wrap_move_up_through_wrapped_line() {
         .with_file("abcdefghijklmno\nshort\n")
         .run(actions(vec![MoveDown, MoveDown, MoveUp]));
 
-    assert_eq!(buf(&t).cursor_row, 0, "back on first logical line");
-    assert!(buf(&t).cursor_col >= 9, "on last sub-line");
+    assert_eq!(buf(&t).cursor_row(), 0, "back on first logical line");
+    assert!(buf(&t).cursor_col() >= 9, "on last sub-line");
 }
 
 #[test]
@@ -1186,7 +1188,7 @@ fn wrap_scroll_sub_line() {
 
     // After many MoveDowns through a 100-char wrapped line, scroll should have adjusted
     assert!(
-        buf(&t).scroll_row > 0 || buf(&t).scroll_sub_line > 0,
+        buf(&t).scroll_row() > 0 || buf(&t).scroll_sub_line() > 0,
         "scroll should have moved for wrapped content"
     );
 }
@@ -1207,18 +1209,19 @@ fn wrap_move_up_not_stuck_at_chunk_boundary() {
             // Wait for async clipboard round-trip to apply the yank
             WaitFor(|s| {
                 s.active_buffer
-                    .and_then(|id| s.buffers.get(&id))
-                    .map_or(false, |b| b.doc.line_len(0) >= 25)
+                    .as_ref()
+                    .and_then(|path| s.buffers.get(path))
+                    .map_or(false, |b| b.doc().line_len(0) >= 25)
             }),
             Do(MoveUp),
         ]);
 
-    assert_eq!(buf(&t).cursor_row, 0, "should stay on first logical line");
+    assert_eq!(buf(&t).cursor_row(), 0, "should stay on first logical line");
     // After yank cursor is at col=25 (sub-line 2). One MoveUp → sub-line 1.
     assert!(
-        buf(&t).cursor_col >= 9 && buf(&t).cursor_col < 18,
+        buf(&t).cursor_col() >= 9 && buf(&t).cursor_col() < 18,
         "should be on sub-line 1 (col in [9,18)), got col={}",
-        buf(&t).cursor_col
+        buf(&t).cursor_col()
     );
 }
 
@@ -1237,19 +1240,20 @@ fn wrap_move_down_no_skip_at_chunk_boundary() {
             Do(Yank),
             WaitFor(|s| {
                 s.active_buffer
-                    .and_then(|id| s.buffers.get(&id))
-                    .map_or(false, |b| b.doc.line_len(0) >= 25)
+                    .as_ref()
+                    .and_then(|path| s.buffers.get(path))
+                    .map_or(false, |b| b.doc().line_len(0) >= 25)
             }),
             Do(MoveUp),
             Do(MoveUp),
             Do(MoveDown),
         ]);
 
-    assert_eq!(buf(&t).cursor_row, 0, "should stay on first logical line");
+    assert_eq!(buf(&t).cursor_row(), 0, "should stay on first logical line");
     assert!(
-        buf(&t).cursor_col >= 9 && buf(&t).cursor_col < 18,
+        buf(&t).cursor_col() >= 9 && buf(&t).cursor_col() < 18,
         "should be on sub-line 1 (col in [9,18)), got col={}",
-        buf(&t).cursor_col
+        buf(&t).cursor_col()
     );
 }
 
@@ -1307,7 +1311,7 @@ fn session_restore_tabs() {
         .state
         .buffers
         .values()
-        .filter_map(|b| b.path.as_ref())
+        .filter_map(|b| b.path_buf())
         .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
         .collect();
     paths.sort();
@@ -1330,14 +1334,13 @@ fn session_restore_tab_order_with_arg_repeated() {
             .values()
             .map(|b| {
                 let name = b
-                    .path
-                    .as_ref()
+                    .path_buf()
                     .unwrap()
                     .file_name()
                     .unwrap()
                     .to_string_lossy()
                     .into_owned();
-                (name, b.tab_order)
+                (name, b.tab_order())
             })
             .collect();
         v.sort_by_key(|(_, o)| *o);
@@ -1359,14 +1362,13 @@ fn session_restore_tab_order_with_arg_repeated() {
             .values()
             .map(|b| {
                 let name = b
-                    .path
-                    .as_ref()
+                    .path_buf()
                     .unwrap()
                     .file_name()
                     .unwrap()
                     .to_string_lossy()
                     .into_owned();
-                (name, b.tab_order)
+                (name, b.tab_order())
             })
             .collect();
         v.sort_by_key(|(_, o)| *o);
@@ -1395,14 +1397,13 @@ fn session_restore_tab_order_with_arg_repeated() {
             .values()
             .map(|b| {
                 let name = b
-                    .path
-                    .as_ref()
+                    .path_buf()
                     .unwrap()
                     .file_name()
                     .unwrap()
                     .to_string_lossy()
                     .into_owned();
-                (name, b.tab_order)
+                (name, b.tab_order())
             })
             .collect();
         v.sort_by_key(|(_, o)| *o);
@@ -1431,14 +1432,13 @@ fn session_restore_tab_order() {
             .values()
             .map(|b| {
                 let name = b
-                    .path
-                    .as_ref()
+                    .path_buf()
                     .unwrap()
                     .file_name()
                     .unwrap()
                     .to_string_lossy()
                     .into_owned();
-                (name, b.tab_order)
+                (name, b.tab_order())
             })
             .collect();
         v.sort_by_key(|(_, o)| *o);
@@ -1456,14 +1456,13 @@ fn session_restore_tab_order() {
         .values()
         .map(|b| {
             let name = b
-                .path
-                .as_ref()
+                .path_buf()
                 .unwrap()
                 .file_name()
                 .unwrap()
                 .to_string_lossy()
                 .into_owned();
-            (name, b.tab_order)
+            (name, b.tab_order())
         })
         .collect();
     restored.sort_by_key(|(_, o)| *o);
@@ -1500,8 +1499,7 @@ fn session_restore_missing_file() {
     // fileB.txt should be open; fileA.txt silently skipped
     assert_eq!(t2.state.buffers.len(), 1);
     let name = buf(&t2)
-        .path
-        .as_ref()
+        .path_buf()
         .unwrap()
         .file_name()
         .unwrap()
@@ -1556,8 +1554,7 @@ fn session_restore_multiple_missing() {
 
     assert_eq!(t2.state.buffers.len(), 1);
     let name = buf(&t2)
-        .path
-        .as_ref()
+        .path_buf()
         .unwrap()
         .file_name()
         .unwrap()
@@ -1619,7 +1616,7 @@ fn session_restore_with_arg_file() {
         .state
         .buffers
         .values()
-        .filter_map(|b| b.path.as_ref())
+        .filter_map(|b| b.path_buf())
         .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
         .collect();
     paths.sort();
@@ -1627,8 +1624,7 @@ fn session_restore_with_arg_file() {
 
     // Active tab should be the arg file — explicit arg overrides session's choice
     let active_name = buf(&t2)
-        .path
-        .as_ref()
+        .path_buf()
         .unwrap()
         .file_name()
         .unwrap()
@@ -1653,15 +1649,15 @@ fn session_restore_cursor() {
             WaitFor(|s| s.session.saved),
         ]);
 
-    assert_eq!(buf(&t).cursor_row, 3);
+    assert_eq!(buf(&t).cursor_row(), 3);
     let dir = t.dirs.root.clone();
 
     // Run 2: restore — cursor should be at row 3
     let t2 = TestHarness::with_dir(dir).run(vec![WaitFor(|s| !s.buffers.is_empty())]);
 
-    let id = t2.state.active_buffer.unwrap();
-    let b = &t2.state.buffers[&id];
-    assert_eq!(b.cursor_row, 3, "cursor row should be restored");
+    let ap = t2.state.active_buffer.as_ref().unwrap();
+    let b = &t2.state.buffers[ap];
+    assert_eq!(b.cursor_row(), 3, "cursor row should be restored");
 }
 
 #[test]
@@ -1673,8 +1669,7 @@ fn session_restore_active_tab() {
         .run(vec![Do(PrevTab), Do(Quit), WaitFor(|s| s.session.saved)]);
 
     let active_name = buf(&t)
-        .path
-        .as_ref()
+        .path_buf()
         .unwrap()
         .file_name()
         .unwrap()
@@ -1690,8 +1685,7 @@ fn session_restore_active_tab() {
         .run(vec![WaitFor(|s| s.buffers.len() >= 2)]);
 
     let active_name2 = buf(&t2)
-        .path
-        .as_ref()
+        .path_buf()
         .unwrap()
         .file_name()
         .unwrap()
@@ -1709,8 +1703,7 @@ fn session_restore_active_tab_no_args() {
         .run(vec![Do(PrevTab), Do(Quit), WaitFor(|s| s.session.saved)]);
 
     let active_name = buf(&t)
-        .path
-        .as_ref()
+        .path_buf()
         .unwrap()
         .file_name()
         .unwrap()
@@ -1723,8 +1716,7 @@ fn session_restore_active_tab_no_args() {
     let t2 = TestHarness::with_dir(dir).run(vec![WaitFor(|s| s.buffers.len() >= 2)]);
 
     let active_name2 = buf(&t2)
-        .path
-        .as_ref()
+        .path_buf()
         .unwrap()
         .file_name()
         .unwrap()
@@ -1746,8 +1738,9 @@ fn save_strips_trailing_whitespace() {
             Do(Save),
             WaitFor(|s| {
                 s.active_buffer
-                    .and_then(|id| s.buffers.get(&id))
-                    .is_some_and(|b| b.save_state == SaveState::Clean)
+                    .as_ref()
+                    .and_then(|path| s.buffers.get(path))
+                    .is_some_and(|b| b.save_state() == SaveState::Clean)
             }),
         ]);
 
@@ -1761,8 +1754,9 @@ fn save_ensures_final_newline() {
         Do(Save),
         WaitFor(|s| {
             s.active_buffer
-                .and_then(|id| s.buffers.get(&id))
-                .is_some_and(|b| b.save_state == SaveState::Clean)
+                .as_ref()
+                .and_then(|path| s.buffers.get(path))
+                .is_some_and(|b| b.save_state() == SaveState::Clean)
         }),
     ]);
 
@@ -1776,14 +1770,15 @@ fn save_format_is_undoable() {
         Do(Save),
         WaitFor(|s| {
             s.active_buffer
-                .and_then(|id| s.buffers.get(&id))
-                .is_some_and(|b| b.save_state == SaveState::Clean)
+                .as_ref()
+                .and_then(|path| s.buffers.get(path))
+                .is_some_and(|b| b.save_state() == SaveState::Clean)
         }),
         Do(Undo),
     ]);
 
     // After undo, trailing whitespace should be back
-    let line = buf(&t).doc.line(0);
+    let line = buf(&t).doc().line(0);
     assert_eq!(line, "hello   ", "undo should restore trailing whitespace");
 }
 
@@ -1798,18 +1793,19 @@ fn undo_persist_and_restore() {
         Do(InsertChar('!')),
         WaitFor(|s| {
             s.active_buffer
-                .and_then(|id| s.buffers.get(&id))
-                .is_some_and(|b| b.persisted_undo_len > 0)
+                .as_ref()
+                .and_then(|path| s.buffers.get(path))
+                .is_some_and(|b| b.persisted_undo_len() > 0)
         }),
         Do(Quit),
         WaitFor(|s| s.session.saved),
     ]);
-    assert!(buf(&t).doc.dirty(), "buffer should be dirty");
+    assert!(buf(&t).is_dirty(), "buffer should be dirty");
     let dir = t.dirs.root.clone();
 
     // Run 2: restore — undo should work and revert the edits
     let t2 = TestHarness::with_dir(dir).run(vec![WaitFor(|s| !s.buffers.is_empty()), Do(Undo)]);
-    let line = buf(&t2).doc.line(0);
+    let line = buf(&t2).doc().line(0);
     assert_eq!(line, "hello", "undo should revert persisted edits");
 }
 
@@ -1822,8 +1818,9 @@ fn undo_cleared_after_save() {
         Do(Save),
         WaitFor(|s| {
             s.active_buffer
-                .and_then(|id| s.buffers.get(&id))
-                .is_some_and(|b| b.save_state == SaveState::Clean)
+                .as_ref()
+                .and_then(|path| s.buffers.get(path))
+                .is_some_and(|b| b.save_state() == SaveState::Clean)
         }),
         Do(Quit),
         WaitFor(|s| s.session.saved),
@@ -1833,7 +1830,7 @@ fn undo_cleared_after_save() {
     // Run 2: restore — buffer should be clean (save cleared undo in DB)
     let t2 = TestHarness::with_dir(dir).run(vec![WaitFor(|s| !s.buffers.is_empty())]);
     assert!(
-        !buf(&t2).doc.dirty(),
+        !buf(&t2).is_dirty(),
         "buffer should be clean after save+restore"
     );
 }
@@ -1847,8 +1844,9 @@ fn session_restores_dirty_state() {
         // Wait for undo to be flushed to DB
         WaitFor(|s| {
             s.active_buffer
-                .and_then(|id| s.buffers.get(&id))
-                .is_some_and(|b| b.persisted_undo_len > 0)
+                .as_ref()
+                .and_then(|path| s.buffers.get(path))
+                .is_some_and(|b| b.persisted_undo_len() > 0)
         }),
         Do(Quit),
         WaitFor(|s| s.session.saved),
@@ -1858,7 +1856,7 @@ fn session_restores_dirty_state() {
     // Run 2: restore — buffer should be dirty (distance_from_save != 0)
     let t2 = TestHarness::with_dir(dir).run(vec![WaitFor(|s| !s.buffers.is_empty())]);
     assert!(
-        buf(&t2).doc.dirty(),
+        buf(&t2).is_dirty(),
         "buffer should be dirty after restore of unsaved edits"
     );
 }
@@ -1987,7 +1985,7 @@ fn external_editor_second_save_detected() {
     std::fs::rename(&tmp, &file_path).unwrap();
 
     inst.wait_for(
-        |s| active_buf(s).is_some_and(|b| b.doc.line(0) == "first"),
+        |s| active_buf(s).is_some_and(|b| b.doc().line(0) == "first"),
         WAIT,
         "first external save detected",
     );
@@ -1998,7 +1996,7 @@ fn external_editor_second_save_detected() {
     std::fs::rename(&tmp, &file_path).unwrap();
 
     inst.wait_for(
-        |s| active_buf(s).is_some_and(|b| b.doc.line(0) == "second"),
+        |s| active_buf(s).is_some_and(|b| b.doc().line(0) == "second"),
         WAIT,
         "second external save detected",
     );
@@ -2033,7 +2031,7 @@ fn external_editor_second_direct_write_detected() {
     std::fs::write(&file_path, "first\n").unwrap();
 
     inst.wait_for(
-        |s| active_buf(s).is_some_and(|b| b.doc.line(0) == "first"),
+        |s| active_buf(s).is_some_and(|b| b.doc().line(0) == "first"),
         WAIT,
         "first external save detected",
     );
@@ -2046,7 +2044,7 @@ fn external_editor_second_direct_write_detected() {
     std::fs::write(&file_path, "second\n").unwrap();
 
     inst.wait_for(
-        |s| active_buf(s).is_some_and(|b| b.doc.line(0) == "second"),
+        |s| active_buf(s).is_some_and(|b| b.doc().line(0) == "second"),
         WAIT,
         "second external save detected",
     );
@@ -2154,18 +2152,19 @@ fn cross_instance_sync_insert_newline() {
             // Wait for sync to apply
             WaitFor(|s| {
                 s.active_buffer
-                    .and_then(|id| s.buffers.get(&id))
-                    .is_some_and(|b| b.doc.line_count() == 5) // was 4, now 5
+                    .as_ref()
+                    .and_then(|path| s.buffers.get(path))
+                    .is_some_and(|b| b.doc().line_count() == 5) // was 4, now 5
             }),
         ]);
 
     let b = buf(&t);
-    assert_eq!(b.doc.line(0), "aaa");
-    assert_eq!(b.doc.line(1), ""); // the inserted newline
-    assert_eq!(b.doc.line(2), "bbb");
-    assert_eq!(b.doc.line(3), "ccc");
+    assert_eq!(b.doc().line(0), "aaa");
+    assert_eq!(b.doc().line(1), ""); // the inserted newline
+    assert_eq!(b.doc().line(2), "bbb");
+    assert_eq!(b.doc().line(3), "ccc");
     assert_eq!(
-        b.doc.line_count(),
+        b.doc().line_count(),
         5,
         "should have exactly one extra newline, not double"
     );
@@ -2211,14 +2210,15 @@ fn cross_instance_sync_multiple_edits() {
             })),
             WaitFor(|s| {
                 s.active_buffer
-                    .and_then(|id| s.buffers.get(&id))
-                    .is_some_and(|b| b.doc.line(0).contains("XYZ"))
+                    .as_ref()
+                    .and_then(|path| s.buffers.get(path))
+                    .is_some_and(|b| b.doc().line(0).contains("XYZ"))
             }),
         ]);
 
     let b = buf(&t);
     assert_eq!(
-        b.doc.line(0),
+        b.doc().line(0),
         "XYZhello",
         "all three edits should be replayed"
     );
@@ -2261,8 +2261,9 @@ fn cross_instance_sync_after_save() {
             // Wait for first sync
             WaitFor(|s| {
                 s.active_buffer
-                    .and_then(|id| s.buffers.get(&id))
-                    .is_some_and(|b| b.doc.line(0).starts_with("X"))
+                    .as_ref()
+                    .and_then(|path| s.buffers.get(path))
+                    .is_some_and(|b| b.doc().line(0).starts_with("X"))
             }),
             // Now simulate B saving: write new content to disk and clear undo in DB
             TestStep::RunFn(Box::new(|dirs| {
@@ -2294,18 +2295,19 @@ fn cross_instance_sync_after_save() {
             // Wait for A to detect the external save (chain_id should be reset)
             WaitFor(|s| {
                 s.active_buffer
-                    .and_then(|id| s.buffers.get(&id))
-                    .is_some_and(|b| b.chain_id.is_none())
+                    .as_ref()
+                    .and_then(|path| s.buffers.get(path))
+                    .is_some_and(|b| b.chain_id().is_none())
             }),
         ]);
 
     let b = buf(&t);
     // After external save detection, A should have reset its undo chain
     assert!(
-        b.chain_id.is_none(),
+        b.chain_id().is_none(),
         "chain_id should be reset after external save"
     );
-    assert_eq!(b.last_seen_seq, 0, "last_seen_seq should be reset");
+    assert_eq!(b.last_seen_seq(), 0, "last_seen_seq should be reset");
 }
 
 // ── Core bug: after save, only post-save undo groups should be flushed ──
@@ -2315,7 +2317,7 @@ fn persisted_undo_len_preserved_after_save() {
     // After save, persisted_undo_len must match the undo history length —
     // NOT reset to 0.  The old code (see _old/crates/buffer/src/watcher.rs:396)
     // did this correctly:
-    //     self.persisted_undo_len = self.save_history_len;
+    //     self.persisted_undo_len() = self.save_history_len;
     // Without this, the next flush re-sends ALL undo groups (including
     // pre-save ones), which corrupts cross-instance sync on the receiver.
     let t = TestHarness::new().with_file("hello\n").run(vec![
@@ -2323,20 +2325,22 @@ fn persisted_undo_len_preserved_after_save() {
         Do(InsertChar('X')),
         WaitFor(|s| {
             s.active_buffer
-                .and_then(|id| s.buffers.get(&id))
-                .is_some_and(|b| b.persisted_undo_len > 0)
+                .as_ref()
+                .and_then(|path| s.buffers.get(path))
+                .is_some_and(|b| b.persisted_undo_len() > 0)
         }),
         Do(Save),
         WaitFor(|s| {
             s.active_buffer
-                .and_then(|id| s.buffers.get(&id))
-                .is_some_and(|b| b.save_state == SaveState::Clean)
+                .as_ref()
+                .and_then(|path| s.buffers.get(path))
+                .is_some_and(|b| b.save_state() == SaveState::Clean)
         }),
     ]);
 
     let b = buf(&t);
     assert!(
-        b.persisted_undo_len > 0,
+        b.persisted_undo_len() > 0,
         "persisted_undo_len should reflect saved undo history, got 0"
     );
 }
@@ -2348,7 +2352,8 @@ use led_state::AppState;
 
 fn active_buf(s: &AppState) -> Option<&led_state::BufferState> {
     s.active_buffer
-        .and_then(|id| s.buffers.get(&id))
+        .as_ref()
+        .and_then(|path| s.buffers.get(path))
         .map(|v| &**v)
 }
 
@@ -2383,22 +2388,22 @@ fn two_instance_sync_after_save() {
     assert!(a.with_state(|s| s.workspace.as_ref().unwrap().primary));
     assert!(!b.with_state(|s| s.workspace.as_ref().unwrap().primary));
 
-    let a_lines_before = a.with_state(|s| active_buf(s).unwrap().doc.line_count());
+    let a_lines_before = a.with_state(|s| active_buf(s).unwrap().doc().line_count());
 
     // Step 3: B adds a newline
     b.push(InsertNewline);
     b.wait_for(
-        |s| active_buf(s).is_some_and(|b| b.chain_id.is_some()),
+        |s| active_buf(s).is_some_and(|b| b.chain_id().is_some()),
         WAIT,
         "B undo flushed",
     );
     a.wait_for(
-        move |s| active_buf(s).is_some_and(|b| b.doc.line_count() > a_lines_before),
+        move |s| active_buf(s).is_some_and(|b| b.doc().line_count() > a_lines_before),
         WAIT,
         "A synced first newline",
     );
 
-    let a_lines_after_sync1 = a.with_state(|s| active_buf(s).unwrap().doc.line_count());
+    let a_lines_after_sync1 = a.with_state(|s| active_buf(s).unwrap().doc().line_count());
     assert_eq!(
         a_lines_after_sync1,
         a_lines_before + 1,
@@ -2408,7 +2413,7 @@ fn two_instance_sync_after_save() {
     // Step 4: B saves
     b.push(Save);
     b.wait_for(
-        |s| active_buf(s).is_some_and(|b| b.save_state == SaveState::Clean),
+        |s| active_buf(s).is_some_and(|b| b.save_state() == SaveState::Clean),
         WAIT,
         "B saved",
     );
@@ -2416,19 +2421,19 @@ fn two_instance_sync_after_save() {
     // Step 5: B adds another newline
     b.push(InsertNewline);
     b.wait_for(
-        |s| active_buf(s).is_some_and(|b| b.chain_id.is_some() && b.doc.dirty()),
+        |s| active_buf(s).is_some_and(|b| b.chain_id().is_some() && b.is_dirty()),
         WAIT,
         "B second edit flushed",
     );
 
     // A must sync the second newline
     a.wait_for(
-        move |s| active_buf(s).is_some_and(|b| b.doc.line_count() > a_lines_after_sync1),
+        move |s| active_buf(s).is_some_and(|b| b.doc().line_count() > a_lines_after_sync1),
         WAIT,
         "A synced second newline",
     );
 
-    let a_final_lines = a.with_state(|s| active_buf(s).unwrap().doc.line_count());
+    let a_final_lines = a.with_state(|s| active_buf(s).unwrap().doc().line_count());
     assert_eq!(
         a_final_lines,
         a_lines_before + 2,
@@ -2439,14 +2444,14 @@ fn two_instance_sync_after_save() {
     // Content should match between A and B
     let a_lines: Vec<String> = a.with_state(|s| {
         let buf = active_buf(s).unwrap();
-        (0..buf.doc.line_count())
-            .map(|i| buf.doc.line(i).to_string())
+        (0..buf.doc().line_count())
+            .map(|i| buf.doc().line(i).to_string())
             .collect()
     });
     let b_lines: Vec<String> = b.with_state(|s| {
         let buf = active_buf(s).unwrap();
-        (0..buf.doc.line_count())
-            .map(|i| buf.doc.line(i).to_string())
+        (0..buf.doc().line_count())
+            .map(|i| buf.doc().line(i).to_string())
             .collect()
     });
     for (i, (a_line, b_line)) in a_lines.iter().zip(b_lines.iter()).enumerate() {
@@ -2483,22 +2488,22 @@ fn two_instance_second_edit_syncs_without_save() {
         "B ready",
     );
 
-    let a_lines_before = a.with_state(|s| active_buf(s).unwrap().doc.line_count());
+    let a_lines_before = a.with_state(|s| active_buf(s).unwrap().doc().line_count());
 
     // Step 3: B inserts newline
     b.push(InsertNewline);
     b.wait_for(
-        |s| active_buf(s).is_some_and(|b| b.chain_id.is_some()),
+        |s| active_buf(s).is_some_and(|b| b.chain_id().is_some()),
         WAIT,
         "B first edit flushed",
     );
     a.wait_for(
-        move |s| active_buf(s).is_some_and(|b| b.doc.line_count() > a_lines_before),
+        move |s| active_buf(s).is_some_and(|b| b.doc().line_count() > a_lines_before),
         WAIT,
         "A synced first newline",
     );
 
-    let a_lines_after_sync1 = a.with_state(|s| active_buf(s).unwrap().doc.line_count());
+    let a_lines_after_sync1 = a.with_state(|s| active_buf(s).unwrap().doc().line_count());
     assert_eq!(a_lines_after_sync1, a_lines_before + 1);
 
     // Step 4: wait 1000ms for the first flush to fully propagate
@@ -2507,19 +2512,19 @@ fn two_instance_second_edit_syncs_without_save() {
     // Step 5: B inserts another newline (no save)
     b.push(InsertNewline);
     b.wait_for(
-        move |s| active_buf(s).is_some_and(|b| b.doc.line_count() > a_lines_after_sync1),
+        move |s| active_buf(s).is_some_and(|b| b.doc().line_count() > a_lines_after_sync1),
         WAIT,
         "B has second newline",
     );
 
     // A must sync the second newline
     a.wait_for(
-        move |s| active_buf(s).is_some_and(|b| b.doc.line_count() > a_lines_after_sync1),
+        move |s| active_buf(s).is_some_and(|b| b.doc().line_count() > a_lines_after_sync1),
         WAIT,
         "A synced second newline",
     );
 
-    let a_final_lines = a.with_state(|s| active_buf(s).unwrap().doc.line_count());
+    let a_final_lines = a.with_state(|s| active_buf(s).unwrap().doc().line_count());
     assert_eq!(
         a_final_lines,
         a_lines_before + 2,
@@ -2529,14 +2534,14 @@ fn two_instance_second_edit_syncs_without_save() {
     );
     let a_lines: Vec<String> = a.with_state(|s| {
         let buf = active_buf(s).unwrap();
-        (0..buf.doc.line_count())
-            .map(|i| buf.doc.line(i).to_string())
+        (0..buf.doc().line_count())
+            .map(|i| buf.doc().line(i).to_string())
             .collect()
     });
     let b_lines: Vec<String> = b.with_state(|s| {
         let buf = active_buf(s).unwrap();
-        (0..buf.doc.line_count())
-            .map(|i| buf.doc.line(i).to_string())
+        (0..buf.doc().line_count())
+            .map(|i| buf.doc().line(i).to_string())
             .collect()
     });
     for (i, (a_line, b_line)) in a_lines.iter().zip(b_lines.iter()).enumerate() {
@@ -2574,14 +2579,14 @@ fn two_instance_remote_save_clears_dirty() {
     // Step 3: B inserts newline
     b.push(InsertNewline);
     b.wait_for(
-        |s| active_buf(s).is_some_and(|b| b.chain_id.is_some()),
+        |s| active_buf(s).is_some_and(|b| b.chain_id().is_some()),
         WAIT,
         "B undo flushed",
     );
 
     // A syncs → A becomes dirty
     a.wait_for(
-        |s| active_buf(s).is_some_and(|b| b.doc.dirty()),
+        |s| active_buf(s).is_some_and(|b| b.is_dirty()),
         WAIT,
         "A dirty after sync",
     );
@@ -2589,14 +2594,14 @@ fn two_instance_remote_save_clears_dirty() {
     // Step 4: B saves
     b.push(Save);
     b.wait_for(
-        |s| active_buf(s).is_some_and(|b| b.save_state == SaveState::Clean && !b.doc.dirty()),
+        |s| active_buf(s).is_some_and(|b| b.save_state() == SaveState::Clean && !b.is_dirty()),
         WAIT,
         "B clean after save",
     );
 
     // A must also become clean: the file on disk now matches A's content
     a.wait_for(
-        |s| active_buf(s).is_some_and(|b| !b.doc.dirty()),
+        |s| active_buf(s).is_some_and(|b| !b.is_dirty()),
         WAIT,
         "A clean after remote save",
     );
@@ -2604,14 +2609,14 @@ fn two_instance_remote_save_clears_dirty() {
     // Content should still match
     let a_lines: Vec<String> = a.with_state(|s| {
         let buf = active_buf(s).unwrap();
-        (0..buf.doc.line_count())
-            .map(|i| buf.doc.line(i).to_string())
+        (0..buf.doc().line_count())
+            .map(|i| buf.doc().line(i).to_string())
             .collect()
     });
     let b_lines: Vec<String> = b.with_state(|s| {
         let buf = active_buf(s).unwrap();
-        (0..buf.doc.line_count())
-            .map(|i| buf.doc.line(i).to_string())
+        (0..buf.doc().line_count())
+            .map(|i| buf.doc().line(i).to_string())
             .collect()
     });
     for (i, (a_line, b_line)) in a_lines.iter().zip(b_lines.iter()).enumerate() {
@@ -2730,75 +2735,75 @@ fn two_instance_undo_syncs_and_clears_dirty() {
         "B ready",
     );
 
-    let original_lines = a.with_state(|s| active_buf(s).unwrap().doc.line_count());
+    let original_lines = a.with_state(|s| active_buf(s).unwrap().doc().line_count());
 
     // Step 2: A inserts newline
     a.push(InsertNewline);
     a.wait_for(
-        |s| active_buf(s).is_some_and(|b| b.chain_id.is_some()),
+        |s| active_buf(s).is_some_and(|b| b.chain_id().is_some()),
         WAIT,
         "A undo flushed",
     );
 
     // B syncs the newline
     b.wait_for(
-        move |s| active_buf(s).is_some_and(|b| b.doc.line_count() > original_lines),
+        move |s| active_buf(s).is_some_and(|b| b.doc().line_count() > original_lines),
         WAIT,
         "B synced newline",
     );
 
     // Both should be dirty
     assert!(
-        a.with_state(|s| active_buf(s).unwrap().doc.dirty()),
+        a.with_state(|s| active_buf(s).unwrap().is_dirty()),
         "A should be dirty after edit"
     );
     assert!(
-        b.with_state(|s| active_buf(s).unwrap().doc.dirty()),
+        b.with_state(|s| active_buf(s).unwrap().is_dirty()),
         "B should be dirty after sync"
     );
 
     // Step 3: A undoes
     a.push(Undo);
     a.wait_for(
-        move |s| active_buf(s).is_some_and(|b| b.doc.line_count() == original_lines),
+        move |s| active_buf(s).is_some_and(|b| b.doc().line_count() == original_lines),
         WAIT,
         "A undid the newline",
     );
 
     // A should be clean (undo back to saved state)
     a.wait_for(
-        |s| active_buf(s).is_some_and(|b| !b.doc.dirty()),
+        |s| active_buf(s).is_some_and(|b| !b.is_dirty()),
         WAIT,
         "A clean after undo",
     );
 
     // B should sync the undo and also be clean
     b.wait_for(
-        move |s| active_buf(s).is_some_and(|b| b.doc.line_count() == original_lines),
+        move |s| active_buf(s).is_some_and(|b| b.doc().line_count() == original_lines),
         WAIT,
         "B synced the undo",
     );
     b.wait_for(
-        |s| active_buf(s).is_some_and(|b| !b.doc.dirty()),
+        |s| active_buf(s).is_some_and(|b| !b.is_dirty()),
         WAIT,
         "B clean after synced undo",
     );
 
     // Content should match original
-    let a_line_count = a.with_state(|s| active_buf(s).unwrap().doc.line_count());
-    let b_line_count = b.with_state(|s| active_buf(s).unwrap().doc.line_count());
+    let a_line_count = a.with_state(|s| active_buf(s).unwrap().doc().line_count());
+    let b_line_count = b.with_state(|s| active_buf(s).unwrap().doc().line_count());
     assert_eq!(a_line_count, original_lines);
     assert_eq!(b_line_count, original_lines);
     let a_lines: Vec<String> = a.with_state(|s| {
         let buf = active_buf(s).unwrap();
-        (0..buf.doc.line_count())
-            .map(|i| buf.doc.line(i).to_string())
+        (0..buf.doc().line_count())
+            .map(|i| buf.doc().line(i).to_string())
             .collect()
     });
     let b_lines: Vec<String> = b.with_state(|s| {
         let buf = active_buf(s).unwrap();
-        (0..buf.doc.line_count())
-            .map(|i| buf.doc.line(i).to_string())
+        (0..buf.doc().line_count())
+            .map(|i| buf.doc().line(i).to_string())
             .collect()
     });
     for (i, (a_line, b_line)) in a_lines.iter().zip(b_lines.iter()).enumerate() {
@@ -2817,7 +2822,7 @@ fn set_mark_sets_mark() {
         .with_file("aaa\nbbb\n")
         .run(actions(vec![SetMark]));
 
-    assert_eq!(buf(&t).mark, Some((0, 0)));
+    assert_eq!(buf(&t).mark(), Some((0, 0)));
 }
 
 #[test]
@@ -2826,8 +2831,8 @@ fn mark_persists_on_movement() {
         .with_file("aaa\nbbb\n")
         .run(actions(vec![SetMark, MoveDown]));
 
-    assert_eq!(buf(&t).mark, Some((0, 0)));
-    assert_eq!(buf(&t).cursor_row, 1);
+    assert_eq!(buf(&t).mark(), Some((0, 0)));
+    assert_eq!(buf(&t).cursor_row(), 1);
 }
 
 #[test]
@@ -2836,7 +2841,7 @@ fn insert_clears_mark() {
         .with_file("aaa\nbbb\n")
         .run(actions(vec![SetMark, InsertChar('x')]));
 
-    assert!(buf(&t).mark.is_none());
+    assert!(buf(&t).mark().is_none());
 }
 
 #[test]
@@ -2845,10 +2850,10 @@ fn kill_region_deletes_selection() {
         .with_file("aaa\nbbb\n")
         .run(actions(vec![SetMark, MoveDown, KillRegion]));
 
-    assert_eq!(buf(&t).doc.line(0), "bbb");
-    assert_eq!(buf(&t).cursor_row, 0);
-    assert_eq!(buf(&t).cursor_col, 0);
-    assert!(buf(&t).mark.is_none());
+    assert_eq!(buf(&t).doc().line(0), "bbb");
+    assert_eq!(buf(&t).cursor_row(), 0);
+    assert_eq!(buf(&t).cursor_col(), 0);
+    assert!(buf(&t).mark().is_none());
     assert_eq!(t.state.kill_ring.content, "aaa\n");
 }
 
@@ -2867,8 +2872,8 @@ fn yank_inserts_killed_text() {
         .with_file("aaa\nbbb\n")
         .run(actions(vec![SetMark, MoveDown, KillRegion, Yank]));
 
-    assert_eq!(buf(&t).doc.line(0), "aaa");
-    assert_eq!(buf(&t).doc.line(1), "bbb");
+    assert_eq!(buf(&t).doc().line(0), "aaa");
+    assert_eq!(buf(&t).doc().line(1), "bbb");
 }
 
 #[test]
@@ -2905,8 +2910,8 @@ fn search_opens_and_finds() {
     let is = b.isearch.as_ref().expect("isearch should be active");
     assert_eq!(is.query, "he");
     assert_eq!(is.matches.len(), 2);
-    assert_eq!(b.cursor_row, 0);
-    assert_eq!(b.cursor_col, 0);
+    assert_eq!(b.cursor_row(), 0);
+    assert_eq!(b.cursor_col(), 0);
 }
 
 #[test]
@@ -2922,8 +2927,8 @@ fn search_next_advances() {
         ]));
 
     let b = buf(&t);
-    assert_eq!(b.cursor_row, 1);
-    assert_eq!(b.cursor_col, 0);
+    assert_eq!(b.cursor_row(), 1);
+    assert_eq!(b.cursor_col(), 0);
 }
 
 #[test]
@@ -2939,8 +2944,8 @@ fn search_cancel_restores_cursor() {
 
     let b = buf(&t);
     assert!(b.isearch.is_none(), "isearch should be cleared");
-    assert_eq!(b.cursor_row, 1);
-    assert_eq!(b.cursor_col, 0);
+    assert_eq!(b.cursor_row(), 1);
+    assert_eq!(b.cursor_col(), 0);
 }
 
 #[test]
@@ -2955,8 +2960,8 @@ fn search_accept_keeps_position() {
 
     let b = buf(&t);
     assert!(b.isearch.is_none(), "isearch should be cleared");
-    assert_eq!(b.cursor_row, 1);
-    assert_eq!(b.cursor_col, 0);
+    assert_eq!(b.cursor_row(), 1);
+    assert_eq!(b.cursor_col(), 0);
 }
 
 #[test]
@@ -2982,8 +2987,8 @@ fn search_wraps_on_failed() {
     let b = buf(&t);
     let is = b.isearch.as_ref().expect("isearch should be active");
     assert!(!is.failed, "should not be failed after wrap");
-    assert_eq!(b.cursor_row, 0);
-    assert_eq!(b.cursor_col, 0);
+    assert_eq!(b.cursor_row(), 0);
+    assert_eq!(b.cursor_col(), 0);
 }
 
 #[test]
@@ -3048,8 +3053,8 @@ fn jump_back_restores_position() {
         ]));
 
     let b = buf(&t);
-    assert_eq!(b.cursor_row, 0, "JumpBack should restore row");
-    assert_eq!(b.cursor_col, 0, "JumpBack should restore col");
+    assert_eq!(b.cursor_row(), 0, "JumpBack should restore row");
+    assert_eq!(b.cursor_col(), 0, "JumpBack should restore col");
 }
 
 #[test]
@@ -3066,8 +3071,8 @@ fn jump_forward_after_back() {
         ]));
 
     let b = buf(&t);
-    assert_eq!(b.cursor_row, 2, "JumpForward should go to (2,0)");
-    assert_eq!(b.cursor_col, 0);
+    assert_eq!(b.cursor_row(), 2, "JumpForward should go to (2,0)");
+    assert_eq!(b.cursor_col(), 0);
 }
 
 #[test]
@@ -3080,10 +3085,10 @@ fn jump_back_at_empty_list() {
 
     let b = buf(&t);
     assert_eq!(
-        b.cursor_row, 1,
+        b.cursor_row(), 1,
         "JumpBack with empty list should not move cursor"
     );
-    assert_eq!(b.cursor_col, 0);
+    assert_eq!(b.cursor_col(), 0);
 }
 
 #[test]
@@ -3101,8 +3106,8 @@ fn jump_forward_at_end() {
         ]));
 
     let b = buf(&t);
-    assert_eq!(b.cursor_row, 2, "JumpForward at end should not move cursor");
-    assert_eq!(b.cursor_col, 0);
+    assert_eq!(b.cursor_row(), 2, "JumpForward at end should not move cursor");
+    assert_eq!(b.cursor_col(), 0);
 }
 
 #[test]
@@ -3123,8 +3128,7 @@ fn jump_back_cross_buffer() {
 
     let b = buf(&t);
     assert_eq!(
-        b.path
-            .as_ref()
+        b.path_buf()
             .unwrap()
             .file_name()
             .unwrap()
@@ -3133,8 +3137,8 @@ fn jump_back_cross_buffer() {
         "aaa.txt",
         "JumpBack should switch to the correct buffer"
     );
-    assert_eq!(b.cursor_row, 0);
-    assert_eq!(b.cursor_col, 0);
+    assert_eq!(b.cursor_row(), 0);
+    assert_eq!(b.cursor_col(), 0);
 }
 
 #[test]
@@ -3156,10 +3160,10 @@ fn jump_truncates_forward_history() {
 
     let b = buf(&t);
     assert_eq!(
-        b.cursor_row, 3,
+        b.cursor_row(), 3,
         "Forward history should have been truncated"
     );
-    assert_eq!(b.cursor_col, 0);
+    assert_eq!(b.cursor_col(), 0);
 }
 
 // ── Syntax highlighting tests ──
@@ -3175,7 +3179,7 @@ fn syntax_highlights_rust_file() {
     // After the syntax driver processes, highlights should be populated
     // (The driver runs asynchronously, so we wait)
     // At minimum the buffer should exist and have the right content
-    assert_eq!(b.doc.line(0), "fn main() {");
+    assert_eq!(b.doc().line(0), "fn main() {");
 }
 
 #[test]
@@ -3188,8 +3192,9 @@ fn kill_line_keeps_highlights_in_sync() {
         // Wait for initial syntax highlights
         WaitFor(|s| {
             s.active_buffer
-                .and_then(|id| s.buffers.get(&id))
-                .map_or(false, |b| !b.syntax_highlights.is_empty())
+                .as_ref()
+                .and_then(|path| s.buffers.get(path))
+                .map_or(false, |b| !b.syntax_highlights().is_empty())
         }),
         // Kill "fn aaa() {}" (line 0 text)
         Do(KillLine),
@@ -3200,21 +3205,21 @@ fn kill_line_keeps_highlights_in_sync() {
         // Now line 0 should be "fn bbb() {}"
         // Wait for syntax to catch up
         WaitFor(|s| {
-            let b = s.active_buffer.and_then(|id| s.buffers.get(&id)).unwrap();
+            let b = s.active_buffer.as_ref().and_then(|path| s.buffers.get(path)).unwrap();
             // Highlights should contain a span for the current doc's content.
             // "fn" keyword should be highlighted on line 0 (bbb) after kills.
-            b.syntax_highlights
+            b.syntax_highlights()
                 .iter()
                 .any(|(line, span)| *line == 0 && span.capture_name.contains("keyword"))
         }),
     ]);
 
     let b = buf(&t);
-    assert_eq!(b.doc.line(0), "fn bbb() {}");
+    assert_eq!(b.doc().line(0), "fn bbb() {}");
 
     // All highlight lines must be within document bounds
-    let line_count = b.doc.line_count();
-    for (line, span) in b.syntax_highlights.iter() {
+    let line_count = b.doc().line_count();
+    for (line, span) in b.syntax_highlights().iter() {
         assert!(
             *line < line_count,
             "highlight on line {} but doc has {} lines, span: {:?}",
@@ -3226,7 +3231,7 @@ fn kill_line_keeps_highlights_in_sync() {
 
     // "fn" keyword must appear on line 0 (where "fn bbb" now lives)
     let has_fn_on_line0 = b
-        .syntax_highlights
+        .syntax_highlights()
         .iter()
         .any(|(line, span)| *line == 0 && span.capture_name.contains("keyword"));
     assert!(
@@ -3255,8 +3260,9 @@ fn kill_line_long_file_highlights_recover() {
     let t = TestHarness::new().with_file_ext(&src, "rs").run(vec![
         WaitFor(|s| {
             s.active_buffer
-                .and_then(|id| s.buffers.get(&id))
-                .map_or(false, |b| !b.syntax_highlights.is_empty())
+                .as_ref()
+                .and_then(|path| s.buffers.get(path))
+                .map_or(false, |b| !b.syntax_highlights().is_empty())
         }),
         // Kill "fn aaa() {}" text, then the newline
         Do(KillLine),
@@ -3265,19 +3271,19 @@ fn kill_line_long_file_highlights_recover() {
         // Wait for highlights: line 0 must have a comment capture,
         // NOT a keyword capture (which would indicate stale cache).
         WaitFor(|s| {
-            let b = s.active_buffer.and_then(|id| s.buffers.get(&id)).unwrap();
-            b.syntax_highlights
+            let b = s.active_buffer.as_ref().and_then(|path| s.buffers.get(path)).unwrap();
+            b.syntax_highlights()
                 .iter()
                 .any(|(line, span)| *line == 0 && span.capture_name.contains("comment"))
         }),
     ]);
 
     let b = buf(&t);
-    assert_eq!(b.doc.line(0), "// this is a comment");
+    assert_eq!(b.doc().line(0), "// this is a comment");
 
     // Line 0 must have comment highlight, not keyword
     let has_comment = b
-        .syntax_highlights
+        .syntax_highlights()
         .iter()
         .any(|(line, span)| *line == 0 && span.capture_name.contains("comment"));
     assert!(
@@ -3286,7 +3292,7 @@ fn kill_line_long_file_highlights_recover() {
     );
 
     let has_keyword_on_0 = b
-        .syntax_highlights
+        .syntax_highlights()
         .iter()
         .any(|(line, span)| *line == 0 && span.capture_name.contains("keyword"));
     assert!(
@@ -3316,8 +3322,9 @@ More text
         // Wait for initial highlights
         WaitFor(|s| {
             s.active_buffer
-                .and_then(|id| s.buffers.get(&id))
-                .map_or(false, |b| !b.syntax_highlights.is_empty())
+                .as_ref()
+                .and_then(|path| s.buffers.get(path))
+                .map_or(false, |b| !b.syntax_highlights().is_empty())
         }),
         // Move to "## Section A" (line 2)
         Do(MoveDown),
@@ -3332,20 +3339,20 @@ More text
         // Wait for syntax highlights to update for the new doc version.
         // The doc version after 3 kills is initial + 3 (at minimum).
         WaitFor(|s| {
-            let b = s.active_buffer.and_then(|id| s.buffers.get(&id)).unwrap();
-            let lc = b.doc.line_count();
+            let b = s.active_buffer.as_ref().and_then(|path| s.buffers.get(path)).unwrap();
+            let lc = b.doc().line_count();
             // Highlights must be non-empty and fully within bounds
-            !b.syntax_highlights.is_empty()
-                && b.syntax_highlights.iter().all(|(line, _)| *line < lc)
+            !b.syntax_highlights().is_empty()
+                && b.syntax_highlights().iter().all(|(line, _)| *line < lc)
         }),
     ]);
 
     let b = buf(&t);
-    assert_eq!(b.doc.line(2), "Some text");
+    assert_eq!(b.doc().line(2), "Some text");
 
     // All highlight line numbers must be within doc bounds
-    let lc = b.doc.line_count();
-    for (line, span) in b.syntax_highlights.iter() {
+    let lc = b.doc().line_count();
+    for (line, span) in b.syntax_highlights().iter() {
         assert!(
             *line < lc,
             "stale highlight: line {} >= line_count {}, capture: {:?}",
@@ -3369,8 +3376,9 @@ fn match_bracket_jumps() {
             // Wait for syntax driver to populate matching_bracket
             WaitFor(|s| {
                 s.active_buffer
-                    .and_then(|id| s.buffers.get(&id))
-                    .and_then(|b| b.matching_bracket)
+                    .as_ref()
+                    .and_then(|path| s.buffers.get(path))
+                    .and_then(|b| b.matching_bracket())
                     .is_some()
             }),
             Do(MatchBracket),
@@ -3378,8 +3386,8 @@ fn match_bracket_jumps() {
 
     let b = buf(&t);
     // Should jump to the matching `}`
-    assert_eq!(b.cursor_row, 2, "should jump to closing brace row");
-    assert_eq!(b.cursor_col, 0, "should jump to closing brace col");
+    assert_eq!(b.cursor_row(), 2, "should jump to closing brace row");
+    assert_eq!(b.cursor_col(), 0, "should jump to closing brace col");
 }
 
 #[test]
@@ -3396,16 +3404,17 @@ fn match_bracket_reverse() {
             // Wait for syntax driver to populate matching_bracket
             WaitFor(|s| {
                 s.active_buffer
-                    .and_then(|id| s.buffers.get(&id))
-                    .and_then(|b| b.matching_bracket)
+                    .as_ref()
+                    .and_then(|path| s.buffers.get(path))
+                    .and_then(|b| b.matching_bracket())
                     .is_some()
             }),
             Do(MatchBracket),
         ]);
 
     let b = buf(&t);
-    assert_eq!(b.cursor_row, 0, "should jump to opening brace row");
-    assert_eq!(b.cursor_col, 7, "should jump to opening brace col");
+    assert_eq!(b.cursor_row(), 0, "should jump to opening brace row");
+    assert_eq!(b.cursor_col(), 7, "should jump to opening brace col");
 }
 
 #[test]
@@ -3420,8 +3429,8 @@ fn match_bracket_no_bracket() {
         ]));
 
     let b = buf(&t);
-    assert_eq!(b.cursor_row, 0);
-    assert_eq!(b.cursor_col, 0, "cursor should not move");
+    assert_eq!(b.cursor_row(), 0);
+    assert_eq!(b.cursor_col(), 0, "cursor should not move");
 }
 
 #[test]
@@ -3436,14 +3445,14 @@ fn auto_indent_after_brace() {
         ]);
 
     let b = buf(&t);
-    assert_eq!(b.cursor_row, 1);
+    assert_eq!(b.cursor_row(), 1);
     assert!(
-        b.cursor_col >= 2,
+        b.cursor_col() >= 2,
         "cursor should be indented after '{{', got col {}",
-        b.cursor_col
+        b.cursor_col()
     );
     // Verify the indent text was actually inserted
-    let line = b.doc.line(1);
+    let line = b.doc().line(1);
     assert!(
         line.starts_with("    ") || line.starts_with('\t'),
         "new line should be indented: {:?}",
@@ -3468,7 +3477,7 @@ fn auto_indent_closing_brace() {
         ]);
 
     let b = buf(&t);
-    let line = b.doc.line(2);
+    let line = b.doc().line(2);
     // The closing brace should be dedented to match "fn main() {"
     assert!(
         !line.starts_with("    }"),
@@ -3490,8 +3499,8 @@ fn sort_imports_reorders() {
 
     let b = buf(&t);
     // After sorting, a::A should come before z::Z
-    assert_eq!(b.doc.line(0), "use a::A;", "first import should be a::A");
-    assert_eq!(b.doc.line(1), "use z::Z;", "second import should be z::Z");
+    assert_eq!(b.doc().line(0), "use a::A;", "first import should be a::A");
+    assert_eq!(b.doc().line(1), "use z::Z;", "second import should be z::Z");
 }
 
 #[test]
@@ -3503,7 +3512,7 @@ fn sort_imports_no_change() {
     let b = buf(&t);
     // Already sorted — should not modify doc
     assert!(
-        !b.doc.dirty(),
+        !b.is_dirty(),
         "already sorted imports should not dirty the doc"
     );
 }
@@ -3516,9 +3525,9 @@ fn rainbow_brackets_depth() {
         .run(actions(vec![Wait(50)]));
 
     let b = buf(&t);
-    if !b.bracket_pairs.is_empty() {
+    if !b.bracket_pairs().is_empty() {
         // Check that at least some pairs have different color indices
-        let indices: Vec<Option<usize>> = b.bracket_pairs.iter().map(|p| p.color_index).collect();
+        let indices: Vec<Option<usize>> = b.bracket_pairs().iter().map(|p| p.color_index).collect();
         let has_multiple = indices
             .iter()
             .filter_map(|i| i.as_ref())
@@ -3546,7 +3555,7 @@ fn close_bracket_reindents_with_syntax() {
         ]);
 
     let b = buf(&t);
-    let line = b.doc.line(1);
+    let line = b.doc().line(1);
     // The brace should be present on line 1
     assert!(
         line.contains('}'),
@@ -3722,8 +3731,7 @@ fn find_file_opens_existing() {
     assert!(t.state.find_file.is_none());
     // The second file should be open
     let has_second = t.state.buffers.values().any(|b| {
-        b.path
-            .as_ref()
+        b.path_buf()
             .and_then(|p| p.file_name())
             .map_or(false, |n| n == "second.txt")
     });
@@ -3796,8 +3804,7 @@ fn find_file_opens_nonexistent() {
 
     assert!(t.state.find_file.is_none());
     let has_new = t.state.buffers.values().any(|b| {
-        b.path
-            .as_ref()
+        b.path_buf()
             .and_then(|p| p.file_name())
             .map_or(false, |n| n == "newfile.txt")
     });
@@ -3835,8 +3842,7 @@ fn find_file_opens_nonexistent_no_buffers() {
 
     assert!(t.state.find_file.is_none());
     let has_new = t.state.buffers.values().any(|b| {
-        b.path
-            .as_ref()
+        b.path_buf()
             .and_then(|p| p.file_name())
             .map_or(false, |n| n == "newfile.txt")
     });
@@ -3874,8 +3880,7 @@ fn find_file_opens_nonexistent_in_project_dir() {
         ]);
 
     let has_new = t.state.buffers.values().any(|b| {
-        b.path
-            .as_ref()
+        b.path_buf()
             .and_then(|p| p.file_name())
             .map_or(false, |n| n == "new.txt")
     });
@@ -3931,7 +3936,16 @@ fn lsp_project(main_rs: &str, config: serde_json::Value) -> (PathBuf, PathBuf) {
 }
 
 fn has_lsp_diagnostics(s: &led_state::AppState) -> bool {
-    s.lsp.diagnostics.values().any(|d| !d.is_empty())
+    s.buffers
+        .values()
+        .any(|b| !b.status().diagnostics().is_empty())
+}
+
+fn all_diagnostics_count(s: &led_state::AppState) -> usize {
+    s.buffers
+        .values()
+        .map(|b| b.status().diagnostics().len())
+        .sum::<usize>()
 }
 
 fn lsp_server_ready(s: &led_state::AppState) -> bool {
@@ -3976,10 +3990,9 @@ fn lsp_diagnostics_appear() {
 
     let all_diags: Vec<_> = t
         .state
-        .lsp
-        .diagnostics
+        .buffers
         .values()
-        .flat_map(|d| d.iter())
+        .flat_map(|b| b.status().diagnostics().iter())
         .collect();
     assert!(!all_diags.is_empty(), "expected diagnostics");
     assert!(
@@ -4008,16 +4021,17 @@ fn lsp_format() {
             Do(LspFormat),
             WaitFor(|s| {
                 s.active_buffer
-                    .and_then(|id| s.buffers.get(&id))
-                    .map_or(false, |b| b.doc.line(0).starts_with("fn main()"))
+                    .as_ref()
+                    .and_then(|path| s.buffers.get(path))
+                    .map_or(false, |b| b.doc().line(0).starts_with("fn main()"))
             }),
         ]);
 
     let b = buf(&t);
     assert!(
-        b.doc.line(0).starts_with("fn main()"),
+        b.doc().line(0).starts_with("fn main()"),
         "expected formatted first line, got: {:?}",
-        b.doc.line(0)
+        b.doc().line(0)
     );
 }
 
@@ -4048,14 +4062,15 @@ fn lsp_goto_definition() {
             // Wait for cursor to land on the definition (line 0)
             WaitFor(|s| {
                 s.active_buffer
-                    .and_then(|id| s.buffers.get(&id))
-                    .map_or(false, |b| b.cursor_row == 0)
+                    .as_ref()
+                    .and_then(|path| s.buffers.get(path))
+                    .map_or(false, |b| b.cursor_row() == 0)
             }),
         ]);
 
     let b = buf(&t);
     assert_eq!(
-        b.cursor_row, 0,
+        b.cursor_row(), 0,
         "expected cursor on definition line (fn greet)"
     );
 }
@@ -4092,15 +4107,15 @@ fn lsp_next_prev_diagnostic() {
         .with_lsp_server(fake_lsp_binary())
         .with_arg(main_rs)
         .run(vec![
-            WaitFor(|s| s.lsp.diagnostics.values().flat_map(|d| d.iter()).count() >= 2),
+            WaitFor(|s| all_diagnostics_count(s) >= 2),
             Do(LspNextDiagnostic),
         ]);
 
     let b = buf(&t);
     assert!(
-        b.cursor_row >= 1,
+        b.cursor_row() >= 1,
         "expected cursor to move to a diagnostic, row={}",
-        b.cursor_row
+        b.cursor_row()
     );
 }
 
@@ -4179,21 +4194,22 @@ fn lsp_rename_submit() {
             // Wait for rename to complete — both occurrences should be renamed
             WaitFor(|s| {
                 s.active_buffer
-                    .and_then(|id| s.buffers.get(&id))
-                    .map_or(false, |b| b.doc.line(1).contains("world"))
+                    .as_ref()
+                    .and_then(|path| s.buffers.get(path))
+                    .map_or(false, |b| b.doc().line(1).contains("world"))
             }),
         ]);
 
     let b = buf(&t);
     assert!(
-        b.doc.line(1).contains("world"),
+        b.doc().line(1).contains("world"),
         "expected 'hello' renamed to 'world' on line 1, got: {:?}",
-        b.doc.line(1)
+        b.doc().line(1)
     );
     assert!(
-        b.doc.line(3).contains("world"),
+        b.doc().line(3).contains("world"),
         "expected 'hello' renamed to 'world' on line 3, got: {:?}",
-        b.doc.line(3)
+        b.doc().line(3)
     );
 }
 
@@ -4432,16 +4448,16 @@ fn lsp_completion_accept_moves_cursor() {
         ]);
 
     let b = buf(&t);
-    let line = b.doc.line(2);
+    let line = b.doc().line(2);
     assert!(
         line.len() > 3,
         "expected completion text on line 2, got: {:?}",
         line
     );
     assert!(
-        b.cursor_col > 3,
+        b.cursor_col() > 3,
         "expected cursor after inserted text, got col={}",
-        b.cursor_col
+        b.cursor_col()
     );
 }
 
@@ -4526,21 +4542,22 @@ fn lsp_format_on_save() {
             Do(Save),
             WaitFor(|s| {
                 s.active_buffer
-                    .and_then(|id| s.buffers.get(&id))
+                    .as_ref()
+                    .and_then(|path| s.buffers.get(path))
                     .map_or(false, |b| {
-                        b.save_state == led_state::SaveState::Clean
-                            && b.doc.line(0).starts_with("fn main()")
+                        b.save_state() == led_state::SaveState::Clean
+                            && b.doc().line(0).starts_with("fn main()")
                     })
             }),
         ]);
 
     let b = buf(&t);
     assert!(
-        b.doc.line(0).starts_with("fn main()"),
+        b.doc().line(0).starts_with("fn main()"),
         "expected formatted, got: {:?}",
-        b.doc.line(0)
+        b.doc().line(0)
     );
-    assert_eq!(b.save_state, led_state::SaveState::Clean);
+    assert_eq!(b.save_state(), led_state::SaveState::Clean);
 }
 
 // ── Multi-file and directory CLI opening ──
@@ -4551,14 +4568,13 @@ fn tab_names_sorted(state: &led_state::AppState) -> Vec<String> {
         .values()
         .map(|b| {
             let name = b
-                .path
-                .as_ref()
+                .path_buf()
                 .unwrap()
                 .file_name()
                 .unwrap()
                 .to_string_lossy()
                 .into_owned();
-            (name, b.tab_order)
+            (name, b.tab_order())
         })
         .collect();
     tabs.sort_by_key(|(_, o)| *o);
@@ -4577,7 +4593,7 @@ fn multi_file_tab_order_and_activation() {
 
     // Last file should be active
     let active = buf(&t);
-    assert_eq!(active.doc.line(0), "ccc");
+    assert_eq!(active.doc().line(0), "ccc");
 
     // Tab order should follow arg order
     assert_eq!(
@@ -4607,7 +4623,7 @@ fn multi_file_session_last_arg_active() {
 
     let active = buf(&t2);
     assert_eq!(
-        active.doc.line(0),
+        active.doc().line(0),
         "ccc",
         "last arg file (c.txt) should be active"
     );
@@ -4633,22 +4649,21 @@ fn multi_file_session_last_used_bumped() {
         .state
         .buffers
         .values()
-        .find(|b| b.path.as_deref() == Some(keep_path.as_path()))
+        .find(|b| b.path() == Some(keep_path.as_path()))
         .expect("keep.txt should be open");
     let other_buf = t2
         .state
         .buffers
         .values()
         .find(|b| {
-            b.path
-                .as_ref()
+            b.path_buf()
                 .and_then(|p| p.file_name())
                 .map_or(false, |n| n == "other.txt")
         })
         .expect("other.txt should be open");
 
     assert!(
-        keep_buf.last_used >= other_buf.last_used,
+        keep_buf.last_used() >= other_buf.last_used(),
         "arg file's last_used should be >= non-arg file's last_used"
     );
 }
@@ -4843,9 +4858,9 @@ fn file_search_replace_single_in_buffer() {
             Do(MoveRight), // replace first match
         ]);
     let b = buf(&t);
-    assert_eq!(b.doc.line(0), "xxx");
-    assert_eq!(b.doc.line(2), "aaa");
-    assert_eq!(b.save_state, SaveState::Modified);
+    assert_eq!(b.doc().line(0), "xxx");
+    assert_eq!(b.doc().line(2), "aaa");
+    assert_eq!(b.save_state(), SaveState::Modified);
 }
 
 #[test]
@@ -4867,7 +4882,7 @@ fn file_search_unreplace_single() {
             Do(MoveLeft),  // unreplace
         ]);
     let b = buf(&t);
-    assert_eq!(b.doc.line(0), "aaa");
+    assert_eq!(b.doc().line(0), "aaa");
 }
 
 #[test]
@@ -4888,8 +4903,8 @@ fn file_search_replace_all() {
         ]);
     assert!(t.state.file_search.is_none());
     let b = buf(&t);
-    assert_eq!(b.doc.line(0), "z");
-    assert_eq!(b.doc.line(2), "z");
+    assert_eq!(b.doc().line(0), "z");
+    assert_eq!(b.doc().line(2), "z");
 }
 
 #[test]
@@ -4911,8 +4926,8 @@ fn file_search_replace_all_then_undo() {
             Do(Undo),       // one undo should revert ALL replacements
         ]);
     let b = buf(&t);
-    assert_eq!(b.doc.line(0), "aaa");
-    assert_eq!(b.doc.line(2), "aaa");
+    assert_eq!(b.doc().line(0), "aaa");
+    assert_eq!(b.doc().line(2), "aaa");
 }
 
 #[test]
@@ -4937,8 +4952,8 @@ fn file_search_replace_undo_chain() {
             Do(Undo),      // undo second replace
         ]);
     let b = buf(&t);
-    assert_eq!(b.doc.line(0), "z"); // first replace still applied
-    assert_eq!(b.doc.line(2), "aaa"); // second was undone
+    assert_eq!(b.doc().line(0), "z"); // first replace still applied
+    assert_eq!(b.doc().line(2), "aaa"); // second was undone
 }
 
 #[test]
@@ -4954,7 +4969,7 @@ fn file_search_no_replace_mode_arrows_noop() {
             Do(MoveRight), // no-op, replace mode off
         ]);
     let b = buf(&t);
-    assert_eq!(b.doc.line(0), "hello");
+    assert_eq!(b.doc().line(0), "hello");
 }
 
 #[test]
@@ -4984,10 +4999,9 @@ fn file_search_replace_all_multi_file() {
         .buffers
         .values()
         .filter(|b| {
-            b.path
-                .as_ref()
+            b.path_buf()
                 .is_some_and(|p| p.ends_with("a.txt") || p.ends_with("b.txt"))
-                && b.doc.line(0) == "bye"
+                && b.doc().line(0) == "bye"
         })
         .count();
     assert_eq!(modified_count, 2, "both buffers should be modified");
@@ -5005,7 +5019,7 @@ fn kbd_macro_record_and_playback() {
         KbdMacroExecute,
     ]));
     let b = buf(&t);
-    assert_eq!(b.doc.line(0), "xyxyhello");
+    assert_eq!(b.doc().line(0), "xyxyhello");
 }
 
 #[test]
@@ -5020,7 +5034,7 @@ fn kbd_macro_playback_multiple() {
     ]));
     let b = buf(&t);
     // 'a' inserted during recording + 3 playbacks = "aaaa"
-    assert_eq!(b.doc.line(0), "aaaahello");
+    assert_eq!(b.doc().line(0), "aaaahello");
 }
 
 #[test]
@@ -5077,5 +5091,5 @@ fn kbd_macro_restart_during_recording() {
     let b = buf(&t);
     // "xy" was typed during first recording (executed live), then restart,
     // "z" typed during second recording, then playback inserts another "z"
-    assert_eq!(b.doc.line(0), "xyzzhello");
+    assert_eq!(b.doc().line(0), "xyzzhello");
 }

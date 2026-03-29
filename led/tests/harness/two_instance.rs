@@ -136,12 +136,13 @@ impl Instance {
                 let state_desc: String = self.with_state(|s| {
                     let buf_info =
                         s.active_buffer
-                            .and_then(|id| s.buffers.get(&id))
+                            .as_ref()
+                            .and_then(|path| s.buffers.get(path))
                             .map(|b| {
                                 format!(
                                 "chain_id={:?} dirty={} save={:?} persisted={} seq={} change_seq={} lines={}",
-                                b.chain_id, b.doc.dirty(), b.save_state, b.persisted_undo_len,
-                                b.last_seen_seq, b.change_seq, b.doc.line_count()
+                                b.chain_id(), b.is_dirty(), b.save_state(), b.persisted_undo_len(),
+                                b.last_seen_seq(), b.change_seq(), b.doc().line_count()
                             )
                             });
                     format!(

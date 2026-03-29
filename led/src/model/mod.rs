@@ -23,9 +23,9 @@ use led_core::rx::Stream;
 use led_core::theme::Theme;
 use std::path::PathBuf;
 
-use led_core::{Action, Alert, BufferId, PanelSlot, next_change_seq};
+use led_core::{Action, Alert, PanelSlot};
 use led_state::{
-    AppState, BracketPair, BufferState, ChangeReason, Dimensions, HighlightSpan,
+    AppState, BracketPair, BufferState, ChangeReason, Dimensions, HighlightSpan, SaveState,
     SessionRestorePhase,
 };
 use led_workspace::Workspace;
@@ -120,14 +120,13 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
             else {
                 unreachable!()
             };
-            let buf_id = s
+            let path = s
                 .buffers
                 .values()
-                .find(|b| b.path.as_ref() == Some(&file_path))
-                .map(|b| b.id)
-                .unwrap_or(BufferId(u64::MAX));
+                .find(|b| b.path_buf() == Some(&file_path))
+                .and_then(|b| b.path_buf().cloned());
             Mut::UndoFlushed {
-                buf_id,
+                path,
                 chain_id,
                 last_seen_seq,
             }
@@ -147,8 +146,7 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
             let path = s
                 .notify_hash_to_buffer
                 .get(&file_path_hash)
-                .and_then(|id| s.buffers.get(id))
-                .and_then(|b| b.path.clone());
+                .cloned();
             Mut::NotifyEvent { path }
         })
         .stream();
@@ -209,17 +207,18 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
         .flat_map(|s: Rc<AppState>| {
             s.buffers
                 .values()
-                .filter(|b| b.path.is_some())
-                .filter(|b| !b.is_preview)
-                .filter(|b| b.doc.undo_history_len() > b.persisted_undo_len || b.doc.dirty())
+                .filter(|b| b.path().is_some())
+                .filter(|b| !b.is_preview())
+                .filter(|b| b.undo_history_len() > b.persisted_undo_len() || b.is_dirty())
                 .filter_map(|b| {
-                    let file_path = b.path.clone().unwrap();
+                    let file_path = b.path_buf().cloned().unwrap();
                     let chain_id = b
-                        .chain_id
-                        .clone()
+                        .chain_id()
+                        .map(String::from)
                         .unwrap_or_else(led_workspace::new_chain_id);
-                    let closed_doc = b.doc.close_undo_group();
-                    let raw_entries = closed_doc.undo_entries_from(b.persisted_undo_len);
+                    let mut undo = b.undo_history().clone();
+                    undo.flush_pending();
+                    let raw_entries = undo.entries_from(b.persisted_undo_len());
                     if raw_entries.is_empty() {
                         return None;
                     }
@@ -230,15 +229,15 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
                     if entries.is_empty() {
                         return None;
                     }
-                    let undo_cursor = closed_doc.undo_history_len();
+                    let undo_cursor = undo.entry_count();
                     Some(Mut::UndoFlushReady {
-                        buf_id: b.id,
+                        path: b.path_buf().cloned().unwrap(),
                         flush: led_state::UndoFlush {
                             file_path,
                             chain_id,
-                            content_hash: b.content_hash,
+                            content_hash: b.content_hash(),
                             undo_cursor,
-                            distance_from_save: closed_doc.distance_from_save(),
+                            distance_from_save: undo.distance_from_save(),
                             entries,
                         },
                     })
@@ -302,30 +301,23 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
         .filter(|(text, _)| !text.is_empty())
         .filter_map(|(text, s)| {
             let dims = s.dims?;
-            let id = s.active_buffer?;
-            let buf = s.buffers.get(&id)?;
+            let path = s.active_buffer.as_ref()?;
+            let buf = s.buffers.get(path)?;
             let mut buf = (**buf).clone();
             action::close_group_on_move(&mut buf);
-            buf.mark = None;
-            let (doc, r, c, a) = edit::yank(&buf, &text);
-            buf.doc = doc;
-            buf.cursor_row = r;
-            buf.cursor_col = c;
-            buf.cursor_col_affinity = a;
+            buf.clear_mark();
+            let (r, c, a) = edit::yank(&mut buf, &text);
+            buf.set_cursor(r, c, a);
             let (sr, ssl) = mov::adjust_scroll(&buf, &dims);
-            buf.scroll_row = sr;
-            buf.scroll_sub_line = ssl;
-            if buf.doc.dirty() && buf.save_state == led_state::SaveState::Clean {
-                buf.save_state = led_state::SaveState::Modified;
-            }
-            Some(Mut::BufferUpdate(id, buf, ChangeReason::Edit))
+            buf.set_scroll(sr, ssl);
+            Some(Mut::BufferUpdate(path.clone(), buf, ChangeReason::Edit))
         })
         .stream();
 
     let syntax_s = drivers
         .syntax_in
         .map(|syn| Mut::SyntaxUpdate {
-            buf_id: syn.buf_id,
+            path: syn.path,
             version: syn.doc_version,
             highlights: syn.highlights,
             bracket_pairs: syn.bracket_pairs,
@@ -449,11 +441,9 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
         log::trace!("model: {}", m.name());
         let mut s = Rc::unwrap_or_clone(s);
         match m {
-            Mut::ActivateBuffer(id) => {
-                s.active_buffer = Some(id);
-                if let Some(path) = s.buffers.get(&id).and_then(|b| b.path.clone()) {
-                    s.git_mut().pending_line_scan.set(Some(path));
-                }
+            Mut::ActivateBuffer(path) => {
+                s.active_buffer = Some(path.clone());
+                s.git_mut().pending_line_scan.set(Some(path));
                 action::reveal_active_buffer(&mut s);
             }
             Mut::Action(a) => {
@@ -468,24 +458,43 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
                 s.alerts.warn = warn;
             }
             Mut::BufferOpen {
+                path,
                 buf,
-                next_id,
                 activate,
                 notify_hash,
                 session_restore_done,
                 clear_pending_jump,
             } => {
-                let buf_id = buf.id;
                 let will_activate = activate || s.active_buffer.is_none();
                 if will_activate {
-                    s.active_buffer = Some(buf_id);
+                    s.active_buffer = Some(path.clone());
                 }
-                if let Some(ref path) = buf.path {
-                    s.session.positions.remove(path);
+                if let Some(p) = buf.path() {
+                    s.session.positions.remove(p);
                 }
-                s.notify_hash_to_buffer.insert(notify_hash, buf_id);
-                s.buffers_mut().insert(buf_id, Rc::new(buf));
-                s.next_buffer_id = next_id;
+                // If a ghost buffer exists for this path, load doc into it
+                // (preserving its annotations). Otherwise insert the new buffer.
+                if let Some(existing) = s.buf_mut(&path) {
+                    if !existing.is_loaded() {
+                        existing.load_doc(buf.doc_id(), buf.doc().clone());
+                        existing.set_cursor(buf.cursor_row(), buf.cursor_col(), buf.cursor_col_affinity());
+                        existing.set_scroll(buf.scroll_row(), buf.scroll_sub_line());
+                        existing.set_tab_order(buf.tab_order());
+                        existing.set_preview(buf.is_preview());
+                        if buf.save_state() == SaveState::Modified {
+                            existing.mark_modified_if_dirty();
+                        }
+                        existing.restore_session(
+                            buf.persisted_undo_len(),
+                            buf.chain_id().map(String::from),
+                            buf.last_seen_seq(),
+                            buf.content_hash(),
+                        );
+                    }
+                } else {
+                    s.buffers_mut().insert(path.clone(), Rc::new(buf));
+                }
+                s.notify_hash_to_buffer.insert(notify_hash, path.clone());
                 action::renumber_tabs(&mut s);
                 if session_restore_done {
                     s.session.restore_phase = SessionRestorePhase::Done;
@@ -501,32 +510,20 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
                     action::reveal_active_buffer(&mut s);
                 }
                 // Apply pending search-replace if this file was opened for replace_all
-                file_search::apply_pending_replace(&mut s, buf_id);
+                file_search::apply_pending_replace(&mut s, &path);
             }
             Mut::BufferSaved {
-                id,
+                path,
                 buf,
                 undo_clear_path,
             } => {
                 let filename = buf
-                    .path
-                    .as_ref()
+                    .path()
                     .and_then(|p| p.file_name())
                     .map(|n| n.to_string_lossy().into_owned());
-                // Record the save_request version as the diagnostics seq for this path,
-                // so we can reject stale diagnostics from earlier saves.
-                let save_ver = s.save_request.version();
-                if let Some(path) = buf.path.as_ref() {
-                    s.lsp_mut().diagnostics_seq.insert(path.clone(), save_ver);
-                }
-                s.buffers_mut().insert(id, Rc::new(buf));
-                if let Some(buf) = s.buf_mut(id) {
-                    buf.change_seq = next_change_seq();
-                }
+                s.buffers_mut().insert(path.clone(), Rc::new(buf));
                 s.git_mut().pending_file_scan.set(());
-                if let Some(path) = s.buffers.get(&id).and_then(|b| b.path.clone()) {
-                    s.git_mut().pending_line_scan.set(Some(path));
-                }
+                s.git_mut().pending_line_scan.set(Some(path));
                 if let Some(path) = undo_clear_path {
                     s.pending_undo_clear.set(path);
                 }
@@ -536,7 +533,7 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
                 }
             }
             Mut::BufferSavedAs {
-                id,
+                path,
                 buf,
                 new_path,
                 undo_clear_path,
@@ -545,20 +542,23 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
                 let old_hash = s
                     .notify_hash_to_buffer
                     .iter()
-                    .find(|(_, v)| **v == id)
+                    .find(|(_, v)| **v == path)
                     .map(|(k, _)| k.clone());
                 if let Some(h) = old_hash {
                     s.notify_hash_to_buffer.remove(&h);
                 }
                 let new_hash = led_workspace::path_hash(&new_path);
-                s.notify_hash_to_buffer.insert(new_hash, id);
+                s.notify_hash_to_buffer.insert(new_hash, new_path.clone());
 
+                // Remove old path entry, insert under new path
+                s.buffers_mut().remove(&path);
                 let filename = new_path
                     .file_name()
                     .map(|n| n.to_string_lossy().into_owned());
-                s.buffers_mut().insert(id, Rc::new(buf));
-                if let Some(buf) = s.buf_mut(id) {
-                    buf.change_seq = next_change_seq();
+                s.buffers_mut().insert(new_path.clone(), Rc::new(buf));
+                // Update active_buffer if it was pointing to the old path
+                if s.active_buffer.as_ref() == Some(&path) {
+                    s.active_buffer = Some(new_path.clone());
                 }
                 s.git_mut().pending_file_scan.set(());
                 s.git_mut().pending_line_scan.set(Some(new_path));
@@ -570,9 +570,9 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
                 }
                 action::reveal_active_buffer(&mut s);
             }
-            Mut::BufferUpdate(id, mut buf, reason) => {
-                buf.change_reason = reason;
-                s.buffers_mut().insert(id, Rc::new(buf));
+            Mut::BufferUpdate(path, mut buf, reason) => {
+                buf.set_change_reason(reason);
+                s.buffers_mut().insert(path, Rc::new(buf));
             }
             Mut::ConfigKeys(v) => s.config_keys = Some(v),
             Mut::DirListed(path, entries) => {
@@ -604,45 +604,47 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
                 s.git_mut().file_statuses = statuses;
             }
             Mut::GitLineStatuses { path, statuses } => {
-                s.git_mut().line_statuses.insert(path, statuses);
+                if !s.buffers.contains_key(&path) {
+                    s.buffers_mut()
+                        .insert(path.clone(), Rc::new(BufferState::ghost(path.clone())));
+                }
+                if let Some(buf) = s.buf_mut(&path) {
+                    buf.set_git_line_statuses(statuses);
+                }
             }
             Mut::ForceRedraw(v) => s.force_redraw = v,
             Mut::Keymap(v) => s.keymap = Some(v),
             Mut::PreviewOpen {
                 buf,
-                next_id,
                 notify_hash,
-                remove_old_id,
+                remove_old_path,
                 remove_old_hash,
                 pre_preview_buffer,
             } => {
-                remove_old_id.map(|id| s.buffers_mut().remove(&id));
+                remove_old_path.as_ref().map(|p| s.buffers_mut().remove(p));
                 remove_old_hash.map(|h| s.notify_hash_to_buffer.remove(&h));
                 s.preview.pre_preview_buffer = pre_preview_buffer;
-                let buf_id = buf.id;
-                s.notify_hash_to_buffer.insert(notify_hash, buf_id);
-                s.buffers_mut().insert(buf_id, Rc::new(buf));
-                s.active_buffer = Some(buf_id);
-                s.preview.buffer = Some(buf_id);
-                s.next_buffer_id = next_id;
+                let path = buf.path_buf().cloned().expect("preview buffer must have path");
+                s.notify_hash_to_buffer.insert(notify_hash, path.clone());
+                s.buffers_mut().insert(path.clone(), Rc::new(buf));
+                s.active_buffer = Some(path.clone());
+                s.preview.buffer = Some(path);
                 action::renumber_tabs(&mut s);
             }
             Mut::PreviewActivateExisting {
-                id,
+                path,
                 row,
                 col,
-                remove_old_id,
+                remove_old_path,
                 remove_old_hash,
                 pre_preview_buffer,
             } => {
-                remove_old_id.map(|id| s.buffers_mut().remove(&id));
+                remove_old_path.as_ref().map(|p| s.buffers_mut().remove(p));
                 remove_old_hash.map(|h| s.notify_hash_to_buffer.remove(&h));
                 s.preview.pre_preview_buffer = pre_preview_buffer;
-                s.active_buffer = Some(id);
-                s.buf_mut(id).map(|buf| {
-                    buf.cursor_row = row;
-                    buf.cursor_col = col;
-                    buf.cursor_col_affinity = col;
+                s.active_buffer = Some(path.clone());
+                s.buf_mut(&path).map(|buf| {
+                    buf.set_cursor(row, col, col);
                 });
                 action::renumber_tabs(&mut s);
             }
@@ -710,31 +712,30 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
                     s.pending_sync_check.set(path);
                 }
             }
-            Mut::UndoFlushReady { buf_id, flush } => {
-                if let Some(buf) = s.buf_mut(buf_id) {
+            Mut::UndoFlushReady { path, flush } => {
+                if let Some(buf) = s.buf_mut(&path) {
                     // Close the undo group on the actual buffer doc to keep
                     // it consistent with persisted_undo_len. Without this,
                     // subsequent edits can append to the already-flushed open
                     // group, making undo_groups_from(persisted) return empty.
-                    buf.doc = buf.doc.close_undo_group();
-                    buf.chain_id = Some(flush.chain_id.clone());
-                    buf.persisted_undo_len = flush.undo_cursor;
-                    buf.change_seq = next_change_seq();
+                    buf.close_undo_group();
+                    buf.undo_flush_started(flush.chain_id.clone(), flush.undo_cursor);
                 }
                 s.pending_undo_flush.set(Some(flush));
             }
             Mut::UndoFlushed {
-                buf_id,
+                path,
                 chain_id,
                 last_seen_seq,
             } => {
-                if let Some(buf) = s.buf_mut(buf_id) {
-                    buf.chain_id = Some(chain_id);
-                    buf.last_seen_seq = last_seen_seq;
+                if let Some(path) = path {
+                    if let Some(buf) = s.buf_mut(&path) {
+                        buf.undo_flush_confirmed(chain_id, last_seen_seq);
+                    }
                 }
             }
             Mut::SyntaxUpdate {
-                buf_id,
+                path,
                 version,
                 highlights,
                 bracket_pairs,
@@ -743,43 +744,35 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
                 reindent_chars,
             } => {
                 let tab_stop = s.dims.map(|d| d.tab_stop);
-                if let Some(buf) = s.buf_mut(buf_id) {
-                    buf.reindent_chars = reindent_chars;
+                if let Some(buf) = s.buf_mut(&path) {
+                    buf.set_reindent_chars(reindent_chars);
                     // Check if indent will modify the doc — if so, skip
                     // storing highlights from this response (their character
                     // offsets would be wrong after the doc changes). The
                     // indent change triggers a new SyntaxOut which produces
                     // correct highlights for the indented doc.
                     let will_indent = indent_row.is_some_and(|row| {
-                        buf.pending_indent_row == Some(row)
+                        buf.pending_indent_row() == Some(row)
                             && (indent.is_some()
-                                || (buf.pending_tab_fallback && tab_stop.is_some()))
+                                || (buf.pending_tab_fallback() && tab_stop.is_some()))
                     });
-                    if buf.doc.version() == version && !will_indent {
-                        buf.syntax_highlights = Rc::new(highlights);
-                        buf.bracket_pairs = Rc::new(bracket_pairs);
-                        buf.matching_bracket = led_state::BracketPair::find_match(
-                            &buf.bracket_pairs,
-                            buf.cursor_row,
-                            buf.cursor_col,
-                        );
+                    if !will_indent {
+                        buf.offer_syntax(highlights, bracket_pairs, version);
                     }
                     if let Some(row) = indent_row {
-                        if buf.pending_indent_row == Some(row) && buf.doc.version() == version {
-                            buf.pending_indent_row = None;
-                            let was_tab = buf.pending_tab_fallback;
-                            buf.pending_tab_fallback = false;
+                        if buf.pending_indent_row() == Some(row) && buf.version() == version {
+                            buf.set_pending_indent_row(None);
+                            let was_tab = buf.pending_tab_fallback();
+                            buf.set_pending_tab_fallback(false);
                             if let Some(new_indent) = &indent {
-                                let cursor_on_row = buf.cursor_row == row;
+                                let cursor_on_row = buf.cursor_row() == row;
                                 edit::apply_indent(buf, row, new_indent, cursor_on_row);
                             } else if was_tab {
                                 if let Some(ts) = tab_stop {
                                     edit::insert_soft_tab(buf, ts);
                                 }
                             }
-                            if buf.doc.dirty() && buf.save_state == led_state::SaveState::Clean {
-                                buf.save_state = led_state::SaveState::Modified;
-                            }
+                            buf.mark_modified_if_dirty();
                         }
                     }
                 }
@@ -792,10 +785,10 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
             }
             Mut::TimerFired(name) => handle_timer(&mut s, name),
             Mut::TouchArgFiles { entries } => {
-                for (id, tab_order) in entries {
-                    if let Some(buf) = s.buf_mut(id) {
-                        buf.last_used = std::time::Instant::now();
-                        buf.tab_order = tab_order;
+                for (path, tab_order) in entries {
+                    if let Some(buf) = s.buf_mut(&path) {
+                        buf.touch();
+                        buf.set_tab_order(tab_order);
                     }
                 }
                 action::renumber_tabs(&mut s);
@@ -820,24 +813,22 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
             }
             Mut::GitChanged => {
                 s.git_mut().pending_file_scan.set(());
-                if let Some(id) = s.active_buffer {
-                    if let Some(path) = s.buffers.get(&id).and_then(|b| b.path.clone()) {
-                        s.git_mut().pending_line_scan.set(Some(path));
-                    }
+                if let Some(path) = s.active_buffer.clone() {
+                    s.git_mut().pending_line_scan.set(Some(path));
                 }
             }
 
             // ── LSP ──
             Mut::LspNavigate { path, row, col } => {
                 // Record current position in jump list
-                if let Some(id) = s.active_buffer {
-                    if let Some(buf) = s.buffers.get(&id) {
-                        if let Some(ref p) = buf.path {
+                if let Some(ref active) = s.active_buffer {
+                    if let Some(buf) = s.buffers.get(active) {
+                        if let Some(p) = buf.path_buf() {
                             let pos = led_state::JumpPosition {
                                 path: p.clone(),
-                                row: buf.cursor_row,
-                                col: buf.cursor_col,
-                                scroll_offset: buf.scroll_row,
+                                row: buf.cursor_row(),
+                                col: buf.cursor_col(),
+                                scroll_offset: buf.scroll_row(),
                             };
                             jump::record_jump(&mut s, pos);
                         }
@@ -849,19 +840,18 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
                     .buffers
                     .values()
                     .find(|b| {
-                        b.path.as_ref().map_or(false, |p| {
+                        b.path_buf().map_or(false, |p| {
                             std::fs::canonicalize(p).unwrap_or_else(|_| p.clone()) == canonical
                         })
                     })
-                    .map(|b| b.id);
-                if let Some(id) = existing {
-                    s.active_buffer = Some(id);
+                    .and_then(|b| b.path_buf().cloned());
+                if let Some(existing_path) = existing {
+                    s.active_buffer = Some(existing_path.clone());
                     let half = s.dims.map_or(10, |d| d.buffer_height() / 2);
-                    if let Some(buf) = s.buf_mut(id) {
-                        buf.cursor_row = row.min(buf.doc.line_count().saturating_sub(1));
-                        buf.cursor_col = col;
-                        buf.cursor_col_affinity = col;
-                        buf.scroll_row = buf.cursor_row.saturating_sub(half);
+                    if let Some(buf) = s.buf_mut(&existing_path) {
+                        let r = row.min(buf.doc().line_count().saturating_sub(1));
+                        buf.set_cursor(r, col, col);
+                        buf.set_scroll(buf.cursor_row().saturating_sub(half), 0);
                     }
                     action::reveal_active_buffer(&mut s);
                 } else {
@@ -877,27 +867,19 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
             Mut::LspEdits { edits } => {
                 let is_empty = edits.iter().all(|fe| fe.edits.is_empty());
                 for fe in edits {
-                    let buf_id = s
-                        .buffers
-                        .values()
-                        .find(|b| b.path.as_ref() == Some(&fe.path))
-                        .map(|b| b.id);
-                    if let Some(id) = buf_id {
-                        let (old_lines, old_ver) = s
-                            .buffers
-                            .get(&id)
-                            .map(|b| (b.doc.line_count(), b.doc.version()))
-                            .unwrap_or((0, 0));
-                        let edit_row = fe.edits.iter().map(|e| e.start_row).min().unwrap_or(0);
-                        if let Some(buf) = s.buf_mut(id) {
-                            apply_text_edits(buf, &fe.edits);
-                        }
-                        mov::shift_annotations(&mut s, id, edit_row, old_lines, old_ver);
+                    if let Some(buf) = s.buf_mut(&fe.path) {
+                        apply_text_edits(buf, &fe.edits);
                     }
                 }
                 // Format-done signal (empty edits) → trigger pending save
                 if is_empty && s.lsp.pending_save_after_format {
                     s.lsp_mut().pending_save_after_format = false;
+                    // Apply built-in cleanup after LSP format, before save
+                    if let Some(path) = s.active_buffer.clone() {
+                        if let Some(buf) = s.buf_mut(&path) {
+                            buf.apply_save_cleanup();
+                        }
+                    }
                     s.save_request.set(());
                 }
             }
@@ -930,15 +912,25 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
             Mut::LspDiagnostics {
                 path,
                 diagnostics,
-                seq,
+                content_hash,
             } => {
-                let current_seq = s.lsp.diagnostics_seq.get(&path).copied().unwrap_or(0);
-                if seq >= current_seq {
-                    s.lsp_mut().diagnostics.insert(path, diagnostics);
+                // Ensure buffer exists (create ghost if needed)
+                if !s.buffers.contains_key(&path) {
+                    s.buffers_mut()
+                        .insert(path.clone(), Rc::new(BufferState::ghost(path.clone())));
+                }
+                if let Some(buf) = s.buf_mut(&path) {
+                    buf.offer_diagnostics(diagnostics, content_hash);
                 }
             }
             Mut::LspInlayHints { path, hints } => {
-                s.lsp_mut().inlay_hints.insert(path, hints);
+                if !s.buffers.contains_key(&path) {
+                    s.buffers_mut()
+                        .insert(path.clone(), Rc::new(BufferState::ghost(path.clone())));
+                }
+                if let Some(buf) = s.buf_mut(&path) {
+                    buf.set_inlay_hints(hints);
+                }
             }
             Mut::LspProgress {
                 server_name,
@@ -959,13 +951,12 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
             } => {
                 for buf in s.buffers_mut().values_mut() {
                     let ext = buf
-                        .path
-                        .as_ref()
+                        .path()
                         .and_then(|p| p.extension())
                         .and_then(|e| e.to_str())
                         .unwrap_or("");
                     if extensions.iter().any(|x| x == ext) {
-                        Rc::make_mut(buf).completion_triggers = triggers.clone();
+                        Rc::make_mut(buf).set_completion_triggers(triggers.clone());
                     }
                 }
             }
@@ -1015,9 +1006,9 @@ fn handle_timer(state: &mut AppState, name: &'static str) {
             state.lsp_mut().spinner_tick = state.lsp.spinner_tick.wrapping_add(1);
         }
         "tab_linger" => {
-            if let Some(id) = state.active_buffer {
-                if let Some(buf) = state.buf_mut(id) {
-                    buf.last_used = std::time::Instant::now();
+            if let Some(path) = state.active_buffer.clone() {
+                if let Some(buf) = state.buf_mut(&path) {
+                    buf.touch();
                 }
             }
         }
@@ -1031,7 +1022,7 @@ fn handle_timer(state: &mut AppState, name: &'static str) {
 
 #[derive(Clone)]
 enum Mut {
-    ActivateBuffer(BufferId),
+    ActivateBuffer(PathBuf),
     Action(Action),
     EvictOneBuffer,
     KbdMacroSetCount(usize),
@@ -1040,25 +1031,25 @@ enum Mut {
         warn: Option<String>,
     },
     BufferOpen {
+        path: PathBuf,
         buf: BufferState,
-        next_id: u64,
         activate: bool,
         notify_hash: String,
         session_restore_done: bool,
         clear_pending_jump: bool,
     },
     BufferSaved {
-        id: BufferId,
+        path: PathBuf,
         buf: BufferState,
-        undo_clear_path: Option<std::path::PathBuf>,
+        undo_clear_path: Option<PathBuf>,
     },
     BufferSavedAs {
-        id: BufferId,
+        path: PathBuf,
         buf: BufferState,
-        new_path: std::path::PathBuf,
-        undo_clear_path: Option<std::path::PathBuf>,
+        new_path: PathBuf,
+        undo_clear_path: Option<PathBuf>,
     },
-    BufferUpdate(BufferId, BufferState, ChangeReason),
+    BufferUpdate(PathBuf, BufferState, ChangeReason),
     ConfigKeys(ConfigFile<Keys>),
     ConfigTheme(ConfigFile<Theme>),
     DirListed(std::path::PathBuf, Vec<led_fs::DirEntry>),
@@ -1084,19 +1075,18 @@ enum Mut {
     Keymap(Rc<Keymap>),
     PreviewOpen {
         buf: BufferState,
-        next_id: u64,
         notify_hash: String,
-        remove_old_id: Option<BufferId>,
+        remove_old_path: Option<PathBuf>,
         remove_old_hash: Option<String>,
-        pre_preview_buffer: Option<BufferId>,
+        pre_preview_buffer: Option<PathBuf>,
     },
     PreviewActivateExisting {
-        id: BufferId,
+        path: PathBuf,
         row: usize,
         col: usize,
-        remove_old_id: Option<BufferId>,
+        remove_old_path: Option<PathBuf>,
         remove_old_hash: Option<String>,
-        pre_preview_buffer: Option<BufferId>,
+        pre_preview_buffer: Option<PathBuf>,
     },
     Resize(u16, u16),
     NotifyEvent {
@@ -1123,7 +1113,7 @@ enum Mut {
     WatchersReady,
     Suspend(bool),
     SyntaxUpdate {
-        buf_id: BufferId,
+        path: PathBuf,
         version: u64,
         highlights: Vec<(usize, HighlightSpan)>,
         bracket_pairs: Vec<BracketPair>,
@@ -1132,17 +1122,17 @@ enum Mut {
         reindent_chars: Arc<[char]>,
     },
     UndoFlushed {
-        buf_id: BufferId,
+        path: Option<PathBuf>,
         chain_id: String,
         last_seen_seq: i64,
     },
     UndoFlushReady {
-        buf_id: BufferId,
+        path: PathBuf,
         flush: led_state::UndoFlush,
     },
     TimerFired(&'static str),
     TouchArgFiles {
-        entries: Vec<(BufferId, usize)>,
+        entries: Vec<(PathBuf, usize)>,
     },
     Workspace {
         workspace: Workspace,
@@ -1171,7 +1161,7 @@ enum Mut {
     LspDiagnostics {
         path: PathBuf,
         diagnostics: Vec<led_lsp::Diagnostic>,
-        seq: u64,
+        content_hash: u64,
     },
     LspInlayHints {
         path: PathBuf,
@@ -1269,31 +1259,28 @@ fn apply_text_edits(buf: &mut BufferState, edits: &[led_lsp::TextEdit]) {
     action::close_group_on_move(buf);
     // Flush any pending undo group and pre-seed a new one with the actual
     // cursor position so that undo restores the cursor correctly.
-    let cursor_char = buf.doc.line_to_char(buf.cursor_row) + buf.cursor_col;
-    buf.doc = buf.doc.close_undo_group();
-    buf.doc = buf.doc.begin_undo_group(cursor_char);
+    let cursor_char = buf.doc().line_to_char(buf.cursor_row()) + buf.cursor_col();
+    buf.close_undo_group();
+    buf.begin_undo_group(cursor_char);
     for te in sorted {
-        let start = buf.doc.line_to_char(te.start_row) + te.start_col;
-        let end = buf.doc.line_to_char(te.end_row) + te.end_col;
+        let start = buf.doc().line_to_char(te.start_row) + te.start_col;
+        let end = buf.doc().line_to_char(te.end_row) + te.end_col;
         if start != end {
-            buf.doc = buf.doc.remove(start, end);
+            buf.remove_text(start, end);
         }
         if !te.new_text.is_empty() {
-            buf.doc = buf.doc.insert(start, &te.new_text);
+            buf.insert_text(start, &te.new_text);
         }
-    }
-    if buf.doc.dirty() && buf.save_state == led_state::SaveState::Clean {
-        buf.save_state = led_state::SaveState::Modified;
     }
 }
 
 // ── Preview combinator ──
 
-/// Helper: look up the notify hash for a buffer ID.
-fn notify_hash_for(s: &AppState, buf_id: BufferId) -> Option<String> {
+/// Helper: look up the notify hash for a buffer path.
+fn notify_hash_for(s: &AppState, path: &std::path::Path) -> Option<String> {
     s.notify_hash_to_buffer
         .iter()
-        .find(|(_, v)| **v == buf_id)
+        .find(|(_, v)| v.as_path() == path)
         .map(|(k, _)| k.clone())
 }
 
@@ -1304,17 +1291,15 @@ fn resolve_preview(s: &AppState) -> Option<Mut> {
     let req = (*s.preview.pending).as_ref()?;
 
     // Case A: same file already previewed → reposition via BufferUpdate
-    if let Some(preview_id) = s.preview.buffer {
-        if let Some(buf) = s.buffers.get(&preview_id) {
-            if buf.path.as_ref() == Some(&req.path) {
+    if let Some(ref preview_path) = s.preview.buffer {
+        if let Some(buf) = s.buffers.get(preview_path) {
+            if buf.path_buf() == Some(&req.path) {
                 let mut buf = (**buf).clone();
-                let row = req.row.min(buf.doc.line_count().saturating_sub(1));
-                buf.cursor_row = row;
-                buf.cursor_col = req.col;
-                buf.cursor_col_affinity = req.col;
+                let row = req.row.min(buf.doc().line_count().saturating_sub(1));
+                buf.set_cursor(row, req.col, req.col);
                 let buffer_height = s.dims.map_or(20, |d| d.buffer_height());
-                buf.scroll_row = row.saturating_sub(buffer_height / 2);
-                return Some(Mut::BufferUpdate(preview_id, buf, ChangeReason::Edit));
+                buf.set_scroll(row.saturating_sub(buffer_height / 2), 0);
+                return Some(Mut::BufferUpdate(preview_path.clone(), buf, ChangeReason::Edit));
             }
         }
     }
@@ -1323,26 +1308,26 @@ fn resolve_preview(s: &AppState) -> Option<Mut> {
     if let Some(existing) = s
         .buffers
         .values()
-        .find(|b| b.path.as_ref() == Some(&req.path) && !b.is_preview)
+        .find(|b| b.path_buf() == Some(&req.path) && !b.is_preview())
     {
-        let id = existing.id;
-        let row = req.row.min(existing.doc.line_count().saturating_sub(1));
+        let path = existing.path_buf().cloned().expect("matched by path");
+        let row = req.row.min(existing.doc().line_count().saturating_sub(1));
         let col = req.col;
 
-        let remove_old_id = s.preview.buffer;
-        let remove_old_hash = remove_old_id.and_then(|pid| notify_hash_for(s, pid));
+        let remove_old_path = s.preview.buffer.clone();
+        let remove_old_hash = remove_old_path.as_deref().and_then(|p| notify_hash_for(s, p));
         let pre_preview_buffer =
             if s.preview.buffer.is_none() && s.preview.pre_preview_buffer.is_none() {
-                s.active_buffer
+                s.active_buffer.clone()
             } else {
-                s.preview.pre_preview_buffer
+                s.preview.pre_preview_buffer.clone()
             };
 
         return Some(Mut::PreviewActivateExisting {
-            id,
+            path,
             row,
             col,
-            remove_old_id,
+            remove_old_path,
             remove_old_hash,
             pre_preview_buffer,
         });

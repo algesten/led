@@ -26,10 +26,10 @@ pub(super) fn handle_completion_action(state: &mut AppState, action: &Action) ->
             if let Some(comp) = comp {
                 let index = comp.selected;
                 if let Some(item) = comp.items.get(index) {
-                    if let Some(id) = state.active_buffer {
-                        let buf = &state.buffers[&id];
-                        let cursor_row = buf.cursor_row;
-                        let cursor_col = buf.cursor_col;
+                    if let Some(path) = state.active_buffer.clone() {
+                        let buf = &state.buffers[&path];
+                        let cursor_row = buf.cursor_row();
+                        let cursor_col = buf.cursor_col();
 
                         // Build text edit: replace from prefix_start to current cursor
                         let te = led_lsp::TextEdit {
@@ -47,35 +47,36 @@ pub(super) fn handle_completion_action(state: &mut AppState, action: &Action) ->
                         // Apply edit and move cursor to end of inserted text
                         let (old_lines, old_ver) = state
                             .buffers
-                            .get(&id)
-                            .map(|b| (b.doc.line_count(), b.doc.version()))
+                            .get(&path)
+                            .map(|b| (b.doc().line_count(), b.version()))
                             .unwrap_or((0, 0));
                         let edit_row = te.start_row;
-                        if let Some(buf) = state.buf_mut(id) {
+                        if let Some(buf) = state.buf_mut(&path) {
                             super::super::apply_text_edits(buf, &[te.clone()]);
                             let new_text = &te.new_text;
                             let newline_count = new_text.chars().filter(|c| *c == '\n').count();
-                            if newline_count == 0 {
-                                buf.cursor_row = te.start_row;
-                                buf.cursor_col = te.start_col + new_text.chars().count();
+                            let (r, c) = if newline_count == 0 {
+                                (te.start_row, te.start_col + new_text.chars().count())
                             } else {
-                                buf.cursor_row = te.start_row + newline_count;
-                                buf.cursor_col = new_text
-                                    .rsplit('\n')
-                                    .next()
-                                    .map(|l| l.chars().count())
-                                    .unwrap_or(0);
-                            }
-                            buf.cursor_col_affinity = buf.cursor_col;
+                                (
+                                    te.start_row + newline_count,
+                                    new_text
+                                        .rsplit('\n')
+                                        .next()
+                                        .map(|l| l.chars().count())
+                                        .unwrap_or(0),
+                                )
+                            };
+                            buf.set_cursor(r, c, c);
                         }
-                        mov::shift_annotations(state, id, edit_row, old_lines, old_ver);
+                        mov::shift_annotations(state, &path, edit_row, old_lines, old_ver);
 
                         // Apply additional edits (auto-imports etc.)
                         if !item.additional_edits.is_empty() {
                             let (old_lines, old_ver) = state
                                 .buffers
-                                .get(&id)
-                                .map(|b| (b.doc.line_count(), b.doc.version()))
+                                .get(&path)
+                                .map(|b| (b.doc().line_count(), b.version()))
                                 .unwrap_or((0, 0));
                             let edit_row = item
                                 .additional_edits
@@ -83,10 +84,10 @@ pub(super) fn handle_completion_action(state: &mut AppState, action: &Action) ->
                                 .map(|e| e.start_row)
                                 .min()
                                 .unwrap_or(0);
-                            if let Some(buf) = state.buf_mut(id) {
+                            if let Some(buf) = state.buf_mut(&path) {
                                 super::super::apply_text_edits(buf, &item.additional_edits);
                             }
-                            mov::shift_annotations(state, id, edit_row, old_lines, old_ver);
+                            mov::shift_annotations(state, &path, edit_row, old_lines, old_ver);
                         }
                     }
                     // Request resolve for additional edits from server
@@ -209,22 +210,26 @@ pub(super) fn handle_rename_action(state: &mut AppState, action: &Action) -> boo
 pub(super) fn navigate_diagnostic(state: &mut AppState, forward: bool) {
     let cur_path = state
         .active_buffer
-        .and_then(|id| state.buffers.get(&id))
-        .and_then(|b| b.path.clone());
+        .as_ref()
+        .and_then(|path| state.buffers.get(path))
+        .and_then(|b| b.path_buf().cloned());
 
     let (row, col) = state
         .active_buffer
-        .and_then(|id| state.buffers.get(&id))
-        .map(|b| (b.cursor_row, b.cursor_col))
+        .as_ref()
+        .and_then(|path| state.buffers.get(path))
+        .map(|b| (b.cursor_row(), b.cursor_col()))
         .unwrap_or((0, 0));
 
     // Build a sorted list of all (path, diag) across the workspace.
-    let mut all: Vec<(&std::path::PathBuf, &led_lsp::Diagnostic)> = state
-        .lsp
-        .diagnostics
-        .iter()
-        .flat_map(|(p, ds)| ds.iter().map(move |d| (p, d)))
-        .collect();
+    let mut all: Vec<(&std::path::PathBuf, &led_lsp::Diagnostic)> = Vec::new();
+    for buf in state.buffers.values() {
+        if let Some(path) = buf.path_buf() {
+            for d in buf.status().diagnostics() {
+                all.push((path, d));
+            }
+        }
+    }
     all.sort_by(|a, b| {
         a.0.cmp(b.0)
             .then(a.1.start_row.cmp(&b.1.start_row))
@@ -265,17 +270,14 @@ pub(super) fn navigate_diagnostic(state: &mut AppState, forward: bool) {
 
     // If the target is in the current buffer, just move the cursor.
     if cur_path.as_ref() == Some(&target_path) {
-        let id = state.active_buffer.unwrap();
+        let path = state.active_buffer.clone().unwrap();
         let dims = state.dims;
-        if let Some(buf) = state.buf_mut(id) {
+        if let Some(buf) = state.buf_mut(&path) {
             close_group_on_move(buf);
-            buf.cursor_row = target_row;
-            buf.cursor_col = target_col;
-            buf.cursor_col_affinity = target_col;
+            buf.set_cursor(target_row, target_col, target_col);
             if let Some(dims) = dims {
                 let (sr, ssl) = mov::adjust_scroll(buf, &dims);
-                buf.scroll_row = sr;
-                buf.scroll_sub_line = ssl;
+                buf.set_scroll(sr, ssl);
             }
         }
         return;
@@ -287,19 +289,18 @@ pub(super) fn navigate_diagnostic(state: &mut AppState, forward: bool) {
         .buffers
         .values()
         .find(|b| {
-            b.path.as_ref().map_or(false, |p| {
+            b.path_buf().map_or(false, |p| {
                 std::fs::canonicalize(p).unwrap_or_else(|_| p.clone()) == canonical
             })
         })
-        .map(|b| b.id);
-    if let Some(id) = existing {
-        state.active_buffer = Some(id);
+        .and_then(|b| b.path_buf().cloned());
+    if let Some(path) = existing {
+        state.active_buffer = Some(path.clone());
         let half = state.dims.map_or(10, |d| d.buffer_height() / 2);
-        if let Some(buf) = state.buf_mut(id) {
-            buf.cursor_row = target_row.min(buf.doc.line_count().saturating_sub(1));
-            buf.cursor_col = target_col;
-            buf.cursor_col_affinity = target_col;
-            buf.scroll_row = buf.cursor_row.saturating_sub(half);
+        if let Some(buf) = state.buf_mut(&path) {
+            let r = target_row.min(buf.doc().line_count().saturating_sub(1));
+            buf.set_cursor(r, target_col, target_col);
+            buf.set_scroll(r.saturating_sub(half), 0);
         }
         reveal_active_buffer(state);
     } else {
@@ -314,8 +315,8 @@ pub(super) fn navigate_diagnostic(state: &mut AppState, forward: bool) {
 }
 
 pub(super) fn open_rename_overlay(state: &mut AppState) {
-    if let Some(id) = state.active_buffer {
-        if let Some(buf) = state.buffers.get(&id) {
+    if let Some(ref path) = state.active_buffer {
+        if let Some(buf) = state.buffers.get(path) {
             let word = word_under_cursor(buf);
             let cursor = word.len();
             state.lsp_mut().rename = Some(RenameState {

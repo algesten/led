@@ -52,11 +52,11 @@ pub fn lsp_of(lsp_in: &Stream<LspIn>, state: &Stream<Rc<AppState>>) -> Stream<Mu
             LspIn::Diagnostics {
                 path,
                 diagnostics,
-                seq,
+                content_hash,
             } => Mut::LspDiagnostics {
                 path,
                 diagnostics,
-                seq,
+                content_hash,
             },
             _ => unreachable!(),
         })

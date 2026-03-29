@@ -588,32 +588,8 @@ mod tests {
                 // byte_offset >= 3 the iterator sees available == 0.
                 ("hel", 0)
             }
-            fn version(&self) -> u64 {
-                0
-            }
-            fn dirty(&self) -> bool {
-                false
-            }
             fn content_hash(&self) -> u64 {
                 0
-            }
-            fn undo_history_len(&self) -> usize {
-                0
-            }
-            fn undo_entries_from(&self, _: usize) -> Vec<led_core::UndoEntry> {
-                vec![]
-            }
-            fn undo_cursor(&self) -> Option<usize> {
-                None
-            }
-            fn distance_from_save(&self) -> i32 {
-                0
-            }
-            fn pending_edit_ops(&self) -> Vec<led_core::EditOp> {
-                vec![]
-            }
-            fn begin_undo_group(&self, _: usize) -> Arc<dyn Doc> {
-                unimplemented!()
             }
             fn insert(&self, _: usize, _: &str) -> Arc<dyn Doc> {
                 unimplemented!()
@@ -621,29 +597,11 @@ mod tests {
             fn remove(&self, _: usize, _: usize) -> Arc<dyn Doc> {
                 unimplemented!()
             }
-            fn close_undo_group(&self) -> Arc<dyn Doc> {
-                unimplemented!()
-            }
-            fn undo(&self) -> Option<(Arc<dyn Doc>, usize)> {
-                None
-            }
-            fn redo(&self) -> Option<(Arc<dyn Doc>, usize)> {
-                None
-            }
-            fn apply_remote_entry(&self, _: &led_core::UndoEntry) -> Arc<dyn Doc> {
-                unimplemented!()
-            }
-            fn with_distance_from_save(&self, _: i32) -> Arc<dyn Doc> {
-                unimplemented!()
-            }
             fn slice(&self, _: usize, _: usize) -> String {
                 String::new()
             }
             fn write_to(&self, _: &mut dyn std::io::Write) -> std::io::Result<()> {
                 Ok(())
-            }
-            fn mark_saved(&self) -> Arc<dyn Doc> {
-                unimplemented!()
             }
             fn clone_box(&self) -> Box<dyn Doc> {
                 unimplemented!()

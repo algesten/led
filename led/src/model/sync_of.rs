@@ -1,9 +1,8 @@
 use std::rc::Rc;
-use std::sync::Arc;
 
 use led_core::rx::Stream;
-use led_core::{Doc, UndoEntry, next_change_seq};
-use led_state::{AppState, ChangeReason, SaveState};
+use led_core::{UndoEntry, apply_op_to_doc};
+use led_state::{AppState, BufferState, ChangeReason};
 use led_workspace::{SyncResultKind, WorkspaceIn};
 
 use super::Mut;
@@ -27,19 +26,10 @@ fn resolve_sync(result: SyncResultKind, state: &AppState) -> Option<Mut> {
         SyncResultKind::NoChange { .. } => None,
 
         SyncResultKind::ExternalSave { file_path } => {
-            let buf = state
-                .buffers
-                .values()
-                .find(|b| b.path.as_ref() == Some(&file_path))?;
+            let buf = state.buffers.get(&file_path)?;
             let mut buf = (**buf).clone();
-            buf.last_seen_seq = 0;
-            buf.chain_id = None;
-            buf.persisted_undo_len = buf.doc.undo_history_len();
-            buf.change_seq = next_change_seq();
-            if buf.doc.dirty() && buf.save_state == SaveState::Clean {
-                buf.doc = buf.doc.mark_saved();
-            }
-            Some(Mut::BufferUpdate(buf.id, buf, ChangeReason::Edit))
+            buf.mark_externally_saved();
+            Some(Mut::BufferUpdate(file_path, buf, ChangeReason::Edit))
         }
 
         SyncResultKind::ReplayEntries {
@@ -47,22 +37,15 @@ fn resolve_sync(result: SyncResultKind, state: &AppState) -> Option<Mut> {
             entries,
             new_last_seen_seq,
         } => {
-            let buf = state
-                .buffers
-                .values()
-                .find(|b| b.path.as_ref() == Some(&file_path))?;
+            let buf = state.buffers.get(&file_path)?;
             // Guard: skip duplicate application
-            if new_last_seen_seq <= buf.last_seen_seq {
+            if new_last_seen_seq <= buf.last_seen_seq() {
                 return None;
             }
-            let doc = apply_remote_entries(&buf.doc, &entries);
             let mut buf = (**buf).clone();
-            buf.doc = doc;
-            buf.last_seen_seq = new_last_seen_seq;
-            buf.persisted_undo_len = buf.doc.undo_history_len();
-            buf.content_hash = buf.doc.content_hash();
-            buf.change_seq = next_change_seq();
-            Some(Mut::BufferUpdate(buf.id, buf, ChangeReason::Edit))
+            apply_remote_entries(&mut buf, &entries);
+            buf.apply_sync_replay(new_last_seen_seq);
+            Some(Mut::BufferUpdate(file_path, buf, ChangeReason::Edit))
         }
 
         SyncResultKind::ReloadAndReplay {
@@ -72,49 +55,43 @@ fn resolve_sync(result: SyncResultKind, state: &AppState) -> Option<Mut> {
             entries,
             new_last_seen_seq,
         } => {
-            let buf = state
-                .buffers
-                .values()
-                .find(|b| b.path.as_ref() == Some(&file_path))?;
+            let buf = state.buffers.get(&file_path)?;
             // Safety check: skip if buffer is dirty and content_hash
             // mismatches — prevents clobbering local unsaved edits.
-            if buf.doc.dirty() && buf.content_hash != content_hash {
+            if buf.is_dirty() && buf.content_hash() != content_hash {
                 log::info!(
                     "sync: skipping ReloadAndReplay for dirty buffer {}, content hash mismatch",
                     file_path.display()
                 );
                 return None;
             }
-            if buf.content_hash != content_hash {
+            if buf.content_hash() != content_hash {
                 log::info!(
                     "sync: content hash mismatch for {}, expecting docstore reload",
                     file_path.display()
                 );
             }
             // Guard: skip duplicate application
-            if new_last_seen_seq <= buf.last_seen_seq {
+            if new_last_seen_seq <= buf.last_seen_seq() {
                 return None;
             }
-            let doc = apply_remote_entries(&buf.doc, &entries);
             let mut buf = (**buf).clone();
-            buf.doc = doc;
-            buf.chain_id = Some(new_chain_id);
-            buf.last_seen_seq = new_last_seen_seq;
-            buf.persisted_undo_len = buf.doc.undo_history_len();
-            buf.content_hash = buf.doc.content_hash();
-            buf.change_seq = next_change_seq();
-            Some(Mut::BufferUpdate(buf.id, buf, ChangeReason::Edit))
+            apply_remote_entries(&mut buf, &entries);
+            buf.apply_sync_reload(new_chain_id, new_last_seen_seq);
+            Some(Mut::BufferUpdate(file_path, buf, ChangeReason::Edit))
         }
     }
 }
 
-fn apply_remote_entries(doc: &Arc<dyn Doc>, entries: &[Vec<u8>]) -> Arc<dyn Doc> {
-    let mut doc = doc.close_undo_group();
+/// Apply serialized undo entries to a buffer: mutates both the doc (content)
+/// and the undo history (on BufferState).
+fn apply_remote_entries(buf: &mut BufferState, entries: &[Vec<u8>]) {
+    buf.close_undo_group();
     for entry_data in entries {
         let Ok(entry) = rmp_serde::from_slice::<UndoEntry>(entry_data) else {
             continue;
         };
-        doc = doc.apply_remote_entry(&entry);
+        let doc = apply_op_to_doc(buf.doc(), &entry.op);
+        buf.apply_remote_entry(doc, entry);
     }
-    doc
 }

@@ -263,35 +263,6 @@ pub fn driver(
     stream
 }
 
-/// Apply format-on-save: strip trailing whitespace per line, ensure final newline.
-/// Returns the formatted doc with edits recorded as an undo group.
-fn format_on_save(doc: &Arc<dyn Doc>) -> Arc<dyn Doc> {
-    let mut doc = doc.close_undo_group();
-    let line_count = doc.line_count();
-
-    // Strip trailing whitespace (iterate in reverse so offsets stay valid)
-    for line_idx in (0..line_count).rev() {
-        let line = doc.line(line_idx); // already stripped of \n
-        let trimmed = line.trim_end();
-        if trimmed.len() < line.len() {
-            let line_start = doc.line_to_char(line_idx);
-            let start = line_start + trimmed.chars().count();
-            let end = line_start + line.chars().count();
-            doc = doc.remove(start, end);
-        }
-    }
-
-    // Ensure final newline
-    let len_chars = doc.line_to_char(doc.line_count().saturating_sub(1))
-        + doc.line_len(doc.line_count().saturating_sub(1));
-    let last_line = doc.line(doc.line_count().saturating_sub(1));
-    if !last_line.is_empty() {
-        doc = doc.insert(len_chars, "\n");
-    }
-
-    doc.close_undo_group()
-}
-
 async fn handle_save(
     path: &PathBuf,
     doc: &Arc<dyn Doc>,
@@ -313,10 +284,7 @@ async fn handle_save(
     }
     let tmp_path = parent.join(format!(".led-save-{}", std::process::id()));
 
-    // Format on save: strip trailing whitespace, ensure final newline
-    let doc = format_on_save(doc);
-
-    // Serialize to memory, then write async
+    // Serialize to memory, then write async (cleanup already applied by model layer)
     let mut buf = Vec::new();
     if let Err(e) = doc.write_to(&mut buf) {
         let _ = tx
@@ -340,8 +308,7 @@ async fn handle_save(
 
     match tokio::fs::rename(&tmp_path, path).await {
         Ok(()) => {
-            let doc = doc.mark_saved();
-            let _ = tx.send(Ok(DocStoreIn::Saved { id, doc })).await;
+            let _ = tx.send(Ok(DocStoreIn::Saved { id, doc: doc.clone() })).await;
         }
         Err(e) => {
             let _ = tokio::fs::remove_file(&tmp_path).await;
@@ -375,8 +342,6 @@ async fn handle_save_as(
     }
     let tmp_path = parent.join(format!(".led-save-{}", std::process::id()));
 
-    let doc = format_on_save(doc);
-
     let mut buf = Vec::new();
     if let Err(e) = doc.write_to(&mut buf) {
         let _ = tx
@@ -400,12 +365,11 @@ async fn handle_save_as(
 
     match tokio::fs::rename(&tmp_path, path).await {
         Ok(()) => {
-            let doc = doc.mark_saved();
             let _ = tx
                 .send(Ok(DocStoreIn::SavedAs {
                     id,
                     path: path.clone(),
-                    doc,
+                    doc: doc.clone(),
                 }))
                 .await;
         }

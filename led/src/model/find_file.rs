@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use led_core::Action;
 use led_fs::FindFileEntry;
-use led_state::{AppState, FindFileMode, FindFileState, PreviewRequest, SaveState};
+use led_state::{AppState, FindFileMode, FindFileState, PreviewRequest};
 
 // ── Path helpers ──
 
@@ -211,10 +211,10 @@ pub fn activate(state: &mut AppState) {
     // Parent dir of active buffer's path, or start_dir
     let dir = state
         .active_buffer
-        .and_then(|id| state.buffers.get(&id))
-        .and_then(|buf| buf.path.as_ref())
-        .and_then(|p| p.parent())
-        .map(|p| p.to_path_buf())
+        .as_ref()
+        .and_then(|path| state.buffers.get(path))
+        .and_then(|buf| buf.path_buf().cloned())
+        .and_then(|p| p.parent().map(|pp| pp.to_path_buf()))
         .unwrap_or_else(|| (*state.startup.start_dir).clone());
 
     let dir_str = dir.to_string_lossy().into_owned();
@@ -245,8 +245,9 @@ pub fn activate_save_as(state: &mut AppState) {
     // Start with the current buffer's full path (or parent dir like find_file)
     let input = state
         .active_buffer
-        .and_then(|id| state.buffers.get(&id))
-        .and_then(|buf| buf.path.as_ref())
+        .as_ref()
+        .and_then(|path| state.buffers.get(path))
+        .and_then(|buf| buf.path_buf().cloned())
         .map(|p| abbreviate_home(&p.to_string_lossy()))
         .unwrap_or_else(|| {
             let dir = (*state.startup.start_dir).to_string_lossy().into_owned();
@@ -554,10 +555,10 @@ fn handle_enter_save_as(state: &mut AppState) {
     };
 
     // Save the active buffer to the new path
-    if let Some(id) = state.active_buffer {
-        if let Some(buf) = state.buf_mut(id) {
+    if let Some(active_path) = state.active_buffer.clone() {
+        if let Some(buf) = state.buf_mut(&active_path) {
             super::action::close_group_on_move(buf);
-            buf.save_state = SaveState::Saving;
+            buf.mark_saving();
         }
         state.pending_save_as.set(Some(path));
     }
