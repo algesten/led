@@ -143,10 +143,7 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
             let WI::NotifyEvent { file_path_hash } = ev else {
                 unreachable!()
             };
-            let path = s
-                .notify_hash_to_buffer
-                .get(&file_path_hash)
-                .cloned();
+            let path = s.notify_hash_to_buffer.get(&file_path_hash).cloned();
             Mut::NotifyEvent { path }
         })
         .stream();
@@ -235,7 +232,7 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
                         flush: led_state::UndoFlush {
                             file_path,
                             chain_id,
-                            content_hash: b.content_hash(),
+                            content_hash: b.content_hash().0,
                             undo_cursor,
                             distance_from_save: undo.distance_from_save(),
                             entries,
@@ -307,9 +304,9 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
             action::close_group_on_move(&mut buf);
             buf.clear_mark();
             let (r, c, a) = edit::yank(&mut buf, &text);
-            buf.set_cursor(r, c, a);
+            buf.set_cursor(led_core::Row(r), led_core::Col(c), led_core::Col(a));
             let (sr, ssl) = mov::adjust_scroll(&buf, &dims);
-            buf.set_scroll(sr, ssl);
+            buf.set_scroll(led_core::Row(sr), led_core::SubLine(ssl));
             Some(Mut::BufferUpdate(path.clone(), buf, ChangeReason::Edit))
         })
         .stream();
@@ -477,7 +474,11 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
                 if let Some(existing) = s.buf_mut(&path) {
                     if !existing.is_loaded() {
                         existing.load_doc(buf.doc_id(), buf.doc().clone());
-                        existing.set_cursor(buf.cursor_row(), buf.cursor_col(), buf.cursor_col_affinity());
+                        existing.set_cursor(
+                            buf.cursor_row(),
+                            buf.cursor_col(),
+                            buf.cursor_col_affinity(),
+                        );
                         existing.set_scroll(buf.scroll_row(), buf.scroll_sub_line());
                         existing.set_tab_order(buf.tab_order());
                         existing.set_preview(buf.is_preview());
@@ -624,7 +625,10 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
                 remove_old_path.as_ref().map(|p| s.buffers_mut().remove(p));
                 remove_old_hash.map(|h| s.notify_hash_to_buffer.remove(&h));
                 s.preview.pre_preview_buffer = pre_preview_buffer;
-                let path = buf.path_buf().cloned().expect("preview buffer must have path");
+                let path = buf
+                    .path_buf()
+                    .cloned()
+                    .expect("preview buffer must have path");
                 s.notify_hash_to_buffer.insert(notify_hash, path.clone());
                 s.buffers_mut().insert(path.clone(), Rc::new(buf));
                 s.active_buffer = Some(path.clone());
@@ -644,7 +648,7 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
                 s.preview.pre_preview_buffer = pre_preview_buffer;
                 s.active_buffer = Some(path.clone());
                 s.buf_mut(&path).map(|buf| {
-                    buf.set_cursor(row, col, col);
+                    buf.set_cursor(led_core::Row(row), led_core::Col(col), led_core::Col(col));
                 });
                 action::renumber_tabs(&mut s);
             }
@@ -757,15 +761,15 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
                                 || (buf.pending_tab_fallback() && tab_stop.is_some()))
                     });
                     if !will_indent {
-                        buf.offer_syntax(highlights, bracket_pairs, version);
+                        buf.offer_syntax(highlights, bracket_pairs, led_core::DocVersion(version));
                     }
                     if let Some(row) = indent_row {
-                        if buf.pending_indent_row() == Some(row) && buf.version() == version {
+                        if buf.pending_indent_row() == Some(row) && buf.version().0 == version {
                             buf.set_pending_indent_row(None);
                             let was_tab = buf.pending_tab_fallback();
                             buf.set_pending_tab_fallback(false);
                             if let Some(new_indent) = &indent {
-                                let cursor_on_row = buf.cursor_row() == row;
+                                let cursor_on_row = buf.cursor_row().0 == row;
                                 edit::apply_indent(buf, row, new_indent, cursor_on_row);
                             } else if was_tab {
                                 if let Some(ts) = tab_stop {
@@ -788,7 +792,7 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
                 for (path, tab_order) in entries {
                     if let Some(buf) = s.buf_mut(&path) {
                         buf.touch();
-                        buf.set_tab_order(tab_order);
+                        buf.set_tab_order(led_core::TabOrder(tab_order));
                     }
                 }
                 action::renumber_tabs(&mut s);
@@ -826,9 +830,9 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
                         if let Some(p) = buf.path_buf() {
                             let pos = led_state::JumpPosition {
                                 path: p.clone(),
-                                row: buf.cursor_row(),
-                                col: buf.cursor_col(),
-                                scroll_offset: buf.scroll_row(),
+                                row: buf.cursor_row().0,
+                                col: buf.cursor_col().0,
+                                scroll_offset: buf.scroll_row().0,
                             };
                             jump::record_jump(&mut s, pos);
                         }
@@ -850,8 +854,11 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
                     let half = s.dims.map_or(10, |d| d.buffer_height() / 2);
                     if let Some(buf) = s.buf_mut(&existing_path) {
                         let r = row.min(buf.doc().line_count().saturating_sub(1));
-                        buf.set_cursor(r, col, col);
-                        buf.set_scroll(buf.cursor_row().saturating_sub(half), 0);
+                        buf.set_cursor(led_core::Row(r), led_core::Col(col), led_core::Col(col));
+                        buf.set_scroll(
+                            led_core::Row(buf.cursor_row().0.saturating_sub(half)),
+                            led_core::SubLine(0),
+                        );
                     }
                     action::reveal_active_buffer(&mut s);
                 } else {
@@ -920,7 +927,7 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
                         .insert(path.clone(), Rc::new(BufferState::ghost(path.clone())));
                 }
                 if let Some(buf) = s.buf_mut(&path) {
-                    buf.offer_diagnostics(diagnostics, content_hash);
+                    buf.offer_diagnostics(diagnostics, led_core::ContentHash(content_hash));
                 }
             }
             Mut::LspInlayHints { path, hints } => {
@@ -1259,12 +1266,16 @@ fn apply_text_edits(buf: &mut BufferState, edits: &[led_lsp::TextEdit]) {
     action::close_group_on_move(buf);
     // Flush any pending undo group and pre-seed a new one with the actual
     // cursor position so that undo restores the cursor correctly.
-    let cursor_char = buf.doc().line_to_char(buf.cursor_row()) + buf.cursor_col();
+    let cursor_char =
+        led_core::CharOffset(buf.doc().line_to_char(buf.cursor_row()).0 + buf.cursor_col().0);
     buf.close_undo_group();
     buf.begin_undo_group(cursor_char);
     for te in sorted {
-        let start = buf.doc().line_to_char(te.start_row) + te.start_col;
-        let end = buf.doc().line_to_char(te.end_row) + te.end_col;
+        let start = led_core::CharOffset(
+            buf.doc().line_to_char(led_core::Row(te.start_row)).0 + te.start_col,
+        );
+        let end =
+            led_core::CharOffset(buf.doc().line_to_char(led_core::Row(te.end_row)).0 + te.end_col);
         if start != end {
             buf.remove_text(start, end);
         }
@@ -1296,10 +1307,21 @@ fn resolve_preview(s: &AppState) -> Option<Mut> {
             if buf.path_buf() == Some(&req.path) {
                 let mut buf = (**buf).clone();
                 let row = req.row.min(buf.doc().line_count().saturating_sub(1));
-                buf.set_cursor(row, req.col, req.col);
+                buf.set_cursor(
+                    led_core::Row(row),
+                    led_core::Col(req.col),
+                    led_core::Col(req.col),
+                );
                 let buffer_height = s.dims.map_or(20, |d| d.buffer_height());
-                buf.set_scroll(row.saturating_sub(buffer_height / 2), 0);
-                return Some(Mut::BufferUpdate(preview_path.clone(), buf, ChangeReason::Edit));
+                buf.set_scroll(
+                    led_core::Row(row.saturating_sub(buffer_height / 2)),
+                    led_core::SubLine(0),
+                );
+                return Some(Mut::BufferUpdate(
+                    preview_path.clone(),
+                    buf,
+                    ChangeReason::Edit,
+                ));
             }
         }
     }
@@ -1315,7 +1337,9 @@ fn resolve_preview(s: &AppState) -> Option<Mut> {
         let col = req.col;
 
         let remove_old_path = s.preview.buffer.clone();
-        let remove_old_hash = remove_old_path.as_deref().and_then(|p| notify_hash_for(s, p));
+        let remove_old_hash = remove_old_path
+            .as_deref()
+            .and_then(|p| notify_hash_for(s, p));
         let pre_preview_buffer =
             if s.preview.buffer.is_none() && s.preview.pre_preview_buffer.is_none() {
                 s.active_buffer.clone()

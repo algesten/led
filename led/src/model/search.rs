@@ -11,7 +11,7 @@ pub fn find_all_matches(doc: &dyn Doc, query: &str) -> Vec<(usize, usize, usize)
     let total = doc.line_count();
     let mut results = Vec::new();
     for row in 0..total {
-        let line = doc.line(row);
+        let line = doc.line(led_core::Row(row));
         let line_lower = line.to_lowercase();
         let mut start = 0;
         while let Some(pos) = line_lower[start..].find(&query_lower) {
@@ -47,9 +47,9 @@ pub fn start_search(buf: &mut BufferState) {
 
     buf.isearch = Some(ISearchState {
         query: query.clone(),
-        origin: (buf.cursor_row(), buf.cursor_col()),
-        origin_scroll: buf.scroll_row(),
-        origin_sub_line: buf.scroll_sub_line(),
+        origin: (buf.cursor_row().0, buf.cursor_col().0),
+        origin_scroll: buf.scroll_row().0,
+        origin_sub_line: buf.scroll_sub_line().0,
         failed: false,
         matches: Vec::new(),
         match_idx: None,
@@ -68,7 +68,7 @@ pub fn update_search(buf: &mut BufferState) {
         None => return,
     };
     let matches = find_all_matches(&**buf.doc(), &query);
-    let (row, col) = (buf.cursor_row(), buf.cursor_col());
+    let (row, col) = (buf.cursor_row().0, buf.cursor_col().0);
 
     let (match_idx, failed) = if query.is_empty() {
         (None, false)
@@ -83,7 +83,7 @@ pub fn update_search(buf: &mut BufferState) {
 
     if let Some(idx) = match_idx {
         let (r, c, _) = matches[idx];
-        buf.set_cursor(r, c, c);
+        buf.set_cursor(led_core::Row(r), led_core::Col(c), led_core::Col(c));
     }
 
     let isearch = buf.isearch.as_mut().unwrap();
@@ -120,7 +120,7 @@ pub fn search_next(buf: &mut BufferState) {
     if failed {
         // Wrap to first match
         let (row, col, _) = buf.isearch.as_ref().unwrap().matches[0];
-        buf.set_cursor(row, col, col);
+        buf.set_cursor(led_core::Row(row), led_core::Col(col), led_core::Col(col));
         let isearch = buf.isearch.as_mut().unwrap();
         isearch.match_idx = Some(0);
         isearch.failed = false;
@@ -133,7 +133,7 @@ pub fn search_next(buf: &mut BufferState) {
         let len = buf.isearch.as_ref().unwrap().matches.len();
         if next < len {
             let (row, col, _) = buf.isearch.as_ref().unwrap().matches[next];
-            buf.set_cursor(row, col, col);
+            buf.set_cursor(led_core::Row(row), led_core::Col(col), led_core::Col(col));
             let isearch = buf.isearch.as_mut().unwrap();
             isearch.match_idx = Some(next);
         } else {
@@ -157,8 +157,15 @@ fn save_last_search(buf: &mut BufferState) {
 pub fn search_cancel(buf: &mut BufferState) {
     save_last_search(buf);
     if let Some(isearch) = buf.isearch.take() {
-        buf.set_cursor(isearch.origin.0, isearch.origin.1, isearch.origin.1);
-        buf.set_scroll(isearch.origin_scroll, isearch.origin_sub_line);
+        buf.set_cursor(
+            led_core::Row(isearch.origin.0),
+            led_core::Col(isearch.origin.1),
+            led_core::Col(isearch.origin.1),
+        );
+        buf.set_scroll(
+            led_core::Row(isearch.origin_scroll),
+            led_core::SubLine(isearch.origin_sub_line),
+        );
     }
 }
 

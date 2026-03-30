@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use led_core::{Doc, EditOp, LanguageId};
+use led_core::{CharOffset, ContentHash, Doc, EditOp, LanguageId, Row};
 use lsp_types::{
     CodeActionOrCommand, CodeActionParams, CodeActionResponse, CompletionParams,
     CompletionResponse, DocumentFormattingParams, FormattingOptions, GotoDefinitionParams,
@@ -174,7 +174,7 @@ pub(crate) async fn run(
         quiescent: HashMap::new(),
         need_diagnostics: false,
         buffered_diagnostics: HashMap::new(),
-                _file_watcher: None,
+        _file_watcher: None,
         file_watcher_globs: None,
         last_progress_sent: std::time::Instant::now(),
         trigger_characters: Vec::new(),
@@ -224,7 +224,11 @@ impl LspManager {
                     // the server re-diagnoses, and flush any buffered diagnostics.
                     self.send_did_save(&path);
                     for (diag_path, diagnostics) in self.buffered_diagnostics.drain() {
-                        let h = self.docs.get(&diag_path).map(|d| d.content_hash()).unwrap_or(0);
+                        let h = self
+                            .docs
+                            .get(&diag_path)
+                            .map(|d| d.content_hash())
+                            .unwrap_or(ContentHash(0));
                         let _ = result_tx
                             .send(LspIn::Diagnostics {
                                 path: diag_path,
@@ -243,10 +247,11 @@ impl LspManager {
                         if let Some(op) = edit_ops.last() {
                             let new_doc = self.docs.get(&path);
                             if let Some(d) = new_doc {
-                                let cursor_offset = op.offset + op.new_text.chars().count();
+                                let cursor_offset =
+                                    CharOffset(op.offset.0 + op.new_text.chars().count());
                                 let row = d.char_to_line(cursor_offset);
-                                let col = cursor_offset - d.line_to_char(row);
-                                self.spawn_completion(path.clone(), row, col);
+                                let col = cursor_offset.0 - d.line_to_char(row).0;
+                                self.spawn_completion(path.clone(), row.0, col);
                             }
                         }
                     } else {
@@ -255,12 +260,19 @@ impl LspManager {
                     }
                 }
             }
-            LspOut::BufferSaved { path, content_hash: _ } => {
+            LspOut::BufferSaved {
+                path,
+                content_hash: _,
+            } => {
                 self.send_did_save(&path);
                 // Flush diagnostics that arrived while need_diagnostics was false
                 // (e.g. from format-on-save didChange before didSave).
                 for (diag_path, diagnostics) in self.buffered_diagnostics.drain() {
-                    let h = self.docs.get(&diag_path).map(|d| d.content_hash()).unwrap_or(0);
+                    let h = self
+                        .docs
+                        .get(&diag_path)
+                        .map(|d| d.content_hash())
+                        .unwrap_or(ContentHash(0));
                     let _ = result_tx
                         .send(LspIn::Diagnostics {
                             path: diag_path,
@@ -497,23 +509,23 @@ impl LspManager {
             ([op], Some(old)) => {
                 // Single edit — use incremental sync
                 let start_line = old.char_to_line(op.offset);
-                let start_col = op.offset - old.line_to_char(start_line);
-                let old_end = op.offset + op.old_text.chars().count();
-                let last_char = old.line_to_char(old.line_count().saturating_sub(1))
-                    + old.line_len(old.line_count().saturating_sub(1));
-                let old_end_clamped = old_end.min(last_char);
+                let start_col = op.offset.0 - old.line_to_char(start_line).0;
+                let old_end = op.offset.0 + op.old_text.chars().count();
+                let last_row = Row(old.line_count().saturating_sub(1));
+                let last_char = old.line_to_char(last_row).0 + old.line_len(last_row);
+                let old_end_clamped = CharOffset(old_end.min(last_char));
                 let end_line = old.char_to_line(old_end_clamped);
-                let end_col = old_end_clamped - old.line_to_char(end_line);
-                let start_line_text = doc_line(old, start_line);
+                let end_col = old_end_clamped.0 - old.line_to_char(end_line).0;
+                let start_line_text = doc_line(old, start_line.0);
                 let end_line_text = if end_line == start_line {
                     start_line_text.clone()
                 } else {
-                    doc_line(old, end_line)
+                    doc_line(old, end_line.0)
                 };
                 vec![lsp_types::TextDocumentContentChangeEvent {
                     range: Some(lsp_types::Range {
-                        start: lsp_pos(start_line, start_col, start_line_text.as_deref()),
-                        end: lsp_pos(end_line, end_col, end_line_text.as_deref()),
+                        start: lsp_pos(start_line.0, start_col, start_line_text.as_deref()),
+                        end: lsp_pos(end_line.0, end_col, end_line_text.as_deref()),
                     }),
                     range_length: None,
                     text: op.new_text.clone(),
@@ -1024,7 +1036,11 @@ impl LspManager {
                         };
                         let diagnostics = convert_diagnostics(&params.diagnostics, &line_at);
                         if self.need_diagnostics {
-                            let h = self.docs.get(&path).map(|d| d.content_hash()).unwrap_or(0);
+                            let h = self
+                                .docs
+                                .get(&path)
+                                .map(|d| d.content_hash())
+                                .unwrap_or(ContentHash(0));
                             let _ = result_tx
                                 .send(LspIn::Diagnostics {
                                     path,
@@ -1157,7 +1173,11 @@ impl LspManager {
             RequestResult::Diagnostics { path, raw } => {
                 let line_at = |row: usize| self.docs.get(&path).and_then(|d| doc_line(&**d, row));
                 let diagnostics = convert_diagnostics(&raw, &line_at);
-                let h = self.docs.get(&path).map(|d| d.content_hash()).unwrap_or(0);
+                let h = self
+                    .docs
+                    .get(&path)
+                    .map(|d| d.content_hash())
+                    .unwrap_or(ContentHash(0));
                 let _ = result_tx
                     .send(LspIn::Diagnostics {
                         path,
@@ -1347,7 +1367,7 @@ impl LspManager {
             return;
         }
 
-        let line = doc.line(row);
+        let line = doc.line(Row(row));
         let line_chars: Vec<char> = line.chars().collect();
         let psc = self.completion_prefix_start_col;
 
@@ -1361,12 +1381,11 @@ impl LspManager {
         // If the user is editing a different part of the line (e.g., typed "if"
         // then moved on to type "LspI"), the session is stale — dismiss it.
         if let Some(op) = edit_ops.last() {
-            let edit_pos = op.offset + op.new_text.chars().count();
-            let edit_row = doc.char_to_line(edit_pos.min(
-                doc.line_to_char(doc.line_count().saturating_sub(1))
-                    + doc.line_len(doc.line_count().saturating_sub(1)),
-            ));
-            let edit_col = edit_pos - doc.line_to_char(edit_row);
+            let edit_pos = op.offset.0 + op.new_text.chars().count();
+            let last_row = Row(doc.line_count().saturating_sub(1));
+            let last_char = doc.line_to_char(last_row).0 + doc.line_len(last_row);
+            let edit_row = doc.char_to_line(CharOffset(edit_pos.min(last_char)));
+            let edit_col = edit_pos - doc.line_to_char(edit_row).0;
             // Find the end of the identifier at psc
             let mut id_end = psc;
             while id_end < line_chars.len()
@@ -1375,7 +1394,7 @@ impl LspManager {
                 id_end += 1;
             }
             // Edit is on a different row, or outside the identifier range → stale
-            if edit_row != row || edit_col < psc || edit_col > id_end {
+            if edit_row.0 != row || edit_col < psc || edit_col > id_end {
                 self.clear_completion(result_tx).await;
                 return;
             }

@@ -8,7 +8,7 @@ mod tabs;
 
 use std::rc::Rc;
 
-use led_core::{Action, PanelSlot};
+use led_core::{Action, CharOffset, Col, PanelSlot, Row};
 use led_state::{AppState, Dimensions, EditKind, LspRequest};
 
 use super::{edit, file_search, find_file, jump, mov, search};
@@ -170,26 +170,26 @@ pub fn handle_action(state: &mut AppState, action: Action) -> bool {
         }
         Action::MoveLeft => with_buf(state, |buf, dims| {
             let (r, c, _) = mov::move_left(buf);
-            buf.set_cursor(r, c, 0);
-            buf.set_cursor(r, c, mov::reset_affinity(buf, dims));
+            buf.set_cursor(Row(r), Col(c), Col(0));
+            buf.set_cursor(Row(r), Col(c), Col(mov::reset_affinity(buf, dims)));
             close_group_on_move(buf);
         }),
         Action::MoveRight => with_buf(state, |buf, dims| {
             let (r, c, _) = mov::move_right(buf);
-            buf.set_cursor(r, c, 0);
-            buf.set_cursor(r, c, mov::reset_affinity(buf, dims));
+            buf.set_cursor(Row(r), Col(c), Col(0));
+            buf.set_cursor(Row(r), Col(c), Col(mov::reset_affinity(buf, dims)));
             close_group_on_move(buf);
         }),
         Action::LineStart => with_buf(state, |buf, dims| {
             let (r, c, _) = mov::line_start(buf);
-            buf.set_cursor(r, c, 0);
-            buf.set_cursor(r, c, mov::reset_affinity(buf, dims));
+            buf.set_cursor(Row(r), Col(c), Col(0));
+            buf.set_cursor(Row(r), Col(c), Col(mov::reset_affinity(buf, dims)));
             close_group_on_move(buf);
         }),
         Action::LineEnd => with_buf(state, |buf, dims| {
             let (r, c, _) = mov::line_end(buf);
-            buf.set_cursor(r, c, 0);
-            buf.set_cursor(r, c, mov::reset_affinity(buf, dims));
+            buf.set_cursor(Row(r), Col(c), Col(0));
+            buf.set_cursor(Row(r), Col(c), Col(mov::reset_affinity(buf, dims)));
             close_group_on_move(buf);
         }),
 
@@ -217,8 +217,8 @@ pub fn handle_action(state: &mut AppState, action: Action) -> bool {
                 buf.clear_mark();
                 maybe_close_group(buf, EditKind::Insert, ch);
                 let (r, c, _) = edit::insert_char(buf, ch);
-                buf.set_cursor(r, c, 0);
-                buf.set_cursor(r, c, mov::reset_affinity(buf, dims));
+                buf.set_cursor(Row(r), Col(c), Col(0));
+                buf.set_cursor(Row(r), Col(c), Col(mov::reset_affinity(buf, dims)));
                 buf.set_last_edit_kind(EditKind::Insert);
                 if buf.reindent_chars().contains(&ch) {
                     buf.set_pending_indent_row(Some(r));
@@ -230,7 +230,7 @@ pub fn handle_action(state: &mut AppState, action: Action) -> bool {
                     if let Some(buf) = state.buffers.get(path) {
                         if !buf.completion_triggers().is_empty() {
                             let line = buf.doc().line(buf.cursor_row());
-                            let col = buf.cursor_col();
+                            let col = buf.cursor_col().0;
                             if col > 0 {
                                 let prev = line.chars().nth(col - 1).unwrap_or(' ');
                                 if prev.is_alphanumeric() || prev == '_' {
@@ -249,13 +249,13 @@ pub fn handle_action(state: &mut AppState, action: Action) -> bool {
             buf.clear_mark();
             close_group_on_move(buf);
             let (r, c, a) = edit::insert_newline(buf);
-            buf.set_cursor(r, c, a);
+            buf.set_cursor(Row(r), Col(c), Col(a));
             buf.set_pending_indent_row(Some(r));
         }),
         Action::InsertTab => with_buf(state, |buf, _dims| {
             buf.clear_mark();
             close_group_on_move(buf);
-            buf.set_pending_indent_row(Some(buf.cursor_row()));
+            buf.set_pending_indent_row(Some(buf.cursor_row().0));
             buf.set_pending_tab_fallback(true);
         }),
         Action::DeleteBackward => with_buf(state, |buf, dims| {
@@ -264,8 +264,8 @@ pub fn handle_action(state: &mut AppState, action: Action) -> bool {
                 buf.close_undo_group();
             }
             if let Some((r, c, _)) = edit::delete_backward(buf) {
-                buf.set_cursor(r, c, 0);
-                buf.set_cursor(r, c, mov::reset_affinity(buf, dims));
+                buf.set_cursor(Row(r), Col(c), Col(0));
+                buf.set_cursor(Row(r), Col(c), Col(mov::reset_affinity(buf, dims)));
                 buf.set_last_edit_kind(EditKind::Delete);
             }
         }),
@@ -275,8 +275,8 @@ pub fn handle_action(state: &mut AppState, action: Action) -> bool {
                 buf.close_undo_group();
             }
             if let Some((r, c, _)) = edit::delete_forward(buf) {
-                buf.set_cursor(r, c, 0);
-                buf.set_cursor(r, c, mov::reset_affinity(buf, dims));
+                buf.set_cursor(Row(r), Col(c), Col(0));
+                buf.set_cursor(Row(r), Col(c), Col(mov::reset_affinity(buf, dims)));
                 buf.set_last_edit_kind(EditKind::Delete);
             }
         }),
@@ -286,11 +286,11 @@ pub fn handle_action(state: &mut AppState, action: Action) -> bool {
                 if let Some(buf) = state.buf_mut(&path) {
                     close_group_on_move(buf);
                     if let Some((killed, r, c, a)) = edit::kill_line(buf) {
-                        buf.set_cursor(r, c, a);
+                        buf.set_cursor(Row(r), Col(c), Col(a));
                         killed_text = Some(killed);
                     }
                     let (sr, ssl) = mov::adjust_scroll(buf, &dims);
-                    buf.set_scroll(sr, ssl);
+                    buf.set_scroll(Row(sr), led_core::SubLine(ssl));
                     buf.touch();
                 }
             }
@@ -305,7 +305,7 @@ pub fn handle_action(state: &mut AppState, action: Action) -> bool {
                 if let Some(buf) = state.buf_mut(&path) {
                     close_group_on_move(buf);
                     if let Some((killed, r, c, a)) = edit::kill_region(buf) {
-                        buf.set_cursor(r, c, a);
+                        buf.set_cursor(Row(r), Col(c), Col(a));
                         buf.clear_mark();
                         killed_text = Some(killed);
                     } else {
@@ -313,7 +313,7 @@ pub fn handle_action(state: &mut AppState, action: Action) -> bool {
                         no_region = true;
                     }
                     let (sr, ssl) = mov::adjust_scroll(buf, &dims);
-                    buf.set_scroll(sr, ssl);
+                    buf.set_scroll(Row(sr), led_core::SubLine(ssl));
                     buf.touch();
                 }
             } else {
@@ -335,18 +335,18 @@ pub fn handle_action(state: &mut AppState, action: Action) -> bool {
             close_group_on_move(buf);
             if let Some(cursor) = buf.undo() {
                 let row = buf.doc().char_to_line(cursor);
-                let col = cursor - buf.doc().line_to_char(row);
-                buf.set_cursor(row, col, 0);
-                buf.set_cursor(row, col, mov::reset_affinity(buf, dims));
+                let col = cursor.0 - buf.doc().line_to_char(row).0;
+                buf.set_cursor(row, Col(col), Col(0));
+                buf.set_cursor(row, Col(col), Col(mov::reset_affinity(buf, dims)));
             }
         }),
         Action::Redo => with_buf(state, |buf, dims| {
             close_group_on_move(buf);
             if let Some(cursor) = buf.redo() {
                 let row = buf.doc().char_to_line(cursor);
-                let col = cursor - buf.doc().line_to_char(row);
-                buf.set_cursor(row, col, 0);
-                buf.set_cursor(row, col, mov::reset_affinity(buf, dims));
+                let col = cursor.0 - buf.doc().line_to_char(row).0;
+                buf.set_cursor(row, Col(col), Col(0));
+                buf.set_cursor(row, Col(col), Col(mov::reset_affinity(buf, dims)));
             }
         }),
 
@@ -430,8 +430,8 @@ pub fn handle_action(state: &mut AppState, action: Action) -> bool {
         // ── Bracket matching ──
         Action::MatchBracket => with_buf(state, |buf, dims| {
             if let Some((row, col)) = buf.matching_bracket() {
-                buf.set_cursor(row, col, 0);
-                buf.set_cursor(row, col, mov::reset_affinity(buf, dims));
+                buf.set_cursor(Row(row), Col(col), Col(0));
+                buf.set_cursor(Row(row), Col(col), Col(mov::reset_affinity(buf, dims)));
                 close_group_on_move(buf);
             }
         }),
@@ -455,9 +455,9 @@ pub fn handle_action(state: &mut AppState, action: Action) -> bool {
                             if let Some((start_byte, end_byte, replacement)) =
                                 led_syntax::import::sort_imports_text(&**buf.doc(), &import_items)
                             {
-                                let start_char = buf.doc().byte_to_char(start_byte);
-                                let end_char = buf.doc().byte_to_char(end_byte);
-                                let edit_row = buf.doc().char_to_line(start_char);
+                                let start_char = CharOffset(buf.doc().byte_to_char(start_byte));
+                                let end_char = CharOffset(buf.doc().byte_to_char(end_byte));
+                                let edit_row = buf.doc().char_to_line(start_char).0;
                                 let buf = state.buf_mut(&path).unwrap();
                                 close_group_on_move(buf);
                                 buf.edit_at(edit_row, |doc| {

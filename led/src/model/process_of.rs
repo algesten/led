@@ -60,7 +60,7 @@ pub fn process_of(state: &Stream<Rc<AppState>>) -> Stream<Mut> {
                             .iter()
                             .any(|ap| b.path_buf() == Some(ap))
                     })
-                    .map(|b| b.tab_order())
+                    .map(|b| b.tab_order().0)
                     .max()
                     .map_or(0, |m| m + 1)
             } else {
@@ -73,7 +73,7 @@ pub fn process_of(state: &Stream<Rc<AppState>>) -> Stream<Mut> {
                 .enumerate()
                 .filter_map(|(i, p)| {
                     let buf = s.buffers.values().find(|b| b.path_buf() == Some(p))?;
-                    let tab_order = if reorder { base + i } else { buf.tab_order() };
+                    let tab_order = if reorder { base + i } else { buf.tab_order().0 };
                     Some((buf.path_buf()?.clone(), tab_order))
                 })
                 .collect();

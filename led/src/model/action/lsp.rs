@@ -28,8 +28,8 @@ pub(super) fn handle_completion_action(state: &mut AppState, action: &Action) ->
                 if let Some(item) = comp.items.get(index) {
                     if let Some(path) = state.active_buffer.clone() {
                         let buf = &state.buffers[&path];
-                        let cursor_row = buf.cursor_row();
-                        let cursor_col = buf.cursor_col();
+                        let cursor_row = buf.cursor_row().0;
+                        let cursor_col = buf.cursor_col().0;
 
                         // Build text edit: replace from prefix_start to current cursor
                         let te = led_lsp::TextEdit {
@@ -49,7 +49,7 @@ pub(super) fn handle_completion_action(state: &mut AppState, action: &Action) ->
                             .buffers
                             .get(&path)
                             .map(|b| (b.doc().line_count(), b.version()))
-                            .unwrap_or((0, 0));
+                            .unwrap_or((0, led_core::DocVersion(0)));
                         let edit_row = te.start_row;
                         if let Some(buf) = state.buf_mut(&path) {
                             super::super::apply_text_edits(buf, &[te.clone()]);
@@ -67,7 +67,7 @@ pub(super) fn handle_completion_action(state: &mut AppState, action: &Action) ->
                                         .unwrap_or(0),
                                 )
                             };
-                            buf.set_cursor(r, c, c);
+                            buf.set_cursor(led_core::Row(r), led_core::Col(c), led_core::Col(c));
                         }
                         mov::shift_annotations(state, &path, edit_row, old_lines, old_ver);
 
@@ -77,7 +77,7 @@ pub(super) fn handle_completion_action(state: &mut AppState, action: &Action) ->
                                 .buffers
                                 .get(&path)
                                 .map(|b| (b.doc().line_count(), b.version()))
-                                .unwrap_or((0, 0));
+                                .unwrap_or((0, led_core::DocVersion(0)));
                             let edit_row = item
                                 .additional_edits
                                 .iter()
@@ -218,7 +218,7 @@ pub(super) fn navigate_diagnostic(state: &mut AppState, forward: bool) {
         .active_buffer
         .as_ref()
         .and_then(|path| state.buffers.get(path))
-        .map(|b| (b.cursor_row(), b.cursor_col()))
+        .map(|b| (b.cursor_row().0, b.cursor_col().0))
         .unwrap_or((0, 0));
 
     // Build a sorted list of all (path, diag) across the workspace.
@@ -274,10 +274,14 @@ pub(super) fn navigate_diagnostic(state: &mut AppState, forward: bool) {
         let dims = state.dims;
         if let Some(buf) = state.buf_mut(&path) {
             close_group_on_move(buf);
-            buf.set_cursor(target_row, target_col, target_col);
+            buf.set_cursor(
+                led_core::Row(target_row),
+                led_core::Col(target_col),
+                led_core::Col(target_col),
+            );
             if let Some(dims) = dims {
                 let (sr, ssl) = mov::adjust_scroll(buf, &dims);
-                buf.set_scroll(sr, ssl);
+                buf.set_scroll(led_core::Row(sr), led_core::SubLine(ssl));
             }
         }
         return;
@@ -299,8 +303,12 @@ pub(super) fn navigate_diagnostic(state: &mut AppState, forward: bool) {
         let half = state.dims.map_or(10, |d| d.buffer_height() / 2);
         if let Some(buf) = state.buf_mut(&path) {
             let r = target_row.min(buf.doc().line_count().saturating_sub(1));
-            buf.set_cursor(r, target_col, target_col);
-            buf.set_scroll(r.saturating_sub(half), 0);
+            buf.set_cursor(
+                led_core::Row(r),
+                led_core::Col(target_col),
+                led_core::Col(target_col),
+            );
+            buf.set_scroll(led_core::Row(r.saturating_sub(half)), led_core::SubLine(0));
         }
         reveal_active_buffer(state);
     } else {

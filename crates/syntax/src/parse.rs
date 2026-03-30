@@ -1,4 +1,4 @@
-use led_core::Doc;
+use led_core::{CharOffset, Doc};
 use tree_sitter::{InputEdit, Parser, Point, Tree};
 
 /// Parse document contents using tree-sitter's incremental parsing callback.
@@ -25,12 +25,12 @@ pub(crate) fn parse_doc(
 #[allow(dead_code)]
 fn byte_and_point(doc: &dyn Doc, char_idx: usize) -> (usize, Point) {
     let byte = doc.char_to_byte(char_idx);
-    let line = doc.char_to_line(char_idx);
+    let line = doc.char_to_line(CharOffset(char_idx));
     let line_byte = doc.line_to_byte(line);
     (
         byte,
         Point {
-            row: line,
+            row: line.0,
             column: byte - line_byte,
         },
     )
@@ -81,8 +81,8 @@ pub(crate) fn edit_for_remove(doc: &dyn Doc, char_start: usize, char_end: usize)
 
 /// Extract text from a tree-sitter node.
 pub(crate) fn node_text(doc: &dyn Doc, node: &tree_sitter::Node) -> String {
-    let start = doc.byte_to_char(node.start_byte());
-    let end = doc.byte_to_char(node.end_byte().min(doc.len_bytes()));
+    let start = CharOffset(doc.byte_to_char(node.start_byte()));
+    let end = CharOffset(doc.byte_to_char(node.end_byte().min(doc.len_bytes())));
     doc.slice(start, end)
 }
 

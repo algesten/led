@@ -486,11 +486,7 @@ pub fn handle_file_search_action(state: &mut AppState, action: &Action) -> bool 
 // ── Buffer lookup ──
 
 fn find_buf_for_path(state: &AppState, path: &std::path::Path) -> Option<std::path::PathBuf> {
-    if let Some(b) = state
-        .buffers
-        .values()
-        .find(|b| b.path() == Some(path))
-    {
+    if let Some(b) = state.buffers.values().find(|b| b.path() == Some(path)) {
         return b.path_buf().cloned();
     }
     let canonical = std::fs::canonicalize(path).ok()?;
@@ -680,7 +676,7 @@ fn unreplace_selected(state: &mut AppState) {
         let line_text = state
             .buffers
             .get(&bp)
-            .map(|b| b.doc().line(entry.row).to_string())
+            .map(|b| b.doc().line(led_core::Row(entry.row)).to_string())
             .unwrap_or_default();
         let fs = state.file_search.as_mut().unwrap();
         reinsert_hit_into_results(fs, &entry, &line_text);
@@ -812,7 +808,11 @@ fn replace_all(state: &mut AppState) {
 /// Called from BufferOpen handler. If this buffer's path has pending replace hits,
 /// apply them all in one undo group.
 pub fn apply_pending_replace(state: &mut AppState, buf_path: &std::path::Path) {
-    let path = match state.buffers.get(buf_path).and_then(|b| b.path_buf().cloned()) {
+    let path = match state
+        .buffers
+        .get(buf_path)
+        .and_then(|b| b.path_buf().cloned())
+    {
         Some(p) => p,
         None => return,
     };
@@ -973,7 +973,7 @@ fn replace_in_buffer(
         return;
     }
 
-    let line_text = buf.doc().line(row);
+    let line_text = buf.doc().line(led_core::Row(row));
     let actual_replacement = if let Some(query) = search_query {
         let matched_text = line_text
             .get(match_start_byte..match_end_byte)
@@ -991,9 +991,9 @@ fn replace_in_buffer(
         .get(..match_end_byte)
         .map(|s| s.chars().count())
         .unwrap_or(match_start_char);
-    let line_start = buf.doc().line_to_char(row);
-    let abs_start = line_start + match_start_char;
-    let abs_end = line_start + match_end_char;
+    let line_start = buf.doc().line_to_char(led_core::Row(row)).0;
+    let abs_start = led_core::CharOffset(line_start + match_start_char);
+    let abs_end = led_core::CharOffset(line_start + match_end_char);
 
     buf.remove_text(abs_start, abs_end);
     buf.insert_text(abs_start, &actual_replacement);
@@ -1014,7 +1014,7 @@ fn confirm_selected(state: &mut AppState) {
         if let Some(active_path) = state.active_buffer.clone() {
             if let Some(buf) = state.buf_mut(&active_path) {
                 let r = row.min(buf.doc().line_count().saturating_sub(1));
-                buf.set_cursor(r, col, col);
+                buf.set_cursor(led_core::Row(r), led_core::Col(col), led_core::Col(col));
             }
         }
         super::action::reveal_active_buffer(state);
@@ -1032,7 +1032,7 @@ fn confirm_selected(state: &mut AppState) {
         state.active_buffer = Some(buf_path.clone());
         if let Some(buf) = state.buf_mut(&buf_path) {
             let r = row.min(buf.doc().line_count().saturating_sub(1));
-            buf.set_cursor(r, col, col);
+            buf.set_cursor(led_core::Row(r), led_core::Col(col), led_core::Col(col));
         }
         super::action::reveal_active_buffer(state);
     } else {

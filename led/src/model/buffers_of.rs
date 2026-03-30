@@ -33,11 +33,13 @@ pub fn buffers_of(
                     let buffer_height = state.dims.map_or(20, |d| d.buffer_height());
                     let notify_hash = led_workspace::path_hash(&path);
 
-                    let mut buf =
-                        BufferState::new(id, doc, Some(path), Default::default());
-                    buf.set_cursor(row, col, col);
-                    buf.set_scroll(row.saturating_sub(buffer_height / 2), 0);
-                    buf.set_tab_order(tab_order);
+                    let mut buf = BufferState::new(id, doc, Some(path), Default::default());
+                    buf.set_cursor(led_core::Row(row), led_core::Col(col), led_core::Col(col));
+                    buf.set_scroll(
+                        led_core::Row(row.saturating_sub(buffer_height / 2)),
+                        led_core::SubLine(0),
+                    );
+                    buf.set_tab_order(led_core::TabOrder(tab_order));
                     buf.set_preview(true);
                     let remove_old_path = state.preview.buffer.clone();
                     let remove_old_hash = remove_old_path.as_ref().and_then(|pp| {
@@ -97,14 +99,12 @@ pub fn buffers_of(
                 let undo_data = sp.and_then(|sp| sp.undo.as_ref());
                 let (chain_id, persisted_undo_len, last_seen_seq, distance_from_save) =
                     match undo_data {
-                        Some(undo) if undo.content_hash == doc.content_hash() => {
-                            (
-                                Some(undo.chain_id.clone()),
-                                undo.entries.len(),
-                                undo.last_seen_seq,
-                                undo.distance_from_save,
-                            )
-                        }
+                        Some(undo) if undo.content_hash == doc.content_hash().0 => (
+                            Some(undo.chain_id.clone()),
+                            undo.entries.len(),
+                            undo.last_seen_seq,
+                            undo.distance_from_save,
+                        ),
                         _ => (None, 0, 0, 0),
                     };
 
@@ -143,7 +143,7 @@ pub fn buffers_of(
 
                 // Replay persisted undo entries into the buffer
                 if let Some(undo) = undo_data {
-                    if undo.content_hash == content_hash {
+                    if undo.content_hash == content_hash.0 {
                         apply_undo_entries(&mut buf, &undo.entries);
                         // Override distance_from_save to match persisted value,
                         // since replay accumulates directions which may differ
@@ -152,9 +152,16 @@ pub fn buffers_of(
                     }
                 }
 
-                buf.set_cursor(cursor_row, cursor_col, cursor_col);
-                buf.set_scroll(scroll_row, scroll_sub_line);
-                buf.set_tab_order(tab_order);
+                buf.set_cursor(
+                    led_core::Row(cursor_row),
+                    led_core::Col(cursor_col),
+                    led_core::Col(cursor_col),
+                );
+                buf.set_scroll(
+                    led_core::Row(scroll_row),
+                    led_core::SubLine(scroll_sub_line),
+                );
+                buf.set_tab_order(led_core::TabOrder(tab_order));
                 if save_state == SaveState::Modified {
                     buf.mark_modified_if_dirty();
                 }
@@ -211,9 +218,7 @@ pub fn buffers_of(
                 // when a file was re-opened as a duplicate (ActivateBuffer
                 // instead of BufferOpen): the buffer keeps the original DocId
                 // but the docstore assigned a new one for the watcher.
-                let buf = find_buf_by_doc_id(&state, id).or_else(|| {
-                    state.buffers.get(&path)
-                });
+                let buf = find_buf_by_doc_id(&state, id).or_else(|| state.buffers.get(&path));
                 let buf = match buf {
                     Some(b) => b,
                     None => {
@@ -229,7 +234,8 @@ pub fn buffers_of(
                 let incoming_hash = doc.content_hash();
                 if incoming_hash == buf.content_hash() {
                     log::trace!(
-                        "ExternalChange: content_hash unchanged ({incoming_hash:#x}), skipping"
+                        "ExternalChange: content_hash unchanged ({:#x}), skipping",
+                        incoming_hash.0
                     );
                     if buf.is_dirty() && buf.save_state() == SaveState::Clean {
                         let mut buf = (**buf).clone();
@@ -247,8 +253,9 @@ pub fn buffers_of(
                     return None;
                 }
                 log::trace!(
-                    "ExternalChange: applying, hash {:#x} -> {incoming_hash:#x}",
-                    buf.content_hash()
+                    "ExternalChange: applying, hash {:#x} -> {:#x}",
+                    buf.content_hash().0,
+                    incoming_hash.0
                 );
                 let mut buf = (**buf).clone();
                 buf.reload_from_disk(doc);

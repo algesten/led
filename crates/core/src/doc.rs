@@ -5,11 +5,13 @@ use std::sync::Arc;
 use ropey::Rope;
 use serde::{Deserialize, Serialize};
 
+use crate::{CharOffset, ContentHash, Row};
+
 // ── Undo types ──
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct EditOp {
-    pub offset: usize,
+    pub offset: CharOffset,
     pub old_text: String,
     pub new_text: String,
 }
@@ -17,8 +19,8 @@ pub struct EditOp {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct UndoEntry {
     pub op: EditOp,
-    pub cursor_before: usize,
-    pub cursor_after: usize,
+    pub cursor_before: CharOffset,
+    pub cursor_after: CharOffset,
     /// 1 = forward edit, 0 = continuation (same group), -1 = undo inverse.
     pub direction: i32,
 }
@@ -26,7 +28,7 @@ pub struct UndoEntry {
 /// Accumulates rapid edits before they are flushed to the linear history.
 #[derive(Clone, Debug)]
 struct PendingEdit {
-    cursor_before: usize,
+    cursor_before: CharOffset,
     ops: Vec<EditOp>,
 }
 
@@ -63,9 +65,9 @@ impl Default for UndoHistory {
     }
 }
 
-fn compute_cursor_after(op: &EditOp) -> usize {
+fn compute_cursor_after(op: &EditOp) -> CharOffset {
     if !op.new_text.is_empty() {
-        op.offset + op.new_text.chars().count()
+        CharOffset(*op.offset + op.new_text.chars().count())
     } else {
         op.offset
     }
@@ -75,7 +77,7 @@ fn compute_cursor_after(op: &EditOp) -> usize {
 pub fn apply_op_to_doc(doc: &Arc<dyn Doc>, op: &EditOp) -> Arc<dyn Doc> {
     let mut d = doc.clone();
     if !op.old_text.is_empty() {
-        let end = op.offset + op.old_text.chars().count();
+        let end = CharOffset(*op.offset + op.old_text.chars().count());
         d = d.remove(op.offset, end);
     }
     if !op.new_text.is_empty() {
@@ -88,7 +90,7 @@ impl UndoHistory {
     /// Pre-create a pending group with the given cursor position.
     /// If a pending group already exists, this is a no-op.
     /// Subsequent `push_op` calls will join this group.
-    pub fn begin_group(&mut self, cursor_before: usize) {
+    pub fn begin_group(&mut self, cursor_before: CharOffset) {
         if self.undo_cursor.is_some() {
             self.flush_pending();
             self.undo_cursor = None;
@@ -101,7 +103,7 @@ impl UndoHistory {
 
     /// Append an op to pending (creates one if none exists).
     /// Any new edit breaks the undo chain.
-    pub fn push_op(&mut self, op: EditOp, cursor_before: usize) {
+    pub fn push_op(&mut self, op: EditOp, cursor_before: CharOffset) {
         if self.undo_cursor.is_some() {
             self.flush_pending();
             self.undo_cursor = None;
@@ -232,31 +234,31 @@ impl UndoHistory {
 pub trait Doc: Send + Sync {
     // Display
     fn line_count(&self) -> usize;
-    fn line(&self, idx: usize) -> String;
+    fn line(&self, idx: Row) -> String;
 
     // Coordinate conversion
-    fn line_to_char(&self, line_idx: usize) -> usize;
-    fn char_to_line(&self, char_idx: usize) -> usize;
-    fn line_len(&self, line_idx: usize) -> usize;
+    fn line_to_char(&self, line_idx: Row) -> CharOffset;
+    fn char_to_line(&self, char_idx: CharOffset) -> Row;
+    fn line_len(&self, line_idx: Row) -> usize;
 
     // Byte-level access (needed by tree-sitter)
     fn len_bytes(&self) -> usize;
-    fn line_to_byte(&self, line_idx: usize) -> usize;
-    fn byte_to_line(&self, byte_idx: usize) -> usize;
+    fn line_to_byte(&self, line_idx: Row) -> usize;
+    fn byte_to_line(&self, byte_idx: usize) -> Row;
     fn byte_to_char(&self, byte_idx: usize) -> usize;
     fn char_to_byte(&self, char_idx: usize) -> usize;
     /// Returns (chunk_str, chunk_byte_start) for the chunk containing `byte_offset`.
     fn chunk_at_byte(&self, byte_offset: usize) -> (&str, usize);
 
     // Identity
-    fn content_hash(&self) -> u64;
+    fn content_hash(&self) -> ContentHash;
 
     // Edits — pure rope mutations
-    fn insert(&self, char_idx: usize, text: &str) -> Arc<dyn Doc>;
-    fn remove(&self, start: usize, end: usize) -> Arc<dyn Doc>;
+    fn insert(&self, char_idx: CharOffset, text: &str) -> Arc<dyn Doc>;
+    fn remove(&self, start: CharOffset, end: CharOffset) -> Arc<dyn Doc>;
 
     // Text extraction
-    fn slice(&self, start: usize, end: usize) -> String;
+    fn slice(&self, start: CharOffset, end: CharOffset) -> String;
 
     // Persistence
     fn write_to(&self, writer: &mut dyn io::Write) -> io::Result<()>;
@@ -293,28 +295,28 @@ impl Doc for TextDoc {
         self.rope.len_lines()
     }
 
-    fn line(&self, idx: usize) -> String {
-        if idx >= self.rope.len_lines() {
+    fn line(&self, idx: Row) -> String {
+        if *idx >= self.rope.len_lines() {
             return String::new();
         }
-        let line = self.rope.line(idx);
+        let line = self.rope.line(*idx);
         let s = line.to_string();
         s.trim_end_matches(&['\n', '\r'][..]).to_string()
     }
 
-    fn line_to_char(&self, line_idx: usize) -> usize {
-        self.rope.line_to_char(line_idx)
+    fn line_to_char(&self, line_idx: Row) -> CharOffset {
+        CharOffset(self.rope.line_to_char(*line_idx))
     }
 
-    fn char_to_line(&self, char_idx: usize) -> usize {
-        self.rope.char_to_line(char_idx)
+    fn char_to_line(&self, char_idx: CharOffset) -> Row {
+        Row(self.rope.char_to_line(*char_idx))
     }
 
-    fn line_len(&self, line_idx: usize) -> usize {
-        if line_idx >= self.rope.len_lines() {
+    fn line_len(&self, line_idx: Row) -> usize {
+        if *line_idx >= self.rope.len_lines() {
             return 0;
         }
-        let line = self.rope.line(line_idx);
+        let line = self.rope.line(*line_idx);
         let mut n = line.len_chars();
         while n > 0 && matches!(line.char(n - 1), '\n' | '\r') {
             n -= 1;
@@ -326,12 +328,12 @@ impl Doc for TextDoc {
         self.rope.len_bytes()
     }
 
-    fn line_to_byte(&self, line_idx: usize) -> usize {
-        self.rope.line_to_byte(line_idx)
+    fn line_to_byte(&self, line_idx: Row) -> usize {
+        self.rope.line_to_byte(*line_idx)
     }
 
-    fn byte_to_line(&self, byte_idx: usize) -> usize {
-        self.rope.byte_to_line(byte_idx)
+    fn byte_to_line(&self, byte_idx: usize) -> Row {
+        Row(self.rope.byte_to_line(byte_idx))
     }
 
     fn byte_to_char(&self, byte_idx: usize) -> usize {
@@ -347,28 +349,28 @@ impl Doc for TextDoc {
         (chunk, chunk_byte_start)
     }
 
-    fn content_hash(&self) -> u64 {
+    fn content_hash(&self) -> ContentHash {
         let mut hasher = DefaultHasher::new();
         for chunk in self.rope.chunks() {
             hasher.write(chunk.as_bytes());
         }
-        hasher.finish()
+        ContentHash(hasher.finish())
     }
 
-    fn insert(&self, char_idx: usize, text: &str) -> Arc<dyn Doc> {
+    fn insert(&self, char_idx: CharOffset, text: &str) -> Arc<dyn Doc> {
         let mut rope = self.rope.clone();
-        rope.insert(char_idx, text);
+        rope.insert(*char_idx, text);
         Arc::new(TextDoc { rope })
     }
 
-    fn remove(&self, start: usize, end: usize) -> Arc<dyn Doc> {
+    fn remove(&self, start: CharOffset, end: CharOffset) -> Arc<dyn Doc> {
         let mut rope = self.rope.clone();
-        rope.remove(start..end);
+        rope.remove(*start..*end);
         Arc::new(TextDoc { rope })
     }
 
-    fn slice(&self, start: usize, end: usize) -> String {
-        self.rope.slice(start..end).to_string()
+    fn slice(&self, start: CharOffset, end: CharOffset) -> String {
+        self.rope.slice(*start..*end).to_string()
     }
 
     fn write_to(&self, writer: &mut dyn io::Write) -> io::Result<()> {

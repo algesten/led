@@ -142,7 +142,7 @@ impl Instance {
                                 format!(
                                 "chain_id={:?} dirty={} save={:?} persisted={} seq={} change_seq={} lines={}",
                                 b.chain_id(), b.is_dirty(), b.save_state(), b.persisted_undo_len(),
-                                b.last_seen_seq(), b.change_seq(), b.doc().line_count()
+                                b.last_seen_seq(), b.change_seq().0, b.doc().line_count()
                             )
                             });
                     format!(

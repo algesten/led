@@ -42,8 +42,8 @@ fn indent_done(s: &led_state::AppState) -> bool {
 fn open_file() {
     let t = TestHarness::new().with_file("hello\nworld\n").run(vec![]);
 
-    assert_eq!(buf(&t).doc().line(0), "hello");
-    assert_eq!(buf(&t).doc().line(1), "world");
+    assert_eq!(buf(&t).doc().line(led_core::Row(0)), "hello");
+    assert_eq!(buf(&t).doc().line(led_core::Row(1)), "world");
     assert_eq!(buf(&t).doc().line_count(), 3);
 }
 
@@ -52,7 +52,7 @@ fn open_empty_file() {
     let t = TestHarness::new().with_file("").run(vec![]);
 
     assert_eq!(buf(&t).doc().line_count(), 1);
-    assert_eq!(buf(&t).doc().line(0), "");
+    assert_eq!(buf(&t).doc().line(led_core::Row(0)), "");
 }
 
 #[test]
@@ -71,8 +71,8 @@ fn move_down() {
         .with_file("aaa\nbbb\nccc\n")
         .run(actions(vec![MoveDown, MoveDown]));
 
-    assert_eq!(buf(&t).cursor_row(), 2);
-    assert_eq!(buf(&t).cursor_col(), 0);
+    assert_eq!(buf(&t).cursor_row().0, 2);
+    assert_eq!(buf(&t).cursor_col().0, 0);
 }
 
 #[test]
@@ -81,7 +81,7 @@ fn move_up() {
         .with_file("aaa\nbbb\nccc\n")
         .run(actions(vec![MoveDown, MoveDown, MoveUp]));
 
-    assert_eq!(buf(&t).cursor_row(), 1);
+    assert_eq!(buf(&t).cursor_row().0, 1);
 }
 
 #[test]
@@ -90,8 +90,8 @@ fn move_right_and_left() {
         .with_file("hello\n")
         .run(actions(vec![MoveRight, MoveRight, MoveRight, MoveLeft]));
 
-    assert_eq!(buf(&t).cursor_row(), 0);
-    assert_eq!(buf(&t).cursor_col(), 2);
+    assert_eq!(buf(&t).cursor_row().0, 0);
+    assert_eq!(buf(&t).cursor_col().0, 2);
 }
 
 #[test]
@@ -100,8 +100,8 @@ fn move_up_at_top() {
         .with_file("hello\n")
         .run(actions(vec![MoveUp, MoveUp]));
 
-    assert_eq!(buf(&t).cursor_row(), 0);
-    assert_eq!(buf(&t).cursor_col(), 0);
+    assert_eq!(buf(&t).cursor_row().0, 0);
+    assert_eq!(buf(&t).cursor_col().0, 0);
 }
 
 #[test]
@@ -111,7 +111,7 @@ fn move_down_at_bottom() {
         .run(actions(vec![MoveDown, MoveDown, MoveDown]));
 
     let max_row = buf(&t).doc().line_count() - 1;
-    assert_eq!(buf(&t).cursor_row(), max_row);
+    assert_eq!(buf(&t).cursor_row().0, max_row);
 }
 
 #[test]
@@ -120,8 +120,8 @@ fn move_left_at_start() {
         .with_file("hello\n")
         .run(actions(vec![MoveLeft]));
 
-    assert_eq!(buf(&t).cursor_row(), 0);
-    assert_eq!(buf(&t).cursor_col(), 0);
+    assert_eq!(buf(&t).cursor_row().0, 0);
+    assert_eq!(buf(&t).cursor_col().0, 0);
 }
 
 // ── Movement: wrapping ──
@@ -132,8 +132,8 @@ fn move_right_wraps_to_next_line() {
         .with_file("ab\ncd\n")
         .run(actions(vec![MoveRight, MoveRight, MoveRight]));
 
-    assert_eq!(buf(&t).cursor_row(), 1);
-    assert_eq!(buf(&t).cursor_col(), 0);
+    assert_eq!(buf(&t).cursor_row().0, 1);
+    assert_eq!(buf(&t).cursor_col().0, 0);
 }
 
 #[test]
@@ -142,8 +142,8 @@ fn move_left_wraps_to_previous_line() {
         .with_file("ab\ncd\n")
         .run(actions(vec![MoveDown, MoveLeft]));
 
-    assert_eq!(buf(&t).cursor_row(), 0);
-    assert_eq!(buf(&t).cursor_col(), 2);
+    assert_eq!(buf(&t).cursor_row().0, 0);
+    assert_eq!(buf(&t).cursor_col().0, 2);
 }
 
 // ── Movement: line start/end ──
@@ -154,13 +154,13 @@ fn line_start_and_end() {
         .with_file("hello world\n")
         .run(actions(vec![MoveRight, MoveRight, MoveRight, LineStart]));
 
-    assert_eq!(buf(&t).cursor_col(), 0);
+    assert_eq!(buf(&t).cursor_col().0, 0);
 
     let t = TestHarness::new()
         .with_file("hello world\n")
         .run(actions(vec![LineEnd]));
 
-    assert_eq!(buf(&t).cursor_col(), 11);
+    assert_eq!(buf(&t).cursor_col().0, 11);
 }
 
 // ── Movement: file start/end ──
@@ -172,14 +172,14 @@ fn file_start_and_end() {
         .run(actions(vec![FileEnd]));
 
     let max_row = buf(&t).doc().line_count() - 1;
-    assert_eq!(buf(&t).cursor_row(), max_row);
+    assert_eq!(buf(&t).cursor_row().0, max_row);
 
     let t = TestHarness::new()
         .with_file("aaa\nbbb\nccc\n")
         .run(actions(vec![MoveDown, MoveDown, FileStart]));
 
-    assert_eq!(buf(&t).cursor_row(), 0);
-    assert_eq!(buf(&t).cursor_col(), 0);
+    assert_eq!(buf(&t).cursor_row().0, 0);
+    assert_eq!(buf(&t).cursor_col().0, 0);
 }
 
 // ── Movement: column affinity ──
@@ -190,8 +190,8 @@ fn column_affinity_preserved_across_short_line() {
         .with_file("hello\nhi\nworld\n")
         .run(actions(vec![LineEnd, MoveDown, MoveDown]));
 
-    assert_eq!(buf(&t).cursor_row(), 2);
-    assert_eq!(buf(&t).cursor_col(), 5);
+    assert_eq!(buf(&t).cursor_row().0, 2);
+    assert_eq!(buf(&t).cursor_col().0, 5);
 }
 
 // ── Movement: page up/down ──
@@ -208,14 +208,14 @@ fn page_down_and_up() {
         .with_file(&lines)
         .run(actions(vec![PageDown]));
 
-    assert!(buf(&t).cursor_row() > 0);
+    assert!(buf(&t).cursor_row().0 > 0);
 
     let t = TestHarness::new()
         .with_viewport(80, 24)
         .with_file(&lines)
         .run(actions(vec![PageDown, PageUp]));
 
-    assert_eq!(buf(&t).cursor_row(), 0);
+    assert_eq!(buf(&t).cursor_row().0, 0);
 }
 
 // ── Movement: scroll ──
@@ -232,7 +232,7 @@ fn scroll_follows_cursor() {
         .with_file(&lines)
         .run(actions(vec![PageDown]));
 
-    assert!(buf(&t).scroll_row() > 0, "scroll should have moved");
+    assert!(buf(&t).scroll_row().0 > 0, "scroll should have moved");
 }
 
 // ── Editing: insert ──
@@ -243,8 +243,8 @@ fn insert_chars() {
         .with_file("hello\n")
         .run(actions(vec![InsertChar('x'), InsertChar('y')]));
 
-    assert_eq!(buf(&t).doc().line(0), "xyhello");
-    assert_eq!(buf(&t).cursor_col(), 2);
+    assert_eq!(buf(&t).doc().line(led_core::Row(0)), "xyhello");
+    assert_eq!(buf(&t).cursor_col().0, 2);
 }
 
 #[test]
@@ -255,8 +255,8 @@ fn insert_in_middle() {
         InsertChar('X'),
     ]));
 
-    assert_eq!(buf(&t).doc().line(0), "heXllo");
-    assert_eq!(buf(&t).cursor_col(), 3);
+    assert_eq!(buf(&t).doc().line(led_core::Row(0)), "heXllo");
+    assert_eq!(buf(&t).cursor_col().0, 3);
 }
 
 #[test]
@@ -267,10 +267,10 @@ fn insert_newline() {
         InsertNewline,
     ]));
 
-    assert_eq!(buf(&t).doc().line(0), "he");
-    assert_eq!(buf(&t).doc().line(1), "llo");
-    assert_eq!(buf(&t).cursor_row(), 1);
-    assert_eq!(buf(&t).cursor_col(), 0);
+    assert_eq!(buf(&t).doc().line(led_core::Row(0)), "he");
+    assert_eq!(buf(&t).doc().line(led_core::Row(1)), "llo");
+    assert_eq!(buf(&t).cursor_row().0, 1);
+    assert_eq!(buf(&t).cursor_col().0, 0);
 }
 
 #[test]
@@ -280,8 +280,8 @@ fn insert_tab() {
         .with_file("hello\n")
         .run(vec![Do(InsertTab), WaitFor(indent_done)]);
 
-    assert_eq!(buf(&t).doc().line(0), "    hello");
-    assert_eq!(buf(&t).cursor_col(), 4);
+    assert_eq!(buf(&t).doc().line(led_core::Row(0)), "    hello");
+    assert_eq!(buf(&t).cursor_col().0, 4);
 }
 
 #[test]
@@ -293,7 +293,7 @@ fn insert_tab_alignment() {
         WaitFor(indent_done),
     ]);
 
-    assert_eq!(buf(&t).cursor_col(), 4);
+    assert_eq!(buf(&t).cursor_col().0, 4);
 }
 
 // ── Editing: delete backward ──
@@ -306,8 +306,8 @@ fn delete_backward() {
         DeleteBackward,
     ]));
 
-    assert_eq!(buf(&t).doc().line(0), "hllo");
-    assert_eq!(buf(&t).cursor_col(), 1);
+    assert_eq!(buf(&t).doc().line(led_core::Row(0)), "hllo");
+    assert_eq!(buf(&t).cursor_col().0, 1);
 }
 
 #[test]
@@ -316,8 +316,8 @@ fn delete_backward_at_start_does_nothing() {
         .with_file("hello\n")
         .run(actions(vec![DeleteBackward]));
 
-    assert_eq!(buf(&t).doc().line(0), "hello");
-    assert_eq!(buf(&t).cursor_col(), 0);
+    assert_eq!(buf(&t).doc().line(led_core::Row(0)), "hello");
+    assert_eq!(buf(&t).cursor_col().0, 0);
 }
 
 #[test]
@@ -326,9 +326,9 @@ fn delete_backward_joins_lines() {
         .with_file("hello\nworld\n")
         .run(actions(vec![MoveDown, DeleteBackward]));
 
-    assert_eq!(buf(&t).doc().line(0), "helloworld");
-    assert_eq!(buf(&t).cursor_row(), 0);
-    assert_eq!(buf(&t).cursor_col(), 5);
+    assert_eq!(buf(&t).doc().line(led_core::Row(0)), "helloworld");
+    assert_eq!(buf(&t).cursor_row().0, 0);
+    assert_eq!(buf(&t).cursor_col().0, 5);
 }
 
 // ── Editing: delete forward ──
@@ -339,8 +339,8 @@ fn delete_forward() {
         .with_file("hello\n")
         .run(actions(vec![DeleteForward]));
 
-    assert_eq!(buf(&t).doc().line(0), "ello");
-    assert_eq!(buf(&t).cursor_col(), 0);
+    assert_eq!(buf(&t).doc().line(led_core::Row(0)), "ello");
+    assert_eq!(buf(&t).cursor_col().0, 0);
 }
 
 #[test]
@@ -349,8 +349,8 @@ fn delete_forward_joins_lines() {
         .with_file("hello\nworld\n")
         .run(actions(vec![LineEnd, DeleteForward]));
 
-    assert_eq!(buf(&t).doc().line(0), "helloworld");
-    assert_eq!(buf(&t).cursor_row(), 0);
+    assert_eq!(buf(&t).doc().line(led_core::Row(0)), "helloworld");
+    assert_eq!(buf(&t).cursor_row().0, 0);
 }
 
 // ── Editing: kill line ──
@@ -361,8 +361,8 @@ fn kill_line_deletes_to_end() {
         .with_file("hello world\n")
         .run(actions(vec![MoveRight, MoveRight, KillLine]));
 
-    assert_eq!(buf(&t).doc().line(0), "he");
-    assert_eq!(buf(&t).cursor_col(), 2);
+    assert_eq!(buf(&t).doc().line(led_core::Row(0)), "he");
+    assert_eq!(buf(&t).cursor_col().0, 2);
 }
 
 #[test]
@@ -371,7 +371,7 @@ fn kill_line_at_end_joins_next() {
         .with_file("hello\nworld\n")
         .run(actions(vec![LineEnd, KillLine]));
 
-    assert_eq!(buf(&t).doc().line(0), "helloworld");
+    assert_eq!(buf(&t).doc().line(led_core::Row(0)), "helloworld");
 }
 
 #[test]
@@ -381,8 +381,8 @@ fn kill_line_multibyte_char() {
         .with_file("a — b\nsecond\n")
         .run(actions(vec![KillLine]));
 
-    assert_eq!(buf(&t).doc().line(0), "");
-    assert_eq!(buf(&t).doc().line(1), "second");
+    assert_eq!(buf(&t).doc().line(led_core::Row(0)), "");
+    assert_eq!(buf(&t).doc().line(led_core::Row(1)), "second");
     assert_eq!(buf(&t).doc().line_count(), 3); // empty + second + trailing
 }
 
@@ -396,7 +396,7 @@ fn undo_reverts_insert_group() {
         Undo,
     ]));
 
-    assert_eq!(buf(&t).doc().line(0), "hello");
+    assert_eq!(buf(&t).doc().line(led_core::Row(0)), "hello");
 }
 
 #[test]
@@ -408,7 +408,7 @@ fn undo_then_redo() {
         Redo,
     ]));
 
-    assert_eq!(buf(&t).doc().line(0), "xyhello");
+    assert_eq!(buf(&t).doc().line(led_core::Row(0)), "xyhello");
 }
 
 #[test]
@@ -422,7 +422,7 @@ fn undo_groups_split_on_movement() {
         Undo, // only reverts "cd"
     ]));
 
-    assert_eq!(buf(&t).doc().line(0), "abhello");
+    assert_eq!(buf(&t).doc().line(led_core::Row(0)), "abhello");
 }
 
 #[test]
@@ -435,7 +435,7 @@ fn undo_groups_split_on_word_boundary() {
         Undo, // reverts " c" (space + c are in the same group)
     ]));
 
-    assert_eq!(buf(&t).doc().line(0), "ab");
+    assert_eq!(buf(&t).doc().line(led_core::Row(0)), "ab");
 }
 
 #[test]
@@ -448,7 +448,7 @@ fn redo_cleared_by_new_edit() {
         Redo,            // redoes 'b' (original 'a' redo is gone)
     ]));
 
-    assert_eq!(buf(&t).doc().line(0), "bhello");
+    assert_eq!(buf(&t).doc().line(led_core::Row(0)), "bhello");
 }
 
 #[test]
@@ -464,7 +464,7 @@ fn multiple_undo() {
         Undo, // reverts 'a'
     ]));
 
-    assert_eq!(buf(&t).doc().line(0), "hello");
+    assert_eq!(buf(&t).doc().line(led_core::Row(0)), "hello");
 }
 
 #[test]
@@ -477,7 +477,11 @@ fn undo_all_clears_dirty() {
         Do(Undo),
     ]);
 
-    assert_eq!(buf(&t).doc().line(0), "hello", "content should be restored");
+    assert_eq!(
+        buf(&t).doc().line(led_core::Row(0)),
+        "hello",
+        "content should be restored"
+    );
     assert!(
         !buf(&t).is_dirty(),
         "undoing back to saved state should clear dirty"
@@ -490,7 +494,7 @@ fn undo_nothing_is_noop() {
         .with_file("hello\n")
         .run(actions(vec![Undo]));
 
-    assert_eq!(buf(&t).doc().line(0), "hello");
+    assert_eq!(buf(&t).doc().line(led_core::Row(0)), "hello");
 }
 
 #[test]
@@ -499,7 +503,7 @@ fn redo_nothing_is_noop() {
         .with_file("hello\n")
         .run(actions(vec![Redo]));
 
-    assert_eq!(buf(&t).doc().line(0), "hello");
+    assert_eq!(buf(&t).doc().line(led_core::Row(0)), "hello");
 }
 
 /// Full Emacs undo chain test:
@@ -551,9 +555,21 @@ fn emacs_undo_undo_restores_original() {
     let t = TestHarness::new().with_file("").run(steps);
 
     let b = buf(&t);
-    assert_eq!(b.doc().line(0), "1", "first line should be '1'");
-    assert_eq!(b.doc().line(1), "2", "second line should be '2'");
-    assert_eq!(b.doc().line(2), "3", "third line should be '3'");
+    assert_eq!(
+        b.doc().line(led_core::Row(0)),
+        "1",
+        "first line should be '1'"
+    );
+    assert_eq!(
+        b.doc().line(led_core::Row(1)),
+        "2",
+        "second line should be '2'"
+    );
+    assert_eq!(
+        b.doc().line(led_core::Row(2)),
+        "3",
+        "third line should be '3'"
+    );
     assert_eq!(
         b.doc().line_count(),
         4,
@@ -721,7 +737,7 @@ fn next_tab_cycles_through_buffers() {
     // Last opened file should be active
     assert_eq!(t.state.buffers.len(), 3);
     let active = buf(&t);
-    assert_eq!(active.doc().line(0), "c");
+    assert_eq!(active.doc().line(led_core::Row(0)), "c");
 
     // NextTab wraps to first
     let t = TestHarness::new()
@@ -732,7 +748,7 @@ fn next_tab_cycles_through_buffers() {
 
     let active = buf(&t);
     assert_eq!(
-        active.doc().line(0),
+        active.doc().line(led_core::Row(0)),
         "a",
         "NextTab from last should wrap to first"
     );
@@ -748,7 +764,7 @@ fn prev_tab_cycles_backwards() {
 
     let active = buf(&t);
     assert_eq!(
-        active.doc().line(0),
+        active.doc().line(led_core::Row(0)),
         "b",
         "PrevTab from last should go to middle"
     );
@@ -765,7 +781,7 @@ fn tab_cycle_roundtrip() {
 
     let active = buf(&t);
     assert_eq!(
-        active.doc().line(0),
+        active.doc().line(led_core::Row(0)),
         "c",
         "3 NextTabs in 3-tab set should cycle back"
     );
@@ -785,7 +801,7 @@ fn kill_buffer_activates_next() {
     assert_eq!(t.state.buffers.len(), 2);
     let active = buf(&t);
     assert_eq!(
-        active.doc().line(0),
+        active.doc().line(led_core::Row(0)),
         "c",
         "killing middle tab should activate next"
     );
@@ -897,7 +913,7 @@ fn move_down_in_main_moves_cursor_not_browser() {
     ]);
 
     assert_eq!(
-        buf(&t).cursor_row(),
+        buf(&t).cursor_row().0,
         1,
         "MoveDown in Main should move editor cursor"
     );
@@ -1140,8 +1156,8 @@ fn wrap_move_down_through_wrapped_line() {
         .run(actions(vec![MoveDown]));
 
     // First MoveDown should move to the second sub-line of the first logical line
-    assert_eq!(buf(&t).cursor_row(), 0, "still on first logical line");
-    assert!(buf(&t).cursor_col() >= 9, "should be on second sub-line");
+    assert_eq!(buf(&t).cursor_row().0, 0, "still on first logical line");
+    assert!(buf(&t).cursor_col().0 >= 9, "should be on second sub-line");
 }
 
 #[test]
@@ -1152,7 +1168,11 @@ fn wrap_move_down_crosses_to_next_line() {
         .with_file("abcdefghijklmno\nshort\n")
         .run(actions(vec![MoveDown, MoveDown]));
 
-    assert_eq!(buf(&t).cursor_row(), 1, "should be on second logical line");
+    assert_eq!(
+        buf(&t).cursor_row().0,
+        1,
+        "should be on second logical line"
+    );
 }
 
 #[test]
@@ -1163,8 +1183,8 @@ fn wrap_move_up_through_wrapped_line() {
         .with_file("abcdefghijklmno\nshort\n")
         .run(actions(vec![MoveDown, MoveDown, MoveUp]));
 
-    assert_eq!(buf(&t).cursor_row(), 0, "back on first logical line");
-    assert!(buf(&t).cursor_col() >= 9, "on last sub-line");
+    assert_eq!(buf(&t).cursor_row().0, 0, "back on first logical line");
+    assert!(buf(&t).cursor_col().0 >= 9, "on last sub-line");
 }
 
 #[test]
@@ -1188,7 +1208,7 @@ fn wrap_scroll_sub_line() {
 
     // After many MoveDowns through a 100-char wrapped line, scroll should have adjusted
     assert!(
-        buf(&t).scroll_row() > 0 || buf(&t).scroll_sub_line() > 0,
+        buf(&t).scroll_row().0 > 0 || buf(&t).scroll_sub_line().0 > 0,
         "scroll should have moved for wrapped content"
     );
 }
@@ -1211,17 +1231,21 @@ fn wrap_move_up_not_stuck_at_chunk_boundary() {
                 s.active_buffer
                     .as_ref()
                     .and_then(|path| s.buffers.get(path))
-                    .map_or(false, |b| b.doc().line_len(0) >= 25)
+                    .map_or(false, |b| b.doc().line_len(led_core::Row(0)) >= 25)
             }),
             Do(MoveUp),
         ]);
 
-    assert_eq!(buf(&t).cursor_row(), 0, "should stay on first logical line");
+    assert_eq!(
+        buf(&t).cursor_row().0,
+        0,
+        "should stay on first logical line"
+    );
     // After yank cursor is at col=25 (sub-line 2). One MoveUp → sub-line 1.
     assert!(
-        buf(&t).cursor_col() >= 9 && buf(&t).cursor_col() < 18,
+        buf(&t).cursor_col().0 >= 9 && buf(&t).cursor_col().0 < 18,
         "should be on sub-line 1 (col in [9,18)), got col={}",
-        buf(&t).cursor_col()
+        buf(&t).cursor_col().0
     );
 }
 
@@ -1242,18 +1266,22 @@ fn wrap_move_down_no_skip_at_chunk_boundary() {
                 s.active_buffer
                     .as_ref()
                     .and_then(|path| s.buffers.get(path))
-                    .map_or(false, |b| b.doc().line_len(0) >= 25)
+                    .map_or(false, |b| b.doc().line_len(led_core::Row(0)) >= 25)
             }),
             Do(MoveUp),
             Do(MoveUp),
             Do(MoveDown),
         ]);
 
-    assert_eq!(buf(&t).cursor_row(), 0, "should stay on first logical line");
+    assert_eq!(
+        buf(&t).cursor_row().0,
+        0,
+        "should stay on first logical line"
+    );
     assert!(
-        buf(&t).cursor_col() >= 9 && buf(&t).cursor_col() < 18,
+        buf(&t).cursor_col().0 >= 9 && buf(&t).cursor_col().0 < 18,
         "should be on sub-line 1 (col in [9,18)), got col={}",
-        buf(&t).cursor_col()
+        buf(&t).cursor_col().0
     );
 }
 
@@ -1340,7 +1368,7 @@ fn session_restore_tab_order_with_arg_repeated() {
                     .unwrap()
                     .to_string_lossy()
                     .into_owned();
-                (name, b.tab_order())
+                (name, b.tab_order().0)
             })
             .collect();
         v.sort_by_key(|(_, o)| *o);
@@ -1368,7 +1396,7 @@ fn session_restore_tab_order_with_arg_repeated() {
                     .unwrap()
                     .to_string_lossy()
                     .into_owned();
-                (name, b.tab_order())
+                (name, b.tab_order().0)
             })
             .collect();
         v.sort_by_key(|(_, o)| *o);
@@ -1403,7 +1431,7 @@ fn session_restore_tab_order_with_arg_repeated() {
                     .unwrap()
                     .to_string_lossy()
                     .into_owned();
-                (name, b.tab_order())
+                (name, b.tab_order().0)
             })
             .collect();
         v.sort_by_key(|(_, o)| *o);
@@ -1438,7 +1466,7 @@ fn session_restore_tab_order() {
                     .unwrap()
                     .to_string_lossy()
                     .into_owned();
-                (name, b.tab_order())
+                (name, b.tab_order().0)
             })
             .collect();
         v.sort_by_key(|(_, o)| *o);
@@ -1462,7 +1490,7 @@ fn session_restore_tab_order() {
                 .unwrap()
                 .to_string_lossy()
                 .into_owned();
-            (name, b.tab_order())
+            (name, b.tab_order().0)
         })
         .collect();
     restored.sort_by_key(|(_, o)| *o);
@@ -1649,7 +1677,7 @@ fn session_restore_cursor() {
             WaitFor(|s| s.session.saved),
         ]);
 
-    assert_eq!(buf(&t).cursor_row(), 3);
+    assert_eq!(buf(&t).cursor_row().0, 3);
     let dir = t.dirs.root.clone();
 
     // Run 2: restore — cursor should be at row 3
@@ -1657,7 +1685,7 @@ fn session_restore_cursor() {
 
     let ap = t2.state.active_buffer.as_ref().unwrap();
     let b = &t2.state.buffers[ap];
-    assert_eq!(b.cursor_row(), 3, "cursor row should be restored");
+    assert_eq!(b.cursor_row().0, 3, "cursor row should be restored");
 }
 
 #[test]
@@ -1778,7 +1806,7 @@ fn save_format_is_undoable() {
     ]);
 
     // After undo, trailing whitespace should be back
-    let line = buf(&t).doc().line(0);
+    let line = buf(&t).doc().line(led_core::Row(0));
     assert_eq!(line, "hello   ", "undo should restore trailing whitespace");
 }
 
@@ -1805,7 +1833,7 @@ fn undo_persist_and_restore() {
 
     // Run 2: restore — undo should work and revert the edits
     let t2 = TestHarness::with_dir(dir).run(vec![WaitFor(|s| !s.buffers.is_empty()), Do(Undo)]);
-    let line = buf(&t2).doc().line(0);
+    let line = buf(&t2).doc().line(led_core::Row(0));
     assert_eq!(line, "hello", "undo should revert persisted edits");
 }
 
@@ -1985,7 +2013,7 @@ fn external_editor_second_save_detected() {
     std::fs::rename(&tmp, &file_path).unwrap();
 
     inst.wait_for(
-        |s| active_buf(s).is_some_and(|b| b.doc().line(0) == "first"),
+        |s| active_buf(s).is_some_and(|b| b.doc().line(led_core::Row(0)) == "first"),
         WAIT,
         "first external save detected",
     );
@@ -1996,7 +2024,7 @@ fn external_editor_second_save_detected() {
     std::fs::rename(&tmp, &file_path).unwrap();
 
     inst.wait_for(
-        |s| active_buf(s).is_some_and(|b| b.doc().line(0) == "second"),
+        |s| active_buf(s).is_some_and(|b| b.doc().line(led_core::Row(0)) == "second"),
         WAIT,
         "second external save detected",
     );
@@ -2031,7 +2059,7 @@ fn external_editor_second_direct_write_detected() {
     std::fs::write(&file_path, "first\n").unwrap();
 
     inst.wait_for(
-        |s| active_buf(s).is_some_and(|b| b.doc().line(0) == "first"),
+        |s| active_buf(s).is_some_and(|b| b.doc().line(led_core::Row(0)) == "first"),
         WAIT,
         "first external save detected",
     );
@@ -2044,7 +2072,7 @@ fn external_editor_second_direct_write_detected() {
     std::fs::write(&file_path, "second\n").unwrap();
 
     inst.wait_for(
-        |s| active_buf(s).is_some_and(|b| b.doc().line(0) == "second"),
+        |s| active_buf(s).is_some_and(|b| b.doc().line(led_core::Row(0)) == "second"),
         WAIT,
         "second external save detected",
     );
@@ -2103,12 +2131,12 @@ fn simulate_external_edit(
 fn make_insert_entry(offset: usize, text: &str) -> UndoEntry {
     UndoEntry {
         op: EditOp {
-            offset,
+            offset: led_core::CharOffset(offset),
             old_text: String::new(),
             new_text: text.to_string(),
         },
-        cursor_before: offset,
-        cursor_after: offset + text.chars().count(),
+        cursor_before: led_core::CharOffset(offset),
+        cursor_after: led_core::CharOffset(offset + text.chars().count()),
         direction: 1,
     }
 }
@@ -2159,10 +2187,10 @@ fn cross_instance_sync_insert_newline() {
         ]);
 
     let b = buf(&t);
-    assert_eq!(b.doc().line(0), "aaa");
-    assert_eq!(b.doc().line(1), ""); // the inserted newline
-    assert_eq!(b.doc().line(2), "bbb");
-    assert_eq!(b.doc().line(3), "ccc");
+    assert_eq!(b.doc().line(led_core::Row(0)), "aaa");
+    assert_eq!(b.doc().line(led_core::Row(1)), ""); // the inserted newline
+    assert_eq!(b.doc().line(led_core::Row(2)), "bbb");
+    assert_eq!(b.doc().line(led_core::Row(3)), "ccc");
     assert_eq!(
         b.doc().line_count(),
         5,
@@ -2212,13 +2240,13 @@ fn cross_instance_sync_multiple_edits() {
                 s.active_buffer
                     .as_ref()
                     .and_then(|path| s.buffers.get(path))
-                    .is_some_and(|b| b.doc().line(0).contains("XYZ"))
+                    .is_some_and(|b| b.doc().line(led_core::Row(0)).contains("XYZ"))
             }),
         ]);
 
     let b = buf(&t);
     assert_eq!(
-        b.doc().line(0),
+        b.doc().line(led_core::Row(0)),
         "XYZhello",
         "all three edits should be replayed"
     );
@@ -2263,7 +2291,7 @@ fn cross_instance_sync_after_save() {
                 s.active_buffer
                     .as_ref()
                     .and_then(|path| s.buffers.get(path))
-                    .is_some_and(|b| b.doc().line(0).starts_with("X"))
+                    .is_some_and(|b| b.doc().line(led_core::Row(0)).starts_with("X"))
             }),
             // Now simulate B saving: write new content to disk and clear undo in DB
             TestStep::RunFn(Box::new(|dirs| {
@@ -2445,13 +2473,13 @@ fn two_instance_sync_after_save() {
     let a_lines: Vec<String> = a.with_state(|s| {
         let buf = active_buf(s).unwrap();
         (0..buf.doc().line_count())
-            .map(|i| buf.doc().line(i).to_string())
+            .map(|i| buf.doc().line(led_core::Row(i)).to_string())
             .collect()
     });
     let b_lines: Vec<String> = b.with_state(|s| {
         let buf = active_buf(s).unwrap();
         (0..buf.doc().line_count())
-            .map(|i| buf.doc().line(i).to_string())
+            .map(|i| buf.doc().line(led_core::Row(i)).to_string())
             .collect()
     });
     for (i, (a_line, b_line)) in a_lines.iter().zip(b_lines.iter()).enumerate() {
@@ -2535,13 +2563,13 @@ fn two_instance_second_edit_syncs_without_save() {
     let a_lines: Vec<String> = a.with_state(|s| {
         let buf = active_buf(s).unwrap();
         (0..buf.doc().line_count())
-            .map(|i| buf.doc().line(i).to_string())
+            .map(|i| buf.doc().line(led_core::Row(i)).to_string())
             .collect()
     });
     let b_lines: Vec<String> = b.with_state(|s| {
         let buf = active_buf(s).unwrap();
         (0..buf.doc().line_count())
-            .map(|i| buf.doc().line(i).to_string())
+            .map(|i| buf.doc().line(led_core::Row(i)).to_string())
             .collect()
     });
     for (i, (a_line, b_line)) in a_lines.iter().zip(b_lines.iter()).enumerate() {
@@ -2610,13 +2638,13 @@ fn two_instance_remote_save_clears_dirty() {
     let a_lines: Vec<String> = a.with_state(|s| {
         let buf = active_buf(s).unwrap();
         (0..buf.doc().line_count())
-            .map(|i| buf.doc().line(i).to_string())
+            .map(|i| buf.doc().line(led_core::Row(i)).to_string())
             .collect()
     });
     let b_lines: Vec<String> = b.with_state(|s| {
         let buf = active_buf(s).unwrap();
         (0..buf.doc().line_count())
-            .map(|i| buf.doc().line(i).to_string())
+            .map(|i| buf.doc().line(led_core::Row(i)).to_string())
             .collect()
     });
     for (i, (a_line, b_line)) in a_lines.iter().zip(b_lines.iter()).enumerate() {
@@ -2797,13 +2825,13 @@ fn two_instance_undo_syncs_and_clears_dirty() {
     let a_lines: Vec<String> = a.with_state(|s| {
         let buf = active_buf(s).unwrap();
         (0..buf.doc().line_count())
-            .map(|i| buf.doc().line(i).to_string())
+            .map(|i| buf.doc().line(led_core::Row(i)).to_string())
             .collect()
     });
     let b_lines: Vec<String> = b.with_state(|s| {
         let buf = active_buf(s).unwrap();
         (0..buf.doc().line_count())
-            .map(|i| buf.doc().line(i).to_string())
+            .map(|i| buf.doc().line(led_core::Row(i)).to_string())
             .collect()
     });
     for (i, (a_line, b_line)) in a_lines.iter().zip(b_lines.iter()).enumerate() {
@@ -2822,7 +2850,7 @@ fn set_mark_sets_mark() {
         .with_file("aaa\nbbb\n")
         .run(actions(vec![SetMark]));
 
-    assert_eq!(buf(&t).mark(), Some((0, 0)));
+    assert_eq!(buf(&t).mark(), Some((led_core::Row(0), led_core::Col(0))));
 }
 
 #[test]
@@ -2831,8 +2859,8 @@ fn mark_persists_on_movement() {
         .with_file("aaa\nbbb\n")
         .run(actions(vec![SetMark, MoveDown]));
 
-    assert_eq!(buf(&t).mark(), Some((0, 0)));
-    assert_eq!(buf(&t).cursor_row(), 1);
+    assert_eq!(buf(&t).mark(), Some((led_core::Row(0), led_core::Col(0))));
+    assert_eq!(buf(&t).cursor_row().0, 1);
 }
 
 #[test]
@@ -2850,9 +2878,9 @@ fn kill_region_deletes_selection() {
         .with_file("aaa\nbbb\n")
         .run(actions(vec![SetMark, MoveDown, KillRegion]));
 
-    assert_eq!(buf(&t).doc().line(0), "bbb");
-    assert_eq!(buf(&t).cursor_row(), 0);
-    assert_eq!(buf(&t).cursor_col(), 0);
+    assert_eq!(buf(&t).doc().line(led_core::Row(0)), "bbb");
+    assert_eq!(buf(&t).cursor_row().0, 0);
+    assert_eq!(buf(&t).cursor_col().0, 0);
     assert!(buf(&t).mark().is_none());
     assert_eq!(t.state.kill_ring.content, "aaa\n");
 }
@@ -2872,8 +2900,8 @@ fn yank_inserts_killed_text() {
         .with_file("aaa\nbbb\n")
         .run(actions(vec![SetMark, MoveDown, KillRegion, Yank]));
 
-    assert_eq!(buf(&t).doc().line(0), "aaa");
-    assert_eq!(buf(&t).doc().line(1), "bbb");
+    assert_eq!(buf(&t).doc().line(led_core::Row(0)), "aaa");
+    assert_eq!(buf(&t).doc().line(led_core::Row(1)), "bbb");
 }
 
 #[test]
@@ -2910,8 +2938,8 @@ fn search_opens_and_finds() {
     let is = b.isearch.as_ref().expect("isearch should be active");
     assert_eq!(is.query, "he");
     assert_eq!(is.matches.len(), 2);
-    assert_eq!(b.cursor_row(), 0);
-    assert_eq!(b.cursor_col(), 0);
+    assert_eq!(b.cursor_row().0, 0);
+    assert_eq!(b.cursor_col().0, 0);
 }
 
 #[test]
@@ -2927,8 +2955,8 @@ fn search_next_advances() {
         ]));
 
     let b = buf(&t);
-    assert_eq!(b.cursor_row(), 1);
-    assert_eq!(b.cursor_col(), 0);
+    assert_eq!(b.cursor_row().0, 1);
+    assert_eq!(b.cursor_col().0, 0);
 }
 
 #[test]
@@ -2944,8 +2972,8 @@ fn search_cancel_restores_cursor() {
 
     let b = buf(&t);
     assert!(b.isearch.is_none(), "isearch should be cleared");
-    assert_eq!(b.cursor_row(), 1);
-    assert_eq!(b.cursor_col(), 0);
+    assert_eq!(b.cursor_row().0, 1);
+    assert_eq!(b.cursor_col().0, 0);
 }
 
 #[test]
@@ -2960,8 +2988,8 @@ fn search_accept_keeps_position() {
 
     let b = buf(&t);
     assert!(b.isearch.is_none(), "isearch should be cleared");
-    assert_eq!(b.cursor_row(), 1);
-    assert_eq!(b.cursor_col(), 0);
+    assert_eq!(b.cursor_row().0, 1);
+    assert_eq!(b.cursor_col().0, 0);
 }
 
 #[test]
@@ -2987,8 +3015,8 @@ fn search_wraps_on_failed() {
     let b = buf(&t);
     let is = b.isearch.as_ref().expect("isearch should be active");
     assert!(!is.failed, "should not be failed after wrap");
-    assert_eq!(b.cursor_row(), 0);
-    assert_eq!(b.cursor_col(), 0);
+    assert_eq!(b.cursor_row().0, 0);
+    assert_eq!(b.cursor_col().0, 0);
 }
 
 #[test]
@@ -3053,8 +3081,8 @@ fn jump_back_restores_position() {
         ]));
 
     let b = buf(&t);
-    assert_eq!(b.cursor_row(), 0, "JumpBack should restore row");
-    assert_eq!(b.cursor_col(), 0, "JumpBack should restore col");
+    assert_eq!(b.cursor_row().0, 0, "JumpBack should restore row");
+    assert_eq!(b.cursor_col().0, 0, "JumpBack should restore col");
 }
 
 #[test]
@@ -3071,8 +3099,8 @@ fn jump_forward_after_back() {
         ]));
 
     let b = buf(&t);
-    assert_eq!(b.cursor_row(), 2, "JumpForward should go to (2,0)");
-    assert_eq!(b.cursor_col(), 0);
+    assert_eq!(b.cursor_row().0, 2, "JumpForward should go to (2,0)");
+    assert_eq!(b.cursor_col().0, 0);
 }
 
 #[test]
@@ -3085,10 +3113,11 @@ fn jump_back_at_empty_list() {
 
     let b = buf(&t);
     assert_eq!(
-        b.cursor_row(), 1,
+        b.cursor_row().0,
+        1,
         "JumpBack with empty list should not move cursor"
     );
-    assert_eq!(b.cursor_col(), 0);
+    assert_eq!(b.cursor_col().0, 0);
 }
 
 #[test]
@@ -3106,8 +3135,12 @@ fn jump_forward_at_end() {
         ]));
 
     let b = buf(&t);
-    assert_eq!(b.cursor_row(), 2, "JumpForward at end should not move cursor");
-    assert_eq!(b.cursor_col(), 0);
+    assert_eq!(
+        b.cursor_row().0,
+        2,
+        "JumpForward at end should not move cursor"
+    );
+    assert_eq!(b.cursor_col().0, 0);
 }
 
 #[test]
@@ -3128,17 +3161,12 @@ fn jump_back_cross_buffer() {
 
     let b = buf(&t);
     assert_eq!(
-        b.path_buf()
-            .unwrap()
-            .file_name()
-            .unwrap()
-            .to_str()
-            .unwrap(),
+        b.path_buf().unwrap().file_name().unwrap().to_str().unwrap(),
         "aaa.txt",
         "JumpBack should switch to the correct buffer"
     );
-    assert_eq!(b.cursor_row(), 0);
-    assert_eq!(b.cursor_col(), 0);
+    assert_eq!(b.cursor_row().0, 0);
+    assert_eq!(b.cursor_col().0, 0);
 }
 
 #[test]
@@ -3160,10 +3188,11 @@ fn jump_truncates_forward_history() {
 
     let b = buf(&t);
     assert_eq!(
-        b.cursor_row(), 3,
+        b.cursor_row().0,
+        3,
         "Forward history should have been truncated"
     );
-    assert_eq!(b.cursor_col(), 0);
+    assert_eq!(b.cursor_col().0, 0);
 }
 
 // ── Syntax highlighting tests ──
@@ -3179,7 +3208,7 @@ fn syntax_highlights_rust_file() {
     // After the syntax driver processes, highlights should be populated
     // (The driver runs asynchronously, so we wait)
     // At minimum the buffer should exist and have the right content
-    assert_eq!(b.doc().line(0), "fn main() {");
+    assert_eq!(b.doc().line(led_core::Row(0)), "fn main() {");
 }
 
 #[test]
@@ -3205,7 +3234,11 @@ fn kill_line_keeps_highlights_in_sync() {
         // Now line 0 should be "fn bbb() {}"
         // Wait for syntax to catch up
         WaitFor(|s| {
-            let b = s.active_buffer.as_ref().and_then(|path| s.buffers.get(path)).unwrap();
+            let b = s
+                .active_buffer
+                .as_ref()
+                .and_then(|path| s.buffers.get(path))
+                .unwrap();
             // Highlights should contain a span for the current doc's content.
             // "fn" keyword should be highlighted on line 0 (bbb) after kills.
             b.syntax_highlights()
@@ -3215,7 +3248,7 @@ fn kill_line_keeps_highlights_in_sync() {
     ]);
 
     let b = buf(&t);
-    assert_eq!(b.doc().line(0), "fn bbb() {}");
+    assert_eq!(b.doc().line(led_core::Row(0)), "fn bbb() {}");
 
     // All highlight lines must be within document bounds
     let line_count = b.doc().line_count();
@@ -3271,7 +3304,11 @@ fn kill_line_long_file_highlights_recover() {
         // Wait for highlights: line 0 must have a comment capture,
         // NOT a keyword capture (which would indicate stale cache).
         WaitFor(|s| {
-            let b = s.active_buffer.as_ref().and_then(|path| s.buffers.get(path)).unwrap();
+            let b = s
+                .active_buffer
+                .as_ref()
+                .and_then(|path| s.buffers.get(path))
+                .unwrap();
             b.syntax_highlights()
                 .iter()
                 .any(|(line, span)| *line == 0 && span.capture_name.contains("comment"))
@@ -3279,7 +3316,7 @@ fn kill_line_long_file_highlights_recover() {
     ]);
 
     let b = buf(&t);
-    assert_eq!(b.doc().line(0), "// this is a comment");
+    assert_eq!(b.doc().line(led_core::Row(0)), "// this is a comment");
 
     // Line 0 must have comment highlight, not keyword
     let has_comment = b
@@ -3339,7 +3376,11 @@ More text
         // Wait for syntax highlights to update for the new doc version.
         // The doc version after 3 kills is initial + 3 (at minimum).
         WaitFor(|s| {
-            let b = s.active_buffer.as_ref().and_then(|path| s.buffers.get(path)).unwrap();
+            let b = s
+                .active_buffer
+                .as_ref()
+                .and_then(|path| s.buffers.get(path))
+                .unwrap();
             let lc = b.doc().line_count();
             // Highlights must be non-empty and fully within bounds
             !b.syntax_highlights().is_empty()
@@ -3348,7 +3389,7 @@ More text
     ]);
 
     let b = buf(&t);
-    assert_eq!(b.doc().line(2), "Some text");
+    assert_eq!(b.doc().line(led_core::Row(2)), "Some text");
 
     // All highlight line numbers must be within doc bounds
     let lc = b.doc().line_count();
@@ -3386,8 +3427,8 @@ fn match_bracket_jumps() {
 
     let b = buf(&t);
     // Should jump to the matching `}`
-    assert_eq!(b.cursor_row(), 2, "should jump to closing brace row");
-    assert_eq!(b.cursor_col(), 0, "should jump to closing brace col");
+    assert_eq!(b.cursor_row().0, 2, "should jump to closing brace row");
+    assert_eq!(b.cursor_col().0, 0, "should jump to closing brace col");
 }
 
 #[test]
@@ -3413,8 +3454,8 @@ fn match_bracket_reverse() {
         ]);
 
     let b = buf(&t);
-    assert_eq!(b.cursor_row(), 0, "should jump to opening brace row");
-    assert_eq!(b.cursor_col(), 7, "should jump to opening brace col");
+    assert_eq!(b.cursor_row().0, 0, "should jump to opening brace row");
+    assert_eq!(b.cursor_col().0, 7, "should jump to opening brace col");
 }
 
 #[test]
@@ -3429,8 +3470,8 @@ fn match_bracket_no_bracket() {
         ]));
 
     let b = buf(&t);
-    assert_eq!(b.cursor_row(), 0);
-    assert_eq!(b.cursor_col(), 0, "cursor should not move");
+    assert_eq!(b.cursor_row().0, 0);
+    assert_eq!(b.cursor_col().0, 0, "cursor should not move");
 }
 
 #[test]
@@ -3445,14 +3486,14 @@ fn auto_indent_after_brace() {
         ]);
 
     let b = buf(&t);
-    assert_eq!(b.cursor_row(), 1);
+    assert_eq!(b.cursor_row().0, 1);
     assert!(
-        b.cursor_col() >= 2,
+        b.cursor_col().0 >= 2,
         "cursor should be indented after '{{', got col {}",
-        b.cursor_col()
+        b.cursor_col().0
     );
     // Verify the indent text was actually inserted
-    let line = b.doc().line(1);
+    let line = b.doc().line(led_core::Row(1));
     assert!(
         line.starts_with("    ") || line.starts_with('\t'),
         "new line should be indented: {:?}",
@@ -3477,7 +3518,7 @@ fn auto_indent_closing_brace() {
         ]);
 
     let b = buf(&t);
-    let line = b.doc().line(2);
+    let line = b.doc().line(led_core::Row(2));
     // The closing brace should be dedented to match "fn main() {"
     assert!(
         !line.starts_with("    }"),
@@ -3499,8 +3540,16 @@ fn sort_imports_reorders() {
 
     let b = buf(&t);
     // After sorting, a::A should come before z::Z
-    assert_eq!(b.doc().line(0), "use a::A;", "first import should be a::A");
-    assert_eq!(b.doc().line(1), "use z::Z;", "second import should be z::Z");
+    assert_eq!(
+        b.doc().line(led_core::Row(0)),
+        "use a::A;",
+        "first import should be a::A"
+    );
+    assert_eq!(
+        b.doc().line(led_core::Row(1)),
+        "use z::Z;",
+        "second import should be z::Z"
+    );
 }
 
 #[test]
@@ -3555,7 +3604,7 @@ fn close_bracket_reindents_with_syntax() {
         ]);
 
     let b = buf(&t);
-    let line = b.doc().line(1);
+    let line = b.doc().line(led_core::Row(1));
     // The brace should be present on line 1
     assert!(
         line.contains('}'),
@@ -4023,15 +4072,17 @@ fn lsp_format() {
                 s.active_buffer
                     .as_ref()
                     .and_then(|path| s.buffers.get(path))
-                    .map_or(false, |b| b.doc().line(0).starts_with("fn main()"))
+                    .map_or(false, |b| {
+                        b.doc().line(led_core::Row(0)).starts_with("fn main()")
+                    })
             }),
         ]);
 
     let b = buf(&t);
     assert!(
-        b.doc().line(0).starts_with("fn main()"),
+        b.doc().line(led_core::Row(0)).starts_with("fn main()"),
         "expected formatted first line, got: {:?}",
-        b.doc().line(0)
+        b.doc().line(led_core::Row(0))
     );
 }
 
@@ -4064,13 +4115,14 @@ fn lsp_goto_definition() {
                 s.active_buffer
                     .as_ref()
                     .and_then(|path| s.buffers.get(path))
-                    .map_or(false, |b| b.cursor_row() == 0)
+                    .map_or(false, |b| b.cursor_row().0 == 0)
             }),
         ]);
 
     let b = buf(&t);
     assert_eq!(
-        b.cursor_row(), 0,
+        b.cursor_row().0,
+        0,
         "expected cursor on definition line (fn greet)"
     );
 }
@@ -4113,9 +4165,9 @@ fn lsp_next_prev_diagnostic() {
 
     let b = buf(&t);
     assert!(
-        b.cursor_row() >= 1,
+        b.cursor_row().0 >= 1,
         "expected cursor to move to a diagnostic, row={}",
-        b.cursor_row()
+        b.cursor_row().0
     );
 }
 
@@ -4196,20 +4248,20 @@ fn lsp_rename_submit() {
                 s.active_buffer
                     .as_ref()
                     .and_then(|path| s.buffers.get(path))
-                    .map_or(false, |b| b.doc().line(1).contains("world"))
+                    .map_or(false, |b| b.doc().line(led_core::Row(1)).contains("world"))
             }),
         ]);
 
     let b = buf(&t);
     assert!(
-        b.doc().line(1).contains("world"),
+        b.doc().line(led_core::Row(1)).contains("world"),
         "expected 'hello' renamed to 'world' on line 1, got: {:?}",
-        b.doc().line(1)
+        b.doc().line(led_core::Row(1))
     );
     assert!(
-        b.doc().line(3).contains("world"),
+        b.doc().line(led_core::Row(3)).contains("world"),
         "expected 'hello' renamed to 'world' on line 3, got: {:?}",
-        b.doc().line(3)
+        b.doc().line(led_core::Row(3))
     );
 }
 
@@ -4448,16 +4500,16 @@ fn lsp_completion_accept_moves_cursor() {
         ]);
 
     let b = buf(&t);
-    let line = b.doc().line(2);
+    let line = b.doc().line(led_core::Row(2));
     assert!(
         line.len() > 3,
         "expected completion text on line 2, got: {:?}",
         line
     );
     assert!(
-        b.cursor_col() > 3,
+        b.cursor_col().0 > 3,
         "expected cursor after inserted text, got col={}",
-        b.cursor_col()
+        b.cursor_col().0
     );
 }
 
@@ -4546,16 +4598,16 @@ fn lsp_format_on_save() {
                     .and_then(|path| s.buffers.get(path))
                     .map_or(false, |b| {
                         b.save_state() == led_state::SaveState::Clean
-                            && b.doc().line(0).starts_with("fn main()")
+                            && b.doc().line(led_core::Row(0)).starts_with("fn main()")
                     })
             }),
         ]);
 
     let b = buf(&t);
     assert!(
-        b.doc().line(0).starts_with("fn main()"),
+        b.doc().line(led_core::Row(0)).starts_with("fn main()"),
         "expected formatted, got: {:?}",
-        b.doc().line(0)
+        b.doc().line(led_core::Row(0))
     );
     assert_eq!(b.save_state(), led_state::SaveState::Clean);
 }
@@ -4574,7 +4626,7 @@ fn tab_names_sorted(state: &led_state::AppState) -> Vec<String> {
                 .unwrap()
                 .to_string_lossy()
                 .into_owned();
-            (name, b.tab_order())
+            (name, b.tab_order().0)
         })
         .collect();
     tabs.sort_by_key(|(_, o)| *o);
@@ -4593,7 +4645,7 @@ fn multi_file_tab_order_and_activation() {
 
     // Last file should be active
     let active = buf(&t);
-    assert_eq!(active.doc().line(0), "ccc");
+    assert_eq!(active.doc().line(led_core::Row(0)), "ccc");
 
     // Tab order should follow arg order
     assert_eq!(
@@ -4623,7 +4675,7 @@ fn multi_file_session_last_arg_active() {
 
     let active = buf(&t2);
     assert_eq!(
-        active.doc().line(0),
+        active.doc().line(led_core::Row(0)),
         "ccc",
         "last arg file (c.txt) should be active"
     );
@@ -4858,8 +4910,8 @@ fn file_search_replace_single_in_buffer() {
             Do(MoveRight), // replace first match
         ]);
     let b = buf(&t);
-    assert_eq!(b.doc().line(0), "xxx");
-    assert_eq!(b.doc().line(2), "aaa");
+    assert_eq!(b.doc().line(led_core::Row(0)), "xxx");
+    assert_eq!(b.doc().line(led_core::Row(2)), "aaa");
     assert_eq!(b.save_state(), SaveState::Modified);
 }
 
@@ -4882,7 +4934,7 @@ fn file_search_unreplace_single() {
             Do(MoveLeft),  // unreplace
         ]);
     let b = buf(&t);
-    assert_eq!(b.doc().line(0), "aaa");
+    assert_eq!(b.doc().line(led_core::Row(0)), "aaa");
 }
 
 #[test]
@@ -4903,8 +4955,8 @@ fn file_search_replace_all() {
         ]);
     assert!(t.state.file_search.is_none());
     let b = buf(&t);
-    assert_eq!(b.doc().line(0), "z");
-    assert_eq!(b.doc().line(2), "z");
+    assert_eq!(b.doc().line(led_core::Row(0)), "z");
+    assert_eq!(b.doc().line(led_core::Row(2)), "z");
 }
 
 #[test]
@@ -4926,8 +4978,8 @@ fn file_search_replace_all_then_undo() {
             Do(Undo),       // one undo should revert ALL replacements
         ]);
     let b = buf(&t);
-    assert_eq!(b.doc().line(0), "aaa");
-    assert_eq!(b.doc().line(2), "aaa");
+    assert_eq!(b.doc().line(led_core::Row(0)), "aaa");
+    assert_eq!(b.doc().line(led_core::Row(2)), "aaa");
 }
 
 #[test]
@@ -4952,8 +5004,8 @@ fn file_search_replace_undo_chain() {
             Do(Undo),      // undo second replace
         ]);
     let b = buf(&t);
-    assert_eq!(b.doc().line(0), "z"); // first replace still applied
-    assert_eq!(b.doc().line(2), "aaa"); // second was undone
+    assert_eq!(b.doc().line(led_core::Row(0)), "z"); // first replace still applied
+    assert_eq!(b.doc().line(led_core::Row(2)), "aaa"); // second was undone
 }
 
 #[test]
@@ -4969,7 +5021,7 @@ fn file_search_no_replace_mode_arrows_noop() {
             Do(MoveRight), // no-op, replace mode off
         ]);
     let b = buf(&t);
-    assert_eq!(b.doc().line(0), "hello");
+    assert_eq!(b.doc().line(led_core::Row(0)), "hello");
 }
 
 #[test]
@@ -5001,7 +5053,7 @@ fn file_search_replace_all_multi_file() {
         .filter(|b| {
             b.path_buf()
                 .is_some_and(|p| p.ends_with("a.txt") || p.ends_with("b.txt"))
-                && b.doc().line(0) == "bye"
+                && b.doc().line(led_core::Row(0)) == "bye"
         })
         .count();
     assert_eq!(modified_count, 2, "both buffers should be modified");
@@ -5019,7 +5071,7 @@ fn kbd_macro_record_and_playback() {
         KbdMacroExecute,
     ]));
     let b = buf(&t);
-    assert_eq!(b.doc().line(0), "xyxyhello");
+    assert_eq!(b.doc().line(led_core::Row(0)), "xyxyhello");
 }
 
 #[test]
@@ -5034,7 +5086,7 @@ fn kbd_macro_playback_multiple() {
     ]));
     let b = buf(&t);
     // 'a' inserted during recording + 3 playbacks = "aaaa"
-    assert_eq!(b.doc().line(0), "aaaahello");
+    assert_eq!(b.doc().line(led_core::Row(0)), "aaaahello");
 }
 
 #[test]
@@ -5091,5 +5143,5 @@ fn kbd_macro_restart_during_recording() {
     let b = buf(&t);
     // "xy" was typed during first recording (executed live), then restart,
     // "z" typed during second recording, then playback inserts another "z"
-    assert_eq!(b.doc().line(0), "xyzzhello");
+    assert_eq!(b.doc().line(led_core::Row(0)), "xyzzhello");
 }

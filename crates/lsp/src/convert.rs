@@ -70,7 +70,7 @@ pub(crate) fn doc_line(doc: &dyn Doc, row: usize) -> Option<String> {
     if row >= doc.line_count() {
         return None;
     }
-    let line = doc.line(row);
+    let line = doc.line(led_core::Row(row));
     Some(
         line.trim_end_matches('\n')
             .trim_end_matches('\r')

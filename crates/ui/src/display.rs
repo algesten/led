@@ -3,10 +3,10 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 
+use led_core::Doc;
 use led_core::PanelSlot;
 use led_core::git::{self, FileStatus, LineStatus};
 use led_core::wrap::{chars_to_string, compute_chunks, expand_tabs, find_sub_line};
-use led_core::Doc;
 use led_state::{AppState, BracketPair, Dimensions, EntryKind, HighlightSpan};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
@@ -106,9 +106,9 @@ pub fn display_inputs(s: &AppState) -> Option<DisplayInputs> {
     let selection = buf.mark().map(|(mr, mc)| {
         let (cr, cc) = (buf.cursor_row(), buf.cursor_col());
         if (mr, mc) <= (cr, cc) {
-            ((mr, mc), (cr, cc))
+            ((mr.0, mc.0), (cr.0, cc.0))
         } else {
-            ((cr, cc), (mr, mc))
+            ((cr.0, cc.0), (mr.0, mc.0))
         }
     });
 
@@ -172,8 +172,8 @@ pub fn display_inputs(s: &AppState) -> Option<DisplayInputs> {
     Some(DisplayInputs {
         buffer_path: buf.path_buf().cloned(),
         doc: buf.doc().clone(),
-        scroll_row: buf.scroll_row(),
-        scroll_sub_line: buf.scroll_sub_line(),
+        scroll_row: buf.scroll_row().0,
+        scroll_sub_line: buf.scroll_sub_line().0,
         text_width: dims.text_width(),
         buffer_height: dims.buffer_height(),
         gutter_style: style::resolve(theme, &theme.editor.gutter),
@@ -190,12 +190,12 @@ pub fn display_inputs(s: &AppState) -> Option<DisplayInputs> {
         bracket_pairs: buf.bracket_pairs().clone(),
         matching_bracket: BracketPair::find_match(
             buf.bracket_pairs(),
-            buf.cursor_row(),
-            buf.cursor_col(),
+            buf.cursor_row().0,
+            buf.cursor_col().0,
         ),
-        cursor_row: buf.cursor_row(),
-        cursor_col: buf.cursor_col(),
-        content_hash: buf.content_hash(),
+        cursor_row: buf.cursor_row().0,
+        cursor_col: buf.cursor_col().0,
+        content_hash: buf.content_hash().0,
         syntax_styles: style::resolve_syntax_map(theme_arc),
         bracket_match_style: style::resolve(theme, &theme.brackets.match_),
         rainbow_styles: [
@@ -231,7 +231,7 @@ pub fn build_display_lines(d: &DisplayInputs) -> Rc<Vec<Line<'static>>> {
     let mut skip_sub_lines = d.scroll_sub_line;
 
     while screen_row < d.buffer_height && line_idx < line_count {
-        let line = d.doc.line(line_idx);
+        let line = d.doc.line(led_core::Row(line_idx));
         let (display, char_map) = expand_tabs(&line);
         let chunks = compute_chunks(display.len(), d.text_width);
 
@@ -590,10 +590,10 @@ pub fn cursor_inputs(s: &AppState) -> Option<CursorInputs> {
     Some(CursorInputs {
         buffer_path: buf.path_buf().cloned(),
         doc: buf.doc().clone(),
-        cursor_row: buf.cursor_row(),
-        cursor_col: buf.cursor_col(),
-        scroll_row: buf.scroll_row(),
-        scroll_sub_line: buf.scroll_sub_line(),
+        cursor_row: buf.cursor_row().0,
+        cursor_col: buf.cursor_col().0,
+        scroll_row: buf.scroll_row().0,
+        scroll_sub_line: buf.scroll_sub_line().0,
         text_width: dims.text_width(),
         gutter_width: dims.gutter_width,
     })
@@ -601,7 +601,7 @@ pub fn cursor_inputs(s: &AppState) -> Option<CursorInputs> {
 
 /// Returns cursor position relative to buffer area: (x_offset, y_offset).
 pub fn compute_cursor_pos(c: &CursorInputs) -> Option<(u16, u16)> {
-    let line = c.doc.line(c.cursor_row);
+    let line = c.doc.line(led_core::Row(c.cursor_row));
     let (display, char_map) = expand_tabs(&line);
     let cursor_dcol = char_map
         .get(c.cursor_col)
@@ -618,7 +618,7 @@ pub fn compute_cursor_pos(c: &CursorInputs) -> Option<(u16, u16)> {
     let mut skip_sub_lines = c.scroll_sub_line;
 
     while line_idx < line_count {
-        let l = c.doc.line(line_idx);
+        let l = c.doc.line(led_core::Row(line_idx));
         let (disp, _) = expand_tabs(&l);
         let ch = compute_chunks(disp.len(), c.text_width);
 
@@ -673,7 +673,12 @@ pub fn status_inputs(s: &AppState) -> StatusInputs {
                 .and_then(|p| p.file_name())
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            (fname, buf.is_dirty(), buf.cursor_row(), buf.cursor_col())
+            (
+                fname,
+                buf.is_dirty(),
+                buf.cursor_row().0,
+                buf.cursor_col().0,
+            )
         })
         .unwrap_or_default();
 
@@ -837,12 +842,16 @@ pub fn overlay_inputs(s: &AppState) -> OverlayContent {
         Some(d) => d,
         None => return OverlayContent::None,
     };
-    let (cursor_x, cursor_y) = match s.active_buffer.as_ref().and_then(|path| s.buffers.get(path)) {
+    let (cursor_x, cursor_y) = match s
+        .active_buffer
+        .as_ref()
+        .and_then(|path| s.buffers.get(path))
+    {
         Some(buf) => {
             let x = dims.side_width()
                 + dims.gutter_width
-                + (buf.cursor_col() as u16).min(dims.text_width() as u16);
-            let y = buf.cursor_row().saturating_sub(buf.scroll_row()) as u16;
+                + (buf.cursor_col().0 as u16).min(dims.text_width() as u16);
+            let y = buf.cursor_row().0.saturating_sub(buf.scroll_row().0) as u16;
             (x, y)
         }
         None => return OverlayContent::None,

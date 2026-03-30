@@ -72,11 +72,11 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
                 .filter(|b| !b.is_preview())
                 .map(|b| SessionBuffer {
                     file_path: b.path_buf().cloned().unwrap(),
-                    tab_order: b.tab_order(),
-                    cursor_row: b.cursor_row(),
-                    cursor_col: b.cursor_col(),
-                    scroll_row: b.scroll_row(),
-                    scroll_sub_line: b.scroll_sub_line(),
+                    tab_order: b.tab_order().0,
+                    cursor_row: b.cursor_row().0,
+                    cursor_col: b.cursor_col().0,
+                    scroll_row: b.scroll_row().0,
+                    scroll_sub_line: b.scroll_sub_line().0,
                     undo: None,
                 })
                 .collect();
@@ -85,7 +85,7 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
                 .active_buffer
                 .as_ref()
                 .and_then(|path| s.buffers.get(path))
-                .map(|b| b.tab_order())
+                .map(|b| b.tab_order().0)
                 .unwrap_or(0);
 
             WorkspaceOut::SaveSession {
@@ -177,7 +177,7 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
             let base = s
                 .buffers
                 .values()
-                .map(|b| b.tab_order())
+                .map(|b| b.tab_order().0)
                 .max()
                 .map_or(0, |m| m + 1);
             s.startup
@@ -219,7 +219,12 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
         .filter(|s| s.pending_replace_opens.version() > 0)
         .filter(|s| !s.pending_replace_opens.is_empty())
         .map(|s| {
-            let max_tab = s.buffers.values().map(|b| b.tab_order()).max().unwrap_or(0);
+            let max_tab = s
+                .buffers
+                .values()
+                .map(|b| b.tab_order().0)
+                .max()
+                .unwrap_or(0);
             (*s.pending_replace_opens)
                 .iter()
                 .enumerate()
@@ -242,7 +247,7 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
             tab_order: s
                 .buffers
                 .values()
-                .map(|b| b.tab_order())
+                .map(|b| b.tab_order().0)
                 .max()
                 .map_or(0, |m| m + 1),
             create_if_missing: true,
@@ -270,7 +275,11 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
         .map(|s| {
             s.buffers
                 .values()
-                .filter(|b| b.is_loaded() && b.save_state() == led_state::SaveState::Saving && b.path().is_some())
+                .filter(|b| {
+                    b.is_loaded()
+                        && b.save_state() == led_state::SaveState::Saving
+                        && b.path().is_some()
+                })
                 .map(|b| DocStoreOut::Save {
                     id: b.doc_id(),
                     doc: b.doc().clone(),
@@ -312,7 +321,7 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
                 tab_order: s
                     .buffers
                     .values()
-                    .map(|b| b.tab_order())
+                    .map(|b| b.tab_order().0)
                     .max()
                     .map_or(0, |m| m + 1),
                 create_if_missing: false,
@@ -458,19 +467,18 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
     // vertical movement; cursor_col excluded so horizontal movement
     // within a line skips syntax entirely — bracket match updates
     // on next vertical move or edit.
-    let syntax_key =
-        |s: &Rc<AppState>| -> (Option<(u64, usize, usize, Option<usize>)>, usize) {
-            let buf_info = s.active_buffer.as_ref().and_then(|path| {
-                let buf = s.buffers.get(path)?;
-                Some((
-                    buf.version(),
-                    buf.scroll_row(),
-                    buf.cursor_row(),
-                    buf.pending_indent_row(),
-                ))
-            });
-            (buf_info, s.buffers.len())
-        };
+    let syntax_key = |s: &Rc<AppState>| -> (Option<(u64, usize, usize, Option<usize>)>, usize) {
+        let buf_info = s.active_buffer.as_ref().and_then(|path| {
+            let buf = s.buffers.get(path)?;
+            Some((
+                buf.version().0,
+                buf.scroll_row().0,
+                buf.cursor_row().0,
+                buf.pending_indent_row(),
+            ))
+        });
+        (buf_info, s.buffers.len())
+    };
 
     let known_bufs: Rc<RefCell<HashSet<PathBuf>>> = Rc::new(RefCell::new(HashSet::new()));
     let known_bufs2 = known_bufs.clone();
@@ -486,12 +494,12 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
             Some(SyntaxOut::BufferChanged {
                 path,
                 doc: buf.doc().clone(),
-                version: buf.version(),
+                version: buf.version().0,
                 edit_ops: buf.pending_edit_ops(),
-                scroll_row: buf.scroll_row(),
+                scroll_row: buf.scroll_row().0,
                 buffer_height,
-                cursor_row: buf.cursor_row(),
-                cursor_col: buf.cursor_col(),
+                cursor_row: buf.cursor_row().0,
+                cursor_col: buf.cursor_col().0,
                 indent_row: buf.pending_indent_row(),
             })
         })
@@ -502,7 +510,9 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
         .dedupe_by(loaded_buf_paths)
         .map(move |s| {
             let mut known = known_bufs2.borrow_mut();
-            let current: HashSet<PathBuf> = s.buffers.values()
+            let current: HashSet<PathBuf> = s
+                .buffers
+                .values()
                 .filter(|b| b.is_loaded())
                 .filter_map(|b| b.path_buf().cloned())
                 .collect();
@@ -532,7 +542,7 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
             Some(SyntaxOut::Reparse {
                 path,
                 doc: buf.doc().clone(),
-                version: buf.version(),
+                version: buf.version().0,
             })
         })
         .stream();
@@ -694,7 +704,7 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
         .dedupe_by(|s| {
             s.active_buffer.as_ref().and_then(|path| {
                 let buf = s.buffers.get(path)?;
-                Some((path.clone(), buf.version()))
+                Some((path.clone(), buf.version().0))
             })
         })
         .filter(|s| s.active_buffer.is_some())
@@ -722,7 +732,7 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
             let path = buf.path_buf().cloned()?;
             Some(LspOut::BufferSaved {
                 path,
-                content_hash: buf.doc().content_hash(),
+                content_hash: buf.doc().content_hash().0,
             })
         })
         .stream();
@@ -735,7 +745,7 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
             }
             s.active_buffer.as_ref().and_then(|path| {
                 let buf = s.buffers.get(path)?;
-                Some((path.clone(), buf.scroll_row() / 5, buf.version()))
+                Some((path.clone(), buf.scroll_row().0 / 5, buf.version().0))
             })
         })
         .filter(|s| s.lsp.inlay_hints_enabled)
@@ -744,7 +754,7 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
             let active_path = s.active_buffer.as_ref()?;
             let buf = s.buffers.get(active_path)?;
             let path = buf.path_buf().cloned()?;
-            let start_row = buf.scroll_row();
+            let start_row = buf.scroll_row().0;
             let buffer_height = s.dims.map_or(50, |d| d.buffer_height());
             let end_row = start_row + buffer_height + 10;
             Some(LspOut::InlayHints {
@@ -765,13 +775,14 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
             let active_path = s.active_buffer.as_ref()?;
             let buf = s.buffers.get(active_path)?;
             let path = buf.path_buf().cloned()?;
-            let row = buf.cursor_row();
-            let col = buf.cursor_col();
+            let row = buf.cursor_row().0;
+            let col = buf.cursor_col().0;
             match req {
                 LspRequest::GotoDefinition => Some(LspOut::GotoDefinition { path, row, col }),
                 LspRequest::Format => Some(LspOut::Format { path }),
                 LspRequest::CodeAction => {
-                    let (end_row, end_col) = buf.mark().unwrap_or((row, col));
+                    let (end_row, end_col) =
+                        buf.mark().map(|(r, c)| (r.0, c.0)).unwrap_or((row, col));
                     let (sr, sc, er, ec) = if (row, col) <= (end_row, end_col) {
                         (row, col, end_row, end_col)
                     } else {

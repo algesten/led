@@ -24,7 +24,11 @@ pub(super) fn handle_isearch_action(state: &mut AppState, action: &Action) -> bo
                 };
                 if empty {
                     let origin = buf.isearch.as_ref().unwrap().origin;
-                    buf.set_cursor(origin.0, origin.1, origin.1);
+                    buf.set_cursor(
+                        led_core::Row(origin.0),
+                        led_core::Col(origin.1),
+                        led_core::Col(origin.1),
+                    );
                     let is = buf.isearch.as_mut().unwrap();
                     is.matches.clear();
                     is.match_idx = None;
@@ -53,7 +57,7 @@ pub(super) fn handle_isearch_action(state: &mut AppState, action: &Action) -> bo
                 if let Some(buf) = state.buffers.get(path) {
                     if let (Some(is), Some(path)) = (&buf.isearch, buf.path_buf()) {
                         let cursor_moved =
-                            buf.cursor_row() != is.origin.0 || buf.cursor_col() != is.origin.1;
+                            buf.cursor_row().0 != is.origin.0 || buf.cursor_col().0 != is.origin.1;
                         if cursor_moved {
                             let pos = JumpPosition {
                                 path: path.clone(),

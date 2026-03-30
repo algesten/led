@@ -1,4 +1,4 @@
-use led_core::Doc;
+use led_core::{CharOffset, Doc};
 use tree_sitter::{QueryCursor, StreamingIterator, Tree};
 
 use crate::config::ImportsConfig;
@@ -85,8 +85,8 @@ pub fn sort_imports_text(
     }
 
     // Check if already sorted
-    let original_start_char = doc.byte_to_char(overall_start);
-    let original_end_char = doc.byte_to_char(overall_end);
+    let original_start_char = CharOffset(doc.byte_to_char(overall_start));
+    let original_end_char = CharOffset(doc.byte_to_char(overall_end));
     let original = doc.slice(original_start_char, original_end_char);
     if result.trim_end_matches('\n') == original.trim_end_matches('\n') {
         return None;

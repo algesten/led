@@ -1,7 +1,7 @@
-use led_core::Doc;
 use led_core::wrap::{
     compute_chunks, display_col_to_char_idx, expand_tabs, find_sub_line, visual_line_count,
 };
+use led_core::{Doc, DocVersion, Row};
 
 use led_state::{AppState, BufferState, Dimensions};
 
@@ -13,38 +13,48 @@ pub fn adjust_scroll(buf: &BufferState, dims: &Dimensions) -> (usize, usize) {
     let height = dims.buffer_height();
 
     if height == 0 || text_width == 0 {
-        return (buf.scroll_row(), buf.scroll_sub_line());
+        return (buf.scroll_row().0, buf.scroll_sub_line().0);
     }
 
     let margin = dims.scroll_margin.min(height / 2);
     let total = buf.doc().line_count();
 
     // Clamp scroll to valid range
-    let mut sr = buf.scroll_row();
-    let mut ssl = buf.scroll_sub_line();
+    let mut sr = buf.scroll_row().0;
+    let mut ssl = buf.scroll_sub_line().0;
     if sr >= total {
         sr = total.saturating_sub(1);
         ssl = 0;
     }
-    let scroll_vl = visual_line_count(expand_tabs(&buf.doc().line(sr)).0.len(), text_width);
+    let scroll_vl = visual_line_count(expand_tabs(&buf.doc().line(Row(sr))).0.len(), text_width);
     if ssl >= scroll_vl {
         ssl = scroll_vl.saturating_sub(1);
     }
 
     // Compute cursor's sub-line within its logical line
-    let (cursor_sub, _cursor_vrow_count) =
-        cursor_visual_position(&**buf.doc(), buf.cursor_row(), buf.cursor_col(), text_width);
+    let (cursor_sub, _cursor_vrow_count) = cursor_visual_position(
+        &**buf.doc(),
+        buf.cursor_row().0,
+        buf.cursor_col().0,
+        text_width,
+    );
 
     // Compute cursor's visual row relative to scroll position
-    let cursor_vrow =
-        compute_cursor_vrow(&**buf.doc(), buf.cursor_row(), cursor_sub, sr, ssl, text_width);
+    let cursor_vrow = compute_cursor_vrow(
+        &**buf.doc(),
+        buf.cursor_row().0,
+        cursor_sub,
+        sr,
+        ssl,
+        text_width,
+    );
 
     // Case 1: cursor too close to top — scroll up
     if let Some(vrow) = cursor_vrow {
         if vrow < margin {
             return scroll_to_place_cursor_at_vrow(
                 &**buf.doc(),
-                buf.cursor_row(),
+                buf.cursor_row().0,
                 cursor_sub,
                 margin,
                 text_width,
@@ -55,7 +65,7 @@ pub fn adjust_scroll(buf: &BufferState, dims: &Dimensions) -> (usize, usize) {
             let target_vrow = height.saturating_sub(margin + 1);
             return scroll_to_place_cursor_at_vrow(
                 &**buf.doc(),
-                buf.cursor_row(),
+                buf.cursor_row().0,
                 cursor_sub,
                 target_vrow,
                 text_width,
@@ -66,11 +76,11 @@ pub fn adjust_scroll(buf: &BufferState, dims: &Dimensions) -> (usize, usize) {
     }
 
     // Cursor is not in the visible range at all
-    if buf.cursor_row() < sr || (buf.cursor_row() == sr && cursor_sub < ssl) {
+    if buf.cursor_row().0 < sr || (buf.cursor_row().0 == sr && cursor_sub < ssl) {
         // Cursor above viewport — place at margin from top
         return scroll_to_place_cursor_at_vrow(
             &**buf.doc(),
-            buf.cursor_row(),
+            buf.cursor_row().0,
             cursor_sub,
             margin,
             text_width,
@@ -81,7 +91,7 @@ pub fn adjust_scroll(buf: &BufferState, dims: &Dimensions) -> (usize, usize) {
     let target_vrow = height.saturating_sub(margin + 1);
     scroll_to_place_cursor_at_vrow(
         &**buf.doc(),
-        buf.cursor_row(),
+        buf.cursor_row().0,
         cursor_sub,
         target_vrow,
         text_width,
@@ -109,12 +119,12 @@ fn compute_cursor_vrow(
     }
 
     // First logical line: only count sub-lines from scroll_sub_line onward
-    let scroll_vl = visual_line_count(expand_tabs(&doc.line(sr)).0.len(), text_width);
+    let scroll_vl = visual_line_count(expand_tabs(&doc.line(Row(sr))).0.len(), text_width);
     vrow += scroll_vl - ssl;
 
     // Intermediate lines
     for li in (sr + 1)..cursor_row {
-        vrow += visual_line_count(expand_tabs(&doc.line(li)).0.len(), text_width);
+        vrow += visual_line_count(expand_tabs(&doc.line(Row(li))).0.len(), text_width);
         if vrow > 10000 {
             return None; // Don't scan too far
         }
@@ -148,7 +158,7 @@ fn scroll_to_place_cursor_at_vrow(
         if remaining == 0 {
             break;
         }
-        let vl = visual_line_count(expand_tabs(&doc.line(li)).0.len(), text_width);
+        let vl = visual_line_count(expand_tabs(&doc.line(Row(li))).0.len(), text_width);
         if vl <= remaining {
             remaining -= vl;
             new_scroll = li;
@@ -169,7 +179,7 @@ fn cursor_visual_position(
     cursor_col: usize,
     text_width: usize,
 ) -> (usize, usize) {
-    let (cursor_display, cursor_cm) = expand_tabs(&doc.line(cursor_row));
+    let (cursor_display, cursor_cm) = expand_tabs(&doc.line(Row(cursor_row)));
     let cursor_dc = cursor_cm
         .get(cursor_col)
         .copied()
@@ -184,7 +194,7 @@ fn cursor_visual_position(
 
 /// Compute the visual column (display column within current sub-line chunk).
 fn visual_col_of(doc: &dyn Doc, row: usize, col: usize, text_width: usize) -> usize {
-    let (display, char_map) = expand_tabs(&doc.line(row));
+    let (display, char_map) = expand_tabs(&doc.line(Row(row)));
     let dcol = char_map
         .get(col)
         .copied()
@@ -196,7 +206,12 @@ fn visual_col_of(doc: &dyn Doc, row: usize, col: usize, text_width: usize) -> us
 
 /// Reset affinity to current visual column.
 pub fn reset_affinity(buf: &BufferState, dims: &Dimensions) -> usize {
-    visual_col_of(&**buf.doc(), buf.cursor_row(), buf.cursor_col(), dims.text_width())
+    visual_col_of(
+        &**buf.doc(),
+        buf.cursor_row().0,
+        buf.cursor_col().0,
+        dims.text_width(),
+    )
 }
 
 // ── Movement ──
@@ -204,38 +219,38 @@ pub fn reset_affinity(buf: &BufferState, dims: &Dimensions) -> usize {
 pub fn move_up(buf: &BufferState, dims: &Dimensions) -> (usize, usize, usize) {
     let tw = dims.text_width();
     let (row, col) = compute_move_up(
-        buf.cursor_row(),
-        buf.cursor_col(),
-        buf.cursor_col_affinity(),
+        buf.cursor_row().0,
+        buf.cursor_col().0,
+        buf.cursor_col_affinity().0,
         tw,
         &**buf.doc(),
     );
-    let len = buf.doc().line_len(row);
+    let len = buf.doc().line_len(Row(row));
     let col = col.min(len);
-    (row, col, buf.cursor_col_affinity())
+    (row, col, buf.cursor_col_affinity().0)
 }
 
 pub fn move_down(buf: &BufferState, dims: &Dimensions) -> (usize, usize, usize) {
     let tw = dims.text_width();
     let (row, col) = compute_move_down(
-        buf.cursor_row(),
-        buf.cursor_col(),
-        buf.cursor_col_affinity(),
+        buf.cursor_row().0,
+        buf.cursor_col().0,
+        buf.cursor_col_affinity().0,
         tw,
         &**buf.doc(),
     );
-    let len = buf.doc().line_len(row);
+    let len = buf.doc().line_len(Row(row));
     let col = col.min(len);
-    (row, col, buf.cursor_col_affinity())
+    (row, col, buf.cursor_col_affinity().0)
 }
 
 pub fn move_left(buf: &BufferState) -> (usize, usize, usize) {
-    if buf.cursor_col() > 0 {
-        let col = buf.cursor_col() - 1;
-        (buf.cursor_row(), col, col)
-    } else if buf.cursor_row() > 0 {
-        let row = buf.cursor_row() - 1;
-        let col = buf.doc().line_len(row);
+    if buf.cursor_col().0 > 0 {
+        let col = buf.cursor_col().0 - 1;
+        (buf.cursor_row().0, col, col)
+    } else if buf.cursor_row().0 > 0 {
+        let row = buf.cursor_row().0 - 1;
+        let col = buf.doc().line_len(Row(row));
         (row, col, col)
     } else {
         (0, 0, 0)
@@ -244,43 +259,43 @@ pub fn move_left(buf: &BufferState) -> (usize, usize, usize) {
 
 pub fn move_right(buf: &BufferState) -> (usize, usize, usize) {
     let len = buf.doc().line_len(buf.cursor_row());
-    if buf.cursor_col() < len {
-        let col = buf.cursor_col() + 1;
-        (buf.cursor_row(), col, col)
-    } else if buf.cursor_row() < buf.doc().line_count().saturating_sub(1) {
-        let row = buf.cursor_row() + 1;
+    if buf.cursor_col().0 < len {
+        let col = buf.cursor_col().0 + 1;
+        (buf.cursor_row().0, col, col)
+    } else if buf.cursor_row().0 < buf.doc().line_count().saturating_sub(1) {
+        let row = buf.cursor_row().0 + 1;
         (row, 0, 0)
     } else {
-        (buf.cursor_row(), len, len)
+        (buf.cursor_row().0, len, len)
     }
 }
 
 pub fn line_start(buf: &BufferState) -> (usize, usize, usize) {
-    (buf.cursor_row(), 0, 0)
+    (buf.cursor_row().0, 0, 0)
 }
 
 pub fn line_end(buf: &BufferState) -> (usize, usize, usize) {
     let col = buf.doc().line_len(buf.cursor_row());
-    (buf.cursor_row(), col, col)
+    (buf.cursor_row().0, col, col)
 }
 
 pub fn page_up(buf: &BufferState, dims: &Dimensions) -> (usize, usize, usize) {
     let height = dims.buffer_height();
     let page = height.saturating_sub(1).max(1);
-    let row = buf.cursor_row().saturating_sub(page);
-    let len = buf.doc().line_len(row);
-    let col = buf.cursor_col_affinity().min(len);
-    (row, col, buf.cursor_col_affinity())
+    let row = buf.cursor_row().0.saturating_sub(page);
+    let len = buf.doc().line_len(Row(row));
+    let col = buf.cursor_col_affinity().0.min(len);
+    (row, col, buf.cursor_col_affinity().0)
 }
 
 pub fn page_down(buf: &BufferState, dims: &Dimensions) -> (usize, usize, usize) {
     let height = dims.buffer_height();
     let page = height.saturating_sub(1).max(1);
     let max_row = buf.doc().line_count().saturating_sub(1);
-    let row = (buf.cursor_row() + page).min(max_row);
-    let len = buf.doc().line_len(row);
-    let col = buf.cursor_col_affinity().min(len);
-    (row, col, buf.cursor_col_affinity())
+    let row = (buf.cursor_row().0 + page).min(max_row);
+    let len = buf.doc().line_len(Row(row));
+    let col = buf.cursor_col_affinity().0.min(len);
+    (row, col, buf.cursor_col_affinity().0)
 }
 
 pub fn file_start() -> (usize, usize, usize) {
@@ -289,7 +304,7 @@ pub fn file_start() -> (usize, usize, usize) {
 
 pub fn file_end(doc: &dyn Doc) -> (usize, usize, usize) {
     let row = doc.line_count().saturating_sub(1);
-    let col = doc.line_len(row);
+    let col = doc.line_len(Row(row));
     (row, col, col)
 }
 
@@ -309,7 +324,7 @@ fn compute_move_up(
         return (cursor_row, cursor_col);
     }
 
-    let (display, char_map) = expand_tabs(&doc.line(cursor_row));
+    let (display, char_map) = expand_tabs(&doc.line(Row(cursor_row)));
     let cursor_dcol = char_map
         .get(cursor_col)
         .copied()
@@ -327,7 +342,7 @@ fn compute_move_up(
         (cursor_row, col)
     } else if cursor_row > 0 {
         let new_row = cursor_row - 1;
-        let (prev_display, prev_cm) = expand_tabs(&doc.line(new_row));
+        let (prev_display, prev_cm) = expand_tabs(&doc.line(Row(new_row)));
         let prev_chunks = compute_chunks(prev_display.len(), tw);
         let (cs, ce) = *prev_chunks.last().unwrap();
         let target_dcol = cs + visual_col_affinity.min(ce - cs);
@@ -352,7 +367,7 @@ fn compute_move_down(
         return (cursor_row, cursor_col);
     }
 
-    let (display, char_map) = expand_tabs(&doc.line(cursor_row));
+    let (display, char_map) = expand_tabs(&doc.line(Row(cursor_row)));
     let cursor_dcol = char_map
         .get(cursor_col)
         .copied()
@@ -375,7 +390,7 @@ fn compute_move_down(
         (cursor_row, col)
     } else if cursor_row + 1 < doc.line_count() {
         let new_row = cursor_row + 1;
-        let (next_display, next_cm) = expand_tabs(&doc.line(new_row));
+        let (next_display, next_cm) = expand_tabs(&doc.line(Row(new_row)));
         let next_chunks = compute_chunks(next_display.len(), tw);
         let (cs, ce) = next_chunks[0];
         // For a single-chunk line, allow the full range (end-of-line cursor).
@@ -405,7 +420,7 @@ pub fn shift_annotations(
     buf_path: &std::path::Path,
     edit_row: usize,
     old_line_count: usize,
-    old_doc_version: u64,
+    old_doc_version: DocVersion,
 ) {
     if let Some(buf) = state.buf_mut(buf_path) {
         buf.shift_annotations(edit_row, old_line_count, old_doc_version);

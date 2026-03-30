@@ -182,9 +182,12 @@ pub fn driver(state: Stream<Rc<AppState>>) -> Stream<UiIn> {
     let overflow_s = state
         .filter(|s| tabs_overflow(s))
         .filter(|s| {
-            s.buffers
-                .values()
-                .any(|b| b.is_loaded() && !b.is_preview() && b.path_buf() != s.active_buffer.as_ref() && !b.is_dirty())
+            s.buffers.values().any(|b| {
+                b.is_loaded()
+                    && !b.is_preview()
+                    && b.path_buf() != s.active_buffer.as_ref()
+                    && !b.is_dirty()
+            })
         })
         .map(|_| UiIn::EvictOneBuffer)
         .stream();

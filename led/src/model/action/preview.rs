@@ -8,7 +8,9 @@ use super::helpers::{renumber_tabs, reveal_active_buffer};
 pub(crate) fn close_preview(state: &mut AppState) {
     if let Some(preview_path) = state.preview.buffer.take() {
         state.buffers_mut().remove(&preview_path);
-        state.notify_hash_to_buffer.retain(|_, v| *v != preview_path);
+        state
+            .notify_hash_to_buffer
+            .retain(|_, v| *v != preview_path);
         renumber_tabs(state);
     }
     if let Some(restore_path) = state.preview.pre_preview_buffer.take() {

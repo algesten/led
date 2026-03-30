@@ -202,10 +202,13 @@ pub fn driver(out: Stream<SyntaxOut>) -> Stream<SyntaxIn> {
                                 for op in ops {
                                     bs.state.mark_edit(op, &*shadow);
                                     // Advance shadow to match post-edit state.
-                                    let off =
-                                        op.offset.min(shadow.byte_to_char(shadow.len_bytes()));
+                                    let off = led_core::CharOffset(
+                                        op.offset.0.min(shadow.byte_to_char(shadow.len_bytes())),
+                                    );
                                     if !op.old_text.is_empty() {
-                                        let end = off + op.old_text.chars().count();
+                                        let end = led_core::CharOffset(
+                                            off.0 + op.old_text.chars().count(),
+                                        );
                                         shadow = shadow.remove(off, end);
                                     }
                                     if !op.new_text.is_empty() {
@@ -324,9 +327,9 @@ fn to_state_brackets(
     scroll_row: usize,
     end_line: usize,
 ) -> Vec<BracketPair> {
-    let start_byte = doc.line_to_byte(scroll_row);
+    let start_byte = doc.line_to_byte(led_core::Row(scroll_row));
     let end_byte = if end_line < doc.line_count() {
-        doc.line_to_byte(end_line)
+        doc.line_to_byte(led_core::Row(end_line))
     } else {
         doc.len_bytes()
     };
@@ -338,14 +341,14 @@ fn to_state_brackets(
         .filter(|bm| bm.open_range.start < len && bm.close_range.start < len)
         .map(|bm| {
             let open_byte = bm.open_range.start;
-            let open_line = doc.byte_to_line(open_byte);
+            let open_line = doc.byte_to_line(open_byte).0;
             let open_char = doc.byte_to_char(open_byte);
-            let open_col = open_char - doc.line_to_char(open_line);
+            let open_col = open_char - doc.line_to_char(led_core::Row(open_line)).0;
 
             let close_byte = bm.close_range.start;
-            let close_line = doc.byte_to_line(close_byte);
+            let close_line = doc.byte_to_line(close_byte).0;
             let close_char = doc.byte_to_char(close_byte);
-            let close_col = close_char - doc.line_to_char(close_line);
+            let close_col = close_char - doc.line_to_char(led_core::Row(close_line)).0;
 
             BracketPair {
                 open_line,

@@ -308,7 +308,12 @@ async fn handle_save(
 
     match tokio::fs::rename(&tmp_path, path).await {
         Ok(()) => {
-            let _ = tx.send(Ok(DocStoreIn::Saved { id, doc: doc.clone() })).await;
+            let _ = tx
+                .send(Ok(DocStoreIn::Saved {
+                    id,
+                    doc: doc.clone(),
+                }))
+                .await;
         }
         Err(e) => {
             let _ = tokio::fs::remove_file(&tmp_path).await;

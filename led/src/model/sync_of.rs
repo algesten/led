@@ -58,14 +58,14 @@ fn resolve_sync(result: SyncResultKind, state: &AppState) -> Option<Mut> {
             let buf = state.buffers.get(&file_path)?;
             // Safety check: skip if buffer is dirty and content_hash
             // mismatches — prevents clobbering local unsaved edits.
-            if buf.is_dirty() && buf.content_hash() != content_hash {
+            if buf.is_dirty() && buf.content_hash() != led_core::ContentHash(content_hash) {
                 log::info!(
                     "sync: skipping ReloadAndReplay for dirty buffer {}, content hash mismatch",
                     file_path.display()
                 );
                 return None;
             }
-            if buf.content_hash() != content_hash {
+            if buf.content_hash() != led_core::ContentHash(content_hash) {
                 log::info!(
                     "sync: content hash mismatch for {}, expecting docstore reload",
                     file_path.display()

@@ -1,6 +1,6 @@
 use std::ops::Range;
 
-use led_core::Doc;
+use led_core::{Doc, Row};
 use tree_sitter::{QueryCursor, StreamingIterator, Tree};
 
 use crate::config::BracketsConfig;
@@ -62,7 +62,7 @@ pub(crate) fn matching_bracket(
     row: usize,
     col: usize,
 ) -> Option<(usize, usize)> {
-    let char_idx = doc.line_to_char(row) + col;
+    let char_idx = doc.line_to_char(Row(row)).0 + col;
     let byte_pos = doc.char_to_byte(char_idx);
 
     let mut cursor = QueryCursor::new();
@@ -90,15 +90,15 @@ pub(crate) fn matching_bracket(
                 let target_byte = cr.start.min(len.saturating_sub(1));
                 let target_line = doc.byte_to_line(target_byte);
                 let target_char = doc.byte_to_char(target_byte);
-                let line_char = doc.line_to_char(target_line);
-                return Some((target_line, target_char - line_char));
+                let line_char = doc.line_to_char(target_line).0;
+                return Some((target_line.0, target_char - line_char));
             }
             if cr.start <= byte_pos && byte_pos < cr.end {
                 let target_byte = or.start.min(len.saturating_sub(1));
                 let target_line = doc.byte_to_line(target_byte);
                 let target_char = doc.byte_to_char(target_byte);
-                let line_char = doc.line_to_char(target_line);
-                return Some((target_line, target_char - line_char));
+                let line_char = doc.line_to_char(target_line).0;
+                return Some((target_line.0, target_char - line_char));
             }
         }
     }

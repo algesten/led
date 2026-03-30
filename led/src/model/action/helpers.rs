@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use led_core::{Row, SubLine, TabOrder};
 use led_state::{AppState, BufferState, Dimensions, EditKind};
 
 use super::super::mov;
@@ -14,14 +15,14 @@ pub(super) fn with_buf(state: &mut AppState, f: impl FnOnce(&mut BufferState, &D
         let snapshot = state
             .buffers
             .get(&path)
-            .map(|b| (b.doc().line_count(), b.cursor_row(), b.version()));
+            .map(|b| (b.doc().line_count(), b.cursor_row().0, b.version()));
         let Some((old_lines, edit_row, old_ver)) = snapshot else {
             return;
         };
         if let Some(buf) = state.buf_mut(&path) {
             f(buf, &dims);
             let (sr, ssl) = mov::adjust_scroll(buf, &dims);
-            buf.set_scroll(sr, ssl);
+            buf.set_scroll(Row(sr), SubLine(ssl));
             buf.update_matching_bracket();
             buf.mark_modified_if_dirty();
             buf.touch();
@@ -40,7 +41,7 @@ pub(crate) fn renumber_tabs(state: &mut AppState) {
     let mut ordered: Vec<PathBuf> = state.buffers.keys().cloned().collect();
     ordered.sort_by_key(|path| state.buffers[path].tab_order());
     for (i, path) in ordered.into_iter().enumerate() {
-        state.buf_mut(&path).unwrap().set_tab_order(i);
+        state.buf_mut(&path).unwrap().set_tab_order(TabOrder(i));
     }
 }
 
@@ -79,7 +80,7 @@ pub(super) fn maybe_close_group(buf: &mut BufferState, kind: EditKind, ch: char)
         // Word boundary: whitespace after non-whitespace
         if ch.is_whitespace() {
             let line = buf.doc().line(buf.cursor_row());
-            let prev = line.chars().nth(buf.cursor_col().saturating_sub(1));
+            let prev = line.chars().nth(buf.cursor_col().0.saturating_sub(1));
             if let Some(p) = prev {
                 if !p.is_whitespace() {
                     buf.close_undo_group();
@@ -119,7 +120,7 @@ pub(super) fn should_record(action: &led_core::Action) -> bool {
 pub(super) fn word_under_cursor(buf: &BufferState) -> String {
     let line = buf.doc().line(buf.cursor_row());
     let chars: Vec<char> = line.chars().collect();
-    let col = buf.cursor_col();
+    let col = buf.cursor_col().0;
     if col >= chars.len() {
         return String::new();
     }

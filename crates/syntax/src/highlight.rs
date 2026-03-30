@@ -1,4 +1,4 @@
-use led_core::Doc;
+use led_core::{Doc, Row};
 use tree_sitter::{Query, QueryCursor, StreamingIterator, Tree};
 
 use crate::parse::DocProvider;
@@ -42,16 +42,16 @@ pub(crate) fn collect_highlights(
                 continue;
             }
 
-            let node_start_line = doc.byte_to_line(node_start_byte);
-            let node_end_line = doc.byte_to_line(node_end_byte.min(len.max(1) - 1));
+            let node_start_line = doc.byte_to_line(node_start_byte).0;
+            let node_end_line = doc.byte_to_line(node_end_byte.min(len.max(1) - 1)).0;
 
             for line in node_start_line..=node_end_line {
                 if line < start_line || line >= end_line {
                     continue;
                 }
-                let line_start_byte = doc.line_to_byte(line);
+                let line_start_byte = doc.line_to_byte(Row(line));
                 let line_end_byte = if line + 1 < total_lines {
-                    doc.line_to_byte(line + 1)
+                    doc.line_to_byte(Row(line + 1))
                 } else {
                     doc.len_bytes()
                 };
@@ -67,7 +67,7 @@ pub(crate) fn collect_highlights(
                 let char_end = doc.byte_to_char(span_end_byte) - line_start_char;
 
                 // Clamp to effective line length (exclude trailing newline)
-                let line_text = doc.line(line);
+                let line_text = doc.line(Row(line));
                 let effective_line_len = line_text.chars().count();
                 let char_end = char_end.min(effective_line_len);
                 if char_start >= char_end {

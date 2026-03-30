@@ -1,6 +1,6 @@
 use std::ops::Range;
 
-use led_core::Doc;
+use led_core::{Doc, Row};
 use tree_sitter::{Query, QueryCursor, StreamingIterator, Tree};
 
 use crate::config::{IndentDelta, IndentSuggestion, IndentsConfig};
@@ -30,7 +30,7 @@ pub(crate) fn suggest_indent_with_tree(
     let total_bytes = doc.len_bytes();
     let query_start = indent_query_start(doc, tree, basis_row, line);
     let query_end = if line + 1 < doc.line_count() {
-        doc.line_to_byte(line + 1)
+        doc.line_to_byte(Row(line + 1))
     } else {
         total_bytes
     };
@@ -93,7 +93,7 @@ pub(crate) fn suggest_indent_with_tree(
     let within_error = is_within_error(error_query, tree, doc, line);
 
     let len = doc.len_bytes();
-    let line_start = doc.line_to_byte(line);
+    let line_start = doc.line_to_byte(Row(line));
 
     // Unwrap basis_row from continuation constructs: if the basis row is
     // inside a non-terminated indent range that ends before the current line,
@@ -104,9 +104,9 @@ pub(crate) fn suggest_indent_with_tree(
     // starts on basis_row and extends past the current line). In that case
     // the "inflated" indent is the correct base for the block's content.
     let basis_row = {
-        let basis_byte = doc.line_to_byte(basis_row);
+        let basis_byte = doc.line_to_byte(Row(basis_row));
         let opens_block = indent_ranges.iter().any(|(r, _)| {
-            r.start < len && doc.byte_to_line(r.start) == basis_row && r.end > line_start
+            r.start < len && doc.byte_to_line(r.start).0 == basis_row && r.end > line_start
         });
         if opens_block {
             basis_row
@@ -117,7 +117,7 @@ pub(crate) fn suggest_indent_with_tree(
                     continue;
                 }
                 if r.start < basis_byte && r.end > basis_byte && r.end <= line_start {
-                    let start_line = doc.byte_to_line(r.start);
+                    let start_line = doc.byte_to_line(r.start).0;
                     if start_line < row {
                         row = start_line;
                     }
@@ -130,12 +130,12 @@ pub(crate) fn suggest_indent_with_tree(
     let basis_opens_indent = indent_ranges
         .iter()
         .filter(|(r, _)| r.start < len)
-        .any(|(r, _)| doc.byte_to_line(r.start) == basis_row && r.end > line_start);
+        .any(|(r, _)| doc.byte_to_line(r.start).0 == basis_row && r.end > line_start);
 
     let line_at_outdent = indent_ranges
         .iter()
         .filter(|(r, terminated)| *terminated && r.end > 0 && r.end <= len)
-        .any(|(r, _)| doc.byte_to_line(r.end) == line && r.start < line_start);
+        .any(|(r, _)| doc.byte_to_line(r.end).0 == line && r.start < line_start);
 
     let delta = if line_at_outdent {
         IndentDelta::Less
@@ -156,9 +156,9 @@ fn is_within_error(error_query: Option<&Query>, tree: &Tree, doc: &dyn Doc, line
     let Some(eq) = error_query else {
         return false;
     };
-    let line_start = doc.line_to_byte(line);
+    let line_start = doc.line_to_byte(Row(line));
     let line_end = if line + 1 < doc.line_count() {
-        doc.line_to_byte(line + 1)
+        doc.line_to_byte(Row(line + 1))
     } else {
         doc.len_bytes()
     };
@@ -170,8 +170,8 @@ fn is_within_error(error_query: Option<&Query>, tree: &Tree, doc: &dyn Doc, line
 }
 
 fn indent_query_start(doc: &dyn Doc, tree: &Tree, basis_row: usize, line: usize) -> usize {
-    let basis_start = doc.line_to_byte(basis_row);
-    let line_byte = doc.line_to_byte(line);
+    let basis_start = doc.line_to_byte(Row(basis_row));
+    let line_byte = doc.line_to_byte(Row(line));
     let mut node = tree
         .root_node()
         .descendant_for_byte_range(line_byte, line_byte);
@@ -186,7 +186,7 @@ fn indent_query_start(doc: &dyn Doc, tree: &Tree, basis_row: usize, line: usize)
 
 fn find_basis_row(doc: &dyn Doc, line: usize) -> Option<usize> {
     for row in (0..line).rev() {
-        let line_text = doc.line(row);
+        let line_text = doc.line(Row(row));
         if line_text.chars().any(|c| !c.is_whitespace()) {
             return Some(row);
         }
@@ -197,7 +197,7 @@ fn find_basis_row(doc: &dyn Doc, line: usize) -> Option<usize> {
 /// For a line whose first non-whitespace char is a closing bracket,
 /// find the matching open bracket via tree-sitter and return its line's indent.
 pub(crate) fn closing_bracket_indent(tree: &Tree, doc: &dyn Doc, line: usize) -> Option<String> {
-    let line_text = doc.line(line);
+    let line_text = doc.line(Row(line));
     let mut char_offset = 0;
     let mut found_bracket = false;
     for ch in line_text.chars() {
@@ -214,7 +214,7 @@ pub(crate) fn closing_bracket_indent(tree: &Tree, doc: &dyn Doc, line: usize) ->
     if !found_bracket {
         return None;
     }
-    let bracket_char_idx = doc.line_to_char(line) + char_offset;
+    let bracket_char_idx = doc.line_to_char(Row(line)).0 + char_offset;
     let bracket_byte = doc.char_to_byte(bracket_char_idx);
     let node = tree
         .root_node()
@@ -225,7 +225,7 @@ pub(crate) fn closing_bracket_indent(tree: &Tree, doc: &dyn Doc, line: usize) ->
 
 /// Get leading whitespace of a line.
 pub(crate) fn get_line_indent(doc: &dyn Doc, line: usize) -> String {
-    let line_text = doc.line(line);
+    let line_text = doc.line(Row(line));
     let mut indent = String::new();
     for ch in line_text.chars() {
         if ch == ' ' || ch == '\t' {
@@ -274,7 +274,7 @@ pub(crate) fn apply_indent_delta(
 pub(crate) fn detect_indent_unit(doc: &dyn Doc) -> String {
     let lines = doc.line_count().min(100);
     for i in 0..lines {
-        let line = doc.line(i);
+        let line = doc.line(Row(i));
         let mut indent = String::new();
         for ch in line.chars() {
             if ch == '\t' {
@@ -301,7 +301,7 @@ pub(crate) fn regex_indent(
     decrease_pattern: Option<&regex::Regex>,
 ) -> Option<String> {
     let basis = find_prev_nonempty_line(doc, line)?;
-    let basis_text = doc.line(basis);
+    let basis_text = doc.line(Row(basis));
     let basis_indent = get_line_indent(doc, basis);
 
     if let Some(re) = increase_pattern {
@@ -314,7 +314,7 @@ pub(crate) fn regex_indent(
         }
     }
 
-    let current_text = doc.line(line);
+    let current_text = doc.line(Row(line));
     if let Some(re) = decrease_pattern {
         if re.is_match(&current_text) {
             return Some(apply_indent_delta(
@@ -330,7 +330,7 @@ pub(crate) fn regex_indent(
 
 fn find_prev_nonempty_line(doc: &dyn Doc, line: usize) -> Option<usize> {
     for row in (0..line).rev() {
-        let line_text = doc.line(row);
+        let line_text = doc.line(Row(row));
         if line_text.chars().any(|c| !c.is_whitespace()) {
             return Some(row);
         }

@@ -14,7 +14,7 @@ pub(super) fn cycle_tab(state: &mut AppState, direction: i32) {
         .buffers
         .iter()
         .filter(|(_, buf)| buf.is_loaded() && !buf.is_preview())
-        .map(|(path, buf)| (path.clone(), buf.tab_order()))
+        .map(|(path, buf)| (path.clone(), buf.tab_order().0))
         .collect();
     tabs.sort_by_key(|&(_, order)| order);
 
@@ -72,14 +72,14 @@ fn do_kill_buffer(state: &mut AppState, path: &std::path::Path) {
         .and_then(|p| p.file_name())
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let killed_order = buf.tab_order();
+    let killed_order = buf.tab_order().0;
 
     // Find next buffer to activate (next by tab_order, wrapping)
     let mut tabs: Vec<(PathBuf, usize)> = state
         .buffers
         .iter()
         .filter(|(p, buf)| p.as_path() != path && buf.is_loaded())
-        .map(|(p, buf)| (p.clone(), buf.tab_order()))
+        .map(|(p, buf)| (p.clone(), buf.tab_order().0))
         .collect();
     tabs.sort_by_key(|&(_, order)| order);
 

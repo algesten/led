@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use led_core::rx::Stream;
-use led_core::{Doc, EditOp};
+use led_core::{ContentHash, Doc, EditOp};
 
 mod convert;
 mod manager;
@@ -167,7 +167,7 @@ pub enum LspIn {
     Diagnostics {
         path: PathBuf,
         diagnostics: Vec<Diagnostic>,
-        content_hash: u64,
+        content_hash: ContentHash,
     },
     InlayHints {
         path: PathBuf,

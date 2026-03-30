@@ -34,7 +34,7 @@ pub struct SyntaxState {
 
 impl SyntaxState {
     pub fn from_path_and_doc(path: &Path, doc: &dyn Doc) -> Option<Self> {
-        let entry = detect_language_from_modeline(|i| doc.line(i), doc.line_count())
+        let entry = detect_language_from_modeline(|i| doc.line(led_core::Row(i)), doc.line_count())
             .and_then(|name| lang_entry_for_name(&name))
             .or_else(|| {
                 symlink_chain(path).iter().find_map(|p| {
@@ -117,18 +117,16 @@ impl SyntaxState {
     /// `pre_edit_doc`, but do NOT reparse yet.  Call `finish_edits` once
     /// after all edits to reparse with the final doc.
     pub fn mark_edit(&mut self, op: &EditOp, pre_edit_doc: &dyn Doc) {
-        let start_byte = pre_edit_doc.char_to_byte(
-            op.offset
-                .min(pre_edit_doc.byte_to_char(pre_edit_doc.len_bytes())),
-        );
-        let start_line = pre_edit_doc.char_to_line(
-            op.offset
-                .min(pre_edit_doc.byte_to_char(pre_edit_doc.len_bytes())),
-        );
+        let clamped = op
+            .offset
+            .0
+            .min(pre_edit_doc.byte_to_char(pre_edit_doc.len_bytes()));
+        let start_byte = pre_edit_doc.char_to_byte(clamped);
+        let start_line = pre_edit_doc.char_to_line(led_core::CharOffset(clamped));
         let start_line_byte = pre_edit_doc.line_to_byte(start_line);
 
         let start_position = tree_sitter::Point {
-            row: start_line,
+            row: start_line.0,
             column: start_byte - start_line_byte,
         };
 
@@ -232,11 +230,11 @@ impl SyntaxState {
             return Vec::new();
         }
         let end_line = end_line.min(total_lines);
-        let start_byte = doc.line_to_byte(start_line);
+        let start_byte = doc.line_to_byte(led_core::Row(start_line));
         let end_byte = if end_line >= total_lines {
             doc.len_bytes()
         } else {
-            doc.line_to_byte(end_line)
+            doc.line_to_byte(led_core::Row(end_line))
         };
 
         let mut result = collect_highlights(

@@ -50,7 +50,9 @@ pub struct DocId(pub u64);
 macro_rules! newtype_usize {
     ($($(#[$meta:meta])* $name:ident),+ $(,)?) => {$(
         $(#[$meta])*
-        #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+        #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash,
+                 serde::Serialize, serde::Deserialize)]
+        #[serde(transparent)]
         pub struct $name(pub usize);
         impl std::ops::Deref for $name {
             type Target = usize;
@@ -59,13 +61,37 @@ macro_rules! newtype_usize {
         impl From<usize> for $name {
             fn from(v: usize) -> Self { Self(v) }
         }
+        impl std::ops::Add for $name {
+            type Output = Self;
+            fn add(self, rhs: Self) -> Self { Self(self.0 + rhs.0) }
+        }
+        impl std::ops::Add<usize> for $name {
+            type Output = Self;
+            fn add(self, rhs: usize) -> Self { Self(self.0 + rhs) }
+        }
+        impl std::ops::Sub for $name {
+            type Output = Self;
+            fn sub(self, rhs: Self) -> Self { Self(self.0 - rhs.0) }
+        }
+        impl std::ops::Sub<usize> for $name {
+            type Output = Self;
+            fn sub(self, rhs: usize) -> Self { Self(self.0 - rhs) }
+        }
+        impl std::ops::AddAssign<usize> for $name {
+            fn add_assign(&mut self, rhs: usize) { self.0 += rhs; }
+        }
+        impl std::ops::SubAssign<usize> for $name {
+            fn sub_assign(&mut self, rhs: usize) { self.0 -= rhs; }
+        }
     )+};
 }
 
 macro_rules! newtype_u64 {
     ($($(#[$meta:meta])* $name:ident),+ $(,)?) => {$(
         $(#[$meta])*
-        #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+        #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash,
+                 serde::Serialize, serde::Deserialize)]
+        #[serde(transparent)]
         pub struct $name(pub u64);
         impl std::ops::Deref for $name {
             type Target = u64;
@@ -73,6 +99,28 @@ macro_rules! newtype_u64 {
         }
         impl From<u64> for $name {
             fn from(v: u64) -> Self { Self(v) }
+        }
+        impl std::ops::Add for $name {
+            type Output = Self;
+            fn add(self, rhs: Self) -> Self { Self(self.0 + rhs.0) }
+        }
+        impl std::ops::Add<u64> for $name {
+            type Output = Self;
+            fn add(self, rhs: u64) -> Self { Self(self.0 + rhs) }
+        }
+        impl std::ops::Sub for $name {
+            type Output = Self;
+            fn sub(self, rhs: Self) -> Self { Self(self.0 - rhs.0) }
+        }
+        impl std::ops::Sub<u64> for $name {
+            type Output = Self;
+            fn sub(self, rhs: u64) -> Self { Self(self.0 - rhs) }
+        }
+        impl std::ops::AddAssign<u64> for $name {
+            fn add_assign(&mut self, rhs: u64) { self.0 += rhs; }
+        }
+        impl std::ops::SubAssign<u64> for $name {
+            fn sub_assign(&mut self, rhs: u64) { self.0 -= rhs; }
         }
     )+};
 }

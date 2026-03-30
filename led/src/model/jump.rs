@@ -53,9 +53,9 @@ fn current_position(state: &AppState) -> Option<JumpPosition> {
     let path = buf.path_buf()?.clone();
     Some(JumpPosition {
         path,
-        row: buf.cursor_row(),
-        col: buf.cursor_col(),
-        scroll_offset: buf.scroll_row(),
+        row: buf.cursor_row().0,
+        col: buf.cursor_col().0,
+        scroll_offset: buf.scroll_row().0,
     })
 }
 
@@ -74,8 +74,12 @@ fn navigate_to_position(state: &mut AppState, pos: JumpPosition) {
         state.active_buffer = Some(buf_path.clone());
         if let Some(buf) = state.buf_mut(&buf_path) {
             let row = pos.row.min(buf.doc().line_count().saturating_sub(1));
-            buf.set_cursor(row, pos.col, pos.col);
-            buf.set_scroll(pos.scroll_offset, buf.scroll_sub_line());
+            buf.set_cursor(
+                led_core::Row(row),
+                led_core::Col(pos.col),
+                led_core::Col(pos.col),
+            );
+            buf.set_scroll(led_core::Row(pos.scroll_offset), buf.scroll_sub_line());
         }
         super::action::reveal_active_buffer(state);
     } else {
