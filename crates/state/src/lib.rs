@@ -486,9 +486,9 @@ impl BufferState {
         let doc = self.doc.as_ref().expect("edit() called on ghost buffer");
         let old_lines = doc.line_count();
         let old_ver = self.version;
-        let edit_row = self.cursor_row.0;
+        let edit_row = *self.cursor_row;
         let (new_doc, result) = f(doc);
-        self.version = DocVersion(self.version.0 + 1);
+        self.version = self.version + 1;
         self.doc = Some(new_doc);
         self.sync_annotations(edit_row, old_lines, old_ver);
         result
@@ -505,7 +505,7 @@ impl BufferState {
         let old_lines = doc.line_count();
         let old_ver = self.version;
         let (new_doc, result) = f(doc);
-        self.version = DocVersion(self.version.0 + 1);
+        self.version = self.version + 1;
         self.doc = Some(new_doc);
         self.sync_annotations(edit_row, old_lines, old_ver);
         result
@@ -527,9 +527,9 @@ impl BufferState {
             },
             char_idx,
         );
-        self.version = DocVersion(self.version.0 + 1);
+        self.version = self.version + 1;
         self.doc = Some(new_doc);
-        self.sync_annotations(self.cursor_row.0, old_lines, old_ver);
+        self.sync_annotations(*self.cursor_row, old_lines, old_ver);
     }
 
     /// Remove text between two character offsets. Records undo op, shifts annotations.
@@ -547,9 +547,9 @@ impl BufferState {
             },
             start,
         );
-        self.version = DocVersion(self.version.0 + 1);
+        self.version = self.version + 1;
         self.doc = Some(new_doc);
-        self.sync_annotations(self.cursor_row.0, old_lines, old_ver);
+        self.sync_annotations(*self.cursor_row, old_lines, old_ver);
     }
 
     /// Replace the document wholesale (undo, redo, external reload, sync).
@@ -638,10 +638,10 @@ impl BufferState {
         self.content_hash = hash;
         self.change_seq = ChangeSeq(led_core::next_change_seq());
         // Clamp cursor to new document bounds
-        let max_row = self.doc().line_count().saturating_sub(1);
-        self.cursor_row = Row(self.cursor_row.0.min(max_row));
-        let max_col = self.doc().line_len(self.cursor_row);
-        self.cursor_col = Col(self.cursor_col.0.min(max_col));
+        let max_row = Row(self.doc().line_count().saturating_sub(1));
+        self.cursor_row = self.cursor_row.min(max_row);
+        let max_col = Col(self.doc().line_len(self.cursor_row));
+        self.cursor_col = self.cursor_col.min(max_col);
         self.cursor_col_affinity = self.cursor_col;
         self.close_group_on_move();
     }
@@ -664,7 +664,7 @@ impl BufferState {
     pub fn apply_remote_entry(&mut self, doc: Arc<dyn Doc>, entry: led_core::UndoEntry) {
         self.doc = Some(doc);
         self.undo.push_remote_entry(entry);
-        self.version = DocVersion(self.version.0 + 1);
+        self.version = self.version + 1;
     }
 
     /// Replay remote undo entries completed. Clears annotations, updates persistence.
@@ -785,7 +785,7 @@ impl BufferState {
         }
 
         self.undo.set_undo_cursor(Some(pos));
-        self.version = DocVersion(self.version.0 + 1);
+        self.version = self.version + 1;
         self.doc = Some(doc);
         Some(restore_cursor)
     }
@@ -838,7 +838,7 @@ impl BufferState {
             self.undo.set_undo_cursor(Some(pos));
         }
 
-        self.version = DocVersion(self.version.0 + 1);
+        self.version = self.version + 1;
         self.doc = Some(doc);
         Some(restore_cursor)
     }
@@ -855,15 +855,15 @@ impl BufferState {
         self.cursor_col_affinity
     }
     pub fn set_cursor(&mut self, row: Row, col: Col, affinity: Col) {
-        let max_row = self.doc().line_count().saturating_sub(1);
-        self.cursor_row = Row(row.0.min(max_row));
-        let max_col = self.doc().line_len(self.cursor_row);
-        self.cursor_col = Col(col.0.min(max_col));
+        let max_row = Row(self.doc().line_count().saturating_sub(1));
+        self.cursor_row = row.min(max_row);
+        let max_col = Col(self.doc().line_len(self.cursor_row));
+        self.cursor_col = col.min(max_col);
         self.cursor_col_affinity = affinity;
     }
     pub fn set_cursor_row(&mut self, row: Row) {
-        let max_row = self.doc().line_count().saturating_sub(1);
-        self.cursor_row = Row(row.0.min(max_row));
+        let max_row = Row(self.doc().line_count().saturating_sub(1));
+        self.cursor_row = row.min(max_row);
     }
 
     // ── Mark ──
@@ -890,7 +890,7 @@ impl BufferState {
         self.scroll_sub_line
     }
     pub fn set_scroll(&mut self, row: Row, sub_line: SubLine) {
-        self.scroll_row = Row(row.0.min(self.doc().line_count().saturating_sub(1)));
+        self.scroll_row = row.min(Row(self.doc().line_count().saturating_sub(1)));
         self.scroll_sub_line = sub_line;
     }
 
@@ -989,7 +989,7 @@ impl BufferState {
     }
     pub fn update_matching_bracket(&mut self) {
         self.matching_bracket =
-            BracketPair::find_match(&self.bracket_pairs, self.cursor_row.0, self.cursor_col.0);
+            BracketPair::find_match(&self.bracket_pairs, *self.cursor_row, *self.cursor_col);
     }
     pub fn status(&self) -> &BufferStatus {
         &self.status

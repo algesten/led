@@ -143,7 +143,7 @@ pub fn buffers_of(
 
                 // Replay persisted undo entries into the buffer
                 if let Some(undo) = undo_data {
-                    if undo.content_hash == content_hash.0 {
+                    if undo.content_hash == *content_hash {
                         apply_undo_entries(&mut buf, &undo.entries);
                         // Override distance_from_save to match persisted value,
                         // since replay accumulates directions which may differ

@@ -56,7 +56,7 @@ pub fn lsp_of(lsp_in: &Stream<LspIn>, state: &Stream<Rc<AppState>>) -> Stream<Mu
             } => Mut::LspDiagnostics {
                 path,
                 diagnostics,
-                content_hash: content_hash.0,
+                content_hash: *content_hash,
             },
             _ => unreachable!(),
         })
