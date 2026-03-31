@@ -9,7 +9,7 @@ use crate::{CharOffset, ContentHash, Row};
 
 // ── Undo types ──
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EditOp {
     pub offset: CharOffset,
     pub old_text: String,

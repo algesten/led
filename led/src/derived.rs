@@ -9,7 +9,7 @@ use led_core::rx::Stream;
 use led_docstore::DocStoreOut;
 use led_fs::FsOut;
 use led_lsp::LspOut;
-use led_state::{AppState, ChangeReason, LspRequest, SessionRestorePhase};
+use led_state::{AppState, ChangeReason, LspRequest, SessionRestorePhase, SyntaxRequest};
 use led_syntax::SyntaxOut;
 use led_timers::{Schedule, TimersOut};
 use led_workspace::{SessionBuffer, SessionData, WorkspaceOut};
@@ -459,53 +459,94 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
     clipboard_write.forward(&clipboard_out);
     clipboard_read.forward(&clipboard_out);
 
-    // Syntax: only recompute on doc version or scroll changes.
-    // Cursor-only moves don't trigger syntax work — bracket matching
-    // updates on the next edit or scroll, which is fast enough.
-    // Only trigger syntax on doc version and scroll changes.
-    // cursor_row included so bracket matching updates per-line during
-    // vertical movement; cursor_col excluded so horizontal movement
-    // within a line skips syntax entirely — bracket match updates
-    // on next vertical move or edit.
-    let syntax_key = |s: &Rc<AppState>| -> (Option<(u64, usize, usize, Option<usize>)>, usize) {
-        let buf_info = s.active_buffer.as_ref().and_then(|path| {
-            let buf = s.buffers.get(path)?;
-            Some((
-                buf.version().0,
-                buf.scroll_row().0,
-                buf.cursor_row().0,
-                buf.pending_indent_row(),
-            ))
-        });
-        (buf_info, s.buffers.len())
-    };
+    // Syntax: request-based stream.  Buffers set a pending syntax
+    // request internally (Full or Partial) when mutated.  This stream
+    // emits SyntaxOut::BufferChanged for every buffer with a pending
+    // request.
+    fn syntax_seq_key(s: &Rc<AppState>) -> u64 {
+        s.buffers
+            .values()
+            .filter(|b| b.is_materialized())
+            .map(|b| b.pending_syntax_seq())
+            .max()
+            .unwrap_or(0)
+    }
 
-    let known_bufs: Rc<RefCell<HashSet<PathBuf>>> = Rc::new(RefCell::new(HashSet::new()));
-    let known_bufs2 = known_bufs.clone();
+    let syntax_requests = state
+        .dedupe_by(syntax_seq_key)
+        .filter(|s| syntax_seq_key(s) > 0)
+        .map(|s| {
+            let buffer_height = s.dims.map_or(50, |d| d.buffer_height());
+            s.buffers
+                .values()
+                .filter(|b| b.is_materialized() && b.pending_syntax_request().is_some())
+                .filter_map(|b| {
+                    let path = b.path_buf().cloned()?;
+                    let is_active = s.active_buffer.as_ref() == Some(&path);
+                    let indent_row = if is_active {
+                        b.pending_indent_row()
+                    } else {
+                        None
+                    };
+                    let edit_ops = match b.pending_syntax_request()? {
+                        SyntaxRequest::Full => vec![],
+                        SyntaxRequest::Partial { edit_ops } => edit_ops.clone(),
+                    };
+                    Some(SyntaxOut::BufferChanged {
+                        path,
+                        doc: b.doc().clone(),
+                        version: b.version().0,
+                        edit_ops,
+                        scroll_row: b.scroll_row().0,
+                        buffer_height,
+                        cursor_row: b.cursor_row().0,
+                        cursor_col: b.cursor_col().0,
+                        indent_row,
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .stream();
 
-    let syntax_changed = state
-        .dedupe_by(syntax_key)
-        .filter(|s| s.active_buffer.is_some())
+    // Viewport-only: scroll/cursor changes on the active buffer when
+    // no pending syntax request exists.  The driver recomputes visible
+    // highlights without reparsing.
+    let syntax_viewport = state
+        .dedupe_by(|s| {
+            s.active_buffer.as_ref().and_then(|path| {
+                let buf = s.buffers.get(path)?;
+                Some((path.clone(), buf.scroll_row().0, buf.cursor_row().0))
+            })
+        })
+        .filter(|s| {
+            s.active_buffer
+                .as_ref()
+                .and_then(|p| s.buffers.get(p))
+                .is_some_and(|b| b.is_materialized())
+        })
         .filter_map(|s| {
-            let active_path = s.active_buffer.as_ref()?;
-            let buf = s.buffers.get(active_path)?;
+            let path = s.active_buffer.as_ref()?;
+            let buf = s.buffers.get(path)?;
             let path = buf.path_buf().cloned()?;
             let buffer_height = s.dims.map_or(50, |d| d.buffer_height());
             Some(SyntaxOut::BufferChanged {
                 path,
                 doc: buf.doc().clone(),
                 version: buf.version().0,
-                edit_ops: buf.pending_edit_ops(),
+                edit_ops: vec![],
                 scroll_row: buf.scroll_row().0,
                 buffer_height,
                 cursor_row: buf.cursor_row().0,
                 cursor_col: buf.cursor_col().0,
-                indent_row: buf.pending_indent_row(),
+                indent_row: None,
             })
         })
         .stream();
 
-    // Track buffer lifecycle: emit BufferClosed for removed loaded buffers
+    // Track buffer lifecycle: emit BufferClosed for removed buffers
+    let known_bufs: Rc<RefCell<HashSet<PathBuf>>> = Rc::new(RefCell::new(HashSet::new()));
+    let known_bufs2 = known_bufs.clone();
+
     let syntax_lifecycle = state
         .dedupe_by(loaded_buf_paths)
         .map(move |s| {
@@ -529,27 +570,19 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
         })
         .stream();
 
-    // Reparse on save: when save completes, force a full reparse so
-    // highlights are guaranteed in sync with the saved (possibly
-    // formatted) content.
-    let syntax_saved = state
-        .dedupe_by(|s| s.save_done.version())
-        .filter(|s| s.save_done.version() > 0)
-        .filter_map(|s| {
-            let active_path = s.active_buffer.as_ref()?;
-            let buf = s.buffers.get(active_path)?;
-            let path = buf.path_buf().cloned()?;
-            Some(SyntaxOut::Reparse {
-                path,
-                doc: buf.doc().clone(),
-                version: buf.version().0,
-            })
-        })
-        .stream();
-
     let syntax_out: Stream<SyntaxOut> = Stream::new();
-    syntax_changed.forward(&syntax_out);
-    syntax_saved.forward(&syntax_out);
+    syntax_viewport.forward(&syntax_out);
+    // Fan-in request events (Vec<SyntaxOut>)
+    {
+        let target = syntax_out.clone();
+        syntax_requests.on(move |opt: Option<&Vec<SyntaxOut>>| {
+            if let Some(events) = opt {
+                for ev in events {
+                    target.push(ev.clone());
+                }
+            }
+        });
+    }
     // Fan-in lifecycle events
     {
         let target = syntax_out.clone();

@@ -262,6 +262,15 @@ pub struct ISearchState {
     pub match_idx: Option<usize>,
 }
 
+/// What syntax work this buffer needs from the syntax driver.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SyntaxRequest {
+    /// Full reparse needed (materialization, undo, redo, reload, save).
+    Full,
+    /// Incremental update with captured edit ops.
+    Partial { edit_ops: Vec<EditOp> },
+}
+
 /// Whether a buffer's content is loaded from disk.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MaterializationState {
@@ -313,7 +322,9 @@ pub struct BufferState {
     pub isearch: Option<ISearchState>,
     pub last_search: Option<String>,
 
-    // Cached annotations (from syntax driver)
+    // Syntax highlighting
+    pending_syntax_request: Option<SyntaxRequest>,
+    pending_syntax_seq: u64,
     syntax_highlights: Rc<Vec<(usize, HighlightSpan)>>,
     bracket_pairs: Rc<Vec<BracketPair>>,
     matching_bracket: Option<(usize, usize)>,
@@ -367,6 +378,8 @@ impl BufferState {
             change_reason: ChangeReason::Init,
             isearch: None,
             last_search: None,
+            pending_syntax_request: None,
+            pending_syntax_seq: 0,
             syntax_highlights: Rc::new(Vec::new()),
             bracket_pairs: Rc::new(Vec::new()),
             matching_bracket: None,
@@ -448,6 +461,7 @@ impl BufferState {
         self.content_hash = doc.content_hash();
         self.doc = doc;
         self.materialization = MaterializationState::Materialized;
+        self.set_syntax_full();
     }
 
     /// Dematerialize: replace doc with InertDoc, discard undo.
@@ -455,11 +469,45 @@ impl BufferState {
         self.doc = Arc::new(InertDoc);
         self.undo = UndoHistory::default();
         self.materialization = MaterializationState::NotMaterialized;
+        self.pending_syntax_request = None;
     }
 
     /// Mark that materialization has been requested.
     pub fn mark_materialization_requested(&mut self) {
         self.materialization = MaterializationState::Requested;
+    }
+
+    // ── Syntax request ──
+
+    pub fn pending_syntax_request(&self) -> Option<&SyntaxRequest> {
+        self.pending_syntax_request.as_ref()
+    }
+
+    pub fn pending_syntax_seq(&self) -> u64 {
+        self.pending_syntax_seq
+    }
+
+    fn set_syntax_full(&mut self) {
+        self.pending_syntax_request = Some(SyntaxRequest::Full);
+        self.pending_syntax_seq += 1;
+    }
+
+    fn append_syntax_edit(&mut self, op: EditOp) {
+        match &mut self.pending_syntax_request {
+            Some(SyntaxRequest::Full) => {
+                // Full subsumes Partial — keep Full but bump seq
+                // so derived re-fires with the updated doc.
+                self.pending_syntax_seq += 1;
+            }
+            Some(SyntaxRequest::Partial { edit_ops }) => {
+                edit_ops.push(op);
+                self.pending_syntax_seq += 1;
+            }
+            None => {
+                self.pending_syntax_request = Some(SyntaxRequest::Partial { edit_ops: vec![op] });
+                self.pending_syntax_seq += 1;
+            }
+        }
     }
 
     /// Edit the document at the cursor row. Shifts annotations and marks
@@ -490,6 +538,7 @@ impl BufferState {
         let (new_doc, result) = f(doc);
         self.version = self.version + 1;
         self.doc = new_doc;
+        self.set_syntax_full();
         self.sync_annotations(edit_row, old_lines, old_ver);
         result
     }
@@ -502,14 +551,13 @@ impl BufferState {
         let old_lines = doc.line_count();
         let old_ver = self.version;
         let new_doc = doc.insert(char_idx, text);
-        self.undo.push_op(
-            EditOp {
-                offset: char_idx,
-                old_text: String::new(),
-                new_text: text.to_string(),
-            },
-            char_idx,
-        );
+        let op = EditOp {
+            offset: char_idx,
+            old_text: String::new(),
+            new_text: text.to_string(),
+        };
+        self.undo.push_op(op.clone(), char_idx);
+        self.append_syntax_edit(op);
         self.version = self.version + 1;
         self.last_edit_kind = Some(EditKind::Insert);
         self.doc = new_doc;
@@ -524,14 +572,13 @@ impl BufferState {
         let old_ver = self.version;
         let old_text = doc.slice(start, end);
         let new_doc = doc.remove(start, end);
-        self.undo.push_op(
-            EditOp {
-                offset: start,
-                old_text,
-                new_text: String::new(),
-            },
-            start,
-        );
+        let op = EditOp {
+            offset: start,
+            old_text,
+            new_text: String::new(),
+        };
+        self.undo.push_op(op.clone(), start);
+        self.append_syntax_edit(op);
         self.version = self.version + 1;
         self.last_edit_kind = Some(EditKind::Delete);
         self.doc = new_doc;
@@ -547,6 +594,7 @@ impl BufferState {
         self.bracket_pairs = Rc::new(Vec::new());
         self.matching_bracket = None;
         self.status = BufferStatus::new();
+        self.set_syntax_full();
         self.mark_modified_if_dirty();
     }
 
@@ -606,6 +654,7 @@ impl BufferState {
         self.last_seen_seq = 0;
         self.content_hash = self.doc().content_hash();
         self.change_seq = ChangeSeq(led_core::next_change_seq());
+        self.set_syntax_full();
     }
 
     /// Save-as completed: docstore confirmed save to new path.
@@ -774,6 +823,7 @@ impl BufferState {
         self.undo.set_undo_cursor(Some(pos));
         self.version = self.version + 1;
         self.doc = doc;
+        self.set_syntax_full();
         Some(restore_cursor)
     }
 
@@ -827,6 +877,7 @@ impl BufferState {
 
         self.version = self.version + 1;
         self.doc = doc;
+        self.set_syntax_full();
         Some(restore_cursor)
     }
 
@@ -1061,6 +1112,15 @@ impl BufferState {
     pub fn request_indent(&mut self, row: Option<usize>, tab_fallback: bool) {
         self.pending_indent_row = row;
         self.pending_tab_fallback = tab_fallback;
+        if row.is_some() {
+            // Ensure a syntax cycle fires so the driver can compute
+            // the indent.  Bump seq even if a request already exists
+            // so derived re-evaluates with the new indent_row.
+            if self.pending_syntax_request.is_none() {
+                self.pending_syntax_request = Some(SyntaxRequest::Full);
+            }
+            self.pending_syntax_seq += 1;
+        }
     }
 
     /// Shift cached annotations (syntax highlights, diagnostics, git line

@@ -31,11 +31,6 @@ use tokio::sync::mpsc;
 
 #[derive(Clone)]
 pub enum SyntaxOut {
-    BufferOpened {
-        path: PathBuf,
-        doc: Arc<dyn Doc>,
-        version: u64,
-    },
     BufferChanged {
         path: PathBuf,
         doc: Arc<dyn Doc>,
@@ -49,11 +44,6 @@ pub enum SyntaxOut {
     },
     BufferClosed {
         path: PathBuf,
-    },
-    Reparse {
-        path: PathBuf,
-        doc: Arc<dyn Doc>,
-        version: u64,
     },
 }
 
@@ -101,43 +91,6 @@ pub fn driver(out: Stream<SyntaxOut>) -> Stream<SyntaxIn> {
 
         while let Some(cmd) = cmd_rx.recv().await {
             match cmd {
-                SyntaxOut::BufferOpened { path, doc, version } => {
-                    if let Some(ss) = SyntaxState::from_path_and_doc(&path, &*doc) {
-                        let highlights = ss.highlights_for_lines(&*doc, 0, 50);
-                        let state_highlights = to_state_highlights(&highlights);
-                        let bracket_pairs = to_state_brackets(&ss, &*doc, 0, 50);
-                        let matching = ss.matching_bracket(&*doc, 0, 0);
-
-                        let ver = version;
-                        let reindent_chars = ss.reindent_chars().clone();
-                        states.insert(
-                            path.clone(),
-                            BufSyntax {
-                                state: ss,
-                                last_ver: ver,
-                                last_doc: doc.clone(),
-                                last_scroll: 0,
-                                last_end_line: 50,
-                                cached_highlights: state_highlights.clone(),
-                                cached_brackets: bracket_pairs.clone(),
-                                reindent_chars: reindent_chars.clone(),
-                            },
-                        );
-
-                        let _ = tx
-                            .send(SyntaxIn {
-                                path,
-                                doc_version: ver,
-                                highlights: state_highlights,
-                                bracket_pairs,
-                                matching_bracket: matching,
-                                indent: None,
-                                indent_row: None,
-                                reindent_chars,
-                            })
-                            .await;
-                    }
-                }
                 SyntaxOut::BufferChanged {
                     path,
                     doc,
@@ -263,32 +216,6 @@ pub fn driver(out: Stream<SyntaxOut>) -> Stream<SyntaxIn> {
                 }
                 SyntaxOut::BufferClosed { path } => {
                     states.remove(&path);
-                }
-                SyntaxOut::Reparse { path, doc, version } => {
-                    if let Some(bs) = states.get_mut(&path) {
-                        bs.state.reparse(&*doc);
-                        bs.last_ver = version;
-                        bs.last_doc = doc.clone();
-                        let scroll_row = bs.last_scroll;
-                        let end_line = bs.last_end_line.max(1);
-                        let end = end_line.min(doc.line_count());
-                        bs.cached_highlights = to_state_highlights(
-                            &bs.state.highlights_for_lines(&*doc, scroll_row, end),
-                        );
-                        bs.cached_brackets = to_state_brackets(&bs.state, &*doc, scroll_row, end);
-                        let _ = tx
-                            .send(SyntaxIn {
-                                path,
-                                doc_version: version,
-                                highlights: bs.cached_highlights.clone(),
-                                bracket_pairs: bs.cached_brackets.clone(),
-                                matching_bracket: None,
-                                indent: None,
-                                indent_row: None,
-                                reindent_chars: bs.reindent_chars.clone(),
-                            })
-                            .await;
-                    }
                 }
             }
         }
