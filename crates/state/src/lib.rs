@@ -455,12 +455,24 @@ impl BufferState {
         &self.doc
     }
 
-    /// Materialize: load a document into a non-materialized buffer.
-    pub fn materialize(&mut self, doc_id: DocId, doc: Arc<dyn Doc>) {
+    /// Load or replace the document content.
+    ///
+    /// `clear_annotations`: when true, clears syntax highlights,
+    /// brackets, and diagnostics (use for reloads where content
+    /// changed externally).  When false, preserves annotations
+    /// (use for first materialization — diagnostics may have
+    /// arrived while the buffer was unmaterialized).
+    pub fn materialize(&mut self, doc_id: DocId, doc: Arc<dyn Doc>, clear_annotations: bool) {
         self.doc_id = doc_id;
         self.content_hash = doc.content_hash();
         self.doc = doc;
         self.materialization = MaterializationState::Materialized;
+        if clear_annotations {
+            self.syntax_highlights = Rc::new(Vec::new());
+            self.bracket_pairs = Rc::new(Vec::new());
+            self.matching_bracket = None;
+            self.status = BufferStatus::new();
+        }
         self.set_syntax_full();
     }
 
@@ -526,19 +538,21 @@ impl BufferState {
     }
 
     /// Edit the document at a specific row. Shifts annotations and marks
-    /// modified automatically. The closure returns `(new_doc, R)`.
+    /// modified automatically. The closure returns `(new_doc, edit_ops, R)`.
     pub fn edit_at<R>(
         &mut self,
         edit_row: usize,
-        f: impl FnOnce(&Arc<dyn Doc>) -> (Arc<dyn Doc>, R),
+        f: impl FnOnce(&Arc<dyn Doc>) -> (Arc<dyn Doc>, Vec<EditOp>, R),
     ) -> R {
         let doc = &self.doc;
         let old_lines = doc.line_count();
         let old_ver = self.version;
-        let (new_doc, result) = f(doc);
+        let (new_doc, ops, result) = f(doc);
         self.version = self.version + 1;
         self.doc = new_doc;
-        self.set_syntax_full();
+        for op in ops {
+            self.append_syntax_edit(op);
+        }
         self.sync_annotations(edit_row, old_lines, old_ver);
         result
     }
@@ -547,55 +561,37 @@ impl BufferState {
 
     /// Insert text at a character offset. Records undo op, shifts annotations.
     pub fn insert_text(&mut self, char_idx: CharOffset, text: &str) {
-        let doc = &self.doc;
-        let old_lines = doc.line_count();
-        let old_ver = self.version;
-        let new_doc = doc.insert(char_idx, text);
+        let edit_row = *self.cursor_row;
         let op = EditOp {
             offset: char_idx,
             old_text: String::new(),
             new_text: text.to_string(),
         };
         self.undo.push_op(op.clone(), char_idx);
-        self.append_syntax_edit(op);
-        self.version = self.version + 1;
+        self.edit_at(edit_row, |doc| {
+            let new_doc = doc.insert(char_idx, text);
+            (new_doc, vec![op], ())
+        });
         self.last_edit_kind = Some(EditKind::Insert);
-        self.doc = new_doc;
         self.touch();
-        self.sync_annotations(*self.cursor_row, old_lines, old_ver);
     }
 
     /// Remove text between two character offsets. Records undo op, shifts annotations.
     pub fn remove_text(&mut self, start: CharOffset, end: CharOffset) {
-        let doc = &self.doc;
-        let old_lines = doc.line_count();
-        let old_ver = self.version;
-        let old_text = doc.slice(start, end);
-        let new_doc = doc.remove(start, end);
+        let edit_row = *self.cursor_row;
+        let old_text = self.doc.slice(start, end);
         let op = EditOp {
             offset: start,
             old_text,
             new_text: String::new(),
         };
         self.undo.push_op(op.clone(), start);
-        self.append_syntax_edit(op);
-        self.version = self.version + 1;
+        self.edit_at(edit_row, |doc| {
+            let new_doc = doc.remove(start, end);
+            (new_doc, vec![op], ())
+        });
         self.last_edit_kind = Some(EditKind::Delete);
-        self.doc = new_doc;
         self.touch();
-        self.sync_annotations(*self.cursor_row, old_lines, old_ver);
-    }
-
-    /// Replace the document wholesale (undo, redo, external reload, sync).
-    /// Clears all cached annotations and invalidates in-flight diagnostics.
-    fn replace_doc(&mut self, doc: Arc<dyn Doc>) {
-        self.doc = doc;
-        self.syntax_highlights = Rc::new(Vec::new());
-        self.bracket_pairs = Rc::new(Vec::new());
-        self.matching_bracket = None;
-        self.status = BufferStatus::new();
-        self.set_syntax_full();
-        self.mark_modified_if_dirty();
     }
 
     // ── Save lifecycle ──
@@ -669,9 +665,7 @@ impl BufferState {
     /// File changed on disk with different content. Replaces doc,
     /// clears annotations, clamps cursor.
     pub fn reload_from_disk(&mut self, doc: Arc<dyn Doc>) {
-        let hash = doc.content_hash();
-        self.replace_doc(doc);
-        self.content_hash = hash;
+        self.materialize(self.doc_id, doc, true);
         self.change_seq = ChangeSeq(led_core::next_change_seq());
         // Clamp cursor to new document bounds
         let max_row = Row(self.doc().line_count().saturating_sub(1));

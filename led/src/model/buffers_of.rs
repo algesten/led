@@ -34,7 +34,7 @@ pub fn buffers_of(
                     let notify_hash = led_workspace::path_hash(&path);
 
                     let mut buf = BufferState::new(path.clone());
-                    buf.materialize(id, doc);
+                    buf.materialize(id, doc, false);
                     buf.set_cursor(led_core::Row(row), led_core::Col(col), led_core::Col(col));
                     buf.set_scroll(
                         led_core::Row(row.saturating_sub(buffer_height / 2)),

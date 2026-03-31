@@ -8,7 +8,7 @@ mod tabs;
 
 use std::rc::Rc;
 
-use led_core::{Action, CharOffset, Col, PanelSlot, Row};
+use led_core::{Action, CharOffset, Col, EditOp, PanelSlot, Row};
 use led_state::{AppState, Dimensions, EditKind, LspRequest};
 
 use super::{edit, file_search, find_file, jump, mov, search};
@@ -462,7 +462,13 @@ pub fn handle_action(state: &mut AppState, action: Action) -> bool {
                                 buf.edit_at(edit_row, |doc| {
                                     let d = doc.remove(start_char, end_char);
                                     let d = d.insert(start_char, &replacement);
-                                    (d, ())
+                                    let old_text = doc.slice(start_char, end_char);
+                                    let ops = vec![EditOp {
+                                        offset: start_char,
+                                        old_text,
+                                        new_text: replacement.clone(),
+                                    }];
+                                    (d, ops, ())
                                 });
                                 buf.touch();
                                 state.alerts.info = Some("Imports sorted".into());

@@ -485,7 +485,7 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
                         .insert(path.clone(), Rc::new(BufferState::new(path.clone())));
                 }
                 if let Some(buf) = s.buf_mut(&path) {
-                    buf.materialize(doc_id, doc);
+                    buf.materialize(doc_id, doc, false);
                     buf.set_cursor(
                         led_core::Row(cursor.0),
                         led_core::Col(cursor.1),
