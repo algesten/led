@@ -340,9 +340,9 @@ pub struct BufferState {
 }
 
 impl BufferState {
-    /// Create a ghost buffer — path known, no doc loaded.
-    /// Holds annotations (diagnostics, git status) until the file is opened.
-    pub fn ghost(path: PathBuf) -> Self {
+    /// Create an unmaterialized buffer for the given path.
+    /// Content is loaded later via `materialize()`.
+    pub fn new(path: PathBuf) -> Self {
         Self {
             doc_id: DocId(0),
             doc: Arc::new(InertDoc),
@@ -377,52 +377,6 @@ impl BufferState {
             is_preview: false,
             last_used: Instant::now(),
             status: BufferStatus::new(),
-            annotations_synced_ver: DocVersion(0),
-        }
-    }
-
-    /// Create a loaded buffer with doc present.
-    pub fn new(
-        doc_id: DocId,
-        doc: Arc<dyn Doc>,
-        path: Option<PathBuf>,
-        status: BufferStatus,
-    ) -> Self {
-        let content_hash = doc.content_hash();
-        Self {
-            doc_id,
-            doc,
-            materialization: MaterializationState::Materialized,
-            version: DocVersion(0),
-            undo: UndoHistory::default(),
-            path,
-            cursor_row: Row(0),
-            cursor_col: Col(0),
-            cursor_col_affinity: Col(0),
-            scroll_row: Row(0),
-            scroll_sub_line: SubLine(0),
-            tab_order: TabOrder(0),
-            mark: None,
-            last_edit_kind: None,
-            save_state: SaveState::Clean,
-            persisted_undo_len: 0,
-            chain_id: None,
-            last_seen_seq: 0,
-            content_hash,
-            change_seq: ChangeSeq(0),
-            change_reason: ChangeReason::Init,
-            isearch: None,
-            last_search: None,
-            syntax_highlights: Rc::new(Vec::new()),
-            bracket_pairs: Rc::new(Vec::new()),
-            matching_bracket: None,
-            pending_indent_row: None,
-            pending_tab_fallback: false,
-            reindent_chars: Arc::from([]),
-            completion_triggers: Vec::new(),
-            is_preview: false,
-            last_used: Instant::now(),
-            status,
             annotations_synced_ver: DocVersion(0),
         }
     }
@@ -951,7 +905,7 @@ impl BufferState {
     // ── Annotations (offer pattern) ──
 
     /// Accept diagnostics if they match the current document content.
-    /// Ghost buffers (no doc) always accept — no content to go stale against.
+    /// Unmaterialized buffers always accept — no content to go stale against.
     pub fn offer_diagnostics(
         &mut self,
         diags: Vec<led_lsp::Diagnostic>,

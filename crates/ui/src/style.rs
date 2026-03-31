@@ -470,12 +470,8 @@ mod tests {
 
         let test_path: PathBuf = "test.rs".into();
         let doc = TextDoc::from_reader("hello world\n".as_bytes()).unwrap();
-        let buf = BufferState::new(
-            DocId(1),
-            Arc::new(doc),
-            Some(test_path.clone()),
-            Default::default(),
-        );
+        let mut buf = BufferState::new(test_path.clone());
+        buf.materialize(DocId(1), Arc::new(doc));
 
         let mut state = AppState::new(Startup {
             headless: true,

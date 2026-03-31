@@ -33,7 +33,8 @@ pub fn buffers_of(
                     let buffer_height = state.dims.map_or(20, |d| d.buffer_height());
                     let notify_hash = led_workspace::path_hash(&path);
 
-                    let mut buf = BufferState::new(id, doc, Some(path), Default::default());
+                    let mut buf = BufferState::new(path.clone());
+                    buf.materialize(id, doc);
                     buf.set_cursor(led_core::Row(row), led_core::Col(col), led_core::Col(col));
                     buf.set_scroll(
                         led_core::Row(row.saturating_sub(buffer_height / 2)),
@@ -65,7 +66,7 @@ pub fn buffers_of(
                 }
 
                 // Duplicate detection: activate existing tab if same path is already open
-                // (only if it's a loaded buffer, not a ghost)
+                // (only if it's materialized, not just a path placeholder)
                 if state
                     .buffers
                     .get(&path)

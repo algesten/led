@@ -479,10 +479,10 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
                 }
                 s.session.positions.remove(&path);
 
-                // Ensure buffer exists (ghost if needed), then materialize
+                // Ensure buffer exists, then materialize
                 if !s.buffers.contains_key(&path) {
                     s.buffers_mut()
-                        .insert(path.clone(), Rc::new(BufferState::ghost(path.clone())));
+                        .insert(path.clone(), Rc::new(BufferState::new(path.clone())));
                 }
                 if let Some(buf) = s.buf_mut(&path) {
                     buf.materialize(doc_id, doc);
@@ -621,7 +621,7 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
             Mut::GitLineStatuses { path, statuses } => {
                 if !s.buffers.contains_key(&path) {
                     s.buffers_mut()
-                        .insert(path.clone(), Rc::new(BufferState::ghost(path.clone())));
+                        .insert(path.clone(), Rc::new(BufferState::new(path.clone())));
                 }
                 if let Some(buf) = s.buf_mut(&path) {
                     buf.set_git_line_statuses(statuses);
@@ -936,10 +936,10 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
                 diagnostics,
                 content_hash,
             } => {
-                // Ensure buffer exists (create ghost if needed)
+                // Ensure buffer exists (create unmaterialized if needed)
                 if !s.buffers.contains_key(&path) {
                     s.buffers_mut()
-                        .insert(path.clone(), Rc::new(BufferState::ghost(path.clone())));
+                        .insert(path.clone(), Rc::new(BufferState::new(path.clone())));
                 }
                 if let Some(buf) = s.buf_mut(&path) {
                     buf.offer_diagnostics(diagnostics, led_core::ContentHash(content_hash));
@@ -948,7 +948,7 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
             Mut::LspInlayHints { path, hints } => {
                 if !s.buffers.contains_key(&path) {
                     s.buffers_mut()
-                        .insert(path.clone(), Rc::new(BufferState::ghost(path.clone())));
+                        .insert(path.clone(), Rc::new(BufferState::new(path.clone())));
                 }
                 if let Some(buf) = s.buf_mut(&path) {
                     buf.set_inlay_hints(hints);

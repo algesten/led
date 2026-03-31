@@ -14,7 +14,7 @@ use led_syntax::SyntaxOut;
 use led_timers::{Schedule, TimersOut};
 use led_workspace::{SessionBuffer, SessionData, WorkspaceOut};
 
-/// Key for deduping on loaded (non-ghost) buffer paths.
+/// Key for deduping on materialized buffer paths.
 fn loaded_buf_paths(s: &Rc<AppState>) -> Vec<PathBuf> {
     let mut paths: Vec<PathBuf> = s
         .buffers
