@@ -11,8 +11,8 @@ use led_config_file::ConfigFile;
 use led_core::keys::{Keymap, Keys};
 use led_core::theme::Theme;
 use led_core::{
-    ChangeSeq, CharOffset, Col, ContentHash, Doc, DocId, DocVersion, EditOp, PanelSlot, Row,
-    Startup, SubLine, TabOrder, UndoHistory, Versioned,
+    ChangeSeq, CharOffset, Col, ContentHash, Doc, DocId, DocVersion, EditOp, InertDoc, PanelSlot,
+    Row, Startup, SubLine, TabOrder, UndoHistory, Versioned,
 };
 pub use led_workspace::Workspace;
 pub use led_workspace::{SessionBuffer, SessionRestorePhase};
@@ -262,14 +262,26 @@ pub struct ISearchState {
     pub match_idx: Option<usize>,
 }
 
+/// Whether a buffer's content is loaded from disk.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MaterializationState {
+    /// Path known, no content loaded. Doc is InertDoc.
+    NotMaterialized,
+    /// Open requested to docstore, waiting for response.
+    Requested,
+    /// Content loaded from disk. Doc is TextDoc.
+    Materialized,
+}
+
 #[derive(Clone)]
 pub struct BufferState {
     // Identity
     doc_id: DocId,
     path: Option<PathBuf>,
 
-    // Content (None for ghost buffers — path known but file not loaded)
-    doc: Option<Arc<dyn Doc>>,
+    // Content (InertDoc for non-materialized buffers)
+    doc: Arc<dyn Doc>,
+    materialization: MaterializationState,
 
     // Editing state (owned by buffer, not doc)
     version: DocVersion,
@@ -333,7 +345,8 @@ impl BufferState {
     pub fn ghost(path: PathBuf) -> Self {
         Self {
             doc_id: DocId(0),
-            doc: None,
+            doc: Arc::new(InertDoc),
+            materialization: MaterializationState::NotMaterialized,
             version: DocVersion(0),
             undo: UndoHistory::default(),
             path: Some(path),
@@ -378,7 +391,8 @@ impl BufferState {
         let content_hash = doc.content_hash();
         Self {
             doc_id,
-            doc: Some(doc),
+            doc,
+            materialization: MaterializationState::Materialized,
             version: DocVersion(0),
             undo: UndoHistory::default(),
             path,
@@ -460,36 +474,51 @@ impl BufferState {
 
     // ── Document ──
 
-    /// Whether this buffer has a loaded document (not a ghost).
-    pub fn is_loaded(&self) -> bool {
-        self.doc.is_some()
+    /// Whether this buffer has materialized content.
+    pub fn is_materialized(&self) -> bool {
+        self.materialization == MaterializationState::Materialized
     }
 
-    /// Get the document. Panics on ghost buffers.
+    pub fn materialization(&self) -> MaterializationState {
+        self.materialization
+    }
+
+    /// Get the document (InertDoc for non-materialized buffers).
     pub fn doc(&self) -> &Arc<dyn Doc> {
-        self.doc
-            .as_ref()
-            .unwrap_or_else(|| panic!("doc() called on ghost buffer: path={:?}", self.path))
+        &self.doc
     }
 
-    /// Load a document into a ghost buffer.
-    pub fn load_doc(&mut self, doc_id: DocId, doc: Arc<dyn Doc>) {
+    /// Materialize: load a document into a non-materialized buffer.
+    pub fn materialize(&mut self, doc_id: DocId, doc: Arc<dyn Doc>) {
         self.doc_id = doc_id;
         self.content_hash = doc.content_hash();
-        self.doc = Some(doc);
+        self.doc = doc;
+        self.materialization = MaterializationState::Materialized;
+    }
+
+    /// Dematerialize: replace doc with InertDoc, discard undo.
+    pub fn dematerialize(&mut self) {
+        self.doc = Arc::new(InertDoc);
+        self.undo = UndoHistory::default();
+        self.materialization = MaterializationState::NotMaterialized;
+    }
+
+    /// Mark that materialization has been requested.
+    pub fn mark_materialization_requested(&mut self) {
+        self.materialization = MaterializationState::Requested;
     }
 
     /// Edit the document at the cursor row. Shifts annotations and marks
     /// modified automatically. The closure returns `(new_doc, R)` where `R`
     /// is forwarded to the caller (typically cursor position info).
     pub fn edit<R>(&mut self, f: impl FnOnce(&Arc<dyn Doc>) -> (Arc<dyn Doc>, R)) -> R {
-        let doc = self.doc.as_ref().expect("edit() called on ghost buffer");
+        let doc = &self.doc;
         let old_lines = doc.line_count();
         let old_ver = self.version;
         let edit_row = *self.cursor_row;
         let (new_doc, result) = f(doc);
         self.version = self.version + 1;
-        self.doc = Some(new_doc);
+        self.doc = new_doc;
         self.sync_annotations(edit_row, old_lines, old_ver);
         result
     }
@@ -501,12 +530,12 @@ impl BufferState {
         edit_row: usize,
         f: impl FnOnce(&Arc<dyn Doc>) -> (Arc<dyn Doc>, R),
     ) -> R {
-        let doc = self.doc.as_ref().expect("edit_at() called on ghost buffer");
+        let doc = &self.doc;
         let old_lines = doc.line_count();
         let old_ver = self.version;
         let (new_doc, result) = f(doc);
         self.version = self.version + 1;
-        self.doc = Some(new_doc);
+        self.doc = new_doc;
         self.sync_annotations(edit_row, old_lines, old_ver);
         result
     }
@@ -515,7 +544,7 @@ impl BufferState {
 
     /// Insert text at a character offset. Records undo op, shifts annotations.
     pub fn insert_text(&mut self, char_idx: CharOffset, text: &str) {
-        let doc = self.doc.as_ref().expect("insert_text on ghost");
+        let doc = &self.doc;
         let old_lines = doc.line_count();
         let old_ver = self.version;
         let new_doc = doc.insert(char_idx, text);
@@ -528,13 +557,15 @@ impl BufferState {
             char_idx,
         );
         self.version = self.version + 1;
-        self.doc = Some(new_doc);
+        self.last_edit_kind = Some(EditKind::Insert);
+        self.doc = new_doc;
+        self.touch();
         self.sync_annotations(*self.cursor_row, old_lines, old_ver);
     }
 
     /// Remove text between two character offsets. Records undo op, shifts annotations.
     pub fn remove_text(&mut self, start: CharOffset, end: CharOffset) {
-        let doc = self.doc.as_ref().expect("remove_text on ghost");
+        let doc = &self.doc;
         let old_lines = doc.line_count();
         let old_ver = self.version;
         let old_text = doc.slice(start, end);
@@ -548,14 +579,16 @@ impl BufferState {
             start,
         );
         self.version = self.version + 1;
-        self.doc = Some(new_doc);
+        self.last_edit_kind = Some(EditKind::Delete);
+        self.doc = new_doc;
+        self.touch();
         self.sync_annotations(*self.cursor_row, old_lines, old_ver);
     }
 
     /// Replace the document wholesale (undo, redo, external reload, sync).
     /// Clears all cached annotations and invalidates in-flight diagnostics.
     fn replace_doc(&mut self, doc: Arc<dyn Doc>) {
-        self.doc = Some(doc);
+        self.doc = doc;
         self.syntax_highlights = Rc::new(Vec::new());
         self.bracket_pairs = Rc::new(Vec::new());
         self.matching_bracket = None;
@@ -570,7 +603,7 @@ impl BufferState {
     /// Edits are recorded in undo so they can be undone.
     pub fn apply_save_cleanup(&mut self) {
         // Collect edits first to avoid borrow conflict
-        let doc = self.doc.as_ref().expect("cleanup on ghost");
+        let doc = &self.doc;
         let line_count = doc.line_count();
         let mut removals: Vec<(CharOffset, CharOffset)> = Vec::new();
 
@@ -599,7 +632,7 @@ impl BufferState {
 
         // Ensure final newline
         if needs_final_newline {
-            let doc = self.doc.as_ref().unwrap();
+            let doc = &self.doc;
             let last_row = Row(doc.line_count().saturating_sub(1));
             let len = doc.line_to_char(last_row).0 + doc.line_len(last_row);
             self.insert_text(CharOffset(len), "\n");
@@ -610,7 +643,7 @@ impl BufferState {
     /// flushed), marks clean, resets persistence, bumps change seq.
     /// Preserves annotations (content unchanged).
     pub fn save_completed(&mut self, doc: Arc<dyn Doc>) {
-        self.doc = Some(doc);
+        self.doc = doc;
         self.save_state = SaveState::Clean;
         self.undo.flush_pending();
         self.undo.reset_distance_from_save();
@@ -662,7 +695,7 @@ impl BufferState {
 
     /// Apply a single remote undo entry: update doc content and record in undo history.
     pub fn apply_remote_entry(&mut self, doc: Arc<dyn Doc>, entry: led_core::UndoEntry) {
-        self.doc = Some(doc);
+        self.doc = doc;
         self.undo.push_remote_entry(entry);
         self.version = self.version + 1;
     }
@@ -762,7 +795,7 @@ impl BufferState {
         }
 
         // Apply collected inverse ops
-        let mut doc = self.doc.as_ref().expect("undo on ghost").clone();
+        let mut doc = self.doc.clone();
         let mut restore_cursor = CharOffset(0);
         for (inv_op, direction, inv_cb, inv_ca) in ops {
             if !inv_op.old_text.is_empty() {
@@ -786,7 +819,7 @@ impl BufferState {
 
         self.undo.set_undo_cursor(Some(pos));
         self.version = self.version + 1;
-        self.doc = Some(doc);
+        self.doc = doc;
         Some(restore_cursor)
     }
 
@@ -818,7 +851,7 @@ impl BufferState {
         }
 
         // Apply collected ops
-        let mut doc = self.doc.as_ref().expect("redo on ghost").clone();
+        let mut doc = self.doc.clone();
         let mut restore_cursor = CharOffset(0);
         for (op, direction, cursor_after) in &ops {
             if !op.old_text.is_empty() {
@@ -839,7 +872,7 @@ impl BufferState {
         }
 
         self.version = self.version + 1;
-        self.doc = Some(doc);
+        self.doc = doc;
         Some(restore_cursor)
     }
 
@@ -908,9 +941,6 @@ impl BufferState {
     pub fn last_edit_kind(&self) -> Option<EditKind> {
         self.last_edit_kind
     }
-    pub fn set_last_edit_kind(&mut self, kind: EditKind) {
-        self.last_edit_kind = Some(kind);
-    }
     pub fn close_group_on_move(&mut self) {
         if self.last_edit_kind.is_some() {
             self.close_undo_group();
@@ -927,25 +957,24 @@ impl BufferState {
         diags: Vec<led_lsp::Diagnostic>,
         content_hash: ContentHash,
     ) -> bool {
-        if let Some(doc) = &self.doc {
-            let my_hash = doc.content_hash();
-            if content_hash == my_hash {
-                self.status.set_diagnostics(diags);
-                true
-            } else {
-                log::debug!(
-                    "offer_diagnostics rejected: incoming={:?} buffer={:?} path={:?} n_diags={}",
-                    content_hash,
-                    my_hash,
-                    self.path,
-                    diags.len()
-                );
-                false
-            }
-        } else {
-            // Ghost buffer — always accept
+        if !self.is_materialized() {
+            // Non-materialized buffer — always accept
+            self.status.set_diagnostics(diags);
+            return true;
+        }
+        let my_hash = self.doc.content_hash();
+        if content_hash == my_hash {
             self.status.set_diagnostics(diags);
             true
+        } else {
+            log::debug!(
+                "offer_diagnostics rejected: incoming={:?} buffer={:?} path={:?} n_diags={}",
+                content_hash,
+                my_hash,
+                self.path,
+                diags.len()
+            );
+            false
         }
     }
 
@@ -1027,16 +1056,13 @@ impl BufferState {
         chain_id: Option<String>,
         last_seen_seq: i64,
         content_hash: ContentHash,
+        distance_from_save: i32,
     ) {
         self.persisted_undo_len = persisted_undo_len;
         self.chain_id = chain_id;
         self.last_seen_seq = last_seen_seq;
         self.content_hash = content_hash;
-    }
-
-    /// Override the undo history's distance_from_save (e.g. during session restore).
-    pub fn set_undo_distance_from_save(&mut self, distance: i32) {
-        self.undo.set_distance_from_save(distance);
+        self.undo.set_distance_from_save(distance_from_save);
     }
 
     // ── Tab management & activity ──
@@ -1071,14 +1097,16 @@ impl BufferState {
     pub fn pending_indent_row(&self) -> Option<usize> {
         self.pending_indent_row
     }
-    pub fn set_pending_indent_row(&mut self, row: Option<usize>) {
-        self.pending_indent_row = row;
-    }
     pub fn pending_tab_fallback(&self) -> bool {
         self.pending_tab_fallback
     }
-    pub fn set_pending_tab_fallback(&mut self, fallback: bool) {
-        self.pending_tab_fallback = fallback;
+
+    /// Request auto-indent for a given row.  When `tab_fallback` is true,
+    /// a literal tab-stop will be inserted if the language server returns
+    /// no indent change.
+    pub fn request_indent(&mut self, row: Option<usize>, tab_fallback: bool) {
+        self.pending_indent_row = row;
+        self.pending_tab_fallback = tab_fallback;
     }
 
     /// Shift cached annotations (syntax highlights, diagnostics, git line

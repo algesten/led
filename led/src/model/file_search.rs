@@ -608,6 +608,9 @@ fn replace_selected(state: &mut AppState) {
             &replacement,
             Some(&query),
         );
+        if let Some(buf) = state.buf_mut(&bp) {
+            buf.close_group_on_move();
+        }
         let fs = state.file_search.as_mut().unwrap();
         fs.replace_stack.push(entry);
         remove_hit_from_results(fs, result_idx);
@@ -673,6 +676,9 @@ fn unreplace_selected(state: &mut AppState) {
             &entry.original_text,
             None, // unreplace: always literal
         );
+        if let Some(buf) = state.buf_mut(&bp) {
+            buf.close_group_on_move();
+        }
         let line_text = state
             .buffers
             .get(&bp)
@@ -769,6 +775,9 @@ fn replace_all(state: &mut AppState) {
                     replacement_len: replacement.len(),
                 });
             }
+            if let Some(buf) = state.buf_mut(&bp) {
+                buf.close_group_on_move();
+            }
         }
     }
 
@@ -857,6 +866,9 @@ pub fn apply_pending_replace(state: &mut AppState, buf_path: &std::path::Path) {
     close_undo_group(state, buf_path);
     for (row, ms, me, _original) in hits.iter().rev() {
         replace_in_buffer(state, buf_path, *row, *ms, *me, &replacement, Some(&query));
+    }
+    if let Some(buf) = state.buf_mut(buf_path) {
+        buf.close_group_on_move();
     }
 }
 

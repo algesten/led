@@ -23,9 +23,9 @@ use led_core::rx::Stream;
 use led_core::theme::Theme;
 use std::path::PathBuf;
 
-use led_core::{Action, Alert, PanelSlot};
+use led_core::{Action, Alert, Doc, DocId, PanelSlot};
 use led_state::{
-    AppState, BracketPair, BufferState, ChangeReason, Dimensions, HighlightSpan, SaveState,
+    AppState, BracketPair, BufferState, ChangeReason, Dimensions, HighlightSpan,
     SessionRestorePhase,
 };
 use led_workspace::Workspace;
@@ -305,6 +305,7 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
             buf.clear_mark();
             let (r, c, a) = edit::yank(&mut buf, &text);
             buf.set_cursor(led_core::Row(r), led_core::Col(c), led_core::Col(a));
+            action::close_group_on_move(&mut buf);
             let (sr, ssl) = mov::adjust_scroll(&buf, &dims);
             buf.set_scroll(led_core::Row(sr), led_core::SubLine(ssl));
             Some(Mut::BufferUpdate(path.clone(), buf, ChangeReason::Edit))
@@ -456,44 +457,57 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
             }
             Mut::BufferOpen {
                 path,
-                buf,
+                doc_id,
+                doc,
+                cursor,
+                scroll,
+                tab_order,
+                is_preview,
                 activate,
                 notify_hash,
                 session_restore_done,
                 clear_pending_jump,
+                undo_entries,
+                persisted_undo_len,
+                chain_id,
+                last_seen_seq,
+                distance_from_save,
             } => {
                 let will_activate = activate || s.active_buffer.is_none();
                 if will_activate {
                     s.active_buffer = Some(path.clone());
                 }
-                if let Some(p) = buf.path() {
-                    s.session.positions.remove(p);
+                s.session.positions.remove(&path);
+
+                // Ensure buffer exists (ghost if needed), then materialize
+                if !s.buffers.contains_key(&path) {
+                    s.buffers_mut()
+                        .insert(path.clone(), Rc::new(BufferState::ghost(path.clone())));
                 }
-                // If a ghost buffer exists for this path, load doc into it
-                // (preserving its annotations). Otherwise insert the new buffer.
-                if let Some(existing) = s.buf_mut(&path) {
-                    if !existing.is_loaded() {
-                        existing.load_doc(buf.doc_id(), buf.doc().clone());
-                        existing.set_cursor(
-                            buf.cursor_row(),
-                            buf.cursor_col(),
-                            buf.cursor_col_affinity(),
-                        );
-                        existing.set_scroll(buf.scroll_row(), buf.scroll_sub_line());
-                        existing.set_tab_order(buf.tab_order());
-                        existing.set_preview(buf.is_preview());
-                        if buf.save_state() == SaveState::Modified {
-                            existing.mark_modified_if_dirty();
-                        }
-                        existing.restore_session(
-                            buf.persisted_undo_len(),
-                            buf.chain_id().map(String::from),
-                            buf.last_seen_seq(),
-                            buf.content_hash(),
-                        );
+                if let Some(buf) = s.buf_mut(&path) {
+                    buf.materialize(doc_id, doc);
+                    buf.set_cursor(
+                        led_core::Row(cursor.0),
+                        led_core::Col(cursor.1),
+                        led_core::Col(cursor.1),
+                    );
+                    buf.set_scroll(led_core::Row(scroll.0), led_core::SubLine(scroll.1));
+                    buf.set_tab_order(led_core::TabOrder(tab_order));
+                    buf.set_preview(is_preview);
+                    if !undo_entries.is_empty() {
+                        buffers_of::apply_undo_entries(buf, &undo_entries);
                     }
-                } else {
-                    s.buffers_mut().insert(path.clone(), Rc::new(buf));
+                    let content_hash = buf.content_hash();
+                    buf.restore_session(
+                        persisted_undo_len,
+                        chain_id,
+                        last_seen_seq,
+                        content_hash,
+                        distance_from_save,
+                    );
+                    if distance_from_save != 0 {
+                        buf.mark_modified_if_dirty();
+                    }
                 }
                 s.notify_hash_to_buffer.insert(notify_hash, path.clone());
                 action::renumber_tabs(&mut s);
@@ -765,9 +779,8 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
                     }
                     if let Some(row) = indent_row {
                         if buf.pending_indent_row() == Some(row) && buf.version().0 == version {
-                            buf.set_pending_indent_row(None);
                             let was_tab = buf.pending_tab_fallback();
-                            buf.set_pending_tab_fallback(false);
+                            buf.request_indent(None, false);
                             if let Some(new_indent) = &indent {
                                 let cursor_on_row = buf.cursor_row().0 == row;
                                 edit::apply_indent(buf, row, new_indent, cursor_on_row);
@@ -776,6 +789,7 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
                                     edit::insert_soft_tab(buf, ts);
                                 }
                             }
+                            buf.close_group_on_move();
                             buf.mark_modified_if_dirty();
                         }
                     }
@@ -876,6 +890,7 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
                 for fe in edits {
                     if let Some(buf) = s.buf_mut(&fe.path) {
                         apply_text_edits(buf, &fe.edits);
+                        buf.close_group_on_move();
                     }
                 }
                 // Format-done signal (empty edits) → trigger pending save
@@ -1039,11 +1054,22 @@ enum Mut {
     },
     BufferOpen {
         path: PathBuf,
-        buf: BufferState,
+        doc_id: DocId,
+        doc: Arc<dyn Doc>,
+        cursor: (usize, usize),
+        scroll: (usize, usize),
+        tab_order: usize,
+        is_preview: bool,
         activate: bool,
         notify_hash: String,
         session_restore_done: bool,
         clear_pending_jump: bool,
+        /// Session restore: undo entries + persistence state
+        undo_entries: Vec<Vec<u8>>,
+        persisted_undo_len: usize,
+        chain_id: Option<String>,
+        last_seen_seq: i64,
+        distance_from_save: i32,
     },
     BufferSaved {
         path: PathBuf,

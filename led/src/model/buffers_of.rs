@@ -66,7 +66,11 @@ pub fn buffers_of(
 
                 // Duplicate detection: activate existing tab if same path is already open
                 // (only if it's a loaded buffer, not a ghost)
-                if state.buffers.get(&path).is_some_and(|b| b.is_loaded()) {
+                if state
+                    .buffers
+                    .get(&path)
+                    .is_some_and(|b| b.is_materialized())
+                {
                     return Some(Mut::ActivateBuffer(path));
                 }
 
@@ -114,12 +118,6 @@ pub fn buffers_of(
                 let notify_hash = led_workspace::path_hash(&path);
                 let content_hash = doc.content_hash();
 
-                let save_state = if distance_from_save != 0 {
-                    SaveState::Modified
-                } else {
-                    SaveState::Clean
-                };
-
                 // Apply pending jump position if this buffer matches
                 let pending_jump = state.jump.pending_position.as_ref().and_then(|p| {
                     if Some(&p.path) == Some(&path) {
@@ -139,33 +137,11 @@ pub fn buffers_of(
                     None => (cursor_row, cursor_col, scroll_row),
                 };
 
-                let mut buf = BufferState::new(id, doc, Some(path.clone()), Default::default());
+                let undo_entries = match undo_data {
+                    Some(undo) if undo.content_hash == *content_hash => undo.entries.clone(),
+                    _ => Vec::new(),
+                };
 
-                // Replay persisted undo entries into the buffer
-                if let Some(undo) = undo_data {
-                    if undo.content_hash == *content_hash {
-                        apply_undo_entries(&mut buf, &undo.entries);
-                        // Override distance_from_save to match persisted value,
-                        // since replay accumulates directions which may differ
-                        // from the distance at the time of the last flush.
-                        buf.set_undo_distance_from_save(undo.distance_from_save);
-                    }
-                }
-
-                buf.set_cursor(
-                    led_core::Row(cursor_row),
-                    led_core::Col(cursor_col),
-                    led_core::Col(cursor_col),
-                );
-                buf.set_scroll(
-                    led_core::Row(scroll_row),
-                    led_core::SubLine(scroll_sub_line),
-                );
-                buf.set_tab_order(led_core::TabOrder(tab_order));
-                if save_state == SaveState::Modified {
-                    buf.mark_modified_if_dirty();
-                }
-                buf.restore_session(persisted_undo_len, chain_id, last_seen_seq, content_hash);
                 let activate = if is_startup_arg {
                     is_last_arg
                 } else {
@@ -173,11 +149,21 @@ pub fn buffers_of(
                 };
                 Some(Mut::BufferOpen {
                     path,
-                    buf,
+                    doc_id: id,
+                    doc,
+                    cursor: (cursor_row, cursor_col),
+                    scroll: (scroll_row, scroll_sub_line),
+                    tab_order,
+                    is_preview: false,
                     activate,
                     notify_hash,
                     session_restore_done: is_session_restore && state.session.positions.len() == 1,
                     clear_pending_jump,
+                    undo_entries,
+                    persisted_undo_len,
+                    chain_id,
+                    last_seen_seq,
+                    distance_from_save,
                 })
             }
             Ok(DocStoreIn::Saved { id, doc }) => {
@@ -277,7 +263,7 @@ fn find_buf_by_doc_id<'a>(state: &'a AppState, doc_id: DocId) -> Option<&'a Rc<B
 }
 
 /// Apply persisted undo entries to a buffer, restoring edit history.
-fn apply_undo_entries(buf: &mut BufferState, entries: &[Vec<u8>]) {
+pub(super) fn apply_undo_entries(buf: &mut BufferState, entries: &[Vec<u8>]) {
     buf.close_undo_group();
     for entry_data in entries {
         let Ok(entry) = rmp_serde::from_slice::<led_core::UndoEntry>(entry_data) else {

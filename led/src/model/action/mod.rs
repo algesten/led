@@ -219,9 +219,8 @@ pub fn handle_action(state: &mut AppState, action: Action) -> bool {
                 let (r, c, _) = edit::insert_char(buf, ch);
                 buf.set_cursor(Row(r), Col(c), Col(0));
                 buf.set_cursor(Row(r), Col(c), Col(mov::reset_affinity(buf, dims)));
-                buf.set_last_edit_kind(EditKind::Insert);
                 if buf.reindent_chars().contains(&ch) {
-                    buf.set_pending_indent_row(Some(r));
+                    buf.request_indent(Some(r), false);
                 }
             });
             // Auto-trigger completion when no popup is showing
@@ -250,13 +249,13 @@ pub fn handle_action(state: &mut AppState, action: Action) -> bool {
             close_group_on_move(buf);
             let (r, c, a) = edit::insert_newline(buf);
             buf.set_cursor(Row(r), Col(c), Col(a));
-            buf.set_pending_indent_row(Some(r));
+            close_group_on_move(buf);
+            buf.request_indent(Some(r), false);
         }),
         Action::InsertTab => with_buf(state, |buf, _dims| {
             buf.clear_mark();
             close_group_on_move(buf);
-            buf.set_pending_indent_row(Some(buf.cursor_row().0));
-            buf.set_pending_tab_fallback(true);
+            buf.request_indent(Some(buf.cursor_row().0), true);
         }),
         Action::DeleteBackward => with_buf(state, |buf, dims| {
             buf.clear_mark();
@@ -266,7 +265,6 @@ pub fn handle_action(state: &mut AppState, action: Action) -> bool {
             if let Some((r, c, _)) = edit::delete_backward(buf) {
                 buf.set_cursor(Row(r), Col(c), Col(0));
                 buf.set_cursor(Row(r), Col(c), Col(mov::reset_affinity(buf, dims)));
-                buf.set_last_edit_kind(EditKind::Delete);
             }
         }),
         Action::DeleteForward => with_buf(state, |buf, dims| {
@@ -277,7 +275,6 @@ pub fn handle_action(state: &mut AppState, action: Action) -> bool {
             if let Some((r, c, _)) = edit::delete_forward(buf) {
                 buf.set_cursor(Row(r), Col(c), Col(0));
                 buf.set_cursor(Row(r), Col(c), Col(mov::reset_affinity(buf, dims)));
-                buf.set_last_edit_kind(EditKind::Delete);
             }
         }),
         Action::KillLine => {
@@ -289,6 +286,7 @@ pub fn handle_action(state: &mut AppState, action: Action) -> bool {
                         buf.set_cursor(Row(r), Col(c), Col(a));
                         killed_text = Some(killed);
                     }
+                    close_group_on_move(buf);
                     let (sr, ssl) = mov::adjust_scroll(buf, &dims);
                     buf.set_scroll(Row(sr), led_core::SubLine(ssl));
                     buf.touch();
@@ -312,6 +310,7 @@ pub fn handle_action(state: &mut AppState, action: Action) -> bool {
                         buf.clear_mark();
                         no_region = true;
                     }
+                    close_group_on_move(buf);
                     let (sr, ssl) = mov::adjust_scroll(buf, &dims);
                     buf.set_scroll(Row(sr), led_core::SubLine(ssl));
                     buf.touch();

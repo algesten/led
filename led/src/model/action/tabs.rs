@@ -13,7 +13,7 @@ pub(super) fn cycle_tab(state: &mut AppState, direction: i32) {
     let mut tabs: Vec<(PathBuf, usize)> = state
         .buffers
         .iter()
-        .filter(|(_, buf)| buf.is_loaded() && !buf.is_preview())
+        .filter(|(_, buf)| buf.is_materialized() && !buf.is_preview())
         .map(|(path, buf)| (path.clone(), buf.tab_order().0))
         .collect();
     tabs.sort_by_key(|&(_, order)| order);
@@ -78,7 +78,7 @@ fn do_kill_buffer(state: &mut AppState, path: &std::path::Path) {
     let mut tabs: Vec<(PathBuf, usize)> = state
         .buffers
         .iter()
-        .filter(|(p, buf)| p.as_path() != path && buf.is_loaded())
+        .filter(|(p, buf)| p.as_path() != path && buf.is_materialized())
         .map(|(p, buf)| (p.clone(), buf.tab_order().0))
         .collect();
     tabs.sort_by_key(|&(_, order)| order);

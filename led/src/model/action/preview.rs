@@ -63,7 +63,7 @@ pub(crate) fn evict_one_buffer(state: &mut AppState) {
     let victim = state
         .buffers
         .values()
-        .filter(|b| b.is_loaded() && !b.is_preview())
+        .filter(|b| b.is_materialized() && !b.is_preview())
         .filter(|b| b.path_buf() != state.active_buffer.as_ref())
         .filter(|b| !b.is_dirty())
         .min_by_key(|b| b.last_used())

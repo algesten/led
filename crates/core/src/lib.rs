@@ -13,7 +13,7 @@ mod versioned;
 
 pub use alert::{Alert, AlertExt};
 pub use config::Startup;
-pub use doc::{Doc, EditOp, TextDoc, UndoEntry, UndoHistory, apply_op_to_doc};
+pub use doc::{Doc, EditOp, InertDoc, TextDoc, UndoEntry, UndoHistory, apply_op_to_doc};
 pub use language::{LanguageId, LspContextId};
 pub use versioned::Versioned;
 pub use watch::{FileWatcher, Registration, WatchEvent, WatchEventKind, WatchMode};

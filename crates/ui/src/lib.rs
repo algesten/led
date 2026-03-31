@@ -183,7 +183,7 @@ pub fn driver(state: Stream<Rc<AppState>>) -> Stream<UiIn> {
         .filter(|s| tabs_overflow(s))
         .filter(|s| {
             s.buffers.values().any(|b| {
-                b.is_loaded()
+                b.is_materialized()
                     && !b.is_preview()
                     && b.path_buf() != s.active_buffer.as_ref()
                     && !b.is_dirty()

@@ -98,7 +98,7 @@ pub fn display_inputs(s: &AppState) -> Option<DisplayInputs> {
     let dims = s.dims?;
     let config_theme = s.config_theme.as_ref()?;
     let path = s.active_buffer.as_ref()?;
-    let buf = s.buffers.get(path).filter(|b| b.is_loaded())?;
+    let buf = s.buffers.get(path).filter(|b| b.is_materialized())?;
     let theme_arc = &config_theme.file;
     let theme = theme_arc.as_ref();
 
@@ -666,7 +666,7 @@ pub fn status_inputs(s: &AppState) -> StatusInputs {
     let (file_name, is_dirty, cursor_row, cursor_col) = s
         .active_buffer
         .as_ref()
-        .and_then(|path| s.buffers.get(path).filter(|b| b.is_loaded()))
+        .and_then(|path| s.buffers.get(path).filter(|b| b.is_materialized()))
         .map(|buf| {
             let fname = buf
                 .path()
@@ -926,7 +926,7 @@ pub fn tabs_inputs(s: &AppState) -> Option<TabsInputs> {
     let preview_active_style = style::resolve(theme, &theme.tabs.preview_active);
     let preview_inactive_style = style::resolve(theme, &theme.tabs.preview_inactive);
 
-    let mut bufs: Vec<_> = s.buffers.values().filter(|b| b.is_loaded()).collect();
+    let mut bufs: Vec<_> = s.buffers.values().filter(|b| b.is_materialized()).collect();
     bufs.sort_by_key(|b| b.tab_order());
 
     let entries = bufs

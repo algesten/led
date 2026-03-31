@@ -273,6 +273,66 @@ impl Clone for Box<dyn Doc> {
     }
 }
 
+// ── InertDoc ──
+
+/// A zero-content Doc for non-materialized buffers.
+/// All operations are safe no-ops.
+pub struct InertDoc;
+
+impl Doc for InertDoc {
+    fn line_count(&self) -> usize {
+        0
+    }
+    fn line(&self, _: Row) -> String {
+        String::new()
+    }
+    fn line_to_char(&self, _: Row) -> CharOffset {
+        CharOffset(0)
+    }
+    fn char_to_line(&self, _: CharOffset) -> Row {
+        Row(0)
+    }
+    fn line_len(&self, _: Row) -> usize {
+        0
+    }
+    fn len_bytes(&self) -> usize {
+        0
+    }
+    fn line_to_byte(&self, _: Row) -> usize {
+        0
+    }
+    fn byte_to_line(&self, _: usize) -> Row {
+        Row(0)
+    }
+    fn byte_to_char(&self, _: usize) -> usize {
+        0
+    }
+    fn char_to_byte(&self, _: usize) -> usize {
+        0
+    }
+    fn chunk_at_byte(&self, _: usize) -> (&str, usize) {
+        ("", 0)
+    }
+    fn content_hash(&self) -> ContentHash {
+        ContentHash(0)
+    }
+    fn insert(&self, _: CharOffset, _: &str) -> Arc<dyn Doc> {
+        Arc::new(InertDoc)
+    }
+    fn remove(&self, _: CharOffset, _: CharOffset) -> Arc<dyn Doc> {
+        Arc::new(InertDoc)
+    }
+    fn slice(&self, _: CharOffset, _: CharOffset) -> String {
+        String::new()
+    }
+    fn write_to(&self, _: &mut dyn io::Write) -> io::Result<()> {
+        Ok(())
+    }
+    fn clone_box(&self) -> Box<dyn Doc> {
+        Box::new(InertDoc)
+    }
+}
+
 // ── TextDoc ──
 
 pub struct TextDoc {

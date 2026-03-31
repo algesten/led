@@ -19,7 +19,7 @@ fn loaded_buf_paths(s: &Rc<AppState>) -> Vec<PathBuf> {
     let mut paths: Vec<PathBuf> = s
         .buffers
         .values()
-        .filter(|b| b.is_loaded())
+        .filter(|b| b.is_materialized())
         .filter_map(|b| b.path_buf().cloned())
         .collect();
     paths.sort();
@@ -68,7 +68,7 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
             let buffers: Vec<SessionBuffer> = s
                 .buffers
                 .values()
-                .filter(|b| b.is_loaded() && b.path().is_some())
+                .filter(|b| b.is_materialized() && b.path().is_some())
                 .filter(|b| !b.is_preview())
                 .map(|b| SessionBuffer {
                     file_path: b.path_buf().cloned().unwrap(),
@@ -276,7 +276,7 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
             s.buffers
                 .values()
                 .filter(|b| {
-                    b.is_loaded()
+                    b.is_materialized()
                         && b.save_state() == led_state::SaveState::Saving
                         && b.path().is_some()
                 })
@@ -361,7 +361,7 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
             s.buffers
                 .values()
                 .filter(|b| {
-                    b.is_loaded()
+                    b.is_materialized()
                         && b.path().is_some()
                         && !b.is_preview()
                         && (b.undo_history_len() > b.persisted_undo_len() || b.is_dirty())
@@ -513,7 +513,7 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
             let current: HashSet<PathBuf> = s
                 .buffers
                 .values()
-                .filter(|b| b.is_loaded())
+                .filter(|b| b.is_materialized())
                 .filter_map(|b| b.path_buf().cloned())
                 .collect();
             let removed: Vec<PathBuf> = known.difference(&current).cloned().collect();
@@ -663,7 +663,7 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
             let current: HashSet<PathBuf> = s
                 .buffers
                 .values()
-                .filter(|b| b.is_loaded())
+                .filter(|b| b.is_materialized())
                 .filter_map(|b| b.path_buf().cloned())
                 .collect();
             let added: Vec<PathBuf> = current.difference(&known).cloned().collect();

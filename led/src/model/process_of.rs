@@ -37,7 +37,7 @@ pub fn process_of(state: &Stream<Rc<AppState>>) -> Stream<Mut> {
             let buf = s
                 .buffers
                 .values()
-                .find(|b| b.is_loaded() && b.path_buf() == Some(last_arg))?;
+                .find(|b| b.is_materialized() && b.path_buf() == Some(last_arg))?;
             Some(Mut::ActivateBuffer(buf.path_buf()?.clone()))
         })
         .stream();

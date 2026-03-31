@@ -68,6 +68,7 @@ pub(super) fn handle_completion_action(state: &mut AppState, action: &Action) ->
                                 )
                             };
                             buf.set_cursor(led_core::Row(r), led_core::Col(c), led_core::Col(c));
+                            close_group_on_move(buf);
                         }
                         mov::shift_annotations(state, &path, edit_row, old_lines, old_ver);
 
@@ -86,6 +87,7 @@ pub(super) fn handle_completion_action(state: &mut AppState, action: &Action) ->
                                 .unwrap_or(0);
                             if let Some(buf) = state.buf_mut(&path) {
                                 super::super::apply_text_edits(buf, &item.additional_edits);
+                                close_group_on_move(buf);
                             }
                             mov::shift_annotations(state, &path, edit_row, old_lines, old_ver);
                         }
