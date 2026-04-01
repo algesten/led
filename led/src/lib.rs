@@ -51,7 +51,7 @@ impl Drop for RunGuards {
 ///
 /// When `startup.headless` is true, skips terminal setup and UI driver.
 /// `actions_in` — direct action injection stream (empty in production).
-/// `quit_tx` — signalled when `state.quit` becomes true.
+/// `quit_tx` — signalled when `state.phase` becomes `Exiting`.
 pub fn run(
     startup: Startup,
     actions_in: Stream<Action>,
@@ -131,7 +131,7 @@ pub fn run(
     let mut quit_tx = Some(quit_tx);
     state.on(move |opt: Option<&Rc<AppState>>| {
         if let Some(s) = opt {
-            if s.quit {
+            if s.phase == led_state::Phase::Exiting {
                 let needs_save = s.workspace.as_ref().is_some_and(|w| w.primary);
                 if s.session.saved || !needs_save {
                     if let Some(tx) = quit_tx.take() {

@@ -9,7 +9,7 @@ use led_core::rx::Stream;
 use led_docstore::DocStoreOut;
 use led_fs::FsOut;
 use led_lsp::LspOut;
-use led_state::{AppState, ChangeReason, LspRequest, SessionRestorePhase, SyntaxRequest};
+use led_state::{AppState, ChangeReason, LspRequest, Phase, SyntaxRequest};
 use led_syntax::SyntaxOut;
 use led_timers::{Schedule, TimersOut};
 use led_workspace::{SessionBuffer, SessionData, WorkspaceOut};
@@ -61,8 +61,8 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
 
     // Session save: triggered once when quit transitions to true (primary only)
     let session_save = state
-        .dedupe_by(|s| s.quit)
-        .filter(|s| s.quit)
+        .dedupe_by(|s| s.phase == Phase::Exiting)
+        .filter(|s| s.phase == Phase::Exiting)
         .filter(|s| s.workspace.as_ref().is_some_and(|w| w.primary))
         .map(|s| {
             let buffers: Vec<SessionBuffer> = s
@@ -168,8 +168,8 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
     // Only opens files that aren't already in a buffer; already-open files
     // are activated directly via ActivateBuffer in the model (see process_of).
     let startup_open = state
-        .dedupe_by(|s| s.session.restore_phase == SessionRestorePhase::Done)
-        .filter(|s| s.session.restore_phase == SessionRestorePhase::Done)
+        .dedupe_by(|s| s.phase == Phase::Running)
+        .filter(|s| s.phase == Phase::Running)
         .filter(|s| !s.startup.arg_paths.is_empty())
         .flat_map(|s| {
             let open_paths: std::collections::HashSet<&std::path::Path> =
@@ -848,8 +848,8 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
 
     // Shutdown
     let lsp_shutdown = state
-        .dedupe_by(|s| s.quit)
-        .filter(|s| s.quit)
+        .dedupe_by(|s| s.phase == Phase::Exiting)
+        .filter(|s| s.phase == Phase::Exiting)
         .map(|_| LspOut::Shutdown)
         .stream();
 

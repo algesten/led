@@ -2,22 +2,22 @@ use std::io;
 use std::rc::Rc;
 
 use led_core::rx::Stream;
-use led_state::{AppState, SessionRestorePhase};
+use led_state::{AppState, Phase};
 
 use super::Mut;
 
 /// Derive suspend/resume side effects from state.
 pub fn process_of(state: &Stream<Rc<AppState>>) -> Stream<Mut> {
-    // Suspend: perform terminal restore/re-init, then clear the flag
+    // Suspend: perform terminal restore/re-init, then emit Resumed
     let suspend_s = state
-        .filter(|s| s.suspend)
+        .filter(|s| s.phase == Phase::Suspended)
         .inspect(|_| suspend())
-        .map(|_| Mut::Suspend(false))
+        .map(|_| Mut::Resumed)
         .stream();
 
-    // Force redraw after resuming from suspend (true→false transition)
+    // Force redraw after resuming from suspend (Suspended→Running transition)
     let redraw_s = state
-        .map(|s| (s.suspend, s.force_redraw))
+        .map(|s| (s.phase == Phase::Suspended, s.force_redraw))
         .fold(
             (false, false, 0u64),
             |(_, prev_suspend, _), (suspend, redraw)| (prev_suspend, suspend, redraw),
@@ -30,8 +30,8 @@ pub fn process_of(state: &Stream<Rc<AppState>>) -> Stream<Mut> {
     // If the arg file was already opened by session restore, activate it
     // without re-opening through the docstore.
     let activate_arg_s = state
-        .dedupe_by(|s| s.session.restore_phase == SessionRestorePhase::Done)
-        .filter(|s| s.session.restore_phase == SessionRestorePhase::Done)
+        .dedupe_by(|s| s.phase == Phase::Running)
+        .filter(|s| s.phase == Phase::Running)
         .filter_map(|s| {
             let last_arg = s.startup.arg_paths.last()?;
             let buf = s
@@ -46,8 +46,8 @@ pub fn process_of(state: &Stream<Rc<AppState>>) -> Stream<Mut> {
     // making them resistant to auto-close. For multi-file args, also
     // reorder their tab_order to the end of the tab bar in arg order.
     let touch_args_s = state
-        .dedupe_by(|s| s.session.restore_phase == SessionRestorePhase::Done)
-        .filter(|s| s.session.restore_phase == SessionRestorePhase::Done)
+        .dedupe_by(|s| s.phase == Phase::Running)
+        .filter(|s| s.phase == Phase::Running)
         .filter(|s| !s.startup.arg_paths.is_empty())
         .filter_map(|s| {
             let reorder = s.startup.arg_paths.len() > 1;
@@ -111,6 +111,7 @@ fn suspend() {
     )
     .ok();
 
+    // SAFETY: raise(SIGTSTP) is a well-defined POSIX signal operation.
     unsafe { libc::raise(libc::SIGTSTP) };
 
     enable_raw_mode().ok();

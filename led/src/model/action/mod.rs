@@ -9,7 +9,7 @@ mod tabs;
 use std::rc::Rc;
 
 use led_core::{Action, CharOffset, Col, EditOp, PanelSlot, Row};
-use led_state::{AppState, Dimensions, EditKind, LspRequest};
+use led_state::{AppState, Dimensions, EditKind, LspRequest, Phase};
 
 use super::{edit, file_search, find_file, jump, mov, search};
 use helpers::{is_editing_action, maybe_close_group, should_record, with_buf};
@@ -144,10 +144,10 @@ pub fn handle_action(state: &mut AppState, action: Action) -> bool {
             };
         }
         Action::Quit => {
-            state.quit = true;
+            state.phase = Phase::Exiting;
         }
         Action::Suspend => {
-            state.suspend = true;
+            state.phase = Phase::Suspended;
         }
 
         // ── Resize ──
@@ -168,18 +168,30 @@ pub fn handle_action(state: &mut AppState, action: Action) -> bool {
                 editor::handle_editor_movement(state, &action);
             }
         }
-        Action::MoveLeft => with_buf(state, |buf, dims| {
-            let (r, c, _) = mov::move_left(buf);
-            buf.set_cursor(Row(r), Col(c), Col(0));
-            buf.set_cursor(Row(r), Col(c), Col(mov::reset_affinity(buf, dims)));
-            close_group_on_move(buf);
-        }),
-        Action::MoveRight => with_buf(state, |buf, dims| {
-            let (r, c, _) = mov::move_right(buf);
-            buf.set_cursor(Row(r), Col(c), Col(0));
-            buf.set_cursor(Row(r), Col(c), Col(mov::reset_affinity(buf, dims)));
-            close_group_on_move(buf);
-        }),
+        Action::MoveLeft => {
+            if state.focus == PanelSlot::Side {
+                browser::handle_browser_collapse(state);
+            } else {
+                with_buf(state, |buf, dims| {
+                    let (r, c, _) = mov::move_left(buf);
+                    buf.set_cursor(Row(r), Col(c), Col(0));
+                    buf.set_cursor(Row(r), Col(c), Col(mov::reset_affinity(buf, dims)));
+                    close_group_on_move(buf);
+                });
+            }
+        }
+        Action::MoveRight => {
+            if state.focus == PanelSlot::Side {
+                browser::handle_browser_expand(state);
+            } else {
+                with_buf(state, |buf, dims| {
+                    let (r, c, _) = mov::move_right(buf);
+                    buf.set_cursor(Row(r), Col(c), Col(0));
+                    buf.set_cursor(Row(r), Col(c), Col(mov::reset_affinity(buf, dims)));
+                    close_group_on_move(buf);
+                });
+            }
+        }
         Action::LineStart => with_buf(state, |buf, dims| {
             let (r, c, _) = mov::line_start(buf);
             buf.set_cursor(Row(r), Col(c), Col(0));

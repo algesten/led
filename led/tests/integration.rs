@@ -1521,7 +1521,7 @@ fn session_restore_missing_file() {
     let t2 = TestHarness::with_dir(dir)
         .with_arg(file_b)
         .run(vec![WaitFor(|s| {
-            s.session.restore_phase == led_state::SessionRestorePhase::Done && !s.buffers.is_empty()
+            s.phase == led_state::Phase::Running && !s.buffers.is_empty()
         })]);
 
     // fileB.txt should be open; fileA.txt silently skipped
@@ -1552,9 +1552,8 @@ fn session_restore_all_files_missing() {
     std::fs::remove_file(t.dirs.workspace.join("two.txt")).expect("remove two.txt");
 
     // Run 2: session restore should complete (not hang) with zero buffers
-    let t2 = TestHarness::with_dir(dir).run(vec![WaitFor(|s| {
-        s.session.restore_phase == led_state::SessionRestorePhase::Done
-    })]);
+    let t2 =
+        TestHarness::with_dir(dir).run(vec![WaitFor(|s| s.phase == led_state::Phase::Running)]);
 
     assert!(t2.state.buffers.is_empty());
 }
@@ -1577,7 +1576,7 @@ fn session_restore_multiple_missing() {
 
     // Run 2: only b.txt should survive
     let t2 = TestHarness::with_dir(dir).run(vec![WaitFor(|s| {
-        s.session.restore_phase == led_state::SessionRestorePhase::Done && !s.buffers.is_empty()
+        s.phase == led_state::Phase::Running && !s.buffers.is_empty()
     })]);
 
     assert_eq!(t2.state.buffers.len(), 1);
@@ -1936,7 +1935,7 @@ fn session_restores_browser_expanded_dirs() {
 }
 
 #[test]
-fn session_restores_focus_on_browser() {
+fn session_resume_always_focuses_editor() {
     // Run 1: switch focus to browser, quit
     let t = TestHarness::new().with_file("hello\n").run(vec![
         WaitFor(|s| !s.buffers.is_empty()),
@@ -1946,12 +1945,13 @@ fn session_restores_focus_on_browser() {
     assert_eq!(t.state.focus, led_core::PanelSlot::Side);
     let dir = t.dirs.root.clone();
 
-    // Run 2: restore — focus should be on the browser
+    // Run 2: restore — focus should be on the editor (not browser),
+    // because buffers exist and focus is resolved to Main on entering Running.
     let t2 = TestHarness::with_dir(dir).run(vec![WaitFor(|s| !s.buffers.is_empty())]);
     assert_eq!(
         t2.state.focus,
-        led_core::PanelSlot::Side,
-        "focus should be restored to browser"
+        led_core::PanelSlot::Main,
+        "resume with buffers should always focus editor"
     );
 }
 
@@ -1976,9 +1976,7 @@ fn session_restores_focus_on_editor() {
 #[test]
 fn no_buffers_focus_falls_back_to_browser() {
     // Single instance, no file arguments — focus should land on browser
-    let t = TestHarness::new().run(vec![WaitFor(|s| {
-        s.session.restore_phase == led_state::SessionRestorePhase::Done
-    })]);
+    let t = TestHarness::new().run(vec![WaitFor(|s| s.phase == led_state::Phase::Running)]);
     assert_eq!(
         t.state.focus,
         led_core::PanelSlot::Side,
@@ -3720,7 +3718,7 @@ fn find_file_tab_completions_no_buffer() {
     let t = TestHarness::with_dir(root)
         .with_arg_dir(workspace)
         .run(vec![
-            WaitFor(|s| s.session.restore_phase == led_state::SessionRestorePhase::Done),
+            WaitFor(|s| s.phase == led_state::Phase::Running),
             Do(FindFile),
             WaitFor(|s| {
                 s.find_file
@@ -3913,7 +3911,7 @@ fn find_file_opens_nonexistent_in_project_dir() {
     let t = TestHarness::with_dir(root)
         .with_arg_dir(workspace)
         .run(vec![
-            WaitFor(|s| s.session.restore_phase == led_state::SessionRestorePhase::Done),
+            WaitFor(|s| s.phase == led_state::Phase::Running),
             Do(FindFile),
             WaitFor(|s| s.find_file.is_some()),
             Do(InsertChar('n')),
@@ -4760,9 +4758,7 @@ fn directory_opens_browser_focused() {
 
     let t = TestHarness::with_dir(root)
         .with_arg_dir(workspace)
-        .run(vec![WaitFor(|s| {
-            s.session.restore_phase == led_state::SessionRestorePhase::Done
-        })]);
+        .run(vec![WaitFor(|s| s.phase == led_state::Phase::Running)]);
 
     assert_eq!(
         t.state.focus,

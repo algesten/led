@@ -137,14 +137,6 @@ pub struct RestoredSession {
     pub kv: HashMap<String, String>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub enum SessionRestorePhase {
-    #[default]
-    Pending,
-    Restoring,
-    Done,
-}
-
 // ── Driver ──
 
 /// Start the workspace driver. Takes a stream of commands,

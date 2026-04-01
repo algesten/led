@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use led_core::PanelSlot;
 use led_core::rx::Stream;
-use led_state::{JumpPosition, SessionRestorePhase};
+use led_state::JumpPosition;
 use led_workspace::{SessionBuffer, WorkspaceIn as WI};
 
 use super::Mut;
@@ -74,7 +74,6 @@ pub fn session_of(workspace_in: &Stream<WI>) -> Stream<Mut> {
                         browser_expanded_dirs.iter().cloned().collect();
 
                     Mut::SessionRestored {
-                        restore_phase: SessionRestorePhase::Restoring,
                         active_tab_order: Some(session.active_tab_order),
                         show_side_panel: session.show_side_panel,
                         restored_focus,
@@ -89,7 +88,6 @@ pub fn session_of(workspace_in: &Stream<WI>) -> Stream<Mut> {
                     }
                 }
                 None => Mut::SessionRestored {
-                    restore_phase: SessionRestorePhase::Done,
                     active_tab_order: None,
                     show_side_panel: true,
                     restored_focus: None,

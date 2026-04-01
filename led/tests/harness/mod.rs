@@ -248,8 +248,7 @@ impl TestHarness {
                         // Wait for session restore to complete, then for files to open
                         loop {
                             if let Some(ref s) = *last_for_wait.borrow() {
-                                let phase_done =
-                                    s.session.restore_phase == led_state::SessionRestorePhase::Done;
+                                let phase_done = s.phase == led_state::Phase::Running;
                                 let files_ready = s.buffers.len() >= file_count;
                                 if phase_done && files_ready {
                                     break;

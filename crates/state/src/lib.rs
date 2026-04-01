@@ -14,8 +14,33 @@ use led_core::{
     ChangeSeq, CharOffset, Col, ContentHash, Doc, DocId, DocVersion, EditOp, InertDoc, PanelSlot,
     Row, Startup, SubLine, TabOrder, UndoHistory, Versioned,
 };
+pub use led_workspace::SessionBuffer;
 pub use led_workspace::Workspace;
-pub use led_workspace::{SessionBuffer, SessionRestorePhase};
+
+// ── Phase ──
+
+/// Application lifecycle phase.
+///
+/// ```text
+/// Init ──┬── Resuming ──┐
+///        └──────────────┼── Running ⇄ Suspended
+///                       │
+///        (any phase) ───┴── Exiting ── (process exit)
+/// ```
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Phase {
+    /// Waiting for workspace, config, session load.
+    #[default]
+    Init,
+    /// Session found, buffers being opened from DB.
+    Resuming,
+    /// Fully operational. Focus is resolved on entry.
+    Running,
+    /// Terminal suspended (SIGTSTP). Returns to Running.
+    Suspended,
+    /// Quit requested. Session being saved.
+    Exiting,
+}
 
 pub mod file_search;
 
@@ -1364,7 +1389,6 @@ pub struct GitState {
 
 #[derive(Debug, Clone, Default)]
 pub struct SessionState {
-    pub restore_phase: SessionRestorePhase,
     pub restored_focus: Option<PanelSlot>,
     pub positions: HashMap<PathBuf, SessionBuffer>,
     pub active_tab_order: Option<usize>,
@@ -1487,11 +1511,10 @@ pub struct AppState {
     pub config_keys: Option<ConfigFile<Keys>>,
     pub config_theme: Option<ConfigFile<Theme>>,
     pub keymap: Option<Rc<Keymap>>,
+    pub phase: Phase,
     pub focus: PanelSlot,
     pub show_side_panel: bool,
     pub dims: Option<Dimensions>,
-    pub quit: bool,
-    pub suspend: bool,
     pub force_redraw: u64,
     pub alerts: AlertState,
     pub buffers: Rc<HashMap<PathBuf, Rc<BufferState>>>,
