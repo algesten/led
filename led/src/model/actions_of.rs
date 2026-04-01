@@ -88,16 +88,18 @@ fn map_key(
         }
 
         return match action {
-            Some(a) => vec![Mut::Action(a)],
-            None => vec![],
+            Some(a) if !requires_editor_focus(&a) || state.focus == PanelSlot::Main => {
+                vec![Mut::Action(a)]
+            }
+            _ => vec![],
         };
     }
 
-    match keymap.lookup(&combo, context) {
-        KeymapLookup::Action(action) => vec![Mut::Action(action)],
+    let action = match keymap.lookup(&combo, context) {
+        KeymapLookup::Action(action) => Some(action),
         KeymapLookup::ChordPrefix => {
             chord.set(Some(combo));
-            vec![]
+            None
         }
         KeymapLookup::Unbound => {
             if allow_char_insert(state) && !combo.ctrl && !combo.alt {
@@ -105,8 +107,14 @@ fn map_key(
                     return vec![Mut::Action(Action::InsertChar(c))];
                 }
             }
-            vec![]
+            None
         }
+    };
+    match action {
+        Some(a) if !requires_editor_focus(&a) || state.focus == PanelSlot::Main => {
+            vec![Mut::Action(a)]
+        }
+        _ => vec![],
     }
 }
 
@@ -120,6 +128,23 @@ fn resolve_context(state: &AppState) -> Option<&'static str> {
         PanelSlot::StatusBar => None,
         PanelSlot::Overlay => None,
     }
+}
+
+fn requires_editor_focus(action: &Action) -> bool {
+    matches!(
+        action,
+        Action::InsertChar(_)
+            | Action::InsertNewline
+            | Action::InsertTab
+            | Action::DeleteBackward
+            | Action::DeleteForward
+            | Action::KillLine
+            | Action::KillRegion
+            | Action::Yank
+            | Action::Undo
+            | Action::Redo
+            | Action::SortImports
+    )
 }
 
 fn allow_char_insert(state: &AppState) -> bool {
