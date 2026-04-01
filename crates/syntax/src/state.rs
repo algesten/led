@@ -546,6 +546,7 @@ mod tests {
     #[test]
     fn doc_chunks_terminates_at_chunk_boundary() {
         use crate::parse::DocChunks;
+        use led_core::{CharOffset, ContentHash, Row};
 
         // A doc whose chunk_at_byte always returns the *previous* chunk,
         // simulating the boundary condition that triggers the bug.
@@ -554,26 +555,26 @@ mod tests {
             fn line_count(&self) -> usize {
                 1
             }
-            fn line(&self, _: usize) -> String {
+            fn line(&self, _: Row) -> String {
                 "hello".into()
             }
-            fn line_to_char(&self, _: usize) -> usize {
-                0
+            fn line_to_char(&self, _: Row) -> CharOffset {
+                CharOffset(0)
             }
-            fn char_to_line(&self, _: usize) -> usize {
-                0
+            fn char_to_line(&self, _: CharOffset) -> Row {
+                Row(0)
             }
-            fn line_len(&self, _: usize) -> usize {
+            fn line_len(&self, _: Row) -> usize {
                 5
             }
             fn len_bytes(&self) -> usize {
                 5
             }
-            fn line_to_byte(&self, _: usize) -> usize {
+            fn line_to_byte(&self, _: Row) -> usize {
                 0
             }
-            fn byte_to_line(&self, _: usize) -> usize {
-                0
+            fn byte_to_line(&self, _: usize) -> Row {
+                Row(0)
             }
             fn byte_to_char(&self, i: usize) -> usize {
                 i
@@ -586,16 +587,16 @@ mod tests {
                 // byte_offset >= 3 the iterator sees available == 0.
                 ("hel", 0)
             }
-            fn content_hash(&self) -> u64 {
-                0
+            fn content_hash(&self) -> ContentHash {
+                ContentHash(0)
             }
-            fn insert(&self, _: usize, _: &str) -> Arc<dyn Doc> {
+            fn insert(&self, _: CharOffset, _: &str) -> Arc<dyn Doc> {
                 unimplemented!()
             }
-            fn remove(&self, _: usize, _: usize) -> Arc<dyn Doc> {
+            fn remove(&self, _: CharOffset, _: CharOffset) -> Arc<dyn Doc> {
                 unimplemented!()
             }
-            fn slice(&self, _: usize, _: usize) -> String {
+            fn slice(&self, _: CharOffset, _: CharOffset) -> String {
                 String::new()
             }
             fn write_to(&self, _: &mut dyn std::io::Write) -> std::io::Result<()> {
@@ -650,7 +651,7 @@ mod tests {
             expected.len(),
             actual,
             actual.len(),
-            doc.line(line),
+            doc.line(led_core::Row(line)),
         );
     }
 
@@ -909,7 +910,7 @@ fn run() {
             expected.len(),
             actual,
             actual.len(),
-            doc.line(line),
+            doc.line(led_core::Row(line)),
         );
     }
 
