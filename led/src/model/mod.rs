@@ -678,7 +678,6 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
             Mut::SessionRestored {
                 active_tab_order,
                 show_side_panel,
-                restored_focus,
                 positions,
                 pending_opens,
                 browser_selected,
@@ -693,7 +692,6 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
                 if let Some(ref mut dims) = s.dims {
                     dims.show_side_panel = show_side_panel;
                 }
-                s.session.restored_focus = restored_focus;
                 s.session.positions = positions;
                 let b = s.browser_mut();
                 b.selected = browser_selected;
@@ -985,8 +983,6 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
 /// Resolve focus when entering Running.
 /// Called exactly once per Init/Resuming → Running transition.
 fn resolve_focus(s: &mut AppState) {
-    s.session.restored_focus.take(); // consume — not used for focus decision
-
     if let Some(ref dir) = s.startup.arg_dir {
         let dir = dir.clone();
         let new_dirs = s.browser_mut().reveal(&dir);
@@ -1120,7 +1116,6 @@ enum Mut {
     SessionRestored {
         active_tab_order: Option<usize>,
         show_side_panel: bool,
-        restored_focus: Option<PanelSlot>,
         positions: HashMap<PathBuf, led_workspace::SessionBuffer>,
         pending_opens: Vec<PathBuf>,
         browser_selected: usize,

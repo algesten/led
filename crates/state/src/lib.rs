@@ -1389,7 +1389,6 @@ pub struct GitState {
 
 #[derive(Debug, Clone, Default)]
 pub struct SessionState {
-    pub restored_focus: Option<PanelSlot>,
     pub positions: HashMap<PathBuf, SessionBuffer>,
     pub active_tab_order: Option<usize>,
     pub pending_opens: Versioned<Vec<PathBuf>>,

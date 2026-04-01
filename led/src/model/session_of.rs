@@ -1,7 +1,6 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 
-use led_core::PanelSlot;
 use led_core::rx::Stream;
 use led_state::JumpPosition;
 use led_workspace::{SessionBuffer, WorkspaceIn as WI};
@@ -17,11 +16,6 @@ pub fn session_of(workspace_in: &Stream<WI>) -> Stream<Mut> {
             };
             match session {
                 Some(session) => {
-                    let restored_focus = session.kv.get("focus").map(|v| match v.as_str() {
-                        "side" => PanelSlot::Side,
-                        _ => PanelSlot::Main,
-                    });
-
                     let paths: Vec<PathBuf> = session
                         .buffers
                         .iter()
@@ -76,7 +70,6 @@ pub fn session_of(workspace_in: &Stream<WI>) -> Stream<Mut> {
                     Mut::SessionRestored {
                         active_tab_order: Some(session.active_tab_order),
                         show_side_panel: session.show_side_panel,
-                        restored_focus,
                         positions,
                         pending_opens: paths,
                         browser_selected,
@@ -90,7 +83,6 @@ pub fn session_of(workspace_in: &Stream<WI>) -> Stream<Mut> {
                 None => Mut::SessionRestored {
                     active_tab_order: None,
                     show_side_panel: true,
-                    restored_focus: None,
                     positions: HashMap::new(),
                     pending_opens: Vec::new(),
                     browser_selected: 0,
