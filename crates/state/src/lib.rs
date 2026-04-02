@@ -734,6 +734,7 @@ impl BufferState {
         self.persisted_undo_len = self.undo.entry_count();
         self.content_hash = self.doc().content_hash();
         self.change_seq = ChangeSeq(led_core::next_change_seq());
+        self.set_syntax_full();
     }
 
     /// Reload from persisted state with new chain. Clears annotations, updates persistence.
@@ -749,6 +750,7 @@ impl BufferState {
         self.persisted_undo_len = self.undo.entry_count();
         self.content_hash = self.doc().content_hash();
         self.change_seq = ChangeSeq(led_core::next_change_seq());
+        self.set_syntax_full();
     }
 
     // ── Undo flush ──
