@@ -88,14 +88,21 @@ impl BufferStatus {
         self.git_line_statuses = statuses;
     }
 
+    /// Clear diagnostics that touch a row whose content changed (e.g. text killed).
+    fn clear_diagnostics_on_row(&mut self, row: usize) {
+        self.diagnostics
+            .retain(|d| !(d.start_row <= row && d.end_row >= row));
+    }
+
     /// Shift line positions after a structural edit.
     fn shift_lines(&mut self, edit_row: usize, delta: isize) {
         self.diagnostics.retain_mut(|d| {
-            // Remove diagnostics on deleted lines
+            // Remove diagnostics on the edit row and deleted lines.
+            // The edit row's content changes during a structural edit
+            // (e.g. line join), so its diagnostics are stale.
             if delta < 0 {
-                let deleted_start = edit_row + 1;
                 let deleted_end = edit_row + (-delta) as usize;
-                if d.start_row >= deleted_start && d.end_row <= deleted_end {
+                if d.start_row >= edit_row && d.end_row <= deleted_end {
                     return false;
                 }
             }
@@ -1167,6 +1174,9 @@ impl BufferState {
         let new_lines = self.doc().line_count();
         let delta = new_lines as isize - old_lines as isize;
         if delta == 0 {
+            // No structural change, but the edit row's content changed.
+            // Clear stale diagnostics on that row.
+            self.status.clear_diagnostics_on_row(edit_row);
             self.annotations_synced_ver = cur_ver;
             return;
         }
@@ -1598,5 +1608,117 @@ impl AppState {
 
     pub fn lsp_mut(&mut self) -> &mut LspState {
         Rc::make_mut(&mut self.lsp)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn diag(start_row: usize, end_row: usize) -> led_lsp::Diagnostic {
+        led_lsp::Diagnostic {
+            start_row,
+            start_col: 0,
+            end_row,
+            end_col: 0,
+            severity: led_lsp::DiagnosticSeverity::Warning,
+            message: String::new(),
+            source: None,
+        }
+    }
+
+    #[test]
+    fn clear_diagnostics_on_row_removes_matching() {
+        // When text is killed on a line (delta=0), the diagnostic
+        // on that row should be cleared.
+        let mut status = BufferStatus::new();
+        status.set_diagnostics(vec![diag(5, 5), diag(8, 8)]);
+        status.clear_diagnostics_on_row(5);
+        assert_eq!(status.diagnostics().len(), 1);
+        assert_eq!(status.diagnostics()[0].start_row, 8);
+    }
+
+    #[test]
+    fn clear_diagnostics_on_row_removes_spanning() {
+        // A diagnostic that spans across the edit row should also be cleared
+        // (e.g. hint diagnostic covering rows 4-6, edit on row 5).
+        let mut status = BufferStatus::new();
+        status.set_diagnostics(vec![diag(4, 6), diag(8, 8)]);
+        status.clear_diagnostics_on_row(5);
+        assert_eq!(status.diagnostics().len(), 1);
+        assert_eq!(status.diagnostics()[0].start_row, 8);
+    }
+
+    #[test]
+    fn clear_diagnostics_on_row_keeps_others() {
+        let mut status = BufferStatus::new();
+        status.set_diagnostics(vec![diag(3, 3), diag(7, 7)]);
+        status.clear_diagnostics_on_row(5);
+        assert_eq!(status.diagnostics().len(), 2);
+    }
+
+    #[test]
+    fn shift_lines_removes_diagnostic_on_edit_row() {
+        // ctrl-k join: diagnostic on the edit row should be cleared
+        // because the line's content changed.
+        let mut status = BufferStatus::new();
+        status.set_diagnostics(vec![diag(5, 5)]);
+        status.shift_lines(5, -1);
+        assert!(status.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn shift_lines_removes_diagnostic_on_deleted_line_below() {
+        let mut status = BufferStatus::new();
+        status.set_diagnostics(vec![diag(6, 6)]);
+        status.shift_lines(5, -1);
+        assert!(status.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn shift_lines_shifts_diagnostic_below_deleted_range() {
+        let mut status = BufferStatus::new();
+        status.set_diagnostics(vec![diag(10, 10)]);
+        status.shift_lines(5, -2);
+        assert_eq!(status.diagnostics()[0].start_row, 8);
+        assert_eq!(status.diagnostics()[0].end_row, 8);
+    }
+
+    #[test]
+    fn shift_lines_keeps_diagnostic_above_edit_row() {
+        let mut status = BufferStatus::new();
+        status.set_diagnostics(vec![diag(3, 3)]);
+        status.shift_lines(5, -1);
+        assert_eq!(status.diagnostics()[0].start_row, 3);
+    }
+
+    #[test]
+    fn shift_lines_insert_does_not_remove_diagnostic_on_edit_row() {
+        // Inserting a line should not clear diagnostics on the edit row.
+        let mut status = BufferStatus::new();
+        status.set_diagnostics(vec![diag(5, 5)]);
+        status.shift_lines(5, 1);
+        assert_eq!(status.diagnostics()[0].start_row, 5);
+    }
+
+    #[test]
+    fn shift_lines_insert_shifts_diagnostic_below() {
+        let mut status = BufferStatus::new();
+        status.set_diagnostics(vec![diag(8, 8)]);
+        status.shift_lines(5, 1);
+        assert_eq!(status.diagnostics()[0].start_row, 9);
+    }
+
+    #[test]
+    fn shift_lines_multi_line_delete() {
+        // Delete 3 lines starting below edit_row.
+        // Diagnostic on edit_row: removed (content changed).
+        // Diagnostic on deleted lines: removed.
+        // Diagnostic below: shifted.
+        let mut status = BufferStatus::new();
+        status.set_diagnostics(vec![diag(5, 5), diag(7, 7), diag(10, 10)]);
+        status.shift_lines(5, -3);
+        assert_eq!(status.diagnostics().len(), 1);
+        assert_eq!(status.diagnostics()[0].start_row, 7); // was 10, shifted by -3
     }
 }
