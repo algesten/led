@@ -88,7 +88,11 @@ fn map_key(
         }
 
         return match action {
-            Some(a) if !requires_editor_focus(&a) || state.focus == PanelSlot::Main => {
+            Some(a)
+                if !requires_editor_focus(&a)
+                    || state.focus == PanelSlot::Main
+                    || has_input_dialog(state) =>
+            {
                 vec![Mut::Action(a)]
             }
             _ => vec![],
@@ -111,7 +115,11 @@ fn map_key(
         }
     };
     match action {
-        Some(a) if !requires_editor_focus(&a) || state.focus == PanelSlot::Main => {
+        Some(a)
+            if !requires_editor_focus(&a)
+                || state.focus == PanelSlot::Main
+                || has_input_dialog(state) =>
+        {
             vec![Mut::Action(a)]
         }
         _ => vec![],
@@ -147,8 +155,12 @@ fn requires_editor_focus(action: &Action) -> bool {
     )
 }
 
+fn has_input_dialog(state: &AppState) -> bool {
+    state.file_search.is_some() || state.find_file.is_some()
+}
+
 fn allow_char_insert(state: &AppState) -> bool {
-    if state.file_search.is_some() || state.find_file.is_some() {
+    if has_input_dialog(state) {
         return true;
     }
     matches!(state.focus, PanelSlot::Main)
