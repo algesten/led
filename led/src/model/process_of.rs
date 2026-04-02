@@ -94,9 +94,7 @@ pub fn process_of(state: &Stream<Rc<AppState>>) -> Stream<Mut> {
 }
 
 fn suspend() {
-    use crossterm::event::{
-        DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-    };
+    use crossterm::event::{DisableBracketedPaste, EnableBracketedPaste};
     use crossterm::terminal::{
         EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
     };
@@ -106,7 +104,6 @@ fn suspend() {
         io::stdout(),
         crossterm::cursor::Show,
         LeaveAlternateScreen,
-        DisableMouseCapture,
         DisableBracketedPaste
     )
     .ok();
@@ -115,11 +112,5 @@ fn suspend() {
     unsafe { libc::raise(libc::SIGTSTP) };
 
     enable_raw_mode().ok();
-    crossterm::execute!(
-        io::stdout(),
-        EnterAlternateScreen,
-        EnableMouseCapture,
-        EnableBracketedPaste
-    )
-    .ok();
+    crossterm::execute!(io::stdout(), EnterAlternateScreen, EnableBracketedPaste).ok();
 }

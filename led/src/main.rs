@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use clap::Parser;
-use crossterm::event::{DisableBracketedPaste, DisableMouseCapture};
+use crossterm::event::DisableBracketedPaste;
 use crossterm::terminal::{LeaveAlternateScreen, disable_raw_mode};
 use led_config_file::TomlFile;
 use led_core::Startup;
@@ -165,7 +165,6 @@ async fn main() {
         io::stdout(),
         crossterm::cursor::Show,
         LeaveAlternateScreen,
-        DisableMouseCapture,
         DisableBracketedPaste
     )
     .ok();

@@ -74,17 +74,12 @@ pub fn setup_terminal() -> InputGuard {
 }
 
 fn do_setup_terminal() -> io::Result<()> {
-    use crossterm::event::{EnableBracketedPaste, EnableMouseCapture};
+    use crossterm::event::EnableBracketedPaste;
     use crossterm::execute;
     use crossterm::terminal::{EnterAlternateScreen, enable_raw_mode};
 
     enable_raw_mode()?;
-    execute!(
-        io::stdout(),
-        EnterAlternateScreen,
-        EnableMouseCapture,
-        EnableBracketedPaste
-    )?;
+    execute!(io::stdout(), EnterAlternateScreen, EnableBracketedPaste)?;
     Ok(())
 }
 
@@ -97,16 +92,11 @@ fn setup_panic_hook() {
 }
 
 fn restore_terminal() -> io::Result<()> {
-    use crossterm::event::{DisableBracketedPaste, DisableMouseCapture};
+    use crossterm::event::DisableBracketedPaste;
     use crossterm::execute;
     use crossterm::terminal::{LeaveAlternateScreen, disable_raw_mode};
 
     disable_raw_mode()?;
-    execute!(
-        io::stdout(),
-        LeaveAlternateScreen,
-        DisableMouseCapture,
-        DisableBracketedPaste
-    )?;
+    execute!(io::stdout(), LeaveAlternateScreen, DisableBracketedPaste)?;
     Ok(())
 }
