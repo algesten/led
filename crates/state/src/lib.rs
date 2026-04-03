@@ -12,7 +12,7 @@ use led_core::keys::{Keymap, Keys};
 use led_core::theme::Theme;
 use led_core::{
     ChangeSeq, CharOffset, Col, ContentHash, Doc, DocId, DocVersion, EditOp, InertDoc, PanelSlot,
-    Row, Startup, SubLine, TabOrder, UndoHistory, Versioned,
+    Row, Startup, SubLine, UndoHistory, Versioned,
 };
 pub use led_workspace::SessionBuffer;
 pub use led_workspace::Workspace;
@@ -43,6 +43,14 @@ pub enum Phase {
 }
 
 pub mod file_search;
+
+// ── Tab ──
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Tab {
+    pub path: PathBuf,
+    pub is_preview: bool,
+}
 
 // ── BufferStatus ──
 
@@ -369,9 +377,10 @@ pub struct BufferState {
     // LSP
     completion_triggers: Vec<String>,
 
+    // Materialization
+    create_if_missing: bool,
+
     // UI
-    tab_order: TabOrder,
-    is_preview: bool,
     last_used: Instant,
 
     // Per-file annotations (diagnostics, inlay hints, git line status)
@@ -398,7 +407,6 @@ impl BufferState {
             cursor_col_affinity: Col(0),
             scroll_row: Row(0),
             scroll_sub_line: SubLine(0),
-            tab_order: TabOrder(0),
             mark: None,
             last_edit_kind: None,
             save_state: SaveState::Clean,
@@ -419,7 +427,7 @@ impl BufferState {
             pending_tab_fallback: false,
             reindent_chars: Arc::from([]),
             completion_triggers: Vec::new(),
-            is_preview: false,
+            create_if_missing: false,
             last_used: Instant::now(),
             status: BufferStatus::new(),
             annotations_synced_ver: DocVersion(0),
@@ -436,12 +444,6 @@ impl BufferState {
     }
     pub fn path_buf(&self) -> Option<&PathBuf> {
         self.path.as_ref()
-    }
-    pub fn is_preview(&self) -> bool {
-        self.is_preview
-    }
-    pub fn set_preview(&mut self, preview: bool) {
-        self.is_preview = preview;
     }
 
     // ── Editing state ──
@@ -519,6 +521,14 @@ impl BufferState {
     /// Mark that materialization has been requested.
     pub fn mark_materialization_requested(&mut self) {
         self.materialization = MaterializationState::Requested;
+    }
+
+    pub fn create_if_missing(&self) -> bool {
+        self.create_if_missing
+    }
+
+    pub fn set_create_if_missing(&mut self, v: bool) {
+        self.create_if_missing = v;
     }
 
     // ── Syntax request ──
@@ -1098,14 +1108,8 @@ impl BufferState {
         self.undo.set_distance_from_save(distance_from_save);
     }
 
-    // ── Tab management & activity ──
+    // ── Activity tracking ──
 
-    pub fn tab_order(&self) -> TabOrder {
-        self.tab_order
-    }
-    pub fn set_tab_order(&mut self, order: TabOrder) {
-        self.tab_order = order;
-    }
     pub fn last_used(&self) -> Instant {
         self.last_used
     }
@@ -1220,7 +1224,6 @@ impl fmt::Debug for BufferState {
             .field("cursor_row", &self.cursor_row)
             .field("cursor_col", &self.cursor_col)
             .field("scroll_row", &self.scroll_row)
-            .field("tab_order", &self.tab_order)
             .field("last_used", &self.last_used)
             .finish()
     }
@@ -1529,7 +1532,8 @@ pub struct AppState {
     pub force_redraw: u64,
     pub alerts: AlertState,
     pub buffers: Rc<HashMap<PathBuf, Rc<BufferState>>>,
-    pub active_buffer: Option<PathBuf>,
+    pub tabs: VecDeque<Tab>,
+    pub active_tab: Option<PathBuf>,
     pub save_request: Versioned<()>,
     pub save_all_request: Versioned<()>,
     pub save_done: Versioned<()>,

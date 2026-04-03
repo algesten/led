@@ -16,9 +16,7 @@ use helpers::{is_editing_action, maybe_close_group, should_record, with_buf};
 use preview::promote_preview_active;
 
 // Re-export items used by other modules in the crate.
-pub(super) use helpers::{
-    browser_scroll_to_selected, close_group_on_move, renumber_tabs, reveal_active_buffer,
-};
+pub(super) use helpers::{browser_scroll_to_selected, close_group_on_move, reveal_active_buffer};
 pub(super) use preview::{close_preview, evict_one_buffer, promote_preview};
 
 pub fn handle_action(state: &mut AppState, action: Action) -> bool {
@@ -59,7 +57,7 @@ pub fn handle_action(state: &mut AppState, action: Action) -> bool {
     }
 
     // Filter mutating input while indent is in flight
-    if let Some(ref path) = state.active_buffer {
+    if let Some(ref path) = state.active_tab {
         if let Some(buf) = state.buffers.get(path) {
             if buf.pending_indent_row().is_some() && is_editing_action(&action) {
                 return true;
@@ -69,7 +67,7 @@ pub fn handle_action(state: &mut AppState, action: Action) -> bool {
 
     // Auto-promote preview if user edits in it
     if state.preview.buffer.is_some()
-        && state.active_buffer == state.preview.buffer
+        && state.active_tab == state.preview.buffer
         && is_editing_action(&action)
     {
         promote_preview_active(state);
@@ -111,7 +109,7 @@ pub fn handle_action(state: &mut AppState, action: Action) -> bool {
     }
 
     // Intercept actions during incremental search
-    if let Some(ref path) = state.active_buffer {
+    if let Some(ref path) = state.active_tab {
         let in_search = state
             .buffers
             .get(path)
@@ -237,7 +235,7 @@ pub fn handle_action(state: &mut AppState, action: Action) -> bool {
             });
             // Auto-trigger completion when no popup is showing
             if state.lsp.completion.is_none() {
-                if let Some(ref path) = state.active_buffer {
+                if let Some(ref path) = state.active_tab {
                     if let Some(buf) = state.buffers.get(path) {
                         if !buf.completion_triggers().is_empty() {
                             let line = buf.doc().line(buf.cursor_row());
@@ -291,7 +289,7 @@ pub fn handle_action(state: &mut AppState, action: Action) -> bool {
         }),
         Action::KillLine => {
             let mut killed_text = None;
-            if let (Some(dims), Some(path)) = (state.dims, state.active_buffer.clone()) {
+            if let (Some(dims), Some(path)) = (state.dims, state.active_tab.clone()) {
                 if let Some(buf) = state.buf_mut(&path) {
                     close_group_on_move(buf);
                     if let Some((killed, r, c, a)) = edit::kill_line(buf) {
@@ -311,7 +309,7 @@ pub fn handle_action(state: &mut AppState, action: Action) -> bool {
         Action::KillRegion => {
             let mut killed_text = None;
             let mut no_region = false;
-            if let (Some(dims), Some(path)) = (state.dims, state.active_buffer.clone()) {
+            if let (Some(dims), Some(path)) = (state.dims, state.active_tab.clone()) {
                 if let Some(buf) = state.buf_mut(&path) {
                     close_group_on_move(buf);
                     if let Some((killed, r, c, a)) = edit::kill_region(buf) {
@@ -363,7 +361,7 @@ pub fn handle_action(state: &mut AppState, action: Action) -> bool {
 
         // ── Save ──
         Action::Save => {
-            if let Some(path) = state.active_buffer.clone() {
+            if let Some(path) = state.active_tab.clone() {
                 if let Some(buf) = state.buf_mut(&path) {
                     close_group_on_move(buf);
                     buf.mark_saving();
@@ -372,12 +370,13 @@ pub fn handle_action(state: &mut AppState, action: Action) -> bool {
             }
             // If we have an LSP server for this file, format first then save
             let has_lsp = state
-                .active_buffer
+                .active_tab
                 .as_ref()
                 .and_then(|path| state.buffers.get(path))
                 .and_then(|b| b.path())
                 .is_some_and(|_| !state.lsp.server_name.is_empty());
             if has_lsp {
+                log::info!("save: requesting LSP format");
                 state.lsp_mut().pending_save_after_format = true;
                 state
                     .lsp_mut()
@@ -386,7 +385,7 @@ pub fn handle_action(state: &mut AppState, action: Action) -> bool {
                 state.alerts.info = Some("Formatting...".into());
             } else {
                 // Apply built-in cleanup (strip trailing whitespace, ensure final newline)
-                if let Some(path) = state.active_buffer.clone() {
+                if let Some(path) = state.active_tab.clone() {
                     if let Some(buf) = state.buf_mut(&path) {
                         buf.apply_save_cleanup();
                     }
@@ -414,7 +413,7 @@ pub fn handle_action(state: &mut AppState, action: Action) -> bool {
         }
 
         Action::SaveNoFormat => {
-            if let Some(path) = state.active_buffer.clone() {
+            if let Some(path) = state.active_tab.clone() {
                 if let Some(buf) = state.buf_mut(&path) {
                     close_group_on_move(buf);
                     buf.mark_saving();
@@ -456,7 +455,7 @@ pub fn handle_action(state: &mut AppState, action: Action) -> bool {
 
         // ── Sort imports ──
         Action::SortImports => {
-            if let Some(path) = state.active_buffer.clone() {
+            if let Some(path) = state.active_tab.clone() {
                 if let Some(buf) = state.buffers.get(&path) {
                     if let Some(file_path) = buf.path() {
                         if let Some(ss) =

@@ -117,7 +117,8 @@ pub(super) fn handle_browser_open(state: &mut AppState) {
             // Clear pending_preview so the preview stream doesn't race
             state.preview.pending.set(None);
             close_preview(state);
-            state.pending_open.set(Some(entry.path.clone()));
+            super::super::request_open(state, entry.path.clone(), true);
+            state.active_tab = Some(entry.path.clone());
             state.focus = PanelSlot::Main;
         }
         EntryKind::Directory { expanded } => {

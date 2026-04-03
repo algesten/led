@@ -134,8 +134,6 @@ newtype_usize! {
     CharOffset,
     /// Visual sub-line index within a wrapped line.
     SubLine,
-    /// Tab display order (0-based).
-    TabOrder,
 }
 
 newtype_u64! {

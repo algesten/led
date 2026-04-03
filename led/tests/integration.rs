@@ -13,7 +13,7 @@ use harness::{TestHarness, TestStep};
 // ── Helpers ──
 
 fn buf(t: &harness::TestResult) -> &led_state::BufferState {
-    let path = t.state.active_buffer.as_ref().expect("no active buffer");
+    let path = t.state.active_tab.as_ref().expect("no active buffer");
     &t.state.buffers[path]
 }
 
@@ -23,14 +23,14 @@ fn actions(acts: Vec<led_core::Action>) -> Vec<TestStep> {
 }
 
 fn is_clean(s: &led_state::AppState) -> bool {
-    s.active_buffer
+    s.active_tab
         .as_ref()
         .and_then(|path| s.buffers.get(path))
         .map_or(false, |b| b.save_state() == SaveState::Clean)
 }
 
 fn indent_done(s: &led_state::AppState) -> bool {
-    s.active_buffer
+    s.active_tab
         .as_ref()
         .and_then(|path| s.buffers.get(path))
         .map_or(true, |b| b.pending_indent_row().is_none())
@@ -59,7 +59,7 @@ fn open_empty_file() {
 fn no_file() {
     let t = TestHarness::new().run(vec![]);
 
-    assert!(t.state.active_buffer.is_none());
+    assert!(t.state.active_tab.is_none());
     assert!(t.state.buffers.is_empty());
 }
 
@@ -651,7 +651,7 @@ fn kill_buffer_clean() {
         .with_file("hello\n")
         .run(actions(vec![KillBuffer]));
 
-    assert!(t.state.active_buffer.is_none());
+    assert!(t.state.active_tab.is_none());
     assert!(t.state.buffers.is_empty());
     assert!(
         t.state
@@ -671,7 +671,7 @@ fn kill_buffer_dirty_prompts() {
         .run(actions(vec![InsertChar('x'), KillBuffer]));
 
     // Buffer should NOT be killed — waiting for confirmation
-    assert!(t.state.active_buffer.is_some());
+    assert!(t.state.active_tab.is_some());
     assert!(!t.state.buffers.is_empty());
     assert!(t.state.confirm_kill);
     assert!(
@@ -693,7 +693,7 @@ fn kill_buffer_dirty_confirm_yes() {
         InsertChar('y'),
     ]));
 
-    assert!(t.state.active_buffer.is_none());
+    assert!(t.state.active_tab.is_none());
     assert!(t.state.buffers.is_empty());
     assert!(!t.state.confirm_kill);
 }
@@ -707,7 +707,7 @@ fn kill_buffer_dirty_confirm_no() {
     ]));
 
     // Buffer should NOT be killed — user said no
-    assert!(t.state.active_buffer.is_some());
+    assert!(t.state.active_tab.is_some());
     assert!(!t.state.buffers.is_empty());
     assert!(!t.state.confirm_kill);
 }
@@ -721,7 +721,7 @@ fn kill_buffer_dirty_confirm_abort() {
     ]));
 
     // Buffer should NOT be killed — user aborted
-    assert!(t.state.active_buffer.is_some());
+    assert!(t.state.active_tab.is_some());
     assert!(!t.state.buffers.is_empty());
     assert!(!t.state.confirm_kill);
 }
@@ -1001,7 +1001,7 @@ fn browser_reveals_opened_file() {
         .with_named_file("hello.txt", "hello\n")
         .run(vec![WaitFor(browser_reveal_done)]);
 
-    let active_path = t.state.active_buffer.as_ref().unwrap();
+    let active_path = t.state.active_tab.as_ref().unwrap();
     let buf_path = t.state.buffers[active_path].path_buf().unwrap();
     let canonical = std::fs::canonicalize(buf_path).unwrap_or_else(|_| buf_path.clone());
     let selected_entry = &t.state.browser.entries[t.state.browser.selected];
@@ -1022,7 +1022,7 @@ fn browser_reveals_on_tab_switch() {
             WaitFor(browser_reveal_done),
         ]);
 
-    let ap = t.state.active_buffer.as_ref().unwrap();
+    let ap = t.state.active_tab.as_ref().unwrap();
     let active_path = t.state.buffers[ap].path_buf().unwrap();
     let canonical = std::fs::canonicalize(active_path).unwrap_or_else(|_| active_path.clone());
     let selected_entry = &t.state.browser.entries[t.state.browser.selected];
@@ -1049,7 +1049,7 @@ fn browser_reveals_file_in_subdir() {
     );
 
     // The active buffer's file should be selected in the browser
-    let active_p = t.state.active_buffer.as_ref().unwrap();
+    let active_p = t.state.active_tab.as_ref().unwrap();
     let active_path = t.state.buffers[active_p].path_buf().unwrap();
     let active_canonical =
         std::fs::canonicalize(active_path).unwrap_or_else(|_| active_path.clone());
@@ -1071,7 +1071,7 @@ fn browser_reveals_after_kill_buffer() {
             WaitFor(browser_reveal_done),
         ]);
 
-    let ap = t.state.active_buffer.as_ref().unwrap();
+    let ap = t.state.active_tab.as_ref().unwrap();
     let active_path = t.state.buffers[ap].path_buf().unwrap();
     let canonical = std::fs::canonicalize(active_path).unwrap_or_else(|_| active_path.clone());
     let selected_entry = &t.state.browser.entries[t.state.browser.selected];
@@ -1228,7 +1228,7 @@ fn wrap_move_up_not_stuck_at_chunk_boundary() {
             Do(Yank),
             // Wait for async clipboard round-trip to apply the yank
             WaitFor(|s| {
-                s.active_buffer
+                s.active_tab
                     .as_ref()
                     .and_then(|path| s.buffers.get(path))
                     .map_or(false, |b| b.doc().line_len(led_core::Row(0)) >= 25)
@@ -1263,7 +1263,7 @@ fn wrap_move_down_no_skip_at_chunk_boundary() {
             Do(KillLine),
             Do(Yank),
             WaitFor(|s| {
-                s.active_buffer
+                s.active_tab
                     .as_ref()
                     .and_then(|path| s.buffers.get(path))
                     .map_or(false, |b| b.doc().line_len(led_core::Row(0)) >= 25)
@@ -1355,25 +1355,7 @@ fn session_restore_tab_order_with_arg_repeated() {
         .with_named_file("lib.rs", "fn main() {}\n")
         .run(vec![Do(Quit), WaitFor(|s| s.session.saved)]);
 
-    let order1: Vec<(String, usize)> = {
-        let mut v: Vec<_> = t
-            .state
-            .buffers
-            .values()
-            .map(|b| {
-                let name = b
-                    .path_buf()
-                    .unwrap()
-                    .file_name()
-                    .unwrap()
-                    .to_string_lossy()
-                    .into_owned();
-                (name, b.tab_order().0)
-            })
-            .collect();
-        v.sort_by_key(|(_, o)| *o);
-        v
-    };
+    let order1 = tab_names_sorted(&t.state);
 
     let dir = t.dirs.root.clone();
     let cargo_path = t.dirs.workspace.join("Cargo.toml");
@@ -1383,25 +1365,7 @@ fn session_restore_tab_order_with_arg_repeated() {
         .with_arg(cargo_path.clone())
         .run(vec![WaitFor(|s| s.buffers.len() >= 2)]);
 
-    let order2: Vec<(String, usize)> = {
-        let mut v: Vec<_> = t2
-            .state
-            .buffers
-            .values()
-            .map(|b| {
-                let name = b
-                    .path_buf()
-                    .unwrap()
-                    .file_name()
-                    .unwrap()
-                    .to_string_lossy()
-                    .into_owned();
-                (name, b.tab_order().0)
-            })
-            .collect();
-        v.sort_by_key(|(_, o)| *o);
-        v
-    };
+    let order2 = tab_names_sorted(&t2.state);
     assert_eq!(
         order1, order2,
         "tab order should be stable after first restart"
@@ -1418,25 +1382,7 @@ fn session_restore_tab_order_with_arg_repeated() {
         .with_arg(cargo_path)
         .run(vec![WaitFor(|s| s.buffers.len() >= 2)]);
 
-    let order3: Vec<(String, usize)> = {
-        let mut v: Vec<_> = t3
-            .state
-            .buffers
-            .values()
-            .map(|b| {
-                let name = b
-                    .path_buf()
-                    .unwrap()
-                    .file_name()
-                    .unwrap()
-                    .to_string_lossy()
-                    .into_owned();
-                (name, b.tab_order().0)
-            })
-            .collect();
-        v.sort_by_key(|(_, o)| *o);
-        v
-    };
+    let order3 = tab_names_sorted(&t3.state);
     assert_eq!(
         order1, order3,
         "tab order should be stable after second restart"
@@ -1452,48 +1398,15 @@ fn session_restore_tab_order() {
         .with_named_file("ccc.txt", "c\n")
         .run(vec![Do(Quit), WaitFor(|s| s.session.saved)]);
 
-    // Capture original tab orders
-    let original: Vec<(String, usize)> = {
-        let mut v: Vec<_> = t
-            .state
-            .buffers
-            .values()
-            .map(|b| {
-                let name = b
-                    .path_buf()
-                    .unwrap()
-                    .file_name()
-                    .unwrap()
-                    .to_string_lossy()
-                    .into_owned();
-                (name, b.tab_order().0)
-            })
-            .collect();
-        v.sort_by_key(|(_, o)| *o);
-        v
-    };
+    // Capture original tab order
+    let original = tab_names_sorted(&t.state);
 
     let dir = t.dirs.root.clone();
 
-    // Run 2: restore session — tab_order should be preserved
+    // Run 2: restore session — tab order should be preserved
     let t2 = TestHarness::with_dir(dir).run(vec![WaitFor(|s| s.buffers.len() >= 3)]);
 
-    let mut restored: Vec<(String, usize)> = t2
-        .state
-        .buffers
-        .values()
-        .map(|b| {
-            let name = b
-                .path_buf()
-                .unwrap()
-                .file_name()
-                .unwrap()
-                .to_string_lossy()
-                .into_owned();
-            (name, b.tab_order().0)
-        })
-        .collect();
-    restored.sort_by_key(|(_, o)| *o);
+    let restored = tab_names_sorted(&t2.state);
 
     assert_eq!(
         original, restored,
@@ -1609,7 +1522,7 @@ fn session_restore_with_arg_file() {
             Do(ToggleFocus),  // focus browser
             Do(FileEnd),      // select last entry (lib.rs — files sorted after dirs)
             Do(OpenSelected), // open lib.rs from browser
-            WaitFor(|s| s.buffers.len() >= 2),
+            WaitFor(|s| s.buffers.values().filter(|b| b.is_materialized()).count() >= 2),
             QuitAndWait, // dispatch Quit and wait for quit signal (like real app)
         ]);
 
@@ -1682,7 +1595,7 @@ fn session_restore_cursor() {
     // Run 2: restore — cursor should be at row 3
     let t2 = TestHarness::with_dir(dir).run(vec![WaitFor(|s| !s.buffers.is_empty())]);
 
-    let ap = t2.state.active_buffer.as_ref().unwrap();
+    let ap = t2.state.active_tab.as_ref().unwrap();
     let b = &t2.state.buffers[ap];
     assert_eq!(b.cursor_row().0, 3, "cursor row should be restored");
 }
@@ -1764,7 +1677,7 @@ fn save_strips_trailing_whitespace() {
         .run(vec![
             Do(Save),
             WaitFor(|s| {
-                s.active_buffer
+                s.active_tab
                     .as_ref()
                     .and_then(|path| s.buffers.get(path))
                     .is_some_and(|b| b.save_state() == SaveState::Clean)
@@ -1780,7 +1693,7 @@ fn save_ensures_final_newline() {
     let t = TestHarness::new().with_file("no newline at end").run(vec![
         Do(Save),
         WaitFor(|s| {
-            s.active_buffer
+            s.active_tab
                 .as_ref()
                 .and_then(|path| s.buffers.get(path))
                 .is_some_and(|b| b.save_state() == SaveState::Clean)
@@ -1796,7 +1709,7 @@ fn save_format_is_undoable() {
     let t = TestHarness::new().with_file("hello   \n").run(vec![
         Do(Save),
         WaitFor(|s| {
-            s.active_buffer
+            s.active_tab
                 .as_ref()
                 .and_then(|path| s.buffers.get(path))
                 .is_some_and(|b| b.save_state() == SaveState::Clean)
@@ -1819,7 +1732,7 @@ fn undo_persist_and_restore() {
         Do(InsertChar('!')),
         Do(InsertChar('!')),
         WaitFor(|s| {
-            s.active_buffer
+            s.active_tab
                 .as_ref()
                 .and_then(|path| s.buffers.get(path))
                 .is_some_and(|b| b.persisted_undo_len() > 0)
@@ -1844,7 +1757,7 @@ fn undo_cleared_after_save() {
         Do(InsertChar('!')),
         Do(Save),
         WaitFor(|s| {
-            s.active_buffer
+            s.active_tab
                 .as_ref()
                 .and_then(|path| s.buffers.get(path))
                 .is_some_and(|b| b.save_state() == SaveState::Clean)
@@ -1870,7 +1783,7 @@ fn session_restores_dirty_state() {
         Do(InsertChar('X')),
         // Wait for undo to be flushed to DB
         WaitFor(|s| {
-            s.active_buffer
+            s.active_tab
                 .as_ref()
                 .and_then(|path| s.buffers.get(path))
                 .is_some_and(|b| b.persisted_undo_len() > 0)
@@ -2177,7 +2090,7 @@ fn cross_instance_sync_insert_newline() {
             })),
             // Wait for sync to apply
             WaitFor(|s| {
-                s.active_buffer
+                s.active_tab
                     .as_ref()
                     .and_then(|path| s.buffers.get(path))
                     .is_some_and(|b| b.doc().line_count() == 5) // was 4, now 5
@@ -2235,7 +2148,7 @@ fn cross_instance_sync_multiple_edits() {
                 );
             })),
             WaitFor(|s| {
-                s.active_buffer
+                s.active_tab
                     .as_ref()
                     .and_then(|path| s.buffers.get(path))
                     .is_some_and(|b| b.doc().line(led_core::Row(0)).contains("XYZ"))
@@ -2286,7 +2199,7 @@ fn cross_instance_sync_after_save() {
             })),
             // Wait for first sync
             WaitFor(|s| {
-                s.active_buffer
+                s.active_tab
                     .as_ref()
                     .and_then(|path| s.buffers.get(path))
                     .is_some_and(|b| b.doc().line(led_core::Row(0)).starts_with("X"))
@@ -2320,7 +2233,7 @@ fn cross_instance_sync_after_save() {
             })),
             // Wait for A to detect the external save (chain_id should be reset)
             WaitFor(|s| {
-                s.active_buffer
+                s.active_tab
                     .as_ref()
                     .and_then(|path| s.buffers.get(path))
                     .is_some_and(|b| b.chain_id().is_none())
@@ -2350,14 +2263,14 @@ fn persisted_undo_len_preserved_after_save() {
         WaitFor(|s| !s.buffers.is_empty()),
         Do(InsertChar('X')),
         WaitFor(|s| {
-            s.active_buffer
+            s.active_tab
                 .as_ref()
                 .and_then(|path| s.buffers.get(path))
                 .is_some_and(|b| b.persisted_undo_len() > 0)
         }),
         Do(Save),
         WaitFor(|s| {
-            s.active_buffer
+            s.active_tab
                 .as_ref()
                 .and_then(|path| s.buffers.get(path))
                 .is_some_and(|b| b.save_state() == SaveState::Clean)
@@ -2377,7 +2290,7 @@ use harness::two_instance::{Instance, shared_workspace, startup_for};
 use led_state::AppState;
 
 fn active_buf(s: &AppState) -> Option<&led_state::BufferState> {
-    s.active_buffer
+    s.active_tab
         .as_ref()
         .and_then(|path| s.buffers.get(path))
         .map(|v| &**v)
@@ -3218,7 +3131,7 @@ fn kill_line_keeps_highlights_in_sync() {
     let t = TestHarness::new().with_file_ext(src, "rs").run(vec![
         // Wait for initial syntax highlights
         WaitFor(|s| {
-            s.active_buffer
+            s.active_tab
                 .as_ref()
                 .and_then(|path| s.buffers.get(path))
                 .map_or(false, |b| !b.syntax_highlights().is_empty())
@@ -3233,7 +3146,7 @@ fn kill_line_keeps_highlights_in_sync() {
         // Wait for syntax to catch up
         WaitFor(|s| {
             let b = s
-                .active_buffer
+                .active_tab
                 .as_ref()
                 .and_then(|path| s.buffers.get(path))
                 .unwrap();
@@ -3290,7 +3203,7 @@ fn kill_line_long_file_highlights_recover() {
     }
     let t = TestHarness::new().with_file_ext(&src, "rs").run(vec![
         WaitFor(|s| {
-            s.active_buffer
+            s.active_tab
                 .as_ref()
                 .and_then(|path| s.buffers.get(path))
                 .map_or(false, |b| !b.syntax_highlights().is_empty())
@@ -3303,7 +3216,7 @@ fn kill_line_long_file_highlights_recover() {
         // NOT a keyword capture (which would indicate stale cache).
         WaitFor(|s| {
             let b = s
-                .active_buffer
+                .active_tab
                 .as_ref()
                 .and_then(|path| s.buffers.get(path))
                 .unwrap();
@@ -3356,7 +3269,7 @@ More text
     let t = TestHarness::new().with_file_ext(src, "md").run(vec![
         // Wait for initial highlights
         WaitFor(|s| {
-            s.active_buffer
+            s.active_tab
                 .as_ref()
                 .and_then(|path| s.buffers.get(path))
                 .map_or(false, |b| !b.syntax_highlights().is_empty())
@@ -3375,7 +3288,7 @@ More text
         // The doc version after 3 kills is initial + 3 (at minimum).
         WaitFor(|s| {
             let b = s
-                .active_buffer
+                .active_tab
                 .as_ref()
                 .and_then(|path| s.buffers.get(path))
                 .unwrap();
@@ -3414,7 +3327,7 @@ fn match_bracket_jumps() {
             Do(MoveLeft),
             // Wait for syntax driver to populate matching_bracket
             WaitFor(|s| {
-                s.active_buffer
+                s.active_tab
                     .as_ref()
                     .and_then(|path| s.buffers.get(path))
                     .and_then(|b| b.matching_bracket())
@@ -3442,7 +3355,7 @@ fn match_bracket_reverse() {
             Do(LineStart),
             // Wait for syntax driver to populate matching_bracket
             WaitFor(|s| {
-                s.active_buffer
+                s.active_tab
                     .as_ref()
                     .and_then(|path| s.buffers.get(path))
                     .and_then(|b| b.matching_bracket())
@@ -3923,7 +3836,13 @@ fn find_file_opens_nonexistent_in_project_dir() {
             Do(InsertChar('t')),
             Do(InsertNewline),
             WaitFor(|s| s.find_file.is_none()),
-            WaitFor(|s| !s.buffers.is_empty()),
+            WaitFor(|s| {
+                s.buffers
+                    .values()
+                    .any(|b| b.is_materialized() && b.path_buf().map_or(false, |p| {
+                        p.file_name().map_or(false, |n| n == "new.txt")
+                    }))
+            }),
         ]);
 
     let has_new = t.state.buffers.values().any(|b| {
@@ -4067,7 +3986,7 @@ fn lsp_format() {
             WaitFor(lsp_server_ready),
             Do(LspFormat),
             WaitFor(|s| {
-                s.active_buffer
+                s.active_tab
                     .as_ref()
                     .and_then(|path| s.buffers.get(path))
                     .map_or(false, |b| {
@@ -4110,7 +4029,7 @@ fn lsp_goto_definition() {
             Do(LspGotoDefinition),
             // Wait for cursor to land on the definition (line 0)
             WaitFor(|s| {
-                s.active_buffer
+                s.active_tab
                     .as_ref()
                     .and_then(|path| s.buffers.get(path))
                     .map_or(false, |b| b.cursor_row().0 == 0)
@@ -4243,7 +4162,7 @@ fn lsp_rename_submit() {
             Do(InsertNewline), // submit
             // Wait for rename to complete — both occurrences should be renamed
             WaitFor(|s| {
-                s.active_buffer
+                s.active_tab
                     .as_ref()
                     .and_then(|path| s.buffers.get(path))
                     .map_or(false, |b| b.doc().line(led_core::Row(1)).contains("world"))
@@ -4591,7 +4510,7 @@ fn lsp_format_on_save() {
             WaitFor(lsp_server_ready),
             Do(Save),
             WaitFor(|s| {
-                s.active_buffer
+                s.active_tab
                     .as_ref()
                     .and_then(|path| s.buffers.get(path))
                     .map_or(false, |b| {
@@ -4613,22 +4532,11 @@ fn lsp_format_on_save() {
 // ── Multi-file and directory CLI opening ──
 
 fn tab_names_sorted(state: &led_state::AppState) -> Vec<String> {
-    let mut tabs: Vec<_> = state
-        .buffers
-        .values()
-        .map(|b| {
-            let name = b
-                .path_buf()
-                .unwrap()
-                .file_name()
-                .unwrap()
-                .to_string_lossy()
-                .into_owned();
-            (name, b.tab_order().0)
-        })
-        .collect();
-    tabs.sort_by_key(|(_, o)| *o);
-    tabs.into_iter().map(|(n, _)| n).collect()
+    state
+        .tabs
+        .iter()
+        .filter_map(|t| t.path.file_name().map(|n| n.to_string_lossy().into_owned()))
+        .collect()
 }
 
 #[test]

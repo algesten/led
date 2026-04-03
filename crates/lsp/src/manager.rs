@@ -6,7 +6,7 @@ use led_core::{CharOffset, ContentHash, Doc, EditOp, LanguageId, Row};
 use lsp_types::{
     CodeActionOrCommand, CodeActionParams, CodeActionResponse, CompletionParams,
     CompletionResponse, DocumentFormattingParams, FormattingOptions, GotoDefinitionParams,
-    GotoDefinitionResponse, InlayHintParams, NumberOrString, Position, Range, RenameParams,
+    GotoDefinitionResponse, InlayHintParams, NumberOrString, Range, RenameParams,
     TextDocumentIdentifier, TextDocumentItem, TextDocumentPositionParams, TextEdit, WorkspaceEdit,
 };
 use serde_json::Value;
@@ -881,53 +881,10 @@ impl LspManager {
             let Some(uri) = uri_from_path(&path) else {
                 return;
             };
+            let t0 = std::time::Instant::now();
 
-            // Step 1: Organize imports (always via LSP)
-            let oi_params = CodeActionParams {
-                text_document: TextDocumentIdentifier { uri: uri.clone() },
-                range: Range {
-                    start: Position {
-                        line: 0,
-                        character: 0,
-                    },
-                    end: Position {
-                        line: 0,
-                        character: 0,
-                    },
-                },
-                context: lsp_types::CodeActionContext {
-                    diagnostics: vec![],
-                    only: Some(vec![lsp_types::CodeActionKind::new(
-                        "source.organizeImports",
-                    )]),
-                    trigger_kind: Some(lsp_types::CodeActionTriggerKind::AUTOMATIC),
-                },
-                work_done_progress_params: Default::default(),
-                partial_result_params: Default::default(),
-            };
-
-            let oi_result: Result<Option<CodeActionResponse>, _> =
-                server.request("textDocument/codeAction", &oi_params).await;
-
-            if let Ok(Some(actions)) = oi_result {
-                for action in actions {
-                    if let CodeActionOrCommand::CodeAction(ca) = action {
-                        if let Some(ref edit) = ca.edit {
-                            let raw_edits = extract_raw_edits_for_path(edit, &path);
-                            if !raw_edits.is_empty() {
-                                let _ = event_tx.send(ManagerEvent::RequestResult(
-                                    RequestResult::Format {
-                                        path: path.clone(),
-                                        edits: raw_edits,
-                                    },
-                                ));
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Step 2: Format document
+            // Format document
+            let t1 = std::time::Instant::now();
             if let Some(ref prettier_bin) = prettier {
                 // Prettier: pipe buffer content through CLI
                 if let Some(content) = doc_content {
@@ -970,6 +927,7 @@ impl LspManager {
                 }
             }
 
+            log::info!("format: formatting took {:?}, total {:?}", t1.elapsed(), t0.elapsed());
             // Always signal format done so save-after-format can proceed
             let _ = event_tx.send(ManagerEvent::RequestResult(RequestResult::FormatDone));
         });
@@ -1686,62 +1644,6 @@ fn fuzzy_filter_completions(
     scored.into_iter().map(|(i, _)| items[i].clone()).collect()
 }
 
-fn extract_raw_edits_for_path(edit: &WorkspaceEdit, target: &Path) -> Vec<TextEdit> {
-    let mut result = Vec::new();
-    let canonical_target = std::fs::canonicalize(target).unwrap_or_else(|_| target.to_path_buf());
-
-    if let Some(changes) = &edit.changes {
-        for (uri, edits) in changes {
-            if let Some(path) = crate::convert::path_from_uri(uri) {
-                if path == target || path == canonical_target {
-                    result.extend(edits.iter().cloned());
-                }
-            }
-        }
-    }
-
-    if let Some(document_changes) = &edit.document_changes {
-        use lsp_types::DocumentChanges;
-        match document_changes {
-            DocumentChanges::Edits(edits) => {
-                for tde in edits {
-                    if let Some(path) = crate::convert::path_from_uri(&tde.text_document.uri) {
-                        if path == target || path == canonical_target {
-                            for e in &tde.edits {
-                                match e {
-                                    lsp_types::OneOf::Left(te) => result.push(te.clone()),
-                                    lsp_types::OneOf::Right(ate) => {
-                                        result.push(ate.text_edit.clone())
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            DocumentChanges::Operations(ops) => {
-                for op in ops {
-                    if let lsp_types::DocumentChangeOperation::Edit(tde) = op {
-                        if let Some(path) = crate::convert::path_from_uri(&tde.text_document.uri) {
-                            if path == target || path == canonical_target {
-                                for e in &tde.edits {
-                                    match e {
-                                        lsp_types::OneOf::Left(te) => result.push(te.clone()),
-                                        lsp_types::OneOf::Right(ate) => {
-                                            result.push(ate.text_edit.clone())
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    result
-}
 
 // ── Prettier integration ──
 

@@ -38,13 +38,13 @@ fn is_search_input(fs: &FileSearchState) -> bool {
 
 pub fn activate(state: &mut AppState) {
     let selected = state
-        .active_buffer
+        .active_tab
         .as_ref()
         .and_then(|path| state.buffers.get(path))
         .and_then(|buf| super::edit::selected_text(buf));
 
     if selected.is_some() {
-        if let Some(path) = state.active_buffer.clone() {
+        if let Some(path) = state.active_tab.clone() {
             if let Some(buf) = state.buf_mut(&path) {
                 buf.clear_mark();
             }
@@ -810,7 +810,20 @@ fn replace_all(state: &mut AppState) {
             }
         }
         state.pending_replace_all = Some(pending);
-        state.pending_replace_opens.set(non_open_paths);
+        for path in non_open_paths.iter() {
+            if !state.tabs.iter().any(|t| t.path == *path) {
+                state.tabs.push_back(led_state::Tab {
+                    path: path.clone(),
+                    is_preview: false,
+                });
+            }
+            if !state.buffers.contains_key(path) {
+                let buf = led_state::BufferState::new(path.clone());
+                state
+                    .buffers_mut()
+                    .insert(path.clone(), std::rc::Rc::new(buf));
+            }
+        }
     }
 }
 
@@ -1023,7 +1036,7 @@ fn confirm_selected(state: &mut AppState) {
     };
 
     if super::action::promote_preview(state, &path) {
-        if let Some(active_path) = state.active_buffer.clone() {
+        if let Some(active_path) = state.active_tab.clone() {
             if let Some(buf) = state.buf_mut(&active_path) {
                 let r = row.min(buf.doc().line_count().saturating_sub(1));
                 buf.set_cursor(led_core::Row(r), led_core::Col(col), led_core::Col(col));
@@ -1041,14 +1054,15 @@ fn confirm_selected(state: &mut AppState) {
         .and_then(|b| b.path_buf().cloned());
 
     if let Some(buf_path) = existing {
-        state.active_buffer = Some(buf_path.clone());
+        state.active_tab = Some(buf_path.clone());
         if let Some(buf) = state.buf_mut(&buf_path) {
             let r = row.min(buf.doc().line_count().saturating_sub(1));
             buf.set_cursor(led_core::Row(r), led_core::Col(col), led_core::Col(col));
         }
         super::action::reveal_active_buffer(state);
     } else {
-        state.pending_open.set(Some(path.clone()));
+        super::request_open(state, path.clone(), false);
+        state.active_tab = Some(path.clone());
         state.jump.pending_position = Some(JumpPosition {
             path,
             row,

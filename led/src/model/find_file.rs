@@ -210,7 +210,7 @@ fn tab_complete(state: &mut AppState) {
 pub fn activate(state: &mut AppState) {
     // Parent dir of active buffer's path, or start_dir
     let dir = state
-        .active_buffer
+        .active_tab
         .as_ref()
         .and_then(|path| state.buffers.get(path))
         .and_then(|buf| buf.path_buf().cloned())
@@ -244,7 +244,7 @@ pub fn activate(state: &mut AppState) {
 pub fn activate_save_as(state: &mut AppState) {
     // Start with the current buffer's full path (or parent dir like find_file)
     let input = state
-        .active_buffer
+        .active_tab
         .as_ref()
         .and_then(|path| state.buffers.get(path))
         .and_then(|buf| buf.path_buf().cloned())
@@ -468,7 +468,9 @@ fn handle_enter_open(state: &mut AppState) {
                 if super::action::promote_preview(state, &comp.full) {
                     deactivate_without_close_preview(state);
                 } else {
-                    state.pending_open.set(Some(comp.full));
+                    let path = comp.full.clone();
+                    super::request_open(state, path.clone(), true);
+                    state.active_tab = Some(path);
                     deactivate(state);
                 }
             }
@@ -493,7 +495,9 @@ fn handle_enter_open(state: &mut AppState) {
             if super::action::promote_preview(state, &comp.full) {
                 deactivate_without_close_preview(state);
             } else {
-                state.pending_open.set(Some(comp.full));
+                let path = comp.full.clone();
+                super::request_open(state, path.clone(), true);
+                state.active_tab = Some(path);
                 deactivate(state);
             }
             return;
@@ -505,7 +509,8 @@ fn handle_enter_open(state: &mut AppState) {
         if super::action::promote_preview(state, &expanded) {
             deactivate_without_close_preview(state);
         } else {
-            state.pending_open.set(Some(expanded));
+            super::request_open(state, expanded.clone(), true);
+            state.active_tab = Some(expanded);
             deactivate(state);
         }
         return;
@@ -555,7 +560,7 @@ fn handle_enter_save_as(state: &mut AppState) {
     };
 
     // Save the active buffer to the new path
-    if let Some(active_path) = state.active_buffer.clone() {
+    if let Some(active_path) = state.active_tab.clone() {
         if let Some(buf) = state.buf_mut(&active_path) {
             super::action::close_group_on_move(buf);
             buf.mark_saving();

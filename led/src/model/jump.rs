@@ -48,7 +48,7 @@ pub fn jump_forward(state: &mut AppState) {
 
 /// Get the current cursor position as a JumpPosition, if there's an active buffer with a path.
 fn current_position(state: &AppState) -> Option<JumpPosition> {
-    let active_path = state.active_buffer.as_ref()?;
+    let active_path = state.active_tab.as_ref()?;
     let buf = state.buffers.get(active_path)?;
     let path = buf.path_buf()?.clone();
     Some(JumpPosition {
@@ -71,7 +71,7 @@ fn navigate_to_position(state: &mut AppState, pos: JumpPosition) {
         .and_then(|b| b.path_buf().cloned());
 
     if let Some(buf_path) = existing {
-        state.active_buffer = Some(buf_path.clone());
+        state.active_tab = Some(buf_path.clone());
         if let Some(buf) = state.buf_mut(&buf_path) {
             let row = pos.row.min(buf.doc().line_count().saturating_sub(1));
             buf.set_cursor(
@@ -84,7 +84,8 @@ fn navigate_to_position(state: &mut AppState, pos: JumpPosition) {
         super::action::reveal_active_buffer(state);
     } else {
         // File not open — request open and store pending position
-        state.pending_open.set(Some(pos.path.clone()));
+        super::request_open(state, pos.path.clone(), false);
+        state.active_tab = Some(pos.path.clone());
         state.jump.pending_position = Some(pos);
     }
 }

@@ -1,6 +1,4 @@
-use std::path::PathBuf;
-
-use led_core::{Row, SubLine, TabOrder};
+use led_core::{Row, SubLine};
 use led_state::{AppState, BufferState, Dimensions, EditKind};
 
 use super::super::mov;
@@ -11,7 +9,7 @@ pub(super) fn with_buf(state: &mut AppState, f: impl FnOnce(&mut BufferState, &D
         Some(d) => d,
         None => return,
     };
-    if let Some(path) = state.active_buffer.clone() {
+    if let Some(path) = state.active_tab.clone() {
         let snapshot = state
             .buffers
             .get(&path)
@@ -36,18 +34,9 @@ pub(crate) fn close_group_on_move(buf: &mut BufferState) {
     buf.close_group_on_move();
 }
 
-/// Renumber tab_order to be contiguous 0..n, preserving relative order.
-pub(crate) fn renumber_tabs(state: &mut AppState) {
-    let mut ordered: Vec<PathBuf> = state.buffers.keys().cloned().collect();
-    ordered.sort_by_key(|path| state.buffers[path].tab_order());
-    for (i, path) in ordered.into_iter().enumerate() {
-        state.buf_mut(&path).unwrap().set_tab_order(TabOrder(i));
-    }
-}
-
 pub(crate) fn reveal_active_buffer(state: &mut AppState) {
     let path = state
-        .active_buffer
+        .active_tab
         .as_ref()
         .and_then(|path| state.buffers.get(path))
         .and_then(|b| b.path_buf().cloned());

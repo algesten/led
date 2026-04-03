@@ -26,7 +26,7 @@ pub(super) fn handle_completion_action(state: &mut AppState, action: &Action) ->
             if let Some(comp) = comp {
                 let index = comp.selected;
                 if let Some(item) = comp.items.get(index) {
-                    if let Some(path) = state.active_buffer.clone() {
+                    if let Some(path) = state.active_tab.clone() {
                         let buf = &state.buffers[&path];
                         let cursor_row = buf.cursor_row().0;
                         let cursor_col = buf.cursor_col().0;
@@ -211,13 +211,13 @@ pub(super) fn handle_rename_action(state: &mut AppState, action: &Action) -> boo
 
 pub(super) fn navigate_diagnostic(state: &mut AppState, forward: bool) {
     let cur_path = state
-        .active_buffer
+        .active_tab
         .as_ref()
         .and_then(|path| state.buffers.get(path))
         .and_then(|b| b.path_buf().cloned());
 
     let (row, col) = state
-        .active_buffer
+        .active_tab
         .as_ref()
         .and_then(|path| state.buffers.get(path))
         .map(|b| (b.cursor_row().0, b.cursor_col().0))
@@ -272,7 +272,7 @@ pub(super) fn navigate_diagnostic(state: &mut AppState, forward: bool) {
 
     // If the target is in the current buffer, just move the cursor.
     if cur_path.as_ref() == Some(&target_path) {
-        let path = state.active_buffer.clone().unwrap();
+        let path = state.active_tab.clone().unwrap();
         let dims = state.dims;
         if let Some(buf) = state.buf_mut(&path) {
             close_group_on_move(buf);
@@ -301,7 +301,7 @@ pub(super) fn navigate_diagnostic(state: &mut AppState, forward: bool) {
         })
         .and_then(|b| b.path_buf().cloned());
     if let Some(path) = existing {
-        state.active_buffer = Some(path.clone());
+        state.active_tab = Some(path.clone());
         let half = state.dims.map_or(10, |d| d.buffer_height() / 2);
         if let Some(buf) = state.buf_mut(&path) {
             let r = target_row.min(buf.doc().line_count().saturating_sub(1));
@@ -314,7 +314,8 @@ pub(super) fn navigate_diagnostic(state: &mut AppState, forward: bool) {
         }
         reveal_active_buffer(state);
     } else {
-        state.pending_open.set(Some(target_path.clone()));
+        super::super::request_open(state, target_path.clone(), false);
+        state.active_tab = Some(target_path.clone());
         state.jump.pending_position = Some(led_state::JumpPosition {
             path: target_path,
             row: target_row,
@@ -325,7 +326,7 @@ pub(super) fn navigate_diagnostic(state: &mut AppState, forward: bool) {
 }
 
 pub(super) fn open_rename_overlay(state: &mut AppState) {
-    if let Some(ref path) = state.active_buffer {
+    if let Some(ref path) = state.active_tab {
         if let Some(buf) = state.buffers.get(path) {
             let word = word_under_cursor(buf);
             let cursor = word.len();

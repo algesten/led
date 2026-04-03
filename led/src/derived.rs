@@ -46,7 +46,7 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
     // in one atomic visual update, eliminating cursor flash.
     let ui = state
         .filter(|s| {
-            s.active_buffer
+            s.active_tab
                 .as_ref()
                 .and_then(|path| s.buffers.get(path))
                 .map_or(true, |b| b.pending_indent_row().is_none())
@@ -66,26 +66,36 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
         .filter(|s| s.workspace.as_ref().is_some_and(|w| w.primary))
         .map(|s| {
             let buffers: Vec<SessionBuffer> = s
-                .buffers
-                .values()
-                .filter(|b| b.is_materialized() && b.path().is_some())
-                .filter(|b| !b.is_preview())
-                .map(|b| SessionBuffer {
-                    file_path: b.path_buf().cloned().unwrap(),
-                    tab_order: b.tab_order().0,
-                    cursor_row: b.cursor_row().0,
-                    cursor_col: b.cursor_col().0,
-                    scroll_row: b.scroll_row().0,
-                    scroll_sub_line: b.scroll_sub_line().0,
-                    undo: None,
+                .tabs
+                .iter()
+                .filter(|t| !t.is_preview)
+                .enumerate()
+                .filter_map(|(i, t)| {
+                    let b = s.buffers.get(&t.path)?;
+                    if !b.is_materialized() || b.path().is_none() {
+                        return None;
+                    }
+                    Some(SessionBuffer {
+                        file_path: b.path_buf().cloned().unwrap(),
+                        tab_order: i,
+                        cursor_row: b.cursor_row().0,
+                        cursor_col: b.cursor_col().0,
+                        scroll_row: b.scroll_row().0,
+                        scroll_sub_line: b.scroll_sub_line().0,
+                        undo: None,
+                    })
                 })
                 .collect();
 
             let active_tab_order = s
-                .active_buffer
+                .active_tab
                 .as_ref()
-                .and_then(|path| s.buffers.get(path))
-                .map(|b| b.tab_order().0)
+                .and_then(|path| {
+                    s.tabs
+                        .iter()
+                        .filter(|t| !t.is_preview)
+                        .position(|t| t.path == *path)
+                })
                 .unwrap_or(0);
 
             WorkspaceOut::SaveSession {
@@ -164,103 +174,51 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
         .map(ConfigFileOut::ConfigDir)
         .stream();
 
-    // File opens from startup args — gated on session restore being done.
-    // Only opens files that aren't already in a buffer; already-open files
-    // are activated directly via ActivateBuffer in the model (see process_of).
-    let startup_open = state
-        .dedupe_by(|s| s.phase == Phase::Running)
-        .filter(|s| s.phase == Phase::Running)
-        .filter(|s| !s.startup.arg_paths.is_empty())
-        .flat_map(|s| {
-            let open_paths: std::collections::HashSet<&std::path::Path> =
-                s.buffers.values().filter_map(|b| b.path()).collect();
-            let base = s
-                .buffers
-                .values()
-                .map(|b| b.tab_order().0)
-                .max()
-                .map_or(0, |m| m + 1);
-            s.startup
-                .arg_paths
-                .iter()
-                .enumerate()
-                .filter(|(_, p)| !open_paths.contains(p.as_path()))
-                .map(move |(i, path)| DocStoreOut::Open {
-                    path: path.clone(),
-                    tab_order: base + i,
-                    create_if_missing: true,
-                })
-                .collect::<Vec<_>>()
-        });
+    // Unified buffer materialization: emit DocStoreOut::Open for any buffer
+    // that exists in state but hasn't been loaded from disk yet.
+    // The docstore driver deduplicates in-flight requests.
+    // Unified buffer materialization: intersect open tabs with
+    // non-materialized buffers. Diagnostic-only buffers are not in
+    // tabs, so they never get materialized.
+    fn tabs_needing_open(s: &Rc<AppState>) -> Vec<PathBuf> {
+        s.tabs
+            .iter()
+            .filter(|t| {
+                s.buffers
+                    .get(&t.path)
+                    .map_or(true, |b| b.materialization() == led_state::MaterializationState::NotMaterialized)
+            })
+            .map(|t| t.path.clone())
+            .collect()
+    }
 
-    // File opens from session restore — tab_order from session positions
-    let session_open = state
-        .dedupe_by(|s| s.session.pending_opens.version())
-        .filter(|s| s.session.pending_opens.version() > 0)
-        .map(|s| {
-            let positions = &s.session.positions;
-            (*s.session.pending_opens)
-                .iter()
+    let materialize = state
+        .dedupe_by(tabs_needing_open)
+        .filter(|s| !tabs_needing_open(s).is_empty())
+        .flat_map(|s| {
+            tabs_needing_open(&s)
+                .into_iter()
                 .map(|path| {
-                    let tab_order = positions.get(path).map(|sp| sp.tab_order).unwrap_or(0);
+                    let create_if_missing = s
+                        .buffers
+                        .get(&path)
+                        .map(|b| b.create_if_missing())
+                        .unwrap_or(false);
                     DocStoreOut::Open {
-                        path: path.clone(),
-                        tab_order,
-                        create_if_missing: false,
+                        path,
+                        create_if_missing,
                     }
                 })
                 .collect::<Vec<_>>()
-        })
-        .flat_map(|cmds| cmds);
-
-    // File opens from replace-all (non-open files)
-    let replace_open = state
-        .dedupe_by(|s| s.pending_replace_opens.version())
-        .filter(|s| s.pending_replace_opens.version() > 0)
-        .filter(|s| !s.pending_replace_opens.is_empty())
-        .map(|s| {
-            let max_tab = s
-                .buffers
-                .values()
-                .map(|b| b.tab_order().0)
-                .max()
-                .unwrap_or(0);
-            (*s.pending_replace_opens)
-                .iter()
-                .enumerate()
-                .map(|(i, path)| DocStoreOut::Open {
-                    path: path.clone(),
-                    tab_order: max_tab + 1 + i,
-                    create_if_missing: false,
-                })
-                .collect::<Vec<_>>()
-        })
-        .flat_map(|cmds| cmds);
-
-    // File opens from browser
-    let browser_open = state
-        .dedupe_by(|s| s.pending_open.version())
-        .filter(|s| s.pending_open.version() > 0)
-        .filter(|s| s.pending_open.is_some())
-        .map(|s| DocStoreOut::Open {
-            path: (*s.pending_open).clone().unwrap(),
-            tab_order: s
-                .buffers
-                .values()
-                .map(|b| b.tab_order().0)
-                .max()
-                .map_or(0, |m| m + 1),
-            create_if_missing: true,
-        })
-        .stream();
+        });
 
     // Save
     let save_out = state
         .dedupe_by(|s| s.save_request.version())
         .filter(|s| s.save_request.version() > 0)
-        .filter(|s| s.active_buffer.is_some())
+        .filter(|s| s.active_tab.is_some())
         .map(|s| {
-            let buf = &s.buffers[s.active_buffer.as_ref().unwrap()];
+            let buf = &s.buffers[s.active_tab.as_ref().unwrap()];
             DocStoreOut::Save {
                 id: buf.doc_id(),
                 doc: buf.doc().clone(),
@@ -293,9 +251,9 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
         .dedupe_by(|s| s.pending_save_as.version())
         .filter(|s| s.pending_save_as.version() > 0)
         .filter(|s| s.pending_save_as.is_some())
-        .filter(|s| s.active_buffer.is_some())
+        .filter(|s| s.active_tab.is_some())
         .map(|s| {
-            let buf = &s.buffers[s.active_buffer.as_ref().unwrap()];
+            let buf = &s.buffers[s.active_tab.as_ref().unwrap()];
             let path = (*s.pending_save_as).clone().unwrap();
             DocStoreOut::SaveAs {
                 id: buf.doc_id(),
@@ -305,7 +263,8 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
         })
         .stream();
 
-    // Preview open: Case C (new file, not already in any buffer)
+    // Preview open: Case C (new file, not already in any buffer).
+    // The docstore deduplicates in-flight requests.
     let preview_open = state
         .dedupe_by(|s| s.preview.pending.version())
         .filter(|s| s.preview.pending.version() > 0)
@@ -318,26 +277,17 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
             let req = (*s.preview.pending).as_ref().unwrap();
             DocStoreOut::Open {
                 path: req.path.clone(),
-                tab_order: s
-                    .buffers
-                    .values()
-                    .map(|b| b.tab_order().0)
-                    .max()
-                    .map_or(0, |m| m + 1),
                 create_if_missing: false,
             }
         })
         .stream();
 
     let docstore_out: Stream<DocStoreOut> = Stream::new();
-    startup_open.forward(&docstore_out);
-    session_open.forward(&docstore_out);
-    replace_open.forward(&docstore_out);
-    browser_open.forward(&docstore_out);
+    materialize.forward(&docstore_out);
+    preview_open.forward(&docstore_out);
     save_out.forward(&docstore_out);
     save_all_out.forward(&docstore_out);
     save_as_out.forward(&docstore_out);
-    preview_open.forward(&docstore_out);
 
     // Timers: schedule alert clear when info/warn appears
     let alert_timer = state
@@ -363,7 +313,7 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
                 .filter(|b| {
                     b.is_materialized()
                         && b.path().is_some()
-                        && !b.is_preview()
+                        && !s.tabs.iter().any(|t| t.is_preview && b.path_buf() == Some(&t.path))
                         && (b.undo_history_len() > b.persisted_undo_len() || b.is_dirty())
                 })
                 .map(|b| b.version())
@@ -399,8 +349,8 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
     // If the user stays on a tab for 3s, the timer fires and updates last_used.
     // Rapid NextTab/PrevTab resets the timer, so stepping past doesn't count.
     let linger_timer = state
-        .dedupe_by(|s| s.active_buffer.clone())
-        .filter(|s| s.active_buffer.is_some())
+        .dedupe_by(|s| s.active_tab.clone())
+        .filter(|s| s.active_tab.is_some())
         .map(|_| TimersOut::Set {
             name: "tab_linger",
             duration: Duration::from_secs(3),
@@ -482,7 +432,7 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
                 .filter(|b| b.is_materialized() && b.pending_syntax_request().is_some())
                 .filter_map(|b| {
                     let path = b.path_buf().cloned()?;
-                    let is_active = s.active_buffer.as_ref() == Some(&path);
+                    let is_active = s.active_tab.as_ref() == Some(&path);
                     let indent_row = if is_active {
                         b.pending_indent_row()
                     } else {
@@ -513,19 +463,19 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
     // highlights without reparsing.
     let syntax_viewport = state
         .dedupe_by(|s| {
-            s.active_buffer.as_ref().and_then(|path| {
+            s.active_tab.as_ref().and_then(|path| {
                 let buf = s.buffers.get(path)?;
                 Some((path.clone(), buf.scroll_row().0, buf.cursor_row().0))
             })
         })
         .filter(|s| {
-            s.active_buffer
+            s.active_tab
                 .as_ref()
                 .and_then(|p| s.buffers.get(p))
                 .is_some_and(|b| b.is_materialized())
         })
         .filter_map(|s| {
-            let path = s.active_buffer.as_ref()?;
+            let path = s.active_tab.as_ref()?;
             let buf = s.buffers.get(path)?;
             let path = buf.path_buf().cloned()?;
             let buffer_height = s.dims.map_or(50, |d| d.buffer_height());
@@ -732,17 +682,17 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
         });
     }
 
-    // BufferChanged: dedupe on (active_buffer, doc.version())
+    // BufferChanged: dedupe on (active_tab, doc.version())
     let lsp_buf_changed = state
         .dedupe_by(|s| {
-            s.active_buffer.as_ref().and_then(|path| {
+            s.active_tab.as_ref().and_then(|path| {
                 let buf = s.buffers.get(path)?;
                 Some((path.clone(), buf.version().0))
             })
         })
-        .filter(|s| s.active_buffer.is_some())
+        .filter(|s| s.active_tab.is_some())
         .filter_map(|s| {
-            let active_path = s.active_buffer.as_ref()?;
+            let active_path = s.active_tab.as_ref()?;
             let buf = s.buffers.get(active_path)?;
             let path = buf.path_buf().cloned()?;
             Some(LspOut::BufferChanged {
@@ -758,9 +708,9 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
     let lsp_buf_saved = state
         .dedupe_by(|s| s.save_request.version())
         .filter(|s| s.save_request.version() > 0)
-        .filter(|s| s.active_buffer.is_some())
+        .filter(|s| s.active_tab.is_some())
         .filter_map(|s| {
-            let active_path = s.active_buffer.as_ref()?;
+            let active_path = s.active_tab.as_ref()?;
             let buf = s.buffers.get(active_path)?;
             let path = buf.path_buf().cloned()?;
             Some(LspOut::BufferSaved {
@@ -776,15 +726,15 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
             if !s.lsp.inlay_hints_enabled {
                 return None;
             }
-            s.active_buffer.as_ref().and_then(|path| {
+            s.active_tab.as_ref().and_then(|path| {
                 let buf = s.buffers.get(path)?;
                 Some((path.clone(), buf.scroll_row().0 / 5, buf.version().0))
             })
         })
         .filter(|s| s.lsp.inlay_hints_enabled)
-        .filter(|s| s.active_buffer.is_some())
+        .filter(|s| s.active_tab.is_some())
         .filter_map(|s| {
-            let active_path = s.active_buffer.as_ref()?;
+            let active_path = s.active_tab.as_ref()?;
             let buf = s.buffers.get(active_path)?;
             let path = buf.path_buf().cloned()?;
             let start_row = buf.scroll_row().0;
@@ -805,7 +755,7 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
         .filter(|s| s.lsp.pending_request.is_some())
         .filter_map(|s| {
             let req = (*s.lsp.pending_request).as_ref()?;
-            let active_path = s.active_buffer.as_ref()?;
+            let active_path = s.active_tab.as_ref()?;
             let buf = s.buffers.get(active_path)?;
             let path = buf.path_buf().cloned()?;
             let row = buf.cursor_row().0;

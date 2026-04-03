@@ -19,7 +19,6 @@ pub fn buffers_of(
                 id,
                 path,
                 doc,
-                tab_order,
             }) => {
                 // Preview open: check if pending_preview matches this path
                 let is_preview = (*state.preview.pending)
@@ -40,8 +39,6 @@ pub fn buffers_of(
                         led_core::Row(row.saturating_sub(buffer_height / 2)),
                         led_core::SubLine(0),
                     );
-                    buf.set_tab_order(led_core::TabOrder(tab_order));
-                    buf.set_preview(true);
                     let remove_old_path = state.preview.buffer.clone();
                     let remove_old_hash = remove_old_path.as_ref().and_then(|pp| {
                         state
@@ -53,7 +50,7 @@ pub fn buffers_of(
                     let pre_preview_buffer = if state.preview.pre_preview_buffer.is_some() {
                         state.preview.pre_preview_buffer.clone()
                     } else {
-                        state.active_buffer.clone()
+                        state.active_tab.clone()
                     };
 
                     return Some(Mut::PreviewOpen {
@@ -145,8 +142,12 @@ pub fn buffers_of(
 
                 let activate = if is_startup_arg {
                     is_last_arg
+                } else if is_session_restore {
+                    let tab_index = state.tabs.iter().position(|t| t.path == path);
+                    tab_index.is_some()
+                        && state.session.active_tab_order == tab_index
                 } else {
-                    !is_session_restore || state.session.active_tab_order == Some(tab_order)
+                    true
                 };
                 Some(Mut::BufferOpen {
                     path,
@@ -154,8 +155,6 @@ pub fn buffers_of(
                     doc,
                     cursor: (cursor_row, cursor_col),
                     scroll: (scroll_row, scroll_sub_line),
-                    tab_order,
-                    is_preview: false,
                     activate,
                     notify_hash,
                     session_restore_done: is_session_restore && state.session.positions.len() == 1,
@@ -252,6 +251,7 @@ pub fn buffers_of(
                     ChangeReason::ExternalFileChange,
                 ))
             }
+            Ok(DocStoreIn::Opening { path }) => Some(Mut::Opening { path }),
             Ok(DocStoreIn::ExternalRemove { .. }) => None,
             Ok(DocStoreIn::OpenFailed { path }) => Some(Mut::SessionOpenFailed { path }),
             Err(a) => Some(Mut::alert(a)),

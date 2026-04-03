@@ -53,7 +53,7 @@ pub(super) fn handle_isearch_action(state: &mut AppState, action: &Action) -> bo
         }
         Action::InsertNewline => {
             // Record jump from search origin before accepting
-            if let Some(ref path) = state.active_buffer {
+            if let Some(ref path) = state.active_tab {
                 if let Some(buf) = state.buffers.get(path) {
                     if let (Some(is), Some(path)) = (&buf.isearch, buf.path_buf()) {
                         let cursor_moved =

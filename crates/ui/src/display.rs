@@ -97,7 +97,7 @@ impl PartialEq for DisplayInputs {
 pub fn display_inputs(s: &AppState) -> Option<DisplayInputs> {
     let dims = s.dims?;
     let config_theme = s.config_theme.as_ref()?;
-    let path = s.active_buffer.as_ref()?;
+    let path = s.active_tab.as_ref()?;
     let buf = s.buffers.get(path).filter(|b| b.is_materialized())?;
     let theme_arc = &config_theme.file;
     let theme = theme_arc.as_ref();
@@ -585,7 +585,7 @@ pub fn cursor_inputs(s: &AppState) -> Option<CursorInputs> {
         return None;
     }
     let dims = s.dims?;
-    let path = s.active_buffer.as_ref()?;
+    let path = s.active_tab.as_ref()?;
     let buf = s.buffers.get(path)?;
     Some(CursorInputs {
         buffer_path: buf.path_buf().cloned(),
@@ -664,7 +664,7 @@ pub struct StatusInputs {
 
 pub fn status_inputs(s: &AppState) -> StatusInputs {
     let (file_name, is_dirty, cursor_row, cursor_col) = s
-        .active_buffer
+        .active_tab
         .as_ref()
         .and_then(|path| s.buffers.get(path).filter(|b| b.is_materialized()))
         .map(|buf| {
@@ -691,7 +691,7 @@ pub fn status_inputs(s: &AppState) -> StatusInputs {
     let viewport_width = s.dims.map_or(0, |d| d.viewport_width);
 
     let search_prompt = s
-        .active_buffer
+        .active_tab
         .as_ref()
         .and_then(|path| s.buffers.get(path))
         .and_then(|buf| {
@@ -843,7 +843,7 @@ pub fn overlay_inputs(s: &AppState) -> OverlayContent {
         None => return OverlayContent::None,
     };
     let (cursor_x, cursor_y) = match s
-        .active_buffer
+        .active_tab
         .as_ref()
         .and_then(|path| s.buffers.get(path))
     {
@@ -926,12 +926,11 @@ pub fn tabs_inputs(s: &AppState) -> Option<TabsInputs> {
     let preview_active_style = style::resolve(theme, &theme.tabs.preview_active);
     let preview_inactive_style = style::resolve(theme, &theme.tabs.preview_inactive);
 
-    let mut bufs: Vec<_> = s.buffers.values().filter(|b| b.is_materialized()).collect();
-    bufs.sort_by_key(|b| b.tab_order());
-
-    let entries = bufs
+    let entries = s
+        .tabs
         .iter()
-        .map(|buf| {
+        .filter_map(|tab| {
+            let buf = s.buffers.get(&tab.path).filter(|b| b.is_materialized())?;
             let name = buf
                 .path()
                 .and_then(|p| p.file_name())
@@ -939,8 +938,8 @@ pub fn tabs_inputs(s: &AppState) -> Option<TabsInputs> {
                 .unwrap_or_else(|| "[untitled]".to_string());
             let dirty = buf.is_dirty();
             let label = format_tab_label(&name, dirty);
-            let is_active = s.active_buffer.as_ref() == buf.path_buf();
-            let entry_style = if buf.is_preview() {
+            let is_active = s.active_tab.as_ref() == Some(&tab.path);
+            let entry_style = if tab.is_preview {
                 if is_active {
                     preview_active_style
                 } else {
@@ -951,11 +950,11 @@ pub fn tabs_inputs(s: &AppState) -> Option<TabsInputs> {
             } else {
                 inactive_style
             };
-            TabEntry {
+            Some(TabEntry {
                 label,
                 is_active,
                 style: entry_style,
-            }
+            })
         })
         .collect();
 

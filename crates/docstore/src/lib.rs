@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::io::Cursor;
 use std::path::PathBuf;
@@ -14,7 +14,6 @@ use tokio::sync::mpsc;
 pub enum DocStoreOut {
     Open {
         path: PathBuf,
-        tab_order: usize,
         /// When true, opening a non-existent path creates an empty buffer
         /// instead of reporting OpenFailed.  Used for user-initiated opens
         /// (CLI arg, find-file); session restore passes false.
@@ -37,11 +36,14 @@ pub enum DocStoreOut {
 
 #[derive(Clone)]
 pub enum DocStoreIn {
+    /// Driver acknowledged the open request; materialization in progress.
+    Opening {
+        path: PathBuf,
+    },
     Opened {
         id: DocId,
         path: PathBuf,
         doc: Arc<dyn Doc>,
-        tab_order: usize,
     },
     Saved {
         id: DocId,
@@ -68,16 +70,13 @@ pub enum DocStoreIn {
 impl fmt::Debug for DocStoreIn {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            DocStoreIn::Opened {
-                id,
-                path,
-                tab_order,
-                ..
-            } => f
+            DocStoreIn::Opening { path } => {
+                f.debug_struct("Opening").field("path", path).finish()
+            }
+            DocStoreIn::Opened { id, path, .. } => f
                 .debug_struct("Opened")
                 .field("id", id)
                 .field("path", path)
-                .field("tab_order", tab_order)
                 .finish(),
             DocStoreIn::Saved { id, .. } => f.debug_struct("Saved").field("id", id).finish(),
             DocStoreIn::SavedAs { id, path, .. } => f
@@ -141,42 +140,52 @@ pub fn driver(
         // reports (e.g. /var → /private/var on macOS).
         let mut path_to_id: HashMap<PathBuf, DocId> = HashMap::new();
         let mut registrations: HashMap<PathBuf, Registration> = HashMap::new();
+        let mut in_flight: HashSet<PathBuf> = HashSet::new();
 
         loop {
             tokio::select! {
                 maybe_cmd = cmd_rx.recv() => {
                     let Some(cmd) = maybe_cmd else { break };
                     match cmd {
-                        DocStoreOut::Open { path, tab_order, create_if_missing } => {
+                        DocStoreOut::Open { path, create_if_missing } => {
+                            let canonical = canonicalize(&path);
+
+                            // Skip if already in-flight or already opened.
+                            if in_flight.contains(&canonical) || path_to_id.contains_key(&canonical) {
+                                continue;
+                            }
+
                             if let Some(parent) = path.parent() {
-                                let canonical = std::fs::canonicalize(parent)
+                                let canon_parent = std::fs::canonicalize(parent)
                                     .unwrap_or_else(|_| parent.to_path_buf());
-                                if !registrations.contains_key(&canonical) {
+                                if !registrations.contains_key(&canon_parent) {
                                     let reg = file_watcher.register(
                                         parent,
                                         WatchMode::NonRecursive,
                                         watcher_tx.clone(),
                                     );
-                                    registrations.insert(canonical, reg);
+                                    registrations.insert(canon_parent, reg);
                                 }
                             }
 
-                            let canonical = canonicalize(&path);
+                            // Acknowledge: driver is now loading this file.
+                            in_flight.insert(canonical.clone());
+                            let _ = result_tx.send(Ok(DocStoreIn::Opening { path: path.clone() })).await;
+
                             let doc_result = match read_doc(&path).await {
                                 Ok(doc) => Ok(doc),
                                 Err(e) if create_if_missing
                                     && e.kind() == std::io::ErrorKind::NotFound =>
                                 {
-                                    // New file: create an empty document.
-                                    // The file will be created on disk when the user saves.
                                     Ok(TextDoc::from_reader(Cursor::new(b"" as &[u8])).unwrap())
                                 }
                                 Err(e) => Err(e),
                             };
+
+                            in_flight.remove(&canonical);
+
                             match doc_result {
                                 Ok(doc) => {
-                                    // Reuse existing DocId if already tracked,
-                                    // otherwise allocate a new one.
                                     let id = match path_to_id.get(&canonical) {
                                         Some(&existing) => existing,
                                         None => {
@@ -188,7 +197,7 @@ pub fn driver(
                                         }
                                     };
                                     let doc: Arc<dyn Doc> = Arc::new(doc);
-                                    let _ = result_tx.send(Ok(DocStoreIn::Opened { id, path, doc, tab_order })).await;
+                                    let _ = result_tx.send(Ok(DocStoreIn::Opened { id, path, doc })).await;
                                 }
                                 Err(e) => {
                                     log::debug!("Cannot open {}: {e}", path.display());

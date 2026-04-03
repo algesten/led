@@ -135,7 +135,7 @@ impl Instance {
             if start.elapsed() > timeout {
                 let state_desc: String = self.with_state(|s| {
                     let buf_info =
-                        s.active_buffer
+                        s.active_tab
                             .as_ref()
                             .and_then(|path| s.buffers.get(path))
                             .map(|b| {
