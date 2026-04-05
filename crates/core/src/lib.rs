@@ -18,12 +18,29 @@ pub use language::{LanguageId, LspContextId};
 pub use versioned::Versioned;
 pub use watch::{FileWatcher, Registration, WatchEvent, WatchEventKind, WatchMode};
 
+use std::cell::Cell;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static CHANGE_SEQ: AtomicU64 = AtomicU64::new(1);
 
 pub fn next_change_seq() -> u64 {
     CHANGE_SEQ.fetch_add(1, Ordering::Relaxed)
+}
+
+thread_local! {
+    static LINE_BUF: Cell<String> = const { Cell::new(String::new()) };
+}
+
+/// Borrow the thread-local line buffer for the duration of `f`.
+/// The buffer retains its allocation across calls — after the first use
+/// grows it, subsequent calls reuse that capacity with zero allocation.
+pub fn with_line_buf<R>(f: impl FnOnce(&mut String) -> R) -> R {
+    LINE_BUF.with(|cell| {
+        let mut buf = cell.take();
+        let result = f(&mut buf);
+        cell.set(buf);
+        result
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

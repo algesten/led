@@ -15,11 +15,7 @@ pub fn buffers_of(
     docstore
         .sample_combine(state)
         .filter_map(move |(result, state)| match result {
-            Ok(DocStoreIn::Opened {
-                id,
-                path,
-                doc,
-            }) => {
+            Ok(DocStoreIn::Opened { id, path, doc }) => {
                 // Preview open: check if pending_preview matches this path
                 let is_preview = (*state.preview.pending)
                     .as_ref()
@@ -144,8 +140,7 @@ pub fn buffers_of(
                     is_last_arg
                 } else if is_session_restore {
                     let tab_index = state.tabs.iter().position(|t| t.path == path);
-                    tab_index.is_some()
-                        && state.session.active_tab_order == tab_index
+                    tab_index.is_some() && state.session.active_tab_order == tab_index
                 } else {
                     true
                 };

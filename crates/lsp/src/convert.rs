@@ -70,12 +70,12 @@ pub(crate) fn doc_line(doc: &dyn Doc, row: usize) -> Option<String> {
     if row >= doc.line_count() {
         return None;
     }
-    let line = doc.line(led_core::Row(row));
-    Some(
-        line.trim_end_matches('\n')
-            .trim_end_matches('\r')
-            .to_string(),
-    )
+    Some(led_core::with_line_buf(|line| {
+        doc.line(led_core::Row(row), line);
+        let trimmed = line.trim_end_matches(&['\n', '\r'][..]).len();
+        line.truncate(trimmed);
+        line.clone()
+    }))
 }
 
 /// Get a line from a file on disk.

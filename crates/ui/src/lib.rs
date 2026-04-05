@@ -240,6 +240,11 @@ fn setup() -> Terminal<CrosstermBackend<io::Stdout>> {
     use ratatui::backend::Backend;
     let size = backend.size().expect("query terminal size");
     let area = Rect::new(0, 0, size.width, size.height);
-    Terminal::with_options(backend, TerminalOptions { viewport: Viewport::Fixed(area) })
-        .expect("create terminal")
+    Terminal::with_options(
+        backend,
+        TerminalOptions {
+            viewport: Viewport::Fixed(area),
+        },
+    )
+    .expect("create terminal")
 }

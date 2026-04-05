@@ -927,7 +927,11 @@ impl LspManager {
                 }
             }
 
-            log::info!("format: formatting took {:?}, total {:?}", t1.elapsed(), t0.elapsed());
+            log::info!(
+                "format: formatting took {:?}, total {:?}",
+                t1.elapsed(),
+                t0.elapsed()
+            );
             // Always signal format done so save-after-format can proceed
             let _ = event_tx.send(ManagerEvent::RequestResult(RequestResult::FormatDone));
         });
@@ -1325,8 +1329,10 @@ impl LspManager {
             return;
         }
 
-        let line = doc.line(Row(row));
-        let line_chars: Vec<char> = line.chars().collect();
+        let line_chars: Vec<char> = led_core::with_line_buf(|line| {
+            doc.line(Row(row), line);
+            line.chars().collect()
+        });
         let psc = self.completion_prefix_start_col;
 
         // Line got shorter than prefix start → dismiss
@@ -1643,7 +1649,6 @@ fn fuzzy_filter_completions(
 
     scored.into_iter().map(|(i, _)| items[i].clone()).collect()
 }
-
 
 // ── Prettier integration ──
 

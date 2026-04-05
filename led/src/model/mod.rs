@@ -718,7 +718,10 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
                 if !pending_opens.is_empty() {
                     for path in &pending_opens {
                         if !s.tabs.iter().any(|t| t.path == *path) {
-                            s.tabs.push_back(led_state::Tab { path: path.clone(), is_preview: false });
+                            s.tabs.push_back(led_state::Tab {
+                                path: path.clone(),
+                                is_preview: false,
+                            });
                         }
                         if !s.buffers.contains_key(path) {
                             let buf = BufferState::new(path.clone());
@@ -1043,7 +1046,10 @@ fn ensure_startup_arg_buffers(s: &mut AppState) {
     }
     for path in s.startup.arg_paths.clone().iter() {
         if !s.tabs.iter().any(|t| t.path == *path) {
-            s.tabs.push_back(led_state::Tab { path: path.clone(), is_preview: false });
+            s.tabs.push_back(led_state::Tab {
+                path: path.clone(),
+                is_preview: false,
+            });
         }
         if !s.buffers.contains_key(path) {
             let mut buf = BufferState::new(path.clone());
@@ -1057,7 +1063,10 @@ fn ensure_startup_arg_buffers(s: &mut AppState) {
 /// the unified materialization stream in derived will emit `DocStoreOut::Open`.
 pub(crate) fn request_open(s: &mut AppState, path: PathBuf, create_if_missing: bool) {
     if !s.tabs.iter().any(|t| t.path == path) {
-        s.tabs.push_back(led_state::Tab { path: path.clone(), is_preview: false });
+        s.tabs.push_back(led_state::Tab {
+            path: path.clone(),
+            is_preview: false,
+        });
     }
     if !s.buffers.contains_key(&path) {
         let mut buf = BufferState::new(path.clone());
@@ -1407,14 +1416,10 @@ fn resolve_preview(s: &AppState) -> Option<Mut> {
     }
 
     // Case B: already open as real buffer → activate temporarily
-    if let Some(existing) = s
-        .buffers
-        .values()
-        .find(|b| {
-            b.path_buf() == Some(&req.path)
-                && !s.tabs.iter().any(|t| t.path == req.path && t.is_preview)
-        })
-    {
+    if let Some(existing) = s.buffers.values().find(|b| {
+        b.path_buf() == Some(&req.path)
+            && !s.tabs.iter().any(|t| t.path == req.path && t.is_preview)
+    }) {
         let path = existing.path_buf().cloned().expect("matched by path");
         let row = req.row.min(existing.doc().line_count().saturating_sub(1));
         let col = req.col;

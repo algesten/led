@@ -249,7 +249,9 @@ impl TestHarness {
                         loop {
                             if let Some(ref s) = *last_for_wait.borrow() {
                                 let phase_done = s.phase == led_state::Phase::Running;
-                                let files_ready = s.buffers.values().filter(|b| b.is_materialized()).count() >= file_count;
+                                let files_ready =
+                                    s.buffers.values().filter(|b| b.is_materialized()).count()
+                                        >= file_count;
                                 if phase_done && files_ready {
                                     break;
                                 }

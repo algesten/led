@@ -235,22 +235,26 @@ pub fn handle_action(state: &mut AppState, action: Action) -> bool {
             });
             // Auto-trigger completion when no popup is showing
             if state.lsp.completion.is_none() {
-                if let Some(ref path) = state.active_tab {
-                    if let Some(buf) = state.buffers.get(path) {
-                        if !buf.completion_triggers().is_empty() {
-                            let line = buf.doc().line(buf.cursor_row());
+                let should_complete = state
+                    .active_tab
+                    .as_ref()
+                    .and_then(|path| state.buffers.get(path))
+                    .filter(|buf| !buf.completion_triggers().is_empty())
+                    .is_some_and(|buf| {
+                        led_core::with_line_buf(|line| {
+                            buf.doc().line(buf.cursor_row(), line);
                             let col = buf.cursor_col().0;
-                            if col > 0 {
+                            col > 0 && {
                                 let prev = line.chars().nth(col - 1).unwrap_or(' ');
-                                if prev.is_alphanumeric() || prev == '_' {
-                                    state
-                                        .lsp_mut()
-                                        .pending_request
-                                        .set(Some(LspRequest::Complete));
-                                }
+                                prev.is_alphanumeric() || prev == '_'
                             }
-                        }
-                    }
+                        })
+                    });
+                if should_complete {
+                    state
+                        .lsp_mut()
+                        .pending_request
+                        .set(Some(LspRequest::Complete));
                 }
             }
         }

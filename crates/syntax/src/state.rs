@@ -34,20 +34,27 @@ pub struct SyntaxState {
 
 impl SyntaxState {
     pub fn from_path_and_doc(path: &Path, doc: &dyn Doc) -> Option<Self> {
-        let entry = detect_language_from_modeline(|i| doc.line(led_core::Row(i)), doc.line_count())
-            .and_then(|name| lang_entry_for_name(&name))
-            .or_else(|| {
-                symlink_chain(path).iter().find_map(|p| {
-                    p.extension()
-                        .and_then(|e| e.to_str())
-                        .and_then(lang_for_ext)
-                        .or_else(|| {
-                            p.file_name()
-                                .and_then(|n| n.to_str())
-                                .and_then(lang_for_filename)
-                        })
-                })
-            })?;
+        let entry = detect_language_from_modeline(
+            |i| {
+                let mut buf = String::new();
+                doc.line(led_core::Row(i), &mut buf);
+                buf
+            },
+            doc.line_count(),
+        )
+        .and_then(|name| lang_entry_for_name(&name))
+        .or_else(|| {
+            symlink_chain(path).iter().find_map(|p| {
+                p.extension()
+                    .and_then(|e| e.to_str())
+                    .and_then(lang_for_ext)
+                    .or_else(|| {
+                        p.file_name()
+                            .and_then(|n| n.to_str())
+                            .and_then(lang_for_filename)
+                    })
+            })
+        })?;
 
         let mut parser = Parser::new();
         parser.set_language(&entry.language).ok()?;

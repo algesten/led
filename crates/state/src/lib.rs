@@ -647,23 +647,25 @@ impl BufferState {
         let line_count = doc.line_count();
         let mut removals: Vec<(CharOffset, CharOffset)> = Vec::new();
 
-        for line_idx in (0..line_count).rev() {
-            let row = Row(line_idx);
-            let line = doc.line(row);
-            let trimmed = line.trim_end();
-            if trimmed.len() < line.len() {
-                let line_start = doc.line_to_char(row).0;
-                let start = CharOffset(line_start + trimmed.chars().count());
-                let end = CharOffset(line_start + line.chars().count());
-                removals.push((start, end));
+        led_core::with_line_buf(|line_buf| {
+            for line_idx in (0..line_count).rev() {
+                let row = Row(line_idx);
+                doc.line(row, line_buf);
+                let trimmed = line_buf.trim_end();
+                if trimmed.len() < line_buf.len() {
+                    let line_start = doc.line_to_char(row).0;
+                    let start = CharOffset(line_start + trimmed.chars().count());
+                    let end = CharOffset(line_start + line_buf.chars().count());
+                    removals.push((start, end));
+                }
             }
-        }
+        });
 
-        let needs_final_newline = {
+        let needs_final_newline = led_core::with_line_buf(|line_buf| {
             let last_row = Row(doc.line_count().saturating_sub(1));
-            let last = doc.line(last_row);
-            !last.is_empty()
-        };
+            doc.line(last_row, line_buf);
+            !line_buf.is_empty()
+        });
 
         // Apply removals (already in reverse order)
         for (start, end) in removals {

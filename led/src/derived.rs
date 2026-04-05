@@ -184,9 +184,9 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
         s.tabs
             .iter()
             .filter(|t| {
-                s.buffers
-                    .get(&t.path)
-                    .map_or(true, |b| b.materialization() == led_state::MaterializationState::NotMaterialized)
+                s.buffers.get(&t.path).map_or(true, |b| {
+                    b.materialization() == led_state::MaterializationState::NotMaterialized
+                })
             })
             .map(|t| t.path.clone())
             .collect()
@@ -313,7 +313,10 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
                 .filter(|b| {
                     b.is_materialized()
                         && b.path().is_some()
-                        && !s.tabs.iter().any(|t| t.is_preview && b.path_buf() == Some(&t.path))
+                        && !s
+                            .tabs
+                            .iter()
+                            .any(|t| t.is_preview && b.path_buf() == Some(&t.path))
                         && (b.undo_history_len() > b.persisted_undo_len() || b.is_dirty())
                 })
                 .map(|b| b.version())

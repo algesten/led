@@ -14,7 +14,12 @@ pub(super) fn cycle_tab(state: &mut AppState, direction: i32) {
         .tabs
         .iter()
         .filter(|t| !t.is_preview)
-        .filter(|t| state.buffers.get(&t.path).map_or(false, |b| b.is_materialized()))
+        .filter(|t| {
+            state
+                .buffers
+                .get(&t.path)
+                .map_or(false, |b| b.is_materialized())
+        })
         .map(|t| &t.path)
         .collect();
 

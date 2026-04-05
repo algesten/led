@@ -3837,11 +3837,11 @@ fn find_file_opens_nonexistent_in_project_dir() {
             Do(InsertNewline),
             WaitFor(|s| s.find_file.is_none()),
             WaitFor(|s| {
-                s.buffers
-                    .values()
-                    .any(|b| b.is_materialized() && b.path_buf().map_or(false, |p| {
-                        p.file_name().map_or(false, |n| n == "new.txt")
-                    }))
+                s.buffers.values().any(|b| {
+                    b.is_materialized()
+                        && b.path_buf()
+                            .map_or(false, |p| p.file_name().map_or(false, |n| n == "new.txt"))
+                })
             }),
         ]);
 

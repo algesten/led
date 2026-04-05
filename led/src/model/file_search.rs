@@ -679,11 +679,12 @@ fn unreplace_selected(state: &mut AppState) {
         if let Some(buf) = state.buf_mut(&bp) {
             buf.close_group_on_move();
         }
-        let line_text = state
-            .buffers
-            .get(&bp)
-            .map(|b| b.doc().line(led_core::Row(entry.row)).to_string())
-            .unwrap_or_default();
+        let line_text = led_core::with_line_buf(|buf| {
+            if let Some(b) = state.buffers.get(&bp) {
+                b.doc().line(led_core::Row(entry.row), buf);
+            }
+            buf.clone()
+        });
         let fs = state.file_search.as_mut().unwrap();
         reinsert_hit_into_results(fs, &entry, &line_text);
         let target_idx = fs
@@ -998,7 +999,10 @@ fn replace_in_buffer(
         return;
     }
 
-    let line_text = buf.doc().line(led_core::Row(row));
+    let line_text = led_core::with_line_buf(|b| {
+        buf.doc().line(led_core::Row(row), b);
+        b.clone()
+    });
     let actual_replacement = if let Some(query) = search_query {
         let matched_text = line_text
             .get(match_start_byte..match_end_byte)

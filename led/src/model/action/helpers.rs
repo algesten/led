@@ -68,13 +68,15 @@ pub(super) fn maybe_close_group(buf: &mut BufferState, kind: EditKind, ch: char)
     } else if kind == EditKind::Insert {
         // Word boundary: whitespace after non-whitespace
         if ch.is_whitespace() {
-            let line = buf.doc().line(buf.cursor_row());
-            let prev = line.chars().nth(buf.cursor_col().0.saturating_sub(1));
-            if let Some(p) = prev {
-                if !p.is_whitespace() {
-                    buf.close_undo_group();
+            led_core::with_line_buf(|line| {
+                buf.doc().line(buf.cursor_row(), line);
+                let prev = line.chars().nth(buf.cursor_col().0.saturating_sub(1));
+                if let Some(p) = prev {
+                    if !p.is_whitespace() {
+                        buf.close_undo_group();
+                    }
                 }
-            }
+            });
         }
     }
 }
@@ -107,19 +109,21 @@ pub(super) fn should_record(action: &led_core::Action) -> bool {
 
 /// Extract the word under the cursor.
 pub(super) fn word_under_cursor(buf: &BufferState) -> String {
-    let line = buf.doc().line(buf.cursor_row());
-    let chars: Vec<char> = line.chars().collect();
-    let col = buf.cursor_col().0;
-    if col >= chars.len() {
-        return String::new();
-    }
-    let mut start = col;
-    while start > 0 && (chars[start - 1].is_alphanumeric() || chars[start - 1] == '_') {
-        start -= 1;
-    }
-    let mut end = col;
-    while end < chars.len() && (chars[end].is_alphanumeric() || chars[end] == '_') {
-        end += 1;
-    }
-    chars[start..end].iter().collect()
+    led_core::with_line_buf(|line| {
+        buf.doc().line(buf.cursor_row(), line);
+        let chars: Vec<char> = line.chars().collect();
+        let col = buf.cursor_col().0;
+        if col >= chars.len() {
+            return String::new();
+        }
+        let mut start = col;
+        while start > 0 && (chars[start - 1].is_alphanumeric() || chars[start - 1] == '_') {
+            start -= 1;
+        }
+        let mut end = col;
+        while end < chars.len() && (chars[end].is_alphanumeric() || chars[end] == '_') {
+            end += 1;
+        }
+        chars[start..end].iter().collect()
+    })
 }

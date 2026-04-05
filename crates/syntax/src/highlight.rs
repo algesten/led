@@ -67,8 +67,7 @@ pub(crate) fn collect_highlights(
                 let char_end = doc.byte_to_char(span_end_byte) - line_start_char;
 
                 // Clamp to effective line length (exclude trailing newline)
-                let line_text = doc.line(Row(line));
-                let effective_line_len = line_text.chars().count();
+                let effective_line_len = doc.line_len(Row(line));
                 let char_end = char_end.min(effective_line_len);
                 if char_start >= char_end {
                     continue;

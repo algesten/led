@@ -10,23 +10,25 @@ pub fn find_all_matches(doc: &dyn Doc, query: &str) -> Vec<(usize, usize, usize)
     let query_lower: String = query.to_lowercase();
     let total = doc.line_count();
     let mut results = Vec::new();
-    for row in 0..total {
-        let line = doc.line(led_core::Row(row));
-        let line_lower = line.to_lowercase();
-        let mut start = 0;
-        while let Some(pos) = line_lower[start..].find(&query_lower) {
-            let byte_offset = start + pos;
-            let col = line[..byte_offset].chars().count();
-            let char_len = query.chars().count();
-            results.push((row, col, char_len));
-            // Advance past this match by at least one char
-            start = byte_offset
-                + line_lower[byte_offset..]
-                    .chars()
-                    .next()
-                    .map_or(1, |c| c.len_utf8());
+    led_core::with_line_buf(|line| {
+        for row in 0..total {
+            doc.line(led_core::Row(row), line);
+            let line_lower = line.to_lowercase();
+            let mut start = 0;
+            while let Some(pos) = line_lower[start..].find(&query_lower) {
+                let byte_offset = start + pos;
+                let col = line[..byte_offset].chars().count();
+                let char_len = query.chars().count();
+                results.push((row, col, char_len));
+                // Advance past this match by at least one char
+                start = byte_offset
+                    + line_lower[byte_offset..]
+                        .chars()
+                        .next()
+                        .map_or(1, |c| c.len_utf8());
+            }
         }
-    }
+    });
     results
 }
 

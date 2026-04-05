@@ -6,9 +6,7 @@ use std::sync::Arc;
 use led_core::Doc;
 use led_core::PanelSlot;
 use led_core::git::{self, FileStatus, LineStatus};
-use led_core::wrap::{
-    chars_to_string, compute_chunks, expand_tabs, find_sub_line, line_display_width,
-};
+use led_core::wrap::{chars_to_string, compute_chunks, expand_tabs, find_sub_line};
 use led_state::{AppState, BracketPair, Dimensions, EntryKind, HighlightSpan};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
@@ -226,6 +224,10 @@ pub fn display_inputs(s: &AppState) -> Option<DisplayInputs> {
 }
 
 pub fn build_display_lines(d: &DisplayInputs) -> Rc<Vec<Line<'static>>> {
+    led_core::with_line_buf(|line_buf| build_display_lines_inner(d, line_buf))
+}
+
+fn build_display_lines_inner(d: &DisplayInputs, line_buf: &mut String) -> Rc<Vec<Line<'static>>> {
     let mut display_lines: Vec<Line<'static>> = Vec::with_capacity(d.buffer_height);
     let line_count = d.doc.line_count();
     let mut screen_row: usize = 0;
@@ -233,8 +235,8 @@ pub fn build_display_lines(d: &DisplayInputs) -> Rc<Vec<Line<'static>>> {
     let mut skip_sub_lines = d.scroll_sub_line;
 
     while screen_row < d.buffer_height && line_idx < line_count {
-        let line = d.doc.line(led_core::Row(line_idx));
-        let (display, char_map) = expand_tabs(&line);
+        d.doc.line(led_core::Row(line_idx), line_buf);
+        let (display, char_map) = expand_tabs(&line_buf);
         let chunks = compute_chunks(display.len(), d.text_width);
 
         // Compute selected display-column range for this line
@@ -603,14 +605,17 @@ pub fn cursor_inputs(s: &AppState) -> Option<CursorInputs> {
 
 /// Returns cursor position relative to buffer area: (x_offset, y_offset).
 pub fn compute_cursor_pos(c: &CursorInputs) -> Option<(u16, u16)> {
-    let cursor_line = c.doc.line(led_core::Row(c.cursor_row));
-    let (cursor_display, char_map) = expand_tabs(&cursor_line);
+    led_core::with_line_buf(|line_buf| compute_cursor_pos_inner(c, line_buf))
+}
+
+fn compute_cursor_pos_inner(c: &CursorInputs, line_buf: &mut String) -> Option<(u16, u16)> {
+    c.doc.line(led_core::Row(c.cursor_row), line_buf);
+    let (cursor_display, char_map) = expand_tabs(&line_buf);
     let cursor_dcol = char_map
         .get(c.cursor_col)
         .copied()
         .unwrap_or_else(|| char_map.last().copied().unwrap_or(0));
-    let cursor_display_width = cursor_display.len();
-    let cursor_chunks = compute_chunks(cursor_display_width, c.text_width);
+    let cursor_chunks = compute_chunks(cursor_display.len(), c.text_width);
     let cursor_sub = find_sub_line(&cursor_chunks, cursor_dcol);
     let (cs, _ce) = cursor_chunks[cursor_sub];
 
@@ -622,12 +627,11 @@ pub fn compute_cursor_pos(c: &CursorInputs) -> Option<(u16, u16)> {
 
     while line_idx < line_count {
         // Reuse precomputed data for the cursor line; use lightweight
-        // line_display_width for all other lines to avoid expand_tabs allocations.
+        // line_display_width for all other lines to avoid allocations.
         let chunks = if line_idx == c.cursor_row {
             &cursor_chunks
         } else {
-            let l = c.doc.line(led_core::Row(line_idx));
-            let dw = line_display_width(&l);
+            let dw = c.doc.line_display_width(led_core::Row(line_idx));
             &compute_chunks(dw, c.text_width)
         };
 
@@ -851,11 +855,7 @@ pub fn overlay_inputs(s: &AppState) -> OverlayContent {
         Some(d) => d,
         None => return OverlayContent::None,
     };
-    let (cursor_x, cursor_y) = match s
-        .active_tab
-        .as_ref()
-        .and_then(|path| s.buffers.get(path))
-    {
+    let (cursor_x, cursor_y) = match s.active_tab.as_ref().and_then(|path| s.buffers.get(path)) {
         Some(buf) => {
             let x = dims.side_width()
                 + dims.gutter_width
@@ -1449,7 +1449,10 @@ pub fn file_search_inputs(s: &AppState) -> Option<FileSearchInputs> {
         hit_style: style::resolve_cached(theme, &theme.file_search.hit),
         match_style: style::resolve_cached(theme, &theme.file_search.match_),
         selected_style: style::resolve_cached(theme, &theme.file_search.selected),
-        selected_unfocused_style: style::resolve_cached(theme, &theme.file_search.selected_unfocused),
+        selected_unfocused_style: style::resolve_cached(
+            theme,
+            &theme.file_search.selected_unfocused,
+        ),
     })
 }
 

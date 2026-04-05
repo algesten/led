@@ -28,16 +28,18 @@ pub fn insert_newline(buf: &mut BufferState) -> (usize, usize, usize) {
 }
 
 fn get_line_indent(doc: &dyn Doc, line: usize) -> String {
-    let text = doc.line(Row(line));
-    let mut indent = String::new();
-    for ch in text.chars() {
-        if ch == ' ' || ch == '\t' {
-            indent.push(ch);
-        } else {
-            break;
+    led_core::with_line_buf(|text| {
+        doc.line(Row(line), text);
+        let mut indent = String::new();
+        for ch in text.chars() {
+            if ch == ' ' || ch == '\t' {
+                indent.push(ch);
+            } else {
+                break;
+            }
         }
-    }
-    indent
+        indent
+    })
 }
 
 /// Apply computed indent to a line, replacing existing leading whitespace.

@@ -70,9 +70,7 @@ pub enum DocStoreIn {
 impl fmt::Debug for DocStoreIn {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            DocStoreIn::Opening { path } => {
-                f.debug_struct("Opening").field("path", path).finish()
-            }
+            DocStoreIn::Opening { path } => f.debug_struct("Opening").field("path", path).finish(),
             DocStoreIn::Opened { id, path, .. } => f
                 .debug_struct("Opened")
                 .field("id", id)

@@ -185,56 +185,62 @@ fn indent_query_start(doc: &dyn Doc, tree: &Tree, basis_row: usize, line: usize)
 }
 
 fn find_basis_row(doc: &dyn Doc, line: usize) -> Option<usize> {
-    for row in (0..line).rev() {
-        let line_text = doc.line(Row(row));
-        if line_text.chars().any(|c| !c.is_whitespace()) {
-            return Some(row);
+    led_core::with_line_buf(|line_text| {
+        for row in (0..line).rev() {
+            doc.line(Row(row), line_text);
+            if line_text.chars().any(|c| !c.is_whitespace()) {
+                return Some(row);
+            }
         }
-    }
-    if line > 0 { Some(0) } else { None }
+        if line > 0 { Some(0) } else { None }
+    })
 }
 
 /// For a line whose first non-whitespace char is a closing bracket,
 /// find the matching open bracket via tree-sitter and return its line's indent.
 pub(crate) fn closing_bracket_indent(tree: &Tree, doc: &dyn Doc, line: usize) -> Option<String> {
-    let line_text = doc.line(Row(line));
-    let mut char_offset = 0;
-    let mut found_bracket = false;
-    for ch in line_text.chars() {
-        if ch == ' ' || ch == '\t' {
-            char_offset += 1;
-            continue;
+    led_core::with_line_buf(|line_text| {
+        doc.line(Row(line), line_text);
+        let mut char_offset = 0;
+        let mut found_bracket = false;
+        for ch in line_text.chars() {
+            if ch == ' ' || ch == '\t' {
+                char_offset += 1;
+                continue;
+            }
+            if ch != '}' && ch != ')' && ch != ']' {
+                return None;
+            }
+            found_bracket = true;
+            break;
         }
-        if ch != '}' && ch != ')' && ch != ']' {
+        if !found_bracket {
             return None;
         }
-        found_bracket = true;
-        break;
-    }
-    if !found_bracket {
-        return None;
-    }
-    let bracket_char_idx = doc.line_to_char(Row(line)).0 + char_offset;
-    let bracket_byte = doc.char_to_byte(bracket_char_idx);
-    let node = tree
-        .root_node()
-        .descendant_for_byte_range(bracket_byte, bracket_byte + 1)?;
-    let parent = node.parent()?;
-    Some(get_line_indent(doc, parent.start_position().row))
+        let bracket_char_idx = doc.line_to_char(Row(line)).0 + char_offset;
+        let bracket_byte = doc.char_to_byte(bracket_char_idx);
+        let node = tree
+            .root_node()
+            .descendant_for_byte_range(bracket_byte, bracket_byte + 1)?;
+        let parent = node.parent()?;
+        Some(get_line_indent(doc, parent.start_position().row))
+    })
 }
 
 /// Get leading whitespace of a line.
 pub(crate) fn get_line_indent(doc: &dyn Doc, line: usize) -> String {
-    let line_text = doc.line(Row(line));
-    let mut indent = String::new();
-    for ch in line_text.chars() {
-        if ch == ' ' || ch == '\t' {
-            indent.push(ch);
-        } else {
-            break;
+    led_core::with_line_buf(|line_text| {
+        doc.line(Row(line), line_text);
+        let mut indent = String::new();
+        for ch in line_text.chars() {
+            if ch == ' ' || ch == '\t' {
+                indent.push(ch);
+            } else {
+                break;
+            }
         }
-    }
-    indent
+        indent
+    })
 }
 
 /// Apply an indent delta to a basis indentation string.
@@ -273,23 +279,25 @@ pub(crate) fn apply_indent_delta(
 /// Detect the indent unit used in the file.
 pub(crate) fn detect_indent_unit(doc: &dyn Doc) -> String {
     let lines = doc.line_count().min(100);
-    for i in 0..lines {
-        let line = doc.line(Row(i));
-        let mut indent = String::new();
-        for ch in line.chars() {
-            if ch == '\t' {
-                return "\t".to_string();
-            } else if ch == ' ' {
-                indent.push(' ');
-            } else {
-                break;
+    led_core::with_line_buf(|line| {
+        for i in 0..lines {
+            doc.line(Row(i), line);
+            let mut indent = String::new();
+            for ch in line.chars() {
+                if ch == '\t' {
+                    return "\t".to_string();
+                } else if ch == ' ' {
+                    indent.push(' ');
+                } else {
+                    break;
+                }
+            }
+            if !indent.is_empty() {
+                return indent;
             }
         }
-        if !indent.is_empty() {
-            return indent;
-        }
-    }
-    "    ".to_string()
+        "    ".to_string()
+    })
 }
 
 /// Regex-based indent fallback for when the tree is in an error state.
@@ -301,36 +309,39 @@ pub(crate) fn regex_indent(
     decrease_pattern: Option<&regex::Regex>,
 ) -> Option<String> {
     let basis = find_prev_nonempty_line(doc, line)?;
-    let basis_text = doc.line(Row(basis));
-    let basis_indent = get_line_indent(doc, basis);
+    led_core::with_line_buf(|line_buf| {
+        doc.line(Row(basis), line_buf);
+        let basis_indent = get_line_indent(doc, basis);
 
-    if let Some(re) = increase_pattern {
-        if re.is_match(&basis_text) {
-            return Some(apply_indent_delta(
-                &basis_indent,
-                IndentDelta::Greater,
-                indent_unit,
-            ));
+        if let Some(re) = increase_pattern {
+            if re.is_match(line_buf) {
+                return Some(apply_indent_delta(
+                    &basis_indent,
+                    IndentDelta::Greater,
+                    indent_unit,
+                ));
+            }
         }
-    }
 
-    let current_text = doc.line(Row(line));
-    if let Some(re) = decrease_pattern {
-        if re.is_match(&current_text) {
-            return Some(apply_indent_delta(
-                &basis_indent,
-                IndentDelta::Less,
-                indent_unit,
-            ));
+        doc.line(Row(line), line_buf);
+        if let Some(re) = decrease_pattern {
+            if re.is_match(line_buf) {
+                return Some(apply_indent_delta(
+                    &basis_indent,
+                    IndentDelta::Less,
+                    indent_unit,
+                ));
+            }
         }
-    }
 
-    None
+        None
+    })
 }
 
 fn find_prev_nonempty_line(doc: &dyn Doc, line: usize) -> Option<usize> {
+    let mut line_text = String::new();
     for row in (0..line).rev() {
-        let line_text = doc.line(Row(row));
+        doc.line(Row(row), &mut line_text);
         if line_text.chars().any(|c| !c.is_whitespace()) {
             return Some(row);
         }

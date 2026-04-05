@@ -234,7 +234,13 @@ impl UndoHistory {
 pub trait Doc: Send + Sync {
     // Display
     fn line_count(&self) -> usize;
-    fn line(&self, idx: Row) -> String;
+
+    /// Fill `buf` with the raw content of line `idx` (may include trailing `\n`/`\r`).
+    /// Clears `buf` before filling, so callers can reuse it across iterations.
+    fn line(&self, idx: Row, buf: &mut String);
+
+    /// Count the display width of a line (tabs = 4 columns) without allocating.
+    fn line_display_width(&self, idx: Row) -> usize;
 
     // Coordinate conversion
     fn line_to_char(&self, line_idx: Row) -> CharOffset;
@@ -283,8 +289,11 @@ impl Doc for InertDoc {
     fn line_count(&self) -> usize {
         0
     }
-    fn line(&self, _: Row) -> String {
-        String::new()
+    fn line(&self, _: Row, buf: &mut String) {
+        buf.clear();
+    }
+    fn line_display_width(&self, _: Row) -> usize {
+        0
     }
     fn line_to_char(&self, _: Row) -> CharOffset {
         CharOffset(0)
@@ -355,15 +364,27 @@ impl Doc for TextDoc {
         self.rope.len_lines()
     }
 
-    fn line(&self, idx: Row) -> String {
+    fn line(&self, idx: Row, buf: &mut String) {
+        buf.clear();
         if *idx >= self.rope.len_lines() {
-            return String::new();
+            return;
         }
-        let line = self.rope.line(*idx);
-        let mut s = line.to_string();
-        let trimmed_len = s.trim_end_matches(&['\n', '\r'][..]).len();
-        s.truncate(trimmed_len);
-        s
+        let slice = self.rope.line(*idx);
+        for chunk in slice.chunks() {
+            buf.push_str(chunk);
+        }
+    }
+
+    fn line_display_width(&self, idx: Row) -> usize {
+        if *idx >= self.rope.len_lines() {
+            return 0;
+        }
+        self.rope
+            .line(*idx)
+            .chars()
+            .filter(|c| *c != '\n' && *c != '\r')
+            .map(|c| if c == '\t' { 4 } else { 1 })
+            .sum()
     }
 
     fn line_to_char(&self, line_idx: Row) -> CharOffset {

@@ -1,16 +1,18 @@
 /// Count display width of a line (tabs expand to 4 columns) without allocating.
 pub fn line_display_width(line: &str) -> usize {
-    line.chars()
-        .map(|ch| if ch == '\t' { 4 } else { 1 })
-        .sum()
+    line.chars().map(|ch| if ch == '\t' { 4 } else { 1 }).sum()
 }
 
 /// Expand tabs to 4 spaces, returning display chars and char-index-to-display-column map.
 /// The map has len = num_source_chars + 1 (sentinel at end == display.len()).
+/// Trailing `\n`/`\r` from rope lines are skipped.
 pub fn expand_tabs(line: &str) -> (Vec<char>, Vec<usize>) {
     let mut display: Vec<char> = Vec::with_capacity(line.len());
     let mut char_map = Vec::with_capacity(line.len() + 1);
     for ch in line.chars() {
+        if ch == '\n' || ch == '\r' {
+            continue;
+        }
         char_map.push(display.len());
         if ch == '\t' {
             display.extend([' ', ' ', ' ', ' ']);
