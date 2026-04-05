@@ -1,14 +1,10 @@
+use std::rc::Rc;
+
 use led_core::{Doc, Row};
+use led_state::HighlightSpan;
 use tree_sitter::{Query, QueryCursor, StreamingIterator, Tree};
 
 use crate::parse::DocProvider;
-
-#[derive(Debug, Clone)]
-pub struct HighlightSpan {
-    pub char_start: usize,
-    pub char_end: usize,
-    pub capture_name: String,
-}
 
 pub(crate) fn collect_highlights(
     query: &Query,
@@ -23,7 +19,12 @@ pub(crate) fn collect_highlights(
     let mut cursor = QueryCursor::new();
     cursor.set_byte_range(start_byte..end_byte);
 
-    let capture_names = query.capture_names();
+    // Intern capture names: one Rc<str> per capture index, reused across all spans.
+    let interned: Vec<Rc<str>> = query
+        .capture_names()
+        .iter()
+        .map(|n| Rc::from(&**n))
+        .collect();
     let mut result = Vec::new();
 
     let mut matches = cursor.matches(query, tree.root_node(), DocProvider { doc });
@@ -32,7 +33,7 @@ pub(crate) fn collect_highlights(
         matches.get()
     } {
         for cap in m.captures {
-            let name = capture_names[cap.index as usize];
+            let name = Rc::clone(&interned[cap.index as usize]);
             let node = cap.node;
             let len = doc.len_bytes();
             // Clamp: tree may be out of sync with doc after edits
@@ -78,7 +79,7 @@ pub(crate) fn collect_highlights(
                     HighlightSpan {
                         char_start,
                         char_end,
-                        capture_name: name.to_string(),
+                        capture_name: Rc::clone(&name),
                     },
                 ));
             }

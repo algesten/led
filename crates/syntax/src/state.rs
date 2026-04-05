@@ -8,12 +8,13 @@ use led_core::{Doc, EditOp};
 
 use crate::bracket;
 use crate::config::*;
-use crate::highlight::{HighlightSpan, collect_highlights};
+use crate::highlight::collect_highlights;
 use crate::indent;
 use crate::injection::{self, InjectionLayer, QueryCache};
 use crate::language::{lang_entry_for_name, lang_for_ext, lang_for_filename};
 use crate::modeline::detect_language_from_modeline;
 use crate::parse::parse_doc;
+use led_state::HighlightSpan;
 
 pub struct SyntaxState {
     parser: Parser,
@@ -455,10 +456,7 @@ mod tests {
         let path = Path::new("test.rs");
         let state = SyntaxState::from_path_and_doc(path, &*doc).unwrap();
         let highlights = state.highlights_for_lines(&*doc, 0, 1);
-        let names: Vec<&str> = highlights
-            .iter()
-            .map(|(_, s)| s.capture_name.as_str())
-            .collect();
+        let names: Vec<&str> = highlights.iter().map(|(_, s)| &*s.capture_name).collect();
         assert!(
             names.iter().any(|n| n.contains("keyword")),
             "expected keyword capture in highlights: {names:?}"
@@ -562,8 +560,12 @@ mod tests {
             fn line_count(&self) -> usize {
                 1
             }
-            fn line(&self, _: Row) -> String {
-                "hello".into()
+            fn line(&self, _: Row, buf: &mut String) {
+                buf.clear();
+                buf.push_str("hello");
+            }
+            fn line_display_width(&self, _: Row) -> usize {
+                5
             }
             fn line_to_char(&self, _: Row) -> CharOffset {
                 CharOffset(0)
@@ -658,7 +660,11 @@ mod tests {
             expected.len(),
             actual,
             actual.len(),
-            doc.line(led_core::Row(line)),
+            {
+                let mut b = String::new();
+                doc.line(led_core::Row(line), &mut b);
+                b
+            },
         );
     }
 
@@ -917,7 +923,11 @@ fn run() {
             expected.len(),
             actual,
             actual.len(),
-            doc.line(led_core::Row(line)),
+            {
+                let mut b = String::new();
+                doc.line(led_core::Row(line), &mut b);
+                b
+            },
         );
     }
 
@@ -1044,10 +1054,7 @@ if (true) {
         let path = Path::new("test.rb");
         let state = SyntaxState::from_path_and_doc(path, &*doc).unwrap();
         let highlights = state.highlights_for_lines(&*doc, 0, 3);
-        let names: Vec<&str> = highlights
-            .iter()
-            .map(|(_, s)| s.capture_name.as_str())
-            .collect();
+        let names: Vec<&str> = highlights.iter().map(|(_, s)| &*s.capture_name).collect();
         assert!(
             names.iter().any(|n| n.contains("keyword")),
             "expected keyword capture in Ruby highlights: {names:?}"
@@ -1095,10 +1102,7 @@ if (true) {
         let path = Path::new("test.py");
         let state = SyntaxState::from_path_and_doc(path, &*doc).unwrap();
         let highlights = state.highlights_for_lines(&*doc, 0, 4);
-        let names: Vec<&str> = highlights
-            .iter()
-            .map(|(_, s)| s.capture_name.as_str())
-            .collect();
+        let names: Vec<&str> = highlights.iter().map(|(_, s)| &*s.capture_name).collect();
         assert!(
             names.iter().any(|n| n.contains("keyword")),
             "expected Ruby-style highlights, got: {names:?}"

@@ -1331,6 +1331,8 @@ impl LspManager {
 
         let line_chars: Vec<char> = led_core::with_line_buf(|line| {
             doc.line(Row(row), line);
+            let t = line.trim_end_matches(&['\n', '\r'][..]).len();
+            line.truncate(t);
             line.chars().collect()
         });
         let psc = self.completion_prefix_start_col;

@@ -13,18 +13,19 @@ pub mod import;
 
 pub use bracket::{BracketMatch, assign_rainbow_depth};
 pub use config::{IndentDelta, IndentSuggestion};
-pub use highlight::HighlightSpan;
 pub use import::ImportItem;
+pub use led_state::HighlightSpan;
 pub use outline::OutlineItem;
 pub use state::SyntaxState;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use led_core::rx::Stream;
 use led_core::{Doc, EditOp};
-use led_state::{BracketPair, HighlightSpan as StateHighlightSpan};
+use led_state::BracketPair;
 use tokio::sync::mpsc;
 
 // ── Driver protocol ──
@@ -51,7 +52,7 @@ pub enum SyntaxOut {
 pub struct SyntaxIn {
     pub path: PathBuf,
     pub doc_version: u64,
-    pub highlights: Vec<(usize, StateHighlightSpan)>,
+    pub highlights: Rc<Vec<(usize, HighlightSpan)>>,
     pub bracket_pairs: Vec<BracketPair>,
     pub matching_bracket: Option<(usize, usize)>,
     pub indent: Option<String>,
@@ -83,7 +84,7 @@ pub fn driver(out: Stream<SyntaxOut>) -> Stream<SyntaxIn> {
             last_doc: Arc<dyn Doc>,
             last_scroll: usize,
             last_end_line: usize,
-            cached_highlights: Vec<(usize, led_state::HighlightSpan)>,
+            cached_highlights: Rc<Vec<(usize, HighlightSpan)>>,
             cached_brackets: Vec<led_state::BracketPair>,
             reindent_chars: Arc<[char]>,
         }
@@ -91,6 +92,10 @@ pub fn driver(out: Stream<SyntaxOut>) -> Stream<SyntaxIn> {
 
         while let Some(cmd) = cmd_rx.recv().await {
             match cmd {
+                SyntaxOut::BufferClosed { path } => {
+                    states.remove(&path);
+                    continue;
+                }
                 SyntaxOut::BufferChanged {
                     path,
                     doc,
@@ -114,7 +119,7 @@ pub fn driver(out: Stream<SyntaxOut>) -> Stream<SyntaxIn> {
                                     last_doc: doc.clone(),
                                     last_scroll: usize::MAX,
                                     last_end_line: 0,
-                                    cached_highlights: Vec::new(),
+                                    cached_highlights: Rc::new(Vec::new()),
                                     cached_brackets: Vec::new(),
                                     reindent_chars,
                                 },
@@ -125,7 +130,7 @@ pub fn driver(out: Stream<SyntaxOut>) -> Stream<SyntaxIn> {
                                     .send(SyntaxIn {
                                         path,
                                         doc_version: version,
-                                        highlights: vec![],
+                                        highlights: Rc::new(vec![]),
                                         bracket_pairs: vec![],
                                         matching_bracket: None,
                                         indent: None,
@@ -183,9 +188,8 @@ pub fn driver(out: Stream<SyntaxOut>) -> Stream<SyntaxIn> {
                         scroll_row != bs.last_scroll || end_line != bs.last_end_line;
 
                     if doc_changed || viewport_changed || bs.cached_highlights.is_empty() {
-                        bs.cached_highlights = to_state_highlights(
-                            &bs.state.highlights_for_lines(&*doc, scroll_row, end_line),
-                        );
+                        bs.cached_highlights =
+                            Rc::new(bs.state.highlights_for_lines(&*doc, scroll_row, end_line));
                         bs.cached_brackets =
                             to_state_brackets(&bs.state, &*doc, scroll_row, end_line);
                         bs.last_scroll = scroll_row;
@@ -214,9 +218,6 @@ pub fn driver(out: Stream<SyntaxOut>) -> Stream<SyntaxIn> {
                         })
                         .await;
                 }
-                SyntaxOut::BufferClosed { path } => {
-                    states.remove(&path);
-                }
             }
         }
     });
@@ -230,22 +231,6 @@ pub fn driver(out: Stream<SyntaxOut>) -> Stream<SyntaxIn> {
     });
 
     stream
-}
-
-fn to_state_highlights(highlights: &[(usize, HighlightSpan)]) -> Vec<(usize, StateHighlightSpan)> {
-    highlights
-        .iter()
-        .map(|(line, span)| {
-            (
-                *line,
-                StateHighlightSpan {
-                    char_start: span.char_start,
-                    char_end: span.char_end,
-                    capture_name: span.capture_name.clone(),
-                },
-            )
-        })
-        .collect()
 }
 
 fn to_state_brackets(

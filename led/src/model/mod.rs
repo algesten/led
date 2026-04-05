@@ -1210,7 +1210,7 @@ enum Mut {
     SyntaxUpdate {
         path: PathBuf,
         version: u64,
-        highlights: Vec<(usize, HighlightSpan)>,
+        highlights: Rc<Vec<(usize, HighlightSpan)>>,
         bracket_pairs: Vec<BracketPair>,
         indent: Option<String>,
         indent_row: Option<usize>,

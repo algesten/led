@@ -258,7 +258,7 @@ pub enum ChangeReason {
 pub struct HighlightSpan {
     pub char_start: usize,
     pub char_end: usize,
-    pub capture_name: String,
+    pub capture_name: Rc<str>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -651,6 +651,9 @@ impl BufferState {
             for line_idx in (0..line_count).rev() {
                 let row = Row(line_idx);
                 doc.line(row, line_buf);
+                // Strip line endings first — only trim actual whitespace.
+                let content_len = line_buf.trim_end_matches(&['\n', '\r'][..]).len();
+                line_buf.truncate(content_len);
                 let trimmed = line_buf.trim_end();
                 if trimmed.len() < line_buf.len() {
                     let line_start = doc.line_to_char(row).0;
@@ -661,11 +664,10 @@ impl BufferState {
             }
         });
 
-        let needs_final_newline = led_core::with_line_buf(|line_buf| {
+        let needs_final_newline = {
             let last_row = Row(doc.line_count().saturating_sub(1));
-            doc.line(last_row, line_buf);
-            !line_buf.is_empty()
-        });
+            doc.line_len(last_row) > 0
+        };
 
         // Apply removals (already in reverse order)
         for (start, end) in removals {
@@ -1026,12 +1028,12 @@ impl BufferState {
     /// Accept syntax highlights only if doc version matches.
     pub fn offer_syntax(
         &mut self,
-        highlights: Vec<(usize, HighlightSpan)>,
+        highlights: Rc<Vec<(usize, HighlightSpan)>>,
         bracket_pairs: Vec<BracketPair>,
         version: DocVersion,
     ) -> bool {
         if self.version == version {
-            self.syntax_highlights = Rc::new(highlights);
+            self.syntax_highlights = highlights;
             self.bracket_pairs = Rc::new(bracket_pairs);
             self.update_matching_bracket();
             true

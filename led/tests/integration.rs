@@ -12,6 +12,15 @@ use harness::{TestHarness, TestStep};
 
 // ── Helpers ──
 
+/// Test helper: get a line as a trimmed String (allocates — test-only).
+fn line(doc: &dyn led_core::Doc, row: usize) -> String {
+    let mut buf = String::new();
+    doc.line(led_core::Row(row), &mut buf);
+    let trimmed = buf.trim_end_matches(&['\n', '\r'][..]).len();
+    buf.truncate(trimmed);
+    buf
+}
+
 fn buf(t: &harness::TestResult) -> &led_state::BufferState {
     let path = t.state.active_tab.as_ref().expect("no active buffer");
     &t.state.buffers[path]
@@ -42,8 +51,8 @@ fn indent_done(s: &led_state::AppState) -> bool {
 fn open_file() {
     let t = TestHarness::new().with_file("hello\nworld\n").run(vec![]);
 
-    assert_eq!(buf(&t).doc().line(led_core::Row(0)), "hello");
-    assert_eq!(buf(&t).doc().line(led_core::Row(1)), "world");
+    assert_eq!(line(&**buf(&t).doc(), 0), "hello");
+    assert_eq!(line(&**buf(&t).doc(), 1), "world");
     assert_eq!(buf(&t).doc().line_count(), 3);
 }
 
@@ -52,7 +61,7 @@ fn open_empty_file() {
     let t = TestHarness::new().with_file("").run(vec![]);
 
     assert_eq!(buf(&t).doc().line_count(), 1);
-    assert_eq!(buf(&t).doc().line(led_core::Row(0)), "");
+    assert_eq!(line(&**buf(&t).doc(), 0), "");
 }
 
 #[test]
@@ -243,7 +252,7 @@ fn insert_chars() {
         .with_file("hello\n")
         .run(actions(vec![InsertChar('x'), InsertChar('y')]));
 
-    assert_eq!(buf(&t).doc().line(led_core::Row(0)), "xyhello");
+    assert_eq!(line(&**buf(&t).doc(), 0), "xyhello");
     assert_eq!(buf(&t).cursor_col().0, 2);
 }
 
@@ -255,7 +264,7 @@ fn insert_in_middle() {
         InsertChar('X'),
     ]));
 
-    assert_eq!(buf(&t).doc().line(led_core::Row(0)), "heXllo");
+    assert_eq!(line(&**buf(&t).doc(), 0), "heXllo");
     assert_eq!(buf(&t).cursor_col().0, 3);
 }
 
@@ -267,8 +276,8 @@ fn insert_newline() {
         InsertNewline,
     ]));
 
-    assert_eq!(buf(&t).doc().line(led_core::Row(0)), "he");
-    assert_eq!(buf(&t).doc().line(led_core::Row(1)), "llo");
+    assert_eq!(line(&**buf(&t).doc(), 0), "he");
+    assert_eq!(line(&**buf(&t).doc(), 1), "llo");
     assert_eq!(buf(&t).cursor_row().0, 1);
     assert_eq!(buf(&t).cursor_col().0, 0);
 }
@@ -280,7 +289,7 @@ fn insert_tab() {
         .with_file("hello\n")
         .run(vec![Do(InsertTab), WaitFor(indent_done)]);
 
-    assert_eq!(buf(&t).doc().line(led_core::Row(0)), "    hello");
+    assert_eq!(line(&**buf(&t).doc(), 0), "    hello");
     assert_eq!(buf(&t).cursor_col().0, 4);
 }
 
@@ -306,7 +315,7 @@ fn delete_backward() {
         DeleteBackward,
     ]));
 
-    assert_eq!(buf(&t).doc().line(led_core::Row(0)), "hllo");
+    assert_eq!(line(&**buf(&t).doc(), 0), "hllo");
     assert_eq!(buf(&t).cursor_col().0, 1);
 }
 
@@ -316,7 +325,7 @@ fn delete_backward_at_start_does_nothing() {
         .with_file("hello\n")
         .run(actions(vec![DeleteBackward]));
 
-    assert_eq!(buf(&t).doc().line(led_core::Row(0)), "hello");
+    assert_eq!(line(&**buf(&t).doc(), 0), "hello");
     assert_eq!(buf(&t).cursor_col().0, 0);
 }
 
@@ -326,7 +335,7 @@ fn delete_backward_joins_lines() {
         .with_file("hello\nworld\n")
         .run(actions(vec![MoveDown, DeleteBackward]));
 
-    assert_eq!(buf(&t).doc().line(led_core::Row(0)), "helloworld");
+    assert_eq!(line(&**buf(&t).doc(), 0), "helloworld");
     assert_eq!(buf(&t).cursor_row().0, 0);
     assert_eq!(buf(&t).cursor_col().0, 5);
 }
@@ -339,7 +348,7 @@ fn delete_forward() {
         .with_file("hello\n")
         .run(actions(vec![DeleteForward]));
 
-    assert_eq!(buf(&t).doc().line(led_core::Row(0)), "ello");
+    assert_eq!(line(&**buf(&t).doc(), 0), "ello");
     assert_eq!(buf(&t).cursor_col().0, 0);
 }
 
@@ -349,7 +358,7 @@ fn delete_forward_joins_lines() {
         .with_file("hello\nworld\n")
         .run(actions(vec![LineEnd, DeleteForward]));
 
-    assert_eq!(buf(&t).doc().line(led_core::Row(0)), "helloworld");
+    assert_eq!(line(&**buf(&t).doc(), 0), "helloworld");
     assert_eq!(buf(&t).cursor_row().0, 0);
 }
 
@@ -361,7 +370,7 @@ fn kill_line_deletes_to_end() {
         .with_file("hello world\n")
         .run(actions(vec![MoveRight, MoveRight, KillLine]));
 
-    assert_eq!(buf(&t).doc().line(led_core::Row(0)), "he");
+    assert_eq!(line(&**buf(&t).doc(), 0), "he");
     assert_eq!(buf(&t).cursor_col().0, 2);
 }
 
@@ -371,7 +380,7 @@ fn kill_line_at_end_joins_next() {
         .with_file("hello\nworld\n")
         .run(actions(vec![LineEnd, KillLine]));
 
-    assert_eq!(buf(&t).doc().line(led_core::Row(0)), "helloworld");
+    assert_eq!(line(&**buf(&t).doc(), 0), "helloworld");
 }
 
 #[test]
@@ -381,8 +390,8 @@ fn kill_line_multibyte_char() {
         .with_file("a — b\nsecond\n")
         .run(actions(vec![KillLine]));
 
-    assert_eq!(buf(&t).doc().line(led_core::Row(0)), "");
-    assert_eq!(buf(&t).doc().line(led_core::Row(1)), "second");
+    assert_eq!(line(&**buf(&t).doc(), 0), "");
+    assert_eq!(line(&**buf(&t).doc(), 1), "second");
     assert_eq!(buf(&t).doc().line_count(), 3); // empty + second + trailing
 }
 
@@ -396,7 +405,7 @@ fn undo_reverts_insert_group() {
         Undo,
     ]));
 
-    assert_eq!(buf(&t).doc().line(led_core::Row(0)), "hello");
+    assert_eq!(line(&**buf(&t).doc(), 0), "hello");
 }
 
 #[test]
@@ -408,7 +417,7 @@ fn undo_then_redo() {
         Redo,
     ]));
 
-    assert_eq!(buf(&t).doc().line(led_core::Row(0)), "xyhello");
+    assert_eq!(line(&**buf(&t).doc(), 0), "xyhello");
 }
 
 #[test]
@@ -422,7 +431,7 @@ fn undo_groups_split_on_movement() {
         Undo, // only reverts "cd"
     ]));
 
-    assert_eq!(buf(&t).doc().line(led_core::Row(0)), "abhello");
+    assert_eq!(line(&**buf(&t).doc(), 0), "abhello");
 }
 
 #[test]
@@ -435,7 +444,7 @@ fn undo_groups_split_on_word_boundary() {
         Undo, // reverts " c" (space + c are in the same group)
     ]));
 
-    assert_eq!(buf(&t).doc().line(led_core::Row(0)), "ab");
+    assert_eq!(line(&**buf(&t).doc(), 0), "ab");
 }
 
 #[test]
@@ -448,7 +457,7 @@ fn redo_cleared_by_new_edit() {
         Redo,            // redoes 'b' (original 'a' redo is gone)
     ]));
 
-    assert_eq!(buf(&t).doc().line(led_core::Row(0)), "bhello");
+    assert_eq!(line(&**buf(&t).doc(), 0), "bhello");
 }
 
 #[test]
@@ -464,7 +473,7 @@ fn multiple_undo() {
         Undo, // reverts 'a'
     ]));
 
-    assert_eq!(buf(&t).doc().line(led_core::Row(0)), "hello");
+    assert_eq!(line(&**buf(&t).doc(), 0), "hello");
 }
 
 #[test]
@@ -478,7 +487,7 @@ fn undo_all_clears_dirty() {
     ]);
 
     assert_eq!(
-        buf(&t).doc().line(led_core::Row(0)),
+        line(&**buf(&t).doc(), 0),
         "hello",
         "content should be restored"
     );
@@ -494,7 +503,7 @@ fn undo_nothing_is_noop() {
         .with_file("hello\n")
         .run(actions(vec![Undo]));
 
-    assert_eq!(buf(&t).doc().line(led_core::Row(0)), "hello");
+    assert_eq!(line(&**buf(&t).doc(), 0), "hello");
 }
 
 #[test]
@@ -503,7 +512,7 @@ fn redo_nothing_is_noop() {
         .with_file("hello\n")
         .run(actions(vec![Redo]));
 
-    assert_eq!(buf(&t).doc().line(led_core::Row(0)), "hello");
+    assert_eq!(line(&**buf(&t).doc(), 0), "hello");
 }
 
 /// Full Emacs undo chain test:
@@ -555,21 +564,9 @@ fn emacs_undo_undo_restores_original() {
     let t = TestHarness::new().with_file("").run(steps);
 
     let b = buf(&t);
-    assert_eq!(
-        b.doc().line(led_core::Row(0)),
-        "1",
-        "first line should be '1'"
-    );
-    assert_eq!(
-        b.doc().line(led_core::Row(1)),
-        "2",
-        "second line should be '2'"
-    );
-    assert_eq!(
-        b.doc().line(led_core::Row(2)),
-        "3",
-        "third line should be '3'"
-    );
+    assert_eq!(line(&**b.doc(), 0), "1", "first line should be '1'");
+    assert_eq!(line(&**b.doc(), 1), "2", "second line should be '2'");
+    assert_eq!(line(&**b.doc(), 2), "3", "third line should be '3'");
     assert_eq!(
         b.doc().line_count(),
         4,
@@ -737,7 +734,7 @@ fn next_tab_cycles_through_buffers() {
     // Last opened file should be active
     assert_eq!(t.state.buffers.len(), 3);
     let active = buf(&t);
-    assert_eq!(active.doc().line(led_core::Row(0)), "c");
+    assert_eq!(line(&**active.doc(), 0), "c");
 
     // NextTab wraps to first
     let t = TestHarness::new()
@@ -748,7 +745,7 @@ fn next_tab_cycles_through_buffers() {
 
     let active = buf(&t);
     assert_eq!(
-        active.doc().line(led_core::Row(0)),
+        line(&**active.doc(), 0),
         "a",
         "NextTab from last should wrap to first"
     );
@@ -764,7 +761,7 @@ fn prev_tab_cycles_backwards() {
 
     let active = buf(&t);
     assert_eq!(
-        active.doc().line(led_core::Row(0)),
+        line(&**active.doc(), 0),
         "b",
         "PrevTab from last should go to middle"
     );
@@ -781,7 +778,7 @@ fn tab_cycle_roundtrip() {
 
     let active = buf(&t);
     assert_eq!(
-        active.doc().line(led_core::Row(0)),
+        line(&**active.doc(), 0),
         "c",
         "3 NextTabs in 3-tab set should cycle back"
     );
@@ -801,7 +798,7 @@ fn kill_buffer_activates_next() {
     assert_eq!(t.state.buffers.len(), 2);
     let active = buf(&t);
     assert_eq!(
-        active.doc().line(led_core::Row(0)),
+        line(&**active.doc(), 0),
         "c",
         "killing middle tab should activate next"
     );
@@ -1718,7 +1715,7 @@ fn save_format_is_undoable() {
     ]);
 
     // After undo, trailing whitespace should be back
-    let line = buf(&t).doc().line(led_core::Row(0));
+    let line = line(&**buf(&t).doc(), 0);
     assert_eq!(line, "hello   ", "undo should restore trailing whitespace");
 }
 
@@ -1745,7 +1742,7 @@ fn undo_persist_and_restore() {
 
     // Run 2: restore — undo should work and revert the edits
     let t2 = TestHarness::with_dir(dir).run(vec![WaitFor(|s| !s.buffers.is_empty()), Do(Undo)]);
-    let line = buf(&t2).doc().line(led_core::Row(0));
+    let line = line(&**buf(&t2).doc(), 0);
     assert_eq!(line, "hello", "undo should revert persisted edits");
 }
 
@@ -1924,7 +1921,7 @@ fn external_editor_second_save_detected() {
     std::fs::rename(&tmp, &file_path).unwrap();
 
     inst.wait_for(
-        |s| active_buf(s).is_some_and(|b| b.doc().line(led_core::Row(0)) == "first"),
+        |s| active_buf(s).is_some_and(|b| line(&**b.doc(), 0) == "first"),
         WAIT,
         "first external save detected",
     );
@@ -1935,7 +1932,7 @@ fn external_editor_second_save_detected() {
     std::fs::rename(&tmp, &file_path).unwrap();
 
     inst.wait_for(
-        |s| active_buf(s).is_some_and(|b| b.doc().line(led_core::Row(0)) == "second"),
+        |s| active_buf(s).is_some_and(|b| line(&**b.doc(), 0) == "second"),
         WAIT,
         "second external save detected",
     );
@@ -1970,7 +1967,7 @@ fn external_editor_second_direct_write_detected() {
     std::fs::write(&file_path, "first\n").unwrap();
 
     inst.wait_for(
-        |s| active_buf(s).is_some_and(|b| b.doc().line(led_core::Row(0)) == "first"),
+        |s| active_buf(s).is_some_and(|b| line(&**b.doc(), 0) == "first"),
         WAIT,
         "first external save detected",
     );
@@ -1983,7 +1980,7 @@ fn external_editor_second_direct_write_detected() {
     std::fs::write(&file_path, "second\n").unwrap();
 
     inst.wait_for(
-        |s| active_buf(s).is_some_and(|b| b.doc().line(led_core::Row(0)) == "second"),
+        |s| active_buf(s).is_some_and(|b| line(&**b.doc(), 0) == "second"),
         WAIT,
         "second external save detected",
     );
@@ -2098,10 +2095,10 @@ fn cross_instance_sync_insert_newline() {
         ]);
 
     let b = buf(&t);
-    assert_eq!(b.doc().line(led_core::Row(0)), "aaa");
-    assert_eq!(b.doc().line(led_core::Row(1)), ""); // the inserted newline
-    assert_eq!(b.doc().line(led_core::Row(2)), "bbb");
-    assert_eq!(b.doc().line(led_core::Row(3)), "ccc");
+    assert_eq!(line(&**b.doc(), 0), "aaa");
+    assert_eq!(line(&**b.doc(), 1), ""); // the inserted newline
+    assert_eq!(line(&**b.doc(), 2), "bbb");
+    assert_eq!(line(&**b.doc(), 3), "ccc");
     assert_eq!(
         b.doc().line_count(),
         5,
@@ -2151,13 +2148,13 @@ fn cross_instance_sync_multiple_edits() {
                 s.active_tab
                     .as_ref()
                     .and_then(|path| s.buffers.get(path))
-                    .is_some_and(|b| b.doc().line(led_core::Row(0)).contains("XYZ"))
+                    .is_some_and(|b| line(&**b.doc(), 0).contains("XYZ"))
             }),
         ]);
 
     let b = buf(&t);
     assert_eq!(
-        b.doc().line(led_core::Row(0)),
+        line(&**b.doc(), 0),
         "XYZhello",
         "all three edits should be replayed"
     );
@@ -2202,7 +2199,7 @@ fn cross_instance_sync_after_save() {
                 s.active_tab
                     .as_ref()
                     .and_then(|path| s.buffers.get(path))
-                    .is_some_and(|b| b.doc().line(led_core::Row(0)).starts_with("X"))
+                    .is_some_and(|b| line(&**b.doc(), 0).starts_with("X"))
             }),
             // Now simulate B saving: write new content to disk and clear undo in DB
             TestStep::RunFn(Box::new(|dirs| {
@@ -2384,13 +2381,13 @@ fn two_instance_sync_after_save() {
     let a_lines: Vec<String> = a.with_state(|s| {
         let buf = active_buf(s).unwrap();
         (0..buf.doc().line_count())
-            .map(|i| buf.doc().line(led_core::Row(i)).to_string())
+            .map(|i| line(&**buf.doc(), i).to_string())
             .collect()
     });
     let b_lines: Vec<String> = b.with_state(|s| {
         let buf = active_buf(s).unwrap();
         (0..buf.doc().line_count())
-            .map(|i| buf.doc().line(led_core::Row(i)).to_string())
+            .map(|i| line(&**buf.doc(), i).to_string())
             .collect()
     });
     for (i, (a_line, b_line)) in a_lines.iter().zip(b_lines.iter()).enumerate() {
@@ -2474,13 +2471,13 @@ fn two_instance_second_edit_syncs_without_save() {
     let a_lines: Vec<String> = a.with_state(|s| {
         let buf = active_buf(s).unwrap();
         (0..buf.doc().line_count())
-            .map(|i| buf.doc().line(led_core::Row(i)).to_string())
+            .map(|i| line(&**buf.doc(), i).to_string())
             .collect()
     });
     let b_lines: Vec<String> = b.with_state(|s| {
         let buf = active_buf(s).unwrap();
         (0..buf.doc().line_count())
-            .map(|i| buf.doc().line(led_core::Row(i)).to_string())
+            .map(|i| line(&**buf.doc(), i).to_string())
             .collect()
     });
     for (i, (a_line, b_line)) in a_lines.iter().zip(b_lines.iter()).enumerate() {
@@ -2549,13 +2546,13 @@ fn two_instance_remote_save_clears_dirty() {
     let a_lines: Vec<String> = a.with_state(|s| {
         let buf = active_buf(s).unwrap();
         (0..buf.doc().line_count())
-            .map(|i| buf.doc().line(led_core::Row(i)).to_string())
+            .map(|i| line(&**buf.doc(), i).to_string())
             .collect()
     });
     let b_lines: Vec<String> = b.with_state(|s| {
         let buf = active_buf(s).unwrap();
         (0..buf.doc().line_count())
-            .map(|i| buf.doc().line(led_core::Row(i)).to_string())
+            .map(|i| line(&**buf.doc(), i).to_string())
             .collect()
     });
     for (i, (a_line, b_line)) in a_lines.iter().zip(b_lines.iter()).enumerate() {
@@ -2736,13 +2733,13 @@ fn two_instance_undo_syncs_and_clears_dirty() {
     let a_lines: Vec<String> = a.with_state(|s| {
         let buf = active_buf(s).unwrap();
         (0..buf.doc().line_count())
-            .map(|i| buf.doc().line(led_core::Row(i)).to_string())
+            .map(|i| line(&**buf.doc(), i).to_string())
             .collect()
     });
     let b_lines: Vec<String> = b.with_state(|s| {
         let buf = active_buf(s).unwrap();
         (0..buf.doc().line_count())
-            .map(|i| buf.doc().line(led_core::Row(i)).to_string())
+            .map(|i| line(&**buf.doc(), i).to_string())
             .collect()
     });
     for (i, (a_line, b_line)) in a_lines.iter().zip(b_lines.iter()).enumerate() {
@@ -2789,7 +2786,7 @@ fn kill_region_deletes_selection() {
         .with_file("aaa\nbbb\n")
         .run(actions(vec![SetMark, MoveDown, KillRegion]));
 
-    assert_eq!(buf(&t).doc().line(led_core::Row(0)), "bbb");
+    assert_eq!(line(&**buf(&t).doc(), 0), "bbb");
     assert_eq!(buf(&t).cursor_row().0, 0);
     assert_eq!(buf(&t).cursor_col().0, 0);
     assert!(buf(&t).mark().is_none());
@@ -2811,8 +2808,8 @@ fn yank_inserts_killed_text() {
         .with_file("aaa\nbbb\n")
         .run(actions(vec![SetMark, MoveDown, KillRegion, Yank]));
 
-    assert_eq!(buf(&t).doc().line(led_core::Row(0)), "aaa");
-    assert_eq!(buf(&t).doc().line(led_core::Row(1)), "bbb");
+    assert_eq!(line(&**buf(&t).doc(), 0), "aaa");
+    assert_eq!(line(&**buf(&t).doc(), 1), "bbb");
 }
 
 #[test]
@@ -3119,7 +3116,7 @@ fn syntax_highlights_rust_file() {
     // After the syntax driver processes, highlights should be populated
     // (The driver runs asynchronously, so we wait)
     // At minimum the buffer should exist and have the right content
-    assert_eq!(b.doc().line(led_core::Row(0)), "fn main() {");
+    assert_eq!(line(&**b.doc(), 0), "fn main() {");
 }
 
 #[test]
@@ -3159,7 +3156,7 @@ fn kill_line_keeps_highlights_in_sync() {
     ]);
 
     let b = buf(&t);
-    assert_eq!(b.doc().line(led_core::Row(0)), "fn bbb() {}");
+    assert_eq!(line(&**b.doc(), 0), "fn bbb() {}");
 
     // All highlight lines must be within document bounds
     let line_count = b.doc().line_count();
@@ -3227,7 +3224,7 @@ fn kill_line_long_file_highlights_recover() {
     ]);
 
     let b = buf(&t);
-    assert_eq!(b.doc().line(led_core::Row(0)), "// this is a comment");
+    assert_eq!(line(&**b.doc(), 0), "// this is a comment");
 
     // Line 0 must have comment highlight, not keyword
     let has_comment = b
@@ -3300,7 +3297,7 @@ More text
     ]);
 
     let b = buf(&t);
-    assert_eq!(b.doc().line(led_core::Row(2)), "Some text");
+    assert_eq!(line(&**b.doc(), 2), "Some text");
 
     // All highlight line numbers must be within doc bounds
     let lc = b.doc().line_count();
@@ -3404,7 +3401,7 @@ fn auto_indent_after_brace() {
         b.cursor_col().0
     );
     // Verify the indent text was actually inserted
-    let line = b.doc().line(led_core::Row(1));
+    let line = line(&**b.doc(), 1);
     assert!(
         line.starts_with("    ") || line.starts_with('\t'),
         "new line should be indented: {:?}",
@@ -3429,7 +3426,7 @@ fn auto_indent_closing_brace() {
         ]);
 
     let b = buf(&t);
-    let line = b.doc().line(led_core::Row(2));
+    let line = line(&**b.doc(), 2);
     // The closing brace should be dedented to match "fn main() {"
     assert!(
         !line.starts_with("    }"),
@@ -3452,12 +3449,12 @@ fn sort_imports_reorders() {
     let b = buf(&t);
     // After sorting, a::A should come before z::Z
     assert_eq!(
-        b.doc().line(led_core::Row(0)),
+        line(&**b.doc(), 0),
         "use a::A;",
         "first import should be a::A"
     );
     assert_eq!(
-        b.doc().line(led_core::Row(1)),
+        line(&**b.doc(), 1),
         "use z::Z;",
         "second import should be z::Z"
     );
@@ -3515,7 +3512,7 @@ fn close_bracket_reindents_with_syntax() {
         ]);
 
     let b = buf(&t);
-    let line = b.doc().line(led_core::Row(1));
+    let line = line(&**b.doc(), 1);
     // The brace should be present on line 1
     assert!(
         line.contains('}'),
@@ -3989,17 +3986,15 @@ fn lsp_format() {
                 s.active_tab
                     .as_ref()
                     .and_then(|path| s.buffers.get(path))
-                    .map_or(false, |b| {
-                        b.doc().line(led_core::Row(0)).starts_with("fn main()")
-                    })
+                    .map_or(false, |b| line(&**b.doc(), 0).starts_with("fn main()"))
             }),
         ]);
 
     let b = buf(&t);
     assert!(
-        b.doc().line(led_core::Row(0)).starts_with("fn main()"),
+        line(&**b.doc(), 0).starts_with("fn main()"),
         "expected formatted first line, got: {:?}",
-        b.doc().line(led_core::Row(0))
+        line(&**b.doc(), 0)
     );
 }
 
@@ -4165,20 +4160,20 @@ fn lsp_rename_submit() {
                 s.active_tab
                     .as_ref()
                     .and_then(|path| s.buffers.get(path))
-                    .map_or(false, |b| b.doc().line(led_core::Row(1)).contains("world"))
+                    .map_or(false, |b| line(&**b.doc(), 1).contains("world"))
             }),
         ]);
 
     let b = buf(&t);
     assert!(
-        b.doc().line(led_core::Row(1)).contains("world"),
+        line(&**b.doc(), 1).contains("world"),
         "expected 'hello' renamed to 'world' on line 1, got: {:?}",
-        b.doc().line(led_core::Row(1))
+        line(&**b.doc(), 1)
     );
     assert!(
-        b.doc().line(led_core::Row(3)).contains("world"),
+        line(&**b.doc(), 3).contains("world"),
         "expected 'hello' renamed to 'world' on line 3, got: {:?}",
-        b.doc().line(led_core::Row(3))
+        line(&**b.doc(), 3)
     );
 }
 
@@ -4417,7 +4412,7 @@ fn lsp_completion_accept_moves_cursor() {
         ]);
 
     let b = buf(&t);
-    let line = b.doc().line(led_core::Row(2));
+    let line = line(&**b.doc(), 2);
     assert!(
         line.len() > 3,
         "expected completion text on line 2, got: {:?}",
@@ -4515,16 +4510,16 @@ fn lsp_format_on_save() {
                     .and_then(|path| s.buffers.get(path))
                     .map_or(false, |b| {
                         b.save_state() == led_state::SaveState::Clean
-                            && b.doc().line(led_core::Row(0)).starts_with("fn main()")
+                            && line(&**b.doc(), 0).starts_with("fn main()")
                     })
             }),
         ]);
 
     let b = buf(&t);
     assert!(
-        b.doc().line(led_core::Row(0)).starts_with("fn main()"),
+        line(&**b.doc(), 0).starts_with("fn main()"),
         "expected formatted, got: {:?}",
-        b.doc().line(led_core::Row(0))
+        line(&**b.doc(), 0)
     );
     assert_eq!(b.save_state(), led_state::SaveState::Clean);
 }
@@ -4551,7 +4546,7 @@ fn multi_file_tab_order_and_activation() {
 
     // Last file should be active
     let active = buf(&t);
-    assert_eq!(active.doc().line(led_core::Row(0)), "ccc");
+    assert_eq!(line(&**active.doc(), 0), "ccc");
 
     // Tab order should follow arg order
     assert_eq!(
@@ -4581,7 +4576,7 @@ fn multi_file_session_last_arg_active() {
 
     let active = buf(&t2);
     assert_eq!(
-        active.doc().line(led_core::Row(0)),
+        line(&**active.doc(), 0),
         "ccc",
         "last arg file (c.txt) should be active"
     );
@@ -4814,8 +4809,8 @@ fn file_search_replace_single_in_buffer() {
             Do(MoveRight), // replace first match
         ]);
     let b = buf(&t);
-    assert_eq!(b.doc().line(led_core::Row(0)), "xxx");
-    assert_eq!(b.doc().line(led_core::Row(2)), "aaa");
+    assert_eq!(line(&**b.doc(), 0), "xxx");
+    assert_eq!(line(&**b.doc(), 2), "aaa");
     assert_eq!(b.save_state(), SaveState::Modified);
 }
 
@@ -4838,7 +4833,7 @@ fn file_search_unreplace_single() {
             Do(MoveLeft),  // unreplace
         ]);
     let b = buf(&t);
-    assert_eq!(b.doc().line(led_core::Row(0)), "aaa");
+    assert_eq!(line(&**b.doc(), 0), "aaa");
 }
 
 #[test]
@@ -4859,8 +4854,8 @@ fn file_search_replace_all() {
         ]);
     assert!(t.state.file_search.is_none());
     let b = buf(&t);
-    assert_eq!(b.doc().line(led_core::Row(0)), "z");
-    assert_eq!(b.doc().line(led_core::Row(2)), "z");
+    assert_eq!(line(&**b.doc(), 0), "z");
+    assert_eq!(line(&**b.doc(), 2), "z");
 }
 
 #[test]
@@ -4882,8 +4877,8 @@ fn file_search_replace_all_then_undo() {
             Do(Undo),       // one undo should revert ALL replacements
         ]);
     let b = buf(&t);
-    assert_eq!(b.doc().line(led_core::Row(0)), "aaa");
-    assert_eq!(b.doc().line(led_core::Row(2)), "aaa");
+    assert_eq!(line(&**b.doc(), 0), "aaa");
+    assert_eq!(line(&**b.doc(), 2), "aaa");
 }
 
 #[test]
@@ -4908,8 +4903,8 @@ fn file_search_replace_undo_chain() {
             Do(Undo),      // undo second replace
         ]);
     let b = buf(&t);
-    assert_eq!(b.doc().line(led_core::Row(0)), "z"); // first replace still applied
-    assert_eq!(b.doc().line(led_core::Row(2)), "aaa"); // second was undone
+    assert_eq!(line(&**b.doc(), 0), "z"); // first replace still applied
+    assert_eq!(line(&**b.doc(), 2), "aaa"); // second was undone
 }
 
 #[test]
@@ -4925,7 +4920,7 @@ fn file_search_no_replace_mode_arrows_noop() {
             Do(MoveRight), // no-op, replace mode off
         ]);
     let b = buf(&t);
-    assert_eq!(b.doc().line(led_core::Row(0)), "hello");
+    assert_eq!(line(&**b.doc(), 0), "hello");
 }
 
 #[test]
@@ -4957,7 +4952,7 @@ fn file_search_replace_all_multi_file() {
         .filter(|b| {
             b.path_buf()
                 .is_some_and(|p| p.ends_with("a.txt") || p.ends_with("b.txt"))
-                && b.doc().line(led_core::Row(0)) == "bye"
+                && line(&**b.doc(), 0) == "bye"
         })
         .count();
     assert_eq!(modified_count, 2, "both buffers should be modified");
@@ -4975,7 +4970,7 @@ fn kbd_macro_record_and_playback() {
         KbdMacroExecute,
     ]));
     let b = buf(&t);
-    assert_eq!(b.doc().line(led_core::Row(0)), "xyxyhello");
+    assert_eq!(line(&**b.doc(), 0), "xyxyhello");
 }
 
 #[test]
@@ -4990,7 +4985,7 @@ fn kbd_macro_playback_multiple() {
     ]));
     let b = buf(&t);
     // 'a' inserted during recording + 3 playbacks = "aaaa"
-    assert_eq!(b.doc().line(led_core::Row(0)), "aaaahello");
+    assert_eq!(line(&**b.doc(), 0), "aaaahello");
 }
 
 #[test]
@@ -5047,5 +5042,5 @@ fn kbd_macro_restart_during_recording() {
     let b = buf(&t);
     // "xy" was typed during first recording (executed live), then restart,
     // "z" typed during second recording, then playback inserts another "z"
-    assert_eq!(b.doc().line(led_core::Row(0)), "xyzzhello");
+    assert_eq!(line(&**b.doc(), 0), "xyzzhello");
 }

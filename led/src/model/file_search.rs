@@ -682,6 +682,8 @@ fn unreplace_selected(state: &mut AppState) {
         let line_text = led_core::with_line_buf(|buf| {
             if let Some(b) = state.buffers.get(&bp) {
                 b.doc().line(led_core::Row(entry.row), buf);
+                let t = buf.trim_end_matches(&['\n', '\r'][..]).len();
+                buf.truncate(t);
             }
             buf.clone()
         });
@@ -1001,6 +1003,8 @@ fn replace_in_buffer(
 
     let line_text = led_core::with_line_buf(|b| {
         buf.doc().line(led_core::Row(row), b);
+        let t = b.trim_end_matches(&['\n', '\r'][..]).len();
+        b.truncate(t);
         b.clone()
     });
     let actual_replacement = if let Some(query) = search_query {

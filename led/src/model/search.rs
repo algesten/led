@@ -13,6 +13,8 @@ pub fn find_all_matches(doc: &dyn Doc, query: &str) -> Vec<(usize, usize, usize)
     led_core::with_line_buf(|line| {
         for row in 0..total {
             doc.line(led_core::Row(row), line);
+            let trimmed = line.trim_end_matches(&['\n', '\r'][..]).len();
+            line.truncate(trimmed);
             let line_lower = line.to_lowercase();
             let mut start = 0;
             while let Some(pos) = line_lower[start..].find(&query_lower) {
