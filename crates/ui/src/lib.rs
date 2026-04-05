@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::io;
 use std::rc::Rc;
 
@@ -5,10 +6,8 @@ use led_core::combine;
 use led_core::rx::Stream;
 use led_state::AppState;
 use ratatui::Terminal;
-use ratatui::TerminalOptions;
-use ratatui::Viewport;
 use ratatui::backend::CrosstermBackend;
-use ratatui::layout::Rect;
+use ratatui::layout::Size;
 use ratatui::style::Style;
 use ratatui::text::Line;
 
@@ -151,7 +150,6 @@ pub fn driver(state: Stream<Rc<AppState>>) -> Stream<UiIn> {
     );
 
     let mut last_redraw = 0u64;
-    let mut last_viewport = (0u16, 0u16);
 
     render_s.on(
         move |opt: Option<&(
@@ -167,13 +165,11 @@ pub fn driver(state: Stream<Rc<AppState>>) -> Stream<UiIn> {
                 return;
             };
 
-            // Resize the fixed viewport when the terminal dimensions change.
-            let vp = (layout.dims.viewport_width, layout.dims.viewport_height);
-            if vp != last_viewport {
-                last_viewport = vp;
-                let area = Rect::new(0, 0, vp.0, vp.1);
-                terminal.resize(area).ok();
-            }
+            // Keep the cached size in sync so autoresize() is a no-op.
+            terminal.backend_mut().set_size(Size::new(
+                layout.dims.viewport_width,
+                layout.dims.viewport_height,
+            ));
 
             let clear = layout.force_redraw != last_redraw;
             last_redraw = layout.force_redraw;
@@ -232,19 +228,77 @@ fn tabs_overflow(s: &AppState) -> bool {
     false
 }
 
-fn setup() -> Terminal<CrosstermBackend<io::Stdout>> {
-    let backend = CrosstermBackend::new(io::stdout());
-    // Query the terminal size once at startup, then use a Fixed viewport
-    // so ratatui skips the autoresize syscall (open /dev/tty) on every draw().
-    // Subsequent resizes are driven by TerminalInput::Resize events.
+fn setup() -> Terminal<CachedSizeBackend> {
+    let inner = CrosstermBackend::new(io::stdout());
     use ratatui::backend::Backend;
-    let size = backend.size().expect("query terminal size");
-    let area = Rect::new(0, 0, size.width, size.height);
-    Terminal::with_options(
-        backend,
-        TerminalOptions {
-            viewport: Viewport::Fixed(area),
-        },
-    )
-    .expect("create terminal")
+    let size = inner.size().expect("query terminal size");
+    let backend = CachedSizeBackend {
+        inner,
+        cached_size: Cell::new(size),
+    };
+    Terminal::new(backend).expect("create terminal")
+}
+
+/// Wraps [`CrosstermBackend`] to cache `size()` so ratatui's per-frame
+/// `autoresize()` check never triggers the expensive ioctl on macOS.
+/// The render closure calls [`set_size`] before each draw.
+struct CachedSizeBackend {
+    inner: CrosstermBackend<io::Stdout>,
+    cached_size: Cell<Size>,
+}
+
+impl CachedSizeBackend {
+    fn set_size(&self, size: Size) {
+        self.cached_size.set(size);
+    }
+}
+
+impl ratatui::backend::Backend for CachedSizeBackend {
+    type Error = io::Error;
+
+    fn draw<'a, I>(&mut self, content: I) -> io::Result<()>
+    where
+        I: Iterator<Item = (u16, u16, &'a ratatui::buffer::Cell)>,
+    {
+        self.inner.draw(content)
+    }
+
+    fn hide_cursor(&mut self) -> io::Result<()> {
+        self.inner.hide_cursor()
+    }
+
+    fn show_cursor(&mut self) -> io::Result<()> {
+        self.inner.show_cursor()
+    }
+
+    fn get_cursor_position(&mut self) -> io::Result<ratatui::layout::Position> {
+        self.inner.get_cursor_position()
+    }
+
+    fn set_cursor_position<P: Into<ratatui::layout::Position>>(
+        &mut self,
+        position: P,
+    ) -> io::Result<()> {
+        self.inner.set_cursor_position(position)
+    }
+
+    fn clear(&mut self) -> io::Result<()> {
+        self.inner.clear()
+    }
+
+    fn clear_region(&mut self, clear_type: ratatui::backend::ClearType) -> io::Result<()> {
+        self.inner.clear_region(clear_type)
+    }
+
+    fn size(&self) -> io::Result<Size> {
+        Ok(self.cached_size.get())
+    }
+
+    fn window_size(&mut self) -> io::Result<ratatui::backend::WindowSize> {
+        self.inner.window_size()
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
+    }
 }
