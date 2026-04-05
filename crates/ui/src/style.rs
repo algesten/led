@@ -13,6 +13,26 @@ pub fn resolve(theme: &Theme, sv: &StyleValue) -> Style {
     resolve_depth(theme, sv, MAX_DEPTH)
 }
 
+/// Cached version of [`resolve`]. Uses pointer identity on the `&Theme` (stable
+/// because it lives behind an `Arc`) and on the `&StyleValue` (a field within
+/// that same `Theme`). The cache clears automatically when the theme changes.
+pub fn resolve_cached(theme: &Theme, sv: &StyleValue) -> Style {
+    thread_local! {
+        static CACHE: RefCell<(usize, HashMap<usize, Style>)> =
+            RefCell::new((0, HashMap::new()));
+    }
+    let theme_ptr = theme as *const Theme as usize;
+    CACHE.with(|cell| {
+        let mut cache = cell.borrow_mut();
+        if cache.0 != theme_ptr {
+            cache.0 = theme_ptr;
+            cache.1.clear();
+        }
+        let sv_ptr = sv as *const StyleValue as usize;
+        *cache.1.entry(sv_ptr).or_insert_with(|| resolve(theme, sv))
+    })
+}
+
 /// Pre-resolve all syntax.{name} entries from the theme into a style map.
 /// Cached by Arc pointer identity — only recomputes when the theme Arc changes.
 pub fn resolve_syntax_map(theme: &Arc<Theme>) -> Rc<HashMap<String, Style>> {

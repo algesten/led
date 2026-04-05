@@ -360,8 +360,10 @@ impl Doc for TextDoc {
             return String::new();
         }
         let line = self.rope.line(*idx);
-        let s = line.to_string();
-        s.trim_end_matches(&['\n', '\r'][..]).to_string()
+        let mut s = line.to_string();
+        let trimmed_len = s.trim_end_matches(&['\n', '\r'][..]).len();
+        s.truncate(trimmed_len);
+        s
     }
 
     fn line_to_char(&self, line_idx: Row) -> CharOffset {

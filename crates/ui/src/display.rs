@@ -6,7 +6,9 @@ use std::sync::Arc;
 use led_core::Doc;
 use led_core::PanelSlot;
 use led_core::git::{self, FileStatus, LineStatus};
-use led_core::wrap::{chars_to_string, compute_chunks, expand_tabs, find_sub_line};
+use led_core::wrap::{
+    chars_to_string, compute_chunks, expand_tabs, find_sub_line, line_display_width,
+};
 use led_state::{AppState, BracketPair, Dimensions, EntryKind, HighlightSpan};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
@@ -132,8 +134,8 @@ pub fn display_inputs(s: &AppState) -> Option<DisplayInputs> {
     });
 
     let git_line_statuses = buf.status().git_line_statuses().to_vec();
-    let gutter_added_style = style::resolve(theme, &theme.git.gutter_added);
-    let gutter_modified_style = style::resolve(theme, &theme.git.gutter_modified);
+    let gutter_added_style = style::resolve_cached(theme, &theme.git.gutter_added);
+    let gutter_modified_style = style::resolve_cached(theme, &theme.git.gutter_modified);
 
     let diagnostics: Vec<(usize, usize, usize, usize, led_lsp::DiagnosticSeverity)> = buf
         .status()
@@ -149,15 +151,15 @@ pub fn display_inputs(s: &AppState) -> Option<DisplayInputs> {
         .map(|h| (h.row, h.col, h.label.clone()))
         .collect();
 
-    let diagnostic_error_style = style::resolve(theme, &theme.diagnostics.error);
-    let diagnostic_warning_style = style::resolve(theme, &theme.diagnostics.warning);
-    let diagnostic_info_style = style::resolve(theme, &theme.diagnostics.info);
-    let diagnostic_hint_style = style::resolve(theme, &theme.diagnostics.hint);
+    let diagnostic_error_style = style::resolve_cached(theme, &theme.diagnostics.error);
+    let diagnostic_warning_style = style::resolve_cached(theme, &theme.diagnostics.warning);
+    let diagnostic_info_style = style::resolve_cached(theme, &theme.diagnostics.info);
+    let diagnostic_hint_style = style::resolve_cached(theme, &theme.diagnostics.hint);
     let inlay_hint_style = theme
         .editor
         .inlay_hint
         .as_ref()
-        .map(|sv| style::resolve(theme, sv))
+        .map(|sv| style::resolve_cached(theme, sv))
         .unwrap_or_else(|| Style::default().fg(ratatui::style::Color::DarkGray));
     let inlay_hints_enabled = s.lsp.inlay_hints_enabled;
 
@@ -166,7 +168,7 @@ pub fn display_inputs(s: &AppState) -> Option<DisplayInputs> {
         .editor
         .ruler
         .as_ref()
-        .map(|sv| style::resolve(theme, sv))
+        .map(|sv| style::resolve_cached(theme, sv))
         .unwrap_or_else(|| Style::default().fg(ratatui::style::Color::DarkGray));
 
     Some(DisplayInputs {
@@ -176,16 +178,16 @@ pub fn display_inputs(s: &AppState) -> Option<DisplayInputs> {
         scroll_sub_line: buf.scroll_sub_line().0,
         text_width: dims.text_width(),
         buffer_height: dims.buffer_height(),
-        gutter_style: style::resolve(theme, &theme.editor.gutter),
-        text_style: style::resolve(theme, &theme.editor.text),
+        gutter_style: style::resolve_cached(theme, &theme.editor.gutter),
+        text_style: style::resolve_cached(theme, &theme.editor.text),
         selection,
-        selection_style: style::resolve(theme, &theme.editor.selection),
+        selection_style: style::resolve_cached(theme, &theme.editor.selection),
         search_matches,
         search_match_idx,
-        search_match_style: style::resolve(theme, &theme.editor.search_match),
-        search_current_style: style::resolve(theme, &theme.editor.search_current),
+        search_match_style: style::resolve_cached(theme, &theme.editor.search_match),
+        search_current_style: style::resolve_cached(theme, &theme.editor.search_current),
         file_search_match,
-        file_search_match_style: style::resolve(theme, &theme.editor.file_search_match),
+        file_search_match_style: style::resolve_cached(theme, &theme.editor.file_search_match),
         syntax_highlights: buf.syntax_highlights().clone(),
         bracket_pairs: buf.bracket_pairs().clone(),
         matching_bracket: BracketPair::find_match(
@@ -197,14 +199,14 @@ pub fn display_inputs(s: &AppState) -> Option<DisplayInputs> {
         cursor_col: buf.cursor_col().0,
         content_hash: buf.content_hash().0,
         syntax_styles: style::resolve_syntax_map(theme_arc),
-        bracket_match_style: style::resolve(theme, &theme.brackets.match_),
+        bracket_match_style: style::resolve_cached(theme, &theme.brackets.match_),
         rainbow_styles: [
-            style::resolve(theme, &theme.brackets.rainbow_0),
-            style::resolve(theme, &theme.brackets.rainbow_1),
-            style::resolve(theme, &theme.brackets.rainbow_2),
-            style::resolve(theme, &theme.brackets.rainbow_3),
-            style::resolve(theme, &theme.brackets.rainbow_4),
-            style::resolve(theme, &theme.brackets.rainbow_5),
+            style::resolve_cached(theme, &theme.brackets.rainbow_0),
+            style::resolve_cached(theme, &theme.brackets.rainbow_1),
+            style::resolve_cached(theme, &theme.brackets.rainbow_2),
+            style::resolve_cached(theme, &theme.brackets.rainbow_3),
+            style::resolve_cached(theme, &theme.brackets.rainbow_4),
+            style::resolve_cached(theme, &theme.brackets.rainbow_5),
         ],
         git_line_statuses,
         gutter_added_style,
@@ -601,15 +603,16 @@ pub fn cursor_inputs(s: &AppState) -> Option<CursorInputs> {
 
 /// Returns cursor position relative to buffer area: (x_offset, y_offset).
 pub fn compute_cursor_pos(c: &CursorInputs) -> Option<(u16, u16)> {
-    let line = c.doc.line(led_core::Row(c.cursor_row));
-    let (display, char_map) = expand_tabs(&line);
+    let cursor_line = c.doc.line(led_core::Row(c.cursor_row));
+    let (cursor_display, char_map) = expand_tabs(&cursor_line);
     let cursor_dcol = char_map
         .get(c.cursor_col)
         .copied()
         .unwrap_or_else(|| char_map.last().copied().unwrap_or(0));
-    let chunks = compute_chunks(display.len(), c.text_width);
-    let cursor_sub = find_sub_line(&chunks, cursor_dcol);
-    let (cs, _ce) = chunks[cursor_sub];
+    let cursor_display_width = cursor_display.len();
+    let cursor_chunks = compute_chunks(cursor_display_width, c.text_width);
+    let cursor_sub = find_sub_line(&cursor_chunks, cursor_dcol);
+    let (cs, _ce) = cursor_chunks[cursor_sub];
 
     // Compute visual row from scroll position
     let mut vrow: usize = 0;
@@ -618,11 +621,17 @@ pub fn compute_cursor_pos(c: &CursorInputs) -> Option<(u16, u16)> {
     let mut skip_sub_lines = c.scroll_sub_line;
 
     while line_idx < line_count {
-        let l = c.doc.line(led_core::Row(line_idx));
-        let (disp, _) = expand_tabs(&l);
-        let ch = compute_chunks(disp.len(), c.text_width);
+        // Reuse precomputed data for the cursor line; use lightweight
+        // line_display_width for all other lines to avoid expand_tabs allocations.
+        let chunks = if line_idx == c.cursor_row {
+            &cursor_chunks
+        } else {
+            let l = c.doc.line(led_core::Row(line_idx));
+            let dw = line_display_width(&l);
+            &compute_chunks(dw, c.text_width)
+        };
 
-        for (chunk_idx, _) in ch.iter().enumerate() {
+        for (chunk_idx, _) in chunks.iter().enumerate() {
             if skip_sub_lines > 0 {
                 skip_sub_lines -= 1;
                 continue;
@@ -921,10 +930,10 @@ pub fn tabs_inputs(s: &AppState) -> Option<TabsInputs> {
     let theme = s.config_theme.as_ref()?;
     let dims = s.dims?;
     let theme = theme.file.as_ref();
-    let active_style = style::resolve(theme, &theme.tabs.active);
-    let inactive_style = style::resolve(theme, &theme.tabs.inactive);
-    let preview_active_style = style::resolve(theme, &theme.tabs.preview_active);
-    let preview_inactive_style = style::resolve(theme, &theme.tabs.preview_inactive);
+    let active_style = style::resolve_cached(theme, &theme.tabs.active);
+    let inactive_style = style::resolve_cached(theme, &theme.tabs.inactive);
+    let preview_active_style = style::resolve_cached(theme, &theme.tabs.preview_active);
+    let preview_inactive_style = style::resolve_cached(theme, &theme.tabs.preview_inactive);
 
     let entries = s
         .tabs
@@ -1008,9 +1017,9 @@ pub fn layout_inputs(s: &AppState) -> LayoutInputs {
         .map(|ct| {
             let t = ct.file.as_ref();
             if s.file_search.is_some() {
-                style::resolve(t, &t.file_search.border)
+                style::resolve_cached(t, &t.file_search.border)
             } else {
-                style::resolve(t, &t.browser.border)
+                style::resolve_cached(t, &t.browser.border)
             }
         })
         .unwrap_or_default();
@@ -1021,9 +1030,9 @@ pub fn layout_inputs(s: &AppState) -> LayoutInputs {
         .map(|ct| {
             let t = ct.file.as_ref();
             (
-                style::resolve(t, &t.browser.file),
-                style::resolve(t, &t.editor.text),
-                style::resolve(t, &t.status_bar.style),
+                style::resolve_cached(t, &t.browser.file),
+                style::resolve_cached(t, &t.editor.text),
+                style::resolve_cached(t, &t.status_bar.style),
             )
         })
         .unwrap_or_default();
@@ -1126,17 +1135,17 @@ pub fn browser_inputs(s: &AppState) -> Option<BrowserInputs> {
         focused: s.focus == PanelSlot::Side,
         height: dims.buffer_height(),
         side_width: dims.side_panel_width,
-        dir_style: style::resolve(theme, &theme.browser.directory),
-        file_style: style::resolve(theme, &theme.browser.file),
-        selected_style: style::resolve(theme, &theme.browser.selected),
-        selected_unfocused_style: style::resolve(theme, &theme.browser.selected_unfocused),
+        dir_style: style::resolve_cached(theme, &theme.browser.directory),
+        file_style: style::resolve_cached(theme, &theme.browser.file),
+        selected_style: style::resolve_cached(theme, &theme.browser.selected),
+        selected_unfocused_style: style::resolve_cached(theme, &theme.browser.selected_unfocused),
         git_file_statuses: s.git.file_statuses.clone(),
-        git_modified_style: style::resolve(theme, &theme.git.modified),
-        git_added_style: style::resolve(theme, &theme.git.added),
-        git_untracked_style: style::resolve(theme, &theme.git.untracked),
+        git_modified_style: style::resolve_cached(theme, &theme.git.modified),
+        git_added_style: style::resolve_cached(theme, &theme.git.added),
+        git_untracked_style: style::resolve_cached(theme, &theme.git.untracked),
         diag_file_severities,
-        diag_error_style: style::resolve(theme, &theme.diagnostics.error),
-        diag_warning_style: style::resolve(theme, &theme.diagnostics.warning),
+        diag_error_style: style::resolve_cached(theme, &theme.diagnostics.error),
+        diag_warning_style: style::resolve_cached(theme, &theme.diagnostics.warning),
     })
 }
 
@@ -1328,9 +1337,9 @@ pub fn find_file_completion_inputs(s: &AppState) -> Option<FindFileCompletionInp
         completions: ff.completions.clone(),
         selected: ff.selected,
         height: dims.buffer_height(),
-        dir_style: style::resolve(theme, &theme.browser.directory),
-        file_style: style::resolve(theme, &theme.browser.file),
-        selected_style: style::resolve(theme, &theme.browser.selected),
+        dir_style: style::resolve_cached(theme, &theme.browser.directory),
+        file_style: style::resolve_cached(theme, &theme.browser.file),
+        selected_style: style::resolve_cached(theme, &theme.browser.selected),
         side_width: dims.side_panel_width,
     })
 }
@@ -1433,14 +1442,14 @@ pub fn file_search_inputs(s: &AppState) -> Option<FileSearchInputs> {
         side_width: dims.side_panel_width,
         replace_mode: fs.replace_mode,
         replace_text: fs.replace_text.clone(),
-        input_style: style::resolve(theme, &theme.file_search.input),
-        toggle_on_style: style::resolve(theme, &theme.file_search.toggle_on),
-        toggle_off_style: style::resolve(theme, &theme.file_search.toggle_off),
-        file_header_style: style::resolve(theme, &theme.file_search.file_header),
-        hit_style: style::resolve(theme, &theme.file_search.hit),
-        match_style: style::resolve(theme, &theme.file_search.match_),
-        selected_style: style::resolve(theme, &theme.file_search.selected),
-        selected_unfocused_style: style::resolve(theme, &theme.file_search.selected_unfocused),
+        input_style: style::resolve_cached(theme, &theme.file_search.input),
+        toggle_on_style: style::resolve_cached(theme, &theme.file_search.toggle_on),
+        toggle_off_style: style::resolve_cached(theme, &theme.file_search.toggle_off),
+        file_header_style: style::resolve_cached(theme, &theme.file_search.file_header),
+        hit_style: style::resolve_cached(theme, &theme.file_search.hit),
+        match_style: style::resolve_cached(theme, &theme.file_search.match_),
+        selected_style: style::resolve_cached(theme, &theme.file_search.selected),
+        selected_unfocused_style: style::resolve_cached(theme, &theme.file_search.selected_unfocused),
     })
 }
 

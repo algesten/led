@@ -5,7 +5,10 @@ use led_core::combine;
 use led_core::rx::Stream;
 use led_state::AppState;
 use ratatui::Terminal;
+use ratatui::TerminalOptions;
+use ratatui::Viewport;
 use ratatui::backend::CrosstermBackend;
+use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::text::Line;
 
@@ -148,6 +151,7 @@ pub fn driver(state: Stream<Rc<AppState>>) -> Stream<UiIn> {
     );
 
     let mut last_redraw = 0u64;
+    let mut last_viewport = (0u16, 0u16);
 
     render_s.on(
         move |opt: Option<&(
@@ -162,6 +166,15 @@ pub fn driver(state: Stream<Rc<AppState>>) -> Stream<UiIn> {
             let Some((lines, cursor, status, tabs, layout, browser, overlay)) = opt else {
                 return;
             };
+
+            // Resize the fixed viewport when the terminal dimensions change.
+            let vp = (layout.dims.viewport_width, layout.dims.viewport_height);
+            if vp != last_viewport {
+                last_viewport = vp;
+                let area = Rect::new(0, 0, vp.0, vp.1);
+                terminal.resize(area).ok();
+            }
+
             let clear = layout.force_redraw != last_redraw;
             last_redraw = layout.force_redraw;
             if clear {
@@ -221,5 +234,12 @@ fn tabs_overflow(s: &AppState) -> bool {
 
 fn setup() -> Terminal<CrosstermBackend<io::Stdout>> {
     let backend = CrosstermBackend::new(io::stdout());
-    Terminal::new(backend).expect("create terminal")
+    // Query the terminal size once at startup, then use a Fixed viewport
+    // so ratatui skips the autoresize syscall (open /dev/tty) on every draw().
+    // Subsequent resizes are driven by TerminalInput::Resize events.
+    use ratatui::backend::Backend;
+    let size = backend.size().expect("query terminal size");
+    let area = Rect::new(0, 0, size.width, size.height);
+    Terminal::with_options(backend, TerminalOptions { viewport: Viewport::Fixed(area) })
+        .expect("create terminal")
 }

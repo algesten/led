@@ -1,3 +1,10 @@
+/// Count display width of a line (tabs expand to 4 columns) without allocating.
+pub fn line_display_width(line: &str) -> usize {
+    line.chars()
+        .map(|ch| if ch == '\t' { 4 } else { 1 })
+        .sum()
+}
+
 /// Expand tabs to 4 spaces, returning display chars and char-index-to-display-column map.
 /// The map has len = num_source_chars + 1 (sentinel at end == display.len()).
 pub fn expand_tabs(line: &str) -> (Vec<char>, Vec<usize>) {
@@ -83,6 +90,14 @@ pub fn display_col_to_char_idx(char_map: &[usize], target_dcol: usize) -> usize 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn line_display_width_basic() {
+        assert_eq!(line_display_width("abc"), 3);
+        assert_eq!(line_display_width("a\tb"), 6); // 1 + 4 + 1
+        assert_eq!(line_display_width(""), 0);
+        assert_eq!(line_display_width("\t\t"), 8);
+    }
 
     #[test]
     fn expand_tabs_no_tabs() {
