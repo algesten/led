@@ -90,134 +90,194 @@ pub fn driver(out: Stream<SyntaxOut>) -> Stream<SyntaxIn> {
         }
         let mut states: HashMap<PathBuf, BufSyntax> = HashMap::new();
 
+        // Scratch space for coalescing queued messages per buffer.
+        struct Coalesced {
+            doc: Arc<dyn Doc>,
+            version: u64,
+            edit_ops: Vec<EditOp>,
+            scroll_row: usize,
+            buffer_height: usize,
+            indent_row: Option<usize>,
+        }
+
         while let Some(cmd) = cmd_rx.recv().await {
-            match cmd {
-                SyntaxOut::BufferClosed { path } => {
-                    states.remove(&path);
-                    continue;
+            // Coalesce: drain any queued messages, keeping the latest
+            // state per path while merging edit_ops and indent_row.
+            let mut pending: HashMap<PathBuf, Coalesced> = HashMap::new();
+            let mut closes: Vec<PathBuf> = Vec::new();
+            {
+                let mut first = Some(cmd);
+                loop {
+                    let msg = if let Some(m) = first.take() {
+                        m
+                    } else if let Ok(m) = cmd_rx.try_recv() {
+                        m
+                    } else {
+                        break;
+                    };
+                    match msg {
+                        SyntaxOut::BufferChanged {
+                            path,
+                            doc,
+                            version,
+                            edit_ops,
+                            scroll_row,
+                            buffer_height,
+                            indent_row,
+                            ..
+                        } => {
+                            if let Some(existing) = pending.get_mut(&path) {
+                                existing.edit_ops.extend(edit_ops);
+                                existing.doc = doc;
+                                existing.version = version;
+                                existing.scroll_row = scroll_row;
+                                existing.buffer_height = buffer_height;
+                                existing.indent_row = indent_row.or(existing.indent_row);
+                            } else {
+                                pending.insert(
+                                    path,
+                                    Coalesced {
+                                        doc,
+                                        version,
+                                        edit_ops,
+                                        scroll_row,
+                                        buffer_height,
+                                        indent_row,
+                                    },
+                                );
+                            }
+                        }
+                        SyntaxOut::BufferClosed { path } => {
+                            pending.remove(&path);
+                            closes.push(path);
+                        }
+                    }
                 }
-                SyntaxOut::BufferChanged {
-                    path,
+            }
+
+            for path in closes {
+                states.remove(&path);
+            }
+
+            for (
+                path,
+                Coalesced {
                     doc,
                     version,
                     edit_ops,
                     scroll_row,
                     buffer_height,
-                    cursor_row: _,
-                    cursor_col: _,
                     indent_row,
-                } => {
-                    // Auto-initialize if not yet opened
-                    if !states.contains_key(&path) {
-                        if let Some(ss) = SyntaxState::from_path_and_doc(&path, &*doc) {
-                            let reindent_chars = ss.reindent_chars().clone();
-                            states.insert(
-                                path.clone(),
-                                BufSyntax {
-                                    state: ss,
-                                    last_ver: version,
-                                    last_doc: doc.clone(),
-                                    last_scroll: usize::MAX,
-                                    last_end_line: 0,
-                                    cached_highlights: Rc::new(Vec::new()),
-                                    cached_brackets: Vec::new(),
-                                    reindent_chars,
-                                },
-                            );
-                        } else {
-                            if indent_row.is_some() {
-                                let _ = tx
-                                    .send(SyntaxIn {
-                                        path,
-                                        doc_version: version,
-                                        highlights: Rc::new(vec![]),
-                                        bracket_pairs: vec![],
-                                        matching_bracket: None,
-                                        indent: None,
-                                        indent_row,
-                                        reindent_chars: Arc::from([]),
-                                    })
-                                    .await;
-                            }
-                            continue;
-                        }
-                    }
-                    let bs = states.get_mut(&path).unwrap();
-
-                    // Update parse tree if doc changed
-                    let doc_changed = version != bs.last_ver;
-                    if doc_changed {
-                        let new_op_count = (version - bs.last_ver) as usize;
-                        if !edit_ops.is_empty() && edit_ops.len() >= new_op_count {
-                            let ops = &edit_ops[edit_ops.len() - new_op_count..];
-                            if new_op_count == 1 {
-                                bs.state.apply_edit_op(&ops[0], &*doc);
-                            } else {
-                                // Replay ops: mark each edit using the pre-edit
-                                // doc for correct byte positions, then reparse
-                                // once with the final doc.
-                                let mut shadow: Arc<dyn Doc> = bs.last_doc.clone();
-                                for op in ops {
-                                    bs.state.mark_edit(op, &*shadow);
-                                    // Advance shadow to match post-edit state.
-                                    let off = led_core::CharOffset(
-                                        op.offset.0.min(shadow.byte_to_char(shadow.len_bytes())),
-                                    );
-                                    if !op.old_text.is_empty() {
-                                        let end = led_core::CharOffset(
-                                            off.0 + op.old_text.chars().count(),
-                                        );
-                                        shadow = shadow.remove(off, end);
-                                    }
-                                    if !op.new_text.is_empty() {
-                                        shadow = shadow.insert(off, &op.new_text);
-                                    }
-                                }
-                                bs.state.finish_edits(&*doc);
-                            }
-                        } else {
-                            bs.state.reparse(&*doc);
-                        }
-                        bs.last_ver = version;
-                        bs.last_doc = doc.clone();
-                    }
-
-                    // Recompute highlights/brackets when doc or viewport changed
-                    let end_line = (scroll_row + buffer_height + 5).min(doc.line_count());
-                    let viewport_changed =
-                        scroll_row != bs.last_scroll || end_line != bs.last_end_line;
-
-                    if doc_changed || viewport_changed || bs.cached_highlights.is_empty() {
-                        bs.cached_highlights =
-                            Rc::new(bs.state.highlights_for_lines(&*doc, scroll_row, end_line));
-                        bs.cached_brackets =
-                            to_state_brackets(&bs.state, &*doc, scroll_row, end_line);
-                        bs.last_scroll = scroll_row;
-                        bs.last_end_line = end_line;
-                    }
-
-                    // matching_bracket is computed from cached bracket_pairs
-                    // in the model layer — no tree-sitter query needed.
-
-                    let indent = if let Some(row) = indent_row {
-                        bs.state.compute_auto_indent(&*doc, row)
+                },
+            ) in pending
+            {
+                // Auto-initialize if not yet opened
+                if !states.contains_key(&path) {
+                    if let Some(ss) = SyntaxState::from_path_and_doc(&path, &*doc) {
+                        let reindent_chars = ss.reindent_chars().clone();
+                        states.insert(
+                            path.clone(),
+                            BufSyntax {
+                                state: ss,
+                                last_ver: version,
+                                last_doc: doc.clone(),
+                                last_scroll: usize::MAX,
+                                last_end_line: 0,
+                                cached_highlights: Rc::new(Vec::new()),
+                                cached_brackets: Vec::new(),
+                                reindent_chars,
+                            },
+                        );
                     } else {
-                        None
-                    };
-
-                    let _ = tx
-                        .send(SyntaxIn {
-                            path,
-                            doc_version: version,
-                            highlights: bs.cached_highlights.clone(),
-                            bracket_pairs: bs.cached_brackets.clone(),
-                            matching_bracket: None,
-                            indent,
-                            indent_row,
-                            reindent_chars: bs.reindent_chars.clone(),
-                        })
-                        .await;
+                        if indent_row.is_some() {
+                            let _ = tx
+                                .send(SyntaxIn {
+                                    path,
+                                    doc_version: version,
+                                    highlights: Rc::new(vec![]),
+                                    bracket_pairs: vec![],
+                                    matching_bracket: None,
+                                    indent: None,
+                                    indent_row,
+                                    reindent_chars: Arc::from([]),
+                                })
+                                .await;
+                        }
+                        continue;
+                    }
                 }
+                let bs = states.get_mut(&path).unwrap();
+
+                // Update parse tree if doc changed
+                let doc_changed = version != bs.last_ver;
+                if doc_changed {
+                    let new_op_count = (version - bs.last_ver) as usize;
+                    if !edit_ops.is_empty() && edit_ops.len() >= new_op_count {
+                        let ops = &edit_ops[edit_ops.len() - new_op_count..];
+                        if new_op_count == 1 {
+                            bs.state.apply_edit_op(&ops[0], &*doc);
+                        } else {
+                            // Replay ops: mark each edit using the pre-edit
+                            // doc for correct byte positions, then reparse
+                            // once with the final doc.
+                            let mut shadow: Arc<dyn Doc> = bs.last_doc.clone();
+                            for op in ops {
+                                bs.state.mark_edit(op, &*shadow);
+                                // Advance shadow to match post-edit state.
+                                let off = led_core::CharOffset(
+                                    op.offset.0.min(shadow.byte_to_char(shadow.len_bytes())),
+                                );
+                                if !op.old_text.is_empty() {
+                                    let end =
+                                        led_core::CharOffset(off.0 + op.old_text.chars().count());
+                                    shadow = shadow.remove(off, end);
+                                }
+                                if !op.new_text.is_empty() {
+                                    shadow = shadow.insert(off, &op.new_text);
+                                }
+                            }
+                            bs.state.finish_edits(&*doc);
+                        }
+                    } else {
+                        bs.state.reparse(&*doc);
+                    }
+                    bs.last_ver = version;
+                    bs.last_doc = doc.clone();
+                }
+
+                // Recompute highlights/brackets when doc or viewport changed
+                let end_line = (scroll_row + buffer_height + 5).min(doc.line_count());
+                let viewport_changed = scroll_row != bs.last_scroll || end_line != bs.last_end_line;
+
+                if doc_changed || viewport_changed || bs.cached_highlights.is_empty() {
+                    bs.cached_highlights =
+                        Rc::new(bs.state.highlights_for_lines(&*doc, scroll_row, end_line));
+                    bs.cached_brackets = to_state_brackets(&bs.state, &*doc, scroll_row, end_line);
+                    bs.last_scroll = scroll_row;
+                    bs.last_end_line = end_line;
+                }
+
+                // matching_bracket is computed from cached bracket_pairs
+                // in the model layer — no tree-sitter query needed.
+
+                let indent = if let Some(row) = indent_row {
+                    bs.state.compute_auto_indent(&*doc, row)
+                } else {
+                    None
+                };
+
+                let _ = tx
+                    .send(SyntaxIn {
+                        path,
+                        doc_version: version,
+                        highlights: bs.cached_highlights.clone(),
+                        bracket_pairs: bs.cached_brackets.clone(),
+                        matching_bracket: None,
+                        indent,
+                        indent_row,
+                        reindent_chars: bs.reindent_chars.clone(),
+                    })
+                    .await;
             }
         }
     });
