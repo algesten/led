@@ -1,7 +1,7 @@
 use std::rc::Rc;
 
+use led_core::Alert;
 use led_core::rx::Stream;
-use led_core::{Alert, DocId};
 use led_docstore::DocStoreIn;
 use led_state::{AppState, BufferState, ChangeReason, SaveState};
 
@@ -15,70 +15,20 @@ pub fn buffers_of(
     docstore
         .sample_combine(state)
         .filter_map(move |(result, state)| match result {
-            Ok(DocStoreIn::Opened { id, path, doc }) => {
-                // Preview open: check if pending_preview matches this path
-                let is_preview = (*state.preview.pending)
-                    .as_ref()
-                    .map_or(false, |req| req.path == path);
-
-                if is_preview {
-                    let req = (*state.preview.pending).as_ref().unwrap();
-                    let row = req.row.min(doc.line_count().saturating_sub(1));
-                    let col = req.col;
-                    let buffer_height = state.dims.map_or(20, |d| d.buffer_height());
-                    let notify_hash = led_workspace::path_hash(&path);
-
-                    let mut buf = BufferState::new(path.clone());
-                    buf.materialize(id, doc, false);
-                    buf.set_cursor(led_core::Row(row), led_core::Col(col), led_core::Col(col));
-                    buf.set_scroll(
-                        led_core::Row(row.saturating_sub(buffer_height / 2)),
-                        led_core::SubLine(0),
-                    );
-                    let remove_old_path = state.preview.buffer.clone();
-                    let remove_old_hash = remove_old_path.as_ref().and_then(|pp| {
-                        state
-                            .notify_hash_to_buffer
-                            .iter()
-                            .find(|(_, v)| *v == pp)
-                            .map(|(k, _)| k.clone())
-                    });
-                    let pre_preview_buffer = if state.preview.pre_preview_buffer.is_some() {
-                        state.preview.pre_preview_buffer.clone()
-                    } else {
-                        state.active_tab.clone()
-                    };
-
-                    return Some(Mut::PreviewOpen {
-                        buf,
-                        notify_hash,
-                        remove_old_path,
-                        remove_old_hash,
-                        pre_preview_buffer,
-                    });
+            Ok(DocStoreIn::Opened { path, doc }) => {
+                // Drop if this file is no longer in any tab (e.g. stale preview open
+                // for a file the user already scrolled past).
+                if !state.tabs.iter().any(|t| t.path == path) {
+                    return None;
                 }
 
-                // Duplicate detection: activate existing tab if same path is already open
-                // (only if it's materialized, not just a path placeholder)
+                // Drop duplicate: buffer is already materialized.
                 if state
                     .buffers
                     .get(&path)
                     .is_some_and(|b| b.is_materialized())
                 {
-                    return Some(Mut::ActivateBuffer(path));
-                }
-
-                // Stale preview detection: when a preview buffer is active,
-                // the preview_open derived stream may have in-flight opens
-                // for files the user has already scrolled past.  Drop them
-                // unless they were explicitly requested by a user action.
-                if state.preview.buffer.is_some() {
-                    let requested_by_user = (*state.pending_open).as_ref() == Some(&path)
-                        || state.startup.arg_paths.contains(&path)
-                        || state.session.positions.contains_key(&path);
-                    if !requested_by_user {
-                        return None;
-                    }
+                    return None;
                 }
 
                 // Apply restored session positions + undo if available
@@ -146,13 +96,11 @@ pub fn buffers_of(
                 };
                 Some(Mut::BufferOpen {
                     path,
-                    doc_id: id,
                     doc,
                     cursor: (cursor_row, cursor_col),
                     scroll: (scroll_row, scroll_sub_line),
                     activate,
                     notify_hash,
-                    session_restore_done: is_session_restore && state.session.positions.len() == 1,
                     clear_pending_jump,
                     undo_entries,
                     persisted_undo_len,
@@ -161,9 +109,8 @@ pub fn buffers_of(
                     distance_from_save,
                 })
             }
-            Ok(DocStoreIn::Saved { id, doc }) => {
-                let buf = find_buf_by_doc_id(&state, id)?;
-                let path = buf.path_buf().cloned()?;
+            Ok(DocStoreIn::Saved { path, doc }) => {
+                let buf = state.buffers.get(&path)?;
                 let undo_clear_path = if buf.save_state() == SaveState::Saving {
                     Some(path.clone())
                 } else {
@@ -177,8 +124,11 @@ pub fn buffers_of(
                     undo_clear_path,
                 })
             }
-            Ok(DocStoreIn::SavedAs { id, path, doc }) => {
-                let buf = find_buf_by_doc_id(&state, id)?;
+            Ok(DocStoreIn::SavedAs { path, doc }) => {
+                // path is the NEW path (where the file was saved to).
+                // The active buffer is the one that initiated the save-as.
+                let active_path = state.active_tab.as_ref()?;
+                let buf = state.buffers.get(active_path)?;
                 let old_path = buf.path_buf().cloned()?;
                 let undo_clear_path = if buf.save_state() == SaveState::Saving {
                     Some(old_path.clone())
@@ -194,20 +144,11 @@ pub fn buffers_of(
                     undo_clear_path,
                 })
             }
-            Ok(DocStoreIn::ExternalChange { id, path, doc }) => {
-                // Try DocId first, fall back to path — DocId mismatch happens
-                // when a file was re-opened as a duplicate (ActivateBuffer
-                // instead of BufferOpen): the buffer keeps the original DocId
-                // but the docstore assigned a new one for the watcher.
-                let buf = find_buf_by_doc_id(&state, id).or_else(|| state.buffers.get(&path));
-                let buf = match buf {
+            Ok(DocStoreIn::ExternalChange { path, doc }) => {
+                let buf = match state.buffers.get(&path) {
                     Some(b) => b,
                     None => {
-                        log::trace!(
-                            "ExternalChange: no buffer for doc_id {:?} or path {}",
-                            id,
-                            path.display()
-                        );
+                        log::trace!("ExternalChange: no buffer for path {}", path.display());
                         return None;
                     }
                 };
@@ -246,16 +187,12 @@ pub fn buffers_of(
                     ChangeReason::ExternalFileChange,
                 ))
             }
-            Ok(DocStoreIn::Opening { path }) => Some(Mut::Opening { path }),
+            Ok(DocStoreIn::Opening { .. }) => None,
             Ok(DocStoreIn::ExternalRemove { .. }) => None,
             Ok(DocStoreIn::OpenFailed { path }) => Some(Mut::SessionOpenFailed { path }),
             Err(a) => Some(Mut::alert(a)),
         })
         .stream()
-}
-
-fn find_buf_by_doc_id<'a>(state: &'a AppState, doc_id: DocId) -> Option<&'a Rc<BufferState>> {
-    state.buffers.values().find(|b| b.doc_id() == doc_id)
 }
 
 /// Apply persisted undo entries to a buffer, restoring edit history.

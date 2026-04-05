@@ -210,6 +210,7 @@ pub(super) fn handle_rename_action(state: &mut AppState, action: &Action) -> boo
 }
 
 pub(super) fn navigate_diagnostic(state: &mut AppState, forward: bool) {
+    log::debug!("[diag] navigate forward={}", forward);
     let cur_path = state
         .active_tab
         .as_ref()
@@ -238,6 +239,11 @@ pub(super) fn navigate_diagnostic(state: &mut AppState, forward: bool) {
             .then(a.1.start_col.cmp(&b.1.start_col))
     });
 
+    log::debug!(
+        "[diag] found {} diagnostics across {} buffers",
+        all.len(),
+        state.buffers.len()
+    );
     if all.is_empty() {
         return;
     }
@@ -270,8 +276,26 @@ pub(super) fn navigate_diagnostic(state: &mut AppState, forward: bool) {
     let target_col = target_diag.start_col;
     let target_path = target_path.clone();
 
+    log::debug!(
+        "[diag] target: {}:{},{} (current: {:?}:{},{})",
+        target_path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy(),
+        target_row,
+        target_col,
+        cur_path.as_ref().map(|p| p
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned()),
+        row,
+        col,
+    );
+
     // If the target is in the current buffer, just move the cursor.
     if cur_path.as_ref() == Some(&target_path) {
+        log::debug!("[diag] → same buffer, moving cursor");
         let path = state.active_tab.clone().unwrap();
         let dims = state.dims;
         if let Some(buf) = state.buf_mut(&path) {
@@ -301,6 +325,7 @@ pub(super) fn navigate_diagnostic(state: &mut AppState, forward: bool) {
         })
         .and_then(|b| b.path_buf().cloned());
     if let Some(path) = existing {
+        log::debug!("[diag] → different file, already open: {}", path.display());
         state.active_tab = Some(path.clone());
         let half = state.dims.map_or(10, |d| d.buffer_height() / 2);
         if let Some(buf) = state.buf_mut(&path) {
@@ -314,6 +339,10 @@ pub(super) fn navigate_diagnostic(state: &mut AppState, forward: bool) {
         }
         reveal_active_buffer(state);
     } else {
+        log::debug!(
+            "[diag] → different file, not open: {}",
+            target_path.display()
+        );
         super::super::request_open(state, target_path.clone(), false);
         state.active_tab = Some(target_path.clone());
         state.jump.pending_position = Some(led_state::JumpPosition {

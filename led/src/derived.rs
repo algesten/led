@@ -68,7 +68,7 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
             let buffers: Vec<SessionBuffer> = s
                 .tabs
                 .iter()
-                .filter(|t| !t.is_preview)
+                .filter(|t| !t.is_preview())
                 .enumerate()
                 .filter_map(|(i, t)| {
                     let b = s.buffers.get(&t.path)?;
@@ -93,7 +93,7 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
                 .and_then(|path| {
                     s.tabs
                         .iter()
-                        .filter(|t| !t.is_preview)
+                        .filter(|t| !t.is_preview())
                         .position(|t| t.path == *path)
                 })
                 .unwrap_or(0);
@@ -181,24 +181,64 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
     // non-materialized buffers. Diagnostic-only buffers are not in
     // tabs, so they never get materialized.
     fn tabs_needing_open(s: &Rc<AppState>) -> Vec<PathBuf> {
-        s.tabs
+        let result: Vec<PathBuf> = s
+            .tabs
             .iter()
             .filter(|t| {
-                s.buffers.get(&t.path).map_or(true, |b| {
+                let needs = s.buffers.get(&t.path).map_or(true, |b| {
                     b.materialization() == led_state::MaterializationState::NotMaterialized
-                })
+                });
+                if !needs {
+                    log::debug!(
+                        "[materialize] tab {} skipped (mat={:?})",
+                        t.path.file_name().unwrap_or_default().to_string_lossy(),
+                        s.buffers.get(&t.path).map(|b| b.materialization()),
+                    );
+                }
+                needs
             })
             .map(|t| t.path.clone())
-            .collect()
+            .collect();
+        if !result.is_empty() {
+            log::debug!(
+                "[materialize] tabs_needing_open: {:?}",
+                result
+                    .iter()
+                    .map(|p| p
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .into_owned())
+                    .collect::<Vec<_>>(),
+            );
+        }
+        result
     }
 
     let materialize = state
         .dedupe_by(tabs_needing_open)
         .filter(|s| !tabs_needing_open(s).is_empty())
         .flat_map(|s| {
-            tabs_needing_open(&s)
+            let paths = tabs_needing_open(&s);
+            log::debug!(
+                "[materialize] emitting Opens for: {:?}",
+                paths
+                    .iter()
+                    .map(|p| p
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .into_owned())
+                    .collect::<Vec<_>>(),
+            );
+            paths
                 .into_iter()
                 .map(|path| {
+                    // Mark as Requested via interior mutability so subsequent
+                    // invocations of tabs_needing_open skip this buffer.
+                    if let Some(b) = s.buffers.get(&path) {
+                        b.mark_requested();
+                    }
                     let create_if_missing = s
                         .buffers
                         .get(&path)
@@ -220,7 +260,7 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
         .map(|s| {
             let buf = &s.buffers[s.active_tab.as_ref().unwrap()];
             DocStoreOut::Save {
-                id: buf.doc_id(),
+                path: buf.path_buf().cloned().unwrap(),
                 doc: buf.doc().clone(),
             }
         })
@@ -239,7 +279,7 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
                         && b.path().is_some()
                 })
                 .map(|b| DocStoreOut::Save {
-                    id: b.doc_id(),
+                    path: b.path_buf().cloned().unwrap(),
                     doc: b.doc().clone(),
                 })
                 .collect::<Vec<_>>()
@@ -256,35 +296,15 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
             let buf = &s.buffers[s.active_tab.as_ref().unwrap()];
             let path = (*s.pending_save_as).clone().unwrap();
             DocStoreOut::SaveAs {
-                id: buf.doc_id(),
+                path: buf.path_buf().cloned().unwrap(),
                 doc: buf.doc().clone(),
-                path,
-            }
-        })
-        .stream();
-
-    // Preview open: Case C (new file, not already in any buffer).
-    // The docstore deduplicates in-flight requests.
-    let preview_open = state
-        .dedupe_by(|s| s.preview.pending.version())
-        .filter(|s| s.preview.pending.version() > 0)
-        .filter(|s| s.preview.pending.is_some())
-        .filter(|s| {
-            let req_path = (*s.preview.pending).as_ref().map(|r| &r.path);
-            !s.buffers.values().any(|b| b.path_buf() == req_path)
-        })
-        .map(|s| {
-            let req = (*s.preview.pending).as_ref().unwrap();
-            DocStoreOut::Open {
-                path: req.path.clone(),
-                create_if_missing: false,
+                new_path: path,
             }
         })
         .stream();
 
     let docstore_out: Stream<DocStoreOut> = Stream::new();
     materialize.forward(&docstore_out);
-    preview_open.forward(&docstore_out);
     save_out.forward(&docstore_out);
     save_all_out.forward(&docstore_out);
     save_as_out.forward(&docstore_out);
@@ -316,7 +336,7 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
                         && !s
                             .tabs
                             .iter()
-                            .any(|t| t.is_preview && b.path_buf() == Some(&t.path))
+                            .any(|t| t.is_preview() && b.path_buf() == Some(&t.path))
                         && (b.undo_history_len() > b.persisted_undo_len() || b.is_dirty())
                 })
                 .map(|b| b.version())

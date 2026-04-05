@@ -59,9 +59,6 @@ pub struct ChangeStamp {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct BufferId(pub u64);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct DocId(pub u64);
-
 // ── Domain newtypes ──
 
 macro_rules! newtype_usize {

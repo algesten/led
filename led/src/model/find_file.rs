@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use led_core::Action;
 use led_fs::FindFileEntry;
-use led_state::{AppState, FindFileMode, FindFileState, PreviewRequest};
+use led_state::{AppState, FindFileMode, FindFileState};
 
 // ── Path helpers ──
 
@@ -300,11 +300,7 @@ fn preview_selected(state: &mut AppState) {
         return;
     };
     if !comp.is_dir {
-        state.preview.pending.set(Some(PreviewRequest {
-            path: comp.full.clone(),
-            row: 0,
-            col: 0,
-        }));
+        super::action::set_preview(state, comp.full.clone(), 0, 0);
     }
 }
 

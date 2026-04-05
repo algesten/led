@@ -192,7 +192,7 @@ pub fn driver(state: Stream<Rc<AppState>>) -> Stream<UiIn> {
         .filter(|s| tabs_overflow(s))
         .filter(|s| {
             s.tabs.iter().any(|tab| {
-                !tab.is_preview
+                !tab.is_preview()
                     && Some(&tab.path) != s.active_tab.as_ref()
                     && s.buffers
                         .get(&tab.path)

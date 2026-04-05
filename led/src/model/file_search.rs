@@ -2,7 +2,7 @@ use led_core::{Action, PanelSlot};
 use led_state::file_search::{
     FileSearchRequest, FileSearchSelection, FileSearchState, ReplaceEntry,
 };
-use led_state::{AppState, JumpPosition, PreviewRequest};
+use led_state::{AppState, JumpPosition};
 
 // ── UTF-8 cursor helpers ──
 
@@ -109,11 +109,7 @@ fn preview_selected(state: &mut AppState) {
     let Some((group, hit)) = fs.selected_hit() else {
         return;
     };
-    state.preview.pending.set(Some(PreviewRequest {
-        path: group.path.clone(),
-        row: hit.row,
-        col: hit.col,
-    }));
+    super::action::set_preview(state, group.path.clone(), hit.row, hit.col);
 }
 
 // ── Trigger search ──
@@ -817,7 +813,7 @@ fn replace_all(state: &mut AppState) {
             if !state.tabs.iter().any(|t| t.path == *path) {
                 state.tabs.push_back(led_state::Tab {
                     path: path.clone(),
-                    is_preview: false,
+                    preview: None,
                 });
             }
             if !state.buffers.contains_key(path) {

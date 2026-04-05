@@ -1988,6 +1988,103 @@ fn external_editor_second_direct_write_detected() {
     inst.stop();
 }
 
+/// External rename of a clean buffer: the buffer should adopt the new path
+/// and preserve its content.
+#[test]
+#[ignore]
+fn external_rename_clean_buffer() {
+    let (dirs, paths) = shared_workspace(&[("test.txt", "original\n")]);
+    let file_path = paths[0].clone();
+    let new_path = dirs.workspace.join("renamed.txt");
+
+    let mut inst = Instance::start(startup_for(&dirs, &paths));
+    inst.wait_for(
+        |s| s.session.watchers_ready && !s.buffers.is_empty(),
+        WAIT,
+        "instance ready",
+    );
+
+    // Rename the file externally
+    std::fs::rename(&file_path, &new_path).unwrap();
+
+    let new_path2 = new_path.clone();
+    inst.wait_for(
+        move |s| {
+            s.active_tab
+                .as_ref()
+                .and_then(|p| s.buffers.get(p))
+                .and_then(|b| b.path_buf())
+                .map_or(false, |p| *p == new_path2)
+        },
+        WAIT,
+        "buffer path updated to renamed.txt",
+    );
+
+    let (content, buf_path) = inst.with_state(|s| {
+        let b = active_buf(s).unwrap();
+        (line(&**b.doc(), 0), b.path_buf().cloned())
+    });
+    assert_eq!(content, "original", "content should be preserved");
+    assert_eq!(
+        buf_path.as_ref(),
+        Some(&new_path),
+        "buffer path should be the new name"
+    );
+
+    inst.stop();
+}
+
+/// External rename of a dirty buffer: the file is moved to a new name.
+/// The buffer has unsaved edits — it should keep those edits and the old path.
+#[test]
+#[ignore]
+fn external_rename_dirty_buffer() {
+    let (dirs, paths) = shared_workspace(&[("test.txt", "original\n")]);
+    let file_path = paths[0].clone();
+    let new_path = dirs.workspace.join("renamed.txt");
+
+    let mut inst = Instance::start(startup_for(&dirs, &paths));
+    inst.wait_for(
+        |s| s.session.watchers_ready && !s.buffers.is_empty(),
+        WAIT,
+        "instance ready",
+    );
+
+    // Make the buffer dirty
+    inst.push(InsertChar('X'));
+
+    inst.wait_for(
+        |s| active_buf(s).is_some_and(|b| b.is_dirty()),
+        WAIT,
+        "buffer is dirty",
+    );
+
+    // Rename the file externally
+    std::fs::rename(&file_path, &new_path).unwrap();
+
+    // Give the watcher time to fire events
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    // Buffer should still be open with our edits and old path
+    let (content, buf_path, dirty) = inst.with_state(|s| {
+        let b = active_buf(s).unwrap();
+        (line(&**b.doc(), 0), b.path_buf().cloned(), b.is_dirty())
+    });
+    assert!(
+        content.contains('X'),
+        "buffer should still have our edit, got: {:?}",
+        content
+    );
+    assert_eq!(
+        buf_path.as_ref(),
+        Some(&file_path),
+        "buffer path should still be the original"
+    );
+    assert!(dirty, "buffer should still be dirty");
+
+    inst.stop();
+}
+
 // ── Cross-instance sync ──
 
 /// Simulate an external instance's edit by writing undo entries to the DB
@@ -5043,4 +5140,43 @@ fn kbd_macro_restart_during_recording() {
     // "xy" was typed during first recording (executed live), then restart,
     // "z" typed during second recording, then playback inserts another "z"
     assert_eq!(line(&**b.doc(), 0), "xyzzhello");
+}
+
+#[test]
+fn browser_preview_switches_between_files() {
+    let root = tempfile::TempDir::new().unwrap().keep();
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::write(workspace.join("aaa.txt"), "first file\n").unwrap();
+    std::fs::write(workspace.join("bbb.txt"), "second file\n").unwrap();
+
+    fn preview_shows(s: &led_state::AppState, prefix: &str) -> bool {
+        s.active_tab
+            .as_ref()
+            .and_then(|p| s.buffers.get(p))
+            .map_or(false, |b| {
+                let mut buf = String::new();
+                b.doc().line(led_core::Row(0), &mut buf);
+                buf.starts_with(prefix)
+            })
+    }
+
+    let t = TestHarness::with_dir(root).run(vec![
+        WaitFor(has_browser_entries),
+        Do(MoveDown),
+        WaitFor(|s| preview_shows(s, "second")),
+        Do(MoveUp),
+        WaitFor(|s| preview_shows(s, "first")),
+        Do(MoveDown),
+        WaitFor(|s| preview_shows(s, "second")),
+        Do(MoveUp),
+        WaitFor(|s| preview_shows(s, "first")),
+    ]);
+
+    let b = buf(&t);
+    assert!(
+        line(&**b.doc(), 0).starts_with("first"),
+        "preview should show aaa.txt after navigating back up, got: {:?}",
+        line(&**b.doc(), 0),
+    );
 }

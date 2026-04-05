@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use led_core::rx::Stream;
 use led_core::{
-    Alert, Doc, DocId, FileWatcher, Registration, TextDoc, WatchEvent, WatchEventKind, WatchMode,
+    Alert, Doc, FileWatcher, Registration, TextDoc, WatchEvent, WatchEventKind, WatchMode,
 };
 use tokio::sync::mpsc;
 
@@ -20,17 +20,13 @@ pub enum DocStoreOut {
         create_if_missing: bool,
     },
     Save {
-        id: DocId,
+        path: PathBuf,
         doc: Arc<dyn Doc>,
     },
     SaveAs {
-        id: DocId,
-        doc: Arc<dyn Doc>,
         path: PathBuf,
-    },
-    Close {
-        id: DocId,
         doc: Arc<dyn Doc>,
+        new_path: PathBuf,
     },
 }
 
@@ -41,26 +37,23 @@ pub enum DocStoreIn {
         path: PathBuf,
     },
     Opened {
-        id: DocId,
         path: PathBuf,
         doc: Arc<dyn Doc>,
     },
     Saved {
-        id: DocId,
+        path: PathBuf,
         doc: Arc<dyn Doc>,
     },
     SavedAs {
-        id: DocId,
         path: PathBuf,
         doc: Arc<dyn Doc>,
     },
     ExternalChange {
-        id: DocId,
         path: PathBuf,
         doc: Arc<dyn Doc>,
     },
     ExternalRemove {
-        id: DocId,
+        path: PathBuf,
     },
     OpenFailed {
         path: PathBuf,
@@ -71,34 +64,26 @@ impl fmt::Debug for DocStoreIn {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             DocStoreIn::Opening { path } => f.debug_struct("Opening").field("path", path).finish(),
-            DocStoreIn::Opened { id, path, .. } => f
-                .debug_struct("Opened")
-                .field("id", id)
-                .field("path", path)
-                .finish(),
-            DocStoreIn::Saved { id, .. } => f.debug_struct("Saved").field("id", id).finish(),
-            DocStoreIn::SavedAs { id, path, .. } => f
-                .debug_struct("SavedAs")
-                .field("id", id)
-                .field("path", path)
-                .finish(),
-            DocStoreIn::ExternalChange { id, path, .. } => f
-                .debug_struct("ExternalChange")
-                .field("id", id)
-                .field("path", path)
-                .finish(),
-            DocStoreIn::ExternalRemove { id } => {
-                f.debug_struct("ExternalRemove").field("id", id).finish()
+            DocStoreIn::Opened { path, .. } => {
+                f.debug_struct("Opened").field("path", path).finish()
             }
+            DocStoreIn::Saved { path, .. } => f.debug_struct("Saved").field("path", path).finish(),
+            DocStoreIn::SavedAs { path, .. } => {
+                f.debug_struct("SavedAs").field("path", path).finish()
+            }
+            DocStoreIn::ExternalChange { path, .. } => f
+                .debug_struct("ExternalChange")
+                .field("path", path)
+                .finish(),
+            DocStoreIn::ExternalRemove { path } => f
+                .debug_struct("ExternalRemove")
+                .field("path", path)
+                .finish(),
             DocStoreIn::OpenFailed { path } => {
                 f.debug_struct("OpenFailed").field("path", path).finish()
             }
         }
     }
-}
-
-struct OpenDoc {
-    path: PathBuf,
 }
 
 /// Read a file and construct a TextDoc. Async read, sync Rope construction from memory.
@@ -132,13 +117,10 @@ pub fn driver(
     tokio::task::spawn_local(async move {
         let (watcher_tx, mut watcher_rx) = mpsc::channel::<WatchEvent>(256);
 
-        let mut next_doc_id: u64 = 0;
-        let mut open_docs: HashMap<DocId, OpenDoc> = HashMap::new();
-        // Keyed by canonical path so lookups match what the notify crate
-        // reports (e.g. /var → /private/var on macOS).
-        let mut path_to_id: HashMap<PathBuf, DocId> = HashMap::new();
         let mut registrations: HashMap<PathBuf, Registration> = HashMap::new();
-        let mut in_flight: HashSet<PathBuf> = HashSet::new();
+        // Canonical paths of files we've opened — used to filter watcher events
+        // so we only report external changes for files we care about.
+        let mut watched_paths: HashSet<PathBuf> = HashSet::new();
 
         loop {
             tokio::select! {
@@ -147,27 +129,13 @@ pub fn driver(
                     match cmd {
                         DocStoreOut::Open { path, create_if_missing } => {
                             let canonical = canonicalize(&path);
+                            log::debug!("[docstore] Open: {}", path.display());
 
-                            // Skip if already in-flight or already opened.
-                            if in_flight.contains(&canonical) || path_to_id.contains_key(&canonical) {
-                                continue;
-                            }
+                            register_watcher(
+                                &path, &file_watcher, &watcher_tx,
+                                &mut registrations,
+                            );
 
-                            if let Some(parent) = path.parent() {
-                                let canon_parent = std::fs::canonicalize(parent)
-                                    .unwrap_or_else(|_| parent.to_path_buf());
-                                if !registrations.contains_key(&canon_parent) {
-                                    let reg = file_watcher.register(
-                                        parent,
-                                        WatchMode::NonRecursive,
-                                        watcher_tx.clone(),
-                                    );
-                                    registrations.insert(canon_parent, reg);
-                                }
-                            }
-
-                            // Acknowledge: driver is now loading this file.
-                            in_flight.insert(canonical.clone());
                             let _ = result_tx.send(Ok(DocStoreIn::Opening { path: path.clone() })).await;
 
                             let doc_result = match read_doc(&path).await {
@@ -180,22 +148,11 @@ pub fn driver(
                                 Err(e) => Err(e),
                             };
 
-                            in_flight.remove(&canonical);
-
                             match doc_result {
                                 Ok(doc) => {
-                                    let id = match path_to_id.get(&canonical) {
-                                        Some(&existing) => existing,
-                                        None => {
-                                            let id = DocId(next_doc_id);
-                                            next_doc_id += 1;
-                                            open_docs.insert(id, OpenDoc { path: path.clone() });
-                                            path_to_id.insert(canonical, id);
-                                            id
-                                        }
-                                    };
+                                    watched_paths.insert(canonical);
                                     let doc: Arc<dyn Doc> = Arc::new(doc);
-                                    let _ = result_tx.send(Ok(DocStoreIn::Opened { id, path, doc })).await;
+                                    let _ = result_tx.send(Ok(DocStoreIn::Opened { path, doc })).await;
                                 }
                                 Err(e) => {
                                     log::debug!("Cannot open {}: {e}", path.display());
@@ -205,53 +162,28 @@ pub fn driver(
                                 }
                             }
                         }
-                        DocStoreOut::Save { id, doc } => {
-                            if let Some(open) = open_docs.get(&id) {
-                                handle_save(
-                                    &open.path, &doc, &result_tx, id,
-                                ).await;
-                            }
+                        DocStoreOut::Save { path, doc } => {
+                            handle_save(&path, &doc, &result_tx).await;
                         }
-                        DocStoreOut::SaveAs { id, doc, path } => {
-                            // Update internal path tracking
-                            let old_canonical = open_docs.get(&id).map(|o| canonicalize(&o.path));
-                            if let Some(old_canonical) = old_canonical {
-                                path_to_id.remove(&old_canonical);
-                            }
-                            let new_canonical = canonicalize(&path);
-                            open_docs.insert(id, OpenDoc { path: path.clone() });
-                            path_to_id.insert(new_canonical, id);
+                        DocStoreOut::SaveAs { path, doc, new_path } => {
+                            let old_canonical = canonicalize(&path);
+                            watched_paths.remove(&old_canonical);
+                            let new_canonical = canonicalize(&new_path);
+                            watched_paths.insert(new_canonical);
 
-                            // Register watcher for new parent directory
-                            if let Some(parent) = path.parent() {
-                                let canonical_parent = std::fs::canonicalize(parent)
-                                    .unwrap_or_else(|_| parent.to_path_buf());
-                                if !registrations.contains_key(&canonical_parent) {
-                                    let reg = file_watcher.register(
-                                        parent,
-                                        WatchMode::NonRecursive,
-                                        watcher_tx.clone(),
-                                    );
-                                    registrations.insert(canonical_parent, reg);
-                                }
-                            }
+                            register_watcher(
+                                &new_path, &file_watcher, &watcher_tx,
+                                &mut registrations,
+                            );
 
-                            handle_save_as(
-                                &path, &doc, &result_tx, id,
-                            ).await;
-                        }
-                        DocStoreOut::Close { id, .. } => {
-                            if let Some(open) = open_docs.remove(&id) {
-                                let canonical = canonicalize(&open.path);
-                                path_to_id.remove(&canonical);
-                            }
+                            handle_save_as(&new_path, &doc, &result_tx).await;
                         }
                     }
                 }
                 Some(event) = watcher_rx.recv() => {
                     log::trace!("[docstore] select got watcher event: {:?}", event.kind);
                     handle_watcher_event(
-                        event, &path_to_id, &result_tx,
+                        event, &watched_paths, &result_tx,
                     ).await;
                     log::trace!("[docstore] handle_watcher_event done");
                 }
@@ -270,11 +202,25 @@ pub fn driver(
     stream
 }
 
+fn register_watcher(
+    path: &PathBuf,
+    file_watcher: &Arc<FileWatcher>,
+    watcher_tx: &mpsc::Sender<WatchEvent>,
+    registrations: &mut HashMap<PathBuf, Registration>,
+) {
+    if let Some(parent) = path.parent() {
+        let canon_parent = std::fs::canonicalize(parent).unwrap_or_else(|_| parent.to_path_buf());
+        if !registrations.contains_key(&canon_parent) {
+            let reg = file_watcher.register(parent, WatchMode::NonRecursive, watcher_tx.clone());
+            registrations.insert(canon_parent, reg);
+        }
+    }
+}
+
 async fn handle_save(
     path: &PathBuf,
     doc: &Arc<dyn Doc>,
     tx: &mpsc::Sender<Result<DocStoreIn, Alert>>,
-    id: DocId,
 ) {
     let parent = path.parent().unwrap_or(std::path::Path::new("."));
     // Create parent directories for new files that don't exist on disk yet.
@@ -317,7 +263,7 @@ async fn handle_save(
         Ok(()) => {
             let _ = tx
                 .send(Ok(DocStoreIn::Saved {
-                    id,
+                    path: path.clone(),
                     doc: doc.clone(),
                 }))
                 .await;
@@ -338,7 +284,6 @@ async fn handle_save_as(
     path: &PathBuf,
     doc: &Arc<dyn Doc>,
     tx: &mpsc::Sender<Result<DocStoreIn, Alert>>,
-    id: DocId,
 ) {
     let parent = path.parent().unwrap_or(std::path::Path::new("."));
     if !parent.exists() {
@@ -379,7 +324,6 @@ async fn handle_save_as(
         Ok(()) => {
             let _ = tx
                 .send(Ok(DocStoreIn::SavedAs {
-                    id,
                     path: path.clone(),
                     doc: doc.clone(),
                 }))
@@ -399,14 +343,14 @@ async fn handle_save_as(
 
 async fn handle_watcher_event(
     event: WatchEvent,
-    path_to_id: &HashMap<PathBuf, DocId>,
+    watched_paths: &HashSet<PathBuf>,
     tx: &mpsc::Sender<Result<DocStoreIn, Alert>>,
 ) {
     for path in &event.paths {
-        let Some(&id) = path_to_id.get(path) else {
-            log::trace!("[docstore] path not in path_to_id: {}", path.display());
+        if !watched_paths.contains(path) {
+            log::trace!("[docstore] path not watched: {}", path.display());
             continue;
-        };
+        }
 
         log::trace!(
             "[docstore] path matched: {} kind={:?}",
@@ -420,7 +364,6 @@ async fn handle_watcher_event(
                     log::trace!("[docstore] read_doc ok, sending ExternalChange");
                     let doc: Arc<dyn Doc> = Arc::new(doc);
                     Some(Ok(DocStoreIn::ExternalChange {
-                        id,
                         path: path.clone(),
                         doc,
                     }))
@@ -430,7 +373,7 @@ async fn handle_watcher_event(
                     None
                 }
             },
-            WatchEventKind::Remove => Some(Ok(DocStoreIn::ExternalRemove { id })),
+            WatchEventKind::Remove => Some(Ok(DocStoreIn::ExternalRemove { path: path.clone() })),
         };
 
         if let Some(msg) = msg {
@@ -441,4 +384,160 @@ async fn handle_watcher_event(
 
 fn canonicalize(path: &PathBuf) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.clone())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use led_core::FileWatcher;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    use std::time::Duration;
+
+    /// Helper: run a test inside a single-threaded LocalSet, matching
+    /// the real app's runtime (spawn_local, current_thread).
+    fn run_local<F: std::future::Future<Output = ()> + 'static>(f: F) {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            tokio::task::LocalSet::new().run_until(f).await;
+        });
+    }
+
+    /// Wait until a predicate is satisfied, polling with yield_now.
+    /// Panics after timeout.
+    async fn wait_for<F: Fn() -> bool>(pred: F, label: &str) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if pred() {
+                return;
+            }
+            if tokio::time::Instant::now() > deadline {
+                panic!("wait_for({label}) timed out");
+            }
+            tokio::task::yield_now().await;
+        }
+    }
+
+    /// The docstore does not deduplicate — that's the model's job.
+    /// Multiple Opens for the same file each produce an Opened event.
+    #[test]
+    fn duplicate_opens_each_produce_opened() {
+        run_local(async {
+            let dir = tempfile::TempDir::new().unwrap();
+            let file = dir.path().join("test.txt");
+            std::fs::write(&file, "hello\n").unwrap();
+
+            let watcher = FileWatcher::new();
+            let cmd_stream: Stream<DocStoreOut> = Stream::new();
+            let result_stream = driver(cmd_stream.clone(), watcher);
+
+            let results: Rc<RefCell<Vec<DocStoreIn>>> = Rc::new(RefCell::new(Vec::new()));
+            let r = results.clone();
+            result_stream.on(move |opt: Option<&Result<DocStoreIn, Alert>>| {
+                if let Some(Ok(ev)) = opt {
+                    r.borrow_mut().push(ev.clone());
+                }
+            });
+
+            // Push 3 Opens synchronously — they all land in the mpsc channel
+            // before the driver task gets to run (single-threaded LocalSet).
+            cmd_stream.push(DocStoreOut::Open {
+                path: file.clone(),
+                create_if_missing: false,
+            });
+            cmd_stream.push(DocStoreOut::Open {
+                path: file.clone(),
+                create_if_missing: false,
+            });
+            cmd_stream.push(DocStoreOut::Open {
+                path: file.clone(),
+                create_if_missing: false,
+            });
+
+            let r2 = results.clone();
+            wait_for(
+                move || {
+                    r2.borrow()
+                        .iter()
+                        .filter(|e| matches!(e, DocStoreIn::Opened { .. }))
+                        .count()
+                        >= 3
+                },
+                "3 Opened events",
+            )
+            .await;
+
+            let events = results.borrow();
+            let opened_count = events
+                .iter()
+                .filter(|e| matches!(e, DocStoreIn::Opened { .. }))
+                .count();
+
+            assert_eq!(
+                opened_count, 3,
+                "docstore does not deduplicate (events: {:?})",
+                &*events
+            );
+        });
+    }
+
+    /// Opens for different files in the same batch are all processed.
+    #[test]
+    fn different_files_in_batch_all_open() {
+        run_local(async {
+            let dir = tempfile::TempDir::new().unwrap();
+            let file_a = dir.path().join("a.txt");
+            let file_b = dir.path().join("b.txt");
+            std::fs::write(&file_a, "aaa\n").unwrap();
+            std::fs::write(&file_b, "bbb\n").unwrap();
+
+            let watcher = FileWatcher::new();
+            let cmd_stream: Stream<DocStoreOut> = Stream::new();
+            let result_stream = driver(cmd_stream.clone(), watcher);
+
+            let results: Rc<RefCell<Vec<DocStoreIn>>> = Rc::new(RefCell::new(Vec::new()));
+            let r = results.clone();
+            result_stream.on(move |opt: Option<&Result<DocStoreIn, Alert>>| {
+                if let Some(Ok(ev)) = opt {
+                    r.borrow_mut().push(ev.clone());
+                }
+            });
+
+            cmd_stream.push(DocStoreOut::Open {
+                path: file_a.clone(),
+                create_if_missing: false,
+            });
+            cmd_stream.push(DocStoreOut::Open {
+                path: file_b.clone(),
+                create_if_missing: false,
+            });
+
+            let r2 = results.clone();
+            wait_for(
+                move || {
+                    r2.borrow()
+                        .iter()
+                        .filter(|e| matches!(e, DocStoreIn::Opened { .. }))
+                        .count()
+                        >= 2
+                },
+                "2 Opened events",
+            )
+            .await;
+
+            let events = results.borrow();
+            let opened_count = events
+                .iter()
+                .filter(|e| matches!(e, DocStoreIn::Opened { .. }))
+                .count();
+            assert_eq!(
+                opened_count, 2,
+                "both files should open (events: {:?})",
+                &*events
+            );
+        });
+    }
 }

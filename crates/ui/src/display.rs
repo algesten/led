@@ -948,7 +948,7 @@ pub fn tabs_inputs(s: &AppState) -> Option<TabsInputs> {
             let dirty = buf.is_dirty();
             let label = format_tab_label(&name, dirty);
             let is_active = s.active_tab.as_ref() == Some(&tab.path);
-            let entry_style = if tab.is_preview {
+            let entry_style = if tab.is_preview() {
                 if is_active {
                     preview_active_style
                 } else {

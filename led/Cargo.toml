@@ -32,4 +32,4 @@ tokio = { workspace = true }
 [dev-dependencies]
 notify = { workspace = true }
 rusqlite = { workspace = true }
-tempfile = "3"
+tempfile = { workspace = true }

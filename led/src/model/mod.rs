@@ -23,7 +23,7 @@ use led_core::rx::Stream;
 use led_core::theme::Theme;
 use std::path::PathBuf;
 
-use led_core::{Action, Alert, Doc, DocId, PanelSlot};
+use led_core::{Action, Alert, Doc, PanelSlot};
 use led_state::{
     AppState, BracketPair, BufferState, ChangeReason, Dimensions, HighlightSpan, Phase,
 };
@@ -169,8 +169,20 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
     let actions_s = actions_of(&drivers.terminal_in, &state);
     let buffers_s = buffers_of(&drivers.docstore_in, &state);
     let process_s = process_of(&state);
-    let preview_s = preview_of(&state);
     let lsp_s = lsp_of::lsp_of(&drivers.lsp_in, &state);
+
+    // Resume complete: all session files resolved (opened or failed).
+    let resume_complete_s = state
+        .filter(|s| s.phase == Phase::Resuming)
+        .filter(|s| {
+            !s.session.resume.is_empty()
+                && s.session
+                    .resume
+                    .iter()
+                    .all(|e| e.state != led_state::ResumeState::Pending)
+        })
+        .map(|_| Mut::ResumeComplete)
+        .stream();
 
     // ── 2. Build up muts from driver input and derived streams ──
 
@@ -206,7 +218,7 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
                 .filter(|b| b.path().is_some())
                 .filter(|b| {
                     let path = b.path_buf().unwrap();
-                    !s.tabs.iter().any(|t| t.path == *path && t.is_preview)
+                    !s.tabs.iter().any(|t| t.path == *path && t.is_preview())
                 })
                 .filter(|b| b.undo_history_len() > b.persisted_undo_len() || b.is_dirty())
                 .filter_map(|b| {
@@ -424,7 +436,7 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
     git_file_s.forward(&muts);
     git_line_s.forward(&muts);
     file_search_s.forward(&muts);
-    preview_s.forward(&muts);
+    resume_complete_s.forward(&muts);
     lsp_s.forward(&muts);
 
     let ui_evict_s = drivers
@@ -457,21 +469,47 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
                 s.alerts.info = info;
                 s.alerts.warn = warn;
             }
-            Mut::Opening { path } => {
-                log::info!("Opening: {}", path.display());
-                if let Some(buf) = s.buf_mut(&path) {
-                    buf.mark_materialization_requested();
+            Mut::ResumeComplete => {
+                log::info!("ResumeComplete");
+                s.phase = Phase::Running;
+
+                // Resolve active tab from session's saved order.
+                if let Some(order) = s.session.active_tab_order.take() {
+                    let non_preview_tabs: Vec<_> =
+                        s.tabs.iter().filter(|t| !t.is_preview()).collect();
+                    if let Some(tab) = non_preview_tabs.get(order) {
+                        s.active_tab = Some(tab.path.clone());
+                    }
                 }
+                // Fall back: if active_tab is not set or points to a missing buffer,
+                // pick the first materialized tab.
+                let active_valid = s.active_tab.as_ref().map_or(false, |p| {
+                    s.buffers.get(p).is_some_and(|b| b.is_materialized())
+                });
+                if !active_valid {
+                    s.active_tab = s
+                        .tabs
+                        .iter()
+                        .find(|t| s.buffers.get(&t.path).is_some_and(|b| b.is_materialized()))
+                        .map(|t| t.path.clone());
+                }
+
+                ensure_startup_arg_buffers(&mut s);
+
+                // CLI arg files override session's active tab.
+                if let Some(arg_path) = s.startup.arg_paths.last() {
+                    s.active_tab = Some(arg_path.clone());
+                }
+
+                resolve_focus(&mut s);
             }
             Mut::BufferOpen {
                 path,
-                doc_id,
                 doc,
                 cursor,
                 scroll,
                 activate,
                 notify_hash,
-                session_restore_done,
                 clear_pending_jump,
                 undo_entries,
                 persisted_undo_len,
@@ -480,11 +518,22 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
                 distance_from_save,
             } => {
                 log::info!("BufferOpen: {}", path.display());
-                let will_activate = activate || s.active_tab.is_none();
+                s.session.positions.remove(&path);
+
+                // Mark resume entry as Opened
+                if let Some(entry) = s.session.resume.iter_mut().find(|e| e.path == path) {
+                    entry.state = led_state::ResumeState::Opened;
+                }
+
+                // Activation: during Resuming, don't activate — ResumeComplete handles it.
+                let will_activate = if s.phase == Phase::Resuming {
+                    false
+                } else {
+                    activate || s.active_tab.is_none()
+                };
                 if will_activate {
                     s.active_tab = Some(path.clone());
                 }
-                s.session.positions.remove(&path);
 
                 // Ensure buffer exists, then materialize
                 if !s.buffers.contains_key(&path) {
@@ -492,7 +541,7 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
                         .insert(path.clone(), Rc::new(BufferState::new(path.clone())));
                 }
                 if let Some(buf) = s.buf_mut(&path) {
-                    buf.materialize(doc_id, doc, false);
+                    buf.materialize(doc, false);
                     buf.set_cursor(
                         led_core::Row(cursor.0),
                         led_core::Col(cursor.1),
@@ -515,12 +564,8 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
                     }
                 }
                 s.notify_hash_to_buffer.insert(notify_hash, path.clone());
-                if session_restore_done {
-                    s.session.active_tab_order = None;
-                    s.phase = Phase::Running;
-                    ensure_startup_arg_buffers(&mut s);
-                    resolve_focus(&mut s);
-                } else if s.phase == Phase::Running && will_activate {
+                let is_preview_tab = s.tabs.iter().any(|t| t.is_preview() && t.path == path);
+                if s.phase == Phase::Running && will_activate && !is_preview_tab {
                     s.focus = PanelSlot::Main;
                 }
                 if clear_pending_jump {
@@ -605,13 +650,13 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
             Mut::FileSearchResults(fs, preview) => {
                 s.file_search = Some(fs);
                 if let Some(req) = preview {
-                    s.preview.pending.set(Some(req));
+                    action::set_preview(&mut s, req.path, req.row, req.col);
                 }
             }
             Mut::FileSearchReplaceComplete(fs, preview, count) => {
                 s.file_search = Some(fs);
                 if let Some(req) = preview {
-                    s.preview.pending.set(Some(req));
+                    action::set_preview(&mut s, req.path, req.row, req.col);
                 }
                 s.alerts.info = Some(format!("Replaced {count} occurrence(s)"));
             }
@@ -634,50 +679,6 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
             }
             Mut::ForceRedraw(v) => s.force_redraw = v,
             Mut::Keymap(v) => s.keymap = Some(v),
-            Mut::PreviewOpen {
-                buf,
-                notify_hash,
-                remove_old_path,
-                remove_old_hash,
-                pre_preview_buffer,
-            } => {
-                if let Some(ref old) = remove_old_path {
-                    s.buffers_mut().remove(old);
-                    s.tabs.retain(|t| t.path != *old);
-                }
-                remove_old_hash.map(|h| s.notify_hash_to_buffer.remove(&h));
-                s.preview.pre_preview_buffer = pre_preview_buffer;
-                let path = buf
-                    .path_buf()
-                    .cloned()
-                    .expect("preview buffer must have path");
-                s.notify_hash_to_buffer.insert(notify_hash, path.clone());
-                s.buffers_mut().insert(path.clone(), Rc::new(buf));
-                if !s.tabs.iter().any(|t| t.path == path) {
-                    s.tabs.push_back(led_state::Tab {
-                        path: path.clone(),
-                        is_preview: true,
-                    });
-                }
-                s.active_tab = Some(path.clone());
-                s.preview.buffer = Some(path);
-            }
-            Mut::PreviewActivateExisting {
-                path,
-                row,
-                col,
-                remove_old_path,
-                remove_old_hash,
-                pre_preview_buffer,
-            } => {
-                remove_old_path.as_ref().map(|p| s.buffers_mut().remove(p));
-                remove_old_hash.map(|h| s.notify_hash_to_buffer.remove(&h));
-                s.preview.pre_preview_buffer = pre_preview_buffer;
-                s.active_tab = Some(path.clone());
-                s.buf_mut(&path).map(|buf| {
-                    buf.set_cursor(led_core::Row(row), led_core::Col(col), led_core::Col(col));
-                });
-            }
             Mut::Resize(w, h) => {
                 s.dims = Some(Dimensions::new(w, h, s.show_side_panel));
             }
@@ -685,10 +686,10 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
                 s.session.positions.remove(&path);
                 s.buffers_mut().remove(&path);
                 s.tabs.retain(|t| t.path != path);
-                if s.phase == Phase::Resuming && s.session.positions.is_empty() {
-                    s.phase = Phase::Running;
-                    ensure_startup_arg_buffers(&mut s);
-                    resolve_focus(&mut s);
+
+                // Mark resume entry as Failed — ResumeComplete handles the transition.
+                if let Some(entry) = s.session.resume.iter_mut().find(|e| e.path == path) {
+                    entry.state = led_state::ResumeState::Failed;
                 }
             }
             Mut::SessionRestored {
@@ -716,11 +717,18 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
                 s.jump.entries = jump_entries;
                 s.jump.index = jump_index;
                 if !pending_opens.is_empty() {
+                    s.session.resume = pending_opens
+                        .iter()
+                        .map(|p| led_state::ResumeEntry {
+                            path: p.clone(),
+                            state: led_state::ResumeState::Pending,
+                        })
+                        .collect();
                     for path in &pending_opens {
                         if !s.tabs.iter().any(|t| t.path == *path) {
                             s.tabs.push_back(led_state::Tab {
                                 path: path.clone(),
-                                is_preview: false,
+                                preview: None,
                             });
                         }
                         if !s.buffers.contains_key(path) {
@@ -1048,7 +1056,7 @@ fn ensure_startup_arg_buffers(s: &mut AppState) {
         if !s.tabs.iter().any(|t| t.path == *path) {
             s.tabs.push_back(led_state::Tab {
                 path: path.clone(),
-                is_preview: false,
+                preview: None,
             });
         }
         if !s.buffers.contains_key(path) {
@@ -1065,7 +1073,7 @@ pub(crate) fn request_open(s: &mut AppState, path: PathBuf, create_if_missing: b
     if !s.tabs.iter().any(|t| t.path == path) {
         s.tabs.push_back(led_state::Tab {
             path: path.clone(),
-            is_preview: false,
+            preview: None,
         });
     }
     if !s.buffers.contains_key(&path) {
@@ -1115,18 +1123,14 @@ enum Mut {
         info: Option<String>,
         warn: Option<String>,
     },
-    Opening {
-        path: PathBuf,
-    },
+    ResumeComplete,
     BufferOpen {
         path: PathBuf,
-        doc_id: DocId,
         doc: Arc<dyn Doc>,
         cursor: (usize, usize),
         scroll: (usize, usize),
         activate: bool,
         notify_hash: String,
-        session_restore_done: bool,
         clear_pending_jump: bool,
         /// Session restore: undo entries + persistence state
         undo_entries: Vec<Vec<u8>>,
@@ -1170,21 +1174,6 @@ enum Mut {
     },
     ForceRedraw(u64),
     Keymap(Rc<Keymap>),
-    PreviewOpen {
-        buf: BufferState,
-        notify_hash: String,
-        remove_old_path: Option<PathBuf>,
-        remove_old_hash: Option<String>,
-        pre_preview_buffer: Option<PathBuf>,
-    },
-    PreviewActivateExisting {
-        path: PathBuf,
-        row: usize,
-        col: usize,
-        remove_old_path: Option<PathBuf>,
-        remove_old_hash: Option<String>,
-        pre_preview_buffer: Option<PathBuf>,
-    },
     Resize(u16, u16),
     NotifyEvent {
         path: Option<std::path::PathBuf>,
@@ -1279,7 +1268,8 @@ impl Mut {
             Mut::ActivateBuffer(_) => "ActivateBuffer",
             Mut::Action(_) => "Action",
             Mut::Alert { .. } => "Alert",
-            Mut::Opening { .. } => "Opening",
+
+            Mut::ResumeComplete => "ResumeComplete",
             Mut::BufferOpen { .. } => "BufferOpen",
             Mut::BufferSaved { .. } => "BufferSaved",
             Mut::BufferSavedAs { .. } => "BufferSavedAs",
@@ -1294,8 +1284,7 @@ impl Mut {
             Mut::GitLineStatuses { .. } => "GitLineStatuses",
             Mut::ForceRedraw(_) => "ForceRedraw",
             Mut::Keymap(_) => "Keymap",
-            Mut::PreviewOpen { .. } => "PreviewOpen",
-            Mut::PreviewActivateExisting { .. } => "PreviewActivateExisting",
+
             Mut::Resize(_, _) => "Resize",
             Mut::NotifyEvent { .. } => "NotifyEvent",
             Mut::SessionOpenFailed { .. } => "SessionOpenFailed",
@@ -1375,85 +1364,3 @@ fn apply_text_edits(buf: &mut BufferState, edits: &[led_lsp::TextEdit]) {
 }
 
 // ── Preview combinator ──
-
-/// Helper: look up the notify hash for a buffer path.
-fn notify_hash_for(s: &AppState, path: &std::path::Path) -> Option<String> {
-    s.notify_hash_to_buffer
-        .iter()
-        .find(|(_, v)| v.as_path() == path)
-        .map(|(k, _)| k.clone())
-}
-
-/// Classify a pending_preview request against current state and produce
-/// the appropriate Mut. Cases A and B are handled here; Case C (new file)
-/// returns None — the derived docstore stream handles it.
-fn resolve_preview(s: &AppState) -> Option<Mut> {
-    let req = (*s.preview.pending).as_ref()?;
-
-    // Case A: same file already previewed → reposition via BufferUpdate
-    if let Some(ref preview_path) = s.preview.buffer {
-        if let Some(buf) = s.buffers.get(preview_path) {
-            if buf.path_buf() == Some(&req.path) {
-                let mut buf = (**buf).clone();
-                let row = req.row.min(buf.doc().line_count().saturating_sub(1));
-                buf.set_cursor(
-                    led_core::Row(row),
-                    led_core::Col(req.col),
-                    led_core::Col(req.col),
-                );
-                let buffer_height = s.dims.map_or(20, |d| d.buffer_height());
-                buf.set_scroll(
-                    led_core::Row(row.saturating_sub(buffer_height / 2)),
-                    led_core::SubLine(0),
-                );
-                return Some(Mut::BufferUpdate(
-                    preview_path.clone(),
-                    buf,
-                    ChangeReason::Edit,
-                ));
-            }
-        }
-    }
-
-    // Case B: already open as real buffer → activate temporarily
-    if let Some(existing) = s.buffers.values().find(|b| {
-        b.path_buf() == Some(&req.path)
-            && !s.tabs.iter().any(|t| t.path == req.path && t.is_preview)
-    }) {
-        let path = existing.path_buf().cloned().expect("matched by path");
-        let row = req.row.min(existing.doc().line_count().saturating_sub(1));
-        let col = req.col;
-
-        let remove_old_path = s.preview.buffer.clone();
-        let remove_old_hash = remove_old_path
-            .as_deref()
-            .and_then(|p| notify_hash_for(s, p));
-        let pre_preview_buffer =
-            if s.preview.buffer.is_none() && s.preview.pre_preview_buffer.is_none() {
-                s.active_tab.clone()
-            } else {
-                s.preview.pre_preview_buffer.clone()
-            };
-
-        return Some(Mut::PreviewActivateExisting {
-            path,
-            row,
-            col,
-            remove_old_path,
-            remove_old_hash,
-            pre_preview_buffer,
-        });
-    }
-
-    // Case C: new file — handled by derived, not here
-    None
-}
-
-fn preview_of(state: &Stream<Rc<AppState>>) -> Stream<Mut> {
-    state
-        .dedupe_by(|s| s.preview.pending.version())
-        .filter(|s| s.preview.pending.version() > 0)
-        .filter(|s| s.preview.pending.is_some())
-        .filter_map(|s| resolve_preview(&s))
-        .stream()
-}

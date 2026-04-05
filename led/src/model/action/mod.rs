@@ -17,7 +17,7 @@ use preview::promote_preview_active;
 
 // Re-export items used by other modules in the crate.
 pub(super) use helpers::{browser_scroll_to_selected, close_group_on_move, reveal_active_buffer};
-pub(super) use preview::{close_preview, evict_one_buffer, promote_preview};
+pub(super) use preview::{close_preview, evict_one_buffer, promote_preview, set_preview};
 
 pub fn handle_action(state: &mut AppState, action: Action) -> bool {
     // ── Keyboard macro recording ──
@@ -66,11 +66,16 @@ pub fn handle_action(state: &mut AppState, action: Action) -> bool {
     }
 
     // Auto-promote preview if user edits in it
-    if state.preview.buffer.is_some()
-        && state.active_tab == state.preview.buffer
-        && is_editing_action(&action)
-    {
-        promote_preview_active(state);
+    if is_editing_action(&action) {
+        if let Some(ref active) = state.active_tab {
+            if state
+                .tabs
+                .iter()
+                .any(|t| t.is_preview() && t.path == *active)
+            {
+                promote_preview_active(state);
+            }
+        }
     }
 
     // Intercept actions during LSP completion

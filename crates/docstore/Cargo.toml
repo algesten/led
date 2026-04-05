@@ -7,3 +7,6 @@ edition = "2024"
 led-core = { workspace = true }
 log = { workspace = true }
 tokio = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

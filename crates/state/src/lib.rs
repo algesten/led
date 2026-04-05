@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -11,8 +12,8 @@ use led_config_file::ConfigFile;
 use led_core::keys::{Keymap, Keys};
 use led_core::theme::Theme;
 use led_core::{
-    ChangeSeq, CharOffset, Col, ContentHash, Doc, DocId, DocVersion, EditOp, InertDoc, PanelSlot,
-    Row, Startup, SubLine, UndoHistory, Versioned,
+    ChangeSeq, CharOffset, Col, ContentHash, Doc, DocVersion, EditOp, InertDoc, PanelSlot, Row,
+    Startup, SubLine, UndoHistory, Versioned,
 };
 pub use led_workspace::SessionBuffer;
 pub use led_workspace::Workspace;
@@ -44,12 +45,38 @@ pub enum Phase {
 
 pub mod file_search;
 
+// ── Resume ──
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResumeState {
+    Pending,
+    Opened,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResumeEntry {
+    pub path: PathBuf,
+    pub state: ResumeState,
+}
+
 // ── Tab ──
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Tab {
     pub path: PathBuf,
-    pub is_preview: bool,
+    pub preview: Option<PreviewTab>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreviewTab {
+    pub previous_tab: PathBuf,
+}
+
+impl Tab {
+    pub fn is_preview(&self) -> bool {
+        self.preview.is_some()
+    }
 }
 
 // ── BufferStatus ──
@@ -325,12 +352,11 @@ pub enum MaterializationState {
 #[derive(Clone)]
 pub struct BufferState {
     // Identity
-    doc_id: DocId,
     path: Option<PathBuf>,
 
     // Content (InertDoc for non-materialized buffers)
     doc: Arc<dyn Doc>,
-    materialization: MaterializationState,
+    materialization: Cell<MaterializationState>,
 
     // Editing state (owned by buffer, not doc)
     version: DocVersion,
@@ -396,9 +422,8 @@ impl BufferState {
     /// Content is loaded later via `materialize()`.
     pub fn new(path: PathBuf) -> Self {
         Self {
-            doc_id: DocId(0),
             doc: Arc::new(InertDoc),
-            materialization: MaterializationState::NotMaterialized,
+            materialization: Cell::new(MaterializationState::NotMaterialized),
             version: DocVersion(0),
             undo: UndoHistory::default(),
             path: Some(path),
@@ -428,6 +453,7 @@ impl BufferState {
             reindent_chars: Arc::from([]),
             completion_triggers: Vec::new(),
             create_if_missing: false,
+
             last_used: Instant::now(),
             status: BufferStatus::new(),
             annotations_synced_ver: DocVersion(0),
@@ -436,9 +462,6 @@ impl BufferState {
 
     // ── Identity ──
 
-    pub fn doc_id(&self) -> DocId {
-        self.doc_id
-    }
     pub fn path(&self) -> Option<&Path> {
         self.path.as_deref()
     }
@@ -477,11 +500,17 @@ impl BufferState {
 
     /// Whether this buffer has materialized content.
     pub fn is_materialized(&self) -> bool {
-        self.materialization == MaterializationState::Materialized
+        self.materialization.get() == MaterializationState::Materialized
     }
 
     pub fn materialization(&self) -> MaterializationState {
-        self.materialization
+        self.materialization.get()
+    }
+
+    /// Mark as requested via interior mutability. Called from derived
+    /// streams to prevent duplicate Open emissions.
+    pub fn mark_requested(&self) {
+        self.materialization.set(MaterializationState::Requested);
     }
 
     /// Get the document (InertDoc for non-materialized buffers).
@@ -496,11 +525,10 @@ impl BufferState {
     /// changed externally).  When false, preserves annotations
     /// (use for first materialization — diagnostics may have
     /// arrived while the buffer was unmaterialized).
-    pub fn materialize(&mut self, doc_id: DocId, doc: Arc<dyn Doc>, clear_annotations: bool) {
-        self.doc_id = doc_id;
+    pub fn materialize(&mut self, doc: Arc<dyn Doc>, clear_annotations: bool) {
         self.content_hash = doc.content_hash();
         self.doc = doc;
-        self.materialization = MaterializationState::Materialized;
+        self.materialization.set(MaterializationState::Materialized);
         if clear_annotations {
             self.syntax_highlights = Rc::new(Vec::new());
             self.bracket_pairs = Rc::new(Vec::new());
@@ -514,13 +542,9 @@ impl BufferState {
     pub fn dematerialize(&mut self) {
         self.doc = Arc::new(InertDoc);
         self.undo = UndoHistory::default();
-        self.materialization = MaterializationState::NotMaterialized;
+        self.materialization
+            .set(MaterializationState::NotMaterialized);
         self.pending_syntax_request = None;
-    }
-
-    /// Mark that materialization has been requested.
-    pub fn mark_materialization_requested(&mut self) {
-        self.materialization = MaterializationState::Requested;
     }
 
     pub fn create_if_missing(&self) -> bool {
@@ -711,7 +735,7 @@ impl BufferState {
     /// File changed on disk with different content. Replaces doc,
     /// clears annotations, clamps cursor.
     pub fn reload_from_disk(&mut self, doc: Arc<dyn Doc>) {
-        self.materialize(self.doc_id, doc, true);
+        self.materialize(doc, true);
         self.change_seq = ChangeSeq(led_core::next_change_seq());
         // Clamp cursor to new document bounds
         let max_row = Row(self.doc().line_count().saturating_sub(1));
@@ -1223,7 +1247,6 @@ impl BufferState {
 impl fmt::Debug for BufferState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("BufferState")
-            .field("doc_id", &self.doc_id)
             .field("path", &self.path)
             .field("cursor_row", &self.cursor_row)
             .field("cursor_col", &self.cursor_col)
@@ -1411,6 +1434,7 @@ pub struct SessionState {
     pub positions: HashMap<PathBuf, SessionBuffer>,
     pub active_tab_order: Option<usize>,
     pub pending_opens: Versioned<Vec<PathBuf>>,
+    pub resume: Vec<ResumeEntry>,
     pub saved: bool,
     pub watchers_ready: bool,
 }
@@ -1511,15 +1535,6 @@ pub struct LspProgress {
     pub message: Option<String>,
 }
 
-// ── Preview ──
-
-#[derive(Debug, Clone, Default)]
-pub struct PreviewState {
-    pub buffer: Option<PathBuf>,
-    pub pre_preview_buffer: Option<PathBuf>,
-    pub pending: Versioned<Option<PreviewRequest>>,
-}
-
 // ── App state ──
 
 #[derive(Debug, Clone, Default)]
@@ -1575,9 +1590,6 @@ pub struct AppState {
     pub pending_file_replace: Versioned<Option<file_search::FileSearchReplaceRequest>>,
     pub pending_replace_opens: Versioned<Vec<std::path::PathBuf>>,
     pub pending_replace_all: Option<file_search::PendingReplaceAll>,
-
-    // Preview buffer
-    pub preview: PreviewState,
 
     // Git
     pub git: Rc<GitState>,

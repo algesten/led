@@ -307,11 +307,16 @@ async fn wait_for_condition(
     state: &Rc<RefCell<Option<Rc<AppState>>>>,
     pred: fn(&AppState) -> bool,
 ) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     loop {
         if let Some(ref s) = *state.borrow() {
             if pred(s) {
                 return;
             }
+        }
+        if tokio::time::Instant::now() > deadline {
+            eprintln!("WaitFor timed out after 10s — aborting");
+            std::process::exit(10);
         }
         tokio::time::sleep(Duration::from_millis(1)).await;
     }

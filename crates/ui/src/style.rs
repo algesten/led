@@ -479,7 +479,7 @@ mod tests {
         use crate::render;
         use std::path::PathBuf;
 
-        use led_core::{DocId, Startup, TextDoc};
+        use led_core::{Startup, TextDoc};
         use led_state::{AppState, BufferState, Dimensions};
 
         let theme_toml = include_str!("../../config-file/src/default_theme.toml");
@@ -491,7 +491,7 @@ mod tests {
         let test_path: PathBuf = "test.rs".into();
         let doc = TextDoc::from_reader("hello world\n".as_bytes()).unwrap();
         let mut buf = BufferState::new(test_path.clone());
-        buf.materialize(DocId(1), Arc::new(doc), false);
+        buf.materialize(Arc::new(doc), false);
 
         let mut state = AppState::new(Startup {
             headless: true,
@@ -507,7 +507,7 @@ mod tests {
         state.active_tab = Some(test_path.clone());
         state.tabs.push_back(led_state::Tab {
             path: test_path.clone(),
-            is_preview: false,
+            preview: None,
         });
         std::rc::Rc::make_mut(&mut state.buffers).insert(test_path, std::rc::Rc::new(buf));
 

@@ -1,7 +1,7 @@
 use led_core::Action;
-use led_state::{AppState, EntryKind, PreviewRequest};
+use led_state::{AppState, EntryKind};
 
-use super::preview::{close_preview, promote_preview};
+use super::preview::{close_preview, promote_preview, set_preview};
 
 pub(super) fn handle_browser_nav(state: &mut AppState, action: &Action) {
     let len = state.browser.entries.len();
@@ -44,11 +44,7 @@ pub(super) fn handle_browser_nav(state: &mut AppState, action: &Action) {
     if let Some(entry) = state.browser.entries.get(state.browser.selected) {
         match &entry.kind {
             EntryKind::File => {
-                state.preview.pending.set(Some(PreviewRequest {
-                    path: entry.path.clone(),
-                    row: 0,
-                    col: 0,
-                }));
+                set_preview(state, entry.path.clone(), 0, 0);
             }
             EntryKind::Directory { .. } => {
                 close_preview(state);
@@ -114,8 +110,6 @@ pub(super) fn handle_browser_open(state: &mut AppState) {
                 state.focus = PanelSlot::Main;
                 return;
             }
-            // Clear pending_preview so the preview stream doesn't race
-            state.preview.pending.set(None);
             close_preview(state);
             super::super::request_open(state, entry.path.clone(), true);
             state.active_tab = Some(entry.path.clone());

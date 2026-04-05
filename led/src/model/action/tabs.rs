@@ -13,7 +13,7 @@ pub(super) fn cycle_tab(state: &mut AppState, direction: i32) {
     let tabs: Vec<&PathBuf> = state
         .tabs
         .iter()
-        .filter(|t| !t.is_preview)
+        .filter(|t| !t.is_preview())
         .filter(|t| {
             state
                 .buffers
@@ -63,7 +63,7 @@ pub(super) fn force_kill_buffer(state: &mut AppState) {
 }
 
 fn do_kill_buffer(state: &mut AppState, path: &std::path::Path) {
-    if state.preview.buffer.as_deref() == Some(path) {
+    if state.tabs.iter().any(|t| t.is_preview() && t.path == path) {
         close_preview(state);
         return;
     }
