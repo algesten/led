@@ -567,7 +567,7 @@ impl BufferState {
 
     fn set_syntax_full(&mut self) {
         self.pending_syntax_request = Some(SyntaxRequest::Full);
-        self.pending_syntax_seq += 1;
+        self.pending_syntax_seq = led_core::next_syntax_seq();
     }
 
     fn append_syntax_edit(&mut self, op: EditOp) {
@@ -575,15 +575,15 @@ impl BufferState {
             Some(SyntaxRequest::Full) => {
                 // Full subsumes Partial — keep Full but bump seq
                 // so derived re-fires with the updated doc.
-                self.pending_syntax_seq += 1;
+                self.pending_syntax_seq = led_core::next_syntax_seq();
             }
             Some(SyntaxRequest::Partial { edit_ops }) => {
                 edit_ops.push(op);
-                self.pending_syntax_seq += 1;
+                self.pending_syntax_seq = led_core::next_syntax_seq();
             }
             None => {
                 self.pending_syntax_request = Some(SyntaxRequest::Partial { edit_ops: vec![op] });
-                self.pending_syntax_seq += 1;
+                self.pending_syntax_seq = led_core::next_syntax_seq();
             }
         }
     }
@@ -1179,7 +1179,7 @@ impl BufferState {
             if self.pending_syntax_request.is_none() {
                 self.pending_syntax_request = Some(SyntaxRequest::Full);
             }
-            self.pending_syntax_seq += 1;
+            self.pending_syntax_seq = led_core::next_syntax_seq();
         }
     }
 

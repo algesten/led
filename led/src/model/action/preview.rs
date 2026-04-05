@@ -10,36 +10,18 @@ use super::helpers::reveal_active_buffer;
 /// ensures a buffer placeholder exists, and sets the active tab.
 /// The normal `tabs_needing_open` derived stream will materialize it.
 pub(crate) fn set_preview(state: &mut AppState, path: PathBuf, row: usize, col: usize) {
-    log::debug!(
-        "[set_preview] path={} tabs={:?}",
-        path.display(),
-        state
-            .tabs
-            .iter()
-            .map(|t| format!(
-                "{}({})",
-                t.path.display(),
-                if t.is_preview() { "P" } else { "T" }
-            ))
-            .collect::<Vec<_>>(),
-    );
     // If the path is already open as a real tab, just activate it.
     let canonical = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
     if let Some(tab) = state.tabs.iter().find(|t| {
         !t.is_preview()
             && std::fs::canonicalize(&t.path).unwrap_or_else(|_| t.path.clone()) == canonical
     }) {
-        log::debug!(
-            "[set_preview] already a real tab, activating: {}",
-            tab.path.display()
-        );
         state.active_tab = Some(tab.path.clone());
         return;
     }
 
     // If the path is already the active preview, just reposition the cursor.
     if state.tabs.iter().any(|t| t.is_preview() && t.path == path) {
-        log::debug!("[set_preview] same file, repositioning");
         state.active_tab = Some(path.clone());
         let dims = state.dims;
         if let Some(buf) = state.buf_mut(&path) {
@@ -58,34 +40,23 @@ pub(crate) fn set_preview(state: &mut AppState, path: PathBuf, row: usize, col: 
 
     // Remember the previous active tab (only on first preview entry).
     let previous_tab = if let Some(tab) = state.tabs.iter().find(|t| t.is_preview()) {
-        // Already have a preview — keep the original previous_tab.
         tab.preview.as_ref().unwrap().previous_tab.clone()
     } else {
-        // No preview yet — remember current active tab.
         state.active_tab.clone().unwrap_or_default()
     };
 
     // Remove old preview tab and its buffer (if not used by a real tab).
     if let Some(idx) = state.tabs.iter().position(|t| t.is_preview()) {
         let old_path = state.tabs[idx].path.clone();
-        log::debug!(
-            "[set_preview] removing old preview: {}",
-            old_path.file_name().unwrap_or_default().to_string_lossy()
-        );
         state.tabs.remove(idx);
         let still_in_tabs = state.tabs.iter().any(|t| t.path == old_path);
         if !still_in_tabs {
-            log::debug!("[set_preview] removing buffer for old preview");
             state.buffers_mut().remove(&old_path);
             state.notify_hash_to_buffer.retain(|_, v| *v != old_path);
         }
     }
 
     // Insert the new preview tab.
-    log::debug!(
-        "[set_preview] inserting preview tab for {}",
-        path.file_name().unwrap_or_default().to_string_lossy()
-    );
     state.tabs.push_back(led_state::Tab {
         path: path.clone(),
         preview: Some(PreviewTab { previous_tab }),
@@ -93,19 +64,9 @@ pub(crate) fn set_preview(state: &mut AppState, path: PathBuf, row: usize, col: 
 
     // Ensure buffer placeholder exists for materialization.
     if !state.buffers.contains_key(&path) {
-        log::debug!(
-            "[set_preview] creating buffer placeholder for {}",
-            path.file_name().unwrap_or_default().to_string_lossy()
-        );
         state
             .buffers_mut()
             .insert(path.clone(), Rc::new(BufferState::new(path.clone())));
-    } else {
-        log::debug!(
-            "[set_preview] buffer already exists for {} (mat={:?})",
-            path.file_name().unwrap_or_default().to_string_lossy(),
-            state.buffers.get(&path).map(|b| b.materialization()),
-        );
     }
 
     state.active_tab = Some(path.clone());
@@ -129,7 +90,6 @@ pub(crate) fn close_preview(state: &mut AppState) {
     let preview_path = tab.path.clone();
     let restore_path = tab.preview.as_ref().map(|p| p.previous_tab.clone());
 
-    // Remove the preview tab and its buffer.
     state
         .tabs
         .retain(|t| t.path != preview_path || !t.is_preview());
@@ -141,7 +101,6 @@ pub(crate) fn close_preview(state: &mut AppState) {
             .retain(|_, v| *v != preview_path);
     }
 
-    // Restore previous active tab.
     if let Some(restore) = restore_path {
         if state.buffers.contains_key(&restore) {
             state.active_tab = Some(restore);

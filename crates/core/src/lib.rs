@@ -27,6 +27,12 @@ pub fn next_change_seq() -> u64 {
     CHANGE_SEQ.fetch_add(1, Ordering::Relaxed)
 }
 
+static SYNTAX_SEQ: AtomicU64 = AtomicU64::new(1);
+
+pub fn next_syntax_seq() -> u64 {
+    SYNTAX_SEQ.fetch_add(1, Ordering::Relaxed)
+}
+
 thread_local! {
     static LINE_BUF: Cell<String> = const { Cell::new(String::new()) };
 }

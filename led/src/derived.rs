@@ -181,57 +181,22 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
     // non-materialized buffers. Diagnostic-only buffers are not in
     // tabs, so they never get materialized.
     fn tabs_needing_open(s: &Rc<AppState>) -> Vec<PathBuf> {
-        let result: Vec<PathBuf> = s
-            .tabs
+        s.tabs
             .iter()
             .filter(|t| {
-                let needs = s.buffers.get(&t.path).map_or(true, |b| {
+                s.buffers.get(&t.path).map_or(true, |b| {
                     b.materialization() == led_state::MaterializationState::NotMaterialized
-                });
-                if !needs {
-                    log::debug!(
-                        "[materialize] tab {} skipped (mat={:?})",
-                        t.path.file_name().unwrap_or_default().to_string_lossy(),
-                        s.buffers.get(&t.path).map(|b| b.materialization()),
-                    );
-                }
-                needs
+                })
             })
             .map(|t| t.path.clone())
-            .collect();
-        if !result.is_empty() {
-            log::debug!(
-                "[materialize] tabs_needing_open: {:?}",
-                result
-                    .iter()
-                    .map(|p| p
-                        .file_name()
-                        .unwrap_or_default()
-                        .to_string_lossy()
-                        .into_owned())
-                    .collect::<Vec<_>>(),
-            );
-        }
-        result
+            .collect()
     }
 
     let materialize = state
         .dedupe_by(tabs_needing_open)
         .filter(|s| !tabs_needing_open(s).is_empty())
         .flat_map(|s| {
-            let paths = tabs_needing_open(&s);
-            log::debug!(
-                "[materialize] emitting Opens for: {:?}",
-                paths
-                    .iter()
-                    .map(|p| p
-                        .file_name()
-                        .unwrap_or_default()
-                        .to_string_lossy()
-                        .into_owned())
-                    .collect::<Vec<_>>(),
-            );
-            paths
+            tabs_needing_open(&s)
                 .into_iter()
                 .map(|path| {
                     // Mark as Requested via interior mutability so subsequent
