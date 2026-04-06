@@ -193,9 +193,9 @@ pub fn driver(state: Stream<Rc<AppState>>) -> Stream<UiIn> {
         .filter(|s| {
             s.tabs.iter().any(|tab| {
                 !tab.is_preview()
-                    && Some(&tab.path) != s.active_tab.as_ref()
+                    && Some(tab.path()) != s.active_tab.as_ref()
                     && s.buffers
-                        .get(&tab.path)
+                        .get(tab.path())
                         .is_some_and(|b| b.is_materialized() && !b.is_dirty())
             })
         })

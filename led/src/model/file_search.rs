@@ -1,8 +1,8 @@
 use led_core::{Action, PanelSlot};
+use led_state::AppState;
 use led_state::file_search::{
     FileSearchRequest, FileSearchSelection, FileSearchState, ReplaceEntry,
 };
-use led_state::{AppState, JumpPosition};
 
 // ── UTF-8 cursor helpers ──
 
@@ -802,11 +802,8 @@ fn replace_all(state: &mut AppState) {
         }
         state.pending_replace_all = Some(pending);
         for path in non_open_paths.iter() {
-            if !state.tabs.iter().any(|t| t.path == *path) {
-                state.tabs.push_back(led_state::Tab {
-                    path: path.clone(),
-                    preview: None,
-                });
+            if !state.tabs.iter().any(|t| *t.path() == *path) {
+                state.tabs.push_back(led_state::Tab::new(path.clone()));
             }
             if !state.buffers.contains_key(path) {
                 let buf = led_state::BufferState::new(path.clone());
@@ -1042,13 +1039,14 @@ fn confirm_selected(state: &mut AppState) {
         super::action::reveal_active_buffer(state);
     } else {
         super::request_open(state, path.clone(), false);
-        state.active_tab = Some(path.clone());
-        state.jump.pending_position = Some(JumpPosition {
-            path,
-            row,
-            col,
-            scroll_offset: row.saturating_sub(5),
-        });
+        if let Some(tab) = state.tabs.iter_mut().find(|t| *t.path() == path) {
+            tab.set_cursor(
+                led_core::Row(row),
+                led_core::Col(col),
+                led_core::Row(row.saturating_sub(5)),
+            );
+        }
+        state.active_tab = Some(path);
     }
 
     deactivate(state);

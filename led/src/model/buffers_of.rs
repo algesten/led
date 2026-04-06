@@ -18,7 +18,7 @@ pub fn buffers_of(
             Ok(DocStoreIn::Opened { path, doc }) => {
                 // Drop if this file is no longer in any tab (e.g. stale preview open
                 // for a file the user already scrolled past).
-                if !state.tabs.iter().any(|t| t.path == path) {
+                if !state.tabs.iter().any(|t| *t.path() == path) {
                     return None;
                 }
 
@@ -62,25 +62,6 @@ pub fn buffers_of(
                 let notify_hash = led_workspace::path_hash(&path);
                 let content_hash = doc.content_hash();
 
-                // Apply pending jump position if this buffer matches
-                let pending_jump = state.jump.pending_position.as_ref().and_then(|p| {
-                    if Some(&p.path) == Some(&path) {
-                        Some(p.clone())
-                    } else {
-                        None
-                    }
-                });
-                let clear_pending_jump = pending_jump.is_some();
-
-                let (cursor_row, cursor_col, scroll_row) = match &pending_jump {
-                    Some(p) => (
-                        p.row.min(doc.line_count().saturating_sub(1)),
-                        p.col,
-                        p.scroll_offset,
-                    ),
-                    None => (cursor_row, cursor_col, scroll_row),
-                };
-
                 let undo_entries = match undo_data {
                     Some(undo) if undo.content_hash == *content_hash => undo.entries.clone(),
                     _ => Vec::new(),
@@ -89,7 +70,7 @@ pub fn buffers_of(
                 let activate = if is_startup_arg {
                     is_last_arg
                 } else if is_session_restore {
-                    let tab_index = state.tabs.iter().position(|t| t.path == path);
+                    let tab_index = state.tabs.iter().position(|t| *t.path() == path);
                     tab_index.is_some() && state.session.active_tab_order == tab_index
                 } else {
                     true
@@ -101,7 +82,6 @@ pub fn buffers_of(
                     scroll: (scroll_row, scroll_sub_line),
                     activate,
                     notify_hash,
-                    clear_pending_jump,
                     undo_entries,
                     persisted_undo_len,
                     chain_id,

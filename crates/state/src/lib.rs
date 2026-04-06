@@ -63,18 +63,55 @@ pub struct ResumeEntry {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Tab {
-    pub path: CanonPath,
-    pub preview: Option<PreviewTab>,
+    path: CanonPath,
+    preview: Option<PreviewTab>,
+    pending_cursor: Option<(Row, Col, Row)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PreviewTab {
-    pub previous_tab: CanonPath,
+struct PreviewTab {
+    previous_tab: CanonPath,
 }
 
 impl Tab {
+    pub fn new(path: CanonPath) -> Self {
+        Self {
+            path,
+            preview: None,
+            pending_cursor: None,
+        }
+    }
+
+    pub fn path(&self) -> &CanonPath {
+        &self.path
+    }
+
     pub fn is_preview(&self) -> bool {
         self.preview.is_some()
+    }
+
+    pub fn previous_tab(&self) -> Option<&CanonPath> {
+        self.preview.as_ref().map(|p| &p.previous_tab)
+    }
+
+    pub fn set_preview(&mut self, previous_tab: CanonPath) {
+        self.preview = Some(PreviewTab { previous_tab });
+    }
+
+    pub fn unpreview(&mut self) {
+        self.preview = None;
+    }
+
+    pub fn set_cursor(&mut self, row: Row, col: Col, scroll_row: Row) {
+        self.pending_cursor = Some((row, col, scroll_row));
+    }
+
+    pub fn has_pending_cursor(&self) -> bool {
+        self.pending_cursor.is_some()
+    }
+
+    pub fn take_cursor(&mut self) -> Option<(Row, Col, Row)> {
+        self.pending_cursor.take()
     }
 }
 
@@ -361,15 +398,15 @@ pub struct BufferState {
     version: DocVersion,
     undo: UndoHistory,
 
-    // Cursor
-    cursor_row: Row,
-    cursor_col: Col,
-    cursor_col_affinity: Col,
+    // Cursor (interior mutable — allows set_cursor through &self)
+    cursor_row: Cell<Row>,
+    cursor_col: Cell<Col>,
+    cursor_col_affinity: Cell<Col>,
     mark: Option<(Row, Col)>,
 
-    // Scroll
-    scroll_row: Row,
-    scroll_sub_line: SubLine,
+    // Scroll (interior mutable — allows set_scroll through &self)
+    scroll_row: Cell<Row>,
+    scroll_sub_line: Cell<SubLine>,
 
     // Edit tracking
     last_edit_kind: Option<EditKind>,
@@ -426,11 +463,11 @@ impl BufferState {
             version: DocVersion(0),
             undo: UndoHistory::default(),
             path: Some(path),
-            cursor_row: Row(0),
-            cursor_col: Col(0),
-            cursor_col_affinity: Col(0),
-            scroll_row: Row(0),
-            scroll_sub_line: SubLine(0),
+            cursor_row: Cell::new(Row(0)),
+            cursor_col: Cell::new(Col(0)),
+            cursor_col_affinity: Cell::new(Col(0)),
+            scroll_row: Cell::new(Row(0)),
+            scroll_sub_line: Cell::new(SubLine(0)),
             mark: None,
             last_edit_kind: None,
             save_state: SaveState::Clean,
@@ -599,7 +636,7 @@ impl BufferState {
         let doc = &self.doc;
         let old_lines = doc.line_count();
         let old_ver = self.version;
-        let edit_row = *self.cursor_row;
+        let edit_row = self.cursor_row.get().0;
         let (new_doc, result) = f(doc);
         self.version = self.version + 1;
         self.doc = new_doc;
@@ -631,7 +668,7 @@ impl BufferState {
 
     /// Insert text at a character offset. Records undo op, shifts annotations.
     pub fn insert_text(&mut self, char_idx: CharOffset, text: &str) {
-        let edit_row = *self.cursor_row;
+        let edit_row = self.cursor_row.get().0;
         let op = EditOp {
             offset: char_idx,
             old_text: String::new(),
@@ -648,7 +685,7 @@ impl BufferState {
 
     /// Remove text between two character offsets. Records undo op, shifts annotations.
     pub fn remove_text(&mut self, start: CharOffset, end: CharOffset) {
-        let edit_row = *self.cursor_row;
+        let edit_row = self.cursor_row.get().0;
         let old_text = self.doc.slice(start, end);
         let op = EditOp {
             offset: start,
@@ -743,10 +780,10 @@ impl BufferState {
         self.change_seq = ChangeSeq(led_core::next_change_seq());
         // Clamp cursor to new document bounds
         let max_row = Row(self.doc().line_count().saturating_sub(1));
-        self.cursor_row = self.cursor_row.min(max_row);
-        let max_col = Col(self.doc().line_len(self.cursor_row));
-        self.cursor_col = self.cursor_col.min(max_col);
-        self.cursor_col_affinity = self.cursor_col;
+        self.cursor_row.set(self.cursor_row.get().min(max_row));
+        let max_col = Col(self.doc().line_len(self.cursor_row.get()));
+        self.cursor_col.set(self.cursor_col.get().min(max_col));
+        self.cursor_col_affinity.set(self.cursor_col.get());
         self.close_group_on_move();
     }
 
@@ -954,24 +991,24 @@ impl BufferState {
     // ── Cursor ──
 
     pub fn cursor_row(&self) -> Row {
-        self.cursor_row
+        self.cursor_row.get()
     }
     pub fn cursor_col(&self) -> Col {
-        self.cursor_col
+        self.cursor_col.get()
     }
     pub fn cursor_col_affinity(&self) -> Col {
-        self.cursor_col_affinity
+        self.cursor_col_affinity.get()
     }
-    pub fn set_cursor(&mut self, row: Row, col: Col, affinity: Col) {
+    pub fn set_cursor(&self, row: Row, col: Col, affinity: Col) {
         let max_row = Row(self.doc().line_count().saturating_sub(1));
-        self.cursor_row = row.min(max_row);
-        let max_col = Col(self.doc().line_len(self.cursor_row));
-        self.cursor_col = col.min(max_col);
-        self.cursor_col_affinity = affinity;
+        self.cursor_row.set(row.min(max_row));
+        let max_col = Col(self.doc().line_len(self.cursor_row.get()));
+        self.cursor_col.set(col.min(max_col));
+        self.cursor_col_affinity.set(affinity);
     }
     pub fn set_cursor_row(&mut self, row: Row) {
         let max_row = Row(self.doc().line_count().saturating_sub(1));
-        self.cursor_row = row.min(max_row);
+        self.cursor_row.set(row.min(max_row));
     }
 
     // ── Mark ──
@@ -980,7 +1017,7 @@ impl BufferState {
         self.mark
     }
     pub fn set_mark(&mut self) {
-        self.mark = Some((self.cursor_row, self.cursor_col));
+        self.mark = Some((self.cursor_row.get(), self.cursor_col.get()));
     }
     pub fn set_mark_at(&mut self, row: Row, col: Col) {
         self.mark = Some((row, col));
@@ -992,14 +1029,15 @@ impl BufferState {
     // ── Scroll ──
 
     pub fn scroll_row(&self) -> Row {
-        self.scroll_row
+        self.scroll_row.get()
     }
     pub fn scroll_sub_line(&self) -> SubLine {
-        self.scroll_sub_line
+        self.scroll_sub_line.get()
     }
-    pub fn set_scroll(&mut self, row: Row, sub_line: SubLine) {
-        self.scroll_row = row.min(Row(self.doc().line_count().saturating_sub(1)));
-        self.scroll_sub_line = sub_line;
+    pub fn set_scroll(&self, row: Row, sub_line: SubLine) {
+        self.scroll_row
+            .set(row.min(Row(self.doc().line_count().saturating_sub(1))));
+        self.scroll_sub_line.set(sub_line);
     }
 
     // ── Save state ──
@@ -1092,8 +1130,11 @@ impl BufferState {
         self.matching_bracket
     }
     pub fn update_matching_bracket(&mut self) {
-        self.matching_bracket =
-            BracketPair::find_match(&self.bracket_pairs, *self.cursor_row, *self.cursor_col);
+        self.matching_bracket = BracketPair::find_match(
+            &self.bracket_pairs,
+            self.cursor_row.get().0,
+            self.cursor_col.get().0,
+        );
     }
     pub fn status(&self) -> &BufferStatus {
         &self.status
@@ -1427,7 +1468,6 @@ pub struct GitState {
     pub branch: Option<String>,
     pub file_statuses: HashMap<CanonPath, HashSet<led_core::git::FileStatus>>,
     pub pending_file_scan: Versioned<()>,
-    pub pending_line_scan: Versioned<Option<CanonPath>>,
     pub scan_seq: Versioned<()>,
 }
 
@@ -1449,7 +1489,6 @@ pub struct SessionState {
 pub struct JumpListState {
     pub entries: VecDeque<JumpPosition>,
     pub index: usize,
-    pub pending_position: Option<JumpPosition>,
 }
 
 // ── Kill ring ──

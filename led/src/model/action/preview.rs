@@ -2,7 +2,7 @@ use std::rc::Rc;
 
 use led_core::CanonPath;
 use led_core::PanelSlot;
-use led_state::{AppState, BufferState, PreviewTab};
+use led_state::{AppState, BufferState};
 
 use super::helpers::reveal_active_buffer;
 
@@ -18,7 +18,7 @@ pub(crate) fn set_preview(state: &mut AppState, path: CanonPath, row: usize, col
             .iter()
             .map(|t| format!(
                 "{}({})",
-                t.path.display(),
+                t.path().display(),
                 if t.is_preview() { "P" } else { "T" }
             ))
             .collect::<Vec<_>>(),
@@ -28,18 +28,22 @@ pub(crate) fn set_preview(state: &mut AppState, path: CanonPath, row: usize, col
     if let Some(tab) = state
         .tabs
         .iter()
-        .find(|t| !t.is_preview() && t.path == path)
+        .find(|t| !t.is_preview() && *t.path() == path)
     {
         log::debug!(
             "[set_preview] already a real tab, activating: {}",
-            tab.path.display()
+            tab.path().display()
         );
-        state.active_tab = Some(tab.path.clone());
+        state.active_tab = Some(tab.path().clone());
         return;
     }
 
     // If the path is already the active preview, just reposition the cursor.
-    if state.tabs.iter().any(|t| t.is_preview() && t.path == path) {
+    if state
+        .tabs
+        .iter()
+        .any(|t| t.is_preview() && *t.path() == path)
+    {
         state.active_tab = Some(path.clone());
         let dims = state.dims;
         if let Some(buf) = state.buf_mut(&path) {
@@ -58,7 +62,7 @@ pub(crate) fn set_preview(state: &mut AppState, path: CanonPath, row: usize, col
 
     // Remember the previous active tab (only on first preview entry).
     let previous_tab = if let Some(tab) = state.tabs.iter().find(|t| t.is_preview()) {
-        tab.preview.as_ref().unwrap().previous_tab.clone()
+        tab.previous_tab().unwrap().clone()
     } else {
         state.active_tab.clone().unwrap_or_default()
     };
@@ -69,10 +73,17 @@ pub(crate) fn set_preview(state: &mut AppState, path: CanonPath, row: usize, col
     }
 
     // Insert the new preview tab.
-    state.tabs.push_back(led_state::Tab {
-        path: path.clone(),
-        preview: Some(PreviewTab { previous_tab }),
-    });
+    let mut tab = led_state::Tab::new(path.clone());
+    tab.set_preview(previous_tab);
+    if row > 0 || col > 0 {
+        let half = state.dims.map_or(10, |d| d.buffer_height() / 2);
+        tab.set_cursor(
+            led_core::Row(row),
+            led_core::Col(col),
+            led_core::Row(row.saturating_sub(half)),
+        );
+    }
+    state.tabs.push_back(tab);
 
     // Ensure buffer placeholder exists for materialization.
     if !state.buffers.contains_key(&path) {
@@ -81,17 +92,7 @@ pub(crate) fn set_preview(state: &mut AppState, path: CanonPath, row: usize, col
             .insert(path.clone(), Rc::new(BufferState::new(path.clone())));
     }
 
-    state.active_tab = Some(path.clone());
-
-    // Set pending jump position for cursor placement when the buffer loads.
-    if row > 0 || col > 0 {
-        state.jump.pending_position = Some(led_state::JumpPosition {
-            path,
-            row,
-            col,
-            scroll_offset: 0,
-        });
-    }
+    state.active_tab = Some(path);
 }
 
 pub(crate) fn close_preview(state: &mut AppState) {
@@ -99,13 +100,13 @@ pub(crate) fn close_preview(state: &mut AppState) {
     let Some(tab) = preview_tab else {
         return;
     };
-    let preview_path = tab.path.clone();
-    let restore_path = tab.preview.as_ref().map(|p| p.previous_tab.clone());
+    let preview_path = tab.path().clone();
+    let restore_path = tab.previous_tab().cloned();
 
     // Remove preview tab. The fold dematerializes orphaned buffers.
     state
         .tabs
-        .retain(|t| t.path != preview_path || !t.is_preview());
+        .retain(|t| *t.path() != preview_path || !t.is_preview());
 
     if let Some(restore) = restore_path {
         if state.buffers.contains_key(&restore) {
@@ -124,17 +125,17 @@ pub(crate) fn promote_preview(state: &mut AppState, path: &CanonPath) -> bool {
     let Some(tab) = state
         .tabs
         .iter_mut()
-        .find(|t| t.is_preview() && t.path == *path)
+        .find(|t| t.is_preview() && *t.path() == *path)
     else {
         return false;
     };
-    tab.preview = None;
+    tab.unpreview();
     true
 }
 
 pub(super) fn promote_preview_active(state: &mut AppState) {
     if let Some(tab) = state.tabs.iter_mut().find(|t| t.is_preview()) {
-        tab.preview = None;
+        tab.unpreview();
     }
 }
 
@@ -143,7 +144,7 @@ pub(crate) fn evict_one_buffer(state: &mut AppState) {
         .tabs
         .iter()
         .filter(|t| t.is_preview())
-        .map(|t| &t.path)
+        .map(|t| t.path())
         .collect();
     let victim = state
         .buffers

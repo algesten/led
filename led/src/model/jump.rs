@@ -83,9 +83,15 @@ fn navigate_to_position(state: &mut AppState, pos: JumpPosition) {
         }
         super::action::reveal_active_buffer(state);
     } else {
-        // File not open — request open and store pending position
+        // File not open — request open with pending cursor on tab.
         super::request_open(state, pos.path.clone(), false);
-        state.active_tab = Some(pos.path.clone());
-        state.jump.pending_position = Some(pos);
+        if let Some(tab) = state.tabs.iter_mut().find(|t| *t.path() == pos.path) {
+            tab.set_cursor(
+                led_core::Row(pos.row),
+                led_core::Col(pos.col),
+                led_core::Row(pos.scroll_offset),
+            );
+        }
+        state.active_tab = Some(pos.path);
     }
 }

@@ -72,7 +72,7 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
                 .filter(|t| !t.is_preview())
                 .enumerate()
                 .filter_map(|(i, t)| {
-                    let b = s.buffers.get(&t.path)?;
+                    let b = s.buffers.get(t.path())?;
                     if !b.is_materialized() || b.path().is_none() {
                         return None;
                     }
@@ -98,7 +98,7 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
                     s.tabs
                         .iter()
                         .filter(|t| !t.is_preview())
-                        .position(|t| t.path == *path)
+                        .position(|t| *t.path() == *path)
                 })
                 .unwrap_or(0);
 
@@ -187,10 +187,10 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
             .iter()
             .filter(|t| {
                 s.buffers
-                    .get(&t.path)
+                    .get(t.path())
                     .map_or(true, |b| b.is_unmaterialized())
             })
-            .map(|t| t.path.clone())
+            .map(|t| t.path().clone())
             .collect();
         result
     }
@@ -304,7 +304,7 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
                         && !s
                             .tabs
                             .iter()
-                            .any(|t| t.is_preview() && b.path() == Some(&t.path))
+                            .any(|t| t.is_preview() && b.path() == Some(t.path()))
                         && (b.undo_history_len() > b.persisted_undo_len() || b.is_dirty())
                 })
                 .map(|b| b.version())
@@ -558,24 +558,10 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
         })
         .stream();
 
-    // Git: emit ScanLines immediately on tab switch / save
-    let git_line_scan = state
-        .dedupe_by(|s| s.git.pending_line_scan.version())
-        .filter(|s| s.git.pending_line_scan.version() > 0)
-        .filter(|s| s.git.pending_line_scan.is_some())
-        .filter(|s| s.workspace.is_some())
-        .map(|s| {
-            let root = s.workspace.as_ref().unwrap().root.clone();
-            let path = (*s.git.pending_line_scan).clone().unwrap();
-            led_git::GitOut::ScanLines { root, path }
-        })
-        .stream();
-
     git_file_timer.forward(&timers_out);
 
     let git_out: Stream<led_git::GitOut> = Stream::new();
     git_file_scan.forward(&git_out);
-    git_line_scan.forward(&git_out);
 
     let file_search_search_out = state
         .dedupe_by(|s| s.pending_file_search.version())

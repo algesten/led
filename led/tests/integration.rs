@@ -4178,13 +4178,316 @@ fn lsp_next_prev_diagnostic() {
         .with_arg(main_rs)
         .run(vec![
             WaitFor(|s| all_diagnostics_count(s) >= 2),
-            Do(LspNextDiagnostic),
+            Do(NextIssue),
         ]);
 
     let b = buf(&t);
     assert!(
         b.cursor_row().0 >= 1,
         "expected cursor to move to a diagnostic, row={}",
+        b.cursor_row().0
+    );
+}
+
+#[test]
+fn next_issue_errors_before_warnings() {
+    // Error on line 2, warning on line 1 — NextIssue should jump to the error.
+    let (root, main_rs) = lsp_project(
+        "fn main() {\n    let _w = 0;\n    let _e: i32 = \"a\";\n}\n",
+        serde_json::json!({
+            "diagnostics": {
+                "main.rs": [
+                    {
+                        "range": {
+                            "start": {"line": 1, "character": 8},
+                            "end": {"line": 1, "character": 10}
+                        },
+                        "severity": 2,
+                        "message": "unused variable"
+                    },
+                    {
+                        "range": {
+                            "start": {"line": 2, "character": 18},
+                            "end": {"line": 2, "character": 21}
+                        },
+                        "severity": 1,
+                        "message": "mismatched types"
+                    }
+                ]
+            }
+        }),
+    );
+
+    let t = TestHarness::with_dir(root)
+        .with_lsp_server(fake_lsp_binary())
+        .with_arg(main_rs)
+        .run(vec![
+            WaitFor(|s| all_diagnostics_count(s) >= 2),
+            Do(NextIssue),
+        ]);
+
+    let b = buf(&t);
+    assert_eq!(
+        b.cursor_row().0,
+        2,
+        "NextIssue should jump to error (line 2), not warning (line 1)"
+    );
+}
+
+#[test]
+fn next_issue_falls_through_to_warnings() {
+    // Only warnings — NextIssue should navigate to the warning.
+    let (root, main_rs) = lsp_project(
+        "fn main() {\n    let _w = 0;\n    let _v = 1;\n}\n",
+        serde_json::json!({
+            "diagnostics": {
+                "main.rs": [
+                    {
+                        "range": {
+                            "start": {"line": 1, "character": 8},
+                            "end": {"line": 1, "character": 10}
+                        },
+                        "severity": 2,
+                        "message": "unused variable _w"
+                    },
+                    {
+                        "range": {
+                            "start": {"line": 2, "character": 8},
+                            "end": {"line": 2, "character": 10}
+                        },
+                        "severity": 2,
+                        "message": "unused variable _v"
+                    }
+                ]
+            }
+        }),
+    );
+
+    let t = TestHarness::with_dir(root)
+        .with_lsp_server(fake_lsp_binary())
+        .with_arg(main_rs)
+        .run(vec![
+            WaitFor(|s| all_diagnostics_count(s) >= 2),
+            Do(NextIssue),
+        ]);
+
+    let b = buf(&t);
+    assert_eq!(
+        b.cursor_row().0,
+        1,
+        "NextIssue should jump to first warning when no errors"
+    );
+}
+
+#[test]
+fn next_issue_cycles_errors() {
+    // Two errors — NextIssue twice then once more should wrap to first.
+    let (root, main_rs) = lsp_project(
+        "fn main() {\n    let _x: i32 = \"a\";\n    let _y: i32 = \"b\";\n}\n",
+        serde_json::json!({
+            "diagnostics": {
+                "main.rs": [
+                    {
+                        "range": {
+                            "start": {"line": 1, "character": 18},
+                            "end": {"line": 1, "character": 21}
+                        },
+                        "severity": 1,
+                        "message": "error 1"
+                    },
+                    {
+                        "range": {
+                            "start": {"line": 2, "character": 18},
+                            "end": {"line": 2, "character": 21}
+                        },
+                        "severity": 1,
+                        "message": "error 2"
+                    }
+                ]
+            }
+        }),
+    );
+
+    let t = TestHarness::with_dir(root)
+        .with_lsp_server(fake_lsp_binary())
+        .with_arg(main_rs)
+        .run(vec![
+            WaitFor(|s| all_diagnostics_count(s) >= 2),
+            Do(NextIssue),
+            Do(NextIssue),
+            Do(NextIssue), // wrap
+        ]);
+
+    let b = buf(&t);
+    assert_eq!(
+        b.cursor_row().0,
+        1,
+        "third NextIssue should wrap back to first error (line 1)"
+    );
+}
+
+#[test]
+fn prev_issue_navigates_backward() {
+    // Two errors — PrevIssue from (0,0) should wrap to last error.
+    let (root, main_rs) = lsp_project(
+        "fn main() {\n    let _x: i32 = \"a\";\n    let _y: i32 = \"b\";\n}\n",
+        serde_json::json!({
+            "diagnostics": {
+                "main.rs": [
+                    {
+                        "range": {
+                            "start": {"line": 1, "character": 18},
+                            "end": {"line": 1, "character": 21}
+                        },
+                        "severity": 1,
+                        "message": "error 1"
+                    },
+                    {
+                        "range": {
+                            "start": {"line": 2, "character": 18},
+                            "end": {"line": 2, "character": 21}
+                        },
+                        "severity": 1,
+                        "message": "error 2"
+                    }
+                ]
+            }
+        }),
+    );
+
+    let t = TestHarness::with_dir(root)
+        .with_lsp_server(fake_lsp_binary())
+        .with_arg(main_rs)
+        .run(vec![
+            WaitFor(|s| all_diagnostics_count(s) >= 2),
+            Do(PrevIssue),
+        ]);
+
+    let b = buf(&t);
+    assert_eq!(
+        b.cursor_row().0,
+        2,
+        "PrevIssue from top should wrap to last error (line 2)"
+    );
+}
+
+#[test]
+fn next_issue_cross_file() {
+    // Errors in two different files — NextIssue should navigate across files.
+    let (root, main_rs) = lsp_project(
+        "fn main() {\n    helper();\n}\n",
+        serde_json::json!({
+            "diagnostics": {
+                "main.rs": [{
+                    "range": {
+                        "start": {"line": 1, "character": 4},
+                        "end": {"line": 1, "character": 10}
+                    },
+                    "severity": 1,
+                    "message": "error in main"
+                }],
+                "other.rs": [{
+                    "range": {
+                        "start": {"line": 0, "character": 0},
+                        "end": {"line": 0, "character": 5}
+                    },
+                    "severity": 1,
+                    "message": "error in other"
+                }]
+            }
+        }),
+    );
+
+    // Create the second file alongside main.rs
+    let src_dir = root.join("workspace/src");
+    let other_rs = src_dir.join("other.rs");
+    std::fs::write(&other_rs, "bad code\n").unwrap();
+
+    let t = TestHarness::with_dir(root)
+        .with_lsp_server(fake_lsp_binary())
+        .with_arg(main_rs)
+        .with_arg(other_rs)
+        .run(vec![
+            WaitFor(|s| all_diagnostics_count(s) >= 2),
+            // Navigate until we land in a different file than where we started.
+            Do(NextIssue),
+            Do(NextIssue),
+        ]);
+
+    // After two NextIssue from the start, we should have visited both files.
+    // Verify we ended on one of the two diagnostic positions.
+    let b = buf(&t);
+    let row = b.cursor_row().0;
+    let active = t.state.active_tab.as_ref().unwrap();
+    let active_name = active.as_path().file_name().unwrap().to_str().unwrap();
+    assert!(
+        (active_name == "main.rs" && row == 1) || (active_name == "other.rs" && row == 0),
+        "expected cursor at a diagnostic in main.rs:1 or other.rs:0, got {}:{}",
+        active_name,
+        row
+    );
+}
+
+#[test]
+fn next_issue_git_unstaged() {
+    // Set up a git repo with an unstaged modification, no LSP diagnostics.
+    // NextIssue should navigate to a git change position.
+    let dir = tempfile::TempDir::new().expect("tmpdir");
+    let root = dir.keep();
+    let workspace = root.join("workspace");
+    let config_dir = root.join("config");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::create_dir_all(&workspace).unwrap();
+
+    let file_path = workspace.join("test.txt");
+    std::fs::write(&file_path, "line1\nline2\nline3\n").unwrap();
+
+    // Initialize git repo and commit the file.
+    std::process::Command::new("git")
+        .args(["init"])
+        .current_dir(&workspace)
+        .output()
+        .expect("git init");
+    std::process::Command::new("git")
+        .args(["add", "."])
+        .current_dir(&workspace)
+        .output()
+        .expect("git add");
+    std::process::Command::new("git")
+        .args([
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@test.com",
+            "commit",
+            "-m",
+            "init",
+        ])
+        .current_dir(&workspace)
+        .output()
+        .expect("git commit");
+
+    // Modify the file to create unstaged changes (add a line at the end).
+    std::fs::write(&file_path, "line1\nline2\nline3\nnew line\n").unwrap();
+
+    let t = TestHarness::with_dir(root).with_arg(file_path).run(vec![
+        // Save triggers a git file scan.
+        Do(Save),
+        WaitFor(|s| !s.git.file_statuses.is_empty()),
+        // Wait for line statuses to load (triggered by tab activation).
+        WaitFor(|s| {
+            s.active_tab
+                .as_ref()
+                .and_then(|p| s.buffers.get(p))
+                .map_or(false, |b| !b.status().git_line_statuses().is_empty())
+        }),
+        Do(NextIssue),
+    ]);
+
+    let b = buf(&t);
+    assert!(
+        b.cursor_row().0 >= 3,
+        "NextIssue should jump to the git change (line 3+), got row={}",
         b.cursor_row().0
     );
 }
@@ -4636,7 +4939,11 @@ fn tab_names_sorted(state: &led_state::AppState) -> Vec<String> {
     state
         .tabs
         .iter()
-        .filter_map(|t| t.path.file_name().map(|n| n.to_string_lossy().into_owned()))
+        .filter_map(|t| {
+            t.path()
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+        })
         .collect()
 }
 
@@ -5188,5 +5495,132 @@ fn browser_preview_switches_between_files() {
         line(&**b.doc(), 0).starts_with("first"),
         "preview should show aaa.txt after navigating back up, got: {:?}",
         line(&**b.doc(), 0),
+    );
+}
+
+#[test]
+fn preview_positions_cursor_at_search_hit() {
+    // File search hits on a specific line — preview should position cursor there.
+    let root = tempfile::TempDir::new().unwrap().keep();
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::write(
+        workspace.join("target.txt"),
+        "line0\nline1\nline2\nNEEDLE\nline4\n",
+    )
+    .unwrap();
+
+    let t = TestHarness::with_dir(root).run(vec![
+        WaitFor(has_browser_entries),
+        Do(OpenFileSearch),
+        Do(InsertChar('N')),
+        Do(InsertChar('E')),
+        Do(InsertChar('E')),
+        Do(InsertChar('D')),
+        Do(InsertChar('L')),
+        Do(InsertChar('E')),
+        WaitFor(file_search_has_results),
+        // Navigate to the result — this opens the file as a preview
+        Do(MoveDown),
+        WaitFor(|s| {
+            s.active_tab
+                .as_ref()
+                .and_then(|p| s.buffers.get(p))
+                .map_or(false, |b| b.is_materialized())
+        }),
+    ]);
+
+    let b = buf(&t);
+    assert_eq!(
+        b.cursor_row().0,
+        3,
+        "preview cursor should be on line 3 (NEEDLE), got row={}",
+        b.cursor_row().0
+    );
+}
+
+#[test]
+fn next_issue_opens_unopened_file_at_change_position() {
+    // Git repo with two modified files. Only one is open as a tab.
+    // NextIssue should open the other file at the change position, not row 0.
+    let dir = tempfile::TempDir::new().expect("tmpdir");
+    let root = dir.keep();
+    let workspace = root.join("workspace");
+    let config_dir = root.join("config");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::create_dir_all(&workspace).unwrap();
+
+    let aaa = workspace.join("aaa.txt");
+    let bbb = workspace.join("bbb.txt");
+    std::fs::write(&aaa, "aaa1\naaa2\naaa3\n").unwrap();
+    std::fs::write(&bbb, "bbb1\nbbb2\nbbb3\nbbb4\nbbb5\n").unwrap();
+
+    // Initialize git repo and commit both files.
+    std::process::Command::new("git")
+        .args(["init"])
+        .current_dir(&workspace)
+        .output()
+        .expect("git init");
+    std::process::Command::new("git")
+        .args(["add", "."])
+        .current_dir(&workspace)
+        .output()
+        .expect("git add");
+    std::process::Command::new("git")
+        .args([
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@test.com",
+            "commit",
+            "-m",
+            "init",
+        ])
+        .current_dir(&workspace)
+        .output()
+        .expect("git commit");
+
+    // Modify both files — append lines.
+    std::fs::write(&aaa, "aaa1\naaa2\naaa3\naaa_new\n").unwrap();
+    std::fs::write(&bbb, "bbb1\nbbb2\nbbb3\nbbb4\nbbb5\nbbb_new\n").unwrap();
+
+    // Only open aaa.txt.
+    let t = TestHarness::with_dir(root).with_arg(aaa).run(vec![
+        Do(Save),
+        WaitFor(|s| !s.git.file_statuses.is_empty()),
+        WaitFor(|s| {
+            s.active_tab
+                .as_ref()
+                .and_then(|p| s.buffers.get(p))
+                .map_or(false, |b| !b.status().git_line_statuses().is_empty())
+        }),
+        // First NextIssue: lands on aaa.txt's change (line 3).
+        Do(NextIssue),
+        // Second NextIssue: should open bbb.txt at its change (line 5).
+        Do(NextIssue),
+        WaitFor(|s| {
+            s.active_tab
+                .as_ref()
+                .map_or(false, |p| p.file_name().map_or(false, |n| n == "bbb.txt"))
+        }),
+        // Wait for the buffer to materialize.
+        WaitFor(|s| {
+            s.active_tab
+                .as_ref()
+                .and_then(|p| s.buffers.get(p))
+                .map_or(false, |b| b.is_materialized())
+        }),
+    ]);
+
+    let active = t.state.active_tab.as_ref().unwrap();
+    let name = active.file_name().unwrap().to_str().unwrap();
+    assert_eq!(name, "bbb.txt");
+
+    let b = t.state.buffers.get(active).unwrap();
+    assert_eq!(
+        b.cursor_row().0,
+        5,
+        "cursor should be at the git change (line 5), got row={}",
+        b.cursor_row().0
     );
 }

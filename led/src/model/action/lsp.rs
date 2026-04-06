@@ -210,72 +210,159 @@ pub(super) fn handle_rename_action(state: &mut AppState, action: &Action) -> boo
     }
 }
 
-pub(super) fn navigate_diagnostic(state: &mut AppState, forward: bool) {
-    let cur_path = state
-        .active_tab
-        .as_ref()
-        .and_then(|path| state.buffers.get(path))
-        .and_then(|b| b.path().cloned());
+pub(super) fn navigate_issue(state: &mut AppState, forward: bool) {
+    use led_core::git::FileStatus;
+    use led_lsp::DiagnosticSeverity;
 
-    let (row, col) = state
-        .active_tab
-        .as_ref()
-        .and_then(|path| state.buffers.get(path))
-        .map(|b| (b.cursor_row().0, b.cursor_col().0))
-        .unwrap_or((0, 0));
+    // Level 1: LSP errors
+    if scan_diagnostics(state, forward, DiagnosticSeverity::Error) {
+        return;
+    }
 
-    // Build a sorted list of all (path, diag) across the workspace.
-    let mut all: Vec<(&CanonPath, &led_lsp::Diagnostic)> = Vec::new();
+    // Level 2: LSP warnings
+    if scan_diagnostics(state, forward, DiagnosticSeverity::Warning) {
+        return;
+    }
+
+    // Level 3: Git unstaged (worktree modified or untracked)
+    if scan_git_changes(
+        state,
+        forward,
+        &[FileStatus::GitWtModified, FileStatus::GitUntracked],
+    ) {
+        return;
+    }
+
+    // Level 4: Git staged (index modified or new)
+    scan_git_changes(
+        state,
+        forward,
+        &[FileStatus::GitIndexModified, FileStatus::GitIndexNew],
+    );
+}
+
+type Pos<'a> = (&'a CanonPath, usize, usize);
+
+/// Track the best candidate and wrap-around target in a single pass.
+fn consider<'a>(
+    forward: bool,
+    cur: &Option<Pos<'_>>,
+    pos: Pos<'a>,
+    best: &mut Option<Pos<'a>>,
+    wrap: &mut Option<Pos<'a>>,
+) {
+    if forward {
+        if cur.map_or(true, |c| pos > c) && best.map_or(true, |b| pos < b) {
+            *best = Some(pos);
+        }
+        if wrap.map_or(true, |w| pos < w) {
+            *wrap = Some(pos);
+        }
+    } else {
+        if cur.map_or(true, |c| pos < c) && best.map_or(true, |b| pos > b) {
+            *best = Some(pos);
+        }
+        if wrap.map_or(true, |w| pos > w) {
+            *wrap = Some(pos);
+        }
+    }
+}
+
+/// Single-pass scan of diagnostics at the given severity. Returns true if navigated.
+fn scan_diagnostics(
+    state: &mut AppState,
+    forward: bool,
+    severity: led_lsp::DiagnosticSeverity,
+) -> bool {
+    let cur = cursor_pos(state);
+    let mut best: Option<Pos<'_>> = None;
+    let mut wrap: Option<Pos<'_>> = None;
+
     for buf in state.buffers.values() {
-        if let Some(path) = buf.path() {
-            for d in buf.status().diagnostics() {
-                all.push((path, d));
+        let Some(path) = buf.path() else { continue };
+        for d in buf.status().diagnostics() {
+            if d.severity == severity {
+                consider(
+                    forward,
+                    &cur,
+                    (path, d.start_row, d.start_col),
+                    &mut best,
+                    &mut wrap,
+                );
             }
         }
     }
-    all.sort_by(|a, b| {
-        a.0.cmp(b.0)
-            .then(a.1.start_row.cmp(&b.1.start_row))
-            .then(a.1.start_col.cmp(&b.1.start_col))
-    });
 
-    if all.is_empty() {
-        return;
+    let Some(&(p, r, c)) = best.or(wrap).as_ref() else {
+        return false;
+    };
+    let target = p.clone();
+    navigate_to_position(state, target, r, c);
+    true
+}
+
+/// Single-pass scan of git change hunks for files matching the given statuses.
+/// Returns true if navigated.
+fn scan_git_changes(
+    state: &mut AppState,
+    forward: bool,
+    match_statuses: &[led_core::git::FileStatus],
+) -> bool {
+    let cur = cursor_pos(state);
+    let mut best: Option<Pos<'_>> = None;
+    let mut wrap: Option<Pos<'_>> = None;
+
+    for (path, statuses) in state.git.file_statuses.iter() {
+        if !statuses.iter().any(|fs| match_statuses.contains(fs)) {
+            continue;
+        }
+        let line_statuses = state
+            .buffers
+            .get(path)
+            .map(|buf| buf.status().git_line_statuses())
+            .unwrap_or(&[]);
+
+        if line_statuses.is_empty() {
+            consider(forward, &cur, (path, 0, 0), &mut best, &mut wrap);
+        } else {
+            for ls in line_statuses {
+                consider(
+                    forward,
+                    &cur,
+                    (path, ls.rows.start, 0),
+                    &mut best,
+                    &mut wrap,
+                );
+            }
+        }
     }
 
-    // Find next/prev diagnostic across all files.
-    let cur_key = cur_path.as_ref().map(|p| (p, row, col));
-    let target = if forward {
-        all.iter()
-            .find(|(p, d)| {
-                cur_key.map_or(true, |(cp, cr, cc)| {
-                    (*p, d.start_row, d.start_col) > (cp, cr, cc)
-                })
-            })
-            .or_else(|| all.first())
-    } else {
-        all.iter()
-            .rev()
-            .find(|(p, d)| {
-                cur_key.map_or(true, |(cp, cr, cc)| {
-                    (*p, d.start_row, d.start_col) < (cp, cr, cc)
-                })
-            })
-            .or_else(|| all.last())
+    let Some(&(p, r, c)) = best.or(wrap).as_ref() else {
+        return false;
     };
+    let target = p.clone();
+    navigate_to_position(state, target, r, c);
+    true
+}
 
-    let Some(&(target_path, target_diag)) = target else {
-        return;
-    };
-    let target_row = target_diag.start_row;
-    let target_col = target_diag.start_col;
-    let target_path = target_path.clone();
+/// Current cursor as (path, row, col) — all borrowed from state.
+fn cursor_pos(state: &AppState) -> Option<Pos<'_>> {
+    let path = state.active_tab.as_ref()?;
+    let buf = state.buffers.get(path)?;
+    Some((path, buf.cursor_row().0, buf.cursor_col().0))
+}
 
-    // If the target is in the current buffer, just move the cursor.
-    if cur_path.as_ref() == Some(&target_path) {
-        let path = state.active_tab.clone().unwrap();
+/// Navigate to a specific (path, row, col), handling same-buffer, cross-tab, and file-open cases.
+fn navigate_to_position(
+    state: &mut AppState,
+    target_path: CanonPath,
+    target_row: usize,
+    target_col: usize,
+) {
+    // Same buffer — just move the cursor.
+    if state.active_tab.as_ref() == Some(&target_path) {
         let dims = state.dims;
-        if let Some(buf) = state.buf_mut(&path) {
+        if let Some(buf) = state.buf_mut(&target_path) {
             close_group_on_move(buf);
             buf.set_cursor(
                 led_core::Row(target_row),
@@ -290,14 +377,14 @@ pub(super) fn navigate_diagnostic(state: &mut AppState, forward: bool) {
         return;
     }
 
-    // Target is in a different file — paths are CanonPath so simple == works.
-    let in_tab = state.tabs.iter().any(|t| t.path == target_path);
-    if in_tab {
-        let path = target_path.clone();
-        log::debug!("[diag] → different file, already open: {}", path.display());
-        state.active_tab = Some(path.clone());
+    // Different file — already open in a tab.
+    if state.tabs.iter().any(|t| *t.path() == target_path) {
+        log::debug!(
+            "[issue] → different file, already open: {}",
+            target_path.display()
+        );
         let half = state.dims.map_or(10, |d| d.buffer_height() / 2);
-        if let Some(buf) = state.buf_mut(&path) {
+        if let Some(buf) = state.buf_mut(&target_path) {
             let r = target_row.min(buf.doc().line_count().saturating_sub(1));
             buf.set_cursor(
                 led_core::Row(r),
@@ -306,21 +393,26 @@ pub(super) fn navigate_diagnostic(state: &mut AppState, forward: bool) {
             );
             buf.set_scroll(led_core::Row(r.saturating_sub(half)), led_core::SubLine(0));
         }
+        state.active_tab = Some(target_path);
         reveal_active_buffer(state);
-    } else {
-        log::debug!(
-            "[diag] → different file, not open: {}",
-            target_path.display()
-        );
-        super::super::request_open(state, target_path.clone(), false);
-        state.active_tab = Some(target_path.clone());
-        state.jump.pending_position = Some(led_state::JumpPosition {
-            path: target_path,
-            row: target_row,
-            col: target_col,
-            scroll_offset: 0,
-        });
+        return;
     }
+
+    // Not open — request open.
+    log::debug!(
+        "[issue] → different file, not open: {}",
+        target_path.display()
+    );
+    super::super::request_open(state, target_path.clone(), false);
+    if let Some(tab) = state.tabs.iter_mut().find(|t| *t.path() == target_path) {
+        let half = state.dims.map_or(10, |d| d.buffer_height() / 2);
+        tab.set_cursor(
+            led_core::Row(target_row),
+            led_core::Col(target_col),
+            led_core::Row(target_row.saturating_sub(half)),
+        );
+    }
+    state.active_tab = Some(target_path);
 }
 
 pub(super) fn open_rename_overlay(state: &mut AppState) {

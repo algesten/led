@@ -5,8 +5,9 @@ use crate::CanonPath;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FileStatus {
-    GitModified,
-    GitAdded,
+    GitWtModified,
+    GitIndexModified,
+    GitIndexNew,
     GitUntracked,
 }
 
@@ -24,12 +25,17 @@ struct StatusInfo {
 
 fn status_info(s: FileStatus) -> StatusInfo {
     match s {
-        FileStatus::GitModified => StatusInfo {
+        FileStatus::GitWtModified => StatusInfo {
             letter: 'M',
             theme_key: "git.modified",
             priority: 1,
         },
-        FileStatus::GitAdded => StatusInfo {
+        FileStatus::GitIndexModified => StatusInfo {
+            letter: 'M',
+            theme_key: "git.modified",
+            priority: 1,
+        },
+        FileStatus::GitIndexNew => StatusInfo {
             letter: 'A',
             theme_key: "git.added",
             priority: 2,

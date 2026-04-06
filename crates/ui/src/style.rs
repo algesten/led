@@ -505,10 +505,7 @@ mod tests {
         state.dims = Some(Dimensions::new(40, 10, false));
         state.config_theme = Some(config_theme);
         state.active_tab = Some(test_path.clone());
-        state.tabs.push_back(led_state::Tab {
-            path: test_path.clone(),
-            preview: None,
-        });
+        state.tabs.push_back(led_state::Tab::new(test_path.clone()));
         std::rc::Rc::make_mut(&mut state.buffers).insert(test_path, std::rc::Rc::new(buf));
 
         let display_inputs = display::display_inputs(&state).expect("display_inputs");

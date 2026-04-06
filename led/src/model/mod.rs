@@ -218,7 +218,7 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
                 .filter(|b| b.path().is_some())
                 .filter(|b| {
                     let path = b.path().unwrap();
-                    !s.tabs.iter().any(|t| t.path == *path && t.is_preview())
+                    !s.tabs.iter().any(|t| *t.path() == *path && t.is_preview())
                 })
                 .filter(|b| b.undo_history_len() > b.persisted_undo_len() || b.is_dirty())
                 .filter_map(|b| {
@@ -453,7 +453,6 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
         match m {
             Mut::ActivateBuffer(path) => {
                 s.active_tab = Some(path.clone());
-                s.git_mut().pending_line_scan.set(Some(path));
                 action::reveal_active_buffer(&mut s);
             }
             Mut::Action(a) => {
@@ -476,7 +475,7 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
                     let non_preview_tabs: Vec<_> =
                         s.tabs.iter().filter(|t| !t.is_preview()).collect();
                     if let Some(tab) = non_preview_tabs.get(order) {
-                        s.active_tab = Some(tab.path.clone());
+                        s.active_tab = Some(tab.path().clone());
                     }
                 }
                 // Fall back: if active_tab is not set or points to a missing buffer,
@@ -488,8 +487,8 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
                     s.active_tab = s
                         .tabs
                         .iter()
-                        .find(|t| s.buffers.get(&t.path).is_some_and(|b| b.is_materialized()))
-                        .map(|t| t.path.clone());
+                        .find(|t| s.buffers.get(t.path()).is_some_and(|b| b.is_materialized()))
+                        .map(|t| t.path().clone());
                 }
 
                 ensure_startup_arg_buffers(&mut s);
@@ -508,7 +507,6 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
                 scroll,
                 activate,
                 notify_hash,
-                clear_pending_jump,
                 undo_entries,
                 persisted_undo_len,
                 chain_id,
@@ -562,12 +560,9 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
                     }
                 }
                 s.notify_hash_to_buffer.insert(notify_hash, path.clone());
-                let is_preview_tab = s.tabs.iter().any(|t| t.is_preview() && t.path == path);
+                let is_preview_tab = s.tabs.iter().any(|t| t.is_preview() && *t.path() == path);
                 if s.phase == Phase::Running && will_activate && !is_preview_tab {
                     s.focus = PanelSlot::Main;
-                }
-                if clear_pending_jump {
-                    s.jump.pending_position = None;
                 }
                 if will_activate {
                     action::reveal_active_buffer(&mut s);
@@ -586,7 +581,6 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
                     .map(|n| n.to_string_lossy().into_owned());
                 s.buffers_mut().insert(path.clone(), Rc::new(buf));
                 s.git_mut().pending_file_scan.set(());
-                s.git_mut().pending_line_scan.set(Some(path));
                 if let Some(path) = undo_clear_path {
                     s.pending_undo_clear.set(path);
                 }
@@ -624,7 +618,6 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
                     s.active_tab = Some(new_path.clone());
                 }
                 s.git_mut().pending_file_scan.set(());
-                s.git_mut().pending_line_scan.set(Some(new_path));
                 if let Some(path) = undo_clear_path {
                     s.pending_undo_clear.set(path);
                 }
@@ -683,7 +676,7 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
             Mut::SessionOpenFailed { path } => {
                 s.session.positions.remove(&path);
                 s.buffers_mut().remove(&path);
-                s.tabs.retain(|t| t.path != path);
+                s.tabs.retain(|t| *t.path() != path);
 
                 // Mark resume entry as Failed — ResumeComplete handles the transition.
                 if let Some(entry) = s.session.resume.iter_mut().find(|e| e.path == path) {
@@ -723,11 +716,8 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
                         })
                         .collect();
                     for path in &pending_opens {
-                        if !s.tabs.iter().any(|t| t.path == *path) {
-                            s.tabs.push_back(led_state::Tab {
-                                path: path.clone(),
-                                preview: None,
-                            });
+                        if !s.tabs.iter().any(|t| *t.path() == *path) {
+                            s.tabs.push_back(led_state::Tab::new(path.clone()));
                         }
                         if !s.buffers.contains_key(path) {
                             let buf = BufferState::new(path.clone());
@@ -834,7 +824,7 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
                 // Reorder tabs: move arg files to end in arg order
                 if entries.len() > 1 {
                     for path in &entries {
-                        if let Some(pos) = s.tabs.iter().position(|t| t.path == *path) {
+                        if let Some(pos) = s.tabs.iter().position(|t| *t.path() == *path) {
                             let tab = s.tabs.remove(pos).unwrap();
                             s.tabs.push_back(tab);
                         }
@@ -861,9 +851,6 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
             }
             Mut::GitChanged => {
                 s.git_mut().pending_file_scan.set(());
-                if let Some(path) = s.active_tab.clone() {
-                    s.git_mut().pending_line_scan.set(Some(path));
-                }
             }
 
             // ── LSP ──
@@ -902,13 +889,15 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
                     action::reveal_active_buffer(&mut s);
                 } else {
                     request_open(&mut s, path.clone(), false);
-                    s.active_tab = Some(path.clone());
-                    s.jump.pending_position = Some(led_state::JumpPosition {
-                        path,
-                        row,
-                        col,
-                        scroll_offset: 0,
-                    });
+                    if let Some(tab) = s.tabs.iter_mut().find(|t| *t.path() == path) {
+                        let half = s.dims.map_or(10, |d| d.buffer_height() / 2);
+                        tab.set_cursor(
+                            led_core::Row(row),
+                            led_core::Col(col),
+                            led_core::Row(row.saturating_sub(half)),
+                        );
+                    }
+                    s.active_tab = Some(path);
                 }
             }
             Mut::LspEdits { edits } => {
@@ -1024,13 +1013,29 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
         for buf in buffers.values_mut() {
             let has_tab = buf
                 .path()
-                .map_or(false, |p| tabs.iter().any(|t| t.path == *p));
+                .map_or(false, |p| tabs.iter().any(|t| *t.path() == *p));
             if !has_tab && !buf.is_unmaterialized() {
                 Rc::make_mut(buf).dematerialize();
             }
         }
         s.notify_hash_to_buffer
-            .retain(|_, p| s.tabs.iter().any(|t| t.path == *p));
+            .retain(|_, p| s.tabs.iter().any(|t| *t.path() == *p));
+
+        // Apply pending cursor from tabs to materialized buffers.
+        for tab in s.tabs.iter_mut() {
+            if !tab.has_pending_cursor() {
+                continue;
+            }
+            let Some(buf) = s.buffers.get(tab.path()) else {
+                continue;
+            };
+            if !buf.is_materialized() {
+                continue;
+            }
+            let (row, col, scroll_row) = tab.take_cursor().unwrap();
+            buf.set_cursor(row, col, col);
+            buf.set_scroll(scroll_row, led_core::SubLine(0));
+        }
 
         Rc::new(s)
     });
@@ -1065,11 +1070,8 @@ fn ensure_startup_arg_buffers(s: &mut AppState) {
         return;
     }
     for path in s.startup.arg_paths.clone().iter() {
-        if !s.tabs.iter().any(|t| t.path == *path) {
-            s.tabs.push_back(led_state::Tab {
-                path: path.clone(),
-                preview: None,
-            });
+        if !s.tabs.iter().any(|t| *t.path() == *path) {
+            s.tabs.push_back(led_state::Tab::new(path.clone()));
         }
         if !s.buffers.contains_key(path) {
             let mut buf = BufferState::new(path.clone());
@@ -1082,11 +1084,8 @@ fn ensure_startup_arg_buffers(s: &mut AppState) {
 /// Ensure a buffer entry exists for `path`. If the buffer is not yet materialized,
 /// the unified materialization stream in derived will emit `DocStoreOut::Open`.
 pub(crate) fn request_open(s: &mut AppState, path: CanonPath, create_if_missing: bool) {
-    if !s.tabs.iter().any(|t| t.path == path) {
-        s.tabs.push_back(led_state::Tab {
-            path: path.clone(),
-            preview: None,
-        });
+    if !s.tabs.iter().any(|t| *t.path() == path) {
+        s.tabs.push_back(led_state::Tab::new(path.clone()));
     }
     if !s.buffers.contains_key(&path) {
         let mut buf = BufferState::new(path.clone());
@@ -1143,7 +1142,6 @@ enum Mut {
         scroll: (usize, usize),
         activate: bool,
         notify_hash: String,
-        clear_pending_jump: bool,
         /// Session restore: undo entries + persistence state
         undo_entries: Vec<Vec<u8>>,
         persisted_undo_len: usize,

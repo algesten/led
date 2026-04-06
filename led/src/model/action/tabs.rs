@@ -16,10 +16,10 @@ pub(super) fn cycle_tab(state: &mut AppState, direction: i32) {
         .filter(|t| {
             state
                 .buffers
-                .get(&t.path)
+                .get(t.path())
                 .map_or(false, |b| b.is_materialized())
         })
-        .map(|t| &t.path)
+        .map(|t| t.path())
         .collect();
 
     let Some(pos) = tabs.iter().position(|path| *path == active_path) else {
@@ -62,7 +62,11 @@ pub(super) fn force_kill_buffer(state: &mut AppState) {
 }
 
 fn do_kill_buffer(state: &mut AppState, path: &CanonPath) {
-    if state.tabs.iter().any(|t| t.is_preview() && t.path == *path) {
+    if state
+        .tabs
+        .iter()
+        .any(|t| t.is_preview() && t.path() == path)
+    {
         close_preview(state);
         return;
     }
@@ -79,17 +83,17 @@ fn do_kill_buffer(state: &mut AppState, path: &CanonPath) {
 
     // Find next tab to activate: look at the killed tab's position in the VecDeque,
     // then pick the adjacent tab (next, or previous if at the end).
-    let killed_index = state.tabs.iter().position(|t| t.path == *path);
+    let killed_index = state.tabs.iter().position(|t| t.path() == path);
     let next_active = killed_index.and_then(|idx| {
         let len = state.tabs.len();
         if len <= 1 {
             return None;
         }
         let next_idx = if idx + 1 < len { idx + 1 } else { idx - 1 };
-        Some(state.tabs[next_idx].path.clone())
+        Some(state.tabs[next_idx].path().clone())
     });
 
-    state.tabs.retain(|t| t.path != *path);
+    state.tabs.retain(|t| t.path() != path);
     state.active_tab = next_active;
     reveal_active_buffer(state);
 

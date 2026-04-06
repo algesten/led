@@ -8,7 +8,6 @@ use tokio::sync::mpsc;
 #[derive(Clone, Debug)]
 pub enum GitOut {
     ScanFiles { root: CanonPath },
-    ScanLines { root: CanonPath, path: CanonPath },
 }
 
 #[derive(Clone, Debug)]
@@ -40,25 +39,32 @@ pub fn driver(out: Stream<GitOut>) -> Stream<GitIn> {
         while let Some(cmd) = cmd_rx.recv().await {
             match cmd {
                 GitOut::ScanFiles { root } => {
-                    let result =
-                        tokio::task::spawn_blocking(move || scan_file_statuses(&root)).await;
-                    if let Ok(Some((statuses, branch))) = result {
+                    let result = tokio::task::spawn_blocking(move || {
+                        let (file_statuses, branch) = scan_file_statuses(&root)?;
+                        let line_statuses: Vec<_> = file_statuses
+                            .keys()
+                            .filter_map(|path| {
+                                let lines = scan_line_statuses(&root, path)?;
+                                Some((path.clone(), lines))
+                            })
+                            .collect();
+                        Some((file_statuses, branch, line_statuses))
+                    })
+                    .await;
+                    if let Ok(Some((file_statuses, branch, line_statuses))) = result {
                         result_tx
-                            .send(GitIn::FileStatuses { statuses, branch })
+                            .send(GitIn::FileStatuses {
+                                statuses: file_statuses,
+                                branch,
+                            })
                             .await
                             .ok();
-                    }
-                }
-                GitOut::ScanLines { root, path } => {
-                    let path2 = path.clone();
-                    let result =
-                        tokio::task::spawn_blocking(move || scan_line_statuses(&root, &path2))
-                            .await;
-                    if let Ok(Some(statuses)) = result {
-                        result_tx
-                            .send(GitIn::LineStatuses { path, statuses })
-                            .await
-                            .ok();
+                        for (path, statuses) in line_statuses {
+                            result_tx
+                                .send(GitIn::LineStatuses { path, statuses })
+                                .await
+                                .ok();
+                        }
                     }
                 }
             }
@@ -105,17 +111,16 @@ fn scan_file_statuses(
 
         let mut file_statuses = HashSet::new();
 
-        if status.intersects(
-            git2::Status::WT_MODIFIED
-                | git2::Status::INDEX_MODIFIED
-                | git2::Status::WT_RENAMED
-                | git2::Status::INDEX_RENAMED,
-        ) {
-            file_statuses.insert(FileStatus::GitModified);
+        if status.intersects(git2::Status::WT_MODIFIED | git2::Status::WT_RENAMED) {
+            file_statuses.insert(FileStatus::GitWtModified);
+        }
+
+        if status.intersects(git2::Status::INDEX_MODIFIED | git2::Status::INDEX_RENAMED) {
+            file_statuses.insert(FileStatus::GitIndexModified);
         }
 
         if status.intersects(git2::Status::INDEX_NEW) {
-            file_statuses.insert(FileStatus::GitAdded);
+            file_statuses.insert(FileStatus::GitIndexNew);
         }
 
         if status.intersects(git2::Status::WT_NEW) {

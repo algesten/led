@@ -242,8 +242,8 @@ pub enum Action {
     LspRename,
     LspCodeAction,
     LspFormat,
-    LspNextDiagnostic,
-    LspPrevDiagnostic,
+    NextIssue,
+    PrevIssue,
     LspToggleInlayHints,
 
     // UI

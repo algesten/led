@@ -939,7 +939,7 @@ pub fn tabs_inputs(s: &AppState) -> Option<TabsInputs> {
         .tabs
         .iter()
         .filter_map(|tab| {
-            let buf = s.buffers.get(&tab.path).filter(|b| b.is_materialized())?;
+            let buf = s.buffers.get(tab.path()).filter(|b| b.is_materialized())?;
             let name = buf
                 .path()
                 .and_then(|p| p.file_name())
@@ -947,7 +947,7 @@ pub fn tabs_inputs(s: &AppState) -> Option<TabsInputs> {
                 .unwrap_or_else(|| "[untitled]".to_string());
             let dirty = buf.is_dirty();
             let label = format_tab_label(&name, dirty);
-            let is_active = s.active_tab.as_ref() == Some(&tab.path);
+            let is_active = s.active_tab.as_ref() == Some(tab.path());
             let entry_style = if tab.is_preview() {
                 if is_active {
                     preview_active_style

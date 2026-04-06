@@ -71,7 +71,7 @@ pub fn handle_action(state: &mut AppState, action: Action) -> bool {
             if state
                 .tabs
                 .iter()
-                .any(|t| t.is_preview() && t.path == *active)
+                .any(|t| t.is_preview() && *t.path() == *active)
             {
                 promote_preview_active(state);
             }
@@ -522,11 +522,11 @@ pub fn handle_action(state: &mut AppState, action: Action) -> bool {
                 .set(Some(LspRequest::CodeAction));
         }
         Action::LspRename => lsp::open_rename_overlay(state),
-        Action::LspNextDiagnostic => {
-            lsp::navigate_diagnostic(state, true);
+        Action::NextIssue => {
+            lsp::navigate_issue(state, true);
         }
-        Action::LspPrevDiagnostic => {
-            lsp::navigate_diagnostic(state, false);
+        Action::PrevIssue => {
+            lsp::navigate_issue(state, false);
         }
         Action::LspToggleInlayHints => {
             let lsp = state.lsp_mut();
