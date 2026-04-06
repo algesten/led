@@ -639,9 +639,8 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
                     });
                 }
             }
-            for path in removed {
-                events.push(LspOut::BufferClosed { path });
-            }
+            // No didClose — the LSP has its own file watcher.
+            let _ = removed;
             events
         })
         .filter(|events| !events.is_empty())
