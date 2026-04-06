@@ -63,15 +63,9 @@ pub(crate) fn set_preview(state: &mut AppState, path: CanonPath, row: usize, col
         state.active_tab.clone().unwrap_or_default()
     };
 
-    // Remove old preview tab and its buffer (if not used by a real tab).
+    // Remove old preview tab. The fold dematerializes orphaned buffers.
     if let Some(idx) = state.tabs.iter().position(|t| t.is_preview()) {
-        let old_path = state.tabs[idx].path.clone();
         state.tabs.remove(idx);
-        let still_in_tabs = state.tabs.iter().any(|t| t.path == old_path);
-        if !still_in_tabs {
-            state.buffers_mut().remove(&old_path);
-            state.notify_hash_to_buffer.retain(|_, v| *v != old_path);
-        }
     }
 
     // Insert the new preview tab.
@@ -108,16 +102,10 @@ pub(crate) fn close_preview(state: &mut AppState) {
     let preview_path = tab.path.clone();
     let restore_path = tab.preview.as_ref().map(|p| p.previous_tab.clone());
 
+    // Remove preview tab. The fold dematerializes orphaned buffers.
     state
         .tabs
         .retain(|t| t.path != preview_path || !t.is_preview());
-    let still_in_tabs = state.tabs.iter().any(|t| t.path == preview_path);
-    if !still_in_tabs {
-        state.buffers_mut().remove(&preview_path);
-        state
-            .notify_hash_to_buffer
-            .retain(|_, v| *v != preview_path);
-    }
 
     if let Some(restore) = restore_path {
         if state.buffers.contains_key(&restore) {
@@ -127,7 +115,7 @@ pub(crate) fn close_preview(state: &mut AppState) {
             }
         }
     }
-    if state.buffers.is_empty() {
+    if state.tabs.is_empty() {
         state.focus = PanelSlot::Side;
     }
 }
@@ -167,7 +155,9 @@ pub(crate) fn evict_one_buffer(state: &mut AppState) {
         .min_by_key(|b| b.last_used())
         .and_then(|b| b.path().cloned());
     if let Some(path) = victim {
-        state.buffers_mut().remove(&path);
+        if let Some(buf) = state.buf_mut(&path) {
+            buf.dematerialize();
+        }
         state.notify_hash_to_buffer.retain(|_, v| *v != path);
     }
 }

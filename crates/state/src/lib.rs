@@ -341,7 +341,7 @@ pub enum SyntaxRequest {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MaterializationState {
     /// Path known, no content loaded. Doc is InertDoc.
-    NotMaterialized,
+    Unmaterialized,
     /// Open requested to docstore, waiting for response.
     Requested,
     /// Content loaded from disk. Doc is TextDoc.
@@ -422,7 +422,7 @@ impl BufferState {
     pub fn new(path: CanonPath) -> Self {
         Self {
             doc: Arc::new(InertDoc),
-            materialization: Cell::new(MaterializationState::NotMaterialized),
+            materialization: Cell::new(MaterializationState::Unmaterialized),
             version: DocVersion(0),
             undo: UndoHistory::default(),
             path: Some(path),
@@ -499,6 +499,11 @@ impl BufferState {
         self.materialization.get() == MaterializationState::Materialized
     }
 
+    /// Whether this buffer is in the initial unmaterialized state.
+    pub fn is_unmaterialized(&self) -> bool {
+        self.materialization.get() == MaterializationState::Unmaterialized
+    }
+
     pub fn materialization(&self) -> MaterializationState {
         self.materialization.get()
     }
@@ -535,11 +540,14 @@ impl BufferState {
     }
 
     /// Dematerialize: replace doc with InertDoc, discard undo.
+    /// Increments version so any in-flight Open response will mismatch
+    /// and be treated as a fresh materialization.
     pub fn dematerialize(&mut self) {
         self.doc = Arc::new(InertDoc);
         self.undo = UndoHistory::default();
+        self.version = self.version + 1;
         self.materialization
-            .set(MaterializationState::NotMaterialized);
+            .set(MaterializationState::Unmaterialized);
         self.pending_syntax_request = None;
     }
 

@@ -649,7 +649,13 @@ fn kill_buffer_clean() {
         .run(actions(vec![KillBuffer]));
 
     assert!(t.state.active_tab.is_none());
-    assert!(t.state.buffers.is_empty());
+    assert!(t.state.tabs.is_empty());
+    // Buffer persists (dematerialized) so diagnostics survive for the file browser.
+    assert!(!t.state.buffers.is_empty());
+    assert!(
+        !t.state.buffers.values().any(|b| b.is_materialized()),
+        "buffer should be dematerialized after kill"
+    );
     assert!(
         t.state
             .alerts
@@ -691,7 +697,11 @@ fn kill_buffer_dirty_confirm_yes() {
     ]));
 
     assert!(t.state.active_tab.is_none());
-    assert!(t.state.buffers.is_empty());
+    assert!(t.state.tabs.is_empty());
+    assert!(
+        !t.state.buffers.values().any(|b| b.is_materialized()),
+        "buffer should be dematerialized after force kill"
+    );
     assert!(!t.state.confirm_kill);
 }
 
@@ -795,7 +805,7 @@ fn kill_buffer_activates_next() {
             KillBuffer,
         ]));
 
-    assert_eq!(t.state.buffers.len(), 2);
+    assert_eq!(t.state.tabs.len(), 2);
     let active = buf(&t);
     assert_eq!(
         line(&**active.doc(), 0),

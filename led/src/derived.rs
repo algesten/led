@@ -186,9 +186,9 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
             .tabs
             .iter()
             .filter(|t| {
-                s.buffers.get(&t.path).map_or(true, |b| {
-                    b.materialization() == led_state::MaterializationState::NotMaterialized
-                })
+                s.buffers
+                    .get(&t.path)
+                    .map_or(true, |b| b.is_unmaterialized())
             })
             .map(|t| t.path.clone())
             .collect();

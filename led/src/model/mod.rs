@@ -1013,6 +1013,25 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
                 }
             }
         }
+
+        // Implicit dematerialization: any buffer not referenced by a tab
+        // that isn't already Unmaterialized gets dematerialized. Catches
+        // both Materialized (kill buffer) and Requested (preview scrolled
+        // past before the docstore responded). Version is bumped to
+        // invalidate any in-flight Open response.
+        let tabs = &s.tabs;
+        let buffers = Rc::make_mut(&mut s.buffers);
+        for buf in buffers.values_mut() {
+            let has_tab = buf
+                .path()
+                .map_or(false, |p| tabs.iter().any(|t| t.path == *p));
+            if !has_tab && !buf.is_unmaterialized() {
+                Rc::make_mut(buf).dematerialize();
+            }
+        }
+        s.notify_hash_to_buffer
+            .retain(|_, p| s.tabs.iter().any(|t| t.path == *p));
+
         Rc::new(s)
     });
 

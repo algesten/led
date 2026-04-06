@@ -89,7 +89,6 @@ fn do_kill_buffer(state: &mut AppState, path: &CanonPath) {
         Some(state.tabs[next_idx].path.clone())
     });
 
-    state.buffers_mut().remove(path);
     state.tabs.retain(|t| t.path != *path);
     state.active_tab = next_active;
     reveal_active_buffer(state);
