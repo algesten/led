@@ -776,9 +776,13 @@ impl BufferState {
     /// File changed on disk with different content. Replaces doc,
     /// clears annotations, clamps cursor.
     pub fn reload_from_disk(&mut self, doc: Arc<dyn Doc>) {
-        self.materialize(doc, true);
+        self.content_hash = doc.content_hash();
+        self.doc = doc;
+        self.version = self.version + 1;
         self.change_seq = ChangeSeq(led_core::next_change_seq());
-        // Clamp cursor to new document bounds
+        // Request full syntax reparse. Keep old highlights visible until new ones arrive.
+        self.set_syntax_full();
+        // Clamp cursor to new document bounds.
         let max_row = Row(self.doc().line_count().saturating_sub(1));
         self.cursor_row.set(self.cursor_row.get().min(max_row));
         let max_col = Col(self.doc().line_len(self.cursor_row.get()));
