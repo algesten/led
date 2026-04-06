@@ -35,10 +35,10 @@ pub fn buffers_of(
                 let sp = state.session.positions.get(&path);
                 let (cursor_row, cursor_col, scroll_row, scroll_sub_line) = match sp {
                     Some(sp) => (
-                        sp.cursor_row.min(doc.line_count().saturating_sub(1)),
-                        sp.cursor_col,
-                        sp.scroll_row,
-                        sp.scroll_sub_line,
+                        (*sp.cursor_row).min(doc.line_count().saturating_sub(1)),
+                        *sp.cursor_col,
+                        *sp.scroll_row,
+                        *sp.scroll_sub_line,
                     ),
                     None => (0, 0, 0, 0),
                 };
@@ -47,7 +47,7 @@ pub fn buffers_of(
                 let undo_data = sp.and_then(|sp| sp.undo.as_ref());
                 let (chain_id, persisted_undo_len, last_seen_seq, distance_from_save) =
                     match undo_data {
-                        Some(undo) if undo.content_hash == doc.content_hash().0 => (
+                        Some(undo) if undo.content_hash == doc.content_hash() => (
                             Some(undo.chain_id.clone()),
                             undo.entries.len(),
                             undo.last_seen_seq,
@@ -63,7 +63,7 @@ pub fn buffers_of(
                 let content_hash = doc.content_hash();
 
                 let undo_entries = match undo_data {
-                    Some(undo) if undo.content_hash == *content_hash => undo.entries.clone(),
+                    Some(undo) if undo.content_hash == content_hash => undo.entries.clone(),
                     _ => Vec::new(),
                 };
 

@@ -235,7 +235,7 @@ pub fn handle_action(state: &mut AppState, action: Action) -> bool {
                 buf.set_cursor(Row(r), Col(c), Col(0));
                 buf.set_cursor(Row(r), Col(c), Col(mov::reset_affinity(buf, dims)));
                 if buf.reindent_chars().contains(&ch) {
-                    buf.request_indent(Some(r), false);
+                    buf.request_indent(Some(Row(r)), false);
                 }
             });
             // Auto-trigger completion when no popup is showing
@@ -269,12 +269,12 @@ pub fn handle_action(state: &mut AppState, action: Action) -> bool {
             let (r, c, a) = edit::insert_newline(buf);
             buf.set_cursor(Row(r), Col(c), Col(a));
             close_group_on_move(buf);
-            buf.request_indent(Some(r), false);
+            buf.request_indent(Some(Row(r)), false);
         }),
         Action::InsertTab => with_buf(state, |buf, _dims| {
             buf.clear_mark();
             close_group_on_move(buf);
-            buf.request_indent(Some(buf.cursor_row().0), true);
+            buf.request_indent(Some(buf.cursor_row()), true);
         }),
         Action::DeleteBackward => with_buf(state, |buf, dims| {
             buf.clear_mark();
@@ -449,8 +449,8 @@ pub fn handle_action(state: &mut AppState, action: Action) -> bool {
         // ── Bracket matching ──
         Action::MatchBracket => with_buf(state, |buf, dims| {
             if let Some((row, col)) = buf.matching_bracket() {
-                buf.set_cursor(Row(row), Col(col), Col(0));
-                buf.set_cursor(Row(row), Col(col), Col(mov::reset_affinity(buf, dims)));
+                buf.set_cursor(row, col, Col(0));
+                buf.set_cursor(row, col, Col(mov::reset_affinity(buf, dims)));
                 close_group_on_move(buf);
             }
         }),
@@ -477,7 +477,7 @@ pub fn handle_action(state: &mut AppState, action: Action) -> bool {
                             {
                                 let start_char = CharOffset(buf.doc().byte_to_char(start_byte));
                                 let end_char = CharOffset(buf.doc().byte_to_char(end_byte));
-                                let edit_row = buf.doc().char_to_line(start_char).0;
+                                let edit_row = buf.doc().char_to_line(start_char);
                                 let buf = state.buf_mut(&path).unwrap();
                                 close_group_on_move(buf);
                                 buf.edit_at(edit_row, |doc| {

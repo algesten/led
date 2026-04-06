@@ -246,7 +246,7 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
                         flush: led_state::UndoFlush {
                             file_path,
                             chain_id,
-                            content_hash: b.content_hash().0,
+                            content_hash: b.content_hash(),
                             undo_cursor,
                             distance_from_save: undo.distance_from_save(),
                             entries,
@@ -790,15 +790,15 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
                                 || (buf.pending_tab_fallback() && tab_stop.is_some()))
                     });
                     if !will_indent {
-                        buf.offer_syntax(highlights, bracket_pairs, led_core::DocVersion(version));
+                        buf.offer_syntax(highlights, bracket_pairs, version);
                     }
                     if let Some(row) = indent_row {
-                        if buf.pending_indent_row() == Some(row) && buf.version().0 == version {
+                        if buf.pending_indent_row() == Some(row) && buf.version() == version {
                             let was_tab = buf.pending_tab_fallback();
                             buf.request_indent(None, false);
                             if let Some(new_indent) = &indent {
-                                let cursor_on_row = buf.cursor_row().0 == row;
-                                edit::apply_indent(buf, row, new_indent, cursor_on_row);
+                                let cursor_on_row = buf.cursor_row() == row;
+                                edit::apply_indent(buf, *row, new_indent, cursor_on_row);
                             } else if was_tab {
                                 if let Some(ts) = tab_stop {
                                     edit::insert_soft_tab(buf, ts);
@@ -861,9 +861,9 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
                         if let Some(p) = buf.path() {
                             let pos = led_state::JumpPosition {
                                 path: p.clone(),
-                                row: buf.cursor_row().0,
-                                col: buf.cursor_col().0,
-                                scroll_offset: buf.scroll_row().0,
+                                row: buf.cursor_row(),
+                                col: buf.cursor_col(),
+                                scroll_offset: buf.scroll_row(),
                             };
                             jump::record_jump(&mut s, pos);
                         }
@@ -879,8 +879,8 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
                     s.active_tab = Some(existing_path.clone());
                     let half = s.dims.map_or(10, |d| d.buffer_height() / 2);
                     if let Some(buf) = s.buf_mut(&existing_path) {
-                        let r = row.min(buf.doc().line_count().saturating_sub(1));
-                        buf.set_cursor(led_core::Row(r), led_core::Col(col), led_core::Col(col));
+                        let r = (*row).min(buf.doc().line_count().saturating_sub(1));
+                        buf.set_cursor(led_core::Row(r), col, col);
                         buf.set_scroll(
                             led_core::Row(buf.cursor_row().0.saturating_sub(half)),
                             led_core::SubLine(0),
@@ -891,11 +891,7 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
                     request_open(&mut s, path.clone(), false);
                     if let Some(tab) = s.tabs.iter_mut().find(|t| *t.path() == path) {
                         let half = s.dims.map_or(10, |d| d.buffer_height() / 2);
-                        tab.set_cursor(
-                            led_core::Row(row),
-                            led_core::Col(col),
-                            led_core::Row(row.saturating_sub(half)),
-                        );
+                        tab.set_cursor(row, col, led_core::Row(row.saturating_sub(half)));
                     }
                     s.active_tab = Some(path);
                 }
@@ -933,7 +929,7 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
                 } else {
                     s.lsp_mut().completion = Some(led_state::CompletionState {
                         items,
-                        prefix_start_col,
+                        prefix_start_col: *prefix_start_col,
                         selected: 0,
                         scroll_offset: 0,
                     });
@@ -961,7 +957,7 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
                         .insert(path.clone(), Rc::new(BufferState::new(path.clone())));
                 }
                 if let Some(buf) = s.buf_mut(&path) {
-                    buf.offer_diagnostics(diagnostics, led_core::ContentHash(content_hash));
+                    buf.offer_diagnostics(diagnostics, content_hash);
                 }
             }
             Mut::LspInlayHints { path, hints } => {
@@ -1182,7 +1178,7 @@ enum Mut {
         path: CanonPath,
         statuses: Vec<led_core::git::LineStatus>,
     },
-    ForceRedraw(u64),
+    ForceRedraw(led_core::RedrawSeq),
     Keymap(Rc<Keymap>),
     Resize(u16, u16),
     NotifyEvent {
@@ -1208,11 +1204,11 @@ enum Mut {
     Resumed,
     SyntaxUpdate {
         path: CanonPath,
-        version: u64,
-        highlights: Rc<Vec<(usize, HighlightSpan)>>,
+        version: led_core::DocVersion,
+        highlights: Rc<Vec<(led_core::Row, HighlightSpan)>>,
         bracket_pairs: Vec<BracketPair>,
         indent: Option<String>,
-        indent_row: Option<usize>,
+        indent_row: Option<led_core::Row>,
         reindent_chars: Arc<[char]>,
     },
     UndoFlushed {
@@ -1239,15 +1235,15 @@ enum Mut {
     // LSP
     LspNavigate {
         path: CanonPath,
-        row: usize,
-        col: usize,
+        row: led_core::Row,
+        col: led_core::Col,
     },
     LspEdits {
         edits: Vec<led_lsp::FileEdit>,
     },
     LspCompletion {
         items: Vec<led_lsp::CompletionItem>,
-        prefix_start_col: usize,
+        prefix_start_col: led_core::Col,
     },
     LspCodeActions {
         actions: Vec<String>,
@@ -1255,7 +1251,7 @@ enum Mut {
     LspDiagnostics {
         path: CanonPath,
         diagnostics: Vec<led_lsp::Diagnostic>,
-        content_hash: u64,
+        content_hash: led_core::ContentHash,
     },
     LspInlayHints {
         path: CanonPath,
@@ -1359,11 +1355,8 @@ fn apply_text_edits(buf: &mut BufferState, edits: &[led_lsp::TextEdit]) {
     buf.close_undo_group();
     buf.begin_undo_group(cursor_char);
     for te in sorted {
-        let start = led_core::CharOffset(
-            buf.doc().line_to_char(led_core::Row(te.start_row)).0 + te.start_col,
-        );
-        let end =
-            led_core::CharOffset(buf.doc().line_to_char(led_core::Row(te.end_row)).0 + te.end_col);
+        let start = led_core::CharOffset(buf.doc().line_to_char(te.start_row).0 + *te.start_col);
+        let end = led_core::CharOffset(buf.doc().line_to_char(te.end_row).0 + *te.end_col);
         if start != end {
             buf.remove_text(start, end);
         }

@@ -1,6 +1,6 @@
 use std::rc::Rc;
 
-use led_core::{Doc, Row};
+use led_core::{Col, Doc, Row};
 use led_state::HighlightSpan;
 use tree_sitter::{Query, QueryCursor, StreamingIterator, Tree};
 
@@ -14,7 +14,7 @@ pub(crate) fn collect_highlights(
     end_byte: usize,
     start_line: usize,
     end_line: usize,
-) -> Vec<(usize, HighlightSpan)> {
+) -> Vec<(Row, HighlightSpan)> {
     let total_lines = doc.line_count();
     let mut cursor = QueryCursor::new();
     cursor.set_byte_range(start_byte..end_byte);
@@ -75,10 +75,10 @@ pub(crate) fn collect_highlights(
                 }
 
                 result.push((
-                    line,
+                    Row(line),
                     HighlightSpan {
-                        char_start,
-                        char_end,
+                        char_start: Col(char_start),
+                        char_end: Col(char_end),
                         capture_name: Rc::clone(&name),
                     },
                 ));

@@ -400,7 +400,7 @@ mod tests {
         let dims = Dimensions::new(40, 10, false);
         let layout = LayoutInfo {
             dims,
-            force_redraw: 0,
+            force_redraw: led_core::RedrawSeq(0),
             side_border_style: side_border,
             side_bg_style: side_bg,
             text_style,

@@ -1,11 +1,11 @@
 use std::collections::HashMap;
 
-use led_core::CanonPath;
+use led_core::{CanonPath, Col, Row};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SearchHit {
-    pub row: usize,
-    pub col: usize,
+    pub row: Row,
+    pub col: Col,
     pub line_text: String,
     pub match_start: usize, // byte offset in line_text
     pub match_end: usize,
@@ -47,7 +47,7 @@ pub enum FileSearchSelection {
 pub struct ReplaceEntry {
     pub flat_hit_idx: usize,
     pub path: CanonPath,
-    pub row: usize,
+    pub row: Row,
     pub original_text: String,  // the matched text that was replaced
     pub match_start: usize,     // byte offset in line
     pub match_end: usize,       // byte offset in line
@@ -71,7 +71,7 @@ pub struct FileSearchReplaceRequest {
 pub enum ReplaceScope {
     Single {
         path: CanonPath,
-        row: usize,
+        row: Row,
         match_start: usize,
         match_end: usize,
     },
@@ -102,7 +102,7 @@ pub struct FileSearchState {
 /// Lives on AppState so it survives deactivate().
 #[derive(Debug, Clone, Default)]
 pub struct PendingReplaceAll {
-    pub hits: HashMap<CanonPath, Vec<(usize, usize, usize, String)>>,
+    pub hits: HashMap<CanonPath, Vec<(Row, usize, usize, String)>>,
     pub replacement: String,
     pub query: String,
 }

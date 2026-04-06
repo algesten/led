@@ -455,6 +455,6 @@ pub fn shift_annotations(
     old_doc_version: DocVersion,
 ) {
     if let Some(buf) = state.buf_mut(buf_path) {
-        buf.shift_annotations(edit_row, old_line_count, old_doc_version);
+        buf.shift_annotations(Row(edit_row), old_line_count, old_doc_version);
     }
 }

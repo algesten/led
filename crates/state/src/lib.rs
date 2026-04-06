@@ -12,7 +12,7 @@ use led_core::keys::{Keymap, Keys};
 use led_core::theme::Theme;
 use led_core::{
     CanonPath, ChangeSeq, CharOffset, Col, ContentHash, Doc, DocVersion, EditOp, InertDoc,
-    PanelSlot, Row, Startup, SubLine, UndoHistory, UserPath, Versioned,
+    PanelSlot, RedrawSeq, Row, Startup, SubLine, SyntaxSeq, UndoHistory, UserPath, Versioned,
 };
 pub use led_workspace::SessionBuffer;
 pub use led_workspace::Workspace;
@@ -161,12 +161,14 @@ impl BufferStatus {
 
     /// Clear diagnostics that touch a row whose content changed (e.g. text killed).
     fn clear_diagnostics_on_row(&mut self, row: usize) {
+        let row = Row(row);
         self.diagnostics
             .retain(|d| !(d.start_row <= row && d.end_row >= row));
     }
 
     /// Shift line positions after a structural edit.
     fn shift_lines(&mut self, edit_row: usize, delta: isize) {
+        let edit_row = Row(edit_row);
         self.diagnostics.retain_mut(|d| {
             // Remove diagnostics on the edit row and deleted lines.
             // The edit row's content changes during a structural edit
@@ -179,10 +181,10 @@ impl BufferStatus {
             }
             // Shift diagnostics below the edit
             if d.start_row > edit_row {
-                d.start_row = (d.start_row as isize + delta).max(0) as usize;
+                d.start_row = Row((d.start_row.0 as isize + delta).max(0) as usize);
             }
             if d.end_row > edit_row {
-                d.end_row = (d.end_row as isize + delta).max(0) as usize;
+                d.end_row = Row((d.end_row.0 as isize + delta).max(0) as usize);
             }
             true
         });
@@ -195,16 +197,16 @@ impl BufferStatus {
 #[derive(Debug, Clone, PartialEq)]
 pub struct PreviewRequest {
     pub path: CanonPath,
-    pub row: usize,
-    pub col: usize,
+    pub row: Row,
+    pub col: Col,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JumpPosition {
     pub path: CanonPath,
-    pub row: usize,
-    pub col: usize,
-    pub scroll_offset: usize,
+    pub row: Row,
+    pub col: Col,
+    pub scroll_offset: Row,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -278,7 +280,7 @@ impl Dimensions {
 pub struct UndoFlush {
     pub file_path: CanonPath,
     pub chain_id: String,
-    pub content_hash: u64,
+    pub content_hash: ContentHash,
     pub undo_cursor: usize,
     pub distance_from_save: i32,
     pub entries: Vec<Vec<u8>>,
@@ -319,17 +321,17 @@ pub enum ChangeReason {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct HighlightSpan {
-    pub char_start: usize,
-    pub char_end: usize,
+    pub char_start: Col,
+    pub char_end: Col,
     pub capture_name: Rc<str>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct BracketPair {
-    pub open_line: usize,
-    pub open_col: usize,
-    pub close_line: usize,
-    pub close_col: usize,
+    pub open_line: Row,
+    pub open_col: Col,
+    pub close_line: Row,
+    pub close_col: Col,
     pub color_index: Option<usize>,
 }
 
@@ -337,9 +339,9 @@ impl BracketPair {
     /// Find the matching bracket for the cursor from cached pairs.
     pub fn find_match(
         pairs: &[BracketPair],
-        cursor_row: usize,
-        cursor_col: usize,
-    ) -> Option<(usize, usize)> {
+        cursor_row: Row,
+        cursor_col: Col,
+    ) -> Option<(Row, Col)> {
         for bp in pairs {
             if bp.open_line == cursor_row && bp.open_col == cursor_col {
                 return Some((bp.close_line, bp.close_col));
@@ -357,11 +359,11 @@ impl BracketPair {
 #[derive(Debug, Clone)]
 pub struct ISearchState {
     pub query: String,
-    pub origin: (usize, usize),
-    pub origin_scroll: usize,
-    pub origin_sub_line: usize,
+    pub origin: (Row, Col),
+    pub origin_scroll: Row,
+    pub origin_sub_line: SubLine,
     pub failed: bool,
-    pub matches: Vec<(usize, usize, usize)>, // (row, col, char_len)
+    pub matches: Vec<(Row, Col, usize)>, // (row, col, char_len)
     pub match_idx: Option<usize>,
 }
 
@@ -426,13 +428,13 @@ pub struct BufferState {
 
     // Syntax highlighting
     pending_syntax_request: Option<SyntaxRequest>,
-    pending_syntax_seq: u64,
-    syntax_highlights: Rc<Vec<(usize, HighlightSpan)>>,
+    pending_syntax_seq: SyntaxSeq,
+    syntax_highlights: Rc<Vec<(Row, HighlightSpan)>>,
     bracket_pairs: Rc<Vec<BracketPair>>,
-    matching_bracket: Option<(usize, usize)>,
+    matching_bracket: Option<(Row, Col)>,
 
     // Indent
-    pending_indent_row: Option<usize>,
+    pending_indent_row: Option<Row>,
     pending_tab_fallback: bool,
     reindent_chars: Arc<[char]>,
 
@@ -480,7 +482,7 @@ impl BufferState {
             isearch: None,
             last_search: None,
             pending_syntax_request: None,
-            pending_syntax_seq: 0,
+            pending_syntax_seq: SyntaxSeq(0),
             syntax_highlights: Rc::new(Vec::new()),
             bracket_pairs: Rc::new(Vec::new()),
             matching_bracket: None,
@@ -602,7 +604,7 @@ impl BufferState {
         self.pending_syntax_request.as_ref()
     }
 
-    pub fn pending_syntax_seq(&self) -> u64 {
+    pub fn pending_syntax_seq(&self) -> SyntaxSeq {
         self.pending_syntax_seq
     }
 
@@ -636,7 +638,7 @@ impl BufferState {
         let doc = &self.doc;
         let old_lines = doc.line_count();
         let old_ver = self.version;
-        let edit_row = self.cursor_row.get().0;
+        let edit_row = self.cursor_row.get();
         let (new_doc, result) = f(doc);
         self.version = self.version + 1;
         self.doc = new_doc;
@@ -648,7 +650,7 @@ impl BufferState {
     /// modified automatically. The closure returns `(new_doc, edit_ops, R)`.
     pub fn edit_at<R>(
         &mut self,
-        edit_row: usize,
+        edit_row: Row,
         f: impl FnOnce(&Arc<dyn Doc>) -> (Arc<dyn Doc>, Vec<EditOp>, R),
     ) -> R {
         let doc = &self.doc;
@@ -668,7 +670,7 @@ impl BufferState {
 
     /// Insert text at a character offset. Records undo op, shifts annotations.
     pub fn insert_text(&mut self, char_idx: CharOffset, text: &str) {
-        let edit_row = self.cursor_row.get().0;
+        let edit_row = self.cursor_row.get();
         let op = EditOp {
             offset: char_idx,
             old_text: String::new(),
@@ -685,7 +687,7 @@ impl BufferState {
 
     /// Remove text between two character offsets. Records undo op, shifts annotations.
     pub fn remove_text(&mut self, start: CharOffset, end: CharOffset) {
-        let edit_row = self.cursor_row.get().0;
+        let edit_row = self.cursor_row.get();
         let old_text = self.doc.slice(start, end);
         let op = EditOp {
             offset: start,
@@ -760,7 +762,7 @@ impl BufferState {
         self.chain_id = None;
         self.last_seen_seq = 0;
         self.content_hash = self.doc().content_hash();
-        self.change_seq = ChangeSeq(led_core::next_change_seq());
+        self.change_seq = led_core::next_change_seq();
         self.set_syntax_full();
     }
 
@@ -779,7 +781,7 @@ impl BufferState {
         self.content_hash = doc.content_hash();
         self.doc = doc;
         self.version = self.version + 1;
-        self.change_seq = ChangeSeq(led_core::next_change_seq());
+        self.change_seq = led_core::next_change_seq();
         // Request full syntax reparse. Keep old highlights visible until new ones arrive.
         self.set_syntax_full();
         // Clamp cursor to new document bounds.
@@ -797,7 +799,7 @@ impl BufferState {
         self.last_seen_seq = 0;
         self.chain_id = None;
         self.persisted_undo_len = self.undo.entry_count();
-        self.change_seq = ChangeSeq(led_core::next_change_seq());
+        self.change_seq = led_core::next_change_seq();
         if self.is_dirty() && self.save_state == SaveState::Clean {
             self.undo.reset_distance_from_save();
         }
@@ -823,7 +825,7 @@ impl BufferState {
         self.last_seen_seq = last_seen_seq;
         self.persisted_undo_len = self.undo.entry_count();
         self.content_hash = self.doc().content_hash();
-        self.change_seq = ChangeSeq(led_core::next_change_seq());
+        self.change_seq = led_core::next_change_seq();
         self.set_syntax_full();
     }
 
@@ -839,7 +841,7 @@ impl BufferState {
         self.last_seen_seq = last_seen_seq;
         self.persisted_undo_len = self.undo.entry_count();
         self.content_hash = self.doc().content_hash();
-        self.change_seq = ChangeSeq(led_core::next_change_seq());
+        self.change_seq = led_core::next_change_seq();
         self.set_syntax_full();
     }
 
@@ -849,7 +851,7 @@ impl BufferState {
     pub fn undo_flush_started(&mut self, chain_id: String, undo_cursor: usize) {
         self.chain_id = Some(chain_id);
         self.persisted_undo_len = undo_cursor;
-        self.change_seq = ChangeSeq(led_core::next_change_seq());
+        self.change_seq = led_core::next_change_seq();
     }
 
     /// Undo flush confirmed by workspace.
@@ -1098,7 +1100,7 @@ impl BufferState {
     /// Accept syntax highlights only if doc version matches.
     pub fn offer_syntax(
         &mut self,
-        highlights: Rc<Vec<(usize, HighlightSpan)>>,
+        highlights: Rc<Vec<(Row, HighlightSpan)>>,
         bracket_pairs: Vec<BracketPair>,
         version: DocVersion,
     ) -> bool {
@@ -1124,20 +1126,20 @@ impl BufferState {
 
     // ── Reading annotations (for display) ──
 
-    pub fn syntax_highlights(&self) -> &Rc<Vec<(usize, HighlightSpan)>> {
+    pub fn syntax_highlights(&self) -> &Rc<Vec<(Row, HighlightSpan)>> {
         &self.syntax_highlights
     }
     pub fn bracket_pairs(&self) -> &Rc<Vec<BracketPair>> {
         &self.bracket_pairs
     }
-    pub fn matching_bracket(&self) -> Option<(usize, usize)> {
+    pub fn matching_bracket(&self) -> Option<(Row, Col)> {
         self.matching_bracket
     }
     pub fn update_matching_bracket(&mut self) {
         self.matching_bracket = BracketPair::find_match(
             &self.bracket_pairs,
-            self.cursor_row.get().0,
-            self.cursor_col.get().0,
+            self.cursor_row.get(),
+            self.cursor_col.get(),
         );
     }
     pub fn status(&self) -> &BufferStatus {
@@ -1208,7 +1210,7 @@ impl BufferState {
     pub fn set_reindent_chars(&mut self, chars: Arc<[char]>) {
         self.reindent_chars = chars;
     }
-    pub fn pending_indent_row(&self) -> Option<usize> {
+    pub fn pending_indent_row(&self) -> Option<Row> {
         self.pending_indent_row
     }
     pub fn pending_tab_fallback(&self) -> bool {
@@ -1218,7 +1220,7 @@ impl BufferState {
     /// Request auto-indent for a given row.  When `tab_fallback` is true,
     /// a literal tab-stop will be inserted if the language server returns
     /// no indent change.
-    pub fn request_indent(&mut self, row: Option<usize>, tab_fallback: bool) {
+    pub fn request_indent(&mut self, row: Option<Row>, tab_fallback: bool) {
         self.pending_indent_row = row;
         self.pending_tab_fallback = tab_fallback;
         if row.is_some() {
@@ -1235,13 +1237,13 @@ impl BufferState {
     /// Shift cached annotations (syntax highlights, diagnostics, git line
     /// statuses) after a document edit.  This is the public entry-point used
     /// by callers that perform multi-step edits outside `edit()`/`edit_at()`.
-    pub fn shift_annotations(&mut self, edit_row: usize, old_lines: usize, old_ver: DocVersion) {
+    pub fn shift_annotations(&mut self, edit_row: Row, old_lines: usize, old_ver: DocVersion) {
         self.sync_annotations(edit_row, old_lines, old_ver);
     }
 
     // ── Private ──
 
-    fn sync_annotations(&mut self, edit_row: usize, old_lines: usize, old_ver: DocVersion) {
+    fn sync_annotations(&mut self, edit_row: Row, old_lines: usize, old_ver: DocVersion) {
         let cur_ver = self.version;
         if cur_ver == old_ver {
             return;
@@ -1257,7 +1259,7 @@ impl BufferState {
         if delta == 0 {
             // No structural change, but the edit row's content changed.
             // Clear stale diagnostics on that row.
-            self.status.clear_diagnostics_on_row(edit_row);
+            self.status.clear_diagnostics_on_row(*edit_row);
             self.annotations_synced_ver = cur_ver;
             return;
         }
@@ -1269,9 +1271,9 @@ impl BufferState {
                 if *line <= edit_row {
                     Some((*line, span.clone()))
                 } else {
-                    let new_line = (*line as isize + delta) as usize;
+                    let new_line = (line.0 as isize + delta) as usize;
                     if new_line < new_lines {
-                        Some((new_line, span.clone()))
+                        Some((Row(new_line), span.clone()))
                     } else {
                         None
                     }
@@ -1280,7 +1282,7 @@ impl BufferState {
             .collect();
         self.syntax_highlights = Rc::new(shifted);
         // Shift diagnostics + clear git line statuses
-        self.status.shift_lines(edit_row, delta);
+        self.status.shift_lines(*edit_row, delta);
         // Mark modified if dirty
         self.mark_modified_if_dirty();
         self.annotations_synced_ver = cur_ver;
@@ -1595,7 +1597,7 @@ pub struct AppState {
     pub focus: PanelSlot,
     pub show_side_panel: bool,
     pub dims: Option<Dimensions>,
-    pub force_redraw: u64,
+    pub force_redraw: RedrawSeq,
     pub alerts: AlertState,
     pub buffers: Rc<HashMap<CanonPath, Rc<BufferState>>>,
     pub tabs: VecDeque<Tab>,
@@ -1684,10 +1686,10 @@ mod tests {
 
     fn diag(start_row: usize, end_row: usize) -> led_lsp::Diagnostic {
         led_lsp::Diagnostic {
-            start_row,
-            start_col: 0,
-            end_row,
-            end_col: 0,
+            start_row: led_core::Row(start_row),
+            start_col: led_core::Col(0),
+            end_row: led_core::Row(end_row),
+            end_col: led_core::Col(0),
             severity: led_lsp::DiagnosticSeverity::Warning,
             message: String::new(),
             source: None,
@@ -1702,7 +1704,7 @@ mod tests {
         status.set_diagnostics(vec![diag(5, 5), diag(8, 8)]);
         status.clear_diagnostics_on_row(5);
         assert_eq!(status.diagnostics().len(), 1);
-        assert_eq!(status.diagnostics()[0].start_row, 8);
+        assert_eq!(status.diagnostics()[0].start_row, led_core::Row(8));
     }
 
     #[test]
@@ -1713,7 +1715,7 @@ mod tests {
         status.set_diagnostics(vec![diag(4, 6), diag(8, 8)]);
         status.clear_diagnostics_on_row(5);
         assert_eq!(status.diagnostics().len(), 1);
-        assert_eq!(status.diagnostics()[0].start_row, 8);
+        assert_eq!(status.diagnostics()[0].start_row, led_core::Row(8));
     }
 
     #[test]
@@ -1747,8 +1749,8 @@ mod tests {
         let mut status = BufferStatus::new();
         status.set_diagnostics(vec![diag(10, 10)]);
         status.shift_lines(5, -2);
-        assert_eq!(status.diagnostics()[0].start_row, 8);
-        assert_eq!(status.diagnostics()[0].end_row, 8);
+        assert_eq!(status.diagnostics()[0].start_row, led_core::Row(8));
+        assert_eq!(status.diagnostics()[0].end_row, led_core::Row(8));
     }
 
     #[test]
@@ -1756,7 +1758,7 @@ mod tests {
         let mut status = BufferStatus::new();
         status.set_diagnostics(vec![diag(3, 3)]);
         status.shift_lines(5, -1);
-        assert_eq!(status.diagnostics()[0].start_row, 3);
+        assert_eq!(status.diagnostics()[0].start_row, led_core::Row(3));
     }
 
     #[test]
@@ -1765,7 +1767,7 @@ mod tests {
         let mut status = BufferStatus::new();
         status.set_diagnostics(vec![diag(5, 5)]);
         status.shift_lines(5, 1);
-        assert_eq!(status.diagnostics()[0].start_row, 5);
+        assert_eq!(status.diagnostics()[0].start_row, led_core::Row(5));
     }
 
     #[test]
@@ -1773,7 +1775,7 @@ mod tests {
         let mut status = BufferStatus::new();
         status.set_diagnostics(vec![diag(8, 8)]);
         status.shift_lines(5, 1);
-        assert_eq!(status.diagnostics()[0].start_row, 9);
+        assert_eq!(status.diagnostics()[0].start_row, led_core::Row(9));
     }
 
     #[test]
@@ -1786,6 +1788,6 @@ mod tests {
         status.set_diagnostics(vec![diag(5, 5), diag(7, 7), diag(10, 10)]);
         status.shift_lines(5, -3);
         assert_eq!(status.diagnostics().len(), 1);
-        assert_eq!(status.diagnostics()[0].start_row, 7); // was 10, shifted by -3
+        assert_eq!(status.diagnostics()[0].start_row, led_core::Row(7)); // was 10, shifted by -3
     }
 }

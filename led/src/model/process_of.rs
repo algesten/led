@@ -19,11 +19,11 @@ pub fn process_of(state: &Stream<Rc<AppState>>) -> Stream<Mut> {
     let redraw_s = state
         .map(|s| (s.phase == Phase::Suspended, s.force_redraw))
         .fold(
-            (false, false, 0u64),
+            (false, false, led_core::RedrawSeq(0)),
             |(_, prev_suspend, _), (suspend, redraw)| (prev_suspend, suspend, redraw),
         )
         .filter(|(prev, curr, _)| *prev && !*curr)
-        .map(|(_, _, redraw)| Mut::ForceRedraw(redraw + 1))
+        .map(|(_, _, redraw)| Mut::ForceRedraw(redraw + 1u64))
         .stream();
 
     // Activate last arg-file tab after session restore completes.

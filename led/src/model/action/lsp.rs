@@ -29,13 +29,13 @@ pub(super) fn handle_completion_action(state: &mut AppState, action: &Action) ->
                 if let Some(item) = comp.items.get(index) {
                     if let Some(path) = state.active_tab.clone() {
                         let buf = &state.buffers[&path];
-                        let cursor_row = buf.cursor_row().0;
-                        let cursor_col = buf.cursor_col().0;
+                        let cursor_row = buf.cursor_row();
+                        let cursor_col = buf.cursor_col();
 
                         // Build text edit: replace from prefix_start to current cursor
                         let te = led_lsp::TextEdit {
                             start_row: cursor_row,
-                            start_col: comp.prefix_start_col,
+                            start_col: led_core::Col(comp.prefix_start_col),
                             end_row: cursor_row,
                             end_col: cursor_col,
                             new_text: item
@@ -61,17 +61,19 @@ pub(super) fn handle_completion_action(state: &mut AppState, action: &Action) ->
                             } else {
                                 (
                                     te.start_row + newline_count,
-                                    new_text
-                                        .rsplit('\n')
-                                        .next()
-                                        .map(|l| l.chars().count())
-                                        .unwrap_or(0),
+                                    led_core::Col(
+                                        new_text
+                                            .rsplit('\n')
+                                            .next()
+                                            .map(|l| l.chars().count())
+                                            .unwrap_or(0),
+                                    ),
                                 )
                             };
-                            buf.set_cursor(led_core::Row(r), led_core::Col(c), led_core::Col(c));
+                            buf.set_cursor(r, c, c);
                             close_group_on_move(buf);
                         }
-                        mov::shift_annotations(state, &path, edit_row, old_lines, old_ver);
+                        mov::shift_annotations(state, &path, *edit_row, old_lines, old_ver);
 
                         // Apply additional edits (auto-imports etc.)
                         if !item.additional_edits.is_empty() {
@@ -85,12 +87,12 @@ pub(super) fn handle_completion_action(state: &mut AppState, action: &Action) ->
                                 .iter()
                                 .map(|e| e.start_row)
                                 .min()
-                                .unwrap_or(0);
+                                .unwrap_or(led_core::Row(0));
                             if let Some(buf) = state.buf_mut(&path) {
                                 super::super::apply_text_edits(buf, &item.additional_edits);
                                 close_group_on_move(buf);
                             }
-                            mov::shift_annotations(state, &path, edit_row, old_lines, old_ver);
+                            mov::shift_annotations(state, &path, *edit_row, old_lines, old_ver);
                         }
                     }
                     // Request resolve for additional edits from server
@@ -285,7 +287,7 @@ fn scan_diagnostics(
                 consider(
                     forward,
                     &cur,
-                    (path, d.start_row, d.start_col),
+                    (path, *d.start_row, *d.start_col),
                     &mut best,
                     &mut wrap,
                 );

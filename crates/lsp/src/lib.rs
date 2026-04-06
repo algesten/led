@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use led_core::rx::Stream;
-use led_core::{CanonPath, ContentHash, Doc, EditOp};
+use led_core::{CanonPath, Col, ContentHash, Doc, EditOp, Row};
 
 mod convert;
 mod manager;
@@ -13,10 +13,10 @@ mod transport;
 
 #[derive(Debug, Clone)]
 pub struct TextEdit {
-    pub start_row: usize,
-    pub start_col: usize,
-    pub end_row: usize,
-    pub end_col: usize,
+    pub start_row: Row,
+    pub start_col: Col,
+    pub end_row: Row,
+    pub end_col: Col,
     pub new_text: String,
 }
 
@@ -40,17 +40,17 @@ pub struct CompletionItem {
 
 #[derive(Debug, Clone)]
 pub struct InlayHint {
-    pub row: usize,
-    pub col: usize,
+    pub row: Row,
+    pub col: Col,
     pub label: String,
 }
 
 #[derive(Debug, Clone)]
 pub struct Diagnostic {
-    pub start_row: usize,
-    pub start_col: usize,
-    pub end_row: usize,
-    pub end_col: usize,
+    pub start_row: Row,
+    pub start_col: Col,
+    pub end_row: Row,
+    pub end_col: Col,
     pub severity: DiagnosticSeverity,
     pub message: String,
     pub source: Option<String>,
@@ -89,7 +89,7 @@ pub enum LspOut {
     },
     BufferSaved {
         path: CanonPath,
-        content_hash: u64,
+        content_hash: ContentHash,
     },
     BufferClosed {
         path: CanonPath,
@@ -98,29 +98,29 @@ pub enum LspOut {
     // User-initiated requests
     GotoDefinition {
         path: CanonPath,
-        row: usize,
-        col: usize,
+        row: Row,
+        col: Col,
     },
     Complete {
         path: CanonPath,
-        row: usize,
-        col: usize,
+        row: Row,
+        col: Col,
     },
     CompleteAccept {
         index: usize,
     },
     Rename {
         path: CanonPath,
-        row: usize,
-        col: usize,
+        row: Row,
+        col: Col,
         new_name: String,
     },
     CodeAction {
         path: CanonPath,
-        start_row: usize,
-        start_col: usize,
-        end_row: usize,
-        end_col: usize,
+        start_row: Row,
+        start_col: Col,
+        end_row: Row,
+        end_col: Col,
     },
     CodeActionSelect {
         index: usize,
@@ -130,8 +130,8 @@ pub enum LspOut {
     },
     InlayHints {
         path: CanonPath,
-        start_row: usize,
-        end_row: usize,
+        start_row: Row,
+        end_row: Row,
     },
 }
 
@@ -142,8 +142,8 @@ pub enum LspIn {
     // Navigation
     Navigate {
         path: CanonPath,
-        row: usize,
-        col: usize,
+        row: Row,
+        col: Col,
     },
 
     // Edits
@@ -154,7 +154,7 @@ pub enum LspIn {
     // Completion popup
     Completion {
         items: Vec<CompletionItem>,
-        prefix_start_col: usize,
+        prefix_start_col: Col,
     },
 
     // Code action picker

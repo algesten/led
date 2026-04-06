@@ -25,14 +25,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 static CHANGE_SEQ: AtomicU64 = AtomicU64::new(1);
 
-pub fn next_change_seq() -> u64 {
-    CHANGE_SEQ.fetch_add(1, Ordering::Relaxed)
+pub fn next_change_seq() -> ChangeSeq {
+    ChangeSeq(CHANGE_SEQ.fetch_add(1, Ordering::Relaxed))
 }
 
 static SYNTAX_SEQ: AtomicU64 = AtomicU64::new(1);
 
-pub fn next_syntax_seq() -> u64 {
-    SYNTAX_SEQ.fetch_add(1, Ordering::Relaxed)
+pub fn next_syntax_seq() -> SyntaxSeq {
+    SyntaxSeq(SYNTAX_SEQ.fetch_add(1, Ordering::Relaxed))
 }
 
 thread_local! {
@@ -59,9 +59,9 @@ pub enum Origin {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ChangeStamp {
-    pub seq: u64,
+    pub seq: ChangeSeq,
     pub origin: Origin,
-    pub content_hash: u64,
+    pub content_hash: ContentHash,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -167,6 +167,10 @@ newtype_u64! {
     ChangeSeq,
     /// Content hash for comparing on-disk vs in-memory state.
     ContentHash,
+    /// Monotonic syntax-reparse sequence.
+    SyntaxSeq,
+    /// Monotonic force-redraw sequence.
+    RedrawSeq,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

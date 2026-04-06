@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 
-use led_core::{CanonPath, CharOffset, ContentHash, Doc, EditOp, LanguageId, Row};
+use led_core::{CanonPath, CharOffset, Col, ContentHash, Doc, EditOp, LanguageId, Row};
 use lsp_types::{
     CodeActionOrCommand, CodeActionParams, CodeActionResponse, CompletionParams,
     CompletionResponse, DocumentFormattingParams, FormattingOptions, GotoDefinitionParams,
@@ -39,7 +39,7 @@ enum ManagerEvent {
 
 enum RequestResult {
     GotoDefinition {
-        locations: Vec<(CanonPath, usize, usize)>,
+        locations: Vec<(CanonPath, Row, Col)>,
     },
     Format {
         path: CanonPath,
@@ -66,8 +66,8 @@ enum RequestResult {
     Completion {
         path: CanonPath,
         response: CompletionResponse,
-        row: usize,
-        col: usize,
+        row: Row,
+        col: Col,
         seq: u64,
     },
     CompletionResolved {
@@ -125,8 +125,8 @@ struct LspManager {
     completion_items: Vec<lsp_types::CompletionItem>,
     /// Active completion session for re-filtering on BufferChanged
     completion_path: Option<CanonPath>,
-    completion_row: usize,
-    completion_prefix_start_col: usize,
+    completion_row: Row,
+    completion_prefix_start_col: Col,
     /// Domain items from last server response (unfiltered)
     completion_domain_items: Vec<crate::CompletionItem>,
     progress_tokens: HashMap<String, ProgressState>,
@@ -164,8 +164,8 @@ pub(crate) async fn run(
         pending_code_actions: HashMap::new(),
         completion_items: Vec::new(),
         completion_path: None,
-        completion_row: 0,
-        completion_prefix_start_col: 0,
+        completion_row: Row(0),
+        completion_prefix_start_col: Col(0),
         completion_domain_items: Vec::new(),
         progress_tokens: HashMap::new(),
         quiescent: HashMap::new(),
@@ -247,8 +247,8 @@ impl LspManager {
                                 let cursor_offset =
                                     CharOffset(op.offset.0 + op.new_text.chars().count());
                                 let row = d.char_to_line(cursor_offset);
-                                let col = cursor_offset.0 - d.line_to_char(row).0;
-                                self.spawn_completion(path.clone(), row.0, col);
+                                let col = Col(cursor_offset.0 - d.line_to_char(row).0);
+                                self.spawn_completion(path.clone(), row, col);
                             }
                         }
                     } else {
@@ -512,16 +512,16 @@ impl LspManager {
                 let old_end_clamped = CharOffset(old_end.min(last_char));
                 let end_line = old.char_to_line(old_end_clamped);
                 let end_col = old_end_clamped.0 - old.line_to_char(end_line).0;
-                let start_line_text = doc_line(old, start_line.0);
+                let start_line_text = doc_line(old, start_line);
                 let end_line_text = if end_line == start_line {
                     start_line_text.clone()
                 } else {
-                    doc_line(old, end_line.0)
+                    doc_line(old, end_line)
                 };
                 vec![lsp_types::TextDocumentContentChangeEvent {
                     range: Some(lsp_types::Range {
-                        start: lsp_pos(start_line.0, start_col, start_line_text.as_deref()),
-                        end: lsp_pos(end_line.0, end_col, end_line_text.as_deref()),
+                        start: lsp_pos(start_line, Col(start_col), start_line_text.as_deref()),
+                        end: lsp_pos(end_line, Col(end_col), end_line_text.as_deref()),
                     }),
                     range_length: None,
                     text: op.new_text.clone(),
@@ -594,7 +594,7 @@ impl LspManager {
 
     // ── Feature requests ──
 
-    fn spawn_goto_definition(&self, path: CanonPath, row: usize, col: usize) {
+    fn spawn_goto_definition(&self, path: CanonPath, row: Row, col: Col) {
         let Some(server) = self.server_for_path(&path) else {
             return;
         };
@@ -632,7 +632,7 @@ impl LspManager {
         });
     }
 
-    fn spawn_completion(&mut self, path: CanonPath, row: usize, col: usize) {
+    fn spawn_completion(&mut self, path: CanonPath, row: Row, col: Col) {
         let Some(server) = self.server_for_path(&path) else {
             return;
         };
@@ -715,7 +715,7 @@ impl LspManager {
         });
     }
 
-    fn spawn_rename(&self, path: CanonPath, row: usize, col: usize, new_name: String) {
+    fn spawn_rename(&self, path: CanonPath, row: Row, col: Col, new_name: String) {
         let Some(server) = self.server_for_path(&path) else {
             return;
         };
@@ -758,10 +758,10 @@ impl LspManager {
     fn spawn_code_action(
         &self,
         path: CanonPath,
-        start_row: usize,
-        start_col: usize,
-        end_row: usize,
-        end_col: usize,
+        start_row: Row,
+        start_col: Col,
+        end_row: Row,
+        end_col: Col,
     ) {
         let Some(server) = self.server_for_path(&path) else {
             return;
@@ -930,7 +930,7 @@ impl LspManager {
         });
     }
 
-    fn spawn_inlay_hints(&self, path: CanonPath, start_row: usize, end_row: usize) {
+    fn spawn_inlay_hints(&self, path: CanonPath, start_row: Row, end_row: Row) {
         let Some(server) = self.server_for_path(&path) else {
             return;
         };
@@ -943,8 +943,8 @@ impl LspManager {
             let params = InlayHintParams {
                 text_document: TextDocumentIdentifier { uri },
                 range: Range {
-                    start: lsp_pos(start_row, 0, None),
-                    end: lsp_pos(end_row, 0, None),
+                    start: lsp_pos(start_row, Col(0), None),
+                    end: lsp_pos(end_row, Col(0), None),
                 },
                 work_done_progress_params: Default::default(),
             };
@@ -981,7 +981,7 @@ impl LspManager {
                         let line_at = |row: usize| {
                             self.docs
                                 .get(&path)
-                                .and_then(|d| doc_line(&**d, row))
+                                .and_then(|d| doc_line(&**d, Row(row)))
                                 .or_else(|| {
                                     std::fs::read_to_string(path.as_path())
                                         .ok()
@@ -1055,7 +1055,8 @@ impl LspManager {
                 }
             }
             RequestResult::Format { path, edits } => {
-                let line_at = |row: usize| self.docs.get(&path).and_then(|d| doc_line(&**d, row));
+                let line_at =
+                    |row: usize| self.docs.get(&path).and_then(|d| doc_line(&**d, Row(row)));
                 let domain_edits: Vec<crate::TextEdit> = edits
                     .iter()
                     .map(|e| lsp_text_edit_to_domain(e, &line_at))
@@ -1112,7 +1113,8 @@ impl LspManager {
                 }
             }
             RequestResult::InlayHints { path, hints } => {
-                let line_at = |row: usize| self.docs.get(&path).and_then(|d| doc_line(&**d, row));
+                let line_at =
+                    |row: usize| self.docs.get(&path).and_then(|d| doc_line(&**d, Row(row)));
                 let domain_hints = convert_inlay_hints(hints, &line_at);
                 let _ = result_tx
                     .send(LspIn::InlayHints {
@@ -1122,7 +1124,8 @@ impl LspManager {
                     .await;
             }
             RequestResult::Diagnostics { path, raw } => {
-                let line_at = |row: usize| self.docs.get(&path).and_then(|d| doc_line(&**d, row));
+                let line_at =
+                    |row: usize| self.docs.get(&path).and_then(|d| doc_line(&**d, Row(row)));
                 let diagnostics = convert_diagnostics(&raw, &line_at);
                 let h = self
                     .docs
@@ -1148,7 +1151,7 @@ impl LspManager {
                 if seq != self.completion_seq {
                     return;
                 }
-                let line_at = |r: usize| self.docs.get(&path).and_then(|d| doc_line(&**d, r));
+                let line_at = |r: usize| self.docs.get(&path).and_then(|d| doc_line(&**d, Row(r)));
 
                 // Store raw items for resolve
                 let raw_items = match &response {
@@ -1313,18 +1316,18 @@ impl LspManager {
         };
 
         let row = self.completion_row;
-        if row >= doc.line_count() {
+        if *row >= doc.line_count() {
             self.clear_completion(result_tx).await;
             return;
         }
 
         let line_chars: Vec<char> = led_core::with_line_buf(|line| {
-            doc.line(Row(row), line);
+            doc.line(row, line);
             let t = line.trim_end_matches(&['\n', '\r'][..]).len();
             line.truncate(t);
             line.chars().collect()
         });
-        let psc = self.completion_prefix_start_col;
+        let psc = *self.completion_prefix_start_col;
 
         // Line got shorter than prefix start → dismiss
         if psc > line_chars.len() {
@@ -1349,7 +1352,7 @@ impl LspManager {
                 id_end += 1;
             }
             // Edit is on a different row, or outside the identifier range → stale
-            if edit_row.0 != row || edit_col < psc || edit_col > id_end {
+            if edit_row != row || edit_col < psc || edit_col > id_end {
                 self.clear_completion(result_tx).await;
                 return;
             }
@@ -1370,7 +1373,7 @@ impl LspManager {
             let _ = result_tx
                 .send(LspIn::Completion {
                     items: self.completion_domain_items.clone(),
-                    prefix_start_col: psc,
+                    prefix_start_col: Col(psc),
                 })
                 .await;
             return;
@@ -1384,7 +1387,7 @@ impl LspManager {
             let _ = result_tx
                 .send(LspIn::Completion {
                     items: filtered,
-                    prefix_start_col: psc,
+                    prefix_start_col: Col(psc),
                 })
                 .await;
         }
@@ -1396,7 +1399,7 @@ impl LspManager {
         let _ = result_tx
             .send(LspIn::Completion {
                 items: vec![],
-                prefix_start_col: 0,
+                prefix_start_col: Col(0),
             })
             .await;
     }
@@ -1561,7 +1564,7 @@ impl LspManager {
 
     // ── Helpers ──
 
-    fn line_at(&self, path: &CanonPath, row: usize) -> Option<String> {
+    fn line_at(&self, path: &CanonPath, row: Row) -> Option<String> {
         self.docs.get(path).and_then(|d| doc_line(&**d, row))
     }
 }
@@ -1696,10 +1699,10 @@ async fn run_prettier(
         .unwrap_or(0);
 
     Some(vec![crate::TextEdit {
-        start_row: 0,
-        start_col: 0,
-        end_row: last_line,
-        end_col: last_col,
+        start_row: Row(0),
+        start_col: Col(0),
+        end_row: Row(last_line),
+        end_col: Col(last_col),
         new_text: formatted,
     }])
 }

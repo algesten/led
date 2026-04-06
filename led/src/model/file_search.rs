@@ -529,7 +529,7 @@ fn reinsert_hit_into_results(fs: &mut FileSearchState, entry: &ReplaceEntry, lin
 
     let hit = led_state::file_search::SearchHit {
         row: entry.row,
-        col: line_text[..entry.match_start].chars().count(),
+        col: led_core::Col(line_text[..entry.match_start].chars().count()),
         line_text: line_text.to_string(),
         match_start: entry.match_start,
         match_end: entry.match_end,
@@ -590,7 +590,7 @@ fn replace_selected(state: &mut AppState) {
         replace_in_buffer(
             state,
             &bp,
-            row,
+            *row,
             match_start,
             match_end,
             &replacement,
@@ -658,7 +658,7 @@ fn unreplace_selected(state: &mut AppState) {
         replace_in_buffer(
             state,
             &bp,
-            entry.row,
+            *entry.row,
             entry.match_start,
             entry.match_start + entry.replacement_len,
             &entry.original_text,
@@ -669,7 +669,7 @@ fn unreplace_selected(state: &mut AppState) {
         }
         let line_text = led_core::with_line_buf(|buf| {
             if let Some(b) = state.buffers.get(&bp) {
-                b.doc().line(led_core::Row(entry.row), buf);
+                b.doc().line(entry.row, buf);
                 let t = buf.trim_end_matches(&['\n', '\r'][..]).len();
                 buf.truncate(t);
             }
@@ -738,7 +738,7 @@ fn replace_all(state: &mut AppState) {
         let original = hit.line_text[hit.match_start..hit.match_end].to_string();
         hits_by_buf.entry(group.path.clone()).or_default().push((
             fi,
-            hit.row,
+            *hit.row,
             hit.match_start,
             hit.match_end,
             original,
@@ -759,7 +759,7 @@ fn replace_all(state: &mut AppState) {
                 fs.replace_stack.push(ReplaceEntry {
                     flat_hit_idx: *fi,
                     path: path.clone(),
-                    row: *row,
+                    row: led_core::Row(*row),
                     original_text: original.clone(),
                     match_start: *ms,
                     match_end: *me,
@@ -793,9 +793,11 @@ fn replace_all(state: &mut AppState) {
         };
         for path in &non_open_paths {
             if let Some(hits) = hits_by_buf.get(path) {
-                let stashed: Vec<(usize, usize, usize, String)> = hits
+                let stashed: Vec<(led_core::Row, usize, usize, String)> = hits
                     .iter()
-                    .map(|(_fi, row, ms, me, original)| (*row, *ms, *me, original.clone()))
+                    .map(|(_fi, row, ms, me, original)| {
+                        (led_core::Row(*row), *ms, *me, original.clone())
+                    })
                     .collect();
                 pending.hits.insert(path.clone(), stashed);
             }
@@ -850,7 +852,7 @@ pub fn apply_pending_replace(state: &mut AppState, buf_path: &led_core::CanonPat
     // Apply replacements in reverse order (one undo group)
     close_undo_group(state, buf_path);
     for (row, ms, me, _original) in hits.iter().rev() {
-        replace_in_buffer(state, buf_path, *row, *ms, *me, &replacement, Some(&query));
+        replace_in_buffer(state, buf_path, **row, *ms, *me, &replacement, Some(&query));
     }
     if let Some(buf) = state.buf_mut(buf_path) {
         buf.close_group_on_move();
@@ -1015,8 +1017,8 @@ fn confirm_selected(state: &mut AppState) {
     if super::action::promote_preview(state, &path) {
         if let Some(active_path) = state.active_tab.clone() {
             if let Some(buf) = state.buf_mut(&active_path) {
-                let r = row.min(buf.doc().line_count().saturating_sub(1));
-                buf.set_cursor(led_core::Row(r), led_core::Col(col), led_core::Col(col));
+                let r = led_core::Row((*row).min(buf.doc().line_count().saturating_sub(1)));
+                buf.set_cursor(r, col, col);
             }
         }
         super::action::reveal_active_buffer(state);
@@ -1033,18 +1035,14 @@ fn confirm_selected(state: &mut AppState) {
     if let Some(buf_path) = existing {
         state.active_tab = Some(buf_path.clone());
         if let Some(buf) = state.buf_mut(&buf_path) {
-            let r = row.min(buf.doc().line_count().saturating_sub(1));
-            buf.set_cursor(led_core::Row(r), led_core::Col(col), led_core::Col(col));
+            let r = led_core::Row((*row).min(buf.doc().line_count().saturating_sub(1)));
+            buf.set_cursor(r, col, col);
         }
         super::action::reveal_active_buffer(state);
     } else {
         super::request_open(state, path.clone(), false);
         if let Some(tab) = state.tabs.iter_mut().find(|t| *t.path() == path) {
-            tab.set_cursor(
-                led_core::Row(row),
-                led_core::Col(col),
-                led_core::Row(row.saturating_sub(5)),
-            );
+            tab.set_cursor(row, col, led_core::Row((*row).saturating_sub(5)));
         }
         state.active_tab = Some(path);
     }

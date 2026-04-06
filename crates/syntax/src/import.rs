@@ -1,4 +1,4 @@
-use led_core::{CharOffset, Doc};
+use led_core::{CharOffset, Doc, Row};
 use tree_sitter::{QueryCursor, StreamingIterator, Tree};
 
 use crate::config::ImportsConfig;
@@ -7,8 +7,8 @@ use crate::parse::{DocProvider, node_text};
 #[derive(Debug, Clone)]
 pub struct ImportItem {
     pub full_text: String,
-    pub start_row: usize,
-    pub end_row: usize,
+    pub start_row: Row,
+    pub end_row: Row,
     pub start_byte: usize,
     pub end_byte: usize,
 }
@@ -26,8 +26,8 @@ pub(crate) fn imports(config: &ImportsConfig, tree: &Tree, doc: &dyn Doc) -> Vec
             if cap.index == config.import_capture_ix {
                 items.push(ImportItem {
                     full_text: node_text(doc, &cap.node),
-                    start_row: cap.node.start_position().row,
-                    end_row: cap.node.end_position().row,
+                    start_row: Row(cap.node.start_position().row),
+                    end_row: Row(cap.node.end_position().row),
                     start_byte: cap.node.start_byte(),
                     end_byte: cap.node.end_byte(),
                 });

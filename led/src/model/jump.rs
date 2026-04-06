@@ -53,9 +53,9 @@ fn current_position(state: &AppState) -> Option<JumpPosition> {
     let path = buf.path()?.clone();
     Some(JumpPosition {
         path,
-        row: buf.cursor_row().0,
-        col: buf.cursor_col().0,
-        scroll_offset: buf.scroll_row().0,
+        row: buf.cursor_row(),
+        col: buf.cursor_col(),
+        scroll_offset: buf.scroll_row(),
     })
 }
 
@@ -73,24 +73,16 @@ fn navigate_to_position(state: &mut AppState, pos: JumpPosition) {
     if let Some(buf_path) = existing {
         state.active_tab = Some(buf_path.clone());
         if let Some(buf) = state.buf_mut(&buf_path) {
-            let row = pos.row.min(buf.doc().line_count().saturating_sub(1));
-            buf.set_cursor(
-                led_core::Row(row),
-                led_core::Col(pos.col),
-                led_core::Col(pos.col),
-            );
-            buf.set_scroll(led_core::Row(pos.scroll_offset), buf.scroll_sub_line());
+            let row = led_core::Row((*pos.row).min(buf.doc().line_count().saturating_sub(1)));
+            buf.set_cursor(row, pos.col, pos.col);
+            buf.set_scroll(pos.scroll_offset, buf.scroll_sub_line());
         }
         super::action::reveal_active_buffer(state);
     } else {
         // File not open — request open with pending cursor on tab.
         super::request_open(state, pos.path.clone(), false);
         if let Some(tab) = state.tabs.iter_mut().find(|t| *t.path() == pos.path) {
-            tab.set_cursor(
-                led_core::Row(pos.row),
-                led_core::Col(pos.col),
-                led_core::Row(pos.scroll_offset),
-            );
+            tab.set_cursor(pos.row, pos.col, pos.scroll_offset);
         }
         state.active_tab = Some(pos.path);
     }

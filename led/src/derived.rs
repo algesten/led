@@ -4,6 +4,7 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use led_core::CanonPath;
+use led_core::SyntaxSeq;
 
 use led_config_file::{ConfigDir, ConfigFileOut};
 use led_core::rx::Stream;
@@ -82,10 +83,10 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
                     Some(SessionBuffer {
                         file_path,
                         tab_order: i,
-                        cursor_row: b.cursor_row().0,
-                        cursor_col: b.cursor_col().0,
-                        scroll_row: b.scroll_row().0,
-                        scroll_sub_line: b.scroll_sub_line().0,
+                        cursor_row: b.cursor_row(),
+                        cursor_col: b.cursor_col(),
+                        scroll_row: b.scroll_row(),
+                        scroll_sub_line: b.scroll_sub_line(),
                         undo: None,
                     })
                 })
@@ -404,18 +405,18 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
     // request internally (Full or Partial) when mutated.  This stream
     // emits SyntaxOut::BufferChanged for every buffer with a pending
     // request.
-    fn syntax_seq_key(s: &Rc<AppState>) -> u64 {
+    fn syntax_seq_key(s: &Rc<AppState>) -> SyntaxSeq {
         s.buffers
             .values()
             .filter(|b| b.is_materialized())
             .map(|b| b.pending_syntax_seq())
             .max()
-            .unwrap_or(0)
+            .unwrap_or(SyntaxSeq(0))
     }
 
     let syntax_requests = state
         .dedupe_by(syntax_seq_key)
-        .filter(|s| syntax_seq_key(s) > 0)
+        .filter(|s| syntax_seq_key(s) > SyntaxSeq(0))
         .map(|s| {
             let buffer_height = s.dims.map_or(50, |d| d.buffer_height());
             s.buffers
@@ -436,12 +437,12 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
                     Some(SyntaxOut::BufferChanged {
                         path,
                         doc: b.doc().clone(),
-                        version: b.version().0,
+                        version: b.version(),
                         edit_ops,
-                        scroll_row: b.scroll_row().0,
+                        scroll_row: b.scroll_row(),
                         buffer_height,
-                        cursor_row: b.cursor_row().0,
-                        cursor_col: b.cursor_col().0,
+                        cursor_row: b.cursor_row(),
+                        cursor_col: b.cursor_col(),
                         indent_row,
                     })
                 })
@@ -456,7 +457,7 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
         .dedupe_by(|s| {
             s.active_tab.as_ref().and_then(|path| {
                 let buf = s.buffers.get(path)?;
-                Some((path.clone(), buf.scroll_row().0, buf.cursor_row().0))
+                Some((path.clone(), buf.scroll_row(), buf.cursor_row()))
             })
         })
         .filter(|s| {
@@ -473,12 +474,12 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
             Some(SyntaxOut::BufferChanged {
                 path,
                 doc: buf.doc().clone(),
-                version: buf.version().0,
+                version: buf.version(),
                 edit_ops: vec![],
-                scroll_row: buf.scroll_row().0,
+                scroll_row: buf.scroll_row(),
                 buffer_height,
-                cursor_row: buf.cursor_row().0,
-                cursor_col: buf.cursor_col().0,
+                cursor_row: buf.cursor_row(),
+                cursor_col: buf.cursor_col(),
                 indent_row: None,
             })
         })
@@ -663,7 +664,7 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
         .dedupe_by(|s| {
             s.active_tab.as_ref().and_then(|path| {
                 let buf = s.buffers.get(path)?;
-                Some((path.clone(), buf.version().0))
+                Some((path.clone(), buf.version()))
             })
         })
         .filter(|s| s.active_tab.is_some())
@@ -691,7 +692,7 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
             let path = buf.path().cloned()?;
             Some(LspOut::BufferSaved {
                 path,
-                content_hash: buf.doc().content_hash().0,
+                content_hash: buf.doc().content_hash(),
             })
         })
         .stream();
@@ -704,7 +705,7 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
             }
             s.active_tab.as_ref().and_then(|path| {
                 let buf = s.buffers.get(path)?;
-                Some((path.clone(), buf.scroll_row().0 / 5, buf.version().0))
+                Some((path.clone(), *buf.scroll_row() / 5, buf.version()))
             })
         })
         .filter(|s| s.lsp.inlay_hints_enabled)
@@ -713,9 +714,9 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
             let active_path = s.active_tab.as_ref()?;
             let buf = s.buffers.get(active_path)?;
             let path = buf.path().cloned()?;
-            let start_row = buf.scroll_row().0;
+            let start_row = buf.scroll_row();
             let buffer_height = s.dims.map_or(50, |d| d.buffer_height());
-            let end_row = start_row + buffer_height + 10;
+            let end_row = led_core::Row(*start_row + buffer_height + 10);
             Some(LspOut::InlayHints {
                 path,
                 start_row,
@@ -734,14 +735,13 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
             let active_path = s.active_tab.as_ref()?;
             let buf = s.buffers.get(active_path)?;
             let path = buf.path().cloned()?;
-            let row = buf.cursor_row().0;
-            let col = buf.cursor_col().0;
+            let row = buf.cursor_row();
+            let col = buf.cursor_col();
             match req {
                 LspRequest::GotoDefinition => Some(LspOut::GotoDefinition { path, row, col }),
                 LspRequest::Format => Some(LspOut::Format { path }),
                 LspRequest::CodeAction => {
-                    let (end_row, end_col) =
-                        buf.mark().map(|(r, c)| (r.0, c.0)).unwrap_or((row, col));
+                    let (end_row, end_col) = buf.mark().unwrap_or((row, col));
                     let (sr, sc, er, ec) = if (row, col) <= (end_row, end_col) {
                         (row, col, end_row, end_col)
                     } else {

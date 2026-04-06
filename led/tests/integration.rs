@@ -2124,7 +2124,7 @@ fn simulate_external_edit(
         &root_str,
         &path_str,
         chain_id,
-        content_hash,
+        led_core::ContentHash(content_hash),
         undo_entries.len(),
         distance,
         &entries,
@@ -3257,7 +3257,7 @@ fn kill_line_keeps_highlights_in_sync() {
             // "fn" keyword should be highlighted on line 0 (bbb) after kills.
             b.syntax_highlights()
                 .iter()
-                .any(|(line, span)| *line == 0 && span.capture_name.contains("keyword"))
+                .any(|(line, span)| **line == 0 && span.capture_name.contains("keyword"))
         }),
     ]);
 
@@ -3268,8 +3268,8 @@ fn kill_line_keeps_highlights_in_sync() {
     let line_count = b.doc().line_count();
     for (line, span) in b.syntax_highlights().iter() {
         assert!(
-            *line < line_count,
-            "highlight on line {} but doc has {} lines, span: {:?}",
+            **line < line_count,
+            "highlight on line {:?} but doc has {} lines, span: {:?}",
             line,
             line_count,
             span.capture_name,
@@ -3280,7 +3280,7 @@ fn kill_line_keeps_highlights_in_sync() {
     let has_fn_on_line0 = b
         .syntax_highlights()
         .iter()
-        .any(|(line, span)| *line == 0 && span.capture_name.contains("keyword"));
+        .any(|(line, span)| **line == 0 && span.capture_name.contains("keyword"));
     assert!(
         has_fn_on_line0,
         "expected 'fn' keyword highlight on line 0 after kill"
@@ -3325,7 +3325,7 @@ fn kill_line_long_file_highlights_recover() {
                 .unwrap();
             b.syntax_highlights()
                 .iter()
-                .any(|(line, span)| *line == 0 && span.capture_name.contains("comment"))
+                .any(|(line, span)| **line == 0 && span.capture_name.contains("comment"))
         }),
     ]);
 
@@ -3336,7 +3336,7 @@ fn kill_line_long_file_highlights_recover() {
     let has_comment = b
         .syntax_highlights()
         .iter()
-        .any(|(line, span)| *line == 0 && span.capture_name.contains("comment"));
+        .any(|(line, span)| **line == 0 && span.capture_name.contains("comment"));
     assert!(
         has_comment,
         "line 0 should have comment highlight after kill"
@@ -3345,7 +3345,7 @@ fn kill_line_long_file_highlights_recover() {
     let has_keyword_on_0 = b
         .syntax_highlights()
         .iter()
-        .any(|(line, span)| *line == 0 && span.capture_name.contains("keyword"));
+        .any(|(line, span)| **line == 0 && span.capture_name.contains("keyword"));
     assert!(
         !has_keyword_on_0,
         "line 0 should NOT have keyword highlight (stale cache!)"
@@ -3398,7 +3398,7 @@ More text
             let lc = b.doc().line_count();
             // Highlights must be non-empty and fully within bounds
             !b.syntax_highlights().is_empty()
-                && b.syntax_highlights().iter().all(|(line, _)| *line < lc)
+                && b.syntax_highlights().iter().all(|(line, _)| **line < lc)
         }),
     ]);
 
@@ -3409,8 +3409,8 @@ More text
     let lc = b.doc().line_count();
     for (line, span) in b.syntax_highlights().iter() {
         assert!(
-            *line < lc,
-            "stale highlight: line {} >= line_count {}, capture: {:?}",
+            **line < lc,
+            "stale highlight: line {:?} >= line_count {}, capture: {:?}",
             line,
             lc,
             span.capture_name,

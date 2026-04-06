@@ -23,7 +23,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use led_core::rx::Stream;
-use led_core::{CanonPath, Doc, EditOp};
+use led_core::{CanonPath, Col, Doc, DocVersion, EditOp, Row};
 use led_state::BracketPair;
 use tokio::sync::mpsc;
 
@@ -34,13 +34,13 @@ pub enum SyntaxOut {
     BufferChanged {
         path: CanonPath,
         doc: Arc<dyn Doc>,
-        version: u64,
+        version: DocVersion,
         edit_ops: Vec<EditOp>,
-        scroll_row: usize,
+        scroll_row: Row,
         buffer_height: usize,
-        cursor_row: usize,
-        cursor_col: usize,
-        indent_row: Option<usize>,
+        cursor_row: Row,
+        cursor_col: Col,
+        indent_row: Option<Row>,
     },
     BufferClosed {
         path: CanonPath,
@@ -50,12 +50,12 @@ pub enum SyntaxOut {
 #[derive(Clone)]
 pub struct SyntaxIn {
     pub path: CanonPath,
-    pub doc_version: u64,
-    pub highlights: Rc<Vec<(usize, HighlightSpan)>>,
+    pub doc_version: DocVersion,
+    pub highlights: Rc<Vec<(Row, HighlightSpan)>>,
     pub bracket_pairs: Vec<BracketPair>,
-    pub matching_bracket: Option<(usize, usize)>,
+    pub matching_bracket: Option<(Row, Col)>,
     pub indent: Option<String>,
-    pub indent_row: Option<usize>,
+    pub indent_row: Option<Row>,
     /// Characters that trigger re-indentation when typed, as declared by the language.
     pub reindent_chars: Arc<[char]>,
 }
@@ -79,11 +79,11 @@ pub fn driver(out: Stream<SyntaxOut>) -> Stream<SyntaxIn> {
     tokio::task::spawn_local(async move {
         struct BufSyntax {
             state: SyntaxState,
-            last_ver: u64,
+            last_ver: DocVersion,
             last_doc: Arc<dyn Doc>,
-            last_scroll: usize,
-            last_end_line: usize,
-            cached_highlights: Rc<Vec<(usize, HighlightSpan)>>,
+            last_scroll: Row,
+            last_end_line: Row,
+            cached_highlights: Rc<Vec<(Row, HighlightSpan)>>,
             cached_brackets: Vec<led_state::BracketPair>,
             reindent_chars: Arc<[char]>,
         }
@@ -92,11 +92,11 @@ pub fn driver(out: Stream<SyntaxOut>) -> Stream<SyntaxIn> {
         // Scratch space for coalescing queued messages per buffer.
         struct Coalesced {
             doc: Arc<dyn Doc>,
-            version: u64,
+            version: DocVersion,
             edit_ops: Vec<EditOp>,
-            scroll_row: usize,
+            scroll_row: Row,
             buffer_height: usize,
-            indent_row: Option<usize>,
+            indent_row: Option<Row>,
         }
 
         while let Some(cmd) = cmd_rx.recv().await {
@@ -180,8 +180,8 @@ pub fn driver(out: Stream<SyntaxOut>) -> Stream<SyntaxIn> {
                                 state: ss,
                                 last_ver: version,
                                 last_doc: doc.clone(),
-                                last_scroll: usize::MAX,
-                                last_end_line: 0,
+                                last_scroll: Row(usize::MAX),
+                                last_end_line: Row(0),
                                 cached_highlights: Rc::new(Vec::new()),
                                 cached_brackets: Vec::new(),
                                 reindent_chars,
@@ -210,7 +210,7 @@ pub fn driver(out: Stream<SyntaxOut>) -> Stream<SyntaxIn> {
                 // Update parse tree if doc changed
                 let doc_changed = version != bs.last_ver;
                 if doc_changed {
-                    let new_op_count = (version - bs.last_ver) as usize;
+                    let new_op_count = (*version - *bs.last_ver) as usize;
                     if !edit_ops.is_empty() && edit_ops.len() >= new_op_count {
                         let ops = &edit_ops[edit_ops.len() - new_op_count..];
                         if new_op_count == 1 {
@@ -245,12 +245,12 @@ pub fn driver(out: Stream<SyntaxOut>) -> Stream<SyntaxIn> {
                 }
 
                 // Recompute highlights/brackets when doc or viewport changed
-                let end_line = (scroll_row + buffer_height + 5).min(doc.line_count());
+                let end_line = Row((*scroll_row + buffer_height + 5).min(doc.line_count()));
                 let viewport_changed = scroll_row != bs.last_scroll || end_line != bs.last_end_line;
 
                 if doc_changed || viewport_changed || bs.cached_highlights.is_empty() {
                     bs.cached_highlights =
-                        Rc::new(bs.state.highlights_for_lines(&*doc, scroll_row, end_line));
+                        Rc::new(bs.state.highlights_for_lines(&*doc, *scroll_row, *end_line));
                     bs.cached_brackets = to_state_brackets(&bs.state, &*doc, scroll_row, end_line);
                     bs.last_scroll = scroll_row;
                     bs.last_end_line = end_line;
@@ -295,12 +295,12 @@ pub fn driver(out: Stream<SyntaxOut>) -> Stream<SyntaxIn> {
 fn to_state_brackets(
     ss: &SyntaxState,
     doc: &dyn Doc,
-    scroll_row: usize,
-    end_line: usize,
+    scroll_row: Row,
+    end_line: Row,
 ) -> Vec<BracketPair> {
-    let start_byte = doc.line_to_byte(led_core::Row(scroll_row));
-    let end_byte = if end_line < doc.line_count() {
-        doc.line_to_byte(led_core::Row(end_line))
+    let start_byte = doc.line_to_byte(scroll_row);
+    let end_byte = if *end_line < doc.line_count() {
+        doc.line_to_byte(end_line)
     } else {
         doc.len_bytes()
     };
@@ -312,14 +312,14 @@ fn to_state_brackets(
         .filter(|bm| bm.open_range.start < len && bm.close_range.start < len)
         .map(|bm| {
             let open_byte = bm.open_range.start;
-            let open_line = doc.byte_to_line(open_byte).0;
+            let open_line = doc.byte_to_line(open_byte);
             let open_char = doc.byte_to_char(open_byte);
-            let open_col = open_char - doc.line_to_char(led_core::Row(open_line)).0;
+            let open_col = Col(open_char - doc.line_to_char(open_line).0);
 
             let close_byte = bm.close_range.start;
-            let close_line = doc.byte_to_line(close_byte).0;
+            let close_line = doc.byte_to_line(close_byte);
             let close_char = doc.byte_to_char(close_byte);
-            let close_col = close_char - doc.line_to_char(led_core::Row(close_line)).0;
+            let close_col = Col(close_char - doc.line_to_char(close_line).0);
 
             BracketPair {
                 open_line,

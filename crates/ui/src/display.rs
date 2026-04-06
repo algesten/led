@@ -7,6 +7,7 @@ use led_core::Doc;
 use led_core::PanelSlot;
 use led_core::git::{self, FileStatus, LineStatus};
 use led_core::wrap::{chars_to_string, compute_chunks, expand_tabs, find_sub_line};
+use led_core::{Col, ContentHash, RedrawSeq, Row, SubLine};
 use led_state::{AppState, BracketPair, Dimensions, EntryKind, HighlightSpan};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
@@ -19,38 +20,38 @@ use crate::style;
 pub struct DisplayInputs {
     buffer_path: Option<CanonPath>,
     doc: Arc<dyn Doc>,
-    scroll_row: usize,
-    scroll_sub_line: usize,
+    scroll_row: Row,
+    scroll_sub_line: SubLine,
     text_width: usize,
     buffer_height: usize,
     gutter_style: Style,
     text_style: Style,
     /// Normalized selection range: ((start_row, start_col), (end_row, end_col)) where start <= end.
-    selection: Option<((usize, usize), (usize, usize))>,
+    selection: Option<((Row, Col), (Row, Col))>,
     selection_style: Style,
     // Search match highlighting
-    search_matches: Vec<(usize, usize, usize)>,
+    search_matches: Vec<(Row, Col, usize)>,
     search_match_idx: Option<usize>,
     search_match_style: Style,
     search_current_style: Style,
     // File search (C-f) match highlight in preview buffer
-    file_search_match: Option<(usize, usize, usize)>,
+    file_search_match: Option<(Row, Col, usize)>,
     file_search_match_style: Style,
     // Syntax highlighting
-    syntax_highlights: Rc<Vec<(usize, HighlightSpan)>>,
+    syntax_highlights: Rc<Vec<(Row, HighlightSpan)>>,
     bracket_pairs: Rc<Vec<BracketPair>>,
-    matching_bracket: Option<(usize, usize)>,
-    cursor_row: usize,
-    cursor_col: usize,
-    content_hash: u64,
+    matching_bracket: Option<(Row, Col)>,
+    cursor_row: Row,
+    cursor_col: Col,
+    content_hash: ContentHash,
     syntax_styles: Rc<HashMap<String, Style>>,
     bracket_match_style: Style,
     rainbow_styles: [Style; 6],
     git_line_statuses: Vec<LineStatus>,
     gutter_added_style: Style,
     gutter_modified_style: Style,
-    diagnostics: Vec<(usize, usize, usize, usize, led_lsp::DiagnosticSeverity)>,
-    inlay_hints: Vec<(usize, usize, String)>,
+    diagnostics: Vec<(Row, Col, Row, Col, led_lsp::DiagnosticSeverity)>,
+    inlay_hints: Vec<(Row, Col, String)>,
     diagnostic_error_style: Style,
     diagnostic_warning_style: Style,
     diagnostic_info_style: Style,
@@ -106,9 +107,9 @@ pub fn display_inputs(s: &AppState) -> Option<DisplayInputs> {
     let selection = buf.mark().map(|(mr, mc)| {
         let (cr, cc) = (buf.cursor_row(), buf.cursor_col());
         if (mr, mc) <= (cr, cc) {
-            ((mr.0, mc.0), (cr.0, cc.0))
+            ((mr, mc), (cr, cc))
         } else {
-            ((cr.0, cc.0), (mr.0, mc.0))
+            ((cr, cc), (mr, mc))
         }
     });
 
@@ -135,14 +136,14 @@ pub fn display_inputs(s: &AppState) -> Option<DisplayInputs> {
     let gutter_added_style = style::resolve_cached(theme, &theme.git.gutter_added);
     let gutter_modified_style = style::resolve_cached(theme, &theme.git.gutter_modified);
 
-    let diagnostics: Vec<(usize, usize, usize, usize, led_lsp::DiagnosticSeverity)> = buf
+    let diagnostics: Vec<(Row, Col, Row, Col, led_lsp::DiagnosticSeverity)> = buf
         .status()
         .diagnostics()
         .iter()
         .map(|d| (d.start_row, d.start_col, d.end_row, d.end_col, d.severity))
         .collect();
 
-    let inlay_hints: Vec<(usize, usize, String)> = buf
+    let inlay_hints: Vec<(Row, Col, String)> = buf
         .status()
         .inlay_hints()
         .iter()
@@ -172,8 +173,8 @@ pub fn display_inputs(s: &AppState) -> Option<DisplayInputs> {
     Some(DisplayInputs {
         buffer_path: buf.path().cloned(),
         doc: buf.doc().clone(),
-        scroll_row: buf.scroll_row().0,
-        scroll_sub_line: buf.scroll_sub_line().0,
+        scroll_row: buf.scroll_row(),
+        scroll_sub_line: buf.scroll_sub_line(),
         text_width: dims.text_width(),
         buffer_height: dims.buffer_height(),
         gutter_style: style::resolve_cached(theme, &theme.editor.gutter),
@@ -190,12 +191,12 @@ pub fn display_inputs(s: &AppState) -> Option<DisplayInputs> {
         bracket_pairs: buf.bracket_pairs().clone(),
         matching_bracket: BracketPair::find_match(
             buf.bracket_pairs(),
-            buf.cursor_row().0,
-            buf.cursor_col().0,
+            buf.cursor_row(),
+            buf.cursor_col(),
         ),
-        cursor_row: buf.cursor_row().0,
-        cursor_col: buf.cursor_col().0,
-        content_hash: buf.content_hash().0,
+        cursor_row: buf.cursor_row(),
+        cursor_col: buf.cursor_col(),
+        content_hash: buf.content_hash(),
         syntax_styles: style::resolve_syntax_map(theme_arc),
         bracket_match_style: style::resolve_cached(theme, &theme.brackets.match_),
         rainbow_styles: [
@@ -231,8 +232,8 @@ fn build_display_lines_inner(d: &DisplayInputs, line_buf: &mut String) -> Rc<Vec
     let mut display_lines: Vec<Line<'static>> = Vec::with_capacity(d.buffer_height);
     let line_count = d.doc.line_count();
     let mut screen_row: usize = 0;
-    let mut line_idx = d.scroll_row;
-    let mut skip_sub_lines = d.scroll_sub_line;
+    let mut line_idx = *d.scroll_row;
+    let mut skip_sub_lines = *d.scroll_sub_line;
 
     while screen_row < d.buffer_height && line_idx < line_count {
         d.doc.line(led_core::Row(line_idx), line_buf);
@@ -241,14 +242,14 @@ fn build_display_lines_inner(d: &DisplayInputs, line_buf: &mut String) -> Rc<Vec
 
         // Compute selected display-column range for this line
         let sel_dcols = match d.selection {
-            Some(((sr, sc), (er, ec))) if line_idx >= sr && line_idx <= er => {
-                let sd = if line_idx == sr {
-                    char_map.get(sc).copied().unwrap_or(display.len())
+            Some(((sr, sc), (er, ec))) if line_idx >= *sr && line_idx <= *er => {
+                let sd = if line_idx == *sr {
+                    char_map.get(*sc).copied().unwrap_or(display.len())
                 } else {
                     0
                 };
-                let ed = if line_idx == er {
-                    char_map.get(ec).copied().unwrap_or(display.len())
+                let ed = if line_idx == *er {
+                    char_map.get(*ec).copied().unwrap_or(display.len())
                 } else {
                     display.len()
                 };
@@ -260,7 +261,7 @@ fn build_display_lines_inner(d: &DisplayInputs, line_buf: &mut String) -> Rc<Vec
         // Whether this line is within the selection and selection continues past its end
         // (used for padding the full line width with selection style)
         let line_selected_through = match d.selection {
-            Some(((sr, _), (er, _))) => line_idx >= sr && line_idx < er,
+            Some(((sr, _), (er, _))) => line_idx >= *sr && line_idx < *er,
             None => false,
         };
 
@@ -292,7 +293,7 @@ fn build_display_lines_inner(d: &DisplayInputs, line_buf: &mut String) -> Rc<Vec
             let diag_sev = if chunk_idx == 0 {
                 d.diagnostics
                     .iter()
-                    .filter(|(sr, _, _, _, _)| *sr == line_idx)
+                    .filter(|(sr, _, _, _, _)| **sr == line_idx)
                     .map(|(_, _, _, _, s)| s)
                     .min_by_key(|s| match s {
                         led_lsp::DiagnosticSeverity::Error => 0,
@@ -333,10 +334,10 @@ fn build_display_lines_inner(d: &DisplayInputs, line_buf: &mut String) -> Rc<Vec
                 let mut spans_for_line: Vec<&HighlightSpan> = d
                     .syntax_highlights
                     .iter()
-                    .filter(|(l, _)| *l == line_idx)
+                    .filter(|(l, _)| **l == line_idx)
                     .map(|(_, span)| span)
                     .collect();
-                spans_for_line.sort_by_key(|s| std::cmp::Reverse(s.char_end - s.char_start));
+                spans_for_line.sort_by_key(|s| std::cmp::Reverse(*s.char_end - *s.char_start));
 
                 for span in spans_for_line {
                     let span_style = style::resolve_capture_style(
@@ -345,11 +346,11 @@ fn build_display_lines_inner(d: &DisplayInputs, line_buf: &mut String) -> Rc<Vec
                         d.text_style,
                     );
                     let s_dcol = char_map
-                        .get(span.char_start)
+                        .get(*span.char_start)
                         .copied()
                         .unwrap_or(display.len());
                     let e_dcol = char_map
-                        .get(span.char_end)
+                        .get(*span.char_end)
                         .copied()
                         .unwrap_or(display.len());
                     let s = s_dcol.max(cs).saturating_sub(cs);
@@ -365,15 +366,18 @@ fn build_display_lines_inner(d: &DisplayInputs, line_buf: &mut String) -> Rc<Vec
                 if let Some(ci) = bp.color_index {
                     let rainbow_style = d.rainbow_styles[ci % 6];
                     // Open bracket
-                    if bp.open_line == line_idx {
-                        let dcol = char_map.get(bp.open_col).copied().unwrap_or(display.len());
+                    if *bp.open_line == line_idx {
+                        let dcol = char_map.get(*bp.open_col).copied().unwrap_or(display.len());
                         if dcol >= cs && dcol < ce {
                             col_styles[dcol - cs] = rainbow_style;
                         }
                     }
                     // Close bracket
-                    if bp.close_line == line_idx {
-                        let dcol = char_map.get(bp.close_col).copied().unwrap_or(display.len());
+                    if *bp.close_line == line_idx {
+                        let dcol = char_map
+                            .get(*bp.close_col)
+                            .copied()
+                            .unwrap_or(display.len());
                         if dcol >= cs && dcol < ce {
                             col_styles[dcol - cs] = rainbow_style;
                         }
@@ -384,15 +388,18 @@ fn build_display_lines_inner(d: &DisplayInputs, line_buf: &mut String) -> Rc<Vec
             // 4. Matching bracket at cursor
             if let Some((match_row, match_col)) = d.matching_bracket {
                 // Highlight the bracket under cursor
-                if d.cursor_row == line_idx {
-                    let dcol = char_map.get(d.cursor_col).copied().unwrap_or(display.len());
+                if *d.cursor_row == line_idx {
+                    let dcol = char_map
+                        .get(*d.cursor_col)
+                        .copied()
+                        .unwrap_or(display.len());
                     if dcol >= cs && dcol < ce {
                         col_styles[dcol - cs] = d.bracket_match_style;
                     }
                 }
                 // Highlight the matching bracket
-                if match_row == line_idx {
-                    let dcol = char_map.get(match_col).copied().unwrap_or(display.len());
+                if *match_row == line_idx {
+                    let dcol = char_map.get(*match_col).copied().unwrap_or(display.len());
                     if dcol >= cs && dcol < ce {
                         col_styles[dcol - cs] = d.bracket_match_style;
                     }
@@ -412,11 +419,11 @@ fn build_display_lines_inner(d: &DisplayInputs, line_buf: &mut String) -> Rc<Vec
 
             // 6. Search matches on top
             for (mi, &(mr, mc, mlen)) in d.search_matches.iter().enumerate() {
-                if mr != line_idx {
+                if *mr != line_idx {
                     continue;
                 }
-                let ms = char_map.get(mc).copied().unwrap_or(display.len());
-                let me = char_map.get(mc + mlen).copied().unwrap_or(display.len());
+                let ms = char_map.get(*mc).copied().unwrap_or(display.len());
+                let me = char_map.get(*mc + mlen).copied().unwrap_or(display.len());
                 if ms >= ce || me <= cs {
                     continue;
                 }
@@ -433,9 +440,9 @@ fn build_display_lines_inner(d: &DisplayInputs, line_buf: &mut String) -> Rc<Vec
 
             // 6b. File search match highlight (C-f preview)
             if let Some((fr, fc, flen)) = d.file_search_match {
-                if fr == line_idx {
-                    let fs = char_map.get(fc).copied().unwrap_or(display.len());
-                    let fe = char_map.get(fc + flen).copied().unwrap_or(display.len());
+                if *fr == line_idx {
+                    let fs = char_map.get(*fc).copied().unwrap_or(display.len());
+                    let fe = char_map.get(*fc + flen).copied().unwrap_or(display.len());
                     if fs < ce && fe > cs {
                         for i in fs.max(cs)..fe.min(ce) {
                             col_styles[i - cs] = d.file_search_match_style;
@@ -446,7 +453,7 @@ fn build_display_lines_inner(d: &DisplayInputs, line_buf: &mut String) -> Rc<Vec
 
             // 6.5. Diagnostic underlines
             for &(dr_start, dc_start, dr_end, dc_end, ref sev) in &d.diagnostics {
-                if line_idx < dr_start || line_idx > dr_end {
+                if line_idx < *dr_start || line_idx > *dr_end {
                     continue;
                 }
                 let diag_style = match sev {
@@ -455,13 +462,13 @@ fn build_display_lines_inner(d: &DisplayInputs, line_buf: &mut String) -> Rc<Vec
                     led_lsp::DiagnosticSeverity::Info => d.diagnostic_info_style,
                     led_lsp::DiagnosticSeverity::Hint => continue,
                 };
-                let ds = if line_idx == dr_start {
-                    char_map.get(dc_start).copied().unwrap_or(display.len())
+                let ds = if line_idx == *dr_start {
+                    char_map.get(*dc_start).copied().unwrap_or(display.len())
                 } else {
                     0
                 };
-                let de = if line_idx == dr_end {
-                    char_map.get(dc_end).copied().unwrap_or(display.len())
+                let de = if line_idx == *dr_end {
+                    char_map.get(*dc_end).copied().unwrap_or(display.len())
                 } else {
                     display.len()
                 };
@@ -507,7 +514,7 @@ fn build_display_lines_inner(d: &DisplayInputs, line_buf: &mut String) -> Rc<Vec
             let mut hint_width = 0usize;
             if is_last && d.inlay_hints_enabled {
                 for (hr, _hc, label) in &d.inlay_hints {
-                    if *hr == line_idx {
+                    if **hr == line_idx {
                         let text = format!(" {}", label);
                         hint_width += text.len();
                         spans.push(Span::styled(text, d.inlay_hint_style));
@@ -561,10 +568,10 @@ fn build_display_lines_inner(d: &DisplayInputs, line_buf: &mut String) -> Rc<Vec
 pub struct CursorInputs {
     buffer_path: Option<CanonPath>,
     doc: Arc<dyn Doc>,
-    cursor_row: usize,
-    cursor_col: usize,
-    scroll_row: usize,
-    scroll_sub_line: usize,
+    cursor_row: Row,
+    cursor_col: Col,
+    scroll_row: Row,
+    scroll_sub_line: SubLine,
     text_width: usize,
     gutter_width: u16,
 }
@@ -594,10 +601,10 @@ pub fn cursor_inputs(s: &AppState) -> Option<CursorInputs> {
     Some(CursorInputs {
         buffer_path: buf.path().cloned(),
         doc: buf.doc().clone(),
-        cursor_row: buf.cursor_row().0,
-        cursor_col: buf.cursor_col().0,
-        scroll_row: buf.scroll_row().0,
-        scroll_sub_line: buf.scroll_sub_line().0,
+        cursor_row: buf.cursor_row(),
+        cursor_col: buf.cursor_col(),
+        scroll_row: buf.scroll_row(),
+        scroll_sub_line: buf.scroll_sub_line(),
         text_width: dims.text_width(),
         gutter_width: dims.gutter_width,
     })
@@ -609,10 +616,10 @@ pub fn compute_cursor_pos(c: &CursorInputs) -> Option<(u16, u16)> {
 }
 
 fn compute_cursor_pos_inner(c: &CursorInputs, line_buf: &mut String) -> Option<(u16, u16)> {
-    c.doc.line(led_core::Row(c.cursor_row), line_buf);
+    c.doc.line(c.cursor_row, line_buf);
     let (cursor_display, char_map) = expand_tabs(&line_buf);
     let cursor_dcol = char_map
-        .get(c.cursor_col)
+        .get(*c.cursor_col)
         .copied()
         .unwrap_or_else(|| char_map.last().copied().unwrap_or(0));
     let cursor_chunks = compute_chunks(cursor_display.len(), c.text_width);
@@ -622,13 +629,13 @@ fn compute_cursor_pos_inner(c: &CursorInputs, line_buf: &mut String) -> Option<(
     // Compute visual row from scroll position
     let mut vrow: usize = 0;
     let line_count = c.doc.line_count();
-    let mut line_idx = c.scroll_row;
-    let mut skip_sub_lines = c.scroll_sub_line;
+    let mut line_idx = *c.scroll_row;
+    let mut skip_sub_lines = *c.scroll_sub_line;
 
     while line_idx < line_count {
         // Reuse precomputed data for the cursor line; use lightweight
         // line_display_width for all other lines to avoid allocations.
-        let chunks = if line_idx == c.cursor_row {
+        let chunks = if line_idx == *c.cursor_row {
             &cursor_chunks
         } else {
             let dw = c.doc.line_display_width(led_core::Row(line_idx));
@@ -640,7 +647,7 @@ fn compute_cursor_pos_inner(c: &CursorInputs, line_buf: &mut String) -> Option<(
                 skip_sub_lines -= 1;
                 continue;
             }
-            if line_idx == c.cursor_row && chunk_idx == cursor_sub {
+            if line_idx == *c.cursor_row && chunk_idx == cursor_sub {
                 let cx = c.gutter_width + (cursor_dcol - cs) as u16;
                 return Some((cx, vrow as u16));
             }
@@ -660,8 +667,8 @@ fn compute_cursor_pos_inner(c: &CursorInputs, line_buf: &mut String) -> Option<(
 pub struct StatusInputs {
     pub file_name: String,
     pub is_dirty: bool,
-    pub cursor_row: usize,
-    pub cursor_col: usize,
+    pub cursor_row: Row,
+    pub cursor_col: Col,
     pub info: Option<String>,
     pub warn: Option<String>,
     pub viewport_width: u16,
@@ -686,14 +693,9 @@ pub fn status_inputs(s: &AppState) -> StatusInputs {
                 .and_then(|p| p.file_name())
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            (
-                fname,
-                buf.is_dirty(),
-                buf.cursor_row().0,
-                buf.cursor_col().0,
-            )
+            (fname, buf.is_dirty(), buf.cursor_row(), buf.cursor_col())
         })
-        .unwrap_or_default();
+        .unwrap_or((String::new(), false, Row(0), Col(0)));
 
     let file_name = if file_name.is_empty() {
         "led".to_string()
@@ -818,7 +820,7 @@ pub fn build_status_content(s: &StatusInputs) -> Rc<String> {
         None => default_left,
     };
 
-    let pos = format!("L{}:C{} ", s.cursor_row + 1, s.cursor_col + 1);
+    let pos = format!("L{}:C{} ", *s.cursor_row + 1, *s.cursor_col + 1);
 
     let total = s.viewport_width as usize;
     let left_width = left.chars().count();
@@ -859,7 +861,7 @@ pub fn overlay_inputs(s: &AppState) -> OverlayContent {
         Some(buf) => {
             let x = dims.side_width()
                 + dims.gutter_width
-                + (buf.cursor_col().0 as u16).min(dims.text_width() as u16);
+                + (*buf.cursor_col() as u16).min(dims.text_width() as u16);
             let y = buf.cursor_row().0.saturating_sub(buf.scroll_row().0) as u16;
             (x, y)
         }
@@ -1003,7 +1005,7 @@ pub fn build_tab_entries(t: &TabsInputs) -> Rc<TabsInputs> {
 pub struct LayoutInputs {
     pub dims: Option<Dimensions>,
     pub has_theme: bool,
-    pub force_redraw: u64,
+    pub force_redraw: RedrawSeq,
     pub side_border_style: Style,
     pub side_bg_style: Style,
     pub text_style: Style,
@@ -1065,7 +1067,7 @@ pub fn layout_inputs(s: &AppState) -> LayoutInputs {
 #[derive(Clone, Copy)]
 pub struct LayoutInfo {
     pub dims: Dimensions,
-    pub force_redraw: u64,
+    pub force_redraw: RedrawSeq,
     pub side_border_style: Style,
     pub side_bg_style: Style,
     pub text_style: Style,
@@ -1574,7 +1576,7 @@ pub fn build_file_search_lines(f: &FileSearchInputs) -> Rc<Vec<Line<'static>>> {
                     f.match_style
                 };
 
-                let prefix = format!("{:>4}: ", hit.row + 1);
+                let prefix = format!("{:>4}: ", *hit.row + 1);
                 let avail = width.saturating_sub(prefix.chars().count());
                 let spans = build_hit_spans(hit, &prefix, avail, base_style, match_s);
                 lines.push(Line::from(spans));

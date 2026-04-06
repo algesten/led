@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use tree_sitter::{InputEdit, Parser, Query, Tree};
 
-use led_core::{Doc, EditOp};
+use led_core::{Col, Doc, EditOp, Row};
 
 use crate::bracket;
 use crate::config::*;
@@ -232,7 +232,7 @@ impl SyntaxState {
         doc: &dyn Doc,
         start_line: usize,
         end_line: usize,
-    ) -> Vec<(usize, HighlightSpan)> {
+    ) -> Vec<(Row, HighlightSpan)> {
         let total_lines = doc.line_count();
         if start_line >= total_lines {
             return Vec::new();
@@ -287,12 +287,7 @@ impl SyntaxState {
         }
     }
 
-    pub fn matching_bracket(
-        &self,
-        doc: &dyn Doc,
-        row: usize,
-        col: usize,
-    ) -> Option<(usize, usize)> {
+    pub fn matching_bracket(&self, doc: &dyn Doc, row: Row, col: Col) -> Option<(Row, Col)> {
         let config = self.brackets_config.as_ref()?;
         bracket::matching_bracket(config, &self.tree, doc, row, col)
     }
@@ -321,7 +316,7 @@ impl SyntaxState {
         &self.reindent_chars
     }
 
-    pub fn suggest_indent(&self, doc: &dyn Doc, line: usize) -> Option<IndentSuggestion> {
+    pub fn suggest_indent(&self, doc: &dyn Doc, line: Row) -> Option<IndentSuggestion> {
         let config = self.indents_config.as_ref()?;
         indent::suggest_indent(config, &self.tree, self.error_query.as_ref(), doc, line)
     }
@@ -330,18 +325,18 @@ impl SyntaxState {
         &self,
         doc: &dyn Doc,
         tree: &Tree,
-        line: usize,
+        line: Row,
     ) -> Option<IndentSuggestion> {
         let config = self.indents_config.as_ref()?;
         indent::suggest_indent_with_tree(config, tree, self.error_query.as_ref(), doc, line)
     }
 
-    pub fn closing_bracket_indent(&self, doc: &dyn Doc, line: usize) -> Option<String> {
+    pub fn closing_bracket_indent(&self, doc: &dyn Doc, line: Row) -> Option<String> {
         indent::closing_bracket_indent(&self.tree, doc, line)
     }
 
     /// Compute auto-indent for a line using two-pass tree-sitter analysis with regex fallback.
-    pub fn compute_auto_indent(&self, doc: &dyn Doc, line: usize) -> Option<String> {
+    pub fn compute_auto_indent(&self, doc: &dyn Doc, line: Row) -> Option<String> {
         let indent_unit = indent::detect_indent_unit(doc);
 
         // For closing brackets, match the opening bracket's line indent
@@ -468,7 +463,7 @@ mod tests {
         let doc = make_doc("fn main() {\n\n}\n");
         let path = Path::new("test.rs");
         let state = SyntaxState::from_path_and_doc(path, &*doc).unwrap();
-        let suggestion = state.suggest_indent(&*doc, 1).unwrap();
+        let suggestion = state.suggest_indent(&*doc, Row(1)).unwrap();
         assert_eq!(suggestion.delta, IndentDelta::Greater);
         assert_eq!(suggestion.basis_row, 0);
     }
@@ -478,7 +473,7 @@ mod tests {
         let doc = make_doc("fn main() {\n    let x = 1;\n}\n");
         let path = Path::new("test.rs");
         let state = SyntaxState::from_path_and_doc(path, &*doc).unwrap();
-        let suggestion = state.suggest_indent(&*doc, 2).unwrap();
+        let suggestion = state.suggest_indent(&*doc, Row(2)).unwrap();
         assert_eq!(suggestion.delta, IndentDelta::Less);
     }
 
@@ -487,11 +482,11 @@ mod tests {
         let doc = make_doc("fn f() { (1 + 2) }\n");
         let path = Path::new("test.rs");
         let state = SyntaxState::from_path_and_doc(path, &*doc).unwrap();
-        let m = state.matching_bracket(&*doc, 0, 7);
+        let m = state.matching_bracket(&*doc, Row(0), Col(7));
         assert!(m.is_some(), "expected bracket match for '{{' at (0,7)");
         let (r, c) = m.unwrap();
-        assert_eq!(r, 0);
-        assert_eq!(c, 17);
+        assert_eq!(r, Row(0));
+        assert_eq!(c, Col(17));
     }
 
     #[test]
@@ -635,7 +630,7 @@ mod tests {
         let doc = make_doc("fn main() {\n\n}\n");
         let path = Path::new("test.rs");
         let state = SyntaxState::from_path_and_doc(path, &*doc).unwrap();
-        let indent_text = state.compute_auto_indent(&*doc, 1);
+        let indent_text = state.compute_auto_indent(&*doc, Row(1));
         assert!(indent_text.is_some());
         let indent_text = indent_text.unwrap();
         assert!(
@@ -649,7 +644,7 @@ mod tests {
         let doc = make_doc(source);
         let path = Path::new("test.rs");
         let state = SyntaxState::from_path_and_doc(path, &*doc).unwrap();
-        let indent = state.compute_auto_indent(&*doc, line);
+        let indent = state.compute_auto_indent(&*doc, Row(line));
         let actual = indent.as_deref().unwrap_or("");
         assert_eq!(
             actual,
@@ -912,7 +907,7 @@ fn run() {
         let doc = make_doc(source);
         let path = Path::new("test.ts");
         let state = SyntaxState::from_path_and_doc(path, &*doc).unwrap();
-        let indent = state.compute_auto_indent(&*doc, line);
+        let indent = state.compute_auto_indent(&*doc, Row(line));
         let actual = indent.as_deref().unwrap_or("");
         assert_eq!(
             actual,
@@ -998,15 +993,15 @@ const products = [
         // Check that each object's block has highlights
         let first_obj_hl: Vec<_> = highlights
             .iter()
-            .filter(|(l, _)| *l >= 2 && *l <= 7)
+            .filter(|(l, _)| *l >= Row(2) && *l <= Row(7))
             .collect();
         let second_obj_hl: Vec<_> = highlights
             .iter()
-            .filter(|(l, _)| *l >= 9 && *l <= 14)
+            .filter(|(l, _)| *l >= Row(9) && *l <= Row(14))
             .collect();
         let third_obj_hl: Vec<_> = highlights
             .iter()
-            .filter(|(l, _)| *l >= 16 && *l <= 21)
+            .filter(|(l, _)| *l >= Row(16) && *l <= Row(21))
             .collect();
 
         assert!(

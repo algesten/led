@@ -310,7 +310,7 @@ fn preview_selected(state: &mut AppState) {
         return;
     };
     if !comp.is_dir {
-        super::action::set_preview(state, comp.full.clone(), 0, 0);
+        super::action::set_preview(state, comp.full.clone(), led_core::Row(0), led_core::Col(0));
     }
 }
 

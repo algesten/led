@@ -1,9 +1,9 @@
-use led_core::Doc;
+use led_core::{Col, Doc, Row};
 use led_state::{BufferState, ISearchState};
 
 /// Scan doc line by line for case-insensitive substring matches.
-/// Returns (row, col, char_len) triples.
-pub fn find_all_matches(doc: &dyn Doc, query: &str) -> Vec<(usize, usize, usize)> {
+/// Returns (Row, Col, char_len) triples.
+pub fn find_all_matches(doc: &dyn Doc, query: &str) -> Vec<(Row, Col, usize)> {
     if query.is_empty() {
         return Vec::new();
     }
@@ -12,7 +12,7 @@ pub fn find_all_matches(doc: &dyn Doc, query: &str) -> Vec<(usize, usize, usize)
     let mut results = Vec::new();
     led_core::with_line_buf(|line| {
         for row in 0..total {
-            doc.line(led_core::Row(row), line);
+            doc.line(Row(row), line);
             let trimmed = line.trim_end_matches(&['\n', '\r'][..]).len();
             line.truncate(trimmed);
             let line_lower = line.to_lowercase();
@@ -21,7 +21,7 @@ pub fn find_all_matches(doc: &dyn Doc, query: &str) -> Vec<(usize, usize, usize)
                 let byte_offset = start + pos;
                 let col = line[..byte_offset].chars().count();
                 let char_len = query.chars().count();
-                results.push((row, col, char_len));
+                results.push((Row(row), Col(col), char_len));
                 // Advance past this match by at least one char
                 start = byte_offset
                     + line_lower[byte_offset..]
@@ -35,7 +35,7 @@ pub fn find_all_matches(doc: &dyn Doc, query: &str) -> Vec<(usize, usize, usize)
 }
 
 /// Find index of first match at or after (row, col).
-fn first_match_from(matches: &[(usize, usize, usize)], row: usize, col: usize) -> Option<usize> {
+fn first_match_from(matches: &[(Row, Col, usize)], row: Row, col: Col) -> Option<usize> {
     matches
         .iter()
         .position(|&(mr, mc, _)| mr > row || (mr == row && mc >= col))
@@ -51,9 +51,9 @@ pub fn start_search(buf: &mut BufferState) {
 
     buf.isearch = Some(ISearchState {
         query: query.clone(),
-        origin: (buf.cursor_row().0, buf.cursor_col().0),
-        origin_scroll: buf.scroll_row().0,
-        origin_sub_line: buf.scroll_sub_line().0,
+        origin: (buf.cursor_row(), buf.cursor_col()),
+        origin_scroll: buf.scroll_row(),
+        origin_sub_line: buf.scroll_sub_line(),
         failed: false,
         matches: Vec::new(),
         match_idx: None,
@@ -72,7 +72,7 @@ pub fn update_search(buf: &mut BufferState) {
         None => return,
     };
     let matches = find_all_matches(&**buf.doc(), &query);
-    let (row, col) = (buf.cursor_row().0, buf.cursor_col().0);
+    let (row, col) = (buf.cursor_row(), buf.cursor_col());
 
     let (match_idx, failed) = if query.is_empty() {
         (None, false)
@@ -87,7 +87,7 @@ pub fn update_search(buf: &mut BufferState) {
 
     if let Some(idx) = match_idx {
         let (r, c, _) = matches[idx];
-        buf.set_cursor(led_core::Row(r), led_core::Col(c), led_core::Col(c));
+        buf.set_cursor(r, c, c);
     }
 
     let isearch = buf.isearch.as_mut().unwrap();
@@ -124,7 +124,7 @@ pub fn search_next(buf: &mut BufferState) {
     if failed {
         // Wrap to first match
         let (row, col, _) = buf.isearch.as_ref().unwrap().matches[0];
-        buf.set_cursor(led_core::Row(row), led_core::Col(col), led_core::Col(col));
+        buf.set_cursor(row, col, col);
         let isearch = buf.isearch.as_mut().unwrap();
         isearch.match_idx = Some(0);
         isearch.failed = false;
@@ -137,7 +137,7 @@ pub fn search_next(buf: &mut BufferState) {
         let len = buf.isearch.as_ref().unwrap().matches.len();
         if next < len {
             let (row, col, _) = buf.isearch.as_ref().unwrap().matches[next];
-            buf.set_cursor(led_core::Row(row), led_core::Col(col), led_core::Col(col));
+            buf.set_cursor(row, col, col);
             let isearch = buf.isearch.as_mut().unwrap();
             isearch.match_idx = Some(next);
         } else {
@@ -161,15 +161,8 @@ fn save_last_search(buf: &mut BufferState) {
 pub fn search_cancel(buf: &mut BufferState) {
     save_last_search(buf);
     if let Some(isearch) = buf.isearch.take() {
-        buf.set_cursor(
-            led_core::Row(isearch.origin.0),
-            led_core::Col(isearch.origin.1),
-            led_core::Col(isearch.origin.1),
-        );
-        buf.set_scroll(
-            led_core::Row(isearch.origin_scroll),
-            led_core::SubLine(isearch.origin_sub_line),
-        );
+        buf.set_cursor(isearch.origin.0, isearch.origin.1, isearch.origin.1);
+        buf.set_scroll(isearch.origin_scroll, isearch.origin_sub_line);
     }
 }
 

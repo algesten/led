@@ -1,4 +1,4 @@
-use led_core::{CanonPath, Doc, UserPath};
+use led_core::{CanonPath, Col, Doc, Row, UserPath};
 use lsp_types::{
     CodeActionOrCommand, CompletionResponse, GotoDefinitionResponse, Location, Position, TextEdit,
     Uri, WorkspaceEdit,
@@ -44,31 +44,31 @@ pub(crate) fn char_col_to_utf16_col(line: &str, char_col: usize) -> u32 {
 }
 
 /// Convert (row, col) to LSP Position, using a line for UTF-16 conversion.
-pub(crate) fn lsp_pos(row: usize, col: usize, line: Option<&str>) -> Position {
+pub(crate) fn lsp_pos(row: Row, col: Col, line: Option<&str>) -> Position {
     let utf16_col = match line {
-        Some(l) => char_col_to_utf16_col(l, col),
-        None => col as u32,
+        Some(l) => char_col_to_utf16_col(l, *col),
+        None => *col as u32,
     };
-    Position::new(row as u32, utf16_col)
+    Position::new(*row as u32, utf16_col)
 }
 
 /// Convert LSP Position to (row, col), using a line for UTF-16 conversion.
-pub(crate) fn from_lsp_pos(pos: &Position, line: Option<&str>) -> (usize, usize) {
-    let row = pos.line as usize;
+pub(crate) fn from_lsp_pos(pos: &Position, line: Option<&str>) -> (Row, Col) {
+    let row = Row(pos.line as usize);
     let col = match line {
-        Some(l) => utf16_col_to_char_col(l, pos.character),
-        None => pos.character as usize,
+        Some(l) => Col(utf16_col_to_char_col(l, pos.character)),
+        None => Col(pos.character as usize),
     };
     (row, col)
 }
 
 /// Get a line from a Doc, stripping trailing newline.
-pub(crate) fn doc_line(doc: &dyn Doc, row: usize) -> Option<String> {
-    if row >= doc.line_count() {
+pub(crate) fn doc_line(doc: &dyn Doc, row: Row) -> Option<String> {
+    if *row >= doc.line_count() {
         return None;
     }
     Some(led_core::with_line_buf(|line| {
-        doc.line(led_core::Row(row), line);
+        doc.line(row, line);
         let trimmed = line.trim_end_matches(&['\n', '\r'][..]).len();
         line.truncate(trimmed);
         line.clone()
@@ -76,9 +76,9 @@ pub(crate) fn doc_line(doc: &dyn Doc, row: usize) -> Option<String> {
 }
 
 /// Get a line from a file on disk.
-fn disk_line(path: &CanonPath, row: usize) -> Option<String> {
+fn disk_line(path: &CanonPath, row: Row) -> Option<String> {
     let content = std::fs::read_to_string(path.as_path()).ok()?;
-    content.lines().nth(row).map(|l| l.to_string())
+    content.lines().nth(*row).map(|l| l.to_string())
 }
 
 /// Get full text from a Doc.
@@ -94,13 +94,13 @@ pub(crate) fn lsp_text_edit_to_domain(
     te: &TextEdit,
     line_at: &impl Fn(usize) -> Option<String>,
 ) -> crate::TextEdit {
-    let start_row = te.range.start.line as usize;
-    let end_row = te.range.end.line as usize;
-    let start_line = line_at(start_row);
+    let start_row = Row(te.range.start.line as usize);
+    let end_row = Row(te.range.end.line as usize);
+    let start_line = line_at(*start_row);
     let end_line = if end_row == start_row {
         start_line.clone()
     } else {
-        line_at(end_row)
+        line_at(*end_row)
     };
     let (_, start_col) = from_lsp_pos(&te.range.start, start_line.as_deref());
     let (_, end_col) = from_lsp_pos(&te.range.end, end_line.as_deref());
@@ -206,13 +206,13 @@ pub(crate) fn apply_edits_to_disk(path: &CanonPath, edits: &[crate::TextEdit]) {
     });
 
     for edit in sorted_edits {
-        let start_row = edit.start_row.min(lines.len());
-        let end_row = edit.end_row.min(lines.len());
+        let start_row = (*edit.start_row).min(lines.len());
+        let end_row = (*edit.end_row).min(lines.len());
 
         let prefix = if start_row < lines.len() {
             lines[start_row]
                 .chars()
-                .take(edit.start_col)
+                .take(*edit.start_col)
                 .collect::<String>()
         } else {
             String::new()
@@ -220,7 +220,7 @@ pub(crate) fn apply_edits_to_disk(path: &CanonPath, edits: &[crate::TextEdit]) {
         let suffix = if end_row < lines.len() {
             lines[end_row]
                 .chars()
-                .skip(edit.end_col)
+                .skip(*edit.end_col)
                 .collect::<String>()
         } else {
             String::new()
@@ -246,7 +246,7 @@ pub(crate) fn apply_edits_to_disk(path: &CanonPath, edits: &[crate::TextEdit]) {
 
 pub(crate) fn definition_response_to_locations(
     resp: GotoDefinitionResponse,
-) -> Vec<(CanonPath, usize, usize)> {
+) -> Vec<(CanonPath, Row, Col)> {
     match resp {
         GotoDefinitionResponse::Scalar(loc) => location_to_tuple(&loc).into_iter().collect(),
         GotoDefinitionResponse::Array(locs) => locs.iter().filter_map(location_to_tuple).collect(),
@@ -254,7 +254,7 @@ pub(crate) fn definition_response_to_locations(
             .iter()
             .filter_map(|link| {
                 let path = path_from_uri(&link.target_uri)?;
-                let line = disk_line(&path, link.target_selection_range.start.line as usize);
+                let line = disk_line(&path, Row(link.target_selection_range.start.line as usize));
                 let (row, col) = from_lsp_pos(&link.target_selection_range.start, line.as_deref());
                 Some((path, row, col))
             })
@@ -262,9 +262,9 @@ pub(crate) fn definition_response_to_locations(
     }
 }
 
-fn location_to_tuple(loc: &Location) -> Option<(CanonPath, usize, usize)> {
+fn location_to_tuple(loc: &Location) -> Option<(CanonPath, Row, Col)> {
     let path = path_from_uri(&loc.uri)?;
-    let line = disk_line(&path, loc.range.start.line as usize);
+    let line = disk_line(&path, Row(loc.range.start.line as usize));
     let (row, col) = from_lsp_pos(&loc.range.start, line.as_deref());
     Some((path, row, col))
 }
@@ -332,10 +332,10 @@ pub(crate) fn convert_inlay_hints(
 
 pub(crate) fn convert_completion_response(
     resp: CompletionResponse,
-    row: usize,
-    col: usize,
+    row: Row,
+    col: Col,
     line_at: &impl Fn(usize) -> Option<String>,
-) -> (Vec<CompletionItem>, usize) {
+) -> (Vec<CompletionItem>, Col) {
     let lsp_items = match resp {
         CompletionResponse::Array(items) => items,
         CompletionResponse::List(list) => list.items,
@@ -353,9 +353,9 @@ pub(crate) fn convert_completion_response(
             }
         })
         .unwrap_or_else(|| {
-            if let Some(line_str) = line_at(row) {
+            if let Some(line_str) = line_at(*row) {
                 let line: Vec<char> = line_str.chars().collect();
-                let mut start = col;
+                let mut start = *col;
                 while start > 0 && start <= line.len() {
                     let ch = line[start - 1];
                     if ch.is_alphanumeric() || ch == '_' {
@@ -364,7 +364,7 @@ pub(crate) fn convert_completion_response(
                         break;
                     }
                 }
-                start
+                Col(start)
             } else {
                 col
             }

@@ -9,7 +9,12 @@ use super::helpers::reveal_active_buffer;
 /// Set the preview to a new file. Creates or replaces the preview tab,
 /// ensures a buffer placeholder exists, and sets the active tab.
 /// The normal `tabs_needing_open` derived stream will materialize it.
-pub(crate) fn set_preview(state: &mut AppState, path: CanonPath, row: usize, col: usize) {
+pub(crate) fn set_preview(
+    state: &mut AppState,
+    path: CanonPath,
+    row: led_core::Row,
+    col: led_core::Col,
+) {
     log::debug!(
         "[set_preview] path={} tabs={:?}",
         path.display(),
@@ -48,8 +53,8 @@ pub(crate) fn set_preview(state: &mut AppState, path: CanonPath, row: usize, col
         let dims = state.dims;
         if let Some(buf) = state.buf_mut(&path) {
             if buf.is_materialized() {
-                let r = row.min(buf.doc().line_count().saturating_sub(1));
-                buf.set_cursor(led_core::Row(r), led_core::Col(col), led_core::Col(col));
+                let r = (*row).min(buf.doc().line_count().saturating_sub(1));
+                buf.set_cursor(led_core::Row(r), col, col);
                 let buffer_height = dims.map_or(20, |d| d.buffer_height());
                 buf.set_scroll(
                     led_core::Row(r.saturating_sub(buffer_height / 2)),
@@ -75,13 +80,9 @@ pub(crate) fn set_preview(state: &mut AppState, path: CanonPath, row: usize, col
     // Insert the new preview tab.
     let mut tab = led_state::Tab::new(path.clone());
     tab.set_preview(previous_tab);
-    if row > 0 || col > 0 {
+    if *row > 0 || *col > 0 {
         let half = state.dims.map_or(10, |d| d.buffer_height() / 2);
-        tab.set_cursor(
-            led_core::Row(row),
-            led_core::Col(col),
-            led_core::Row(row.saturating_sub(half)),
-        );
+        tab.set_cursor(row, col, led_core::Row(row.saturating_sub(half)));
     }
     state.tabs.push_back(tab);
 

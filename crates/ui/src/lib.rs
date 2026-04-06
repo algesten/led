@@ -149,7 +149,7 @@ pub fn driver(state: Stream<Rc<AppState>>) -> Stream<UiIn> {
         display_s, cursor_s, status_s, tabs_s, layout_s, browser_s, overlay_s
     );
 
-    let mut last_redraw = 0u64;
+    let mut last_redraw = led_core::RedrawSeq::default();
 
     render_s.on(
         move |opt: Option<&(

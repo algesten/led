@@ -3,7 +3,7 @@ use grep_regex::RegexMatcherBuilder;
 use grep_searcher::sinks::UTF8;
 use ignore::WalkBuilder;
 
-use led_core::{CanonPath, UserPath};
+use led_core::{CanonPath, Col, Row, UserPath};
 use led_state::file_search::{FileGroup, ReplaceScope, SearchHit};
 
 pub fn run_search(
@@ -64,8 +64,8 @@ pub fn run_search(
                             let abs_end = byte_offset + mat.end();
                             let col = line_text[..abs_start].chars().count();
                             hits.push(SearchHit {
-                                row: (line_num as usize).saturating_sub(1),
-                                col,
+                                row: Row((line_num as usize).saturating_sub(1)),
+                                col: Col(col),
                                 line_text: line_text.to_string(),
                                 match_start: abs_start,
                                 match_end: abs_end,
@@ -138,15 +138,15 @@ pub fn run_replace(
         } => {
             if let Ok(content) = std::fs::read_to_string(path.as_path()) {
                 let lines: Vec<&str> = content.lines().collect();
-                if *row < lines.len() {
-                    let line = lines[*row];
+                if **row < lines.len() {
+                    let line = lines[**row];
                     if *match_start <= line.len() && *match_end <= line.len() {
                         let mut new_content = String::with_capacity(content.len());
                         for (i, l) in content.lines().enumerate() {
                             if i > 0 {
                                 new_content.push('\n');
                             }
-                            if i == *row {
+                            if i == **row {
                                 new_content.push_str(&l[..*match_start]);
                                 new_content.push_str(replacement);
                                 new_content.push_str(&l[*match_end..]);

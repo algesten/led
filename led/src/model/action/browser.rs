@@ -44,7 +44,12 @@ pub(super) fn handle_browser_nav(state: &mut AppState, action: &Action) {
     if let Some(entry) = state.browser.entries.get(state.browser.selected) {
         match &entry.kind {
             EntryKind::File => {
-                set_preview(state, entry.path.clone(), 0, 0);
+                set_preview(
+                    state,
+                    entry.path.clone(),
+                    led_core::Row(0),
+                    led_core::Col(0),
+                );
             }
             EntryKind::Directory { .. } => {
                 close_preview(state);

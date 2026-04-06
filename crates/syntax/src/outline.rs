@@ -1,4 +1,4 @@
-use led_core::Doc;
+use led_core::{Doc, Row};
 use tree_sitter::{QueryCursor, StreamingIterator, Tree};
 
 use crate::config::OutlineConfig;
@@ -9,7 +9,7 @@ pub struct OutlineItem {
     pub depth: usize,
     pub name: String,
     pub context: String,
-    pub row: usize,
+    pub row: Row,
 }
 
 pub(crate) fn outline(config: &OutlineConfig, tree: &Tree, doc: &dyn Doc) -> Vec<OutlineItem> {
@@ -58,7 +58,7 @@ pub(crate) fn outline(config: &OutlineConfig, tree: &Tree, doc: &dyn Doc) -> Vec
                     depth: 0,
                     name: name_text,
                     context,
-                    row: node.start_position().row,
+                    row: Row(node.start_position().row),
                 },
             ));
         }

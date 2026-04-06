@@ -8,7 +8,8 @@ use std::time::Instant;
 
 use led_core::rx::Stream;
 use led_core::{
-    CanonPath, FileWatcher, Registration, Startup, UserPath, WatchEvent, WatchEventKind, WatchMode,
+    CanonPath, Col, ContentHash, FileWatcher, Registration, Row, Startup, SubLine, UserPath,
+    WatchEvent, WatchEventKind, WatchMode,
 };
 use tokio::sync::mpsc;
 
@@ -36,7 +37,7 @@ pub enum WorkspaceOut {
     FlushUndo {
         file_path: CanonPath,
         chain_id: String,
-        content_hash: u64,
+        content_hash: ContentHash,
         undo_cursor: usize,
         distance_from_save: i32,
         entries: Vec<Vec<u8>>,
@@ -88,7 +89,7 @@ pub enum SyncResultKind {
     ReloadAndReplay {
         file_path: CanonPath,
         new_chain_id: String,
-        content_hash: u64,
+        content_hash: ContentHash,
         entries: Vec<Vec<u8>>,
         new_last_seen_seq: i64,
     },
@@ -114,10 +115,10 @@ pub struct SessionData {
 pub struct SessionBuffer {
     pub file_path: UserPath,
     pub tab_order: usize,
-    pub cursor_row: usize,
-    pub cursor_col: usize,
-    pub scroll_row: usize,
-    pub scroll_sub_line: usize,
+    pub cursor_row: Row,
+    pub cursor_col: Col,
+    pub scroll_row: Row,
+    pub scroll_sub_line: SubLine,
     /// Undo restore data (loaded from DB during session restore).
     pub undo: Option<UndoRestoreData>,
 }
@@ -125,7 +126,7 @@ pub struct SessionBuffer {
 #[derive(Clone, Debug)]
 pub struct UndoRestoreData {
     pub chain_id: String,
-    pub content_hash: u64,
+    pub content_hash: ContentHash,
     pub undo_cursor: Option<usize>,
     pub distance_from_save: i32,
     pub entries: Vec<Vec<u8>>,
