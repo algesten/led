@@ -291,12 +291,9 @@ pub(super) fn navigate_diagnostic(state: &mut AppState, forward: bool) {
     }
 
     // Target is in a different file — paths are CanonPath so simple == works.
-    let existing = state
-        .buffers
-        .values()
-        .find(|b| b.path() == Some(&target_path))
-        .and_then(|b| b.path().cloned());
-    if let Some(path) = existing {
+    let in_tab = state.tabs.iter().any(|t| t.path == target_path);
+    if in_tab {
+        let path = target_path.clone();
         log::debug!("[diag] → different file, already open: {}", path.display());
         state.active_tab = Some(path.clone());
         let half = state.dims.map_or(10, |d| d.buffer_height() / 2);
