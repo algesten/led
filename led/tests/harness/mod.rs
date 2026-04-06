@@ -158,7 +158,7 @@ impl TestHarness {
         use std::sync::Once;
         static INIT_LOG: Once = Once::new();
         INIT_LOG.call_once(|| {
-            if let Ok(path) = std::env::var("LED_LOG_FILE") {
+            if let Ok(path) = std::env::var(" diagnostics requested") {
                 led::logging::init_file_logger(std::path::Path::new(&path));
             }
         });

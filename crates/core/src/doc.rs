@@ -5,7 +5,7 @@ use std::sync::Arc;
 use ropey::Rope;
 use serde::{Deserialize, Serialize};
 
-use crate::{CharOffset, ContentHash, Row};
+use crate::{CharOffset, EphemeralContentHash, PersistedContentHash, Row};
 
 // ── Undo types ──
 
@@ -16,6 +16,13 @@ pub struct EditOp {
     pub new_text: String,
 }
 
+impl EditOp {
+    /// A no-op edit (used for save-point markers in the undo chain).
+    pub fn is_noop(&self) -> bool {
+        self.old_text.is_empty() && self.new_text.is_empty()
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct UndoEntry {
     pub op: EditOp,
@@ -23,6 +30,9 @@ pub struct UndoEntry {
     pub cursor_after: CharOffset,
     /// 1 = forward edit, 0 = continuation (same group), -1 = undo inverse.
     pub direction: i32,
+    /// Set only on save-point marker entries (for diagnostic replay).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_hash: Option<PersistedContentHash>,
 }
 
 /// Accumulates rapid edits before they are flushed to the linear history.
@@ -134,6 +144,7 @@ impl UndoHistory {
                 cursor_after,
                 op,
                 direction,
+                content_hash: None,
             });
             cursor = cursor_after;
         }
@@ -224,14 +235,41 @@ impl UndoHistory {
     pub fn entry_count(&self) -> usize {
         self.entries.len()
     }
+
+    /// Insert a save-point marker with the given content_hash.
+    /// The marker is a no-op entry skipped by undo/redo.
+    pub fn insert_save_point(&mut self, content_hash: PersistedContentHash) {
+        self.flush_pending();
+        self.entries.push(UndoEntry {
+            op: EditOp {
+                offset: CharOffset(0),
+                old_text: String::new(),
+                new_text: String::new(),
+            },
+            cursor_before: CharOffset(0),
+            cursor_after: CharOffset(0),
+            direction: 0,
+            content_hash: Some(content_hash),
+        });
+    }
+
+    /// Find the index of the save-point marker with the given content_hash,
+    /// searching backward from the end.
+    pub fn find_save_point(&self, content_hash: PersistedContentHash) -> Option<usize> {
+        self.entries
+            .iter()
+            .rposition(|e| e.content_hash == Some(content_hash))
+    }
 }
+
+use std::fmt;
 
 // ── Doc trait ──
 
 /// Pure content interface for text documents.
 ///
 /// No undo, no version tracking, no dirty state. Those live on BufferState.
-pub trait Doc: Send + Sync {
+pub trait Doc: fmt::Debug + Send + Sync {
     // Display
     fn line_count(&self) -> usize;
 
@@ -257,7 +295,7 @@ pub trait Doc: Send + Sync {
     fn chunk_at_byte(&self, byte_offset: usize) -> (&str, usize);
 
     // Identity
-    fn content_hash(&self) -> ContentHash;
+    fn content_hash(&self) -> EphemeralContentHash;
 
     // Edits — pure rope mutations
     fn insert(&self, char_idx: CharOffset, text: &str) -> Arc<dyn Doc>;
@@ -283,6 +321,7 @@ impl Clone for Box<dyn Doc> {
 
 /// A zero-content Doc for non-materialized buffers.
 /// All operations are safe no-ops.
+#[derive(Debug)]
 pub struct InertDoc;
 
 impl Doc for InertDoc {
@@ -322,8 +361,8 @@ impl Doc for InertDoc {
     fn chunk_at_byte(&self, _: usize) -> (&str, usize) {
         ("", 0)
     }
-    fn content_hash(&self) -> ContentHash {
-        ContentHash(0)
+    fn content_hash(&self) -> EphemeralContentHash {
+        EphemeralContentHash(0)
     }
     fn insert(&self, _: CharOffset, _: &str) -> Arc<dyn Doc> {
         Arc::new(InertDoc)
@@ -344,6 +383,7 @@ impl Doc for InertDoc {
 
 // ── TextDoc ──
 
+#[derive(Debug)]
 pub struct TextDoc {
     rope: Rope,
 }
@@ -432,12 +472,12 @@ impl Doc for TextDoc {
         (chunk, chunk_byte_start)
     }
 
-    fn content_hash(&self) -> ContentHash {
+    fn content_hash(&self) -> EphemeralContentHash {
         let mut hasher = DefaultHasher::new();
         for chunk in self.rope.chunks() {
             hasher.write(chunk.as_bytes());
         }
-        ContentHash(hasher.finish())
+        EphemeralContentHash(hasher.finish())
     }
 
     fn insert(&self, char_idx: CharOffset, text: &str) -> Arc<dyn Doc> {
@@ -467,5 +507,60 @@ impl Doc for TextDoc {
         Box::new(TextDoc {
             rope: self.rope.clone(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn op(offset: usize, old: &str, new: &str) -> EditOp {
+        EditOp {
+            offset: CharOffset(offset),
+            old_text: old.to_string(),
+            new_text: new.to_string(),
+        }
+    }
+
+    #[test]
+    fn is_noop() {
+        assert!(op(0, "", "").is_noop());
+        assert!(!op(0, "", "a").is_noop());
+        assert!(!op(0, "x", "").is_noop());
+    }
+
+    #[test]
+    fn save_point_is_noop_entry() {
+        let mut h = UndoHistory::default();
+        h.push_op(op(0, "", "a"), CharOffset(0));
+        h.flush_pending();
+        h.insert_save_point(PersistedContentHash(42));
+        assert_eq!(h.entry_count(), 2);
+        let marker = &h.entries_from(1)[0];
+        assert!(marker.op.is_noop());
+        assert_eq!(marker.content_hash, Some(PersistedContentHash(42)));
+        assert_eq!(marker.direction, 0);
+    }
+
+    #[test]
+    fn find_save_point_returns_latest() {
+        let mut h = UndoHistory::default();
+        h.insert_save_point(PersistedContentHash(1));
+        h.push_op(op(0, "", "x"), CharOffset(0));
+        h.flush_pending();
+        h.insert_save_point(PersistedContentHash(2));
+        assert_eq!(h.find_save_point(PersistedContentHash(1)), Some(0));
+        assert_eq!(h.find_save_point(PersistedContentHash(2)), Some(2));
+        assert_eq!(h.find_save_point(PersistedContentHash(99)), None);
+    }
+
+    #[test]
+    fn save_point_does_not_affect_distance_from_save() {
+        let mut h = UndoHistory::default();
+        h.push_op(op(0, "", "a"), CharOffset(0));
+        h.flush_pending();
+        let d1 = h.distance_from_save();
+        h.insert_save_point(PersistedContentHash(1));
+        assert_eq!(h.distance_from_save(), d1);
     }
 }

@@ -11,8 +11,9 @@ use led_config_file::ConfigFile;
 use led_core::keys::{Keymap, Keys};
 use led_core::theme::Theme;
 use led_core::{
-    CanonPath, ChangeSeq, CharOffset, Col, ContentHash, Doc, DocVersion, EditOp, InertDoc,
-    PanelSlot, RedrawSeq, Row, Startup, SubLine, SyntaxSeq, UndoHistory, UserPath, Versioned,
+    CanonPath, ChangeSeq, CharOffset, Col, Doc, DocVersion, EditOp, InertDoc, PanelSlot,
+    PersistedContentHash, RedrawSeq, Row, Startup, SubLine, SyntaxSeq, UndoHistory, UserPath,
+    Versioned,
 };
 pub use led_workspace::SessionBuffer;
 pub use led_workspace::Workspace;
@@ -280,7 +281,7 @@ impl Dimensions {
 pub struct UndoFlush {
     pub file_path: CanonPath,
     pub chain_id: String,
-    pub content_hash: ContentHash,
+    pub content_hash: PersistedContentHash,
     pub undo_cursor: usize,
     pub distance_from_save: i32,
     pub entries: Vec<Vec<u8>>,
@@ -418,7 +419,7 @@ pub struct BufferState {
     persisted_undo_len: usize,
     chain_id: Option<String>,
     last_seen_seq: i64,
-    content_hash: ContentHash,
+    content_hash: PersistedContentHash,
     change_seq: ChangeSeq,
     change_reason: ChangeReason,
 
@@ -476,7 +477,7 @@ impl BufferState {
             persisted_undo_len: 0,
             chain_id: None,
             last_seen_seq: 0,
-            content_hash: ContentHash(0),
+            content_hash: PersistedContentHash(0),
             change_seq: ChangeSeq(0),
             change_reason: ChangeReason::Init,
             isearch: None,
@@ -566,7 +567,7 @@ impl BufferState {
     /// (use for first materialization — diagnostics may have
     /// arrived while the buffer was unmaterialized).
     pub fn materialize(&mut self, doc: Arc<dyn Doc>, clear_annotations: bool) {
-        self.content_hash = doc.content_hash();
+        self.content_hash = PersistedContentHash(doc.content_hash().0);
         self.doc = doc;
         self.materialization.set(MaterializationState::Materialized);
         if clear_annotations {
@@ -761,7 +762,7 @@ impl BufferState {
         self.persisted_undo_len = self.undo.entry_count();
         self.chain_id = None;
         self.last_seen_seq = 0;
-        self.content_hash = self.doc().content_hash();
+        self.content_hash = PersistedContentHash(self.doc().content_hash().0);
         self.change_seq = led_core::next_change_seq();
         self.set_syntax_full();
     }
@@ -778,7 +779,7 @@ impl BufferState {
     /// File changed on disk with different content. Replaces doc,
     /// clears annotations, clamps cursor.
     pub fn reload_from_disk(&mut self, doc: Arc<dyn Doc>) {
-        self.content_hash = doc.content_hash();
+        self.content_hash = PersistedContentHash(doc.content_hash().0);
         self.doc = doc;
         self.version = self.version + 1;
         self.change_seq = led_core::next_change_seq();
@@ -794,8 +795,9 @@ impl BufferState {
     }
 
     /// File was saved externally (detected by sync). Marks doc clean
-    /// without changing content. Preserves annotations.
+    /// without changing content. Bumps version so LSP is notified.
     pub fn mark_externally_saved(&mut self) {
+        self.version = self.version + 1;
         self.last_seen_seq = 0;
         self.chain_id = None;
         self.persisted_undo_len = self.undo.entry_count();
@@ -824,7 +826,7 @@ impl BufferState {
         self.status = BufferStatus::new();
         self.last_seen_seq = last_seen_seq;
         self.persisted_undo_len = self.undo.entry_count();
-        self.content_hash = self.doc().content_hash();
+        self.content_hash = PersistedContentHash(self.doc().content_hash().0);
         self.change_seq = led_core::next_change_seq();
         self.set_syntax_full();
     }
@@ -840,7 +842,7 @@ impl BufferState {
         self.chain_id = Some(chain_id);
         self.last_seen_seq = last_seen_seq;
         self.persisted_undo_len = self.undo.entry_count();
-        self.content_hash = self.doc().content_hash();
+        self.content_hash = PersistedContentHash(self.doc().content_hash().0);
         self.change_seq = led_core::next_change_seq();
         self.set_syntax_full();
     }
@@ -928,6 +930,7 @@ impl BufferState {
                     cursor_before: inv_cb,
                     cursor_after: inv_ca,
                     direction: -direction,
+                    content_hash: None,
                 },
                 direction,
             );
@@ -1069,32 +1072,132 @@ impl BufferState {
 
     // ── Annotations (offer pattern) ──
 
-    /// Accept diagnostics if they match the current document content.
+    /// Record a save-point marker in the undo chain for diagnostic replay.
+    pub fn record_diag_save_point(&mut self) {
+        let hash = PersistedContentHash(self.doc.content_hash().0);
+        log::trace!(
+            "diag: record_save_point hash={:#x} path={:?} undo_len={}",
+            hash.0,
+            self.path,
+            self.undo.entry_count(),
+        );
+        self.undo.insert_save_point(hash);
+    }
+
+    /// Accept diagnostics, replaying edits if the content_hash is stale.
     /// Unmaterialized buffers always accept — no content to go stale against.
     pub fn offer_diagnostics(
         &mut self,
         diags: Vec<led_lsp::Diagnostic>,
-        content_hash: ContentHash,
+        content_hash: PersistedContentHash,
     ) -> bool {
         if !self.is_materialized() {
-            // Non-materialized buffer — always accept
+            log::trace!(
+                "diag: offer_diagnostics unmaterialized, accepting {} diags, path={:?}",
+                diags.len(),
+                self.path,
+            );
             self.status.set_diagnostics(diags);
             return true;
         }
         let my_hash = self.doc.content_hash();
-        if content_hash == my_hash {
-            self.status.set_diagnostics(diags);
-            true
-        } else {
-            log::debug!(
-                "offer_diagnostics rejected: incoming={:?} buffer={:?} path={:?} n_diags={}",
-                content_hash,
-                my_hash,
+        // Fast path: exact match (common case, also handles undo-back-to-save)
+        if content_hash.0 == my_hash.0 {
+            log::trace!(
+                "diag: offer_diagnostics FAST path, hash={:#x}, {} diags, path={:?}",
+                content_hash.0,
+                diags.len(),
                 self.path,
-                diags.len()
             );
-            false
+            self.status.set_diagnostics(diags);
+            return true;
         }
+        // Replay path: find save-point marker, reconstruct and transform
+        if let Some(save_idx) = self.undo.find_save_point(content_hash) {
+            let n_entries = self.undo.entry_count() - save_idx - 1;
+            log::trace!(
+                "diag: offer_diagnostics REPLAY path, req_hash={:#x} cur_hash={:#x}, {} diags, {} entries to replay, path={:?}",
+                content_hash.0,
+                my_hash.0,
+                diags.len(),
+                n_entries,
+                self.path,
+            );
+            let transformed = self.replay_diagnostics(diags, save_idx);
+            self.status.set_diagnostics(transformed);
+            return true;
+        }
+        log::debug!(
+            "offer_diagnostics rejected: incoming={:?} buffer={:?} path={:?} n_diags={}",
+            content_hash,
+            self.doc.content_hash(),
+            self.path,
+            diags.len()
+        );
+        false
+    }
+
+    /// Reconstruct save-time doc, walk forward through edits, transform
+    /// diagnostic positions (clear edited rows, shift for structural changes).
+    fn replay_diagnostics(
+        &mut self,
+        mut diags: Vec<led_lsp::Diagnostic>,
+        save_idx: usize,
+    ) -> Vec<led_lsp::Diagnostic> {
+        self.undo.flush_pending();
+        let entries = self.undo.entries_from(save_idx + 1);
+
+        // Reconstruct save-time doc by walking backward from current doc
+        let mut doc = self.doc.clone();
+        for entry in entries.iter().rev() {
+            if entry.op.is_noop() {
+                continue;
+            }
+            let inv = EditOp {
+                offset: entry.op.offset,
+                old_text: entry.op.new_text.clone(),
+                new_text: entry.op.old_text.clone(),
+            };
+            doc = led_core::apply_op_to_doc(&doc, &inv);
+        }
+
+        // Walk forward, transforming diagnostics at each step
+        for entry in entries {
+            if entry.op.is_noop() {
+                continue;
+            }
+            let edit_row = doc.char_to_line(entry.op.offset);
+            let old_newlines = entry.op.old_text.chars().filter(|&c| c == '\n').count();
+            let new_newlines = entry.op.new_text.chars().filter(|&c| c == '\n').count();
+            let delta = new_newlines as isize - old_newlines as isize;
+
+            if delta == 0 {
+                // Content edit on this row — clear diagnostics touching it
+                diags.retain(|d| !(d.start_row <= edit_row && d.end_row >= edit_row));
+            } else {
+                // Structural edit — shift/remove diagnostics
+                diags.retain_mut(|d| {
+                    if delta < 0 {
+                        let deleted_end = Row(*edit_row + (-delta) as usize);
+                        if d.start_row >= edit_row && d.end_row <= deleted_end {
+                            return false;
+                        }
+                    }
+                    if d.start_row > edit_row {
+                        d.start_row = Row((d.start_row.0 as isize + delta).max(0) as usize);
+                    }
+                    if d.end_row > edit_row {
+                        d.end_row = Row((d.end_row.0 as isize + delta).max(0) as usize);
+                    }
+                    true
+                });
+            }
+
+            // Advance replay doc
+            doc = led_core::apply_op_to_doc(&doc, &entry.op);
+        }
+
+        diags
     }
 
     /// Accept syntax highlights only if doc version matches.
@@ -1148,7 +1251,7 @@ impl BufferState {
 
     // ── Persistence & sync (read-only for external code) ──
 
-    pub fn content_hash(&self) -> ContentHash {
+    pub fn content_hash(&self) -> PersistedContentHash {
         self.content_hash
     }
     pub fn change_seq(&self) -> ChangeSeq {
@@ -1177,7 +1280,7 @@ impl BufferState {
         persisted_undo_len: usize,
         chain_id: Option<String>,
         last_seen_seq: i64,
-        content_hash: ContentHash,
+        content_hash: PersistedContentHash,
         distance_from_save: i32,
     ) {
         self.persisted_undo_len = persisted_undo_len;
@@ -1789,5 +1892,238 @@ mod tests {
         status.shift_lines(5, -3);
         assert_eq!(status.diagnostics().len(), 1);
         assert_eq!(status.diagnostics()[0].start_row, led_core::Row(7)); // was 10, shifted by -3
+    }
+
+    // ── Diagnostic replay tests ──
+
+    fn diag_msg(start_row: usize, end_row: usize, msg: &str) -> led_lsp::Diagnostic {
+        led_lsp::Diagnostic {
+            start_row: led_core::Row(start_row),
+            start_col: led_core::Col(0),
+            end_row: led_core::Row(end_row),
+            end_col: led_core::Col(5),
+            severity: led_lsp::DiagnosticSeverity::Error,
+            message: msg.to_string(),
+            source: None,
+        }
+    }
+
+    fn make_buf(content: &str) -> BufferState {
+        let path = led_core::UserPath::new("/tmp/test.rs").canonicalize();
+        let mut buf = BufferState::new(path);
+        let doc: Arc<dyn led_core::Doc> = Arc::new(
+            led_core::TextDoc::from_reader(std::io::Cursor::new(content.as_bytes())).unwrap(),
+        );
+        buf.materialize(doc, false);
+        buf
+    }
+
+    #[test]
+    fn offer_diagnostics_exact_match() {
+        let mut buf = make_buf("hello\nworld\n");
+        let hash = PersistedContentHash(buf.doc().content_hash().0);
+        let diags = vec![diag_msg(1, 1, "error on world")];
+        assert!(buf.offer_diagnostics(diags, hash));
+        assert_eq!(buf.status().diagnostics().len(), 1);
+    }
+
+    #[test]
+    fn offer_diagnostics_rejects_unknown_hash() {
+        let mut buf = make_buf("hello\nworld\n");
+        let diags = vec![diag_msg(1, 1, "error")];
+        assert!(!buf.offer_diagnostics(diags, PersistedContentHash(999)));
+        assert!(buf.status().diagnostics().is_empty());
+    }
+
+    #[test]
+    fn offer_diagnostics_replay_clears_edited_row() {
+        let mut buf = make_buf("hello\nworld\n");
+        let save_hash = PersistedContentHash(buf.doc().content_hash().0);
+        buf.record_diag_save_point();
+
+        // Insert char on row 1 (offset 6 = start of "world")
+        buf.insert_text(led_core::CharOffset(6), "x");
+
+        let diags = vec![
+            diag_msg(0, 0, "error on hello"),
+            diag_msg(1, 1, "error on world"),
+        ];
+        assert!(buf.offer_diagnostics(diags, save_hash));
+        let result = buf.status().diagnostics();
+        assert_eq!(result.len(), 1);
+        assert!(result[0].message.contains("hello"));
+    }
+
+    #[test]
+    fn offer_diagnostics_replay_shifts_after_newline() {
+        let mut buf = make_buf("aaa\nbbb\nccc\n");
+        let save_hash = PersistedContentHash(buf.doc().content_hash().0);
+        buf.record_diag_save_point();
+
+        // Insert newline at end of row 0 (offset 3, between "aaa" and "\n")
+        buf.insert_text(led_core::CharOffset(3), "\n");
+
+        let diags = vec![diag_msg(2, 2, "error on ccc")];
+        assert!(buf.offer_diagnostics(diags, save_hash));
+        let result = buf.status().diagnostics();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].start_row, led_core::Row(3));
+    }
+
+    #[test]
+    fn offer_diagnostics_replay_removes_deleted_line() {
+        let mut buf = make_buf("aaa\nbbb\nccc\nddd\n");
+        let save_hash = PersistedContentHash(buf.doc().content_hash().0);
+        buf.record_diag_save_point();
+
+        // Remove "bbb\n" (offset 4..8)
+        buf.remove_text(led_core::CharOffset(4), led_core::CharOffset(8));
+
+        let diags = vec![
+            diag_msg(0, 0, "error on aaa"),
+            diag_msg(1, 1, "error on bbb"),
+            diag_msg(3, 3, "error on ddd"),
+        ];
+        assert!(buf.offer_diagnostics(diags, save_hash));
+        let result = buf.status().diagnostics();
+        // "aaa" at row 0: kept. "bbb" at row 1: removed (in deleted range).
+        // "ddd" at row 3: shifted by -1 to row 2.
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].start_row, led_core::Row(0));
+        assert_eq!(result[1].start_row, led_core::Row(2));
+    }
+
+    #[test]
+    fn offer_diagnostics_fast_path_after_undo_to_save() {
+        let mut buf = make_buf("hello\n");
+        let save_hash = PersistedContentHash(buf.doc().content_hash().0);
+        buf.record_diag_save_point();
+
+        buf.insert_text(led_core::CharOffset(0), "x");
+        buf.undo();
+
+        assert_eq!(buf.doc().content_hash().0, save_hash.0);
+        let diags = vec![diag_msg(0, 0, "error")];
+        assert!(buf.offer_diagnostics(diags, save_hash));
+        assert_eq!(buf.status().diagnostics().len(), 1);
+    }
+
+    #[test]
+    fn replay_multi_step_insert_then_newline() {
+        // Save, insert char on row 0, then insert newline on row 0.
+        // Diagnostics should: clear row 0 (edited), shift row 1+ by +1 (newline).
+        // "aaa\nbbb\nccc\n"
+        let mut buf = make_buf("aaa\nbbb\nccc\n");
+        let save_hash = PersistedContentHash(buf.doc().content_hash().0);
+        buf.record_diag_save_point();
+
+        // Step 1: insert "x" at offset 0 (row 0) — "xaaa\nbbb\nccc\n"
+        buf.insert_text(led_core::CharOffset(0), "x");
+        // Close undo group so next edit is separate
+        buf.close_undo_group();
+
+        // Step 2: insert newline at offset 2 (row 0) — "xa\naa\nbbb\nccc\n"
+        buf.insert_text(led_core::CharOffset(2), "\n");
+
+        let diags = vec![
+            diag_msg(0, 0, "error on aaa"),
+            diag_msg(1, 1, "error on bbb"),
+            diag_msg(2, 2, "error on ccc"),
+        ];
+        assert!(buf.offer_diagnostics(diags, save_hash));
+        let result = buf.status().diagnostics();
+        // Row 0 ("aaa"): cleared by step 1 (char edit on row 0)
+        // Row 1 ("bbb"): after step 1 still row 1, after step 2 shifts to row 2
+        // Row 2 ("ccc"): after step 1 still row 2, after step 2 shifts to row 3
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].start_row, led_core::Row(2));
+        assert_eq!(result[1].start_row, led_core::Row(3));
+    }
+
+    #[test]
+    fn replay_multi_step_newline_then_edit_below() {
+        // Save, insert newline at row 1, then edit the new row 3 (was row 2).
+        // "aaa\nbbb\nccc\n"
+        let mut buf = make_buf("aaa\nbbb\nccc\n");
+        let save_hash = PersistedContentHash(buf.doc().content_hash().0);
+        buf.record_diag_save_point();
+
+        // Step 1: insert newline at offset 7 (end of "bbb") — "aaa\nbbb\n\nccc\n"
+        buf.insert_text(led_core::CharOffset(7), "\n");
+        buf.close_undo_group();
+
+        // Step 2: insert "x" at offset 9 (start of "ccc", now row 3) — "aaa\nbbb\n\nxccc\n"
+        buf.insert_text(led_core::CharOffset(9), "x");
+
+        let diags = vec![
+            diag_msg(0, 0, "error on aaa"),
+            diag_msg(1, 1, "error on bbb"),
+            diag_msg(2, 2, "error on ccc"),
+        ];
+        assert!(buf.offer_diagnostics(diags, save_hash));
+        let result = buf.status().diagnostics();
+        // Row 0 ("aaa"): untouched → stays at 0
+        // Row 1 ("bbb"): step 1 inserts newline at row 1, but diagnostic is ON row 1
+        //   not BELOW it, so it stays at row 1
+        // Row 2 ("ccc"): step 1 shifts it from row 2 → row 3, step 2 edits row 3 → cleared
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].start_row, led_core::Row(0));
+        assert_eq!(result[1].start_row, led_core::Row(1));
+    }
+
+    #[test]
+    fn replay_multi_step_delete_then_insert() {
+        // Save, delete a line, then insert a newline elsewhere.
+        // "aaa\nbbb\nccc\nddd\n"
+        let mut buf = make_buf("aaa\nbbb\nccc\nddd\n");
+        let save_hash = PersistedContentHash(buf.doc().content_hash().0);
+        buf.record_diag_save_point();
+
+        // Step 1: remove "bbb\n" (offset 4..8) — "aaa\nccc\nddd\n"
+        buf.remove_text(led_core::CharOffset(4), led_core::CharOffset(8));
+        buf.close_undo_group();
+
+        // Step 2: insert newline at offset 3 (end of "aaa") — "aaa\n\nccc\nddd\n"
+        buf.insert_text(led_core::CharOffset(3), "\n");
+
+        let diags = vec![
+            diag_msg(0, 0, "error on aaa"),
+            diag_msg(3, 3, "error on ddd"),
+        ];
+        assert!(buf.offer_diagnostics(diags, save_hash));
+        let result = buf.status().diagnostics();
+        // Row 0 ("aaa"): step 1 doesn't touch it. Step 2: newline at row 0,
+        //   diagnostic is ON row 0, not shifted (shift only applies to rows > edit_row)
+        // Row 3 ("ddd"): step 1 (delta=-1, edit_row=1): 3 > 1, shifted to 2.
+        //   step 2 (delta=+1, edit_row=0): 2 > 0, shifted to 3.
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].start_row, led_core::Row(0));
+        assert_eq!(result[1].start_row, led_core::Row(3));
+    }
+
+    #[test]
+    fn replay_many_char_edits_on_same_row() {
+        // Save, type several characters on row 1. Only row 1 diagnostic
+        // should be cleared; others untouched.
+        let mut buf = make_buf("aaa\nbbb\nccc\n");
+        let save_hash = PersistedContentHash(buf.doc().content_hash().0);
+        buf.record_diag_save_point();
+
+        // Type "xyz" at start of row 1 (offset 4)
+        buf.insert_text(led_core::CharOffset(4), "x");
+        buf.insert_text(led_core::CharOffset(5), "y");
+        buf.insert_text(led_core::CharOffset(6), "z");
+
+        let diags = vec![
+            diag_msg(0, 0, "error on aaa"),
+            diag_msg(1, 1, "error on bbb"),
+            diag_msg(2, 2, "error on ccc"),
+        ];
+        assert!(buf.offer_diagnostics(diags, save_hash));
+        let result = buf.status().diagnostics();
+        // Row 1 cleared (edited), rows 0 and 2 untouched
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].start_row, led_core::Row(0));
+        assert_eq!(result[1].start_row, led_core::Row(2));
     }
 }

@@ -467,7 +467,7 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
                 s.alerts.warn = warn;
             }
             Mut::ResumeComplete => {
-                log::info!("ResumeComplete");
+                log::info!("phase: {:?} → Running (ResumeComplete)", s.phase);
                 s.phase = Phase::Running;
 
                 // Resolve active tab from session's saved order.
@@ -724,8 +724,13 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
                             s.buffers_mut().insert(path.clone(), Rc::new(buf));
                         }
                     }
+                    log::info!("phase: {:?} → Resuming (SessionRestored)", s.phase);
                     s.phase = Phase::Resuming;
                 } else {
+                    log::info!(
+                        "phase: {:?} → Running (SessionRestored, no resume)",
+                        s.phase
+                    );
                     s.phase = Phase::Running;
                     ensure_startup_arg_buffers(&mut s);
                     resolve_focus(&mut s);
@@ -811,6 +816,7 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
                 }
             }
             Mut::Resumed => {
+                log::info!("phase: {:?} → Running (Resumed)", s.phase);
                 s.phase = Phase::Running;
                 s.git_mut().pending_file_scan.set(());
             }
@@ -915,6 +921,7 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
                     if let Some(path) = s.active_tab.clone() {
                         if let Some(buf) = s.buf_mut(&path) {
                             buf.apply_save_cleanup();
+                            buf.record_diag_save_point();
                         }
                     }
                     s.save_request.set(());
@@ -1251,7 +1258,7 @@ enum Mut {
     LspDiagnostics {
         path: CanonPath,
         diagnostics: Vec<led_lsp::Diagnostic>,
-        content_hash: led_core::ContentHash,
+        content_hash: led_core::PersistedContentHash,
     },
     LspInlayHints {
         path: CanonPath,

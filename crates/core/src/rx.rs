@@ -65,9 +65,15 @@ impl<T: 'static> Stream<T> {
         }
 
         self.inner.draining.set(true);
+        let mut drain_count = 0u32;
         loop {
             let next = self.inner.queue.borrow_mut().pop_front();
             let Some(value) = next else { break };
+            drain_count += 1;
+            if drain_count > 1000 {
+                log::error!("rx::Stream drain loop exceeded 1000 — aborting");
+                std::process::exit(11);
+            }
             // queue borrow is released — listeners may re-enter push()
             let mut listeners = self.inner.listeners.borrow_mut();
             for listener in listeners.iter_mut() {
@@ -149,6 +155,25 @@ impl<T: Clone + 'static> Stream<T> {
             },
             _t: PhantomData,
         }
+    }
+
+    /// One-to-many expansion directly on a stream. Each `T` produces an iterator
+    /// of `U`s, all pushed to the returned stream.
+    pub fn flat_map<U: 'static, I: IntoIterator<Item = U>>(
+        &self,
+        mut f: impl FnMut(T) -> I + 'static,
+    ) -> Stream<U> {
+        let target = Stream::new();
+        let target2 = target.clone();
+        self.on(move |opt: Option<&T>| match opt {
+            Some(t) => {
+                for u in f(t.clone()) {
+                    target2.push(u);
+                }
+            }
+            None => target2.close(),
+        });
+        target
     }
 
     /// Forward all values to another stream (fan-in).

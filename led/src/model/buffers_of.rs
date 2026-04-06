@@ -47,7 +47,7 @@ pub fn buffers_of(
                 let undo_data = sp.and_then(|sp| sp.undo.as_ref());
                 let (chain_id, persisted_undo_len, last_seen_seq, distance_from_save) =
                     match undo_data {
-                        Some(undo) if undo.content_hash == doc.content_hash() => (
+                        Some(undo) if undo.content_hash.0 == doc.content_hash().0 => (
                             Some(undo.chain_id.clone()),
                             undo.entries.len(),
                             undo.last_seen_seq,
@@ -63,7 +63,7 @@ pub fn buffers_of(
                 let content_hash = doc.content_hash();
 
                 let undo_entries = match undo_data {
-                    Some(undo) if undo.content_hash == content_hash => undo.entries.clone(),
+                    Some(undo) if undo.content_hash.0 == content_hash.0 => undo.entries.clone(),
                     _ => Vec::new(),
                 };
 
@@ -134,14 +134,15 @@ pub fn buffers_of(
                 };
                 let buf_path = buf.path().cloned().unwrap_or_else(|| path.clone());
                 let incoming_hash = doc.content_hash();
-                if incoming_hash == buf.content_hash() {
+                if incoming_hash.0 == buf.content_hash().0 {
                     log::trace!(
-                        "ExternalChange: content_hash unchanged ({:#x}), skipping",
+                        "ExternalChange: content_hash unchanged ({:#x}), signaling save",
                         incoming_hash.0
                     );
                     if buf.is_dirty() && buf.save_state() == SaveState::Clean {
                         let mut buf = (**buf).clone();
                         buf.mark_externally_saved();
+                        buf.record_diag_save_point();
                         return Some(Mut::BufferUpdate(
                             buf_path,
                             buf,
@@ -161,6 +162,7 @@ pub fn buffers_of(
                 );
                 let mut buf = (**buf).clone();
                 buf.reload_from_disk(doc);
+                buf.record_diag_save_point();
                 Some(Mut::BufferUpdate(
                     buf_path,
                     buf,

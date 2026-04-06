@@ -8,8 +8,8 @@ use std::time::Instant;
 
 use led_core::rx::Stream;
 use led_core::{
-    CanonPath, Col, ContentHash, FileWatcher, Registration, Row, Startup, SubLine, UserPath,
-    WatchEvent, WatchEventKind, WatchMode,
+    CanonPath, Col, FileWatcher, PersistedContentHash, Registration, Row, Startup, SubLine,
+    UserPath, WatchEvent, WatchEventKind, WatchMode,
 };
 use tokio::sync::mpsc;
 
@@ -37,7 +37,7 @@ pub enum WorkspaceOut {
     FlushUndo {
         file_path: CanonPath,
         chain_id: String,
-        content_hash: ContentHash,
+        content_hash: PersistedContentHash,
         undo_cursor: usize,
         distance_from_save: i32,
         entries: Vec<Vec<u8>>,
@@ -89,7 +89,7 @@ pub enum SyncResultKind {
     ReloadAndReplay {
         file_path: CanonPath,
         new_chain_id: String,
-        content_hash: ContentHash,
+        content_hash: PersistedContentHash,
         entries: Vec<Vec<u8>>,
         new_last_seen_seq: i64,
     },
@@ -126,7 +126,7 @@ pub struct SessionBuffer {
 #[derive(Clone, Debug)]
 pub struct UndoRestoreData {
     pub chain_id: String,
-    pub content_hash: ContentHash,
+    pub content_hash: PersistedContentHash,
     pub undo_cursor: Option<usize>,
     pub distance_from_save: i32,
     pub entries: Vec<Vec<u8>>,

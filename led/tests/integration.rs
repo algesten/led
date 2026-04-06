@@ -2124,7 +2124,7 @@ fn simulate_external_edit(
         &root_str,
         &path_str,
         chain_id,
-        led_core::ContentHash(content_hash),
+        led_core::PersistedContentHash(content_hash),
         undo_entries.len(),
         distance,
         &entries,
@@ -2149,6 +2149,7 @@ fn make_insert_entry(offset: usize, text: &str) -> UndoEntry {
         cursor_before: led_core::CharOffset(offset),
         cursor_after: led_core::CharOffset(offset + text.chars().count()),
         direction: 1,
+        content_hash: None,
     }
 }
 

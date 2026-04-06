@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 
-use led_core::{CanonPath, CharOffset, Col, ContentHash, Doc, EditOp, LanguageId, Row};
+use led_core::{CanonPath, CharOffset, Col, Doc, EditOp, LanguageId, PersistedContentHash, Row};
 use lsp_types::{
     CodeActionOrCommand, CodeActionParams, CodeActionResponse, CompletionParams,
     CompletionResponse, DocumentFormattingParams, FormattingOptions, GotoDefinitionParams,
@@ -20,6 +20,199 @@ use crate::registry::LspRegistry;
 use crate::server::LanguageServer;
 use crate::transport::LspNotification;
 use crate::{FileEdit, LspIn, LspOut};
+
+// ── Diagnostic source ──
+
+/// Normalizes push/pull LSP diagnostic delivery.
+///
+/// Push-based servers: `publishDiagnostics` updates the cache. When
+/// `requested` is true, first push triggers a cycle.
+///
+/// Pull-based servers: quiescence triggers a cycle, pulls all paths.
+///
+/// Both: a diagnostic cycle freezes `cmd_rx`, collects results
+/// (push cache + pull responses), forwards all, then unfreezes.
+struct DiagnosticSource {
+    /// Server capabilities, detected at runtime.
+    has_quiescence: bool,
+    has_pull: bool,
+
+    /// Push diagnostics received since last cycle completed.
+    push_cache: HashMap<CanonPath, Vec<crate::Diagnostic>>,
+
+    /// True when diagnostics were requested (PersistedContentHash changed).
+    requested: bool,
+
+    /// Active diagnostic cycle (None = idle).
+    cycle: Option<DiagCycle>,
+}
+
+struct DiagCycle {
+    /// Content hash snapshot for every opened doc at cycle start.
+    hash_snapshot: HashMap<CanonPath, PersistedContentHash>,
+    /// Paths still awaiting results (pull response or push).
+    pending_paths: HashSet<CanonPath>,
+    /// Collected results ready to forward.
+    results: Vec<(CanonPath, Vec<crate::Diagnostic>)>,
+    /// Push-mode: 1s silence timer. Pull-mode: 5s hard timeout.
+    deadline: tokio::time::Instant,
+}
+
+impl DiagnosticSource {
+    fn new() -> Self {
+        Self {
+            has_quiescence: false,
+            has_pull: true,
+            push_cache: HashMap::new(),
+            requested: false,
+            cycle: None,
+        }
+    }
+
+    /// Deadline for the active cycle.
+    fn deadline(&self) -> Option<tokio::time::Instant> {
+        self.cycle.as_ref().map(|c| c.deadline)
+    }
+
+    /// Mark that we want diagnostics.
+    fn request(&mut self) {
+        self.requested = true;
+        log::trace!("diag: diagnostics requested");
+    }
+
+    /// Server sent quiescence. Returns true if a cycle should start.
+    fn on_quiescence(&mut self) -> bool {
+        self.has_quiescence = true;
+        self.requested && !self.is_active()
+    }
+
+    /// Push notification arrived. Returns action for the manager.
+    fn on_push(&mut self, path: CanonPath, diags: Vec<crate::Diagnostic>) -> DiagPushAction {
+        self.push_cache.insert(path.clone(), diags.clone());
+
+        if let Some(cycle) = &mut self.cycle {
+            // Active cycle: satisfy this path if pending
+            if cycle.pending_paths.remove(&path) {
+                cycle.results.push((path, diags));
+                // Reset silence timer for push-mode cycles
+                cycle.deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(1);
+            }
+            if cycle.pending_paths.is_empty() {
+                return DiagPushAction::CycleComplete;
+            }
+            return DiagPushAction::None;
+        }
+
+        // No active cycle: push triggers cycle if requested.
+        if self.requested {
+            log::trace!("diag: push triggers StartCycle");
+            DiagPushAction::StartCycle
+        } else {
+            DiagPushAction::None
+        }
+    }
+
+    /// Start a diagnostic cycle. Snapshots content hashes, consumes push
+    /// cache for available paths, returns paths that need pulling.
+    fn start_cycle(
+        &mut self,
+        docs: &HashMap<CanonPath, Arc<dyn Doc>>,
+        opened_docs: &HashSet<CanonPath>,
+    ) -> Vec<CanonPath> {
+        self.requested = false;
+
+        let hash_snapshot: HashMap<CanonPath, PersistedContentHash> = docs
+            .iter()
+            .map(|(p, d)| (p.clone(), PersistedContentHash(d.content_hash().0)))
+            .collect();
+
+        let mut results = Vec::new();
+        let mut needs_pull = Vec::new();
+
+        for path in opened_docs {
+            if let Some(cached) = self.push_cache.remove(path) {
+                results.push((path.clone(), cached));
+            } else {
+                needs_pull.push(path.clone());
+            }
+        }
+
+        let deadline = if self.has_quiescence {
+            tokio::time::Instant::now() + std::time::Duration::from_secs(5)
+        } else {
+            tokio::time::Instant::now() + std::time::Duration::from_secs(1)
+        };
+
+        log::trace!(
+            "diag: cycle start, {} cached, {} need pull, {} docs, mode={}",
+            results.len(),
+            needs_pull.len(),
+            hash_snapshot.len(),
+            if self.has_quiescence { "pull" } else { "push" },
+        );
+
+        self.cycle = Some(DiagCycle {
+            hash_snapshot,
+            pending_paths: needs_pull.iter().cloned().collect(),
+            results,
+            deadline,
+        });
+
+        if self.has_pull { needs_pull } else { vec![] }
+    }
+
+    /// Record a pull response. Returns true if the cycle is complete.
+    fn on_pull_response(&mut self, path: CanonPath, diags: Vec<crate::Diagnostic>) -> bool {
+        let Some(cycle) = &mut self.cycle else {
+            return false;
+        };
+        if cycle.pending_paths.remove(&path) {
+            cycle.results.push((path, diags));
+        }
+        cycle.pending_paths.is_empty()
+    }
+
+    /// Take the completed cycle results.
+    fn take_results(&mut self) -> Vec<(CanonPath, Vec<crate::Diagnostic>, PersistedContentHash)> {
+        let Some(cycle) = self.cycle.take() else {
+            return Vec::new();
+        };
+        cycle
+            .results
+            .into_iter()
+            .map(|(path, diags)| {
+                let h = cycle
+                    .hash_snapshot
+                    .get(&path)
+                    .copied()
+                    .unwrap_or(PersistedContentHash(0));
+                (path, diags, h)
+            })
+            .collect()
+    }
+
+    fn is_active(&self) -> bool {
+        self.cycle.is_some()
+    }
+
+    fn is_cycle_complete(&self) -> bool {
+        self.cycle
+            .as_ref()
+            .is_some_and(|c| c.pending_paths.is_empty())
+    }
+
+    fn cancel(&mut self) {
+        log::trace!("diag: cycle cancelled (timeout), re-requesting");
+        self.cycle = None;
+        self.requested = true;
+    }
+}
+
+enum DiagPushAction {
+    None,
+    StartCycle,
+    CycleComplete,
+}
 
 // ── Internal event types ──
 
@@ -131,8 +324,9 @@ struct LspManager {
     completion_domain_items: Vec<crate::CompletionItem>,
     progress_tokens: HashMap<String, ProgressState>,
     quiescent: HashMap<LanguageId, bool>,
-    need_diagnostics: bool,
-    buffered_diagnostics: HashMap<CanonPath, Vec<crate::Diagnostic>>,
+    /// Normalizes push/pull diagnostic delivery into a pull-all model.
+    /// Also manages the diagnostic cycle (freeze) state.
+    diag_source: DiagnosticSource,
     _file_watcher: Option<notify::RecommendedWatcher>,
     file_watcher_globs: Option<globset::GlobSet>,
     /// Rate-limit progress updates to the UI.
@@ -169,8 +363,7 @@ pub(crate) async fn run(
         completion_domain_items: Vec::new(),
         progress_tokens: HashMap::new(),
         quiescent: HashMap::new(),
-        need_diagnostics: false,
-        buffered_diagnostics: HashMap::new(),
+        diag_source: DiagnosticSource::new(),
         _file_watcher: None,
         file_watcher_globs: None,
         last_progress_sent: std::time::Instant::now(),
@@ -179,14 +372,29 @@ pub(crate) async fn run(
     };
 
     loop {
-        tokio::select! {
-            cmd = cmd_rx.recv() => {
-                let Some(cmd) = cmd else { break };
-                mgr.handle_command(cmd, &result_tx).await;
+        if let Some(deadline) = mgr.diag_source.deadline() {
+            // Frozen: active cycle, read server events or timeout
+            tokio::select! {
+                event = event_rx.recv() => {
+                    let Some(event) = event else { break };
+                    mgr.handle_event(event, &result_tx).await;
+                }
+                _ = tokio::time::sleep_until(deadline) => {
+                    log::warn!("diag: cycle timeout, cancelling");
+                    mgr.diag_source.cancel();
+                }
             }
-            event = event_rx.recv() => {
-                let Some(event) = event else { break };
-                mgr.handle_event(event, &result_tx).await;
+        } else {
+            // Normal: read both
+            tokio::select! {
+                cmd = cmd_rx.recv() => {
+                    let Some(cmd) = cmd else { break };
+                    mgr.handle_command(cmd, &result_tx).await;
+                }
+                event = event_rx.recv() => {
+                    let Some(event) = event else { break };
+                    mgr.handle_event(event, &result_tx).await;
+                }
             }
         }
     }
@@ -212,49 +420,26 @@ impl LspManager {
                 path,
                 doc,
                 edit_ops,
-                external,
             } => {
                 let old_doc = self.docs.insert(path.clone(), doc);
                 self.send_did_change(&path, &edit_ops, old_doc.as_deref());
-                if external {
-                    // The file is already saved on disk — send didSave so
-                    // the server re-diagnoses, and flush any buffered diagnostics.
-                    self.send_did_save(&path);
-                    for (diag_path, diagnostics) in self.buffered_diagnostics.drain() {
-                        let h = self
-                            .docs
-                            .get(&diag_path)
-                            .map(|d| d.content_hash())
-                            .unwrap_or(ContentHash(0));
-                        let _ = result_tx
-                            .send(LspIn::Diagnostics {
-                                path: diag_path,
-                                diagnostics,
-                                content_hash: h,
-                            })
-                            .await;
+                // Check if last edit was a trigger character → fresh completion
+                let triggered = self.check_trigger_char(&path, &edit_ops);
+                if triggered {
+                    self.completion_path = None;
+                    self.completion_domain_items.clear();
+                    if let Some(op) = edit_ops.last() {
+                        let new_doc = self.docs.get(&path);
+                        if let Some(d) = new_doc {
+                            let cursor_offset =
+                                CharOffset(op.offset.0 + op.new_text.chars().count());
+                            let row = d.char_to_line(cursor_offset);
+                            let col = Col(cursor_offset.0 - d.line_to_char(row).0);
+                            self.spawn_completion(path.clone(), row, col);
+                        }
                     }
                 } else {
-                    // Check if last edit was a trigger character → fresh completion
-                    let triggered = self.check_trigger_char(&path, &edit_ops);
-                    if triggered {
-                        self.completion_path = None;
-                        self.completion_domain_items.clear();
-                        // Compute cursor position from edit_ops
-                        if let Some(op) = edit_ops.last() {
-                            let new_doc = self.docs.get(&path);
-                            if let Some(d) = new_doc {
-                                let cursor_offset =
-                                    CharOffset(op.offset.0 + op.new_text.chars().count());
-                                let row = d.char_to_line(cursor_offset);
-                                let col = Col(cursor_offset.0 - d.line_to_char(row).0);
-                                self.spawn_completion(path.clone(), row, col);
-                            }
-                        }
-                    } else {
-                        // Re-filter active completion
-                        self.refilter_completion(&path, &edit_ops, result_tx).await;
-                    }
+                    self.refilter_completion(&path, &edit_ops, result_tx).await;
                 }
             }
             LspOut::BufferSaved {
@@ -262,22 +447,9 @@ impl LspManager {
                 content_hash: _,
             } => {
                 self.send_did_save(&path);
-                // Flush diagnostics that arrived while need_diagnostics was false
-                // (e.g. from format-on-save didChange before didSave).
-                for (diag_path, diagnostics) in self.buffered_diagnostics.drain() {
-                    let h = self
-                        .docs
-                        .get(&diag_path)
-                        .map(|d| d.content_hash())
-                        .unwrap_or(ContentHash(0));
-                    let _ = result_tx
-                        .send(LspIn::Diagnostics {
-                            path: diag_path,
-                            diagnostics,
-                            content_hash: h,
-                        })
-                        .await;
-                }
+            }
+            LspOut::RequestDiagnostics => {
+                self.diag_source.request();
             }
             LspOut::BufferClosed { path } => {
                 self.send_did_close(&path);
@@ -481,7 +653,6 @@ impl LspManager {
             },
         );
         self.opened_docs.insert(path.clone());
-        self.need_diagnostics = true;
     }
 
     fn send_did_change(
@@ -547,7 +718,6 @@ impl LspManager {
                 content_changes,
             },
         );
-        self.need_diagnostics = false;
     }
 
     fn send_did_save(&mut self, path: &CanonPath) {
@@ -565,7 +735,6 @@ impl LspManager {
                 text: Some(text),
             },
         );
-        self.need_diagnostics = true;
     }
 
     fn send_did_close(&mut self, path: &CanonPath) {
@@ -989,21 +1158,22 @@ impl LspManager {
                                 })
                         };
                         let diagnostics = convert_diagnostics(&params.diagnostics, &line_at);
-                        if self.need_diagnostics {
-                            let h = self
-                                .docs
-                                .get(&path)
-                                .map(|d| d.content_hash())
-                                .unwrap_or(ContentHash(0));
-                            let _ = result_tx
-                                .send(LspIn::Diagnostics {
-                                    path,
-                                    diagnostics,
-                                    content_hash: h,
-                                })
-                                .await;
-                        } else {
-                            self.buffered_diagnostics.insert(path, diagnostics);
+                        log::trace!(
+                            "diag: push for {}, {} diags",
+                            path.display(),
+                            diagnostics.len(),
+                        );
+                        match self.diag_source.on_push(path, diagnostics) {
+                            DiagPushAction::CycleComplete => {
+                                self.flush_diag_cycle(result_tx).await;
+                            }
+                            DiagPushAction::StartCycle => {
+                                self.enter_diag_cycle("push");
+                                if self.diag_source.is_cycle_complete() {
+                                    self.flush_diag_cycle(result_tx).await;
+                                }
+                            }
+                            DiagPushAction::None => {}
                         }
                     }
                 }
@@ -1023,11 +1193,19 @@ impl LspManager {
             }
             "experimental/serverStatus" => {
                 let quiescent = notif.params.get("quiescent").and_then(|v| v.as_bool());
+                log::trace!(
+                    "diag: serverStatus quiescent={:?} language={:?}",
+                    quiescent,
+                    language,
+                );
                 if let Some(q) = quiescent {
                     let was_busy = !*self.quiescent.get(&language).unwrap_or(&true);
                     self.quiescent.insert(language, q);
-                    if was_busy && q && self.need_diagnostics {
-                        self.pull_all_diagnostics();
+                    if was_busy && q && self.diag_source.on_quiescence() {
+                        self.enter_diag_cycle("quiescence");
+                        if self.diag_source.is_cycle_complete() {
+                            self.flush_diag_cycle(result_tx).await;
+                        }
                     }
                     self.send_progress_throttled(result_tx).await;
                 }
@@ -1127,18 +1305,10 @@ impl LspManager {
                 let line_at =
                     |row: usize| self.docs.get(&path).and_then(|d| doc_line(&**d, Row(row)));
                 let diagnostics = convert_diagnostics(&raw, &line_at);
-                let h = self
-                    .docs
-                    .get(&path)
-                    .map(|d| d.content_hash())
-                    .unwrap_or(ContentHash(0));
-                let _ = result_tx
-                    .send(LspIn::Diagnostics {
-                        path,
-                        diagnostics,
-                        content_hash: h,
-                    })
-                    .await;
+                let done = self.diag_source.on_pull_response(path, diagnostics);
+                if done {
+                    self.flush_diag_cycle(result_tx).await;
+                }
             }
             RequestResult::Completion {
                 path,
@@ -1512,10 +1682,36 @@ impl LspManager {
         }
     }
 
-    // ── Pull diagnostics ──
+    // ── Diagnostic freeze + pull ──
 
-    fn pull_all_diagnostics(&self) {
-        for path in &self.opened_docs {
+    /// Flush a completed diagnostic cycle: forward all results to the model.
+    async fn flush_diag_cycle(&mut self, result_tx: &tokio::sync::mpsc::Sender<LspIn>) {
+        for (p, diags, h) in self.diag_source.take_results() {
+            log::trace!(
+                "diag: forwarding {} diags for {}, hash={:#x}",
+                diags.len(),
+                p.display(),
+                h.0,
+            );
+            let _ = result_tx
+                .send(LspIn::Diagnostics {
+                    path: p,
+                    diagnostics: diags,
+                    content_hash: h,
+                })
+                .await;
+        }
+        log::trace!("diag: cycle complete");
+    }
+
+    /// Start a diagnostic cycle: snapshot content hashes, pull for uncached paths.
+    fn enter_diag_cycle(&mut self, reason: &str) {
+        if self.diag_source.is_active() {
+            log::trace!("diag: cycle already active, skipping ({})", reason);
+            return;
+        }
+        let needs_pull = self.diag_source.start_cycle(&self.docs, &self.opened_docs);
+        for path in &needs_pull {
             if let Some(server) = self.server_for_path(path) {
                 self.spawn_pull_diagnostics(path.clone(), server);
             }
@@ -1544,14 +1740,14 @@ impl LspManager {
                 Ok(lsp_types::DocumentDiagnosticReportResult::Report(
                     lsp_types::DocumentDiagnosticReport::Full(report),
                 )) => report.full_document_diagnostic_report.items,
-                Ok(_) => return,
+                Ok(_) => vec![],
                 Err(e) => {
                     log::debug!(
                         "LSP pull diagnostics failed for {}: {}",
                         path.display(),
                         e.message
                     );
-                    return;
+                    vec![]
                 }
             };
 

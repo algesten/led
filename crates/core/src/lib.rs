@@ -57,13 +57,6 @@ pub enum Origin {
     Remote,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ChangeStamp {
-    pub seq: ChangeSeq,
-    pub origin: Origin,
-    pub content_hash: ContentHash,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct BufferId(pub u64);
 
@@ -165,8 +158,10 @@ newtype_u64! {
     SaveSeq,
     /// Monotonic change sequence (increments on every observable buffer change).
     ChangeSeq,
-    /// Content hash for comparing on-disk vs in-memory state.
-    ContentHash,
+    /// Hash of content as persisted on disk.
+    PersistedContentHash,
+    /// Hash of current in-memory content (ephemeral, computed from rope).
+    EphemeralContentHash,
     /// Monotonic syntax-reparse sequence.
     SyntaxSeq,
     /// Monotonic force-redraw sequence.

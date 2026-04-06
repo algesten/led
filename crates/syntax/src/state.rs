@@ -546,7 +546,7 @@ mod tests {
     #[test]
     fn doc_chunks_terminates_at_chunk_boundary() {
         use crate::parse::DocChunks;
-        use led_core::{CharOffset, ContentHash, Row};
+        use led_core::{CharOffset, EphemeralContentHash, Row};
 
         // A doc whose chunk_at_byte always returns the *previous* chunk,
         // simulating the boundary condition that triggers the bug.
@@ -591,8 +591,8 @@ mod tests {
                 // byte_offset >= 3 the iterator sees available == 0.
                 ("hel", 0)
             }
-            fn content_hash(&self) -> ContentHash {
-                ContentHash(0)
+            fn content_hash(&self) -> EphemeralContentHash {
+                EphemeralContentHash(0)
             }
             fn insert(&self, _: CharOffset, _: &str) -> Arc<dyn Doc> {
                 unimplemented!()

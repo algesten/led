@@ -3,8 +3,7 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::time::Duration;
 
-use led_core::CanonPath;
-use led_core::SyntaxSeq;
+use led_core::{CanonPath, PersistedContentHash, SyntaxSeq};
 
 use led_config_file::{ConfigDir, ConfigFileOut};
 use led_core::rx::Stream;
@@ -659,29 +658,33 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
         });
     }
 
-    // BufferChanged: dedupe on (active_tab, doc.version())
+    // BufferChanged: emit for any buffer whose version changed.
+    let lsp_known_versions: Rc<RefCell<HashMap<CanonPath, u64>>> =
+        Rc::new(RefCell::new(HashMap::new()));
+
     let lsp_buf_changed = state
-        .dedupe_by(|s| {
-            s.active_tab.as_ref().and_then(|path| {
-                let buf = s.buffers.get(path)?;
-                Some((path.clone(), buf.version()))
-            })
+        .dedupe_by(|s| s.buffers.values().map(|b| b.version().0).sum::<u64>())
+        .flat_map(move |s: Rc<AppState>| {
+            let mut known = lsp_known_versions.borrow_mut();
+            s.buffers
+                .values()
+                .filter_map(|buf| {
+                    let path = buf.path()?;
+                    let ver = buf.version().0;
+                    let prev = known.insert(path.clone(), ver);
+                    (prev.is_some() && prev != Some(ver))
+                        .then(|| (path.clone(), buf.doc().clone(), buf.pending_edit_ops()))
+                })
+                .collect::<Vec<_>>()
         })
-        .filter(|s| s.active_tab.is_some())
-        .filter_map(|s| {
-            let active_path = s.active_tab.as_ref()?;
-            let buf = s.buffers.get(active_path)?;
-            let path = buf.path().cloned()?;
-            Some(LspOut::BufferChanged {
-                path,
-                doc: buf.doc().clone(),
-                edit_ops: buf.pending_edit_ops(),
-                external: buf.change_reason() == ChangeReason::ExternalFileChange,
-            })
+        .map(|(path, doc, edit_ops)| LspOut::BufferChanged {
+            path,
+            doc,
+            edit_ops,
         })
         .stream();
 
-    // BufferSaved: dedupe on save_request.version()
+    // BufferSaved on local save: dedupe on save_request.version()
     let lsp_buf_saved = state
         .dedupe_by(|s| s.save_request.version())
         .filter(|s| s.save_request.version() > 0)
@@ -692,9 +695,62 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
             let path = buf.path().cloned()?;
             Some(LspOut::BufferSaved {
                 path,
-                content_hash: buf.doc().content_hash(),
+                content_hash: PersistedContentHash(buf.doc().content_hash().0),
             })
         })
+        .stream();
+
+    // BufferSaved on external file change: emit didSave for changed files.
+    let lsp_external_saved_known: Rc<RefCell<HashMap<CanonPath, u64>>> =
+        Rc::new(RefCell::new(HashMap::new()));
+    let lsp_external_saved = state
+        .dedupe_by(|s| {
+            s.buffers
+                .values()
+                .filter(|b| b.change_reason() == ChangeReason::ExternalFileChange)
+                .map(|b| b.change_seq().0)
+                .sum::<u64>()
+        })
+        .flat_map(move |s: Rc<AppState>| {
+            let mut known = lsp_external_saved_known.borrow_mut();
+            s.buffers
+                .values()
+                .filter(|b| b.change_reason() == ChangeReason::ExternalFileChange)
+                .filter_map(|buf| {
+                    let path = buf.path()?;
+                    let seq = buf.change_seq().0;
+                    let prev = known.insert(path.clone(), seq);
+                    (prev != Some(seq)).then(|| LspOut::BufferSaved {
+                        path: path.clone(),
+                        content_hash: PersistedContentHash(buf.doc().content_hash().0),
+                    })
+                })
+                .collect::<Vec<_>>()
+        });
+
+    // RequestDiagnostics signal 1: PersistedContentHash changed while Running.
+    let lsp_request_diag_hash = state
+        .map(|s: Rc<AppState>| {
+            (
+                s.phase,
+                s.buffers
+                    .values()
+                    // 2 ^ 20 ~= 1 million files before this overflows
+                    .map(|b| b.content_hash().0 & 0x0000_0fff_ffff_ffff)
+                    .sum::<u64>(),
+            )
+        })
+        .dedupe()
+        .filter(|(phase, _)| *phase == Phase::Running)
+        .map(|_| LspOut::RequestDiagnostics)
+        .stream();
+
+    // RequestDiagnostics signal 2: transition to Running.
+    let lsp_request_diag_running = state
+        .map(|s: Rc<AppState>| s.phase)
+        .dedupe()
+        .filter(|phase| *phase == Phase::Running)
+        .map(|_| LspOut::RequestDiagnostics)
         .stream();
 
     // InlayHints: viewport-driven request
@@ -782,6 +838,9 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
     lsp_init.forward(&lsp_out);
     lsp_buf_changed.forward(&lsp_out);
     lsp_buf_saved.forward(&lsp_out);
+    lsp_external_saved.forward(&lsp_out);
+    lsp_request_diag_hash.forward(&lsp_out);
+    lsp_request_diag_running.forward(&lsp_out);
     lsp_inlay_hints.forward(&lsp_out);
     lsp_requests.forward(&lsp_out);
     lsp_shutdown.forward(&lsp_out);

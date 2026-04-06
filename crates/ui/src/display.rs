@@ -7,7 +7,7 @@ use led_core::Doc;
 use led_core::PanelSlot;
 use led_core::git::{self, FileStatus, LineStatus};
 use led_core::wrap::{chars_to_string, compute_chunks, expand_tabs, find_sub_line};
-use led_core::{Col, ContentHash, RedrawSeq, Row, SubLine};
+use led_core::{Col, PersistedContentHash, RedrawSeq, Row, SubLine};
 use led_state::{AppState, BracketPair, Dimensions, EntryKind, HighlightSpan};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
@@ -43,7 +43,7 @@ pub struct DisplayInputs {
     matching_bracket: Option<(Row, Col)>,
     cursor_row: Row,
     cursor_col: Col,
-    content_hash: ContentHash,
+    content_hash: PersistedContentHash,
     syntax_styles: Rc<HashMap<String, Style>>,
     bracket_match_style: Style,
     rainbow_styles: [Style; 6],

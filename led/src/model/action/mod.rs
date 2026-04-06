@@ -147,6 +147,7 @@ pub fn handle_action(state: &mut AppState, action: Action) -> bool {
             };
         }
         Action::Quit => {
+            log::info!("phase: {:?} → Exiting (Quit)", state.phase);
             state.phase = Phase::Exiting;
         }
         Action::Suspend => {
@@ -397,6 +398,7 @@ pub fn handle_action(state: &mut AppState, action: Action) -> bool {
                 if let Some(path) = state.active_tab.clone() {
                     if let Some(buf) = state.buf_mut(&path) {
                         buf.apply_save_cleanup();
+                        buf.record_diag_save_point();
                     }
                 }
                 state.save_request.set(());
@@ -427,6 +429,7 @@ pub fn handle_action(state: &mut AppState, action: Action) -> bool {
                     close_group_on_move(buf);
                     buf.mark_saving();
                     buf.touch();
+                    buf.record_diag_save_point();
                 }
             }
             state.save_request.set(());

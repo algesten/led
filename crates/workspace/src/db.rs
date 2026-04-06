@@ -3,7 +3,7 @@ use std::path::Path;
 
 use rusqlite::{Connection, params};
 
-use led_core::{Col, ContentHash, Row, SubLine};
+use led_core::{Col, PersistedContentHash, Row, SubLine};
 
 use crate::{RestoredSession, SessionBuffer, SessionData};
 
@@ -217,7 +217,7 @@ pub fn flush_undo(
     root_path: &str,
     file_path: &str,
     chain_id: &str,
-    content_hash: ContentHash,
+    content_hash: PersistedContentHash,
     undo_cursor: usize,
     distance_from_save: i32,
     entries: &[Vec<u8>],
@@ -264,7 +264,7 @@ pub fn clear_undo(conn: &Connection, root_path: &str, file_path: &str) -> rusqli
 
 pub struct UndoSyncState {
     pub chain_id: String,
-    pub content_hash: ContentHash,
+    pub content_hash: PersistedContentHash,
     pub entries: Vec<Vec<u8>>,
     pub last_seq: i64,
 }
@@ -280,7 +280,7 @@ pub fn load_undo_after(
     )?.query_row(params![root_path, file_path], |row| {
         let chain_id: String = row.get(0)?;
         let content_hash: i64 = row.get(1)?;
-        Ok((chain_id, ContentHash(content_hash as u64)))
+        Ok((chain_id, PersistedContentHash(content_hash as u64)))
     });
 
     let (chain_id, content_hash) = match state {
@@ -326,7 +326,7 @@ pub fn load_undo_all(
         .query_row(params![root_path, file_path], |row| {
             Ok(UndoRestoreState {
                 chain_id: row.get(0)?,
-                content_hash: ContentHash(row.get::<_, i64>(1)? as u64),
+                content_hash: PersistedContentHash(row.get::<_, i64>(1)? as u64),
                 undo_cursor: row.get::<_, Option<i64>>(2)?.map(|v| v as usize),
                 distance_from_save: row.get(3)?,
                 entries: Vec::new(),
@@ -360,7 +360,7 @@ pub fn load_undo_all(
 
 pub struct UndoRestoreState {
     pub chain_id: String,
-    pub content_hash: ContentHash,
+    pub content_hash: PersistedContentHash,
     pub undo_cursor: Option<usize>,
     pub distance_from_save: i32,
     pub entries: Vec<Vec<u8>>,
@@ -513,7 +513,7 @@ mod tests {
             "/project",
             "/tmp/a.rs",
             "chain-1",
-            ContentHash(12345),
+            PersistedContentHash(12345),
             2,
             1,
             &entries,
@@ -525,7 +525,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(state.chain_id, "chain-1");
-        assert_eq!(state.content_hash, ContentHash(12345));
+        assert_eq!(state.content_hash, PersistedContentHash(12345));
         assert_eq!(state.entries.len(), 2);
         assert_eq!(state.entries[0], vec![1, 2, 3]);
         assert_eq!(state.entries[1], vec![4, 5, 6]);
@@ -566,7 +566,7 @@ mod tests {
             "/project",
             "/tmp/a.rs",
             "chain-1",
-            ContentHash(12345),
+            PersistedContentHash(12345),
             2,
             3,
             &[vec![10], vec![20]],
@@ -577,7 +577,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(state.chain_id, "chain-1");
-        assert_eq!(state.content_hash, ContentHash(12345));
+        assert_eq!(state.content_hash, PersistedContentHash(12345));
         assert_eq!(state.undo_cursor, Some(2));
         assert_eq!(state.distance_from_save, 3);
         assert_eq!(state.entries.len(), 2);
@@ -612,7 +612,7 @@ mod tests {
             "/project",
             "/tmp/a.rs",
             "chain-1",
-            ContentHash(12345),
+            PersistedContentHash(12345),
             2,
             0,
             &[vec![1, 2, 3]],
@@ -654,7 +654,7 @@ mod tests {
             "/project",
             "/tmp/a.rs",
             "chain-1",
-            ContentHash(12345),
+            PersistedContentHash(12345),
             2,
             0,
             &[vec![1, 2, 3]],
@@ -723,7 +723,7 @@ mod tests {
             "/project",
             "/tmp/a.rs",
             "chain-1",
-            ContentHash(100),
+            PersistedContentHash(100),
             1,
             0,
             &[vec![10]],
@@ -736,7 +736,7 @@ mod tests {
             "/project",
             "/tmp/a.rs",
             "chain-1",
-            ContentHash(200),
+            PersistedContentHash(200),
             2,
             1,
             &[vec![20]],

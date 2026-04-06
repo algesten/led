@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use led_core::rx::Stream;
-use led_core::{CanonPath, Col, ContentHash, Doc, EditOp, Row};
+use led_core::{CanonPath, Col, Doc, EditOp, PersistedContentHash, Row};
 
 mod convert;
 mod manager;
@@ -66,7 +66,7 @@ pub enum DiagnosticSeverity {
 
 // ── LspOut (derived → driver) ──
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub enum LspOut {
     // Lifecycle
     Init {
@@ -83,17 +83,19 @@ pub enum LspOut {
         path: CanonPath,
         doc: Arc<dyn Doc>,
         edit_ops: Vec<EditOp>,
-        /// True when the change originated from disk (e.g. external `git checkout`).
-        /// The file is already saved, so the LSP should also receive didSave.
-        external: bool,
     },
     BufferSaved {
         path: CanonPath,
-        content_hash: ContentHash,
+        content_hash: PersistedContentHash,
     },
     BufferClosed {
         path: CanonPath,
     },
+
+    /// Request a diagnostic cycle. The manager freezes its input queue,
+    /// snapshots content hashes for all open docs, and pulls diagnostics
+    /// for every opened file.
+    RequestDiagnostics,
 
     // User-initiated requests
     GotoDefinition {
@@ -166,7 +168,7 @@ pub enum LspIn {
     Diagnostics {
         path: CanonPath,
         diagnostics: Vec<Diagnostic>,
-        content_hash: ContentHash,
+        content_hash: PersistedContentHash,
     },
     InlayHints {
         path: CanonPath,
