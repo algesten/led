@@ -4,6 +4,7 @@ mod doc;
 pub mod git;
 pub mod keys;
 mod language;
+mod path;
 pub mod rx;
 pub mod theme;
 mod watch;
@@ -15,6 +16,7 @@ pub use alert::{Alert, AlertExt};
 pub use config::Startup;
 pub use doc::{Doc, EditOp, InertDoc, TextDoc, UndoEntry, UndoHistory, apply_op_to_doc};
 pub use language::{LanguageId, LspContextId};
+pub use path::{CanonPath, UserPath};
 pub use versioned::Versioned;
 pub use watch::{FileWatcher, Registration, WatchEvent, WatchEventKind, WatchMode};
 

@@ -1,32 +1,32 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::io::Cursor;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use led_core::rx::Stream;
 use led_core::{
-    Alert, Doc, FileWatcher, Registration, TextDoc, WatchEvent, WatchEventKind, WatchMode,
+    Alert, CanonPath, Doc, FileWatcher, Registration, TextDoc, WatchEvent, WatchEventKind,
+    WatchMode,
 };
 use tokio::sync::mpsc;
 
 #[derive(Clone)]
 pub enum DocStoreOut {
     Open {
-        path: PathBuf,
+        path: CanonPath,
         /// When true, opening a non-existent path creates an empty buffer
         /// instead of reporting OpenFailed.  Used for user-initiated opens
         /// (CLI arg, find-file); session restore passes false.
         create_if_missing: bool,
     },
     Save {
-        path: PathBuf,
+        path: CanonPath,
         doc: Arc<dyn Doc>,
     },
     SaveAs {
-        path: PathBuf,
+        path: CanonPath,
         doc: Arc<dyn Doc>,
-        new_path: PathBuf,
+        new_path: CanonPath,
     },
 }
 
@@ -34,29 +34,29 @@ pub enum DocStoreOut {
 pub enum DocStoreIn {
     /// Driver acknowledged the open request; materialization in progress.
     Opening {
-        path: PathBuf,
+        path: CanonPath,
     },
     Opened {
-        path: PathBuf,
+        path: CanonPath,
         doc: Arc<dyn Doc>,
     },
     Saved {
-        path: PathBuf,
+        path: CanonPath,
         doc: Arc<dyn Doc>,
     },
     SavedAs {
-        path: PathBuf,
+        path: CanonPath,
         doc: Arc<dyn Doc>,
     },
     ExternalChange {
-        path: PathBuf,
+        path: CanonPath,
         doc: Arc<dyn Doc>,
     },
     ExternalRemove {
-        path: PathBuf,
+        path: CanonPath,
     },
     OpenFailed {
-        path: PathBuf,
+        path: CanonPath,
     },
 }
 
@@ -87,8 +87,8 @@ impl fmt::Debug for DocStoreIn {
 }
 
 /// Read a file and construct a TextDoc. Async read, sync Rope construction from memory.
-async fn read_doc(path: &PathBuf) -> std::io::Result<TextDoc> {
-    let bytes = tokio::fs::read(path).await?;
+async fn read_doc(path: &CanonPath) -> std::io::Result<TextDoc> {
+    let bytes = tokio::fs::read(path.as_path()).await?;
     TextDoc::from_reader(Cursor::new(bytes))
 }
 
@@ -117,10 +117,10 @@ pub fn driver(
     tokio::task::spawn_local(async move {
         let (watcher_tx, mut watcher_rx) = mpsc::channel::<WatchEvent>(256);
 
-        let mut registrations: HashMap<PathBuf, Registration> = HashMap::new();
+        let mut registrations: HashMap<CanonPath, Registration> = HashMap::new();
         // Canonical paths of files we've opened — used to filter watcher events
         // so we only report external changes for files we care about.
-        let mut watched_paths: HashSet<PathBuf> = HashSet::new();
+        let mut watched_paths: HashSet<CanonPath> = HashSet::new();
 
         loop {
             tokio::select! {
@@ -128,7 +128,6 @@ pub fn driver(
                     let Some(cmd) = maybe_cmd else { break };
                     match cmd {
                         DocStoreOut::Open { path, create_if_missing } => {
-                            let canonical = canonicalize(&path);
                             log::debug!("[docstore] Open: {}", path.display());
 
                             register_watcher(
@@ -150,7 +149,7 @@ pub fn driver(
 
                             match doc_result {
                                 Ok(doc) => {
-                                    watched_paths.insert(canonical);
+                                    watched_paths.insert(path.clone());
                                     let doc: Arc<dyn Doc> = Arc::new(doc);
                                     let _ = result_tx.send(Ok(DocStoreIn::Opened { path, doc })).await;
                                 }
@@ -166,10 +165,8 @@ pub fn driver(
                             handle_save(&path, &doc, &result_tx).await;
                         }
                         DocStoreOut::SaveAs { path, doc, new_path } => {
-                            let old_canonical = canonicalize(&path);
-                            watched_paths.remove(&old_canonical);
-                            let new_canonical = canonicalize(&new_path);
-                            watched_paths.insert(new_canonical);
+                            watched_paths.remove(&path);
+                            watched_paths.insert(new_path.clone());
 
                             register_watcher(
                                 &new_path, &file_watcher, &watcher_tx,
@@ -203,39 +200,42 @@ pub fn driver(
 }
 
 fn register_watcher(
-    path: &PathBuf,
+    path: &CanonPath,
     file_watcher: &Arc<FileWatcher>,
     watcher_tx: &mpsc::Sender<WatchEvent>,
-    registrations: &mut HashMap<PathBuf, Registration>,
+    registrations: &mut HashMap<CanonPath, Registration>,
 ) {
     if let Some(parent) = path.parent() {
-        let canon_parent = std::fs::canonicalize(parent).unwrap_or_else(|_| parent.to_path_buf());
-        if !registrations.contains_key(&canon_parent) {
-            let reg = file_watcher.register(parent, WatchMode::NonRecursive, watcher_tx.clone());
-            registrations.insert(canon_parent, reg);
+        if !registrations.contains_key(&parent) {
+            let reg = file_watcher.register(&parent, WatchMode::NonRecursive, watcher_tx.clone());
+            registrations.insert(parent, reg);
         }
     }
 }
 
 async fn handle_save(
-    path: &PathBuf,
+    path: &CanonPath,
     doc: &Arc<dyn Doc>,
     tx: &mpsc::Sender<Result<DocStoreIn, Alert>>,
 ) {
-    let parent = path.parent().unwrap_or(std::path::Path::new("."));
+    let parent = path.parent();
+    let parent_path = parent
+        .as_ref()
+        .map(|p| p.as_path())
+        .unwrap_or(std::path::Path::new("."));
     // Create parent directories for new files that don't exist on disk yet.
-    if !parent.exists() {
-        if let Err(e) = tokio::fs::create_dir_all(parent).await {
+    if !parent_path.exists() {
+        if let Err(e) = tokio::fs::create_dir_all(parent_path).await {
             let _ = tx
                 .send(Err(Alert::Warn(format!(
                     "Failed to create directory {}: {e}",
-                    parent.display()
+                    parent_path.display()
                 ))))
                 .await;
             return;
         }
     }
-    let tmp_path = parent.join(format!(".led-save-{}", std::process::id()));
+    let tmp_path = parent_path.join(format!(".led-save-{}", std::process::id()));
 
     // Serialize to memory, then write async (cleanup already applied by model layer)
     let mut buf = Vec::new();
@@ -259,7 +259,7 @@ async fn handle_save(
         return;
     }
 
-    match tokio::fs::rename(&tmp_path, path).await {
+    match tokio::fs::rename(&tmp_path, path.as_path()).await {
         Ok(()) => {
             let _ = tx
                 .send(Ok(DocStoreIn::Saved {
@@ -281,23 +281,27 @@ async fn handle_save(
 }
 
 async fn handle_save_as(
-    path: &PathBuf,
+    path: &CanonPath,
     doc: &Arc<dyn Doc>,
     tx: &mpsc::Sender<Result<DocStoreIn, Alert>>,
 ) {
-    let parent = path.parent().unwrap_or(std::path::Path::new("."));
-    if !parent.exists() {
-        if let Err(e) = tokio::fs::create_dir_all(parent).await {
+    let parent = path.parent();
+    let parent_path = parent
+        .as_ref()
+        .map(|p| p.as_path())
+        .unwrap_or(std::path::Path::new("."));
+    if !parent_path.exists() {
+        if let Err(e) = tokio::fs::create_dir_all(parent_path).await {
             let _ = tx
                 .send(Err(Alert::Warn(format!(
                     "Failed to create directory {}: {e}",
-                    parent.display()
+                    parent_path.display()
                 ))))
                 .await;
             return;
         }
     }
-    let tmp_path = parent.join(format!(".led-save-{}", std::process::id()));
+    let tmp_path = parent_path.join(format!(".led-save-{}", std::process::id()));
 
     let mut buf = Vec::new();
     if let Err(e) = doc.write_to(&mut buf) {
@@ -320,7 +324,7 @@ async fn handle_save_as(
         return;
     }
 
-    match tokio::fs::rename(&tmp_path, path).await {
+    match tokio::fs::rename(&tmp_path, path.as_path()).await {
         Ok(()) => {
             let _ = tx
                 .send(Ok(DocStoreIn::SavedAs {
@@ -343,7 +347,7 @@ async fn handle_save_as(
 
 async fn handle_watcher_event(
     event: WatchEvent,
-    watched_paths: &HashSet<PathBuf>,
+    watched_paths: &HashSet<CanonPath>,
     tx: &mpsc::Sender<Result<DocStoreIn, Alert>>,
 ) {
     for path in &event.paths {
@@ -382,14 +386,10 @@ async fn handle_watcher_event(
     }
 }
 
-fn canonicalize(path: &PathBuf) -> PathBuf {
-    std::fs::canonicalize(path).unwrap_or_else(|_| path.clone())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use led_core::FileWatcher;
+    use led_core::{FileWatcher, UserPath};
     use std::cell::RefCell;
     use std::rc::Rc;
     use std::time::Duration;
@@ -429,6 +429,7 @@ mod tests {
             let dir = tempfile::TempDir::new().unwrap();
             let file = dir.path().join("test.txt");
             std::fs::write(&file, "hello\n").unwrap();
+            let file = UserPath::new(file).canonicalize();
 
             let watcher = FileWatcher::new();
             let cmd_stream: Stream<DocStoreOut> = Stream::new();
@@ -493,6 +494,8 @@ mod tests {
             let file_b = dir.path().join("b.txt");
             std::fs::write(&file_a, "aaa\n").unwrap();
             std::fs::write(&file_b, "bbb\n").unwrap();
+            let file_a = UserPath::new(file_a).canonicalize();
+            let file_b = UserPath::new(file_b).canonicalize();
 
             let watcher = FileWatcher::new();
             let cmd_stream: Stream<DocStoreOut> = Stream::new();

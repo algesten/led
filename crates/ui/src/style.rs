@@ -477,9 +477,8 @@ mod tests {
 
         use crate::display::{self, OverlayContent};
         use crate::render;
-        use std::path::PathBuf;
 
-        use led_core::{Startup, TextDoc};
+        use led_core::{CanonPath, Startup, TextDoc, UserPath};
         use led_state::{AppState, BufferState, Dimensions};
 
         let theme_toml = include_str!("../../config-file/src/default_theme.toml");
@@ -488,7 +487,7 @@ mod tests {
             file: Arc::new(theme),
         };
 
-        let test_path: PathBuf = "test.rs".into();
+        let test_path: CanonPath = UserPath::new("test.rs").canonicalize();
         let doc = TextDoc::from_reader("hello world\n".as_bytes()).unwrap();
         let mut buf = BufferState::new(test_path.clone());
         buf.materialize(Arc::new(doc), false);
@@ -498,8 +497,9 @@ mod tests {
             enable_watchers: false,
             arg_paths: vec![],
             arg_dir: None,
-            start_dir: Arc::new("/tmp".into()),
-            config_dir: "/tmp/config".into(),
+            start_dir: Arc::new(UserPath::new("/tmp").canonicalize()),
+            user_start_dir: UserPath::new("/tmp"),
+            config_dir: UserPath::new("/tmp/config"),
             test_lsp_server: None,
         });
         state.dims = Some(Dimensions::new(40, 10, false));

@@ -37,8 +37,8 @@ pub fn process_of(state: &Stream<Rc<AppState>>) -> Stream<Mut> {
             let buf = s
                 .buffers
                 .values()
-                .find(|b| b.is_materialized() && b.path_buf() == Some(last_arg))?;
-            Some(Mut::ActivateBuffer(buf.path_buf()?.clone()))
+                .find(|b| b.is_materialized() && b.path() == Some(last_arg))?;
+            Some(Mut::ActivateBuffer(buf.path()?.clone()))
         })
         .stream();
 
@@ -54,8 +54,8 @@ pub fn process_of(state: &Stream<Rc<AppState>>) -> Stream<Mut> {
                 .arg_paths
                 .iter()
                 .filter_map(|p| {
-                    let buf = s.buffers.values().find(|b| b.path_buf() == Some(p))?;
-                    Some(buf.path_buf()?.clone())
+                    let buf = s.buffers.values().find(|b| b.path() == Some(p))?;
+                    Some(buf.path()?.clone())
                 })
                 .collect();
             if entries.is_empty() {

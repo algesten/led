@@ -10,6 +10,7 @@ use led_core::Startup;
 use led_core::keys::Keys;
 use led_core::rx::Stream;
 use led_core::theme::Theme;
+use led_core::{CanonPath, UserPath};
 use tokio::sync::oneshot;
 
 #[derive(Parser)]
@@ -43,54 +44,71 @@ async fn main() {
         led::logging::init_file_logger(log_path);
     }
 
-    let resolve_path = |p: &str| -> PathBuf {
-        // Make absolute by canonicalizing the parent directory, but preserve
-        // the original filename so that symlink names are kept intact
-        // (important for language detection: .profile → dotfiles/profile).
-        let path = PathBuf::from(p);
+    let resolve_path = |p: &str| -> CanonPath {
+        // Build a UserPath then canonicalize. For non-existent files,
+        // canonicalize falls back to the original path.
+        let path = std::path::PathBuf::from(p);
         let parent = path.parent().unwrap_or(std::path::Path::new("."));
-        let canonical_parent = std::fs::canonicalize(parent)
-            .unwrap_or_else(|_| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-        canonical_parent.join(path.file_name().unwrap_or_default())
+        let canonical_parent = UserPath::new(parent).canonicalize();
+        let joined = UserPath::new(
+            canonical_parent
+                .as_path()
+                .join(path.file_name().unwrap_or_default()),
+        );
+        joined.canonicalize()
     };
 
-    let resolved: Vec<PathBuf> = cli.paths.iter().map(|p| resolve_path(p)).collect();
+    let resolved: Vec<CanonPath> = cli.paths.iter().map(|p| resolve_path(p)).collect();
 
     // Single directory: open in file browser, no files.
     // Otherwise: filter out directories, open remaining files.
+    // Capture the user-provided start directory before canonicalization.
+    let user_start_dir = if cli.paths.len() == 1 {
+        UserPath::new(&cli.paths[0])
+    } else {
+        UserPath::new(std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")))
+    };
+
     let (arg_dir, arg_paths, start_dir) = if resolved.len() == 1 && resolved[0].is_dir() {
         let dir = resolved.into_iter().next().unwrap();
         let start = dir.clone();
         (Some(dir), vec![], start)
     } else {
-        let files: Vec<PathBuf> = resolved.into_iter().filter(|p| !p.is_dir()).collect();
-        let start = files
-            .first()
-            .and_then(|p| p.parent())
-            .map(|parent| parent.to_path_buf())
-            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")));
+        let files: Vec<CanonPath> = resolved.into_iter().filter(|p| !p.is_dir()).collect();
+        let start = files.first().and_then(|p| p.parent()).unwrap_or_else(|| {
+            UserPath::new(std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/")))
+                .canonicalize()
+        });
         (None, files, start)
     };
 
-    let config_dir = dirs::home_dir()
-        .unwrap_or_default()
-        .join(".config")
-        .join("led");
+    let config_dir = UserPath::new(
+        dirs::home_dir()
+            .unwrap_or_default()
+            .join(".config")
+            .join("led"),
+    );
 
     if cli.reset_config {
-        std::fs::create_dir_all(&config_dir).ok();
+        std::fs::create_dir_all(config_dir.as_path()).ok();
 
-        match std::fs::write(config_dir.join(Keys::file_name()), Keys::default_toml()) {
+        match std::fs::write(
+            config_dir.as_path().join(Keys::file_name()),
+            Keys::default_toml(),
+        ) {
             Ok(()) => eprintln!("Config reset to defaults."),
             Err(e) => eprintln!("Failed to reset config: {e}"),
         }
 
-        match std::fs::write(config_dir.join(Theme::file_name()), Theme::default_toml()) {
+        match std::fs::write(
+            config_dir.as_path().join(Theme::file_name()),
+            Theme::default_toml(),
+        ) {
             Ok(()) => eprintln!("Theme reset to defaults."),
             Err(e) => eprintln!("Failed to reset theme: {e}"),
         }
 
-        match std::fs::remove_file(config_dir.join("db.sqlite")) {
+        match std::fs::remove_file(config_dir.as_path().join("db.sqlite")) {
             Ok(()) => eprintln!("Session database reset."),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 eprintln!("Session database reset.")
@@ -105,6 +123,7 @@ async fn main() {
         arg_paths,
         arg_dir,
         start_dir: Arc::new(start_dir),
+        user_start_dir,
         config_dir,
         test_lsp_server: None,
     };

@@ -1,15 +1,14 @@
-use std::path::PathBuf;
-
 use grep_matcher::Matcher;
 use grep_regex::RegexMatcherBuilder;
 use grep_searcher::sinks::UTF8;
 use ignore::WalkBuilder;
 
+use led_core::{CanonPath, UserPath};
 use led_state::file_search::{FileGroup, ReplaceScope, SearchHit};
 
 pub fn run_search(
     query: &str,
-    root: &std::path::Path,
+    root: &CanonPath,
     case_sensitive: bool,
     use_regex: bool,
 ) -> Vec<FileGroup> {
@@ -28,7 +27,7 @@ pub fn run_search(
         Err(_) => return Vec::new(),
     };
 
-    let walker = WalkBuilder::new(root)
+    let walker = WalkBuilder::new(root.as_path())
         .hidden(true)
         .git_ignore(true)
         .git_global(true)
@@ -44,13 +43,13 @@ pub fn run_search(
         if !entry.file_type().map_or(false, |ft| ft.is_file()) {
             continue;
         }
-        let path = entry.path().to_path_buf();
+        let path = UserPath::new(entry.path()).canonicalize();
 
         let mut hits = Vec::new();
         let m = &matcher;
         let _ = searcher.search_path(
             m,
-            &path,
+            path.as_path(),
             UTF8(|line_num, line_text| {
                 let line_text = line_text.trim_end_matches('\n').trim_end_matches('\r');
                 let mut byte_offset = 0;
@@ -86,9 +85,8 @@ pub fn run_search(
         if !hits.is_empty() {
             let relative = path
                 .strip_prefix(root)
-                .unwrap_or(&path)
-                .to_string_lossy()
-                .to_string();
+                .map(|p: &std::path::Path| p.to_string_lossy().to_string())
+                .unwrap_or_else(|| path.to_string_lossy().to_string());
             groups.push(FileGroup {
                 path,
                 relative,
@@ -109,11 +107,11 @@ pub fn run_search(
 pub fn run_replace(
     query: &str,
     replacement: &str,
-    root: &std::path::Path,
+    root: &CanonPath,
     case_sensitive: bool,
     use_regex: bool,
     scope: &ReplaceScope,
-    skip_paths: &[PathBuf],
+    skip_paths: &[CanonPath],
 ) -> (Vec<FileGroup>, usize) {
     let pattern = if use_regex {
         query.to_string()
@@ -138,7 +136,7 @@ pub fn run_replace(
             match_start,
             match_end,
         } => {
-            if let Ok(content) = std::fs::read_to_string(path) {
+            if let Ok(content) = std::fs::read_to_string(path.as_path()) {
                 let lines: Vec<&str> = content.lines().collect();
                 if *row < lines.len() {
                     let line = lines[*row];
@@ -161,13 +159,13 @@ pub fn run_replace(
                         if content.ends_with('\n') {
                             new_content.push('\n');
                         }
-                        write_atomic(path, &new_content);
+                        write_atomic(path.as_path(), &new_content);
                     }
                 }
             }
         }
         ReplaceScope::All => {
-            let walker = WalkBuilder::new(root)
+            let walker = WalkBuilder::new(root.as_path())
                 .hidden(true)
                 .git_ignore(true)
                 .git_global(true)
@@ -178,12 +176,12 @@ pub fn run_replace(
                 if !entry.file_type().map_or(false, |ft| ft.is_file()) {
                     continue;
                 }
-                let path = entry.path().to_path_buf();
+                let path = UserPath::new(entry.path()).canonicalize();
                 if skip_paths.contains(&path) {
                     continue;
                 }
 
-                let Ok(content) = std::fs::read_to_string(&path) else {
+                let Ok(content) = std::fs::read_to_string(path.as_path()) else {
                     continue;
                 };
 
@@ -191,7 +189,7 @@ pub fn run_replace(
                 if new_content != content {
                     let count = re.find_iter(&content).count();
                     replaced_count += count;
-                    write_atomic(&path, &new_content);
+                    write_atomic(path.as_path(), &new_content);
                 }
             }
         }

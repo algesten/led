@@ -1,7 +1,6 @@
 mod search;
 
-use std::path::PathBuf;
-
+use led_core::CanonPath;
 use led_core::rx::Stream;
 use led_state::file_search::{FileGroup, ReplaceScope};
 use tokio::sync::mpsc;
@@ -10,18 +9,18 @@ use tokio::sync::mpsc;
 pub enum FileSearchOut {
     Search {
         query: String,
-        root: PathBuf,
+        root: CanonPath,
         case_sensitive: bool,
         use_regex: bool,
     },
     Replace {
         query: String,
         replacement: String,
-        root: PathBuf,
+        root: CanonPath,
         case_sensitive: bool,
         use_regex: bool,
         scope: ReplaceScope,
-        skip_paths: Vec<PathBuf>,
+        skip_paths: Vec<CanonPath>,
     },
 }
 

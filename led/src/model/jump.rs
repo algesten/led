@@ -50,7 +50,7 @@ pub fn jump_forward(state: &mut AppState) {
 fn current_position(state: &AppState) -> Option<JumpPosition> {
     let active_path = state.active_tab.as_ref()?;
     let buf = state.buffers.get(active_path)?;
-    let path = buf.path_buf()?.clone();
+    let path = buf.path()?.clone();
     Some(JumpPosition {
         path,
         row: buf.cursor_row().0,
@@ -67,8 +67,8 @@ fn navigate_to_position(state: &mut AppState, pos: JumpPosition) {
     let existing = state
         .buffers
         .values()
-        .find(|b| b.path() == Some(pos.path.as_path()))
-        .and_then(|b| b.path_buf().cloned());
+        .find(|b| b.path() == Some(&pos.path))
+        .and_then(|b| b.path().cloned());
 
     if let Some(buf_path) = existing {
         state.active_tab = Some(buf_path.clone());

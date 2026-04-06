@@ -1,8 +1,9 @@
+use led_core::CanonPath;
 use led_core::{Action, PanelSlot};
 use led_state::{AppState, LspRequest, RenameState};
 
 use super::super::mov;
-use super::helpers::{close_group_on_move, word_under_cursor};
+use super::helpers::{close_group_on_move, reveal_active_buffer, word_under_cursor};
 
 pub(super) fn handle_completion_action(state: &mut AppState, action: &Action) -> bool {
     match action {
@@ -214,7 +215,7 @@ pub(super) fn navigate_diagnostic(state: &mut AppState, forward: bool) {
         .active_tab
         .as_ref()
         .and_then(|path| state.buffers.get(path))
-        .and_then(|b| b.path_buf().cloned());
+        .and_then(|b| b.path().cloned());
 
     let (row, col) = state
         .active_tab
@@ -224,9 +225,9 @@ pub(super) fn navigate_diagnostic(state: &mut AppState, forward: bool) {
         .unwrap_or((0, 0));
 
     // Build a sorted list of all (path, diag) across the workspace.
-    let mut all: Vec<(&std::path::PathBuf, &led_lsp::Diagnostic)> = Vec::new();
+    let mut all: Vec<(&CanonPath, &led_lsp::Diagnostic)> = Vec::new();
     for buf in state.buffers.values() {
-        if let Some(path) = buf.path_buf() {
+        if let Some(path) = buf.path() {
             for d in buf.status().diagnostics() {
                 all.push((path, d));
             }
@@ -289,8 +290,40 @@ pub(super) fn navigate_diagnostic(state: &mut AppState, forward: bool) {
         return;
     }
 
-    // Target is in a different file — open as preview.
-    super::preview::set_preview(state, target_path, target_row, target_col);
+    // Target is in a different file — paths are CanonPath so simple == works.
+    let existing = state
+        .buffers
+        .values()
+        .find(|b| b.path() == Some(&target_path))
+        .and_then(|b| b.path().cloned());
+    if let Some(path) = existing {
+        log::debug!("[diag] → different file, already open: {}", path.display());
+        state.active_tab = Some(path.clone());
+        let half = state.dims.map_or(10, |d| d.buffer_height() / 2);
+        if let Some(buf) = state.buf_mut(&path) {
+            let r = target_row.min(buf.doc().line_count().saturating_sub(1));
+            buf.set_cursor(
+                led_core::Row(r),
+                led_core::Col(target_col),
+                led_core::Col(target_col),
+            );
+            buf.set_scroll(led_core::Row(r.saturating_sub(half)), led_core::SubLine(0));
+        }
+        reveal_active_buffer(state);
+    } else {
+        log::debug!(
+            "[diag] → different file, not open: {}",
+            target_path.display()
+        );
+        super::super::request_open(state, target_path.clone(), false);
+        state.active_tab = Some(target_path.clone());
+        state.jump.pending_position = Some(led_state::JumpPosition {
+            path: target_path,
+            row: target_row,
+            col: target_col,
+            scroll_offset: 0,
+        });
+    }
 }
 
 pub(super) fn open_rename_overlay(state: &mut AppState) {

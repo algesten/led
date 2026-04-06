@@ -1,5 +1,4 @@
-use std::path::PathBuf;
-
+use led_core::CanonPath;
 use led_core::PanelSlot;
 use led_state::AppState;
 
@@ -10,7 +9,7 @@ pub(super) fn cycle_tab(state: &mut AppState, direction: i32) {
     let Some(ref active_path) = state.active_tab else {
         return;
     };
-    let tabs: Vec<&PathBuf> = state
+    let tabs: Vec<&CanonPath> = state
         .tabs
         .iter()
         .filter(|t| !t.is_preview())
@@ -62,8 +61,8 @@ pub(super) fn force_kill_buffer(state: &mut AppState) {
     do_kill_buffer(state, &active_path);
 }
 
-fn do_kill_buffer(state: &mut AppState, path: &std::path::Path) {
-    if state.tabs.iter().any(|t| t.is_preview() && t.path == path) {
+fn do_kill_buffer(state: &mut AppState, path: &CanonPath) {
+    if state.tabs.iter().any(|t| t.is_preview() && t.path == *path) {
         close_preview(state);
         return;
     }
@@ -80,7 +79,7 @@ fn do_kill_buffer(state: &mut AppState, path: &std::path::Path) {
 
     // Find next tab to activate: look at the killed tab's position in the VecDeque,
     // then pick the adjacent tab (next, or previous if at the end).
-    let killed_index = state.tabs.iter().position(|t| t.path == path);
+    let killed_index = state.tabs.iter().position(|t| t.path == *path);
     let next_active = killed_index.and_then(|idx| {
         let len = state.tabs.len();
         if len <= 1 {

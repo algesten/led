@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use led_core::Action::*;
-use led_core::{EditOp, Startup, UndoEntry};
+use led_core::{EditOp, Startup, UndoEntry, UserPath};
 use led_state::SaveState;
 
 use TestStep::{Do, QuitAndWait, WaitFor};
@@ -999,11 +999,10 @@ fn browser_reveals_opened_file() {
         .run(vec![WaitFor(browser_reveal_done)]);
 
     let active_path = t.state.active_tab.as_ref().unwrap();
-    let buf_path = t.state.buffers[active_path].path_buf().unwrap();
-    let canonical = std::fs::canonicalize(buf_path).unwrap_or_else(|_| buf_path.clone());
+    let buf_path = t.state.buffers[active_path].path().unwrap();
     let selected_entry = &t.state.browser.entries[t.state.browser.selected];
     assert_eq!(
-        selected_entry.path, canonical,
+        selected_entry.path, *buf_path,
         "browser should select the opened file"
     );
 }
@@ -1020,11 +1019,10 @@ fn browser_reveals_on_tab_switch() {
         ]);
 
     let ap = t.state.active_tab.as_ref().unwrap();
-    let active_path = t.state.buffers[ap].path_buf().unwrap();
-    let canonical = std::fs::canonicalize(active_path).unwrap_or_else(|_| active_path.clone());
+    let active_path = t.state.buffers[ap].path().unwrap();
     let selected_entry = &t.state.browser.entries[t.state.browser.selected];
     assert_eq!(
-        selected_entry.path, canonical,
+        selected_entry.path, *active_path,
         "browser should select the active buffer's file after tab switch"
     );
 }
@@ -1047,12 +1045,10 @@ fn browser_reveals_file_in_subdir() {
 
     // The active buffer's file should be selected in the browser
     let active_p = t.state.active_tab.as_ref().unwrap();
-    let active_path = t.state.buffers[active_p].path_buf().unwrap();
-    let active_canonical =
-        std::fs::canonicalize(active_path).unwrap_or_else(|_| active_path.clone());
+    let active_path = t.state.buffers[active_p].path().unwrap();
     let selected_entry = &t.state.browser.entries[t.state.browser.selected];
     assert_eq!(
-        selected_entry.path, active_canonical,
+        selected_entry.path, *active_path,
         "browser should select the active buffer's file"
     );
 }
@@ -1069,11 +1065,10 @@ fn browser_reveals_after_kill_buffer() {
         ]);
 
     let ap = t.state.active_tab.as_ref().unwrap();
-    let active_path = t.state.buffers[ap].path_buf().unwrap();
-    let canonical = std::fs::canonicalize(active_path).unwrap_or_else(|_| active_path.clone());
+    let active_path = t.state.buffers[ap].path().unwrap();
     let selected_entry = &t.state.browser.entries[t.state.browser.selected];
     assert_eq!(
-        selected_entry.path, canonical,
+        selected_entry.path, *active_path,
         "browser should select the remaining file after kill"
     );
 }
@@ -1336,7 +1331,7 @@ fn session_restore_tabs() {
         .state
         .buffers
         .values()
-        .filter_map(|b| b.path_buf())
+        .filter_map(|b| b.path())
         .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
         .collect();
     paths.sort();
@@ -1437,7 +1432,7 @@ fn session_restore_missing_file() {
     // fileB.txt should be open; fileA.txt silently skipped
     assert_eq!(t2.state.buffers.len(), 1);
     let name = buf(&t2)
-        .path_buf()
+        .path()
         .unwrap()
         .file_name()
         .unwrap()
@@ -1491,7 +1486,7 @@ fn session_restore_multiple_missing() {
 
     assert_eq!(t2.state.buffers.len(), 1);
     let name = buf(&t2)
-        .path_buf()
+        .path()
         .unwrap()
         .file_name()
         .unwrap()
@@ -1553,7 +1548,7 @@ fn session_restore_with_arg_file() {
         .state
         .buffers
         .values()
-        .filter_map(|b| b.path_buf())
+        .filter_map(|b| b.path())
         .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
         .collect();
     paths.sort();
@@ -1561,7 +1556,7 @@ fn session_restore_with_arg_file() {
 
     // Active tab should be the arg file — explicit arg overrides session's choice
     let active_name = buf(&t2)
-        .path_buf()
+        .path()
         .unwrap()
         .file_name()
         .unwrap()
@@ -1606,7 +1601,7 @@ fn session_restore_active_tab() {
         .run(vec![Do(PrevTab), Do(Quit), WaitFor(|s| s.session.saved)]);
 
     let active_name = buf(&t)
-        .path_buf()
+        .path()
         .unwrap()
         .file_name()
         .unwrap()
@@ -1622,7 +1617,7 @@ fn session_restore_active_tab() {
         .run(vec![WaitFor(|s| s.buffers.len() >= 2)]);
 
     let active_name2 = buf(&t2)
-        .path_buf()
+        .path()
         .unwrap()
         .file_name()
         .unwrap()
@@ -1640,7 +1635,7 @@ fn session_restore_active_tab_no_args() {
         .run(vec![Do(PrevTab), Do(Quit), WaitFor(|s| s.session.saved)]);
 
     let active_name = buf(&t)
-        .path_buf()
+        .path()
         .unwrap()
         .file_name()
         .unwrap()
@@ -1653,7 +1648,7 @@ fn session_restore_active_tab_no_args() {
     let t2 = TestHarness::with_dir(dir).run(vec![WaitFor(|s| s.buffers.len() >= 2)]);
 
     let active_name2 = buf(&t2)
-        .path_buf()
+        .path()
         .unwrap()
         .file_name()
         .unwrap()
@@ -2007,14 +2002,15 @@ fn external_rename_clean_buffer() {
     // Rename the file externally
     std::fs::rename(&file_path, &new_path).unwrap();
 
-    let new_path2 = new_path.clone();
+    let new_path_canon = UserPath::new(&new_path).canonicalize();
+    let new_path_canon2 = new_path_canon.clone();
     inst.wait_for(
         move |s| {
             s.active_tab
                 .as_ref()
                 .and_then(|p| s.buffers.get(p))
-                .and_then(|b| b.path_buf())
-                .map_or(false, |p| *p == new_path2)
+                .and_then(|b| b.path())
+                .map_or(false, |p| *p == new_path_canon2)
         },
         WAIT,
         "buffer path updated to renamed.txt",
@@ -2022,12 +2018,12 @@ fn external_rename_clean_buffer() {
 
     let (content, buf_path) = inst.with_state(|s| {
         let b = active_buf(s).unwrap();
-        (line(&**b.doc(), 0), b.path_buf().cloned())
+        (line(&**b.doc(), 0), b.path().cloned())
     });
     assert_eq!(content, "original", "content should be preserved");
     assert_eq!(
         buf_path.as_ref(),
-        Some(&new_path),
+        Some(&new_path_canon),
         "buffer path should be the new name"
     );
 
@@ -2068,16 +2064,17 @@ fn external_rename_dirty_buffer() {
     // Buffer should still be open with our edits and old path
     let (content, buf_path, dirty) = inst.with_state(|s| {
         let b = active_buf(s).unwrap();
-        (line(&**b.doc(), 0), b.path_buf().cloned(), b.is_dirty())
+        (line(&**b.doc(), 0), b.path().cloned(), b.is_dirty())
     });
     assert!(
         content.contains('X'),
         "buffer should still have our edit, got: {:?}",
         content
     );
+    let file_path_canon = UserPath::new(&file_path).canonicalize();
     assert_eq!(
         buf_path.as_ref(),
-        Some(&file_path),
+        Some(&file_path_canon),
         "buffer path should still be the original"
     );
     assert!(dirty, "buffer should still be dirty");
@@ -2100,8 +2097,7 @@ fn simulate_external_edit(
     let conn = rusqlite::Connection::open(&db_path).expect("open DB");
 
     // Must canonicalize to match the workspace driver (resolves /var → /private/var on macOS)
-    let canonical_root =
-        std::fs::canonicalize(&dirs.workspace).unwrap_or_else(|_| dirs.workspace.clone());
+    let canonical_root = UserPath::new(&dirs.workspace).canonicalize();
     let root_str = canonical_root.to_string_lossy();
     let path_str = file_path.to_string_lossy();
 
@@ -2127,7 +2123,7 @@ fn simulate_external_edit(
     drop(conn);
 
     // Touch notify file to wake the instance
-    let hash = led_workspace::path_hash(file_path);
+    let hash = led_workspace::path_hash(&UserPath::new(file_path).canonicalize());
     let notify_dir = dirs.config.join("notify");
     std::fs::create_dir_all(&notify_dir).ok();
     std::fs::write(notify_dir.join(&hash), b"").ok();
@@ -2313,15 +2309,14 @@ fn cross_instance_sync_after_save() {
                 // Clear undo in DB (like ClearUndo does after save)
                 let db_path = dirs.config.join("db.sqlite");
                 let conn = rusqlite::Connection::open(&db_path).expect("open DB");
-                let canonical_root = std::fs::canonicalize(&dirs.workspace)
-                    .unwrap_or_else(|_| dirs.workspace.clone());
+                let canonical_root = UserPath::new(&dirs.workspace).canonicalize();
                 let root_str = canonical_root.to_string_lossy();
                 let path_str = file_path.to_string_lossy();
                 led_workspace::db::clear_undo(&conn, &root_str, &path_str).expect("clear_undo");
                 drop(conn);
 
                 // Touch notify to wake A
-                let hash = led_workspace::path_hash(&file_path);
+                let hash = led_workspace::path_hash(&UserPath::new(&file_path).canonicalize());
                 let notify_dir = dirs.config.join("notify");
                 std::fs::write(notify_dir.join(&hash), b"").ok();
             })),
@@ -2670,13 +2665,16 @@ fn two_instance_no_args_browser_visible() {
     std::fs::create_dir_all(dirs.workspace.join(".git")).expect("create .git");
 
     // Start both with no arg_paths — like running `led` with no arguments
+    let ws_canon = UserPath::new(&dirs.workspace).canonicalize();
+    let cfg_user = UserPath::new(&dirs.config);
     let no_files_a = Startup {
         headless: true,
         enable_watchers: true,
         arg_paths: vec![],
         arg_dir: None,
-        start_dir: Arc::new(dirs.workspace.clone()),
-        config_dir: dirs.config.clone(),
+        start_dir: Arc::new(ws_canon.clone()),
+        user_start_dir: UserPath::new(ws_canon.as_path()),
+        config_dir: cfg_user.clone(),
         test_lsp_server: None,
     };
     let no_files_b = Startup {
@@ -2684,8 +2682,9 @@ fn two_instance_no_args_browser_visible() {
         enable_watchers: true,
         arg_paths: vec![],
         arg_dir: None,
-        start_dir: Arc::new(dirs.workspace.clone()),
-        config_dir: dirs.config.clone(),
+        start_dir: Arc::new(ws_canon.clone()),
+        user_start_dir: UserPath::new(ws_canon.as_path()),
+        config_dir: cfg_user.clone(),
         test_lsp_server: None,
     };
 
@@ -3166,7 +3165,7 @@ fn jump_back_cross_buffer() {
 
     let b = buf(&t);
     assert_eq!(
-        b.path_buf().unwrap().file_name().unwrap().to_str().unwrap(),
+        b.path().unwrap().file_name().unwrap().to_str().unwrap(),
         "aaa.txt",
         "JumpBack should switch to the correct buffer"
     );
@@ -3785,7 +3784,7 @@ fn find_file_opens_existing() {
     assert!(t.state.find_file.is_none());
     // The second file should be open
     let has_second = t.state.buffers.values().any(|b| {
-        b.path_buf()
+        b.path()
             .and_then(|p| p.file_name())
             .map_or(false, |n| n == "second.txt")
     });
@@ -3858,7 +3857,7 @@ fn find_file_opens_nonexistent() {
 
     assert!(t.state.find_file.is_none());
     let has_new = t.state.buffers.values().any(|b| {
-        b.path_buf()
+        b.path()
             .and_then(|p| p.file_name())
             .map_or(false, |n| n == "newfile.txt")
     });
@@ -3896,7 +3895,7 @@ fn find_file_opens_nonexistent_no_buffers() {
 
     assert!(t.state.find_file.is_none());
     let has_new = t.state.buffers.values().any(|b| {
-        b.path_buf()
+        b.path()
             .and_then(|p| p.file_name())
             .map_or(false, |n| n == "newfile.txt")
     });
@@ -3933,14 +3932,14 @@ fn find_file_opens_nonexistent_in_project_dir() {
             WaitFor(|s| {
                 s.buffers.values().any(|b| {
                     b.is_materialized()
-                        && b.path_buf()
+                        && b.path()
                             .map_or(false, |p| p.file_name().map_or(false, |n| n == "new.txt"))
                 })
             }),
         ]);
 
     let has_new = t.state.buffers.values().any(|b| {
-        b.path_buf()
+        b.path()
             .and_then(|p| p.file_name())
             .map_or(false, |n| n == "new.txt")
     });
@@ -4695,18 +4694,19 @@ fn multi_file_session_last_used_bumped() {
         .with_arg(keep_path.clone())
         .run(vec![WaitFor(|s| s.buffers.len() >= 2)]);
 
+    let keep_path_canon = UserPath::new(&keep_path).canonicalize();
     let keep_buf = t2
         .state
         .buffers
         .values()
-        .find(|b| b.path() == Some(keep_path.as_path()))
+        .find(|b| b.path() == Some(&keep_path_canon))
         .expect("keep.txt should be open");
     let other_buf = t2
         .state
         .buffers
         .values()
         .find(|b| {
-            b.path_buf()
+            b.path()
                 .and_then(|p| p.file_name())
                 .map_or(false, |n| n == "other.txt")
         })
@@ -4791,7 +4791,7 @@ fn directory_in_workspace_reveals_subdir() {
         .run(vec![WaitFor(browser_reveal_done)]);
 
     // Canonicalize for comparison (macOS /var → /private/var)
-    let workspace = std::fs::canonicalize(&workspace).unwrap();
+    let workspace = UserPath::new(&workspace).canonicalize();
     let src_dir = workspace.join("src");
     let canonical_deep = src_dir.join("deep");
 
@@ -5047,7 +5047,7 @@ fn file_search_replace_all_multi_file() {
         .buffers
         .values()
         .filter(|b| {
-            b.path_buf()
+            b.path()
                 .is_some_and(|p| p.ends_with("a.txt") || p.ends_with("b.txt"))
                 && line(&**b.doc(), 0) == "bye"
         })

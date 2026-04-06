@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::path::PathBuf;
 
 use led_core::rx::Stream;
+use led_core::{CanonPath, UserPath};
 use led_state::JumpPosition;
 use led_workspace::{SessionBuffer, WorkspaceIn as WI};
 
@@ -16,15 +16,15 @@ pub fn session_of(workspace_in: &Stream<WI>) -> Stream<Mut> {
             };
             match session {
                 Some(session) => {
-                    let paths: Vec<PathBuf> = session
+                    let paths: Vec<CanonPath> = session
                         .buffers
                         .iter()
-                        .map(|b| b.file_path.clone())
+                        .map(|b| b.file_path.canonicalize())
                         .collect();
 
-                    let mut positions: HashMap<PathBuf, SessionBuffer> = HashMap::new();
+                    let mut positions: HashMap<CanonPath, SessionBuffer> = HashMap::new();
                     for buf in session.buffers {
-                        positions.insert(buf.file_path.clone(), buf);
+                        positions.insert(buf.file_path.canonicalize(), buf);
                     }
 
                     let browser_selected = session
@@ -45,8 +45,8 @@ pub fn session_of(workspace_in: &Stream<WI>) -> Stream<Mut> {
                         .map(|v| {
                             v.lines()
                                 .filter(|l| !l.is_empty())
-                                .map(PathBuf::from)
-                                .collect::<HashSet<PathBuf>>()
+                                .map(|l| UserPath::new(l).canonicalize())
+                                .collect::<HashSet<CanonPath>>()
                         })
                         .unwrap_or_default();
 
@@ -64,7 +64,7 @@ pub fn session_of(workspace_in: &Stream<WI>) -> Stream<Mut> {
                         })
                         .unwrap_or_default();
 
-                    let pending_lists: Vec<PathBuf> =
+                    let pending_lists: Vec<CanonPath> =
                         browser_expanded_dirs.iter().cloned().collect();
 
                     Mut::SessionRestored {

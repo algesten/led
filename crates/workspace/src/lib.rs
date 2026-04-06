@@ -1,14 +1,15 @@
 pub mod db;
 
 use std::collections::HashMap;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{File, OpenOptions};
 use std::hash::DefaultHasher;
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
 use led_core::rx::Stream;
-use led_core::{FileWatcher, Registration, Startup, WatchEvent, WatchEventKind, WatchMode};
+use led_core::{
+    CanonPath, FileWatcher, Registration, Startup, UserPath, WatchEvent, WatchEventKind, WatchMode,
+};
 use tokio::sync::mpsc;
 
 const GIT_DIR: &str = ".git";
@@ -18,8 +19,10 @@ const PRIMARY_DIR: &str = "primary";
 
 #[derive(Clone, Default, Debug, PartialEq)]
 pub struct Workspace {
-    pub root: PathBuf,
-    pub config: PathBuf,
+    pub root: CanonPath,
+    /// The workspace root as the user provided it (preserves symlink paths).
+    pub user_root: UserPath,
+    pub config: UserPath,
     pub primary: bool,
 }
 
@@ -31,7 +34,7 @@ pub enum WorkspaceOut {
     SaveSession { data: SessionData },
     /// Flush unpersisted undo entries for a buffer.
     FlushUndo {
-        file_path: PathBuf,
+        file_path: CanonPath,
         chain_id: String,
         content_hash: u64,
         undo_cursor: usize,
@@ -39,10 +42,10 @@ pub enum WorkspaceOut {
         entries: Vec<Vec<u8>>,
     },
     /// Delete undo state after save.
-    ClearUndo { file_path: PathBuf },
+    ClearUndo { file_path: CanonPath },
     /// Query for cross-instance sync.
     CheckSync {
-        file_path: PathBuf,
+        file_path: CanonPath,
         last_seen_seq: i64,
         current_chain_id: Option<String>,
     },
@@ -58,7 +61,7 @@ pub enum WorkspaceIn {
     SessionSaved,
     /// Undo entries flushed.
     UndoFlushed {
-        file_path: PathBuf,
+        file_path: CanonPath,
         chain_id: String,
         persisted_undo_len: usize,
         last_seen_seq: i64,
@@ -68,7 +71,7 @@ pub enum WorkspaceIn {
     /// Another instance touched the notify dir for a file we have open.
     NotifyEvent { file_path_hash: String },
     /// Workspace tree changed (watcher event — paths that were created/removed).
-    WorkspaceChanged { paths: Vec<PathBuf> },
+    WorkspaceChanged { paths: Vec<CanonPath> },
     /// Git internal state changed (external git command detected).
     GitChanged,
     /// Notify watcher is ready (for cross-instance sync tests).
@@ -78,22 +81,22 @@ pub enum WorkspaceIn {
 #[derive(Clone, Debug)]
 pub enum SyncResultKind {
     ReplayEntries {
-        file_path: PathBuf,
+        file_path: CanonPath,
         entries: Vec<Vec<u8>>,
         new_last_seen_seq: i64,
     },
     ReloadAndReplay {
-        file_path: PathBuf,
+        file_path: CanonPath,
         new_chain_id: String,
         content_hash: u64,
         entries: Vec<Vec<u8>>,
         new_last_seen_seq: i64,
     },
     ExternalSave {
-        file_path: PathBuf,
+        file_path: CanonPath,
     },
     NoChange {
-        file_path: PathBuf,
+        file_path: CanonPath,
     },
 }
 
@@ -109,7 +112,7 @@ pub struct SessionData {
 
 #[derive(Clone, Debug)]
 pub struct SessionBuffer {
-    pub file_path: PathBuf,
+    pub file_path: UserPath,
     pub tab_order: usize,
     pub cursor_row: usize,
     pub cursor_col: usize,
@@ -184,11 +187,14 @@ pub fn driver(out: Stream<WorkspaceOut>, file_watcher: Arc<FileWatcher>) -> Stre
                             let _ = result_tx.send(WorkspaceIn::SessionSaved).await;
                         }
                         WorkspaceOut::Init { startup } => {
-                            let dir = fs::canonicalize(&*startup.start_dir)
-                                .unwrap_or_else(|_| startup.start_dir.as_ref().clone());
+                            let dir = CanonPath::clone(&startup.start_dir);
 
                             let root = find_git_root(&dir);
-                            let config = PathBuf::clone(&startup.config_dir);
+                            let user_root = root.to_user_path(
+                                &startup.start_dir,
+                                &startup.user_start_dir,
+                            );
+                            let config = UserPath::clone(&startup.config_dir);
 
                             let primary = match try_become_primary(&config, &root) {
                                 Some(file) => {
@@ -199,7 +205,7 @@ pub fn driver(out: Stream<WorkspaceOut>, file_watcher: Arc<FileWatcher>) -> Stre
                             };
 
                             root_str = root.to_string_lossy().into_owned();
-                            let workspace = Workspace { root: root.clone(), config: config.clone(), primary };
+                            let workspace = Workspace { root: root.clone(), user_root, config: config.clone(), primary };
 
                             current = Some(workspace.clone());
                             if result_tx.send(WorkspaceIn::Workspace { workspace }).await.is_err() {
@@ -207,7 +213,7 @@ pub fn driver(out: Stream<WorkspaceOut>, file_watcher: Arc<FileWatcher>) -> Stre
                             }
 
                             // Open DB and load session + undo state
-                            let session = match db::open_db(&config) {
+                            let session = match db::open_db(config.as_path()) {
                                 Ok(conn) => {
                                     let mut session = if primary {
                                         db::load_session(&conn, &root_str).ok().flatten()
@@ -244,7 +250,7 @@ pub fn driver(out: Stream<WorkspaceOut>, file_watcher: Arc<FileWatcher>) -> Stre
                             }
 
                             let notify_dir = config.join("notify");
-                            std::fs::create_dir_all(&notify_dir).ok();
+                            std::fs::create_dir_all(notify_dir.as_path()).ok();
 
                             // Register watchers with the shared FileWatcher
                             // (inert watcher silently accepts but never delivers)
@@ -256,8 +262,9 @@ pub fn driver(out: Stream<WorkspaceOut>, file_watcher: Arc<FileWatcher>) -> Stre
                                 ));
                             }
                             if let Some(tx) = notify_sender.take() {
+                                let notify_canon = notify_dir.canonicalize();
                                 _notify_reg = Some(file_watcher.register(
-                                    &notify_dir,
+                                    &notify_canon,
                                     WatchMode::NonRecursive,
                                     tx,
                                 ));
@@ -365,7 +372,7 @@ pub fn driver(out: Stream<WorkspaceOut>, file_watcher: Arc<FileWatcher>) -> Stre
                 }
                 Some(ev) = root_watch_rx.recv() => {
                     let is_git_internal = ev.paths.iter().all(|p| {
-                        p.components().any(|c| c.as_os_str() == ".git")
+                        p.as_path().components().any(|c| c.as_os_str() == ".git")
                     });
 
                     if is_git_internal {
@@ -435,8 +442,8 @@ pub fn driver(out: Stream<WorkspaceOut>, file_watcher: Arc<FileWatcher>) -> Stre
 
 // ── Internals ──
 
-fn find_git_root(start: &Path) -> PathBuf {
-    let mut dir = start.to_path_buf();
+fn find_git_root(start: &CanonPath) -> CanonPath {
+    let mut dir = start.as_path().to_path_buf();
     let mut root = None;
     loop {
         let git = dir.join(GIT_DIR);
@@ -447,18 +454,19 @@ fn find_git_root(start: &Path) -> PathBuf {
             break;
         }
     }
-    root.unwrap_or_else(|| start.to_path_buf())
+    let result = root.unwrap_or_else(|| start.as_path().to_path_buf());
+    UserPath::new(result).canonicalize()
 }
 
-fn try_become_primary(config: &Path, root: &Path) -> Option<File> {
+fn try_become_primary(config: &UserPath, root: &CanonPath) -> Option<File> {
     use std::hash::{Hash, Hasher};
     use std::os::unix::io::AsRawFd;
 
-    let lock_dir = config.join(PRIMARY_DIR);
+    let lock_dir = config.as_path().join(PRIMARY_DIR);
     std::fs::create_dir_all(&lock_dir).ok()?;
 
     let mut hasher = DefaultHasher::new();
-    root.hash(&mut hasher);
+    root.as_path().hash(&mut hasher);
     let hash = format!("{:016x}", hasher.finish());
 
     let file = OpenOptions::new()
@@ -485,16 +493,16 @@ pub fn new_chain_id() -> String {
     format!("{:016x}", hasher.finish())
 }
 
-pub fn path_hash(path: &Path) -> String {
+pub fn path_hash(path: &CanonPath) -> String {
     use std::hash::{Hash, Hasher};
     let mut hasher = DefaultHasher::new();
-    path.hash(&mut hasher);
+    path.as_path().hash(&mut hasher);
     format!("{:016x}", hasher.finish())
 }
 
-fn is_git_sentinel(path: &Path) -> bool {
+fn is_git_sentinel(path: &CanonPath) -> bool {
     let mut saw_dot_git = false;
-    for component in path.components() {
+    for component in path.as_path().components() {
         let name = component.as_os_str();
         if name == ".git" {
             saw_dot_git = true;
@@ -513,9 +521,9 @@ fn is_git_sentinel(path: &Path) -> bool {
     false
 }
 
-fn touch_notify_file(config: Option<&PathBuf>, hash: &str) {
+fn touch_notify_file(config: Option<&UserPath>, hash: &str) {
     let Some(config) = config else { return };
-    let notify_dir = config.join("notify");
+    let notify_dir = config.as_path().join("notify");
     let path = notify_dir.join(hash);
     std::fs::write(&path, b"").ok();
 }

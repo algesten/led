@@ -78,7 +78,7 @@ pub(super) fn handle_browser_collapse(state: &mut AppState) {
     let collapse_path = match &entry.kind {
         EntryKind::Directory { expanded: true } => entry.path.clone(),
         _ => match entry.path.parent() {
-            Some(parent) if state.browser.expanded_dirs.contains(parent) => parent.to_path_buf(),
+            Some(parent) if state.browser.expanded_dirs.contains(&parent) => parent,
             _ => return,
         },
     };

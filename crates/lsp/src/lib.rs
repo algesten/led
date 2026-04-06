@@ -1,8 +1,7 @@
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use led_core::rx::Stream;
-use led_core::{ContentHash, Doc, EditOp};
+use led_core::{CanonPath, ContentHash, Doc, EditOp};
 
 mod convert;
 mod manager;
@@ -23,7 +22,7 @@ pub struct TextEdit {
 
 #[derive(Debug, Clone)]
 pub struct FileEdit {
-    pub path: PathBuf,
+    pub path: CanonPath,
     pub edits: Vec<TextEdit>,
 }
 
@@ -71,17 +70,17 @@ pub enum DiagnosticSeverity {
 pub enum LspOut {
     // Lifecycle
     Init {
-        root: PathBuf,
+        root: CanonPath,
     },
     Shutdown,
 
     // Document sync
     BufferOpened {
-        path: PathBuf,
+        path: CanonPath,
         doc: Arc<dyn Doc>,
     },
     BufferChanged {
-        path: PathBuf,
+        path: CanonPath,
         doc: Arc<dyn Doc>,
         edit_ops: Vec<EditOp>,
         /// True when the change originated from disk (e.g. external `git checkout`).
@@ -89,21 +88,21 @@ pub enum LspOut {
         external: bool,
     },
     BufferSaved {
-        path: PathBuf,
+        path: CanonPath,
         content_hash: u64,
     },
     BufferClosed {
-        path: PathBuf,
+        path: CanonPath,
     },
 
     // User-initiated requests
     GotoDefinition {
-        path: PathBuf,
+        path: CanonPath,
         row: usize,
         col: usize,
     },
     Complete {
-        path: PathBuf,
+        path: CanonPath,
         row: usize,
         col: usize,
     },
@@ -111,13 +110,13 @@ pub enum LspOut {
         index: usize,
     },
     Rename {
-        path: PathBuf,
+        path: CanonPath,
         row: usize,
         col: usize,
         new_name: String,
     },
     CodeAction {
-        path: PathBuf,
+        path: CanonPath,
         start_row: usize,
         start_col: usize,
         end_row: usize,
@@ -127,10 +126,10 @@ pub enum LspOut {
         index: usize,
     },
     Format {
-        path: PathBuf,
+        path: CanonPath,
     },
     InlayHints {
-        path: PathBuf,
+        path: CanonPath,
         start_row: usize,
         end_row: usize,
     },
@@ -142,7 +141,7 @@ pub enum LspOut {
 pub enum LspIn {
     // Navigation
     Navigate {
-        path: PathBuf,
+        path: CanonPath,
         row: usize,
         col: usize,
     },
@@ -165,12 +164,12 @@ pub enum LspIn {
 
     // Annotations
     Diagnostics {
-        path: PathBuf,
+        path: CanonPath,
         diagnostics: Vec<Diagnostic>,
         content_hash: ContentHash,
     },
     InlayHints {
-        path: PathBuf,
+        path: CanonPath,
         hints: Vec<InlayHint>,
     },
 

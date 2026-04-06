@@ -1,8 +1,9 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Duration;
+
+use led_core::CanonPath;
 
 use led_config_file::{ConfigDir, ConfigFileOut};
 use led_core::rx::Stream;
@@ -15,12 +16,12 @@ use led_timers::{Schedule, TimersOut};
 use led_workspace::{SessionBuffer, SessionData, WorkspaceOut};
 
 /// Key for deduping on materialized buffer paths.
-fn loaded_buf_paths(s: &Rc<AppState>) -> Vec<PathBuf> {
-    let mut paths: Vec<PathBuf> = s
+fn loaded_buf_paths(s: &Rc<AppState>) -> Vec<CanonPath> {
+    let mut paths: Vec<CanonPath> = s
         .buffers
         .values()
         .filter(|b| b.is_materialized())
-        .filter_map(|b| b.path_buf().cloned())
+        .filter_map(|b| b.path().cloned())
         .collect();
     paths.sort();
     paths
@@ -75,8 +76,11 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
                     if !b.is_materialized() || b.path().is_none() {
                         return None;
                     }
+                    let canon = b.path().unwrap();
+                    let ws = s.workspace.as_ref().unwrap();
+                    let file_path = canon.to_user_path(&ws.root, &ws.user_root);
                     Some(SessionBuffer {
-                        file_path: b.path_buf().cloned().unwrap(),
+                        file_path,
                         tab_order: i,
                         cursor_row: b.cursor_row().0,
                         cursor_col: b.cursor_col().0,
@@ -140,11 +144,8 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
         .dedupe_by(|s| s.pending_sync_check.version())
         .filter(|s| s.pending_sync_check.version() > 0)
         .map(|s| {
-            let file_path: std::path::PathBuf = (*s.pending_sync_check).clone();
-            let buf = s
-                .buffers
-                .values()
-                .find(|b| b.path_buf() == Some(&file_path));
+            let file_path: CanonPath = (*s.pending_sync_check).clone();
+            let buf = s.buffers.values().find(|b| b.path() == Some(&file_path));
             let (last_seen_seq, current_chain_id) = match buf {
                 Some(b) => (b.last_seen_seq(), b.chain_id().map(|s| s.to_owned())),
                 None => (0, None),
@@ -180,8 +181,9 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
     // Unified buffer materialization: intersect open tabs with
     // non-materialized buffers. Diagnostic-only buffers are not in
     // tabs, so they never get materialized.
-    fn tabs_needing_open(s: &Rc<AppState>) -> Vec<PathBuf> {
-        s.tabs
+    fn tabs_needing_open(s: &Rc<AppState>) -> Vec<CanonPath> {
+        let result: Vec<CanonPath> = s
+            .tabs
             .iter()
             .filter(|t| {
                 s.buffers.get(&t.path).map_or(true, |b| {
@@ -189,7 +191,8 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
                 })
             })
             .map(|t| t.path.clone())
-            .collect()
+            .collect();
+        result
     }
 
     let materialize = state
@@ -225,7 +228,7 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
         .map(|s| {
             let buf = &s.buffers[s.active_tab.as_ref().unwrap()];
             DocStoreOut::Save {
-                path: buf.path_buf().cloned().unwrap(),
+                path: buf.path().cloned().unwrap(),
                 doc: buf.doc().clone(),
             }
         })
@@ -244,7 +247,7 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
                         && b.path().is_some()
                 })
                 .map(|b| DocStoreOut::Save {
-                    path: b.path_buf().cloned().unwrap(),
+                    path: b.path().cloned().unwrap(),
                     doc: b.doc().clone(),
                 })
                 .collect::<Vec<_>>()
@@ -261,7 +264,7 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
             let buf = &s.buffers[s.active_tab.as_ref().unwrap()];
             let path = (*s.pending_save_as).clone().unwrap();
             DocStoreOut::SaveAs {
-                path: buf.path_buf().cloned().unwrap(),
+                path: buf.path().cloned().unwrap(),
                 doc: buf.doc().clone(),
                 new_path: path,
             }
@@ -301,7 +304,7 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
                         && !s
                             .tabs
                             .iter()
-                            .any(|t| t.is_preview() && b.path_buf() == Some(&t.path))
+                            .any(|t| t.is_preview() && b.path() == Some(&t.path))
                         && (b.undo_history_len() > b.persisted_undo_len() || b.is_dirty())
                 })
                 .map(|b| b.version())
@@ -419,7 +422,7 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
                 .values()
                 .filter(|b| b.is_materialized() && b.pending_syntax_request().is_some())
                 .filter_map(|b| {
-                    let path = b.path_buf().cloned()?;
+                    let path = b.path().cloned()?;
                     let is_active = s.active_tab.as_ref() == Some(&path);
                     let indent_row = if is_active {
                         b.pending_indent_row()
@@ -465,7 +468,7 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
         .filter_map(|s| {
             let path = s.active_tab.as_ref()?;
             let buf = s.buffers.get(path)?;
-            let path = buf.path_buf().cloned()?;
+            let path = buf.path().cloned()?;
             let buffer_height = s.dims.map_or(50, |d| d.buffer_height());
             Some(SyntaxOut::BufferChanged {
                 path,
@@ -482,20 +485,20 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
         .stream();
 
     // Track buffer lifecycle: emit BufferClosed for removed buffers
-    let known_bufs: Rc<RefCell<HashSet<PathBuf>>> = Rc::new(RefCell::new(HashSet::new()));
+    let known_bufs: Rc<RefCell<HashSet<CanonPath>>> = Rc::new(RefCell::new(HashSet::new()));
     let known_bufs2 = known_bufs.clone();
 
     let syntax_lifecycle = state
         .dedupe_by(loaded_buf_paths)
         .map(move |s| {
             let mut known = known_bufs2.borrow_mut();
-            let current: HashSet<PathBuf> = s
+            let current: HashSet<CanonPath> = s
                 .buffers
                 .values()
                 .filter(|b| b.is_materialized())
-                .filter_map(|b| b.path_buf().cloned())
+                .filter_map(|b| b.path().cloned())
                 .collect();
-            let removed: Vec<PathBuf> = known.difference(&current).cloned().collect();
+            let removed: Vec<CanonPath> = known.difference(&current).cloned().collect();
             *known = current;
             removed
         })
@@ -625,25 +628,25 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
     let lsp_out: Stream<LspOut> = Stream::new();
 
     // Buffer lifecycle: track open/close
-    let lsp_known_bufs: Rc<RefCell<HashSet<PathBuf>>> = Rc::new(RefCell::new(HashSet::new()));
+    let lsp_known_bufs: Rc<RefCell<HashSet<CanonPath>>> = Rc::new(RefCell::new(HashSet::new()));
 
     let lsp_buf_opened = state
         .dedupe_by(loaded_buf_paths)
         .map(move |s: Rc<AppState>| {
             let mut known = lsp_known_bufs.borrow_mut();
-            let current: HashSet<PathBuf> = s
+            let current: HashSet<CanonPath> = s
                 .buffers
                 .values()
                 .filter(|b| b.is_materialized())
-                .filter_map(|b| b.path_buf().cloned())
+                .filter_map(|b| b.path().cloned())
                 .collect();
-            let added: Vec<PathBuf> = current.difference(&known).cloned().collect();
-            let removed: Vec<PathBuf> = known.difference(&current).cloned().collect();
+            let added: Vec<CanonPath> = current.difference(&known).cloned().collect();
+            let removed: Vec<CanonPath> = known.difference(&current).cloned().collect();
             *known = current;
             // Emit opened events
             let mut events: Vec<LspOut> = Vec::new();
             for path in added {
-                if let Some(buf) = s.buffers.values().find(|b| b.path_buf() == Some(&path)) {
+                if let Some(buf) = s.buffers.values().find(|b| b.path() == Some(&path)) {
                     events.push(LspOut::BufferOpened {
                         path,
                         doc: buf.doc().clone(),
@@ -682,7 +685,7 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
         .filter_map(|s| {
             let active_path = s.active_tab.as_ref()?;
             let buf = s.buffers.get(active_path)?;
-            let path = buf.path_buf().cloned()?;
+            let path = buf.path().cloned()?;
             Some(LspOut::BufferChanged {
                 path,
                 doc: buf.doc().clone(),
@@ -700,7 +703,7 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
         .filter_map(|s| {
             let active_path = s.active_tab.as_ref()?;
             let buf = s.buffers.get(active_path)?;
-            let path = buf.path_buf().cloned()?;
+            let path = buf.path().cloned()?;
             Some(LspOut::BufferSaved {
                 path,
                 content_hash: buf.doc().content_hash().0,
@@ -724,7 +727,7 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
         .filter_map(|s| {
             let active_path = s.active_tab.as_ref()?;
             let buf = s.buffers.get(active_path)?;
-            let path = buf.path_buf().cloned()?;
+            let path = buf.path().cloned()?;
             let start_row = buf.scroll_row().0;
             let buffer_height = s.dims.map_or(50, |d| d.buffer_height());
             let end_row = start_row + buffer_height + 10;
@@ -745,7 +748,7 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
             let req = (*s.lsp.pending_request).as_ref()?;
             let active_path = s.active_tab.as_ref()?;
             let buf = s.buffers.get(active_path)?;
-            let path = buf.path_buf().cloned()?;
+            let path = buf.path().cloned()?;
             let row = buf.cursor_row().0;
             let col = buf.cursor_col().0;
             match req {

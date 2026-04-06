@@ -1,6 +1,6 @@
-use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
+use led_core::CanonPath;
 use led_core::PanelSlot;
 use led_state::{AppState, BufferState, PreviewTab};
 
@@ -9,13 +9,31 @@ use super::helpers::reveal_active_buffer;
 /// Set the preview to a new file. Creates or replaces the preview tab,
 /// ensures a buffer placeholder exists, and sets the active tab.
 /// The normal `tabs_needing_open` derived stream will materialize it.
-pub(crate) fn set_preview(state: &mut AppState, path: PathBuf, row: usize, col: usize) {
+pub(crate) fn set_preview(state: &mut AppState, path: CanonPath, row: usize, col: usize) {
+    log::debug!(
+        "[set_preview] path={} tabs={:?}",
+        path.display(),
+        state
+            .tabs
+            .iter()
+            .map(|t| format!(
+                "{}({})",
+                t.path.display(),
+                if t.is_preview() { "P" } else { "T" }
+            ))
+            .collect::<Vec<_>>(),
+    );
     // If the path is already open as a real tab, just activate it.
-    let canonical = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
-    if let Some(tab) = state.tabs.iter().find(|t| {
-        !t.is_preview()
-            && std::fs::canonicalize(&t.path).unwrap_or_else(|_| t.path.clone()) == canonical
-    }) {
+    // Paths are CanonPath so simple == comparison works.
+    if let Some(tab) = state
+        .tabs
+        .iter()
+        .find(|t| !t.is_preview() && t.path == path)
+    {
+        log::debug!(
+            "[set_preview] already a real tab, activating: {}",
+            tab.path.display()
+        );
         state.active_tab = Some(tab.path.clone());
         return;
     }
@@ -114,11 +132,11 @@ pub(crate) fn close_preview(state: &mut AppState) {
     }
 }
 
-pub(crate) fn promote_preview(state: &mut AppState, path: &Path) -> bool {
+pub(crate) fn promote_preview(state: &mut AppState, path: &CanonPath) -> bool {
     let Some(tab) = state
         .tabs
         .iter_mut()
-        .find(|t| t.is_preview() && t.path == path)
+        .find(|t| t.is_preview() && t.path == *path)
     else {
         return false;
     };
@@ -143,11 +161,11 @@ pub(crate) fn evict_one_buffer(state: &mut AppState) {
         .buffers
         .values()
         .filter(|b| b.is_materialized())
-        .filter(|b| !b.path_buf().map_or(false, |p| preview_paths.contains(p)))
-        .filter(|b| b.path_buf() != state.active_tab.as_ref())
+        .filter(|b| !b.path().map_or(false, |p| preview_paths.contains(p)))
+        .filter(|b| b.path() != state.active_tab.as_ref())
         .filter(|b| !b.is_dirty())
         .min_by_key(|b| b.last_used())
-        .and_then(|b| b.path_buf().cloned());
+        .and_then(|b| b.path().cloned());
     if let Some(path) = victim {
         state.buffers_mut().remove(&path);
         state.notify_hash_to_buffer.retain(|_, v| *v != path);

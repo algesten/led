@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use led_core::rx::Stream;
-use led_core::{Action, Startup};
+use led_core::{Action, CanonPath, Startup, UserPath};
 use led_state::AppState;
 use tempfile::TempDir;
 use tokio::sync::oneshot;
@@ -169,7 +169,7 @@ impl TestHarness {
         std::fs::create_dir_all(&workspace_dir).expect("create workspace dir");
         std::fs::create_dir_all(&config_dir).expect("create config dir");
 
-        let mut arg_paths: Vec<PathBuf> = files
+        let mut arg_paths_raw: Vec<PathBuf> = files
             .into_iter()
             .map(|(name, content)| {
                 let path = workspace_dir.join(name);
@@ -180,18 +180,22 @@ impl TestHarness {
                 path
             })
             .collect();
-        arg_paths.extend(extra_args);
-        let file_path = arg_paths.first().cloned();
+        arg_paths_raw.extend(extra_args);
+        let file_path = arg_paths_raw.first().cloned();
 
-        let arg_dir = self.arg_dir.map(|d| std::fs::canonicalize(&d).unwrap_or(d));
+        let arg_paths: Vec<CanonPath> = arg_paths_raw
+            .iter()
+            .map(|p| UserPath::new(p).canonicalize())
+            .collect();
+
+        let arg_dir = self.arg_dir.map(|d| UserPath::new(d).canonicalize());
         let start_dir = if let Some(ref dir) = arg_dir {
             dir.clone()
         } else {
             arg_paths
                 .first()
                 .and_then(|p| p.parent())
-                .map(|p| p.to_path_buf())
-                .unwrap_or_else(|| workspace_dir.clone())
+                .unwrap_or_else(|| UserPath::new(&workspace_dir).canonicalize())
         };
 
         let startup = Startup {
@@ -199,9 +203,10 @@ impl TestHarness {
             enable_watchers: self.enable_watchers,
             arg_paths,
             arg_dir,
-            start_dir: Arc::new(start_dir),
-            config_dir: config_dir.clone(),
-            test_lsp_server: self.test_lsp_server.clone(),
+            start_dir: Arc::new(start_dir.clone()),
+            user_start_dir: UserPath::new(start_dir.as_path()),
+            config_dir: UserPath::new(config_dir.clone()),
+            test_lsp_server: self.test_lsp_server.map(UserPath::new),
         };
 
         let dirs = TestDirs {

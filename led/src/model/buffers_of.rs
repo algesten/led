@@ -129,7 +129,7 @@ pub fn buffers_of(
                 // The active buffer is the one that initiated the save-as.
                 let active_path = state.active_tab.as_ref()?;
                 let buf = state.buffers.get(active_path)?;
-                let old_path = buf.path_buf().cloned()?;
+                let old_path = buf.path().cloned()?;
                 let undo_clear_path = if buf.save_state() == SaveState::Saving {
                     Some(old_path.clone())
                 } else {
@@ -152,7 +152,7 @@ pub fn buffers_of(
                         return None;
                     }
                 };
-                let buf_path = buf.path_buf().cloned().unwrap_or_else(|| path.clone());
+                let buf_path = buf.path().cloned().unwrap_or_else(|| path.clone());
                 let incoming_hash = doc.content_hash();
                 if incoming_hash == buf.content_hash() {
                     log::trace!(

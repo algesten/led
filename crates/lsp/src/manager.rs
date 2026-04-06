@@ -1,8 +1,8 @@
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
-use led_core::{CharOffset, ContentHash, Doc, EditOp, LanguageId, Row};
+use led_core::{CanonPath, CharOffset, ContentHash, Doc, EditOp, LanguageId, Row};
 use lsp_types::{
     CodeActionOrCommand, CodeActionParams, CodeActionResponse, CompletionParams,
     CompletionResponse, DocumentFormattingParams, FormattingOptions, GotoDefinitionParams,
@@ -34,37 +34,37 @@ enum ManagerEvent {
     },
     Notification(LanguageId, LspNotification),
     RequestResult(RequestResult),
-    FileChanged(PathBuf, FileChangeKind),
+    FileChanged(CanonPath, FileChangeKind),
 }
 
 enum RequestResult {
     GotoDefinition {
-        locations: Vec<(PathBuf, usize, usize)>,
+        locations: Vec<(CanonPath, usize, usize)>,
     },
     Format {
-        path: PathBuf,
+        path: CanonPath,
         edits: Vec<TextEdit>,
     },
     Rename {
         file_edits: Vec<FileEdit>,
     },
     CodeActions {
-        path: PathBuf,
+        path: CanonPath,
         raw: Vec<CodeActionOrCommand>,
     },
     CodeActionResolved {
         file_edits: Vec<FileEdit>,
     },
     InlayHints {
-        path: PathBuf,
+        path: CanonPath,
         hints: Vec<lsp_types::InlayHint>,
     },
     Diagnostics {
-        path: PathBuf,
+        path: CanonPath,
         raw: Vec<lsp_types::Diagnostic>,
     },
     Completion {
-        path: PathBuf,
+        path: CanonPath,
         response: CompletionResponse,
         row: usize,
         col: usize,
@@ -74,7 +74,7 @@ enum RequestResult {
         additional_edits: Vec<crate::TextEdit>,
     },
     FormatRaw {
-        path: PathBuf,
+        path: CanonPath,
         edits: Vec<crate::TextEdit>,
     },
     FormatDone,
@@ -114,19 +114,17 @@ enum ProgressUpdate {
 struct LspManager {
     registry: LspRegistry,
     servers: HashMap<LanguageId, Arc<LanguageServer>>,
-    root: PathBuf,
+    root: CanonPath,
     event_tx: tokio::sync::mpsc::UnboundedSender<ManagerEvent>,
     pending_starts: HashSet<LanguageId>,
-    opened_docs: HashSet<PathBuf>,
-    /// Reverse map: canonical path → original path (for macOS /var → /private/var).
-    canonical_to_original: HashMap<PathBuf, PathBuf>,
-    pending_opens: HashSet<PathBuf>,
-    docs: HashMap<PathBuf, Arc<dyn Doc>>,
-    doc_versions: HashMap<PathBuf, i32>,
-    pending_code_actions: HashMap<PathBuf, Vec<CodeActionOrCommand>>,
+    opened_docs: HashSet<CanonPath>,
+    pending_opens: HashSet<CanonPath>,
+    docs: HashMap<CanonPath, Arc<dyn Doc>>,
+    doc_versions: HashMap<CanonPath, i32>,
+    pending_code_actions: HashMap<CanonPath, Vec<CodeActionOrCommand>>,
     completion_items: Vec<lsp_types::CompletionItem>,
     /// Active completion session for re-filtering on BufferChanged
-    completion_path: Option<PathBuf>,
+    completion_path: Option<CanonPath>,
     completion_row: usize,
     completion_prefix_start_col: usize,
     /// Domain items from last server response (unfiltered)
@@ -134,7 +132,7 @@ struct LspManager {
     progress_tokens: HashMap<String, ProgressState>,
     quiescent: HashMap<LanguageId, bool>,
     need_diagnostics: bool,
-    buffered_diagnostics: HashMap<PathBuf, Vec<crate::Diagnostic>>,
+    buffered_diagnostics: HashMap<CanonPath, Vec<crate::Diagnostic>>,
     _file_watcher: Option<notify::RecommendedWatcher>,
     file_watcher_globs: Option<globset::GlobSet>,
     /// Rate-limit progress updates to the UI.
@@ -156,11 +154,10 @@ pub(crate) async fn run(
     let mut mgr = LspManager {
         registry: LspRegistry::new(server_override),
         servers: HashMap::new(),
-        root: PathBuf::new(),
+        root: CanonPath::default(),
         event_tx,
         pending_starts: HashSet::new(),
         opened_docs: HashSet::new(),
-        canonical_to_original: HashMap::new(),
         pending_opens: HashSet::new(),
         docs: HashMap::new(),
         doc_versions: HashMap::new(),
@@ -366,7 +363,7 @@ impl LspManager {
                 }
 
                 // Flush pending opens
-                let pending: Vec<PathBuf> = self.pending_opens.drain().collect();
+                let pending: Vec<CanonPath> = self.pending_opens.drain().collect();
                 for path in pending {
                     self.send_did_open(&path);
                 }
@@ -393,7 +390,7 @@ impl LspManager {
 
     // ── Server lifecycle ──
 
-    fn ensure_server_for_path(&mut self, path: &Path) {
+    fn ensure_server_for_path(&mut self, path: &CanonPath) {
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
         let Some(config) = self.registry.config_for_extension(ext).cloned() else {
             return;
@@ -434,7 +431,7 @@ impl LspManager {
         });
     }
 
-    fn server_for_path(&self, path: &Path) -> Option<Arc<LanguageServer>> {
+    fn server_for_path(&self, path: &CanonPath) -> Option<Arc<LanguageServer>> {
         let ext = path.extension().and_then(|e| e.to_str())?;
         let config = self.registry.config_for_extension(ext)?;
         self.servers.get(&config.language).cloned()
@@ -448,12 +445,12 @@ impl LspManager {
 
     // ── Document sync (full-text) ──
 
-    fn send_did_open(&mut self, path: &Path) {
+    fn send_did_open(&mut self, path: &CanonPath) {
         if self.opened_docs.contains(path) {
             return;
         }
         let Some(server) = self.server_for_path(path) else {
-            self.pending_opens.insert(path.to_path_buf());
+            self.pending_opens.insert(path.clone());
             return;
         };
         let Some(uri) = uri_from_path(path) else {
@@ -468,7 +465,7 @@ impl LspManager {
             .docs
             .get(path)
             .map(|d| doc_full_text(&**d))
-            .unwrap_or_else(|| std::fs::read_to_string(path).unwrap_or_default());
+            .unwrap_or_else(|| std::fs::read_to_string(path.as_path()).unwrap_or_default());
 
         let version = self.next_version(path);
 
@@ -483,17 +480,16 @@ impl LspManager {
                 },
             },
         );
-        self.opened_docs.insert(path.to_path_buf());
-        if let Ok(canonical) = std::fs::canonicalize(path) {
-            if canonical != path {
-                self.canonical_to_original
-                    .insert(canonical, path.to_path_buf());
-            }
-        }
+        self.opened_docs.insert(path.clone());
         self.need_diagnostics = true;
     }
 
-    fn send_did_change(&mut self, path: &Path, edit_ops: &[EditOp], old_doc: Option<&dyn Doc>) {
+    fn send_did_change(
+        &mut self,
+        path: &CanonPath,
+        edit_ops: &[EditOp],
+        old_doc: Option<&dyn Doc>,
+    ) {
         if !self.opened_docs.contains(path) {
             return;
         }
@@ -554,14 +550,14 @@ impl LspManager {
         self.need_diagnostics = false;
     }
 
-    fn send_did_save(&mut self, path: &Path) {
+    fn send_did_save(&mut self, path: &CanonPath) {
         let Some(server) = self.server_for_path(path) else {
             return;
         };
         let Some(uri) = uri_from_path(path) else {
             return;
         };
-        let text = std::fs::read_to_string(path).unwrap_or_default();
+        let text = std::fs::read_to_string(path.as_path()).unwrap_or_default();
         server.notify(
             "textDocument/didSave",
             &lsp_types::DidSaveTextDocumentParams {
@@ -572,12 +568,9 @@ impl LspManager {
         self.need_diagnostics = true;
     }
 
-    fn send_did_close(&mut self, path: &Path) {
+    fn send_did_close(&mut self, path: &CanonPath) {
         if !self.opened_docs.remove(path) {
             return;
-        }
-        if let Ok(canonical) = std::fs::canonicalize(path) {
-            self.canonical_to_original.remove(&canonical);
         }
         let Some(server) = self.server_for_path(path) else {
             return;
@@ -593,15 +586,15 @@ impl LspManager {
         );
     }
 
-    fn next_version(&mut self, path: &Path) -> i32 {
-        let v = self.doc_versions.entry(path.to_path_buf()).or_insert(0);
+    fn next_version(&mut self, path: &CanonPath) -> i32 {
+        let v = self.doc_versions.entry(path.clone()).or_insert(0);
         *v += 1;
         *v
     }
 
     // ── Feature requests ──
 
-    fn spawn_goto_definition(&self, path: PathBuf, row: usize, col: usize) {
+    fn spawn_goto_definition(&self, path: CanonPath, row: usize, col: usize) {
         let Some(server) = self.server_for_path(&path) else {
             return;
         };
@@ -639,7 +632,7 @@ impl LspManager {
         });
     }
 
-    fn spawn_completion(&mut self, path: PathBuf, row: usize, col: usize) {
+    fn spawn_completion(&mut self, path: CanonPath, row: usize, col: usize) {
         let Some(server) = self.server_for_path(&path) else {
             return;
         };
@@ -722,7 +715,7 @@ impl LspManager {
         });
     }
 
-    fn spawn_rename(&self, path: PathBuf, row: usize, col: usize, new_name: String) {
+    fn spawn_rename(&self, path: CanonPath, row: usize, col: usize, new_name: String) {
         let Some(server) = self.server_for_path(&path) else {
             return;
         };
@@ -764,7 +757,7 @@ impl LspManager {
 
     fn spawn_code_action(
         &self,
-        path: PathBuf,
+        path: CanonPath,
         start_row: usize,
         start_col: usize,
         end_row: usize,
@@ -866,7 +859,7 @@ impl LspManager {
         });
     }
 
-    fn spawn_format(&self, path: PathBuf, doc_content: Option<Vec<u8>>) {
+    fn spawn_format(&self, path: CanonPath, doc_content: Option<Vec<u8>>) {
         let Some(server) = self.server_for_path(&path) else {
             // No server → send FormatDone immediately so save proceeds
             let _ = self
@@ -937,7 +930,7 @@ impl LspManager {
         });
     }
 
-    fn spawn_inlay_hints(&self, path: PathBuf, start_row: usize, end_row: usize) {
+    fn spawn_inlay_hints(&self, path: CanonPath, start_row: usize, end_row: usize) {
         let Some(server) = self.server_for_path(&path) else {
             return;
         };
@@ -984,14 +977,13 @@ impl LspManager {
                 if let Ok(params) =
                     serde_json::from_value::<lsp_types::PublishDiagnosticsParams>(notif.params)
                 {
-                    if let Some(raw_path) = crate::convert::path_from_uri(&params.uri) {
-                        let path = self.resolve_path(raw_path);
+                    if let Some(path) = crate::convert::path_from_uri(&params.uri) {
                         let line_at = |row: usize| {
                             self.docs
                                 .get(&path)
                                 .and_then(|d| doc_line(&**d, row))
                                 .or_else(|| {
-                                    std::fs::read_to_string(&path)
+                                    std::fs::read_to_string(path.as_path())
                                         .ok()
                                         .and_then(|c| c.lines().nth(row).map(|l| l.to_string()))
                                 })
@@ -1059,7 +1051,6 @@ impl LspManager {
         match result {
             RequestResult::GotoDefinition { locations } => {
                 if let Some((path, row, col)) = locations.into_iter().next() {
-                    let path = self.resolve_path(path);
                     let _ = result_tx.send(LspIn::Navigate { path, row, col }).await;
                 }
             }
@@ -1089,8 +1080,7 @@ impl LspManager {
             RequestResult::Rename { file_edits } => {
                 // Apply non-open file edits to disk
                 let mut open_edits = Vec::new();
-                for mut fe in file_edits {
-                    fe.path = self.resolve_path(fe.path);
+                for fe in file_edits {
                     if self.opened_docs.contains(&fe.path) {
                         open_edits.push(fe);
                     } else {
@@ -1110,8 +1100,7 @@ impl LspManager {
             }
             RequestResult::CodeActionResolved { file_edits } => {
                 let mut open_edits = Vec::new();
-                for mut fe in file_edits {
-                    fe.path = self.resolve_path(fe.path);
+                for fe in file_edits {
                     if self.opened_docs.contains(&fe.path) {
                         open_edits.push(fe);
                     } else {
@@ -1282,7 +1271,7 @@ impl LspManager {
 
     // ── Completion auto-trigger ──
 
-    fn check_trigger_char(&self, path: &Path, edit_ops: &[EditOp]) -> bool {
+    fn check_trigger_char(&self, path: &CanonPath, edit_ops: &[EditOp]) -> bool {
         if self.trigger_characters.is_empty() {
             return false;
         }
@@ -1306,7 +1295,7 @@ impl LspManager {
 
     async fn refilter_completion(
         &mut self,
-        changed_path: &Path,
+        changed_path: &CanonPath,
         edit_ops: &[EditOp],
         result_tx: &tokio::sync::mpsc::Sender<LspIn>,
     ) {
@@ -1473,14 +1462,15 @@ impl LspManager {
             };
             for path in ev.paths {
                 if globs.is_match(&path) {
-                    let _ = event_tx.send(ManagerEvent::FileChanged(path, kind));
+                    let canon = led_core::UserPath::new(path).canonicalize();
+                    let _ = event_tx.send(ManagerEvent::FileChanged(canon, kind));
                 }
             }
         });
 
         match watcher {
             Ok(mut w) => {
-                if let Err(e) = w.watch(&root, RecursiveMode::Recursive) {
+                if let Err(e) = w.watch(root.as_path(), RecursiveMode::Recursive) {
                     log::warn!(
                         "LSP file watcher: failed to watch {}: {}",
                         root.display(),
@@ -1497,7 +1487,7 @@ impl LspManager {
         }
     }
 
-    fn send_file_changed(&self, path: &Path, kind: FileChangeKind) {
+    fn send_file_changed(&self, path: &CanonPath, kind: FileChangeKind) {
         let Some(uri) = uri_from_path(path) else {
             return;
         };
@@ -1529,7 +1519,7 @@ impl LspManager {
         }
     }
 
-    fn spawn_pull_diagnostics(&self, path: PathBuf, server: Arc<LanguageServer>) {
+    fn spawn_pull_diagnostics(&self, path: CanonPath, server: Arc<LanguageServer>) {
         let event_tx = self.event_tx.clone();
 
         tokio::spawn(async move {
@@ -1571,16 +1561,7 @@ impl LspManager {
 
     // ── Helpers ──
 
-    /// Resolve a canonical path (from server responses) back to the original
-    /// path used by the rest of the system. On macOS, /private/var/… → /var/….
-    fn resolve_path(&self, path: PathBuf) -> PathBuf {
-        self.canonical_to_original
-            .get(&path)
-            .cloned()
-            .unwrap_or(path)
-    }
-
-    fn line_at(&self, path: &Path, row: usize) -> Option<String> {
+    fn line_at(&self, path: &CanonPath, row: usize) -> Option<String> {
         self.docs.get(path).and_then(|d| doc_line(&**d, row))
     }
 }
@@ -1655,8 +1636,8 @@ fn fuzzy_filter_completions(
 // ── Prettier integration ──
 
 /// Walk up from the file's directory looking for `node_modules/.bin/prettier`.
-fn find_prettier(file_path: &Path) -> Option<PathBuf> {
-    let mut dir = file_path.parent()?;
+fn find_prettier(file_path: &CanonPath) -> Option<std::path::PathBuf> {
+    let mut dir = file_path.as_path().parent()?;
     loop {
         let bin = dir.join("node_modules/.bin/prettier");
         if bin.exists() {
@@ -1669,14 +1650,14 @@ fn find_prettier(file_path: &Path) -> Option<PathBuf> {
 /// Run prettier on buffer content and return a full-file replacement edit.
 async fn run_prettier(
     prettier_bin: &Path,
-    file_path: &Path,
+    file_path: &CanonPath,
     content: &[u8],
 ) -> Option<Vec<crate::TextEdit>> {
     use tokio::process::Command;
 
     let mut child = Command::new(prettier_bin)
         .arg("--stdin-filepath")
-        .arg(file_path)
+        .arg(file_path.as_path())
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())

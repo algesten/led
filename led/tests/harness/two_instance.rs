@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use led_core::rx::Stream;
-use led_core::{Action, Startup};
+use led_core::{Action, CanonPath, Startup, UserPath};
 use led_state::AppState;
 use tokio::sync::oneshot;
 
@@ -217,19 +217,23 @@ pub fn shared_workspace(files: &[(&str, &str)]) -> (TestDirs, Vec<PathBuf>) {
 }
 
 pub fn startup_for(dirs: &TestDirs, file_paths: &[PathBuf]) -> Startup {
-    let start_dir = file_paths
+    let arg_paths: Vec<CanonPath> = file_paths
+        .iter()
+        .map(|p| UserPath::new(p).canonicalize())
+        .collect();
+    let start_dir = arg_paths
         .first()
         .and_then(|p| p.parent())
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| dirs.workspace.clone());
+        .unwrap_or_else(|| UserPath::new(&dirs.workspace).canonicalize());
 
     Startup {
         headless: true,
         enable_watchers: true,
-        arg_paths: file_paths.to_vec(),
+        arg_paths,
         arg_dir: None,
-        start_dir: Arc::new(start_dir),
-        config_dir: dirs.config.clone(),
+        start_dir: Arc::new(start_dir.clone()),
+        user_start_dir: UserPath::new(start_dir.as_path()),
+        config_dir: UserPath::new(&dirs.config),
         test_lsp_server: None,
     }
 }

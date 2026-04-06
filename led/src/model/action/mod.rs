@@ -408,7 +408,7 @@ pub fn handle_action(state: &mut AppState, action: Action) -> bool {
                 .buffers
                 .values()
                 .filter(|b| b.is_dirty() && b.path().is_some())
-                .filter_map(|b| b.path_buf().cloned())
+                .filter_map(|b| b.path().cloned())
                 .collect();
             for path in &dirty_paths {
                 if let Some(buf) = state.buf_mut(path) {
@@ -467,9 +467,10 @@ pub fn handle_action(state: &mut AppState, action: Action) -> bool {
             if let Some(path) = state.active_tab.clone() {
                 if let Some(buf) = state.buffers.get(&path) {
                     if let Some(file_path) = buf.path() {
-                        if let Some(ss) =
-                            led_syntax::SyntaxState::from_path_and_doc(file_path, &**buf.doc())
-                        {
+                        if let Some(ss) = led_syntax::SyntaxState::from_path_and_doc(
+                            file_path.as_path(),
+                            &**buf.doc(),
+                        ) {
                             let import_items = ss.imports(&**buf.doc());
                             if let Some((start_byte, end_byte, replacement)) =
                                 led_syntax::import::sort_imports_text(&**buf.doc(), &import_items)

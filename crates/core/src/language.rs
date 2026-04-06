@@ -1,6 +1,7 @@
 use std::hash::{Hash, Hasher};
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
+
+use crate::path::CanonPath;
 
 // ── LanguageId ──
 
@@ -66,16 +67,16 @@ pub struct LspContextId(Arc<LspContextIdData>);
 
 #[derive(Debug, Hash, Eq, PartialEq)]
 struct LspContextIdData {
-    root: PathBuf,
+    root: CanonPath,
     language: LanguageId,
 }
 
 impl LspContextId {
-    pub fn new(root: PathBuf, language: LanguageId) -> Self {
+    pub fn new(root: CanonPath, language: LanguageId) -> Self {
         Self(Arc::new(LspContextIdData { root, language }))
     }
 
-    pub fn root(&self) -> &Path {
+    pub fn root(&self) -> &CanonPath {
         &self.0.root
     }
 

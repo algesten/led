@@ -449,7 +449,7 @@ fn compute_move_down(
 /// Pass it so we can detect whether the document actually changed.
 pub fn shift_annotations(
     state: &mut AppState,
-    buf_path: &std::path::Path,
+    buf_path: &led_core::CanonPath,
     edit_row: usize,
     old_line_count: usize,
     old_doc_version: DocVersion,

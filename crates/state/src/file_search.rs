@@ -1,5 +1,6 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
+
+use led_core::CanonPath;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SearchHit {
@@ -12,7 +13,7 @@ pub struct SearchHit {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct FileGroup {
-    pub path: PathBuf,
+    pub path: CanonPath,
     pub relative: String,
     pub hits: Vec<SearchHit>,
 }
@@ -26,7 +27,7 @@ pub struct FlatHit {
 #[derive(Debug, Clone, PartialEq)]
 pub struct FileSearchRequest {
     pub query: String,
-    pub root: PathBuf,
+    pub root: CanonPath,
     pub case_sensitive: bool,
     pub use_regex: bool,
 }
@@ -45,7 +46,7 @@ pub enum FileSearchSelection {
 #[derive(Debug, Clone)]
 pub struct ReplaceEntry {
     pub flat_hit_idx: usize,
-    pub path: PathBuf,
+    pub path: CanonPath,
     pub row: usize,
     pub original_text: String,  // the matched text that was replaced
     pub match_start: usize,     // byte offset in line
@@ -59,17 +60,17 @@ pub struct ReplaceEntry {
 pub struct FileSearchReplaceRequest {
     pub query: String,
     pub replacement: String,
-    pub root: PathBuf,
+    pub root: CanonPath,
     pub case_sensitive: bool,
     pub use_regex: bool,
     pub scope: ReplaceScope,
-    pub skip_paths: Vec<PathBuf>,
+    pub skip_paths: Vec<CanonPath>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ReplaceScope {
     Single {
-        path: PathBuf,
+        path: CanonPath,
         row: usize,
         match_start: usize,
         match_end: usize,
@@ -101,7 +102,7 @@ pub struct FileSearchState {
 /// Lives on AppState so it survives deactivate().
 #[derive(Debug, Clone, Default)]
 pub struct PendingReplaceAll {
-    pub hits: HashMap<PathBuf, Vec<(usize, usize, usize, String)>>,
+    pub hits: HashMap<CanonPath, Vec<(usize, usize, usize, String)>>,
     pub replacement: String,
     pub query: String,
 }

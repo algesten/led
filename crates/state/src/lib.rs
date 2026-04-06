@@ -1,7 +1,6 @@
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
-use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Instant;
@@ -12,8 +11,8 @@ use led_config_file::ConfigFile;
 use led_core::keys::{Keymap, Keys};
 use led_core::theme::Theme;
 use led_core::{
-    ChangeSeq, CharOffset, Col, ContentHash, Doc, DocVersion, EditOp, InertDoc, PanelSlot, Row,
-    Startup, SubLine, UndoHistory, Versioned,
+    CanonPath, ChangeSeq, CharOffset, Col, ContentHash, Doc, DocVersion, EditOp, InertDoc,
+    PanelSlot, Row, Startup, SubLine, UndoHistory, UserPath, Versioned,
 };
 pub use led_workspace::SessionBuffer;
 pub use led_workspace::Workspace;
@@ -56,7 +55,7 @@ pub enum ResumeState {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResumeEntry {
-    pub path: PathBuf,
+    pub path: CanonPath,
     pub state: ResumeState,
 }
 
@@ -64,13 +63,13 @@ pub struct ResumeEntry {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Tab {
-    pub path: PathBuf,
+    pub path: CanonPath,
     pub preview: Option<PreviewTab>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreviewTab {
-    pub previous_tab: PathBuf,
+    pub previous_tab: CanonPath,
 }
 
 impl Tab {
@@ -158,14 +157,14 @@ impl BufferStatus {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct PreviewRequest {
-    pub path: PathBuf,
+    pub path: CanonPath,
     pub row: usize,
     pub col: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JumpPosition {
-    pub path: PathBuf,
+    pub path: CanonPath,
     pub row: usize,
     pub col: usize,
     pub scroll_offset: usize,
@@ -240,7 +239,7 @@ impl Dimensions {
 
 #[derive(Debug, Clone)]
 pub struct UndoFlush {
-    pub file_path: PathBuf,
+    pub file_path: CanonPath,
     pub chain_id: String,
     pub content_hash: u64,
     pub undo_cursor: usize,
@@ -352,7 +351,7 @@ pub enum MaterializationState {
 #[derive(Clone)]
 pub struct BufferState {
     // Identity
-    path: Option<PathBuf>,
+    path: Option<CanonPath>,
 
     // Content (InertDoc for non-materialized buffers)
     doc: Arc<dyn Doc>,
@@ -420,7 +419,7 @@ pub struct BufferState {
 impl BufferState {
     /// Create an unmaterialized buffer for the given path.
     /// Content is loaded later via `materialize()`.
-    pub fn new(path: PathBuf) -> Self {
+    pub fn new(path: CanonPath) -> Self {
         Self {
             doc: Arc::new(InertDoc),
             materialization: Cell::new(MaterializationState::NotMaterialized),
@@ -462,10 +461,7 @@ impl BufferState {
 
     // ── Identity ──
 
-    pub fn path(&self) -> Option<&Path> {
-        self.path.as_deref()
-    }
-    pub fn path_buf(&self) -> Option<&PathBuf> {
+    pub fn path(&self) -> Option<&CanonPath> {
         self.path.as_ref()
     }
 
@@ -725,7 +721,7 @@ impl BufferState {
 
     /// Save-as completed: docstore confirmed save to new path.
     /// Same as save_completed but also updates path.
-    pub fn save_as_completed(&mut self, doc: Arc<dyn Doc>, new_path: PathBuf) {
+    pub fn save_as_completed(&mut self, doc: Arc<dyn Doc>, new_path: CanonPath) {
         self.path = Some(new_path);
         self.save_completed(doc);
     }
@@ -1266,7 +1262,7 @@ pub enum EntryKind {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TreeEntry {
-    pub path: PathBuf,
+    pub path: CanonPath,
     pub name: String,
     pub depth: usize,
     pub kind: EntryKind,
@@ -1274,13 +1270,13 @@ pub struct TreeEntry {
 
 #[derive(Debug, Clone, Default)]
 pub struct FileBrowserState {
-    pub root: Option<PathBuf>,
-    pub dir_contents: HashMap<PathBuf, Vec<led_fs::DirEntry>>,
-    pub expanded_dirs: HashSet<PathBuf>,
+    pub root: Option<CanonPath>,
+    pub dir_contents: HashMap<CanonPath, Vec<led_fs::DirEntry>>,
+    pub expanded_dirs: HashSet<CanonPath>,
     pub entries: Rc<Vec<TreeEntry>>,
     pub selected: usize,
     pub scroll_offset: usize,
-    pub pending_reveal: Option<PathBuf>,
+    pub pending_reveal: Option<CanonPath>,
 }
 
 impl FileBrowserState {
@@ -1297,8 +1293,8 @@ impl FileBrowserState {
     /// Expand ancestors of `path`, rebuild entries, and try to select it.
     /// Sets `pending_reveal` for retry when dir listings arrive asynchronously.
     /// Returns newly expanded directories that need listing.
-    pub fn reveal(&mut self, path: &Path) -> Vec<PathBuf> {
-        self.pending_reveal = Some(path.to_path_buf());
+    pub fn reveal(&mut self, path: &CanonPath) -> Vec<CanonPath> {
+        self.pending_reveal = Some(path.clone());
 
         let Some(ref root) = self.root else {
             return vec![];
@@ -1312,8 +1308,8 @@ impl FileBrowserState {
             if dir == root || !dir.starts_with(&root) {
                 break;
             }
-            if self.expanded_dirs.insert(dir.to_path_buf()) {
-                newly_expanded.push(dir.to_path_buf());
+            if self.expanded_dirs.insert(dir.clone()) {
+                newly_expanded.push(dir.clone());
             }
             ancestor = dir.parent();
         }
@@ -1338,17 +1334,17 @@ impl FileBrowserState {
 }
 
 fn walk_tree(
-    dir: &PathBuf,
+    dir: &CanonPath,
     depth: usize,
-    dir_contents: &HashMap<PathBuf, Vec<led_fs::DirEntry>>,
-    expanded_dirs: &HashSet<PathBuf>,
+    dir_contents: &HashMap<CanonPath, Vec<led_fs::DirEntry>>,
+    expanded_dirs: &HashSet<CanonPath>,
     entries: &mut Vec<TreeEntry>,
 ) {
     let Some(contents) = dir_contents.get(dir) else {
         return;
     };
     for entry in contents {
-        let path = dir.join(&entry.name);
+        let path = UserPath::new(dir.as_path().join(&entry.name)).canonicalize();
         let expanded = entry.is_dir && expanded_dirs.contains(&path);
         let kind = if entry.is_dir {
             EntryKind::Directory { expanded }
@@ -1421,9 +1417,9 @@ pub struct KbdMacroState {
 #[derive(Debug, Clone, Default)]
 pub struct GitState {
     pub branch: Option<String>,
-    pub file_statuses: HashMap<PathBuf, HashSet<led_core::git::FileStatus>>,
+    pub file_statuses: HashMap<CanonPath, HashSet<led_core::git::FileStatus>>,
     pub pending_file_scan: Versioned<()>,
-    pub pending_line_scan: Versioned<Option<PathBuf>>,
+    pub pending_line_scan: Versioned<Option<CanonPath>>,
     pub scan_seq: Versioned<()>,
 }
 
@@ -1431,9 +1427,9 @@ pub struct GitState {
 
 #[derive(Debug, Clone, Default)]
 pub struct SessionState {
-    pub positions: HashMap<PathBuf, SessionBuffer>,
+    pub positions: HashMap<CanonPath, SessionBuffer>,
     pub active_tab_order: Option<usize>,
-    pub pending_opens: Versioned<Vec<PathBuf>>,
+    pub pending_opens: Versioned<Vec<CanonPath>>,
     pub resume: Vec<ResumeEntry>,
     pub saved: bool,
     pub watchers_ready: bool,
@@ -1550,22 +1546,22 @@ pub struct AppState {
     pub dims: Option<Dimensions>,
     pub force_redraw: u64,
     pub alerts: AlertState,
-    pub buffers: Rc<HashMap<PathBuf, Rc<BufferState>>>,
+    pub buffers: Rc<HashMap<CanonPath, Rc<BufferState>>>,
     pub tabs: VecDeque<Tab>,
-    pub active_tab: Option<PathBuf>,
+    pub active_tab: Option<CanonPath>,
     pub save_request: Versioned<()>,
     pub save_all_request: Versioned<()>,
     pub save_done: Versioned<()>,
     pub browser: Rc<FileBrowserState>,
-    pub pending_open: Versioned<Option<PathBuf>>,
-    pub pending_lists: Versioned<Vec<PathBuf>>,
+    pub pending_open: Versioned<Option<CanonPath>>,
+    pub pending_lists: Versioned<Vec<CanonPath>>,
 
     // Session persistence
     pub session: SessionState,
     pub pending_undo_flush: Versioned<Option<UndoFlush>>,
-    pub pending_undo_clear: Versioned<PathBuf>,
-    pub pending_sync_check: Versioned<PathBuf>,
-    pub notify_hash_to_buffer: HashMap<String, PathBuf>,
+    pub pending_undo_clear: Versioned<CanonPath>,
+    pub pending_sync_check: Versioned<CanonPath>,
+    pub notify_hash_to_buffer: HashMap<String, CanonPath>,
 
     // Confirmation prompts
     pub confirm_kill: bool,
@@ -1581,14 +1577,14 @@ pub struct AppState {
 
     // Find file / Save as
     pub find_file: Option<FindFileState>,
-    pub pending_find_file_list: Versioned<Option<(PathBuf, String, bool)>>,
-    pub pending_save_as: Versioned<Option<PathBuf>>,
+    pub pending_find_file_list: Versioned<Option<(CanonPath, String, bool)>>,
+    pub pending_save_as: Versioned<Option<CanonPath>>,
 
     // File search
     pub file_search: Option<file_search::FileSearchState>,
     pub pending_file_search: Versioned<Option<file_search::FileSearchRequest>>,
     pub pending_file_replace: Versioned<Option<file_search::FileSearchReplaceRequest>>,
-    pub pending_replace_opens: Versioned<Vec<std::path::PathBuf>>,
+    pub pending_replace_opens: Versioned<Vec<CanonPath>>,
     pub pending_replace_all: Option<file_search::PendingReplaceAll>,
 
     // Git
@@ -1607,12 +1603,12 @@ impl AppState {
         }
     }
 
-    pub fn buffers_mut(&mut self) -> &mut HashMap<PathBuf, Rc<BufferState>> {
+    pub fn buffers_mut(&mut self) -> &mut HashMap<CanonPath, Rc<BufferState>> {
         Rc::make_mut(&mut self.buffers)
     }
 
     /// Get a mutable reference to a single buffer via copy-on-write.
-    pub fn buf_mut(&mut self, path: &Path) -> Option<&mut BufferState> {
+    pub fn buf_mut(&mut self, path: &CanonPath) -> Option<&mut BufferState> {
         Rc::make_mut(&mut self.buffers)
             .get_mut(path)
             .map(|rc| Rc::make_mut(rc))

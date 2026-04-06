@@ -1,10 +1,11 @@
 use std::collections::HashSet;
-use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use notify::Watcher;
 use tokio::sync::mpsc;
+
+use crate::path::{CanonPath, UserPath};
 
 static REG_SEQ: AtomicU64 = AtomicU64::new(0);
 
@@ -27,7 +28,7 @@ impl From<WatchMode> for notify::RecursiveMode {
 
 #[derive(Debug, Clone)]
 pub struct WatchEvent {
-    pub paths: Vec<PathBuf>,
+    pub paths: Vec<CanonPath>,
     pub kind: WatchEventKind,
 }
 
@@ -42,7 +43,7 @@ pub enum WatchEventKind {
 
 struct RegEntry {
     id: u64,
-    dir: PathBuf,
+    dir: CanonPath,
     tx: mpsc::Sender<WatchEvent>,
 }
 
@@ -57,7 +58,7 @@ pub struct FileWatcher {
     regs: Arc<Mutex<Vec<RegEntry>>>,
     watcher: Mutex<Option<notify::RecommendedWatcher>>,
     /// Tracks which canonical dirs have an active `watcher.watch()` call.
-    watched: Mutex<HashSet<PathBuf>>,
+    watched: Mutex<HashSet<CanonPath>>,
 }
 
 impl FileWatcher {
@@ -77,7 +78,11 @@ impl FileWatcher {
                     _ => return,
                 };
                 let watch_event = WatchEvent {
-                    paths: ev.paths,
+                    paths: ev
+                        .paths
+                        .into_iter()
+                        .map(|p| UserPath::new(p).canonicalize())
+                        .collect(),
                     kind,
                 };
                 let regs = regs_cb.lock().unwrap();
@@ -119,11 +124,10 @@ impl FileWatcher {
     /// watch is created — the returned channel will never receive events.
     pub fn register(
         self: &Arc<Self>,
-        dir: &Path,
+        dir: &CanonPath,
         mode: WatchMode,
         tx: mpsc::Sender<WatchEvent>,
     ) -> Registration {
-        let dir = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
         let id = REG_SEQ.fetch_add(1, Ordering::Relaxed);
         log::trace!(
             "[FileWatcher] register id={} dir={} mode={:?}",
@@ -146,7 +150,7 @@ impl FileWatcher {
                     dir.display(),
                     mode,
                 );
-                if let Err(e) = w.watch(&dir, mode.into()) {
+                if let Err(e) = w.watch(dir.as_path(), mode.into()) {
                     log::warn!("[FileWatcher] failed to watch {}: {e}", dir.display());
                 }
             }
@@ -155,7 +159,7 @@ impl FileWatcher {
         Registration {
             fw: Arc::clone(self),
             id,
-            dir,
+            dir: dir.clone(),
         }
     }
 }
@@ -168,7 +172,7 @@ impl FileWatcher {
 pub struct Registration {
     fw: Arc<FileWatcher>,
     id: u64,
-    dir: PathBuf,
+    dir: CanonPath,
 }
 
 impl Drop for Registration {
@@ -186,7 +190,7 @@ impl Drop for Registration {
         if !still_watched {
             self.fw.watched.lock().unwrap().remove(&self.dir);
             if let Some(ref mut w) = *self.fw.watcher.lock().unwrap() {
-                w.unwatch(&self.dir).ok();
+                w.unwatch(self.dir.as_path()).ok();
             }
         }
     }

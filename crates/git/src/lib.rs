@@ -1,24 +1,24 @@
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
 
 use led_core::git::{FileStatus, LineStatus, LineStatusKind};
 use led_core::rx::Stream;
+use led_core::{CanonPath, UserPath};
 use tokio::sync::mpsc;
 
 #[derive(Clone, Debug)]
 pub enum GitOut {
-    ScanFiles { root: PathBuf },
-    ScanLines { root: PathBuf, path: PathBuf },
+    ScanFiles { root: CanonPath },
+    ScanLines { root: CanonPath, path: CanonPath },
 }
 
 #[derive(Clone, Debug)]
 pub enum GitIn {
     FileStatuses {
-        statuses: HashMap<PathBuf, HashSet<FileStatus>>,
+        statuses: HashMap<CanonPath, HashSet<FileStatus>>,
         branch: Option<String>,
     },
     LineStatuses {
-        path: PathBuf,
+        path: CanonPath,
         statuses: Vec<LineStatus>,
     },
 }
@@ -77,9 +77,9 @@ pub fn driver(out: Stream<GitOut>) -> Stream<GitIn> {
 }
 
 fn scan_file_statuses(
-    root: &Path,
-) -> Option<(HashMap<PathBuf, HashSet<FileStatus>>, Option<String>)> {
-    let repo = git2::Repository::open(root).ok()?;
+    root: &CanonPath,
+) -> Option<(HashMap<CanonPath, HashSet<FileStatus>>, Option<String>)> {
+    let repo = git2::Repository::open(root.as_path()).ok()?;
 
     let branch = repo
         .head()
@@ -92,15 +92,15 @@ fn scan_file_statuses(
         .exclude_submodules(true);
 
     let git_statuses = repo.statuses(Some(&mut opts)).ok()?;
-    let workdir = repo.workdir()?.to_path_buf();
+    let workdir = UserPath::new(repo.workdir()?).canonicalize();
 
-    let mut result: HashMap<PathBuf, HashSet<FileStatus>> = HashMap::new();
+    let mut result: HashMap<CanonPath, HashSet<FileStatus>> = HashMap::new();
 
     for entry in git_statuses.iter() {
         let Some(rel_path) = entry.path() else {
             continue;
         };
-        let abs_path = workdir.join(rel_path);
+        let abs_path = UserPath::new(workdir.as_path().join(rel_path)).canonicalize();
         let status = entry.status();
 
         let mut file_statuses = HashSet::new();
@@ -130,10 +130,10 @@ fn scan_file_statuses(
     Some((result, branch))
 }
 
-fn scan_line_statuses(root: &Path, file_path: &Path) -> Option<Vec<LineStatus>> {
-    let repo = git2::Repository::open(root).ok()?;
-    let workdir = repo.workdir()?.to_path_buf();
-    let rel_path = file_path.strip_prefix(&workdir).ok()?;
+fn scan_line_statuses(root: &CanonPath, file_path: &CanonPath) -> Option<Vec<LineStatus>> {
+    let repo = git2::Repository::open(root.as_path()).ok()?;
+    let workdir = UserPath::new(repo.workdir()?).canonicalize();
+    let rel_path = file_path.strip_prefix(&workdir)?;
     let rel_str = rel_path.to_str()?;
 
     // Get HEAD blob
@@ -144,7 +144,7 @@ fn scan_line_statuses(root: &Path, file_path: &Path) -> Option<Vec<LineStatus>> 
     let old_content = old_blob.content();
 
     // Read current file from disk
-    let new_content = std::fs::read(file_path).ok()?;
+    let new_content = std::fs::read(file_path.as_path()).ok()?;
 
     let patch = git2::Patch::from_buffers(
         old_content,

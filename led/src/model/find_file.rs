@@ -1,10 +1,15 @@
 use std::path::{Path, PathBuf};
 
-use led_core::Action;
-use led_fs::FindFileEntry;
+use led_core::{Action, CanonPath, UserPath};
 use led_state::{AppState, FindFileMode, FindFileState};
 
 // ── Path helpers ──
+
+/// Convert a CanonPath to a UserPath for display, using the workspace root mapping.
+fn canon_to_user(state: &AppState, path: &CanonPath) -> UserPath {
+    let ws = state.workspace.as_ref().unwrap();
+    path.to_user_path(&ws.root, &ws.user_root)
+}
 
 fn abbreviate_home(path: &str) -> String {
     if let Some(home) = dirs::home_dir() {
@@ -99,11 +104,12 @@ fn request_completions(state: &mut AppState) {
     if input.ends_with('/') {
         let prefix = String::new();
         let show_hidden = false;
+        let dir = UserPath::new(expanded).canonicalize();
         state
             .pending_find_file_list
-            .set(Some((expanded, prefix, show_hidden)));
+            .set(Some((dir, prefix, show_hidden)));
     } else {
-        let dir = expanded.parent().unwrap_or(Path::new("/")).to_path_buf();
+        let dir = UserPath::new(expanded.parent().unwrap_or(Path::new("/"))).canonicalize();
         let prefix = expanded
             .file_name()
             .map(|s| s.to_string_lossy().into_owned())
@@ -117,7 +123,7 @@ fn request_completions(state: &mut AppState) {
 
 // ── Longest common prefix ──
 
-fn longest_common_prefix(completions: &[FindFileEntry]) -> String {
+fn longest_common_prefix(completions: &[led_fs::FindFileEntry]) -> String {
     if completions.is_empty() {
         return String::new();
     }
@@ -208,16 +214,16 @@ fn tab_complete(state: &mut AppState) {
 // ── Activation ──
 
 pub fn activate(state: &mut AppState) {
-    // Parent dir of active buffer's path, or start_dir
+    // Parent dir of active buffer's path, or start_dir — shown as user path.
     let dir = state
         .active_tab
         .as_ref()
         .and_then(|path| state.buffers.get(path))
-        .and_then(|buf| buf.path_buf().cloned())
-        .and_then(|p| p.parent().map(|pp| pp.to_path_buf()))
+        .and_then(|buf| buf.path().cloned())
+        .and_then(|p| p.parent())
         .unwrap_or_else(|| (*state.startup.start_dir).clone());
 
-    let dir_str = dir.to_string_lossy().into_owned();
+    let dir_str = canon_to_user(state, &dir).to_string_lossy().into_owned();
     let mut input = abbreviate_home(&dir_str);
     if !input.ends_with('/') {
         input.push('/');
@@ -236,9 +242,10 @@ pub fn activate(state: &mut AppState) {
 
     // Request initial listing
     let expanded = expand_path(&state.find_file.as_ref().unwrap().input);
+    let dir = UserPath::new(expanded).canonicalize();
     state
         .pending_find_file_list
-        .set(Some((expanded, String::new(), false)));
+        .set(Some((dir, String::new(), false)));
 }
 
 pub fn activate_save_as(state: &mut AppState) {
@@ -247,10 +254,12 @@ pub fn activate_save_as(state: &mut AppState) {
         .active_tab
         .as_ref()
         .and_then(|path| state.buffers.get(path))
-        .and_then(|buf| buf.path_buf().cloned())
-        .map(|p| abbreviate_home(&p.to_string_lossy()))
+        .and_then(|buf| buf.path().cloned())
+        .map(|p| abbreviate_home(&canon_to_user(state, &p).to_string_lossy()))
         .unwrap_or_else(|| {
-            let dir = (*state.startup.start_dir).to_string_lossy().into_owned();
+            let dir = canon_to_user(state, &state.startup.start_dir)
+                .to_string_lossy()
+                .into_owned();
             let mut s = abbreviate_home(&dir);
             if !s.ends_with('/') {
                 s.push('/');
@@ -271,7 +280,8 @@ pub fn activate_save_as(state: &mut AppState) {
 
     // Request initial listing for the directory
     let expanded = expand_path(&state.find_file.as_ref().unwrap().input);
-    let dir = expanded.parent().unwrap_or(Path::new("/")).to_path_buf();
+    let dir =
+        UserPath::new(expanded.parent().unwrap_or(Path::new("/")).to_path_buf()).canonicalize();
     let prefix = expanded
         .file_name()
         .map(|s| s.to_string_lossy().into_owned())
@@ -476,10 +486,15 @@ fn handle_enter_open(state: &mut AppState) {
 
     // Path B: no selection — check completions for exact match
     let expanded = expand_path(&ff.input);
+    let expanded_canon = UserPath::new(&expanded).canonicalize();
     let input = ff.input.clone();
 
     // Find matching completion (clone to release borrow)
-    let matched = ff.completions.iter().find(|c| c.full == expanded).cloned();
+    let matched = ff
+        .completions
+        .iter()
+        .find(|c| c.full == expanded_canon)
+        .cloned();
 
     if let Some(comp) = matched {
         if comp.is_dir {
@@ -502,11 +517,11 @@ fn handle_enter_open(state: &mut AppState) {
 
     // Path C: non-existent path (not ending /, not empty) → open (creates new file)
     if !input.ends_with('/') && !input.is_empty() {
-        if super::action::promote_preview(state, &expanded) {
+        if super::action::promote_preview(state, &expanded_canon) {
             deactivate_without_close_preview(state);
         } else {
-            super::request_open(state, expanded.clone(), true);
-            state.active_tab = Some(expanded);
+            super::request_open(state, expanded_canon.clone(), true);
+            state.active_tab = Some(expanded_canon);
             deactivate(state);
         }
         return;
@@ -534,10 +549,15 @@ fn handle_enter_save_as(state: &mut AppState) {
         }
     } else {
         let expanded = expand_path(&ff.input);
+        let expanded_canon = UserPath::new(&expanded).canonicalize();
         let input = ff.input.clone();
 
         // Check completions for exact dir match → descend
-        let matched = ff.completions.iter().find(|c| c.full == expanded).cloned();
+        let matched = ff
+            .completions
+            .iter()
+            .find(|c| c.full == expanded_canon)
+            .cloned();
         if let Some(comp) = matched {
             if comp.is_dir {
                 if input.ends_with('/') {
@@ -552,7 +572,7 @@ fn handle_enter_save_as(state: &mut AppState) {
             return;
         }
 
-        expanded
+        expanded_canon
     };
 
     // Save the active buffer to the new path

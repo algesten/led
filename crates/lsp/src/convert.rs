@@ -1,6 +1,4 @@
-use std::path::{Path, PathBuf};
-
-use led_core::Doc;
+use led_core::{CanonPath, Doc, UserPath};
 use lsp_types::{
     CodeActionOrCommand, CompletionResponse, GotoDefinitionResponse, Location, Position, TextEdit,
     Uri, WorkspaceEdit,
@@ -10,16 +8,15 @@ use crate::{CompletionItem, Diagnostic, DiagnosticSeverity, FileEdit, InlayHint}
 
 // ── URI / path ──
 
-pub(crate) fn uri_from_path(path: &Path) -> Option<Uri> {
-    let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    let s = format!("file://{}", canonical.to_str()?);
+pub(crate) fn uri_from_path(path: &CanonPath) -> Option<Uri> {
+    let s = format!("file://{}", path.to_str()?);
     s.parse().ok()
 }
 
-pub(crate) fn path_from_uri(uri: &Uri) -> Option<PathBuf> {
+pub(crate) fn path_from_uri(uri: &Uri) -> Option<CanonPath> {
     let s = uri.as_str();
     let stripped = s.strip_prefix("file://")?;
-    Some(PathBuf::from(stripped))
+    Some(UserPath::new(stripped).canonicalize())
 }
 
 // ── UTF-16 ↔ char ──
@@ -79,8 +76,8 @@ pub(crate) fn doc_line(doc: &dyn Doc, row: usize) -> Option<String> {
 }
 
 /// Get a line from a file on disk.
-fn disk_line(path: &Path, row: usize) -> Option<String> {
-    let content = std::fs::read_to_string(path).ok()?;
+fn disk_line(path: &CanonPath, row: usize) -> Option<String> {
+    let content = std::fs::read_to_string(path.as_path()).ok()?;
     content.lines().nth(row).map(|l| l.to_string())
 }
 
@@ -120,19 +117,19 @@ pub(crate) fn lsp_text_edit_to_domain(
 
 pub(crate) fn workspace_edit_to_file_edits(edit: &WorkspaceEdit) -> Vec<FileEdit> {
     use std::collections::HashMap;
-    let mut result: HashMap<PathBuf, Vec<crate::TextEdit>> = HashMap::new();
+    let mut result: HashMap<CanonPath, Vec<crate::TextEdit>> = HashMap::new();
 
     let collect_edits =
-        |path: &Path,
+        |path: &CanonPath,
          lsp_edits: &[TextEdit],
-         result: &mut HashMap<PathBuf, Vec<crate::TextEdit>>| {
+         result: &mut HashMap<CanonPath, Vec<crate::TextEdit>>| {
             let lines = read_file_lines(path);
             let line_at = |row: usize| lines.get(row).cloned();
             let edits: Vec<crate::TextEdit> = lsp_edits
                 .iter()
                 .map(|e| lsp_text_edit_to_domain(e, &line_at))
                 .collect();
-            result.entry(path.to_path_buf()).or_default().extend(edits);
+            result.entry(path.clone()).or_default().extend(edits);
         };
 
     if let Some(changes) = &edit.changes {
@@ -189,8 +186,8 @@ pub(crate) fn workspace_edit_to_file_edits(edit: &WorkspaceEdit) -> Vec<FileEdit
 
 // ── Apply edits to disk ──
 
-pub(crate) fn apply_edits_to_disk(path: &Path, edits: &[crate::TextEdit]) {
-    let Ok(content) = std::fs::read_to_string(path) else {
+pub(crate) fn apply_edits_to_disk(path: &CanonPath, edits: &[crate::TextEdit]) {
+    let Ok(content) = std::fs::read_to_string(path.as_path()) else {
         return;
     };
     let mut lines: Vec<String> = content.lines().map(|l| l.to_string()).collect();
@@ -242,14 +239,14 @@ pub(crate) fn apply_edits_to_disk(path: &Path, edits: &[crate::TextEdit]) {
     } else {
         result
     };
-    let _ = std::fs::write(path, output);
+    let _ = std::fs::write(path.as_path(), output);
 }
 
 // ── Goto definition response ──
 
 pub(crate) fn definition_response_to_locations(
     resp: GotoDefinitionResponse,
-) -> Vec<(PathBuf, usize, usize)> {
+) -> Vec<(CanonPath, usize, usize)> {
     match resp {
         GotoDefinitionResponse::Scalar(loc) => location_to_tuple(&loc).into_iter().collect(),
         GotoDefinitionResponse::Array(locs) => locs.iter().filter_map(location_to_tuple).collect(),
@@ -265,7 +262,7 @@ pub(crate) fn definition_response_to_locations(
     }
 }
 
-fn location_to_tuple(loc: &Location) -> Option<(PathBuf, usize, usize)> {
+fn location_to_tuple(loc: &Location) -> Option<(CanonPath, usize, usize)> {
     let path = path_from_uri(&loc.uri)?;
     let line = disk_line(&path, loc.range.start.line as usize);
     let (row, col) = from_lsp_pos(&loc.range.start, line.as_deref());
@@ -462,8 +459,8 @@ pub(crate) fn code_action_titles(actions: &[CodeActionOrCommand]) -> Vec<String>
 
 // ── Helpers ──
 
-fn read_file_lines(path: &Path) -> Vec<String> {
-    match std::fs::read_to_string(path) {
+fn read_file_lines(path: &CanonPath) -> Vec<String> {
+    match std::fs::read_to_string(path.as_path()) {
         Ok(content) => content.lines().map(|l| l.to_string()).collect(),
         Err(_) => vec![],
     }

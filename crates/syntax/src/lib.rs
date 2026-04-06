@@ -19,12 +19,11 @@ pub use outline::OutlineItem;
 pub use state::SyntaxState;
 
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 
 use led_core::rx::Stream;
-use led_core::{Doc, EditOp};
+use led_core::{CanonPath, Doc, EditOp};
 use led_state::BracketPair;
 use tokio::sync::mpsc;
 
@@ -33,7 +32,7 @@ use tokio::sync::mpsc;
 #[derive(Clone)]
 pub enum SyntaxOut {
     BufferChanged {
-        path: PathBuf,
+        path: CanonPath,
         doc: Arc<dyn Doc>,
         version: u64,
         edit_ops: Vec<EditOp>,
@@ -44,13 +43,13 @@ pub enum SyntaxOut {
         indent_row: Option<usize>,
     },
     BufferClosed {
-        path: PathBuf,
+        path: CanonPath,
     },
 }
 
 #[derive(Clone)]
 pub struct SyntaxIn {
-    pub path: PathBuf,
+    pub path: CanonPath,
     pub doc_version: u64,
     pub highlights: Rc<Vec<(usize, HighlightSpan)>>,
     pub bracket_pairs: Vec<BracketPair>,
@@ -88,7 +87,7 @@ pub fn driver(out: Stream<SyntaxOut>) -> Stream<SyntaxIn> {
             cached_brackets: Vec<led_state::BracketPair>,
             reindent_chars: Arc<[char]>,
         }
-        let mut states: HashMap<PathBuf, BufSyntax> = HashMap::new();
+        let mut states: HashMap<CanonPath, BufSyntax> = HashMap::new();
 
         // Scratch space for coalescing queued messages per buffer.
         struct Coalesced {
@@ -103,8 +102,8 @@ pub fn driver(out: Stream<SyntaxOut>) -> Stream<SyntaxIn> {
         while let Some(cmd) = cmd_rx.recv().await {
             // Coalesce: drain any queued messages, keeping the latest
             // state per path while merging edit_ops and indent_row.
-            let mut pending: HashMap<PathBuf, Coalesced> = HashMap::new();
-            let mut closes: Vec<PathBuf> = Vec::new();
+            let mut pending: HashMap<CanonPath, Coalesced> = HashMap::new();
+            let mut closes: Vec<CanonPath> = Vec::new();
             {
                 let mut first = Some(cmd);
                 loop {
@@ -173,7 +172,7 @@ pub fn driver(out: Stream<SyntaxOut>) -> Stream<SyntaxIn> {
             {
                 // Auto-initialize if not yet opened
                 if !states.contains_key(&path) {
-                    if let Some(ss) = SyntaxState::from_path_and_doc(&path, &*doc) {
+                    if let Some(ss) = SyntaxState::from_path_and_doc(path.as_path(), &*doc) {
                         let reindent_chars = ss.reindent_chars().clone();
                         states.insert(
                             path.clone(),

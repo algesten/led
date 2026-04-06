@@ -55,7 +55,7 @@ pub(super) fn handle_isearch_action(state: &mut AppState, action: &Action) -> bo
             // Record jump from search origin before accepting
             if let Some(ref path) = state.active_tab {
                 if let Some(buf) = state.buffers.get(path) {
-                    if let (Some(is), Some(path)) = (&buf.isearch, buf.path_buf()) {
+                    if let (Some(is), Some(path)) = (&buf.isearch, buf.path()) {
                         let cursor_moved =
                             buf.cursor_row().0 != is.origin.0 || buf.cursor_col().0 != is.origin.1;
                         if cursor_moved {

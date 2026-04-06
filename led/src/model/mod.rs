@@ -17,11 +17,11 @@ mod session_of;
 mod sync_of;
 
 use led_config_file::ConfigFile;
+use led_core::CanonPath;
 use led_core::git::FileStatus;
 use led_core::keys::{Keymap, Keys};
 use led_core::rx::Stream;
 use led_core::theme::Theme;
-use std::path::PathBuf;
 
 use led_core::{Action, Alert, Doc, PanelSlot};
 use led_state::{
@@ -85,8 +85,8 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
             let mut dirs_to_refresh = HashSet::new();
             for p in &paths {
                 if let Some(parent) = p.parent() {
-                    if parent == root.as_path() || b.expanded_dirs.contains(parent) {
-                        dirs_to_refresh.insert(parent.to_path_buf());
+                    if parent == *root || b.expanded_dirs.contains(&parent) {
+                        dirs_to_refresh.insert(parent);
                     }
                 }
             }
@@ -122,8 +122,8 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
             let path = s
                 .buffers
                 .values()
-                .find(|b| b.path_buf() == Some(&file_path))
-                .and_then(|b| b.path_buf().cloned());
+                .find(|b| b.path() == Some(&file_path))
+                .and_then(|b| b.path().cloned());
             Mut::UndoFlushed {
                 path,
                 chain_id,
@@ -217,12 +217,12 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
                 .values()
                 .filter(|b| b.path().is_some())
                 .filter(|b| {
-                    let path = b.path_buf().unwrap();
+                    let path = b.path().unwrap();
                     !s.tabs.iter().any(|t| t.path == *path && t.is_preview())
                 })
                 .filter(|b| b.undo_history_len() > b.persisted_undo_len() || b.is_dirty())
                 .filter_map(|b| {
-                    let file_path = b.path_buf().cloned().unwrap();
+                    let file_path = b.path().cloned().unwrap();
                     let chain_id = b
                         .chain_id()
                         .map(String::from)
@@ -242,7 +242,7 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
                     }
                     let undo_cursor = undo.entry_count();
                     Some(Mut::UndoFlushReady {
-                        path: b.path_buf().cloned().unwrap(),
+                        path: b.path().cloned().unwrap(),
                         flush: led_state::UndoFlush {
                             file_path,
                             chain_id,
@@ -276,12 +276,10 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
             // Validate the listing matches current input
             let expanded = find_file::expand_path(&ff.input);
             let expected_dir = if ff.input.ends_with('/') {
-                expanded
+                led_core::UserPath::new(&expanded).canonicalize()
             } else {
-                expanded
-                    .parent()
-                    .unwrap_or(std::path::Path::new("/"))
-                    .to_path_buf()
+                led_core::UserPath::new(expanded.parent().unwrap_or(std::path::Path::new("/")))
+                    .canonicalize()
             };
             if dir != expected_dir {
                 return None;
@@ -873,7 +871,7 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
                 // Record current position in jump list
                 if let Some(ref active) = s.active_tab {
                     if let Some(buf) = s.buffers.get(active) {
-                        if let Some(p) = buf.path_buf() {
+                        if let Some(p) = buf.path() {
                             let pos = led_state::JumpPosition {
                                 path: p.clone(),
                                 row: buf.cursor_row().0,
@@ -884,17 +882,12 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
                         }
                     }
                 }
-                // Check if file is already open
-                let canonical = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+                // Check if file is already open (paths are CanonPath, simple == works)
                 let existing = s
                     .buffers
                     .values()
-                    .find(|b| {
-                        b.path_buf().map_or(false, |p| {
-                            std::fs::canonicalize(p).unwrap_or_else(|_| p.clone()) == canonical
-                        })
-                    })
-                    .and_then(|b| b.path_buf().cloned());
+                    .find(|b| b.path() == Some(&path))
+                    .and_then(|b| b.path().cloned());
                 if let Some(existing_path) = existing {
                     s.active_tab = Some(existing_path.clone());
                     let half = s.dims.map_or(10, |d| d.buffer_height() / 2);
@@ -1069,7 +1062,7 @@ fn ensure_startup_arg_buffers(s: &mut AppState) {
 
 /// Ensure a buffer entry exists for `path`. If the buffer is not yet materialized,
 /// the unified materialization stream in derived will emit `DocStoreOut::Open`.
-pub(crate) fn request_open(s: &mut AppState, path: PathBuf, create_if_missing: bool) {
+pub(crate) fn request_open(s: &mut AppState, path: CanonPath, create_if_missing: bool) {
     if !s.tabs.iter().any(|t| t.path == path) {
         s.tabs.push_back(led_state::Tab {
             path: path.clone(),
@@ -1115,7 +1108,7 @@ fn handle_timer(state: &mut AppState, name: &'static str) {
 
 #[derive(Clone)]
 enum Mut {
-    ActivateBuffer(PathBuf),
+    ActivateBuffer(CanonPath),
     Action(Action),
     EvictOneBuffer,
     KbdMacroSetCount(usize),
@@ -1125,7 +1118,7 @@ enum Mut {
     },
     ResumeComplete,
     BufferOpen {
-        path: PathBuf,
+        path: CanonPath,
         doc: Arc<dyn Doc>,
         cursor: (usize, usize),
         scroll: (usize, usize),
@@ -1140,20 +1133,20 @@ enum Mut {
         distance_from_save: i32,
     },
     BufferSaved {
-        path: PathBuf,
+        path: CanonPath,
         buf: BufferState,
-        undo_clear_path: Option<PathBuf>,
+        undo_clear_path: Option<CanonPath>,
     },
     BufferSavedAs {
-        path: PathBuf,
+        path: CanonPath,
         buf: BufferState,
-        new_path: PathBuf,
-        undo_clear_path: Option<PathBuf>,
+        new_path: CanonPath,
+        undo_clear_path: Option<CanonPath>,
     },
-    BufferUpdate(PathBuf, BufferState, ChangeReason),
+    BufferUpdate(CanonPath, BufferState, ChangeReason),
     ConfigKeys(ConfigFile<Keys>),
     ConfigTheme(ConfigFile<Theme>),
-    DirListed(std::path::PathBuf, Vec<led_fs::DirEntry>),
+    DirListed(CanonPath, Vec<led_fs::DirEntry>),
     FileSearchResults(
         led_state::file_search::FileSearchState,
         Option<led_state::PreviewRequest>,
@@ -1165,39 +1158,39 @@ enum Mut {
     ),
     FindFileListed(led_state::FindFileState),
     GitFileStatuses {
-        statuses: HashMap<PathBuf, HashSet<FileStatus>>,
+        statuses: HashMap<CanonPath, HashSet<FileStatus>>,
         branch: Option<String>,
     },
     GitLineStatuses {
-        path: PathBuf,
+        path: CanonPath,
         statuses: Vec<led_core::git::LineStatus>,
     },
     ForceRedraw(u64),
     Keymap(Rc<Keymap>),
     Resize(u16, u16),
     NotifyEvent {
-        path: Option<std::path::PathBuf>,
+        path: Option<CanonPath>,
     },
     SessionOpenFailed {
-        path: std::path::PathBuf,
+        path: CanonPath,
     },
     SessionRestored {
         active_tab_order: Option<usize>,
         show_side_panel: bool,
-        positions: HashMap<PathBuf, led_workspace::SessionBuffer>,
-        pending_opens: Vec<PathBuf>,
+        positions: HashMap<CanonPath, led_workspace::SessionBuffer>,
+        pending_opens: Vec<CanonPath>,
         browser_selected: usize,
         browser_scroll_offset: usize,
-        browser_expanded_dirs: HashSet<PathBuf>,
+        browser_expanded_dirs: HashSet<CanonPath>,
         jump_entries: std::collections::VecDeque<led_state::JumpPosition>,
         jump_index: usize,
-        pending_lists: Vec<PathBuf>,
+        pending_lists: Vec<CanonPath>,
     },
     SessionSaved,
     WatchersReady,
     Resumed,
     SyntaxUpdate {
-        path: PathBuf,
+        path: CanonPath,
         version: u64,
         highlights: Rc<Vec<(usize, HighlightSpan)>>,
         bracket_pairs: Vec<BracketPair>,
@@ -1206,29 +1199,29 @@ enum Mut {
         reindent_chars: Arc<[char]>,
     },
     UndoFlushed {
-        path: Option<PathBuf>,
+        path: Option<CanonPath>,
         chain_id: String,
         last_seen_seq: i64,
     },
     UndoFlushReady {
-        path: PathBuf,
+        path: CanonPath,
         flush: led_state::UndoFlush,
     },
     TimerFired(&'static str),
     TouchArgFiles {
-        entries: Vec<PathBuf>,
+        entries: Vec<CanonPath>,
     },
     Workspace {
         workspace: Workspace,
-        initial_dirs: Vec<PathBuf>,
+        initial_dirs: Vec<CanonPath>,
     },
     WorkspaceChanged {
-        dirs: Vec<PathBuf>,
+        dirs: Vec<CanonPath>,
     },
     GitChanged,
     // LSP
     LspNavigate {
-        path: PathBuf,
+        path: CanonPath,
         row: usize,
         col: usize,
     },
@@ -1243,12 +1236,12 @@ enum Mut {
         actions: Vec<String>,
     },
     LspDiagnostics {
-        path: PathBuf,
+        path: CanonPath,
         diagnostics: Vec<led_lsp::Diagnostic>,
         content_hash: u64,
     },
     LspInlayHints {
-        path: PathBuf,
+        path: CanonPath,
         hints: Vec<led_lsp::InlayHint>,
     },
     LspProgress {

@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
-use std::path::{Path, PathBuf};
+
+use crate::CanonPath;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FileStatus {
@@ -74,8 +75,8 @@ pub fn resolve_display(statuses: &HashSet<FileStatus>) -> Option<StatusDisplay> 
 
 /// Aggregate file statuses for all files under a directory.
 pub fn directory_statuses(
-    file_statuses: &HashMap<PathBuf, HashSet<FileStatus>>,
-    dir: &Path,
+    file_statuses: &HashMap<CanonPath, HashSet<FileStatus>>,
+    dir: &CanonPath,
 ) -> HashSet<FileStatus> {
     let mut result = HashSet::new();
     for (path, statuses) in file_statuses {

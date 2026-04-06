@@ -1,10 +1,9 @@
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use led_core::keys::Keys;
 use led_core::rx::Stream;
 use led_core::theme::Theme;
-use led_core::{Alert, AlertExt};
+use led_core::{Alert, AlertExt, UserPath};
 use tokio::sync::mpsc;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -15,7 +14,7 @@ pub enum ConfigFileOut {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ConfigDir {
-    pub config: PathBuf,
+    pub config: UserPath,
     pub read_only: bool,
 }
 

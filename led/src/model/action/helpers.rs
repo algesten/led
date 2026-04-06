@@ -39,10 +39,9 @@ pub(crate) fn reveal_active_buffer(state: &mut AppState) {
         .active_tab
         .as_ref()
         .and_then(|path| state.buffers.get(path))
-        .and_then(|b| b.path_buf().cloned());
+        .and_then(|b| b.path().cloned());
     let Some(path) = path else { return };
-    // Canonicalize to match browser.root (which is canonicalized by the workspace driver)
-    let path = std::fs::canonicalize(&path).unwrap_or(path);
+    // Paths are already CanonPath — no need to canonicalize again.
     let new_dirs = state.browser_mut().reveal(&path);
     if !new_dirs.is_empty() {
         state.pending_lists.set(new_dirs);

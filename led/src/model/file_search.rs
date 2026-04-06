@@ -481,21 +481,13 @@ pub fn handle_file_search_action(state: &mut AppState, action: &Action) -> bool 
 
 // ── Buffer lookup ──
 
-fn find_buf_for_path(state: &AppState, path: &std::path::Path) -> Option<std::path::PathBuf> {
-    if let Some(b) = state.buffers.values().find(|b| b.path() == Some(path)) {
-        return b.path_buf().cloned();
-    }
-    let canonical = std::fs::canonicalize(path).ok()?;
+fn find_buf_for_path(state: &AppState, path: &led_core::CanonPath) -> Option<led_core::CanonPath> {
+    // Paths are already CanonPath — simple equality check suffices.
     state
         .buffers
         .values()
-        .find(|b| {
-            b.path_buf()
-                .and_then(|p| std::fs::canonicalize(p).ok())
-                .as_deref()
-                == Some(canonical.as_path())
-        })
-        .and_then(|b| b.path_buf().cloned())
+        .find(|b| b.path() == Some(path))
+        .and_then(|b| b.path().cloned())
 }
 
 // ── Replace execution ──
@@ -554,7 +546,7 @@ fn reinsert_hit_into_results(fs: &mut FileSearchState, entry: &ReplaceEntry, lin
     fs.rebuild_flat_hits();
 }
 
-fn close_undo_group(state: &mut AppState, buf_path: &std::path::Path) {
+fn close_undo_group(state: &mut AppState, buf_path: &led_core::CanonPath) {
     if let Some(buf) = state.buf_mut(buf_path) {
         buf.close_undo_group();
     }
@@ -736,7 +728,7 @@ fn replace_all(state: &mut AppState) {
     let query = fs.query.clone();
 
     let mut hits_by_buf: std::collections::HashMap<
-        std::path::PathBuf,
+        led_core::CanonPath,
         Vec<(usize, usize, usize, usize, String)>,
     > = std::collections::HashMap::new();
 
@@ -787,7 +779,7 @@ fn replace_all(state: &mut AppState) {
 
     // For non-open files: stash the hits and open the files as buffers.
     // Replacements will be applied when the buffers arrive (BufferOpen).
-    let non_open_paths: Vec<std::path::PathBuf> = hits_by_buf
+    let non_open_paths: Vec<led_core::CanonPath> = hits_by_buf
         .keys()
         .filter(|p| !open_paths.contains(p))
         .cloned()
@@ -828,12 +820,8 @@ fn replace_all(state: &mut AppState) {
 
 /// Called from BufferOpen handler. If this buffer's path has pending replace hits,
 /// apply them all in one undo group.
-pub fn apply_pending_replace(state: &mut AppState, buf_path: &std::path::Path) {
-    let path = match state
-        .buffers
-        .get(buf_path)
-        .and_then(|b| b.path_buf().cloned())
-    {
+pub fn apply_pending_replace(state: &mut AppState, buf_path: &led_core::CanonPath) {
+    let path = match state.buffers.get(buf_path).and_then(|b| b.path().cloned()) {
         Some(p) => p,
         None => return,
     };
@@ -843,16 +831,8 @@ pub fn apply_pending_replace(state: &mut AppState, buf_path: &std::path::Path) {
         None => return,
     };
 
-    // Try direct path match, then canonical
-    let hits = pending.hits.remove(&path).or_else(|| {
-        let canonical = std::fs::canonicalize(&path).ok()?;
-        let key = pending
-            .hits
-            .keys()
-            .find(|k| std::fs::canonicalize(k).ok().as_deref() == Some(canonical.as_path()))?
-            .clone();
-        pending.hits.remove(&key)
-    });
+    // Paths are CanonPath — direct lookup suffices.
+    let hits = pending.hits.remove(&path);
     let Some(hits) = hits else { return };
 
     let pending_ref = state.pending_replace_all.as_ref().unwrap();
@@ -866,11 +846,7 @@ pub fn apply_pending_replace(state: &mut AppState, buf_path: &std::path::Path) {
 
     // Remove matching results from the search panel (if still open)
     if let Some(ref mut fs) = state.file_search {
-        fs.results.retain(|g| {
-            g.path != path
-                && std::fs::canonicalize(&g.path).ok().as_deref()
-                    != std::fs::canonicalize(&path).ok().as_deref()
-        });
+        fs.results.retain(|g| g.path != path);
         fs.rebuild_flat_hits();
     }
 
@@ -983,7 +959,7 @@ mod tests {
 /// If None, insert replacement literally.
 fn replace_in_buffer(
     state: &mut AppState,
-    buf_path: &std::path::Path,
+    buf_path: &led_core::CanonPath,
     row: usize,
     match_start_byte: usize,
     match_end_byte: usize,
@@ -1054,8 +1030,8 @@ fn confirm_selected(state: &mut AppState) {
     let existing = state
         .buffers
         .values()
-        .find(|b| b.path_buf() == Some(&path))
-        .and_then(|b| b.path_buf().cloned());
+        .find(|b| b.path() == Some(&path))
+        .and_then(|b| b.path().cloned());
 
     if let Some(buf_path) = existing {
         state.active_tab = Some(buf_path.clone());

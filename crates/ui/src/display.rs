@@ -1,5 +1,5 @@
+use led_core::CanonPath;
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -17,7 +17,7 @@ use crate::style;
 
 #[derive(Clone)]
 pub struct DisplayInputs {
-    buffer_path: Option<PathBuf>,
+    buffer_path: Option<CanonPath>,
     doc: Arc<dyn Doc>,
     scroll_row: usize,
     scroll_sub_line: usize,
@@ -120,7 +120,7 @@ pub fn display_inputs(s: &AppState) -> Option<DisplayInputs> {
 
     let file_search_match = s.file_search.as_ref().and_then(|fs| {
         let (group, hit) = fs.selected_hit()?;
-        if buf.path_buf() != Some(&group.path) {
+        if buf.path() != Some(&group.path) {
             return None;
         }
         let char_len = hit
@@ -170,7 +170,7 @@ pub fn display_inputs(s: &AppState) -> Option<DisplayInputs> {
         .unwrap_or_else(|| Style::default().fg(ratatui::style::Color::DarkGray));
 
     Some(DisplayInputs {
-        buffer_path: buf.path_buf().cloned(),
+        buffer_path: buf.path().cloned(),
         doc: buf.doc().clone(),
         scroll_row: buf.scroll_row().0,
         scroll_sub_line: buf.scroll_sub_line().0,
@@ -559,7 +559,7 @@ fn build_display_lines_inner(d: &DisplayInputs, line_buf: &mut String) -> Rc<Vec
 
 #[derive(Clone)]
 pub struct CursorInputs {
-    buffer_path: Option<PathBuf>,
+    buffer_path: Option<CanonPath>,
     doc: Arc<dyn Doc>,
     cursor_row: usize,
     cursor_col: usize,
@@ -592,7 +592,7 @@ pub fn cursor_inputs(s: &AppState) -> Option<CursorInputs> {
     let path = s.active_tab.as_ref()?;
     let buf = s.buffers.get(path)?;
     Some(CursorInputs {
-        buffer_path: buf.path_buf().cloned(),
+        buffer_path: buf.path().cloned(),
         doc: buf.doc().clone(),
         cursor_row: buf.cursor_row().0,
         cursor_col: buf.cursor_col().0,
@@ -1107,11 +1107,11 @@ pub struct BrowserInputs {
     pub file_style: Style,
     pub selected_style: Style,
     pub selected_unfocused_style: Style,
-    pub git_file_statuses: HashMap<std::path::PathBuf, std::collections::HashSet<FileStatus>>,
+    pub git_file_statuses: HashMap<CanonPath, std::collections::HashSet<FileStatus>>,
     pub git_modified_style: Style,
     pub git_added_style: Style,
     pub git_untracked_style: Style,
-    pub diag_file_severities: HashMap<PathBuf, BrowserSeverity>,
+    pub diag_file_severities: HashMap<CanonPath, BrowserSeverity>,
     pub diag_error_style: Style,
     pub diag_warning_style: Style,
 }
@@ -1165,11 +1165,11 @@ fn worst_severity(diags: &[led_lsp::Diagnostic]) -> Option<BrowserSeverity> {
     worst
 }
 
-fn build_diag_severities(s: &led_state::AppState) -> HashMap<PathBuf, BrowserSeverity> {
+fn build_diag_severities(s: &led_state::AppState) -> HashMap<CanonPath, BrowserSeverity> {
     let mut result = HashMap::new();
     // Open buffers
     for buf in s.buffers.values() {
-        if let Some(path) = buf.path_buf() {
+        if let Some(path) = buf.path() {
             if let Some(w) = worst_severity(buf.status().diagnostics()) {
                 result.insert(path.clone(), w);
             }
@@ -1179,8 +1179,8 @@ fn build_diag_severities(s: &led_state::AppState) -> HashMap<PathBuf, BrowserSev
 }
 
 fn directory_severity(
-    file_severities: &HashMap<PathBuf, BrowserSeverity>,
-    dir: &Path,
+    file_severities: &HashMap<CanonPath, BrowserSeverity>,
+    dir: &CanonPath,
 ) -> Option<BrowserSeverity> {
     let mut worst: Option<BrowserSeverity> = None;
     for (path, &sev) in file_severities {

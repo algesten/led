@@ -1,7 +1,8 @@
 use std::collections::HashMap;
-use std::path::Path;
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::{Arc, Mutex};
+
+use led_core::CanonPath;
 
 use lsp_types::{InitializeParams, InitializeResult, InitializedParams, ServerCapabilities};
 use serde_json::Value;
@@ -24,14 +25,14 @@ pub(crate) struct LanguageServer {
 impl LanguageServer {
     pub(crate) async fn start(
         config: &ServerConfig,
-        root: &Path,
+        root: &CanonPath,
         notification_tx: tokio::sync::mpsc::UnboundedSender<LspNotification>,
     ) -> Result<Arc<Self>, LspError> {
         use tokio::process::Command;
 
         let mut child = Command::new(config.command)
             .args(config.args)
-            .current_dir(root)
+            .current_dir(root.as_path())
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -85,7 +86,7 @@ impl LanguageServer {
         });
 
         // Send initialize
-        let root_uri = uri_from_path(root);
+        let root_uri = crate::convert::uri_from_path(root);
         #[allow(deprecated)]
         let init_params = InitializeParams {
             process_id: Some(std::process::id()),
@@ -305,10 +306,4 @@ impl LanguageServer {
             });
         }
     }
-}
-
-fn uri_from_path(path: &Path) -> Option<lsp_types::Uri> {
-    let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    let s = format!("file://{}", canonical.to_str()?);
-    s.parse().ok()
 }

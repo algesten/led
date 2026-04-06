@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use led_core::{CanonPath, UserPath};
 
 use led_core::rx::Stream;
 use tokio::sync::mpsc;
@@ -7,10 +7,10 @@ use tokio::sync::mpsc;
 #[derive(Clone, Debug)]
 pub enum FsOut {
     ListDir {
-        path: PathBuf,
+        path: CanonPath,
     },
     FindFileList {
-        dir: PathBuf,
+        dir: CanonPath,
         prefix: String,
         show_hidden: bool,
     },
@@ -20,11 +20,11 @@ pub enum FsOut {
 #[derive(Clone, Debug)]
 pub enum FsIn {
     DirListed {
-        path: PathBuf,
+        path: CanonPath,
         entries: Vec<DirEntry>,
     },
     FindFileListed {
-        dir: PathBuf,
+        dir: CanonPath,
         entries: Vec<FindFileEntry>,
     },
 }
@@ -39,8 +39,8 @@ pub struct DirEntry {
 /// A find-file completion entry.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FindFileEntry {
-    pub name: String,  // display name: dirs get trailing "/"
-    pub full: PathBuf, // full path
+    pub name: String,    // display name: dirs get trailing "/"
+    pub full: CanonPath, // full canonical path
     pub is_dir: bool,
 }
 
@@ -90,8 +90,8 @@ pub fn driver(out: Stream<FsOut>) -> Stream<FsIn> {
     stream
 }
 
-fn find_file_list(dir: &std::path::Path, prefix: &str, show_hidden: bool) -> Vec<FindFileEntry> {
-    let read = match std::fs::read_dir(dir) {
+fn find_file_list(dir: &CanonPath, prefix: &str, show_hidden: bool) -> Vec<FindFileEntry> {
+    let read = match std::fs::read_dir(dir.as_path()) {
         Ok(r) => r,
         Err(e) => {
             log::warn!(
@@ -121,7 +121,7 @@ fn find_file_list(dir: &std::path::Path, prefix: &str, show_hidden: bool) -> Vec
             } else {
                 raw_name
             };
-            let full = dir.join(e.file_name());
+            let full = UserPath::new(dir.as_path().join(e.file_name())).canonicalize();
             Some(FindFileEntry {
                 name: display_name,
                 full,
@@ -140,8 +140,8 @@ fn find_file_list(dir: &std::path::Path, prefix: &str, show_hidden: bool) -> Vec
     entries
 }
 
-fn list_dir(path: &std::path::Path) -> Vec<DirEntry> {
-    let read = match std::fs::read_dir(path) {
+fn list_dir(path: &CanonPath) -> Vec<DirEntry> {
+    let read = match std::fs::read_dir(path.as_path()) {
         Ok(r) => r,
         Err(e) => {
             log::warn!("failed to read dir {}: {}", path.display(), e);
