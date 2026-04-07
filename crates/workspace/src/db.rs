@@ -3,7 +3,7 @@ use std::path::Path;
 
 use rusqlite::{Connection, params};
 
-use led_core::{Col, PersistedContentHash, Row, SubLine};
+use led_core::{Col, PersistedContentHash, Row, SubLine, UndoEntry};
 
 use crate::{RestoredSession, SessionBuffer, SessionData};
 
@@ -220,7 +220,7 @@ pub fn flush_undo(
     content_hash: PersistedContentHash,
     undo_cursor: usize,
     distance_from_save: i32,
-    entries: &[Vec<u8>],
+    entries: &[UndoEntry],
 ) -> rusqlite::Result<i64> {
     let tx = conn.unchecked_transaction()?;
 
@@ -242,7 +242,10 @@ pub fn flush_undo(
         "INSERT INTO undo_entries (root_path, file_path, entry_data) VALUES (?1, ?2, ?3)",
     )?;
     for entry in entries {
-        stmt.execute(params![root_path, file_path, entry])?;
+        let bytes = rmp_serde::to_vec(entry).map_err(|e| {
+            rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::other(e)))
+        })?;
+        stmt.execute(params![root_path, file_path, bytes])?;
     }
     drop(stmt);
 
@@ -265,7 +268,7 @@ pub fn clear_undo(conn: &Connection, root_path: &str, file_path: &str) -> rusqli
 pub struct UndoSyncState {
     pub chain_id: String,
     pub content_hash: PersistedContentHash,
-    pub entries: Vec<Vec<u8>>,
+    pub entries: Vec<UndoEntry>,
     pub last_seq: i64,
 }
 
@@ -302,7 +305,10 @@ pub fn load_undo_after(
         .collect::<rusqlite::Result<Vec<_>>>()?;
 
     let last_seq = rows.last().map(|(seq, _)| *seq).unwrap_or(after_seq);
-    let entries = rows.into_iter().map(|(_, data)| data).collect();
+    let entries = rows
+        .into_iter()
+        .filter_map(|(_, data)| rmp_serde::from_slice::<UndoEntry>(&data).ok())
+        .collect();
 
     Ok(Some(UndoSyncState {
         chain_id,
@@ -353,7 +359,10 @@ pub fn load_undo_all(
         .collect::<rusqlite::Result<Vec<_>>>()?;
 
     restore.last_seq = rows.last().map(|(seq, _)| *seq).unwrap_or(0);
-    restore.entries = rows.into_iter().map(|(_, data)| data).collect();
+    restore.entries = rows
+        .into_iter()
+        .filter_map(|(_, data)| rmp_serde::from_slice::<UndoEntry>(&data).ok())
+        .collect();
 
     Ok(Some(restore))
 }
@@ -363,19 +372,34 @@ pub struct UndoRestoreState {
     pub content_hash: PersistedContentHash,
     pub undo_cursor: Option<usize>,
     pub distance_from_save: i32,
-    pub entries: Vec<Vec<u8>>,
+    pub entries: Vec<UndoEntry>,
     pub last_seq: i64,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use led_core::{CharOffset, EditOp};
 
     fn mem_db() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
         run_schema(&conn).unwrap();
         conn
+    }
+
+    fn stub_entry(text: &str) -> UndoEntry {
+        UndoEntry {
+            op: EditOp {
+                offset: CharOffset(0),
+                old_text: String::new(),
+                new_text: text.to_string(),
+            },
+            cursor_before: CharOffset(0),
+            cursor_after: CharOffset(text.chars().count()),
+            direction: 1,
+            content_hash: None,
+        }
     }
 
     #[test]
@@ -507,7 +531,7 @@ mod tests {
         )
         .unwrap();
 
-        let entries = vec![vec![1, 2, 3], vec![4, 5, 6]];
+        let entries = vec![stub_entry("a"), stub_entry("b")];
         let last_seq = flush_undo(
             &conn,
             "/project",
@@ -527,8 +551,8 @@ mod tests {
         assert_eq!(state.chain_id, "chain-1");
         assert_eq!(state.content_hash, PersistedContentHash(12345));
         assert_eq!(state.entries.len(), 2);
-        assert_eq!(state.entries[0], vec![1, 2, 3]);
-        assert_eq!(state.entries[1], vec![4, 5, 6]);
+        assert_eq!(state.entries[0].op.new_text, "a");
+        assert_eq!(state.entries[1].op.new_text, "b");
 
         // Load after last_seq returns no new entries
         let state2 = load_undo_after(&conn, "/project", "/tmp/a.rs", last_seq)
@@ -569,7 +593,7 @@ mod tests {
             PersistedContentHash(12345),
             2,
             3,
-            &[vec![10], vec![20]],
+            &[stub_entry("x"), stub_entry("y")],
         )
         .unwrap();
 
@@ -615,7 +639,7 @@ mod tests {
             PersistedContentHash(12345),
             2,
             0,
-            &[vec![1, 2, 3]],
+            &[stub_entry("x")],
         )
         .unwrap();
 
@@ -657,7 +681,7 @@ mod tests {
             PersistedContentHash(12345),
             2,
             0,
-            &[vec![1, 2, 3]],
+            &[stub_entry("x")],
         )
         .unwrap();
 
@@ -726,7 +750,7 @@ mod tests {
             PersistedContentHash(100),
             1,
             0,
-            &[vec![10]],
+            &[stub_entry("first")],
         )
         .unwrap();
 
@@ -739,7 +763,7 @@ mod tests {
             PersistedContentHash(200),
             2,
             1,
-            &[vec![20]],
+            &[stub_entry("second")],
         )
         .unwrap();
         assert!(seq2 > seq1);
@@ -749,7 +773,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(state.entries.len(), 1);
-        assert_eq!(state.entries[0], vec![20]);
+        assert_eq!(state.entries[0].op.new_text, "second");
         assert_eq!(state.last_seq, seq2);
     }
 

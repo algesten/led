@@ -227,14 +227,8 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
                         .unwrap_or_else(led_workspace::new_chain_id);
                     let mut undo = b.undo_history().clone();
                     undo.flush_pending();
-                    let raw_entries = undo.entries_from(b.persisted_undo_len());
-                    if raw_entries.is_empty() {
-                        return None;
-                    }
-                    let entries: Vec<Vec<u8>> = raw_entries
-                        .iter()
-                        .filter_map(|e| rmp_serde::to_vec(e).ok())
-                        .collect();
+                    let entries: Vec<led_core::UndoEntry> =
+                        undo.entries_from(b.persisted_undo_len()).to_vec();
                     if entries.is_empty() {
                         return None;
                     }
@@ -1143,7 +1137,7 @@ enum Mut {
         activate: bool,
         notify_hash: String,
         /// Session restore: undo entries + persistence state
-        undo_entries: Vec<Vec<u8>>,
+        undo_entries: Vec<led_core::UndoEntry>,
         persisted_undo_len: usize,
         chain_id: Option<String>,
         last_seen_seq: i64,

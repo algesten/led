@@ -284,7 +284,7 @@ pub struct UndoFlush {
     pub content_hash: PersistedContentHash,
     pub undo_cursor: usize,
     pub distance_from_save: i32,
-    pub entries: Vec<Vec<u8>>,
+    pub entries: Vec<led_core::UndoEntry>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -170,13 +170,10 @@ pub fn buffers_of(
 }
 
 /// Apply persisted undo entries to a buffer, restoring edit history.
-pub(super) fn apply_undo_entries(buf: &mut BufferState, entries: &[Vec<u8>]) {
+pub(super) fn apply_undo_entries(buf: &mut BufferState, entries: &[led_core::UndoEntry]) {
     buf.close_undo_group();
-    for entry_data in entries {
-        let Ok(entry) = rmp_serde::from_slice::<led_core::UndoEntry>(entry_data) else {
-            continue;
-        };
+    for entry in entries {
         let doc = led_core::apply_op_to_doc(buf.doc(), &entry.op);
-        buf.apply_remote_entry(doc, entry);
+        buf.apply_remote_entry(doc, entry.clone());
     }
 }

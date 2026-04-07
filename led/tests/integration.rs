@@ -2111,11 +2111,6 @@ fn simulate_external_edit(
     let root_str = canonical_root.to_string_lossy();
     let path_str = file_path.to_string_lossy();
 
-    let entries: Vec<Vec<u8>> = undo_entries
-        .iter()
-        .map(|e| rmp_serde::to_vec(e).unwrap())
-        .collect();
-
     // distance_from_save = count of d=1 entries (each forward group adds 1)
     let distance: i32 = undo_entries.iter().map(|e| e.direction).sum();
 
@@ -2127,7 +2122,7 @@ fn simulate_external_edit(
         led_core::PersistedContentHash(content_hash),
         undo_entries.len(),
         distance,
-        &entries,
+        undo_entries,
     )
     .expect("flush_undo");
     drop(conn);

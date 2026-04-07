@@ -101,15 +101,12 @@ fn resolve_sync(result: SyncResultKind, state: &AppState) -> Option<Mut> {
     }
 }
 
-/// Apply serialized undo entries to a buffer: mutates both the doc (content)
+/// Apply remote undo entries to a buffer: mutates both the doc (content)
 /// and the undo history (on BufferState).
-fn apply_remote_entries(buf: &mut BufferState, entries: &[Vec<u8>]) {
+fn apply_remote_entries(buf: &mut BufferState, entries: &[UndoEntry]) {
     buf.close_undo_group();
-    for entry_data in entries {
-        let Ok(entry) = rmp_serde::from_slice::<UndoEntry>(entry_data) else {
-            continue;
-        };
+    for entry in entries {
         let doc = apply_op_to_doc(buf.doc(), &entry.op);
-        buf.apply_remote_entry(doc, entry);
+        buf.apply_remote_entry(doc, entry.clone());
     }
 }

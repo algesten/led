@@ -40,7 +40,7 @@ pub enum WorkspaceOut {
         content_hash: PersistedContentHash,
         undo_cursor: usize,
         distance_from_save: i32,
-        entries: Vec<Vec<u8>>,
+        entries: Vec<led_core::UndoEntry>,
     },
     /// Delete undo state after save.
     ClearUndo { file_path: CanonPath },
@@ -83,14 +83,14 @@ pub enum WorkspaceIn {
 pub enum SyncResultKind {
     ReplayEntries {
         file_path: CanonPath,
-        entries: Vec<Vec<u8>>,
+        entries: Vec<led_core::UndoEntry>,
         new_last_seen_seq: i64,
     },
     ReloadAndReplay {
         file_path: CanonPath,
         new_chain_id: String,
         content_hash: PersistedContentHash,
-        entries: Vec<Vec<u8>>,
+        entries: Vec<led_core::UndoEntry>,
         new_last_seen_seq: i64,
     },
     ExternalSave {
@@ -129,7 +129,7 @@ pub struct UndoRestoreData {
     pub content_hash: PersistedContentHash,
     pub undo_cursor: Option<usize>,
     pub distance_from_save: i32,
-    pub entries: Vec<Vec<u8>>,
+    pub entries: Vec<led_core::UndoEntry>,
     pub last_seen_seq: i64,
 }
 
