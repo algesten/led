@@ -24,9 +24,7 @@ use led_core::rx::Stream;
 use led_core::theme::Theme;
 
 use led_core::{Action, Alert, Doc, PanelSlot};
-use led_state::{
-    AppState, BracketPair, BufferState, ChangeReason, Dimensions, HighlightSpan, Phase,
-};
+use led_state::{AppState, BracketPair, BufferState, Dimensions, HighlightSpan, Phase};
 use led_workspace::Workspace;
 
 use crate::Drivers;
@@ -320,7 +318,7 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
             action::close_group_on_move(&mut buf);
             let (sr, ssl) = mov::adjust_scroll(&buf, &dims);
             buf.set_scroll(led_core::Row(sr), led_core::SubLine(ssl));
-            Some(Mut::BufferUpdate(path.clone(), buf, ChangeReason::Edit))
+            Some(Mut::BufferUpdate(path.clone(), buf))
         })
         .stream();
 
@@ -626,8 +624,7 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
                 }
                 action::reveal_active_buffer(&mut s);
             }
-            Mut::BufferUpdate(path, mut buf, reason) => {
-                buf.set_change_reason(reason);
+            Mut::BufferUpdate(path, buf) => {
                 s.buffers_mut().insert(path, Rc::new(buf));
             }
             Mut::ConfigKeys(v) => s.config_keys = Some(v),
@@ -1163,7 +1160,7 @@ enum Mut {
         new_path: CanonPath,
         undo_clear_path: Option<CanonPath>,
     },
-    BufferUpdate(CanonPath, BufferState, ChangeReason),
+    BufferUpdate(CanonPath, BufferState),
     ConfigKeys(ConfigFile<Keys>),
     ConfigTheme(ConfigFile<Theme>),
     DirListed(CanonPath, Vec<led_fs::DirEntry>),
@@ -1286,7 +1283,7 @@ impl Mut {
             Mut::BufferOpen { .. } => "BufferOpen",
             Mut::BufferSaved { .. } => "BufferSaved",
             Mut::BufferSavedAs { .. } => "BufferSavedAs",
-            Mut::BufferUpdate(_, _, _) => "BufferUpdate",
+            Mut::BufferUpdate(_, _) => "BufferUpdate",
             Mut::ConfigKeys(_) => "ConfigKeys",
             Mut::ConfigTheme(_) => "ConfigTheme",
             Mut::DirListed(_, _) => "DirListed",

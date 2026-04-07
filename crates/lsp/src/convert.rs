@@ -286,6 +286,19 @@ pub(crate) fn convert_diagnostics(
             };
             let (start_row, start_col) = from_lsp_pos(&d.range.start, start_line.as_deref());
             let (end_row, end_col) = from_lsp_pos(&d.range.end, end_line.as_deref());
+            log::trace!(
+                "diag: convert lsp=({},{})-({},{}) → ({},{})–({},{}) line={:?} msg={}",
+                d.range.start.line,
+                d.range.start.character,
+                d.range.end.line,
+                d.range.end.character,
+                start_row.0,
+                start_col.0,
+                end_row.0,
+                end_col.0,
+                start_line.as_deref().map(|l| &l[..l.len().min(40)]),
+                &d.message[..d.message.len().min(60)],
+            );
             let severity = match d.severity {
                 Some(lsp_types::DiagnosticSeverity::ERROR) => DiagnosticSeverity::Error,
                 Some(lsp_types::DiagnosticSeverity::WARNING) => DiagnosticSeverity::Warning,
@@ -293,6 +306,10 @@ pub(crate) fn convert_diagnostics(
                 Some(lsp_types::DiagnosticSeverity::HINT) => DiagnosticSeverity::Hint,
                 _ => DiagnosticSeverity::Error,
             };
+            let code = d.code.as_ref().map(|c| match c {
+                lsp_types::NumberOrString::Number(n) => n.to_string(),
+                lsp_types::NumberOrString::String(s) => s.clone(),
+            });
             Diagnostic {
                 start_row,
                 start_col,
@@ -301,6 +318,7 @@ pub(crate) fn convert_diagnostics(
                 severity,
                 message: d.message.clone(),
                 source: d.source.clone(),
+                code,
             }
         })
         .collect()

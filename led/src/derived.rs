@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::time::Duration;
 
-use led_core::{CanonPath, PersistedContentHash, SyntaxSeq};
+use led_core::{CanonPath, SyntaxSeq};
 
 use led_config_file::{ConfigDir, ConfigFileOut};
 use led_core::rx::Stream;
@@ -672,61 +672,28 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
                     let path = buf.path()?;
                     let ver = buf.version().0;
                     let prev = known.insert(path.clone(), ver);
-                    (prev.is_some() && prev != Some(ver))
-                        .then(|| (path.clone(), buf.doc().clone(), buf.pending_edit_ops()))
-                })
-                .collect::<Vec<_>>()
-        })
-        .map(|(path, doc, edit_ops)| LspOut::BufferChanged {
-            path,
-            doc,
-            edit_ops,
-        })
-        .stream();
-
-    // BufferSaved on local save: dedupe on save_request.version()
-    let lsp_buf_saved = state
-        .dedupe_by(|s| s.save_request.version())
-        .filter(|s| s.save_request.version() > 0)
-        .filter(|s| s.active_tab.is_some())
-        .filter_map(|s| {
-            let active_path = s.active_tab.as_ref()?;
-            let buf = s.buffers.get(active_path)?;
-            let path = buf.path().cloned()?;
-            Some(LspOut::BufferSaved {
-                path,
-                content_hash: PersistedContentHash(buf.doc().content_hash().0),
-            })
-        })
-        .stream();
-
-    // BufferSaved on external file change: emit didSave for changed files.
-    let lsp_external_saved_known: Rc<RefCell<HashMap<CanonPath, u64>>> =
-        Rc::new(RefCell::new(HashMap::new()));
-    let lsp_external_saved = state
-        .dedupe_by(|s| {
-            s.buffers
-                .values()
-                .filter(|b| b.change_reason() == ChangeReason::ExternalFileChange)
-                .map(|b| b.change_seq().0)
-                .sum::<u64>()
-        })
-        .flat_map(move |s: Rc<AppState>| {
-            let mut known = lsp_external_saved_known.borrow_mut();
-            s.buffers
-                .values()
-                .filter(|b| b.change_reason() == ChangeReason::ExternalFileChange)
-                .filter_map(|buf| {
-                    let path = buf.path()?;
-                    let seq = buf.change_seq().0;
-                    let prev = known.insert(path.clone(), seq);
-                    (prev != Some(seq)).then(|| LspOut::BufferSaved {
-                        path: path.clone(),
-                        content_hash: PersistedContentHash(buf.doc().content_hash().0),
+                    (prev.is_some() && prev != Some(ver)).then(|| {
+                        let do_save = matches!(
+                            buf.change_reason(),
+                            ChangeReason::LocalSave | ChangeReason::ExternalFileChange
+                        );
+                        (
+                            path.clone(),
+                            buf.doc().clone(),
+                            buf.pending_edit_ops(),
+                            do_save,
+                        )
                     })
                 })
                 .collect::<Vec<_>>()
-        });
+        })
+        .map(|(path, doc, edit_ops, do_save)| LspOut::BufferChanged {
+            path,
+            doc,
+            edit_ops,
+            do_save,
+        })
+        .stream();
 
     // RequestDiagnostics signal 1: PersistedContentHash changed while Running.
     let lsp_request_diag_hash = state
@@ -736,7 +703,7 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
                 s.buffers
                     .values()
                     // 2 ^ 20 ~= 1 million files before this overflows
-                    .map(|b| b.content_hash().0 & 0x0000_0fff_ffff_ffff)
+                    .map(|b| b.content_hash().0 & 0x0000_0fff_ffff_ff + b.saved_version().0)
                     .sum::<u64>(),
             )
         })
@@ -837,8 +804,6 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
 
     lsp_init.forward(&lsp_out);
     lsp_buf_changed.forward(&lsp_out);
-    lsp_buf_saved.forward(&lsp_out);
-    lsp_external_saved.forward(&lsp_out);
     lsp_request_diag_hash.forward(&lsp_out);
     lsp_request_diag_running.forward(&lsp_out);
     lsp_inlay_hints.forward(&lsp_out);

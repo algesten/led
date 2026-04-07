@@ -550,6 +550,7 @@ mod tests {
 
         // A doc whose chunk_at_byte always returns the *previous* chunk,
         // simulating the boundary condition that triggers the bug.
+        #[derive(Debug)]
         struct BoundaryDoc;
         impl Doc for BoundaryDoc {
             fn line_count(&self) -> usize {

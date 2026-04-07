@@ -54,6 +54,9 @@ pub struct Diagnostic {
     pub severity: DiagnosticSeverity,
     pub message: String,
     pub source: Option<String>,
+    /// Diagnostic code from the server (e.g. "E0277"). Used to match
+    /// the same diagnostic between push and pull results.
+    pub code: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,10 +86,9 @@ pub enum LspOut {
         path: CanonPath,
         doc: Arc<dyn Doc>,
         edit_ops: Vec<EditOp>,
-    },
-    BufferSaved {
-        path: CanonPath,
-        content_hash: PersistedContentHash,
+        /// True when this change should also send didSave (local save or
+        /// external file change). The content matches what's on disk.
+        do_save: bool,
     },
     BufferClosed {
         path: CanonPath,

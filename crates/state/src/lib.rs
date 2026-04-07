@@ -303,18 +303,19 @@ pub enum SaveState {
 
 /// Why a buffer's content last changed.
 ///
-/// Carried on every `Mut::BufferUpdate` so the compiler enforces that
-/// callers always declare intent. Stored on `BufferState` by the reducer
-/// so derived streams can branch on it (e.g. LSP didSave for external changes).
+/// Set by buffer operations themselves. Derived streams branch on this
+/// to decide whether to send `didSave` to the LSP (LocalSave or
+/// ExternalFileChange both indicate the content matches disk).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ChangeReason {
-    /// Buffer just opened — initial content load from disk.
+    /// Buffer just constructed — no content loaded yet.
     #[default]
     Init,
-    /// User edit, yank, undo, or cross-instance sync.
+    /// User edit, yank, undo, redo, format edits, or cross-instance sync.
     Edit,
+    /// Local save completed (docstore confirmed write).
+    LocalSave,
     /// Content reloaded from disk (e.g. external `git checkout .`).
-    /// The file is already saved — no user-initiated save will follow.
     ExternalFileChange,
 }
 
@@ -399,6 +400,9 @@ pub struct BufferState {
 
     // Editing state (owned by buffer, not doc)
     version: DocVersion,
+    /// Snapshot of `version` at the last save (or external reload).
+    /// Used as a dedupe key for "the saved content changed."
+    saved_version: DocVersion,
     undo: UndoHistory,
 
     // Cursor (interior mutable — allows set_cursor through &self)
@@ -464,6 +468,7 @@ impl BufferState {
             doc: Arc::new(InertDoc),
             materialization: Cell::new(MaterializationState::Unmaterialized),
             version: DocVersion(0),
+            saved_version: DocVersion(0),
             undo: UndoHistory::default(),
             path: Some(path),
             cursor_row: Cell::new(Row(0)),
@@ -510,6 +515,12 @@ impl BufferState {
     /// Monotonic version counter. Incremented on every content edit, undo, redo.
     pub fn version(&self) -> DocVersion {
         self.version
+    }
+
+    /// Snapshot of `version` at the last save (or external reload).
+    /// Only changes when the on-disk content changes.
+    pub fn saved_version(&self) -> DocVersion {
+        self.saved_version
     }
 
     /// Whether the buffer has unsaved changes.
@@ -570,6 +581,7 @@ impl BufferState {
         self.content_hash = PersistedContentHash(doc.content_hash().0);
         self.doc = doc;
         self.materialization.set(MaterializationState::Materialized);
+        self.change_reason = ChangeReason::Init;
         if clear_annotations {
             self.syntax_highlights = Rc::new(Vec::new());
             self.bracket_pairs = Rc::new(Vec::new());
@@ -683,6 +695,7 @@ impl BufferState {
             (new_doc, vec![op], ())
         });
         self.last_edit_kind = Some(EditKind::Insert);
+        self.change_reason = ChangeReason::Edit;
         self.touch();
     }
 
@@ -701,6 +714,7 @@ impl BufferState {
             (new_doc, vec![op], ())
         });
         self.last_edit_kind = Some(EditKind::Delete);
+        self.change_reason = ChangeReason::Edit;
         self.touch();
     }
 
@@ -764,6 +778,9 @@ impl BufferState {
         self.last_seen_seq = 0;
         self.content_hash = PersistedContentHash(self.doc().content_hash().0);
         self.change_seq = led_core::next_change_seq();
+        self.change_reason = ChangeReason::LocalSave;
+        self.version = self.version + 1;
+        self.saved_version = self.version;
         self.set_syntax_full();
     }
 
@@ -782,7 +799,9 @@ impl BufferState {
         self.content_hash = PersistedContentHash(doc.content_hash().0);
         self.doc = doc;
         self.version = self.version + 1;
+        self.saved_version = self.version;
         self.change_seq = led_core::next_change_seq();
+        self.change_reason = ChangeReason::ExternalFileChange;
         // Request full syntax reparse. Keep old highlights visible until new ones arrive.
         self.set_syntax_full();
         // Clamp cursor to new document bounds.
@@ -798,10 +817,12 @@ impl BufferState {
     /// without changing content. Bumps version so LSP is notified.
     pub fn mark_externally_saved(&mut self) {
         self.version = self.version + 1;
+        self.saved_version = self.version;
         self.last_seen_seq = 0;
         self.chain_id = None;
         self.persisted_undo_len = self.undo.entry_count();
         self.change_seq = led_core::next_change_seq();
+        self.change_reason = ChangeReason::ExternalFileChange;
         if self.is_dirty() && self.save_state == SaveState::Clean {
             self.undo.reset_distance_from_save();
         }
@@ -814,6 +835,7 @@ impl BufferState {
         self.doc = doc;
         self.undo.push_remote_entry(entry);
         self.version = self.version + 1;
+        self.change_reason = ChangeReason::Edit;
     }
 
     /// Replay remote undo entries completed. Clears annotations, updates persistence.
@@ -828,6 +850,7 @@ impl BufferState {
         self.persisted_undo_len = self.undo.entry_count();
         self.content_hash = PersistedContentHash(self.doc().content_hash().0);
         self.change_seq = led_core::next_change_seq();
+        self.change_reason = ChangeReason::Edit;
         self.set_syntax_full();
     }
 
@@ -844,6 +867,7 @@ impl BufferState {
         self.persisted_undo_len = self.undo.entry_count();
         self.content_hash = PersistedContentHash(self.doc().content_hash().0);
         self.change_seq = led_core::next_change_seq();
+        self.change_reason = ChangeReason::Edit;
         self.set_syntax_full();
     }
 
@@ -939,6 +963,7 @@ impl BufferState {
         self.undo.set_undo_cursor(Some(pos));
         self.version = self.version + 1;
         self.doc = doc;
+        self.change_reason = ChangeReason::Edit;
         self.set_syntax_full();
         Some(restore_cursor)
     }
@@ -993,6 +1018,7 @@ impl BufferState {
 
         self.version = self.version + 1;
         self.doc = doc;
+        self.change_reason = ChangeReason::Edit;
         self.set_syntax_full();
         Some(restore_cursor)
     }
@@ -1259,9 +1285,6 @@ impl BufferState {
     }
     pub fn change_reason(&self) -> ChangeReason {
         self.change_reason
-    }
-    pub fn set_change_reason(&mut self, reason: ChangeReason) {
-        self.change_reason = reason;
     }
     pub fn chain_id(&self) -> Option<&str> {
         self.chain_id.as_deref()
@@ -1796,6 +1819,7 @@ mod tests {
             severity: led_lsp::DiagnosticSeverity::Warning,
             message: String::new(),
             source: None,
+            code: None,
         }
     }
 
@@ -1905,6 +1929,7 @@ mod tests {
             severity: led_lsp::DiagnosticSeverity::Error,
             message: msg.to_string(),
             source: None,
+            code: None,
         }
     }
 

@@ -3,7 +3,7 @@ use std::rc::Rc;
 use led_core::Alert;
 use led_core::rx::Stream;
 use led_docstore::DocStoreIn;
-use led_state::{AppState, BufferState, ChangeReason, SaveState};
+use led_state::{AppState, BufferState, SaveState};
 
 use super::Mut;
 
@@ -143,11 +143,7 @@ pub fn buffers_of(
                         let mut buf = (**buf).clone();
                         buf.mark_externally_saved();
                         buf.record_diag_save_point();
-                        return Some(Mut::BufferUpdate(
-                            buf_path,
-                            buf,
-                            ChangeReason::ExternalFileChange,
-                        ));
+                        return Some(Mut::BufferUpdate(buf_path, buf));
                     }
                     return None;
                 }
@@ -163,11 +159,7 @@ pub fn buffers_of(
                 let mut buf = (**buf).clone();
                 buf.reload_from_disk(doc);
                 buf.record_diag_save_point();
-                Some(Mut::BufferUpdate(
-                    buf_path,
-                    buf,
-                    ChangeReason::ExternalFileChange,
-                ))
+                Some(Mut::BufferUpdate(buf_path, buf))
             }
             Ok(DocStoreIn::Opening { .. }) => None,
             Ok(DocStoreIn::ExternalRemove { .. }) => None,

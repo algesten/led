@@ -2,7 +2,7 @@ use std::rc::Rc;
 
 use led_core::rx::Stream;
 use led_core::{UndoEntry, apply_op_to_doc};
-use led_state::{AppState, BufferState, ChangeReason};
+use led_state::{AppState, BufferState};
 use led_workspace::{SyncResultKind, WorkspaceIn};
 
 use super::Mut;
@@ -34,7 +34,7 @@ fn resolve_sync(result: SyncResultKind, state: &AppState) -> Option<Mut> {
             );
             let mut buf = (**buf).clone();
             buf.mark_externally_saved();
-            Some(Mut::BufferUpdate(file_path, buf, ChangeReason::Edit))
+            Some(Mut::BufferUpdate(file_path, buf))
         }
 
         SyncResultKind::ReplayEntries {
@@ -63,7 +63,7 @@ fn resolve_sync(result: SyncResultKind, state: &AppState) -> Option<Mut> {
                 buf.content_hash().0
             );
             buf.apply_sync_replay(new_last_seen_seq);
-            Some(Mut::BufferUpdate(file_path, buf, ChangeReason::Edit))
+            Some(Mut::BufferUpdate(file_path, buf))
         }
 
         SyncResultKind::ReloadAndReplay {
@@ -96,7 +96,7 @@ fn resolve_sync(result: SyncResultKind, state: &AppState) -> Option<Mut> {
             let mut buf = (**buf).clone();
             apply_remote_entries(&mut buf, &entries);
             buf.apply_sync_reload(new_chain_id, new_last_seen_seq);
-            Some(Mut::BufferUpdate(file_path, buf, ChangeReason::Edit))
+            Some(Mut::BufferUpdate(file_path, buf))
         }
     }
 }
