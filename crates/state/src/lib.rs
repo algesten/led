@@ -830,45 +830,69 @@ impl BufferState {
 
     // ── Workspace sync ──
 
-    /// Apply a single remote undo entry: update doc content and record in undo history.
-    pub fn apply_remote_entry(&mut self, doc: Arc<dyn Doc>, entry: led_core::UndoEntry) {
-        self.doc = doc;
-        self.undo.push_remote_entry(entry);
-        self.version = self.version + 1;
-        self.change_reason = ChangeReason::Edit;
-    }
-
-    /// Replay remote undo entries completed. Clears annotations, updates persistence.
-    /// Call after applying entries via `apply_remote_entry`.
-    pub fn apply_sync_replay(&mut self, last_seen_seq: i64) {
-        // Annotations are stale after remote edits — clear them.
-        self.syntax_highlights = Rc::new(Vec::new());
-        self.bracket_pairs = Rc::new(Vec::new());
-        self.matching_bracket = None;
-        self.status = BufferStatus::new();
-        self.last_seen_seq = last_seen_seq;
-        self.persisted_undo_len = self.undo.entry_count();
-        self.content_hash = PersistedContentHash(self.doc().content_hash().0);
-        self.change_seq = led_core::next_change_seq();
-        self.change_reason = ChangeReason::Edit;
-        self.set_syntax_full();
-    }
-
-    /// Reload from persisted state with new chain. Clears annotations, updates persistence.
-    /// Call after applying entries via `apply_remote_entry`.
-    pub fn apply_sync_reload(&mut self, chain_id: String, last_seen_seq: i64) {
+    /// Apply a batch of remote undo entries to this buffer.
+    ///
+    /// Validates seq monotonicity and chain anchor before applying. The
+    /// entries' positions were computed against `content_hash` on
+    /// local; if our buffer is at a different anchor we refuse to
+    /// apply (returns `false`) so the caller can leave the entries in
+    /// SQLite for retry on the next sync round.
+    ///
+    /// Handles both same-chain (anchor unchanged) and chain-switch
+    /// cases uniformly: caller passes the chain_id and anchor that
+    /// SQLite holds, and the post-apply state mirrors them.
+    pub fn try_apply_sync(
+        &mut self,
+        chain_id: String,
+        content_hash: PersistedContentHash,
+        entries: &[led_core::UndoEntry],
+        new_last_seen_seq: i64,
+    ) -> bool {
+        if new_last_seen_seq <= self.last_seen_seq {
+            log::trace!(
+                "sync: skipping apply, already seen ({} <= {})",
+                new_last_seen_seq,
+                self.last_seen_seq,
+            );
+            return false;
+        }
+        if self.content_hash != content_hash {
+            log::trace!(
+                "sync: chain anchor mismatch, ours={:#x} theirs={:#x}, refusing apply",
+                self.content_hash.0,
+                content_hash.0,
+            );
+            return false;
+        }
+        self.apply_persisted_entries(entries);
         // Annotations are stale after remote edits — clear them.
         self.syntax_highlights = Rc::new(Vec::new());
         self.bracket_pairs = Rc::new(Vec::new());
         self.matching_bracket = None;
         self.status = BufferStatus::new();
         self.chain_id = Some(chain_id);
-        self.last_seen_seq = last_seen_seq;
+        self.last_seen_seq = new_last_seen_seq;
         self.persisted_undo_len = self.undo.entry_count();
-        self.content_hash = PersistedContentHash(self.doc().content_hash().0);
         self.change_seq = led_core::next_change_seq();
         self.change_reason = ChangeReason::Edit;
         self.set_syntax_full();
+        true
+    }
+
+    /// Apply a batch of typed undo entries to the doc + undo history.
+    ///
+    /// No validation. Used by session restore (where the buffer was
+    /// just opened against the chain anchor and the entries are
+    /// trusted) and internally by `try_apply_sync`.
+    pub fn apply_persisted_entries(&mut self, entries: &[led_core::UndoEntry]) {
+        self.close_undo_group();
+        for entry in entries {
+            let doc = led_core::apply_op_to_doc(&self.doc, &entry.op);
+            self.doc = doc;
+            self.undo.push_remote_entry(entry.clone());
+            self.version = self.version + 1;
+            self.change_reason = ChangeReason::Edit;
+        }
     }
 
     // ── Undo flush ──
@@ -2150,5 +2174,186 @@ mod tests {
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].start_row, led_core::Row(0));
         assert_eq!(result[1].start_row, led_core::Row(2));
+    }
+
+    // ── Sync apply tests ──
+
+    fn doc_from(content: &str) -> Arc<dyn led_core::Doc> {
+        Arc::new(led_core::TextDoc::from_reader(std::io::Cursor::new(content.as_bytes())).unwrap())
+    }
+
+    /// Hash of the rope built from `content` (live/ephemeral hash).
+    fn rope_hash(content: &str) -> u64 {
+        doc_from(content).content_hash().0
+    }
+
+    fn insert_entry(offset: usize, text: &str) -> led_core::UndoEntry {
+        led_core::UndoEntry {
+            op: led_core::EditOp {
+                offset: led_core::CharOffset(offset),
+                old_text: String::new(),
+                new_text: text.to_string(),
+            },
+            cursor_before: led_core::CharOffset(offset),
+            cursor_after: led_core::CharOffset(offset + text.chars().count()),
+            direction: 1,
+            content_hash: None,
+        }
+    }
+
+    /// Buffer in a known sync state: materialized at `content`, on chain
+    /// `chain_id` with the matching anchor and a non-zero `last_seen_seq`.
+    fn synced_buf(content: &str, chain_id: &str, last_seen_seq: i64) -> BufferState {
+        let mut buf = make_buf(content);
+        let anchor = PersistedContentHash(buf.doc().content_hash().0);
+        buf.restore_session(0, Some(chain_id.to_string()), last_seen_seq, anchor, 0);
+        buf
+    }
+
+    #[test]
+    fn try_apply_sync_rejects_old_seq() {
+        let mut buf = synced_buf("hello", "chain-x", 5);
+        let anchor = buf.content_hash();
+        let before_doc_hash = buf.doc().content_hash().0;
+
+        // new_last_seen_seq <= current → refuse
+        let applied = buf.try_apply_sync("chain-x".to_string(), anchor, &[insert_entry(5, "!")], 5);
+        assert!(!applied);
+        // Buffer untouched
+        assert_eq!(buf.last_seen_seq(), 5);
+        assert_eq!(buf.doc().content_hash().0, before_doc_hash);
+        assert_eq!(buf.chain_id(), Some("chain-x"));
+    }
+
+    #[test]
+    fn try_apply_sync_rejects_anchor_mismatch() {
+        let mut buf = synced_buf("hello", "chain-x", 5);
+        let before_doc_hash = buf.doc().content_hash().0;
+        let bogus_anchor = PersistedContentHash(0xdead_beef);
+
+        let applied = buf.try_apply_sync(
+            "chain-x".to_string(),
+            bogus_anchor,
+            &[insert_entry(5, "!")],
+            6,
+        );
+        assert!(!applied);
+        // Buffer untouched
+        assert_eq!(buf.last_seen_seq(), 5);
+        assert_eq!(buf.doc().content_hash().0, before_doc_hash);
+    }
+
+    #[test]
+    fn try_apply_sync_succeeds_on_same_chain() {
+        let mut buf = synced_buf("hello", "chain-x", 5);
+        let anchor = buf.content_hash();
+
+        // Insert " world" at end (offset 5) → "hello world"
+        let applied = buf.try_apply_sync(
+            "chain-x".to_string(),
+            anchor,
+            &[insert_entry(5, " world")],
+            7,
+        );
+        assert!(applied);
+        assert_eq!(buf.doc().content_hash().0, rope_hash("hello world"));
+        assert_eq!(buf.chain_id(), Some("chain-x"));
+        assert_eq!(buf.last_seen_seq(), 7);
+        // Anchor (PersistedContentHash) unchanged — sync replay does not
+        // move it, so subsequent rounds can verify against it.
+        assert_eq!(buf.content_hash(), anchor);
+    }
+
+    #[test]
+    fn try_apply_sync_handles_chain_switch() {
+        // Buffer is on chain X. A new chain Y arrives with the SAME
+        // anchor (e.g. local saved+immediately edited; the new chain's
+        // anchor matches the disk state the remote already has).
+        let mut buf = synced_buf("hello", "chain-x", 5);
+        let anchor = buf.content_hash();
+
+        let applied = buf.try_apply_sync("chain-y".to_string(), anchor, &[insert_entry(5, "!")], 8);
+        assert!(applied);
+        assert_eq!(buf.chain_id(), Some("chain-y"));
+        assert_eq!(buf.doc().content_hash().0, rope_hash("hello!"));
+        assert_eq!(buf.last_seen_seq(), 8);
+    }
+
+    #[test]
+    fn apply_persisted_entries_skips_validation() {
+        // Used by session restore — no anchor check, no seq bookkeeping.
+        let mut buf = make_buf("hello");
+        let anchor_before = buf.content_hash();
+        let seq_before = buf.last_seen_seq();
+
+        buf.apply_persisted_entries(&[insert_entry(5, "!")]);
+
+        assert_eq!(buf.doc().content_hash().0, rope_hash("hello!"));
+        // No anchor or seq bookkeeping — those are caller's responsibility.
+        assert_eq!(buf.content_hash(), anchor_before);
+        assert_eq!(buf.last_seen_seq(), seq_before);
+    }
+
+    #[test]
+    fn reload_then_sync_succeeds() {
+        // Order A: docstore reload arrives BEFORE the queued sync entries.
+        // After reload, the buffer is at the new chain's anchor and the
+        // sync apply succeeds on the first try.
+        let mut buf = synced_buf("hello", "chain-x", 5);
+
+        // Local saved a new state to disk: "hello world".
+        let new_disk = doc_from("hello world");
+        let new_anchor = PersistedContentHash(new_disk.content_hash().0);
+        buf.reload_from_disk(new_disk);
+        assert_eq!(buf.content_hash(), new_anchor);
+
+        // Sync entries arrive: a new chain Y rooted at the new disk state,
+        // appending "!" at the end.
+        let applied = buf.try_apply_sync(
+            "chain-y".to_string(),
+            new_anchor,
+            &[insert_entry(11, "!")],
+            10,
+        );
+        assert!(applied);
+        assert_eq!(buf.doc().content_hash().0, rope_hash("hello world!"));
+        assert_eq!(buf.chain_id(), Some("chain-y"));
+        assert_eq!(buf.last_seen_seq(), 10);
+    }
+
+    #[test]
+    fn sync_before_reload_refuses_then_recovers() {
+        // Order B: sync entries arrive BEFORE the docstore reload. They
+        // were generated against the new chain's anchor, but the buffer
+        // is still at the old anchor — refuse. After reload moves the
+        // buffer to the new anchor, retrying the same sync apply succeeds.
+        let mut buf = synced_buf("hello", "chain-x", 5);
+        let stale_anchor = buf.content_hash();
+
+        // Local saved "hello world" — that hash is the new chain anchor.
+        let new_disk = doc_from("hello world");
+        let new_anchor = PersistedContentHash(new_disk.content_hash().0);
+
+        // Sync entries arrive first. Buffer is still at the old anchor;
+        // applying these would corrupt the rope, so we refuse.
+        let entries = vec![insert_entry(11, "!")];
+        let applied = buf.try_apply_sync("chain-y".to_string(), new_anchor, &entries, 10);
+        assert!(!applied);
+        // Buffer is unchanged.
+        assert_eq!(buf.doc().content_hash().0, rope_hash("hello"));
+        assert_eq!(buf.content_hash(), stale_anchor);
+        assert_eq!(buf.chain_id(), Some("chain-x"));
+        assert_eq!(buf.last_seen_seq(), 5);
+
+        // Now the docstore reload lands.
+        buf.reload_from_disk(new_disk);
+        assert_eq!(buf.content_hash(), new_anchor);
+
+        // Retry the same sync entries — now anchors match, apply succeeds.
+        let applied = buf.try_apply_sync("chain-y".to_string(), new_anchor, &entries, 10);
+        assert!(applied);
+        assert_eq!(buf.doc().content_hash().0, rope_hash("hello world!"));
+        assert_eq!(buf.chain_id(), Some("chain-y"));
+        assert_eq!(buf.last_seen_seq(), 10);
     }
 }

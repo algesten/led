@@ -81,14 +81,13 @@ pub enum WorkspaceIn {
 
 #[derive(Clone, Debug)]
 pub enum SyncResultKind {
-    ReplayEntries {
+    /// Apply a batch of remote entries. The buffer must validate
+    /// `chain_id` and `content_hash` against its own state before
+    /// applying — see `BufferState::try_apply_sync`. Covers both
+    /// same-chain extension and chain-switch cases.
+    SyncEntries {
         file_path: CanonPath,
-        entries: Vec<led_core::UndoEntry>,
-        new_last_seen_seq: i64,
-    },
-    ReloadAndReplay {
-        file_path: CanonPath,
-        new_chain_id: String,
+        chain_id: String,
         content_hash: PersistedContentHash,
         entries: Vec<led_core::UndoEntry>,
         new_last_seen_seq: i64,
@@ -342,16 +341,10 @@ pub fn driver(out: Stream<WorkspaceOut>, file_watcher: Arc<FileWatcher>) -> Stre
                                             .is_some_and(|c| c == &state.chain_id);
                                         if state.entries.is_empty() && same_chain {
                                             SyncResultKind::NoChange { file_path }
-                                        } else if same_chain {
-                                            SyncResultKind::ReplayEntries {
-                                                file_path,
-                                                entries: state.entries,
-                                                new_last_seen_seq: state.last_seq,
-                                            }
                                         } else {
-                                            SyncResultKind::ReloadAndReplay {
+                                            SyncResultKind::SyncEntries {
                                                 file_path,
-                                                new_chain_id: state.chain_id,
+                                                chain_id: state.chain_id,
                                                 content_hash: state.content_hash,
                                                 entries: state.entries,
                                                 new_last_seen_seq: state.last_seq,

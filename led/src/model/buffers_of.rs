@@ -3,7 +3,7 @@ use std::rc::Rc;
 use led_core::Alert;
 use led_core::rx::Stream;
 use led_docstore::DocStoreIn;
-use led_state::{AppState, BufferState, SaveState};
+use led_state::{AppState, SaveState};
 
 use super::Mut;
 
@@ -167,13 +167,4 @@ pub fn buffers_of(
             Err(a) => Some(Mut::alert(a)),
         })
         .stream()
-}
-
-/// Apply persisted undo entries to a buffer, restoring edit history.
-pub(super) fn apply_undo_entries(buf: &mut BufferState, entries: &[led_core::UndoEntry]) {
-    buf.close_undo_group();
-    for entry in entries {
-        let doc = led_core::apply_op_to_doc(buf.doc(), &entry.op);
-        buf.apply_remote_entry(doc, entry.clone());
-    }
 }

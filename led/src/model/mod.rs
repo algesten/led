@@ -537,7 +537,7 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
                     );
                     buf.set_scroll(led_core::Row(scroll.0), led_core::SubLine(scroll.1));
                     if !undo_entries.is_empty() {
-                        buffers_of::apply_undo_entries(buf, &undo_entries);
+                        buf.apply_persisted_entries(&undo_entries);
                     }
                     let content_hash = buf.content_hash();
                     buf.restore_session(
