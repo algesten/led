@@ -398,6 +398,7 @@ mod tests {
             cursor_before: CharOffset(0),
             cursor_after: CharOffset(text.chars().count()),
             direction: 1,
+            instance_id: led_core::instance_id(),
             content_hash: None,
         }
     }

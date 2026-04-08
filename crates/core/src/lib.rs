@@ -21,6 +21,7 @@ pub use versioned::Versioned;
 pub use watch::{FileWatcher, Registration, WatchEvent, WatchEventKind, WatchMode};
 
 use std::cell::Cell;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static CHANGE_SEQ: AtomicU64 = AtomicU64::new(1);
@@ -33,6 +34,30 @@ static SYNTAX_SEQ: AtomicU64 = AtomicU64::new(1);
 
 pub fn next_syntax_seq() -> SyntaxSeq {
     SyntaxSeq(SYNTAX_SEQ.fetch_add(1, Ordering::Relaxed))
+}
+
+/// Process-unique identifier used to tag undo entries with their
+/// originating instance. Generated lazily on first call from time + pid,
+/// then frozen for the lifetime of the process.
+///
+/// Two led instances editing the same file via SQLite sync each have
+/// their own id; this is how a buffer can tell whether the edits in
+/// its undo chain were typed locally in this process or arrived via
+/// sync from somewhere else.
+pub fn instance_id() -> u64 {
+    static INSTANCE_ID: OnceLock<u64> = OnceLock::new();
+    *INSTANCE_ID.get_or_init(|| {
+        use std::hash::{DefaultHasher, Hash, Hasher};
+        use std::time::SystemTime;
+        let mut h = DefaultHasher::new();
+        SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+            .hash(&mut h);
+        std::process::id().hash(&mut h);
+        h.finish()
+    })
 }
 
 thread_local! {

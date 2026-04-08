@@ -5,7 +5,6 @@ use std::sync::Arc;
 
 use led_core::Action::*;
 use led_core::{EditOp, Startup, UndoEntry, UserPath};
-use led_state::SaveState;
 
 use TestStep::{Do, QuitAndWait, WaitFor};
 use harness::{TestHarness, TestStep};
@@ -35,7 +34,7 @@ fn is_clean(s: &led_state::AppState) -> bool {
     s.active_tab
         .as_ref()
         .and_then(|path| s.buffers.get(path))
-        .map_or(false, |b| b.save_state() == SaveState::Clean)
+        .map_or(false, |b| !b.is_dirty() && !b.save_in_flight())
 }
 
 fn indent_done(s: &led_state::AppState) -> bool {
@@ -580,8 +579,8 @@ fn emacs_undo_undo_restores_original() {
 fn clean_after_open() {
     let t = TestHarness::new().with_file("hello\n").run(vec![]);
 
-    assert_eq!(buf(&t).save_state(), SaveState::Clean);
     assert!(!buf(&t).is_dirty());
+    assert!(!buf(&t).save_in_flight());
 }
 
 #[test]
@@ -590,8 +589,8 @@ fn modified_after_edit() {
         .with_file("hello\n")
         .run(actions(vec![InsertChar('x')]));
 
-    assert_eq!(buf(&t).save_state(), SaveState::Modified);
     assert!(buf(&t).is_dirty());
+    assert!(!buf(&t).save_in_flight());
 }
 
 #[test]
@@ -601,8 +600,7 @@ fn saving_after_save_action() {
         .with_file("hello\n")
         .run(actions(vec![InsertChar('x'), Save]));
 
-    // State should be Saving (the async save hasn't completed yet)
-    assert_eq!(buf(&t).save_state(), SaveState::Saving);
+    assert!(buf(&t).save_in_flight());
 }
 
 #[test]
@@ -613,8 +611,8 @@ fn clean_after_save_completes() {
         WaitFor(is_clean),
     ]);
 
-    assert_eq!(buf(&t).save_state(), SaveState::Clean);
     assert!(!buf(&t).is_dirty());
+    assert!(!buf(&t).save_in_flight());
 }
 
 #[test]
@@ -1682,7 +1680,7 @@ fn save_strips_trailing_whitespace() {
                 s.active_tab
                     .as_ref()
                     .and_then(|path| s.buffers.get(path))
-                    .is_some_and(|b| b.save_state() == SaveState::Clean)
+                    .is_some_and(|b| !b.is_dirty() && !b.save_in_flight())
             }),
         ]);
 
@@ -1698,7 +1696,7 @@ fn save_ensures_final_newline() {
             s.active_tab
                 .as_ref()
                 .and_then(|path| s.buffers.get(path))
-                .is_some_and(|b| b.save_state() == SaveState::Clean)
+                .is_some_and(|b| !b.is_dirty() && !b.save_in_flight())
         }),
     ]);
 
@@ -1714,7 +1712,7 @@ fn save_format_is_undoable() {
             s.active_tab
                 .as_ref()
                 .and_then(|path| s.buffers.get(path))
-                .is_some_and(|b| b.save_state() == SaveState::Clean)
+                .is_some_and(|b| !b.is_dirty() && !b.save_in_flight())
         }),
         Do(Undo),
     ]);
@@ -1762,7 +1760,7 @@ fn undo_cleared_after_save() {
             s.active_tab
                 .as_ref()
                 .and_then(|path| s.buffers.get(path))
-                .is_some_and(|b| b.save_state() == SaveState::Clean)
+                .is_some_and(|b| !b.is_dirty() && !b.save_in_flight())
         }),
         Do(Quit),
         WaitFor(|s| s.session.saved),
@@ -2144,6 +2142,7 @@ fn make_insert_entry(offset: usize, text: &str) -> UndoEntry {
         cursor_before: led_core::CharOffset(offset),
         cursor_after: led_core::CharOffset(offset + text.chars().count()),
         direction: 1,
+        instance_id: led_core::instance_id(),
         content_hash: None,
     }
 }
@@ -2368,7 +2367,7 @@ fn persisted_undo_len_preserved_after_save() {
             s.active_tab
                 .as_ref()
                 .and_then(|path| s.buffers.get(path))
-                .is_some_and(|b| b.save_state() == SaveState::Clean)
+                .is_some_and(|b| !b.is_dirty() && !b.save_in_flight())
         }),
     ]);
 
@@ -2447,7 +2446,7 @@ fn two_instance_sync_after_save() {
     // Step 4: B saves
     b.push(Save);
     b.wait_for(
-        |s| active_buf(s).is_some_and(|b| b.save_state() == SaveState::Clean),
+        |s| active_buf(s).is_some_and(|b| !b.is_dirty() && !b.save_in_flight()),
         WAIT,
         "B saved",
     );
@@ -2628,7 +2627,7 @@ fn two_instance_remote_save_clears_dirty() {
     // Step 4: B saves
     b.push(Save);
     b.wait_for(
-        |s| active_buf(s).is_some_and(|b| b.save_state() == SaveState::Clean && !b.is_dirty()),
+        |s| active_buf(s).is_some_and(|b| !b.is_dirty() && !b.save_in_flight() && !b.is_dirty()),
         WAIT,
         "B clean after save",
     );
@@ -4914,7 +4913,8 @@ fn lsp_format_on_save() {
                     .as_ref()
                     .and_then(|path| s.buffers.get(path))
                     .map_or(false, |b| {
-                        b.save_state() == led_state::SaveState::Clean
+                        !b.is_dirty()
+                            && !b.save_in_flight()
                             && line(&**b.doc(), 0).starts_with("fn main()")
                     })
             }),
@@ -4926,7 +4926,7 @@ fn lsp_format_on_save() {
         "expected formatted, got: {:?}",
         line(&**b.doc(), 0)
     );
-    assert_eq!(b.save_state(), led_state::SaveState::Clean);
+    assert!(!b.is_dirty() && !b.save_in_flight());
 }
 
 // ── Multi-file and directory CLI opening ──
@@ -5221,7 +5221,7 @@ fn file_search_replace_single_in_buffer() {
     let b = buf(&t);
     assert_eq!(line(&**b.doc(), 0), "xxx");
     assert_eq!(line(&**b.doc(), 2), "aaa");
-    assert_eq!(b.save_state(), SaveState::Modified);
+    assert!(b.is_dirty() && !b.save_in_flight());
 }
 
 #[test]

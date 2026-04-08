@@ -373,8 +373,7 @@ pub fn handle_action(state: &mut AppState, action: Action) -> bool {
         Action::Save => {
             if let Some(path) = state.active_tab.clone() {
                 if let Some(buf) = state.buf_mut(&path) {
-                    close_group_on_move(buf);
-                    buf.mark_saving();
+                    buf.begin_save();
                     buf.touch();
                 }
             }
@@ -414,8 +413,7 @@ pub fn handle_action(state: &mut AppState, action: Action) -> bool {
                 .collect();
             for path in &dirty_paths {
                 if let Some(buf) = state.buf_mut(path) {
-                    close_group_on_move(buf);
-                    buf.mark_saving();
+                    buf.begin_save();
                 }
             }
             if !dirty_paths.is_empty() {
@@ -426,8 +424,7 @@ pub fn handle_action(state: &mut AppState, action: Action) -> bool {
         Action::SaveNoFormat => {
             if let Some(path) = state.active_tab.clone() {
                 if let Some(buf) = state.buf_mut(&path) {
-                    close_group_on_move(buf);
-                    buf.mark_saving();
+                    buf.begin_save();
                     buf.touch();
                     buf.record_diag_save_point();
                 }

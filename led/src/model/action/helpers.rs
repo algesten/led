@@ -22,7 +22,6 @@ pub(super) fn with_buf(state: &mut AppState, f: impl FnOnce(&mut BufferState, &D
             let (sr, ssl) = mov::adjust_scroll(buf, &dims);
             buf.set_scroll(Row(sr), SubLine(ssl));
             buf.update_matching_bracket();
-            buf.mark_modified_if_dirty();
             buf.touch();
         }
         mov::shift_annotations(state, &path, edit_row, old_lines, old_ver);

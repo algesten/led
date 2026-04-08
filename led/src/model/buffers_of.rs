@@ -3,7 +3,7 @@ use std::rc::Rc;
 use led_core::Alert;
 use led_core::rx::Stream;
 use led_docstore::DocStoreIn;
-use led_state::{AppState, SaveState};
+use led_state::AppState;
 
 use super::Mut;
 
@@ -91,7 +91,7 @@ pub fn buffers_of(
             }
             Ok(DocStoreIn::Saved { path, doc }) => {
                 let buf = state.buffers.get(&path)?;
-                let undo_clear_path = if buf.save_state() == SaveState::Saving {
+                let undo_clear_path = if buf.save_in_flight() {
                     Some(path.clone())
                 } else {
                     None
@@ -110,7 +110,7 @@ pub fn buffers_of(
                 let active_path = state.active_tab.as_ref()?;
                 let buf = state.buffers.get(active_path)?;
                 let old_path = buf.path().cloned()?;
-                let undo_clear_path = if buf.save_state() == SaveState::Saving {
+                let undo_clear_path = if buf.save_in_flight() {
                     Some(old_path.clone())
                 } else {
                     None
@@ -139,7 +139,7 @@ pub fn buffers_of(
                         "ExternalChange: content_hash unchanged ({:#x}), signaling save",
                         incoming_hash.0
                     );
-                    if buf.is_dirty() && buf.save_state() == SaveState::Clean {
+                    if buf.is_dirty() && !buf.has_local_edits() {
                         let mut buf = (**buf).clone();
                         buf.mark_externally_saved();
                         buf.record_diag_save_point();
@@ -147,8 +147,8 @@ pub fn buffers_of(
                     }
                     return None;
                 }
-                if buf.is_dirty() {
-                    log::trace!("ExternalChange: buffer is dirty, skipping");
+                if buf.has_local_edits() {
+                    log::trace!("ExternalChange: buffer has local edits, skipping");
                     return None;
                 }
                 log::trace!(

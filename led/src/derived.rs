@@ -241,11 +241,7 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
         .map(|s| {
             s.buffers
                 .values()
-                .filter(|b| {
-                    b.is_materialized()
-                        && b.save_state() == led_state::SaveState::Saving
-                        && b.path().is_some()
-                })
+                .filter(|b| b.is_materialized() && b.save_in_flight() && b.path().is_some())
                 .map(|b| DocStoreOut::Save {
                     path: b.path().cloned().unwrap(),
                     doc: b.doc().clone(),

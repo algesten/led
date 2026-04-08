@@ -140,8 +140,8 @@ impl Instance {
                             .and_then(|path| s.buffers.get(path))
                             .map(|b| {
                                 format!(
-                                "chain_id={:?} dirty={} save={:?} persisted={} seq={} change_seq={} lines={}",
-                                b.chain_id(), b.is_dirty(), b.save_state(), b.persisted_undo_len(),
+                                "chain_id={:?} dirty={} in_flight={} persisted={} seq={} change_seq={} lines={}",
+                                b.chain_id(), b.is_dirty(), b.save_in_flight(), b.persisted_undo_len(),
                                 b.last_seen_seq(), b.change_seq().0, b.doc().line_count()
                             )
                             });

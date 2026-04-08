@@ -30,6 +30,12 @@ pub struct UndoEntry {
     pub cursor_after: CharOffset,
     /// 1 = forward edit, 0 = continuation (same group), -1 = undo inverse.
     pub direction: i32,
+    /// `crate::instance_id()` of the process that created this entry.
+    /// Preserved across sync replication so a receiver can tell whether
+    /// a given entry was typed locally or arrived from another instance.
+    /// Defaults to 0 for entries persisted before this field existed.
+    #[serde(default)]
+    pub instance_id: u64,
     /// Set only on save-point marker entries (for diagnostic replay).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content_hash: Option<PersistedContentHash>,
@@ -135,6 +141,7 @@ impl UndoHistory {
             return;
         }
 
+        let id = crate::instance_id();
         let mut cursor = pending.cursor_before;
         for (i, op) in pending.ops.into_iter().enumerate() {
             let direction = if i == 0 { 1 } else { 0 };
@@ -144,6 +151,7 @@ impl UndoHistory {
                 cursor_after,
                 op,
                 direction,
+                instance_id: id,
                 content_hash: None,
             });
             cursor = cursor_after;
@@ -165,6 +173,13 @@ impl UndoHistory {
     /// Whether there are pending ops not yet flushed.
     pub fn has_pending(&self) -> bool {
         self.pending.as_ref().is_some_and(|p| !p.ops.is_empty())
+    }
+
+    /// Whether any committed entry was created by the given instance id.
+    /// Used to detect "this chain contains edits from this process" without
+    /// relying on a separate dirty-source flag.
+    pub fn has_entry_from(&self, id: u64) -> bool {
+        self.entries.iter().any(|e| e.instance_id == id)
     }
 
     pub fn undo_cursor(&self) -> Option<usize> {
@@ -238,6 +253,9 @@ impl UndoHistory {
 
     /// Insert a save-point marker with the given content_hash.
     /// The marker is a no-op entry skipped by undo/redo.
+    ///
+    /// Markers leave `instance_id` at 0: they don't originate from any
+    /// user action, so they must not count toward `has_local_edits`.
     pub fn insert_save_point(&mut self, content_hash: PersistedContentHash) {
         self.flush_pending();
         self.entries.push(UndoEntry {
@@ -249,6 +267,7 @@ impl UndoHistory {
             cursor_before: CharOffset(0),
             cursor_after: CharOffset(0),
             direction: 0,
+            instance_id: 0,
             content_hash: Some(content_hash),
         });
     }

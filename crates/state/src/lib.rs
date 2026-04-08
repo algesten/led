@@ -293,14 +293,6 @@ pub enum EditKind {
     Delete,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum SaveState {
-    #[default]
-    Clean,
-    Modified,
-    Saving,
-}
-
 /// Why a buffer's content last changed.
 ///
 /// Set by buffer operations themselves. Derived streams branch on this
@@ -417,7 +409,7 @@ pub struct BufferState {
 
     // Edit tracking
     last_edit_kind: Option<EditKind>,
-    save_state: SaveState,
+    save_in_flight: bool,
 
     // Undo persistence
     persisted_undo_len: usize,
@@ -478,7 +470,7 @@ impl BufferState {
             scroll_sub_line: Cell::new(SubLine(0)),
             mark: None,
             last_edit_kind: None,
-            save_state: SaveState::Clean,
+            save_in_flight: false,
             persisted_undo_len: 0,
             chain_id: None,
             last_seen_seq: 0,
@@ -526,6 +518,15 @@ impl BufferState {
     /// Whether the buffer has unsaved changes.
     pub fn is_dirty(&self) -> bool {
         self.undo.has_pending() || self.undo.distance_from_save() != 0
+    }
+
+    /// Whether the chain contains any edits originating from this process.
+    /// Pending edits count (they're local-only — sync entries never go
+    /// through pending). Committed entries are checked by their
+    /// `instance_id`. Used to decide whether `reload_from_disk` would
+    /// clobber unsaved local typing.
+    pub fn has_local_edits(&self) -> bool {
+        self.undo.has_pending() || self.undo.has_entry_from(led_core::instance_id())
     }
 
     /// Access the undo history (read-only, for persistence).
@@ -770,7 +771,7 @@ impl BufferState {
     /// Preserves annotations (content unchanged).
     pub fn save_completed(&mut self, doc: Arc<dyn Doc>) {
         self.doc = doc;
-        self.save_state = SaveState::Clean;
+        self.save_in_flight = false;
         self.undo.flush_pending();
         self.undo.reset_distance_from_save();
         self.persisted_undo_len = self.undo.entry_count();
@@ -823,7 +824,7 @@ impl BufferState {
         self.persisted_undo_len = self.undo.entry_count();
         self.change_seq = led_core::next_change_seq();
         self.change_reason = ChangeReason::ExternalFileChange;
-        if self.is_dirty() && self.save_state == SaveState::Clean {
+        if self.is_dirty() && !self.has_local_edits() {
             self.undo.reset_distance_from_save();
         }
     }
@@ -978,6 +979,7 @@ impl BufferState {
                     cursor_before: inv_cb,
                     cursor_after: inv_ca,
                     direction: -direction,
+                    instance_id: led_core::instance_id(),
                     content_hash: None,
                 },
                 direction,
@@ -1101,11 +1103,18 @@ impl BufferState {
 
     // ── Save state ──
 
-    pub fn save_state(&self) -> SaveState {
-        self.save_state
+    /// Whether a save initiated by this instance is currently in flight
+    /// (request sent to the docstore, no confirmation yet).
+    pub fn save_in_flight(&self) -> bool {
+        self.save_in_flight
     }
-    pub fn mark_saving(&mut self) {
-        self.save_state = SaveState::Saving;
+
+    /// Begin a save: close any pending undo group and mark the save as
+    /// in flight. The matched `save_completed` (called when the docstore
+    /// confirms) clears the in-flight flag and resets dirty state.
+    pub fn begin_save(&mut self) {
+        self.close_group_on_move();
+        self.save_in_flight = true;
     }
 
     // ── Edit kind tracking ──
@@ -1398,8 +1407,6 @@ impl BufferState {
         if cur_ver == old_ver {
             return;
         }
-        // Mark modified on any doc change, regardless of line count delta.
-        self.mark_modified_if_dirty();
         // Already synced for this doc version (e.g. edit() + with_buf both call us).
         if cur_ver == self.annotations_synced_ver {
             return;
@@ -1433,15 +1440,7 @@ impl BufferState {
         self.syntax_highlights = Rc::new(shifted);
         // Shift diagnostics + clear git line statuses
         self.status.shift_lines(*edit_row, delta);
-        // Mark modified if dirty
-        self.mark_modified_if_dirty();
         self.annotations_synced_ver = cur_ver;
-    }
-
-    pub fn mark_modified_if_dirty(&mut self) {
-        if self.is_dirty() && self.save_state == SaveState::Clean {
-            self.save_state = SaveState::Modified;
-        }
     }
 }
 
@@ -2197,6 +2196,7 @@ mod tests {
             cursor_before: led_core::CharOffset(offset),
             cursor_after: led_core::CharOffset(offset + text.chars().count()),
             direction: 1,
+            instance_id: led_core::instance_id(),
             content_hash: None,
         }
     }
@@ -2355,5 +2355,99 @@ mod tests {
         assert_eq!(buf.doc().content_hash().0, rope_hash("hello world!"));
         assert_eq!(buf.chain_id(), Some("chain-y"));
         assert_eq!(buf.last_seen_seq(), 10);
+    }
+
+    // ── has_local_edits tests ──
+
+    /// An UndoEntry that looks like it came from another instance.
+    fn remote_entry(offset: usize, text: &str) -> led_core::UndoEntry {
+        // Use a fixed non-zero id distinct from this process's id.
+        // led_core::instance_id() is generated lazily per process, so we
+        // can pick any value that doesn't collide. 1 is fine — random
+        // ids hash time + pid and won't be 1.
+        led_core::UndoEntry {
+            op: led_core::EditOp {
+                offset: led_core::CharOffset(offset),
+                old_text: String::new(),
+                new_text: text.to_string(),
+            },
+            cursor_before: led_core::CharOffset(offset),
+            cursor_after: led_core::CharOffset(offset + text.chars().count()),
+            direction: 1,
+            instance_id: 1,
+            content_hash: None,
+        }
+    }
+
+    #[test]
+    fn has_local_edits_false_after_sync_only() {
+        // Buffer that received only sync entries (instance_id != ours)
+        // must report has_local_edits == false, even though it's dirty.
+        let mut buf = synced_buf("hello", "chain-x", 5);
+        let anchor = buf.content_hash();
+
+        let applied = buf.try_apply_sync(
+            "chain-x".to_string(),
+            anchor,
+            &[remote_entry(5, " world")],
+            6,
+        );
+        assert!(applied);
+        // Content moved, distance_from_save accumulated
+        assert_eq!(buf.doc().content_hash().0, rope_hash("hello world"));
+        assert!(buf.is_dirty());
+        // ...but no local edits — reload from disk would be safe.
+        assert!(!buf.has_local_edits());
+    }
+
+    #[test]
+    fn has_local_edits_true_after_local_typing() {
+        let mut buf = make_buf("hello");
+        assert!(!buf.has_local_edits());
+
+        buf.insert_text(led_core::CharOffset(5), " world");
+        // The pending group is local-by-definition.
+        assert!(buf.has_local_edits());
+
+        // Once flushed to entries (close_undo_group), the entries carry
+        // this process's instance_id and the predicate still holds.
+        buf.close_undo_group();
+        assert!(buf.has_local_edits());
+    }
+
+    #[test]
+    fn has_local_edits_true_when_local_mixed_with_sync() {
+        // Local typing followed by remote sync entries: still local.
+        let mut buf = synced_buf("hello", "chain-x", 5);
+        buf.insert_text(led_core::CharOffset(5), "!");
+        buf.close_undo_group();
+        assert!(buf.has_local_edits());
+
+        // A remote entry on top doesn't erase the local fact.
+        let anchor = buf.content_hash();
+        let applied = buf.try_apply_sync("chain-x".to_string(), anchor, &[remote_entry(6, "?")], 6);
+        assert!(applied);
+        assert!(buf.has_local_edits());
+    }
+
+    #[test]
+    fn has_local_edits_cleared_by_save_completed() {
+        let mut buf = make_buf("hello");
+        buf.insert_text(led_core::CharOffset(5), "!");
+        buf.close_undo_group();
+        assert!(buf.has_local_edits());
+
+        // save_completed flushes pending and resets persistence — but
+        // the committed entries (with our instance_id) are still in the
+        // chain. has_local_edits stays true until the chain is rebuilt.
+        // The dirty/save status is the right axis here, not has_local_edits.
+        let new_doc = doc_from("hello!");
+        buf.save_completed(new_doc);
+        assert!(!buf.is_dirty());
+        assert!(!buf.save_in_flight());
+        // Note: has_local_edits scans the chain and the chain still has
+        // the local entry — that's fine because is_dirty is the gate
+        // for "would reload clobber" and it's now false.
+        assert!(buf.has_local_edits());
     }
 }

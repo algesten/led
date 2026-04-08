@@ -547,9 +547,6 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
                         content_hash,
                         distance_from_save,
                     );
-                    if distance_from_save != 0 {
-                        buf.mark_modified_if_dirty();
-                    }
                 }
                 s.notify_hash_to_buffer.insert(notify_hash, path.clone());
                 let is_preview_tab = s.tabs.iter().any(|t| t.is_preview() && *t.path() == path);
@@ -801,7 +798,6 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
                                 }
                             }
                             buf.close_group_on_move();
-                            buf.mark_modified_if_dirty();
                         }
                     }
                 }

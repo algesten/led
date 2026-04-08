@@ -578,8 +578,7 @@ fn handle_enter_save_as(state: &mut AppState) {
     // Save the active buffer to the new path
     if let Some(active_path) = state.active_tab.clone() {
         if let Some(buf) = state.buf_mut(&active_path) {
-            super::action::close_group_on_move(buf);
-            buf.mark_saving();
+            buf.begin_save();
         }
         state.pending_save_as.set(Some(path));
     }
