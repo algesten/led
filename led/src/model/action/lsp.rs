@@ -11,6 +11,9 @@ pub(super) fn handle_completion_action(state: &mut AppState, action: &Action) ->
             let lsp = state.lsp_mut();
             if let Some(ref mut comp) = lsp.completion {
                 comp.selected = comp.selected.saturating_sub(1);
+                if comp.selected < comp.scroll_offset {
+                    comp.scroll_offset = comp.selected;
+                }
             }
             true
         }
@@ -18,6 +21,10 @@ pub(super) fn handle_completion_action(state: &mut AppState, action: &Action) ->
             let lsp = state.lsp_mut();
             if let Some(ref mut comp) = lsp.completion {
                 comp.selected = (comp.selected + 1).min(comp.items.len().saturating_sub(1));
+                let max_visible = 10;
+                if comp.selected >= comp.scroll_offset + max_visible {
+                    comp.scroll_offset = comp.selected + 1 - max_visible;
+                }
             }
             true
         }
