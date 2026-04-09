@@ -141,25 +141,29 @@ pub(super) fn promote_preview_active(state: &mut AppState) {
 }
 
 pub(crate) fn evict_one_buffer(state: &mut AppState) {
-    let preview_paths: std::collections::HashSet<_> = state
+    // Only real (non-preview) tabs are eligible. Constraining the victim
+    // to a tab path is critical: dematerializing a buffer whose tab still
+    // exists would just be re-materialized on the next tick by the
+    // `tabs_needing_open` derived stream, causing an open/close loop.
+    let evictable_paths: std::collections::HashSet<_> = state
         .tabs
         .iter()
-        .filter(|t| t.is_preview())
+        .filter(|t| !t.is_preview())
         .map(|t| t.path())
         .collect();
     let victim = state
         .buffers
         .values()
         .filter(|b| b.is_materialized())
-        .filter(|b| !b.path().map_or(false, |p| preview_paths.contains(p)))
-        .filter(|b| b.path() != state.active_tab.as_ref())
         .filter(|b| !b.is_dirty())
+        .filter(|b| b.path() != state.active_tab.as_ref())
+        .filter(|b| b.path().map_or(false, |p| evictable_paths.contains(p)))
         .min_by_key(|b| b.last_used())
         .and_then(|b| b.path().cloned());
     if let Some(path) = victim {
-        if let Some(buf) = state.buf_mut(&path) {
-            buf.dematerialize();
-        }
-        state.notify_hash_to_buffer.retain(|_, v| *v != path);
+        // Remove the tab. The implicit dematerialization fold at the end
+        // of the reducer dematerializes the orphaned buffer and cleans
+        // up notify_hash_to_buffer.
+        state.tabs.retain(|t| t.is_preview() || *t.path() != path);
     }
 }
