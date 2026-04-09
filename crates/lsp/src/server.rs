@@ -53,15 +53,22 @@ impl LanguageServer {
         let stdin = child.stdin.take().unwrap();
         let stdout = child.stdout.take().unwrap();
 
-        // Log stderr in background
+        // Log stderr in background; forward error lines as synthetic notifications.
         let stderr = child.stderr.take().unwrap();
         let server_name = config.command.to_string();
+        let stderr_notif_tx = notification_tx.clone();
         tokio::spawn(async move {
             use tokio::io::AsyncBufReadExt;
             let reader = tokio::io::BufReader::new(stderr);
             let mut lines = reader.lines();
             while let Ok(Some(line)) = lines.next_line().await {
                 log::warn!("LSP stderr [{}]: {}", server_name, line);
+                if line.starts_with("error") {
+                    let _ = stderr_notif_tx.send(LspNotification {
+                        method: "$/stderr".to_string(),
+                        params: Value::String(format!("{}: {}", server_name, line)),
+                    });
+                }
             }
         });
 
