@@ -100,7 +100,7 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
         .map(|_| Mut::GitChanged)
         .stream();
 
-    let session_s = session_of::session_of(&drivers.workspace_in);
+    let session_s = session_of::session_of(&drivers.workspace_in, &state);
 
     // UndoFlushed needs buffer lookup → sample_combine with state
     let undo_flushed_s = drivers
@@ -195,7 +195,7 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
         s.startup
             .arg_paths
             .iter()
-            .map(|p| Mut::EnsureTab(p.clone()))
+            .map(|p| Mut::EnsureTab(p.clone(), true))
             .collect::<Vec<_>>()
     });
 
@@ -497,13 +497,15 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
             Mut::SetFocus(focus) => {
                 s.focus = focus;
             }
-            Mut::EnsureTab(path) => {
+            Mut::EnsureTab(path, create_if_missing) => {
                 if !s.tabs.iter().any(|t| *t.path() == path) {
                     s.tabs.push_back(led_state::Tab::new(path.clone()));
                 }
                 if !s.buffers.contains_key(&path) {
                     let mut buf = BufferState::new(path.clone());
-                    buf.set_create_if_missing(true);
+                    if create_if_missing {
+                        buf.set_create_if_missing(true);
+                    }
                     s.buffers_mut().insert(path, Rc::new(buf));
                 }
             }
@@ -680,61 +682,43 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
                     entry.state = led_state::ResumeState::Failed;
                 }
             }
-            Mut::SessionRestored {
-                active_tab_order,
-                show_side_panel,
-                positions,
-                pending_opens,
-                browser_selected,
-                browser_scroll_offset,
-                browser_expanded_dirs,
-                jump_entries,
-                jump_index,
-                pending_lists,
-            } => {
-                s.session.active_tab_order = active_tab_order;
-                s.show_side_panel = show_side_panel;
+            Mut::SetActiveTabOrder(order) => {
+                s.session.active_tab_order = order;
+            }
+            Mut::SetShowSidePanel(show) => {
+                s.show_side_panel = show;
                 if let Some(ref mut dims) = s.dims {
-                    dims.show_side_panel = show_side_panel;
+                    dims.show_side_panel = show;
                 }
+            }
+            Mut::SetSessionPositions(positions) => {
                 s.session.positions = positions;
+            }
+            Mut::SetBrowserState {
+                selected,
+                scroll_offset,
+                expanded_dirs,
+            } => {
                 let b = s.browser_mut();
-                b.selected = browser_selected;
-                b.scroll_offset = browser_scroll_offset;
-                b.expanded_dirs = browser_expanded_dirs;
-                s.jump.entries = jump_entries;
-                s.jump.index = jump_index;
-                if !pending_opens.is_empty() {
-                    s.session.resume = pending_opens
-                        .iter()
-                        .map(|p| led_state::ResumeEntry {
-                            path: p.clone(),
-                            state: led_state::ResumeState::Pending,
-                        })
-                        .collect();
-                    for path in &pending_opens {
-                        if !s.tabs.iter().any(|t| *t.path() == *path) {
-                            s.tabs.push_back(led_state::Tab::new(path.clone()));
-                        }
-                        if !s.buffers.contains_key(path) {
-                            let buf = BufferState::new(path.clone());
-                            s.buffers_mut().insert(path.clone(), Rc::new(buf));
-                        }
-                    }
-                    log::info!("phase: {:?} → Resuming (SessionRestored)", s.phase);
-                    s.phase = Phase::Resuming;
-                } else {
-                    log::info!(
-                        "phase: {:?} → Running (SessionRestored, no resume)",
-                        s.phase
-                    );
-                    s.phase = Phase::Running;
-                    ensure_startup_arg_buffers(&mut s);
-                    resolve_focus(&mut s);
-                }
-                if !pending_lists.is_empty() {
-                    s.pending_lists.set(pending_lists);
-                }
+                b.selected = selected;
+                b.scroll_offset = scroll_offset;
+                b.expanded_dirs = expanded_dirs;
+            }
+            Mut::SetJumpState { entries, index } => {
+                s.jump.entries = entries;
+                s.jump.index = index;
+            }
+            Mut::SetPendingLists(dirs) => {
+                s.pending_lists.set(dirs);
+            }
+            Mut::SetResumeEntries(paths) => {
+                s.session.resume = paths
+                    .iter()
+                    .map(|p| led_state::ResumeEntry {
+                        path: p.clone(),
+                        state: led_state::ResumeState::Pending,
+                    })
+                    .collect();
             }
             Mut::SessionSaved => {
                 s.session.saved = true;
@@ -954,51 +938,13 @@ fn resolve_resume_active_tab(s: &AppState) -> Option<CanonPath> {
 }
 
 /// Pure: compute focus slot when entering Running.
-fn resolve_focus_slot(s: &AppState) -> PanelSlot {
+pub(super) fn resolve_focus_slot(s: &AppState) -> PanelSlot {
     if s.startup.arg_dir.is_some() {
         PanelSlot::Side
     } else if !s.buffers.is_empty() || !s.startup.arg_paths.is_empty() {
         PanelSlot::Main
     } else {
         PanelSlot::Side
-    }
-}
-
-/// Resolve focus when entering Running (mutable version for SessionRestored).
-/// Called exactly once per Init/Resuming → Running transition.
-fn resolve_focus(s: &mut AppState) {
-    if let Some(ref dir) = s.startup.arg_dir {
-        let dir = dir.clone();
-        let new_dirs = s.browser_mut().reveal(&dir);
-        if !new_dirs.is_empty() {
-            s.pending_lists.set(new_dirs);
-        }
-        action::browser_scroll_to_selected(s);
-        s.focus = PanelSlot::Side;
-        return;
-    }
-
-    if !s.buffers.is_empty() {
-        s.focus = PanelSlot::Main;
-    } else {
-        s.focus = PanelSlot::Side;
-    }
-}
-
-/// Create unmaterialized buffer entries for startup arg files.
-fn ensure_startup_arg_buffers(s: &mut AppState) {
-    if s.startup.arg_paths.is_empty() {
-        return;
-    }
-    for path in s.startup.arg_paths.clone().iter() {
-        if !s.tabs.iter().any(|t| *t.path() == *path) {
-            s.tabs.push_back(led_state::Tab::new(path.clone()));
-        }
-        if !s.buffers.contains_key(path) {
-            let mut buf = BufferState::new(path.clone());
-            buf.set_create_if_missing(true);
-            s.buffers_mut().insert(path.clone(), Rc::new(buf));
-        }
     }
 }
 
@@ -1213,8 +1159,22 @@ enum Mut {
     SetPhase(Phase),
     SetActiveTab(CanonPath),
     SetFocus(PanelSlot),
-    EnsureTab(CanonPath),
+    EnsureTab(CanonPath, bool),
     BrowserReveal(CanonPath),
+    SetActiveTabOrder(Option<usize>),
+    SetShowSidePanel(bool),
+    SetSessionPositions(HashMap<CanonPath, led_workspace::SessionBuffer>),
+    SetBrowserState {
+        selected: usize,
+        scroll_offset: usize,
+        expanded_dirs: HashSet<CanonPath>,
+    },
+    SetJumpState {
+        entries: std::collections::VecDeque<led_state::JumpPosition>,
+        index: usize,
+    },
+    SetPendingLists(Vec<CanonPath>),
+    SetResumeEntries(Vec<CanonPath>),
     JumpRecord(led_state::JumpPosition),
     RequestOpen(CanonPath),
     LspFormatDone,
@@ -1288,18 +1248,6 @@ enum Mut {
     },
     SessionOpenFailed {
         path: CanonPath,
-    },
-    SessionRestored {
-        active_tab_order: Option<usize>,
-        show_side_panel: bool,
-        positions: HashMap<CanonPath, led_workspace::SessionBuffer>,
-        pending_opens: Vec<CanonPath>,
-        browser_selected: usize,
-        browser_scroll_offset: usize,
-        browser_expanded_dirs: HashSet<CanonPath>,
-        jump_entries: std::collections::VecDeque<led_state::JumpPosition>,
-        jump_index: usize,
-        pending_lists: Vec<CanonPath>,
     },
     SessionSaved,
     WatchersReady,
@@ -1382,7 +1330,7 @@ impl Mut {
             Mut::SetPhase(_) => "SetPhase",
             Mut::SetActiveTab(_) => "SetActiveTab",
             Mut::SetFocus(_) => "SetFocus",
-            Mut::EnsureTab(_) => "EnsureTab",
+            Mut::EnsureTab(..) => "EnsureTab",
             Mut::BrowserReveal(_) => "BrowserReveal",
             Mut::Alert { .. } => "Alert",
             Mut::Warn { .. } => "Warn",
@@ -1405,7 +1353,13 @@ impl Mut {
             Mut::Resize(_, _) => "Resize",
             Mut::NotifyEvent { .. } => "NotifyEvent",
             Mut::SessionOpenFailed { .. } => "SessionOpenFailed",
-            Mut::SessionRestored { .. } => "SessionRestored",
+            Mut::SetActiveTabOrder(_) => "SetActiveTabOrder",
+            Mut::SetShowSidePanel(_) => "SetShowSidePanel",
+            Mut::SetSessionPositions(_) => "SetSessionPositions",
+            Mut::SetBrowserState { .. } => "SetBrowserState",
+            Mut::SetJumpState { .. } => "SetJumpState",
+            Mut::SetPendingLists(_) => "SetPendingLists",
+            Mut::SetResumeEntries(_) => "SetResumeEntries",
             Mut::SessionSaved => "SessionSaved",
             Mut::WatchersReady => "WatchersReady",
             Mut::Resumed => "Resumed",
