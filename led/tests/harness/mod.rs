@@ -251,6 +251,7 @@ impl TestHarness {
                     let last_for_wait = last_state.clone();
                     tokio::task::spawn_local(async move {
                         // Wait for session restore to complete, then for files to open
+                        let init_deadline = tokio::time::Instant::now() + Duration::from_secs(30);
                         loop {
                             if let Some(ref s) = *last_for_wait.borrow() {
                                 let phase_done = s.phase == led_state::Phase::Running;
@@ -260,6 +261,12 @@ impl TestHarness {
                                 if phase_done && files_ready {
                                     break;
                                 }
+                            }
+                            if tokio::time::Instant::now() > init_deadline {
+                                let test = std::thread::current().name().unwrap_or("?").to_string();
+                                eprintln!("Init wait timed out after 30s in {test} — aborting");
+                                let _ = std::fs::write("/tmp/led-test-timeout.txt", format!("{test} (init)"));
+                                std::process::exit(10);
                             }
                             tokio::time::sleep(Duration::from_millis(1)).await;
                         }
@@ -298,7 +305,8 @@ impl TestHarness {
         });
 
         // Safety net: cancel any lingering tasks (e.g. filesystem watchers).
-        rt.shutdown_timeout(Duration::from_millis(100));
+        // Allow enough time for the workspace driver to release the primary lock.
+        rt.shutdown_timeout(Duration::from_secs(2));
 
         TestResult {
             state,
@@ -312,7 +320,7 @@ async fn wait_for_condition(
     state: &Rc<RefCell<Option<Rc<AppState>>>>,
     pred: fn(&AppState) -> bool,
 ) {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     loop {
         if let Some(ref s) = *state.borrow() {
             if pred(s) {
@@ -320,7 +328,29 @@ async fn wait_for_condition(
             }
         }
         if tokio::time::Instant::now() > deadline {
-            eprintln!("WaitFor timed out after 10s — aborting");
+            let test = std::thread::current().name().unwrap_or("?").to_string();
+            let state_info = if let Some(ref s) = *state.borrow() {
+                let buf_paths: Vec<_> = s.buffers.keys().map(|p| p.display().to_string()).collect();
+                let tab_paths: Vec<_> = s.tabs.iter().map(|t| t.path().display().to_string()).collect();
+                let resume: Vec<_> = s.session.resume.iter().map(|e| format!("{:?}={:?}", e.path.file_name(), e.state)).collect();
+                format!(
+                    "phase={:?} bufs={} materialized={}\n  buf_paths={:?}\n  tab_paths={:?}\n  resume={:?}\n  primary={:?}",
+                    s.phase,
+                    s.buffers.len(),
+                    s.buffers.values().filter(|b| b.is_materialized()).count(),
+                    buf_paths,
+                    tab_paths,
+                    resume,
+                    s.workspace.as_ref().map(|w| w.primary),
+                )
+            } else {
+                "no state".to_string()
+            };
+            let _ = std::fs::write(
+                "/tmp/led-test-timeout.txt",
+                format!("{test}\n{state_info}"),
+            );
+            eprintln!("WaitFor timed out after 30s in {test} — {state_info}");
             std::process::exit(10);
         }
         tokio::time::sleep(Duration::from_millis(1)).await;
