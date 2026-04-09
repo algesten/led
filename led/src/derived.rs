@@ -699,7 +699,7 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
                 s.buffers
                     .values()
                     // 2 ^ 20 ~= 1 million files before this overflows
-                    .map(|b| b.content_hash().0 & 0x0000_0fff_ffff_ff + b.saved_version().0)
+                    .map(|b| (b.content_hash().0 & 0x0000_0fff_ffff_ff) + b.saved_version().0)
                     .sum::<u64>(),
             )
         })
