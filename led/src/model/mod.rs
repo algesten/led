@@ -171,11 +171,9 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
     keyboard_actions_s.forward(&raw_actions);
     drivers.actions_in.forward(&raw_actions);
 
-    // Legacy path: unmigrated actions go through Mut::Action → handle_action
-    let legacy_action_s = raw_actions
-        .filter(|a| !is_migrated(a))
-        .map(Mut::Action)
-        .stream();
+    // ALL actions go through handle_action for modal interception + pre-match guards.
+    // Migrated actions hit the catch-all in handle_action's main match (no-op there).
+    let all_actions_s = raw_actions.map(Mut::Action).stream();
     let buffers_s = buffers_of(&drivers.docstore_in, &state);
     let process_s = process_of(&state);
     let lsp_s = lsp_of::lsp_of(&drivers.lsp_in, &state);
@@ -219,41 +217,28 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
         .map(Mut::BrowserReveal)
         .stream();
 
-    // ── Cross-cutting action guards (apply to ALL actions, migrated or not) ──
-
-    // Macro recording: capture migrated actions into the recording buffer
-    let macro_record_s = raw_actions
-        .filter(|a| {
-            !matches!(
-                a,
-                Action::KbdMacroStart | Action::KbdMacroEnd | Action::KbdMacroExecute
-            )
-        })
-        .filter(|a| is_migrated(a))
-        .sample_combine(&state)
-        .filter(|(_, s)| s.kbd_macro.recording)
-        .map(|(a, _)| Mut::KbdMacroRecord(a))
-        .stream();
-
-    // Confirm kill dismissal: clear confirm_kill on any migrated action
-    let confirm_kill_dismiss_s = raw_actions
-        .filter(|a| is_migrated(a))
-        .sample_combine(&state)
-        .filter(|(_, s)| s.confirm_kill)
-        .map(|_| Mut::DismissConfirmKill)
-        .stream();
-
     // ── Action streams (migrated from handle_action) ──
+    //
+    // All actions still flow through Mut::Action → handle_action for:
+    // - Macro recording (pre-match guard)
+    // - Confirm kill dismissal (pre-match guard)
+    // - Modal interception (completion, code actions, rename, file search, etc.)
+    //
+    // handle_action's main match uses catch-all for migrated actions.
+    // These streams produce the actual Muts. They filter out blocking overlays
+    // (code_actions, rename) which absorb all actions.
 
     let toggle_side_panel_s = raw_actions
         .filter(|a| matches!(a, Action::ToggleSidePanel))
         .sample_combine(&state)
+        .filter(|(_, s)| !has_blocking_overlay(&s))
         .map(|(_, s)| Mut::SetShowSidePanel(!s.show_side_panel))
         .stream();
 
     let toggle_focus_s = raw_actions
         .filter(|a| matches!(a, Action::ToggleFocus))
         .sample_combine(&state)
+        .filter(|(_, s)| !has_blocking_overlay(&s))
         .map(|(_, s)| {
             Mut::SetFocus(match s.focus {
                 PanelSlot::Main => PanelSlot::Side,
@@ -311,6 +296,7 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
     let line_start_s = raw_actions
         .filter(|a| matches!(a, Action::LineStart))
         .sample_combine(&state)
+        .filter(|(_, s)| !has_blocking_overlay(&s))
         .filter(|(_, s)| s.focus == PanelSlot::Main)
         .filter_map(|(_, s)| Some((s.dims?, s.active_tab.clone()?, s)))
         .filter_map(|(dims, path, s)| {
@@ -337,6 +323,7 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
     let line_end_s = raw_actions
         .filter(|a| matches!(a, Action::LineEnd))
         .sample_combine(&state)
+        .filter(|(_, s)| !has_blocking_overlay(&s))
         .filter(|(_, s)| s.focus == PanelSlot::Main)
         .filter_map(|(_, s)| Some((s.dims?, s.active_tab.clone()?, s)))
         .filter_map(|(dims, path, s)| {
@@ -363,6 +350,7 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
     let match_bracket_s = raw_actions
         .filter(|a| matches!(a, Action::MatchBracket))
         .sample_combine(&state)
+        .filter(|(_, s)| !has_blocking_overlay(&s))
         .filter_map(|(_, s)| Some((s.dims?, s.active_tab.clone()?, s)))
         .filter_map(|(dims, path, s)| {
             let buf = (**s.buffers.get(&path)?).clone();
@@ -385,6 +373,7 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
     let undo_s = raw_actions
         .filter(|a| matches!(a, Action::Undo))
         .sample_combine(&state)
+        .filter(|(_, s)| !has_blocking_overlay(&s))
         .filter_map(|(_, s)| Some((s.dims?, s.active_tab.clone()?, s)))
         .filter_map(|(dims, path, s)| {
             let buf = (**s.buffers.get(&path)?).clone();
@@ -413,6 +402,7 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
     let redo_s = raw_actions
         .filter(|a| matches!(a, Action::Redo))
         .sample_combine(&state)
+        .filter(|(_, s)| !has_blocking_overlay(&s))
         .filter_map(|(_, s)| Some((s.dims?, s.active_tab.clone()?, s)))
         .filter_map(|(dims, path, s)| {
             let buf = (**s.buffers.get(&path)?).clone();
@@ -663,9 +653,7 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
     sync_s.forward(&muts);
     keymap_s.forward(&muts);
     actions_muts_s.forward(&muts);
-    legacy_action_s.forward(&muts);
-    macro_record_s.forward(&muts);
-    confirm_kill_dismiss_s.forward(&muts);
+    all_actions_s.forward(&muts);
     toggle_side_panel_s.forward(&muts);
     toggle_focus_s.forward(&muts);
     quit_s.forward(&muts);
@@ -1074,13 +1062,6 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
             Mut::PendingYank => {
                 s.kill_ring.pending_yank.set(());
             }
-            Mut::KbdMacroRecord(a) => {
-                s.kbd_macro.current.push(a);
-            }
-            Mut::DismissConfirmKill => {
-                s.confirm_kill = false;
-                s.alerts.info = None;
-            }
             Mut::LspEdits { edits } => {
                 for fe in edits {
                     if let Some(buf) = s.buf_mut(&fe.path) {
@@ -1195,26 +1176,10 @@ fn resolve_resume_active_tab(s: &AppState) -> Option<CanonPath> {
 }
 
 /// Pure: compute focus slot when entering Running.
-/// Actions that have been migrated to dedicated stream chains.
-/// These are filtered out of the legacy Mut::Action path.
-fn is_migrated(action: &Action) -> bool {
-    matches!(
-        action,
-        Action::ToggleSidePanel
-            | Action::ToggleFocus
-            | Action::Quit
-            | Action::Suspend
-            | Action::LspGotoDefinition
-            | Action::LspFormat
-            | Action::LspCodeAction
-            | Action::Yank
-            | Action::Resize(..)
-            | Action::LineStart
-            | Action::LineEnd
-            | Action::MatchBracket
-            | Action::Undo
-            | Action::Redo
-    )
+/// True when a blocking overlay is active that absorbs all actions.
+/// Migrated action streams must not fire in this state.
+fn has_blocking_overlay(s: &AppState) -> bool {
+    s.lsp.code_actions.is_some() || (s.lsp.rename.is_some() && s.focus == PanelSlot::Overlay)
 }
 
 pub(super) fn resolve_focus_slot(s: &AppState) -> PanelSlot {
@@ -1456,8 +1421,6 @@ enum Mut {
     SetResumeEntries(Vec<CanonPath>),
     LspRequestPending(Option<led_state::LspRequest>),
     PendingYank,
-    KbdMacroRecord(Action),
-    DismissConfirmKill,
     JumpRecord(led_state::JumpPosition),
     RequestOpen(CanonPath),
     LspFormatDone,
@@ -1661,8 +1624,6 @@ impl Mut {
             Mut::SetTabPendingCursor { .. } => "SetTabPendingCursor",
             Mut::LspRequestPending(_) => "LspRequestPending",
             Mut::PendingYank => "PendingYank",
-            Mut::KbdMacroRecord(_) => "KbdMacroRecord",
-            Mut::DismissConfirmKill => "DismissConfirmKill",
             Mut::LspEdits { .. } => "LspEdits",
             Mut::LspFormatDone => "LspFormatDone",
             Mut::LspCompletion { .. } => "LspCompletion",
