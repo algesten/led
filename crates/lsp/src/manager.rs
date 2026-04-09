@@ -1453,7 +1453,11 @@ impl LspManager {
             }
             "$/stderr" => {
                 if let Some(msg) = notif.params.as_str() {
-                    let _ = result_tx.send(LspIn::Error { message: msg.to_string() }).await;
+                    let _ = result_tx
+                        .send(LspIn::Error {
+                            message: msg.to_string(),
+                        })
+                        .await;
                 }
             }
             _ => {

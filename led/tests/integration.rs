@@ -5620,3 +5620,144 @@ fn next_issue_opens_unopened_file_at_change_position() {
         b.cursor_row().0
     );
 }
+
+/// Run `git init`, optionally stage and commit a baseline, in `workspace`.
+fn git_init_with_commit(workspace: &Path, stage: &[&str]) {
+    std::process::Command::new("git")
+        .args(["init"])
+        .current_dir(workspace)
+        .output()
+        .expect("git init");
+    for path in stage {
+        std::process::Command::new("git")
+            .args(["add", path])
+            .current_dir(workspace)
+            .output()
+            .expect("git add");
+    }
+    let mut args = vec![
+        "-c",
+        "user.name=Test",
+        "-c",
+        "user.email=test@test.com",
+        "commit",
+        "-m",
+        "init",
+    ];
+    if stage.is_empty() {
+        args.push("--allow-empty");
+    }
+    std::process::Command::new("git")
+        .args(&args)
+        .current_dir(workspace)
+        .output()
+        .expect("git commit");
+}
+
+/// Stage `path` and create a commit in `workspace`.
+fn git_add_commit(workspace: &Path, path: &str, message: &str) {
+    std::process::Command::new("git")
+        .args(["add", path])
+        .current_dir(workspace)
+        .output()
+        .expect("git add");
+    std::process::Command::new("git")
+        .args([
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@test.com",
+            "commit",
+            "-m",
+            message,
+        ])
+        .current_dir(workspace)
+        .output()
+        .expect("git commit");
+}
+
+#[test]
+fn git_status_clears_after_save_then_external_commit() {
+    // User-reported repro: "committing files in the terminal and the files
+    // are not marked accordingly with the new statuses". Edit + save in
+    // the editor, then commit externally — file_statuses must clear.
+    let dir = tempfile::TempDir::new().expect("tmpdir");
+    let root = dir.keep();
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let file_path = workspace.join("test.txt");
+    std::fs::write(&file_path, "line1\nline2\nline3\n").unwrap();
+    git_init_with_commit(&workspace, &["test.txt"]);
+
+    let t = TestHarness::with_dir(root)
+        .with_watchers()
+        .with_arg(file_path)
+        .run(vec![
+            WaitFor(|s| {
+                s.workspace.is_some() && s.git.branch.is_some() && s.git.file_statuses.is_empty()
+            }),
+            Do(InsertChar('X')),
+            Do(Save),
+            WaitFor(|s| !s.git.file_statuses.is_empty()),
+            TestStep::RunFn(Box::new(|dirs| {
+                git_add_commit(&dirs.workspace, "test.txt", "edit");
+            })),
+            WaitFor(|s| s.git.file_statuses.is_empty()),
+        ]);
+
+    assert!(
+        t.state.git.file_statuses.is_empty(),
+        "expected file_statuses to be empty after external commit, got {:?}",
+        t.state.git.file_statuses
+    );
+}
+
+#[test]
+fn git_line_statuses_clear_after_external_commit() {
+    // The git driver only emits LineStatuses for files in file_statuses,
+    // so without explicit clearing, gutter markers persist after a file
+    // transitions from dirty to clean externally.
+    let dir = tempfile::TempDir::new().expect("tmpdir");
+    let root = dir.keep();
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let file_path = workspace.join("test.txt");
+    std::fs::write(&file_path, "line1\nline2\nline3\n").unwrap();
+    git_init_with_commit(&workspace, &["test.txt"]);
+
+    let t = TestHarness::with_dir(root)
+        .with_watchers()
+        .with_arg(file_path)
+        .run(vec![
+            WaitFor(|s| {
+                s.workspace.is_some() && s.git.branch.is_some() && s.git.file_statuses.is_empty()
+            }),
+            Do(InsertChar('X')),
+            Do(Save),
+            WaitFor(|s| !s.git.file_statuses.is_empty()),
+            WaitFor(|s| {
+                s.active_tab
+                    .as_ref()
+                    .and_then(|p| s.buffers.get(p))
+                    .map_or(false, |b| !b.status().git_line_statuses().is_empty())
+            }),
+            TestStep::RunFn(Box::new(|dirs| {
+                git_add_commit(&dirs.workspace, "test.txt", "edit");
+            })),
+            WaitFor(|s| s.git.file_statuses.is_empty()),
+            WaitFor(|s| {
+                s.active_tab
+                    .as_ref()
+                    .and_then(|p| s.buffers.get(p))
+                    .map_or(false, |b| b.status().git_line_statuses().is_empty())
+            }),
+        ]);
+
+    let active = t.state.active_tab.as_ref().unwrap();
+    let b = t.state.buffers.get(active).unwrap();
+    assert!(
+        b.status().git_line_statuses().is_empty(),
+        "expected line statuses to clear after external commit, got {:?}",
+        b.status().git_line_statuses()
+    );
+}

@@ -384,7 +384,7 @@ mod tests {
         use ratatui::backend::TestBackend;
         use ratatui::text::{Line, Span};
 
-        use crate::display::{LayoutInfo, OverlayContent, TabEntry, TabsInputs};
+        use crate::display::{self, LayoutInfo, OverlayContent, TabEntry, TabsInputs};
         use crate::render;
         use led_state::Dimensions;
 

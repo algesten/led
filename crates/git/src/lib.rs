@@ -36,6 +36,10 @@ pub fn driver(out: Stream<GitOut>) -> Stream<GitIn> {
 
     // Async task: handle git operations via spawn_blocking
     tokio::spawn(async move {
+        // Paths that had non-empty line statuses in the previous scan, so
+        // the next scan can emit empty LineStatuses to clear gutter markers
+        // for files that are no longer dirty.
+        let mut tracked: HashSet<CanonPath> = HashSet::new();
         while let Some(cmd) = cmd_rx.recv().await {
             match cmd {
                 GitOut::ScanFiles { root } => {
@@ -59,12 +63,24 @@ pub fn driver(out: Stream<GitOut>) -> Stream<GitIn> {
                             })
                             .await
                             .ok();
+                        let mut next_tracked: HashSet<CanonPath> = HashSet::new();
                         for (path, statuses) in line_statuses {
+                            next_tracked.insert(path.clone());
                             result_tx
                                 .send(GitIn::LineStatuses { path, statuses })
                                 .await
                                 .ok();
                         }
+                        for path in tracked.difference(&next_tracked) {
+                            result_tx
+                                .send(GitIn::LineStatuses {
+                                    path: path.clone(),
+                                    statuses: Vec::new(),
+                                })
+                                .await
+                                .ok();
+                        }
+                        tracked = next_tracked;
                     }
                 }
             }

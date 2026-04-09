@@ -265,7 +265,10 @@ impl TestHarness {
                             if tokio::time::Instant::now() > init_deadline {
                                 let test = std::thread::current().name().unwrap_or("?").to_string();
                                 eprintln!("Init wait timed out after 30s in {test} — aborting");
-                                let _ = std::fs::write("/tmp/led-test-timeout.txt", format!("{test} (init)"));
+                                let _ = std::fs::write(
+                                    "/tmp/led-test-timeout.txt",
+                                    format!("{test} (init)"),
+                                );
                                 std::process::exit(10);
                             }
                             tokio::time::sleep(Duration::from_millis(1)).await;
@@ -331,8 +334,17 @@ async fn wait_for_condition(
             let test = std::thread::current().name().unwrap_or("?").to_string();
             let state_info = if let Some(ref s) = *state.borrow() {
                 let buf_paths: Vec<_> = s.buffers.keys().map(|p| p.display().to_string()).collect();
-                let tab_paths: Vec<_> = s.tabs.iter().map(|t| t.path().display().to_string()).collect();
-                let resume: Vec<_> = s.session.resume.iter().map(|e| format!("{:?}={:?}", e.path.file_name(), e.state)).collect();
+                let tab_paths: Vec<_> = s
+                    .tabs
+                    .iter()
+                    .map(|t| t.path().display().to_string())
+                    .collect();
+                let resume: Vec<_> = s
+                    .session
+                    .resume
+                    .iter()
+                    .map(|e| format!("{:?}={:?}", e.path.file_name(), e.state))
+                    .collect();
                 format!(
                     "phase={:?} bufs={} materialized={}\n  buf_paths={:?}\n  tab_paths={:?}\n  resume={:?}\n  primary={:?}",
                     s.phase,
@@ -346,10 +358,7 @@ async fn wait_for_condition(
             } else {
                 "no state".to_string()
             };
-            let _ = std::fs::write(
-                "/tmp/led-test-timeout.txt",
-                format!("{test}\n{state_info}"),
-            );
+            let _ = std::fs::write("/tmp/led-test-timeout.txt", format!("{test}\n{state_info}"));
             eprintln!("WaitFor timed out after 30s in {test} — {state_info}");
             std::process::exit(10);
         }

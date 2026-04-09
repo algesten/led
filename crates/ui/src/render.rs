@@ -199,7 +199,11 @@ fn render_overlay(overlay: &OverlayContent, frame: &mut Frame, area: Rect) {
                 }
             }
 
-            let content_w = raw.iter().map(|(t, _)| t.chars().count()).max().unwrap_or(1);
+            let content_w = raw
+                .iter()
+                .map(|(t, _)| t.chars().count())
+                .max()
+                .unwrap_or(1);
             let width = (content_w + 2).min(area.width as usize);
             let height = raw.len().min(area.height as usize / 2).max(1);
             let raw = &raw[..height];
@@ -222,7 +226,9 @@ fn render_overlay(overlay: &OverlayContent, frame: &mut Frame, area: Rect) {
                 .iter()
                 .map(|(text, fg)| {
                     let inner: String = text.chars().take(width.saturating_sub(2)).collect();
-                    let pad = width.saturating_sub(2).saturating_sub(inner.chars().count());
+                    let pad = width
+                        .saturating_sub(2)
+                        .saturating_sub(inner.chars().count());
                     Line::from(Span::styled(
                         format!(" {inner}{:pad$} ", ""),
                         Style::default().bg(Color::DarkGray).fg(*fg),
@@ -275,7 +281,10 @@ fn render_status_bar(
     area: Rect,
 ) {
     let style = if status.is_warn {
-        Style::default().bg(Color::Red).fg(Color::White).add_modifier(Modifier::BOLD)
+        Style::default()
+            .bg(Color::Red)
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD)
     } else {
         layout.status_style
     };
