@@ -155,7 +155,7 @@ pub fn driver(state: Stream<Rc<AppState>>) -> Stream<UiIn> {
         move |opt: Option<&(
             Rc<Vec<Line<'static>>>,
             Option<(u16, u16)>,
-            Rc<String>,
+            Rc<display::StatusContent>,
             Rc<display::TabsInputs>,
             display::LayoutInfo,
             Rc<Vec<Line<'static>>>,

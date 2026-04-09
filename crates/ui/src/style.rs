@@ -422,7 +422,10 @@ mod tests {
             gutter_width: 2,
         };
 
-        let status = " test.rs              L1:C1 ";
+        let status = display::StatusContent {
+            text: " test.rs              L1:C1 ".to_string(),
+            is_warn: false,
+        };
 
         let backend = TestBackend::new(40, 10);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
@@ -433,7 +436,7 @@ mod tests {
                     &layout,
                     &display_lines,
                     Some((2, 0)),
-                    status,
+                    &status,
                     &tabs,
                     &[],
                     &OverlayContent::None,

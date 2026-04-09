@@ -89,9 +89,9 @@ pub fn lsp_of(lsp_in: &Stream<LspIn>, state: &Stream<Rc<AppState>>) -> Stream<Mu
     let error_s = lsp_in
         .filter(|ev| matches!(ev, LspIn::Error { .. }))
         .map(|ev| match ev {
-            LspIn::Error { message } => Mut::Alert {
-                info: None,
-                warn: Some(format!("LSP: {}", message)),
+            LspIn::Error { message } => Mut::Warn {
+                key: "lsp".to_string(),
+                message: format!("LSP: {}", message),
             },
             _ => unreachable!(),
         })

@@ -45,7 +45,7 @@ pub fn handle_action(state: &mut AppState, action: Action) -> bool {
     // Handle confirmation prompt for dirty buffer kill
     if state.confirm_kill {
         state.confirm_kill = false;
-        state.alerts.warn = None;
+        state.alerts.info = None;
         if matches!(action, Action::InsertChar('y' | 'Y')) {
             tabs::force_kill_buffer(state);
             return true;
@@ -342,7 +342,7 @@ pub fn handle_action(state: &mut AppState, action: Action) -> bool {
                 state.kill_ring.set(killed);
             }
             if no_region {
-                state.alerts.warn = Some("No region".into());
+                state.alerts.info = Some("No region".into());
             }
         }
         Action::Yank => {
@@ -545,15 +545,15 @@ pub fn handle_action(state: &mut AppState, action: Action) -> bool {
             state.alerts.info = Some("Defining kbd macro...".into());
         }
         Action::KbdMacroEnd => {
-            state.alerts.warn = Some("Not defining kbd macro".into());
+            state.alerts.info = Some("Not defining kbd macro".into());
         }
         Action::KbdMacroExecute => {
             if state.kbd_macro.playback_depth >= 100 {
-                state.alerts.warn = Some("Keyboard macro recursion limit".into());
+                state.alerts.info = Some("Keyboard macro recursion limit".into());
                 return false;
             }
             let Some(actions) = state.kbd_macro.last.clone() else {
-                state.alerts.warn = Some("No kbd macro defined".into());
+                state.alerts.info = Some("No kbd macro defined".into());
                 return false;
             };
             let count = state.kbd_macro.execute_count.take().unwrap_or(1);

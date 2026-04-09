@@ -454,9 +454,11 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
                 s.kbd_macro.execute_count = Some(n);
             }
             Mut::EvictOneBuffer => action::evict_one_buffer(&mut s),
-            Mut::Alert { info, warn } => {
+            Mut::Alert { info } => {
                 s.alerts.info = info;
-                s.alerts.warn = warn;
+            }
+            Mut::Warn { key, message } => {
+                s.alerts.set_warn(key, message);
             }
             Mut::ResumeComplete => {
                 log::info!("phase: {:?} → Running (ResumeComplete)", s.phase);
@@ -1122,7 +1124,10 @@ enum Mut {
     KbdMacroSetCount(usize),
     Alert {
         info: Option<String>,
-        warn: Option<String>,
+    },
+    Warn {
+        key: String,
+        message: String,
     },
     ResumeComplete,
     BufferOpen {
@@ -1268,6 +1273,7 @@ impl Mut {
             Mut::ActivateBuffer(_) => "ActivateBuffer",
             Mut::Action(_) => "Action",
             Mut::Alert { .. } => "Alert",
+            Mut::Warn { .. } => "Warn",
 
             Mut::ResumeComplete => "ResumeComplete",
             Mut::BufferOpen { .. } => "BufferOpen",
@@ -1315,14 +1321,8 @@ impl Mut {
 
     fn alert(a: Alert) -> Self {
         match a {
-            Alert::Info(v) => Mut::Alert {
-                info: Some(v),
-                warn: None,
-            },
-            Alert::Warn(v) => Mut::Alert {
-                info: None,
-                warn: Some(v),
-            },
+            Alert::Info(v) => Mut::Alert { info: Some(v) },
+            Alert::Warn(v) => Mut::Alert { info: Some(v) },
         }
     }
 }
