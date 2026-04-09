@@ -219,6 +219,30 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
         .map(Mut::BrowserReveal)
         .stream();
 
+    // ── Cross-cutting action guards (apply to ALL actions, migrated or not) ──
+
+    // Macro recording: capture migrated actions into the recording buffer
+    let macro_record_s = raw_actions
+        .filter(|a| {
+            !matches!(
+                a,
+                Action::KbdMacroStart | Action::KbdMacroEnd | Action::KbdMacroExecute
+            )
+        })
+        .filter(|a| is_migrated(a))
+        .sample_combine(&state)
+        .filter(|(_, s)| s.kbd_macro.recording)
+        .map(|(a, _)| Mut::KbdMacroRecord(a))
+        .stream();
+
+    // Confirm kill dismissal: clear confirm_kill on any migrated action
+    let confirm_kill_dismiss_s = raw_actions
+        .filter(|a| is_migrated(a))
+        .sample_combine(&state)
+        .filter(|(_, s)| s.confirm_kill)
+        .map(|_| Mut::DismissConfirmKill)
+        .stream();
+
     // ── Action streams (migrated from handle_action) ──
 
     let toggle_side_panel_s = raw_actions
@@ -497,6 +521,8 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
     keymap_s.forward(&muts);
     actions_muts_s.forward(&muts);
     legacy_action_s.forward(&muts);
+    macro_record_s.forward(&muts);
+    confirm_kill_dismiss_s.forward(&muts);
     toggle_side_panel_s.forward(&muts);
     toggle_focus_s.forward(&muts);
     quit_s.forward(&muts);
@@ -899,6 +925,13 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
             Mut::PendingYank => {
                 s.kill_ring.pending_yank.set(());
             }
+            Mut::KbdMacroRecord(a) => {
+                s.kbd_macro.current.push(a);
+            }
+            Mut::DismissConfirmKill => {
+                s.confirm_kill = false;
+                s.alerts.info = None;
+            }
             Mut::LspEdits { edits } => {
                 for fe in edits {
                     if let Some(buf) = s.buf_mut(&fe.path) {
@@ -1268,6 +1301,8 @@ enum Mut {
     SetResumeEntries(Vec<CanonPath>),
     LspRequestPending(Option<led_state::LspRequest>),
     PendingYank,
+    KbdMacroRecord(Action),
+    DismissConfirmKill,
     JumpRecord(led_state::JumpPosition),
     RequestOpen(CanonPath),
     LspFormatDone,
@@ -1471,6 +1506,8 @@ impl Mut {
             Mut::SetTabPendingCursor { .. } => "SetTabPendingCursor",
             Mut::LspRequestPending(_) => "LspRequestPending",
             Mut::PendingYank => "PendingYank",
+            Mut::KbdMacroRecord(_) => "KbdMacroRecord",
+            Mut::DismissConfirmKill => "DismissConfirmKill",
             Mut::LspEdits { .. } => "LspEdits",
             Mut::LspFormatDone => "LspFormatDone",
             Mut::LspCompletion { .. } => "LspCompletion",
