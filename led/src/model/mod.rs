@@ -609,6 +609,156 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
         .map(|_| Mut::SaveAllRequest)
         .stream();
 
+    // ── Jump list ──
+
+    let jump_back_parent_s = raw_actions
+        .filter(|a| matches!(a, Action::JumpBack))
+        .sample_combine(&state)
+        .filter(|(_, s)| !has_blocking_overlay(&s))
+        .filter(|(_, s)| s.jump.index > 0)
+        .stream();
+
+    // Save current position when jumping back from present
+    let jump_back_save_s = jump_back_parent_s
+        .filter(|(_, s)| s.jump.index == s.jump.entries.len())
+        .filter_map(|(_, s)| {
+            let active = s.active_tab.as_ref()?;
+            let buf = s.buffers.get(active)?;
+            let p = buf.path()?;
+            Some(Mut::JumpRecord(led_state::JumpPosition {
+                path: p.clone(),
+                row: buf.cursor_row(),
+                col: buf.cursor_col(),
+                scroll_offset: buf.scroll_row(),
+            }))
+        })
+        .stream();
+
+    let jump_back_index_s = jump_back_parent_s
+        .map(|(_, s)| Mut::SetJumpIndex(s.jump.index - 1))
+        .stream();
+
+    // Navigate to target position (existing buffer → BufferUpdate, or open new)
+    let jump_back_nav_existing_s = jump_back_parent_s
+        .filter_map(|(_, s)| {
+            let pos = s.jump.entries.get(s.jump.index - 1)?;
+            let buf = s.buffers.get(&pos.path)?;
+            if !buf.is_materialized() {
+                return None;
+            }
+            let buf = (**buf).clone();
+            let r = led_core::Row((*pos.row).min(buf.doc().line_count().saturating_sub(1)));
+            buf.set_cursor(r, pos.col, pos.col);
+            buf.set_scroll(pos.scroll_offset, buf.scroll_sub_line());
+            Some((pos.path.clone(), buf))
+        })
+        .map(|(path, buf)| Mut::BufferUpdate(path, buf))
+        .stream();
+
+    let jump_back_activate_s = jump_back_parent_s
+        .filter_map(|(_, s)| s.jump.entries.get(s.jump.index - 1).cloned())
+        .map(|pos| Mut::ActivateBuffer(pos.path))
+        .stream();
+
+    let jump_back_open_s = jump_back_parent_s
+        .filter_map(|(_, s)| {
+            let pos = s.jump.entries.get(s.jump.index - 1)?;
+            if s.buffers
+                .get(&pos.path)
+                .is_some_and(|b| b.is_materialized())
+            {
+                return None;
+            }
+            Some(pos.clone())
+        })
+        .map(|pos| Mut::RequestOpen(pos.path))
+        .stream();
+
+    let jump_back_cursor_s = jump_back_parent_s
+        .filter_map(|(_, s)| {
+            let pos = s.jump.entries.get(s.jump.index - 1)?;
+            if s.buffers
+                .get(&pos.path)
+                .is_some_and(|b| b.is_materialized())
+            {
+                return None;
+            }
+            Some(pos.clone())
+        })
+        .map(|pos| Mut::SetTabPendingCursor {
+            path: pos.path,
+            row: pos.row,
+            col: pos.col,
+            scroll_row: pos.scroll_offset,
+        })
+        .stream();
+
+    // JumpForward — same pattern, simpler (no save-current-position)
+    let jump_fwd_parent_s = raw_actions
+        .filter(|a| matches!(a, Action::JumpForward))
+        .sample_combine(&state)
+        .filter(|(_, s)| !has_blocking_overlay(&s))
+        .filter(|(_, s)| s.jump.index + 1 < s.jump.entries.len())
+        .stream();
+
+    let jump_fwd_index_s = jump_fwd_parent_s
+        .map(|(_, s)| Mut::SetJumpIndex(s.jump.index + 1))
+        .stream();
+
+    let jump_fwd_nav_existing_s = jump_fwd_parent_s
+        .filter_map(|(_, s)| {
+            let pos = s.jump.entries.get(s.jump.index + 1)?;
+            let buf = s.buffers.get(&pos.path)?;
+            if !buf.is_materialized() {
+                return None;
+            }
+            let buf = (**buf).clone();
+            let r = led_core::Row((*pos.row).min(buf.doc().line_count().saturating_sub(1)));
+            buf.set_cursor(r, pos.col, pos.col);
+            buf.set_scroll(pos.scroll_offset, buf.scroll_sub_line());
+            Some((pos.path.clone(), buf))
+        })
+        .map(|(path, buf)| Mut::BufferUpdate(path, buf))
+        .stream();
+
+    let jump_fwd_activate_s = jump_fwd_parent_s
+        .filter_map(|(_, s)| s.jump.entries.get(s.jump.index + 1).cloned())
+        .map(|pos| Mut::ActivateBuffer(pos.path))
+        .stream();
+
+    let jump_fwd_open_s = jump_fwd_parent_s
+        .filter_map(|(_, s)| {
+            let pos = s.jump.entries.get(s.jump.index + 1)?;
+            if s.buffers
+                .get(&pos.path)
+                .is_some_and(|b| b.is_materialized())
+            {
+                return None;
+            }
+            Some(pos.clone())
+        })
+        .map(|pos| Mut::RequestOpen(pos.path))
+        .stream();
+
+    let jump_fwd_cursor_s = jump_fwd_parent_s
+        .filter_map(|(_, s)| {
+            let pos = s.jump.entries.get(s.jump.index + 1)?;
+            if s.buffers
+                .get(&pos.path)
+                .is_some_and(|b| b.is_materialized())
+            {
+                return None;
+            }
+            Some(pos.clone())
+        })
+        .map(|pos| Mut::SetTabPendingCursor {
+            path: pos.path,
+            row: pos.row,
+            col: pos.col,
+            scroll_row: pos.scroll_offset,
+        })
+        .stream();
+
     // ── 2. Build up muts from driver input and derived streams ──
 
     let muts: Stream<Mut> = drivers
@@ -865,6 +1015,17 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
     save_no_format_request_s.forward(&muts);
     save_all_bufs_s.forward(&muts);
     save_all_request_s.forward(&muts);
+    jump_back_save_s.forward(&muts);
+    jump_back_index_s.forward(&muts);
+    jump_back_nav_existing_s.forward(&muts);
+    jump_back_activate_s.forward(&muts);
+    jump_back_open_s.forward(&muts);
+    jump_back_cursor_s.forward(&muts);
+    jump_fwd_index_s.forward(&muts);
+    jump_fwd_nav_existing_s.forward(&muts);
+    jump_fwd_activate_s.forward(&muts);
+    jump_fwd_open_s.forward(&muts);
+    jump_fwd_cursor_s.forward(&muts);
     buffers_s.forward(&muts);
     process_s.forward(&muts);
     timers_s.forward(&muts);
@@ -1268,6 +1429,9 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
             }
             Mut::SaveAllRequest => {
                 s.save_all_request.set(());
+            }
+            Mut::SetJumpIndex(index) => {
+                s.jump.index = index;
             }
             Mut::ToggleInlayHints(enabled) => {
                 s.lsp_mut().inlay_hints_enabled = enabled;
@@ -1680,6 +1844,7 @@ enum Mut {
     SetPendingSaveAfterFormat,
     SaveRequest,
     SaveAllRequest,
+    SetJumpIndex(usize),
     JumpRecord(led_state::JumpPosition),
     RequestOpen(CanonPath),
     LspFormatDone,
@@ -1887,6 +2052,7 @@ impl Mut {
             Mut::SetPendingSaveAfterFormat => "SetPendingSaveAfterFormat",
             Mut::SaveRequest => "SaveRequest",
             Mut::SaveAllRequest => "SaveAllRequest",
+            Mut::SetJumpIndex(_) => "SetJumpIndex",
             Mut::LspEdits { .. } => "LspEdits",
             Mut::LspFormatDone => "LspFormatDone",
             Mut::LspCompletion { .. } => "LspCompletion",

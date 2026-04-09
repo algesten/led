@@ -9,7 +9,7 @@ mod tabs;
 use led_core::{Action, CharOffset, Col, EditOp, PanelSlot, Row};
 use led_state::{AppState, EditKind, LspRequest};
 
-use super::{edit, file_search, find_file, jump, mov, search};
+use super::{edit, file_search, find_file, mov, search};
 use helpers::{is_editing_action, maybe_close_group, should_record, with_buf};
 use preview::promote_preview_active;
 
@@ -300,10 +300,6 @@ pub fn handle_action(state: &mut AppState, action: Action) -> bool {
         Action::InBufferSearch => with_buf(state, |buf, _dims| {
             search::start_search(buf);
         }),
-
-        // ── Jump list ──
-        Action::JumpBack => jump::jump_back(state),
-        Action::JumpForward => jump::jump_forward(state),
 
         // ── Find file / Save as ──
         Action::FindFile => find_file::activate(state),
