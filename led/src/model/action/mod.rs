@@ -6,8 +6,6 @@ mod lsp;
 mod preview;
 mod tabs;
 
-use std::rc::Rc;
-
 use led_core::{Action, CharOffset, Col, EditOp, PanelSlot, Row};
 use led_state::{AppState, EditKind, LspRequest};
 
@@ -359,8 +357,6 @@ pub fn handle_action(state: &mut AppState, action: Action) -> bool {
         }
 
         // ── Tabs ──
-        Action::NextTab => tabs::cycle_tab(state, 1),
-        Action::PrevTab => tabs::cycle_tab(state, -1),
         Action::KillBuffer => tabs::kill_buffer(state),
 
         // ── Search ──
@@ -426,15 +422,6 @@ pub fn handle_action(state: &mut AppState, action: Action) -> bool {
         }
         Action::PrevIssue => {
             lsp::navigate_issue(state, false);
-        }
-        Action::LspToggleInlayHints => {
-            let lsp = state.lsp_mut();
-            lsp.inlay_hints_enabled = !lsp.inlay_hints_enabled;
-            if !lsp.inlay_hints_enabled {
-                for buf in state.buffers_mut().values_mut() {
-                    Rc::make_mut(buf).clear_inlay_hints();
-                }
-            }
         }
 
         // ── Macros ──

@@ -475,6 +475,31 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
         })
         .stream();
 
+    // Tab cycling: pure computation of next/prev tab path
+    let next_tab_s = raw_actions
+        .filter(|a| matches!(a, Action::NextTab))
+        .sample_combine(&state)
+        .filter(|(_, s)| !has_blocking_overlay(&s))
+        .filter_map(|(_, s)| compute_cycle_tab(&s, 1))
+        .map(Mut::ActivateBuffer)
+        .stream();
+
+    let prev_tab_s = raw_actions
+        .filter(|a| matches!(a, Action::PrevTab))
+        .sample_combine(&state)
+        .filter(|(_, s)| !has_blocking_overlay(&s))
+        .filter_map(|(_, s)| compute_cycle_tab(&s, -1))
+        .map(Mut::ActivateBuffer)
+        .stream();
+
+    // LspToggleInlayHints: toggle flag + clear hints
+    let lsp_toggle_hints_s = raw_actions
+        .filter(|a| matches!(a, Action::LspToggleInlayHints))
+        .sample_combine(&state)
+        .filter(|(_, s)| !has_blocking_overlay(&s))
+        .map(|(_, s)| Mut::ToggleInlayHints(!s.lsp.inlay_hints_enabled))
+        .stream();
+
     // ── 2. Build up muts from driver input and derived streams ──
 
     let muts: Stream<Mut> = drivers
@@ -718,6 +743,9 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
     set_mark_buf_s.forward(&muts);
     set_mark_alert_s.forward(&muts);
     abort_s.forward(&muts);
+    next_tab_s.forward(&muts);
+    prev_tab_s.forward(&muts);
+    lsp_toggle_hints_s.forward(&muts);
     buffers_s.forward(&muts);
     process_s.forward(&muts);
     timers_s.forward(&muts);
@@ -1112,6 +1140,14 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
             Mut::PendingYank => {
                 s.kill_ring.pending_yank.set(());
             }
+            Mut::ToggleInlayHints(enabled) => {
+                s.lsp_mut().inlay_hints_enabled = enabled;
+                if !enabled {
+                    for buf in s.buffers_mut().values_mut() {
+                        Rc::make_mut(buf).clear_inlay_hints();
+                    }
+                }
+            }
             Mut::LspEdits { edits } => {
                 for fe in edits {
                     if let Some(buf) = s.buf_mut(&fe.path) {
@@ -1226,6 +1262,26 @@ fn resolve_resume_active_tab(s: &AppState) -> Option<CanonPath> {
 }
 
 /// Pure: compute focus slot when entering Running.
+/// Pure: compute the next/prev tab path by cycling through materialized non-preview tabs.
+fn compute_cycle_tab(s: &AppState, direction: i32) -> Option<CanonPath> {
+    let active_path = s.active_tab.as_ref()?;
+    let tabs: Vec<&CanonPath> = s
+        .tabs
+        .iter()
+        .filter(|t| !t.is_preview())
+        .filter(|t| {
+            s.buffers
+                .get(t.path())
+                .map_or(false, |b| b.is_materialized())
+        })
+        .map(|t| t.path())
+        .collect();
+    let pos = tabs.iter().position(|p| *p == active_path)?;
+    let len = tabs.len() as i32;
+    let next = ((pos as i32 + direction).rem_euclid(len)) as usize;
+    Some(tabs[next].clone())
+}
+
 /// True when a blocking overlay is active that absorbs all actions.
 /// Migrated action streams must not fire in this state.
 fn has_blocking_overlay(s: &AppState) -> bool {
@@ -1482,6 +1538,7 @@ enum Mut {
     SetResumeEntries(Vec<CanonPath>),
     LspRequestPending(Option<led_state::LspRequest>),
     PendingYank,
+    ToggleInlayHints(bool),
     JumpRecord(led_state::JumpPosition),
     RequestOpen(CanonPath),
     LspFormatDone,
@@ -1685,6 +1742,7 @@ impl Mut {
             Mut::SetTabPendingCursor { .. } => "SetTabPendingCursor",
             Mut::LspRequestPending(_) => "LspRequestPending",
             Mut::PendingYank => "PendingYank",
+            Mut::ToggleInlayHints(_) => "ToggleInlayHints",
             Mut::LspEdits { .. } => "LspEdits",
             Mut::LspFormatDone => "LspFormatDone",
             Mut::LspCompletion { .. } => "LspCompletion",
