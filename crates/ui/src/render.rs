@@ -11,7 +11,7 @@ pub fn render(
     layout: &LayoutInfo,
     lines: &[Line],
     cursor: Option<(u16, u16)>,
-    status: &str,
+    status: &crate::display::StatusContent,
     tabs: &TabsInputs,
     browser: &[Line],
     overlay: &OverlayContent,
@@ -171,12 +171,116 @@ fn render_overlay(overlay: &OverlayContent, frame: &mut Frame, area: Rect) {
                 rect,
             );
         }
+        OverlayContent::Diagnostic {
+            messages,
+            anchor_x,
+            anchor_y,
+        } => {
+            if messages.is_empty() {
+                return;
+            }
+
+            let max_content = 58usize.min(area.width.saturating_sub(4) as usize);
+
+            // Build (text, fg_color) for each rendered line.
+            let mut raw: Vec<(String, Color)> = Vec::new();
+            for (i, (sev, msg)) in messages.iter().enumerate() {
+                if i > 0 {
+                    raw.push(("\u{2500}".repeat(max_content), Color::Gray));
+                }
+                let fg = match sev {
+                    led_lsp::DiagnosticSeverity::Error => Color::Red,
+                    led_lsp::DiagnosticSeverity::Warning => Color::Yellow,
+                    led_lsp::DiagnosticSeverity::Info => Color::Cyan,
+                    led_lsp::DiagnosticSeverity::Hint => Color::White,
+                };
+                for line in word_wrap(msg, max_content) {
+                    raw.push((line, fg));
+                }
+            }
+
+            let content_w = raw.iter().map(|(t, _)| t.chars().count()).max().unwrap_or(1);
+            let width = (content_w + 2).min(area.width as usize);
+            let height = raw.len().min(area.height as usize / 2).max(1);
+            let raw = &raw[..height];
+
+            // X: clamp so the box stays on screen.
+            let x =
+                (*anchor_x as usize).min(area.width.saturating_sub(width as u16) as usize) as u16;
+
+            // Y: prefer above the anchor line; fall back to below.
+            let y = if (*anchor_y as usize) >= height {
+                anchor_y - height as u16
+            } else {
+                (*anchor_y + 1).min(area.height.saturating_sub(height as u16))
+            };
+
+            let rect = Rect::new(x, y, width as u16, height as u16);
+            frame.render_widget(Clear, rect);
+
+            let lines: Vec<Line> = raw
+                .iter()
+                .map(|(text, fg)| {
+                    let inner: String = text.chars().take(width.saturating_sub(2)).collect();
+                    let pad = width.saturating_sub(2).saturating_sub(inner.chars().count());
+                    Line::from(Span::styled(
+                        format!(" {inner}{:pad$} ", ""),
+                        Style::default().bg(Color::DarkGray).fg(*fg),
+                    ))
+                })
+                .collect();
+            frame.render_widget(Paragraph::new(lines), rect);
+        }
     }
 }
 
-fn render_status_bar(status: &str, layout: &LayoutInfo, frame: &mut Frame, area: Rect) {
+fn word_wrap(text: &str, max_width: usize) -> Vec<String> {
+    let mut lines = Vec::new();
+    for raw_line in text.lines() {
+        if raw_line.chars().count() <= max_width {
+            lines.push(raw_line.to_string());
+        } else {
+            let mut current = String::new();
+            let mut current_w = 0;
+            for word in raw_line.split_whitespace() {
+                let ww = word.chars().count();
+                if current.is_empty() {
+                    current = word.to_string();
+                    current_w = ww;
+                } else if current_w + 1 + ww <= max_width {
+                    current.push(' ');
+                    current.push_str(word);
+                    current_w += 1 + ww;
+                } else {
+                    lines.push(current);
+                    current = word.to_string();
+                    current_w = ww;
+                }
+            }
+            if !current.is_empty() {
+                lines.push(current);
+            }
+        }
+    }
+    if lines.is_empty() {
+        lines.push(String::new());
+    }
+    lines
+}
+
+fn render_status_bar(
+    status: &crate::display::StatusContent,
+    layout: &LayoutInfo,
+    frame: &mut Frame,
+    area: Rect,
+) {
+    let style = if status.is_warn {
+        Style::default().bg(Color::Red).fg(Color::White).add_modifier(Modifier::BOLD)
+    } else {
+        layout.status_style
+    };
     frame.render_widget(
-        Paragraph::new(status.to_owned()).style(layout.status_style),
+        Paragraph::new(status.text.as_str().to_owned()).style(style),
         area,
     );
 }

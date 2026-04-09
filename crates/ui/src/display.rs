@@ -739,7 +739,7 @@ pub fn status_inputs(s: &AppState) -> StatusInputs {
         cursor_row,
         cursor_col,
         info: s.alerts.info.clone(),
-        warn: s.alerts.warn.clone(),
+        warn: s.alerts.warn().map(|s| s.to_string()),
         viewport_width,
         search_prompt,
         find_file_prompt,
@@ -782,7 +782,14 @@ fn format_lsp_status(server_name: &str, busy: bool, detail: Option<&str>) -> Str
     format!("  {spinner}{server_name}{detail_str}")
 }
 
-pub fn build_status_content(s: &StatusInputs) -> Rc<String> {
+#[derive(Clone, PartialEq)]
+pub struct StatusContent {
+    pub text: String,
+    /// True when showing a persistent warning (render with warn style).
+    pub is_warn: bool,
+}
+
+pub fn build_status_content(s: &StatusInputs) -> Rc<StatusContent> {
     // During find-file or save-as, show prompt
     if let Some((ref input, _cursor, mode)) = s.find_file_prompt {
         let label = match mode {
@@ -792,7 +799,10 @@ pub fn build_status_content(s: &StatusInputs) -> Rc<String> {
         let left = format!(" {label}: {input}");
         let total = s.viewport_width as usize;
         let padding = total.saturating_sub(left.chars().count());
-        return Rc::new(format!("{}{:padding$}", left, "", padding = padding));
+        return Rc::new(StatusContent {
+            text: format!("{}{:padding$}", left, "", padding = padding),
+            is_warn: false,
+        });
     }
 
     // During search, show search prompt instead of normal status
@@ -800,7 +810,10 @@ pub fn build_status_content(s: &StatusInputs) -> Rc<String> {
         let left = format!(" {}", prompt);
         let total = s.viewport_width as usize;
         let padding = total.saturating_sub(left.chars().count());
-        return Rc::new(format!("{}{:padding$}", left, "", padding = padding));
+        return Rc::new(StatusContent {
+            text: format!("{}{:padding$}", left, "", padding = padding),
+            is_warn: false,
+        });
     }
 
     let modified = if s.is_dirty { " \u{25cf}" } else { "" };
@@ -814,10 +827,15 @@ pub fn build_status_content(s: &StatusInputs) -> Rc<String> {
 
     let default_left = format!(" {}{}{}{}", s.file_name, modified, branch_display, lsp_str);
 
-    let left = match s.warn.as_deref().or(s.info.as_deref()) {
-        Some(m) => format!(" {}", m),
-        None if s.recording_macro => " Defining kbd macro...".to_string(),
-        None => default_left,
+    // Info (transient) takes priority over warn (persistent).
+    let (left, is_warn) = if let Some(m) = s.info.as_deref() {
+        (format!(" {}", m), false)
+    } else if let Some(m) = s.warn.as_deref() {
+        (format!(" {}", m), true)
+    } else if s.recording_macro {
+        (" Defining kbd macro...".to_string(), false)
+    } else {
+        (default_left, false)
     };
 
     let pos = format!("L{}:C{} ", *s.cursor_row + 1, *s.cursor_col + 1);
@@ -826,7 +844,10 @@ pub fn build_status_content(s: &StatusInputs) -> Rc<String> {
     let left_width = left.chars().count();
     let right_width = pos.chars().count();
     let padding = total.saturating_sub(left_width + right_width);
-    Rc::new(format!("{}{:padding$}{}", left, "", pos, padding = padding))
+    Rc::new(StatusContent {
+        text: format!("{}{:padding$}{}", left, "", pos, padding = padding),
+        is_warn,
+    })
 }
 
 // ── Overlay (completion popup, code action picker, rename input) ──
@@ -847,6 +868,11 @@ pub enum OverlayContent {
     Rename {
         input: String,
         cursor: usize,
+        anchor_x: u16,
+        anchor_y: u16,
+    },
+    Diagnostic {
+        messages: Vec<(led_lsp::DiagnosticSeverity, String)>,
         anchor_x: u16,
         anchor_y: u16,
     },
@@ -909,7 +935,47 @@ pub fn overlay_inputs(s: &AppState) -> OverlayContent {
         };
     }
 
+    // Diagnostic popover: show when cursor is on a line with diagnostics.
+    if let Some(buf) = s.active_tab.as_ref().and_then(|path| s.buffers.get(path)) {
+        let crow = buf.cursor_row();
+        let messages: Vec<_> = buf
+            .status()
+            .diagnostics()
+            .iter()
+            .filter(|d| crow >= d.start_row && crow <= d.end_row)
+            .map(|d| (d.severity, format_diagnostic_message(d)))
+            .collect();
+        if !messages.is_empty() {
+            return OverlayContent::Diagnostic {
+                messages,
+                anchor_x: cursor_x,
+                anchor_y: cursor_y,
+            };
+        }
+    }
+
     OverlayContent::None
+}
+
+fn format_diagnostic_message(d: &led_lsp::Diagnostic) -> String {
+    let mut prefix = String::new();
+    if let Some(ref src) = d.source {
+        prefix.push_str(src);
+    }
+    if let Some(ref code) = d.code {
+        if prefix.is_empty() {
+            prefix.push_str(code);
+        } else {
+            prefix.push('(');
+            prefix.push_str(code);
+            prefix.push(')');
+        }
+    }
+    if prefix.is_empty() {
+        d.message.clone()
+    } else {
+        format!("{}: {}", prefix, d.message)
+    }
 }
 
 // ── Tab bar ──
