@@ -21,6 +21,17 @@ fn abbreviate_home(path: &str) -> String {
     path.to_string()
 }
 
+/// Compute the expected directory for a find-file input, for validating
+/// that an incoming directory listing matches the current input.
+pub(super) fn expected_dir(input: &str) -> CanonPath {
+    let expanded = expand_path(input);
+    if input.ends_with('/') {
+        UserPath::new(&expanded).canonicalize()
+    } else {
+        UserPath::new(expanded.parent().unwrap_or(Path::new("/"))).canonicalize()
+    }
+}
+
 pub(super) fn expand_path(input: &str) -> PathBuf {
     let input = if input.starts_with('~') {
         if let Some(home) = dirs::home_dir() {

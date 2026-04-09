@@ -170,7 +170,8 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
     let lsp_s = lsp_of::lsp_of(&drivers.lsp_in, &state);
 
     // Resume complete: all session files resolved (opened or failed).
-    let resume_complete_s = state
+    // Common parent stream — branches into children that each produce one Mut.
+    let resume_complete_s: Stream<Rc<AppState>> = state
         .filter(|s| s.phase == Phase::Resuming)
         .filter(|s| {
             !s.session.resume.is_empty()
@@ -179,7 +180,32 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
                     .iter()
                     .all(|e| e.state != led_state::ResumeState::Pending)
         })
-        .map(|_| Mut::ResumeComplete)
+        .stream();
+
+    let resume_phase_s = resume_complete_s
+        .map(|_| Mut::SetPhase(Phase::Running))
+        .stream();
+
+    let resume_tab_s = resume_complete_s
+        .filter_map(|s| resolve_resume_active_tab(&s))
+        .map(Mut::SetActiveTab)
+        .stream();
+
+    let resume_ensure_tabs_s = resume_complete_s.flat_map(|s| {
+        s.startup
+            .arg_paths
+            .iter()
+            .map(|p| Mut::EnsureTab(p.clone()))
+            .collect::<Vec<_>>()
+    });
+
+    let resume_focus_s = resume_complete_s
+        .map(|s| Mut::SetFocus(resolve_focus_slot(&s)))
+        .stream();
+
+    let resume_reveal_s = resume_complete_s
+        .filter_map(|s| s.startup.arg_dir.clone())
+        .map(Mut::BrowserReveal)
         .stream();
 
     // ── 2. Build up muts from driver input and derived streams ──
@@ -219,31 +245,25 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
                     !s.tabs.iter().any(|t| *t.path() == *path && t.is_preview())
                 })
                 .filter(|b| b.undo_history_len() > b.persisted_undo_len() || b.is_dirty())
-                .filter_map(|b| {
-                    let file_path = b.path().cloned().unwrap();
+                .map(|b| {
+                    let path = b.path().cloned().unwrap();
                     let chain_id = b
                         .chain_id()
                         .map(String::from)
                         .unwrap_or_else(led_workspace::new_chain_id);
-                    let mut undo = b.undo_history().clone();
-                    undo.flush_pending();
-                    let entries: Vec<led_core::UndoEntry> =
-                        undo.entries_from(b.persisted_undo_len()).to_vec();
-                    if entries.is_empty() {
-                        return None;
-                    }
-                    let undo_cursor = undo.entry_count();
-                    Some(Mut::UndoFlushReady {
-                        path: b.path().cloned().unwrap(),
-                        flush: led_state::UndoFlush {
-                            file_path,
-                            chain_id,
-                            content_hash: b.content_hash(),
-                            undo_cursor,
-                            distance_from_save: undo.distance_from_save(),
-                            entries,
-                        },
-                    })
+                    (path, chain_id, b.content_hash(), flush_entries(b))
+                })
+                .filter(|(_, _, _, fe)| !fe.entries.is_empty())
+                .map(|(path, chain_id, content_hash, fe)| Mut::UndoFlushReady {
+                    path: path.clone(),
+                    flush: led_state::UndoFlush {
+                        file_path: path,
+                        chain_id,
+                        content_hash,
+                        undo_cursor: fe.undo_cursor,
+                        distance_from_save: fe.distance_from_save,
+                        entries: fe.entries,
+                    },
                 })
                 .collect::<Vec<_>>()
         });
@@ -263,23 +283,12 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
             _ => None,
         })
         .sample_combine(&state)
-        .filter_map(|((dir, entries), s)| {
-            let ff = s.find_file.as_ref()?;
-            // Validate the listing matches current input
-            let expanded = find_file::expand_path(&ff.input);
-            let expected_dir = if ff.input.ends_with('/') {
-                led_core::UserPath::new(&expanded).canonicalize()
-            } else {
-                led_core::UserPath::new(expanded.parent().unwrap_or(std::path::Path::new("/")))
-                    .canonicalize()
-            };
-            if dir != expected_dir {
-                return None;
-            }
-            let mut ff = ff.clone();
+        .filter_map(|((dir, entries), s)| Some((dir, entries, s.find_file.as_ref()?.clone())))
+        .filter(|(dir, _, ff)| *dir == find_file::expected_dir(&ff.input))
+        .map(|(_, entries, mut ff)| {
             ff.completions = entries;
             ff.selected = None;
-            Some(Mut::FindFileListed(ff))
+            Mut::FindFileListed(ff)
         })
         .stream();
 
@@ -289,22 +298,21 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
             led_clipboard::ClipboardIn::Text(text) => text,
         })
         .sample_combine(&state)
+        // Fall back to kill ring content when system clipboard has no text.
         .map(|(text, s)| {
-            // Fall back to kill ring content when system clipboard has no text
-            // (e.g. an image is in the clipboard).
-            let text = if text.is_empty() {
-                s.kill_ring.content.clone()
+            if text.is_empty() {
+                (s.kill_ring.content.clone(), s)
             } else {
-                text
-            };
-            (text, s)
+                (text, s)
+            }
         })
         .filter(|(text, _)| !text.is_empty())
-        .filter_map(|(text, s)| {
-            let dims = s.dims?;
-            let path = s.active_tab.as_ref()?;
-            let buf = s.buffers.get(path)?;
-            let mut buf = (**buf).clone();
+        .filter_map(|(text, s)| Some((text, s.dims?, s.active_tab.clone()?, s)))
+        .filter_map(|(text, dims, path, s)| {
+            let buf = (**s.buffers.get(&path)?).clone();
+            Some((text, dims, path, buf))
+        })
+        .map(|(text, dims, path, mut buf)| {
             action::close_group_on_move(&mut buf);
             buf.clear_mark();
             let (r, c, a) = edit::yank(&mut buf, &text);
@@ -312,20 +320,47 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
             action::close_group_on_move(&mut buf);
             let (sr, ssl) = mov::adjust_scroll(&buf, &dims);
             buf.set_scroll(led_core::Row(sr), led_core::SubLine(ssl));
-            Some(Mut::BufferUpdate(path.clone(), buf))
+            Mut::BufferUpdate(path, buf)
         })
         .stream();
 
-    let syntax_s = drivers
-        .syntax_in
-        .map(|syn| Mut::SyntaxUpdate {
+    // ── Syntax: common parent, split highlights vs indent ──
+
+    let syntax_parent_s: Stream<_> = drivers.syntax_in.sample_combine(&state);
+
+    // Child 1: offer highlights when indent won't invalidate them
+    let syntax_highlights_s = syntax_parent_s
+        .filter(|(syn, s)| !syntax_will_indent(syn, s))
+        .map(|(syn, _)| Mut::SyntaxHighlights {
             path: syn.path,
             version: syn.doc_version,
             highlights: syn.highlights,
             bracket_pairs: syn.bracket_pairs,
-            indent: syn.indent,
-            indent_row: syn.indent_row,
             reindent_chars: syn.reindent_chars,
+        })
+        .stream();
+
+    // Child 2: apply indent when indent_row matches and version is current
+    let syntax_indent_s = syntax_parent_s
+        .filter(|(syn, s)| syntax_can_apply_indent(syn, s))
+        .map(|(syn, s)| {
+            let tab_stop = s.dims.map(|d| d.tab_stop);
+            Mut::ApplyIndent {
+                path: syn.path,
+                indent: syn.indent,
+                indent_row: syn.indent_row.unwrap(),
+                tab_stop,
+                reindent_chars: syn.reindent_chars,
+            }
+        })
+        .stream();
+
+    // Child 3: set reindent_chars only (will_indent but version mismatch)
+    let syntax_reindent_s = syntax_parent_s
+        .filter(|(syn, s)| syntax_will_indent(syn, s) && !syntax_can_apply_indent(syn, s))
+        .map(|(syn, _)| Mut::SetReindentChars {
+            path: syn.path,
+            chars: syn.reindent_chars,
         })
         .stream();
 
@@ -353,50 +388,36 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
 
     let file_search_results_s = drivers
         .file_search_in
-        .filter(|ev| matches!(ev, led_file_search::FileSearchIn::Results { .. }))
-        .map(|ev| match ev {
-            led_file_search::FileSearchIn::Results { results } => results,
-            _ => unreachable!(),
+        .filter_map(|ev| match ev {
+            led_file_search::FileSearchIn::Results { results } => Some(results),
+            _ => None,
         })
         .sample_combine(&state)
-        .filter_map(|(results, s)| {
-            let mut fs = s.file_search.clone()?;
+        .filter_map(|(results, s)| Some((results, s.file_search.clone()?)))
+        .map(|(results, mut fs)| {
             fs.results = results;
             fs.rebuild_flat_hits();
-            let preview = fs
-                .selected_hit()
-                .map(|(group, hit)| led_state::PreviewRequest {
-                    path: group.path.clone(),
-                    row: hit.row,
-                    col: hit.col,
-                });
-            Some(Mut::FileSearchResults(fs, preview))
+            let preview = preview_for_selected_hit(&fs);
+            Mut::FileSearchResults(fs, preview)
         })
         .stream();
 
     let file_search_replace_s = drivers
         .file_search_in
-        .filter(|ev| matches!(ev, led_file_search::FileSearchIn::ReplaceComplete { .. }))
-        .map(|ev| match ev {
+        .filter_map(|ev| match ev {
             led_file_search::FileSearchIn::ReplaceComplete {
                 results,
                 replaced_count,
-            } => (results, replaced_count),
-            _ => unreachable!(),
+            } => Some((results, replaced_count)),
+            _ => None,
         })
         .sample_combine(&state)
-        .filter_map(|((results, count), s)| {
-            let mut fs = s.file_search.clone()?;
+        .filter_map(|((results, count), s)| Some((results, count, s.file_search.clone()?)))
+        .map(|(results, count, mut fs)| {
             fs.results = results;
             fs.rebuild_flat_hits();
-            let preview = fs
-                .selected_hit()
-                .map(|(group, hit)| led_state::PreviewRequest {
-                    path: group.path.clone(),
-                    row: hit.row,
-                    col: hit.col,
-                });
-            Some(Mut::FileSearchReplaceComplete(fs, preview, count))
+            let preview = preview_for_selected_hit(&fs);
+            Mut::FileSearchReplaceComplete(fs, preview, count)
         })
         .stream();
 
@@ -422,11 +443,17 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
     fs_dir_listed_s.forward(&muts);
     fs_find_file_listed_s.forward(&muts);
     clipboard_s.forward(&muts);
-    syntax_s.forward(&muts);
+    syntax_highlights_s.forward(&muts);
+    syntax_indent_s.forward(&muts);
+    syntax_reindent_s.forward(&muts);
     git_file_s.forward(&muts);
     git_line_s.forward(&muts);
     file_search_s.forward(&muts);
-    resume_complete_s.forward(&muts);
+    resume_phase_s.forward(&muts);
+    resume_ensure_tabs_s.forward(&muts);
+    resume_tab_s.forward(&muts);
+    resume_focus_s.forward(&muts);
+    resume_reveal_s.forward(&muts);
     lsp_s.forward(&muts);
 
     let ui_evict_s = drivers
@@ -460,39 +487,48 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
             Mut::Warn { key, message } => {
                 s.alerts.set_warn(key, message);
             }
-            Mut::ResumeComplete => {
-                log::info!("phase: {:?} → Running (ResumeComplete)", s.phase);
-                s.phase = Phase::Running;
-
-                // Resolve active tab from session's saved order.
-                if let Some(order) = s.session.active_tab_order.take() {
-                    let non_preview_tabs: Vec<_> =
-                        s.tabs.iter().filter(|t| !t.is_preview()).collect();
-                    if let Some(tab) = non_preview_tabs.get(order) {
-                        s.active_tab = Some(tab.path().clone());
-                    }
+            Mut::SetPhase(phase) => {
+                log::info!("phase: {:?} → {:?}", s.phase, phase);
+                s.phase = phase;
+            }
+            Mut::SetActiveTab(path) => {
+                s.active_tab = Some(path);
+            }
+            Mut::SetFocus(focus) => {
+                s.focus = focus;
+            }
+            Mut::EnsureTab(path) => {
+                if !s.tabs.iter().any(|t| *t.path() == path) {
+                    s.tabs.push_back(led_state::Tab::new(path.clone()));
                 }
-                // Fall back: if active_tab is not set or points to a missing buffer,
-                // pick the first materialized tab.
-                let active_valid = s.active_tab.as_ref().map_or(false, |p| {
-                    s.buffers.get(p).is_some_and(|b| b.is_materialized())
-                });
-                if !active_valid {
-                    s.active_tab = s
-                        .tabs
-                        .iter()
-                        .find(|t| s.buffers.get(t.path()).is_some_and(|b| b.is_materialized()))
-                        .map(|t| t.path().clone());
+                if !s.buffers.contains_key(&path) {
+                    let mut buf = BufferState::new(path.clone());
+                    buf.set_create_if_missing(true);
+                    s.buffers_mut().insert(path, Rc::new(buf));
                 }
-
-                ensure_startup_arg_buffers(&mut s);
-
-                // CLI arg files override session's active tab.
-                if let Some(arg_path) = s.startup.arg_paths.last() {
-                    s.active_tab = Some(arg_path.clone());
+            }
+            Mut::BrowserReveal(dir) => {
+                let new_dirs = s.browser_mut().reveal(&dir);
+                if !new_dirs.is_empty() {
+                    s.pending_lists.set(new_dirs);
                 }
-
-                resolve_focus(&mut s);
+                action::browser_scroll_to_selected(&mut s);
+            }
+            Mut::JumpRecord(pos) => {
+                jump::record_jump(&mut s, pos);
+            }
+            Mut::RequestOpen(path) => {
+                request_open(&mut s, path, false);
+            }
+            Mut::SetTabPendingCursor {
+                path,
+                row,
+                col,
+                scroll_row,
+            } => {
+                if let Some(tab) = s.tabs.iter_mut().find(|t| *t.path() == path) {
+                    tab.set_cursor(row, col, scroll_row);
+                }
             }
             Mut::BufferOpen {
                 path,
@@ -586,36 +622,7 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
                 new_path,
                 undo_clear_path,
             } => {
-                // Update notify hash: remove old, insert new
-                let old_hash = s
-                    .notify_hash_to_buffer
-                    .iter()
-                    .find(|(_, v)| **v == path)
-                    .map(|(k, _)| k.clone());
-                if let Some(h) = old_hash {
-                    s.notify_hash_to_buffer.remove(&h);
-                }
-                let new_hash = led_workspace::path_hash(&new_path);
-                s.notify_hash_to_buffer.insert(new_hash, new_path.clone());
-
-                // Remove old path entry, insert under new path
-                s.buffers_mut().remove(&path);
-                let filename = new_path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned());
-                s.buffers_mut().insert(new_path.clone(), Rc::new(buf));
-                // Update active_tab if it was pointing to the old path
-                if s.active_tab.as_ref() == Some(&path) {
-                    s.active_tab = Some(new_path.clone());
-                }
-                s.git_mut().pending_file_scan.set(());
-                if let Some(path) = undo_clear_path {
-                    s.pending_undo_clear.set(path);
-                }
-                if let Some(name) = filename {
-                    s.alerts.info = Some(format!("Saved {name}"));
-                }
-                action::reveal_active_buffer(&mut s);
+                handle_buffer_saved_as(&mut s, path, buf, new_path, undo_clear_path);
             }
             Mut::BufferUpdate(path, buf) => {
                 s.buffers_mut().insert(path, Rc::new(buf));
@@ -762,46 +769,43 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
                     }
                 }
             }
-            Mut::SyntaxUpdate {
+            Mut::SyntaxHighlights {
                 path,
                 version,
                 highlights,
                 bracket_pairs,
-                indent,
-                indent_row,
                 reindent_chars,
             } => {
-                let tab_stop = s.dims.map(|d| d.tab_stop);
                 if let Some(buf) = s.buf_mut(&path) {
                     buf.set_reindent_chars(reindent_chars);
-                    // Check if indent will modify the doc — if so, skip
-                    // storing highlights from this response (their character
-                    // offsets would be wrong after the doc changes). The
-                    // indent change triggers a new SyntaxOut which produces
-                    // correct highlights for the indented doc.
-                    let will_indent = indent_row.is_some_and(|row| {
-                        buf.pending_indent_row() == Some(row)
-                            && (indent.is_some()
-                                || (buf.pending_tab_fallback() && tab_stop.is_some()))
-                    });
-                    if !will_indent {
-                        buf.offer_syntax(highlights, bracket_pairs, version);
-                    }
-                    if let Some(row) = indent_row {
-                        if buf.pending_indent_row() == Some(row) && buf.version() == version {
-                            let was_tab = buf.pending_tab_fallback();
-                            buf.request_indent(None, false);
-                            if let Some(new_indent) = &indent {
-                                let cursor_on_row = buf.cursor_row() == row;
-                                edit::apply_indent(buf, *row, new_indent, cursor_on_row);
-                            } else if was_tab {
-                                if let Some(ts) = tab_stop {
-                                    edit::insert_soft_tab(buf, ts);
-                                }
-                            }
-                            buf.close_group_on_move();
+                    buf.offer_syntax(highlights, bracket_pairs, version);
+                }
+            }
+            Mut::ApplyIndent {
+                path,
+                indent,
+                indent_row,
+                tab_stop,
+                reindent_chars,
+            } => {
+                if let Some(buf) = s.buf_mut(&path) {
+                    buf.set_reindent_chars(reindent_chars);
+                    let was_tab = buf.pending_tab_fallback();
+                    buf.request_indent(None, false);
+                    if let Some(ref new_indent) = indent {
+                        let cursor_on_row = buf.cursor_row() == indent_row;
+                        edit::apply_indent(buf, *indent_row, new_indent, cursor_on_row);
+                    } else if was_tab {
+                        if let Some(ts) = tab_stop {
+                            edit::insert_soft_tab(buf, ts);
                         }
                     }
+                    buf.close_group_on_move();
+                }
+            }
+            Mut::SetReindentChars { path, chars } => {
+                if let Some(buf) = s.buf_mut(&path) {
+                    buf.set_reindent_chars(chars);
                 }
             }
             Mut::Resumed => {
@@ -811,20 +815,7 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
             }
             Mut::TimerFired(name) => handle_timer(&mut s, name),
             Mut::TouchArgFiles { entries } => {
-                for path in &entries {
-                    if let Some(buf) = s.buf_mut(path) {
-                        buf.touch();
-                    }
-                }
-                // Reorder tabs: move arg files to end in arg order
-                if entries.len() > 1 {
-                    for path in &entries {
-                        if let Some(pos) = s.tabs.iter().position(|t| *t.path() == *path) {
-                            let tab = s.tabs.remove(pos).unwrap();
-                            s.tabs.push_back(tab);
-                        }
-                    }
-                }
+                touch_and_reorder_arg_files(&mut s, &entries);
             }
             Mut::Workspace {
                 workspace,
@@ -849,72 +840,18 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
             }
 
             // ── LSP ──
-            Mut::LspNavigate { path, row, col } => {
-                // Record current position in jump list
-                if let Some(ref active) = s.active_tab {
-                    if let Some(buf) = s.buffers.get(active) {
-                        if let Some(p) = buf.path() {
-                            let pos = led_state::JumpPosition {
-                                path: p.clone(),
-                                row: buf.cursor_row(),
-                                col: buf.cursor_col(),
-                                scroll_offset: buf.scroll_row(),
-                            };
-                            jump::record_jump(&mut s, pos);
-                        }
-                    }
-                }
-                // Check if file is already open (paths are CanonPath, simple == works)
-                let existing = s
-                    .buffers
-                    .values()
-                    .find(|b| b.path() == Some(&path))
-                    .and_then(|b| b.path().cloned());
-                if let Some(existing_path) = existing {
-                    s.active_tab = Some(existing_path.clone());
-                    let half = s.dims.map_or(10, |d| d.buffer_height() / 2);
-                    if let Some(buf) = s.buf_mut(&existing_path) {
-                        let r = (*row).min(buf.doc().line_count().saturating_sub(1));
-                        buf.set_cursor(led_core::Row(r), col, col);
-                        buf.set_scroll(
-                            led_core::Row(buf.cursor_row().0.saturating_sub(half)),
-                            led_core::SubLine(0),
-                        );
-                    }
-                    action::reveal_active_buffer(&mut s);
-                } else {
-                    request_open(&mut s, path.clone(), false);
-                    if let Some(tab) = s.tabs.iter_mut().find(|t| *t.path() == path) {
-                        let half = s.dims.map_or(10, |d| d.buffer_height() / 2);
-                        tab.set_cursor(row, col, led_core::Row(row.saturating_sub(half)));
-                    }
-                    s.active_tab = Some(path);
-                }
-            }
             Mut::LspEdits { edits } => {
-                let is_empty = edits.iter().all(|fe| fe.edits.is_empty());
                 for fe in edits {
                     if let Some(buf) = s.buf_mut(&fe.path) {
                         apply_text_edits(buf, &fe.edits);
                         buf.close_group_on_move();
                     }
                 }
-                // Format-done signal (empty edits) → trigger pending save
-                if !is_empty {
-                    log::info!("save: received LSP format edits");
-                }
-                if is_empty && s.lsp.pending_save_after_format {
-                    log::info!("save: format done, triggering save");
-                    s.lsp_mut().pending_save_after_format = false;
-                    // Apply built-in cleanup after LSP format, before save
-                    if let Some(path) = s.active_tab.clone() {
-                        if let Some(buf) = s.buf_mut(&path) {
-                            buf.apply_save_cleanup();
-                            buf.record_diag_save_point();
-                        }
-                    }
-                    s.save_request.set(());
-                }
+            }
+            Mut::LspFormatDone => {
+                log::info!("save: format done, triggering save");
+                s.lsp_mut().pending_save_after_format = false;
+                s.save_request.set(());
             }
             Mut::LspCompletion {
                 items,
@@ -982,52 +919,13 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
                 extensions,
                 triggers,
             } => {
-                for buf in s.buffers_mut().values_mut() {
-                    let ext = buf
-                        .path()
-                        .and_then(|p| p.extension())
-                        .and_then(|e| e.to_str())
-                        .unwrap_or("");
-                    if extensions.iter().any(|x| x == ext) {
-                        Rc::make_mut(buf).set_completion_triggers(triggers.clone());
-                    }
-                }
+                apply_trigger_chars(&mut s, &extensions, &triggers);
             }
         }
 
-        // Implicit dematerialization: any buffer not referenced by a tab
-        // that isn't already Unmaterialized gets dematerialized. Catches
-        // both Materialized (kill buffer) and Requested (preview scrolled
-        // past before the docstore responded). Version is bumped to
-        // invalidate any in-flight Open response.
-        let tabs = &s.tabs;
-        let buffers = Rc::make_mut(&mut s.buffers);
-        for buf in buffers.values_mut() {
-            let has_tab = buf
-                .path()
-                .map_or(false, |p| tabs.iter().any(|t| *t.path() == *p));
-            if !has_tab && !buf.is_unmaterialized() {
-                Rc::make_mut(buf).dematerialize();
-            }
-        }
-        s.notify_hash_to_buffer
-            .retain(|_, p| s.tabs.iter().any(|t| *t.path() == *p));
-
-        // Apply pending cursor from tabs to materialized buffers.
-        for tab in s.tabs.iter_mut() {
-            if !tab.has_pending_cursor() {
-                continue;
-            }
-            let Some(buf) = s.buffers.get(tab.path()) else {
-                continue;
-            };
-            if !buf.is_materialized() {
-                continue;
-            }
-            let (row, col, scroll_row) = tab.take_cursor().unwrap();
-            buf.set_cursor(row, col, col);
-            buf.set_scroll(scroll_row, led_core::SubLine(0));
-        }
+        gc_orphan_buffers(&mut s);
+        gc_notify_hashes(&mut s);
+        apply_pending_cursors(&mut s);
 
         Rc::new(s)
     });
@@ -1035,7 +933,38 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
     state
 }
 
-/// Resolve focus when entering Running.
+/// Pure: compute active tab for resume from session order, fallback, or CLI args.
+fn resolve_resume_active_tab(s: &AppState) -> Option<CanonPath> {
+    // CLI args take priority
+    if let Some(arg_path) = s.startup.arg_paths.last() {
+        return Some(arg_path.clone());
+    }
+    // Session's saved tab order
+    if let Some(order) = s.session.active_tab_order {
+        let non_preview: Vec<_> = s.tabs.iter().filter(|t| !t.is_preview()).collect();
+        if let Some(tab) = non_preview.get(order) {
+            return Some(tab.path().clone());
+        }
+    }
+    // Fallback: first materialized tab
+    s.tabs
+        .iter()
+        .find(|t| s.buffers.get(t.path()).is_some_and(|b| b.is_materialized()))
+        .map(|t| t.path().clone())
+}
+
+/// Pure: compute focus slot when entering Running.
+fn resolve_focus_slot(s: &AppState) -> PanelSlot {
+    if s.startup.arg_dir.is_some() {
+        PanelSlot::Side
+    } else if !s.buffers.is_empty() || !s.startup.arg_paths.is_empty() {
+        PanelSlot::Main
+    } else {
+        PanelSlot::Side
+    }
+}
+
+/// Resolve focus when entering Running (mutable version for SessionRestored).
 /// Called exactly once per Init/Resuming → Running transition.
 fn resolve_focus(s: &mut AppState) {
     if let Some(ref dir) = s.startup.arg_dir {
@@ -1090,6 +1019,167 @@ pub(crate) fn request_open(s: &mut AppState, path: CanonPath, create_if_missing:
     }
 }
 
+struct FlushEntries {
+    entries: Vec<led_core::UndoEntry>,
+    undo_cursor: usize,
+    distance_from_save: i32,
+}
+
+fn flush_entries(b: &BufferState) -> FlushEntries {
+    let mut undo = b.undo_history().clone();
+    undo.flush_pending();
+    FlushEntries {
+        entries: undo.entries_from(b.persisted_undo_len()).to_vec(),
+        undo_cursor: undo.entry_count(),
+        distance_from_save: undo.distance_from_save(),
+    }
+}
+
+fn apply_trigger_chars(s: &mut AppState, extensions: &[String], triggers: &[String]) {
+    for buf in s.buffers_mut().values_mut() {
+        let ext = buf
+            .path()
+            .and_then(|p| p.extension())
+            .and_then(|e| e.to_str())
+            .unwrap_or("");
+        if extensions.iter().any(|x| x == ext) {
+            Rc::make_mut(buf).set_completion_triggers(triggers.to_vec());
+        }
+    }
+}
+
+fn touch_and_reorder_arg_files(s: &mut AppState, entries: &[CanonPath]) {
+    for path in entries {
+        if let Some(buf) = s.buf_mut(path) {
+            buf.touch();
+        }
+    }
+    if entries.len() > 1 {
+        for path in entries {
+            if let Some(pos) = s.tabs.iter().position(|t| *t.path() == *path) {
+                let tab = s.tabs.remove(pos).unwrap();
+                s.tabs.push_back(tab);
+            }
+        }
+    }
+}
+
+fn handle_buffer_saved_as(
+    s: &mut AppState,
+    path: CanonPath,
+    buf: BufferState,
+    new_path: CanonPath,
+    undo_clear_path: Option<CanonPath>,
+) {
+    // Update notify hash: remove old, insert new
+    let old_hash = s
+        .notify_hash_to_buffer
+        .iter()
+        .find(|(_, v)| **v == path)
+        .map(|(k, _)| k.clone());
+    if let Some(h) = old_hash {
+        s.notify_hash_to_buffer.remove(&h);
+    }
+    let new_hash = led_workspace::path_hash(&new_path);
+    s.notify_hash_to_buffer.insert(new_hash, new_path.clone());
+
+    // Remove old path entry, insert under new path
+    s.buffers_mut().remove(&path);
+    let filename = new_path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned());
+    s.buffers_mut().insert(new_path.clone(), Rc::new(buf));
+    if s.active_tab.as_ref() == Some(&path) {
+        s.active_tab = Some(new_path.clone());
+    }
+    s.git_mut().pending_file_scan.set(());
+    if let Some(path) = undo_clear_path {
+        s.pending_undo_clear.set(path);
+    }
+    if let Some(name) = filename {
+        s.alerts.info = Some(format!("Saved {name}"));
+    }
+    action::reveal_active_buffer(s);
+}
+
+/// Will this syntax response modify the document via indent?
+/// If so, highlights should be skipped (offsets would be wrong).
+fn syntax_will_indent(syn: &led_syntax::SyntaxIn, s: &AppState) -> bool {
+    let Some(row) = syn.indent_row else {
+        return false;
+    };
+    let Some(buf) = s.buffers.get(&syn.path) else {
+        return false;
+    };
+    let tab_stop = s.dims.map(|d| d.tab_stop);
+    buf.pending_indent_row() == Some(row)
+        && (syn.indent.is_some() || (buf.pending_tab_fallback() && tab_stop.is_some()))
+}
+
+/// Can we apply the indent from this syntax response?
+/// Requires indent_row match AND version match.
+fn syntax_can_apply_indent(syn: &led_syntax::SyntaxIn, s: &AppState) -> bool {
+    let Some(row) = syn.indent_row else {
+        return false;
+    };
+    let Some(buf) = s.buffers.get(&syn.path) else {
+        return false;
+    };
+    buf.pending_indent_row() == Some(row) && buf.version() == syn.doc_version
+}
+
+fn preview_for_selected_hit(
+    fs: &led_state::file_search::FileSearchState,
+) -> Option<led_state::PreviewRequest> {
+    let (group, hit) = fs.selected_hit()?;
+    Some(led_state::PreviewRequest {
+        path: group.path.clone(),
+        row: hit.row,
+        col: hit.col,
+    })
+}
+
+/// Dematerialize any buffer not referenced by a tab. Catches both
+/// Materialized (kill buffer) and Requested (preview scrolled past
+/// before the docstore responded). Version is bumped to invalidate
+/// any in-flight Open response.
+fn gc_orphan_buffers(s: &mut AppState) {
+    let tabs = &s.tabs;
+    let buffers = Rc::make_mut(&mut s.buffers);
+    for buf in buffers.values_mut() {
+        let has_tab = buf
+            .path()
+            .map_or(false, |p| tabs.iter().any(|t| *t.path() == *p));
+        if !has_tab && !buf.is_unmaterialized() {
+            Rc::make_mut(buf).dematerialize();
+        }
+    }
+}
+
+/// Remove notify-hash entries for paths that no longer have a tab.
+fn gc_notify_hashes(s: &mut AppState) {
+    s.notify_hash_to_buffer
+        .retain(|_, p| s.tabs.iter().any(|t| *t.path() == *p));
+}
+
+/// Apply pending cursor from tabs to materialized buffers.
+fn apply_pending_cursors(s: &mut AppState) {
+    for tab in s.tabs.iter_mut() {
+        if !tab.has_pending_cursor() {
+            continue;
+        }
+        let Some(buf) = s.buffers.get(tab.path()) else {
+            continue;
+        };
+        if !buf.is_materialized() {
+            continue;
+        }
+        let (row, col, scroll_row) = tab.take_cursor().unwrap();
+        buf.set_cursor(row, col, col);
+        buf.set_scroll(scroll_row, led_core::SubLine(0));
+    }
+}
+
 fn handle_timer(state: &mut AppState, name: &'static str) {
     match name {
         "alert_clear" => {
@@ -1120,6 +1210,20 @@ fn handle_timer(state: &mut AppState, name: &'static str) {
 enum Mut {
     ActivateBuffer(CanonPath),
     Action(Action),
+    SetPhase(Phase),
+    SetActiveTab(CanonPath),
+    SetFocus(PanelSlot),
+    EnsureTab(CanonPath),
+    BrowserReveal(CanonPath),
+    JumpRecord(led_state::JumpPosition),
+    RequestOpen(CanonPath),
+    LspFormatDone,
+    SetTabPendingCursor {
+        path: CanonPath,
+        row: led_core::Row,
+        col: led_core::Col,
+        scroll_row: led_core::Row,
+    },
     EvictOneBuffer,
     KbdMacroSetCount(usize),
     Alert {
@@ -1129,7 +1233,6 @@ enum Mut {
         key: String,
         message: String,
     },
-    ResumeComplete,
     BufferOpen {
         path: CanonPath,
         doc: Arc<dyn Doc>,
@@ -1201,14 +1304,23 @@ enum Mut {
     SessionSaved,
     WatchersReady,
     Resumed,
-    SyntaxUpdate {
+    SyntaxHighlights {
         path: CanonPath,
         version: led_core::DocVersion,
         highlights: Rc<Vec<(led_core::Row, HighlightSpan)>>,
         bracket_pairs: Vec<BracketPair>,
-        indent: Option<String>,
-        indent_row: Option<led_core::Row>,
         reindent_chars: Arc<[char]>,
+    },
+    ApplyIndent {
+        path: CanonPath,
+        indent: Option<String>,
+        indent_row: led_core::Row,
+        tab_stop: Option<usize>,
+        reindent_chars: Arc<[char]>,
+    },
+    SetReindentChars {
+        path: CanonPath,
+        chars: Arc<[char]>,
     },
     UndoFlushed {
         path: Option<CanonPath>,
@@ -1232,11 +1344,6 @@ enum Mut {
     },
     GitChanged,
     // LSP
-    LspNavigate {
-        path: CanonPath,
-        row: led_core::Row,
-        col: led_core::Col,
-    },
     LspEdits {
         edits: Vec<led_lsp::FileEdit>,
     },
@@ -1272,10 +1379,14 @@ impl Mut {
         match self {
             Mut::ActivateBuffer(_) => "ActivateBuffer",
             Mut::Action(_) => "Action",
+            Mut::SetPhase(_) => "SetPhase",
+            Mut::SetActiveTab(_) => "SetActiveTab",
+            Mut::SetFocus(_) => "SetFocus",
+            Mut::EnsureTab(_) => "EnsureTab",
+            Mut::BrowserReveal(_) => "BrowserReveal",
             Mut::Alert { .. } => "Alert",
             Mut::Warn { .. } => "Warn",
 
-            Mut::ResumeComplete => "ResumeComplete",
             Mut::BufferOpen { .. } => "BufferOpen",
             Mut::BufferSaved { .. } => "BufferSaved",
             Mut::BufferSavedAs { .. } => "BufferSavedAs",
@@ -1298,7 +1409,9 @@ impl Mut {
             Mut::SessionSaved => "SessionSaved",
             Mut::WatchersReady => "WatchersReady",
             Mut::Resumed => "Resumed",
-            Mut::SyntaxUpdate { .. } => "SyntaxUpdate",
+            Mut::SyntaxHighlights { .. } => "SyntaxHighlights",
+            Mut::ApplyIndent { .. } => "ApplyIndent",
+            Mut::SetReindentChars { .. } => "SetReindentChars",
             Mut::UndoFlushed { .. } => "UndoFlushed",
             Mut::UndoFlushReady { .. } => "UndoFlushReady",
             Mut::TimerFired(_) => "TimerFired",
@@ -1306,8 +1419,11 @@ impl Mut {
             Mut::Workspace { .. } => "Workspace",
             Mut::WorkspaceChanged { .. } => "WorkspaceChanged",
             Mut::GitChanged => "GitChanged",
-            Mut::LspNavigate { .. } => "LspNavigate",
+            Mut::JumpRecord(_) => "JumpRecord",
+            Mut::RequestOpen(_) => "RequestOpen",
+            Mut::SetTabPendingCursor { .. } => "SetTabPendingCursor",
             Mut::LspEdits { .. } => "LspEdits",
+            Mut::LspFormatDone => "LspFormatDone",
             Mut::LspCompletion { .. } => "LspCompletion",
             Mut::LspCodeActions { .. } => "LspCodeActions",
             Mut::LspDiagnostics { .. } => "LspDiagnostics",

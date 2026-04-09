@@ -119,6 +119,31 @@ let session_browser_s = session_restored_s
     });
 ```
 
+**The pattern: Common parent stream → multiple child chains.** When refactoring a fat reducer handler, first create a stream for the triggering event, then branch it into children that each produce one fine-grained `Mut`:
+
+```rust
+// Common parent: computed once, shared by all children
+let resume_complete_s = state
+    .filter(|s| s.phase == Phase::Resuming)
+    .filter(|s| s.session.resume.iter().all(|e| e.state != ResumeState::Pending));
+
+// Child 1: set phase
+let resume_phase_s = resume_complete_s
+    .map(|_| Mut::SetPhase(Phase::Running));
+
+// Child 2: resolve active tab (all decision-making here, not in reducer)
+let resume_tab_s = resume_complete_s
+    .filter_map(|s| resolve_session_active_tab(&s))
+    .map(Mut::SetActiveTab);
+
+// Child 3: resolve focus
+let resume_focus_s = resume_complete_s
+    .map(|s| resolve_focus_slot(&s))
+    .map(Mut::SetFocus);
+```
+
+The reducer just assigns: `Mut::SetPhase(p) => { s.phase = p; }`, `Mut::SetActiveTab(p) => { s.active_tab = Some(p); }`, etc. Zero logic in the reducer — all decision-making lives in the child chains.
+
 ### Principle 3: Max ~3 Lines Per Combinator Closure (Maybe 5 in a Pinch)
 
 Each combinator chain step (filter, map, filter_map, etc.) should be at most ~3 lines. 5 lines is the absolute upper bound for exceptional cases.
