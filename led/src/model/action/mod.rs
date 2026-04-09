@@ -293,69 +293,6 @@ pub fn handle_action(state: &mut AppState, action: Action) -> bool {
             }
         }
 
-        // ── Save ──
-        Action::Save => {
-            if let Some(path) = state.active_tab.clone() {
-                if let Some(buf) = state.buf_mut(&path) {
-                    buf.begin_save();
-                    buf.touch();
-                }
-            }
-            // If we have an LSP server for this file, format first then save
-            let has_lsp = state
-                .active_tab
-                .as_ref()
-                .and_then(|path| state.buffers.get(path))
-                .and_then(|b| b.path())
-                .is_some_and(|_| !state.lsp.server_name.is_empty());
-            if has_lsp {
-                log::info!("save: requesting LSP format");
-                state.lsp_mut().pending_save_after_format = true;
-                state
-                    .lsp_mut()
-                    .pending_request
-                    .set(Some(LspRequest::Format));
-                state.alerts.info = Some("Formatting...".into());
-            } else {
-                // Apply built-in cleanup (strip trailing whitespace, ensure final newline)
-                if let Some(path) = state.active_tab.clone() {
-                    if let Some(buf) = state.buf_mut(&path) {
-                        buf.apply_save_cleanup();
-                        buf.record_diag_save_point();
-                    }
-                }
-                state.save_request.set(());
-            }
-        }
-
-        Action::SaveAll => {
-            let dirty_paths: Vec<_> = state
-                .buffers
-                .values()
-                .filter(|b| b.is_dirty() && b.path().is_some())
-                .filter_map(|b| b.path().cloned())
-                .collect();
-            for path in &dirty_paths {
-                if let Some(buf) = state.buf_mut(path) {
-                    buf.begin_save();
-                }
-            }
-            if !dirty_paths.is_empty() {
-                state.save_all_request.set(());
-            }
-        }
-
-        Action::SaveNoFormat => {
-            if let Some(path) = state.active_tab.clone() {
-                if let Some(buf) = state.buf_mut(&path) {
-                    buf.begin_save();
-                    buf.touch();
-                    buf.record_diag_save_point();
-                }
-            }
-            state.save_request.set(());
-        }
-
         // ── Tabs ──
         Action::KillBuffer => tabs::kill_buffer(state),
 

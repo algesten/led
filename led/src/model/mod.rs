@@ -500,6 +500,115 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
         .map(|(_, s)| Mut::ToggleInlayHints(!s.lsp.inlay_hints_enabled))
         .stream();
 
+    // ── Save actions ──
+
+    let save_parent_s = raw_actions
+        .filter(|a| matches!(a, Action::Save))
+        .sample_combine(&state)
+        .filter(|(_, s)| !has_blocking_overlay(&s))
+        .stream();
+
+    // Save with LSP: begin_save + request format
+    let save_lsp_buf_s = save_parent_s
+        .filter(|(_, s)| has_active_lsp(&s))
+        .filter_map(|(_, s)| {
+            let path = s.active_tab.clone()?;
+            let mut buf = (**s.buffers.get(&path)?).clone();
+            buf.begin_save();
+            buf.touch();
+            Some(Mut::BufferUpdate(path, buf))
+        })
+        .stream();
+
+    let save_lsp_format_s = save_parent_s
+        .filter(|(_, s)| has_active_lsp(&s))
+        .map(|_| Mut::SetPendingSaveAfterFormat)
+        .stream();
+
+    let save_lsp_request_s = save_parent_s
+        .filter(|(_, s)| has_active_lsp(&s))
+        .map(|_| Mut::LspRequestPending(Some(led_state::LspRequest::Format)))
+        .stream();
+
+    let save_lsp_alert_s = save_parent_s
+        .filter(|(_, s)| has_active_lsp(&s))
+        .map(|_| Mut::Alert {
+            info: Some("Formatting...".into()),
+        })
+        .stream();
+
+    // Save without LSP: begin_save + cleanup + trigger save
+    let save_direct_buf_s = save_parent_s
+        .filter(|(_, s)| !has_active_lsp(&s))
+        .filter_map(|(_, s)| {
+            let path = s.active_tab.clone()?;
+            let mut buf = (**s.buffers.get(&path)?).clone();
+            buf.begin_save();
+            buf.touch();
+            buf.apply_save_cleanup();
+            buf.record_diag_save_point();
+            Some(Mut::BufferUpdate(path, buf))
+        })
+        .stream();
+
+    let save_direct_request_s = save_parent_s
+        .filter(|(_, s)| !has_active_lsp(&s))
+        .map(|_| Mut::SaveRequest)
+        .stream();
+
+    // SaveNoFormat: begin_save + cleanup + save (no LSP format)
+    let save_no_format_buf_s = raw_actions
+        .filter(|a| matches!(a, Action::SaveNoFormat))
+        .sample_combine(&state)
+        .filter(|(_, s)| !has_blocking_overlay(&s))
+        .filter_map(|(_, s)| {
+            let path = s.active_tab.clone()?;
+            let mut buf = (**s.buffers.get(&path)?).clone();
+            buf.begin_save();
+            buf.touch();
+            buf.record_diag_save_point();
+            Some(Mut::BufferUpdate(path, buf))
+        })
+        .stream();
+
+    let save_no_format_request_s = raw_actions
+        .filter(|a| matches!(a, Action::SaveNoFormat))
+        .sample_combine(&state)
+        .filter(|(_, s)| !has_blocking_overlay(&s))
+        .map(|_| Mut::SaveRequest)
+        .stream();
+
+    // SaveAll: begin_save on all dirty buffers + trigger save_all
+    let save_all_bufs_s = raw_actions
+        .filter(|a| matches!(a, Action::SaveAll))
+        .sample_combine(&state)
+        .filter(|(_, s)| !has_blocking_overlay(&s))
+        .flat_map(|(_, s)| {
+            s.buffers
+                .values()
+                .filter(|b| b.is_dirty() && b.path().is_some())
+                .map(|b| {
+                    let path = b.path().cloned().unwrap();
+                    let mut buf = (**b).clone();
+                    buf.begin_save();
+                    (path, buf)
+                })
+                .map(|(path, buf)| Mut::BufferUpdate(path, buf))
+                .collect::<Vec<_>>()
+        });
+
+    let save_all_request_s = raw_actions
+        .filter(|a| matches!(a, Action::SaveAll))
+        .sample_combine(&state)
+        .filter(|(_, s)| {
+            !has_blocking_overlay(&s)
+                && s.buffers
+                    .values()
+                    .any(|b| b.is_dirty() && b.path().is_some())
+        })
+        .map(|_| Mut::SaveAllRequest)
+        .stream();
+
     // ── 2. Build up muts from driver input and derived streams ──
 
     let muts: Stream<Mut> = drivers
@@ -746,6 +855,16 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
     next_tab_s.forward(&muts);
     prev_tab_s.forward(&muts);
     lsp_toggle_hints_s.forward(&muts);
+    save_lsp_buf_s.forward(&muts);
+    save_lsp_format_s.forward(&muts);
+    save_lsp_request_s.forward(&muts);
+    save_lsp_alert_s.forward(&muts);
+    save_direct_buf_s.forward(&muts);
+    save_direct_request_s.forward(&muts);
+    save_no_format_buf_s.forward(&muts);
+    save_no_format_request_s.forward(&muts);
+    save_all_bufs_s.forward(&muts);
+    save_all_request_s.forward(&muts);
     buffers_s.forward(&muts);
     process_s.forward(&muts);
     timers_s.forward(&muts);
@@ -1140,6 +1259,16 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
             Mut::PendingYank => {
                 s.kill_ring.pending_yank.set(());
             }
+            Mut::SetPendingSaveAfterFormat => {
+                log::info!("save: requesting LSP format");
+                s.lsp_mut().pending_save_after_format = true;
+            }
+            Mut::SaveRequest => {
+                s.save_request.set(());
+            }
+            Mut::SaveAllRequest => {
+                s.save_all_request.set(());
+            }
             Mut::ToggleInlayHints(enabled) => {
                 s.lsp_mut().inlay_hints_enabled = enabled;
                 if !enabled {
@@ -1280,6 +1409,15 @@ fn compute_cycle_tab(s: &AppState, direction: i32) -> Option<CanonPath> {
     let len = tabs.len() as i32;
     let next = ((pos as i32 + direction).rem_euclid(len)) as usize;
     Some(tabs[next].clone())
+}
+
+/// True when the active buffer has an LSP server (used for format-before-save).
+fn has_active_lsp(s: &AppState) -> bool {
+    s.active_tab
+        .as_ref()
+        .and_then(|path| s.buffers.get(path))
+        .and_then(|b| b.path())
+        .is_some_and(|_| !s.lsp.server_name.is_empty())
 }
 
 /// True when a blocking overlay is active that absorbs all actions.
@@ -1539,6 +1677,9 @@ enum Mut {
     LspRequestPending(Option<led_state::LspRequest>),
     PendingYank,
     ToggleInlayHints(bool),
+    SetPendingSaveAfterFormat,
+    SaveRequest,
+    SaveAllRequest,
     JumpRecord(led_state::JumpPosition),
     RequestOpen(CanonPath),
     LspFormatDone,
@@ -1743,6 +1884,9 @@ impl Mut {
             Mut::LspRequestPending(_) => "LspRequestPending",
             Mut::PendingYank => "PendingYank",
             Mut::ToggleInlayHints(_) => "ToggleInlayHints",
+            Mut::SetPendingSaveAfterFormat => "SetPendingSaveAfterFormat",
+            Mut::SaveRequest => "SaveRequest",
+            Mut::SaveAllRequest => "SaveAllRequest",
             Mut::LspEdits { .. } => "LspEdits",
             Mut::LspFormatDone => "LspFormatDone",
             Mut::LspCompletion { .. } => "LspCompletion",
