@@ -1451,6 +1451,11 @@ impl LspManager {
             "client/registerCapability" => {
                 self.handle_register_capability(&notif.params);
             }
+            "$/stderr" => {
+                if let Some(msg) = notif.params.as_str() {
+                    let _ = result_tx.send(LspIn::Error { message: msg.to_string() }).await;
+                }
+            }
             _ => {
                 log::debug!("LSP unhandled notification: {}", notif.method);
             }
