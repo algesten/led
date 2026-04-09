@@ -176,18 +176,6 @@ pub fn handle_action(state: &mut AppState, action: Action) -> bool {
         Action::CollapseAll => browser::handle_browser_collapse_all(state),
         Action::OpenSelected => browser::handle_browser_open(state),
 
-        // ── Mark / Kill ring ──
-        Action::SetMark => {
-            with_buf(state, |buf, _dims| {
-                buf.set_mark();
-            });
-            state.alerts.info = Some("Mark set".into());
-        }
-
-        Action::Abort => with_buf(state, |buf, _dims| {
-            buf.clear_mark();
-        }),
-
         // ── Editing ──
         Action::InsertChar(ch) => {
             with_buf(state, |buf, dims| {

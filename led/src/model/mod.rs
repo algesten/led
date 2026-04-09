@@ -296,7 +296,7 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
     let line_start_s = raw_actions
         .filter(|a| matches!(a, Action::LineStart))
         .sample_combine(&state)
-        .filter(|(_, s)| !has_blocking_overlay(&s))
+        .filter(|(_, s)| !has_blocking_overlay(&s) && !has_input_modal(&s))
         .filter(|(_, s)| s.focus == PanelSlot::Main)
         .filter_map(|(_, s)| Some((s.dims?, s.active_tab.clone()?, s)))
         .filter_map(|(dims, path, s)| {
@@ -323,7 +323,7 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
     let line_end_s = raw_actions
         .filter(|a| matches!(a, Action::LineEnd))
         .sample_combine(&state)
-        .filter(|(_, s)| !has_blocking_overlay(&s))
+        .filter(|(_, s)| !has_blocking_overlay(&s) && !has_input_modal(&s))
         .filter(|(_, s)| s.focus == PanelSlot::Main)
         .filter_map(|(_, s)| Some((s.dims?, s.active_tab.clone()?, s)))
         .filter_map(|(dims, path, s)| {
@@ -350,7 +350,7 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
     let match_bracket_s = raw_actions
         .filter(|a| matches!(a, Action::MatchBracket))
         .sample_combine(&state)
-        .filter(|(_, s)| !has_blocking_overlay(&s))
+        .filter(|(_, s)| !has_blocking_overlay(&s) && !has_input_modal(&s))
         .filter_map(|(_, s)| Some((s.dims?, s.active_tab.clone()?, s)))
         .filter_map(|(dims, path, s)| {
             let buf = (**s.buffers.get(&path)?).clone();
@@ -373,7 +373,7 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
     let undo_s = raw_actions
         .filter(|a| matches!(a, Action::Undo))
         .sample_combine(&state)
-        .filter(|(_, s)| !has_blocking_overlay(&s))
+        .filter(|(_, s)| !has_blocking_overlay(&s) && !has_input_modal(&s))
         .filter_map(|(_, s)| Some((s.dims?, s.active_tab.clone()?, s)))
         .filter_map(|(dims, path, s)| {
             let buf = (**s.buffers.get(&path)?).clone();
@@ -402,7 +402,7 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
     let redo_s = raw_actions
         .filter(|a| matches!(a, Action::Redo))
         .sample_combine(&state)
-        .filter(|(_, s)| !has_blocking_overlay(&s))
+        .filter(|(_, s)| !has_blocking_overlay(&s) && !has_input_modal(&s))
         .filter_map(|(_, s)| Some((s.dims?, s.active_tab.clone()?, s)))
         .filter_map(|(dims, path, s)| {
             let buf = (**s.buffers.get(&path)?).clone();
@@ -423,6 +423,53 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
             let (sr, ssl) = mov::adjust_scroll(&buf, &dims);
             buf.set_scroll(led_core::Row(sr), led_core::SubLine(ssl));
             buf.update_matching_bracket();
+            buf.touch();
+            Mut::BufferUpdate(path, buf)
+        })
+        .stream();
+
+    // SetMark: set mark on active buffer + show alert
+    let set_mark_buf_s = raw_actions
+        .filter(|a| matches!(a, Action::SetMark))
+        .sample_combine(&state)
+        .filter(|(_, s)| !has_blocking_overlay(&s) && !has_input_modal(&s))
+        .filter_map(|(_, s)| Some((s.dims?, s.active_tab.clone()?, s)))
+        .filter_map(|(dims, path, s)| {
+            let buf = (**s.buffers.get(&path)?).clone();
+            Some((dims, path, buf))
+        })
+        .map(|(dims, path, mut buf)| {
+            buf.set_mark();
+            let (sr, ssl) = mov::adjust_scroll(&buf, &dims);
+            buf.set_scroll(led_core::Row(sr), led_core::SubLine(ssl));
+            buf.touch();
+            Mut::BufferUpdate(path, buf)
+        })
+        .stream();
+
+    let set_mark_alert_s = raw_actions
+        .filter(|a| matches!(a, Action::SetMark))
+        .sample_combine(&state)
+        .filter(|(_, s)| !has_blocking_overlay(&s) && !has_input_modal(&s))
+        .map(|_| Mut::Alert {
+            info: Some("Mark set".into()),
+        })
+        .stream();
+
+    // Abort: clear mark on active buffer
+    let abort_s = raw_actions
+        .filter(|a| matches!(a, Action::Abort))
+        .sample_combine(&state)
+        .filter(|(_, s)| !has_blocking_overlay(&s) && !has_input_modal(&s))
+        .filter_map(|(_, s)| Some((s.dims?, s.active_tab.clone()?, s)))
+        .filter_map(|(dims, path, s)| {
+            let buf = (**s.buffers.get(&path)?).clone();
+            Some((dims, path, buf))
+        })
+        .map(|(dims, path, mut buf)| {
+            buf.clear_mark();
+            let (sr, ssl) = mov::adjust_scroll(&buf, &dims);
+            buf.set_scroll(led_core::Row(sr), led_core::SubLine(ssl));
             buf.touch();
             Mut::BufferUpdate(path, buf)
         })
@@ -668,6 +715,9 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
     match_bracket_s.forward(&muts);
     undo_s.forward(&muts);
     redo_s.forward(&muts);
+    set_mark_buf_s.forward(&muts);
+    set_mark_alert_s.forward(&muts);
+    abort_s.forward(&muts);
     buffers_s.forward(&muts);
     process_s.forward(&muts);
     timers_s.forward(&muts);
@@ -1180,6 +1230,17 @@ fn resolve_resume_active_tab(s: &AppState) -> Option<CanonPath> {
 /// Migrated action streams must not fire in this state.
 fn has_blocking_overlay(s: &AppState) -> bool {
     s.lsp.code_actions.is_some() || (s.lsp.rename.is_some() && s.focus == PanelSlot::Overlay)
+}
+
+/// True when a modal dialog that captures editing/movement input is active.
+/// Editor action streams must not fire in this state.
+fn has_input_modal(s: &AppState) -> bool {
+    s.file_search.is_some()
+        || s.find_file.is_some()
+        || s.active_tab
+            .as_ref()
+            .and_then(|p| s.buffers.get(p))
+            .map_or(false, |b| b.isearch.is_some())
 }
 
 pub(super) fn resolve_focus_slot(s: &AppState) -> PanelSlot {
