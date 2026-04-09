@@ -9,7 +9,7 @@ mod tabs;
 use std::rc::Rc;
 
 use led_core::{Action, CharOffset, Col, EditOp, PanelSlot, Row};
-use led_state::{AppState, Dimensions, EditKind, LspRequest};
+use led_state::{AppState, EditKind, LspRequest};
 
 use super::{edit, file_search, find_file, jump, mov, search};
 use helpers::{is_editing_action, maybe_close_group, should_record, with_buf};
@@ -132,12 +132,7 @@ pub fn handle_action(state: &mut AppState, action: Action) -> bool {
     }
 
     match action {
-        // ── Resize ──
-        Action::Resize(w, h) => {
-            state.dims = Some(Dimensions::new(w, h, state.show_side_panel));
-        }
-
-        // ── Movement (routed by focus) ──
+        // ── Movement (routed by focus — browser side only) ──
         Action::MoveUp
         | Action::MoveDown
         | Action::PageUp
@@ -174,18 +169,6 @@ pub fn handle_action(state: &mut AppState, action: Action) -> bool {
                 });
             }
         }
-        Action::LineStart => with_buf(state, |buf, dims| {
-            let (r, c, _) = mov::line_start(buf);
-            buf.set_cursor(Row(r), Col(c), Col(0));
-            buf.set_cursor(Row(r), Col(c), Col(mov::reset_affinity(buf, dims)));
-            close_group_on_move(buf);
-        }),
-        Action::LineEnd => with_buf(state, |buf, dims| {
-            let (r, c, _) = mov::line_end(buf);
-            buf.set_cursor(Row(r), Col(c), Col(0));
-            buf.set_cursor(Row(r), Col(c), Col(mov::reset_affinity(buf, dims)));
-            close_group_on_move(buf);
-        }),
 
         // ── Browser ──
         Action::ExpandDir => browser::handle_browser_expand(state),
@@ -324,26 +307,6 @@ pub fn handle_action(state: &mut AppState, action: Action) -> bool {
             }
         }
 
-        // ── Undo / Redo ──
-        Action::Undo => with_buf(state, |buf, dims| {
-            close_group_on_move(buf);
-            if let Some(cursor) = buf.undo() {
-                let row = buf.doc().char_to_line(cursor);
-                let col = cursor.0 - buf.doc().line_to_char(row).0;
-                buf.set_cursor(row, Col(col), Col(0));
-                buf.set_cursor(row, Col(col), Col(mov::reset_affinity(buf, dims)));
-            }
-        }),
-        Action::Redo => with_buf(state, |buf, dims| {
-            close_group_on_move(buf);
-            if let Some(cursor) = buf.redo() {
-                let row = buf.doc().char_to_line(cursor);
-                let col = cursor.0 - buf.doc().line_to_char(row).0;
-                buf.set_cursor(row, Col(col), Col(0));
-                buf.set_cursor(row, Col(col), Col(mov::reset_affinity(buf, dims)));
-            }
-        }),
-
         // ── Save ──
         Action::Save => {
             if let Some(path) = state.active_tab.clone() {
@@ -420,15 +383,6 @@ pub fn handle_action(state: &mut AppState, action: Action) -> bool {
         // ── Jump list ──
         Action::JumpBack => jump::jump_back(state),
         Action::JumpForward => jump::jump_forward(state),
-
-        // ── Bracket matching ──
-        Action::MatchBracket => with_buf(state, |buf, dims| {
-            if let Some((row, col)) = buf.matching_bracket() {
-                buf.set_cursor(row, col, Col(0));
-                buf.set_cursor(row, col, Col(mov::reset_affinity(buf, dims)));
-                close_group_on_move(buf);
-            }
-        }),
 
         // ── Find file / Save as ──
         Action::FindFile => find_file::activate(state),

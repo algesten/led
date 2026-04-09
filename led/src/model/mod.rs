@@ -295,6 +295,149 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
         .map(|_| Mut::PendingYank)
         .stream();
 
+    // Resize (from test harness — terminal resize already handled in actions_of)
+    let action_resize_s = raw_actions
+        .filter_map(|a| match a {
+            Action::Resize(w, h) => Some(Mut::Resize(w, h)),
+            _ => None,
+        })
+        .stream();
+
+    // ── Editor movement/editing actions (with_buf pattern → BufferUpdate) ──
+    //
+    // These all: filter action → sample state → extract (dims, path, buf) →
+    // apply operation on cloned buf → adjust scroll → emit BufferUpdate.
+
+    let line_start_s = raw_actions
+        .filter(|a| matches!(a, Action::LineStart))
+        .sample_combine(&state)
+        .filter(|(_, s)| s.focus == PanelSlot::Main)
+        .filter_map(|(_, s)| Some((s.dims?, s.active_tab.clone()?, s)))
+        .filter_map(|(dims, path, s)| {
+            let buf = (**s.buffers.get(&path)?).clone();
+            Some((dims, path, buf))
+        })
+        .map(|(dims, path, mut buf)| {
+            let (r, c, _) = mov::line_start(&buf);
+            buf.set_cursor(led_core::Row(r), led_core::Col(c), led_core::Col(0));
+            buf.set_cursor(
+                led_core::Row(r),
+                led_core::Col(c),
+                led_core::Col(mov::reset_affinity(&buf, &dims)),
+            );
+            buf.close_group_on_move();
+            let (sr, ssl) = mov::adjust_scroll(&buf, &dims);
+            buf.set_scroll(led_core::Row(sr), led_core::SubLine(ssl));
+            buf.update_matching_bracket();
+            buf.touch();
+            Mut::BufferUpdate(path, buf)
+        })
+        .stream();
+
+    let line_end_s = raw_actions
+        .filter(|a| matches!(a, Action::LineEnd))
+        .sample_combine(&state)
+        .filter(|(_, s)| s.focus == PanelSlot::Main)
+        .filter_map(|(_, s)| Some((s.dims?, s.active_tab.clone()?, s)))
+        .filter_map(|(dims, path, s)| {
+            let buf = (**s.buffers.get(&path)?).clone();
+            Some((dims, path, buf))
+        })
+        .map(|(dims, path, mut buf)| {
+            let (r, c, _) = mov::line_end(&buf);
+            buf.set_cursor(led_core::Row(r), led_core::Col(c), led_core::Col(0));
+            buf.set_cursor(
+                led_core::Row(r),
+                led_core::Col(c),
+                led_core::Col(mov::reset_affinity(&buf, &dims)),
+            );
+            buf.close_group_on_move();
+            let (sr, ssl) = mov::adjust_scroll(&buf, &dims);
+            buf.set_scroll(led_core::Row(sr), led_core::SubLine(ssl));
+            buf.update_matching_bracket();
+            buf.touch();
+            Mut::BufferUpdate(path, buf)
+        })
+        .stream();
+
+    let match_bracket_s = raw_actions
+        .filter(|a| matches!(a, Action::MatchBracket))
+        .sample_combine(&state)
+        .filter_map(|(_, s)| Some((s.dims?, s.active_tab.clone()?, s)))
+        .filter_map(|(dims, path, s)| {
+            let buf = (**s.buffers.get(&path)?).clone();
+            Some((dims, path, buf))
+        })
+        .filter(|(_, _, buf)| buf.matching_bracket().is_some())
+        .map(|(dims, path, mut buf)| {
+            let (row, col) = buf.matching_bracket().unwrap();
+            buf.set_cursor(row, col, led_core::Col(0));
+            buf.set_cursor(row, col, led_core::Col(mov::reset_affinity(&buf, &dims)));
+            buf.close_group_on_move();
+            let (sr, ssl) = mov::adjust_scroll(&buf, &dims);
+            buf.set_scroll(led_core::Row(sr), led_core::SubLine(ssl));
+            buf.update_matching_bracket();
+            buf.touch();
+            Mut::BufferUpdate(path, buf)
+        })
+        .stream();
+
+    let undo_s = raw_actions
+        .filter(|a| matches!(a, Action::Undo))
+        .sample_combine(&state)
+        .filter_map(|(_, s)| Some((s.dims?, s.active_tab.clone()?, s)))
+        .filter_map(|(dims, path, s)| {
+            let buf = (**s.buffers.get(&path)?).clone();
+            Some((dims, path, buf))
+        })
+        .map(|(dims, path, mut buf)| {
+            buf.close_group_on_move();
+            if let Some(cursor) = buf.undo() {
+                let row = buf.doc().char_to_line(cursor);
+                let col = cursor.0 - buf.doc().line_to_char(row).0;
+                buf.set_cursor(row, led_core::Col(col), led_core::Col(0));
+                buf.set_cursor(
+                    row,
+                    led_core::Col(col),
+                    led_core::Col(mov::reset_affinity(&buf, &dims)),
+                );
+            }
+            let (sr, ssl) = mov::adjust_scroll(&buf, &dims);
+            buf.set_scroll(led_core::Row(sr), led_core::SubLine(ssl));
+            buf.update_matching_bracket();
+            buf.touch();
+            Mut::BufferUpdate(path, buf)
+        })
+        .stream();
+
+    let redo_s = raw_actions
+        .filter(|a| matches!(a, Action::Redo))
+        .sample_combine(&state)
+        .filter_map(|(_, s)| Some((s.dims?, s.active_tab.clone()?, s)))
+        .filter_map(|(dims, path, s)| {
+            let buf = (**s.buffers.get(&path)?).clone();
+            Some((dims, path, buf))
+        })
+        .map(|(dims, path, mut buf)| {
+            buf.close_group_on_move();
+            if let Some(cursor) = buf.redo() {
+                let row = buf.doc().char_to_line(cursor);
+                let col = cursor.0 - buf.doc().line_to_char(row).0;
+                buf.set_cursor(row, led_core::Col(col), led_core::Col(0));
+                buf.set_cursor(
+                    row,
+                    led_core::Col(col),
+                    led_core::Col(mov::reset_affinity(&buf, &dims)),
+                );
+            }
+            let (sr, ssl) = mov::adjust_scroll(&buf, &dims);
+            buf.set_scroll(led_core::Row(sr), led_core::SubLine(ssl));
+            buf.update_matching_bracket();
+            buf.touch();
+            Mut::BufferUpdate(path, buf)
+        })
+        .stream();
+
     // ── 2. Build up muts from driver input and derived streams ──
 
     let muts: Stream<Mut> = drivers
@@ -531,6 +674,12 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
     lsp_format_s.forward(&muts);
     lsp_code_action_s.forward(&muts);
     yank_s.forward(&muts);
+    action_resize_s.forward(&muts);
+    line_start_s.forward(&muts);
+    line_end_s.forward(&muts);
+    match_bracket_s.forward(&muts);
+    undo_s.forward(&muts);
+    redo_s.forward(&muts);
     buffers_s.forward(&muts);
     process_s.forward(&muts);
     timers_s.forward(&muts);
@@ -1059,6 +1208,12 @@ fn is_migrated(action: &Action) -> bool {
             | Action::LspFormat
             | Action::LspCodeAction
             | Action::Yank
+            | Action::Resize(..)
+            | Action::LineStart
+            | Action::LineEnd
+            | Action::MatchBracket
+            | Action::Undo
+            | Action::Redo
     )
 }
 
