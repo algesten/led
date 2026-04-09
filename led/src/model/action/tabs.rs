@@ -46,7 +46,7 @@ pub(super) fn kill_buffer(state: &mut AppState) {
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| active_path.to_string_lossy().into_owned());
         state.confirm_kill = true;
-        state.alerts.warn = Some(format!("Buffer {filename} modified; kill anyway? (y or n)"));
+        state.alerts.info = Some(format!("Buffer {filename} modified; kill anyway? (y or n)"));
         return;
     }
 

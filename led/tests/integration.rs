@@ -678,7 +678,7 @@ fn kill_buffer_dirty_prompts() {
     assert!(
         t.state
             .alerts
-            .warn
+            .info
             .as_deref()
             .unwrap_or("")
             .contains("kill anyway"),
@@ -2900,7 +2900,7 @@ fn kill_region_no_mark_warns() {
         .with_file("aaa\nbbb\n")
         .run(actions(vec![KillRegion]));
 
-    assert_eq!(t.state.alerts.warn.as_deref(), Some("No region"));
+    assert_eq!(t.state.alerts.info.as_deref(), Some("No region"));
 }
 
 #[test]
@@ -5415,7 +5415,7 @@ fn kbd_macro_no_macro_defined() {
     let t = TestHarness::new()
         .with_file("hello\n")
         .run(actions(vec![KbdMacroExecute]));
-    assert_eq!(t.state.alerts.warn.as_deref(), Some("No kbd macro defined"));
+    assert_eq!(t.state.alerts.info.as_deref(), Some("No kbd macro defined"));
 }
 
 #[test]
@@ -5424,7 +5424,7 @@ fn kbd_macro_end_without_recording() {
         .with_file("hello\n")
         .run(actions(vec![KbdMacroEnd]));
     assert_eq!(
-        t.state.alerts.warn.as_deref(),
+        t.state.alerts.info.as_deref(),
         Some("Not defining kbd macro")
     );
 }

@@ -1590,18 +1590,42 @@ pub struct FindFileState {
 
 #[derive(Debug, Clone, Default)]
 pub struct AlertState {
+    /// Transient message, cleared after 3 seconds.
     pub info: Option<String>,
-    pub warn: Option<String>,
+    /// Persistent warnings keyed by sender identifier.
+    /// Shown when no transient info is active.
+    warns: Vec<(String, String)>,
 }
 
 impl AlertState {
     pub fn has_alert(&self) -> bool {
-        self.info.is_some() || self.warn.is_some()
+        self.info.is_some() || !self.warns.is_empty()
     }
 
+    /// Clear transient info only; warns persist.
     pub fn clear(&mut self) {
         self.info = None;
-        self.warn = None;
+    }
+
+    /// Set or update a persistent warning by key.
+    pub fn set_warn(&mut self, key: impl Into<String>, message: impl Into<String>) {
+        let key = key.into();
+        let message = message.into();
+        if let Some(entry) = self.warns.iter_mut().find(|(k, _)| *k == key) {
+            entry.1 = message;
+        } else {
+            self.warns.push((key, message));
+        }
+    }
+
+    /// Clear a persistent warning by key.
+    pub fn clear_warn(&mut self, key: &str) {
+        self.warns.retain(|(k, _)| k != key);
+    }
+
+    /// The current warn message to display (first-arrived takes priority).
+    pub fn warn(&self) -> Option<&str> {
+        self.warns.first().map(|(_, m)| m.as_str())
     }
 }
 
