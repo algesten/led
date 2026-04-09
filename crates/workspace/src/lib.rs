@@ -196,12 +196,17 @@ pub fn driver(out: Stream<WorkspaceOut>, file_watcher: Arc<FileWatcher>) -> Stre
                             );
                             let config = UserPath::clone(&startup.config_dir);
 
-                            let primary = match try_become_primary(&config, &root) {
-                                Some(file) => {
-                                    _lock_file = Some(file);
-                                    true
+                            let primary = if startup.headless {
+                                // Tests: skip flock to avoid stale locks between runs.
+                                true
+                            } else {
+                                match try_become_primary(&config, &root) {
+                                    Some(file) => {
+                                        _lock_file = Some(file);
+                                        true
+                                    }
+                                    None => false,
                                 }
-                                None => false,
                             };
 
                             root_str = root.to_string_lossy().into_owned();
