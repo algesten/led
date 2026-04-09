@@ -164,7 +164,18 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
         })
         .stream();
 
-    let actions_s = actions_of(&drivers.terminal_in, &state);
+    let (actions_muts_s, keyboard_actions_s) = actions_of(&drivers.terminal_in, &state);
+
+    // Unified raw action stream: keyboard + test harness
+    let raw_actions: Stream<Action> = Stream::new();
+    keyboard_actions_s.forward(&raw_actions);
+    drivers.actions_in.forward(&raw_actions);
+
+    // Legacy path: unmigrated actions go through Mut::Action → handle_action
+    let legacy_action_s = raw_actions
+        .filter(|a| !is_migrated(a))
+        .map(Mut::Action)
+        .stream();
     let buffers_s = buffers_of(&drivers.docstore_in, &state);
     let process_s = process_of(&state);
     let lsp_s = lsp_of::lsp_of(&drivers.lsp_in, &state);
@@ -208,6 +219,58 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
         .map(Mut::BrowserReveal)
         .stream();
 
+    // ── Action streams (migrated from handle_action) ──
+
+    let toggle_side_panel_s = raw_actions
+        .filter(|a| matches!(a, Action::ToggleSidePanel))
+        .sample_combine(&state)
+        .map(|(_, s)| Mut::SetShowSidePanel(!s.show_side_panel))
+        .stream();
+
+    let toggle_focus_s = raw_actions
+        .filter(|a| matches!(a, Action::ToggleFocus))
+        .sample_combine(&state)
+        .map(|(_, s)| {
+            Mut::SetFocus(match s.focus {
+                PanelSlot::Main => PanelSlot::Side,
+                PanelSlot::Side => PanelSlot::Main,
+                other => other,
+            })
+        })
+        .stream();
+
+    let quit_s = raw_actions
+        .filter(|a| matches!(a, Action::Quit))
+        .map(|_| Mut::SetPhase(Phase::Exiting))
+        .stream();
+
+    let suspend_s = raw_actions
+        .filter(|a| matches!(a, Action::Suspend))
+        .map(|_| Mut::SetPhase(Phase::Suspended))
+        .stream();
+
+    // Simple LSP request actions
+    let lsp_goto_def_s = raw_actions
+        .filter(|a| matches!(a, Action::LspGotoDefinition))
+        .map(|_| Mut::LspRequestPending(Some(led_state::LspRequest::GotoDefinition)))
+        .stream();
+
+    let lsp_format_s = raw_actions
+        .filter(|a| matches!(a, Action::LspFormat))
+        .map(|_| Mut::LspRequestPending(Some(led_state::LspRequest::Format)))
+        .stream();
+
+    let lsp_code_action_s = raw_actions
+        .filter(|a| matches!(a, Action::LspCodeAction))
+        .map(|_| Mut::LspRequestPending(Some(led_state::LspRequest::CodeAction)))
+        .stream();
+
+    // Yank triggers clipboard read
+    let yank_s = raw_actions
+        .filter(|a| matches!(a, Action::Yank))
+        .map(|_| Mut::PendingYank)
+        .stream();
+
     // ── 2. Build up muts from driver input and derived streams ──
 
     let muts: Stream<Mut> = drivers
@@ -220,8 +283,6 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
             Ok(v) => Mut::ConfigTheme(v),
             Err(a) => Mut::alert(a),
         }));
-
-    let direct_actions_s = drivers.actions_in.map(|a| Mut::Action(a)).stream();
 
     // Split timers: undo_flush goes through a chain that samples state,
     // other timers go directly to the reducer.
@@ -434,8 +495,16 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
     notify_s.forward(&muts);
     sync_s.forward(&muts);
     keymap_s.forward(&muts);
-    actions_s.forward(&muts);
-    direct_actions_s.forward(&muts);
+    actions_muts_s.forward(&muts);
+    legacy_action_s.forward(&muts);
+    toggle_side_panel_s.forward(&muts);
+    toggle_focus_s.forward(&muts);
+    quit_s.forward(&muts);
+    suspend_s.forward(&muts);
+    lsp_goto_def_s.forward(&muts);
+    lsp_format_s.forward(&muts);
+    lsp_code_action_s.forward(&muts);
+    yank_s.forward(&muts);
     buffers_s.forward(&muts);
     process_s.forward(&muts);
     timers_s.forward(&muts);
@@ -824,6 +893,12 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
             }
 
             // ── LSP ──
+            Mut::LspRequestPending(request) => {
+                s.lsp_mut().pending_request.set(request);
+            }
+            Mut::PendingYank => {
+                s.kill_ring.pending_yank.set(());
+            }
             Mut::LspEdits { edits } => {
                 for fe in edits {
                     if let Some(buf) = s.buf_mut(&fe.path) {
@@ -938,6 +1013,22 @@ fn resolve_resume_active_tab(s: &AppState) -> Option<CanonPath> {
 }
 
 /// Pure: compute focus slot when entering Running.
+/// Actions that have been migrated to dedicated stream chains.
+/// These are filtered out of the legacy Mut::Action path.
+fn is_migrated(action: &Action) -> bool {
+    matches!(
+        action,
+        Action::ToggleSidePanel
+            | Action::ToggleFocus
+            | Action::Quit
+            | Action::Suspend
+            | Action::LspGotoDefinition
+            | Action::LspFormat
+            | Action::LspCodeAction
+            | Action::Yank
+    )
+}
+
 pub(super) fn resolve_focus_slot(s: &AppState) -> PanelSlot {
     if s.startup.arg_dir.is_some() {
         PanelSlot::Side
@@ -1175,6 +1266,8 @@ enum Mut {
     },
     SetPendingLists(Vec<CanonPath>),
     SetResumeEntries(Vec<CanonPath>),
+    LspRequestPending(Option<led_state::LspRequest>),
+    PendingYank,
     JumpRecord(led_state::JumpPosition),
     RequestOpen(CanonPath),
     LspFormatDone,
@@ -1376,6 +1469,8 @@ impl Mut {
             Mut::JumpRecord(_) => "JumpRecord",
             Mut::RequestOpen(_) => "RequestOpen",
             Mut::SetTabPendingCursor { .. } => "SetTabPendingCursor",
+            Mut::LspRequestPending(_) => "LspRequestPending",
+            Mut::PendingYank => "PendingYank",
             Mut::LspEdits { .. } => "LspEdits",
             Mut::LspFormatDone => "LspFormatDone",
             Mut::LspCompletion { .. } => "LspCompletion",

@@ -9,7 +9,7 @@ mod tabs;
 use std::rc::Rc;
 
 use led_core::{Action, CharOffset, Col, EditOp, PanelSlot, Row};
-use led_state::{AppState, Dimensions, EditKind, LspRequest, Phase};
+use led_state::{AppState, Dimensions, EditKind, LspRequest};
 
 use super::{edit, file_search, find_file, jump, mov, search};
 use helpers::{is_editing_action, maybe_close_group, should_record, with_buf};
@@ -132,28 +132,6 @@ pub fn handle_action(state: &mut AppState, action: Action) -> bool {
     }
 
     match action {
-        // ── UI ──
-        Action::ToggleSidePanel => {
-            state.show_side_panel = !state.show_side_panel;
-            if let Some(ref mut dims) = state.dims {
-                dims.show_side_panel = state.show_side_panel;
-            }
-        }
-        Action::ToggleFocus => {
-            state.focus = match state.focus {
-                PanelSlot::Main => PanelSlot::Side,
-                PanelSlot::Side => PanelSlot::Main,
-                other => other,
-            };
-        }
-        Action::Quit => {
-            log::info!("phase: {:?} → Exiting (Quit)", state.phase);
-            state.phase = Phase::Exiting;
-        }
-        Action::Suspend => {
-            state.phase = Phase::Suspended;
-        }
-
         // ── Resize ──
         Action::Resize(w, h) => {
             state.dims = Some(Dimensions::new(w, h, state.show_side_panel));
@@ -345,9 +323,6 @@ pub fn handle_action(state: &mut AppState, action: Action) -> bool {
                 state.alerts.info = Some("No region".into());
             }
         }
-        Action::Yank => {
-            state.kill_ring.pending_yank.set(());
-        }
 
         // ── Undo / Redo ──
         Action::Undo => with_buf(state, |buf, dims| {
@@ -503,24 +478,6 @@ pub fn handle_action(state: &mut AppState, action: Action) -> bool {
         }
 
         // ── LSP ──
-        Action::LspGotoDefinition => {
-            state
-                .lsp_mut()
-                .pending_request
-                .set(Some(LspRequest::GotoDefinition));
-        }
-        Action::LspFormat => {
-            state
-                .lsp_mut()
-                .pending_request
-                .set(Some(LspRequest::Format));
-        }
-        Action::LspCodeAction => {
-            state
-                .lsp_mut()
-                .pending_request
-                .set(Some(LspRequest::CodeAction));
-        }
         Action::LspRename => lsp::open_rename_overlay(state),
         Action::NextIssue => {
             lsp::navigate_issue(state, true);

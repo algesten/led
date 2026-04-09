@@ -12,30 +12,48 @@ use led_terminal_in::TerminalInput;
 use super::Mut;
 
 /// Derive actions from terminal input + state (for keymap context).
-pub fn actions_of(input: &Stream<TerminalInput>, state: &Stream<Rc<AppState>>) -> Stream<Mut> {
+/// Returns (mut_stream, action_stream) — mut_stream has Resize + internal Muts,
+/// action_stream has raw Actions for downstream _of files.
+pub fn actions_of(
+    input: &Stream<TerminalInput>,
+    state: &Stream<Rc<AppState>>,
+) -> (Stream<Mut>, Stream<Action>) {
     // Resize doesn't need state — extract it directly so it's never lost
-    let resize_s = input.filter_map(|i| match i {
-        TerminalInput::Resize(w, h) => Some(Mut::Resize(w, h)),
-        _ => None,
-    });
+    let resize_s = input
+        .filter_map(|i| match i {
+            TerminalInput::Resize(w, h) => Some(Mut::Resize(w, h)),
+            _ => None,
+        })
+        .stream();
 
     // Key events need the keymap from state
     let chord: Cell<Option<KeyCombo>> = Cell::new(None);
     let chord_count: Cell<Option<usize>> = Cell::new(None);
     let macro_repeat: Cell<bool> = Cell::new(false);
-    let key_input_s = input
+    let key_muts_s: Stream<Mut> = input
         .filter_map(|i| match i {
             TerminalInput::Key(combo) => Some(combo),
             _ => None,
         })
         .sample_combine(state)
         .map(move |(combo, state)| map_key(combo, &state, &chord, &chord_count, &macro_repeat))
-        .flat_map(|actions| actions);
+        .flat_map(|muts| muts);
 
-    let merged: Stream<Mut> = Stream::new();
-    resize_s.into(&merged);
-    key_input_s.forward(&merged);
-    merged
+    // Split: extract Actions, keep non-Action Muts (KbdMacroSetCount, etc.)
+    let action_s = key_muts_s
+        .filter_map(|m| match m {
+            Mut::Action(a) => Some(a),
+            _ => None,
+        })
+        .stream();
+
+    let non_action_muts_s = key_muts_s.filter(|m| !matches!(m, Mut::Action(_))).stream();
+
+    let muts: Stream<Mut> = Stream::new();
+    resize_s.forward(&muts);
+    non_action_muts_s.forward(&muts);
+
+    (muts, action_s)
 }
 
 fn map_key(
