@@ -937,6 +937,7 @@ pub enum OverlayContent {
     },
     PrComment {
         comments: Vec<(String, String)>, // (author, body)
+        author_style: Style,
         anchor_x: u16,
         anchor_y: u16,
     },
@@ -1027,8 +1028,18 @@ pub fn overlay_inputs(s: &AppState) -> OverlayContent {
     // PR comment popover: show when cursor is on a line with review comments.
     // Hidden when buffer has diverged from the PR's committed version.
     if let Some(comments) = pr_comments_for_cursor(s) {
+        let default_blue = Style::default().fg(ratatui::style::Color::Blue);
+        let author_style = s
+            .config_theme
+            .as_ref()
+            .and_then(|ct| {
+                let pr = ct.file.pr.as_ref()?;
+                Some(style::resolve_cached(&ct.file, &pr.gutter_comment))
+            })
+            .unwrap_or(default_blue);
         return OverlayContent::PrComment {
             comments,
+            author_style,
             anchor_x: cursor_x,
             anchor_y: cursor_y,
         };
@@ -1486,14 +1497,7 @@ pub fn build_browser_lines(b: &BrowserInputs) -> Rc<Vec<Line<'static>>> {
                     })
                 })
                 .or_else(|| {
-                    pr_style.map(|sty| {
-                        let ch = if b.pr_comment_files.contains(&entry.path) {
-                            'C'
-                        } else {
-                            'P'
-                        };
-                        (ch, sty)
-                    })
+                    pr_style.map(|sty| ('\u{2022}', sty)) // •
                 });
 
             match status {

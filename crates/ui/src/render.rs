@@ -239,6 +239,7 @@ fn render_overlay(overlay: &OverlayContent, frame: &mut Frame, area: Rect) {
         }
         OverlayContent::PrComment {
             comments,
+            author_style,
             anchor_x,
             anchor_y,
         } => {
@@ -247,24 +248,21 @@ fn render_overlay(overlay: &OverlayContent, frame: &mut Frame, area: Rect) {
             }
 
             let max_content = 58usize.min(area.width.saturating_sub(4) as usize);
+            let author_fg = author_style.fg.unwrap_or(Color::Blue);
 
             let mut raw: Vec<(String, Color)> = Vec::new();
             for (i, (author, body)) in comments.iter().enumerate() {
                 if i > 0 {
                     raw.push(("\u{2500}".repeat(max_content), Color::Gray));
                 }
-                raw.push((format!("@{author}:"), Color::Cyan));
+                raw.push((format!("@{author}:"), author_fg));
                 for line in word_wrap(body, max_content) {
                     raw.push((line, Color::White));
                 }
             }
 
-            let content_w = raw
-                .iter()
-                .map(|(t, _)| t.chars().count())
-                .max()
-                .unwrap_or(1);
-            let width = (content_w + 2).min(area.width as usize);
+            // Fixed width = max_content + 2 (padding)
+            let width = (max_content + 2).min(area.width as usize);
             let height = raw.len().min(area.height as usize / 2).max(1);
             let raw = &raw[..height];
 
