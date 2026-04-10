@@ -1420,6 +1420,40 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
         .map(|_| Mut::TriggerFileSearch)
         .stream();
 
+    // ── LspRename: compute word under cursor → SetLspRename + SetFocus ──
+
+    let lsp_rename_parent_s = raw_actions
+        .filter(|a| matches!(a, Action::LspRename))
+        .sample_combine(&state)
+        .filter(|(_, s)| !has_blocking_overlay(&s))
+        .stream();
+
+    let lsp_rename_set_s = lsp_rename_parent_s
+        .filter_map(|(_, s)| {
+            let path = s.active_tab.as_ref()?;
+            let buf = s.buffers.get(path)?;
+            let word = action::word_under_cursor(buf);
+            let cursor = word.len();
+            Some(Mut::SetLspRename(led_state::RenameState {
+                input: word,
+                cursor,
+            }))
+        })
+        .stream();
+
+    let lsp_rename_focus_s = lsp_rename_parent_s
+        .filter(|(_, s)| {
+            s.active_tab
+                .as_ref()
+                .and_then(|p| s.buffers.get(p))
+                .is_some()
+        })
+        .map(|_| Mut::SetFocus(PanelSlot::Overlay))
+        .stream();
+
+    // NextIssue/PrevIssue stay in handle_action — navigate_to_position
+    // requires imperative state mutation (request_open, set active_tab, etc.)
+
     // ── 2. Build up muts from driver input and derived streams ──
 
     let muts: Stream<Mut> = drivers
@@ -1720,6 +1754,8 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
     open_file_search_focus2_s.forward(&muts);
     open_file_search_clear_mark_s.forward(&muts);
     open_file_search_trigger_s.forward(&muts);
+    lsp_rename_set_s.forward(&muts);
+    lsp_rename_focus_s.forward(&muts);
     // Modal streams + unmigrated — all share the same actions_with_state snapshot.
     isearch_s.forward(&muts);
     lsp_code_action_picker_s.forward(&muts);
@@ -2163,6 +2199,9 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
             Mut::SetFileSearch(fs) => {
                 s.file_search = Some(fs);
             }
+            Mut::SetLspRename(rename) => {
+                s.lsp_mut().rename = Some(rename);
+            }
             Mut::TriggerFileSearch => {
                 file_search::trigger_search(&mut s);
             }
@@ -2367,6 +2406,7 @@ fn is_migrated(action: &Action) -> bool {
             | Action::FindFile
             | Action::SaveAs
             | Action::OpenFileSearch
+            | Action::LspRename
     )
 }
 
@@ -2668,6 +2708,7 @@ enum Mut {
     SetPendingFindFileList(CanonPath, String, bool),
     SetFileSearch(led_state::file_search::FileSearchState),
     TriggerFileSearch,
+    SetLspRename(led_state::RenameState),
     LspCodeActionPickerAction(Action),
     LspRenameAction(Action),
     LspCompletionAction(Action),
@@ -2891,6 +2932,7 @@ impl Mut {
             Mut::SetPendingFindFileList(..) => "SetPendingFindFileList",
             Mut::SetFileSearch(_) => "SetFileSearch",
             Mut::TriggerFileSearch => "TriggerFileSearch",
+            Mut::SetLspRename(_) => "SetLspRename",
             Mut::ForceKillBuffer => "ForceKillBuffer",
             Mut::LspCodeActionPickerAction(_) => "LspCodeActionPickerAction",
             Mut::LspRenameAction(_) => "LspRenameAction",

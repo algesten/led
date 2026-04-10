@@ -14,7 +14,9 @@ use helpers::{is_editing_action, maybe_close_group, should_record, with_buf};
 use preview::promote_preview_active;
 
 // Re-export items used by other modules in the crate.
-pub(super) use helpers::{browser_scroll_to_selected, close_group_on_move, reveal_active_buffer};
+pub(super) use helpers::{
+    browser_scroll_to_selected, close_group_on_move, reveal_active_buffer, word_under_cursor,
+};
 pub(super) use lsp::{handle_code_action_picker, handle_completion_action, handle_rename_action};
 pub(super) use preview::{close_preview, evict_one_buffer, promote_preview, set_preview};
 pub(super) use tabs::force_kill_buffer;
@@ -304,13 +306,6 @@ pub fn handle_action(state: &mut AppState, action: Action) -> bool {
         }
 
         // ── LSP ──
-        Action::LspRename => lsp::open_rename_overlay(state),
-        Action::NextIssue => {
-            lsp::navigate_issue(state, true);
-        }
-        Action::PrevIssue => {
-            lsp::navigate_issue(state, false);
-        }
 
         // ── Macros ──
         Action::KbdMacroStart => {
@@ -351,7 +346,75 @@ pub fn handle_action(state: &mut AppState, action: Action) -> bool {
             }
         }
 
+        Action::NextIssue => {
+            lsp::navigate_issue(state, true);
+        }
+        Action::PrevIssue => {
+            lsp::navigate_issue(state, false);
+        }
+
         _ => {}
     }
     true
+}
+
+/// Pure: compute the navigation target for next/prev issue.
+/// Returns Muts to navigate to the target position.
+pub(super) fn compute_navigate_issue(state: &AppState, forward: bool) -> Vec<super::Mut> {
+    let Some((target_path, target_row, target_col)) = lsp::compute_issue_target(state, forward)
+    else {
+        return vec![];
+    };
+
+    // Same buffer — BufferUpdate with cursor moved
+    if state.active_tab.as_ref() == Some(&target_path) {
+        let Some(dims) = state.dims else {
+            return vec![];
+        };
+        let Some(buf_rc) = state.buffers.get(&target_path) else {
+            return vec![];
+        };
+        let mut buf = (**buf_rc).clone();
+        buf.close_group_on_move();
+        buf.set_cursor(
+            led_core::Row(target_row),
+            led_core::Col(target_col),
+            led_core::Col(target_col),
+        );
+        let (sr, ssl) = super::mov::adjust_scroll(&buf, &dims);
+        buf.set_scroll(led_core::Row(sr), led_core::SubLine(ssl));
+        buf.update_matching_bracket();
+        buf.touch();
+        return vec![super::Mut::BufferUpdate(target_path, buf)];
+    }
+
+    // Different file, already open — BufferUpdate + ActivateBuffer
+    if state.buffers.contains_key(&target_path) {
+        let mut buf = (**state.buffers.get(&target_path).unwrap()).clone();
+        let half = state.dims.map_or(10, |d| d.buffer_height() / 2);
+        let r = target_row.min(buf.doc().line_count().saturating_sub(1));
+        buf.set_cursor(
+            led_core::Row(r),
+            led_core::Col(target_col),
+            led_core::Col(target_col),
+        );
+        buf.set_scroll(led_core::Row(r.saturating_sub(half)), led_core::SubLine(0));
+        return vec![
+            super::Mut::BufferUpdate(target_path.clone(), buf),
+            super::Mut::ActivateBuffer(target_path),
+        ];
+    }
+
+    // Not open — RequestOpen + SetTabPendingCursor + ActivateBuffer
+    let half = state.dims.map_or(10, |d| d.buffer_height() / 2);
+    vec![
+        super::Mut::RequestOpen(target_path.clone()),
+        super::Mut::SetTabPendingCursor {
+            path: target_path.clone(),
+            row: led_core::Row(target_row),
+            col: led_core::Col(target_col),
+            scroll_row: led_core::Row(target_row.saturating_sub(half)),
+        },
+        super::Mut::ActivateBuffer(target_path),
+    ]
 }

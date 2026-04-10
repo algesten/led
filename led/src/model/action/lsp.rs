@@ -219,6 +219,94 @@ pub fn handle_rename_action(state: &mut AppState, action: &Action) -> bool {
     }
 }
 
+/// Pure: compute the target position for next/prev issue navigation.
+pub fn compute_issue_target(state: &AppState, forward: bool) -> Option<(CanonPath, usize, usize)> {
+    use led_core::git::FileStatus;
+    use led_lsp::DiagnosticSeverity;
+
+    let cur = cursor_pos(state);
+
+    // Level 1: LSP errors
+    if let Some(t) = scan_diagnostics_pure(state, forward, DiagnosticSeverity::Error, &cur) {
+        return Some(t);
+    }
+    // Level 2: LSP warnings
+    if let Some(t) = scan_diagnostics_pure(state, forward, DiagnosticSeverity::Warning, &cur) {
+        return Some(t);
+    }
+    // Level 3: Git unstaged
+    if let Some(t) = scan_git_changes_pure(
+        state,
+        forward,
+        &[FileStatus::GitWtModified, FileStatus::GitUntracked],
+        &cur,
+    ) {
+        return Some(t);
+    }
+    // Level 4: Git staged
+    scan_git_changes_pure(
+        state,
+        forward,
+        &[FileStatus::GitIndexModified, FileStatus::GitIndexNew],
+        &cur,
+    )
+}
+
+fn scan_diagnostics_pure(
+    state: &AppState,
+    forward: bool,
+    severity: led_lsp::DiagnosticSeverity,
+    cur: &Option<Pos<'_>>,
+) -> Option<(CanonPath, usize, usize)> {
+    let mut best: Option<Pos<'_>> = None;
+    let mut wrap: Option<Pos<'_>> = None;
+    for buf in state.buffers.values() {
+        let Some(path) = buf.path() else { continue };
+        for d in buf.status().diagnostics() {
+            if d.severity == severity {
+                consider(
+                    forward,
+                    cur,
+                    (path, *d.start_row, *d.start_col),
+                    &mut best,
+                    &mut wrap,
+                );
+            }
+        }
+    }
+    let &(p, r, c) = best.or(wrap).as_ref()?;
+    Some((p.clone(), r, c))
+}
+
+fn scan_git_changes_pure(
+    state: &AppState,
+    forward: bool,
+    match_statuses: &[led_core::git::FileStatus],
+    cur: &Option<Pos<'_>>,
+) -> Option<(CanonPath, usize, usize)> {
+    let mut best: Option<Pos<'_>> = None;
+    let mut wrap: Option<Pos<'_>> = None;
+    for (path, statuses) in state.git.file_statuses.iter() {
+        if !statuses.iter().any(|fs| match_statuses.contains(fs)) {
+            continue;
+        }
+        let line_statuses = state
+            .buffers
+            .get(path)
+            .map(|buf| buf.status().git_line_statuses())
+            .unwrap_or_default();
+        if line_statuses.is_empty() {
+            consider(forward, cur, (path, 0, 0), &mut best, &mut wrap);
+        } else {
+            for ls in line_statuses {
+                consider(forward, cur, (path, ls.rows.start, 0), &mut best, &mut wrap);
+            }
+        }
+    }
+    let &(p, r, c) = best.or(wrap).as_ref()?;
+    Some((p.clone(), r, c))
+}
+
 pub(super) fn navigate_issue(state: &mut AppState, forward: bool) {
     use led_core::git::FileStatus;
     use led_lsp::DiagnosticSeverity;

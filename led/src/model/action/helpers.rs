@@ -106,7 +106,7 @@ pub(super) fn should_record(action: &led_core::Action) -> bool {
 }
 
 /// Extract the word under the cursor.
-pub(super) fn word_under_cursor(buf: &BufferState) -> String {
+pub fn word_under_cursor(buf: &BufferState) -> String {
     led_core::with_line_buf(|line| {
         buf.doc().line(buf.cursor_row(), line);
         let chars: Vec<char> = line.chars().collect();
