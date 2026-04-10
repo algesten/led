@@ -171,9 +171,43 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
     keyboard_actions_s.forward(&raw_actions);
     drivers.actions_in.forward(&raw_actions);
 
-    // ALL actions go through handle_action for modal interception + pre-match guards.
-    // Migrated actions hit the catch-all in handle_action's main match (no-op there).
-    let all_actions_s = raw_actions.map(Mut::Action).stream();
+    // Only unmigrated actions go through handle_action.
+    // Migrated actions are handled entirely by dedicated stream chains.
+    let unmigrated_actions_s = raw_actions
+        .filter(|a| !is_migrated(a))
+        .map(Mut::Action)
+        .stream();
+
+    // ── Pre-match guard streams (apply to migrated actions) ──
+    // These replicate the cross-cutting logic from handle_action's pre-match guards.
+
+    let macro_record_s = raw_actions
+        .filter(|a| is_migrated(a))
+        .filter(|a| {
+            !matches!(
+                a,
+                Action::KbdMacroStart | Action::KbdMacroEnd | Action::KbdMacroExecute
+            )
+        })
+        .sample_combine(&state)
+        .filter(|(_, s)| s.kbd_macro.recording)
+        .map(|(a, _)| Mut::KbdMacroRecord(a))
+        .stream();
+
+    let confirm_kill_dismiss_s = raw_actions
+        .filter(|a| is_migrated(a))
+        .sample_combine(&state)
+        .filter(|(_, s)| s.confirm_kill)
+        .map(|_| Mut::DismissConfirmKill)
+        .stream();
+
+    let kill_ring_break_s = raw_actions
+        .filter(|a| is_migrated(a))
+        .filter(|a| !matches!(a, Action::KillLine))
+        .sample_combine(&state)
+        .filter(|(_, s)| !s.confirm_kill)
+        .map(|_| Mut::BreakKillAccumulation)
+        .stream();
     let buffers_s = buffers_of(&drivers.docstore_in, &state);
     let process_s = process_of(&state);
     let lsp_s = lsp_of::lsp_of(&drivers.lsp_in, &state);
@@ -456,24 +490,7 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
         })
         .stream();
 
-    // Abort: clear mark on active buffer
-    let abort_s = raw_actions
-        .filter(|a| matches!(a, Action::Abort))
-        .sample_combine(&state)
-        .filter(|(_, s)| !has_blocking_overlay(&s) && !has_input_modal(&s))
-        .filter_map(|(_, s)| Some((s.dims?, s.active_tab.clone()?, s)))
-        .filter_map(|(dims, path, s)| {
-            let buf = (**s.buffers.get(&path)?).clone();
-            Some((dims, path, buf))
-        })
-        .map(|(dims, path, mut buf)| {
-            buf.clear_mark();
-            let (sr, ssl) = mov::adjust_scroll(&buf, &dims);
-            buf.set_scroll(led_core::Row(sr), led_core::SubLine(ssl));
-            buf.touch();
-            Mut::BufferUpdate(path, buf)
-        })
-        .stream();
+    // Abort stays in handle_action — consumed by modals (isearch, file_search, completion)
 
     // Tab cycling: pure computation of next/prev tab path
     let next_tab_s = raw_actions
@@ -984,9 +1001,11 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
     sync_s.forward(&muts);
     keymap_s.forward(&muts);
     actions_muts_s.forward(&muts);
-    // Action streams BEFORE all_actions_s — they must sample pre-mutation state.
-    // all_actions_s (Mut::Action → handle_action) may deactivate modals, and
-    // editing streams must see the modal-active state to correctly filter.
+    // Pre-match guard streams for migrated actions
+    macro_record_s.forward(&muts);
+    confirm_kill_dismiss_s.forward(&muts);
+    kill_ring_break_s.forward(&muts);
+    // Action streams
     toggle_side_panel_s.forward(&muts);
     toggle_focus_s.forward(&muts);
     quit_s.forward(&muts);
@@ -1003,7 +1022,7 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
     redo_s.forward(&muts);
     set_mark_buf_s.forward(&muts);
     set_mark_alert_s.forward(&muts);
-    abort_s.forward(&muts);
+
     next_tab_s.forward(&muts);
     prev_tab_s.forward(&muts);
     lsp_toggle_hints_s.forward(&muts);
@@ -1028,8 +1047,8 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
     jump_fwd_activate_s.forward(&muts);
     jump_fwd_open_s.forward(&muts);
     jump_fwd_cursor_s.forward(&muts);
-    // all_actions_s LAST — handle_action runs after all stream chains have sampled state.
-    all_actions_s.forward(&muts);
+    // Only unmigrated actions go through handle_action.
+    unmigrated_actions_s.forward(&muts);
     buffers_s.forward(&muts);
     process_s.forward(&muts);
     timers_s.forward(&muts);
@@ -1424,6 +1443,16 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
             Mut::PendingYank => {
                 s.kill_ring.pending_yank.set(());
             }
+            Mut::KbdMacroRecord(a) => {
+                s.kbd_macro.current.push(a);
+            }
+            Mut::DismissConfirmKill => {
+                s.confirm_kill = false;
+                s.alerts.info = None;
+            }
+            Mut::BreakKillAccumulation => {
+                s.kill_ring.break_accumulation();
+            }
             Mut::SetPendingSaveAfterFormat => {
                 log::info!("save: requesting LSP format");
                 s.lsp_mut().pending_save_after_format = true;
@@ -1580,6 +1609,36 @@ fn compute_cycle_tab(s: &AppState, direction: i32) -> Option<CanonPath> {
 }
 
 /// True when the active buffer has an LSP server (used for format-before-save).
+fn is_migrated(action: &Action) -> bool {
+    matches!(
+        action,
+        Action::ToggleSidePanel
+            | Action::ToggleFocus
+            | Action::Quit
+            | Action::Suspend
+            | Action::LspGotoDefinition
+            | Action::LspFormat
+            | Action::LspCodeAction
+            | Action::Yank
+            | Action::Resize(..)
+            | Action::LineStart
+            | Action::LineEnd
+            | Action::MatchBracket
+            | Action::Undo
+            | Action::Redo
+            | Action::SetMark
+            | Action::NextTab
+            | Action::PrevTab
+            | Action::LspToggleInlayHints
+            | Action::Save
+            | Action::SaveAll
+            | Action::SaveNoFormat
+            | Action::SaveForce
+            | Action::JumpBack
+            | Action::JumpForward
+    )
+}
+
 fn has_active_lsp(s: &AppState) -> bool {
     s.active_tab
         .as_ref()
@@ -1844,6 +1903,9 @@ enum Mut {
     SetResumeEntries(Vec<CanonPath>),
     LspRequestPending(Option<led_state::LspRequest>),
     PendingYank,
+    KbdMacroRecord(Action),
+    DismissConfirmKill,
+    BreakKillAccumulation,
     ToggleInlayHints(bool),
     SetPendingSaveAfterFormat,
     SaveRequest,
@@ -2052,6 +2114,9 @@ impl Mut {
             Mut::SetTabPendingCursor { .. } => "SetTabPendingCursor",
             Mut::LspRequestPending(_) => "LspRequestPending",
             Mut::PendingYank => "PendingYank",
+            Mut::KbdMacroRecord(_) => "KbdMacroRecord",
+            Mut::DismissConfirmKill => "DismissConfirmKill",
+            Mut::BreakKillAccumulation => "BreakKillAccumulation",
             Mut::ToggleInlayHints(_) => "ToggleInlayHints",
             Mut::SetPendingSaveAfterFormat => "SetPendingSaveAfterFormat",
             Mut::SaveRequest => "SaveRequest",

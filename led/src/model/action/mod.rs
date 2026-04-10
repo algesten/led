@@ -168,6 +168,10 @@ pub fn handle_action(state: &mut AppState, action: Action) -> bool {
             }
         }
 
+        Action::Abort => with_buf(state, |buf, _dims| {
+            buf.clear_mark();
+        }),
+
         // ── Browser ──
         Action::ExpandDir => browser::handle_browser_expand(state),
         Action::CollapseDir => browser::handle_browser_collapse(state),
