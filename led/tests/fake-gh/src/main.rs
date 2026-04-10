@@ -54,6 +54,17 @@ fn main() {
         }
     }
 
+    // Match: api graphql -f query=...
+    if args.len() >= 2 && args[0] == "api" && args[1] == "graphql" {
+        match config.get("graphql") {
+            Some(v) => {
+                println!("{}", v);
+                process::exit(0);
+            }
+            None => process::exit(1),
+        }
+    }
+
     // Unknown subcommand
     process::exit(1);
 }

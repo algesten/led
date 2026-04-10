@@ -1513,6 +1513,9 @@ fn handle_timer(state: &mut AppState, name: &'static str) {
         "pr_settle" => {
             state.git_mut().pr_settle_seq.set(());
         }
+        "pr_poll" => {
+            state.git_mut().pr_poll_seq.set(());
+        }
         _ => {}
     }
 }

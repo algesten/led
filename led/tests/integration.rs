@@ -5947,3 +5947,126 @@ diff --git a/test.txt b/test.txt
         "expected rows 2,3 in PR diff, got {rows:?}"
     );
 }
+
+#[test]
+fn gh_pr_review_comments_loaded() {
+    // Verify that line-level review comments from GraphQL are loaded
+    // and associated with the correct file and line.
+    let diff = "\
+diff --git a/test.txt b/test.txt
+--- a/test.txt
++++ b/test.txt
+@@ -1,2 +1,4 @@
+ aaa
+ bbb
++ccc
++ddd
+";
+    let config = serde_json::json!({
+        "pr_view": {
+            "number": 10,
+            "state": "OPEN",
+            "url": "https://github.com/test/repo/pull/10",
+            "reviews": []
+        },
+        "pr_diff": diff,
+        "graphql": {
+            "data": {
+                "repository": {
+                    "pullRequest": {
+                        "reviewThreads": {
+                            "nodes": [
+                                {
+                                    "path": "test.txt",
+                                    "line": 3,
+                                    "isOutdated": false,
+                                    "comments": {
+                                        "nodes": [
+                                            {
+                                                "body": "Should this be ddd?",
+                                                "author": { "login": "reviewer" }
+                                            }
+                                        ]
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                }
+            }
+        }
+    });
+
+    let (root, file_path) = gh_pr_project("aaa\nbbb\n", "aaa\nbbb\nccc\nddd\n", config);
+
+    let t = TestHarness::with_dir(root)
+        .with_gh_binary(fake_gh_binary())
+        .with_arg(file_path)
+        .run(vec![WaitFor(|s| s.git.pr.is_some())]);
+
+    let pr = t.state.git.pr.as_ref().unwrap();
+    assert_eq!(pr.number.0, 10);
+    assert_eq!(pr.comments.len(), 1, "expected 1 file with comments");
+
+    let comments = pr.comments.values().next().unwrap();
+    assert_eq!(comments.len(), 1, "expected 1 comment");
+    assert_eq!(
+        comments[0].line.0, 2,
+        "comment should be on row 2 (0-based from line 3)"
+    );
+    assert_eq!(comments[0].body, "Should this be ddd?");
+    assert_eq!(comments[0].author, "reviewer");
+}
+
+#[test]
+fn gh_pr_outdated_comments_skipped() {
+    // Outdated review comments should not appear in the PR state.
+    let config = serde_json::json!({
+        "pr_view": {
+            "number": 11,
+            "state": "OPEN",
+            "url": "https://github.com/test/repo/pull/11",
+            "reviews": []
+        },
+        "pr_diff": "",
+        "graphql": {
+            "data": {
+                "repository": {
+                    "pullRequest": {
+                        "reviewThreads": {
+                            "nodes": [
+                                {
+                                    "path": "test.txt",
+                                    "line": 1,
+                                    "isOutdated": true,
+                                    "comments": {
+                                        "nodes": [
+                                            {
+                                                "body": "Old comment",
+                                                "author": { "login": "reviewer" }
+                                            }
+                                        ]
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                }
+            }
+        }
+    });
+
+    let (root, file_path) = gh_pr_project("aaa\n", "aaa\nbbb\n", config);
+
+    let t = TestHarness::with_dir(root)
+        .with_gh_binary(fake_gh_binary())
+        .with_arg(file_path)
+        .run(vec![WaitFor(|s| s.git.pr.is_some())]);
+
+    let pr = t.state.git.pr.as_ref().unwrap();
+    assert!(
+        pr.comments.is_empty(),
+        "outdated comments should be skipped, got {:?}",
+        pr.comments
+    );
+}
