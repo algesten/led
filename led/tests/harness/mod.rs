@@ -57,6 +57,7 @@ pub struct TestHarness {
     viewport: (u16, u16),
     enable_watchers: bool,
     test_lsp_server: Option<PathBuf>,
+    test_gh_binary: Option<PathBuf>,
 }
 
 impl TestHarness {
@@ -70,6 +71,7 @@ impl TestHarness {
             viewport: (80, 24),
             enable_watchers: false,
             test_lsp_server: None,
+            test_gh_binary: None,
         }
     }
 
@@ -86,6 +88,7 @@ impl TestHarness {
             viewport: (80, 24),
             enable_watchers: false,
             test_lsp_server: None,
+            test_gh_binary: None,
         }
     }
 
@@ -93,6 +96,13 @@ impl TestHarness {
     #[allow(dead_code)]
     pub fn with_lsp_server(mut self, path: PathBuf) -> Self {
         self.test_lsp_server = Some(path);
+        self
+    }
+
+    /// Set a fake `gh` CLI binary for this test.
+    #[allow(dead_code)]
+    pub fn with_gh_binary(mut self, path: PathBuf) -> Self {
+        self.test_gh_binary = Some(path);
         self
     }
 
@@ -207,6 +217,7 @@ impl TestHarness {
             user_start_dir: UserPath::new(start_dir.as_path()),
             config_dir: UserPath::new(config_dir.clone()),
             test_lsp_server: self.test_lsp_server.map(UserPath::new),
+            test_gh_binary: self.test_gh_binary.map(UserPath::new),
         };
 
         let dirs = TestDirs {

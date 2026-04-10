@@ -85,6 +85,17 @@ pub enum Origin {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct BufferId(pub u64);
 
+/// GitHub pull request number.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
+pub struct PrNumber(pub u32);
+
+impl std::fmt::Display for PrNumber {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
 // ── Domain newtypes ──
 
 macro_rules! newtype_usize {
@@ -279,6 +290,7 @@ pub enum Action {
     OpenSelected,
     OpenSelectedBg,
     OpenMessages,
+    OpenPrUrl,
     Abort,
 
     // Macros

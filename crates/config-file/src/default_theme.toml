@@ -365,6 +365,12 @@ untracked       = "$x022"
 gutter_added    = "$x034"
 gutter_modified = "$x172"
 
+[pr]
+diff            = "$x245"
+comment         = "$x033"
+gutter_diff     = "$x245"
+gutter_comment  = "$x033"
+
 [brackets]
 match            = { fg = "$bright_yellow", bold = true }
 rainbow_0        = "$x033"

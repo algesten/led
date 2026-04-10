@@ -48,8 +48,12 @@ pub struct DisplayInputs {
     bracket_match_style: Style,
     rainbow_styles: [Style; 6],
     git_line_statuses: Vec<LineStatus>,
+    pr_diff_line_statuses: Vec<LineStatus>,
+    pr_comment_lines: Vec<usize>,
     gutter_added_style: Style,
     gutter_modified_style: Style,
+    gutter_pr_diff_style: Style,
+    gutter_pr_comment_style: Style,
     diagnostics: Vec<(Row, Col, Row, Col, led_lsp::DiagnosticSeverity)>,
     inlay_hints: Vec<(Row, Col, String)>,
     diagnostic_error_style: Style,
@@ -88,6 +92,8 @@ impl PartialEq for DisplayInputs {
             && self.cursor_row == other.cursor_row
             && self.cursor_col == other.cursor_col
             && self.git_line_statuses == other.git_line_statuses
+            && self.pr_diff_line_statuses == other.pr_diff_line_statuses
+            && self.pr_comment_lines == other.pr_comment_lines
             && self.diagnostics == other.diagnostics
             && self.inlay_hints == other.inlay_hints
             && self.inlay_hints_enabled == other.inlay_hints_enabled
@@ -135,6 +141,38 @@ pub fn display_inputs(s: &AppState) -> Option<DisplayInputs> {
     let git_line_statuses = buf.status().git_line_statuses().to_vec();
     let gutter_added_style = style::resolve_cached(theme, &theme.git.gutter_added);
     let gutter_modified_style = style::resolve_cached(theme, &theme.git.gutter_modified);
+
+    let active_path = buf.path();
+    let (pr_diff_line_statuses, pr_comment_lines) = s
+        .git
+        .pr
+        .as_ref()
+        .and_then(|pr| {
+            let p = active_path?;
+            let diff = pr.diff_files.get(p).cloned().unwrap_or_default();
+            let mut comments: Vec<usize> = pr
+                .comments
+                .get(p)
+                .map(|cs| cs.iter().map(|c| *c.line).collect())
+                .unwrap_or_default();
+            comments.sort_unstable();
+            comments.dedup();
+            Some((diff, comments))
+        })
+        .unwrap_or_default();
+
+    let default_gray = Style::default().fg(ratatui::style::Color::DarkGray);
+    let default_blue = Style::default().fg(ratatui::style::Color::Blue);
+    let gutter_pr_diff_style = theme
+        .pr
+        .as_ref()
+        .map(|pr| style::resolve_cached(theme, &pr.gutter_diff))
+        .unwrap_or(default_gray);
+    let gutter_pr_comment_style = theme
+        .pr
+        .as_ref()
+        .map(|pr| style::resolve_cached(theme, &pr.gutter_comment))
+        .unwrap_or(default_blue);
 
     let diagnostics: Vec<(Row, Col, Row, Col, led_lsp::DiagnosticSeverity)> = buf
         .status()
@@ -208,8 +246,12 @@ pub fn display_inputs(s: &AppState) -> Option<DisplayInputs> {
             style::resolve_cached(theme, &theme.brackets.rainbow_5),
         ],
         git_line_statuses,
+        pr_diff_line_statuses,
+        pr_comment_lines,
         gutter_added_style,
         gutter_modified_style,
+        gutter_pr_diff_style,
+        gutter_pr_comment_style,
         diagnostics,
         inlay_hints,
         diagnostic_error_style,
@@ -277,17 +319,27 @@ fn build_display_lines_inner(d: &DisplayInputs, line_buf: &mut String) -> Rc<Vec
             let is_last = chunk_idx == chunks.len() - 1;
             let mut spans: Vec<Span<'static>> = Vec::with_capacity(4);
 
-            // Gutter col 1: git diff marker
-            let git_char = match led_core::git::line_status_at(&d.git_line_statuses, line_idx) {
-                Some(led_core::git::LineStatusKind::GitAdded) if chunk_idx == 0 => {
-                    Span::styled("\u{258E}", d.gutter_added_style)
+            // Gutter col 1: change marker (git diff > PR comment > PR diff)
+            let change_char = if chunk_idx == 0 {
+                let git = led_core::git::line_status_at(&d.git_line_statuses, line_idx);
+                let pr_comment = d.pr_comment_lines.binary_search(&line_idx).is_ok();
+                let pr_diff =
+                    led_core::git::line_status_at(&d.pr_diff_line_statuses, line_idx).is_some();
+                match (git, pr_comment, pr_diff) {
+                    (Some(led_core::git::LineStatusKind::GitAdded), _, _) => {
+                        Span::styled("\u{258E}", d.gutter_added_style)
+                    }
+                    (Some(led_core::git::LineStatusKind::GitModified), _, _) => {
+                        Span::styled("\u{258E}", d.gutter_modified_style)
+                    }
+                    (_, true, _) => Span::styled("\u{258E}", d.gutter_pr_comment_style),
+                    (_, _, true) => Span::styled("\u{258E}", d.gutter_pr_diff_style),
+                    _ => Span::styled(" ", d.gutter_style),
                 }
-                Some(led_core::git::LineStatusKind::GitModified) if chunk_idx == 0 => {
-                    Span::styled("\u{258E}", d.gutter_modified_style)
-                }
-                _ => Span::styled(" ", d.gutter_style),
+            } else {
+                Span::styled(" ", d.gutter_style)
             };
-            spans.push(git_char);
+            spans.push(change_char);
 
             // Gutter col 2: diagnostic severity indicator (most severe on this line)
             let diag_sev = if chunk_idx == 0 {
@@ -675,6 +727,7 @@ pub struct StatusInputs {
     pub search_prompt: Option<String>,
     pub find_file_prompt: Option<(String, usize, led_state::FindFileMode)>,
     pub branch: Option<String>,
+    pub pr: Option<(led_core::PrNumber, led_state::PrStatus)>,
     pub lsp_server_name: String,
     pub lsp_busy: bool,
     pub lsp_detail: Option<String>,
@@ -724,6 +777,7 @@ pub fn status_inputs(s: &AppState) -> StatusInputs {
         .as_ref()
         .map(|ff| (ff.input.clone(), ff.cursor, ff.mode));
     let branch = s.git.branch.clone();
+    let pr = s.git.pr.as_ref().map(|p| (p.number, p.status.clone()));
 
     let lsp_detail = s.lsp.progress.as_ref().map(|p| {
         if let Some(ref msg) = p.message {
@@ -744,6 +798,7 @@ pub fn status_inputs(s: &AppState) -> StatusInputs {
         search_prompt,
         find_file_prompt,
         branch,
+        pr,
         lsp_server_name: s.lsp.server_name.clone(),
         lsp_busy: s.lsp.busy,
         lsp_detail,
@@ -818,14 +873,17 @@ pub fn build_status_content(s: &StatusInputs) -> Rc<StatusContent> {
 
     let modified = if s.is_dirty { " \u{25cf}" } else { "" };
 
-    let branch_display = match &s.branch {
-        Some(b) if !b.is_empty() => format!(" ({b})"),
-        _ => String::new(),
+    let branch_str = s.branch.as_deref().unwrap_or("");
+    let pr_str = match &s.pr {
+        Some((num, led_state::PrStatus::Open)) => format!(" (PR #{})", num),
+        Some((num, led_state::PrStatus::Merged)) => format!(" (PR #{}, merged)", num),
+        Some((num, led_state::PrStatus::Closed)) => format!(" (PR #{}, closed)", num),
+        None => String::new(),
     };
 
     let lsp_str = format_lsp_status(&s.lsp_server_name, s.lsp_busy, s.lsp_detail.as_deref());
 
-    let default_left = format!(" {}{}{}{}", s.file_name, modified, branch_display, lsp_str);
+    let default_left = format!(" {branch_str}{modified}{pr_str}{lsp_str}");
 
     // Info (transient) takes priority over warn (persistent).
     let (left, is_warn) = if let Some(m) = s.info.as_deref() {
@@ -1182,6 +1240,10 @@ pub struct BrowserInputs {
     pub diag_file_severities: HashMap<CanonPath, BrowserSeverity>,
     pub diag_error_style: Style,
     pub diag_warning_style: Style,
+    pub pr_diff_files: std::collections::HashSet<CanonPath>,
+    pub pr_comment_files: std::collections::HashSet<CanonPath>,
+    pub pr_diff_style: Style,
+    pub pr_comment_style: Style,
 }
 
 pub fn browser_inputs(s: &AppState) -> Option<BrowserInputs> {
@@ -1214,6 +1276,28 @@ pub fn browser_inputs(s: &AppState) -> Option<BrowserInputs> {
         diag_file_severities,
         diag_error_style: style::resolve_cached(theme, &theme.diagnostics.error),
         diag_warning_style: style::resolve_cached(theme, &theme.diagnostics.warning),
+        pr_diff_files: s
+            .git
+            .pr
+            .as_ref()
+            .map(|pr| pr.diff_files.keys().cloned().collect())
+            .unwrap_or_default(),
+        pr_comment_files: s
+            .git
+            .pr
+            .as_ref()
+            .map(|pr| pr.comments.keys().cloned().collect())
+            .unwrap_or_default(),
+        pr_diff_style: theme
+            .pr
+            .as_ref()
+            .map(|pr| style::resolve_cached(theme, &pr.diff))
+            .unwrap_or_else(|| Style::default().fg(ratatui::style::Color::DarkGray)),
+        pr_comment_style: theme
+            .pr
+            .as_ref()
+            .map(|pr| style::resolve_cached(theme, &pr.comment))
+            .unwrap_or_else(|| Style::default().fg(ratatui::style::Color::Blue)),
     })
 }
 
@@ -1302,6 +1386,15 @@ pub fn build_browser_lines(b: &BrowserInputs) -> Rc<Vec<Line<'static>>> {
                 _ => b.file_style,
             });
 
+            // Resolve PR status for this entry (comment > diff)
+            let pr_style = if b.pr_comment_files.contains(&entry.path) {
+                Some(b.pr_comment_style)
+            } else if b.pr_diff_files.contains(&entry.path) {
+                Some(b.pr_diff_style)
+            } else {
+                None
+            };
+
             // Resolve diagnostic severity for this entry
             let diag_sev = match &entry.kind {
                 EntryKind::File => b.diag_file_severities.get(&entry.path).copied(),
@@ -1319,12 +1412,15 @@ pub fn build_browser_lines(b: &BrowserInputs) -> Rc<Vec<Line<'static>>> {
                 b.selected_style
             } else if is_selected {
                 b.selected_unfocused_style
-                    .patch(diag_style.or(git_style).unwrap_or_default())
+                    .patch(diag_style.or(git_style).or(pr_style).unwrap_or_default())
             } else {
-                diag_style.or(git_style).unwrap_or(match &entry.kind {
-                    EntryKind::Directory { .. } => b.dir_style,
-                    EntryKind::File => b.file_style,
-                })
+                diag_style
+                    .or(git_style)
+                    .or(pr_style)
+                    .unwrap_or(match &entry.kind {
+                        EntryKind::Directory { .. } => b.dir_style,
+                        EntryKind::File => b.file_style,
+                    })
             };
 
             // Determine status character and its style
@@ -1343,6 +1439,16 @@ pub fn build_browser_lines(b: &BrowserInputs) -> Rc<Vec<Line<'static>>> {
                             EntryKind::File => sd.letter,
                         };
                         (ch, git_style.unwrap_or(entry_style))
+                    })
+                })
+                .or_else(|| {
+                    pr_style.map(|sty| {
+                        let ch = if b.pr_comment_files.contains(&entry.path) {
+                            'C'
+                        } else {
+                            'P'
+                        };
+                        (ch, sty)
                     })
                 });
 

@@ -31,6 +31,7 @@ pub struct Drivers {
     pub clipboard_in: Stream<led_clipboard::ClipboardIn>,
     pub syntax_in: Stream<led_syntax::SyntaxIn>,
     pub git_in: Stream<led_git::GitIn>,
+    pub gh_pr_in: Stream<led_gh_pr::GhPrIn>,
     pub file_search_in: Stream<led_file_search::FileSearchIn>,
     pub lsp_in: Stream<led_lsp::LspIn>,
     pub ui_in: Stream<led_ui::UiIn>,
@@ -62,6 +63,10 @@ pub fn run(
         .test_lsp_server
         .as_ref()
         .map(|p| p.to_string_lossy().to_string());
+    let gh_binary_override = startup
+        .test_gh_binary
+        .as_ref()
+        .map(|p| p.to_string_lossy().to_string());
 
     let file_watcher = if startup.enable_watchers {
         FileWatcher::new()
@@ -75,8 +80,11 @@ pub fn run(
     // 1. Hoisted AppState
     let state: Stream<Rc<AppState>> = Stream::new();
 
+    // git_activity bypasses AppState — wired to workspace GitChanged below
+    let git_activity: Stream<()> = Stream::new();
+
     // 2. Derived
-    let d = derived(state.clone());
+    let d = derived(state.clone(), git_activity.clone());
 
     // 3. Drivers
     let (input_guard, terminal_in, ui_in) = if headless {
@@ -98,13 +106,33 @@ pub fn run(
 
     let syntax_in = led_syntax::driver(d.syntax_out);
     let git_in = led_git::driver(d.git_out);
+    let gh_pr_in = led_gh_pr::driver(d.gh_pr_out, gh_binary_override);
     let file_search_in = led_file_search::driver(d.file_search_out);
     let lsp_in = led_lsp::driver(d.lsp_out, lsp_server_override);
+
+    // Fork workspace GitChanged events to git_activity (bypasses AppState)
+    let workspace_in = led_workspace::driver(d.workspace_out, file_watcher.clone());
+    let ga = git_activity;
+    workspace_in.on(move |ev: Option<&WorkspaceIn>| {
+        if matches!(ev, Some(WorkspaceIn::GitChanged)) {
+            ga.push(());
+        }
+    });
+
+    // Open URL consumer (fire-and-forget)
+    d.open_url.on(move |opt: Option<&String>| {
+        if let Some(url) = opt {
+            let url = url.clone();
+            std::thread::spawn(move || {
+                let _ = open::that(&url);
+            });
+        }
+    });
 
     let drivers = Drivers {
         terminal_in,
         actions_in,
-        workspace_in: led_workspace::driver(d.workspace_out, file_watcher.clone()),
+        workspace_in,
         docstore_in: led_docstore::driver(d.docstore_out, file_watcher),
         config_keys_in: led_config_file::driver::<Keys>(d.config_file_out.clone()),
         config_theme_in: led_config_file::driver::<Theme>(d.config_file_out),
@@ -113,6 +141,7 @@ pub fn run(
         clipboard_in,
         syntax_in,
         git_in,
+        gh_pr_in,
         file_search_in,
         lsp_in,
         ui_in,

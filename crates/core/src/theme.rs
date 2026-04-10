@@ -116,5 +116,15 @@ pub struct Theme {
     pub diagnostics: DiagnosticsTheme,
     pub git: GitTheme,
     pub brackets: BracketsTheme,
+    #[serde(default)]
+    pub pr: Option<PrTheme>,
     pub syntax: HashMap<String, StyleValue>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct PrTheme {
+    pub diff: StyleValue,
+    pub comment: StyleValue,
+    pub gutter_diff: StyleValue,
+    pub gutter_comment: StyleValue,
 }

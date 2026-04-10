@@ -235,5 +235,6 @@ pub fn startup_for(dirs: &TestDirs, file_paths: &[PathBuf]) -> Startup {
         user_start_dir: UserPath::new(start_dir.as_path()),
         config_dir: UserPath::new(&dirs.config),
         test_lsp_server: None,
+        test_gh_binary: None,
     }
 }

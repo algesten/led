@@ -9,6 +9,8 @@ pub enum FileStatus {
     GitIndexModified,
     GitIndexNew,
     GitUntracked,
+    PrDiff,
+    PrComment,
 }
 
 pub struct StatusDisplay {
@@ -44,6 +46,16 @@ fn status_info(s: FileStatus) -> StatusInfo {
             letter: 'U',
             theme_key: "git.untracked",
             priority: 3,
+        },
+        FileStatus::PrComment => StatusInfo {
+            letter: 'C',
+            theme_key: "pr.comment",
+            priority: 0,
+        },
+        FileStatus::PrDiff => StatusInfo {
+            letter: 'P',
+            theme_key: "pr.diff",
+            priority: 0,
         },
     }
 }
@@ -97,6 +109,8 @@ pub fn directory_statuses(
 pub enum LineStatusKind {
     GitAdded,
     GitModified,
+    PrDiff,
+    PrComment,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

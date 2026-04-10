@@ -8,12 +8,13 @@ use std::time::Instant;
 use serde::{Deserialize, Serialize};
 
 use led_config_file::ConfigFile;
+use led_core::git::LineStatus;
 use led_core::keys::{Keymap, Keys};
 use led_core::theme::Theme;
 use led_core::{
     CanonPath, ChangeSeq, CharOffset, Col, Doc, DocVersion, EditOp, InertDoc, PanelSlot,
-    PersistedContentHash, RedrawSeq, Row, Startup, SubLine, SyntaxSeq, UndoHistory, UserPath,
-    Versioned,
+    PersistedContentHash, PrNumber, RedrawSeq, Row, Startup, SubLine, SyntaxSeq, UndoHistory,
+    UserPath, Versioned,
 };
 pub use led_workspace::SessionBuffer;
 pub use led_workspace::Workspace;
@@ -1648,6 +1649,33 @@ pub struct GitState {
     pub file_statuses: HashMap<CanonPath, HashSet<led_core::git::FileStatus>>,
     pub pending_file_scan: Versioned<()>,
     pub scan_seq: Versioned<()>,
+    pub pr: Option<PrInfo>,
+    pub pr_settle_seq: Versioned<()>,
+}
+
+// ── PR ──
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PrStatus {
+    Open,
+    Merged,
+    Closed,
+}
+
+#[derive(Debug, Clone)]
+pub struct PrComment {
+    pub line: Row,
+    pub body: String,
+    pub author: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct PrInfo {
+    pub number: PrNumber,
+    pub status: PrStatus,
+    pub url: String,
+    pub diff_files: HashMap<CanonPath, Vec<LineStatus>>,
+    pub comments: HashMap<CanonPath, Vec<PrComment>>,
 }
 
 // ── Session ──
@@ -1815,6 +1843,9 @@ pub struct AppState {
 
     // Git
     pub git: Rc<GitState>,
+
+    // URL open
+    pub pending_open_url: Versioned<Option<String>>,
 
     // LSP
     pub lsp: Rc<LspState>,

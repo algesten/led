@@ -243,11 +243,18 @@ pub(super) fn navigate_issue(state: &mut AppState, forward: bool) {
     }
 
     // Level 4: Git staged (index modified or new)
-    scan_git_changes(
+    if scan_git_changes(
         state,
         forward,
         &[FileStatus::GitIndexModified, FileStatus::GitIndexNew],
-    );
+    ) {
+        return;
+    }
+
+    // Level 5: PR comments + PR diff (same level, ordered by position)
+    if let Some(pr) = state.git.pr.clone() {
+        scan_pr_issues(state, forward, &pr);
+    }
 }
 
 type Pos<'a> = (&'a CanonPath, usize, usize);
@@ -359,6 +366,38 @@ fn cursor_pos(state: &AppState) -> Option<Pos<'_>> {
     let path = state.active_tab.as_ref()?;
     let buf = state.buffers.get(path)?;
     Some((path, buf.cursor_row().0, buf.cursor_col().0))
+}
+
+/// Scan PR comments and diff hunks as a single level. Returns true if navigated.
+fn scan_pr_issues(state: &mut AppState, forward: bool, pr: &led_state::PrInfo) -> bool {
+    let cur = cursor_pos(state);
+    let mut best: Option<Pos<'_>> = None;
+    let mut wrap: Option<Pos<'_>> = None;
+
+    for (path, comments) in &pr.comments {
+        for c in comments {
+            consider(forward, &cur, (path, *c.line, 0), &mut best, &mut wrap);
+        }
+    }
+
+    for (path, line_statuses) in &pr.diff_files {
+        for ls in line_statuses {
+            consider(
+                forward,
+                &cur,
+                (path, ls.rows.start, 0),
+                &mut best,
+                &mut wrap,
+            );
+        }
+    }
+
+    let Some(&(p, r, c)) = best.or(wrap).as_ref() else {
+        return false;
+    };
+    let target = p.clone();
+    navigate_to_position(state, target, r, c);
+    true
 }
 
 /// Navigate to a specific (path, row, col), handling same-buffer, cross-tab, and file-open cases.

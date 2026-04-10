@@ -10,6 +10,7 @@ mod editing_of;
 pub(crate) mod file_search;
 pub(crate) mod find_file;
 mod find_file_of;
+mod gh_pr_of;
 mod isearch_of;
 mod jump;
 mod jump_of;
@@ -340,6 +341,7 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
 
     // ── Action streams (extracted to _of files) ──
     let ui_actions_s = ui_actions_of::ui_actions_of(&raw_actions, &state);
+    let gh_pr_s = gh_pr_of::gh_pr_of(&drivers.gh_pr_in, &raw_actions, &state);
     let movement_s = movement_of::movement_of(&raw_actions, &actions_with_state, &state);
     let editing_s = editing_of::editing_of(&raw_actions, &actions_with_state, &state);
     let kill_s = kill_of::kill_of(&actions_with_state);
@@ -582,6 +584,7 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
     confirm_kill_accept_s.forward(&muts);
     // Action streams (extracted to _of files)
     ui_actions_s.forward(&muts);
+    gh_pr_s.forward(&muts);
     movement_s.forward(&muts);
     editing_s.forward(&muts);
     kill_s.forward(&muts);
@@ -641,6 +644,12 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
                 s.kbd_macro.execute_count = Some(n);
             }
             Mut::EvictOneBuffer => action::evict_one_buffer(&mut s),
+            Mut::SetPrInfo(info) => {
+                s.git_mut().pr = info;
+            }
+            Mut::SetPendingOpenUrl(url) => {
+                s.pending_open_url.set(Some(url));
+            }
             Mut::Alert { info } => {
                 s.alerts.info = info;
             }
@@ -1501,6 +1510,9 @@ fn handle_timer(state: &mut AppState, name: &'static str) {
             // Handled by the undo_flush_s combinator chain, not here.
             // The timer fires → chain samples state → produces UndoFlushReady.
         }
+        "pr_settle" => {
+            state.git_mut().pr_settle_seq.set(());
+        }
         _ => {}
     }
 }
@@ -1562,6 +1574,8 @@ enum Mut {
         scroll_row: led_core::Row,
     },
     EvictOneBuffer,
+    SetPrInfo(Option<led_state::PrInfo>),
+    SetPendingOpenUrl(String),
     KbdMacroSetCount(usize),
     Alert {
         info: Option<String>,
@@ -1786,6 +1800,8 @@ impl Mut {
             Mut::LspProgress { .. } => "LspProgress",
             Mut::LspTriggerChars { .. } => "LspTriggerChars",
             Mut::EvictOneBuffer => "EvictOneBuffer",
+            Mut::SetPrInfo(_) => "SetPrInfo",
+            Mut::SetPendingOpenUrl(_) => "SetPendingOpenUrl",
             Mut::KbdMacroSetCount(_) => "KbdMacroSetCount",
         }
     }

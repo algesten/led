@@ -37,11 +37,13 @@ pub struct Derived {
     pub clipboard_out: Stream<led_clipboard::ClipboardOut>,
     pub syntax_out: Stream<SyntaxOut>,
     pub git_out: Stream<led_git::GitOut>,
+    pub gh_pr_out: Stream<led_gh_pr::GhPrOut>,
     pub file_search_out: Stream<led_file_search::FileSearchOut>,
     pub lsp_out: Stream<LspOut>,
+    pub open_url: Stream<String>,
 }
 
-pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
+pub fn derived(state: Stream<Rc<AppState>>, git_activity: Stream<()>) -> Derived {
     // Suppress render while an async indent is in flight — the next
     // render after the driver responds shows newline + correct indent
     // in one atomic visual update, eliminating cursor flash.
@@ -806,6 +808,53 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
     lsp_requests.forward(&lsp_out);
     lsp_shutdown.forward(&lsp_out);
 
+    // ── PR settle timer (git_activity bypasses AppState) ──
+    let pr_settle_timer = git_activity
+        .map(|_| TimersOut::Set {
+            name: "pr_settle",
+            duration: Duration::from_secs(2),
+            schedule: Schedule::Replace,
+        })
+        .stream();
+    pr_settle_timer.forward(&timers_out);
+
+    // ── PR load command ──
+    let gh_pr_out: Stream<led_gh_pr::GhPrOut> = Stream::new();
+
+    // Initial load / branch change: fires when branch first becomes known or switches
+    let gh_pr_initial = state
+        .dedupe_by(|s| s.git.branch.clone())
+        .filter(|s| s.git.branch.is_some())
+        .filter(|s| s.workspace.is_some())
+        .map(|s| led_gh_pr::GhPrOut::LoadPr {
+            branch: s.git.branch.clone().unwrap(),
+            root: s.workspace.as_ref().unwrap().root.clone(),
+        })
+        .stream();
+
+    // Reload after git activity settles (e.g. commit, push, rebase)
+    let gh_pr_reload = state
+        .dedupe_by(|s| s.git.pr_settle_seq.version())
+        .filter(|s| s.git.pr_settle_seq.version() > 0)
+        .filter(|s| s.git.branch.is_some())
+        .filter(|s| s.workspace.is_some())
+        .map(|s| led_gh_pr::GhPrOut::LoadPr {
+            branch: s.git.branch.clone().unwrap(),
+            root: s.workspace.as_ref().unwrap().root.clone(),
+        })
+        .stream();
+
+    gh_pr_initial.forward(&gh_pr_out);
+    gh_pr_reload.forward(&gh_pr_out);
+
+    // ── Open URL (fire-and-forget via consumer in lib.rs) ──
+    let open_url = state
+        .dedupe_by(|s| s.pending_open_url.version())
+        .filter(|s| s.pending_open_url.version() > 0)
+        .filter(|s| s.pending_open_url.is_some())
+        .map(|s| (*s.pending_open_url).clone().unwrap())
+        .stream();
+
     Derived {
         ui,
         workspace_out,
@@ -816,8 +865,10 @@ pub fn derived(state: Stream<Rc<AppState>>) -> Derived {
         clipboard_out,
         syntax_out,
         git_out,
+        gh_pr_out,
         file_search_out,
         lsp_out,
+        open_url,
     }
 }
 
