@@ -178,9 +178,35 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
 
     let isearch_s = isearch_of::isearch_of(&actions_with_state, &state, is_migrated);
 
-    // Only unmigrated actions not consumed by isearch go through handle_action.
+    // File search: when active, route actions to FileSearchAction Mut.
+    // Pass through: Resize, Quit, Suspend (and catch-all on input deactivates + passes).
+    let file_search_action_s = actions_with_state
+        .filter(|(a, s)| {
+            s.file_search.is_some()
+                && !matches!(a, Action::Resize(..) | Action::Quit | Action::Suspend)
+        })
+        .map(|(a, _)| Mut::FileSearchAction(a))
+        .stream();
+
+    // Find file: when active, route actions to FindFileAction Mut.
+    let find_file_action_s = actions_with_state
+        .filter(|(a, s)| {
+            s.find_file.is_some()
+                && !matches!(a, Action::Resize(..) | Action::Quit | Action::Suspend)
+        })
+        .map(|(a, _)| Mut::FindFileAction(a))
+        .stream();
+
+    // Only unmigrated actions not consumed by any modal go through handle_action.
     let unmigrated_actions_s = actions_with_state
-        .filter(|(a, s)| !is_migrated(a) && !isearch_of::is_consumed_by_isearch(a, s))
+        .filter(|(a, s)| {
+            !is_migrated(a)
+                && !isearch_of::is_consumed_by_isearch(a, s)
+                && !(s.file_search.is_some()
+                    && !matches!(a, Action::Resize(..) | Action::Quit | Action::Suspend))
+                && !(s.find_file.is_some()
+                    && !matches!(a, Action::Resize(..) | Action::Quit | Action::Suspend))
+        })
         .map(|(a, _)| Mut::Action(a))
         .stream();
 
@@ -1053,10 +1079,11 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
     jump_fwd_activate_s.forward(&muts);
     jump_fwd_open_s.forward(&muts);
     jump_fwd_cursor_s.forward(&muts);
-    // Only unmigrated actions go through handle_action.
-    unmigrated_actions_s.forward(&muts);
-    // isearch_s AFTER action streams — SearchAccept needs to run after BufferUpdate
+    // Modal streams + unmigrated — all share the same actions_with_state snapshot.
     isearch_s.forward(&muts);
+    file_search_action_s.forward(&muts);
+    find_file_action_s.forward(&muts);
+    unmigrated_actions_s.forward(&muts);
     buffers_s.forward(&muts);
     process_s.forward(&muts);
     timers_s.forward(&muts);
@@ -1460,6 +1487,12 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
             }
             Mut::BreakKillAccumulation => {
                 s.kill_ring.break_accumulation();
+            }
+            Mut::FileSearchAction(a) => {
+                file_search::handle_file_search_action(&mut s, &a);
+            }
+            Mut::FindFileAction(a) => {
+                find_file::handle_find_file_action(&mut s, &a);
             }
             Mut::SearchAccept(path) => {
                 if let Some(buf) = s.buf_mut(&path) {
@@ -1917,6 +1950,8 @@ enum Mut {
     DismissConfirmKill,
     BreakKillAccumulation,
     SearchAccept(CanonPath),
+    FileSearchAction(Action),
+    FindFileAction(Action),
     ToggleInlayHints(bool),
     SetPendingSaveAfterFormat,
     SaveRequest,
@@ -2129,6 +2164,8 @@ impl Mut {
             Mut::DismissConfirmKill => "DismissConfirmKill",
             Mut::BreakKillAccumulation => "BreakKillAccumulation",
             Mut::SearchAccept(_) => "SearchAccept",
+            Mut::FileSearchAction(_) => "FileSearchAction",
+            Mut::FindFileAction(_) => "FindFileAction",
             Mut::ToggleInlayHints(_) => "ToggleInlayHints",
             Mut::SetPendingSaveAfterFormat => "SetPendingSaveAfterFormat",
             Mut::SaveRequest => "SaveRequest",

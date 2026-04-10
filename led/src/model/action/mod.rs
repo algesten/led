@@ -97,19 +97,8 @@ pub fn handle_action(state: &mut AppState, action: Action) -> bool {
         }
     }
 
-    // Intercept actions during file search
-    if state.file_search.is_some() {
-        if file_search::handle_file_search_action(state, &action) {
-            return true;
-        }
-    }
-
-    // Intercept actions during find-file
-    if state.find_file.is_some() {
-        if find_file::handle_find_file_action(state, &action) {
-            return true;
-        }
-    }
+    // file_search and find_file handling moved to stream-based Muts
+    // (FileSearchAction, FindFileAction) via actions_with_state.
 
     // isearch handling is mostly in isearch_of.rs (stream-based).
     // InBufferSearch stays here: start_search when not in isearch, search_next when in isearch.
