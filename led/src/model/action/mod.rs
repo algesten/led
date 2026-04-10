@@ -263,9 +263,6 @@ pub fn handle_action(state: &mut AppState, action: Action) -> bool {
             search::start_search(buf);
         }),
 
-        // ── File search ──
-        Action::OpenFileSearch => file_search::activate(state),
-
         // ── Sort imports ──
         Action::SortImports => {
             if let Some(path) = state.active_tab.clone() {

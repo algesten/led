@@ -36,6 +36,45 @@ fn is_search_input(fs: &FileSearchState) -> bool {
 
 // ── Activation ──
 
+/// Pure: compute the FileSearchState + whether to trigger a search.
+pub fn compute_activate(state: &AppState) -> (FileSearchState, bool) {
+    let selected = state
+        .active_tab
+        .as_ref()
+        .and_then(|path| state.buffers.get(path))
+        .and_then(|buf| super::edit::selected_text(buf));
+
+    let mut fs = state.file_search.clone().unwrap_or(FileSearchState {
+        query: String::new(),
+        cursor_pos: 0,
+        case_sensitive: false,
+        use_regex: false,
+        results: Vec::new(),
+        flat_hits: Vec::new(),
+        selection: FileSearchSelection::SearchInput,
+        scroll_offset: 0,
+        replace_mode: false,
+        replace_text: String::new(),
+        replace_cursor_pos: 0,
+        replace_stack: Vec::new(),
+    });
+
+    fs.selection = FileSearchSelection::SearchInput;
+
+    let trigger = if let Some(text) = selected {
+        fs.query = text;
+        fs.cursor_pos = fs.query.chars().count();
+        fs.results.clear();
+        fs.flat_hits.clear();
+        fs.scroll_offset = 0;
+        true
+    } else {
+        false
+    };
+
+    (fs, trigger)
+}
+
 pub fn activate(state: &mut AppState) {
     let selected = state
         .active_tab
@@ -114,7 +153,7 @@ fn preview_selected(state: &mut AppState) {
 
 // ── Trigger search ──
 
-fn trigger_search(state: &mut AppState) {
+pub fn trigger_search(state: &mut AppState) {
     let fs = state.file_search.as_mut().unwrap();
     if fs.query.is_empty() {
         fs.results.clear();

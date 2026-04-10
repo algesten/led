@@ -1368,6 +1368,58 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
         })
         .stream();
 
+    // ── OpenFileSearch: pure computation → multiple Muts ──
+
+    let open_file_search_parent_s = raw_actions
+        .filter(|a| matches!(a, Action::OpenFileSearch))
+        .sample_combine(&state)
+        .filter(|(_, s)| !has_blocking_overlay(&s))
+        .stream();
+
+    let open_file_search_set_s = open_file_search_parent_s
+        .map(|(_, s)| {
+            let (fs, _) = file_search::compute_activate(&s);
+            Mut::SetFileSearch(fs)
+        })
+        .stream();
+
+    let open_file_search_focus_s = open_file_search_parent_s
+        .map(|_| Mut::SetShowSidePanel(true))
+        .stream();
+
+    let open_file_search_focus2_s = open_file_search_parent_s
+        .map(|_| Mut::SetFocus(PanelSlot::Side))
+        .stream();
+
+    // Clear mark if selected text was used as initial query
+    let open_file_search_clear_mark_s = open_file_search_parent_s
+        .filter(|(_, s)| {
+            s.active_tab
+                .as_ref()
+                .and_then(|p| s.buffers.get(p))
+                .and_then(|buf| edit::selected_text(buf))
+                .is_some()
+        })
+        .filter_map(|(_, s)| {
+            let path = s.active_tab.clone()?;
+            let mut buf = (**s.buffers.get(&path)?).clone();
+            buf.clear_mark();
+            Some(Mut::BufferUpdate(path, buf))
+        })
+        .stream();
+
+    // Trigger search if selected text was used
+    let open_file_search_trigger_s = open_file_search_parent_s
+        .filter(|(_, s)| {
+            s.active_tab
+                .as_ref()
+                .and_then(|p| s.buffers.get(p))
+                .and_then(|buf| edit::selected_text(buf))
+                .is_some()
+        })
+        .map(|_| Mut::TriggerFileSearch)
+        .stream();
+
     // ── 2. Build up muts from driver input and derived streams ──
 
     let muts: Stream<Mut> = drivers
@@ -1663,6 +1715,11 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
     find_file_list_s.forward(&muts);
     save_as_set_s.forward(&muts);
     save_as_list_s.forward(&muts);
+    open_file_search_set_s.forward(&muts);
+    open_file_search_focus_s.forward(&muts);
+    open_file_search_focus2_s.forward(&muts);
+    open_file_search_clear_mark_s.forward(&muts);
+    open_file_search_trigger_s.forward(&muts);
     // Modal streams + unmigrated — all share the same actions_with_state snapshot.
     isearch_s.forward(&muts);
     lsp_code_action_picker_s.forward(&muts);
@@ -2103,6 +2160,12 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
                 s.pending_find_file_list
                     .set(Some((dir, prefix, show_hidden)));
             }
+            Mut::SetFileSearch(fs) => {
+                s.file_search = Some(fs);
+            }
+            Mut::TriggerFileSearch => {
+                file_search::trigger_search(&mut s);
+            }
             Mut::ForceKillBuffer => {
                 action::force_kill_buffer(&mut s);
             }
@@ -2303,6 +2366,7 @@ fn is_migrated(action: &Action) -> bool {
             | Action::KillRegion
             | Action::FindFile
             | Action::SaveAs
+            | Action::OpenFileSearch
     )
 }
 
@@ -2602,6 +2666,8 @@ enum Mut {
     KillRingSet(String),
     SetFindFile(led_state::FindFileState),
     SetPendingFindFileList(CanonPath, String, bool),
+    SetFileSearch(led_state::file_search::FileSearchState),
+    TriggerFileSearch,
     LspCodeActionPickerAction(Action),
     LspRenameAction(Action),
     LspCompletionAction(Action),
@@ -2823,6 +2889,8 @@ impl Mut {
             Mut::KillRingSet(_) => "KillRingSet",
             Mut::SetFindFile(_) => "SetFindFile",
             Mut::SetPendingFindFileList(..) => "SetPendingFindFileList",
+            Mut::SetFileSearch(_) => "SetFileSearch",
+            Mut::TriggerFileSearch => "TriggerFileSearch",
             Mut::ForceKillBuffer => "ForceKillBuffer",
             Mut::LspCodeActionPickerAction(_) => "LspCodeActionPickerAction",
             Mut::LspRenameAction(_) => "LspRenameAction",
