@@ -5,32 +5,6 @@ use led_state::AppState;
 use super::helpers::reveal_active_buffer;
 use super::preview::close_preview;
 
-pub(super) fn cycle_tab(state: &mut AppState, direction: i32) {
-    let Some(ref active_path) = state.active_tab else {
-        return;
-    };
-    let tabs: Vec<&CanonPath> = state
-        .tabs
-        .iter()
-        .filter(|t| !t.is_preview())
-        .filter(|t| {
-            state
-                .buffers
-                .get(t.path())
-                .map_or(false, |b| b.is_materialized())
-        })
-        .map(|t| t.path())
-        .collect();
-
-    let Some(pos) = tabs.iter().position(|path| *path == active_path) else {
-        return;
-    };
-    let len = tabs.len() as i32;
-    let next = ((pos as i32 + direction).rem_euclid(len)) as usize;
-    state.active_tab = Some(tabs[next].clone());
-    reveal_active_buffer(state);
-}
-
 pub(super) fn kill_buffer(state: &mut AppState) {
     let Some(ref active_path) = state.active_tab else {
         return;

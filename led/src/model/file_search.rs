@@ -75,61 +75,6 @@ pub fn compute_activate(state: &AppState) -> (FileSearchState, bool) {
     (fs, trigger)
 }
 
-pub fn activate(state: &mut AppState) {
-    let selected = state
-        .active_tab
-        .as_ref()
-        .and_then(|path| state.buffers.get(path))
-        .and_then(|buf| super::edit::selected_text(buf));
-
-    if selected.is_some() {
-        if let Some(path) = state.active_tab.clone() {
-            if let Some(buf) = state.buf_mut(&path) {
-                buf.clear_mark();
-            }
-        }
-    }
-
-    let mut fs = state.file_search.take().unwrap_or(FileSearchState {
-        query: String::new(),
-        cursor_pos: 0,
-        case_sensitive: false,
-        use_regex: false,
-        results: Vec::new(),
-        flat_hits: Vec::new(),
-        selection: FileSearchSelection::SearchInput,
-        scroll_offset: 0,
-        replace_mode: false,
-        replace_text: String::new(),
-        replace_cursor_pos: 0,
-        replace_stack: Vec::new(),
-    });
-
-    fs.selection = FileSearchSelection::SearchInput;
-
-    let has_selected = if let Some(text) = selected {
-        fs.query = text;
-        fs.cursor_pos = fs.query.chars().count();
-        fs.results.clear();
-        fs.flat_hits.clear();
-        fs.scroll_offset = 0;
-        true
-    } else {
-        false
-    };
-
-    state.file_search = Some(fs);
-    state.focus = PanelSlot::Side;
-    state.show_side_panel = true;
-    if let Some(ref mut dims) = state.dims {
-        dims.show_side_panel = true;
-    }
-
-    if has_selected {
-        trigger_search(state);
-    }
-}
-
 pub fn deactivate(state: &mut AppState) {
     super::action::close_preview(state);
     state.file_search = None;
