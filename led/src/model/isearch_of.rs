@@ -11,6 +11,10 @@ pub fn is_consumed_by_isearch(a: &Action, s: &AppState) -> bool {
     is_in_isearch(s) && isearch_consumes(a)
 }
 
+pub fn is_in_isearch_pub(s: &AppState) -> bool {
+    is_in_isearch(s)
+}
+
 fn is_in_isearch(s: &AppState) -> bool {
     s.active_tab
         .as_ref()

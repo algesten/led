@@ -54,7 +54,7 @@ pub(super) fn kill_buffer(state: &mut AppState) {
     do_kill_buffer(state, &active_path);
 }
 
-pub(super) fn force_kill_buffer(state: &mut AppState) {
+pub fn force_kill_buffer(state: &mut AppState) {
     let Some(active_path) = state.active_tab.clone() else {
         return;
     };

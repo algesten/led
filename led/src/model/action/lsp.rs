@@ -5,7 +5,7 @@ use led_state::{AppState, LspRequest, RenameState};
 use super::super::mov;
 use super::helpers::{close_group_on_move, reveal_active_buffer, word_under_cursor};
 
-pub(super) fn handle_completion_action(state: &mut AppState, action: &Action) -> bool {
+pub fn handle_completion_action(state: &mut AppState, action: &Action) -> bool {
     match action {
         Action::MoveUp => {
             let lsp = state.lsp_mut();
@@ -126,7 +126,7 @@ pub(super) fn handle_completion_action(state: &mut AppState, action: &Action) ->
     }
 }
 
-pub(super) fn handle_code_action_picker(state: &mut AppState, action: &Action) -> bool {
+pub fn handle_code_action_picker(state: &mut AppState, action: &Action) -> bool {
     match action {
         Action::MoveUp => {
             let lsp = state.lsp_mut();
@@ -167,7 +167,7 @@ pub(super) fn handle_code_action_picker(state: &mut AppState, action: &Action) -
     }
 }
 
-pub(super) fn handle_rename_action(state: &mut AppState, action: &Action) -> bool {
+pub fn handle_rename_action(state: &mut AppState, action: &Action) -> bool {
     match action {
         Action::InsertChar(ch) => {
             let lsp = state.lsp_mut();

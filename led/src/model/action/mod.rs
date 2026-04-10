@@ -15,7 +15,9 @@ use preview::promote_preview_active;
 
 // Re-export items used by other modules in the crate.
 pub(super) use helpers::{browser_scroll_to_selected, close_group_on_move, reveal_active_buffer};
+pub(super) use lsp::{handle_code_action_picker, handle_completion_action, handle_rename_action};
 pub(super) use preview::{close_preview, evict_one_buffer, promote_preview, set_preview};
+pub(super) use tabs::force_kill_buffer;
 
 pub fn handle_action(state: &mut AppState, action: Action) -> bool {
     // ── Keyboard macro recording ──
@@ -76,26 +78,9 @@ pub fn handle_action(state: &mut AppState, action: Action) -> bool {
         }
     }
 
-    // Intercept actions during LSP completion
-    if state.lsp.completion.is_some() {
-        if lsp::handle_completion_action(state, &action) {
-            return true;
-        }
-    }
+    // LSP completion handling moved to stream-based LspCompletionAction Mut.
 
-    // Intercept actions during LSP code action picker
-    if state.lsp.code_actions.is_some() {
-        if lsp::handle_code_action_picker(state, &action) {
-            return true;
-        }
-    }
-
-    // Intercept actions during LSP rename
-    if state.lsp.rename.is_some() && state.focus == PanelSlot::Overlay {
-        if lsp::handle_rename_action(state, &action) {
-            return true;
-        }
-    }
+    // LSP code_actions, rename, completion handling moved to stream-based Muts.
 
     // file_search and find_file handling moved to stream-based Muts
     // (FileSearchAction, FindFileAction) via actions_with_state.

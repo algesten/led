@@ -178,6 +178,29 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
 
     let isearch_s = isearch_of::isearch_of(&actions_with_state, &state, is_migrated);
 
+    // LSP code action picker: absorbs all actions.
+    let lsp_code_action_picker_s = actions_with_state
+        .filter(|(_, s)| s.lsp.code_actions.is_some())
+        .filter(|(a, _)| !matches!(a, Action::Resize(..) | Action::Quit | Action::Suspend))
+        .map(|(a, _)| Mut::LspCodeActionPickerAction(a))
+        .stream();
+
+    // LSP rename overlay: absorbs all actions when focused.
+    let lsp_rename_action_s = actions_with_state
+        .filter(|(_, s)| s.lsp.rename.is_some() && s.focus == PanelSlot::Overlay)
+        .filter(|(a, _)| !matches!(a, Action::Resize(..) | Action::Quit | Action::Suspend))
+        .map(|(a, _)| Mut::LspRenameAction(a))
+        .stream();
+
+    // LSP completion: when active, route actions (except pass-through) to handler.
+    let lsp_completion_action_s = actions_with_state
+        .filter(|(a, s)| {
+            s.lsp.completion.is_some()
+                && !matches!(a, Action::Resize(..) | Action::Quit | Action::Suspend)
+        })
+        .map(|(a, _)| Mut::LspCompletionAction(a))
+        .stream();
+
     // File search: when active, route actions to FileSearchAction Mut.
     // Pass through: Resize, Quit, Suspend (and catch-all on input deactivates + passes).
     let file_search_action_s = actions_with_state
@@ -206,6 +229,13 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
                     && !matches!(a, Action::Resize(..) | Action::Quit | Action::Suspend))
                 && !(s.find_file.is_some()
                     && !matches!(a, Action::Resize(..) | Action::Quit | Action::Suspend))
+                && !(s.lsp.completion.is_some()
+                    && !matches!(a, Action::Resize(..) | Action::Quit | Action::Suspend))
+                && !(s.lsp.code_actions.is_some()
+                    && !matches!(a, Action::Resize(..) | Action::Quit | Action::Suspend))
+                && !(s.lsp.rename.is_some()
+                    && s.focus == PanelSlot::Overlay
+                    && !matches!(a, Action::Resize(..) | Action::Quit | Action::Suspend))
         })
         .map(|(a, _)| Mut::Action(a))
         .stream();
@@ -224,6 +254,13 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
         .sample_combine(&state)
         .filter(|(_, s)| s.kbd_macro.recording)
         .map(|(a, _)| Mut::KbdMacroRecord(a))
+        .stream();
+
+    let confirm_kill_accept_s = raw_actions
+        .filter(|a| matches!(a, Action::InsertChar('y' | 'Y')))
+        .sample_combine(&state)
+        .filter(|(_, s)| s.confirm_kill)
+        .map(|_| Mut::ForceKillBuffer)
         .stream();
 
     let confirm_kill_dismiss_s = raw_actions
@@ -808,6 +845,198 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
         })
         .stream();
 
+    // ── Editing actions ──
+    // These exist in BOTH streams AND handle_action's main match.
+    // Normal: is_migrated filters → only streams fire.
+    // Macro playback: handle_action called directly → only handle_action fires.
+
+    let insert_char_parent_s = actions_with_state
+        .filter_map(|(a, s)| match a {
+            Action::InsertChar(ch) => Some((ch, s)),
+            _ => None,
+        })
+        .filter(|(_, s)| {
+            !has_blocking_overlay(&s)
+                && !has_any_input_modal(&s)
+                && !is_indent_in_flight(&s)
+                && !s.confirm_kill
+        })
+        .stream();
+
+    let insert_char_buf_s = insert_char_parent_s
+        .map(|(ch, s)| {
+            let close = active_buf(&s).map_or(false, |b| {
+                b.last_edit_kind() != Some(led_state::EditKind::Insert)
+                    || (ch.is_whitespace() && is_word_boundary(b))
+            });
+            (ch, close, s)
+        })
+        .filter_map(|(ch, close, s)| Some((ch, close, s.dims?, s.active_tab.clone()?, s)))
+        .filter_map(|(ch, close, dims, path, s)| {
+            let buf = (**s.buffers.get(&path)?).clone();
+            Some((ch, close, dims, path, buf))
+        })
+        .map(|(ch, close, dims, path, mut buf)| {
+            buf.clear_mark();
+            if close {
+                buf.close_undo_group();
+            }
+            let (r, c, _) = edit::insert_char(&mut buf, ch);
+            buf.set_cursor(led_core::Row(r), led_core::Col(c), led_core::Col(0));
+            buf.set_cursor(
+                led_core::Row(r),
+                led_core::Col(c),
+                led_core::Col(mov::reset_affinity(&buf, &dims)),
+            );
+            if buf.reindent_chars().contains(&ch) {
+                buf.request_indent(Some(led_core::Row(r)), false);
+            }
+            let (sr, ssl) = mov::adjust_scroll(&buf, &dims);
+            buf.set_scroll(led_core::Row(sr), led_core::SubLine(ssl));
+            buf.update_matching_bracket();
+            buf.touch();
+            Mut::BufferUpdate(path, buf)
+        })
+        .stream();
+
+    let insert_char_complete_s = insert_char_parent_s
+        .filter(|(ch, _)| ch.is_alphanumeric() || *ch == '_')
+        .sample_combine(&state)
+        .filter(|(_, s)| s.lsp.completion.is_none())
+        .filter(|(_, s)| active_buf(&s).map_or(false, |b| !b.completion_triggers().is_empty()))
+        .map(|_| Mut::LspRequestPending(Some(led_state::LspRequest::Complete)))
+        .stream();
+
+    let insert_newline_s = actions_with_state
+        .filter(|(a, _)| matches!(a, Action::InsertNewline))
+        .filter(|(_, s)| {
+            !has_blocking_overlay(&s)
+                && !has_any_input_modal(&s)
+                && !is_indent_in_flight(&s)
+                && !s.confirm_kill
+        })
+        .filter_map(|(_, s)| Some((s.dims?, s.active_tab.clone()?, s)))
+        .filter_map(|(dims, path, s)| {
+            let buf = (**s.buffers.get(&path)?).clone();
+            Some((dims, path, buf))
+        })
+        .map(|(dims, path, mut buf)| {
+            buf.clear_mark();
+            buf.close_group_on_move();
+            let (r, c, a) = edit::insert_newline(&mut buf);
+            buf.set_cursor(led_core::Row(r), led_core::Col(c), led_core::Col(a));
+            buf.close_group_on_move();
+            buf.request_indent(Some(led_core::Row(r)), false);
+            let (sr, ssl) = mov::adjust_scroll(&buf, &dims);
+            buf.set_scroll(led_core::Row(sr), led_core::SubLine(ssl));
+            buf.update_matching_bracket();
+            buf.touch();
+            Mut::BufferUpdate(path, buf)
+        })
+        .stream();
+
+    let insert_tab_s = actions_with_state
+        .filter(|(a, _)| matches!(a, Action::InsertTab))
+        .filter(|(_, s)| {
+            !has_blocking_overlay(&s)
+                && !has_any_input_modal(&s)
+                && !is_indent_in_flight(&s)
+                && !s.confirm_kill
+        })
+        .filter_map(|(_, s)| Some((s.dims?, s.active_tab.clone()?, s)))
+        .filter_map(|(dims, path, s)| {
+            let buf = (**s.buffers.get(&path)?).clone();
+            Some((dims, path, buf))
+        })
+        .map(|(dims, path, mut buf)| {
+            buf.clear_mark();
+            buf.close_group_on_move();
+            buf.request_indent(Some(buf.cursor_row()), true);
+            let (sr, ssl) = mov::adjust_scroll(&buf, &dims);
+            buf.set_scroll(led_core::Row(sr), led_core::SubLine(ssl));
+            buf.touch();
+            Mut::BufferUpdate(path, buf)
+        })
+        .stream();
+
+    let delete_backward_s = actions_with_state
+        .filter(|(a, _)| matches!(a, Action::DeleteBackward))
+        .filter(|(_, s)| {
+            !has_blocking_overlay(&s)
+                && !has_any_input_modal(&s)
+                && !is_indent_in_flight(&s)
+                && !s.confirm_kill
+        })
+        .filter_map(|(_, s)| {
+            let close = active_buf(&s).map_or(false, |b| {
+                b.last_edit_kind() != Some(led_state::EditKind::Delete)
+            });
+            Some((close, s.dims?, s.active_tab.clone()?, s))
+        })
+        .filter_map(|(close, dims, path, s)| {
+            let buf = (**s.buffers.get(&path)?).clone();
+            Some((close, dims, path, buf))
+        })
+        .map(|(close, dims, path, mut buf)| {
+            buf.clear_mark();
+            if close {
+                buf.close_undo_group();
+            }
+            if let Some((r, c, _)) = edit::delete_backward(&mut buf) {
+                buf.set_cursor(led_core::Row(r), led_core::Col(c), led_core::Col(0));
+                buf.set_cursor(
+                    led_core::Row(r),
+                    led_core::Col(c),
+                    led_core::Col(mov::reset_affinity(&buf, &dims)),
+                );
+            }
+            let (sr, ssl) = mov::adjust_scroll(&buf, &dims);
+            buf.set_scroll(led_core::Row(sr), led_core::SubLine(ssl));
+            buf.update_matching_bracket();
+            buf.touch();
+            Mut::BufferUpdate(path, buf)
+        })
+        .stream();
+
+    let delete_forward_s = actions_with_state
+        .filter(|(a, _)| matches!(a, Action::DeleteForward))
+        .filter(|(_, s)| {
+            !has_blocking_overlay(&s)
+                && !has_any_input_modal(&s)
+                && !is_indent_in_flight(&s)
+                && !s.confirm_kill
+        })
+        .filter_map(|(_, s)| {
+            let close = active_buf(&s).map_or(false, |b| {
+                b.last_edit_kind() != Some(led_state::EditKind::Delete)
+            });
+            Some((close, s.dims?, s.active_tab.clone()?, s))
+        })
+        .filter_map(|(close, dims, path, s)| {
+            let buf = (**s.buffers.get(&path)?).clone();
+            Some((close, dims, path, buf))
+        })
+        .map(|(close, dims, path, mut buf)| {
+            buf.clear_mark();
+            if close {
+                buf.close_undo_group();
+            }
+            if let Some((r, c, _)) = edit::delete_forward(&mut buf) {
+                buf.set_cursor(led_core::Row(r), led_core::Col(c), led_core::Col(0));
+                buf.set_cursor(
+                    led_core::Row(r),
+                    led_core::Col(c),
+                    led_core::Col(mov::reset_affinity(&buf, &dims)),
+                );
+            }
+            let (sr, ssl) = mov::adjust_scroll(&buf, &dims);
+            buf.set_scroll(led_core::Row(sr), led_core::SubLine(ssl));
+            buf.update_matching_bracket();
+            buf.touch();
+            Mut::BufferUpdate(path, buf)
+        })
+        .stream();
+
     // ── 2. Build up muts from driver input and derived streams ──
 
     let muts: Stream<Mut> = drivers
@@ -1079,8 +1308,18 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
     jump_fwd_activate_s.forward(&muts);
     jump_fwd_open_s.forward(&muts);
     jump_fwd_cursor_s.forward(&muts);
+    confirm_kill_accept_s.forward(&muts);
+    insert_char_buf_s.forward(&muts);
+    insert_char_complete_s.forward(&muts);
+    insert_newline_s.forward(&muts);
+    insert_tab_s.forward(&muts);
+    delete_backward_s.forward(&muts);
+    delete_forward_s.forward(&muts);
     // Modal streams + unmigrated — all share the same actions_with_state snapshot.
     isearch_s.forward(&muts);
+    lsp_code_action_picker_s.forward(&muts);
+    lsp_rename_action_s.forward(&muts);
+    lsp_completion_action_s.forward(&muts);
     file_search_action_s.forward(&muts);
     find_file_action_s.forward(&muts);
     unmigrated_actions_s.forward(&muts);
@@ -1488,11 +1727,23 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
             Mut::BreakKillAccumulation => {
                 s.kill_ring.break_accumulation();
             }
+            Mut::LspCodeActionPickerAction(a) => {
+                action::handle_code_action_picker(&mut s, &a);
+            }
+            Mut::LspRenameAction(a) => {
+                action::handle_rename_action(&mut s, &a);
+            }
+            Mut::LspCompletionAction(a) => {
+                action::handle_completion_action(&mut s, &a);
+            }
             Mut::FileSearchAction(a) => {
                 file_search::handle_file_search_action(&mut s, &a);
             }
             Mut::FindFileAction(a) => {
                 find_file::handle_find_file_action(&mut s, &a);
+            }
+            Mut::ForceKillBuffer => {
+                action::force_kill_buffer(&mut s);
             }
             Mut::SearchAccept(path) => {
                 if let Some(buf) = s.buf_mut(&path) {
@@ -1682,6 +1933,11 @@ fn is_migrated(action: &Action) -> bool {
             | Action::SaveForce
             | Action::JumpBack
             | Action::JumpForward
+            | Action::InsertChar(_)
+            | Action::InsertNewline
+            | Action::InsertTab
+            | Action::DeleteBackward
+            | Action::DeleteForward
     )
 }
 
@@ -1695,6 +1951,26 @@ fn has_active_lsp(s: &AppState) -> bool {
 
 /// True when a blocking overlay is active that absorbs all actions.
 /// Migrated action streams must not fire in this state.
+fn active_buf(s: &AppState) -> Option<&BufferState> {
+    s.active_tab
+        .as_ref()
+        .and_then(|p| s.buffers.get(p))
+        .map(|b| &**b)
+}
+
+fn is_word_boundary(buf: &BufferState) -> bool {
+    led_core::with_line_buf(|line| {
+        buf.doc().line(buf.cursor_row(), line);
+        line.chars()
+            .nth(buf.cursor_col().0.saturating_sub(1))
+            .map_or(false, |p| !p.is_whitespace())
+    })
+}
+
+fn is_indent_in_flight(s: &AppState) -> bool {
+    active_buf(s).map_or(false, |b| b.pending_indent_row().is_some())
+}
+
 fn has_blocking_overlay(s: &AppState) -> bool {
     s.lsp.code_actions.is_some() || (s.lsp.rename.is_some() && s.focus == PanelSlot::Overlay)
 }
@@ -1705,6 +1981,12 @@ fn has_blocking_overlay(s: &AppState) -> bool {
 /// Excludes isearch — handled by isearch_of.rs streams.
 fn has_input_modal(s: &AppState) -> bool {
     s.file_search.is_some() || s.find_file.is_some()
+}
+
+/// Like has_input_modal but also checks isearch. Used by editing action
+/// streams that must not fire when isearch consumes the same actions.
+fn has_any_input_modal(s: &AppState) -> bool {
+    has_input_modal(s) || isearch_of::is_in_isearch_pub(s)
 }
 
 pub(super) fn resolve_focus_slot(s: &AppState) -> PanelSlot {
@@ -1950,6 +2232,10 @@ enum Mut {
     DismissConfirmKill,
     BreakKillAccumulation,
     SearchAccept(CanonPath),
+    ForceKillBuffer,
+    LspCodeActionPickerAction(Action),
+    LspRenameAction(Action),
+    LspCompletionAction(Action),
     FileSearchAction(Action),
     FindFileAction(Action),
     ToggleInlayHints(bool),
@@ -2164,6 +2450,10 @@ impl Mut {
             Mut::DismissConfirmKill => "DismissConfirmKill",
             Mut::BreakKillAccumulation => "BreakKillAccumulation",
             Mut::SearchAccept(_) => "SearchAccept",
+            Mut::ForceKillBuffer => "ForceKillBuffer",
+            Mut::LspCodeActionPickerAction(_) => "LspCodeActionPickerAction",
+            Mut::LspRenameAction(_) => "LspRenameAction",
+            Mut::LspCompletionAction(_) => "LspCompletionAction",
             Mut::FileSearchAction(_) => "FileSearchAction",
             Mut::FindFileAction(_) => "FindFileAction",
             Mut::ToggleInlayHints(_) => "ToggleInlayHints",
