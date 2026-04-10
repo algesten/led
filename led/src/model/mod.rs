@@ -1451,6 +1451,75 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
         .map(|_| Mut::SetFocus(PanelSlot::Overlay))
         .stream();
 
+    // ── SortImports: compute sorted text → BufferUpdate + Alert ──
+
+    let sort_imports_parent_s = raw_actions
+        .filter(|a| matches!(a, Action::SortImports))
+        .sample_combine(&state)
+        .filter(|(_, s)| !has_blocking_overlay(&s))
+        .stream();
+
+    let sort_imports_buf_s = sort_imports_parent_s
+        .filter_map(|(_, s)| {
+            let path = s.active_tab.clone()?;
+            let buf = s.buffers.get(&path)?;
+            let file_path = buf.path()?;
+            let ss = led_syntax::SyntaxState::from_path_and_doc(file_path.as_path(), &**buf.doc())?;
+            let import_items = ss.imports(&**buf.doc());
+            let (start_byte, end_byte, replacement) =
+                led_syntax::import::sort_imports_text(&**buf.doc(), &import_items)?;
+            let start_char = led_core::CharOffset(buf.doc().byte_to_char(start_byte));
+            let end_char = led_core::CharOffset(buf.doc().byte_to_char(end_byte));
+            let edit_row = buf.doc().char_to_line(start_char);
+            let mut buf = (**buf).clone();
+            buf.close_group_on_move();
+            buf.edit_at(edit_row, |doc| {
+                let d = doc.remove(start_char, end_char);
+                let d = d.insert(start_char, &replacement);
+                let old_text = doc.slice(start_char, end_char);
+                let ops = vec![led_core::EditOp {
+                    offset: start_char,
+                    old_text,
+                    new_text: replacement.clone(),
+                }];
+                (d, ops, ())
+            });
+            buf.touch();
+            Some(Mut::BufferUpdate(path, buf))
+        })
+        .stream();
+
+    let sort_imports_alert_s = sort_imports_parent_s
+        .map(|(_, s)| {
+            let sorted = s
+                .active_tab
+                .as_ref()
+                .and_then(|p| s.buffers.get(p))
+                .and_then(|buf| buf.path())
+                .and_then(|fp| {
+                    led_syntax::SyntaxState::from_path_and_doc(
+                        fp.as_path(),
+                        &**s.buffers.get(s.active_tab.as_ref()?).unwrap().doc(),
+                    )
+                })
+                .map(|ss| {
+                    let buf = s.buffers.get(s.active_tab.as_ref().unwrap()).unwrap();
+                    let items = ss.imports(&**buf.doc());
+                    led_syntax::import::sort_imports_text(&**buf.doc(), &items).is_some()
+                })
+                .unwrap_or(false);
+            if sorted {
+                Mut::Alert {
+                    info: Some("Imports sorted".into()),
+                }
+            } else {
+                Mut::Alert {
+                    info: Some("Imports already sorted".into()),
+                }
+            }
+        })
+        .stream();
+
     // NextIssue/PrevIssue stay in handle_action — navigate_to_position
     // requires imperative state mutation (request_open, set active_tab, etc.)
 
@@ -1756,6 +1825,8 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
     open_file_search_trigger_s.forward(&muts);
     lsp_rename_set_s.forward(&muts);
     lsp_rename_focus_s.forward(&muts);
+    sort_imports_buf_s.forward(&muts);
+    sort_imports_alert_s.forward(&muts);
     // Modal streams + unmigrated — all share the same actions_with_state snapshot.
     isearch_s.forward(&muts);
     lsp_code_action_picker_s.forward(&muts);
@@ -2407,6 +2478,7 @@ fn is_migrated(action: &Action) -> bool {
             | Action::SaveAs
             | Action::OpenFileSearch
             | Action::LspRename
+            | Action::SortImports
     )
 }
 

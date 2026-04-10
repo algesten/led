@@ -265,46 +265,6 @@ pub fn handle_action(state: &mut AppState, action: Action) -> bool {
             search::start_search(buf);
         }),
 
-        // ── Sort imports ──
-        Action::SortImports => {
-            if let Some(path) = state.active_tab.clone() {
-                if let Some(buf) = state.buffers.get(&path) {
-                    if let Some(file_path) = buf.path() {
-                        if let Some(ss) = led_syntax::SyntaxState::from_path_and_doc(
-                            file_path.as_path(),
-                            &**buf.doc(),
-                        ) {
-                            let import_items = ss.imports(&**buf.doc());
-                            if let Some((start_byte, end_byte, replacement)) =
-                                led_syntax::import::sort_imports_text(&**buf.doc(), &import_items)
-                            {
-                                let start_char = CharOffset(buf.doc().byte_to_char(start_byte));
-                                let end_char = CharOffset(buf.doc().byte_to_char(end_byte));
-                                let edit_row = buf.doc().char_to_line(start_char);
-                                let buf = state.buf_mut(&path).unwrap();
-                                close_group_on_move(buf);
-                                buf.edit_at(edit_row, |doc| {
-                                    let d = doc.remove(start_char, end_char);
-                                    let d = d.insert(start_char, &replacement);
-                                    let old_text = doc.slice(start_char, end_char);
-                                    let ops = vec![EditOp {
-                                        offset: start_char,
-                                        old_text,
-                                        new_text: replacement.clone(),
-                                    }];
-                                    (d, ops, ())
-                                });
-                                buf.touch();
-                                state.alerts.info = Some("Imports sorted".into());
-                            } else {
-                                state.alerts.info = Some("Imports already sorted".into());
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
         // ── LSP ──
 
         // ── Macros ──
