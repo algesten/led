@@ -108,42 +108,22 @@ pub fn handle_action(state: &mut AppState, action: Action) -> bool {
     }
 
     match action {
-        // ── Movement (routed by focus — browser side only) ──
+        // ── Movement — browser side only (editor side in streams) ──
         Action::MoveUp
         | Action::MoveDown
         | Action::PageUp
         | Action::PageDown
         | Action::FileStart
-        | Action::FileEnd => {
-            if state.focus == PanelSlot::Side {
-                browser::handle_browser_nav(state, &action);
-            } else {
-                editor::handle_editor_movement(state, &action);
-            }
+        | Action::FileEnd
+            if state.focus == PanelSlot::Side =>
+        {
+            browser::handle_browser_nav(state, &action);
         }
-        Action::MoveLeft => {
-            if state.focus == PanelSlot::Side {
-                browser::handle_browser_collapse(state);
-            } else {
-                with_buf(state, |buf, dims| {
-                    let (r, c, _) = mov::move_left(buf);
-                    buf.set_cursor(Row(r), Col(c), Col(0));
-                    buf.set_cursor(Row(r), Col(c), Col(mov::reset_affinity(buf, dims)));
-                    close_group_on_move(buf);
-                });
-            }
+        Action::MoveLeft if state.focus == PanelSlot::Side => {
+            browser::handle_browser_collapse(state);
         }
-        Action::MoveRight => {
-            if state.focus == PanelSlot::Side {
-                browser::handle_browser_expand(state);
-            } else {
-                with_buf(state, |buf, dims| {
-                    let (r, c, _) = mov::move_right(buf);
-                    buf.set_cursor(Row(r), Col(c), Col(0));
-                    buf.set_cursor(Row(r), Col(c), Col(mov::reset_affinity(buf, dims)));
-                    close_group_on_move(buf);
-                });
-            }
+        Action::MoveRight if state.focus == PanelSlot::Side => {
+            browser::handle_browser_expand(state);
         }
 
         Action::Abort => with_buf(state, |buf, _dims| {

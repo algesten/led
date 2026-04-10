@@ -1037,6 +1037,295 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
         })
         .stream();
 
+    // ── Movement actions (editor side, focus==Main) ──
+
+    let move_up_s = actions_with_state
+        .filter(|(a, _)| matches!(a, Action::MoveUp))
+        .filter(|(_, s)| {
+            !has_blocking_overlay(&s) && !has_any_input_modal(&s) && s.focus == PanelSlot::Main
+        })
+        .filter_map(|(_, s)| Some((s.dims?, s.active_tab.clone()?, s)))
+        .filter_map(|(dims, path, s)| {
+            let buf = (**s.buffers.get(&path)?).clone();
+            Some((dims, path, buf))
+        })
+        .map(|(dims, path, mut buf)| {
+            let (r, c, a) = mov::move_up(&buf, &dims);
+            buf.set_cursor(led_core::Row(r), led_core::Col(c), led_core::Col(a));
+            buf.close_group_on_move();
+            let (sr, ssl) = mov::adjust_scroll(&buf, &dims);
+            buf.set_scroll(led_core::Row(sr), led_core::SubLine(ssl));
+            buf.update_matching_bracket();
+            buf.touch();
+            Mut::BufferUpdate(path, buf)
+        })
+        .stream();
+
+    let move_down_s = actions_with_state
+        .filter(|(a, _)| matches!(a, Action::MoveDown))
+        .filter(|(_, s)| {
+            !has_blocking_overlay(&s) && !has_any_input_modal(&s) && s.focus == PanelSlot::Main
+        })
+        .filter_map(|(_, s)| Some((s.dims?, s.active_tab.clone()?, s)))
+        .filter_map(|(dims, path, s)| {
+            let buf = (**s.buffers.get(&path)?).clone();
+            Some((dims, path, buf))
+        })
+        .map(|(dims, path, mut buf)| {
+            let (r, c, a) = mov::move_down(&buf, &dims);
+            buf.set_cursor(led_core::Row(r), led_core::Col(c), led_core::Col(a));
+            buf.close_group_on_move();
+            let (sr, ssl) = mov::adjust_scroll(&buf, &dims);
+            buf.set_scroll(led_core::Row(sr), led_core::SubLine(ssl));
+            buf.update_matching_bracket();
+            buf.touch();
+            Mut::BufferUpdate(path, buf)
+        })
+        .stream();
+
+    let move_left_s = actions_with_state
+        .filter(|(a, _)| matches!(a, Action::MoveLeft))
+        .filter(|(_, s)| {
+            !has_blocking_overlay(&s) && !has_any_input_modal(&s) && s.focus == PanelSlot::Main
+        })
+        .filter_map(|(_, s)| Some((s.dims?, s.active_tab.clone()?, s)))
+        .filter_map(|(dims, path, s)| {
+            let buf = (**s.buffers.get(&path)?).clone();
+            Some((dims, path, buf))
+        })
+        .map(|(dims, path, mut buf)| {
+            let (r, c, _) = mov::move_left(&buf);
+            buf.set_cursor(led_core::Row(r), led_core::Col(c), led_core::Col(0));
+            buf.set_cursor(
+                led_core::Row(r),
+                led_core::Col(c),
+                led_core::Col(mov::reset_affinity(&buf, &dims)),
+            );
+            buf.close_group_on_move();
+            let (sr, ssl) = mov::adjust_scroll(&buf, &dims);
+            buf.set_scroll(led_core::Row(sr), led_core::SubLine(ssl));
+            buf.update_matching_bracket();
+            buf.touch();
+            Mut::BufferUpdate(path, buf)
+        })
+        .stream();
+
+    let move_right_s = actions_with_state
+        .filter(|(a, _)| matches!(a, Action::MoveRight))
+        .filter(|(_, s)| {
+            !has_blocking_overlay(&s) && !has_any_input_modal(&s) && s.focus == PanelSlot::Main
+        })
+        .filter_map(|(_, s)| Some((s.dims?, s.active_tab.clone()?, s)))
+        .filter_map(|(dims, path, s)| {
+            let buf = (**s.buffers.get(&path)?).clone();
+            Some((dims, path, buf))
+        })
+        .map(|(dims, path, mut buf)| {
+            let (r, c, _) = mov::move_right(&buf);
+            buf.set_cursor(led_core::Row(r), led_core::Col(c), led_core::Col(0));
+            buf.set_cursor(
+                led_core::Row(r),
+                led_core::Col(c),
+                led_core::Col(mov::reset_affinity(&buf, &dims)),
+            );
+            buf.close_group_on_move();
+            let (sr, ssl) = mov::adjust_scroll(&buf, &dims);
+            buf.set_scroll(led_core::Row(sr), led_core::SubLine(ssl));
+            buf.update_matching_bracket();
+            buf.touch();
+            Mut::BufferUpdate(path, buf)
+        })
+        .stream();
+
+    let page_up_s = actions_with_state
+        .filter(|(a, _)| matches!(a, Action::PageUp))
+        .filter(|(_, s)| {
+            !has_blocking_overlay(&s) && !has_any_input_modal(&s) && s.focus == PanelSlot::Main
+        })
+        .filter_map(|(_, s)| Some((s.dims?, s.active_tab.clone()?, s)))
+        .filter_map(|(dims, path, s)| {
+            let buf = (**s.buffers.get(&path)?).clone();
+            Some((dims, path, buf))
+        })
+        .map(|(dims, path, mut buf)| {
+            let (r, c, a) = mov::page_up(&buf, &dims);
+            buf.set_cursor(led_core::Row(r), led_core::Col(c), led_core::Col(a));
+            buf.close_group_on_move();
+            let (sr, ssl) = mov::adjust_scroll(&buf, &dims);
+            buf.set_scroll(led_core::Row(sr), led_core::SubLine(ssl));
+            buf.update_matching_bracket();
+            buf.touch();
+            Mut::BufferUpdate(path, buf)
+        })
+        .stream();
+
+    let page_down_s = actions_with_state
+        .filter(|(a, _)| matches!(a, Action::PageDown))
+        .filter(|(_, s)| {
+            !has_blocking_overlay(&s) && !has_any_input_modal(&s) && s.focus == PanelSlot::Main
+        })
+        .filter_map(|(_, s)| Some((s.dims?, s.active_tab.clone()?, s)))
+        .filter_map(|(dims, path, s)| {
+            let buf = (**s.buffers.get(&path)?).clone();
+            Some((dims, path, buf))
+        })
+        .map(|(dims, path, mut buf)| {
+            let (r, c, a) = mov::page_down(&buf, &dims);
+            buf.set_cursor(led_core::Row(r), led_core::Col(c), led_core::Col(a));
+            buf.close_group_on_move();
+            let (sr, ssl) = mov::adjust_scroll(&buf, &dims);
+            buf.set_scroll(led_core::Row(sr), led_core::SubLine(ssl));
+            buf.update_matching_bracket();
+            buf.touch();
+            Mut::BufferUpdate(path, buf)
+        })
+        .stream();
+
+    let file_start_s = actions_with_state
+        .filter(|(a, _)| matches!(a, Action::FileStart))
+        .filter(|(_, s)| {
+            !has_blocking_overlay(&s) && !has_any_input_modal(&s) && s.focus == PanelSlot::Main
+        })
+        .filter_map(|(_, s)| Some((s.dims?, s.active_tab.clone()?, s)))
+        .filter_map(|(dims, path, s)| {
+            let buf = (**s.buffers.get(&path)?).clone();
+            Some((dims, path, buf))
+        })
+        .map(|(dims, path, mut buf)| {
+            let (r, c, _) = mov::file_start();
+            buf.set_cursor(
+                led_core::Row(r),
+                led_core::Col(c),
+                led_core::Col(mov::reset_affinity(&buf, &dims)),
+            );
+            buf.close_group_on_move();
+            let (sr, ssl) = mov::adjust_scroll(&buf, &dims);
+            buf.set_scroll(led_core::Row(sr), led_core::SubLine(ssl));
+            buf.update_matching_bracket();
+            buf.touch();
+            Mut::BufferUpdate(path, buf)
+        })
+        .stream();
+
+    let file_end_s = actions_with_state
+        .filter(|(a, _)| matches!(a, Action::FileEnd))
+        .filter(|(_, s)| {
+            !has_blocking_overlay(&s) && !has_any_input_modal(&s) && s.focus == PanelSlot::Main
+        })
+        .filter_map(|(_, s)| Some((s.dims?, s.active_tab.clone()?, s)))
+        .filter_map(|(dims, path, s)| {
+            let buf = (**s.buffers.get(&path)?).clone();
+            Some((dims, path, buf))
+        })
+        .map(|(dims, path, mut buf)| {
+            let (r, c, _) = mov::file_end(&**buf.doc());
+            buf.set_cursor(
+                led_core::Row(r),
+                led_core::Col(c),
+                led_core::Col(mov::reset_affinity(&buf, &dims)),
+            );
+            buf.close_group_on_move();
+            let (sr, ssl) = mov::adjust_scroll(&buf, &dims);
+            buf.set_scroll(led_core::Row(sr), led_core::SubLine(ssl));
+            buf.update_matching_bracket();
+            buf.touch();
+            Mut::BufferUpdate(path, buf)
+        })
+        .stream();
+
+    // ── Kill ring actions ──
+
+    let kill_line_parent_s = actions_with_state
+        .filter(|(a, _)| matches!(a, Action::KillLine))
+        .filter(|(_, s)| {
+            !has_blocking_overlay(&s)
+                && !has_any_input_modal(&s)
+                && !is_indent_in_flight(&s)
+                && !s.confirm_kill
+        })
+        .stream();
+
+    let kill_line_buf_s = kill_line_parent_s
+        .filter_map(|(_, s)| {
+            let dims = s.dims?;
+            let path = s.active_tab.clone()?;
+            let mut buf = (**s.buffers.get(&path)?).clone();
+            buf.close_group_on_move();
+            let killed = edit::kill_line(&mut buf);
+            if let Some((_, r, c, a)) = &killed {
+                buf.set_cursor(led_core::Row(*r), led_core::Col(*c), led_core::Col(*a));
+            }
+            buf.close_group_on_move();
+            let (sr, ssl) = mov::adjust_scroll(&buf, &dims);
+            buf.set_scroll(led_core::Row(sr), led_core::SubLine(ssl));
+            buf.touch();
+            Some((path, buf, killed.map(|(k, _, _, _)| k)))
+        })
+        .map(|(path, buf, _)| Mut::BufferUpdate(path, buf))
+        .stream();
+
+    let kill_line_ring_s = kill_line_parent_s
+        .filter_map(|(_, s)| {
+            let path = s.active_tab.as_ref()?;
+            let mut buf = (**s.buffers.get(path)?).clone();
+            buf.close_group_on_move();
+            let (killed, _, _, _) = edit::kill_line(&mut buf)?;
+            Some(Mut::KillRingAccumulate(killed))
+        })
+        .stream();
+
+    let kill_region_parent_s = actions_with_state
+        .filter(|(a, _)| matches!(a, Action::KillRegion))
+        .filter(|(_, s)| {
+            !has_blocking_overlay(&s)
+                && !has_any_input_modal(&s)
+                && !is_indent_in_flight(&s)
+                && !s.confirm_kill
+        })
+        .stream();
+
+    let kill_region_buf_s = kill_region_parent_s
+        .filter_map(|(_, s)| {
+            let dims = s.dims?;
+            let path = s.active_tab.clone()?;
+            let mut buf = (**s.buffers.get(&path)?).clone();
+            buf.close_group_on_move();
+            if let Some((_, r, c, a)) = edit::kill_region(&mut buf) {
+                buf.set_cursor(led_core::Row(r), led_core::Col(c), led_core::Col(a));
+                buf.clear_mark();
+            } else {
+                buf.clear_mark();
+            }
+            buf.close_group_on_move();
+            let (sr, ssl) = mov::adjust_scroll(&buf, &dims);
+            buf.set_scroll(led_core::Row(sr), led_core::SubLine(ssl));
+            buf.touch();
+            Some(Mut::BufferUpdate(path, buf))
+        })
+        .stream();
+
+    let kill_region_ring_s = kill_region_parent_s
+        .filter_map(|(_, s)| {
+            let path = s.active_tab.as_ref()?;
+            let mut buf = (**s.buffers.get(path)?).clone();
+            buf.close_group_on_move();
+            let (killed, _, _, _) = edit::kill_region(&mut buf)?;
+            Some(Mut::KillRingSet(killed))
+        })
+        .stream();
+
+    let kill_region_no_region_s = kill_region_parent_s
+        .filter(|(_, s)| {
+            s.active_tab
+                .as_ref()
+                .and_then(|p| s.buffers.get(p))
+                .map_or(true, |b| b.mark().is_none())
+        })
+        .map(|_| Mut::Alert {
+            info: Some("No region".into()),
+        })
+        .stream();
+
     // ── 2. Build up muts from driver input and derived streams ──
 
     let muts: Stream<Mut> = drivers
@@ -1315,6 +1604,19 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
     insert_tab_s.forward(&muts);
     delete_backward_s.forward(&muts);
     delete_forward_s.forward(&muts);
+    move_up_s.forward(&muts);
+    move_down_s.forward(&muts);
+    move_left_s.forward(&muts);
+    move_right_s.forward(&muts);
+    page_up_s.forward(&muts);
+    page_down_s.forward(&muts);
+    file_start_s.forward(&muts);
+    file_end_s.forward(&muts);
+    kill_line_buf_s.forward(&muts);
+    kill_line_ring_s.forward(&muts);
+    kill_region_buf_s.forward(&muts);
+    kill_region_ring_s.forward(&muts);
+    kill_region_no_region_s.forward(&muts);
     // Modal streams + unmigrated — all share the same actions_with_state snapshot.
     isearch_s.forward(&muts);
     lsp_code_action_picker_s.forward(&muts);
@@ -1742,6 +2044,12 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
             Mut::FindFileAction(a) => {
                 find_file::handle_find_file_action(&mut s, &a);
             }
+            Mut::KillRingAccumulate(text) => {
+                s.kill_ring.accumulate(&text);
+            }
+            Mut::KillRingSet(text) => {
+                s.kill_ring.set(text);
+            }
             Mut::ForceKillBuffer => {
                 action::force_kill_buffer(&mut s);
             }
@@ -1938,6 +2246,8 @@ fn is_migrated(action: &Action) -> bool {
             | Action::InsertTab
             | Action::DeleteBackward
             | Action::DeleteForward
+            | Action::KillLine
+            | Action::KillRegion
     )
 }
 
@@ -2233,6 +2543,8 @@ enum Mut {
     BreakKillAccumulation,
     SearchAccept(CanonPath),
     ForceKillBuffer,
+    KillRingAccumulate(String),
+    KillRingSet(String),
     LspCodeActionPickerAction(Action),
     LspRenameAction(Action),
     LspCompletionAction(Action),
@@ -2450,6 +2762,8 @@ impl Mut {
             Mut::DismissConfirmKill => "DismissConfirmKill",
             Mut::BreakKillAccumulation => "BreakKillAccumulation",
             Mut::SearchAccept(_) => "SearchAccept",
+            Mut::KillRingAccumulate(_) => "KillRingAccumulate",
+            Mut::KillRingSet(_) => "KillRingSet",
             Mut::ForceKillBuffer => "ForceKillBuffer",
             Mut::LspCodeActionPickerAction(_) => "LspCodeActionPickerAction",
             Mut::LspRenameAction(_) => "LspRenameAction",
