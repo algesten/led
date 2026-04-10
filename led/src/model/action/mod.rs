@@ -263,10 +263,6 @@ pub fn handle_action(state: &mut AppState, action: Action) -> bool {
             search::start_search(buf);
         }),
 
-        // ── Find file / Save as ──
-        Action::FindFile => find_file::activate(state),
-        Action::SaveAs => find_file::activate_save_as(state),
-
         // ── File search ──
         Action::OpenFileSearch => file_search::activate(state),
 

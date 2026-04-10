@@ -224,6 +224,79 @@ fn tab_complete(state: &mut AppState) {
 
 // ── Activation ──
 
+/// Pure: compute initial FindFileState for Open mode from current state.
+pub fn compute_activate(state: &AppState) -> (FindFileState, (CanonPath, String, bool)) {
+    let dir = state
+        .active_tab
+        .as_ref()
+        .and_then(|path| state.buffers.get(path))
+        .and_then(|buf| buf.path().cloned())
+        .and_then(|p| p.parent())
+        .unwrap_or_else(|| (*state.startup.start_dir).clone());
+
+    let dir_str = canon_to_user(state, &dir).to_string_lossy().into_owned();
+    let mut input = abbreviate_home(&dir_str);
+    if !input.ends_with('/') {
+        input.push('/');
+    }
+    let cursor = input.len();
+
+    let fs = FindFileState {
+        mode: FindFileMode::Open,
+        input: input.clone(),
+        cursor,
+        base_input: input,
+        completions: Vec::new(),
+        selected: None,
+        show_side: false,
+    };
+
+    let expanded = expand_path(&fs.input);
+    let listing_dir = UserPath::new(expanded).canonicalize();
+    (fs, (listing_dir, String::new(), false))
+}
+
+/// Pure: compute initial FindFileState for SaveAs mode from current state.
+pub fn compute_activate_save_as(state: &AppState) -> (FindFileState, (CanonPath, String, bool)) {
+    let input = state
+        .active_tab
+        .as_ref()
+        .and_then(|path| state.buffers.get(path))
+        .and_then(|buf| buf.path().cloned())
+        .map(|p| abbreviate_home(&canon_to_user(state, &p).to_string_lossy()))
+        .unwrap_or_else(|| {
+            let dir = canon_to_user(state, &state.startup.start_dir)
+                .to_string_lossy()
+                .into_owned();
+            let mut s = abbreviate_home(&dir);
+            if !s.ends_with('/') {
+                s.push('/');
+            }
+            s
+        });
+    let cursor = input.len();
+
+    let fs = FindFileState {
+        mode: FindFileMode::SaveAs,
+        input: input.clone(),
+        cursor,
+        base_input: input,
+        completions: Vec::new(),
+        selected: None,
+        show_side: false,
+    };
+
+    let expanded = expand_path(&fs.input);
+    let dir =
+        UserPath::new(expanded.parent().unwrap_or(Path::new("/")).to_path_buf()).canonicalize();
+    let prefix = expanded
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let show_hidden = prefix.starts_with('.');
+    (fs, (dir, prefix, show_hidden))
+}
+
 pub fn activate(state: &mut AppState) {
     // Parent dir of active buffer's path, or start_dir — shown as user path.
     let dir = state

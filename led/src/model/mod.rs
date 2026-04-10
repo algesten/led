@@ -1326,6 +1326,48 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
         })
         .stream();
 
+    // ── FindFile / SaveAs: pure computation → SetFindFile + SetPendingFindFileList ──
+
+    let find_file_parent_s = raw_actions
+        .filter(|a| matches!(a, Action::FindFile))
+        .sample_combine(&state)
+        .filter(|(_, s)| !has_blocking_overlay(&s))
+        .stream();
+
+    let find_file_set_s = find_file_parent_s
+        .map(|(_, s)| {
+            let (fs, _) = find_file::compute_activate(&s);
+            Mut::SetFindFile(fs)
+        })
+        .stream();
+
+    let find_file_list_s = find_file_parent_s
+        .map(|(_, s)| {
+            let (_, (dir, prefix, show_hidden)) = find_file::compute_activate(&s);
+            Mut::SetPendingFindFileList(dir, prefix, show_hidden)
+        })
+        .stream();
+
+    let save_as_parent_s = raw_actions
+        .filter(|a| matches!(a, Action::SaveAs))
+        .sample_combine(&state)
+        .filter(|(_, s)| !has_blocking_overlay(&s))
+        .stream();
+
+    let save_as_set_s = save_as_parent_s
+        .map(|(_, s)| {
+            let (fs, _) = find_file::compute_activate_save_as(&s);
+            Mut::SetFindFile(fs)
+        })
+        .stream();
+
+    let save_as_list_s = save_as_parent_s
+        .map(|(_, s)| {
+            let (_, (dir, prefix, show_hidden)) = find_file::compute_activate_save_as(&s);
+            Mut::SetPendingFindFileList(dir, prefix, show_hidden)
+        })
+        .stream();
+
     // ── 2. Build up muts from driver input and derived streams ──
 
     let muts: Stream<Mut> = drivers
@@ -1617,6 +1659,10 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
     kill_region_buf_s.forward(&muts);
     kill_region_ring_s.forward(&muts);
     kill_region_no_region_s.forward(&muts);
+    find_file_set_s.forward(&muts);
+    find_file_list_s.forward(&muts);
+    save_as_set_s.forward(&muts);
+    save_as_list_s.forward(&muts);
     // Modal streams + unmigrated — all share the same actions_with_state snapshot.
     isearch_s.forward(&muts);
     lsp_code_action_picker_s.forward(&muts);
@@ -2050,6 +2096,13 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
             Mut::KillRingSet(text) => {
                 s.kill_ring.set(text);
             }
+            Mut::SetFindFile(fs) => {
+                s.find_file = Some(fs);
+            }
+            Mut::SetPendingFindFileList(dir, prefix, show_hidden) => {
+                s.pending_find_file_list
+                    .set(Some((dir, prefix, show_hidden)));
+            }
             Mut::ForceKillBuffer => {
                 action::force_kill_buffer(&mut s);
             }
@@ -2248,6 +2301,8 @@ fn is_migrated(action: &Action) -> bool {
             | Action::DeleteForward
             | Action::KillLine
             | Action::KillRegion
+            | Action::FindFile
+            | Action::SaveAs
     )
 }
 
@@ -2545,6 +2600,8 @@ enum Mut {
     ForceKillBuffer,
     KillRingAccumulate(String),
     KillRingSet(String),
+    SetFindFile(led_state::FindFileState),
+    SetPendingFindFileList(CanonPath, String, bool),
     LspCodeActionPickerAction(Action),
     LspRenameAction(Action),
     LspCompletionAction(Action),
@@ -2764,6 +2821,8 @@ impl Mut {
             Mut::SearchAccept(_) => "SearchAccept",
             Mut::KillRingAccumulate(_) => "KillRingAccumulate",
             Mut::KillRingSet(_) => "KillRingSet",
+            Mut::SetFindFile(_) => "SetFindFile",
+            Mut::SetPendingFindFileList(..) => "SetPendingFindFileList",
             Mut::ForceKillBuffer => "ForceKillBuffer",
             Mut::LspCodeActionPickerAction(_) => "LspCodeActionPickerAction",
             Mut::LspRenameAction(_) => "LspRenameAction",
