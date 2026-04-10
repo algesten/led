@@ -126,6 +126,7 @@ async fn main() {
         user_start_dir,
         config_dir,
         test_lsp_server: None,
+        test_gh_binary: None,
     };
 
     let local = tokio::task::LocalSet::new();

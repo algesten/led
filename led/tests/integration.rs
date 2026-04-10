@@ -2681,6 +2681,7 @@ fn two_instance_no_args_browser_visible() {
         user_start_dir: UserPath::new(ws_canon.as_path()),
         config_dir: cfg_user.clone(),
         test_lsp_server: None,
+        test_gh_binary: None,
     };
     let no_files_b = Startup {
         headless: true,
@@ -2691,6 +2692,7 @@ fn two_instance_no_args_browser_visible() {
         user_start_dir: UserPath::new(ws_canon.as_path()),
         config_dir: cfg_user.clone(),
         test_lsp_server: None,
+        test_gh_binary: None,
     };
 
     let mut a = Instance::start(no_files_a);
@@ -5622,6 +5624,60 @@ fn next_issue_opens_unopened_file_at_change_position() {
 }
 
 /// Run `git init`, optionally stage and commit a baseline, in `workspace`.
+// ── Fake GH helper ──
+
+static BUILD_FAKE_GH: Once = Once::new();
+
+fn fake_gh_binary() -> PathBuf {
+    BUILD_FAKE_GH.call_once(|| {
+        let status = std::process::Command::new("cargo")
+            .args(["build", "-p", "fake-gh"])
+            .status()
+            .expect("cargo build fake-gh");
+        assert!(status.success(), "failed to build fake-gh");
+    });
+    let mut path = std::env::current_exe().unwrap();
+    path.pop(); // deps/
+    path.pop(); // debug/
+    path.push("fake-gh");
+    path
+}
+
+/// Create a git repo with a file, a commit, then an uncommitted edit
+/// plus a `.fake-gh.json` config. Returns `(root_dir, file_path)`.
+fn gh_pr_project(
+    file_content: &str,
+    edit_content: &str,
+    config: serde_json::Value,
+) -> (PathBuf, PathBuf) {
+    let dir = tempfile::TempDir::new().expect("tmpdir");
+    let root = dir.keep();
+    let workspace = root.join("workspace");
+    let config_dir = root.join("config");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::create_dir_all(&workspace).unwrap();
+
+    let file_path = workspace.join("test.txt");
+    std::fs::write(&file_path, file_content).unwrap();
+
+    // git init + commit
+    git_init_with_commit(&workspace, &["test.txt"]);
+
+    // Create an uncommitted edit so the git driver picks up the branch
+    std::fs::write(&file_path, edit_content).unwrap();
+
+    // Place fake-gh config in the workspace root
+    std::fs::write(
+        workspace.join(".fake-gh.json"),
+        serde_json::to_string_pretty(&config).unwrap(),
+    )
+    .unwrap();
+
+    (root, file_path)
+}
+
+// ── Git helpers ──
+
 fn git_init_with_commit(workspace: &Path, stage: &[&str]) {
     std::process::Command::new("git")
         .args(["init"])
@@ -5759,5 +5815,135 @@ fn git_line_statuses_clear_after_external_commit() {
         b.status().git_line_statuses().is_empty(),
         "expected line statuses to clear after external commit, got {:?}",
         b.status().git_line_statuses()
+    );
+}
+
+// ── GH PR integration tests ──
+
+#[test]
+fn gh_pr_loads_on_startup() {
+    // Verify that PR info is loaded when the editor starts in a git repo
+    // with a PR. Uses a fake `gh` binary that returns canned JSON.
+    let diff = "\
+diff --git a/test.txt b/test.txt
+--- a/test.txt
++++ b/test.txt
+@@ -1,3 +1,4 @@
+ line1
+ line2
+ line3
++new line
+";
+    let config = serde_json::json!({
+        "pr_view": {
+            "number": 42,
+            "state": "OPEN",
+            "url": "https://github.com/test/repo/pull/42",
+            "reviewThreads": { "nodes": [] }
+        },
+        "pr_diff": diff
+    });
+
+    let (root, file_path) = gh_pr_project(
+        "line1\nline2\nline3\n",
+        "line1\nline2\nline3\nnew line\n",
+        config,
+    );
+
+    let t = TestHarness::with_dir(root)
+        .with_gh_binary(fake_gh_binary())
+        .with_arg(file_path)
+        .run(vec![
+            WaitFor(|s| s.git.branch.is_some()),
+            WaitFor(|s| s.git.pr.is_some()),
+        ]);
+
+    let pr = t.state.git.pr.as_ref().expect("PR should be loaded");
+    assert_eq!(pr.number.0, 42, "PR number");
+    assert_eq!(pr.status, led_state::PrStatus::Open, "PR status");
+    assert_eq!(pr.url, "https://github.com/test/repo/pull/42");
+    assert!(
+        !pr.diff_files.is_empty(),
+        "PR diff should contain at least one file"
+    );
+}
+
+#[test]
+fn gh_pr_no_pr_on_branch() {
+    // When fake-gh returns failure (no config for pr_view), PR state should
+    // remain None.
+    let config = serde_json::json!({});
+
+    let (root, file_path) = gh_pr_project("line1\n", "line1\nline2\n", config);
+
+    let t = TestHarness::with_dir(root)
+        .with_gh_binary(fake_gh_binary())
+        .with_arg(file_path)
+        .run(vec![
+            WaitFor(|s| s.git.branch.is_some()),
+            // Give the driver time to respond. We wait for the git branch
+            // (which triggers PR load), then check that PR remains None.
+            // Use a small action to flush another cycle.
+            Do(Save),
+            WaitFor(|s| {
+                s.active_tab
+                    .as_ref()
+                    .and_then(|p| s.buffers.get(p))
+                    .is_some_and(|b| !b.is_dirty())
+            }),
+        ]);
+
+    assert!(
+        t.state.git.pr.is_none(),
+        "PR should be None when fake-gh has no pr_view config"
+    );
+}
+
+#[test]
+fn gh_pr_diff_lines_on_buffer() {
+    // Verify that the PR diff line statuses are applied to the buffer's
+    // status and are accessible for rendering.
+    let diff = "\
+diff --git a/test.txt b/test.txt
+--- a/test.txt
++++ b/test.txt
+@@ -1,2 +1,4 @@
+ aaa
+ bbb
++ccc
++ddd
+";
+    let config = serde_json::json!({
+        "pr_view": {
+            "number": 7,
+            "state": "OPEN",
+            "url": "https://github.com/test/repo/pull/7",
+            "reviewThreads": { "nodes": [] }
+        },
+        "pr_diff": diff
+    });
+
+    let (root, file_path) = gh_pr_project("aaa\nbbb\n", "aaa\nbbb\nccc\nddd\n", config);
+
+    let t = TestHarness::with_dir(root)
+        .with_gh_binary(fake_gh_binary())
+        .with_arg(file_path)
+        .run(vec![WaitFor(|s| s.git.pr.is_some())]);
+
+    let pr = t.state.git.pr.as_ref().unwrap();
+    assert_eq!(pr.number.0, 7);
+
+    // The diff should have one file with line statuses for the added lines
+    assert_eq!(pr.diff_files.len(), 1, "expected 1 file in diff");
+    let statuses = pr.diff_files.values().next().unwrap();
+    assert!(
+        !statuses.is_empty(),
+        "expected PR diff line statuses for added lines"
+    );
+    // Lines 2 and 3 (0-based) should be marked as PrDiff
+    let rows: Vec<usize> = statuses.iter().flat_map(|s| s.rows.clone()).collect();
+    assert!(
+        rows.contains(&2) && rows.contains(&3),
+        "expected rows 2,3 in PR diff, got {rows:?}"
     );
 }

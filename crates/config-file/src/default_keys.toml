@@ -66,6 +66,7 @@
 "(" = "kbd_macro_start"
 ")" = "kbd_macro_end"
 "e" = "kbd_macro_execute"
+"ctrl+p" = "open_pr_url"
 
 [keys."ctrl+h"]
 "e" = "open_messages"

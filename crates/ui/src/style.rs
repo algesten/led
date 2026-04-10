@@ -504,6 +504,7 @@ mod tests {
             user_start_dir: UserPath::new("/tmp"),
             config_dir: UserPath::new("/tmp/config"),
             test_lsp_server: None,
+            test_gh_binary: None,
         });
         state.dims = Some(Dimensions::new(40, 10, false));
         state.config_theme = Some(config_theme);

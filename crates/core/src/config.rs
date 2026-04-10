@@ -36,4 +36,7 @@ pub struct Startup {
 
     /// Override the LSP server command for all languages (testing only).
     pub test_lsp_server: Option<UserPath>,
+
+    /// Override the `gh` CLI binary path (testing only).
+    pub test_gh_binary: Option<UserPath>,
 }
