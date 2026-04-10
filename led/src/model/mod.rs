@@ -984,7 +984,9 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
     sync_s.forward(&muts);
     keymap_s.forward(&muts);
     actions_muts_s.forward(&muts);
-    all_actions_s.forward(&muts);
+    // Action streams BEFORE all_actions_s — they must sample pre-mutation state.
+    // all_actions_s (Mut::Action → handle_action) may deactivate modals, and
+    // editing streams must see the modal-active state to correctly filter.
     toggle_side_panel_s.forward(&muts);
     toggle_focus_s.forward(&muts);
     quit_s.forward(&muts);
@@ -1026,6 +1028,8 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
     jump_fwd_activate_s.forward(&muts);
     jump_fwd_open_s.forward(&muts);
     jump_fwd_cursor_s.forward(&muts);
+    // all_actions_s LAST — handle_action runs after all stream chains have sampled state.
+    all_actions_s.forward(&muts);
     buffers_s.forward(&muts);
     process_s.forward(&muts);
     timers_s.forward(&muts);
