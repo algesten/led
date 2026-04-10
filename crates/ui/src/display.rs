@@ -147,6 +147,13 @@ pub fn display_inputs(s: &AppState) -> Option<DisplayInputs> {
         .as_ref()
         .and_then(|pr| {
             let p = active_path?;
+            // Hide PR annotations if the buffer has diverged from the PR's
+            // committed version (dirty edits, saves, or external changes).
+            if let Some(pr_hash) = pr.file_hashes.get(p) {
+                if buf.content_hash() != *pr_hash || buf.is_dirty() {
+                    return None;
+                }
+            }
             let diff = pr.diff_files.get(p).cloned().unwrap_or_default();
             let mut comments: Vec<usize> = pr
                 .comments
@@ -928,6 +935,11 @@ pub enum OverlayContent {
         anchor_x: u16,
         anchor_y: u16,
     },
+    PrComment {
+        comments: Vec<(String, String)>, // (author, body)
+        anchor_x: u16,
+        anchor_y: u16,
+    },
 }
 
 pub fn overlay_inputs(s: &AppState) -> OverlayContent {
@@ -1012,7 +1024,39 @@ pub fn overlay_inputs(s: &AppState) -> OverlayContent {
         }
     }
 
+    // PR comment popover: show when cursor is on a line with review comments.
+    // Hidden when buffer has diverged from the PR's committed version.
+    if let Some(comments) = pr_comments_for_cursor(s) {
+        return OverlayContent::PrComment {
+            comments,
+            anchor_x: cursor_x,
+            anchor_y: cursor_y,
+        };
+    }
+
     OverlayContent::None
+}
+
+fn pr_comments_for_cursor(s: &AppState) -> Option<Vec<(String, String)>> {
+    let buf = s.active_tab.as_ref().and_then(|p| s.buffers.get(p))?;
+    let pr = s.git.pr.as_ref()?;
+    let path = buf.path()?;
+    let pr_hash = pr.file_hashes.get(path)?;
+    if buf.content_hash() != *pr_hash || buf.is_dirty() {
+        return None;
+    }
+    let file_comments = pr.comments.get(path)?;
+    let crow = buf.cursor_row();
+    let comments: Vec<(String, String)> = file_comments
+        .iter()
+        .filter(|c| c.line == crow)
+        .map(|c| (c.author.clone(), c.body.clone()))
+        .collect();
+    if comments.is_empty() {
+        None
+    } else {
+        Some(comments)
+    }
 }
 
 fn format_diagnostic_message(d: &led_lsp::Diagnostic) -> String {

@@ -237,6 +237,63 @@ fn render_overlay(overlay: &OverlayContent, frame: &mut Frame, area: Rect) {
                 .collect();
             frame.render_widget(Paragraph::new(lines), rect);
         }
+        OverlayContent::PrComment {
+            comments,
+            anchor_x,
+            anchor_y,
+        } => {
+            if comments.is_empty() {
+                return;
+            }
+
+            let max_content = 58usize.min(area.width.saturating_sub(4) as usize);
+
+            let mut raw: Vec<(String, Color)> = Vec::new();
+            for (i, (author, body)) in comments.iter().enumerate() {
+                if i > 0 {
+                    raw.push(("\u{2500}".repeat(max_content), Color::Gray));
+                }
+                raw.push((format!("@{author}:"), Color::Cyan));
+                for line in word_wrap(body, max_content) {
+                    raw.push((line, Color::White));
+                }
+            }
+
+            let content_w = raw
+                .iter()
+                .map(|(t, _)| t.chars().count())
+                .max()
+                .unwrap_or(1);
+            let width = (content_w + 2).min(area.width as usize);
+            let height = raw.len().min(area.height as usize / 2).max(1);
+            let raw = &raw[..height];
+
+            let x =
+                (*anchor_x as usize).min(area.width.saturating_sub(width as u16) as usize) as u16;
+            let y = if (*anchor_y as usize) >= height {
+                anchor_y - height as u16
+            } else {
+                (*anchor_y + 1).min(area.height.saturating_sub(height as u16))
+            };
+
+            let rect = Rect::new(x, y, width as u16, height as u16);
+            frame.render_widget(Clear, rect);
+
+            let lines: Vec<Line> = raw
+                .iter()
+                .map(|(text, fg)| {
+                    let inner: String = text.chars().take(width.saturating_sub(2)).collect();
+                    let pad = width
+                        .saturating_sub(2)
+                        .saturating_sub(inner.chars().count());
+                    Line::from(Span::styled(
+                        format!(" {inner}{:pad$} ", ""),
+                        Style::default().bg(Color::DarkGray).fg(*fg),
+                    ))
+                })
+                .collect();
+            frame.render_widget(Paragraph::new(lines), rect);
+        }
     }
 }
 

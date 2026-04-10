@@ -13,8 +13,11 @@ fn to_pr_info(ev: &GhPrIn) -> Option<PrInfo> {
         number,
         state,
         url,
+        api_endpoint,
+        etag,
         diff_lines,
         comments,
+        file_hashes,
     } = ev
     else {
         return None;
@@ -45,8 +48,11 @@ fn to_pr_info(ev: &GhPrIn) -> Option<PrInfo> {
         number: *number,
         status,
         url: url.clone(),
+        api_endpoint: api_endpoint.clone(),
+        etag: etag.clone(),
         diff_files: diff_lines.clone(),
         comments,
+        file_hashes: file_hashes.clone(),
     })
 }
 
@@ -56,7 +62,11 @@ pub fn gh_pr_of(
     state: &Stream<Rc<AppState>>,
 ) -> Stream<Mut> {
     // Driver result → SetPrInfo (conversion in combinator chain, not reducer)
-    let pr_loaded_s = gh_pr_in.map(|ev| Mut::SetPrInfo(to_pr_info(&ev))).stream();
+    // PrUnchanged (304) is filtered out — no state update needed.
+    let pr_loaded_s = gh_pr_in
+        .filter(|ev| !matches!(ev, GhPrIn::PrUnchanged))
+        .map(|ev| Mut::SetPrInfo(to_pr_info(&ev)))
+        .stream();
 
     // Branch change → clear PR state immediately
     let branch_clear_s = state

@@ -1311,6 +1311,7 @@ dependencies = [
 name = "led-gh-pr"
 version = "0.1.0"
 dependencies = [
+ "git2",
  "led-core",
  "log",
  "serde",

@@ -1651,6 +1651,7 @@ pub struct GitState {
     pub scan_seq: Versioned<()>,
     pub pr: Option<PrInfo>,
     pub pr_settle_seq: Versioned<()>,
+    pub pr_poll_seq: Versioned<()>,
 }
 
 // ── PR ──
@@ -1676,6 +1677,13 @@ pub struct PrInfo {
     pub url: String,
     pub diff_files: HashMap<CanonPath, Vec<LineStatus>>,
     pub comments: HashMap<CanonPath, Vec<PrComment>>,
+    /// Content hash per file at the PR's head commit.
+    /// Used to suppress PR annotations when the local buffer has diverged.
+    pub file_hashes: HashMap<CanonPath, PersistedContentHash>,
+    /// REST API endpoint for conditional polling (e.g. `repos/owner/repo/pulls/42`).
+    pub api_endpoint: String,
+    /// ETag from last successful fetch — used for `If-None-Match` conditional requests.
+    pub etag: Option<String>,
 }
 
 // ── Session ──

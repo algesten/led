@@ -844,8 +844,43 @@ pub fn derived(state: Stream<Rc<AppState>>, git_activity: Stream<()>) -> Derived
         })
         .stream();
 
+    // PR poll: start 15s repeating timer once PR is loaded, cancel when cleared
+    let pr_poll_timer = state
+        .map(|s| s.git.pr.is_some())
+        .dedupe()
+        .map(|has_pr| {
+            if has_pr {
+                TimersOut::Set {
+                    name: "pr_poll",
+                    duration: Duration::from_secs(15),
+                    schedule: Schedule::Repeated,
+                }
+            } else {
+                TimersOut::Cancel { name: "pr_poll" }
+            }
+        })
+        .stream();
+    pr_poll_timer.forward(&timers_out);
+
+    // PR poll command: triggered by pr_poll_seq (bumped by timer handler)
+    let gh_pr_poll = state
+        .dedupe_by(|s| s.git.pr_poll_seq.version())
+        .filter(|s| s.git.pr_poll_seq.version() > 0)
+        .filter(|s| s.git.pr.is_some())
+        .filter(|s| s.workspace.is_some())
+        .map(|s| {
+            let pr = s.git.pr.as_ref().unwrap();
+            led_gh_pr::GhPrOut::PollPr {
+                api_endpoint: pr.api_endpoint.clone(),
+                etag: pr.etag.clone(),
+                root: s.workspace.as_ref().unwrap().root.clone(),
+            }
+        })
+        .stream();
+
     gh_pr_initial.forward(&gh_pr_out);
     gh_pr_reload.forward(&gh_pr_out);
+    gh_pr_poll.forward(&gh_pr_out);
 
     // ── Open URL (fire-and-forget via consumer in lib.rs) ──
     let open_url = state
