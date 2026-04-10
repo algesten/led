@@ -58,8 +58,6 @@ pub struct DisplayInputs {
     inlay_hints: Vec<(Row, Col, String)>,
     diagnostic_error_style: Style,
     diagnostic_warning_style: Style,
-    diagnostic_info_style: Style,
-    diagnostic_hint_style: Style,
     inlay_hint_style: Style,
     inlay_hints_enabled: bool,
     ruler_col: Option<usize>,
@@ -190,8 +188,6 @@ pub fn display_inputs(s: &AppState) -> Option<DisplayInputs> {
 
     let diagnostic_error_style = style::resolve_cached(theme, &theme.diagnostics.error);
     let diagnostic_warning_style = style::resolve_cached(theme, &theme.diagnostics.warning);
-    let diagnostic_info_style = style::resolve_cached(theme, &theme.diagnostics.info);
-    let diagnostic_hint_style = style::resolve_cached(theme, &theme.diagnostics.hint);
     let inlay_hint_style = theme
         .editor
         .inlay_hint
@@ -256,8 +252,6 @@ pub fn display_inputs(s: &AppState) -> Option<DisplayInputs> {
         inlay_hints,
         diagnostic_error_style,
         diagnostic_warning_style,
-        diagnostic_info_style,
-        diagnostic_hint_style,
         inlay_hint_style,
         inlay_hints_enabled,
         ruler_col,
@@ -345,13 +339,18 @@ fn build_display_lines_inner(d: &DisplayInputs, line_buf: &mut String) -> Rc<Vec
             let diag_sev = if chunk_idx == 0 {
                 d.diagnostics
                     .iter()
-                    .filter(|(sr, _, _, _, _)| **sr == line_idx)
+                    .filter(|(sr, _, _, _, sev)| {
+                        **sr == line_idx
+                            && matches!(
+                                sev,
+                                led_lsp::DiagnosticSeverity::Error
+                                    | led_lsp::DiagnosticSeverity::Warning
+                            )
+                    })
                     .map(|(_, _, _, _, s)| s)
                     .min_by_key(|s| match s {
                         led_lsp::DiagnosticSeverity::Error => 0,
-                        led_lsp::DiagnosticSeverity::Warning => 1,
-                        led_lsp::DiagnosticSeverity::Info => 2,
-                        led_lsp::DiagnosticSeverity::Hint => 3,
+                        _ => 1,
                     })
             } else {
                 None
@@ -363,13 +362,7 @@ fn build_display_lines_inner(d: &DisplayInputs, line_buf: &mut String) -> Rc<Vec
                 Some(led_lsp::DiagnosticSeverity::Warning) => {
                     Span::styled("\u{25CF}", d.diagnostic_warning_style)
                 }
-                Some(led_lsp::DiagnosticSeverity::Info) => {
-                    Span::styled("\u{25CF}", d.diagnostic_info_style)
-                }
-                Some(led_lsp::DiagnosticSeverity::Hint) => {
-                    Span::styled("\u{25CF}", d.diagnostic_hint_style)
-                }
-                None => Span::styled(" ", d.gutter_style),
+                None | Some(_) => Span::styled(" ", d.gutter_style),
             };
             spans.push(diag_char);
 
@@ -511,8 +504,9 @@ fn build_display_lines_inner(d: &DisplayInputs, line_buf: &mut String) -> Rc<Vec
                 let diag_style = match sev {
                     led_lsp::DiagnosticSeverity::Error => d.diagnostic_error_style,
                     led_lsp::DiagnosticSeverity::Warning => d.diagnostic_warning_style,
-                    led_lsp::DiagnosticSeverity::Info => d.diagnostic_info_style,
-                    led_lsp::DiagnosticSeverity::Hint => continue,
+                    led_lsp::DiagnosticSeverity::Info | led_lsp::DiagnosticSeverity::Hint => {
+                        continue;
+                    }
                 };
                 let ds = if line_idx == *dr_start {
                     char_map.get(*dc_start).copied().unwrap_or(display.len())
@@ -1001,6 +995,12 @@ pub fn overlay_inputs(s: &AppState) -> OverlayContent {
             .diagnostics()
             .iter()
             .filter(|d| crow >= d.start_row && crow <= d.end_row)
+            .filter(|d| {
+                matches!(
+                    d.severity,
+                    led_lsp::DiagnosticSeverity::Error | led_lsp::DiagnosticSeverity::Warning
+                )
+            })
             .map(|d| (d.severity, format_diagnostic_message(d)))
             .collect();
         if !messages.is_empty() {
