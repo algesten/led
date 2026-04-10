@@ -111,14 +111,18 @@ pub fn handle_action(state: &mut AppState, action: Action) -> bool {
         }
     }
 
-    // Intercept actions during incremental search
+    // isearch handling is mostly in isearch_of.rs (stream-based).
+    // InBufferSearch stays here: start_search when not in isearch, search_next when in isearch.
     if let Some(ref path) = state.active_tab {
-        let in_search = state
+        if state
             .buffers
             .get(path)
-            .map_or(false, |b| b.isearch.is_some());
-        if in_search {
-            if isearch::handle_isearch_action(state, &action) {
+            .map_or(false, |b| b.isearch.is_some())
+        {
+            if matches!(action, Action::InBufferSearch) {
+                with_buf(state, |buf, _dims| {
+                    search::search_next(buf);
+                });
                 return true;
             }
         }

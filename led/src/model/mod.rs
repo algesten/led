@@ -8,6 +8,7 @@ mod buffers_of;
 mod edit;
 pub(crate) mod file_search;
 pub(crate) mod find_file;
+mod isearch_of;
 mod jump;
 mod lsp_of;
 mod mov;
@@ -171,11 +172,16 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
     keyboard_actions_s.forward(&raw_actions);
     drivers.actions_in.forward(&raw_actions);
 
-    // Only unmigrated actions go through handle_action.
-    // Migrated actions are handled entirely by dedicated stream chains.
-    let unmigrated_actions_s = raw_actions
-        .filter(|a| !is_migrated(a))
-        .map(Mut::Action)
+    // Single sample_combine for both isearch_of and unmigrated_actions_s.
+    // This ensures both see the SAME state snapshot for each action.
+    let actions_with_state: Stream<(Action, Rc<AppState>)> = raw_actions.sample_combine(&state);
+
+    let isearch_s = isearch_of::isearch_of(&actions_with_state, &state, is_migrated);
+
+    // Only unmigrated actions not consumed by isearch go through handle_action.
+    let unmigrated_actions_s = actions_with_state
+        .filter(|(a, s)| !is_migrated(a) && !isearch_of::is_consumed_by_isearch(a, s))
+        .map(|(a, _)| Mut::Action(a))
         .stream();
 
     // ── Pre-match guard streams (apply to migrated actions) ──
@@ -1049,6 +1055,8 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
     jump_fwd_cursor_s.forward(&muts);
     // Only unmigrated actions go through handle_action.
     unmigrated_actions_s.forward(&muts);
+    // isearch_s AFTER action streams — SearchAccept needs to run after BufferUpdate
+    isearch_s.forward(&muts);
     buffers_s.forward(&muts);
     process_s.forward(&muts);
     timers_s.forward(&muts);
@@ -1453,6 +1461,11 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
             Mut::BreakKillAccumulation => {
                 s.kill_ring.break_accumulation();
             }
+            Mut::SearchAccept(path) => {
+                if let Some(buf) = s.buf_mut(&path) {
+                    search::search_accept(buf);
+                }
+            }
             Mut::SetPendingSaveAfterFormat => {
                 log::info!("save: requesting LSP format");
                 s.lsp_mut().pending_save_after_format = true;
@@ -1655,13 +1668,10 @@ fn has_blocking_overlay(s: &AppState) -> bool {
 
 /// True when a modal dialog that captures editing/movement input is active.
 /// Editor action streams must not fire in this state.
+/// Input modal that consumes editing/movement actions.
+/// Excludes isearch — handled by isearch_of.rs streams.
 fn has_input_modal(s: &AppState) -> bool {
-    s.file_search.is_some()
-        || s.find_file.is_some()
-        || s.active_tab
-            .as_ref()
-            .and_then(|p| s.buffers.get(p))
-            .map_or(false, |b| b.isearch.is_some())
+    s.file_search.is_some() || s.find_file.is_some()
 }
 
 pub(super) fn resolve_focus_slot(s: &AppState) -> PanelSlot {
@@ -1906,6 +1916,7 @@ enum Mut {
     KbdMacroRecord(Action),
     DismissConfirmKill,
     BreakKillAccumulation,
+    SearchAccept(CanonPath),
     ToggleInlayHints(bool),
     SetPendingSaveAfterFormat,
     SaveRequest,
@@ -2117,6 +2128,7 @@ impl Mut {
             Mut::KbdMacroRecord(_) => "KbdMacroRecord",
             Mut::DismissConfirmKill => "DismissConfirmKill",
             Mut::BreakKillAccumulation => "BreakKillAccumulation",
+            Mut::SearchAccept(_) => "SearchAccept",
             Mut::ToggleInlayHints(_) => "ToggleInlayHints",
             Mut::SetPendingSaveAfterFormat => "SetPendingSaveAfterFormat",
             Mut::SaveRequest => "SaveRequest",
