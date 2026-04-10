@@ -21,6 +21,15 @@ pub enum GhPrOut {
     },
 }
 
+/// A review comment from a PR thread, as returned by the driver.
+#[derive(Clone, Debug)]
+pub struct ReviewComment {
+    pub line: Row,
+    pub body: String,
+    pub author: String,
+    pub url: String,
+}
+
 #[derive(Clone, Debug)]
 pub enum GhPrIn {
     PrLoaded {
@@ -30,7 +39,7 @@ pub enum GhPrIn {
         api_endpoint: String,
         etag: Option<String>,
         diff_lines: HashMap<CanonPath, Vec<LineStatus>>,
-        comments: HashMap<CanonPath, Vec<(Row, String, String)>>,
+        comments: HashMap<CanonPath, Vec<ReviewComment>>,
         file_hashes: HashMap<CanonPath, PersistedContentHash>,
     },
     /// 304 Not Modified — PR hasn't changed.
@@ -318,13 +327,13 @@ fn load_review_threads(
     pr_number: u32,
     url: &str,
     root: &CanonPath,
-) -> HashMap<CanonPath, Vec<(Row, String, String)>> {
+) -> HashMap<CanonPath, Vec<ReviewComment>> {
     let Some((owner, repo)) = parse_github_url(url) else {
         return HashMap::new();
     };
 
     let query = format!(
-        r#"query {{ repository(owner:"{owner}",name:"{repo}") {{ pullRequest(number:{pr_number}) {{ reviewThreads(first:100) {{ nodes {{ path line isOutdated comments(first:5) {{ nodes {{ body author {{ login }} }} }} }} }} }} }} }}"#,
+        r#"query {{ repository(owner:"{owner}",name:"{repo}") {{ pullRequest(number:{pr_number}) {{ reviewThreads(first:100) {{ nodes {{ path line isOutdated comments(first:5) {{ nodes {{ body url author {{ login }} }} }} }} }} }} }} }}"#,
     );
 
     let output = match run_gh(
@@ -341,7 +350,7 @@ fn load_review_threads(
         Err(_) => return HashMap::new(),
     };
 
-    let mut result: HashMap<CanonPath, Vec<(Row, String, String)>> = HashMap::new();
+    let mut result: HashMap<CanonPath, Vec<ReviewComment>> = HashMap::new();
 
     let threads = parsed
         .pointer("/data/repository/pullRequest/reviewThreads/nodes")
@@ -369,7 +378,7 @@ fn load_review_threads(
         // GraphQL returns 1-based line numbers; convert to 0-based Row
         let row = Row(line.saturating_sub(1) as usize);
 
-        let (body, author) = thread
+        let (body, author, comment_url) = thread
             .pointer("/comments/nodes/0")
             .map(|comment| {
                 let body = comment
@@ -382,15 +391,22 @@ fn load_review_threads(
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string();
-                (body, author)
+                let url = comment
+                    .get("url")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                (body, author, url)
             })
             .unwrap_or_default();
 
         let abs_path = UserPath::new(root.as_path().join(path_str)).canonicalize();
-        result
-            .entry(abs_path)
-            .or_default()
-            .push((row, body, author));
+        result.entry(abs_path).or_default().push(ReviewComment {
+            line: row,
+            body,
+            author,
+            url: comment_url,
+        });
     }
 
     result

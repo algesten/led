@@ -1668,6 +1668,7 @@ pub struct PrComment {
     pub line: Row,
     pub body: String,
     pub author: String,
+    pub url: String,
 }
 
 #[derive(Debug, Clone)]

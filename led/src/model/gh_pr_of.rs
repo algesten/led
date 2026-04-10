@@ -34,10 +34,11 @@ fn to_pr_info(ev: &GhPrIn) -> Option<PrInfo> {
         .map(|(path, entries)| {
             let pcs = entries
                 .iter()
-                .map(|(line, body, author)| PrComment {
-                    line: *line,
-                    body: body.clone(),
-                    author: author.clone(),
+                .map(|c| PrComment {
+                    line: c.line,
+                    body: c.body.clone(),
+                    author: c.author.clone(),
+                    url: c.url.clone(),
                 })
                 .collect();
             (path.clone(), pcs)
@@ -75,11 +76,29 @@ pub fn gh_pr_of(
         .map(|_| Mut::SetPrInfo(None))
         .stream();
 
-    // OpenPrUrl action → extract URL, set pending open
+    // OpenPrUrl action → open comment URL if cursor is on a comment, else PR URL
     let open_pr_url_s = raw_actions
         .filter(|a| matches!(a, Action::OpenPrUrl))
         .sample_combine(state)
-        .filter_map(|(_, s)| s.git.pr.as_ref().map(|pr| pr.url.clone()))
+        .filter_map(|(_, s)| {
+            let pr = s.git.pr.as_ref()?;
+            // Try to find a comment on the cursor line
+            let comment_url = s
+                .active_tab
+                .as_ref()
+                .and_then(|path| s.buffers.get(path))
+                .and_then(|buf| {
+                    let path = buf.path()?;
+                    let comments = pr.comments.get(path)?;
+                    let crow = buf.cursor_row();
+                    comments
+                        .iter()
+                        .find(|c| c.line == crow)
+                        .map(|c| c.url.clone())
+                        .filter(|u| !u.is_empty())
+                });
+            Some(comment_url.unwrap_or_else(|| pr.url.clone()))
+        })
         .map(Mut::SetPendingOpenUrl)
         .stream();
 
