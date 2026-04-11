@@ -48,9 +48,10 @@ pub struct DisplayInputs {
     syntax_styles: Rc<HashMap<String, Style>>,
     bracket_match_style: Style,
     rainbow_styles: [Style; 6],
-    git_line_statuses: Vec<LineStatus>,
-    pr_diff_line_statuses: Vec<LineStatus>,
-    pr_comment_lines: Vec<usize>,
+    /// All line annotations (git + PR) merged into one list. Rendered via
+    /// `best_category_at` so precedence is preserved without per-source
+    /// branching.
+    line_annotations: Vec<LineStatus>,
     gutter_added_style: Style,
     gutter_modified_style: Style,
     gutter_pr_diff_style: Style,
@@ -90,9 +91,7 @@ impl PartialEq for DisplayInputs {
             && self.matching_bracket == other.matching_bracket
             && self.cursor_row == other.cursor_row
             && self.cursor_col == other.cursor_col
-            && self.git_line_statuses == other.git_line_statuses
-            && self.pr_diff_line_statuses == other.pr_diff_line_statuses
-            && self.pr_comment_lines == other.pr_comment_lines
+            && self.line_annotations == other.line_annotations
             && self.diagnostics == other.diagnostics
             && self.inlay_hints == other.inlay_hints
             && self.inlay_hints_enabled == other.inlay_hints_enabled
@@ -153,35 +152,13 @@ pub fn display_inputs(s: &AppState) -> Option<DisplayInputs> {
         Some((hit.row, hit.col, char_len))
     });
 
-    let git_line_statuses = buf.status().git_line_statuses().to_vec();
+    // All line-level annotations for this buffer, merged from git + PR.
+    // Shared with overlay and browser via `led_state::annotations` so the
+    // three mechanisms can't drift out of sync.
+    let line_annotations = led_state::annotations::buffer_line_annotations(s, buf);
+
     let gutter_added_style = style::resolve_cached(theme, &theme.git.gutter_added);
     let gutter_modified_style = style::resolve_cached(theme, &theme.git.gutter_modified);
-
-    let active_path = buf.path();
-    let (pr_diff_line_statuses, pr_comment_lines) = s
-        .git
-        .pr
-        .as_ref()
-        .and_then(|pr| {
-            let p = active_path?;
-            // Hide PR annotations if the buffer has diverged from the PR's
-            // committed version (dirty edits, saves, or external changes).
-            if let Some(pr_hash) = pr.file_hashes.get(p) {
-                if buf.content_hash() != *pr_hash || buf.is_dirty() {
-                    return None;
-                }
-            }
-            let diff = pr.diff_files.get(p).cloned().unwrap_or_default();
-            let mut comments: Vec<usize> = pr
-                .comments
-                .get(p)
-                .map(|cs| cs.iter().map(|c| *c.line).collect())
-                .unwrap_or_default();
-            comments.sort_unstable();
-            comments.dedup();
-            Some((diff, comments))
-        })
-        .unwrap_or_default();
 
     let default_gray = Style::default().fg(ratatui::style::Color::DarkGray);
     let default_blue = Style::default().fg(ratatui::style::Color::Blue);
@@ -265,9 +242,7 @@ pub fn display_inputs(s: &AppState) -> Option<DisplayInputs> {
             style::resolve_cached(theme, &theme.brackets.rainbow_4),
             style::resolve_cached(theme, &theme.brackets.rainbow_5),
         ],
-        git_line_statuses,
-        pr_diff_line_statuses,
-        pr_comment_lines,
+        line_annotations,
         gutter_added_style,
         gutter_modified_style,
         gutter_pr_diff_style,
@@ -337,21 +312,12 @@ fn build_display_lines_inner(d: &DisplayInputs, line_buf: &mut String) -> Rc<Vec
             let is_last = chunk_idx == chunks.len() - 1;
             let mut spans: Vec<Span<'static>> = Vec::with_capacity(4);
 
-            // Gutter col 1: change marker.
-            // Pick the highest-precedence category covering this line:
-            // git (unstaged > staged) > PR comment > PR diff.
+            // Gutter col 1: change marker. The merged annotations list is
+            // queried via `best_category_at`, which returns the
+            // highest-precedence category covering this line. Precedence is
+            // defined in `IssueCategory::precedence` — single source of truth.
             let change_char = if chunk_idx == 0 {
-                let git_cat = git::line_category_at(&d.git_line_statuses, line_idx);
-                let pr_comment = d.pr_comment_lines.binary_search(&line_idx).is_ok();
-                let pr_diff_cat = git::line_category_at(&d.pr_diff_line_statuses, line_idx);
-
-                // Build a winner — git wins over PR. Among git, the line statuses
-                // already encode unstaged-wins-over-staged.
-                let winner: Option<IssueCategory> = git_cat
-                    .or_else(|| pr_comment.then_some(IssueCategory::PrComment))
-                    .or(pr_diff_cat);
-
-                match winner {
+                match git::best_category_at(&d.line_annotations, line_idx) {
                     Some(cat) => Span::styled("\u{258E}", d.category_style(cat)),
                     None => Span::styled(" ", d.gutter_style),
                 }
@@ -1068,17 +1034,10 @@ pub fn overlay_inputs(s: &AppState) -> OverlayContent {
 
 fn pr_comments_for_cursor(s: &AppState) -> Option<Vec<(String, String)>> {
     let buf = s.active_tab.as_ref().and_then(|p| s.buffers.get(p))?;
-    let pr = s.git.pr.as_ref()?;
     let path = buf.path()?;
-    let pr_hash = pr.file_hashes.get(path)?;
-    if buf.content_hash() != *pr_hash || buf.is_dirty() {
-        return None;
-    }
-    let file_comments = pr.comments.get(path)?;
     let crow = buf.cursor_row();
-    let comments: Vec<(String, String)> = file_comments
+    let comments: Vec<(String, String)> = led_state::annotations::comments_at_line(s, path, crow)
         .iter()
-        .filter(|c| c.line == crow)
         .map(|c| (c.author.clone(), c.body.clone()))
         .collect();
     if comments.is_empty() {
@@ -1288,12 +1247,6 @@ pub fn build_layout(l: &LayoutInputs) -> Option<LayoutInfo> {
 
 // ── Browser ──
 
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum BrowserSeverity {
-    Warning,
-    Error,
-}
-
 #[derive(Clone, PartialEq)]
 pub struct BrowserInputs {
     pub entries: Rc<Vec<led_state::TreeEntry>>,
@@ -1306,17 +1259,33 @@ pub struct BrowserInputs {
     pub file_style: Style,
     pub selected_style: Style,
     pub selected_unfocused_style: Style,
-    pub git_file_statuses: HashMap<CanonPath, std::collections::HashSet<IssueCategory>>,
+    /// All file-level categories, keyed by path. Single source of truth —
+    /// shared with gutter/overlay via `led_state::annotations`.
+    pub file_categories: HashMap<CanonPath, std::collections::HashSet<IssueCategory>>,
+    /// Resolved styles per category, used by `category_style`.
+    pub diag_error_style: Style,
+    pub diag_warning_style: Style,
     pub git_modified_style: Style,
     pub git_added_style: Style,
     pub git_untracked_style: Style,
-    pub diag_file_severities: HashMap<CanonPath, BrowserSeverity>,
-    pub diag_error_style: Style,
-    pub diag_warning_style: Style,
-    pub pr_diff_files: std::collections::HashSet<CanonPath>,
-    pub pr_comment_files: std::collections::HashSet<CanonPath>,
     pub pr_diff_style: Style,
     pub pr_comment_style: Style,
+}
+
+impl BrowserInputs {
+    /// Theme style for an [`IssueCategory`]. Mirrors
+    /// `DisplayInputs::category_style` so gutter + browser stay in sync.
+    pub fn category_style(&self, cat: IssueCategory) -> Style {
+        match cat {
+            IssueCategory::LspError => self.diag_error_style,
+            IssueCategory::LspWarning => self.diag_warning_style,
+            IssueCategory::Unstaged => self.git_modified_style,
+            IssueCategory::StagedModified | IssueCategory::StagedNew => self.git_added_style,
+            IssueCategory::Untracked => self.git_untracked_style,
+            IssueCategory::PrComment => self.pr_comment_style,
+            IssueCategory::PrDiff => self.pr_diff_style,
+        }
+    }
 }
 
 pub fn browser_inputs(s: &AppState) -> Option<BrowserInputs> {
@@ -1329,8 +1298,6 @@ pub fn browser_inputs(s: &AppState) -> Option<BrowserInputs> {
     let dims = s.dims?;
     let theme = s.config_theme.as_ref()?.file.as_ref();
 
-    let diag_file_severities = build_diag_severities(s);
-
     Some(BrowserInputs {
         entries: s.browser.entries.clone(),
         selected: s.browser.selected,
@@ -1342,25 +1309,12 @@ pub fn browser_inputs(s: &AppState) -> Option<BrowserInputs> {
         file_style: style::resolve_cached(theme, &theme.browser.file),
         selected_style: style::resolve_cached(theme, &theme.browser.selected),
         selected_unfocused_style: style::resolve_cached(theme, &theme.browser.selected_unfocused),
-        git_file_statuses: s.git.file_statuses.clone(),
+        file_categories: led_state::annotations::file_categories_map(s),
+        diag_error_style: style::resolve_cached(theme, &theme.diagnostics.error),
+        diag_warning_style: style::resolve_cached(theme, &theme.diagnostics.warning),
         git_modified_style: style::resolve_cached(theme, &theme.git.modified),
         git_added_style: style::resolve_cached(theme, &theme.git.added),
         git_untracked_style: style::resolve_cached(theme, &theme.git.untracked),
-        diag_file_severities,
-        diag_error_style: style::resolve_cached(theme, &theme.diagnostics.error),
-        diag_warning_style: style::resolve_cached(theme, &theme.diagnostics.warning),
-        pr_diff_files: s
-            .git
-            .pr
-            .as_ref()
-            .map(|pr| pr.diff_files.keys().cloned().collect())
-            .unwrap_or_default(),
-        pr_comment_files: s
-            .git
-            .pr
-            .as_ref()
-            .map(|pr| pr.comments.keys().cloned().collect())
-            .unwrap_or_default(),
         pr_diff_style: theme
             .pr
             .as_ref()
@@ -1372,51 +1326,6 @@ pub fn browser_inputs(s: &AppState) -> Option<BrowserInputs> {
             .map(|pr| style::resolve_cached(theme, &pr.comment))
             .unwrap_or_else(|| Style::default().fg(ratatui::style::Color::Blue)),
     })
-}
-
-fn worst_severity(diags: &[led_lsp::Diagnostic]) -> Option<BrowserSeverity> {
-    let mut worst: Option<BrowserSeverity> = None;
-    for d in diags {
-        let sev = match d.severity {
-            led_lsp::DiagnosticSeverity::Error => BrowserSeverity::Error,
-            led_lsp::DiagnosticSeverity::Warning => BrowserSeverity::Warning,
-            _ => continue,
-        };
-        worst = Some(match worst {
-            Some(w) => w.max(sev),
-            None => sev,
-        });
-    }
-    worst
-}
-
-fn build_diag_severities(s: &led_state::AppState) -> HashMap<CanonPath, BrowserSeverity> {
-    let mut result = HashMap::new();
-    // Open buffers
-    for buf in s.buffers.values() {
-        if let Some(path) = buf.path() {
-            if let Some(w) = worst_severity(buf.status().diagnostics()) {
-                result.insert(path.clone(), w);
-            }
-        }
-    }
-    result
-}
-
-fn directory_severity(
-    file_severities: &HashMap<CanonPath, BrowserSeverity>,
-    dir: &CanonPath,
-) -> Option<BrowserSeverity> {
-    let mut worst: Option<BrowserSeverity> = None;
-    for (path, &sev) in file_severities {
-        if path.starts_with(dir) && path != dir {
-            worst = Some(match worst {
-                Some(w) => w.max(sev),
-                None => sev,
-            });
-        }
-    }
-    worst
 }
 
 pub fn build_browser_lines(b: &BrowserInputs) -> Rc<Vec<Line<'static>>> {
@@ -1440,83 +1349,49 @@ pub fn build_browser_lines(b: &BrowserInputs) -> Rc<Vec<Line<'static>>> {
                 EntryKind::File => "  ",
             };
 
-            // Resolve git status for this entry
-            let status_display = match &entry.kind {
-                EntryKind::File => {
-                    let cats = b.git_file_statuses.get(&entry.path);
-                    cats.and_then(resolve_display)
-                }
+            // Resolve all categories for this entry — single source of truth.
+            // Both files and directories go through `file_categories` +
+            // `directory_categories` aggregation.
+            let cats = match &entry.kind {
+                EntryKind::File => b
+                    .file_categories
+                    .get(&entry.path)
+                    .cloned()
+                    .unwrap_or_default(),
                 EntryKind::Directory { .. } => {
-                    let cats = directory_categories(&b.git_file_statuses, &entry.path);
-                    resolve_display(&cats)
+                    directory_categories(&b.file_categories, &entry.path)
                 }
             };
 
-            let git_style = status_display.as_ref().map(|sd| match sd.theme_key {
-                "git.modified" => b.git_modified_style,
-                "git.added" => b.git_added_style,
-                "git.untracked" => b.git_untracked_style,
-                _ => b.file_style,
-            });
-
-            // Resolve PR status for this entry (comment > diff)
-            let pr_style = if b.pr_comment_files.contains(&entry.path) {
-                Some(b.pr_comment_style)
-            } else if b.pr_diff_files.contains(&entry.path) {
-                Some(b.pr_diff_style)
-            } else {
-                None
-            };
-
-            // Resolve diagnostic severity for this entry
-            let diag_sev = match &entry.kind {
-                EntryKind::File => b.diag_file_severities.get(&entry.path).copied(),
-                EntryKind::Directory { .. } => {
-                    directory_severity(&b.diag_file_severities, &entry.path)
-                }
-            };
-
-            let diag_style = diag_sev.map(|sev| match sev {
-                BrowserSeverity::Error => b.diag_error_style,
-                BrowserSeverity::Warning => b.diag_warning_style,
+            let display = resolve_display(&cats);
+            let marker_style = display.as_ref().and_then(|sd| {
+                cats.iter()
+                    .find(|c| c.info().theme_key == sd.theme_key)
+                    .map(|c| b.category_style(*c))
             });
 
             let entry_style = if is_selected && b.focused {
                 b.selected_style
             } else if is_selected {
                 b.selected_unfocused_style
-                    .patch(diag_style.or(git_style).or(pr_style).unwrap_or_default())
+                    .patch(marker_style.unwrap_or_default())
             } else {
-                diag_style
-                    .or(git_style)
-                    .or(pr_style)
-                    .unwrap_or(match &entry.kind {
-                        EntryKind::Directory { .. } => b.dir_style,
-                        EntryKind::File => b.file_style,
-                    })
+                marker_style.unwrap_or(match &entry.kind {
+                    EntryKind::Directory { .. } => b.dir_style,
+                    EntryKind::File => b.file_style,
+                })
             };
 
-            // Determine status character and its style
-            let status = diag_sev
-                .map(|sev| {
-                    let ch = match sev {
-                        BrowserSeverity::Error => '\u{25CF}', // ●
-                        BrowserSeverity::Warning => '\u{25CF}',
-                    };
-                    (ch, diag_style.unwrap_or(entry_style))
-                })
-                .or_else(|| {
-                    status_display.as_ref().map(|sd| {
-                        let ch = match &entry.kind {
-                            EntryKind::Directory { .. } => '\u{2022}', // •
-                            EntryKind::File => sd.letter,
-                        };
-                        (ch, git_style.unwrap_or(entry_style))
-                    })
-                })
-                .or_else(|| {
-                    pr_style.map(|sty| ('\u{2022}', sty)) // •
-                });
+            // Status character: use the letter from `resolve_display`. The
+            // letter logic lives in `CategoryInfo::browser_letter` — single
+            // source of truth. For directories, always render a bullet.
+            let status = display.as_ref().map(|sd| {
+                let ch = match &entry.kind {
+                    EntryKind::Directory { .. } => '\u{2022}', // •
+                    EntryKind::File => sd.letter,
+                };
+                (ch, marker_style.unwrap_or(entry_style))
+            });
 
             match status {
                 Some((status_char, marker_style)) => {

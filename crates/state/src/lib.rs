@@ -44,6 +44,7 @@ pub enum Phase {
     Exiting,
 }
 
+pub mod annotations;
 pub mod file_search;
 
 // ── Resume ──
