@@ -2,6 +2,7 @@ mod alert;
 mod config;
 mod doc;
 pub mod git;
+pub mod issue;
 pub mod keys;
 mod language;
 mod path;
@@ -15,6 +16,9 @@ mod versioned;
 pub use alert::{Alert, AlertExt};
 pub use config::Startup;
 pub use doc::{Doc, EditOp, InertDoc, TextDoc, UndoEntry, UndoHistory, apply_op_to_doc};
+pub use issue::{
+    CategoryInfo, IssueCategory, StatusDisplay, directory_categories, resolve_display,
+};
 pub use language::{LanguageId, LspContextId};
 pub use path::{CanonPath, UserPath};
 pub use versioned::Versioned;

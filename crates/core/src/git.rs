@@ -1,126 +1,21 @@
-use std::collections::{HashMap, HashSet};
+//! Git-specific data types: per-line status ranges.
+//!
+//! The category enum lives in [`crate::issue`] (re-exported as
+//! [`crate::IssueCategory`]) since it's shared across git, LSP, PR, and
+//! browser concerns.
+
 use std::ops::Range;
 
-use crate::CanonPath;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum FileStatus {
-    GitWtModified,
-    GitIndexModified,
-    GitIndexNew,
-    GitUntracked,
-    PrDiff,
-    PrComment,
-}
-
-pub struct StatusDisplay {
-    pub letter: char,
-    pub theme_key: &'static str,
-}
-
-#[derive(Clone, Copy)]
-struct StatusInfo {
-    letter: char,
-    theme_key: &'static str,
-    priority: u8,
-}
-
-fn status_info(s: FileStatus) -> StatusInfo {
-    match s {
-        FileStatus::GitWtModified => StatusInfo {
-            letter: 'M',
-            theme_key: "git.modified",
-            priority: 1,
-        },
-        FileStatus::GitIndexModified => StatusInfo {
-            letter: 'M',
-            theme_key: "git.modified",
-            priority: 1,
-        },
-        FileStatus::GitIndexNew => StatusInfo {
-            letter: 'A',
-            theme_key: "git.added",
-            priority: 2,
-        },
-        FileStatus::GitUntracked => StatusInfo {
-            letter: 'U',
-            theme_key: "git.untracked",
-            priority: 3,
-        },
-        FileStatus::PrComment => StatusInfo {
-            letter: 'C',
-            theme_key: "pr.comment",
-            priority: 0,
-        },
-        FileStatus::PrDiff => StatusInfo {
-            letter: 'P',
-            theme_key: "pr.diff",
-            priority: 0,
-        },
-    }
-}
-
-/// Compose a set of file statuses into a display.
-/// Letter from lowest priority, color from highest.
-///
-/// Both lowest and highest are tracked independently so iteration
-/// order of the HashSet cannot affect the result.
-pub fn resolve_display(statuses: &HashSet<FileStatus>) -> Option<StatusDisplay> {
-    if statuses.is_empty() {
-        return None;
-    }
-    let mut lowest: Option<StatusInfo> = None;
-    let mut highest: Option<StatusInfo> = None;
-    for &s in statuses {
-        let info = status_info(s);
-        if lowest.map_or(true, |l| info.priority < l.priority) {
-            lowest = Some(info);
-        }
-        if highest.map_or(true, |h| info.priority > h.priority) {
-            highest = Some(info);
-        }
-    }
-    let lowest = lowest?;
-    let theme_key = match highest {
-        Some(h) if h.priority > lowest.priority => h.theme_key,
-        _ => lowest.theme_key,
-    };
-    Some(StatusDisplay {
-        letter: lowest.letter,
-        theme_key,
-    })
-}
-
-/// Aggregate file statuses for all files under a directory.
-pub fn directory_statuses(
-    file_statuses: &HashMap<CanonPath, HashSet<FileStatus>>,
-    dir: &CanonPath,
-) -> HashSet<FileStatus> {
-    let mut result = HashSet::new();
-    for (path, statuses) in file_statuses {
-        if path.starts_with(dir) && path != dir {
-            result.extend(statuses);
-        }
-    }
-    result
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum LineStatusKind {
-    GitAdded,
-    GitModified,
-    PrDiff,
-    PrComment,
-}
+use crate::IssueCategory;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LineStatus {
-    pub kind: LineStatusKind,
+    pub category: IssueCategory,
     pub rows: Range<usize>,
 }
 
 /// Binary search for the line status covering `row`.
-pub fn line_status_at(statuses: &[LineStatus], row: usize) -> Option<LineStatusKind> {
+pub fn line_category_at(statuses: &[LineStatus], row: usize) -> Option<IssueCategory> {
     let idx = statuses
         .binary_search_by(|s| {
             if row < s.rows.start {
@@ -132,5 +27,5 @@ pub fn line_status_at(statuses: &[LineStatus], row: usize) -> Option<LineStatusK
             }
         })
         .ok()?;
-    Some(statuses[idx].kind)
+    Some(statuses[idx].category)
 }
