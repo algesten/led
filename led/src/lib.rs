@@ -51,10 +51,14 @@ impl Drop for RunGuards {
 /// Set up and run the editor.
 ///
 /// When `startup.headless` is true, skips terminal setup and UI driver.
+/// `terminal_in` — terminal input injection stream. The crossterm driver
+/// (when not headless) forwards into this stream; callers can also push
+/// synthetic `TerminalInput::Key` events for replay/profiling.
 /// `actions_in` — direct action injection stream (empty in production).
 /// `quit_tx` — signalled when `state.phase` becomes `Exiting`.
 pub fn run(
     startup: Startup,
+    terminal_in: Stream<TerminalInput>,
     actions_in: Stream<Action>,
     quit_tx: oneshot::Sender<()>,
 ) -> (Stream<Rc<AppState>>, RunGuards) {
@@ -87,13 +91,13 @@ pub fn run(
     let d = derived(state.clone(), git_activity.clone());
 
     // 3. Drivers
-    let (input_guard, terminal_in, ui_in) = if headless {
-        (None, Stream::new(), Stream::new())
+    let (input_guard, ui_in) = if headless {
+        (None, Stream::new())
     } else {
         let guard = led_terminal_in::setup_terminal();
         let ui_in = led_ui::driver(d.ui);
-        let terminal_in = led_terminal_in::driver();
-        (Some(guard), terminal_in, ui_in)
+        led_terminal_in::driver().forward(&terminal_in);
+        (Some(guard), ui_in)
     };
 
     let timers_in = led_timers::driver(d.timers_out);

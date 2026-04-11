@@ -251,10 +251,12 @@ impl TestHarness {
             let local = tokio::task::LocalSet::new();
             local
                 .run_until(async {
+                    let terminal_in: Stream<led_terminal_in::TerminalInput> = Stream::new();
                     let foobars_in: Stream<Action> = Stream::new();
                     let (quit_tx, quit_rx) = oneshot::channel::<()>();
 
-                    let (state, guards) = led::run(startup, foobars_in.clone(), quit_tx);
+                    let (state, guards) =
+                        led::run(startup, terminal_in, foobars_in.clone(), quit_tx);
 
                     let last_state: Rc<RefCell<Option<Rc<AppState>>>> = Rc::new(RefCell::new(None));
                     let capture = last_state.clone();

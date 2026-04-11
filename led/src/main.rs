@@ -7,10 +7,11 @@ use crossterm::event::DisableBracketedPaste;
 use crossterm::terminal::{LeaveAlternateScreen, disable_raw_mode};
 use led_config_file::TomlFile;
 use led_core::Startup;
-use led_core::keys::Keys;
+use led_core::keys::{KeyCombo, Keys, format_key_combo, parse_key_combo};
 use led_core::rx::Stream;
 use led_core::theme::Theme;
 use led_core::{CanonPath, UserPath};
+use led_terminal_in::TerminalInput;
 use tokio::sync::oneshot;
 
 #[derive(Parser)]
@@ -19,28 +20,55 @@ struct Cli {
     /// Files or directory to open
     paths: Vec<String>,
 
-    /// Write logs to a file (e.g. --log-file /tmp/led.log)
-    #[arg(long)]
+    /// Write logs to FILE
+    #[arg(long, value_name = "FILE")]
     log_file: Option<PathBuf>,
 
-    /// Reset keybinding and theme config to defaults, and clear session database
+    /// Reset keybinds/theme to defaults and clear session db
     #[arg(long)]
     reset_config: bool,
 
-    /// Standalone mode: do not load a workspace. No git/LSP/session/watchers.
-    /// Intended for `EDITOR="led --no-workspace"` single-file editing.
+    // Intended for `EDITOR="led --no-workspace"` single-file editing.
+    /// Standalone mode: no workspace, git, LSP, session or watchers
     #[arg(long)]
     no_workspace: bool,
 
-    /// After 5s, spam MoveUp for flamegraph profiling
-    #[cfg(debug_assertions)]
-    #[arg(long)]
-    flamegraph: bool,
+    /// Replay a key-combo file into terminal input (for profiling)
+    #[arg(long, value_name = "FILE")]
+    keys_file: Option<PathBuf>,
 
-    /// After 10s (LSP warm-up), type chars then C-a C-k in a loop
-    #[cfg(debug_assertions)]
-    #[arg(long)]
-    flamegraph2: bool,
+    /// Record key presses to FILE (replay with --keys-file)
+    #[arg(long, value_name = "FILE")]
+    keys_record: Option<PathBuf>,
+}
+
+enum KeyScript {
+    Key(KeyCombo),
+    /// Jump to the first entry whose source line number is >= target.
+    Goto(usize),
+}
+
+fn parse_keys_script(content: &str) -> Vec<(usize, KeyScript)> {
+    let mut script = Vec::new();
+    for (line_no, line) in content.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let lower = trimmed.to_ascii_lowercase();
+        if let Some(rest) = lower.strip_prefix("goto") {
+            let rest = rest.trim();
+            let target: usize = rest.parse().unwrap_or_else(|e| {
+                panic!("keys file line {line_no}: parse goto target '{rest}': {e}")
+            });
+            script.push((line_no, KeyScript::Goto(target)));
+            continue;
+        }
+        let combo = parse_key_combo(trimmed)
+            .unwrap_or_else(|e| panic!("keys file line {line_no}: parse '{trimmed}': {e}"));
+        script.push((line_no, KeyScript::Key(combo)));
+    }
+    script
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -154,50 +182,59 @@ async fn main() {
         no_workspace: cli.no_workspace,
     };
 
+    let keys_script: Option<Vec<(usize, KeyScript)>> = cli.keys_file.as_ref().map(|path| {
+        let content = std::fs::read_to_string(path)
+            .unwrap_or_else(|e| panic!("read keys file {}: {e}", path.display()));
+        parse_keys_script(&content)
+    });
+
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
             let (tx, rx) = oneshot::channel();
 
+            let terminal_in: Stream<TerminalInput> = Stream::new();
             let actions_in: Stream<led_core::Action> = Stream::new();
-            let (_state, _guards) = led::run(startup, actions_in.clone(), tx);
+            let (_state, _guards) = led::run(startup, terminal_in.clone(), actions_in.clone(), tx);
 
-            #[cfg(debug_assertions)]
-            if cli.flamegraph {
-                let stream = actions_in.clone();
-                tokio::task::spawn_local(async move {
-                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                    loop {
-                        stream.push(led_core::Action::FileStart);
-                        tokio::task::yield_now().await;
-                        stream.push(led_core::Action::PageDown);
-                        tokio::task::yield_now().await;
-                        for _ in 0..80 {
-                            stream.push(led_core::Action::MoveDown);
-                            tokio::task::yield_now().await;
-                        }
-                    }
+            if let Some(path) = cli.keys_record.clone() {
+                use std::io::Write;
+                let file = std::fs::File::create(&path)
+                    .unwrap_or_else(|e| panic!("create keys record file {}: {e}", path.display()));
+                let file = std::cell::RefCell::new(file);
+                terminal_in.on(move |opt: Option<&TerminalInput>| {
+                    let Some(TerminalInput::Key(combo)) = opt else {
+                        return;
+                    };
+                    let Some(line) = format_key_combo(combo) else {
+                        return;
+                    };
+                    let mut f = file.borrow_mut();
+                    let _ = writeln!(f, "{line}");
+                    let _ = f.flush();
                 });
             }
 
-            #[cfg(debug_assertions)]
-            if cli.flamegraph2 {
-                let stream = actions_in.clone();
+            if let Some(script) = keys_script {
+                let stream = terminal_in.clone();
                 tokio::task::spawn_local(async move {
-                    // Wait for LSP to start up
-                    tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-                    let chars = "abcdefghihjklkjasd";
-                    loop {
-                        for c in chars.chars() {
-                            stream.push(led_core::Action::InsertChar(c));
-                            tokio::task::yield_now().await;
+                    // Give startup (session restore, LSP warm-up) a moment to settle.
+                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                    let mut i = 0;
+                    while i < script.len() {
+                        match script[i].1 {
+                            KeyScript::Key(combo) => {
+                                stream.push(TerminalInput::Key(combo));
+                                tokio::task::yield_now().await;
+                                i += 1;
+                            }
+                            KeyScript::Goto(target) => {
+                                i = script
+                                    .iter()
+                                    .position(|(line_no, _)| *line_no >= target)
+                                    .unwrap_or(script.len());
+                            }
                         }
-                        // C-a: go to line start
-                        stream.push(led_core::Action::LineStart);
-                        tokio::task::yield_now().await;
-                        // C-k: kill line
-                        stream.push(led_core::Action::KillLine);
-                        tokio::task::yield_now().await;
                     }
                 });
             }

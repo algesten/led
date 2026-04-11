@@ -242,3 +242,37 @@ pub fn parse_key_combo(s: &str) -> Result<KeyCombo, String> {
         shift,
     })
 }
+
+/// Format a `KeyCombo` in the same canonical form accepted by `parse_key_combo`.
+/// Returns `None` for key codes that the parser cannot round-trip (e.g. F-keys).
+pub fn format_key_combo(c: &KeyCombo) -> Option<String> {
+    let mut s = String::new();
+    if c.ctrl {
+        s.push_str("ctrl+");
+    }
+    if c.alt {
+        s.push_str("alt+");
+    }
+    if c.shift {
+        s.push_str("shift+");
+    }
+    match c.code {
+        KeyCode::Char(' ') => s.push_str("space"),
+        KeyCode::Char(ch) => s.push(ch),
+        KeyCode::Up => s.push_str("up"),
+        KeyCode::Down => s.push_str("down"),
+        KeyCode::Left => s.push_str("left"),
+        KeyCode::Right => s.push_str("right"),
+        KeyCode::Home => s.push_str("home"),
+        KeyCode::End => s.push_str("end"),
+        KeyCode::PageUp => s.push_str("pageup"),
+        KeyCode::PageDown => s.push_str("pagedown"),
+        KeyCode::Enter => s.push_str("enter"),
+        KeyCode::Backspace => s.push_str("backspace"),
+        KeyCode::Delete => s.push_str("delete"),
+        KeyCode::Tab => s.push_str("tab"),
+        KeyCode::Esc => s.push_str("esc"),
+        _ => return None,
+    }
+    Some(s)
+}

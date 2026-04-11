@@ -41,10 +41,12 @@ impl Instance {
                 let local = tokio::task::LocalSet::new();
                 local
                     .run_until(async {
+                        let terminal_in: Stream<led_terminal_in::TerminalInput> = Stream::new();
                         let actions_in: Stream<Action> = Stream::new();
                         let (quit_tx, _quit_rx) = oneshot::channel::<()>();
 
-                        let (state_stream, guards) = led::run(startup, actions_in.clone(), quit_tx);
+                        let (state_stream, guards) =
+                            led::run(startup, terminal_in, actions_in.clone(), quit_tx);
 
                         // Capture every state update on this thread.
                         let last_state: Rc<std::cell::RefCell<Option<Rc<AppState>>>> =
