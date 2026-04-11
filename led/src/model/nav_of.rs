@@ -160,6 +160,11 @@ fn scan_level(state: &AppState, forward: bool, cats: &[IssueCategory]) -> Option
             .then(a.row.cmp(&b.row))
             .then(a.col.cmp(&b.col))
     });
+    // Dedupe by (path, row, col) — multiple categories at the same line
+    // collapse to a single navigation target. Without this, the cursor
+    // would land on one but pick_target_index would treat the others
+    // as separate items, breaking the cycle.
+    positions.dedup_by(|a, b| a.path == b.path && a.row == b.row && a.col == b.col);
 
     let cur = cursor_pos(state);
     let target_idx = pick_target_index(&positions, cur, forward);
@@ -173,6 +178,17 @@ fn scan_level(state: &AppState, forward: bool, cats: &[IssueCategory]) -> Option
         position: target_idx + 1,
         total: positions.len(),
     })
+}
+
+/// Clamp a row to the buffer's last line if the buffer is materialized.
+/// Returns the input row unchanged for unmaterialized buffers.
+fn clamp_row_to_buffer(state: &AppState, path: &CanonPath, row: usize) -> usize {
+    state
+        .buffers
+        .get(path)
+        .filter(|b| b.is_materialized())
+        .map(|b| row.min(b.doc().line_count().saturating_sub(1)))
+        .unwrap_or(row)
 }
 
 /// Pick the next target in the sorted cycle relative to the current cursor.
@@ -228,7 +244,7 @@ fn collect_diagnostic_positions(state: &AppState, cats: &[IssueCategory], out: &
             }
             out.push(Pos {
                 path: path.clone(),
-                row: *d.start_row,
+                row: clamp_row_to_buffer(state, path, *d.start_row),
                 col: *d.start_col,
                 category: cat,
             });
@@ -282,7 +298,7 @@ fn collect_git_positions(state: &AppState, cats: &[IssueCategory], out: &mut Vec
             for ls in matching {
                 out.push(Pos {
                     path: path.clone(),
-                    row: ls.rows.start,
+                    row: clamp_row_to_buffer(state, path, ls.rows.start),
                     col: 0,
                     category: ls.category,
                 });
@@ -298,7 +314,7 @@ fn collect_pr_positions(state: &AppState, cats: &[IssueCategory], out: &mut Vec<
             for c in comments {
                 out.push(Pos {
                     path: path.clone(),
-                    row: *c.line,
+                    row: clamp_row_to_buffer(state, path, *c.line),
                     col: 0,
                     category: IssueCategory::PrComment,
                 });
@@ -310,7 +326,7 @@ fn collect_pr_positions(state: &AppState, cats: &[IssueCategory], out: &mut Vec<
             for ls in line_statuses {
                 out.push(Pos {
                     path: path.clone(),
-                    row: ls.rows.start,
+                    row: clamp_row_to_buffer(state, path, ls.rows.start),
                     col: 0,
                     category: IssueCategory::PrDiff,
                 });
@@ -411,6 +427,42 @@ mod tests {
     }
 
     // ── compute_navigation: smoke test via empty state ──
+
+    #[test]
+    fn dedup_collapses_same_position_different_category() {
+        // After clamping, two positions at the same (path, row, col) but
+        // with different categories should collapse to one.
+        let mut ps = vec![
+            Pos {
+                path: UserPath::new("/a").canonicalize(),
+                row: 5,
+                col: 0,
+                category: IssueCategory::PrDiff,
+            },
+            Pos {
+                path: UserPath::new("/a").canonicalize(),
+                row: 5,
+                col: 0,
+                category: IssueCategory::PrComment,
+            },
+            Pos {
+                path: UserPath::new("/a").canonicalize(),
+                row: 7,
+                col: 0,
+                category: IssueCategory::PrDiff,
+            },
+        ];
+        ps.sort_by(|a, b| {
+            a.path
+                .cmp(&b.path)
+                .then(a.row.cmp(&b.row))
+                .then(a.col.cmp(&b.col))
+        });
+        ps.dedup_by(|a, b| a.path == b.path && a.row == b.row && a.col == b.col);
+        assert_eq!(ps.len(), 2);
+        assert_eq!(ps[0].row, 5);
+        assert_eq!(ps[1].row, 7);
+    }
 
     #[test]
     fn compute_navigation_empty_state_returns_none() {
