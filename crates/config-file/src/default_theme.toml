@@ -367,9 +367,9 @@ gutter_modified = "$x172"
 
 [pr]
 diff            = "$x245"
-comment         = "$x033"
+comment         = "$x205"
 gutter_diff     = "$x245"
-gutter_comment  = "$x033"
+gutter_comment  = "$x205"
 
 [brackets]
 match            = { fg = "$bright_yellow", bold = true }
