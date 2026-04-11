@@ -824,43 +824,37 @@ pub fn derived(state: Stream<Rc<AppState>>, git_activity: Stream<()>) -> Derived
     // Initial load / branch change: fires when branch first becomes known or switches
     let gh_pr_initial = state
         .dedupe_by(|s| s.git.branch.clone())
-        .filter(|s| s.git.branch.is_some())
-        .filter(|s| s.workspace.is_some())
-        .map(|s| led_gh_pr::GhPrOut::LoadPr {
-            branch: s.git.branch.clone().unwrap(),
-            root: s.workspace.as_ref().unwrap().root.clone(),
-        })
+        .filter_map(load_pr_command)
         .stream();
 
     // Reload after git activity settles (e.g. commit, push, rebase)
     let gh_pr_reload = state
         .dedupe_by(|s| s.git.pr_settle_seq.version())
         .filter(|s| s.git.pr_settle_seq.version() > 0)
-        .filter(|s| s.git.branch.is_some())
-        .filter(|s| s.workspace.is_some())
-        .map(|s| led_gh_pr::GhPrOut::LoadPr {
-            branch: s.git.branch.clone().unwrap(),
-            root: s.workspace.as_ref().unwrap().root.clone(),
+        .filter_map(load_pr_command)
+        .stream();
+
+    // PR poll: 15s repeating timer, started when a PR appears, cancelled when
+    // it disappears. Two streams (set + cancel) instead of one with if/else.
+    let pr_present_changed = state.map(|s| s.git.pr.is_some()).dedupe().stream();
+
+    let pr_poll_set = pr_present_changed
+        .clone()
+        .filter(|has_pr| *has_pr)
+        .map(|_| TimersOut::Set {
+            name: "pr_poll",
+            duration: Duration::from_secs(15),
+            schedule: Schedule::Repeated,
         })
         .stream();
 
-    // PR poll: start 15s repeating timer once PR is loaded, cancel when cleared
-    let pr_poll_timer = state
-        .map(|s| s.git.pr.is_some())
-        .dedupe()
-        .map(|has_pr| {
-            if has_pr {
-                TimersOut::Set {
-                    name: "pr_poll",
-                    duration: Duration::from_secs(15),
-                    schedule: Schedule::Repeated,
-                }
-            } else {
-                TimersOut::Cancel { name: "pr_poll" }
-            }
-        })
+    let pr_poll_cancel = pr_present_changed
+        .filter(|has_pr| !*has_pr)
+        .map(|_| TimersOut::Cancel { name: "pr_poll" })
         .stream();
-    pr_poll_timer.forward(&timers_out);
+
+    pr_poll_set.forward(&timers_out);
+    pr_poll_cancel.forward(&timers_out);
 
     // PR poll command: triggered by pr_poll_seq (bumped by timer handler)
     let gh_pr_poll = state
@@ -905,6 +899,14 @@ pub fn derived(state: Stream<Rc<AppState>>, git_activity: Stream<()>) -> Derived
         lsp_out,
         open_url,
     }
+}
+
+/// Build a `LoadPr` driver command from app state, when both branch and
+/// workspace root are available. Returns `None` otherwise.
+fn load_pr_command(s: Rc<AppState>) -> Option<led_gh_pr::GhPrOut> {
+    let branch = s.git.branch.clone()?;
+    let root = s.workspace.as_ref()?.root.clone();
+    Some(led_gh_pr::GhPrOut::LoadPr { branch, root })
 }
 
 fn build_session_kv(s: &AppState) -> HashMap<String, String> {

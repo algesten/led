@@ -351,3 +351,81 @@ fn other_buffer_update(
     buf.set_scroll(Row(r.saturating_sub(half)), SubLine(0));
     Some((nav.target_path.clone(), buf))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use led_core::UserPath;
+
+    fn p(path: &str, row: usize, col: usize) -> Pos {
+        Pos {
+            path: UserPath::new(path).canonicalize(),
+            row,
+            col,
+            category: IssueCategory::Unstaged,
+        }
+    }
+
+    // ── pick_target_index ──
+
+    #[test]
+    fn pick_target_no_cursor_picks_first() {
+        let ps = vec![p("/a", 1, 0), p("/a", 5, 0), p("/b", 0, 0)];
+        assert_eq!(pick_target_index(&ps, None, true), 0);
+        assert_eq!(pick_target_index(&ps, None, false), 0);
+    }
+
+    #[test]
+    fn pick_target_forward_picks_next_after_cursor() {
+        let ps = vec![p("/a", 1, 0), p("/a", 5, 0), p("/a", 9, 0)];
+        let cur = Some((UserPath::new("/a").canonicalize(), 5, 0));
+        assert_eq!(pick_target_index(&ps, cur, true), 2);
+    }
+
+    #[test]
+    fn pick_target_forward_wraps_around() {
+        let ps = vec![p("/a", 1, 0), p("/a", 5, 0)];
+        let cur = Some((UserPath::new("/a").canonicalize(), 9, 0));
+        assert_eq!(pick_target_index(&ps, cur, true), 0); // wraps to first
+    }
+
+    #[test]
+    fn pick_target_backward_picks_prev_before_cursor() {
+        let ps = vec![p("/a", 1, 0), p("/a", 5, 0), p("/a", 9, 0)];
+        let cur = Some((UserPath::new("/a").canonicalize(), 5, 0));
+        assert_eq!(pick_target_index(&ps, cur, false), 0);
+    }
+
+    #[test]
+    fn pick_target_backward_wraps_around() {
+        let ps = vec![p("/a", 1, 0), p("/a", 5, 0)];
+        let cur = Some((UserPath::new("/a").canonicalize(), 0, 0));
+        assert_eq!(pick_target_index(&ps, cur, false), 1); // wraps to last
+    }
+
+    #[test]
+    fn pick_target_crosses_files() {
+        let ps = vec![p("/a", 5, 0), p("/b", 1, 0)];
+        let cur = Some((UserPath::new("/a").canonicalize(), 5, 0));
+        assert_eq!(pick_target_index(&ps, cur, true), 1); // /b/1 > /a/5
+    }
+
+    // ── compute_navigation: smoke test via empty state ──
+
+    #[test]
+    fn compute_navigation_empty_state_returns_none() {
+        let state = led_state::AppState::new(led_core::Startup {
+            headless: true,
+            enable_watchers: false,
+            arg_paths: vec![],
+            arg_dir: None,
+            start_dir: std::sync::Arc::new(UserPath::new("/tmp").canonicalize()),
+            user_start_dir: UserPath::new("/tmp"),
+            config_dir: UserPath::new("/tmp/config"),
+            test_lsp_server: None,
+            test_gh_binary: None,
+        });
+        assert!(compute_navigation(&state, true).is_none());
+        assert!(compute_navigation(&state, false).is_none());
+    }
+}
