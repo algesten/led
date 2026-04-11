@@ -277,9 +277,24 @@ In replace mode, the search input, replace input, and results form a single vert
 | `Ctrl+r`    | Rename symbol       |
 | `Alt+i`     | Code action         |
 | `Ctrl+t`    | Toggle inlay hints  |
-| `Alt+.`     | Next diagnostic     |
-| `Alt+,`     | Previous diagnostic |
 | `Ctrl+x i`  | Sort imports        |
+
+### Issues
+
+| Key     | Action        |
+|---------|---------------|
+| `Alt+.` | Next issue    |
+| `Alt+,` | Previous issue |
+
+"Issue" navigation cycles through LSP errors and warnings, unstaged and staged git changes, and PR diff lines and review comments — in that priority order.
+
+### Git & GitHub
+
+| Key             | Action                    |
+|-----------------|---------------------------|
+| `Ctrl+x Ctrl+p` | Open PR / comment URL     |
+
+`Ctrl+x Ctrl+p` opens the current pull request in the browser. If the cursor is on a line with a PR review comment, that comment's URL is opened instead.
 
 ### Jump List
 
