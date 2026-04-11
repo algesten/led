@@ -2,6 +2,9 @@
 
 A lightweight, fast text editor for the terminal, written in Rust.
 
+> [!WARNING]
+> **Vibe coded.** This project is an experiment in getting an AI assistant to follow Functional Reactive Programming (FRP) principles and produce reasonable code within that discipline. I've focused on the overall architecture rather than reviewing the code output in detail. For projects I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and [str0m](https://github.com/algesten/str0m).
+
 led is built on a functional reactive programming (FRP) architecture where the model is a pure reducer, all side effects live in drivers, and the UI is a derived function of state. The result is a responsive editor with rich features and a small footprint.
 
 <p align="center">
