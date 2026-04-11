@@ -6247,3 +6247,109 @@ fn normal_mode_still_loads_workspace() {
         "normal mode must default to showing the sidebar"
     );
 }
+
+// ── Reflow paragraph ──
+
+#[test]
+fn reflow_wraps_long_doc_comment() {
+    let long_text = "word ".repeat(40);
+    let src = format!("/// {long_text}\nfn foo() {{}}\n");
+    let t = TestHarness::new()
+        .with_file_ext(&src, "rs")
+        .run(actions(vec![ReflowParagraph]));
+
+    let b = buf(&t);
+    let doc = &**b.doc();
+    // The `fn foo() {}` line should still exist somewhere.
+    let mut found_fn = false;
+    let mut max_line_width = 0usize;
+    for r in 0..doc.line_count() {
+        let l = line(doc, r);
+        if l.contains("fn foo()") {
+            found_fn = true;
+        }
+        max_line_width = max_line_width.max(l.chars().count());
+        if !l.is_empty() && !l.contains("fn foo()") {
+            assert!(l.starts_with("/// "), "reflow line missing prefix: {l:?}");
+        }
+    }
+    assert!(found_fn, "fn foo() should be preserved");
+    assert!(
+        max_line_width <= 100,
+        "reflow should wrap to ≤100 chars, got max {max_line_width}"
+    );
+    assert!(doc.line_count() > 2, "expected multi-line wrap");
+}
+
+#[test]
+fn reflow_markdown_paragraph_wraps() {
+    let long_para = "word ".repeat(40);
+    let src = format!("# Heading\n\n{long_para}\n\nOther paragraph.\n");
+    let t = TestHarness::new().with_file_ext(&src, "md").run(vec![
+        Do(MoveDown), // row 1 (blank)
+        Do(MoveDown), // row 2 (long paragraph)
+        Do(ReflowParagraph),
+    ]);
+
+    let b = buf(&t);
+    let doc = &**b.doc();
+    // Heading untouched.
+    assert_eq!(line(doc, 0), "# Heading");
+    // Every line ≤ 100 chars.
+    for r in 0..doc.line_count() {
+        assert!(
+            line(doc, r).chars().count() <= 100,
+            "line {r} too long: {}",
+            line(doc, r)
+        );
+    }
+    // "Other paragraph." must still exist.
+    let text: String = (0..doc.line_count())
+        .map(|r| line(doc, r))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        text.contains("Other paragraph."),
+        "sibling paragraph touched: {text:?}"
+    );
+}
+
+#[test]
+fn reflow_on_plain_code_is_noop() {
+    let src = "fn foo() {\n    let x = 1;\n}\n";
+    let t = TestHarness::new()
+        .with_file_ext(src, "rs")
+        .run(vec![Do(MoveDown), Do(ReflowParagraph)]);
+
+    let b = buf(&t);
+    assert!(!b.is_dirty(), "reflow on code should not dirty the buffer");
+}
+
+#[test]
+fn reflow_region_reflows_all_spans() {
+    let long = "word ".repeat(30);
+    let src = format!("/// {long}\nfn foo() {{}}\n\n/// {long}\nfn bar() {{}}\n");
+    let t = TestHarness::new().with_file_ext(&src, "rs").run(vec![
+        Do(SetMark),
+        Do(FileEnd),
+        Do(ReflowParagraph),
+    ]);
+
+    let b = buf(&t);
+    let doc = &**b.doc();
+    let text: String = (0..doc.line_count())
+        .map(|r| line(doc, r))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(text.contains("fn foo() {}"), "fn foo missing: {text}");
+    assert!(text.contains("fn bar() {}"), "fn bar missing: {text}");
+    for l in text.lines() {
+        if l.is_empty() || l.contains("fn ") {
+            continue;
+        }
+        assert!(l.starts_with("/// "), "unexpected line: {l:?}");
+        assert!(l.chars().count() <= 100, "line too long: {l:?}");
+    }
+    let slash_count = text.lines().filter(|l| l.starts_with("/// ")).count();
+    assert!(slash_count >= 4, "expected ≥4 /// lines, got {slash_count}");
+}

@@ -275,6 +275,7 @@ pub enum Action {
     KillRegion,
     Yank,
     SortImports,
+    ReflowParagraph,
 
     // LSP
     LspGotoDefinition,

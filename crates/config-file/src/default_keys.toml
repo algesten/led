@@ -53,6 +53,7 @@
 "alt+right" = "jump_forward"
 "alt+o" = "outline"
 "alt+]" = "match_bracket"
+"ctrl+q" = "reflow_paragraph"
 
 [keys."ctrl+x"]
 "ctrl+c" = "quit"

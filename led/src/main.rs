@@ -137,6 +137,8 @@ async fn main() {
             }
             Err(e) => eprintln!("Failed to reset session database: {e}"),
         }
+
+        return;
     }
 
     let startup = Startup {

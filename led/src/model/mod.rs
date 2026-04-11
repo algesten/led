@@ -20,6 +20,8 @@ mod mov;
 mod movement_of;
 mod nav_of;
 mod process_of;
+mod reflow;
+mod reflow_of;
 mod save_of;
 mod search;
 mod session_of;
@@ -345,6 +347,7 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
     let gh_pr_s = gh_pr_of::gh_pr_of(&drivers.gh_pr_in, &raw_actions, &state);
     let movement_s = movement_of::movement_of(&raw_actions, &actions_with_state, &state);
     let editing_s = editing_of::editing_of(&raw_actions, &actions_with_state, &state);
+    let reflow_s = reflow_of::reflow_of(&raw_actions, &state);
     let kill_s = kill_of::kill_of(&actions_with_state);
     let save_s = save_of::save_of(&raw_actions, &state);
     let jump_s = jump_of::jump_of(&raw_actions, &state);
@@ -586,6 +589,7 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
     gh_pr_s.forward(&muts);
     movement_s.forward(&muts);
     editing_s.forward(&muts);
+    reflow_s.forward(&muts);
     kill_s.forward(&muts);
     save_s.forward(&muts);
     jump_s.forward(&muts);
