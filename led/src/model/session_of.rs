@@ -150,6 +150,16 @@ pub fn session_of(workspace_in: &Stream<WI>, state: &Stream<Rc<AppState>>) -> St
         .filter(|m| matches!(m, Mut::SetPendingLists(v) if !v.is_empty()))
         .stream();
 
+    // Standalone mode: no Mut::Workspace ever fires to seed the browser,
+    // so kick off an initial listing of `start_dir` here. Without this
+    // the sidebar renders blank (browser.root is set by AppState::new
+    // but dir_contents is empty until the fs driver responds).
+    let standalone_browser_list_s = session_s
+        .sample_combine(state)
+        .filter(|(_, s)| s.startup.no_workspace)
+        .map(|(_, s)| Mut::SetPendingLists(vec![(*s.startup.start_dir).clone()]))
+        .stream();
+
     // With pending opens: create tabs/buffers, set phase to Resuming
     let resume_tabs_s = session_s
         .filter(|sd| !sd.pending_opens.is_empty())
@@ -209,6 +219,7 @@ pub fn session_of(workspace_in: &Stream<WI>, state: &Stream<Rc<AppState>>) -> St
     browser_s.forward(&muts);
     jump_s.forward(&muts);
     pending_lists_s.forward(&muts);
+    standalone_browser_list_s.forward(&muts);
     resume_tabs_s.forward(&muts);
     resume_entries_s.forward(&muts);
     resume_phase_s.forward(&muts);

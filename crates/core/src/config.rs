@@ -52,8 +52,10 @@ pub struct Startup {
     /// - No recursive watcher is registered on a project root.
     /// - Git/LSP/find-in-files stay dormant (they key on
     ///   `WorkspaceState::Loaded`).
-    /// - The sidebar is hidden on startup but can be toggled on; when
-    ///   shown, the file browser is rooted at `start_dir`, not a
-    ///   workspace root.
+    /// - The file browser sidebar is visible and rooted at the process
+    ///   CWD (captured into `start_dir`), not the file argument's
+    ///   parent. This matters for `$EDITOR` use: when git invokes
+    ///   `led --no-workspace .git/COMMIT_EDITMSG` from the project
+    ///   root, the browser shows the project instead of `.git/`.
     pub no_workspace: bool,
 }

@@ -68,13 +68,28 @@ async fn main() {
     // Single directory: open in file browser, no files.
     // Otherwise: filter out directories, open remaining files.
     // Capture the user-provided start directory before canonicalization.
-    let user_start_dir = if cli.paths.len() == 1 {
+    //
+    // Standalone mode (`--no-workspace`) always anchors on the process
+    // CWD: the file arg is typically something like `.git/COMMIT_EDITMSG`
+    // or a tempfile, and rooting the browser at that file's parent would
+    // show a hidden/temp dir. CWD is where the user *was* when they ran
+    // the command, which is almost always the useful "here".
+    let user_start_dir = if cli.no_workspace {
+        UserPath::new(std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")))
+    } else if cli.paths.len() == 1 {
         UserPath::new(&cli.paths[0])
     } else {
         UserPath::new(std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")))
     };
 
-    let (arg_dir, arg_paths, start_dir) = if resolved.len() == 1 && resolved[0].is_dir() {
+    let (arg_dir, arg_paths, start_dir) = if cli.no_workspace {
+        let files: Vec<CanonPath> = resolved.into_iter().filter(|p| !p.is_dir()).collect();
+        let start = UserPath::new(
+            std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/")),
+        )
+        .canonicalize();
+        (None, files, start)
+    } else if resolved.len() == 1 && resolved[0].is_dir() {
         let dir = resolved.into_iter().next().unwrap();
         let start = dir.clone();
         (Some(dir), vec![], start)

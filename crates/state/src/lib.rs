@@ -1909,10 +1909,10 @@ impl AppState {
     pub fn new(startup: Startup) -> Self {
         // Standalone mode (`--no-workspace`) pre-seeds the three bits of
         // state that would otherwise be filled in by the workspace driver
-        // or session restore: workspace stays `Standalone` forever, the
-        // sidebar is hidden (but toggleable), and the file browser is
-        // rooted at `start_dir` so that toggling the sidebar shows a
-        // plain file browser instead of nothing.
+        // or session restore: workspace stays `Standalone` forever, and
+        // the file browser is rooted at `start_dir` so the sidebar shows
+        // a plain file listing of the directory the user started in
+        // instead of a workspace view.
         if startup.no_workspace {
             let browser = FileBrowserState {
                 root: Some((*startup.start_dir).clone()),
@@ -1921,7 +1921,7 @@ impl AppState {
             return Self {
                 startup: Arc::new(startup),
                 workspace: WorkspaceState::Standalone,
-                show_side_panel: false,
+                show_side_panel: true,
                 browser: Rc::new(browser),
                 ..Default::default()
             };

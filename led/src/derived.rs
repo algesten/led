@@ -168,13 +168,20 @@ pub fn derived(state: Stream<Rc<AppState>>, git_activity: Stream<()>) -> Derived
     undo_clear.forward(&workspace_out);
     sync_check.forward(&workspace_out);
 
+    // Config file driver: needs a config dir to read keys.toml/theme.toml.
+    // In normal mode this is `workspace.config` (read/write for primary,
+    // read-only for secondary). In standalone mode there is no workspace,
+    // but we still need a keymap — otherwise every keystroke (including
+    // C-c) is dropped. Fall back to `startup.config_dir` as read-only so
+    // the keymap loads without touching session state.
     let config_file_out = state
-        .filter_map(|s| s.workspace.loaded().cloned())
-        .dedupe()
-        .map(|w| ConfigDir {
-            config: w.config.clone(),
-            read_only: !w.primary,
+        .filter_map(|s| match &s.workspace {
+            led_state::WorkspaceState::Loaded(w) => Some((w.config.clone(), !w.primary)),
+            led_state::WorkspaceState::Standalone => Some((s.startup.config_dir.clone(), true)),
+            led_state::WorkspaceState::Loading => None,
         })
+        .dedupe()
+        .map(|(config, read_only)| ConfigDir { config, read_only })
         .map(ConfigFileOut::ConfigDir)
         .stream();
 

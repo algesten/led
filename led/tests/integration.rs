@@ -6092,12 +6092,19 @@ fn no_workspace_starts_in_standalone_mode() {
         t.state.workspace
     );
     assert!(
-        !t.state.show_side_panel,
-        "sidebar should be hidden by default in standalone mode"
+        t.state.show_side_panel,
+        "sidebar should be visible by default in standalone mode"
     );
-    assert!(
-        t.state.browser.root.is_some(),
-        "browser root should be pre-seeded in standalone mode"
+    let browser_root = t
+        .state
+        .browser
+        .root
+        .as_ref()
+        .expect("browser root must be pre-seeded in standalone mode");
+    assert_eq!(
+        browser_root.as_path(),
+        t.state.startup.start_dir.as_path(),
+        "browser root should equal start_dir in standalone mode"
     );
     assert_eq!(
         t.state
@@ -6168,25 +6175,59 @@ fn no_workspace_skips_git_and_lsp() {
     );
 }
 
-/// The sidebar can still be toggled on in standalone mode — it just
-/// shows a plain file browser rooted at `start_dir`, not a workspace
-/// view.
+/// Regression: standalone mode must kick off an initial directory
+/// listing of `start_dir` so the sidebar actually renders files. The
+/// bug was that `browser.root` was pre-seeded by `AppState::new` but
+/// nothing ever set `pending_lists`, leaving `dir_contents` empty and
+/// the sidebar blank. Fix lives in `session_of.rs`.
 #[test]
-fn no_workspace_sidebar_toggles_on() {
+fn no_workspace_populates_browser_from_start_dir() {
     let t = TestHarness::new()
         .with_no_workspace()
-        .with_file("content\n")
-        .run(vec![Do(ToggleSidePanel)]);
+        .with_named_file("a.txt", "a\n")
+        .with_named_file("b.txt", "b\n")
+        .run(vec![WaitFor(|s| !s.browser.entries.is_empty())]);
 
     assert!(
-        t.state.show_side_panel,
-        "ToggleSidePanel should turn the sidebar on in standalone mode"
+        !t.state.browser.entries.is_empty(),
+        "browser should have entries from start_dir listing"
     );
-    let browser_root = t.state.browser.root.as_ref().expect("browser root");
-    assert_eq!(
-        browser_root.as_path(),
-        t.state.startup.start_dir.as_path(),
-        "browser root should equal start_dir in standalone mode"
+    let names: Vec<String> = t
+        .state
+        .browser
+        .entries
+        .iter()
+        .filter_map(|e| e.path.file_name().map(|n| n.to_string_lossy().into_owned()))
+        .collect();
+    assert!(
+        names.iter().any(|n| n == "a.txt"),
+        "browser should list a.txt from start_dir, got {names:?}"
+    );
+    assert!(
+        names.iter().any(|n| n == "b.txt"),
+        "browser should list b.txt from start_dir, got {names:?}"
+    );
+}
+
+/// Regression: the config file driver must still load keys.toml (and
+/// therefore the keymap) in standalone mode. If it doesn't, every
+/// keystroke — including C-c — is dropped and the app hangs with a
+/// black screen. The bug was that `config_file_out` was gated on
+/// `workspace.loaded()` and never fired when `workspace == Standalone`.
+#[test]
+fn no_workspace_loads_keymap_from_config_dir() {
+    let t = TestHarness::new()
+        .with_no_workspace()
+        .with_file("hello\n")
+        .run(vec![WaitFor(|s| s.keymap.is_some())]);
+
+    assert!(
+        t.state.keymap.is_some(),
+        "standalone mode must still load the keymap so keystrokes dispatch"
+    );
+    assert!(
+        t.state.config_keys.is_some(),
+        "standalone mode must still read keys.toml"
     );
 }
 
