@@ -80,25 +80,7 @@ pub fn gh_pr_of(
     let open_pr_url_s = raw_actions
         .filter(|a| matches!(a, Action::OpenPrUrl))
         .sample_combine(state)
-        .filter_map(|(_, s)| {
-            let pr = s.git.pr.as_ref()?;
-            // Try to find a comment on the cursor line
-            let comment_url = s
-                .active_tab
-                .as_ref()
-                .and_then(|path| s.buffers.get(path))
-                .and_then(|buf| {
-                    let path = buf.path()?;
-                    let comments = pr.comments.get(path)?;
-                    let crow = buf.cursor_row();
-                    comments
-                        .iter()
-                        .find(|c| c.line == crow)
-                        .map(|c| c.url.clone())
-                        .filter(|u| !u.is_empty())
-                });
-            Some(comment_url.unwrap_or_else(|| pr.url.clone()))
-        })
+        .filter_map(|(_, s)| open_pr_target_url(&s))
         .map(Mut::SetPendingOpenUrl)
         .stream();
 
@@ -107,4 +89,102 @@ pub fn gh_pr_of(
     branch_clear_s.forward(&merged);
     open_pr_url_s.forward(&merged);
     merged
+}
+
+/// URL to open for the `OpenPrUrl` action: comment URL if the cursor is on a
+/// PR comment line, otherwise the PR URL itself. Returns `None` when there is
+/// no PR loaded.
+fn open_pr_target_url(state: &AppState) -> Option<String> {
+    let pr = state.git.pr.as_ref()?;
+    Some(comment_url_at_cursor(state).unwrap_or_else(|| pr.url.clone()))
+}
+
+/// Find the (non-empty) comment URL on the active buffer's current line.
+fn comment_url_at_cursor(state: &AppState) -> Option<String> {
+    let buf = state.buffers.get(state.active_tab.as_ref()?)?;
+    let path = buf.path()?;
+    let pr = state.git.pr.as_ref()?;
+    let comments = pr.comments.get(path)?;
+    let crow = buf.cursor_row();
+    comments
+        .iter()
+        .find(|c| c.line == crow)
+        .map(|c| c.url.clone())
+        .filter(|u| !u.is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use led_core::{Row, Startup, UserPath};
+    use led_state::{PrInfo, PrStatus};
+    use std::sync::Arc;
+
+    fn empty_state() -> AppState {
+        AppState::new(Startup {
+            headless: true,
+            enable_watchers: false,
+            arg_paths: vec![],
+            arg_dir: None,
+            start_dir: Arc::new(UserPath::new("/tmp").canonicalize()),
+            user_start_dir: UserPath::new("/tmp"),
+            config_dir: UserPath::new("/tmp/config"),
+            test_lsp_server: None,
+            test_gh_binary: None,
+        })
+    }
+
+    fn pr_with_comment(path: CanonPath, line: usize, comment_url: &str) -> PrInfo {
+        let mut comments = HashMap::new();
+        comments.insert(
+            path,
+            vec![PrComment {
+                line: Row(line),
+                body: "x".into(),
+                author: "u".into(),
+                url: comment_url.into(),
+            }],
+        );
+        PrInfo {
+            number: led_core::PrNumber(1),
+            status: PrStatus::Open,
+            url: "https://github.com/o/r/pull/1".into(),
+            api_endpoint: "repos/o/r/pulls/1".into(),
+            etag: None,
+            diff_files: HashMap::new(),
+            comments,
+            file_hashes: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn open_url_returns_none_without_pr() {
+        let state = empty_state();
+        assert_eq!(open_pr_target_url(&state), None);
+    }
+
+    #[test]
+    fn open_url_falls_back_to_pr_url_when_no_comment_on_cursor_line() {
+        let state = empty_state();
+        // Note: there's no active tab, so comment_url_at_cursor returns None,
+        // and open_pr_target_url falls back to pr.url.
+        let mut state = state;
+        let path = UserPath::new("/tmp/x").canonicalize();
+        state.git_mut().pr = Some(pr_with_comment(path, 5, "https://example/c"));
+        assert_eq!(
+            open_pr_target_url(&state),
+            Some("https://github.com/o/r/pull/1".into())
+        );
+    }
+
+    #[test]
+    fn comment_url_returns_none_for_empty_url() {
+        let state = empty_state();
+        // Even if a matching comment exists, an empty URL is filtered out.
+        let mut state = state;
+        let path = UserPath::new("/tmp/x").canonicalize();
+        state.git_mut().pr = Some(pr_with_comment(path, 5, ""));
+        // No active tab → still None.
+        assert_eq!(comment_url_at_cursor(&state), None);
+    }
 }
