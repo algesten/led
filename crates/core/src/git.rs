@@ -14,7 +14,9 @@ pub struct LineStatus {
     pub rows: Range<usize>,
 }
 
-/// Binary search for the line status covering `row`.
+/// Binary search for the line status covering `row`. Expects a
+/// **non-overlapping** sorted list (each row is in at most one range).
+/// For merged lists where ranges can overlap, use [`best_category_at`].
 pub fn line_category_at(statuses: &[LineStatus], row: usize) -> Option<IssueCategory> {
     let idx = statuses
         .binary_search_by(|s| {
@@ -28,4 +30,17 @@ pub fn line_category_at(statuses: &[LineStatus], row: usize) -> Option<IssueCate
         })
         .ok()?;
     Some(statuses[idx].category)
+}
+
+/// Find the highest-precedence category covering `row` in a
+/// potentially-overlapping merged list. Linear scan — O(n).
+///
+/// Use this when the list contains multiple sources (git line statuses,
+/// PR diff, PR comments) that can overlap at the same row.
+pub fn best_category_at(statuses: &[LineStatus], row: usize) -> Option<IssueCategory> {
+    statuses
+        .iter()
+        .filter(|s| s.rows.contains(&row))
+        .map(|s| s.category)
+        .min_by_key(|c| c.precedence())
 }

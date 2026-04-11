@@ -470,6 +470,54 @@ fn compute_file_hashes(
     result
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use led_core::{Doc, TextDoc};
+
+    /// The hash we compute from a git blob must match what `TextDoc::content_hash`
+    /// produces for the same bytes. If this test fails, `file_hashes` will never
+    /// match buffer hashes, and PR annotations will always be suppressed.
+    #[test]
+    fn blob_hash_matches_textdoc_content_hash() {
+        let content = b"line1\nline2\nline3\n";
+
+        // The gh-pr side: hash the raw blob bytes.
+        let mut hasher = DefaultHasher::new();
+        hasher.write(content);
+        let blob_hash = PersistedContentHash(hasher.finish());
+
+        // The buffer side: load into a TextDoc and call content_hash().
+        let doc = TextDoc::from_reader(&content[..]).unwrap();
+        let doc_hash = PersistedContentHash(doc.content_hash().0);
+
+        assert_eq!(
+            blob_hash, doc_hash,
+            "blob hash {blob_hash:?} must match TextDoc hash {doc_hash:?}"
+        );
+    }
+
+    #[test]
+    fn blob_hash_matches_textdoc_content_hash_large() {
+        // A larger content that forces rope to split into multiple chunks.
+        let line = "hello world, this is a fairly long line that the rope will split up.\n";
+        let content: String = line.repeat(500);
+        let bytes = content.as_bytes();
+
+        let mut hasher = DefaultHasher::new();
+        hasher.write(bytes);
+        let blob_hash = PersistedContentHash(hasher.finish());
+
+        let doc = TextDoc::from_reader(bytes).unwrap();
+        let doc_hash = PersistedContentHash(doc.content_hash().0);
+
+        assert_eq!(
+            blob_hash, doc_hash,
+            "blob hash {blob_hash:?} must match TextDoc hash {doc_hash:?} for large content"
+        );
+    }
+}
+
 fn parse_unified_diff(diff: &str, root: &CanonPath) -> HashMap<CanonPath, Vec<LineStatus>> {
     let mut result: HashMap<CanonPath, Vec<LineStatus>> = HashMap::new();
     let mut current_path: Option<CanonPath> = None;
