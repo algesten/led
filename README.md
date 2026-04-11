@@ -4,9 +4,9 @@ A lightweight, fast text editor for the terminal, written in Rust.
 
 led is built on a functional reactive programming (FRP) architecture where the model is a pure reducer, all side effects live in drivers, and the UI is a derived function of state. The result is a responsive editor with rich features and a small footprint.
 
-<!-- SCREENSHOT: hero — full editor view showing a Rust file with syntax highlighting,
-     side panel file browser, tab bar, status bar with git branch, and LSP diagnostics
-     in the gutter. This is the "first impression" shot. -->
+<p align="center">
+  <img src="https://github.com/user-attachments/assets/11f1c8a1-3e75-4c13-8dc7-2a811cb83dac" width="900" alt="led editor — Rust file with syntax highlighting, file browser, tabs, and status bar">
+</p>
 
 ## Features
 
@@ -63,18 +63,18 @@ npm install -g bash-language-server
 - **Format** — on-demand formatting with import sorting
 - **Progress** — spinner in status bar during long operations
 
-<!-- SCREENSHOT: lsp-completion — completion popup open on a Rust or TypeScript file,
-     showing fuzzy-filtered results with detail text -->
+<p align="center">
+  <img src="https://github.com/user-attachments/assets/381a53e0-fbc9-4a79-8d7a-e2faf08e6d6d" width="900" alt="LSP completion popup with fuzzy-filtered results">
+</p>
 
-<!-- SCREENSHOT: lsp-diagnostics — editor showing error/warning squiggles in the gutter
-     and a diagnostic message in the status bar -->
+<p align="center">
+  <img src="https://github.com/user-attachments/assets/1d7f0a75-2279-4ceb-a485-feca49792aa9" width="900" alt="LSP diagnostics with red squiggles and change bars in the gutter">
+</p>
 
 ### Syntax Highlighting
 
 Tree-sitter powered highlighting for Bash, C, C++, JavaScript, JSON, Make, Markdown, Python, Ruby, Rust, Swift, TOML, and TypeScript. Rainbow bracket coloring with matching bracket highlighting.
 
-<!-- SCREENSHOT: syntax — a file showing rich syntax highlighting and rainbow brackets,
-     ideally with a matching bracket pair visible -->
 
 ### Language Detection
 
@@ -116,8 +116,9 @@ The following mode strings are recognized in modelines:
 - **Buffer search** (`Ctrl+s`) — incremental search within the current file with match highlighting and wrap-around navigation.
 - **Find file** (`Ctrl+x Ctrl+f`) — fuzzy path completion for quick file opening.
 
-<!-- SCREENSHOT: file-search — project-wide search open in the side panel showing
-     results grouped by file, with a match previewed in the editor -->
+<p align="center">
+  <img src="https://github.com/user-attachments/assets/54a89264-b648-4511-a2f5-149f27cd4b8b" width="900" alt="Project search panel with results grouped by file">
+</p>
 
 ### File Browser
 
@@ -127,8 +128,6 @@ Side panel file tree with expand/collapse, file preview on selection, and backgr
 
 Current branch in the status bar. Per-file status (modified, staged, untracked) shown in the file browser. Line-level change indicators in the editor gutter.
 
-<!-- SCREENSHOT: git-gutter — editor gutter showing green (added) and blue (modified)
-     change indicators next to code, with the branch name visible in the status bar -->
 
 ### Session Persistence
 
