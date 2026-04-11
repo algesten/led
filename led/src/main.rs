@@ -188,4 +188,12 @@ async fn main() {
         DisableBracketedPaste
     )
     .ok();
+
+    // Force exit. Everything that had to be persisted (session, undo) was
+    // already flushed before `rx.await` returned. Don't wait politely for
+    // background `spawn_blocking` work (git scans, `gh` CLI, LSP shutdown
+    // handshakes) or the native file-watcher thread — otherwise the tokio
+    // current-thread runtime drop stalls until those finish, which is
+    // especially visible when quitting mid-startup.
+    std::process::exit(0);
 }
