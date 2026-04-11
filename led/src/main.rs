@@ -33,10 +33,12 @@ struct Cli {
     no_workspace: bool,
 
     /// After 5s, spam MoveUp for flamegraph profiling
+    #[cfg(debug_assertions)]
     #[arg(long)]
     flamegraph: bool,
 
     /// After 10s (LSP warm-up), type chars then C-a C-k in a loop
+    #[cfg(debug_assertions)]
     #[arg(long)]
     flamegraph2: bool,
 }
@@ -158,6 +160,7 @@ async fn main() {
             let actions_in: Stream<led_core::Action> = Stream::new();
             let (_state, _guards) = led::run(startup, actions_in.clone(), tx);
 
+            #[cfg(debug_assertions)]
             if cli.flamegraph {
                 let stream = actions_in.clone();
                 tokio::task::spawn_local(async move {
@@ -175,6 +178,7 @@ async fn main() {
                 });
             }
 
+            #[cfg(debug_assertions)]
             if cli.flamegraph2 {
                 let stream = actions_in.clone();
                 tokio::task::spawn_local(async move {
