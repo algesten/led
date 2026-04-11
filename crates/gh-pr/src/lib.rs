@@ -2,7 +2,8 @@ use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hasher};
 use std::process::Stdio;
 
-use led_core::git::{LineStatus, LineStatusKind};
+use led_core::IssueCategory;
+use led_core::git::LineStatus;
 use led_core::rx::Stream;
 use led_core::{CanonPath, PersistedContentHash, PrNumber, Row, UserPath};
 use tokio::sync::mpsc;
@@ -547,17 +548,17 @@ fn parse_unified_diff(diff: &str, root: &CanonPath) -> HashMap<CanonPath, Vec<Li
         if let Some(_added) = line.strip_prefix('+') {
             let row = new_line;
             let statuses = result.entry(path.clone()).or_default();
-            let kind = LineStatusKind::PrDiff;
+            let category = IssueCategory::PrDiff;
 
             if let Some(last) = statuses.last_mut() {
-                if last.kind == kind && last.rows.end == row {
+                if last.category == category && last.rows.end == row {
                     last.rows.end = row + 1;
                     new_line += 1;
                     continue;
                 }
             }
             statuses.push(LineStatus {
-                kind,
+                category,
                 rows: row..row + 1,
             });
             new_line += 1;

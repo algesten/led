@@ -304,13 +304,7 @@ pub fn handle_action(state: &mut AppState, action: Action) -> bool {
             }
         }
 
-        Action::NextIssue => {
-            lsp::navigate_issue(state, true);
-        }
-        Action::PrevIssue => {
-            lsp::navigate_issue(state, false);
-        }
-
+        // NextIssue/PrevIssue handled by `nav_of` (FRP combinator chain).
         _ => {}
     }
     true

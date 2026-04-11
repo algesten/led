@@ -18,6 +18,7 @@ mod kill_of;
 mod lsp_of;
 mod mov;
 mod movement_of;
+mod nav_of;
 mod process_of;
 mod save_of;
 mod search;
@@ -27,7 +28,7 @@ mod ui_actions_of;
 
 use led_config_file::ConfigFile;
 use led_core::CanonPath;
-use led_core::git::FileStatus;
+use led_core::IssueCategory;
 use led_core::keys::{Keymap, Keys};
 use led_core::rx::Stream;
 use led_core::theme::Theme;
@@ -348,9 +349,7 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
     let save_s = save_of::save_of(&raw_actions, &state);
     let jump_s = jump_of::jump_of(&raw_actions, &state);
     let find_file_s2 = find_file_of::find_file_of(&raw_actions, &state);
-
-    // NextIssue/PrevIssue stay in handle_action — navigate_to_position
-    // requires imperative state mutation (request_open, set active_tab, etc.)
+    let nav_s = nav_of::nav_of(&raw_actions, &state);
 
     // ── 2. Build up muts from driver input and derived streams ──
 
@@ -591,6 +590,7 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
     save_s.forward(&muts);
     jump_s.forward(&muts);
     find_file_s2.forward(&muts);
+    nav_s.forward(&muts);
     // Modal streams + unmigrated — all share the same actions_with_state snapshot.
     isearch_s.forward(&muts);
     lsp_code_action_picker_s.forward(&muts);
@@ -1627,7 +1627,7 @@ enum Mut {
     ),
     FindFileListed(led_state::FindFileState),
     GitFileStatuses {
-        statuses: HashMap<CanonPath, HashSet<FileStatus>>,
+        statuses: HashMap<CanonPath, HashSet<IssueCategory>>,
         branch: Option<String>,
     },
     GitLineStatuses {

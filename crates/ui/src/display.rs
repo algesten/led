@@ -5,9 +5,10 @@ use std::sync::Arc;
 
 use led_core::Doc;
 use led_core::PanelSlot;
-use led_core::git::{self, FileStatus, LineStatus};
+use led_core::git::{self, LineStatus};
 use led_core::wrap::{chars_to_string, compute_chunks, expand_tabs, find_sub_line};
 use led_core::{Col, PersistedContentHash, RedrawSeq, Row, SubLine};
+use led_core::{IssueCategory, directory_categories, resolve_display};
 use led_state::{AppState, BracketPair, Dimensions, EntryKind, HighlightSpan};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
@@ -96,6 +97,22 @@ impl PartialEq for DisplayInputs {
             && self.inlay_hints == other.inlay_hints
             && self.inlay_hints_enabled == other.inlay_hints_enabled
             && self.ruler_col == other.ruler_col
+    }
+}
+
+impl DisplayInputs {
+    /// Style for an issue category — looked up from per-style fields the
+    /// struct already carries.
+    fn category_style(&self, cat: IssueCategory) -> Style {
+        match cat {
+            IssueCategory::Unstaged => self.gutter_modified_style,
+            IssueCategory::StagedModified | IssueCategory::StagedNew => self.gutter_added_style,
+            IssueCategory::Untracked => self.gutter_added_style, // unused at line level
+            IssueCategory::PrComment => self.gutter_pr_comment_style,
+            IssueCategory::PrDiff => self.gutter_pr_diff_style,
+            IssueCategory::LspError => self.diagnostic_error_style,
+            IssueCategory::LspWarning => self.diagnostic_warning_style,
+        }
     }
 }
 
@@ -320,22 +337,23 @@ fn build_display_lines_inner(d: &DisplayInputs, line_buf: &mut String) -> Rc<Vec
             let is_last = chunk_idx == chunks.len() - 1;
             let mut spans: Vec<Span<'static>> = Vec::with_capacity(4);
 
-            // Gutter col 1: change marker (git diff > PR comment > PR diff)
+            // Gutter col 1: change marker.
+            // Pick the highest-precedence category covering this line:
+            // git (unstaged > staged) > PR comment > PR diff.
             let change_char = if chunk_idx == 0 {
-                let git = led_core::git::line_status_at(&d.git_line_statuses, line_idx);
+                let git_cat = git::line_category_at(&d.git_line_statuses, line_idx);
                 let pr_comment = d.pr_comment_lines.binary_search(&line_idx).is_ok();
-                let pr_diff =
-                    led_core::git::line_status_at(&d.pr_diff_line_statuses, line_idx).is_some();
-                match (git, pr_comment, pr_diff) {
-                    (Some(led_core::git::LineStatusKind::GitAdded), _, _) => {
-                        Span::styled("\u{258E}", d.gutter_added_style)
-                    }
-                    (Some(led_core::git::LineStatusKind::GitModified), _, _) => {
-                        Span::styled("\u{258E}", d.gutter_modified_style)
-                    }
-                    (_, true, _) => Span::styled("\u{258E}", d.gutter_pr_comment_style),
-                    (_, _, true) => Span::styled("\u{258E}", d.gutter_pr_diff_style),
-                    _ => Span::styled(" ", d.gutter_style),
+                let pr_diff_cat = git::line_category_at(&d.pr_diff_line_statuses, line_idx);
+
+                // Build a winner — git wins over PR. Among git, the line statuses
+                // already encode unstaged-wins-over-staged.
+                let winner: Option<IssueCategory> = git_cat
+                    .or_else(|| pr_comment.then_some(IssueCategory::PrComment))
+                    .or(pr_diff_cat);
+
+                match winner {
+                    Some(cat) => Span::styled("\u{258E}", d.category_style(cat)),
+                    None => Span::styled(" ", d.gutter_style),
                 }
             } else {
                 Span::styled(" ", d.gutter_style)
@@ -1288,7 +1306,7 @@ pub struct BrowserInputs {
     pub file_style: Style,
     pub selected_style: Style,
     pub selected_unfocused_style: Style,
-    pub git_file_statuses: HashMap<CanonPath, std::collections::HashSet<FileStatus>>,
+    pub git_file_statuses: HashMap<CanonPath, std::collections::HashSet<IssueCategory>>,
     pub git_modified_style: Style,
     pub git_added_style: Style,
     pub git_untracked_style: Style,
@@ -1425,12 +1443,12 @@ pub fn build_browser_lines(b: &BrowserInputs) -> Rc<Vec<Line<'static>>> {
             // Resolve git status for this entry
             let status_display = match &entry.kind {
                 EntryKind::File => {
-                    let statuses = b.git_file_statuses.get(&entry.path);
-                    statuses.and_then(git::resolve_display)
+                    let cats = b.git_file_statuses.get(&entry.path);
+                    cats.and_then(resolve_display)
                 }
                 EntryKind::Directory { .. } => {
-                    let statuses = git::directory_statuses(&b.git_file_statuses, &entry.path);
-                    git::resolve_display(&statuses)
+                    let cats = directory_categories(&b.git_file_statuses, &entry.path);
+                    resolve_display(&cats)
                 }
             };
 

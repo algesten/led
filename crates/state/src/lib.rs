@@ -1646,7 +1646,7 @@ pub struct KbdMacroState {
 #[derive(Debug, Clone, Default)]
 pub struct GitState {
     pub branch: Option<String>,
-    pub file_statuses: HashMap<CanonPath, HashSet<led_core::git::FileStatus>>,
+    pub file_statuses: HashMap<CanonPath, HashSet<led_core::IssueCategory>>,
     pub pending_file_scan: Versioned<()>,
     pub scan_seq: Versioned<()>,
     pub pr: Option<PrInfo>,
