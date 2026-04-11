@@ -980,7 +980,7 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
                 b.rebuild_entries();
                 s.pending_lists.set(initial_dirs);
                 s.git_mut().pending_file_scan.set(());
-                s.workspace = Some(Rc::new(workspace));
+                s.workspace = led_state::WorkspaceState::Loaded(Rc::new(workspace));
             }
             Mut::WorkspaceChanged { dirs } => {
                 if !dirs.is_empty() {

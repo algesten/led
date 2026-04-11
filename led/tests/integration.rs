@@ -2418,8 +2418,8 @@ fn two_instance_sync_after_save() {
     );
 
     // Verify A is primary, B is not
-    assert!(a.with_state(|s| s.workspace.as_ref().unwrap().primary));
-    assert!(!b.with_state(|s| s.workspace.as_ref().unwrap().primary));
+    assert!(a.with_state(|s| s.workspace.loaded().unwrap().primary));
+    assert!(!b.with_state(|s| s.workspace.loaded().unwrap().primary));
 
     let a_lines_before = a.with_state(|s| active_buf(s).unwrap().doc().line_count());
 
@@ -2682,6 +2682,7 @@ fn two_instance_no_args_browser_visible() {
         config_dir: cfg_user.clone(),
         test_lsp_server: None,
         test_gh_binary: None,
+        no_workspace: false,
     };
     let no_files_b = Startup {
         headless: true,
@@ -2693,6 +2694,7 @@ fn two_instance_no_args_browser_visible() {
         config_dir: cfg_user.clone(),
         test_lsp_server: None,
         test_gh_binary: None,
+        no_workspace: false,
     };
 
     let mut a = Instance::start(no_files_a);
@@ -2711,11 +2713,11 @@ fn two_instance_no_args_browser_visible() {
 
     // Both should have the workspace resolved and browser entries
     assert!(
-        a.with_state(|s| s.workspace.is_some()),
+        a.with_state(|s| s.workspace.is_loaded()),
         "A should have a workspace"
     );
     assert!(
-        b.with_state(|s| s.workspace.is_some()),
+        b.with_state(|s| s.workspace.is_loaded()),
         "B should have a workspace"
     );
 
@@ -5750,7 +5752,7 @@ fn git_status_clears_after_save_then_external_commit() {
         .with_arg(file_path)
         .run(vec![
             WaitFor(|s| {
-                s.workspace.is_some() && s.git.branch.is_some() && s.git.file_statuses.is_empty()
+                s.workspace.is_loaded() && s.git.branch.is_some() && s.git.file_statuses.is_empty()
             }),
             Do(InsertChar('X')),
             Do(Save),
@@ -5786,7 +5788,7 @@ fn git_line_statuses_clear_after_external_commit() {
         .with_arg(file_path)
         .run(vec![
             WaitFor(|s| {
-                s.workspace.is_some() && s.git.branch.is_some() && s.git.file_statuses.is_empty()
+                s.workspace.is_loaded() && s.git.branch.is_some() && s.git.file_statuses.is_empty()
             }),
             Do(InsertChar('X')),
             Do(Save),
@@ -6068,5 +6070,139 @@ fn gh_pr_outdated_comments_skipped() {
         pr.comments.is_empty(),
         "outdated comments should be skipped, got {:?}",
         pr.comments
+    );
+}
+
+// ── Standalone mode (--no-workspace) ──
+
+/// Standalone mode reaches the Running phase without ever loading a
+/// workspace: `WorkspaceState` stays `Standalone`, the sidebar is
+/// hidden, and the browser is pre-rooted at `start_dir`.
+#[test]
+fn no_workspace_starts_in_standalone_mode() {
+    let t = TestHarness::new()
+        .with_no_workspace()
+        .with_file("hello\n")
+        .run(vec![]);
+
+    assert_eq!(t.state.phase, led_state::Phase::Running);
+    assert!(
+        matches!(t.state.workspace, led_state::WorkspaceState::Standalone),
+        "workspace should be Standalone, got {:?}",
+        t.state.workspace
+    );
+    assert!(
+        !t.state.show_side_panel,
+        "sidebar should be hidden by default in standalone mode"
+    );
+    assert!(
+        t.state.browser.root.is_some(),
+        "browser root should be pre-seeded in standalone mode"
+    );
+    assert_eq!(
+        t.state
+            .buffers
+            .values()
+            .filter(|b| b.is_materialized())
+            .count(),
+        1,
+        "the argument file should still open"
+    );
+}
+
+/// Standalone mode must never touch the session database. Even inside a
+/// directory that looks like a git repo, and even across a quit, no
+/// `db.sqlite` file is created.
+#[test]
+fn no_workspace_never_writes_session_db() {
+    let t = TestHarness::new()
+        .with_no_workspace()
+        .with_file("commit message\n")
+        .run(vec![
+            Do(InsertChar('x')),
+            WaitFor(|s| s.active_tab.is_some()),
+            QuitAndWait,
+        ]);
+
+    let db_path = t.dirs.config.join("db.sqlite");
+    assert!(
+        !db_path.exists(),
+        "standalone mode must never create {}",
+        db_path.display()
+    );
+    let primary_dir = t.dirs.config.join("primary");
+    assert!(
+        !primary_dir.exists(),
+        "standalone mode must never create the primary lock dir at {}",
+        primary_dir.display()
+    );
+}
+
+/// Standalone mode never activates workspace-scoped features: git stays
+/// empty (no branch detected) and LSP never initializes.
+#[test]
+fn no_workspace_skips_git_and_lsp() {
+    // Put a real .git dir next to the file — without --no-workspace this
+    // would trigger git detection and surface a branch.
+    let t = TestHarness::new()
+        .with_no_workspace()
+        .with_file("fn main() {}\n")
+        .run(vec![TestStep::RunFn(Box::new(|dirs| {
+            std::fs::create_dir_all(dirs.workspace.join(".git")).expect("create .git");
+            std::fs::write(dirs.workspace.join(".git/HEAD"), "ref: refs/heads/main\n")
+                .expect("write HEAD");
+        }))]);
+
+    assert!(
+        t.state.git.branch.is_none(),
+        "git must stay dormant in standalone mode, got {:?}",
+        t.state.git.branch
+    );
+    assert!(
+        t.state.git.file_statuses.is_empty(),
+        "git file scan must not run in standalone mode"
+    );
+    assert!(
+        !t.state.workspace.is_loaded(),
+        "workspace must never transition to Loaded in standalone mode"
+    );
+}
+
+/// The sidebar can still be toggled on in standalone mode — it just
+/// shows a plain file browser rooted at `start_dir`, not a workspace
+/// view.
+#[test]
+fn no_workspace_sidebar_toggles_on() {
+    let t = TestHarness::new()
+        .with_no_workspace()
+        .with_file("content\n")
+        .run(vec![Do(ToggleSidePanel)]);
+
+    assert!(
+        t.state.show_side_panel,
+        "ToggleSidePanel should turn the sidebar on in standalone mode"
+    );
+    let browser_root = t.state.browser.root.as_ref().expect("browser root");
+    assert_eq!(
+        browser_root.as_path(),
+        t.state.startup.start_dir.as_path(),
+        "browser root should equal start_dir in standalone mode"
+    );
+}
+
+/// Normal mode (no `--no-workspace`) must still behave as before: the
+/// workspace loads, the sidebar defaults to visible, and git activity
+/// eventually surfaces a branch.
+#[test]
+fn normal_mode_still_loads_workspace() {
+    let t = TestHarness::new().with_file("hi\n").run(vec![]);
+
+    assert!(
+        t.state.workspace.is_loaded(),
+        "normal mode must transition to Loaded"
+    );
+    assert!(
+        t.state.show_side_panel,
+        "normal mode must default to showing the sidebar"
     );
 }

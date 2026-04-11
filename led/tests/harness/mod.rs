@@ -58,6 +58,7 @@ pub struct TestHarness {
     enable_watchers: bool,
     test_lsp_server: Option<PathBuf>,
     test_gh_binary: Option<PathBuf>,
+    no_workspace: bool,
 }
 
 impl TestHarness {
@@ -72,6 +73,7 @@ impl TestHarness {
             enable_watchers: false,
             test_lsp_server: None,
             test_gh_binary: None,
+            no_workspace: false,
         }
     }
 
@@ -89,7 +91,16 @@ impl TestHarness {
             enable_watchers: false,
             test_lsp_server: None,
             test_gh_binary: None,
+            no_workspace: false,
         }
+    }
+
+    /// Start in standalone mode (`--no-workspace`). No workspace is
+    /// loaded, no session read/written, no git/LSP.
+    #[allow(dead_code)]
+    pub fn with_no_workspace(mut self) -> Self {
+        self.no_workspace = true;
+        self
     }
 
     /// Set a fake LSP server binary for this test.
@@ -218,6 +229,7 @@ impl TestHarness {
             config_dir: UserPath::new(config_dir.clone()),
             test_lsp_server: self.test_lsp_server.map(UserPath::new),
             test_gh_binary: self.test_gh_binary.map(UserPath::new),
+            no_workspace: self.no_workspace,
         };
 
         let dirs = TestDirs {
@@ -364,7 +376,7 @@ async fn wait_for_condition(
                     buf_paths,
                     tab_paths,
                     resume,
-                    s.workspace.as_ref().map(|w| w.primary),
+                    s.workspace.loaded().map(|w| w.primary),
                 )
             } else {
                 "no state".to_string()

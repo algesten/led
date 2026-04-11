@@ -109,7 +109,7 @@ pub fn trigger_search(state: &mut AppState) {
 
     let root = state
         .workspace
-        .as_ref()
+        .loaded()
         .map(|w| w.root.clone())
         .unwrap_or_else(|| (*state.startup.start_dir).clone());
 
@@ -605,7 +605,7 @@ fn replace_selected(state: &mut AppState) {
 
         let root = state
             .workspace
-            .as_ref()
+            .loaded()
             .map(|w| w.root.clone())
             .unwrap_or_else(|| (*state.startup.start_dir).clone());
 
@@ -674,7 +674,7 @@ fn unreplace_selected(state: &mut AppState) {
     } else {
         let root = state
             .workspace
-            .as_ref()
+            .loaded()
             .map(|w| w.root.clone())
             .unwrap_or_else(|| (*state.startup.start_dir).clone());
 

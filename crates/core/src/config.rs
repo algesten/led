@@ -39,4 +39,21 @@ pub struct Startup {
 
     /// Override the `gh` CLI binary path (testing only).
     pub test_gh_binary: Option<UserPath>,
+
+    /// Standalone (no-workspace) mode. Intended for `$EDITOR` use — e.g.
+    /// `EDITOR="led --no-workspace"` for git commit messages and similar
+    /// single-file edits where loading the surrounding project is wrong.
+    ///
+    /// In this mode:
+    /// - No git root is detected; no workspace is loaded.
+    /// - `AppState.workspace` is `WorkspaceState::Standalone` and never
+    ///   transitions to `Loaded`.
+    /// - No session is read or written (the DB is not opened, no flock).
+    /// - No recursive watcher is registered on a project root.
+    /// - Git/LSP/find-in-files stay dormant (they key on
+    ///   `WorkspaceState::Loaded`).
+    /// - The sidebar is hidden on startup but can be toggled on; when
+    ///   shown, the file browser is rooted at `start_dir`, not a
+    ///   workspace root.
+    pub no_workspace: bool,
 }

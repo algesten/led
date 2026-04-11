@@ -1795,12 +1795,56 @@ pub struct LspProgress {
     pub message: Option<String>,
 }
 
+// ── Workspace state ──
+
+/// Three-way state of the workspace.
+///
+/// `Option<Workspace>` would be ambiguous: `None` could mean "not yet
+/// loaded" OR "intentionally absent". This enum names both cases so
+/// every consumer has to decide which it cares about, and the compiler
+/// catches any site that forgets to handle `Standalone`.
+#[derive(Debug, Clone, Default)]
+pub enum WorkspaceState {
+    /// Pre-Init: the workspace driver has not yet reported. Transient
+    /// state on startup. Consumers should wait.
+    #[default]
+    Loading,
+    /// `startup.no_workspace` is set — e.g. `EDITOR="led --no-workspace"`
+    /// for git commit messages. No workspace will ever load. Git, LSP,
+    /// session persistence, and the workspace root watcher are all
+    /// deliberately inactive. The file browser is rooted at
+    /// `startup.start_dir` instead (see `AppState::new`).
+    Standalone,
+    /// Normal mode: workspace has been resolved (git root detected,
+    /// primary lock acquired, session loaded).
+    Loaded(Rc<Workspace>),
+}
+
+impl WorkspaceState {
+    /// The loaded workspace, if any. Returns `None` for both `Loading`
+    /// and `Standalone`. Use pattern matching directly when the
+    /// distinction matters.
+    pub fn loaded(&self) -> Option<&Rc<Workspace>> {
+        match self {
+            WorkspaceState::Loaded(w) => Some(w),
+            _ => None,
+        }
+    }
+
+    pub fn is_loaded(&self) -> bool {
+        matches!(self, WorkspaceState::Loaded(_))
+    }
+}
+
 // ── App state ──
 
 #[derive(Debug, Clone, Default)]
 pub struct AppState {
     pub startup: Arc<Startup>,
-    pub workspace: Option<Rc<Workspace>>,
+    /// Workspace lifecycle state. `None` is not representable —
+    /// see `WorkspaceState` for the three distinct cases (Loading,
+    /// Standalone, Loaded).
+    pub workspace: WorkspaceState,
     pub config_keys: Option<ConfigFile<Keys>>,
     pub config_theme: Option<ConfigFile<Theme>>,
     pub keymap: Option<Rc<Keymap>>,
@@ -1863,6 +1907,26 @@ pub struct AppState {
 
 impl AppState {
     pub fn new(startup: Startup) -> Self {
+        // Standalone mode (`--no-workspace`) pre-seeds the three bits of
+        // state that would otherwise be filled in by the workspace driver
+        // or session restore: workspace stays `Standalone` forever, the
+        // sidebar is hidden (but toggleable), and the file browser is
+        // rooted at `start_dir` so that toggling the sidebar shows a
+        // plain file browser instead of nothing.
+        if startup.no_workspace {
+            let browser = FileBrowserState {
+                root: Some((*startup.start_dir).clone()),
+                ..Default::default()
+            };
+            return Self {
+                startup: Arc::new(startup),
+                workspace: WorkspaceState::Standalone,
+                show_side_panel: false,
+                browser: Rc::new(browser),
+                ..Default::default()
+            };
+        }
+
         Self {
             startup: Arc::new(startup),
             show_side_panel: true,

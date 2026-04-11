@@ -161,7 +161,7 @@ pub fn run(
     state.on(move |opt: Option<&Rc<AppState>>| {
         if let Some(s) = opt {
             if s.phase == led_state::Phase::Exiting {
-                let needs_save = s.workspace.as_ref().is_some_and(|w| w.primary);
+                let needs_save = s.workspace.loaded().is_some_and(|w| w.primary);
                 if s.session.saved || !needs_save {
                     if let Some(tx) = quit_tx.take() {
                         let _ = tx.send(());

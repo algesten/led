@@ -27,6 +27,11 @@ struct Cli {
     #[arg(long)]
     reset_config: bool,
 
+    /// Standalone mode: do not load a workspace. No git/LSP/session/watchers.
+    /// Intended for `EDITOR="led --no-workspace"` single-file editing.
+    #[arg(long)]
+    no_workspace: bool,
+
     /// After 5s, spam MoveUp for flamegraph profiling
     #[arg(long)]
     flamegraph: bool,
@@ -127,6 +132,7 @@ async fn main() {
         config_dir,
         test_lsp_server: None,
         test_gh_binary: None,
+        no_workspace: cli.no_workspace,
     };
 
     let local = tokio::task::LocalSet::new();

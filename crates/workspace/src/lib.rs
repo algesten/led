@@ -187,6 +187,23 @@ pub fn driver(out: Stream<WorkspaceOut>, file_watcher: Arc<FileWatcher>) -> Stre
                             let _ = result_tx.send(WorkspaceIn::SessionSaved).await;
                         }
                         WorkspaceOut::Init { startup } => {
+                            // Standalone mode (`--no-workspace`): deliberately
+                            // skip ALL workspace side-effects. No git root
+                            // detection, no flock, no DB, no watchers, and
+                            // crucially no `Workspace` event — so AppState
+                            // stays `WorkspaceState::Standalone` forever and
+                            // every consumer guarded on `is_loaded()` stays
+                            // dormant. We still emit `SessionRestored(None)`
+                            // + `WatchersReady` so the model's phase machine
+                            // advances Init → Running (see session_of.rs).
+                            if startup.no_workspace {
+                                if result_tx.send(WorkspaceIn::SessionRestored { session: None }).await.is_err() {
+                                    break;
+                                }
+                                let _ = result_tx.send(WorkspaceIn::WatchersReady).await;
+                                continue;
+                            }
+
                             let dir = CanonPath::clone(&startup.start_dir);
 
                             let root = find_git_root(&dir);

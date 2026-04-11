@@ -62,11 +62,12 @@ pub fn derived(state: Stream<Rc<AppState>>, git_activity: Stream<()>) -> Derived
         .map(|startup| WorkspaceOut::Init { startup })
         .stream();
 
-    // Session save: triggered once when quit transitions to true (primary only)
+    // Session save: triggered once when quit transitions to true (primary only).
+    // Standalone mode has no workspace → naturally skipped.
     let session_save = state
         .dedupe_by(|s| s.phase == Phase::Exiting)
         .filter(|s| s.phase == Phase::Exiting)
-        .filter(|s| s.workspace.as_ref().is_some_and(|w| w.primary))
+        .filter(|s| s.workspace.loaded().is_some_and(|w| w.primary))
         .map(|s| {
             let buffers: Vec<SessionBuffer> = s
                 .tabs
@@ -79,7 +80,7 @@ pub fn derived(state: Stream<Rc<AppState>>, git_activity: Stream<()>) -> Derived
                         return None;
                     }
                     let canon = b.path().unwrap();
-                    let ws = s.workspace.as_ref().unwrap();
+                    let ws = s.workspace.loaded().unwrap();
                     let file_path = canon.to_user_path(&ws.root, &ws.user_root);
                     Some(SessionBuffer {
                         file_path,
@@ -168,7 +169,7 @@ pub fn derived(state: Stream<Rc<AppState>>, git_activity: Stream<()>) -> Derived
     sync_check.forward(&workspace_out);
 
     let config_file_out = state
-        .filter_map(|s| s.workspace.clone())
+        .filter_map(|s| s.workspace.loaded().cloned())
         .dedupe()
         .map(|w| ConfigDir {
             config: w.config.clone(),
@@ -545,15 +546,13 @@ pub fn derived(state: Stream<Rc<AppState>>, git_activity: Stream<()>) -> Derived
         })
         .stream();
 
-    // Git: emit ScanFiles after timer fires (git_scan_seq bumped by handle_timer)
+    // Git: emit ScanFiles after timer fires (git_scan_seq bumped by handle_timer).
+    // Standalone mode stays dormant — `loaded()` returns None.
     let git_file_scan = state
         .dedupe_by(|s| s.git.scan_seq.version())
         .filter(|s| s.git.scan_seq.version() > 0)
-        .filter(|s| s.workspace.is_some())
-        .map(|s| {
-            let root = s.workspace.as_ref().unwrap().root.clone();
-            led_git::GitOut::ScanFiles { root }
-        })
+        .filter_map(|s| s.workspace.loaded().map(|w| w.root.clone()))
+        .map(|root| led_git::GitOut::ScanFiles { root })
         .stream();
 
     git_file_timer.forward(&timers_out);
@@ -600,9 +599,10 @@ pub fn derived(state: Stream<Rc<AppState>>, git_activity: Stream<()>) -> Derived
 
     // ── LSP ──
 
-    // Init: emit when workspace root becomes available
+    // Init: emit when workspace root becomes available.
+    // Standalone mode stays in Loading/Standalone → LSP never starts.
     let lsp_init = state
-        .filter_map(|s| s.workspace.clone())
+        .filter_map(|s| s.workspace.loaded().cloned())
         .dedupe()
         .map(|w| LspOut::Init {
             root: w.root.clone(),
@@ -856,18 +856,19 @@ pub fn derived(state: Stream<Rc<AppState>>, git_activity: Stream<()>) -> Derived
     pr_poll_set.forward(&timers_out);
     pr_poll_cancel.forward(&timers_out);
 
-    // PR poll command: triggered by pr_poll_seq (bumped by timer handler)
+    // PR poll command: triggered by pr_poll_seq (bumped by timer handler).
+    // Standalone mode has no workspace → dormant.
     let gh_pr_poll = state
         .dedupe_by(|s| s.git.pr_poll_seq.version())
         .filter(|s| s.git.pr_poll_seq.version() > 0)
         .filter(|s| s.git.pr.is_some())
-        .filter(|s| s.workspace.is_some())
+        .filter(|s| s.workspace.is_loaded())
         .map(|s| {
             let pr = s.git.pr.as_ref().unwrap();
             led_gh_pr::GhPrOut::PollPr {
                 api_endpoint: pr.api_endpoint.clone(),
                 etag: pr.etag.clone(),
-                root: s.workspace.as_ref().unwrap().root.clone(),
+                root: s.workspace.loaded().unwrap().root.clone(),
             }
         })
         .stream();
@@ -902,10 +903,11 @@ pub fn derived(state: Stream<Rc<AppState>>, git_activity: Stream<()>) -> Derived
 }
 
 /// Build a `LoadPr` driver command from app state, when both branch and
-/// workspace root are available. Returns `None` otherwise.
+/// workspace root are available. Returns `None` otherwise (including in
+/// standalone mode, where `workspace.loaded()` is None).
 fn load_pr_command(s: Rc<AppState>) -> Option<led_gh_pr::GhPrOut> {
     let branch = s.git.branch.clone()?;
-    let root = s.workspace.as_ref()?.root.clone();
+    let root = s.workspace.loaded()?.root.clone();
     Some(led_gh_pr::GhPrOut::LoadPr { branch, root })
 }
 

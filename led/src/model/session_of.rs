@@ -113,8 +113,13 @@ pub fn session_of(workspace_in: &Stream<WI>, state: &Stream<Rc<AppState>>) -> St
         .map(|sd| Mut::SetActiveTabOrder(sd.active_tab_order))
         .stream();
 
+    // Standalone mode initializes `show_side_panel` in `AppState::new`
+    // (hidden by default, user-toggleable). Don't let the session-restore
+    // default (`true`, from a `None` session) clobber it.
     let show_side_panel_s = session_s
-        .map(|sd| Mut::SetShowSidePanel(sd.show_side_panel))
+        .sample_combine(state)
+        .filter(|(_, s)| !s.startup.no_workspace)
+        .map(|(sd, _)| Mut::SetShowSidePanel(sd.show_side_panel))
         .stream();
 
     let positions_s = session_s

@@ -5,10 +5,14 @@ use led_state::{AppState, FindFileMode, FindFileState};
 
 // ── Path helpers ──
 
-/// Convert a CanonPath to a UserPath for display, using the workspace root mapping.
+/// Convert a CanonPath to a UserPath for display, using the workspace root
+/// mapping when available, or falling back to the startup dir in standalone
+/// mode (where there is no workspace).
 fn canon_to_user(state: &AppState, path: &CanonPath) -> UserPath {
-    let ws = state.workspace.as_ref().unwrap();
-    path.to_user_path(&ws.root, &ws.user_root)
+    match state.workspace.loaded() {
+        Some(ws) => path.to_user_path(&ws.root, &ws.user_root),
+        None => path.to_user_path(&state.startup.start_dir, &state.startup.user_start_dir),
+    }
 }
 
 fn abbreviate_home(path: &str) -> String {
