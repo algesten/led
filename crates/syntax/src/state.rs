@@ -1,17 +1,17 @@
 use std::ops::Range;
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use tree_sitter::{InputEdit, Parser, Query, Tree};
 
-use led_core::{Col, Doc, EditOp, Row};
+use led_core::path::PathChain;
+use led_core::{Col, Doc, EditOp, LanguageId, Row};
 
 use crate::bracket;
 use crate::config::*;
 use crate::highlight::collect_highlights;
 use crate::indent;
 use crate::injection::{self, InjectionLayer, QueryCache};
-use crate::language::{lang_entry_for_name, lang_for_ext, lang_for_filename};
+use crate::language::{LangEntry, lang_entry_for_id, lang_entry_for_name};
 use crate::modeline::detect_language_from_modeline;
 use crate::parse::parse_doc;
 use led_state::HighlightSpan;
@@ -34,7 +34,15 @@ pub struct SyntaxState {
 }
 
 impl SyntaxState {
-    pub fn from_path_and_doc(path: &Path, doc: &dyn Doc) -> Option<Self> {
+    /// Build syntax state from a precomputed `LanguageId`, with modeline
+    /// detection from the doc taking priority.
+    ///
+    /// This is the production entry point — the buffer constructor
+    /// pre-resolves language via `LanguageId::from_chain` and the
+    /// driver passes it in. Modeline still wins because it's
+    /// doc-content-aware (e.g. a `# vim: set ft=ruby :` line in a
+    /// `.profile` file).
+    pub fn from_language_and_doc(language: Option<LanguageId>, doc: &dyn Doc) -> Option<Self> {
         let entry = detect_language_from_modeline(
             |i| {
                 let mut buf = String::new();
@@ -44,19 +52,28 @@ impl SyntaxState {
             doc.line_count(),
         )
         .and_then(|name| lang_entry_for_name(&name))
-        .or_else(|| {
-            symlink_chain(path).iter().find_map(|p| {
-                p.extension()
-                    .and_then(|e| e.to_str())
-                    .and_then(lang_for_ext)
-                    .or_else(|| {
-                        p.file_name()
-                            .and_then(|n| n.to_str())
-                            .and_then(lang_for_filename)
-                    })
-            })
-        })?;
+        .or_else(|| language.and_then(lang_entry_for_id))?;
+        Self::from_entry(entry, doc)
+    }
 
+    /// Walk `chain` for language detection, then build syntax state.
+    /// Used by call sites that have a `PathChain` but no precomputed
+    /// `LanguageId` (notably the sort-imports action).
+    pub fn from_chain_and_doc(chain: &PathChain, doc: &dyn Doc) -> Option<Self> {
+        Self::from_language_and_doc(LanguageId::from_chain(chain), doc)
+    }
+
+    /// Backward-compat wrapper for tests: walk the symlink chain
+    /// starting from `path` (so a symlink path's chain is honored), then
+    /// detect the language. Equivalent to what production used to do
+    /// before chain resolution moved into `BufferState::new`.
+    #[cfg(test)]
+    pub fn from_path_and_doc(path: &std::path::Path, doc: &dyn Doc) -> Option<Self> {
+        let chain = led_core::UserPath::new(path).resolve_chain();
+        Self::from_chain_and_doc(&chain, doc)
+    }
+
+    fn from_entry(entry: LangEntry, doc: &dyn Doc) -> Option<Self> {
         let mut parser = Parser::new();
         parser.set_language(&entry.language).ok()?;
 
@@ -384,35 +401,11 @@ impl SyntaxState {
     }
 }
 
-/// Walk a symlink chain, returning the original path followed by each hop's
-/// resolved target.  Stops when we reach a non-symlink or detect a cycle.
-fn symlink_chain(path: &Path) -> Vec<PathBuf> {
-    let mut chain = vec![path.to_path_buf()];
-    let mut current = path.to_path_buf();
-    loop {
-        match std::fs::read_link(&current) {
-            Ok(target) => {
-                let resolved = if target.is_relative() {
-                    current.parent().unwrap_or(Path::new(".")).join(&target)
-                } else {
-                    target
-                };
-                if chain.contains(&resolved) {
-                    break;
-                }
-                chain.push(resolved.clone());
-                current = resolved;
-            }
-            Err(_) => break,
-        }
-    }
-    chain
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use led_core::TextDoc;
+    use std::path::Path;
     use std::sync::Arc;
 
     fn make_doc(text: &str) -> Arc<dyn Doc> {
@@ -1112,6 +1105,71 @@ if (true) {
         assert!(
             SyntaxState::from_path_and_doc(path, &*doc).is_none(),
             "should return None when no detection method matches"
+        );
+    }
+
+    /// Regression: `led ~/.profile` should highlight as shell even when
+    /// `.profile` is a symlink to a regular file with a non-well-known
+    /// name (the typical dotfiles-repo layout). Before the fix, the
+    /// caller canonicalized the path before reaching syntax detection,
+    /// so only the resolved name (e.g. `profile`) was checked against
+    /// the well-known filename list, missing `.profile`.
+    #[cfg(unix)]
+    #[test]
+    fn well_known_filename_matched_via_display_path() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        // Target file with a non-well-known name (mimics dotfiles repo).
+        let target = tmp.path().join("profile");
+        std::fs::write(&target, "export FOO=bar\n").unwrap();
+        // Symlink with a well-known dotfile name.
+        let link = tmp.path().join(".profile");
+        symlink(&target, &link).unwrap();
+
+        // Canonical path resolves the symlink → "profile" (no leading dot).
+        let canon = std::fs::canonicalize(&link).unwrap();
+        assert_eq!(canon.file_name().unwrap(), "profile");
+
+        let doc = make_doc("export FOO=bar\n");
+
+        // With only the canonical path (degenerate chain), nothing
+        // matches: "profile" is not in the well-known filename list.
+        assert!(
+            SyntaxState::from_path_and_doc(&canon, &*doc).is_none(),
+            "canonical 'profile' should not match any well-known name"
+        );
+
+        // A real chain built from the symlink picks up `.profile`.
+        let chain = led_core::UserPath::new(link.clone()).resolve_chain();
+        let state = SyntaxState::from_chain_and_doc(&chain, &*doc);
+        assert!(
+            state.is_some(),
+            "symlinked '.profile' should be detected as shell"
+        );
+    }
+
+    /// The reverse case: passing the symlink path directly (without
+    /// canonicalizing first) must also work — the symlink chain walks
+    /// forward via `read_link`. This is the case `symlink_chain` was
+    /// designed to handle and we want to keep it working.
+    #[cfg(unix)]
+    #[test]
+    fn well_known_filename_matched_via_symlink_chain_forward() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let target = tmp.path().join("profile");
+        std::fs::write(&target, "export FOO=bar\n").unwrap();
+        let link = tmp.path().join(".profile");
+        symlink(&target, &link).unwrap();
+
+        let doc = make_doc("export FOO=bar\n");
+        // Pass the (non-canonical) symlink path — `.profile` matches
+        // directly via `lang_for_filename`.
+        assert!(
+            SyntaxState::from_path_and_doc(&link, &*doc).is_some(),
+            "non-canonical '.profile' should be detected as shell"
         );
     }
 }

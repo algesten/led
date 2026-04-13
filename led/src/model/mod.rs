@@ -29,11 +29,11 @@ mod sync_of;
 mod ui_actions_of;
 
 use led_config_file::ConfigFile;
-use led_core::CanonPath;
 use led_core::IssueCategory;
 use led_core::keys::{Keymap, Keys};
 use led_core::rx::Stream;
 use led_core::theme::Theme;
+use led_core::{CanonPath, UserPath};
 
 use led_core::{Action, Alert, Doc, PanelSlot};
 use led_state::{AppState, BracketPair, BufferState, Dimensions, HighlightSpan, Phase};
@@ -314,11 +314,19 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
         .map(Mut::SetActiveTab)
         .stream();
 
+    // Combinator does all the work: filter out already-open buffers, then
+    // pre-build a fully configured BufferState (chain resolved, language
+    // detected, create_if_missing set) so the reducer is mechanical.
+    // CLAUDE.md Principle 1.
     let resume_ensure_tabs_s = resume_complete_s.flat_map(|s| {
         s.startup
-            .arg_paths
+            .arg_user_paths
             .iter()
-            .map(|p| Mut::EnsureTab(p.clone(), true))
+            .filter(|u| !s.buffers.contains_key(&u.canonicalize()))
+            .map(|u| {
+                let buf = BufferState::new(u.clone()).with_create_if_missing(true);
+                Mut::EnsureTab(Rc::new(buf))
+            })
             .collect::<Vec<_>>()
     });
 
@@ -670,17 +678,10 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
             Mut::SetFocus(focus) => {
                 s.focus = focus;
             }
-            Mut::EnsureTab(path, create_if_missing) => {
-                if !s.tabs.iter().any(|t| *t.path() == path) {
-                    s.tabs.push_back(led_state::Tab::new(path.clone()));
-                }
-                if !s.buffers.contains_key(&path) {
-                    let mut buf = BufferState::new(path.clone());
-                    if create_if_missing {
-                        buf.set_create_if_missing(true);
-                    }
-                    s.buffers_mut().insert(path, Rc::new(buf));
-                }
+            Mut::EnsureTab(buf) => {
+                let canon = buf.path().expect("EnsureTab buffer has path").clone();
+                s.tabs.push_back(led_state::Tab::new(canon.clone()));
+                s.buffers_mut().insert(canon, buf);
             }
             Mut::BrowserReveal(dir) => {
                 let new_dirs = s.browser_mut().reveal(&dir);
@@ -693,7 +694,11 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
                 jump::record_jump(&mut s, pos);
             }
             Mut::RequestOpen(path) => {
-                request_open(&mut s, path, false);
+                // RequestOpen comes from internal drivers (jump, LSP go-to-def,
+                // nav) which only know canonical paths. Wrap as UserPath so the
+                // request_open signature is uniform; chain resolution becomes
+                // a no-op (degenerate chain) for these.
+                request_open(&mut s, UserPath::new(path.as_path()), false);
             }
             Mut::SetTabPendingCursor {
                 path,
@@ -738,8 +743,10 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
 
                 // Ensure buffer exists, then materialize
                 if !s.buffers.contains_key(&path) {
-                    s.buffers_mut()
-                        .insert(path.clone(), Rc::new(BufferState::new(path.clone())));
+                    s.buffers_mut().insert(
+                        path.clone(),
+                        Rc::new(BufferState::new_from_canon(path.clone())),
+                    );
                 }
                 if let Some(buf) = s.buf_mut(&path) {
                     buf.materialize(doc, false);
@@ -833,8 +840,10 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
             }
             Mut::GitLineStatuses { path, statuses } => {
                 if !s.buffers.contains_key(&path) {
-                    s.buffers_mut()
-                        .insert(path.clone(), Rc::new(BufferState::new(path.clone())));
+                    s.buffers_mut().insert(
+                        path.clone(),
+                        Rc::new(BufferState::new_from_canon(path.clone())),
+                    );
                 }
                 if let Some(buf) = s.buf_mut(&path) {
                     buf.set_git_line_statuses(statuses);
@@ -1125,8 +1134,10 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
             } => {
                 // Ensure buffer exists (create unmaterialized if needed)
                 if !s.buffers.contains_key(&path) {
-                    s.buffers_mut()
-                        .insert(path.clone(), Rc::new(BufferState::new(path.clone())));
+                    s.buffers_mut().insert(
+                        path.clone(),
+                        Rc::new(BufferState::new_from_canon(path.clone())),
+                    );
                 }
                 if let Some(buf) = s.buf_mut(&path) {
                     buf.offer_diagnostics(diagnostics, content_hash);
@@ -1134,8 +1145,10 @@ pub fn model(drivers: Drivers, init: AppState) -> Stream<Rc<AppState>> {
             }
             Mut::LspInlayHints { path, hints } => {
                 if !s.buffers.contains_key(&path) {
-                    s.buffers_mut()
-                        .insert(path.clone(), Rc::new(BufferState::new(path.clone())));
+                    s.buffers_mut().insert(
+                        path.clone(),
+                        Rc::new(BufferState::new_from_canon(path.clone())),
+                    );
                 }
                 if let Some(buf) = s.buf_mut(&path) {
                     buf.set_inlay_hints(hints);
@@ -1314,14 +1327,19 @@ pub(super) fn resolve_focus_slot(s: &AppState) -> PanelSlot {
     }
 }
 
-/// Ensure a buffer entry exists for `path`. If the buffer is not yet materialized,
+/// Ensure a buffer entry exists for `user`. If the buffer is not yet materialized,
 /// the unified materialization stream in derived will emit `DocStoreOut::Open`.
-pub(crate) fn request_open(s: &mut AppState, path: CanonPath, create_if_missing: bool) {
+///
+/// Takes a `UserPath` rather than `CanonPath` so the buffer constructor
+/// can walk the symlink chain for language detection (needed when the
+/// user types a symlinked dotfile name like `~/.profile`).
+pub(crate) fn request_open(s: &mut AppState, user: UserPath, create_if_missing: bool) {
+    let path = user.canonicalize();
     if !s.tabs.iter().any(|t| *t.path() == path) {
         s.tabs.push_back(led_state::Tab::new(path.clone()));
     }
     if !s.buffers.contains_key(&path) {
-        let mut buf = BufferState::new(path.clone());
+        let mut buf = BufferState::new(user);
         buf.set_create_if_missing(create_if_missing);
         s.buffers_mut().insert(path, Rc::new(buf));
     } else if let Some(buf) = s.buf_mut(&path) {
@@ -1531,7 +1549,12 @@ enum Mut {
     SetPhase(Phase),
     SetActiveTab(CanonPath),
     SetFocus(PanelSlot),
-    EnsureTab(CanonPath, bool),
+    /// Insert a fully-constructed buffer (chain resolved + language
+    /// detected upstream) and a tab for it. Per CLAUDE.md Principle 1,
+    /// the reducer is mechanical: assignment only. Decisions
+    /// (filtering "already present", picking `create_if_missing`)
+    /// happen in the upstream combinator that produces this Mut.
+    EnsureTab(Rc<led_state::BufferState>),
     BrowserReveal(CanonPath),
     SetActiveTabOrder(Option<usize>),
     SetShowSidePanel(bool),

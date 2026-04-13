@@ -2676,6 +2676,7 @@ fn two_instance_no_args_browser_visible() {
         headless: true,
         enable_watchers: true,
         arg_paths: vec![],
+        arg_user_paths: vec![],
         arg_dir: None,
         start_dir: Arc::new(ws_canon.clone()),
         user_start_dir: UserPath::new(ws_canon.as_path()),
@@ -2688,6 +2689,7 @@ fn two_instance_no_args_browser_visible() {
         headless: true,
         enable_watchers: true,
         arg_paths: vec![],
+        arg_user_paths: vec![],
         arg_dir: None,
         start_dir: Arc::new(ws_canon.clone()),
         user_start_dir: UserPath::new(ws_canon.as_path()),
@@ -3209,6 +3211,100 @@ fn jump_truncates_forward_history() {
 }
 
 // ── Syntax highlighting tests ──
+
+/// Regression: `led ~/.profile` (a symlink to a non-well-known target
+/// like `~/dotfiles/profile`) must still be detected as shell. The chain
+/// resolution lives in `BufferState::new(user)` and walks the symlink
+/// chain so the well-known `.profile` name wins over the resolved
+/// `profile` filename.
+#[cfg(unix)]
+#[test]
+fn symlinked_dotfile_gets_shell_syntax_highlighting() {
+    use led_core::LanguageId;
+
+    // Mirror `led ~/.profile` exactly: the symlink is the ONLY arg.
+    // The target file is written but not opened directly.
+    let t = TestHarness::new()
+        .with_target_only_file("profile_target", "export FOO=bar\n# comment\n")
+        .with_symlink(".profile", "profile_target")
+        .run(vec![WaitFor(|s| {
+            s.active_tab
+                .as_ref()
+                .and_then(|p| s.buffers.get(p))
+                .is_some_and(|b| !b.syntax_highlights().is_empty())
+        })]);
+
+    let b = buf(&t);
+    // Highlights populated → tree-sitter detected a language for this buffer.
+    assert!(
+        !b.syntax_highlights().is_empty(),
+        "expected syntax highlights on symlinked .profile"
+    );
+    // The pre-resolved language was Bash (driven by the symlink name).
+    assert_eq!(b.language(), Some(LanguageId::Bash));
+    // Buffer carries the full chain (user-typed name first, canonical last).
+    let chain = b.path_chain();
+    assert!(
+        chain.user.as_path().ends_with(".profile"),
+        "user path should end with .profile, got {:?}",
+        chain.user.as_path()
+    );
+    assert_eq!(
+        chain.resolved.as_path().file_name().unwrap(),
+        "profile_target",
+        "resolved path should point at the target file"
+    );
+}
+
+/// Regression: the production bug was that `led ~/.profile`, on the
+/// second invocation, reads the session DB which only stores canonical
+/// paths. The resume combinator would rebuild buffers from those
+/// canonical paths — losing the `.profile` symlink name and yielding
+/// `language = None`.
+///
+/// Fix: when session restore finds a pending_open, look in
+/// `arg_user_paths` for a matching UserPath (one that canonicalizes to
+/// the same path) and use it for chain resolution.
+#[cfg(unix)]
+#[test]
+fn symlinked_dotfile_language_survives_session_restore() {
+    use led_core::LanguageId;
+
+    // Run 1: open the symlink, quit. Session DB now contains the
+    // canonical path (/.../workspace/profile_target).
+    let t = TestHarness::new()
+        .with_target_only_file("profile_target", "export FOO=bar\n")
+        .with_symlink(".profile", "profile_target")
+        .run(vec![
+            WaitFor(|s| {
+                s.active_tab
+                    .as_ref()
+                    .and_then(|p| s.buffers.get(p))
+                    .is_some_and(|b| !b.syntax_highlights().is_empty())
+            }),
+            Do(Quit),
+            WaitFor(|s| s.session.saved),
+        ]);
+    let dir = t.dirs.root.clone();
+    drop(t);
+
+    // Run 2: reuse same dir, pass the symlink as arg again. Session
+    // restore sees the canonical; the combinator must find `.profile`
+    // in arg_user_paths and rebuild the chain from there.
+    let symlink_path = dir.join("workspace").join(".profile");
+    let t2 = TestHarness::with_dir(dir)
+        .with_arg(symlink_path)
+        .run(vec![WaitFor(|s| {
+            s.active_tab
+                .as_ref()
+                .and_then(|p| s.buffers.get(p))
+                .is_some_and(|b| !b.syntax_highlights().is_empty())
+        })]);
+
+    let b = buf(&t2);
+    assert_eq!(b.language(), Some(LanguageId::Bash));
+    assert!(b.path_chain().user.as_path().ends_with(".profile"));
+}
 
 #[test]
 fn syntax_highlights_rust_file() {

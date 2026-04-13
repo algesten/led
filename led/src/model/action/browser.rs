@@ -116,7 +116,11 @@ pub(super) fn handle_browser_open(state: &mut AppState) {
                 return;
             }
             close_preview(state);
-            super::super::request_open(state, entry.path.clone(), true);
+            // Browser entries come from the workspace driver as CanonPath
+            // (already symlink-resolved). Wrap as UserPath — chain
+            // resolution becomes a no-op. Recovering individual symlink
+            // entries from the workspace listing is a separate concern.
+            super::super::request_open(state, led_core::UserPath::new(entry.path.as_path()), true);
             state.active_tab = Some(entry.path.clone());
             state.focus = PanelSlot::Main;
         }

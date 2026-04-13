@@ -441,6 +441,7 @@ pub fn derived(state: Stream<Rc<AppState>>, git_activity: Stream<()>) -> Derived
                     };
                     Some(SyntaxOut::BufferChanged {
                         path,
+                        language: b.language(),
                         doc: b.doc().clone(),
                         version: b.version(),
                         edit_ops,
@@ -478,6 +479,7 @@ pub fn derived(state: Stream<Rc<AppState>>, git_activity: Stream<()>) -> Derived
             let buffer_height = s.dims.map_or(50, |d| d.buffer_height());
             Some(SyntaxOut::BufferChanged {
                 path,
+                language: buf.language(),
                 doc: buf.doc().clone(),
                 version: buf.version(),
                 edit_ops: vec![],
@@ -640,6 +642,7 @@ pub fn derived(state: Stream<Rc<AppState>>, git_activity: Stream<()>) -> Derived
                 if let Some(buf) = s.buffers.values().find(|b| b.path() == Some(&path)) {
                     events.push(LspOut::BufferOpened {
                         path,
+                        language: buf.language(),
                         doc: buf.doc().clone(),
                     });
                 }

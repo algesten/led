@@ -18,6 +18,13 @@ pub struct Startup {
     /// Files to open on startup (from CLI args). Immutable after construction.
     pub arg_paths: Vec<CanonPath>,
 
+    /// User-typed CLI arg paths, parallel to `arg_paths`. Preserves the
+    /// original (pre-canonicalization) names so the buffer constructor
+    /// can resolve their full symlink chain — needed for correct syntax
+    /// and LSP language detection on symlinked dotfiles like
+    /// `~/.profile -> ~/dotfiles/profile`.
+    pub arg_user_paths: Vec<UserPath>,
+
     /// Directory derived from the command line, or the directory
     /// where the binary started.
     pub start_dir: Arc<CanonPath>,

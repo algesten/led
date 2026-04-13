@@ -1314,6 +1314,7 @@ dependencies = [
  "notify",
  "ropey",
  "serde",
+ "tempfile",
  "tokio",
  "toml",
 ]
@@ -1412,6 +1413,7 @@ dependencies = [
  "log",
  "regex",
  "ropey",
+ "tempfile",
  "tokio",
  "tree-sitter",
  "tree-sitter-bash",

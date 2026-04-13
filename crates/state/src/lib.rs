@@ -12,9 +12,9 @@ use led_core::git::LineStatus;
 use led_core::keys::{Keymap, Keys};
 use led_core::theme::Theme;
 use led_core::{
-    CanonPath, ChangeSeq, CharOffset, Col, Doc, DocVersion, EditOp, InertDoc, PanelSlot,
-    PersistedContentHash, PrNumber, RedrawSeq, Row, Startup, SubLine, SyntaxSeq, UndoHistory,
-    UserPath, Versioned,
+    CanonPath, ChangeSeq, CharOffset, Col, Doc, DocVersion, EditOp, InertDoc, LanguageId,
+    PanelSlot, PathChain, PersistedContentHash, PrNumber, RedrawSeq, Row, Startup, SubLine,
+    SyntaxSeq, UndoHistory, UserPath, Versioned,
 };
 pub use led_workspace::SessionBuffer;
 pub use led_workspace::Workspace;
@@ -385,8 +385,15 @@ pub enum MaterializationState {
 
 #[derive(Clone)]
 pub struct BufferState {
-    // Identity
-    path: Option<CanonPath>,
+    // Identity — full symlink chain (user-typed name, intermediate
+    // symlink targets, final canonical path). Drives both syntax-color
+    // and LSP language detection.
+    path_chain: PathChain,
+
+    // Resolved language (computed once at construction via
+    // `LanguageId::from_chain`). `None` for files with no recognized
+    // extension or well-known filename. Drivers consume this directly.
+    language: Option<LanguageId>,
 
     // Content (InertDoc for non-materialized buffers)
     doc: Arc<dyn Doc>,
@@ -455,16 +462,36 @@ pub struct BufferState {
 }
 
 impl BufferState {
-    /// Create an unmaterialized buffer for the given path.
+    /// Create an unmaterialized buffer for a user-facing path.
+    ///
+    /// Resolves the symlink chain via [`UserPath::resolve_chain`] and
+    /// detects the language via [`LanguageId::from_chain`]. Both are
+    /// stored on the buffer for later use by the syntax and LSP drivers.
     /// Content is loaded later via `materialize()`.
-    pub fn new(path: CanonPath) -> Self {
+    pub fn new(user: UserPath) -> Self {
+        Self::from_chain(user.resolve_chain())
+    }
+
+    /// Create an unmaterialized buffer from a canonical path.
+    ///
+    /// Used by sites that only have a `CanonPath` to begin with —
+    /// typically driver-originated paths (gh PR diffs, git status, LSP
+    /// diagnostics, file-search results, session restore). Wraps the
+    /// path in a degenerate `PathChain` (no intermediates).
+    pub fn new_from_canon(canon: CanonPath) -> Self {
+        Self::from_chain(PathChain::from_canon(canon))
+    }
+
+    fn from_chain(path_chain: PathChain) -> Self {
+        let language = LanguageId::from_chain(&path_chain);
         Self {
             doc: Arc::new(InertDoc),
             materialization: Cell::new(MaterializationState::Unmaterialized),
             version: DocVersion(0),
             saved_version: DocVersion(0),
             undo: UndoHistory::default(),
-            path: Some(path),
+            path_chain,
+            language,
             cursor_row: Cell::new(Row(0)),
             cursor_col: Cell::new(Col(0)),
             cursor_col_affinity: Cell::new(Col(0)),
@@ -498,10 +525,34 @@ impl BufferState {
         }
     }
 
+    /// Builder: enable `create_if_missing` for this buffer. Used when
+    /// pre-building buffers in combinators before they go into a
+    /// reducer.
+    pub fn with_create_if_missing(mut self, v: bool) -> Self {
+        self.create_if_missing = v;
+        self
+    }
+
     // ── Identity ──
 
+    /// Resolved canonical path of this buffer. Backwards-compatible
+    /// signature — wraps `Some(&self.path_chain.resolved)` so existing
+    /// call sites that handle `Option` continue to work.
     pub fn path(&self) -> Option<&CanonPath> {
-        self.path.as_ref()
+        Some(&self.path_chain.resolved)
+    }
+
+    /// Full symlink chain (user, intermediaries, resolved) used at
+    /// language-detection time.
+    pub fn path_chain(&self) -> &PathChain {
+        &self.path_chain
+    }
+
+    /// Resolved language for this buffer. Computed once at construction
+    /// from the path chain. `None` when the chain has no recognized
+    /// extension or well-known filename.
+    pub fn language(&self) -> Option<LanguageId> {
+        self.language
     }
 
     // ── Editing state ──
@@ -788,9 +839,13 @@ impl BufferState {
     }
 
     /// Save-as completed: docstore confirmed save to new path.
-    /// Same as save_completed but also updates path.
+    /// Same as save_completed but also updates path. The symlink chain
+    /// is rebuilt as a degenerate `PathChain::from_canon` — save-as
+    /// targets a fresh file, so any symlink history from the original
+    /// path no longer applies.
     pub fn save_as_completed(&mut self, doc: Arc<dyn Doc>, new_path: CanonPath) {
-        self.path = Some(new_path);
+        self.path_chain = PathChain::from_canon(new_path);
+        self.language = LanguageId::from_chain(&self.path_chain);
         self.save_completed(doc);
     }
 
@@ -1139,7 +1194,7 @@ impl BufferState {
         log::trace!(
             "diag: record_save_point hash={:#x} path={:?} undo_len={}",
             hash.0,
-            self.path,
+            self.path(),
             self.undo.entry_count(),
         );
         self.undo.insert_save_point(hash);
@@ -1156,7 +1211,7 @@ impl BufferState {
             log::trace!(
                 "diag: offer_diagnostics unmaterialized, accepting {} diags, path={:?}",
                 diags.len(),
-                self.path,
+                self.path(),
             );
             self.status.set_diagnostics(diags);
             return true;
@@ -1168,7 +1223,7 @@ impl BufferState {
                 "diag: offer_diagnostics FAST path, hash={:#x}, {} diags, path={:?}",
                 content_hash.0,
                 diags.len(),
-                self.path,
+                self.path(),
             );
             self.status.set_diagnostics(diags);
             return true;
@@ -1182,7 +1237,7 @@ impl BufferState {
                 my_hash.0,
                 diags.len(),
                 n_entries,
-                self.path,
+                self.path(),
             );
             let transformed = self.replay_diagnostics(diags, save_idx);
             self.status.set_diagnostics(transformed);
@@ -1192,7 +1247,7 @@ impl BufferState {
             "offer_diagnostics rejected: incoming={:?} buffer={:?} path={:?} n_diags={}",
             content_hash,
             self.doc.content_hash(),
-            self.path,
+            self.path(),
             diags.len()
         );
         false
@@ -1449,7 +1504,7 @@ impl BufferState {
 impl fmt::Debug for BufferState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("BufferState")
-            .field("path", &self.path)
+            .field("path", &self.path())
             .field("cursor_row", &self.cursor_row)
             .field("cursor_col", &self.cursor_col)
             .field("scroll_row", &self.scroll_row)
@@ -2087,7 +2142,7 @@ mod tests {
 
     fn make_buf(content: &str) -> BufferState {
         let path = led_core::UserPath::new("/tmp/test.rs").canonicalize();
-        let mut buf = BufferState::new(path);
+        let mut buf = BufferState::new_from_canon(path);
         let doc: Arc<dyn led_core::Doc> = Arc::new(
             led_core::TextDoc::from_reader(std::io::Cursor::new(content.as_bytes())).unwrap(),
         );

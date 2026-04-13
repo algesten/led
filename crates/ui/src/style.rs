@@ -492,13 +492,14 @@ mod tests {
 
         let test_path: CanonPath = UserPath::new("test.rs").canonicalize();
         let doc = TextDoc::from_reader("hello world\n".as_bytes()).unwrap();
-        let mut buf = BufferState::new(test_path.clone());
+        let mut buf = BufferState::new_from_canon(test_path.clone());
         buf.materialize(Arc::new(doc), false);
 
         let mut state = AppState::new(Startup {
             headless: true,
             enable_watchers: false,
             arg_paths: vec![],
+            arg_user_paths: vec![],
             arg_dir: None,
             start_dir: Arc::new(UserPath::new("/tmp").canonicalize()),
             user_start_dir: UserPath::new("/tmp"),

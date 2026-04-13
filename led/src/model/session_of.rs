@@ -160,13 +160,29 @@ pub fn session_of(workspace_in: &Stream<WI>, state: &Stream<Rc<AppState>>) -> St
         .map(|(_, s)| Mut::SetPendingLists(vec![(*s.startup.start_dir).clone()]))
         .stream();
 
-    // With pending opens: create tabs/buffers, set phase to Resuming
+    // With pending opens: create tabs/buffers, set phase to Resuming.
+    // Session entries are stored as canonical paths; the symlink chain
+    // normally can't be recovered. BUT — if the user re-invoked led
+    // with the same symlink arg (e.g. `led ~/.profile`), we can find a
+    // matching UserPath in `arg_user_paths` and use it to rebuild the
+    // chain. Otherwise fall back to `new_from_canon` (degenerate chain).
+    // All decisions stay in the combinator (Principle 1).
     let resume_tabs_s = session_s
         .filter(|sd| !sd.pending_opens.is_empty())
-        .flat_map(|sd| {
+        .sample_combine(state)
+        .flat_map(|(sd, s)| {
             sd.pending_opens
                 .iter()
-                .map(|p| Mut::EnsureTab(p.clone(), false))
+                .map(|p| {
+                    let buf = s
+                        .startup
+                        .arg_user_paths
+                        .iter()
+                        .find(|u| u.canonicalize() == *p)
+                        .map(|u| led_state::BufferState::new(u.clone()))
+                        .unwrap_or_else(|| led_state::BufferState::new_from_canon(p.clone()));
+                    Mut::EnsureTab(std::rc::Rc::new(buf))
+                })
                 .collect::<Vec<_>>()
         });
 
@@ -186,15 +202,22 @@ pub fn session_of(workspace_in: &Stream<WI>, state: &Stream<Rc<AppState>>) -> St
         .map(|_| Mut::SetPhase(Phase::Running))
         .stream();
 
-    // Without pending opens: ensure startup arg buffers + resolve focus
+    // Without pending opens: ensure startup arg buffers + resolve focus.
+    // Use arg_user_paths so the buffer constructor walks the symlink
+    // chain — needed for correct syntax/LSP detection on dotfile
+    // symlinks like `~/.profile`.
     let no_resume_arg_tabs_s = session_s
         .filter(|sd| sd.pending_opens.is_empty())
         .sample_combine(state)
         .flat_map(|(_, s)| {
             s.startup
-                .arg_paths
+                .arg_user_paths
                 .iter()
-                .map(|p| Mut::EnsureTab(p.clone(), true))
+                .filter(|u| !s.buffers.contains_key(&u.canonicalize()))
+                .map(|u| {
+                    let buf = led_state::BufferState::new(u.clone()).with_create_if_missing(true);
+                    Mut::EnsureTab(std::rc::Rc::new(buf))
+                })
                 .collect::<Vec<_>>()
         });
 

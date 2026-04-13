@@ -301,8 +301,7 @@ pub fn editing_of(
         .filter_map(|(_, s)| {
             let path = s.active_tab.clone()?;
             let buf = s.buffers.get(&path)?;
-            let file_path = buf.path()?;
-            let ss = led_syntax::SyntaxState::from_path_and_doc(file_path.as_path(), &**buf.doc())?;
+            let ss = led_syntax::SyntaxState::from_chain_and_doc(buf.path_chain(), &**buf.doc())?;
             let import_items = ss.imports(&**buf.doc());
             let (start_byte, end_byte, replacement) =
                 led_syntax::import::sort_imports_text(&**buf.doc(), &import_items)?;
@@ -333,12 +332,8 @@ pub fn editing_of(
                 .active_tab
                 .as_ref()
                 .and_then(|p| s.buffers.get(p))
-                .and_then(|buf| buf.path())
-                .and_then(|fp| {
-                    led_syntax::SyntaxState::from_path_and_doc(
-                        fp.as_path(),
-                        &**s.buffers.get(s.active_tab.as_ref()?).unwrap().doc(),
-                    )
+                .and_then(|buf| {
+                    led_syntax::SyntaxState::from_chain_and_doc(buf.path_chain(), &**buf.doc())
                 })
                 .map(|ss| {
                     let buf = s.buffers.get(s.active_tab.as_ref().unwrap()).unwrap();

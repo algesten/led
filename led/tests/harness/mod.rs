@@ -52,6 +52,13 @@ pub struct TestHarness {
     tmpdir: Option<TempDir>,
     reuse_dir: Option<PathBuf>,
     files: Vec<(String, String)>,
+    /// Files written to the workspace dir but NOT added to arg_paths.
+    /// Used for symlink targets and other setup files.
+    target_only_files: Vec<(String, String)>,
+    /// Symlinks to create in the workspace dir (link_name → target_name).
+    /// Created during `run()`, after files are written. The link name is
+    /// also added to arg_paths_raw so the test opens via the symlink.
+    symlinks: Vec<(String, String)>,
     arg_paths: Vec<PathBuf>,
     arg_dir: Option<PathBuf>,
     viewport: (u16, u16),
@@ -67,6 +74,8 @@ impl TestHarness {
             tmpdir: Some(TempDir::new().expect("create tmpdir")),
             reuse_dir: None,
             files: Vec::new(),
+            target_only_files: Vec::new(),
+            symlinks: Vec::new(),
             arg_paths: Vec::new(),
             arg_dir: None,
             viewport: (80, 24),
@@ -85,6 +94,8 @@ impl TestHarness {
             tmpdir: None,
             reuse_dir: Some(dir),
             files: Vec::new(),
+            target_only_files: Vec::new(),
+            symlinks: Vec::new(),
             arg_paths: Vec::new(),
             arg_dir: None,
             viewport: (80, 24),
@@ -150,6 +161,29 @@ impl TestHarness {
         self
     }
 
+    /// Create a symlink in the workspace dir (`link_name -> target_name`)
+    /// and add the symlink path to `arg_paths`. Use this to exercise
+    /// the same flow as `led ~/.profile` where the user opens via a
+    /// symlink and the buffer constructor must walk the chain to detect
+    /// the language.
+    #[cfg(unix)]
+    #[allow(dead_code)]
+    pub fn with_symlink(mut self, link_name: &str, target_name: &str) -> Self {
+        self.symlinks
+            .push((link_name.to_string(), target_name.to_string()));
+        self
+    }
+
+    /// Write a file to the workspace dir WITHOUT adding it as an arg path.
+    /// Use this for files that are only referenced (e.g. as a symlink
+    /// target) but not themselves opened.
+    #[allow(dead_code)]
+    pub fn with_target_only_file(mut self, name: &str, content: &str) -> Self {
+        self.target_only_files
+            .push((name.to_string(), content.to_string()));
+        self
+    }
+
     /// Enable file system watchers for this test (docstore + workspace).
     /// Only needed for tests that depend on external-change detection or
     /// cross-instance sync.
@@ -166,9 +200,13 @@ impl TestHarness {
     }
 
     pub fn run(self, steps: Vec<TestStep>) -> TestResult {
-        let file_count = self.files.len() + self.arg_paths.len();
+        // Symlinks share the canonical path of their target — they map to
+        // the same buffer, so don't double-count.
+        let file_count = self.files.len() + self.arg_paths.len() + self.symlinks.len();
         let files = self.files;
+        let target_only_files = self.target_only_files;
         let extra_args = self.arg_paths;
+        let symlinks = self.symlinks;
         let root = match (self.tmpdir, self.reuse_dir) {
             (Some(td), _) => td.keep(),
             (None, Some(d)) => d,
@@ -201,13 +239,33 @@ impl TestHarness {
                 path
             })
             .collect();
+        // Write target-only files (not added as args).
+        for (name, content) in &target_only_files {
+            let path = workspace_dir.join(name);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).expect("create parent dir");
+            }
+            std::fs::write(&path, content).expect("write target-only file");
+        }
+        // Create requested symlinks AFTER files are written. Each symlink
+        // path (not the target) is added to arg_paths_raw so the test
+        // exercises the same code path as `led ~/.profile`: the user-typed
+        // arg is the symlink, and the buffer constructor must walk the
+        // chain to detect language.
+        #[cfg(unix)]
+        for (link_name, target_name) in &symlinks {
+            let link = workspace_dir.join(link_name);
+            let target = workspace_dir.join(target_name);
+            std::os::unix::fs::symlink(&target, &link).expect("create symlink");
+            arg_paths_raw.push(link);
+        }
+        #[cfg(not(unix))]
+        let _ = symlinks; // No-op on non-unix.
         arg_paths_raw.extend(extra_args);
         let file_path = arg_paths_raw.first().cloned();
 
-        let arg_paths: Vec<CanonPath> = arg_paths_raw
-            .iter()
-            .map(|p| UserPath::new(p).canonicalize())
-            .collect();
+        let arg_user_paths: Vec<UserPath> = arg_paths_raw.iter().map(UserPath::new).collect();
+        let arg_paths: Vec<CanonPath> = arg_user_paths.iter().map(|u| u.canonicalize()).collect();
 
         let arg_dir = self.arg_dir.map(|d| UserPath::new(d).canonicalize());
         let start_dir = if let Some(ref dir) = arg_dir {
@@ -223,6 +281,7 @@ impl TestHarness {
             headless: true,
             enable_watchers: self.enable_watchers,
             arg_paths,
+            arg_user_paths,
             arg_dir,
             start_dir: Arc::new(start_dir.clone()),
             user_start_dir: UserPath::new(start_dir.as_path()),

@@ -465,6 +465,11 @@ struct LspManager {
     opened_docs: HashSet<CanonPath>,
     pending_opens: HashSet<CanonPath>,
     docs: HashMap<CanonPath, Arc<dyn Doc>>,
+    /// Per-buffer pre-resolved language. Populated on `BufferOpened`;
+    /// consulted by `server_for_path` and `send_did_open` so language
+    /// detection happens once (in `BufferState::new`) rather than on
+    /// every LSP call.
+    languages: HashMap<CanonPath, Option<LanguageId>>,
     doc_versions: HashMap<CanonPath, i32>,
     pending_code_actions: HashMap<CanonPath, Vec<CodeActionOrCommand>>,
     completion_items: Vec<lsp_types::CompletionItem>,
@@ -506,6 +511,7 @@ pub(crate) async fn run(
         opened_docs: HashSet::new(),
         pending_opens: HashSet::new(),
         docs: HashMap::new(),
+        languages: HashMap::new(),
         doc_versions: HashMap::new(),
         pending_code_actions: HashMap::new(),
         completion_items: Vec::new(),
@@ -562,10 +568,15 @@ impl LspManager {
             LspOut::Shutdown => {
                 self.shutdown_all().await;
             }
-            LspOut::BufferOpened { path, doc } => {
+            LspOut::BufferOpened {
+                path,
+                language,
+                doc,
+            } => {
                 self.docs.insert(path.clone(), doc);
-                self.ensure_server_for_path(&path);
-                self.send_did_open(&path);
+                self.languages.insert(path.clone(), language);
+                self.ensure_server_for_path(&path, language);
+                self.send_did_open(&path, language);
             }
             LspOut::BufferChanged {
                 path,
@@ -717,7 +728,8 @@ impl LspManager {
                 // Flush pending opens
                 let pending: Vec<CanonPath> = self.pending_opens.drain().collect();
                 for path in pending {
-                    self.send_did_open(&path);
+                    let lang = self.languages.get(&path).copied().flatten();
+                    self.send_did_open(&path, lang);
                 }
             }
             ManagerEvent::ServerError { error, not_found } => {
@@ -742,13 +754,12 @@ impl LspManager {
 
     // ── Server lifecycle ──
 
-    fn ensure_server_for_path(&mut self, path: &CanonPath) {
-        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-        let Some(config) = self.registry.config_for_extension(ext).cloned() else {
+    fn ensure_server_for_path(&mut self, _path: &CanonPath, language: Option<LanguageId>) {
+        let Some(language) = language else { return };
+        let Some(config) = self.registry.config_for_language(language).cloned() else {
             return;
         };
 
-        let language = config.language;
         if self.servers.contains_key(&language) || self.pending_starts.contains(&language) {
             return;
         }
@@ -784,9 +795,8 @@ impl LspManager {
     }
 
     fn server_for_path(&self, path: &CanonPath) -> Option<Arc<LanguageServer>> {
-        let ext = path.extension().and_then(|e| e.to_str())?;
-        let config = self.registry.config_for_extension(ext)?;
-        self.servers.get(&config.language).cloned()
+        let language = (*self.languages.get(path)?)?;
+        self.servers.get(&language).cloned()
     }
 
     async fn shutdown_all(&mut self) {
@@ -797,7 +807,7 @@ impl LspManager {
 
     // ── Document sync (full-text) ──
 
-    fn send_did_open(&mut self, path: &CanonPath) {
+    fn send_did_open(&mut self, path: &CanonPath, language: Option<LanguageId>) {
         if self.opened_docs.contains(path) {
             return;
         }
@@ -808,10 +818,7 @@ impl LspManager {
         let Some(uri) = uri_from_path(path) else {
             return;
         };
-        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-        let lang_id = LanguageId::from_extension(ext)
-            .map(|l| l.as_lsp_str())
-            .unwrap_or("plaintext");
+        let lang_id = language.map(|l| l.as_lsp_str()).unwrap_or("plaintext");
 
         let text = self
             .docs

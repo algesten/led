@@ -88,9 +88,10 @@ pub(crate) fn set_preview(
 
     // Ensure buffer placeholder exists for materialization.
     if !state.buffers.contains_key(&path) {
-        state
-            .buffers_mut()
-            .insert(path.clone(), Rc::new(BufferState::new(path.clone())));
+        state.buffers_mut().insert(
+            path.clone(),
+            Rc::new(BufferState::new_from_canon(path.clone())),
+        );
     }
 
     state.active_tab = Some(path);

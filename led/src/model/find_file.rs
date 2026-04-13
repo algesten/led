@@ -484,7 +484,10 @@ fn handle_enter_open(state: &mut AppState) {
                     deactivate_without_close_preview(state);
                 } else {
                     let path = comp.full.clone();
-                    super::request_open(state, path.clone(), true);
+                    // Completion was selected from the UI list — we don't
+                    // have the user-typed source, so wrap the canonical
+                    // path as UserPath (degenerate chain).
+                    super::request_open(state, UserPath::new(comp.full.as_path()), true);
                     state.active_tab = Some(path);
                     deactivate(state);
                 }
@@ -495,7 +498,8 @@ fn handle_enter_open(state: &mut AppState) {
 
     // Path B: no selection — check completions for exact match
     let expanded = expand_path(&ff.input);
-    let expanded_canon = UserPath::new(&expanded).canonicalize();
+    let expanded_user = UserPath::new(&expanded);
+    let expanded_canon = expanded_user.canonicalize();
     let input = ff.input.clone();
 
     // Find matching completion (clone to release borrow)
@@ -516,7 +520,11 @@ fn handle_enter_open(state: &mut AppState) {
                 deactivate_without_close_preview(state);
             } else {
                 let path = comp.full.clone();
-                super::request_open(state, path.clone(), true);
+                // The matched completion equals expanded_canon, so the
+                // user-typed source is `expanded_user` — pass it so the
+                // buffer constructor walks the symlink chain (catches
+                // dotfile names like `~/.profile`).
+                super::request_open(state, expanded_user.clone(), true);
                 state.active_tab = Some(path);
                 deactivate(state);
             }
@@ -529,7 +537,7 @@ fn handle_enter_open(state: &mut AppState) {
         if super::action::promote_preview(state, &expanded_canon) {
             deactivate_without_close_preview(state);
         } else {
-            super::request_open(state, expanded_canon.clone(), true);
+            super::request_open(state, expanded_user.clone(), true);
             state.active_tab = Some(expanded_canon);
             deactivate(state);
         }

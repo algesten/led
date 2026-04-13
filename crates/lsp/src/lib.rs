@@ -80,6 +80,11 @@ pub enum LspOut {
     // Document sync
     BufferOpened {
         path: CanonPath,
+        /// Pre-resolved language for this buffer (computed by
+        /// `BufferState::new` via `LanguageId::from_chain`). The manager
+        /// uses this to pick the LSP server and as the `languageId` in
+        /// `textDocument/didOpen`. `None` when no language matches.
+        language: Option<led_core::LanguageId>,
         doc: Arc<dyn Doc>,
     },
     BufferChanged {

@@ -219,10 +219,8 @@ pub fn shared_workspace(files: &[(&str, &str)]) -> (TestDirs, Vec<PathBuf>) {
 }
 
 pub fn startup_for(dirs: &TestDirs, file_paths: &[PathBuf]) -> Startup {
-    let arg_paths: Vec<CanonPath> = file_paths
-        .iter()
-        .map(|p| UserPath::new(p).canonicalize())
-        .collect();
+    let arg_user_paths: Vec<UserPath> = file_paths.iter().map(UserPath::new).collect();
+    let arg_paths: Vec<CanonPath> = arg_user_paths.iter().map(|u| u.canonicalize()).collect();
     let start_dir = arg_paths
         .first()
         .and_then(|p| p.parent())
@@ -232,6 +230,7 @@ pub fn startup_for(dirs: &TestDirs, file_paths: &[PathBuf]) -> Startup {
         headless: true,
         enable_watchers: true,
         arg_paths,
+        arg_user_paths,
         arg_dir: None,
         start_dir: Arc::new(start_dir.clone()),
         user_start_dir: UserPath::new(start_dir.as_path()),

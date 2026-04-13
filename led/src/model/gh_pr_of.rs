@@ -125,6 +125,7 @@ mod tests {
             headless: true,
             enable_watchers: false,
             arg_paths: vec![],
+            arg_user_paths: vec![],
             arg_dir: None,
             start_dir: Arc::new(UserPath::new("/tmp").canonicalize()),
             user_start_dir: UserPath::new("/tmp"),

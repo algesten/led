@@ -1,5 +1,6 @@
 use std::borrow::Cow;
 
+use led_core::language::LanguageId;
 use tree_sitter::Language;
 
 pub(crate) struct LangEntry {
@@ -184,23 +185,27 @@ pub(crate) fn lang_for_ext(ext: &str) -> Option<LangEntry> {
     }
 }
 
-pub(crate) fn lang_for_filename(name: &str) -> Option<LangEntry> {
-    match name {
-        "Makefile" | "makefile" | "GNUmakefile" | "BSDmakefile" => Some(LangEntry::new(
-            tree_sitter_make::LANGUAGE.into(),
-            tree_sitter_make::HIGHLIGHTS_QUERY,
-        )),
-        "Gemfile" | "Rakefile" | "Vagrantfile" | "Guardfile" | "Podfile" | "Capfile"
-        | "Brewfile" | "Thorfile" | "Dangerfile" | "Berksfile" | "Puppetfile" | "Steepfile"
-        | "Fastfile" | "Appfile" | "Matchfile" | "Deliverfile" | "Snapfile" | "Scanfile"
-        | "Gymfile" => lang_for_ext("rb"),
-        ".bashrc" | ".bash_profile" | ".bash_logout" | ".bash_aliases" | ".profile" | ".envrc"
-        | "PKGBUILD" => lang_for_ext("sh"),
-        "SConstruct" | "SConscript" | "Snakefile" | "wscript" => lang_for_ext("py"),
-        "Pipfile" => lang_for_ext("toml"),
-        ".babelrc" => lang_for_ext("json"),
-        _ => None,
-    }
+/// Map a [`LanguageId`] to a tree-sitter language entry, picking the
+/// canonical extension for each language. Used by the syntax driver to
+/// turn the buffer's precomputed `LanguageId` into a concrete
+/// [`LangEntry`].
+pub(crate) fn lang_entry_for_id(id: LanguageId) -> Option<LangEntry> {
+    let ext = match id {
+        LanguageId::Rust => "rs",
+        LanguageId::TypeScript => "ts",
+        LanguageId::JavaScript => "js",
+        LanguageId::Python => "py",
+        LanguageId::C => "c",
+        LanguageId::Cpp => "cpp",
+        LanguageId::Swift => "swift",
+        LanguageId::Toml => "toml",
+        LanguageId::Json => "json",
+        LanguageId::Bash => "sh",
+        LanguageId::Ruby => "rb",
+        LanguageId::Markdown => "md",
+        LanguageId::Make => "mk",
+    };
+    lang_for_ext(ext)
 }
 
 pub(crate) fn lang_entry_for_name(name: &str) -> Option<LangEntry> {

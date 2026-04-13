@@ -792,7 +792,7 @@ fn replace_all(state: &mut AppState) {
                 state.tabs.push_back(led_state::Tab::new(path.clone()));
             }
             if !state.buffers.contains_key(path) {
-                let buf = led_state::BufferState::new(path.clone());
+                let buf = led_state::BufferState::new_from_canon(path.clone());
                 state
                     .buffers_mut()
                     .insert(path.clone(), std::rc::Rc::new(buf));
@@ -1024,7 +1024,7 @@ fn confirm_selected(state: &mut AppState) {
         }
         super::action::reveal_active_buffer(state);
     } else {
-        super::request_open(state, path.clone(), false);
+        super::request_open(state, led_core::UserPath::new(path.as_path()), false);
         if let Some(tab) = state.tabs.iter_mut().find(|t| *t.path() == path) {
             tab.set_cursor(row, col, led_core::Row((*row).saturating_sub(5)));
         }

@@ -93,7 +93,14 @@ async fn main() {
         joined.canonicalize()
     };
 
-    let resolved: Vec<CanonPath> = cli.paths.iter().map(|p| resolve_path(p)).collect();
+    // Build paired (user, canonical) so the filter that drops directories
+    // keeps the two vecs aligned. The user-typed names are needed downstream
+    // by `BufferState::new` to walk the symlink chain for language detection.
+    let resolved_pairs: Vec<(UserPath, CanonPath)> = cli
+        .paths
+        .iter()
+        .map(|p| (UserPath::new(p), resolve_path(p)))
+        .collect();
 
     // Single directory: open in file browser, no files.
     // Otherwise: filter out directories, open remaining files.
@@ -112,24 +119,32 @@ async fn main() {
         UserPath::new(std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")))
     };
 
-    let (arg_dir, arg_paths, start_dir) = if cli.no_workspace {
-        let files: Vec<CanonPath> = resolved.into_iter().filter(|p| !p.is_dir()).collect();
+    let (arg_dir, arg_user_paths, arg_paths, start_dir) = if cli.no_workspace {
+        let files: Vec<(UserPath, CanonPath)> = resolved_pairs
+            .into_iter()
+            .filter(|(_, c)| !c.is_dir())
+            .collect();
+        let (users, canons): (Vec<UserPath>, Vec<CanonPath>) = files.into_iter().unzip();
         let start = UserPath::new(
             std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/")),
         )
         .canonicalize();
-        (None, files, start)
-    } else if resolved.len() == 1 && resolved[0].is_dir() {
-        let dir = resolved.into_iter().next().unwrap();
+        (None, users, canons, start)
+    } else if resolved_pairs.len() == 1 && resolved_pairs[0].1.is_dir() {
+        let (_user, dir) = resolved_pairs.into_iter().next().unwrap();
         let start = dir.clone();
-        (Some(dir), vec![], start)
+        (Some(dir), vec![], vec![], start)
     } else {
-        let files: Vec<CanonPath> = resolved.into_iter().filter(|p| !p.is_dir()).collect();
-        let start = files.first().and_then(|p| p.parent()).unwrap_or_else(|| {
+        let files: Vec<(UserPath, CanonPath)> = resolved_pairs
+            .into_iter()
+            .filter(|(_, c)| !c.is_dir())
+            .collect();
+        let (users, canons): (Vec<UserPath>, Vec<CanonPath>) = files.into_iter().unzip();
+        let start = canons.first().and_then(|p| p.parent()).unwrap_or_else(|| {
             UserPath::new(std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/")))
                 .canonicalize()
         });
-        (None, files, start)
+        (None, users, canons, start)
     };
 
     let config_dir = UserPath::new(
@@ -173,6 +188,7 @@ async fn main() {
         headless: false,
         enable_watchers: true,
         arg_paths,
+        arg_user_paths,
         arg_dir,
         start_dir: Arc::new(start_dir),
         user_start_dir,

@@ -4,8 +4,8 @@ mod doc;
 pub mod git;
 pub mod issue;
 pub mod keys;
-mod language;
-mod path;
+pub mod language;
+pub mod path;
 pub mod rx;
 pub mod theme;
 mod watch;
@@ -20,7 +20,7 @@ pub use issue::{
     CategoryInfo, IssueCategory, StatusDisplay, directory_categories, resolve_display,
 };
 pub use language::{LanguageId, LspContextId};
-pub use path::{CanonPath, UserPath};
+pub use path::{CanonPath, PathChain, UserPath, symlink_chain};
 pub use versioned::Versioned;
 pub use watch::{FileWatcher, Registration, WatchEvent, WatchEventKind, WatchMode};
 

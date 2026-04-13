@@ -23,7 +23,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use led_core::rx::Stream;
-use led_core::{CanonPath, Col, Doc, DocVersion, EditOp, Row};
+use led_core::{CanonPath, Col, Doc, DocVersion, EditOp, LanguageId, Row};
 use led_state::BracketPair;
 use tokio::sync::mpsc;
 
@@ -33,6 +33,11 @@ use tokio::sync::mpsc;
 pub enum SyntaxOut {
     BufferChanged {
         path: CanonPath,
+        /// Language pre-resolved by the buffer constructor via
+        /// `LanguageId::from_chain`. `None` when no extension or
+        /// well-known filename matches; modeline detection inside the
+        /// driver may still produce a language for the doc.
+        language: Option<LanguageId>,
         doc: Arc<dyn Doc>,
         version: DocVersion,
         edit_ops: Vec<EditOp>,
@@ -91,6 +96,7 @@ pub fn driver(out: Stream<SyntaxOut>) -> Stream<SyntaxIn> {
 
         // Scratch space for coalescing queued messages per buffer.
         struct Coalesced {
+            language: Option<LanguageId>,
             doc: Arc<dyn Doc>,
             version: DocVersion,
             edit_ops: Vec<EditOp>,
@@ -117,6 +123,7 @@ pub fn driver(out: Stream<SyntaxOut>) -> Stream<SyntaxIn> {
                     match msg {
                         SyntaxOut::BufferChanged {
                             path,
+                            language,
                             doc,
                             version,
                             edit_ops,
@@ -132,10 +139,12 @@ pub fn driver(out: Stream<SyntaxOut>) -> Stream<SyntaxIn> {
                                 existing.scroll_row = scroll_row;
                                 existing.buffer_height = buffer_height;
                                 existing.indent_row = indent_row.or(existing.indent_row);
+                                existing.language = language.or(existing.language);
                             } else {
                                 pending.insert(
                                     path,
                                     Coalesced {
+                                        language,
                                         doc,
                                         version,
                                         edit_ops,
@@ -161,6 +170,7 @@ pub fn driver(out: Stream<SyntaxOut>) -> Stream<SyntaxIn> {
             for (
                 path,
                 Coalesced {
+                    language,
                     doc,
                     version,
                     edit_ops,
@@ -172,7 +182,7 @@ pub fn driver(out: Stream<SyntaxOut>) -> Stream<SyntaxIn> {
             {
                 // Auto-initialize if not yet opened
                 if !states.contains_key(&path) {
-                    if let Some(ss) = SyntaxState::from_path_and_doc(path.as_path(), &*doc) {
+                    if let Some(ss) = SyntaxState::from_language_and_doc(language, &*doc) {
                         let reindent_chars = ss.reindent_chars().clone();
                         states.insert(
                             path.clone(),

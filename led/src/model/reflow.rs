@@ -795,7 +795,7 @@ mod tests {
     fn make_buf(text: &str, name: &str) -> (BufferState, std::path::PathBuf) {
         let p = std::path::PathBuf::from(format!("/tmp/reflow_test_{name}"));
         let canon = led_core::UserPath::new(p.clone()).canonicalize();
-        let mut buf = BufferState::new(canon);
+        let mut buf = BufferState::new_from_canon(canon);
         let doc: Arc<dyn Doc> = make_doc(text);
         buf.materialize(doc, false);
         (buf, p)
