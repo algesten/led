@@ -22,7 +22,7 @@ The current led architecture has a single `model()` function with a large combin
 
 Nothing destructive happens until step 5. Each step produces an artifact committed to the repo.
 
-1. **Build the test harness.** Extend the existing `TestHarness` (in `led/tests/harness/mod.rs`) to capture rendered frames, dispatched driver events, and state snapshots. Add `insta` (or similar). Input scripts at the keypress layer, not the `Action` layer. See `GOLDENS-PLAN.md`.
+1. **Build the subprocess test runner + binary contract.** Drive the compiled `led` binary in a PTY; parse its ANSI output with `vt100`; capture dispatched work via a new `--golden-trace <path>` flag written by led itself. Add `--test-clock` for a virtual clock. Build scripted fake binaries for LSP/gh (replacing ad-hoc per-test fakes). Zero coupling to internal types — the entire code-side surface is the CLI flags + trace format. Add `insta` (or similar). See `GOLDENS-PLAN.md`.
 2. **Generate spec goldens.** Mechanical axes (per-Action, per-keybinding, per-driver-event, per-config-key) first — these are enumerations over code and produce hundreds of stub goldens automatically. Then author narrative goldens per feature area. All generated against current led and committed. See `GOLDENS-PLAN.md`.
 3. **Write the functional spec.** Phase A extraction, Phase B narrative (with reverse index into Phase A extracts). See `SPEC-PLAN.md`.
 4. **Write the driver inventory.** One file per driver, plus the translation table. See `DRIVER-INVENTORY-PLAN.md`.
@@ -38,8 +38,10 @@ Do not re-litigate these without good reason:
 - **Mechanism**: the `drv` crate provides the memoization primitive. It already supports atoms, lenses, chained memos, and multi-atom queries. It lives in a sibling directory (`../drv`).
 - **Fine-grained Muts**: the "many small muts, trivial reducer" principle from the current `CLAUDE.md` carries forward — but per-domain, not global.
 - **No `rm -rf` on day one**: the current code is the final arbiter of behavior; keep it one `grep` away until parity is verified.
-- **Goldens capture the external boundary** (rendered frame + dispatched events) at the raw-keypress input level. Not internal `AppState` — that shape is changing.
+- **Goldens capture the external boundary** (rendered frame + dispatched trace) at the raw-keypress input level. Not internal `AppState` — that shape is changing.
+- **Goldens drive the compiled binary in a PTY.** Zero coupling to internal Rust types; the entire code-side contract is two CLI flags (`--golden-trace`, `--test-clock`) plus the trace-line format. Same golden files run unchanged against legacy and rewrite binaries.
 - **Golden generation happens against current led, before the rewrite starts.**
+- **The rewrite happens on a `rewrite` branch as a full clean slate.** Current `crates/` and `led/` get deleted on that branch; the goldens, spec, and driver inventory (on `main`, merged in) are the reconstruction contract. `main` continues receiving fixes and features throughout.
 
 ## Key open questions
 

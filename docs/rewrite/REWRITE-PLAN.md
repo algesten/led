@@ -8,76 +8,61 @@ Prerequisite reading: `README.md`, `QUERY-ARCH.md`.
 
 ## The cardinal rule
 
-**Do not `rm -rf` the existing crates on day one.** The current implementation is the final arbiter of behavior — thousands of details live in code and nowhere else. The previous rewrite (which this plan is explicitly guarding against repeating) had the failure mode of "must prompt every detail back into existence."
+**Do not `rm -rf` the existing crates before Phase 2 is complete.** The current implementation is the final arbiter of behavior — thousands of details live in code and nowhere else. The previous rewrite (which this plan is explicitly guarding against repeating) had the failure mode of "must prompt every detail back into existence."
 
-Two acceptable strategies:
+The goldens, spec, and driver inventory are the insurance. Once they're committed to `main`, a clean-slate rewrite is safe: the golden suite encodes external behavior, the spec and driver docs encode the human-readable contract, and `main` stays as a live reference.
 
-### Strategy A — sibling path (recommended)
+### The branch + worktree strategy
 
-Keep everything under `crates/` untouched. Build new code under a new path that doesn't collide:
+- **`main`**: current FRP code, continues receiving fixes and features. Holds the goldens, spec, and driver inventory (all generated against current led).
+- **`rewrite`**: branched from `main` after Phase 2 completes. `crates/` and `led/` are deleted on this branch. New code grows here under whatever layout `QUERY-ARCH.md` implies (see § "Multi-crate organization").
+- **Worktrees**: use `git worktree add ../led-rewrite rewrite` so both branches are checked out side-by-side. `grep` across both. Run both binaries in adjacent terminals for behavior comparison.
+- **Goldens flow one direction**: authored on `main`, merged into `rewrite`. If a bug in current led needs a behavior change, fix on `main` first, golden updates there, merge into `rewrite`. This keeps `main` as the single source of truth for the spec contract.
+- **Cutover**: when `rewrite` is green against the full golden suite, it replaces `main` (fast-forward or merge, whichever history you prefer).
 
 ```
-led/
-  crates/           ← current FRP implementation, untouched
-  crates-next/      ← new query-driven implementation, grows here
-  led-next/         ← new binary
-  Cargo.toml        ← workspace includes both
-  docs/rewrite/     ← these docs
-  docs/extract/     ← Phase A extraction output
-  docs/spec/        ← narrative spec
-  tests/golden/     ← goldens generated against current led (spec contract)
+~/dev/led/          ← main branch checkout:        crates/, led/, docs/, tests/golden/
+~/dev/led-rewrite/  ← rewrite branch worktree:     (new crates grow here), docs/, tests/golden/
 ```
 
-Both binaries (`led` and `led-next`) build from the same workspace. Tests for the old code continue to run. The new code can depend on common utilities (e.g., `CanonPath` types) by either copying them or referencing them via the workspace until a natural split emerges.
-
-When `led-next` reaches parity:
-- Rename `crates/` → `crates-legacy/` (keep briefly as reference)
-- Rename `crates-next/` → `crates/`
-- Eventually delete `crates-legacy/`
-
-### Strategy B — branch with reference tree
-
-Alternative: work on a `rewrite` branch where `crates/` is moved to `reference/` (read-only; no code depends on it). New code goes in a fresh `crates/`.
-
-Strategy A is preferred because both implementations compile in the same tree, and you can `grep` across both simultaneously.
+The goldens drive the compiled `led` binary over a PTY (see `GOLDENS-PLAN.md`). The same `tests/golden/*` files run unchanged against either branch's binary — the rewrite just needs to honor the same CLI flags and trace format.
 
 ### What not to do
 
-- **Do not** start a new branch and delete `crates/` before Phase 2 is complete. If the goldens are in place and the old code is pushed, you can recover — but the cost/risk is enormous and unnecessary.
+- **Do not** create the `rewrite` branch or delete `crates/` before Phase 2 is complete. If the goldens are in place and the old code is pushed, you can recover — but the cost/risk is enormous and unnecessary.
 - **Do not** try to incrementally rewrite *within* the existing FRP structure. The two architectures don't mix; partial migrations would be worse than either.
+- **Do not** author goldens on the `rewrite` branch. They belong on `main`, generated against the reference implementation.
 
 ---
 
 ## Phases
 
 ```
-Phase 0  Harness bootstrap            (prereq; on old code)
-Phase 1  Goldens generation           (on old code)
-Phase 2  Functional spec + driver inv (on old code, docs only)
-Phase 3  Skeleton of new arch         (new code)
-Phase 4  Domain-by-domain porting     (new code; goldens as target)
+Phase 0  Runner + binary contract     (prereq; on main)
+Phase 1  Goldens generation           (on main)
+Phase 2  Functional spec + driver inv (on main, docs only)
+Phase 3  Branch `rewrite`; skeleton   (on rewrite branch)
+Phase 4  Domain-by-domain porting     (on rewrite branch; goldens as target)
 Phase 5  Parity verification          (all goldens green)
-Phase 6  Swap                         (rename; delete legacy)
+Phase 6  Cutover                      (rewrite replaces main)
 ```
 
-Phases 0–2 are **pre-rewrite**. Phases 3–6 are the rewrite proper.
+Phases 0–2 are **pre-rewrite**, all on `main`. Phase 3 creates the `rewrite` branch. Phases 3–6 are the rewrite proper.
 
-### Phase 0 — harness bootstrap
+### Phase 0 — runner + binary contract
 
-**Goal:** a test harness capable of generating a golden for any scenario.
+**Goal:** a golden-test runner capable of driving the compiled `led` binary in a PTY and producing diffable snapshots.
 
-Work happens on the current code. See `GOLDENS-PLAN.md` for details; in brief:
+Work happens on `main`. See `GOLDENS-PLAN.md` for details; in brief:
 
-- Extend the existing `TestHarness` (`led/tests/harness/mod.rs`) to capture:
-  - **Rendered frame** (run the ui driver in-process to a `String` buffer instead of the real terminal).
-  - **Dispatched events** (record every driver `*Out` stream emission).
-  - **State snapshots** (serialize `AppState` via serde for internal goldens only — not part of spec contract).
-- Add `insta` (or equivalent snapshot crate).
-- Accept inputs at the raw-keypress layer (`press("Ctrl-s")`) in addition to the existing `Action`-level API. Raw keys test the keymap layer; `Action`-level tests stay useful too.
-- Make time deterministic (virtual clock injected into drivers that use time).
-- Normalize non-determinism (iteration order, random IDs, absolute paths) before snapshotting.
+- Build `tests/golden/runner/`: spawns `led` under a PTY (`portable-pty` or similar), sends keystrokes, feeds output through `vt100::Parser`, snapshots the rendered grid.
+- Add `--golden-trace <path>` flag to led: writes one normalized line per externally-observable dispatch (resource request, file write, spawned subprocess, timer set, render tick). This is the dispatched.snap source.
+- Add `--test-clock` flag to led: virtual clock that idle-advances to the next scheduled timer when no external I/O is pending.
+- Build `crates/fake-lsp/` and `crates/fake-gh/`: scripted fake-server binaries that replay responses per a script file. Replaces ad-hoc per-test fakes.
+- Add `insta` to test deps.
+- Normalize non-determinism in trace output (iteration order sorted at source, random IDs masked to monotonic sequence, absolute paths stripped to repo-relative).
 
-**Exit criteria:** can write a test that scripts keypresses and produces diffable golden files for frame + dispatched events. A handful of examples checked in.
+**Exit criteria:** can write a test that scripts keypresses and produces diffable `frame.snap` + `dispatched.snap` via subprocess drive. A handful of examples checked in. Zero imports from `led-*` crates in the runner.
 
 ### Phase 1 — goldens generation
 
@@ -105,11 +90,14 @@ In parallel with Phase 1 (they share the Phase A extraction step):
 
 **Exit criteria:** spec covers every feature area; driver inventory covers every driver; cross-check passes.
 
-### Phase 3 — skeleton of new arch
+### Phase 3 — branch, clean slate, skeleton of new arch
 
-**Goal:** the query-driven skeleton compiles and produces a (blank or minimal) frame.
+**Goal:** create the `rewrite` branch; on it, the query-driven skeleton compiles and produces a (blank or minimal) frame.
 
-- Set up `crates-next/` workspace members.
+- `git checkout -b rewrite` from the tip of `main` (which now has goldens + spec + driver inventory).
+- On the `rewrite` branch: delete `crates/` and `led/` entirely. Keep `docs/`, `tests/golden/`, `Cargo.toml` (workspace), root `CLAUDE.md`, and any top-level tooling.
+- `git worktree add ../led-rewrite rewrite` so both trees are live side-by-side.
+- Grow new crates under whatever layout `QUERY-ARCH.md` § "Multi-crate organization" suggests (typically `crates/state-*`, `crates/runtime/`, `crates/drivers/`, `led/` for the bin).
 - Define the initial domain atoms (`BufferState`, `UiState` at minimum; others as they come online).
 - Define the `Event` enum (coarse inputs + resource completions).
 - Write `apply_event` skeleton (match arms that panic with `todo!()` initially).
@@ -117,12 +105,13 @@ In parallel with Phase 1 (they share the Phase A extraction step):
 - Wire a minimal `Runtime` with `tick()` over a channel.
 - Keyboard input driver → produces `Event::Key`.
 - Terminal driver → calls `terminal.draw(&frame)`.
+- Wire `--golden-trace` and `--test-clock` from day one — these are non-negotiable, and the goldens can start running (mostly failing) against the new binary immediately as a progress signal.
 
-**Exit criteria:** `cargo run -p led-next` opens a blank terminal UI that responds to Ctrl-C to quit. All architectural layers exist in skeletal form.
+**Exit criteria:** `cargo run` on the `rewrite` branch opens a blank terminal UI that responds to Ctrl-C to quit. The golden runner can attach to it (it spawns, accepts input, emits trace lines, exits cleanly).
 
 ### Phase 4 — domain-by-domain porting
 
-**Goal:** `led-next` passes all Phase 1 goldens.
+**Goal:** new `led` passes all Phase 1 goldens.
 
 Port one domain at a time. For each domain:
 
@@ -152,33 +141,29 @@ As each domain comes online, more goldens pass. Progress is measurable in "% gol
 
 ### Phase 5 — parity verification
 
-**Goal:** confidence that `led-next` behaves like `led`.
+**Goal:** confidence that new `led` behaves like `led`.
 
 Beyond goldens:
 
-- **Interactive exploration**: use `led-next` for real work for a period. Log every bug / behavior mismatch as an issue. Add goldens for each.
+- **Interactive exploration**: use new `led` for real work for a period. Log every bug / behavior mismatch as an issue. Add goldens for each.
 - **Benchmarks**: compare startup time, keypress latency, memory use. Not required to be identical; must be reasonable.
 - **Coverage**: run goldens under `cargo llvm-cov`. Uncovered branches in new code are either dead or need new goldens.
 - **Mutation testing**: `cargo-mutants` (optional but valuable). Surviving mutants indicate behaviors not exercised by goldens.
 
 **Exit criteria:** goldens green + no known behavior regressions + benchmarks acceptable.
 
-### Phase 6 — swap
+### Phase 6 — cutover
 
-**Goal:** `led-next` becomes `led`.
+**Goal:** `rewrite` replaces `main`.
 
-1. Rename workspace:
-   - `crates/` → `crates-legacy/`
-   - `crates-next/` → `crates/`
-   - `led/` → `led-legacy/`
-   - `led-next/` → `led/`
-2. Update root `Cargo.toml` workspace members.
+1. Tag `main` at its current tip (e.g. `legacy-final`) for recovery if needed.
+2. Fast-forward or merge `rewrite` into `main` (force-update if necessary — coordinate with any other contributors).
 3. Update root `README.md` (replace "vibe coded FRP" framing with new arch description).
-4. Update root `CLAUDE.md` (replace/supersede FRP principles with query-arch principles; see `QUERY-ARCH.md` § "What happens to the current principles").
-5. Tag a release or commit marking the cutover.
-6. Keep `crates-legacy/` / `led-legacy/` for at least a release cycle as a reference. Delete when you're sure nothing's missing.
+4. Update root `CLAUDE.md` (replace FRP principles with query-arch principles; see `QUERY-ARCH.md` § "What happens to the current principles").
+5. Tag a release marking the cutover.
+6. Remove the `../led-rewrite` worktree; delete the `rewrite` branch. The `legacy-final` tag is the reference if anything's missing.
 
-**Exit criteria:** `cargo run` runs the new led; legacy is opt-in via path.
+**Exit criteria:** `cargo run` on `main` runs the new led. The FRP implementation lives only in git history (accessible via `legacy-final` tag).
 
 ---
 
@@ -218,9 +203,9 @@ When a golden fails during the rewrite, the prompt is strong to run `cargo insta
 
 The narrative spec seems optional next to the goldens — goldens are enforceable, docs aren't. But the spec is what catches *what you didn't think to test*. A feature area missing from the spec is a blind spot in the golden suite. The cross-check (every extract entry referenced by narrative) is the completeness check.
 
-### Don't rewrite the test harness during Phase 4
+### Don't change the binary contract during Phase 4
 
-The harness is the contract between old and new. If the harness changes, goldens change shape, and the spec is no longer frozen. Extensions are fine (new capture types, new input sources). Rewrites are not — except under explicit plan in Phase 6.
+The binary contract (CLI flags + trace format + grid serialization) is what the goldens depend on. If it changes, goldens change shape, and the spec is no longer frozen. Extending is fine (new trace tokens for new driver work, new keybindings for new actions). Reshaping existing trace lines or flags is not — any such change is a `main`-branch change, landed there with the golden updates, then merged into `rewrite`.
 
 ### Expect the edit log / rebase design to iterate
 
@@ -233,10 +218,10 @@ The first draft of `BufferState.edits` and `rebase_diagnostics` will probably ne
 - **After Phase 0**: you can write a new golden test in ~5 minutes and commit its baseline.
 - **After Phase 1**: the CI "coverage" tests pass; if you add an `Action::Foo` without a golden, CI catches it.
 - **After Phase 2**: you can answer "what does led do when X?" by reading docs, without running the binary.
-- **After Phase 3**: `led-next` runs, shows a blank screen, accepts Ctrl-C.
+- **After Phase 3**: new `led` runs, shows a blank screen, accepts Ctrl-C.
 - **During Phase 4**: the percentage of green goldens grows monotonically. A regression in that number means a port broke something already-ported. Investigate before moving on.
 - **After Phase 4**: all goldens green.
-- **After Phase 5**: goldens green + you've used `led-next` for real work for days without issue.
+- **After Phase 5**: goldens green + you've used new `led` for real work for days without issue.
 - **After Phase 6**: `led` is the new arch; legacy is a subdirectory.
 
 ---
