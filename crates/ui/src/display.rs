@@ -7,7 +7,7 @@ use led_core::Doc;
 use led_core::PanelSlot;
 use led_core::git::{self, LineStatus};
 use led_core::wrap::{chars_to_string, compute_chunks, expand_tabs, find_sub_line};
-use led_core::{Col, PersistedContentHash, RedrawSeq, Row, SubLine};
+use led_core::{Col, DocVersion, PersistedContentHash, RedrawSeq, Row, SubLine};
 use led_core::{IssueCategory, directory_categories, resolve_display};
 use led_state::{AppState, BracketPair, Dimensions, EntryKind, HighlightSpan};
 use ratatui::style::Style;
@@ -44,6 +44,12 @@ pub struct DisplayInputs {
     matching_bracket: Option<(Row, Col)>,
     cursor_row: Row,
     cursor_col: Col,
+    /// In-memory edit counter — bumps on every insert/remove/undo/redo
+    /// as well as save/reload. `content_hash` alone (persisted) is not
+    /// enough: it would miss edits that don't move the cursor (e.g.
+    /// DeleteForward mid-line in a plain-text buffer with no syntax
+    /// reparse), suppressing the render until the next keystroke.
+    doc_version: DocVersion,
     content_hash: PersistedContentHash,
     syntax_styles: Rc<HashMap<String, Style>>,
     bracket_match_style: Style,
@@ -71,6 +77,7 @@ impl PartialEq for DisplayInputs {
     fn eq(&self, other: &Self) -> bool {
         self.focused == other.focused
             && self.buffer_path == other.buffer_path
+            && self.doc_version == other.doc_version
             && self.content_hash == other.content_hash
             && self.scroll_row == other.scroll_row
             && self.scroll_sub_line == other.scroll_sub_line
@@ -231,6 +238,7 @@ pub fn display_inputs(s: &AppState) -> Option<DisplayInputs> {
         ),
         cursor_row: buf.cursor_row(),
         cursor_col: buf.cursor_col(),
+        doc_version: buf.version(),
         content_hash: buf.content_hash(),
         syntax_styles: style::resolve_syntax_map(theme_arc),
         bracket_match_style: style::resolve_cached(theme, &theme.brackets.match_),
