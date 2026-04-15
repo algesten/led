@@ -1,0 +1,9 @@
+no_workspace = true
+
+[[file]]
+path = "cjk.txt"
+contents = """
+chinese 你好世界
+japanese こんにちは世界
+korean 안녕하세요 세계
+"""

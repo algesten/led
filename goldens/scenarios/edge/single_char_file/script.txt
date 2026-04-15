@@ -1,0 +1,2 @@
+# Move End to land the cursor after the single char.
+press End

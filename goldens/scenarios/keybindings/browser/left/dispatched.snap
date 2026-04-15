@@ -1,0 +1,6 @@
+FsListDir	path=<TMPDIR>
+FileOpen	path=<TMPDIR>/alpha.txt create_if_missing=true
+FileOpen	path=<TMPDIR>/beta.txt create_if_missing=true
+FileOpen	path=<TMPDIR>/subdir/inner.txt create_if_missing=true
+FsListDir	path=<TMPDIR>/subdir
+GitScan	root=<TMPDIR>

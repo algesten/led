@@ -1,0 +1,8 @@
+# Driver event: FileSearchIn::Results { results }
+# Cause: FileSearchOut::Search driven by typing a query in the workspace
+# file-search overlay; ripgrep-backed driver returns matches.
+# Consequence: overlay lists matching lines across files.
+wait 500ms
+press Ctrl-f
+type needle
+wait 500ms

@@ -1,0 +1,8 @@
+# Set mark at row 0 col 0, extend down two lines, kill the region, move
+# to the end of the buffer, then yank.
+press Ctrl-Space
+press Down
+press Down
+press Ctrl-w
+press Ctrl-End
+press Ctrl-y

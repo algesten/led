@@ -1,0 +1,5 @@
+no_workspace = true
+
+[[file]]
+path = "hello.txt"
+contents = "hello world\n"

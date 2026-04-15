@@ -1,0 +1,16 @@
+git_init = true
+
+[[file]]
+path = "main.rs"
+contents = """
+fn main() {
+    x
+}
+"""
+
+[fake_lsp]
+triggerCharacters = ["."]
+completions = [
+  { label = "foo", kind = 3 },
+  { label = "foobar", kind = 3 },
+]

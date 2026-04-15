@@ -1,0 +1,5 @@
+# Driver event: LspIn::TriggerChars { extensions, triggers }
+# Cause: parsed from initialize response's completion capabilities.
+# Consequence: state.lsp.trigger_chars populated; silent, no frame change
+# until a trigger char is typed. Trace shows the ingestion.
+wait 1500ms

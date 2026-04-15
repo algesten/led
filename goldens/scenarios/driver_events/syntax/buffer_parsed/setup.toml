@@ -1,0 +1,10 @@
+git_init = true
+
+[[file]]
+path = "main.rs"
+contents = """
+fn main() {
+    let greeting = "hello";
+    println!("{}", greeting);
+}
+"""

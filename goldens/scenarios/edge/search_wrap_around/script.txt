@@ -1,0 +1,6 @@
+# isearch "match", then Ctrl-s twice to cycle past the last hit and
+# wrap back to the first.
+press Ctrl-s
+type match
+press Ctrl-s
+press Ctrl-s

@@ -1,0 +1,15 @@
+git_init = true
+
+[[file]]
+path = "main.rs"
+contents = """
+fn main() {
+    let unused = 42;
+}
+"""
+
+[fake_lsp]
+[fake_lsp.diagnostics]
+"main.rs" = [
+  { range = { start = { line = 1, character = 8 }, end = { line = 1, character = 14 } }, severity = 2, message = "unused variable: `unused`" },
+]

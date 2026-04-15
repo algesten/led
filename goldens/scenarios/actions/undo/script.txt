@@ -1,0 +1,4 @@
+# Type some text, then undo it. Ctrl-/ is the canonical undo chord.
+press End
+type  appended
+press Ctrl-/

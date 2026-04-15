@@ -1,0 +1,21 @@
+FsListDir	path=<TMPDIR>
+FileOpen	path=<TMPDIR>/a.txt create_if_missing=true
+GitScan	root=<TMPDIR>
+FsFindFile	dir=<TMPDIR>/a.txt prefix="" show_hidden=false
+FsFindFile	dir=<TMPDIR>/a.txt prefix="z" show_hidden=false
+FsFindFile	dir=<TMPDIR>/a.txt prefix="zz" show_hidden=false
+FsFindFile	dir=<TMPDIR>/a.txt prefix="zzz" show_hidden=false
+FsFindFile	dir=<TMPDIR>/a.txt prefix="zzzn" show_hidden=false
+FsFindFile	dir=<TMPDIR>/a.txt prefix="zzzno" show_hidden=false
+FsFindFile	dir=<TMPDIR>/a.txt prefix="zzznom" show_hidden=false
+FsFindFile	dir=<TMPDIR>/a.txt prefix="zzznoma" show_hidden=false
+FsFindFile	dir=<TMPDIR>/a.txt prefix="zzznomat" show_hidden=false
+FsFindFile	dir=<TMPDIR>/a.txt prefix="zzznomatc" show_hidden=false
+FsFindFile	dir=<TMPDIR>/a.txt prefix="zzznomatch" show_hidden=false
+FsFindFile	dir=<TMPDIR>/a.txt prefix="zzznomatchf" show_hidden=false
+FsFindFile	dir=<TMPDIR>/a.txt prefix="zzznomatchfi" show_hidden=false
+FsFindFile	dir=<TMPDIR>/a.txt prefix="zzznomatchfil" show_hidden=false
+FsFindFile	dir=<TMPDIR>/a.txt prefix="zzznomatchfile" show_hidden=false
+FsFindFile	dir=<TMPDIR>/a.txt prefix="zzznomatchfileq" show_hidden=false
+FsFindFile	dir=<TMPDIR>/a.txt prefix="zzznomatchfileqq" show_hidden=false
+FsFindFile	dir=<TMPDIR>/a.txt prefix="zzznomatchfileqqq" show_hidden=false

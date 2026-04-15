@@ -1,0 +1,12 @@
+# Insert three separate edit groups, then undo twice. Each group is
+# separated by a cursor movement so undo peels them off one at a time.
+press End
+type  alpha
+press Left
+press End
+type  beta
+press Left
+press End
+type  gamma
+press Ctrl-/
+press Ctrl-/

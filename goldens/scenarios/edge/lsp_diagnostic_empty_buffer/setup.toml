@@ -1,0 +1,13 @@
+git_init = true
+
+# LSP has a diagnostic queued for an empty file. Edge case for the
+# position-out-of-range path in the rebase code.
+[[file]]
+path = "main.rs"
+contents = ""
+
+[fake_lsp]
+[fake_lsp.diagnostics]
+"main.rs" = [
+  { range = { start = { line = 0, character = 0 }, end = { line = 0, character = 0 } }, severity = 2, message = "empty crate root" },
+]

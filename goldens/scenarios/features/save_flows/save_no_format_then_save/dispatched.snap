@@ -1,0 +1,6 @@
+FsListDir	path=<TMPDIR>
+FileOpen	path=<TMPDIR>/buffer.txt create_if_missing=true
+FileSave	path=<TMPDIR>/buffer.txt
+WorkspaceClearUndo	path=<TMPDIR>/buffer.txt
+FileSave	path=<TMPDIR>/buffer.txt
+WorkspaceClearUndo	path=<TMPDIR>/buffer.txt

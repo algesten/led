@@ -288,6 +288,7 @@ impl TestHarness {
             config_dir: UserPath::new(config_dir.clone()),
             test_lsp_server: self.test_lsp_server.map(UserPath::new),
             test_gh_binary: self.test_gh_binary.map(UserPath::new),
+            golden_trace: None,
             no_workspace: self.no_workspace,
         };
 

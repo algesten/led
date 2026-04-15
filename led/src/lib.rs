@@ -5,7 +5,7 @@ use led_core::keys::Keys;
 use led_core::rx::Stream;
 use led_core::theme::Theme;
 use led_core::{Action, Alert, FileWatcher, Startup};
-use led_fs::FsIn;
+use led_fs::{FsIn, FsOut};
 use led_state::AppState;
 use led_terminal_in::TerminalInput;
 use led_timers::TimersIn;
@@ -13,6 +13,7 @@ use led_workspace::WorkspaceIn;
 use tokio::sync::oneshot;
 
 pub mod derived;
+pub mod golden_trace;
 pub mod logging;
 pub mod model;
 
@@ -71,6 +72,10 @@ pub fn run(
         .test_gh_binary
         .as_ref()
         .map(|p| p.to_string_lossy().to_string());
+    let golden_trace_active = startup.golden_trace.is_some();
+    if let Some(path) = startup.golden_trace.as_ref() {
+        golden_trace::GoldenTraceSink::install(path).expect("create golden-trace file");
+    }
 
     let file_watcher = if startup.enable_watchers {
         FileWatcher::new()
@@ -89,6 +94,175 @@ pub fn run(
 
     // 2. Derived
     let d = derived(state.clone(), git_activity.clone());
+
+    // Golden trace: subscribe ONLY to dispatches that cause externally-
+    // observable work (disk I/O, subprocess spawns, OS clipboard, browser
+    // launch, SQLite writes). Internal coordination signals (Workspace
+    // Init, SyntaxBufferChanged, ConfigDir, TimerSet, LspOut driver-
+    // commands) are deliberately NOT traced — those are implementation
+    // details of the current arch and will not exist in the rewrite. The
+    // LSP protocol traffic, which IS externally observable, is hooked
+    // separately at the JSON-RPC transport layer in `crates/lsp/`.
+    //
+    // Off in production: subscribers are no-ops when no sink installed.
+    if golden_trace_active {
+        d.docstore_out
+            .on(|opt: Option<&led_docstore::DocStoreOut>| {
+                let Some(out) = opt else { return };
+                use led_core::golden_trace::emit;
+                match out {
+                    led_docstore::DocStoreOut::Open {
+                        path,
+                        create_if_missing,
+                    } => emit(
+                        "FileOpen",
+                        &format!(
+                            "path={} create_if_missing={create_if_missing}",
+                            path.display()
+                        ),
+                    ),
+                    led_docstore::DocStoreOut::Save { path, .. } => {
+                        emit("FileSave", &format!("path={}", path.display()))
+                    }
+                    led_docstore::DocStoreOut::SaveAs { path, new_path, .. } => emit(
+                        "FileSaveAs",
+                        &format!("path={} new_path={}", path.display(), new_path.display()),
+                    ),
+                }
+            });
+
+        d.fs_out.on(|opt: Option<&FsOut>| {
+            let Some(out) = opt else { return };
+            use led_core::golden_trace::emit;
+            match out {
+                FsOut::ListDir { path } => emit("FsListDir", &format!("path={}", path.display())),
+                FsOut::FindFileList {
+                    dir,
+                    prefix,
+                    show_hidden,
+                } => emit(
+                    "FsFindFile",
+                    &format!(
+                        "dir={} prefix={prefix:?} show_hidden={show_hidden}",
+                        dir.display()
+                    ),
+                ),
+            }
+        });
+
+        d.git_out.on(|opt: Option<&led_git::GitOut>| {
+            let Some(out) = opt else { return };
+            match out {
+                led_git::GitOut::ScanFiles { root } => led_core::golden_trace::emit(
+                    "GitScan",
+                    &format!("root={}", root.display()),
+                ),
+            }
+        });
+
+        d.workspace_out
+            .on(|opt: Option<&led_workspace::WorkspaceOut>| {
+                let Some(out) = opt else { return };
+                use led_core::golden_trace::emit;
+                use led_workspace::WorkspaceOut::*;
+                match out {
+                    // Init is internal coordination (driver wiring), not
+                    // an observable side effect; the actual SQLite open
+                    // happens inside the driver but isn't reached without
+                    // a real workspace anyway. Skipped intentionally.
+                    Init { .. } => {}
+                    SaveSession { .. } => emit("WorkspaceSaveSession", ""),
+                    FlushUndo {
+                        file_path,
+                        chain_id,
+                        ..
+                    } => emit(
+                        "WorkspaceFlushUndo",
+                        &format!("path={} chain={chain_id}", file_path.display()),
+                    ),
+                    ClearUndo { file_path } => emit(
+                        "WorkspaceClearUndo",
+                        &format!("path={}", file_path.display()),
+                    ),
+                    CheckSync { file_path, .. } => emit(
+                        "WorkspaceCheckSync",
+                        &format!("path={}", file_path.display()),
+                    ),
+                }
+            });
+
+        d.clipboard_out
+            .on(|opt: Option<&led_clipboard::ClipboardOut>| {
+                let Some(out) = opt else { return };
+                use led_core::golden_trace::emit;
+                match out {
+                    led_clipboard::ClipboardOut::Read => emit("ClipboardRead", ""),
+                    led_clipboard::ClipboardOut::Write(s) => {
+                        let preview: String = s.chars().take(40).collect();
+                        emit(
+                            "ClipboardWrite",
+                            &format!("len={} preview={preview:?}", s.len()),
+                        )
+                    }
+                }
+            });
+
+        d.gh_pr_out.on(|opt: Option<&led_gh_pr::GhPrOut>| {
+            let Some(out) = opt else { return };
+            use led_core::golden_trace::emit;
+            match out {
+                led_gh_pr::GhPrOut::LoadPr { branch, root } => emit(
+                    "GhLoadPr",
+                    &format!("branch={branch} root={}", root.display()),
+                ),
+                led_gh_pr::GhPrOut::PollPr {
+                    api_endpoint, root, ..
+                } => emit(
+                    "GhPollPr",
+                    &format!("endpoint={api_endpoint} root={}", root.display()),
+                ),
+            }
+        });
+
+        d.file_search_out
+            .on(|opt: Option<&led_file_search::FileSearchOut>| {
+                let Some(out) = opt else { return };
+                use led_core::golden_trace::emit;
+                use led_file_search::FileSearchOut::*;
+                match out {
+                    Search {
+                        query,
+                        root,
+                        case_sensitive,
+                        use_regex,
+                    } => emit(
+                        "FileSearch",
+                        &format!(
+                            "query={query:?} root={} case={case_sensitive} regex={use_regex}",
+                            root.display()
+                        ),
+                    ),
+                    Replace {
+                        query,
+                        replacement,
+                        root,
+                        ..
+                    } => emit(
+                        "FileReplace",
+                        &format!(
+                            "query={query:?} replacement={replacement:?} root={}",
+                            root.display()
+                        ),
+                    ),
+                }
+            });
+
+        d.open_url.on(|opt: Option<&String>| {
+            if let Some(url) = opt {
+                led_core::golden_trace::emit("OpenUrl", &format!("url={url:?}"));
+            }
+        });
+    }
 
     // 3. Drivers
     let (input_guard, ui_in) = if headless {

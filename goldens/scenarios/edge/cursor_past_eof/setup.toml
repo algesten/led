@@ -1,0 +1,5 @@
+no_workspace = true
+
+[[file]]
+path = "small.txt"
+contents = "only line one\nonly line two\n"

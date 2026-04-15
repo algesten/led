@@ -1,0 +1,4 @@
+FsListDir	path=<TMPDIR>
+FileOpen	path=<TMPDIR>/keeper.txt create_if_missing=true
+FileOpen	path=<TMPDIR>/transient.txt create_if_missing=true
+WorkspaceFlushUndo	path=<TMPDIR>/transient.txt chain=<CHAIN>

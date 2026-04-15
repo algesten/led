@@ -1,0 +1,9 @@
+git_init = true
+
+[[file]]
+path = "a.txt"
+contents = "a line with needle inside\nanother plain line\n"
+
+[[file]]
+path = "b.txt"
+contents = "no match here\nneedle in b\n"

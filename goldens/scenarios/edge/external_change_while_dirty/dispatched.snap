@@ -1,0 +1,7 @@
+FsListDir	path=<TMPDIR>
+FileOpen	path=<TMPDIR>/shared.txt create_if_missing=true
+GitScan	root=<TMPDIR>
+WorkspaceFlushUndo	path=<TMPDIR>/shared.txt chain=<CHAIN>
+WorkspaceCheckSync	path=<TMPDIR>/shared.txt
+FsListDir	path=<TMPDIR>
+GitScan	root=<TMPDIR>

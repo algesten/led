@@ -1,0 +1,15 @@
+# Goto-def to record a jump, jump back, then forward again.
+wait 1500ms
+press Down
+press Down
+press Down
+press Down
+press Down
+press Right
+press Right
+press Right
+press Right
+press Alt-Enter
+wait 500ms
+press Alt-b
+press Alt-f

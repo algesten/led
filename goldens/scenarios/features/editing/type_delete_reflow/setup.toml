@@ -1,0 +1,7 @@
+git_init = true
+
+[[file]]
+path = "notes.md"
+contents = """
+short intro.
+"""

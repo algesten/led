@@ -1,0 +1,4 @@
+# Any non-y chord dismisses the confirm prompt.
+type x
+press Ctrl-x k
+type n

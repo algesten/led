@@ -1,0 +1,15 @@
+git_init = true
+
+# LSP diagnostic on the very first line (line 0) — edge of buffer.
+[[file]]
+path = "main.rs"
+contents = """
+fn main() {}
+let bad = ;
+"""
+
+[fake_lsp]
+[fake_lsp.diagnostics]
+"main.rs" = [
+  { range = { start = { line = 0, character = 3 }, end = { line = 0, character = 7 } }, severity = 1, message = "expected item, found keyword" },
+]

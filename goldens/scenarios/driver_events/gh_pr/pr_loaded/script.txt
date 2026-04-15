@@ -1,0 +1,5 @@
+# Driver event: GhPrIn::PrLoaded { number, state, url, ... }
+# Cause: workspace detects a branch; gh-pr driver calls fake-gh, which
+# serves the configured pr_view.
+# Consequence: PR info stored on state; status-bar PR indicator shown.
+wait 1500ms

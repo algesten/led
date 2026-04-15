@@ -1,0 +1,4 @@
+# Up during isearch: accept match, then run Up normally.
+press Ctrl-s
+type apple
+press Up

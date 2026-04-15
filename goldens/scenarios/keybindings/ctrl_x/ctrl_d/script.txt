@@ -1,0 +1,2 @@
+type hi
+press Ctrl-x Ctrl-d

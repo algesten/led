@@ -1,0 +1,7 @@
+# With j rebound to move_down and k to move_up, pressing j/k navigates
+# instead of inserting the characters. Send j three times then k once;
+# cursor should land on row 2 (0-indexed), column 0.
+type j
+type j
+type j
+type k

@@ -42,10 +42,17 @@ pub(crate) type ResponseHandlers =
 pub(crate) fn spawn_writer(
     mut rx: tokio::sync::mpsc::UnboundedReceiver<String>,
     mut stdin: tokio::process::ChildStdin,
+    server_name: String,
 ) {
     tokio::spawn(async move {
         use tokio::io::AsyncWriteExt;
         while let Some(body) = rx.recv().await {
+            if led_core::golden_trace::is_active() {
+                led_core::golden_trace::emit(
+                    "LspSend",
+                    &format!("server={server_name} {}", trace_fields(&body)),
+                );
+            }
             let header = format!("Content-Length: {}\r\n\r\n", body.len());
             if stdin.write_all(header.as_bytes()).await.is_err() {
                 break;
@@ -60,11 +67,54 @@ pub(crate) fn spawn_writer(
     });
 }
 
+/// Compact human-readable summary of a JSON-RPC frame for the goldens
+/// trace. Extracts method, id (for requests/responses), and the most
+/// useful textDocument fields (uri, version) when present.
+fn trace_fields(body: &str) -> String {
+    let Ok(v) = serde_json::from_str::<Value>(body) else {
+        return format!("body_len={} (unparsed)", body.len());
+    };
+    let method = v.get("method").and_then(|m| m.as_str());
+    let id = v.get("id").and_then(|i| {
+        i.as_i64()
+            .map(|n| n.to_string())
+            .or_else(|| i.as_str().map(|s| s.to_string()))
+    });
+    let kind = match (method, id.as_ref()) {
+        (Some(_), Some(_)) => "request",
+        (Some(_), None) => "notification",
+        (None, Some(_)) => "response",
+        (None, None) => "unknown",
+    };
+    let uri = v
+        .pointer("/params/textDocument/uri")
+        .and_then(|s| s.as_str());
+    let version = v
+        .pointer("/params/textDocument/version")
+        .and_then(|s| s.as_i64());
+
+    let mut out = format!("kind={kind}");
+    if let Some(m) = method {
+        out.push_str(&format!(" method={m}"));
+    }
+    if let Some(i) = id {
+        out.push_str(&format!(" id={i}"));
+    }
+    if let Some(u) = uri {
+        out.push_str(&format!(" path={u}"));
+    }
+    if let Some(v) = version {
+        out.push_str(&format!(" version={v}"));
+    }
+    out
+}
+
 pub(crate) fn spawn_reader(
     stdout: tokio::process::ChildStdout,
     response_handlers: ResponseHandlers,
     notification_tx: tokio::sync::mpsc::UnboundedSender<LspNotification>,
     writer_tx: tokio::sync::mpsc::UnboundedSender<String>,
+    server_name: String,
 ) {
     tokio::spawn(async move {
         use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
@@ -111,6 +161,15 @@ pub(crate) fn spawn_reader(
                 log::warn!("LSP reader: JSON parse error");
                 continue;
             };
+
+            if led_core::golden_trace::is_active() {
+                if let Ok(s) = std::str::from_utf8(&body) {
+                    led_core::golden_trace::emit(
+                        "LspRecv",
+                        &format!("server={server_name} {}", trace_fields(s)),
+                    );
+                }
+            }
 
             // id: null counts as absent (some servers include it in notifications)
             let has_id = msg.get("id").is_some_and(|v| !v.is_null());

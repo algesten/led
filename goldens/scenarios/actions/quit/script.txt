@@ -1,0 +1,3 @@
+# Quit starts the Exiting phase; the runner captures the frame and
+# trace shortly after. The process is killed on drop either way.
+press Ctrl-x Ctrl-c

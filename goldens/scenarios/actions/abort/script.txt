@@ -1,0 +1,4 @@
+# Enter isearch, type a bit, then Abort (Esc).
+press Ctrl-s
+type hello
+press Esc

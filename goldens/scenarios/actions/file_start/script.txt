@@ -1,0 +1,4 @@
+# Ctrl+Home isn't sendable via runner; use Emacs alternate Alt-<.
+press Down
+press Down
+press Alt-<

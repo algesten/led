@@ -1,0 +1,6 @@
+# Start isearch, type a query that lands on row 1, accept with Enter,
+# then move the cursor to the end of that line.
+press Ctrl-s
+type needle
+press Enter
+press End

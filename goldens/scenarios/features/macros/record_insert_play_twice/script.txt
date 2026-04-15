@@ -1,0 +1,9 @@
+# Record macro: End + type "#" + Down. Replay twice using the bare `e`
+# repeat-mode after the initial Ctrl-x e execute.
+press Ctrl-x (
+press End
+type #
+press Down
+press Ctrl-x )
+press Ctrl-x e
+type e

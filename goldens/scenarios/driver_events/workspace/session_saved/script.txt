@@ -1,0 +1,7 @@
+# Driver event: WorkspaceIn::SessionSaved
+# Cause: response to WorkspaceOut::SaveSession emitted during quit flow
+# in a workspace (primary-instance only).
+# Consequence: session.saved = true; lib.rs then exits. Frame captures
+# the Exiting phase.
+wait 500ms
+press Ctrl-x Ctrl-c

@@ -1,0 +1,15 @@
+git_init = true
+
+[[file]]
+path = "main.rs"
+contents = """
+fn main() {
+    let x = 1;
+}
+"""
+
+[fake_lsp]
+codeActions = [
+  { title = "Add import", kind = "quickfix" },
+  { title = "Inline variable", kind = "refactor" },
+]

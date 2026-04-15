@@ -1,0 +1,7 @@
+no_workspace = true
+
+# Zero-byte file: opens a buffer with no lines at all (or a single empty
+# line, depending on led's normalization).
+[[file]]
+path = "empty.txt"
+contents = ""

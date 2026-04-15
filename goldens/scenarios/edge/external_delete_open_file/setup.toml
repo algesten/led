@@ -1,0 +1,7 @@
+git_init = true
+
+# File is open; external process deletes it. The docstore watcher
+# should react and surface the removal.
+[[file]]
+path = "doomed.txt"
+contents = "going away soon\n"

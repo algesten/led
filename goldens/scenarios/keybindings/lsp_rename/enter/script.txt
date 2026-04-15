@@ -1,0 +1,4 @@
+wait 1500ms
+press Ctrl-r
+type newname
+press Enter

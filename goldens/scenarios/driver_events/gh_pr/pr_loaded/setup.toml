@@ -1,0 +1,12 @@
+git_init = true
+
+[[file]]
+path = "a.txt"
+contents = "hi\n"
+
+[fake_gh.pr_view]
+number = 42
+state = "OPEN"
+url = "https://example.invalid/pr/42"
+[fake_gh.pr_view.reviewThreads]
+nodes = []

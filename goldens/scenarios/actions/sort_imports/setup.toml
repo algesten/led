@@ -1,0 +1,11 @@
+git_init = true
+
+[[file]]
+path = "main.rs"
+contents = """
+use std::path::Path;
+use std::collections::HashMap;
+use std::fs;
+
+fn main() {}
+"""

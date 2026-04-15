@@ -1,0 +1,6 @@
+# Focus sidebar, move onto the subdir entry, press Right = expand_dir.
+wait 200ms
+press Alt-Tab
+press Down
+press Down
+press Right

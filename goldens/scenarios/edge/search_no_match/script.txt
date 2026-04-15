@@ -1,0 +1,4 @@
+# Search for a string not present — isearch should highlight "no match"
+# state in the overlay.
+press Ctrl-s
+type zzznomatchzzz

@@ -1,0 +1,6 @@
+# Focus the side panel, move to the `sub/` directory, expand it.
+wait 500ms
+press Alt-Tab
+press Down
+press Right
+wait 300ms

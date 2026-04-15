@@ -1,0 +1,5 @@
+FsListDir	path=<TMPDIR>
+FileOpen	path=<TMPDIR>/tracked.txt create_if_missing=true
+GitScan	root=<TMPDIR>
+WorkspaceFlushUndo	path=<TMPDIR>/tracked.txt chain=<CHAIN>
+WorkspaceCheckSync	path=<TMPDIR>/tracked.txt

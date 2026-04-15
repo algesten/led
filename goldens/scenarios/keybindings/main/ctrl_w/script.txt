@@ -1,0 +1,4 @@
+# Set mark with Ctrl-Space alternative: use Ctrl-w to kill region.
+# Without a mark, the action is a no-op; set mark via Ctrl-Space is
+# unavailable to the runner, so we rely on the action's no-op fallback.
+press Ctrl-w

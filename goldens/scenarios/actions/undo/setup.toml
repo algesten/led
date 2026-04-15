@@ -1,0 +1,8 @@
+no_workspace = true
+
+[[file]]
+path = "buffer.txt"
+contents = """
+original line one
+original line two
+"""

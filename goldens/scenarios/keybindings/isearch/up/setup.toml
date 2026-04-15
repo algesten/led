@@ -1,0 +1,10 @@
+no_workspace = true
+
+[[file]]
+path = "buffer.txt"
+contents = """
+apple banana cherry
+apple cookie donut
+banana apple pear
+other text line
+"""

@@ -1,0 +1,3 @@
+# End of trailing-whitespace line — cursor should land after the last
+# space, not after the last non-space.
+press End

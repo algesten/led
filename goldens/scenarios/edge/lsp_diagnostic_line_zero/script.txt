@@ -1,0 +1,2 @@
+# Let LSP settle — diagnostic should render as a gutter mark on line 0.
+wait 2s

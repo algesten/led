@@ -1,0 +1,3 @@
+# Capture initial render — cursor on the mixed-indent lines.
+press Down
+press Down

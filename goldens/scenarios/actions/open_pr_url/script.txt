@@ -1,0 +1,3 @@
+# Wait for gh-pr driver to load the PR, then OpenPrUrl.
+wait 1500ms
+press Ctrl-x Ctrl-p

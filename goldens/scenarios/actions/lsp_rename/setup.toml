@@ -1,0 +1,12 @@
+git_init = true
+
+[[file]]
+path = "main.rs"
+contents = """
+fn main() {
+    let foo = 1;
+    let _ = foo;
+}
+"""
+
+[fake_lsp]

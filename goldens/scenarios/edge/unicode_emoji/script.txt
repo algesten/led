@@ -1,0 +1,4 @@
+# Move cursor to end of the emoji line. Exercises grapheme / column
+# width handling for multi-byte, wide-display codepoints.
+press Down
+press End

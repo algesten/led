@@ -1,0 +1,7 @@
+no_workspace = true
+
+# Lines with trailing spaces — led should preserve them (format-on-save
+# may strip, but open should round-trip exact bytes).
+[[file]]
+path = "trail.txt"
+contents = "line with trailing spaces   \nnext line\n   \nfinal line\n"

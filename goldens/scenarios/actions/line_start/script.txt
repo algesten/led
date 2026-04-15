@@ -1,0 +1,5 @@
+# Move right a few times, then Ctrl-a to jump back to column 0.
+press Right
+press Right
+press Right
+press Ctrl-a

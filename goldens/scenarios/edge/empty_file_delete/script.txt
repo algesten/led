@@ -1,0 +1,4 @@
+# Backspace and Delete on an empty buffer are no-ops — cursor/line stay
+# at origin.
+press Backspace
+press Delete

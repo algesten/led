@@ -1,0 +1,5 @@
+FsListDir	path=<TMPDIR>
+FileOpen	path=<TMPDIR>/notes.md create_if_missing=true
+GitScan	root=<TMPDIR>
+WorkspaceFlushUndo	path=<TMPDIR>/notes.md chain=<CHAIN>
+WorkspaceCheckSync	path=<TMPDIR>/notes.md

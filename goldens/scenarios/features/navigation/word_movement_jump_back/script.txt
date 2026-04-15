@@ -1,0 +1,7 @@
+# Move around the buffer. Most of these are character-level because
+# word-level motion is not in default_keys; end up on the third row end
+# before returning home.
+press Down
+press Down
+press End
+press Ctrl-Home

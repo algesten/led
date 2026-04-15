@@ -1,0 +1,14 @@
+FsListDir	path=<TMPDIR>
+FileOpen	path=<TMPDIR>/hello.txt create_if_missing=true
+FsFindFile	dir=<TMPDIR> prefix="hello.txt" show_hidden=false
+FsFindFile	dir=<TMPDIR> prefix="hello.txtc" show_hidden=false
+FsFindFile	dir=<TMPDIR> prefix="hello.txtco" show_hidden=false
+FsFindFile	dir=<TMPDIR> prefix="hello.txtcop" show_hidden=false
+FsFindFile	dir=<TMPDIR> prefix="hello.txtcopy" show_hidden=false
+FsFindFile	dir=<TMPDIR> prefix="hello.txtcopy." show_hidden=false
+FsFindFile	dir=<TMPDIR> prefix="hello.txtcopy.t" show_hidden=false
+FsFindFile	dir=<TMPDIR> prefix="hello.txtcopy.tx" show_hidden=false
+FsFindFile	dir=<TMPDIR> prefix="hello.txtcopy.txt" show_hidden=false
+FileSaveAs	path=<TMPDIR>/hello.txt new_path=<TMPDIR>/hello.txtcopy.txt
+WorkspaceClearUndo	path=<TMPDIR>/hello.txt
+FileOpen	path=<TMPDIR>/hello.txt create_if_missing=false

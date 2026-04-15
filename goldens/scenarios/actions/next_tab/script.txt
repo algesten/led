@@ -1,0 +1,4 @@
+# Two files open; second is active. Ctrl-Left to first, then Ctrl-Right
+# back to second to demonstrate next-tab.
+press Ctrl-Left
+press Ctrl-Right

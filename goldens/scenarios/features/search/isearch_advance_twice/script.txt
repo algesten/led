@@ -1,0 +1,7 @@
+# Start isearch, type query, then press Ctrl-s twice to advance through
+# the next two matches; accept with Enter on the third hit.
+press Ctrl-s
+type alpha
+press Ctrl-s
+press Ctrl-s
+press Enter

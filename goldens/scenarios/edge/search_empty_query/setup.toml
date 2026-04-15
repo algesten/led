@@ -1,0 +1,5 @@
+no_workspace = true
+
+[[file]]
+path = "doc.txt"
+contents = "alpha beta gamma\ndelta echo foxtrot\n"

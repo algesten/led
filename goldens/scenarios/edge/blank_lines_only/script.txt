@@ -1,0 +1,4 @@
+# Step through blank lines — column should stay at 1 throughout.
+press Down
+press Down
+press End

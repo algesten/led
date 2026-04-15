@@ -2,6 +2,7 @@ mod alert;
 mod config;
 mod doc;
 pub mod git;
+pub mod golden_trace;
 pub mod issue;
 pub mod keys;
 pub mod language;

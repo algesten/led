@@ -1,0 +1,2 @@
+# Ctrl-x k = kill_buffer on a clean buffer — should close without prompt.
+press Ctrl-x k

@@ -1,0 +1,15 @@
+no_workspace = true
+
+[[file]]
+path = "hello.txt"
+contents = "hello world\n"
+
+[config]
+# Minimal custom keymap — led replaces defaults wholesale, so these are
+# the only bindings available. Loading the file produces a successful
+# Ok(ConfigFile<Keys>) response from the config-file driver.
+keys = """
+[keys]
+"ctrl+s" = "save"
+"ctrl+x ctrl+c" = "quit"
+"""

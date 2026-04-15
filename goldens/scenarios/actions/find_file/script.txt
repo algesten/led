@@ -1,0 +1,2 @@
+wait 500ms
+press Ctrl-x Ctrl-f

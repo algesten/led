@@ -1,0 +1,7 @@
+# Open find-file, type the prefix of a file that is not already active,
+# confirm to open it.
+wait 500ms
+press Ctrl-x Ctrl-f
+type alpha.txt
+press Enter
+wait 300ms

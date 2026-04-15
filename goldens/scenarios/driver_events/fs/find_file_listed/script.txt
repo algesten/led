@@ -1,0 +1,7 @@
+# Driver event: FsIn::FindFileListed { dir, entries }
+# Cause: FsOut::FindFileList triggered when the find-file overlay prefix
+# changes; response populates the overlay's completion entries.
+wait 500ms
+press Ctrl-x Ctrl-f
+type al
+wait 200ms

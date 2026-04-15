@@ -1,0 +1,4 @@
+# Move down twice to get a cursor row > 0, then MoveUp is observable.
+press Down
+press Down
+press Up

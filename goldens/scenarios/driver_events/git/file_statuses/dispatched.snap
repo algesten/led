@@ -1,0 +1,4 @@
+FsListDir	path=<TMPDIR>
+FileOpen	path=<TMPDIR>/tracked.txt create_if_missing=true
+FileOpen	path=<TMPDIR>/untracked.txt create_if_missing=true
+GitScan	root=<TMPDIR>

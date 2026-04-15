@@ -1,0 +1,10 @@
+no_workspace = true
+
+[[file]]
+path = "rtl.txt"
+contents = """
+hello world
+مرحبا بالعالم
+שלום עולם
+goodbye
+"""

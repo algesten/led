@@ -1,0 +1,7 @@
+# Record a macro (Down), execute it once (Ctrl-x e), then bare `e` to
+# replay (kbd_macro repeat mode).
+press Ctrl-x (
+press Down
+press Ctrl-x )
+press Ctrl-x e
+type e

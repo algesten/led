@@ -1,0 +1,9 @@
+no_workspace = true
+
+[[file]]
+path = "alpha.txt"
+contents = "alpha line one\n"
+
+[[file]]
+path = "beta.txt"
+contents = "beta line one\n"

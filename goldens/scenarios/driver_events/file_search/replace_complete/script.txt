@@ -1,0 +1,11 @@
+# Driver event: FileSearchIn::ReplaceComplete { results, replaced_count }
+# Cause: FileSearchOut::Replace triggered by confirm in the replace UI.
+# Consequence: "Replaced N" alert; file-search results updated.
+wait 500ms
+press Ctrl-f
+type needle
+press Alt-3
+press Tab
+type pin
+press Alt-Enter
+wait 500ms

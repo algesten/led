@@ -1,0 +1,5 @@
+# With zero chord bindings, Ctrl-a (normally line_start) and
+# Ctrl-x Ctrl-s (normally save) are unbound no-ops. The final state
+# should show the file still open with no save alert fired.
+press Ctrl-a
+press Ctrl-x Ctrl-s

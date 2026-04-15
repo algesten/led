@@ -1,0 +1,8 @@
+# Driver event: WorkspaceIn::UndoFlushed { file_path, chain_id, ... }
+# Cause: response to WorkspaceOut::FlushUndo after the undo_flush timer
+# (500ms) elapses following edits; sqlite write succeeds.
+# Consequence: buf.undo_flush_confirmed called; last_seen_seq updated.
+# No visible frame change — trace shows the dispatch.
+press End
+type  edit
+wait 1s

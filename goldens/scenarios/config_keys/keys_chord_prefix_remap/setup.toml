@@ -1,0 +1,31 @@
+no_workspace = true
+
+[[file]]
+path = "hello.txt"
+contents = "hello\n"
+
+# Move the save chord prefix from Ctrl-x to Ctrl-y. After remap,
+# Ctrl-y Ctrl-s should save instead of Ctrl-x Ctrl-s. Demonstrates that
+# chord-prefix lookup is driven entirely by the sub-table location.
+[config]
+keys = """
+[keys]
+"ctrl+a" = "line_start"
+"ctrl+e" = "line_end"
+"up" = "move_up"
+"down" = "move_down"
+"left" = "move_left"
+"right" = "move_right"
+"home" = "line_start"
+"end" = "line_end"
+"enter" = "insert_newline"
+"backspace" = "delete_backward"
+"delete" = "delete_forward"
+"tab" = "insert_tab"
+"ctrl+g" = "abort"
+"esc" = "abort"
+
+[keys."ctrl+y"]
+"ctrl+c" = "quit"
+"ctrl+s" = "save"
+"""

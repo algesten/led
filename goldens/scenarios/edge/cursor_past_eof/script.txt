@@ -1,0 +1,7 @@
+# Press Down many times past last line — cursor should clamp at EOF.
+press Down
+press Down
+press Down
+press Down
+press Down
+press Down

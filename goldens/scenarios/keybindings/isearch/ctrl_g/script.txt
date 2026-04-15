@@ -1,0 +1,3 @@
+press Ctrl-s
+type apple
+press Ctrl-g

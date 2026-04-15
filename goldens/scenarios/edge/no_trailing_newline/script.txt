@@ -1,0 +1,3 @@
+# Move to EOF — cursor should land after the final char, no phantom line.
+press Down
+press End

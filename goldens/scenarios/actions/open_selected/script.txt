@@ -1,0 +1,6 @@
+# Focus browser, select a file entry, open it.
+wait 500ms
+press Alt-Tab
+press Down
+press Enter
+wait 300ms

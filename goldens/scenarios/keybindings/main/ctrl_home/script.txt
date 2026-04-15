@@ -1,0 +1,4 @@
+press Down
+press Down
+press Down
+press Ctrl-Home

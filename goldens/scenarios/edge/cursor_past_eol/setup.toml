@@ -1,0 +1,7 @@
+no_workspace = true
+
+# Different line lengths. Move cursor to end of the long line, then
+# arrow Down — cursor should clamp to the short line's end, not overshoot.
+[[file]]
+path = "varied.txt"
+contents = "this is a longer line\nshort\nanother long line here\n"

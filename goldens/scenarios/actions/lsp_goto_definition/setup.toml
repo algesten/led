@@ -1,0 +1,15 @@
+git_init = true
+
+[[file]]
+path = "main.rs"
+contents = """
+fn helper() {
+    println!("helper");
+}
+
+fn main() {
+    helper();
+}
+"""
+
+[fake_lsp]

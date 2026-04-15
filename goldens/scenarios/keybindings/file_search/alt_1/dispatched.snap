@@ -1,0 +1,8 @@
+FsListDir	path=<TMPDIR>
+FileOpen	path=<TMPDIR>/a.txt create_if_missing=true
+FileOpen	path=<TMPDIR>/b.txt create_if_missing=true
+GitScan	root=<TMPDIR>
+FileSearch	query="f" root=<TMPDIR> case=false regex=false
+FileSearch	query="fo" root=<TMPDIR> case=false regex=false
+FileSearch	query="foo" root=<TMPDIR> case=false regex=false
+FileSearch	query="foo" root=<TMPDIR> case=true regex=false

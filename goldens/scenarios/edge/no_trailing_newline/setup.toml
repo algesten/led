@@ -1,0 +1,7 @@
+no_workspace = true
+
+# File that does NOT end in a newline. Edge case for line-count and
+# save-with-format behavior.
+[[file]]
+path = "no-eol.txt"
+contents = "line one\nline two without newline"

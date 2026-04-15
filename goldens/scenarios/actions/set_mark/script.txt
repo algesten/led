@@ -1,0 +1,4 @@
+# Set the mark at start, move down to extend the visible region.
+press Ctrl-Space
+press Down
+press Down

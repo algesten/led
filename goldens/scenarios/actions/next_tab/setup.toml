@@ -1,0 +1,13 @@
+no_workspace = true
+
+[[file]]
+path = "first.txt"
+contents = """
+contents of first
+"""
+
+[[file]]
+path = "second.txt"
+contents = """
+contents of second
+"""

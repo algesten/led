@@ -1,0 +1,1 @@
+# No input — captures the initial frame and trace after open.

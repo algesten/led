@@ -1,0 +1,7 @@
+no_workspace = true
+
+# CRLF line endings — led should detect and preserve them. The TOML
+# string uses explicit \r\n escapes.
+[[file]]
+path = "crlf.txt"
+contents = "first\r\nsecond\r\nthird\r\n"

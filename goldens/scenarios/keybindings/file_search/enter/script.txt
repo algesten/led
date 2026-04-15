@@ -1,0 +1,6 @@
+# Enter on input row advances to first hit; Enter on hit opens it.
+wait 200ms
+press Ctrl-f
+type foo
+wait 300ms
+press Enter

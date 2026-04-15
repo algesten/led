@@ -1,0 +1,41 @@
+git_init = true
+
+[[file]]
+path = "a.txt"
+contents = "alpha foo bravo\nsecond foo line\n"
+
+[[file]]
+path = "b.txt"
+contents = "beta foo charlie\n"
+
+# Rebind the case-toggle inside the file_search panel from Alt-1 → Alt-c.
+# Demonstrates that [file_search] context bindings override the default
+# chord mappings when the panel is focused.
+[config]
+keys = """
+[keys]
+"up" = "move_up"
+"down" = "move_down"
+"left" = "move_left"
+"right" = "move_right"
+"home" = "line_start"
+"end" = "line_end"
+"enter" = "insert_newline"
+"backspace" = "delete_backward"
+"delete" = "delete_forward"
+"tab" = "insert_tab"
+"ctrl+f" = "open_file_search"
+"ctrl+g" = "abort"
+"esc" = "abort"
+
+[keys."ctrl+x"]
+"ctrl+c" = "quit"
+"ctrl+s" = "save"
+
+[file_search]
+"alt+c" = "toggle_search_case"
+"alt+2" = "toggle_search_regex"
+"alt+3" = "toggle_search_replace"
+"enter" = "open_selected"
+"alt+enter" = "replace_all"
+"""

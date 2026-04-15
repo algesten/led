@@ -1,0 +1,3 @@
+# Driver event: DocStoreIn::Opened { path, doc }
+# Cause: disk read completed for the CLI-supplied file.
+# Consequence: buffer materialized, tab activated, frame shows contents.

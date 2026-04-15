@@ -1,0 +1,5 @@
+git_init = true
+
+[[file]]
+path = "notes.txt"
+contents = "original line one\noriginal line two\n"

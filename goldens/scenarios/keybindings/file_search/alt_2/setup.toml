@@ -1,0 +1,9 @@
+git_init = true
+
+[[file]]
+path = "a.txt"
+contents = "alpha foo bravo\nsecond foo line\n"
+
+[[file]]
+path = "b.txt"
+contents = "beta foo charlie\n"

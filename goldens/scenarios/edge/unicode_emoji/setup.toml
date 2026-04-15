@@ -1,0 +1,9 @@
+no_workspace = true
+
+[[file]]
+path = "emoji.txt"
+contents = """
+plain ascii line
+emoji line 🎉🚀✨🔥
+more ascii after
+"""

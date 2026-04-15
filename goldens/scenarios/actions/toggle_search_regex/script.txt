@@ -1,0 +1,4 @@
+wait 500ms
+press Ctrl-f
+type a.c
+press Alt-2

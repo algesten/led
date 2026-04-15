@@ -132,6 +132,7 @@ mod tests {
             config_dir: UserPath::new("/tmp/config"),
             test_lsp_server: None,
             test_gh_binary: None,
+            golden_trace: None,
             no_workspace: false,
         })
     }

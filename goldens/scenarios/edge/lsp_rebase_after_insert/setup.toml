@@ -1,0 +1,19 @@
+git_init = true
+
+# LSP-rebase scenario (per GOLDENS-PLAN.md). A diagnostic is reported
+# at line 2 of the on-disk file. After the user inserts a new line at
+# the top of the buffer, the diagnostic should be re-anchored to
+# line 3 in the display (unless a new pull replaces it).
+[[file]]
+path = "main.rs"
+contents = """
+fn main() {
+    let unused = 42;
+}
+"""
+
+[fake_lsp]
+[fake_lsp.diagnostics]
+"main.rs" = [
+  { range = { start = { line = 1, character = 8 }, end = { line = 1, character = 14 } }, severity = 2, message = "unused variable: `unused`" },
+]

@@ -1,0 +1,6 @@
+# Wait for workspace + syntax to settle, then position at the opening
+# brace of fn main() { ... } and jump to its match.
+wait 500ms
+press End
+press Left
+press Alt-]

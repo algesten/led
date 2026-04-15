@@ -1,0 +1,2 @@
+type x
+press Ctrl-x Ctrl-a

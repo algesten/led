@@ -1,0 +1,8 @@
+# Dirty the buffer, save-no-format, dirty it again, then a regular save.
+# With no LSP attached both paths land on SaveRequest.
+press End
+type  world
+press Ctrl-x Ctrl-d
+press End
+type  !
+press Ctrl-x Ctrl-s

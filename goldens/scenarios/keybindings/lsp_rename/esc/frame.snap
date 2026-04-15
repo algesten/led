@@ -1,0 +1,40 @@
+  main.rs               │  fn greet() {
+                        │      let name = 42;
+                        │      println!("{name}");
+                        │  }
+                        │  
+                        │~ 
+                        │~ 
+                        │~ 
+                        │~ 
+                        │~ 
+                        │~ 
+                        │~ 
+                        │~ 
+                        │~ 
+                        │~ 
+                        │~ 
+                        │~ 
+                        │~ 
+                        │~ 
+                        │~ 
+                        │~ 
+                        │~ 
+                        │~ 
+                        │~ 
+                        │~ 
+                        │~ 
+                        │~ 
+                        │~ 
+                        │~ 
+                        │~ 
+                        │~ 
+                        │~ 
+                        │~ 
+                        │~ 
+                        │~ 
+                        │~ 
+                        │~ 
+                        │~ 
+                        │  main.rs 
+   /Users/martin/dev/led/target/debug/fake-lsp                                                                    L1:C1 

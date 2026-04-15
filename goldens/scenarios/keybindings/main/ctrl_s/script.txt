@@ -1,0 +1,2 @@
+# Ctrl-s in main opens isearch overlay; capture the overlay-active frame.
+press Ctrl-s

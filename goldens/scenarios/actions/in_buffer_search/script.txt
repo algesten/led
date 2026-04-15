@@ -1,0 +1,3 @@
+# Start isearch and type a query.
+press Ctrl-s
+type alpha

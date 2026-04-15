@@ -40,6 +40,24 @@ struct Cli {
     /// Record key presses to FILE (replay with --keys-file)
     #[arg(long, value_name = "FILE")]
     keys_record: Option<PathBuf>,
+
+    /// Append a normalized dispatch trace to FILE (test-only; used by goldens).
+    #[arg(long, value_name = "FILE")]
+    golden_trace: Option<PathBuf>,
+
+    /// Override the config directory (defaults to ~/.config/led).
+    /// Used by tests to isolate session DB and config files; also useful
+    /// for users who want a non-default config location.
+    #[arg(long, value_name = "DIR")]
+    config_dir: Option<PathBuf>,
+
+    /// Override the LSP server command for ALL languages (test-only).
+    #[arg(long, value_name = "PATH", hide = true)]
+    test_lsp_server: Option<PathBuf>,
+
+    /// Override the `gh` CLI binary path (test-only).
+    #[arg(long, value_name = "PATH", hide = true)]
+    test_gh_binary: Option<PathBuf>,
 }
 
 enum KeyScript {
@@ -147,12 +165,12 @@ async fn main() {
         (None, users, canons, start)
     };
 
-    let config_dir = UserPath::new(
+    let config_dir = UserPath::new(cli.config_dir.clone().unwrap_or_else(|| {
         dirs::home_dir()
             .unwrap_or_default()
             .join(".config")
-            .join("led"),
-    );
+            .join("led")
+    }));
 
     if cli.reset_config {
         std::fs::create_dir_all(config_dir.as_path()).ok();
@@ -193,8 +211,9 @@ async fn main() {
         start_dir: Arc::new(start_dir),
         user_start_dir,
         config_dir,
-        test_lsp_server: None,
-        test_gh_binary: None,
+        test_lsp_server: cli.test_lsp_server.clone().map(UserPath::new),
+        test_gh_binary: cli.test_gh_binary.clone().map(UserPath::new),
+        golden_trace: cli.golden_trace.clone(),
         no_workspace: cli.no_workspace,
     };
 

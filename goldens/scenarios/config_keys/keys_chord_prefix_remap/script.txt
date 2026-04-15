@@ -1,0 +1,5 @@
+# Save chord moved from Ctrl-x prefix to Ctrl-y prefix. Drive the new
+# chord to verify dispatch travels through the remapped prefix table.
+press End
+type  world
+press Ctrl-y Ctrl-s

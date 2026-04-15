@@ -1,0 +1,10 @@
+no_workspace = true
+
+[[file]]
+path = "buffer.txt"
+contents = """
+alpha match one
+alpha match two
+alpha match three
+tail
+"""

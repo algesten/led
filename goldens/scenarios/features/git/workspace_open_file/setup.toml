@@ -1,0 +1,5 @@
+git_init = true
+
+[[file]]
+path = "tracked.txt"
+contents = "tracked line one\ntracked line two\n"

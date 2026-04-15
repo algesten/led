@@ -1,0 +1,6 @@
+no_workspace = true
+
+# Single character, no trailing newline.
+[[file]]
+path = "one.txt"
+contents = "x"

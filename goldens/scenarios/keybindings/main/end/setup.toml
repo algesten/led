@@ -1,0 +1,10 @@
+no_workspace = true
+
+[[file]]
+path = "buffer.txt"
+contents = """
+alpha beta gamma
+second line here
+third line text
+fourth line more
+"""

@@ -1,0 +1,40 @@
+  main.rs               │  use std::path::Path;
+                        │  use std::collections::HashMap;
+                        │  use std::fs;
+                        │  
+                        │  fn main() {}
+                        │  
+                        │~ 
+                        │~ 
+                        │~ 
+                        │~ 
+                        │~ 
+                        │~ 
+                        │~ 
+                        │~ 
+                        │~ 
+                        │~ 
+                        │~ 
+                        │~ 
+                        │~ 
+                        │~ 
+                        │~ 
+                        │~ 
+                        │~ 
+                        │~ 
+                        │~ 
+                        │~ 
+                        │~ 
+                        │~ 
+                        │~ 
+                        │~ 
+                        │~ 
+                        │~ 
+                        │~ 
+                        │~ 
+                        │~ 
+                        │~ 
+                        │~ 
+                        │~ 
+                        │  main.rs 
+   /Users/martin/dev/led/target/debug/fake-lsp                                                                    L1:C1 

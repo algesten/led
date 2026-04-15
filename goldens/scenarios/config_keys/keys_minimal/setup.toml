@@ -1,0 +1,14 @@
+no_workspace = true
+
+[[file]]
+path = "buffer.txt"
+contents = "hello world\n"
+
+# Minimal keys.toml: empty [keys] table (still parses). With no bindings,
+# no chord produces any action. Typing still works (InsertChar runs via
+# the unbound fallthrough in the keymap handler), but chords like
+# Ctrl-x Ctrl-c / Ctrl-a / Ctrl-e become no-ops.
+[config]
+keys = """
+[keys]
+"""

@@ -1,0 +1,10 @@
+no_workspace = true
+
+[[file]]
+path = "lines.txt"
+contents = """
+line one
+line two
+line three
+line four
+"""

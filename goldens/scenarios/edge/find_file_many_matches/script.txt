@@ -1,0 +1,5 @@
+# Let workspace index, then open find-file and filter by "note" —
+# many matches should populate the overlay.
+wait 500ms
+press Ctrl-x Ctrl-f
+type note

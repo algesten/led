@@ -1,0 +1,5 @@
+# Driver event: SyntaxIn { highlights, indent, reindent_chars, ... }
+# Cause: tree-sitter parses the .rs file on open.
+# Consequence: frame shows colored syntax tokens; trace shows
+# SyntaxHighlights/ApplyIndent/SetReindentChars muts.
+wait 500ms

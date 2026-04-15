@@ -1,0 +1,6 @@
+# Driver event: DocStoreIn::Saved { path, doc }
+# Cause: disk write completed for DocStoreOut::Save (triggered by Ctrl-x Ctrl-s).
+# Consequence: BufferSaved mut, "Saved ..." alert in status bar.
+press End
+type  world
+press Ctrl-x Ctrl-s

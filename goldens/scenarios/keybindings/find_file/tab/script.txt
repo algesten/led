@@ -1,0 +1,3 @@
+press Ctrl-x Ctrl-f
+type b
+press Tab

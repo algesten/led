@@ -1,0 +1,6 @@
+# Open file in a git-initialized workspace, let the git scan run, make
+# an edit to produce a buffer-level change indicator, and settle.
+wait 500ms
+press End
+type  edited
+wait 500ms

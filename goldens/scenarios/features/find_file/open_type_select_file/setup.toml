@@ -1,0 +1,9 @@
+git_init = true
+
+[[file]]
+path = "alpha.txt"
+contents = "alpha body\n"
+
+[[file]]
+path = "beta.txt"
+contents = "beta body\n"

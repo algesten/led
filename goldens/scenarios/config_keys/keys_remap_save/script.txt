@@ -1,0 +1,5 @@
+# With custom keys.toml, ctrl+s is rebound from in_buffer_search → save.
+# Type something then press Ctrl-s (a single chord, not Ctrl-x Ctrl-s).
+press End
+type  world
+press Ctrl-s

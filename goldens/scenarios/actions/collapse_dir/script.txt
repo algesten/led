@@ -1,0 +1,7 @@
+# Focus browser, navigate to and expand `sub/`, then collapse it.
+wait 500ms
+press Alt-Tab
+press Down
+press Right
+wait 300ms
+press Left

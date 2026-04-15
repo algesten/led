@@ -1,0 +1,6 @@
+# Driver event: WorkspaceIn::Workspace { workspace }
+# Cause: workspace driver resolved the git root and acquired the primary
+# flock right after WorkspaceOut::Init.
+# Consequence: Mut::Workspace seeds browser root, pending_lists, first
+# pending_file_scan. Frame shows sidebar populated.
+wait 500ms

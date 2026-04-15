@@ -1,0 +1,7 @@
+FsListDir	path=<TMPDIR>
+FileOpen	path=<TMPDIR>/notes.txt create_if_missing=true
+GitScan	root=<TMPDIR>
+FsListDir	path=<TMPDIR>
+GitScan	root=<TMPDIR>
+WorkspaceFlushUndo	path=<TMPDIR>/notes.txt chain=<CHAIN>
+WorkspaceCheckSync	path=<TMPDIR>/notes.txt

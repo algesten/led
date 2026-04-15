@@ -1,0 +1,2 @@
+# Alt-Enter in main = lsp_goto_definition; no LSP → action is a no-op.
+press Alt-Enter

@@ -1,0 +1,19 @@
+# Driver event: LspIn::Edits { edits }
+# Cause: textDocument/rename response carries a WorkspaceEdit for `foo`.
+# Consequence: buffer text updated in place with new identifier.
+wait 1500ms
+press Down
+press Right
+press Right
+press Right
+press Right
+press Right
+press Right
+press Right
+press Right
+press Right
+press Ctrl-r
+wait 300ms
+type bar
+press Enter
+wait 500ms

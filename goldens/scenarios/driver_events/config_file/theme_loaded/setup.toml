@@ -1,0 +1,14 @@
+no_workspace = true
+
+[[file]]
+path = "hello.txt"
+contents = "hello world\n"
+
+[config]
+# Minimal theme override — successful parse produces Ok(ConfigFile<Theme>)
+# from the config-file driver.
+theme = """
+[colors]
+foreground = "#ffffff"
+background = "#000000"
+"""

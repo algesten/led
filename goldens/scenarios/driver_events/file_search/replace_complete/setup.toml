@@ -1,0 +1,5 @@
+git_init = true
+
+[[file]]
+path = "a.txt"
+contents = "needle in haystack, another needle\n"

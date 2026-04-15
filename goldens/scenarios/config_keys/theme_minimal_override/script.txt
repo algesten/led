@@ -1,0 +1,4 @@
+# Custom theme.toml sanity check: no action needed. Just let led render
+# its first frame with the full custom palette loaded. A deserialization
+# failure would fire an info-level Alert (visible in the status bar) and
+# fall back to defaults — the golden snapshot catches either outcome.

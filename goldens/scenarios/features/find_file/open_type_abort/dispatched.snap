@@ -1,0 +1,7 @@
+FsListDir	path=<TMPDIR>
+FileOpen	path=<TMPDIR>/alpha.txt create_if_missing=true
+FileOpen	path=<TMPDIR>/beta.txt create_if_missing=true
+GitScan	root=<TMPDIR>
+FsFindFile	dir=<TMPDIR> prefix="" show_hidden=false
+FsFindFile	dir=<TMPDIR> prefix="a" show_hidden=false
+FsFindFile	dir=<TMPDIR> prefix="al" show_hidden=false

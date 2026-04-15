@@ -1,0 +1,9 @@
+git_init = true
+
+[[file]]
+path = "tracked.txt"
+contents = "tracked contents\n"
+
+[[file]]
+path = "untracked.txt"
+contents = "untracked contents\n"

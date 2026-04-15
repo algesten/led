@@ -1,0 +1,13 @@
+git_init = true
+
+[[file]]
+path = "a.txt"
+contents = "hi\n"
+
+[[file]]
+path = "sub/nested.txt"
+contents = "nested\n"
+
+[[file]]
+path = "other/more.txt"
+contents = "more\n"

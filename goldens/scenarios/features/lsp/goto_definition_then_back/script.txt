@@ -1,0 +1,15 @@
+# Goto-definition from the call site to the helper declaration, then
+# JumpBack to the original call site.
+wait 1500ms
+press Down
+press Down
+press Down
+press Down
+press Down
+press Right
+press Right
+press Right
+press Right
+press Alt-Enter
+wait 500ms
+press Alt-b

@@ -1,0 +1,2 @@
+# Two tabs open; kill the active (clean) one.
+press Ctrl-x k

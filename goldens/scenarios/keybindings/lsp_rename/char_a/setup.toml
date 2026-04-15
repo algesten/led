@@ -1,0 +1,12 @@
+git_init = true
+
+[[file]]
+path = "main.rs"
+contents = """
+fn greet() {
+    let name = 42;
+    println!("{name}");
+}
+"""
+
+[fake_lsp]

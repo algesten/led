@@ -1,0 +1,4 @@
+# Save a clean buffer twice. No actual write should happen (buffer not
+# dirty), but the dispatch is traced.
+press Ctrl-x Ctrl-s
+press Ctrl-x Ctrl-s

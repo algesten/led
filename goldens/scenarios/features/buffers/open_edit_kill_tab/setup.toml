@@ -1,0 +1,9 @@
+no_workspace = true
+
+[[file]]
+path = "keeper.txt"
+contents = "keeper contents\n"
+
+[[file]]
+path = "transient.txt"
+contents = "transient contents\n"

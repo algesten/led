@@ -75,12 +75,20 @@ impl LanguageServer {
         let (writer_tx, writer_rx) = tokio::sync::mpsc::unbounded_channel();
         let response_handlers: ResponseHandlers = Arc::new(Mutex::new(HashMap::new()));
 
-        spawn_writer(writer_rx, stdin);
+        // Use just the binary basename for the trace so the line is stable
+        // across machines (avoids /Users/x/dev/led/target/.../fake-lsp).
+        // The internal `name` field below keeps the full command for logs.
+        let server_name = std::path::Path::new(config.command)
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| config.command.to_string());
+        spawn_writer(writer_rx, stdin, server_name.clone());
         spawn_reader(
             stdout,
             response_handlers.clone(),
             notification_tx,
             writer_tx.clone(),
+            server_name,
         );
 
         let server = Arc::new(Self {

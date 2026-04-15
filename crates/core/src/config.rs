@@ -47,6 +47,11 @@ pub struct Startup {
     /// Override the `gh` CLI binary path (testing only).
     pub test_gh_binary: Option<UserPath>,
 
+    /// Append a normalized one-line-per-dispatch trace to this file.
+    /// Used by the goldens runner to snapshot externally-observable
+    /// work led performs. Off in production. See `docs/rewrite/GOLDENS-PLAN.md`.
+    pub golden_trace: Option<std::path::PathBuf>,
+
     /// Standalone (no-workspace) mode. Intended for `$EDITOR` use — e.g.
     /// `EDITOR="led --no-workspace"` for git commit messages and similar
     /// single-file edits where loading the surrounding project is wrong.

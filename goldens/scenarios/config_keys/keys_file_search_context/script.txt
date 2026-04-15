@@ -1,0 +1,7 @@
+# Open the project search panel, type a query, then press the new
+# Alt-c chord (default Alt-1) to flip the case-sensitive toggle.
+wait 200ms
+press Ctrl-f
+type foo
+wait 300ms
+press Alt-c

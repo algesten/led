@@ -1,0 +1,6 @@
+# Driver event: WorkspaceIn::WatchersReady
+# Cause: final step of workspace Init — both the .git/ sentinel watcher
+# and the recursive workspace watcher are registered.
+# Consequence: session.watchers_ready = true; cross-instance sync is
+# henceforth enabled. Visible in the trace.
+wait 500ms

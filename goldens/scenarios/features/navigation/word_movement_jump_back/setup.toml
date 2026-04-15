@@ -1,0 +1,9 @@
+no_workspace = true
+
+[[file]]
+path = "notes.txt"
+contents = """
+alpha beta gamma
+delta echo foxtrot
+golf hotel india
+"""

@@ -1,0 +1,38 @@
+no_workspace = true
+
+[[file]]
+path = "lines.txt"
+contents = """
+alpha
+bravo
+charlie
+delta
+echo
+"""
+
+# Rebind plain j / k to move_down / move_up (vi-style). Since led inserts
+# characters via a separate Action::InsertChar code path, a scalar binding
+# for a printable character overrides insertion.
+[config]
+keys = """
+[keys]
+"ctrl+a" = "line_start"
+"ctrl+e" = "line_end"
+"up" = "move_up"
+"down" = "move_down"
+"left" = "move_left"
+"right" = "move_right"
+"home" = "line_start"
+"end" = "line_end"
+"enter" = "insert_newline"
+"backspace" = "delete_backward"
+"delete" = "delete_forward"
+"tab" = "insert_tab"
+"j" = "move_down"
+"k" = "move_up"
+"ctrl+g" = "abort"
+"esc" = "abort"
+
+[keys."ctrl+x"]
+"ctrl+c" = "quit"
+"""

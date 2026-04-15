@@ -1,0 +1,6 @@
+# Kill-line twice at row 0 (accumulates into one ring entry), move past
+# the remaining content, then yank the accumulated text back.
+press Ctrl-k
+press Ctrl-k
+press Ctrl-End
+press Ctrl-y

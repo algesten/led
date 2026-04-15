@@ -1,0 +1,5 @@
+# Dirty the buffer, then quit — should display the confirm-kill prompt.
+# Do NOT press y/n; snapshot captures the prompt state.
+press End
+type  dirty
+press Ctrl-x Ctrl-c

@@ -1,0 +1,4 @@
+# Move through RTL scripts (Arabic, Hebrew). led renders them left-to-right
+# in the buffer; snapshot captures byte-preserving behavior.
+press Down
+press End

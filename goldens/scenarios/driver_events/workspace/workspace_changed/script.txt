@@ -1,0 +1,8 @@
+# Driver event: WorkspaceIn::WorkspaceChanged { paths }
+# Cause: recursive workspace watcher fires for Create/Remove in the
+# workspace tree; fs_write on a new path triggers a Create.
+# Consequence: Mut::WorkspaceChanged refreshes dir listings; sidebar
+# picks up the new file.
+wait 1s
+fs_write fresh.txt fresh file content\n
+wait 1s

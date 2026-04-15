@@ -1,0 +1,7 @@
+# Driver event: LspIn::CodeActions { actions }
+# Cause: Alt-i invokes textDocument/codeAction; fake-lsp returns
+# configured actions.
+# Consequence: code-action overlay listing "Inline variable `x`".
+wait 1500ms
+press Alt-i
+wait 500ms

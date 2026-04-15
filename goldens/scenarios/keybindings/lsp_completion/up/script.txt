@@ -1,0 +1,7 @@
+wait 1500ms
+press Down
+press End
+type .
+wait 500ms
+press Down
+press Up

@@ -1,0 +1,19 @@
+FsListDir	path=<TMPDIR>
+FileOpen	path=<TMPDIR>/note01.txt create_if_missing=true
+FileOpen	path=<TMPDIR>/note02.txt create_if_missing=true
+FileOpen	path=<TMPDIR>/note03.txt create_if_missing=true
+FileOpen	path=<TMPDIR>/note04.txt create_if_missing=true
+FileOpen	path=<TMPDIR>/note05.txt create_if_missing=true
+FileOpen	path=<TMPDIR>/note06.txt create_if_missing=true
+FileOpen	path=<TMPDIR>/note07.txt create_if_missing=true
+FileOpen	path=<TMPDIR>/note08.txt create_if_missing=true
+FileOpen	path=<TMPDIR>/note09.txt create_if_missing=true
+FileOpen	path=<TMPDIR>/note10.txt create_if_missing=true
+FileOpen	path=<TMPDIR>/note11.txt create_if_missing=true
+FileOpen	path=<TMPDIR>/note12.txt create_if_missing=true
+GitScan	root=<TMPDIR>
+FsFindFile	dir=<TMPDIR> prefix="" show_hidden=false
+FsFindFile	dir=<TMPDIR> prefix="n" show_hidden=false
+FsFindFile	dir=<TMPDIR> prefix="no" show_hidden=false
+FsFindFile	dir=<TMPDIR> prefix="not" show_hidden=false
+FsFindFile	dir=<TMPDIR> prefix="note" show_hidden=false

@@ -1,0 +1,3 @@
+# End of long line, then Down onto the short line — cursor must clamp.
+press End
+press Down

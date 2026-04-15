@@ -1,0 +1,4 @@
+# Wait for LSP initialize, open rename, type a char.
+wait 1500ms
+press Ctrl-r
+type x

@@ -1,0 +1,2 @@
+# Ctrl-x ( = kbd_macro_start
+press Ctrl-x (

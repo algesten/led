@@ -1,0 +1,4 @@
+# Second Ctrl-s inside isearch = search_next.
+press Ctrl-s
+type apple
+press Ctrl-s

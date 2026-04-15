@@ -1,0 +1,7 @@
+no_workspace = true
+
+# Two matches. Search once to find first, Ctrl-s again to advance past
+# last — should wrap to top.
+[[file]]
+path = "doc.txt"
+contents = "first match here\nfiller\nfiller\nsecond match\nend\n"

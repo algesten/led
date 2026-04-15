@@ -1,0 +1,6 @@
+no_workspace = true
+
+# File containing only newlines — exercises empty-line cursor motion.
+[[file]]
+path = "blank.txt"
+contents = "\n\n\n\n"

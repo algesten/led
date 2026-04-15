@@ -1,0 +1,2 @@
+FsListDir	path=<TMPDIR>
+FileOpen	path=<TMPDIR>/trail.txt create_if_missing=true

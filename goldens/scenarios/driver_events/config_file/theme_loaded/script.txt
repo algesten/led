@@ -1,0 +1,4 @@
+# Driver event: Ok(ConfigFile<Theme>)
+# Cause: config-file driver successfully parsed <config_dir>/theme.toml.
+# Consequence: state.theme updated; render layer uses new colors. Frame
+# captures initial render after load.

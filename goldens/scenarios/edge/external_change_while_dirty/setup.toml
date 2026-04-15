@@ -1,0 +1,7 @@
+git_init = true
+
+# File is open and dirty; external process rewrites it. led should
+# surface a conflict alert rather than silently discarding the edits.
+[[file]]
+path = "shared.txt"
+contents = "original line one\noriginal line two\n"

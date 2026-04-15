@@ -1,0 +1,7 @@
+no_workspace = true
+
+# Mixed tab + space indentation on different lines. Tabs render at their
+# configured column width; the display should line up consistently.
+[[file]]
+path = "indent.txt"
+contents = "\tline with tab indent\n    line with four spaces\n\t    tab then spaces\n"

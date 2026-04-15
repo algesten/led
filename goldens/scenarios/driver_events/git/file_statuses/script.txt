@@ -1,0 +1,4 @@
+# Driver event: GitIn::FileStatuses { statuses, branch }
+# Cause: GitOut::ScanFiles at startup; libgit2 reports repo-wide status.
+# Consequence: sidebar decorations (untracked marker) and status-bar branch.
+wait 500ms

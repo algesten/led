@@ -1,0 +1,2 @@
+# Ctrl-x Ctrl-c = quit; capture the pre-quit frame.
+press Ctrl-x Ctrl-c

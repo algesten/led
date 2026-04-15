@@ -1,0 +1,2 @@
+# Two files open; second is active. Ctrl-Left switches to first.
+press Ctrl-Left

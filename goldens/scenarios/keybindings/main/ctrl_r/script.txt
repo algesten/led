@@ -1,0 +1,3 @@
+# Ctrl-r = lsp_rename; without LSP nothing happens, but capture the
+# attempt frame + trace.
+press Ctrl-r

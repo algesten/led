@@ -1,0 +1,4 @@
+# Kill-line into the kill ring, move past the newline, then yank.
+press Ctrl-k
+press Down
+press Ctrl-y

@@ -1,0 +1,5 @@
+# Open find-file overlay, type a partial name, then abort.
+wait 500ms
+press Ctrl-x Ctrl-f
+type al
+press Esc

@@ -1,0 +1,2 @@
+# Ctrl+End isn't sendable via runner; use Alt-> alternate.
+press Alt->

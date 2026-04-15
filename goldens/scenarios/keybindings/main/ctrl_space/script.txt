@@ -1,0 +1,2 @@
+press Ctrl-Space
+press Down

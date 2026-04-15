@@ -1,0 +1,121 @@
+no_workspace = true
+
+[[file]]
+path = "hello.txt"
+contents = "hello world\n"
+
+# Supply a full custom theme.toml. All required sections (COLORS, tabs,
+# status_bar, editor, browser, file_search, diagnostics, git, brackets,
+# syntax) must be present or deserialization fails and led falls back to
+# defaults. vt100::Screen::contents() returns text only, so colour
+# changes don't surface in the frame snapshot — this scenario's value
+# is that it LOADS without triggering an alert, i.e. the theme pipeline
+# round-trips cleanly. We tweak a handful of palette names to prove the
+# file was consumed without crashing parsing.
+[config]
+theme = """
+[COLORS]
+black   = "ansi_black"
+red     = "ansi_red"
+green   = "ansi_green"
+yellow  = "ansi_yellow"
+blue    = "ansi_blue"
+magenta = "ansi_magenta"
+cyan    = "ansi_cyan"
+white   = "ansi_white"
+bright_black   = "ansi_bright_black"
+bright_red     = "ansi_bright_red"
+bright_green   = "ansi_bright_green"
+bright_yellow  = "ansi_bright_yellow"
+bright_blue    = "ansi_bright_blue"
+bright_magenta = "ansi_bright_magenta"
+bright_cyan    = "ansi_bright_cyan"
+bright_white   = "ansi_bright_white"
+
+normal           = "term_reset"
+accent           = "ansi_bright_green"
+muted            = "ansi_bright_black"
+bold             = "ansi_bright_white"
+inverse_bold     = { fg = "ansi_black", bg = "ansi_bright_white" }
+inverse_active   = { fg = "ansi_black", bg = "ansi_bright_green" }
+inverse_inactive = { fg = "ansi_white", bg = "ansi_bright_black" }
+inverse_inactive2= { fg = "term_reset", bg = "ansi_bright_black" }
+selected         = { fg = "term_reset", bg = "ansi_magenta" }
+selected_2nd     = { fg = "ansi_black", bg = "ansi_bright_cyan" }
+neutral          = "ansi_cyan"
+
+syntax_keyword   = "ansi_blue"
+syntax_type      = "ansi_cyan"
+syntax_string    = "ansi_green"
+syntax_number    = "ansi_magenta"
+syntax_comment   = "ansi_bright_black"
+syntax_attribute = "ansi_yellow"
+syntax_tag       = "ansi_red"
+syntax_label     = "ansi_yellow"
+
+[tabs]
+active           = "$inverse_active"
+inactive         = "$inverse_inactive"
+preview_active   = "$inverse_active"
+preview_inactive = "$inverse_inactive"
+
+[status_bar]
+style = { fg = "$bold", bg = "$muted" }
+
+[editor]
+text               = "$normal"
+gutter             = "$muted"
+selection          = "$selected"
+search_match       = "$selected_2nd"
+search_current     = "$inverse_bold"
+file_search_match  = "$inverse_bold"
+
+[browser]
+directory          = "$neutral"
+file               = "$normal"
+selected           = "$inverse_active"
+selected_unfocused = "$inverse_inactive2"
+border             = "$muted"
+
+[file_search]
+border             = "$muted"
+input              = { bg = "$bright_black" }
+input_unfocused    = { bg = "$bright_black" }
+toggle_on          = "$inverse_active"
+toggle_off         = "$inverse_inactive"
+file_header        = "$accent"
+hit                = "$normal"
+match              = { fg = "$bright_yellow", bold = true }
+selected           = "$inverse_active"
+selected_unfocused = "$inverse_inactive"
+search_current     = "$inverse_bold"
+
+[diagnostics]
+error   = "$red"
+warning = "$yellow"
+info    = "$blue"
+hint    = "$bright_black"
+
+[git]
+modified        = "$yellow"
+added           = "$green"
+untracked       = "$bright_green"
+gutter_added    = "$green"
+gutter_modified = "$yellow"
+
+[brackets]
+match     = { fg = "$bright_yellow", bold = true }
+rainbow_0 = "$blue"
+rainbow_1 = "$magenta"
+rainbow_2 = "$green"
+rainbow_3 = "$yellow"
+rainbow_4 = "$cyan"
+rainbow_5 = "$red"
+
+[syntax]
+keyword = "$syntax_keyword"
+type    = "$syntax_type"
+string  = "$syntax_string"
+number  = "$syntax_number"
+comment = "$syntax_comment"
+"""

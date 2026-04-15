@@ -1,0 +1,34 @@
+no_workspace = true
+
+[[file]]
+path = "hello.txt"
+contents = "hello\n"
+
+# Default binds ctrl+s to in_buffer_search and Ctrl-x Ctrl-s to save.
+# Here we rebind ctrl+s directly to save so a single chord saves the file.
+[config]
+keys = """
+[keys]
+"ctrl+a" = "line_start"
+"ctrl+e" = "line_end"
+"ctrl+d" = "delete_forward"
+"ctrl+k" = "kill_line"
+"up" = "move_up"
+"down" = "move_down"
+"left" = "move_left"
+"right" = "move_right"
+"home" = "line_start"
+"end" = "line_end"
+"pageup" = "page_up"
+"pagedown" = "page_down"
+"enter" = "insert_newline"
+"backspace" = "delete_backward"
+"delete" = "delete_forward"
+"tab" = "insert_tab"
+"ctrl+s" = "save"
+"ctrl+g" = "abort"
+"esc" = "abort"
+
+[keys."ctrl+x"]
+"ctrl+c" = "quit"
+"""

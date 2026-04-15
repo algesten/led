@@ -1,0 +1,6 @@
+# Driver event: DocStoreIn::ExternalChange { path, doc }
+# Cause: parent-dir watcher fired Modify/Create for an open file; driver
+# re-read disk. Frame reloads with new content.
+wait 1s
+fs_write notes.txt externally rewritten line one\nexternally rewritten line two\n
+wait 1s

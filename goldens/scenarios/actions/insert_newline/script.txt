@@ -1,0 +1,7 @@
+# Cursor at col 5 (after "hello"), then split the line.
+press Right
+press Right
+press Right
+press Right
+press Right
+press Enter

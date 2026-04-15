@@ -1,0 +1,5 @@
+# Type a long paragraph on the intro line, then reflow it.
+wait 500ms
+press End
+type  followed by extra content that will make this line wrap past the reflow target width once we trigger the reflow paragraph action.
+press Ctrl-q

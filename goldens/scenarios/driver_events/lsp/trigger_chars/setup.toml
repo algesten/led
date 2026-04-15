@@ -1,0 +1,10 @@
+git_init = true
+
+[[file]]
+path = "main.rs"
+contents = """
+fn main() {}
+"""
+
+[fake_lsp]
+triggerCharacters = [".", ":", ">"]

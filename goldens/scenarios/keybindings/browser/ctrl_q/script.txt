@@ -1,0 +1,7 @@
+# Focus sidebar, expand a dir, then Ctrl-q = collapse_all.
+wait 200ms
+press Alt-Tab
+press Down
+press Down
+press Right
+press Ctrl-q

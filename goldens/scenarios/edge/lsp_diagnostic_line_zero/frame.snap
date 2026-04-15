@@ -1,0 +1,40 @@
+  main.rs              •│ ●fn main() {}
+                        │   expected item, found keyword 
+                        │  
+                        │~ 
+                        │~ 
+                        │~ 
+                        │~ 
+                        │~ 
+                        │~ 
+                        │~ 
+                        │~ 
+                        │~ 
+                        │~ 
+                        │~ 
+                        │~ 
+                        │~ 
+                        │~ 
+                        │~ 
+                        │~ 
+                        │~ 
+                        │~ 
+                        │~ 
+                        │~ 
+                        │~ 
+                        │~ 
+                        │~ 
+                        │~ 
+                        │~ 
+                        │~ 
+                        │~ 
+                        │~ 
+                        │~ 
+                        │~ 
+                        │~ 
+                        │~ 
+                        │~ 
+                        │~ 
+                        │~ 
+                        │  main.rs 
+   /Users/martin/dev/led/target/debug/fake-lsp                                                                    L1:C1 

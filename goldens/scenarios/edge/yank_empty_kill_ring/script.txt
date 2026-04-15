@@ -1,0 +1,2 @@
+# Yank with nothing previously killed — should be a no-op or alert.
+press Ctrl-y

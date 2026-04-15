@@ -1,0 +1,6 @@
+# Active is transient (last opened). Type to dirty, then kill. Dirty kill
+# triggers the confirm-kill prompt; answer 'y' to force.
+press End
+type  x
+press Ctrl-x k
+type y

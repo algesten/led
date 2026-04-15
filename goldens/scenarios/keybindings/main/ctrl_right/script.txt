@@ -1,0 +1,2 @@
+press Ctrl-Left
+press Ctrl-Right

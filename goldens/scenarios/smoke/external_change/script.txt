@@ -1,0 +1,5 @@
+# Let workspace + watchers settle, externally rewrite the file, then wait
+# for led's docstore driver to surface the ExternalChange event.
+wait 1s
+fs_write notes.txt externally rewritten line one\nexternally rewritten line two\n
+wait 1s

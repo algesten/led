@@ -1,0 +1,11 @@
+no_workspace = true
+
+# Combining marks: 'é' spelled as e + U+0301 (COMBINING ACUTE ACCENT),
+# 'ñ' as n + U+0303, plus ZWJ emoji family.
+[[file]]
+path = "combining.txt"
+contents = """
+cafe\u0301
+nin\u0303o
+family 👨\u200d👩\u200d👧
+"""

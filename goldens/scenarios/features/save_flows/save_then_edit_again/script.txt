@@ -1,0 +1,7 @@
+# Edit, save, then edit again. The buffer should be dirty again after
+# the second edit.
+press End
+type  first
+press Ctrl-x Ctrl-s
+press End
+type  second

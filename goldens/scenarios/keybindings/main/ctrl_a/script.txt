@@ -1,0 +1,4 @@
+press Right
+press Right
+press Right
+press Ctrl-a

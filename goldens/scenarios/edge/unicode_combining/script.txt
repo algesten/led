@@ -1,0 +1,8 @@
+# Combining marks and ZWJ sequences: move End on each line — exercises
+# grapheme-cluster column math (the base char plus zero-width combiners
+# should count as 1 column).
+press End
+press Down
+press End
+press Down
+press End

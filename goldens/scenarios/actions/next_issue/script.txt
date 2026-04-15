@@ -1,0 +1,2 @@
+wait 1500ms
+press Alt-.

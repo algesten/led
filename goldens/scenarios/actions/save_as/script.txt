@@ -1,0 +1,3 @@
+# SaveAs opens the find-file overlay in SaveAs mode. This scenario
+# exercises the opening, not the confirm-path step.
+press Ctrl-x Ctrl-w

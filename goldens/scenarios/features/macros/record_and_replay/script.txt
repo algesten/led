@@ -1,0 +1,8 @@
+# Record a macro that appends "!" at end of line and moves down, end
+# recording, then replay once.
+press Ctrl-x (
+press End
+type !
+press Down
+press Ctrl-x )
+press Ctrl-x e

@@ -1,0 +1,6 @@
+FsListDir	path=<TMPDIR>
+FileOpen	path=<TMPDIR>/doomed.txt create_if_missing=true
+GitScan	root=<TMPDIR>
+FsListDir	path=<TMPDIR>
+FsListDir	path=<TMPDIR>
+GitScan	root=<TMPDIR>

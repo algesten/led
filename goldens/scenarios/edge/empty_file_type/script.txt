@@ -1,0 +1,2 @@
+# Type into a freshly-opened empty buffer.
+type first text

@@ -1,0 +1,5 @@
+# Driver event: FsIn::DirListed { path, entries }
+# Cause: FsOut::ListDir fires at workspace init for the root dir; the
+# response populates the sidebar browser listing.
+# Consequence: sidebar shows a.txt, b.txt, sub/.
+wait 500ms

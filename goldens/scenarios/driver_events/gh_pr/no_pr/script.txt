@@ -1,0 +1,5 @@
+# Driver event: GhPrIn::NoPr
+# Cause: `gh pr view` exits non-zero because fake-gh has no pr_view
+# configured for this branch.
+# Consequence: pr_info stays None; no PR indicator in status bar.
+wait 1500ms

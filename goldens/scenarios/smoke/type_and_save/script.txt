@@ -1,0 +1,3 @@
+press End
+type  world
+press Ctrl-x Ctrl-s

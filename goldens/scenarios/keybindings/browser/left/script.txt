@@ -1,0 +1,4 @@
+# Focus sidebar then press Left (context = browser → collapse_dir).
+wait 200ms
+press Alt-Tab
+press Left

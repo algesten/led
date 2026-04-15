@@ -1,0 +1,4 @@
+# Start isearch, type query, then Abort. Cursor should return to origin.
+press Ctrl-s
+type needle
+press Esc

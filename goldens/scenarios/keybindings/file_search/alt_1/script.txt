@@ -1,0 +1,5 @@
+wait 200ms
+press Ctrl-f
+type foo
+wait 300ms
+press Alt-1

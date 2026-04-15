@@ -1,0 +1,4 @@
+# Driver event: Ok(ConfigFile<Keys>)
+# Cause: config-file driver successfully parsed <config_dir>/keys.toml.
+# Consequence: keymap_s rebuilds the keymap from the custom bindings.
+# The frame captures the initial state after load.

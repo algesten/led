@@ -1,0 +1,6 @@
+# Dirty the buffer, then externally rewrite the same file on disk.
+press End
+type  local edits
+wait 500ms
+fs_write shared.txt externally rewritten one\nexternally rewritten two\n
+wait 1s

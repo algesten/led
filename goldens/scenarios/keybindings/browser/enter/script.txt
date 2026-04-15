@@ -1,0 +1,4 @@
+# Focus sidebar then Enter on the selected entry = open_selected.
+wait 200ms
+press Alt-Tab
+press Enter

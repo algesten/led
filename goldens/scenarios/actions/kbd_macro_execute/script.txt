@@ -1,0 +1,5 @@
+# Define a one-char macro, then execute it.
+press Ctrl-x (
+type x
+press Ctrl-x )
+press Ctrl-x e

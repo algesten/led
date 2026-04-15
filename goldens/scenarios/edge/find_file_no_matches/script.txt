@@ -1,0 +1,4 @@
+# Open find-file overlay; type a query that matches nothing.
+wait 500ms
+press Ctrl-x Ctrl-f
+type zzznomatchfileqqq

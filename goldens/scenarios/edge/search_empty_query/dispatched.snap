@@ -1,0 +1,2 @@
+FsListDir	path=<TMPDIR>
+FileOpen	path=<TMPDIR>/doc.txt create_if_missing=true

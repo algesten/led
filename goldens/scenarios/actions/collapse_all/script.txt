@@ -1,0 +1,7 @@
+# Focus browser, expand one directory, then collapse-all.
+wait 500ms
+press Alt-Tab
+press Down
+press Right
+wait 300ms
+press Ctrl-q

@@ -1,0 +1,6 @@
+# CJK characters are 2 columns wide. Move End on each line to exercise
+# cursor-column computation over wide glyphs.
+press Down
+press End
+press Down
+press End

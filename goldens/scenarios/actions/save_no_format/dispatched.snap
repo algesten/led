@@ -1,0 +1,4 @@
+FsListDir	path=<TMPDIR>
+FileOpen	path=<TMPDIR>/hello.txt create_if_missing=true
+FileSave	path=<TMPDIR>/hello.txt
+WorkspaceClearUndo	path=<TMPDIR>/hello.txt

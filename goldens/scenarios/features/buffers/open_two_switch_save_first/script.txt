@@ -1,0 +1,5 @@
+# Two files open; beta active. Switch to alpha, append text, save.
+press Ctrl-Left
+press End
+type  edited
+press Ctrl-x Ctrl-s

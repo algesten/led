@@ -1,0 +1,5 @@
+# Ctrl-x e = kbd_macro_execute; record a simple macro first.
+press Ctrl-x (
+press Down
+press Ctrl-x )
+press Ctrl-x e

@@ -1,0 +1,9 @@
+# Driver event: LspIn::Completion { items, prefix_start_col }
+# Cause: trigger char "." fires textDocument/completion; fake-lsp returns
+# the configured items.
+# Consequence: completion popup overlay appears with items.
+wait 1500ms
+press Down
+press End
+type .
+wait 500ms

@@ -1,0 +1,41 @@
+git_init = true
+
+# Many workspace files sharing the "note" prefix. The find-file overlay
+# should show a scrollable match list. First file (note01) opens as the
+# active buffer; find-file is launched from there.
+[[file]]
+path = "note01.txt"
+contents = "one\n"
+[[file]]
+path = "note02.txt"
+contents = "two\n"
+[[file]]
+path = "note03.txt"
+contents = "three\n"
+[[file]]
+path = "note04.txt"
+contents = "four\n"
+[[file]]
+path = "note05.txt"
+contents = "five\n"
+[[file]]
+path = "note06.txt"
+contents = "six\n"
+[[file]]
+path = "note07.txt"
+contents = "seven\n"
+[[file]]
+path = "note08.txt"
+contents = "eight\n"
+[[file]]
+path = "note09.txt"
+contents = "nine\n"
+[[file]]
+path = "note10.txt"
+contents = "ten\n"
+[[file]]
+path = "note11.txt"
+contents = "eleven\n"
+[[file]]
+path = "note12.txt"
+contents = "twelve\n"

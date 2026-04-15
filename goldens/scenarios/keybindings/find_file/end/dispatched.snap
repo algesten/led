@@ -1,0 +1,6 @@
+FsListDir	path=<TMPDIR>
+FileOpen	path=<TMPDIR>/buffer.txt create_if_missing=true
+FsFindFile	dir=<TMPDIR> prefix="" show_hidden=false
+FsFindFile	dir=<TMPDIR> prefix="a" show_hidden=false
+FsFindFile	dir=<TMPDIR> prefix="ab" show_hidden=false
+FsFindFile	dir=<TMPDIR> prefix="abc" show_hidden=false

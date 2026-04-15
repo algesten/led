@@ -1,0 +1,4 @@
+wait 500ms
+press Ctrl-f
+type needle
+press Alt-1

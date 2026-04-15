@@ -1,0 +1,8 @@
+git_init = true
+
+[[file]]
+path = "a.txt"
+contents = "hi\n"
+
+[fake_gh]
+# No pr_view configured → fake-gh exits non-zero on `gh pr view`.

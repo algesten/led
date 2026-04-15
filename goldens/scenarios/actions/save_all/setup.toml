@@ -1,0 +1,9 @@
+no_workspace = true
+
+[[file]]
+path = "a.txt"
+contents = "aaa\n"
+
+[[file]]
+path = "b.txt"
+contents = "bbb\n"

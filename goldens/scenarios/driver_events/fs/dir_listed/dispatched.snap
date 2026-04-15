@@ -1,0 +1,6 @@
+FsListDir	path=<TMPDIR>
+FileOpen	path=<TMPDIR>/a.txt create_if_missing=true
+FileOpen	path=<TMPDIR>/b.txt create_if_missing=true
+FileOpen	path=<TMPDIR>/sub/nested.txt create_if_missing=true
+FsListDir	path=<TMPDIR>/sub
+GitScan	root=<TMPDIR>

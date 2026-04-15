@@ -1,0 +1,13 @@
+git_init = true
+
+[[file]]
+path = "alpha.txt"
+contents = "alpha contents\n"
+
+[[file]]
+path = "beta.txt"
+contents = "beta contents\n"
+
+[[file]]
+path = "subdir/inner.txt"
+contents = "inner contents\n"

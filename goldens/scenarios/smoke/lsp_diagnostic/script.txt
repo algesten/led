@@ -1,0 +1,4 @@
+# LSP startup is fully async; settle's quiescence detector returns
+# before the workspace driver kicks off LSP. Explicit wait until the
+# initialize → didOpen → publishDiagnostics cycle completes.
+wait 2s

@@ -1,0 +1,6 @@
+# Dirty the active buffer and invoke SaveAll. Only one buffer is dirty
+# here (NextTab's Ctrl-Right isn't sendable via the PTY runner), but the
+# SaveAll dispatch + BufferUpdate per dirty still fires.
+press End
+type  x
+press Ctrl-x Ctrl-a

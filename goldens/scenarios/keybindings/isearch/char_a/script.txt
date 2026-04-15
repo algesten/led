@@ -1,0 +1,2 @@
+press Ctrl-s
+type a

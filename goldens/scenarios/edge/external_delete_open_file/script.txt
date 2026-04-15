@@ -1,0 +1,5 @@
+# Let workspace settle, then fs_delete the open file. led should react
+# to the removal.
+wait 1s
+fs_delete doomed.txt
+wait 1s

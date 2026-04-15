@@ -1,0 +1,6 @@
+# Driver event: DocStoreIn::SavedAs { path, doc }
+# Cause: disk write completed for DocStoreOut::SaveAs (Ctrl-x Ctrl-w).
+# Consequence: BufferSavedAs mut (new path registered, tab renamed).
+press Ctrl-x Ctrl-w
+type copy.txt
+press Enter

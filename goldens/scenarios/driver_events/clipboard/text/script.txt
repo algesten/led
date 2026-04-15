@@ -1,0 +1,7 @@
+# Driver event: ClipboardIn::Text(text)
+# Cause: ClipboardOut::Read response — headless driver returns the last
+# Write (or empty, in which case the model falls back to the kill-ring).
+# Consequence: the killed line is re-inserted at the cursor on Ctrl-y.
+press Ctrl-k
+press Down
+press Ctrl-y

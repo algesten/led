@@ -1,0 +1,6 @@
+# Driver event: WorkspaceIn::SessionRestored { session: None }
+# Cause: fresh workspace — no prior session row in sqlite, so the driver
+# sends None after loading.
+# Consequence: no tabs restored; phase advances straight to Running with
+# only the CLI-opened file visible.
+wait 500ms

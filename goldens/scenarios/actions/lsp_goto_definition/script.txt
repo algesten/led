@@ -1,0 +1,14 @@
+# Wait for LSP handshake; position cursor on "helper" within fn main,
+# then goto-definition.
+wait 1500ms
+press Down
+press Down
+press Down
+press Down
+press Down
+press Right
+press Right
+press Right
+press Right
+press Alt-Enter
+wait 500ms

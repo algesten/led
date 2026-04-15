@@ -1,0 +1,4 @@
+# Advance right so MoveLeft has somewhere to go.
+press Right
+press Right
+press Left

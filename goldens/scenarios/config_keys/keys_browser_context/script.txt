@@ -1,0 +1,7 @@
+# Focus the sidebar, then press j twice (custom browser binding →
+# move_down). Sidebar selection should advance two rows; the letter 'j'
+# itself must NOT be inserted anywhere.
+wait 200ms
+press Alt-Tab
+type j
+type j

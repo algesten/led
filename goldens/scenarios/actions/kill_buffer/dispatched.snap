@@ -1,0 +1,3 @@
+FsListDir	path=<TMPDIR>
+FileOpen	path=<TMPDIR>/a.txt create_if_missing=true
+FileOpen	path=<TMPDIR>/b.txt create_if_missing=true

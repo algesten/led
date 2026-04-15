@@ -1,0 +1,4 @@
+# Start recording, type one char, end recording.
+press Ctrl-x (
+type x
+press Ctrl-x )

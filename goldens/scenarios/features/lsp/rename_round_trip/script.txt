@@ -1,0 +1,17 @@
+# Position on `foo`, open rename overlay, type new name, submit. The
+# fake-lsp returns WorkspaceEdit that renames both occurrences.
+wait 1500ms
+press Down
+press Right
+press Right
+press Right
+press Right
+press Right
+press Right
+press Right
+press Right
+press Right
+press Ctrl-r
+type bar
+press Enter
+wait 500ms

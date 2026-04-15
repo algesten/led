@@ -1,0 +1,5 @@
+press Ctrl-x Ctrl-f
+type abc
+press Left
+press Left
+press Right

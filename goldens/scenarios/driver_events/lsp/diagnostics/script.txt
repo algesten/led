@@ -1,0 +1,5 @@
+# Driver event: LspIn::Diagnostics { path, diagnostics, content_hash }
+# Cause: fake-lsp sends publishDiagnostics on didOpen.
+# Consequence: gutter mark + highlight on the "unused" span, issue count
+# in status bar.
+wait 2s

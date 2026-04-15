@@ -1,0 +1,4 @@
+# Let LSP publish diagnostics, then cycle through them with NextIssue.
+wait 1500ms
+press Alt-.
+press Alt-.

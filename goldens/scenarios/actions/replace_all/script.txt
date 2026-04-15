@@ -1,0 +1,10 @@
+# Open file-search, type query, enter replace mode, Tab to replace
+# input, type replacement, then trigger ReplaceAll.
+wait 500ms
+press Ctrl-f
+type needle
+press Alt-3
+press Tab
+type pin
+press Alt-Enter
+wait 500ms

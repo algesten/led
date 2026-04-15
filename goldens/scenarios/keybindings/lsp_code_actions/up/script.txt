@@ -1,0 +1,5 @@
+wait 1500ms
+press Alt-i
+wait 500ms
+press Down
+press Up

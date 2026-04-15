@@ -1,0 +1,13 @@
+# Move to the word `foo` on row 1 and invoke rename overlay.
+wait 1500ms
+press Down
+press Right
+press Right
+press Right
+press Right
+press Right
+press Right
+press Right
+press Right
+press Right
+press Ctrl-r

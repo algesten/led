@@ -1,0 +1,7 @@
+git_init = true
+
+[[file]]
+path = "notes.md"
+contents = """
+This is a really long paragraph that definitely exceeds the default target reflow column width and should therefore be wrapped by the dprint-based reflow pass when ctrl+q is pressed with the cursor on this line.
+"""

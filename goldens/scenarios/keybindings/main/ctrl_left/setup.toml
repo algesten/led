@@ -1,0 +1,9 @@
+no_workspace = true
+
+[[file]]
+path = "first.txt"
+contents = "first\n"
+
+[[file]]
+path = "second.txt"
+contents = "second\n"

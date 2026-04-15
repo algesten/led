@@ -1,0 +1,5 @@
+FsListDir	path=<TMPDIR>
+FileOpen	path=<TMPDIR>/alpha.txt create_if_missing=true
+FileOpen	path=<TMPDIR>/beta.txt create_if_missing=true
+FileSave	path=<TMPDIR>/alpha.txt
+WorkspaceClearUndo	path=<TMPDIR>/alpha.txt

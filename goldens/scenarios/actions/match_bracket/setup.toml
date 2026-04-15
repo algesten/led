@@ -1,0 +1,9 @@
+git_init = true
+
+[[file]]
+path = "main.rs"
+contents = """
+fn main() {
+    println!("hi");
+}
+"""

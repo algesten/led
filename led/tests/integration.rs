@@ -2683,6 +2683,7 @@ fn two_instance_no_args_browser_visible() {
         config_dir: cfg_user.clone(),
         test_lsp_server: None,
         test_gh_binary: None,
+        golden_trace: None,
         no_workspace: false,
     };
     let no_files_b = Startup {
@@ -2696,6 +2697,7 @@ fn two_instance_no_args_browser_visible() {
         config_dir: cfg_user.clone(),
         test_lsp_server: None,
         test_gh_binary: None,
+        golden_trace: None,
         no_workspace: false,
     };
 

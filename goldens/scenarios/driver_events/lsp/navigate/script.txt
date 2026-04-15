@@ -1,0 +1,16 @@
+# Driver event: LspIn::Navigate { path, row, col }
+# Cause: textDocument/definition — fake-lsp searches for `fn helper` and
+# returns the matching location.
+# Consequence: cursor jumps to the function declaration.
+wait 1500ms
+press Down
+press Down
+press Down
+press Down
+press Down
+press Right
+press Right
+press Right
+press Right
+press Alt-Enter
+wait 500ms

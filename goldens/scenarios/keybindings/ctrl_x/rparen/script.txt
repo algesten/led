@@ -1,0 +1,4 @@
+# Ctrl-x ) = kbd_macro_end; start one first to make this valid.
+press Ctrl-x (
+press Down
+press Ctrl-x )

@@ -1,0 +1,3 @@
+# Open isearch but type nothing — empty query should stay in isearch
+# mode with the prompt visible but no match.
+press Ctrl-s
