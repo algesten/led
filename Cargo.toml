@@ -1,71 +1,44 @@
 [workspace]
 resolver = "2"
-members = ["led", "crates/clipboard", "crates/config-file", "crates/core", "crates/state", "crates/terminal-in", "crates/docstore", "crates/workspace", "crates/ui", "crates/timers", "crates/fs", "crates/file-search", "crates/syntax", "crates/git", "crates/gh-pr", "crates/lsp", "led/tests/fake-lsp", "led/tests/fake-gh"]
+members = []
 exclude = ["goldens"]
-default-members = ["led"]
 
 [workspace.dependencies]
-led-clipboard = { path = "crates/clipboard" }
-led-config-file = { path = "crates/config-file" }
-led-core = { path = "crates/core" }
-led-state = { path = "crates/state" }
-led-terminal-in = { path = "crates/terminal-in" }
-led-docstore = { path = "crates/docstore" }
-led-workspace = { path = "crates/workspace" }
-led-ui = { path = "crates/ui" }
-led-timers = { path = "crates/timers" }
-led-fs = { path = "crates/fs" }
-led-file-search = { path = "crates/file-search" }
-led-gh-pr = { path = "crates/gh-pr" }
-led-git = { path = "crates/git" }
-led-syntax = { path = "crates/syntax" }
-led-lsp = { path = "crates/lsp" }
+# Internal crate paths will be added here as crates are grown
+# per docs/rewrite/QUERY-ARCH.md § "Multi-crate organization".
 
+# External dependencies carried over from the legacy workspace.
+# Trim or update as the rewrite actually uses them.
 arboard = { version = "3", default-features = false }
 clap = { version = "4.5.60", features = ["derive"] }
 crossterm = { version = "0.29" }
 dirs = "6"
 dprint-plugin-markdown = "0.21.1"
-libc = "0.2"
-log = "0.4"
-open = "5"
-notify = "7"
-pin-project-lite = "0.2"
-ratatui = "0.30"
-serde = { version = "1", features = ["derive"] }
-tokio = { version = "1", features = ["macros", "sync", "time", "rt-multi-thread", "fs"] }
-# tokio-stream = { version = "0.1.18", features = ["sync"] }
-tokio-util = "0.7.18"
-tempfile = "3"
-toml = "0.8"
-
-# crossterm = { version = "0.29", features = ["event-stream"] }
-# futures = "0.3"
 git2 = { version = "0.20", features = ["vendored-libgit2"] }
 globset = "0.4"
-# led_buffer = { path = "crates/buffer" }
-# led_core = { path = "crates/core" }
-# led_file_browser = { path = "crates/file-browser" }
-# led_file_search = { path = "crates/file-search" }
-# led_find_file = { path = "crates/find-file" }
-# led_git_status = { path = "crates/git-status" }
-# led_jump_list = { path = "crates/jump-list" }
-# led_lsp = { path = "crates/lsp" }
-# led_messages = { path = "crates/messages" }
-# led_workspace_watcher = { path = "crates/workspace-watcher" }
-lsp-types = "0.97"
-nucleo-matcher = "0.3"
-grep-regex = "0.1"
 grep-matcher = "0.1"
+grep-regex = "0.1"
 grep-searcher = "0.1"
 ignore = "0.4"
+libc = "0.2"
+log = "0.4"
+lsp-types = "0.97"
+notify = "7"
+nucleo-matcher = "0.3"
+open = "5"
+pin-project-lite = "0.2"
+ratatui = "0.30"
 regex = "1"
 regex-syntax = "0.8"
 rmp-serde = "1"
 ropey = "1.6"
 rusqlite = { version = "0.38.0", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-# similar = "2"
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "sync", "time", "rt-multi-thread", "fs"] }
+tokio-util = "0.7.18"
+toml = "0.8"
 tree-sitter = "0.25"
 tree-sitter-bash = "0.25"
 tree-sitter-c = "0.24"
@@ -80,4 +53,3 @@ tree-sitter-rust = "0.23"
 tree-sitter-swift = "0.7"
 tree-sitter-toml-ng = "0.7"
 tree-sitter-typescript = "0.23"
-# twox-hash = "2"
