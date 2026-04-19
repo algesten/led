@@ -1,0 +1,10 @@
+[package]
+name = "led-state-tabs"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+led-core = { workspace = true }
+drv = { workspace = true }
+imbl = { workspace = true }

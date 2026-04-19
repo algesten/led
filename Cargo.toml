@@ -1,11 +1,30 @@
 [workspace]
 resolver = "2"
-members = []
+members = [
+    "crates/core",
+    "crates/state-tabs",
+    "crates/driver-buffers/core",
+    "crates/driver-buffers/native",
+    "crates/driver-terminal/core",
+    "crates/driver-terminal/native",
+    "crates/runtime",
+    "led",
+]
 exclude = ["goldens"]
 
 [workspace.dependencies]
-# Internal crate paths will be added here as crates are grown
-# per docs/rewrite/QUERY-ARCH.md § "Multi-crate organization".
+# Internal crates (per docs/rewrite/MILESTONE-1.md § "Crate layout").
+led-core = { path = "crates/core" }
+led-state-tabs = { path = "crates/state-tabs" }
+led-driver-buffers-core = { path = "crates/driver-buffers/core" }
+led-driver-buffers-native = { path = "crates/driver-buffers/native" }
+led-driver-terminal-core = { path = "crates/driver-terminal/core" }
+led-driver-terminal-native = { path = "crates/driver-terminal/native" }
+led-runtime = { path = "crates/runtime" }
+
+# drv = the memoization / query primitive.
+drv = { path = "../drv/drv", features = ["imbl"] }
+imbl = "7"
 
 # External dependencies carried over from the legacy workspace.
 # Trim or update as the rewrite actually uses them.

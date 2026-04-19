@@ -2,7 +2,29 @@
 
 How to actually carry out the rewrite from FRP → query-driven.
 
-Prerequisite reading: `README.md`, `QUERY-ARCH.md`.
+Prerequisite reading: `README.md`, `QUERY-ARCH.md`, and (authoritative
+for the code organisation) `../../../drv/EXAMPLE-ARCH.md`.
+
+> **Status (2026-04-19).** Phases 0–3 are done.
+>
+> - **Phase 0 (harness).** `goldens/` crate: PTY spawn via
+>   `portable-pty`, `vt100` parser, scripted fakes. Excluded from
+>   workspace (black-box).
+> - **Phase 1 (goldens).** ~280 scenarios in
+>   `goldens/scenarios/{actions,keybindings,config_keys,driver_events,features,edge,smoke}/`,
+>   authored against current led on `main`.
+> - **Phase 2 (spec + driver inventory).** `docs/extract/` (4 files),
+>   `docs/spec/` (18 files), `docs/drivers/` (14 files). Cross-check
+>   references done.
+> - **Phase 3 (skeleton).** `rewrite` branch; worktree at
+>   `../led-rewrite/`; M1 skeleton (tabs + buffer-loads + render)
+>   runs end-to-end.
+>
+> **Phase 4 (domain-by-domain port) is the next ~multi-milestone
+> effort.** Progress is measured as `% goldens green` when run against
+> the rewrite binary. M1 implements a small slice — Ctrl-C / Tab /
+> Shift-Tab / first-render — so most goldens fail against it today.
+> Each milestone adds a domain and turns more green.
 
 ---
 
@@ -90,24 +112,33 @@ In parallel with Phase 1 (they share the Phase A extraction step):
 
 **Exit criteria:** spec covers every feature area; driver inventory covers every driver; cross-check passes.
 
-### Phase 3 — branch, clean slate, skeleton of new arch
+### Phase 3 — branch, clean slate, skeleton of new arch [DONE]
 
 **Goal:** create the `rewrite` branch; on it, the query-driven skeleton compiles and produces a (blank or minimal) frame.
 
-- `git checkout -b rewrite` from the tip of `main` (which now has goldens + spec + driver inventory).
-- On the `rewrite` branch: delete `crates/` and `led/` entirely. Keep `docs/`, `tests/golden/`, `Cargo.toml` (workspace), root `CLAUDE.md`, and any top-level tooling.
-- `git worktree add ../led-rewrite rewrite` so both trees are live side-by-side.
-- Grow new crates under whatever layout `QUERY-ARCH.md` § "Multi-crate organization" suggests (typically `crates/state-*`, `crates/runtime/`, `crates/drivers/`, `led/` for the bin).
-- Define the initial domain atoms (`BufferState`, `UiState` at minimum; others as they come online).
-- Define the `Event` enum (coarse inputs + resource completions).
-- Write `apply_event` skeleton (match arms that panic with `todo!()` initially).
-- Write a minimal `render_frame` query that returns a blank frame for empty state.
-- Wire a minimal `Runtime` with `tick()` over a channel.
-- Keyboard input driver → produces `Event::Key`.
-- Terminal driver → calls `terminal.draw(&frame)`.
-- Wire `--golden-trace` and `--test-clock` from day one — these are non-negotiable, and the goldens can start running (mostly failing) against the new binary immediately as a progress signal.
+What actually happened:
 
-**Exit criteria:** `cargo run` on the `rewrite` branch opens a blank terminal UI that responds to Ctrl-C to quit. The golden runner can attach to it (it spawns, accepts input, emits trace lines, exits cleanly).
+- `rewrite` branch exists; worktree at `../led-rewrite`.
+- `crates/` and `led/` deleted from `rewrite`.
+- Crate layout follows [`../../../drv/EXAMPLE-ARCH.md`](../../../drv/EXAMPLE-ARCH.md)
+  § "Organizing the code": `core/`, `state-tabs/`, `driver-buffers/{core,native}/`,
+  `driver-terminal/{core,native}/`, `runtime/`, `led/`. Strict driver
+  isolation; all cross-atom lenses + memos in `runtime/src/query.rs`.
+  See `README.md` § "Current crate layout" for the tree.
+- Atoms defined so far: `Tabs`, `BufferStore`, `Terminal`.
+- `Event` enum: `Key`, `Resize`, `Quit`.
+- `dispatch` handles `Ctrl-C` (quit), `Tab` / `Shift-Tab` (cycle active tab).
+- `render_frame` + `tab_bar_model` + `body_model` compose a `Frame`;
+  `paint()` emits ANSI via crossterm.
+- Input driver (`driver-terminal/native`) reads crossterm events on a
+  bg thread; file-read driver (`driver-buffers/native`) reads files on
+  a bg thread.
+- `--golden-trace` wired (emits `key_in`, `resize`, `file_load_start`,
+  `file_load_done`, `render_tick`). `--test-clock` **not yet wired**
+  (reserved for when Phases 0–1 happen and the harness needs virtual
+  time).
+
+**Exit criterion met:** `cargo run -p led -- FILE…` opens a terminal UI showing the file content, Tab cycles tabs, Ctrl-C exits cleanly (cursor restored). 35 unit tests passing.
 
 ### Phase 4 — domain-by-domain porting
 

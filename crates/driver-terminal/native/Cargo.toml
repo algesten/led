@@ -1,0 +1,15 @@
+[package]
+name = "led-driver-terminal-native"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Desktop crossterm implementation of the terminal driver:
+# - Background reader thread that translates crossterm events into
+#   `TermEvent`s and forwards them to `*-core`.
+# - `paint` free fn that emits ANSI escape sequences for a `Frame`.
+# - `RawModeGuard` RAII for raw mode + alternate screen.
+
+[dependencies]
+led-driver-terminal-core = { workspace = true }
+crossterm = { workspace = true }

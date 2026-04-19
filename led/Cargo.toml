@@ -1,0 +1,18 @@
+[package]
+name = "led"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "led"
+path = "src/main.rs"
+
+[dependencies]
+led-core = { workspace = true }
+led-state-tabs = { workspace = true }
+led-driver-buffers-core = { workspace = true }
+led-driver-terminal-core = { workspace = true }
+led-driver-terminal-native = { workspace = true }
+led-runtime = { workspace = true }
+clap = { workspace = true }

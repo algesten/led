@@ -1,0 +1,17 @@
+[package]
+name = "led-driver-terminal-core"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Sync core of the terminal driver — strictly isolated. Knows only
+# about its own atom, its own ABI-crossing event types, the `Frame` /
+# view-models `paint` consumes, and the sync `TerminalInputDriver` API.
+# Has NO dependency on other drivers or on state-tabs.
+#
+# Render-time memos that build `Frame`s from multiple drivers' atoms
+# live in `led-runtime`. The `paint` free fn and `RawModeGuard` live in
+# `led-driver-terminal-native`.
+
+[dependencies]
+drv = { workspace = true }

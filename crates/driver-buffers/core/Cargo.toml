@@ -1,0 +1,19 @@
+[package]
+name = "led-driver-buffers-core"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Sync, platform-agnostic side of the buffers driver. Strictly
+# self-contained: knows only about its own atom + ABI types + sync API.
+# Has NO dependency on other drivers or on state-tabs — cross-driver
+# composition happens in `led-runtime`.
+#
+# The matching async worker lives in `led-driver-buffers-native`
+# (desktop) or a Swift/Kotlin implementation on iOS/Android.
+
+[dependencies]
+led-core = { workspace = true }
+drv = { workspace = true }
+imbl = { workspace = true }
+ropey = { workspace = true }

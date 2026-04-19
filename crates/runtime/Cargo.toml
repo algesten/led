@@ -1,0 +1,30 @@
+[package]
+name = "led-runtime"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Desktop wiring crate. Owns:
+#
+# - The event enum + dispatch (which mutates driver atoms in response
+#   to input events).
+# - The query layer: standalone `#[drv::lens]` declarations projecting
+#   every driver's atom, and the cross-atom memos that combine them
+#   into `LoadAction`s and `Frame`s.
+# - The `Trace` trait + `SharedTrace` file sink.
+# - The `run` main loop: ingest → query → execute → render.
+# - `spawn_drivers` convenience for the desktop `*-native` workers.
+#
+# Mobile targets would replace this crate with their own runtime wiring
+# around the same `*-core` crates.
+
+[dependencies]
+led-core = { workspace = true }
+led-state-tabs = { workspace = true }
+led-driver-buffers-core = { workspace = true }
+led-driver-buffers-native = { workspace = true }
+led-driver-terminal-core = { workspace = true }
+led-driver-terminal-native = { workspace = true }
+drv = { workspace = true }
+imbl = { workspace = true }
+ropey = { workspace = true }
