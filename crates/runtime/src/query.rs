@@ -403,7 +403,7 @@ mod tests {
             Some(Dims { cols: 40, rows: 11 }), // 10 body rows
         );
         // Place cursor at line 25 with scroll.top = 20 → cursor visible at row 5.
-        t.open[0].cursor = Cursor { line: 25, col: 2 };
+        t.open[0].cursor = Cursor { line: 25, col: 2, preferred_col: 2 };
         t.open[0].scroll = Scroll { top: 20 };
 
         let frame = render(&t, &s, &term).expect("dims set");
@@ -430,7 +430,7 @@ mod tests {
             Some(Dims { cols: 40, rows: 6 }), // 5 body rows
         );
         // Cursor far outside the scroll window.
-        t.open[0].cursor = Cursor { line: 40, col: 0 };
+        t.open[0].cursor = Cursor { line: 40, col: 0, preferred_col: 0 };
         t.open[0].scroll = Scroll { top: 0 };
 
         let frame = render(&t, &s, &term).expect("dims set");

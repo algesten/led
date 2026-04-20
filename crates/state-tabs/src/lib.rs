@@ -15,10 +15,17 @@ led_core::id_newtype!(TabId);
 /// `line` / `col` are zero-based indices; `col` is a character index
 /// (not a display column — revisit for wide/combining characters when
 /// syntax work comes online).
+///
+/// `preferred_col` is the user's horizontal "goal" — preserved across
+/// `Up` / `Down` / `PageUp` / `PageDown` so that traversing a short
+/// line and continuing onto a long line restores the original column.
+/// Any explicit horizontal move (`Left` / `Right` / `Home` / `End`)
+/// resets `preferred_col` to match the new `col`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Cursor {
     pub line: usize,
     pub col: usize,
+    pub preferred_col: usize,
 }
 
 /// Viewport scroll offset. `top` is the first buffer row shown at the
