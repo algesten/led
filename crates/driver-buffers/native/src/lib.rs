@@ -315,11 +315,14 @@ mod tests {
     struct TempDir(PathBuf);
 
     fn tempdir() -> TempDir {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
         let base = std::env::temp_dir();
         let unique = format!(
             "led-driver-buffers-native-{}-{}",
             std::process::id(),
-            Instant::now().elapsed().as_nanos()
+            n,
         );
         let p = base.join(unique);
         std::fs::create_dir_all(&p).expect("tempdir create");

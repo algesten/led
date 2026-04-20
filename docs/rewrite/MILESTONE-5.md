@@ -46,7 +46,11 @@ $ cargo run -p led -- Cargo.toml
   diagnostics.
 - `--config-dir <PATH>` CLI flag (already reserved) points at a
   directory; `<dir>/config.toml` is read if present. Absent
-  `--config-dir` falls back to `dirs::config_dir()/led`, also optional.
+  `--config-dir` falls back to `$XDG_CONFIG_HOME/led/` (if set) or
+  `~/.config/led/` otherwise. Uniform across platforms — we skip
+  `dirs::config_dir()` because its macOS path
+  (`~/Library/Application Support`) isn't where users of a terminal-
+  first editor look.
 - TOML `[keys]` section merges onto the default map (later entries
   override earlier ones; no "unbind" yet).
 - Parse errors at startup print to stderr and exit non-zero **before**

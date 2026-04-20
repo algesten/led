@@ -107,8 +107,12 @@ impl std::error::Error for ConfigError {}
 ///
 /// Resolution:
 /// 1. Start with [`default_keymap`].
-/// 2. Look for `config.toml` in `config_dir` (if given) or in the
-///    platform config dir (`~/.config/led/` on Linux/macOS).
+/// 2. Look for `config.toml` in `config_dir` (if given), then in
+///    `$XDG_CONFIG_HOME/led/` (if set), otherwise `~/.config/led/`.
+///    This is uniform across Linux / macOS / Windows — we skip
+///    `dirs::config_dir()` because its macOS path
+///    (`~/Library/Application Support`) is inappropriate for a
+///    terminal-first editor.
 /// 3. If a file is found, merge its `[keys]` section on top.
 /// 4. If no file is found anywhere, return the defaults silently —
 ///    having no config is the common case.
@@ -125,12 +129,24 @@ pub fn load_keymap(config_dir: Option<&Path>) -> Result<Keymap, ConfigError> {
     Ok(keymap)
 }
 
+/// Resolve the config file path.
+///
+/// Deliberately CLI-tool convention, not Apple convention:
+/// `$XDG_CONFIG_HOME/led/config.toml` if set, otherwise
+/// `$HOME/.config/led/config.toml` on every platform. `dirs::config_dir`
+/// is NOT used — on macOS it returns
+/// `~/Library/Application Support`, which is surprising for a
+/// terminal editor.
 fn discover_config(explicit: Option<&Path>) -> Option<PathBuf> {
     if let Some(dir) = explicit {
         let candidate = dir.join("config.toml");
         return candidate.exists().then_some(candidate);
     }
-    let base = dirs::config_dir()?.join("led");
+    let base = if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME") {
+        PathBuf::from(xdg).join("led")
+    } else {
+        dirs::home_dir()?.join(".config").join("led")
+    };
     let candidate = base.join("config.toml");
     candidate.exists().then_some(candidate)
 }
@@ -336,6 +352,42 @@ mod tests {
         );
         let e = load_keymap(Some(tmp.path())).unwrap_err();
         assert!(matches!(e, ConfigError::NonStringBinding { .. }));
+    }
+
+    #[test]
+    fn xdg_config_home_env_is_honoured() {
+        // Point XDG_CONFIG_HOME at our tempdir, drop config.toml into
+        // `<tmp>/led/`, and confirm discover_config finds it without
+        // a CLI --config-dir hint.
+        let tmp = tempdir();
+        let led_dir = tmp.path().join("led");
+        std::fs::create_dir_all(&led_dir).unwrap();
+        let file = led_dir.join("config.toml");
+        let mut f = std::fs::File::create(&file).unwrap();
+        f.write_all(br#"[keys]
+"ctrl-q" = "quit"
+"#)
+            .unwrap();
+
+        // SAFETY: test is single-threaded within its process slice
+        // thanks to the env guard — but env mutation is inherently
+        // process-global. We save + restore to be polite to other
+        // tests in the same binary.
+        let prev = std::env::var_os("XDG_CONFIG_HOME");
+        // SAFETY: env mutation in test; see note above.
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", tmp.path()) };
+
+        let keymap = load_keymap(None).unwrap();
+        assert_eq!(
+            keymap.lookup(&parse_key("ctrl-q").unwrap()),
+            Some(Command::Quit)
+        );
+
+        // Restore.
+        match prev {
+            Some(v) => unsafe { std::env::set_var("XDG_CONFIG_HOME", v) },
+            None => unsafe { std::env::remove_var("XDG_CONFIG_HOME") },
+        }
     }
 
     #[test]
