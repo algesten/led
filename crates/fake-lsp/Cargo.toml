@@ -1,0 +1,13 @@
+[package]
+name = "fake-lsp"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Scripted LSP server stand-in used by `goldens/`. Not part of the editor
+# runtime. Reads `.fake-lsp.json` from the workspace and replays JSON-RPC
+# responses against the LSP handshake + subsequent requests.
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }

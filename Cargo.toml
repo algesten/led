@@ -9,6 +9,8 @@ members = [
     "crates/driver-terminal/core",
     "crates/driver-terminal/native",
     "crates/runtime",
+    "crates/fake-lsp",
+    "crates/fake-gh",
     "led",
 ]
 exclude = ["goldens"]

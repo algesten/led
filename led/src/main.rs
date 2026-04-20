@@ -31,13 +31,21 @@ struct Cli {
     config_dir: Option<PathBuf>,
 
     // The goldens runner always passes these; parse-and-ignore so it
-    // doesn't trip on unknown-flag errors.
+    // doesn't trip on unknown-flag errors. Each wires up in its own
+    // later milestone (see docs/rewrite/ROADMAP.md).
     #[arg(long, hide = true)]
     test_clock: Option<PathBuf>,
     #[arg(long, hide = true)]
     test_lsp_server: Option<PathBuf>,
     #[arg(long, hide = true)]
     test_gh_binary: Option<PathBuf>,
+
+    /// Skip workspace root detection; treat the process's CWD as the
+    /// only directory relevant to this session. Used by the goldens
+    /// harness when a scenario only cares about individual files.
+    /// Currently parse-only — workspace scope lands in M11 / M21.
+    #[arg(long, hide = true)]
+    no_workspace: bool,
 }
 
 fn main() -> io::Result<()> {

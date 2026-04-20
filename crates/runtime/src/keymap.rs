@@ -82,12 +82,17 @@ impl Keymap {
 
 /// Built-in keymap reproducing M1–M4 behaviour. The binary starts
 /// from this; user config merges overrides on top.
+///
+/// M6 rebinds these to legacy Emacs-style chords (`ctrl+x ctrl+s`
+/// for save, `ctrl+x ctrl+c` for quit, etc.) once the chord
+/// infrastructure lands. Until then, plain `ctrl+s` / `ctrl+c` are
+/// the shortcuts.
 pub fn default_keymap() -> Keymap {
     let mut m = Keymap::empty();
-    m.bind("ctrl-c", Command::Quit);
-    m.bind("ctrl-s", Command::Save);
+    m.bind("ctrl+c", Command::Quit);
+    m.bind("ctrl+s", Command::Save);
     m.bind("tab", Command::TabNext);
-    m.bind("shift-tab", Command::TabPrev);
+    m.bind("shift+tab", Command::TabPrev);
     m.bind("backtab", Command::TabPrev);
     m.bind("up", Command::CursorUp);
     m.bind("down", Command::CursorDown);
@@ -105,7 +110,7 @@ pub fn default_keymap() -> Keymap {
 
 // ── Key-string parsing ─────────────────────────────────────────────────
 
-/// Parse a dash-separated key string into a [`KeyEvent`].
+/// Parse a `+`-separated key string into a [`KeyEvent`].
 ///
 /// Modifiers are case-insensitive and may appear in any order. The
 /// final segment is the key code: a named key (`tab`, `pageup`, …),
@@ -113,13 +118,17 @@ pub fn default_keymap() -> Keymap {
 ///
 /// Uppercase ASCII letters (`"A"`) implicitly add the Shift modifier;
 /// this matches what terminals emit.
+///
+/// Legacy led uses `+` as the separator, so we do too. `-` is also
+/// accepted for dash-style config files — segments are split on
+/// either character.
 pub fn parse_key(s: &str) -> Result<KeyEvent, String> {
     if s.is_empty() {
         return Err("empty key string".into());
     }
     let mut modifiers = KeyModifiers::NONE;
     let mut code: Option<KeyCode> = None;
-    let parts: Vec<&str> = s.split('-').collect();
+    let parts: Vec<&str> = s.split(|c: char| c == '+' || c == '-').collect();
     let (tail, head) = parts
         .split_last()
         .expect("split returns at least one element");
@@ -193,10 +202,10 @@ pub fn parse_key(s: &str) -> Result<KeyEvent, String> {
 pub fn key_string(k: &KeyEvent) -> String {
     let mut out = String::new();
     if k.modifiers.contains(KeyModifiers::CONTROL) {
-        out.push_str("ctrl-");
+        out.push_str("ctrl+");
     }
     if k.modifiers.contains(KeyModifiers::ALT) {
-        out.push_str("alt-");
+        out.push_str("alt+");
     }
     match k.code {
         KeyCode::Char(c)
@@ -206,7 +215,7 @@ pub fn key_string(k: &KeyEvent) -> String {
         }
         _ => {
             if k.modifiers.contains(KeyModifiers::SHIFT) {
-                out.push_str("shift-");
+                out.push_str("shift+");
             }
             out.push_str(&code_string(&k.code));
         }
@@ -238,28 +247,31 @@ fn code_string(c: &KeyCode) -> String {
 
 // ── Command-string parsing ─────────────────────────────────────────────
 
-/// Parse a dot-separated command string into a [`Command`].
+/// Parse a snake-case command string into a [`Command`].
 ///
-/// Unknown strings are a parse error at config load time. `InsertChar`
-/// is deliberately not reachable via this parser — it exists only as
-/// the fallback path in dispatch.
+/// Names match legacy led's Action enum: `move_up`, `line_start`,
+/// `delete_backward`, etc. — so user `keys.toml` files port over
+/// unchanged. Unknown strings are a parse error at config load time.
+/// `InsertChar` is deliberately not reachable via this parser — it
+/// exists only as the fallback path in dispatch.
 pub fn parse_command(s: &str) -> Result<Command, String> {
     match s {
         "quit" => Ok(Command::Quit),
         "save" => Ok(Command::Save),
-        "tab.next" => Ok(Command::TabNext),
-        "tab.prev" => Ok(Command::TabPrev),
-        "cursor.up" => Ok(Command::CursorUp),
-        "cursor.down" => Ok(Command::CursorDown),
-        "cursor.left" => Ok(Command::CursorLeft),
-        "cursor.right" => Ok(Command::CursorRight),
-        "cursor.line-start" => Ok(Command::CursorLineStart),
-        "cursor.line-end" => Ok(Command::CursorLineEnd),
-        "cursor.page-up" => Ok(Command::CursorPageUp),
-        "cursor.page-down" => Ok(Command::CursorPageDown),
-        "edit.insert-newline" => Ok(Command::InsertNewline),
-        "edit.delete-back" => Ok(Command::DeleteBack),
-        "edit.delete-forward" => Ok(Command::DeleteForward),
+        "next_tab" => Ok(Command::TabNext),
+        "prev_tab" => Ok(Command::TabPrev),
+        "move_up" => Ok(Command::CursorUp),
+        "move_down" => Ok(Command::CursorDown),
+        "move_left" => Ok(Command::CursorLeft),
+        "move_right" => Ok(Command::CursorRight),
+        "line_start" => Ok(Command::CursorLineStart),
+        "line_end" => Ok(Command::CursorLineEnd),
+        "page_up" => Ok(Command::CursorPageUp),
+        "page_down" => Ok(Command::CursorPageDown),
+        // file_start / file_end land in M10.
+        "insert_newline" => Ok(Command::InsertNewline),
+        "delete_backward" => Ok(Command::DeleteBack),
+        "delete_forward" => Ok(Command::DeleteForward),
         other => Err(format!("unknown command `{other}`")),
     }
 }
@@ -386,19 +398,19 @@ mod tests {
         let cases = [
             ("quit", Command::Quit),
             ("save", Command::Save),
-            ("tab.next", Command::TabNext),
-            ("tab.prev", Command::TabPrev),
-            ("cursor.up", Command::CursorUp),
-            ("cursor.down", Command::CursorDown),
-            ("cursor.left", Command::CursorLeft),
-            ("cursor.right", Command::CursorRight),
-            ("cursor.line-start", Command::CursorLineStart),
-            ("cursor.line-end", Command::CursorLineEnd),
-            ("cursor.page-up", Command::CursorPageUp),
-            ("cursor.page-down", Command::CursorPageDown),
-            ("edit.insert-newline", Command::InsertNewline),
-            ("edit.delete-back", Command::DeleteBack),
-            ("edit.delete-forward", Command::DeleteForward),
+            ("next_tab", Command::TabNext),
+            ("prev_tab", Command::TabPrev),
+            ("move_up", Command::CursorUp),
+            ("move_down", Command::CursorDown),
+            ("move_left", Command::CursorLeft),
+            ("move_right", Command::CursorRight),
+            ("line_start", Command::CursorLineStart),
+            ("line_end", Command::CursorLineEnd),
+            ("page_up", Command::CursorPageUp),
+            ("page_down", Command::CursorPageDown),
+            ("insert_newline", Command::InsertNewline),
+            ("delete_backward", Command::DeleteBack),
+            ("delete_forward", Command::DeleteForward),
         ];
         for (s, expected) in cases {
             assert_eq!(parse_command(s).unwrap(), expected, "command `{s}`");

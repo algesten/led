@@ -1,17 +1,21 @@
 //! TOML config loader.
 //!
-//! Reads `<config-dir>/config.toml`, merges its `[keys]` section into
+//! Reads `<config-dir>/keys.toml`, merges its `[keys]` section into
 //! the default keymap, and returns the result. Called synchronously
 //! by `main.rs` before raw mode is acquired — parse errors surface
 //! on a cooked terminal.
 //!
-//! File shape (whole file optional):
+//! File name and format match legacy led exactly so user configs
+//! port over without change:
 //!
 //! ```toml
 //! [keys]
-//! "ctrl-q" = "quit"
-//! "ctrl-w" = "tab.next"
+//! "ctrl+q" = "quit"
+//! "ctrl+w" = "next_tab"
 //! ```
+//!
+//! Modifier separator is `+`; action names are `snake_case`. See
+//! `keymap.rs` for the full vocabulary.
 //!
 //! Unknown key strings, unknown command strings, and malformed TOML
 //! are all reported as `ConfigError` with source context.
@@ -139,7 +143,7 @@ pub fn load_keymap(config_dir: Option<&Path>) -> Result<Keymap, ConfigError> {
 /// terminal editor.
 fn discover_config(explicit: Option<&Path>) -> Option<PathBuf> {
     if let Some(dir) = explicit {
-        let candidate = dir.join("config.toml");
+        let candidate = dir.join("keys.toml");
         return candidate.exists().then_some(candidate);
     }
     let base = if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME") {
@@ -147,7 +151,7 @@ fn discover_config(explicit: Option<&Path>) -> Option<PathBuf> {
     } else {
         dirs::home_dir()?.join(".config").join("led")
     };
-    let candidate = base.join("config.toml");
+    let candidate = base.join("keys.toml");
     candidate.exists().then_some(candidate)
 }
 
@@ -236,7 +240,7 @@ mod tests {
     }
 
     fn write_config(dir: &TempDir, body: &str) -> PathBuf {
-        let p = dir.path().join("config.toml");
+        let p = dir.path().join("keys.toml");
         let mut f = std::fs::File::create(&p).unwrap();
         f.write_all(body.as_bytes()).unwrap();
         p
@@ -249,7 +253,7 @@ mod tests {
         let keymap = load_keymap(Some(tmp.path())).unwrap();
         // A default binding is still there.
         assert_eq!(
-            keymap.lookup(&parse_key("ctrl-c").unwrap()),
+            keymap.lookup(&parse_key("ctrl+c").unwrap()),
             Some(Command::Quit)
         );
     }
@@ -261,22 +265,22 @@ mod tests {
             &tmp,
             r#"
 [keys]
-"ctrl-q" = "quit"
-"ctrl-w" = "tab.next"
+"ctrl+q" = "quit"
+"ctrl+w" = "next_tab"
 "#,
         );
         let keymap = load_keymap(Some(tmp.path())).unwrap();
         assert_eq!(
-            keymap.lookup(&parse_key("ctrl-q").unwrap()),
+            keymap.lookup(&parse_key("ctrl+q").unwrap()),
             Some(Command::Quit)
         );
         assert_eq!(
-            keymap.lookup(&parse_key("ctrl-w").unwrap()),
+            keymap.lookup(&parse_key("ctrl+w").unwrap()),
             Some(Command::TabNext)
         );
         // Defaults still present.
         assert_eq!(
-            keymap.lookup(&parse_key("ctrl-s").unwrap()),
+            keymap.lookup(&parse_key("ctrl+s").unwrap()),
             Some(Command::Save)
         );
     }
@@ -288,12 +292,12 @@ mod tests {
             &tmp,
             r#"
 [keys]
-"ctrl-c" = "save"
+"ctrl+c" = "save"
 "#,
         );
         let keymap = load_keymap(Some(tmp.path())).unwrap();
         assert_eq!(
-            keymap.lookup(&parse_key("ctrl-c").unwrap()),
+            keymap.lookup(&parse_key("ctrl+c").unwrap()),
             Some(Command::Save)
         );
     }
@@ -301,7 +305,7 @@ mod tests {
     #[test]
     fn malformed_toml_errors() {
         let tmp = tempdir();
-        write_config(&tmp, "[keys\n\"ctrl-q\" = \"quit\"\n");
+        write_config(&tmp, "[keys\n\"ctrl+q\" = \"quit\"\n");
         let e = load_keymap(Some(tmp.path())).unwrap_err();
         assert!(matches!(e, ConfigError::Toml { .. }), "got {e:?}");
     }
@@ -313,12 +317,12 @@ mod tests {
             &tmp,
             r#"
 [keys]
-"ctrl-nope-bogus" = "quit"
+"ctrl+nope+bogus" = "quit"
 "#,
         );
         let e = load_keymap(Some(tmp.path())).unwrap_err();
         match e {
-            ConfigError::UnknownKey { key, .. } => assert_eq!(key, "ctrl-nope-bogus"),
+            ConfigError::UnknownKey { key, .. } => assert_eq!(key, "ctrl+nope+bogus"),
             other => panic!("expected UnknownKey, got {other:?}"),
         }
     }
@@ -330,7 +334,7 @@ mod tests {
             &tmp,
             r#"
 [keys]
-"ctrl-q" = "explode"
+"ctrl+q" = "explode"
 "#,
         );
         let e = load_keymap(Some(tmp.path())).unwrap_err();
@@ -347,7 +351,7 @@ mod tests {
             &tmp,
             r#"
 [keys]
-"ctrl-q" = 42
+"ctrl+q" = 42
 "#,
         );
         let e = load_keymap(Some(tmp.path())).unwrap_err();
@@ -356,16 +360,16 @@ mod tests {
 
     #[test]
     fn xdg_config_home_env_is_honoured() {
-        // Point XDG_CONFIG_HOME at our tempdir, drop config.toml into
+        // Point XDG_CONFIG_HOME at our tempdir, drop keys.toml into
         // `<tmp>/led/`, and confirm discover_config finds it without
         // a CLI --config-dir hint.
         let tmp = tempdir();
         let led_dir = tmp.path().join("led");
         std::fs::create_dir_all(&led_dir).unwrap();
-        let file = led_dir.join("config.toml");
+        let file = led_dir.join("keys.toml");
         let mut f = std::fs::File::create(&file).unwrap();
         f.write_all(br#"[keys]
-"ctrl-q" = "quit"
+"ctrl+q" = "quit"
 "#)
             .unwrap();
 
@@ -379,7 +383,7 @@ mod tests {
 
         let keymap = load_keymap(None).unwrap();
         assert_eq!(
-            keymap.lookup(&parse_key("ctrl-q").unwrap()),
+            keymap.lookup(&parse_key("ctrl+q").unwrap()),
             Some(Command::Quit)
         );
 
@@ -396,7 +400,7 @@ mod tests {
         write_config(&tmp, "");
         let keymap = load_keymap(Some(tmp.path())).unwrap();
         assert_eq!(
-            keymap.lookup(&parse_key("ctrl-c").unwrap()),
+            keymap.lookup(&parse_key("ctrl+c").unwrap()),
             Some(Command::Quit)
         );
     }
