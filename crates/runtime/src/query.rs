@@ -14,7 +14,8 @@
 #[allow(unused_imports)]
 use led_core::CanonPath;
 use led_driver_buffers_core::{BufferStore, LoadAction, LoadState, SaveAction};
-use led_driver_terminal_core::{BodyModel, Dims, Frame, TabBarModel, Terminal};
+use led_driver_terminal_core::{BodyModel, Dims, Frame, StatusBarModel, TabBarModel, Terminal};
+use led_state_alerts::AlertState;
 use led_state_buffer_edits::{BufferEdits, EditedBuffer};
 use led_state_tabs::{Cursor, Scroll, Tab, TabId, Tabs};
 use ropey::Rope;
@@ -122,6 +123,29 @@ impl<'a> TerminalDimsInput<'a> {
     }
 }
 
+// ── Input on AlertState ────────────────────────────────────────────────
+
+/// Narrow projection — excludes `info_expires_at` since it changes
+/// every 10ms and would thrash the status-bar memo cache. The expiry
+/// is the runtime's concern, not the painter's.
+#[drv::input]
+#[derive(Copy, Clone)]
+pub struct AlertsInput<'a> {
+    pub info: &'a Option<String>,
+    pub warns: &'a Vec<(String, String)>,
+    pub confirm_kill: &'a Option<TabId>,
+}
+
+impl<'a> AlertsInput<'a> {
+    pub fn new(a: &'a AlertState) -> Self {
+        Self {
+            info: &a.info,
+            warns: &a.warns,
+            confirm_kill: &a.confirm_kill,
+        }
+    }
+}
+
 // ── Memos ──────────────────────────────────────────────────────────────
 
 /// "What files need a load started?"
@@ -181,11 +205,10 @@ pub fn file_save_action<'p, 'b>(
 /// (inside `Frame`, deep inside `render_frame`'s cache slot) are a
 /// pointer copy.
 ///
-/// Indicators:
-/// - `*` prefix when the buffer has been modified since load.
-/// - ` ●` suffix on the active tab when a mark is set. Stand-in
-///   until M9 adds proper region highlighting + alert surface;
-///   without it there's no visible feedback from `Ctrl-Space`.
+/// Format per label: `<prefix><name>` where `<prefix>` is `●`
+/// (filled circle) when the buffer is dirty, else no prefix. Matches
+/// the legacy goldens. The painter adds the surrounding spaces
+/// (`" <label> "`) so a dirty active tab reads `" ●foo.rs "`.
 #[drv::memo(single)]
 pub fn tab_bar_model<'a, 'b>(
     tabs: TabsActiveInput<'a>,
@@ -197,8 +220,7 @@ pub fn tab_bar_model<'a, 'b>(
     let labels: Vec<String> = tabs
         .open
         .iter()
-        .enumerate()
-        .map(|(i, t)| {
+        .map(|t| {
             let base = t
                 .path
                 .file_name()
@@ -209,28 +231,13 @@ pub fn tab_bar_model<'a, 'b>(
                 .get(&t.path)
                 .map(|b| b.dirty())
                 .unwrap_or(false);
-            let has_mark = active == Some(i) && t.mark.is_some();
-            match (dirty, has_mark) {
-                (false, false) => base,
-                (true, false) => {
-                    let mut s = String::with_capacity(base.len() + 1);
-                    s.push('*');
-                    s.push_str(&base);
-                    s
-                }
-                (false, true) => {
-                    let mut s = String::with_capacity(base.len() + 2);
-                    s.push_str(&base);
-                    s.push_str(" \u{2022}"); // ` ●`
-                    s
-                }
-                (true, true) => {
-                    let mut s = String::with_capacity(base.len() + 3);
-                    s.push('*');
-                    s.push_str(&base);
-                    s.push_str(" \u{2022}");
-                    s
-                }
+            if dirty {
+                let mut s = String::with_capacity(base.len() + "\u{25cf}".len());
+                s.push('\u{25cf}'); // ●
+                s.push_str(&base);
+                s
+            } else {
+                base
             }
         })
         .collect();
@@ -239,6 +246,11 @@ pub fn tab_bar_model<'a, 'b>(
         active,
     }
 }
+
+// Gutter width reserved on the left of every body row. M9 renders
+// two blank cols; future milestones fill col 0 with git marks and
+// col 1 with diagnostic severity.
+const GUTTER_WIDTH: usize = 2;
 
 /// Body slice of the render frame.
 ///
@@ -289,19 +301,28 @@ fn path_display(tab: &Tab) -> Arc<str> {
 }
 
 fn render_content(rope: &Rope, cursor: Cursor, scroll: Scroll, dims: Dims) -> BodyModel {
-    let body_rows = dims.rows.saturating_sub(1) as usize;
+    let body_rows = dims.rows.saturating_sub(2) as usize;
     let line_count = rope.len_lines();
     let cols = dims.cols as usize;
+    let content_cols = cols.saturating_sub(GUTTER_WIDTH);
 
     let mut lines: Vec<String> = Vec::with_capacity(body_rows);
-    for ln in scroll.top..scroll.top.saturating_add(body_rows) {
-        if ln >= line_count {
-            break;
+    for i in 0..body_rows {
+        let ln = scroll.top.saturating_add(i);
+        if ln < line_count {
+            // Content row: 2-space gutter, then truncated buffer line.
+            let mut s = String::with_capacity(cols);
+            s.push_str("  ");
+            let mut content = rope.line(ln).to_string();
+            strip_trailing_newline(&mut content);
+            truncate_to_cols_in_place(&mut content, content_cols);
+            s.push_str(&content);
+            lines.push(s);
+        } else {
+            // Past-EOF sentinel: tilde in gutter col 0. Painter's
+            // clear-to-EOL blanks the rest of the row.
+            lines.push("~ ".to_string());
         }
-        let mut s = rope.line(ln).to_string();
-        strip_trailing_newline(&mut s);
-        truncate_to_cols_in_place(&mut s, cols);
-        lines.push(s);
     }
 
     BodyModel::Content {
@@ -311,7 +332,7 @@ fn render_content(rope: &Rope, cursor: Cursor, scroll: Scroll, dims: Dims) -> Bo
 }
 
 fn visible_cursor(c: Cursor, s: Scroll, dims: Dims) -> Option<(u16, u16)> {
-    let body_rows = dims.rows.saturating_sub(1) as usize;
+    let body_rows = dims.rows.saturating_sub(2) as usize;
     if body_rows == 0 {
         return None;
     }
@@ -319,7 +340,8 @@ fn visible_cursor(c: Cursor, s: Scroll, dims: Dims) -> Option<(u16, u16)> {
         return None;
     }
     let row = (c.line - s.top) as u16;
-    let col = c.col.min(dims.cols.saturating_sub(1) as usize) as u16;
+    let max_col = (dims.cols as usize).saturating_sub(1);
+    let col = (c.col + GUTTER_WIDTH).min(max_col) as u16;
     Some((row, col))
 }
 
@@ -340,35 +362,141 @@ fn truncate_to_cols_in_place(s: &mut String, cols: usize) {
     }
 }
 
-/// Top-level render model. Composes `tab_bar_model` + `body_model` —
-/// each independently cached in its own per-memo thread-local cache.
+/// Status-bar slice of the render frame.
+///
+/// Priority chain (highest wins):
+/// 1. **Confirm-kill prompt** — blocks other content; no position
+///    indicator. Matches legacy dismiss-on-first-keystroke UX.
+/// 2. **Info alert** — transient; shown alongside the position.
+/// 3. **Warn alert** — persistent; shown alongside the position with
+///    the `is_warn` flag set (painter renders white-on-red-bold).
+/// 4. **Default** — left is `"  ●"` when the active buffer is dirty
+///    else empty; right is `"L<row>:C<col> "` (1-indexed human
+///    coords, trailing space).
+///
+/// All strings are `Arc<str>` so cache-hit clones of
+/// [`StatusBarModel`] are a pointer copy.
+#[drv::memo(single)]
+pub fn status_bar_model<'a, 'b, 'c>(
+    alerts: AlertsInput<'a>,
+    tabs: TabsActiveInput<'b>,
+    edits: EditedBuffersInput<'c>,
+) -> StatusBarModel {
+    // Priority 1 — confirm-kill prompt.
+    if let Some(kill_id) = *alerts.confirm_kill {
+        let name = tabs
+            .open
+            .iter()
+            .find(|t| t.id == kill_id)
+            .and_then(|t| t.path.file_name().map(|os| os.to_string_lossy().into_owned()))
+            .unwrap_or_default();
+        return StatusBarModel {
+            left: Arc::from(format!(" Kill buffer '{name}'? (y/N) ")),
+            right: Arc::from(""),
+            is_warn: false,
+        };
+    }
+
+    let right = position_string(tabs, edits);
+
+    // Priority 2 — info alert.
+    if let Some(msg) = alerts.info.as_deref() {
+        let mut left = String::with_capacity(msg.len() + 1);
+        left.push(' ');
+        left.push_str(msg);
+        return StatusBarModel {
+            left: Arc::from(left),
+            right,
+            is_warn: false,
+        };
+    }
+
+    // Priority 3 — warn alert (first-arrived).
+    if let Some((_, msg)) = alerts.warns.first() {
+        let mut left = String::with_capacity(msg.len() + 1);
+        left.push(' ');
+        left.push_str(msg);
+        return StatusBarModel {
+            left: Arc::from(left),
+            right,
+            is_warn: true,
+        };
+    }
+
+    // Priority 4 — default. Dirty dot in cols 2–3 (padded for
+    // visual alignment with the gutter above).
+    let dirty = active_is_dirty(tabs, edits);
+    let left: Arc<str> = if dirty {
+        Arc::from("  \u{25cf}")
+    } else {
+        Arc::from("")
+    };
+    StatusBarModel {
+        left,
+        right,
+        is_warn: false,
+    }
+}
+
+fn active_tab<'t>(tabs: TabsActiveInput<'t>) -> Option<&'t Tab> {
+    let id = (*tabs.active)?;
+    tabs.open.iter().find(|t| t.id == id)
+}
+
+fn active_is_dirty(tabs: TabsActiveInput<'_>, edits: EditedBuffersInput<'_>) -> bool {
+    let Some(tab) = active_tab(tabs) else {
+        return false;
+    };
+    edits
+        .buffers
+        .get(&tab.path)
+        .map(|eb| eb.dirty())
+        .unwrap_or(false)
+}
+
+fn position_string(tabs: TabsActiveInput<'_>, _edits: EditedBuffersInput<'_>) -> Arc<str> {
+    let Some(tab) = active_tab(tabs) else {
+        return Arc::from("");
+    };
+    // 1-indexed for human display — matches legacy goldens.
+    let row = tab.cursor.line + 1;
+    let col = tab.cursor.col + 1;
+    Arc::from(format!("L{row}:C{col} "))
+}
+
+/// Top-level render model. Composes `tab_bar_model` + `body_model` +
+/// `status_bar_model` — each independently cached in its own
+/// per-memo thread-local cache.
 ///
 /// The call site pattern for a memo composing sibling memos: pass the
 /// same input values through — drv 0.3's input types are `Copy` over
 /// references, so forwarding is free.
 #[drv::memo(single)]
-pub fn render_frame<'t, 'e, 'b, 'a>(
+pub fn render_frame<'t, 'e, 'b, 'a, 'al>(
     term: TerminalDimsInput<'t>,
     edits: EditedBuffersInput<'e>,
     store: StoreLoadedInput<'b>,
     tabs: TabsActiveInput<'a>,
+    alerts: AlertsInput<'al>,
 ) -> Option<Frame> {
     let dims = (*term.dims)?;
     let tab_bar = tab_bar_model(tabs, edits);
     let body = body_model(edits, store, tabs, dims);
+    let status_bar = status_bar_model(alerts, tabs, edits);
     // Translate the body-relative cursor (row, col) into absolute
-    // screen coords (col, row). +1 on the row accounts for the tab
-    // bar; the painter wants column-major order (crossterm).
+    // screen coords (col, row). Body starts at row 0 now — tab bar
+    // and status bar live at the bottom — so no +1.
     let cursor = match &body {
         BodyModel::Content {
             cursor: Some((row, col)),
             ..
-        } => Some((*col, row.saturating_add(1))),
+        } => Some((*col, *row)),
         _ => None,
     };
     Some(Frame {
         tab_bar,
         body,
+        status_bar,
         cursor,
         dims,
     })
@@ -468,11 +596,13 @@ mod tests {
     }
 
     fn render(t: &Tabs, e: &BufferEdits, s: &BufferStore, term: &Terminal) -> Option<Frame> {
+        let alerts = AlertState::default();
         render_frame(
             TerminalDimsInput::new(term),
             EditedBuffersInput::new(e),
             StoreLoadedInput::new(s),
             TabsActiveInput::new(t),
+            AlertsInput::new(&alerts),
         )
     }
 
@@ -508,16 +638,18 @@ mod tests {
         let frame = render(&t, &e, &s, &term).expect("dims set");
         match &frame.body {
             BodyModel::Content { lines, cursor } => {
-                assert_eq!(lines.len(), 4); // dims.rows - 1 tab bar row
-                assert_eq!(lines[0], "line 0");
-                assert_eq!(lines[3], "line 3");
-                // Default cursor at (0, 0) — visible at top-left of body.
-                assert_eq!(*cursor, Some((0, 0)));
+                // body_rows = dims.rows - 2 (tab bar + status bar).
+                assert_eq!(lines.len(), 3);
+                // Each content row is 2-col gutter + truncated content.
+                assert_eq!(lines[0], "  line 0");
+                assert_eq!(lines[2], "  line 2");
+                // Default cursor at (0, 0) → gutter-shifted to col 2.
+                assert_eq!(*cursor, Some((0, 2)));
             }
             other => panic!("expected Content, got {other:?}"),
         }
-        // Frame-level cursor: body-relative (row=0, col=0) + tab-bar row → (col=0, row=1).
-        assert_eq!(frame.cursor, Some((0, 1)));
+        // Body starts at row 0 now — no +1.
+        assert_eq!(frame.cursor, Some((2, 0)));
     }
 
     #[test]
@@ -527,7 +659,7 @@ mod tests {
             &[("big.rs", 1)],
             Some(1),
             &[("big.rs", LoadState::Ready(Arc::new(Rope::from_str(&body))))],
-            Some(Dims { cols: 40, rows: 11 }), // 10 body rows
+            Some(Dims { cols: 40, rows: 11 }), // body_rows = 11 - 2 = 9
         );
         // Place cursor at line 25 with scroll.top = 20 → cursor visible at row 5.
         t.open[0].cursor = Cursor { line: 25, col: 2, preferred_col: 2 };
@@ -536,15 +668,16 @@ mod tests {
         let frame = render(&t, &e, &s, &term).expect("dims set");
         match &frame.body {
             BodyModel::Content { lines, cursor } => {
-                assert_eq!(lines.len(), 10);
-                assert_eq!(lines[0], "line 20");
-                assert_eq!(lines[5], "line 25");
-                assert_eq!(*cursor, Some((5, 2)));
+                assert_eq!(lines.len(), 9);
+                assert_eq!(lines[0], "  line 20");
+                assert_eq!(lines[5], "  line 25");
+                // Cursor col 2 → screen col 4 (gutter shift).
+                assert_eq!(*cursor, Some((5, 4)));
             }
             other => panic!("expected Content, got {other:?}"),
         }
-        // Absolute frame cursor = (col=2, row=5+1).
-        assert_eq!(frame.cursor, Some((2, 6)));
+        // Absolute frame cursor = (col, row) — body starts at row 0.
+        assert_eq!(frame.cursor, Some((4, 5)));
     }
 
     #[test]
@@ -619,7 +752,7 @@ mod tests {
         let frame = render(&t, &e, &s, &term).expect("dims set");
         match &frame.body {
             BodyModel::Content { lines, .. } => {
-                assert_eq!(lines[0], "edited-version");
+                assert_eq!(lines[0], "  edited-version");
             }
             other => panic!("expected Content, got {other:?}"),
         }
@@ -641,7 +774,7 @@ mod tests {
         let frame = render(&t, &e, &s, &term).expect("dims set");
         match &frame.body {
             BodyModel::Content { lines, .. } => {
-                assert_eq!(lines[0], "from-disk");
+                assert_eq!(lines[0], "  from-disk");
             }
             other => panic!("expected Content, got {other:?}"),
         }
@@ -730,7 +863,7 @@ mod tests {
     }
 
     #[test]
-    fn tab_bar_prefixes_dirty_labels_with_asterisk() {
+    fn tab_bar_prefixes_dirty_labels_with_dot() {
         let (t, mut e, s, term) = fixture(
             &[("a.rs", 1), ("b.rs", 2)],
             Some(1),
@@ -769,7 +902,7 @@ mod tests {
         let frame = render(&t, &e, &s, &term).expect("dims set");
         assert_eq!(
             *frame.tab_bar.labels,
-            vec!["a.rs".to_string(), "*b.rs".to_string()]
+            vec!["a.rs".to_string(), "\u{25cf}b.rs".to_string()]
         );
     }
 }

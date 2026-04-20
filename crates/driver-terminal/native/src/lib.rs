@@ -19,8 +19,8 @@ use crossterm::event::{
     KeyModifiers as CtKeyModifiers,
 };
 use led_driver_terminal_core::{
-    BodyModel, Dims, Frame, KeyCode, KeyEvent, KeyModifiers, TabBarModel, TermEvent,
-    TerminalInputDriver, Trace,
+    BodyModel, Dims, Frame, KeyCode, KeyEvent, KeyModifiers, StatusBarModel, TabBarModel,
+    TermEvent, TerminalInputDriver, Trace,
 };
 
 /// Lifecycle marker for the native reader thread.
@@ -125,12 +125,12 @@ fn translate_mods(m: CtKeyModifiers) -> KeyModifiers {
 /// redraw — negligible. The caller only invokes `paint` when the frame
 /// actually changed.
 pub fn paint(frame: &Frame, out: &mut impl Write) -> io::Result<()> {
-    use crossterm::{cursor, queue, terminal};
+    use crossterm::{cursor, queue};
 
     queue!(out, cursor::Hide, cursor::MoveTo(0, 0))?;
-    paint_tab_bar(&frame.tab_bar, frame.dims, out)?;
     paint_body(&frame.body, frame.dims, out)?;
-    queue!(out, terminal::Clear(terminal::ClearType::FromCursorDown))?;
+    paint_tab_bar(&frame.tab_bar, frame.dims, out)?;
+    paint_status_bar(&frame.status_bar, frame.dims, out)?;
 
     // Cursor placement last, on top of the finished frame. The
     // per-frame `Hide` above prevents flicker while drawing; the
@@ -146,7 +146,10 @@ pub fn paint(frame: &Frame, out: &mut impl Write) -> io::Result<()> {
 fn paint_tab_bar(bar: &TabBarModel, dims: Dims, out: &mut impl Write) -> io::Result<()> {
     use crossterm::{cursor, queue, style, terminal};
 
-    queue!(out, cursor::MoveTo(0, 0))?;
+    // Tab bar at the bottom of the editor area: second-to-last row.
+    // Matches legacy led's ratatui layout + the goldens.
+    let row = dims.rows.saturating_sub(2);
+    queue!(out, cursor::MoveTo(0, row))?;
     let mut col: u16 = 0;
     for (i, label) in bar.labels.iter().enumerate() {
         let active = bar.active == Some(i);
@@ -173,11 +176,52 @@ fn paint_tab_bar(bar: &TabBarModel, dims: Dims, out: &mut impl Write) -> io::Res
     Ok(())
 }
 
+fn paint_status_bar(s: &StatusBarModel, dims: Dims, out: &mut impl Write) -> io::Result<()> {
+    use crossterm::{cursor, queue, style, terminal};
+
+    let row = dims.rows.saturating_sub(1);
+    queue!(out, cursor::MoveTo(0, row))?;
+
+    // Warn styling spans the whole row — set it before the first
+    // print, reset after the row is complete.
+    if s.is_warn {
+        queue!(
+            out,
+            style::SetBackgroundColor(style::Color::Red),
+            style::SetForegroundColor(style::Color::White),
+            style::SetAttribute(style::Attribute::Bold),
+        )?;
+    }
+
+    let cols = dims.cols as usize;
+    let left_cols = s.left.chars().count().min(cols);
+    let right_cols = s.right.chars().count().min(cols - left_cols);
+    let pad = cols - left_cols - right_cols;
+
+    queue!(out, style::Print(s.left.as_ref()))?;
+    for _ in 0..pad {
+        queue!(out, style::Print(" "))?;
+    }
+    queue!(out, style::Print(s.right.as_ref()))?;
+
+    if s.is_warn {
+        queue!(
+            out,
+            style::SetAttribute(style::Attribute::Reset),
+            style::ResetColor,
+        )?;
+    }
+    queue!(out, terminal::Clear(terminal::ClearType::UntilNewLine))?;
+    Ok(())
+}
+
 fn paint_body(body: &BodyModel, dims: Dims, out: &mut impl Write) -> io::Result<()> {
     use crossterm::{cursor, queue, style, terminal};
 
-    let body_top: u16 = 1;
-    let body_rows = dims.rows.saturating_sub(1);
+    // Body starts at row 0 — tab bar and status bar are at the
+    // bottom two rows, not the top.
+    let body_top: u16 = 0;
+    let body_rows = dims.rows.saturating_sub(2);
 
     // Match inside the loop — no intermediate `Vec<&str>` per paint.
     for row in 0..body_rows {
@@ -269,7 +313,8 @@ mod tests {
                 lines: Arc::new(vec!["line 1".into(), "line 2".into()]),
                 cursor: Some((0, 0)),
             },
-            cursor: Some((0, 1)),
+            status_bar: StatusBarModel::default(),
+            cursor: Some((0, 0)),
             dims: Dims { cols: 40, rows: 5 },
         };
         let mut out: Vec<u8> = Vec::new();
@@ -282,6 +327,7 @@ mod tests {
         let frame = Frame {
             tab_bar: TabBarModel::default(),
             body: BodyModel::Empty,
+            status_bar: StatusBarModel::default(),
             cursor: None,
             dims: Dims { cols: 40, rows: 5 },
         };

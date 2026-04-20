@@ -133,10 +133,25 @@ impl Default for BodyModel {
     }
 }
 
+/// Bottom-row status bar. `left` is written from col 0; `right` is
+/// written right-aligned; the gap is cleared. `is_warn` asks the
+/// painter to use the warn (red-bg / white-fg / bold) style for the
+/// whole row.
+///
+/// Both strings are `Arc<str>` so cache-hit clones are a pointer
+/// copy even when nothing on the status bar changed.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct StatusBarModel {
+    pub left: Arc<str>,
+    pub right: Arc<str>,
+    pub is_warn: bool,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct Frame {
     pub tab_bar: TabBarModel,
     pub body: BodyModel,
+    pub status_bar: StatusBarModel,
     /// Absolute terminal cursor position as `(col, row)` — matches
     /// crossterm's `cursor::MoveTo` argument order. `None` hides the
     /// cursor (no active content / cursor scrolled away).

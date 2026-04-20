@@ -21,7 +21,7 @@ pub mod trace;
 
 use std::io::{self, Write};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use led_driver_buffers_core::{BufferStore, FileReadDriver, FileWriteDriver, LoadState};
 use led_driver_buffers_native::{FileReadNative, FileWriteNative};
@@ -31,17 +31,22 @@ use led_driver_clipboard_core::{
 use led_driver_clipboard_native::ClipboardNative;
 use led_driver_terminal_core::{Dims, Frame, KeyEvent, TermEvent, Terminal, TerminalInputDriver};
 use led_driver_terminal_native::{paint, TerminalInputNative};
+use led_state_alerts::AlertState;
 use led_state_buffer_edits::{BufferEdits, EditedBuffer};
 use led_state_kill_ring::KillRing;
 use led_state_tabs::{TabId, Tabs};
+
+/// How long a transient info alert (`Saved foo.rs`) stays on screen
+/// before the tick loop clears it. Matches legacy.
+const INFO_TTL: Duration = Duration::from_secs(2);
 
 pub use config::{load_keymap, ConfigError};
 pub use dispatch::{dispatch_key, DispatchOutcome, Dispatcher};
 pub use keymap::{default_keymap, parse_command, parse_key, ChordState, Command, Keymap};
 pub use query::{
-    body_model, file_load_action, file_save_action, render_frame, tab_bar_model,
-    EditedBuffersInput, PendingSavesInput, StoreLoadedInput, TabsActiveInput, TabsOpenInput,
-    TerminalDimsInput,
+    body_model, file_load_action, file_save_action, render_frame, status_bar_model,
+    tab_bar_model, AlertsInput, EditedBuffersInput, PendingSavesInput, StoreLoadedInput,
+    TabsActiveInput, TabsOpenInput, TerminalDimsInput,
 };
 pub use trace::{SharedTrace, Trace};
 
@@ -93,6 +98,7 @@ pub fn run(
     tabs: &mut Tabs,
     edits: &mut BufferEdits,
     kill_ring: &mut KillRing,
+    alerts: &mut AlertState,
     store: &mut BufferStore,
     terminal: &mut Terminal,
     drivers: &Drivers,
@@ -105,6 +111,11 @@ pub fn run(
 
     loop {
         // ── Ingest ──────────────────────────────────────────────
+        // Clear expired info alerts at the top of each tick — one
+        // `Instant::now()` compare per tick, zero allocs when no
+        // alert is live.
+        alerts.expire_info(Instant::now());
+
         // Seed BufferEdits from newly-Ready loads. `process` returns
         // an empty Vec on idle ticks (no heap alloc); `or_insert_with`
         // avoids clobbering a buffer the user has already edited if
@@ -120,8 +131,15 @@ pub fn run(
         // Apply write completions: round-trip the saved rope into
         // `BufferStore` as the new disk baseline, and bump
         // `saved_version` so `dirty()` becomes false (unless the
-        // user has since edited past that version).
+        // user has since edited past that version). Surfaces the
+        // outcome via alerts: success → transient info; error →
+        // persistent warn keyed by path.
         for done in drivers.file_write.process() {
+            let basename = done
+                .path
+                .file_name()
+                .map(|os| os.to_string_lossy().into_owned())
+                .unwrap_or_else(|| done.path.display().to_string());
             match done.result {
                 Ok(rope) => {
                     store
@@ -130,10 +148,13 @@ pub fn run(
                     if let Some(eb) = edits.buffers.get_mut(&done.path) {
                         eb.saved_version = eb.saved_version.max(done.version);
                     }
+                    alerts.clear_warn(&basename);
+                    alerts.set_info(format!("Saved {basename}"), Instant::now(), INFO_TTL);
                 }
-                Err(_msg) => {
+                Err(msg) => {
                     // Already traced inside FileWriteDriver::process.
                     // Buffer stays dirty so the user can retry.
+                    alerts.set_warn(basename.clone(), format!("save {basename}: {msg}"));
                 }
             }
         }
@@ -181,6 +202,7 @@ pub fn run(
                 tabs,
                 edits,
                 kill_ring,
+                alerts,
                 store,
                 terminal,
                 keymap,
@@ -212,6 +234,7 @@ pub fn run(
             EditedBuffersInput::new(edits),
             StoreLoadedInput::new(store),
             TabsActiveInput::new(tabs),
+            AlertsInput::new(alerts),
         );
 
         // ── Execute ─────────────────────────────────────────────

@@ -12,6 +12,7 @@ use led_driver_buffers_core::BufferStore;
 use led_driver_terminal_core::Terminal;
 use led_driver_terminal_native::RawModeGuard;
 use led_runtime::{load_keymap, spawn_drivers, SharedTrace, TabIdGen};
+use led_state_alerts::AlertState;
 use led_state_buffer_edits::BufferEdits;
 use led_state_kill_ring::KillRing;
 use led_state_tabs::{Tab, Tabs};
@@ -81,6 +82,7 @@ fn main() -> io::Result<()> {
     let mut tabs = Tabs::default();
     let mut edits = BufferEdits::default();
     let mut kill_ring = KillRing::default();
+    let mut alerts = AlertState::default();
     let mut store = BufferStore::default();
     let mut terminal = Terminal::default();
 
@@ -110,6 +112,7 @@ fn main() -> io::Result<()> {
         &mut tabs,
         &mut edits,
         &mut kill_ring,
+        &mut alerts,
         &mut store,
         &mut terminal,
         &drivers,

@@ -43,7 +43,7 @@ use edit::{delete_back, delete_forward, insert_char, insert_newline};
 use kill::{kill_line, kill_region, request_yank};
 use mark::{clear_mark, set_mark_active};
 use save::{request_save_active, request_save_all};
-use tabs::{cycle_active, kill_active};
+use tabs::{cycle_active, force_kill, kill_active};
 use undo::{redo_active, undo_active};
 
 // Test-only imports: the cursor-geometry unit tests exercise these
@@ -53,6 +53,7 @@ use cursor::{adjust_scroll, apply_move};
 
 use led_driver_buffers_core::BufferStore;
 use led_driver_terminal_core::{KeyCode, KeyEvent, KeyModifiers, Terminal};
+use led_state_alerts::AlertState;
 use led_state_buffer_edits::BufferEdits;
 use led_state_kill_ring::KillRing;
 use led_state_tabs::Tabs;
@@ -85,6 +86,7 @@ pub struct Dispatcher<'a> {
     pub tabs: &'a mut Tabs,
     pub edits: &'a mut BufferEdits,
     pub kill_ring: &'a mut KillRing,
+    pub alerts: &'a mut AlertState,
     pub store: &'a BufferStore,
     pub terminal: &'a Terminal,
     pub keymap: &'a Keymap,
@@ -114,6 +116,7 @@ impl<'a> Dispatcher<'a> {
             self.tabs,
             self.edits,
             self.kill_ring,
+            self.alerts,
             self.store,
             self.terminal,
             self.keymap,
@@ -124,6 +127,11 @@ impl<'a> Dispatcher<'a> {
 
 /// Keymap-first dispatch with chord support. Algorithm:
 ///
+/// 0. If a confirm-kill prompt is live, intercept this keystroke:
+///    `y`/`Y` (no modifiers) confirms and force-kills the targeted
+///    tab; any other key clears the prompt and falls through to the
+///    normal resolution so e.g. `Esc` still clears the mark or an
+///    arrow key still moves.
 /// 1. If a chord prefix is pending, consume it and look up the
 ///    second key in that prefix's table. Unknown second key silently
 ///    cancels. Matches legacy `keymap.md` § "Chord prefix with no
@@ -142,15 +150,29 @@ pub fn dispatch_key(
     tabs: &mut Tabs,
     edits: &mut BufferEdits,
     kill_ring: &mut KillRing,
+    alerts: &mut AlertState,
     store: &BufferStore,
     terminal: &Terminal,
     keymap: &Keymap,
     chord: &mut ChordState,
 ) -> DispatchOutcome {
+    // Step 0 — confirm-kill gate.
+    if let Some(target) = alerts.confirm_kill {
+        alerts.confirm_kill = None;
+        if k.modifiers.is_empty()
+            && matches!(k.code, KeyCode::Char('y') | KeyCode::Char('Y'))
+        {
+            force_kill(tabs, edits, target);
+            return DispatchOutcome::Continue;
+        }
+        // Any other key: prompt dismissed; fall through so the key
+        // runs its normal binding / implicit-insert behaviour.
+    }
+
     let resolved = resolve_command(k, keymap, chord);
     match resolved {
         Resolved::Command(cmd) => {
-            let outcome = run_command(cmd, tabs, edits, kill_ring, store, terminal);
+            let outcome = run_command(cmd, tabs, edits, kill_ring, alerts, store, terminal);
             // Kill-ring coalescing: any non-KillLine command breaks
             // the flag, so the next KillLine starts a fresh entry.
             if !matches!(cmd, Command::KillLine) {
@@ -227,11 +249,13 @@ fn implicit_insert(k: &KeyEvent) -> Option<Command> {
     Some(Command::InsertChar(c))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_command(
     cmd: Command,
     tabs: &mut Tabs,
     edits: &mut BufferEdits,
     kill_ring: &mut KillRing,
+    alerts: &mut AlertState,
     store: &BufferStore,
     terminal: &Terminal,
 ) -> DispatchOutcome {
@@ -239,9 +263,8 @@ fn run_command(
         Command::Quit => DispatchOutcome::Quit,
         Command::Abort => {
             // Clear any set mark as part of the abort gesture.
-            // Future milestones (M9 confirm-kill, M13 isearch,
-            // M17/18 LSP overlays) short-circuit the dispatch
-            // stream before this point when their modal is active.
+            // M13 / M17 / M18 will short-circuit the dispatch stream
+            // before this point when their modals are active.
             clear_mark(tabs);
             DispatchOutcome::Continue
         }
@@ -268,7 +291,7 @@ fn run_command(
             DispatchOutcome::Continue
         }
         Command::KillBuffer => {
-            kill_active(tabs, edits);
+            kill_active(tabs, edits, alerts);
             DispatchOutcome::Continue
         }
         Command::CursorUp => {
@@ -369,6 +392,7 @@ mod tests {
     use led_core::{CanonPath, UserPath};
     use led_driver_buffers_core::LoadState;
     use led_driver_terminal_core::{Dims, KeyCode, KeyEvent, KeyModifiers, Terminal};
+    use led_state_alerts::AlertState;
     use led_state_tabs::{Cursor, Scroll, Tab, TabId, Tabs};
     use ropey::Rope;
     use std::sync::Arc;
@@ -385,11 +409,13 @@ mod tests {
     ) -> DispatchOutcome {
         let mut chord = ChordState::default();
         let mut kill_ring = KillRing::default();
+        let mut alerts = AlertState::default();
         dispatch_key(
             k,
             tabs,
             edits,
             &mut kill_ring,
+            &mut alerts,
             store,
             terminal,
             &default_keymap(),
@@ -411,11 +437,13 @@ mod tests {
         let keymap = default_keymap();
         let mut chord = ChordState::default();
         let mut kill_ring = KillRing::default();
+        let mut alerts = AlertState::default();
         dispatch_key(
             prefix,
             tabs,
             edits,
             &mut kill_ring,
+            &mut alerts,
             store,
             terminal,
             &keymap,
@@ -426,6 +454,7 @@ mod tests {
             tabs,
             edits,
             &mut kill_ring,
+            &mut alerts,
             store,
             terminal,
             &keymap,
@@ -470,6 +499,7 @@ mod tests {
         // branch no-ops, which is exactly what these tests assume.
         let mut edits = BufferEdits::default();
         let mut kill_ring = KillRing::default();
+        let mut alerts = AlertState::default();
         let store = BufferStore::default();
         let terminal = Terminal::default();
         let keymap = crate::keymap::default_keymap();
@@ -479,6 +509,7 @@ mod tests {
             tabs,
             &mut edits,
             &mut kill_ring,
+            &mut alerts,
             &store,
             &terminal,
             &keymap,
@@ -516,6 +547,7 @@ mod tests {
         let mut tabs = tabs_with(&[("a", 1)], Some(1));
         let mut edits = BufferEdits::default();
         let mut kill_ring = KillRing::default();
+        let mut alerts = AlertState::default();
         let store = BufferStore::default();
         let term = Terminal::default();
         let keymap = default_keymap();
@@ -527,6 +559,7 @@ mod tests {
             &mut tabs,
             &mut edits,
             &mut kill_ring,
+            &mut alerts,
             &store,
             &term,
             &keymap,
@@ -541,6 +574,7 @@ mod tests {
             &mut tabs,
             &mut edits,
             &mut kill_ring,
+            &mut alerts,
             &store,
             &term,
             &keymap,
@@ -1364,12 +1398,14 @@ mod tests {
         km.bind("ctrl+q", Command::Quit);
         let mut chord = ChordState::default();
         let mut kill_ring = KillRing::default();
+        let mut alerts = AlertState::default();
 
         let outcome = dispatch_key(
             key(KeyModifiers::CONTROL, KeyCode::Char('q')),
             &mut tabs,
             &mut edits,
             &mut kill_ring,
+            &mut alerts,
             &store,
             &term,
             &km,
@@ -1383,6 +1419,7 @@ mod tests {
             &mut tabs,
             &mut edits,
             &mut kill_ring,
+            &mut alerts,
             &store,
             &term,
             &km,
@@ -1401,11 +1438,13 @@ mod tests {
         let km = Keymap::empty(); // no bindings at all
         let mut chord = ChordState::default();
         let mut kill_ring = KillRing::default();
+        let mut alerts = AlertState::default();
         dispatch_key(
             key(KeyModifiers::NONE, KeyCode::Char('z')),
             &mut tabs,
             &mut edits,
             &mut kill_ring,
+            &mut alerts,
             &store,
             &term,
             &km,
@@ -1425,11 +1464,13 @@ mod tests {
         let km = Keymap::empty();
         let mut chord = ChordState::default();
         let mut kill_ring = KillRing::default();
+        let mut alerts = AlertState::default();
         dispatch_key(
             key(KeyModifiers::CONTROL, KeyCode::Char('x')),
             &mut tabs,
             &mut edits,
             &mut kill_ring,
+            &mut alerts,
             &store,
             &term,
             &km,
@@ -1486,12 +1527,14 @@ mod tests {
         let keymap = default_keymap();
         let mut chord = ChordState::default();
         let mut kill_ring = KillRing::default();
+        let mut alerts = AlertState::default();
         // ctrl+x → pending.
         dispatch_key(
             key(KeyModifiers::CONTROL, KeyCode::Char('x')),
             &mut tabs,
             &mut edits,
             &mut kill_ring,
+            &mut alerts,
             &store,
             &term,
             &keymap,
@@ -1504,6 +1547,7 @@ mod tests {
             &mut tabs,
             &mut edits,
             &mut kill_ring,
+            &mut alerts,
             &store,
             &term,
             &keymap,
@@ -1725,11 +1769,13 @@ mod tests {
         terminal: &Terminal,
     ) -> DispatchOutcome {
         let mut chord = ChordState::default();
+        let mut alerts = AlertState::default();
         dispatch_key(
             k,
             tabs,
             edits,
             kill_ring,
+            &mut alerts,
             store,
             terminal,
             &default_keymap(),
@@ -2035,6 +2081,7 @@ mod tests {
         km.bind("ctrl+y", Command::Redo); // override Yank for test
         let mut chord = ChordState::default();
         let mut kr = KillRing::default();
+        let mut alerts = AlertState::default();
 
         // Undo: ""
         dispatch_key(
@@ -2042,6 +2089,7 @@ mod tests {
             &mut tabs,
             &mut edits,
             &mut kr,
+            &mut alerts,
             &store,
             &term,
             &km,
@@ -2055,6 +2103,7 @@ mod tests {
             &mut tabs,
             &mut edits,
             &mut kr,
+            &mut alerts,
             &store,
             &term,
             &km,
@@ -2120,11 +2169,13 @@ mod tests {
         km.bind("ctrl+y", Command::Redo);
         let mut chord = ChordState::default();
         let mut kr = KillRing::default();
+        let mut alerts = AlertState::default();
         dispatch_key(
             key(KeyModifiers::CONTROL, KeyCode::Char('y')),
             &mut tabs,
             &mut edits,
             &mut kr,
+            &mut alerts,
             &store,
             &term,
             &km,
