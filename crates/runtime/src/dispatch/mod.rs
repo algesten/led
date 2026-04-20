@@ -5,53 +5,71 @@
 //! [`DispatchOutcome`] so the main loop can learn that a quit was
 //! requested without looking for a sentinel in state.
 //!
-//! M2 extends dispatch with cursor movement. Arrow (and Home/End/Page)
-//! keys mutate the active tab's `cursor` and then re-evaluate `scroll`
-//! so the cursor stays inside the viewport. Clamping against the rope
-//! requires read-only access to [`BufferStore`]; scroll needs the
-//! current `Terminal.dims` for the body-row count. Hence the widened
-//! signature.
+//! This module is split per concern:
 //!
-//! M3 adds editing. Printable chars, `Enter`, `Backspace`, `Delete`
-//! each mutate the active tab's buffer in [`BufferEdits`] (the
-//! user-decision source that sits alongside `BufferStore`). Cursor
-//! movement also reads edits first, store second, so movement works
-//! on the edited rope even before save (M4) lands.
+//! - [`shared`] — helpers used by most submodules (with_active, bump,
+//!   cursor↔char conversion, line_char_len).
+//! - [`cursor`] — Move enum, apply_move, move_cursor, adjust_scroll,
+//!   word-boundary walking.
+//! - [`edit`] — insert_char, insert_newline, delete_back,
+//!   delete_forward.
+//! - [`mark`] — set_mark_active, clear_mark, region_range.
+//! - [`kill`] — kill_region, kill_line, request_yank, `apply_yank`
+//!   (the ingest-side paste callback, re-exported).
+//! - [`undo`] — undo_active / redo_active.
+//! - [`tabs`] — cycle_active, kill_active.
+//! - [`save`] — request_save_active, request_save_all.
+//!
+//! Tests live in `mod tests` below; they cover all the submodules.
 
-use led_driver_buffers_core::{BufferStore, LoadState};
+mod cursor;
+mod edit;
+mod kill;
+mod mark;
+mod save;
+mod shared;
+mod tabs;
+mod undo;
+
+// Public surface — kept tight so the runtime only reaches in for
+// the five externally-relevant names.
+pub use kill::apply_yank;
+
+// Aliases used by `run_command` + the tests module. Non-test items
+// stay used unconditionally; test-only helpers live behind
+// `#[cfg(test)]`.
+use cursor::{Move, move_cursor};
+use edit::{delete_back, delete_forward, insert_char, insert_newline};
+use kill::{kill_line, kill_region, request_yank};
+use mark::{clear_mark, set_mark_active};
+use save::{request_save_active, request_save_all};
+use tabs::{cycle_active, kill_active};
+use undo::{redo_active, undo_active};
+
+// Test-only imports: the cursor-geometry unit tests exercise these
+// pure helpers directly.
+#[cfg(test)]
+use cursor::{adjust_scroll, apply_move};
+
+use led_driver_buffers_core::BufferStore;
 use led_driver_terminal_core::{KeyCode, KeyEvent, KeyModifiers, Terminal};
-use led_state_buffer_edits::{BufferEdits, EditOp, EditedBuffer};
+use led_state_buffer_edits::BufferEdits;
 use led_state_kill_ring::KillRing;
-use led_state_tabs::{Cursor, Scroll, Tab, Tabs};
-use ropey::Rope;
-use std::sync::Arc;
+use led_state_tabs::Tabs;
 
-use crate::keymap::{ChordState, Command, Keymap};
+// Test-only re-export so the tests module's `use super::*` can
+// construct `EditedBuffer` literals directly.
+#[cfg(test)]
+#[allow(unused_imports)]
+use led_state_buffer_edits::EditedBuffer;
+
 use crate::Event;
+use crate::keymap::{ChordState, Command, Keymap};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DispatchOutcome {
     Continue,
     Quit,
-}
-
-/// Logical cursor moves. Built from key events in [`dispatch_key`] and
-/// applied by the pure [`apply_move`] helper so the geometry is unit
-/// testable without any keyboard setup.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Move {
-    Up,
-    Down,
-    Left,
-    Right,
-    LineStart,
-    LineEnd,
-    PageUp,
-    PageDown,
-    FileStart,
-    FileEnd,
-    WordLeft,
-    WordRight,
 }
 
 /// Top-level entry point used by the main loop.
@@ -316,672 +334,6 @@ fn run_command(
     }
 }
 
-fn cycle_active(tabs: &mut Tabs, delta: isize) {
-    if tabs.open.is_empty() {
-        return;
-    }
-    let n = tabs.open.len() as isize;
-    let cur_idx = tabs
-        .active
-        .and_then(|id| tabs.open.iter().position(|t: &Tab| t.id == id))
-        .unwrap_or(0) as isize;
-    let next_idx = (cur_idx + delta).rem_euclid(n) as usize;
-    tabs.active = Some(tabs.open[next_idx].id);
-}
-
-/// Apply a move to the active tab: update cursor, then adjust scroll so
-/// the cursor stays inside the body viewport. No-op when there is no
-/// active tab or its buffer isn't loaded yet — the cursor has nothing
-/// to clamp against.
-///
-/// Rope lookup prefers [`BufferEdits`] (the user's edited view); the
-/// store fallback only matters before the runtime has seeded edits
-/// for a just-loaded buffer.
-fn move_cursor(
-    tabs: &mut Tabs,
-    edits: &BufferEdits,
-    store: &BufferStore,
-    terminal: &Terminal,
-    m: Move,
-) {
-    let Some(active) = tabs.active else {
-        return;
-    };
-    let Some(idx) = tabs.open.iter().position(|t| t.id == active) else {
-        return;
-    };
-    let path = &tabs.open[idx].path;
-    let rope: Arc<Rope> = match edits.buffers.get(path) {
-        Some(eb) => eb.rope.clone(),
-        None => match store.loaded.get(path) {
-            Some(LoadState::Ready(r)) => r.clone(),
-            _ => return,
-        },
-    };
-
-    let body_rows = terminal
-        .dims
-        .map(|d| d.rows.saturating_sub(1) as usize)
-        .unwrap_or(0);
-
-    let tab = &mut tabs.open[idx];
-    tab.cursor = apply_move(tab.cursor, &rope, m, body_rows);
-    tab.scroll = adjust_scroll(tab.scroll, tab.cursor, body_rows);
-}
-
-// ── Save request ───────────────────────────────────────────────────────
-
-/// Insert the active tab's path into `pending_saves` iff the buffer
-/// is loaded and dirty. Runtime's query + execute pair turns the
-/// entry into an actual write and clears it synchronously before
-/// spawning async work.
-fn request_save_active(tabs: &Tabs, edits: &mut BufferEdits) {
-    let Some(id) = tabs.active else {
-        return;
-    };
-    let Some(tab) = tabs.open.iter().find(|t| t.id == id) else {
-        return;
-    };
-    let Some(eb) = edits.buffers.get(&tab.path) else {
-        return;
-    };
-    if eb.dirty() {
-        edits.pending_saves.insert(tab.path.clone());
-    }
-}
-
-/// Insert every dirty-buffer path into `pending_saves`. Paths not
-/// currently attached to any open tab are skipped — "save all" means
-/// "save everything the user currently has open that has changed."
-fn request_save_all(tabs: &Tabs, edits: &mut BufferEdits) {
-    for tab in tabs.open.iter() {
-        let Some(eb) = edits.buffers.get(&tab.path) else {
-            continue;
-        };
-        if eb.dirty() {
-            edits.pending_saves.insert(tab.path.clone());
-        }
-    }
-}
-
-// ── Mark / region / kill ring ─────────────────────────────────────────
-
-fn set_mark_active(tabs: &mut Tabs) {
-    let Some(id) = tabs.active else {
-        return;
-    };
-    let Some(idx) = tabs.open.iter().position(|t| t.id == id) else {
-        return;
-    };
-    let tab = &mut tabs.open[idx];
-    tab.mark = Some(tab.cursor);
-}
-
-fn clear_mark(tabs: &mut Tabs) {
-    let Some(id) = tabs.active else {
-        return;
-    };
-    let Some(idx) = tabs.open.iter().position(|t| t.id == id) else {
-        return;
-    };
-    tabs.open[idx].mark = None;
-}
-
-/// Region bounds in char indices: `(start, end)` with `start <= end`,
-/// both clamped to the rope. Returns None when there's no active
-/// tab, no mark, or mark and cursor resolve to the same char index
-/// (empty region).
-fn region_range(tab: &Tab, rope: &Rope) -> Option<(usize, usize)> {
-    let mark = tab.mark?;
-    let a = cursor_to_char(&mark, rope);
-    let b = cursor_to_char(&tab.cursor, rope);
-    if a == b {
-        return None;
-    }
-    Some((a.min(b), a.max(b)))
-}
-
-fn cursor_to_char(c: &Cursor, rope: &Rope) -> usize {
-    let line_count = rope.len_lines().max(1);
-    let line = c.line.min(line_count - 1);
-    let line_len = line_char_len(rope, line);
-    let col = c.col.min(line_len);
-    rope.line_to_char(line) + col
-}
-
-fn kill_region(tabs: &mut Tabs, edits: &mut BufferEdits, kill_ring: &mut KillRing) {
-    let Some(id) = tabs.active else {
-        return;
-    };
-    let Some(idx) = tabs.open.iter().position(|t| t.id == id) else {
-        return;
-    };
-    let tab = &tabs.open[idx];
-    let Some(eb) = edits.buffers.get(&tab.path) else {
-        return;
-    };
-    let Some((start, end)) = region_range(tab, &eb.rope) else {
-        return;
-    };
-    let before = tab.cursor;
-
-    let mut rope = (*eb.rope).clone();
-    let killed: Arc<str> = Arc::from(rope.slice(start..end).to_string());
-    rope.remove(start..end);
-
-    let eb = edits.buffers.get_mut(&tab.path).expect("checked above");
-    bump(eb, rope);
-
-    let tab = &mut tabs.open[idx];
-    // Cursor lands at the start of the killed region.
-    tab.cursor = char_to_cursor(start, &eb.rope);
-    tab.cursor.preferred_col = tab.cursor.col;
-    tab.mark = None;
-    let after = tab.cursor;
-
-    kill_ring.latest = Some(killed.clone());
-    kill_ring.last_was_kill_line = false;
-    kill_ring.pending_clipboard_write = Some(killed.clone());
-
-    eb.history.record_delete(start, killed, before, after);
-}
-
-fn char_to_cursor(ch: usize, rope: &Rope) -> Cursor {
-    let line = rope.char_to_line(ch);
-    let col = ch - rope.line_to_char(line);
-    Cursor {
-        line,
-        col,
-        preferred_col: col,
-    }
-}
-
-fn kill_line(tabs: &mut Tabs, edits: &mut BufferEdits, kill_ring: &mut KillRing) {
-    let Some(id) = tabs.active else {
-        return;
-    };
-    let Some(idx) = tabs.open.iter().position(|t| t.id == id) else {
-        return;
-    };
-    let tab = &tabs.open[idx];
-    let Some(eb) = edits.buffers.get(&tab.path) else {
-        return;
-    };
-    let rope_arc = eb.rope.clone();
-    let line_count = rope_arc.len_lines();
-    let line = tab.cursor.line.min(line_count.saturating_sub(1));
-    let line_len = line_char_len(&rope_arc, line);
-    let col = tab.cursor.col.min(line_len);
-
-    let start = rope_arc.line_to_char(line) + col;
-    // At EOL: kill the newline (join with next line). At end of
-    // file: no-op.
-    let end = if col < line_len {
-        rope_arc.line_to_char(line) + line_len
-    } else if line + 1 < line_count {
-        rope_arc.line_to_char(line + 1)
-    } else {
-        return;
-    };
-    if start == end {
-        return;
-    }
-
-    let before = tab.cursor;
-    let mut rope = (*rope_arc).clone();
-    let killed_slice: Arc<str> = Arc::from(rope.slice(start..end).to_string());
-    rope.remove(start..end);
-
-    let new_latest: Arc<str> = if kill_ring.last_was_kill_line {
-        match &kill_ring.latest {
-            Some(prev) => {
-                let mut joined = String::with_capacity(prev.len() + killed_slice.len());
-                joined.push_str(prev);
-                joined.push_str(&killed_slice);
-                Arc::from(joined)
-            }
-            None => killed_slice.clone(),
-        }
-    } else {
-        killed_slice.clone()
-    };
-
-    let eb = edits.buffers.get_mut(&tab.path).expect("checked above");
-    bump(eb, rope);
-    // Cursor stays at `start` — kill-to-EOL doesn't move it.
-    let tab = &mut tabs.open[idx];
-    tab.cursor = char_to_cursor(start, &eb.rope);
-    tab.cursor.preferred_col = tab.cursor.col;
-    let after = tab.cursor;
-
-    kill_ring.latest = Some(new_latest.clone());
-    kill_ring.last_was_kill_line = true;
-    kill_ring.pending_clipboard_write = Some(new_latest);
-
-    // Record the actual characters this kill removed (not the
-    // coalesced kill-ring contents) — undo should restore exactly
-    // what this command's rope.remove took out.
-    eb.history.record_delete(start, killed_slice, before, after);
-}
-
-/// Mark a yank as pending against the currently-active tab. The
-/// runtime later fires a clipboard read; when it returns, the
-/// `apply_yank` ingest step inserts at the pending tab's cursor.
-fn request_yank(tabs: &Tabs, kill_ring: &mut KillRing) {
-    let Some(id) = tabs.active else {
-        return;
-    };
-    // Ignore if a read is already in flight — double-tap yank
-    // shouldn't kick off a second clipboard read.
-    if kill_ring.read_in_flight {
-        return;
-    }
-    kill_ring.pending_yank = Some(id);
-}
-
-/// Insert `text` at the cursor of the tab that originally requested
-/// the yank. Clears `pending_yank`. No-op when the target tab no
-/// longer exists (closed while the clipboard read was in flight) or
-/// isn't materialised in `edits`.
-pub fn apply_yank(tabs: &mut Tabs, edits: &mut BufferEdits, target: led_state_tabs::TabId, text: &str) {
-    let Some(idx) = tabs.open.iter().position(|t| t.id == target) else {
-        return;
-    };
-    let tab = &tabs.open[idx];
-    let Some(eb) = edits.buffers.get(&tab.path) else {
-        return;
-    };
-    let before = tab.cursor;
-
-    let mut rope = (*eb.rope).clone();
-    let char_idx = cursor_to_char(&tab.cursor, &rope);
-    rope.insert(char_idx, text);
-
-    let eb = edits.buffers.get_mut(&tab.path).expect("checked above");
-    bump(eb, rope);
-
-    // Advance cursor past the inserted text.
-    let inserted_chars = text.chars().count();
-    let new_idx = char_idx + inserted_chars;
-    let tab = &mut tabs.open[idx];
-    tab.cursor = char_to_cursor(new_idx, &eb.rope);
-    tab.cursor.preferred_col = tab.cursor.col;
-    let after = tab.cursor;
-
-    eb.history
-        .record_insert(char_idx, Arc::from(text), before, after);
-}
-
-// ── Undo / redo ───────────────────────────────────────────────────────
-
-fn undo_active(tabs: &mut Tabs, edits: &mut BufferEdits) {
-    with_active(tabs, edits, |tab, eb| {
-        let Some(group) = eb.history.take_undo() else {
-            return;
-        };
-        // Apply ops in reverse order, as their inverses.
-        let mut rope = (*eb.rope).clone();
-        for op in group.ops.iter().rev() {
-            match op {
-                EditOp::Insert { at, text } => {
-                    let len = text.chars().count();
-                    rope.remove(*at..*at + len);
-                }
-                EditOp::Delete { at, text } => {
-                    rope.insert(*at, text);
-                }
-            }
-        }
-        bump(eb, rope);
-        tab.cursor = group.cursor_before;
-        tab.cursor.preferred_col = tab.cursor.col;
-        eb.history.push_future(group);
-    });
-}
-
-fn redo_active(tabs: &mut Tabs, edits: &mut BufferEdits) {
-    with_active(tabs, edits, |tab, eb| {
-        let Some(group) = eb.history.take_redo() else {
-            return;
-        };
-        let mut rope = (*eb.rope).clone();
-        for op in &group.ops {
-            match op {
-                EditOp::Insert { at, text } => {
-                    rope.insert(*at, text);
-                }
-                EditOp::Delete { at, text } => {
-                    let len = text.chars().count();
-                    rope.remove(*at..*at + len);
-                }
-            }
-        }
-        bump(eb, rope);
-        tab.cursor = group.cursor_after;
-        tab.cursor.preferred_col = tab.cursor.col;
-        eb.history.push_past(group);
-    });
-}
-
-// ── Kill buffer ────────────────────────────────────────────────────────
-
-/// Close the active tab. M6 no-ops if the buffer is dirty (no
-/// confirm-kill prompt yet — M9 adds that). After a successful kill,
-/// activate the neighbour tab or `None` if this was the last.
-fn kill_active(tabs: &mut Tabs, edits: &mut BufferEdits) {
-    let Some(id) = tabs.active else {
-        return;
-    };
-    let Some(idx) = tabs.open.iter().position(|t| t.id == id) else {
-        return;
-    };
-    // Guard against losing unsaved work. M9 swaps this for a
-    // confirm-kill prompt.
-    if let Some(eb) = edits.buffers.get(&tabs.open[idx].path)
-        && eb.dirty()
-    {
-        return;
-    }
-    let path = tabs.open[idx].path.clone();
-    tabs.open.remove(idx);
-    edits.buffers.remove(&path);
-    edits.pending_saves.remove(&path);
-    if tabs.open.is_empty() {
-        tabs.active = None;
-    } else {
-        let next = idx.min(tabs.open.len() - 1);
-        tabs.active = Some(tabs.open[next].id);
-    }
-}
-
-// ── Edit primitives ────────────────────────────────────────────────────
-
-/// Access the active tab and its edited buffer together. Bails if
-/// either is missing — buffer not yet loaded means edit keys no-op.
-fn with_active<F>(tabs: &mut Tabs, edits: &mut BufferEdits, f: F)
-where
-    F: FnOnce(&mut Tab, &mut EditedBuffer),
-{
-    let Some(id) = tabs.active else {
-        return;
-    };
-    let Some(idx) = tabs.open.iter().position(|t| t.id == id) else {
-        return;
-    };
-    let tab = &mut tabs.open[idx];
-    let Some(eb) = edits.buffers.get_mut(&tab.path) else {
-        return;
-    };
-    f(tab, eb);
-}
-
-fn bump(eb: &mut EditedBuffer, new_rope: Rope) {
-    eb.rope = Arc::new(new_rope);
-    eb.version = eb.version.saturating_add(1);
-    // saved_version untouched — `dirty()` now derives as version > saved_version.
-}
-
-fn insert_char(tabs: &mut Tabs, edits: &mut BufferEdits, ch: char) {
-    with_active(tabs, edits, |tab, eb| {
-        let before = tab.cursor;
-        let mut rope = (*eb.rope).clone();
-        let char_idx = rope.line_to_char(tab.cursor.line) + tab.cursor.col;
-        rope.insert_char(char_idx, ch);
-        bump(eb, rope);
-        tab.cursor.col += 1;
-        tab.cursor.preferred_col = tab.cursor.col;
-        let after = tab.cursor;
-        eb.history.record_insert_char(char_idx, ch, before, after);
-    });
-}
-
-fn insert_newline(tabs: &mut Tabs, edits: &mut BufferEdits) {
-    with_active(tabs, edits, |tab, eb| {
-        let before = tab.cursor;
-        let mut rope = (*eb.rope).clone();
-        let char_idx = rope.line_to_char(tab.cursor.line) + tab.cursor.col;
-        rope.insert_char(char_idx, '\n');
-        bump(eb, rope);
-        eb.history
-            .record_insert(char_idx, Arc::<str>::from("\n"), before, {
-                // cursor_after is set below; we need it before we
-                // overwrite cursor. Snapshot post-compute.
-                let mut a = before;
-                a.line += 1;
-                a.col = 0;
-                a.preferred_col = 0;
-                a
-            });
-        tab.cursor.line += 1;
-        tab.cursor.col = 0;
-        tab.cursor.preferred_col = 0;
-    });
-}
-
-fn delete_back(tabs: &mut Tabs, edits: &mut BufferEdits) {
-    with_active(tabs, edits, |tab, eb| {
-        if tab.cursor.line == 0 && tab.cursor.col == 0 {
-            return;
-        }
-        let before = tab.cursor;
-        // Capture the join column *before* the remove. After the
-        // newline is gone the previous line grows to include the
-        // current one, so post-remove length is too large.
-        let join_col = if tab.cursor.col == 0 {
-            line_char_len(&eb.rope, tab.cursor.line - 1)
-        } else {
-            0
-        };
-        let mut rope = (*eb.rope).clone();
-        let char_idx = rope.line_to_char(tab.cursor.line) + tab.cursor.col;
-        let removed: String = rope.slice(char_idx - 1..char_idx).to_string();
-        rope.remove(char_idx - 1..char_idx);
-        if tab.cursor.col > 0 {
-            tab.cursor.col -= 1;
-        } else {
-            tab.cursor.line -= 1;
-            tab.cursor.col = join_col;
-        }
-        tab.cursor.preferred_col = tab.cursor.col;
-        let after = tab.cursor;
-        bump(eb, rope);
-        eb.history
-            .record_delete(char_idx - 1, Arc::from(removed), before, after);
-    });
-}
-
-fn delete_forward(tabs: &mut Tabs, edits: &mut BufferEdits) {
-    with_active(tabs, edits, |tab, eb| {
-        let line_count = eb.rope.len_lines();
-        let on_last_line = tab.cursor.line + 1 >= line_count;
-        let at_line_end = tab.cursor.col >= line_char_len(&eb.rope, tab.cursor.line);
-        if on_last_line && at_line_end {
-            return;
-        }
-        let before = tab.cursor;
-        let mut rope = (*eb.rope).clone();
-        let char_idx = rope.line_to_char(tab.cursor.line) + tab.cursor.col;
-        let removed: String = rope.slice(char_idx..char_idx + 1).to_string();
-        rope.remove(char_idx..char_idx + 1);
-        bump(eb, rope);
-        // Cursor stays put. preferred_col unchanged (col didn't move).
-        let after = tab.cursor;
-        eb.history
-            .record_delete(char_idx, Arc::from(removed), before, after);
-    });
-}
-
-/// Pure cursor geometry over a rope. Clamps every output to valid
-/// buffer coordinates given the current rope extent.
-///
-/// Vertical moves (`Up` / `Down` / `PageUp` / `PageDown`) carry
-/// `preferred_col` forward and clamp `col` to the destination line —
-/// so traversing a short line and landing on a long line later
-/// restores the original goal column. Horizontal moves re-anchor
-/// `preferred_col` to the new `col`.
-fn apply_move(c: Cursor, rope: &Rope, m: Move, body_rows: usize) -> Cursor {
-    let line_count = rope.len_lines().max(1);
-    let last_line = line_count - 1;
-    let clamp_col = |line: usize, col: usize| col.min(line_char_len(rope, line));
-
-    // Vertical move: pick `nl`, clamp goal col to it, keep preferred.
-    let vertical = |nl: usize| -> Cursor {
-        Cursor {
-            line: nl,
-            col: clamp_col(nl, c.preferred_col),
-            preferred_col: c.preferred_col,
-        }
-    };
-    // Horizontal move: anchor preferred_col to the new col.
-    let horizontal = |line: usize, col: usize| -> Cursor {
-        Cursor {
-            line,
-            col,
-            preferred_col: col,
-        }
-    };
-
-    match m {
-        Move::Up => vertical(c.line.saturating_sub(1)),
-        Move::Down => vertical((c.line + 1).min(last_line)),
-        Move::PageUp => vertical(c.line.saturating_sub(body_rows.max(1))),
-        Move::PageDown => vertical((c.line + body_rows.max(1)).min(last_line)),
-        Move::Left => horizontal(c.line, c.col.saturating_sub(1)),
-        Move::Right => horizontal(c.line, clamp_col(c.line, c.col.saturating_add(1))),
-        Move::LineStart => horizontal(c.line, 0),
-        Move::LineEnd => horizontal(c.line, line_char_len(rope, c.line)),
-        Move::FileStart => horizontal(0, 0),
-        Move::FileEnd => {
-            let line = last_line;
-            horizontal(line, line_char_len(rope, line))
-        }
-        Move::WordLeft => {
-            let (line, col) = word_boundary_back(rope, c.line, c.col);
-            horizontal(line, col)
-        }
-        Move::WordRight => {
-            let (line, col) = word_boundary_fwd(rope, c.line, c.col);
-            horizontal(line, col)
-        }
-    }
-}
-
-/// Word = run of alphanumeric-or-underscore chars. `word_boundary_fwd`
-/// skips any trailing non-word chars from the current position, then
-/// skips word chars to land at the start of the next non-word run.
-///
-/// Walks the rope directly with `RopeSlice::char_at`-style indexing —
-/// no intermediate allocation, matches the allocation-discipline rule
-/// for dispatch hot paths.
-fn word_boundary_fwd(rope: &Rope, mut line: usize, mut col: usize) -> (usize, usize) {
-    let line_count = rope.len_lines().max(1);
-    let last_line = line_count - 1;
-    loop {
-        let len = line_char_len(rope, line);
-        // 1. Skip non-word chars on the current line.
-        while col < len && !is_word_char(rope_char_at(rope, line, col)) {
-            col += 1;
-        }
-        if col >= len {
-            // Ran off the end; advance to the next line's start.
-            if line == last_line {
-                return (line, len);
-            }
-            line += 1;
-            col = 0;
-            continue;
-        }
-        // 2. Skip word chars; we land at the first non-word after them.
-        while col < line_char_len(rope, line)
-            && is_word_char(rope_char_at(rope, line, col))
-        {
-            col += 1;
-        }
-        return (line, col);
-    }
-}
-
-fn word_boundary_back(rope: &Rope, mut line: usize, mut col: usize) -> (usize, usize) {
-    loop {
-        if col == 0 {
-            if line == 0 {
-                return (0, 0);
-            }
-            line -= 1;
-            col = line_char_len(rope, line);
-            continue;
-        }
-        // 1. Skip non-word chars immediately behind the cursor.
-        while col > 0 && !is_word_char(rope_char_at(rope, line, col - 1)) {
-            col -= 1;
-        }
-        if col == 0 {
-            // Line ran out to the left; check if we landed on a word
-            // boundary or need to cross to the previous line.
-            if line == 0 {
-                return (0, 0);
-            }
-            // Previous line hasn't been scanned yet; loop handles it.
-            line -= 1;
-            col = line_char_len(rope, line);
-            continue;
-        }
-        // 2. Skip the word run itself — we land at its start.
-        while col > 0 && is_word_char(rope_char_at(rope, line, col - 1)) {
-            col -= 1;
-        }
-        return (line, col);
-    }
-}
-
-fn is_word_char(c: char) -> bool {
-    c.is_alphanumeric() || c == '_'
-}
-
-fn rope_char_at(rope: &Rope, line: usize, col: usize) -> char {
-    let base = rope.line_to_char(line);
-    rope.char(base + col)
-}
-
-/// Move scroll.top so that the cursor row stays within [top, top+body_rows).
-fn adjust_scroll(s: Scroll, c: Cursor, body_rows: usize) -> Scroll {
-    if body_rows == 0 {
-        return s;
-    }
-    if c.line < s.top {
-        Scroll { top: c.line }
-    } else if c.line >= s.top.saturating_add(body_rows) {
-        Scroll {
-            top: c.line + 1 - body_rows,
-        }
-    } else {
-        s
-    }
-}
-
-/// Character count of a buffer line, stripped of trailing `\n` / `\r\n`.
-/// Out-of-range lines yield 0.
-///
-/// Walks the rope directly — no intermediate `String` allocation.
-/// Called on every cursor keystroke, so this needs to stay cheap.
-fn line_char_len(rope: &Rope, line: usize) -> usize {
-    if line >= rope.len_lines() {
-        return 0;
-    }
-    let slice = rope.line(line);
-    let mut end = slice.len_chars();
-    if end == 0 {
-        return 0;
-    }
-    if slice.char(end - 1) == '\n' {
-        end -= 1;
-        if end > 0 && slice.char(end - 1) == '\r' {
-            end -= 1;
-        }
-    }
-    end
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1032,10 +384,24 @@ mod tests {
         let mut chord = ChordState::default();
         let mut kill_ring = KillRing::default();
         dispatch_key(
-            prefix, tabs, edits, &mut kill_ring, store, terminal, &keymap, &mut chord,
+            prefix,
+            tabs,
+            edits,
+            &mut kill_ring,
+            store,
+            terminal,
+            &keymap,
+            &mut chord,
         );
         dispatch_key(
-            second, tabs, edits, &mut kill_ring, store, terminal, &keymap, &mut chord,
+            second,
+            tabs,
+            edits,
+            &mut kill_ring,
+            store,
+            terminal,
+            &keymap,
+            &mut chord,
         )
     }
 
@@ -1179,10 +545,7 @@ mod tests {
     /// (the user-visible rope) with identical content — mirrors the
     /// production path where the runtime copies newly-Ready ropes
     /// into `BufferEdits` via load completions.
-    fn fixture_with_content(
-        body: &str,
-        dims: Dims,
-    ) -> (Tabs, BufferEdits, BufferStore, Terminal) {
+    fn fixture_with_content(body: &str, dims: Dims) -> (Tabs, BufferEdits, BufferStore, Terminal) {
         let rope = Arc::new(Rope::from_str(body));
         let mut edits = BufferEdits::default();
         edits
@@ -1521,7 +884,13 @@ mod tests {
     #[test]
     fn page_down_also_preserves_preferred_col() {
         let body = (0..30)
-            .map(|i| if i == 5 { "xy".into() } else { format!("line {i:03}") })
+            .map(|i| {
+                if i == 5 {
+                    "xy".into()
+                } else {
+                    format!("line {i:03}")
+                }
+            })
             .collect::<Vec<String>>()
             .join("\n");
         let rope = Rope::from_str(&body);
@@ -1844,12 +1213,14 @@ mod tests {
         // ropes + cursors are preserved per tab.
         let mut tabs = tabs_with(&[("a", 1), ("b", 2)], Some(1));
         let mut edits = BufferEdits::default();
-        edits
-            .buffers
-            .insert(canon("a"), EditedBuffer::fresh(Arc::new(Rope::from_str("a"))));
-        edits
-            .buffers
-            .insert(canon("b"), EditedBuffer::fresh(Arc::new(Rope::from_str("b"))));
+        edits.buffers.insert(
+            canon("a"),
+            EditedBuffer::fresh(Arc::new(Rope::from_str("a"))),
+        );
+        edits.buffers.insert(
+            canon("b"),
+            EditedBuffer::fresh(Arc::new(Rope::from_str("b"))),
+        );
         let store = BufferStore::default();
         let term = terminal_with(Some(Dims { cols: 10, rows: 5 }));
         tabs.open[0].cursor = Cursor {
@@ -1901,10 +1272,7 @@ mod tests {
         let (mut tabs, mut edits, store, term) =
             fixture_with_content("hi", Dims { cols: 10, rows: 5 });
         // Force dirty by bumping version past saved_version.
-        let eb = edits
-            .buffers
-            .get_mut(&canon("file.rs"))
-            .expect("seeded");
+        let eb = edits.buffers.get_mut(&canon("file.rs")).expect("seeded");
         eb.version = 1;
         assert!(eb.dirty());
 
@@ -2227,10 +1595,7 @@ mod tests {
     #[test]
     fn file_start_and_file_end_jump_to_extremes() {
         let (mut tabs, mut edits, store, term) =
-            fixture_with_content(
-                "abc\ndef\nghij",
-                Dims { cols: 40, rows: 5 },
-            );
+            fixture_with_content("abc\ndef\nghij", Dims { cols: 40, rows: 5 });
         tabs.open[0].cursor = Cursor {
             line: 1,
             col: 2,
@@ -2275,10 +1640,7 @@ mod tests {
     #[test]
     fn word_right_and_word_left_move_by_word() {
         let (mut tabs, mut edits, store, term) =
-            fixture_with_content(
-                "foo bar  baz",
-                Dims { cols: 40, rows: 5 },
-            );
+            fixture_with_content("foo bar  baz", Dims { cols: 40, rows: 5 });
         // Cursor starts at (0, 0). alt+f → end of "foo" (col 3).
         dispatch_default(
             key(KeyModifiers::ALT, KeyCode::Char('f')),
@@ -2411,10 +1773,7 @@ mod tests {
             &term,
         );
         assert_eq!(rope_of(&edits, "file.rs").to_string(), "abgh");
-        assert_eq!(
-            kr.latest.as_deref(),
-            Some("cdef")
-        );
+        assert_eq!(kr.latest.as_deref(), Some("cdef"));
         assert_eq!(tabs.open[0].cursor.col, 2);
         assert!(tabs.open[0].mark.is_none());
     }
