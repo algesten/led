@@ -83,16 +83,16 @@ pub fn run(
         drivers.file.process(store);
         drivers.input.process(terminal);
 
-        let events: Vec<Event> = std::mem::take(&mut terminal.pending)
-            .into_iter()
-            .map(|ev| match ev {
+        // Drain one event at a time — the `VecDeque::pop_front` yields
+        // each event by value, so the partial borrow of
+        // `terminal.pending` is released before dispatch takes a full
+        // `&Terminal`. No intermediate `Vec<Event>` per tick.
+        let mut quit = false;
+        while let Some(term_ev) = terminal.pending.pop_front() {
+            let ev = match term_ev {
                 TermEvent::Key(k) => Event::Key(k),
                 TermEvent::Resize(d) => Event::Resize(d),
-            })
-            .collect();
-
-        let mut quit = false;
-        for ev in events {
+            };
             match dispatch(ev, tabs, store, terminal) {
                 DispatchOutcome::Continue => {}
                 DispatchOutcome::Quit => {

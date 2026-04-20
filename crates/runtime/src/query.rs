@@ -17,6 +17,7 @@ use led_driver_buffers_core::{BufferStore, LoadAction, LoadState};
 use led_driver_terminal_core::{BodyModel, Dims, Frame, TabBarModel, Terminal};
 use led_state_tabs::{Cursor, Scroll, Tab, TabId, Tabs};
 use ropey::Rope;
+use std::sync::Arc;
 
 // ── Inputs on Tabs ─────────────────────────────────────────────────────
 
@@ -91,6 +92,9 @@ impl<'a> TerminalDimsInput<'a> {
 /// Diff between the paths open in tabs and the `BufferStore` map.
 /// Absent → `Load`; `Pending | Ready | Error` → skip. Once a load is
 /// in flight, the `Pending` entry prevents re-triggering.
+///
+/// Filters before cloning so we only allocate `CanonPath`s for paths
+/// that actually need loading.
 #[drv::memo(single)]
 pub fn file_load_action<'a, 'b>(
     store: StoreLoadedInput<'a>,
@@ -98,13 +102,16 @@ pub fn file_load_action<'a, 'b>(
 ) -> imbl::Vector<LoadAction> {
     tabs.open
         .iter()
-        .map(|t| t.path.clone())
-        .filter(|p| !store.loaded.contains_key(p))
-        .map(LoadAction::Load)
+        .filter(|t| !store.loaded.contains_key(&t.path))
+        .map(|t| LoadAction::Load(t.path.clone()))
         .collect()
 }
 
 /// Tab-bar slice of the render frame.
+///
+/// Labels are wrapped in `Arc` so cache-hit clones of [`TabBarModel`]
+/// (inside `Frame`, deep inside `render_frame`'s cache slot) are a
+/// pointer copy.
 #[drv::memo(single)]
 pub fn tab_bar_model<'a>(tabs: TabsActiveInput<'a>) -> TabBarModel {
     let labels: Vec<String> = tabs
@@ -120,7 +127,10 @@ pub fn tab_bar_model<'a>(tabs: TabsActiveInput<'a>) -> TabBarModel {
     let active = tabs
         .active
         .and_then(|id| tabs.open.iter().position(|t| t.id == id));
-    TabBarModel { labels, active }
+    TabBarModel {
+        labels: Arc::new(labels),
+        active,
+    }
 }
 
 /// Body slice of the render frame.
@@ -141,34 +151,45 @@ pub fn body_model<'a, 'b>(
     let Some(tab) = tabs.open.iter().find(|t| t.id == id) else {
         return BodyModel::Empty;
     };
-    let path_display = tab.path.display().to_string();
-
+    // Only the Pending / Error paths need a rendered path string, and
+    // even then we allocate only once per recompute; `Arc<str>` keeps
+    // cache-hit clones O(1).
     match store.loaded.get(&tab.path) {
-        None | Some(LoadState::Pending) => BodyModel::Pending { path_display },
+        None | Some(LoadState::Pending) => BodyModel::Pending {
+            path_display: path_display(tab),
+        },
         Some(LoadState::Error(msg)) => BodyModel::Error {
-            path_display,
-            message: (**msg).clone(),
+            path_display: path_display(tab),
+            message: Arc::<str>::from(msg.as_str()),
         },
         Some(LoadState::Ready(rope)) => render_content(rope, tab.cursor, tab.scroll, dims),
     }
 }
 
+fn path_display(tab: &Tab) -> Arc<str> {
+    Arc::<str>::from(tab.path.display().to_string())
+}
+
 fn render_content(rope: &Rope, cursor: Cursor, scroll: Scroll, dims: Dims) -> BodyModel {
     let body_rows = dims.rows.saturating_sub(1) as usize;
     let line_count = rope.len_lines();
+    let cols = dims.cols as usize;
 
-    let lines: Vec<String> = (scroll.top..scroll.top.saturating_add(body_rows))
-        .take_while(|&ln| ln < line_count)
-        .map(|ln| {
-            let s = rope.line(ln).to_string();
-            let s = s.strip_suffix('\n').unwrap_or(&s);
-            let s = s.strip_suffix('\r').unwrap_or(s);
-            truncate_to_cols(s, dims.cols as usize)
-        })
-        .collect();
+    let mut lines: Vec<String> = Vec::with_capacity(body_rows);
+    for ln in scroll.top..scroll.top.saturating_add(body_rows) {
+        if ln >= line_count {
+            break;
+        }
+        let mut s = rope.line(ln).to_string();
+        strip_trailing_newline(&mut s);
+        truncate_to_cols_in_place(&mut s, cols);
+        lines.push(s);
+    }
 
-    let cursor = visible_cursor(cursor, scroll, dims);
-    BodyModel::Content { lines, cursor }
+    BodyModel::Content {
+        lines: Arc::new(lines),
+        cursor: visible_cursor(cursor, scroll, dims),
+    }
 }
 
 fn visible_cursor(c: Cursor, s: Scroll, dims: Dims) -> Option<(u16, u16)> {
@@ -184,11 +205,20 @@ fn visible_cursor(c: Cursor, s: Scroll, dims: Dims) -> Option<(u16, u16)> {
     Some((row, col))
 }
 
-fn truncate_to_cols(s: &str, cols: usize) -> String {
-    if s.chars().count() <= cols {
-        s.to_string()
-    } else {
-        s.chars().take(cols).collect()
+fn strip_trailing_newline(s: &mut String) {
+    if s.ends_with('\n') {
+        s.pop();
+        if s.ends_with('\r') {
+            s.pop();
+        }
+    }
+}
+
+/// Truncate `s` to at most `cols` Unicode characters, in place.
+/// No allocation when the string already fits.
+fn truncate_to_cols_in_place(s: &mut String, cols: usize) {
+    if let Some((byte_idx, _)) = s.char_indices().nth(cols) {
+        s.truncate(byte_idx);
     }
 }
 
@@ -334,7 +364,7 @@ mod tests {
             Some(Dims { cols: 80, rows: 24 }),
         );
         let frame = render(&t, &s, &term).expect("dims set");
-        assert_eq!(frame.tab_bar.labels, vec!["a.rs".to_string()]);
+        assert_eq!(*frame.tab_bar.labels, vec!["a.rs".to_string()]);
         assert_eq!(frame.tab_bar.active, Some(0));
         assert!(matches!(frame.body, BodyModel::Pending { .. }));
     }
@@ -421,7 +451,7 @@ mod tests {
         );
         let frame = render(&t, &s, &term).expect("dims set");
         match frame.body {
-            BodyModel::Error { message, .. } => assert_eq!(message, "No such file"),
+            BodyModel::Error { message, .. } => assert_eq!(&*message, "No such file"),
             other => panic!("expected Error, got {other:?}"),
         }
     }
@@ -430,7 +460,7 @@ mod tests {
     fn render_frame_body_empty_when_no_tabs() {
         let (t, s, term) = fixture(&[], None, &[], Some(Dims { cols: 80, rows: 24 }));
         let frame = render(&t, &s, &term).expect("dims set");
-        assert_eq!(frame.tab_bar.labels, Vec::<String>::new());
+        assert!(frame.tab_bar.labels.is_empty());
         assert_eq!(frame.tab_bar.active, None);
         assert!(matches!(frame.body, BodyModel::Empty));
     }

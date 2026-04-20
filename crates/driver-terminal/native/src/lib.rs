@@ -150,15 +150,21 @@ fn paint_tab_bar(bar: &TabBarModel, dims: Dims, out: &mut impl Write) -> io::Res
     let mut col: u16 = 0;
     for (i, label) in bar.labels.iter().enumerate() {
         let active = bar.active == Some(i);
-        let chunk = format!(" {} ", label);
         if active {
             queue!(out, style::SetAttribute(style::Attribute::Reverse))?;
         }
-        queue!(out, style::Print(&chunk))?;
+        // No `format!(" {label} ")` — three Prints go straight through
+        // crossterm's buffered writer with zero allocation.
+        queue!(
+            out,
+            style::Print(" "),
+            style::Print(label),
+            style::Print(" ")
+        )?;
         if active {
             queue!(out, style::SetAttribute(style::Attribute::NoReverse))?;
         }
-        col = col.saturating_add(chunk.chars().count() as u16);
+        col = col.saturating_add(label.chars().count().saturating_add(2) as u16);
         if col >= dims.cols {
             break;
         }
@@ -173,25 +179,28 @@ fn paint_body(body: &BodyModel, dims: Dims, out: &mut impl Write) -> io::Result<
     let body_top: u16 = 1;
     let body_rows = dims.rows.saturating_sub(1);
 
-    let empty = String::new();
-    let lines: Vec<&str> = match body {
-        BodyModel::Empty => vec![],
-        BodyModel::Pending { path_display } => {
-            vec![path_display.as_str(), "loading..."]
-        }
-        BodyModel::Error {
-            path_display,
-            message,
-        } => vec![path_display.as_str(), message.as_str()],
-        BodyModel::Content { lines, .. } => lines.iter().map(String::as_str).collect(),
-    };
-
+    // Match inside the loop — no intermediate `Vec<&str>` per paint.
     for row in 0..body_rows {
         queue!(out, cursor::MoveTo(0, body_top + row))?;
-        if let Some(line) = lines.get(row as usize) {
+        let line: Option<&str> = match body {
+            BodyModel::Empty => None,
+            BodyModel::Pending { path_display } => match row {
+                0 => Some(path_display.as_ref()),
+                1 => Some("loading..."),
+                _ => None,
+            },
+            BodyModel::Error {
+                path_display,
+                message,
+            } => match row {
+                0 => Some(path_display.as_ref()),
+                1 => Some(message.as_ref()),
+                _ => None,
+            },
+            BodyModel::Content { lines, .. } => lines.get(row as usize).map(String::as_str),
+        };
+        if let Some(line) = line {
             queue!(out, style::Print(line))?;
-        } else {
-            queue!(out, style::Print(&empty))?;
         }
         queue!(out, terminal::Clear(terminal::ClearType::UntilNewLine))?;
     }
@@ -250,13 +259,14 @@ mod tests {
 
     #[test]
     fn paint_renders_without_panicking() {
+        use std::sync::Arc;
         let frame = Frame {
             tab_bar: TabBarModel {
-                labels: vec!["a.rs".into(), "b.rs".into()],
+                labels: Arc::new(vec!["a.rs".into(), "b.rs".into()]),
                 active: Some(0),
             },
             body: BodyModel::Content {
-                lines: vec!["line 1".into(), "line 2".into()],
+                lines: Arc::new(vec!["line 1".into(), "line 2".into()]),
                 cursor: Some((0, 0)),
             },
             cursor: Some((0, 1)),

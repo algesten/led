@@ -96,24 +96,30 @@ pub struct Terminal {
 // driver atoms contribute — is the runtime's job; this crate only owns
 // the *types*.
 
+/// Tab-bar labels. `labels` is wrapped in `Arc` so cache-hit clones of
+/// [`TabBarModel`] (and its containing [`Frame`]) are a pointer copy
+/// rather than a deep clone of every label per tick.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct TabBarModel {
-    pub labels: Vec<String>,
+    pub labels: Arc<Vec<String>>,
     pub active: Option<usize>,
 }
 
+/// Body view. All owned-string fields use `Arc<str>` / `Arc<Vec<String>>`
+/// so drv cache-hit clones (which happen on every idle tick through
+/// `render_frame`) never deep-copy the content.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BodyModel {
     Empty,
     Pending {
-        path_display: String,
+        path_display: Arc<str>,
     },
     Error {
-        path_display: String,
-        message: String,
+        path_display: Arc<str>,
+        message: Arc<str>,
     },
     Content {
-        lines: Vec<String>,
+        lines: Arc<Vec<String>>,
         /// Body-relative cursor position `(row, col)`. `None` when the
         /// cursor is outside the visible scroll window (defensive — the
         /// runtime's scroll invariant should keep it in view).

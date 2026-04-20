@@ -223,14 +223,25 @@ fn adjust_scroll(s: Scroll, c: Cursor, body_rows: usize) -> Scroll {
 
 /// Character count of a buffer line, stripped of trailing `\n` / `\r\n`.
 /// Out-of-range lines yield 0.
+///
+/// Walks the rope directly — no intermediate `String` allocation.
+/// Called on every cursor keystroke, so this needs to stay cheap.
 fn line_char_len(rope: &Rope, line: usize) -> usize {
     if line >= rope.len_lines() {
         return 0;
     }
-    let s = rope.line(line).to_string();
-    let s = s.strip_suffix('\n').unwrap_or(&s);
-    let s = s.strip_suffix('\r').unwrap_or(s);
-    s.chars().count()
+    let slice = rope.line(line);
+    let mut end = slice.len_chars();
+    if end == 0 {
+        return 0;
+    }
+    if slice.char(end - 1) == '\n' {
+        end -= 1;
+        if end > 0 && slice.char(end - 1) == '\r' {
+            end -= 1;
+        }
+    }
+    end
 }
 
 #[cfg(test)]
