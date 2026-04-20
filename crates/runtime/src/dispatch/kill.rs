@@ -165,3 +165,227 @@ pub fn apply_yank(tabs: &mut Tabs, edits: &mut BufferEdits, target: TabId, text:
     eb.history
         .record_insert(char_idx, Arc::from(text), before, after);
 }
+
+#[cfg(test)]
+mod tests {
+    
+
+    
+    
+    use led_driver_terminal_core::{Dims, KeyCode, KeyModifiers};
+    
+    
+    use led_state_kill_ring::KillRing;
+    use led_state_tabs::{Cursor, TabId};
+    
+
+    use super::*;
+    use super::super::testutil::*;
+    
+    
+
+    #[test]
+    fn kill_region_removes_marked_range_into_ring() {
+        let (mut tabs, mut edits, store, term) =
+            fixture_with_content("abcdefgh", Dims { cols: 20, rows: 5 });
+        tabs.open[0].cursor = Cursor {
+            line: 0,
+            col: 2,
+            preferred_col: 2,
+        };
+        tabs.open[0].mark = Some(Cursor {
+            line: 0,
+            col: 6,
+            preferred_col: 6,
+        });
+        let mut kr = KillRing::default();
+        dispatch_with_ring(
+            key(KeyModifiers::CONTROL, KeyCode::Char('w')),
+            &mut tabs,
+            &mut edits,
+            &mut kr,
+            &store,
+            &term,
+        );
+        assert_eq!(rope_of(&edits, "file.rs").to_string(), "abgh");
+        assert_eq!(kr.latest.as_deref(), Some("cdef"));
+        assert_eq!(tabs.open[0].cursor.col, 2);
+        assert!(tabs.open[0].mark.is_none());
+    }
+
+    #[test]
+    fn kill_region_handles_mark_after_cursor() {
+        let (mut tabs, mut edits, store, term) =
+            fixture_with_content("abcdefgh", Dims { cols: 20, rows: 5 });
+        // Cursor at 6, mark at 2 — reverse of the previous test.
+        tabs.open[0].cursor = Cursor {
+            line: 0,
+            col: 6,
+            preferred_col: 6,
+        };
+        tabs.open[0].mark = Some(Cursor {
+            line: 0,
+            col: 2,
+            preferred_col: 2,
+        });
+        let mut kr = KillRing::default();
+        dispatch_with_ring(
+            key(KeyModifiers::CONTROL, KeyCode::Char('w')),
+            &mut tabs,
+            &mut edits,
+            &mut kr,
+            &store,
+            &term,
+        );
+        assert_eq!(rope_of(&edits, "file.rs").to_string(), "abgh");
+        assert_eq!(kr.latest.as_deref(), Some("cdef"));
+        // Cursor lands at region start (col 2), not where it started.
+        assert_eq!(tabs.open[0].cursor.col, 2);
+    }
+
+    #[test]
+    fn kill_line_kills_to_eol() {
+        let (mut tabs, mut edits, store, term) =
+            fixture_with_content("foo bar\nbaz", Dims { cols: 20, rows: 5 });
+        tabs.open[0].cursor = Cursor {
+            line: 0,
+            col: 4,
+            preferred_col: 4,
+        };
+        let mut kr = KillRing::default();
+        dispatch_with_ring(
+            key(KeyModifiers::CONTROL, KeyCode::Char('k')),
+            &mut tabs,
+            &mut edits,
+            &mut kr,
+            &store,
+            &term,
+        );
+        assert_eq!(rope_of(&edits, "file.rs").to_string(), "foo \nbaz");
+        assert_eq!(kr.latest.as_deref(), Some("bar"));
+        assert!(kr.last_was_kill_line);
+    }
+
+    #[test]
+    fn kill_line_at_eol_joins_with_next() {
+        let (mut tabs, mut edits, store, term) =
+            fixture_with_content("foo\nbar", Dims { cols: 20, rows: 5 });
+        tabs.open[0].cursor = Cursor {
+            line: 0,
+            col: 3,
+            preferred_col: 3,
+        };
+        let mut kr = KillRing::default();
+        dispatch_with_ring(
+            key(KeyModifiers::CONTROL, KeyCode::Char('k')),
+            &mut tabs,
+            &mut edits,
+            &mut kr,
+            &store,
+            &term,
+        );
+        assert_eq!(rope_of(&edits, "file.rs").to_string(), "foobar");
+        assert_eq!(kr.latest.as_deref(), Some("\n"));
+    }
+
+    #[test]
+    fn consecutive_kill_lines_coalesce() {
+        let (mut tabs, mut edits, store, term) =
+            fixture_with_content("aaa\nbbb\nccc", Dims { cols: 20, rows: 5 });
+        let mut kr = KillRing::default();
+        // First kill: kill "aaa" on line 0.
+        dispatch_with_ring(
+            key(KeyModifiers::CONTROL, KeyCode::Char('k')),
+            &mut tabs,
+            &mut edits,
+            &mut kr,
+            &store,
+            &term,
+        );
+        // Second kill: kill the newline that now precedes "bbb".
+        dispatch_with_ring(
+            key(KeyModifiers::CONTROL, KeyCode::Char('k')),
+            &mut tabs,
+            &mut edits,
+            &mut kr,
+            &store,
+            &term,
+        );
+        // Coalesced: "aaa" + "\n".
+        assert_eq!(kr.latest.as_deref(), Some("aaa\n"));
+    }
+
+    #[test]
+    fn non_kill_command_breaks_coalescing() {
+        let (mut tabs, mut edits, store, term) =
+            fixture_with_content("aaa\nbbb", Dims { cols: 20, rows: 5 });
+        let mut kr = KillRing::default();
+        dispatch_with_ring(
+            key(KeyModifiers::CONTROL, KeyCode::Char('k')),
+            &mut tabs,
+            &mut edits,
+            &mut kr,
+            &store,
+            &term,
+        );
+        assert!(kr.last_was_kill_line);
+        // Any other command resets the flag.
+        dispatch_with_ring(
+            key(KeyModifiers::NONE, KeyCode::Right),
+            &mut tabs,
+            &mut edits,
+            &mut kr,
+            &store,
+            &term,
+        );
+        assert!(!kr.last_was_kill_line);
+    }
+
+    #[test]
+    fn yank_sets_pending_on_active_tab() {
+        let (mut tabs, mut edits, store, term) =
+            fixture_with_content("x", Dims { cols: 20, rows: 5 });
+        let mut kr = KillRing::default();
+        dispatch_with_ring(
+            key(KeyModifiers::CONTROL, KeyCode::Char('y')),
+            &mut tabs,
+            &mut edits,
+            &mut kr,
+            &store,
+            &term,
+        );
+        assert_eq!(kr.pending_yank, Some(TabId(1)));
+    }
+
+    #[test]
+    fn apply_yank_inserts_text_at_cursor() {
+        let (mut tabs, mut edits, _store, _term) =
+            fixture_with_content("hello", Dims { cols: 20, rows: 5 });
+        tabs.open[0].cursor = Cursor {
+            line: 0,
+            col: 3,
+            preferred_col: 3,
+        };
+        apply_yank(&mut tabs, &mut edits, TabId(1), "XYZ");
+        assert_eq!(rope_of(&edits, "file.rs").to_string(), "helXYZlo");
+        assert_eq!(tabs.open[0].cursor.col, 6);
+    }
+
+    #[test]
+    fn kill_region_noop_when_no_mark() {
+        let (mut tabs, mut edits, store, term) =
+            fixture_with_content("abc", Dims { cols: 20, rows: 5 });
+        assert!(tabs.open[0].mark.is_none());
+        let mut kr = KillRing::default();
+        dispatch_with_ring(
+            key(KeyModifiers::CONTROL, KeyCode::Char('w')),
+            &mut tabs,
+            &mut edits,
+            &mut kr,
+            &store,
+            &term,
+        );
+        assert_eq!(rope_of(&edits, "file.rs").to_string(), "abc");
+        assert!(kr.latest.is_none());
+    }
+}

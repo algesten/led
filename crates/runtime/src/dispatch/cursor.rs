@@ -209,3 +209,486 @@ pub(super) fn adjust_scroll(s: Scroll, c: Cursor, body_rows: usize) -> Scroll {
         s
     }
 }
+
+#[cfg(test)]
+mod tests {
+    
+
+    
+    use led_driver_buffers_core::BufferStore;
+    use led_driver_terminal_core::{Dims, KeyCode, KeyModifiers};
+    
+    use led_state_buffer_edits::BufferEdits;
+    
+    use led_state_tabs::{Cursor, Scroll};
+    use ropey::Rope;
+
+    use super::*;
+    use super::super::testutil::*;
+    
+    
+
+    #[test]
+    fn down_moves_cursor_and_does_not_scroll_within_viewport() {
+        let (mut tabs, mut edits, store, term) =
+            fixture_with_content("a\nb\nc\nd\ne\nf", Dims { cols: 10, rows: 5 });
+        // body_rows = 4. Cursor starts at (0,0); moving down stays in view.
+        for _ in 0..3 {
+            dispatch_default(
+                key(KeyModifiers::NONE, KeyCode::Down),
+                &mut tabs,
+                &mut edits,
+                &store,
+                &term,
+            );
+        }
+        assert_eq!(
+            tabs.open[0].cursor,
+            Cursor {
+                line: 3,
+                col: 0,
+                preferred_col: 0,
+            }
+        );
+        assert_eq!(tabs.open[0].scroll, Scroll { top: 0 });
+    }
+
+    #[test]
+    fn down_scrolls_when_cursor_would_leave_viewport() {
+        let (mut tabs, mut edits, store, term) =
+            fixture_with_content("a\nb\nc\nd\ne\nf", Dims { cols: 10, rows: 4 });
+        // body_rows = 3. Fourth Down leaves viewport → scroll.top becomes 1.
+        for _ in 0..3 {
+            dispatch_default(
+                key(KeyModifiers::NONE, KeyCode::Down),
+                &mut tabs,
+                &mut edits,
+                &store,
+                &term,
+            );
+        }
+        assert_eq!(
+            tabs.open[0].cursor,
+            Cursor {
+                line: 3,
+                col: 0,
+                preferred_col: 0,
+            }
+        );
+        assert_eq!(tabs.open[0].scroll, Scroll { top: 1 });
+    }
+
+    #[test]
+    fn up_scrolls_back_toward_the_top() {
+        let (mut tabs, mut edits, store, term) =
+            fixture_with_content("a\nb\nc\nd\ne\nf", Dims { cols: 10, rows: 4 });
+        tabs.open[0].cursor = Cursor {
+            line: 5,
+            col: 0,
+            preferred_col: 0,
+        };
+        tabs.open[0].scroll = Scroll { top: 3 };
+        // body_rows = 3. Moving up from line 5 to line 2 should leave view
+        // at the top.
+        for _ in 0..3 {
+            dispatch_default(
+                key(KeyModifiers::NONE, KeyCode::Up),
+                &mut tabs,
+                &mut edits,
+                &store,
+                &term,
+            );
+        }
+        assert_eq!(
+            tabs.open[0].cursor,
+            Cursor {
+                line: 2,
+                col: 0,
+                preferred_col: 0,
+            }
+        );
+        assert_eq!(tabs.open[0].scroll, Scroll { top: 2 });
+    }
+
+    #[test]
+    fn right_clamps_to_line_end_then_stops() {
+        let (mut tabs, mut edits, store, term) =
+            fixture_with_content("hi\nworld", Dims { cols: 10, rows: 5 });
+        // Line 0 = "hi" (len 2). Right from col 0 → 1 → 2 → 2.
+        for expected in [1usize, 2, 2] {
+            dispatch_default(
+                key(KeyModifiers::NONE, KeyCode::Right),
+                &mut tabs,
+                &mut edits,
+                &store,
+                &term,
+            );
+            assert_eq!(tabs.open[0].cursor.col, expected);
+        }
+    }
+
+    #[test]
+    fn left_stops_at_line_start() {
+        let (mut tabs, mut edits, store, term) =
+            fixture_with_content("hi\nworld", Dims { cols: 10, rows: 5 });
+        tabs.open[0].cursor = Cursor {
+            line: 0,
+            col: 1,
+            preferred_col: 1,
+        };
+        dispatch_default(
+            key(KeyModifiers::NONE, KeyCode::Left),
+            &mut tabs,
+            &mut edits,
+            &store,
+            &term,
+        );
+        assert_eq!(tabs.open[0].cursor.col, 0);
+        dispatch_default(
+            key(KeyModifiers::NONE, KeyCode::Left),
+            &mut tabs,
+            &mut edits,
+            &store,
+            &term,
+        );
+        assert_eq!(tabs.open[0].cursor.col, 0);
+    }
+
+    #[test]
+    fn home_end_jump_within_current_line() {
+        let (mut tabs, mut edits, store, term) =
+            fixture_with_content("abcdef\nghij", Dims { cols: 20, rows: 5 });
+        tabs.open[0].cursor = Cursor {
+            line: 0,
+            col: 3,
+            preferred_col: 3,
+        };
+        dispatch_default(
+            key(KeyModifiers::NONE, KeyCode::End),
+            &mut tabs,
+            &mut edits,
+            &store,
+            &term,
+        );
+        assert_eq!(
+            tabs.open[0].cursor,
+            Cursor {
+                line: 0,
+                col: 6,
+                preferred_col: 6,
+            }
+        );
+        dispatch_default(
+            key(KeyModifiers::NONE, KeyCode::Home),
+            &mut tabs,
+            &mut edits,
+            &store,
+            &term,
+        );
+        assert_eq!(
+            tabs.open[0].cursor,
+            Cursor {
+                line: 0,
+                col: 0,
+                preferred_col: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn page_down_advances_by_one_viewport() {
+        let body = (0..50)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let (mut tabs, mut edits, store, term) =
+            fixture_with_content(&body, Dims { cols: 40, rows: 11 });
+        // body_rows = 10. PageDown from line 0 → line 10, scroll follows.
+        dispatch_default(
+            key(KeyModifiers::NONE, KeyCode::PageDown),
+            &mut tabs,
+            &mut edits,
+            &store,
+            &term,
+        );
+        assert_eq!(tabs.open[0].cursor.line, 10);
+        assert_eq!(tabs.open[0].scroll.top, 1);
+    }
+
+    #[test]
+    fn movement_is_noop_when_buffer_not_loaded() {
+        let mut tabs = tabs_with(&[("file.rs", 1)], Some(1));
+        let mut edits = BufferEdits::default(); // not seeded
+        let store = BufferStore::default(); // no content loaded
+        let term = terminal_with(Some(Dims { cols: 10, rows: 5 }));
+        dispatch_default(
+            key(KeyModifiers::NONE, KeyCode::Down),
+            &mut tabs,
+            &mut edits,
+            &store,
+            &term,
+        );
+        assert_eq!(tabs.open[0].cursor, Cursor::default());
+        assert_eq!(tabs.open[0].scroll, Scroll::default());
+    }
+
+    // ── pure helper tests ───────────────────────────────────────────────
+
+    #[test]
+    fn apply_move_clamps_col_when_moving_to_shorter_line() {
+        let rope = Rope::from_str("abcdef\nghi");
+        let c = apply_move(
+            Cursor {
+                line: 0,
+                col: 5,
+                preferred_col: 5,
+            },
+            &rope,
+            Move::Down,
+            10,
+        );
+        // "ghi".len() == 3 → col clamps; preferred_col carries forward
+        // so a later Down onto a longer line can restore column 5.
+        assert_eq!(
+            c,
+            Cursor {
+                line: 1,
+                col: 3,
+                preferred_col: 5,
+            }
+        );
+    }
+
+    #[test]
+    fn vertical_traversal_restores_preferred_col_on_longer_line() {
+        // The regression this guards against: moving Down past a line
+        // that's shorter than the cursor's column must not anchor the
+        // column to the shorter line. Continuing Down onto a longer
+        // line should return the cursor to the original column.
+        let rope = Rope::from_str("abcdefghij\nxy\n0123456789");
+        let start = Cursor {
+            line: 0,
+            col: 7,
+            preferred_col: 7,
+        };
+
+        // Down onto the short middle line ("xy") clamps col to 2.
+        let c = apply_move(start, &rope, Move::Down, 10);
+        assert_eq!(
+            c,
+            Cursor {
+                line: 1,
+                col: 2,
+                preferred_col: 7,
+            }
+        );
+
+        // Down again onto the long third line — col returns to 7.
+        let c = apply_move(c, &rope, Move::Down, 10);
+        assert_eq!(
+            c,
+            Cursor {
+                line: 2,
+                col: 7,
+                preferred_col: 7,
+            }
+        );
+
+        // And symmetric Up traversal also restores.
+        let c = apply_move(c, &rope, Move::Up, 10);
+        assert_eq!(
+            c,
+            Cursor {
+                line: 1,
+                col: 2,
+                preferred_col: 7,
+            }
+        );
+        let c = apply_move(c, &rope, Move::Up, 10);
+        assert_eq!(
+            c,
+            Cursor {
+                line: 0,
+                col: 7,
+                preferred_col: 7,
+            }
+        );
+    }
+
+    #[test]
+    fn horizontal_move_resets_preferred_col() {
+        // After Right, the preferred column anchors to the new col, so
+        // a subsequent Down follows the new (smaller) goal, not the
+        // old one.
+        let rope = Rope::from_str("abcdefghij\n0123456789");
+        let c = Cursor {
+            line: 0,
+            col: 8,
+            preferred_col: 8,
+        };
+        let c = apply_move(c, &rope, Move::Left, 10);
+        assert_eq!(
+            c,
+            Cursor {
+                line: 0,
+                col: 7,
+                preferred_col: 7,
+            }
+        );
+        let c = apply_move(c, &rope, Move::Down, 10);
+        assert_eq!(
+            c,
+            Cursor {
+                line: 1,
+                col: 7,
+                preferred_col: 7,
+            }
+        );
+    }
+
+    #[test]
+    fn page_down_also_preserves_preferred_col() {
+        let body = (0..30)
+            .map(|i| {
+                if i == 5 {
+                    "xy".into()
+                } else {
+                    format!("line {i:03}")
+                }
+            })
+            .collect::<Vec<String>>()
+            .join("\n");
+        let rope = Rope::from_str(&body);
+        let start = Cursor {
+            line: 0,
+            col: 6,
+            preferred_col: 6,
+        };
+        // PageDown by 10 lands at line 10 ("line 010", len 8) — col 6 restored.
+        let c = apply_move(start, &rope, Move::PageDown, 10);
+        assert_eq!(
+            c,
+            Cursor {
+                line: 10,
+                col: 6,
+                preferred_col: 6,
+            }
+        );
+    }
+
+    #[test]
+    fn adjust_scroll_pulls_cursor_back_into_view() {
+        let s = adjust_scroll(
+            Scroll { top: 0 },
+            Cursor {
+                line: 8,
+                col: 0,
+                preferred_col: 0,
+            },
+            4,
+        );
+        assert_eq!(s, Scroll { top: 5 });
+    }
+
+    #[test]
+    fn adjust_scroll_noop_when_cursor_inside_window() {
+        let s0 = Scroll { top: 10 };
+        let s = adjust_scroll(
+            s0,
+            Cursor {
+                line: 12,
+                col: 0,
+                preferred_col: 0,
+            },
+            4,
+        );
+        assert_eq!(s, s0);
+    }
+
+    #[test]
+    fn file_start_and_file_end_jump_to_extremes() {
+        let (mut tabs, mut edits, store, term) =
+            fixture_with_content("abc\ndef\nghij", Dims { cols: 40, rows: 5 });
+        tabs.open[0].cursor = Cursor {
+            line: 1,
+            col: 2,
+            preferred_col: 2,
+        };
+
+        // ctrl+end → last line, last col.
+        dispatch_default(
+            key(KeyModifiers::CONTROL, KeyCode::End),
+            &mut tabs,
+            &mut edits,
+            &store,
+            &term,
+        );
+        assert_eq!(
+            tabs.open[0].cursor,
+            Cursor {
+                line: 2,
+                col: 4,
+                preferred_col: 4,
+            }
+        );
+
+        // ctrl+home → line 0, col 0.
+        dispatch_default(
+            key(KeyModifiers::CONTROL, KeyCode::Home),
+            &mut tabs,
+            &mut edits,
+            &store,
+            &term,
+        );
+        assert_eq!(
+            tabs.open[0].cursor,
+            Cursor {
+                line: 0,
+                col: 0,
+                preferred_col: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn word_right_and_word_left_move_by_word() {
+        let (mut tabs, mut edits, store, term) =
+            fixture_with_content("foo bar  baz", Dims { cols: 40, rows: 5 });
+        // Cursor starts at (0, 0). alt+f → end of "foo" (col 3).
+        dispatch_default(
+            key(KeyModifiers::ALT, KeyCode::Char('f')),
+            &mut tabs,
+            &mut edits,
+            &store,
+            &term,
+        );
+        assert_eq!(tabs.open[0].cursor.col, 3);
+        // alt+f again → skip " ", skip "bar", land at col 7.
+        dispatch_default(
+            key(KeyModifiers::ALT, KeyCode::Char('f')),
+            &mut tabs,
+            &mut edits,
+            &store,
+            &term,
+        );
+        assert_eq!(tabs.open[0].cursor.col, 7);
+        // alt+b → back to start of "bar" (col 4).
+        dispatch_default(
+            key(KeyModifiers::ALT, KeyCode::Char('b')),
+            &mut tabs,
+            &mut edits,
+            &store,
+            &term,
+        );
+        assert_eq!(tabs.open[0].cursor.col, 4);
+        // alt+b → start of "foo" (col 0).
+        dispatch_default(
+            key(KeyModifiers::ALT, KeyCode::Char('b')),
+            &mut tabs,
+            &mut edits,
+            &store,
+            &term,
+        );
+        assert_eq!(tabs.open[0].cursor.col, 0);
+    }
+}
