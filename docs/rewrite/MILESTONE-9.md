@@ -122,15 +122,17 @@ Per `ROADMAP.md`:
 - **Macro recording indicator** → M14.
 - **Find-file / isearch prompt modes** (status-bar overrides 1
   and 2 in the spec) → M12 / M13.
-- **Ruler** (thin vertical mark at col 110) → deferred; not
-  listed in ROADMAP. Revisit with theming.
-- **Theming** — painter uses crossterm basic colors only.
-  `status_bar_model` reports `is_warn: bool`; the painter picks
-  white-on-red-bold. No `theme.status_bar.style` yet.
-- **Per-overlay rendering** (completion, code-actions,
-  diagnostic hover) — those arrive with their features.
-- **Info alert durations other than 2 s** — no per-alert TTL
-  control yet. All Info alerts share 2 s.
+- **Ruler** (thin vertical mark at col 110) → M15. The ruler's
+  style is themeable, and M15 is the milestone that grows the
+  painter to per-cell styles + introduces the theme parser.
+- **Theming** (`theme.status_bar.style`, `theme.git.gutter_*`,
+  `theme.diagnostics`, …) → M15. For M9 the painter uses
+  crossterm basic colors only; `status_bar_model` reports
+  `is_warn: bool` and the painter picks white-on-red-bold by
+  hand. The semantic signal stays the same when themes land.
+- **Per-overlay rendering**: diagnostic hover → M16,
+  completion popup → M17, code-actions / rename → M18. M9
+  lays no groundwork for these beyond the region split.
 
 ## Key design decisions
 
@@ -244,6 +246,14 @@ if let Some(exp) = alerts.info_expires_at
 At most one `Instant::now()` per tick; cheap. The check runs
 *before* the query phase so the status-bar memo's input is
 already up-to-date for this tick's render.
+
+All Info alerts share the same 2 s TTL (legacy matches).
+No per-alert TTL control: the call sites don't need it, and
+adding a `Duration` arg to every `set_info` call would
+complicate the dispatch sites without solving a real problem.
+If a future feature needs a different duration, extend
+`set_info` then — the shape already takes `ttl`, just no caller
+varies it yet.
 
 ### D9 — Confirm-kill gates the next keystroke, not the whole tick
 
