@@ -48,21 +48,24 @@ $ cargo run -p led -- Cargo.toml
   `file_save_done | path=... version=N ok=<bool> [err=...]`.
 
 ### Out
-- Save-All (across all open tabs). Single-tab-save per keypress
-  only. Multi-save falls out trivially if we later add a keymap
-  entry that inserts every dirty path into `pending_saves`.
-- Undo / save history — still deferred (no edit log yet).
-- User-facing error surface: errors go to the trace log but no UI
-  banner. A future `Notices` source can pick this up.
-- Reload from disk (what happens when an external process rewrites
-  the file) — orthogonal to save, deferred.
-- File locking / conflict detection (mtime-on-save, writer
-  contention). M4 assumes the editor is the only writer.
-- Line-ending normalisation (CRLF vs LF). Write whatever the rope
-  contains verbatim.
-- BOM handling. Same answer.
-- Save-as / rename — deferred.
-- Format-on-save / hooks — deferred.
+
+Each item links to its scheduled milestone in `ROADMAP.md`:
+
+- **Save-All** (`ctrl+x ctrl+a`) → M6. Adds the `SaveAll` command;
+  dispatch inserts every dirty path into `pending_saves`.
+- **Undo / save history** → M8 (edit log).
+- **User-facing error surface** → M9 (alert system). M4 errors land
+  in the trace; M9 surfaces them in the status bar.
+- **Reload from disk / external change** → M26.
+- **File locking / conflict detection** → M26 as well; the watch
+  driver's mtime check is the natural hook.
+- **Line-ending normalisation (CRLF vs LF)** → not scheduled. Write
+  verbatim. Add to roadmap if it bites.
+- **BOM handling** → not scheduled. Same answer.
+- **Save-As** (`ctrl+x ctrl+w`) → M12 (find-file overlay: SaveAs
+  reuses that overlay).
+- **Format-on-save** → M18 (LSP extras). M4 just writes the rope;
+  M18 rewires save to run LSP format first when attached.
 
 ## Key design decisions
 

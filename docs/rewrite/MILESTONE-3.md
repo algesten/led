@@ -60,24 +60,24 @@ $ cargo run -p led -- Cargo.toml
   `--golden-trace`.
 
 ### Out
-- Saving to disk (M4). `Ctrl-S` is not wired.
-- Undo / redo. No history beyond the materialised rope.
-- Clipboard (`Ctrl-C` already means quit; cut/copy/paste wait for M5
-  config so they can be rebound).
-- Multi-line indent / dedent, block selection, selection at all.
-- Tab key for indentation — Tab still cycles tabs, because we don't
-  have config-driven keymap yet (M5).
-- Unicode-width aware column math (combining marks, double-width
-  East Asian chars). Column stays a char index; wide chars will be
-  handled when syntax arrives.
-- Smart-indent / auto-indent.
-- Line-ending preservation (CRLF vs LF).
-- Rebase queries for async data — the `version` counter is added
-  now so LSP can use it later, but no rebase memo exists yet.
-- Explicit edit log (operation sequence). M3 stores only the
-  materialised rope + `version` + `dirty`; the edit log will be
-  layered on when LSP / git diagnostics need to translate coords
-  across edits.
+
+Each item links to its scheduled milestone in `ROADMAP.md`:
+
+- **Saving to disk** → M4. `Ctrl-S` is not wired yet.
+- **Undo / redo** → M8. The explicit edit log lands there — until
+  then M3 stores only the materialised rope + `version` + `dirty`.
+- **Clipboard + kill ring + selection** → M7.
+- **Tab key for indentation** → M23 (auto-indent). Tab stays bound
+  to `tab.next` in the M5 keymap.
+- **Unicode-width aware column math** → M25. Column stays a char
+  index; wide CJK chars and combining marks won't render correctly
+  until then.
+- **Smart-indent / auto-indent** → M23.
+- **Line-ending preservation (CRLF vs LF)** → not scheduled; write
+  whatever the rope contains verbatim. Add to roadmap if it bites.
+- **Rebase queries for async data** → M16 (first LSP consumer). The
+  `version` counter is the anchor those queries will walk through
+  the op log introduced in M8.
 
 ## Key design decisions
 

@@ -19,10 +19,11 @@ The current led architecture has a single `model()` function with a large combin
 5. **[MILESTONE-2-SCOPE.md](MILESTONE-2-SCOPE.md)** — short scope-bookmark for M2 (cursor + arrow-key movement + viewport scrolling). Not a design; the first task of M2 is to write the full MILESTONE-2.md.
 6. **[M1-arch.svg](M1-arch.svg)** — graphviz of the actual M1 shape (atoms, lenses, memos, drivers, the ABI boundary). [`.dot`](M1-arch.dot) and [`.png`](M1-arch.png) alongside.
 7. **[REWRITE-PLAN.md](REWRITE-PLAN.md)** — phased execution plan. Phases 0–3 done; Phase 4 (domain port against goldens) pending.
-8. **[SPEC-PLAN.md](SPEC-PLAN.md)** — methodology used to produce the spec; artefacts in `docs/spec/` and `docs/extract/`.
-9. **[DRIVER-INVENTORY-PLAN.md](DRIVER-INVENTORY-PLAN.md)** — template used for per-driver docs; artefacts in `docs/drivers/`.
-10. **[GOLDENS-PLAN.md](GOLDENS-PLAN.md)** — golden-test strategy. Harness lives in `goldens/` (excluded from the workspace; black-box subprocess tests). ~280 scenarios authored.
-11. **[POST-REWRITE-REVIEW.md](POST-REWRITE-REVIEW.md)** — bugs and quirks in current led to consider during rewrite.
+8. **[ROADMAP.md](ROADMAP.md)** — concrete milestone schedule: M1–M5 shipped, Mα–M26 planned. Every `[Out]` bullet in a milestone doc points here. Includes golden-review discipline (don't carry legacy bugs forward).
+9. **[SPEC-PLAN.md](SPEC-PLAN.md)** — methodology used to produce the spec; artefacts in `docs/spec/` and `docs/extract/`.
+10. **[DRIVER-INVENTORY-PLAN.md](DRIVER-INVENTORY-PLAN.md)** — template used for per-driver docs; artefacts in `docs/drivers/`.
+11. **[GOLDENS-PLAN.md](GOLDENS-PLAN.md)** — golden-test strategy. Harness lives in `goldens/` (excluded from the workspace; black-box subprocess tests). ~280 scenarios authored.
+12. **[POST-REWRITE-REVIEW.md](POST-REWRITE-REVIEW.md)** — bugs and quirks in current led to consider during rewrite.
 
 ## Current crate layout (rewrite branch)
 

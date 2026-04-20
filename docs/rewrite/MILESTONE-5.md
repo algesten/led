@@ -57,18 +57,30 @@ $ cargo run -p led -- Cargo.toml
   raw mode is acquired so the message lands on a usable terminal.
 
 ### Out
-- Hot reload. Config is read once at startup; the resulting `Keymap`
-  is immutable for the process lifetime. Hot reload needs a watch
-  driver + a `ConfigState` atom; deferred.
-- Unbind / `"none"` / fallthrough. You can only override, not remove.
-- Per-mode keymaps (insert vs normal etc.). No modal design yet.
-- Chord / prefix bindings (`ctrl-x ctrl-s` style). Single keypress →
-  single command.
-- Non-keymap config: theming, tab width, line endings, session,
-  plugins. All separate concerns, future milestones.
-- Command arguments beyond the `InsertChar(char)` built-in. Users
-  bind key → named command; no parameterised bindings in config.
-- Lua / DSL config. TOML only.
+
+Each item links to its scheduled milestone in `ROADMAP.md`:
+
+- **Chord / prefix bindings** (`ctrl+x ctrl+s`) → M6. That's also
+  where the legacy Emacs-style defaults get rebound.
+- **Context overlays** (`[browser]`, `[file_search]`) → M11 (browser)
+  and M14 (file-search) respectively. The feature they gate on lands
+  then; the keymap-side plumbing lands alongside.
+- **Hot reload** → M26 (same watch driver that handles external
+  buffer changes can reload `config.toml`). Not scheduled on its own.
+- **Unbind / `"none"` / fallthrough** → M6 (comes for free with the
+  trie representation; bindings can point at a sentinel that cancels
+  instead of firing).
+- **Theming** (`theme.toml`, token colors) → M15 (syntax). The
+  config parser grows a `[theme]` section there.
+- **Tab width, line endings, other editor config** → M23 (the first
+  feature that actually cares — auto-indent needs tab-width). Add a
+  `[editor]` section to the TOML loader then.
+- **Session persistence / saved layout** → M21.
+- **Modal keymaps** (insert vs normal) → not scheduled. Legacy led
+  isn't modal; no need.
+- **Parameterised commands beyond `InsertChar`** → not scheduled.
+  TOML bindings remain key → named command.
+- **Lua / DSL config** → not scheduled. TOML only.
 
 ## Key design decisions
 
