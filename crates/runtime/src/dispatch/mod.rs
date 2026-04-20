@@ -1589,9 +1589,10 @@ mod tests {
         assert!(!edits.buffers.contains_key(&canon("a")));
     }
 
-    #[test]
-    fn kill_buffer_on_dirty_is_noop_until_m9() {
-        let mut tabs = tabs_with(&[("a", 1), ("b", 2)], Some(1));
+    // ── M9: confirm-kill on dirty ─────────────────────────────────────
+
+    fn dirty_tabs_with_confirm_scenario() -> (Tabs, BufferEdits, BufferStore, Terminal) {
+        let tabs = tabs_with(&[("a", 1), ("b", 2)], Some(1));
         let mut edits = BufferEdits::default();
         edits.buffers.insert(
             canon("a"),
@@ -1608,17 +1609,205 @@ mod tests {
         );
         let store = BufferStore::default();
         let term = terminal_with(Some(Dims { cols: 10, rows: 5 }));
+        (tabs, edits, store, term)
+    }
 
-        dispatch_chord_default(
+    #[test]
+    fn kill_buffer_on_dirty_raises_confirm_prompt() {
+        let (mut tabs, mut edits, store, term) = dirty_tabs_with_confirm_scenario();
+        let mut kill_ring = KillRing::default();
+        let mut alerts = AlertState::default();
+        let mut chord = ChordState::default();
+        let keymap = default_keymap();
+
+        // Ctrl-x k on dirty active tab → prompt set, tab still open.
+        dispatch_key(
             key(KeyModifiers::CONTROL, KeyCode::Char('x')),
+            &mut tabs,
+            &mut edits,
+            &mut kill_ring,
+            &mut alerts,
+            &store,
+            &term,
+            &keymap,
+            &mut chord,
+        );
+        dispatch_key(
             key(KeyModifiers::NONE, KeyCode::Char('k')),
             &mut tabs,
             &mut edits,
+            &mut kill_ring,
+            &mut alerts,
             &store,
             &term,
+            &keymap,
+            &mut chord,
         );
-        // Tab a still open — M6 doesn't have confirm-kill.
+        assert_eq!(alerts.confirm_kill, Some(TabId(1)));
         assert_eq!(tabs.open.len(), 2);
+    }
+
+    #[test]
+    fn confirm_kill_y_force_kills_and_clears_prompt() {
+        let (mut tabs, mut edits, store, term) = dirty_tabs_with_confirm_scenario();
+        let mut kill_ring = KillRing::default();
+        let mut alerts = AlertState {
+            confirm_kill: Some(TabId(1)),
+            ..Default::default()
+        };
+        let mut chord = ChordState::default();
+        let keymap = default_keymap();
+
+        dispatch_key(
+            key(KeyModifiers::NONE, KeyCode::Char('y')),
+            &mut tabs,
+            &mut edits,
+            &mut kill_ring,
+            &mut alerts,
+            &store,
+            &term,
+            &keymap,
+            &mut chord,
+        );
+        assert!(alerts.confirm_kill.is_none());
+        assert_eq!(tabs.open.len(), 1);
+        assert_eq!(tabs.open[0].id, TabId(2));
+        // 'y' must NOT have been inserted into the (now-gone) buffer —
+        // force-kill returns early.
+        assert!(!edits.buffers.contains_key(&canon("a")));
+    }
+
+    #[test]
+    fn confirm_kill_capital_y_also_confirms() {
+        let (mut tabs, mut edits, store, term) = dirty_tabs_with_confirm_scenario();
+        let mut kill_ring = KillRing::default();
+        let mut alerts = AlertState {
+            confirm_kill: Some(TabId(1)),
+            ..Default::default()
+        };
+        let mut chord = ChordState::default();
+        let keymap = default_keymap();
+
+        dispatch_key(
+            key(KeyModifiers::NONE, KeyCode::Char('Y')),
+            &mut tabs,
+            &mut edits,
+            &mut kill_ring,
+            &mut alerts,
+            &store,
+            &term,
+            &keymap,
+            &mut chord,
+        );
+        assert!(alerts.confirm_kill.is_none());
+        assert_eq!(tabs.open.len(), 1);
+    }
+
+    #[test]
+    fn confirm_kill_n_dismisses_and_inserts() {
+        let (mut tabs, mut edits, store, term) = dirty_tabs_with_confirm_scenario();
+        let mut kill_ring = KillRing::default();
+        let mut alerts = AlertState {
+            confirm_kill: Some(TabId(1)),
+            ..Default::default()
+        };
+        let mut chord = ChordState::default();
+        let keymap = default_keymap();
+
+        dispatch_key(
+            key(KeyModifiers::NONE, KeyCode::Char('n')),
+            &mut tabs,
+            &mut edits,
+            &mut kill_ring,
+            &mut alerts,
+            &store,
+            &term,
+            &keymap,
+            &mut chord,
+        );
+        // Prompt dismissed.
+        assert!(alerts.confirm_kill.is_none());
+        // Tab stays open.
+        assert_eq!(tabs.open.len(), 2);
+        // 'n' inserted into active buffer.
+        assert_eq!(rope_of(&edits, "a").to_string(), "nA");
+    }
+
+    #[test]
+    fn confirm_kill_esc_dismisses_and_clears_mark() {
+        let (mut tabs, mut edits, store, term) = dirty_tabs_with_confirm_scenario();
+        // Set a mark so we can verify Esc's Abort runs.
+        tabs.open[0].mark = Some(Cursor {
+            line: 0,
+            col: 0,
+            preferred_col: 0,
+        });
+        let mut kill_ring = KillRing::default();
+        let mut alerts = AlertState {
+            confirm_kill: Some(TabId(1)),
+            ..Default::default()
+        };
+        let mut chord = ChordState::default();
+        let keymap = default_keymap();
+
+        dispatch_key(
+            key(KeyModifiers::NONE, KeyCode::Esc),
+            &mut tabs,
+            &mut edits,
+            &mut kill_ring,
+            &mut alerts,
+            &store,
+            &term,
+            &keymap,
+            &mut chord,
+        );
+        assert!(alerts.confirm_kill.is_none());
+        assert_eq!(tabs.open.len(), 2);
+        // Esc's Abort command still ran → mark cleared.
+        assert!(tabs.open[0].mark.is_none());
+    }
+
+    #[test]
+    fn kill_buffer_on_clean_still_kills_without_prompt() {
+        // M9 regression guard: the clean path must not accidentally
+        // route through confirm_kill.
+        let mut tabs = tabs_with(&[("a", 1), ("b", 2)], Some(1));
+        let mut edits = BufferEdits::default();
+        edits.buffers.insert(
+            canon("a"),
+            EditedBuffer::fresh(Arc::new(Rope::from_str("A"))),
+        );
+        let store = BufferStore::default();
+        let term = terminal_with(Some(Dims { cols: 10, rows: 5 }));
+        let mut kill_ring = KillRing::default();
+        let mut alerts = AlertState::default();
+        let mut chord = ChordState::default();
+        let keymap = default_keymap();
+
+        dispatch_key(
+            key(KeyModifiers::CONTROL, KeyCode::Char('x')),
+            &mut tabs,
+            &mut edits,
+            &mut kill_ring,
+            &mut alerts,
+            &store,
+            &term,
+            &keymap,
+            &mut chord,
+        );
+        dispatch_key(
+            key(KeyModifiers::NONE, KeyCode::Char('k')),
+            &mut tabs,
+            &mut edits,
+            &mut kill_ring,
+            &mut alerts,
+            &store,
+            &term,
+            &keymap,
+            &mut chord,
+        );
+        assert!(alerts.confirm_kill.is_none());
+        assert_eq!(tabs.open.len(), 1);
     }
 
     #[test]

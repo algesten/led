@@ -905,4 +905,172 @@ mod tests {
             vec!["a.rs".to_string(), "\u{25cf}b.rs".to_string()]
         );
     }
+
+    // ── M9: past-EOF tildes ─────────────────────────────────────────────
+
+    #[test]
+    fn body_model_fills_past_eof_rows_with_tilde() {
+        // Two-line rope in a six-row viewport: body_rows = 4, so rows
+        // 2 and 3 are past-EOF.
+        let (t, e, s, term) = fixture(
+            &[("short.rs", 1)],
+            Some(1),
+            &[(
+                "short.rs",
+                LoadState::Ready(Arc::new(Rope::from_str("one\ntwo"))),
+            )],
+            Some(Dims { cols: 20, rows: 6 }),
+        );
+        let frame = render(&t, &e, &s, &term).expect("dims set");
+        match &frame.body {
+            BodyModel::Content { lines, .. } => {
+                assert_eq!(lines.len(), 4);
+                assert_eq!(lines[0], "  one");
+                assert_eq!(lines[1], "  two");
+                assert_eq!(lines[2], "~ ");
+                assert_eq!(lines[3], "~ ");
+            }
+            other => panic!("expected Content, got {other:?}"),
+        }
+    }
+
+    // ── M9: status bar model ────────────────────────────────────────────
+
+    fn status(a: &AlertState, t: &Tabs, e: &BufferEdits) -> StatusBarModel {
+        status_bar_model(
+            AlertsInput::new(a),
+            TabsActiveInput::new(t),
+            EditedBuffersInput::new(e),
+        )
+    }
+
+    #[test]
+    fn status_bar_default_empty_when_no_tab() {
+        let s = status(&AlertState::default(), &Tabs::default(), &BufferEdits::default());
+        assert_eq!(&*s.left, "");
+        assert_eq!(&*s.right, "");
+        assert!(!s.is_warn);
+    }
+
+    #[test]
+    fn status_bar_default_clean_shows_position_only() {
+        let mut tabs = Tabs::default();
+        tabs.open.push_back(Tab {
+            id: TabId(1),
+            path: canon("a.rs"),
+            cursor: Cursor { line: 0, col: 0, preferred_col: 0 },
+            ..Default::default()
+        });
+        tabs.active = Some(TabId(1));
+        let s = status(&AlertState::default(), &tabs, &BufferEdits::default());
+        assert_eq!(&*s.left, "");
+        assert_eq!(&*s.right, "L1:C1 ");
+        assert!(!s.is_warn);
+    }
+
+    #[test]
+    fn status_bar_default_dirty_shows_dot_and_position() {
+        let mut tabs = Tabs::default();
+        tabs.open.push_back(Tab {
+            id: TabId(1),
+            path: canon("a.rs"),
+            cursor: Cursor { line: 4, col: 10, preferred_col: 10 },
+            ..Default::default()
+        });
+        tabs.active = Some(TabId(1));
+        let mut edits = BufferEdits::default();
+        edits.buffers.insert(
+            canon("a.rs"),
+            EditedBuffer {
+                rope: Arc::new(Rope::from_str("x")),
+                version: 3,
+                saved_version: 1, // dirty
+                history: Default::default(),
+            },
+        );
+        let s = status(&AlertState::default(), &tabs, &edits);
+        assert_eq!(&*s.left, "  \u{25cf}");
+        assert_eq!(&*s.right, "L5:C11 ");
+        assert!(!s.is_warn);
+    }
+
+    #[test]
+    fn status_bar_shows_info_alert() {
+        let a = AlertState {
+            info: Some("Saved foo.rs".into()),
+            ..Default::default()
+        };
+        let mut tabs = Tabs::default();
+        tabs.open.push_back(Tab {
+            id: TabId(1),
+            path: canon("a.rs"),
+            ..Default::default()
+        });
+        tabs.active = Some(TabId(1));
+        let s = status(&a, &tabs, &BufferEdits::default());
+        assert_eq!(&*s.left, " Saved foo.rs");
+        assert_eq!(&*s.right, "L1:C1 ");
+        assert!(!s.is_warn);
+    }
+
+    #[test]
+    fn status_bar_shows_warn_with_warn_flag() {
+        let a = AlertState {
+            warns: vec![("a.rs".into(), "save a.rs: permission denied".into())],
+            ..Default::default()
+        };
+        let mut tabs = Tabs::default();
+        tabs.open.push_back(Tab {
+            id: TabId(1),
+            path: canon("a.rs"),
+            ..Default::default()
+        });
+        tabs.active = Some(TabId(1));
+        let s = status(&a, &tabs, &BufferEdits::default());
+        assert_eq!(&*s.left, " save a.rs: permission denied");
+        assert!(s.is_warn);
+    }
+
+    #[test]
+    fn status_bar_info_wins_over_warn() {
+        let a = AlertState {
+            info: Some("Saved".into()),
+            warns: vec![("k".into(), "oh no".into())],
+            ..Default::default()
+        };
+        let s = status(&a, &Tabs::default(), &BufferEdits::default());
+        assert_eq!(&*s.left, " Saved");
+        assert!(!s.is_warn);
+    }
+
+    #[test]
+    fn status_bar_confirm_kill_wins_over_info() {
+        let a = AlertState {
+            confirm_kill: Some(TabId(1)),
+            info: Some("Saved".into()),
+            ..Default::default()
+        };
+        let mut tabs = Tabs::default();
+        tabs.open.push_back(Tab {
+            id: TabId(1),
+            path: canon("draft.txt"),
+            ..Default::default()
+        });
+        tabs.active = Some(TabId(1));
+        let s = status(&a, &tabs, &BufferEdits::default());
+        assert_eq!(&*s.left, " Kill buffer 'draft.txt'? (y/N) ");
+        assert_eq!(&*s.right, "");
+    }
+
+    #[test]
+    fn render_frame_composes_status_bar() {
+        let (t, e, s, term) = fixture(
+            &[("a.rs", 1)],
+            Some(1),
+            &[("a.rs", LoadState::Ready(Arc::new(Rope::from_str("x"))))],
+            Some(Dims { cols: 40, rows: 5 }),
+        );
+        let frame = render(&t, &e, &s, &term).expect("dims set");
+        assert_eq!(&*frame.status_bar.right, "L1:C1 ");
+    }
 }
