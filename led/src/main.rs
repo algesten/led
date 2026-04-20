@@ -51,15 +51,22 @@ struct Cli {
 fn main() -> io::Result<()> {
     let cli = Cli::parse();
 
-    // Load keymap before raw mode so parse errors land on a cooked
-    // terminal where the user can read them.
-    let keymap = match load_keymap(cli.config_dir.as_deref()) {
-        Ok(k) => k,
+    // Load keymap before raw mode so parse errors and per-binding
+    // warnings land on a cooked terminal where the user can read
+    // them. Per-binding problems are non-fatal — they surface as
+    // warnings and that entry is skipped. Fatal (I/O, malformed
+    // TOML) exits with code 2.
+    let loaded = match load_keymap(cli.config_dir.as_deref()) {
+        Ok(l) => l,
         Err(e) => {
             eprintln!("led: config error: {e}");
             std::process::exit(2);
         }
     };
+    for w in &loaded.warnings {
+        eprintln!("led: config warning: {w}");
+    }
+    let keymap = loaded.keymap;
 
     let trace = match cli.golden_trace {
         Some(path) => {

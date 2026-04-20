@@ -25,9 +25,25 @@ use std::path::{Path, PathBuf};
 
 use crate::keymap::{default_keymap, parse_command, parse_key, Keymap};
 
-/// Failure modes surfaced back to the binary. `Display` produces
-/// human-readable messages suitable for `eprintln!` — no source-chain
-/// boilerplate, since the binary wants a single line.
+/// Result of [`load_keymap`]: the merged keymap plus any
+/// per-binding warnings that were non-fatal (unknown key, unknown
+/// command, malformed binding shape).
+///
+/// Unknown bindings are deliberately non-fatal during the rewrite
+/// period: a legacy user config is expected to reference dozens of
+/// commands the rewrite hasn't implemented yet, and a single
+/// `prev_issue` shouldn't take down the whole config. Legacy is
+/// stricter — it throws out the entire file on one bad entry;
+/// revisit that choice when the rewrite is complete.
+#[derive(Debug, Default)]
+pub struct LoadedKeymap {
+    pub keymap: Keymap,
+    pub warnings: Vec<String>,
+}
+
+/// Fatal config failures: bad file I/O or TOML that won't parse at
+/// the top level. Per-binding errors land in `LoadedKeymap.warnings`
+/// instead.
 #[derive(Debug)]
 pub enum ConfigError {
     /// The file existed but could not be read (I/O error).
@@ -40,47 +56,7 @@ pub enum ConfigError {
         path: PathBuf,
         message: String,
     },
-    /// A `[keys]` entry referenced an unknown key string.
-    UnknownKey {
-        path: PathBuf,
-        key: String,
-        message: String,
-    },
-    /// A `[keys]` entry referenced an unknown command string.
-    UnknownCommand {
-        path: PathBuf,
-        key: String,
-        command: String,
-        message: String,
-    },
-    /// The `[keys]` section held a non-string value for some key.
-    NonStringBinding {
-        path: PathBuf,
-        key: String,
-    },
-    /// A value inside `[keys]` was neither a string (direct) nor a
-    /// table (chord).
-    InvalidBindingShape {
-        path: PathBuf,
-        key: String,
-        message: String,
-    },
-    /// A chord sub-table referenced an unknown second key.
-    UnknownChordKey {
-        path: PathBuf,
-        prefix: String,
-        key: String,
-        message: String,
-    },
-    /// A chord sub-table referenced an unknown command.
-    UnknownChordCommand {
-        path: PathBuf,
-        prefix: String,
-        key: String,
-        command: String,
-        message: String,
-    },
-    /// Any other non-`[keys]` top-level table type problem.
+    /// Any non-`[keys]` top-level table type problem.
     SchemaMismatch {
         path: PathBuf,
         message: String,
@@ -96,56 +72,6 @@ impl std::fmt::Display for ConfigError {
             ConfigError::Toml { path, message } => {
                 write!(f, "parse {}: {message}", path.display())
             }
-            ConfigError::UnknownKey {
-                path,
-                key,
-                message,
-            } => write!(
-                f,
-                "{}: [keys] entry `{key}`: {message}",
-                path.display()
-            ),
-            ConfigError::UnknownCommand {
-                path,
-                key,
-                command,
-                message,
-            } => write!(
-                f,
-                "{}: [keys] entry `{key}` → `{command}`: {message}",
-                path.display()
-            ),
-            ConfigError::NonStringBinding { path, key } => write!(
-                f,
-                "{}: [keys] entry `{key}` must be a string command name",
-                path.display()
-            ),
-            ConfigError::InvalidBindingShape { path, key, message } => write!(
-                f,
-                "{}: [keys] entry `{key}`: {message}",
-                path.display()
-            ),
-            ConfigError::UnknownChordKey {
-                path,
-                prefix,
-                key,
-                message,
-            } => write!(
-                f,
-                "{}: [keys.\"{prefix}\"] entry `{key}`: {message}",
-                path.display()
-            ),
-            ConfigError::UnknownChordCommand {
-                path,
-                prefix,
-                key,
-                command,
-                message,
-            } => write!(
-                f,
-                "{}: [keys.\"{prefix}\"] entry `{key}` → `{command}`: {message}",
-                path.display()
-            ),
             ConfigError::SchemaMismatch { path, message } => {
                 write!(f, "{}: {message}", path.display())
             }
@@ -168,17 +94,20 @@ impl std::error::Error for ConfigError {}
 /// 3. If a file is found, merge its `[keys]` section on top.
 /// 4. If no file is found anywhere, return the defaults silently —
 ///    having no config is the common case.
-pub fn load_keymap(config_dir: Option<&Path>) -> Result<Keymap, ConfigError> {
-    let mut keymap = default_keymap();
+pub fn load_keymap(config_dir: Option<&Path>) -> Result<LoadedKeymap, ConfigError> {
+    let mut loaded = LoadedKeymap {
+        keymap: default_keymap(),
+        warnings: Vec::new(),
+    };
     let Some(path) = discover_config(config_dir) else {
-        return Ok(keymap);
+        return Ok(loaded);
     };
     let source = fs::read_to_string(&path).map_err(|e| ConfigError::Io {
         path: path.clone(),
         message: e.to_string(),
     })?;
-    apply_toml(&mut keymap, &path, &source)?;
-    Ok(keymap)
+    apply_toml(&mut loaded, &path, &source)?;
+    Ok(loaded)
 }
 
 /// Resolve the config file path.
@@ -203,7 +132,11 @@ fn discover_config(explicit: Option<&Path>) -> Option<PathBuf> {
     candidate.exists().then_some(candidate)
 }
 
-fn apply_toml(keymap: &mut Keymap, path: &Path, source: &str) -> Result<(), ConfigError> {
+fn apply_toml(
+    loaded: &mut LoadedKeymap,
+    path: &Path,
+    source: &str,
+) -> Result<(), ConfigError> {
     let value: toml::Value = source.parse().map_err(|e: toml::de::Error| ConfigError::Toml {
         path: path.to_path_buf(),
         message: e.to_string(),
@@ -233,60 +166,56 @@ fn apply_toml(keymap: &mut Keymap, path: &Path, source: &str) -> Result<(), Conf
     };
 
     for (key_str, value) in keys_table {
-        let prefix_key = parse_key(key_str).map_err(|message| ConfigError::UnknownKey {
-            path: path.to_path_buf(),
-            key: key_str.to_string(),
-            message,
-        })?;
+        let prefix_key = match parse_key(key_str) {
+            Ok(k) => k,
+            Err(message) => {
+                loaded
+                    .warnings
+                    .push(format!("[keys] `{key_str}`: {message} (skipped)"));
+                continue;
+            }
+        };
 
         match value {
             // Direct: "ctrl+q" = "quit"
-            toml::Value::String(cmd_str) => {
-                let cmd =
-                    parse_command(cmd_str).map_err(|message| ConfigError::UnknownCommand {
-                        path: path.to_path_buf(),
-                        key: key_str.to_string(),
-                        command: cmd_str.to_string(),
-                        message,
-                    })?;
-                keymap.insert_direct(prefix_key, cmd);
-            }
+            toml::Value::String(cmd_str) => match parse_command(cmd_str) {
+                Ok(cmd) => loaded.keymap.insert_direct(prefix_key, cmd),
+                Err(message) => loaded.warnings.push(format!(
+                    "[keys] `{key_str}` = `{cmd_str}`: {message} (skipped)"
+                )),
+            },
             // Chord: [keys."ctrl+x"] "ctrl+s" = "save"
             toml::Value::Table(chord_table) => {
                 for (second_str, second_value) in chord_table {
-                    let cmd_str = second_value.as_str().ok_or_else(|| {
-                        ConfigError::NonStringBinding {
-                            path: path.to_path_buf(),
-                            key: format!("{key_str} {second_str}"),
+                    let cmd_str = match second_value.as_str() {
+                        Some(s) => s,
+                        None => {
+                            loaded.warnings.push(format!(
+                                "[keys.\"{key_str}\"] `{second_str}`: value must be a string (skipped)"
+                            ));
+                            continue;
                         }
-                    })?;
-                    let second = parse_key(second_str).map_err(|message| {
-                        ConfigError::UnknownChordKey {
-                            path: path.to_path_buf(),
-                            prefix: key_str.to_string(),
-                            key: second_str.to_string(),
-                            message,
+                    };
+                    let second = match parse_key(second_str) {
+                        Ok(k) => k,
+                        Err(message) => {
+                            loaded.warnings.push(format!(
+                                "[keys.\"{key_str}\"] `{second_str}`: {message} (skipped)"
+                            ));
+                            continue;
                         }
-                    })?;
-                    let cmd =
-                        parse_command(cmd_str).map_err(|message| ConfigError::UnknownChordCommand {
-                            path: path.to_path_buf(),
-                            prefix: key_str.to_string(),
-                            key: second_str.to_string(),
-                            command: cmd_str.to_string(),
-                            message,
-                        })?;
-                    keymap.insert_chord(prefix_key, second, cmd);
+                    };
+                    match parse_command(cmd_str) {
+                        Ok(cmd) => loaded.keymap.insert_chord(prefix_key, second, cmd),
+                        Err(message) => loaded.warnings.push(format!(
+                            "[keys.\"{key_str}\"] `{second_str}` = `{cmd_str}`: {message} (skipped)"
+                        )),
+                    }
                 }
             }
-            _ => {
-                return Err(ConfigError::InvalidBindingShape {
-                    path: path.to_path_buf(),
-                    key: key_str.to_string(),
-                    message: "binding must be either a string (direct) or a table (chord)"
-                        .into(),
-                });
-            }
+            _ => loaded.warnings.push(format!(
+                "[keys] `{key_str}`: value must be a string (direct) or a table (chord) (skipped)"
+            )),
         }
     }
 
@@ -332,7 +261,7 @@ mod tests {
     fn missing_file_returns_defaults() {
         let tmp = tempdir();
         // No keys.toml inside.
-        let keymap = load_keymap(Some(tmp.path())).unwrap();
+        let keymap = load_keymap(Some(tmp.path())).unwrap().keymap;
         // A default direct binding is still there.
         assert_eq!(
             keymap.lookup_direct(&parse_key("up").unwrap()),
@@ -359,7 +288,7 @@ mod tests {
 "ctrl+w" = "next_tab"
 "#,
         );
-        let keymap = load_keymap(Some(tmp.path())).unwrap();
+        let keymap = load_keymap(Some(tmp.path())).unwrap().keymap;
         assert_eq!(
             keymap.lookup_direct(&parse_key("ctrl+q").unwrap()),
             Some(Command::Quit)
@@ -393,7 +322,7 @@ mod tests {
 "esc" = "save"
 "#,
         );
-        let keymap = load_keymap(Some(tmp.path())).unwrap();
+        let keymap = load_keymap(Some(tmp.path())).unwrap().keymap;
         assert_eq!(
             keymap.lookup_direct(&parse_key("esc").unwrap()),
             Some(Command::Save)
@@ -409,41 +338,68 @@ mod tests {
     }
 
     #[test]
-    fn unknown_key_errors() {
+    fn unknown_key_is_a_warning_not_a_fatal() {
         let tmp = tempdir();
         write_config(
             &tmp,
             r#"
 [keys]
 "ctrl+nope+bogus" = "quit"
+"ctrl+q" = "quit"
 "#,
         );
-        let e = load_keymap(Some(tmp.path())).unwrap_err();
-        match e {
-            ConfigError::UnknownKey { key, .. } => assert_eq!(key, "ctrl+nope+bogus"),
-            other => panic!("expected UnknownKey, got {other:?}"),
-        }
+        let loaded = load_keymap(Some(tmp.path())).unwrap();
+        // Bad line surfaced as a warning.
+        assert_eq!(loaded.warnings.len(), 1);
+        assert!(
+            loaded.warnings[0].contains("ctrl+nope+bogus"),
+            "{:?}",
+            loaded.warnings
+        );
+        // Good line still applied.
+        assert_eq!(
+            loaded
+                .keymap
+                .lookup_direct(&parse_key("ctrl+q").unwrap()),
+            Some(Command::Quit)
+        );
     }
 
     #[test]
-    fn unknown_command_errors() {
+    fn unknown_command_is_a_warning_not_a_fatal() {
         let tmp = tempdir();
         write_config(
             &tmp,
             r#"
 [keys]
 "ctrl+q" = "explode"
+"ctrl+w" = "next_tab"
 "#,
         );
-        let e = load_keymap(Some(tmp.path())).unwrap_err();
-        match e {
-            ConfigError::UnknownCommand { command, .. } => assert_eq!(command, "explode"),
-            other => panic!("expected UnknownCommand, got {other:?}"),
-        }
+        let loaded = load_keymap(Some(tmp.path())).unwrap();
+        assert_eq!(loaded.warnings.len(), 1);
+        assert!(
+            loaded.warnings[0].contains("explode"),
+            "{:?}",
+            loaded.warnings
+        );
+        assert_eq!(
+            loaded
+                .keymap
+                .lookup_direct(&parse_key("ctrl+w").unwrap()),
+            Some(Command::TabNext)
+        );
+        // Bogus binding not applied.
+        assert_eq!(
+            loaded
+                .keymap
+                .lookup_direct(&parse_key("ctrl+q").unwrap()),
+            None
+        );
     }
 
     #[test]
-    fn non_string_binding_errors() {
+    fn non_string_binding_is_a_warning_not_a_fatal() {
         let tmp = tempdir();
         write_config(
             &tmp,
@@ -452,11 +408,38 @@ mod tests {
 "ctrl+q" = 42
 "#,
         );
-        let e = load_keymap(Some(tmp.path())).unwrap_err();
-        // A top-level entry that's neither a string (direct) nor a
-        // table (chord) is an InvalidBindingShape. The nested
-        // NonStringBinding variant handles chord-value-is-not-string.
-        assert!(matches!(e, ConfigError::InvalidBindingShape { .. }), "got {e:?}");
+        let loaded = load_keymap(Some(tmp.path())).unwrap();
+        assert_eq!(loaded.warnings.len(), 1);
+        assert!(loaded.warnings[0].contains("string"));
+    }
+
+    #[test]
+    fn legacy_config_loads_with_many_warnings() {
+        // A real-world scenario: user still has the legacy keys.toml
+        // with commands the rewrite doesn't know yet. The rewrite's
+        // own defaults stay in effect, plus whatever the user wrote
+        // that we *do* understand. All unknowns are warnings.
+        let tmp = tempdir();
+        write_config(
+            &tmp,
+            r#"
+[keys]
+"alt+," = "prev_issue"
+"alt+." = "next_issue"
+"ctrl+f" = "open_file_search"
+"up" = "move_up"
+"#,
+        );
+        let loaded = load_keymap(Some(tmp.path())).unwrap();
+        // Three unknown commands → three warnings.
+        assert_eq!(loaded.warnings.len(), 3);
+        // Known one applied.
+        assert_eq!(
+            loaded
+                .keymap
+                .lookup_direct(&parse_key("up").unwrap()),
+            Some(Command::CursorUp)
+        );
     }
 
     #[test]
@@ -482,7 +465,7 @@ mod tests {
         // SAFETY: env mutation in test; see note above.
         unsafe { std::env::set_var("XDG_CONFIG_HOME", tmp.path()) };
 
-        let keymap = load_keymap(None).unwrap();
+        let keymap = load_keymap(None).unwrap().keymap;
         assert_eq!(
             keymap.lookup(&parse_key("ctrl+q").unwrap()),
             Some(Command::Quit)
@@ -499,7 +482,7 @@ mod tests {
     fn empty_file_is_fine() {
         let tmp = tempdir();
         write_config(&tmp, "");
-        let keymap = load_keymap(Some(tmp.path())).unwrap();
+        let keymap = load_keymap(Some(tmp.path())).unwrap().keymap;
         // Defaults still intact — ctrl+x ctrl+c quits in M6.
         assert_eq!(
             keymap
@@ -524,7 +507,7 @@ mod tests {
 "k" = "kill_buffer"
 "#,
         );
-        let keymap = load_keymap(Some(tmp.path())).unwrap();
+        let keymap = load_keymap(Some(tmp.path())).unwrap().keymap;
         assert_eq!(
             keymap.lookup_chord(
                 &parse_key("ctrl+x").unwrap(),
@@ -542,42 +525,59 @@ mod tests {
     }
 
     #[test]
-    fn unknown_chord_key_errors() {
+    fn unknown_chord_key_is_a_warning() {
         let tmp = tempdir();
         write_config(
             &tmp,
             r#"
 [keys."ctrl+x"]
 "ctrl+garbage+key" = "quit"
+"ctrl+s" = "save"
 "#,
         );
-        let e = load_keymap(Some(tmp.path())).unwrap_err();
-        match e {
-            ConfigError::UnknownChordKey { prefix, key, .. } => {
-                assert_eq!(prefix, "ctrl+x");
-                assert_eq!(key, "ctrl+garbage+key");
-            }
-            other => panic!("expected UnknownChordKey, got {other:?}"),
-        }
+        let loaded = load_keymap(Some(tmp.path())).unwrap();
+        assert_eq!(loaded.warnings.len(), 1);
+        assert!(
+            loaded.warnings[0].contains("ctrl+garbage+key"),
+            "{:?}",
+            loaded.warnings
+        );
+        // Good line still applied.
+        assert_eq!(
+            loaded.keymap.lookup_chord(
+                &parse_key("ctrl+x").unwrap(),
+                &parse_key("ctrl+s").unwrap(),
+            ),
+            Some(Command::Save)
+        );
     }
 
     #[test]
-    fn unknown_chord_command_errors() {
+    fn unknown_chord_command_is_a_warning() {
         let tmp = tempdir();
         write_config(
             &tmp,
             r#"
 [keys."ctrl+x"]
 "ctrl+s" = "explode"
+"k" = "kill_buffer"
 "#,
         );
-        let e = load_keymap(Some(tmp.path())).unwrap_err();
-        match e {
-            ConfigError::UnknownChordCommand { command, .. } => {
-                assert_eq!(command, "explode")
-            }
-            other => panic!("expected UnknownChordCommand, got {other:?}"),
-        }
+        let loaded = load_keymap(Some(tmp.path())).unwrap();
+        assert_eq!(loaded.warnings.len(), 1);
+        assert!(
+            loaded.warnings[0].contains("explode"),
+            "{:?}",
+            loaded.warnings
+        );
+        // Good line still applied; bogus not.
+        assert_eq!(
+            loaded.keymap.lookup_chord(
+                &parse_key("ctrl+x").unwrap(),
+                &parse_key("k").unwrap(),
+            ),
+            Some(Command::KillBuffer)
+        );
     }
 
     #[test]
@@ -594,7 +594,7 @@ mod tests {
 "ctrl+s" = "save"
 "#,
         );
-        let keymap = load_keymap(Some(tmp.path())).unwrap();
+        let keymap = load_keymap(Some(tmp.path())).unwrap().keymap;
         assert_eq!(
             keymap.lookup_direct(&parse_key("ctrl+q").unwrap()),
             Some(Command::Quit)
