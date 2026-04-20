@@ -43,6 +43,10 @@ pub struct Tab {
     pub path: CanonPath,
     pub cursor: Cursor,
     pub scroll: Scroll,
+    /// Second anchor for a region. Set by `SetMark`; cleared by
+    /// `Abort` or consumed by `KillRegion`. Stays in raw buffer
+    /// coordinates across edits — clamped on read, not rebased.
+    pub mark: Option<Cursor>,
 }
 
 /// Source: which tabs are open, which is active.

@@ -55,6 +55,12 @@ pub enum Command {
     DeleteBack,
     DeleteForward,
     InsertChar(char),
+
+    // Mark / region / kill ring (M7).
+    SetMark,
+    KillRegion,
+    KillLine,
+    Yank,
 }
 
 /// Two-level key → command binding set. `direct` maps single keys to
@@ -195,6 +201,12 @@ pub fn default_keymap() -> Keymap {
     // Abort (modal overlays override behaviour in later milestones).
     m.bind("esc", Command::Abort);
     m.bind("ctrl+g", Command::Abort);
+
+    // Mark / region / kill ring.
+    m.bind("ctrl+space", Command::SetMark);
+    m.bind("ctrl+w", Command::KillRegion);
+    m.bind("ctrl+k", Command::KillLine);
+    m.bind("ctrl+y", Command::Yank);
 
     // File-write + buffer-management chords (ctrl+x prefix).
     m.bind_chord("ctrl+x", "ctrl+s", Command::Save);
@@ -377,6 +389,10 @@ pub fn parse_command(s: &str) -> Result<Command, String> {
         "insert_newline" => Ok(Command::InsertNewline),
         "delete_backward" => Ok(Command::DeleteBack),
         "delete_forward" => Ok(Command::DeleteForward),
+        "set_mark" => Ok(Command::SetMark),
+        "kill_region" => Ok(Command::KillRegion),
+        "kill_line" => Ok(Command::KillLine),
+        "yank" => Ok(Command::Yank),
         other => Err(format!("unknown command `{other}`")),
     }
 }

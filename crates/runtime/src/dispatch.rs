@@ -21,6 +21,7 @@
 use led_driver_buffers_core::{BufferStore, LoadState};
 use led_driver_terminal_core::{KeyCode, KeyEvent, KeyModifiers, Terminal};
 use led_state_buffer_edits::{BufferEdits, EditedBuffer};
+use led_state_kill_ring::KillRing;
 use led_state_tabs::{Cursor, Scroll, Tab, Tabs};
 use ropey::Rope;
 use std::sync::Arc;
@@ -54,17 +55,19 @@ enum Move {
 }
 
 /// Top-level entry point used by the main loop.
+#[allow(clippy::too_many_arguments)]
 pub fn dispatch(
     ev: Event,
     tabs: &mut Tabs,
     edits: &mut BufferEdits,
+    kill_ring: &mut KillRing,
     store: &BufferStore,
     terminal: &Terminal,
     keymap: &Keymap,
     chord: &mut ChordState,
 ) -> DispatchOutcome {
     match ev {
-        Event::Key(k) => dispatch_key(k, tabs, edits, store, terminal, keymap, chord),
+        Event::Key(k) => dispatch_key(k, tabs, edits, kill_ring, store, terminal, keymap, chord),
         // `Resize` is applied inside `TerminalInputDriver.process` —
         // pure state, no dispatch work here. M2 does not re-clamp
         // cursor/scroll on resize; next movement re-clamps.
@@ -87,37 +90,61 @@ pub fn dispatch(
 ///
 /// The pending prefix is always cleared before resolving the second
 /// key so a failed chord never leaks state into the next press.
+#[allow(clippy::too_many_arguments)]
 pub fn dispatch_key(
     k: KeyEvent,
     tabs: &mut Tabs,
     edits: &mut BufferEdits,
+    kill_ring: &mut KillRing,
     store: &BufferStore,
     terminal: &Terminal,
     keymap: &Keymap,
     chord: &mut ChordState,
 ) -> DispatchOutcome {
+    let resolved = resolve_command(k, keymap, chord);
+    match resolved {
+        Resolved::Command(cmd) => {
+            let outcome = run_command(cmd, tabs, edits, kill_ring, store, terminal);
+            // Kill-ring coalescing: any non-KillLine command breaks
+            // the flag, so the next KillLine starts a fresh entry.
+            if !matches!(cmd, Command::KillLine) {
+                kill_ring.last_was_kill_line = false;
+            }
+            outcome
+        }
+        Resolved::PrefixStored | Resolved::Continue => DispatchOutcome::Continue,
+    }
+}
+
+/// What `dispatch_key` did with the keystroke. Split out so the
+/// coalescing bookkeeping stays in one place.
+enum Resolved {
+    Command(Command),
+    /// A chord prefix was stored; next key resolves against it.
+    PrefixStored,
+    /// No binding and no implicit-insert match — silent no-op.
+    Continue,
+}
+
+fn resolve_command(k: KeyEvent, keymap: &Keymap, chord: &mut ChordState) -> Resolved {
     if let Some(prefix) = chord.pending.take() {
         if let Some(cmd) = keymap.lookup_chord(&prefix, &k) {
-            return run_command(cmd, tabs, edits, store, terminal);
+            return Resolved::Command(cmd);
         }
         // Silent cancel — matches legacy behaviour.
-        return DispatchOutcome::Continue;
+        return Resolved::Continue;
     }
-
     if let Some(cmd) = keymap.lookup_direct(&k) {
-        return run_command(cmd, tabs, edits, store, terminal);
+        return Resolved::Command(cmd);
     }
-
     if keymap.is_prefix(&k) {
         chord.pending = Some(k);
-        return DispatchOutcome::Continue;
+        return Resolved::PrefixStored;
     }
-
     if let Some(cmd) = implicit_insert(&k) {
-        return run_command(cmd, tabs, edits, store, terminal);
+        return Resolved::Command(cmd);
     }
-
-    DispatchOutcome::Continue
+    Resolved::Continue
 }
 
 /// Printable-char fallback: an unbound `Char(c)` with no Ctrl / Alt
@@ -140,16 +167,18 @@ fn run_command(
     cmd: Command,
     tabs: &mut Tabs,
     edits: &mut BufferEdits,
+    kill_ring: &mut KillRing,
     store: &BufferStore,
     terminal: &Terminal,
 ) -> DispatchOutcome {
     match cmd {
         Command::Quit => DispatchOutcome::Quit,
         Command::Abort => {
-            // No-op at the plain editor level. Future milestones
-            // (M9 confirm-kill, M13 isearch, M17/18 LSP overlays)
-            // short-circuit the dispatch stream before this point
-            // when their modal is active.
+            // Clear any set mark as part of the abort gesture.
+            // Future milestones (M9 confirm-kill, M13 isearch,
+            // M17/18 LSP overlays) short-circuit the dispatch
+            // stream before this point when their modal is active.
+            clear_mark(tabs);
             DispatchOutcome::Continue
         }
         Command::Save => {
@@ -242,6 +271,22 @@ fn run_command(
             insert_char(tabs, edits, c);
             DispatchOutcome::Continue
         }
+        Command::SetMark => {
+            set_mark_active(tabs);
+            DispatchOutcome::Continue
+        }
+        Command::KillRegion => {
+            kill_region(tabs, edits, kill_ring);
+            DispatchOutcome::Continue
+        }
+        Command::KillLine => {
+            kill_line(tabs, edits, kill_ring);
+            DispatchOutcome::Continue
+        }
+        Command::Yank => {
+            request_yank(tabs, kill_ring);
+            DispatchOutcome::Continue
+        }
     }
 }
 
@@ -331,6 +376,196 @@ fn request_save_all(tabs: &Tabs, edits: &mut BufferEdits) {
             edits.pending_saves.insert(tab.path.clone());
         }
     }
+}
+
+// ── Mark / region / kill ring ─────────────────────────────────────────
+
+fn set_mark_active(tabs: &mut Tabs) {
+    let Some(id) = tabs.active else {
+        return;
+    };
+    let Some(idx) = tabs.open.iter().position(|t| t.id == id) else {
+        return;
+    };
+    let tab = &mut tabs.open[idx];
+    tab.mark = Some(tab.cursor);
+}
+
+fn clear_mark(tabs: &mut Tabs) {
+    let Some(id) = tabs.active else {
+        return;
+    };
+    let Some(idx) = tabs.open.iter().position(|t| t.id == id) else {
+        return;
+    };
+    tabs.open[idx].mark = None;
+}
+
+/// Region bounds in char indices: `(start, end)` with `start <= end`,
+/// both clamped to the rope. Returns None when there's no active
+/// tab, no mark, or mark and cursor resolve to the same char index
+/// (empty region).
+fn region_range(tab: &Tab, rope: &Rope) -> Option<(usize, usize)> {
+    let mark = tab.mark?;
+    let a = cursor_to_char(&mark, rope);
+    let b = cursor_to_char(&tab.cursor, rope);
+    if a == b {
+        return None;
+    }
+    Some((a.min(b), a.max(b)))
+}
+
+fn cursor_to_char(c: &Cursor, rope: &Rope) -> usize {
+    let line_count = rope.len_lines().max(1);
+    let line = c.line.min(line_count - 1);
+    let line_len = line_char_len(rope, line);
+    let col = c.col.min(line_len);
+    rope.line_to_char(line) + col
+}
+
+fn kill_region(tabs: &mut Tabs, edits: &mut BufferEdits, kill_ring: &mut KillRing) {
+    let Some(id) = tabs.active else {
+        return;
+    };
+    let Some(idx) = tabs.open.iter().position(|t| t.id == id) else {
+        return;
+    };
+    let tab = &tabs.open[idx];
+    let Some(eb) = edits.buffers.get(&tab.path) else {
+        return;
+    };
+    let Some((start, end)) = region_range(tab, &eb.rope) else {
+        return;
+    };
+
+    let mut rope = (*eb.rope).clone();
+    let killed: Arc<str> = Arc::from(rope.slice(start..end).to_string());
+    rope.remove(start..end);
+
+    let eb = edits.buffers.get_mut(&tab.path).expect("checked above");
+    bump(eb, rope);
+
+    let tab = &mut tabs.open[idx];
+    // Cursor lands at the start of the killed region.
+    tab.cursor = char_to_cursor(start, &eb.rope);
+    tab.cursor.preferred_col = tab.cursor.col;
+    tab.mark = None;
+
+    kill_ring.latest = Some(killed);
+    kill_ring.last_was_kill_line = false;
+}
+
+fn char_to_cursor(ch: usize, rope: &Rope) -> Cursor {
+    let line = rope.char_to_line(ch);
+    let col = ch - rope.line_to_char(line);
+    Cursor {
+        line,
+        col,
+        preferred_col: col,
+    }
+}
+
+fn kill_line(tabs: &mut Tabs, edits: &mut BufferEdits, kill_ring: &mut KillRing) {
+    let Some(id) = tabs.active else {
+        return;
+    };
+    let Some(idx) = tabs.open.iter().position(|t| t.id == id) else {
+        return;
+    };
+    let tab = &tabs.open[idx];
+    let Some(eb) = edits.buffers.get(&tab.path) else {
+        return;
+    };
+    let rope_arc = eb.rope.clone();
+    let line_count = rope_arc.len_lines();
+    let line = tab.cursor.line.min(line_count.saturating_sub(1));
+    let line_len = line_char_len(&rope_arc, line);
+    let col = tab.cursor.col.min(line_len);
+
+    let start = rope_arc.line_to_char(line) + col;
+    // At EOL: kill the newline (join with next line). At end of
+    // file: no-op.
+    let end = if col < line_len {
+        rope_arc.line_to_char(line) + line_len
+    } else if line + 1 < line_count {
+        rope_arc.line_to_char(line + 1)
+    } else {
+        return;
+    };
+    if start == end {
+        return;
+    }
+
+    let mut rope = (*rope_arc).clone();
+    let killed_slice = rope.slice(start..end).to_string();
+    rope.remove(start..end);
+
+    let new_latest: Arc<str> = if kill_ring.last_was_kill_line {
+        match &kill_ring.latest {
+            Some(prev) => {
+                let mut joined = String::with_capacity(prev.len() + killed_slice.len());
+                joined.push_str(prev);
+                joined.push_str(&killed_slice);
+                Arc::from(joined)
+            }
+            None => Arc::from(killed_slice),
+        }
+    } else {
+        Arc::from(killed_slice)
+    };
+
+    let eb = edits.buffers.get_mut(&tab.path).expect("checked above");
+    bump(eb, rope);
+    // Cursor stays at `start` — kill-to-EOL doesn't move it.
+    let tab = &mut tabs.open[idx];
+    tab.cursor = char_to_cursor(start, &eb.rope);
+    tab.cursor.preferred_col = tab.cursor.col;
+
+    kill_ring.latest = Some(new_latest);
+    kill_ring.last_was_kill_line = true;
+}
+
+/// Mark a yank as pending against the currently-active tab. The
+/// runtime later fires a clipboard read; when it returns, the
+/// `apply_yank` ingest step inserts at the pending tab's cursor.
+fn request_yank(tabs: &Tabs, kill_ring: &mut KillRing) {
+    let Some(id) = tabs.active else {
+        return;
+    };
+    // Ignore if a read is already in flight — double-tap yank
+    // shouldn't kick off a second clipboard read.
+    if kill_ring.read_in_flight {
+        return;
+    }
+    kill_ring.pending_yank = Some(id);
+}
+
+/// Insert `text` at the cursor of the tab that originally requested
+/// the yank. Clears `pending_yank`. No-op when the target tab no
+/// longer exists (closed while the clipboard read was in flight) or
+/// isn't materialised in `edits`.
+pub fn apply_yank(tabs: &mut Tabs, edits: &mut BufferEdits, target: led_state_tabs::TabId, text: &str) {
+    let Some(idx) = tabs.open.iter().position(|t| t.id == target) else {
+        return;
+    };
+    let tab = &tabs.open[idx];
+    let Some(eb) = edits.buffers.get(&tab.path) else {
+        return;
+    };
+
+    let mut rope = (*eb.rope).clone();
+    let char_idx = cursor_to_char(&tab.cursor, &rope);
+    rope.insert(char_idx, text);
+
+    let eb = edits.buffers.get_mut(&tab.path).expect("checked above");
+    bump(eb, rope);
+
+    // Advance cursor past the inserted text.
+    let inserted_chars = text.chars().count();
+    let new_idx = char_idx + inserted_chars;
+    let tab = &mut tabs.open[idx];
+    tab.cursor = char_to_cursor(new_idx, &eb.rope);
+    tab.cursor.preferred_col = tab.cursor.col;
 }
 
 // ── Kill buffer ────────────────────────────────────────────────────────
@@ -650,10 +885,12 @@ mod tests {
         terminal: &Terminal,
     ) -> DispatchOutcome {
         let mut chord = ChordState::default();
+        let mut kill_ring = KillRing::default();
         dispatch_key(
             k,
             tabs,
             edits,
+            &mut kill_ring,
             store,
             terminal,
             &default_keymap(),
@@ -674,8 +911,13 @@ mod tests {
     ) -> DispatchOutcome {
         let keymap = default_keymap();
         let mut chord = ChordState::default();
-        dispatch_key(prefix, tabs, edits, store, terminal, &keymap, &mut chord);
-        dispatch_key(second, tabs, edits, store, terminal, &keymap, &mut chord)
+        let mut kill_ring = KillRing::default();
+        dispatch_key(
+            prefix, tabs, edits, &mut kill_ring, store, terminal, &keymap, &mut chord,
+        );
+        dispatch_key(
+            second, tabs, edits, &mut kill_ring, store, terminal, &keymap, &mut chord,
+        )
     }
 
     fn canon(s: &str) -> CanonPath {
@@ -714,11 +956,21 @@ mod tests {
         // edits source — empty BufferEdits means every edit-primitive
         // branch no-ops, which is exactly what these tests assume.
         let mut edits = BufferEdits::default();
+        let mut kill_ring = KillRing::default();
         let store = BufferStore::default();
         let terminal = Terminal::default();
         let keymap = crate::keymap::default_keymap();
         let mut chord = ChordState::default();
-        dispatch_key(k, tabs, &mut edits, &store, &terminal, &keymap, &mut chord)
+        dispatch_key(
+            k,
+            tabs,
+            &mut edits,
+            &mut kill_ring,
+            &store,
+            &terminal,
+            &keymap,
+            &mut chord,
+        )
     }
 
     // ── Tab switching + quit (M1 behaviour, unchanged) ──────────────────
@@ -750,6 +1002,7 @@ mod tests {
     fn ctrl_x_ctrl_c_signals_quit_as_chord() {
         let mut tabs = tabs_with(&[("a", 1)], Some(1));
         let mut edits = BufferEdits::default();
+        let mut kill_ring = KillRing::default();
         let store = BufferStore::default();
         let term = Terminal::default();
         let keymap = default_keymap();
@@ -760,6 +1013,7 @@ mod tests {
             key(KeyModifiers::CONTROL, KeyCode::Char('x')),
             &mut tabs,
             &mut edits,
+            &mut kill_ring,
             &store,
             &term,
             &keymap,
@@ -773,6 +1027,7 @@ mod tests {
             key(KeyModifiers::CONTROL, KeyCode::Char('c')),
             &mut tabs,
             &mut edits,
+            &mut kill_ring,
             &store,
             &term,
             &keymap,
@@ -1593,11 +1848,13 @@ mod tests {
         let mut km = Keymap::empty();
         km.bind("ctrl+q", Command::Quit);
         let mut chord = ChordState::default();
+        let mut kill_ring = KillRing::default();
 
         let outcome = dispatch_key(
             key(KeyModifiers::CONTROL, KeyCode::Char('q')),
             &mut tabs,
             &mut edits,
+            &mut kill_ring,
             &store,
             &term,
             &km,
@@ -1610,6 +1867,7 @@ mod tests {
             key(KeyModifiers::CONTROL, KeyCode::Char('c')),
             &mut tabs,
             &mut edits,
+            &mut kill_ring,
             &store,
             &term,
             &km,
@@ -1627,10 +1885,12 @@ mod tests {
 
         let km = Keymap::empty(); // no bindings at all
         let mut chord = ChordState::default();
+        let mut kill_ring = KillRing::default();
         dispatch_key(
             key(KeyModifiers::NONE, KeyCode::Char('z')),
             &mut tabs,
             &mut edits,
+            &mut kill_ring,
             &store,
             &term,
             &km,
@@ -1649,10 +1909,12 @@ mod tests {
 
         let km = Keymap::empty();
         let mut chord = ChordState::default();
+        let mut kill_ring = KillRing::default();
         dispatch_key(
             key(KeyModifiers::CONTROL, KeyCode::Char('x')),
             &mut tabs,
             &mut edits,
+            &mut kill_ring,
             &store,
             &term,
             &km,
@@ -1706,11 +1968,13 @@ mod tests {
             fixture_with_content("hi", Dims { cols: 10, rows: 5 });
         let keymap = default_keymap();
         let mut chord = ChordState::default();
+        let mut kill_ring = KillRing::default();
         // ctrl+x → pending.
         dispatch_key(
             key(KeyModifiers::CONTROL, KeyCode::Char('x')),
             &mut tabs,
             &mut edits,
+            &mut kill_ring,
             &store,
             &term,
             &keymap,
@@ -1722,6 +1986,7 @@ mod tests {
             key(KeyModifiers::NONE, KeyCode::Char('z')),
             &mut tabs,
             &mut edits,
+            &mut kill_ring,
             &store,
             &term,
             &keymap,
@@ -1933,5 +2198,276 @@ mod tests {
         let mut tabs = tabs_with(&[("a", 1)], Some(1));
         let outcome = noop_dispatch(key(KeyModifiers::NONE, KeyCode::Esc), &mut tabs);
         assert_eq!(outcome, DispatchOutcome::Continue);
+    }
+
+    // ── M7: mark / region / kill ring / yank ────────────────────────────
+
+    fn dispatch_with_ring(
+        k: KeyEvent,
+        tabs: &mut Tabs,
+        edits: &mut BufferEdits,
+        kill_ring: &mut KillRing,
+        store: &BufferStore,
+        terminal: &Terminal,
+    ) -> DispatchOutcome {
+        let mut chord = ChordState::default();
+        dispatch_key(
+            k,
+            tabs,
+            edits,
+            kill_ring,
+            store,
+            terminal,
+            &default_keymap(),
+            &mut chord,
+        )
+    }
+
+    #[test]
+    fn set_mark_captures_current_cursor() {
+        let (mut tabs, mut edits, store, term) =
+            fixture_with_content("abc\ndef", Dims { cols: 20, rows: 5 });
+        tabs.open[0].cursor = Cursor {
+            line: 1,
+            col: 2,
+            preferred_col: 2,
+        };
+        let mut kr = KillRing::default();
+        dispatch_with_ring(
+            key(KeyModifiers::CONTROL, KeyCode::Char(' ')),
+            &mut tabs,
+            &mut edits,
+            &mut kr,
+            &store,
+            &term,
+        );
+        assert_eq!(
+            tabs.open[0].mark,
+            Some(Cursor {
+                line: 1,
+                col: 2,
+                preferred_col: 2,
+            })
+        );
+    }
+
+    #[test]
+    fn abort_clears_mark() {
+        let mut tabs = tabs_with(&[("a", 1)], Some(1));
+        tabs.open[0].mark = Some(Cursor {
+            line: 0,
+            col: 3,
+            preferred_col: 3,
+        });
+        noop_dispatch(key(KeyModifiers::NONE, KeyCode::Esc), &mut tabs);
+        assert!(tabs.open[0].mark.is_none());
+    }
+
+    #[test]
+    fn kill_region_removes_marked_range_into_ring() {
+        let (mut tabs, mut edits, store, term) =
+            fixture_with_content("abcdefgh", Dims { cols: 20, rows: 5 });
+        tabs.open[0].cursor = Cursor {
+            line: 0,
+            col: 2,
+            preferred_col: 2,
+        };
+        tabs.open[0].mark = Some(Cursor {
+            line: 0,
+            col: 6,
+            preferred_col: 6,
+        });
+        let mut kr = KillRing::default();
+        dispatch_with_ring(
+            key(KeyModifiers::CONTROL, KeyCode::Char('w')),
+            &mut tabs,
+            &mut edits,
+            &mut kr,
+            &store,
+            &term,
+        );
+        assert_eq!(rope_of(&edits, "file.rs").to_string(), "abgh");
+        assert_eq!(
+            kr.latest.as_deref(),
+            Some("cdef")
+        );
+        assert_eq!(tabs.open[0].cursor.col, 2);
+        assert!(tabs.open[0].mark.is_none());
+    }
+
+    #[test]
+    fn kill_region_handles_mark_after_cursor() {
+        let (mut tabs, mut edits, store, term) =
+            fixture_with_content("abcdefgh", Dims { cols: 20, rows: 5 });
+        // Cursor at 6, mark at 2 — reverse of the previous test.
+        tabs.open[0].cursor = Cursor {
+            line: 0,
+            col: 6,
+            preferred_col: 6,
+        };
+        tabs.open[0].mark = Some(Cursor {
+            line: 0,
+            col: 2,
+            preferred_col: 2,
+        });
+        let mut kr = KillRing::default();
+        dispatch_with_ring(
+            key(KeyModifiers::CONTROL, KeyCode::Char('w')),
+            &mut tabs,
+            &mut edits,
+            &mut kr,
+            &store,
+            &term,
+        );
+        assert_eq!(rope_of(&edits, "file.rs").to_string(), "abgh");
+        assert_eq!(kr.latest.as_deref(), Some("cdef"));
+        // Cursor lands at region start (col 2), not where it started.
+        assert_eq!(tabs.open[0].cursor.col, 2);
+    }
+
+    #[test]
+    fn kill_line_kills_to_eol() {
+        let (mut tabs, mut edits, store, term) =
+            fixture_with_content("foo bar\nbaz", Dims { cols: 20, rows: 5 });
+        tabs.open[0].cursor = Cursor {
+            line: 0,
+            col: 4,
+            preferred_col: 4,
+        };
+        let mut kr = KillRing::default();
+        dispatch_with_ring(
+            key(KeyModifiers::CONTROL, KeyCode::Char('k')),
+            &mut tabs,
+            &mut edits,
+            &mut kr,
+            &store,
+            &term,
+        );
+        assert_eq!(rope_of(&edits, "file.rs").to_string(), "foo \nbaz");
+        assert_eq!(kr.latest.as_deref(), Some("bar"));
+        assert!(kr.last_was_kill_line);
+    }
+
+    #[test]
+    fn kill_line_at_eol_joins_with_next() {
+        let (mut tabs, mut edits, store, term) =
+            fixture_with_content("foo\nbar", Dims { cols: 20, rows: 5 });
+        tabs.open[0].cursor = Cursor {
+            line: 0,
+            col: 3,
+            preferred_col: 3,
+        };
+        let mut kr = KillRing::default();
+        dispatch_with_ring(
+            key(KeyModifiers::CONTROL, KeyCode::Char('k')),
+            &mut tabs,
+            &mut edits,
+            &mut kr,
+            &store,
+            &term,
+        );
+        assert_eq!(rope_of(&edits, "file.rs").to_string(), "foobar");
+        assert_eq!(kr.latest.as_deref(), Some("\n"));
+    }
+
+    #[test]
+    fn consecutive_kill_lines_coalesce() {
+        let (mut tabs, mut edits, store, term) =
+            fixture_with_content("aaa\nbbb\nccc", Dims { cols: 20, rows: 5 });
+        let mut kr = KillRing::default();
+        // First kill: kill "aaa" on line 0.
+        dispatch_with_ring(
+            key(KeyModifiers::CONTROL, KeyCode::Char('k')),
+            &mut tabs,
+            &mut edits,
+            &mut kr,
+            &store,
+            &term,
+        );
+        // Second kill: kill the newline that now precedes "bbb".
+        dispatch_with_ring(
+            key(KeyModifiers::CONTROL, KeyCode::Char('k')),
+            &mut tabs,
+            &mut edits,
+            &mut kr,
+            &store,
+            &term,
+        );
+        // Coalesced: "aaa" + "\n".
+        assert_eq!(kr.latest.as_deref(), Some("aaa\n"));
+    }
+
+    #[test]
+    fn non_kill_command_breaks_coalescing() {
+        let (mut tabs, mut edits, store, term) =
+            fixture_with_content("aaa\nbbb", Dims { cols: 20, rows: 5 });
+        let mut kr = KillRing::default();
+        dispatch_with_ring(
+            key(KeyModifiers::CONTROL, KeyCode::Char('k')),
+            &mut tabs,
+            &mut edits,
+            &mut kr,
+            &store,
+            &term,
+        );
+        assert!(kr.last_was_kill_line);
+        // Any other command resets the flag.
+        dispatch_with_ring(
+            key(KeyModifiers::NONE, KeyCode::Right),
+            &mut tabs,
+            &mut edits,
+            &mut kr,
+            &store,
+            &term,
+        );
+        assert!(!kr.last_was_kill_line);
+    }
+
+    #[test]
+    fn yank_sets_pending_on_active_tab() {
+        let (mut tabs, mut edits, store, term) =
+            fixture_with_content("x", Dims { cols: 20, rows: 5 });
+        let mut kr = KillRing::default();
+        dispatch_with_ring(
+            key(KeyModifiers::CONTROL, KeyCode::Char('y')),
+            &mut tabs,
+            &mut edits,
+            &mut kr,
+            &store,
+            &term,
+        );
+        assert_eq!(kr.pending_yank, Some(TabId(1)));
+    }
+
+    #[test]
+    fn apply_yank_inserts_text_at_cursor() {
+        let (mut tabs, mut edits, _store, _term) =
+            fixture_with_content("hello", Dims { cols: 20, rows: 5 });
+        tabs.open[0].cursor = Cursor {
+            line: 0,
+            col: 3,
+            preferred_col: 3,
+        };
+        apply_yank(&mut tabs, &mut edits, TabId(1), "XYZ");
+        assert_eq!(rope_of(&edits, "file.rs").to_string(), "helXYZlo");
+        assert_eq!(tabs.open[0].cursor.col, 6);
+    }
+
+    #[test]
+    fn kill_region_noop_when_no_mark() {
+        let (mut tabs, mut edits, store, term) =
+            fixture_with_content("abc", Dims { cols: 20, rows: 5 });
+        assert!(tabs.open[0].mark.is_none());
+        let mut kr = KillRing::default();
+        dispatch_with_ring(
+            key(KeyModifiers::CONTROL, KeyCode::Char('w')),
+            &mut tabs,
+            &mut edits,
+            &mut kr,
+            &store,
+            &term,
+        );
+        assert_eq!(rope_of(&edits, "file.rs").to_string(), "abc");
+        assert!(kr.latest.is_none());
     }
 }

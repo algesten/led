@@ -28,6 +28,7 @@ use led_driver_buffers_native::{FileReadNative, FileWriteNative};
 use led_driver_terminal_core::{Dims, Frame, KeyEvent, TermEvent, Terminal, TerminalInputDriver};
 use led_driver_terminal_native::{paint, TerminalInputNative};
 use led_state_buffer_edits::{BufferEdits, EditedBuffer};
+use led_state_kill_ring::KillRing;
 use led_state_tabs::{TabId, Tabs};
 
 pub use config::{load_keymap, ConfigError};
@@ -85,6 +86,7 @@ impl TabIdGen {
 pub fn run(
     tabs: &mut Tabs,
     edits: &mut BufferEdits,
+    kill_ring: &mut KillRing,
     store: &mut BufferStore,
     terminal: &mut Terminal,
     drivers: &Drivers,
@@ -142,7 +144,7 @@ pub fn run(
                 TermEvent::Key(k) => Event::Key(k),
                 TermEvent::Resize(d) => Event::Resize(d),
             };
-            match dispatch(ev, tabs, edits, store, terminal, keymap, &mut chord) {
+            match dispatch(ev, tabs, edits, kill_ring, store, terminal, keymap, &mut chord) {
                 DispatchOutcome::Continue => {}
                 DispatchOutcome::Quit => {
                     quit = true;

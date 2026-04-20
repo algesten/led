@@ -345,6 +345,7 @@ dependencies = [
  "led-driver-terminal-native",
  "led-runtime",
  "led-state-buffer-edits",
+ "led-state-kill-ring",
  "led-state-tabs",
 ]
 
@@ -399,6 +400,7 @@ dependencies = [
  "led-driver-terminal-core",
  "led-driver-terminal-native",
  "led-state-buffer-edits",
+ "led-state-kill-ring",
  "led-state-tabs",
  "ropey",
  "toml",
@@ -411,6 +413,13 @@ dependencies = [
  "imbl",
  "led-core",
  "ropey",
+]
+
+[[package]]
+name = "led-state-kill-ring"
+version = "0.0.0"
+dependencies = [
+ "led-state-tabs",
 ]
 
 [[package]]

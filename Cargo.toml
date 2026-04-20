@@ -4,6 +4,7 @@ members = [
     "crates/core",
     "crates/state-tabs",
     "crates/state-buffer-edits",
+    "crates/state-kill-ring",
     "crates/driver-buffers/core",
     "crates/driver-buffers/native",
     "crates/driver-terminal/core",
@@ -20,6 +21,7 @@ exclude = ["goldens"]
 led-core = { path = "crates/core" }
 led-state-tabs = { path = "crates/state-tabs" }
 led-state-buffer-edits = { path = "crates/state-buffer-edits" }
+led-state-kill-ring = { path = "crates/state-kill-ring" }
 led-driver-buffers-core = { path = "crates/driver-buffers/core" }
 led-driver-buffers-native = { path = "crates/driver-buffers/native" }
 led-driver-terminal-core = { path = "crates/driver-terminal/core" }

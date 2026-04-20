@@ -22,6 +22,7 @@ publish = false
 led-core = { workspace = true }
 led-state-tabs = { workspace = true }
 led-state-buffer-edits = { workspace = true }
+led-state-kill-ring = { workspace = true }
 led-driver-buffers-core = { workspace = true }
 led-driver-buffers-native = { workspace = true }
 led-driver-terminal-core = { workspace = true }

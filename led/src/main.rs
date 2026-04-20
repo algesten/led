@@ -13,6 +13,7 @@ use led_driver_terminal_core::Terminal;
 use led_driver_terminal_native::RawModeGuard;
 use led_runtime::{load_keymap, spawn_drivers, SharedTrace, TabIdGen};
 use led_state_buffer_edits::BufferEdits;
+use led_state_kill_ring::KillRing;
 use led_state_tabs::{Tab, Tabs};
 
 #[derive(Parser, Debug)]
@@ -79,6 +80,7 @@ fn main() -> io::Result<()> {
     // Build atoms as plain structs — drv 0.2.0 has no wrapper type.
     let mut tabs = Tabs::default();
     let mut edits = BufferEdits::default();
+    let mut kill_ring = KillRing::default();
     let mut store = BufferStore::default();
     let mut terminal = Terminal::default();
 
@@ -107,6 +109,7 @@ fn main() -> io::Result<()> {
     led_runtime::run(
         &mut tabs,
         &mut edits,
+        &mut kill_ring,
         &mut store,
         &mut terminal,
         &drivers,
