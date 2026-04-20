@@ -179,17 +179,26 @@ pub fn file_save_action<'p, 'b>(
 ///
 /// Labels are wrapped in `Arc` so cache-hit clones of [`TabBarModel`]
 /// (inside `Frame`, deep inside `render_frame`'s cache slot) are a
-/// pointer copy. A `*` prefix marks tabs whose buffer has been
-/// modified since load.
+/// pointer copy.
+///
+/// Indicators:
+/// - `*` prefix when the buffer has been modified since load.
+/// - ` ●` suffix on the active tab when a mark is set. Stand-in
+///   until M9 adds proper region highlighting + alert surface;
+///   without it there's no visible feedback from `Ctrl-Space`.
 #[drv::memo(single)]
 pub fn tab_bar_model<'a, 'b>(
     tabs: TabsActiveInput<'a>,
     edits: EditedBuffersInput<'b>,
 ) -> TabBarModel {
+    let active = tabs
+        .active
+        .and_then(|id| tabs.open.iter().position(|t| t.id == id));
     let labels: Vec<String> = tabs
         .open
         .iter()
-        .map(|t| {
+        .enumerate()
+        .map(|(i, t)| {
             let base = t
                 .path
                 .file_name()
@@ -200,19 +209,31 @@ pub fn tab_bar_model<'a, 'b>(
                 .get(&t.path)
                 .map(|b| b.dirty())
                 .unwrap_or(false);
-            if dirty {
-                let mut s = String::with_capacity(base.len() + 1);
-                s.push('*');
-                s.push_str(&base);
-                s
-            } else {
-                base
+            let has_mark = active == Some(i) && t.mark.is_some();
+            match (dirty, has_mark) {
+                (false, false) => base,
+                (true, false) => {
+                    let mut s = String::with_capacity(base.len() + 1);
+                    s.push('*');
+                    s.push_str(&base);
+                    s
+                }
+                (false, true) => {
+                    let mut s = String::with_capacity(base.len() + 2);
+                    s.push_str(&base);
+                    s.push_str(" \u{2022}"); // ` ●`
+                    s
+                }
+                (true, true) => {
+                    let mut s = String::with_capacity(base.len() + 3);
+                    s.push('*');
+                    s.push_str(&base);
+                    s.push_str(" \u{2022}");
+                    s
+                }
             }
         })
         .collect();
-    let active = tabs
-        .active
-        .and_then(|id| tabs.open.iter().position(|t| t.id == id));
     TabBarModel {
         labels: Arc::new(labels),
         active,
