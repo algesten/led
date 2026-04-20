@@ -77,6 +77,14 @@ pub fn dispatch_key(
         // Quit (Ctrl-C) — takes precedence over the plain Char arm.
         (m, KeyCode::Char('c')) if m.contains(KeyModifiers::CONTROL) => DispatchOutcome::Quit,
 
+        // Save the active buffer (Ctrl-S). No-op on a clean or
+        // unloaded buffer. Same arm shape as Ctrl-C so the Ctrl
+        // handling lives together.
+        (m, KeyCode::Char('s')) if m.contains(KeyModifiers::CONTROL) => {
+            request_save_active(tabs, edits);
+            DispatchOutcome::Continue
+        }
+
         // Tab switching (M1).
         (m, KeyCode::Tab) if m.is_empty() => {
             cycle_active(tabs, 1);
@@ -209,6 +217,27 @@ fn move_cursor(
     tab.scroll = adjust_scroll(tab.scroll, tab.cursor, body_rows);
 }
 
+// ── Save request ───────────────────────────────────────────────────────
+
+/// Insert the active tab's path into `pending_saves` iff the buffer
+/// is loaded and dirty. Runtime's query + execute pair turns the
+/// entry into an actual write and clears it synchronously before
+/// spawning async work.
+fn request_save_active(tabs: &Tabs, edits: &mut BufferEdits) {
+    let Some(id) = tabs.active else {
+        return;
+    };
+    let Some(tab) = tabs.open.iter().find(|t| t.id == id) else {
+        return;
+    };
+    let Some(eb) = edits.buffers.get(&tab.path) else {
+        return;
+    };
+    if eb.dirty() {
+        edits.pending_saves.insert(tab.path.clone());
+    }
+}
+
 // ── Edit primitives ────────────────────────────────────────────────────
 
 /// Access the active tab and its edited buffer together. Bails if
@@ -233,7 +262,7 @@ where
 fn bump(eb: &mut EditedBuffer, new_rope: Rope) {
     eb.rope = Arc::new(new_rope);
     eb.version = eb.version.saturating_add(1);
-    eb.dirty = true;
+    // saved_version untouched — `dirty()` now derives as version > saved_version.
 }
 
 fn insert_char(tabs: &mut Tabs, edits: &mut BufferEdits, ch: char) {
@@ -884,7 +913,7 @@ mod tests {
     }
 
     fn dirty_of(edits: &BufferEdits, path: &str) -> bool {
-        edits.buffers.get(&canon(path)).expect("seeded").dirty
+        edits.buffers.get(&canon(path)).expect("seeded").dirty()
     }
 
     #[test]
@@ -1188,5 +1217,97 @@ mod tests {
         assert_eq!(rope_of(&edits, "b").to_string(), "b?");
         assert!(dirty_of(&edits, "a"));
         assert!(dirty_of(&edits, "b"));
+    }
+
+    // ── M4: Ctrl-S save request ─────────────────────────────────────────
+
+    #[test]
+    fn ctrl_s_queues_save_for_dirty_active_buffer() {
+        let (mut tabs, mut edits, store, term) =
+            fixture_with_content("hi", Dims { cols: 10, rows: 5 });
+        // Force dirty by bumping version past saved_version.
+        let eb = edits
+            .buffers
+            .get_mut(&canon("file.rs"))
+            .expect("seeded");
+        eb.version = 1;
+        assert!(eb.dirty());
+
+        dispatch_key(
+            key(KeyModifiers::CONTROL, KeyCode::Char('s')),
+            &mut tabs,
+            &mut edits,
+            &store,
+            &term,
+        );
+
+        assert!(edits.pending_saves.contains(&canon("file.rs")));
+    }
+
+    #[test]
+    fn ctrl_s_on_clean_buffer_is_noop() {
+        let (mut tabs, mut edits, store, term) =
+            fixture_with_content("hi", Dims { cols: 10, rows: 5 });
+        // Buffer is fresh (version == saved_version == 0).
+        dispatch_key(
+            key(KeyModifiers::CONTROL, KeyCode::Char('s')),
+            &mut tabs,
+            &mut edits,
+            &store,
+            &term,
+        );
+        assert!(edits.pending_saves.is_empty());
+    }
+
+    #[test]
+    fn ctrl_s_on_unloaded_buffer_is_noop() {
+        let mut tabs = tabs_with(&[("file.rs", 1)], Some(1));
+        let mut edits = BufferEdits::default();
+        let store = BufferStore::default();
+        let term = terminal_with(Some(Dims { cols: 10, rows: 5 }));
+        dispatch_key(
+            key(KeyModifiers::CONTROL, KeyCode::Char('s')),
+            &mut tabs,
+            &mut edits,
+            &store,
+            &term,
+        );
+        assert!(edits.pending_saves.is_empty());
+    }
+
+    #[test]
+    fn ctrl_s_targets_only_active_tab() {
+        // Two dirty buffers; Ctrl-S on tab b should only enqueue b.
+        let mut tabs = tabs_with(&[("a", 1), ("b", 2)], Some(2));
+        let mut edits = BufferEdits::default();
+        edits.buffers.insert(
+            canon("a"),
+            EditedBuffer {
+                rope: Arc::new(Rope::from_str("A")),
+                version: 1,
+                saved_version: 0,
+            },
+        );
+        edits.buffers.insert(
+            canon("b"),
+            EditedBuffer {
+                rope: Arc::new(Rope::from_str("B")),
+                version: 1,
+                saved_version: 0,
+            },
+        );
+        let store = BufferStore::default();
+        let term = terminal_with(Some(Dims { cols: 10, rows: 5 }));
+
+        dispatch_key(
+            key(KeyModifiers::CONTROL, KeyCode::Char('s')),
+            &mut tabs,
+            &mut edits,
+            &store,
+            &term,
+        );
+
+        assert!(edits.pending_saves.contains(&canon("b")));
+        assert!(!edits.pending_saves.contains(&canon("a")));
     }
 }

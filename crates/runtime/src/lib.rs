@@ -21,8 +21,8 @@ use std::io::{self, Write};
 use std::sync::Arc;
 use std::time::Duration;
 
-use led_driver_buffers_core::{BufferStore, FileReadDriver};
-use led_driver_buffers_native::FileReadNative;
+use led_driver_buffers_core::{BufferStore, FileReadDriver, FileWriteDriver, LoadState};
+use led_driver_buffers_native::{FileReadNative, FileWriteNative};
 use led_driver_terminal_core::{Dims, Frame, KeyEvent, TermEvent, Terminal, TerminalInputDriver};
 use led_driver_terminal_native::{paint, TerminalInputNative};
 use led_state_buffer_edits::{BufferEdits, EditedBuffer};
@@ -30,8 +30,9 @@ use led_state_tabs::{TabId, Tabs};
 
 pub use dispatch::{dispatch, dispatch_key, DispatchOutcome};
 pub use query::{
-    body_model, file_load_action, render_frame, tab_bar_model, EditedBuffersInput,
-    StoreLoadedInput, TabsActiveInput, TabsOpenInput, TerminalDimsInput,
+    body_model, file_load_action, file_save_action, render_frame, tab_bar_model,
+    EditedBuffersInput, PendingSavesInput, StoreLoadedInput, TabsActiveInput, TabsOpenInput,
+    TerminalDimsInput,
 };
 pub use trace::{SharedTrace, Trace};
 
@@ -50,10 +51,12 @@ pub enum Event {
 /// native marker drops (no-op — the worker self-exits on hangup).
 pub struct Drivers {
     pub file: FileReadDriver,
+    pub file_write: FileWriteDriver,
     pub input: TerminalInputDriver,
 
     // Held only for lifetime management; detached on drop.
     _file_native: FileReadNative,
+    _file_write_native: FileWriteNative,
     _input_native: TerminalInputNative,
 }
 
@@ -93,6 +96,28 @@ pub fn run(
                 .entry(completion.path)
                 .or_insert_with(|| EditedBuffer::fresh(completion.rope));
         }
+
+        // Apply write completions: round-trip the saved rope into
+        // `BufferStore` as the new disk baseline, and bump
+        // `saved_version` so `dirty()` becomes false (unless the
+        // user has since edited past that version).
+        for done in drivers.file_write.process() {
+            match done.result {
+                Ok(rope) => {
+                    store
+                        .loaded
+                        .insert(done.path.clone(), LoadState::Ready(rope));
+                    if let Some(eb) = edits.buffers.get_mut(&done.path) {
+                        eb.saved_version = eb.saved_version.max(done.version);
+                    }
+                }
+                Err(_msg) => {
+                    // Already traced inside FileWriteDriver::process.
+                    // Buffer stays dirty so the user can retry.
+                }
+            }
+        }
+
         drivers.input.process(terminal);
 
         // Drain one event at a time — the `VecDeque::pop_front` yields
@@ -118,9 +143,13 @@ pub fn run(
         }
 
         // ── Query ───────────────────────────────────────────────
-        let actions = file_load_action(
+        let load_actions = file_load_action(
             StoreLoadedInput::new(store),
             TabsOpenInput::new(tabs),
+        );
+        let save_actions = file_save_action(
+            PendingSavesInput::new(edits),
+            EditedBuffersInput::new(edits),
         );
         let frame = render_frame(
             TerminalDimsInput::new(terminal),
@@ -130,7 +159,16 @@ pub fn run(
         );
 
         // ── Execute ─────────────────────────────────────────────
-        drivers.file.execute(actions.iter(), store);
+        drivers.file.execute(load_actions.iter(), store);
+
+        // Sync-clear pending_saves for the paths we're about to
+        // dispatch — the execute-pattern discipline that prevents
+        // the next tick's query from re-emitting the same saves.
+        for action in &save_actions {
+            let led_driver_buffers_core::SaveAction::Save { path, .. } = action;
+            edits.pending_saves.remove(path);
+        }
+        drivers.file_write.execute(save_actions.iter());
 
         // ── Render ──────────────────────────────────────────────
         if frame != last_frame {
@@ -151,11 +189,15 @@ pub fn run(
 /// using the desktop `*-native` implementations.
 pub fn spawn_drivers(trace: SharedTrace) -> io::Result<Drivers> {
     let (file, file_native) = led_driver_buffers_native::spawn(trace.clone().as_file_trace());
+    let (file_write, file_write_native) =
+        led_driver_buffers_native::spawn_write(trace.clone().as_file_trace());
     let (input, input_native) = led_driver_terminal_native::spawn(trace.as_terminal_trace())?;
     Ok(Drivers {
         file,
+        file_write,
         input,
         _file_native: file_native,
+        _file_write_native: file_write_native,
         _input_native: input_native,
     })
 }
@@ -185,6 +227,12 @@ pub(crate) mod trace_adapter {
         }
         fn file_load_done(&self, path: &CanonPath, result: &Result<Arc<Rope>, String>) {
             self.0.file_load_done(path, result);
+        }
+        fn file_save_start(&self, path: &CanonPath, version: u64) {
+            self.0.file_save_start(path, version);
+        }
+        fn file_save_done(&self, path: &CanonPath, version: u64, result: &Result<(), String>) {
+            self.0.file_save_done(path, version, result);
         }
     }
 

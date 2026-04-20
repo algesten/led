@@ -13,7 +13,7 @@
 
 #[allow(unused_imports)]
 use led_core::CanonPath;
-use led_driver_buffers_core::{BufferStore, LoadAction, LoadState};
+use led_driver_buffers_core::{BufferStore, LoadAction, LoadState, SaveAction};
 use led_driver_terminal_core::{BodyModel, Dims, Frame, TabBarModel, Terminal};
 use led_state_buffer_edits::{BufferEdits, EditedBuffer};
 use led_state_tabs::{Cursor, Scroll, Tab, TabId, Tabs};
@@ -68,6 +68,23 @@ impl<'a> EditedBuffersInput<'a> {
     pub fn new(edits: &'a BufferEdits) -> Self {
         Self {
             buffers: &edits.buffers,
+        }
+    }
+}
+
+/// Pending-save requests. Narrow projection so a cursor move or a
+/// rope edit on `BufferEdits.buffers` doesn't invalidate save-related
+/// memo caches.
+#[drv::input]
+#[derive(Copy, Clone)]
+pub struct PendingSavesInput<'a> {
+    pub paths: &'a imbl::HashSet<CanonPath>,
+}
+
+impl<'a> PendingSavesInput<'a> {
+    pub fn new(edits: &'a BufferEdits) -> Self {
+        Self {
+            paths: &edits.pending_saves,
         }
     }
 }
@@ -127,6 +144,37 @@ pub fn file_load_action<'a, 'b>(
         .collect()
 }
 
+/// "What saves should we dispatch now?"
+///
+/// Diffs the user's save requests (`pending_saves`) against the
+/// edited buffers, emitting one `SaveAction` per path that is both
+/// requested and dirty. Runtime sync-clears `pending_saves` for the
+/// emitted paths before calling `FileWriteDriver::execute` — without
+/// that clear the next tick's query would emit the same saves again.
+///
+/// Idle: `pending_saves` is empty → returns `Vec::new()` (no alloc).
+#[drv::memo(single)]
+pub fn file_save_action<'p, 'b>(
+    pending: PendingSavesInput<'p>,
+    buffers: EditedBuffersInput<'b>,
+) -> Vec<SaveAction> {
+    let mut out: Vec<SaveAction> = Vec::new();
+    for path in pending.paths.iter() {
+        let Some(eb) = buffers.buffers.get(path) else {
+            continue;
+        };
+        if !eb.dirty() {
+            continue;
+        }
+        out.push(SaveAction::Save {
+            path: path.clone(),
+            rope: eb.rope.clone(),
+            version: eb.version,
+        });
+    }
+    out
+}
+
 /// Tab-bar slice of the render frame.
 ///
 /// Labels are wrapped in `Arc` so cache-hit clones of [`TabBarModel`]
@@ -147,7 +195,11 @@ pub fn tab_bar_model<'a, 'b>(
                 .file_name()
                 .map(|os| os.to_string_lossy().into_owned())
                 .unwrap_or_else(|| t.path.display().to_string());
-            let dirty = edits.buffers.get(&t.path).map(|b| b.dirty).unwrap_or(false);
+            let dirty = edits
+                .buffers
+                .get(&t.path)
+                .map(|b| b.dirty())
+                .unwrap_or(false);
             if dirty {
                 let mut s = String::with_capacity(base.len() + 1);
                 s.push('*');
@@ -538,7 +590,7 @@ mod tests {
             EditedBuffer {
                 rope: Arc::new(Rope::from_str("edited-version")),
                 version: 1,
-                dirty: true,
+                saved_version: 0,
             },
         );
 
@@ -573,6 +625,86 @@ mod tests {
         }
     }
 
+    // ── M4: save action memo ────────────────────────────────────────────
+
+    #[test]
+    fn file_save_action_empty_when_nothing_pending() {
+        let e = BufferEdits::default();
+        let actions = file_save_action(
+            PendingSavesInput::new(&e),
+            EditedBuffersInput::new(&e),
+        );
+        assert!(actions.is_empty());
+    }
+
+    #[test]
+    fn file_save_action_emits_save_for_pending_dirty_buffer() {
+        let mut e = BufferEdits::default();
+        let path = canon("a.rs");
+        let rope = Arc::new(Rope::from_str("payload"));
+        e.buffers.insert(
+            path.clone(),
+            EditedBuffer {
+                rope: rope.clone(),
+                version: 3,
+                saved_version: 0,
+            },
+        );
+        e.pending_saves.insert(path.clone());
+
+        let actions = file_save_action(
+            PendingSavesInput::new(&e),
+            EditedBuffersInput::new(&e),
+        );
+        assert_eq!(actions.len(), 1);
+        match &actions[0] {
+            SaveAction::Save {
+                path: p,
+                rope: r,
+                version,
+            } => {
+                assert_eq!(p, &path);
+                assert!(Arc::ptr_eq(r, &rope));
+                assert_eq!(*version, 3);
+            }
+        }
+    }
+
+    #[test]
+    fn file_save_action_skips_clean_buffers() {
+        let mut e = BufferEdits::default();
+        let path = canon("clean.rs");
+        e.buffers.insert(
+            path.clone(),
+            EditedBuffer {
+                rope: Arc::new(Rope::from_str("x")),
+                version: 0,
+                saved_version: 0, // dirty() == false
+            },
+        );
+        e.pending_saves.insert(path);
+
+        let actions = file_save_action(
+            PendingSavesInput::new(&e),
+            EditedBuffersInput::new(&e),
+        );
+        assert!(actions.is_empty());
+    }
+
+    #[test]
+    fn file_save_action_skips_pending_paths_with_no_buffer() {
+        // Could happen if pending entry leaked past a tab close. Memo
+        // must not panic or emit phantom saves.
+        let mut e = BufferEdits::default();
+        e.pending_saves.insert(canon("ghost.rs"));
+
+        let actions = file_save_action(
+            PendingSavesInput::new(&e),
+            EditedBuffersInput::new(&e),
+        );
+        assert!(actions.is_empty());
+    }
+
     #[test]
     fn tab_bar_prefixes_dirty_labels_with_asterisk() {
         let (t, mut e, s, term) = fixture(
@@ -596,7 +728,7 @@ mod tests {
             EditedBuffer {
                 rope: Arc::new(Rope::from_str("x")),
                 version: 0,
-                dirty: false,
+                saved_version: 0,
             },
         );
         e.buffers.insert(
@@ -604,7 +736,7 @@ mod tests {
             EditedBuffer {
                 rope: Arc::new(Rope::from_str("yy")),
                 version: 1,
-                dirty: true,
+                saved_version: 0,
             },
         );
 

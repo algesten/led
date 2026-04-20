@@ -16,7 +16,7 @@
 //! (typically two: one for the rope — consumed by body_model — and
 //! one for just the dirty flags — consumed by tab_bar_model).
 
-use imbl::HashMap;
+use imbl::{HashMap, HashSet};
 use led_core::CanonPath;
 use ropey::Rope;
 use std::sync::Arc;
@@ -35,33 +35,46 @@ pub struct EditedBuffer {
     /// rope itself (dirty badge, status line) and (b) the anchor
     /// future rebase queries will translate coordinates against.
     pub version: u64,
-    /// `false` while rope == disk base; flips to `true` on the first
-    /// edit. Reset by save (M4) / reload (later).
-    pub dirty: bool,
+    /// The `version` value last persisted to disk. Starts at 0 —
+    /// matching `version` on a fresh load, so a just-loaded buffer
+    /// reports `dirty() == false`. Advances on every successful
+    /// save completion. A save that races behind a newer edit does
+    /// not clear the dirty flag, because `version > saved_version`
+    /// still holds.
+    pub saved_version: u64,
 }
 
 impl EditedBuffer {
+    /// True iff the rope has been modified since the last save /
+    /// load completion.
+    pub fn dirty(&self) -> bool {
+        self.version > self.saved_version
+    }
+
     /// Fresh, clean seed for a buffer whose disk rope just arrived.
     pub fn fresh(rope: Arc<Rope>) -> Self {
         Self {
             rope,
             version: 0,
-            dirty: false,
+            saved_version: 0,
         }
     }
 }
 
-/// Source: per-path edited buffer state.
+/// Source: per-path edited buffer state + the set of paths the user
+/// has asked to save but whose write hasn't been dispatched yet.
 ///
 /// Invariants (maintained by dispatch + runtime seeding):
-/// - An entry exists iff the runtime has observed a `Ready` load
-///   completion for that path.
-/// - `dirty == (version > 0)` for buffers that haven't been saved or
-///   reloaded yet. Post-M4, saves reset `version`-vs-disk tracking
-///   independently of the counter.
+/// - An entry in `buffers` exists iff the runtime has observed a
+///   `Ready` load completion for that path.
+/// - `pending_saves ⊆ keys(buffers)` — dispatch only inserts paths
+///   for which `buffers.get(path)` returned `Some` and reported
+///   `dirty()`. Entries are cleared synchronously in the execute
+///   phase, so the next tick's save query emits an empty list.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct BufferEdits {
     pub buffers: HashMap<CanonPath, EditedBuffer>,
+    pub pending_saves: HashSet<CanonPath>,
 }
 
 #[cfg(test)]
@@ -84,8 +97,30 @@ mod tests {
         let rope = Arc::new(Rope::from_str("hello"));
         let eb = EditedBuffer::fresh(rope.clone());
         assert_eq!(eb.version, 0);
-        assert!(!eb.dirty);
+        assert_eq!(eb.saved_version, 0);
+        assert!(!eb.dirty());
         assert!(Arc::ptr_eq(&eb.rope, &rope));
+    }
+
+    #[test]
+    fn dirty_flips_when_version_exceeds_saved_version() {
+        let mut eb = EditedBuffer::fresh(Arc::new(Rope::from_str("hi")));
+        eb.version = 3;
+        assert!(eb.dirty());
+        eb.saved_version = 3;
+        assert!(!eb.dirty());
+        eb.version = 4; // user edited after save
+        assert!(eb.dirty());
+    }
+
+    #[test]
+    fn dirty_tracks_saved_version_not_a_flag() {
+        // A save at version 2 that completes after the user has
+        // edited to version 4 must leave the buffer dirty.
+        let mut eb = EditedBuffer::fresh(Arc::new(Rope::from_str("x")));
+        eb.version = 4;
+        eb.saved_version = 2; // write finished; recorded older version
+        assert!(eb.dirty());
     }
 
     #[test]

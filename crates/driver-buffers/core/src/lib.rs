@@ -84,6 +84,8 @@ pub struct LoadCompletion {
 pub trait Trace: Send + Sync {
     fn file_load_start(&self, path: &CanonPath);
     fn file_load_done(&self, path: &CanonPath, result: &Result<Arc<Rope>, String>);
+    fn file_save_start(&self, path: &CanonPath, version: u64);
+    fn file_save_done(&self, path: &CanonPath, version: u64, result: &Result<(), String>);
 }
 
 /// No-op trace for tests or non-golden runs.
@@ -91,6 +93,8 @@ pub struct NoopTrace;
 impl Trace for NoopTrace {
     fn file_load_start(&self, _: &CanonPath) {}
     fn file_load_done(&self, _: &CanonPath, _: &Result<Arc<Rope>, String>) {}
+    fn file_save_start(&self, _: &CanonPath, _: u64) {}
+    fn file_save_done(&self, _: &CanonPath, _: u64, _: &Result<(), String>) {}
 }
 
 // ── Sync driver API ────────────────────────────────────────────────────
@@ -157,6 +161,104 @@ impl FileReadDriver {
             store.loaded.insert(path.clone(), LoadState::Pending);
             self.trace.file_load_start(path);
             let _ = self.tx_cmd.send(ReadCmd::Read(path.clone()));
+        }
+    }
+}
+
+// ── FileWriteDriver — saves ─────────────────────────────────────────────
+
+/// Action produced by the runtime's save query, consumed by
+/// [`FileWriteDriver::execute`].
+#[derive(Clone, Debug, PartialEq)]
+pub enum SaveAction {
+    Save {
+        path: CanonPath,
+        rope: Arc<Rope>,
+        version: u64,
+    },
+}
+
+/// Command from the sync save driver to its async worker.
+#[derive(Clone, Debug)]
+pub enum WriteCmd {
+    Write {
+        path: CanonPath,
+        rope: Arc<Rope>,
+        version: u64,
+    },
+}
+
+/// Completion posted by the async write worker.
+///
+/// `result: Ok(Arc<Rope>)` echoes the rope that was persisted so the
+/// runtime can install it as the new `BufferStore` baseline without
+/// re-reading from disk.
+#[derive(Debug)]
+pub struct WriteDone {
+    pub path: CanonPath,
+    pub version: u64,
+    pub result: Result<Arc<Rope>, String>,
+}
+
+/// Main-loop-facing half of the save driver.
+///
+/// Unlike [`FileReadDriver`], `FileWriteDriver` owns no source: the
+/// intent-write side effects (clearing `pending_saves`, bumping
+/// `saved_version`, installing the saved rope into `BufferStore`)
+/// live in the runtime. Keeping the driver stateless also keeps it
+/// ignorant of sibling state crates — a strict-isolation win.
+pub struct FileWriteDriver {
+    tx_cmd: Sender<WriteCmd>,
+    rx_done: Receiver<WriteDone>,
+    trace: Arc<dyn Trace>,
+}
+
+impl FileWriteDriver {
+    pub fn new(
+        tx_cmd: Sender<WriteCmd>,
+        rx_done: Receiver<WriteDone>,
+        trace: Arc<dyn Trace>,
+    ) -> Self {
+        Self {
+            tx_cmd,
+            rx_done,
+            trace,
+        }
+    }
+
+    /// Drain write completions. `Vec::new()` on idle — no alloc.
+    pub fn process(&self) -> Vec<WriteDone> {
+        let mut out: Vec<WriteDone> = Vec::new();
+        while let Ok(done) = self.rx_done.try_recv() {
+            let trace_result: Result<(), String> = match &done.result {
+                Ok(_) => Ok(()),
+                Err(msg) => Err(msg.clone()),
+            };
+            self.trace.file_save_done(&done.path, done.version, &trace_result);
+            out.push(done);
+        }
+        out
+    }
+
+    /// Act on `SaveAction`s. Forwards a `WriteCmd` to the async
+    /// worker for each action; does not touch any source state
+    /// (that's the runtime's job — see the M4 design doc).
+    pub fn execute<'a, I>(&self, actions: I)
+    where
+        I: IntoIterator<Item = &'a SaveAction>,
+    {
+        for SaveAction::Save {
+            path,
+            rope,
+            version,
+        } in actions
+        {
+            self.trace.file_save_start(path, *version);
+            let _ = self.tx_cmd.send(WriteCmd::Write {
+                path: path.clone(),
+                rope: rope.clone(),
+                version: *version,
+            });
         }
     }
 }
@@ -240,6 +342,87 @@ mod tests {
         match store.loaded.get(&path) {
             Some(LoadState::Error(m)) => assert_eq!(m.as_str(), "No such file"),
             other => panic!("expected Error, got {other:?}"),
+        }
+    }
+
+    // ── FileWriteDriver ─────────────────────────────────────────────────
+
+    #[test]
+    fn write_execute_sends_write_cmd() {
+        let (tx_cmd, rx_cmd) = mpsc::channel::<WriteCmd>();
+        let (_tx_done, rx_done) = mpsc::channel::<WriteDone>();
+        let driver = FileWriteDriver::new(tx_cmd, rx_done, Arc::new(NoopTrace));
+
+        let path = canon("doc.txt");
+        let rope = Arc::new(Rope::from_str("payload"));
+        let action = SaveAction::Save {
+            path: path.clone(),
+            rope: rope.clone(),
+            version: 7,
+        };
+
+        driver.execute([&action]);
+
+        match rx_cmd.try_recv().expect("expected a WriteCmd") {
+            WriteCmd::Write {
+                path: p,
+                rope: r,
+                version,
+            } => {
+                assert_eq!(p, path);
+                assert!(Arc::ptr_eq(&r, &rope));
+                assert_eq!(version, 7);
+            }
+        }
+    }
+
+    #[test]
+    fn write_process_surfaces_completion() {
+        let (tx_cmd, _rx_cmd) = mpsc::channel::<WriteCmd>();
+        let (tx_done, rx_done) = mpsc::channel::<WriteDone>();
+        let driver = FileWriteDriver::new(tx_cmd, rx_done, Arc::new(NoopTrace));
+
+        let path = canon("doc.txt");
+        let rope = Arc::new(Rope::from_str("payload"));
+
+        tx_done
+            .send(WriteDone {
+                path: path.clone(),
+                version: 3,
+                result: Ok(rope.clone()),
+            })
+            .expect("send WriteDone");
+
+        let mut completions = driver.process();
+        assert_eq!(completions.len(), 1);
+        let done = completions.pop().unwrap();
+        assert_eq!(done.path, path);
+        assert_eq!(done.version, 3);
+        match done.result {
+            Ok(r) => assert!(Arc::ptr_eq(&r, &rope)),
+            Err(_) => panic!("expected Ok"),
+        }
+    }
+
+    #[test]
+    fn write_process_surfaces_error() {
+        let (tx_cmd, _rx_cmd) = mpsc::channel::<WriteCmd>();
+        let (tx_done, rx_done) = mpsc::channel::<WriteDone>();
+        let driver = FileWriteDriver::new(tx_cmd, rx_done, Arc::new(NoopTrace));
+
+        tx_done
+            .send(WriteDone {
+                path: canon("ro.txt"),
+                version: 1,
+                result: Err("Permission denied".into()),
+            })
+            .unwrap();
+
+        let completions = driver.process();
+        assert_eq!(completions.len(), 1);
+        match &completions[0].result {
+            Err(msg) => assert_eq!(msg, "Permission denied"),
+            Ok(_) => panic!("expected Err"),
         }
     }
 }

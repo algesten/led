@@ -6,13 +6,16 @@
 //! both speak the same command/event types from `*-core`.
 
 use std::fs;
+use std::io::Write;
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
 use std::thread;
 
 use led_core::CanonPath;
-use led_driver_buffers_core::{FileReadDriver, ReadCmd, ReadDone, Trace};
+use led_driver_buffers_core::{
+    FileReadDriver, FileWriteDriver, ReadCmd, ReadDone, Trace, WriteCmd, WriteDone,
+};
 use ropey::Rope;
 
 /// Lifecycle marker for the native worker thread.
@@ -71,6 +74,97 @@ fn read_one(path: &CanonPath) -> Result<Arc<Rope>, String> {
     }
 }
 
+// ── FileWriteDriver native worker ──────────────────────────────────────
+
+/// Lifecycle marker for the write-worker thread. See [`FileReadNative`]
+/// for the drop-order rationale; same argument applies.
+pub struct FileWriteNative {
+    _marker: (),
+}
+
+/// Convenience: spawn both halves of the write driver, connected to
+/// fresh channels.
+pub fn spawn_write(trace: Arc<dyn Trace>) -> (FileWriteDriver, FileWriteNative) {
+    let (tx_cmd, rx_cmd) = mpsc::channel::<WriteCmd>();
+    let (tx_done, rx_done) = mpsc::channel::<WriteDone>();
+    let native = spawn_write_worker(rx_cmd, tx_done);
+    let driver = FileWriteDriver::new(tx_cmd, rx_done, trace);
+    (driver, native)
+}
+
+pub fn spawn_write_worker(
+    rx_cmd: Receiver<WriteCmd>,
+    tx_done: Sender<WriteDone>,
+) -> FileWriteNative {
+    thread::Builder::new()
+        .name("led-file-write".into())
+        .spawn(move || write_worker_loop(rx_cmd, tx_done))
+        .expect("spawning file-write worker should succeed");
+    FileWriteNative { _marker: () }
+}
+
+fn write_worker_loop(rx: Receiver<WriteCmd>, tx: Sender<WriteDone>) {
+    while let Ok(cmd) = rx.recv() {
+        match cmd {
+            WriteCmd::Write {
+                path,
+                rope,
+                version,
+            } => {
+                let result = write_atomic(&path, &rope, version);
+                let done = WriteDone {
+                    path,
+                    version,
+                    // On success echo the same Arc back — the runtime
+                    // installs it as the new disk baseline and the
+                    // refcount bump is O(1).
+                    result: result.map(|()| rope),
+                };
+                if tx.send(done).is_err() {
+                    return;
+                }
+            }
+        }
+    }
+}
+
+/// Atomic write: dump rope to `<dir>/.led.<basename>.v<version>.tmp`,
+/// then rename onto the target. Power loss or crash mid-write leaves
+/// either the old file or the new one intact, never a torn write.
+fn write_atomic(path: &CanonPath, rope: &Rope, version: u64) -> Result<(), String> {
+    let target: PathBuf = path.as_path().to_path_buf();
+    let dir = target
+        .parent()
+        .ok_or_else(|| "save target has no parent directory".to_string())?;
+    let base = target
+        .file_name()
+        .ok_or_else(|| "save target has no filename".to_string())?;
+    let mut tmp_name = std::ffi::OsString::from(".led.");
+    tmp_name.push(base);
+    tmp_name.push(format!(".v{version}.tmp"));
+    let tmp_path = dir.join(&tmp_name);
+
+    // Scope the File so it's closed (and flushed) before the rename.
+    let write_result = (|| -> std::io::Result<()> {
+        let mut f = fs::File::create(&tmp_path)?;
+        // `Rope::write_to` iterates chunks — no full-content allocation.
+        rope.write_to(&mut f)?;
+        f.flush()?;
+        Ok(())
+    })();
+    if let Err(e) = write_result {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(e.to_string());
+    }
+
+    if let Err(e) = fs::rename(&tmp_path, &target) {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(e.to_string());
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     //! Integration-ish tests that actually spawn the native worker.
@@ -78,7 +172,9 @@ mod tests {
 
     use super::*;
     use led_core::UserPath;
-    use led_driver_buffers_core::{BufferStore, LoadAction, LoadState, NoopTrace};
+    use led_driver_buffers_core::{
+        BufferStore, LoadAction, LoadState, NoopTrace, SaveAction, WriteDone,
+    };
     use std::io::Write;
     use std::path::PathBuf;
     use std::time::{Duration, Instant};
@@ -123,6 +219,74 @@ mod tests {
             Duration::from_secs(5),
         );
         assert!(ready, "expected Ready within 5s");
+    }
+
+    fn drain_write_completions(
+        driver: &FileWriteDriver,
+        deadline: Duration,
+    ) -> Vec<WriteDone> {
+        let mut all: Vec<WriteDone> = Vec::new();
+        let start = Instant::now();
+        while start.elapsed() < deadline {
+            let mut batch = driver.process();
+            if !batch.is_empty() {
+                all.append(&mut batch);
+                return all;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        all
+    }
+
+    #[test]
+    fn spawn_write_persists_rope_atomically() {
+        let tmp = tempdir();
+        let file_path = tmp.path().join("out.txt");
+        let path = canon(&file_path);
+        let rope = Arc::new(Rope::from_str("hello, save\n"));
+
+        let (driver, _native) = spawn_write(Arc::new(NoopTrace));
+        driver.execute([&SaveAction::Save {
+            path: path.clone(),
+            rope: rope.clone(),
+            version: 1,
+        }]);
+
+        let completions = drain_write_completions(&driver, Duration::from_secs(5));
+        assert_eq!(completions.len(), 1);
+        let done = &completions[0];
+        assert_eq!(done.path, path);
+        assert_eq!(done.version, 1);
+        assert!(done.result.is_ok());
+
+        // File contains what we wrote, and no `.tmp` detritus remains.
+        let persisted = std::fs::read_to_string(&file_path).unwrap();
+        assert_eq!(persisted, "hello, save\n");
+        let leftovers: Vec<_> = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().starts_with(".led."))
+            .collect();
+        assert!(leftovers.is_empty(), "expected no tmp files left over");
+    }
+
+    #[test]
+    fn spawn_write_reports_error_on_unwritable_path() {
+        let tmp = tempdir();
+        // Use a path whose parent doesn't exist — rename will fail.
+        let bogus = tmp.path().join("no-such-dir").join("out.txt");
+        let path = canon(&bogus);
+
+        let (driver, _native) = spawn_write(Arc::new(NoopTrace));
+        driver.execute([&SaveAction::Save {
+            path,
+            rope: Arc::new(Rope::from_str("x")),
+            version: 1,
+        }]);
+
+        let completions = drain_write_completions(&driver, Duration::from_secs(5));
+        assert_eq!(completions.len(), 1);
+        assert!(completions[0].result.is_err());
     }
 
     #[test]

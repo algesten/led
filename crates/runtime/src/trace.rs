@@ -29,6 +29,8 @@ pub trait Trace: Send + Sync {
     fn resize(&self, dims: Dims);
     fn file_load_start(&self, path: &CanonPath);
     fn file_load_done(&self, path: &CanonPath, result: &Result<Arc<Rope>, String>);
+    fn file_save_start(&self, path: &CanonPath, version: u64);
+    fn file_save_done(&self, path: &CanonPath, version: u64, result: &Result<(), String>);
     fn render_tick(&self);
 }
 
@@ -106,6 +108,25 @@ impl Trace for FileTrace {
             tail
         ));
     }
+    fn file_save_start(&self, path: &CanonPath, version: u64) {
+        self.write_line(&format!(
+            "file_save_start | path={} version={}",
+            self.format_path(path),
+            version
+        ));
+    }
+    fn file_save_done(&self, path: &CanonPath, version: u64, result: &Result<(), String>) {
+        let tail = match result {
+            Ok(()) => "ok=true".to_string(),
+            Err(msg) => format!("ok=false err={:?}", msg),
+        };
+        self.write_line(&format!(
+            "file_save_done  | path={} version={} {}",
+            self.format_path(path),
+            version,
+            tail
+        ));
+    }
     fn render_tick(&self) {
         self.write_line("render_tick");
     }
@@ -136,6 +157,8 @@ impl Trace for NoopTrace {
     fn resize(&self, _: Dims) {}
     fn file_load_start(&self, _: &CanonPath) {}
     fn file_load_done(&self, _: &CanonPath, _: &Result<Arc<Rope>, String>) {}
+    fn file_save_start(&self, _: &CanonPath, _: u64) {}
+    fn file_save_done(&self, _: &CanonPath, _: u64, _: &Result<(), String>) {}
     fn render_tick(&self) {}
 }
 
