@@ -74,6 +74,7 @@ Do not re-litigate these without good reason:
 - **Goldens drive the compiled binary in a PTY.** Zero coupling to internal Rust types; the entire code-side contract is `--golden-trace` + `--test-clock` flags plus the trace-line format. Same golden files run unchanged against legacy and rewrite binaries.
 - **Golden generation happens against current led, before the domain-by-domain port starts.** Still pending.
 - **The rewrite happens on a `rewrite` branch as a full clean slate.** `main` continues receiving fixes and features; goldens, spec, and driver inventory authored there are merged into `rewrite`.
+- **Allocation discipline: zero malloc on idle ticks.** The main loop runs at ~100 Hz; on true idle every memo must cache-hit, every `execute` must iterate an empty collection, and `paint` must be skipped. Memo outputs containing large owned data are `Arc`-wrapped (`Arc<Vec<String>>`, `Arc<str>`, `imbl::Vector<T>`) so cache-hit `Clone` is a refcount bump, not a deep copy. Render/paint code never materialises intermediate collections — no `Vec<&str>` to iterate, no `format!(" {x} ")` per cell. Filter before clone in action memos. Rope ops walk `RopeSlice` directly (`.char(i)`, `.len_chars()`) — never `.to_string()` to measure. Before adding hot-path code, ask "what does this allocate per idle tick / per keystroke / per paint?" and if the answer is non-zero for the idle case, rethink. An M2 audit found 10 wasteful sites in one pass; it's easy to reintroduce.
 
 ## Open questions that are still open
 
