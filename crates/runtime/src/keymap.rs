@@ -65,6 +65,11 @@ pub enum Command {
     // Undo / redo (M8).
     Undo,
     Redo,
+
+    // Navigation (M10).
+    JumpBack,
+    JumpForward,
+    MatchBracket,
 }
 
 /// Two-level key → command binding set. `direct` maps single keys to
@@ -184,8 +189,16 @@ pub fn default_keymap() -> Keymap {
     m.bind("ctrl+end", Command::CursorFileEnd);
     m.bind("alt+<", Command::CursorFileStart);
     m.bind("alt+>", Command::CursorFileEnd);
-    m.bind("alt+b", Command::CursorWordLeft);
-    m.bind("alt+f", Command::CursorWordRight);
+
+    // Navigation (M10). Legacy binds alt+b/f + alt+left/right to jump
+    // back/forward, NOT to word motion — the CursorWordLeft /
+    // CursorWordRight commands stay available for users who want to
+    // bind them in their own keys.toml.
+    m.bind("alt+b", Command::JumpBack);
+    m.bind("alt+left", Command::JumpBack);
+    m.bind("alt+f", Command::JumpForward);
+    m.bind("alt+right", Command::JumpForward);
+    m.bind("alt+]", Command::MatchBracket);
 
     // Tab management.
     m.bind("ctrl+left", Command::TabPrev);
@@ -407,6 +420,9 @@ pub fn parse_command(s: &str) -> Result<Command, String> {
         "yank" => Ok(Command::Yank),
         "undo" => Ok(Command::Undo),
         "redo" => Ok(Command::Redo),
+        "jump_back" => Ok(Command::JumpBack),
+        "jump_forward" => Ok(Command::JumpForward),
+        "match_bracket" => Ok(Command::MatchBracket),
         other => Err(format!("unknown command `{other}`")),
     }
 }

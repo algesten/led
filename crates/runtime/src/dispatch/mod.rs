@@ -29,6 +29,7 @@ mod cursor;
 mod edit;
 mod kill;
 mod mark;
+mod nav;
 mod save;
 mod shared;
 mod tabs;
@@ -46,6 +47,7 @@ use cursor::{Move, move_cursor};
 use edit::{delete_back, delete_forward, insert_char, insert_newline};
 use kill::{kill_line, kill_region, request_yank};
 use mark::{clear_mark, set_mark_active};
+use nav::{jump_back, jump_forward, match_bracket};
 use save::{request_save_active, request_save_all};
 use tabs::{cycle_active, force_kill, kill_active};
 use undo::{redo_active, undo_active};
@@ -54,6 +56,7 @@ use led_driver_buffers_core::BufferStore;
 use led_driver_terminal_core::{KeyCode, KeyEvent, KeyModifiers, Terminal};
 use led_state_alerts::AlertState;
 use led_state_buffer_edits::BufferEdits;
+use led_state_jumps::JumpListState;
 use led_state_kill_ring::KillRing;
 use led_state_tabs::Tabs;
 
@@ -80,6 +83,7 @@ pub struct Dispatcher<'a> {
     pub edits: &'a mut BufferEdits,
     pub kill_ring: &'a mut KillRing,
     pub alerts: &'a mut AlertState,
+    pub jumps: &'a mut JumpListState,
     pub store: &'a BufferStore,
     pub terminal: &'a Terminal,
     pub keymap: &'a Keymap,
@@ -110,6 +114,7 @@ impl<'a> Dispatcher<'a> {
             self.edits,
             self.kill_ring,
             self.alerts,
+            self.jumps,
             self.store,
             self.terminal,
             self.keymap,
@@ -144,6 +149,7 @@ pub fn dispatch_key(
     edits: &mut BufferEdits,
     kill_ring: &mut KillRing,
     alerts: &mut AlertState,
+    jumps: &mut JumpListState,
     store: &BufferStore,
     terminal: &Terminal,
     keymap: &Keymap,
@@ -163,7 +169,8 @@ pub fn dispatch_key(
     let resolved = resolve_command(k, keymap, chord);
     match resolved {
         Resolved::Command(cmd) => {
-            let outcome = run_command(cmd, tabs, edits, kill_ring, alerts, store, terminal);
+            let outcome =
+                run_command(cmd, tabs, edits, kill_ring, alerts, jumps, store, terminal);
             // Kill-ring coalescing: any non-KillLine command breaks
             // the flag, so the next KillLine starts a fresh entry.
             if !matches!(cmd, Command::KillLine) {
@@ -247,6 +254,7 @@ fn run_command(
     edits: &mut BufferEdits,
     kill_ring: &mut KillRing,
     alerts: &mut AlertState,
+    jumps: &mut JumpListState,
     store: &BufferStore,
     terminal: &Terminal,
 ) -> DispatchOutcome {
@@ -274,11 +282,11 @@ fn run_command(
             DispatchOutcome::Continue
         }
         Command::TabNext => {
-            cycle_active(tabs, 1);
+            cycle_active(tabs, jumps, 1);
             DispatchOutcome::Continue
         }
         Command::TabPrev => {
-            cycle_active(tabs, -1);
+            cycle_active(tabs, jumps, -1);
             DispatchOutcome::Continue
         }
         Command::KillBuffer => {
@@ -373,6 +381,18 @@ fn run_command(
             redo_active(tabs, edits);
             DispatchOutcome::Continue
         }
+        Command::JumpBack => {
+            jump_back(tabs, edits, jumps);
+            DispatchOutcome::Continue
+        }
+        Command::JumpForward => {
+            jump_forward(tabs, edits, jumps);
+            DispatchOutcome::Continue
+        }
+        Command::MatchBracket => {
+            match_bracket(tabs, edits, jumps);
+            DispatchOutcome::Continue
+        }
     }
 }
 
@@ -398,6 +418,7 @@ mod tests {
         let mut edits = BufferEdits::default();
         let mut kill_ring = KillRing::default();
         let mut alerts = AlertState::default();
+        let mut jumps = JumpListState::default();
         let store = BufferStore::default();
         let term = Terminal::default();
         let keymap = default_keymap();
@@ -410,6 +431,7 @@ mod tests {
             &mut edits,
             &mut kill_ring,
             &mut alerts,
+            &mut jumps,
             &store,
             &term,
             &keymap,
@@ -425,6 +447,7 @@ mod tests {
             &mut edits,
             &mut kill_ring,
             &mut alerts,
+            &mut jumps,
             &store,
             &term,
             &keymap,
@@ -454,6 +477,7 @@ mod tests {
         let mut chord = ChordState::default();
         let mut kill_ring = KillRing::default();
         let mut alerts = AlertState::default();
+        let mut jumps = JumpListState::default();
         // ctrl+x → pending.
         dispatch_key(
             key(KeyModifiers::CONTROL, KeyCode::Char('x')),
@@ -461,6 +485,7 @@ mod tests {
             &mut edits,
             &mut kill_ring,
             &mut alerts,
+            &mut jumps,
             &store,
             &term,
             &keymap,
@@ -474,6 +499,7 @@ mod tests {
             &mut edits,
             &mut kill_ring,
             &mut alerts,
+            &mut jumps,
             &store,
             &term,
             &keymap,
@@ -502,6 +528,7 @@ mod tests {
         let mut chord = ChordState::default();
         let mut kill_ring = KillRing::default();
         let mut alerts = AlertState::default();
+        let mut jumps = JumpListState::default();
 
         let outcome = dispatch_key(
             key(KeyModifiers::CONTROL, KeyCode::Char('q')),
@@ -509,6 +536,7 @@ mod tests {
             &mut edits,
             &mut kill_ring,
             &mut alerts,
+            &mut jumps,
             &store,
             &term,
             &km,
@@ -523,6 +551,7 @@ mod tests {
             &mut edits,
             &mut kill_ring,
             &mut alerts,
+            &mut jumps,
             &store,
             &term,
             &km,
@@ -542,12 +571,14 @@ mod tests {
         let mut chord = ChordState::default();
         let mut kill_ring = KillRing::default();
         let mut alerts = AlertState::default();
+        let mut jumps = JumpListState::default();
         dispatch_key(
             key(KeyModifiers::NONE, KeyCode::Char('z')),
             &mut tabs,
             &mut edits,
             &mut kill_ring,
             &mut alerts,
+            &mut jumps,
             &store,
             &term,
             &km,
@@ -568,12 +599,14 @@ mod tests {
         let mut chord = ChordState::default();
         let mut kill_ring = KillRing::default();
         let mut alerts = AlertState::default();
+        let mut jumps = JumpListState::default();
         dispatch_key(
             key(KeyModifiers::CONTROL, KeyCode::Char('x')),
             &mut tabs,
             &mut edits,
             &mut kill_ring,
             &mut alerts,
+            &mut jumps,
             &store,
             &term,
             &km,

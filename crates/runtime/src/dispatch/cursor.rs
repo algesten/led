@@ -212,19 +212,18 @@ pub(super) fn adjust_scroll(s: Scroll, c: Cursor, body_rows: usize) -> Scroll {
 
 #[cfg(test)]
 mod tests {
-    
-
-    
     use led_driver_buffers_core::BufferStore;
-    use led_driver_terminal_core::{Dims, KeyCode, KeyModifiers};
-    
+    use led_driver_terminal_core::{Dims, KeyCode, KeyEvent, KeyModifiers};
+    use led_state_alerts::AlertState;
     use led_state_buffer_edits::BufferEdits;
-    
-    use led_state_tabs::{Cursor, Scroll};
+    use led_state_jumps::JumpListState;
+    use led_state_kill_ring::KillRing;
+    use led_state_tabs::{Cursor, Scroll, Tabs};
     use ropey::Rope;
 
-    use super::*;
     use super::super::testutil::*;
+    use super::*;
+    use crate::keymap::{default_keymap, ChordState, Command};
     
     
 
@@ -652,42 +651,69 @@ mod tests {
 
     #[test]
     fn word_right_and_word_left_move_by_word() {
+        // M10 unbinds alt+b/f from word motion (legacy reserves
+        // them for jump-back/forward). Use an explicit keymap so
+        // this test still exercises the word-move primitives.
         let (mut tabs, mut edits, store, term) =
             fixture_with_content("foo bar  baz", Dims { cols: 40, rows: 5 });
-        // Cursor starts at (0, 0). alt+f → end of "foo" (col 3).
-        dispatch_default(
+        let mut km = default_keymap();
+        km.bind("alt+f", Command::CursorWordRight);
+        km.bind("alt+b", Command::CursorWordLeft);
+        let mut chord = ChordState::default();
+        let mut kill_ring = KillRing::default();
+        let mut alerts = AlertState::default();
+        let mut jumps = JumpListState::default();
+
+        let press = |k: KeyEvent,
+                     tabs: &mut Tabs,
+                     edits: &mut BufferEdits,
+                     chord: &mut ChordState,
+                     kill_ring: &mut KillRing,
+                     alerts: &mut AlertState,
+                     jumps: &mut JumpListState| {
+            super::super::dispatch_key(
+                k, tabs, edits, kill_ring, alerts, jumps, &store, &term, &km, chord,
+            );
+        };
+
+        press(
             key(KeyModifiers::ALT, KeyCode::Char('f')),
             &mut tabs,
             &mut edits,
-            &store,
-            &term,
+            &mut chord,
+            &mut kill_ring,
+            &mut alerts,
+            &mut jumps,
         );
         assert_eq!(tabs.open[0].cursor.col, 3);
-        // alt+f again → skip " ", skip "bar", land at col 7.
-        dispatch_default(
+        press(
             key(KeyModifiers::ALT, KeyCode::Char('f')),
             &mut tabs,
             &mut edits,
-            &store,
-            &term,
+            &mut chord,
+            &mut kill_ring,
+            &mut alerts,
+            &mut jumps,
         );
         assert_eq!(tabs.open[0].cursor.col, 7);
-        // alt+b → back to start of "bar" (col 4).
-        dispatch_default(
+        press(
             key(KeyModifiers::ALT, KeyCode::Char('b')),
             &mut tabs,
             &mut edits,
-            &store,
-            &term,
+            &mut chord,
+            &mut kill_ring,
+            &mut alerts,
+            &mut jumps,
         );
         assert_eq!(tabs.open[0].cursor.col, 4);
-        // alt+b → start of "foo" (col 0).
-        dispatch_default(
+        press(
             key(KeyModifiers::ALT, KeyCode::Char('b')),
             &mut tabs,
             &mut edits,
-            &store,
-            &term,
+            &mut chord,
+            &mut kill_ring,
+            &mut alerts,
+            &mut jumps,
         );
         assert_eq!(tabs.open[0].cursor.col, 0);
     }

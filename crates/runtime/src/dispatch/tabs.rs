@@ -1,10 +1,13 @@
-//! Tab cycling + kill-buffer (M1, M6, M9).
+//! Tab cycling + kill-buffer (M1, M6, M9). Tab cycling also records
+//! a jump-list entry for the outgoing tab (M10) so the user can
+//! `alt+b` back to wherever they came from.
 
 use led_state_alerts::AlertState;
 use led_state_buffer_edits::BufferEdits;
+use led_state_jumps::{JumpListState, JumpPosition};
 use led_state_tabs::{Tab, TabId, Tabs};
 
-pub(super) fn cycle_active(tabs: &mut Tabs, delta: isize) {
+pub(super) fn cycle_active(tabs: &mut Tabs, jumps: &mut JumpListState, delta: isize) {
     if tabs.open.is_empty() {
         return;
     }
@@ -14,6 +17,20 @@ pub(super) fn cycle_active(tabs: &mut Tabs, delta: isize) {
         .and_then(|id| tabs.open.iter().position(|t: &Tab| t.id == id))
         .unwrap_or(0) as isize;
     let next_idx = (cur_idx + delta).rem_euclid(n) as usize;
+
+    // Record the outgoing tab's cursor so Alt-b returns here. Skip
+    // the no-op case where the tab doesn't actually change.
+    if let Some(prev_id) = tabs.active
+        && let Some(prev) = tabs.open.iter().find(|t| t.id == prev_id)
+        && prev.id != tabs.open[next_idx].id
+    {
+        jumps.record(JumpPosition {
+            path: prev.path.clone(),
+            line: prev.cursor.line,
+            col: prev.cursor.col,
+        });
+    }
+
     tabs.active = Some(tabs.open[next_idx].id);
 }
 
@@ -66,6 +83,7 @@ mod tests {
     use led_driver_buffers_core::BufferStore;
     use led_driver_terminal_core::{Dims, KeyCode, KeyModifiers, Terminal};
     use led_state_alerts::AlertState;
+    use led_state_jumps::JumpListState;
     use led_state_buffer_edits::{BufferEdits, EditedBuffer};
     use led_state_kill_ring::KillRing;
     use led_state_tabs::{Cursor, TabId, Tabs};
@@ -165,6 +183,7 @@ mod tests {
         let (mut tabs, mut edits, store, term) = dirty_tabs_with_confirm_scenario();
         let mut kill_ring = KillRing::default();
         let mut alerts = AlertState::default();
+        let mut jumps = JumpListState::default();
         let mut chord = ChordState::default();
         let keymap = default_keymap();
 
@@ -175,6 +194,7 @@ mod tests {
             &mut edits,
             &mut kill_ring,
             &mut alerts,
+            &mut jumps,
             &store,
             &term,
             &keymap,
@@ -186,6 +206,7 @@ mod tests {
             &mut edits,
             &mut kill_ring,
             &mut alerts,
+            &mut jumps,
             &store,
             &term,
             &keymap,
@@ -203,6 +224,7 @@ mod tests {
             confirm_kill: Some(TabId(1)),
             ..Default::default()
         };
+        let mut jumps = JumpListState::default();
         let mut chord = ChordState::default();
         let keymap = default_keymap();
 
@@ -212,6 +234,7 @@ mod tests {
             &mut edits,
             &mut kill_ring,
             &mut alerts,
+            &mut jumps,
             &store,
             &term,
             &keymap,
@@ -233,6 +256,7 @@ mod tests {
             confirm_kill: Some(TabId(1)),
             ..Default::default()
         };
+        let mut jumps = JumpListState::default();
         let mut chord = ChordState::default();
         let keymap = default_keymap();
 
@@ -242,6 +266,7 @@ mod tests {
             &mut edits,
             &mut kill_ring,
             &mut alerts,
+            &mut jumps,
             &store,
             &term,
             &keymap,
@@ -259,6 +284,7 @@ mod tests {
             confirm_kill: Some(TabId(1)),
             ..Default::default()
         };
+        let mut jumps = JumpListState::default();
         let mut chord = ChordState::default();
         let keymap = default_keymap();
 
@@ -268,6 +294,7 @@ mod tests {
             &mut edits,
             &mut kill_ring,
             &mut alerts,
+            &mut jumps,
             &store,
             &term,
             &keymap,
@@ -295,6 +322,7 @@ mod tests {
             confirm_kill: Some(TabId(1)),
             ..Default::default()
         };
+        let mut jumps = JumpListState::default();
         let mut chord = ChordState::default();
         let keymap = default_keymap();
 
@@ -304,6 +332,7 @@ mod tests {
             &mut edits,
             &mut kill_ring,
             &mut alerts,
+            &mut jumps,
             &store,
             &term,
             &keymap,
@@ -329,6 +358,7 @@ mod tests {
         let term = terminal_with(Some(Dims { cols: 10, rows: 5 }));
         let mut kill_ring = KillRing::default();
         let mut alerts = AlertState::default();
+        let mut jumps = JumpListState::default();
         let mut chord = ChordState::default();
         let keymap = default_keymap();
 
@@ -338,6 +368,7 @@ mod tests {
             &mut edits,
             &mut kill_ring,
             &mut alerts,
+            &mut jumps,
             &store,
             &term,
             &keymap,
@@ -349,6 +380,7 @@ mod tests {
             &mut edits,
             &mut kill_ring,
             &mut alerts,
+            &mut jumps,
             &store,
             &term,
             &keymap,

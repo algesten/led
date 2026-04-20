@@ -1,0 +1,13 @@
+[package]
+name = "led-state-jumps"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Session-global user-decision source: the jump list. Matches legacy
+# led/src/model/jump.rs. No driver — entries are produced by dispatch
+# (match-bracket, jump-back-from-head, tab switch) and consumed by
+# dispatch (jump-back / jump-forward).
+
+[dependencies]
+led-core = { workspace = true }

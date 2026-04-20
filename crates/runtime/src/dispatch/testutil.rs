@@ -14,6 +14,7 @@ use led_driver_buffers_core::{BufferStore, LoadState};
 use led_driver_terminal_core::{Dims, KeyCode, KeyEvent, KeyModifiers, Terminal};
 use led_state_alerts::AlertState;
 use led_state_buffer_edits::{BufferEdits, EditedBuffer};
+use led_state_jumps::JumpListState;
 use led_state_kill_ring::KillRing;
 use led_state_tabs::{Tab, TabId, Tabs};
 use ropey::Rope;
@@ -112,12 +113,14 @@ pub(super) fn dispatch_default(
     let mut chord = ChordState::default();
     let mut kill_ring = KillRing::default();
     let mut alerts = AlertState::default();
+    let mut jumps = JumpListState::default();
     dispatch_key(
         k,
         tabs,
         edits,
         &mut kill_ring,
         &mut alerts,
+        &mut jumps,
         store,
         terminal,
         &default_keymap(),
@@ -140,12 +143,14 @@ pub(super) fn dispatch_chord_default(
     let mut chord = ChordState::default();
     let mut kill_ring = KillRing::default();
     let mut alerts = AlertState::default();
+    let mut jumps = JumpListState::default();
     dispatch_key(
         prefix,
         tabs,
         edits,
         &mut kill_ring,
         &mut alerts,
+        &mut jumps,
         store,
         terminal,
         &keymap,
@@ -157,6 +162,7 @@ pub(super) fn dispatch_chord_default(
         edits,
         &mut kill_ring,
         &mut alerts,
+        &mut jumps,
         store,
         terminal,
         &keymap,
@@ -176,12 +182,14 @@ pub(super) fn dispatch_with_ring(
 ) -> DispatchOutcome {
     let mut chord = ChordState::default();
     let mut alerts = AlertState::default();
+    let mut jumps = JumpListState::default();
     dispatch_key(
         k,
         tabs,
         edits,
         kill_ring,
         &mut alerts,
+        &mut jumps,
         store,
         terminal,
         &default_keymap(),
@@ -195,6 +203,7 @@ pub(super) fn noop_dispatch(k: KeyEvent, tabs: &mut Tabs) -> DispatchOutcome {
     let mut edits = BufferEdits::default();
     let mut kill_ring = KillRing::default();
     let mut alerts = AlertState::default();
+    let mut jumps = JumpListState::default();
     let store = BufferStore::default();
     let terminal = Terminal::default();
     let keymap = default_keymap();
@@ -205,6 +214,7 @@ pub(super) fn noop_dispatch(k: KeyEvent, tabs: &mut Tabs) -> DispatchOutcome {
         &mut edits,
         &mut kill_ring,
         &mut alerts,
+        &mut jumps,
         &store,
         &terminal,
         &keymap,

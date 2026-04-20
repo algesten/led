@@ -33,6 +33,7 @@ use led_driver_terminal_core::{Dims, Frame, KeyEvent, TermEvent, Terminal, Termi
 use led_driver_terminal_native::{paint, TerminalInputNative};
 use led_state_alerts::AlertState;
 use led_state_buffer_edits::{BufferEdits, EditedBuffer};
+use led_state_jumps::JumpListState;
 use led_state_kill_ring::KillRing;
 use led_state_tabs::{TabId, Tabs};
 
@@ -99,6 +100,7 @@ pub fn run(
     edits: &mut BufferEdits,
     kill_ring: &mut KillRing,
     alerts: &mut AlertState,
+    jumps: &mut JumpListState,
     store: &mut BufferStore,
     terminal: &mut Terminal,
     drivers: &Drivers,
@@ -203,6 +205,7 @@ pub fn run(
                 edits,
                 kill_ring,
                 alerts,
+                jumps,
                 store,
                 terminal,
                 keymap,

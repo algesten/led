@@ -398,6 +398,7 @@ dependencies = [
  "led-runtime",
  "led-state-alerts",
  "led-state-buffer-edits",
+ "led-state-jumps",
  "led-state-kill-ring",
  "led-state-tabs",
 ]
@@ -468,6 +469,7 @@ dependencies = [
  "led-driver-terminal-native",
  "led-state-alerts",
  "led-state-buffer-edits",
+ "led-state-jumps",
  "led-state-kill-ring",
  "led-state-tabs",
  "ropey",
@@ -489,6 +491,13 @@ dependencies = [
  "led-core",
  "led-state-tabs",
  "ropey",
+]
+
+[[package]]
+name = "led-state-jumps"
+version = "0.0.0"
+dependencies = [
+ "led-core",
 ]
 
 [[package]]

@@ -66,6 +66,7 @@ mod tests {
     
     use led_driver_terminal_core::{Dims, KeyCode, KeyModifiers};
     use led_state_alerts::AlertState;
+    use led_state_jumps::JumpListState;
     
     use led_state_kill_ring::KillRing;
     use led_state_tabs::Cursor;
@@ -126,6 +127,7 @@ mod tests {
         let mut chord = ChordState::default();
         let mut kr = KillRing::default();
         let mut alerts = AlertState::default();
+        let mut jumps = JumpListState::default();
 
         // Undo: ""
         dispatch_key(
@@ -134,6 +136,7 @@ mod tests {
             &mut edits,
             &mut kr,
             &mut alerts,
+            &mut jumps,
             &store,
             &term,
             &km,
@@ -148,6 +151,7 @@ mod tests {
             &mut edits,
             &mut kr,
             &mut alerts,
+            &mut jumps,
             &store,
             &term,
             &km,
@@ -214,12 +218,14 @@ mod tests {
         let mut chord = ChordState::default();
         let mut kr = KillRing::default();
         let mut alerts = AlertState::default();
+        let mut jumps = JumpListState::default();
         dispatch_key(
             key(KeyModifiers::CONTROL, KeyCode::Char('y')),
             &mut tabs,
             &mut edits,
             &mut kr,
             &mut alerts,
+            &mut jumps,
             &store,
             &term,
             &km,
