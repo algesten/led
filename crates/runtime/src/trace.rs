@@ -31,6 +31,10 @@ pub trait Trace: Send + Sync {
     fn file_load_done(&self, path: &CanonPath, result: &Result<Arc<Rope>, String>);
     fn file_save_start(&self, path: &CanonPath, version: u64);
     fn file_save_done(&self, path: &CanonPath, version: u64, result: &Result<(), String>);
+    fn clipboard_read_start(&self);
+    fn clipboard_read_done(&self, ok: bool, empty: bool);
+    fn clipboard_write_start(&self, bytes: usize);
+    fn clipboard_write_done(&self, ok: bool);
     fn render_tick(&self);
 }
 
@@ -127,6 +131,20 @@ impl Trace for FileTrace {
             tail
         ));
     }
+    fn clipboard_read_start(&self) {
+        self.write_line("clipboard_read_start");
+    }
+    fn clipboard_read_done(&self, ok: bool, empty: bool) {
+        self.write_line(&format!(
+            "clipboard_read_done  | ok={ok} empty={empty}"
+        ));
+    }
+    fn clipboard_write_start(&self, bytes: usize) {
+        self.write_line(&format!("clipboard_write_start | bytes={bytes}"));
+    }
+    fn clipboard_write_done(&self, ok: bool) {
+        self.write_line(&format!("clipboard_write_done  | ok={ok}"));
+    }
     fn render_tick(&self) {
         self.write_line("render_tick");
     }
@@ -159,6 +177,10 @@ impl Trace for NoopTrace {
     fn file_load_done(&self, _: &CanonPath, _: &Result<Arc<Rope>, String>) {}
     fn file_save_start(&self, _: &CanonPath, _: u64) {}
     fn file_save_done(&self, _: &CanonPath, _: u64, _: &Result<(), String>) {}
+    fn clipboard_read_start(&self) {}
+    fn clipboard_read_done(&self, _ok: bool, _empty: bool) {}
+    fn clipboard_write_start(&self, _bytes: usize) {}
+    fn clipboard_write_done(&self, _ok: bool) {}
     fn render_tick(&self) {}
 }
 

@@ -451,8 +451,9 @@ fn kill_region(tabs: &mut Tabs, edits: &mut BufferEdits, kill_ring: &mut KillRin
     tab.cursor.preferred_col = tab.cursor.col;
     tab.mark = None;
 
-    kill_ring.latest = Some(killed);
+    kill_ring.latest = Some(killed.clone());
     kill_ring.last_was_kill_line = false;
+    kill_ring.pending_clipboard_write = Some(killed);
 }
 
 fn char_to_cursor(ch: usize, rope: &Rope) -> Cursor {
@@ -521,8 +522,9 @@ fn kill_line(tabs: &mut Tabs, edits: &mut BufferEdits, kill_ring: &mut KillRing)
     tab.cursor = char_to_cursor(start, &eb.rope);
     tab.cursor.preferred_col = tab.cursor.col;
 
-    kill_ring.latest = Some(new_latest);
+    kill_ring.latest = Some(new_latest.clone());
     kill_ring.last_was_kill_line = true;
+    kill_ring.pending_clipboard_write = Some(new_latest);
 }
 
 /// Mark a yank as pending against the currently-active tab. The

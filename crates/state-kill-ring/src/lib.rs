@@ -40,6 +40,10 @@ pub struct KillRing {
     /// True while a clipboard read is in flight. Query uses this
     /// to avoid spawning a second read on top of the first.
     pub read_in_flight: bool,
+    /// Text queued for an async clipboard write after a kill
+    /// command. Runtime drains this in the execute phase, sync-
+    /// clears it, and hands the text to the clipboard driver.
+    pub pending_clipboard_write: Option<Arc<str>>,
 }
 
 #[cfg(test)]
@@ -62,6 +66,7 @@ mod tests {
             last_was_kill_line: true,
             pending_yank: Some(TabId(7)),
             read_in_flight: true,
+            pending_clipboard_write: Some(Arc::from("hi")),
         };
         let c = k.clone();
         assert_eq!(c, k);

@@ -9,6 +9,8 @@ members = [
     "crates/driver-buffers/native",
     "crates/driver-terminal/core",
     "crates/driver-terminal/native",
+    "crates/driver-clipboard/core",
+    "crates/driver-clipboard/native",
     "crates/runtime",
     "crates/fake-lsp",
     "crates/fake-gh",
@@ -26,6 +28,8 @@ led-driver-buffers-core = { path = "crates/driver-buffers/core" }
 led-driver-buffers-native = { path = "crates/driver-buffers/native" }
 led-driver-terminal-core = { path = "crates/driver-terminal/core" }
 led-driver-terminal-native = { path = "crates/driver-terminal/native" }
+led-driver-clipboard-core = { path = "crates/driver-clipboard/core" }
+led-driver-clipboard-native = { path = "crates/driver-clipboard/native" }
 led-runtime = { path = "crates/runtime" }
 
 # drv = the memoization / query primitive.

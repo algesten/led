@@ -25,6 +25,10 @@ use std::time::Duration;
 
 use led_driver_buffers_core::{BufferStore, FileReadDriver, FileWriteDriver, LoadState};
 use led_driver_buffers_native::{FileReadNative, FileWriteNative};
+use led_driver_clipboard_core::{
+    ClipboardAction, ClipboardDriver, ClipboardResult,
+};
+use led_driver_clipboard_native::ClipboardNative;
 use led_driver_terminal_core::{Dims, Frame, KeyEvent, TermEvent, Terminal, TerminalInputDriver};
 use led_driver_terminal_native::{paint, TerminalInputNative};
 use led_state_buffer_edits::{BufferEdits, EditedBuffer};
@@ -58,11 +62,13 @@ pub struct Drivers {
     pub file: FileReadDriver,
     pub file_write: FileWriteDriver,
     pub input: TerminalInputDriver,
+    pub clipboard: ClipboardDriver,
 
     // Held only for lifetime management; detached on drop.
     _file_native: FileReadNative,
     _file_write_native: FileWriteNative,
     _input_native: TerminalInputNative,
+    _clipboard_native: ClipboardNative,
 }
 
 /// Allocator for fresh `TabId`s. Counter only; ids are never reused.
@@ -132,6 +138,33 @@ pub fn run(
             }
         }
 
+        // Apply clipboard completions: either paste the text at the
+        // tab the yank was issued from, or on empty/error fall back
+        // to the kill ring. Writes only clear the in-flight bit.
+        for done in drivers.clipboard.process() {
+            match done.result {
+                Ok(ClipboardResult::Text(Some(text))) => {
+                    if let Some(target) = kill_ring.pending_yank.take() {
+                        dispatch::apply_yank(tabs, edits, target, &text);
+                    }
+                    kill_ring.read_in_flight = false;
+                }
+                Ok(ClipboardResult::Text(None)) | Err(_) => {
+                    // Empty clipboard or read failure — fall back to
+                    // the kill ring's latest entry.
+                    if let Some(target) = kill_ring.pending_yank.take()
+                        && let Some(fallback) = kill_ring.latest.clone()
+                    {
+                        dispatch::apply_yank(tabs, edits, target, &fallback);
+                    }
+                    kill_ring.read_in_flight = false;
+                }
+                Ok(ClipboardResult::Written) => {
+                    // Nothing further to do.
+                }
+            }
+        }
+
         drivers.input.process(terminal);
 
         // Drain one event at a time — the `VecDeque::pop_front` yields
@@ -184,6 +217,20 @@ pub fn run(
         }
         drivers.file_write.execute(save_actions.iter());
 
+        // Clipboard actions: a Read when a yank is pending (no read
+        // already in flight), a Write when a kill queued clipboard
+        // text. Both flags cleared synchronously per the execute
+        // pattern.
+        let mut clip_actions: Vec<ClipboardAction> = Vec::new();
+        if kill_ring.pending_yank.is_some() && !kill_ring.read_in_flight {
+            kill_ring.read_in_flight = true;
+            clip_actions.push(ClipboardAction::Read);
+        }
+        if let Some(text) = kill_ring.pending_clipboard_write.take() {
+            clip_actions.push(ClipboardAction::Write(text));
+        }
+        drivers.clipboard.execute(clip_actions.iter());
+
         // ── Render ──────────────────────────────────────────────
         if frame != last_frame {
             if let Some(f) = &frame {
@@ -205,14 +252,18 @@ pub fn spawn_drivers(trace: SharedTrace) -> io::Result<Drivers> {
     let (file, file_native) = led_driver_buffers_native::spawn(trace.clone().as_file_trace());
     let (file_write, file_write_native) =
         led_driver_buffers_native::spawn_write(trace.clone().as_file_trace());
+    let (clipboard, clipboard_native) =
+        led_driver_clipboard_native::spawn(trace.clone().as_clipboard_trace());
     let (input, input_native) = led_driver_terminal_native::spawn(trace.as_terminal_trace())?;
     Ok(Drivers {
         file,
         file_write,
         input,
+        clipboard,
         _file_native: file_native,
         _file_write_native: file_write_native,
         _input_native: input_native,
+        _clipboard_native: clipboard_native,
     })
 }
 
@@ -234,6 +285,7 @@ pub(crate) mod trace_adapter {
 
     pub(crate) struct FileTraceAdapter(pub Arc<dyn Trace>);
     pub(crate) struct TermTraceAdapter(pub Arc<dyn Trace>);
+    pub(crate) struct ClipboardTraceAdapter(pub Arc<dyn Trace>);
 
     impl led_driver_buffers_core::Trace for FileTraceAdapter {
         fn file_load_start(&self, path: &CanonPath) {
@@ -261,6 +313,21 @@ pub(crate) mod trace_adapter {
             self.0.render_tick();
         }
     }
+
+    impl led_driver_clipboard_core::Trace for ClipboardTraceAdapter {
+        fn clipboard_read_start(&self) {
+            self.0.clipboard_read_start();
+        }
+        fn clipboard_read_done(&self, ok: bool, empty: bool) {
+            self.0.clipboard_read_done(ok, empty);
+        }
+        fn clipboard_write_start(&self, bytes: usize) {
+            self.0.clipboard_write_start(bytes);
+        }
+        fn clipboard_write_done(&self, ok: bool) {
+            self.0.clipboard_write_done(ok);
+        }
+    }
 }
 
 impl SharedTrace {
@@ -269,5 +336,8 @@ impl SharedTrace {
     }
     pub(crate) fn as_terminal_trace(&self) -> Arc<dyn led_driver_terminal_core::Trace> {
         Arc::new(trace_adapter::TermTraceAdapter(self.inner()))
+    }
+    pub(crate) fn as_clipboard_trace(&self) -> Arc<dyn led_driver_clipboard_core::Trace> {
+        Arc::new(trace_adapter::ClipboardTraceAdapter(self.inner()))
     }
 }

@@ -27,6 +27,8 @@ led-driver-buffers-core = { workspace = true }
 led-driver-buffers-native = { workspace = true }
 led-driver-terminal-core = { workspace = true }
 led-driver-terminal-native = { workspace = true }
+led-driver-clipboard-core = { workspace = true }
+led-driver-clipboard-native = { workspace = true }
 drv = { workspace = true }
 imbl = { workspace = true }
 ropey = { workspace = true }
