@@ -66,6 +66,17 @@ pub struct ReadDone {
     pub result: Result<Arc<Rope>, String>,
 }
 
+/// A successful load surfaced by [`FileReadDriver::process`] — the
+/// runtime uses this to seed the `BufferEdits` source with a clean,
+/// disk-matching rope. Failed loads are not surfaced here; they land
+/// in `BufferStore` as `LoadState::Error` and don't belong in
+/// `BufferEdits`.
+#[derive(Debug, Clone)]
+pub struct LoadCompletion {
+    pub path: CanonPath,
+    pub rope: Arc<Rope>,
+}
+
 // ── Trace ──────────────────────────────────────────────────────────────
 
 /// Hook for emitting `--golden-trace` lines. The runtime crate provides
@@ -110,15 +121,28 @@ impl FileReadDriver {
 
     /// Drain completions from the async worker into `BufferStore`.
     /// Main-thread, cheap.
-    pub fn process(&self, store: &mut BufferStore) {
+    ///
+    /// Returns the list of paths whose load transitioned to `Ready`
+    /// on this tick so the runtime can seed sibling sources (notably
+    /// `BufferEdits`). On idle ticks the returned `Vec` is empty —
+    /// `Vec::new()` is zero-alloc.
+    pub fn process(&self, store: &mut BufferStore) -> Vec<LoadCompletion> {
+        let mut completions: Vec<LoadCompletion> = Vec::new();
         while let Ok(done) = self.rx_done.try_recv() {
             self.trace.file_load_done(&done.path, &done.result);
             let entry = match &done.result {
-                Ok(rope) => LoadState::Ready(rope.clone()),
+                Ok(rope) => {
+                    completions.push(LoadCompletion {
+                        path: done.path.clone(),
+                        rope: rope.clone(),
+                    });
+                    LoadState::Ready(rope.clone())
+                }
                 Err(msg) => LoadState::Error(Arc::new(msg.clone())),
             };
             store.loaded.insert(done.path, entry);
         }
+        completions
     }
 
     /// Act on `LoadAction`s (produced by the runtime's query layer).

@@ -268,6 +268,7 @@ dependencies = [
  "led-driver-terminal-core",
  "led-driver-terminal-native",
  "led-runtime",
+ "led-state-buffer-edits",
  "led-state-tabs",
 ]
 
@@ -320,7 +321,17 @@ dependencies = [
  "led-driver-buffers-native",
  "led-driver-terminal-core",
  "led-driver-terminal-native",
+ "led-state-buffer-edits",
  "led-state-tabs",
+ "ropey",
+]
+
+[[package]]
+name = "led-state-buffer-edits"
+version = "0.0.0"
+dependencies = [
+ "imbl",
+ "led-core",
  "ropey",
 ]
 

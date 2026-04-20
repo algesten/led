@@ -11,11 +11,19 @@
 //! requires read-only access to [`BufferStore`]; scroll needs the
 //! current `Terminal.dims` for the body-row count. Hence the widened
 //! signature.
+//!
+//! M3 adds editing. Printable chars, `Enter`, `Backspace`, `Delete`
+//! each mutate the active tab's buffer in [`BufferEdits`] (the
+//! user-decision source that sits alongside `BufferStore`). Cursor
+//! movement also reads edits first, store second, so movement works
+//! on the edited rope even before save (M4) lands.
 
 use led_driver_buffers_core::{BufferStore, LoadState};
 use led_driver_terminal_core::{KeyCode, KeyEvent, KeyModifiers, Terminal};
+use led_state_buffer_edits::{BufferEdits, EditedBuffer};
 use led_state_tabs::{Cursor, Scroll, Tab, Tabs};
 use ropey::Rope;
+use std::sync::Arc;
 
 use crate::Event;
 
@@ -44,11 +52,12 @@ enum Move {
 pub fn dispatch(
     ev: Event,
     tabs: &mut Tabs,
+    edits: &mut BufferEdits,
     store: &BufferStore,
     terminal: &Terminal,
 ) -> DispatchOutcome {
     match ev {
-        Event::Key(k) => dispatch_key(k, tabs, store, terminal),
+        Event::Key(k) => dispatch_key(k, tabs, edits, store, terminal),
         // `Resize` is applied inside `TerminalInputDriver.process` —
         // pure state, no dispatch work here. M2 does not re-clamp
         // cursor/scroll on resize; next movement re-clamps.
@@ -60,11 +69,15 @@ pub fn dispatch(
 pub fn dispatch_key(
     k: KeyEvent,
     tabs: &mut Tabs,
+    edits: &mut BufferEdits,
     store: &BufferStore,
     terminal: &Terminal,
 ) -> DispatchOutcome {
     match (k.modifiers, k.code) {
+        // Quit (Ctrl-C) — takes precedence over the plain Char arm.
         (m, KeyCode::Char('c')) if m.contains(KeyModifiers::CONTROL) => DispatchOutcome::Quit,
+
+        // Tab switching (M1).
         (m, KeyCode::Tab) if m.is_empty() => {
             cycle_active(tabs, 1);
             DispatchOutcome::Continue
@@ -75,38 +88,70 @@ pub fn dispatch_key(
             cycle_active(tabs, -1);
             DispatchOutcome::Continue
         }
+
+        // Cursor movement (M2). Rope comes from edits first, store
+        // second, so movement stays valid against the user's view.
         (m, KeyCode::Up) if m.is_empty() => {
-            move_cursor(tabs, store, terminal, Move::Up);
+            move_cursor(tabs, edits, store, terminal, Move::Up);
             DispatchOutcome::Continue
         }
         (m, KeyCode::Down) if m.is_empty() => {
-            move_cursor(tabs, store, terminal, Move::Down);
+            move_cursor(tabs, edits, store, terminal, Move::Down);
             DispatchOutcome::Continue
         }
         (m, KeyCode::Left) if m.is_empty() => {
-            move_cursor(tabs, store, terminal, Move::Left);
+            move_cursor(tabs, edits, store, terminal, Move::Left);
             DispatchOutcome::Continue
         }
         (m, KeyCode::Right) if m.is_empty() => {
-            move_cursor(tabs, store, terminal, Move::Right);
+            move_cursor(tabs, edits, store, terminal, Move::Right);
             DispatchOutcome::Continue
         }
         (m, KeyCode::Home) if m.is_empty() => {
-            move_cursor(tabs, store, terminal, Move::LineStart);
+            move_cursor(tabs, edits, store, terminal, Move::LineStart);
             DispatchOutcome::Continue
         }
         (m, KeyCode::End) if m.is_empty() => {
-            move_cursor(tabs, store, terminal, Move::LineEnd);
+            move_cursor(tabs, edits, store, terminal, Move::LineEnd);
             DispatchOutcome::Continue
         }
         (m, KeyCode::PageUp) if m.is_empty() => {
-            move_cursor(tabs, store, terminal, Move::PageUp);
+            move_cursor(tabs, edits, store, terminal, Move::PageUp);
             DispatchOutcome::Continue
         }
         (m, KeyCode::PageDown) if m.is_empty() => {
-            move_cursor(tabs, store, terminal, Move::PageDown);
+            move_cursor(tabs, edits, store, terminal, Move::PageDown);
             DispatchOutcome::Continue
         }
+
+        // Editing (M3). All four primitives no-op unless the active
+        // tab's buffer has been seeded in BufferEdits (which happens
+        // when the file-read driver's load completion is drained).
+        (m, KeyCode::Char(c))
+            if m.is_empty()
+                || (m == KeyModifiers::SHIFT && !c.is_control())
+                || (!m.contains(KeyModifiers::CONTROL) && !m.contains(KeyModifiers::ALT)) =>
+        {
+            // Accept plain char or Shift+char (terminals usually emit
+            // the final glyph directly; Shift may or may not be set).
+            // Explicitly reject Ctrl- / Alt- combos — they're reserved
+            // for the keymap layer (M5).
+            insert_char(tabs, edits, c);
+            DispatchOutcome::Continue
+        }
+        (m, KeyCode::Enter) if m.is_empty() => {
+            insert_newline(tabs, edits);
+            DispatchOutcome::Continue
+        }
+        (m, KeyCode::Backspace) if m.is_empty() => {
+            delete_back(tabs, edits);
+            DispatchOutcome::Continue
+        }
+        (m, KeyCode::Delete) if m.is_empty() => {
+            delete_forward(tabs, edits);
+            DispatchOutcome::Continue
+        }
+
         _ => DispatchOutcome::Continue,
     }
 }
@@ -128,16 +173,30 @@ fn cycle_active(tabs: &mut Tabs, delta: isize) {
 /// the cursor stays inside the body viewport. No-op when there is no
 /// active tab or its buffer isn't loaded yet — the cursor has nothing
 /// to clamp against.
-fn move_cursor(tabs: &mut Tabs, store: &BufferStore, terminal: &Terminal, m: Move) {
+///
+/// Rope lookup prefers [`BufferEdits`] (the user's edited view); the
+/// store fallback only matters before the runtime has seeded edits
+/// for a just-loaded buffer.
+fn move_cursor(
+    tabs: &mut Tabs,
+    edits: &BufferEdits,
+    store: &BufferStore,
+    terminal: &Terminal,
+    m: Move,
+) {
     let Some(active) = tabs.active else {
         return;
     };
     let Some(idx) = tabs.open.iter().position(|t| t.id == active) else {
         return;
     };
-    let rope = match store.loaded.get(&tabs.open[idx].path) {
-        Some(LoadState::Ready(r)) => r.clone(),
-        _ => return,
+    let path = &tabs.open[idx].path;
+    let rope: Arc<Rope> = match edits.buffers.get(path) {
+        Some(eb) => eb.rope.clone(),
+        None => match store.loaded.get(path) {
+            Some(LoadState::Ready(r)) => r.clone(),
+            _ => return,
+        },
     };
 
     let body_rows = terminal
@@ -148,6 +207,99 @@ fn move_cursor(tabs: &mut Tabs, store: &BufferStore, terminal: &Terminal, m: Mov
     let tab = &mut tabs.open[idx];
     tab.cursor = apply_move(tab.cursor, &rope, m, body_rows);
     tab.scroll = adjust_scroll(tab.scroll, tab.cursor, body_rows);
+}
+
+// ── Edit primitives ────────────────────────────────────────────────────
+
+/// Access the active tab and its edited buffer together. Bails if
+/// either is missing — buffer not yet loaded means edit keys no-op.
+fn with_active<F>(tabs: &mut Tabs, edits: &mut BufferEdits, f: F)
+where
+    F: FnOnce(&mut Tab, &mut EditedBuffer),
+{
+    let Some(id) = tabs.active else {
+        return;
+    };
+    let Some(idx) = tabs.open.iter().position(|t| t.id == id) else {
+        return;
+    };
+    let tab = &mut tabs.open[idx];
+    let Some(eb) = edits.buffers.get_mut(&tab.path) else {
+        return;
+    };
+    f(tab, eb);
+}
+
+fn bump(eb: &mut EditedBuffer, new_rope: Rope) {
+    eb.rope = Arc::new(new_rope);
+    eb.version = eb.version.saturating_add(1);
+    eb.dirty = true;
+}
+
+fn insert_char(tabs: &mut Tabs, edits: &mut BufferEdits, ch: char) {
+    with_active(tabs, edits, |tab, eb| {
+        let mut rope = (*eb.rope).clone();
+        let char_idx = rope.line_to_char(tab.cursor.line) + tab.cursor.col;
+        rope.insert_char(char_idx, ch);
+        bump(eb, rope);
+        tab.cursor.col += 1;
+        tab.cursor.preferred_col = tab.cursor.col;
+    });
+}
+
+fn insert_newline(tabs: &mut Tabs, edits: &mut BufferEdits) {
+    with_active(tabs, edits, |tab, eb| {
+        let mut rope = (*eb.rope).clone();
+        let char_idx = rope.line_to_char(tab.cursor.line) + tab.cursor.col;
+        rope.insert_char(char_idx, '\n');
+        bump(eb, rope);
+        tab.cursor.line += 1;
+        tab.cursor.col = 0;
+        tab.cursor.preferred_col = 0;
+    });
+}
+
+fn delete_back(tabs: &mut Tabs, edits: &mut BufferEdits) {
+    with_active(tabs, edits, |tab, eb| {
+        if tab.cursor.line == 0 && tab.cursor.col == 0 {
+            return;
+        }
+        // Capture the join column *before* the remove. After the
+        // newline is gone the previous line grows to include the
+        // current one, so post-remove length is too large.
+        let join_col = if tab.cursor.col == 0 {
+            line_char_len(&eb.rope, tab.cursor.line - 1)
+        } else {
+            0
+        };
+        let mut rope = (*eb.rope).clone();
+        let char_idx = rope.line_to_char(tab.cursor.line) + tab.cursor.col;
+        rope.remove(char_idx - 1..char_idx);
+        if tab.cursor.col > 0 {
+            tab.cursor.col -= 1;
+        } else {
+            tab.cursor.line -= 1;
+            tab.cursor.col = join_col;
+        }
+        tab.cursor.preferred_col = tab.cursor.col;
+        bump(eb, rope);
+    });
+}
+
+fn delete_forward(tabs: &mut Tabs, edits: &mut BufferEdits) {
+    with_active(tabs, edits, |tab, eb| {
+        let line_count = eb.rope.len_lines();
+        let on_last_line = tab.cursor.line + 1 >= line_count;
+        let at_line_end = tab.cursor.col >= line_char_len(&eb.rope, tab.cursor.line);
+        if on_last_line && at_line_end {
+            return;
+        }
+        let mut rope = (*eb.rope).clone();
+        let char_idx = rope.line_to_char(tab.cursor.line) + tab.cursor.col;
+        rope.remove(char_idx..char_idx + 1);
+        bump(eb, rope);
+        // Cursor stays put. preferred_col unchanged (col didn't move).
+    });
 }
 
 /// Pure cursor geometry over a rope. Clamps every output to valid
@@ -258,17 +410,6 @@ mod tests {
         t
     }
 
-    fn store_with(entries: &[(&str, &str)]) -> BufferStore {
-        let mut s = BufferStore::default();
-        for (p, body) in entries {
-            s.loaded.insert(
-                canon(p),
-                LoadState::Ready(Arc::new(Rope::from_str(body))),
-            );
-        }
-        s
-    }
-
     fn terminal_with(dims: Option<Dims>) -> Terminal {
         Terminal {
             dims,
@@ -284,9 +425,13 @@ mod tests {
     }
 
     fn noop_dispatch(k: KeyEvent, tabs: &mut Tabs) -> DispatchOutcome {
+        // Tests that only care about tab-switch / quit don't need an
+        // edits source — empty BufferEdits means every edit-primitive
+        // branch no-ops, which is exactly what these tests assume.
+        let mut edits = BufferEdits::default();
         let store = BufferStore::default();
         let terminal = Terminal::default();
-        dispatch_key(k, tabs, &store, &terminal)
+        dispatch_key(k, tabs, &mut edits, &store, &terminal)
     }
 
     // ── Tab switching + quit (M1 behaviour, unchanged) ──────────────────
@@ -327,23 +472,41 @@ mod tests {
 
     // ── M2: cursor movement ─────────────────────────────────────────────
 
-    fn fixture_with_content(body: &str, dims: Dims) -> (Tabs, BufferStore, Terminal) {
+    /// M3: fixture seeds both `BufferStore` (disk) and `BufferEdits`
+    /// (the user-visible rope) with identical content — mirrors the
+    /// production path where the runtime copies newly-Ready ropes
+    /// into `BufferEdits` via load completions.
+    fn fixture_with_content(
+        body: &str,
+        dims: Dims,
+    ) -> (Tabs, BufferEdits, BufferStore, Terminal) {
+        let rope = Arc::new(Rope::from_str(body));
+        let mut edits = BufferEdits::default();
+        edits
+            .buffers
+            .insert(canon("file.rs"), EditedBuffer::fresh(rope.clone()));
+        let mut store = BufferStore::default();
+        store
+            .loaded
+            .insert(canon("file.rs"), LoadState::Ready(rope));
         (
             tabs_with(&[("file.rs", 1)], Some(1)),
-            store_with(&[("file.rs", body)]),
+            edits,
+            store,
             terminal_with(Some(dims)),
         )
     }
 
     #[test]
     fn down_moves_cursor_and_does_not_scroll_within_viewport() {
-        let (mut tabs, store, term) =
+        let (mut tabs, mut edits, store, term) =
             fixture_with_content("a\nb\nc\nd\ne\nf", Dims { cols: 10, rows: 5 });
         // body_rows = 4. Cursor starts at (0,0); moving down stays in view.
         for _ in 0..3 {
             dispatch_key(
                 key(KeyModifiers::NONE, KeyCode::Down),
                 &mut tabs,
+                &mut edits,
                 &store,
                 &term,
             );
@@ -361,13 +524,14 @@ mod tests {
 
     #[test]
     fn down_scrolls_when_cursor_would_leave_viewport() {
-        let (mut tabs, store, term) =
+        let (mut tabs, mut edits, store, term) =
             fixture_with_content("a\nb\nc\nd\ne\nf", Dims { cols: 10, rows: 4 });
         // body_rows = 3. Fourth Down leaves viewport → scroll.top becomes 1.
         for _ in 0..3 {
             dispatch_key(
                 key(KeyModifiers::NONE, KeyCode::Down),
                 &mut tabs,
+                &mut edits,
                 &store,
                 &term,
             );
@@ -385,7 +549,7 @@ mod tests {
 
     #[test]
     fn up_scrolls_back_toward_the_top() {
-        let (mut tabs, store, term) =
+        let (mut tabs, mut edits, store, term) =
             fixture_with_content("a\nb\nc\nd\ne\nf", Dims { cols: 10, rows: 4 });
         tabs.open[0].cursor = Cursor {
             line: 5,
@@ -399,6 +563,7 @@ mod tests {
             dispatch_key(
                 key(KeyModifiers::NONE, KeyCode::Up),
                 &mut tabs,
+                &mut edits,
                 &store,
                 &term,
             );
@@ -416,13 +581,14 @@ mod tests {
 
     #[test]
     fn right_clamps_to_line_end_then_stops() {
-        let (mut tabs, store, term) =
+        let (mut tabs, mut edits, store, term) =
             fixture_with_content("hi\nworld", Dims { cols: 10, rows: 5 });
         // Line 0 = "hi" (len 2). Right from col 0 → 1 → 2 → 2.
         for expected in [1usize, 2, 2] {
             dispatch_key(
                 key(KeyModifiers::NONE, KeyCode::Right),
                 &mut tabs,
+                &mut edits,
                 &store,
                 &term,
             );
@@ -432,7 +598,7 @@ mod tests {
 
     #[test]
     fn left_stops_at_line_start() {
-        let (mut tabs, store, term) =
+        let (mut tabs, mut edits, store, term) =
             fixture_with_content("hi\nworld", Dims { cols: 10, rows: 5 });
         tabs.open[0].cursor = Cursor {
             line: 0,
@@ -442,6 +608,7 @@ mod tests {
         dispatch_key(
             key(KeyModifiers::NONE, KeyCode::Left),
             &mut tabs,
+            &mut edits,
             &store,
             &term,
         );
@@ -449,6 +616,7 @@ mod tests {
         dispatch_key(
             key(KeyModifiers::NONE, KeyCode::Left),
             &mut tabs,
+            &mut edits,
             &store,
             &term,
         );
@@ -457,7 +625,7 @@ mod tests {
 
     #[test]
     fn home_end_jump_within_current_line() {
-        let (mut tabs, store, term) =
+        let (mut tabs, mut edits, store, term) =
             fixture_with_content("abcdef\nghij", Dims { cols: 20, rows: 5 });
         tabs.open[0].cursor = Cursor {
             line: 0,
@@ -467,6 +635,7 @@ mod tests {
         dispatch_key(
             key(KeyModifiers::NONE, KeyCode::End),
             &mut tabs,
+            &mut edits,
             &store,
             &term,
         );
@@ -481,6 +650,7 @@ mod tests {
         dispatch_key(
             key(KeyModifiers::NONE, KeyCode::Home),
             &mut tabs,
+            &mut edits,
             &store,
             &term,
         );
@@ -500,12 +670,13 @@ mod tests {
             .map(|i| format!("line {i}"))
             .collect::<Vec<_>>()
             .join("\n");
-        let (mut tabs, store, term) =
+        let (mut tabs, mut edits, store, term) =
             fixture_with_content(&body, Dims { cols: 40, rows: 11 });
         // body_rows = 10. PageDown from line 0 → line 10, scroll follows.
         dispatch_key(
             key(KeyModifiers::NONE, KeyCode::PageDown),
             &mut tabs,
+            &mut edits,
             &store,
             &term,
         );
@@ -516,11 +687,13 @@ mod tests {
     #[test]
     fn movement_is_noop_when_buffer_not_loaded() {
         let mut tabs = tabs_with(&[("file.rs", 1)], Some(1));
+        let mut edits = BufferEdits::default(); // not seeded
         let store = BufferStore::default(); // no content loaded
         let term = terminal_with(Some(Dims { cols: 10, rows: 5 }));
         dispatch_key(
             key(KeyModifiers::NONE, KeyCode::Down),
             &mut tabs,
+            &mut edits,
             &store,
             &term,
         );
@@ -693,5 +866,327 @@ mod tests {
             4,
         );
         assert_eq!(s, s0);
+    }
+
+    // ── M3: edit primitives ─────────────────────────────────────────────
+
+    fn rope_of(edits: &BufferEdits, path: &str) -> Arc<Rope> {
+        edits
+            .buffers
+            .get(&canon(path))
+            .expect("seeded")
+            .rope
+            .clone()
+    }
+
+    fn version_of(edits: &BufferEdits, path: &str) -> u64 {
+        edits.buffers.get(&canon(path)).expect("seeded").version
+    }
+
+    fn dirty_of(edits: &BufferEdits, path: &str) -> bool {
+        edits.buffers.get(&canon(path)).expect("seeded").dirty
+    }
+
+    #[test]
+    fn insert_char_advances_cursor_and_bumps_version() {
+        let (mut tabs, mut edits, store, term) =
+            fixture_with_content("abc\n", Dims { cols: 10, rows: 5 });
+        tabs.open[0].cursor = Cursor {
+            line: 0,
+            col: 1,
+            preferred_col: 1,
+        };
+
+        dispatch_key(
+            key(KeyModifiers::NONE, KeyCode::Char('X')),
+            &mut tabs,
+            &mut edits,
+            &store,
+            &term,
+        );
+
+        assert_eq!(rope_of(&edits, "file.rs").to_string(), "aXbc\n");
+        assert_eq!(tabs.open[0].cursor.col, 2);
+        assert_eq!(tabs.open[0].cursor.preferred_col, 2);
+        assert_eq!(version_of(&edits, "file.rs"), 1);
+        assert!(dirty_of(&edits, "file.rs"));
+    }
+
+    #[test]
+    fn insert_newline_splits_line_and_drops_cursor() {
+        let (mut tabs, mut edits, store, term) =
+            fixture_with_content("abcdef\n", Dims { cols: 10, rows: 5 });
+        tabs.open[0].cursor = Cursor {
+            line: 0,
+            col: 3,
+            preferred_col: 3,
+        };
+
+        dispatch_key(
+            key(KeyModifiers::NONE, KeyCode::Enter),
+            &mut tabs,
+            &mut edits,
+            &store,
+            &term,
+        );
+
+        assert_eq!(rope_of(&edits, "file.rs").to_string(), "abc\ndef\n");
+        assert_eq!(
+            tabs.open[0].cursor,
+            Cursor {
+                line: 1,
+                col: 0,
+                preferred_col: 0,
+            }
+        );
+        assert!(dirty_of(&edits, "file.rs"));
+    }
+
+    #[test]
+    fn backspace_deletes_char_before_cursor() {
+        let (mut tabs, mut edits, store, term) =
+            fixture_with_content("hello", Dims { cols: 10, rows: 5 });
+        tabs.open[0].cursor = Cursor {
+            line: 0,
+            col: 5,
+            preferred_col: 5,
+        };
+
+        dispatch_key(
+            key(KeyModifiers::NONE, KeyCode::Backspace),
+            &mut tabs,
+            &mut edits,
+            &store,
+            &term,
+        );
+
+        assert_eq!(rope_of(&edits, "file.rs").to_string(), "hell");
+        assert_eq!(tabs.open[0].cursor.col, 4);
+    }
+
+    #[test]
+    fn backspace_at_column_zero_joins_with_previous_line() {
+        let (mut tabs, mut edits, store, term) =
+            fixture_with_content("foo\nbar\n", Dims { cols: 10, rows: 5 });
+        tabs.open[0].cursor = Cursor {
+            line: 1,
+            col: 0,
+            preferred_col: 0,
+        };
+
+        dispatch_key(
+            key(KeyModifiers::NONE, KeyCode::Backspace),
+            &mut tabs,
+            &mut edits,
+            &store,
+            &term,
+        );
+
+        assert_eq!(rope_of(&edits, "file.rs").to_string(), "foobar\n");
+        // Cursor landed where the join point is — end of the old "foo".
+        assert_eq!(
+            tabs.open[0].cursor,
+            Cursor {
+                line: 0,
+                col: 3,
+                preferred_col: 3,
+            }
+        );
+    }
+
+    #[test]
+    fn backspace_at_origin_is_a_noop() {
+        let (mut tabs, mut edits, store, term) =
+            fixture_with_content("abc\n", Dims { cols: 10, rows: 5 });
+        let v0 = version_of(&edits, "file.rs");
+
+        dispatch_key(
+            key(KeyModifiers::NONE, KeyCode::Backspace),
+            &mut tabs,
+            &mut edits,
+            &store,
+            &term,
+        );
+
+        assert_eq!(rope_of(&edits, "file.rs").to_string(), "abc\n");
+        assert_eq!(version_of(&edits, "file.rs"), v0);
+        assert!(!dirty_of(&edits, "file.rs"));
+    }
+
+    #[test]
+    fn delete_forward_removes_char_at_cursor() {
+        let (mut tabs, mut edits, store, term) =
+            fixture_with_content("hello", Dims { cols: 10, rows: 5 });
+        tabs.open[0].cursor = Cursor {
+            line: 0,
+            col: 1,
+            preferred_col: 1,
+        };
+
+        dispatch_key(
+            key(KeyModifiers::NONE, KeyCode::Delete),
+            &mut tabs,
+            &mut edits,
+            &store,
+            &term,
+        );
+
+        assert_eq!(rope_of(&edits, "file.rs").to_string(), "hllo");
+        // Cursor stays put.
+        assert_eq!(tabs.open[0].cursor.col, 1);
+    }
+
+    #[test]
+    fn delete_forward_at_end_of_line_joins_with_next() {
+        let (mut tabs, mut edits, store, term) =
+            fixture_with_content("foo\nbar", Dims { cols: 10, rows: 5 });
+        tabs.open[0].cursor = Cursor {
+            line: 0,
+            col: 3,
+            preferred_col: 3,
+        };
+
+        dispatch_key(
+            key(KeyModifiers::NONE, KeyCode::Delete),
+            &mut tabs,
+            &mut edits,
+            &store,
+            &term,
+        );
+
+        assert_eq!(rope_of(&edits, "file.rs").to_string(), "foobar");
+        // Cursor position unchanged — still at the join point.
+        assert_eq!(tabs.open[0].cursor.col, 3);
+    }
+
+    #[test]
+    fn delete_forward_at_eof_is_a_noop() {
+        let (mut tabs, mut edits, store, term) =
+            fixture_with_content("abc", Dims { cols: 10, rows: 5 });
+        tabs.open[0].cursor = Cursor {
+            line: 0,
+            col: 3,
+            preferred_col: 3,
+        };
+        let v0 = version_of(&edits, "file.rs");
+
+        dispatch_key(
+            key(KeyModifiers::NONE, KeyCode::Delete),
+            &mut tabs,
+            &mut edits,
+            &store,
+            &term,
+        );
+
+        assert_eq!(rope_of(&edits, "file.rs").to_string(), "abc");
+        assert_eq!(version_of(&edits, "file.rs"), v0);
+    }
+
+    #[test]
+    fn edit_on_unloaded_buffer_is_swallowed() {
+        // Tab is open but BufferEdits has no entry (file hasn't
+        // loaded yet) — all four primitives no-op and leave the
+        // cursor alone.
+        let mut tabs = tabs_with(&[("file.rs", 1)], Some(1));
+        let mut edits = BufferEdits::default();
+        let store = BufferStore::default();
+        let term = terminal_with(Some(Dims { cols: 10, rows: 5 }));
+        tabs.open[0].cursor = Cursor {
+            line: 0,
+            col: 0,
+            preferred_col: 0,
+        };
+
+        for code in [
+            KeyCode::Char('x'),
+            KeyCode::Enter,
+            KeyCode::Backspace,
+            KeyCode::Delete,
+        ] {
+            dispatch_key(
+                key(KeyModifiers::NONE, code),
+                &mut tabs,
+                &mut edits,
+                &store,
+                &term,
+            );
+        }
+
+        assert!(edits.buffers.is_empty());
+        assert_eq!(tabs.open[0].cursor, Cursor::default());
+    }
+
+    #[test]
+    fn ctrl_c_still_quits_not_inserts() {
+        // Regression guard: Ctrl-C must reach the Quit arm before the
+        // Char-insert arm, even though 'c' is printable.
+        let (mut tabs, mut edits, store, term) =
+            fixture_with_content("", Dims { cols: 10, rows: 5 });
+        let outcome = dispatch_key(
+            key(KeyModifiers::CONTROL, KeyCode::Char('c')),
+            &mut tabs,
+            &mut edits,
+            &store,
+            &term,
+        );
+        assert_eq!(outcome, DispatchOutcome::Quit);
+        assert_eq!(rope_of(&edits, "file.rs").to_string(), "");
+        assert!(!dirty_of(&edits, "file.rs"));
+    }
+
+    #[test]
+    fn edits_survive_tab_switch() {
+        // Two tabs, two files; edit each, switch between, confirm the
+        // ropes + cursors are preserved per tab.
+        let mut tabs = tabs_with(&[("a", 1), ("b", 2)], Some(1));
+        let mut edits = BufferEdits::default();
+        edits
+            .buffers
+            .insert(canon("a"), EditedBuffer::fresh(Arc::new(Rope::from_str("a"))));
+        edits
+            .buffers
+            .insert(canon("b"), EditedBuffer::fresh(Arc::new(Rope::from_str("b"))));
+        let store = BufferStore::default();
+        let term = terminal_with(Some(Dims { cols: 10, rows: 5 }));
+        tabs.open[0].cursor = Cursor {
+            line: 0,
+            col: 1,
+            preferred_col: 1,
+        };
+
+        // Edit tab a.
+        dispatch_key(
+            key(KeyModifiers::NONE, KeyCode::Char('!')),
+            &mut tabs,
+            &mut edits,
+            &store,
+            &term,
+        );
+
+        // Switch to tab b.
+        dispatch_key(
+            key(KeyModifiers::NONE, KeyCode::Tab),
+            &mut tabs,
+            &mut edits,
+            &store,
+            &term,
+        );
+        tabs.open[1].cursor = Cursor {
+            line: 0,
+            col: 1,
+            preferred_col: 1,
+        };
+        dispatch_key(
+            key(KeyModifiers::NONE, KeyCode::Char('?')),
+            &mut tabs,
+            &mut edits,
+            &store,
+            &term,
+        );
+
+        assert_eq!(rope_of(&edits, "a").to_string(), "a!");
+        assert_eq!(rope_of(&edits, "b").to_string(), "b?");
+        assert!(dirty_of(&edits, "a"));
+        assert!(dirty_of(&edits, "b"));
     }
 }

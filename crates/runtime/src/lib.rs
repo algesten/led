@@ -25,11 +25,12 @@ use led_driver_buffers_core::{BufferStore, FileReadDriver};
 use led_driver_buffers_native::FileReadNative;
 use led_driver_terminal_core::{Dims, Frame, KeyEvent, TermEvent, Terminal, TerminalInputDriver};
 use led_driver_terminal_native::{paint, TerminalInputNative};
+use led_state_buffer_edits::{BufferEdits, EditedBuffer};
 use led_state_tabs::{TabId, Tabs};
 
 pub use dispatch::{dispatch, dispatch_key, DispatchOutcome};
 pub use query::{
-    body_model, file_load_action, render_frame, tab_bar_model,
+    body_model, file_load_action, render_frame, tab_bar_model, EditedBuffersInput,
     StoreLoadedInput, TabsActiveInput, TabsOpenInput, TerminalDimsInput,
 };
 pub use trace::{SharedTrace, Trace};
@@ -70,6 +71,7 @@ impl TabIdGen {
 /// Run the main loop until dispatch signals quit.
 pub fn run(
     tabs: &mut Tabs,
+    edits: &mut BufferEdits,
     store: &mut BufferStore,
     terminal: &mut Terminal,
     drivers: &Drivers,
@@ -80,7 +82,17 @@ pub fn run(
 
     loop {
         // ── Ingest ──────────────────────────────────────────────
-        drivers.file.process(store);
+        // Seed BufferEdits from newly-Ready loads. `process` returns
+        // an empty Vec on idle ticks (no heap alloc); `or_insert_with`
+        // avoids clobbering a buffer the user has already edited if
+        // a later reload round-trips through here.
+        let completions = drivers.file.process(store);
+        for completion in completions {
+            edits
+                .buffers
+                .entry(completion.path)
+                .or_insert_with(|| EditedBuffer::fresh(completion.rope));
+        }
         drivers.input.process(terminal);
 
         // Drain one event at a time — the `VecDeque::pop_front` yields
@@ -93,7 +105,7 @@ pub fn run(
                 TermEvent::Key(k) => Event::Key(k),
                 TermEvent::Resize(d) => Event::Resize(d),
             };
-            match dispatch(ev, tabs, store, terminal) {
+            match dispatch(ev, tabs, edits, store, terminal) {
                 DispatchOutcome::Continue => {}
                 DispatchOutcome::Quit => {
                     quit = true;
@@ -112,6 +124,7 @@ pub fn run(
         );
         let frame = render_frame(
             TerminalDimsInput::new(terminal),
+            EditedBuffersInput::new(edits),
             StoreLoadedInput::new(store),
             TabsActiveInput::new(tabs),
         );
