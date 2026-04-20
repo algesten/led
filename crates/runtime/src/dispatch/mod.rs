@@ -72,25 +72,53 @@ pub enum DispatchOutcome {
     Quit,
 }
 
-/// Top-level entry point used by the main loop.
-#[allow(clippy::too_many_arguments)]
-pub fn dispatch(
-    ev: Event,
-    tabs: &mut Tabs,
-    edits: &mut BufferEdits,
-    kill_ring: &mut KillRing,
-    store: &BufferStore,
-    terminal: &Terminal,
-    keymap: &Keymap,
-    chord: &mut ChordState,
-) -> DispatchOutcome {
-    match ev {
-        Event::Key(k) => dispatch_key(k, tabs, edits, kill_ring, store, terminal, keymap, chord),
-        // `Resize` is applied inside `TerminalInputDriver.process` —
-        // pure state, no dispatch work here. M2 does not re-clamp
-        // cursor/scroll on resize; next movement re-clamps.
-        Event::Resize(_) => DispatchOutcome::Continue,
-        Event::Quit => DispatchOutcome::Quit,
+/// Bundle of mutable + shared references the dispatch loop needs.
+///
+/// The main loop constructs one of these per event and calls
+/// [`Dispatcher::dispatch`]. Fields are public so test code can
+/// build one with ad-hoc borrows too.
+///
+/// The struct holds references, not owned state — it's cheap to
+/// build one per tick (or even per call) from the runtime's stack
+/// bindings. No lifetime extension or pinning required.
+pub struct Dispatcher<'a> {
+    pub tabs: &'a mut Tabs,
+    pub edits: &'a mut BufferEdits,
+    pub kill_ring: &'a mut KillRing,
+    pub store: &'a BufferStore,
+    pub terminal: &'a Terminal,
+    pub keymap: &'a Keymap,
+    pub chord: &'a mut ChordState,
+}
+
+impl<'a> Dispatcher<'a> {
+    /// Top-level entry point: dispatch one [`Event`] through to
+    /// either a command execution or a silent state-change.
+    pub fn dispatch(&mut self, ev: Event) -> DispatchOutcome {
+        match ev {
+            Event::Key(k) => self.dispatch_key(k),
+            // `Resize` is applied inside `TerminalInputDriver.process` —
+            // pure state, no dispatch work here. M2 does not re-clamp
+            // cursor/scroll on resize; next movement re-clamps.
+            Event::Resize(_) => DispatchOutcome::Continue,
+            Event::Quit => DispatchOutcome::Quit,
+        }
+    }
+
+    /// Resolve + run a single keystroke. Delegates to the free
+    /// [`dispatch_key`] so the submodule functions and tests that
+    /// already take individual args keep working unchanged.
+    pub fn dispatch_key(&mut self, k: KeyEvent) -> DispatchOutcome {
+        dispatch_key(
+            k,
+            self.tabs,
+            self.edits,
+            self.kill_ring,
+            self.store,
+            self.terminal,
+            self.keymap,
+            self.chord,
+        )
     }
 }
 

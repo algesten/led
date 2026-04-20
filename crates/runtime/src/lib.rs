@@ -36,7 +36,7 @@ use led_state_kill_ring::KillRing;
 use led_state_tabs::{TabId, Tabs};
 
 pub use config::{load_keymap, ConfigError};
-pub use dispatch::{dispatch, dispatch_key, DispatchOutcome};
+pub use dispatch::{dispatch_key, DispatchOutcome, Dispatcher};
 pub use keymap::{default_keymap, parse_command, parse_key, ChordState, Command, Keymap};
 pub use query::{
     body_model, file_load_action, file_save_action, render_frame, tab_bar_model,
@@ -177,7 +177,16 @@ pub fn run(
                 TermEvent::Key(k) => Event::Key(k),
                 TermEvent::Resize(d) => Event::Resize(d),
             };
-            match dispatch(ev, tabs, edits, kill_ring, store, terminal, keymap, &mut chord) {
+            let mut dispatcher = Dispatcher {
+                tabs,
+                edits,
+                kill_ring,
+                store,
+                terminal,
+                keymap,
+                chord: &mut chord,
+            };
+            match dispatcher.dispatch(ev) {
                 DispatchOutcome::Continue => {}
                 DispatchOutcome::Quit => {
                     quit = true;
