@@ -11,5 +11,6 @@ publish = false
 # - `RawModeGuard` RAII for raw mode + alternate screen.
 
 [dependencies]
+led-core = { workspace = true }
 led-driver-terminal-core = { workspace = true }
 crossterm = { workspace = true }

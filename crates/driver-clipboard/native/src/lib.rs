@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 
+use led_core::Notifier;
 use led_driver_clipboard_core::{
     ClipboardCmd, ClipboardDone, ClipboardDriver, ClipboardResult, Trace,
 };
@@ -18,10 +19,10 @@ pub struct ClipboardNative {
     _marker: (),
 }
 
-pub fn spawn(trace: Arc<dyn Trace>) -> (ClipboardDriver, ClipboardNative) {
+pub fn spawn(trace: Arc<dyn Trace>, notify: Notifier) -> (ClipboardDriver, ClipboardNative) {
     let (tx_cmd, rx_cmd) = mpsc::channel::<ClipboardCmd>();
     let (tx_done, rx_done) = mpsc::channel::<ClipboardDone>();
-    let native = spawn_worker(rx_cmd, tx_done);
+    let native = spawn_worker(rx_cmd, tx_done, notify);
     let driver = ClipboardDriver::new(tx_cmd, rx_done, trace);
     (driver, native)
 }
@@ -29,15 +30,20 @@ pub fn spawn(trace: Arc<dyn Trace>) -> (ClipboardDriver, ClipboardNative) {
 pub fn spawn_worker(
     rx_cmd: Receiver<ClipboardCmd>,
     tx_done: Sender<ClipboardDone>,
+    notify: Notifier,
 ) -> ClipboardNative {
     thread::Builder::new()
         .name("led-clipboard".into())
-        .spawn(move || worker_loop(rx_cmd, tx_done))
+        .spawn(move || worker_loop(rx_cmd, tx_done, notify))
         .expect("spawning clipboard worker should succeed");
     ClipboardNative { _marker: () }
 }
 
-fn worker_loop(rx_cmd: Receiver<ClipboardCmd>, tx_done: Sender<ClipboardDone>) {
+fn worker_loop(
+    rx_cmd: Receiver<ClipboardCmd>,
+    tx_done: Sender<ClipboardDone>,
+    notify: Notifier,
+) {
     // Construct lazily so a clipboard-less environment (headless CI)
     // doesn't crash — `arboard::Clipboard::new()` fails there.
     let mut clip: Option<arboard::Clipboard> = None;
@@ -50,6 +56,7 @@ fn worker_loop(rx_cmd: Receiver<ClipboardCmd>, tx_done: Sender<ClipboardDone>) {
         if tx_done.send(ClipboardDone { result }).is_err() {
             return;
         }
+        notify.notify();
     }
 }
 
@@ -94,6 +101,6 @@ mod tests {
         // Smoke: spawn the worker, immediately drop. Worker should
         // exit when the Sender drops. Doesn't actually touch the
         // clipboard.
-        let (_driver, _native) = spawn(Arc::new(NoopTrace));
+        let (_driver, _native) = spawn(Arc::new(NoopTrace), Notifier::noop());
     }
 }

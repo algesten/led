@@ -8,8 +8,10 @@
 //!   user-vs-canonical split
 
 pub mod ids;
+pub mod notify;
 pub mod paths;
 
+pub use notify::Notifier;
 pub use paths::{CanonPath, UserPath};
 
 // `id_newtype!` is `#[macro_export]` so it's already callable as

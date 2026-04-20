@@ -11,7 +11,7 @@ use led_core::UserPath;
 use led_driver_buffers_core::BufferStore;
 use led_driver_terminal_core::Terminal;
 use led_driver_terminal_native::RawModeGuard;
-use led_runtime::{load_keymap, spawn_drivers, SharedTrace, TabIdGen};
+use led_runtime::{load_keymap, spawn_drivers, SharedTrace, TabIdGen, Wake};
 use led_state_alerts::AlertState;
 use led_state_buffer_edits::BufferEdits;
 use led_state_jumps::JumpListState;
@@ -107,7 +107,8 @@ fn main() -> io::Result<()> {
     // `Drop` restores cooked mode on normal exit and on panic unwind.
     let _raw = RawModeGuard::acquire()?;
 
-    let drivers = spawn_drivers(trace.clone())?;
+    let wake = Wake::new();
+    let drivers = spawn_drivers(trace.clone(), &wake)?;
 
     let mut stdout = io::stdout();
     led_runtime::run(
@@ -119,6 +120,7 @@ fn main() -> io::Result<()> {
         &mut store,
         &mut terminal,
         &drivers,
+        &wake,
         &keymap,
         &mut stdout,
         &trace,

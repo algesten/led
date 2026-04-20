@@ -29,6 +29,7 @@ use led_driver_clipboard_core::{
     ClipboardAction, ClipboardDriver, ClipboardResult,
 };
 use led_driver_clipboard_native::ClipboardNative;
+use led_core::Notifier;
 use led_driver_terminal_core::{Dims, Frame, KeyEvent, TermEvent, Terminal, TerminalInputDriver};
 use led_driver_terminal_native::{paint, TerminalInputNative};
 use led_state_alerts::AlertState;
@@ -36,6 +37,30 @@ use led_state_buffer_edits::{BufferEdits, EditedBuffer};
 use led_state_jumps::JumpListState;
 use led_state_kill_ring::KillRing;
 use led_state_tabs::{TabId, Tabs};
+
+/// Wake channel: drivers signal on their own, the main loop blocks on
+/// `rx.recv_timeout(deadline)` so we wake on any event or when the
+/// nearest timer (info-alert expiry, future M-?? timers) fires.
+pub struct Wake {
+    pub notifier: Notifier,
+    pub rx: std::sync::mpsc::Receiver<()>,
+}
+
+impl Wake {
+    pub fn new() -> Self {
+        let (tx, rx) = std::sync::mpsc::channel();
+        Self {
+            notifier: Notifier::new(tx),
+            rx,
+        }
+    }
+}
+
+impl Default for Wake {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 /// How long a transient info alert (`Saved foo.rs`) stays on screen
 /// before the tick loop clears it. Matches legacy.
@@ -104,6 +129,7 @@ pub fn run(
     store: &mut BufferStore,
     terminal: &mut Terminal,
     drivers: &Drivers,
+    wake: &Wake,
     keymap: &Keymap,
     stdout: &mut impl Write,
     trace: &SharedTrace,
@@ -275,21 +301,44 @@ pub fn run(
             last_frame = frame;
         }
 
-        // Short sleep; a proper cross-channel select is a later
-        // refinement (would require crossbeam or a Condvar fan-in).
-        std::thread::sleep(Duration::from_millis(10));
+        // ── Block until something happens ───────────────────────
+        // Drain any stale wake signals that arrived while we were
+        // working — they're already accounted for by the drains
+        // above. Then block on `recv_timeout` with a deadline equal
+        // to the nearest pending timer (only the info-alert expiry
+        // today). Drivers notify on every completion, terminal
+        // input notifies on every key; we wake instantly on either
+        // and sleep the rest of the time.
+        while wake.rx.try_recv().is_ok() {}
+        let timeout = alerts
+            .info_expires_at
+            .and_then(|deadline| deadline.checked_duration_since(Instant::now()))
+            .unwrap_or(Duration::from_secs(60));
+        use std::sync::mpsc::RecvTimeoutError;
+        match wake.rx.recv_timeout(timeout) {
+            Ok(()) | Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => break Ok(()),
+        }
     }
 }
 
 /// Convenience constructor: spawns both drivers with a shared trace
-/// using the desktop `*-native` implementations.
-pub fn spawn_drivers(trace: SharedTrace) -> io::Result<Drivers> {
-    let (file, file_native) = led_driver_buffers_native::spawn(trace.clone().as_file_trace());
-    let (file_write, file_write_native) =
-        led_driver_buffers_native::spawn_write(trace.clone().as_file_trace());
-    let (clipboard, clipboard_native) =
-        led_driver_clipboard_native::spawn(trace.clone().as_clipboard_trace());
-    let (input, input_native) = led_driver_terminal_native::spawn(trace.as_terminal_trace())?;
+/// using the desktop `*-native` implementations. Every driver gets a
+/// clone of the wake [`Notifier`]; each completion signals the main
+/// loop so it wakes immediately.
+pub fn spawn_drivers(trace: SharedTrace, wake: &Wake) -> io::Result<Drivers> {
+    let (file, file_native) =
+        led_driver_buffers_native::spawn(trace.clone().as_file_trace(), wake.notifier.clone());
+    let (file_write, file_write_native) = led_driver_buffers_native::spawn_write(
+        trace.clone().as_file_trace(),
+        wake.notifier.clone(),
+    );
+    let (clipboard, clipboard_native) = led_driver_clipboard_native::spawn(
+        trace.clone().as_clipboard_trace(),
+        wake.notifier.clone(),
+    );
+    let (input, input_native) =
+        led_driver_terminal_native::spawn(trace.as_terminal_trace(), wake.notifier.clone())?;
     Ok(Drivers {
         file,
         file_write,

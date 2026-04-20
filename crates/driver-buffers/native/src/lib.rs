@@ -12,7 +12,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
 use std::thread;
 
-use led_core::CanonPath;
+use led_core::{CanonPath, Notifier};
 use led_driver_buffers_core::{
     FileReadDriver, FileWriteDriver, ReadCmd, ReadDone, Trace, WriteCmd, WriteDone,
 };
@@ -33,11 +33,11 @@ pub struct FileReadNative {
 /// Convenience: build both halves of the driver connected to each
 /// other, with channels allocated internally. This is the one-call
 /// wiring most binaries want.
-pub fn spawn(trace: Arc<dyn Trace>) -> (FileReadDriver, FileReadNative) {
+pub fn spawn(trace: Arc<dyn Trace>, notify: Notifier) -> (FileReadDriver, FileReadNative) {
     let (tx_cmd, rx_cmd) = mpsc::channel::<ReadCmd>();
     let (tx_done, rx_done) = mpsc::channel::<ReadDone>();
 
-    let native = spawn_worker(rx_cmd, tx_done);
+    let native = spawn_worker(rx_cmd, tx_done, notify);
     let driver = FileReadDriver::new(tx_cmd, rx_done, trace);
     (driver, native)
 }
@@ -45,15 +45,19 @@ pub fn spawn(trace: Arc<dyn Trace>) -> (FileReadDriver, FileReadNative) {
 /// Lower-level: spawn the worker against pre-existing channels. Useful
 /// when the binary wants to own the channels (e.g. for telemetry or
 /// complex shutdown).
-pub fn spawn_worker(rx_cmd: Receiver<ReadCmd>, tx_done: Sender<ReadDone>) -> FileReadNative {
+pub fn spawn_worker(
+    rx_cmd: Receiver<ReadCmd>,
+    tx_done: Sender<ReadDone>,
+    notify: Notifier,
+) -> FileReadNative {
     thread::Builder::new()
         .name("led-file-read".into())
-        .spawn(move || worker_loop(rx_cmd, tx_done))
+        .spawn(move || worker_loop(rx_cmd, tx_done, notify))
         .expect("spawning file-read worker should succeed");
     FileReadNative { _marker: () }
 }
 
-fn worker_loop(rx: Receiver<ReadCmd>, tx: Sender<ReadDone>) {
+fn worker_loop(rx: Receiver<ReadCmd>, tx: Sender<ReadDone>, notify: Notifier) {
     while let Ok(cmd) = rx.recv() {
         match cmd {
             ReadCmd::Read(path) => {
@@ -61,6 +65,7 @@ fn worker_loop(rx: Receiver<ReadCmd>, tx: Sender<ReadDone>) {
                 if tx.send(ReadDone { path, result }).is_err() {
                     return;
                 }
+                notify.notify();
             }
         }
     }
@@ -84,10 +89,13 @@ pub struct FileWriteNative {
 
 /// Convenience: spawn both halves of the write driver, connected to
 /// fresh channels.
-pub fn spawn_write(trace: Arc<dyn Trace>) -> (FileWriteDriver, FileWriteNative) {
+pub fn spawn_write(
+    trace: Arc<dyn Trace>,
+    notify: Notifier,
+) -> (FileWriteDriver, FileWriteNative) {
     let (tx_cmd, rx_cmd) = mpsc::channel::<WriteCmd>();
     let (tx_done, rx_done) = mpsc::channel::<WriteDone>();
-    let native = spawn_write_worker(rx_cmd, tx_done);
+    let native = spawn_write_worker(rx_cmd, tx_done, notify);
     let driver = FileWriteDriver::new(tx_cmd, rx_done, trace);
     (driver, native)
 }
@@ -95,15 +103,16 @@ pub fn spawn_write(trace: Arc<dyn Trace>) -> (FileWriteDriver, FileWriteNative) 
 pub fn spawn_write_worker(
     rx_cmd: Receiver<WriteCmd>,
     tx_done: Sender<WriteDone>,
+    notify: Notifier,
 ) -> FileWriteNative {
     thread::Builder::new()
         .name("led-file-write".into())
-        .spawn(move || write_worker_loop(rx_cmd, tx_done))
+        .spawn(move || write_worker_loop(rx_cmd, tx_done, notify))
         .expect("spawning file-write worker should succeed");
     FileWriteNative { _marker: () }
 }
 
-fn write_worker_loop(rx: Receiver<WriteCmd>, tx: Sender<WriteDone>) {
+fn write_worker_loop(rx: Receiver<WriteCmd>, tx: Sender<WriteDone>, notify: Notifier) {
     while let Ok(cmd) = rx.recv() {
         match cmd {
             WriteCmd::Write {
@@ -123,6 +132,7 @@ fn write_worker_loop(rx: Receiver<WriteCmd>, tx: Sender<WriteDone>) {
                 if tx.send(done).is_err() {
                     return;
                 }
+                notify.notify();
             }
         }
     }
@@ -204,7 +214,7 @@ mod tests {
         }
         let path = canon(&file_path);
 
-        let (driver, _native) = spawn(Arc::new(NoopTrace));
+        let (driver, _native) = spawn(Arc::new(NoopTrace), Notifier::noop());
         let mut store = BufferStore::default();
 
         let acts = [LoadAction::Load(path.clone())];
@@ -245,7 +255,7 @@ mod tests {
         let path = canon(&file_path);
         let rope = Arc::new(Rope::from_str("hello, save\n"));
 
-        let (driver, _native) = spawn_write(Arc::new(NoopTrace));
+        let (driver, _native) = spawn_write(Arc::new(NoopTrace), Notifier::noop());
         driver.execute([&SaveAction::Save {
             path: path.clone(),
             rope: rope.clone(),
@@ -277,7 +287,7 @@ mod tests {
         let bogus = tmp.path().join("no-such-dir").join("out.txt");
         let path = canon(&bogus);
 
-        let (driver, _native) = spawn_write(Arc::new(NoopTrace));
+        let (driver, _native) = spawn_write(Arc::new(NoopTrace), Notifier::noop());
         driver.execute([&SaveAction::Save {
             path,
             rope: Arc::new(Rope::from_str("x")),
@@ -294,7 +304,7 @@ mod tests {
         let tmp = tempdir();
         let path = canon(&tmp.path().join("does-not-exist.rs"));
 
-        let (driver, _native) = spawn(Arc::new(NoopTrace));
+        let (driver, _native) = spawn(Arc::new(NoopTrace), Notifier::noop());
         let mut store = BufferStore::default();
 
         let acts = [LoadAction::Load(path.clone())];

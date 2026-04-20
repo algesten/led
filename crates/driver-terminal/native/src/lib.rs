@@ -12,12 +12,12 @@ use std::io::{self, Write};
 use std::sync::mpsc::{self, Sender};
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
 
 use crossterm::event::{
     self as ct_event, Event as CtEvent, KeyCode as CtKeyCode, KeyEvent as CtKeyEvent,
     KeyModifiers as CtKeyModifiers,
 };
+use led_core::Notifier;
 use led_driver_terminal_core::{
     BodyModel, Dims, Frame, KeyCode, KeyEvent, KeyModifiers, StatusBarModel, TabBarModel,
     TermEvent, TerminalInputDriver, Trace,
@@ -37,43 +37,49 @@ pub struct TerminalInputNative {
 
 /// Convenience: wire up `TerminalInputDriver` + its native reader
 /// thread, seeding the initial dims from the live tty.
-pub fn spawn(trace: Arc<dyn Trace>) -> io::Result<(TerminalInputDriver, TerminalInputNative)> {
+pub fn spawn(
+    trace: Arc<dyn Trace>,
+    notify: Notifier,
+) -> io::Result<(TerminalInputDriver, TerminalInputNative)> {
     let (tx, rx) = mpsc::channel::<TermEvent>();
 
     // Seed the first render with real dimensions — otherwise the main
     // loop waits for a resize event that may never come.
     if let Ok((cols, rows)) = crossterm::terminal::size() {
         let _ = tx.send(TermEvent::Resize(Dims { cols, rows }));
+        notify.notify();
     }
 
+    let reader_notify = notify;
     thread::Builder::new()
         .name("led-terminal-input".into())
-        .spawn(move || reader_loop(tx))?;
+        .spawn(move || reader_loop(tx, reader_notify))?;
 
     let driver = TerminalInputDriver::new(rx, trace);
     Ok((driver, TerminalInputNative { _marker: () }))
 }
 
-fn reader_loop(tx: Sender<TermEvent>) {
+fn reader_loop(tx: Sender<TermEvent>, notify: Notifier) {
+    // Blocking read — events push into the channel with zero extra
+    // latency. A prior `poll(50ms)` here added perceptible stutter
+    // when holding a key down.
     loop {
-        match ct_event::poll(Duration::from_millis(50)) {
-            Ok(true) => match ct_event::read() {
-                Ok(CtEvent::Key(k)) => {
-                    if let Some(ev) = translate_key(k) {
-                        if tx.send(TermEvent::Key(ev)).is_err() {
-                            return;
-                        }
-                    }
-                }
-                Ok(CtEvent::Resize(cols, rows)) => {
-                    if tx.send(TermEvent::Resize(Dims { cols, rows })).is_err() {
+        match ct_event::read() {
+            Ok(CtEvent::Key(k)) => {
+                if let Some(ev) = translate_key(k) {
+                    if tx.send(TermEvent::Key(ev)).is_err() {
                         return;
                     }
+                    notify.notify();
                 }
-                Ok(_) => {} // mouse/paste/focus ignored at M1
-                Err(_) => return,
-            },
-            Ok(false) => {}
+            }
+            Ok(CtEvent::Resize(cols, rows)) => {
+                if tx.send(TermEvent::Resize(Dims { cols, rows })).is_err() {
+                    return;
+                }
+                notify.notify();
+            }
+            Ok(_) => {} // mouse/paste/focus ignored at M1
             Err(_) => return,
         }
     }

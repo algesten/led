@@ -435,6 +435,7 @@ name = "led-driver-clipboard-native"
 version = "0.0.0"
 dependencies = [
  "arboard",
+ "led-core",
  "led-driver-clipboard-core",
 ]
 
@@ -450,6 +451,7 @@ name = "led-driver-terminal-native"
 version = "0.0.0"
 dependencies = [
  "crossterm",
+ "led-core",
  "led-driver-terminal-core",
 ]
 
