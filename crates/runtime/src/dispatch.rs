@@ -25,6 +25,7 @@ use led_state_tabs::{Cursor, Scroll, Tab, Tabs};
 use ropey::Rope;
 use std::sync::Arc;
 
+use crate::keymap::{Command, Keymap};
 use crate::Event;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -55,9 +56,10 @@ pub fn dispatch(
     edits: &mut BufferEdits,
     store: &BufferStore,
     terminal: &Terminal,
+    keymap: &Keymap,
 ) -> DispatchOutcome {
     match ev {
-        Event::Key(k) => dispatch_key(k, tabs, edits, store, terminal),
+        Event::Key(k) => dispatch_key(k, tabs, edits, store, terminal, keymap),
         // `Resize` is applied inside `TerminalInputDriver.process` —
         // pure state, no dispatch work here. M2 does not re-clamp
         // cursor/scroll on resize; next movement re-clamps.
@@ -66,101 +68,113 @@ pub fn dispatch(
     }
 }
 
+/// Keymap-first dispatch. The keymap resolves a key to a [`Command`];
+/// unbound printable characters fall through to
+/// [`Command::InsertChar`] as an implicit "insert the typed char"
+/// policy.
 pub fn dispatch_key(
     k: KeyEvent,
     tabs: &mut Tabs,
     edits: &mut BufferEdits,
     store: &BufferStore,
     terminal: &Terminal,
+    keymap: &Keymap,
 ) -> DispatchOutcome {
-    match (k.modifiers, k.code) {
-        // Quit (Ctrl-C) — takes precedence over the plain Char arm.
-        (m, KeyCode::Char('c')) if m.contains(KeyModifiers::CONTROL) => DispatchOutcome::Quit,
+    let cmd = match keymap.lookup(&k) {
+        Some(cmd) => cmd,
+        None => match implicit_insert(&k) {
+            Some(cmd) => cmd,
+            None => return DispatchOutcome::Continue,
+        },
+    };
+    run_command(cmd, tabs, edits, store, terminal)
+}
 
-        // Save the active buffer (Ctrl-S). No-op on a clean or
-        // unloaded buffer. Same arm shape as Ctrl-C so the Ctrl
-        // handling lives together.
-        (m, KeyCode::Char('s')) if m.contains(KeyModifiers::CONTROL) => {
+/// Printable-char fallback: an unbound `Char(c)` with no Ctrl / Alt
+/// is treated as "insert that character". Shift is tolerated because
+/// terminals typically fold shift into the char itself (`A` vs `a`).
+fn implicit_insert(k: &KeyEvent) -> Option<Command> {
+    let KeyCode::Char(c) = k.code else {
+        return None;
+    };
+    if k.modifiers.contains(KeyModifiers::CONTROL) || k.modifiers.contains(KeyModifiers::ALT) {
+        return None;
+    }
+    if c.is_control() {
+        return None;
+    }
+    Some(Command::InsertChar(c))
+}
+
+fn run_command(
+    cmd: Command,
+    tabs: &mut Tabs,
+    edits: &mut BufferEdits,
+    store: &BufferStore,
+    terminal: &Terminal,
+) -> DispatchOutcome {
+    match cmd {
+        Command::Quit => DispatchOutcome::Quit,
+        Command::Save => {
             request_save_active(tabs, edits);
             DispatchOutcome::Continue
         }
-
-        // Tab switching (M1).
-        (m, KeyCode::Tab) if m.is_empty() => {
+        Command::TabNext => {
             cycle_active(tabs, 1);
             DispatchOutcome::Continue
         }
-        (m, KeyCode::BackTab) if m.contains(KeyModifiers::SHIFT) || m.is_empty() => {
-            // Many terminals emit BackTab without an explicit SHIFT flag;
-            // accept both for robustness.
+        Command::TabPrev => {
             cycle_active(tabs, -1);
             DispatchOutcome::Continue
         }
-
-        // Cursor movement (M2). Rope comes from edits first, store
-        // second, so movement stays valid against the user's view.
-        (m, KeyCode::Up) if m.is_empty() => {
+        Command::CursorUp => {
             move_cursor(tabs, edits, store, terminal, Move::Up);
             DispatchOutcome::Continue
         }
-        (m, KeyCode::Down) if m.is_empty() => {
+        Command::CursorDown => {
             move_cursor(tabs, edits, store, terminal, Move::Down);
             DispatchOutcome::Continue
         }
-        (m, KeyCode::Left) if m.is_empty() => {
+        Command::CursorLeft => {
             move_cursor(tabs, edits, store, terminal, Move::Left);
             DispatchOutcome::Continue
         }
-        (m, KeyCode::Right) if m.is_empty() => {
+        Command::CursorRight => {
             move_cursor(tabs, edits, store, terminal, Move::Right);
             DispatchOutcome::Continue
         }
-        (m, KeyCode::Home) if m.is_empty() => {
+        Command::CursorLineStart => {
             move_cursor(tabs, edits, store, terminal, Move::LineStart);
             DispatchOutcome::Continue
         }
-        (m, KeyCode::End) if m.is_empty() => {
+        Command::CursorLineEnd => {
             move_cursor(tabs, edits, store, terminal, Move::LineEnd);
             DispatchOutcome::Continue
         }
-        (m, KeyCode::PageUp) if m.is_empty() => {
+        Command::CursorPageUp => {
             move_cursor(tabs, edits, store, terminal, Move::PageUp);
             DispatchOutcome::Continue
         }
-        (m, KeyCode::PageDown) if m.is_empty() => {
+        Command::CursorPageDown => {
             move_cursor(tabs, edits, store, terminal, Move::PageDown);
             DispatchOutcome::Continue
         }
-
-        // Editing (M3). All four primitives no-op unless the active
-        // tab's buffer has been seeded in BufferEdits (which happens
-        // when the file-read driver's load completion is drained).
-        (m, KeyCode::Char(c))
-            if m.is_empty()
-                || (m == KeyModifiers::SHIFT && !c.is_control())
-                || (!m.contains(KeyModifiers::CONTROL) && !m.contains(KeyModifiers::ALT)) =>
-        {
-            // Accept plain char or Shift+char (terminals usually emit
-            // the final glyph directly; Shift may or may not be set).
-            // Explicitly reject Ctrl- / Alt- combos — they're reserved
-            // for the keymap layer (M5).
-            insert_char(tabs, edits, c);
-            DispatchOutcome::Continue
-        }
-        (m, KeyCode::Enter) if m.is_empty() => {
+        Command::InsertNewline => {
             insert_newline(tabs, edits);
             DispatchOutcome::Continue
         }
-        (m, KeyCode::Backspace) if m.is_empty() => {
+        Command::DeleteBack => {
             delete_back(tabs, edits);
             DispatchOutcome::Continue
         }
-        (m, KeyCode::Delete) if m.is_empty() => {
+        Command::DeleteForward => {
             delete_forward(tabs, edits);
             DispatchOutcome::Continue
         }
-
-        _ => DispatchOutcome::Continue,
+        Command::InsertChar(c) => {
+            insert_char(tabs, edits, c);
+            DispatchOutcome::Continue
+        }
     }
 }
 
@@ -415,12 +429,26 @@ fn line_char_len(rope: &Rope, line: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::keymap::default_keymap;
     use led_core::{CanonPath, UserPath};
     use led_driver_buffers_core::LoadState;
     use led_driver_terminal_core::{Dims, KeyCode, KeyEvent, KeyModifiers, Terminal};
     use led_state_tabs::{Cursor, Scroll, Tab, TabId, Tabs};
     use ropey::Rope;
     use std::sync::Arc;
+
+    /// Dispatch a key with the default keymap. Almost every test cares
+    /// about state effects rather than the keymap itself, so hiding
+    /// the keymap arg makes call sites readable.
+    fn dispatch_default(
+        k: KeyEvent,
+        tabs: &mut Tabs,
+        edits: &mut BufferEdits,
+        store: &BufferStore,
+        terminal: &Terminal,
+    ) -> DispatchOutcome {
+        dispatch_key(k, tabs, edits, store, terminal, &default_keymap())
+    }
 
     fn canon(s: &str) -> CanonPath {
         UserPath::new(s).canonicalize()
@@ -460,7 +488,8 @@ mod tests {
         let mut edits = BufferEdits::default();
         let store = BufferStore::default();
         let terminal = Terminal::default();
-        dispatch_key(k, tabs, &mut edits, &store, &terminal)
+        let keymap = crate::keymap::default_keymap();
+        dispatch_key(k, tabs, &mut edits, &store, &terminal, &keymap)
     }
 
     // ── Tab switching + quit (M1 behaviour, unchanged) ──────────────────
@@ -478,10 +507,13 @@ mod tests {
 
     #[test]
     fn shift_tab_cycles_backward() {
+        // Terminals may encode Shift+Tab either as `{Tab, SHIFT}`
+        // (modifier) or `{BackTab, NONE}` (special key code). The
+        // default keymap binds both forms.
         let mut tabs = tabs_with(&[("a", 1), ("b", 2), ("c", 3)], Some(1));
-        noop_dispatch(key(KeyModifiers::SHIFT, KeyCode::BackTab), &mut tabs);
+        noop_dispatch(key(KeyModifiers::SHIFT, KeyCode::Tab), &mut tabs);
         assert_eq!(tabs.active, Some(TabId(3)));
-        noop_dispatch(key(KeyModifiers::SHIFT, KeyCode::BackTab), &mut tabs);
+        noop_dispatch(key(KeyModifiers::NONE, KeyCode::BackTab), &mut tabs);
         assert_eq!(tabs.active, Some(TabId(2)));
     }
 
@@ -532,7 +564,7 @@ mod tests {
             fixture_with_content("a\nb\nc\nd\ne\nf", Dims { cols: 10, rows: 5 });
         // body_rows = 4. Cursor starts at (0,0); moving down stays in view.
         for _ in 0..3 {
-            dispatch_key(
+            dispatch_default(
                 key(KeyModifiers::NONE, KeyCode::Down),
                 &mut tabs,
                 &mut edits,
@@ -557,7 +589,7 @@ mod tests {
             fixture_with_content("a\nb\nc\nd\ne\nf", Dims { cols: 10, rows: 4 });
         // body_rows = 3. Fourth Down leaves viewport → scroll.top becomes 1.
         for _ in 0..3 {
-            dispatch_key(
+            dispatch_default(
                 key(KeyModifiers::NONE, KeyCode::Down),
                 &mut tabs,
                 &mut edits,
@@ -589,7 +621,7 @@ mod tests {
         // body_rows = 3. Moving up from line 5 to line 2 should leave view
         // at the top.
         for _ in 0..3 {
-            dispatch_key(
+            dispatch_default(
                 key(KeyModifiers::NONE, KeyCode::Up),
                 &mut tabs,
                 &mut edits,
@@ -614,7 +646,7 @@ mod tests {
             fixture_with_content("hi\nworld", Dims { cols: 10, rows: 5 });
         // Line 0 = "hi" (len 2). Right from col 0 → 1 → 2 → 2.
         for expected in [1usize, 2, 2] {
-            dispatch_key(
+            dispatch_default(
                 key(KeyModifiers::NONE, KeyCode::Right),
                 &mut tabs,
                 &mut edits,
@@ -634,7 +666,7 @@ mod tests {
             col: 1,
             preferred_col: 1,
         };
-        dispatch_key(
+        dispatch_default(
             key(KeyModifiers::NONE, KeyCode::Left),
             &mut tabs,
             &mut edits,
@@ -642,7 +674,7 @@ mod tests {
             &term,
         );
         assert_eq!(tabs.open[0].cursor.col, 0);
-        dispatch_key(
+        dispatch_default(
             key(KeyModifiers::NONE, KeyCode::Left),
             &mut tabs,
             &mut edits,
@@ -661,7 +693,7 @@ mod tests {
             col: 3,
             preferred_col: 3,
         };
-        dispatch_key(
+        dispatch_default(
             key(KeyModifiers::NONE, KeyCode::End),
             &mut tabs,
             &mut edits,
@@ -676,7 +708,7 @@ mod tests {
                 preferred_col: 6,
             }
         );
-        dispatch_key(
+        dispatch_default(
             key(KeyModifiers::NONE, KeyCode::Home),
             &mut tabs,
             &mut edits,
@@ -702,7 +734,7 @@ mod tests {
         let (mut tabs, mut edits, store, term) =
             fixture_with_content(&body, Dims { cols: 40, rows: 11 });
         // body_rows = 10. PageDown from line 0 → line 10, scroll follows.
-        dispatch_key(
+        dispatch_default(
             key(KeyModifiers::NONE, KeyCode::PageDown),
             &mut tabs,
             &mut edits,
@@ -719,7 +751,7 @@ mod tests {
         let mut edits = BufferEdits::default(); // not seeded
         let store = BufferStore::default(); // no content loaded
         let term = terminal_with(Some(Dims { cols: 10, rows: 5 }));
-        dispatch_key(
+        dispatch_default(
             key(KeyModifiers::NONE, KeyCode::Down),
             &mut tabs,
             &mut edits,
@@ -926,7 +958,7 @@ mod tests {
             preferred_col: 1,
         };
 
-        dispatch_key(
+        dispatch_default(
             key(KeyModifiers::NONE, KeyCode::Char('X')),
             &mut tabs,
             &mut edits,
@@ -951,7 +983,7 @@ mod tests {
             preferred_col: 3,
         };
 
-        dispatch_key(
+        dispatch_default(
             key(KeyModifiers::NONE, KeyCode::Enter),
             &mut tabs,
             &mut edits,
@@ -981,7 +1013,7 @@ mod tests {
             preferred_col: 5,
         };
 
-        dispatch_key(
+        dispatch_default(
             key(KeyModifiers::NONE, KeyCode::Backspace),
             &mut tabs,
             &mut edits,
@@ -1003,7 +1035,7 @@ mod tests {
             preferred_col: 0,
         };
 
-        dispatch_key(
+        dispatch_default(
             key(KeyModifiers::NONE, KeyCode::Backspace),
             &mut tabs,
             &mut edits,
@@ -1029,7 +1061,7 @@ mod tests {
             fixture_with_content("abc\n", Dims { cols: 10, rows: 5 });
         let v0 = version_of(&edits, "file.rs");
 
-        dispatch_key(
+        dispatch_default(
             key(KeyModifiers::NONE, KeyCode::Backspace),
             &mut tabs,
             &mut edits,
@@ -1052,7 +1084,7 @@ mod tests {
             preferred_col: 1,
         };
 
-        dispatch_key(
+        dispatch_default(
             key(KeyModifiers::NONE, KeyCode::Delete),
             &mut tabs,
             &mut edits,
@@ -1075,7 +1107,7 @@ mod tests {
             preferred_col: 3,
         };
 
-        dispatch_key(
+        dispatch_default(
             key(KeyModifiers::NONE, KeyCode::Delete),
             &mut tabs,
             &mut edits,
@@ -1099,7 +1131,7 @@ mod tests {
         };
         let v0 = version_of(&edits, "file.rs");
 
-        dispatch_key(
+        dispatch_default(
             key(KeyModifiers::NONE, KeyCode::Delete),
             &mut tabs,
             &mut edits,
@@ -1132,7 +1164,7 @@ mod tests {
             KeyCode::Backspace,
             KeyCode::Delete,
         ] {
-            dispatch_key(
+            dispatch_default(
                 key(KeyModifiers::NONE, code),
                 &mut tabs,
                 &mut edits,
@@ -1151,7 +1183,7 @@ mod tests {
         // Char-insert arm, even though 'c' is printable.
         let (mut tabs, mut edits, store, term) =
             fixture_with_content("", Dims { cols: 10, rows: 5 });
-        let outcome = dispatch_key(
+        let outcome = dispatch_default(
             key(KeyModifiers::CONTROL, KeyCode::Char('c')),
             &mut tabs,
             &mut edits,
@@ -1184,7 +1216,7 @@ mod tests {
         };
 
         // Edit tab a.
-        dispatch_key(
+        dispatch_default(
             key(KeyModifiers::NONE, KeyCode::Char('!')),
             &mut tabs,
             &mut edits,
@@ -1193,7 +1225,7 @@ mod tests {
         );
 
         // Switch to tab b.
-        dispatch_key(
+        dispatch_default(
             key(KeyModifiers::NONE, KeyCode::Tab),
             &mut tabs,
             &mut edits,
@@ -1205,7 +1237,7 @@ mod tests {
             col: 1,
             preferred_col: 1,
         };
-        dispatch_key(
+        dispatch_default(
             key(KeyModifiers::NONE, KeyCode::Char('?')),
             &mut tabs,
             &mut edits,
@@ -1233,7 +1265,7 @@ mod tests {
         eb.version = 1;
         assert!(eb.dirty());
 
-        dispatch_key(
+        dispatch_default(
             key(KeyModifiers::CONTROL, KeyCode::Char('s')),
             &mut tabs,
             &mut edits,
@@ -1249,7 +1281,7 @@ mod tests {
         let (mut tabs, mut edits, store, term) =
             fixture_with_content("hi", Dims { cols: 10, rows: 5 });
         // Buffer is fresh (version == saved_version == 0).
-        dispatch_key(
+        dispatch_default(
             key(KeyModifiers::CONTROL, KeyCode::Char('s')),
             &mut tabs,
             &mut edits,
@@ -1265,7 +1297,7 @@ mod tests {
         let mut edits = BufferEdits::default();
         let store = BufferStore::default();
         let term = terminal_with(Some(Dims { cols: 10, rows: 5 }));
-        dispatch_key(
+        dispatch_default(
             key(KeyModifiers::CONTROL, KeyCode::Char('s')),
             &mut tabs,
             &mut edits,
@@ -1273,6 +1305,81 @@ mod tests {
             &term,
         );
         assert!(edits.pending_saves.is_empty());
+    }
+
+    #[test]
+    fn custom_keymap_routes_to_the_bound_command() {
+        // Bind Ctrl-Q to Quit on a custom keymap and confirm dispatch
+        // honours it. Ctrl-C — unbound in this map — reaches nothing
+        // special (falls through as no-op, since it's a control char
+        // the implicit-insert fallback also rejects).
+        let mut tabs = tabs_with(&[("a", 1)], Some(1));
+        let mut edits = BufferEdits::default();
+        let store = BufferStore::default();
+        let term = terminal_with(Some(Dims { cols: 10, rows: 5 }));
+
+        let mut km = Keymap::empty();
+        km.bind("ctrl-q", Command::Quit);
+
+        let outcome = dispatch_key(
+            key(KeyModifiers::CONTROL, KeyCode::Char('q')),
+            &mut tabs,
+            &mut edits,
+            &store,
+            &term,
+            &km,
+        );
+        assert_eq!(outcome, DispatchOutcome::Quit);
+
+        // Ctrl-C not bound here → Continue (not Quit).
+        let outcome = dispatch_key(
+            key(KeyModifiers::CONTROL, KeyCode::Char('c')),
+            &mut tabs,
+            &mut edits,
+            &store,
+            &term,
+            &km,
+        );
+        assert_eq!(outcome, DispatchOutcome::Continue);
+    }
+
+    #[test]
+    fn unbound_printable_char_falls_through_to_insert() {
+        // A printable char with no binding falls through to InsertChar.
+        // Only the active tab's edited rope gets the character.
+        let (mut tabs, mut edits, store, term) =
+            fixture_with_content("", Dims { cols: 10, rows: 5 });
+
+        let km = Keymap::empty(); // no bindings at all
+        dispatch_key(
+            key(KeyModifiers::NONE, KeyCode::Char('z')),
+            &mut tabs,
+            &mut edits,
+            &store,
+            &term,
+            &km,
+        );
+        assert_eq!(rope_of(&edits, "file.rs").to_string(), "z");
+    }
+
+    #[test]
+    fn ctrl_char_without_binding_is_swallowed_not_inserted() {
+        // An unbound Ctrl-combo must NOT fall through to InsertChar,
+        // otherwise typing Ctrl-X on an unconfigured keymap would
+        // insert 'x' into the buffer.
+        let (mut tabs, mut edits, store, term) =
+            fixture_with_content("", Dims { cols: 10, rows: 5 });
+
+        let km = Keymap::empty();
+        dispatch_key(
+            key(KeyModifiers::CONTROL, KeyCode::Char('x')),
+            &mut tabs,
+            &mut edits,
+            &store,
+            &term,
+            &km,
+        );
+        assert_eq!(rope_of(&edits, "file.rs").to_string(), "");
     }
 
     #[test]
@@ -1299,7 +1406,7 @@ mod tests {
         let store = BufferStore::default();
         let term = terminal_with(Some(Dims { cols: 10, rows: 5 }));
 
-        dispatch_key(
+        dispatch_default(
             key(KeyModifiers::CONTROL, KeyCode::Char('s')),
             &mut tabs,
             &mut edits,

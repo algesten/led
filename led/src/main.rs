@@ -11,7 +11,7 @@ use led_core::UserPath;
 use led_driver_buffers_core::BufferStore;
 use led_driver_terminal_core::Terminal;
 use led_driver_terminal_native::RawModeGuard;
-use led_runtime::{spawn_drivers, SharedTrace, TabIdGen};
+use led_runtime::{load_keymap, spawn_drivers, SharedTrace, TabIdGen};
 use led_state_buffer_edits::BufferEdits;
 use led_state_tabs::{Tab, Tabs};
 
@@ -25,8 +25,9 @@ struct Cli {
     #[arg(long)]
     golden_trace: Option<PathBuf>,
 
-    /// Reserved for later milestones; ignored today.
-    #[arg(long, hide = true)]
+    /// Directory containing `config.toml`. Defaults to
+    /// `~/.config/led/`. Missing file is not an error.
+    #[arg(long)]
     config_dir: Option<PathBuf>,
 
     // The goldens runner always passes these; parse-and-ignore so it
@@ -41,6 +42,16 @@ struct Cli {
 
 fn main() -> io::Result<()> {
     let cli = Cli::parse();
+
+    // Load keymap before raw mode so parse errors land on a cooked
+    // terminal where the user can read them.
+    let keymap = match load_keymap(cli.config_dir.as_deref()) {
+        Ok(k) => k,
+        Err(e) => {
+            eprintln!("led: config error: {e}");
+            std::process::exit(2);
+        }
+    };
 
     let trace = match cli.golden_trace {
         Some(path) => {
@@ -84,6 +95,7 @@ fn main() -> io::Result<()> {
         &mut store,
         &mut terminal,
         &drivers,
+        &keymap,
         &mut stdout,
         &trace,
     )?;

@@ -29,3 +29,5 @@ led-driver-terminal-native = { workspace = true }
 drv = { workspace = true }
 imbl = { workspace = true }
 ropey = { workspace = true }
+toml = { workspace = true }
+dirs = { workspace = true }

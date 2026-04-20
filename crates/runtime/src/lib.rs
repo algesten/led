@@ -13,7 +13,9 @@
 //! A mobile runtime would replace this crate — same `*-core` crates
 //! underneath, different wiring + different native workers.
 
+pub mod config;
 pub mod dispatch;
+pub mod keymap;
 pub mod query;
 pub mod trace;
 
@@ -28,7 +30,9 @@ use led_driver_terminal_native::{paint, TerminalInputNative};
 use led_state_buffer_edits::{BufferEdits, EditedBuffer};
 use led_state_tabs::{TabId, Tabs};
 
+pub use config::{load_keymap, ConfigError};
 pub use dispatch::{dispatch, dispatch_key, DispatchOutcome};
+pub use keymap::{default_keymap, parse_command, parse_key, Command, Keymap};
 pub use query::{
     body_model, file_load_action, file_save_action, render_frame, tab_bar_model,
     EditedBuffersInput, PendingSavesInput, StoreLoadedInput, TabsActiveInput, TabsOpenInput,
@@ -72,12 +76,19 @@ impl TabIdGen {
 }
 
 /// Run the main loop until dispatch signals quit.
+///
+/// Many parameters are intentional — this is the integration seam
+/// where every source + driver + config is threaded into the loop.
+/// Packaging them into a struct would hide the relationships rather
+/// than clarifying them.
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     tabs: &mut Tabs,
     edits: &mut BufferEdits,
     store: &mut BufferStore,
     terminal: &mut Terminal,
     drivers: &Drivers,
+    keymap: &Keymap,
     stdout: &mut impl Write,
     trace: &SharedTrace,
 ) -> io::Result<()> {
@@ -130,7 +141,7 @@ pub fn run(
                 TermEvent::Key(k) => Event::Key(k),
                 TermEvent::Resize(d) => Event::Resize(d),
             };
-            match dispatch(ev, tabs, edits, store, terminal) {
+            match dispatch(ev, tabs, edits, store, terminal, keymap) {
                 DispatchOutcome::Continue => {}
                 DispatchOutcome::Quit => {
                     quit = true;
