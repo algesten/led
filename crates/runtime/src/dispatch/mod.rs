@@ -159,9 +159,7 @@ pub fn dispatch_key(
     // Step 0 — confirm-kill gate.
     if let Some(target) = alerts.confirm_kill {
         alerts.confirm_kill = None;
-        if k.modifiers.is_empty()
-            && matches!(k.code, KeyCode::Char('y') | KeyCode::Char('Y'))
-        {
+        if k.modifiers.is_empty() && matches!(k.code, KeyCode::Char('y') | KeyCode::Char('Y')) {
             force_kill(tabs, edits, target);
             return DispatchOutcome::Continue;
         }

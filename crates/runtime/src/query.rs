@@ -206,9 +206,10 @@ pub fn file_save_action<'p, 'b>(
 /// pointer copy.
 ///
 /// Format per label: `<prefix><name>` where `<prefix>` is `●`
-/// (filled circle) when the buffer is dirty, else no prefix. Matches
-/// the legacy goldens. The painter adds the surrounding spaces
-/// (`" <label> "`) so a dirty active tab reads `" ●foo.rs "`.
+/// (filled circle) when the buffer is dirty, else a space. The painter
+/// wraps each label in `" <label> "`, so the two cases render as
+/// `"  foo.rs "` (clean) and `" ●foo.rs "` (dirty) — the `●`
+/// replaces the second leading space, matching the legacy goldens.
 #[drv::memo(single)]
 pub fn tab_bar_model<'a, 'b>(
     tabs: TabsActiveInput<'a>,
@@ -231,14 +232,14 @@ pub fn tab_bar_model<'a, 'b>(
                 .get(&t.path)
                 .map(|b| b.dirty())
                 .unwrap_or(false);
+            let mut s = String::with_capacity(base.len() + "\u{25cf}".len());
             if dirty {
-                let mut s = String::with_capacity(base.len() + "\u{25cf}".len());
                 s.push('\u{25cf}'); // ●
-                s.push_str(&base);
-                s
             } else {
-                base
+                s.push(' ');
             }
+            s.push_str(&base);
+            s
         })
         .collect();
     TabBarModel {
@@ -621,7 +622,7 @@ mod tests {
             Some(Dims { cols: 80, rows: 24 }),
         );
         let frame = render(&t, &e, &s, &term).expect("dims set");
-        assert_eq!(*frame.tab_bar.labels, vec!["a.rs".to_string()]);
+        assert_eq!(*frame.tab_bar.labels, vec![" a.rs".to_string()]);
         assert_eq!(frame.tab_bar.active, Some(0));
         assert!(matches!(frame.body, BodyModel::Pending { .. }));
     }
@@ -902,7 +903,7 @@ mod tests {
         let frame = render(&t, &e, &s, &term).expect("dims set");
         assert_eq!(
             *frame.tab_bar.labels,
-            vec!["a.rs".to_string(), "\u{25cf}b.rs".to_string()]
+            vec![" a.rs".to_string(), "\u{25cf}b.rs".to_string()]
         );
     }
 
