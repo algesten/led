@@ -1,0 +1,13 @@
+[package]
+name = "led-state-alerts"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Session-global user-decision source: alerts + confirm-kill flag.
+# No driver — alert entries are produced by dispatch (info on save,
+# warn on write error, confirm_kill on kill-dirty) and expired by
+# the runtime's tick loop.
+
+[dependencies]
+led-state-tabs = { workspace = true }
