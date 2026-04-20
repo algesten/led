@@ -25,7 +25,7 @@ use led_state_tabs::{Cursor, Scroll, Tab, Tabs};
 use ropey::Rope;
 use std::sync::Arc;
 
-use crate::keymap::{Command, Keymap};
+use crate::keymap::{ChordState, Command, Keymap};
 use crate::Event;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -47,6 +47,10 @@ enum Move {
     LineEnd,
     PageUp,
     PageDown,
+    FileStart,
+    FileEnd,
+    WordLeft,
+    WordRight,
 }
 
 /// Top-level entry point used by the main loop.
@@ -57,9 +61,10 @@ pub fn dispatch(
     store: &BufferStore,
     terminal: &Terminal,
     keymap: &Keymap,
+    chord: &mut ChordState,
 ) -> DispatchOutcome {
     match ev {
-        Event::Key(k) => dispatch_key(k, tabs, edits, store, terminal, keymap),
+        Event::Key(k) => dispatch_key(k, tabs, edits, store, terminal, keymap, chord),
         // `Resize` is applied inside `TerminalInputDriver.process` —
         // pure state, no dispatch work here. M2 does not re-clamp
         // cursor/scroll on resize; next movement re-clamps.
@@ -68,10 +73,20 @@ pub fn dispatch(
     }
 }
 
-/// Keymap-first dispatch. The keymap resolves a key to a [`Command`];
-/// unbound printable characters fall through to
-/// [`Command::InsertChar`] as an implicit "insert the typed char"
-/// policy.
+/// Keymap-first dispatch with chord support. Algorithm:
+///
+/// 1. If a chord prefix is pending, consume it and look up the
+///    second key in that prefix's table. Unknown second key silently
+///    cancels. Matches legacy `keymap.md` § "Chord prefix with no
+///    second chord".
+/// 2. Otherwise try the direct table.
+/// 3. Otherwise, if the key is itself a prefix, store it as pending
+///    and return.
+/// 4. Otherwise fall through to [`implicit_insert`] — printable chars
+///    with no Ctrl/Alt insert themselves.
+///
+/// The pending prefix is always cleared before resolving the second
+/// key so a failed chord never leaks state into the next press.
 pub fn dispatch_key(
     k: KeyEvent,
     tabs: &mut Tabs,
@@ -79,15 +94,30 @@ pub fn dispatch_key(
     store: &BufferStore,
     terminal: &Terminal,
     keymap: &Keymap,
+    chord: &mut ChordState,
 ) -> DispatchOutcome {
-    let cmd = match keymap.lookup(&k) {
-        Some(cmd) => cmd,
-        None => match implicit_insert(&k) {
-            Some(cmd) => cmd,
-            None => return DispatchOutcome::Continue,
-        },
-    };
-    run_command(cmd, tabs, edits, store, terminal)
+    if let Some(prefix) = chord.pending.take() {
+        if let Some(cmd) = keymap.lookup_chord(&prefix, &k) {
+            return run_command(cmd, tabs, edits, store, terminal);
+        }
+        // Silent cancel — matches legacy behaviour.
+        return DispatchOutcome::Continue;
+    }
+
+    if let Some(cmd) = keymap.lookup_direct(&k) {
+        return run_command(cmd, tabs, edits, store, terminal);
+    }
+
+    if keymap.is_prefix(&k) {
+        chord.pending = Some(k);
+        return DispatchOutcome::Continue;
+    }
+
+    if let Some(cmd) = implicit_insert(&k) {
+        return run_command(cmd, tabs, edits, store, terminal);
+    }
+
+    DispatchOutcome::Continue
 }
 
 /// Printable-char fallback: an unbound `Char(c)` with no Ctrl / Alt
@@ -115,7 +145,24 @@ fn run_command(
 ) -> DispatchOutcome {
     match cmd {
         Command::Quit => DispatchOutcome::Quit,
+        Command::Abort => {
+            // No-op at the plain editor level. Future milestones
+            // (M9 confirm-kill, M13 isearch, M17/18 LSP overlays)
+            // short-circuit the dispatch stream before this point
+            // when their modal is active.
+            DispatchOutcome::Continue
+        }
         Command::Save => {
+            request_save_active(tabs, edits);
+            DispatchOutcome::Continue
+        }
+        Command::SaveAll => {
+            request_save_all(tabs, edits);
+            DispatchOutcome::Continue
+        }
+        Command::SaveNoFormat => {
+            // Alias of Save in M6. M18 (LSP format) will differentiate:
+            // Save runs format first, SaveNoFormat skips it.
             request_save_active(tabs, edits);
             DispatchOutcome::Continue
         }
@@ -125,6 +172,10 @@ fn run_command(
         }
         Command::TabPrev => {
             cycle_active(tabs, -1);
+            DispatchOutcome::Continue
+        }
+        Command::KillBuffer => {
+            kill_active(tabs, edits);
             DispatchOutcome::Continue
         }
         Command::CursorUp => {
@@ -157,6 +208,22 @@ fn run_command(
         }
         Command::CursorPageDown => {
             move_cursor(tabs, edits, store, terminal, Move::PageDown);
+            DispatchOutcome::Continue
+        }
+        Command::CursorFileStart => {
+            move_cursor(tabs, edits, store, terminal, Move::FileStart);
+            DispatchOutcome::Continue
+        }
+        Command::CursorFileEnd => {
+            move_cursor(tabs, edits, store, terminal, Move::FileEnd);
+            DispatchOutcome::Continue
+        }
+        Command::CursorWordLeft => {
+            move_cursor(tabs, edits, store, terminal, Move::WordLeft);
+            DispatchOutcome::Continue
+        }
+        Command::CursorWordRight => {
+            move_cursor(tabs, edits, store, terminal, Move::WordRight);
             DispatchOutcome::Continue
         }
         Command::InsertNewline => {
@@ -249,6 +316,51 @@ fn request_save_active(tabs: &Tabs, edits: &mut BufferEdits) {
     };
     if eb.dirty() {
         edits.pending_saves.insert(tab.path.clone());
+    }
+}
+
+/// Insert every dirty-buffer path into `pending_saves`. Paths not
+/// currently attached to any open tab are skipped — "save all" means
+/// "save everything the user currently has open that has changed."
+fn request_save_all(tabs: &Tabs, edits: &mut BufferEdits) {
+    for tab in tabs.open.iter() {
+        let Some(eb) = edits.buffers.get(&tab.path) else {
+            continue;
+        };
+        if eb.dirty() {
+            edits.pending_saves.insert(tab.path.clone());
+        }
+    }
+}
+
+// ── Kill buffer ────────────────────────────────────────────────────────
+
+/// Close the active tab. M6 no-ops if the buffer is dirty (no
+/// confirm-kill prompt yet — M9 adds that). After a successful kill,
+/// activate the neighbour tab or `None` if this was the last.
+fn kill_active(tabs: &mut Tabs, edits: &mut BufferEdits) {
+    let Some(id) = tabs.active else {
+        return;
+    };
+    let Some(idx) = tabs.open.iter().position(|t| t.id == id) else {
+        return;
+    };
+    // Guard against losing unsaved work. M9 swaps this for a
+    // confirm-kill prompt.
+    if let Some(eb) = edits.buffers.get(&tabs.open[idx].path)
+        && eb.dirty()
+    {
+        return;
+    }
+    let path = tabs.open[idx].path.clone();
+    tabs.open.remove(idx);
+    edits.buffers.remove(&path);
+    edits.pending_saves.remove(&path);
+    if tabs.open.is_empty() {
+        tabs.active = None;
+    } else {
+        let next = idx.min(tabs.open.len() - 1);
+        tabs.active = Some(tabs.open[next].id);
     }
 }
 
@@ -384,7 +496,97 @@ fn apply_move(c: Cursor, rope: &Rope, m: Move, body_rows: usize) -> Cursor {
         Move::Right => horizontal(c.line, clamp_col(c.line, c.col.saturating_add(1))),
         Move::LineStart => horizontal(c.line, 0),
         Move::LineEnd => horizontal(c.line, line_char_len(rope, c.line)),
+        Move::FileStart => horizontal(0, 0),
+        Move::FileEnd => {
+            let line = last_line;
+            horizontal(line, line_char_len(rope, line))
+        }
+        Move::WordLeft => {
+            let (line, col) = word_boundary_back(rope, c.line, c.col);
+            horizontal(line, col)
+        }
+        Move::WordRight => {
+            let (line, col) = word_boundary_fwd(rope, c.line, c.col);
+            horizontal(line, col)
+        }
     }
+}
+
+/// Word = run of alphanumeric-or-underscore chars. `word_boundary_fwd`
+/// skips any trailing non-word chars from the current position, then
+/// skips word chars to land at the start of the next non-word run.
+///
+/// Walks the rope directly with `RopeSlice::char_at`-style indexing —
+/// no intermediate allocation, matches the allocation-discipline rule
+/// for dispatch hot paths.
+fn word_boundary_fwd(rope: &Rope, mut line: usize, mut col: usize) -> (usize, usize) {
+    let line_count = rope.len_lines().max(1);
+    let last_line = line_count - 1;
+    loop {
+        let len = line_char_len(rope, line);
+        // 1. Skip non-word chars on the current line.
+        while col < len && !is_word_char(rope_char_at(rope, line, col)) {
+            col += 1;
+        }
+        if col >= len {
+            // Ran off the end; advance to the next line's start.
+            if line == last_line {
+                return (line, len);
+            }
+            line += 1;
+            col = 0;
+            continue;
+        }
+        // 2. Skip word chars; we land at the first non-word after them.
+        while col < line_char_len(rope, line)
+            && is_word_char(rope_char_at(rope, line, col))
+        {
+            col += 1;
+        }
+        return (line, col);
+    }
+}
+
+fn word_boundary_back(rope: &Rope, mut line: usize, mut col: usize) -> (usize, usize) {
+    loop {
+        if col == 0 {
+            if line == 0 {
+                return (0, 0);
+            }
+            line -= 1;
+            col = line_char_len(rope, line);
+            continue;
+        }
+        // 1. Skip non-word chars immediately behind the cursor.
+        while col > 0 && !is_word_char(rope_char_at(rope, line, col - 1)) {
+            col -= 1;
+        }
+        if col == 0 {
+            // Line ran out to the left; check if we landed on a word
+            // boundary or need to cross to the previous line.
+            if line == 0 {
+                return (0, 0);
+            }
+            // Previous line hasn't been scanned yet; loop handles it.
+            line -= 1;
+            col = line_char_len(rope, line);
+            continue;
+        }
+        // 2. Skip the word run itself — we land at its start.
+        while col > 0 && is_word_char(rope_char_at(rope, line, col - 1)) {
+            col -= 1;
+        }
+        return (line, col);
+    }
+}
+
+fn is_word_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
+fn rope_char_at(rope: &Rope, line: usize, col: usize) -> char {
+    let base = rope.line_to_char(line);
+    rope.char(base + col)
 }
 
 /// Move scroll.top so that the cursor row stays within [top, top+body_rows).
@@ -437,9 +639,9 @@ mod tests {
     use ropey::Rope;
     use std::sync::Arc;
 
-    /// Dispatch a key with the default keymap. Almost every test cares
-    /// about state effects rather than the keymap itself, so hiding
-    /// the keymap arg makes call sites readable.
+    /// Dispatch a key with the default keymap and a fresh chord
+    /// slot. Tests that care about chord state pass their own
+    /// `ChordState` via `dispatch_key` directly.
     fn dispatch_default(
         k: KeyEvent,
         tabs: &mut Tabs,
@@ -447,7 +649,33 @@ mod tests {
         store: &BufferStore,
         terminal: &Terminal,
     ) -> DispatchOutcome {
-        dispatch_key(k, tabs, edits, store, terminal, &default_keymap())
+        let mut chord = ChordState::default();
+        dispatch_key(
+            k,
+            tabs,
+            edits,
+            store,
+            terminal,
+            &default_keymap(),
+            &mut chord,
+        )
+    }
+
+    /// Press a chord sequence (prefix then second) with a fresh
+    /// `ChordState`. Used by tests that want to exercise legacy-style
+    /// chord-bound commands without duplicating the state setup.
+    fn dispatch_chord_default(
+        prefix: KeyEvent,
+        second: KeyEvent,
+        tabs: &mut Tabs,
+        edits: &mut BufferEdits,
+        store: &BufferStore,
+        terminal: &Terminal,
+    ) -> DispatchOutcome {
+        let keymap = default_keymap();
+        let mut chord = ChordState::default();
+        dispatch_key(prefix, tabs, edits, store, terminal, &keymap, &mut chord);
+        dispatch_key(second, tabs, edits, store, terminal, &keymap, &mut chord)
     }
 
     fn canon(s: &str) -> CanonPath {
@@ -489,7 +717,8 @@ mod tests {
         let store = BufferStore::default();
         let terminal = Terminal::default();
         let keymap = crate::keymap::default_keymap();
-        dispatch_key(k, tabs, &mut edits, &store, &terminal, &keymap)
+        let mut chord = ChordState::default();
+        dispatch_key(k, tabs, &mut edits, &store, &terminal, &keymap, &mut chord)
     }
 
     // ── Tab switching + quit (M1 behaviour, unchanged) ──────────────────
@@ -518,10 +747,49 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_c_signals_quit() {
+    fn ctrl_x_ctrl_c_signals_quit_as_chord() {
+        let mut tabs = tabs_with(&[("a", 1)], Some(1));
+        let mut edits = BufferEdits::default();
+        let store = BufferStore::default();
+        let term = Terminal::default();
+        let keymap = default_keymap();
+        let mut chord = ChordState::default();
+
+        // First half of the chord: ctrl+x → pending, Continue.
+        let outcome = dispatch_key(
+            key(KeyModifiers::CONTROL, KeyCode::Char('x')),
+            &mut tabs,
+            &mut edits,
+            &store,
+            &term,
+            &keymap,
+            &mut chord,
+        );
+        assert_eq!(outcome, DispatchOutcome::Continue);
+        assert!(chord.pending.is_some());
+
+        // Second half: ctrl+c → chord fires Quit.
+        let outcome = dispatch_key(
+            key(KeyModifiers::CONTROL, KeyCode::Char('c')),
+            &mut tabs,
+            &mut edits,
+            &store,
+            &term,
+            &keymap,
+            &mut chord,
+        );
+        assert_eq!(outcome, DispatchOutcome::Quit);
+        assert!(chord.pending.is_none());
+    }
+
+    #[test]
+    fn plain_ctrl_c_no_longer_quits() {
+        // Legacy parity: plain ctrl+c is unbound by default. It falls
+        // through implicit_insert (control char — rejected there too)
+        // and is a silent no-op.
         let mut tabs = tabs_with(&[("a", 1)], Some(1));
         let outcome = noop_dispatch(key(KeyModifiers::CONTROL, KeyCode::Char('c')), &mut tabs);
-        assert_eq!(outcome, DispatchOutcome::Quit);
+        assert_eq!(outcome, DispatchOutcome::Continue);
     }
 
     #[test]
@@ -1178,9 +1446,10 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_c_still_quits_not_inserts() {
-        // Regression guard: Ctrl-C must reach the Quit arm before the
-        // Char-insert arm, even though 'c' is printable.
+    fn ctrl_c_does_not_insert_c() {
+        // Regression guard: plain ctrl+c is unbound in the M6 default
+        // keymap (quit moved to ctrl+x ctrl+c), but we must still not
+        // let implicit_insert turn it into `InsertChar('c')`.
         let (mut tabs, mut edits, store, term) =
             fixture_with_content("", Dims { cols: 10, rows: 5 });
         let outcome = dispatch_default(
@@ -1190,7 +1459,7 @@ mod tests {
             &store,
             &term,
         );
-        assert_eq!(outcome, DispatchOutcome::Quit);
+        assert_eq!(outcome, DispatchOutcome::Continue);
         assert_eq!(rope_of(&edits, "file.rs").to_string(), "");
         assert!(!dirty_of(&edits, "file.rs"));
     }
@@ -1251,10 +1520,10 @@ mod tests {
         assert!(dirty_of(&edits, "b"));
     }
 
-    // ── M4: Ctrl-S save request ─────────────────────────────────────────
+    // ── Save via legacy chord (ctrl+x ctrl+s) ───────────────────────────
 
     #[test]
-    fn ctrl_s_queues_save_for_dirty_active_buffer() {
+    fn ctrl_x_ctrl_s_queues_save_for_dirty_active_buffer() {
         let (mut tabs, mut edits, store, term) =
             fixture_with_content("hi", Dims { cols: 10, rows: 5 });
         // Force dirty by bumping version past saved_version.
@@ -1265,7 +1534,8 @@ mod tests {
         eb.version = 1;
         assert!(eb.dirty());
 
-        dispatch_default(
+        dispatch_chord_default(
+            key(KeyModifiers::CONTROL, KeyCode::Char('x')),
             key(KeyModifiers::CONTROL, KeyCode::Char('s')),
             &mut tabs,
             &mut edits,
@@ -1277,11 +1547,12 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_s_on_clean_buffer_is_noop() {
+    fn ctrl_x_ctrl_s_on_clean_buffer_is_noop() {
         let (mut tabs, mut edits, store, term) =
             fixture_with_content("hi", Dims { cols: 10, rows: 5 });
         // Buffer is fresh (version == saved_version == 0).
-        dispatch_default(
+        dispatch_chord_default(
+            key(KeyModifiers::CONTROL, KeyCode::Char('x')),
             key(KeyModifiers::CONTROL, KeyCode::Char('s')),
             &mut tabs,
             &mut edits,
@@ -1292,12 +1563,13 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_s_on_unloaded_buffer_is_noop() {
+    fn ctrl_x_ctrl_s_on_unloaded_buffer_is_noop() {
         let mut tabs = tabs_with(&[("file.rs", 1)], Some(1));
         let mut edits = BufferEdits::default();
         let store = BufferStore::default();
         let term = terminal_with(Some(Dims { cols: 10, rows: 5 }));
-        dispatch_default(
+        dispatch_chord_default(
+            key(KeyModifiers::CONTROL, KeyCode::Char('x')),
             key(KeyModifiers::CONTROL, KeyCode::Char('s')),
             &mut tabs,
             &mut edits,
@@ -1319,7 +1591,8 @@ mod tests {
         let term = terminal_with(Some(Dims { cols: 10, rows: 5 }));
 
         let mut km = Keymap::empty();
-        km.bind("ctrl-q", Command::Quit);
+        km.bind("ctrl+q", Command::Quit);
+        let mut chord = ChordState::default();
 
         let outcome = dispatch_key(
             key(KeyModifiers::CONTROL, KeyCode::Char('q')),
@@ -1328,6 +1601,7 @@ mod tests {
             &store,
             &term,
             &km,
+            &mut chord,
         );
         assert_eq!(outcome, DispatchOutcome::Quit);
 
@@ -1339,6 +1613,7 @@ mod tests {
             &store,
             &term,
             &km,
+            &mut chord,
         );
         assert_eq!(outcome, DispatchOutcome::Continue);
     }
@@ -1351,6 +1626,7 @@ mod tests {
             fixture_with_content("", Dims { cols: 10, rows: 5 });
 
         let km = Keymap::empty(); // no bindings at all
+        let mut chord = ChordState::default();
         dispatch_key(
             key(KeyModifiers::NONE, KeyCode::Char('z')),
             &mut tabs,
@@ -1358,6 +1634,7 @@ mod tests {
             &store,
             &term,
             &km,
+            &mut chord,
         );
         assert_eq!(rope_of(&edits, "file.rs").to_string(), "z");
     }
@@ -1371,6 +1648,7 @@ mod tests {
             fixture_with_content("", Dims { cols: 10, rows: 5 });
 
         let km = Keymap::empty();
+        let mut chord = ChordState::default();
         dispatch_key(
             key(KeyModifiers::CONTROL, KeyCode::Char('x')),
             &mut tabs,
@@ -1378,13 +1656,14 @@ mod tests {
             &store,
             &term,
             &km,
+            &mut chord,
         );
         assert_eq!(rope_of(&edits, "file.rs").to_string(), "");
     }
 
     #[test]
-    fn ctrl_s_targets_only_active_tab() {
-        // Two dirty buffers; Ctrl-S on tab b should only enqueue b.
+    fn ctrl_x_ctrl_s_targets_only_active_tab() {
+        // Two dirty buffers; Ctrl-X Ctrl-S on tab b should only enqueue b.
         let mut tabs = tabs_with(&[("a", 1), ("b", 2)], Some(2));
         let mut edits = BufferEdits::default();
         edits.buffers.insert(
@@ -1406,7 +1685,8 @@ mod tests {
         let store = BufferStore::default();
         let term = terminal_with(Some(Dims { cols: 10, rows: 5 }));
 
-        dispatch_default(
+        dispatch_chord_default(
+            key(KeyModifiers::CONTROL, KeyCode::Char('x')),
             key(KeyModifiers::CONTROL, KeyCode::Char('s')),
             &mut tabs,
             &mut edits,
@@ -1416,5 +1696,242 @@ mod tests {
 
         assert!(edits.pending_saves.contains(&canon("b")));
         assert!(!edits.pending_saves.contains(&canon("a")));
+    }
+
+    // ── M6: chord dispatch + new commands ───────────────────────────────
+
+    #[test]
+    fn unknown_second_key_in_chord_cancels_silently() {
+        let (mut tabs, mut edits, store, term) =
+            fixture_with_content("hi", Dims { cols: 10, rows: 5 });
+        let keymap = default_keymap();
+        let mut chord = ChordState::default();
+        // ctrl+x → pending.
+        dispatch_key(
+            key(KeyModifiers::CONTROL, KeyCode::Char('x')),
+            &mut tabs,
+            &mut edits,
+            &store,
+            &term,
+            &keymap,
+            &mut chord,
+        );
+        assert!(chord.pending.is_some());
+        // Second key `z` isn't bound under ctrl+x → silent cancel.
+        let outcome = dispatch_key(
+            key(KeyModifiers::NONE, KeyCode::Char('z')),
+            &mut tabs,
+            &mut edits,
+            &store,
+            &term,
+            &keymap,
+            &mut chord,
+        );
+        assert_eq!(outcome, DispatchOutcome::Continue);
+        assert!(chord.pending.is_none());
+        // `z` was NOT inserted — the printable fallback only fires
+        // at the root, not inside a prefix.
+        assert_eq!(rope_of(&edits, "file.rs").to_string(), "hi");
+    }
+
+    #[test]
+    fn kill_buffer_closes_clean_active_tab() {
+        let mut tabs = tabs_with(&[("a", 1), ("b", 2)], Some(1));
+        let mut edits = BufferEdits::default();
+        edits.buffers.insert(
+            canon("a"),
+            EditedBuffer::fresh(Arc::new(Rope::from_str("A"))),
+        );
+        edits.buffers.insert(
+            canon("b"),
+            EditedBuffer::fresh(Arc::new(Rope::from_str("B"))),
+        );
+        let store = BufferStore::default();
+        let term = terminal_with(Some(Dims { cols: 10, rows: 5 }));
+
+        dispatch_chord_default(
+            key(KeyModifiers::CONTROL, KeyCode::Char('x')),
+            key(KeyModifiers::NONE, KeyCode::Char('k')),
+            &mut tabs,
+            &mut edits,
+            &store,
+            &term,
+        );
+
+        assert_eq!(tabs.open.len(), 1);
+        assert_eq!(tabs.open[0].id, TabId(2));
+        assert!(!edits.buffers.contains_key(&canon("a")));
+    }
+
+    #[test]
+    fn kill_buffer_on_dirty_is_noop_until_m9() {
+        let mut tabs = tabs_with(&[("a", 1), ("b", 2)], Some(1));
+        let mut edits = BufferEdits::default();
+        edits.buffers.insert(
+            canon("a"),
+            EditedBuffer {
+                rope: Arc::new(Rope::from_str("A")),
+                version: 1,
+                saved_version: 0,
+            },
+        );
+        edits.buffers.insert(
+            canon("b"),
+            EditedBuffer::fresh(Arc::new(Rope::from_str("B"))),
+        );
+        let store = BufferStore::default();
+        let term = terminal_with(Some(Dims { cols: 10, rows: 5 }));
+
+        dispatch_chord_default(
+            key(KeyModifiers::CONTROL, KeyCode::Char('x')),
+            key(KeyModifiers::NONE, KeyCode::Char('k')),
+            &mut tabs,
+            &mut edits,
+            &store,
+            &term,
+        );
+        // Tab a still open — M6 doesn't have confirm-kill.
+        assert_eq!(tabs.open.len(), 2);
+    }
+
+    #[test]
+    fn save_all_enqueues_every_dirty_buffer() {
+        let mut tabs = tabs_with(&[("a", 1), ("b", 2), ("c", 3)], Some(1));
+        let mut edits = BufferEdits::default();
+        edits.buffers.insert(
+            canon("a"),
+            EditedBuffer {
+                rope: Arc::new(Rope::from_str("A")),
+                version: 1,
+                saved_version: 0,
+            },
+        );
+        // b is clean.
+        edits.buffers.insert(
+            canon("b"),
+            EditedBuffer::fresh(Arc::new(Rope::from_str("B"))),
+        );
+        edits.buffers.insert(
+            canon("c"),
+            EditedBuffer {
+                rope: Arc::new(Rope::from_str("C")),
+                version: 2,
+                saved_version: 0,
+            },
+        );
+        let store = BufferStore::default();
+        let term = terminal_with(Some(Dims { cols: 10, rows: 5 }));
+
+        dispatch_chord_default(
+            key(KeyModifiers::CONTROL, KeyCode::Char('x')),
+            key(KeyModifiers::CONTROL, KeyCode::Char('a')),
+            &mut tabs,
+            &mut edits,
+            &store,
+            &term,
+        );
+        assert!(edits.pending_saves.contains(&canon("a")));
+        assert!(edits.pending_saves.contains(&canon("c")));
+        assert!(!edits.pending_saves.contains(&canon("b")));
+    }
+
+    #[test]
+    fn file_start_and_file_end_jump_to_extremes() {
+        let (mut tabs, mut edits, store, term) =
+            fixture_with_content(
+                "abc\ndef\nghij",
+                Dims { cols: 40, rows: 5 },
+            );
+        tabs.open[0].cursor = Cursor {
+            line: 1,
+            col: 2,
+            preferred_col: 2,
+        };
+
+        // ctrl+end → last line, last col.
+        dispatch_default(
+            key(KeyModifiers::CONTROL, KeyCode::End),
+            &mut tabs,
+            &mut edits,
+            &store,
+            &term,
+        );
+        assert_eq!(
+            tabs.open[0].cursor,
+            Cursor {
+                line: 2,
+                col: 4,
+                preferred_col: 4,
+            }
+        );
+
+        // ctrl+home → line 0, col 0.
+        dispatch_default(
+            key(KeyModifiers::CONTROL, KeyCode::Home),
+            &mut tabs,
+            &mut edits,
+            &store,
+            &term,
+        );
+        assert_eq!(
+            tabs.open[0].cursor,
+            Cursor {
+                line: 0,
+                col: 0,
+                preferred_col: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn word_right_and_word_left_move_by_word() {
+        let (mut tabs, mut edits, store, term) =
+            fixture_with_content(
+                "foo bar  baz",
+                Dims { cols: 40, rows: 5 },
+            );
+        // Cursor starts at (0, 0). alt+f → end of "foo" (col 3).
+        dispatch_default(
+            key(KeyModifiers::ALT, KeyCode::Char('f')),
+            &mut tabs,
+            &mut edits,
+            &store,
+            &term,
+        );
+        assert_eq!(tabs.open[0].cursor.col, 3);
+        // alt+f again → skip " ", skip "bar", land at col 7.
+        dispatch_default(
+            key(KeyModifiers::ALT, KeyCode::Char('f')),
+            &mut tabs,
+            &mut edits,
+            &store,
+            &term,
+        );
+        assert_eq!(tabs.open[0].cursor.col, 7);
+        // alt+b → back to start of "bar" (col 4).
+        dispatch_default(
+            key(KeyModifiers::ALT, KeyCode::Char('b')),
+            &mut tabs,
+            &mut edits,
+            &store,
+            &term,
+        );
+        assert_eq!(tabs.open[0].cursor.col, 4);
+        // alt+b → start of "foo" (col 0).
+        dispatch_default(
+            key(KeyModifiers::ALT, KeyCode::Char('b')),
+            &mut tabs,
+            &mut edits,
+            &store,
+            &term,
+        );
+        assert_eq!(tabs.open[0].cursor.col, 0);
+    }
+
+    #[test]
+    fn abort_is_a_noop_at_the_plain_editor_level() {
+        let mut tabs = tabs_with(&[("a", 1)], Some(1));
+        let outcome = noop_dispatch(key(KeyModifiers::NONE, KeyCode::Esc), &mut tabs);
+        assert_eq!(outcome, DispatchOutcome::Continue);
     }
 }

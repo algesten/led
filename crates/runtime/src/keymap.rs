@@ -22,10 +22,21 @@ use std::collections::HashMap;
 /// character.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Command {
+    // Lifecycle
     Quit,
+    Abort,
+
+    // Tab management
     TabNext,
     TabPrev,
+    KillBuffer,
+
+    // Save variants
     Save,
+    SaveAll,
+    SaveNoFormat,
+
+    // Cursor
     CursorUp,
     CursorDown,
     CursorLeft,
@@ -34,66 +45,119 @@ pub enum Command {
     CursorLineEnd,
     CursorPageUp,
     CursorPageDown,
+    CursorFileStart,
+    CursorFileEnd,
+    CursorWordLeft,
+    CursorWordRight,
+
+    // Editing
     InsertNewline,
     DeleteBack,
     DeleteForward,
     InsertChar(char),
 }
 
-/// Key → command binding set. Immutable during a run.
+/// Two-level key → command binding set. `direct` maps single keys to
+/// commands; `chords` maps a prefix key to a nested table mapping
+/// the second key to a command. Disjoint: a key in `direct` shadows
+/// any chord entry with the same prefix (legacy behaviour).
 #[derive(Debug, Clone, Default)]
 pub struct Keymap {
-    bindings: HashMap<KeyEvent, Command>,
+    direct: HashMap<KeyEvent, Command>,
+    chords: HashMap<KeyEvent, HashMap<KeyEvent, Command>>,
 }
 
 impl Keymap {
     pub fn empty() -> Self {
         Self {
-            bindings: HashMap::new(),
+            direct: HashMap::new(),
+            chords: HashMap::new(),
         }
     }
 
-    /// Bind a key string to a command. Panics on invalid key string —
+    /// Bind a single key to a command. Panics on invalid key string —
     /// only called from the baked-in `default_keymap` where the
     /// strings are static.
     pub fn bind(&mut self, key: &str, cmd: Command) {
         let ev = parse_key(key).unwrap_or_else(|e| panic!("invalid default key `{key}`: {e}"));
-        self.bindings.insert(ev, cmd);
+        self.direct.insert(ev, cmd);
     }
 
-    /// Insert an already-parsed key → command binding. Used by the
-    /// config loader where key strings may come from user input.
-    pub fn insert(&mut self, key: KeyEvent, cmd: Command) {
-        self.bindings.insert(key, cmd);
+    /// Bind a two-key chord (`prefix` then `second`) to a command.
+    /// Panics on invalid strings — caller beware, only for the baked
+    /// defaults.
+    pub fn bind_chord(&mut self, prefix: &str, second: &str, cmd: Command) {
+        let p = parse_key(prefix)
+            .unwrap_or_else(|e| panic!("invalid chord prefix `{prefix}`: {e}"));
+        let s = parse_key(second)
+            .unwrap_or_else(|e| panic!("invalid chord second `{second}`: {e}"));
+        self.chords.entry(p).or_default().insert(s, cmd);
     }
 
+    /// Insert an already-parsed direct binding. Used by the config
+    /// loader where key strings may come from user input.
+    pub fn insert_direct(&mut self, key: KeyEvent, cmd: Command) {
+        self.direct.insert(key, cmd);
+    }
+
+    /// Insert an already-parsed chord binding.
+    pub fn insert_chord(&mut self, prefix: KeyEvent, second: KeyEvent, cmd: Command) {
+        self.chords.entry(prefix).or_default().insert(second, cmd);
+    }
+
+    pub fn lookup_direct(&self, key: &KeyEvent) -> Option<Command> {
+        self.direct.get(key).copied()
+    }
+
+    pub fn lookup_chord(&self, prefix: &KeyEvent, second: &KeyEvent) -> Option<Command> {
+        self.chords.get(prefix)?.get(second).copied()
+    }
+
+    /// Does `key` begin a chord? A direct binding for the same key
+    /// shadows its chord table — `is_prefix` returns false then, so
+    /// dispatch routes through `lookup_direct`.
+    pub fn is_prefix(&self, key: &KeyEvent) -> bool {
+        !self.direct.contains_key(key) && self.chords.contains_key(key)
+    }
+
+    /// Backward-compat shim for M5 callers that only used direct
+    /// bindings (dispatch fallback path, tests that pre-date chords).
     pub fn lookup(&self, key: &KeyEvent) -> Option<Command> {
-        self.bindings.get(key).copied()
-    }
-
-    pub fn len(&self) -> usize {
-        self.bindings.len()
+        self.lookup_direct(key)
     }
 
     pub fn is_empty(&self) -> bool {
-        self.bindings.is_empty()
+        self.direct.is_empty() && self.chords.is_empty()
     }
 }
 
-/// Built-in keymap reproducing M1–M4 behaviour. The binary starts
-/// from this; user config merges overrides on top.
+/// Runtime-only chord state. Carries a pending prefix between
+/// dispatch ticks. Not a drv source — lives in the `run` frame,
+/// threaded through `dispatch_key` by `&mut`.
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChordState {
+    pub pending: Option<KeyEvent>,
+}
+
+/// Built-in keymap matching legacy `default_keys.toml` for every
+/// command the rewrite implements so far. User config merges
+/// overrides on top.
 ///
-/// M6 rebinds these to legacy Emacs-style chords (`ctrl+x ctrl+s`
-/// for save, `ctrl+x ctrl+c` for quit, etc.) once the chord
-/// infrastructure lands. Until then, plain `ctrl+s` / `ctrl+c` are
-/// the shortcuts.
+/// Bindings deliberately omitted from M6 because their feature isn't
+/// implemented yet (tracked in `docs/rewrite/ROADMAP.md`):
+///
+/// - `tab = "insert_tab"` — M23 (auto-indent). We keep `tab =
+///   "next_tab"` as a placeholder so tab switching still works.
+/// - `ctrl+f`, `ctrl+r`, `ctrl+b`, `ctrl+t`, `alt+tab`, `alt+.`,
+///   `alt+,`, `alt+]`, `alt+enter`, `alt+i`, `alt+o`, `ctrl+space`,
+///   `ctrl+w`, `ctrl+y`, `ctrl+k`, `ctrl+/`, `ctrl+_`, `ctrl+7`,
+///   `ctrl+z`, `ctrl+q`, `ctrl+x ctrl+f`, `ctrl+x ctrl+w`,
+///   `ctrl+x ctrl+p`, `ctrl+x i`, `ctrl+x (`, `ctrl+x )`,
+///   `ctrl+x e`, `ctrl+h e` — each lands in its feature milestone.
 pub fn default_keymap() -> Keymap {
     let mut m = Keymap::empty();
-    m.bind("ctrl+c", Command::Quit);
-    m.bind("ctrl+s", Command::Save);
-    m.bind("tab", Command::TabNext);
-    m.bind("shift+tab", Command::TabPrev);
-    m.bind("backtab", Command::TabPrev);
+
+    // Cursor movement (implemented by M2 / M6).
     m.bind("up", Command::CursorUp);
     m.bind("down", Command::CursorDown);
     m.bind("left", Command::CursorLeft);
@@ -102,9 +166,43 @@ pub fn default_keymap() -> Keymap {
     m.bind("end", Command::CursorLineEnd);
     m.bind("pageup", Command::CursorPageUp);
     m.bind("pagedown", Command::CursorPageDown);
+    m.bind("ctrl+a", Command::CursorLineStart);
+    m.bind("ctrl+e", Command::CursorLineEnd);
+    m.bind("alt+v", Command::CursorPageUp);
+    m.bind("ctrl+v", Command::CursorPageDown);
+    m.bind("ctrl+home", Command::CursorFileStart);
+    m.bind("ctrl+end", Command::CursorFileEnd);
+    m.bind("alt+<", Command::CursorFileStart);
+    m.bind("alt+>", Command::CursorFileEnd);
+    m.bind("alt+b", Command::CursorWordLeft);
+    m.bind("alt+f", Command::CursorWordRight);
+
+    // Tab management.
+    m.bind("ctrl+left", Command::TabPrev);
+    m.bind("ctrl+right", Command::TabNext);
+    // Placeholder until insert_tab (M23). Tab cycling is a convenient
+    // alias even after auto-indent lands.
+    m.bind("tab", Command::TabNext);
+    m.bind("shift+tab", Command::TabPrev);
+    m.bind("backtab", Command::TabPrev);
+
+    // Editing.
     m.bind("enter", Command::InsertNewline);
     m.bind("backspace", Command::DeleteBack);
     m.bind("delete", Command::DeleteForward);
+    m.bind("ctrl+d", Command::DeleteForward);
+
+    // Abort (modal overlays override behaviour in later milestones).
+    m.bind("esc", Command::Abort);
+    m.bind("ctrl+g", Command::Abort);
+
+    // File-write + buffer-management chords (ctrl+x prefix).
+    m.bind_chord("ctrl+x", "ctrl+s", Command::Save);
+    m.bind_chord("ctrl+x", "ctrl+c", Command::Quit);
+    m.bind_chord("ctrl+x", "ctrl+a", Command::SaveAll);
+    m.bind_chord("ctrl+x", "ctrl+d", Command::SaveNoFormat);
+    m.bind_chord("ctrl+x", "k", Command::KillBuffer);
+
     m
 }
 
@@ -128,7 +226,7 @@ pub fn parse_key(s: &str) -> Result<KeyEvent, String> {
     }
     let mut modifiers = KeyModifiers::NONE;
     let mut code: Option<KeyCode> = None;
-    let parts: Vec<&str> = s.split(|c: char| c == '+' || c == '-').collect();
+    let parts: Vec<&str> = s.split(['+', '-']).collect();
     let (tail, head) = parts
         .split_last()
         .expect("split returns at least one element");
@@ -162,10 +260,10 @@ pub fn parse_key(s: &str) -> Result<KeyEvent, String> {
         "pagedown" | "pgdn" => code = Some(KeyCode::PageDown),
         "space" | "spc" => code = Some(KeyCode::Char(' ')),
         fn_key if fn_key.starts_with('f') && fn_key.len() > 1 => {
-            if let Ok(n) = fn_key[1..].parse::<u8>() {
-                if (1..=24).contains(&n) {
-                    code = Some(KeyCode::F(n));
-                }
+            if let Ok(n) = fn_key[1..].parse::<u8>()
+                && (1..=24).contains(&n)
+            {
+                code = Some(KeyCode::F(n));
             }
         }
         _ => {}
@@ -257,9 +355,13 @@ fn code_string(c: &KeyCode) -> String {
 pub fn parse_command(s: &str) -> Result<Command, String> {
     match s {
         "quit" => Ok(Command::Quit),
+        "abort" => Ok(Command::Abort),
         "save" => Ok(Command::Save),
+        "save_all" => Ok(Command::SaveAll),
+        "save_no_format" => Ok(Command::SaveNoFormat),
         "next_tab" => Ok(Command::TabNext),
         "prev_tab" => Ok(Command::TabPrev),
+        "kill_buffer" => Ok(Command::KillBuffer),
         "move_up" => Ok(Command::CursorUp),
         "move_down" => Ok(Command::CursorDown),
         "move_left" => Ok(Command::CursorLeft),
@@ -268,7 +370,10 @@ pub fn parse_command(s: &str) -> Result<Command, String> {
         "line_end" => Ok(Command::CursorLineEnd),
         "page_up" => Ok(Command::CursorPageUp),
         "page_down" => Ok(Command::CursorPageDown),
-        // file_start / file_end land in M10.
+        "file_start" => Ok(Command::CursorFileStart),
+        "file_end" => Ok(Command::CursorFileEnd),
+        "word_left" => Ok(Command::CursorWordLeft),
+        "word_right" => Ok(Command::CursorWordRight),
         "insert_newline" => Ok(Command::InsertNewline),
         "delete_backward" => Ok(Command::DeleteBack),
         "delete_forward" => Ok(Command::DeleteForward),
@@ -428,38 +533,54 @@ mod tests {
     #[test]
     fn default_keymap_contains_core_bindings() {
         let m = default_keymap();
-        assert_eq!(m.lookup(&parse_key("ctrl-c").unwrap()), Some(Command::Quit));
-        assert_eq!(m.lookup(&parse_key("ctrl-s").unwrap()), Some(Command::Save));
+        // Direct bindings.
         assert_eq!(
-            m.lookup(&parse_key("tab").unwrap()),
-            Some(Command::TabNext)
-        );
-        assert_eq!(
-            m.lookup(&parse_key("shift-tab").unwrap()),
-            Some(Command::TabPrev)
-        );
-        assert_eq!(
-            m.lookup(&parse_key("up").unwrap()),
+            m.lookup_direct(&parse_key("up").unwrap()),
             Some(Command::CursorUp)
         );
         assert_eq!(
-            m.lookup(&parse_key("enter").unwrap()),
+            m.lookup_direct(&parse_key("enter").unwrap()),
             Some(Command::InsertNewline)
         );
+        assert_eq!(
+            m.lookup_direct(&parse_key("esc").unwrap()),
+            Some(Command::Abort)
+        );
+        // Chord bindings — save + quit moved under ctrl+x.
+        assert_eq!(
+            m.lookup_chord(&parse_key("ctrl+x").unwrap(), &parse_key("ctrl+s").unwrap()),
+            Some(Command::Save)
+        );
+        assert_eq!(
+            m.lookup_chord(&parse_key("ctrl+x").unwrap(), &parse_key("ctrl+c").unwrap()),
+            Some(Command::Quit)
+        );
+        assert_eq!(
+            m.lookup_chord(&parse_key("ctrl+x").unwrap(), &parse_key("k").unwrap()),
+            Some(Command::KillBuffer)
+        );
+        // ctrl+x is a prefix, not a direct binding.
+        assert!(m.is_prefix(&parse_key("ctrl+x").unwrap()));
+        assert_eq!(m.lookup_direct(&parse_key("ctrl+x").unwrap()), None);
+        // Plain ctrl+c / ctrl+s are UNBOUND at the root (legacy parity).
+        assert_eq!(m.lookup_direct(&parse_key("ctrl+c").unwrap()), None);
+        assert_eq!(m.lookup_direct(&parse_key("ctrl+s").unwrap()), None);
     }
 
     #[test]
     fn keymap_insert_overrides_existing() {
         let mut m = default_keymap();
-        // User rebinds Ctrl-C to quit (no-op — already Quit), then
-        // rebinds to Save for the sake of the test.
-        m.insert(parse_key("ctrl-c").unwrap(), Command::Save);
-        assert_eq!(m.lookup(&parse_key("ctrl-c").unwrap()), Some(Command::Save));
+        // Rebind tab (was TabNext in M5 default) to Save for the test.
+        m.insert_direct(parse_key("tab").unwrap(), Command::Save);
+        assert_eq!(
+            m.lookup_direct(&parse_key("tab").unwrap()),
+            Some(Command::Save)
+        );
     }
 
     #[test]
     fn keymap_unknown_key_yields_none() {
         let m = default_keymap();
-        assert_eq!(m.lookup(&parse_key("f7").unwrap()), None);
+        assert_eq!(m.lookup_direct(&parse_key("f7").unwrap()), None);
     }
 }

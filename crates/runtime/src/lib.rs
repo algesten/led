@@ -32,7 +32,7 @@ use led_state_tabs::{TabId, Tabs};
 
 pub use config::{load_keymap, ConfigError};
 pub use dispatch::{dispatch, dispatch_key, DispatchOutcome};
-pub use keymap::{default_keymap, parse_command, parse_key, Command, Keymap};
+pub use keymap::{default_keymap, parse_command, parse_key, ChordState, Command, Keymap};
 pub use query::{
     body_model, file_load_action, file_save_action, render_frame, tab_bar_model,
     EditedBuffersInput, PendingSavesInput, StoreLoadedInput, TabsActiveInput, TabsOpenInput,
@@ -93,6 +93,7 @@ pub fn run(
     trace: &SharedTrace,
 ) -> io::Result<()> {
     let mut last_frame: Option<Frame> = None;
+    let mut chord = ChordState::default();
 
     loop {
         // ── Ingest ──────────────────────────────────────────────
@@ -141,7 +142,7 @@ pub fn run(
                 TermEvent::Key(k) => Event::Key(k),
                 TermEvent::Resize(d) => Event::Resize(d),
             };
-            match dispatch(ev, tabs, edits, store, terminal, keymap) {
+            match dispatch(ev, tabs, edits, store, terminal, keymap, &mut chord) {
                 DispatchOutcome::Continue => {}
                 DispatchOutcome::Quit => {
                     quit = true;
