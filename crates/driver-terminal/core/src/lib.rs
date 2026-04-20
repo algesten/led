@@ -114,6 +114,10 @@ pub enum BodyModel {
     },
     Content {
         lines: Vec<String>,
+        /// Body-relative cursor position `(row, col)`. `None` when the
+        /// cursor is outside the visible scroll window (defensive — the
+        /// runtime's scroll invariant should keep it in view).
+        cursor: Option<(u16, u16)>,
     },
 }
 
@@ -127,6 +131,10 @@ impl Default for BodyModel {
 pub struct Frame {
     pub tab_bar: TabBarModel,
     pub body: BodyModel,
+    /// Absolute terminal cursor position as `(col, row)` — matches
+    /// crossterm's `cursor::MoveTo` argument order. `None` hides the
+    /// cursor (no active content / cursor scrolled away).
+    pub cursor: Option<(u16, u16)>,
     pub dims: Dims,
 }
 

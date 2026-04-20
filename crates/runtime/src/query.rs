@@ -15,7 +15,8 @@
 use led_core::CanonPath;
 use led_driver_buffers_core::{BufferStore, LoadAction, LoadState};
 use led_driver_terminal_core::{BodyModel, Dims, Frame, TabBarModel, Terminal};
-use led_state_tabs::{Tab, TabId, Tabs};
+use led_state_tabs::{Cursor, Scroll, Tab, TabId, Tabs};
+use ropey::Rope;
 
 // ── Inputs on Tabs ─────────────────────────────────────────────────────
 
@@ -123,6 +124,11 @@ pub fn tab_bar_model<'a>(tabs: TabsActiveInput<'a>) -> TabBarModel {
 }
 
 /// Body slice of the render frame.
+///
+/// Reads the active tab's cursor + scroll to produce the visible line
+/// slice and a body-relative cursor position. Scroll is source state
+/// on [`Tab`]; dispatch maintains the "keep cursor visible" invariant
+/// so the cursor is normally inside the returned window.
 #[drv::memo(single)]
 pub fn body_model<'a, 'b>(
     store: StoreLoadedInput<'a>,
@@ -143,21 +149,39 @@ pub fn body_model<'a, 'b>(
             path_display,
             message: (**msg).clone(),
         },
-        Some(LoadState::Ready(rope)) => {
-            let body_rows = dims.rows.saturating_sub(1) as usize;
-            let lines: Vec<String> = rope
-                .lines()
-                .take(body_rows)
-                .map(|l| {
-                    let s = l.to_string();
-                    let s = s.strip_suffix('\n').unwrap_or(&s);
-                    let s = s.strip_suffix('\r').unwrap_or(s);
-                    truncate_to_cols(s, dims.cols as usize)
-                })
-                .collect();
-            BodyModel::Content { lines }
-        }
+        Some(LoadState::Ready(rope)) => render_content(rope, tab.cursor, tab.scroll, dims),
     }
+}
+
+fn render_content(rope: &Rope, cursor: Cursor, scroll: Scroll, dims: Dims) -> BodyModel {
+    let body_rows = dims.rows.saturating_sub(1) as usize;
+    let line_count = rope.len_lines();
+
+    let lines: Vec<String> = (scroll.top..scroll.top.saturating_add(body_rows))
+        .take_while(|&ln| ln < line_count)
+        .map(|ln| {
+            let s = rope.line(ln).to_string();
+            let s = s.strip_suffix('\n').unwrap_or(&s);
+            let s = s.strip_suffix('\r').unwrap_or(s);
+            truncate_to_cols(s, dims.cols as usize)
+        })
+        .collect();
+
+    let cursor = visible_cursor(cursor, scroll, dims);
+    BodyModel::Content { lines, cursor }
+}
+
+fn visible_cursor(c: Cursor, s: Scroll, dims: Dims) -> Option<(u16, u16)> {
+    let body_rows = dims.rows.saturating_sub(1) as usize;
+    if body_rows == 0 {
+        return None;
+    }
+    if c.line < s.top || c.line >= s.top.saturating_add(body_rows) {
+        return None;
+    }
+    let row = (c.line - s.top) as u16;
+    let col = c.col.min(dims.cols.saturating_sub(1) as usize) as u16;
+    Some((row, col))
 }
 
 fn truncate_to_cols(s: &str, cols: usize) -> String {
@@ -183,9 +207,20 @@ pub fn render_frame<'t, 'b, 'a>(
     let dims = (*term.dims)?;
     let tab_bar = tab_bar_model(tabs);
     let body = body_model(store, tabs, dims);
+    // Translate the body-relative cursor (row, col) into absolute
+    // screen coords (col, row). +1 on the row accounts for the tab
+    // bar; the painter wants column-major order (crossterm).
+    let cursor = match &body {
+        BodyModel::Content {
+            cursor: Some((row, col)),
+            ..
+        } => Some((*col, row.saturating_add(1))),
+        _ => None,
+    };
     Some(Frame {
         tab_bar,
         body,
+        cursor,
         dims,
     })
 }
@@ -212,6 +247,7 @@ mod tests {
             t.open.push_back(Tab {
                 id: TabId(*id),
                 path: canon(p),
+                ..Default::default()
             });
         }
         t.active = active.map(TabId);
@@ -234,10 +270,12 @@ mod tests {
         tabs.open.push_back(Tab {
             id: TabId(1),
             path: canon("a.rs"),
+            ..Default::default()
         });
         tabs.open.push_back(Tab {
             id: TabId(2),
             path: canon("b.rs"),
+            ..Default::default()
         });
 
         let acts = file_load_action(
@@ -261,6 +299,7 @@ mod tests {
             tabs.open.push_back(Tab {
                 id: TabId(i as u64 + 1),
                 path: canon(p),
+                ..Default::default()
             });
         }
 
@@ -310,14 +349,66 @@ mod tests {
             Some(Dims { cols: 10, rows: 5 }),
         );
         let frame = render(&t, &s, &term).expect("dims set");
-        match frame.body {
-            BodyModel::Content { lines } => {
+        match &frame.body {
+            BodyModel::Content { lines, cursor } => {
                 assert_eq!(lines.len(), 4); // dims.rows - 1 tab bar row
                 assert_eq!(lines[0], "line 0");
                 assert_eq!(lines[3], "line 3");
+                // Default cursor at (0, 0) — visible at top-left of body.
+                assert_eq!(*cursor, Some((0, 0)));
             }
             other => panic!("expected Content, got {other:?}"),
         }
+        // Frame-level cursor: body-relative (row=0, col=0) + tab-bar row → (col=0, row=1).
+        assert_eq!(frame.cursor, Some((0, 1)));
+    }
+
+    #[test]
+    fn body_model_scrolls_and_reports_cursor_inside_window() {
+        let body = (0..50).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+        let (mut t, s, term) = fixture(
+            &[("big.rs", 1)],
+            Some(1),
+            &[("big.rs", LoadState::Ready(Arc::new(Rope::from_str(&body))))],
+            Some(Dims { cols: 40, rows: 11 }), // 10 body rows
+        );
+        // Place cursor at line 25 with scroll.top = 20 → cursor visible at row 5.
+        t.open[0].cursor = Cursor { line: 25, col: 2 };
+        t.open[0].scroll = Scroll { top: 20 };
+
+        let frame = render(&t, &s, &term).expect("dims set");
+        match &frame.body {
+            BodyModel::Content { lines, cursor } => {
+                assert_eq!(lines.len(), 10);
+                assert_eq!(lines[0], "line 20");
+                assert_eq!(lines[5], "line 25");
+                assert_eq!(*cursor, Some((5, 2)));
+            }
+            other => panic!("expected Content, got {other:?}"),
+        }
+        // Absolute frame cursor = (col=2, row=5+1).
+        assert_eq!(frame.cursor, Some((2, 6)));
+    }
+
+    #[test]
+    fn body_model_hides_cursor_when_scrolled_away() {
+        let body = (0..50).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+        let (mut t, s, term) = fixture(
+            &[("big.rs", 1)],
+            Some(1),
+            &[("big.rs", LoadState::Ready(Arc::new(Rope::from_str(&body))))],
+            Some(Dims { cols: 40, rows: 6 }), // 5 body rows
+        );
+        // Cursor far outside the scroll window.
+        t.open[0].cursor = Cursor { line: 40, col: 0 };
+        t.open[0].scroll = Scroll { top: 0 };
+
+        let frame = render(&t, &s, &term).expect("dims set");
+        match &frame.body {
+            BodyModel::Content { cursor, .. } => assert_eq!(*cursor, None),
+            other => panic!("expected Content, got {other:?}"),
+        }
+        assert_eq!(frame.cursor, None);
     }
 
     #[test]

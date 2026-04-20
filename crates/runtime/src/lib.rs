@@ -93,7 +93,7 @@ pub fn run(
 
         let mut quit = false;
         for ev in events {
-            match dispatch(ev, tabs) {
+            match dispatch(ev, tabs, store, terminal) {
                 DispatchOutcome::Continue => {}
                 DispatchOutcome::Quit => {
                     quit = true;

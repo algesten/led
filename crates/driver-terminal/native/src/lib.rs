@@ -131,6 +131,15 @@ pub fn paint(frame: &Frame, out: &mut impl Write) -> io::Result<()> {
     paint_tab_bar(&frame.tab_bar, frame.dims, out)?;
     paint_body(&frame.body, frame.dims, out)?;
     queue!(out, terminal::Clear(terminal::ClearType::FromCursorDown))?;
+
+    // Cursor placement last, on top of the finished frame. The
+    // per-frame `Hide` above prevents flicker while drawing; the
+    // trailing `Show` + `MoveTo` puts the cursor exactly where
+    // `render_frame` wants it, or leaves it hidden if the active
+    // view has no cursor (no content loaded, scrolled away, etc.).
+    if let Some((col, row)) = frame.cursor {
+        queue!(out, cursor::MoveTo(col, row), cursor::Show)?;
+    }
     out.flush()
 }
 
@@ -174,7 +183,7 @@ fn paint_body(body: &BodyModel, dims: Dims, out: &mut impl Write) -> io::Result<
             path_display,
             message,
         } => vec![path_display.as_str(), message.as_str()],
-        BodyModel::Content { lines } => lines.iter().map(String::as_str).collect(),
+        BodyModel::Content { lines, .. } => lines.iter().map(String::as_str).collect(),
     };
 
     for row in 0..body_rows {
@@ -248,11 +257,27 @@ mod tests {
             },
             body: BodyModel::Content {
                 lines: vec!["line 1".into(), "line 2".into()],
+                cursor: Some((0, 0)),
             },
+            cursor: Some((0, 1)),
             dims: Dims { cols: 40, rows: 5 },
         };
         let mut out: Vec<u8> = Vec::new();
         paint(&frame, &mut out).expect("paint to Vec<u8>");
+        assert!(!out.is_empty());
+    }
+
+    #[test]
+    fn paint_hides_cursor_when_frame_cursor_is_none() {
+        let frame = Frame {
+            tab_bar: TabBarModel::default(),
+            body: BodyModel::Empty,
+            cursor: None,
+            dims: Dims { cols: 40, rows: 5 },
+        };
+        let mut out: Vec<u8> = Vec::new();
+        paint(&frame, &mut out).expect("paint to Vec<u8>");
+        // Empty frames still produce clear/hide sequences — just don't panic.
         assert!(!out.is_empty());
     }
 }

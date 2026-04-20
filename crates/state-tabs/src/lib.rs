@@ -9,14 +9,33 @@ use led_core::CanonPath;
 
 led_core::id_newtype!(TabId);
 
+/// Buffer-coordinate cursor position. Stored on [`Tab`] so two tabs
+/// viewing the same file can hold independent cursors.
+///
+/// `line` / `col` are zero-based indices; `col` is a character index
+/// (not a display column — revisit for wide/combining characters when
+/// syntax work comes online).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Cursor {
+    pub line: usize,
+    pub col: usize,
+}
+
+/// Viewport scroll offset. `top` is the first buffer row shown at the
+/// top of the body. Persists per tab across tab switches.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Scroll {
+    pub top: usize,
+}
+
 /// One open tab. Stored in-line inside [`Tabs::open`] rather than
 /// through a separate map so the source's invariants are local.
 #[derive(Clone, Debug, PartialEq, Default)]
 pub struct Tab {
     pub id: TabId,
     pub path: CanonPath,
-    // M2: pub is_preview: bool,
-    // M3: pub cursor: Cursor,
+    pub cursor: Cursor,
+    pub scroll: Scroll,
 }
 
 /// Source: which tabs are open, which is active.
@@ -55,6 +74,7 @@ mod tests {
         Tab {
             id: TabId(id),
             path: canon(path),
+            ..Default::default()
         }
     }
 
@@ -69,7 +89,7 @@ mod tests {
     fn tabs_can_hold_entries() {
         let mut t = Tabs::default();
         let id = TabId(1);
-        t.open.push_back(Tab { id, path: canon("a.rs") });
+        t.open.push_back(Tab { id, path: canon("a.rs"), ..Default::default() });
         t.active = Some(id);
 
         assert_eq!(t.open.len(), 1);

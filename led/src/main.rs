@@ -61,6 +61,7 @@ fn main() -> io::Result<()> {
         tabs.open.push_back(Tab {
             id,
             path: UserPath::new(f).canonicalize(),
+            ..Default::default()
         });
         if tabs.active.is_none() {
             tabs.active = Some(id);
