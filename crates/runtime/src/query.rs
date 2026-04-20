@@ -612,6 +612,7 @@ mod tests {
                 rope: Arc::new(Rope::from_str("edited-version")),
                 version: 1,
                 saved_version: 0,
+                history: Default::default(),
             },
         );
 
@@ -669,6 +670,7 @@ mod tests {
                 rope: rope.clone(),
                 version: 3,
                 saved_version: 0,
+                history: Default::default(),
             },
         );
         e.pending_saves.insert(path.clone());
@@ -701,6 +703,7 @@ mod tests {
                 rope: Arc::new(Rope::from_str("x")),
                 version: 0,
                 saved_version: 0, // dirty() == false
+                history: Default::default(),
             },
         );
         e.pending_saves.insert(path);
@@ -750,6 +753,7 @@ mod tests {
                 rope: Arc::new(Rope::from_str("x")),
                 version: 0,
                 saved_version: 0,
+                history: Default::default(),
             },
         );
         e.buffers.insert(
@@ -758,6 +762,7 @@ mod tests {
                 rope: Arc::new(Rope::from_str("yy")),
                 version: 1,
                 saved_version: 0,
+                history: Default::default(),
             },
         );
 

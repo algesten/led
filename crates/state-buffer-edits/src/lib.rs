@@ -21,6 +21,9 @@ use led_core::CanonPath;
 use ropey::Rope;
 use std::sync::Arc;
 
+pub mod history;
+pub use history::{EditGroup, EditOp, History, rebase_char_index};
+
 /// One open buffer's editable state.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EditedBuffer {
@@ -42,6 +45,9 @@ pub struct EditedBuffer {
     /// not clear the dirty flag, because `version > saved_version`
     /// still holds.
     pub saved_version: u64,
+    /// Undo / redo history. See [`History`]. Grows unbounded for
+    /// the session; persistence is deferred to M21.
+    pub history: History,
 }
 
 impl EditedBuffer {
@@ -57,6 +63,7 @@ impl EditedBuffer {
             rope,
             version: 0,
             saved_version: 0,
+            history: History::default(),
         }
     }
 }

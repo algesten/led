@@ -61,6 +61,10 @@ pub enum Command {
     KillRegion,
     KillLine,
     Yank,
+
+    // Undo / redo (M8).
+    Undo,
+    Redo,
 }
 
 /// Two-level key → command binding set. `direct` maps single keys to
@@ -207,6 +211,14 @@ pub fn default_keymap() -> Keymap {
     m.bind("ctrl+w", Command::KillRegion);
     m.bind("ctrl+k", Command::KillLine);
     m.bind("ctrl+y", Command::Yank);
+
+    // Undo — legacy binds three aliases because `ctrl+/` emits
+    // different byte sequences on different terminals. Redo is
+    // deliberately unbound by default (Emacs tradition; rebind via
+    // keys.toml).
+    m.bind("ctrl+/", Command::Undo);
+    m.bind("ctrl+_", Command::Undo);
+    m.bind("ctrl+7", Command::Undo);
 
     // File-write + buffer-management chords (ctrl+x prefix).
     m.bind_chord("ctrl+x", "ctrl+s", Command::Save);
@@ -393,6 +405,8 @@ pub fn parse_command(s: &str) -> Result<Command, String> {
         "kill_region" => Ok(Command::KillRegion),
         "kill_line" => Ok(Command::KillLine),
         "yank" => Ok(Command::Yank),
+        "undo" => Ok(Command::Undo),
+        "redo" => Ok(Command::Redo),
         other => Err(format!("unknown command `{other}`")),
     }
 }

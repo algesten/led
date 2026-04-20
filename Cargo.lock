@@ -478,6 +478,7 @@ version = "0.0.0"
 dependencies = [
  "imbl",
  "led-core",
+ "led-state-tabs",
  "ropey",
 ]
 

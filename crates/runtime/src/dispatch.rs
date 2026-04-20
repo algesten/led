@@ -20,7 +20,7 @@
 
 use led_driver_buffers_core::{BufferStore, LoadState};
 use led_driver_terminal_core::{KeyCode, KeyEvent, KeyModifiers, Terminal};
-use led_state_buffer_edits::{BufferEdits, EditedBuffer};
+use led_state_buffer_edits::{BufferEdits, EditOp, EditedBuffer};
 use led_state_kill_ring::KillRing;
 use led_state_tabs::{Cursor, Scroll, Tab, Tabs};
 use ropey::Rope;
@@ -110,9 +110,27 @@ pub fn dispatch_key(
             if !matches!(cmd, Command::KillLine) {
                 kill_ring.last_was_kill_line = false;
             }
+            // Undo coalescing: any command other than a coalescable
+            // InsertChar closes the open group. Non-edit commands
+            // finalise via the blanket path; edit commands that
+            // opened their own (non-coalescable) group already
+            // finalised inside their primitive.
+            if !is_coalescable_insert(&cmd) {
+                finalise_history(edits);
+            }
             outcome
         }
         Resolved::PrefixStored | Resolved::Continue => DispatchOutcome::Continue,
+    }
+}
+
+fn is_coalescable_insert(cmd: &Command) -> bool {
+    matches!(cmd, Command::InsertChar(c) if c.is_alphanumeric() || *c == '_')
+}
+
+fn finalise_history(edits: &mut BufferEdits) {
+    for (_, eb) in edits.buffers.iter_mut() {
+        eb.history.finalise();
     }
 }
 
@@ -287,6 +305,14 @@ fn run_command(
             request_yank(tabs, kill_ring);
             DispatchOutcome::Continue
         }
+        Command::Undo => {
+            undo_active(tabs, edits);
+            DispatchOutcome::Continue
+        }
+        Command::Redo => {
+            redo_active(tabs, edits);
+            DispatchOutcome::Continue
+        }
     }
 }
 
@@ -437,6 +463,7 @@ fn kill_region(tabs: &mut Tabs, edits: &mut BufferEdits, kill_ring: &mut KillRin
     let Some((start, end)) = region_range(tab, &eb.rope) else {
         return;
     };
+    let before = tab.cursor;
 
     let mut rope = (*eb.rope).clone();
     let killed: Arc<str> = Arc::from(rope.slice(start..end).to_string());
@@ -450,10 +477,13 @@ fn kill_region(tabs: &mut Tabs, edits: &mut BufferEdits, kill_ring: &mut KillRin
     tab.cursor = char_to_cursor(start, &eb.rope);
     tab.cursor.preferred_col = tab.cursor.col;
     tab.mark = None;
+    let after = tab.cursor;
 
     kill_ring.latest = Some(killed.clone());
     kill_ring.last_was_kill_line = false;
-    kill_ring.pending_clipboard_write = Some(killed);
+    kill_ring.pending_clipboard_write = Some(killed.clone());
+
+    eb.history.record_delete(start, killed, before, after);
 }
 
 fn char_to_cursor(ch: usize, rope: &Rope) -> Cursor {
@@ -497,8 +527,9 @@ fn kill_line(tabs: &mut Tabs, edits: &mut BufferEdits, kill_ring: &mut KillRing)
         return;
     }
 
+    let before = tab.cursor;
     let mut rope = (*rope_arc).clone();
-    let killed_slice = rope.slice(start..end).to_string();
+    let killed_slice: Arc<str> = Arc::from(rope.slice(start..end).to_string());
     rope.remove(start..end);
 
     let new_latest: Arc<str> = if kill_ring.last_was_kill_line {
@@ -509,10 +540,10 @@ fn kill_line(tabs: &mut Tabs, edits: &mut BufferEdits, kill_ring: &mut KillRing)
                 joined.push_str(&killed_slice);
                 Arc::from(joined)
             }
-            None => Arc::from(killed_slice),
+            None => killed_slice.clone(),
         }
     } else {
-        Arc::from(killed_slice)
+        killed_slice.clone()
     };
 
     let eb = edits.buffers.get_mut(&tab.path).expect("checked above");
@@ -521,10 +552,16 @@ fn kill_line(tabs: &mut Tabs, edits: &mut BufferEdits, kill_ring: &mut KillRing)
     let tab = &mut tabs.open[idx];
     tab.cursor = char_to_cursor(start, &eb.rope);
     tab.cursor.preferred_col = tab.cursor.col;
+    let after = tab.cursor;
 
     kill_ring.latest = Some(new_latest.clone());
     kill_ring.last_was_kill_line = true;
     kill_ring.pending_clipboard_write = Some(new_latest);
+
+    // Record the actual characters this kill removed (not the
+    // coalesced kill-ring contents) — undo should restore exactly
+    // what this command's rope.remove took out.
+    eb.history.record_delete(start, killed_slice, before, after);
 }
 
 /// Mark a yank as pending against the currently-active tab. The
@@ -554,6 +591,7 @@ pub fn apply_yank(tabs: &mut Tabs, edits: &mut BufferEdits, target: led_state_ta
     let Some(eb) = edits.buffers.get(&tab.path) else {
         return;
     };
+    let before = tab.cursor;
 
     let mut rope = (*eb.rope).clone();
     let char_idx = cursor_to_char(&tab.cursor, &rope);
@@ -568,6 +606,61 @@ pub fn apply_yank(tabs: &mut Tabs, edits: &mut BufferEdits, target: led_state_ta
     let tab = &mut tabs.open[idx];
     tab.cursor = char_to_cursor(new_idx, &eb.rope);
     tab.cursor.preferred_col = tab.cursor.col;
+    let after = tab.cursor;
+
+    eb.history
+        .record_insert(char_idx, Arc::from(text), before, after);
+}
+
+// ── Undo / redo ───────────────────────────────────────────────────────
+
+fn undo_active(tabs: &mut Tabs, edits: &mut BufferEdits) {
+    with_active(tabs, edits, |tab, eb| {
+        let Some(group) = eb.history.take_undo() else {
+            return;
+        };
+        // Apply ops in reverse order, as their inverses.
+        let mut rope = (*eb.rope).clone();
+        for op in group.ops.iter().rev() {
+            match op {
+                EditOp::Insert { at, text } => {
+                    let len = text.chars().count();
+                    rope.remove(*at..*at + len);
+                }
+                EditOp::Delete { at, text } => {
+                    rope.insert(*at, text);
+                }
+            }
+        }
+        bump(eb, rope);
+        tab.cursor = group.cursor_before;
+        tab.cursor.preferred_col = tab.cursor.col;
+        eb.history.push_future(group);
+    });
+}
+
+fn redo_active(tabs: &mut Tabs, edits: &mut BufferEdits) {
+    with_active(tabs, edits, |tab, eb| {
+        let Some(group) = eb.history.take_redo() else {
+            return;
+        };
+        let mut rope = (*eb.rope).clone();
+        for op in &group.ops {
+            match op {
+                EditOp::Insert { at, text } => {
+                    rope.insert(*at, text);
+                }
+                EditOp::Delete { at, text } => {
+                    let len = text.chars().count();
+                    rope.remove(*at..*at + len);
+                }
+            }
+        }
+        bump(eb, rope);
+        tab.cursor = group.cursor_after;
+        tab.cursor.preferred_col = tab.cursor.col;
+        eb.history.push_past(group);
+    });
 }
 
 // ── Kill buffer ────────────────────────────────────────────────────────
@@ -630,21 +723,35 @@ fn bump(eb: &mut EditedBuffer, new_rope: Rope) {
 
 fn insert_char(tabs: &mut Tabs, edits: &mut BufferEdits, ch: char) {
     with_active(tabs, edits, |tab, eb| {
+        let before = tab.cursor;
         let mut rope = (*eb.rope).clone();
         let char_idx = rope.line_to_char(tab.cursor.line) + tab.cursor.col;
         rope.insert_char(char_idx, ch);
         bump(eb, rope);
         tab.cursor.col += 1;
         tab.cursor.preferred_col = tab.cursor.col;
+        let after = tab.cursor;
+        eb.history.record_insert_char(char_idx, ch, before, after);
     });
 }
 
 fn insert_newline(tabs: &mut Tabs, edits: &mut BufferEdits) {
     with_active(tabs, edits, |tab, eb| {
+        let before = tab.cursor;
         let mut rope = (*eb.rope).clone();
         let char_idx = rope.line_to_char(tab.cursor.line) + tab.cursor.col;
         rope.insert_char(char_idx, '\n');
         bump(eb, rope);
+        eb.history
+            .record_insert(char_idx, Arc::<str>::from("\n"), before, {
+                // cursor_after is set below; we need it before we
+                // overwrite cursor. Snapshot post-compute.
+                let mut a = before;
+                a.line += 1;
+                a.col = 0;
+                a.preferred_col = 0;
+                a
+            });
         tab.cursor.line += 1;
         tab.cursor.col = 0;
         tab.cursor.preferred_col = 0;
@@ -656,6 +763,7 @@ fn delete_back(tabs: &mut Tabs, edits: &mut BufferEdits) {
         if tab.cursor.line == 0 && tab.cursor.col == 0 {
             return;
         }
+        let before = tab.cursor;
         // Capture the join column *before* the remove. After the
         // newline is gone the previous line grows to include the
         // current one, so post-remove length is too large.
@@ -666,6 +774,7 @@ fn delete_back(tabs: &mut Tabs, edits: &mut BufferEdits) {
         };
         let mut rope = (*eb.rope).clone();
         let char_idx = rope.line_to_char(tab.cursor.line) + tab.cursor.col;
+        let removed: String = rope.slice(char_idx - 1..char_idx).to_string();
         rope.remove(char_idx - 1..char_idx);
         if tab.cursor.col > 0 {
             tab.cursor.col -= 1;
@@ -674,7 +783,10 @@ fn delete_back(tabs: &mut Tabs, edits: &mut BufferEdits) {
             tab.cursor.col = join_col;
         }
         tab.cursor.preferred_col = tab.cursor.col;
+        let after = tab.cursor;
         bump(eb, rope);
+        eb.history
+            .record_delete(char_idx - 1, Arc::from(removed), before, after);
     });
 }
 
@@ -686,11 +798,16 @@ fn delete_forward(tabs: &mut Tabs, edits: &mut BufferEdits) {
         if on_last_line && at_line_end {
             return;
         }
+        let before = tab.cursor;
         let mut rope = (*eb.rope).clone();
         let char_idx = rope.line_to_char(tab.cursor.line) + tab.cursor.col;
+        let removed: String = rope.slice(char_idx..char_idx + 1).to_string();
         rope.remove(char_idx..char_idx + 1);
         bump(eb, rope);
         // Cursor stays put. preferred_col unchanged (col didn't move).
+        let after = tab.cursor;
+        eb.history
+            .record_delete(char_idx, Arc::from(removed), before, after);
     });
 }
 
@@ -1936,6 +2053,7 @@ mod tests {
                 rope: Arc::new(Rope::from_str("A")),
                 version: 1,
                 saved_version: 0,
+                history: Default::default(),
             },
         );
         edits.buffers.insert(
@@ -1944,6 +2062,7 @@ mod tests {
                 rope: Arc::new(Rope::from_str("B")),
                 version: 1,
                 saved_version: 0,
+                history: Default::default(),
             },
         );
         let store = BufferStore::default();
@@ -2040,6 +2159,7 @@ mod tests {
                 rope: Arc::new(Rope::from_str("A")),
                 version: 1,
                 saved_version: 0,
+                history: Default::default(),
             },
         );
         edits.buffers.insert(
@@ -2071,6 +2191,7 @@ mod tests {
                 rope: Arc::new(Rope::from_str("A")),
                 version: 1,
                 saved_version: 0,
+                history: Default::default(),
             },
         );
         // b is clean.
@@ -2084,6 +2205,7 @@ mod tests {
                 rope: Arc::new(Rope::from_str("C")),
                 version: 2,
                 saved_version: 0,
+                history: Default::default(),
             },
         );
         let store = BufferStore::default();
@@ -2453,6 +2575,202 @@ mod tests {
         apply_yank(&mut tabs, &mut edits, TabId(1), "XYZ");
         assert_eq!(rope_of(&edits, "file.rs").to_string(), "helXYZlo");
         assert_eq!(tabs.open[0].cursor.col, 6);
+    }
+
+    // ── M8: undo / redo ─────────────────────────────────────────────────
+
+    fn type_chars(
+        chars: &str,
+        tabs: &mut Tabs,
+        edits: &mut BufferEdits,
+        store: &BufferStore,
+        term: &Terminal,
+    ) {
+        // Each char goes through the full keymap → implicit_insert
+        // path so coalescing fires exactly as at runtime.
+        for c in chars.chars() {
+            dispatch_default(
+                key(KeyModifiers::NONE, KeyCode::Char(c)),
+                tabs,
+                edits,
+                store,
+                term,
+            );
+        }
+    }
+
+    #[test]
+    fn undo_removes_coalesced_word_inserts_in_one_shot() {
+        let (mut tabs, mut edits, store, term) =
+            fixture_with_content("", Dims { cols: 20, rows: 5 });
+
+        type_chars("hello", &mut tabs, &mut edits, &store, &term);
+        assert_eq!(rope_of(&edits, "file.rs").to_string(), "hello");
+
+        // Ctrl-/ → one group, five chars gone.
+        dispatch_default(
+            key(KeyModifiers::CONTROL, KeyCode::Char('/')),
+            &mut tabs,
+            &mut edits,
+            &store,
+            &term,
+        );
+        assert_eq!(rope_of(&edits, "file.rs").to_string(), "");
+    }
+
+    #[test]
+    fn undo_with_space_boundary_pops_only_last_word() {
+        let (mut tabs, mut edits, store, term) =
+            fixture_with_content("", Dims { cols: 20, rows: 5 });
+
+        type_chars("hello ", &mut tabs, &mut edits, &store, &term);
+        assert_eq!(rope_of(&edits, "file.rs").to_string(), "hello ");
+
+        // Space broke coalescing → two groups: "hello" then " ".
+        dispatch_default(
+            key(KeyModifiers::CONTROL, KeyCode::Char('/')),
+            &mut tabs,
+            &mut edits,
+            &store,
+            &term,
+        );
+        assert_eq!(rope_of(&edits, "file.rs").to_string(), "hello");
+    }
+
+    #[test]
+    fn redo_applies_the_undone_group() {
+        // Plain undo is bound; redo isn't — use a custom keymap.
+        let (mut tabs, mut edits, store, term) =
+            fixture_with_content("", Dims { cols: 20, rows: 5 });
+
+        type_chars("hi", &mut tabs, &mut edits, &store, &term);
+        let mut km = default_keymap();
+        km.bind("ctrl+y", Command::Redo); // override Yank for test
+        let mut chord = ChordState::default();
+        let mut kr = KillRing::default();
+
+        // Undo: ""
+        dispatch_key(
+            key(KeyModifiers::CONTROL, KeyCode::Char('/')),
+            &mut tabs,
+            &mut edits,
+            &mut kr,
+            &store,
+            &term,
+            &km,
+            &mut chord,
+        );
+        assert_eq!(rope_of(&edits, "file.rs").to_string(), "");
+
+        // Redo: "hi"
+        dispatch_key(
+            key(KeyModifiers::CONTROL, KeyCode::Char('y')),
+            &mut tabs,
+            &mut edits,
+            &mut kr,
+            &store,
+            &term,
+            &km,
+            &mut chord,
+        );
+        assert_eq!(rope_of(&edits, "file.rs").to_string(), "hi");
+    }
+
+    #[test]
+    fn undo_restores_killed_region() {
+        let (mut tabs, mut edits, store, term) =
+            fixture_with_content("abcdefgh", Dims { cols: 20, rows: 5 });
+        tabs.open[0].cursor = Cursor {
+            line: 0,
+            col: 2,
+            preferred_col: 2,
+        };
+        tabs.open[0].mark = Some(Cursor {
+            line: 0,
+            col: 6,
+            preferred_col: 6,
+        });
+        let mut kr = KillRing::default();
+        dispatch_with_ring(
+            key(KeyModifiers::CONTROL, KeyCode::Char('w')),
+            &mut tabs,
+            &mut edits,
+            &mut kr,
+            &store,
+            &term,
+        );
+        assert_eq!(rope_of(&edits, "file.rs").to_string(), "abgh");
+
+        dispatch_default(
+            key(KeyModifiers::CONTROL, KeyCode::Char('/')),
+            &mut tabs,
+            &mut edits,
+            &store,
+            &term,
+        );
+        assert_eq!(rope_of(&edits, "file.rs").to_string(), "abcdefgh");
+    }
+
+    #[test]
+    fn edit_after_undo_drops_future() {
+        let (mut tabs, mut edits, store, term) =
+            fixture_with_content("", Dims { cols: 20, rows: 5 });
+        type_chars("hi", &mut tabs, &mut edits, &store, &term);
+        dispatch_default(
+            key(KeyModifiers::CONTROL, KeyCode::Char('/')),
+            &mut tabs,
+            &mut edits,
+            &store,
+            &term,
+        );
+        assert_eq!(rope_of(&edits, "file.rs").to_string(), "");
+        // Redo is bound in this test via a custom map; before that,
+        // a new edit should drop the future branch.
+        type_chars("x", &mut tabs, &mut edits, &store, &term);
+        assert_eq!(rope_of(&edits, "file.rs").to_string(), "x");
+
+        let mut km = default_keymap();
+        km.bind("ctrl+y", Command::Redo);
+        let mut chord = ChordState::default();
+        let mut kr = KillRing::default();
+        dispatch_key(
+            key(KeyModifiers::CONTROL, KeyCode::Char('y')),
+            &mut tabs,
+            &mut edits,
+            &mut kr,
+            &store,
+            &term,
+            &km,
+            &mut chord,
+        );
+        // Still "x" — nothing to redo because the new edit dropped
+        // the future branch.
+        assert_eq!(rope_of(&edits, "file.rs").to_string(), "x");
+    }
+
+    #[test]
+    fn undo_restores_cursor_before() {
+        let (mut tabs, mut edits, store, term) =
+            fixture_with_content("", Dims { cols: 20, rows: 5 });
+        type_chars("hi", &mut tabs, &mut edits, &store, &term);
+        // Cursor is at (0, 2). Move it elsewhere to verify that undo
+        // restores to cursor_before.
+        tabs.open[0].cursor = Cursor {
+            line: 0,
+            col: 0,
+            preferred_col: 0,
+        };
+        dispatch_default(
+            key(KeyModifiers::CONTROL, KeyCode::Char('/')),
+            &mut tabs,
+            &mut edits,
+            &store,
+            &term,
+        );
+        assert_eq!(rope_of(&edits, "file.rs").to_string(), "");
+        // Undo restored cursor_before, which was (0, 0) for the
+        // first char of the coalesced "hi" group.
+        assert_eq!(tabs.open[0].cursor.col, 0);
     }
 
     #[test]
