@@ -332,6 +332,14 @@ fn run_command(
         return outcome;
     }
 
+    // In-buffer isearch overlay intercept. Typing / backspace /
+    // Enter / Esc / another Ctrl-s are fully consumed; every other
+    // command triggers "accept on passthrough" — the current match
+    // becomes the cursor's home, then the command runs normally.
+    if let Some(outcome) = isearch::run_overlay_command(cmd, isearch, tabs, edits, jumps) {
+        return outcome;
+    }
+
     let browser_focused = browser.focus == Focus::Side;
     match cmd {
         Command::Quit => DispatchOutcome::Quit,
@@ -341,11 +349,7 @@ fn run_command(
             // consumed upstream in `find_file::run_overlay_command`.
             // M17 / M18 will short-circuit their own modals before
             // reaching here.
-            if isearch.is_some() {
-                isearch::deactivate(isearch, tabs);
-            } else {
-                clear_mark(tabs);
-            }
+            clear_mark(tabs);
             DispatchOutcome::Continue
         }
         Command::Save => {

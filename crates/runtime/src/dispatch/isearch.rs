@@ -11,8 +11,14 @@
 
 use led_core::CanonPath;
 use led_state_buffer_edits::BufferEdits;
-use led_state_isearch::IsearchState;
-use led_state_tabs::{Cursor, Scroll, Tabs};
+use led_state_isearch::{IsearchMatch, IsearchState};
+use led_state_jumps::{JumpListState, JumpPosition};
+use led_state_tabs::Tabs;
+use ropey::Rope;
+
+use crate::keymap::Command;
+
+use super::DispatchOutcome;
 
 /// `Ctrl-s` handler. Starts a new search if inactive (seeding from
 /// the active buffer's current cursor); advances if already active
@@ -58,30 +64,253 @@ fn prior_last_query(
     None
 }
 
-/// Abort: close the overlay. Cursor/scroll restoration to
-/// `origin_cursor` / `origin_scroll` lands with Stage 4 (needs the
-/// `&mut Tabs` borrow to rewrite the active tab's cursor).
-pub(super) fn deactivate(
-    isearch: &mut Option<IsearchState>,
-    _tabs: &mut Tabs,
-) {
-    *isearch = None;
+/// Abort: restore origin cursor/scroll and close the overlay.
+/// Stashes the current query into `last_query` so a subsequent
+/// `Ctrl-s`-on-empty recalls it.
+pub(super) fn deactivate(isearch: &mut Option<IsearchState>, tabs: &mut Tabs) {
+    let Some(state) = isearch.take() else {
+        return;
+    };
+    // Restore the active tab to the origin.
+    if let Some(active_id) = tabs.active
+        && let Some(tab) = tabs.open.iter_mut().find(|t| t.id == active_id)
+    {
+        tab.cursor = state.origin_cursor;
+        tab.scroll = state.origin_scroll;
+    }
 }
 
-// Prevent `Cursor` / `Scroll` unused-import warnings until
-// subsequent stages wire them into the full dispatcher.
-#[allow(dead_code)]
-const _USES: fn() = || {
-    let _ = std::mem::size_of::<Cursor>();
-    let _ = std::mem::size_of::<Scroll>();
-};
+/// Accept: keep the current cursor where it is, stash the query
+/// into `last_query`, push a JumpRecord for the origin if the
+/// cursor moved, and close.
+fn accept(
+    isearch: &mut Option<IsearchState>,
+    tabs: &Tabs,
+    jumps: &mut JumpListState,
+) {
+    let Some(state) = isearch.take() else {
+        return;
+    };
+    // If the active tab's cursor moved from origin, record the
+    // origin in the jump list so Alt-Left returns the user.
+    if let Some(active_id) = tabs.active
+        && let Some(tab) = tabs.open.iter().find(|t| t.id == active_id)
+        && (tab.cursor.line, tab.cursor.col)
+            != (state.origin_cursor.line, state.origin_cursor.col)
+    {
+        jumps.record(JumpPosition {
+            path: tab.path.clone(),
+            line: state.origin_cursor.line,
+            col: state.origin_cursor.col,
+        });
+    }
+}
+
+/// Overlay dispatch. Returns `Some(Continue)` when isearch fully
+/// consumed the command, `None` when the command should fall
+/// through to normal dispatch (the "accept on passthrough"
+/// semantic from `docs/spec/search.md`).
+pub(super) fn run_overlay_command(
+    cmd: Command,
+    isearch: &mut Option<IsearchState>,
+    tabs: &mut Tabs,
+    edits: &BufferEdits,
+    jumps: &mut JumpListState,
+) -> Option<DispatchOutcome> {
+    isearch.as_ref()?;
+    match cmd {
+        Command::InsertChar(c) => {
+            append_and_search(isearch, tabs, edits, c);
+            Some(DispatchOutcome::Continue)
+        }
+        Command::DeleteBack => {
+            pop_and_search(isearch, tabs, edits);
+            Some(DispatchOutcome::Continue)
+        }
+        Command::InsertNewline => {
+            accept(isearch, tabs, jumps);
+            Some(DispatchOutcome::Continue)
+        }
+        Command::Abort => {
+            deactivate(isearch, tabs);
+            Some(DispatchOutcome::Continue)
+        }
+        // `Ctrl-s` again: advance to next match (Stage 3). Absorb
+        // for now so we don't fall through to a stale binding.
+        Command::InBufferSearch => Some(DispatchOutcome::Continue),
+        // Everything else: "accept on passthrough". The current
+        // match becomes the cursor's home; the command then runs
+        // normally in the outer dispatch path. Quit passes through
+        // without even the accept step (edge case matters less).
+        Command::Quit => None,
+        _ => {
+            accept(isearch, tabs, jumps);
+            None
+        }
+    }
+}
+
+/// Append `c` to the query; recompute matches; jump the active
+/// buffer's cursor to the first match at-or-after the current
+/// cursor. No forward match → set `failed`.
+fn append_and_search(
+    isearch: &mut Option<IsearchState>,
+    tabs: &mut Tabs,
+    edits: &BufferEdits,
+    c: char,
+) {
+    let state = match isearch.as_mut() {
+        Some(s) => s,
+        None => return,
+    };
+    state.query.insert_char(c);
+    recompute_and_jump(state, tabs, edits);
+}
+
+/// Pop the last query char and re-run matching. If the query
+/// becomes empty, restore the cursor + scroll to the origin
+/// (the user "undid" back to their starting point).
+fn pop_and_search(
+    isearch: &mut Option<IsearchState>,
+    tabs: &mut Tabs,
+    edits: &BufferEdits,
+) {
+    let state = match isearch.as_mut() {
+        Some(s) => s,
+        None => return,
+    };
+    if !state.query.delete_back() {
+        // Query was already empty — nothing to do.
+        return;
+    }
+    if state.query.text.is_empty() {
+        state.matches.clear();
+        state.match_idx = None;
+        state.failed = false;
+        let origin_cursor = state.origin_cursor;
+        let origin_scroll = state.origin_scroll;
+        if let Some(active_id) = tabs.active
+            && let Some(tab) = tabs.open.iter_mut().find(|t| t.id == active_id)
+        {
+            tab.cursor = origin_cursor;
+            tab.scroll = origin_scroll;
+        }
+        return;
+    }
+    recompute_and_jump(state, tabs, edits);
+}
+
+/// Rescan the active buffer's rope for the current query and
+/// jump the cursor to the first forward match. Sets `failed =
+/// true` when no match at or after the current cursor exists.
+fn recompute_and_jump(
+    state: &mut IsearchState,
+    tabs: &mut Tabs,
+    edits: &BufferEdits,
+) {
+    let rope = match active_rope(tabs, edits) {
+        Some(r) => r,
+        None => return,
+    };
+    state.matches = find_all_matches(&rope, &state.query.text);
+    state.failed = false;
+    let Some(active_id) = tabs.active else {
+        return;
+    };
+    let Some(tab_idx) = tabs.open.iter().position(|t| t.id == active_id) else {
+        return;
+    };
+    let tab = &tabs.open[tab_idx];
+    let cursor_char = cursor_to_char(&rope, tab.cursor.line, tab.cursor.col);
+    let first_forward = state
+        .matches
+        .iter()
+        .position(|m| m.char_start >= cursor_char);
+    match first_forward {
+        Some(idx) => {
+            state.match_idx = Some(idx);
+            let hit = state.matches[idx];
+            let (line, col) = char_to_line_col(&rope, hit.char_start);
+            let tab = &mut tabs.open[tab_idx];
+            tab.cursor.line = line;
+            tab.cursor.col = col;
+            tab.cursor.preferred_col = col;
+        }
+        None => {
+            state.match_idx = None;
+            state.failed = true;
+        }
+    }
+}
+
+/// Case-insensitive substring scan. Walks the rope a char at a
+/// time; when `query` is non-empty we compare lowercased chars.
+/// Empty query → empty match list (matches legacy — no cursor
+/// jump while the query is still being typed from scratch).
+fn find_all_matches(rope: &Rope, query: &str) -> Vec<IsearchMatch> {
+    if query.is_empty() {
+        return Vec::new();
+    }
+    let qlower: Vec<char> = query.chars().flat_map(|c| c.to_lowercase()).collect();
+    let mut out = Vec::new();
+    let total = rope.len_chars();
+    let qlen = qlower.len();
+    if qlen == 0 || qlen > total {
+        return out;
+    }
+    // Linear scan; works for M13's buffer sizes. M14's project
+    // search uses ripgrep.
+    let mut i = 0;
+    while i + qlen <= total {
+        let mut ok = true;
+        for (j, &qc) in qlower.iter().enumerate() {
+            let rc = rope.char(i + j);
+            // `to_lowercase` returns an iterator; for M13 we only
+            // fold on the first mapped char — matches legacy's
+            // byte-level lowercase. Unicode edge cases (German ß,
+            // Turkish dotless I) are out-of-scope.
+            let rcl = rc.to_lowercase().next().unwrap_or(rc);
+            if rcl != qc {
+                ok = false;
+                break;
+            }
+        }
+        if ok {
+            out.push(IsearchMatch {
+                char_start: i,
+                char_end: i + qlen,
+            });
+            i += qlen;
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
+fn active_rope(tabs: &Tabs, edits: &BufferEdits) -> Option<Rope> {
+    let active_id = tabs.active?;
+    let tab = tabs.open.iter().find(|t| t.id == active_id)?;
+    edits.buffers.get(&tab.path).map(|eb| (*eb.rope).clone())
+}
+
+fn cursor_to_char(rope: &Rope, line: usize, col: usize) -> usize {
+    let line = line.min(rope.len_lines().saturating_sub(1));
+    rope.line_to_char(line) + col
+}
+
+fn char_to_line_col(rope: &Rope, ch: usize) -> (usize, usize) {
+    let line = rope.char_to_line(ch);
+    let col = ch - rope.line_to_char(line);
+    (line, col)
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use led_core::UserPath;
     use led_state_buffer_edits::EditedBuffer;
-    use led_state_tabs::{Tab, TabId};
+    use led_state_tabs::{Cursor, Scroll, Tab, TabId};
     use ropey::Rope;
     use std::sync::Arc;
 
@@ -138,6 +367,150 @@ mod tests {
         let mut isearch = None;
         in_buffer_search(&mut isearch, &tabs, &edits);
         assert!(isearch.is_none());
+    }
+
+    #[test]
+    fn find_all_matches_case_insensitive() {
+        let rope = Rope::from_str("Foo fooBAR quux Foo\n");
+        let ms = find_all_matches(&rope, "foo");
+        assert_eq!(ms.len(), 3);
+        assert_eq!(ms[0], IsearchMatch { char_start: 0, char_end: 3 });
+        assert_eq!(ms[1], IsearchMatch { char_start: 4, char_end: 7 });
+        assert_eq!(ms[2], IsearchMatch { char_start: 16, char_end: 19 });
+    }
+
+    #[test]
+    fn find_all_matches_empty_query_is_empty() {
+        let rope = Rope::from_str("hello\n");
+        assert!(find_all_matches(&rope, "").is_empty());
+    }
+
+    #[test]
+    fn typing_advances_cursor_to_first_forward_match() {
+        let mut tabs = tabs_with_active("/tmp/buf.txt");
+        // Start at line 0 col 0.
+        tabs.open[0].cursor = Cursor::default();
+        let edits = edits_with_buffer(
+            "/tmp/buf.txt",
+            "alpha beta gamma\ndelta echo foxtrot\nalpha zulu yankee\n",
+        );
+        let mut isearch = None;
+        in_buffer_search(&mut isearch, &tabs, &edits);
+        let mut jumps = JumpListState::default();
+        // Type 'a' 'l' 'p' 'h' 'a' → query = "alpha", first match is at 0.
+        for c in "alpha".chars() {
+            run_overlay_command(
+                Command::InsertChar(c),
+                &mut isearch,
+                &mut tabs,
+                &edits,
+                &mut jumps,
+            );
+        }
+        let s = isearch.as_ref().unwrap();
+        assert_eq!(s.query.text, "alpha");
+        assert_eq!(s.matches.len(), 2);
+        assert_eq!(s.match_idx, Some(0));
+        assert!(!s.failed);
+        // Cursor jumped to match 0, which is already at (0, 0).
+        assert_eq!(tabs.open[0].cursor.line, 0);
+        assert_eq!(tabs.open[0].cursor.col, 0);
+    }
+
+    #[test]
+    fn no_forward_match_sets_failed() {
+        let mut tabs = tabs_with_active("/tmp/buf.txt");
+        // Cursor past the only match.
+        tabs.open[0].cursor = Cursor { line: 1, col: 0, preferred_col: 0 };
+        let edits = edits_with_buffer("/tmp/buf.txt", "alpha\nbeta\n");
+        let mut isearch = None;
+        in_buffer_search(&mut isearch, &tabs, &edits);
+        let mut jumps = JumpListState::default();
+        run_overlay_command(
+            Command::InsertChar('a'),
+            &mut isearch,
+            &mut tabs,
+            &edits,
+            &mut jumps,
+        );
+        let s = isearch.as_ref().unwrap();
+        // "a" has two matches in "alpha" + one in "beta" (b-e-t-a) at
+        // char 9. First forward from line 1 col 0 is "a" in "beta" (9).
+        // The cursor at line 1 col 0 → char index = 6, so first match
+        // with char_start >= 6 is 9. Not failed.
+        assert!(!s.failed);
+        assert!(s.match_idx.is_some());
+
+        // Now type 'q' (not in buffer) → no matches at all → failed.
+        run_overlay_command(
+            Command::InsertChar('q'),
+            &mut isearch,
+            &mut tabs,
+            &edits,
+            &mut jumps,
+        );
+        let s = isearch.as_ref().unwrap();
+        assert!(s.failed);
+        assert!(s.matches.is_empty());
+    }
+
+    #[test]
+    fn backspace_to_empty_restores_origin() {
+        let mut tabs = tabs_with_active("/tmp/buf.txt");
+        let origin = Cursor { line: 0, col: 0, preferred_col: 0 };
+        tabs.open[0].cursor = origin;
+        let edits = edits_with_buffer("/tmp/buf.txt", "alpha beta\n");
+        let mut isearch = None;
+        in_buffer_search(&mut isearch, &tabs, &edits);
+        let mut jumps = JumpListState::default();
+        run_overlay_command(Command::InsertChar('b'), &mut isearch, &mut tabs, &edits, &mut jumps);
+        // 'b' is at char 6 (line 0 col 6).
+        assert_eq!(tabs.open[0].cursor.col, 6);
+        run_overlay_command(Command::DeleteBack, &mut isearch, &mut tabs, &edits, &mut jumps);
+        // Query empty → cursor back at origin.
+        assert_eq!(tabs.open[0].cursor, origin);
+    }
+
+    #[test]
+    fn enter_accepts_and_pushes_jump_record_when_cursor_moved() {
+        let mut tabs = tabs_with_active("/tmp/buf.txt");
+        tabs.open[0].cursor = Cursor::default();
+        let edits = edits_with_buffer("/tmp/buf.txt", "alpha beta\n");
+        let mut isearch = None;
+        in_buffer_search(&mut isearch, &tabs, &edits);
+        let mut jumps = JumpListState::default();
+        run_overlay_command(Command::InsertChar('b'), &mut isearch, &mut tabs, &edits, &mut jumps);
+        run_overlay_command(
+            Command::InsertNewline,
+            &mut isearch,
+            &mut tabs,
+            &edits,
+            &mut jumps,
+        );
+        assert!(isearch.is_none());
+        // Cursor stays where the match put it.
+        assert_eq!(tabs.open[0].cursor.col, 6);
+        // JumpList recorded the origin (0, 0).
+        assert!(jumps.can_back());
+    }
+
+    #[test]
+    fn esc_restores_origin_cursor_and_scroll() {
+        let mut tabs = tabs_with_active("/tmp/buf.txt");
+        let origin_cursor = Cursor { line: 0, col: 3, preferred_col: 3 };
+        let origin_scroll = Scroll { top: 0 };
+        tabs.open[0].cursor = origin_cursor;
+        tabs.open[0].scroll = origin_scroll;
+        let edits = edits_with_buffer("/tmp/buf.txt", "alpha beta\n");
+        let mut isearch = None;
+        in_buffer_search(&mut isearch, &tabs, &edits);
+        let mut jumps = JumpListState::default();
+        run_overlay_command(Command::InsertChar('b'), &mut isearch, &mut tabs, &edits, &mut jumps);
+        assert_ne!(tabs.open[0].cursor, origin_cursor);
+        run_overlay_command(Command::Abort, &mut isearch, &mut tabs, &edits, &mut jumps);
+        assert!(isearch.is_none());
+        assert_eq!(tabs.open[0].cursor, origin_cursor);
+        assert_eq!(tabs.open[0].scroll, origin_scroll);
     }
 
     #[test]

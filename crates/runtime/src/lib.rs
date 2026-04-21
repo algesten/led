@@ -381,6 +381,7 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
             AlertsInput::new(alerts),
             BrowserUiInput::new(browser),
             FindFileInput::new(find_file),
+            query::IsearchInput::new(isearch),
         );
 
         // ── Execute ─────────────────────────────────────────────

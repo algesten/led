@@ -240,6 +240,20 @@ impl<'a> FindFileInput<'a> {
     }
 }
 
+/// Projection for the in-buffer isearch overlay. `None` when
+/// isearch is inactive.
+#[drv::input]
+#[derive(Copy, Clone)]
+pub struct IsearchInput<'a> {
+    pub overlay: &'a Option<led_state_isearch::IsearchState>,
+}
+
+impl<'a> IsearchInput<'a> {
+    pub fn new(is: &'a Option<led_state_isearch::IsearchState>) -> Self {
+        Self { overlay: is }
+    }
+}
+
 // ── Memos ──────────────────────────────────────────────────────────────
 
 /// "What files need a load started?"
@@ -486,12 +500,36 @@ fn truncate_to_cols_in_place(s: &mut String, cols: usize) {
 /// All strings are `Arc<str>` so cache-hit clones of
 /// [`StatusBarModel`] are a pointer copy.
 #[drv::memo(single)]
-pub fn status_bar_model<'a, 'b, 'c, 'f>(
+pub fn status_bar_model<'a, 'b, 'c, 'f, 'i>(
     alerts: AlertsInput<'a>,
     tabs: TabsActiveInput<'b>,
     edits: EditedBuffersInput<'c>,
     find_file: FindFileInput<'f>,
+    isearch: IsearchInput<'i>,
 ) -> StatusBarModel {
+    // Priority 0a — in-buffer isearch prompt.
+    if let Some(state) = isearch.overlay.as_ref() {
+        let hint_len = state.query.hint.as_ref().map(|h| h.len() + 1).unwrap_or(0);
+        let mut left = String::with_capacity(state.query.text.len() + 10 + hint_len);
+        left.push_str(" Search: ");
+        left.push_str(&state.query.text);
+        if let Some(hint) = state.query.hint.as_ref() {
+            left.push(' ');
+            left.push_str(hint);
+        }
+        // Failed-state marker — matches legacy UX of "query shows
+        // even when no match forward"; Stage 3/5 will style this
+        // differently in the painter.
+        if state.failed {
+            left.push_str("  [No match]");
+        }
+        return StatusBarModel {
+            left: Arc::from(left),
+            right: Arc::from(""),
+            is_warn: false,
+        };
+    }
+
     // Priority 0 — find-file overlay prompt. Replaces the whole
     // status bar content: left is `Find file: <input>` /
     // `Save as: <input>`, right is empty (no position indicator
@@ -758,7 +796,7 @@ pub fn file_list_action<'f, 'u>(
 /// same input values through — drv 0.3's input types are `Copy` over
 /// references, so forwarding is free.
 #[drv::memo(single)]
-pub fn render_frame<'t, 'e, 'b, 'a, 'al, 'br, 'ff>(
+pub fn render_frame<'t, 'e, 'b, 'a, 'al, 'br, 'ff, 'is>(
     term: TerminalDimsInput<'t>,
     edits: EditedBuffersInput<'e>,
     store: StoreLoadedInput<'b>,
@@ -766,12 +804,13 @@ pub fn render_frame<'t, 'e, 'b, 'a, 'al, 'br, 'ff>(
     alerts: AlertsInput<'al>,
     browser: BrowserUiInput<'br>,
     find_file: FindFileInput<'ff>,
+    isearch: IsearchInput<'is>,
 ) -> Option<Frame> {
     let dims = (*term.dims)?;
     let layout = Layout::compute(dims, *browser.visible);
     let tab_bar = tab_bar_model(tabs, edits);
     let body = body_model(edits, store, tabs, layout.editor_area);
-    let status_bar = status_bar_model(alerts, tabs, edits, find_file);
+    let status_bar = status_bar_model(alerts, tabs, edits, find_file, isearch);
     let side_panel = layout
         .side_area
         .map(|area| side_panel_model(browser, find_file, area.rows));
@@ -923,6 +962,7 @@ mod tests {
             ..Default::default()
         };
         let ff = None;
+        let is = None;
         render_frame(
             TerminalDimsInput::new(term),
             EditedBuffersInput::new(e),
@@ -931,6 +971,7 @@ mod tests {
             AlertsInput::new(&alerts),
             BrowserUiInput::new(&browser),
             FindFileInput::new(&ff),
+            IsearchInput::new(&is),
         )
     }
 
@@ -974,6 +1015,7 @@ mod tests {
         ff_state.input.cursor = 4;
         assert_eq!(ff_state.mode, FindFileMode::Open);
         let ff = Some(ff_state);
+        let is = None;
 
         let frame = render_frame(
             TerminalDimsInput::new(&term),
@@ -983,6 +1025,7 @@ mod tests {
             AlertsInput::new(&alerts),
             BrowserUiInput::new(&browser),
             FindFileInput::new(&ff),
+            IsearchInput::new(&is),
         )
         .expect("dims set");
 
@@ -1009,6 +1052,7 @@ mod tests {
             ..Default::default()
         };
         let ff = None;
+        let is = None;
         let frame = render_frame(
             TerminalDimsInput::new(&term),
             EditedBuffersInput::new(&e),
@@ -1017,6 +1061,7 @@ mod tests {
             AlertsInput::new(&alerts),
             BrowserUiInput::new(&browser),
             FindFileInput::new(&ff),
+            IsearchInput::new(&is),
         )
         .expect("dims set");
         assert_eq!(frame.cursor, None);
@@ -1373,11 +1418,13 @@ mod tests {
 
     fn status(a: &AlertState, t: &Tabs, e: &BufferEdits) -> StatusBarModel {
         let ff = None;
+        let is = None;
         status_bar_model(
             AlertsInput::new(a),
             TabsActiveInput::new(t),
             EditedBuffersInput::new(e),
             FindFileInput::new(&ff),
+            IsearchInput::new(&is),
         )
     }
 
