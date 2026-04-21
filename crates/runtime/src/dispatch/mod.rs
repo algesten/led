@@ -204,6 +204,7 @@ pub fn dispatch_key(
         chord,
         browser.focus == Focus::Side,
         find_file.is_some(),
+        file_search.is_some(),
     );
     match resolved {
         Resolved::Command(cmd) => {
@@ -256,6 +257,7 @@ fn resolve_command(
     chord: &mut ChordState,
     browser_focused: bool,
     find_file_active: bool,
+    file_search_active: bool,
 ) -> Resolved {
     if let Some(prefix) = chord.pending.take() {
         if let Some(cmd) = keymap.lookup_chord(&prefix, &k) {
@@ -286,10 +288,12 @@ fn resolve_command(
         chord.pending = Some(k);
         return Resolved::PrefixStored;
     }
-    // Implicit insert only when the editor is focused. For find-file
-    // this still fires — the overlay turns `InsertChar(c)` into an
-    // input-buffer edit. Sidebar focus suppresses implicit-insert.
-    if !browser_focused
+    // Implicit insert. Fires when the editor is focused, and also
+    // when the file-search overlay is active (its "focus = Side"
+    // suppresses normal sidebar-focused implicit-insert, but the
+    // overlay still wants typed chars as query input). Browser
+    // focus without the overlay → suppress.
+    if (!browser_focused || file_search_active)
         && let Some(cmd) = implicit_insert(&k)
     {
         return Resolved::Command(cmd);
@@ -343,6 +347,12 @@ fn run_command(
     // command triggers "accept on passthrough" — the current match
     // becomes the cursor's home, then the command runs normally.
     if let Some(outcome) = isearch::run_overlay_command(cmd, isearch, tabs, edits, jumps) {
+        return outcome;
+    }
+
+    // File-search overlay intercept (M14). Typing / toggles /
+    // Abort are fully consumed; other commands fall through.
+    if let Some(outcome) = file_search::run_overlay_command(cmd, file_search, browser) {
         return outcome;
     }
 
@@ -570,6 +580,14 @@ fn run_command(
             file_search::deactivate(file_search, browser);
             DispatchOutcome::Continue
         }
+        // Toggles + ReplaceAll are only meaningful inside the
+        // overlay — `file_search::run_overlay_command` consumes
+        // them when active. If we get here, the overlay isn't
+        // open, and these are no-ops.
+        Command::ToggleSearchCase
+        | Command::ToggleSearchRegex
+        | Command::ToggleSearchReplace
+        | Command::ReplaceAll => DispatchOutcome::Continue,
     }
 }
 

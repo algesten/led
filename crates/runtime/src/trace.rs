@@ -40,6 +40,15 @@ pub trait Trace: Send + Sync {
     fn clipboard_write_done(&self, ok: bool);
     fn fs_list_start(&self, path: &CanonPath);
     fn fs_list_done(&self, path: &CanonPath, ok: bool);
+    /// Project-wide file search request dispatched to the ripgrep
+    /// driver. Legacy dispatched.snap name: `FileSearch`.
+    fn file_search_start(
+        &self,
+        query: &str,
+        root: &CanonPath,
+        case_sensitive: bool,
+        use_regex: bool,
+    );
     /// Emitted when the find-file driver receives a completion
     /// command. Legacy's dispatched.snap name is `FsFindFile`.
     fn find_file_start(&self, cmd: &FindFileCmd);
@@ -99,6 +108,16 @@ impl SharedTrace {
     }
     pub fn workspace_clear_undo(&self, path: &CanonPath) {
         self.0.workspace_clear_undo(path);
+    }
+    pub fn file_search_start(
+        &self,
+        query: &str,
+        root: &CanonPath,
+        case_sensitive: bool,
+        use_regex: bool,
+    ) {
+        self.0
+            .file_search_start(query, root, case_sensitive, use_regex);
     }
     pub fn file_reopen_existing(&self, path: &CanonPath) {
         self.0.file_reopen_existing(path);
@@ -166,6 +185,21 @@ impl Trace for FileTrace {
         self.write_line(&format!("FsListDir\tpath={}", self.format_path(path)));
     }
     fn fs_list_done(&self, _: &CanonPath, _: bool) {}
+    fn file_search_start(
+        &self,
+        query: &str,
+        root: &CanonPath,
+        case_sensitive: bool,
+        use_regex: bool,
+    ) {
+        self.write_line(&format!(
+            "FileSearch\tquery=\"{}\" root={} case={} regex={}",
+            query,
+            self.format_path(root),
+            case_sensitive,
+            use_regex,
+        ));
+    }
     fn find_file_start(&self, cmd: &FindFileCmd) {
         // Legacy format: `FsFindFile\tdir=<p> prefix="<s>" show_hidden=<bool>`.
         self.write_line(&format!(
@@ -226,6 +260,7 @@ impl Trace for NoopTrace {
     fn clipboard_write_done(&self, _ok: bool) {}
     fn fs_list_start(&self, _: &CanonPath) {}
     fn fs_list_done(&self, _: &CanonPath, _: bool) {}
+    fn file_search_start(&self, _: &str, _: &CanonPath, _: bool, _: bool) {}
     fn find_file_start(&self, _: &FindFileCmd) {}
     fn find_file_done(&self, _: &CanonPath, _: &str, _: bool) {}
     fn workspace_clear_undo(&self, _: &CanonPath) {}

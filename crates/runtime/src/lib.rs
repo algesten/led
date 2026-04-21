@@ -407,6 +407,29 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
         }
         drivers.find_file.execute(find_file_actions.iter());
 
+        // File-search queued requests (M14). Trace per queued
+        // search; real driver dispatch lands with stage 4. Root is
+        // the workspace (`fs.root`) — legacy falls back to the
+        // startup dir when no workspace; M11 sets `fs.root` to
+        // CWD at startup, so the fallback arrives for free.
+        if let Some(fs_state) = file_search.as_mut()
+            && !fs_state.pending_search.is_empty()
+            && let Some(root) = fs.root.as_ref()
+        {
+            for req in fs_state.pending_search.drain(..) {
+                trace.file_search_start(
+                    &req.query,
+                    root,
+                    req.case_sensitive,
+                    req.use_regex,
+                );
+            }
+        } else if let Some(fs_state) = file_search.as_mut() {
+            // No workspace root — swallow pending to avoid re-fire
+            // (sync-clear discipline even though nothing to trace).
+            fs_state.pending_search.clear();
+        }
+
         // Sync-clear pending_saves + pending_save_as for the paths
         // we're about to dispatch — the execute-pattern discipline
         // that prevents the next tick's query from re-emitting the

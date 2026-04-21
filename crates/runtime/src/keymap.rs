@@ -96,10 +96,15 @@ pub enum Command {
     InBufferSearch,
 
     // Project-wide file search (M14). `OpenFileSearch` opens the
-    // sidebar overlay; `CloseFileSearch` exits. Toggles + replace
-    // flow land in stage 4+.
+    // sidebar overlay; `CloseFileSearch` exits. Toggles flip the
+    // three mode switches shown in the header; `ReplaceAll` is the
+    // bulk-replace commit.
     OpenFileSearch,
     CloseFileSearch,
+    ToggleSearchCase,
+    ToggleSearchRegex,
+    ToggleSearchReplace,
+    ReplaceAll,
 }
 
 /// Two-level key → command binding set. `direct` maps single keys to
@@ -343,8 +348,13 @@ pub fn default_keymap() -> Keymap {
     // In-buffer isearch (M13). Same binding starts and advances.
     m.bind("ctrl+s", Command::InBufferSearch);
 
-    // Project-wide file search (M14). Ctrl+f toggles the overlay.
+    // Project-wide file search (M14). Ctrl+f toggles the overlay;
+    // toggles fire while the overlay has focus.
     m.bind("ctrl+f", Command::OpenFileSearch);
+    m.bind("alt+1", Command::ToggleSearchCase);
+    m.bind("alt+2", Command::ToggleSearchRegex);
+    m.bind("alt+3", Command::ToggleSearchReplace);
+    m.bind("alt+enter", Command::ReplaceAll);
 
     m
 }
@@ -542,6 +552,10 @@ pub fn parse_command(s: &str) -> Result<Command, String> {
         "in_buffer_search" => Ok(Command::InBufferSearch),
         "open_file_search" => Ok(Command::OpenFileSearch),
         "close_file_search" => Ok(Command::CloseFileSearch),
+        "toggle_search_case" => Ok(Command::ToggleSearchCase),
+        "toggle_search_regex" => Ok(Command::ToggleSearchRegex),
+        "toggle_search_replace" => Ok(Command::ToggleSearchReplace),
+        "replace_all" => Ok(Command::ReplaceAll),
         other => Err(format!("unknown command `{other}`")),
     }
 }

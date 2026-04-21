@@ -66,4 +66,38 @@ pub struct FileSearchState {
     pub case_sensitive: bool,
     pub use_regex: bool,
     pub replace_mode: bool,
+
+    /// Queue of pending ripgrep requests. Dispatch pushes one per
+    /// input edit / toggle flip; the main loop drains + ships to
+    /// the driver + clears in order. Mirrors find-file's queue
+    /// pattern so multiple keystrokes per tick produce one
+    /// `FileSearch` trace line each.
+    pub pending_search: Vec<PendingSearch>,
+}
+
+/// One queued search request: the current query + toggle state at
+/// the moment of the edit. The driver snaps these into a ripgrep
+/// command; the runtime sync-clears the queue before execute.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingSearch {
+    pub query: String,
+    pub case_sensitive: bool,
+    pub use_regex: bool,
+}
+
+impl FileSearchState {
+    /// Queue a search request from the current input + toggle
+    /// state. No-op when the query is empty — legacy skips the
+    /// request so the side panel shows "no results yet" rather
+    /// than flooding ripgrep with the no-op pattern.
+    pub fn queue_search(&mut self) {
+        if self.query.text.is_empty() {
+            return;
+        }
+        self.pending_search.push(PendingSearch {
+            query: self.query.text.clone(),
+            case_sensitive: self.case_sensitive,
+            use_regex: self.use_regex,
+        });
+    }
 }
