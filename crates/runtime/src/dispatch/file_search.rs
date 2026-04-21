@@ -169,7 +169,13 @@ pub(super) fn run_overlay_command(
             );
         }
         Command::InsertNewline => {
-            handle_enter(file_search, browser, tabs, edits);
+            handle_enter(
+                file_search,
+                browser,
+                tabs,
+                edits,
+                side_panel_rows(terminal),
+            );
         }
         Command::Abort | Command::CloseFileSearch => {
             deactivate(file_search, browser, tabs);
@@ -217,6 +223,7 @@ fn handle_enter(
     browser: &mut BrowserUi,
     tabs: &mut Tabs,
     edits: &mut BufferEdits,
+    body_rows: usize,
 ) {
     let (hit, commit) = {
         let state = match file_search.as_mut() {
@@ -233,9 +240,9 @@ fn handle_enter(
         (state.flat_hits[idx].clone(), commit)
     };
     if commit {
-        jump_commit(&hit, file_search, browser, tabs);
+        jump_commit(&hit, file_search, browser, tabs, body_rows);
     } else {
-        jump_preview(&hit, tabs, edits);
+        jump_preview(&hit, tabs, edits, body_rows);
     }
 }
 
@@ -249,6 +256,7 @@ fn jump_commit(
     file_search: &mut Option<FileSearchState>,
     browser: &mut BrowserUi,
     tabs: &mut Tabs,
+    body_rows: usize,
 ) {
     open_or_focus_tab(tabs, &hit.path, /* promote */ true);
     let line = hit.line.saturating_sub(1);
@@ -262,7 +270,7 @@ fn jump_commit(
             col,
             preferred_col: col,
         };
-        tab.scroll.top = line;
+        tab.scroll.top = preview_scroll_top(line, body_rows);
     }
     if let Some(state) = file_search.as_mut() {
         state.previous_tab = None;
@@ -282,7 +290,7 @@ fn move_selection(
     tabs: &mut Tabs,
     edits: &mut BufferEdits,
     delta: i32,
-    side_rows: usize,
+    body_rows: usize,
 ) {
     // Encode the current selection as a flat row index.
     let replace_slot = state.replace_mode as i64;
@@ -301,11 +309,14 @@ fn move_selection(
     } else {
         FileSearchSelection::Result((next - base) as usize)
     };
-    clamp_scroll_to_selection(state, side_rows);
+    // Side panel and body share the same row budget
+    // (`dims.rows - 2` for both); the same value drives the
+    // scroll-follow on the sidebar and the preview scroll below.
+    clamp_scroll_to_selection(state, body_rows);
     if let FileSearchSelection::Result(i) = state.selection
         && let Some(hit) = state.flat_hits.get(i).cloned()
     {
-        jump_preview(&hit, tabs, edits);
+        jump_preview(&hit, tabs, edits, body_rows);
     }
 }
 
@@ -407,18 +418,21 @@ fn apply_replace_all(
 /// Open (or focus) the hit's file as a preview tab and position the
 /// cursor on the match. `open_or_focus_tab(promote=false)` re-uses an
 /// existing tab for the same path, otherwise creates a preview. The
-/// cursor goes to 0-indexed `(line-1, col-1)` because ripgrep
-/// positions are 1-indexed.
-fn jump_preview(hit: &FileSearchHit, tabs: &mut Tabs, edits: &BufferEdits) {
+/// cursor goes to the start of the match line (col 0 keeps the
+/// preview unobtrusive; commit-Enter is what jumps onto the match
+/// column). The viewport scrolls so the hit sits ~1/3 down from
+/// the top when there's room — giving the user some context above.
+fn jump_preview(
+    hit: &FileSearchHit,
+    tabs: &mut Tabs,
+    edits: &BufferEdits,
+    body_rows: usize,
+) {
     open_or_focus_tab(tabs, &hit.path, false);
     let Some(active_id) = tabs.active else { return };
     let Some(idx) = tabs.open.iter().position(|t| t.id == active_id) else {
         return;
     };
-    // Preview lands the cursor at the start of the hit's line — not
-    // at the match column — matching legacy. The user arrows / types
-    // to explore from there; the match column only matters for the
-    // replace flow (stage 7).
     let line = hit.line.saturating_sub(1);
     let tab = &mut tabs.open[idx];
     tab.cursor = Cursor {
@@ -426,8 +440,19 @@ fn jump_preview(hit: &FileSearchHit, tabs: &mut Tabs, edits: &BufferEdits) {
         col: 0,
         preferred_col: 0,
     };
-    tab.scroll.top = line;
+    tab.scroll.top = preview_scroll_top(line, body_rows);
     let _ = edits;
+}
+
+/// Scroll the viewport so `line` lands roughly 1/3 down from the
+/// top, leaving context above. Returns 0 when the hit is too close
+/// to the start of the buffer for 1/3 to fit, or when rows is 0.
+fn preview_scroll_top(line: usize, body_rows: usize) -> usize {
+    if body_rows == 0 {
+        return line;
+    }
+    let offset = body_rows / 3;
+    line.saturating_sub(offset)
 }
 
 #[cfg(test)]
@@ -618,8 +643,11 @@ mod tests {
             ..Default::default()
         };
         let mut edits = led_state_buffer_edits::BufferEdits::default();
+        // Small viewport so body_rows/3 = 0 and the match stays at
+        // the very top — makes the scroll.top assertion concrete.
+        let body_rows = 3;
 
-        handle_enter(&mut file_search, &mut browser, &mut tabs, &mut edits);
+        handle_enter(&mut file_search, &mut browser, &mut tabs, &mut edits, body_rows);
 
         // Overlay closed.
         assert!(file_search.is_none());
@@ -634,7 +662,8 @@ mod tests {
         assert_eq!(tabs.open[0].cursor.line, 2);
         assert_eq!(tabs.open[0].cursor.col, 6);
         assert_eq!(tabs.open[0].cursor.preferred_col, 6);
-        assert_eq!(tabs.open[0].scroll.top, 2);
+        // body_rows/3 = 1 → scroll = line - 1 = 1.
+        assert_eq!(tabs.open[0].scroll.top, 1);
     }
 
     #[test]
@@ -673,8 +702,9 @@ mod tests {
             ..Default::default()
         };
         let mut edits = led_state_buffer_edits::BufferEdits::default();
+        let body_rows = 3;
 
-        handle_enter(&mut file_search, &mut browser, &mut tabs, &mut edits);
+        handle_enter(&mut file_search, &mut browser, &mut tabs, &mut edits, body_rows);
 
         assert!(file_search.is_some());
         let state = file_search.as_ref().unwrap();

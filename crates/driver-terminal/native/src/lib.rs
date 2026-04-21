@@ -313,6 +313,11 @@ fn paint_body(
         .filter(|c| *c < area.cols)
         .filter(|_| !theme.ruler.is_default());
 
+    let match_highlight = match body {
+        BodyModel::Content { match_highlight, .. } => *match_highlight,
+        _ => None,
+    };
+
     for row in 0..area.rows {
         queue!(out, cursor::MoveTo(area.x, area.y + row))?;
         let line: Option<&str> = match body {
@@ -336,6 +341,32 @@ fn paint_body(
             queue!(out, style::Print(line))?;
         }
         queue!(out, terminal::Clear(terminal::ClearType::UntilNewLine))?;
+
+        // File-search match highlight: a single run of cells inside
+        // one row. Overpaint the matched substring with
+        // `theme.search_match` so the hit stands out the way it
+        // does in the sidebar. Only active when the file-search
+        // overlay's selected hit lives on this visible row.
+        if let Some(mh) = match_highlight
+            && mh.row == row
+            && let Some(line) = line
+            && mh.col_end > mh.col_start
+        {
+            let matched: String = line
+                .chars()
+                .skip(mh.col_start as usize)
+                .take((mh.col_end - mh.col_start) as usize)
+                .collect();
+            if !matched.is_empty() {
+                queue!(
+                    out,
+                    cursor::MoveTo(area.x + mh.col_start, area.y + row)
+                )?;
+                apply_style(out, &theme.search_match)?;
+                queue!(out, style::Print(matched))?;
+                reset_style(out, &theme.search_match)?;
+            }
+        }
 
         // Overpaint the ruler column on top of the row. A single
         // cell, styled with `theme.ruler`. If the row's text covers
@@ -707,6 +738,7 @@ mod tests {
             body: BodyModel::Content {
                 lines: Arc::new(vec!["line 1".into(), "line 2".into()]),
                 cursor: Some((0, 0)),
+                match_highlight: None,
             },
             status_bar: StatusBarModel::default(),
             side_panel: None,
@@ -807,6 +839,7 @@ mod tests {
         let body = BodyModel::Content {
             lines: body_lines.clone(),
             cursor: Some((0, 2)),
+            match_highlight: None,
         };
 
         let frame1 = Frame {
@@ -1006,6 +1039,7 @@ mod tests {
                 "".to_string(),
             ]),
             cursor: None,
+            match_highlight: None,
         };
         let mut theme = Theme::default();
         theme.ruler_column = Some(5);

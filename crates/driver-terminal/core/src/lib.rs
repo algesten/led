@@ -209,7 +209,24 @@ pub enum BodyModel {
         /// cursor is outside the visible scroll window (defensive — the
         /// runtime's scroll invariant should keep it in view).
         cursor: Option<(u16, u16)>,
+        /// When set, the painter overlays `theme.search_match` on a
+        /// single run of characters inside one visible row. Used by
+        /// the file-search preview to show "this is the hit you're
+        /// looking at" on top of the buffer, mirroring the sidebar
+        /// highlight.
+        match_highlight: Option<BodyMatch>,
     },
+}
+
+/// One currently-previewed search hit, expressed in body-visible
+/// coordinates (post-scroll, post-gutter). The painter doesn't need
+/// to know about the rope or the scroll offset — everything is
+/// pre-resolved.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct BodyMatch {
+    pub row: u16,
+    pub col_start: u16,
+    pub col_end: u16,
 }
 
 /// Side-panel row. `chevron` is `None` for files, `Some(true)` for

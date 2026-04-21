@@ -404,10 +404,11 @@ const GUTTER_WIDTH: usize = 2;
 /// BufferEdits seed, plus Pending / Error paths that never made it
 /// to `Ready`.
 #[drv::memo(single)]
-pub fn body_model<'e, 'a, 'b>(
+pub fn body_model<'e, 'a, 'b, 'o>(
     edits: EditedBuffersInput<'e>,
     store: StoreLoadedInput<'a>,
     tabs: TabsActiveInput<'b>,
+    overlays: OverlaysInput<'o>,
     area: Rect,
 ) -> BodyModel {
     let Some(id) = *tabs.active else {
@@ -416,8 +417,9 @@ pub fn body_model<'e, 'a, 'b>(
     let Some(tab) = tabs.open.iter().find(|t| t.id == id) else {
         return BodyModel::Empty;
     };
+    let highlight = active_body_match(&overlays, &tab.path, tab.scroll, area);
     if let Some(eb) = edits.buffers.get(&tab.path) {
-        return render_content(&eb.rope, tab.cursor, tab.scroll, area);
+        return render_content(&eb.rope, tab.cursor, tab.scroll, area, highlight);
     }
     // Only the Pending / Error paths need a rendered path string, and
     // even then we allocate only once per recompute; `Arc<str>` keeps
@@ -430,15 +432,68 @@ pub fn body_model<'e, 'a, 'b>(
             path_display: path_display(tab),
             message: Arc::<str>::from(msg.as_str()),
         },
-        Some(LoadState::Ready(rope)) => render_content(rope, tab.cursor, tab.scroll, area),
+        Some(LoadState::Ready(rope)) => {
+            render_content(rope, tab.cursor, tab.scroll, area, highlight)
+        }
     }
+}
+
+/// Resolve the file-search overlay's current hit into a visible-row
+/// match highlight for the active tab. Returns `None` unless the
+/// overlay is open, has a Result selection pointing at a loaded hit,
+/// and the hit's path matches `active_path`. The result coords are
+/// body-visible (post-scroll, post-gutter) so the painter consumes
+/// them directly.
+fn active_body_match(
+    overlays: &OverlaysInput<'_>,
+    active_path: &CanonPath,
+    scroll: Scroll,
+    area: Rect,
+) -> Option<led_driver_terminal_core::BodyMatch> {
+    let state = overlays.file_search.as_ref()?;
+    let led_state_file_search::FileSearchSelection::Result(i) = state.selection else {
+        return None;
+    };
+    let hit = state.flat_hits.get(i)?;
+    if &hit.path != active_path {
+        return None;
+    }
+    let line = hit.line.saturating_sub(1);
+    let body_rows = area.rows as usize;
+    if body_rows == 0 || line < scroll.top || line >= scroll.top + body_rows {
+        return None;
+    }
+    let cols = area.cols as usize;
+    let content_cols = cols.saturating_sub(GUTTER_WIDTH);
+    let match_char_len = chars_between(&hit.preview, hit.match_start, hit.match_end);
+    let col_start_char = hit.col.saturating_sub(1);
+    let col_end_char = col_start_char + match_char_len;
+    // Buffer content truncated to `content_cols` — clamp the
+    // highlight to the visible slice so we don't emit a range past
+    // the right edge.
+    let col_start = col_start_char.min(content_cols);
+    let col_end = col_end_char.min(content_cols);
+    if col_end <= col_start {
+        return None;
+    }
+    Some(led_driver_terminal_core::BodyMatch {
+        row: (line - scroll.top) as u16,
+        col_start: (col_start + GUTTER_WIDTH) as u16,
+        col_end: (col_end + GUTTER_WIDTH) as u16,
+    })
 }
 
 fn path_display(tab: &Tab) -> Arc<str> {
     Arc::<str>::from(tab.path.display().to_string())
 }
 
-fn render_content(rope: &Rope, cursor: Cursor, scroll: Scroll, area: Rect) -> BodyModel {
+fn render_content(
+    rope: &Rope,
+    cursor: Cursor,
+    scroll: Scroll,
+    area: Rect,
+    match_highlight: Option<led_driver_terminal_core::BodyMatch>,
+) -> BodyModel {
     let body_rows = area.rows as usize;
     let line_count = rope.len_lines();
     let cols = area.cols as usize;
@@ -466,6 +521,7 @@ fn render_content(rope: &Rope, cursor: Cursor, scroll: Scroll, area: Rect) -> Bo
     BodyModel::Content {
         lines: Arc::new(lines),
         cursor: visible_cursor(cursor, scroll, area),
+        match_highlight,
     }
 }
 
@@ -1073,7 +1129,7 @@ fn render_frame_memo<'t, 'e, 'b, 'a, 'al, 'br, 'ov>(
     let dims = (*term.dims)?;
     let layout = Layout::compute(dims, *browser.visible);
     let tab_bar = tab_bar_model(tabs, edits);
-    let body = body_model(edits, store, tabs, layout.editor_area);
+    let body = body_model(edits, store, tabs, overlays, layout.editor_area);
     let status_bar = status_bar_model(alerts, tabs, edits, overlays);
     let side_panel = layout
         .side_area
@@ -1339,7 +1395,7 @@ mod tests {
         );
         let frame = render(&t, &e, &s, &term).expect("dims set");
         match &frame.body {
-            BodyModel::Content { lines, cursor } => {
+            BodyModel::Content { lines, cursor, .. } => {
                 // body_rows = dims.rows - 2 (tab bar + status bar).
                 assert_eq!(lines.len(), 3);
                 // Each content row is 2-col gutter + truncated content.
@@ -1369,7 +1425,7 @@ mod tests {
 
         let frame = render(&t, &e, &s, &term).expect("dims set");
         match &frame.body {
-            BodyModel::Content { lines, cursor } => {
+            BodyModel::Content { lines, cursor, .. } => {
                 assert_eq!(lines.len(), 9);
                 assert_eq!(lines[0], "  line 20");
                 assert_eq!(lines[5], "  line 25");
@@ -1855,6 +1911,138 @@ mod tests {
             flat_hits: flat,
             selection,
             ..Default::default()
+        }
+    }
+
+    #[test]
+    fn body_model_carries_match_highlight_when_preview_hit_is_on_active_tab() {
+        use led_state_file_search::{FileSearchGroup, FileSearchHit};
+
+        let path = canon("a.rs");
+        let rope = Arc::new(Rope::from_str("line zero\nline one\n    foo here\nlast\n"));
+
+        // Active tab is a.rs, scrolled to line 2 ("    foo here").
+        let tab = Tab {
+            id: TabId(1),
+            path: path.clone(),
+            cursor: Cursor::default(),
+            scroll: Scroll { top: 2 },
+            ..Default::default()
+        };
+        let mut t = Tabs::default();
+        t.open.push_back(tab);
+        t.active = Some(TabId(1));
+
+        let mut e = BufferEdits::default();
+        e.buffers.insert(
+            path.clone(),
+            led_state_buffer_edits::EditedBuffer::fresh(rope.clone()),
+        );
+        let s = BufferStore::default();
+
+        // File-search overlay with selection on the hit: line 3
+        // (1-indexed), "foo" at col 5 (0-indexed char 4), match
+        // len 3.
+        let hit = FileSearchHit {
+            path: path.clone(),
+            line: 3,
+            col: 5,
+            preview: "    foo here".into(),
+            match_start: 4,
+            match_end: 7,
+        };
+        let fs = Some(led_state_file_search::FileSearchState {
+            results: vec![FileSearchGroup {
+                path: path.clone(),
+                relative: "a.rs".into(),
+                hits: vec![hit.clone()],
+            }],
+            flat_hits: vec![hit],
+            selection: led_state_file_search::FileSearchSelection::Result(0),
+            ..Default::default()
+        });
+        let is = None;
+
+        let model = body_model(
+            EditedBuffersInput::new(&e),
+            StoreLoadedInput::new(&s),
+            TabsActiveInput::new(&t),
+            OverlaysInput::new(&None, &is, &fs),
+            Rect { x: 0, y: 0, cols: 40, rows: 5 },
+        );
+        match model {
+            BodyModel::Content {
+                match_highlight: Some(mh),
+                ..
+            } => {
+                // Scroll.top = 2, hit line = 2 → body row 0.
+                assert_eq!(mh.row, 0);
+                // col_start = 4 + GUTTER_WIDTH(2) = 6.
+                assert_eq!(mh.col_start, 6);
+                // col_end = 7 + GUTTER_WIDTH = 9.
+                assert_eq!(mh.col_end, 9);
+            }
+            other => panic!("expected Content with highlight, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn body_model_has_no_highlight_when_active_tab_differs_from_hit() {
+        use led_state_file_search::{FileSearchGroup, FileSearchHit};
+
+        let a = canon("a.rs");
+        let b = canon("b.rs");
+        let rope = Arc::new(Rope::from_str("text\n"));
+
+        let mut t = Tabs::default();
+        t.open.push_back(Tab {
+            id: TabId(1),
+            path: b.clone(), // active tab = b.rs
+            ..Default::default()
+        });
+        t.active = Some(TabId(1));
+
+        let mut e = BufferEdits::default();
+        e.buffers.insert(
+            b.clone(),
+            led_state_buffer_edits::EditedBuffer::fresh(rope),
+        );
+        let s = BufferStore::default();
+
+        // Hit lives on a.rs — should NOT paint a highlight on
+        // b.rs's body.
+        let hit = FileSearchHit {
+            path: a.clone(),
+            line: 1,
+            col: 1,
+            preview: "text".into(),
+            match_start: 0,
+            match_end: 4,
+        };
+        let fs = Some(led_state_file_search::FileSearchState {
+            results: vec![FileSearchGroup {
+                path: a.clone(),
+                relative: "a.rs".into(),
+                hits: vec![hit.clone()],
+            }],
+            flat_hits: vec![hit],
+            selection: led_state_file_search::FileSearchSelection::Result(0),
+            ..Default::default()
+        });
+        let is = None;
+
+        let model = body_model(
+            EditedBuffersInput::new(&e),
+            StoreLoadedInput::new(&s),
+            TabsActiveInput::new(&t),
+            OverlaysInput::new(&None, &is, &fs),
+            Rect { x: 0, y: 0, cols: 40, rows: 5 },
+        );
+        match model {
+            BodyModel::Content { match_highlight, .. } => {
+                assert_eq!(match_highlight, None);
+            }
+            other => panic!("expected Content, got {other:?}"),
         }
     }
 
