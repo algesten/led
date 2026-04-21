@@ -19,8 +19,8 @@ use crossterm::event::{
 };
 use led_core::Notifier;
 use led_driver_terminal_core::{
-    BodyModel, Dims, Frame, KeyCode, KeyEvent, KeyModifiers, Rect, SidePanelModel, StatusBarModel,
-    TabBarModel, TermEvent, TerminalInputDriver, Trace,
+    Attrs, BodyModel, Color, Dims, Frame, KeyCode, KeyEvent, KeyModifiers, Rect, SidePanelModel,
+    StatusBarModel, Style, TabBarModel, TermEvent, Theme, TerminalInputDriver, Trace,
 };
 
 #[cfg(test)]
@@ -160,10 +160,11 @@ impl TerminalOutputDriver {
         &self,
         frame: &Frame,
         last: Option<&Frame>,
+        theme: &Theme,
         out: &mut W,
     ) -> io::Result<()> {
         self.trace.render_tick();
-        paint(frame, last, out)
+        paint(frame, last, theme, out)
     }
 }
 
@@ -173,7 +174,12 @@ impl TerminalOutputDriver {
 /// them on first paint / layout change). At 120×40 a full repaint
 /// is ~4800 cells; dirty-diffing avoids that cost on tight scroll
 /// loops where only the body + status line change.
-pub fn paint(frame: &Frame, last: Option<&Frame>, out: &mut impl Write) -> io::Result<()> {
+pub fn paint(
+    frame: &Frame,
+    last: Option<&Frame>,
+    theme: &Theme,
+    out: &mut impl Write,
+) -> io::Result<()> {
     use crossterm::{cursor, queue};
 
     queue!(out, cursor::Hide)?;
@@ -187,13 +193,13 @@ pub fn paint(frame: &Frame, last: Option<&Frame>, out: &mut impl Write) -> io::R
         || last.map(|l| l.layout.side_area) != Some(frame.layout.side_area)
     {
         if let (Some(panel), Some(area)) = (&frame.side_panel, frame.layout.side_area) {
-            paint_side_panel(panel, area, out)?;
+            paint_side_panel(panel, area, theme, out)?;
         }
         // Border is layout-derived; repaint whenever layout changes
         // or when we're repainting the side panel anyway.
         if let Some(x) = frame.layout.side_border_x {
             let rows = frame.layout.editor_area.rows + frame.layout.tab_bar.rows;
-            paint_side_border(x, rows, out)?;
+            paint_side_border(x, rows, theme, out)?;
         }
     }
 
@@ -202,11 +208,11 @@ pub fn paint(frame: &Frame, last: Option<&Frame>, out: &mut impl Write) -> io::R
     }
 
     if force || last.map(|l| &l.tab_bar) != Some(&frame.tab_bar) {
-        paint_tab_bar(&frame.tab_bar, frame.layout.tab_bar, out)?;
+        paint_tab_bar(&frame.tab_bar, frame.layout.tab_bar, theme, out)?;
     }
 
     if force || last.map(|l| &l.status_bar) != Some(&frame.status_bar) {
-        paint_status_bar(&frame.status_bar, frame.layout.status_bar, out)?;
+        paint_status_bar(&frame.status_bar, frame.layout.status_bar, theme, out)?;
     }
 
     // Cursor placement last, on top of the finished frame. The
@@ -220,7 +226,12 @@ pub fn paint(frame: &Frame, last: Option<&Frame>, out: &mut impl Write) -> io::R
     out.flush()
 }
 
-fn paint_tab_bar(bar: &TabBarModel, area: Rect, out: &mut impl Write) -> io::Result<()> {
+fn paint_tab_bar(
+    bar: &TabBarModel,
+    area: Rect,
+    theme: &Theme,
+    out: &mut impl Write,
+) -> io::Result<()> {
     use crossterm::{cursor, queue, style, terminal};
 
     // Tab bar at the bottom of the editor area: second-to-last row.
@@ -229,9 +240,12 @@ fn paint_tab_bar(bar: &TabBarModel, area: Rect, out: &mut impl Write) -> io::Res
     let mut col: u16 = 0;
     for (i, label) in bar.labels.iter().enumerate() {
         let active = bar.active == Some(i);
-        if active {
-            queue!(out, style::SetAttribute(style::Attribute::Reverse))?;
-        }
+        let style = if active {
+            &theme.tab_active
+        } else {
+            &theme.tab_inactive
+        };
+        apply_style(out, style)?;
         // No `format!(" {label} ")` — three Prints go straight through
         // crossterm's buffered writer with zero allocation.
         queue!(
@@ -240,9 +254,7 @@ fn paint_tab_bar(bar: &TabBarModel, area: Rect, out: &mut impl Write) -> io::Res
             style::Print(label),
             style::Print(" ")
         )?;
-        if active {
-            queue!(out, style::SetAttribute(style::Attribute::NoReverse))?;
-        }
+        reset_style(out, style)?;
         col = col.saturating_add(label.chars().count().saturating_add(2) as u16);
         if col >= area.cols {
             break;
@@ -252,21 +264,25 @@ fn paint_tab_bar(bar: &TabBarModel, area: Rect, out: &mut impl Write) -> io::Res
     Ok(())
 }
 
-fn paint_status_bar(s: &StatusBarModel, area: Rect, out: &mut impl Write) -> io::Result<()> {
+fn paint_status_bar(
+    s: &StatusBarModel,
+    area: Rect,
+    theme: &Theme,
+    out: &mut impl Write,
+) -> io::Result<()> {
     use crossterm::{cursor, queue, style, terminal};
 
     queue!(out, cursor::MoveTo(area.x, area.y))?;
 
-    // Warn styling spans the whole row — set it before the first
-    // print, reset after the row is complete.
-    if s.is_warn {
-        queue!(
-            out,
-            style::SetBackgroundColor(style::Color::Red),
-            style::SetForegroundColor(style::Color::White),
-            style::SetAttribute(style::Attribute::Bold),
-        )?;
-    }
+    // Row-wide styling — set once before the first print, reset
+    // after. `status_normal` lets themers tint the happy-path bar
+    // too; the default is unstyled so unthemed goldens don't move.
+    let row_style = if s.is_warn {
+        &theme.status_warn
+    } else {
+        &theme.status_normal
+    };
+    apply_style(out, row_style)?;
 
     let cols = area.cols as usize;
     let left_cols = s.left.chars().count().min(cols);
@@ -279,13 +295,7 @@ fn paint_status_bar(s: &StatusBarModel, area: Rect, out: &mut impl Write) -> io:
     }
     queue!(out, style::Print(s.right.as_ref()))?;
 
-    if s.is_warn {
-        queue!(
-            out,
-            style::SetAttribute(style::Attribute::Reset),
-            style::ResetColor,
-        )?;
-    }
+    reset_style(out, row_style)?;
     queue!(out, terminal::Clear(terminal::ClearType::UntilNewLine))?;
     Ok(())
 }
@@ -320,7 +330,12 @@ fn paint_body(body: &BodyModel, area: Rect, out: &mut impl Write) -> io::Result<
     Ok(())
 }
 
-fn paint_side_panel(panel: &SidePanelModel, area: Rect, out: &mut impl Write) -> io::Result<()> {
+fn paint_side_panel(
+    panel: &SidePanelModel,
+    area: Rect,
+    theme: &Theme,
+    out: &mut impl Write,
+) -> io::Result<()> {
     use crossterm::{cursor, queue, style};
     use led_driver_terminal_core::SidePanelMode;
 
@@ -363,9 +378,14 @@ fn paint_side_panel(panel: &SidePanelModel, area: Rect, out: &mut impl Write) ->
                 line = truncated;
             }
             if entry.selected {
-                queue!(out, style::SetAttribute(style::Attribute::Reverse))?;
+                let sel_style = if panel.focused {
+                    &theme.browser_selected_focused
+                } else {
+                    &theme.browser_selected_unfocused
+                };
+                apply_style(out, sel_style)?;
                 queue!(out, style::Print(line))?;
-                queue!(out, style::SetAttribute(style::Attribute::NoReverse))?;
+                reset_style(out, sel_style)?;
             } else {
                 queue!(out, style::Print(line))?;
             }
@@ -381,12 +401,78 @@ fn paint_side_panel(panel: &SidePanelModel, area: Rect, out: &mut impl Write) ->
     Ok(())
 }
 
-fn paint_side_border(x: u16, rows: u16, out: &mut impl Write) -> io::Result<()> {
+fn paint_side_border(
+    x: u16,
+    rows: u16,
+    theme: &Theme,
+    out: &mut impl Write,
+) -> io::Result<()> {
     use crossterm::{cursor, queue, style};
+    apply_style(out, &theme.browser_border)?;
     for row in 0..rows {
         queue!(out, cursor::MoveTo(x, row), style::Print("\u{2502}"))?; // │
     }
+    reset_style(out, &theme.browser_border)?;
     Ok(())
+}
+
+// ── Theme → ANSI helpers ───────────────────────────────────────────────
+
+/// Emit the SetForeground / SetBackground / SetAttribute escapes for
+/// a [`Style`]. No-op when the style is the default — the painter
+/// won't touch terminal state, so goldens stay pixel-identical with
+/// an unstyled theme.
+fn apply_style(out: &mut impl Write, s: &Style) -> io::Result<()> {
+    use crossterm::{queue, style};
+    if s.is_default() {
+        return Ok(());
+    }
+    if let Some(fg) = s.fg {
+        queue!(out, style::SetForegroundColor(to_ct_color(fg)))?;
+    }
+    if let Some(bg) = s.bg {
+        queue!(out, style::SetBackgroundColor(to_ct_color(bg)))?;
+    }
+    apply_attrs(out, s.attrs)?;
+    Ok(())
+}
+
+fn apply_attrs(out: &mut impl Write, a: Attrs) -> io::Result<()> {
+    use crossterm::{queue, style};
+    if a.bold {
+        queue!(out, style::SetAttribute(style::Attribute::Bold))?;
+    }
+    if a.reverse {
+        queue!(out, style::SetAttribute(style::Attribute::Reverse))?;
+    }
+    if a.underline {
+        queue!(out, style::SetAttribute(style::Attribute::Underlined))?;
+    }
+    Ok(())
+}
+
+/// Undo `apply_style`. A blanket `Attribute::Reset` + `ResetColor`
+/// covers every case including the mixed attr+color legacy status
+/// bar; a default style is a no-op.
+fn reset_style(out: &mut impl Write, s: &Style) -> io::Result<()> {
+    use crossterm::{queue, style};
+    if s.is_default() {
+        return Ok(());
+    }
+    queue!(
+        out,
+        style::SetAttribute(style::Attribute::Reset),
+        style::ResetColor,
+    )?;
+    Ok(())
+}
+
+fn to_ct_color(c: Color) -> crossterm::style::Color {
+    crossterm::style::Color::Rgb {
+        r: c.r,
+        g: c.g,
+        b: c.b,
+    }
 }
 
 // ── Raw mode guard ─────────────────────────────────────────────────────
@@ -468,7 +554,7 @@ mod tests {
             dims: Dims { cols: 40, rows: 5 },
         };
         let mut out: Vec<u8> = Vec::new();
-        paint(&frame, None, &mut out).expect("paint to Vec<u8>");
+        paint(&frame, None, &Theme::legacy_default(), &mut out).expect("paint to Vec<u8>");
         assert!(!out.is_empty());
     }
 
@@ -484,7 +570,7 @@ mod tests {
             dims: Dims { cols: 40, rows: 5 },
         };
         let mut out: Vec<u8> = Vec::new();
-        paint(&frame, None, &mut out).expect("paint to Vec<u8>");
+        paint(&frame, None, &Theme::legacy_default(), &mut out).expect("paint to Vec<u8>");
         // Empty frames still produce clear/hide sequences — just don't panic.
         assert!(!out.is_empty());
     }
@@ -509,7 +595,7 @@ mod tests {
         };
         let area = Rect { x: 0, y: 0, cols: 24, rows: 10 };
         let mut out: Vec<u8> = Vec::new();
-        paint_side_panel(&panel, area, &mut out).expect("paint");
+        paint_side_panel(&panel, area, &Theme::legacy_default(), &mut out).expect("paint");
         assert!(
             !out.windows(3).any(|w| w == b"\x1b[K"),
             "paint_side_panel emitted Clear(UntilNewLine); bytes: {out:?}",
@@ -588,10 +674,10 @@ mod tests {
 
         let mut grid = Grid::new(dims);
         let mut out: Vec<u8> = Vec::new();
-        paint(&frame1, None, &mut out).expect("paint frame1");
+        paint(&frame1, None, &Theme::legacy_default(), &mut out).expect("paint frame1");
         grid.apply(&out);
         out.clear();
-        paint(&frame2, Some(&frame1), &mut out).expect("paint frame2");
+        paint(&frame2, Some(&frame1), &Theme::legacy_default(), &mut out).expect("paint frame2");
         grid.apply(&out);
 
         // Body column 25 ("  line NN" starts at editor_area.x=25).

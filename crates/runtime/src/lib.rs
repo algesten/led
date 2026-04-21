@@ -199,6 +199,7 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
     let drivers = world.drivers;
     let wake = world.wake;
     let keymap = world.keymap;
+    let theme = world.theme;
     let stdout = &mut *world.stdout;
     // `world.trace` is wired into every driver at spawn time; the
     // main loop also emits a `WorkspaceClearUndo` on each save,
@@ -531,7 +532,7 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
         // ── Render ──────────────────────────────────────────────
         if frame != last_frame {
             if let Some(f) = &frame {
-                drivers.output.execute(f, last_frame.as_ref(), stdout)?;
+                drivers.output.execute(f, last_frame.as_ref(), theme, stdout)?;
             }
             last_frame = frame;
         }
