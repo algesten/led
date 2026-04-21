@@ -98,6 +98,7 @@ pub(super) fn run_overlay_command(
     browser: &mut BrowserUi,
     tabs: &mut Tabs,
     edits: &mut BufferEdits,
+    terminal: &led_driver_terminal_core::Terminal,
 ) -> Option<DispatchOutcome> {
     file_search.as_ref()?;
     match cmd {
@@ -150,10 +151,22 @@ pub(super) fn run_overlay_command(
             // input row; existing results stay.
         }
         Command::CursorDown => {
-            move_selection(file_search.as_mut()?, tabs, edits, 1);
+            move_selection(
+                file_search.as_mut()?,
+                tabs,
+                edits,
+                1,
+                side_panel_rows(terminal),
+            );
         }
         Command::CursorUp => {
-            move_selection(file_search.as_mut()?, tabs, edits, -1);
+            move_selection(
+                file_search.as_mut()?,
+                tabs,
+                edits,
+                -1,
+                side_panel_rows(terminal),
+            );
         }
         Command::InsertNewline => {
             handle_enter(file_search.as_mut()?, tabs, edits);
@@ -212,12 +225,15 @@ fn handle_enter(
 /// The row order is: `SearchInput`, (`ReplaceInput` when replace_mode
 /// is on), then `Result(0..flat_hits.len())`. Saturating at the
 /// ends. Landing on a `Result` row triggers a jump-preview so the
-/// body mirrors the selection as the user scrolls.
+/// body mirrors the selection as the user scrolls; `side_rows` is
+/// the number of rows available to the side panel and drives the
+/// scroll-follow clamp on `scroll_offset`.
 fn move_selection(
     state: &mut FileSearchState,
     tabs: &mut Tabs,
     edits: &mut BufferEdits,
     delta: i32,
+    side_rows: usize,
 ) {
     // Encode the current selection as a flat row index.
     let replace_slot = state.replace_mode as i64;
@@ -236,11 +252,68 @@ fn move_selection(
     } else {
         FileSearchSelection::Result((next - base) as usize)
     };
+    clamp_scroll_to_selection(state, side_rows);
     if let FileSearchSelection::Result(i) = state.selection
         && let Some(hit) = state.flat_hits.get(i).cloned()
     {
         jump_preview(&hit, tabs, edits);
     }
+}
+
+/// Minimum-movement scroll clamp. Persists `scroll_offset` into state
+/// so subsequent up/down moves don't re-derive from a stale baseline.
+/// Called after `state.selection` has been updated.
+fn clamp_scroll_to_selection(
+    state: &mut FileSearchState,
+    side_rows: usize,
+) {
+    let input_rows = 1 + 1 + state.replace_mode as usize; // header + query [+ replace]
+    let tree_visible = side_rows.saturating_sub(input_rows);
+    if tree_visible == 0 {
+        return;
+    }
+    let FileSearchSelection::Result(i) = state.selection else {
+        return;
+    };
+    let stream = tree_row_index_for_hit(&state.results, i);
+    if stream < state.scroll_offset {
+        state.scroll_offset = stream;
+    } else if stream >= state.scroll_offset + tree_visible {
+        state.scroll_offset = stream + 1 - tree_visible;
+    }
+}
+
+/// Same walk as `query::tree_row_index_for_hit`. Duplicated here to
+/// keep `dispatch` free of a dependency on the render module's
+/// helpers; the two stay in sync by construction.
+fn tree_row_index_for_hit(
+    groups: &[led_state_file_search::FileSearchGroup],
+    flat_idx: usize,
+) -> usize {
+    let mut stream = 0usize;
+    let mut seen = 0usize;
+    for group in groups {
+        stream += 1; // group header
+        if flat_idx < seen + group.hits.len() {
+            return stream + (flat_idx - seen);
+        }
+        stream += group.hits.len();
+        seen += group.hits.len();
+    }
+    stream.saturating_sub(1)
+}
+
+/// Visible-row budget for the side panel. Matches
+/// `Layout::compute`: side panel always gets `dims.rows - 2` rows
+/// when visible; `0` when the terminal is too narrow or dims aren't
+/// known yet (the overlay isn't useful in those states).
+fn side_panel_rows(
+    terminal: &led_driver_terminal_core::Terminal,
+) -> usize {
+    terminal
+        .dims
+        .map(|d| d.rows.saturating_sub(2) as usize)
+        .unwrap_or(0)
 }
 
 /// `Alt+Enter` — apply the replace across every hit's buffer. Only
@@ -363,5 +436,87 @@ mod tests {
         };
         activate(&mut fs, &mut browser, &tabs);
         assert_eq!(fs.unwrap().previous_tab, Some(TabId(7)));
+    }
+
+    fn fs_state_with_hits(n_hits: usize) -> FileSearchState {
+        use led_state_file_search::{FileSearchGroup, FileSearchHit};
+        let path = led_core::UserPath::new("a.rs").canonicalize();
+        let hits: Vec<FileSearchHit> = (1..=n_hits)
+            .map(|i| FileSearchHit {
+                path: path.clone(),
+                line: i,
+                col: 1,
+                preview: format!("hit {i}"),
+                match_start: 0,
+                match_end: 0,
+            })
+            .collect();
+        FileSearchState {
+            results: vec![FileSearchGroup {
+                path,
+                relative: "a.rs".into(),
+                hits: hits.clone(),
+            }],
+            flat_hits: hits,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn move_selection_does_not_scroll_up_until_selection_leaves_the_top() {
+        // 4 side rows = 2 pinned (header + query) + 2 tree rows.
+        // Stream layout: 0=a.rs header, 1=hit1, 2=hit2, …, 6=hit6.
+        //
+        // Scroll down until the viewport shows hit5+hit6 (scroll=5),
+        // then arrow up. The viewport must hold steady until the
+        // selection exits the top of it — then scroll one row per
+        // further up-arrow. No scrolling while the selection is
+        // still inside the visible window.
+        let mut state = fs_state_with_hits(6);
+        let mut tabs = Tabs::default();
+        let mut edits = led_state_buffer_edits::BufferEdits::default();
+        let side_rows = 4;
+
+        // Down 6 times: SearchInput → Result(0..5).
+        for _ in 0..6 {
+            move_selection(&mut state, &mut tabs, &mut edits, 1, side_rows);
+        }
+        assert_eq!(state.selection, FileSearchSelection::Result(5));
+        // Selected stream row = 6; tree_visible = 2; scroll clamped
+        // to 6 + 1 - 2 = 5. Viewport = stream 5+6 (hit5+hit6).
+        assert_eq!(state.scroll_offset, 5);
+
+        // Arrow up once: selection = Result(4) → stream 5. That's
+        // still the top of the visible window, so no scroll.
+        move_selection(&mut state, &mut tabs, &mut edits, -1, side_rows);
+        assert_eq!(state.selection, FileSearchSelection::Result(4));
+        assert_eq!(state.scroll_offset, 5);
+
+        // Arrow up again: selection = Result(3) → stream 4. Now
+        // 4 < 5 → scroll follows selection up to 4. Viewport =
+        // stream 4+5 (hit4+hit5).
+        move_selection(&mut state, &mut tabs, &mut edits, -1, side_rows);
+        assert_eq!(state.selection, FileSearchSelection::Result(3));
+        assert_eq!(state.scroll_offset, 4);
+    }
+
+    #[test]
+    fn move_selection_scrolls_down_when_selection_leaves_the_bottom() {
+        let mut state = fs_state_with_hits(6);
+        let mut tabs = Tabs::default();
+        let mut edits = led_state_buffer_edits::BufferEdits::default();
+        let side_rows = 4; // 2 tree rows visible
+
+        // Down three times: SearchInput → Result(0) → Result(1) →
+        // Result(2). Stream rows 1, 2, 3. Initial scroll = 0 so
+        // tree shows stream 0+1 (header + hit1). After first
+        // down-arrow (stream 1) still fits. After third (stream 3)
+        // scroll clamps up to 2.
+        move_selection(&mut state, &mut tabs, &mut edits, 1, side_rows);
+        assert_eq!(state.scroll_offset, 0);
+        move_selection(&mut state, &mut tabs, &mut edits, 1, side_rows);
+        assert_eq!(state.scroll_offset, 1);
+        move_selection(&mut state, &mut tabs, &mut edits, 1, side_rows);
+        assert_eq!(state.scroll_offset, 2);
     }
 }
