@@ -115,7 +115,7 @@ pub struct Drivers {
 pub struct TabIdGen(u64);
 
 impl TabIdGen {
-    pub fn next(&mut self) -> TabId {
+    pub fn issue(&mut self) -> TabId {
         self.0 += 1;
         TabId(self.0)
     }

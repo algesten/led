@@ -94,7 +94,7 @@ fn main() -> io::Result<()> {
     // open-time expansion.
     let mut ids = TabIdGen::default();
     for f in &cli.files {
-        let id = ids.next();
+        let id = ids.issue();
         let canon = UserPath::new(f).canonicalize();
         reveal_ancestors(&mut atoms.browser, &atoms.fs, &canon);
         atoms.tabs.open.push_back(Tab {

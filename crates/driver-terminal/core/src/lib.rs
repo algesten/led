@@ -189,8 +189,9 @@ pub struct TabBarModel {
 /// Body view. All owned-string fields use `Arc<str>` / `Arc<Vec<String>>`
 /// so drv cache-hit clones (which happen on every idle tick through
 /// `render_frame`) never deep-copy the content.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum BodyModel {
+    #[default]
     Empty,
     Pending {
         path_display: Arc<str>,
@@ -206,12 +207,6 @@ pub enum BodyModel {
         /// runtime's scroll invariant should keep it in view).
         cursor: Option<(u16, u16)>,
     },
-}
-
-impl Default for BodyModel {
-    fn default() -> Self {
-        BodyModel::Empty
-    }
 }
 
 /// Side-panel row. `chevron` is `None` for files, `Some(true)` for

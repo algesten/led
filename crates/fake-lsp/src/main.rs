@@ -118,10 +118,10 @@ impl FakeLsp {
 
         // Load config from workspace root.
         let config_path = self.root_path.join(".fake-lsp.json");
-        if let Ok(data) = std::fs::read_to_string(&config_path) {
-            if let Ok(cfg) = serde_json::from_str::<Config>(&data) {
-                self.config = cfg;
-            }
+        if let Ok(data) = std::fs::read_to_string(&config_path)
+            && let Ok(cfg) = serde_json::from_str::<Config>(&data)
+        {
+            self.config = cfg;
         }
 
         let trigger_chars: Vec<Value> = self

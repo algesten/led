@@ -159,10 +159,10 @@ impl FileTrace {
 
     fn format_path(&self, path: &CanonPath) -> String {
         let p = path.as_path();
-        if let Some(root) = &self.root {
-            if let Ok(rel) = p.strip_prefix(root) {
-                return rel.display().to_string();
-            }
+        if let Some(root) = &self.root
+            && let Ok(rel) = p.strip_prefix(root)
+        {
+            return rel.display().to_string();
         }
         p.display().to_string()
     }
