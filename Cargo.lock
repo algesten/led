@@ -586,6 +586,7 @@ dependencies = [
  "ignore",
  "led-core",
  "led-driver-file-search-core",
+ "regex",
  "regex-syntax",
 ]
 

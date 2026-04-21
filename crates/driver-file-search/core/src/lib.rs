@@ -69,52 +69,128 @@ pub struct FileSearchOut {
     pub flat: Vec<FileSearchHit>,
 }
 
+/// Project-wide replace-all request. Runs independently of any
+/// cached search results — the worker does its own tree walk.
+///
+/// `skip_paths` is the set of files the runtime is rewriting
+/// in-memory (loaded buffers). The worker skips them so the session
+/// view stays the source of truth for those; the runtime applies
+/// the replacement to their rope in dispatch instead of letting the
+/// driver overwrite them on disk.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileSearchReplaceCmd {
+    pub root: CanonPath,
+    pub query: String,
+    pub replacement: String,
+    pub case_sensitive: bool,
+    pub use_regex: bool,
+    pub skip_paths: Vec<CanonPath>,
+}
+
+/// One replace-all completion. `files_changed` = number of files
+/// whose content differed after regex substitution (and therefore
+/// got rewritten). `total_replacements` = total number of matches
+/// the worker replaced across all files.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileSearchReplaceOut {
+    pub query: String,
+    pub files_changed: usize,
+    pub total_replacements: usize,
+}
+
 /// Driver-scoped trace. The runtime's `Trace` delegates here via the
 /// adapter pattern used by every other driver.
 pub trait Trace: Send + Sync {
     fn file_search_start(&self, cmd: &FileSearchCmd);
     fn file_search_done(&self, query: &str, ok: bool);
+    fn file_search_replace_start(&self, cmd: &FileSearchReplaceCmd);
+    fn file_search_replace_done(
+        &self,
+        query: &str,
+        files_changed: usize,
+        total_replacements: usize,
+    );
 }
 
 pub struct NoopTrace;
 impl Trace for NoopTrace {
     fn file_search_start(&self, _: &FileSearchCmd) {}
     fn file_search_done(&self, _: &str, _: bool) {}
+    fn file_search_replace_start(&self, _: &FileSearchReplaceCmd) {}
+    fn file_search_replace_done(&self, _: &str, _: usize, _: usize) {}
 }
 
-/// Main-loop-facing half. Owns the `Sender` for commands and the
-/// `Receiver` for results; the async worker holds the opposite ends.
+/// Main-loop-facing half. Owns two channel pairs — one for search
+/// (the live-typing feed) and one for replace-all. Separating them
+/// keeps the two loops independent: a pending replace never delays
+/// a search response, and vice versa.
 pub struct FileSearchDriver {
-    tx: Sender<FileSearchCmd>,
-    rx: Receiver<FileSearchOut>,
+    search_tx: Sender<FileSearchCmd>,
+    search_rx: Receiver<FileSearchOut>,
+    replace_tx: Sender<FileSearchReplaceCmd>,
+    replace_rx: Receiver<FileSearchReplaceOut>,
     trace: Arc<dyn Trace>,
 }
 
 impl FileSearchDriver {
     pub fn new(
-        tx: Sender<FileSearchCmd>,
-        rx: Receiver<FileSearchOut>,
+        search_tx: Sender<FileSearchCmd>,
+        search_rx: Receiver<FileSearchOut>,
+        replace_tx: Sender<FileSearchReplaceCmd>,
+        replace_rx: Receiver<FileSearchReplaceOut>,
         trace: Arc<dyn Trace>,
     ) -> Self {
-        Self { tx, rx, trace }
-    }
-
-    /// Ship each command to the worker. A `file_search_start` trace
-    /// fires per command. Failed sends (worker gone) silently drop —
-    /// mirrors every other driver's shutdown-race handling.
-    pub fn execute<'a>(&self, cmds: impl IntoIterator<Item = &'a FileSearchCmd>) {
-        for cmd in cmds {
-            self.trace.file_search_start(cmd);
-            let _ = self.tx.send(cmd.clone());
+        Self {
+            search_tx,
+            search_rx,
+            replace_tx,
+            replace_rx,
+            trace,
         }
     }
 
-    /// Drain ready results. Empty `Vec` on idle ticks — zero heap
-    /// alloc on the happy path.
+    /// Ship each search command to the worker. A `file_search_start`
+    /// trace fires per command. Failed sends (worker gone) silently
+    /// drop — mirrors every other driver's shutdown-race handling.
+    pub fn execute<'a>(&self, cmds: impl IntoIterator<Item = &'a FileSearchCmd>) {
+        for cmd in cmds {
+            self.trace.file_search_start(cmd);
+            let _ = self.search_tx.send(cmd.clone());
+        }
+    }
+
+    /// Ship a replace-all request. One trace line per command.
+    pub fn execute_replace<'a>(
+        &self,
+        cmds: impl IntoIterator<Item = &'a FileSearchReplaceCmd>,
+    ) {
+        for cmd in cmds {
+            self.trace.file_search_replace_start(cmd);
+            let _ = self.replace_tx.send(cmd.clone());
+        }
+    }
+
+    /// Drain ready search results. Empty `Vec` on idle ticks — zero
+    /// heap alloc on the happy path.
     pub fn process(&self) -> Vec<FileSearchOut> {
         let mut out = Vec::new();
-        while let Ok(done) = self.rx.try_recv() {
+        while let Ok(done) = self.search_rx.try_recv() {
             self.trace.file_search_done(&done.query, true);
+            out.push(done);
+        }
+        out
+    }
+
+    /// Drain ready replace completions. Same zero-alloc-on-idle
+    /// discipline as `process`.
+    pub fn process_replace(&self) -> Vec<FileSearchReplaceOut> {
+        let mut out = Vec::new();
+        while let Ok(done) = self.replace_rx.try_recv() {
+            self.trace.file_search_replace_done(
+                &done.query,
+                done.files_changed,
+                done.total_replacements,
+            );
             out.push(done);
         }
         out

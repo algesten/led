@@ -803,6 +803,25 @@ pub(crate) mod trace_adapter {
             );
         }
         fn file_search_done(&self, _query: &str, _ok: bool) {}
+        fn file_search_replace_start(
+            &self,
+            cmd: &led_driver_file_search_core::FileSearchReplaceCmd,
+        ) {
+            self.0.file_search_replace_start(
+                &cmd.query,
+                &cmd.replacement,
+                &cmd.root,
+                cmd.case_sensitive,
+                cmd.use_regex,
+            );
+        }
+        fn file_search_replace_done(
+            &self,
+            _query: &str,
+            _files_changed: usize,
+            _total_replacements: usize,
+        ) {
+        }
     }
 }
 

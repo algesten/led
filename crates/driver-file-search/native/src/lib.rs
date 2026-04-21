@@ -17,7 +17,8 @@ use ignore::WalkBuilder;
 
 use led_core::{Notifier, UserPath};
 use led_driver_file_search_core::{
-    FileSearchCmd, FileSearchDriver, FileSearchGroup, FileSearchHit, FileSearchOut, Trace,
+    FileSearchCmd, FileSearchDriver, FileSearchGroup, FileSearchHit, FileSearchOut,
+    FileSearchReplaceCmd, FileSearchReplaceOut, Trace,
 };
 
 /// Legacy's hard cap on total hits per search — prevents the worker
@@ -32,26 +33,51 @@ pub struct FileSearchNative {
 }
 
 pub fn spawn(trace: Arc<dyn Trace>, notify: Notifier) -> (FileSearchDriver, FileSearchNative) {
-    let (tx_cmd, rx_cmd) = mpsc::channel::<FileSearchCmd>();
-    let (tx_done, rx_done) = mpsc::channel::<FileSearchOut>();
-    let native = spawn_worker(rx_cmd, tx_done, notify);
-    let driver = FileSearchDriver::new(tx_cmd, rx_done, trace);
+    let (search_tx_cmd, search_rx_cmd) = mpsc::channel::<FileSearchCmd>();
+    let (search_tx_done, search_rx_done) = mpsc::channel::<FileSearchOut>();
+    let (replace_tx_cmd, replace_rx_cmd) = mpsc::channel::<FileSearchReplaceCmd>();
+    let (replace_tx_done, replace_rx_done) = mpsc::channel::<FileSearchReplaceOut>();
+    let native = spawn_workers(
+        search_rx_cmd,
+        search_tx_done,
+        replace_rx_cmd,
+        replace_tx_done,
+        notify,
+    );
+    let driver = FileSearchDriver::new(
+        search_tx_cmd,
+        search_rx_done,
+        replace_tx_cmd,
+        replace_rx_done,
+        trace,
+    );
     (driver, native)
 }
 
-pub fn spawn_worker(
-    rx_cmd: Receiver<FileSearchCmd>,
-    tx_done: Sender<FileSearchOut>,
+/// Two worker threads: one for the live-typing search feed, one for
+/// replace-all. Kept separate so an in-flight replace (which does
+/// disk writes) doesn't back up search responses. Both self-exit
+/// when their command `Sender` hangs up.
+pub fn spawn_workers(
+    search_rx: Receiver<FileSearchCmd>,
+    search_tx: Sender<FileSearchOut>,
+    replace_rx: Receiver<FileSearchReplaceCmd>,
+    replace_tx: Sender<FileSearchReplaceOut>,
     notify: Notifier,
 ) -> FileSearchNative {
+    let notify_search = notify.clone();
     thread::Builder::new()
         .name("led-file-search".into())
-        .spawn(move || worker_loop(rx_cmd, tx_done, notify))
-        .expect("spawning file-search worker should succeed");
+        .spawn(move || search_worker_loop(search_rx, search_tx, notify_search))
+        .expect("spawning file-search search worker should succeed");
+    thread::Builder::new()
+        .name("led-file-search-replace".into())
+        .spawn(move || replace_worker_loop(replace_rx, replace_tx, notify))
+        .expect("spawning file-search replace worker should succeed");
     FileSearchNative { _marker: () }
 }
 
-fn worker_loop(
+fn search_worker_loop(
     rx: Receiver<FileSearchCmd>,
     tx: Sender<FileSearchOut>,
     notify: Notifier,
@@ -70,6 +96,95 @@ fn worker_loop(
         }
         notify.notify();
     }
+}
+
+fn replace_worker_loop(
+    rx: Receiver<FileSearchReplaceCmd>,
+    tx: Sender<FileSearchReplaceOut>,
+    notify: Notifier,
+) {
+    while let Ok(cmd) = rx.recv() {
+        let (files_changed, total_replacements) = run_replace(&cmd);
+        let out = FileSearchReplaceOut {
+            query: cmd.query,
+            files_changed,
+            total_replacements,
+        };
+        if tx.send(out).is_err() {
+            return;
+        }
+        notify.notify();
+    }
+}
+
+/// Walk the workspace independently of the search results — apply
+/// `regex.replace_all` to each file not in `skip_paths`, rewrite
+/// atomically (`<dir>/.led-replace-<pid>` → `rename`) when the
+/// substitution changed anything. Returns
+/// `(files_changed, total_replacements)`. Invalid regex short-
+/// circuits to `(0, 0)`.
+fn run_replace(cmd: &FileSearchReplaceCmd) -> (usize, usize) {
+    let pattern = if cmd.use_regex {
+        cmd.query.clone()
+    } else {
+        regex_syntax::escape(&cmd.query)
+    };
+    let re = match regex::RegexBuilder::new(&pattern)
+        .case_insensitive(!cmd.case_sensitive)
+        .build()
+    {
+        Ok(r) => r,
+        Err(_) => return (0, 0),
+    };
+
+    let walker = WalkBuilder::new(cmd.root.as_path())
+        .hidden(true)
+        .git_ignore(true)
+        .git_global(true)
+        .git_exclude(true)
+        .build();
+
+    let mut files_changed = 0usize;
+    let mut total_replacements = 0usize;
+
+    for entry in walker.flatten() {
+        if !entry.file_type().is_some_and(|ft| ft.is_file()) {
+            continue;
+        }
+        let path = UserPath::new(entry.path()).canonicalize();
+        if cmd.skip_paths.contains(&path) {
+            continue;
+        }
+        let Ok(content) = std::fs::read_to_string(entry.path()) else {
+            // Binary / unreadable files are skipped silently — same
+            // policy `grep-searcher` applies in the search path.
+            continue;
+        };
+        let new_content = re.replace_all(&content, cmd.replacement.as_str());
+        if new_content.as_ref() == content {
+            continue;
+        }
+        let count = re.find_iter(&content).count();
+        if write_atomic(entry.path(), new_content.as_ref()).is_ok() {
+            files_changed += 1;
+            total_replacements += count;
+        }
+    }
+
+    (files_changed, total_replacements)
+}
+
+/// Write `content` to `path` atomically: stage into
+/// `<dir>/.led-replace-<pid>-<n>` first, then `rename` into place.
+/// Keeps readers / other processes from seeing a torn file.
+fn write_atomic(path: &std::path::Path, content: &str) -> std::io::Result<()> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static N: AtomicU64 = AtomicU64::new(0);
+    let n = N.fetch_add(1, Ordering::Relaxed);
+    let dir = path.parent().unwrap_or(path);
+    let tmp = dir.join(format!(".led-replace-{}-{}", std::process::id(), n));
+    std::fs::write(&tmp, content)?;
+    std::fs::rename(&tmp, path)
 }
 
 fn run_search(cmd: &FileSearchCmd) -> (Vec<FileSearchGroup>, Vec<FileSearchHit>) {
@@ -209,6 +324,8 @@ mod tests {
     impl Trace for NoopTraceImpl {
         fn file_search_start(&self, _: &FileSearchCmd) {}
         fn file_search_done(&self, _: &str, _: bool) {}
+        fn file_search_replace_start(&self, _: &FileSearchReplaceCmd) {}
+        fn file_search_replace_done(&self, _: &str, _: usize, _: usize) {}
     }
 
     #[test]
@@ -360,5 +477,133 @@ mod tests {
             .map(|g| g.relative.as_str())
             .collect();
         assert_eq!(names, vec!["kept.txt"]);
+    }
+
+    fn wait_for_replace(
+        drv: &FileSearchDriver,
+        deadline: Duration,
+    ) -> Option<FileSearchReplaceOut> {
+        let start = Instant::now();
+        while start.elapsed() < deadline {
+            let mut batch = drv.process_replace();
+            if let Some(first) = batch.drain(..).next() {
+                return Some(first);
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        None
+    }
+
+    #[test]
+    fn replace_rewrites_matching_files_and_counts_replacements() {
+        let dir = tempdir();
+        stdfs::write(dir.join("a.txt"), b"foo bar\nbaz foo\n").unwrap();
+        stdfs::write(dir.join("b.txt"), b"no match here\n").unwrap();
+        stdfs::write(dir.join("c.txt"), b"triple foo foo foo\n").unwrap();
+
+        let (drv, _native) = spawn(Arc::new(NoopTraceImpl), Notifier::noop());
+        drv.execute_replace(std::iter::once(&FileSearchReplaceCmd {
+            root: canon(&dir),
+            query: "foo".into(),
+            replacement: "QUX".into(),
+            case_sensitive: false,
+            use_regex: false,
+            skip_paths: Vec::new(),
+        }));
+
+        let out = wait_for_replace(&drv, Duration::from_secs(2))
+            .expect("replace result within 2s");
+        assert_eq!(out.files_changed, 2);
+        assert_eq!(out.total_replacements, 5);
+        // a.txt rewritten, b.txt untouched, c.txt rewritten.
+        let a = stdfs::read_to_string(dir.join("a.txt")).unwrap();
+        let b = stdfs::read_to_string(dir.join("b.txt")).unwrap();
+        let c = stdfs::read_to_string(dir.join("c.txt")).unwrap();
+        assert_eq!(a, "QUX bar\nbaz QUX\n");
+        assert_eq!(b, "no match here\n");
+        assert_eq!(c, "triple QUX QUX QUX\n");
+    }
+
+    #[test]
+    fn replace_skips_paths_in_skip_list() {
+        let dir = tempdir();
+        stdfs::write(dir.join("a.txt"), b"foo\n").unwrap();
+        stdfs::write(dir.join("b.txt"), b"foo\n").unwrap();
+
+        let a_path = canon(&dir.join("a.txt"));
+
+        let (drv, _native) = spawn(Arc::new(NoopTraceImpl), Notifier::noop());
+        drv.execute_replace(std::iter::once(&FileSearchReplaceCmd {
+            root: canon(&dir),
+            query: "foo".into(),
+            replacement: "QUX".into(),
+            case_sensitive: false,
+            use_regex: false,
+            skip_paths: vec![a_path],
+        }));
+
+        let out = wait_for_replace(&drv, Duration::from_secs(2))
+            .expect("replace result within 2s");
+        // Only b.txt got rewritten; a.txt stays on disk untouched
+        // (the runtime would have applied the replace in-memory for
+        // a.txt on its own).
+        assert_eq!(out.files_changed, 1);
+        assert_eq!(out.total_replacements, 1);
+        assert_eq!(stdfs::read_to_string(dir.join("a.txt")).unwrap(), "foo\n");
+        assert_eq!(
+            stdfs::read_to_string(dir.join("b.txt")).unwrap(),
+            "QUX\n"
+        );
+    }
+
+    #[test]
+    fn replace_invalid_regex_returns_zero_counts() {
+        let dir = tempdir();
+        stdfs::write(dir.join("a.txt"), b"foo\n").unwrap();
+
+        let (drv, _native) = spawn(Arc::new(NoopTraceImpl), Notifier::noop());
+        drv.execute_replace(std::iter::once(&FileSearchReplaceCmd {
+            root: canon(&dir),
+            query: "[invalid".into(),
+            replacement: "x".into(),
+            case_sensitive: false,
+            use_regex: true,
+            skip_paths: Vec::new(),
+        }));
+
+        let out = wait_for_replace(&drv, Duration::from_secs(2))
+            .expect("replace result within 2s");
+        assert_eq!(out.files_changed, 0);
+        assert_eq!(out.total_replacements, 0);
+        assert_eq!(stdfs::read_to_string(dir.join("a.txt")).unwrap(), "foo\n");
+    }
+
+    #[test]
+    fn replace_preserves_trailing_newline_and_content_outside_match() {
+        let dir = tempdir();
+        stdfs::write(
+            dir.join("a.txt"),
+            b"line one with foo\nline two\nfoo at end\n",
+        )
+        .unwrap();
+
+        let (drv, _native) = spawn(Arc::new(NoopTraceImpl), Notifier::noop());
+        drv.execute_replace(std::iter::once(&FileSearchReplaceCmd {
+            root: canon(&dir),
+            query: "foo".into(),
+            replacement: "BAR".into(),
+            case_sensitive: false,
+            use_regex: false,
+            skip_paths: Vec::new(),
+        }));
+
+        let out = wait_for_replace(&drv, Duration::from_secs(2))
+            .expect("replace result within 2s");
+        assert_eq!(out.files_changed, 1);
+        assert_eq!(out.total_replacements, 2);
+        assert_eq!(
+            stdfs::read_to_string(dir.join("a.txt")).unwrap(),
+            "line one with BAR\nline two\nBAR at end\n",
+        );
     }
 }

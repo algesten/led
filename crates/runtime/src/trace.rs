@@ -49,6 +49,16 @@ pub trait Trace: Send + Sync {
         case_sensitive: bool,
         use_regex: bool,
     );
+    /// Project-wide replace-all request dispatched to the driver.
+    /// Legacy dispatched.snap name: `FileSearchReplace`.
+    fn file_search_replace_start(
+        &self,
+        query: &str,
+        replacement: &str,
+        root: &CanonPath,
+        case_sensitive: bool,
+        use_regex: bool,
+    );
     /// Emitted when the find-file driver receives a completion
     /// command. Legacy's dispatched.snap name is `FsFindFile`.
     fn find_file_start(&self, cmd: &FindFileCmd);
@@ -200,6 +210,23 @@ impl Trace for FileTrace {
             use_regex,
         ));
     }
+    fn file_search_replace_start(
+        &self,
+        query: &str,
+        replacement: &str,
+        root: &CanonPath,
+        case_sensitive: bool,
+        use_regex: bool,
+    ) {
+        self.write_line(&format!(
+            "FileSearchReplace\tquery=\"{}\" replacement=\"{}\" root={} case={} regex={}",
+            query,
+            replacement,
+            self.format_path(root),
+            case_sensitive,
+            use_regex,
+        ));
+    }
     fn find_file_start(&self, cmd: &FindFileCmd) {
         // Legacy format: `FsFindFile\tdir=<p> prefix="<s>" show_hidden=<bool>`.
         self.write_line(&format!(
@@ -261,6 +288,15 @@ impl Trace for NoopTrace {
     fn fs_list_start(&self, _: &CanonPath) {}
     fn fs_list_done(&self, _: &CanonPath, _: bool) {}
     fn file_search_start(&self, _: &str, _: &CanonPath, _: bool, _: bool) {}
+    fn file_search_replace_start(
+        &self,
+        _: &str,
+        _: &str,
+        _: &CanonPath,
+        _: bool,
+        _: bool,
+    ) {
+    }
     fn find_file_start(&self, _: &FindFileCmd) {}
     fn find_file_done(&self, _: &CanonPath, _: &str, _: bool) {}
     fn workspace_clear_undo(&self, _: &CanonPath) {}

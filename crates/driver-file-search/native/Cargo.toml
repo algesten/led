@@ -19,4 +19,5 @@ grep-matcher = { workspace = true }
 grep-regex = { workspace = true }
 grep-searcher = { workspace = true }
 ignore = { workspace = true }
+regex = { workspace = true }
 regex-syntax = { workspace = true }
