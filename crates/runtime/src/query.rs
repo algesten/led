@@ -743,8 +743,9 @@ fn completions_side_panel(
 /// - Row 2: replace input row — only when `replace_mode`.
 /// - Rows 3+: results tree — one row per file group header, then
 ///   one row per hit formatted `"   <line>: <preview>"` (3-space
-///   indent matching legacy). `scroll_offset` skips that many
-///   rows of the tree (inputs stay pinned).
+///   indent matching legacy). The tree scrolls to follow the
+///   selection when the user arrows past the bottom edge; inputs
+///   stay pinned on the first 1–2 rows.
 ///
 /// `focused=false` because M14b chrome theming hasn't picked a
 /// focused side-panel style for this overlay yet.
@@ -794,21 +795,41 @@ fn file_search_side_panel(
     }
 
     // Selected flat-hit index (if the cursor is on a result row).
-    // Used to flag the matching hit row as `selected` below.
     let selected_hit_idx = match state.selection {
         led_state_file_search::FileSearchSelection::Result(i) => Some(i),
         _ => None,
     };
 
-    // Flatten results: one row per group header + one row per hit,
-    // in order. The `hit_idx` bookkeeping mirrors `flat_hits` — the
-    // i-th hit encountered here has flat index `i`.
-    let scroll = state.scroll_offset;
+    // Rows remaining for the results tree after the pinned inputs.
+    let tree_rows_avail = total.saturating_sub(out.len());
+    if tree_rows_avail == 0 {
+        return SidePanelModel {
+            rows: Arc::new(out),
+            focused: false,
+            mode: led_driver_terminal_core::SidePanelMode::Completions,
+        };
+    }
+
+    // Follow-the-selection scroll. The tree renders as a flat row
+    // stream (group header + hits + next group header + ...); find
+    // the stream index of the selected hit so we can clamp scroll
+    // to keep it on screen. Defaults to the user-set baseline
+    // (`scroll_offset`) when nothing is selected.
+    let selected_stream_idx =
+        selected_hit_idx.map(|i| tree_row_index_for_hit(&state.results, i));
+    let baseline = state.scroll_offset;
+    let effective_scroll = match selected_stream_idx {
+        Some(sel) if sel < baseline => sel,
+        Some(sel) if sel >= baseline + tree_rows_avail => sel + 1 - tree_rows_avail,
+        _ => baseline,
+    };
+
+    // Flatten results: one row per group header + one row per hit.
     let mut skipped = 0usize;
     let mut hit_idx: usize = 0;
     'outer: for group in state.results.iter() {
         // Group header row.
-        if skipped < scroll {
+        if skipped < effective_scroll {
             skipped += 1;
         } else {
             if total <= out.len() {
@@ -822,7 +843,7 @@ fn file_search_side_panel(
             });
         }
         for hit in &group.hits {
-            if skipped < scroll {
+            if skipped < effective_scroll {
                 skipped += 1;
             } else {
                 if total <= out.len() {
@@ -845,6 +866,28 @@ fn file_search_side_panel(
         focused: false,
         mode: led_driver_terminal_core::SidePanelMode::Completions,
     }
+}
+
+/// Stream-row index of the `i`-th flat hit in the rendered tree.
+/// Each group adds one header row before its hits, so the stream
+/// index is `i + (group_index_of_hit(i) + 1)`. Used by the scroll-
+/// follow logic in `file_search_side_panel`.
+fn tree_row_index_for_hit(
+    groups: &[led_state_file_search::FileSearchGroup],
+    flat_idx: usize,
+) -> usize {
+    let mut stream = 0usize;
+    let mut seen = 0usize;
+    for group in groups {
+        stream += 1; // group header
+        if flat_idx < seen + group.hits.len() {
+            return stream + (flat_idx - seen);
+        }
+        stream += group.hits.len();
+        seen += group.hits.len();
+    }
+    // flat_idx out of range — pin to end.
+    stream.saturating_sub(1)
 }
 
 /// "What clipboard action should we fire this tick?"
@@ -1720,5 +1763,89 @@ mod tests {
         );
         let frame = render(&t, &e, &s, &term).expect("dims set");
         assert_eq!(&*frame.status_bar.right, "L1:C1 ");
+    }
+
+    // ── file-search side-panel scroll-follow ───────────────────────
+
+    fn fs_group(
+        relative: &str,
+        hits: usize,
+    ) -> led_state_file_search::FileSearchGroup {
+        let path = canon(relative);
+        let hits = (1..=hits)
+            .map(|i| led_state_file_search::FileSearchHit {
+                path: path.clone(),
+                line: i,
+                col: 1,
+                preview: format!("hit {i}"),
+                match_start: 0,
+                match_end: 0,
+            })
+            .collect();
+        led_state_file_search::FileSearchGroup {
+            path,
+            relative: relative.into(),
+            hits,
+        }
+    }
+
+    fn fs_state_with_results(
+        groups: Vec<led_state_file_search::FileSearchGroup>,
+        selection: led_state_file_search::FileSearchSelection,
+    ) -> led_state_file_search::FileSearchState {
+        let flat: Vec<_> = groups.iter().flat_map(|g| g.hits.iter().cloned()).collect();
+        let mut query = led_core::TextInput::default();
+        query.set("needle");
+        led_state_file_search::FileSearchState {
+            query,
+            results: groups,
+            flat_hits: flat,
+            selection,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn file_search_sidebar_scrolls_to_follow_selection_downward() {
+        // Viewport = 4 rows: header + query + 2 tree rows visible.
+        // One group with 6 hits → tree row 0 is the header, rows 1–6
+        // are hits. Selection on flat_hits[4] → stream row 5; with
+        // tree_rows_avail=2 that should scroll so rows 4+5 are
+        // visible (i.e. the selected row lands on the last visible).
+        let state = fs_state_with_results(
+            vec![fs_group("a.rs", 6)],
+            led_state_file_search::FileSearchSelection::Result(4),
+        );
+        let model = file_search_side_panel(&state, 4);
+        let names: Vec<&str> = model.rows.iter().map(|r| &*r.name).collect();
+        assert_eq!(names[0], " Aa   .*   =>");
+        assert_eq!(names[1], "needle");
+        // Tree section shows hits 4 and 5 (1-indexed: "   4: hit 4"
+        // and "   5: hit 5"), not the group header that would
+        // otherwise sit at the top.
+        assert_eq!(names[2], "   4: hit 4");
+        assert_eq!(names[3], "   5: hit 5");
+        assert!(model.rows[3].selected);
+    }
+
+    #[test]
+    fn file_search_sidebar_pulls_scroll_back_when_selection_rises_above_viewport() {
+        // baseline scroll is 4 (tree showing rows 4+5 of 6 hits).
+        // Selection jumps to flat_hits[0] (stream row 1). Effective
+        // scroll drops to 1 so the selected row is the top of the
+        // visible tree; minimum-movement rule, not a full rewind.
+        let state = fs_state_with_results(
+            vec![fs_group("a.rs", 6)],
+            led_state_file_search::FileSearchSelection::Result(0),
+        );
+        let mut state = state;
+        state.scroll_offset = 4;
+        let model = file_search_side_panel(&state, 4);
+        let names: Vec<&str> = model.rows.iter().map(|r| &*r.name).collect();
+        assert_eq!(
+            names,
+            vec![" Aa   .*   =>", "needle", "   1: hit 1", "   2: hit 2"],
+        );
+        assert!(model.rows[2].selected);
     }
 }
