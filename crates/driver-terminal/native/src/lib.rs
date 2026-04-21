@@ -204,7 +204,7 @@ pub fn paint(
     }
 
     if force || last.map(|l| &l.body) != Some(&frame.body) {
-        paint_body(&frame.body, frame.layout.editor_area, out)?;
+        paint_body(&frame.body, frame.layout.editor_area, theme, out)?;
     }
 
     if force || last.map(|l| &l.tab_bar) != Some(&frame.tab_bar) {
@@ -300,8 +300,18 @@ fn paint_status_bar(
     Ok(())
 }
 
-fn paint_body(body: &BodyModel, area: Rect, out: &mut impl Write) -> io::Result<()> {
+fn paint_body(
+    body: &BodyModel,
+    area: Rect,
+    theme: &Theme,
+    out: &mut impl Write,
+) -> io::Result<()> {
     use crossterm::{cursor, queue, style, terminal};
+
+    let ruler = theme
+        .ruler_column
+        .filter(|c| *c < area.cols)
+        .filter(|_| !theme.ruler.is_default());
 
     for row in 0..area.rows {
         queue!(out, cursor::MoveTo(area.x, area.y + row))?;
@@ -326,6 +336,25 @@ fn paint_body(body: &BodyModel, area: Rect, out: &mut impl Write) -> io::Result<
             queue!(out, style::Print(line))?;
         }
         queue!(out, terminal::Clear(terminal::ClearType::UntilNewLine))?;
+
+        // Overpaint the ruler column on top of the row. A single
+        // cell, styled with `theme.ruler`. If the row's text covers
+        // that column the original character keeps its slot and
+        // picks up the ruler style; otherwise we print a plain
+        // space so the ruler renders as a vertical stripe.
+        if let Some(col) = ruler {
+            let glyph: char = line
+                .and_then(|l| l.chars().nth(col as usize))
+                .unwrap_or(' ');
+            queue!(out, cursor::MoveTo(area.x + col, area.y + row))?;
+            apply_style(out, &theme.ruler)?;
+            // Skip repainting zero-width / control chars — safer to
+            // fall back to a plain space than emit something that
+            // might push the cursor.
+            let painted = if glyph.is_control() { ' ' } else { glyph };
+            queue!(out, style::Print(painted))?;
+            reset_style(out, &theme.ruler)?;
+        }
     }
     Ok(())
 }
@@ -790,6 +819,9 @@ mod tests {
             let r = &self.cells[row as usize];
             r[col as usize..(col + n) as usize].iter().collect()
         }
+        fn char_at(&self, row: u16, col: u16) -> char {
+            self.cells[row as usize][col as usize]
+        }
         fn put(&mut self, ch: char) {
             if (self.row as usize) < self.cells.len()
                 && (self.col as usize) < self.cells[self.row as usize].len()
@@ -851,5 +883,43 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn ruler_overpaints_single_column_when_theme_sets_ruler_column() {
+        // Dims account for tab bar + status bar (each 1 row) so the
+        // body gets `rows - 2`. 5 total = 3 body rows.
+        use std::sync::Arc;
+        let dims = Dims { cols: 30, rows: 5 };
+        let layout = Layout::compute(dims, false);
+        assert_eq!(layout.editor_area.rows, 3);
+        let body = BodyModel::Content {
+            lines: Arc::new(vec![
+                "01234567890123456789".to_string(),
+                "shorter".to_string(),
+                "".to_string(),
+            ]),
+            cursor: None,
+        };
+        let mut theme = Theme::legacy_default();
+        theme.ruler_column = Some(5);
+        theme.ruler = Style {
+            bg: Some(Color::rgb(0x22, 0x22, 0x22)),
+            ..Style::default()
+        };
+
+        let mut out: Vec<u8> = Vec::new();
+        paint_body(&body, layout.editor_area, &theme, &mut out).expect("paint_body");
+
+        let mut grid = Grid::new(dims);
+        grid.apply(&out);
+        let editor_x = layout.editor_area.x;
+        // Row 0 col 5 = '5' (from "01234567890...").
+        assert_eq!(grid.char_at(0, editor_x + 5), '5');
+        // Row 1: "shorter" → s(0) h(1) o(2) r(3) t(4) e(5) r(6);
+        // col 5 = 'e'. The ruler keeps the char, just restyles it.
+        assert_eq!(grid.char_at(1, editor_x + 5), 'e');
+        // Row 2: empty line → ruler paints a plain space.
+        assert_eq!(grid.char_at(2, editor_x + 5), ' ');
     }
 }
