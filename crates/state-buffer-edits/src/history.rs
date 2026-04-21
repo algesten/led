@@ -31,11 +31,36 @@ pub enum EditOp {
 /// A logically contiguous run of ops sharing a single undo step.
 /// Cursor bookends let undo/redo restore the cursor where the user
 /// would expect it.
+///
+/// `seq` is a session-monotonic sequence number stamped at
+/// `finalise()` — higher seq means "more recent across all
+/// buffers." Used by the global (cross-buffer) undo path (file-
+/// search overlay's Ctrl+_) to pick the newest group anywhere.
+/// Regular per-buffer undo/redo ignores it; it's just an
+/// ordering tag for the multi-buffer case.
+///
+/// `file_search_mark` carries overlay metadata so per-buffer
+/// undo/redo can resync `FileSearchState.hit_replacements` when
+/// the group represents a per-hit replace or its inverse. `None`
+/// on every group that wasn't issued through the file-search path.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EditGroup {
     pub ops: Vec<EditOp>,
     pub cursor_before: Cursor,
     pub cursor_after: Cursor,
+    pub seq: u64,
+    pub file_search_mark: Option<FileSearchMark>,
+}
+
+/// Payload attached to per-hit search-replace undo groups so the
+/// overlay's hit_replacements Vec stays consistent across undo /
+/// redo. `hit_idx` is the position in FileSearchState.flat_hits;
+/// `forward_marks_replaced` tells which mark state the
+/// forward-apply of this group produces. Undo sets the opposite.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileSearchMark {
+    pub hit_idx: usize,
+    pub forward_marks_replaced: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -49,6 +74,20 @@ pub struct History {
     /// merged into an adjacent op still bumps this counter. Used as
     /// a cheap "has anything changed since version V" test.
     applied: usize,
+    /// Shared session-wide seq generator. Cloned from the owning
+    /// `BufferEdits` on construction so every history stamps
+    /// groups from the same counter. Defaulted for tests /
+    /// standalone use.
+    seq_gen: crate::SeqGen,
+}
+
+impl History {
+    pub fn with_seq_gen(seq_gen: crate::SeqGen) -> Self {
+        Self {
+            seq_gen,
+            ..Default::default()
+        }
+    }
 }
 
 impl History {
@@ -167,9 +206,11 @@ impl History {
 
     /// Close the open group (if any) into `past`. Called by
     /// dispatch after every non-edit command so the next edit
-    /// starts fresh.
+    /// starts fresh. Stamps the closing group with the next
+    /// session seq so cross-buffer ordering is preserved.
     pub fn finalise(&mut self) {
-        if let Some(group) = self.current.take() {
+        if let Some(mut group) = self.current.take() {
+            group.seq = self.seq_gen.next();
             self.past.push(group);
         }
     }
@@ -211,7 +252,36 @@ impl History {
             ops: vec![op],
             cursor_before,
             cursor_after,
+            // seq is stamped at finalise(); 0 is a placeholder
+            // for the open-group state.
+            seq: 0,
+            file_search_mark: None,
         });
+    }
+
+    /// Attach a `FileSearchMark` to the currently-open group. Must
+    /// be called before `finalise()` on that group. Used by the
+    /// file-search dispatch to tag per-hit replace + inverse
+    /// groups so undo/redo can resync the overlay's marks.
+    pub fn mark_current_as_file_search(&mut self, mark: FileSearchMark) {
+        if let Some(g) = self.current.as_mut() {
+            g.file_search_mark = Some(mark);
+        }
+    }
+
+    /// Seq of the top `past` group, if any. Used by the global
+    /// undo path to pick the max-seq buffer across the workspace.
+    /// Returns the in-flight `current` group's (still 0) seq when
+    /// no past is available — the caller treats 0 as "no meaningful
+    /// seq, don't pick this one."
+    pub fn past_top_seq(&self) -> Option<u64> {
+        self.past.last().map(|g| g.seq)
+    }
+
+    /// Seq of the top `future` group (the one that'd get redone
+    /// next), if any.
+    pub fn future_top_seq(&self) -> Option<u64> {
+        self.future.last().map(|g| g.seq)
     }
 }
 

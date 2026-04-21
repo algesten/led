@@ -20,9 +20,47 @@ use imbl::{HashMap, HashSet};
 use led_core::CanonPath;
 use ropey::Rope;
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 
 pub mod history;
-pub use history::{EditGroup, EditOp, History, rebase_char_index};
+pub use history::{EditGroup, EditOp, FileSearchMark, History, rebase_char_index};
+
+/// Session-global edit sequence counter shared by every
+/// [`History`]. Each finalised group stamps `next_seq` and
+/// bumps the counter so every group across the workspace has a
+/// unique, monotonic ordering tag. Zero-cost when the history
+/// feature isn't used (no contention, one atomic add per edit).
+///
+/// `Arc<AtomicU64>` + `Clone` gives `BufferEdits::default()` a
+/// fresh counter, and every new `EditedBuffer` snaps a clone of
+/// the same shared counter so they all increment the same slot.
+#[derive(Debug, Clone)]
+pub struct SeqGen(pub Arc<AtomicU64>);
+
+impl SeqGen {
+    pub fn new() -> Self {
+        Self(Arc::new(AtomicU64::new(0)))
+    }
+
+    /// Return the next seq to assign (post-increment). Seq 0 is
+    /// reserved for "unstamped / open group," so the first real
+    /// seq is 1.
+    pub fn next(&self) -> u64 {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1
+    }
+}
+
+impl Default for SeqGen {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl PartialEq for SeqGen {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
 
 /// One open buffer's editable state.
 #[derive(Debug, Clone, PartialEq)]
@@ -58,12 +96,24 @@ impl EditedBuffer {
     }
 
     /// Fresh, clean seed for a buffer whose disk rope just arrived.
+    /// Uses a detached (per-buffer) seq generator — fine for tests
+    /// and standalone use, but the runtime prefers
+    /// [`EditedBuffer::fresh_with_seq_gen`] so all buffers share
+    /// one counter.
     pub fn fresh(rope: Arc<Rope>) -> Self {
+        Self::fresh_with_seq_gen(rope, SeqGen::new())
+    }
+
+    /// Fresh seed that binds the buffer's history to a session-
+    /// shared seq generator. Called by runtime code when adding a
+    /// new entry to `BufferEdits.buffers` so every buffer stamps
+    /// from the same counter.
+    pub fn fresh_with_seq_gen(rope: Arc<Rope>, seq_gen: SeqGen) -> Self {
         Self {
             rope,
             version: 0,
             saved_version: 0,
-            history: History::default(),
+            history: History::with_seq_gen(seq_gen),
         }
     }
 }
@@ -82,6 +132,12 @@ impl EditedBuffer {
 pub struct BufferEdits {
     pub buffers: HashMap<CanonPath, EditedBuffer>,
     pub pending_saves: HashSet<CanonPath>,
+    /// Session-wide edit sequence generator. Cloned into every
+    /// new `EditedBuffer` so every history across the workspace
+    /// stamps finalised groups from the same counter — gives a
+    /// global "which edit happened most recently across all
+    /// buffers" ordering for the cross-buffer undo path.
+    pub seq_gen: SeqGen,
     /// Map from the active buffer's path (`from`) to a fresh
     /// target (`to`) for a find-file SaveAs commit. Dispatch
     /// inserts here when `Enter` lands in SaveAs mode; the runtime

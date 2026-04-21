@@ -680,9 +680,10 @@ fn seed_edit_from_load(
     rope: Arc<ropey::Rope>,
 ) -> bool {
     use imbl::hashmap::Entry;
+    let seq_gen = edits.seq_gen.clone();
     match edits.buffers.entry(path) {
         Entry::Vacant(v) => {
-            v.insert(EditedBuffer::fresh(rope));
+            v.insert(EditedBuffer::fresh_with_seq_gen(rope, seq_gen));
             true
         }
         Entry::Occupied(_) => false,
