@@ -1,0 +1,13 @@
+[package]
+name = "led-driver-find-file-native"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Desktop worker half of the find-file completion driver. Single
+# thread blocks on `Receiver<FindFileCmd>`; wakes on each command,
+# runs `fs::read_dir` + prefix filter + sort, sends the result back.
+
+[dependencies]
+led-core = { workspace = true }
+led-driver-find-file-core = { workspace = true }

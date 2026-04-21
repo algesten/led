@@ -218,6 +218,26 @@ impl<'a> BrowserUiInput<'a> {
     }
 }
 
+/// Projection for the find-file overlay. `None` when the overlay
+/// is inactive.
+///
+/// M12 bootstrap uses a coarse projection (the whole `FindFileState`
+/// by reference), which busts the `find_file_action` memo cache on
+/// every field change. Later stages can split into narrower inputs
+/// (input + pending flag vs completions + selected) if cache-miss
+/// cost becomes measurable.
+#[drv::input]
+#[derive(Copy, Clone)]
+pub struct FindFileInput<'a> {
+    pub overlay: &'a Option<led_state_find_file::FindFileState>,
+}
+
+impl<'a> FindFileInput<'a> {
+    pub fn new(ff: &'a Option<led_state_find_file::FindFileState>) -> Self {
+        Self { overlay: ff }
+    }
+}
+
 // ── Memos ──────────────────────────────────────────────────────────────
 
 /// "What files need a load started?"
@@ -450,11 +470,33 @@ fn truncate_to_cols_in_place(s: &mut String, cols: usize) {
 /// All strings are `Arc<str>` so cache-hit clones of
 /// [`StatusBarModel`] are a pointer copy.
 #[drv::memo(single)]
-pub fn status_bar_model<'a, 'b, 'c>(
+pub fn status_bar_model<'a, 'b, 'c, 'f>(
     alerts: AlertsInput<'a>,
     tabs: TabsActiveInput<'b>,
     edits: EditedBuffersInput<'c>,
+    find_file: FindFileInput<'f>,
 ) -> StatusBarModel {
+    // Priority 0 — find-file overlay prompt. Replaces the whole
+    // status bar content: left is `Find file: <input>` /
+    // `Save as: <input>`, right is empty (no position indicator
+    // while the overlay has focus). Matches legacy goldens.
+    if let Some(state) = find_file.overlay.as_ref() {
+        let label = match state.mode {
+            led_state_find_file::FindFileMode::Open => "Find file",
+            led_state_find_file::FindFileMode::SaveAs => "Save as",
+        };
+        let mut left = String::with_capacity(state.input.len() + label.len() + 3);
+        left.push(' ');
+        left.push_str(label);
+        left.push_str(": ");
+        left.push_str(&state.input);
+        return StatusBarModel {
+            left: Arc::from(left),
+            right: Arc::from(""),
+            is_warn: false,
+        };
+    }
+
     // Priority 1 — confirm-kill prompt.
     if let Some(kill_id) = *alerts.confirm_kill {
         let name = tabs
@@ -588,6 +630,53 @@ pub fn clipboard_action<'c>(clip: ClipboardStateInput<'c>) -> Option<ClipboardAc
     }
 }
 
+/// "What completion request does the find-file overlay need fired?"
+///
+/// Derives a `FindFileCmd` from the overlay's `input` by splitting at
+/// the last `/`: trailing-slash inputs list the dir itself with an
+/// empty prefix, otherwise we list the parent with the leaf as the
+/// case-insensitive prefix. `show_hidden` flips on when the prefix
+/// starts with `.`.
+///
+/// The memo cache-keys on `FindFileInput`, so an unchanged input
+/// string returns the same `Vec` and the driver sees no re-fire.
+/// Activation changes `input` (None → Some(...)) — the memo
+/// recomputes and emits the initial request. Input edits each
+/// change the string and re-fire.
+///
+/// Returns an empty `Vec` when the overlay is inactive.
+#[drv::memo(single)]
+pub fn find_file_action<'f>(
+    ff: FindFileInput<'f>,
+) -> Vec<led_driver_find_file_core::FindFileCmd> {
+    let Some(state) = ff.overlay.as_ref() else {
+        return Vec::new();
+    };
+    // Execute-pattern: only emit when dispatch set the bit. The main
+    // loop sync-clears it after `execute` so the next tick doesn't
+    // re-fire the same request.
+    if !state.pending_find_file_list {
+        return Vec::new();
+    }
+    use led_core::UserPath;
+    use led_state_find_file::{expand_path, split_input};
+
+    let (dir_part, prefix) = split_input(&state.input);
+    // If the input has no `/` at all, we can't derive a directory to
+    // list. Callers (legacy) skip the request in that case.
+    if dir_part.is_empty() {
+        return Vec::new();
+    }
+    let expanded = expand_path(dir_part);
+    let dir = UserPath::new(expanded).canonicalize();
+    let show_hidden = prefix.starts_with('.');
+    vec![led_driver_find_file_core::FindFileCmd {
+        dir,
+        prefix: prefix.to_string(),
+        show_hidden,
+    }]
+}
+
 /// "What directory listings do we still need?"
 ///
 /// Emits one `ListCmd::List` per path that's expected to have a
@@ -619,19 +708,20 @@ pub fn file_list_action<'f, 'u>(
 /// same input values through — drv 0.3's input types are `Copy` over
 /// references, so forwarding is free.
 #[drv::memo(single)]
-pub fn render_frame<'t, 'e, 'b, 'a, 'al, 'br>(
+pub fn render_frame<'t, 'e, 'b, 'a, 'al, 'br, 'ff>(
     term: TerminalDimsInput<'t>,
     edits: EditedBuffersInput<'e>,
     store: StoreLoadedInput<'b>,
     tabs: TabsActiveInput<'a>,
     alerts: AlertsInput<'al>,
     browser: BrowserUiInput<'br>,
+    find_file: FindFileInput<'ff>,
 ) -> Option<Frame> {
     let dims = (*term.dims)?;
     let layout = Layout::compute(dims, *browser.visible);
     let tab_bar = tab_bar_model(tabs, edits);
     let body = body_model(edits, store, tabs, layout.editor_area);
-    let status_bar = status_bar_model(alerts, tabs, edits);
+    let status_bar = status_bar_model(alerts, tabs, edits, find_file);
     let side_panel = layout
         .side_area
         .map(|area| side_panel_model(browser, area.rows));
@@ -766,6 +856,7 @@ mod tests {
             visible: false,
             ..Default::default()
         };
+        let ff = None;
         render_frame(
             TerminalDimsInput::new(term),
             EditedBuffersInput::new(e),
@@ -773,6 +864,7 @@ mod tests {
             TabsActiveInput::new(t),
             AlertsInput::new(&alerts),
             BrowserUiInput::new(&browser),
+            FindFileInput::new(&ff),
         )
     }
 
@@ -814,6 +906,7 @@ mod tests {
             focus: Focus::Side,
             ..Default::default()
         };
+        let ff = None;
         let frame = render_frame(
             TerminalDimsInput::new(&term),
             EditedBuffersInput::new(&e),
@@ -821,6 +914,7 @@ mod tests {
             TabsActiveInput::new(&t),
             AlertsInput::new(&alerts),
             BrowserUiInput::new(&browser),
+            FindFileInput::new(&ff),
         )
         .expect("dims set");
         assert_eq!(frame.cursor, None);
@@ -1137,10 +1231,12 @@ mod tests {
     // ── M9: status bar model ────────────────────────────────────────────
 
     fn status(a: &AlertState, t: &Tabs, e: &BufferEdits) -> StatusBarModel {
+        let ff = None;
         status_bar_model(
             AlertsInput::new(a),
             TabsActiveInput::new(t),
             EditedBuffersInput::new(e),
+            FindFileInput::new(&ff),
         )
     }
 

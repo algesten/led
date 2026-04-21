@@ -18,6 +18,8 @@ members = [
     "crates/driver-clipboard/native",
     "crates/driver-fs-list/core",
     "crates/driver-fs-list/native",
+    "crates/driver-find-file/core",
+    "crates/driver-find-file/native",
     "crates/runtime",
     "crates/fake-lsp",
     "crates/fake-gh",
@@ -44,6 +46,8 @@ led-driver-clipboard-core = { path = "crates/driver-clipboard/core" }
 led-driver-clipboard-native = { path = "crates/driver-clipboard/native" }
 led-driver-fs-list-core = { path = "crates/driver-fs-list/core" }
 led-driver-fs-list-native = { path = "crates/driver-fs-list/native" }
+led-driver-find-file-core = { path = "crates/driver-find-file/core" }
+led-driver-find-file-native = { path = "crates/driver-find-file/native" }
 led-runtime = { path = "crates/runtime" }
 
 # drv = the memoization / query primitive.

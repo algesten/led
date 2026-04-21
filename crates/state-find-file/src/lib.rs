@@ -13,7 +13,9 @@
 
 use std::path::{Path, PathBuf};
 
-use led_core::CanonPath;
+// `FindFileEntry` is the driver ABI type — state re-exports it so
+// overlay consumers (dispatch, rendering) import a single name.
+pub use led_driver_find_file_core::FindFileEntry;
 
 /// Which mode the overlay is in. Opens and Save-as share the same
 /// input editor + completions UI but differ in activation input
@@ -25,18 +27,6 @@ pub enum FindFileMode {
     /// `Ctrl+x Ctrl+w`. Enter writes the active buffer to the input
     /// path.
     SaveAs,
-}
-
-/// One row in the completions list.
-///
-/// `name` is the display string — for directories it has a trailing
-/// `/` so the renderer doesn't need to know about `is_dir`. `full` is
-/// the canonicalized path used for open / save targets.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FindFileEntry {
-    pub name: String,
-    pub full: CanonPath,
-    pub is_dir: bool,
 }
 
 /// Overlay state.
@@ -73,6 +63,14 @@ pub struct FindFileState {
     /// Whether the completions list should be visible in the side
     /// panel. Set by `Tab`, `MoveUp` / `MoveDown`; cleared on edit.
     pub show_side: bool,
+
+    /// The runtime's execute-pattern bit for completion requests:
+    /// dispatch sets this `true` whenever a refresh is needed
+    /// (activation, input edit), the query memo reads it to produce
+    /// a `FindFileCmd`, and the main loop sync-clears it to `false`
+    /// before the driver executes. Matches legacy
+    /// `pending_find_file_list`.
+    pub pending_find_file_list: bool,
 }
 
 impl FindFileState {
@@ -90,6 +88,7 @@ impl FindFileState {
             completions: Vec::new(),
             selected: None,
             show_side: false,
+            pending_find_file_list: true,
         }
     }
 
@@ -106,6 +105,7 @@ impl FindFileState {
             completions: Vec::new(),
             selected: None,
             show_side: false,
+            pending_find_file_list: true,
         }
     }
 

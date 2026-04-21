@@ -441,6 +441,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "led-driver-find-file-core"
+version = "0.0.0"
+dependencies = [
+ "led-core",
+]
+
+[[package]]
+name = "led-driver-find-file-native"
+version = "0.0.0"
+dependencies = [
+ "led-core",
+ "led-driver-find-file-core",
+]
+
+[[package]]
 name = "led-driver-fs-list-core"
 version = "0.0.0"
 dependencies = [
@@ -484,6 +499,8 @@ dependencies = [
  "led-driver-buffers-native",
  "led-driver-clipboard-core",
  "led-driver-clipboard-native",
+ "led-driver-find-file-core",
+ "led-driver-find-file-native",
  "led-driver-fs-list-core",
  "led-driver-fs-list-native",
  "led-driver-terminal-core",
@@ -539,6 +556,7 @@ version = "0.0.0"
 dependencies = [
  "dirs",
  "led-core",
+ "led-driver-find-file-core",
 ]
 
 [[package]]

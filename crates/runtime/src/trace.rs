@@ -19,6 +19,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use led_core::CanonPath;
+use led_driver_find_file_core::FindFileCmd;
 use led_driver_terminal_core::{Dims, KeyEvent};
 use ropey::Rope;
 
@@ -37,6 +38,13 @@ pub trait Trace: Send + Sync {
     fn clipboard_write_done(&self, ok: bool);
     fn fs_list_start(&self, path: &CanonPath);
     fn fs_list_done(&self, path: &CanonPath, ok: bool);
+    /// Emitted when the find-file driver receives a completion
+    /// command. Legacy's dispatched.snap name is `FsFindFile`.
+    fn find_file_start(&self, cmd: &FindFileCmd);
+    /// Completion back from the driver — not traced in legacy
+    /// (dispatched.snap tracks intents, not driver results), kept
+    /// here for symmetry + future debug traces.
+    fn find_file_done(&self, dir: &CanonPath, prefix: &str, ok: bool);
     /// Emitted when the runtime truncates the undo history after a
     /// save (saved state becomes the new baseline). Legacy traces
     /// this immediately after `FileSave`.
@@ -140,6 +148,16 @@ impl Trace for FileTrace {
         self.write_line(&format!("FsListDir\tpath={}", self.format_path(path)));
     }
     fn fs_list_done(&self, _: &CanonPath, _: bool) {}
+    fn find_file_start(&self, cmd: &FindFileCmd) {
+        // Legacy format: `FsFindFile\tdir=<p> prefix="<s>" show_hidden=<bool>`.
+        self.write_line(&format!(
+            "FsFindFile\tdir={} prefix=\"{}\" show_hidden={}",
+            self.format_path(&cmd.dir),
+            cmd.prefix,
+            cmd.show_hidden,
+        ));
+    }
+    fn find_file_done(&self, _: &CanonPath, _: &str, _: bool) {}
     fn workspace_clear_undo(&self, path: &CanonPath) {
         self.write_line(&format!(
             "WorkspaceClearUndo\tpath={}",
@@ -182,6 +200,8 @@ impl Trace for NoopTrace {
     fn clipboard_write_done(&self, _ok: bool) {}
     fn fs_list_start(&self, _: &CanonPath) {}
     fn fs_list_done(&self, _: &CanonPath, _: bool) {}
+    fn find_file_start(&self, _: &FindFileCmd) {}
+    fn find_file_done(&self, _: &CanonPath, _: &str, _: bool) {}
     fn workspace_clear_undo(&self, _: &CanonPath) {}
     fn render_tick(&self) {}
 }

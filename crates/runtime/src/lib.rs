@@ -32,6 +32,8 @@ use led_driver_clipboard_native::ClipboardNative;
 use led_core::Notifier;
 use led_driver_terminal_core::{Dims, Frame, KeyEvent, TermEvent, Terminal, TerminalInputDriver};
 use led_driver_terminal_native::{TerminalInputNative, TerminalOutputDriver};
+use led_driver_find_file_core::FindFileDriver;
+use led_driver_find_file_native::FindFileNative;
 use led_driver_fs_list_core::FsListDriver;
 use led_driver_fs_list_native::FsListNative;
 use led_state_alerts::AlertState;
@@ -76,9 +78,10 @@ pub use dispatch::{dispatch_key, DispatchOutcome, Dispatcher};
 pub use keymap::{default_keymap, parse_command, parse_key, ChordState, Command, Keymap};
 pub use query::{
     body_model, clipboard_action, file_list_action, file_load_action, file_save_action,
-    render_frame, side_panel_model, status_bar_model, tab_bar_model, AlertsInput,
-    BrowserUiInput, ClipboardStateInput, EditedBuffersInput, FsTreeInput, PendingSavesInput,
-    StoreLoadedInput, TabsActiveInput, TabsOpenInput, TerminalDimsInput,
+    find_file_action, render_frame, side_panel_model, status_bar_model, tab_bar_model,
+    AlertsInput, BrowserUiInput, ClipboardStateInput, EditedBuffersInput, FindFileInput,
+    FsTreeInput, PendingSavesInput, StoreLoadedInput, TabsActiveInput, TabsOpenInput,
+    TerminalDimsInput,
 };
 pub use trace::{SharedTrace, Trace};
 
@@ -102,6 +105,7 @@ pub struct Drivers {
     pub output: TerminalOutputDriver,
     pub clipboard: ClipboardDriver,
     pub fs_list: FsListDriver,
+    pub find_file: FindFileDriver,
 
     // Held only for lifetime management; detached on drop.
     _file_native: FileReadNative,
@@ -109,6 +113,7 @@ pub struct Drivers {
     _input_native: TerminalInputNative,
     _clipboard_native: ClipboardNative,
     _fs_list_native: FsListNative,
+    _find_file_native: FindFileNative,
 }
 
 /// Allocator for fresh `TabId`s. Counter only; ids are never reused.
@@ -249,6 +254,28 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
             rebuild_entries(browser, fs);
         }
 
+        // Apply find-file completions. Late arrivals whose `dir` +
+        // `prefix` no longer match the overlay's current input are
+        // dropped — legacy's "expected_dir" discipline. Matching
+        // completions replace `state.completions` wholesale.
+        for done in drivers.find_file.process() {
+            let Some(ff) = find_file.as_mut() else {
+                continue;
+            };
+            let (dir_part, prefix) = led_state_find_file::split_input(&ff.input);
+            if dir_part.is_empty() {
+                continue;
+            }
+            let expected_dir = led_core::UserPath::new(led_state_find_file::expand_path(
+                dir_part,
+            ))
+            .canonicalize();
+            if done.dir != expected_dir || done.prefix != prefix {
+                continue;
+            }
+            ff.completions = done.entries;
+        }
+
         // Apply clipboard completions: either paste the text at the
         // tab the yank was issued from, or on empty/error fall back
         // to the kill ring. Writes only clear the in-flight bit.
@@ -328,6 +355,7 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
             FsTreeInput::new(fs),
             BrowserUiInput::new(browser),
         );
+        let find_file_actions = find_file_action(FindFileInput::new(find_file));
         let frame = render_frame(
             TerminalDimsInput::new(terminal),
             EditedBuffersInput::new(edits),
@@ -335,6 +363,7 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
             TabsActiveInput::new(tabs),
             AlertsInput::new(alerts),
             BrowserUiInput::new(browser),
+            FindFileInput::new(find_file),
         );
 
         // ── Execute ─────────────────────────────────────────────
@@ -343,6 +372,17 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
         drivers.fs_list.execute(list_actions.iter());
 
         drivers.file.execute(load_actions.iter(), store);
+
+        // Find-file completion requests. Sync-clear the pending bit
+        // BEFORE execute so a late wake that runs the query again
+        // doesn't re-fire the same request. Matches the save
+        // pattern above.
+        if !find_file_actions.is_empty()
+            && let Some(ff) = find_file.as_mut()
+        {
+            ff.pending_find_file_list = false;
+        }
+        drivers.find_file.execute(find_file_actions.iter());
 
         // Sync-clear pending_saves for the paths we're about to
         // dispatch — the execute-pattern discipline that prevents
@@ -480,6 +520,10 @@ pub fn spawn_drivers(trace: SharedTrace, wake: &Wake) -> io::Result<Drivers> {
         trace.clone().as_fs_list_trace(),
         wake.notifier.clone(),
     );
+    let (find_file, find_file_native) = led_driver_find_file_native::spawn(
+        trace.clone().as_find_file_trace(),
+        wake.notifier.clone(),
+    );
     let (input, input_native) = led_driver_terminal_native::spawn(
         trace.clone().as_terminal_trace(),
         wake.notifier.clone(),
@@ -492,11 +536,13 @@ pub fn spawn_drivers(trace: SharedTrace, wake: &Wake) -> io::Result<Drivers> {
         output,
         clipboard,
         fs_list,
+        find_file,
         _file_native: file_native,
         _file_write_native: file_write_native,
         _input_native: input_native,
         _clipboard_native: clipboard_native,
         _fs_list_native: fs_list_native,
+        _find_file_native: find_file_native,
     })
 }
 
@@ -520,6 +566,7 @@ pub(crate) mod trace_adapter {
     pub(crate) struct TermTraceAdapter(pub Arc<dyn Trace>);
     pub(crate) struct ClipboardTraceAdapter(pub Arc<dyn Trace>);
     pub(crate) struct FsListTraceAdapter(pub Arc<dyn Trace>);
+    pub(crate) struct FindFileTraceAdapter(pub Arc<dyn Trace>);
 
     impl led_driver_buffers_core::Trace for FileTraceAdapter {
         fn file_load_start(&self, path: &CanonPath) {
@@ -575,6 +622,15 @@ pub(crate) mod trace_adapter {
             self.0.fs_list_done(path, result.is_ok());
         }
     }
+
+    impl led_driver_find_file_core::Trace for FindFileTraceAdapter {
+        fn find_file_start(&self, cmd: &led_driver_find_file_core::FindFileCmd) {
+            self.0.find_file_start(cmd);
+        }
+        fn find_file_done(&self, path: &CanonPath, prefix: &str, ok: bool) {
+            self.0.find_file_done(path, prefix, ok);
+        }
+    }
 }
 
 impl SharedTrace {
@@ -589,6 +645,9 @@ impl SharedTrace {
     }
     pub(crate) fn as_fs_list_trace(&self) -> Arc<dyn led_driver_fs_list_core::Trace> {
         Arc::new(trace_adapter::FsListTraceAdapter(self.inner()))
+    }
+    pub(crate) fn as_find_file_trace(&self) -> Arc<dyn led_driver_find_file_core::Trace> {
+        Arc::new(trace_adapter::FindFileTraceAdapter(self.inner()))
     }
 }
 
