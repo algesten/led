@@ -159,6 +159,16 @@ impl TextInput {
             self.hint_expires_at = None;
         }
     }
+
+    /// Dismiss any live hint immediately — for "user interacted,
+    /// so the flashed feedback has served its purpose" semantics.
+    /// Used by the overlay dispatch layer at the top of its
+    /// command handler so the next keystroke after a "[No match]"
+    /// flash clears the hint without waiting out the TTL.
+    pub fn dismiss_hint(&mut self) {
+        self.hint = None;
+        self.hint_expires_at = None;
+    }
 }
 
 fn prev_char_boundary(s: &str, byte_pos: usize) -> usize {

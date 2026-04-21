@@ -115,6 +115,14 @@ pub(super) fn run_overlay_command(
     edits: &mut led_state_buffer_edits::BufferEdits,
 ) -> Option<DispatchOutcome> {
     find_file.as_ref()?;
+    // Any overlay interaction dismisses a lingering hint. The
+    // "[No match]" flash is transient feedback; once the user hits
+    // another key it's served its purpose. Tab-complete's no-match
+    // branch re-sets the hint after this clear, so a repeated Tab
+    // re-flashes without waiting out the TTL.
+    if let Some(ff) = find_file.as_mut() {
+        ff.input.dismiss_hint();
+    }
     match cmd {
         Command::InsertChar(c) => insert_char(find_file.as_mut()?, c),
         Command::DeleteBack => delete_back(find_file.as_mut()?),
@@ -758,6 +766,31 @@ mod tests {
         let before = ff.as_ref().unwrap().input.text.clone();
         run_overlay_command(Command::FindFileTabComplete, &mut ff, &mut Tabs::default(), &mut led_state_buffer_edits::BufferEdits::default());
         assert_eq!(ff.as_ref().unwrap().input.text, before);
+    }
+
+    #[test]
+    fn any_subsequent_input_dismisses_the_hint() {
+        // Repro: press Tab with no matches → hint armed. Then type
+        // a char — hint should clear immediately, not linger for
+        // the remainder of the TTL.
+        let mut ff = overlay("/tmp/xyz", 8);
+        run_overlay_command(
+            Command::FindFileTabComplete,
+            &mut ff,
+            &mut Tabs::default(),
+            &mut led_state_buffer_edits::BufferEdits::default(),
+        );
+        assert!(ff.as_ref().unwrap().input.hint.is_some());
+
+        run_overlay_command(
+            Command::InsertChar('q'),
+            &mut ff,
+            &mut Tabs::default(),
+            &mut led_state_buffer_edits::BufferEdits::default(),
+        );
+        let s = ff.as_ref().unwrap();
+        assert!(s.input.hint.is_none());
+        assert!(s.input.hint_expires_at.is_none());
     }
 
     #[test]
