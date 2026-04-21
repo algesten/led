@@ -8,16 +8,10 @@ use std::path::PathBuf;
 
 use clap::Parser;
 use led_core::UserPath;
-use led_driver_buffers_core::BufferStore;
-use led_driver_terminal_core::Terminal;
 use led_driver_terminal_native::RawModeGuard;
-use led_runtime::{load_keymap, spawn_drivers, SharedTrace, TabIdGen, Wake};
-use led_state_alerts::AlertState;
-use led_state_browser::{BrowserUi, FsTree};
-use led_state_buffer_edits::BufferEdits;
-use led_state_jumps::JumpListState;
-use led_state_kill_ring::KillRing;
-use led_state_tabs::{Tab, Tabs};
+use led_runtime::{load_keymap, spawn_drivers, Atoms, SharedTrace, TabIdGen, Wake, World};
+use led_state_browser::FsTree;
+use led_state_tabs::Tab;
 
 #[derive(Parser, Debug)]
 #[command(name = "led", version, about = "led rewrite — milestone 1 skeleton")]
@@ -80,36 +74,31 @@ fn main() -> io::Result<()> {
         None => SharedTrace::noop(),
     };
 
-    // Build atoms as plain structs — drv 0.2.0 has no wrapper type.
-    let mut tabs = Tabs::default();
-    let mut edits = BufferEdits::default();
-    let mut kill_ring = KillRing::default();
-    let mut alerts = AlertState::default();
-    let mut jumps = JumpListState::default();
-    // Workspace root = process cwd. M19 (git integration) will walk
-    // up for `.git` instead; for M11 the CWD convention matches the
-    // typical `cd <project> && led <file>` invocation.
-    let mut browser = BrowserUi::default();
-    let mut fs = FsTree {
-        root: std::env::current_dir()
-            .ok()
-            .map(|p| UserPath::new(&p).canonicalize()),
+    // Build atoms as plain structs.
+    let mut atoms = Atoms {
+        // Workspace root = process cwd. M19 (git integration) will
+        // walk up for `.git` instead; for M11 the CWD convention
+        // matches the typical `cd <project> && led <file>` path.
+        fs: FsTree {
+            root: std::env::current_dir()
+                .ok()
+                .map(|p| UserPath::new(&p).canonicalize()),
+            ..Default::default()
+        },
         ..Default::default()
     };
-    let mut store = BufferStore::default();
-    let mut terminal = Terminal::default();
 
     // Seed tabs from CLI args.
     let mut ids = TabIdGen::default();
     for f in &cli.files {
         let id = ids.next();
-        tabs.open.push_back(Tab {
+        atoms.tabs.open.push_back(Tab {
             id,
             path: UserPath::new(f).canonicalize(),
             ..Default::default()
         });
-        if tabs.active.is_none() {
-            tabs.active = Some(id);
+        if atoms.tabs.active.is_none() {
+            atoms.tabs.active = Some(id);
         }
     }
 
@@ -122,22 +111,15 @@ fn main() -> io::Result<()> {
     let drivers = spawn_drivers(trace.clone(), &wake)?;
 
     let mut stdout = io::stdout();
-    led_runtime::run(
-        &mut tabs,
-        &mut edits,
-        &mut kill_ring,
-        &mut alerts,
-        &mut jumps,
-        &mut browser,
-        &mut fs,
-        &mut store,
-        &mut terminal,
-        &drivers,
-        &wake,
-        &keymap,
-        &mut stdout,
-        &trace,
-    )?;
+    let mut world = World {
+        atoms: &mut atoms,
+        drivers: &drivers,
+        keymap: &keymap,
+        wake: &wake,
+        trace: &trace,
+        stdout: &mut stdout,
+    };
+    led_runtime::run(&mut world)?;
     stdout.flush()?;
 
     Ok(())

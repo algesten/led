@@ -119,29 +119,57 @@ impl TabIdGen {
     }
 }
 
-/// Run the main loop until dispatch signals quit.
+/// Every mutable state atom the main loop touches, bundled.
 ///
-/// Many parameters are intentional — this is the integration seam
-/// where every source + driver + config is threaded into the loop.
-/// Packaging them into a struct would hide the relationships rather
-/// than clarifying them.
-#[allow(clippy::too_many_arguments)]
-pub fn run(
-    tabs: &mut Tabs,
-    edits: &mut BufferEdits,
-    kill_ring: &mut KillRing,
-    alerts: &mut AlertState,
-    jumps: &mut JumpListState,
-    browser: &mut BrowserUi,
-    fs: &mut FsTree,
-    store: &mut BufferStore,
-    terminal: &mut Terminal,
-    drivers: &Drivers,
-    wake: &Wake,
-    keymap: &Keymap,
-    stdout: &mut impl Write,
-    trace: &SharedTrace,
-) -> io::Result<()> {
+/// Per course-correction #4: groups the nine per-domain state
+/// structs so the main loop signature stops growing with each new
+/// milestone. Rust allows disjoint-field `&mut` borrows at compile
+/// time, so dispatch + memo call sites still extract the atoms
+/// they actually need without runtime cost.
+#[derive(Default)]
+pub struct Atoms {
+    pub tabs: Tabs,
+    pub edits: BufferEdits,
+    pub store: BufferStore,
+    pub terminal: Terminal,
+    pub kill_ring: KillRing,
+    pub alerts: AlertState,
+    pub jumps: JumpListState,
+    pub browser: BrowserUi,
+    pub fs: FsTree,
+}
+
+/// Run-time seam: the single thing the main loop sees. Owns nothing
+/// — just bundles borrowed views of the atoms, drivers, config,
+/// wake signal, trace sink, and stdout writer. Shrinks `run()` to
+/// a one-arg function.
+pub struct World<'a, W: Write> {
+    pub atoms: &'a mut Atoms,
+    pub drivers: &'a Drivers,
+    pub keymap: &'a Keymap,
+    pub wake: &'a Wake,
+    pub trace: &'a SharedTrace,
+    pub stdout: &'a mut W,
+}
+
+/// Run the main loop until dispatch signals quit.
+pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
+    let Atoms {
+        tabs,
+        edits,
+        kill_ring,
+        alerts,
+        jumps,
+        browser,
+        fs,
+        store,
+        terminal,
+    } = &mut *world.atoms;
+    let drivers = world.drivers;
+    let wake = world.wake;
+    let keymap = world.keymap;
+    let stdout = &mut *world.stdout;
+    let trace = world.trace;
     let mut last_frame: Option<Frame> = None;
     let mut chord = ChordState::default();
 
