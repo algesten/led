@@ -16,6 +16,11 @@ use led_core::TextInput;
 // pattern used by `state-find-file` with `FindFileEntry`.
 pub use led_driver_file_search_core::{FileSearchGroup, FileSearchHit};
 
+// `TabId` reference is light — the state doesn't mutate `Tabs` itself,
+// it only remembers which tab was active when the overlay opened so
+// `deactivate` can restore focus after closing a preview.
+use led_state_tabs::TabId;
+
 /// Which row in the overlay currently has the caret / is selected.
 ///
 /// `SearchInput` / `ReplaceInput` address the input rows at the top
@@ -57,6 +62,11 @@ pub struct FileSearchState {
     /// pattern so multiple keystrokes per tick produce one
     /// `FileSearch` trace line each.
     pub pending_search: Vec<PendingSearch>,
+
+    /// Tab that was active when the overlay opened. `deactivate`
+    /// restores this after closing any preview tab the overlay
+    /// created — same "snapshot on open" discipline find-file uses.
+    pub previous_tab: Option<TabId>,
 }
 
 /// One queued search request: the current query + toggle state at

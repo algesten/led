@@ -709,6 +709,7 @@ version = "0.0.0"
 dependencies = [
  "led-core",
  "led-driver-file-search-core",
+ "led-state-tabs",
 ]
 
 [[package]]

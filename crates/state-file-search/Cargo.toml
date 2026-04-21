@@ -15,3 +15,4 @@ publish = false
 [dependencies]
 led-core = { workspace = true }
 led-driver-file-search-core = { workspace = true }
+led-state-tabs = { workspace = true }

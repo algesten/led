@@ -275,8 +275,12 @@ fn resolve_command(
         return Resolved::Command(cmd);
     }
     // Browser-context overlay wins over the global direct table when
-    // focus is on the sidebar (M11).
+    // focus is on the sidebar (M11). The file-search overlay also
+    // lives in the sidebar but wants global keys (`enter` →
+    // `InsertNewline`, etc.) to reach its own `run_overlay_command`,
+    // so browser_direct is suppressed while file_search is active.
     if browser_focused
+        && !file_search_active
         && let Some(cmd) = keymap.lookup_browser(&k)
     {
         return Resolved::Command(cmd);
@@ -352,7 +356,9 @@ fn run_command(
 
     // File-search overlay intercept (M14). Typing / toggles /
     // Abort are fully consumed; other commands fall through.
-    if let Some(outcome) = file_search::run_overlay_command(cmd, file_search, browser) {
+    if let Some(outcome) =
+        file_search::run_overlay_command(cmd, file_search, browser, tabs, edits)
+    {
         return outcome;
     }
 
@@ -573,11 +579,11 @@ fn run_command(
             DispatchOutcome::Continue
         }
         Command::OpenFileSearch => {
-            file_search::activate(file_search, browser);
+            file_search::activate(file_search, browser, tabs);
             DispatchOutcome::Continue
         }
         Command::CloseFileSearch => {
-            file_search::deactivate(file_search, browser);
+            file_search::deactivate(file_search, browser, tabs);
             DispatchOutcome::Continue
         }
         // Toggles + ReplaceAll are only meaningful inside the
