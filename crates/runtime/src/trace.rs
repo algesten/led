@@ -59,6 +59,10 @@ pub trait Trace: Send + Sync {
         case_sensitive: bool,
         use_regex: bool,
     );
+    /// Single on-disk point-replace for a per-hit Right-arrow on
+    /// an unloaded file. Legacy dispatched.snap name:
+    /// `FileSearchSingleReplace`.
+    fn file_search_single_replace_start(&self, path: &CanonPath, line: usize);
     /// Emitted when the find-file driver receives a completion
     /// command. Legacy's dispatched.snap name is `FsFindFile`.
     fn find_file_start(&self, cmd: &FindFileCmd);
@@ -227,6 +231,13 @@ impl Trace for FileTrace {
             use_regex,
         ));
     }
+    fn file_search_single_replace_start(&self, path: &CanonPath, line: usize) {
+        self.write_line(&format!(
+            "FileSearchSingleReplace\tpath={} line={}",
+            self.format_path(path),
+            line,
+        ));
+    }
     fn find_file_start(&self, cmd: &FindFileCmd) {
         // Legacy format: `FsFindFile\tdir=<p> prefix="<s>" show_hidden=<bool>`.
         self.write_line(&format!(
@@ -297,6 +308,7 @@ impl Trace for NoopTrace {
         _: bool,
     ) {
     }
+    fn file_search_single_replace_start(&self, _: &CanonPath, _: usize) {}
     fn find_file_start(&self, _: &FindFileCmd) {}
     fn find_file_done(&self, _: &CanonPath, _: &str, _: bool) {}
     fn workspace_clear_undo(&self, _: &CanonPath) {}

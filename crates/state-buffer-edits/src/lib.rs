@@ -101,6 +101,11 @@ pub struct BufferEdits {
     /// these with the driver's on-disk count to build the "Replaced
     /// N occurrences in M files" alert.
     pub pending_replace_in_memory: Vec<InMemoryReplace>,
+    /// Queued on-disk single-hit replace commands. Each
+    /// corresponds to a Right-arrow on a result row whose file
+    /// isn't loaded as a buffer. Main loop drains + ships to the
+    /// driver's single-replace lane.
+    pub pending_single_replace: Vec<PendingSingleReplace>,
 }
 
 /// A pending on-disk replace-all request. Carries only the data
@@ -125,6 +130,20 @@ pub struct PendingReplaceAll {
 pub struct InMemoryReplace {
     pub path: CanonPath,
     pub count: usize,
+}
+
+/// A pending on-disk single-hit replace. Dispatch queues one when
+/// Right-arrow lands on a result row whose file isn't loaded; the
+/// runtime ships it to the driver's single-replace lane. Byte
+/// offsets are line-relative, matching `FileSearchHit`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingSingleReplace {
+    pub path: CanonPath,
+    pub line: usize,
+    pub match_start: usize,
+    pub match_end: usize,
+    pub original: String,
+    pub replacement: String,
 }
 
 #[cfg(test)]

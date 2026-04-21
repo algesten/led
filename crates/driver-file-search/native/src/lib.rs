@@ -18,7 +18,8 @@ use ignore::WalkBuilder;
 use led_core::{Notifier, UserPath};
 use led_driver_file_search_core::{
     FileSearchCmd, FileSearchDriver, FileSearchGroup, FileSearchHit, FileSearchOut,
-    FileSearchReplaceCmd, FileSearchReplaceOut, Trace,
+    FileSearchReplaceCmd, FileSearchReplaceOut, FileSearchSingleReplaceCmd,
+    FileSearchSingleReplaceOut, Trace,
 };
 
 /// Legacy's hard cap on total hits per search — prevents the worker
@@ -37,11 +38,15 @@ pub fn spawn(trace: Arc<dyn Trace>, notify: Notifier) -> (FileSearchDriver, File
     let (search_tx_done, search_rx_done) = mpsc::channel::<FileSearchOut>();
     let (replace_tx_cmd, replace_rx_cmd) = mpsc::channel::<FileSearchReplaceCmd>();
     let (replace_tx_done, replace_rx_done) = mpsc::channel::<FileSearchReplaceOut>();
+    let (single_tx_cmd, single_rx_cmd) = mpsc::channel::<FileSearchSingleReplaceCmd>();
+    let (single_tx_done, single_rx_done) = mpsc::channel::<FileSearchSingleReplaceOut>();
     let native = spawn_workers(
         search_rx_cmd,
         search_tx_done,
         replace_rx_cmd,
         replace_tx_done,
+        single_rx_cmd,
+        single_tx_done,
         notify,
     );
     let driver = FileSearchDriver::new(
@@ -49,31 +54,41 @@ pub fn spawn(trace: Arc<dyn Trace>, notify: Notifier) -> (FileSearchDriver, File
         search_rx_done,
         replace_tx_cmd,
         replace_rx_done,
+        single_tx_cmd,
+        single_rx_done,
         trace,
     );
     (driver, native)
 }
 
-/// Two worker threads: one for the live-typing search feed, one for
-/// replace-all. Kept separate so an in-flight replace (which does
-/// disk writes) doesn't back up search responses. Both self-exit
-/// when their command `Sender` hangs up.
+/// Three worker threads — search / bulk-replace / single-replace.
+/// Separating the single-replace lane from the bulk lane means a
+/// user rapidly Right-arrowing through matches never waits on an
+/// in-flight project-wide replace, and vice versa. All three
+/// self-exit when their command `Sender` hangs up.
 pub fn spawn_workers(
     search_rx: Receiver<FileSearchCmd>,
     search_tx: Sender<FileSearchOut>,
     replace_rx: Receiver<FileSearchReplaceCmd>,
     replace_tx: Sender<FileSearchReplaceOut>,
+    single_rx: Receiver<FileSearchSingleReplaceCmd>,
+    single_tx: Sender<FileSearchSingleReplaceOut>,
     notify: Notifier,
 ) -> FileSearchNative {
     let notify_search = notify.clone();
+    let notify_replace = notify.clone();
     thread::Builder::new()
         .name("led-file-search".into())
         .spawn(move || search_worker_loop(search_rx, search_tx, notify_search))
         .expect("spawning file-search search worker should succeed");
     thread::Builder::new()
         .name("led-file-search-replace".into())
-        .spawn(move || replace_worker_loop(replace_rx, replace_tx, notify))
+        .spawn(move || replace_worker_loop(replace_rx, replace_tx, notify_replace))
         .expect("spawning file-search replace worker should succeed");
+    thread::Builder::new()
+        .name("led-file-search-single".into())
+        .spawn(move || single_replace_worker_loop(single_rx, single_tx, notify))
+        .expect("spawning file-search single-replace worker should succeed");
     FileSearchNative { _marker: () }
 }
 
@@ -115,6 +130,80 @@ fn replace_worker_loop(
         }
         notify.notify();
     }
+}
+
+fn single_replace_worker_loop(
+    rx: Receiver<FileSearchSingleReplaceCmd>,
+    tx: Sender<FileSearchSingleReplaceOut>,
+    notify: Notifier,
+) {
+    while let Ok(cmd) = rx.recv() {
+        let ok = run_single_replace(&cmd);
+        let out = FileSearchSingleReplaceOut {
+            path: cmd.path,
+            ok,
+        };
+        if tx.send(out).is_err() {
+            return;
+        }
+        notify.notify();
+    }
+}
+
+/// Point replacement: read the file, verify the target bytes
+/// still match `original`, splice in `replacement`, atomic write.
+/// Returns `false` when anything doesn't check out (file missing,
+/// line missing, bytes don't match) — the hit gets dropped
+/// silently; the runtime already removed it from the display.
+fn run_single_replace(cmd: &FileSearchSingleReplaceCmd) -> bool {
+    let Ok(content) = std::fs::read_to_string(cmd.path.as_path()) else {
+        return false;
+    };
+    if cmd.line == 0 {
+        return false;
+    }
+    // Find the byte offset of the target line's first char. Walking
+    // `split_inclusive` preserves every newline terminator, so the
+    // sum of slice lengths up to index `line-1` is the offset.
+    let line_idx = cmd.line - 1;
+    let mut offset = 0usize;
+    let mut line_slice: Option<&str> = None;
+    for (i, slice) in content.split_inclusive('\n').enumerate() {
+        if i == line_idx {
+            line_slice = Some(slice);
+            break;
+        }
+        offset += slice.len();
+    }
+    let Some(line_slice) = line_slice else {
+        return false;
+    };
+    // Strip the trailing newline(s) for bounds-checking; the offset
+    // we computed is absolute, and match_start/match_end are within
+    // the trimmed line contents the search produced.
+    let line_body = line_slice
+        .strip_suffix('\n')
+        .map(|s| s.strip_suffix('\r').unwrap_or(s))
+        .unwrap_or(line_slice);
+    if cmd.match_end > line_body.len() || cmd.match_start > cmd.match_end {
+        return false;
+    }
+    let actual = &line_body[cmd.match_start..cmd.match_end];
+    if actual != cmd.original {
+        return false;
+    }
+
+    // Splice. Absolute byte range in the file is
+    // [offset+match_start .. offset+match_end].
+    let abs_start = offset + cmd.match_start;
+    let abs_end = offset + cmd.match_end;
+    let mut new_content = String::with_capacity(
+        content.len() + cmd.replacement.len().saturating_sub(cmd.original.len()),
+    );
+    new_content.push_str(&content[..abs_start]);
+    new_content.push_str(&cmd.replacement);
+    new_content.push_str(&content[abs_end..]);
+    write_atomic(cmd.path.as_path(), &new_content).is_ok()
 }
 
 /// Walk the workspace independently of the search results — apply
@@ -326,6 +415,8 @@ mod tests {
         fn file_search_done(&self, _: &str, _: bool) {}
         fn file_search_replace_start(&self, _: &FileSearchReplaceCmd) {}
         fn file_search_replace_done(&self, _: &str, _: usize, _: usize) {}
+        fn file_search_single_replace_start(&self, _: &FileSearchSingleReplaceCmd) {}
+        fn file_search_single_replace_done(&self, _: &CanonPath, _: bool) {}
     }
 
     #[test]
@@ -576,6 +667,101 @@ mod tests {
         assert_eq!(out.files_changed, 0);
         assert_eq!(out.total_replacements, 0);
         assert_eq!(stdfs::read_to_string(dir.join("a.txt")).unwrap(), "foo\n");
+    }
+
+    fn wait_for_single_replace(
+        drv: &FileSearchDriver,
+        deadline: Duration,
+    ) -> Option<FileSearchSingleReplaceOut> {
+        let start = Instant::now();
+        while start.elapsed() < deadline {
+            let mut batch = drv.process_single_replace();
+            if let Some(first) = batch.drain(..).next() {
+                return Some(first);
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        None
+    }
+
+    #[test]
+    fn single_replace_edits_one_line_and_leaves_rest_intact() {
+        let dir = tempdir();
+        stdfs::write(
+            dir.join("a.txt"),
+            b"first line\nsecond with foo in it\nthird foo line\n",
+        )
+        .unwrap();
+        let path = canon(&dir.join("a.txt"));
+
+        let (drv, _native) = spawn(Arc::new(NoopTraceImpl), Notifier::noop());
+        // "foo" on line 2 at byte offset 12..15 of the line body.
+        drv.execute_single_replace(std::iter::once(&FileSearchSingleReplaceCmd {
+            path: path.clone(),
+            line: 2,
+            match_start: 12,
+            match_end: 15,
+            original: "foo".into(),
+            replacement: "BAR".into(),
+        }));
+
+        let out = wait_for_single_replace(&drv, Duration::from_secs(2))
+            .expect("single replace within 2s");
+        assert!(out.ok);
+        // Only line 2's "foo" got rewritten — "foo" on line 3 is
+        // still there.
+        assert_eq!(
+            stdfs::read_to_string(dir.join("a.txt")).unwrap(),
+            "first line\nsecond with BAR in it\nthird foo line\n",
+        );
+    }
+
+    #[test]
+    fn single_replace_aborts_when_original_doesnt_match() {
+        let dir = tempdir();
+        stdfs::write(dir.join("a.txt"), b"alpha beta gamma\n").unwrap();
+        let path = canon(&dir.join("a.txt"));
+
+        let (drv, _native) = spawn(Arc::new(NoopTraceImpl), Notifier::noop());
+        // We claim "zzz" lives at bytes 6..9 (it doesn't — "beta" is there).
+        drv.execute_single_replace(std::iter::once(&FileSearchSingleReplaceCmd {
+            path: path.clone(),
+            line: 1,
+            match_start: 6,
+            match_end: 9,
+            original: "zzz".into(),
+            replacement: "BAR".into(),
+        }));
+
+        let out = wait_for_single_replace(&drv, Duration::from_secs(2))
+            .expect("single replace within 2s");
+        assert!(!out.ok);
+        // File untouched.
+        assert_eq!(
+            stdfs::read_to_string(dir.join("a.txt")).unwrap(),
+            "alpha beta gamma\n",
+        );
+    }
+
+    #[test]
+    fn single_replace_missing_line_reports_false() {
+        let dir = tempdir();
+        stdfs::write(dir.join("a.txt"), b"only one line\n").unwrap();
+        let path = canon(&dir.join("a.txt"));
+
+        let (drv, _native) = spawn(Arc::new(NoopTraceImpl), Notifier::noop());
+        drv.execute_single_replace(std::iter::once(&FileSearchSingleReplaceCmd {
+            path: path.clone(),
+            line: 10, // way past EOF
+            match_start: 0,
+            match_end: 3,
+            original: "foo".into(),
+            replacement: "BAR".into(),
+        }));
+
+        let out = wait_for_single_replace(&drv, Duration::from_secs(2))
+            .expect("single replace within 2s");
+        assert!(!out.ok);
     }
 
     #[test]

@@ -515,6 +515,29 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
             drivers.file_search.execute_replace(cmds.iter());
         }
 
+        // Per-hit on-disk replaces: drain + ship. One
+        // `FileSearchSingleReplace` trace line each.
+        if !edits.pending_single_replace.is_empty() {
+            let cmds: Vec<led_driver_file_search_core::FileSearchSingleReplaceCmd> = edits
+                .pending_single_replace
+                .drain(..)
+                .map(|p| led_driver_file_search_core::FileSearchSingleReplaceCmd {
+                    path: p.path,
+                    line: p.line,
+                    match_start: p.match_start,
+                    match_end: p.match_end,
+                    original: p.original,
+                    replacement: p.replacement,
+                })
+                .collect();
+            drivers.file_search.execute_single_replace(cmds.iter());
+        }
+        // Drain single-replace completions — runtime doesn't need
+        // to act on them beyond the trace (the display was already
+        // updated optimistically). A future iteration could alert
+        // on failure (stale hit / file gone).
+        let _ = drivers.file_search.process_single_replace();
+
         // Sync-clear pending_saves + pending_save_as for the paths
         // we're about to dispatch — the execute-pattern discipline
         // that prevents the next tick's query from re-emitting the
@@ -866,6 +889,14 @@ pub(crate) mod trace_adapter {
             _total_replacements: usize,
         ) {
         }
+        fn file_search_single_replace_start(
+            &self,
+            cmd: &led_driver_file_search_core::FileSearchSingleReplaceCmd,
+        ) {
+            self.0
+                .file_search_single_replace_start(&cmd.path, cmd.line);
+        }
+        fn file_search_single_replace_done(&self, _: &CanonPath, _: bool) {}
     }
 }
 

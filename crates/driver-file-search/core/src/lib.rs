@@ -69,6 +69,41 @@ pub struct FileSearchOut {
     pub flat: Vec<FileSearchHit>,
 }
 
+/// One-shot point replacement for a single hit on disk. Used when
+/// the user Right-arrows on a result whose file isn't currently
+/// loaded as a buffer — dispatch optimistically removes the hit
+/// from the display, and the driver does the on-disk splice.
+///
+/// The `original` field lets the worker abort when the target
+/// bytes don't look like what we expected (file changed under us
+/// between search and replace). Byte offsets are line-relative —
+/// same form ripgrep / `FileSearchHit` already use.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileSearchSingleReplaceCmd {
+    pub path: CanonPath,
+    /// 1-indexed line number in the file.
+    pub line: usize,
+    /// Byte offset inside the line where the match starts.
+    pub match_start: usize,
+    /// Byte offset inside the line where the match ends.
+    pub match_end: usize,
+    /// Expected content at `[match_start..match_end]`. The worker
+    /// refuses the edit and reports `ok=false` when the file has
+    /// changed.
+    pub original: String,
+    pub replacement: String,
+}
+
+/// Completion for a single on-disk point replace.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileSearchSingleReplaceOut {
+    pub path: CanonPath,
+    /// `true` when the edit was written to disk successfully.
+    /// `false` when the file was missing, unreadable, or the
+    /// target bytes didn't match `original` (stale hit).
+    pub ok: bool,
+}
+
 /// Project-wide replace-all request. Runs independently of any
 /// cached search results — the worker does its own tree walk.
 ///
@@ -110,6 +145,8 @@ pub trait Trace: Send + Sync {
         files_changed: usize,
         total_replacements: usize,
     );
+    fn file_search_single_replace_start(&self, cmd: &FileSearchSingleReplaceCmd);
+    fn file_search_single_replace_done(&self, path: &CanonPath, ok: bool);
 }
 
 pub struct NoopTrace;
@@ -118,17 +155,22 @@ impl Trace for NoopTrace {
     fn file_search_done(&self, _: &str, _: bool) {}
     fn file_search_replace_start(&self, _: &FileSearchReplaceCmd) {}
     fn file_search_replace_done(&self, _: &str, _: usize, _: usize) {}
+    fn file_search_single_replace_start(&self, _: &FileSearchSingleReplaceCmd) {}
+    fn file_search_single_replace_done(&self, _: &CanonPath, _: bool) {}
 }
 
-/// Main-loop-facing half. Owns two channel pairs — one for search
-/// (the live-typing feed) and one for replace-all. Separating them
-/// keeps the two loops independent: a pending replace never delays
-/// a search response, and vice versa.
+/// Main-loop-facing half. Owns three channel pairs — live-typing
+/// search, bulk replace-all, and single on-disk point replace.
+/// Separating them keeps the loops independent: a pending replace
+/// never delays a search response, and a slow single-point replace
+/// never blocks a bulk operation.
 pub struct FileSearchDriver {
     search_tx: Sender<FileSearchCmd>,
     search_rx: Receiver<FileSearchOut>,
     replace_tx: Sender<FileSearchReplaceCmd>,
     replace_rx: Receiver<FileSearchReplaceOut>,
+    single_tx: Sender<FileSearchSingleReplaceCmd>,
+    single_rx: Receiver<FileSearchSingleReplaceOut>,
     trace: Arc<dyn Trace>,
 }
 
@@ -138,6 +180,8 @@ impl FileSearchDriver {
         search_rx: Receiver<FileSearchOut>,
         replace_tx: Sender<FileSearchReplaceCmd>,
         replace_rx: Receiver<FileSearchReplaceOut>,
+        single_tx: Sender<FileSearchSingleReplaceCmd>,
+        single_rx: Receiver<FileSearchSingleReplaceOut>,
         trace: Arc<dyn Trace>,
     ) -> Self {
         Self {
@@ -145,6 +189,8 @@ impl FileSearchDriver {
             search_rx,
             replace_tx,
             replace_rx,
+            single_tx,
+            single_rx,
             trace,
         }
     }
@@ -170,6 +216,17 @@ impl FileSearchDriver {
         }
     }
 
+    /// Ship a single on-disk point-replace. One trace line per cmd.
+    pub fn execute_single_replace<'a>(
+        &self,
+        cmds: impl IntoIterator<Item = &'a FileSearchSingleReplaceCmd>,
+    ) {
+        for cmd in cmds {
+            self.trace.file_search_single_replace_start(cmd);
+            let _ = self.single_tx.send(cmd.clone());
+        }
+    }
+
     /// Drain ready search results. Empty `Vec` on idle ticks — zero
     /// heap alloc on the happy path.
     pub fn process(&self) -> Vec<FileSearchOut> {
@@ -191,6 +248,17 @@ impl FileSearchDriver {
                 done.files_changed,
                 done.total_replacements,
             );
+            out.push(done);
+        }
+        out
+    }
+
+    /// Drain single-replace completions.
+    pub fn process_single_replace(&self) -> Vec<FileSearchSingleReplaceOut> {
+        let mut out = Vec::new();
+        while let Ok(done) = self.single_rx.try_recv() {
+            self.trace
+                .file_search_single_replace_done(&done.path, done.ok);
             out.push(done);
         }
         out

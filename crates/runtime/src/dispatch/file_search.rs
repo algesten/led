@@ -454,10 +454,6 @@ fn replace_selected(
     if state.query.text.is_empty() && state.replace.text.is_empty() {
         return;
     }
-    let Some(eb) = edits.buffers.get_mut(&hit.path) else {
-        // On-disk file — stage 2 will route this through the driver.
-        return;
-    };
     // Char count of the matched substring, using the preview's
     // byte offsets to avoid re-running the matcher against the
     // (possibly edited) rope.
@@ -469,31 +465,50 @@ fn replace_selected(
     if original_char_len == 0 {
         return;
     }
+    let original_text = hit
+        .preview
+        .get(hit.match_start..hit.match_end)
+        .unwrap_or("")
+        .to_string();
     let replacement = state.replace.text.clone();
     let replacement_char_len = replacement.chars().count();
 
-    // Map (line, col) → absolute char index in the rope. Skip the
-    // edit if the line no longer exists (buffer shrank under us).
-    let line0 = hit.line.saturating_sub(1);
-    if line0 >= eb.rope.len_lines() {
-        return;
-    }
-    let line_start = eb.rope.line_to_char(line0);
-    let match_char_start = line_start + hit.col.saturating_sub(1);
-    let match_char_end = match_char_start + original_char_len;
-    if match_char_end > eb.rope.len_chars() {
-        return;
-    }
-
-    // Rewrite the rope. `Arc<Rope>` clone is an O(1) CoW handle, so
-    // the other readers keep their snapshot. After mutation, bump
-    // the version so `dirty()` flips.
-    let mut new_rope = (*eb.rope).clone();
-    new_rope.remove(match_char_start..match_char_end);
-    if !replacement.is_empty() {
-        new_rope.insert(match_char_start, &replacement);
-    }
-    super::shared::bump(eb, new_rope);
+    let rope_char_start = if let Some(eb) = edits.buffers.get_mut(&hit.path) {
+        // Loaded-buffer path: splice the rope in place.
+        let line0 = hit.line.saturating_sub(1);
+        if line0 >= eb.rope.len_lines() {
+            return;
+        }
+        let line_start = eb.rope.line_to_char(line0);
+        let match_char_start = line_start + hit.col.saturating_sub(1);
+        let match_char_end = match_char_start + original_char_len;
+        if match_char_end > eb.rope.len_chars() {
+            return;
+        }
+        let mut new_rope = (*eb.rope).clone();
+        new_rope.remove(match_char_start..match_char_end);
+        if !replacement.is_empty() {
+            new_rope.insert(match_char_start, &replacement);
+        }
+        super::shared::bump(eb, new_rope);
+        match_char_start
+    } else {
+        // On-disk path: queue a driver cmd and optimistically
+        // remove the hit from the display. `rope_char_start` is
+        // meaningless for unloaded buffers — use 0 as a sentinel;
+        // undo reads the line/col from `hit` directly.
+        edits.pending_single_replace.push(
+            led_state_buffer_edits::PendingSingleReplace {
+                path: hit.path.clone(),
+                line: hit.line,
+                match_start: hit.match_start,
+                match_end: hit.match_end,
+                original: original_text.clone(),
+                replacement: replacement.clone(),
+            },
+        );
+        0
+    };
 
     // Record the undo entry BEFORE mutating selection / results.
     state
@@ -504,7 +519,7 @@ fn replace_selected(
             replacement_text: replacement,
             replacement_char_len,
             original_char_len,
-            rope_char_start: match_char_start,
+            rope_char_start,
             path: hit.path.clone(),
         });
 
@@ -543,34 +558,48 @@ fn unreplace_selected(
     let Some(entry) = state.replace_stack.pop() else {
         return;
     };
-    let Some(eb) = edits.buffers.get_mut(&entry.path) else {
-        // Buffer was closed between the replace and the undo —
-        // dropping the entry silently matches legacy.
-        return;
-    };
-    let rope_len = eb.rope.len_chars();
-    let replacement_end = entry
-        .rope_char_start
-        .saturating_add(entry.replacement_char_len);
-    if replacement_end > rope_len {
-        // Rope shrank past the replacement — abandon the undo.
-        return;
-    }
-    // Splice the original text back in place of the replacement.
     let original = entry
         .hit
         .preview
         .get(entry.hit.match_start..entry.hit.match_end)
         .unwrap_or("")
         .to_string();
-    let mut new_rope = (*eb.rope).clone();
-    if entry.replacement_char_len > 0 {
-        new_rope.remove(entry.rope_char_start..replacement_end);
+    if let Some(eb) = edits.buffers.get_mut(&entry.path) {
+        // Loaded-buffer path: rewrite the rope directly.
+        let rope_len = eb.rope.len_chars();
+        let replacement_end = entry
+            .rope_char_start
+            .saturating_add(entry.replacement_char_len);
+        if replacement_end > rope_len {
+            // Rope shrank past the replacement — abandon the undo.
+            return;
+        }
+        let mut new_rope = (*eb.rope).clone();
+        if entry.replacement_char_len > 0 {
+            new_rope.remove(entry.rope_char_start..replacement_end);
+        }
+        if !original.is_empty() {
+            new_rope.insert(entry.rope_char_start, &original);
+        }
+        super::shared::bump(eb, new_rope);
+    } else {
+        // On-disk path: queue the inverse cmd — replace the
+        // replacement run with the original text, at the same
+        // (line, col) as the forward edit. Byte-offset range is
+        // [match_start .. match_start + replacement.bytes].
+        let replacement_bytes = entry.replacement_text.len();
+        let replacement_end_byte = entry.hit.match_start + replacement_bytes;
+        edits.pending_single_replace.push(
+            led_state_buffer_edits::PendingSingleReplace {
+                path: entry.path.clone(),
+                line: entry.hit.line,
+                match_start: entry.hit.match_start,
+                match_end: replacement_end_byte,
+                original: entry.replacement_text.clone(),
+                replacement: original.clone(),
+            },
+        );
     }
-    if !original.is_empty() {
-        new_rope.insert(entry.rope_char_start, &original);
-    }
-    super::shared::bump(eb, new_rope);
 
     // Reinsert the hit at its original position in flat_hits.
     let insert_at = entry.flat_hit_idx.min(state.flat_hits.len());
@@ -1220,9 +1249,11 @@ mod tests {
     }
 
     #[test]
-    fn right_arrow_on_on_disk_hit_is_noop_for_stage_1() {
-        // Hit for a file NOT in edits.buffers → no change yet.
-        // Stage 2 will route this through the driver.
+    fn right_arrow_on_on_disk_hit_queues_driver_cmd() {
+        // Hit for a file NOT in edits.buffers: dispatch
+        // optimistically removes the hit from display, pushes to
+        // replace_stack, and queues a PendingSingleReplace the
+        // runtime will ship to the driver.
         use led_state_buffer_edits::BufferEdits;
 
         let path = led_core::UserPath::new("/tmp/unloaded.rs").canonicalize();
@@ -1238,6 +1269,49 @@ mod tests {
 
         replace_selected(&mut state, &mut tabs, &mut edits);
 
+        // Display updated immediately.
+        assert_eq!(state.flat_hits.len(), 0);
+        assert_eq!(state.replace_stack.len(), 1);
+        // Driver cmd queued with the right coords.
+        assert_eq!(edits.pending_single_replace.len(), 1);
+        let cmd = &edits.pending_single_replace[0];
+        assert_eq!(cmd.path, path);
+        assert_eq!(cmd.line, 1);
+        assert_eq!(cmd.match_start, 6);
+        assert_eq!(cmd.match_end, 9);
+        assert_eq!(cmd.original, "foo");
+        assert_eq!(cmd.replacement, "BAR");
+    }
+
+    #[test]
+    fn left_arrow_undoes_on_disk_replace_by_queueing_inverse_cmd() {
+        use led_state_buffer_edits::BufferEdits;
+
+        let path = led_core::UserPath::new("/tmp/unloaded.rs").canonicalize();
+        let mut edits = BufferEdits::default();
+        let mut state = fs_state_with_hit_in(
+            &path,
+            "alpha foo beta",
+            1,
+            7,
+            (6, 9),
+        );
+        let mut tabs = Tabs::default();
+        replace_selected(&mut state, &mut tabs, &mut edits);
+        assert_eq!(edits.pending_single_replace.len(), 1);
+
+        // Undo — queues the inverse cmd (swap original/replacement,
+        // byte end moves to match_start + replacement.len()).
+        unreplace_selected(&mut state, &mut tabs, &mut edits);
+        assert_eq!(edits.pending_single_replace.len(), 2);
+        let inverse = &edits.pending_single_replace[1];
+        assert_eq!(inverse.path, path);
+        assert_eq!(inverse.line, 1);
+        assert_eq!(inverse.match_start, 6);
+        assert_eq!(inverse.match_end, 9); // 6 + "BAR".len() = 9
+        assert_eq!(inverse.original, "BAR");
+        assert_eq!(inverse.replacement, "foo");
+        // Stack popped, hit reinserted on the display side.
         assert!(state.replace_stack.is_empty());
         assert_eq!(state.flat_hits.len(), 1);
     }
