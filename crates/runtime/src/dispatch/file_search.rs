@@ -223,19 +223,32 @@ pub(super) fn run_overlay_command(
             // across all loaded buffers, anchored to the floor
             // captured when the overlay opened. Per-hit replace +
             // inverse groups carry FileSearchMark tags so
-            // hit_replacements stays consistent.
+            // hit_replacements stays consistent; the sidebar
+            // selection + scroll follow the affected hit.
             let floor = file_search
                 .as_ref()
                 .map(|s| s.overlay_open_seq)
                 .unwrap_or(0);
-            super::undo::undo_global(tabs, edits, file_search.as_mut(), floor);
+            super::undo::undo_global(
+                tabs,
+                edits,
+                file_search.as_mut(),
+                floor,
+                side_panel_rows(terminal),
+            );
         }
         Command::Redo => {
             let floor = file_search
                 .as_ref()
                 .map(|s| s.overlay_open_seq)
                 .unwrap_or(0);
-            super::undo::redo_global(tabs, edits, file_search.as_mut(), floor);
+            super::undo::redo_global(
+                tabs,
+                edits,
+                file_search.as_mut(),
+                floor,
+                side_panel_rows(terminal),
+            );
         }
         Command::ReplaceAll => {
             let state = file_search.as_mut()?;
@@ -1505,14 +1518,14 @@ mod tests {
         assert!(state.hit_replacements[idx_b].is_some());
 
         // Global undo → pops B (higher seq).
-        undo_global(&mut tabs, &mut edits, Some(&mut state), 0);
+        undo_global(&mut tabs, &mut edits, Some(&mut state), 0, 40);
         assert_eq!(edits.buffers[&b].rope.to_string(), "foo in b\n");
         assert_eq!(edits.buffers[&a].rope.to_string(), "BAR in a\n");
         assert!(state.hit_replacements[idx_a].is_some());
         assert!(state.hit_replacements[idx_b].is_none());
 
         // Again → pops A.
-        undo_global(&mut tabs, &mut edits, Some(&mut state), 0);
+        undo_global(&mut tabs, &mut edits, Some(&mut state), 0, 40);
         assert_eq!(edits.buffers[&a].rope.to_string(), "foo in a\n");
         assert!(state.hit_replacements[idx_a].is_none());
 
@@ -1520,7 +1533,7 @@ mod tests {
         // one > floor=0 initially... actually A's future now has
         // the A-replace with seq < B's. redo picks max, so B's
         // replace comes back first).
-        redo_global(&mut tabs, &mut edits, Some(&mut state), 0);
+        redo_global(&mut tabs, &mut edits, Some(&mut state), 0, 40);
         // Future's max seq is B's; but wait A was popped second
         // so A went to future LATER — higher seq on future is A.
         // Actually take_undo/push_future preserves group.seq. A
@@ -1538,6 +1551,134 @@ mod tests {
         // reapplies the last-applied forward edit that's now in
         // future" across buffers — the one with the largest seq.
         assert_eq!(edits.buffers[&b].rope.to_string(), "BAR in b\n");
+    }
+
+    #[test]
+    fn undo_global_scrolls_offscreen_affected_hit_into_view() {
+        // Set up a file with many hits, replace a mid-tree row,
+        // scroll far past it so the row is off-screen, then undo.
+        // Selection should move back to the hit and scroll_offset
+        // should drop to ~stream_row - tree_visible/3.
+        use super::super::undo::undo_global;
+        use led_state_buffer_edits::{BufferEdits, EditedBuffer};
+        use led_state_file_search::{FileSearchGroup, FileSearchHit};
+
+        let path = led_core::UserPath::new("/tmp/a.rs").canonicalize();
+        let mut edits = BufferEdits::default();
+        let sg = edits.seq_gen.clone();
+        // 10-line buffer with "foo" on each line.
+        let mut body = String::new();
+        for _ in 0..10 {
+            body.push_str("foo\n");
+        }
+        edits.buffers.insert(
+            path.clone(),
+            EditedBuffer::fresh_with_seq_gen(
+                std::sync::Arc::new(ropey::Rope::from_str(&body)),
+                sg,
+            ),
+        );
+
+        let mut state = FileSearchState::default();
+        state.query.set("foo");
+        state.replace.set("BAR");
+        state.replace_mode = true;
+        let mut hits = Vec::new();
+        for i in 0..10 {
+            hits.push(FileSearchHit {
+                path: path.clone(),
+                line: i + 1,
+                col: 1,
+                preview: "foo".into(),
+                match_start: 0,
+                match_end: 3,
+            });
+        }
+        state.results = vec![FileSearchGroup {
+            path: path.clone(),
+            relative: "a.rs".into(),
+            hits: hits.clone(),
+        }];
+        state.flat_hits = hits;
+        state.hit_replacements = vec![None; state.flat_hits.len()];
+        state.selection = FileSearchSelection::Result(2);
+
+        let mut tabs = Tabs::default();
+        // Right on hit 2 (line 3). Stream index for hit 2 = 3
+        // (1 group header + 2 hits + this one).
+        replace_selected(&mut state, &mut tabs, &mut edits);
+
+        // Scroll far past it so the row is off-screen.
+        state.scroll_offset = 8;
+
+        // body_rows = 6 → 3 input rows (header + query +
+        // replace) → 3 tree rows visible. Stream 3 < scroll=8
+        // → off-screen. Undo triggers scroll-follow.
+        undo_global(&mut tabs, &mut edits, Some(&mut state), 0, 6);
+
+        assert_eq!(state.selection, FileSearchSelection::Result(2));
+        // tree_visible = 3, third = 1 → stream 3 - 1 = 2.
+        assert_eq!(state.scroll_offset, 2);
+    }
+
+    #[test]
+    fn undo_global_leaves_scroll_alone_when_affected_hit_is_visible() {
+        // Same setup, but the hit is already in view when undo
+        // fires — scroll_offset shouldn't jump.
+        use super::super::undo::undo_global;
+        use led_state_buffer_edits::{BufferEdits, EditedBuffer};
+        use led_state_file_search::{FileSearchGroup, FileSearchHit};
+
+        let path = led_core::UserPath::new("/tmp/a.rs").canonicalize();
+        let mut edits = BufferEdits::default();
+        let sg = edits.seq_gen.clone();
+        let mut body = String::new();
+        for _ in 0..5 {
+            body.push_str("foo\n");
+        }
+        edits.buffers.insert(
+            path.clone(),
+            EditedBuffer::fresh_with_seq_gen(
+                std::sync::Arc::new(ropey::Rope::from_str(&body)),
+                sg,
+            ),
+        );
+
+        let mut state = FileSearchState::default();
+        state.query.set("foo");
+        state.replace.set("BAR");
+        state.replace_mode = true;
+        let mut hits = Vec::new();
+        for i in 0..5 {
+            hits.push(FileSearchHit {
+                path: path.clone(),
+                line: i + 1,
+                col: 1,
+                preview: "foo".into(),
+                match_start: 0,
+                match_end: 3,
+            });
+        }
+        state.results = vec![FileSearchGroup {
+            path: path.clone(),
+            relative: "a.rs".into(),
+            hits: hits.clone(),
+        }];
+        state.flat_hits = hits;
+        state.hit_replacements = vec![None; state.flat_hits.len()];
+        state.selection = FileSearchSelection::Result(1);
+
+        let mut tabs = Tabs::default();
+        replace_selected(&mut state, &mut tabs, &mut edits);
+        // Scroll_offset stays at 0 (nothing scrolled).
+        state.scroll_offset = 0;
+
+        // body_rows = 10 → plenty visible; stream idx for hit 1
+        // = 2, well within viewport.
+        undo_global(&mut tabs, &mut edits, Some(&mut state), 0, 10);
+
+        assert_eq!(state.selection, FileSearchSelection::Result(1));
+        assert_eq!(state.scroll_offset, 0);
     }
 
     #[test]
@@ -1577,7 +1718,7 @@ mod tests {
 
         let mut tabs = Tabs::default();
         let past_len_before = edits.buffers[&a].history.past_len();
-        undo_global(&mut tabs, &mut edits, None, floor);
+        undo_global(&mut tabs, &mut edits, None, floor, 40);
         assert_eq!(
             edits.buffers[&a].history.past_len(),
             past_len_before,

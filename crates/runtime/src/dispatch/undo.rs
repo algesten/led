@@ -74,6 +74,7 @@ pub(super) fn undo_global(
     edits: &mut BufferEdits,
     file_search: Option<&mut FileSearchState>,
     floor: u64,
+    body_rows: usize,
 ) {
     let Some(target_path) = pick_max_past_seq(edits, floor) else {
         return;
@@ -107,9 +108,12 @@ pub(super) fn undo_global(
         tab.cursor.preferred_col = tab.cursor.col;
     }
     // Sync the overlay's mark if the group carried one. Undo goes
-    // to the OPPOSITE of `forward_marks_replaced`.
+    // to the OPPOSITE of `forward_marks_replaced`. Also pull the
+    // sidebar selection onto that hit so the user can see which
+    // row the change landed on.
     if let (Some(mark), Some(state)) = (&group.file_search_mark, file_search) {
         apply_mark_to_state(state, mark.hit_idx, !mark.forward_marks_replaced);
+        focus_affected_hit(state, mark.hit_idx, body_rows);
     }
     eb.history.push_future(group);
 }
@@ -121,6 +125,7 @@ pub(super) fn redo_global(
     edits: &mut BufferEdits,
     file_search: Option<&mut FileSearchState>,
     floor: u64,
+    body_rows: usize,
 ) {
     let Some(target_path) = pick_max_future_seq(edits, floor) else {
         return;
@@ -153,6 +158,7 @@ pub(super) fn redo_global(
     }
     if let (Some(mark), Some(state)) = (&group.file_search_mark, file_search) {
         apply_mark_to_state(state, mark.hit_idx, mark.forward_marks_replaced);
+        focus_affected_hit(state, mark.hit_idx, body_rows);
     }
     eb.history.push_past(group);
 }
@@ -175,6 +181,54 @@ fn pick_max_future_seq(edits: &BufferEdits, floor: u64) -> Option<CanonPath> {
         .filter(|(_, s)| *s > floor)
         .max_by_key(|(_, s)| *s)
         .map(|(p, _)| p)
+}
+
+/// Move the overlay's selection onto the just-affected hit and,
+/// when that row is currently off-screen, scroll it to roughly
+/// `body_rows / 3` from the top (with context above). Leaves the
+/// scroll alone when the row is already visible — no jitter when
+/// the user's already looking at it.
+fn focus_affected_hit(
+    state: &mut FileSearchState,
+    hit_idx: usize,
+    body_rows: usize,
+) {
+    if hit_idx >= state.flat_hits.len() {
+        return;
+    }
+    state.selection = FileSearchSelection::Result(hit_idx);
+    let input_rows = 1 + 1 + state.replace_mode as usize;
+    let tree_visible = body_rows.saturating_sub(input_rows);
+    if tree_visible == 0 {
+        return;
+    }
+    let stream = tree_row_index_for_hit_ref(&state.results, hit_idx);
+    let top = state.scroll_offset;
+    let bottom = top + tree_visible.saturating_sub(1);
+    if stream < top || stream > bottom {
+        let third = tree_visible / 3;
+        state.scroll_offset = stream.saturating_sub(third);
+    }
+}
+
+/// Mirror of `file_search::tree_row_index_for_hit`. Kept local to
+/// this module to avoid a pub cycle; the implementation is the
+/// same stream-walk (group header + hits, in order).
+fn tree_row_index_for_hit_ref(
+    groups: &[led_state_file_search::FileSearchGroup],
+    flat_idx: usize,
+) -> usize {
+    let mut stream = 0usize;
+    let mut seen = 0usize;
+    for group in groups {
+        stream += 1; // group header
+        if flat_idx < seen + group.hits.len() {
+            return stream + (flat_idx - seen);
+        }
+        stream += group.hits.len();
+        seen += group.hits.len();
+    }
+    stream.saturating_sub(1)
 }
 
 /// Toggle the overlay's view of a hit to match a new "replaced?"
