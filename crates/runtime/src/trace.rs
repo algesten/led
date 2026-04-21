@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use led_core::CanonPath;
-use led_driver_terminal_core::{Dims, KeyCode, KeyEvent, KeyModifiers};
+use led_driver_terminal_core::{Dims, KeyEvent};
 use ropey::Rope;
 
 /// The runtime-level trace hook. The driver-specific `Trace` traits in
@@ -186,75 +186,3 @@ impl Trace for NoopTrace {
     fn render_tick(&self) {}
 }
 
-// ── Formatting helpers ────────────────────────────────────────────────
-
-fn format_key(ev: &KeyEvent) -> String {
-    let mut out = String::new();
-    if ev.modifiers.contains(KeyModifiers::CONTROL) {
-        out.push_str("Ctrl-");
-    }
-    if ev.modifiers.contains(KeyModifiers::ALT) {
-        out.push_str("Alt-");
-    }
-    if ev.modifiers.contains(KeyModifiers::SHIFT)
-        && !matches!(ev.code, KeyCode::Char(_) | KeyCode::BackTab)
-    {
-        // Shift is implicit for uppercase chars and BackTab; don't double it.
-        out.push_str("Shift-");
-    }
-    out.push_str(&format_code(&ev.code));
-    out
-}
-
-fn format_code(c: &KeyCode) -> String {
-    match c {
-        KeyCode::Char(ch) => ch.to_string(),
-        KeyCode::Enter => "Enter".into(),
-        KeyCode::Tab => "Tab".into(),
-        KeyCode::BackTab => "BackTab".into(),
-        KeyCode::Backspace => "Backspace".into(),
-        KeyCode::Delete => "Delete".into(),
-        KeyCode::Esc => "Esc".into(),
-        KeyCode::Left => "Left".into(),
-        KeyCode::Right => "Right".into(),
-        KeyCode::Up => "Up".into(),
-        KeyCode::Down => "Down".into(),
-        KeyCode::Home => "Home".into(),
-        KeyCode::End => "End".into(),
-        KeyCode::PageUp => "PageUp".into(),
-        KeyCode::PageDown => "PageDown".into(),
-        KeyCode::F(n) => format!("F{n}"),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn format_key_ctrl_c() {
-        let ev = KeyEvent {
-            code: KeyCode::Char('c'),
-            modifiers: KeyModifiers::CONTROL,
-        };
-        assert_eq!(format_key(&ev), "Ctrl-c");
-    }
-
-    #[test]
-    fn format_key_tab() {
-        let ev = KeyEvent {
-            code: KeyCode::Tab,
-            modifiers: KeyModifiers::NONE,
-        };
-        assert_eq!(format_key(&ev), "Tab");
-    }
-
-    #[test]
-    fn format_key_shift_backtab_no_double_shift() {
-        let ev = KeyEvent {
-            code: KeyCode::BackTab,
-            modifiers: KeyModifiers::SHIFT,
-        };
-        assert_eq!(format_key(&ev), "BackTab");
-    }
-}
