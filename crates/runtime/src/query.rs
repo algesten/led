@@ -734,14 +734,17 @@ fn completions_side_panel(
 
 /// Build a side-panel model from the file-search overlay.
 ///
-/// Layout (M14 stage 2 — minimum viable):
+/// Layout:
 /// - Row 0: toggle header " Aa   .*   =>" — the three toggles for
 ///   case-sensitive, regex, replace-mode. Later stages will style
 ///   active toggles distinctly (reverse video); for now the
 ///   characters appear regardless.
-/// - Row 1: query input row (empty here; typing lands in stage 3).
+/// - Row 1: query input row.
 /// - Row 2: replace input row — only when `replace_mode`.
-/// - Row 3+: results. Empty for stage 2.
+/// - Rows 3+: results tree — one row per file group header, then
+///   one row per hit formatted `"   <line>: <preview>"` (3-space
+///   indent matching legacy). `scroll_offset` skips that many
+///   rows of the tree (inputs stay pinned).
 ///
 /// `focused=false` because M14b chrome theming hasn't picked a
 /// focused side-panel style for this overlay yet.
@@ -749,16 +752,25 @@ fn file_search_side_panel(
     state: &led_state_file_search::FileSearchState,
     rows: u16,
 ) -> SidePanelModel {
+    let total = rows as usize;
     let mut out: Vec<SidePanelRow> = Vec::new();
-    let header_row = SidePanelRow {
+
+    if total == 0 {
+        return SidePanelModel {
+            rows: Arc::new(out),
+            focused: false,
+            mode: led_driver_terminal_core::SidePanelMode::Completions,
+        };
+    }
+
+    out.push(SidePanelRow {
         depth: 0,
         chevron: None,
         name: Arc::<str>::from(" Aa   .*   =>"),
         selected: false,
-    };
-    out.push(header_row);
+    });
 
-    if rows as usize > 1 {
+    if total > out.len() {
         out.push(SidePanelRow {
             depth: 0,
             chevron: None,
@@ -769,7 +781,7 @@ fn file_search_side_panel(
             ),
         });
     }
-    if state.replace_mode && rows as usize > 2 {
+    if state.replace_mode && total > out.len() {
         out.push(SidePanelRow {
             depth: 0,
             chevron: None,
@@ -779,6 +791,53 @@ fn file_search_side_panel(
                 led_state_file_search::FileSearchSelection::ReplaceInput
             ),
         });
+    }
+
+    // Selected flat-hit index (if the cursor is on a result row).
+    // Used to flag the matching hit row as `selected` below.
+    let selected_hit_idx = match state.selection {
+        led_state_file_search::FileSearchSelection::Result(i) => Some(i),
+        _ => None,
+    };
+
+    // Flatten results: one row per group header + one row per hit,
+    // in order. The `hit_idx` bookkeeping mirrors `flat_hits` — the
+    // i-th hit encountered here has flat index `i`.
+    let scroll = state.scroll_offset;
+    let mut skipped = 0usize;
+    let mut hit_idx: usize = 0;
+    'outer: for group in state.results.iter() {
+        // Group header row.
+        if skipped < scroll {
+            skipped += 1;
+        } else {
+            if total <= out.len() {
+                break 'outer;
+            }
+            out.push(SidePanelRow {
+                depth: 0,
+                chevron: None,
+                name: Arc::<str>::from(group.relative.as_str()),
+                selected: false,
+            });
+        }
+        for hit in &group.hits {
+            if skipped < scroll {
+                skipped += 1;
+            } else {
+                if total <= out.len() {
+                    break 'outer;
+                }
+                let name = format!("   {}: {}", hit.line, hit.preview);
+                out.push(SidePanelRow {
+                    depth: 0,
+                    chevron: None,
+                    name: Arc::<str>::from(name.as_str()),
+                    selected: selected_hit_idx == Some(hit_idx),
+                });
+            }
+            hit_idx += 1;
+        }
     }
 
     SidePanelModel {
