@@ -1,0 +1,8 @@
+git_init = true
+
+# One opened file with two matches for the query. The user will
+# arrow into the first hit and Right-arrow twice to replace each
+# match individually.
+[[file]]
+path = "a.txt"
+contents = "foo one\nfoo two\nbaz\n"

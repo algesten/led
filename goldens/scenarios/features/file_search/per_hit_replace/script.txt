@@ -1,0 +1,15 @@
+# Per-hit replace flow: open overlay, type query, enable replace
+# mode, tab to replace input, type replacement, arrow into the
+# results tree, Right-arrow through each hit. Two Right presses
+# consume both matches; the buffer picks up both replacements
+# in-memory (dirty flag on the tab).
+wait 500ms
+press Ctrl-f
+type foo
+wait 300ms
+press Alt-3
+press Tab
+type BAR
+press Down
+press Right
+press Right

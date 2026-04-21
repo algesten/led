@@ -1,0 +1,12 @@
+# Right-arrow-then-Left-arrow round-trips: replace a hit, then
+# undo. The final buffer should be identical to the input.
+wait 500ms
+press Ctrl-f
+type foo
+wait 300ms
+press Alt-3
+press Tab
+type BAR
+press Down
+press Right
+press Left

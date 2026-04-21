@@ -153,3 +153,23 @@ fn theming_ruler_column() {
 fn theming_toggle_header_preserved() {
     run_scenario(&scenario_dir("features/theming/toggle_header_preserved"));
 }
+
+// === file_search (per-hit replace) ===
+
+#[test]
+fn file_search_per_hit_replace() {
+    run_scenario(&scenario_dir("features/file_search/per_hit_replace"));
+}
+
+#[test]
+fn file_search_per_hit_replace_undo() {
+    run_scenario(&scenario_dir("features/file_search/per_hit_replace_undo"));
+}
+
+// A dedicated on-disk scenario would be nice but hard to drive
+// reliably: arrowing into a hit previews the file (loading it as a
+// buffer), so by the time Right-arrow fires it's usually already in
+// `edits.buffers` and the loaded-buffer path wins. The on-disk
+// single-replace driver + dispatch queueing are covered directly
+// by the unit tests in `driver-file-search/native` and
+// `runtime::dispatch::file_search`.
