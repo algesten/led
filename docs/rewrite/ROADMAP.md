@@ -549,6 +549,29 @@ the work into a nebulous "later" bucket.
 milestone docs. The per-milestone `Out` lists are a distributed index;
 this file is the authoritative schedule.
 
+## Continuous-discipline items (not milestones)
+
+These ride along whenever the relevant surface is under the
+keyboard; they don't get their own milestone.
+
+- **Idle-tick allocation audit.** Before each new milestone that
+  touches a hot path (render, dispatch, query memos), re-check the
+  `Vec::new()` / `String::new()` sites and confirm they stay
+  allocation-free on cache hits. Post-course-correct #7 the known
+  sinks are gone; stay vigilant.
+- **Dispatch → driver plumbing tests.** As new dispatch → execute
+  paths land (save, list, clipboard, paint, LSP), add a capture-
+  driver helper + assertions that `execute()` was called with the
+  expected shape. Course-correct #9 left this as a per-milestone
+  discipline.
+- **Trace-emission verification.** Every new trace site (per
+  feature) earns at least one test that asserts the emission
+  fires. Catches silent misfires before a golden diff two weeks
+  later exposes them.
+- **`led-testutil` extraction.** When the third consumer of
+  `dispatch/testutil.rs` shows up (first will be fs-list driver
+  integration tests), extract to a workspace crate.
+
 ## Things deliberately not scheduled
 
 - **`led_macros` / Lua scripting.** Legacy doesn't have it; no need

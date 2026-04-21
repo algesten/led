@@ -187,16 +187,14 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
         // alert is live.
         alerts.expire_info(Instant::now());
 
-        // Seed BufferEdits from newly-Ready loads. `process` returns
-        // an empty Vec on idle ticks (no heap alloc); `or_insert_with`
-        // avoids clobbering a buffer the user has already edited if
-        // a later reload round-trips through here.
+        // Seed BufferEdits from newly-Ready loads. `seed_edit_from_load`
+        // enforces the discipline that an existing edit entry wins
+        // over a late-arriving load completion (course-correct #6).
+        // `process` returns an empty Vec on idle ticks — no heap
+        // alloc on the happy path.
         let completions = drivers.file.process(store);
         for completion in completions {
-            edits
-                .buffers
-                .entry(completion.path)
-                .or_insert_with(|| EditedBuffer::fresh(completion.rope));
+            seed_edit_from_load(edits, completion.path, completion.rope);
         }
 
         // Apply write completions: round-trip the saved rope into
@@ -381,15 +379,62 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
         // input notifies on every key; we wake instantly on either
         // and sleep the rest of the time.
         while wake.rx.try_recv().is_ok() {}
-        let timeout = alerts
-            .info_expires_at
-            .and_then(|deadline| deadline.checked_duration_since(Instant::now()))
+        let timeout = nearest_deadline(alerts)
+            .and_then(|d| d.checked_duration_since(Instant::now()))
             .unwrap_or(Duration::from_secs(60));
         use std::sync::mpsc::RecvTimeoutError;
         match wake.rx.recv_timeout(timeout) {
             Ok(()) | Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => break Ok(()),
         }
+    }
+}
+
+/// Min-fold over every currently-registered wake deadline.
+///
+/// Course-correct #8: isolates the "when should the main loop next
+/// wake up?" decision from `alerts.info_expires_at` so future
+/// timer sources (diagnostics debouncing M12, command-palette
+/// animation M13, LSP completion timeouts M18, file-watch debounce
+/// M26) plug in without touching the main-loop shape.
+///
+/// Takes individual `&` refs (not `&Atoms`) so call sites inside
+/// `run()` can use it alongside the disjoint-field `&mut` borrows
+/// that dispatch needs. Not a drv memo — the inputs change every
+/// tick and the fold is trivially cheap; caching would churn.
+pub fn nearest_deadline(alerts: &AlertState) -> Option<Instant> {
+    let mut soonest: Option<Instant> = None;
+    let consider = |soonest: &mut Option<Instant>, candidate: Option<Instant>| {
+        if let Some(t) = candidate {
+            *soonest = match *soonest {
+                Some(cur) if cur < t => Some(cur),
+                _ => Some(t),
+            };
+        }
+    };
+    consider(&mut soonest, alerts.info_expires_at);
+    // Future timer sources: add `consider(...)` lines here.
+    soonest
+}
+
+/// Seed the edit-buffer map from a newly-Ready FS read. The
+/// discipline (course-correct #6): an existing entry in `edits`
+/// represents the user's edited view of that buffer and is
+/// authoritative — a late load completion for the same path is
+/// discarded. Returns `true` when a new entry was inserted,
+/// `false` when the existing entry absorbed the discard.
+fn seed_edit_from_load(
+    edits: &mut BufferEdits,
+    path: led_core::CanonPath,
+    rope: Arc<ropey::Rope>,
+) -> bool {
+    use imbl::hashmap::Entry;
+    match edits.buffers.entry(path) {
+        Entry::Vacant(v) => {
+            v.insert(EditedBuffer::fresh(rope));
+            true
+        }
+        Entry::Occupied(_) => false,
     }
 }
 
@@ -521,5 +566,54 @@ impl SharedTrace {
     }
     pub(crate) fn as_fs_list_trace(&self) -> Arc<dyn led_driver_fs_list_core::Trace> {
         Arc::new(trace_adapter::FsListTraceAdapter(self.inner()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Ingest-level invariants (course-correct #6).
+
+    use super::*;
+    use led_core::UserPath;
+    use ropey::Rope;
+
+    fn canon(s: &str) -> led_core::CanonPath {
+        UserPath::new(s).canonicalize()
+    }
+
+    #[test]
+    fn seed_edit_from_load_inserts_when_absent() {
+        let mut edits = BufferEdits::default();
+        let path = canon("a.rs");
+        let rope = Arc::new(Rope::from_str("disk\n"));
+        let inserted = seed_edit_from_load(&mut edits, path.clone(), rope);
+        assert!(inserted);
+        assert_eq!(edits.buffers[&path].rope.to_string(), "disk\n");
+    }
+
+    #[test]
+    fn seed_edit_from_load_discards_late_completion_on_edited_buffer() {
+        // Simulates the race: the user opened a file, edited it,
+        // and a *second* read completion for the same path arrives.
+        // The edit view must win — we must NOT clobber it with the
+        // stale disk rope.
+        let mut edits = BufferEdits::default();
+        let path = canon("a.rs");
+        let edited = Arc::new(Rope::from_str("edited\n"));
+        edits
+            .buffers
+            .insert(path.clone(), EditedBuffer::fresh(edited.clone()));
+        // Mutate so the entry is visibly "the user's view".
+        edits
+            .buffers
+            .get_mut(&path)
+            .unwrap()
+            .rope = Arc::new(Rope::from_str("user typed more"));
+
+        let stale_disk = Arc::new(Rope::from_str("old disk\n"));
+        let inserted = seed_edit_from_load(&mut edits, path.clone(), stale_disk);
+        assert!(!inserted);
+        // User's rope preserved.
+        assert_eq!(edits.buffers[&path].rope.to_string(), "user typed more");
     }
 }
