@@ -896,6 +896,36 @@ mod tests {
     }
 
     #[test]
+    fn arrow_after_tab_descent_stays_in_new_directory() {
+        // Regression: after typing "do" + Tab (descends into "docs/")
+        // + Tab (shows side panel) + Down, the selected entry should
+        // appear UNDER docs/, not under the pre-descent parent.
+        // Previously `base_input` wasn't refreshed by Tab-descent,
+        // so arrow-nav formed `dir_prefix("/x/do") + name` = `/x/name`
+        // instead of `/x/docs/name`.
+        let mut ff = overlay("/x/do", 5);
+        {
+            let s = ff.as_mut().unwrap();
+            s.completions = vec![entry("docs", true)];
+        }
+        let mut tabs = Tabs::default();
+        // Tab: single-dir match → descend.
+        run_overlay_command(Command::FindFileTabComplete, &mut ff, &mut tabs, &mut led_state_buffer_edits::BufferEdits::default());
+        assert_eq!(ff.as_ref().unwrap().input, "/x/docs/");
+
+        // Simulate a fresh listing for /x/docs/ landing: runtime would
+        // install completions there. Reproduce the state by hand.
+        {
+            let s = ff.as_mut().unwrap();
+            s.completions = vec![entry("driver", true), entry("runtime", true)];
+        }
+        // Down: select "driver/".
+        run_overlay_command(Command::CursorDown, &mut ff, &mut tabs, &mut led_state_buffer_edits::BufferEdits::default());
+        // Before the fix: "/x/driver/". After: "/x/docs/driver/".
+        assert_eq!(ff.as_ref().unwrap().input, "/x/docs/driver/");
+    }
+
+    #[test]
     fn lcp_case_insensitive_returns_prefix_from_first_input() {
         let names = ["Main.rs", "mailbox.rs", "MAKE.rs"];
         let p = longest_common_prefix_ci(&names);

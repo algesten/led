@@ -152,7 +152,17 @@ impl FindFileState {
     ///   "no parent" branch of `expected_dir`.
     ///
     /// `show_hidden` flips on when the leaf prefix starts with `.`.
+    ///
+    /// Also re-baselines `base_input` to the current input. `base_input`
+    /// is the query prefix arrow-nav forms each rewritten input from
+    /// via `dir_prefix(base_input) + entry.name`; it must track any
+    /// input change that represents a new query — edits, Tab-descent,
+    /// LCP extension — so post-descent arrow-nav lists the new
+    /// directory, not the pre-descent one. Matches legacy's
+    /// `request_completions` (where `base_input = input.clone()`
+    /// fires on every input change).
     pub fn queue_request(&mut self) {
+        self.base_input = self.input.clone();
         let (dir_part, prefix) = split_input(&self.input);
         // When no dir segment is present, the listing target is `/` —
         // matches legacy's `expected_dir` fallback for empty /
