@@ -364,9 +364,15 @@ fn run_command(
 
     // File-search overlay intercept (M14). Typing / toggles /
     // Abort are fully consumed; other commands fall through.
-    if let Some(outcome) =
-        file_search::run_overlay_command(cmd, file_search, browser, tabs, edits, terminal)
-    {
+    if let Some(outcome) = file_search::run_overlay_command(
+        cmd,
+        file_search,
+        browser,
+        tabs,
+        edits,
+        terminal,
+        fs.root.as_ref(),
+    ) {
         return outcome;
     }
 

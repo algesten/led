@@ -89,6 +89,42 @@ pub struct BufferEdits {
     /// `SaveAction::SaveAs`, and sync-clears it before dispatching
     /// to the driver.
     pub pending_save_as: HashMap<CanonPath, CanonPath>,
+    /// Queued project-wide replace-all requests. Dispatch pushes
+    /// one when the user hits Alt+Enter in the file-search overlay;
+    /// the runtime drains + ships to `driver-file-search`. Lives
+    /// here (not on `FileSearchState`) so the overlay can close
+    /// before the driver finishes — the pending cmd survives
+    /// deactivation.
+    pub pending_replace_all: Vec<PendingReplaceAll>,
+    /// In-memory replacement counts staged by dispatch for the most
+    /// recent replace, indexed by path. The runtime aggregates
+    /// these with the driver's on-disk count to build the "Replaced
+    /// N occurrences in M files" alert.
+    pub pending_replace_in_memory: Vec<InMemoryReplace>,
+}
+
+/// A pending on-disk replace-all request. Carries only the data
+/// driver-file-search needs; the runtime materialises a
+/// `FileSearchReplaceCmd` from it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingReplaceAll {
+    pub root: CanonPath,
+    pub query: String,
+    pub replacement: String,
+    pub case_sensitive: bool,
+    pub use_regex: bool,
+    /// Paths the runtime is already replacing in-memory — driver
+    /// must skip these so it doesn't clobber unsaved changes.
+    pub skip_paths: Vec<CanonPath>,
+}
+
+/// One in-memory replacement already applied by dispatch (to a
+/// loaded buffer's rope). The runtime tallies these up with the
+/// driver's reply to report the total count.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InMemoryReplace {
+    pub path: CanonPath,
+    pub count: usize,
 }
 
 #[cfg(test)]

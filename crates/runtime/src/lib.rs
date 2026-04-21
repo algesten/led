@@ -335,6 +335,30 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
             fs_state.scroll_offset = 0;
         }
 
+        // Apply replace-all completions. Combine the driver's
+        // on-disk counts with the dispatch-side in-memory counts
+        // (staged in `edits.pending_replace_in_memory`) to produce
+        // a single "Replaced N occurrences in M files" alert.
+        for done in drivers.file_search.process_replace() {
+            let memory = std::mem::take(&mut edits.pending_replace_in_memory);
+            let memory_files = memory.len();
+            let memory_total: usize = memory.iter().map(|m| m.count).sum();
+            let total_files = done.files_changed + memory_files;
+            let total = done.total_replacements + memory_total;
+            let msg = if total == 0 {
+                format!("No occurrences of `{}`.", done.query)
+            } else {
+                format!(
+                    "Replaced {} occurrence{} in {} file{}.",
+                    total,
+                    if total == 1 { "" } else { "s" },
+                    total_files,
+                    if total_files == 1 { "" } else { "s" },
+                )
+            };
+            alerts.set_info(msg, Instant::now(), INFO_TTL);
+        }
+
         // Apply clipboard completions: either paste the text at the
         // tab the yank was issued from, or on empty/error fall back
         // to the kill ring. Writes only clear the in-flight bit.
@@ -469,6 +493,26 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
             } else {
                 fs_state.pending_search.clear();
             }
+        }
+
+        // Replace-all: drain the dispatch-queued on-disk requests,
+        // ship to the driver. Survives overlay deactivation because
+        // the queue lives on `BufferEdits`. Each cmd becomes one
+        // `FileSearchReplace` trace line.
+        if !edits.pending_replace_all.is_empty() {
+            let cmds: Vec<led_driver_file_search_core::FileSearchReplaceCmd> = edits
+                .pending_replace_all
+                .drain(..)
+                .map(|p| led_driver_file_search_core::FileSearchReplaceCmd {
+                    root: p.root,
+                    query: p.query,
+                    replacement: p.replacement,
+                    case_sensitive: p.case_sensitive,
+                    use_regex: p.use_regex,
+                    skip_paths: p.skip_paths,
+                })
+                .collect();
+            drivers.file_search.execute_replace(cmds.iter());
         }
 
         // Sync-clear pending_saves + pending_save_as for the paths

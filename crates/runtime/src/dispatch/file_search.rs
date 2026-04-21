@@ -99,6 +99,7 @@ pub(super) fn run_overlay_command(
     tabs: &mut Tabs,
     edits: &mut BufferEdits,
     terminal: &led_driver_terminal_core::Terminal,
+    fs_root: Option<&led_core::CanonPath>,
 ) -> Option<DispatchOutcome> {
     file_search.as_ref()?;
     match cmd {
@@ -183,7 +184,7 @@ pub(super) fn run_overlay_command(
         Command::ReplaceAll => {
             let state = file_search.as_mut()?;
             if state.replace_mode {
-                apply_replace_all(state, edits);
+                apply_replace_all(state, edits, fs_root);
                 deactivate(file_search, browser, tabs);
             }
         }
@@ -376,18 +377,32 @@ fn side_panel_rows(
         .unwrap_or(0)
 }
 
-/// `Alt+Enter` — apply the replace across every hit's buffer. Only
-/// fires when `replace_mode` is on (the caller gates this). For
-/// each file with hits that's currently loaded in `edits.buffers`,
-/// we rebuild the rope via `regex.replace_all` over the existing
-/// text and bump its version so `dirty()` goes true. On-disk replace
-/// for files that aren't open yet is a later follow-up — the
-/// typical flow opens buffers via arrow-scan first.
+/// `Alt+Enter` — project-wide replace-all.
+///
+/// Two paths, applied together:
+///
+/// 1. **In-memory.** For every currently-loaded buffer
+///    (`edits.buffers`), run `regex.replace_all` against its rope.
+///    Changed buffers get a fresh version via `shared::bump` so
+///    `dirty()` flips — the session view becomes the source of
+///    truth until the user saves. Per-file replacement counts are
+///    stashed in `edits.pending_replace_in_memory` for the alert.
+///
+/// 2. **On-disk.** Dispatch pushes a `PendingReplaceAll` onto
+///    `edits.pending_replace_all` with the set of loaded paths as
+///    `skip_paths`. The main loop drains that queue and ships a
+///    `FileSearchReplaceCmd` to `driver-file-search`, which walks
+///    the workspace independently and rewrites the remaining files.
+///
+/// `fs_root` is the workspace root (dispatch's caller reads it off
+/// `FsTree`). Missing root → the driver walk is skipped, in-memory
+/// pass still runs.
 fn apply_replace_all(
     state: &led_state_file_search::FileSearchState,
     edits: &mut led_state_buffer_edits::BufferEdits,
+    fs_root: Option<&led_core::CanonPath>,
 ) {
-    if state.results.is_empty() || state.query.text.is_empty() {
+    if state.query.text.is_empty() {
         return;
     }
     let pattern = if state.use_regex {
@@ -403,15 +418,59 @@ fn apply_replace_all(
         Err(_) => return,
     };
     let replacement = state.replace.text.as_str();
-    for group in &state.results {
-        let Some(eb) = edits.buffers.get_mut(&group.path) else {
+
+    // In-memory pass: every loaded buffer that has at least one
+    // match gets rewritten. Not limited to `state.results` —
+    // changes the user has typed since the last search still count.
+    let mut skip_paths: Vec<led_core::CanonPath> =
+        Vec::with_capacity(edits.buffers.len());
+    let mut loaded_paths: Vec<led_core::CanonPath> =
+        edits.buffers.keys().cloned().collect();
+    // Deterministic order makes tests + trace diffs stable.
+    loaded_paths.sort_by(|a, b| a.as_path().cmp(b.as_path()));
+    for path in loaded_paths {
+        let Some(eb) = edits.buffers.get_mut(&path) else {
             continue;
         };
         let existing = eb.rope.to_string();
+        let count = re.find_iter(&existing).count();
+        if count == 0 {
+            continue;
+        }
         let replaced = re.replace_all(&existing, replacement);
         if replaced.as_ref() != existing {
             super::shared::bump(eb, ropey::Rope::from_str(replaced.as_ref()));
+            edits
+                .pending_replace_in_memory
+                .push(led_state_buffer_edits::InMemoryReplace {
+                    path: path.clone(),
+                    count,
+                });
         }
+        skip_paths.push(path);
+    }
+
+    // Skip_paths also needs the full loaded set (even buffers
+    // with zero matches) so the driver can't race and clobber a
+    // loaded-but-unmatched file with an on-disk rewrite that
+    // happens to succeed via regex differences we missed.
+    for path in edits.buffers.keys() {
+        if !skip_paths.contains(path) {
+            skip_paths.push(path.clone());
+        }
+    }
+
+    if let Some(root) = fs_root {
+        edits.pending_replace_all.push(
+            led_state_buffer_edits::PendingReplaceAll {
+                root: root.clone(),
+                query: state.query.text.clone(),
+                replacement: replacement.to_string(),
+                case_sensitive: state.case_sensitive,
+                use_regex: state.use_regex,
+                skip_paths,
+            },
+        );
     }
 }
 
@@ -715,5 +774,112 @@ mod tests {
         assert_eq!(tabs.open[0].cursor.line, 2);
         // Preview parks the cursor at col 0, not the match col.
         assert_eq!(tabs.open[0].cursor.col, 0);
+    }
+
+    #[test]
+    fn apply_replace_all_splits_loaded_and_ondisk_paths() {
+        // Two loaded buffers — one matching the query, one not —
+        // plus a workspace root present. After apply_replace_all:
+        //  - matched loaded buffer's rope is rewritten + version
+        //    bumped + InMemoryReplace staged with count=2.
+        //  - unmatched loaded buffer has no replacement row.
+        //  - BOTH loaded paths land in pending_replace_all.skip_paths
+        //    so the driver walk won't overwrite them.
+        //  - pending_replace_all has one entry with the query +
+        //    replacement + the workspace root.
+        use led_core::UserPath;
+        use led_state_buffer_edits::{BufferEdits, EditedBuffer};
+        use led_state_file_search::{FileSearchGroup, FileSearchHit};
+
+        let root = UserPath::new(".").canonicalize();
+        let path_match = UserPath::new("./a.rs").canonicalize();
+        let path_other = UserPath::new("./b.rs").canonicalize();
+
+        let mut edits = BufferEdits::default();
+        edits.buffers.insert(
+            path_match.clone(),
+            EditedBuffer::fresh(std::sync::Arc::new(ropey::Rope::from_str(
+                "foo here\nand foo\n",
+            ))),
+        );
+        edits.buffers.insert(
+            path_other.clone(),
+            EditedBuffer::fresh(std::sync::Arc::new(ropey::Rope::from_str(
+                "no match\n",
+            ))),
+        );
+
+        // Query/toggles that will match "foo" literally. results
+        // list is deliberately incomplete — apply_replace_all must
+        // not rely on it.
+        let hit = FileSearchHit {
+            path: path_match.clone(),
+            line: 1,
+            col: 1,
+            preview: "foo here".into(),
+            match_start: 0,
+            match_end: 3,
+        };
+        let mut state = FileSearchState::default();
+        state.query.set("foo");
+        state.replace.set("BAR");
+        state.replace_mode = true;
+        state.results = vec![FileSearchGroup {
+            path: path_match.clone(),
+            relative: "a.rs".into(),
+            hits: vec![hit.clone()],
+        }];
+        state.flat_hits = vec![hit];
+
+        apply_replace_all(&state, &mut edits, Some(&root));
+
+        // In-memory: matched buffer got rewritten, stage counted 2.
+        assert_eq!(
+            edits.buffers[&path_match].rope.to_string(),
+            "BAR here\nand BAR\n",
+        );
+        assert_eq!(edits.buffers[&path_other].rope.to_string(), "no match\n");
+        assert_eq!(edits.pending_replace_in_memory.len(), 1);
+        assert_eq!(edits.pending_replace_in_memory[0].path, path_match);
+        assert_eq!(edits.pending_replace_in_memory[0].count, 2);
+
+        // On-disk: one queued cmd with both loaded paths in skip.
+        assert_eq!(edits.pending_replace_all.len(), 1);
+        let cmd = &edits.pending_replace_all[0];
+        assert_eq!(cmd.root, root);
+        assert_eq!(cmd.query, "foo");
+        assert_eq!(cmd.replacement, "BAR");
+        assert!(!cmd.case_sensitive);
+        assert!(!cmd.use_regex);
+        assert!(cmd.skip_paths.contains(&path_match));
+        assert!(cmd.skip_paths.contains(&path_other));
+    }
+
+    #[test]
+    fn apply_replace_all_with_no_workspace_still_rewrites_loaded_buffers() {
+        // No fs.root → no on-disk cmd queued, but the in-memory
+        // pass should still run so the user's loaded buffers pick
+        // up the change.
+        use led_state_buffer_edits::{BufferEdits, EditedBuffer};
+
+        let path = led_core::UserPath::new("/tmp/a.rs").canonicalize();
+        let mut edits = BufferEdits::default();
+        edits.buffers.insert(
+            path.clone(),
+            EditedBuffer::fresh(std::sync::Arc::new(ropey::Rope::from_str(
+                "alpha foo\n",
+            ))),
+        );
+
+        let mut state = FileSearchState::default();
+        state.query.set("foo");
+        state.replace.set("BAR");
+        state.replace_mode = true;
+
+        apply_replace_all(&state, &mut edits, None);
+
+        assert_eq!(edits.buffers[&path].rope.to_string(), "alpha BAR\n");
+        assert_eq!(edits.pending_replace_in_memory.len(), 1);
+        assert!(edits.pending_replace_all.is_empty());
     }
 }
