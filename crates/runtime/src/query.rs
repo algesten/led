@@ -252,14 +252,20 @@ impl<'a> FindFileInput<'a> {
 pub struct OverlaysInput<'a> {
     pub find_file: &'a Option<led_state_find_file::FindFileState>,
     pub isearch: &'a Option<led_state_isearch::IsearchState>,
+    pub file_search: &'a Option<led_state_file_search::FileSearchState>,
 }
 
 impl<'a> OverlaysInput<'a> {
     pub fn new(
         find_file: &'a Option<led_state_find_file::FindFileState>,
         isearch: &'a Option<led_state_isearch::IsearchState>,
+        file_search: &'a Option<led_state_file_search::FileSearchState>,
     ) -> Self {
-        Self { find_file, isearch }
+        Self {
+            find_file,
+            isearch,
+            file_search,
+        }
     }
 }
 
@@ -653,18 +659,22 @@ fn position_string(tabs: TabsActiveInput<'_>, _edits: EditedBuffersInput<'_>) ->
 /// of `browser.entries` and produces one `SidePanelRow` per row.
 /// Empty when the browser has no entries.
 ///
-/// When the find-file overlay is active and has `show_side=true`,
-/// the panel displays completions instead — same visual slot,
-/// different source. The overlay's `selected` drives which row is
-/// highlighted; completions never nest, so `depth = 0` and
-/// `chevron = None` across the board.
+/// Overlay priority (highest first):
+/// - File-search active → render its header (toggle row + query
+///   input + optional replace input + results tree).
+/// - Find-file overlay active with `show_side=true` → render the
+///   completions list.
+/// - Otherwise → render the file-browser tree.
 #[drv::memo(single)]
-pub fn side_panel_model<'b, 'f>(
+pub fn side_panel_model<'b, 'o>(
     browser: BrowserUiInput<'b>,
-    find_file: FindFileInput<'f>,
+    overlays: OverlaysInput<'o>,
     rows: u16,
 ) -> SidePanelModel {
-    if let Some(state) = find_file.overlay.as_ref()
+    if let Some(state) = overlays.file_search.as_ref() {
+        return file_search_side_panel(state, rows);
+    }
+    if let Some(state) = overlays.find_file.as_ref()
         && state.show_side
     {
         return completions_side_panel(state, rows);
@@ -715,6 +725,62 @@ fn completions_side_panel(
             selected: state.selected == Some(i),
         });
     }
+    SidePanelModel {
+        rows: Arc::new(out),
+        focused: false,
+        mode: led_driver_terminal_core::SidePanelMode::Completions,
+    }
+}
+
+/// Build a side-panel model from the file-search overlay.
+///
+/// Layout (M14 stage 2 — minimum viable):
+/// - Row 0: toggle header " Aa   .*   =>" — the three toggles for
+///   case-sensitive, regex, replace-mode. Later stages will style
+///   active toggles distinctly (reverse video); for now the
+///   characters appear regardless.
+/// - Row 1: query input row (empty here; typing lands in stage 3).
+/// - Row 2: replace input row — only when `replace_mode`.
+/// - Row 3+: results. Empty for stage 2.
+///
+/// `focused=false` because M14b chrome theming hasn't picked a
+/// focused side-panel style for this overlay yet.
+fn file_search_side_panel(
+    state: &led_state_file_search::FileSearchState,
+    rows: u16,
+) -> SidePanelModel {
+    let mut out: Vec<SidePanelRow> = Vec::new();
+    let header_row = SidePanelRow {
+        depth: 0,
+        chevron: None,
+        name: Arc::<str>::from(" Aa   .*   =>"),
+        selected: false,
+    };
+    out.push(header_row);
+
+    if rows as usize > 1 {
+        out.push(SidePanelRow {
+            depth: 0,
+            chevron: None,
+            name: Arc::<str>::from(state.query.text.as_str()),
+            selected: matches!(
+                state.selection,
+                led_state_file_search::FileSearchSelection::SearchInput
+            ),
+        });
+    }
+    if state.replace_mode && rows as usize > 2 {
+        out.push(SidePanelRow {
+            depth: 0,
+            chevron: None,
+            name: Arc::<str>::from(state.replace.text.as_str()),
+            selected: matches!(
+                state.selection,
+                led_state_file_search::FileSearchSelection::ReplaceInput
+            ),
+        });
+    }
+
     SidePanelModel {
         rows: Arc::new(out),
         focused: false,
@@ -854,10 +920,9 @@ fn render_frame_memo<'t, 'e, 'b, 'a, 'al, 'br, 'ov>(
     let tab_bar = tab_bar_model(tabs, edits);
     let body = body_model(edits, store, tabs, layout.editor_area);
     let status_bar = status_bar_model(alerts, tabs, edits, overlays);
-    let find_file_only = FindFileInput::new(overlays.find_file);
     let side_panel = layout
         .side_area
-        .map(|area| side_panel_model(browser, find_file_only, area.rows));
+        .map(|area| side_panel_model(browser, overlays, area.rows));
     // Cursor placement, in priority order:
     //
     // 1. Find-file overlay active → status-bar row, column = prompt
@@ -1014,7 +1079,7 @@ mod tests {
             tabs: TabsActiveInput::new(t),
             alerts: AlertsInput::new(&alerts),
             browser: BrowserUiInput::new(&browser),
-            overlays: OverlaysInput::new(&ff, &is),
+            overlays: OverlaysInput::new(&ff, &is, &None),
         })
     }
 
@@ -1067,7 +1132,7 @@ mod tests {
             tabs: TabsActiveInput::new(&t),
             alerts: AlertsInput::new(&alerts),
             browser: BrowserUiInput::new(&browser),
-            overlays: OverlaysInput::new(&ff, &is),
+            overlays: OverlaysInput::new(&ff, &is, &None),
         })
         .expect("dims set");
 
@@ -1102,7 +1167,7 @@ mod tests {
             tabs: TabsActiveInput::new(&t),
             alerts: AlertsInput::new(&alerts),
             browser: BrowserUiInput::new(&browser),
-            overlays: OverlaysInput::new(&ff, &is),
+            overlays: OverlaysInput::new(&ff, &is, &None),
         })
         .expect("dims set");
         assert_eq!(frame.cursor, None);
@@ -1464,7 +1529,7 @@ mod tests {
             AlertsInput::new(a),
             TabsActiveInput::new(t),
             EditedBuffersInput::new(e),
-            OverlaysInput::new(&ff, &is),
+            OverlaysInput::new(&ff, &is, &None),
         )
     }
 

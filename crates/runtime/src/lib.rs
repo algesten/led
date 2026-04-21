@@ -386,7 +386,7 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
             tabs: TabsActiveInput::new(tabs),
             alerts: AlertsInput::new(alerts),
             browser: BrowserUiInput::new(browser),
-            overlays: query::OverlaysInput::new(find_file, isearch),
+            overlays: query::OverlaysInput::new(find_file, isearch, file_search),
         });
 
         // ── Execute ─────────────────────────────────────────────
