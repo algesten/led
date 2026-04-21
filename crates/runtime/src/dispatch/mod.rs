@@ -317,20 +317,22 @@ fn run_command(
     terminal: &Terminal,
     find_file: &mut Option<FindFileState>,
 ) -> DispatchOutcome {
+    // Find-file overlay intercept. When active, the overlay owns
+    // input editing + its own command set; most commands route into
+    // `state.input` instead of the buffer. `Quit` passes through
+    // so `ctrl+x ctrl+c` still exits.
+    if let Some(outcome) = find_file::run_overlay_command(cmd, find_file) {
+        return outcome;
+    }
+
     let browser_focused = browser.focus == Focus::Side;
     match cmd {
         Command::Quit => DispatchOutcome::Quit,
         Command::Abort => {
             // Clear any set mark as part of the abort gesture.
-            // When the find-file overlay is active, Abort closes it
-            // instead of affecting the buffer below. Future modals
-            // (M13 isearch, M17 completion, M18 LSP overlays) will
-            // intercept their own Aborts in the same pattern.
-            if find_file.is_some() {
-                find_file::deactivate(find_file);
-            } else {
-                clear_mark(tabs);
-            }
+            // M13 / M17 / M18 will short-circuit the dispatch stream
+            // before this point when their modals are active.
+            clear_mark(tabs);
             DispatchOutcome::Continue
         }
         Command::Save => {
