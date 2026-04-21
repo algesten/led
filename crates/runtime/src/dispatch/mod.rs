@@ -43,6 +43,7 @@ mod testutil;
 // Public surface — kept tight so the runtime only reaches in for
 // the five externally-relevant names.
 pub use kill::apply_yank;
+pub use shared::open_or_focus_tab;
 
 // Aliases used by `run_command`.
 use browser::{

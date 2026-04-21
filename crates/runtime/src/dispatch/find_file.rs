@@ -252,6 +252,7 @@ fn move_selection(find_file: &mut Option<FindFileState>, tabs: &mut Tabs, delta:
     };
     state.selected = Some(next);
     state.show_side = true;
+    state.arrow_follow = true;
 
     // Rewrite input to dir_prefix(base_input) + selected.name so the
     // status bar reflects the arrow-selected target.

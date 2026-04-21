@@ -30,7 +30,7 @@ pub(super) fn next_tab_id(tabs: &Tabs) -> TabId {
 ///
 /// Shared between M11 browser (`open_selected` / `open_selected_bg`)
 /// and M12 find-file commit.
-pub(super) fn open_or_focus_tab(tabs: &mut Tabs, path: &CanonPath, promote: bool) {
+pub fn open_or_focus_tab(tabs: &mut Tabs, path: &CanonPath, promote: bool) {
     if let Some(idx) = tabs.open.iter().position(|t| &t.path == path) {
         let id = tabs.open[idx].id;
         tabs.active = Some(id);

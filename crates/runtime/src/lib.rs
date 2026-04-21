@@ -258,6 +258,11 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
         // `prefix` no longer match the overlay's current input are
         // dropped — legacy's "expected_dir" discipline. Matching
         // completions replace `state.completions` wholesale.
+        //
+        // When the overlay is in arrow-follow mode (user engaged
+        // arrow-navigation and then descended via Enter), auto-
+        // select the first entry of the fresh listing so the next
+        // Enter keeps drilling without requiring another Down.
         for done in drivers.find_file.process() {
             let Some(ff) = find_file.as_mut() else {
                 continue;
@@ -274,6 +279,7 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
                 continue;
             }
             ff.completions = done.entries;
+            auto_advance_arrow_follow(ff, tabs);
         }
 
         // Apply clipboard completions: either paste the text at the
@@ -522,6 +528,40 @@ fn seed_edit_from_load(
     }
 }
 
+/// When a fresh find-file listing arrives AND the overlay is in
+/// arrow-follow mode (user engaged arrow-nav, then descended via
+/// Enter) AND nothing is currently selected, auto-select entry 0.
+///
+/// Mirrors what `move_selection` would do: rewrites `input` to
+/// `dir_prefix(base_input) + entry.name`, keeps `show_side` up, and
+/// creates a preview tab for file entries (capturing `tabs.active`
+/// into `previous_tab` on the first preview). This lets the user
+/// drill through directories by repeatedly pressing Enter without
+/// needing to Down again after every listing arrives.
+fn auto_advance_arrow_follow(
+    ff: &mut led_state_find_file::FindFileState,
+    tabs: &mut led_state_tabs::Tabs,
+) {
+    if !ff.arrow_follow || ff.completions.is_empty() || ff.selected.is_some() {
+        return;
+    }
+    ff.selected = Some(0);
+    ff.show_side = true;
+    let base = led_state_find_file::dir_prefix(&ff.base_input).to_string();
+    let entry = &ff.completions[0];
+    let mut new_input = base;
+    new_input.push_str(&entry.name);
+    ff.input = new_input;
+    ff.cursor = ff.input.len();
+    if !entry.is_dir {
+        if ff.previous_tab.is_none() {
+            ff.previous_tab = tabs.active;
+        }
+        let path = entry.full.clone();
+        dispatch::open_or_focus_tab(tabs, &path, /* promote= */ false);
+    }
+}
+
 /// Convenience constructor: spawns both drivers with a shared trace
 /// using the desktop `*-native` implementations. Every driver gets a
 /// clone of the wake [`Notifier`]; each completion signals the main
@@ -724,5 +764,73 @@ mod tests {
         assert!(!inserted);
         // User's rope preserved.
         assert_eq!(edits.buffers[&path].rope.to_string(), "user typed more");
+    }
+
+    // ── arrow-follow auto-advance ─────────────────────────────────
+
+    fn entry(name: &str, is_dir: bool) -> led_state_find_file::FindFileEntry {
+        use led_driver_find_file_core::FindFileEntry;
+        let display = if is_dir { format!("{name}/") } else { name.to_string() };
+        FindFileEntry {
+            name: display,
+            full: canon(&format!("/x/{name}")),
+            is_dir,
+        }
+    }
+
+    #[test]
+    fn auto_advance_selects_first_when_arrow_follow_engaged() {
+        use led_state_find_file::FindFileState;
+        let mut ff = FindFileState::open("/x/".into());
+        ff.base_input = "/x/".into();
+        ff.arrow_follow = true;
+        ff.completions = vec![entry("a", true), entry("b", true)];
+        let mut tabs = led_state_tabs::Tabs::default();
+        auto_advance_arrow_follow(&mut ff, &mut tabs);
+        assert_eq!(ff.selected, Some(0));
+        assert_eq!(ff.input, "/x/a/");
+        assert!(ff.show_side);
+    }
+
+    #[test]
+    fn auto_advance_does_nothing_when_arrow_follow_off() {
+        use led_state_find_file::FindFileState;
+        let mut ff = FindFileState::open("/x/".into());
+        ff.base_input = "/x/".into();
+        ff.arrow_follow = false;
+        ff.completions = vec![entry("a", true)];
+        let mut tabs = led_state_tabs::Tabs::default();
+        auto_advance_arrow_follow(&mut ff, &mut tabs);
+        assert!(ff.selected.is_none());
+        assert_eq!(ff.input, "/x/");
+    }
+
+    #[test]
+    fn auto_advance_creates_preview_tab_for_file_entry() {
+        use led_state_find_file::FindFileState;
+        let mut ff = FindFileState::open("/x/".into());
+        ff.base_input = "/x/".into();
+        ff.arrow_follow = true;
+        ff.completions = vec![entry("main.rs", false)];
+        let mut tabs = led_state_tabs::Tabs::default();
+        auto_advance_arrow_follow(&mut ff, &mut tabs);
+        assert_eq!(tabs.open.len(), 1);
+        assert!(tabs.open[0].preview);
+        assert_eq!(ff.input, "/x/main.rs");
+    }
+
+    #[test]
+    fn auto_advance_respects_existing_selection() {
+        // If user is mid-arrow (selected already Some) the auto-
+        // advance shouldn't clobber their pick.
+        use led_state_find_file::FindFileState;
+        let mut ff = FindFileState::open("/x/".into());
+        ff.base_input = "/x/".into();
+        ff.arrow_follow = true;
+        ff.selected = Some(1);
+        ff.completions = vec![entry("a", true), entry("b", true)];
+        let mut tabs = led_state_tabs::Tabs::default();
+        auto_advance_arrow_follow(&mut ff, &mut tabs);
+        assert_eq!(ff.selected, Some(1));
     }
 }

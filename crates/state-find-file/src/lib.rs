@@ -84,6 +84,13 @@ pub struct FindFileState {
     /// not yet previewed anything, or there was no active tab to
     /// preserve.
     pub previous_tab: Option<led_state_tabs::TabId>,
+
+    /// "The user is navigating by arrow keys + Enter." Carried
+    /// across dir-descent so the next arrived listing can auto-
+    /// select its first entry — the user doesn't have to Down
+    /// again to re-establish the selection. Cleared on any
+    /// direct input edit (edits re-arm the query-typing flow).
+    pub arrow_follow: bool,
 }
 
 impl FindFileState {
@@ -103,6 +110,7 @@ impl FindFileState {
             show_side: false,
             pending_find_file_list: Vec::new(),
             previous_tab: None,
+            arrow_follow: false,
         }
     }
 
@@ -121,6 +129,7 @@ impl FindFileState {
             show_side: false,
             pending_find_file_list: Vec::new(),
             previous_tab: None,
+            arrow_follow: false,
         }
     }
 
@@ -134,9 +143,12 @@ impl FindFileState {
     /// Drop the overlay-side derived state that shouldn't outlive
     /// an input edit. Called from every input-changing action so a
     /// stale selection doesn't linger past a character delete.
+    /// Also drops `arrow_follow` — typing re-arms the query-editing
+    /// flow, so the next arrived listing shouldn't auto-advance.
     pub fn reset_selection(&mut self) {
         self.selected = None;
         self.show_side = false;
+        self.arrow_follow = false;
     }
 
     /// Queue a completion request derived from the current input.
