@@ -35,6 +35,8 @@ pub trait Trace: Send + Sync {
     fn clipboard_read_done(&self, ok: bool, empty: bool);
     fn clipboard_write_start(&self, bytes: usize);
     fn clipboard_write_done(&self, ok: bool);
+    fn fs_list_start(&self, path: &CanonPath);
+    fn fs_list_done(&self, path: &CanonPath, ok: bool);
     fn render_tick(&self);
 }
 
@@ -145,6 +147,18 @@ impl Trace for FileTrace {
     fn clipboard_write_done(&self, ok: bool) {
         self.write_line(&format!("clipboard_write_done  | ok={ok}"));
     }
+    fn fs_list_start(&self, path: &CanonPath) {
+        self.write_line(&format!(
+            "FsListDir       | path={}",
+            self.format_path(path)
+        ));
+    }
+    fn fs_list_done(&self, path: &CanonPath, ok: bool) {
+        self.write_line(&format!(
+            "fs_list_done    | path={} ok={ok}",
+            self.format_path(path),
+        ));
+    }
     fn render_tick(&self) {
         self.write_line("render_tick");
     }
@@ -181,6 +195,8 @@ impl Trace for NoopTrace {
     fn clipboard_read_done(&self, _ok: bool, _empty: bool) {}
     fn clipboard_write_start(&self, _bytes: usize) {}
     fn clipboard_write_done(&self, _ok: bool) {}
+    fn fs_list_start(&self, _: &CanonPath) {}
+    fn fs_list_done(&self, _: &CanonPath, _: bool) {}
     fn render_tick(&self) {}
 }
 

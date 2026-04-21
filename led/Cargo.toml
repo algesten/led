@@ -15,6 +15,7 @@ led-state-buffer-edits = { workspace = true }
 led-state-kill-ring = { workspace = true }
 led-state-alerts = { workspace = true }
 led-state-jumps = { workspace = true }
+led-state-browser = { workspace = true }
 led-driver-buffers-core = { workspace = true }
 led-driver-terminal-core = { workspace = true }
 led-driver-terminal-native = { workspace = true }

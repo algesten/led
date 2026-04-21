@@ -111,8 +111,8 @@ impl BrowserState {
                 DirEntryKind::File => files.push(entry),
             }
         }
-        dirs.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
-        files.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+        dirs.sort_by_key(|e| e.name.to_lowercase());
+        files.sort_by_key(|e| e.name.to_lowercase());
 
         for entry in dirs {
             let expanded = self.expanded_dirs.contains(&entry.path);

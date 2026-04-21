@@ -13,6 +13,7 @@ use led_driver_terminal_core::Terminal;
 use led_driver_terminal_native::RawModeGuard;
 use led_runtime::{load_keymap, spawn_drivers, SharedTrace, TabIdGen, Wake};
 use led_state_alerts::AlertState;
+use led_state_browser::BrowserState;
 use led_state_buffer_edits::BufferEdits;
 use led_state_jumps::JumpListState;
 use led_state_kill_ring::KillRing;
@@ -85,6 +86,15 @@ fn main() -> io::Result<()> {
     let mut kill_ring = KillRing::default();
     let mut alerts = AlertState::default();
     let mut jumps = JumpListState::default();
+    // Workspace root = process cwd. M19 (git integration) will walk
+    // up for `.git` instead; for M11 the CWD convention matches the
+    // typical `cd <project> && led <file>` invocation.
+    let mut browser = BrowserState {
+        root: std::env::current_dir()
+            .ok()
+            .map(|p| UserPath::new(&p).canonicalize()),
+        ..Default::default()
+    };
     let mut store = BufferStore::default();
     let mut terminal = Terminal::default();
 
@@ -117,6 +127,7 @@ fn main() -> io::Result<()> {
         &mut kill_ring,
         &mut alerts,
         &mut jumps,
+        &mut browser,
         &mut store,
         &mut terminal,
         &drivers,

@@ -32,7 +32,10 @@ use led_driver_clipboard_native::ClipboardNative;
 use led_core::Notifier;
 use led_driver_terminal_core::{Dims, Frame, KeyEvent, TermEvent, Terminal, TerminalInputDriver};
 use led_driver_terminal_native::{paint, TerminalInputNative};
+use led_driver_fs_list_core::FsListDriver;
+use led_driver_fs_list_native::FsListNative;
 use led_state_alerts::AlertState;
+use led_state_browser::BrowserState;
 use led_state_buffer_edits::{BufferEdits, EditedBuffer};
 use led_state_jumps::JumpListState;
 use led_state_kill_ring::KillRing;
@@ -70,9 +73,10 @@ pub use config::{load_keymap, ConfigError};
 pub use dispatch::{dispatch_key, DispatchOutcome, Dispatcher};
 pub use keymap::{default_keymap, parse_command, parse_key, ChordState, Command, Keymap};
 pub use query::{
-    body_model, file_load_action, file_save_action, render_frame, status_bar_model,
-    tab_bar_model, AlertsInput, EditedBuffersInput, PendingSavesInput, StoreLoadedInput,
-    TabsActiveInput, TabsOpenInput, TerminalDimsInput,
+    body_model, file_list_action, file_load_action, file_save_action, render_frame,
+    side_panel_model, status_bar_model, tab_bar_model, AlertsInput, BrowserInput,
+    EditedBuffersInput, PendingSavesInput, StoreLoadedInput, TabsActiveInput, TabsOpenInput,
+    TerminalDimsInput,
 };
 pub use trace::{SharedTrace, Trace};
 
@@ -94,12 +98,14 @@ pub struct Drivers {
     pub file_write: FileWriteDriver,
     pub input: TerminalInputDriver,
     pub clipboard: ClipboardDriver,
+    pub fs_list: FsListDriver,
 
     // Held only for lifetime management; detached on drop.
     _file_native: FileReadNative,
     _file_write_native: FileWriteNative,
     _input_native: TerminalInputNative,
     _clipboard_native: ClipboardNative,
+    _fs_list_native: FsListNative,
 }
 
 /// Allocator for fresh `TabId`s. Counter only; ids are never reused.
@@ -126,6 +132,7 @@ pub fn run(
     kill_ring: &mut KillRing,
     alerts: &mut AlertState,
     jumps: &mut JumpListState,
+    browser: &mut BrowserState,
     store: &mut BufferStore,
     terminal: &mut Terminal,
     drivers: &Drivers,
@@ -185,6 +192,23 @@ pub fn run(
                     alerts.set_warn(basename.clone(), format!("save {basename}: {msg}"));
                 }
             }
+        }
+
+        // Apply fs-list completions: round-trip entries into
+        // `browser.dir_contents` and rebuild the flattened tree.
+        // Failures leave the dir unlisted; the user can retry via
+        // CollapseAll-then-reopen.
+        let fs_completions = drivers.fs_list.process();
+        let had_listing = !fs_completions.is_empty();
+        for done in fs_completions {
+            if let Ok(entries) = done.result {
+                browser
+                    .dir_contents
+                    .insert(done.path, imbl::Vector::from_iter(entries));
+            }
+        }
+        if had_listing {
+            browser.rebuild_entries();
         }
 
         // Apply clipboard completions: either paste the text at the
@@ -258,12 +282,14 @@ pub fn run(
             PendingSavesInput::new(edits),
             EditedBuffersInput::new(edits),
         );
+        let list_actions = file_list_action(BrowserInput::new(browser));
         let frame = render_frame(
             TerminalDimsInput::new(terminal),
             EditedBuffersInput::new(edits),
             StoreLoadedInput::new(store),
             TabsActiveInput::new(tabs),
             AlertsInput::new(alerts),
+            BrowserInput::new(browser),
         );
 
         // ── Execute ─────────────────────────────────────────────
@@ -277,6 +303,8 @@ pub fn run(
             edits.pending_saves.remove(path);
         }
         drivers.file_write.execute(save_actions.iter());
+
+        drivers.fs_list.execute(list_actions.iter());
 
         // Clipboard actions: a Read when a yank is pending (no read
         // already in flight), a Write when a kill queued clipboard
@@ -337,6 +365,10 @@ pub fn spawn_drivers(trace: SharedTrace, wake: &Wake) -> io::Result<Drivers> {
         trace.clone().as_clipboard_trace(),
         wake.notifier.clone(),
     );
+    let (fs_list, fs_list_native) = led_driver_fs_list_native::spawn(
+        trace.clone().as_fs_list_trace(),
+        wake.notifier.clone(),
+    );
     let (input, input_native) =
         led_driver_terminal_native::spawn(trace.as_terminal_trace(), wake.notifier.clone())?;
     Ok(Drivers {
@@ -344,10 +376,12 @@ pub fn spawn_drivers(trace: SharedTrace, wake: &Wake) -> io::Result<Drivers> {
         file_write,
         input,
         clipboard,
+        fs_list,
         _file_native: file_native,
         _file_write_native: file_write_native,
         _input_native: input_native,
         _clipboard_native: clipboard_native,
+        _fs_list_native: fs_list_native,
     })
 }
 
@@ -370,6 +404,7 @@ pub(crate) mod trace_adapter {
     pub(crate) struct FileTraceAdapter(pub Arc<dyn Trace>);
     pub(crate) struct TermTraceAdapter(pub Arc<dyn Trace>);
     pub(crate) struct ClipboardTraceAdapter(pub Arc<dyn Trace>);
+    pub(crate) struct FsListTraceAdapter(pub Arc<dyn Trace>);
 
     impl led_driver_buffers_core::Trace for FileTraceAdapter {
         fn file_load_start(&self, path: &CanonPath) {
@@ -412,6 +447,19 @@ pub(crate) mod trace_adapter {
             self.0.clipboard_write_done(ok);
         }
     }
+
+    impl led_driver_fs_list_core::Trace for FsListTraceAdapter {
+        fn list_start(&self, path: &CanonPath) {
+            self.0.fs_list_start(path);
+        }
+        fn list_done(
+            &self,
+            path: &CanonPath,
+            result: &Result<Vec<led_driver_fs_list_core::DirEntry>, String>,
+        ) {
+            self.0.fs_list_done(path, result.is_ok());
+        }
+    }
 }
 
 impl SharedTrace {
@@ -423,5 +471,8 @@ impl SharedTrace {
     }
     pub(crate) fn as_clipboard_trace(&self) -> Arc<dyn led_driver_clipboard_core::Trace> {
         Arc::new(trace_adapter::ClipboardTraceAdapter(self.inner()))
+    }
+    pub(crate) fn as_fs_list_trace(&self) -> Arc<dyn led_driver_fs_list_core::Trace> {
+        Arc::new(trace_adapter::FsListTraceAdapter(self.inner()))
     }
 }

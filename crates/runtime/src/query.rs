@@ -14,8 +14,13 @@
 #[allow(unused_imports)]
 use led_core::CanonPath;
 use led_driver_buffers_core::{BufferStore, LoadAction, LoadState, SaveAction};
-use led_driver_terminal_core::{BodyModel, Dims, Frame, StatusBarModel, TabBarModel, Terminal};
+use led_driver_fs_list_core::ListCmd;
+use led_driver_terminal_core::{
+    BodyModel, Dims, Frame, Layout, Rect, SidePanelModel, SidePanelRow, StatusBarModel,
+    TabBarModel, Terminal,
+};
 use led_state_alerts::AlertState;
+use led_state_browser::{BrowserState, Focus, TreeEntry, TreeEntryKind};
 use led_state_buffer_edits::{BufferEdits, EditedBuffer};
 use led_state_tabs::{Cursor, Scroll, Tab, TabId, Tabs};
 use ropey::Rope;
@@ -146,6 +151,39 @@ impl<'a> AlertsInput<'a> {
     }
 }
 
+// ── Input on BrowserState ──────────────────────────────────────────────
+
+/// Full projection for `render_frame` composition. The `entries`
+/// vector is already `Arc`-wrapped inside `BrowserState`, so cache-hit
+/// cloning stays pointer-fast.
+#[drv::input]
+#[derive(Copy, Clone)]
+pub struct BrowserInput<'a> {
+    pub root: &'a Option<CanonPath>,
+    pub dir_contents: &'a imbl::HashMap<CanonPath, imbl::Vector<led_state_browser::DirEntry>>,
+    pub expanded_dirs: &'a imbl::HashSet<CanonPath>,
+    pub entries: &'a Arc<Vec<TreeEntry>>,
+    pub selected: &'a usize,
+    pub scroll_offset: &'a usize,
+    pub visible: &'a bool,
+    pub focus: &'a Focus,
+}
+
+impl<'a> BrowserInput<'a> {
+    pub fn new(b: &'a BrowserState) -> Self {
+        Self {
+            root: &b.root,
+            dir_contents: &b.dir_contents,
+            expanded_dirs: &b.expanded_dirs,
+            entries: &b.entries,
+            selected: &b.selected,
+            scroll_offset: &b.scroll_offset,
+            visible: &b.visible,
+            focus: &b.focus,
+        }
+    }
+}
+
 // ── Memos ──────────────────────────────────────────────────────────────
 
 /// "What files need a load started?"
@@ -271,7 +309,7 @@ pub fn body_model<'e, 'a, 'b>(
     edits: EditedBuffersInput<'e>,
     store: StoreLoadedInput<'a>,
     tabs: TabsActiveInput<'b>,
-    dims: Dims,
+    area: Rect,
 ) -> BodyModel {
     let Some(id) = *tabs.active else {
         return BodyModel::Empty;
@@ -280,7 +318,7 @@ pub fn body_model<'e, 'a, 'b>(
         return BodyModel::Empty;
     };
     if let Some(eb) = edits.buffers.get(&tab.path) {
-        return render_content(&eb.rope, tab.cursor, tab.scroll, dims);
+        return render_content(&eb.rope, tab.cursor, tab.scroll, area);
     }
     // Only the Pending / Error paths need a rendered path string, and
     // even then we allocate only once per recompute; `Arc<str>` keeps
@@ -293,7 +331,7 @@ pub fn body_model<'e, 'a, 'b>(
             path_display: path_display(tab),
             message: Arc::<str>::from(msg.as_str()),
         },
-        Some(LoadState::Ready(rope)) => render_content(rope, tab.cursor, tab.scroll, dims),
+        Some(LoadState::Ready(rope)) => render_content(rope, tab.cursor, tab.scroll, area),
     }
 }
 
@@ -301,10 +339,10 @@ fn path_display(tab: &Tab) -> Arc<str> {
     Arc::<str>::from(tab.path.display().to_string())
 }
 
-fn render_content(rope: &Rope, cursor: Cursor, scroll: Scroll, dims: Dims) -> BodyModel {
-    let body_rows = dims.rows.saturating_sub(2) as usize;
+fn render_content(rope: &Rope, cursor: Cursor, scroll: Scroll, area: Rect) -> BodyModel {
+    let body_rows = area.rows as usize;
     let line_count = rope.len_lines();
-    let cols = dims.cols as usize;
+    let cols = area.cols as usize;
     let content_cols = cols.saturating_sub(GUTTER_WIDTH);
 
     let mut lines: Vec<String> = Vec::with_capacity(body_rows);
@@ -328,12 +366,12 @@ fn render_content(rope: &Rope, cursor: Cursor, scroll: Scroll, dims: Dims) -> Bo
 
     BodyModel::Content {
         lines: Arc::new(lines),
-        cursor: visible_cursor(cursor, scroll, dims),
+        cursor: visible_cursor(cursor, scroll, area),
     }
 }
 
-fn visible_cursor(c: Cursor, s: Scroll, dims: Dims) -> Option<(u16, u16)> {
-    let body_rows = dims.rows.saturating_sub(2) as usize;
+fn visible_cursor(c: Cursor, s: Scroll, area: Rect) -> Option<(u16, u16)> {
+    let body_rows = area.rows as usize;
     if body_rows == 0 {
         return None;
     }
@@ -341,7 +379,7 @@ fn visible_cursor(c: Cursor, s: Scroll, dims: Dims) -> Option<(u16, u16)> {
         return None;
     }
     let row = (c.line - s.top) as u16;
-    let max_col = (dims.cols as usize).saturating_sub(1);
+    let max_col = (area.cols as usize).saturating_sub(1);
     let col = (c.col + GUTTER_WIDTH).min(max_col) as u16;
     Some((row, col))
 }
@@ -465,39 +503,97 @@ fn position_string(tabs: TabsActiveInput<'_>, _edits: EditedBuffersInput<'_>) ->
     Arc::from(format!("L{row}:C{col} "))
 }
 
-/// Top-level render model. Composes `tab_bar_model` + `body_model` +
-/// `status_bar_model` — each independently cached in its own
-/// per-memo thread-local cache.
+/// Side-panel slice of the render frame. Walks the visible window
+/// of `browser.entries` and produces one `SidePanelRow` per row.
+/// Empty when the browser has no entries.
+#[drv::memo(single)]
+pub fn side_panel_model<'b>(browser: BrowserInput<'b>, rows: u16) -> SidePanelModel {
+    let rows = rows as usize;
+    let start = *browser.scroll_offset;
+    let end = start.saturating_add(rows).min(browser.entries.len());
+    let selected = *browser.selected;
+    let focused = *browser.focus == Focus::Side;
+    let mut out: Vec<SidePanelRow> = Vec::with_capacity(end.saturating_sub(start));
+    for (i, entry) in browser.entries[start..end].iter().enumerate() {
+        let chevron = match entry.kind {
+            TreeEntryKind::File => None,
+            TreeEntryKind::Directory { expanded } => Some(expanded),
+        };
+        out.push(SidePanelRow {
+            depth: entry.depth as u16,
+            chevron,
+            name: Arc::<str>::from(entry.name.as_str()),
+            selected: start + i == selected,
+        });
+    }
+    SidePanelModel {
+        rows: Arc::new(out),
+        focused,
+    }
+}
+
+/// "What directory listings do we still need?"
+///
+/// Emits one `ListCmd::List` per path that's expected to have a
+/// listing (workspace root + every expanded dir) but isn't in
+/// `dir_contents` yet. Used to drive `FsListDriver::execute`.
+#[drv::memo(single)]
+pub fn file_list_action<'b>(browser: BrowserInput<'b>) -> Vec<ListCmd> {
+    let mut out: Vec<ListCmd> = Vec::new();
+    if let Some(root) = browser.root.as_ref()
+        && !browser.dir_contents.contains_key(root)
+    {
+        out.push(ListCmd::List(root.clone()));
+    }
+    for dir in browser.expanded_dirs.iter() {
+        if !browser.dir_contents.contains_key(dir) {
+            out.push(ListCmd::List(dir.clone()));
+        }
+    }
+    out
+}
+
+/// Top-level render model. Composes the per-region memos — each
+/// independently cached in its own per-memo thread-local cache.
 ///
 /// The call site pattern for a memo composing sibling memos: pass the
 /// same input values through — drv 0.3's input types are `Copy` over
 /// references, so forwarding is free.
 #[drv::memo(single)]
-pub fn render_frame<'t, 'e, 'b, 'a, 'al>(
+pub fn render_frame<'t, 'e, 'b, 'a, 'al, 'br>(
     term: TerminalDimsInput<'t>,
     edits: EditedBuffersInput<'e>,
     store: StoreLoadedInput<'b>,
     tabs: TabsActiveInput<'a>,
     alerts: AlertsInput<'al>,
+    browser: BrowserInput<'br>,
 ) -> Option<Frame> {
     let dims = (*term.dims)?;
+    let layout = Layout::compute(dims, *browser.visible);
     let tab_bar = tab_bar_model(tabs, edits);
-    let body = body_model(edits, store, tabs, dims);
+    let body = body_model(edits, store, tabs, layout.editor_area);
     let status_bar = status_bar_model(alerts, tabs, edits);
-    // Translate the body-relative cursor (row, col) into absolute
-    // screen coords (col, row). Body starts at row 0 now — tab bar
-    // and status bar live at the bottom — so no +1.
+    let side_panel = layout
+        .side_area
+        .map(|area| side_panel_model(browser, area.rows));
+    // Body cursor is body-area-relative. Shift to absolute screen
+    // coords by adding the editor area's origin.
     let cursor = match &body {
         BodyModel::Content {
             cursor: Some((row, col)),
             ..
-        } => Some((*col, *row)),
+        } => Some((
+            layout.editor_area.x.saturating_add(*col),
+            layout.editor_area.y.saturating_add(*row),
+        )),
         _ => None,
     };
     Some(Frame {
         tab_bar,
         body,
         status_bar,
+        side_panel,
+        layout,
         cursor,
         dims,
     })
@@ -598,12 +694,20 @@ mod tests {
 
     fn render(t: &Tabs, e: &BufferEdits, s: &BufferStore, term: &Terminal) -> Option<Frame> {
         let alerts = AlertState::default();
+        // Tests render without the side panel so body layout matches
+        // the pre-M11 assertions — M11 tests for the side panel are
+        // separate.
+        let browser = BrowserState {
+            visible: false,
+            ..Default::default()
+        };
         render_frame(
             TerminalDimsInput::new(term),
             EditedBuffersInput::new(e),
             StoreLoadedInput::new(s),
             TabsActiveInput::new(t),
             AlertsInput::new(&alerts),
+            BrowserInput::new(&browser),
         )
     }
 

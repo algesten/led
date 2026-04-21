@@ -19,9 +19,12 @@ use crossterm::event::{
 };
 use led_core::Notifier;
 use led_driver_terminal_core::{
-    BodyModel, Dims, Frame, KeyCode, KeyEvent, KeyModifiers, StatusBarModel, TabBarModel,
-    TermEvent, TerminalInputDriver, Trace,
+    BodyModel, Dims, Frame, KeyCode, KeyEvent, KeyModifiers, Rect, SidePanelModel, StatusBarModel,
+    TabBarModel, TermEvent, TerminalInputDriver, Trace,
 };
+
+#[cfg(test)]
+use led_driver_terminal_core::Layout;
 
 /// Lifecycle marker for the native reader thread.
 ///
@@ -134,9 +137,15 @@ pub fn paint(frame: &Frame, out: &mut impl Write) -> io::Result<()> {
     use crossterm::{cursor, queue};
 
     queue!(out, cursor::Hide, cursor::MoveTo(0, 0))?;
-    paint_body(&frame.body, frame.dims, out)?;
-    paint_tab_bar(&frame.tab_bar, frame.dims, out)?;
-    paint_status_bar(&frame.status_bar, frame.dims, out)?;
+    if let (Some(panel), Some(area)) = (&frame.side_panel, frame.layout.side_area) {
+        paint_side_panel(panel, area, out)?;
+    }
+    if let Some(x) = frame.layout.side_border_x {
+        paint_side_border(x, frame.layout.editor_area.rows, out)?;
+    }
+    paint_body(&frame.body, frame.layout.editor_area, out)?;
+    paint_tab_bar(&frame.tab_bar, frame.layout.tab_bar, out)?;
+    paint_status_bar(&frame.status_bar, frame.layout.status_bar, out)?;
 
     // Cursor placement last, on top of the finished frame. The
     // per-frame `Hide` above prevents flicker while drawing; the
@@ -149,13 +158,12 @@ pub fn paint(frame: &Frame, out: &mut impl Write) -> io::Result<()> {
     out.flush()
 }
 
-fn paint_tab_bar(bar: &TabBarModel, dims: Dims, out: &mut impl Write) -> io::Result<()> {
+fn paint_tab_bar(bar: &TabBarModel, area: Rect, out: &mut impl Write) -> io::Result<()> {
     use crossterm::{cursor, queue, style, terminal};
 
     // Tab bar at the bottom of the editor area: second-to-last row.
     // Matches legacy led's ratatui layout + the goldens.
-    let row = dims.rows.saturating_sub(2);
-    queue!(out, cursor::MoveTo(0, row))?;
+    queue!(out, cursor::MoveTo(area.x, area.y))?;
     let mut col: u16 = 0;
     for (i, label) in bar.labels.iter().enumerate() {
         let active = bar.active == Some(i);
@@ -174,7 +182,7 @@ fn paint_tab_bar(bar: &TabBarModel, dims: Dims, out: &mut impl Write) -> io::Res
             queue!(out, style::SetAttribute(style::Attribute::NoReverse))?;
         }
         col = col.saturating_add(label.chars().count().saturating_add(2) as u16);
-        if col >= dims.cols {
+        if col >= area.cols {
             break;
         }
     }
@@ -182,11 +190,10 @@ fn paint_tab_bar(bar: &TabBarModel, dims: Dims, out: &mut impl Write) -> io::Res
     Ok(())
 }
 
-fn paint_status_bar(s: &StatusBarModel, dims: Dims, out: &mut impl Write) -> io::Result<()> {
+fn paint_status_bar(s: &StatusBarModel, area: Rect, out: &mut impl Write) -> io::Result<()> {
     use crossterm::{cursor, queue, style, terminal};
 
-    let row = dims.rows.saturating_sub(1);
-    queue!(out, cursor::MoveTo(0, row))?;
+    queue!(out, cursor::MoveTo(area.x, area.y))?;
 
     // Warn styling spans the whole row — set it before the first
     // print, reset after the row is complete.
@@ -199,7 +206,7 @@ fn paint_status_bar(s: &StatusBarModel, dims: Dims, out: &mut impl Write) -> io:
         )?;
     }
 
-    let cols = dims.cols as usize;
+    let cols = area.cols as usize;
     let left_cols = s.left.chars().count().min(cols);
     let right_cols = s.right.chars().count().min(cols - left_cols);
     let pad = cols - left_cols - right_cols;
@@ -221,17 +228,11 @@ fn paint_status_bar(s: &StatusBarModel, dims: Dims, out: &mut impl Write) -> io:
     Ok(())
 }
 
-fn paint_body(body: &BodyModel, dims: Dims, out: &mut impl Write) -> io::Result<()> {
+fn paint_body(body: &BodyModel, area: Rect, out: &mut impl Write) -> io::Result<()> {
     use crossterm::{cursor, queue, style, terminal};
 
-    // Body starts at row 0 — tab bar and status bar are at the
-    // bottom two rows, not the top.
-    let body_top: u16 = 0;
-    let body_rows = dims.rows.saturating_sub(2);
-
-    // Match inside the loop — no intermediate `Vec<&str>` per paint.
-    for row in 0..body_rows {
-        queue!(out, cursor::MoveTo(0, body_top + row))?;
+    for row in 0..area.rows {
+        queue!(out, cursor::MoveTo(area.x, area.y + row))?;
         let line: Option<&str> = match body {
             BodyModel::Empty => None,
             BodyModel::Pending { path_display } => match row {
@@ -253,6 +254,58 @@ fn paint_body(body: &BodyModel, dims: Dims, out: &mut impl Write) -> io::Result<
             queue!(out, style::Print(line))?;
         }
         queue!(out, terminal::Clear(terminal::ClearType::UntilNewLine))?;
+    }
+    Ok(())
+}
+
+fn paint_side_panel(panel: &SidePanelModel, area: Rect, out: &mut impl Write) -> io::Result<()> {
+    use crossterm::{cursor, queue, style, terminal};
+
+    let cols = area.cols as usize;
+    for row in 0..area.rows {
+        queue!(out, cursor::MoveTo(area.x, area.y + row))?;
+        if let Some(entry) = panel.rows.get(row as usize) {
+            // Two-space indent per depth, then chevron, then name.
+            let mut line = String::with_capacity(cols);
+            for _ in 0..entry.depth {
+                line.push_str("  ");
+            }
+            match entry.chevron {
+                Some(true) => line.push_str("\u{25bd} "),  // ▽
+                Some(false) => line.push_str("\u{25b7} "), // ▷
+                None => line.push_str("  "),
+            }
+            line.push_str(&entry.name);
+            // Pad to full width so the reverse-video background
+            // covers the row end-to-end.
+            let ch_count = line.chars().count();
+            if ch_count < cols {
+                for _ in 0..(cols - ch_count) {
+                    line.push(' ');
+                }
+            } else {
+                // Truncate to fit.
+                let truncated: String = line.chars().take(cols).collect();
+                line = truncated;
+            }
+            if entry.selected {
+                queue!(out, style::SetAttribute(style::Attribute::Reverse))?;
+                queue!(out, style::Print(line))?;
+                queue!(out, style::SetAttribute(style::Attribute::NoReverse))?;
+            } else {
+                queue!(out, style::Print(line))?;
+            }
+        } else {
+            queue!(out, terminal::Clear(terminal::ClearType::UntilNewLine))?;
+        }
+    }
+    Ok(())
+}
+
+fn paint_side_border(x: u16, rows: u16, out: &mut impl Write) -> io::Result<()> {
+    use crossterm::{cursor, queue, style};
+    for row in 0..rows {
+        queue!(out, cursor::MoveTo(x, row), style::Print("\u{2502}"))?; // │
     }
     Ok(())
 }
@@ -320,6 +373,8 @@ mod tests {
                 cursor: Some((0, 0)),
             },
             status_bar: StatusBarModel::default(),
+            side_panel: None,
+            layout: Layout::compute(Dims { cols: 40, rows: 5 }, false),
             cursor: Some((0, 0)),
             dims: Dims { cols: 40, rows: 5 },
         };
@@ -334,6 +389,8 @@ mod tests {
             tab_bar: TabBarModel::default(),
             body: BodyModel::Empty,
             status_bar: StatusBarModel::default(),
+            side_panel: None,
+            layout: Layout::compute(Dims { cols: 40, rows: 5 }, false),
             cursor: None,
             dims: Dims { cols: 40, rows: 5 },
         };

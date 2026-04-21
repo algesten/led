@@ -23,6 +23,84 @@ pub struct Dims {
     pub rows: u16,
 }
 
+/// Screen-coordinate rectangle. Inclusive `x` / `y`, exclusive
+/// `x + cols` / `y + rows`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Rect {
+    pub x: u16,
+    pub y: u16,
+    pub cols: u16,
+    pub rows: u16,
+}
+
+/// Pre-computed layout for a tick: where each chrome region goes.
+/// Painter consumes this; no painter code touches `dims` directly.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Layout {
+    pub dims: Dims,
+    pub side_area: Option<Rect>,
+    pub side_border_x: Option<u16>,
+    pub editor_area: Rect,
+    pub tab_bar: Rect,
+    pub status_bar: Rect,
+}
+
+impl Layout {
+    /// Produce a layout for the given terminal dims. `side_width =
+    /// 25` + 1 border col is reserved when `browser_visible` and the
+    /// terminal is wide enough for a 25-col editor area next to it.
+    pub fn compute(dims: Dims, browser_visible: bool) -> Self {
+        const SIDE_WIDTH: u16 = 25;
+        const MIN_EDITOR_WIDTH: u16 = 25;
+        let body_rows = dims.rows.saturating_sub(2);
+
+        let side_visible = browser_visible
+            && dims.cols > SIDE_WIDTH
+            && dims.cols.saturating_sub(SIDE_WIDTH + 1) >= MIN_EDITOR_WIDTH;
+        let (side_area, side_border_x, editor_x) = if side_visible {
+            (
+                Some(Rect {
+                    x: 0,
+                    y: 0,
+                    cols: SIDE_WIDTH,
+                    rows: body_rows,
+                }),
+                Some(SIDE_WIDTH),
+                SIDE_WIDTH + 1,
+            )
+        } else {
+            (None, None, 0)
+        };
+        let editor_cols = dims.cols.saturating_sub(editor_x);
+        let editor_area = Rect {
+            x: editor_x,
+            y: 0,
+            cols: editor_cols,
+            rows: body_rows,
+        };
+        let tab_bar = Rect {
+            x: editor_x,
+            y: body_rows,
+            cols: editor_cols,
+            rows: 1,
+        };
+        let status_bar = Rect {
+            x: 0,
+            y: dims.rows.saturating_sub(1),
+            cols: dims.cols,
+            rows: 1,
+        };
+        Self {
+            dims,
+            side_area,
+            side_border_x,
+            editor_area,
+            tab_bar,
+            status_bar,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TermEvent {
     Key(KeyEvent),
@@ -133,6 +211,27 @@ impl Default for BodyModel {
     }
 }
 
+/// Side-panel row. `chevron` is `None` for files, `Some(true)` for
+/// expanded dirs (▽), `Some(false)` for collapsed dirs (▷). `depth`
+/// indent and `selected` highlighting are resolved in the painter.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SidePanelRow {
+    pub depth: u16,
+    pub chevron: Option<bool>,
+    pub name: Arc<str>,
+    pub selected: bool,
+}
+
+/// Side-panel slice of the render frame. Pre-sliced to the visible
+/// window (`rows` entries long; caller has already done the scroll
+/// clamp). Wrapped in `Arc` so cache-hit clones of [`Frame`] are a
+/// pointer copy.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct SidePanelModel {
+    pub rows: Arc<Vec<SidePanelRow>>,
+    pub focused: bool,
+}
+
 /// Bottom-row status bar. `left` is written from col 0; `right` is
 /// written right-aligned; the gap is cleared. `is_warn` asks the
 /// painter to use the warn (red-bg / white-fg / bold) style for the
@@ -152,6 +251,8 @@ pub struct Frame {
     pub tab_bar: TabBarModel,
     pub body: BodyModel,
     pub status_bar: StatusBarModel,
+    pub side_panel: Option<SidePanelModel>,
+    pub layout: Layout,
     /// Absolute terminal cursor position as `(col, row)` — matches
     /// crossterm's `cursor::MoveTo` argument order. `None` hides the
     /// cursor (no active content / cursor scrolled away).
