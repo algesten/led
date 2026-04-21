@@ -582,8 +582,23 @@ fn position_string(tabs: TabsActiveInput<'_>, _edits: EditedBuffersInput<'_>) ->
 /// Side-panel slice of the render frame. Walks the visible window
 /// of `browser.entries` and produces one `SidePanelRow` per row.
 /// Empty when the browser has no entries.
+///
+/// When the find-file overlay is active and has `show_side=true`,
+/// the panel displays completions instead — same visual slot,
+/// different source. The overlay's `selected` drives which row is
+/// highlighted; completions never nest, so `depth = 0` and
+/// `chevron = None` across the board.
 #[drv::memo(single)]
-pub fn side_panel_model<'b>(browser: BrowserUiInput<'b>, rows: u16) -> SidePanelModel {
+pub fn side_panel_model<'b, 'f>(
+    browser: BrowserUiInput<'b>,
+    find_file: FindFileInput<'f>,
+    rows: u16,
+) -> SidePanelModel {
+    if let Some(state) = find_file.overlay.as_ref()
+        && state.show_side
+    {
+        return completions_side_panel(state, rows);
+    }
     let rows = rows as usize;
     let start = *browser.scroll_offset;
     let end = start.saturating_add(rows).min(browser.entries.len());
@@ -605,6 +620,33 @@ pub fn side_panel_model<'b>(browser: BrowserUiInput<'b>, rows: u16) -> SidePanel
     SidePanelModel {
         rows: Arc::new(out),
         focused,
+    }
+}
+
+/// Build a side-panel model from the find-file completions list.
+/// Selection highlights the arrow-selected row; `focused` is always
+/// `false` because the side panel never "has focus" in overlay mode
+/// — keystrokes go through the overlay's own handler, and the
+/// painter uses the flag to distinguish focused vs unfocused
+/// selection styling (M14b chrome theming).
+fn completions_side_panel(
+    state: &led_state_find_file::FindFileState,
+    rows: u16,
+) -> SidePanelModel {
+    let rows = rows as usize;
+    let end = state.completions.len().min(rows);
+    let mut out: Vec<SidePanelRow> = Vec::with_capacity(end);
+    for (i, entry) in state.completions[..end].iter().enumerate() {
+        out.push(SidePanelRow {
+            depth: 0,
+            chevron: None,
+            name: Arc::<str>::from(entry.name.as_str()),
+            selected: state.selected == Some(i),
+        });
+    }
+    SidePanelModel {
+        rows: Arc::new(out),
+        focused: false,
     }
 }
 
@@ -706,7 +748,7 @@ pub fn render_frame<'t, 'e, 'b, 'a, 'al, 'br, 'ff>(
     let status_bar = status_bar_model(alerts, tabs, edits, find_file);
     let side_panel = layout
         .side_area
-        .map(|area| side_panel_model(browser, area.rows));
+        .map(|area| side_panel_model(browser, find_file, area.rows));
     // Body cursor is body-area-relative. Shift to absolute screen
     // coords by adding the editor area's origin. When the side panel
     // has focus the editor cursor hides — the painter parks the
