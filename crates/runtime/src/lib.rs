@@ -378,7 +378,7 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
         // ── Render ──────────────────────────────────────────────
         if frame != last_frame {
             if let Some(f) = &frame {
-                drivers.output.execute(f, stdout)?;
+                drivers.output.execute(f, last_frame.as_ref(), stdout)?;
             }
             last_frame = frame;
         }

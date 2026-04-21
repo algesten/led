@@ -145,37 +145,69 @@ impl TerminalOutputDriver {
         Self { trace }
     }
 
-    /// Paint a frame to `out`. The `execute` name matches the shape
-    /// every other driver uses: a sync entry that accepts intent and
+    /// Paint a frame to `out`, skipping regions that match
+    /// `last_frame`. The `execute` name matches the shape every
+    /// other driver uses: a sync entry that accepts intent and
     /// performs the I/O.
-    pub fn execute<W: Write>(&self, frame: &Frame, out: &mut W) -> io::Result<()> {
+    ///
+    /// Regions compared: `side_panel`, `body`, `tab_bar`,
+    /// `status_bar`. Each is `Arc`-wrapped so `PartialEq` is a
+    /// pointer check when the memo cache hit. Held-key scroll only
+    /// mutates `body` + `status_bar`; skipping the sidebar + tab
+    /// bar + border drops ~150 crossterm ops per frame, which is
+    /// where the stutter came from.
+    pub fn execute<W: Write>(
+        &self,
+        frame: &Frame,
+        last: Option<&Frame>,
+        out: &mut W,
+    ) -> io::Result<()> {
         self.trace.render_tick();
-        paint(frame, out)
+        paint(frame, last, out)
     }
 }
 
 // ── Painter ────────────────────────────────────────────────────────────
 
-/// Paint an entire frame. No diffing: at 120×40 that's ~4800 cells per
-/// redraw — negligible. The caller only invokes `paint` when the frame
-/// actually changed.
-pub fn paint(frame: &Frame, out: &mut impl Write) -> io::Result<()> {
+/// Paint the regions of `frame` that differ from `last` (or all of
+/// them on first paint / layout change). At 120×40 a full repaint
+/// is ~4800 cells; dirty-diffing avoids that cost on tight scroll
+/// loops where only the body + status line change.
+pub fn paint(frame: &Frame, last: Option<&Frame>, out: &mut impl Write) -> io::Result<()> {
     use crossterm::{cursor, queue};
 
-    queue!(out, cursor::Hide, cursor::MoveTo(0, 0))?;
-    if let (Some(panel), Some(area)) = (&frame.side_panel, frame.layout.side_area) {
-        paint_side_panel(panel, area, out)?;
+    queue!(out, cursor::Hide)?;
+
+    // Layout change (resize, sidebar toggle) invalidates every
+    // region — repaint in full. Otherwise diff sub-components.
+    let layout_same = last.is_some_and(|l| l.layout == frame.layout);
+    let force = !layout_same;
+
+    if force || last.map(|l| &l.side_panel) != Some(&frame.side_panel)
+        || last.map(|l| l.layout.side_area) != Some(frame.layout.side_area)
+    {
+        if let (Some(panel), Some(area)) = (&frame.side_panel, frame.layout.side_area) {
+            paint_side_panel(panel, area, out)?;
+        }
+        // Border is layout-derived; repaint whenever layout changes
+        // or when we're repainting the side panel anyway.
+        if let Some(x) = frame.layout.side_border_x {
+            let rows = frame.layout.editor_area.rows + frame.layout.tab_bar.rows;
+            paint_side_border(x, rows, out)?;
+        }
     }
-    if let Some(x) = frame.layout.side_border_x {
-        // Border spans the editor-area rows + the tab-bar row so the
-        // sidebar's rightmost column is continuous from top to just
-        // above the status bar.
-        let rows = frame.layout.editor_area.rows + frame.layout.tab_bar.rows;
-        paint_side_border(x, rows, out)?;
+
+    if force || last.map(|l| &l.body) != Some(&frame.body) {
+        paint_body(&frame.body, frame.layout.editor_area, out)?;
     }
-    paint_body(&frame.body, frame.layout.editor_area, out)?;
-    paint_tab_bar(&frame.tab_bar, frame.layout.tab_bar, out)?;
-    paint_status_bar(&frame.status_bar, frame.layout.status_bar, out)?;
+
+    if force || last.map(|l| &l.tab_bar) != Some(&frame.tab_bar) {
+        paint_tab_bar(&frame.tab_bar, frame.layout.tab_bar, out)?;
+    }
+
+    if force || last.map(|l| &l.status_bar) != Some(&frame.status_bar) {
+        paint_status_bar(&frame.status_bar, frame.layout.status_bar, out)?;
+    }
 
     // Cursor placement last, on top of the finished frame. The
     // per-frame `Hide` above prevents flicker while drawing; the
@@ -419,7 +451,7 @@ mod tests {
             dims: Dims { cols: 40, rows: 5 },
         };
         let mut out: Vec<u8> = Vec::new();
-        paint(&frame, &mut out).expect("paint to Vec<u8>");
+        paint(&frame, None, &mut out).expect("paint to Vec<u8>");
         assert!(!out.is_empty());
     }
 
@@ -435,7 +467,7 @@ mod tests {
             dims: Dims { cols: 40, rows: 5 },
         };
         let mut out: Vec<u8> = Vec::new();
-        paint(&frame, &mut out).expect("paint to Vec<u8>");
+        paint(&frame, None, &mut out).expect("paint to Vec<u8>");
         // Empty frames still produce clear/hide sequences — just don't panic.
         assert!(!out.is_empty());
     }
