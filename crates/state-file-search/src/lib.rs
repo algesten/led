@@ -81,11 +81,20 @@ pub struct PendingSearch {
 
 impl FileSearchState {
     /// Queue a search request from the current input + toggle
-    /// state. No-op when the query is empty — legacy skips the
-    /// request so the side panel shows "no results yet" rather
-    /// than flooding ripgrep with the no-op pattern.
+    /// state, or clear any previous results if the query is now
+    /// empty.
+    ///
+    /// Empty-query case isn't a no-op: leaving the stale hits in
+    /// the tree would be confusing after the user backspaced the
+    /// query to nothing. We also skip dispatching a ripgrep
+    /// command for the empty pattern — legacy's discipline, mostly
+    /// so the driver doesn't try to match every byte in the tree.
     pub fn queue_search(&mut self) {
         if self.query.text.is_empty() {
+            self.results.clear();
+            self.flat_hits.clear();
+            self.selection = FileSearchSelection::SearchInput;
+            self.scroll_offset = 0;
             return;
         }
         self.pending_search.push(PendingSearch {
@@ -93,5 +102,78 @@ impl FileSearchState {
             case_sensitive: self.case_sensitive,
             use_regex: self.use_regex,
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use led_core::UserPath;
+
+    fn canon(s: &str) -> led_core::CanonPath {
+        UserPath::new(s).canonicalize()
+    }
+
+    #[test]
+    fn queue_search_clears_stale_results_when_query_becomes_empty() {
+        // Simulate a prior search that populated results + a
+        // Result selection, then the user backspacing to empty.
+        let path = canon("a.rs");
+        let hit = FileSearchHit {
+            path: path.clone(),
+            line: 1,
+            col: 1,
+            preview: "foo".into(),
+            match_start: 0,
+            match_end: 3,
+        };
+        let mut state = FileSearchState {
+            results: vec![FileSearchGroup {
+                path: path.clone(),
+                relative: "a.rs".into(),
+                hits: vec![hit.clone()],
+            }],
+            flat_hits: vec![hit],
+            selection: FileSearchSelection::Result(0),
+            scroll_offset: 4,
+            ..Default::default()
+        };
+        // Query is empty (nothing typed / user deleted it all).
+        state.query.text.clear();
+        state.queue_search();
+        assert!(state.results.is_empty());
+        assert!(state.flat_hits.is_empty());
+        assert_eq!(state.selection, FileSearchSelection::SearchInput);
+        assert_eq!(state.scroll_offset, 0);
+        assert!(state.pending_search.is_empty());
+    }
+
+    #[test]
+    fn queue_search_with_non_empty_query_pushes_pending_and_keeps_results() {
+        let path = canon("a.rs");
+        let hit = FileSearchHit {
+            path: path.clone(),
+            line: 1,
+            col: 1,
+            preview: "foo".into(),
+            match_start: 0,
+            match_end: 3,
+        };
+        let mut state = FileSearchState {
+            results: vec![FileSearchGroup {
+                path: path.clone(),
+                relative: "a.rs".into(),
+                hits: vec![hit.clone()],
+            }],
+            flat_hits: vec![hit],
+            ..Default::default()
+        };
+        state.query.set("bar");
+        state.queue_search();
+        // Old results stay (they get replaced when the driver
+        // response arrives); pending_search picked up the new query.
+        assert_eq!(state.results.len(), 1);
+        assert_eq!(state.pending_search.len(), 1);
+        assert_eq!(state.pending_search[0].query, "bar");
     }
 }
