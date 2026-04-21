@@ -215,12 +215,18 @@ pub enum BodyModel {
 /// Side-panel row. `chevron` is `None` for files, `Some(true)` for
 /// expanded dirs (▽), `Some(false)` for collapsed dirs (▷). `depth`
 /// indent and `selected` highlighting are resolved in the painter.
+///
+/// `match_range` is `(char_start, char_end)` inside `name` — set on
+/// file-search hit rows so the painter can highlight the matched
+/// substring with `theme.search_match`. Skipped when the row is
+/// selected (selection style wins end-to-end).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SidePanelRow {
     pub depth: u16,
     pub chevron: Option<bool>,
     pub name: Arc<str>,
     pub selected: bool,
+    pub match_range: Option<(u16, u16)>,
 }
 
 /// Which kind of content the side panel is displaying.

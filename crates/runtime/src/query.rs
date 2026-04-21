@@ -695,6 +695,7 @@ pub fn side_panel_model<'b, 'o>(
             chevron,
             name: Arc::<str>::from(entry.name.as_str()),
             selected: start + i == selected,
+            match_range: None,
         });
     }
     SidePanelModel {
@@ -723,6 +724,7 @@ fn completions_side_panel(
             chevron: None,
             name: Arc::<str>::from(entry.name.as_str()),
             selected: state.selected == Some(i),
+            match_range: None,
         });
     }
     SidePanelModel {
@@ -774,6 +776,7 @@ fn file_search_side_panel(
         chevron: None,
         name: Arc::<str>::from(" Aa   .*   =>"),
         selected: false,
+        match_range: None,
     });
 
     if total > out.len() {
@@ -785,6 +788,7 @@ fn file_search_side_panel(
                 state.selection,
                 led_state_file_search::FileSearchSelection::SearchInput
             ),
+            match_range: None,
         });
     }
     if state.replace_mode && total > out.len() {
@@ -796,6 +800,7 @@ fn file_search_side_panel(
                 state.selection,
                 led_state_file_search::FileSearchSelection::ReplaceInput
             ),
+            match_range: None,
         });
     }
 
@@ -836,6 +841,7 @@ fn file_search_side_panel(
                 chevron: None,
                 name: Arc::<str>::from(group.relative.as_str()),
                 selected: false,
+                match_range: None,
             });
         }
         for hit in &group.hits {
@@ -845,13 +851,18 @@ fn file_search_side_panel(
                 if total <= out.len() {
                     break 'outer;
                 }
-                let preview = trim_preview_for_match(hit);
+                let (preview, match_preview_idx) = trimmed_preview(hit);
+                let prefix_chars = 3 + count_chars_of_usize(hit.line) + 2;
+                let match_len = chars_between(&hit.preview, hit.match_start, hit.match_end);
+                let match_start = (prefix_chars + match_preview_idx) as u16;
+                let match_end = match_start.saturating_add(match_len as u16);
                 let name = format!("   {}: {}", hit.line, preview);
                 out.push(SidePanelRow {
                     depth: 0,
                     chevron: None,
                     name: Arc::<str>::from(name.as_str()),
                     selected: selected_hit_idx == Some(hit_idx),
+                    match_range: Some((match_start, match_end)),
                 });
             }
             hit_idx += 1;
@@ -865,27 +876,71 @@ fn file_search_side_panel(
     }
 }
 
+/// Context kept to the left of the match when the preview gets
+/// trimmed. 4 characters — enough to see "what identifier this is
+/// part of" without eating so much width that the match falls off
+/// the right edge.
+const PREVIEW_CONTEXT_CHARS: usize = 4;
+
 /// Leading-edge trim for a hit's preview so the matched text stays
-/// visible inside the narrow side-panel column. Prepends an
-/// ellipsis when the match sits deep enough in the line that we
-/// dropped leading characters. Context is kept at 4 characters —
-/// enough to see "what identifier this is part of" without eating
-/// so much width that the match itself gets truncated off the right.
+/// visible inside the narrow side-panel column. Returns both the
+/// trimmed preview and the 0-indexed char offset at which the match
+/// starts inside it — the painter needs the second value to draw
+/// the match-highlight segment.
 ///
 /// Uses `hit.col` (1-indexed character offset) rather than
 /// `match_start` (byte offset), so multi-byte UTF-8 content doesn't
 /// miscount.
-fn trim_preview_for_match(hit: &led_state_file_search::FileSearchHit) -> String {
-    const CONTEXT_CHARS: usize = 4;
+fn trimmed_preview(
+    hit: &led_state_file_search::FileSearchHit,
+) -> (String, usize) {
     let match_char_idx = hit.col.saturating_sub(1);
-    if match_char_idx <= CONTEXT_CHARS {
-        return hit.preview.clone();
+    if match_char_idx <= PREVIEW_CONTEXT_CHARS {
+        return (hit.preview.clone(), match_char_idx);
     }
-    let drop = match_char_idx - CONTEXT_CHARS;
+    let drop = match_char_idx - PREVIEW_CONTEXT_CHARS;
     let mut out = String::with_capacity(hit.preview.len());
     out.push('\u{2026}'); // …
     out.extend(hit.preview.chars().skip(drop));
-    out
+    // After trim: ellipsis + CONTEXT chars = match sits at
+    // char index `1 + CONTEXT` in the new string.
+    (out, 1 + PREVIEW_CONTEXT_CHARS)
+}
+
+/// Back-compat for tests that only care about the trimmed string.
+#[cfg(test)]
+fn trim_preview_for_match(hit: &led_state_file_search::FileSearchHit) -> String {
+    trimmed_preview(hit).0
+}
+
+/// Char count of an unsigned integer rendered via `Display` — used
+/// to compute the width of the `"{line}"` segment in a hit row.
+fn count_chars_of_usize(n: usize) -> usize {
+    if n == 0 {
+        return 1;
+    }
+    let mut n = n;
+    let mut c = 0;
+    while n > 0 {
+        n /= 10;
+        c += 1;
+    }
+    c
+}
+
+/// Number of characters (not bytes) in `s[byte_start..byte_end]`.
+/// Clamps a bad byte range to an empty slice rather than panicking —
+/// the driver sets sensible offsets, but a defensive cast keeps
+/// malformed hits from crashing the painter.
+fn chars_between(s: &str, byte_start: usize, byte_end: usize) -> usize {
+    if byte_end <= byte_start
+        || byte_end > s.len()
+        || !s.is_char_boundary(byte_start)
+        || !s.is_char_boundary(byte_end)
+    {
+        return 0;
+    }
+    s[byte_start..byte_end].chars().count()
 }
 
 /// "What clipboard action should we fire this tick?"
@@ -1856,6 +1911,79 @@ mod tests {
             match_end: 0,
         };
         assert_eq!(trim_preview_for_match(&hit), "  needle at start");
+    }
+
+    #[test]
+    fn hit_row_carries_match_range_covering_the_query() {
+        // Short line, match at col 5 for a 3-char query. Row name
+        // = "   42: aaaabbb". Prefix = 3 + 2 + 2 = 7 chars. Match
+        // starts at char 5-1=4 in the preview (no trim), so
+        // match_range = (7+4, 7+4+3) = (11, 14).
+        use led_state_file_search::{FileSearchGroup, FileSearchHit};
+
+        let path = canon("a.rs");
+        let hit = FileSearchHit {
+            path: path.clone(),
+            line: 42,
+            col: 5,
+            preview: "aaaabbbcccc".into(),
+            match_start: 4,
+            match_end: 7, // 3-char match ("bbb")
+        };
+        let state = led_state_file_search::FileSearchState {
+            results: vec![FileSearchGroup {
+                path: path.clone(),
+                relative: "a.rs".into(),
+                hits: vec![hit.clone()],
+            }],
+            flat_hits: vec![hit],
+            selection: led_state_file_search::FileSearchSelection::SearchInput,
+            ..Default::default()
+        };
+        let model = file_search_side_panel(&state, 20);
+        // Row 0 = header, row 1 = query, row 2 = group header, row 3 = hit.
+        let hit_row = &model.rows[3];
+        assert_eq!(&*hit_row.name, "   42: aaaabbbcccc");
+        assert_eq!(hit_row.match_range, Some((11, 14)));
+    }
+
+    #[test]
+    fn hit_row_match_range_tracks_through_the_trim_ellipsis() {
+        // Long line: "aaaabbbbccccdddd_needle_xxxx" — "needle"
+        // starts at char 17, col=18 (1-indexed), occupies 6 chars.
+        // Trim drops 13 chars (17 - CONTEXT=4), prepends …, leaves
+        // "…ddd_needle_xxxx" with the match at char 5. Row name
+        // prefix is `   1: ` = 6 chars, so match_range =
+        // (6 + 5, 6 + 5 + 6) = (11, 17).
+        use led_state_file_search::{FileSearchGroup, FileSearchHit};
+
+        let path = canon("a.rs");
+        let hit = FileSearchHit {
+            path: path.clone(),
+            line: 1,
+            col: 18,
+            preview: "aaaabbbbccccdddd_needle_xxxx".into(),
+            match_start: 17,
+            match_end: 23,
+        };
+        let state = led_state_file_search::FileSearchState {
+            results: vec![FileSearchGroup {
+                path: path.clone(),
+                relative: "a.rs".into(),
+                hits: vec![hit.clone()],
+            }],
+            flat_hits: vec![hit],
+            selection: led_state_file_search::FileSearchSelection::SearchInput,
+            ..Default::default()
+        };
+        let model = file_search_side_panel(&state, 20);
+        let hit_row = &model.rows[3];
+        assert_eq!(hit_row.match_range, Some((11, 17)));
+        // The chars at the computed range spell out "needle".
+        let chars: Vec<char> = hit_row.name.chars().collect();
+        let (s, e) = hit_row.match_range.unwrap();
+        let slice: String = chars[s as usize..e as usize].iter().collect();
+        assert_eq!(slice, "needle");
     }
 
     #[test]

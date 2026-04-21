@@ -436,6 +436,11 @@ fn paint_side_panel(
                 apply_style(out, sel_style)?;
                 queue!(out, style::Print(line))?;
                 reset_style(out, sel_style)?;
+            } else if let Some((start, end)) = entry.match_range {
+                // Split into three prints so the matched substring
+                // picks up `theme.search_match` styling without
+                // disturbing the surrounding row.
+                paint_row_with_match(&line, start as usize, end as usize, theme, out)?;
             } else {
                 queue!(out, style::Print(line))?;
             }
@@ -447,6 +452,41 @@ fn paint_side_panel(
             // stay blank until something else forces a body repaint.
             queue!(out, style::Print(&blanks))?;
         }
+    }
+    Ok(())
+}
+
+/// Split-print a non-selected hit row so the matched substring
+/// picks up `theme.search_match` styling. `start` / `end` are char
+/// offsets inside `line` (the post-padded / post-truncated text the
+/// sidebar will print). Clamps gracefully when the range is out of
+/// bounds — mis-computed indices shouldn't crash the painter.
+fn paint_row_with_match(
+    line: &str,
+    start: usize,
+    end: usize,
+    theme: &Theme,
+    out: &mut impl Write,
+) -> io::Result<()> {
+    use crossterm::{queue, style};
+    let total = line.chars().count();
+    let start = start.min(total);
+    let end = end.min(total).max(start);
+    if end == start {
+        queue!(out, style::Print(line))?;
+        return Ok(());
+    }
+    let prefix: String = line.chars().take(start).collect();
+    let matched: String = line.chars().skip(start).take(end - start).collect();
+    let suffix: String = line.chars().skip(end).collect();
+    if !prefix.is_empty() {
+        queue!(out, style::Print(prefix))?;
+    }
+    apply_style(out, &theme.search_match)?;
+    queue!(out, style::Print(matched))?;
+    reset_style(out, &theme.search_match)?;
+    if !suffix.is_empty() {
+        queue!(out, style::Print(suffix))?;
     }
     Ok(())
 }
@@ -710,6 +750,7 @@ mod tests {
                 chevron: None,
                 name: Arc::<str>::from("a.rs"),
                 selected: true,
+                match_range: None,
             }]),
             focused: true,
         mode: Default::default(),
@@ -745,12 +786,14 @@ mod tests {
                 chevron: None,
                 name: Arc::<str>::from("a.rs"),
                 selected: true,
+                match_range: None,
             },
             SidePanelRow {
                 depth: 0,
                 chevron: None,
                 name: Arc::<str>::from("b.rs"),
                 selected: false,
+                match_range: None,
             },
         ]);
         // Only two panel rows but editor_area.rows is 8 — six empty
@@ -902,6 +945,50 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn hit_row_match_range_emits_three_styled_segments() {
+        // A non-selected hit row with match_range. The painter
+        // should split the print into prefix + matched + suffix —
+        // detectable by scanning the raw ANSI output for the
+        // `search_match` bold + fg SGR between the prefix and the
+        // suffix text.
+        use std::sync::Arc;
+        use led_driver_terminal_core::SidePanelMode;
+        // Completions mode — painter doesn't prepend indent or
+        // chevron, so match_range is relative to entry.name directly.
+        let panel = SidePanelModel {
+            rows: Arc::new(vec![SidePanelRow {
+                depth: 0,
+                chevron: None,
+                name: Arc::<str>::from("   1: foo_needle_bar"),
+                selected: false,
+                match_range: Some((10, 16)),
+            }]),
+            focused: false,
+            mode: SidePanelMode::Completions,
+        };
+        let area = Rect { x: 0, y: 0, cols: 24, rows: 1 };
+        let mut out: Vec<u8> = Vec::new();
+        paint_side_panel(&panel, area, &Theme::default(), &mut out).expect("paint");
+        let s = std::str::from_utf8(&out).expect("utf8");
+        // "needle" substring must appear after a bold SGR (1). The
+        // surrounding prefix / suffix come in on plain prints.
+        let bold_pos = s.find("\x1b[1m").expect("bold SGR emitted");
+        let needle_pos = s.find("needle").expect("match text printed");
+        assert!(
+            bold_pos < needle_pos,
+            "bold should be set before printing the match; got raw = {s:?}"
+        );
+        // After the match we emit a Reset; check that "bar" comes
+        // after a Reset SGR.
+        let reset_pos = s[needle_pos..].find("\x1b[0m").map(|i| needle_pos + i);
+        let bar_pos = s.find("_bar").expect("suffix printed");
+        assert!(
+            reset_pos.is_some_and(|r| r < bar_pos),
+            "reset should fire between match and suffix; got raw = {s:?}"
+        );
     }
 
     #[test]

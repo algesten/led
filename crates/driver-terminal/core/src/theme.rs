@@ -150,6 +150,10 @@ pub struct Theme {
     // style applied when their corresponding flag is set. Off state
     // uses the default (plain) style — no field needed.
     pub search_toggle_on: Style,
+    /// Style applied to the matched substring inside each hit row.
+    /// Default = bright yellow + bold. Skipped on the currently-
+    /// selected row (selection style takes the whole row).
+    pub search_match: Style,
 
     // ── Editor body ─────────────────────────────────────────
     /// Background applied to the row the cursor is on. Default (no
@@ -232,6 +236,14 @@ impl Default for Theme {
             },
 
             search_toggle_on: inverse_active,
+            search_match: Style {
+                fg: Some(Color::BRIGHT_YELLOW),
+                attrs: Attrs {
+                    bold: true,
+                    ..Attrs::default()
+                },
+                ..Style::default()
+            },
 
             cursor_line: Style::default(),
             ruler: Style {
