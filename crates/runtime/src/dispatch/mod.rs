@@ -60,7 +60,7 @@ use undo::{redo_active, undo_active};
 use led_driver_buffers_core::BufferStore;
 use led_driver_terminal_core::{KeyCode, KeyEvent, KeyModifiers, Terminal};
 use led_state_alerts::AlertState;
-use led_state_browser::{BrowserState, Focus};
+use led_state_browser::{BrowserUi, Focus, FsTree};
 use led_state_buffer_edits::BufferEdits;
 use led_state_jumps::JumpListState;
 use led_state_kill_ring::KillRing;
@@ -90,7 +90,8 @@ pub struct Dispatcher<'a> {
     pub kill_ring: &'a mut KillRing,
     pub alerts: &'a mut AlertState,
     pub jumps: &'a mut JumpListState,
-    pub browser: &'a mut BrowserState,
+    pub browser: &'a mut BrowserUi,
+    pub fs: &'a FsTree,
     pub store: &'a BufferStore,
     pub terminal: &'a Terminal,
     pub keymap: &'a Keymap,
@@ -123,6 +124,7 @@ impl<'a> Dispatcher<'a> {
             self.alerts,
             self.jumps,
             self.browser,
+            self.fs,
             self.store,
             self.terminal,
             self.keymap,
@@ -158,7 +160,8 @@ pub fn dispatch_key(
     kill_ring: &mut KillRing,
     alerts: &mut AlertState,
     jumps: &mut JumpListState,
-    browser: &mut BrowserState,
+    browser: &mut BrowserUi,
+    fs: &FsTree,
     store: &BufferStore,
     terminal: &Terminal,
     keymap: &Keymap,
@@ -179,7 +182,7 @@ pub fn dispatch_key(
     match resolved {
         Resolved::Command(cmd) => {
             let outcome = run_command(
-                cmd, tabs, edits, kill_ring, alerts, jumps, browser, store, terminal,
+                cmd, tabs, edits, kill_ring, alerts, jumps, browser, fs, store, terminal,
             );
             // Kill-ring coalescing: any non-KillLine command breaks
             // the flag, so the next KillLine starts a fresh entry.
@@ -281,7 +284,8 @@ fn run_command(
     kill_ring: &mut KillRing,
     alerts: &mut AlertState,
     jumps: &mut JumpListState,
-    browser: &mut BrowserState,
+    browser: &mut BrowserUi,
+    fs: &FsTree,
     store: &BufferStore,
     terminal: &Terminal,
 ) -> DispatchOutcome {
@@ -454,19 +458,19 @@ fn run_command(
             DispatchOutcome::Continue
         }
         Command::ExpandDir => {
-            expand_dir(browser);
+            expand_dir(browser, fs);
             DispatchOutcome::Continue
         }
         Command::CollapseDir => {
-            collapse_dir(browser);
+            collapse_dir(browser, fs);
             DispatchOutcome::Continue
         }
         Command::CollapseAll => {
-            collapse_all(browser);
+            collapse_all(browser, fs);
             DispatchOutcome::Continue
         }
         Command::OpenSelected => {
-            open_selected(browser, tabs);
+            open_selected(browser, fs, tabs);
             DispatchOutcome::Continue
         }
         Command::OpenSelectedBg => {
@@ -507,7 +511,8 @@ mod tests {
         let mut kill_ring = KillRing::default();
         let mut alerts = AlertState::default();
         let mut jumps = JumpListState::default();
-        let mut browser = BrowserState::default();
+        let mut browser = BrowserUi::default();
+        let fs = FsTree::default();
         let store = BufferStore::default();
         let term = Terminal::default();
         let keymap = default_keymap();
@@ -522,6 +527,7 @@ mod tests {
             &mut alerts,
             &mut jumps,
             &mut browser,
+            &fs,
             &store,
             &term,
             &keymap,
@@ -539,6 +545,7 @@ mod tests {
             &mut alerts,
             &mut jumps,
             &mut browser,
+            &fs,
             &store,
             &term,
             &keymap,
@@ -569,7 +576,8 @@ mod tests {
         let mut kill_ring = KillRing::default();
         let mut alerts = AlertState::default();
         let mut jumps = JumpListState::default();
-        let mut browser = BrowserState::default();
+        let mut browser = BrowserUi::default();
+        let fs = FsTree::default();
         // ctrl+x → pending.
         dispatch_key(
             key(KeyModifiers::CONTROL, KeyCode::Char('x')),
@@ -579,6 +587,7 @@ mod tests {
             &mut alerts,
             &mut jumps,
             &mut browser,
+            &fs,
             &store,
             &term,
             &keymap,
@@ -594,6 +603,7 @@ mod tests {
             &mut alerts,
             &mut jumps,
             &mut browser,
+            &fs,
             &store,
             &term,
             &keymap,
@@ -623,7 +633,8 @@ mod tests {
         let mut kill_ring = KillRing::default();
         let mut alerts = AlertState::default();
         let mut jumps = JumpListState::default();
-        let mut browser = BrowserState::default();
+        let mut browser = BrowserUi::default();
+        let fs = FsTree::default();
 
         let outcome = dispatch_key(
             key(KeyModifiers::CONTROL, KeyCode::Char('q')),
@@ -633,6 +644,7 @@ mod tests {
             &mut alerts,
             &mut jumps,
             &mut browser,
+            &fs,
             &store,
             &term,
             &km,
@@ -649,6 +661,7 @@ mod tests {
             &mut alerts,
             &mut jumps,
             &mut browser,
+            &fs,
             &store,
             &term,
             &km,
@@ -669,7 +682,8 @@ mod tests {
         let mut kill_ring = KillRing::default();
         let mut alerts = AlertState::default();
         let mut jumps = JumpListState::default();
-        let mut browser = BrowserState::default();
+        let mut browser = BrowserUi::default();
+        let fs = FsTree::default();
         dispatch_key(
             key(KeyModifiers::NONE, KeyCode::Char('z')),
             &mut tabs,
@@ -678,6 +692,7 @@ mod tests {
             &mut alerts,
             &mut jumps,
             &mut browser,
+            &fs,
             &store,
             &term,
             &km,
@@ -699,7 +714,8 @@ mod tests {
         let mut kill_ring = KillRing::default();
         let mut alerts = AlertState::default();
         let mut jumps = JumpListState::default();
-        let mut browser = BrowserState::default();
+        let mut browser = BrowserUi::default();
+        let fs = FsTree::default();
         dispatch_key(
             key(KeyModifiers::CONTROL, KeyCode::Char('x')),
             &mut tabs,
@@ -708,6 +724,7 @@ mod tests {
             &mut alerts,
             &mut jumps,
             &mut browser,
+            &fs,
             &store,
             &term,
             &km,

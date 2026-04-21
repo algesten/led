@@ -20,7 +20,7 @@ use led_driver_terminal_core::{
     TabBarModel, Terminal,
 };
 use led_state_alerts::AlertState;
-use led_state_browser::{BrowserState, Focus, TreeEntry, TreeEntryKind};
+use led_state_browser::{BrowserUi, Focus, TreeEntry, TreeEntryKind};
 use led_state_buffer_edits::{BufferEdits, EditedBuffer};
 use led_state_tabs::{Cursor, Scroll, Tab, TabId, Tabs};
 use ropey::Rope;
@@ -151,16 +151,30 @@ impl<'a> AlertsInput<'a> {
     }
 }
 
-// ── Input on BrowserState ──────────────────────────────────────────────
+// ── Input on BrowserUi ──────────────────────────────────────────────
 
-/// Full projection for `render_frame` composition. The `entries`
-/// vector is already `Arc`-wrapped inside `BrowserState`, so cache-hit
-/// cloning stays pointer-fast.
+/// External-fact projection for [`FsTree`]. Written by the FS driver;
+/// consumed by `file_list_action` and (indirectly) `side_panel_model`.
 #[drv::input]
 #[derive(Copy, Clone)]
-pub struct BrowserInput<'a> {
+pub struct FsTreeInput<'a> {
     pub root: &'a Option<CanonPath>,
     pub dir_contents: &'a imbl::HashMap<CanonPath, imbl::Vector<led_state_browser::DirEntry>>,
+}
+
+impl<'a> FsTreeInput<'a> {
+    pub fn new(fs: &'a led_state_browser::FsTree) -> Self {
+        Self {
+            root: &fs.root,
+            dir_contents: &fs.dir_contents,
+        }
+    }
+}
+
+/// User-decision projection for [`BrowserUi`]. Mutated by dispatch.
+#[drv::input]
+#[derive(Copy, Clone)]
+pub struct BrowserUiInput<'a> {
     pub expanded_dirs: &'a imbl::HashSet<CanonPath>,
     pub entries: &'a Arc<Vec<TreeEntry>>,
     pub selected: &'a usize,
@@ -169,11 +183,9 @@ pub struct BrowserInput<'a> {
     pub focus: &'a Focus,
 }
 
-impl<'a> BrowserInput<'a> {
-    pub fn new(b: &'a BrowserState) -> Self {
+impl<'a> BrowserUiInput<'a> {
+    pub fn new(b: &'a BrowserUi) -> Self {
         Self {
-            root: &b.root,
-            dir_contents: &b.dir_contents,
             expanded_dirs: &b.expanded_dirs,
             entries: &b.entries,
             selected: &b.selected,
@@ -507,7 +519,7 @@ fn position_string(tabs: TabsActiveInput<'_>, _edits: EditedBuffersInput<'_>) ->
 /// of `browser.entries` and produces one `SidePanelRow` per row.
 /// Empty when the browser has no entries.
 #[drv::memo(single)]
-pub fn side_panel_model<'b>(browser: BrowserInput<'b>, rows: u16) -> SidePanelModel {
+pub fn side_panel_model<'b>(browser: BrowserUiInput<'b>, rows: u16) -> SidePanelModel {
     let rows = rows as usize;
     let start = *browser.scroll_offset;
     let end = start.saturating_add(rows).min(browser.entries.len());
@@ -538,15 +550,18 @@ pub fn side_panel_model<'b>(browser: BrowserInput<'b>, rows: u16) -> SidePanelMo
 /// listing (workspace root + every expanded dir) but isn't in
 /// `dir_contents` yet. Used to drive `FsListDriver::execute`.
 #[drv::memo(single)]
-pub fn file_list_action<'b>(browser: BrowserInput<'b>) -> Vec<ListCmd> {
+pub fn file_list_action<'f, 'u>(
+    fs: FsTreeInput<'f>,
+    ui: BrowserUiInput<'u>,
+) -> Vec<ListCmd> {
     let mut out: Vec<ListCmd> = Vec::new();
-    if let Some(root) = browser.root.as_ref()
-        && !browser.dir_contents.contains_key(root)
+    if let Some(root) = fs.root.as_ref()
+        && !fs.dir_contents.contains_key(root)
     {
         out.push(ListCmd::List(root.clone()));
     }
-    for dir in browser.expanded_dirs.iter() {
-        if !browser.dir_contents.contains_key(dir) {
+    for dir in ui.expanded_dirs.iter() {
+        if !fs.dir_contents.contains_key(dir) {
             out.push(ListCmd::List(dir.clone()));
         }
     }
@@ -566,7 +581,7 @@ pub fn render_frame<'t, 'e, 'b, 'a, 'al, 'br>(
     store: StoreLoadedInput<'b>,
     tabs: TabsActiveInput<'a>,
     alerts: AlertsInput<'al>,
-    browser: BrowserInput<'br>,
+    browser: BrowserUiInput<'br>,
 ) -> Option<Frame> {
     let dims = (*term.dims)?;
     let layout = Layout::compute(dims, *browser.visible);
@@ -697,7 +712,7 @@ mod tests {
         // Tests render without the side panel so body layout matches
         // the pre-M11 assertions — M11 tests for the side panel are
         // separate.
-        let browser = BrowserState {
+        let browser = BrowserUi {
             visible: false,
             ..Default::default()
         };
@@ -707,7 +722,7 @@ mod tests {
             StoreLoadedInput::new(s),
             TabsActiveInput::new(t),
             AlertsInput::new(&alerts),
-            BrowserInput::new(&browser),
+            BrowserUiInput::new(&browser),
         )
     }
 

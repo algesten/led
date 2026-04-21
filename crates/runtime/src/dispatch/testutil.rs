@@ -14,8 +14,8 @@ use led_driver_buffers_core::{BufferStore, LoadState};
 use led_driver_terminal_core::{Dims, KeyCode, KeyEvent, KeyModifiers, Terminal};
 use led_state_alerts::AlertState;
 use led_state_buffer_edits::{BufferEdits, EditedBuffer};
+use led_state_browser::{BrowserUi, FsTree};
 use led_state_jumps::JumpListState;
-    use led_state_browser::BrowserState;
 use led_state_kill_ring::KillRing;
 use led_state_tabs::{Tab, TabId, Tabs};
 use ropey::Rope;
@@ -115,7 +115,8 @@ pub(super) fn dispatch_default(
     let mut kill_ring = KillRing::default();
     let mut alerts = AlertState::default();
     let mut jumps = JumpListState::default();
-    let mut browser = BrowserState::default();
+    let mut browser = BrowserUi::default();
+    let fs = FsTree::default();
     dispatch_key(
         k,
         tabs,
@@ -124,6 +125,7 @@ pub(super) fn dispatch_default(
         &mut alerts,
         &mut jumps,
         &mut browser,
+        &fs,
         store,
         terminal,
         &default_keymap(),
@@ -147,7 +149,8 @@ pub(super) fn dispatch_chord_default(
     let mut kill_ring = KillRing::default();
     let mut alerts = AlertState::default();
     let mut jumps = JumpListState::default();
-    let mut browser = BrowserState::default();
+    let mut browser = BrowserUi::default();
+    let fs = FsTree::default();
     dispatch_key(
         prefix,
         tabs,
@@ -156,6 +159,7 @@ pub(super) fn dispatch_chord_default(
         &mut alerts,
         &mut jumps,
         &mut browser,
+        &fs,
         store,
         terminal,
         &keymap,
@@ -169,6 +173,7 @@ pub(super) fn dispatch_chord_default(
         &mut alerts,
         &mut jumps,
         &mut browser,
+        &fs,
         store,
         terminal,
         &keymap,
@@ -189,7 +194,8 @@ pub(super) fn dispatch_with_ring(
     let mut chord = ChordState::default();
     let mut alerts = AlertState::default();
     let mut jumps = JumpListState::default();
-    let mut browser = BrowserState::default();
+    let mut browser = BrowserUi::default();
+    let fs = FsTree::default();
     dispatch_key(
         k,
         tabs,
@@ -198,6 +204,7 @@ pub(super) fn dispatch_with_ring(
         &mut alerts,
         &mut jumps,
         &mut browser,
+        &fs,
         store,
         terminal,
         &default_keymap(),
@@ -212,7 +219,8 @@ pub(super) fn noop_dispatch(k: KeyEvent, tabs: &mut Tabs) -> DispatchOutcome {
     let mut kill_ring = KillRing::default();
     let mut alerts = AlertState::default();
     let mut jumps = JumpListState::default();
-    let mut browser = BrowserState::default();
+    let mut browser = BrowserUi::default();
+    let fs = FsTree::default();
     let store = BufferStore::default();
     let terminal = Terminal::default();
     let keymap = default_keymap();
@@ -225,6 +233,7 @@ pub(super) fn noop_dispatch(k: KeyEvent, tabs: &mut Tabs) -> DispatchOutcome {
         &mut alerts,
         &mut jumps,
         &mut browser,
+        &fs,
         &store,
         &terminal,
         &keymap,

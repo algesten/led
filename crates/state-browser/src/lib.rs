@@ -1,38 +1,31 @@
-//! The `BrowserState` source — file-browser sidebar state.
+//! File-browser sidebar state — split into two sources per
+//! EXAMPLE-ARCH § "Sources: two kinds of ground truth":
 //!
-//! Holds the workspace root, a per-directory listings cache populated
-//! by the FS driver, the set of expanded directories, the flattened
-//! `entries` vector the painter walks, and the user's selection +
-//! scroll + focus state.
+//! - [`FsTree`] — **external fact**, written by the FS-list driver.
+//!   Holds the workspace root and the per-directory listings cache.
+//! - [`BrowserUi`] — **user decision**, mutated by dispatch. Holds
+//!   which directories are expanded, the selection + scroll, the
+//!   visible-panel toggle, and focus. The flattened `entries`
+//!   vector the painter walks lives here as a cache; it is a pure
+//!   derivation of `(FsTree, BrowserUi.expanded_dirs)` and is
+//!   rebuilt whenever either side changes.
 //!
-//! Rebuild semantics match legacy `led/src/model/browser`: the
-//! flattened tree walks `root` + `expanded_dirs` + `dir_contents`,
-//! sorts children dirs-first then files-alphabetically, and filters
-//! out leading-`.` names.
+//! Rebuild semantics match legacy `led/src/model/browser`: walk
+//! `root` + `expanded_dirs` + `dir_contents`, sort children
+//! dirs-first then files-alphabetically, and filter out leading-`.`
+//! names.
 
 use std::sync::Arc;
 
 use imbl::{HashMap, HashSet, Vector};
 use led_core::CanonPath;
+pub use led_driver_fs_list_core::{DirEntry, DirEntryKind};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum Focus {
     #[default]
     Main,
     Side,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DirEntryKind {
-    File,
-    Directory,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct DirEntry {
-    pub name: String,
-    pub path: CanonPath,
-    pub kind: DirEntryKind,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -49,14 +42,25 @@ pub struct TreeEntry {
     pub kind: TreeEntryKind,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct BrowserState {
+/// **External-fact** source: the file-system view of the workspace.
+/// Written exclusively by the FS-list driver's ingest path; never
+/// mutated by dispatch.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct FsTree {
     pub root: Option<CanonPath>,
-    /// Per-directory listing cache, filled in by the FS driver.
+    /// Per-directory listing cache, filled by the FS driver.
     pub dir_contents: HashMap<CanonPath, Vector<DirEntry>>,
+}
+
+/// **User-decision** source: the browser's UI state. Dispatch
+/// mutates this; the runtime rebuilds `entries` after every
+/// mutation (or after `FsTree` changes).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BrowserUi {
     pub expanded_dirs: HashSet<CanonPath>,
-    /// Flattened tree view. Rebuilt by [`rebuild_entries`]; wrapped in
-    /// `Arc` so cache-hit clones of [`BrowserState`] are cheap.
+    /// Flattened tree view, derived from `(FsTree, expanded_dirs)`.
+    /// Wrapped in `Arc` so cache-hit clones of [`BrowserUi`] are a
+    /// pointer copy.
     pub entries: Arc<Vec<TreeEntry>>,
     pub selected: usize,
     pub scroll_offset: usize,
@@ -64,11 +68,9 @@ pub struct BrowserState {
     pub focus: Focus,
 }
 
-impl Default for BrowserState {
+impl Default for BrowserUi {
     fn default() -> Self {
         Self {
-            root: None,
-            dir_contents: HashMap::default(),
             expanded_dirs: HashSet::default(),
             entries: Arc::new(Vec::new()),
             selected: 0,
@@ -79,89 +81,93 @@ impl Default for BrowserState {
     }
 }
 
-impl BrowserState {
-    /// Walk the tree and produce `entries`. Directories come first
-    /// within each parent, then files; both groups sorted by
-    /// locale-insensitive name. Hidden entries (leading `.`) are
-    /// filtered out. Expanded subdirectories recurse inline.
-    pub fn rebuild_entries(&mut self) {
-        let mut out: Vec<TreeEntry> = Vec::new();
-        let Some(root) = self.root.clone() else {
-            self.entries = Arc::new(out);
-            self.clamp_selection();
-            return;
-        };
-        self.emit_children_of(&root, 0, &mut out);
-        self.entries = Arc::new(out);
-        self.clamp_selection();
+/// Walk the tree and refresh `ui.entries`. Pure derivation; call
+/// whenever `fs.dir_contents` or `ui.expanded_dirs` changes. Also
+/// clamps `ui.selected` if the new tree is shorter.
+pub fn rebuild_entries(ui: &mut BrowserUi, fs: &FsTree) {
+    let mut out: Vec<TreeEntry> = Vec::new();
+    if let Some(root) = fs.root.as_ref() {
+        emit_children_of(fs, &ui.expanded_dirs, root, 0, &mut out);
     }
+    ui.entries = Arc::new(out);
+    clamp_selection(ui);
+}
 
-    fn emit_children_of(&self, dir: &CanonPath, depth: usize, out: &mut Vec<TreeEntry>) {
-        let Some(children) = self.dir_contents.get(dir) else {
-            return;
-        };
-        let mut dirs: Vec<&DirEntry> = Vec::new();
-        let mut files: Vec<&DirEntry> = Vec::new();
-        for entry in children.iter() {
-            if entry.name.starts_with('.') {
-                continue;
-            }
-            match entry.kind {
-                DirEntryKind::Directory => dirs.push(entry),
-                DirEntryKind::File => files.push(entry),
-            }
+fn emit_children_of(
+    fs: &FsTree,
+    expanded: &HashSet<CanonPath>,
+    dir: &CanonPath,
+    depth: usize,
+    out: &mut Vec<TreeEntry>,
+) {
+    let Some(children) = fs.dir_contents.get(dir) else {
+        return;
+    };
+    let mut dirs: Vec<&DirEntry> = Vec::new();
+    let mut files: Vec<&DirEntry> = Vec::new();
+    for entry in children.iter() {
+        if entry.name.starts_with('.') {
+            continue;
         }
-        dirs.sort_by_key(|e| e.name.to_lowercase());
-        files.sort_by_key(|e| e.name.to_lowercase());
-
-        for entry in dirs {
-            let expanded = self.expanded_dirs.contains(&entry.path);
-            out.push(TreeEntry {
-                path: entry.path.clone(),
-                name: entry.name.clone(),
-                depth,
-                kind: TreeEntryKind::Directory { expanded },
-            });
-            if expanded {
-                self.emit_children_of(&entry.path, depth + 1, out);
-            }
-        }
-        for entry in files {
-            out.push(TreeEntry {
-                path: entry.path.clone(),
-                name: entry.name.clone(),
-                depth,
-                kind: TreeEntryKind::File,
-            });
+        match entry.kind {
+            DirEntryKind::Directory => dirs.push(entry),
+            DirEntryKind::File => files.push(entry),
         }
     }
+    dirs.sort_by_key(|e| e.name.to_lowercase());
+    files.sort_by_key(|e| e.name.to_lowercase());
 
-    fn clamp_selection(&mut self) {
-        if self.entries.is_empty() {
-            self.selected = 0;
-            self.scroll_offset = 0;
-            return;
-        }
-        if self.selected >= self.entries.len() {
-            self.selected = self.entries.len() - 1;
+    for entry in dirs {
+        let is_expanded = expanded.contains(&entry.path);
+        out.push(TreeEntry {
+            path: entry.path.clone(),
+            name: entry.name.clone(),
+            depth,
+            kind: TreeEntryKind::Directory {
+                expanded: is_expanded,
+            },
+        });
+        if is_expanded {
+            emit_children_of(fs, expanded, &entry.path, depth + 1, out);
         }
     }
+    for entry in files {
+        out.push(TreeEntry {
+            path: entry.path.clone(),
+            name: entry.name.clone(),
+            depth,
+            kind: TreeEntryKind::File,
+        });
+    }
+}
 
-    pub fn expand(&mut self, path: CanonPath) {
+fn clamp_selection(ui: &mut BrowserUi) {
+    if ui.entries.is_empty() {
+        ui.selected = 0;
+        ui.scroll_offset = 0;
+        return;
+    }
+    if ui.selected >= ui.entries.len() {
+        ui.selected = ui.entries.len() - 1;
+    }
+}
+
+impl BrowserUi {
+    pub fn expand(&mut self, path: CanonPath, fs: &FsTree) {
         self.expanded_dirs.insert(path);
-        self.rebuild_entries();
+        rebuild_entries(self, fs);
     }
 
-    pub fn collapse(&mut self, path: CanonPath) {
+    pub fn collapse(&mut self, path: CanonPath, fs: &FsTree) {
         self.expanded_dirs.remove(&path);
-        self.rebuild_entries();
+        rebuild_entries(self, fs);
     }
 
-    pub fn collapse_all(&mut self) {
+    pub fn collapse_all(&mut self, fs: &FsTree) {
         self.expanded_dirs = HashSet::default();
         self.selected = 0;
         self.scroll_offset = 0;
-        self.rebuild_entries();
+        rebuild_entries(self, fs);
     }
 
     pub fn selected_entry(&self) -> Option<&TreeEntry> {
@@ -192,8 +198,7 @@ impl BrowserState {
     }
 
     /// Clamp `scroll_offset` so `selected` stays within
-    /// `visible_rows` of the viewport. Called by dispatch after
-    /// every selection change.
+    /// `visible_rows` of the viewport.
     pub fn clamp_scroll(&mut self, visible_rows: usize) {
         if visible_rows == 0 || self.entries.is_empty() {
             self.scroll_offset = 0;
@@ -224,8 +229,8 @@ mod tests {
         }
     }
 
-    fn seeded_state() -> BrowserState {
-        let mut b = BrowserState {
+    fn seeded() -> (FsTree, BrowserUi) {
+        let mut fs = FsTree {
             root: Some(canon("/project")),
             ..Default::default()
         };
@@ -234,7 +239,7 @@ mod tests {
         root_children.push_back(dir_entry("alpha.txt", "/project/alpha.txt", DirEntryKind::File));
         root_children.push_back(dir_entry("beta.txt", "/project/beta.txt", DirEntryKind::File));
         root_children.push_back(dir_entry(".hidden", "/project/.hidden", DirEntryKind::File));
-        b.dir_contents.insert(canon("/project"), root_children);
+        fs.dir_contents.insert(canon("/project"), root_children);
 
         let mut sub_children = Vector::new();
         sub_children.push_back(dir_entry(
@@ -242,137 +247,137 @@ mod tests {
             "/project/sub/inner.txt",
             DirEntryKind::File,
         ));
-        b.dir_contents.insert(canon("/project/sub"), sub_children);
-        b
+        fs.dir_contents.insert(canon("/project/sub"), sub_children);
+        (fs, BrowserUi::default())
     }
 
     #[test]
     fn default_is_empty_and_visible() {
-        let b = BrowserState::default();
-        assert!(b.entries.is_empty());
-        assert!(b.visible);
-        assert_eq!(b.focus, Focus::Main);
+        let ui = BrowserUi::default();
+        assert!(ui.entries.is_empty());
+        assert!(ui.visible);
+        assert_eq!(ui.focus, Focus::Main);
     }
 
     #[test]
     fn rebuild_without_root_is_empty() {
-        let mut b = BrowserState::default();
-        b.rebuild_entries();
-        assert!(b.entries.is_empty());
+        let fs = FsTree::default();
+        let mut ui = BrowserUi::default();
+        rebuild_entries(&mut ui, &fs);
+        assert!(ui.entries.is_empty());
     }
 
     #[test]
     fn rebuild_sorts_dirs_first_then_files_alphabetically() {
-        let mut b = seeded_state();
-        b.rebuild_entries();
-        assert_eq!(b.entries.len(), 3); // sub + alpha + beta; .hidden filtered
-        assert_eq!(b.entries[0].name, "sub");
-        assert_eq!(b.entries[1].name, "alpha.txt");
-        assert_eq!(b.entries[2].name, "beta.txt");
+        let (fs, mut ui) = seeded();
+        rebuild_entries(&mut ui, &fs);
+        assert_eq!(ui.entries.len(), 3); // sub + alpha + beta; .hidden filtered
+        assert_eq!(ui.entries[0].name, "sub");
+        assert_eq!(ui.entries[1].name, "alpha.txt");
+        assert_eq!(ui.entries[2].name, "beta.txt");
     }
 
     #[test]
     fn rebuild_recurses_into_expanded_dirs() {
-        let mut b = seeded_state();
-        b.expanded_dirs.insert(canon("/project/sub"));
-        b.rebuild_entries();
-        assert_eq!(b.entries.len(), 4);
-        assert_eq!(b.entries[0].name, "sub");
-        assert_eq!(b.entries[1].name, "inner.txt");
-        assert_eq!(b.entries[1].depth, 1);
-        assert_eq!(b.entries[2].name, "alpha.txt");
+        let (fs, mut ui) = seeded();
+        ui.expanded_dirs.insert(canon("/project/sub"));
+        rebuild_entries(&mut ui, &fs);
+        assert_eq!(ui.entries.len(), 4);
+        assert_eq!(ui.entries[0].name, "sub");
+        assert_eq!(ui.entries[1].name, "inner.txt");
+        assert_eq!(ui.entries[1].depth, 1);
+        assert_eq!(ui.entries[2].name, "alpha.txt");
     }
 
     #[test]
     fn rebuild_filters_hidden_entries() {
-        let mut b = seeded_state();
-        b.rebuild_entries();
-        assert!(!b.entries.iter().any(|e| e.name == ".hidden"));
+        let (fs, mut ui) = seeded();
+        rebuild_entries(&mut ui, &fs);
+        assert!(!ui.entries.iter().any(|e| e.name == ".hidden"));
     }
 
     #[test]
     fn expand_flips_chevron_and_reveals_children() {
-        let mut b = seeded_state();
-        b.expand(canon("/project/sub"));
+        let (fs, mut ui) = seeded();
+        ui.expand(canon("/project/sub"), &fs);
         assert!(matches!(
-            b.entries[0].kind,
+            ui.entries[0].kind,
             TreeEntryKind::Directory { expanded: true }
         ));
-        assert_eq!(b.entries.len(), 4);
+        assert_eq!(ui.entries.len(), 4);
     }
 
     #[test]
     fn collapse_removes_from_expanded_and_rebuilds() {
-        let mut b = seeded_state();
-        b.expand(canon("/project/sub"));
-        assert_eq!(b.entries.len(), 4);
-        b.collapse(canon("/project/sub"));
-        assert_eq!(b.entries.len(), 3);
+        let (fs, mut ui) = seeded();
+        ui.expand(canon("/project/sub"), &fs);
+        assert_eq!(ui.entries.len(), 4);
+        ui.collapse(canon("/project/sub"), &fs);
+        assert_eq!(ui.entries.len(), 3);
         assert!(matches!(
-            b.entries[0].kind,
+            ui.entries[0].kind,
             TreeEntryKind::Directory { expanded: false }
         ));
     }
 
     #[test]
     fn collapse_all_clears_expanded_and_resets_selection() {
-        let mut b = seeded_state();
-        b.expand(canon("/project/sub"));
-        b.selected = 2;
-        b.scroll_offset = 1;
-        b.collapse_all();
-        assert!(b.expanded_dirs.is_empty());
-        assert_eq!(b.selected, 0);
-        assert_eq!(b.scroll_offset, 0);
+        let (fs, mut ui) = seeded();
+        ui.expand(canon("/project/sub"), &fs);
+        ui.selected = 2;
+        ui.scroll_offset = 1;
+        ui.collapse_all(&fs);
+        assert!(ui.expanded_dirs.is_empty());
+        assert_eq!(ui.selected, 0);
+        assert_eq!(ui.scroll_offset, 0);
     }
 
     #[test]
     fn move_selection_clamps_at_ends() {
-        let mut b = seeded_state();
-        b.rebuild_entries();
-        b.move_selection(-10);
-        assert_eq!(b.selected, 0);
-        b.move_selection(100);
-        assert_eq!(b.selected, b.entries.len() - 1);
+        let (fs, mut ui) = seeded();
+        rebuild_entries(&mut ui, &fs);
+        ui.move_selection(-10);
+        assert_eq!(ui.selected, 0);
+        ui.move_selection(100);
+        assert_eq!(ui.selected, ui.entries.len() - 1);
     }
 
     #[test]
     fn select_first_and_last() {
-        let mut b = seeded_state();
-        b.rebuild_entries();
-        b.select_last();
-        assert_eq!(b.selected, b.entries.len() - 1);
-        b.select_first();
-        assert_eq!(b.selected, 0);
+        let (fs, mut ui) = seeded();
+        rebuild_entries(&mut ui, &fs);
+        ui.select_last();
+        assert_eq!(ui.selected, ui.entries.len() - 1);
+        ui.select_first();
+        assert_eq!(ui.selected, 0);
     }
 
     #[test]
     fn clamp_scroll_brings_selected_into_window() {
-        let mut b = seeded_state();
-        b.rebuild_entries();
-        b.selected = 2;
-        b.scroll_offset = 0;
-        b.clamp_scroll(2); // window [0..2); selected 2 is off-screen.
-        assert_eq!(b.scroll_offset, 1); // window moves to [1..3)
+        let (fs, mut ui) = seeded();
+        rebuild_entries(&mut ui, &fs);
+        ui.selected = 2;
+        ui.scroll_offset = 0;
+        ui.clamp_scroll(2);
+        assert_eq!(ui.scroll_offset, 1);
     }
 
     #[test]
     fn clamp_scroll_pulls_back_when_selected_above_window() {
-        let mut b = seeded_state();
-        b.rebuild_entries();
-        b.selected = 0;
-        b.scroll_offset = 2;
-        b.clamp_scroll(5);
-        assert_eq!(b.scroll_offset, 0);
+        let (fs, mut ui) = seeded();
+        rebuild_entries(&mut ui, &fs);
+        ui.selected = 0;
+        ui.scroll_offset = 2;
+        ui.clamp_scroll(5);
+        assert_eq!(ui.scroll_offset, 0);
     }
 
     #[test]
     fn rebuild_clamps_selected_past_new_end() {
-        let mut b = seeded_state();
-        b.expand(canon("/project/sub"));
-        b.selected = 3; // valid at 4 entries
-        b.collapse(canon("/project/sub"));
-        // After collapse, entries = 3; selected should clamp.
-        assert_eq!(b.selected, 2);
+        let (fs, mut ui) = seeded();
+        ui.expand(canon("/project/sub"), &fs);
+        ui.selected = 3; // valid at 4 entries
+        ui.collapse(canon("/project/sub"), &fs);
+        assert_eq!(ui.selected, 2);
     }
 }

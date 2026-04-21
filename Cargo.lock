@@ -445,7 +445,6 @@ name = "led-driver-fs-list-core"
 version = "0.0.0"
 dependencies = [
  "led-core",
- "led-state-browser",
 ]
 
 [[package]]
@@ -512,6 +511,7 @@ version = "0.0.0"
 dependencies = [
  "imbl",
  "led-core",
+ "led-driver-fs-list-core",
 ]
 
 [[package]]

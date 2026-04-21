@@ -9,7 +9,22 @@ use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender};
 
 use led_core::CanonPath;
-pub use led_state_browser::{DirEntry, DirEntryKind};
+
+/// A single child entry from a directory listing. Structurally owned
+/// by this driver because it IS the driver's ABI — state / runtime
+/// consumers depend on this crate for the shape.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DirEntryKind {
+    File,
+    Directory,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DirEntry {
+    pub name: String,
+    pub path: CanonPath,
+    pub kind: DirEntryKind,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ListCmd {

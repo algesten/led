@@ -10,4 +10,3 @@ publish = false
 
 [dependencies]
 led-core = { workspace = true }
-led-state-browser = { workspace = true }

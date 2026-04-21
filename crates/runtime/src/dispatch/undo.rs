@@ -67,7 +67,7 @@ mod tests {
     use led_driver_terminal_core::{Dims, KeyCode, KeyModifiers};
     use led_state_alerts::AlertState;
     use led_state_jumps::JumpListState;
-    use led_state_browser::BrowserState;
+    use led_state_browser::{BrowserUi, FsTree};
     
     use led_state_kill_ring::KillRing;
     use led_state_tabs::Cursor;
@@ -129,7 +129,8 @@ mod tests {
         let mut kr = KillRing::default();
         let mut alerts = AlertState::default();
         let mut jumps = JumpListState::default();
-        let mut browser = BrowserState::default();
+        let mut browser = BrowserUi::default();
+        let fs = FsTree::default();
 
         // Undo: ""
         dispatch_key(
@@ -140,6 +141,7 @@ mod tests {
             &mut alerts,
             &mut jumps,
             &mut browser,
+            &fs,
             &store,
             &term,
             &km,
@@ -156,6 +158,7 @@ mod tests {
             &mut alerts,
             &mut jumps,
             &mut browser,
+            &fs,
             &store,
             &term,
             &km,
@@ -223,7 +226,8 @@ mod tests {
         let mut kr = KillRing::default();
         let mut alerts = AlertState::default();
         let mut jumps = JumpListState::default();
-        let mut browser = BrowserState::default();
+        let mut browser = BrowserUi::default();
+        let fs = FsTree::default();
         dispatch_key(
             key(KeyModifiers::CONTROL, KeyCode::Char('y')),
             &mut tabs,
@@ -232,6 +236,7 @@ mod tests {
             &mut alerts,
             &mut jumps,
             &mut browser,
+            &fs,
             &store,
             &term,
             &km,

@@ -217,7 +217,7 @@ mod tests {
     use led_state_alerts::AlertState;
     use led_state_buffer_edits::BufferEdits;
     use led_state_jumps::JumpListState;
-    use led_state_browser::BrowserState;
+    use led_state_browser::{BrowserUi, FsTree};
     use led_state_kill_ring::KillRing;
     use led_state_tabs::{Cursor, Scroll, Tabs};
     use ropey::Rope;
@@ -664,7 +664,8 @@ mod tests {
         let mut kill_ring = KillRing::default();
         let mut alerts = AlertState::default();
         let mut jumps = JumpListState::default();
-        let mut browser = BrowserState::default();
+        let mut browser = BrowserUi::default();
+        let fs = FsTree::default();
 
         let press = |k: KeyEvent,
                      tabs: &mut Tabs,
@@ -673,9 +674,10 @@ mod tests {
                      kill_ring: &mut KillRing,
                      alerts: &mut AlertState,
                      jumps: &mut JumpListState,
-                     browser: &mut BrowserState| {
+                     browser: &mut BrowserUi,
+                     fs: &FsTree| {
             super::super::dispatch_key(
-                k, tabs, edits, kill_ring, alerts, jumps, browser, &store, &term, &km, chord,
+                k, tabs, edits, kill_ring, alerts, jumps, browser, fs, &store, &term, &km, chord,
             );
         };
 
@@ -688,6 +690,7 @@ mod tests {
             &mut alerts,
             &mut jumps,
             &mut browser,
+            &fs,
         );
         assert_eq!(tabs.open[0].cursor.col, 3);
         press(
@@ -699,6 +702,7 @@ mod tests {
             &mut alerts,
             &mut jumps,
             &mut browser,
+            &fs,
         );
         assert_eq!(tabs.open[0].cursor.col, 7);
         press(
@@ -710,6 +714,7 @@ mod tests {
             &mut alerts,
             &mut jumps,
             &mut browser,
+            &fs,
         );
         assert_eq!(tabs.open[0].cursor.col, 4);
         press(
@@ -721,6 +726,7 @@ mod tests {
             &mut alerts,
             &mut jumps,
             &mut browser,
+            &fs,
         );
         assert_eq!(tabs.open[0].cursor.col, 0);
     }

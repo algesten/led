@@ -35,7 +35,7 @@ use led_driver_terminal_native::{paint, TerminalInputNative};
 use led_driver_fs_list_core::FsListDriver;
 use led_driver_fs_list_native::FsListNative;
 use led_state_alerts::AlertState;
-use led_state_browser::BrowserState;
+use led_state_browser::{BrowserUi, FsTree, rebuild_entries};
 use led_state_buffer_edits::{BufferEdits, EditedBuffer};
 use led_state_jumps::JumpListState;
 use led_state_kill_ring::KillRing;
@@ -74,9 +74,9 @@ pub use dispatch::{dispatch_key, DispatchOutcome, Dispatcher};
 pub use keymap::{default_keymap, parse_command, parse_key, ChordState, Command, Keymap};
 pub use query::{
     body_model, file_list_action, file_load_action, file_save_action, render_frame,
-    side_panel_model, status_bar_model, tab_bar_model, AlertsInput, BrowserInput,
-    EditedBuffersInput, PendingSavesInput, StoreLoadedInput, TabsActiveInput, TabsOpenInput,
-    TerminalDimsInput,
+    side_panel_model, status_bar_model, tab_bar_model, AlertsInput, BrowserUiInput,
+    EditedBuffersInput, FsTreeInput, PendingSavesInput, StoreLoadedInput, TabsActiveInput,
+    TabsOpenInput, TerminalDimsInput,
 };
 pub use trace::{SharedTrace, Trace};
 
@@ -132,7 +132,8 @@ pub fn run(
     kill_ring: &mut KillRing,
     alerts: &mut AlertState,
     jumps: &mut JumpListState,
-    browser: &mut BrowserState,
+    browser: &mut BrowserUi,
+    fs: &mut FsTree,
     store: &mut BufferStore,
     terminal: &mut Terminal,
     drivers: &Drivers,
@@ -194,21 +195,20 @@ pub fn run(
             }
         }
 
-        // Apply fs-list completions: round-trip entries into
-        // `browser.dir_contents` and rebuild the flattened tree.
-        // Failures leave the dir unlisted; the user can retry via
-        // CollapseAll-then-reopen.
+        // Apply fs-list completions: round-trip entries into the
+        // `FsTree.dir_contents` cache and rebuild the flattened
+        // browser view. Failures leave the dir unlisted; the user
+        // can retry via CollapseAll-then-reopen.
         let fs_completions = drivers.fs_list.process();
         let had_listing = !fs_completions.is_empty();
         for done in fs_completions {
             if let Ok(entries) = done.result {
-                browser
-                    .dir_contents
+                fs.dir_contents
                     .insert(done.path, imbl::Vector::from_iter(entries));
             }
         }
         if had_listing {
-            browser.rebuild_entries();
+            rebuild_entries(browser, fs);
         }
 
         // Apply clipboard completions: either paste the text at the
@@ -257,6 +257,7 @@ pub fn run(
                 alerts,
                 jumps,
                 browser,
+                fs,
                 store,
                 terminal,
                 keymap,
@@ -283,14 +284,17 @@ pub fn run(
             PendingSavesInput::new(edits),
             EditedBuffersInput::new(edits),
         );
-        let list_actions = file_list_action(BrowserInput::new(browser));
+        let list_actions = file_list_action(
+            FsTreeInput::new(fs),
+            BrowserUiInput::new(browser),
+        );
         let frame = render_frame(
             TerminalDimsInput::new(terminal),
             EditedBuffersInput::new(edits),
             StoreLoadedInput::new(store),
             TabsActiveInput::new(tabs),
             AlertsInput::new(alerts),
-            BrowserInput::new(browser),
+            BrowserUiInput::new(browser),
         );
 
         // ── Execute ─────────────────────────────────────────────
