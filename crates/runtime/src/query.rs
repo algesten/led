@@ -636,16 +636,22 @@ pub fn render_frame<'t, 'e, 'b, 'a, 'al, 'br>(
         .side_area
         .map(|area| side_panel_model(browser, area.rows));
     // Body cursor is body-area-relative. Shift to absolute screen
-    // coords by adding the editor area's origin.
-    let cursor = match &body {
-        BodyModel::Content {
-            cursor: Some((row, col)),
-            ..
-        } => Some((
-            layout.editor_area.x.saturating_add(*col),
-            layout.editor_area.y.saturating_add(*row),
-        )),
-        _ => None,
+    // coords by adding the editor area's origin. When the side panel
+    // has focus the editor cursor hides — the painter parks the
+    // terminal cursor on the selected side-panel row instead.
+    let cursor = if *browser.focus == Focus::Side {
+        None
+    } else {
+        match &body {
+            BodyModel::Content {
+                cursor: Some((row, col)),
+                ..
+            } => Some((
+                layout.editor_area.x.saturating_add(*col),
+                layout.editor_area.y.saturating_add(*row),
+            )),
+            _ => None,
+        }
     };
     Some(Frame {
         tab_bar,
@@ -788,6 +794,36 @@ mod tests {
         assert_eq!(*frame.tab_bar.labels, vec![" a.rs".to_string()]);
         assert_eq!(frame.tab_bar.active, Some(0));
         assert!(matches!(frame.body, BodyModel::Pending { .. }));
+    }
+
+    #[test]
+    fn render_frame_hides_cursor_when_side_panel_focused() {
+        // With focus on the side panel the editor cursor must be
+        // `None` — otherwise crossterm would `Show` it at the body
+        // origin while the user is navigating the tree.
+        let body = "hello".to_string();
+        let (t, e, s, term) = fixture(
+            &[("a.rs", 1)],
+            Some(1),
+            &[("a.rs", LoadState::Ready(Arc::new(Rope::from_str(&body))))],
+            Some(Dims { cols: 80, rows: 24 }),
+        );
+        let alerts = AlertState::default();
+        let browser = BrowserUi {
+            visible: false,
+            focus: Focus::Side,
+            ..Default::default()
+        };
+        let frame = render_frame(
+            TerminalDimsInput::new(&term),
+            EditedBuffersInput::new(&e),
+            StoreLoadedInput::new(&s),
+            TabsActiveInput::new(&t),
+            AlertsInput::new(&alerts),
+            BrowserUiInput::new(&browser),
+        )
+        .expect("dims set");
+        assert_eq!(frame.cursor, None);
     }
 
     #[test]
