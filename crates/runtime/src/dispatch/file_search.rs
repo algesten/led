@@ -169,7 +169,7 @@ pub(super) fn run_overlay_command(
             );
         }
         Command::InsertNewline => {
-            handle_enter(file_search.as_mut()?, tabs, edits);
+            handle_enter(file_search, browser, tabs, edits);
         }
         Command::Abort | Command::CloseFileSearch => {
             deactivate(file_search, browser, tabs);
@@ -201,24 +201,73 @@ fn input_for_selection(
     }
 }
 
-/// `Enter` behaviour. On any row, jump-preview the currently
-/// selected hit (or the first hit when the selection sits on an
-/// input row). The overlay stays open so the user can keep scanning.
+/// `Enter` behaviour. Two paths:
+///
+/// - **Selection on a Result row** → commit. Promote the hit's
+///   tab to non-preview, drop the cursor on the exact match
+///   position (line + col), close the overlay. This is the
+///   "jump into this hit" flow users expect after arrow-scanning.
+/// - **Selection on an input row** → preview-only. Select the
+///   first hit, move the preview tab to it, but keep the overlay
+///   open so the user can keep refining / scanning.
+///
+/// No-op when there are no hits.
 fn handle_enter(
-    state: &mut FileSearchState,
+    file_search: &mut Option<FileSearchState>,
+    browser: &mut BrowserUi,
     tabs: &mut Tabs,
     edits: &mut BufferEdits,
 ) {
-    if state.flat_hits.is_empty() {
-        return;
-    }
-    let idx = match state.selection {
-        FileSearchSelection::Result(i) if i < state.flat_hits.len() => i,
-        _ => 0,
+    let (hit, commit) = {
+        let state = match file_search.as_mut() {
+            Some(s) if !s.flat_hits.is_empty() => s,
+            _ => return,
+        };
+        let (idx, commit) = match state.selection {
+            FileSearchSelection::Result(i) if i < state.flat_hits.len() => (i, true),
+            _ => {
+                state.selection = FileSearchSelection::Result(0);
+                (0, false)
+            }
+        };
+        (state.flat_hits[idx].clone(), commit)
     };
-    state.selection = FileSearchSelection::Result(idx);
-    let hit = state.flat_hits[idx].clone();
-    jump_preview(&hit, tabs, edits);
+    if commit {
+        jump_commit(&hit, file_search, browser, tabs);
+    } else {
+        jump_preview(&hit, tabs, edits);
+    }
+}
+
+/// Commit the hit: promote its tab past preview, move the cursor to
+/// the exact match position (1-indexed `hit.line`/`hit.col` become
+/// 0-indexed), and close the overlay. `previous_tab` is cleared
+/// first so `deactivate`'s `close_preview` doesn't re-focus the tab
+/// that was active before the overlay opened.
+fn jump_commit(
+    hit: &FileSearchHit,
+    file_search: &mut Option<FileSearchState>,
+    browser: &mut BrowserUi,
+    tabs: &mut Tabs,
+) {
+    open_or_focus_tab(tabs, &hit.path, /* promote */ true);
+    let line = hit.line.saturating_sub(1);
+    let col = hit.col.saturating_sub(1);
+    if let Some(active_id) = tabs.active
+        && let Some(idx) = tabs.open.iter().position(|t| t.id == active_id)
+    {
+        let tab = &mut tabs.open[idx];
+        tab.cursor = Cursor {
+            line,
+            col,
+            preferred_col: col,
+        };
+        tab.scroll.top = line;
+    }
+    if let Some(state) = file_search.as_mut() {
+        state.previous_tab = None;
+    }
+    deactivate(file_search, browser, tabs);
 }
 
 /// Shift the selection by `delta` rows (`+1` = down, `-1` = up).
@@ -518,5 +567,123 @@ mod tests {
         assert_eq!(state.scroll_offset, 1);
         move_selection(&mut state, &mut tabs, &mut edits, 1, side_rows);
         assert_eq!(state.scroll_offset, 2);
+    }
+
+    #[test]
+    fn enter_on_result_row_commits_promotes_tab_and_closes_overlay() {
+        // Build a state with one hit at line 3, col 7 (1-indexed),
+        // selection already on Result(0). Tab for the hit's file
+        // is open as a preview. Enter should:
+        //  - promote the tab (preview → real)
+        //  - position cursor at (line=2, col=6) in 0-indexed form
+        //  - deactivate the overlay (file_search becomes None)
+        //  - leave focus on Main (editor), not Side.
+        use led_state_browser::{BrowserUi, Focus};
+        use led_state_file_search::{FileSearchGroup, FileSearchHit};
+        use led_state_tabs::{Tab, TabId};
+
+        let path = led_core::UserPath::new("a.rs").canonicalize();
+        let hit = FileSearchHit {
+            path: path.clone(),
+            line: 3,
+            col: 7,
+            preview: "    let foo = bar;".into(),
+            match_start: 8,
+            match_end: 11,
+        };
+        let state = FileSearchState {
+            results: vec![FileSearchGroup {
+                path: path.clone(),
+                relative: "a.rs".into(),
+                hits: vec![hit.clone()],
+            }],
+            flat_hits: vec![hit],
+            selection: FileSearchSelection::Result(0),
+            previous_tab: Some(TabId(99)), // pretend some other tab was active
+            ..Default::default()
+        };
+        let mut file_search = Some(state);
+        let mut tabs = Tabs {
+            open: imbl::vector![Tab {
+                id: TabId(1),
+                path: path.clone(),
+                preview: true,
+                ..Default::default()
+            }],
+            active: Some(TabId(1)),
+        };
+        let mut browser = BrowserUi {
+            focus: Focus::Side,
+            visible: true,
+            ..Default::default()
+        };
+        let mut edits = led_state_buffer_edits::BufferEdits::default();
+
+        handle_enter(&mut file_search, &mut browser, &mut tabs, &mut edits);
+
+        // Overlay closed.
+        assert!(file_search.is_none());
+        assert_eq!(browser.focus, Focus::Main);
+        // Tab survived (wasn't closed by a stale previous_tab restore)
+        // and is now a real (non-preview) tab.
+        assert_eq!(tabs.open.len(), 1);
+        assert_eq!(tabs.open[0].id, TabId(1));
+        assert!(!tabs.open[0].preview);
+        assert_eq!(tabs.active, Some(TabId(1)));
+        // Cursor at the match position, not line start.
+        assert_eq!(tabs.open[0].cursor.line, 2);
+        assert_eq!(tabs.open[0].cursor.col, 6);
+        assert_eq!(tabs.open[0].cursor.preferred_col, 6);
+        assert_eq!(tabs.open[0].scroll.top, 2);
+    }
+
+    #[test]
+    fn enter_on_search_input_previews_first_hit_and_keeps_overlay_open() {
+        // Contrast with the commit test: selection on SearchInput
+        // should keep the overlay open and leave the tab as a
+        // preview. Cursor lands at col 0 of the hit line (preview
+        // behaviour from stage 6), not the match col.
+        use led_state_browser::{BrowserUi, Focus};
+        use led_state_file_search::{FileSearchGroup, FileSearchHit};
+
+        let path = led_core::UserPath::new("a.rs").canonicalize();
+        let hit = FileSearchHit {
+            path: path.clone(),
+            line: 3,
+            col: 7,
+            preview: "    let foo = bar;".into(),
+            match_start: 8,
+            match_end: 11,
+        };
+        let state = FileSearchState {
+            results: vec![FileSearchGroup {
+                path: path.clone(),
+                relative: "a.rs".into(),
+                hits: vec![hit.clone()],
+            }],
+            flat_hits: vec![hit],
+            selection: FileSearchSelection::SearchInput,
+            ..Default::default()
+        };
+        let mut file_search = Some(state);
+        let mut tabs = Tabs::default();
+        let mut browser = BrowserUi {
+            focus: Focus::Side,
+            visible: true,
+            ..Default::default()
+        };
+        let mut edits = led_state_buffer_edits::BufferEdits::default();
+
+        handle_enter(&mut file_search, &mut browser, &mut tabs, &mut edits);
+
+        assert!(file_search.is_some());
+        let state = file_search.as_ref().unwrap();
+        assert_eq!(state.selection, FileSearchSelection::Result(0));
+        // A preview tab was created (file wasn't previously open).
+        assert_eq!(tabs.open.len(), 1);
+        assert!(tabs.open[0].preview);
+        assert_eq!(tabs.open[0].cursor.line, 2);
+        // Preview parks the cursor at col 0, not the match col.
+        assert_eq!(tabs.open[0].cursor.col, 0);
     }
 }
