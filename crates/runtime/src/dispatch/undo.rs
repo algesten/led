@@ -79,43 +79,103 @@ pub(super) fn undo_global(
     let Some(target_path) = pick_max_past_seq(edits, floor) else {
         return;
     };
-    let Some(eb) = edits.buffers.get_mut(&target_path) else {
-        return;
-    };
-    let Some(group) = eb.history.take_undo() else {
-        return;
-    };
-    let mut rope = (*eb.rope).clone();
-    for op in group.ops.iter().rev() {
-        match op {
-            EditOp::Insert { at, text } => {
-                let len = text.chars().count();
-                rope.remove(*at..*at + len);
-            }
-            EditOp::Delete { at, text } => {
-                rope.insert(*at, text);
+    // Pop the group, apply the rope inverse, pin saved_version
+    // when the group came from a preview (disk_write). Collect
+    // what we need (cursor_before, replacement bytes) BEFORE
+    // releasing the &mut eb so the later push into
+    // pending_single_replace can take its own &mut edits.
+    let (group, cursor_before, replacement_bytes, disk_write) = {
+        let Some(eb) = edits.buffers.get_mut(&target_path) else {
+            return;
+        };
+        let Some(group) = eb.history.take_undo() else {
+            return;
+        };
+        let mut rope = (*eb.rope).clone();
+        for op in group.ops.iter().rev() {
+            match op {
+                EditOp::Insert { at, text } => {
+                    let len = text.chars().count();
+                    rope.remove(*at..*at + len);
+                }
+                EditOp::Delete { at, text } => {
+                    rope.insert(*at, text);
+                }
             }
         }
-    }
-    bump(eb, rope);
-    // Bring the editor-side cursor with us when the targeted
-    // buffer is the currently-active tab — mirrors `undo_active`.
+        bump(eb, rope);
+        let disk_write = group
+            .file_search_mark
+            .as_ref()
+            .is_some_and(|m| m.disk_write);
+        if disk_write {
+            eb.saved_version = eb.version;
+        }
+        // Replacement bytes (Insert op's text length) for the
+        // inverse driver cmd's match range.
+        let replacement_bytes = group
+            .ops
+            .iter()
+            .find_map(|op| match op {
+                EditOp::Insert { text, .. } => Some(text.len()),
+                _ => None,
+            })
+            .unwrap_or(0);
+        let cursor_before = group.cursor_before;
+        (group, cursor_before, replacement_bytes, disk_write)
+    };
+
+    // Cursor-follow when the undone buffer is the active tab.
     if let Some(active_id) = tabs.active
         && let Some(tab) = tabs.open.iter_mut().find(|t| t.id == active_id)
         && tab.path == target_path
     {
-        tab.cursor = group.cursor_before;
+        tab.cursor = cursor_before;
         tab.cursor.preferred_col = tab.cursor.col;
     }
-    // Sync the overlay's mark if the group carried one. Undo goes
-    // to the OPPOSITE of `forward_marks_replaced`. Also pull the
-    // sidebar selection onto that hit so the user can see which
-    // row the change landed on.
+
+    // Overlay sync + inverse driver cmd for disk_write groups.
     if let (Some(mark), Some(state)) = (&group.file_search_mark, file_search) {
         apply_mark_to_state(state, mark.hit_idx, !mark.forward_marks_replaced);
         focus_affected_hit(state, mark.hit_idx, body_rows);
+        if disk_write
+            && let Some(hit) = state.flat_hits.get(mark.hit_idx).cloned()
+        {
+            let (orig, repl) = extract_delete_insert_texts(&group.ops);
+            if let (Some(orig), Some(repl)) = (orig, repl) {
+                edits.pending_single_replace.push(
+                    led_state_buffer_edits::PendingSingleReplace {
+                        path: target_path.clone(),
+                        line: hit.line,
+                        match_start: hit.match_start,
+                        match_end: hit.match_start + replacement_bytes,
+                        original: repl,
+                        replacement: orig,
+                    },
+                );
+            }
+        }
     }
-    eb.history.push_future(group);
+
+    if let Some(eb) = edits.buffers.get_mut(&target_path) {
+        eb.history.push_future(group);
+    }
+}
+
+/// Pull the Delete + Insert text fields off a replace group's
+/// ops. Returns (original, replacement) strings. Both `None` when
+/// the group isn't shaped as (Delete, Insert).
+fn extract_delete_insert_texts(ops: &[EditOp]) -> (Option<String>, Option<String>) {
+    let mut del: Option<String> = None;
+    let mut ins: Option<String> = None;
+    for op in ops {
+        match op {
+            EditOp::Delete { text, .. } if del.is_none() => del = Some(text.to_string()),
+            EditOp::Insert { text, .. } if ins.is_none() => ins = Some(text.to_string()),
+            _ => {}
+        }
+    }
+    (del, ins)
 }
 
 /// Cross-buffer redo mirror of `undo_global`. Uses the
@@ -130,37 +190,79 @@ pub(super) fn redo_global(
     let Some(target_path) = pick_max_future_seq(edits, floor) else {
         return;
     };
-    let Some(eb) = edits.buffers.get_mut(&target_path) else {
-        return;
-    };
-    let Some(group) = eb.history.take_redo() else {
-        return;
-    };
-    let mut rope = (*eb.rope).clone();
-    for op in &group.ops {
-        match op {
-            EditOp::Insert { at, text } => {
-                rope.insert(*at, text);
-            }
-            EditOp::Delete { at, text } => {
-                let len = text.chars().count();
-                rope.remove(*at..*at + len);
+    let (group, cursor_after, original_bytes, disk_write) = {
+        let Some(eb) = edits.buffers.get_mut(&target_path) else {
+            return;
+        };
+        let Some(group) = eb.history.take_redo() else {
+            return;
+        };
+        let mut rope = (*eb.rope).clone();
+        for op in &group.ops {
+            match op {
+                EditOp::Insert { at, text } => {
+                    rope.insert(*at, text);
+                }
+                EditOp::Delete { at, text } => {
+                    let len = text.chars().count();
+                    rope.remove(*at..*at + len);
+                }
             }
         }
-    }
-    bump(eb, rope);
+        bump(eb, rope);
+        let disk_write = group
+            .file_search_mark
+            .as_ref()
+            .is_some_and(|m| m.disk_write);
+        if disk_write {
+            eb.saved_version = eb.version;
+        }
+        let original_bytes = group
+            .ops
+            .iter()
+            .find_map(|op| match op {
+                EditOp::Delete { text, .. } => Some(text.len()),
+                _ => None,
+            })
+            .unwrap_or(0);
+        let cursor_after = group.cursor_after;
+        (group, cursor_after, original_bytes, disk_write)
+    };
+
     if let Some(active_id) = tabs.active
         && let Some(tab) = tabs.open.iter_mut().find(|t| t.id == active_id)
         && tab.path == target_path
     {
-        tab.cursor = group.cursor_after;
+        tab.cursor = cursor_after;
         tab.cursor.preferred_col = tab.cursor.col;
     }
     if let (Some(mark), Some(state)) = (&group.file_search_mark, file_search) {
         apply_mark_to_state(state, mark.hit_idx, mark.forward_marks_replaced);
         focus_affected_hit(state, mark.hit_idx, body_rows);
+        if disk_write
+            && let Some(hit) = state.flat_hits.get(mark.hit_idx).cloned()
+        {
+            let (orig, repl) = extract_delete_insert_texts(&group.ops);
+            if let (Some(orig), Some(repl)) = (orig, repl) {
+                // Forward again: replace `orig` bytes
+                // [hit.match_start..match_start + orig.len()]
+                // with `repl`.
+                edits.pending_single_replace.push(
+                    led_state_buffer_edits::PendingSingleReplace {
+                        path: target_path.clone(),
+                        line: hit.line,
+                        match_start: hit.match_start,
+                        match_end: hit.match_start + original_bytes,
+                        original: orig,
+                        replacement: repl,
+                    },
+                );
+            }
+        }
     }
-    eb.history.push_past(group);
+    if let Some(eb) = edits.buffers.get_mut(&target_path) {
+        eb.history.push_past(group);
+    }
 }
 
 fn pick_max_past_seq(edits: &BufferEdits, floor: u64) -> Option<CanonPath> {

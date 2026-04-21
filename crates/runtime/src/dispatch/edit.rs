@@ -9,6 +9,13 @@ use super::shared::{bump, line_char_len, with_active};
 
 pub(super) fn insert_char(tabs: &mut Tabs, edits: &mut BufferEdits, ch: char) {
     with_active(tabs, edits, |tab, eb| {
+        // Preview tabs are strict viewers — typing into one would
+        // create dirty in-memory state the user didn't ask for.
+        // Enter-to-promote is the explicit "I want to own this"
+        // gesture; until then, text input is a no-op.
+        if tab.preview {
+            return;
+        }
         let before = tab.cursor;
         let mut rope = (*eb.rope).clone();
         let char_idx = rope.line_to_char(tab.cursor.line) + tab.cursor.col;
@@ -23,6 +30,9 @@ pub(super) fn insert_char(tabs: &mut Tabs, edits: &mut BufferEdits, ch: char) {
 
 pub(super) fn insert_newline(tabs: &mut Tabs, edits: &mut BufferEdits) {
     with_active(tabs, edits, |tab, eb| {
+        if tab.preview {
+            return;
+        }
         let before = tab.cursor;
         let mut rope = (*eb.rope).clone();
         let char_idx = rope.line_to_char(tab.cursor.line) + tab.cursor.col;
@@ -44,6 +54,9 @@ pub(super) fn insert_newline(tabs: &mut Tabs, edits: &mut BufferEdits) {
 
 pub(super) fn delete_back(tabs: &mut Tabs, edits: &mut BufferEdits) {
     with_active(tabs, edits, |tab, eb| {
+        if tab.preview {
+            return;
+        }
         if tab.cursor.line == 0 && tab.cursor.col == 0 {
             return;
         }
@@ -76,6 +89,9 @@ pub(super) fn delete_back(tabs: &mut Tabs, edits: &mut BufferEdits) {
 
 pub(super) fn delete_forward(tabs: &mut Tabs, edits: &mut BufferEdits) {
     with_active(tabs, edits, |tab, eb| {
+        if tab.preview {
+            return;
+        }
         let line_count = eb.rope.len_lines();
         let on_last_line = tab.cursor.line + 1 >= line_count;
         let at_line_end = tab.cursor.col >= line_char_len(&eb.rope, tab.cursor.line);

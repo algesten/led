@@ -57,10 +57,21 @@ pub struct EditGroup {
 /// redo. `hit_idx` is the position in FileSearchState.flat_hits;
 /// `forward_marks_replaced` tells which mark state the
 /// forward-apply of this group produces. Undo sets the opposite.
+///
+/// `disk_write` distinguishes two replace flavours:
+/// - `false`: the file is a real (non-preview) loaded buffer. The
+///   edit is in-memory only; dirty flag flips; user saves on their
+///   own schedule.
+/// - `true`: the file is a preview tab (or was unloaded when the
+///   replace fired). The runtime also queued a driver cmd to
+///   write disk, and kept `saved_version == version` so the
+///   buffer stays clean. Undo/redo on this kind of group must
+///   also flip the disk state via an inverse driver cmd.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileSearchMark {
     pub hit_idx: usize,
     pub forward_marks_replaced: bool,
+    pub disk_write: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]

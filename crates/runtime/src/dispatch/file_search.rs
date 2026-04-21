@@ -253,7 +253,7 @@ pub(super) fn run_overlay_command(
         Command::ReplaceAll => {
             let state = file_search.as_mut()?;
             if state.replace_mode {
-                apply_replace_all(state, edits, fs_root);
+                apply_replace_all(state, tabs, edits, fs_root);
                 deactivate(file_search, browser, tabs);
             }
         }
@@ -520,11 +520,19 @@ fn replace_selected(
     let replacement = state.replace.text.clone();
     let replacement_char_len = replacement.chars().count();
 
-    let rope_char_start = if let Some(eb) = edits.buffers.get_mut(&hit.path) {
-        // Loaded-buffer path: splice the rope in place AND record
-        // the edit on the buffer's history as one compound replace
-        // group, tagged with a FileSearchMark so undo/redo can
-        // resync the overlay's hit_replacements vec.
+    // "Is this file a real (non-preview) loaded buffer?" — the
+    // one case where replace stays in-memory + dirty so the user
+    // can review before saving. Preview tabs and unloaded files
+    // both go through the driver (direct-to-disk) and keep their
+    // buffers (if any) clean.
+    let is_owned_buffer = edits.buffers.contains_key(&hit.path)
+        && tabs
+            .open
+            .iter()
+            .any(|t| t.path == hit.path && !t.preview);
+
+    let rope_char_start = if is_owned_buffer {
+        let eb = edits.buffers.get_mut(&hit.path).expect("checked above");
         let line0 = hit.line.saturating_sub(1);
         if line0 >= eb.rope.len_lines() {
             return;
@@ -554,14 +562,67 @@ fn replace_selected(
             Some(led_state_buffer_edits::FileSearchMark {
                 hit_idx: idx,
                 forward_marks_replaced: true,
+                disk_write: false,
             }),
         );
         super::shared::bump(eb, new_rope);
         match_char_start
+    } else if let Some(eb) = edits.buffers.get_mut(&hit.path) {
+        // Preview path: rope IS loaded (preview is a lens), but
+        // the buffer is not user-owned. Apply the edit to the
+        // rope for display, fire the driver to write disk, and
+        // keep `saved_version == version` so the buffer stays
+        // clean. Also record a history group tagged `disk_write`
+        // so undo/redo can fire the inverse driver cmd.
+        let line0 = hit.line.saturating_sub(1);
+        if line0 >= eb.rope.len_lines() {
+            return;
+        }
+        let line_start = eb.rope.line_to_char(line0);
+        let match_char_start = line_start + hit.col.saturating_sub(1);
+        let match_char_end = match_char_start + original_char_len;
+        if match_char_end > eb.rope.len_chars() {
+            return;
+        }
+        let mut new_rope = (*eb.rope).clone();
+        new_rope.remove(match_char_start..match_char_end);
+        if !replacement.is_empty() {
+            new_rope.insert(match_char_start, &replacement);
+        }
+        let cursor_anchor = led_state_tabs::Cursor {
+            line: line0,
+            col: hit.col.saturating_sub(1),
+            preferred_col: hit.col.saturating_sub(1),
+        };
+        eb.history.record_replace(
+            match_char_start,
+            std::sync::Arc::<str>::from(original_text.as_str()),
+            std::sync::Arc::<str>::from(replacement.as_str()),
+            cursor_anchor,
+            cursor_anchor,
+            Some(led_state_buffer_edits::FileSearchMark {
+                hit_idx: idx,
+                forward_marks_replaced: true,
+                disk_write: true,
+            }),
+        );
+        super::shared::bump(eb, new_rope);
+        eb.saved_version = eb.version;
+        edits.pending_single_replace.push(
+            led_state_buffer_edits::PendingSingleReplace {
+                path: hit.path.clone(),
+                line: hit.line,
+                match_start: hit.match_start,
+                match_end: hit.match_end,
+                original: original_text.clone(),
+                replacement: replacement.clone(),
+            },
+        );
+        match_char_start
     } else {
-        // On-disk path: queue a driver cmd. `rope_char_start` is
-        // meaningless for unloaded buffers — use 0 as a sentinel;
-        // undo uses (line, col) via the driver inverse cmd.
+        // Unloaded file: no rope in edits.buffers. Pure driver
+        // path. `rope_char_start` is meaningless here; undo uses
+        // (line, col) via the driver inverse cmd.
         edits.pending_single_replace.push(
             led_state_buffer_edits::PendingSingleReplace {
                 path: hit.path.clone(),
@@ -584,20 +645,6 @@ fn replace_selected(
         path: hit.path.clone(),
     });
 
-    // Promote the preview tab for this file to a non-preview tab.
-    // Without this, arrowing to a hit in a different file next
-    // would reassign this tab's path (preview tabs are single-
-    // slot, reused on next preview), orphaning our dirty changes
-    // with no visible tab. Promotion pins the tab so the `●`
-    // marker stays visible and saving / closing still works.
-    if let Some(preview_tab) = tabs
-        .open
-        .iter_mut()
-        .find(|t| t.preview && t.path == hit.path)
-    {
-        preview_tab.preview = false;
-    }
-
     advance_to_next_pending(state);
 }
 
@@ -606,7 +653,7 @@ fn replace_selected(
 /// immediately Right-arrow to redo if wanted.
 fn unreplace_selected(
     state: &mut FileSearchState,
-    _tabs: &mut Tabs,
+    tabs: &mut Tabs,
     edits: &mut BufferEdits,
 ) {
     let FileSearchSelection::Result(idx) = state.selection else {
@@ -622,14 +669,18 @@ fn unreplace_selected(
         .get(entry.hit.match_start..entry.hit.match_end)
         .unwrap_or("")
         .to_string();
-    if let Some(eb) = edits.buffers.get_mut(&entry.path) {
+    let is_owned_buffer = edits.buffers.contains_key(&entry.path)
+        && tabs
+            .open
+            .iter()
+            .any(|t| t.path == entry.path && !t.preview);
+    if is_owned_buffer {
+        let eb = edits.buffers.get_mut(&entry.path).expect("checked above");
         let rope_len = eb.rope.len_chars();
         let replacement_end = entry
             .rope_char_start
             .saturating_add(entry.replacement_char_len);
         if replacement_end > rope_len {
-            // Rope shrank past the replacement — abandon the undo.
-            // Restore the entry so state stays consistent.
             state.hit_replacements[idx] = Some(entry);
             return;
         }
@@ -656,9 +707,61 @@ fn unreplace_selected(
             Some(led_state_buffer_edits::FileSearchMark {
                 hit_idx: idx,
                 forward_marks_replaced: false,
+                disk_write: false,
             }),
         );
         super::shared::bump(eb, new_rope);
+    } else if let Some(eb) = edits.buffers.get_mut(&entry.path) {
+        // Preview inverse: same shape as owned-buffer inverse but
+        // also fires driver cmd + keeps saved_version pinned.
+        let rope_len = eb.rope.len_chars();
+        let replacement_end = entry
+            .rope_char_start
+            .saturating_add(entry.replacement_char_len);
+        if replacement_end > rope_len {
+            state.hit_replacements[idx] = Some(entry);
+            return;
+        }
+        let mut new_rope = (*eb.rope).clone();
+        if entry.replacement_char_len > 0 {
+            new_rope.remove(entry.rope_char_start..replacement_end);
+        }
+        if !original.is_empty() {
+            new_rope.insert(entry.rope_char_start, &original);
+        }
+        let line0 = entry.hit.line.saturating_sub(1);
+        let col0 = entry.hit.col.saturating_sub(1);
+        let cursor_anchor = led_state_tabs::Cursor {
+            line: line0,
+            col: col0,
+            preferred_col: col0,
+        };
+        eb.history.record_replace(
+            entry.rope_char_start,
+            std::sync::Arc::<str>::from(entry.replacement_text.as_str()),
+            std::sync::Arc::<str>::from(original.as_str()),
+            cursor_anchor,
+            cursor_anchor,
+            Some(led_state_buffer_edits::FileSearchMark {
+                hit_idx: idx,
+                forward_marks_replaced: false,
+                disk_write: true,
+            }),
+        );
+        super::shared::bump(eb, new_rope);
+        eb.saved_version = eb.version;
+        let replacement_bytes = entry.replacement_text.len();
+        let replacement_end_byte = entry.hit.match_start + replacement_bytes;
+        edits.pending_single_replace.push(
+            led_state_buffer_edits::PendingSingleReplace {
+                path: entry.path.clone(),
+                line: entry.hit.line,
+                match_start: entry.hit.match_start,
+                match_end: replacement_end_byte,
+                original: entry.replacement_text.clone(),
+                replacement: original.clone(),
+            },
+        );
     } else {
         let replacement_bytes = entry.replacement_text.len();
         let replacement_end_byte = entry.hit.match_start + replacement_bytes;
@@ -711,6 +814,7 @@ fn ensure_replacements_len(state: &mut FileSearchState) {
 
 fn apply_replace_all(
     state: &led_state_file_search::FileSearchState,
+    tabs: &Tabs,
     edits: &mut led_state_buffer_edits::BufferEdits,
     fs_root: Option<&led_core::CanonPath>,
 ) {
@@ -731,22 +835,47 @@ fn apply_replace_all(
     };
     let replacement = state.replace.text.as_str();
 
-    // In-memory pass: every loaded buffer that has at least one
-    // match gets rewritten. Not limited to `state.results` —
-    // changes the user has typed since the last search still count.
-    let mut skip_paths: Vec<led_core::CanonPath> =
-        Vec::with_capacity(edits.buffers.len());
-    let mut loaded_paths: Vec<led_core::CanonPath> =
-        edits.buffers.keys().cloned().collect();
-    // Deterministic order makes tests + trace diffs stable.
-    loaded_paths.sort_by(|a, b| a.as_path().cmp(b.as_path()));
-    for path in loaded_paths {
+    // Tabs split into owned (non-preview) vs preview. Both get
+    // their rope updated in-memory so the view stays consistent;
+    // the difference is the dirty flag and who writes disk.
+    //   - Owned: in-memory + dirty, user saves explicitly.
+    //   - Preview: in-memory + saved_version=version (stays
+    //     clean). Added to skip_paths so the driver walk doesn't
+    //     also write the file — we already applied the edit
+    //     in-memory, and the driver writing on top of our edit
+    //     would be a race.
+    //   - Unloaded files: driver writes them (not in skip_paths).
+    let owned_paths: std::collections::HashSet<led_core::CanonPath> = tabs
+        .open
+        .iter()
+        .filter(|t| !t.preview)
+        .map(|t| t.path.clone())
+        .collect();
+    let preview_paths: std::collections::HashSet<led_core::CanonPath> = tabs
+        .open
+        .iter()
+        .filter(|t| t.preview)
+        .map(|t| t.path.clone())
+        .collect();
+
+    let mut skip_paths: Vec<led_core::CanonPath> = Vec::new();
+
+    // Owned buffers — in-memory + dirty.
+    let mut loaded_owned: Vec<led_core::CanonPath> = edits
+        .buffers
+        .keys()
+        .filter(|p| owned_paths.contains(p))
+        .cloned()
+        .collect();
+    loaded_owned.sort_by(|a, b| a.as_path().cmp(b.as_path()));
+    for path in loaded_owned {
         let Some(eb) = edits.buffers.get_mut(&path) else {
             continue;
         };
         let existing = eb.rope.to_string();
         let count = re.find_iter(&existing).count();
         if count == 0 {
+            skip_paths.push(path);
             continue;
         }
         let replaced = re.replace_all(&existing, replacement);
@@ -762,14 +891,43 @@ fn apply_replace_all(
         skip_paths.push(path);
     }
 
-    // Skip_paths also needs the full loaded set (even buffers
-    // with zero matches) so the driver can't race and clobber a
-    // loaded-but-unmatched file with an on-disk rewrite that
-    // happens to succeed via regex differences we missed.
-    for path in edits.buffers.keys() {
-        if !skip_paths.contains(path) {
-            skip_paths.push(path.clone());
+    // Preview buffers — in-memory but stays clean. Driver skips
+    // them via skip_paths; we wrote the content locally and
+    // pending_single_replace is not queued (the rope reflects the
+    // final state directly).
+    let mut loaded_preview: Vec<led_core::CanonPath> = edits
+        .buffers
+        .keys()
+        .filter(|p| preview_paths.contains(p))
+        .cloned()
+        .collect();
+    loaded_preview.sort_by(|a, b| a.as_path().cmp(b.as_path()));
+    for path in loaded_preview {
+        let Some(eb) = edits.buffers.get_mut(&path) else {
+            continue;
+        };
+        let existing = eb.rope.to_string();
+        let count = re.find_iter(&existing).count();
+        if count == 0 {
+            skip_paths.push(path);
+            continue;
         }
+        let replaced = re.replace_all(&existing, replacement);
+        if replaced.as_ref() != existing {
+            super::shared::bump(eb, ropey::Rope::from_str(replaced.as_ref()));
+            // Preview stays clean — saved_version tracks the disk
+            // state which the driver is about to write to match.
+            eb.saved_version = eb.version;
+            edits
+                .pending_replace_in_memory
+                .push(led_state_buffer_edits::InMemoryReplace {
+                    path: path.clone(),
+                    count,
+                });
+        }
+        // Preview paths NOT added to skip_paths — the driver
+        // writes disk, our in-memory rope mirrors the same regex
+        // result. Both converge on identical content.
     }
 
     if let Some(root) = fs_root {
@@ -1143,7 +1301,28 @@ mod tests {
         }];
         state.flat_hits = vec![hit];
 
-        apply_replace_all(&state, &mut edits, Some(&root));
+        // Both loaded buffers are non-preview (owned). Mock the
+        // tab state to say so.
+        use led_state_tabs::{Tab, TabId};
+        let tabs = Tabs {
+            open: imbl::vector![
+                Tab {
+                    id: TabId(1),
+                    path: path_match.clone(),
+                    preview: false,
+                    ..Default::default()
+                },
+                Tab {
+                    id: TabId(2),
+                    path: path_other.clone(),
+                    preview: false,
+                    ..Default::default()
+                },
+            ],
+            active: Some(TabId(1)),
+        };
+
+        apply_replace_all(&state, &tabs, &mut edits, Some(&root));
 
         // In-memory: matched buffer got rewritten, stage counted 2.
         assert_eq!(
@@ -1188,7 +1367,18 @@ mod tests {
         state.replace.set("BAR");
         state.replace_mode = true;
 
-        apply_replace_all(&state, &mut edits, None);
+        use led_state_tabs::{Tab, TabId};
+        let tabs = Tabs {
+            open: imbl::vector![Tab {
+                id: TabId(1),
+                path: path.clone(),
+                preview: false,
+                ..Default::default()
+            }],
+            active: Some(TabId(1)),
+        };
+
+        apply_replace_all(&state, &tabs, &mut edits, None);
 
         assert_eq!(edits.buffers[&path].rope.to_string(), "alpha BAR\n");
         assert_eq!(edits.pending_replace_in_memory.len(), 1);
@@ -1568,11 +1758,11 @@ mod tests {
     }
 
     #[test]
-    fn right_arrow_promotes_preview_tab_for_replaced_file() {
-        // Arrow-down into a hit creates a preview tab. Without
-        // promotion, arrowing to a hit in another file would
-        // reassign this tab's path and orphan our dirty buffer.
-        // Right-arrow must promote the preview so the tab sticks.
+    fn right_arrow_on_preview_routes_to_driver_keeps_buffer_clean() {
+        // Arrow-down into a hit creates a preview tab. Under
+        // strict-viewer semantics, Right-arrow does NOT promote
+        // the preview — it writes disk (via the driver) and
+        // keeps the buffer clean (saved_version == version).
         use led_state_buffer_edits::{BufferEdits, EditedBuffer};
         use led_state_file_search::{FileSearchGroup, FileSearchHit};
         use led_state_tabs::{Tab, TabId};
@@ -1619,12 +1809,16 @@ mod tests {
 
         replace_selected(&mut state, &mut tabs, &mut edits);
 
-        // Tab stays in place, now non-preview.
+        // Tab stays a preview — no promotion.
         assert_eq!(tabs.open.len(), 1);
-        assert!(!tabs.open[0].preview);
-        assert_eq!(tabs.open[0].path, path);
-        // And it's dirty as expected.
-        assert!(edits.buffers[&path].dirty());
+        assert!(tabs.open[0].preview);
+        // Rope reflects the edit so the preview shows the new
+        // content, but the buffer is clean (saved_version is
+        // kept in lockstep with version).
+        assert_eq!(edits.buffers[&path].rope.to_string(), "BAR\n");
+        assert!(!edits.buffers[&path].dirty());
+        // Driver cmd was queued so disk gets rewritten.
+        assert_eq!(edits.pending_single_replace.len(), 1);
     }
 
     #[test]
@@ -1753,6 +1947,84 @@ mod tests {
 
         assert_eq!(state.selection, FileSearchSelection::Result(1));
         assert_eq!(state.scroll_offset, 0);
+    }
+
+    #[test]
+    fn undo_global_queues_inverse_driver_cmd_for_preview_replace() {
+        // Right-arrow in a preview tab routes through the disk-
+        // write path. Global undo should pop the rope + queue an
+        // inverse `PendingSingleReplace` so disk reverts too.
+        use super::super::undo::undo_global;
+        use led_state_buffer_edits::{BufferEdits, EditedBuffer};
+        use led_state_file_search::{FileSearchGroup, FileSearchHit};
+        use led_state_tabs::{Tab, TabId};
+
+        let path = led_core::UserPath::new("/tmp/a.rs").canonicalize();
+        let mut edits = BufferEdits::default();
+        let sg = edits.seq_gen.clone();
+        edits.buffers.insert(
+            path.clone(),
+            EditedBuffer::fresh_with_seq_gen(
+                std::sync::Arc::new(ropey::Rope::from_str("foo\n")),
+                sg,
+            ),
+        );
+        // Preview tab.
+        let mut tabs = Tabs {
+            open: imbl::vector![Tab {
+                id: TabId(1),
+                path: path.clone(),
+                preview: true,
+                ..Default::default()
+            }],
+            active: Some(TabId(1)),
+        };
+
+        let hit = FileSearchHit {
+            path: path.clone(),
+            line: 1,
+            col: 1,
+            preview: "foo".into(),
+            match_start: 0,
+            match_end: 3,
+        };
+        let mut state = FileSearchState::default();
+        state.query.set("foo");
+        state.replace.set("BAR");
+        state.replace_mode = true;
+        state.results = vec![FileSearchGroup {
+            path: path.clone(),
+            relative: "a.rs".into(),
+            hits: vec![hit.clone()],
+        }];
+        state.flat_hits = vec![hit];
+        state.hit_replacements = vec![None];
+        state.selection = FileSearchSelection::Result(0);
+
+        // Forward: Right on preview → rope = "BAR", driver cmd
+        // queued, saved_version pinned.
+        replace_selected(&mut state, &mut tabs, &mut edits);
+        assert_eq!(edits.buffers[&path].rope.to_string(), "BAR\n");
+        assert!(!edits.buffers[&path].dirty());
+        assert_eq!(edits.pending_single_replace.len(), 1);
+
+        // The forward driver cmd is sitting on the queue. Drain
+        // it (pretend the runtime shipped it) so we can check the
+        // inverse lands afterward.
+        edits.pending_single_replace.clear();
+
+        // Global undo → rope back to "foo", stays clean, inverse
+        // driver cmd queued.
+        undo_global(&mut tabs, &mut edits, Some(&mut state), 0, 10);
+        assert_eq!(edits.buffers[&path].rope.to_string(), "foo\n");
+        assert!(!edits.buffers[&path].dirty());
+        assert_eq!(edits.pending_single_replace.len(), 1);
+        let inverse = &edits.pending_single_replace[0];
+        assert_eq!(inverse.original, "BAR"); // what's currently on disk
+        assert_eq!(inverse.replacement, "foo"); // what we want back
+        assert_eq!(inverse.match_start, 0);
+        assert_eq!(inverse.match_end, 3); // "BAR".len()
+        assert!(state.hit_replacements[0].is_none());
     }
 
     #[test]
