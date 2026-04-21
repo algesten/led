@@ -89,6 +89,11 @@ pub enum Command {
     /// `[find_file]` keymap context — outside that context `Tab` is
     /// reserved for `InsertTab` (M23).
     FindFileTabComplete,
+
+    // In-buffer incremental search (M13). `InBufferSearch` both
+    // starts a fresh isearch and advances to the next match when
+    // already active — see `docs/spec/search.md`.
+    InBufferSearch,
 }
 
 /// Two-level key → command binding set. `direct` maps single keys to
@@ -329,6 +334,9 @@ pub fn default_keymap() -> Keymap {
     // is unbound (reserved for `InsertTab` in M23).
     m.bind_find_file("tab", Command::FindFileTabComplete);
 
+    // In-buffer isearch (M13). Same binding starts and advances.
+    m.bind("ctrl+s", Command::InBufferSearch);
+
     m
 }
 
@@ -522,6 +530,7 @@ pub fn parse_command(s: &str) -> Result<Command, String> {
         "find_file" => Ok(Command::FindFile),
         "save_as" => Ok(Command::SaveAs),
         "find_file_tab_complete" => Ok(Command::FindFileTabComplete),
+        "in_buffer_search" => Ok(Command::InBufferSearch),
         other => Err(format!("unknown command `{other}`")),
     }
 }
@@ -707,9 +716,14 @@ mod tests {
         // ctrl+x is a prefix, not a direct binding.
         assert!(m.is_prefix(&parse_key("ctrl+x").unwrap()));
         assert_eq!(m.lookup_direct(&parse_key("ctrl+x").unwrap()), None);
-        // Plain ctrl+c / ctrl+s are UNBOUND at the root (legacy parity).
+        // Plain ctrl+c is UNBOUND at the root (legacy parity).
         assert_eq!(m.lookup_direct(&parse_key("ctrl+c").unwrap()), None);
-        assert_eq!(m.lookup_direct(&parse_key("ctrl+s").unwrap()), None);
+        // Plain ctrl+s launches in-buffer isearch (M13). Saving
+        // uses the chord `ctrl+x ctrl+s`.
+        assert_eq!(
+            m.lookup_direct(&parse_key("ctrl+s").unwrap()),
+            Some(Command::InBufferSearch),
+        );
     }
 
     #[test]

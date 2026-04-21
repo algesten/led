@@ -17,6 +17,7 @@ use led_state_browser::{BrowserUi, FsTree};
 use led_state_buffer_edits::{BufferEdits, EditedBuffer};
 use led_state_clipboard::ClipboardState;
 use led_state_find_file::FindFileState;
+use led_state_isearch::IsearchState;
 use led_state_jumps::JumpListState;
 use led_state_kill_ring::KillRing;
 use led_state_tabs::{Tab, TabId, Tabs};
@@ -121,6 +122,7 @@ pub(super) fn dispatch_default(
     let mut browser = BrowserUi::default();
     let fs = FsTree::default();
     let mut find_file: Option<FindFileState> = None;
+    let mut isearch: Option<IsearchState> = None;
     dispatch_key(
         k,
         tabs,
@@ -134,6 +136,7 @@ pub(super) fn dispatch_default(
         store,
         terminal,
         &mut find_file,
+        &mut isearch,
         &default_keymap(),
         &mut chord,)
 }
@@ -158,6 +161,7 @@ pub(super) fn dispatch_chord_default(
     let mut browser = BrowserUi::default();
     let fs = FsTree::default();
     let mut find_file: Option<FindFileState> = None;
+    let mut isearch: Option<IsearchState> = None;
     dispatch_key(
         prefix,
         tabs,
@@ -171,9 +175,11 @@ pub(super) fn dispatch_chord_default(
         store,
         terminal,
         &mut find_file,
+        &mut isearch,
         &keymap,
         &mut chord,);
     let mut find_file: Option<FindFileState> = None;
+    let mut isearch: Option<IsearchState> = None;
     dispatch_key(
         second,
         tabs,
@@ -187,6 +193,7 @@ pub(super) fn dispatch_chord_default(
         store,
         terminal,
         &mut find_file,
+        &mut isearch,
         &keymap,
         &mut chord,)
 }
@@ -208,6 +215,7 @@ pub(super) fn dispatch_with_ring(
     let mut browser = BrowserUi::default();
     let fs = FsTree::default();
     let mut find_file: Option<FindFileState> = None;
+    let mut isearch: Option<IsearchState> = None;
     dispatch_key(
         k,
         tabs,
@@ -221,6 +229,7 @@ pub(super) fn dispatch_with_ring(
         store,
         terminal,
         &mut find_file,
+        &mut isearch,
         &default_keymap(),
         &mut chord,)
 }
@@ -240,6 +249,7 @@ pub(super) fn noop_dispatch(k: KeyEvent, tabs: &mut Tabs) -> DispatchOutcome {
     let keymap = default_keymap();
     let mut chord = ChordState::default();
     let mut find_file: Option<FindFileState> = None;
+    let mut isearch: Option<IsearchState> = None;
     dispatch_key(
         k,
         tabs,
@@ -253,6 +263,7 @@ pub(super) fn noop_dispatch(k: KeyEvent, tabs: &mut Tabs) -> DispatchOutcome {
         &store,
         &terminal,
         &mut find_file,
+        &mut isearch,
         &keymap,
         &mut chord,)
 }

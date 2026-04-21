@@ -61,7 +61,8 @@ pub(super) fn redo_active(tabs: &mut Tabs, edits: &mut BufferEdits) {
 #[cfg(test)]
 mod tests {
     use led_state_find_file::FindFileState;
-    
+    use led_state_isearch::IsearchState;
+
 
     
     
@@ -137,6 +138,7 @@ mod tests {
 
         // Undo: ""
         let mut find_file: Option<FindFileState> = None;
+        let mut isearch: Option<IsearchState> = None;
         dispatch_key(
             key(KeyModifiers::CONTROL, KeyCode::Char('/')),
             &mut tabs,
@@ -150,12 +152,14 @@ mod tests {
             &store,
             &term,
         &mut find_file,
+            &mut isearch,
             &km,
             &mut chord,);
         assert_eq!(rope_of(&edits, "file.rs").to_string(), "");
 
         // Redo: "hi"
         let mut find_file: Option<FindFileState> = None;
+        let mut isearch: Option<IsearchState> = None;
         dispatch_key(
             key(KeyModifiers::CONTROL, KeyCode::Char('y')),
             &mut tabs,
@@ -169,6 +173,7 @@ mod tests {
             &store,
             &term,
         &mut find_file,
+            &mut isearch,
             &km,
             &mut chord,);
         assert_eq!(rope_of(&edits, "file.rs").to_string(), "hi");
@@ -239,6 +244,7 @@ mod tests {
         let mut browser = BrowserUi::default();
         let fs = FsTree::default();
         let mut find_file: Option<FindFileState> = None;
+        let mut isearch: Option<IsearchState> = None;
         dispatch_key(
             key(KeyModifiers::CONTROL, KeyCode::Char('y')),
             &mut tabs,
@@ -252,6 +258,7 @@ mod tests {
             &store,
             &term,
         &mut find_file,
+            &mut isearch,
             &km,
             &mut chord,);
         // Still "x" — nothing to redo because the new edit dropped

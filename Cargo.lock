@@ -510,6 +510,7 @@ dependencies = [
  "led-state-buffer-edits",
  "led-state-clipboard",
  "led-state-find-file",
+ "led-state-isearch",
  "led-state-jumps",
  "led-state-kill-ring",
  "led-state-tabs",
@@ -557,6 +558,14 @@ dependencies = [
  "dirs",
  "led-core",
  "led-driver-find-file-core",
+ "led-state-tabs",
+]
+
+[[package]]
+name = "led-state-isearch"
+version = "0.0.0"
+dependencies = [
+ "led-core",
  "led-state-tabs",
 ]
 

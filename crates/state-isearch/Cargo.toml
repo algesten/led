@@ -1,0 +1,19 @@
+[package]
+name = "led-state-isearch"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# In-buffer incremental search state.
+#
+# `Option<IsearchState>` lives on `Atoms`. When `Some`, the runtime
+# is in isearch mode: dispatch routes typing + navigation through
+# the `[isearch]` keymap overlay, the status bar shows the `Search:`
+# prompt, and the active buffer's matches are highlighted. Only one
+# buffer's isearch is live at a time — mirrors legacy "isearch is a
+# per-buffer concept but only one buffer has focus, so it's
+# effectively singleton."
+
+[dependencies]
+led-core = { workspace = true }
+led-state-tabs = { workspace = true }
