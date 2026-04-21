@@ -1,0 +1,13 @@
+[package]
+name = "led-driver-fs-list-native"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Desktop-native worker that calls `std::fs::read_dir` off the main
+# loop and forwards results back via the core driver's mpsc.
+
+[dependencies]
+led-core = { workspace = true }
+led-driver-fs-list-core = { workspace = true }
+led-state-browser = { workspace = true }

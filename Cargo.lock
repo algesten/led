@@ -440,6 +440,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "led-driver-fs-list-core"
+version = "0.0.0"
+dependencies = [
+ "led-core",
+ "led-state-browser",
+]
+
+[[package]]
+name = "led-driver-fs-list-native"
+version = "0.0.0"
+dependencies = [
+ "led-core",
+ "led-driver-fs-list-core",
+ "led-state-browser",
+]
+
+[[package]]
 name = "led-driver-terminal-core"
 version = "0.0.0"
 dependencies = [
@@ -483,6 +500,14 @@ name = "led-state-alerts"
 version = "0.0.0"
 dependencies = [
  "led-state-tabs",
+]
+
+[[package]]
+name = "led-state-browser"
+version = "0.0.0"
+dependencies = [
+ "imbl",
+ "led-core",
 ]
 
 [[package]]
