@@ -570,10 +570,29 @@ fn reset_style(out: &mut impl Write, s: &Style) -> io::Result<()> {
 }
 
 fn to_ct_color(c: Color) -> crossterm::style::Color {
-    crossterm::style::Color::Rgb {
-        r: c.r,
-        g: c.g,
-        b: c.b,
+    match c {
+        // Indexed 0-15 → crossterm's named variants, which emit
+        // the short `ESC[3Nm` / `ESC[4Nm` escapes terminals honour
+        // via the user's palette config. Indexed 16-255 → the
+        // `ESC[38;5;Nm` / `ESC[48;5;Nm` 256-color escapes.
+        Color::Indexed(0) => crossterm::style::Color::Black,
+        Color::Indexed(1) => crossterm::style::Color::DarkRed,
+        Color::Indexed(2) => crossterm::style::Color::DarkGreen,
+        Color::Indexed(3) => crossterm::style::Color::DarkYellow,
+        Color::Indexed(4) => crossterm::style::Color::DarkBlue,
+        Color::Indexed(5) => crossterm::style::Color::DarkMagenta,
+        Color::Indexed(6) => crossterm::style::Color::DarkCyan,
+        Color::Indexed(7) => crossterm::style::Color::Grey,
+        Color::Indexed(8) => crossterm::style::Color::DarkGrey,
+        Color::Indexed(9) => crossterm::style::Color::Red,
+        Color::Indexed(10) => crossterm::style::Color::Green,
+        Color::Indexed(11) => crossterm::style::Color::Yellow,
+        Color::Indexed(12) => crossterm::style::Color::Blue,
+        Color::Indexed(13) => crossterm::style::Color::Magenta,
+        Color::Indexed(14) => crossterm::style::Color::Cyan,
+        Color::Indexed(15) => crossterm::style::Color::White,
+        Color::Indexed(n) => crossterm::style::Color::AnsiValue(n),
+        Color::Rgb { r, g, b } => crossterm::style::Color::Rgb { r, g, b },
     }
 }
 

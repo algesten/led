@@ -230,11 +230,22 @@ fn parse_style(
 
 fn parse_color(v: &toml::Value) -> Option<Color> {
     let s = v.as_str()?;
-    if let Some(hex) = s.strip_prefix('#') {
-        parse_hex_color(hex)
-    } else {
-        parse_named_color(s)
+    // `xNNN` — xterm 256-color palette index (e.g. `x216` = peach).
+    // Matches legacy `default_theme.toml`'s syntax.
+    if let Some(digits) = s.strip_prefix('x') {
+        if let Ok(n) = digits.parse::<u16>()
+            && n <= 255
+        {
+            return Some(Color::Indexed(n as u8));
+        }
+        return None;
     }
+    // Hex `#rrggbb` — 24-bit RGB. Only reliable on truecolor
+    // terminals; indexed forms above are the safer default.
+    if let Some(hex) = s.strip_prefix('#') {
+        return parse_hex_color(hex);
+    }
+    parse_named_color(s)
 }
 
 fn parse_hex_color(hex: &str) -> Option<Color> {
@@ -259,6 +270,13 @@ fn parse_named_color(name: &str) -> Option<Color> {
         "white" => Some(Color::WHITE),
         "grey" | "gray" => Some(Color::GREY),
         "dark_grey" | "dark_gray" | "darkgrey" | "darkgray" => Some(Color::DARK_GREY),
+        "bright_red" => Some(Color::BRIGHT_RED),
+        "bright_green" => Some(Color::BRIGHT_GREEN),
+        "bright_yellow" => Some(Color::BRIGHT_YELLOW),
+        "bright_blue" => Some(Color::BRIGHT_BLUE),
+        "bright_magenta" => Some(Color::BRIGHT_MAGENTA),
+        "bright_cyan" => Some(Color::BRIGHT_CYAN),
+        "bright_white" => Some(Color::BRIGHT_WHITE),
         _ => None,
     }
 }
@@ -408,6 +426,42 @@ bg = "#abc"
         let loaded = load_theme(None, Some(&path)).unwrap();
         assert_eq!(loaded.theme.status_warn.bg, None);
         assert_eq!(loaded.warnings.len(), 1);
+    }
+
+    #[test]
+    fn xterm_index_syntax_resolves_to_indexed_color() {
+        // Legacy `default_theme.toml` used `"$x024"` (via an alias
+        // table); theme.toml accepts `"x024"` directly.
+        let tmp = tempdir();
+        let path = write_theme(
+            &tmp,
+            r#"
+[chrome.status_normal]
+fg = "x223"
+bg = "x024"
+"#,
+        );
+        let loaded = load_theme(None, Some(&path)).unwrap();
+        assert_eq!(loaded.theme.status_normal.fg, Some(Color::Indexed(223)));
+        assert_eq!(loaded.theme.status_normal.bg, Some(Color::Indexed(24)));
+    }
+
+    #[test]
+    fn named_color_resolves_to_ansi_palette_index() {
+        // Built-in `"red"` → Indexed(1), not RGB. Terminals honour
+        // the user's configured palette for the 0-15 range.
+        let tmp = tempdir();
+        let path = write_theme(
+            &tmp,
+            r#"
+[chrome.status_warn]
+fg = "white"
+bg = "red"
+"#,
+        );
+        let loaded = load_theme(None, Some(&path)).unwrap();
+        assert_eq!(loaded.theme.status_warn.fg, Some(Color::Indexed(7)));
+        assert_eq!(loaded.theme.status_warn.bg, Some(Color::Indexed(1)));
     }
 
     #[test]

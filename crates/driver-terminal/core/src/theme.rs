@@ -11,34 +11,59 @@
 //! whose [`Style`] is the default produces no ANSI output, letting
 //! the terminal's native fg / bg show through.
 
-/// 24-bit RGB color. Named palette colors resolve to these at parse
-/// time — the painter never sees names.
+/// Terminal color, either an ANSI/xterm palette index or 24-bit RGB.
+///
+/// - `Indexed(0..=7)` — the 8 basic ANSI colors. Terminals honour
+///   the user's configured palette for these, which is what most
+///   users expect from "red" / "white" / etc.
+/// - `Indexed(8..=15)` — the 8 bright variants.
+/// - `Indexed(16..=255)` — xterm 256-color cube + grayscale.
+/// - `Rgb(r, g, b)` — 24-bit truecolor. Only reliable on terminals
+///   that advertise `COLORTERM=truecolor`; prefer `Indexed` for
+///   defaults.
+///
+/// led's built-in theme uses `Indexed` throughout so it renders on
+/// any 256-color terminal and respects the user's basic palette.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct Color {
-    pub r: u8,
-    pub g: u8,
-    pub b: u8,
+pub enum Color {
+    Indexed(u8),
+    Rgb { r: u8, g: u8, b: u8 },
 }
 
 impl Color {
     pub const fn rgb(r: u8, g: u8, b: u8) -> Self {
-        Self { r, g, b }
+        Self::Rgb { r, g, b }
     }
 
-    /// Legacy ANSI palette. Exact values match crossterm's
-    /// `Color::Red` / `Color::White` / etc. so a `theme.toml` that
-    /// names `red` renders the same as today's hard-coded
-    /// `Color::Red`.
-    pub const BLACK: Self = Self::rgb(0, 0, 0);
-    pub const RED: Self = Self::rgb(205, 0, 0);
-    pub const GREEN: Self = Self::rgb(0, 205, 0);
-    pub const YELLOW: Self = Self::rgb(205, 205, 0);
-    pub const BLUE: Self = Self::rgb(0, 0, 238);
-    pub const MAGENTA: Self = Self::rgb(205, 0, 205);
-    pub const CYAN: Self = Self::rgb(0, 205, 205);
-    pub const WHITE: Self = Self::rgb(229, 229, 229);
-    pub const GREY: Self = Self::rgb(127, 127, 127);
-    pub const DARK_GREY: Self = Self::rgb(64, 64, 64);
+    pub const fn indexed(i: u8) -> Self {
+        Self::Indexed(i)
+    }
+
+    // ── Named palette — ANSI indices 0-15 ──────────────────────
+    //
+    // Using indexed colors (not fixed RGB) means terminals use the
+    // user's configured palette. A theme.toml that writes `"red"`
+    // renders as whatever the user's terminal calls red, same as
+    // legacy led.
+    pub const BLACK: Self = Self::Indexed(0);
+    pub const RED: Self = Self::Indexed(1);
+    pub const GREEN: Self = Self::Indexed(2);
+    pub const YELLOW: Self = Self::Indexed(3);
+    pub const BLUE: Self = Self::Indexed(4);
+    pub const MAGENTA: Self = Self::Indexed(5);
+    pub const CYAN: Self = Self::Indexed(6);
+    pub const WHITE: Self = Self::Indexed(7);
+    pub const DARK_GREY: Self = Self::Indexed(8); // aka bright_black
+    pub const BRIGHT_RED: Self = Self::Indexed(9);
+    pub const BRIGHT_GREEN: Self = Self::Indexed(10);
+    pub const BRIGHT_YELLOW: Self = Self::Indexed(11);
+    pub const BRIGHT_BLUE: Self = Self::Indexed(12);
+    pub const BRIGHT_MAGENTA: Self = Self::Indexed(13);
+    pub const BRIGHT_CYAN: Self = Self::Indexed(14);
+    pub const BRIGHT_WHITE: Self = Self::Indexed(15);
+    /// Alias for `DARK_GREY` — matches the named color both
+    /// `"grey"` / `"gray"` resolve to in theme.toml.
+    pub const GREY: Self = Self::DARK_GREY;
 }
 
 /// Boolean attribute flags. Additive with fg / bg — e.g. `Attrs
@@ -139,19 +164,26 @@ pub struct Theme {
     pub ruler_column: Option<u16>,
 }
 
-// Built-in palette. Matches led's long-standing look: peach accents
-// for active chrome, deep blue muted gutter / border / status bar, a
-// pale-yellow status foreground, dark-grey bg for inactive /
-// unfocused highlights. Hex values mirror the xterm 256-color indices
-// the legacy `default_theme.toml` referenced (x216 peach, x024 deep
-// blue, x223 pale yellow, x232 near-black, x238 dark grey, x236
-// ruler grey).
-const PEACH: Color = Color::rgb(0xff, 0xaf, 0x87);
-const DEEP_BLUE: Color = Color::rgb(0x00, 0x5f, 0xaf);
-const PALE_YELLOW: Color = Color::rgb(0xff, 0xd7, 0xaf);
-const NEAR_BLACK: Color = Color::rgb(0x08, 0x08, 0x08);
-const INACTIVE_GREY: Color = Color::rgb(0x44, 0x44, 0x44);
-const RULER_GREY: Color = Color::rgb(0x30, 0x30, 0x30);
+// Built-in palette — the exact xterm 256-color indices that legacy
+// led's `default_theme.toml` used:
+//
+//   theme_dark      = x024  (deep blue, #005faf)
+//   theme_bright    = x216  (peach,     #ffaf87)
+//   theme_bold      = x223  (pale yellow, #ffd7af)
+//   inverse fg      = x232  (near-black, #080808)
+//   inactive bg     = x238  (dark grey,  #444444)
+//   ruler bg        = x236  (ruler grey, #303030)
+//
+// Using `Color::Indexed` (not `Color::Rgb`) means we emit
+// `ESC[38;5;Nm` / `ESC[48;5;Nm` escapes, which every 256-color
+// terminal renders consistently. Truecolor's not universal — the
+// rewrite ships the same look as legacy did.
+const PEACH: Color = Color::Indexed(216);
+const DEEP_BLUE: Color = Color::Indexed(24);
+const PALE_YELLOW: Color = Color::Indexed(223);
+const NEAR_BLACK: Color = Color::Indexed(232);
+const INACTIVE_GREY: Color = Color::Indexed(238);
+const RULER_GREY: Color = Color::Indexed(236);
 
 impl Default for Theme {
     /// Built-in chrome. Colored end-to-end so an unthemed led ships

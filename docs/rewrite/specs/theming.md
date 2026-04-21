@@ -8,10 +8,11 @@ side panel, ruler, file-search toggles) resolves its fg/bg/attrs from a
 `Theme` is loaded at startup from `theme.toml` — optional, falls back
 to a built-in default that ships a coherent colored look.
 
-Default palette mirrors led's long-standing look: peach accents
-(`#ffaf87`) for active chrome, deep blue (`#005faf`) for muted gutter
-/ border / status bar, pale yellow (`#ffd7af`) status-bar foreground,
-dark grey (`#444444`) for inactive / unfocused highlights.
+Default palette mirrors led's long-standing look, referencing the
+exact xterm 256-color indices legacy used: peach (`x216`) accents
+for active chrome, deep blue (`x024`) for muted gutter / border /
+status bar, pale yellow (`x223`) status-bar foreground, dark grey
+(`x238`) for inactive / unfocused highlights.
 
 M15 (syntax highlighting) extends the same `theme.toml` with a
 `[syntax]` section and a parallel `syntax_*` style vocabulary; M14b
@@ -72,21 +73,32 @@ picks the editor-relative column where the ruler paints.
 
 ## Colors
 
-Two accepted forms:
+Three accepted forms, in priority order:
 
+- **xterm index** — `"xNNN"` where `NNN` is 0-255. Maps directly
+  to the xterm 256-color palette (the built-in theme uses this
+  form: `x024` deep blue, `x216` peach, `x223` pale yellow, etc.).
+  Emits `ESC[38;5;Nm` / `ESC[48;5;Nm`; every 256-color terminal
+  renders these identically.
 - **Named** — case-insensitive. Supported names:
   `black`, `red`, `green`, `yellow`, `blue`, `magenta`, `cyan`,
   `white`, `grey` (alias `gray`), `dark_grey`
-  (aliases `dark_gray`, `darkgrey`, `darkgray`).
-  These resolve to fixed RGB values chosen to match crossterm's
-  legacy 4-bit palette one-to-one.
-- **Hex** — `"#rrggbb"`, exactly 6 hex digits, lowercase or uppercase.
-  3-digit shorthand is not accepted (`#abc` is rejected with a
-  warning).
+  (aliases `dark_gray`, `darkgrey`, `darkgray`), `bright_red`,
+  `bright_green`, `bright_yellow`, `bright_blue`,
+  `bright_magenta`, `bright_cyan`, `bright_white`.
+  Resolve to ANSI palette indices 0-15 (emitted as the short
+  `ESC[3Nm` / `ESC[4Nm` escapes) — terminals honour the user's
+  configured palette for these, so "red" reads like whatever red
+  the user's terminal theme uses.
+- **Hex** — `"#rrggbb"`, exactly 6 hex digits, lowercase or
+  uppercase. 3-digit shorthand is not accepted (`#abc` is rejected
+  with a warning). Emits 24-bit truecolor `ESC[38;2;r;g;bm`;
+  **only reliable on terminals advertising truecolor support**
+  (`$COLORTERM=truecolor`). Prefer `xNNN` / named forms for chrome
+  that should render consistently.
 
-Every accepted color produces a 24-bit RGB escape
-(`\x1b[38;2;r;g;bm` or `\x1b[48;2;r;g;bm`). There is no fall-back
-to 4-bit or 8-bit palettes.
+led's built-in theme uses `xNNN` for every region so an unthemed
+led paints the same way on any 256-color terminal.
 
 ## Attributes
 
@@ -104,41 +116,41 @@ Omitted flags default to `false`.
 
 ### Tabs
 
-| Region             | Default                     | Applies to                                       |
-| ------------------ | --------------------------- | ------------------------------------------------ |
-| `tab_active`       | `fg=#080808 bg=#ffaf87`     | The active tab's ` label ` in the tab bar.       |
-| `tab_inactive`     | `fg=#ffaf87 bg=#444444`     | Every other tab's ` label `.                     |
-| `tab_preview`      | unstyled                    | *Reserved*; painter not yet per-tab-preview-aware. |
-| `tab_dirty_marker` | unstyled                    | *Reserved*; dirty dot currently part of the label. |
+| Region             | Default             | Applies to                                       |
+| ------------------ | ------------------- | ------------------------------------------------ |
+| `tab_active`       | `fg=x232 bg=x216`   | The active tab's ` label ` in the tab bar.       |
+| `tab_inactive`     | `fg=x216 bg=x238`   | Every other tab's ` label `.                     |
+| `tab_preview`      | unstyled            | *Reserved*; painter not yet per-tab-preview-aware. |
+| `tab_dirty_marker` | unstyled            | *Reserved*; dirty dot currently part of the label. |
 
 ### Status bar
 
-| Region          | Default                    | Applies to                                         |
-| --------------- | -------------------------- | -------------------------------------------------- |
-| `status_normal` | `fg=#ffd7af bg=#005faf`    | Non-warn status bar (saved, L1:C1, etc.).          |
-| `status_warn`   | `fg=white bg=red bold`     | `StatusBarModel.is_warn` rows (errors, failures). |
+| Region          | Default                 | Applies to                                         |
+| --------------- | ----------------------- | -------------------------------------------------- |
+| `status_normal` | `fg=x223 bg=x024`       | Non-warn status bar (saved, L1:C1, etc.).          |
+| `status_warn`   | `fg=white bg=red bold`  | `StatusBarModel.is_warn` rows (errors, failures). |
 
 ### Side panel
 
-| Region                      | Default                  | Applies to                                                                 |
-| --------------------------- | ------------------------ | -------------------------------------------------------------------------- |
-| `browser_selected_focused`  | `fg=#080808 bg=#ffaf87`  | Selected row while `SidePanelModel.focused == true`.                       |
-| `browser_selected_unfocused`| `bg=#444444`             | Selected row while `focused == false` (focus lives in the editor pane). |
-| `browser_chevron`           | unstyled                 | *Reserved*; chevron `▷ ▽` currently inline with row text.                  |
-| `browser_border`            | `fg=#005faf`             | Vertical `│` between side panel and editor.                                |
+| Region                      | Default            | Applies to                                                                 |
+| --------------------------- | ------------------ | -------------------------------------------------------------------------- |
+| `browser_selected_focused`  | `fg=x232 bg=x216`  | Selected row while `SidePanelModel.focused == true`.                       |
+| `browser_selected_unfocused`| `bg=x238`          | Selected row while `focused == false` (focus lives in the editor pane). |
+| `browser_chevron`           | unstyled           | *Reserved*; chevron `▷ ▽` currently inline with row text.                  |
+| `browser_border`            | `fg=x024`          | Vertical `│` between side panel and editor.                                |
 
 ### File-search overlay
 
-| Region             | Default                  | Applies to                                                                                   |
-| ------------------ | ------------------------ | -------------------------------------------------------------------------------------------- |
-| `search_toggle_on` | `fg=#080808 bg=#ffaf87`  | Each of `Aa` / `.*` / `=>` in the header row when the corresponding flag (case / regex / replace) is on. |
+| Region             | Default            | Applies to                                                                                   |
+| ------------------ | ------------------ | -------------------------------------------------------------------------------------------- |
+| `search_toggle_on` | `fg=x232 bg=x216`  | Each of `Aa` / `.*` / `=>` in the header row when the corresponding flag (case / regex / replace) is on. |
 
 ### Editor body
 
-| Region        | Default       | Applies to                                                                                            |
-| ------------- | ------------- | ----------------------------------------------------------------------------------------------------- |
-| `cursor_line` | unstyled      | *Reserved*; currently the terminal's native cursor-row style takes over.                              |
-| `ruler`       | `bg=#303030`  | Single column painted over every body row when `ruler_column` is set. The underlying char is preserved when it overlaps. |
+| Region        | Default    | Applies to                                                                                            |
+| ------------- | ---------- | ----------------------------------------------------------------------------------------------------- |
+| `cursor_line` | unstyled   | *Reserved*; currently the terminal's native cursor-row style takes over.                              |
+| `ruler`       | `bg=x236`  | Single column painted over every body row when `ruler_column` is set. The underlying char is preserved when it overlaps. |
 
 `ruler_column` defaults to `None` — the ruler stays off until the
 user opts in. Picking a number automatically would surprise users
