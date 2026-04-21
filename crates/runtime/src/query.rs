@@ -220,14 +220,9 @@ impl<'a> BrowserUiInput<'a> {
     }
 }
 
-/// Projection for the find-file overlay. `None` when the overlay
-/// is inactive.
-///
-/// M12 bootstrap uses a coarse projection (the whole `FindFileState`
-/// by reference), which busts the `find_file_action` memo cache on
-/// every field change. Later stages can split into narrower inputs
-/// (input + pending flag vs completions + selected) if cache-miss
-/// cost becomes measurable.
+/// Projection for the find-file overlay. Still a named type so
+/// the find-file-specific memo (`find_file_action`) can take just
+/// this projection without dragging the whole overlay bundle.
 #[drv::input]
 #[derive(Copy, Clone)]
 pub struct FindFileInput<'a> {
@@ -240,17 +235,31 @@ impl<'a> FindFileInput<'a> {
     }
 }
 
-/// Projection for the in-buffer isearch overlay. `None` when
-/// isearch is inactive.
+/// Unified projection over every currently-defined overlay.
+///
+/// Render and status-bar memos read "whichever overlay is active"
+/// — they shouldn't take one input per overlay kind, because the
+/// count grows with every milestone (M17 adds LSP completion, M18
+/// adds LSP hover, etc.). Instead every overlay gets a field here
+/// and the memos destructure at their call site.
+///
+/// Keeping all overlays in one projection (rather than a nested
+/// drv::input) is necessary because drv's input trait uses
+/// pointer-FastEq, which doesn't compose through nested input
+/// structs. Raw `&Option<...>` fields project fine.
 #[drv::input]
 #[derive(Copy, Clone)]
-pub struct IsearchInput<'a> {
-    pub overlay: &'a Option<led_state_isearch::IsearchState>,
+pub struct OverlaysInput<'a> {
+    pub find_file: &'a Option<led_state_find_file::FindFileState>,
+    pub isearch: &'a Option<led_state_isearch::IsearchState>,
 }
 
-impl<'a> IsearchInput<'a> {
-    pub fn new(is: &'a Option<led_state_isearch::IsearchState>) -> Self {
-        Self { overlay: is }
+impl<'a> OverlaysInput<'a> {
+    pub fn new(
+        find_file: &'a Option<led_state_find_file::FindFileState>,
+        isearch: &'a Option<led_state_isearch::IsearchState>,
+    ) -> Self {
+        Self { find_file, isearch }
     }
 }
 
@@ -500,15 +509,14 @@ fn truncate_to_cols_in_place(s: &mut String, cols: usize) {
 /// All strings are `Arc<str>` so cache-hit clones of
 /// [`StatusBarModel`] are a pointer copy.
 #[drv::memo(single)]
-pub fn status_bar_model<'a, 'b, 'c, 'f, 'i>(
+pub fn status_bar_model<'a, 'b, 'c, 'o>(
     alerts: AlertsInput<'a>,
     tabs: TabsActiveInput<'b>,
     edits: EditedBuffersInput<'c>,
-    find_file: FindFileInput<'f>,
-    isearch: IsearchInput<'i>,
+    overlays: OverlaysInput<'o>,
 ) -> StatusBarModel {
     // Priority 0a — in-buffer isearch prompt.
-    if let Some(state) = isearch.overlay.as_ref() {
+    if let Some(state) = overlays.isearch.as_ref() {
         let hint_len = state.query.hint.as_ref().map(|h| h.len() + 1).unwrap_or(0);
         let mut left = String::with_capacity(state.query.text.len() + 10 + hint_len);
         left.push_str(" Search: ");
@@ -537,7 +545,7 @@ pub fn status_bar_model<'a, 'b, 'c, 'f, 'i>(
     //
     // An active `hint` (e.g. "[No match]") appends after one space
     // of padding — Emacs-style transient feedback.
-    if let Some(state) = find_file.overlay.as_ref() {
+    if let Some(state) = overlays.find_file.as_ref() {
         let label = match state.mode {
             led_state_find_file::FindFileMode::Open => "Find file",
             led_state_find_file::FindFileMode::SaveAs => "Save as",
@@ -795,16 +803,19 @@ pub fn file_list_action<'f, 'u>(
 /// The call site pattern for a memo composing sibling memos: pass the
 /// same input values through — drv 0.3's input types are `Copy` over
 /// references, so forwarding is free.
-/// Bundle of every `#[drv::input]` projection `render_frame` reads.
+/// Bundle of every projection `render_frame` reads. Plain struct —
+/// not a `#[drv::input]`, since drv's input trait uses pointer-
+/// FastEq and doesn't compose through nested inputs. Instead this
+/// is a call-site convenience that the public `render_frame`
+/// wrapper explodes into the inner memo, so callers construct one
+/// labelled struct literal instead of positionally lining up seven
+/// arguments.
 ///
-/// Introduced so `render_frame` stays a single-arg function as the
-/// set of projected sources grows — same pattern as `Dispatcher`.
-/// The struct is `Copy` because every field is already a cheap-
-/// copy projection (references + Arc pointer wrappers).
-///
-/// New memos that want to compose with render_frame don't need to
-/// touch the struct; they just take whichever subset they care
-/// about as individual inputs.
+/// Future memos that also need "most of the runtime state" should
+/// take this same bundle. The inner memo arg count stays under the
+/// clippy `too_many_arguments` threshold because
+/// `OverlaysInput` already collapses the per-overlay projections
+/// (find-file, isearch, future LSP completion, ...) into one.
 #[derive(Copy, Clone)]
 pub struct RenderInputs<'a> {
     pub term: TerminalDimsInput<'a>,
@@ -813,13 +824,9 @@ pub struct RenderInputs<'a> {
     pub tabs: TabsActiveInput<'a>,
     pub alerts: AlertsInput<'a>,
     pub browser: BrowserUiInput<'a>,
-    pub find_file: FindFileInput<'a>,
-    pub isearch: IsearchInput<'a>,
+    pub overlays: OverlaysInput<'a>,
 }
 
-/// Ergonomic wrapper. Explodes `inputs` and calls the inner memo so
-/// call sites stay on a one-arg surface while the memo keeps its
-/// individual-input contract (drv caches per-input, not per-bundle).
 pub fn render_frame(inputs: RenderInputs<'_>) -> Option<Frame> {
     render_frame_memo(
         inputs.term,
@@ -828,30 +835,29 @@ pub fn render_frame(inputs: RenderInputs<'_>) -> Option<Frame> {
         inputs.tabs,
         inputs.alerts,
         inputs.browser,
-        inputs.find_file,
-        inputs.isearch,
+        inputs.overlays,
     )
 }
 
 #[drv::memo(single)]
-fn render_frame_memo<'t, 'e, 'b, 'a, 'al, 'br, 'ff, 'is>(
+fn render_frame_memo<'t, 'e, 'b, 'a, 'al, 'br, 'ov>(
     term: TerminalDimsInput<'t>,
     edits: EditedBuffersInput<'e>,
     store: StoreLoadedInput<'b>,
     tabs: TabsActiveInput<'a>,
     alerts: AlertsInput<'al>,
     browser: BrowserUiInput<'br>,
-    find_file: FindFileInput<'ff>,
-    isearch: IsearchInput<'is>,
+    overlays: OverlaysInput<'ov>,
 ) -> Option<Frame> {
     let dims = (*term.dims)?;
     let layout = Layout::compute(dims, *browser.visible);
     let tab_bar = tab_bar_model(tabs, edits);
     let body = body_model(edits, store, tabs, layout.editor_area);
-    let status_bar = status_bar_model(alerts, tabs, edits, find_file, isearch);
+    let status_bar = status_bar_model(alerts, tabs, edits, overlays);
+    let find_file_only = FindFileInput::new(overlays.find_file);
     let side_panel = layout
         .side_area
-        .map(|area| side_panel_model(browser, find_file, area.rows));
+        .map(|area| side_panel_model(browser, find_file_only, area.rows));
     // Cursor placement, in priority order:
     //
     // 1. Find-file overlay active → status-bar row, column = prompt
@@ -862,7 +868,7 @@ fn render_frame_memo<'t, 'e, 'b, 'a, 'al, 'br, 'ff, 'is>(
     // 2. Side-panel focus → no cursor (M11 cursor-hide rule).
     // 3. Otherwise, map the body cursor from editor-area-relative
     //    coords to absolute terminal coords.
-    let cursor = if let Some(state) = find_file.overlay.as_ref() {
+    let cursor = if let Some(state) = overlays.find_file.as_ref() {
         let prefix_cols: u16 = match state.mode {
             led_state_find_file::FindFileMode::Open => 12, // " Find file: "
             led_state_find_file::FindFileMode::SaveAs => 10, // " Save as: "
@@ -1008,8 +1014,7 @@ mod tests {
             tabs: TabsActiveInput::new(t),
             alerts: AlertsInput::new(&alerts),
             browser: BrowserUiInput::new(&browser),
-            find_file: FindFileInput::new(&ff),
-            isearch: IsearchInput::new(&is),
+            overlays: OverlaysInput::new(&ff, &is),
         })
     }
 
@@ -1062,8 +1067,7 @@ mod tests {
             tabs: TabsActiveInput::new(&t),
             alerts: AlertsInput::new(&alerts),
             browser: BrowserUiInput::new(&browser),
-            find_file: FindFileInput::new(&ff),
-            isearch: IsearchInput::new(&is),
+            overlays: OverlaysInput::new(&ff, &is),
         })
         .expect("dims set");
 
@@ -1098,8 +1102,7 @@ mod tests {
             tabs: TabsActiveInput::new(&t),
             alerts: AlertsInput::new(&alerts),
             browser: BrowserUiInput::new(&browser),
-            find_file: FindFileInput::new(&ff),
-            isearch: IsearchInput::new(&is),
+            overlays: OverlaysInput::new(&ff, &is),
         })
         .expect("dims set");
         assert_eq!(frame.cursor, None);
@@ -1461,8 +1464,7 @@ mod tests {
             AlertsInput::new(a),
             TabsActiveInput::new(t),
             EditedBuffersInput::new(e),
-            FindFileInput::new(&ff),
-            IsearchInput::new(&is),
+            OverlaysInput::new(&ff, &is),
         )
     }
 
