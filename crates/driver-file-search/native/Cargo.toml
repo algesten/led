@@ -1,0 +1,22 @@
+[package]
+name = "led-driver-file-search-native"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Desktop worker for the project-wide file-search driver.
+#
+# Blocking thread consumes `FileSearchCmd`s, walks the workspace via
+# `ignore::WalkBuilder` (honours `.gitignore`), runs
+# `grep-searcher::Searcher` with a `grep-regex::RegexMatcher`, and
+# posts `FileSearchOut` back over the results channel. The search
+# walker is capped at 1000 total hits to match legacy behaviour.
+
+[dependencies]
+led-core = { workspace = true }
+led-driver-file-search-core = { workspace = true }
+grep-matcher = { workspace = true }
+grep-regex = { workspace = true }
+grep-searcher = { workspace = true }
+ignore = { workspace = true }
+regex-syntax = { workspace = true }

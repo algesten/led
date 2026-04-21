@@ -1,0 +1,19 @@
+[package]
+name = "led-driver-file-search-core"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Project-wide file-search driver — sync core.
+#
+# ABI types (`FileSearchCmd`, `FileSearchOut`, `FileSearchHit`,
+# `FileSearchGroup`) plus the trace hook and the main-loop-facing
+# `FileSearchDriver` that owns the command `Sender` and the result
+# `Receiver`. The worker half (ripgrep over the workspace) lives in
+# `driver-file-search/native`.
+#
+# Legacy equivalent: `crates/file-search/src/search.rs`, wrapped into
+# the `driver-*` model used by the rewrite.
+
+[dependencies]
+led-core = { workspace = true }

@@ -9,7 +9,12 @@
 //! See `docs/spec/search.md` § "File-search overlay" for legacy
 //! semantics.
 
-use led_core::{CanonPath, TextInput};
+use led_core::TextInput;
+
+// Hit / group types are the driver ABI — re-exported so the overlay
+// state + renderer + dispatch use one shape end-to-end, matching the
+// pattern used by `state-find-file` with `FindFileEntry`.
+pub use led_driver_file_search_core::{FileSearchGroup, FileSearchHit};
 
 /// Which row in the overlay currently has the caret / is selected.
 ///
@@ -22,27 +27,6 @@ pub enum FileSearchSelection {
     SearchInput,
     ReplaceInput,
     Result(usize),
-}
-
-/// One hit from the ripgrep driver. Kept as char offsets + display
-/// text (the one-line context string) so the renderer doesn't need
-/// to re-open the file.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FileSearchHit {
-    pub path: CanonPath,
-    /// 1-indexed (matches ripgrep output conventions).
-    pub line: usize,
-    pub col: usize,
-    /// Rendered single-line preview text.
-    pub preview: String,
-}
-
-/// Results grouped by file. Matches legacy's "tree" UI where hits
-/// collapse under their file header.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FileSearchGroup {
-    pub path: CanonPath,
-    pub hits: Vec<FileSearchHit>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]

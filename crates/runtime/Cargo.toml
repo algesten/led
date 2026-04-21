@@ -34,6 +34,8 @@ led-driver-fs-list-core = { workspace = true }
 led-driver-fs-list-native = { workspace = true }
 led-driver-find-file-core = { workspace = true }
 led-driver-find-file-native = { workspace = true }
+led-driver-file-search-core = { workspace = true }
+led-driver-file-search-native = { workspace = true }
 led-driver-buffers-core = { workspace = true }
 led-driver-buffers-native = { workspace = true }
 led-driver-terminal-core = { workspace = true }

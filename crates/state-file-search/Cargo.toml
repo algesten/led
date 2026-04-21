@@ -14,3 +14,4 @@ publish = false
 
 [dependencies]
 led-core = { workspace = true }
+led-driver-file-search-core = { workspace = true }

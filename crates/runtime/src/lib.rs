@@ -32,6 +32,8 @@ use led_driver_clipboard_native::ClipboardNative;
 use led_core::Notifier;
 use led_driver_terminal_core::{Dims, Frame, KeyEvent, TermEvent, Terminal, TerminalInputDriver};
 use led_driver_terminal_native::{TerminalInputNative, TerminalOutputDriver};
+use led_driver_file_search_core::{FileSearchCmd, FileSearchDriver};
+use led_driver_file_search_native::FileSearchNative;
 use led_driver_find_file_core::FindFileDriver;
 use led_driver_find_file_native::FindFileNative;
 use led_driver_fs_list_core::FsListDriver;
@@ -108,6 +110,7 @@ pub struct Drivers {
     pub clipboard: ClipboardDriver,
     pub fs_list: FsListDriver,
     pub find_file: FindFileDriver,
+    pub file_search: FileSearchDriver,
 
     // Held only for lifetime management; detached on drop.
     _file_native: FileReadNative,
@@ -116,6 +119,7 @@ pub struct Drivers {
     _clipboard_native: ClipboardNative,
     _fs_list_native: FsListNative,
     _find_file_native: FindFileNative,
+    _file_search_native: FileSearchNative,
 }
 
 /// Allocator for fresh `TabId`s. Counter only; ids are never reused.
@@ -297,6 +301,36 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
             auto_advance_arrow_follow(ff, tabs);
         }
 
+        // Apply file-search completions. Late arrivals whose
+        // `query` / `case_sensitive` / `use_regex` no longer match
+        // the overlay's current state are dropped (same
+        // "expected_dir" discipline as find-file). Matching
+        // completions replace `results` + `flat_hits`; the
+        // selection resets to the search input when the tree
+        // shape changes so an out-of-bounds `Result(i)` doesn't
+        // persist.
+        for done in drivers.file_search.process() {
+            let Some(fs_state) = file_search.as_mut() else {
+                continue;
+            };
+            if done.query != fs_state.query.text
+                || done.case_sensitive != fs_state.case_sensitive
+                || done.use_regex != fs_state.use_regex
+            {
+                continue;
+            }
+            fs_state.results = done.groups;
+            fs_state.flat_hits = done.flat;
+            if let led_state_file_search::FileSearchSelection::Result(i) =
+                fs_state.selection
+                && i >= fs_state.flat_hits.len()
+            {
+                fs_state.selection =
+                    led_state_file_search::FileSearchSelection::SearchInput;
+            }
+            fs_state.scroll_offset = 0;
+        }
+
         // Apply clipboard completions: either paste the text at the
         // tab the yank was issued from, or on empty/error fall back
         // to the kill ring. Writes only clear the in-flight bit.
@@ -407,27 +441,30 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
         }
         drivers.find_file.execute(find_file_actions.iter());
 
-        // File-search queued requests (M14). Trace per queued
-        // search; real driver dispatch lands with stage 4. Root is
-        // the workspace (`fs.root`) — legacy falls back to the
-        // startup dir when no workspace; M11 sets `fs.root` to
-        // CWD at startup, so the fallback arrives for free.
+        // File-search queued requests (M14). Build one
+        // `FileSearchCmd` per queued edit/toggle, ship via the
+        // driver (which emits the `FileSearch` trace line), and
+        // sync-clear the queue. Root is the workspace (`fs.root`);
+        // without a root the queue is dropped silently — M11 sets
+        // `fs.root` to CWD at startup, so normal use has a root.
         if let Some(fs_state) = file_search.as_mut()
             && !fs_state.pending_search.is_empty()
-            && let Some(root) = fs.root.as_ref()
         {
-            for req in fs_state.pending_search.drain(..) {
-                trace.file_search_start(
-                    &req.query,
-                    root,
-                    req.case_sensitive,
-                    req.use_regex,
-                );
+            if let Some(root) = fs.root.as_ref() {
+                let cmds: Vec<FileSearchCmd> = fs_state
+                    .pending_search
+                    .drain(..)
+                    .map(|req| FileSearchCmd {
+                        root: root.clone(),
+                        query: req.query,
+                        case_sensitive: req.case_sensitive,
+                        use_regex: req.use_regex,
+                    })
+                    .collect();
+                drivers.file_search.execute(cmds.iter());
+            } else {
+                fs_state.pending_search.clear();
             }
-        } else if let Some(fs_state) = file_search.as_mut() {
-            // No workspace root — swallow pending to avoid re-fire
-            // (sync-clear discipline even though nothing to trace).
-            fs_state.pending_search.clear();
         }
 
         // Sync-clear pending_saves + pending_save_as for the paths
@@ -631,6 +668,10 @@ pub fn spawn_drivers(trace: SharedTrace, wake: &Wake) -> io::Result<Drivers> {
         trace.clone().as_find_file_trace(),
         wake.notifier.clone(),
     );
+    let (file_search, file_search_native) = led_driver_file_search_native::spawn(
+        trace.clone().as_file_search_trace(),
+        wake.notifier.clone(),
+    );
     let (input, input_native) = led_driver_terminal_native::spawn(
         trace.clone().as_terminal_trace(),
         wake.notifier.clone(),
@@ -644,12 +685,14 @@ pub fn spawn_drivers(trace: SharedTrace, wake: &Wake) -> io::Result<Drivers> {
         clipboard,
         fs_list,
         find_file,
+        file_search,
         _file_native: file_native,
         _file_write_native: file_write_native,
         _input_native: input_native,
         _clipboard_native: clipboard_native,
         _fs_list_native: fs_list_native,
         _find_file_native: find_file_native,
+        _file_search_native: file_search_native,
     })
 }
 
@@ -674,6 +717,7 @@ pub(crate) mod trace_adapter {
     pub(crate) struct ClipboardTraceAdapter(pub Arc<dyn Trace>);
     pub(crate) struct FsListTraceAdapter(pub Arc<dyn Trace>);
     pub(crate) struct FindFileTraceAdapter(pub Arc<dyn Trace>);
+    pub(crate) struct FileSearchTraceAdapter(pub Arc<dyn Trace>);
 
     impl led_driver_buffers_core::Trace for FileTraceAdapter {
         fn file_load_start(&self, path: &CanonPath) {
@@ -744,6 +788,18 @@ pub(crate) mod trace_adapter {
             self.0.find_file_done(path, prefix, ok);
         }
     }
+
+    impl led_driver_file_search_core::Trace for FileSearchTraceAdapter {
+        fn file_search_start(&self, cmd: &led_driver_file_search_core::FileSearchCmd) {
+            self.0.file_search_start(
+                &cmd.query,
+                &cmd.root,
+                cmd.case_sensitive,
+                cmd.use_regex,
+            );
+        }
+        fn file_search_done(&self, _query: &str, _ok: bool) {}
+    }
 }
 
 impl SharedTrace {
@@ -761,6 +817,11 @@ impl SharedTrace {
     }
     pub(crate) fn as_find_file_trace(&self) -> Arc<dyn led_driver_find_file_core::Trace> {
         Arc::new(trace_adapter::FindFileTraceAdapter(self.inner()))
+    }
+    pub(crate) fn as_file_search_trace(
+        &self,
+    ) -> Arc<dyn led_driver_file_search_core::Trace> {
+        Arc::new(trace_adapter::FileSearchTraceAdapter(self.inner()))
     }
 }
 
