@@ -629,8 +629,8 @@ mod tests {
         }
         fn clear_until_newline(&mut self) {
             if let Some(r) = self.cells.get_mut(self.row as usize) {
-                for c in (self.col as usize)..r.len() {
-                    r[c] = ' ';
+                for cell in r.iter_mut().skip(self.col as usize) {
+                    *cell = ' ';
                 }
             }
         }

@@ -38,6 +38,7 @@ use led_state_alerts::AlertState;
 use led_state_browser::{BrowserUi, FsTree, rebuild_entries};
 use led_state_buffer_edits::{BufferEdits, EditedBuffer};
 use led_state_clipboard::ClipboardState;
+use led_state_find_file::FindFileState;
 use led_state_jumps::JumpListState;
 use led_state_kill_ring::KillRing;
 use led_state_tabs::{TabId, Tabs};
@@ -140,6 +141,9 @@ pub struct Atoms {
     pub jumps: JumpListState,
     pub browser: BrowserUi,
     pub fs: FsTree,
+    /// `Some` while the find-file / save-as modal is active. See
+    /// [`led_state_find_file::FindFileState`].
+    pub find_file: Option<FindFileState>,
 }
 
 /// Run-time seam: the single thing the main loop sees. Owns nothing
@@ -168,6 +172,7 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
         fs,
         store,
         terminal,
+        find_file,
     } = &mut *world.atoms;
     let drivers = world.drivers;
     let wake = world.wake;
@@ -294,6 +299,7 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
                 fs,
                 store,
                 terminal,
+                find_file,
                 keymap,
                 chord: &mut chord,
             };

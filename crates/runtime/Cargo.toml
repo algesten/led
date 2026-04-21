@@ -27,6 +27,7 @@ led-state-clipboard = { workspace = true }
 led-state-alerts = { workspace = true }
 led-state-jumps = { workspace = true }
 led-state-browser = { workspace = true }
+led-state-find-file = { workspace = true }
 led-driver-fs-list-core = { workspace = true }
 led-driver-fs-list-native = { workspace = true }
 led-driver-buffers-core = { workspace = true }

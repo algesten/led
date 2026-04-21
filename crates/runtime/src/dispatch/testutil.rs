@@ -16,6 +16,7 @@ use led_state_alerts::AlertState;
 use led_state_browser::{BrowserUi, FsTree};
 use led_state_buffer_edits::{BufferEdits, EditedBuffer};
 use led_state_clipboard::ClipboardState;
+use led_state_find_file::FindFileState;
 use led_state_jumps::JumpListState;
 use led_state_kill_ring::KillRing;
 use led_state_tabs::{Tab, TabId, Tabs};
@@ -119,6 +120,7 @@ pub(super) fn dispatch_default(
     let mut jumps = JumpListState::default();
     let mut browser = BrowserUi::default();
     let fs = FsTree::default();
+    let mut find_file: Option<FindFileState> = None;
     dispatch_key(
         k,
         tabs,
@@ -131,9 +133,9 @@ pub(super) fn dispatch_default(
         &fs,
         store,
         terminal,
+        &mut find_file,
         &default_keymap(),
-        &mut chord,
-    )
+        &mut chord,)
 }
 
 /// Press a chord sequence (prefix then second) with a fresh
@@ -155,6 +157,7 @@ pub(super) fn dispatch_chord_default(
     let mut jumps = JumpListState::default();
     let mut browser = BrowserUi::default();
     let fs = FsTree::default();
+    let mut find_file: Option<FindFileState> = None;
     dispatch_key(
         prefix,
         tabs,
@@ -167,9 +170,10 @@ pub(super) fn dispatch_chord_default(
         &fs,
         store,
         terminal,
+        &mut find_file,
         &keymap,
-        &mut chord,
-    );
+        &mut chord,);
+    let mut find_file: Option<FindFileState> = None;
     dispatch_key(
         second,
         tabs,
@@ -182,9 +186,9 @@ pub(super) fn dispatch_chord_default(
         &fs,
         store,
         terminal,
+        &mut find_file,
         &keymap,
-        &mut chord,
-    )
+        &mut chord,)
 }
 
 /// Dispatch a key with a caller-provided kill ring. Used by M7 tests
@@ -203,6 +207,7 @@ pub(super) fn dispatch_with_ring(
     let mut jumps = JumpListState::default();
     let mut browser = BrowserUi::default();
     let fs = FsTree::default();
+    let mut find_file: Option<FindFileState> = None;
     dispatch_key(
         k,
         tabs,
@@ -215,9 +220,9 @@ pub(super) fn dispatch_with_ring(
         &fs,
         store,
         terminal,
+        &mut find_file,
         &default_keymap(),
-        &mut chord,
-    )
+        &mut chord,)
 }
 
 /// Dispatch a key with everything ambient. Lightest wrapper — for
@@ -234,6 +239,7 @@ pub(super) fn noop_dispatch(k: KeyEvent, tabs: &mut Tabs) -> DispatchOutcome {
     let terminal = Terminal::default();
     let keymap = default_keymap();
     let mut chord = ChordState::default();
+    let mut find_file: Option<FindFileState> = None;
     dispatch_key(
         k,
         tabs,
@@ -246,9 +252,9 @@ pub(super) fn noop_dispatch(k: KeyEvent, tabs: &mut Tabs) -> DispatchOutcome {
         &fs,
         &store,
         &terminal,
+        &mut find_file,
         &keymap,
-        &mut chord,
-    )
+        &mut chord,)
 }
 
 /// Type a run of chars through the full keymap + implicit-insert

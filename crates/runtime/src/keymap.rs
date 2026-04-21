@@ -79,6 +79,16 @@ pub enum Command {
     OpenSelectedBg,
     ToggleSidePanel,
     ToggleFocus,
+
+    // Find-file / save-as overlay (M12).
+    FindFile,
+    SaveAs,
+    /// `Tab` inside the find-file overlay: complete to the single
+    /// match, descend into a dir, or extend input to the longest
+    /// common prefix across multiple matches. Only reachable via the
+    /// `[find_file]` keymap context — outside that context `Tab` is
+    /// reserved for `InsertTab` (M23).
+    FindFileTabComplete,
 }
 
 /// Two-level key → command binding set. `direct` maps single keys to
@@ -87,14 +97,19 @@ pub enum Command {
 /// any chord entry with the same prefix (legacy behaviour).
 ///
 /// `browser_direct` is the context overlay active when focus is on
-/// the file-browser sidebar (M11). Lookup order in that state:
-/// `browser_direct` first, then `direct`. Browser context never
-/// has chords — matches legacy.
+/// the file-browser sidebar (M11). `find_file_direct` is the overlay
+/// active while the find-file / save-as modal is open (M12). Both
+/// shadow global `direct` and never carry chords — matches legacy.
+///
+/// Lookup order is conditional: at most one overlay is active at a
+/// time (browser focus and find-file are mutually exclusive — the
+/// overlay runs with editor focus).
 #[derive(Debug, Clone, Default)]
 pub struct Keymap {
     direct: HashMap<KeyEvent, Command>,
     chords: HashMap<KeyEvent, HashMap<KeyEvent, Command>>,
     browser_direct: HashMap<KeyEvent, Command>,
+    find_file_direct: HashMap<KeyEvent, Command>,
 }
 
 impl Keymap {
@@ -103,6 +118,7 @@ impl Keymap {
             direct: HashMap::new(),
             chords: HashMap::new(),
             browser_direct: HashMap::new(),
+            find_file_direct: HashMap::new(),
         }
     }
 
@@ -156,6 +172,23 @@ impl Keymap {
 
     pub fn insert_browser(&mut self, key: KeyEvent, cmd: Command) {
         self.browser_direct.insert(key, cmd);
+    }
+
+    /// Find-file overlay lookup. Returns `Some` only when the key is
+    /// explicitly bound in the find-file context.
+    pub fn lookup_find_file(&self, key: &KeyEvent) -> Option<Command> {
+        self.find_file_direct.get(key).copied()
+    }
+
+    /// Bind a key in the find-file context overlay. Panics on invalid
+    /// string; only called from `default_keymap` with static strings.
+    pub fn bind_find_file(&mut self, key: &str, cmd: Command) {
+        let ev = parse_key(key).unwrap_or_else(|e| panic!("invalid default key `{key}`: {e}"));
+        self.find_file_direct.insert(ev, cmd);
+    }
+
+    pub fn insert_find_file(&mut self, key: KeyEvent, cmd: Command) {
+        self.find_file_direct.insert(key, cmd);
     }
 
     pub fn lookup_chord(&self, prefix: &KeyEvent, second: &KeyEvent) -> Option<Command> {
@@ -288,6 +321,13 @@ pub fn default_keymap() -> Keymap {
     m.bind_chord("ctrl+x", "ctrl+a", Command::SaveAll);
     m.bind_chord("ctrl+x", "ctrl+d", Command::SaveNoFormat);
     m.bind_chord("ctrl+x", "k", Command::KillBuffer);
+
+    // Find-file / save-as (M12).
+    m.bind_chord("ctrl+x", "ctrl+f", Command::FindFile);
+    m.bind_chord("ctrl+x", "ctrl+w", Command::SaveAs);
+    // Tab completion inside the overlay. Outside the overlay `Tab`
+    // is unbound (reserved for `InsertTab` in M23).
+    m.bind_find_file("tab", Command::FindFileTabComplete);
 
     m
 }
@@ -479,6 +519,9 @@ pub fn parse_command(s: &str) -> Result<Command, String> {
         "open_selected_bg" => Ok(Command::OpenSelectedBg),
         "toggle_side_panel" => Ok(Command::ToggleSidePanel),
         "toggle_focus" => Ok(Command::ToggleFocus),
+        "find_file" => Ok(Command::FindFile),
+        "save_as" => Ok(Command::SaveAs),
+        "find_file_tab_complete" => Ok(Command::FindFileTabComplete),
         other => Err(format!("unknown command `{other}`")),
     }
 }

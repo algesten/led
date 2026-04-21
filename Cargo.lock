@@ -492,6 +492,7 @@ dependencies = [
  "led-state-browser",
  "led-state-buffer-edits",
  "led-state-clipboard",
+ "led-state-find-file",
  "led-state-jumps",
  "led-state-kill-ring",
  "led-state-tabs",
@@ -530,6 +531,14 @@ name = "led-state-clipboard"
 version = "0.0.0"
 dependencies = [
  "led-state-tabs",
+]
+
+[[package]]
+name = "led-state-find-file"
+version = "0.0.0"
+dependencies = [
+ "dirs",
+ "led-core",
 ]
 
 [[package]]

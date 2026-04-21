@@ -77,6 +77,7 @@ pub(super) fn force_kill(tabs: &mut Tabs, edits: &mut BufferEdits, id: TabId) {
 
 #[cfg(test)]
 mod tests {
+    use led_state_find_file::FindFileState;
     use std::sync::Arc;
 
     
@@ -195,6 +196,7 @@ mod tests {
         let keymap = default_keymap();
 
         // Ctrl-x k on dirty active tab → prompt set, tab still open.
+        let mut find_file: Option<FindFileState> = None;
         dispatch_key(
             key(KeyModifiers::CONTROL, KeyCode::Char('x')),
             &mut tabs,
@@ -207,9 +209,10 @@ mod tests {
             &fs,
             &store,
             &term,
+        &mut find_file,
             &keymap,
-            &mut chord,
-        );
+            &mut chord,);
+        let mut find_file: Option<FindFileState> = None;
         dispatch_key(
             key(KeyModifiers::NONE, KeyCode::Char('k')),
             &mut tabs,
@@ -222,9 +225,9 @@ mod tests {
             &fs,
             &store,
             &term,
+        &mut find_file,
             &keymap,
-            &mut chord,
-        );
+            &mut chord,);
         assert_eq!(alerts.confirm_kill, Some(TabId(1)));
         assert_eq!(tabs.open.len(), 2);
     }
@@ -244,6 +247,7 @@ mod tests {
         let mut chord = ChordState::default();
         let keymap = default_keymap();
 
+        let mut find_file: Option<FindFileState> = None;
         dispatch_key(
             key(KeyModifiers::NONE, KeyCode::Char('y')),
             &mut tabs,
@@ -256,9 +260,9 @@ mod tests {
             &fs,
             &store,
             &term,
+        &mut find_file,
             &keymap,
-            &mut chord,
-        );
+            &mut chord,);
         assert!(alerts.confirm_kill.is_none());
         assert_eq!(tabs.open.len(), 1);
         assert_eq!(tabs.open[0].id, TabId(2));
@@ -282,6 +286,7 @@ mod tests {
         let mut chord = ChordState::default();
         let keymap = default_keymap();
 
+        let mut find_file: Option<FindFileState> = None;
         dispatch_key(
             key(KeyModifiers::NONE, KeyCode::Char('Y')),
             &mut tabs,
@@ -294,9 +299,9 @@ mod tests {
             &fs,
             &store,
             &term,
+        &mut find_file,
             &keymap,
-            &mut chord,
-        );
+            &mut chord,);
         assert!(alerts.confirm_kill.is_none());
         assert_eq!(tabs.open.len(), 1);
     }
@@ -316,6 +321,7 @@ mod tests {
         let mut chord = ChordState::default();
         let keymap = default_keymap();
 
+        let mut find_file: Option<FindFileState> = None;
         dispatch_key(
             key(KeyModifiers::NONE, KeyCode::Char('n')),
             &mut tabs,
@@ -328,9 +334,9 @@ mod tests {
             &fs,
             &store,
             &term,
+        &mut find_file,
             &keymap,
-            &mut chord,
-        );
+            &mut chord,);
         // Prompt dismissed.
         assert!(alerts.confirm_kill.is_none());
         // Tab stays open.
@@ -360,6 +366,7 @@ mod tests {
         let mut chord = ChordState::default();
         let keymap = default_keymap();
 
+        let mut find_file: Option<FindFileState> = None;
         dispatch_key(
             key(KeyModifiers::NONE, KeyCode::Esc),
             &mut tabs,
@@ -372,9 +379,9 @@ mod tests {
             &fs,
             &store,
             &term,
+        &mut find_file,
             &keymap,
-            &mut chord,
-        );
+            &mut chord,);
         assert!(alerts.confirm_kill.is_none());
         assert_eq!(tabs.open.len(), 2);
         // Esc's Abort command still ran → mark cleared.
@@ -402,6 +409,7 @@ mod tests {
         let mut chord = ChordState::default();
         let keymap = default_keymap();
 
+        let mut find_file: Option<FindFileState> = None;
         dispatch_key(
             key(KeyModifiers::CONTROL, KeyCode::Char('x')),
             &mut tabs,
@@ -414,9 +422,10 @@ mod tests {
             &fs,
             &store,
             &term,
+        &mut find_file,
             &keymap,
-            &mut chord,
-        );
+            &mut chord,);
+        let mut find_file: Option<FindFileState> = None;
         dispatch_key(
             key(KeyModifiers::NONE, KeyCode::Char('k')),
             &mut tabs,
@@ -429,9 +438,9 @@ mod tests {
             &fs,
             &store,
             &term,
+        &mut find_file,
             &keymap,
-            &mut chord,
-        );
+            &mut chord,);
         assert!(alerts.confirm_kill.is_none());
         assert_eq!(tabs.open.len(), 1);
     }

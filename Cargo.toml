@@ -9,6 +9,7 @@ members = [
     "crates/state-clipboard",
     "crates/state-jumps",
     "crates/state-browser",
+    "crates/state-find-file",
     "crates/driver-buffers/core",
     "crates/driver-buffers/native",
     "crates/driver-terminal/core",
@@ -34,6 +35,7 @@ led-state-alerts = { path = "crates/state-alerts" }
 led-state-clipboard = { path = "crates/state-clipboard" }
 led-state-jumps = { path = "crates/state-jumps" }
 led-state-browser = { path = "crates/state-browser" }
+led-state-find-file = { path = "crates/state-find-file" }
 led-driver-buffers-core = { path = "crates/driver-buffers/core" }
 led-driver-buffers-native = { path = "crates/driver-buffers/native" }
 led-driver-terminal-core = { path = "crates/driver-terminal/core" }

@@ -28,6 +28,7 @@
 mod browser;
 mod cursor;
 mod edit;
+mod find_file;
 mod kill;
 mod mark;
 mod nav;
@@ -63,6 +64,7 @@ use led_state_alerts::AlertState;
 use led_state_browser::{BrowserUi, Focus, FsTree};
 use led_state_buffer_edits::BufferEdits;
 use led_state_clipboard::ClipboardState;
+use led_state_find_file::FindFileState;
 use led_state_jumps::JumpListState;
 use led_state_kill_ring::KillRing;
 use led_state_tabs::Tabs;
@@ -96,6 +98,7 @@ pub struct Dispatcher<'a> {
     pub fs: &'a FsTree,
     pub store: &'a BufferStore,
     pub terminal: &'a Terminal,
+    pub find_file: &'a mut Option<FindFileState>,
     pub keymap: &'a Keymap,
     pub chord: &'a mut ChordState,
 }
@@ -130,6 +133,7 @@ impl<'a> Dispatcher<'a> {
             self.fs,
             self.store,
             self.terminal,
+            self.find_file,
             self.keymap,
             self.chord,
         )
@@ -168,6 +172,7 @@ pub fn dispatch_key(
     fs: &FsTree,
     store: &BufferStore,
     terminal: &Terminal,
+    find_file: &mut Option<FindFileState>,
     keymap: &Keymap,
     chord: &mut ChordState,
 ) -> DispatchOutcome {
@@ -182,11 +187,18 @@ pub fn dispatch_key(
         // runs its normal binding / implicit-insert behaviour.
     }
 
-    let resolved = resolve_command(k, keymap, chord, browser.focus == Focus::Side);
+    let resolved = resolve_command(
+        k,
+        keymap,
+        chord,
+        browser.focus == Focus::Side,
+        find_file.is_some(),
+    );
     match resolved {
         Resolved::Command(cmd) => {
             let outcome = run_command(
                 cmd, tabs, edits, kill_ring, clip, alerts, jumps, browser, fs, store, terminal,
+                find_file,
             );
             // Kill-ring coalescing: any non-KillLine command breaks
             // the flag, so the next KillLine starts a fresh entry.
@@ -232,6 +244,7 @@ fn resolve_command(
     keymap: &Keymap,
     chord: &mut ChordState,
     browser_focused: bool,
+    find_file_active: bool,
 ) -> Resolved {
     if let Some(prefix) = chord.pending.take() {
         if let Some(cmd) = keymap.lookup_chord(&prefix, &k) {
@@ -239,6 +252,14 @@ fn resolve_command(
         }
         // Silent cancel — matches legacy behaviour.
         return Resolved::Continue;
+    }
+    // Find-file context overlay wins over the global direct table
+    // and over browser context (M12). Browser and find-file are
+    // mutually exclusive — the overlay runs with main-pane focus.
+    if find_file_active
+        && let Some(cmd) = keymap.lookup_find_file(&k)
+    {
+        return Resolved::Command(cmd);
     }
     // Browser-context overlay wins over the global direct table when
     // focus is on the sidebar (M11).
@@ -254,8 +275,9 @@ fn resolve_command(
         chord.pending = Some(k);
         return Resolved::PrefixStored;
     }
-    // Implicit insert only when the editor is focused — typing into
-    // the sidebar should be a no-op.
+    // Implicit insert only when the editor is focused. For find-file
+    // this still fires — the overlay turns `InsertChar(c)` into an
+    // input-buffer edit. Sidebar focus suppresses implicit-insert.
     if !browser_focused
         && let Some(cmd) = implicit_insert(&k)
     {
@@ -293,15 +315,22 @@ fn run_command(
     fs: &FsTree,
     store: &BufferStore,
     terminal: &Terminal,
+    find_file: &mut Option<FindFileState>,
 ) -> DispatchOutcome {
     let browser_focused = browser.focus == Focus::Side;
     match cmd {
         Command::Quit => DispatchOutcome::Quit,
         Command::Abort => {
             // Clear any set mark as part of the abort gesture.
-            // M13 / M17 / M18 will short-circuit the dispatch stream
-            // before this point when their modals are active.
-            clear_mark(tabs);
+            // When the find-file overlay is active, Abort closes it
+            // instead of affecting the buffer below. Future modals
+            // (M13 isearch, M17 completion, M18 LSP overlays) will
+            // intercept their own Aborts in the same pattern.
+            if find_file.is_some() {
+                find_file::deactivate(find_file);
+            } else {
+                clear_mark(tabs);
+            }
             DispatchOutcome::Continue
         }
         Command::Save => {
@@ -490,6 +519,20 @@ fn run_command(
             toggle_focus(browser);
             DispatchOutcome::Continue
         }
+        Command::FindFile => {
+            find_file::activate_open(find_file, tabs, fs);
+            DispatchOutcome::Continue
+        }
+        Command::SaveAs => {
+            find_file::activate_save_as(find_file, tabs, fs);
+            DispatchOutcome::Continue
+        }
+        Command::FindFileTabComplete => {
+            // Stage 1: tab-complete is a no-op until M12 phase 4 lands.
+            // The keymap reserves the binding so `Tab` in the overlay
+            // doesn't fall through to `insert_tab` (M23).
+            DispatchOutcome::Continue
+        }
     }
 }
 
@@ -525,6 +568,7 @@ mod tests {
         let mut chord = ChordState::default();
 
         // First half of the chord: ctrl+x → pending, Continue.
+        let mut find_file: Option<FindFileState> = None;
         let outcome = dispatch_key(
             key(KeyModifiers::CONTROL, KeyCode::Char('x')),
             &mut tabs,
@@ -537,13 +581,14 @@ mod tests {
             &fs,
             &store,
             &term,
+        &mut find_file,
             &keymap,
-            &mut chord,
-        );
+            &mut chord,);
         assert_eq!(outcome, DispatchOutcome::Continue);
         assert!(chord.pending.is_some());
 
         // Second half: ctrl+c → chord fires Quit.
+        let mut find_file: Option<FindFileState> = None;
         let outcome = dispatch_key(
             key(KeyModifiers::CONTROL, KeyCode::Char('c')),
             &mut tabs,
@@ -556,9 +601,9 @@ mod tests {
             &fs,
             &store,
             &term,
+        &mut find_file,
             &keymap,
-            &mut chord,
-        );
+            &mut chord,);
         assert_eq!(outcome, DispatchOutcome::Quit);
         assert!(chord.pending.is_none());
     }
@@ -588,6 +633,7 @@ mod tests {
         let mut browser = BrowserUi::default();
         let fs = FsTree::default();
         // ctrl+x → pending.
+        let mut find_file: Option<FindFileState> = None;
         dispatch_key(
             key(KeyModifiers::CONTROL, KeyCode::Char('x')),
             &mut tabs,
@@ -600,11 +646,12 @@ mod tests {
             &fs,
             &store,
             &term,
+        &mut find_file,
             &keymap,
-            &mut chord,
-        );
+            &mut chord,);
         assert!(chord.pending.is_some());
         // Second key `z` isn't bound under ctrl+x → silent cancel.
+        let mut find_file: Option<FindFileState> = None;
         let outcome = dispatch_key(
             key(KeyModifiers::NONE, KeyCode::Char('z')),
             &mut tabs,
@@ -617,9 +664,9 @@ mod tests {
             &fs,
             &store,
             &term,
+        &mut find_file,
             &keymap,
-            &mut chord,
-        );
+            &mut chord,);
         assert_eq!(outcome, DispatchOutcome::Continue);
         assert!(chord.pending.is_none());
         // `z` was NOT inserted — the printable fallback only fires
@@ -648,6 +695,7 @@ mod tests {
         let mut browser = BrowserUi::default();
         let fs = FsTree::default();
 
+        let mut find_file: Option<FindFileState> = None;
         let outcome = dispatch_key(
             key(KeyModifiers::CONTROL, KeyCode::Char('q')),
             &mut tabs,
@@ -660,12 +708,13 @@ mod tests {
             &fs,
             &store,
             &term,
+        &mut find_file,
             &km,
-            &mut chord,
-        );
+            &mut chord,);
         assert_eq!(outcome, DispatchOutcome::Quit);
 
         // Ctrl-C not bound here → Continue (not Quit).
+        let mut find_file: Option<FindFileState> = None;
         let outcome = dispatch_key(
             key(KeyModifiers::CONTROL, KeyCode::Char('c')),
             &mut tabs,
@@ -678,9 +727,9 @@ mod tests {
             &fs,
             &store,
             &term,
+        &mut find_file,
             &km,
-            &mut chord,
-        );
+            &mut chord,);
         assert_eq!(outcome, DispatchOutcome::Continue);
     }
 
@@ -699,6 +748,7 @@ mod tests {
         let mut jumps = JumpListState::default();
         let mut browser = BrowserUi::default();
         let fs = FsTree::default();
+        let mut find_file: Option<FindFileState> = None;
         dispatch_key(
             key(KeyModifiers::NONE, KeyCode::Char('z')),
             &mut tabs,
@@ -711,9 +761,9 @@ mod tests {
             &fs,
             &store,
             &term,
+        &mut find_file,
             &km,
-            &mut chord,
-        );
+            &mut chord,);
         assert_eq!(rope_of(&edits, "file.rs").to_string(), "z");
     }
 
@@ -733,6 +783,7 @@ mod tests {
         let mut jumps = JumpListState::default();
         let mut browser = BrowserUi::default();
         let fs = FsTree::default();
+        let mut find_file: Option<FindFileState> = None;
         dispatch_key(
             key(KeyModifiers::CONTROL, KeyCode::Char('x')),
             &mut tabs,
@@ -745,9 +796,9 @@ mod tests {
             &fs,
             &store,
             &term,
+        &mut find_file,
             &km,
-            &mut chord,
-        );
+            &mut chord,);
         assert_eq!(rope_of(&edits, "file.rs").to_string(), "");
     }
 

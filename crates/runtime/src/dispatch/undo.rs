@@ -60,6 +60,7 @@ pub(super) fn redo_active(tabs: &mut Tabs, edits: &mut BufferEdits) {
 
 #[cfg(test)]
 mod tests {
+    use led_state_find_file::FindFileState;
     
 
     
@@ -135,6 +136,7 @@ mod tests {
         let fs = FsTree::default();
 
         // Undo: ""
+        let mut find_file: Option<FindFileState> = None;
         dispatch_key(
             key(KeyModifiers::CONTROL, KeyCode::Char('/')),
             &mut tabs,
@@ -147,12 +149,13 @@ mod tests {
             &fs,
             &store,
             &term,
+        &mut find_file,
             &km,
-            &mut chord,
-        );
+            &mut chord,);
         assert_eq!(rope_of(&edits, "file.rs").to_string(), "");
 
         // Redo: "hi"
+        let mut find_file: Option<FindFileState> = None;
         dispatch_key(
             key(KeyModifiers::CONTROL, KeyCode::Char('y')),
             &mut tabs,
@@ -165,9 +168,9 @@ mod tests {
             &fs,
             &store,
             &term,
+        &mut find_file,
             &km,
-            &mut chord,
-        );
+            &mut chord,);
         assert_eq!(rope_of(&edits, "file.rs").to_string(), "hi");
     }
 
@@ -235,6 +238,7 @@ mod tests {
         let mut jumps = JumpListState::default();
         let mut browser = BrowserUi::default();
         let fs = FsTree::default();
+        let mut find_file: Option<FindFileState> = None;
         dispatch_key(
             key(KeyModifiers::CONTROL, KeyCode::Char('y')),
             &mut tabs,
@@ -247,9 +251,9 @@ mod tests {
             &fs,
             &store,
             &term,
+        &mut find_file,
             &km,
-            &mut chord,
-        );
+            &mut chord,);
         // Still "x" — nothing to redo because the new edit dropped
         // the future branch.
         assert_eq!(rope_of(&edits, "file.rs").to_string(), "x");

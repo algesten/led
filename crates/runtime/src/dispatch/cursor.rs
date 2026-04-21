@@ -212,6 +212,7 @@ pub(super) fn adjust_scroll(s: Scroll, c: Cursor, body_rows: usize) -> Scroll {
 
 #[cfg(test)]
 mod tests {
+    use led_state_find_file::FindFileState;
     use led_driver_buffers_core::BufferStore;
     use led_driver_terminal_core::{Dims, KeyCode, KeyEvent, KeyModifiers};
     use led_state_alerts::AlertState;
@@ -668,8 +669,9 @@ mod tests {
         let mut jumps = JumpListState::default();
         let mut browser = BrowserUi::default();
         let fs = FsTree::default();
+        let mut find_file: Option<FindFileState> = None;
 
-        let press = |k: KeyEvent,
+        let mut press = |k: KeyEvent,
                      tabs: &mut Tabs,
                      edits: &mut BufferEdits,
                      chord: &mut ChordState,
@@ -680,9 +682,9 @@ mod tests {
                      browser: &mut BrowserUi,
                      fs: &FsTree| {
             super::super::dispatch_key(
-                k, tabs, edits, kill_ring, clip, alerts, jumps, browser, fs, &store, &term, &km,
-                chord,
-            );
+                k, tabs, edits, kill_ring, clip, alerts, jumps, browser, fs, &store, &term,
+        &mut find_file, &km,
+                chord,);
         };
 
         press(

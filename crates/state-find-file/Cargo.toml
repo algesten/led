@@ -1,0 +1,15 @@
+[package]
+name = "led-state-find-file"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Find-file / save-as overlay state. Modal: when `Option<FindFileState>`
+# is `Some`, dispatch routes every key through the overlay and the
+# status bar swaps from its normal content to a `Find file: <input>`
+# or `Save as: <input>` prompt. Completions come from
+# `driver-find-file` as prefix-filtered directory listings.
+
+[dependencies]
+led-core = { workspace = true }
+dirs = { workspace = true }
