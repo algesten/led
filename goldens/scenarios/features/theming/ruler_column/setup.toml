@@ -1,0 +1,19 @@
+no_workspace = true
+
+# Sparse text so the ruler's single-column overpaint is easy to see:
+# a single line 15 chars long at row 0. The ruler lands at column 8
+# (middle of the word), and the painter should preserve whatever
+# character was there — vt100 strips the styling but the glyph
+# stays.
+[[file]]
+path = "a.txt"
+contents = "abcdefghijklmno\n"
+
+[config]
+theme = """
+[chrome]
+ruler_column = 8
+
+[chrome.ruler]
+bg = "dark_grey"
+"""

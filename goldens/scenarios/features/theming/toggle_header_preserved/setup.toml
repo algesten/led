@@ -1,0 +1,15 @@
+no_workspace = true
+
+# Regression guard: the file-search overlay uses a specialised
+# `SidePanelMode::FileSearch` variant, and the painter overwrites
+# row 0 with its own toggle-header render. The header text itself
+# (` Aa   .*   =>`) must stay byte-identical to what query.rs emits —
+# vt100 strips the per-glyph styling and shows the plain text, so a
+# frame snapshot pins the exact spacing.
+[[file]]
+path = "a.txt"
+contents = "foo\n"
+
+[[file]]
+path = "b.txt"
+contents = "foo bar\n"

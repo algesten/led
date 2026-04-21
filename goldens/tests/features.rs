@@ -141,3 +141,15 @@ fn save_flows_save_no_format_then_save() {
 
 // save_flows_save_all_two_dirty — REMOVED. See edge.rs note on save_all
 // race; current led's save-all has non-deterministic completion order.
+
+// === theming (M14b) ===
+
+#[test]
+fn theming_ruler_column() {
+    run_scenario(&scenario_dir("features/theming/ruler_column"));
+}
+
+#[test]
+fn theming_toggle_header_preserved() {
+    run_scenario(&scenario_dir("features/theming/toggle_header_preserved"));
+}
