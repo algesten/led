@@ -845,7 +845,8 @@ fn file_search_side_panel(
                 if total <= out.len() {
                     break 'outer;
                 }
-                let name = format!("   {}: {}", hit.line, hit.preview);
+                let preview = trim_preview_for_match(hit);
+                let name = format!("   {}: {}", hit.line, preview);
                 out.push(SidePanelRow {
                     depth: 0,
                     chevron: None,
@@ -862,6 +863,29 @@ fn file_search_side_panel(
         focused: false,
         mode,
     }
+}
+
+/// Leading-edge trim for a hit's preview so the matched text stays
+/// visible inside the narrow side-panel column. Prepends an
+/// ellipsis when the match sits deep enough in the line that we
+/// dropped leading characters. Context is kept at 4 characters —
+/// enough to see "what identifier this is part of" without eating
+/// so much width that the match itself gets truncated off the right.
+///
+/// Uses `hit.col` (1-indexed character offset) rather than
+/// `match_start` (byte offset), so multi-byte UTF-8 content doesn't
+/// miscount.
+fn trim_preview_for_match(hit: &led_state_file_search::FileSearchHit) -> String {
+    const CONTEXT_CHARS: usize = 4;
+    let match_char_idx = hit.col.saturating_sub(1);
+    if match_char_idx <= CONTEXT_CHARS {
+        return hit.preview.clone();
+    }
+    let drop = match_char_idx - CONTEXT_CHARS;
+    let mut out = String::with_capacity(hit.preview.len());
+    out.push('\u{2026}'); // …
+    out.extend(hit.preview.chars().skip(drop));
+    out
 }
 
 /// "What clipboard action should we fire this tick?"
@@ -1797,5 +1821,61 @@ mod tests {
             vec![" Aa   .*   =>", "needle", "   4: hit 4", "   5: hit 5"],
         );
         assert!(model.rows[3].selected);
+    }
+
+    #[test]
+    fn trim_preview_keeps_match_visible_when_deep_in_the_line() {
+        use led_state_file_search::FileSearchHit;
+        let path = canon("a.rs");
+        // Match starts at col 21 (1-indexed) in a long line. With
+        // CONTEXT=4, the preview drops the first 16 chars and
+        // prepends … so `needle` stays in view.
+        let hit = FileSearchHit {
+            path: path.clone(),
+            line: 42,
+            col: 21,
+            preview: "aaaabbbbccccdddd_needle_xxxx".into(),
+            match_start: 0,
+            match_end: 0,
+        };
+        assert_eq!(trim_preview_for_match(&hit), "…_needle_xxxx");
+    }
+
+    #[test]
+    fn trim_preview_is_a_noop_when_match_starts_near_the_left_edge() {
+        use led_state_file_search::FileSearchHit;
+        let path = canon("a.rs");
+        // Match at col 3 (chars before = 2, less than CONTEXT=4)
+        // → return the preview untouched.
+        let hit = FileSearchHit {
+            path: path.clone(),
+            line: 1,
+            col: 3,
+            preview: "  needle at start".into(),
+            match_start: 0,
+            match_end: 0,
+        };
+        assert_eq!(trim_preview_for_match(&hit), "  needle at start");
+    }
+
+    #[test]
+    fn trim_preview_handles_multibyte_chars_via_col_count() {
+        use led_state_file_search::FileSearchHit;
+        let path = canon("a.rs");
+        // "🎈🎈🎈🎈🎈 needle" — five balloons (1 char each, 4 bytes
+        // each in UTF-8), a space, then "needle" starting at char
+        // index 6 (col=7 1-indexed). CONTEXT=4 → drop 2 chars,
+        // prepend …, keep the match visible.
+        let hit = FileSearchHit {
+            path,
+            line: 1,
+            col: 7,
+            preview: "🎈🎈🎈🎈🎈 needle".into(),
+            match_start: 0,
+            match_end: 0,
+        };
+        let trimmed = trim_preview_for_match(&hit);
+        assert!(trimmed.starts_with('\u{2026}'), "got {trimmed:?}");
+        assert!(trimmed.contains("needle"), "got {trimmed:?}");
     }
 }
