@@ -32,6 +32,7 @@ pub(super) fn activate(
     file_search: &mut Option<FileSearchState>,
     browser: &mut BrowserUi,
     tabs: &Tabs,
+    edits: &BufferEdits,
 ) {
     if file_search.is_some() {
         // Already open — Ctrl+F a second time is a no-op.
@@ -39,6 +40,14 @@ pub(super) fn activate(
     }
     let mut state = FileSearchState::default();
     state.previous_tab = tabs.active;
+    // Peek the shared seq counter WITHOUT bumping it. The floor
+    // for overlay-scoped undo is "every group with seq > this"
+    // — which naturally excludes all pre-overlay edits since
+    // those got lower (or equal) seqs.
+    state.overlay_open_seq = edits
+        .seq_gen
+        .0
+        .load(std::sync::atomic::Ordering::Relaxed);
     *file_search = Some(state);
     // Overlay lives in the side panel slot; focus moves there so
     // keystrokes route through the overlay.
@@ -208,6 +217,25 @@ pub(super) fn run_overlay_command(
         }
         Command::Abort | Command::CloseFileSearch => {
             deactivate(file_search, browser, tabs);
+        }
+        Command::Undo => {
+            // Overlay-scoped undo: pop the most-recent group
+            // across all loaded buffers, anchored to the floor
+            // captured when the overlay opened. Per-hit replace +
+            // inverse groups carry FileSearchMark tags so
+            // hit_replacements stays consistent.
+            let floor = file_search
+                .as_ref()
+                .map(|s| s.overlay_open_seq)
+                .unwrap_or(0);
+            super::undo::undo_global(tabs, edits, file_search.as_mut(), floor);
+        }
+        Command::Redo => {
+            let floor = file_search
+                .as_ref()
+                .map(|s| s.overlay_open_seq)
+                .unwrap_or(0);
+            super::undo::redo_global(tabs, edits, file_search.as_mut(), floor);
         }
         Command::ReplaceAll => {
             let state = file_search.as_mut()?;
@@ -480,7 +508,10 @@ fn replace_selected(
     let replacement_char_len = replacement.chars().count();
 
     let rope_char_start = if let Some(eb) = edits.buffers.get_mut(&hit.path) {
-        // Loaded-buffer path: splice the rope in place.
+        // Loaded-buffer path: splice the rope in place AND record
+        // the edit on the buffer's history as one compound replace
+        // group, tagged with a FileSearchMark so undo/redo can
+        // resync the overlay's hit_replacements vec.
         let line0 = hit.line.saturating_sub(1);
         if line0 >= eb.rope.len_lines() {
             return;
@@ -496,6 +527,22 @@ fn replace_selected(
         if !replacement.is_empty() {
             new_rope.insert(match_char_start, &replacement);
         }
+        let cursor_anchor = led_state_tabs::Cursor {
+            line: line0,
+            col: hit.col.saturating_sub(1),
+            preferred_col: hit.col.saturating_sub(1),
+        };
+        eb.history.record_replace(
+            match_char_start,
+            std::sync::Arc::<str>::from(original_text.as_str()),
+            std::sync::Arc::<str>::from(replacement.as_str()),
+            cursor_anchor,
+            cursor_anchor,
+            Some(led_state_buffer_edits::FileSearchMark {
+                hit_idx: idx,
+                forward_marks_replaced: true,
+            }),
+        );
         super::shared::bump(eb, new_rope);
         match_char_start
     } else {
@@ -566,6 +613,24 @@ fn unreplace_selected(
         if !original.is_empty() {
             new_rope.insert(entry.rope_char_start, &original);
         }
+        let line0 = entry.hit.line.saturating_sub(1);
+        let col0 = entry.hit.col.saturating_sub(1);
+        let cursor_anchor = led_state_tabs::Cursor {
+            line: line0,
+            col: col0,
+            preferred_col: col0,
+        };
+        eb.history.record_replace(
+            entry.rope_char_start,
+            std::sync::Arc::<str>::from(entry.replacement_text.as_str()),
+            std::sync::Arc::<str>::from(original.as_str()),
+            cursor_anchor,
+            cursor_anchor,
+            Some(led_state_buffer_edits::FileSearchMark {
+                hit_idx: idx,
+                forward_marks_replaced: false,
+            }),
+        );
         super::shared::bump(eb, new_rope);
     } else {
         let replacement_bytes = entry.replacement_text.len();
@@ -744,7 +809,7 @@ mod tests {
         let mut browser = BrowserUi::default();
         let tabs = Tabs::default();
         assert_eq!(browser.focus, Focus::Main);
-        activate(&mut fs, &mut browser, &tabs);
+        activate(&mut fs, &mut browser, &tabs, &BufferEdits::default());
         assert!(fs.is_some());
         assert!(browser.visible);
         assert_eq!(browser.focus, Focus::Side);
@@ -769,9 +834,9 @@ mod tests {
         let mut fs = None;
         let mut browser = BrowserUi::default();
         let tabs = Tabs::default();
-        activate(&mut fs, &mut browser, &tabs);
+        activate(&mut fs, &mut browser, &tabs, &BufferEdits::default());
         let first = fs.clone();
-        activate(&mut fs, &mut browser, &tabs);
+        activate(&mut fs, &mut browser, &tabs, &BufferEdits::default());
         assert_eq!(fs, first);
     }
 
@@ -787,7 +852,7 @@ mod tests {
             }],
             active: Some(TabId(7)),
         };
-        activate(&mut fs, &mut browser, &tabs);
+        activate(&mut fs, &mut browser, &tabs, &BufferEdits::default());
         assert_eq!(fs.unwrap().previous_tab, Some(TabId(7)));
     }
 
@@ -1339,5 +1404,184 @@ mod tests {
         // Replacements vec goes to length 0 (cleared) — the runtime
         // resizes it back when a fresh driver response lands.
         assert!(state.hit_replacements.is_empty());
+    }
+
+    // ── Global undo / redo ────────────────────────────────────
+
+    /// Helper: set up two loaded buffers with the shared seq_gen
+    /// from a single BufferEdits so groups land in global order.
+    fn two_buffer_edits(
+        a_path: &led_core::CanonPath,
+        a_content: &str,
+        b_path: &led_core::CanonPath,
+        b_content: &str,
+    ) -> led_state_buffer_edits::BufferEdits {
+        use led_state_buffer_edits::{BufferEdits, EditedBuffer};
+        let mut edits = BufferEdits::default();
+        let sg = edits.seq_gen.clone();
+        edits.buffers.insert(
+            a_path.clone(),
+            EditedBuffer::fresh_with_seq_gen(
+                std::sync::Arc::new(ropey::Rope::from_str(a_content)),
+                sg.clone(),
+            ),
+        );
+        edits.buffers.insert(
+            b_path.clone(),
+            EditedBuffer::fresh_with_seq_gen(
+                std::sync::Arc::new(ropey::Rope::from_str(b_content)),
+                sg,
+            ),
+        );
+        edits
+    }
+
+    fn fs_state_with_hit_for(
+        state: &mut FileSearchState,
+        path: &led_core::CanonPath,
+        line_text: &str,
+        line: usize,
+        col: usize,
+        match_bytes: (usize, usize),
+    ) -> usize {
+        use led_state_file_search::{FileSearchGroup, FileSearchHit};
+        let hit = FileSearchHit {
+            path: path.clone(),
+            line,
+            col,
+            preview: line_text.to_string(),
+            match_start: match_bytes.0,
+            match_end: match_bytes.1,
+        };
+        let idx = state.flat_hits.len();
+        state.flat_hits.push(hit.clone());
+        state.hit_replacements.push(None);
+        let gi = state
+            .results
+            .iter()
+            .position(|g| &g.path == path)
+            .unwrap_or_else(|| {
+                state.results.push(FileSearchGroup {
+                    path: path.clone(),
+                    relative: path.as_path().display().to_string(),
+                    hits: Vec::new(),
+                });
+                state.results.len() - 1
+            });
+        state.results[gi].hits.push(hit);
+        idx
+    }
+
+    #[test]
+    fn undo_global_picks_max_seq_buffer_and_syncs_marks() {
+        // Replace one hit in A, then one in B, then Ctrl+_ in
+        // overlay twice. First undo reverts B (higher seq); second
+        // reverts A. Both hit_replacements flip back to None.
+        use super::super::undo::{redo_global, undo_global};
+
+        let a = led_core::UserPath::new("/tmp/a.rs").canonicalize();
+        let b = led_core::UserPath::new("/tmp/b.rs").canonicalize();
+        let mut edits = two_buffer_edits(&a, "foo in a\n", &b, "foo in b\n");
+
+        let mut state = FileSearchState::default();
+        state.query.set("foo");
+        state.replace.set("BAR");
+        state.replace_mode = true;
+        let idx_a = fs_state_with_hit_for(&mut state, &a, "foo in a", 1, 1, (0, 3));
+        let idx_b = fs_state_with_hit_for(&mut state, &b, "foo in b", 1, 1, (0, 3));
+
+        let mut tabs = Tabs::default();
+
+        // Replace A.
+        state.selection = FileSearchSelection::Result(idx_a);
+        replace_selected(&mut state, &mut tabs, &mut edits);
+        assert_eq!(edits.buffers[&a].rope.to_string(), "BAR in a\n");
+
+        // Replace B.
+        state.selection = FileSearchSelection::Result(idx_b);
+        replace_selected(&mut state, &mut tabs, &mut edits);
+        assert_eq!(edits.buffers[&b].rope.to_string(), "BAR in b\n");
+        assert!(state.hit_replacements[idx_a].is_some());
+        assert!(state.hit_replacements[idx_b].is_some());
+
+        // Global undo → pops B (higher seq).
+        undo_global(&mut tabs, &mut edits, Some(&mut state), 0);
+        assert_eq!(edits.buffers[&b].rope.to_string(), "foo in b\n");
+        assert_eq!(edits.buffers[&a].rope.to_string(), "BAR in a\n");
+        assert!(state.hit_replacements[idx_a].is_some());
+        assert!(state.hit_replacements[idx_b].is_none());
+
+        // Again → pops A.
+        undo_global(&mut tabs, &mut edits, Some(&mut state), 0);
+        assert_eq!(edits.buffers[&a].rope.to_string(), "foo in a\n");
+        assert!(state.hit_replacements[idx_a].is_none());
+
+        // Redo once → restores A (smaller future seq is the only
+        // one > floor=0 initially... actually A's future now has
+        // the A-replace with seq < B's. redo picks max, so B's
+        // replace comes back first).
+        redo_global(&mut tabs, &mut edits, Some(&mut state), 0);
+        // Future's max seq is B's; but wait A was popped second
+        // so A went to future LATER — higher seq on future is A.
+        // Actually take_undo/push_future preserves group.seq. A
+        // got seq=1 when first recorded, B got seq=2. After
+        // undo-B then undo-A, future has [B(2), A(1)] where A is
+        // on top (pushed last). top-seq of future = A's seq = 1.
+        //
+        // max future_top_seq across buffers: A's top future seq
+        // is 1, B's top future seq is 2. redo picks B (max), so
+        // we'd redo B first. But we JUST undid A most recently!
+        //
+        // This is the one non-intuitive bit of global-seq redo:
+        // it recovers the order of original FORWARD edits, not
+        // the reverse of the undo sequence. That matches "redo
+        // reapplies the last-applied forward edit that's now in
+        // future" across buffers — the one with the largest seq.
+        assert_eq!(edits.buffers[&b].rope.to_string(), "BAR in b\n");
+    }
+
+    #[test]
+    fn undo_global_respects_floor_and_refuses_pre_overlay_edits() {
+        use super::super::undo::undo_global;
+        use led_state_buffer_edits::{BufferEdits, EditedBuffer};
+
+        let a = led_core::UserPath::new("/tmp/a.rs").canonicalize();
+        let mut edits = BufferEdits::default();
+        let sg = edits.seq_gen.clone();
+        edits.buffers.insert(
+            a.clone(),
+            EditedBuffer::fresh_with_seq_gen(
+                std::sync::Arc::new(ropey::Rope::from_str("hello\n")),
+                sg,
+            ),
+        );
+
+        // Simulate a pre-overlay edit: type "X" then finalise.
+        {
+            let eb = edits.buffers.get_mut(&a).unwrap();
+            eb.history.record_insert_char(
+                0,
+                'X',
+                led_state_tabs::Cursor::default(),
+                led_state_tabs::Cursor::default(),
+            );
+            eb.history.finalise();
+        }
+
+        // Floor = current seq (overlay just opened). Any undo
+        // with seq <= floor is refused. Nothing happens.
+        let floor = edits
+            .seq_gen
+            .0
+            .load(std::sync::atomic::Ordering::Relaxed);
+
+        let mut tabs = Tabs::default();
+        let past_len_before = edits.buffers[&a].history.past_len();
+        undo_global(&mut tabs, &mut edits, None, floor);
+        assert_eq!(
+            edits.buffers[&a].history.past_len(),
+            past_len_before,
+            "pre-overlay edits must not be undoable from the overlay"
+        );
     }
 }

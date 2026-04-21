@@ -593,7 +593,7 @@ fn run_command(
             DispatchOutcome::Continue
         }
         Command::OpenFileSearch => {
-            file_search::activate(file_search, browser, tabs);
+            file_search::activate(file_search, browser, tabs, edits);
             DispatchOutcome::Continue
         }
         Command::CloseFileSearch => {

@@ -4,7 +4,9 @@
 //! buffer's history. Cursor is restored to the captured bookend
 //! (cursor_before for undo, cursor_after for redo).
 
+use led_core::CanonPath;
 use led_state_buffer_edits::{BufferEdits, EditOp};
+use led_state_file_search::{FileSearchSelection, FileSearchState};
 use led_state_tabs::Tabs;
 
 use super::shared::{bump, with_active};
@@ -56,6 +58,160 @@ pub(super) fn redo_active(tabs: &mut Tabs, edits: &mut BufferEdits) {
         tab.cursor.preferred_col = tab.cursor.col;
         eb.history.push_past(group);
     });
+}
+
+/// Cross-buffer undo used by the file-search overlay. Pops the
+/// group with the largest seq > `floor` across all loaded buffers,
+/// applies its inverse to that buffer's rope, and — if the group
+/// carries a `FileSearchMark` — resyncs
+/// `FileSearchState.hit_replacements` so the overlay's marks stay
+/// consistent with what the buffer content shows.
+///
+/// `floor` is `FileSearchState.overlay_open_seq`: pre-overlay
+/// edits get smaller seqs and are never popped here.
+pub(super) fn undo_global(
+    tabs: &mut Tabs,
+    edits: &mut BufferEdits,
+    file_search: Option<&mut FileSearchState>,
+    floor: u64,
+) {
+    let Some(target_path) = pick_max_past_seq(edits, floor) else {
+        return;
+    };
+    let Some(eb) = edits.buffers.get_mut(&target_path) else {
+        return;
+    };
+    let Some(group) = eb.history.take_undo() else {
+        return;
+    };
+    let mut rope = (*eb.rope).clone();
+    for op in group.ops.iter().rev() {
+        match op {
+            EditOp::Insert { at, text } => {
+                let len = text.chars().count();
+                rope.remove(*at..*at + len);
+            }
+            EditOp::Delete { at, text } => {
+                rope.insert(*at, text);
+            }
+        }
+    }
+    bump(eb, rope);
+    // Bring the editor-side cursor with us when the targeted
+    // buffer is the currently-active tab — mirrors `undo_active`.
+    if let Some(active_id) = tabs.active
+        && let Some(tab) = tabs.open.iter_mut().find(|t| t.id == active_id)
+        && tab.path == target_path
+    {
+        tab.cursor = group.cursor_before;
+        tab.cursor.preferred_col = tab.cursor.col;
+    }
+    // Sync the overlay's mark if the group carried one. Undo goes
+    // to the OPPOSITE of `forward_marks_replaced`.
+    if let (Some(mark), Some(state)) = (&group.file_search_mark, file_search) {
+        apply_mark_to_state(state, mark.hit_idx, !mark.forward_marks_replaced);
+    }
+    eb.history.push_future(group);
+}
+
+/// Cross-buffer redo mirror of `undo_global`. Uses the
+/// max-seq-`> floor` group across `future` stacks.
+pub(super) fn redo_global(
+    tabs: &mut Tabs,
+    edits: &mut BufferEdits,
+    file_search: Option<&mut FileSearchState>,
+    floor: u64,
+) {
+    let Some(target_path) = pick_max_future_seq(edits, floor) else {
+        return;
+    };
+    let Some(eb) = edits.buffers.get_mut(&target_path) else {
+        return;
+    };
+    let Some(group) = eb.history.take_redo() else {
+        return;
+    };
+    let mut rope = (*eb.rope).clone();
+    for op in &group.ops {
+        match op {
+            EditOp::Insert { at, text } => {
+                rope.insert(*at, text);
+            }
+            EditOp::Delete { at, text } => {
+                let len = text.chars().count();
+                rope.remove(*at..*at + len);
+            }
+        }
+    }
+    bump(eb, rope);
+    if let Some(active_id) = tabs.active
+        && let Some(tab) = tabs.open.iter_mut().find(|t| t.id == active_id)
+        && tab.path == target_path
+    {
+        tab.cursor = group.cursor_after;
+        tab.cursor.preferred_col = tab.cursor.col;
+    }
+    if let (Some(mark), Some(state)) = (&group.file_search_mark, file_search) {
+        apply_mark_to_state(state, mark.hit_idx, mark.forward_marks_replaced);
+    }
+    eb.history.push_past(group);
+}
+
+fn pick_max_past_seq(edits: &BufferEdits, floor: u64) -> Option<CanonPath> {
+    edits
+        .buffers
+        .iter()
+        .filter_map(|(p, eb)| eb.history.past_top_seq().map(|s| (p.clone(), s)))
+        .filter(|(_, s)| *s > floor)
+        .max_by_key(|(_, s)| *s)
+        .map(|(p, _)| p)
+}
+
+fn pick_max_future_seq(edits: &BufferEdits, floor: u64) -> Option<CanonPath> {
+    edits
+        .buffers
+        .iter()
+        .filter_map(|(p, eb)| eb.history.future_top_seq().map(|s| (p.clone(), s)))
+        .filter(|(_, s)| *s > floor)
+        .max_by_key(|(_, s)| *s)
+        .map(|(p, _)| p)
+}
+
+/// Toggle the overlay's view of a hit to match a new "replaced?"
+/// value. Rebuilds the `ReplaceEntry` when the mark flips true —
+/// we don't need the full entry for display, just Some(placeholder)
+/// vs None. Forward-applying a Right gives `target=true`, its undo
+/// gives `target=false`, and vice versa for Left's inverse.
+fn apply_mark_to_state(state: &mut FileSearchState, hit_idx: usize, target_replaced: bool) {
+    if hit_idx >= state.flat_hits.len() || hit_idx >= state.hit_replacements.len() {
+        return;
+    }
+    if target_replaced {
+        // Rebuild a minimal entry from the hit; the exact
+        // rope_char_start / replacement_char_len aren't needed for
+        // display, and the Left-arrow path recomputes them from
+        // hit.preview when necessary.
+        let hit = state.flat_hits[hit_idx].clone();
+        let original_char_len = hit
+            .preview
+            .get(hit.match_start..hit.match_end)
+            .map(|s| s.chars().count())
+            .unwrap_or(0);
+        let replacement_text = state.replace.text.clone();
+        state.hit_replacements[hit_idx] = Some(led_state_file_search::ReplaceEntry {
+            hit: hit.clone(),
+            replacement_text: replacement_text.clone(),
+            replacement_char_len: replacement_text.chars().count(),
+            original_char_len,
+            rope_char_start: 0,
+            path: hit.path,
+        });
+    } else {
+        state.hit_replacements[hit_idx] = None;
+    }
+    // If the selection was on this row, keep it. Nothing else to
+    // do — the sidebar redraw picks up the new state.
+    let _ = FileSearchSelection::Result(hit_idx);
 }
 
 #[cfg(test)]

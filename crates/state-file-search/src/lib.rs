@@ -68,6 +68,14 @@ pub struct FileSearchState {
     /// created — same "snapshot on open" discipline find-file uses.
     pub previous_tab: Option<TabId>,
 
+    /// Snapshot of the session-wide edit seq at the moment the
+    /// overlay opened. Cross-buffer undo inside the overlay
+    /// refuses to pop any group whose seq is `<= overlay_open_seq`
+    /// — the user shouldn't be able to undo buffer edits made
+    /// before entering Ctrl+F. `0` means "no floor" (e.g. freshly
+    /// constructed, or no edits had happened yet).
+    pub overlay_open_seq: u64,
+
     /// Per-hit replacement state, indexed parallel to `flat_hits`.
     /// `Some(entry)` means that hit has been replaced (Right-arrow);
     /// `None` means it's still pending. Rows stay visible in the

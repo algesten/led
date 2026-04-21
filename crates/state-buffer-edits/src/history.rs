@@ -204,6 +204,37 @@ impl History {
         self.open_new_group(op, cursor_before, cursor_after);
     }
 
+    /// Record a compound replace (delete + insert at the same
+    /// position) as a single undo group, optionally tagged with a
+    /// `FileSearchMark`. Closes any currently-open group first so
+    /// the replace stands alone — same discipline as a kill or a
+    /// delete. Stamps the new group's seq immediately because it
+    /// can't coalesce with anything.
+    pub fn record_replace(
+        &mut self,
+        at: usize,
+        removed: Arc<str>,
+        inserted: Arc<str>,
+        cursor_before: Cursor,
+        cursor_after: Cursor,
+        mark: Option<FileSearchMark>,
+    ) {
+        self.future.clear();
+        self.finalise();
+        self.applied += 2;
+        let group = EditGroup {
+            ops: vec![
+                EditOp::Delete { at, text: removed },
+                EditOp::Insert { at, text: inserted },
+            ],
+            cursor_before,
+            cursor_after,
+            seq: self.seq_gen.next(),
+            file_search_mark: mark,
+        };
+        self.past.push(group);
+    }
+
     /// Close the open group (if any) into `past`. Called by
     /// dispatch after every non-edit command so the next edit
     /// starts fresh. Stamps the closing group with the next
