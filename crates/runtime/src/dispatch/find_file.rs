@@ -23,7 +23,6 @@
 //! - Preview-tab side effects during arrow navigation.
 //! - Open-mode paths A/B/C; SaveAs commit.
 
-use led_core::UserPath;
 use led_state_browser::FsTree;
 use led_state_find_file::{FindFileMode, FindFileState, abbreviate_home, expand_path};
 use led_state_tabs::Tabs;
@@ -238,22 +237,72 @@ fn handle_enter_open(find_file: &mut Option<FindFileState>, tabs: &mut Tabs) {
     let Some(state) = find_file.as_ref() else {
         return;
     };
-    // Trailing slash: user is exploring the directory. Stage 6 will
-    // commit to the currently-selected completion; for now, Enter
-    // is a no-op (leaves the overlay open).
+
+    // Path A — arrow-driven selection. If a completion is
+    // highlighted, act on that entry regardless of whether `input`
+    // exactly matches its path.
+    if let Some(idx) = state.selected
+        && let Some(entry) = state.completions.get(idx)
+    {
+        let is_dir = entry.is_dir;
+        let full = entry.full.clone();
+        let name = entry.name.clone();
+        if is_dir {
+            descend(find_file, &name);
+        } else {
+            open_or_focus_tab(tabs, &full, /* promote= */ true);
+            deactivate(find_file, tabs);
+        }
+        return;
+    }
+
+    // Trailing slash + no selection = no-op: user is exploring a
+    // directory, there's no target to commit. Matches legacy.
     if state.input.ends_with('/') {
         return;
     }
+
     let expanded = expand_path(&state.input);
-    let canon = UserPath::new(expanded).canonicalize();
-    // Path B short-circuit: if the expanded path matches a
-    // completion and that completion is a dir, Stage 6 will descend
-    // into it. For now, fall through to path C's open so "enter" on
-    // a dir-matching completion opens it like any other path.
-    // Once the matching entry is a file, we open/focus. Same outcome
-    // for path C (no match).
+    let canon = led_core::UserPath::new(expanded).canonicalize();
+
+    // Path B — exact match against a completion (no arrow
+    // selection). Dir → descend; file → open.
+    if let Some(entry) = state.completions.iter().find(|e| e.full == canon) {
+        let is_dir = entry.is_dir;
+        let full = entry.full.clone();
+        let name = entry.name.clone();
+        if is_dir {
+            descend(find_file, &name);
+        } else {
+            open_or_focus_tab(tabs, &full, /* promote= */ true);
+            deactivate(find_file, tabs);
+        }
+        return;
+    }
+
+    // Path C — no selection, no exact match: open (or create) the
+    // typed path. The file-read driver handles missing-file-on-save
+    // creation; for the read, a missing file surfaces as an error
+    // state in the buffer.
     open_or_focus_tab(tabs, &canon, /* promote= */ true);
     deactivate(find_file, tabs);
+}
+
+/// Descend into a directory: rewrite `input` to
+/// `dir_prefix(base_input) + dir_name` (the display name already
+/// carries the trailing `/`) and re-request completions for the
+/// new directory.
+fn descend(find_file: &mut Option<FindFileState>, dir_name: &str) {
+    let Some(state) = find_file.as_mut() else {
+        return;
+    };
+    let base = led_state_find_file::dir_prefix(&state.base_input).to_string();
+    state.input = base;
+    state.input.push_str(dir_name);
+    state.cursor = state.input.len();
+    state.base_input = state.input.clone();
+    state.reset_selection();
+    state.queue_request();
 }
 
 // ── Input-editing primitives ───────────────────────────────────────────
@@ -805,6 +854,54 @@ mod tests {
         // LCP in case-insensitive terms is 2 chars. Returns the slice
         // from `names[0]`, preserving its original case.
         assert_eq!(p, "Ma");
+    }
+
+    #[test]
+    fn enter_on_selected_dir_descends_and_keeps_overlay_open() {
+        let mut ff = overlay("/tmp/sr", 7);
+        {
+            let s = ff.as_mut().unwrap();
+            s.completions = vec![entry("src", true)];
+            s.selected = Some(0);
+        }
+        let mut tabs = Tabs::default();
+        run_overlay_command(Command::InsertNewline, &mut ff, &mut tabs);
+        // Descent keeps the overlay open, no tab opened.
+        let s = ff.as_ref().expect("stays open");
+        assert_eq!(s.input, "/tmp/src/");
+        assert_eq!(s.base_input, "/tmp/src/");
+        assert!(s.selected.is_none());
+        assert!(tabs.open.is_empty());
+        // Descent queues a re-request.
+        assert_eq!(s.pending_find_file_list.len(), 1);
+    }
+
+    #[test]
+    fn enter_on_selected_file_opens_and_deactivates() {
+        let mut ff = overlay("/tmp/mai", 8);
+        {
+            let s = ff.as_mut().unwrap();
+            s.completions = vec![entry("main.rs", false)];
+            s.selected = Some(0);
+        }
+        let mut tabs = Tabs::default();
+        run_overlay_command(Command::InsertNewline, &mut ff, &mut tabs);
+        assert!(ff.is_none());
+        assert_eq!(tabs.open.len(), 1);
+        assert!(!tabs.open[0].preview);
+    }
+
+    #[test]
+    fn enter_on_exact_match_dir_descends() {
+        let mut ff = overlay("/tmp/src", 8);
+        {
+            let s = ff.as_mut().unwrap();
+            s.completions = vec![entry("src", true)];
+        }
+        let mut tabs = Tabs::default();
+        run_overlay_command(Command::InsertNewline, &mut ff, &mut tabs);
+        let s = ff.as_ref().expect("stays open");
+        assert_eq!(s.input, "/tmp/src/");
     }
 
     #[test]
