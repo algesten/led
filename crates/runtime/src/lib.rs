@@ -373,16 +373,16 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
             BrowserUiInput::new(browser),
         );
         let find_file_actions = find_file_action(FindFileInput::new(find_file));
-        let frame = render_frame(
-            TerminalDimsInput::new(terminal),
-            EditedBuffersInput::new(edits),
-            StoreLoadedInput::new(store),
-            TabsActiveInput::new(tabs),
-            AlertsInput::new(alerts),
-            BrowserUiInput::new(browser),
-            FindFileInput::new(find_file),
-            query::IsearchInput::new(isearch),
-        );
+        let frame = render_frame(query::RenderInputs {
+            term: TerminalDimsInput::new(terminal),
+            edits: EditedBuffersInput::new(edits),
+            store: StoreLoadedInput::new(store),
+            tabs: TabsActiveInput::new(tabs),
+            alerts: AlertsInput::new(alerts),
+            browser: BrowserUiInput::new(browser),
+            find_file: FindFileInput::new(find_file),
+            isearch: query::IsearchInput::new(isearch),
+        });
 
         // ── Execute ─────────────────────────────────────────────
         // Directory listings go first so goldens' dispatched.snap

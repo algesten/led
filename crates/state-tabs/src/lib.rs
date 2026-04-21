@@ -52,6 +52,11 @@ pub struct Tab {
     /// `OpenSelected`. M11. At most one preview tab exists at a time;
     /// dispatch enforces that invariant.
     pub preview: bool,
+    /// Last committed isearch query for this tab. Stashed by
+    /// `search_accept` / `search_cancel` so `Ctrl-s` on an empty
+    /// query recalls it. Per-tab (not global) because users
+    /// typically want per-buffer search history. M13.
+    pub last_search: Option<String>,
 }
 
 /// Source: which tabs are open, which is active.

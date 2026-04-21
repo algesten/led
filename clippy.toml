@@ -1,0 +1,5 @@
+# Query memos compose many projected inputs by design; the
+# bundling happens in small structs at call sites
+# (`RenderInputs`, `Dispatcher`). Bump the per-fn arg threshold so
+# the memo internals don't trigger `too_many_arguments`.
+too-many-arguments-threshold = 10

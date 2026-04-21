@@ -795,8 +795,46 @@ pub fn file_list_action<'f, 'u>(
 /// The call site pattern for a memo composing sibling memos: pass the
 /// same input values through — drv 0.3's input types are `Copy` over
 /// references, so forwarding is free.
+/// Bundle of every `#[drv::input]` projection `render_frame` reads.
+///
+/// Introduced so `render_frame` stays a single-arg function as the
+/// set of projected sources grows — same pattern as `Dispatcher`.
+/// The struct is `Copy` because every field is already a cheap-
+/// copy projection (references + Arc pointer wrappers).
+///
+/// New memos that want to compose with render_frame don't need to
+/// touch the struct; they just take whichever subset they care
+/// about as individual inputs.
+#[derive(Copy, Clone)]
+pub struct RenderInputs<'a> {
+    pub term: TerminalDimsInput<'a>,
+    pub edits: EditedBuffersInput<'a>,
+    pub store: StoreLoadedInput<'a>,
+    pub tabs: TabsActiveInput<'a>,
+    pub alerts: AlertsInput<'a>,
+    pub browser: BrowserUiInput<'a>,
+    pub find_file: FindFileInput<'a>,
+    pub isearch: IsearchInput<'a>,
+}
+
+/// Ergonomic wrapper. Explodes `inputs` and calls the inner memo so
+/// call sites stay on a one-arg surface while the memo keeps its
+/// individual-input contract (drv caches per-input, not per-bundle).
+pub fn render_frame(inputs: RenderInputs<'_>) -> Option<Frame> {
+    render_frame_memo(
+        inputs.term,
+        inputs.edits,
+        inputs.store,
+        inputs.tabs,
+        inputs.alerts,
+        inputs.browser,
+        inputs.find_file,
+        inputs.isearch,
+    )
+}
+
 #[drv::memo(single)]
-pub fn render_frame<'t, 'e, 'b, 'a, 'al, 'br, 'ff, 'is>(
+fn render_frame_memo<'t, 'e, 'b, 'a, 'al, 'br, 'ff, 'is>(
     term: TerminalDimsInput<'t>,
     edits: EditedBuffersInput<'e>,
     store: StoreLoadedInput<'b>,
@@ -963,16 +1001,16 @@ mod tests {
         };
         let ff = None;
         let is = None;
-        render_frame(
-            TerminalDimsInput::new(term),
-            EditedBuffersInput::new(e),
-            StoreLoadedInput::new(s),
-            TabsActiveInput::new(t),
-            AlertsInput::new(&alerts),
-            BrowserUiInput::new(&browser),
-            FindFileInput::new(&ff),
-            IsearchInput::new(&is),
-        )
+        render_frame(RenderInputs {
+            term: TerminalDimsInput::new(term),
+            edits: EditedBuffersInput::new(e),
+            store: StoreLoadedInput::new(s),
+            tabs: TabsActiveInput::new(t),
+            alerts: AlertsInput::new(&alerts),
+            browser: BrowserUiInput::new(&browser),
+            find_file: FindFileInput::new(&ff),
+            isearch: IsearchInput::new(&is),
+        })
     }
 
     #[test]
@@ -1017,16 +1055,16 @@ mod tests {
         let ff = Some(ff_state);
         let is = None;
 
-        let frame = render_frame(
-            TerminalDimsInput::new(&term),
-            EditedBuffersInput::new(&e),
-            StoreLoadedInput::new(&s),
-            TabsActiveInput::new(&t),
-            AlertsInput::new(&alerts),
-            BrowserUiInput::new(&browser),
-            FindFileInput::new(&ff),
-            IsearchInput::new(&is),
-        )
+        let frame = render_frame(RenderInputs {
+            term: TerminalDimsInput::new(&term),
+            edits: EditedBuffersInput::new(&e),
+            store: StoreLoadedInput::new(&s),
+            tabs: TabsActiveInput::new(&t),
+            alerts: AlertsInput::new(&alerts),
+            browser: BrowserUiInput::new(&browser),
+            find_file: FindFileInput::new(&ff),
+            isearch: IsearchInput::new(&is),
+        })
         .expect("dims set");
 
         // dims.rows = 24 → status bar at row 23.
@@ -1053,16 +1091,16 @@ mod tests {
         };
         let ff = None;
         let is = None;
-        let frame = render_frame(
-            TerminalDimsInput::new(&term),
-            EditedBuffersInput::new(&e),
-            StoreLoadedInput::new(&s),
-            TabsActiveInput::new(&t),
-            AlertsInput::new(&alerts),
-            BrowserUiInput::new(&browser),
-            FindFileInput::new(&ff),
-            IsearchInput::new(&is),
-        )
+        let frame = render_frame(RenderInputs {
+            term: TerminalDimsInput::new(&term),
+            edits: EditedBuffersInput::new(&e),
+            store: StoreLoadedInput::new(&s),
+            tabs: TabsActiveInput::new(&t),
+            alerts: AlertsInput::new(&alerts),
+            browser: BrowserUiInput::new(&browser),
+            find_file: FindFileInput::new(&ff),
+            isearch: IsearchInput::new(&is),
+        })
         .expect("dims set");
         assert_eq!(frame.cursor, None);
     }
