@@ -557,6 +557,7 @@ dependencies = [
  "dirs",
  "led-core",
  "led-driver-find-file-core",
+ "led-state-tabs",
 ]
 
 [[package]]

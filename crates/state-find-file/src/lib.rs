@@ -76,6 +76,14 @@ pub struct FindFileState {
     /// overlay's current input, so mid-tick re-fires don't paint
     /// stale data.
     pub pending_find_file_list: Vec<led_driver_find_file_core::FindFileCmd>,
+
+    /// Captured on the first arrow-driven preview: the tab id that
+    /// was active before the overlay started previewing
+    /// completions. Deactivate uses it to restore focus after
+    /// closing a preview tab. `None` means either the overlay has
+    /// not yet previewed anything, or there was no active tab to
+    /// preserve.
+    pub previous_tab: Option<led_state_tabs::TabId>,
 }
 
 impl FindFileState {
@@ -94,6 +102,7 @@ impl FindFileState {
             selected: None,
             show_side: false,
             pending_find_file_list: Vec::new(),
+            previous_tab: None,
         }
     }
 
@@ -111,6 +120,7 @@ impl FindFileState {
             selected: None,
             show_side: false,
             pending_find_file_list: Vec::new(),
+            previous_tab: None,
         }
     }
 

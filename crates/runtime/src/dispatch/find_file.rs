@@ -64,10 +64,34 @@ pub(super) fn activate_save_as(
     *find_file = Some(state);
 }
 
-/// Close the overlay. Idempotent. Future stages will also close
-/// the preview tab (if any) and restore the previously-active tab.
-pub(super) fn deactivate(find_file: &mut Option<FindFileState>) {
+/// Close the overlay. Closes the preview tab (if any) and restores
+/// the previously-active tab. Idempotent.
+pub(super) fn deactivate(find_file: &mut Option<FindFileState>, tabs: &mut Tabs) {
+    if let Some(state) = find_file.as_ref() {
+        close_preview(tabs, state.previous_tab);
+    }
     *find_file = None;
+}
+
+/// Remove any preview tab. When `restore_to` is `Some`, promote that
+/// tab to active; otherwise clear `active` if the preview was the
+/// active tab. Matches legacy `close_preview` semantics.
+fn close_preview(tabs: &mut Tabs, restore_to: Option<led_state_tabs::TabId>) {
+    // Find the preview tab (there's at most one at any time).
+    let Some(preview_idx) = tabs.open.iter().position(|t| t.preview) else {
+        return;
+    };
+    let preview_id = tabs.open[preview_idx].id;
+    tabs.open.remove(preview_idx);
+    // Restore the previously-active tab if we have its id and it
+    // still exists. Otherwise pick any remaining tab, or clear.
+    if let Some(prev) = restore_to
+        && tabs.open.iter().any(|t| t.id == prev)
+    {
+        tabs.active = Some(prev);
+    } else if tabs.active == Some(preview_id) {
+        tabs.active = tabs.open.front().map(|t| t.id);
+    }
 }
 
 /// Route a `Command` through the find-file overlay when active.
@@ -102,13 +126,13 @@ pub(super) fn run_overlay_command(
         }
         Command::KillLine => kill_line(find_file.as_mut()?),
         Command::FindFileTabComplete => tab_complete(find_file.as_mut()?),
+        Command::CursorUp => move_selection(find_file, tabs, -1),
+        Command::CursorDown => move_selection(find_file, tabs, 1),
         Command::InsertNewline => handle_enter(find_file, tabs),
-        Command::Abort => deactivate(find_file),
+        Command::Abort => deactivate(find_file, tabs),
         // Not-yet-implemented overlay commands. Absorbed so the key
         // doesn't leak to the buffer below.
-        Command::CursorUp
-        | Command::CursorDown
-        | Command::CursorPageUp
+        Command::CursorPageUp
         | Command::CursorPageDown
         | Command::CursorFileStart
         | Command::CursorFileEnd
@@ -149,8 +173,64 @@ fn handle_enter(find_file: &mut Option<FindFileState>, tabs: &mut Tabs) {
         FindFileMode::SaveAs => {
             // Stage 7b will wire `pending_save_as`. For now just
             // close the overlay so Enter isn't a dead key.
-            deactivate(find_file);
+            deactivate(find_file, tabs);
         }
+    }
+}
+
+/// Arrow-driven selection through completions.
+///
+/// `delta` is +1 for down, -1 for up; the selection wraps at both
+/// ends so the user can cycle. On selection change:
+/// - `input` is rewritten to `dir_prefix(base_input) + selected.name`
+///   so the user sees what will commit on Enter.
+/// - `show_side = true` — arrow nav is the primary way to browse.
+/// - For file entries (`!is_dir`), a preview tab is created/updated
+///   at that path. The first arrow captures `tabs.active` into
+///   `previous_tab` so `deactivate` can restore it.
+fn move_selection(find_file: &mut Option<FindFileState>, tabs: &mut Tabs, delta: isize) {
+    let Some(state) = find_file.as_mut() else {
+        return;
+    };
+    if state.completions.is_empty() {
+        return;
+    }
+    let n = state.completions.len();
+    let next = match state.selected {
+        None => {
+            if delta >= 0 {
+                0
+            } else {
+                n - 1
+            }
+        }
+        Some(i) => {
+            let signed = i as isize + delta;
+            let wrapped = signed.rem_euclid(n as isize);
+            wrapped as usize
+        }
+    };
+    state.selected = Some(next);
+    state.show_side = true;
+
+    // Rewrite input to dir_prefix(base_input) + selected.name so the
+    // status bar reflects the arrow-selected target.
+    let base = led_state_find_file::dir_prefix(&state.base_input).to_string();
+    let mut new_input = base;
+    new_input.push_str(&state.completions[next].name);
+    state.input = new_input;
+    state.cursor = state.input.len();
+
+    // Preview non-directory selections.
+    let entry = &state.completions[next];
+    if !entry.is_dir {
+        // First preview: remember the currently-active tab so we
+        // can restore on deactivate.
+        if state.previous_tab.is_none() {
+            state.previous_tab = tabs.active;
+        }
+        let path = entry.full.clone();
+        open_or_focus_tab(tabs, &path, /* promote= */ false);
     }
 }
 
@@ -173,7 +253,7 @@ fn handle_enter_open(find_file: &mut Option<FindFileState>, tabs: &mut Tabs) {
     // Once the matching entry is a file, we open/focus. Same outcome
     // for path C (no match).
     open_or_focus_tab(tabs, &canon, /* promote= */ true);
-    deactivate(find_file);
+    deactivate(find_file, tabs);
 }
 
 // ── Input-editing primitives ───────────────────────────────────────────
@@ -447,7 +527,7 @@ mod tests {
     #[test]
     fn deactivate_clears_state() {
         let mut ff = Some(FindFileState::open("x/".into()));
-        deactivate(&mut ff);
+        deactivate(&mut ff, &mut Tabs::default());
         assert!(ff.is_none());
     }
 
@@ -644,6 +724,78 @@ mod tests {
         assert!(ff.as_ref().unwrap().show_side);
         assert_eq!(ff.as_ref().unwrap().input, "/tmp/");
         assert!(ff.as_ref().unwrap().selected.is_none());
+    }
+
+    // ── Arrow navigation + preview ─────────────────────────────────
+
+    #[test]
+    fn move_down_selects_first_completion_and_previews_file() {
+        let mut ff = overlay("/tmp/", 5);
+        ff.as_mut().unwrap().completions = vec![entry("a.rs", false), entry("b.rs", false)];
+        let mut tabs = Tabs::default();
+        run_overlay_command(Command::CursorDown, &mut ff, &mut tabs);
+        let s = ff.as_ref().unwrap();
+        assert_eq!(s.selected, Some(0));
+        assert!(s.show_side);
+        // Input rewritten to dir_prefix + selected name.
+        assert_eq!(s.input, "/tmp/a.rs");
+        // Preview tab exists.
+        assert_eq!(tabs.open.len(), 1);
+        assert_eq!(tabs.open[0].path, canon("/tmp/a.rs"));
+        assert!(tabs.open[0].preview);
+    }
+
+    #[test]
+    fn move_up_from_none_wraps_to_last() {
+        let mut ff = overlay("/tmp/", 5);
+        ff.as_mut().unwrap().completions = vec![entry("a.rs", false), entry("b.rs", false)];
+        run_overlay_command(Command::CursorUp, &mut ff, &mut Tabs::default());
+        assert_eq!(ff.as_ref().unwrap().selected, Some(1));
+    }
+
+    #[test]
+    fn move_down_wraps_at_last_back_to_zero() {
+        let mut ff = overlay("/tmp/", 5);
+        ff.as_mut().unwrap().selected = Some(1);
+        ff.as_mut().unwrap().completions = vec![entry("a.rs", false), entry("b.rs", false)];
+        run_overlay_command(Command::CursorDown, &mut ff, &mut Tabs::default());
+        assert_eq!(ff.as_ref().unwrap().selected, Some(0));
+    }
+
+    #[test]
+    fn move_selection_on_dir_entry_skips_preview() {
+        let mut ff = overlay("/tmp/", 5);
+        ff.as_mut().unwrap().completions = vec![entry("src", true)];
+        let mut tabs = Tabs::default();
+        run_overlay_command(Command::CursorDown, &mut ff, &mut tabs);
+        assert_eq!(ff.as_ref().unwrap().selected, Some(0));
+        // Dir preview isn't meaningful → no preview tab created.
+        assert!(tabs.open.is_empty());
+    }
+
+    #[test]
+    fn deactivate_closes_preview_and_restores_previous_active() {
+        use led_state_tabs::{Tab, TabId};
+        let mut ff = overlay("/tmp/", 5);
+        let mut tabs = Tabs::default();
+        let prev_id = TabId(42);
+        tabs.open.push_back(Tab {
+            id: prev_id,
+            path: canon("/tmp/real.rs"),
+            ..Default::default()
+        });
+        tabs.active = Some(prev_id);
+        ff.as_mut().unwrap().completions = vec![entry("a.rs", false)];
+        // Arrow-down creates a preview + captures previous_tab.
+        run_overlay_command(Command::CursorDown, &mut ff, &mut tabs);
+        assert_eq!(tabs.open.len(), 2);
+        assert!(tabs.open.iter().any(|t| t.preview));
+        assert_eq!(ff.as_ref().unwrap().previous_tab, Some(prev_id));
+        // Abort closes the preview and restores the original tab.
+        run_overlay_command(Command::Abort, &mut ff, &mut tabs);
+        assert!(ff.is_none());
+        assert_eq!(tabs.open.len(), 1);
+        assert_eq!(tabs.active, Some(prev_id));
     }
 
     #[test]
