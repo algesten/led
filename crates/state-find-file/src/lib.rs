@@ -91,6 +91,14 @@ pub struct FindFileState {
     /// again to re-establish the selection. Cleared on any
     /// direct input edit (edits re-arm the query-typing flow).
     pub arrow_follow: bool,
+
+    /// Transient in-prompt feedback ("[No match]", "[Complete]"…)
+    /// rendered right after the cursor. Cleared when
+    /// `hint_expires_at` is reached — the runtime's ingest phase
+    /// expires it on every tick, mirroring
+    /// `AlertState::expire_info`.
+    pub hint: Option<String>,
+    pub hint_expires_at: Option<std::time::Instant>,
 }
 
 impl FindFileState {
@@ -111,6 +119,8 @@ impl FindFileState {
             pending_find_file_list: Vec::new(),
             previous_tab: None,
             arrow_follow: false,
+            hint: None,
+            hint_expires_at: None,
         }
     }
 
@@ -130,6 +140,8 @@ impl FindFileState {
             pending_find_file_list: Vec::new(),
             previous_tab: None,
             arrow_follow: false,
+            hint: None,
+            hint_expires_at: None,
         }
     }
 
@@ -149,6 +161,25 @@ impl FindFileState {
         self.selected = None;
         self.show_side = false;
         self.arrow_follow = false;
+    }
+
+    /// Set a transient prompt hint (e.g. "[No match]") that auto-
+    /// clears at `now + ttl`. Mirrors `AlertState::set_info` but
+    /// scoped to the overlay.
+    pub fn set_hint(&mut self, text: impl Into<String>, now: std::time::Instant, ttl: std::time::Duration) {
+        self.hint = Some(text.into());
+        self.hint_expires_at = Some(now + ttl);
+    }
+
+    /// Drop the hint once `now` passes the stored expiry. The
+    /// runtime's ingest phase calls this every tick.
+    pub fn expire_hint(&mut self, now: std::time::Instant) {
+        if let Some(deadline) = self.hint_expires_at
+            && now >= deadline
+        {
+            self.hint = None;
+            self.hint_expires_at = None;
+        }
     }
 
     /// Queue a completion request derived from the current input.
@@ -307,6 +338,24 @@ mod tests {
         let s = FindFileState::save_as("~/src/main.rs".into());
         assert_eq!(s.cursor, 13);
         assert_eq!(s.mode, FindFileMode::SaveAs);
+    }
+
+    #[test]
+    fn set_hint_and_expire_hint_cycle() {
+        use std::time::{Duration, Instant};
+        let mut s = FindFileState::open("/tmp/".into());
+        let t0 = Instant::now();
+        s.set_hint("[No match]", t0, Duration::from_millis(500));
+        assert_eq!(s.hint.as_deref(), Some("[No match]"));
+
+        // Not yet expired.
+        s.expire_hint(t0 + Duration::from_millis(100));
+        assert!(s.hint.is_some());
+
+        // After deadline → cleared.
+        s.expire_hint(t0 + Duration::from_millis(600));
+        assert!(s.hint.is_none());
+        assert!(s.hint_expires_at.is_none());
     }
 
     #[test]

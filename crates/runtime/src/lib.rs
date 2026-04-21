@@ -194,8 +194,13 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
         // ── Ingest ──────────────────────────────────────────────
         // Clear expired info alerts at the top of each tick — one
         // `Instant::now()` compare per tick, zero allocs when no
-        // alert is live.
-        alerts.expire_info(Instant::now());
+        // alert is live. Find-file's transient "[No match]" hint
+        // follows the same TTL discipline.
+        let now = Instant::now();
+        alerts.expire_info(now);
+        if let Some(ff) = find_file.as_mut() {
+            ff.expire_hint(now);
+        }
 
         // Seed BufferEdits from newly-Ready loads. `seed_edit_from_load`
         // enforces the discipline that an existing edit entry wins
@@ -465,7 +470,7 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
         // without getting its work done; the next key would then
         // wait the full timeout. That was the visible stutter when
         // holding a key — key-repeat events race with the drain.
-        let timeout = nearest_deadline(alerts)
+        let timeout = nearest_deadline(alerts, find_file)
             .and_then(|d| d.checked_duration_since(Instant::now()))
             .unwrap_or(Duration::from_secs(60));
         use std::sync::mpsc::RecvTimeoutError;
@@ -492,7 +497,10 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
 /// `run()` can use it alongside the disjoint-field `&mut` borrows
 /// that dispatch needs. Not a drv memo — the inputs change every
 /// tick and the fold is trivially cheap; caching would churn.
-pub fn nearest_deadline(alerts: &AlertState) -> Option<Instant> {
+pub fn nearest_deadline(
+    alerts: &AlertState,
+    find_file: &Option<FindFileState>,
+) -> Option<Instant> {
     let mut soonest: Option<Instant> = None;
     let consider = |soonest: &mut Option<Instant>, candidate: Option<Instant>| {
         if let Some(t) = candidate {
@@ -503,6 +511,10 @@ pub fn nearest_deadline(alerts: &AlertState) -> Option<Instant> {
         }
     };
     consider(&mut soonest, alerts.info_expires_at);
+    consider(
+        &mut soonest,
+        find_file.as_ref().and_then(|ff| ff.hint_expires_at),
+    );
     // Future timer sources: add `consider(...)` lines here.
     soonest
 }

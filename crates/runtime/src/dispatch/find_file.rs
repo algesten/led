@@ -436,7 +436,15 @@ fn tab_complete(s: &mut FindFileState) {
         return;
     }
     match s.completions.len() {
-        0 => {}
+        0 => {
+            // Emacs-style feedback: flash "[No match]" in the prompt
+            // for a beat so the user sees why Tab was a no-op.
+            s.set_hint(
+                "[No match]",
+                std::time::Instant::now(),
+                std::time::Duration::from_millis(1200),
+            );
+        }
         1 => {
             let only = &s.completions[0];
             let is_dir = only.is_dir;
@@ -785,6 +793,15 @@ mod tests {
         let before = ff.as_ref().unwrap().input.clone();
         run_overlay_command(Command::FindFileTabComplete, &mut ff, &mut Tabs::default(), &mut led_state_buffer_edits::BufferEdits::default());
         assert_eq!(ff.as_ref().unwrap().input, before);
+    }
+
+    #[test]
+    fn tab_lcp_no_match_flashes_hint() {
+        let mut ff = overlay("/tmp/xyz", 8);
+        run_overlay_command(Command::FindFileTabComplete, &mut ff, &mut Tabs::default(), &mut led_state_buffer_edits::BufferEdits::default());
+        let s = ff.as_ref().unwrap();
+        assert_eq!(s.hint.as_deref(), Some("[No match]"));
+        assert!(s.hint_expires_at.is_some());
     }
 
     #[test]

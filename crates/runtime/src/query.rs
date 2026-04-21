@@ -496,16 +496,24 @@ pub fn status_bar_model<'a, 'b, 'c, 'f>(
     // status bar content: left is `Find file: <input>` /
     // `Save as: <input>`, right is empty (no position indicator
     // while the overlay has focus). Matches legacy goldens.
+    //
+    // An active `hint` (e.g. "[No match]") appends after one space
+    // of padding — Emacs-style transient feedback.
     if let Some(state) = find_file.overlay.as_ref() {
         let label = match state.mode {
             led_state_find_file::FindFileMode::Open => "Find file",
             led_state_find_file::FindFileMode::SaveAs => "Save as",
         };
-        let mut left = String::with_capacity(state.input.len() + label.len() + 3);
+        let hint_len = state.hint.as_ref().map(|h| h.len() + 1).unwrap_or(0);
+        let mut left = String::with_capacity(state.input.len() + label.len() + 3 + hint_len);
         left.push(' ');
         left.push_str(label);
         left.push_str(": ");
         left.push_str(&state.input);
+        if let Some(hint) = state.hint.as_ref() {
+            left.push(' ');
+            left.push_str(hint);
+        }
         return StatusBarModel {
             left: Arc::from(left),
             right: Arc::from(""),
