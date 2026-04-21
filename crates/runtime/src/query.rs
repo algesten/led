@@ -767,11 +767,27 @@ pub fn render_frame<'t, 'e, 'b, 'a, 'al, 'br, 'ff>(
     let side_panel = layout
         .side_area
         .map(|area| side_panel_model(browser, find_file, area.rows));
-    // Body cursor is body-area-relative. Shift to absolute screen
-    // coords by adding the editor area's origin. When the side panel
-    // has focus the editor cursor hides — the painter parks the
-    // terminal cursor on the selected side-panel row instead.
-    let cursor = if *browser.focus == Focus::Side {
+    // Cursor placement, in priority order:
+    //
+    // 1. Find-file overlay active → status-bar row, column = prompt
+    //    length + overlay input cursor. Byte offsets are ASCII-safe
+    //    for the English prompts; if `input` ever carries non-ASCII
+    //    the overlay's own cursor field is already a char-boundary
+    //    byte index, and we convert to display columns here.
+    // 2. Side-panel focus → no cursor (M11 cursor-hide rule).
+    // 3. Otherwise, map the body cursor from editor-area-relative
+    //    coords to absolute terminal coords.
+    let cursor = if let Some(state) = find_file.overlay.as_ref() {
+        let prefix_cols: u16 = match state.mode {
+            led_state_find_file::FindFileMode::Open => 12, // " Find file: "
+            led_state_find_file::FindFileMode::SaveAs => 10, // " Save as: "
+        };
+        let input_col = state.input[..state.cursor].chars().count() as u16;
+        Some((
+            prefix_cols.saturating_add(input_col),
+            layout.status_bar.y,
+        ))
+    } else if *browser.focus == Focus::Side {
         None
     } else {
         match &body {
@@ -928,6 +944,42 @@ mod tests {
         assert_eq!(*frame.tab_bar.labels, vec![" a.rs".to_string()]);
         assert_eq!(frame.tab_bar.active, Some(0));
         assert!(matches!(frame.body, BodyModel::Pending { .. }));
+    }
+
+    #[test]
+    fn render_frame_parks_cursor_in_status_bar_when_find_file_active() {
+        use led_state_find_file::{FindFileState, FindFileMode};
+        // Any body content works — when the overlay is open the
+        // cursor moves to the status-bar prompt regardless of what
+        // the buffer contains.
+        let (t, e, s, term) = fixture(
+            &[("a.rs", 1)],
+            Some(1),
+            &[("a.rs", LoadState::Ready(Arc::new(Rope::from_str("hi"))))],
+            Some(Dims { cols: 80, rows: 24 }),
+        );
+        let alerts = AlertState::default();
+        let browser = BrowserUi { visible: false, ..Default::default() };
+        // Open mode: prefix " Find file: " is 12 cols; `input.cursor`
+        // at byte 4 in "abcd" is 4 chars → absolute col 16.
+        let mut ff_state = FindFileState::open("abcd".to_string());
+        ff_state.cursor = 4;
+        assert_eq!(ff_state.mode, FindFileMode::Open);
+        let ff = Some(ff_state);
+
+        let frame = render_frame(
+            TerminalDimsInput::new(&term),
+            EditedBuffersInput::new(&e),
+            StoreLoadedInput::new(&s),
+            TabsActiveInput::new(&t),
+            AlertsInput::new(&alerts),
+            BrowserUiInput::new(&browser),
+            FindFileInput::new(&ff),
+        )
+        .expect("dims set");
+
+        // dims.rows = 24 → status bar at row 23.
+        assert_eq!(frame.cursor, Some((16, 23)));
     }
 
     #[test]
