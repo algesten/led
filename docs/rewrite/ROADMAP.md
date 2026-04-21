@@ -313,6 +313,54 @@ variants), `keybindings/main/alt_*` for `alt+b`/`alt+f`.
 `actions/toggle_search_replace`, `actions/replace_all`,
 `driver_events/file_search/*`, `features/file_search/*`.
 
+### M14b — Chrome theming
+
+Introduces the theme pipeline and replaces the hard-coded chrome
+styles currently emitted by `crates/driver-terminal/native/src/lib.rs`
+(tab-bar `Reverse`, status-bar `Red`/`White`/`Bold`, side-panel
+selection `Reverse`, side-panel border `│` in default fg) with
+theme-driven styles. Landing this before M15 means syntax
+highlighting plugs into an already-wired theme rather than
+reinventing the loader, and lets reviewers verify every earlier
+milestone's chrome at the *correct* colors.
+
+Scope:
+
+- `--theme` CLI flag + `theme.toml` parser (minimal: named + hex
+  24-bit colors, bold/reverse/underline attrs, no cascading yet).
+- `[chrome]` section covering:
+  - `tab.active`, `tab.inactive`, `tab.preview`, `tab.dirty_marker`.
+  - `status.normal`, `status.warn` (replacing the hard-coded
+    red/white/bold at lines 265–267 of the native painter).
+  - `browser.selected_focused`, `browser.selected_unfocused`,
+    `browser.chevron`, `browser.border`.
+  - `cursor_line` background (implicit today — the terminal default).
+- Render view-models gain a `Style` field (or an equivalent
+  per-region enum) so the painter selects colors rather than hard-
+  coding `Color::Red` etc.
+- Browser focus split: the painter currently draws the selected row
+  with `Reverse` regardless of focus — M14b takes `SidePanelModel.
+  focused` into account to pick focused vs unfocused selection
+  styles (the cursor-hide fix in M11 handles the *cursor* side; the
+  *selection color* is chrome theming).
+- Ruler column (typically col 110 at 120-col terminals) —
+  introduced here rather than earlier because it's a theme-owned
+  overlay, not a layout primitive.
+
+Out of scope for M14b:
+
+- Syntax token classes in the theme file (those land in M15, which
+  extends the same `theme.toml` with a `[syntax]` section).
+- Per-language chrome variations.
+- Nerd-font chrome glyphs — the existing `▷ ▽ │` unicode is fine.
+
+**Spec reference:** new `docs/rewrite/specs/theming.md` (to be
+authored as part of this milestone).
+
+**Goldens moved to green:** `features/theming/*` (to be authored).
+Chrome-theme assertions currently ride inside individual feature
+goldens; M14b adds dedicated theme-switching coverage.
+
 ### M15 — Syntax highlighting (tree-sitter)
 
 - `SyntaxState` per buffer: `Arc<Tree>` + `language` + version.
@@ -322,8 +370,8 @@ variants), `keybindings/main/alt_*` for `alt+b`/`alt+f`.
 - Language detection: extension + shebang + modeline override.
 - Highlight query → tokens → render as styled cells.
 - `Frame.body` gains per-cell style (foreground, background, attrs).
-- `--theme` CLI flag + `theme.toml` (M15 also adds a minimal theme
-  parser — just foreground colors for token classes to start).
+- Extends the `theme.toml` introduced in M14b with a `[syntax]`
+  section mapping token classes to foreground colors.
 
 **Spec reference:** `syntax.md`, `docs/drivers/syntax.md`.
 
