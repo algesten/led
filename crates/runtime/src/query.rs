@@ -504,13 +504,13 @@ pub fn status_bar_model<'a, 'b, 'c, 'f>(
             led_state_find_file::FindFileMode::Open => "Find file",
             led_state_find_file::FindFileMode::SaveAs => "Save as",
         };
-        let hint_len = state.hint.as_ref().map(|h| h.len() + 1).unwrap_or(0);
-        let mut left = String::with_capacity(state.input.len() + label.len() + 3 + hint_len);
+        let hint_len = state.input.hint.as_ref().map(|h| h.len() + 1).unwrap_or(0);
+        let mut left = String::with_capacity(state.input.text.len() + label.len() + 3 + hint_len);
         left.push(' ');
         left.push_str(label);
         left.push_str(": ");
-        left.push_str(&state.input);
-        if let Some(hint) = state.hint.as_ref() {
+        left.push_str(&state.input.text);
+        if let Some(hint) = state.input.hint.as_ref() {
             left.push(' ');
             left.push_str(hint);
         }
@@ -790,7 +790,7 @@ pub fn render_frame<'t, 'e, 'b, 'a, 'al, 'br, 'ff>(
             led_state_find_file::FindFileMode::Open => 12, // " Find file: "
             led_state_find_file::FindFileMode::SaveAs => 10, // " Save as: "
         };
-        let input_col = state.input[..state.cursor].chars().count() as u16;
+        let input_col = state.input.text[..state.input.cursor].chars().count() as u16;
         Some((
             prefix_cols.saturating_add(input_col),
             layout.status_bar.y,
@@ -971,7 +971,7 @@ mod tests {
         // Open mode: prefix " Find file: " is 12 cols; `input.cursor`
         // at byte 4 in "abcd" is 4 chars → absolute col 16.
         let mut ff_state = FindFileState::open("abcd".to_string());
-        ff_state.cursor = 4;
+        ff_state.input.cursor = 4;
         assert_eq!(ff_state.mode, FindFileMode::Open);
         let ff = Some(ff_state);
 

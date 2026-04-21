@@ -199,7 +199,7 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
         let now = Instant::now();
         alerts.expire_info(now);
         if let Some(ff) = find_file.as_mut() {
-            ff.expire_hint(now);
+            ff.input.expire_hint(now);
         }
 
         // Seed BufferEdits from newly-Ready loads. `seed_edit_from_load`
@@ -272,7 +272,7 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
             let Some(ff) = find_file.as_mut() else {
                 continue;
             };
-            let (dir_part, prefix) = led_state_find_file::split_input(&ff.input);
+            let (dir_part, prefix) = led_state_find_file::split_input(&ff.input.text);
             if dir_part.is_empty() {
                 continue;
             }
@@ -513,7 +513,7 @@ pub fn nearest_deadline(
     consider(&mut soonest, alerts.info_expires_at);
     consider(
         &mut soonest,
-        find_file.as_ref().and_then(|ff| ff.hint_expires_at),
+        find_file.as_ref().and_then(|ff| ff.input.hint_expires_at),
     );
     // Future timer sources: add `consider(...)` lines here.
     soonest
@@ -563,8 +563,7 @@ fn auto_advance_arrow_follow(
     let entry = &ff.completions[0];
     let mut new_input = base;
     new_input.push_str(&entry.name);
-    ff.input = new_input;
-    ff.cursor = ff.input.len();
+    ff.input.set(new_input);
     if !entry.is_dir {
         if ff.previous_tab.is_none() {
             ff.previous_tab = tabs.active;
@@ -800,7 +799,7 @@ mod tests {
         let mut tabs = led_state_tabs::Tabs::default();
         auto_advance_arrow_follow(&mut ff, &mut tabs);
         assert_eq!(ff.selected, Some(0));
-        assert_eq!(ff.input, "/x/a/");
+        assert_eq!(ff.input.text, "/x/a/");
         assert!(ff.show_side);
     }
 
@@ -814,7 +813,7 @@ mod tests {
         let mut tabs = led_state_tabs::Tabs::default();
         auto_advance_arrow_follow(&mut ff, &mut tabs);
         assert!(ff.selected.is_none());
-        assert_eq!(ff.input, "/x/");
+        assert_eq!(ff.input.text, "/x/");
     }
 
     #[test]
@@ -828,7 +827,7 @@ mod tests {
         auto_advance_arrow_follow(&mut ff, &mut tabs);
         assert_eq!(tabs.open.len(), 1);
         assert!(tabs.open[0].preview);
-        assert_eq!(ff.input, "/x/main.rs");
+        assert_eq!(ff.input.text, "/x/main.rs");
     }
 
     #[test]

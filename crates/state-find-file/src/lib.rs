@@ -38,19 +38,17 @@ pub enum FindFileMode {
 pub struct FindFileState {
     pub mode: FindFileMode,
 
-    /// Current input buffer. Rendered after the `Find file: ` /
-    /// `Save as: ` prompt in the status bar.
-    pub input: String,
+    /// Editable input buffer (text + cursor + transient hint).
+    /// Rendered after the `Find file: ` / `Save as: ` prompt in the
+    /// status bar.
+    pub input: led_core::TextInput,
 
-    /// Cursor position within `input`, as a byte offset at a char
-    /// boundary. Moves via arrow keys / Home / End / edits.
-    pub cursor: usize,
-
-    /// `input` as it was before the user last arrow-navigated into
-    /// the completions list. Arrow-nav rewrites `input` to
-    /// `base_input_dir_prefix(base_input) + selected.name`; cancelling
-    /// via further typing resets back to this prefix. `request_completions`
-    /// refreshes this to match the current `input` on every edit.
+    /// `input.text` as it was before the user last arrow-navigated
+    /// into the completions list. Arrow-nav rewrites the input to
+    /// `dir_prefix(base_input) + selected.name`; `queue_request`
+    /// refreshes this to match `input.text` on every edit, so the
+    /// subsequent arrow-nav forms completions from the current
+    /// query.
     pub base_input: String,
 
     /// Current completion rows, driver-sorted (dirs first, alpha).
@@ -92,13 +90,6 @@ pub struct FindFileState {
     /// direct input edit (edits re-arm the query-typing flow).
     pub arrow_follow: bool,
 
-    /// Transient in-prompt feedback ("[No match]", "[Complete]"…)
-    /// rendered right after the cursor. Cleared when
-    /// `hint_expires_at` is reached — the runtime's ingest phase
-    /// expires it on every tick, mirroring
-    /// `AlertState::expire_info`.
-    pub hint: Option<String>,
-    pub hint_expires_at: Option<std::time::Instant>,
 }
 
 impl FindFileState {
@@ -106,42 +97,34 @@ impl FindFileState {
     /// Caller is responsible for picking the input (parent of the
     /// active buffer with a trailing `/`, or `start_dir` / `/` if no
     /// active buffer — see `compute_activate_open` below).
-    pub fn open(input: String) -> Self {
-        let cursor = input.len();
+    pub fn open(initial: String) -> Self {
         Self {
             mode: FindFileMode::Open,
-            input: input.clone(),
-            cursor,
-            base_input: input,
+            base_input: initial.clone(),
+            input: led_core::TextInput::new(initial),
             completions: Vec::new(),
             selected: None,
             show_side: false,
             pending_find_file_list: Vec::new(),
             previous_tab: None,
             arrow_follow: false,
-            hint: None,
-            hint_expires_at: None,
         }
     }
 
     /// Build a SaveAs-mode overlay. Input seeding is the caller's
     /// responsibility — typically the active buffer's full path so
     /// the user can edit the file name in place.
-    pub fn save_as(input: String) -> Self {
-        let cursor = input.len();
+    pub fn save_as(initial: String) -> Self {
         Self {
             mode: FindFileMode::SaveAs,
-            input: input.clone(),
-            cursor,
-            base_input: input,
+            base_input: initial.clone(),
+            input: led_core::TextInput::new(initial),
             completions: Vec::new(),
             selected: None,
             show_side: false,
             pending_find_file_list: Vec::new(),
             previous_tab: None,
             arrow_follow: false,
-            hint: None,
-            hint_expires_at: None,
         }
     }
 
@@ -163,24 +146,6 @@ impl FindFileState {
         self.arrow_follow = false;
     }
 
-    /// Set a transient prompt hint (e.g. "[No match]") that auto-
-    /// clears at `now + ttl`. Mirrors `AlertState::set_info` but
-    /// scoped to the overlay.
-    pub fn set_hint(&mut self, text: impl Into<String>, now: std::time::Instant, ttl: std::time::Duration) {
-        self.hint = Some(text.into());
-        self.hint_expires_at = Some(now + ttl);
-    }
-
-    /// Drop the hint once `now` passes the stored expiry. The
-    /// runtime's ingest phase calls this every tick.
-    pub fn expire_hint(&mut self, now: std::time::Instant) {
-        if let Some(deadline) = self.hint_expires_at
-            && now >= deadline
-        {
-            self.hint = None;
-            self.hint_expires_at = None;
-        }
-    }
 
     /// Queue a completion request derived from the current input.
     /// Dispatch calls this after every edit so the runtime's next
@@ -205,8 +170,8 @@ impl FindFileState {
     /// `request_completions` (where `base_input = input.clone()`
     /// fires on every input change).
     pub fn queue_request(&mut self) {
-        self.base_input = self.input.clone();
-        let (dir_part, prefix) = split_input(&self.input);
+        self.base_input = self.input.text.clone();
+        let (dir_part, prefix) = split_input(&self.input.text);
         // When no dir segment is present, the listing target is `/` —
         // matches legacy's `expected_dir` fallback for empty /
         // slash-less inputs.
@@ -332,30 +297,12 @@ mod tests {
     #[test]
     fn open_and_save_as_constructors_position_cursor_at_end() {
         let s = FindFileState::open("~/src/".into());
-        assert_eq!(s.cursor, 6);
+        assert_eq!(s.input.cursor, 6);
         assert_eq!(s.mode, FindFileMode::Open);
 
         let s = FindFileState::save_as("~/src/main.rs".into());
-        assert_eq!(s.cursor, 13);
+        assert_eq!(s.input.cursor, 13);
         assert_eq!(s.mode, FindFileMode::SaveAs);
-    }
-
-    #[test]
-    fn set_hint_and_expire_hint_cycle() {
-        use std::time::{Duration, Instant};
-        let mut s = FindFileState::open("/tmp/".into());
-        let t0 = Instant::now();
-        s.set_hint("[No match]", t0, Duration::from_millis(500));
-        assert_eq!(s.hint.as_deref(), Some("[No match]"));
-
-        // Not yet expired.
-        s.expire_hint(t0 + Duration::from_millis(100));
-        assert!(s.hint.is_some());
-
-        // After deadline → cleared.
-        s.expire_hint(t0 + Duration::from_millis(600));
-        assert!(s.hint.is_none());
-        assert!(s.hint_expires_at.is_none());
     }
 
     #[test]
