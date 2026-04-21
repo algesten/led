@@ -102,9 +102,10 @@ fn main() -> io::Result<()> {
             path: canon,
             ..Default::default()
         });
-        if atoms.tabs.active.is_none() {
-            atoms.tabs.active = Some(id);
-        }
+        // Each CLI file supersedes as the active tab — the LAST path
+        // on the command line wins. Matches legacy and the goldens'
+        // `led a.txt b.txt` convention (b.txt becomes active).
+        atoms.tabs.active = Some(id);
     }
 
     // Raw mode *after* CLI parse so `--help` / parse errors still go to
