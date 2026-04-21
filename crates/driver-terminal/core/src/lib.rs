@@ -220,6 +220,17 @@ pub struct SidePanelRow {
     pub selected: bool,
 }
 
+/// Which kind of content the side panel is displaying. `Browser` =
+/// the file-tree view (chevron column, 2-col indent per depth).
+/// `Completions` = the find-file completions list (no chevron, no
+/// indent — leaf name starts at col 0).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum SidePanelMode {
+    #[default]
+    Browser,
+    Completions,
+}
+
 /// Side-panel slice of the render frame. Pre-sliced to the visible
 /// window (`rows` entries long; caller has already done the scroll
 /// clamp). Wrapped in `Arc` so cache-hit clones of [`Frame`] are a
@@ -228,6 +239,7 @@ pub struct SidePanelRow {
 pub struct SidePanelModel {
     pub rows: Arc<Vec<SidePanelRow>>,
     pub focused: bool,
+    pub mode: SidePanelMode,
 }
 
 /// Bottom-row status bar. `left` is written from col 0; `right` is

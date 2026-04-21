@@ -322,6 +322,7 @@ fn paint_body(body: &BodyModel, area: Rect, out: &mut impl Write) -> io::Result<
 
 fn paint_side_panel(panel: &SidePanelModel, area: Rect, out: &mut impl Write) -> io::Result<()> {
     use crossterm::{cursor, queue, style};
+    use led_driver_terminal_core::SidePanelMode;
 
     let cols = area.cols as usize;
     // Reused across rows so empty rows don't allocate.
@@ -332,13 +333,21 @@ fn paint_side_panel(panel: &SidePanelModel, area: Rect, out: &mut impl Write) ->
         if let Some(entry) = panel.rows.get(row as usize) {
             // Two-space indent per depth, then chevron, then name.
             let mut line = String::with_capacity(cols);
-            for _ in 0..entry.depth {
-                line.push_str("  ");
-            }
-            match entry.chevron {
-                Some(true) => line.push_str("\u{25bd} "),  // ▽
-                Some(false) => line.push_str("\u{25b7} "), // ▷
-                None => line.push_str("  "),
+            match panel.mode {
+                SidePanelMode::Browser => {
+                    for _ in 0..entry.depth {
+                        line.push_str("  ");
+                    }
+                    match entry.chevron {
+                        Some(true) => line.push_str("\u{25bd} "),  // ▽
+                        Some(false) => line.push_str("\u{25b7} "), // ▷
+                        None => line.push_str("  "),
+                    }
+                }
+                SidePanelMode::Completions => {
+                    // No indent + no chevron column: the leaf name
+                    // starts at col 0.
+                }
             }
             line.push_str(&entry.name);
             // Pad to full width so the reverse-video background
@@ -496,6 +505,7 @@ mod tests {
                 selected: true,
             }]),
             focused: true,
+        mode: Default::default(),
         };
         let area = Rect { x: 0, y: 0, cols: 24, rows: 10 };
         let mut out: Vec<u8> = Vec::new();
@@ -559,6 +569,7 @@ mod tests {
             side_panel: Some(SidePanelModel {
                 rows: side_rows.clone(),
                 focused: false,
+            mode: Default::default(),
             }),
             layout,
             cursor: Some((layout.editor_area.x + 2, 0)),
@@ -569,6 +580,7 @@ mod tests {
             side_panel: Some(SidePanelModel {
                 rows: side_rows,
                 focused: true,
+            mode: Default::default(),
             }),
             cursor: None, // focus=Side hides editor cursor
             ..frame1.clone()

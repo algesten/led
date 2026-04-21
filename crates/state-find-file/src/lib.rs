@@ -143,15 +143,25 @@ impl FindFileState {
     /// Dispatch calls this after every edit so the runtime's next
     /// `execute` ships one `FsFindFile` per change.
     ///
-    /// No-ops when `input` has no `/` (no directory to list). Stores
-    /// the expanded (but not canonicalized) path; the runtime
-    /// canonicalizes at execute time so state stays I/O-free.
+    /// Input → (dir, prefix) mapping:
+    /// - Ends with `/`: directory is the expanded path itself, prefix
+    ///   empty (exploring the directory).
+    /// - Contains `/` but doesn't end with one: directory is the
+    ///   leaf's parent; prefix is the leaf.
+    /// - No `/` / empty: directory falls back to `/` — legacy's
+    ///   "no parent" branch of `expected_dir`.
+    ///
+    /// `show_hidden` flips on when the leaf prefix starts with `.`.
     pub fn queue_request(&mut self) {
         let (dir_part, prefix) = split_input(&self.input);
-        if dir_part.is_empty() {
-            return;
-        }
-        let expanded = expand_path(dir_part);
+        // When no dir segment is present, the listing target is `/` —
+        // matches legacy's `expected_dir` fallback for empty /
+        // slash-less inputs.
+        let expanded = if dir_part.is_empty() {
+            PathBuf::from("/")
+        } else {
+            expand_path(dir_part)
+        };
         let dir = led_core::UserPath::new(expanded).canonicalize();
         let show_hidden = prefix.starts_with('.');
         self.pending_find_file_list

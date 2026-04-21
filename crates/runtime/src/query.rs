@@ -620,6 +620,7 @@ pub fn side_panel_model<'b, 'f>(
     SidePanelModel {
         rows: Arc::new(out),
         focused,
+        mode: led_driver_terminal_core::SidePanelMode::Browser,
     }
 }
 
@@ -647,6 +648,7 @@ fn completions_side_panel(
     SidePanelModel {
         rows: Arc::new(out),
         focused: false,
+        mode: led_driver_terminal_core::SidePanelMode::Completions,
     }
 }
 

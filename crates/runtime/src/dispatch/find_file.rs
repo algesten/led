@@ -388,9 +388,10 @@ fn tab_complete(s: &mut FindFileState) {
         0 => {}
         1 => {
             let only = &s.completions[0];
-            // Single match, directory, input not yet slash-terminated
-            // → descend (append `/` via the name which already has
-            // it).
+            let is_dir = only.is_dir;
+            // Single match: complete. If it's a directory the
+            // display name already carries `/` so "append name"
+            // descends.
             let base = dir_prefix(&s.base_input).to_string();
             let mut new_input = base;
             new_input.push_str(&only.name);
@@ -399,7 +400,13 @@ fn tab_complete(s: &mut FindFileState) {
             s.cursor = s.input.len();
             if changed {
                 s.reset_selection();
-                s.queue_request();
+                // Only re-fire a completion request when we've
+                // descended into a directory. A file completion
+                // just fills the input; pressing Enter from here
+                // is what actually opens it.
+                if is_dir {
+                    s.queue_request();
+                }
             }
         }
         _ => {
