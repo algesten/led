@@ -215,6 +215,7 @@ mod tests {
     use led_driver_buffers_core::BufferStore;
     use led_driver_terminal_core::{Dims, KeyCode, KeyEvent, KeyModifiers};
     use led_state_alerts::AlertState;
+    use led_state_clipboard::ClipboardState;
     use led_state_buffer_edits::BufferEdits;
     use led_state_jumps::JumpListState;
     use led_state_browser::{BrowserUi, FsTree};
@@ -662,6 +663,7 @@ mod tests {
         km.bind("alt+b", Command::CursorWordLeft);
         let mut chord = ChordState::default();
         let mut kill_ring = KillRing::default();
+        let mut clip = ClipboardState::default();
         let mut alerts = AlertState::default();
         let mut jumps = JumpListState::default();
         let mut browser = BrowserUi::default();
@@ -672,12 +674,14 @@ mod tests {
                      edits: &mut BufferEdits,
                      chord: &mut ChordState,
                      kill_ring: &mut KillRing,
+                     clip: &mut ClipboardState,
                      alerts: &mut AlertState,
                      jumps: &mut JumpListState,
                      browser: &mut BrowserUi,
                      fs: &FsTree| {
             super::super::dispatch_key(
-                k, tabs, edits, kill_ring, alerts, jumps, browser, fs, &store, &term, &km, chord,
+                k, tabs, edits, kill_ring, clip, alerts, jumps, browser, fs, &store, &term, &km,
+                chord,
             );
         };
 
@@ -687,6 +691,7 @@ mod tests {
             &mut edits,
             &mut chord,
             &mut kill_ring,
+            &mut clip,
             &mut alerts,
             &mut jumps,
             &mut browser,
@@ -699,6 +704,7 @@ mod tests {
             &mut edits,
             &mut chord,
             &mut kill_ring,
+            &mut clip,
             &mut alerts,
             &mut jumps,
             &mut browser,
@@ -711,6 +717,7 @@ mod tests {
             &mut edits,
             &mut chord,
             &mut kill_ring,
+            &mut clip,
             &mut alerts,
             &mut jumps,
             &mut browser,
@@ -723,6 +730,7 @@ mod tests {
             &mut edits,
             &mut chord,
             &mut kill_ring,
+            &mut clip,
             &mut alerts,
             &mut jumps,
             &mut browser,

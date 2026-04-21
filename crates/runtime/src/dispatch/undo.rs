@@ -66,6 +66,7 @@ mod tests {
     
     use led_driver_terminal_core::{Dims, KeyCode, KeyModifiers};
     use led_state_alerts::AlertState;
+    use led_state_clipboard::ClipboardState;
     use led_state_jumps::JumpListState;
     use led_state_browser::{BrowserUi, FsTree};
     
@@ -127,6 +128,7 @@ mod tests {
         km.bind("ctrl+y", Command::Redo); // override Yank for test
         let mut chord = ChordState::default();
         let mut kr = KillRing::default();
+        let mut clip = ClipboardState::default();
         let mut alerts = AlertState::default();
         let mut jumps = JumpListState::default();
         let mut browser = BrowserUi::default();
@@ -138,6 +140,7 @@ mod tests {
             &mut tabs,
             &mut edits,
             &mut kr,
+            &mut clip,
             &mut alerts,
             &mut jumps,
             &mut browser,
@@ -155,6 +158,7 @@ mod tests {
             &mut tabs,
             &mut edits,
             &mut kr,
+            &mut clip,
             &mut alerts,
             &mut jumps,
             &mut browser,
@@ -182,11 +186,13 @@ mod tests {
             preferred_col: 6,
         });
         let mut kr = KillRing::default();
+        let mut clip = ClipboardState::default();
         dispatch_with_ring(
             key(KeyModifiers::CONTROL, KeyCode::Char('w')),
             &mut tabs,
             &mut edits,
             &mut kr,
+            &mut clip,
             &store,
             &term,
         );
@@ -224,6 +230,7 @@ mod tests {
         km.bind("ctrl+y", Command::Redo);
         let mut chord = ChordState::default();
         let mut kr = KillRing::default();
+        let mut clip = ClipboardState::default();
         let mut alerts = AlertState::default();
         let mut jumps = JumpListState::default();
         let mut browser = BrowserUi::default();
@@ -233,6 +240,7 @@ mod tests {
             &mut tabs,
             &mut edits,
             &mut kr,
+            &mut clip,
             &mut alerts,
             &mut jumps,
             &mut browser,

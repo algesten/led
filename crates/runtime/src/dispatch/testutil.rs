@@ -13,8 +13,9 @@ use led_core::{CanonPath, UserPath};
 use led_driver_buffers_core::{BufferStore, LoadState};
 use led_driver_terminal_core::{Dims, KeyCode, KeyEvent, KeyModifiers, Terminal};
 use led_state_alerts::AlertState;
-use led_state_buffer_edits::{BufferEdits, EditedBuffer};
 use led_state_browser::{BrowserUi, FsTree};
+use led_state_buffer_edits::{BufferEdits, EditedBuffer};
+use led_state_clipboard::ClipboardState;
 use led_state_jumps::JumpListState;
 use led_state_kill_ring::KillRing;
 use led_state_tabs::{Tab, TabId, Tabs};
@@ -113,6 +114,7 @@ pub(super) fn dispatch_default(
 ) -> DispatchOutcome {
     let mut chord = ChordState::default();
     let mut kill_ring = KillRing::default();
+    let mut clip = ClipboardState::default();
     let mut alerts = AlertState::default();
     let mut jumps = JumpListState::default();
     let mut browser = BrowserUi::default();
@@ -122,6 +124,7 @@ pub(super) fn dispatch_default(
         tabs,
         edits,
         &mut kill_ring,
+        &mut clip,
         &mut alerts,
         &mut jumps,
         &mut browser,
@@ -147,6 +150,7 @@ pub(super) fn dispatch_chord_default(
     let keymap = default_keymap();
     let mut chord = ChordState::default();
     let mut kill_ring = KillRing::default();
+    let mut clip = ClipboardState::default();
     let mut alerts = AlertState::default();
     let mut jumps = JumpListState::default();
     let mut browser = BrowserUi::default();
@@ -156,6 +160,7 @@ pub(super) fn dispatch_chord_default(
         tabs,
         edits,
         &mut kill_ring,
+        &mut clip,
         &mut alerts,
         &mut jumps,
         &mut browser,
@@ -170,6 +175,7 @@ pub(super) fn dispatch_chord_default(
         tabs,
         edits,
         &mut kill_ring,
+        &mut clip,
         &mut alerts,
         &mut jumps,
         &mut browser,
@@ -188,6 +194,7 @@ pub(super) fn dispatch_with_ring(
     tabs: &mut Tabs,
     edits: &mut BufferEdits,
     kill_ring: &mut KillRing,
+    clip: &mut ClipboardState,
     store: &BufferStore,
     terminal: &Terminal,
 ) -> DispatchOutcome {
@@ -201,6 +208,7 @@ pub(super) fn dispatch_with_ring(
         tabs,
         edits,
         kill_ring,
+        clip,
         &mut alerts,
         &mut jumps,
         &mut browser,
@@ -217,6 +225,7 @@ pub(super) fn dispatch_with_ring(
 pub(super) fn noop_dispatch(k: KeyEvent, tabs: &mut Tabs) -> DispatchOutcome {
     let mut edits = BufferEdits::default();
     let mut kill_ring = KillRing::default();
+    let mut clip = ClipboardState::default();
     let mut alerts = AlertState::default();
     let mut jumps = JumpListState::default();
     let mut browser = BrowserUi::default();
@@ -230,6 +239,7 @@ pub(super) fn noop_dispatch(k: KeyEvent, tabs: &mut Tabs) -> DispatchOutcome {
         tabs,
         &mut edits,
         &mut kill_ring,
+        &mut clip,
         &mut alerts,
         &mut jumps,
         &mut browser,

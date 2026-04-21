@@ -50,6 +50,7 @@ mod tests {
     use led_driver_terminal_core::{Dims, KeyCode, KeyModifiers};
     
     
+    use led_state_clipboard::ClipboardState;
     use led_state_kill_ring::KillRing;
     use led_state_tabs::Cursor;
     
@@ -69,11 +70,13 @@ mod tests {
             preferred_col: 2,
         };
         let mut kr = KillRing::default();
+        let mut clip = ClipboardState::default();
         dispatch_with_ring(
             key(KeyModifiers::CONTROL, KeyCode::Char(' ')),
             &mut tabs,
             &mut edits,
             &mut kr,
+            &mut clip,
             &store,
             &term,
         );

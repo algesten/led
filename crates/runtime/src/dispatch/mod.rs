@@ -62,6 +62,7 @@ use led_driver_terminal_core::{KeyCode, KeyEvent, KeyModifiers, Terminal};
 use led_state_alerts::AlertState;
 use led_state_browser::{BrowserUi, Focus, FsTree};
 use led_state_buffer_edits::BufferEdits;
+use led_state_clipboard::ClipboardState;
 use led_state_jumps::JumpListState;
 use led_state_kill_ring::KillRing;
 use led_state_tabs::Tabs;
@@ -88,6 +89,7 @@ pub struct Dispatcher<'a> {
     pub tabs: &'a mut Tabs,
     pub edits: &'a mut BufferEdits,
     pub kill_ring: &'a mut KillRing,
+    pub clip: &'a mut ClipboardState,
     pub alerts: &'a mut AlertState,
     pub jumps: &'a mut JumpListState,
     pub browser: &'a mut BrowserUi,
@@ -121,6 +123,7 @@ impl<'a> Dispatcher<'a> {
             self.tabs,
             self.edits,
             self.kill_ring,
+            self.clip,
             self.alerts,
             self.jumps,
             self.browser,
@@ -158,6 +161,7 @@ pub fn dispatch_key(
     tabs: &mut Tabs,
     edits: &mut BufferEdits,
     kill_ring: &mut KillRing,
+    clip: &mut ClipboardState,
     alerts: &mut AlertState,
     jumps: &mut JumpListState,
     browser: &mut BrowserUi,
@@ -182,7 +186,7 @@ pub fn dispatch_key(
     match resolved {
         Resolved::Command(cmd) => {
             let outcome = run_command(
-                cmd, tabs, edits, kill_ring, alerts, jumps, browser, fs, store, terminal,
+                cmd, tabs, edits, kill_ring, clip, alerts, jumps, browser, fs, store, terminal,
             );
             // Kill-ring coalescing: any non-KillLine command breaks
             // the flag, so the next KillLine starts a fresh entry.
@@ -282,6 +286,7 @@ fn run_command(
     tabs: &mut Tabs,
     edits: &mut BufferEdits,
     kill_ring: &mut KillRing,
+    clip: &mut ClipboardState,
     alerts: &mut AlertState,
     jumps: &mut JumpListState,
     browser: &mut BrowserUi,
@@ -426,15 +431,15 @@ fn run_command(
             DispatchOutcome::Continue
         }
         Command::KillRegion => {
-            kill_region(tabs, edits, kill_ring);
+            kill_region(tabs, edits, kill_ring, clip);
             DispatchOutcome::Continue
         }
         Command::KillLine => {
-            kill_line(tabs, edits, kill_ring);
+            kill_line(tabs, edits, kill_ring, clip);
             DispatchOutcome::Continue
         }
         Command::Yank => {
-            request_yank(tabs, kill_ring);
+            request_yank(tabs, clip);
             DispatchOutcome::Continue
         }
         Command::Undo => {
@@ -509,6 +514,7 @@ mod tests {
         let mut tabs = tabs_with(&[("a", 1)], Some(1));
         let mut edits = BufferEdits::default();
         let mut kill_ring = KillRing::default();
+        let mut clip = ClipboardState::default();
         let mut alerts = AlertState::default();
         let mut jumps = JumpListState::default();
         let mut browser = BrowserUi::default();
@@ -524,6 +530,7 @@ mod tests {
             &mut tabs,
             &mut edits,
             &mut kill_ring,
+            &mut clip,
             &mut alerts,
             &mut jumps,
             &mut browser,
@@ -542,6 +549,7 @@ mod tests {
             &mut tabs,
             &mut edits,
             &mut kill_ring,
+            &mut clip,
             &mut alerts,
             &mut jumps,
             &mut browser,
@@ -574,6 +582,7 @@ mod tests {
         let keymap = default_keymap();
         let mut chord = ChordState::default();
         let mut kill_ring = KillRing::default();
+        let mut clip = ClipboardState::default();
         let mut alerts = AlertState::default();
         let mut jumps = JumpListState::default();
         let mut browser = BrowserUi::default();
@@ -584,6 +593,7 @@ mod tests {
             &mut tabs,
             &mut edits,
             &mut kill_ring,
+            &mut clip,
             &mut alerts,
             &mut jumps,
             &mut browser,
@@ -600,6 +610,7 @@ mod tests {
             &mut tabs,
             &mut edits,
             &mut kill_ring,
+            &mut clip,
             &mut alerts,
             &mut jumps,
             &mut browser,
@@ -631,6 +642,7 @@ mod tests {
         km.bind("ctrl+q", Command::Quit);
         let mut chord = ChordState::default();
         let mut kill_ring = KillRing::default();
+        let mut clip = ClipboardState::default();
         let mut alerts = AlertState::default();
         let mut jumps = JumpListState::default();
         let mut browser = BrowserUi::default();
@@ -641,6 +653,7 @@ mod tests {
             &mut tabs,
             &mut edits,
             &mut kill_ring,
+            &mut clip,
             &mut alerts,
             &mut jumps,
             &mut browser,
@@ -658,6 +671,7 @@ mod tests {
             &mut tabs,
             &mut edits,
             &mut kill_ring,
+            &mut clip,
             &mut alerts,
             &mut jumps,
             &mut browser,
@@ -680,6 +694,7 @@ mod tests {
         let km = Keymap::empty(); // no bindings at all
         let mut chord = ChordState::default();
         let mut kill_ring = KillRing::default();
+        let mut clip = ClipboardState::default();
         let mut alerts = AlertState::default();
         let mut jumps = JumpListState::default();
         let mut browser = BrowserUi::default();
@@ -689,6 +704,7 @@ mod tests {
             &mut tabs,
             &mut edits,
             &mut kill_ring,
+            &mut clip,
             &mut alerts,
             &mut jumps,
             &mut browser,
@@ -712,6 +728,7 @@ mod tests {
         let km = Keymap::empty();
         let mut chord = ChordState::default();
         let mut kill_ring = KillRing::default();
+        let mut clip = ClipboardState::default();
         let mut alerts = AlertState::default();
         let mut jumps = JumpListState::default();
         let mut browser = BrowserUi::default();
@@ -721,6 +738,7 @@ mod tests {
             &mut tabs,
             &mut edits,
             &mut kill_ring,
+            &mut clip,
             &mut alerts,
             &mut jumps,
             &mut browser,

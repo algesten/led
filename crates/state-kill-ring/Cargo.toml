@@ -10,4 +10,3 @@ publish = false
 # separately and is wired via the runtime.
 
 [dependencies]
-led-state-tabs = { workspace = true }

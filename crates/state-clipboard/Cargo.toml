@@ -1,0 +1,15 @@
+[package]
+name = "led-state-clipboard"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# The clipboard state source — the async-driver-adjacent piece of
+# yank / kill-line flow. Course-correct #5 split this out of
+# `state-kill-ring`, which was carrying `read_in_flight` + a few
+# other driver-ish fields that don't belong in a user-decision
+# source. The runtime owns a `ClipboardState` instance; a memo
+# derives the `ClipboardAction` the clipboard driver executes.
+
+[dependencies]
+led-state-tabs = { workspace = true }

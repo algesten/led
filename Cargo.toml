@@ -6,6 +6,7 @@ members = [
     "crates/state-buffer-edits",
     "crates/state-kill-ring",
     "crates/state-alerts",
+    "crates/state-clipboard",
     "crates/state-jumps",
     "crates/state-browser",
     "crates/driver-buffers/core",
@@ -30,6 +31,7 @@ led-state-tabs = { path = "crates/state-tabs" }
 led-state-buffer-edits = { path = "crates/state-buffer-edits" }
 led-state-kill-ring = { path = "crates/state-kill-ring" }
 led-state-alerts = { path = "crates/state-alerts" }
+led-state-clipboard = { path = "crates/state-clipboard" }
 led-state-jumps = { path = "crates/state-jumps" }
 led-state-browser = { path = "crates/state-browser" }
 led-driver-buffers-core = { path = "crates/driver-buffers/core" }

@@ -37,6 +37,7 @@ use led_driver_fs_list_native::FsListNative;
 use led_state_alerts::AlertState;
 use led_state_browser::{BrowserUi, FsTree, rebuild_entries};
 use led_state_buffer_edits::{BufferEdits, EditedBuffer};
+use led_state_clipboard::ClipboardState;
 use led_state_jumps::JumpListState;
 use led_state_kill_ring::KillRing;
 use led_state_tabs::{TabId, Tabs};
@@ -73,10 +74,10 @@ pub use config::{load_keymap, ConfigError};
 pub use dispatch::{dispatch_key, DispatchOutcome, Dispatcher};
 pub use keymap::{default_keymap, parse_command, parse_key, ChordState, Command, Keymap};
 pub use query::{
-    body_model, file_list_action, file_load_action, file_save_action, render_frame,
-    side_panel_model, status_bar_model, tab_bar_model, AlertsInput, BrowserUiInput,
-    EditedBuffersInput, FsTreeInput, PendingSavesInput, StoreLoadedInput, TabsActiveInput,
-    TabsOpenInput, TerminalDimsInput,
+    body_model, clipboard_action, file_list_action, file_load_action, file_save_action,
+    render_frame, side_panel_model, status_bar_model, tab_bar_model, AlertsInput,
+    BrowserUiInput, ClipboardStateInput, EditedBuffersInput, FsTreeInput, PendingSavesInput,
+    StoreLoadedInput, TabsActiveInput, TabsOpenInput, TerminalDimsInput,
 };
 pub use trace::{SharedTrace, Trace};
 
@@ -134,6 +135,7 @@ pub struct Atoms {
     pub store: BufferStore,
     pub terminal: Terminal,
     pub kill_ring: KillRing,
+    pub clip: ClipboardState,
     pub alerts: AlertState,
     pub jumps: JumpListState,
     pub browser: BrowserUi,
@@ -159,6 +161,7 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
         tabs,
         edits,
         kill_ring,
+        clip,
         alerts,
         jumps,
         browser,
@@ -249,20 +252,20 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
         for done in drivers.clipboard.process() {
             match done.result {
                 Ok(ClipboardResult::Text(Some(text))) => {
-                    if let Some(target) = kill_ring.pending_yank.take() {
+                    if let Some(target) = clip.pending_yank.take() {
                         dispatch::apply_yank(tabs, edits, target, &text);
                     }
-                    kill_ring.read_in_flight = false;
+                    clip.read_in_flight = false;
                 }
                 Ok(ClipboardResult::Text(None)) | Err(_) => {
                     // Empty clipboard or read failure — fall back to
                     // the kill ring's latest entry.
-                    if let Some(target) = kill_ring.pending_yank.take()
+                    if let Some(target) = clip.pending_yank.take()
                         && let Some(fallback) = kill_ring.latest.clone()
                     {
                         dispatch::apply_yank(tabs, edits, target, &fallback);
                     }
-                    kill_ring.read_in_flight = false;
+                    clip.read_in_flight = false;
                 }
                 Ok(ClipboardResult::Written) => {
                     // Nothing further to do.
@@ -286,6 +289,7 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
                 tabs,
                 edits,
                 kill_ring,
+                clip,
                 alerts,
                 jumps,
                 browser,
@@ -347,15 +351,18 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
         // already in flight), a Write when a kill queued clipboard
         // text. Both flags cleared synchronously per the execute
         // pattern.
-        let mut clip_actions: Vec<ClipboardAction> = Vec::new();
-        if kill_ring.pending_yank.is_some() && !kill_ring.read_in_flight {
-            kill_ring.read_in_flight = true;
-            clip_actions.push(ClipboardAction::Read);
+        let clip_action = clipboard_action(ClipboardStateInput::new(clip));
+        match clip_action {
+            Some(ClipboardAction::Read) => {
+                clip.read_in_flight = true;
+                drivers.clipboard.execute([&ClipboardAction::Read]);
+            }
+            Some(ClipboardAction::Write(_)) => {
+                let text = clip.pending_write.take().expect("memo agreed write");
+                drivers.clipboard.execute([&ClipboardAction::Write(text)]);
+            }
+            None => {}
         }
-        if let Some(text) = kill_ring.pending_clipboard_write.take() {
-            clip_actions.push(ClipboardAction::Write(text));
-        }
-        drivers.clipboard.execute(clip_actions.iter());
 
         // ── Render ──────────────────────────────────────────────
         if frame != last_frame {

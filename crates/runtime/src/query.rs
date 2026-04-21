@@ -14,6 +14,7 @@
 #[allow(unused_imports)]
 use led_core::CanonPath;
 use led_driver_buffers_core::{BufferStore, LoadAction, LoadState, SaveAction};
+use led_driver_clipboard_core::ClipboardAction;
 use led_driver_fs_list_core::ListCmd;
 use led_driver_terminal_core::{
     BodyModel, Dims, Frame, Layout, Rect, SidePanelModel, SidePanelRow, StatusBarModel,
@@ -21,6 +22,7 @@ use led_driver_terminal_core::{
 };
 use led_state_alerts::AlertState;
 use led_state_browser::{BrowserUi, Focus, TreeEntry, TreeEntryKind};
+use led_state_clipboard::ClipboardState;
 use led_state_buffer_edits::{BufferEdits, EditedBuffer};
 use led_state_tabs::{Cursor, Scroll, Tab, TabId, Tabs};
 use ropey::Rope;
@@ -125,6 +127,26 @@ pub struct TerminalDimsInput<'a> {
 impl<'a> TerminalDimsInput<'a> {
     pub fn new(term: &'a Terminal) -> Self {
         Self { dims: &term.dims }
+    }
+}
+
+// ── Input on ClipboardState ────────────────────────────────────────────
+
+#[drv::input]
+#[derive(Copy, Clone)]
+pub struct ClipboardStateInput<'a> {
+    pub pending_yank: &'a Option<TabId>,
+    pub read_in_flight: &'a bool,
+    pub pending_write: &'a Option<Arc<str>>,
+}
+
+impl<'a> ClipboardStateInput<'a> {
+    pub fn new(c: &'a ClipboardState) -> Self {
+        Self {
+            pending_yank: &c.pending_yank,
+            read_in_flight: &c.read_in_flight,
+            pending_write: &c.pending_write,
+        }
     }
 }
 
@@ -541,6 +563,28 @@ pub fn side_panel_model<'b>(browser: BrowserUiInput<'b>, rows: u16) -> SidePanel
     SidePanelModel {
         rows: Arc::new(out),
         focused,
+    }
+}
+
+/// "What clipboard action should we fire this tick?"
+///
+/// Returns `None` on an idle tick (no yank pending, no write
+/// queued). Returns `Some(Read)` when a yank is pending and no
+/// read is in flight. Returns `Some(Write(_))` with a clone of the
+/// pending text when a kill queued one. When both signals are
+/// live, yank wins — matches legacy ordering.
+///
+/// Zero allocation on idle (returns a simple `Option`); one Arc
+/// clone on the Write path, which is the same as the driver's own
+/// execute.
+#[drv::memo(single)]
+pub fn clipboard_action<'c>(clip: ClipboardStateInput<'c>) -> Option<ClipboardAction> {
+    if clip.pending_yank.is_some() && !*clip.read_in_flight {
+        Some(ClipboardAction::Read)
+    } else {
+        clip.pending_write
+            .as_ref()
+            .map(|text| ClipboardAction::Write(text.clone()))
     }
 }
 

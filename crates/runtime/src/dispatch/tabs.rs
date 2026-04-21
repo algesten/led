@@ -83,6 +83,7 @@ mod tests {
     use led_driver_buffers_core::BufferStore;
     use led_driver_terminal_core::{Dims, KeyCode, KeyModifiers, Terminal};
     use led_state_alerts::AlertState;
+    use led_state_clipboard::ClipboardState;
     use led_state_jumps::JumpListState;
     use led_state_browser::{BrowserUi, FsTree};
     use led_state_buffer_edits::{BufferEdits, EditedBuffer};
@@ -183,6 +184,7 @@ mod tests {
     fn kill_buffer_on_dirty_raises_confirm_prompt() {
         let (mut tabs, mut edits, store, term) = dirty_tabs_with_confirm_scenario();
         let mut kill_ring = KillRing::default();
+        let mut clip = ClipboardState::default();
         let mut alerts = AlertState::default();
         let mut jumps = JumpListState::default();
         let mut browser = BrowserUi::default();
@@ -196,6 +198,7 @@ mod tests {
             &mut tabs,
             &mut edits,
             &mut kill_ring,
+            &mut clip,
             &mut alerts,
             &mut jumps,
             &mut browser,
@@ -210,6 +213,7 @@ mod tests {
             &mut tabs,
             &mut edits,
             &mut kill_ring,
+            &mut clip,
             &mut alerts,
             &mut jumps,
             &mut browser,
@@ -227,6 +231,7 @@ mod tests {
     fn confirm_kill_y_force_kills_and_clears_prompt() {
         let (mut tabs, mut edits, store, term) = dirty_tabs_with_confirm_scenario();
         let mut kill_ring = KillRing::default();
+        let mut clip = ClipboardState::default();
         let mut alerts = AlertState {
             confirm_kill: Some(TabId(1)),
             ..Default::default()
@@ -242,6 +247,7 @@ mod tests {
             &mut tabs,
             &mut edits,
             &mut kill_ring,
+            &mut clip,
             &mut alerts,
             &mut jumps,
             &mut browser,
@@ -263,6 +269,7 @@ mod tests {
     fn confirm_kill_capital_y_also_confirms() {
         let (mut tabs, mut edits, store, term) = dirty_tabs_with_confirm_scenario();
         let mut kill_ring = KillRing::default();
+        let mut clip = ClipboardState::default();
         let mut alerts = AlertState {
             confirm_kill: Some(TabId(1)),
             ..Default::default()
@@ -278,6 +285,7 @@ mod tests {
             &mut tabs,
             &mut edits,
             &mut kill_ring,
+            &mut clip,
             &mut alerts,
             &mut jumps,
             &mut browser,
@@ -295,6 +303,7 @@ mod tests {
     fn confirm_kill_n_dismisses_and_inserts() {
         let (mut tabs, mut edits, store, term) = dirty_tabs_with_confirm_scenario();
         let mut kill_ring = KillRing::default();
+        let mut clip = ClipboardState::default();
         let mut alerts = AlertState {
             confirm_kill: Some(TabId(1)),
             ..Default::default()
@@ -310,6 +319,7 @@ mod tests {
             &mut tabs,
             &mut edits,
             &mut kill_ring,
+            &mut clip,
             &mut alerts,
             &mut jumps,
             &mut browser,
@@ -337,6 +347,7 @@ mod tests {
             preferred_col: 0,
         });
         let mut kill_ring = KillRing::default();
+        let mut clip = ClipboardState::default();
         let mut alerts = AlertState {
             confirm_kill: Some(TabId(1)),
             ..Default::default()
@@ -352,6 +363,7 @@ mod tests {
             &mut tabs,
             &mut edits,
             &mut kill_ring,
+            &mut clip,
             &mut alerts,
             &mut jumps,
             &mut browser,
@@ -380,6 +392,7 @@ mod tests {
         let store = BufferStore::default();
         let term = terminal_with(Some(Dims { cols: 10, rows: 5 }));
         let mut kill_ring = KillRing::default();
+        let mut clip = ClipboardState::default();
         let mut alerts = AlertState::default();
         let mut jumps = JumpListState::default();
         let mut browser = BrowserUi::default();
@@ -392,6 +405,7 @@ mod tests {
             &mut tabs,
             &mut edits,
             &mut kill_ring,
+            &mut clip,
             &mut alerts,
             &mut jumps,
             &mut browser,
@@ -406,6 +420,7 @@ mod tests {
             &mut tabs,
             &mut edits,
             &mut kill_ring,
+            &mut clip,
             &mut alerts,
             &mut jumps,
             &mut browser,

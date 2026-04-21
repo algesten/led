@@ -491,6 +491,7 @@ dependencies = [
  "led-state-alerts",
  "led-state-browser",
  "led-state-buffer-edits",
+ "led-state-clipboard",
  "led-state-jumps",
  "led-state-kill-ring",
  "led-state-tabs",
@@ -525,6 +526,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "led-state-clipboard"
+version = "0.0.0"
+dependencies = [
+ "led-state-tabs",
+]
+
+[[package]]
 name = "led-state-jumps"
 version = "0.0.0"
 dependencies = [
@@ -534,9 +542,6 @@ dependencies = [
 [[package]]
 name = "led-state-kill-ring"
 version = "0.0.0"
-dependencies = [
- "led-state-tabs",
-]
 
 [[package]]
 name = "led-state-tabs"
