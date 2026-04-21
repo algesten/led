@@ -24,7 +24,7 @@ use led_driver_terminal_core::{
 };
 
 #[cfg(test)]
-use led_driver_terminal_core::Layout;
+use led_driver_terminal_core::{Layout, SidePanelRow};
 
 /// Lifecycle marker for the native reader thread.
 ///
@@ -321,9 +321,12 @@ fn paint_body(body: &BodyModel, area: Rect, out: &mut impl Write) -> io::Result<
 }
 
 fn paint_side_panel(panel: &SidePanelModel, area: Rect, out: &mut impl Write) -> io::Result<()> {
-    use crossterm::{cursor, queue, style, terminal};
+    use crossterm::{cursor, queue, style};
 
     let cols = area.cols as usize;
+    // Reused across rows so empty rows don't allocate.
+    let blanks: String = " ".repeat(cols);
+
     for row in 0..area.rows {
         queue!(out, cursor::MoveTo(area.x, area.y + row))?;
         if let Some(entry) = panel.rows.get(row as usize) {
@@ -358,7 +361,12 @@ fn paint_side_panel(panel: &SidePanelModel, area: Rect, out: &mut impl Write) ->
                 queue!(out, style::Print(line))?;
             }
         } else {
-            queue!(out, terminal::Clear(terminal::ClearType::UntilNewLine))?;
+            // Print `cols` spaces — scoped to the side-panel area.
+            // NOT `Clear(UntilNewLine)`: that would wipe the body
+            // columns too, and because `paint_body` is skipped on
+            // cache-hit (body Arc unchanged) the blanked cells would
+            // stay blank until something else forces a body repaint.
+            queue!(out, style::Print(&blanks))?;
         }
     }
     Ok(())
@@ -470,5 +478,207 @@ mod tests {
         paint(&frame, None, &mut out).expect("paint to Vec<u8>");
         // Empty frames still produce clear/hide sequences — just don't panic.
         assert!(!out.is_empty());
+    }
+
+    #[test]
+    fn paint_side_panel_never_emits_clear_until_newline() {
+        // Regression guard: `Clear(UntilNewLine)` at col 0 wipes the
+        // body columns to the right of the panel, and because
+        // `paint_body` skips on cache-hit the wipe stays visible
+        // until something else forces a body repaint. The fix prints
+        // `cols` spaces instead — no `\x1b[K` should escape.
+        use std::sync::Arc;
+        let panel = SidePanelModel {
+            rows: Arc::new(vec![SidePanelRow {
+                depth: 0,
+                chevron: None,
+                name: Arc::<str>::from("a.rs"),
+                selected: true,
+            }]),
+            focused: true,
+        };
+        let area = Rect { x: 0, y: 0, cols: 24, rows: 10 };
+        let mut out: Vec<u8> = Vec::new();
+        paint_side_panel(&panel, area, &mut out).expect("paint");
+        assert!(
+            !out.windows(3).any(|w| w == b"\x1b[K"),
+            "paint_side_panel emitted Clear(UntilNewLine); bytes: {out:?}",
+        );
+    }
+
+    #[test]
+    fn alt_tab_cache_hit_repaint_preserves_body_cells() {
+        // End-to-end guard for the reported Alt-Tab regression.
+        //
+        // Construct two frames that differ ONLY in `side_panel.focused`
+        // — the exact diff produced by `ToggleFocus` on an already-
+        // visible panel. Paint the first frame with `last = None`
+        // (full paint), then the second with `last = Some(first)`
+        // (dirty-diff: body Arc is identical so `paint_body` is
+        // skipped). Apply both byte streams to a small grid sim and
+        // assert the body cells still contain the expected text.
+        use std::sync::Arc;
+
+        let dims = Dims { cols: 60, rows: 10 };
+        let layout = Layout::compute(dims, true);
+
+        let side_rows = Arc::new(vec![
+            SidePanelRow {
+                depth: 0,
+                chevron: None,
+                name: Arc::<str>::from("a.rs"),
+                selected: true,
+            },
+            SidePanelRow {
+                depth: 0,
+                chevron: None,
+                name: Arc::<str>::from("b.rs"),
+                selected: false,
+            },
+        ]);
+        // Only two panel rows but editor_area.rows is 8 — six empty
+        // rows exercise the bug path.
+
+        let body_lines = Arc::new(
+            (0..(layout.editor_area.rows as usize))
+                .map(|i| format!("  line {i:02}"))
+                .collect::<Vec<_>>(),
+        );
+        let body = BodyModel::Content {
+            lines: body_lines.clone(),
+            cursor: Some((0, 2)),
+        };
+
+        let frame1 = Frame {
+            tab_bar: TabBarModel {
+                labels: Arc::new(vec!["a.rs".into()]),
+                active: Some(0),
+            },
+            body: body.clone(),
+            status_bar: StatusBarModel::default(),
+            side_panel: Some(SidePanelModel {
+                rows: side_rows.clone(),
+                focused: false,
+            }),
+            layout,
+            cursor: Some((layout.editor_area.x + 2, 0)),
+            dims,
+        };
+        // Frame 2: same body (same Arc → cache hit), side_panel.focused flipped.
+        let frame2 = Frame {
+            side_panel: Some(SidePanelModel {
+                rows: side_rows,
+                focused: true,
+            }),
+            cursor: None, // focus=Side hides editor cursor
+            ..frame1.clone()
+        };
+
+        let mut grid = Grid::new(dims);
+        let mut out: Vec<u8> = Vec::new();
+        paint(&frame1, None, &mut out).expect("paint frame1");
+        grid.apply(&out);
+        out.clear();
+        paint(&frame2, Some(&frame1), &mut out).expect("paint frame2");
+        grid.apply(&out);
+
+        // Body column 25 ("  line NN" starts at editor_area.x=25).
+        // After the second paint (cache-hit body skip), every body
+        // row must still read "  line NN" — regression would leave
+        // rows 2..=7 blank.
+        for row in 0..layout.editor_area.rows {
+            let want = format!("  line {row:02}");
+            let got: String = grid.row_text(
+                layout.editor_area.y + row,
+                layout.editor_area.x,
+                want.chars().count() as u16,
+            );
+            assert_eq!(got, want, "body cells wiped at row {row}");
+        }
+    }
+
+    /// Tiny ANSI sim — enough to execute what `paint` emits
+    /// (`MoveTo`, `Print`, `Clear(UntilNewLine)`, cursor hide/show,
+    /// SGR attributes). SGR is ignored: we care about cell contents,
+    /// not styling.
+    struct Grid {
+        cells: Vec<Vec<char>>,
+        row: u16,
+        col: u16,
+    }
+
+    impl Grid {
+        fn new(d: Dims) -> Self {
+            Self {
+                cells: vec![vec![' '; d.cols as usize]; d.rows as usize],
+                row: 0,
+                col: 0,
+            }
+        }
+        fn row_text(&self, row: u16, col: u16, n: u16) -> String {
+            let r = &self.cells[row as usize];
+            r[col as usize..(col + n) as usize].iter().collect()
+        }
+        fn put(&mut self, ch: char) {
+            if (self.row as usize) < self.cells.len()
+                && (self.col as usize) < self.cells[self.row as usize].len()
+            {
+                self.cells[self.row as usize][self.col as usize] = ch;
+                self.col = self.col.saturating_add(1);
+            }
+        }
+        fn clear_until_newline(&mut self) {
+            if let Some(r) = self.cells.get_mut(self.row as usize) {
+                for c in (self.col as usize)..r.len() {
+                    r[c] = ' ';
+                }
+            }
+        }
+        fn apply(&mut self, bytes: &[u8]) {
+            // Decode as UTF-8 to handle the ▷/▽/│ glyphs.
+            let s = std::str::from_utf8(bytes).expect("UTF-8 paint output");
+            let mut it = s.chars().peekable();
+            while let Some(c) = it.next() {
+                if c != '\x1b' {
+                    self.put(c);
+                    continue;
+                }
+                // ESC — next must be '['.
+                match it.next() {
+                    Some('[') => {}
+                    _ => continue,
+                }
+                let mut params = String::new();
+                let final_byte = loop {
+                    match it.next() {
+                        Some(ch) if ch.is_ascii_alphabetic() => break ch,
+                        Some(ch) => params.push(ch),
+                        None => return,
+                    }
+                };
+                match final_byte {
+                    'H' => {
+                        // <row>;<col>H — 1-indexed. Empty params → 1;1.
+                        let (r, c) = match params.split_once(';') {
+                            Some((a, b)) => (
+                                a.parse::<u16>().unwrap_or(1),
+                                b.parse::<u16>().unwrap_or(1),
+                            ),
+                            None if params.is_empty() => (1, 1),
+                            None => (params.parse::<u16>().unwrap_or(1), 1),
+                        };
+                        self.row = r.saturating_sub(1);
+                        self.col = c.saturating_sub(1);
+                    }
+                    'K' => {
+                        // CSI n K — 0 (default) = from cursor to EOL.
+                        self.clear_until_newline();
+                    }
+                    _ => {
+                        // Ignore SGR (`m`), cursor show/hide (`h`/`l` with `?25`), etc.
+                    }
+                }
+            }
+        }
     }
 }
