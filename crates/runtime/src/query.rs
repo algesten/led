@@ -755,12 +755,17 @@ fn file_search_side_panel(
 ) -> SidePanelModel {
     let total = rows as usize;
     let mut out: Vec<SidePanelRow> = Vec::new();
+    let mode = led_driver_terminal_core::SidePanelMode::FileSearch {
+        case_sensitive: state.case_sensitive,
+        use_regex: state.use_regex,
+        replace_mode: state.replace_mode,
+    };
 
     if total == 0 {
         return SidePanelModel {
             rows: Arc::new(out),
             focused: false,
-            mode: led_driver_terminal_core::SidePanelMode::Completions,
+            mode,
         };
     }
 
@@ -806,7 +811,7 @@ fn file_search_side_panel(
         return SidePanelModel {
             rows: Arc::new(out),
             focused: false,
-            mode: led_driver_terminal_core::SidePanelMode::Completions,
+            mode,
         };
     }
 
@@ -855,7 +860,7 @@ fn file_search_side_panel(
     SidePanelModel {
         rows: Arc::new(out),
         focused: false,
-        mode: led_driver_terminal_core::SidePanelMode::Completions,
+        mode,
     }
 }
 

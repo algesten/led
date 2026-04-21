@@ -223,15 +223,24 @@ pub struct SidePanelRow {
     pub selected: bool,
 }
 
-/// Which kind of content the side panel is displaying. `Browser` =
-/// the file-tree view (chevron column, 2-col indent per depth).
-/// `Completions` = the find-file completions list (no chevron, no
-/// indent — leaf name starts at col 0).
+/// Which kind of content the side panel is displaying.
+///
+/// - `Browser` = file-tree view (chevron column, 2-col indent).
+/// - `Completions` = find-file list (no chevron, no indent).
+/// - `FileSearch` = project-wide search overlay; the header row
+///   (row 0) is repainted by the driver with per-toggle styling
+///   based on these flags so users see which of `Aa` / `.*` / `=>`
+///   are active.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum SidePanelMode {
     #[default]
     Browser,
     Completions,
+    FileSearch {
+        case_sensitive: bool,
+        use_regex: bool,
+        replace_mode: bool,
+    },
 }
 
 /// Side-panel slice of the render frame. Pre-sliced to the visible

@@ -140,9 +140,14 @@ pub struct Theme {
 }
 
 impl Theme {
-    /// The pre-M14b hard-coded chrome, re-expressed as a theme.
-    /// Painter behaviour is identical to the bespoke escapes it
-    /// used to emit, so goldens captured before M14b still pass.
+    /// Default chrome for an unthemed led. Mostly matches the pre-
+    /// M14b hard-coded behaviour — active tabs + selected rows +
+    /// active file-search toggles invert; the warn status bar is
+    /// red + white + bold. The one intentional divergence is the
+    /// unfocused side-panel selection: pre-M14b painted it with
+    /// the same `Reverse` as the focused variant, which hid the
+    /// which-pane-has-focus cue. Default here uses a dim grey
+    /// background so the selection row stays visible but subdued.
     pub fn legacy_default() -> Self {
         Self {
             tab_active: Style::REVERSE,
@@ -155,7 +160,10 @@ impl Theme {
                 },
             },
             browser_selected_focused: Style::REVERSE,
-            browser_selected_unfocused: Style::REVERSE,
+            browser_selected_unfocused: Style {
+                bg: Some(Color::DARK_GREY),
+                ..Style::default()
+            },
             search_toggle_on: Style::REVERSE,
             ..Default::default()
         }

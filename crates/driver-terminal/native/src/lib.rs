@@ -345,6 +345,27 @@ fn paint_side_panel(
 
     for row in 0..area.rows {
         queue!(out, cursor::MoveTo(area.x, area.y + row))?;
+        // File-search mode: row 0 is the toggle header. Paint it
+        // with per-glyph styling so users can tell which of
+        // `Aa` / `.*` / `=>` are on, then skip the usual row-print
+        // path for that row.
+        if row == 0
+            && let SidePanelMode::FileSearch {
+                case_sensitive,
+                use_regex,
+                replace_mode,
+            } = panel.mode
+        {
+            paint_file_search_header(
+                cols,
+                case_sensitive,
+                use_regex,
+                replace_mode,
+                theme,
+                out,
+            )?;
+            continue;
+        }
         if let Some(entry) = panel.rows.get(row as usize) {
             // Two-space indent per depth, then chevron, then name.
             let mut line = String::with_capacity(cols);
@@ -359,7 +380,7 @@ fn paint_side_panel(
                         None => line.push_str("  "),
                     }
                 }
-                SidePanelMode::Completions => {
+                SidePanelMode::Completions | SidePanelMode::FileSearch { .. } => {
                     // No indent + no chevron column: the leaf name
                     // starts at col 0.
                 }
@@ -413,6 +434,58 @@ fn paint_side_border(
         queue!(out, cursor::MoveTo(x, row), style::Print("\u{2502}"))?; // │
     }
     reset_style(out, &theme.browser_border)?;
+    Ok(())
+}
+
+/// File-search header row. Prints `" Aa   .*   =>"` with each of
+/// the three two-char glyph pairs styled via `theme.search_toggle_on`
+/// when the corresponding flag is set (plain otherwise). The leading
+/// space and gaps between glyphs stay unstyled so the eye can
+/// separate the three toggles at a glance. Pads with spaces to the
+/// full panel width.
+fn paint_file_search_header(
+    cols: usize,
+    case_sensitive: bool,
+    use_regex: bool,
+    replace_mode: bool,
+    theme: &Theme,
+    out: &mut impl Write,
+) -> io::Result<()> {
+    use crossterm::{queue, style};
+
+    let on = &theme.search_toggle_on;
+    let mut printed = 0usize;
+
+    // Matches the text query.rs builds for row 0 of the overlay
+    // (`" Aa   .*   =>"`), segment-for-segment. If that text
+    // changes, update both sites.
+    let segments: [(&str, bool); 6] = [
+        (" ", false),
+        ("Aa", case_sensitive),
+        ("   ", false),
+        (".*", use_regex),
+        ("   ", false),
+        ("=>", replace_mode),
+    ];
+    for (text, active) in segments {
+        if printed >= cols {
+            break;
+        }
+        let budget = cols - printed;
+        let slice: String = text.chars().take(budget).collect();
+        if active {
+            apply_style(out, on)?;
+            queue!(out, style::Print(&slice))?;
+            reset_style(out, on)?;
+        } else {
+            queue!(out, style::Print(&slice))?;
+        }
+        printed += slice.chars().count();
+    }
+    // Pad to the right edge so the row is fully repainted.
+    for _ in printed..cols {
+        queue!(out, style::Print(" "))?;
+    }
     Ok(())
 }
 
