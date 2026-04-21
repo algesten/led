@@ -128,6 +128,25 @@ fn write_worker_loop(rx: Receiver<WriteCmd>, tx: Sender<WriteDone>, notify: Noti
                     // installs it as the new disk baseline and the
                     // refcount bump is O(1).
                     result: result.map(|()| rope),
+                    from: None,
+                };
+                if tx.send(done).is_err() {
+                    return;
+                }
+                notify.notify();
+            }
+            WriteCmd::WriteAs {
+                from,
+                to,
+                rope,
+                version,
+            } => {
+                let result = write_atomic(&to, &rope, version);
+                let done = WriteDone {
+                    path: to,
+                    version,
+                    result: result.map(|()| rope),
+                    from: Some(from),
                 };
                 if tx.send(done).is_err() {
                     return;

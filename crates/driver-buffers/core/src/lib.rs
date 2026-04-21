@@ -86,6 +86,10 @@ pub trait Trace: Send + Sync {
     fn file_load_done(&self, path: &CanonPath, result: &Result<Arc<Rope>, String>);
     fn file_save_start(&self, path: &CanonPath, version: u64);
     fn file_save_done(&self, path: &CanonPath, version: u64, result: &Result<(), String>);
+    /// `Ctrl+x Ctrl+w` commit: write the active buffer (`from`) to a
+    /// different path (`to`). `FileSaveAs` in legacy's dispatched.snap.
+    fn file_save_as_start(&self, from: &CanonPath, to: &CanonPath);
+    fn file_save_as_done(&self, from: &CanonPath, to: &CanonPath, result: &Result<(), String>);
 }
 
 /// No-op trace for tests or non-golden runs.
@@ -95,6 +99,8 @@ impl Trace for NoopTrace {
     fn file_load_done(&self, _: &CanonPath, _: &Result<Arc<Rope>, String>) {}
     fn file_save_start(&self, _: &CanonPath, _: u64) {}
     fn file_save_done(&self, _: &CanonPath, _: u64, _: &Result<(), String>) {}
+    fn file_save_as_start(&self, _: &CanonPath, _: &CanonPath) {}
+    fn file_save_as_done(&self, _: &CanonPath, _: &CanonPath, _: &Result<(), String>) {}
 }
 
 // ── Sync driver API ────────────────────────────────────────────────────
@@ -169,10 +175,28 @@ impl FileReadDriver {
 
 /// Action produced by the runtime's save query, consumed by
 /// [`FileWriteDriver::execute`].
+///
+/// `Save` writes the buffer back to the path it was loaded from (the
+/// normal `ctrl+x ctrl+s` flow). `SaveAs` writes the *active buffer's
+/// content* to a **different** path, creating a new file on disk —
+/// the active tab itself stays pinned to `from`. Matches legacy
+/// `DocStoreOut::SaveAs` semantics.
 #[derive(Clone, Debug, PartialEq)]
 pub enum SaveAction {
     Save {
         path: CanonPath,
+        rope: Arc<Rope>,
+        version: u64,
+    },
+    SaveAs {
+        /// The path of the buffer being saved (tab stays here). The
+        /// completion trace / alert shows `from` for
+        /// `WorkspaceClearUndo` because that's the buffer whose undo
+        /// history logically gets re-baselined.
+        from: CanonPath,
+        /// Where the bytes are written. A fresh file is created on
+        /// disk at `to`; the existing tab at `from` is untouched.
+        to: CanonPath,
         rope: Arc<Rope>,
         version: u64,
     },
@@ -186,18 +210,31 @@ pub enum WriteCmd {
         rope: Arc<Rope>,
         version: u64,
     },
+    WriteAs {
+        from: CanonPath,
+        to: CanonPath,
+        rope: Arc<Rope>,
+        version: u64,
+    },
 }
 
 /// Completion posted by the async write worker.
 ///
 /// `result: Ok(Arc<Rope>)` echoes the rope that was persisted so the
 /// runtime can install it as the new `BufferStore` baseline without
-/// re-reading from disk.
+/// re-reading from disk. For `SaveAs`, `path` is the **target** (the
+/// new file on disk); `from` is the source buffer that initiated the
+/// save (tab + undo bookkeeping key).
 #[derive(Debug)]
 pub struct WriteDone {
     pub path: CanonPath,
     pub version: u64,
     pub result: Result<Arc<Rope>, String>,
+    /// `Some(original_path)` for `SaveAs` completions; `None` for
+    /// plain `Save`. The runtime uses this to clear the source
+    /// buffer's undo history and emit the matching `WorkspaceClearUndo`
+    /// trace.
+    pub from: Option<CanonPath>,
 }
 
 /// Main-loop-facing half of the save driver.
@@ -234,7 +271,12 @@ impl FileWriteDriver {
                 Ok(_) => Ok(()),
                 Err(msg) => Err(msg.clone()),
             };
-            self.trace.file_save_done(&done.path, done.version, &trace_result);
+            match &done.from {
+                None => self.trace.file_save_done(&done.path, done.version, &trace_result),
+                Some(from) => self
+                    .trace
+                    .file_save_as_done(from, &done.path, &trace_result),
+            }
             out.push(done);
         }
         out
@@ -247,18 +289,35 @@ impl FileWriteDriver {
     where
         I: IntoIterator<Item = &'a SaveAction>,
     {
-        for SaveAction::Save {
-            path,
-            rope,
-            version,
-        } in actions
-        {
-            self.trace.file_save_start(path, *version);
-            let _ = self.tx_cmd.send(WriteCmd::Write {
-                path: path.clone(),
-                rope: rope.clone(),
-                version: *version,
-            });
+        for action in actions {
+            match action {
+                SaveAction::Save {
+                    path,
+                    rope,
+                    version,
+                } => {
+                    self.trace.file_save_start(path, *version);
+                    let _ = self.tx_cmd.send(WriteCmd::Write {
+                        path: path.clone(),
+                        rope: rope.clone(),
+                        version: *version,
+                    });
+                }
+                SaveAction::SaveAs {
+                    from,
+                    to,
+                    rope,
+                    version,
+                } => {
+                    self.trace.file_save_as_start(from, to);
+                    let _ = self.tx_cmd.send(WriteCmd::WriteAs {
+                        from: from.clone(),
+                        to: to.clone(),
+                        rope: rope.clone(),
+                        version: *version,
+                    });
+                }
+            }
         }
     }
 }
@@ -373,6 +432,7 @@ mod tests {
                 assert!(Arc::ptr_eq(&r, &rope));
                 assert_eq!(version, 7);
             }
+            WriteCmd::WriteAs { .. } => panic!("unexpected WriteAs"),
         }
     }
 
@@ -390,6 +450,7 @@ mod tests {
                 path: path.clone(),
                 version: 3,
                 result: Ok(rope.clone()),
+                from: None,
             })
             .expect("send WriteDone");
 
@@ -415,6 +476,7 @@ mod tests {
                 path: canon("ro.txt"),
                 version: 1,
                 result: Err("Permission denied".into()),
+                from: None,
             })
             .unwrap();
 
@@ -424,5 +486,53 @@ mod tests {
             Err(msg) => assert_eq!(msg, "Permission denied"),
             Ok(_) => panic!("expected Err"),
         }
+    }
+
+    #[test]
+    fn execute_save_as_emits_write_as_cmd() {
+        let (tx_cmd, rx_cmd) = mpsc::channel::<WriteCmd>();
+        let (_tx_done, rx_done) = mpsc::channel::<WriteDone>();
+        let driver = FileWriteDriver::new(tx_cmd, rx_done, Arc::new(NoopTrace));
+
+        let from = canon("/tmp/orig.txt");
+        let to = canon("/tmp/copy.txt");
+        let rope = Arc::new(Rope::from_str("payload"));
+        driver.execute(std::iter::once(&SaveAction::SaveAs {
+            from: from.clone(),
+            to: to.clone(),
+            rope,
+            version: 7,
+        }));
+        match rx_cmd.try_recv() {
+            Ok(WriteCmd::WriteAs { from: f, to: t, version, .. }) => {
+                assert_eq!(f, from);
+                assert_eq!(t, to);
+                assert_eq!(version, 7);
+            }
+            other => panic!("expected WriteAs, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn process_save_as_preserves_from_on_completion() {
+        let (tx_cmd, _rx_cmd) = mpsc::channel::<WriteCmd>();
+        let (tx_done, rx_done) = mpsc::channel::<WriteDone>();
+        let driver = FileWriteDriver::new(tx_cmd, rx_done, Arc::new(NoopTrace));
+
+        let from = canon("/tmp/orig.txt");
+        let to = canon("/tmp/copy.txt");
+        tx_done
+            .send(WriteDone {
+                path: to.clone(),
+                version: 1,
+                result: Ok(Arc::new(Rope::from_str(""))),
+                from: Some(from.clone()),
+            })
+            .unwrap();
+
+        let completions = driver.process();
+        assert_eq!(completions.len(), 1);
+        assert_eq!(completions[0].path, to);
+        assert_eq!(completions[0].from.as_ref(), Some(&from));
     }
 }

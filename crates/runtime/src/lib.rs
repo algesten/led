@@ -384,24 +384,45 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
         }
         drivers.find_file.execute(find_file_actions.iter());
 
-        // Sync-clear pending_saves for the paths we're about to
-        // dispatch — the execute-pattern discipline that prevents
-        // the next tick's query from re-emitting the same saves.
+        // Sync-clear pending_saves + pending_save_as for the paths
+        // we're about to dispatch — the execute-pattern discipline
+        // that prevents the next tick's query from re-emitting the
+        // same saves.
         for action in &save_actions {
-            let led_driver_buffers_core::SaveAction::Save { path, .. } = action;
-            edits.pending_saves.remove(path);
+            match action {
+                led_driver_buffers_core::SaveAction::Save { path, .. } => {
+                    edits.pending_saves.remove(path);
+                }
+                led_driver_buffers_core::SaveAction::SaveAs { from, .. } => {
+                    edits.pending_save_as.remove(from);
+                }
+            }
         }
         drivers.file_write.execute(save_actions.iter());
 
         // Saved state becomes the new baseline: truncate each saved
         // buffer's undo history and emit the paired
         // `WorkspaceClearUndo` trace. Matches legacy.
+        //
+        // SaveAs uses `from` (the source buffer whose content was
+        // saved), not `to` — the target is a fresh file on disk
+        // that has no undo history of its own yet. SaveAs also
+        // emits a `FileOpen path=<from> create_if_missing=false`
+        // trace line after the clear-undo, matching legacy's
+        // re-open-source-on-disk behaviour (the buffer keeps its
+        // in-memory rope; the trace line is the intent record).
         for action in &save_actions {
-            let led_driver_buffers_core::SaveAction::Save { path, .. } = action;
+            let (path, is_save_as) = match action {
+                led_driver_buffers_core::SaveAction::Save { path, .. } => (path, false),
+                led_driver_buffers_core::SaveAction::SaveAs { from, .. } => (from, true),
+            };
             if let Some(eb) = edits.buffers.get_mut(path) {
                 eb.history.clear();
             }
             trace.workspace_clear_undo(path);
+            if is_save_as {
+                trace.file_reopen_existing(path);
+            }
         }
 
         // Clipboard actions: a Read when a yank is pending (no read
@@ -580,6 +601,12 @@ pub(crate) mod trace_adapter {
         }
         fn file_save_done(&self, path: &CanonPath, version: u64, result: &Result<(), String>) {
             self.0.file_save_done(path, version, result);
+        }
+        fn file_save_as_start(&self, from: &CanonPath, to: &CanonPath) {
+            self.0.file_save_as_start(from, to);
+        }
+        fn file_save_as_done(&self, from: &CanonPath, to: &CanonPath, result: &Result<(), String>) {
+            self.0.file_save_as_done(from, to, result);
         }
     }
 

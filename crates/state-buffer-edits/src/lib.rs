@@ -82,6 +82,13 @@ impl EditedBuffer {
 pub struct BufferEdits {
     pub buffers: HashMap<CanonPath, EditedBuffer>,
     pub pending_saves: HashSet<CanonPath>,
+    /// Map from the active buffer's path (`from`) to a fresh
+    /// target (`to`) for a find-file SaveAs commit. Dispatch
+    /// inserts here when `Enter` lands in SaveAs mode; the runtime
+    /// drains the map in the query phase, turns each entry into a
+    /// `SaveAction::SaveAs`, and sync-clears it before dispatching
+    /// to the driver.
+    pub pending_save_as: HashMap<CanonPath, CanonPath>,
 }
 
 #[cfg(test)]

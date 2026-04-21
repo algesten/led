@@ -321,7 +321,7 @@ fn run_command(
     // input editing + its own command set; most commands route into
     // `state.input` instead of the buffer. `Quit` passes through
     // so `ctrl+x ctrl+c` still exits.
-    if let Some(outcome) = find_file::run_overlay_command(cmd, find_file, tabs) {
+    if let Some(outcome) = find_file::run_overlay_command(cmd, find_file, tabs, edits) {
         return outcome;
     }
 

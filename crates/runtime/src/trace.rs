@@ -32,6 +32,8 @@ pub trait Trace: Send + Sync {
     fn file_load_done(&self, path: &CanonPath, result: &Result<Arc<Rope>, String>);
     fn file_save_start(&self, path: &CanonPath, version: u64);
     fn file_save_done(&self, path: &CanonPath, version: u64, result: &Result<(), String>);
+    fn file_save_as_start(&self, from: &CanonPath, to: &CanonPath);
+    fn file_save_as_done(&self, from: &CanonPath, to: &CanonPath, result: &Result<(), String>);
     fn clipboard_read_start(&self);
     fn clipboard_read_done(&self, ok: bool, empty: bool);
     fn clipboard_write_start(&self, bytes: usize);
@@ -49,6 +51,11 @@ pub trait Trace: Send + Sync {
     /// save (saved state becomes the new baseline). Legacy traces
     /// this immediately after `FileSave`.
     fn workspace_clear_undo(&self, path: &CanonPath);
+    /// Emitted after a SaveAs completes: legacy re-opens the source
+    /// buffer's on-disk file to refresh its pristine baseline, with
+    /// `create_if_missing=false` because the file is known to exist
+    /// (we just had it loaded).
+    fn file_reopen_existing(&self, path: &CanonPath);
     fn render_tick(&self);
 }
 
@@ -93,6 +100,9 @@ impl SharedTrace {
     pub fn workspace_clear_undo(&self, path: &CanonPath) {
         self.0.workspace_clear_undo(path);
     }
+    pub fn file_reopen_existing(&self, path: &CanonPath) {
+        self.0.file_reopen_existing(path);
+    }
 }
 
 /// Fan-out of incoming events into pipe-formatted lines on a buffered
@@ -132,6 +142,14 @@ impl Trace for FileTrace {
         self.write_line(&format!("FileSave\tpath={}", self.format_path(path)));
     }
     fn file_save_done(&self, _: &CanonPath, _: u64, _: &Result<(), String>) {}
+    fn file_save_as_start(&self, from: &CanonPath, to: &CanonPath) {
+        self.write_line(&format!(
+            "FileSaveAs\tpath={} new_path={}",
+            self.format_path(from),
+            self.format_path(to),
+        ));
+    }
+    fn file_save_as_done(&self, _: &CanonPath, _: &CanonPath, _: &Result<(), String>) {}
     fn clipboard_read_start(&self) {
         self.write_line("ClipboardRead");
     }
@@ -161,6 +179,12 @@ impl Trace for FileTrace {
     fn workspace_clear_undo(&self, path: &CanonPath) {
         self.write_line(&format!(
             "WorkspaceClearUndo\tpath={}",
+            self.format_path(path)
+        ));
+    }
+    fn file_reopen_existing(&self, path: &CanonPath) {
+        self.write_line(&format!(
+            "FileOpen\tpath={} create_if_missing=false",
             self.format_path(path)
         ));
     }
@@ -194,6 +218,8 @@ impl Trace for NoopTrace {
     fn file_load_done(&self, _: &CanonPath, _: &Result<Arc<Rope>, String>) {}
     fn file_save_start(&self, _: &CanonPath, _: u64) {}
     fn file_save_done(&self, _: &CanonPath, _: u64, _: &Result<(), String>) {}
+    fn file_save_as_start(&self, _: &CanonPath, _: &CanonPath) {}
+    fn file_save_as_done(&self, _: &CanonPath, _: &CanonPath, _: &Result<(), String>) {}
     fn clipboard_read_start(&self) {}
     fn clipboard_read_done(&self, _ok: bool, _empty: bool) {}
     fn clipboard_write_start(&self, _bytes: usize) {}
@@ -203,6 +229,7 @@ impl Trace for NoopTrace {
     fn find_file_start(&self, _: &FindFileCmd) {}
     fn find_file_done(&self, _: &CanonPath, _: &str, _: bool) {}
     fn workspace_clear_undo(&self, _: &CanonPath) {}
+    fn file_reopen_existing(&self, _: &CanonPath) {}
     fn render_tick(&self) {}
 }
 

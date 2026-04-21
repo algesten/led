@@ -87,12 +87,14 @@ impl<'a> EditedBuffersInput<'a> {
 #[derive(Copy, Clone)]
 pub struct PendingSavesInput<'a> {
     pub paths: &'a imbl::HashSet<CanonPath>,
+    pub save_as: &'a imbl::HashMap<CanonPath, CanonPath>,
 }
 
 impl<'a> PendingSavesInput<'a> {
     pub fn new(edits: &'a BufferEdits) -> Self {
         Self {
             paths: &edits.pending_saves,
+            save_as: &edits.pending_save_as,
         }
     }
 }
@@ -284,6 +286,20 @@ pub fn file_save_action<'p, 'b>(
         }
         out.push(SaveAction::Save {
             path: path.clone(),
+            rope: eb.rope.clone(),
+            version: eb.version,
+        });
+    }
+    // SaveAs commits. Unlike Save, SaveAs doesn't require the buffer
+    // to be dirty — the user may want to snapshot a pristine buffer
+    // to a new path.
+    for (from, to) in pending.save_as.iter() {
+        let Some(eb) = buffers.buffers.get(from) else {
+            continue;
+        };
+        out.push(SaveAction::SaveAs {
+            from: from.clone(),
+            to: to.clone(),
             rope: eb.rope.clone(),
             version: eb.version,
         });
@@ -1143,6 +1159,45 @@ mod tests {
                 assert!(Arc::ptr_eq(r, &rope));
                 assert_eq!(*version, 3);
             }
+            SaveAction::SaveAs { .. } => panic!("unexpected SaveAs"),
+        }
+    }
+
+    #[test]
+    fn file_save_action_emits_save_as_from_pending_map() {
+        let mut e = BufferEdits::default();
+        let from = canon("a.rs");
+        let to = canon("b.rs");
+        let rope = Arc::new(Rope::from_str("payload"));
+        e.buffers.insert(
+            from.clone(),
+            EditedBuffer {
+                rope: rope.clone(),
+                version: 2,
+                saved_version: 2, // pristine — SaveAs still fires
+                history: Default::default(),
+            },
+        );
+        e.pending_save_as.insert(from.clone(), to.clone());
+
+        let actions = file_save_action(
+            PendingSavesInput::new(&e),
+            EditedBuffersInput::new(&e),
+        );
+        assert_eq!(actions.len(), 1);
+        match &actions[0] {
+            SaveAction::SaveAs {
+                from: f,
+                to: t,
+                rope: r,
+                version,
+            } => {
+                assert_eq!(f, &from);
+                assert_eq!(t, &to);
+                assert!(Arc::ptr_eq(r, &rope));
+                assert_eq!(*version, 2);
+            }
+            SaveAction::Save { .. } => panic!("unexpected Save"),
         }
     }
 
