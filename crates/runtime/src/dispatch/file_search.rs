@@ -161,8 +161,13 @@ pub(super) fn run_overlay_command(
         Command::Abort | Command::CloseFileSearch => {
             deactivate(file_search, browser, tabs);
         }
-        // ReplaceAll lands in stage 7.
-        Command::ReplaceAll => {}
+        Command::ReplaceAll => {
+            let state = file_search.as_mut()?;
+            if state.replace_mode {
+                apply_replace_all(state, edits);
+                deactivate(file_search, browser, tabs);
+            }
+        }
         // Quit passes through so `Ctrl-X Ctrl-C` still exits.
         Command::Quit => return None,
         // Everything else is absorbed while the overlay owns focus.
@@ -235,6 +240,45 @@ fn move_selection(
         && let Some(hit) = state.flat_hits.get(i).cloned()
     {
         jump_preview(&hit, tabs, edits);
+    }
+}
+
+/// `Alt+Enter` — apply the replace across every hit's buffer. Only
+/// fires when `replace_mode` is on (the caller gates this). For
+/// each file with hits that's currently loaded in `edits.buffers`,
+/// we rebuild the rope via `regex.replace_all` over the existing
+/// text and bump its version so `dirty()` goes true. On-disk replace
+/// for files that aren't open yet is a later follow-up — the
+/// typical flow opens buffers via arrow-scan first.
+fn apply_replace_all(
+    state: &led_state_file_search::FileSearchState,
+    edits: &mut led_state_buffer_edits::BufferEdits,
+) {
+    if state.results.is_empty() || state.query.text.is_empty() {
+        return;
+    }
+    let pattern = if state.use_regex {
+        state.query.text.clone()
+    } else {
+        regex_syntax::escape(&state.query.text)
+    };
+    let re = match regex::RegexBuilder::new(&pattern)
+        .case_insensitive(!state.case_sensitive)
+        .build()
+    {
+        Ok(r) => r,
+        Err(_) => return,
+    };
+    let replacement = state.replace.text.as_str();
+    for group in &state.results {
+        let Some(eb) = edits.buffers.get_mut(&group.path) else {
+            continue;
+        };
+        let existing = eb.rope.to_string();
+        let replaced = re.replace_all(&existing, replacement);
+        if replaced.as_ref() != existing {
+            super::shared::bump(eb, ropey::Rope::from_str(replaced.as_ref()));
+        }
     }
 }
 

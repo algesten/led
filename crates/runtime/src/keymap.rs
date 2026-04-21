@@ -126,6 +126,7 @@ pub struct Keymap {
     chords: HashMap<KeyEvent, HashMap<KeyEvent, Command>>,
     browser_direct: HashMap<KeyEvent, Command>,
     find_file_direct: HashMap<KeyEvent, Command>,
+    file_search_direct: HashMap<KeyEvent, Command>,
 }
 
 impl Keymap {
@@ -135,6 +136,7 @@ impl Keymap {
             chords: HashMap::new(),
             browser_direct: HashMap::new(),
             find_file_direct: HashMap::new(),
+            file_search_direct: HashMap::new(),
         }
     }
 
@@ -207,6 +209,24 @@ impl Keymap {
         self.find_file_direct.insert(key, cmd);
     }
 
+    /// File-search overlay lookup. Returns `Some` only when the key is
+    /// explicitly bound in the file-search context.
+    pub fn lookup_file_search(&self, key: &KeyEvent) -> Option<Command> {
+        self.file_search_direct.get(key).copied()
+    }
+
+    /// Bind a key in the file-search overlay context. Panics on
+    /// invalid string; only called from `default_keymap` with static
+    /// strings.
+    pub fn bind_file_search(&mut self, key: &str, cmd: Command) {
+        let ev = parse_key(key).unwrap_or_else(|e| panic!("invalid default key `{key}`: {e}"));
+        self.file_search_direct.insert(ev, cmd);
+    }
+
+    pub fn insert_file_search(&mut self, key: KeyEvent, cmd: Command) {
+        self.file_search_direct.insert(key, cmd);
+    }
+
     pub fn lookup_chord(&self, prefix: &KeyEvent, second: &KeyEvent) -> Option<Command> {
         self.chords.get(prefix)?.get(second).copied()
     }
@@ -226,6 +246,12 @@ impl Keymap {
 
     pub fn is_empty(&self) -> bool {
         self.direct.is_empty() && self.chords.is_empty()
+    }
+
+    /// Iterate all file-search context bindings. Used by the config
+    /// loader to project user overrides into the overlay map.
+    pub fn file_search_iter(&self) -> impl Iterator<Item = (&KeyEvent, &Command)> {
+        self.file_search_direct.iter()
     }
 }
 
@@ -355,6 +381,10 @@ pub fn default_keymap() -> Keymap {
     m.bind("alt+2", Command::ToggleSearchRegex);
     m.bind("alt+3", Command::ToggleSearchReplace);
     m.bind("alt+enter", Command::ReplaceAll);
+    // Tab inside the overlay cycles SearchInput → ReplaceInput →
+    // result rows (same direction as Down-arrow). Outside the
+    // overlay, `tab` stays unbound (reserved for M23 `insert_tab`).
+    m.bind_file_search("tab", Command::CursorDown);
 
     m
 }

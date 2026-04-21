@@ -274,6 +274,14 @@ fn resolve_command(
     {
         return Resolved::Command(cmd);
     }
+    // File-search overlay context (M14). Takes precedence over the
+    // global direct table so e.g. `tab` maps to the overlay's
+    // field-cycling command instead of falling through to nothing.
+    if file_search_active
+        && let Some(cmd) = keymap.lookup_file_search(&k)
+    {
+        return Resolved::Command(cmd);
+    }
     // Browser-context overlay wins over the global direct table when
     // focus is on the sidebar (M11). The file-search overlay also
     // lives in the sidebar but wants global keys (`enter` →
