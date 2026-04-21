@@ -295,6 +295,7 @@ fn assign_region(theme: &mut Theme, region: &str, style: Style) -> bool {
         "browser_border" => theme.browser_border = style,
         "search_toggle_on" => theme.search_toggle_on = style,
         "search_match" => theme.search_match = style,
+        "search_hit_replaced" => theme.search_hit_replaced = style,
         "cursor_line" => theme.cursor_line = style,
         "ruler" => theme.ruler = style,
         _ => return false,

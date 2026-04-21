@@ -433,13 +433,12 @@ fn side_panel_rows(
 /// `fs_root` is the workspace root (dispatch's caller reads it off
 /// `FsTree`). Missing root → the driver walk is skipped, in-memory
 /// pass still runs.
-/// `CursorRight` on a selected hit — replace that one match.
-///
-/// For loaded buffers (file in `edits.buffers`), edit the rope in
-/// place, bump its version (dirty flag), push an entry onto
-/// `replace_stack` so Left-arrow can undo, remove the hit from
-/// `flat_hits` + its group, and advance selection. Missing buffer →
-/// on-disk path; that's a follow-up (stage 2).
+/// `CursorRight` on a selected hit (replace_mode on) — if the hit
+/// is still pending, apply the replacement and mark the row
+/// replaced. Rows stay visible in the tree either way, so
+/// Left-arrow on a specific replaced row can undo just that one
+/// without disturbing others. Advances selection to the next
+/// pending hit when one's available (wraps to the first pending).
 fn replace_selected(
     state: &mut FileSearchState,
     _tabs: &mut Tabs,
@@ -451,12 +450,19 @@ fn replace_selected(
     let Some(hit) = state.flat_hits.get(idx).cloned() else {
         return;
     };
+    // Ensure the replacements vec is at least as long as flat_hits
+    // — defensive in case something (a test, a stray path) bypassed
+    // the runtime's post-search resize.
+    ensure_replacements_len(state);
+    // Already replaced — Right on an already-handled row is a
+    // no-op (user can Left to undo).
+    if state.hit_replacements[idx].is_some() {
+        advance_to_next_pending(state);
+        return;
+    }
     if state.query.text.is_empty() && state.replace.text.is_empty() {
         return;
     }
-    // Char count of the matched substring, using the preview's
-    // byte offsets to avoid re-running the matcher against the
-    // (possibly edited) rope.
     let original_char_len = hit
         .preview
         .get(hit.match_start..hit.match_end)
@@ -493,10 +499,9 @@ fn replace_selected(
         super::shared::bump(eb, new_rope);
         match_char_start
     } else {
-        // On-disk path: queue a driver cmd and optimistically
-        // remove the hit from the display. `rope_char_start` is
+        // On-disk path: queue a driver cmd. `rope_char_start` is
         // meaningless for unloaded buffers — use 0 as a sentinel;
-        // undo reads the line/col from `hit` directly.
+        // undo uses (line, col) via the driver inverse cmd.
         edits.pending_single_replace.push(
             led_state_buffer_edits::PendingSingleReplace {
                 path: hit.path.clone(),
@@ -510,52 +515,31 @@ fn replace_selected(
         0
     };
 
-    // Record the undo entry BEFORE mutating selection / results.
-    state
-        .replace_stack
-        .push(led_state_file_search::ReplaceEntry {
-            flat_hit_idx: idx,
-            hit: hit.clone(),
-            replacement_text: replacement,
-            replacement_char_len,
-            original_char_len,
-            rope_char_start,
-            path: hit.path.clone(),
-        });
+    state.hit_replacements[idx] = Some(led_state_file_search::ReplaceEntry {
+        hit: hit.clone(),
+        replacement_text: replacement,
+        replacement_char_len,
+        original_char_len,
+        rope_char_start,
+        path: hit.path.clone(),
+    });
 
-    // Remove the hit from its group + flat_hits. Empty groups go
-    // too so the sidebar collapses naturally.
-    state.flat_hits.remove(idx);
-    if let Some(g) = state.results.iter_mut().find(|g| g.path == hit.path)
-        && let Some(pos) = g.hits.iter().position(|h| same_hit(h, &hit))
-    {
-        g.hits.remove(pos);
-    }
-    state.results.retain(|g| !g.hits.is_empty());
-
-    // Advance selection: stay at `idx` so the next hit in the list
-    // becomes selected. Clamp when we just removed the last one.
-    if state.flat_hits.is_empty() {
-        state.selection = if state.replace_mode {
-            FileSearchSelection::ReplaceInput
-        } else {
-            FileSearchSelection::SearchInput
-        };
-    } else {
-        let new_idx = idx.min(state.flat_hits.len() - 1);
-        state.selection = FileSearchSelection::Result(new_idx);
-    }
+    advance_to_next_pending(state);
 }
 
-/// `CursorLeft` on a result row — undo the most recent per-hit
-/// replace. Only the loaded-buffer path lands here; on-disk undo
-/// rides the driver alongside its forward replace (stage 2).
+/// `CursorLeft` on a selected hit — if the hit is marked replaced,
+/// revert it. Selection stays on the row so the user can
+/// immediately Right-arrow to redo if wanted.
 fn unreplace_selected(
     state: &mut FileSearchState,
     _tabs: &mut Tabs,
     edits: &mut BufferEdits,
 ) {
-    let Some(entry) = state.replace_stack.pop() else {
+    let FileSearchSelection::Result(idx) = state.selection else {
+        return;
+    };
+    ensure_replacements_len(state);
+    let Some(entry) = state.hit_replacements[idx].take() else {
         return;
     };
     let original = entry
@@ -565,13 +549,14 @@ fn unreplace_selected(
         .unwrap_or("")
         .to_string();
     if let Some(eb) = edits.buffers.get_mut(&entry.path) {
-        // Loaded-buffer path: rewrite the rope directly.
         let rope_len = eb.rope.len_chars();
         let replacement_end = entry
             .rope_char_start
             .saturating_add(entry.replacement_char_len);
         if replacement_end > rope_len {
             // Rope shrank past the replacement — abandon the undo.
+            // Restore the entry so state stays consistent.
+            state.hit_replacements[idx] = Some(entry);
             return;
         }
         let mut new_rope = (*eb.rope).clone();
@@ -583,10 +568,6 @@ fn unreplace_selected(
         }
         super::shared::bump(eb, new_rope);
     } else {
-        // On-disk path: queue the inverse cmd — replace the
-        // replacement run with the original text, at the same
-        // (line, col) as the forward edit. Byte-offset range is
-        // [match_start .. match_start + replacement.bytes].
         let replacement_bytes = entry.replacement_text.len();
         let replacement_end_byte = entry.hit.match_start + replacement_bytes;
         edits.pending_single_replace.push(
@@ -596,54 +577,44 @@ fn unreplace_selected(
                 match_start: entry.hit.match_start,
                 match_end: replacement_end_byte,
                 original: entry.replacement_text.clone(),
-                replacement: original.clone(),
+                replacement: original,
             },
         );
     }
-
-    // Reinsert the hit at its original position in flat_hits.
-    let insert_at = entry.flat_hit_idx.min(state.flat_hits.len());
-    state.flat_hits.insert(insert_at, entry.hit.clone());
-
-    // Reinsert into the group — find the group for this path or
-    // create a fresh one. Hits within a group stay in flat order.
-    let path = entry.path.clone();
-    let group_idx = state.results.iter().position(|g| g.path == path);
-    match group_idx {
-        Some(i) => {
-            // Find the right spot inside the group by matching
-            // flat order around the reinsertion point.
-            let before_count = state.flat_hits[..insert_at]
-                .iter()
-                .filter(|h| h.path == path)
-                .count();
-            let group = &mut state.results[i];
-            let pos = before_count.min(group.hits.len());
-            group.hits.insert(pos, entry.hit.clone());
-        }
-        None => {
-            let relative = path
-                .as_path()
-                .strip_prefix(std::path::Path::new("/"))
-                .map(|p| p.display().to_string())
-                .unwrap_or_else(|_| path.as_path().display().to_string());
-            state.results.push(led_state_file_search::FileSearchGroup {
-                path,
-                relative,
-                hits: vec![entry.hit.clone()],
-            });
-        }
-    }
-
-    // Re-select the reinserted hit.
-    state.selection = FileSearchSelection::Result(insert_at);
 }
 
-/// Cheap structural equality for hits — the hit list might contain
-/// duplicates (same path + line) when regex captures overlap, so
-/// compare on the fields that uniquely identify one occurrence.
-fn same_hit(a: &FileSearchHit, b: &FileSearchHit) -> bool {
-    a.line == b.line && a.match_start == b.match_start && a.match_end == b.match_end
+/// Advance selection to the next pending hit after the current
+/// index, wrapping to the start. No-op (selection stays) if every
+/// hit has already been replaced — user can Left to undo where
+/// they are, or Down to move within the fully-replaced set.
+fn advance_to_next_pending(state: &mut FileSearchState) {
+    let FileSearchSelection::Result(idx) = state.selection else {
+        return;
+    };
+    let n = state.flat_hits.len();
+    if n == 0 {
+        return;
+    }
+    // Look forward from idx+1, wrap to 0, back to idx.
+    for step in 1..=n {
+        let candidate = (idx + step) % n;
+        if state
+            .hit_replacements
+            .get(candidate)
+            .and_then(|e| e.as_ref())
+            .is_none()
+        {
+            state.selection = FileSearchSelection::Result(candidate);
+            return;
+        }
+    }
+    // All replaced — stay put.
+}
+
+fn ensure_replacements_len(state: &mut FileSearchState) {
+    if state.hit_replacements.len() != state.flat_hits.len() {
+        state.hit_replacements = vec![None; state.flat_hits.len()];
+    }
 }
 
 fn apply_replace_all(
@@ -1165,7 +1136,7 @@ mod tests {
     }
 
     #[test]
-    fn right_arrow_on_result_replaces_single_hit_and_advances() {
+    fn right_arrow_on_result_marks_hit_replaced_and_advances() {
         use led_state_buffer_edits::{BufferEdits, EditedBuffer};
 
         let path = led_core::UserPath::new("/tmp/a.rs").canonicalize();
@@ -1177,7 +1148,6 @@ mod tests {
             ))),
         );
 
-        // "foo" on line 1 at col 7 (1-indexed), bytes 6..9 of preview.
         let mut state = fs_state_with_hit_in(
             &path,
             "alpha foo beta",
@@ -1185,8 +1155,7 @@ mod tests {
             7,
             (6, 9),
         );
-        // Add a second (unrelated) hit so we can verify selection
-        // advances past the removed one.
+        // Second (unrelated) hit so we can verify advance-to-next.
         let mut tabs = Tabs::default();
         let second = led_state_file_search::FileSearchHit {
             path: path.clone(),
@@ -1198,21 +1167,24 @@ mod tests {
         };
         state.results[0].hits.push(second.clone());
         state.flat_hits.push(second);
+        state.hit_replacements = vec![None; state.flat_hits.len()];
 
         replace_selected(&mut state, &mut tabs, &mut edits);
 
-        // Rope: "foo" → "BAR" at position 6..9.
+        // Rope mutated.
         assert_eq!(edits.buffers[&path].rope.to_string(), "alpha BAR beta\n");
-        // Stack has one entry.
-        assert_eq!(state.replace_stack.len(), 1);
-        // Removed hit from flat_hits + its group.
-        assert_eq!(state.flat_hits.len(), 1);
-        // Selection stays at idx 0 (now pointing at the second hit).
-        assert_eq!(state.selection, FileSearchSelection::Result(0));
+        // Hits list UNCHANGED in length — the replaced row stays
+        // visible.
+        assert_eq!(state.flat_hits.len(), 2);
+        // First row marked replaced, second is still pending.
+        assert!(state.hit_replacements[0].is_some());
+        assert!(state.hit_replacements[1].is_none());
+        // Selection advanced to the next pending hit.
+        assert_eq!(state.selection, FileSearchSelection::Result(1));
     }
 
     #[test]
-    fn left_arrow_on_result_undoes_last_replace_and_reinserts_hit() {
+    fn left_arrow_on_replaced_row_undoes_that_specific_hit() {
         use led_state_buffer_edits::{BufferEdits, EditedBuffer};
 
         let path = led_core::UserPath::new("/tmp/a.rs").canonicalize();
@@ -1230,30 +1202,50 @@ mod tests {
             7,
             (6, 9),
         );
+        state.hit_replacements = vec![None; state.flat_hits.len()];
         let mut tabs = Tabs::default();
 
         // Forward: replace.
         replace_selected(&mut state, &mut tabs, &mut edits);
         assert_eq!(edits.buffers[&path].rope.to_string(), "alpha BAR beta\n");
-        assert_eq!(state.flat_hits.len(), 0);
+        assert!(state.hit_replacements[0].is_some());
 
-        // Undo.
+        // Selection wrapped back to 0 (the only hit, already
+        // replaced) — selection stays put. Left-arrow there reverts
+        // that specific row.
+        assert_eq!(state.selection, FileSearchSelection::Result(0));
         unreplace_selected(&mut state, &mut tabs, &mut edits);
 
-        // Rope restored.
         assert_eq!(edits.buffers[&path].rope.to_string(), "alpha foo beta\n");
-        // Hit reinserted + selected again.
+        assert!(state.hit_replacements[0].is_none());
+        // flat_hits still contains the row — undo doesn't add or
+        // remove rows.
         assert_eq!(state.flat_hits.len(), 1);
-        assert_eq!(state.selection, FileSearchSelection::Result(0));
-        assert!(state.replace_stack.is_empty());
+    }
+
+    #[test]
+    fn left_arrow_on_pending_row_is_noop() {
+        use led_state_buffer_edits::BufferEdits;
+
+        let path = led_core::UserPath::new("/tmp/a.rs").canonicalize();
+        let mut edits = BufferEdits::default();
+        let mut state = fs_state_with_hit_in(
+            &path,
+            "alpha foo beta",
+            1,
+            7,
+            (6, 9),
+        );
+        state.hit_replacements = vec![None; state.flat_hits.len()];
+        let mut tabs = Tabs::default();
+
+        unreplace_selected(&mut state, &mut tabs, &mut edits);
+
+        assert!(state.hit_replacements[0].is_none());
     }
 
     #[test]
     fn right_arrow_on_on_disk_hit_queues_driver_cmd() {
-        // Hit for a file NOT in edits.buffers: dispatch
-        // optimistically removes the hit from display, pushes to
-        // replace_stack, and queues a PendingSingleReplace the
-        // runtime will ship to the driver.
         use led_state_buffer_edits::BufferEdits;
 
         let path = led_core::UserPath::new("/tmp/unloaded.rs").canonicalize();
@@ -1265,13 +1257,14 @@ mod tests {
             7,
             (6, 9),
         );
+        state.hit_replacements = vec![None; state.flat_hits.len()];
         let mut tabs = Tabs::default();
 
         replace_selected(&mut state, &mut tabs, &mut edits);
 
-        // Display updated immediately.
-        assert_eq!(state.flat_hits.len(), 0);
-        assert_eq!(state.replace_stack.len(), 1);
+        // Row still visible, marked replaced.
+        assert_eq!(state.flat_hits.len(), 1);
+        assert!(state.hit_replacements[0].is_some());
         // Driver cmd queued with the right coords.
         assert_eq!(edits.pending_single_replace.len(), 1);
         let cmd = &edits.pending_single_replace[0];
@@ -1296,12 +1289,14 @@ mod tests {
             7,
             (6, 9),
         );
+        state.hit_replacements = vec![None; state.flat_hits.len()];
         let mut tabs = Tabs::default();
         replace_selected(&mut state, &mut tabs, &mut edits);
         assert_eq!(edits.pending_single_replace.len(), 1);
+        assert!(state.hit_replacements[0].is_some());
 
-        // Undo — queues the inverse cmd (swap original/replacement,
-        // byte end moves to match_start + replacement.len()).
+        // Undo on the same row queues the inverse cmd and clears
+        // hit_replacements[0].
         unreplace_selected(&mut state, &mut tabs, &mut edits);
         assert_eq!(edits.pending_single_replace.len(), 2);
         let inverse = &edits.pending_single_replace[1];
@@ -1311,16 +1306,11 @@ mod tests {
         assert_eq!(inverse.match_end, 9); // 6 + "BAR".len() = 9
         assert_eq!(inverse.original, "BAR");
         assert_eq!(inverse.replacement, "foo");
-        // Stack popped, hit reinserted on the display side.
-        assert!(state.replace_stack.is_empty());
-        assert_eq!(state.flat_hits.len(), 1);
+        assert!(state.hit_replacements[0].is_none());
     }
 
     #[test]
-    fn queue_search_clears_replace_stack() {
-        // Editing the query after doing per-hit replaces invalidates
-        // the stack — hit indices would reference a results list
-        // that's about to be wholesale-replaced by the driver.
+    fn queue_search_clears_hit_replacements() {
         use led_state_buffer_edits::{BufferEdits, EditedBuffer};
 
         let path = led_core::UserPath::new("/tmp/a.rs").canonicalize();
@@ -1338,14 +1328,16 @@ mod tests {
             7,
             (6, 9),
         );
+        state.hit_replacements = vec![None; state.flat_hits.len()];
         let mut tabs = Tabs::default();
         replace_selected(&mut state, &mut tabs, &mut edits);
-        assert_eq!(state.replace_stack.len(), 1);
+        assert!(state.hit_replacements[0].is_some());
 
-        // Simulate a query edit.
         state.query.insert_char('x');
         state.queue_search();
 
-        assert!(state.replace_stack.is_empty());
+        // Replacements vec goes to length 0 (cleared) — the runtime
+        // resizes it back when a fresh driver response lands.
+        assert!(state.hit_replacements.is_empty());
     }
 }

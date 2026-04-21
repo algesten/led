@@ -752,6 +752,7 @@ pub fn side_panel_model<'b, 'o>(
             name: Arc::<str>::from(entry.name.as_str()),
             selected: start + i == selected,
             match_range: None,
+            replaced: false,
         });
     }
     SidePanelModel {
@@ -781,6 +782,7 @@ fn completions_side_panel(
             name: Arc::<str>::from(entry.name.as_str()),
             selected: state.selected == Some(i),
             match_range: None,
+            replaced: false,
         });
     }
     SidePanelModel {
@@ -833,6 +835,7 @@ fn file_search_side_panel(
         name: Arc::<str>::from(" Aa   .*   =>"),
         selected: false,
         match_range: None,
+        replaced: false,
     });
 
     if total > out.len() {
@@ -845,6 +848,7 @@ fn file_search_side_panel(
                 led_state_file_search::FileSearchSelection::SearchInput
             ),
             match_range: None,
+            replaced: false,
         });
     }
     if state.replace_mode && total > out.len() {
@@ -857,6 +861,7 @@ fn file_search_side_panel(
                 led_state_file_search::FileSearchSelection::ReplaceInput
             ),
             match_range: None,
+            replaced: false,
         });
     }
 
@@ -898,6 +903,7 @@ fn file_search_side_panel(
                 name: Arc::<str>::from(group.relative.as_str()),
                 selected: false,
                 match_range: None,
+                replaced: false,
             });
         }
         for hit in &group.hits {
@@ -907,6 +913,11 @@ fn file_search_side_panel(
                 if total <= out.len() {
                     break 'outer;
                 }
+                let is_replaced = state
+                    .hit_replacements
+                    .get(hit_idx)
+                    .and_then(|e| e.as_ref())
+                    .is_some();
                 let (preview, match_preview_idx) = trimmed_preview(hit);
                 let prefix_chars = 3 + count_chars_of_usize(hit.line) + 2;
                 let match_len = chars_between(&hit.preview, hit.match_start, hit.match_end);
@@ -918,7 +929,15 @@ fn file_search_side_panel(
                     chevron: None,
                     name: Arc::<str>::from(name.as_str()),
                     selected: selected_hit_idx == Some(hit_idx),
-                    match_range: Some((match_start, match_end)),
+                    // Suppress the match highlight on replaced rows
+                    // — the dim replaced style reads better without
+                    // the yellow/bold overlay competing.
+                    match_range: if is_replaced {
+                        None
+                    } else {
+                        Some((match_start, match_end))
+                    },
+                    replaced: is_replaced,
                 });
             }
             hit_idx += 1;

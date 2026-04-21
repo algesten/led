@@ -467,6 +467,14 @@ fn paint_side_panel(
                 apply_style(out, sel_style)?;
                 queue!(out, style::Print(line))?;
                 reset_style(out, sel_style)?;
+            } else if entry.replaced {
+                // Replaced hit rows stay visible so the user can
+                // Left-arrow back onto them to undo. Paint them
+                // with the dim `search_hit_replaced` style so the
+                // distinction is obvious.
+                apply_style(out, &theme.search_hit_replaced)?;
+                queue!(out, style::Print(line))?;
+                reset_style(out, &theme.search_hit_replaced)?;
             } else if let Some((start, end)) = entry.match_range {
                 // Split into three prints so the matched substring
                 // picks up `theme.search_match` styling without
@@ -783,6 +791,7 @@ mod tests {
                 name: Arc::<str>::from("a.rs"),
                 selected: true,
                 match_range: None,
+                replaced: false,
             }]),
             focused: true,
         mode: Default::default(),
@@ -819,6 +828,7 @@ mod tests {
                 name: Arc::<str>::from("a.rs"),
                 selected: true,
                 match_range: None,
+                replaced: false,
             },
             SidePanelRow {
                 depth: 0,
@@ -826,6 +836,7 @@ mod tests {
                 name: Arc::<str>::from("b.rs"),
                 selected: false,
                 match_range: None,
+                replaced: false,
             },
         ]);
         // Only two panel rows but editor_area.rows is 8 — six empty
@@ -998,6 +1009,7 @@ mod tests {
                 name: Arc::<str>::from("   1: foo_needle_bar"),
                 selected: false,
                 match_range: Some((10, 16)),
+                replaced: false,
             }]),
             focused: false,
             mode: SidePanelMode::Completions,

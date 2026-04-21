@@ -237,6 +237,12 @@ pub struct BodyMatch {
 /// file-search hit rows so the painter can highlight the matched
 /// substring with `theme.search_match`. Skipped when the row is
 /// selected (selection style wins end-to-end).
+///
+/// `replaced` is set on file-search hit rows the user has already
+/// applied a per-hit replace to (Right-arrow). The painter styles
+/// these rows dimly via `theme.search_hit_replaced` so they're
+/// visibly distinct from pending rows — the user can Left-arrow
+/// back onto any of them to undo that specific replace.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SidePanelRow {
     pub depth: u16,
@@ -244,6 +250,7 @@ pub struct SidePanelRow {
     pub name: Arc<str>,
     pub selected: bool,
     pub match_range: Option<(u16, u16)>,
+    pub replaced: bool,
 }
 
 /// Which kind of content the side panel is displaying.

@@ -154,6 +154,12 @@ pub struct Theme {
     /// Default = bright yellow + bold. Skipped on the currently-
     /// selected row (selection style takes the whole row).
     pub search_match: Style,
+    /// Style applied to hit rows the user has already replaced
+    /// via Right-arrow. Default = dim grey + strikethrough-ish
+    /// (no strikethrough SGR in `Attrs` yet, so just fg dim).
+    /// Users Left-arrow onto these rows to undo that specific
+    /// replace, so they need to stay visible but clearly distinct.
+    pub search_hit_replaced: Style,
 
     // ── Editor body ─────────────────────────────────────────
     /// Background applied to the row the cursor is on. Default (no
@@ -243,6 +249,11 @@ impl Default for Theme {
                     ..Attrs::default()
                 },
                 ..Style::default()
+            },
+            search_hit_replaced: Style {
+                fg: Some(Color::Indexed(244)), // medium grey
+                attrs: Attrs::default(),
+                bg: None,
             },
 
             cursor_line: Style::default(),

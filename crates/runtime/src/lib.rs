@@ -325,6 +325,12 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
             }
             fs_state.results = done.groups;
             fs_state.flat_hits = done.flat;
+            // New result set — all hits are pending again. Per-hit
+            // replacement state from the previous search is no
+            // longer meaningful (indices may point at different
+            // hits now).
+            fs_state.hit_replacements =
+                vec![None; fs_state.flat_hits.len()];
             if let led_state_file_search::FileSearchSelection::Result(i) =
                 fs_state.selection
                 && i >= fs_state.flat_hits.len()
