@@ -23,13 +23,15 @@
 //! - Preview-tab side effects during arrow navigation.
 //! - Open-mode paths A/B/C; SaveAs commit.
 
+use led_core::UserPath;
 use led_state_browser::FsTree;
-use led_state_find_file::{FindFileState, abbreviate_home};
+use led_state_find_file::{FindFileMode, FindFileState, abbreviate_home, expand_path};
 use led_state_tabs::Tabs;
 
 use crate::keymap::Command;
 
 use super::DispatchOutcome;
+use super::shared::open_or_focus_tab;
 
 /// Enter Open mode. No-op if an overlay is already active — matches
 /// legacy's "cannot nest find-file".
@@ -42,7 +44,9 @@ pub(super) fn activate_open(
         return;
     }
     let input = compute_open_input(tabs, fs);
-    *find_file = Some(FindFileState::open(input));
+    let mut state = FindFileState::open(input);
+    state.queue_request();
+    *find_file = Some(state);
 }
 
 /// Enter SaveAs mode. No-op when already active.
@@ -55,7 +59,9 @@ pub(super) fn activate_save_as(
         return;
     }
     let input = compute_save_as_input(tabs, fs);
-    *find_file = Some(FindFileState::save_as(input));
+    let mut state = FindFileState::save_as(input);
+    state.queue_request();
+    *find_file = Some(state);
 }
 
 /// Close the overlay. Idempotent. Future stages will also close
@@ -80,17 +86,22 @@ pub(super) fn deactivate(find_file: &mut Option<FindFileState>) {
 pub(super) fn run_overlay_command(
     cmd: Command,
     find_file: &mut Option<FindFileState>,
+    tabs: &mut Tabs,
 ) -> Option<DispatchOutcome> {
-    let state = find_file.as_mut()?;
+    find_file.as_ref()?;
     match cmd {
-        Command::InsertChar(c) => insert_char(state, c),
-        Command::DeleteBack => delete_back(state),
-        Command::DeleteForward => delete_forward(state),
-        Command::CursorLeft => move_left(state),
-        Command::CursorRight => move_right(state),
-        Command::CursorLineStart => state.cursor = 0,
-        Command::CursorLineEnd => state.cursor = state.input.len(),
-        Command::KillLine => kill_line(state),
+        Command::InsertChar(c) => insert_char(find_file.as_mut()?, c),
+        Command::DeleteBack => delete_back(find_file.as_mut()?),
+        Command::DeleteForward => delete_forward(find_file.as_mut()?),
+        Command::CursorLeft => move_left(find_file.as_mut()?),
+        Command::CursorRight => move_right(find_file.as_mut()?),
+        Command::CursorLineStart => find_file.as_mut()?.cursor = 0,
+        Command::CursorLineEnd => {
+            let s = find_file.as_mut()?;
+            s.cursor = s.input.len();
+        }
+        Command::KillLine => kill_line(find_file.as_mut()?),
+        Command::InsertNewline => handle_enter(find_file, tabs),
         Command::Abort => deactivate(find_file),
         // Not-yet-implemented overlay commands. Absorbed so the key
         // doesn't leak to the buffer below.
@@ -102,8 +113,7 @@ pub(super) fn run_overlay_command(
         | Command::CursorFileEnd
         | Command::CursorWordLeft
         | Command::CursorWordRight
-        | Command::FindFileTabComplete
-        | Command::InsertNewline => {}
+        | Command::FindFileTabComplete => {}
         // Quit passes through so the user can still ctrl+x ctrl+c
         // out of the editor.
         Command::Quit => return None,
@@ -113,6 +123,57 @@ pub(super) fn run_overlay_command(
         _ => {}
     }
     Some(DispatchOutcome::Continue)
+}
+
+/// Enter / commit. Paths per legacy `handle_enter_open` /
+/// `handle_enter_save_as`, simplified for M12 bootstrap:
+///
+/// - **Open mode, trailing slash**: no-op (user is exploring a
+///   directory; dir-descent-on-Enter lands with Stage 5/6).
+/// - **Open mode, matching completion**: if a file, open/focus it
+///   and deactivate. Dir → no-op for now.
+/// - **Open mode, non-empty input with no match (path C)**:
+///   canonicalize + open (creates a fresh tab at that path; the
+///   file-read driver will treat a missing path as "create on next
+///   save").
+/// - **SaveAs**: set `pending_save_as` (not wired yet — Stage 7b).
+fn handle_enter(find_file: &mut Option<FindFileState>, tabs: &mut Tabs) {
+    let Some(state) = find_file.as_ref() else {
+        return;
+    };
+    if state.input.is_empty() {
+        return;
+    }
+    match state.mode {
+        FindFileMode::Open => handle_enter_open(find_file, tabs),
+        FindFileMode::SaveAs => {
+            // Stage 7b will wire `pending_save_as`. For now just
+            // close the overlay so Enter isn't a dead key.
+            deactivate(find_file);
+        }
+    }
+}
+
+fn handle_enter_open(find_file: &mut Option<FindFileState>, tabs: &mut Tabs) {
+    let Some(state) = find_file.as_ref() else {
+        return;
+    };
+    // Trailing slash: user is exploring the directory. Stage 6 will
+    // commit to the currently-selected completion; for now, Enter
+    // is a no-op (leaves the overlay open).
+    if state.input.ends_with('/') {
+        return;
+    }
+    let expanded = expand_path(&state.input);
+    let canon = UserPath::new(expanded).canonicalize();
+    // Path B short-circuit: if the expanded path matches a
+    // completion and that completion is a dir, Stage 6 will descend
+    // into it. For now, fall through to path C's open so "enter" on
+    // a dir-matching completion opens it like any other path.
+    // Once the matching entry is a file, we open/focus. Same outcome
+    // for path C (no match).
+    open_or_focus_tab(tabs, &canon, /* promote= */ true);
+    deactivate(find_file);
 }
 
 // ── Input-editing primitives ───────────────────────────────────────────
@@ -126,7 +187,7 @@ fn insert_char(s: &mut FindFileState, c: char) {
     s.input.insert(s.cursor, c);
     s.cursor += c.len_utf8();
     s.reset_selection();
-    s.pending_find_file_list = true;
+    s.queue_request();
 }
 
 fn delete_back(s: &mut FindFileState) {
@@ -137,7 +198,7 @@ fn delete_back(s: &mut FindFileState) {
     s.input.replace_range(prev..s.cursor, "");
     s.cursor = prev;
     s.reset_selection();
-    s.pending_find_file_list = true;
+    s.queue_request();
 }
 
 fn delete_forward(s: &mut FindFileState) {
@@ -147,7 +208,7 @@ fn delete_forward(s: &mut FindFileState) {
     let next = next_char_boundary(&s.input, s.cursor);
     s.input.replace_range(s.cursor..next, "");
     s.reset_selection();
-    s.pending_find_file_list = true;
+    s.queue_request();
 }
 
 fn move_left(s: &mut FindFileState) {
@@ -170,7 +231,7 @@ fn kill_line(s: &mut FindFileState) {
     }
     s.input.truncate(s.cursor);
     s.reset_selection();
-    s.pending_find_file_list = true;
+    s.queue_request();
 }
 
 fn prev_char_boundary(s: &str, byte_pos: usize) -> usize {
@@ -304,26 +365,26 @@ mod tests {
     fn overlay(input: &str, cursor: usize) -> Option<FindFileState> {
         let mut s = FindFileState::open(input.to_string());
         s.cursor = cursor;
-        // Activation pre-fires pending_find_file_list; tests want to
-        // observe the bit re-arming after each edit.
-        s.pending_find_file_list = false;
+        // Activation pre-fires a completion request; tests want to
+        // observe the list re-filling after each edit.
+        s.pending_find_file_list.clear();
         Some(s)
     }
 
     #[test]
     fn insert_char_extends_input_and_rearms_pending() {
         let mut ff = overlay("/tmp/", 5);
-        run_overlay_command(Command::InsertChar('a'), &mut ff);
+        run_overlay_command(Command::InsertChar('a'), &mut ff, &mut Tabs::default());
         let s = ff.as_ref().unwrap();
         assert_eq!(s.input, "/tmp/a");
         assert_eq!(s.cursor, 6);
-        assert!(s.pending_find_file_list);
+        assert_eq!(s.pending_find_file_list.len(), 1);
     }
 
     #[test]
     fn delete_back_at_end_of_input() {
         let mut ff = overlay("/tmp/a", 6);
-        run_overlay_command(Command::DeleteBack, &mut ff);
+        run_overlay_command(Command::DeleteBack, &mut ff, &mut Tabs::default());
         assert_eq!(ff.as_ref().unwrap().input, "/tmp/");
         assert_eq!(ff.as_ref().unwrap().cursor, 5);
     }
@@ -331,48 +392,48 @@ mod tests {
     #[test]
     fn delete_back_at_start_is_noop() {
         let mut ff = overlay("/tmp/", 0);
-        run_overlay_command(Command::DeleteBack, &mut ff);
+        run_overlay_command(Command::DeleteBack, &mut ff, &mut Tabs::default());
         assert_eq!(ff.as_ref().unwrap().input, "/tmp/");
-        assert!(!ff.as_ref().unwrap().pending_find_file_list);
+        assert!(ff.as_ref().unwrap().pending_find_file_list.is_empty());
     }
 
     #[test]
     fn delete_forward_at_middle() {
         let mut ff = overlay("/tmp/ab", 5);
-        run_overlay_command(Command::DeleteForward, &mut ff);
+        run_overlay_command(Command::DeleteForward, &mut ff, &mut Tabs::default());
         assert_eq!(ff.as_ref().unwrap().input, "/tmp/b");
     }
 
     #[test]
     fn cursor_left_and_right_walk_char_boundaries() {
         let mut ff = overlay("/ä/", 3); // 'ä' is 2 bytes at byte 1..3
-        run_overlay_command(Command::CursorLeft, &mut ff);
+        run_overlay_command(Command::CursorLeft, &mut ff, &mut Tabs::default());
         assert_eq!(ff.as_ref().unwrap().cursor, 1);
-        run_overlay_command(Command::CursorRight, &mut ff);
+        run_overlay_command(Command::CursorRight, &mut ff, &mut Tabs::default());
         assert_eq!(ff.as_ref().unwrap().cursor, 3);
     }
 
     #[test]
     fn line_start_and_end() {
         let mut ff = overlay("/tmp/", 2);
-        run_overlay_command(Command::CursorLineStart, &mut ff);
+        run_overlay_command(Command::CursorLineStart, &mut ff, &mut Tabs::default());
         assert_eq!(ff.as_ref().unwrap().cursor, 0);
-        run_overlay_command(Command::CursorLineEnd, &mut ff);
+        run_overlay_command(Command::CursorLineEnd, &mut ff, &mut Tabs::default());
         assert_eq!(ff.as_ref().unwrap().cursor, 5);
     }
 
     #[test]
     fn kill_line_truncates_at_cursor() {
         let mut ff = overlay("/tmp/abc", 5);
-        run_overlay_command(Command::KillLine, &mut ff);
+        run_overlay_command(Command::KillLine, &mut ff, &mut Tabs::default());
         assert_eq!(ff.as_ref().unwrap().input, "/tmp/");
-        assert!(ff.as_ref().unwrap().pending_find_file_list);
+        assert_eq!(ff.as_ref().unwrap().pending_find_file_list.len(), 1);
     }
 
     #[test]
     fn abort_closes_the_overlay() {
         let mut ff = overlay("/tmp/", 5);
-        let outcome = run_overlay_command(Command::Abort, &mut ff);
+        let outcome = run_overlay_command(Command::Abort, &mut ff, &mut Tabs::default());
         assert_eq!(outcome, Some(DispatchOutcome::Continue));
         assert!(ff.is_none());
     }
@@ -380,7 +441,7 @@ mod tests {
     #[test]
     fn quit_passes_through() {
         let mut ff = overlay("/tmp/", 5);
-        let outcome = run_overlay_command(Command::Quit, &mut ff);
+        let outcome = run_overlay_command(Command::Quit, &mut ff, &mut Tabs::default());
         // None == "fall through to the normal dispatch path", so
         // the outer `run_command` turns the Quit into a real exit.
         assert!(outcome.is_none());
@@ -390,6 +451,55 @@ mod tests {
     #[test]
     fn inactive_overlay_passes_everything_through() {
         let mut ff: Option<FindFileState> = None;
-        assert!(run_overlay_command(Command::InsertChar('a'), &mut ff).is_none());
+        assert!(run_overlay_command(Command::InsertChar('a'), &mut ff, &mut Tabs::default()).is_none());
+    }
+
+    #[test]
+    fn enter_on_non_trailing_path_opens_and_deactivates() {
+        let mut ff = overlay("/tmp/newfile.txt", 16);
+        let mut tabs = Tabs::default();
+        run_overlay_command(Command::InsertNewline, &mut ff, &mut tabs);
+        assert!(ff.is_none(), "overlay closes on commit");
+        assert_eq!(tabs.open.len(), 1);
+        assert_eq!(tabs.active, Some(tabs.open[0].id));
+        // Real tab, not preview.
+        assert!(!tabs.open[0].preview);
+    }
+
+    #[test]
+    fn enter_on_trailing_slash_is_noop() {
+        let mut ff = overlay("/tmp/", 5);
+        let mut tabs = Tabs::default();
+        run_overlay_command(Command::InsertNewline, &mut ff, &mut tabs);
+        // Overlay stays open; no tab created.
+        assert!(ff.is_some());
+        assert!(tabs.open.is_empty());
+    }
+
+    #[test]
+    fn enter_on_empty_input_is_noop() {
+        let mut ff = overlay("", 0);
+        let mut tabs = Tabs::default();
+        run_overlay_command(Command::InsertNewline, &mut ff, &mut tabs);
+        assert!(ff.is_some());
+        assert!(tabs.open.is_empty());
+    }
+
+    #[test]
+    fn enter_focuses_existing_tab_when_path_matches() {
+        let mut tabs = Tabs::default();
+        let id = led_state_tabs::TabId(42);
+        tabs.open.push_back(led_state_tabs::Tab {
+            id,
+            path: canon("/tmp/existing.txt"),
+            preview: true,
+            ..Default::default()
+        });
+        let mut ff = overlay("/tmp/existing.txt", 17);
+        run_overlay_command(Command::InsertNewline, &mut ff, &mut tabs);
+        // Same tab, now active + promoted.
+        assert_eq!(tabs.open.len(), 1);
+        assert_eq!(tabs.active, Some(id));
+        assert!(!tabs.open[0].preview);
     }
 }

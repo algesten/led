@@ -649,32 +649,14 @@ pub fn clipboard_action<'c>(clip: ClipboardStateInput<'c>) -> Option<ClipboardAc
 pub fn find_file_action<'f>(
     ff: FindFileInput<'f>,
 ) -> Vec<led_driver_find_file_core::FindFileCmd> {
+    // Execute-pattern: dispatch pushed one `FindFileCmd` per input
+    // edit into the state's queue; the memo ships the whole queue,
+    // and the main loop drains it after execute. Inactive overlay
+    // or empty queue → empty Vec (zero alloc hot path).
     let Some(state) = ff.overlay.as_ref() else {
         return Vec::new();
     };
-    // Execute-pattern: only emit when dispatch set the bit. The main
-    // loop sync-clears it after `execute` so the next tick doesn't
-    // re-fire the same request.
-    if !state.pending_find_file_list {
-        return Vec::new();
-    }
-    use led_core::UserPath;
-    use led_state_find_file::{expand_path, split_input};
-
-    let (dir_part, prefix) = split_input(&state.input);
-    // If the input has no `/` at all, we can't derive a directory to
-    // list. Callers (legacy) skip the request in that case.
-    if dir_part.is_empty() {
-        return Vec::new();
-    }
-    let expanded = expand_path(dir_part);
-    let dir = UserPath::new(expanded).canonicalize();
-    let show_hidden = prefix.starts_with('.');
-    vec![led_driver_find_file_core::FindFileCmd {
-        dir,
-        prefix: prefix.to_string(),
-        show_hidden,
-    }]
+    state.pending_find_file_list.clone()
 }
 
 /// "What directory listings do we still need?"

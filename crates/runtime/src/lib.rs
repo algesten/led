@@ -373,14 +373,14 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
 
         drivers.file.execute(load_actions.iter(), store);
 
-        // Find-file completion requests. Sync-clear the pending bit
+        // Find-file completion requests. Sync-clear the queue
         // BEFORE execute so a late wake that runs the query again
-        // doesn't re-fire the same request. Matches the save
+        // doesn't re-fire the same requests. Matches the save
         // pattern above.
         if !find_file_actions.is_empty()
             && let Some(ff) = find_file.as_mut()
         {
-            ff.pending_find_file_list = false;
+            ff.pending_find_file_list.clear();
         }
         drivers.find_file.execute(find_file_actions.iter());
 

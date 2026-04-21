@@ -14,15 +14,9 @@ use std::cmp::Ordering;
 
 use led_core::CanonPath;
 use led_state_browser::{BrowserUi, Focus, FsTree, TreeEntryKind};
-use led_state_tabs::{Tab, TabId, Tabs};
+use led_state_tabs::Tabs;
 
-/// Assign the next available `TabId`. Counter-style; never reused.
-/// The runtime owns a `TabIdGen` but dispatch operates on a short-
-/// lived borrow of `Tabs`, so generate ids from the max open id.
-fn next_tab_id(tabs: &Tabs) -> TabId {
-    let max = tabs.open.iter().map(|t| t.id.0).max().unwrap_or(0);
-    TabId(max + 1)
-}
+use super::shared::open_or_focus_tab;
 
 /// Toggle `browser.visible`. When toggling off while focus is Side,
 /// auto-swap focus back to Main so the next keystroke lands in the
@@ -153,43 +147,14 @@ pub(super) fn open_selected_bg(browser: &mut BrowserUi, tabs: &mut Tabs) {
     }
 }
 
-/// Core open logic: either promote a matching preview, replace the
-/// existing preview's path, or create a new preview tab.
+/// Core open logic — delegates to the shared `open_or_focus_tab`.
 fn open_file_from_browser(
     _browser: &BrowserUi,
     tabs: &mut Tabs,
     path: &CanonPath,
     promote: bool,
 ) {
-    // 1) Path already matches an existing tab → just activate it.
-    if let Some(idx) = tabs.open.iter().position(|t| &t.path == path) {
-        let id = tabs.open[idx].id;
-        tabs.active = Some(id);
-        if promote {
-            tabs.open[idx].preview = false;
-        }
-        return;
-    }
-    // 2) An existing preview slot: replace its path.
-    if let Some(idx) = tabs.open.iter().position(|t| t.preview) {
-        let id = tabs.open[idx].id;
-        tabs.open[idx].path = path.clone();
-        tabs.open[idx].preview = !promote;
-        tabs.open[idx].cursor = Default::default();
-        tabs.open[idx].scroll = Default::default();
-        tabs.open[idx].mark = None;
-        tabs.active = Some(id);
-        return;
-    }
-    // 3) No preview — create one.
-    let id = next_tab_id(tabs);
-    tabs.open.push_back(Tab {
-        id,
-        path: path.clone(),
-        preview: !promote,
-        ..Default::default()
-    });
-    tabs.active = Some(id);
+    open_or_focus_tab(tabs, path, promote);
 }
 
 /// Browser-context selection move (Up/Down in focus=Side). Delta +1

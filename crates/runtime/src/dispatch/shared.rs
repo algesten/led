@@ -4,10 +4,60 @@
 //! `undo`, …) can call them without re-exporting. Nothing here is part
 //! of the dispatch public API.
 
+use led_core::CanonPath;
 use led_state_buffer_edits::{BufferEdits, EditedBuffer};
-use led_state_tabs::{Cursor, Tab, Tabs};
+use led_state_tabs::{Cursor, Tab, TabId, Tabs};
 use ropey::Rope;
 use std::sync::Arc;
+
+/// Allocate the next unused `TabId` by scanning `tabs.open`. Dispatch
+/// doesn't hold the runtime's `TabIdGen` (that lives on the main
+/// stack frame), so each submodule that needs a new tab derives one
+/// locally. Ids are monotonic per-session, never reused.
+pub(super) fn next_tab_id(tabs: &Tabs) -> TabId {
+    let max = tabs.open.iter().map(|t| t.id.0).max().unwrap_or(0);
+    TabId(max + 1)
+}
+
+/// Open (or focus) a file tab at `path`.
+///
+/// - **Existing tab at this path**: activate it; if `promote` is true,
+///   clear its preview flag so it becomes a pinned tab.
+/// - **Preview tab exists**: replace its path. Promote vs keep-preview
+///   per the flag; reset cursor/scroll/mark (new buffer, fresh state).
+/// - **No preview**: create a fresh tab — preview if `!promote`, real
+///   otherwise.
+///
+/// Shared between M11 browser (`open_selected` / `open_selected_bg`)
+/// and M12 find-file commit.
+pub(super) fn open_or_focus_tab(tabs: &mut Tabs, path: &CanonPath, promote: bool) {
+    if let Some(idx) = tabs.open.iter().position(|t| &t.path == path) {
+        let id = tabs.open[idx].id;
+        tabs.active = Some(id);
+        if promote {
+            tabs.open[idx].preview = false;
+        }
+        return;
+    }
+    if let Some(idx) = tabs.open.iter().position(|t| t.preview) {
+        let id = tabs.open[idx].id;
+        tabs.open[idx].path = path.clone();
+        tabs.open[idx].preview = !promote;
+        tabs.open[idx].cursor = Default::default();
+        tabs.open[idx].scroll = Default::default();
+        tabs.open[idx].mark = None;
+        tabs.active = Some(id);
+        return;
+    }
+    let id = next_tab_id(tabs);
+    tabs.open.push_back(Tab {
+        id,
+        path: path.clone(),
+        preview: !promote,
+        ..Default::default()
+    });
+    tabs.active = Some(id);
+}
 
 /// Access the active tab and its edited buffer together. Bails if
 /// either is missing — buffer not yet loaded means edit keys no-op.
