@@ -6,7 +6,12 @@ Chrome theming in led rewrite: every visible region (tabs, status bar,
 side panel, ruler, file-search toggles) resolves its fg/bg/attrs from a
 [`Theme`] value rather than being hard-coded in the painter. The
 `Theme` is loaded at startup from `theme.toml` — optional, falls back
-to a built-in default that preserves the pre-M14b look.
+to a built-in default that ships a coherent colored look.
+
+Default palette mirrors led's long-standing look: peach accents
+(`#ffaf87`) for active chrome, deep blue (`#005faf`) for muted gutter
+/ border / status bar, pale yellow (`#ffd7af`) status-bar foreground,
+dark grey (`#444444`) for inactive / unfocused highlights.
 
 M15 (syntax highlighting) extends the same `theme.toml` with a
 `[syntax]` section and a parallel `syntax_*` style vocabulary; M14b
@@ -99,41 +104,45 @@ Omitted flags default to `false`.
 
 ### Tabs
 
-| Region             | Default                  | Applies to                                       |
-| ------------------ | ------------------------ | ------------------------------------------------ |
-| `tab_active`       | `reverse`                | The active tab's ` label ` in the tab bar.       |
-| `tab_inactive`     | unstyled                 | Every other tab's ` label `.                     |
-| `tab_preview`      | unstyled                 | *Reserved*; painter not yet per-tab-preview-aware. |
-| `tab_dirty_marker` | unstyled                 | *Reserved*; dirty dot currently part of the label. |
+| Region             | Default                     | Applies to                                       |
+| ------------------ | --------------------------- | ------------------------------------------------ |
+| `tab_active`       | `fg=#080808 bg=#ffaf87`     | The active tab's ` label ` in the tab bar.       |
+| `tab_inactive`     | `fg=#ffaf87 bg=#444444`     | Every other tab's ` label `.                     |
+| `tab_preview`      | unstyled                    | *Reserved*; painter not yet per-tab-preview-aware. |
+| `tab_dirty_marker` | unstyled                    | *Reserved*; dirty dot currently part of the label. |
 
 ### Status bar
 
-| Region          | Default            | Applies to                                         |
-| --------------- | ------------------ | -------------------------------------------------- |
-| `status_normal` | unstyled           | Non-warn status bar (saved, L1:C1, etc.).          |
-| `status_warn`   | `fg=white bg=red bold` | `StatusBarModel.is_warn` rows (errors, failures). |
+| Region          | Default                    | Applies to                                         |
+| --------------- | -------------------------- | -------------------------------------------------- |
+| `status_normal` | `fg=#ffd7af bg=#005faf`    | Non-warn status bar (saved, L1:C1, etc.).          |
+| `status_warn`   | `fg=white bg=red bold`     | `StatusBarModel.is_warn` rows (errors, failures). |
 
 ### Side panel
 
-| Region                      | Default      | Applies to                                                                 |
-| --------------------------- | ------------ | -------------------------------------------------------------------------- |
-| `browser_selected_focused`  | `reverse`    | Selected row while `SidePanelModel.focused == true`.                       |
-| `browser_selected_unfocused`| `bg=dark_grey` | Selected row while `focused == false` (focus lives in the editor pane). |
-| `browser_chevron`           | unstyled     | *Reserved*; chevron `▷ ▽` currently inline with row text.                  |
-| `browser_border`            | unstyled     | Vertical `│` between side panel and editor.                                 |
+| Region                      | Default                  | Applies to                                                                 |
+| --------------------------- | ------------------------ | -------------------------------------------------------------------------- |
+| `browser_selected_focused`  | `fg=#080808 bg=#ffaf87`  | Selected row while `SidePanelModel.focused == true`.                       |
+| `browser_selected_unfocused`| `bg=#444444`             | Selected row while `focused == false` (focus lives in the editor pane). |
+| `browser_chevron`           | unstyled                 | *Reserved*; chevron `▷ ▽` currently inline with row text.                  |
+| `browser_border`            | `fg=#005faf`             | Vertical `│` between side panel and editor.                                |
 
 ### File-search overlay
 
-| Region             | Default    | Applies to                                                                                   |
-| ------------------ | ---------- | -------------------------------------------------------------------------------------------- |
-| `search_toggle_on` | `reverse`  | Each of `Aa` / `.*` / `=>` in the header row when the corresponding flag (case / regex / replace) is on. |
+| Region             | Default                  | Applies to                                                                                   |
+| ------------------ | ------------------------ | -------------------------------------------------------------------------------------------- |
+| `search_toggle_on` | `fg=#080808 bg=#ffaf87`  | Each of `Aa` / `.*` / `=>` in the header row when the corresponding flag (case / regex / replace) is on. |
 
 ### Editor body
 
-| Region        | Default    | Applies to                                                                                            |
-| ------------- | ---------- | ----------------------------------------------------------------------------------------------------- |
-| `cursor_line` | unstyled   | *Reserved*; currently the terminal's native cursor-row style takes over.                              |
-| `ruler`       | unstyled   | Single column painted over every body row when `ruler_column` is set. The underlying char is preserved when it overlaps. |
+| Region        | Default       | Applies to                                                                                            |
+| ------------- | ------------- | ----------------------------------------------------------------------------------------------------- |
+| `cursor_line` | unstyled      | *Reserved*; currently the terminal's native cursor-row style takes over.                              |
+| `ruler`       | `bg=#303030`  | Single column painted over every body row when `ruler_column` is set. The underlying char is preserved when it overlaps. |
+
+`ruler_column` defaults to `None` — the ruler stays off until the
+user opts in. Picking a number automatically would surprise users
+whose editor width varies with sidebar state.
 
 ## Painter contract
 

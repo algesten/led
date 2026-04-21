@@ -656,7 +656,7 @@ mod tests {
             dims: Dims { cols: 40, rows: 5 },
         };
         let mut out: Vec<u8> = Vec::new();
-        paint(&frame, None, &Theme::legacy_default(), &mut out).expect("paint to Vec<u8>");
+        paint(&frame, None, &Theme::default(), &mut out).expect("paint to Vec<u8>");
         assert!(!out.is_empty());
     }
 
@@ -672,7 +672,7 @@ mod tests {
             dims: Dims { cols: 40, rows: 5 },
         };
         let mut out: Vec<u8> = Vec::new();
-        paint(&frame, None, &Theme::legacy_default(), &mut out).expect("paint to Vec<u8>");
+        paint(&frame, None, &Theme::default(), &mut out).expect("paint to Vec<u8>");
         // Empty frames still produce clear/hide sequences — just don't panic.
         assert!(!out.is_empty());
     }
@@ -697,7 +697,7 @@ mod tests {
         };
         let area = Rect { x: 0, y: 0, cols: 24, rows: 10 };
         let mut out: Vec<u8> = Vec::new();
-        paint_side_panel(&panel, area, &Theme::legacy_default(), &mut out).expect("paint");
+        paint_side_panel(&panel, area, &Theme::default(), &mut out).expect("paint");
         assert!(
             !out.windows(3).any(|w| w == b"\x1b[K"),
             "paint_side_panel emitted Clear(UntilNewLine); bytes: {out:?}",
@@ -776,10 +776,10 @@ mod tests {
 
         let mut grid = Grid::new(dims);
         let mut out: Vec<u8> = Vec::new();
-        paint(&frame1, None, &Theme::legacy_default(), &mut out).expect("paint frame1");
+        paint(&frame1, None, &Theme::default(), &mut out).expect("paint frame1");
         grid.apply(&out);
         out.clear();
-        paint(&frame2, Some(&frame1), &Theme::legacy_default(), &mut out).expect("paint frame2");
+        paint(&frame2, Some(&frame1), &Theme::default(), &mut out).expect("paint frame2");
         grid.apply(&out);
 
         // Body column 25 ("  line NN" starts at editor_area.x=25).
@@ -901,7 +901,7 @@ mod tests {
             ]),
             cursor: None,
         };
-        let mut theme = Theme::legacy_default();
+        let mut theme = Theme::default();
         theme.ruler_column = Some(5);
         theme.ruler = Style {
             bg: Some(Color::rgb(0x22, 0x22, 0x22)),

@@ -70,13 +70,13 @@ impl std::error::Error for ThemeError {}
 /// 1. If `explicit_path` is `Some`, load it (error when missing).
 /// 2. Otherwise look in `config_dir/theme.toml`, then
 ///    `$XDG_CONFIG_HOME/led/theme.toml` (or `~/.config/led/` when
-///    the env var is unset). Missing file → `legacy_default`.
+///    the env var is unset). Missing file → `Theme::default`.
 pub fn load_theme(
     config_dir: Option<&Path>,
     explicit_path: Option<&Path>,
 ) -> Result<LoadedTheme, ThemeError> {
     let mut loaded = LoadedTheme {
-        theme: Theme::legacy_default(),
+        theme: Theme::default(),
         warnings: Vec::new(),
     };
     let path = match explicit_path {
@@ -318,10 +318,10 @@ mod tests {
     }
 
     #[test]
-    fn no_file_returns_legacy_default() {
+    fn no_file_returns_built_in_default() {
         let tmp = tempdir();
         let loaded = load_theme(Some(tmp.path()), None).unwrap();
-        assert_eq!(loaded.theme, Theme::legacy_default());
+        assert_eq!(loaded.theme, Theme::default());
         assert!(loaded.warnings.is_empty());
     }
 
