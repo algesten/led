@@ -249,12 +249,12 @@ pub fn default_keymap() -> Keymap {
     m.bind_browser("alt+enter", Command::OpenSelectedBg);
     m.bind_browser("ctrl+q", Command::CollapseAll);
 
-    // Tab management.
+    // Tab management. `tab` itself is reserved for `insert_tab`
+    // (M23); legacy never cycles buffers with plain Tab in the
+    // editor. Shift-Tab / BackTab stay bound to `prev_tab` because
+    // most terminals emit one of those encodings for Shift-Tab.
     m.bind("ctrl+left", Command::TabPrev);
     m.bind("ctrl+right", Command::TabNext);
-    // Placeholder until insert_tab (M23). Tab cycling is a convenient
-    // alias even after auto-indent lands.
-    m.bind("tab", Command::TabNext);
     m.bind("shift+tab", Command::TabPrev);
     m.bind("backtab", Command::TabPrev);
 

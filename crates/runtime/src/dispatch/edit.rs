@@ -392,9 +392,10 @@ mod tests {
             &term,
         );
 
-        // Switch to tab b.
+        // Switch to tab b (Ctrl-Right — plain Tab is reserved for
+        // insert_tab per M11 default keymap).
         dispatch_default(
-            key(KeyModifiers::NONE, KeyCode::Tab),
+            key(KeyModifiers::CONTROL, KeyCode::Right),
             &mut tabs,
             &mut edits,
             &store,

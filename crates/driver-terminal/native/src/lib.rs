@@ -347,7 +347,16 @@ pub struct RawModeGuard;
 impl RawModeGuard {
     pub fn acquire() -> io::Result<Self> {
         crossterm::terminal::enable_raw_mode()?;
-        crossterm::execute!(io::stdout(), crossterm::terminal::EnterAlternateScreen)?;
+        // `DisableLineWrap` is essential: without it, writing the
+        // rightmost column of the rightmost row makes the terminal
+        // auto-scroll, shifting every row up by one — the status-bar
+        // paint would then corrupt what's visible. The editor paints
+        // every cell explicitly, so it never needs auto-wrap.
+        crossterm::execute!(
+            io::stdout(),
+            crossterm::terminal::EnterAlternateScreen,
+            crossterm::terminal::DisableLineWrap,
+        )?;
         Ok(Self)
     }
 }
@@ -361,6 +370,7 @@ impl Drop for RawModeGuard {
         let _ = crossterm::execute!(
             io::stdout(),
             crossterm::cursor::Show,
+            crossterm::terminal::EnableLineWrap,
             crossterm::terminal::LeaveAlternateScreen,
         );
         let _ = crossterm::terminal::disable_raw_mode();

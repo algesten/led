@@ -99,13 +99,15 @@ mod tests {
     // ── Tab switching + quit (M1 behaviour, unchanged) ──────────────────
 
     #[test]
-    fn tab_cycles_active_forward() {
+    fn ctrl_right_cycles_active_forward() {
+        // Legacy binds `ctrl+right` / `ctrl+left` to next/prev tab.
+        // Plain `Tab` is reserved for `insert_tab` (M23).
         let mut tabs = tabs_with(&[("a", 1), ("b", 2), ("c", 3)], Some(1));
-        noop_dispatch(key(KeyModifiers::NONE, KeyCode::Tab), &mut tabs);
+        noop_dispatch(key(KeyModifiers::CONTROL, KeyCode::Right), &mut tabs);
         assert_eq!(tabs.active, Some(TabId(2)));
-        noop_dispatch(key(KeyModifiers::NONE, KeyCode::Tab), &mut tabs);
+        noop_dispatch(key(KeyModifiers::CONTROL, KeyCode::Right), &mut tabs);
         assert_eq!(tabs.active, Some(TabId(3)));
-        noop_dispatch(key(KeyModifiers::NONE, KeyCode::Tab), &mut tabs);
+        noop_dispatch(key(KeyModifiers::CONTROL, KeyCode::Right), &mut tabs);
         assert_eq!(tabs.active, Some(TabId(1)));
     }
 
@@ -122,9 +124,9 @@ mod tests {
     }
 
     #[test]
-    fn tab_on_empty_does_nothing() {
+    fn ctrl_right_on_empty_does_nothing() {
         let mut tabs = Tabs::default();
-        noop_dispatch(key(KeyModifiers::NONE, KeyCode::Tab), &mut tabs);
+        noop_dispatch(key(KeyModifiers::CONTROL, KeyCode::Right), &mut tabs);
         assert_eq!(tabs.active, None);
     }
 

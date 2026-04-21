@@ -384,14 +384,14 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
         }
 
         // ── Block until something happens ───────────────────────
-        // Drain any stale wake signals that arrived while we were
-        // working — they're already accounted for by the drains
-        // above. Then block on `recv_timeout` with a deadline equal
-        // to the nearest pending timer (only the info-alert expiry
-        // today). Drivers notify on every completion, terminal
-        // input notifies on every key; we wake instantly on either
-        // and sleep the rest of the time.
-        while wake.rx.try_recv().is_ok() {}
+        // Order matters: block FIRST, then collapse any additional
+        // signals that piled up while we were working on THIS tick
+        // or blocking. If we drained before blocking, a key event
+        // arriving in the narrow window between the terminal drain
+        // above and this drain would consume the wake signal
+        // without getting its work done; the next key would then
+        // wait the full timeout. That was the visible stutter when
+        // holding a key — key-repeat events race with the drain.
         let timeout = nearest_deadline(alerts)
             .and_then(|d| d.checked_duration_since(Instant::now()))
             .unwrap_or(Duration::from_secs(60));
@@ -400,6 +400,10 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
             Ok(()) | Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => break Ok(()),
         }
+        // Collapse any extra signals queued during the above —
+        // they'll all be handled by the next iteration's single
+        // drain of each driver's own channel.
+        while wake.rx.try_recv().is_ok() {}
     }
 }
 
