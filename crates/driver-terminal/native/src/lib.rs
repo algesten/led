@@ -141,7 +141,11 @@ pub fn paint(frame: &Frame, out: &mut impl Write) -> io::Result<()> {
         paint_side_panel(panel, area, out)?;
     }
     if let Some(x) = frame.layout.side_border_x {
-        paint_side_border(x, frame.layout.editor_area.rows, out)?;
+        // Border spans the editor-area rows + the tab-bar row so the
+        // sidebar's rightmost column is continuous from top to just
+        // above the status bar.
+        let rows = frame.layout.editor_area.rows + frame.layout.tab_bar.rows;
+        paint_side_border(x, rows, out)?;
     }
     paint_body(&frame.body, frame.layout.editor_area, out)?;
     paint_tab_bar(&frame.tab_bar, frame.layout.tab_bar, out)?;

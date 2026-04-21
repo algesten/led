@@ -46,27 +46,30 @@ pub struct Layout {
 }
 
 impl Layout {
-    /// Produce a layout for the given terminal dims. `side_width =
-    /// 25` + 1 border col is reserved when `browser_visible` and the
-    /// terminal is wide enough for a 25-col editor area next to it.
+    /// Produce a layout for the given terminal dims. The side panel
+    /// gets a 25-col budget total (24 cols of content + 1 col
+    /// border at the right edge), matching legacy goldens.
+    /// `browser_visible` + sufficient terminal width are required
+    /// for the panel to show.
     pub fn compute(dims: Dims, browser_visible: bool) -> Self {
-        const SIDE_WIDTH: u16 = 25;
+        const SIDE_TOTAL: u16 = 25; // content + border
+        const SIDE_CONTENT: u16 = SIDE_TOTAL - 1;
         const MIN_EDITOR_WIDTH: u16 = 25;
         let body_rows = dims.rows.saturating_sub(2);
 
         let side_visible = browser_visible
-            && dims.cols > SIDE_WIDTH
-            && dims.cols.saturating_sub(SIDE_WIDTH + 1) >= MIN_EDITOR_WIDTH;
+            && dims.cols > SIDE_TOTAL
+            && dims.cols.saturating_sub(SIDE_TOTAL) >= MIN_EDITOR_WIDTH;
         let (side_area, side_border_x, editor_x) = if side_visible {
             (
                 Some(Rect {
                     x: 0,
                     y: 0,
-                    cols: SIDE_WIDTH,
+                    cols: SIDE_CONTENT,
                     rows: body_rows,
                 }),
-                Some(SIDE_WIDTH),
-                SIDE_WIDTH + 1,
+                Some(SIDE_CONTENT),
+                SIDE_TOTAL,
             )
         } else {
             (None, None, 0)

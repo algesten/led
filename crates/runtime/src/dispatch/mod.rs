@@ -25,6 +25,7 @@
 //! `mod tests` in this file covers only the dispatch-level concerns
 //! (chord resolution, implicit-insert gating, quit chord, abort).
 
+mod browser;
 mod cursor;
 mod edit;
 mod kill;
@@ -43,6 +44,10 @@ mod testutil;
 pub use kill::apply_yank;
 
 // Aliases used by `run_command`.
+use browser::{
+    collapse_all, collapse_dir, expand_dir, move_selection, open_selected, open_selected_bg,
+    page_selection, select_first, select_last, toggle_focus, toggle_side_panel,
+};
 use cursor::{Move, move_cursor};
 use edit::{delete_back, delete_forward, insert_char, insert_newline};
 use kill::{kill_line, kill_region, request_yank};
@@ -55,6 +60,7 @@ use undo::{redo_active, undo_active};
 use led_driver_buffers_core::BufferStore;
 use led_driver_terminal_core::{KeyCode, KeyEvent, KeyModifiers, Terminal};
 use led_state_alerts::AlertState;
+use led_state_browser::{BrowserState, Focus};
 use led_state_buffer_edits::BufferEdits;
 use led_state_jumps::JumpListState;
 use led_state_kill_ring::KillRing;
@@ -84,6 +90,7 @@ pub struct Dispatcher<'a> {
     pub kill_ring: &'a mut KillRing,
     pub alerts: &'a mut AlertState,
     pub jumps: &'a mut JumpListState,
+    pub browser: &'a mut BrowserState,
     pub store: &'a BufferStore,
     pub terminal: &'a Terminal,
     pub keymap: &'a Keymap,
@@ -115,6 +122,7 @@ impl<'a> Dispatcher<'a> {
             self.kill_ring,
             self.alerts,
             self.jumps,
+            self.browser,
             self.store,
             self.terminal,
             self.keymap,
@@ -150,6 +158,7 @@ pub fn dispatch_key(
     kill_ring: &mut KillRing,
     alerts: &mut AlertState,
     jumps: &mut JumpListState,
+    browser: &mut BrowserState,
     store: &BufferStore,
     terminal: &Terminal,
     keymap: &Keymap,
@@ -166,11 +175,12 @@ pub fn dispatch_key(
         // runs its normal binding / implicit-insert behaviour.
     }
 
-    let resolved = resolve_command(k, keymap, chord);
+    let resolved = resolve_command(k, keymap, chord, browser.focus == Focus::Side);
     match resolved {
         Resolved::Command(cmd) => {
-            let outcome =
-                run_command(cmd, tabs, edits, kill_ring, alerts, jumps, store, terminal);
+            let outcome = run_command(
+                cmd, tabs, edits, kill_ring, alerts, jumps, browser, store, terminal,
+            );
             // Kill-ring coalescing: any non-KillLine command breaks
             // the flag, so the next KillLine starts a fresh entry.
             if !matches!(cmd, Command::KillLine) {
@@ -210,13 +220,25 @@ enum Resolved {
     Continue,
 }
 
-fn resolve_command(k: KeyEvent, keymap: &Keymap, chord: &mut ChordState) -> Resolved {
+fn resolve_command(
+    k: KeyEvent,
+    keymap: &Keymap,
+    chord: &mut ChordState,
+    browser_focused: bool,
+) -> Resolved {
     if let Some(prefix) = chord.pending.take() {
         if let Some(cmd) = keymap.lookup_chord(&prefix, &k) {
             return Resolved::Command(cmd);
         }
         // Silent cancel — matches legacy behaviour.
         return Resolved::Continue;
+    }
+    // Browser-context overlay wins over the global direct table when
+    // focus is on the sidebar (M11).
+    if browser_focused
+        && let Some(cmd) = keymap.lookup_browser(&k)
+    {
+        return Resolved::Command(cmd);
     }
     if let Some(cmd) = keymap.lookup_direct(&k) {
         return Resolved::Command(cmd);
@@ -225,7 +247,11 @@ fn resolve_command(k: KeyEvent, keymap: &Keymap, chord: &mut ChordState) -> Reso
         chord.pending = Some(k);
         return Resolved::PrefixStored;
     }
-    if let Some(cmd) = implicit_insert(&k) {
+    // Implicit insert only when the editor is focused — typing into
+    // the sidebar should be a no-op.
+    if !browser_focused
+        && let Some(cmd) = implicit_insert(&k)
+    {
         return Resolved::Command(cmd);
     }
     Resolved::Continue
@@ -255,9 +281,11 @@ fn run_command(
     kill_ring: &mut KillRing,
     alerts: &mut AlertState,
     jumps: &mut JumpListState,
+    browser: &mut BrowserState,
     store: &BufferStore,
     terminal: &Terminal,
 ) -> DispatchOutcome {
+    let browser_focused = browser.focus == Focus::Side;
     match cmd {
         Command::Quit => DispatchOutcome::Quit,
         Command::Abort => {
@@ -294,11 +322,19 @@ fn run_command(
             DispatchOutcome::Continue
         }
         Command::CursorUp => {
-            move_cursor(tabs, edits, store, terminal, Move::Up);
+            if browser_focused {
+                move_selection(browser, -1);
+            } else {
+                move_cursor(tabs, edits, store, terminal, Move::Up);
+            }
             DispatchOutcome::Continue
         }
         Command::CursorDown => {
-            move_cursor(tabs, edits, store, terminal, Move::Down);
+            if browser_focused {
+                move_selection(browser, 1);
+            } else {
+                move_cursor(tabs, edits, store, terminal, Move::Down);
+            }
             DispatchOutcome::Continue
         }
         Command::CursorLeft => {
@@ -318,19 +354,43 @@ fn run_command(
             DispatchOutcome::Continue
         }
         Command::CursorPageUp => {
-            move_cursor(tabs, edits, store, terminal, Move::PageUp);
+            let page = terminal
+                .dims
+                .map(|d| d.rows.saturating_sub(2) as usize)
+                .unwrap_or(1);
+            if browser_focused {
+                page_selection(browser, page, /* down= */ false);
+            } else {
+                move_cursor(tabs, edits, store, terminal, Move::PageUp);
+            }
             DispatchOutcome::Continue
         }
         Command::CursorPageDown => {
-            move_cursor(tabs, edits, store, terminal, Move::PageDown);
+            let page = terminal
+                .dims
+                .map(|d| d.rows.saturating_sub(2) as usize)
+                .unwrap_or(1);
+            if browser_focused {
+                page_selection(browser, page, /* down= */ true);
+            } else {
+                move_cursor(tabs, edits, store, terminal, Move::PageDown);
+            }
             DispatchOutcome::Continue
         }
         Command::CursorFileStart => {
-            move_cursor(tabs, edits, store, terminal, Move::FileStart);
+            if browser_focused {
+                select_first(browser);
+            } else {
+                move_cursor(tabs, edits, store, terminal, Move::FileStart);
+            }
             DispatchOutcome::Continue
         }
         Command::CursorFileEnd => {
-            move_cursor(tabs, edits, store, terminal, Move::FileEnd);
+            if browser_focused {
+                select_last(browser);
+            } else {
+                move_cursor(tabs, edits, store, terminal, Move::FileEnd);
+            }
             DispatchOutcome::Continue
         }
         Command::CursorWordLeft => {
@@ -393,6 +453,34 @@ fn run_command(
             match_bracket(tabs, edits, jumps);
             DispatchOutcome::Continue
         }
+        Command::ExpandDir => {
+            expand_dir(browser);
+            DispatchOutcome::Continue
+        }
+        Command::CollapseDir => {
+            collapse_dir(browser);
+            DispatchOutcome::Continue
+        }
+        Command::CollapseAll => {
+            collapse_all(browser);
+            DispatchOutcome::Continue
+        }
+        Command::OpenSelected => {
+            open_selected(browser, tabs);
+            DispatchOutcome::Continue
+        }
+        Command::OpenSelectedBg => {
+            open_selected_bg(browser, tabs);
+            DispatchOutcome::Continue
+        }
+        Command::ToggleSidePanel => {
+            toggle_side_panel(browser);
+            DispatchOutcome::Continue
+        }
+        Command::ToggleFocus => {
+            toggle_focus(browser);
+            DispatchOutcome::Continue
+        }
     }
 }
 
@@ -419,6 +507,7 @@ mod tests {
         let mut kill_ring = KillRing::default();
         let mut alerts = AlertState::default();
         let mut jumps = JumpListState::default();
+        let mut browser = BrowserState::default();
         let store = BufferStore::default();
         let term = Terminal::default();
         let keymap = default_keymap();
@@ -432,6 +521,7 @@ mod tests {
             &mut kill_ring,
             &mut alerts,
             &mut jumps,
+            &mut browser,
             &store,
             &term,
             &keymap,
@@ -448,6 +538,7 @@ mod tests {
             &mut kill_ring,
             &mut alerts,
             &mut jumps,
+            &mut browser,
             &store,
             &term,
             &keymap,
@@ -478,6 +569,7 @@ mod tests {
         let mut kill_ring = KillRing::default();
         let mut alerts = AlertState::default();
         let mut jumps = JumpListState::default();
+        let mut browser = BrowserState::default();
         // ctrl+x → pending.
         dispatch_key(
             key(KeyModifiers::CONTROL, KeyCode::Char('x')),
@@ -486,6 +578,7 @@ mod tests {
             &mut kill_ring,
             &mut alerts,
             &mut jumps,
+            &mut browser,
             &store,
             &term,
             &keymap,
@@ -500,6 +593,7 @@ mod tests {
             &mut kill_ring,
             &mut alerts,
             &mut jumps,
+            &mut browser,
             &store,
             &term,
             &keymap,
@@ -529,6 +623,7 @@ mod tests {
         let mut kill_ring = KillRing::default();
         let mut alerts = AlertState::default();
         let mut jumps = JumpListState::default();
+        let mut browser = BrowserState::default();
 
         let outcome = dispatch_key(
             key(KeyModifiers::CONTROL, KeyCode::Char('q')),
@@ -537,6 +632,7 @@ mod tests {
             &mut kill_ring,
             &mut alerts,
             &mut jumps,
+            &mut browser,
             &store,
             &term,
             &km,
@@ -552,6 +648,7 @@ mod tests {
             &mut kill_ring,
             &mut alerts,
             &mut jumps,
+            &mut browser,
             &store,
             &term,
             &km,
@@ -572,6 +669,7 @@ mod tests {
         let mut kill_ring = KillRing::default();
         let mut alerts = AlertState::default();
         let mut jumps = JumpListState::default();
+        let mut browser = BrowserState::default();
         dispatch_key(
             key(KeyModifiers::NONE, KeyCode::Char('z')),
             &mut tabs,
@@ -579,6 +677,7 @@ mod tests {
             &mut kill_ring,
             &mut alerts,
             &mut jumps,
+            &mut browser,
             &store,
             &term,
             &km,
@@ -600,6 +699,7 @@ mod tests {
         let mut kill_ring = KillRing::default();
         let mut alerts = AlertState::default();
         let mut jumps = JumpListState::default();
+        let mut browser = BrowserState::default();
         dispatch_key(
             key(KeyModifiers::CONTROL, KeyCode::Char('x')),
             &mut tabs,
@@ -607,6 +707,7 @@ mod tests {
             &mut kill_ring,
             &mut alerts,
             &mut jumps,
+            &mut browser,
             &store,
             &term,
             &km,

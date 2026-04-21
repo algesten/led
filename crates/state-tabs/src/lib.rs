@@ -47,6 +47,11 @@ pub struct Tab {
     /// `Abort` or consumed by `KillRegion`. Stays in raw buffer
     /// coordinates across edits — clamped on read, not rebased.
     pub mark: Option<Cursor>,
+    /// `true` while this tab is a file-browser preview — opened by
+    /// arrow-scanning the sidebar and flipped to a real tab on
+    /// `OpenSelected`. M11. At most one preview tab exists at a time;
+    /// dispatch enforces that invariant.
+    pub preview: bool,
 }
 
 /// Source: which tabs are open, which is active.

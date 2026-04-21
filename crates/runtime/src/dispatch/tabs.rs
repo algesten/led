@@ -84,6 +84,7 @@ mod tests {
     use led_driver_terminal_core::{Dims, KeyCode, KeyModifiers, Terminal};
     use led_state_alerts::AlertState;
     use led_state_jumps::JumpListState;
+    use led_state_browser::BrowserState;
     use led_state_buffer_edits::{BufferEdits, EditedBuffer};
     use led_state_kill_ring::KillRing;
     use led_state_tabs::{Cursor, TabId, Tabs};
@@ -184,6 +185,7 @@ mod tests {
         let mut kill_ring = KillRing::default();
         let mut alerts = AlertState::default();
         let mut jumps = JumpListState::default();
+        let mut browser = BrowserState::default();
         let mut chord = ChordState::default();
         let keymap = default_keymap();
 
@@ -195,6 +197,7 @@ mod tests {
             &mut kill_ring,
             &mut alerts,
             &mut jumps,
+            &mut browser,
             &store,
             &term,
             &keymap,
@@ -207,6 +210,7 @@ mod tests {
             &mut kill_ring,
             &mut alerts,
             &mut jumps,
+            &mut browser,
             &store,
             &term,
             &keymap,
@@ -225,6 +229,7 @@ mod tests {
             ..Default::default()
         };
         let mut jumps = JumpListState::default();
+        let mut browser = BrowserState::default();
         let mut chord = ChordState::default();
         let keymap = default_keymap();
 
@@ -235,6 +240,7 @@ mod tests {
             &mut kill_ring,
             &mut alerts,
             &mut jumps,
+            &mut browser,
             &store,
             &term,
             &keymap,
@@ -257,6 +263,7 @@ mod tests {
             ..Default::default()
         };
         let mut jumps = JumpListState::default();
+        let mut browser = BrowserState::default();
         let mut chord = ChordState::default();
         let keymap = default_keymap();
 
@@ -267,6 +274,7 @@ mod tests {
             &mut kill_ring,
             &mut alerts,
             &mut jumps,
+            &mut browser,
             &store,
             &term,
             &keymap,
@@ -285,6 +293,7 @@ mod tests {
             ..Default::default()
         };
         let mut jumps = JumpListState::default();
+        let mut browser = BrowserState::default();
         let mut chord = ChordState::default();
         let keymap = default_keymap();
 
@@ -295,6 +304,7 @@ mod tests {
             &mut kill_ring,
             &mut alerts,
             &mut jumps,
+            &mut browser,
             &store,
             &term,
             &keymap,
@@ -323,6 +333,7 @@ mod tests {
             ..Default::default()
         };
         let mut jumps = JumpListState::default();
+        let mut browser = BrowserState::default();
         let mut chord = ChordState::default();
         let keymap = default_keymap();
 
@@ -333,6 +344,7 @@ mod tests {
             &mut kill_ring,
             &mut alerts,
             &mut jumps,
+            &mut browser,
             &store,
             &term,
             &keymap,
@@ -359,6 +371,7 @@ mod tests {
         let mut kill_ring = KillRing::default();
         let mut alerts = AlertState::default();
         let mut jumps = JumpListState::default();
+        let mut browser = BrowserState::default();
         let mut chord = ChordState::default();
         let keymap = default_keymap();
 
@@ -369,6 +382,7 @@ mod tests {
             &mut kill_ring,
             &mut alerts,
             &mut jumps,
+            &mut browser,
             &store,
             &term,
             &keymap,
@@ -381,6 +395,7 @@ mod tests {
             &mut kill_ring,
             &mut alerts,
             &mut jumps,
+            &mut browser,
             &store,
             &term,
             &keymap,

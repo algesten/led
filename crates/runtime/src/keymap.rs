@@ -70,16 +70,31 @@ pub enum Command {
     JumpBack,
     JumpForward,
     MatchBracket,
+
+    // File browser (M11).
+    ExpandDir,
+    CollapseDir,
+    CollapseAll,
+    OpenSelected,
+    OpenSelectedBg,
+    ToggleSidePanel,
+    ToggleFocus,
 }
 
 /// Two-level key → command binding set. `direct` maps single keys to
 /// commands; `chords` maps a prefix key to a nested table mapping
 /// the second key to a command. Disjoint: a key in `direct` shadows
 /// any chord entry with the same prefix (legacy behaviour).
+///
+/// `browser_direct` is the context overlay active when focus is on
+/// the file-browser sidebar (M11). Lookup order in that state:
+/// `browser_direct` first, then `direct`. Browser context never
+/// has chords — matches legacy.
 #[derive(Debug, Clone, Default)]
 pub struct Keymap {
     direct: HashMap<KeyEvent, Command>,
     chords: HashMap<KeyEvent, HashMap<KeyEvent, Command>>,
+    browser_direct: HashMap<KeyEvent, Command>,
 }
 
 impl Keymap {
@@ -87,6 +102,7 @@ impl Keymap {
         Self {
             direct: HashMap::new(),
             chords: HashMap::new(),
+            browser_direct: HashMap::new(),
         }
     }
 
@@ -122,6 +138,24 @@ impl Keymap {
 
     pub fn lookup_direct(&self, key: &KeyEvent) -> Option<Command> {
         self.direct.get(key).copied()
+    }
+
+    /// Browser-context lookup. Returns `Some` only when the key is
+    /// explicitly bound in the browser overlay.
+    pub fn lookup_browser(&self, key: &KeyEvent) -> Option<Command> {
+        self.browser_direct.get(key).copied()
+    }
+
+    /// Bind a key in the browser-context overlay. Panics on invalid
+    /// key string; only called from `default_keymap` with static
+    /// strings.
+    pub fn bind_browser(&mut self, key: &str, cmd: Command) {
+        let ev = parse_key(key).unwrap_or_else(|e| panic!("invalid default key `{key}`: {e}"));
+        self.browser_direct.insert(ev, cmd);
+    }
+
+    pub fn insert_browser(&mut self, key: KeyEvent, cmd: Command) {
+        self.browser_direct.insert(key, cmd);
     }
 
     pub fn lookup_chord(&self, prefix: &KeyEvent, second: &KeyEvent) -> Option<Command> {
@@ -199,6 +233,21 @@ pub fn default_keymap() -> Keymap {
     m.bind("alt+f", Command::JumpForward);
     m.bind("alt+right", Command::JumpForward);
     m.bind("alt+]", Command::MatchBracket);
+
+    // File browser (M11).
+    m.bind("ctrl+b", Command::ToggleSidePanel);
+    m.bind("alt+tab", Command::ToggleFocus);
+    m.bind_browser("up", Command::CursorUp);
+    m.bind_browser("down", Command::CursorDown);
+    m.bind_browser("pageup", Command::CursorPageUp);
+    m.bind_browser("pagedown", Command::CursorPageDown);
+    m.bind_browser("ctrl+home", Command::CursorFileStart);
+    m.bind_browser("ctrl+end", Command::CursorFileEnd);
+    m.bind_browser("left", Command::CollapseDir);
+    m.bind_browser("right", Command::ExpandDir);
+    m.bind_browser("enter", Command::OpenSelected);
+    m.bind_browser("alt+enter", Command::OpenSelectedBg);
+    m.bind_browser("ctrl+q", Command::CollapseAll);
 
     // Tab management.
     m.bind("ctrl+left", Command::TabPrev);
@@ -423,6 +472,13 @@ pub fn parse_command(s: &str) -> Result<Command, String> {
         "jump_back" => Ok(Command::JumpBack),
         "jump_forward" => Ok(Command::JumpForward),
         "match_bracket" => Ok(Command::MatchBracket),
+        "expand_dir" => Ok(Command::ExpandDir),
+        "collapse_dir" => Ok(Command::CollapseDir),
+        "collapse_all" => Ok(Command::CollapseAll),
+        "open_selected" => Ok(Command::OpenSelected),
+        "open_selected_bg" => Ok(Command::OpenSelectedBg),
+        "toggle_side_panel" => Ok(Command::ToggleSidePanel),
+        "toggle_focus" => Ok(Command::ToggleFocus),
         other => Err(format!("unknown command `{other}`")),
     }
 }

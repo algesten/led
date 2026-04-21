@@ -256,6 +256,7 @@ pub fn run(
                 kill_ring,
                 alerts,
                 jumps,
+                browser,
                 store,
                 terminal,
                 keymap,
