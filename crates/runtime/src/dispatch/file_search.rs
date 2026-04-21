@@ -125,10 +125,30 @@ pub(super) fn run_overlay_command(
             }
         }
         Command::CursorLeft => {
-            input_for_selection(file_search.as_mut()?).move_left();
+            // On a Result row with replace_mode on, Left undoes the
+            // most recent per-hit replace (pops the stack). On input
+            // rows it's the normal cursor move.
+            let state = file_search.as_mut()?;
+            if matches!(state.selection, FileSearchSelection::Result(_))
+                && state.replace_mode
+            {
+                unreplace_selected(state, tabs, edits);
+            } else {
+                input_for_selection(state).move_left();
+            }
         }
         Command::CursorRight => {
-            input_for_selection(file_search.as_mut()?).move_right();
+            // On a Result row with replace_mode on, Right commits
+            // the single hit under the cursor and advances. On input
+            // rows it's the normal cursor move.
+            let state = file_search.as_mut()?;
+            if matches!(state.selection, FileSearchSelection::Result(_))
+                && state.replace_mode
+            {
+                replace_selected(state, tabs, edits);
+            } else {
+                input_for_selection(state).move_right();
+            }
         }
         Command::CursorLineStart => {
             input_for_selection(file_search.as_mut()?).to_line_start();
@@ -413,6 +433,190 @@ fn side_panel_rows(
 /// `fs_root` is the workspace root (dispatch's caller reads it off
 /// `FsTree`). Missing root → the driver walk is skipped, in-memory
 /// pass still runs.
+/// `CursorRight` on a selected hit — replace that one match.
+///
+/// For loaded buffers (file in `edits.buffers`), edit the rope in
+/// place, bump its version (dirty flag), push an entry onto
+/// `replace_stack` so Left-arrow can undo, remove the hit from
+/// `flat_hits` + its group, and advance selection. Missing buffer →
+/// on-disk path; that's a follow-up (stage 2).
+fn replace_selected(
+    state: &mut FileSearchState,
+    _tabs: &mut Tabs,
+    edits: &mut BufferEdits,
+) {
+    let FileSearchSelection::Result(idx) = state.selection else {
+        return;
+    };
+    let Some(hit) = state.flat_hits.get(idx).cloned() else {
+        return;
+    };
+    if state.query.text.is_empty() && state.replace.text.is_empty() {
+        return;
+    }
+    let Some(eb) = edits.buffers.get_mut(&hit.path) else {
+        // On-disk file — stage 2 will route this through the driver.
+        return;
+    };
+    // Char count of the matched substring, using the preview's
+    // byte offsets to avoid re-running the matcher against the
+    // (possibly edited) rope.
+    let original_char_len = hit
+        .preview
+        .get(hit.match_start..hit.match_end)
+        .map(|s| s.chars().count())
+        .unwrap_or(0);
+    if original_char_len == 0 {
+        return;
+    }
+    let replacement = state.replace.text.clone();
+    let replacement_char_len = replacement.chars().count();
+
+    // Map (line, col) → absolute char index in the rope. Skip the
+    // edit if the line no longer exists (buffer shrank under us).
+    let line0 = hit.line.saturating_sub(1);
+    if line0 >= eb.rope.len_lines() {
+        return;
+    }
+    let line_start = eb.rope.line_to_char(line0);
+    let match_char_start = line_start + hit.col.saturating_sub(1);
+    let match_char_end = match_char_start + original_char_len;
+    if match_char_end > eb.rope.len_chars() {
+        return;
+    }
+
+    // Rewrite the rope. `Arc<Rope>` clone is an O(1) CoW handle, so
+    // the other readers keep their snapshot. After mutation, bump
+    // the version so `dirty()` flips.
+    let mut new_rope = (*eb.rope).clone();
+    new_rope.remove(match_char_start..match_char_end);
+    if !replacement.is_empty() {
+        new_rope.insert(match_char_start, &replacement);
+    }
+    super::shared::bump(eb, new_rope);
+
+    // Record the undo entry BEFORE mutating selection / results.
+    state
+        .replace_stack
+        .push(led_state_file_search::ReplaceEntry {
+            flat_hit_idx: idx,
+            hit: hit.clone(),
+            replacement_text: replacement,
+            replacement_char_len,
+            original_char_len,
+            rope_char_start: match_char_start,
+            path: hit.path.clone(),
+        });
+
+    // Remove the hit from its group + flat_hits. Empty groups go
+    // too so the sidebar collapses naturally.
+    state.flat_hits.remove(idx);
+    if let Some(g) = state.results.iter_mut().find(|g| g.path == hit.path)
+        && let Some(pos) = g.hits.iter().position(|h| same_hit(h, &hit))
+    {
+        g.hits.remove(pos);
+    }
+    state.results.retain(|g| !g.hits.is_empty());
+
+    // Advance selection: stay at `idx` so the next hit in the list
+    // becomes selected. Clamp when we just removed the last one.
+    if state.flat_hits.is_empty() {
+        state.selection = if state.replace_mode {
+            FileSearchSelection::ReplaceInput
+        } else {
+            FileSearchSelection::SearchInput
+        };
+    } else {
+        let new_idx = idx.min(state.flat_hits.len() - 1);
+        state.selection = FileSearchSelection::Result(new_idx);
+    }
+}
+
+/// `CursorLeft` on a result row — undo the most recent per-hit
+/// replace. Only the loaded-buffer path lands here; on-disk undo
+/// rides the driver alongside its forward replace (stage 2).
+fn unreplace_selected(
+    state: &mut FileSearchState,
+    _tabs: &mut Tabs,
+    edits: &mut BufferEdits,
+) {
+    let Some(entry) = state.replace_stack.pop() else {
+        return;
+    };
+    let Some(eb) = edits.buffers.get_mut(&entry.path) else {
+        // Buffer was closed between the replace and the undo —
+        // dropping the entry silently matches legacy.
+        return;
+    };
+    let rope_len = eb.rope.len_chars();
+    let replacement_end = entry
+        .rope_char_start
+        .saturating_add(entry.replacement_char_len);
+    if replacement_end > rope_len {
+        // Rope shrank past the replacement — abandon the undo.
+        return;
+    }
+    // Splice the original text back in place of the replacement.
+    let original = entry
+        .hit
+        .preview
+        .get(entry.hit.match_start..entry.hit.match_end)
+        .unwrap_or("")
+        .to_string();
+    let mut new_rope = (*eb.rope).clone();
+    if entry.replacement_char_len > 0 {
+        new_rope.remove(entry.rope_char_start..replacement_end);
+    }
+    if !original.is_empty() {
+        new_rope.insert(entry.rope_char_start, &original);
+    }
+    super::shared::bump(eb, new_rope);
+
+    // Reinsert the hit at its original position in flat_hits.
+    let insert_at = entry.flat_hit_idx.min(state.flat_hits.len());
+    state.flat_hits.insert(insert_at, entry.hit.clone());
+
+    // Reinsert into the group — find the group for this path or
+    // create a fresh one. Hits within a group stay in flat order.
+    let path = entry.path.clone();
+    let group_idx = state.results.iter().position(|g| g.path == path);
+    match group_idx {
+        Some(i) => {
+            // Find the right spot inside the group by matching
+            // flat order around the reinsertion point.
+            let before_count = state.flat_hits[..insert_at]
+                .iter()
+                .filter(|h| h.path == path)
+                .count();
+            let group = &mut state.results[i];
+            let pos = before_count.min(group.hits.len());
+            group.hits.insert(pos, entry.hit.clone());
+        }
+        None => {
+            let relative = path
+                .as_path()
+                .strip_prefix(std::path::Path::new("/"))
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|_| path.as_path().display().to_string());
+            state.results.push(led_state_file_search::FileSearchGroup {
+                path,
+                relative,
+                hits: vec![entry.hit.clone()],
+            });
+        }
+    }
+
+    // Re-select the reinserted hit.
+    state.selection = FileSearchSelection::Result(insert_at);
+}
+
+/// Cheap structural equality for hits — the hit list might contain
+/// duplicates (same path + line) when regex captures overlap, so
+/// compare on the fields that uniquely identify one occurrence.
+fn same_hit(a: &FileSearchHit, b: &FileSearchHit) -> bool {
+    a.line == b.line && a.match_start == b.match_start && a.match_end == b.match_end
+}
+
 fn apply_replace_all(
     state: &led_state_file_search::FileSearchState,
     edits: &mut led_state_buffer_edits::BufferEdits,
@@ -897,5 +1101,177 @@ mod tests {
         assert_eq!(edits.buffers[&path].rope.to_string(), "alpha BAR\n");
         assert_eq!(edits.pending_replace_in_memory.len(), 1);
         assert!(edits.pending_replace_all.is_empty());
+    }
+
+    // ── Per-hit replace (Right/Left on a Result row) ─────────────
+
+    fn fs_state_with_hit_in(
+        path: &led_core::CanonPath,
+        line_text: &str,
+        line: usize,
+        col: usize,
+        match_bytes: (usize, usize),
+    ) -> FileSearchState {
+        use led_state_file_search::{FileSearchGroup, FileSearchHit};
+        let hit = FileSearchHit {
+            path: path.clone(),
+            line,
+            col,
+            preview: line_text.to_string(),
+            match_start: match_bytes.0,
+            match_end: match_bytes.1,
+        };
+        let mut state = FileSearchState::default();
+        state.query.set("foo");
+        state.replace.set("BAR");
+        state.replace_mode = true;
+        state.results = vec![FileSearchGroup {
+            path: path.clone(),
+            relative: "a.rs".into(),
+            hits: vec![hit.clone()],
+        }];
+        state.flat_hits = vec![hit];
+        state.selection = FileSearchSelection::Result(0);
+        state
+    }
+
+    #[test]
+    fn right_arrow_on_result_replaces_single_hit_and_advances() {
+        use led_state_buffer_edits::{BufferEdits, EditedBuffer};
+
+        let path = led_core::UserPath::new("/tmp/a.rs").canonicalize();
+        let mut edits = BufferEdits::default();
+        edits.buffers.insert(
+            path.clone(),
+            EditedBuffer::fresh(std::sync::Arc::new(ropey::Rope::from_str(
+                "alpha foo beta\n",
+            ))),
+        );
+
+        // "foo" on line 1 at col 7 (1-indexed), bytes 6..9 of preview.
+        let mut state = fs_state_with_hit_in(
+            &path,
+            "alpha foo beta",
+            1,
+            7,
+            (6, 9),
+        );
+        // Add a second (unrelated) hit so we can verify selection
+        // advances past the removed one.
+        let mut tabs = Tabs::default();
+        let second = led_state_file_search::FileSearchHit {
+            path: path.clone(),
+            line: 2,
+            col: 1,
+            preview: "foo at start".into(),
+            match_start: 0,
+            match_end: 3,
+        };
+        state.results[0].hits.push(second.clone());
+        state.flat_hits.push(second);
+
+        replace_selected(&mut state, &mut tabs, &mut edits);
+
+        // Rope: "foo" → "BAR" at position 6..9.
+        assert_eq!(edits.buffers[&path].rope.to_string(), "alpha BAR beta\n");
+        // Stack has one entry.
+        assert_eq!(state.replace_stack.len(), 1);
+        // Removed hit from flat_hits + its group.
+        assert_eq!(state.flat_hits.len(), 1);
+        // Selection stays at idx 0 (now pointing at the second hit).
+        assert_eq!(state.selection, FileSearchSelection::Result(0));
+    }
+
+    #[test]
+    fn left_arrow_on_result_undoes_last_replace_and_reinserts_hit() {
+        use led_state_buffer_edits::{BufferEdits, EditedBuffer};
+
+        let path = led_core::UserPath::new("/tmp/a.rs").canonicalize();
+        let mut edits = BufferEdits::default();
+        edits.buffers.insert(
+            path.clone(),
+            EditedBuffer::fresh(std::sync::Arc::new(ropey::Rope::from_str(
+                "alpha foo beta\n",
+            ))),
+        );
+        let mut state = fs_state_with_hit_in(
+            &path,
+            "alpha foo beta",
+            1,
+            7,
+            (6, 9),
+        );
+        let mut tabs = Tabs::default();
+
+        // Forward: replace.
+        replace_selected(&mut state, &mut tabs, &mut edits);
+        assert_eq!(edits.buffers[&path].rope.to_string(), "alpha BAR beta\n");
+        assert_eq!(state.flat_hits.len(), 0);
+
+        // Undo.
+        unreplace_selected(&mut state, &mut tabs, &mut edits);
+
+        // Rope restored.
+        assert_eq!(edits.buffers[&path].rope.to_string(), "alpha foo beta\n");
+        // Hit reinserted + selected again.
+        assert_eq!(state.flat_hits.len(), 1);
+        assert_eq!(state.selection, FileSearchSelection::Result(0));
+        assert!(state.replace_stack.is_empty());
+    }
+
+    #[test]
+    fn right_arrow_on_on_disk_hit_is_noop_for_stage_1() {
+        // Hit for a file NOT in edits.buffers → no change yet.
+        // Stage 2 will route this through the driver.
+        use led_state_buffer_edits::BufferEdits;
+
+        let path = led_core::UserPath::new("/tmp/unloaded.rs").canonicalize();
+        let mut edits = BufferEdits::default();
+        let mut state = fs_state_with_hit_in(
+            &path,
+            "alpha foo beta",
+            1,
+            7,
+            (6, 9),
+        );
+        let mut tabs = Tabs::default();
+
+        replace_selected(&mut state, &mut tabs, &mut edits);
+
+        assert!(state.replace_stack.is_empty());
+        assert_eq!(state.flat_hits.len(), 1);
+    }
+
+    #[test]
+    fn queue_search_clears_replace_stack() {
+        // Editing the query after doing per-hit replaces invalidates
+        // the stack — hit indices would reference a results list
+        // that's about to be wholesale-replaced by the driver.
+        use led_state_buffer_edits::{BufferEdits, EditedBuffer};
+
+        let path = led_core::UserPath::new("/tmp/a.rs").canonicalize();
+        let mut edits = BufferEdits::default();
+        edits.buffers.insert(
+            path.clone(),
+            EditedBuffer::fresh(std::sync::Arc::new(ropey::Rope::from_str(
+                "alpha foo beta\n",
+            ))),
+        );
+        let mut state = fs_state_with_hit_in(
+            &path,
+            "alpha foo beta",
+            1,
+            7,
+            (6, 9),
+        );
+        let mut tabs = Tabs::default();
+        replace_selected(&mut state, &mut tabs, &mut edits);
+        assert_eq!(state.replace_stack.len(), 1);
+
+        // Simulate a query edit.
+        state.query.insert_char('x');
+        state.queue_search();
+
+        assert!(state.replace_stack.is_empty());
     }
 }

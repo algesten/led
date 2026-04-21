@@ -9,7 +9,7 @@
 //! See `docs/spec/search.md` § "File-search overlay" for legacy
 //! semantics.
 
-use led_core::TextInput;
+use led_core::{CanonPath, TextInput};
 
 // Hit / group types are the driver ABI — re-exported so the overlay
 // state + renderer + dispatch use one shape end-to-end, matching the
@@ -67,6 +67,48 @@ pub struct FileSearchState {
     /// restores this after closing any preview tab the overlay
     /// created — same "snapshot on open" discipline find-file uses.
     pub previous_tab: Option<TabId>,
+
+    /// Undo stack for per-hit replacements. `CursorRight` on a
+    /// Result row (with `replace_mode` on) pushes an entry here
+    /// after rewriting the buffer; `CursorLeft` pops to revert.
+    /// Cleared on any edit to the query / toggles (any time the
+    /// result set changes meaning).
+    pub replace_stack: Vec<ReplaceEntry>,
+}
+
+/// One recorded per-hit replacement, carrying enough information
+/// to revert the change and reinsert the hit at its original
+/// position in the result lists.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplaceEntry {
+    /// Index into `flat_hits` where the hit used to live. Used
+    /// to reinsert on undo so the ordering matches what the
+    /// driver produced.
+    pub flat_hit_idx: usize,
+    /// The hit that was consumed. Carries its own path /
+    /// position / preview + match span — we reinsert this verbatim
+    /// on undo. The `preview` on revert is already stale by one
+    /// char-count difference (original vs replacement width);
+    /// callers that care refresh via a new search.
+    pub hit: FileSearchHit,
+    /// The text the replace wrote in place of the original match —
+    /// used on undo to splice the original back over this span.
+    pub replacement_text: String,
+    /// Character count of `replacement_text` — used on undo to
+    /// compute the end of the replaced range in the current rope.
+    pub replacement_char_len: usize,
+    /// Character count of the ORIGINAL match (the text the
+    /// replacement clobbered). Recovered from `hit.preview` via
+    /// `match_start`/`match_end` byte offsets.
+    pub original_char_len: usize,
+    /// Absolute index in the rope where the replacement was
+    /// applied, in characters. Cached so undo doesn't have to
+    /// re-derive from (line, col) against a potentially edited
+    /// rope.
+    pub rope_char_start: usize,
+    /// Canonical path of the affected file. Redundant with
+    /// `hit.path` but kept for ergonomics.
+    pub path: CanonPath,
 }
 
 /// One queued search request: the current query + toggle state at
@@ -90,6 +132,10 @@ impl FileSearchState {
     /// command for the empty pattern — legacy's discipline, mostly
     /// so the driver doesn't try to match every byte in the tree.
     pub fn queue_search(&mut self) {
+        // Any search-input edit invalidates the per-hit replace
+        // stack — the indices point into a result set that's about
+        // to be replaced wholesale (driver response) or cleared.
+        self.replace_stack.clear();
         if self.query.text.is_empty() {
             self.results.clear();
             self.flat_hits.clear();
