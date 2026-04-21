@@ -429,18 +429,37 @@ fn assert_against_golden(actual: &str, golden_path: &Path, kind: &str) {
         std::fs::write(golden_path, actual).expect("write golden");
         return;
     }
-    let expected = std::fs::read_to_string(golden_path).unwrap_or_else(|e| {
+    let expected_raw = std::fs::read_to_string(golden_path).unwrap_or_else(|e| {
         panic!(
             "{kind} golden missing at {} ({e}). Run with UPDATE_GOLDENS=1 to create.",
             golden_path.display()
         )
     });
-    if actual != expected {
+    // vt100's `screen().contents()` already strips trailing whitespace
+    // per row; committed goldens sometimes have it and sometimes don't.
+    // Normalize both sides so the diff tests what the rendering
+    // actually produces, not incidental whitespace.
+    let expected = strip_trailing_ws(&expected_raw);
+    let actual_n = strip_trailing_ws(actual);
+    if actual_n != expected {
         panic!(
-            "{kind} mismatch at {}\n--- expected ---\n{expected}\n--- actual ---\n{actual}\n--- end ---",
+            "{kind} mismatch at {}\n--- expected ---\n{expected}\n--- actual ---\n{actual_n}\n--- end ---",
             golden_path.display()
         );
     }
+}
+
+fn strip_trailing_ws(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for line in s.split_inclusive('\n') {
+        let (body, nl) = match line.strip_suffix('\n') {
+            Some(b) => (b, "\n"),
+            None => (line, ""),
+        };
+        out.push_str(body.trim_end());
+        out.push_str(nl);
+    }
+    out
 }
 
 /// Replace the test tempdir prefix with `<TMPDIR>` so traces are stable

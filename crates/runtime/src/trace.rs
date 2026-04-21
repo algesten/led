@@ -37,6 +37,10 @@ pub trait Trace: Send + Sync {
     fn clipboard_write_done(&self, ok: bool);
     fn fs_list_start(&self, path: &CanonPath);
     fn fs_list_done(&self, path: &CanonPath, ok: bool);
+    /// Emitted when the runtime truncates the undo history after a
+    /// save (saved state becomes the new baseline). Legacy traces
+    /// this immediately after `FileSave`.
+    fn workspace_clear_undo(&self, path: &CanonPath);
     fn render_tick(&self);
 }
 
@@ -78,6 +82,9 @@ impl SharedTrace {
     pub fn render_tick(&self) {
         self.0.render_tick();
     }
+    pub fn workspace_clear_undo(&self, path: &CanonPath) {
+        self.0.workspace_clear_undo(path);
+    }
 }
 
 /// Fan-out of incoming events into pipe-formatted lines on a buffered
@@ -87,81 +94,59 @@ struct FileTrace {
     root: Option<PathBuf>,
 }
 
+// ── Dispatched-intent trace format ─────────────────────────────────────
+//
+// The goldens' `dispatched.snap` captures one line per intent the
+// runtime fires at a driver — not an event log. Format:
+//
+//   `<CommandName>\t<key>=<value>[ <key>=<value>]*`
+//
+// with tab between name and args. The set of CommandNames matches
+// legacy (`FsListDir`, `FileOpen`, `FileSave`, `ClipboardRead`,
+// `ClipboardWrite`, `GitScan`, `WorkspaceClearUndo`,
+// `WorkspaceFlushUndo`, ...). Input-side events (`key_in`,
+// `resize`) and driver-completion events (`file_load_done`,
+// `render_tick`, etc.) are NOT in this log — they're not intents.
+
 impl Trace for FileTrace {
-    fn key_in(&self, ev: &KeyEvent) {
-        self.write_line(&format!("key_in          | key={}", format_key(ev)));
-    }
-    fn resize(&self, dims: Dims) {
-        self.write_line(&format!(
-            "resize          | cols={} rows={}",
-            dims.cols, dims.rows
-        ));
-    }
+    fn key_in(&self, _: &KeyEvent) {}
+    fn resize(&self, _: Dims) {}
     fn file_load_start(&self, path: &CanonPath) {
+        // Legacy named this `FileOpen`; `create_if_missing=true`
+        // matches its default docstore behaviour.
         self.write_line(&format!(
-            "file_load_start | path={}",
+            "FileOpen\tpath={} create_if_missing=true",
             self.format_path(path)
         ));
     }
-    fn file_load_done(&self, path: &CanonPath, result: &Result<Arc<Rope>, String>) {
-        let tail = match result {
-            Ok(rope) => format!("ok=true bytes={}", rope.len_bytes()),
-            Err(msg) => format!("ok=false err={:?}", msg),
-        };
-        self.write_line(&format!(
-            "file_load_done  | path={} {}",
-            self.format_path(path),
-            tail
-        ));
+    fn file_load_done(&self, _: &CanonPath, _: &Result<Arc<Rope>, String>) {}
+    fn file_save_start(&self, path: &CanonPath, _version: u64) {
+        self.write_line(&format!("FileSave\tpath={}", self.format_path(path)));
     }
-    fn file_save_start(&self, path: &CanonPath, version: u64) {
-        self.write_line(&format!(
-            "file_save_start | path={} version={}",
-            self.format_path(path),
-            version
-        ));
-    }
-    fn file_save_done(&self, path: &CanonPath, version: u64, result: &Result<(), String>) {
-        let tail = match result {
-            Ok(()) => "ok=true".to_string(),
-            Err(msg) => format!("ok=false err={:?}", msg),
-        };
-        self.write_line(&format!(
-            "file_save_done  | path={} version={} {}",
-            self.format_path(path),
-            version,
-            tail
-        ));
-    }
+    fn file_save_done(&self, _: &CanonPath, _: u64, _: &Result<(), String>) {}
     fn clipboard_read_start(&self) {
-        self.write_line("clipboard_read_start");
+        self.write_line("ClipboardRead");
     }
-    fn clipboard_read_done(&self, ok: bool, empty: bool) {
-        self.write_line(&format!(
-            "clipboard_read_done  | ok={ok} empty={empty}"
-        ));
-    }
+    fn clipboard_read_done(&self, _: bool, _: bool) {}
     fn clipboard_write_start(&self, bytes: usize) {
-        self.write_line(&format!("clipboard_write_start | bytes={bytes}"));
+        // Legacy emitted a `preview=` of the first 14 chars too; we
+        // don't currently have the text here (the hook's signature
+        // only carries `bytes`). Emit `len=` alone — callers that
+        // care about preview can extend later.
+        self.write_line(&format!("ClipboardWrite\tlen={bytes}"));
     }
-    fn clipboard_write_done(&self, ok: bool) {
-        self.write_line(&format!("clipboard_write_done  | ok={ok}"));
-    }
+    fn clipboard_write_done(&self, _: bool) {}
     fn fs_list_start(&self, path: &CanonPath) {
+        self.write_line(&format!("FsListDir\tpath={}", self.format_path(path)));
+    }
+    fn fs_list_done(&self, _: &CanonPath, _: bool) {}
+    fn workspace_clear_undo(&self, path: &CanonPath) {
         self.write_line(&format!(
-            "FsListDir       | path={}",
+            "WorkspaceClearUndo\tpath={}",
             self.format_path(path)
         ));
     }
-    fn fs_list_done(&self, path: &CanonPath, ok: bool) {
-        self.write_line(&format!(
-            "fs_list_done    | path={} ok={ok}",
-            self.format_path(path),
-        ));
-    }
-    fn render_tick(&self) {
-        self.write_line("render_tick");
-    }
+    fn render_tick(&self) {}
 }
 
 impl FileTrace {
@@ -197,6 +182,7 @@ impl Trace for NoopTrace {
     fn clipboard_write_done(&self, _ok: bool) {}
     fn fs_list_start(&self, _: &CanonPath) {}
     fn fs_list_done(&self, _: &CanonPath, _: bool) {}
+    fn workspace_clear_undo(&self, _: &CanonPath) {}
     fn render_tick(&self) {}
 }
 

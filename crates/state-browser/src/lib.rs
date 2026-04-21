@@ -81,6 +81,31 @@ impl Default for BrowserUi {
     }
 }
 
+/// Expand every ancestor directory of `path` up to (but not
+/// including) `fs.root`. Matches legacy's `reveal_active_buffer`
+/// side of ancestor-expansion — so opening a file in a nested
+/// directory auto-expands the tree down to it.
+///
+/// No-op if `fs.root` isn't set, if `path` isn't inside the root,
+/// or if the path has no ancestors below root.
+pub fn reveal_ancestors(ui: &mut BrowserUi, fs: &FsTree, path: &CanonPath) {
+    let Some(root) = fs.root.as_ref() else {
+        return;
+    };
+    let mut cur = path.as_path().parent();
+    while let Some(parent) = cur {
+        if parent == root.as_path() {
+            break;
+        }
+        if !parent.starts_with(root.as_path()) {
+            break;
+        }
+        let canon = led_core::UserPath::new(parent).canonicalize();
+        ui.expanded_dirs.insert(canon);
+        cur = parent.parent();
+    }
+}
+
 /// Walk the tree and refresh `ui.entries`. Pure derivation; call
 /// whenever `fs.dir_contents` or `ui.expanded_dirs` changes. Also
 /// clamps `ui.selected` if the new tree is shorter.

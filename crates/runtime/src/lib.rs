@@ -174,9 +174,9 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
     let keymap = world.keymap;
     let stdout = &mut *world.stdout;
     // `world.trace` is wired into every driver at spawn time; the
-    // main loop itself no longer emits trace events — paint moved
-    // inside the output driver.
-    let _trace = world.trace;
+    // main loop also emits a `WorkspaceClearUndo` on each save,
+    // so it holds a direct handle.
+    let trace = world.trace;
     let mut last_frame: Option<Frame> = None;
     let mut chord = ChordState::default();
 
@@ -332,6 +332,10 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
         );
 
         // ── Execute ─────────────────────────────────────────────
+        // Directory listings go first so goldens' dispatched.snap
+        // order matches legacy (FsListDir before FileOpen).
+        drivers.fs_list.execute(list_actions.iter());
+
         drivers.file.execute(load_actions.iter(), store);
 
         // Sync-clear pending_saves for the paths we're about to
@@ -343,7 +347,16 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
         }
         drivers.file_write.execute(save_actions.iter());
 
-        drivers.fs_list.execute(list_actions.iter());
+        // Saved state becomes the new baseline: truncate each saved
+        // buffer's undo history and emit the paired
+        // `WorkspaceClearUndo` trace. Matches legacy.
+        for action in &save_actions {
+            let led_driver_buffers_core::SaveAction::Save { path, .. } = action;
+            if let Some(eb) = edits.buffers.get_mut(path) {
+                eb.history.clear();
+            }
+            trace.workspace_clear_undo(path);
+        }
 
         // Clipboard actions: a Read when a yank is pending (no read
         // already in flight), a Write when a kill queued clipboard

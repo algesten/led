@@ -60,6 +60,16 @@ impl History {
         !self.future.is_empty()
     }
 
+    /// Drop every recorded group (past, future, current). Called by
+    /// the runtime after a successful save — saved state becomes
+    /// the new baseline and the prior undo chain no longer matches
+    /// it. Matches legacy's `WorkspaceClearUndo` semantic.
+    pub fn clear(&mut self) {
+        self.past.clear();
+        self.future.clear();
+        self.current = None;
+    }
+
     /// Iterate every applied op in order (past + current). Used by
     /// [`rebase_char_index`] and by tests that inspect the log.
     pub fn applied_ops(&self) -> impl Iterator<Item = &EditOp> {

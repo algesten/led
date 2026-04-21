@@ -10,7 +10,7 @@ use clap::Parser;
 use led_core::UserPath;
 use led_driver_terminal_native::RawModeGuard;
 use led_runtime::{load_keymap, spawn_drivers, Atoms, SharedTrace, TabIdGen, Wake, World};
-use led_state_browser::FsTree;
+use led_state_browser::{reveal_ancestors, FsTree};
 use led_state_tabs::Tab;
 
 #[derive(Parser, Debug)]
@@ -88,13 +88,18 @@ fn main() -> io::Result<()> {
         ..Default::default()
     };
 
-    // Seed tabs from CLI args.
+    // Seed tabs from CLI args. Each open path auto-expands its
+    // ancestor directories in the browser so the tree reveals the
+    // file — matches legacy's `reveal_active_buffer` side of
+    // open-time expansion.
     let mut ids = TabIdGen::default();
     for f in &cli.files {
         let id = ids.next();
+        let canon = UserPath::new(f).canonicalize();
+        reveal_ancestors(&mut atoms.browser, &atoms.fs, &canon);
         atoms.tabs.open.push_back(Tab {
             id,
-            path: UserPath::new(f).canonicalize(),
+            path: canon,
             ..Default::default()
         });
         if atoms.tabs.active.is_none() {
