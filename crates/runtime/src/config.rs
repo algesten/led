@@ -431,8 +431,9 @@ mod tests {
 "#,
         );
         let loaded = load_keymap(Some(tmp.path())).unwrap();
-        // Three unknown commands → three warnings.
-        assert_eq!(loaded.warnings.len(), 3);
+        // Two unknown commands → two warnings. `open_file_search`
+        // became a known command in M14 stage 1.
+        assert_eq!(loaded.warnings.len(), 2);
         // Known one applied.
         assert_eq!(
             loaded

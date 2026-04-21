@@ -509,6 +509,7 @@ dependencies = [
  "led-state-browser",
  "led-state-buffer-edits",
  "led-state-clipboard",
+ "led-state-file-search",
  "led-state-find-file",
  "led-state-isearch",
  "led-state-jumps",
@@ -549,6 +550,13 @@ name = "led-state-clipboard"
 version = "0.0.0"
 dependencies = [
  "led-state-tabs",
+]
+
+[[package]]
+name = "led-state-file-search"
+version = "0.0.0"
+dependencies = [
+ "led-core",
 ]
 
 [[package]]

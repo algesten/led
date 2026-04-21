@@ -1,0 +1,16 @@
+[package]
+name = "led-state-file-search"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Project-wide ripgrep-style search overlay (Ctrl-f).
+#
+# Lives in the left sidebar when active: toggle row (case / regex /
+# replace), query input, optional replace input, results tree.
+# Shares the side panel slot with the file browser; activation flips
+# focus to Side and swaps the side_panel_model source from browser
+# tree to file-search view.
+
+[dependencies]
+led-core = { workspace = true }

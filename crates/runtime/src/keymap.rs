@@ -94,6 +94,12 @@ pub enum Command {
     // starts a fresh isearch and advances to the next match when
     // already active — see `docs/spec/search.md`.
     InBufferSearch,
+
+    // Project-wide file search (M14). `OpenFileSearch` opens the
+    // sidebar overlay; `CloseFileSearch` exits. Toggles + replace
+    // flow land in stage 4+.
+    OpenFileSearch,
+    CloseFileSearch,
 }
 
 /// Two-level key → command binding set. `direct` maps single keys to
@@ -337,6 +343,9 @@ pub fn default_keymap() -> Keymap {
     // In-buffer isearch (M13). Same binding starts and advances.
     m.bind("ctrl+s", Command::InBufferSearch);
 
+    // Project-wide file search (M14). Ctrl+f toggles the overlay.
+    m.bind("ctrl+f", Command::OpenFileSearch);
+
     m
 }
 
@@ -531,6 +540,8 @@ pub fn parse_command(s: &str) -> Result<Command, String> {
         "save_as" => Ok(Command::SaveAs),
         "find_file_tab_complete" => Ok(Command::FindFileTabComplete),
         "in_buffer_search" => Ok(Command::InBufferSearch),
+        "open_file_search" => Ok(Command::OpenFileSearch),
+        "close_file_search" => Ok(Command::CloseFileSearch),
         other => Err(format!("unknown command `{other}`")),
     }
 }

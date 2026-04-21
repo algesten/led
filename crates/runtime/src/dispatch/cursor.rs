@@ -212,6 +212,7 @@ pub(super) fn adjust_scroll(s: Scroll, c: Cursor, body_rows: usize) -> Scroll {
 
 #[cfg(test)]
 mod tests {
+    use led_state_file_search::FileSearchState;
     use led_state_find_file::FindFileState;
     use led_state_isearch::IsearchState;
     use led_driver_buffers_core::BufferStore;
@@ -672,6 +673,7 @@ mod tests {
         let fs = FsTree::default();
         let mut find_file: Option<FindFileState> = None;
         let mut isearch: Option<IsearchState> = None;
+        let mut file_search: Option<FileSearchState> = None;
 
         let mut press = |k: KeyEvent,
                      tabs: &mut Tabs,
@@ -685,7 +687,7 @@ mod tests {
                      fs: &FsTree| {
             super::super::dispatch_key(
                 k, tabs, edits, kill_ring, clip, alerts, jumps, browser, fs, &store, &term,
-        &mut find_file, &mut isearch, &km,
+        &mut find_file, &mut isearch, &mut file_search, &km,
                 chord,);
         };
 

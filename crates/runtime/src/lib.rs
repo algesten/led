@@ -40,6 +40,7 @@ use led_state_alerts::AlertState;
 use led_state_browser::{BrowserUi, FsTree, rebuild_entries};
 use led_state_buffer_edits::{BufferEdits, EditedBuffer};
 use led_state_clipboard::ClipboardState;
+use led_state_file_search::FileSearchState;
 use led_state_find_file::FindFileState;
 use led_state_isearch::IsearchState;
 use led_state_jumps::JumpListState;
@@ -153,6 +154,9 @@ pub struct Atoms {
     /// `Some` while in-buffer isearch is active. See
     /// [`led_state_isearch::IsearchState`].
     pub isearch: Option<IsearchState>,
+    /// `Some` while the project-wide file-search overlay is active.
+    /// See [`led_state_file_search::FileSearchState`].
+    pub file_search: Option<FileSearchState>,
 }
 
 /// Run-time seam: the single thing the main loop sees. Owns nothing
@@ -183,6 +187,7 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
         terminal,
         find_file,
         isearch,
+        file_search,
     } = &mut *world.atoms;
     let drivers = world.drivers;
     let wake = world.wake;
@@ -344,6 +349,7 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
                 terminal,
                 find_file,
                 isearch,
+                file_search,
                 keymap,
                 chord: &mut chord,
             };

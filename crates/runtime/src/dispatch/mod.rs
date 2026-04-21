@@ -28,6 +28,7 @@
 mod browser;
 mod cursor;
 mod edit;
+mod file_search;
 mod find_file;
 mod isearch;
 mod kill;
@@ -66,6 +67,7 @@ use led_state_alerts::AlertState;
 use led_state_browser::{BrowserUi, Focus, FsTree};
 use led_state_buffer_edits::BufferEdits;
 use led_state_clipboard::ClipboardState;
+use led_state_file_search::FileSearchState;
 use led_state_find_file::FindFileState;
 use led_state_isearch::IsearchState;
 use led_state_jumps::JumpListState;
@@ -103,6 +105,7 @@ pub struct Dispatcher<'a> {
     pub terminal: &'a Terminal,
     pub find_file: &'a mut Option<FindFileState>,
     pub isearch: &'a mut Option<IsearchState>,
+    pub file_search: &'a mut Option<FileSearchState>,
     pub keymap: &'a Keymap,
     pub chord: &'a mut ChordState,
 }
@@ -139,6 +142,7 @@ impl<'a> Dispatcher<'a> {
             self.terminal,
             self.find_file,
             self.isearch,
+            self.file_search,
             self.keymap,
             self.chord,
         )
@@ -179,6 +183,7 @@ pub fn dispatch_key(
     terminal: &Terminal,
     find_file: &mut Option<FindFileState>,
     isearch: &mut Option<IsearchState>,
+    file_search: &mut Option<FileSearchState>,
     keymap: &Keymap,
     chord: &mut ChordState,
 ) -> DispatchOutcome {
@@ -204,7 +209,7 @@ pub fn dispatch_key(
         Resolved::Command(cmd) => {
             let outcome = run_command(
                 cmd, tabs, edits, kill_ring, clip, alerts, jumps, browser, fs, store, terminal,
-                find_file, isearch,
+                find_file, isearch, file_search,
             );
             // Kill-ring coalescing: any non-KillLine command breaks
             // the flag, so the next KillLine starts a fresh entry.
@@ -323,6 +328,7 @@ fn run_command(
     terminal: &Terminal,
     find_file: &mut Option<FindFileState>,
     isearch: &mut Option<IsearchState>,
+    file_search: &mut Option<FileSearchState>,
 ) -> DispatchOutcome {
     // Find-file overlay intercept. When active, the overlay owns
     // input editing + its own command set; most commands route into
@@ -556,6 +562,14 @@ fn run_command(
             isearch::in_buffer_search(isearch, tabs, edits);
             DispatchOutcome::Continue
         }
+        Command::OpenFileSearch => {
+            file_search::activate(file_search, browser);
+            DispatchOutcome::Continue
+        }
+        Command::CloseFileSearch => {
+            file_search::deactivate(file_search, browser);
+            DispatchOutcome::Continue
+        }
     }
 }
 
@@ -593,6 +607,7 @@ mod tests {
         // First half of the chord: ctrl+x → pending, Continue.
         let mut find_file: Option<FindFileState> = None;
         let mut isearch: Option<IsearchState> = None;
+        let mut file_search: Option<FileSearchState> = None;
         let outcome = dispatch_key(
             key(KeyModifiers::CONTROL, KeyCode::Char('x')),
             &mut tabs,
@@ -607,6 +622,7 @@ mod tests {
             &term,
         &mut find_file,
             &mut isearch,
+            &mut file_search,
             &keymap,
             &mut chord,);
         assert_eq!(outcome, DispatchOutcome::Continue);
@@ -615,6 +631,7 @@ mod tests {
         // Second half: ctrl+c → chord fires Quit.
         let mut find_file: Option<FindFileState> = None;
         let mut isearch: Option<IsearchState> = None;
+        let mut file_search: Option<FileSearchState> = None;
         let outcome = dispatch_key(
             key(KeyModifiers::CONTROL, KeyCode::Char('c')),
             &mut tabs,
@@ -629,6 +646,7 @@ mod tests {
             &term,
         &mut find_file,
             &mut isearch,
+            &mut file_search,
             &keymap,
             &mut chord,);
         assert_eq!(outcome, DispatchOutcome::Quit);
@@ -662,6 +680,7 @@ mod tests {
         // ctrl+x → pending.
         let mut find_file: Option<FindFileState> = None;
         let mut isearch: Option<IsearchState> = None;
+        let mut file_search: Option<FileSearchState> = None;
         dispatch_key(
             key(KeyModifiers::CONTROL, KeyCode::Char('x')),
             &mut tabs,
@@ -676,12 +695,14 @@ mod tests {
             &term,
         &mut find_file,
             &mut isearch,
+            &mut file_search,
             &keymap,
             &mut chord,);
         assert!(chord.pending.is_some());
         // Second key `z` isn't bound under ctrl+x → silent cancel.
         let mut find_file: Option<FindFileState> = None;
         let mut isearch: Option<IsearchState> = None;
+        let mut file_search: Option<FileSearchState> = None;
         let outcome = dispatch_key(
             key(KeyModifiers::NONE, KeyCode::Char('z')),
             &mut tabs,
@@ -696,6 +717,7 @@ mod tests {
             &term,
         &mut find_file,
             &mut isearch,
+            &mut file_search,
             &keymap,
             &mut chord,);
         assert_eq!(outcome, DispatchOutcome::Continue);
@@ -728,6 +750,7 @@ mod tests {
 
         let mut find_file: Option<FindFileState> = None;
         let mut isearch: Option<IsearchState> = None;
+        let mut file_search: Option<FileSearchState> = None;
         let outcome = dispatch_key(
             key(KeyModifiers::CONTROL, KeyCode::Char('q')),
             &mut tabs,
@@ -742,6 +765,7 @@ mod tests {
             &term,
         &mut find_file,
             &mut isearch,
+            &mut file_search,
             &km,
             &mut chord,);
         assert_eq!(outcome, DispatchOutcome::Quit);
@@ -749,6 +773,7 @@ mod tests {
         // Ctrl-C not bound here → Continue (not Quit).
         let mut find_file: Option<FindFileState> = None;
         let mut isearch: Option<IsearchState> = None;
+        let mut file_search: Option<FileSearchState> = None;
         let outcome = dispatch_key(
             key(KeyModifiers::CONTROL, KeyCode::Char('c')),
             &mut tabs,
@@ -763,6 +788,7 @@ mod tests {
             &term,
         &mut find_file,
             &mut isearch,
+            &mut file_search,
             &km,
             &mut chord,);
         assert_eq!(outcome, DispatchOutcome::Continue);
@@ -785,6 +811,7 @@ mod tests {
         let fs = FsTree::default();
         let mut find_file: Option<FindFileState> = None;
         let mut isearch: Option<IsearchState> = None;
+        let mut file_search: Option<FileSearchState> = None;
         dispatch_key(
             key(KeyModifiers::NONE, KeyCode::Char('z')),
             &mut tabs,
@@ -799,6 +826,7 @@ mod tests {
             &term,
         &mut find_file,
             &mut isearch,
+            &mut file_search,
             &km,
             &mut chord,);
         assert_eq!(rope_of(&edits, "file.rs").to_string(), "z");
@@ -822,6 +850,7 @@ mod tests {
         let fs = FsTree::default();
         let mut find_file: Option<FindFileState> = None;
         let mut isearch: Option<IsearchState> = None;
+        let mut file_search: Option<FileSearchState> = None;
         dispatch_key(
             key(KeyModifiers::CONTROL, KeyCode::Char('x')),
             &mut tabs,
@@ -836,6 +865,7 @@ mod tests {
             &term,
         &mut find_file,
             &mut isearch,
+            &mut file_search,
             &km,
             &mut chord,);
         assert_eq!(rope_of(&edits, "file.rs").to_string(), "");
