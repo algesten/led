@@ -289,7 +289,9 @@ fn handle_enter_open(find_file: &mut Option<FindFileState>, tabs: &mut Tabs) {
         let full = entry.full.clone();
         let name = entry.name.clone();
         if is_dir {
-            descend(find_file, &name);
+            if let Some(st) = find_file.as_mut() {
+                descend(st, &name);
+            }
         } else {
             open_or_focus_tab(tabs, &full, /* promote= */ true);
             deactivate(find_file, tabs);
@@ -313,7 +315,9 @@ fn handle_enter_open(find_file: &mut Option<FindFileState>, tabs: &mut Tabs) {
         let full = entry.full.clone();
         let name = entry.name.clone();
         if is_dir {
-            descend(find_file, &name);
+            if let Some(st) = find_file.as_mut() {
+                descend(st, &name);
+            }
         } else {
             open_or_focus_tab(tabs, &full, /* promote= */ true);
             deactivate(find_file, tabs);
@@ -333,16 +337,21 @@ fn handle_enter_open(find_file: &mut Option<FindFileState>, tabs: &mut Tabs) {
 /// `dir_prefix(base_input) + dir_name` (the display name already
 /// carries the trailing `/`) and re-request completions for the
 /// new directory.
-fn descend(find_file: &mut Option<FindFileState>, dir_name: &str) {
-    let Some(state) = find_file.as_mut() else {
-        return;
-    };
+///
+/// `show_side` stays `true` — the user is mid-navigation, so the
+/// completions panel remains visible rather than flipping back to
+/// the browser tree during the brief window between the descent and
+/// the new listing arriving. `selected` clears (fresh dir, no row to
+/// highlight yet); the stale completions from the parent directory
+/// linger for one tick at most before the refreshed listing lands.
+fn descend(state: &mut FindFileState, dir_name: &str) {
     let base = led_state_find_file::dir_prefix(&state.base_input).to_string();
     state.input = base;
     state.input.push_str(dir_name);
     state.cursor = state.input.len();
     state.base_input = state.input.clone();
-    state.reset_selection();
+    state.selected = None;
+    state.show_side = true;
     state.queue_request();
 }
 
@@ -430,23 +439,24 @@ fn tab_complete(s: &mut FindFileState) {
         1 => {
             let only = &s.completions[0];
             let is_dir = only.is_dir;
-            // Single match: complete. If it's a directory the
-            // display name already carries `/` so "append name"
-            // descends.
-            let base = dir_prefix(&s.base_input).to_string();
-            let mut new_input = base;
-            new_input.push_str(&only.name);
-            let changed = new_input != s.input;
-            s.input = new_input;
-            s.cursor = s.input.len();
-            if changed {
-                s.reset_selection();
-                // Only re-fire a completion request when we've
-                // descended into a directory. A file completion
-                // just fills the input; pressing Enter from here
-                // is what actually opens it.
-                if is_dir {
-                    s.queue_request();
+            let name = only.name.clone();
+            if is_dir {
+                // Shared descent path: keeps `show_side=true` across
+                // the re-request so the panel doesn't flash back to
+                // the browser tree mid-transition.
+                descend(s, &name);
+            } else {
+                // Single-file match: complete fully. No re-request,
+                // no show_side change — pressing Enter from here
+                // opens the file.
+                let base = dir_prefix(&s.base_input).to_string();
+                let mut new_input = base;
+                new_input.push_str(&name);
+                let changed = new_input != s.input;
+                s.input = new_input;
+                s.cursor = s.input.len();
+                if changed {
+                    s.reset_selection();
                 }
             }
         }
@@ -893,6 +903,45 @@ mod tests {
         assert!(ff.is_none());
         assert_eq!(tabs.open.len(), 1);
         assert_eq!(tabs.active, Some(prev_id));
+    }
+
+    #[test]
+    fn enter_on_selected_dir_keeps_side_panel_visible() {
+        // Regression: after arrow-selecting a dir and pressing
+        // Enter, descent used to call reset_selection() which
+        // cleared show_side=false. The next render flipped the
+        // sidebar back to the browser tree until the new listing
+        // arrived — visible flicker. Descent should keep show_side
+        // true so the panel stays in completions mode across the
+        // transition.
+        let mut ff = overlay("/x/", 3);
+        {
+            let s = ff.as_mut().unwrap();
+            s.completions = vec![entry("src", true)];
+            s.selected = Some(0);
+            s.show_side = true;
+        }
+        let mut tabs = Tabs::default();
+        run_overlay_command(Command::InsertNewline, &mut ff, &mut tabs, &mut led_state_buffer_edits::BufferEdits::default());
+        let s = ff.as_ref().expect("stays open after dir descent");
+        assert_eq!(s.input, "/x/src/");
+        assert!(s.show_side, "panel stays visible during descent");
+        assert!(s.selected.is_none(), "selection clears (fresh dir)");
+    }
+
+    #[test]
+    fn tab_on_single_dir_match_keeps_side_panel_visible() {
+        // Same invariant via the Tab-descent path.
+        let mut ff = overlay("/x/sr", 5);
+        {
+            let s = ff.as_mut().unwrap();
+            s.completions = vec![entry("src", true)];
+            s.show_side = true;
+        }
+        run_overlay_command(Command::FindFileTabComplete, &mut ff, &mut Tabs::default(), &mut led_state_buffer_edits::BufferEdits::default());
+        let s = ff.as_ref().unwrap();
+        assert_eq!(s.input, "/x/src/");
+        assert!(s.show_side, "Tab-descent keeps the panel visible");
     }
 
     #[test]
