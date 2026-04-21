@@ -14,6 +14,7 @@
 //! underneath, different wiring + different native workers.
 
 pub mod config;
+pub mod theme;
 pub mod dispatch;
 pub mod keymap;
 pub mod query;
@@ -78,6 +79,7 @@ impl Default for Wake {
 const INFO_TTL: Duration = Duration::from_secs(2);
 
 pub use config::{load_keymap, ConfigError};
+pub use theme::{load_theme, LoadedTheme, ThemeError};
 pub use dispatch::{dispatch_key, DispatchOutcome, Dispatcher};
 pub use keymap::{default_keymap, parse_command, parse_key, ChordState, Command, Keymap};
 pub use query::{
@@ -171,6 +173,7 @@ pub struct World<'a, W: Write> {
     pub atoms: &'a mut Atoms,
     pub drivers: &'a Drivers,
     pub keymap: &'a Keymap,
+    pub theme: &'a led_driver_terminal_core::Theme,
     pub wake: &'a Wake,
     pub trace: &'a SharedTrace,
     pub stdout: &'a mut W,

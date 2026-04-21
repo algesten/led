@@ -9,7 +9,9 @@ use std::path::PathBuf;
 use clap::Parser;
 use led_core::UserPath;
 use led_driver_terminal_native::RawModeGuard;
-use led_runtime::{load_keymap, spawn_drivers, Atoms, SharedTrace, TabIdGen, Wake, World};
+use led_runtime::{
+    load_keymap, load_theme, spawn_drivers, Atoms, SharedTrace, TabIdGen, Wake, World,
+};
 use led_state_browser::{reveal_ancestors, FsTree};
 use led_state_tabs::Tab;
 
@@ -27,6 +29,12 @@ struct Cli {
     /// `~/.config/led/`. Missing file is not an error.
     #[arg(long)]
     config_dir: Option<PathBuf>,
+
+    /// Path to a `theme.toml`. Overrides the default resolution
+    /// (`<config_dir>/theme.toml` → `~/.config/led/theme.toml` →
+    /// built-in). Missing file at an explicit path is an error.
+    #[arg(long)]
+    theme: Option<PathBuf>,
 
     // The goldens runner always passes these; parse-and-ignore so it
     // doesn't trip on unknown-flag errors. Each wires up in its own
@@ -65,6 +73,20 @@ fn main() -> io::Result<()> {
         eprintln!("led: config warning: {w}");
     }
     let keymap = loaded.keymap;
+
+    // Theme resolves the same way: fatal on I/O or malformed TOML,
+    // non-fatal warnings for per-region schema problems.
+    let loaded_theme = match load_theme(cli.config_dir.as_deref(), cli.theme.as_deref()) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("led: theme error: {e}");
+            std::process::exit(2);
+        }
+    };
+    for w in &loaded_theme.warnings {
+        eprintln!("led: theme warning: {w}");
+    }
+    let theme = loaded_theme.theme;
 
     let trace = match cli.golden_trace {
         Some(path) => {
@@ -121,6 +143,7 @@ fn main() -> io::Result<()> {
         atoms: &mut atoms,
         drivers: &drivers,
         keymap: &keymap,
+        theme: &theme,
         wake: &wake,
         trace: &trace,
         stdout: &mut stdout,

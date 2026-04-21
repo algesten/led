@@ -14,6 +14,9 @@ use std::collections::VecDeque;
 use std::sync::mpsc::Receiver;
 use std::sync::Arc;
 
+mod theme;
+pub use theme::{Attrs, Color, Style, Theme};
+
 // ── Mirror types — the ABI boundary ────────────────────────────────────
 
 /// Viewport size in columns × rows.
