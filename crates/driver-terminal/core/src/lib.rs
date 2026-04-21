@@ -269,6 +269,9 @@ pub struct Frame {
 pub trait Trace: Send + Sync {
     fn key_in(&self, ev: &KeyEvent);
     fn resize(&self, dims: Dims);
+    /// Called by [`TerminalOutputDriver::execute`] before a paint.
+    /// (Post-course-correct #3: the trace emission moved inside the
+    /// driver.)
     fn render_tick(&self);
 }
 

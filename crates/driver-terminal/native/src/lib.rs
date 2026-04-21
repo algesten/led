@@ -128,6 +128,32 @@ fn translate_mods(m: CtKeyModifiers) -> KeyModifiers {
     out
 }
 
+// ── Output driver ──────────────────────────────────────────────────────
+
+/// Sync counterpart of [`TerminalInputDriver`] — the "write side" of
+/// the terminal. Takes a [`Frame`] and paints it; emits a trace
+/// event around the call so goldens + any future capture harness
+/// sees it. Course-correct #3: paint used to be a free function
+/// with no driver wrapper and the render-tick trace was emitted by
+/// the runtime itself. Now it lives here like every other driver.
+pub struct TerminalOutputDriver {
+    trace: Arc<dyn Trace>,
+}
+
+impl TerminalOutputDriver {
+    pub fn new(trace: Arc<dyn Trace>) -> Self {
+        Self { trace }
+    }
+
+    /// Paint a frame to `out`. The `execute` name matches the shape
+    /// every other driver uses: a sync entry that accepts intent and
+    /// performs the I/O.
+    pub fn execute<W: Write>(&self, frame: &Frame, out: &mut W) -> io::Result<()> {
+        self.trace.render_tick();
+        paint(frame, out)
+    }
+}
+
 // ── Painter ────────────────────────────────────────────────────────────
 
 /// Paint an entire frame. No diffing: at 120×40 that's ~4800 cells per

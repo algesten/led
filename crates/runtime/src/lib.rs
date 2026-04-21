@@ -31,7 +31,7 @@ use led_driver_clipboard_core::{
 use led_driver_clipboard_native::ClipboardNative;
 use led_core::Notifier;
 use led_driver_terminal_core::{Dims, Frame, KeyEvent, TermEvent, Terminal, TerminalInputDriver};
-use led_driver_terminal_native::{paint, TerminalInputNative};
+use led_driver_terminal_native::{TerminalInputNative, TerminalOutputDriver};
 use led_driver_fs_list_core::FsListDriver;
 use led_driver_fs_list_native::FsListNative;
 use led_state_alerts::AlertState;
@@ -97,6 +97,7 @@ pub struct Drivers {
     pub file: FileReadDriver,
     pub file_write: FileWriteDriver,
     pub input: TerminalInputDriver,
+    pub output: TerminalOutputDriver,
     pub clipboard: ClipboardDriver,
     pub fs_list: FsListDriver,
 
@@ -169,7 +170,10 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
     let wake = world.wake;
     let keymap = world.keymap;
     let stdout = &mut *world.stdout;
-    let trace = world.trace;
+    // `world.trace` is wired into every driver at spawn time; the
+    // main loop itself no longer emits trace events — paint moved
+    // inside the output driver.
+    let _trace = world.trace;
     let mut last_frame: Option<Frame> = None;
     let mut chord = ChordState::default();
 
@@ -356,8 +360,7 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
         // ── Render ──────────────────────────────────────────────
         if frame != last_frame {
             if let Some(f) = &frame {
-                trace.render_tick();
-                paint(f, stdout)?;
+                drivers.output.execute(f, stdout)?;
             }
             last_frame = frame;
         }
@@ -402,12 +405,16 @@ pub fn spawn_drivers(trace: SharedTrace, wake: &Wake) -> io::Result<Drivers> {
         trace.clone().as_fs_list_trace(),
         wake.notifier.clone(),
     );
-    let (input, input_native) =
-        led_driver_terminal_native::spawn(trace.as_terminal_trace(), wake.notifier.clone())?;
+    let (input, input_native) = led_driver_terminal_native::spawn(
+        trace.clone().as_terminal_trace(),
+        wake.notifier.clone(),
+    )?;
+    let output = TerminalOutputDriver::new(trace.as_terminal_trace());
     Ok(Drivers {
         file,
         file_write,
         input,
+        output,
         clipboard,
         fs_list,
         _file_native: file_native,
