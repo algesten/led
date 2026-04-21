@@ -1,11 +1,9 @@
 FsListDir	path=<TMPDIR>
 FileOpen	path=<TMPDIR>/a.txt create_if_missing=true
-GitScan	root=<TMPDIR>
 FileSearch	query="n" root=<TMPDIR> case=false regex=false
 FileSearch	query="ne" root=<TMPDIR> case=false regex=false
 FileSearch	query="nee" root=<TMPDIR> case=false regex=false
 FileSearch	query="need" root=<TMPDIR> case=false regex=false
 FileSearch	query="needl" root=<TMPDIR> case=false regex=false
 FileSearch	query="needle" root=<TMPDIR> case=false regex=false
-WorkspaceFlushUndo	path=<TMPDIR>/a.txt chain=<CHAIN>
-WorkspaceCheckSync	path=<TMPDIR>/a.txt
+FileSearchReplace	query="needle" replacement="pin" root=<TMPDIR> case=false regex=false

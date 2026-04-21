@@ -106,17 +106,23 @@ pub(super) fn run_overlay_command(
         Command::InsertChar(c) => {
             let state = file_search.as_mut()?;
             input_for_selection(state).insert_char(c);
-            state.queue_search();
+            if targets_query(state) {
+                state.queue_search();
+            }
         }
         Command::DeleteBack => {
             let state = file_search.as_mut()?;
             input_for_selection(state).delete_back();
-            state.queue_search();
+            if targets_query(state) {
+                state.queue_search();
+            }
         }
         Command::DeleteForward => {
             let state = file_search.as_mut()?;
             input_for_selection(state).delete_forward();
-            state.queue_search();
+            if targets_query(state) {
+                state.queue_search();
+            }
         }
         Command::CursorLeft => {
             input_for_selection(file_search.as_mut()?).move_left();
@@ -133,7 +139,9 @@ pub(super) fn run_overlay_command(
         Command::KillLine => {
             let state = file_search.as_mut()?;
             input_for_selection(state).kill_to_end();
-            state.queue_search();
+            if targets_query(state) {
+                state.queue_search();
+            }
         }
         Command::ToggleSearchCase => {
             let state = file_search.as_mut()?;
@@ -206,6 +214,14 @@ fn input_for_selection(
         // back to the search input (user intent: refine query).
         _ => &mut state.query,
     }
+}
+
+/// `true` when the active input is the search query (as opposed
+/// to the replacement field). Used to gate `queue_search` so
+/// typing into the replace input doesn't re-fire ripgrep with the
+/// same unchanged query text.
+fn targets_query(state: &FileSearchState) -> bool {
+    !matches!(state.selection, FileSearchSelection::ReplaceInput)
 }
 
 /// `Enter` behaviour. Two paths:
