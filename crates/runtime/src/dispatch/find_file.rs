@@ -101,6 +101,7 @@ pub(super) fn run_overlay_command(
             s.cursor = s.input.len();
         }
         Command::KillLine => kill_line(find_file.as_mut()?),
+        Command::FindFileTabComplete => tab_complete(find_file.as_mut()?),
         Command::InsertNewline => handle_enter(find_file, tabs),
         Command::Abort => deactivate(find_file),
         // Not-yet-implemented overlay commands. Absorbed so the key
@@ -112,8 +113,7 @@ pub(super) fn run_overlay_command(
         | Command::CursorFileStart
         | Command::CursorFileEnd
         | Command::CursorWordLeft
-        | Command::CursorWordRight
-        | Command::FindFileTabComplete => {}
+        | Command::CursorWordRight => {}
         // Quit passes through so the user can still ctrl+x ctrl+c
         // out of the editor.
         Command::Quit => return None,
@@ -232,6 +232,97 @@ fn kill_line(s: &mut FindFileState) {
     s.input.truncate(s.cursor);
     s.reset_selection();
     s.queue_request();
+}
+
+/// Tab-completion / LCP, matching legacy `tab_complete`:
+///
+/// - **Trailing slash + completions**: show the side panel without
+///   auto-selecting (user is exploring; next keystroke keeps
+///   filtering).
+/// - **Single match, directory, input doesn't yet end `/`**: append
+///   the name (which already has `/`), re-request — descends.
+/// - **Single match, any other case**: complete fully to the match.
+/// - **Multiple matches**: set `show_side`; extend input to the
+///   case-insensitive longest common prefix across the matches'
+///   leaf names (trailing `/` stripped for comparison).
+/// - **No matches**: no-op.
+fn tab_complete(s: &mut FindFileState) {
+    use led_state_find_file::dir_prefix;
+
+    // Trailing slash + completions = explore mode.
+    if s.input.ends_with('/') && !s.completions.is_empty() {
+        s.show_side = true;
+        s.selected = None;
+        return;
+    }
+    match s.completions.len() {
+        0 => {}
+        1 => {
+            let only = &s.completions[0];
+            // Single match, directory, input not yet slash-terminated
+            // → descend (append `/` via the name which already has
+            // it).
+            let base = dir_prefix(&s.base_input).to_string();
+            let mut new_input = base;
+            new_input.push_str(&only.name);
+            let changed = new_input != s.input;
+            s.input = new_input;
+            s.cursor = s.input.len();
+            if changed {
+                s.reset_selection();
+                s.queue_request();
+            }
+        }
+        _ => {
+            // Multi-match: extend to case-insensitive LCP.
+            let names: Vec<&str> = s
+                .completions
+                .iter()
+                .map(|e| e.name.trim_end_matches('/'))
+                .collect();
+            let lcp = longest_common_prefix_ci(&names);
+            let base = dir_prefix(&s.base_input).to_string();
+            let mut new_input = base;
+            new_input.push_str(lcp);
+            s.show_side = true;
+            if new_input != s.input {
+                s.input = new_input;
+                s.cursor = s.input.len();
+                s.reset_selection();
+                s.queue_request();
+                // reset_selection cleared show_side — re-arm it so
+                // the panel stays open after the input grew.
+                s.show_side = true;
+            }
+        }
+    }
+}
+
+/// Case-insensitive longest common prefix across all `names`. Returns
+/// an empty `&str` slice when inputs disagree on the first char.
+/// Slice is borrowed from `names[0]` so no allocation is needed.
+fn longest_common_prefix_ci<'a>(names: &[&'a str]) -> &'a str {
+    let Some((first, rest)) = names.split_first() else {
+        return "";
+    };
+    // Walk char-by-char; stop when any other name diverges on the
+    // lowercased char. The slice index tracks bytes of `first`.
+    let mut prefix_bytes = 0;
+    for (byte_idx, c) in first.char_indices() {
+        let c_lower = c.to_ascii_lowercase();
+        let all_match = rest.iter().all(|name| {
+            name[byte_idx..]
+                .chars()
+                .next()
+                .is_some_and(|nc| nc.to_ascii_lowercase() == c_lower)
+        });
+        if all_match {
+            prefix_bytes = byte_idx + c.len_utf8();
+        } else {
+            break;
+        }
+    }
+    &first[..prefix_bytes]
 }
 
 fn prev_char_boundary(s: &str, byte_pos: usize) -> usize {
@@ -483,6 +574,85 @@ mod tests {
         run_overlay_command(Command::InsertNewline, &mut ff, &mut tabs);
         assert!(ff.is_some());
         assert!(tabs.open.is_empty());
+    }
+
+    // ── Tab completion / LCP ───────────────────────────────────────
+
+    fn entry(name: &str, is_dir: bool) -> led_state_find_file::FindFileEntry {
+        let display = if is_dir && !name.ends_with('/') {
+            format!("{name}/")
+        } else {
+            name.to_string()
+        };
+        led_state_find_file::FindFileEntry {
+            name: display,
+            full: canon(&format!("/tmp/{name}")),
+            is_dir,
+        }
+    }
+
+    #[test]
+    fn tab_lcp_empty_completions_is_noop() {
+        let mut ff = overlay("/tmp/xyz", 8);
+        let before = ff.as_ref().unwrap().input.clone();
+        run_overlay_command(Command::FindFileTabComplete, &mut ff, &mut Tabs::default());
+        assert_eq!(ff.as_ref().unwrap().input, before);
+    }
+
+    #[test]
+    fn tab_lcp_single_file_match_completes_fully() {
+        let mut ff = overlay("/tmp/mai", 8);
+        ff.as_mut().unwrap().completions = vec![entry("main.rs", false)];
+        run_overlay_command(Command::FindFileTabComplete, &mut ff, &mut Tabs::default());
+        assert_eq!(ff.as_ref().unwrap().input, "/tmp/main.rs");
+    }
+
+    #[test]
+    fn tab_lcp_single_dir_match_descends_with_trailing_slash() {
+        let mut ff = overlay("/tmp/sr", 7);
+        ff.as_mut().unwrap().completions = vec![entry("src", true)];
+        run_overlay_command(Command::FindFileTabComplete, &mut ff, &mut Tabs::default());
+        // `name` for dirs already carries the trailing `/`.
+        assert_eq!(ff.as_ref().unwrap().input, "/tmp/src/");
+        // Descent re-arms the request queue.
+        assert_eq!(
+            ff.as_ref().unwrap().pending_find_file_list.len(),
+            1,
+            "descent should queue a fresh listing",
+        );
+    }
+
+    #[test]
+    fn tab_lcp_multi_match_extends_to_longest_common_prefix_and_shows_panel() {
+        let mut ff = overlay("/tmp/m", 6);
+        ff.as_mut().unwrap().completions = vec![
+            entry("main.rs", false),
+            entry("mailbox.rs", false),
+            entry("make.rs", false),
+        ];
+        run_overlay_command(Command::FindFileTabComplete, &mut ff, &mut Tabs::default());
+        // LCP of "main.rs", "mailbox.rs", "make.rs" is "ma".
+        assert_eq!(ff.as_ref().unwrap().input, "/tmp/ma");
+        assert!(ff.as_ref().unwrap().show_side);
+    }
+
+    #[test]
+    fn tab_lcp_trailing_slash_just_shows_panel() {
+        let mut ff = overlay("/tmp/", 5);
+        ff.as_mut().unwrap().completions = vec![entry("a.rs", false), entry("b.rs", false)];
+        run_overlay_command(Command::FindFileTabComplete, &mut ff, &mut Tabs::default());
+        assert!(ff.as_ref().unwrap().show_side);
+        assert_eq!(ff.as_ref().unwrap().input, "/tmp/");
+        assert!(ff.as_ref().unwrap().selected.is_none());
+    }
+
+    #[test]
+    fn lcp_case_insensitive_returns_prefix_from_first_input() {
+        let names = ["Main.rs", "mailbox.rs", "MAKE.rs"];
+        let p = longest_common_prefix_ci(&names);
+        // LCP in case-insensitive terms is 2 chars. Returns the slice
+        // from `names[0]`, preserving its original case.
+        assert_eq!(p, "Ma");
     }
 
     #[test]
