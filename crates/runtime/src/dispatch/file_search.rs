@@ -482,7 +482,7 @@ fn side_panel_rows(
 /// pending hit when one's available (wraps to the first pending).
 fn replace_selected(
     state: &mut FileSearchState,
-    _tabs: &mut Tabs,
+    tabs: &mut Tabs,
     edits: &mut BufferEdits,
 ) {
     let FileSearchSelection::Result(idx) = state.selection else {
@@ -583,6 +583,20 @@ fn replace_selected(
         rope_char_start,
         path: hit.path.clone(),
     });
+
+    // Promote the preview tab for this file to a non-preview tab.
+    // Without this, arrowing to a hit in a different file next
+    // would reassign this tab's path (preview tabs are single-
+    // slot, reused on next preview), orphaning our dirty changes
+    // with no visible tab. Promotion pins the tab so the `●`
+    // marker stays visible and saving / closing still works.
+    if let Some(preview_tab) = tabs
+        .open
+        .iter_mut()
+        .find(|t| t.preview && t.path == hit.path)
+    {
+        preview_tab.preview = false;
+    }
 
     advance_to_next_pending(state);
 }
@@ -1551,6 +1565,66 @@ mod tests {
         // reapplies the last-applied forward edit that's now in
         // future" across buffers — the one with the largest seq.
         assert_eq!(edits.buffers[&b].rope.to_string(), "BAR in b\n");
+    }
+
+    #[test]
+    fn right_arrow_promotes_preview_tab_for_replaced_file() {
+        // Arrow-down into a hit creates a preview tab. Without
+        // promotion, arrowing to a hit in another file would
+        // reassign this tab's path and orphan our dirty buffer.
+        // Right-arrow must promote the preview so the tab sticks.
+        use led_state_buffer_edits::{BufferEdits, EditedBuffer};
+        use led_state_file_search::{FileSearchGroup, FileSearchHit};
+        use led_state_tabs::{Tab, TabId};
+
+        let path = led_core::UserPath::new("/tmp/a.rs").canonicalize();
+        let mut edits = BufferEdits::default();
+        edits.buffers.insert(
+            path.clone(),
+            EditedBuffer::fresh(std::sync::Arc::new(ropey::Rope::from_str(
+                "foo\n",
+            ))),
+        );
+
+        let mut tabs = Tabs {
+            open: imbl::vector![Tab {
+                id: TabId(1),
+                path: path.clone(),
+                preview: true,
+                ..Default::default()
+            }],
+            active: Some(TabId(1)),
+        };
+
+        let hit = FileSearchHit {
+            path: path.clone(),
+            line: 1,
+            col: 1,
+            preview: "foo".into(),
+            match_start: 0,
+            match_end: 3,
+        };
+        let mut state = FileSearchState::default();
+        state.query.set("foo");
+        state.replace.set("BAR");
+        state.replace_mode = true;
+        state.results = vec![FileSearchGroup {
+            path: path.clone(),
+            relative: "a.rs".into(),
+            hits: vec![hit.clone()],
+        }];
+        state.flat_hits = vec![hit];
+        state.hit_replacements = vec![None];
+        state.selection = FileSearchSelection::Result(0);
+
+        replace_selected(&mut state, &mut tabs, &mut edits);
+
+        // Tab stays in place, now non-preview.
+        assert_eq!(tabs.open.len(), 1);
+        assert!(!tabs.open[0].preview);
+        assert_eq!(tabs.open[0].path, path);
+        // And it's dirty as expected.
+        assert!(edits.buffers[&path].dirty());
     }
 
     #[test]
