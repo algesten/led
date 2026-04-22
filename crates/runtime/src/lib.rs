@@ -485,6 +485,7 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
                 find_file,
                 isearch,
                 file_search,
+                path_chains,
                 keymap,
                 chord: &mut chord,
             };

@@ -106,6 +106,16 @@ pub struct Dispatcher<'a> {
     pub find_file: &'a mut Option<FindFileState>,
     pub isearch: &'a mut Option<IsearchState>,
     pub file_search: &'a mut Option<FileSearchState>,
+    /// Symlink-resolution chains keyed by canonical path. Dispatch
+    /// populates this whenever a tab opens from a user-typed path
+    /// (find-file commit, browser entry). Load-completion
+    /// language detection consults it so symlinked dotfiles
+    /// (`~/.profile` → `dotfiles/profile`) still detect via the
+    /// user-typed basename.
+    pub path_chains: &'a mut std::collections::HashMap<
+        led_core::CanonPath,
+        led_core::PathChain,
+    >,
     pub keymap: &'a Keymap,
     pub chord: &'a mut ChordState,
 }
@@ -143,6 +153,7 @@ impl<'a> Dispatcher<'a> {
             self.find_file,
             self.isearch,
             self.file_search,
+            self.path_chains,
             self.keymap,
             self.chord,
         )
@@ -184,6 +195,7 @@ pub fn dispatch_key(
     find_file: &mut Option<FindFileState>,
     isearch: &mut Option<IsearchState>,
     file_search: &mut Option<FileSearchState>,
+    path_chains: &mut std::collections::HashMap<led_core::CanonPath, led_core::PathChain>,
     keymap: &Keymap,
     chord: &mut ChordState,
 ) -> DispatchOutcome {
@@ -210,7 +222,7 @@ pub fn dispatch_key(
         Resolved::Command(cmd) => {
             let outcome = run_command(
                 cmd, tabs, edits, kill_ring, clip, alerts, jumps, browser, fs, store, terminal,
-                find_file, isearch, file_search,
+                find_file, isearch, file_search, path_chains,
             );
             // Kill-ring coalescing: any non-KillLine command breaks
             // the flag, so the next KillLine starts a fresh entry.
@@ -345,12 +357,15 @@ fn run_command(
     find_file: &mut Option<FindFileState>,
     isearch: &mut Option<IsearchState>,
     file_search: &mut Option<FileSearchState>,
+    path_chains: &mut std::collections::HashMap<led_core::CanonPath, led_core::PathChain>,
 ) -> DispatchOutcome {
     // Find-file overlay intercept. When active, the overlay owns
     // input editing + its own command set; most commands route into
     // `state.input` instead of the buffer. `Quit` passes through
     // so `ctrl+x ctrl+c` still exits.
-    if let Some(outcome) = find_file::run_overlay_command(cmd, find_file, tabs, edits) {
+    if let Some(outcome) =
+        find_file::run_overlay_command(cmd, find_file, tabs, edits, path_chains)
+    {
         return outcome;
     }
 
@@ -641,6 +656,7 @@ mod tests {
         let term = Terminal::default();
         let keymap = default_keymap();
         let mut chord = ChordState::default();
+        let mut path_chains = std::collections::HashMap::new();
 
         // First half of the chord: ctrl+x → pending, Continue.
         let mut find_file: Option<FindFileState> = None;
@@ -661,6 +677,7 @@ mod tests {
         &mut find_file,
             &mut isearch,
             &mut file_search,
+            &mut path_chains,
             &keymap,
             &mut chord,);
         assert_eq!(outcome, DispatchOutcome::Continue);
@@ -685,6 +702,7 @@ mod tests {
         &mut find_file,
             &mut isearch,
             &mut file_search,
+            &mut path_chains,
             &keymap,
             &mut chord,);
         assert_eq!(outcome, DispatchOutcome::Quit);
@@ -715,6 +733,7 @@ mod tests {
         let mut jumps = JumpListState::default();
         let mut browser = BrowserUi::default();
         let fs = FsTree::default();
+        let mut path_chains = std::collections::HashMap::new();
         // ctrl+x → pending.
         let mut find_file: Option<FindFileState> = None;
         let mut isearch: Option<IsearchState> = None;
@@ -734,6 +753,7 @@ mod tests {
         &mut find_file,
             &mut isearch,
             &mut file_search,
+            &mut path_chains,
             &keymap,
             &mut chord,);
         assert!(chord.pending.is_some());
@@ -756,6 +776,7 @@ mod tests {
         &mut find_file,
             &mut isearch,
             &mut file_search,
+            &mut path_chains,
             &keymap,
             &mut chord,);
         assert_eq!(outcome, DispatchOutcome::Continue);
@@ -786,6 +807,7 @@ mod tests {
         let mut browser = BrowserUi::default();
         let fs = FsTree::default();
 
+        let mut path_chains = std::collections::HashMap::new();
         let mut find_file: Option<FindFileState> = None;
         let mut isearch: Option<IsearchState> = None;
         let mut file_search: Option<FileSearchState> = None;
@@ -804,6 +826,7 @@ mod tests {
         &mut find_file,
             &mut isearch,
             &mut file_search,
+            &mut path_chains,
             &km,
             &mut chord,);
         assert_eq!(outcome, DispatchOutcome::Quit);
@@ -827,6 +850,7 @@ mod tests {
         &mut find_file,
             &mut isearch,
             &mut file_search,
+            &mut path_chains,
             &km,
             &mut chord,);
         assert_eq!(outcome, DispatchOutcome::Continue);
@@ -850,6 +874,7 @@ mod tests {
         let mut find_file: Option<FindFileState> = None;
         let mut isearch: Option<IsearchState> = None;
         let mut file_search: Option<FileSearchState> = None;
+        let mut path_chains = std::collections::HashMap::new();
         dispatch_key(
             key(KeyModifiers::NONE, KeyCode::Char('z')),
             &mut tabs,
@@ -865,6 +890,7 @@ mod tests {
         &mut find_file,
             &mut isearch,
             &mut file_search,
+            &mut path_chains,
             &km,
             &mut chord,);
         assert_eq!(rope_of(&edits, "file.rs").to_string(), "z");
@@ -889,6 +915,7 @@ mod tests {
         let mut find_file: Option<FindFileState> = None;
         let mut isearch: Option<IsearchState> = None;
         let mut file_search: Option<FileSearchState> = None;
+        let mut path_chains = std::collections::HashMap::new();
         dispatch_key(
             key(KeyModifiers::CONTROL, KeyCode::Char('x')),
             &mut tabs,
@@ -904,6 +931,7 @@ mod tests {
         &mut find_file,
             &mut isearch,
             &mut file_search,
+            &mut path_chains,
             &km,
             &mut chord,);
         assert_eq!(rope_of(&edits, "file.rs").to_string(), "");

@@ -197,6 +197,7 @@ mod tests {
         let mut chord = ChordState::default();
         let keymap = default_keymap();
 
+        let mut path_chains = std::collections::HashMap::new();
         // Ctrl-x k on dirty active tab → prompt set, tab still open.
         let mut find_file: Option<FindFileState> = None;
         let mut isearch: Option<IsearchState> = None;
@@ -216,6 +217,7 @@ mod tests {
         &mut find_file,
             &mut isearch,
             &mut file_search,
+            &mut path_chains,
             &keymap,
             &mut chord,);
         let mut find_file: Option<FindFileState> = None;
@@ -236,6 +238,7 @@ mod tests {
         &mut find_file,
             &mut isearch,
             &mut file_search,
+            &mut path_chains,
             &keymap,
             &mut chord,);
         assert_eq!(alerts.confirm_kill, Some(TabId(1)));
@@ -260,6 +263,7 @@ mod tests {
         let mut find_file: Option<FindFileState> = None;
         let mut isearch: Option<IsearchState> = None;
         let mut file_search: Option<FileSearchState> = None;
+        let mut path_chains = std::collections::HashMap::new();
         dispatch_key(
             key(KeyModifiers::NONE, KeyCode::Char('y')),
             &mut tabs,
@@ -275,6 +279,7 @@ mod tests {
         &mut find_file,
             &mut isearch,
             &mut file_search,
+            &mut path_chains,
             &keymap,
             &mut chord,);
         assert!(alerts.confirm_kill.is_none());
@@ -303,6 +308,7 @@ mod tests {
         let mut find_file: Option<FindFileState> = None;
         let mut isearch: Option<IsearchState> = None;
         let mut file_search: Option<FileSearchState> = None;
+        let mut path_chains = std::collections::HashMap::new();
         dispatch_key(
             key(KeyModifiers::NONE, KeyCode::Char('Y')),
             &mut tabs,
@@ -318,6 +324,7 @@ mod tests {
         &mut find_file,
             &mut isearch,
             &mut file_search,
+            &mut path_chains,
             &keymap,
             &mut chord,);
         assert!(alerts.confirm_kill.is_none());
@@ -342,6 +349,7 @@ mod tests {
         let mut find_file: Option<FindFileState> = None;
         let mut isearch: Option<IsearchState> = None;
         let mut file_search: Option<FileSearchState> = None;
+        let mut path_chains = std::collections::HashMap::new();
         dispatch_key(
             key(KeyModifiers::NONE, KeyCode::Char('n')),
             &mut tabs,
@@ -357,6 +365,7 @@ mod tests {
         &mut find_file,
             &mut isearch,
             &mut file_search,
+            &mut path_chains,
             &keymap,
             &mut chord,);
         // Prompt dismissed.
@@ -391,6 +400,7 @@ mod tests {
         let mut find_file: Option<FindFileState> = None;
         let mut isearch: Option<IsearchState> = None;
         let mut file_search: Option<FileSearchState> = None;
+        let mut path_chains = std::collections::HashMap::new();
         dispatch_key(
             key(KeyModifiers::NONE, KeyCode::Esc),
             &mut tabs,
@@ -406,6 +416,7 @@ mod tests {
         &mut find_file,
             &mut isearch,
             &mut file_search,
+            &mut path_chains,
             &keymap,
             &mut chord,);
         assert!(alerts.confirm_kill.is_none());
@@ -438,6 +449,7 @@ mod tests {
         let mut find_file: Option<FindFileState> = None;
         let mut isearch: Option<IsearchState> = None;
         let mut file_search: Option<FileSearchState> = None;
+        let mut path_chains = std::collections::HashMap::new();
         dispatch_key(
             key(KeyModifiers::CONTROL, KeyCode::Char('x')),
             &mut tabs,
@@ -453,6 +465,7 @@ mod tests {
         &mut find_file,
             &mut isearch,
             &mut file_search,
+            &mut path_chains,
             &keymap,
             &mut chord,);
         let mut find_file: Option<FindFileState> = None;
@@ -473,6 +486,7 @@ mod tests {
         &mut find_file,
             &mut isearch,
             &mut file_search,
+            &mut path_chains,
             &keymap,
             &mut chord,);
         assert!(alerts.confirm_kill.is_none());

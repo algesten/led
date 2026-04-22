@@ -416,6 +416,9 @@ mod tests {
         // Path has no extension → fall through to filename table.
         assert_eq!(Language::from_path(&canon("/etc/Makefile")), Some(Language::Make));
         assert_eq!(Language::from_path(&canon("/home/u/.bashrc")), Some(Language::Bash));
+        // `.profile` is a Rust `Path::extension` = None case (starts
+        // with `.`, no other `.` within). Must route via filename.
+        assert_eq!(Language::from_path(&canon("/home/u/.profile")), Some(Language::Bash));
     }
 
     #[test]

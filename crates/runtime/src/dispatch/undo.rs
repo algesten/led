@@ -449,6 +449,7 @@ mod tests {
         let mut browser = BrowserUi::default();
         let fs = FsTree::default();
 
+        let mut path_chains = std::collections::HashMap::new();
         // Undo: ""
         let mut find_file: Option<FindFileState> = None;
         let mut isearch: Option<IsearchState> = None;
@@ -468,6 +469,7 @@ mod tests {
         &mut find_file,
             &mut isearch,
             &mut file_search,
+            &mut path_chains,
             &km,
             &mut chord,);
         assert_eq!(rope_of(&edits, "file.rs").to_string(), "");
@@ -491,6 +493,7 @@ mod tests {
         &mut find_file,
             &mut isearch,
             &mut file_search,
+            &mut path_chains,
             &km,
             &mut chord,);
         assert_eq!(rope_of(&edits, "file.rs").to_string(), "hi");
@@ -563,6 +566,7 @@ mod tests {
         let mut find_file: Option<FindFileState> = None;
         let mut isearch: Option<IsearchState> = None;
         let mut file_search: Option<FileSearchState> = None;
+        let mut path_chains = std::collections::HashMap::new();
         dispatch_key(
             key(KeyModifiers::CONTROL, KeyCode::Char('y')),
             &mut tabs,
@@ -578,6 +582,7 @@ mod tests {
         &mut find_file,
             &mut isearch,
             &mut file_search,
+            &mut path_chains,
             &km,
             &mut chord,);
         // Still "x" — nothing to redo because the new edit dropped

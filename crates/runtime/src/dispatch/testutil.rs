@@ -125,6 +125,7 @@ pub(super) fn dispatch_default(
     let mut find_file: Option<FindFileState> = None;
     let mut isearch: Option<IsearchState> = None;
     let mut file_search: Option<FileSearchState> = None;
+    let mut path_chains = std::collections::HashMap::new();
     dispatch_key(
         k,
         tabs,
@@ -140,6 +141,7 @@ pub(super) fn dispatch_default(
         &mut find_file,
         &mut isearch,
         &mut file_search,
+        &mut path_chains,
         &default_keymap(),
         &mut chord,)
 }
@@ -166,6 +168,7 @@ pub(super) fn dispatch_chord_default(
     let mut find_file: Option<FindFileState> = None;
     let mut isearch: Option<IsearchState> = None;
     let mut file_search: Option<FileSearchState> = None;
+    let mut path_chains = std::collections::HashMap::new();
     dispatch_key(
         prefix,
         tabs,
@@ -181,6 +184,7 @@ pub(super) fn dispatch_chord_default(
         &mut find_file,
         &mut isearch,
         &mut file_search,
+        &mut path_chains,
         &keymap,
         &mut chord,);
     let mut find_file: Option<FindFileState> = None;
@@ -201,6 +205,7 @@ pub(super) fn dispatch_chord_default(
         &mut find_file,
         &mut isearch,
         &mut file_search,
+        &mut path_chains,
         &keymap,
         &mut chord,)
 }
@@ -224,6 +229,7 @@ pub(super) fn dispatch_with_ring(
     let mut find_file: Option<FindFileState> = None;
     let mut isearch: Option<IsearchState> = None;
     let mut file_search: Option<FileSearchState> = None;
+    let mut path_chains = std::collections::HashMap::new();
     dispatch_key(
         k,
         tabs,
@@ -239,6 +245,7 @@ pub(super) fn dispatch_with_ring(
         &mut find_file,
         &mut isearch,
         &mut file_search,
+        &mut path_chains,
         &default_keymap(),
         &mut chord,)
 }
@@ -260,6 +267,7 @@ pub(super) fn noop_dispatch(k: KeyEvent, tabs: &mut Tabs) -> DispatchOutcome {
     let mut find_file: Option<FindFileState> = None;
     let mut isearch: Option<IsearchState> = None;
     let mut file_search: Option<FileSearchState> = None;
+    let mut path_chains = std::collections::HashMap::new();
     dispatch_key(
         k,
         tabs,
@@ -275,6 +283,7 @@ pub(super) fn noop_dispatch(k: KeyEvent, tabs: &mut Tabs) -> DispatchOutcome {
         &mut find_file,
         &mut isearch,
         &mut file_search,
+        &mut path_chains,
         &keymap,
         &mut chord,)
 }
