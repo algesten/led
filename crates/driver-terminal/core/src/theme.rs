@@ -115,6 +115,21 @@ impl Style {
     pub const fn is_default(&self) -> bool {
         self.fg.is_none() && self.bg.is_none() && self.attrs.is_empty()
     }
+
+    /// `const` counterpart to [`Style::default`] — needed for
+    /// building [`SyntaxTheme::plain`] as a `const fn`. The
+    /// auto-derived `Default::default()` isn't callable in `const`.
+    pub const fn default_const() -> Self {
+        Self {
+            fg: None,
+            bg: None,
+            attrs: Attrs {
+                bold: false,
+                reverse: false,
+                underline: false,
+            },
+        }
+    }
 }
 
 /// The full chrome theme. Every paintable region has a named slot so
@@ -172,6 +187,113 @@ pub struct Theme {
     /// Column index (0-based, editor-relative) where the ruler
     /// paints. `None` → no ruler.
     pub ruler_column: Option<u16>,
+
+    // ── Syntax highlighting ─────────────────────────────────
+    /// One [`Style`] per [`led_state_syntax::TokenKind`]. The painter
+    /// slices each rendered row by its [`crate::LineSpan`]s and
+    /// applies the matching style to each run. A kind whose style
+    /// is [`Style::default`] emits no ANSI and lets the terminal
+    /// default fg show through — useful for the catch-all
+    /// `Default` kind.
+    pub syntax: SyntaxTheme,
+}
+
+/// Per-token-kind colour slots. Field names match the
+/// [`led_state_syntax::TokenKind`] variants so the painter maps by
+/// match without an auxiliary table. Default values use xterm
+/// 256-colour indices that look reasonable on both light and dark
+/// terminals — users override via `[syntax]` in `theme.toml`
+/// (wired in stage 5).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct SyntaxTheme {
+    pub keyword: Style,
+    pub type_: Style,
+    pub function: Style,
+    pub string: Style,
+    pub number: Style,
+    pub boolean: Style,
+    pub comment: Style,
+    pub operator: Style,
+    pub punctuation: Style,
+    pub variable: Style,
+    pub property: Style,
+    pub attribute: Style,
+    pub tag: Style,
+    pub label: Style,
+    pub constant: Style,
+    pub escape: Style,
+    pub default: Style,
+}
+
+// Syntax palette — xterm 256-colour indices picked to echo the
+// legacy theme's semantic mapping (keyword magenta-ish, string
+// green, comment dim grey, type cyan-ish, number orange).
+const SYN_KEYWORD: Color = Color::Indexed(170); // bright magenta
+const SYN_TYPE: Color = Color::Indexed(74); // teal-blue
+const SYN_FUNCTION: Color = Color::Indexed(111); // light blue
+const SYN_STRING: Color = Color::Indexed(107); // olive-green
+const SYN_NUMBER: Color = Color::Indexed(173); // soft orange
+const SYN_COMMENT: Color = Color::Indexed(244); // dim grey
+const SYN_CONSTANT: Color = Color::Indexed(173); // same as number
+const SYN_ATTRIBUTE: Color = Color::Indexed(180); // tan
+const SYN_TAG: Color = Color::Indexed(74);
+const SYN_LABEL: Color = Color::Indexed(170);
+const SYN_ESCAPE: Color = Color::Indexed(173);
+
+impl SyntaxTheme {
+    /// Zero-colour syntax theme — every kind is
+    /// [`Style::default`]. The painter emits no styling escapes for
+    /// any token, so buffers render exactly as they did before M15.
+    /// Used as a sentinel + by tests that don't care about colours.
+    pub const fn plain() -> Self {
+        Self {
+            keyword: Style::default_const(),
+            type_: Style::default_const(),
+            function: Style::default_const(),
+            string: Style::default_const(),
+            number: Style::default_const(),
+            boolean: Style::default_const(),
+            comment: Style::default_const(),
+            operator: Style::default_const(),
+            punctuation: Style::default_const(),
+            variable: Style::default_const(),
+            property: Style::default_const(),
+            attribute: Style::default_const(),
+            tag: Style::default_const(),
+            label: Style::default_const(),
+            constant: Style::default_const(),
+            escape: Style::default_const(),
+            default: Style::default_const(),
+        }
+    }
+}
+
+impl Default for SyntaxTheme {
+    fn default() -> Self {
+        let fg = |c: Color| Style {
+            fg: Some(c),
+            ..Style::default()
+        };
+        Self {
+            keyword: fg(SYN_KEYWORD),
+            type_: fg(SYN_TYPE),
+            function: fg(SYN_FUNCTION),
+            string: fg(SYN_STRING),
+            number: fg(SYN_NUMBER),
+            boolean: fg(SYN_KEYWORD),
+            comment: fg(SYN_COMMENT),
+            operator: Style::default(),
+            punctuation: Style::default(),
+            variable: Style::default(),
+            property: Style::default(),
+            attribute: fg(SYN_ATTRIBUTE),
+            tag: fg(SYN_TAG),
+            label: fg(SYN_LABEL),
+            constant: fg(SYN_CONSTANT),
+            escape: fg(SYN_ESCAPE),
+            default: Style::default(),
+        }
+    }
 }
 
 // Built-in palette — the exact xterm 256-color indices that legacy
@@ -266,6 +388,7 @@ impl Default for Theme {
             // it automatically would pick a number that'd surprise
             // users of different editor widths (sidebar on/off).
             ruler_column: None,
+            syntax: SyntaxTheme::default(),
         }
     }
 }

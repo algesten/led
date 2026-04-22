@@ -15,7 +15,7 @@ use std::sync::mpsc::Receiver;
 use std::sync::Arc;
 
 mod theme;
-pub use theme::{Attrs, Color, Style, Theme};
+pub use theme::{Attrs, Color, Style, SyntaxTheme, Theme};
 
 // ── Mirror types — the ABI boundary ────────────────────────────────────
 
@@ -189,7 +189,7 @@ pub struct TabBarModel {
     pub active: Option<usize>,
 }
 
-/// Body view. All owned-string fields use `Arc<str>` / `Arc<Vec<String>>`
+/// Body view. All owned-string fields use `Arc<str>` / `Arc<Vec<BodyLine>>`
 /// so drv cache-hit clones (which happen on every idle tick through
 /// `render_frame`) never deep-copy the content.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -204,7 +204,7 @@ pub enum BodyModel {
         message: Arc<str>,
     },
     Content {
-        lines: Arc<Vec<String>>,
+        lines: Arc<Vec<BodyLine>>,
         /// Body-relative cursor position `(row, col)`. `None` when the
         /// cursor is outside the visible scroll window (defensive — the
         /// runtime's scroll invariant should keep it in view).
@@ -216,6 +216,44 @@ pub enum BodyModel {
         /// highlight.
         match_highlight: Option<BodyMatch>,
     },
+}
+
+/// One rendered body row: the already-truncated row text plus the
+/// list of syntax token spans inside it. Spans' `col_*` values are
+/// relative to the start of `text` (gutter included), so the
+/// painter doesn't need to know the gutter width. Empty `spans`
+/// means "paint the row with no syntax styling" — used for
+/// past-EOF rows and for rows in buffers that have no syntax
+/// highlighting.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct BodyLine {
+    pub text: String,
+    pub spans: Vec<LineSpan>,
+}
+
+impl From<String> for BodyLine {
+    fn from(text: String) -> Self {
+        Self {
+            text,
+            spans: Vec::new(),
+        }
+    }
+}
+
+impl From<&str> for BodyLine {
+    fn from(text: &str) -> Self {
+        Self::from(text.to_string())
+    }
+}
+
+/// One syntax-highlighted run inside a [`BodyLine`]. `col_start` is
+/// inclusive and `col_end` is exclusive. Character columns, not
+/// byte offsets — the painter skips/takes chars to slice.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LineSpan {
+    pub col_start: u16,
+    pub col_end: u16,
+    pub kind: led_state_syntax::TokenKind,
 }
 
 /// One currently-previewed search hit, expressed in body-visible

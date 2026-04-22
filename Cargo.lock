@@ -676,6 +676,7 @@ name = "led-driver-terminal-core"
 version = "0.0.0"
 dependencies = [
  "drv",
+ "led-state-syntax",
 ]
 
 [[package]]
@@ -685,6 +686,7 @@ dependencies = [
  "crossterm",
  "led-core",
  "led-driver-terminal-core",
+ "led-state-syntax",
 ]
 
 [[package]]

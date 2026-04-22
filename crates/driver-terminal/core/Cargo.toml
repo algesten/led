@@ -15,3 +15,7 @@ publish = false
 
 [dependencies]
 drv = { workspace = true }
+# `BodyModel` carries syntax token kinds so the painter can colour
+# each token run. The runtime produces the spans and hands them
+# to the terminal driver via `BodyModel::Content::lines`.
+led-state-syntax = { workspace = true }

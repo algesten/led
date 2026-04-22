@@ -141,6 +141,16 @@ pub struct SyntaxState {
     /// flight — queue a fresh parse if the buffer is ahead of
     /// `version`.
     pub in_flight_version: Option<u64>,
+    /// `history.applied_ops().count()` at the moment the parse
+    /// request was dispatched. The render pipeline subtracts this
+    /// from the current count to know which edit ops to rebase
+    /// through before painting. Advances in lock-step with
+    /// `version` on each applied `SyntaxOut`.
+    pub applied_at_parse: usize,
+    /// `history.applied_ops().count()` snapshotted at dispatch
+    /// time; pinned here while the parse is in flight and copied
+    /// to `applied_at_parse` when the matching completion arrives.
+    pub in_flight_applied: Option<usize>,
 }
 
 impl SyntaxState {
@@ -151,6 +161,8 @@ impl SyntaxState {
             tokens: Arc::new(Vec::new()),
             version: 0,
             in_flight_version: None,
+            applied_at_parse: 0,
+            in_flight_applied: None,
         }
     }
 }

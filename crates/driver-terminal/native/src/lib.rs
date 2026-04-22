@@ -320,25 +320,34 @@ fn paint_body(
 
     for row in 0..area.rows {
         queue!(out, cursor::MoveTo(area.x, area.y + row))?;
-        let line: Option<&str> = match body {
-            BodyModel::Empty => None,
+        // Resolve the row's text plus (for `Content` rows) the syntax
+        // spans that colour it. Non-Content variants never carry spans.
+        let (line, spans): (Option<&str>, &[led_driver_terminal_core::LineSpan]) = match body {
+            BodyModel::Empty => (None, &[]),
             BodyModel::Pending { path_display } => match row {
-                0 => Some(path_display.as_ref()),
-                1 => Some("loading..."),
-                _ => None,
+                0 => (Some(path_display.as_ref()), &[]),
+                1 => (Some("loading..."), &[]),
+                _ => (None, &[]),
             },
             BodyModel::Error {
                 path_display,
                 message,
             } => match row {
-                0 => Some(path_display.as_ref()),
-                1 => Some(message.as_ref()),
-                _ => None,
+                0 => (Some(path_display.as_ref()), &[]),
+                1 => (Some(message.as_ref()), &[]),
+                _ => (None, &[]),
             },
-            BodyModel::Content { lines, .. } => lines.get(row as usize).map(String::as_str),
+            BodyModel::Content { lines, .. } => match lines.get(row as usize) {
+                Some(bl) => (Some(bl.text.as_str()), bl.spans.as_slice()),
+                None => (None, &[]),
+            },
         };
         if let Some(line) = line {
-            queue!(out, style::Print(line))?;
+            if spans.is_empty() {
+                queue!(out, style::Print(line))?;
+            } else {
+                paint_syntax_line(line, spans, &theme.syntax, out)?;
+            }
         }
         queue!(out, terminal::Clear(terminal::ClearType::UntilNewLine))?;
 
@@ -597,6 +606,95 @@ fn paint_file_search_header(
     Ok(())
 }
 
+/// Print one body row slicing it into styled runs according to the
+/// syntax spans the runtime computed. Gaps between spans (and any
+/// suffix after the last span) render with the syntax theme's
+/// `default` style so the gutter and any un-captured characters
+/// still respect user theming.
+///
+/// Spans are assumed non-overlapping and ascending in `col_start`.
+/// The caller guarantees `col_end <= line_char_count` (runtime
+/// clamps against `content_cols`), so we never overshoot the row.
+fn paint_syntax_line(
+    line: &str,
+    spans: &[led_driver_terminal_core::LineSpan],
+    syntax: &led_driver_terminal_core::SyntaxTheme,
+    out: &mut impl Write,
+) -> io::Result<()> {
+    use crossterm::{queue, style};
+    use led_state_syntax::TokenKind;
+
+    let style_for = |kind: TokenKind| -> &Style {
+        match kind {
+            TokenKind::Keyword => &syntax.keyword,
+            TokenKind::Type => &syntax.type_,
+            TokenKind::Function => &syntax.function,
+            TokenKind::String => &syntax.string,
+            TokenKind::Number => &syntax.number,
+            TokenKind::Boolean => &syntax.boolean,
+            TokenKind::Comment => &syntax.comment,
+            TokenKind::Operator => &syntax.operator,
+            TokenKind::Punctuation => &syntax.punctuation,
+            TokenKind::Variable => &syntax.variable,
+            TokenKind::Property => &syntax.property,
+            TokenKind::Attribute => &syntax.attribute,
+            TokenKind::Tag => &syntax.tag,
+            TokenKind::Label => &syntax.label,
+            TokenKind::Constant => &syntax.constant,
+            TokenKind::Escape => &syntax.escape,
+            TokenKind::Default => &syntax.default,
+        }
+    };
+
+    let mut cursor_col: usize = 0;
+    for span in spans {
+        let col_start = span.col_start as usize;
+        let col_end = span.col_end as usize;
+        if col_end <= cursor_col {
+            // Malformed / overlapping input — skip the offending span
+            // so we don't go backwards.
+            continue;
+        }
+        if col_start > cursor_col {
+            // Gap before this span: paint it with the default syntax
+            // style (catches the gutter and any unclaimed glyphs).
+            let gap_text: String = line
+                .chars()
+                .skip(cursor_col)
+                .take(col_start - cursor_col)
+                .collect();
+            if !gap_text.is_empty() {
+                let default_style = &syntax.default;
+                apply_style(out, default_style)?;
+                queue!(out, style::Print(gap_text))?;
+                reset_style(out, default_style)?;
+            }
+            cursor_col = col_start;
+        }
+        let span_text: String = line
+            .chars()
+            .skip(cursor_col)
+            .take(col_end - cursor_col)
+            .collect();
+        if !span_text.is_empty() {
+            let s = style_for(span.kind);
+            apply_style(out, s)?;
+            queue!(out, style::Print(span_text))?;
+            reset_style(out, s)?;
+        }
+        cursor_col = col_end;
+    }
+    // Trailing suffix past the last span.
+    let tail: String = line.chars().skip(cursor_col).collect();
+    if !tail.is_empty() {
+        let default_style = &syntax.default;
+        apply_style(out, default_style)?;
+        queue!(out, style::Print(tail))?;
+        reset_style(out, default_style)?;
+    }
+    Ok(())
+}
+
 // ── Theme → ANSI helpers ───────────────────────────────────────────────
 
 /// Emit the SetForeground / SetBackground / SetAttribute escapes for
@@ -842,9 +940,9 @@ mod tests {
         // Only two panel rows but editor_area.rows is 8 — six empty
         // rows exercise the bug path.
 
-        let body_lines = Arc::new(
+        let body_lines: Arc<Vec<led_driver_terminal_core::BodyLine>> = Arc::new(
             (0..(layout.editor_area.rows as usize))
-                .map(|i| format!("  line {i:02}"))
+                .map(|i| format!("  line {i:02}").into())
                 .collect::<Vec<_>>(),
         );
         let body = BodyModel::Content {
@@ -1046,9 +1144,9 @@ mod tests {
         assert_eq!(layout.editor_area.rows, 3);
         let body = BodyModel::Content {
             lines: Arc::new(vec![
-                "01234567890123456789".to_string(),
-                "shorter".to_string(),
-                "".to_string(),
+                "01234567890123456789".into(),
+                "shorter".into(),
+                "".into(),
             ]),
             cursor: None,
             match_highlight: None,

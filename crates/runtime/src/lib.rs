@@ -390,28 +390,33 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
         // Apply syntax parse completions. The worker echoes the
         // request's `version`; we drop completions whose version
         // is older than the current buffer version (a stale parse
-        // from before the user typed more). `in_flight_version` is
-        // cleared whenever a completion arrives so a fresher edit
-        // can queue a new parse on the next tick.
+        // from before the user typed more). When a completion
+        // applies, we also lift `in_flight_applied` into
+        // `applied_at_parse` — that's the anchor the painter uses
+        // to rebase tokens through any further edits that arrive
+        // after the parse.
         for done in drivers.syntax.process() {
             let Some(state) = syntax.by_path.get_mut(&done.path) else {
                 continue;
             };
+            let pending_applied = state.in_flight_applied;
             state.in_flight_version = None;
+            state.in_flight_applied = None;
             let current_version = edits
                 .buffers
                 .get(&done.path)
                 .map(|eb| eb.version)
                 .unwrap_or(0);
             if done.version < state.version || done.version > current_version {
-                // Older than what we already have, or somehow ahead
-                // of the buffer (shouldn't happen, but guard).
                 continue;
             }
             state.language = done.language;
             state.tree = Some(done.tree);
             state.tokens = done.tokens;
             state.version = done.version;
+            if let Some(applied) = pending_applied {
+                state.applied_at_parse = applied;
+            }
         }
 
         // Apply clipboard completions: either paste the text at the
@@ -504,6 +509,7 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
             alerts: AlertsInput::new(alerts),
             browser: BrowserUiInput::new(browser),
             overlays: query::OverlaysInput::new(find_file, isearch, file_search),
+            syntax: query::SyntaxStatesInput::new(syntax),
         });
 
         // ── Execute ─────────────────────────────────────────────
@@ -661,6 +667,7 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
                 edits_since_prev: Vec::new(),
             });
             state.in_flight_version = Some(eb.version);
+            state.in_flight_applied = Some(eb.history.applied_ops().count());
         }
         if !syntax_cmds.is_empty() {
             drivers.syntax.execute(syntax_cmds.iter());

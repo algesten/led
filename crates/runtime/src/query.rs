@@ -24,6 +24,7 @@ use led_state_alerts::AlertState;
 use led_state_browser::{BrowserUi, Focus, TreeEntry, TreeEntryKind};
 use led_state_clipboard::ClipboardState;
 use led_state_buffer_edits::{BufferEdits, EditedBuffer};
+use led_state_syntax::{SyntaxState, SyntaxStates, TokenKind, TokenSpan};
 use led_state_tabs::{Cursor, Scroll, Tab, TabId, Tabs};
 use ropey::Rope;
 use std::sync::Arc;
@@ -112,6 +113,26 @@ impl<'a> StoreLoadedInput<'a> {
     pub fn new(store: &'a BufferStore) -> Self {
         Self {
             loaded: &store.loaded,
+        }
+    }
+}
+
+// ── Input on SyntaxStates ──────────────────────────────────────────────
+
+/// Whole-map projection over the `SyntaxStates.by_path` field. Memos
+/// that need per-buffer token spans (just `body_model`) lens through
+/// this; on cache hit the projection is a pointer copy because the
+/// map is an `imbl::HashMap`.
+#[drv::input]
+#[derive(Copy, Clone)]
+pub struct SyntaxStatesInput<'a> {
+    pub by_path: &'a imbl::HashMap<CanonPath, SyntaxState>,
+}
+
+impl<'a> SyntaxStatesInput<'a> {
+    pub fn new(s: &'a SyntaxStates) -> Self {
+        Self {
+            by_path: &s.by_path,
         }
     }
 }
@@ -404,11 +425,12 @@ const GUTTER_WIDTH: usize = 2;
 /// BufferEdits seed, plus Pending / Error paths that never made it
 /// to `Ready`.
 #[drv::memo(single)]
-pub fn body_model<'e, 'a, 'b, 'o>(
+pub fn body_model<'e, 'a, 'b, 'o, 's>(
     edits: EditedBuffersInput<'e>,
     store: StoreLoadedInput<'a>,
     tabs: TabsActiveInput<'b>,
     overlays: OverlaysInput<'o>,
+    syntax: SyntaxStatesInput<'s>,
     area: Rect,
 ) -> BodyModel {
     let Some(id) = *tabs.active else {
@@ -419,7 +441,8 @@ pub fn body_model<'e, 'a, 'b, 'o>(
     };
     let highlight = active_body_match(&overlays, &tab.path, tab.scroll, area);
     if let Some(eb) = edits.buffers.get(&tab.path) {
-        return render_content(&eb.rope, tab.cursor, tab.scroll, area, highlight);
+        let spans = rebased_line_spans(syntax.by_path.get(&tab.path), eb);
+        return render_content(&eb.rope, tab.cursor, tab.scroll, area, highlight, spans.as_deref());
     }
     // Only the Pending / Error paths need a rendered path string, and
     // even then we allocate only once per recompute; `Arc<str>` keeps
@@ -433,9 +456,35 @@ pub fn body_model<'e, 'a, 'b, 'o>(
             message: Arc::<str>::from(msg.as_str()),
         },
         Some(LoadState::Ready(rope)) => {
-            render_content(rope, tab.cursor, tab.scroll, area, highlight)
+            render_content(rope, tab.cursor, tab.scroll, area, highlight, None)
         }
     }
+}
+
+/// Apply any edits the user made between the parse and now onto the
+/// token list so spans still line up with current rope offsets. On
+/// an undo-style history regression (applied_ops count went below
+/// the parse snapshot) we show the raw tokens unchanged — the
+/// painter will render them at slightly stale offsets, which is the
+/// acceptable-flicker regime until the next parse lands.
+///
+/// Returns `None` when there's no syntax state yet — caller
+/// interprets that as "render plain".
+fn rebased_line_spans(
+    state: Option<&SyntaxState>,
+    eb: &EditedBuffer,
+) -> Option<Vec<TokenSpan>> {
+    let state = state?;
+    if state.tokens.is_empty() {
+        return None;
+    }
+    let applied_now = eb.history.applied_ops().count();
+    if applied_now <= state.applied_at_parse {
+        return Some(state.tokens.as_ref().clone());
+    }
+    let ops =
+        led_state_syntax::rebase_ops_since_version(&eb.history, state.applied_at_parse);
+    Some(led_state_syntax::rebase_tokens(&state.tokens, ops))
 }
 
 /// Resolve the file-search overlay's current hit into a visible-row
@@ -493,28 +542,49 @@ fn render_content(
     scroll: Scroll,
     area: Rect,
     match_highlight: Option<led_driver_terminal_core::BodyMatch>,
+    rebased_tokens: Option<&[TokenSpan]>,
 ) -> BodyModel {
+    use led_driver_terminal_core::BodyLine;
+
     let body_rows = area.rows as usize;
     let line_count = rope.len_lines();
     let cols = area.cols as usize;
     let content_cols = cols.saturating_sub(GUTTER_WIDTH);
 
-    let mut lines: Vec<String> = Vec::with_capacity(body_rows);
+    let mut lines: Vec<BodyLine> = Vec::with_capacity(body_rows);
     for i in 0..body_rows {
         let ln = scroll.top.saturating_add(i);
         if ln < line_count {
             // Content row: 2-space gutter, then truncated buffer line.
             let mut s = String::with_capacity(cols);
             s.push_str("  ");
+            let line_char_start = rope.line_to_char(ln);
             let mut content = rope.line(ln).to_string();
             strip_trailing_newline(&mut content);
+            // Count the full line's chars *before* truncating — the
+            // token slicer below clamps to `content_cols` so tokens
+            // past the right edge are naturally trimmed.
+            let line_char_len = content.chars().count();
             truncate_to_cols_in_place(&mut content, content_cols);
             s.push_str(&content);
-            lines.push(s);
+            let spans = rebased_tokens
+                .map(|tokens| {
+                    tokens_to_line_spans(
+                        tokens,
+                        line_char_start,
+                        line_char_len,
+                        content_cols,
+                    )
+                })
+                .unwrap_or_default();
+            lines.push(BodyLine { text: s, spans });
         } else {
             // Past-EOF sentinel: tilde in gutter col 0. Painter's
             // clear-to-EOL blanks the rest of the row.
-            lines.push("~ ".to_string());
+            lines.push(BodyLine {
+                text: "~ ".to_string(),
+                spans: Vec::new(),
+            });
         }
     }
 
@@ -523,6 +593,50 @@ fn render_content(
         cursor: visible_cursor(cursor, scroll, area),
         match_highlight,
     }
+}
+
+/// Slice the buffer-wide token list into the subset that falls on a
+/// single rendered row, translating char offsets into row-relative
+/// column positions (gutter included, right-edge-clamped).
+///
+/// A span that crosses the row boundary is clipped to the row; a
+/// span that ends past the truncation point is clipped to
+/// `content_cols`. Tokens whose kind is `Default` are dropped
+/// because emitting a span that styles nothing would force the
+/// painter to reset unnecessarily.
+fn tokens_to_line_spans(
+    tokens: &[TokenSpan],
+    line_char_start: usize,
+    line_char_len: usize,
+    content_cols: usize,
+) -> Vec<led_driver_terminal_core::LineSpan> {
+    let line_end = line_char_start + line_char_len;
+    let mut out = Vec::new();
+    // Binary-search the first span whose end > line_char_start to
+    // skip the prefix that lives on earlier lines. Tokens are sorted
+    // by (start, end) in the worker, so this stays O(log n + k).
+    let start_ix = tokens.partition_point(|t| t.char_end <= line_char_start);
+    for t in &tokens[start_ix..] {
+        if t.char_start >= line_end {
+            break;
+        }
+        if matches!(t.kind, TokenKind::Default) {
+            continue;
+        }
+        let rel_start = t.char_start.saturating_sub(line_char_start);
+        let rel_end = t.char_end.saturating_sub(line_char_start).min(line_char_len);
+        let col_start = (rel_start.min(content_cols) + GUTTER_WIDTH) as u16;
+        let col_end = (rel_end.min(content_cols) + GUTTER_WIDTH) as u16;
+        if col_end <= col_start {
+            continue;
+        }
+        out.push(led_driver_terminal_core::LineSpan {
+            col_start,
+            col_end,
+            kind: t.kind,
+        });
+    }
+    out
 }
 
 fn visible_cursor(c: Cursor, s: Scroll, area: Rect) -> Option<(u16, u16)> {
@@ -1121,6 +1235,7 @@ pub struct RenderInputs<'a> {
     pub alerts: AlertsInput<'a>,
     pub browser: BrowserUiInput<'a>,
     pub overlays: OverlaysInput<'a>,
+    pub syntax: SyntaxStatesInput<'a>,
 }
 
 pub fn render_frame(inputs: RenderInputs<'_>) -> Option<Frame> {
@@ -1132,11 +1247,12 @@ pub fn render_frame(inputs: RenderInputs<'_>) -> Option<Frame> {
         inputs.alerts,
         inputs.browser,
         inputs.overlays,
+        inputs.syntax,
     )
 }
 
 #[drv::memo(single)]
-fn render_frame_memo<'t, 'e, 'b, 'a, 'al, 'br, 'ov>(
+fn render_frame_memo<'t, 'e, 'b, 'a, 'al, 'br, 'ov, 'sx>(
     term: TerminalDimsInput<'t>,
     edits: EditedBuffersInput<'e>,
     store: StoreLoadedInput<'b>,
@@ -1144,11 +1260,12 @@ fn render_frame_memo<'t, 'e, 'b, 'a, 'al, 'br, 'ov>(
     alerts: AlertsInput<'al>,
     browser: BrowserUiInput<'br>,
     overlays: OverlaysInput<'ov>,
+    syntax: SyntaxStatesInput<'sx>,
 ) -> Option<Frame> {
     let dims = (*term.dims)?;
     let layout = Layout::compute(dims, *browser.visible);
     let tab_bar = tab_bar_model(tabs, edits);
-    let body = body_model(edits, store, tabs, overlays, layout.editor_area);
+    let body = body_model(edits, store, tabs, overlays, syntax, layout.editor_area);
     let status_bar = status_bar_model(alerts, tabs, edits, overlays);
     let side_panel = layout
         .side_area
@@ -1302,6 +1419,7 @@ mod tests {
         };
         let ff = None;
         let is = None;
+        let syntax = SyntaxStates::default();
         render_frame(RenderInputs {
             term: TerminalDimsInput::new(term),
             edits: EditedBuffersInput::new(e),
@@ -1310,6 +1428,7 @@ mod tests {
             alerts: AlertsInput::new(&alerts),
             browser: BrowserUiInput::new(&browser),
             overlays: OverlaysInput::new(&ff, &is, &None),
+            syntax: SyntaxStatesInput::new(&syntax),
         })
     }
 
@@ -1355,6 +1474,7 @@ mod tests {
         let ff = Some(ff_state);
         let is = None;
 
+        let syntax = SyntaxStates::default();
         let frame = render_frame(RenderInputs {
             term: TerminalDimsInput::new(&term),
             edits: EditedBuffersInput::new(&e),
@@ -1363,6 +1483,7 @@ mod tests {
             alerts: AlertsInput::new(&alerts),
             browser: BrowserUiInput::new(&browser),
             overlays: OverlaysInput::new(&ff, &is, &None),
+            syntax: SyntaxStatesInput::new(&syntax),
         })
         .expect("dims set");
 
@@ -1390,6 +1511,7 @@ mod tests {
         };
         let ff = None;
         let is = None;
+        let syntax = SyntaxStates::default();
         let frame = render_frame(RenderInputs {
             term: TerminalDimsInput::new(&term),
             edits: EditedBuffersInput::new(&e),
@@ -1398,6 +1520,7 @@ mod tests {
             alerts: AlertsInput::new(&alerts),
             browser: BrowserUiInput::new(&browser),
             overlays: OverlaysInput::new(&ff, &is, &None),
+            syntax: SyntaxStatesInput::new(&syntax),
         })
         .expect("dims set");
         assert_eq!(frame.cursor, None);
@@ -1418,8 +1541,8 @@ mod tests {
                 // body_rows = dims.rows - 2 (tab bar + status bar).
                 assert_eq!(lines.len(), 3);
                 // Each content row is 2-col gutter + truncated content.
-                assert_eq!(lines[0], "  line 0");
-                assert_eq!(lines[2], "  line 2");
+                assert_eq!(lines[0].text, "  line 0");
+                assert_eq!(lines[2].text, "  line 2");
                 // Default cursor at (0, 0) → gutter-shifted to col 2.
                 assert_eq!(*cursor, Some((0, 2)));
             }
@@ -1446,8 +1569,8 @@ mod tests {
         match &frame.body {
             BodyModel::Content { lines, cursor, .. } => {
                 assert_eq!(lines.len(), 9);
-                assert_eq!(lines[0], "  line 20");
-                assert_eq!(lines[5], "  line 25");
+                assert_eq!(lines[0].text, "  line 20");
+                assert_eq!(lines[5].text, "  line 25");
                 // Cursor col 2 → screen col 4 (gutter shift).
                 assert_eq!(*cursor, Some((5, 4)));
             }
@@ -1529,7 +1652,7 @@ mod tests {
         let frame = render(&t, &e, &s, &term).expect("dims set");
         match &frame.body {
             BodyModel::Content { lines, .. } => {
-                assert_eq!(lines[0], "  edited-version");
+                assert_eq!(lines[0].text, "  edited-version");
             }
             other => panic!("expected Content, got {other:?}"),
         }
@@ -1551,7 +1674,7 @@ mod tests {
         let frame = render(&t, &e, &s, &term).expect("dims set");
         match &frame.body {
             BodyModel::Content { lines, .. } => {
-                assert_eq!(lines[0], "  from-disk");
+                assert_eq!(lines[0].text, "  from-disk");
             }
             other => panic!("expected Content, got {other:?}"),
         }
@@ -1741,10 +1864,10 @@ mod tests {
         match &frame.body {
             BodyModel::Content { lines, .. } => {
                 assert_eq!(lines.len(), 4);
-                assert_eq!(lines[0], "  one");
-                assert_eq!(lines[1], "  two");
-                assert_eq!(lines[2], "~ ");
-                assert_eq!(lines[3], "~ ");
+                assert_eq!(lines[0].text, "  one");
+                assert_eq!(lines[1].text, "  two");
+                assert_eq!(lines[2].text, "~ ");
+                assert_eq!(lines[3].text, "~ ");
             }
             other => panic!("expected Content, got {other:?}"),
         }
@@ -1982,11 +2105,13 @@ mod tests {
         });
         let is = None;
 
+        let syntax = SyntaxStates::default();
         let model = body_model(
             EditedBuffersInput::new(&e),
             StoreLoadedInput::new(&s),
             TabsActiveInput::new(&t),
             OverlaysInput::new(&None, &is, &fs),
+            SyntaxStatesInput::new(&syntax),
             Rect { x: 0, y: 0, cols: 40, rows: 5 },
         );
         match model {
@@ -2050,11 +2175,13 @@ mod tests {
         });
         let is = None;
 
+        let syntax = SyntaxStates::default();
         let model = body_model(
             EditedBuffersInput::new(&e),
             StoreLoadedInput::new(&s),
             TabsActiveInput::new(&t),
             OverlaysInput::new(&None, &is, &fs),
+            SyntaxStatesInput::new(&syntax),
             Rect { x: 0, y: 0, cols: 40, rows: 5 },
         );
         match model {

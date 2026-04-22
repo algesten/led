@@ -13,4 +13,8 @@ publish = false
 [dependencies]
 led-core = { workspace = true }
 led-driver-terminal-core = { workspace = true }
+# The painter slices body rows by `TokenKind` to pick a style from
+# `SyntaxTheme`. Only the enum is touched here; the terminal driver
+# stays unaware of trees / parses.
+led-state-syntax = { workspace = true }
 crossterm = { workspace = true }
