@@ -52,7 +52,9 @@ use led_state_find_file::FindFileState;
 use led_state_isearch::IsearchState;
 use led_state_jumps::JumpListState;
 use led_state_kill_ring::KillRing;
-use led_state_diagnostics::{BufferDiagnostics, BufferVersion, DiagnosticsStates};
+use led_state_diagnostics::{
+    BufferDiagnostics, BufferVersion, DiagnosticsStates, LspServerStatus, LspStatuses,
+};
 use led_state_syntax::{Language, SyntaxState, SyntaxStates};
 use led_state_tabs::{TabId, Tabs};
 
@@ -196,6 +198,10 @@ pub struct Atoms {
     /// `true` once `LspCmd::Init` has been emitted. Prevents
     /// re-issuing the handshake on every tick.
     pub lsp_init_sent: bool,
+    /// Per-server LSP progress / ready status. Painter consumes
+    /// via the status-bar model so the user sees when
+    /// rust-analyzer is mid-indexing.
+    pub lsp_status: LspStatuses,
     /// Symlink resolution chain for every path the user has
     /// opened, keyed by canonical path. Populated at tab-open
     /// time (main.rs CLI, find-file commit, browser open) so the
@@ -242,6 +248,7 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
         lsp_notified,
         lsp_state_sum,
         lsp_init_sent,
+        lsp_status,
     } = &mut *world.atoms;
     let drivers = world.drivers;
     let wake = world.wake;
@@ -343,12 +350,39 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
                             .insert(path, BufferDiagnostics::new(version, diags));
                     }
                 }
-                LspEvent::Ready { .. }
-                | LspEvent::Progress { .. }
-                | LspEvent::Error { .. } => {
-                    // Progress / error / quiescence surfacing is
-                    // stage 6 (status bar integration). Drop
-                    // quietly for now.
+                LspEvent::Ready { server } => {
+                    let entry = lsp_status
+                        .by_server
+                        .entry(server)
+                        .or_insert_with(LspServerStatus::default);
+                    entry.ready = true;
+                    entry.busy = false;
+                    entry.detail = None;
+                }
+                LspEvent::Progress { server, busy, detail } => {
+                    let entry = lsp_status
+                        .by_server
+                        .entry(server)
+                        .or_insert_with(LspServerStatus::default);
+                    entry.busy = busy;
+                    entry.detail = detail;
+                    if !busy {
+                        // A progress cycle ended with no
+                        // quiescence signal — treat as ready.
+                        entry.ready = true;
+                    }
+                }
+                LspEvent::Error { server, message } => {
+                    // Surface as a warn alert keyed by server
+                    // name so a repeat error replaces rather
+                    // than stacks. Also clear progress so the
+                    // status bar stops saying "indexing" when
+                    // the server's actually dead.
+                    alerts.set_warn(server.clone(), format!("LSP {server}: {message}"));
+                    if let Some(entry) = lsp_status.by_server.get_mut(&server) {
+                        entry.busy = false;
+                        entry.detail = None;
+                    }
                 }
             }
         }
@@ -613,6 +647,7 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
             overlays: query::OverlaysInput::new(find_file, isearch, file_search),
             syntax: query::SyntaxStatesInput::new(syntax),
             diagnostics: query::DiagnosticsStatesInput::new(diagnostics),
+            lsp: query::LspStatusesInput::new(lsp_status),
         });
 
         // ── Execute ─────────────────────────────────────────────

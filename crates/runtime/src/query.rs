@@ -24,7 +24,10 @@ use led_state_alerts::AlertState;
 use led_state_browser::{BrowserUi, Focus, TreeEntry, TreeEntryKind};
 use led_state_clipboard::ClipboardState;
 use led_state_buffer_edits::{BufferEdits, EditedBuffer};
-use led_state_diagnostics::{BufferDiagnostics, Diagnostic, DiagnosticSeverity, DiagnosticsStates};
+use led_state_diagnostics::{
+    BufferDiagnostics, Diagnostic, DiagnosticSeverity, DiagnosticsStates, LspServerStatus,
+    LspStatuses,
+};
 use led_state_syntax::{SyntaxState, SyntaxStates, TokenKind, TokenSpan};
 use led_state_tabs::{Cursor, Scroll, Tab, TabId, Tabs};
 use ropey::Rope;
@@ -153,6 +156,24 @@ impl<'a> DiagnosticsStatesInput<'a> {
     pub fn new(d: &'a DiagnosticsStates) -> Self {
         Self {
             by_path: &d.by_path,
+        }
+    }
+}
+
+/// Per-server LSP status projection. Lives on its own
+/// projection (not bundled with diagnostics) so progress
+/// churn doesn't invalidate the diagnostic-painter memo
+/// cache.
+#[drv::input]
+#[derive(Copy, Clone)]
+pub struct LspStatusesInput<'a> {
+    pub by_server: &'a imbl::HashMap<String, LspServerStatus>,
+}
+
+impl<'a> LspStatusesInput<'a> {
+    pub fn new(s: &'a LspStatuses) -> Self {
+        Self {
+            by_server: &s.by_server,
         }
     }
 }
@@ -793,12 +814,13 @@ fn truncate_to_cols_in_place(s: &mut String, cols: usize) {
 /// All strings are `Arc<str>` so cache-hit clones of
 /// [`StatusBarModel`] are a pointer copy.
 #[drv::memo(single)]
-pub fn status_bar_model<'a, 'b, 'c, 'o, 'd>(
+pub fn status_bar_model<'a, 'b, 'c, 'o, 'd, 'l>(
     alerts: AlertsInput<'a>,
     tabs: TabsActiveInput<'b>,
     edits: EditedBuffersInput<'c>,
     overlays: OverlaysInput<'o>,
     diagnostics: DiagnosticsStatesInput<'d>,
+    lsp: LspStatusesInput<'l>,
 ) -> StatusBarModel {
     // Priority 0a — in-buffer isearch prompt.
     if let Some(state) = overlays.isearch.as_ref() {
@@ -893,7 +915,18 @@ pub fn status_bar_model<'a, 'b, 'c, 'o, 'd>(
         };
     }
 
-    // Priority 4 — default. Dirty dot in cols 2–3 (padded for
+    // Priority 4 — LSP progress ("rust-analyzer: indexing"
+    // etc.). First busy server wins; legacy displayed this on
+    // the left when no alert overrode it.
+    if let Some(msg) = lsp_progress_message(lsp) {
+        return StatusBarModel {
+            left: Arc::from(msg),
+            right,
+            is_warn: false,
+        };
+    }
+
+    // Priority 5 — default. Dirty dot in cols 2–3 (padded for
     // visual alignment with the gutter above).
     let dirty = active_is_dirty(tabs, edits);
     let left: Arc<str> = if dirty {
@@ -922,6 +955,28 @@ fn active_is_dirty(tabs: TabsActiveInput<'_>, edits: EditedBuffersInput<'_>) -> 
         .get(&tab.path)
         .map(|eb| eb.dirty())
         .unwrap_or(false)
+}
+
+/// First busy LSP server's status line, formatted for the left
+/// of the status bar. Returns `None` when every server is idle
+/// / ready — the bar then falls through to the default
+/// dirty-marker path.
+fn lsp_progress_message(lsp: LspStatusesInput<'_>) -> Option<String> {
+    let (server, status) = lsp
+        .by_server
+        .iter()
+        .find(|(_, s)| s.busy)
+        .map(|(name, s)| (name.clone(), s.clone()))?;
+    let mut out = String::with_capacity(server.len() + 32);
+    out.push(' ');
+    out.push_str(&server);
+    out.push_str(": ");
+    if let Some(detail) = status.detail.as_deref() {
+        out.push_str(detail);
+    } else {
+        out.push_str("working");
+    }
+    Some(out)
 }
 
 fn position_string(
@@ -1365,6 +1420,7 @@ pub struct RenderInputs<'a> {
     pub overlays: OverlaysInput<'a>,
     pub syntax: SyntaxStatesInput<'a>,
     pub diagnostics: DiagnosticsStatesInput<'a>,
+    pub lsp: LspStatusesInput<'a>,
 }
 
 pub fn render_frame(inputs: RenderInputs<'_>) -> Option<Frame> {
@@ -1378,11 +1434,12 @@ pub fn render_frame(inputs: RenderInputs<'_>) -> Option<Frame> {
         inputs.overlays,
         inputs.syntax,
         inputs.diagnostics,
+        inputs.lsp,
     )
 }
 
 #[drv::memo(single)]
-fn render_frame_memo<'t, 'e, 'b, 'a, 'al, 'br, 'ov, 'sx, 'dx>(
+fn render_frame_memo<'t, 'e, 'b, 'a, 'al, 'br, 'ov, 'sx, 'dx, 'lsp>(
     term: TerminalDimsInput<'t>,
     edits: EditedBuffersInput<'e>,
     store: StoreLoadedInput<'b>,
@@ -1392,12 +1449,13 @@ fn render_frame_memo<'t, 'e, 'b, 'a, 'al, 'br, 'ov, 'sx, 'dx>(
     overlays: OverlaysInput<'ov>,
     syntax: SyntaxStatesInput<'sx>,
     diagnostics: DiagnosticsStatesInput<'dx>,
+    lsp: LspStatusesInput<'lsp>,
 ) -> Option<Frame> {
     let dims = (*term.dims)?;
     let layout = Layout::compute(dims, *browser.visible);
     let tab_bar = tab_bar_model(tabs, edits);
     let body = body_model(edits, store, tabs, overlays, syntax, diagnostics, layout.editor_area);
-    let status_bar = status_bar_model(alerts, tabs, edits, overlays, diagnostics);
+    let status_bar = status_bar_model(alerts, tabs, edits, overlays, diagnostics, lsp);
     let side_panel = layout
         .side_area
         .map(|area| side_panel_model(browser, overlays, area.rows));
@@ -1552,6 +1610,7 @@ mod tests {
         let is = None;
         let syntax = SyntaxStates::default();
         let diags = DiagnosticsStates::default();
+        let lsp = LspStatuses::default();
         render_frame(RenderInputs {
             term: TerminalDimsInput::new(term),
             edits: EditedBuffersInput::new(e),
@@ -1562,6 +1621,7 @@ mod tests {
             overlays: OverlaysInput::new(&ff, &is, &None),
             syntax: SyntaxStatesInput::new(&syntax),
             diagnostics: DiagnosticsStatesInput::new(&diags),
+            lsp: LspStatusesInput::new(&lsp),
         })
     }
 
@@ -1609,6 +1669,7 @@ mod tests {
 
         let syntax = SyntaxStates::default();
         let diags = DiagnosticsStates::default();
+        let lsp = LspStatuses::default();
         let frame = render_frame(RenderInputs {
             term: TerminalDimsInput::new(&term),
             edits: EditedBuffersInput::new(&e),
@@ -1619,6 +1680,7 @@ mod tests {
             overlays: OverlaysInput::new(&ff, &is, &None),
             syntax: SyntaxStatesInput::new(&syntax),
             diagnostics: DiagnosticsStatesInput::new(&diags),
+            lsp: LspStatusesInput::new(&lsp),
         })
         .expect("dims set");
 
@@ -1648,6 +1710,7 @@ mod tests {
         let is = None;
         let syntax = SyntaxStates::default();
         let diags = DiagnosticsStates::default();
+        let lsp = LspStatuses::default();
         let frame = render_frame(RenderInputs {
             term: TerminalDimsInput::new(&term),
             edits: EditedBuffersInput::new(&e),
@@ -1658,6 +1721,7 @@ mod tests {
             overlays: OverlaysInput::new(&ff, &is, &None),
             syntax: SyntaxStatesInput::new(&syntax),
             diagnostics: DiagnosticsStatesInput::new(&diags),
+            lsp: LspStatusesInput::new(&lsp),
         })
         .expect("dims set");
         assert_eq!(frame.cursor, None);
@@ -2016,12 +2080,14 @@ mod tests {
         let ff = None;
         let is = None;
         let diags = DiagnosticsStates::default();
+        let lsp = LspStatuses::default();
         status_bar_model(
             AlertsInput::new(a),
             TabsActiveInput::new(t),
             EditedBuffersInput::new(e),
             OverlaysInput::new(&ff, &is, &None),
             DiagnosticsStatesInput::new(&diags),
+            LspStatusesInput::new(&lsp),
         )
     }
 

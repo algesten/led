@@ -99,6 +99,37 @@ pub struct BufferDiagnostics {
     pub diagnostics: Vec<Diagnostic>,
 }
 
+/// One LSP server's live status. Populated by the runtime from
+/// `LspEvent::Progress` and `LspEvent::Ready` deliveries; the
+/// status bar renders the first `busy = true` entry it finds
+/// (priority: servers indexing > idle > absent).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct LspServerStatus {
+    /// `true` while the server is mid-task (typing "indexing",
+    /// "building", etc.). Derived from `$/progress` `begin` /
+    /// `report` messages; cleared on `end`.
+    pub busy: bool,
+    /// Human-readable tail the server emitted last. Shown next
+    /// to the server name when present.
+    pub detail: Option<String>,
+    /// `true` once the server has emitted `experimental/serverStatus
+    /// quiescent=true` at least once (rust-analyzer) OR has
+    /// finished its last progress cycle (generic servers).
+    pub ready: bool,
+}
+
+/// Per-server LSP status map, keyed by the server name the
+/// driver assigned (`format!("{:?}", language)` — e.g.
+/// `"Rust"`, `"TypeScript"`). Kept separate from
+/// `DiagnosticsStates` because its identity churns on a
+/// different cadence (progress events, not diagnostic cycles)
+/// and bundling would invalidate the diagnostic memos on every
+/// keystroke.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LspStatuses {
+    pub by_server: HashMap<String, LspServerStatus>,
+}
+
 impl BufferDiagnostics {
     pub fn new(version: BufferVersion, diagnostics: Vec<Diagnostic>) -> Self {
         Self {
