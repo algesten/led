@@ -21,6 +21,7 @@ use std::sync::{Arc, Mutex};
 use led_core::CanonPath;
 use led_driver_find_file_core::FindFileCmd;
 use led_driver_terminal_core::{Dims, KeyEvent};
+use led_state_syntax::Language;
 use ropey::Rope;
 
 /// The runtime-level trace hook. The driver-specific `Trace` traits in
@@ -63,6 +64,14 @@ pub trait Trace: Send + Sync {
     /// an unloaded file. Legacy dispatched.snap name:
     /// `FileSearchSingleReplace`.
     fn file_search_single_replace_start(&self, path: &CanonPath, line: usize);
+    /// Dispatched when the runtime ships a syntax parse request
+    /// off to the tree-sitter worker. Not in legacy's
+    /// dispatched.snap (M15 rewrite-only), but follows the same
+    /// `<Command>\t<args>` shape.
+    fn syntax_parse_start(&self, path: &CanonPath, version: u64, language: Language);
+    /// Completion back from the worker. Not currently serialized
+    /// to dispatched.snap — kept for symmetry + future debug traces.
+    fn syntax_parse_done(&self, path: &CanonPath, version: u64, ok: bool);
     /// Emitted when the find-file driver receives a completion
     /// command. Legacy's dispatched.snap name is `FsFindFile`.
     fn find_file_start(&self, cmd: &FindFileCmd);
@@ -238,6 +247,15 @@ impl Trace for FileTrace {
             line,
         ));
     }
+    fn syntax_parse_start(&self, path: &CanonPath, version: u64, language: Language) {
+        self.write_line(&format!(
+            "SyntaxParse\tpath={} version={} language={:?}",
+            self.format_path(path),
+            version,
+            language,
+        ));
+    }
+    fn syntax_parse_done(&self, _: &CanonPath, _: u64, _: bool) {}
     fn find_file_start(&self, cmd: &FindFileCmd) {
         // Legacy format: `FsFindFile\tdir=<p> prefix="<s>" show_hidden=<bool>`.
         self.write_line(&format!(
@@ -309,6 +327,8 @@ impl Trace for NoopTrace {
     ) {
     }
     fn file_search_single_replace_start(&self, _: &CanonPath, _: usize) {}
+    fn syntax_parse_start(&self, _: &CanonPath, _: u64, _: Language) {}
+    fn syntax_parse_done(&self, _: &CanonPath, _: u64, _: bool) {}
     fn find_file_start(&self, _: &FindFileCmd) {}
     fn find_file_done(&self, _: &CanonPath, _: &str, _: bool) {}
     fn workspace_clear_undo(&self, _: &CanonPath) {}

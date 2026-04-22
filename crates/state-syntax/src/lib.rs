@@ -133,6 +133,14 @@ pub struct SyntaxState {
     /// this version and the buffer's current version before the
     /// painter consumes them.
     pub version: u64,
+    /// The buffer version currently being parsed by the worker, if
+    /// any. Set by the runtime when a `SyntaxCmd` is dispatched,
+    /// cleared when a `SyntaxOut` at or past that version arrives.
+    /// Prevents re-queuing the same parse on every main-loop tick
+    /// while the worker is still busy. `None` means nothing is in
+    /// flight — queue a fresh parse if the buffer is ahead of
+    /// `version`.
+    pub in_flight_version: Option<u64>,
 }
 
 impl SyntaxState {
@@ -142,6 +150,7 @@ impl SyntaxState {
             tree: None,
             tokens: Arc::new(Vec::new()),
             version: 0,
+            in_flight_version: None,
         }
     }
 }

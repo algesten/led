@@ -39,6 +39,8 @@ use led_driver_find_file_core::FindFileDriver;
 use led_driver_find_file_native::FindFileNative;
 use led_driver_fs_list_core::FsListDriver;
 use led_driver_fs_list_native::FsListNative;
+use led_driver_syntax_core::{SyntaxCmd, SyntaxDriver};
+use led_driver_syntax_native::SyntaxNative;
 use led_state_alerts::AlertState;
 use led_state_browser::{BrowserUi, FsTree, rebuild_entries};
 use led_state_buffer_edits::{BufferEdits, EditedBuffer};
@@ -48,6 +50,7 @@ use led_state_find_file::FindFileState;
 use led_state_isearch::IsearchState;
 use led_state_jumps::JumpListState;
 use led_state_kill_ring::KillRing;
+use led_state_syntax::{Language, SyntaxState, SyntaxStates};
 use led_state_tabs::{TabId, Tabs};
 
 /// Wake channel: drivers signal on their own, the main loop blocks on
@@ -113,6 +116,7 @@ pub struct Drivers {
     pub fs_list: FsListDriver,
     pub find_file: FindFileDriver,
     pub file_search: FileSearchDriver,
+    pub syntax: SyntaxDriver,
 
     // Held only for lifetime management; detached on drop.
     _file_native: FileReadNative,
@@ -122,6 +126,7 @@ pub struct Drivers {
     _fs_list_native: FsListNative,
     _find_file_native: FindFileNative,
     _file_search_native: FileSearchNative,
+    _syntax_native: SyntaxNative,
 }
 
 /// Allocator for fresh `TabId`s. Counter only; ids are never reused.
@@ -163,6 +168,10 @@ pub struct Atoms {
     /// `Some` while the project-wide file-search overlay is active.
     /// See [`led_state_file_search::FileSearchState`].
     pub file_search: Option<FileSearchState>,
+    /// Per-buffer tree-sitter state. A buffer gains an entry when a
+    /// load completes and the path's extension matches a known
+    /// language; otherwise the buffer has no syntax highlighting.
+    pub syntax: SyntaxStates,
 }
 
 /// Run-time seam: the single thing the main loop sees. Owns nothing
@@ -195,6 +204,7 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
         find_file,
         isearch,
         file_search,
+        syntax,
     } = &mut *world.atoms;
     let drivers = world.drivers;
     let wake = world.wake;
@@ -227,7 +237,19 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
         // alloc on the happy path.
         let completions = drivers.file.process(store);
         for completion in completions {
-            seed_edit_from_load(edits, completion.path, completion.rope);
+            // Detect a syntax language for this path *before* the
+            // seed call, because we want to attach a `SyntaxState`
+            // entry even when `seed_edit_from_load` discards the
+            // completion (i.e. the buffer was already edited — the
+            // state entry may already exist but we seed it idempotently).
+            let detected = Language::from_path(&completion.path);
+            seed_edit_from_load(edits, completion.path.clone(), completion.rope);
+            if let Some(lang) = detected {
+                syntax
+                    .by_path
+                    .entry(completion.path)
+                    .or_insert_with(|| SyntaxState::new(lang));
+            }
         }
 
         // Apply write completions: round-trip the saved rope into
@@ -363,6 +385,33 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
                 )
             };
             alerts.set_info(msg, Instant::now(), INFO_TTL);
+        }
+
+        // Apply syntax parse completions. The worker echoes the
+        // request's `version`; we drop completions whose version
+        // is older than the current buffer version (a stale parse
+        // from before the user typed more). `in_flight_version` is
+        // cleared whenever a completion arrives so a fresher edit
+        // can queue a new parse on the next tick.
+        for done in drivers.syntax.process() {
+            let Some(state) = syntax.by_path.get_mut(&done.path) else {
+                continue;
+            };
+            state.in_flight_version = None;
+            let current_version = edits
+                .buffers
+                .get(&done.path)
+                .map(|eb| eb.version)
+                .unwrap_or(0);
+            if done.version < state.version || done.version > current_version {
+                // Older than what we already have, or somehow ahead
+                // of the buffer (shouldn't happen, but guard).
+                continue;
+            }
+            state.language = done.language;
+            state.tree = Some(done.tree);
+            state.tokens = done.tokens;
+            state.version = done.version;
         }
 
         // Apply clipboard completions: either paste the text at the
@@ -585,6 +634,38 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
             }
         }
 
+        // Syntax parse dispatch. For every buffer whose language
+        // we've identified and whose current version is ahead of
+        // (a) the last-applied tokens' version AND (b) any parse
+        // currently in flight, ship a `SyntaxCmd` to the worker
+        // and mark `in_flight_version`. The worker coalesces stale
+        // cmds internally, but tracking in-flight on our side
+        // avoids stuffing the channel on idle ticks.
+        let mut syntax_cmds: Vec<SyntaxCmd> = Vec::new();
+        for (path, state) in syntax.by_path.iter_mut() {
+            let Some(eb) = edits.buffers.get(path) else {
+                continue;
+            };
+            if eb.version <= state.version {
+                continue;
+            }
+            if state.in_flight_version == Some(eb.version) {
+                continue;
+            }
+            syntax_cmds.push(SyntaxCmd {
+                path: path.clone(),
+                version: eb.version,
+                rope: eb.rope.clone(),
+                language: state.language,
+                prev_tree: state.tree.clone(),
+                edits_since_prev: Vec::new(),
+            });
+            state.in_flight_version = Some(eb.version);
+        }
+        if !syntax_cmds.is_empty() {
+            drivers.syntax.execute(syntax_cmds.iter());
+        }
+
         // Clipboard actions: a Read when a yank is pending (no read
         // already in flight), a Write when a kill queued clipboard
         // text. Both flags cleared synchronously per the execute
@@ -750,6 +831,10 @@ pub fn spawn_drivers(trace: SharedTrace, wake: &Wake) -> io::Result<Drivers> {
         trace.clone().as_file_search_trace(),
         wake.notifier.clone(),
     );
+    let (syntax, syntax_native) = led_driver_syntax_native::spawn(
+        trace.clone().as_syntax_trace(),
+        wake.notifier.clone(),
+    );
     let (input, input_native) = led_driver_terminal_native::spawn(
         trace.clone().as_terminal_trace(),
         wake.notifier.clone(),
@@ -764,6 +849,7 @@ pub fn spawn_drivers(trace: SharedTrace, wake: &Wake) -> io::Result<Drivers> {
         fs_list,
         find_file,
         file_search,
+        syntax,
         _file_native: file_native,
         _file_write_native: file_write_native,
         _input_native: input_native,
@@ -771,6 +857,7 @@ pub fn spawn_drivers(trace: SharedTrace, wake: &Wake) -> io::Result<Drivers> {
         _fs_list_native: fs_list_native,
         _find_file_native: find_file_native,
         _file_search_native: file_search_native,
+        _syntax_native: syntax_native,
     })
 }
 
@@ -796,6 +883,7 @@ pub(crate) mod trace_adapter {
     pub(crate) struct FsListTraceAdapter(pub Arc<dyn Trace>);
     pub(crate) struct FindFileTraceAdapter(pub Arc<dyn Trace>);
     pub(crate) struct FileSearchTraceAdapter(pub Arc<dyn Trace>);
+    pub(crate) struct SyntaxTraceAdapter(pub Arc<dyn Trace>);
 
     impl led_driver_buffers_core::Trace for FileTraceAdapter {
         fn file_load_start(&self, path: &CanonPath) {
@@ -867,6 +955,20 @@ pub(crate) mod trace_adapter {
         }
     }
 
+    impl led_driver_syntax_core::Trace for SyntaxTraceAdapter {
+        fn syntax_parse_start(
+            &self,
+            path: &CanonPath,
+            version: u64,
+            language: led_state_syntax::Language,
+        ) {
+            self.0.syntax_parse_start(path, version, language);
+        }
+        fn syntax_parse_done(&self, path: &CanonPath, version: u64, ok: bool) {
+            self.0.syntax_parse_done(path, version, ok);
+        }
+    }
+
     impl led_driver_file_search_core::Trace for FileSearchTraceAdapter {
         fn file_search_start(&self, cmd: &led_driver_file_search_core::FileSearchCmd) {
             self.0.file_search_start(
@@ -927,6 +1029,9 @@ impl SharedTrace {
         &self,
     ) -> Arc<dyn led_driver_file_search_core::Trace> {
         Arc::new(trace_adapter::FileSearchTraceAdapter(self.inner()))
+    }
+    pub(crate) fn as_syntax_trace(&self) -> Arc<dyn led_driver_syntax_core::Trace> {
+        Arc::new(trace_adapter::SyntaxTraceAdapter(self.inner()))
     }
 }
 
