@@ -76,12 +76,15 @@ fn worker_loop(rx: Receiver<SyntaxCmd>, tx: Sender<SyntaxOut>, notify: Notifier)
 /// still return a `SyntaxOut` — just with an empty token list — so
 /// the runtime can move its `version` forward and stop retrying
 /// the same stale state.
+///
+/// Most languages use a single grammar. Markdown is special: the
+/// block grammar parses paragraph / heading / list structure while
+/// the inline grammar parses `**emphasis**`, `` `code` ``, links,
+/// etc. We parse both against the same bytes and merge the raw
+/// captures before flattening so the painter sees one coherent
+/// span list.
 fn run_parse(parser: &mut Parser, cursor: &mut QueryCursor, cmd: SyntaxCmd) -> SyntaxOut {
-    let (language, query) = grammar_for(cmd.language);
-
-    // set_language is cheap; doing it unconditionally keeps the
-    // worker correct when the previous cmd was a different grammar.
-    let _ = parser.set_language(&language);
+    let grammars = grammars_for(cmd.language);
 
     // Materialize the rope to a byte buffer. Tree-sitter and the
     // query text-provider both want contiguous bytes; going through
@@ -89,24 +92,39 @@ fn run_parse(parser: &mut Parser, cursor: &mut QueryCursor, cmd: SyntaxCmd) -> S
     // enough that the copy is not the bottleneck.
     let bytes = rope_to_bytes(&cmd.rope);
 
-    let tree = match parser.parse(&bytes, None) {
-        Some(t) => Arc::new(t),
-        None => {
-            return SyntaxOut {
-                path: cmd.path,
-                version: cmd.version,
-                language: cmd.language,
-                tree: Arc::new(
-                    parser
-                        .parse("", None)
-                        .expect("empty parse should succeed after set_language"),
-                ),
-                tokens: Arc::new(Vec::new()),
-            };
-        }
-    };
+    let mut primary_tree: Option<Arc<tree_sitter::Tree>> = None;
+    let mut raw_captures: Vec<(usize, usize, TokenKind)> = Vec::new();
 
-    let tokens = extract_tokens(&bytes, &cmd.rope, tree.root_node(), query, cursor);
+    for (language, query) in &grammars {
+        // set_language is cheap; doing it unconditionally keeps the
+        // worker correct across language switches + between the
+        // block / inline passes for the same cmd.
+        let _ = parser.set_language(language);
+        let Some(tree) = parser.parse(&bytes, None) else {
+            continue;
+        };
+        collect_raw_captures(
+            &bytes,
+            &cmd.rope,
+            tree.root_node(),
+            query,
+            cursor,
+            &mut raw_captures,
+        );
+        if primary_tree.is_none() {
+            primary_tree = Some(Arc::new(tree));
+        }
+    }
+
+    let tree = match primary_tree {
+        Some(t) => t,
+        None => Arc::new(
+            parser
+                .parse("", None)
+                .expect("empty parse should succeed after set_language"),
+        ),
+    };
+    let tokens = flatten_nested(raw_captures);
 
     SyntaxOut {
         path: cmd.path,
@@ -125,29 +143,20 @@ fn rope_to_bytes(rope: &Rope) -> Vec<u8> {
     bytes
 }
 
-/// Run the highlight query against the parsed tree, map each
-/// capture name to a `TokenKind`, translate byte offsets to char
-/// offsets via the rope, and return a flat list of non-overlapping
-/// token spans in ascending order.
-///
-/// Tree-sitter emits nested captures: a broad `(attribute_item) @attribute`
-/// wraps narrower `@type` / `@constructor` captures inside it.
-/// A flat "first-claim wins" painter would paint everything inside
-/// the attribute with the attribute's colour. We instead flatten
-/// the nested structure so the INNERMOST capture wins at each
-/// character — matching what every other editor (zed, helix, nvim)
-/// does. Ties go to the later-emitted capture, which in tree-sitter's
-/// document order means the more-specific pattern.
-fn extract_tokens(
+/// Run a single highlight query against a parsed tree, appending
+/// its captures (as `(char_start, char_end, kind)` triples) to
+/// `out` without flattening. Callers may make multiple calls for
+/// multi-grammar languages (markdown's block + inline) and flatten
+/// once across the union.
+fn collect_raw_captures(
     bytes: &[u8],
     rope: &Rope,
     root: tree_sitter::Node,
     query: &Query,
     cursor: &mut QueryCursor,
-) -> Vec<TokenSpan> {
+    out: &mut Vec<(usize, usize, TokenKind)>,
+) {
     let capture_names = query.capture_names();
-    let mut raw: Vec<(usize, usize, TokenKind)> = Vec::new();
-
     let mut it = cursor.captures(query, root, bytes);
     while let Some((m, capture_ix)) = it.next() {
         let cap = m.captures[*capture_ix];
@@ -162,10 +171,8 @@ fn extract_tokens(
         }
         let char_start = rope.byte_to_char(start_byte);
         let char_end = rope.byte_to_char(end_byte);
-        raw.push((char_start, char_end, kind));
+        out.push((char_start, char_end, kind));
     }
-
-    flatten_nested(raw)
 }
 
 /// Flatten a set of nested / overlapping `(start, end, kind)`
@@ -241,13 +248,28 @@ fn flatten_nested(captures: Vec<(usize, usize, TokenKind)>) -> Vec<TokenSpan> {
 /// taxonomy follows nvim-treesitter conventions: dot-separated
 /// classes from most to least specific (`keyword.return`,
 /// `function.method.builtin`, …). We match on the top-level class
-/// and ignore modifiers.
+/// and ignore modifiers — except for the `text.*` family used by
+/// the markdown grammar, where each sub-kind has a different
+/// semantic colour (title / literal / uri / reference all
+/// distinct), so those are matched on the full dotted name first.
 ///
 /// Returning `None` drops the capture (e.g. auxiliary captures
 /// starting with `_` that highlight queries use as scaffolding).
 fn capture_name_to_kind(name: &str) -> Option<TokenKind> {
     if name.starts_with('_') {
         return None;
+    }
+    // Markdown-specific: `text.*` captures route to distinct colour
+    // slots (legacy behaviour: title→label, literal→string,
+    // reference→attribute, uri→keyword). Checked before the head-
+    // based match because the head `"text"` alone is ambiguous.
+    match name {
+        "text.title" => return Some(TokenKind::Label),
+        "text.literal" => return Some(TokenKind::String),
+        "text.reference" => return Some(TokenKind::Attribute),
+        "text.uri" => return Some(TokenKind::Keyword),
+        "text.strong" | "text.emphasis" => return Some(TokenKind::Label),
+        _ => {}
     }
     let head = name.split('.').next().unwrap_or(name);
     Some(match head {
@@ -273,145 +295,106 @@ fn capture_name_to_kind(name: &str) -> Option<TokenKind> {
     })
 }
 
-/// Per-language grammar + highlight query, each cached in a
-/// `OnceLock` so we pay the `Query::new` cost (parse the scm source
-/// and compile the predicate tables) exactly once per session.
-fn grammar_for(lang: Language) -> (tree_sitter::Language, &'static Query) {
+/// Per-language list of `(grammar, highlight query)` pairs. Each
+/// pair is compiled once per session behind a `OnceLock`. Most
+/// languages return a single pair; markdown returns two — block
+/// and inline — which the worker runs sequentially against the
+/// same bytes and merges before flattening.
+fn grammars_for(lang: Language) -> Vec<(tree_sitter::Language, &'static Query)> {
+    fn compile(lang: tree_sitter::Language, src: &str, label: &str) -> Query {
+        Query::new(&lang, src).unwrap_or_else(|e| panic!("{label} highlights.scm: {e}"))
+    }
     match lang {
         Language::Rust => {
-            let lang: tree_sitter::Language = tree_sitter_rust::LANGUAGE.into();
             static Q: OnceLock<Query> = OnceLock::new();
-            let query = Q.get_or_init(|| {
-                Query::new(&tree_sitter_rust::LANGUAGE.into(), tree_sitter_rust::HIGHLIGHTS_QUERY)
-                    .expect("rust highlights.scm must compile")
-            });
-            (lang, query)
+            let l: tree_sitter::Language = tree_sitter_rust::LANGUAGE.into();
+            let q = Q.get_or_init(|| compile(l.clone(), tree_sitter_rust::HIGHLIGHTS_QUERY, "rust"));
+            vec![(l, q)]
         }
         Language::TypeScript => {
-            let lang: tree_sitter::Language = tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into();
             static Q: OnceLock<Query> = OnceLock::new();
-            let query = Q.get_or_init(|| {
-                Query::new(
-                    &tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
-                    tree_sitter_typescript::HIGHLIGHTS_QUERY,
-                )
-                .expect("typescript highlights.scm must compile")
-            });
-            (lang, query)
+            let l: tree_sitter::Language = tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into();
+            let q = Q
+                .get_or_init(|| compile(l.clone(), tree_sitter_typescript::HIGHLIGHTS_QUERY, "typescript"));
+            vec![(l, q)]
         }
         Language::JavaScript => {
-            let lang: tree_sitter::Language = tree_sitter_javascript::LANGUAGE.into();
             static Q: OnceLock<Query> = OnceLock::new();
-            let query = Q.get_or_init(|| {
-                Query::new(
-                    &tree_sitter_javascript::LANGUAGE.into(),
-                    tree_sitter_javascript::HIGHLIGHT_QUERY,
-                )
-                .expect("javascript highlights.scm must compile")
-            });
-            (lang, query)
+            let l: tree_sitter::Language = tree_sitter_javascript::LANGUAGE.into();
+            let q = Q
+                .get_or_init(|| compile(l.clone(), tree_sitter_javascript::HIGHLIGHT_QUERY, "javascript"));
+            vec![(l, q)]
         }
         Language::Python => {
-            let lang: tree_sitter::Language = tree_sitter_python::LANGUAGE.into();
             static Q: OnceLock<Query> = OnceLock::new();
-            let query = Q.get_or_init(|| {
-                Query::new(
-                    &tree_sitter_python::LANGUAGE.into(),
-                    tree_sitter_python::HIGHLIGHTS_QUERY,
-                )
-                .expect("python highlights.scm must compile")
-            });
-            (lang, query)
+            let l: tree_sitter::Language = tree_sitter_python::LANGUAGE.into();
+            let q = Q.get_or_init(|| compile(l.clone(), tree_sitter_python::HIGHLIGHTS_QUERY, "python"));
+            vec![(l, q)]
         }
         Language::Bash => {
-            let lang: tree_sitter::Language = tree_sitter_bash::LANGUAGE.into();
             static Q: OnceLock<Query> = OnceLock::new();
-            let query = Q.get_or_init(|| {
-                Query::new(&tree_sitter_bash::LANGUAGE.into(), tree_sitter_bash::HIGHLIGHT_QUERY)
-                    .expect("bash highlights.scm must compile")
-            });
-            (lang, query)
+            let l: tree_sitter::Language = tree_sitter_bash::LANGUAGE.into();
+            let q = Q.get_or_init(|| compile(l.clone(), tree_sitter_bash::HIGHLIGHT_QUERY, "bash"));
+            vec![(l, q)]
         }
         Language::Markdown => {
-            // The markdown grammar ships block + inline queries; we
-            // only wire the block one for now (the inline grammar
-            // lives in a separate crate and isn't enabled yet).
-            let lang: tree_sitter::Language = tree_sitter_md::LANGUAGE.into();
-            static Q: OnceLock<Query> = OnceLock::new();
-            let query = Q.get_or_init(|| {
-                Query::new(&tree_sitter_md::LANGUAGE.into(), tree_sitter_md::HIGHLIGHT_QUERY_BLOCK)
-                    .expect("markdown block highlights.scm must compile")
+            // Block grammar for headings / lists / fences; inline
+            // grammar for `**bold**`, `_em_`, links, code spans.
+            // Run both against the same bytes — the tokens merge
+            // at flatten time.
+            static QB: OnceLock<Query> = OnceLock::new();
+            static QI: OnceLock<Query> = OnceLock::new();
+            let block: tree_sitter::Language = tree_sitter_md::LANGUAGE.into();
+            let inline: tree_sitter::Language = tree_sitter_md::INLINE_LANGUAGE.into();
+            let qb = QB.get_or_init(|| {
+                compile(block.clone(), tree_sitter_md::HIGHLIGHT_QUERY_BLOCK, "markdown-block")
             });
-            (lang, query)
+            let qi = QI.get_or_init(|| {
+                compile(inline.clone(), tree_sitter_md::HIGHLIGHT_QUERY_INLINE, "markdown-inline")
+            });
+            vec![(block, qb), (inline, qi)]
         }
         Language::Json => {
-            let lang: tree_sitter::Language = tree_sitter_json::LANGUAGE.into();
             static Q: OnceLock<Query> = OnceLock::new();
-            let query = Q.get_or_init(|| {
-                Query::new(&tree_sitter_json::LANGUAGE.into(), tree_sitter_json::HIGHLIGHTS_QUERY)
-                    .expect("json highlights.scm must compile")
-            });
-            (lang, query)
+            let l: tree_sitter::Language = tree_sitter_json::LANGUAGE.into();
+            let q = Q.get_or_init(|| compile(l.clone(), tree_sitter_json::HIGHLIGHTS_QUERY, "json"));
+            vec![(l, q)]
         }
         Language::Toml => {
-            let lang: tree_sitter::Language = tree_sitter_toml_ng::LANGUAGE.into();
             static Q: OnceLock<Query> = OnceLock::new();
-            let query = Q.get_or_init(|| {
-                Query::new(
-                    &tree_sitter_toml_ng::LANGUAGE.into(),
-                    tree_sitter_toml_ng::HIGHLIGHTS_QUERY,
-                )
-                .expect("toml highlights.scm must compile")
-            });
-            (lang, query)
+            let l: tree_sitter::Language = tree_sitter_toml_ng::LANGUAGE.into();
+            let q = Q.get_or_init(|| compile(l.clone(), tree_sitter_toml_ng::HIGHLIGHTS_QUERY, "toml"));
+            vec![(l, q)]
         }
         Language::C => {
-            let lang: tree_sitter::Language = tree_sitter_c::LANGUAGE.into();
             static Q: OnceLock<Query> = OnceLock::new();
-            let query = Q.get_or_init(|| {
-                Query::new(&tree_sitter_c::LANGUAGE.into(), tree_sitter_c::HIGHLIGHT_QUERY)
-                    .expect("c highlights.scm must compile")
-            });
-            (lang, query)
+            let l: tree_sitter::Language = tree_sitter_c::LANGUAGE.into();
+            let q = Q.get_or_init(|| compile(l.clone(), tree_sitter_c::HIGHLIGHT_QUERY, "c"));
+            vec![(l, q)]
         }
         Language::Cpp => {
-            let lang: tree_sitter::Language = tree_sitter_cpp::LANGUAGE.into();
             static Q: OnceLock<Query> = OnceLock::new();
-            let query = Q.get_or_init(|| {
-                Query::new(&tree_sitter_cpp::LANGUAGE.into(), tree_sitter_cpp::HIGHLIGHT_QUERY)
-                    .expect("cpp highlights.scm must compile")
-            });
-            (lang, query)
+            let l: tree_sitter::Language = tree_sitter_cpp::LANGUAGE.into();
+            let q = Q.get_or_init(|| compile(l.clone(), tree_sitter_cpp::HIGHLIGHT_QUERY, "cpp"));
+            vec![(l, q)]
         }
         Language::Ruby => {
-            let lang: tree_sitter::Language = tree_sitter_ruby::LANGUAGE.into();
             static Q: OnceLock<Query> = OnceLock::new();
-            let query = Q.get_or_init(|| {
-                Query::new(&tree_sitter_ruby::LANGUAGE.into(), tree_sitter_ruby::HIGHLIGHTS_QUERY)
-                    .expect("ruby highlights.scm must compile")
-            });
-            (lang, query)
+            let l: tree_sitter::Language = tree_sitter_ruby::LANGUAGE.into();
+            let q = Q.get_or_init(|| compile(l.clone(), tree_sitter_ruby::HIGHLIGHTS_QUERY, "ruby"));
+            vec![(l, q)]
         }
         Language::Swift => {
-            let lang: tree_sitter::Language = tree_sitter_swift::LANGUAGE.into();
             static Q: OnceLock<Query> = OnceLock::new();
-            let query = Q.get_or_init(|| {
-                Query::new(
-                    &tree_sitter_swift::LANGUAGE.into(),
-                    tree_sitter_swift::HIGHLIGHTS_QUERY,
-                )
-                .expect("swift highlights.scm must compile")
-            });
-            (lang, query)
+            let l: tree_sitter::Language = tree_sitter_swift::LANGUAGE.into();
+            let q = Q.get_or_init(|| compile(l.clone(), tree_sitter_swift::HIGHLIGHTS_QUERY, "swift"));
+            vec![(l, q)]
         }
         Language::Make => {
-            let lang: tree_sitter::Language = tree_sitter_make::LANGUAGE.into();
             static Q: OnceLock<Query> = OnceLock::new();
-            let query = Q.get_or_init(|| {
-                Query::new(&tree_sitter_make::LANGUAGE.into(), tree_sitter_make::HIGHLIGHTS_QUERY)
-                    .expect("make highlights.scm must compile")
-            });
-            (lang, query)
+            let l: tree_sitter::Language = tree_sitter_make::LANGUAGE.into();
+            let q = Q.get_or_init(|| compile(l.clone(), tree_sitter_make::HIGHLIGHTS_QUERY, "make"));
+            vec![(l, q)]
         }
     }
 }
