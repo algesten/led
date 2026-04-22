@@ -1,0 +1,17 @@
+[package]
+name = "led-state-syntax"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Per-buffer syntax state: tree-sitter `Tree` + latest-known
+# highlight tokens + the rope version the parse was run against.
+# Lives on `Atoms.syntax` keyed by `CanonPath`, one entry per
+# loaded buffer. The runtime seeds entries on file load and
+# updates them when the syntax driver returns fresh parses.
+
+[dependencies]
+led-core = { workspace = true }
+led-state-buffer-edits = { workspace = true }
+imbl = { workspace = true }
+tree-sitter = { workspace = true }

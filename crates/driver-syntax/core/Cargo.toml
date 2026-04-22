@@ -1,0 +1,17 @@
+[package]
+name = "led-driver-syntax-core"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Sync core of the syntax driver.
+#
+# Command / completion ABI for tree-sitter parsing. The native
+# worker lives in `driver-syntax/native`; this crate holds the
+# wire shapes + the main-loop-facing `SyntaxDriver`.
+
+[dependencies]
+led-core = { workspace = true }
+led-state-syntax = { workspace = true }
+ropey = { workspace = true }
+tree-sitter = { workspace = true }

@@ -12,6 +12,7 @@ members = [
     "crates/state-find-file",
     "crates/state-isearch",
     "crates/state-file-search",
+    "crates/state-syntax",
     "crates/driver-buffers/core",
     "crates/driver-buffers/native",
     "crates/driver-terminal/core",
@@ -24,6 +25,8 @@ members = [
     "crates/driver-find-file/native",
     "crates/driver-file-search/core",
     "crates/driver-file-search/native",
+    "crates/driver-syntax/core",
+    "crates/driver-syntax/native",
     "crates/runtime",
     "crates/fake-lsp",
     "crates/fake-gh",
@@ -44,6 +47,7 @@ led-state-browser = { path = "crates/state-browser" }
 led-state-find-file = { path = "crates/state-find-file" }
 led-state-isearch = { path = "crates/state-isearch" }
 led-state-file-search = { path = "crates/state-file-search" }
+led-state-syntax = { path = "crates/state-syntax" }
 led-driver-buffers-core = { path = "crates/driver-buffers/core" }
 led-driver-buffers-native = { path = "crates/driver-buffers/native" }
 led-driver-terminal-core = { path = "crates/driver-terminal/core" }
@@ -56,6 +60,8 @@ led-driver-find-file-core = { path = "crates/driver-find-file/core" }
 led-driver-find-file-native = { path = "crates/driver-find-file/native" }
 led-driver-file-search-core = { path = "crates/driver-file-search/core" }
 led-driver-file-search-native = { path = "crates/driver-file-search/native" }
+led-driver-syntax-core = { path = "crates/driver-syntax/core" }
+led-driver-syntax-native = { path = "crates/driver-syntax/native" }
 led-runtime = { path = "crates/runtime" }
 
 # drv = the memoization / query primitive.
