@@ -208,11 +208,16 @@ fn apply_toml(
 /// themes use extensively — the shorthand is interpreted as an
 /// `fg`-only style.
 ///
-/// Unknown kinds produce a warning and are dropped. Legacy uses
-/// dotted keys like `"type.builtin"` for finer-grained tree-sitter
-/// captures; those collapse onto our top-level `TokenKind` by the
-/// first segment (so `type.builtin` assigns to `type`). Duplicate
-/// assignments overwrite in iteration order — same as `[chrome]`.
+/// Legacy themes use dotted keys like `"type.builtin"` /
+/// `"string.special"` for finer-grained tree-sitter captures. Our
+/// `TokenKind` enum is coarser — we only have one `String` slot
+/// covering all string-like captures — so dotted keys collapse
+/// onto the base kind. When a theme defines BOTH (e.g. `string`
+/// and `"string.special"`) the non-dotted key wins: we process
+/// non-dotted keys first and let dotted keys only fill in bases
+/// that weren't explicitly set. Otherwise iteration order
+/// (alphabetical, via `toml`'s `BTreeMap`) would have
+/// `"string.special"` silently overwrite `string`.
 fn apply_syntax(
     loaded: &mut LoadedTheme,
     path: &Path,
@@ -228,46 +233,81 @@ fn apply_syntax(
             });
         }
     };
+    let mut explicit_bases: HashSet<String> = HashSet::new();
+    // Pass 1: non-dotted keys. These are the authoritative
+    // assignments for each TokenKind.
     for (kind, style_value) in table {
-        let style = match style_value {
-            toml::Value::Table(t) => {
-                match parse_style(t, "syntax", kind, aliases, &mut loaded.warnings) {
-                    Some(s) => s,
-                    None => continue,
-                }
-            }
-            toml::Value::String(_) => {
-                // Bare-string shorthand: value is an fg colour.
-                let Some(color) = parse_color(style_value, aliases) else {
-                    loaded.warnings.push(format!(
-                        "[syntax] `{kind}`: unknown color `{}` (skipped)",
-                        style_value.as_str().unwrap_or(""),
-                    ));
-                    continue;
-                };
-                Style {
-                    fg: Some(color),
-                    ..Style::default()
-                }
-            }
-            _ => {
-                loaded.warnings.push(format!(
-                    "[syntax] `{kind}`: expected table or color string (skipped)"
-                ));
-                continue;
-            }
+        if kind.contains('.') {
+            continue;
+        }
+        let Some(style) = resolve_syntax_style(kind, style_value, aliases, &mut loaded.warnings)
+        else {
+            continue;
         };
-        // Collapse dotted keys onto the base kind (e.g.
-        // `type.builtin` → `type`). Legacy writes finer-grained
-        // overrides; we route them to the broadest class we know.
-        let base_kind = kind.split('.').next().unwrap_or(kind.as_str());
-        if !assign_syntax_kind(&mut loaded.theme.syntax, base_kind, style) {
+        if assign_syntax_kind(&mut loaded.theme.syntax, kind, style) {
+            explicit_bases.insert(kind.clone());
+        } else {
+            loaded
+                .warnings
+                .push(format!("[syntax] `{kind}`: unknown token kind (skipped)"));
+        }
+    }
+    // Pass 2: dotted keys fill in bases that weren't explicitly set
+    // above. If the user set `string` directly, don't let
+    // `string.special` clobber it.
+    for (kind, style_value) in table {
+        if !kind.contains('.') {
+            continue;
+        }
+        let base_kind = kind.split('.').next().unwrap_or(kind.as_str()).to_string();
+        if explicit_bases.contains(&base_kind) {
+            continue;
+        }
+        let Some(style) = resolve_syntax_style(kind, style_value, aliases, &mut loaded.warnings)
+        else {
+            continue;
+        };
+        if !assign_syntax_kind(&mut loaded.theme.syntax, &base_kind, style) {
             loaded
                 .warnings
                 .push(format!("[syntax] `{kind}`: unknown token kind (skipped)"));
         }
     }
     Ok(())
+}
+
+/// Resolve one `[syntax]` entry to a `Style`. Handles both the
+/// table form (`{ fg = "...", bold = true }`) and the bare-string
+/// shorthand (`"$syntax_keyword"` → `{ fg = "$syntax_keyword" }`).
+/// Emits warnings for malformed values and returns `None` for them.
+fn resolve_syntax_style(
+    kind: &str,
+    style_value: &toml::Value,
+    aliases: &Aliases,
+    warnings: &mut Vec<String>,
+) -> Option<Style> {
+    match style_value {
+        toml::Value::Table(t) => parse_style(t, "syntax", kind, aliases, warnings),
+        toml::Value::String(_) => {
+            let Some(color) = parse_color(style_value, aliases) else {
+                warnings.push(format!(
+                    "[syntax] `{kind}`: unknown color `{}` (skipped)",
+                    style_value.as_str().unwrap_or(""),
+                ));
+                return None;
+            };
+            Some(Style {
+                fg: Some(color),
+                ..Style::default()
+            })
+        }
+        _ => {
+            warnings.push(format!(
+                "[syntax] `{kind}`: expected table or color string (skipped)"
+            ));
+            None
+        }
+    }
 }
 
 /// Flatten `[COLORS]` into a `HashMap<name, value-string>`. Values
@@ -804,6 +844,33 @@ tag = "x160"
         );
         let loaded = load_theme(None, Some(&path)).unwrap();
         assert_eq!(loaded.theme.syntax.type_.fg, Some(Color::Indexed(30)));
+    }
+
+    #[test]
+    fn explicit_base_key_wins_over_dotted_sibling() {
+        // Legacy themes define BOTH `string = "..."` (green) and
+        // `"string.special" = "..."` (magenta) for finer-grained
+        // coverage. Our TokenKind is coarser — only one slot per
+        // base class. The non-dotted key must win, otherwise
+        // iteration order silently clobbers the authoritative
+        // assignment with the more specific dotted sibling.
+        let tmp = tempdir();
+        let path = write_theme(
+            &tmp,
+            r##"
+[syntax]
+string           = "x034"
+"string.regex"   = "x034"
+"string.special" = "magenta"
+"##,
+        );
+        let loaded = load_theme(None, Some(&path)).unwrap();
+        assert_eq!(
+            loaded.theme.syntax.string.fg,
+            Some(Color::Indexed(34)),
+            "warnings: {:?}",
+            loaded.warnings,
+        );
     }
 
     #[test]
