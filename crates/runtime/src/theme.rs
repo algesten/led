@@ -29,7 +29,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use led_driver_terminal_core::{Color, Style, Theme};
+use led_driver_terminal_core::{Color, Style, SyntaxTheme, Theme};
 
 /// Result of [`load_theme`]: the resolved theme plus any non-fatal
 /// parse warnings. Unknown region names / unknown color names /
@@ -128,6 +128,10 @@ fn apply_toml(
             })
         }
     };
+    if let Some(syntax_value) = root.get("syntax") {
+        apply_syntax(loaded, path, syntax_value)?;
+    }
+
     let Some(chrome) = root.get("chrome") else {
         return Ok(());
     };
@@ -168,7 +172,7 @@ fn apply_toml(
                 continue;
             }
         };
-        let style = match parse_style(style_table, region, &mut loaded.warnings) {
+        let style = match parse_style(style_table, "chrome", region, &mut loaded.warnings) {
             Some(s) => s,
             None => continue,
         };
@@ -182,8 +186,78 @@ fn apply_toml(
     Ok(())
 }
 
+/// Ingest the `[syntax]` TOML table, one sub-table per
+/// [`TokenKind`]. Same field grammar as `[chrome.<region>]` —
+/// `fg` / `bg` / `bold` / `reverse` / `underline`. Unknown kinds
+/// produce a warning and are dropped; malformed styles warn and
+/// leave the default slot intact.
+fn apply_syntax(
+    loaded: &mut LoadedTheme,
+    path: &Path,
+    syntax: &toml::Value,
+) -> Result<(), ThemeError> {
+    let table = match syntax {
+        toml::Value::Table(t) => t,
+        _ => {
+            return Err(ThemeError::SchemaMismatch {
+                path: path.to_path_buf(),
+                message: "`syntax` must be a table".into(),
+            });
+        }
+    };
+    for (kind, style_value) in table {
+        let style_table = match style_value {
+            toml::Value::Table(t) => t,
+            _ => {
+                loaded
+                    .warnings
+                    .push(format!("[syntax] `{kind}`: value must be a table (skipped)"));
+                continue;
+            }
+        };
+        let style = match parse_style(style_table, "syntax", kind, &mut loaded.warnings) {
+            Some(s) => s,
+            None => continue,
+        };
+        if !assign_syntax_kind(&mut loaded.theme.syntax, kind, style) {
+            loaded
+                .warnings
+                .push(format!("[syntax] `{kind}`: unknown token kind (skipped)"));
+        }
+    }
+    Ok(())
+}
+
+fn assign_syntax_kind(syntax: &mut SyntaxTheme, kind: &str, style: Style) -> bool {
+    // `type` is a reserved word in Rust, so the struct field is
+    // `type_`; accept both the natural `type` spelling and the
+    // underscore variant from TOML for consistency.
+    match kind {
+        "keyword" => syntax.keyword = style,
+        "type" | "type_" => syntax.type_ = style,
+        "function" => syntax.function = style,
+        "string" => syntax.string = style,
+        "number" => syntax.number = style,
+        "boolean" => syntax.boolean = style,
+        "comment" => syntax.comment = style,
+        "operator" => syntax.operator = style,
+        "punctuation" => syntax.punctuation = style,
+        "variable" => syntax.variable = style,
+        "property" => syntax.property = style,
+        "attribute" => syntax.attribute = style,
+        "tag" => syntax.tag = style,
+        "label" => syntax.label = style,
+        "constant" => syntax.constant = style,
+        "escape" => syntax.escape = style,
+        "default" => syntax.default = style,
+        _ => return false,
+    }
+    true
+}
+
 fn parse_style(
     table: &toml::map::Map<String, toml::Value>,
+    section: &str,
     region: &str,
     warnings: &mut Vec<String>,
 ) -> Option<Style> {
@@ -193,35 +267,35 @@ fn parse_style(
             "fg" => match parse_color(v) {
                 Some(c) => style.fg = Some(c),
                 None => warnings.push(format!(
-                    "[chrome.{region}] `fg`: unknown color (skipped this field)"
+                    "[{section}.{region}] `fg`: unknown color (skipped this field)"
                 )),
             },
             "bg" => match parse_color(v) {
                 Some(c) => style.bg = Some(c),
                 None => warnings.push(format!(
-                    "[chrome.{region}] `bg`: unknown color (skipped this field)"
+                    "[{section}.{region}] `bg`: unknown color (skipped this field)"
                 )),
             },
             "bold" => match v.as_bool() {
                 Some(b) => style.attrs.bold = b,
                 None => warnings.push(format!(
-                    "[chrome.{region}] `bold`: expected boolean (skipped)"
+                    "[{section}.{region}] `bold`: expected boolean (skipped)"
                 )),
             },
             "reverse" => match v.as_bool() {
                 Some(b) => style.attrs.reverse = b,
                 None => warnings.push(format!(
-                    "[chrome.{region}] `reverse`: expected boolean (skipped)"
+                    "[{section}.{region}] `reverse`: expected boolean (skipped)"
                 )),
             },
             "underline" => match v.as_bool() {
                 Some(b) => style.attrs.underline = b,
                 None => warnings.push(format!(
-                    "[chrome.{region}] `underline`: expected boolean (skipped)"
+                    "[{section}.{region}] `underline`: expected boolean (skipped)"
                 )),
             },
             other => warnings.push(format!(
-                "[chrome.{region}] `{other}`: unknown field (skipped)"
+                "[{section}.{region}] `{other}`: unknown field (skipped)"
             )),
         }
     }
@@ -319,6 +393,49 @@ mod tests {
         std::fs::create_dir_all(&p).expect("tempdir create");
         TempDir(p)
     }
+
+    /// Guard that points `XDG_CONFIG_HOME` at an empty tempdir so
+    /// `discover_theme` doesn't fall through to the developer's real
+    /// `~/.config/led/theme.toml`. Every test in this module that
+    /// calls `load_theme` without an explicit path must hold one,
+    /// otherwise the dev's config leaks in and flakes assertions.
+    /// Env vars are process-global, so serialise via a mutex.
+    struct XdgGuard {
+        prev: Option<std::ffi::OsString>,
+        _tmp: TempDir,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    fn xdg_guard() -> XdgGuard {
+        use std::sync::{Mutex, OnceLock};
+        static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        let lock = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let prev = std::env::var_os("XDG_CONFIG_HOME");
+        let tmp = tempdir();
+        // SAFETY: tests hold `lock` while mutating the process
+        // environment, and `XdgGuard::drop` restores it.
+        unsafe {
+            std::env::set_var("XDG_CONFIG_HOME", tmp.path());
+        }
+        XdgGuard {
+            prev,
+            _tmp: tmp,
+            _lock: lock,
+        }
+    }
+
+    impl Drop for XdgGuard {
+        fn drop(&mut self) {
+            // SAFETY: `_lock` still held — restore under the same
+            // mutex we acquired in `xdg_guard`.
+            unsafe {
+                match self.prev.take() {
+                    Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
+                    None => std::env::remove_var("XDG_CONFIG_HOME"),
+                }
+            }
+        }
+    }
     impl TempDir {
         fn path(&self) -> &Path {
             &self.0
@@ -339,10 +456,13 @@ mod tests {
 
     #[test]
     fn no_file_returns_built_in_default() {
+        // Isolate `XDG_CONFIG_HOME` so the developer's real
+        // `~/.config/led/theme.toml` can't leak into the test.
+        let _xdg = xdg_guard();
         let tmp = tempdir();
         let loaded = load_theme(Some(tmp.path()), None).unwrap();
         assert_eq!(loaded.theme, Theme::default());
-        assert!(loaded.warnings.is_empty());
+        assert!(loaded.warnings.is_empty(), "warnings: {:?}", loaded.warnings);
     }
 
     #[test]
@@ -464,6 +584,73 @@ bg = "red"
         let loaded = load_theme(None, Some(&path)).unwrap();
         assert_eq!(loaded.theme.status_warn.fg, Some(Color::Indexed(7)));
         assert_eq!(loaded.theme.status_warn.bg, Some(Color::Indexed(1)));
+    }
+
+    #[test]
+    fn syntax_section_populates_token_kind_slots() {
+        let tmp = tempdir();
+        let path = write_theme(
+            &tmp,
+            r##"
+[syntax.keyword]
+fg = "x170"
+bold = true
+
+[syntax.string]
+fg = "x107"
+
+[syntax.comment]
+fg = "#808080"
+"##,
+        );
+        let loaded = load_theme(None, Some(&path)).unwrap();
+        assert_eq!(
+            loaded.theme.syntax.keyword.fg,
+            Some(Color::Indexed(170))
+        );
+        assert!(loaded.theme.syntax.keyword.attrs.bold);
+        assert_eq!(loaded.theme.syntax.string.fg, Some(Color::Indexed(107)));
+        assert_eq!(
+            loaded.theme.syntax.comment.fg,
+            Some(Color::rgb(0x80, 0x80, 0x80))
+        );
+        assert!(loaded.warnings.is_empty());
+    }
+
+    #[test]
+    fn syntax_type_alias_accepts_both_spellings() {
+        // TOML keys can't use a Rust reserved word naturally, but
+        // either `type` or `type_` maps to `SyntaxTheme.type_`.
+        let tmp = tempdir();
+        let path = write_theme(
+            &tmp,
+            r#"
+[syntax.type]
+fg = "x074"
+"#,
+        );
+        let loaded = load_theme(None, Some(&path)).unwrap();
+        assert_eq!(loaded.theme.syntax.type_.fg, Some(Color::Indexed(74)));
+        assert!(loaded.warnings.is_empty());
+    }
+
+    #[test]
+    fn unknown_syntax_kind_is_warned_not_fatal() {
+        let tmp = tempdir();
+        let path = write_theme(
+            &tmp,
+            r#"
+[syntax.neon]
+fg = "magenta"
+
+[syntax.keyword]
+fg = "yellow"
+"#,
+        );
+        let loaded = load_theme(None, Some(&path)).unwrap();
+        assert_eq!(loaded.warnings.len(), 1);
+        assert!(loaded.warnings[0].contains("neon"));
+        assert_eq!(loaded.theme.syntax.keyword.fg, Some(Color::YELLOW));
     }
 
     #[test]
