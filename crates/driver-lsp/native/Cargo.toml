@@ -1,0 +1,22 @@
+[package]
+name = "led-driver-lsp-native"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Desktop LSP worker. Owns:
+# - JSON-RPC framing (Content-Length prefixed) as a pure parser,
+#   testable without tokio or a real server.
+# - The tokio-backed subprocess manager (per-language spawn, stdin
+#   writer pump, stdout reader pump, response correlation) —
+#   lands later in M16.
+#
+# The `DiagnosticSource` state machine itself lives in the core
+# crate and is driven from the tokio event loop here.
+
+[dependencies]
+led-core = { workspace = true }
+led-driver-lsp-core = { workspace = true }
+led-state-diagnostics = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
