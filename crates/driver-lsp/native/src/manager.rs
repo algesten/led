@@ -805,21 +805,45 @@ impl Manager {
                 self.dispatch_push_result(language, path, result);
             }
             "experimental/serverStatus" => {
+                // rust-analyzer's custom status extension.
+                // `quiescent=false` = server is working (indexing,
+                // cachePriming, type-checking, …). `quiescent=true`
+                // = idle. `message` carries a human-readable tail.
+                //
+                // Fire a `Progress` event for BOTH states so the
+                // status-bar spinner animates throughout the
+                // busy phase. The quiescent-true case additionally
+                // runs `on_quiescence` to release any deferred
+                // init RequestDiagnostics.
                 let quiescent = params
                     .get("quiescent")
                     .and_then(|q| q.as_bool())
                     .unwrap_or(false);
-                if !quiescent {
-                    return;
-                }
-                let reissue = {
-                    let entry = self.servers.get_mut(&language).unwrap();
-                    let reissue = entry.diag.on_quiescence();
-                    entry.deferred_init_request = false;
-                    reissue
-                };
-                if reissue {
-                    self.request_diagnostics();
+                let message = params
+                    .get("message")
+                    .and_then(|m| m.as_str())
+                    .map(|s| s.to_string());
+                let server_name = self.servers[&language].server.name.clone();
+                let _ = self.lsp_event_tx.send(LspEvent::Progress {
+                    server: server_name.clone(),
+                    busy: !quiescent,
+                    detail: message,
+                });
+                self.notify.notify();
+                if quiescent {
+                    let _ = self
+                        .lsp_event_tx
+                        .send(LspEvent::Ready { server: server_name });
+                    self.notify.notify();
+                    let reissue = {
+                        let entry = self.servers.get_mut(&language).unwrap();
+                        let reissue = entry.diag.on_quiescence();
+                        entry.deferred_init_request = false;
+                        reissue
+                    };
+                    if reissue {
+                        self.request_diagnostics();
+                    }
                 }
             }
             "$/progress" => {
