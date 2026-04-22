@@ -18,8 +18,10 @@
 
 pub mod classify;
 pub mod framing;
+pub mod registry;
 pub mod subprocess;
 
 pub use classify::{Incoming, JsonRpcError, RequestId, classify};
 pub use framing::{FrameError, encode_frame, try_parse_frame};
+pub use registry::{LspRegistry, ServerConfig};
 pub use subprocess::{Server, ServerIncoming, reader_loop, spawn, writer_loop};
