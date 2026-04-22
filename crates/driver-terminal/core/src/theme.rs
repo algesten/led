@@ -225,20 +225,32 @@ pub struct SyntaxTheme {
     pub default: Style,
 }
 
-// Syntax palette — xterm 256-colour indices picked to echo the
-// legacy theme's semantic mapping (keyword magenta-ish, string
-// green, comment dim grey, type cyan-ish, number orange).
-const SYN_KEYWORD: Color = Color::Indexed(170); // bright magenta
-const SYN_TYPE: Color = Color::Indexed(74); // teal-blue
-const SYN_FUNCTION: Color = Color::Indexed(111); // light blue
-const SYN_STRING: Color = Color::Indexed(107); // olive-green
-const SYN_NUMBER: Color = Color::Indexed(173); // soft orange
-const SYN_COMMENT: Color = Color::Indexed(244); // dim grey
-const SYN_CONSTANT: Color = Color::Indexed(173); // same as number
-const SYN_ATTRIBUTE: Color = Color::Indexed(180); // tan
-const SYN_TAG: Color = Color::Indexed(74);
-const SYN_LABEL: Color = Color::Indexed(170);
-const SYN_ESCAPE: Color = Color::Indexed(173);
+// Syntax palette — xterm 256-colour indices taken verbatim from
+// legacy `default_theme.toml` (see `crates/config-file/src/default_theme.toml`
+// on main):
+//
+//   syntax_keyword   = x032  (blue)
+//   syntax_type      = x030  (teal)
+//   syntax_string    = x034  (green)
+//   syntax_number    = ansi magenta
+//   syntax_comment   = x237  (dark grey)
+//   syntax_attribute = x098  (muted purple)
+//   syntax_tag       = x160  (deep red)
+//   syntax_label     = x172  (orange)
+//
+// Legacy folds several captures into each slot:
+//   function / module / conditional / include / repeat / exception → keyword
+//   type.builtin / constructor → type
+//   boolean / constant / escape / string.special → number (magenta)
+//   property / variable.builtin / variable.parameter → attribute
+const SYN_KEYWORD: Color = Color::Indexed(32);
+const SYN_TYPE: Color = Color::Indexed(30);
+const SYN_STRING: Color = Color::Indexed(34);
+const SYN_NUMBER: Color = Color::MAGENTA;
+const SYN_COMMENT: Color = Color::Indexed(237);
+const SYN_ATTRIBUTE: Color = Color::Indexed(98);
+const SYN_TAG: Color = Color::Indexed(160);
+const SYN_LABEL: Color = Color::Indexed(172);
 
 impl SyntaxTheme {
     /// Zero-colour syntax theme — every kind is
@@ -276,21 +288,27 @@ impl Default for SyntaxTheme {
         };
         Self {
             keyword: fg(SYN_KEYWORD),
+            // Legacy folds function / module / conditional / include
+            // / repeat / exception into $syntax_keyword — same blue.
+            function: fg(SYN_KEYWORD),
             type_: fg(SYN_TYPE),
-            function: fg(SYN_FUNCTION),
             string: fg(SYN_STRING),
             number: fg(SYN_NUMBER),
-            boolean: fg(SYN_KEYWORD),
+            // Legacy groups boolean / constant / escape under
+            // $syntax_number (magenta).
+            boolean: fg(SYN_NUMBER),
+            constant: fg(SYN_NUMBER),
+            escape: fg(SYN_NUMBER),
             comment: fg(SYN_COMMENT),
+            // Legacy keeps operator on the default fg ($normal).
             operator: Style::default(),
             punctuation: Style::default(),
             variable: Style::default(),
-            property: Style::default(),
+            // Legacy maps property + variable.* to $syntax_attribute.
+            property: fg(SYN_ATTRIBUTE),
             attribute: fg(SYN_ATTRIBUTE),
             tag: fg(SYN_TAG),
             label: fg(SYN_LABEL),
-            constant: fg(SYN_CONSTANT),
-            escape: fg(SYN_ESCAPE),
             default: Style::default(),
         }
     }

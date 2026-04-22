@@ -26,10 +26,18 @@
 //! Unknown regions / unknown color names surface as non-fatal
 //! warnings (same discipline as `keys.toml`).
 
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use led_driver_terminal_core::{Color, Style, SyntaxTheme, Theme};
+
+/// Alias table built from `[COLORS]` in `theme.toml`. Legacy led
+/// lets each region reference named aliases via `$name`, which can
+/// chain (`$syntax_keyword` → `$x032` → `#0087d7`). Values are kept
+/// as raw strings — we resolve them recursively at lookup time so
+/// circular chains can be detected per-call.
+type Aliases = HashMap<String, String>;
 
 /// Result of [`load_theme`]: the resolved theme plus any non-fatal
 /// parse warnings. Unknown region names / unknown color names /
@@ -128,8 +136,10 @@ fn apply_toml(
             })
         }
     };
+    let aliases = extract_aliases(root.get("COLORS"), &mut loaded.warnings);
+
     if let Some(syntax_value) = root.get("syntax") {
-        apply_syntax(loaded, path, syntax_value)?;
+        apply_syntax(loaded, path, syntax_value, &aliases)?;
     }
 
     let Some(chrome) = root.get("chrome") else {
@@ -172,7 +182,13 @@ fn apply_toml(
                 continue;
             }
         };
-        let style = match parse_style(style_table, "chrome", region, &mut loaded.warnings) {
+        let style = match parse_style(
+            style_table,
+            "chrome",
+            region,
+            &aliases,
+            &mut loaded.warnings,
+        ) {
             Some(s) => s,
             None => continue,
         };
@@ -186,15 +202,22 @@ fn apply_toml(
     Ok(())
 }
 
-/// Ingest the `[syntax]` TOML table, one sub-table per
-/// [`TokenKind`]. Same field grammar as `[chrome.<region>]` —
-/// `fg` / `bg` / `bold` / `reverse` / `underline`. Unknown kinds
-/// produce a warning and are dropped; malformed styles warn and
-/// leave the default slot intact.
+/// Ingest the `[syntax]` TOML table. Each entry can be either a
+/// sub-table (`keyword = { fg = "x032", bold = true }`) or a bare
+/// string shorthand (`keyword = "$syntax_keyword"`) that legacy
+/// themes use extensively — the shorthand is interpreted as an
+/// `fg`-only style.
+///
+/// Unknown kinds produce a warning and are dropped. Legacy uses
+/// dotted keys like `"type.builtin"` for finer-grained tree-sitter
+/// captures; those collapse onto our top-level `TokenKind` by the
+/// first segment (so `type.builtin` assigns to `type`). Duplicate
+/// assignments overwrite in iteration order — same as `[chrome]`.
 fn apply_syntax(
     loaded: &mut LoadedTheme,
     path: &Path,
     syntax: &toml::Value,
+    aliases: &Aliases,
 ) -> Result<(), ThemeError> {
     let table = match syntax {
         toml::Value::Table(t) => t,
@@ -206,26 +229,74 @@ fn apply_syntax(
         }
     };
     for (kind, style_value) in table {
-        let style_table = match style_value {
-            toml::Value::Table(t) => t,
+        let style = match style_value {
+            toml::Value::Table(t) => {
+                match parse_style(t, "syntax", kind, aliases, &mut loaded.warnings) {
+                    Some(s) => s,
+                    None => continue,
+                }
+            }
+            toml::Value::String(_) => {
+                // Bare-string shorthand: value is an fg colour.
+                let Some(color) = parse_color(style_value, aliases) else {
+                    loaded.warnings.push(format!(
+                        "[syntax] `{kind}`: unknown color `{}` (skipped)",
+                        style_value.as_str().unwrap_or(""),
+                    ));
+                    continue;
+                };
+                Style {
+                    fg: Some(color),
+                    ..Style::default()
+                }
+            }
             _ => {
-                loaded
-                    .warnings
-                    .push(format!("[syntax] `{kind}`: value must be a table (skipped)"));
+                loaded.warnings.push(format!(
+                    "[syntax] `{kind}`: expected table or color string (skipped)"
+                ));
                 continue;
             }
         };
-        let style = match parse_style(style_table, "syntax", kind, &mut loaded.warnings) {
-            Some(s) => s,
-            None => continue,
-        };
-        if !assign_syntax_kind(&mut loaded.theme.syntax, kind, style) {
+        // Collapse dotted keys onto the base kind (e.g.
+        // `type.builtin` → `type`). Legacy writes finer-grained
+        // overrides; we route them to the broadest class we know.
+        let base_kind = kind.split('.').next().unwrap_or(kind.as_str());
+        if !assign_syntax_kind(&mut loaded.theme.syntax, base_kind, style) {
             loaded
                 .warnings
                 .push(format!("[syntax] `{kind}`: unknown token kind (skipped)"));
         }
     }
     Ok(())
+}
+
+/// Flatten `[COLORS]` into a `HashMap<name, value-string>`. Values
+/// are stored raw; resolution (recursive `$alias` lookup, `ansi_*`
+/// name expansion) happens in `resolve_color_name` at read time so
+/// cycles can be detected per-call.
+fn extract_aliases(value: Option<&toml::Value>, warnings: &mut Vec<String>) -> Aliases {
+    let mut out: Aliases = HashMap::new();
+    let Some(value) = value else {
+        return out;
+    };
+    let table = match value {
+        toml::Value::Table(t) => t,
+        _ => {
+            warnings.push("`COLORS` must be a table (skipped)".into());
+            return out;
+        }
+    };
+    for (name, v) in table {
+        match v.as_str() {
+            Some(s) => {
+                out.insert(name.clone(), s.to_string());
+            }
+            None => warnings.push(format!(
+                "[COLORS] `{name}`: value must be a string (skipped)"
+            )),
+        }
+    }
+    out
 }
 
 fn assign_syntax_kind(syntax: &mut SyntaxTheme, kind: &str, style: Style) -> bool {
@@ -259,18 +330,19 @@ fn parse_style(
     table: &toml::map::Map<String, toml::Value>,
     section: &str,
     region: &str,
+    aliases: &Aliases,
     warnings: &mut Vec<String>,
 ) -> Option<Style> {
     let mut style = Style::default();
     for (k, v) in table {
         match k.as_str() {
-            "fg" => match parse_color(v) {
+            "fg" => match parse_color(v, aliases) {
                 Some(c) => style.fg = Some(c),
                 None => warnings.push(format!(
                     "[{section}.{region}] `fg`: unknown color (skipped this field)"
                 )),
             },
-            "bg" => match parse_color(v) {
+            "bg" => match parse_color(v, aliases) {
                 Some(c) => style.bg = Some(c),
                 None => warnings.push(format!(
                     "[{section}.{region}] `bg`: unknown color (skipped this field)"
@@ -302,11 +374,31 @@ fn parse_style(
     Some(style)
 }
 
-fn parse_color(v: &toml::Value) -> Option<Color> {
+fn parse_color(v: &toml::Value, aliases: &Aliases) -> Option<Color> {
     let s = v.as_str()?;
-    // `xNNN` — xterm 256-color palette index (e.g. `x216` = peach).
-    // Matches legacy `default_theme.toml`'s syntax.
-    if let Some(digits) = s.strip_prefix('x') {
+    resolve_color_name(s, aliases, &mut HashSet::new())
+}
+
+/// Recursively resolve a color-value string. The grammar accepts:
+///
+/// - `$name` — look `name` up in `[COLORS]` and resolve its value.
+/// - `xNNN` — xterm 256-colour palette index.
+/// - `#rrggbb` — 24-bit hex.
+/// - `ansi_<name>` or `<name>` — named ANSI colour.
+///
+/// `visited` guards against cycles in the alias table. Unresolved /
+/// malformed values return `None`; the caller emits a warning.
+fn resolve_color_name(name: &str, aliases: &Aliases, visited: &mut HashSet<String>) -> Option<Color> {
+    if let Some(key) = name.strip_prefix('$') {
+        if !visited.insert(key.to_string()) {
+            // Cycle in the alias table — bail.
+            return None;
+        }
+        let target = aliases.get(key)?;
+        // Strip quotes defensively — legacy writes `"$name"` values.
+        return resolve_color_name(target, aliases, visited);
+    }
+    if let Some(digits) = name.strip_prefix('x') {
         if let Ok(n) = digits.parse::<u16>()
             && n <= 255
         {
@@ -314,12 +406,10 @@ fn parse_color(v: &toml::Value) -> Option<Color> {
         }
         return None;
     }
-    // Hex `#rrggbb` — 24-bit RGB. Only reliable on truecolor
-    // terminals; indexed forms above are the safer default.
-    if let Some(hex) = s.strip_prefix('#') {
+    if let Some(hex) = name.strip_prefix('#') {
         return parse_hex_color(hex);
     }
-    parse_named_color(s)
+    parse_named_color(name)
 }
 
 fn parse_hex_color(hex: &str) -> Option<Color> {
@@ -333,7 +423,11 @@ fn parse_hex_color(hex: &str) -> Option<Color> {
 }
 
 fn parse_named_color(name: &str) -> Option<Color> {
-    match name.to_ascii_lowercase().as_str() {
+    // Legacy also accepts `ansi_<name>` — strip the prefix so both
+    // `"red"` and `"ansi_red"` resolve identically.
+    let lower = name.to_ascii_lowercase();
+    let base = lower.strip_prefix("ansi_").unwrap_or(&lower);
+    match base {
         "black" => Some(Color::BLACK),
         "red" => Some(Color::RED),
         "green" => Some(Color::GREEN),
@@ -344,6 +438,7 @@ fn parse_named_color(name: &str) -> Option<Color> {
         "white" => Some(Color::WHITE),
         "grey" | "gray" => Some(Color::GREY),
         "dark_grey" | "dark_gray" | "darkgrey" | "darkgray" => Some(Color::DARK_GREY),
+        "bright_black" => Some(Color::DARK_GREY),
         "bright_red" => Some(Color::BRIGHT_RED),
         "bright_green" => Some(Color::BRIGHT_GREEN),
         "bright_yellow" => Some(Color::BRIGHT_YELLOW),
@@ -651,6 +746,108 @@ fg = "yellow"
         assert_eq!(loaded.warnings.len(), 1);
         assert!(loaded.warnings[0].contains("neon"));
         assert_eq!(loaded.theme.syntax.keyword.fg, Some(Color::YELLOW));
+    }
+
+    #[test]
+    fn colors_alias_resolves_nested_dollar_references() {
+        // Legacy pattern: COLORS maps `syntax_keyword` → `$x032` →
+        // `#0087d7`. The loader must chase both hops.
+        let tmp = tempdir();
+        let path = write_theme(
+            &tmp,
+            r##"
+[COLORS]
+x032 = "#0087d7"
+syntax_keyword = "$x032"
+
+[syntax.keyword]
+fg = "$syntax_keyword"
+"##,
+        );
+        let loaded = load_theme(None, Some(&path)).unwrap();
+        assert_eq!(
+            loaded.theme.syntax.keyword.fg,
+            Some(Color::rgb(0x00, 0x87, 0xd7)),
+            "warnings: {:?}",
+            loaded.warnings,
+        );
+        assert!(loaded.warnings.is_empty(), "warnings: {:?}", loaded.warnings);
+    }
+
+    #[test]
+    fn syntax_string_shorthand_treated_as_fg_only() {
+        // Legacy's `[syntax] tag = "$syntax_tag"` is a bare string,
+        // not a sub-table. Must be interpreted as an fg-only style.
+        let tmp = tempdir();
+        let path = write_theme(
+            &tmp,
+            r#"
+[syntax]
+tag = "x160"
+"#,
+        );
+        let loaded = load_theme(None, Some(&path)).unwrap();
+        assert_eq!(loaded.theme.syntax.tag.fg, Some(Color::Indexed(160)));
+    }
+
+    #[test]
+    fn dotted_syntax_keys_collapse_onto_base_kind() {
+        // Legacy writes `"type.builtin" = "..."` for finer-grained
+        // captures. We assign to the base class `type`.
+        let tmp = tempdir();
+        let path = write_theme(
+            &tmp,
+            r##"
+[syntax]
+"type.builtin" = "x030"
+"##,
+        );
+        let loaded = load_theme(None, Some(&path)).unwrap();
+        assert_eq!(loaded.theme.syntax.type_.fg, Some(Color::Indexed(30)));
+    }
+
+    #[test]
+    fn ansi_prefixed_names_resolve_to_palette_indices() {
+        let tmp = tempdir();
+        let path = write_theme(
+            &tmp,
+            r##"
+[COLORS]
+magenta = "ansi_magenta"
+
+[syntax.number]
+fg = "$magenta"
+"##,
+        );
+        let loaded = load_theme(None, Some(&path)).unwrap();
+        assert_eq!(loaded.theme.syntax.number.fg, Some(Color::MAGENTA));
+    }
+
+    #[test]
+    fn cycle_in_colors_aliases_yields_unknown_color() {
+        let tmp = tempdir();
+        let path = write_theme(
+            &tmp,
+            r##"
+[COLORS]
+a = "$b"
+b = "$a"
+
+[syntax.keyword]
+fg = "$a"
+"##,
+        );
+        let loaded = load_theme(None, Some(&path)).unwrap();
+        // Cycle → unresolved → field stays unset + warning fires.
+        assert!(loaded.theme.syntax.keyword.fg.is_none());
+        assert!(
+            loaded
+                .warnings
+                .iter()
+                .any(|w| w.contains("syntax.keyword") && w.contains("unknown color")),
+            "warnings: {:?}",
+            loaded.warnings,
+        );
     }
 
     #[test]
