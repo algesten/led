@@ -127,13 +127,17 @@ fn rope_to_bytes(rope: &Rope) -> Vec<u8> {
 
 /// Run the highlight query against the parsed tree, map each
 /// capture name to a `TokenKind`, translate byte offsets to char
-/// offsets via the rope, and return token spans sorted by start.
+/// offsets via the rope, and return a flat list of non-overlapping
+/// token spans in ascending order.
 ///
-/// Tree-sitter emits overlapping captures per pattern — e.g. a
-/// `function.call` node also matches a broader `call` pattern. We
-/// keep the innermost / most specific one by preferring later
-/// captures with the same span, and by dropping a capture whose
-/// span is entirely covered by a later one at the same position.
+/// Tree-sitter emits nested captures: a broad `(attribute_item) @attribute`
+/// wraps narrower `@type` / `@constructor` captures inside it.
+/// A flat "first-claim wins" painter would paint everything inside
+/// the attribute with the attribute's colour. We instead flatten
+/// the nested structure so the INNERMOST capture wins at each
+/// character — matching what every other editor (zed, helix, nvim)
+/// does. Ties go to the later-emitted capture, which in tree-sitter's
+/// document order means the more-specific pattern.
 fn extract_tokens(
     bytes: &[u8],
     rope: &Rope,
@@ -142,7 +146,7 @@ fn extract_tokens(
     cursor: &mut QueryCursor,
 ) -> Vec<TokenSpan> {
     let capture_names = query.capture_names();
-    let mut spans: Vec<TokenSpan> = Vec::new();
+    let mut raw: Vec<(usize, usize, TokenKind)> = Vec::new();
 
     let mut it = cursor.captures(query, root, bytes);
     while let Some((m, capture_ix)) = it.next() {
@@ -158,28 +162,79 @@ fn extract_tokens(
         }
         let char_start = rope.byte_to_char(start_byte);
         let char_end = rope.byte_to_char(end_byte);
-        spans.push(TokenSpan {
-            char_start,
-            char_end,
-            kind,
-        });
+        raw.push((char_start, char_end, kind));
     }
 
-    // Later captures override earlier ones where they overlap —
-    // tree-sitter walks outermost to innermost within a match, so
-    // last-write-wins is correct for the "most specific class" rule.
-    // We implement that by sorting on (start asc, end desc) and then
-    // dropping any span whose extent is a strict subset of the
-    // preceding kept span (keep the outer broad span unless a later
-    // capture at the same spot refined it).
-    //
-    // In practice highlight queries are written so captures nest
-    // cleanly; flattening to non-overlapping spans is a job for the
-    // runtime painter. Here we return them sorted by start, with
-    // stable order preserved across ties so the painter can pick a
-    // deterministic winner.
-    spans.sort_by_key(|s| (s.char_start, s.char_end));
-    spans
+    flatten_nested(raw)
+}
+
+/// Flatten a set of nested / overlapping `(start, end, kind)`
+/// captures into a sequence of non-overlapping spans that picks the
+/// innermost capture at each character.
+///
+/// Uses a sweep over open/close events with a stack of currently-
+/// active kinds: the top of the stack wins for the next run. Equal-
+/// range captures resolve to the later-opened one, matching tree-
+/// sitter's "later pattern overrides earlier" convention.
+fn flatten_nested(captures: Vec<(usize, usize, TokenKind)>) -> Vec<TokenSpan> {
+    if captures.is_empty() {
+        return Vec::new();
+    }
+    // Assign a stable id per capture so close events can find the
+    // matching open on the stack even when ranges coincide.
+    #[derive(Clone, Copy)]
+    enum Ev {
+        Open(TokenKind, usize),
+        Close(usize),
+    }
+    let mut events: Vec<(usize, u8, Ev)> = Vec::with_capacity(captures.len() * 2);
+    for (i, (start, end, kind)) in captures.iter().enumerate() {
+        // Tie-breaker at same position: closes go first (0), opens
+        // after (1). Prevents a zero-width overlap between a span
+        // that ends at N and another that starts at N.
+        events.push((*start, 1, Ev::Open(*kind, i)));
+        events.push((*end, 0, Ev::Close(i)));
+    }
+    events.sort_by_key(|(pos, tie, _)| (*pos, *tie));
+
+    let mut stack: Vec<(TokenKind, usize)> = Vec::new();
+    let mut out: Vec<TokenSpan> = Vec::new();
+    let mut cursor: Option<usize> = None;
+
+    for (pos, _tie, ev) in events {
+        if let (Some(start), Some(&(kind, _))) = (cursor, stack.last())
+            && pos > start
+        {
+            // Close the previous run using the currently-innermost
+            // style. Merge with the trailing output span if kinds
+            // match (avoids an N-char span being emitted as N
+            // singleton spans when a wrapping capture opens and
+            // closes many children inside it).
+            if let Some(last) = out.last_mut()
+                && last.kind == kind
+                && last.char_end == start
+            {
+                last.char_end = pos;
+            } else {
+                out.push(TokenSpan {
+                    char_start: start,
+                    char_end: pos,
+                    kind,
+                });
+            }
+        }
+        match ev {
+            Ev::Open(kind, id) => stack.push((kind, id)),
+            Ev::Close(id) => {
+                if let Some(pos_in_stack) = stack.iter().rposition(|&(_, i)| i == id) {
+                    stack.remove(pos_in_stack);
+                }
+            }
+        }
+        cursor = Some(pos);
+    }
+
+    out
 }
 
 /// Map a tree-sitter highlight capture name to a `TokenKind`. The
@@ -467,5 +522,66 @@ mod tests {
         assert_eq!(capture_name_to_kind("string.special"), Some(TokenKind::String));
         assert_eq!(capture_name_to_kind("totally.unknown"), None);
         assert_eq!(capture_name_to_kind("_auxiliary"), None);
+    }
+
+    fn flat(spans: &[led_state_syntax::TokenSpan]) -> Vec<(usize, usize, TokenKind)> {
+        spans
+            .iter()
+            .map(|s| (s.char_start, s.char_end, s.kind))
+            .collect()
+    }
+
+    #[test]
+    fn flatten_inner_capture_wins_over_outer_wrapper() {
+        // Outer @attribute covers [0, 30). Inner @type covers [8, 14).
+        // Inner's range should render as Type; the rest of the outer
+        // range as Attribute — three contiguous runs.
+        let out = flatten_nested(vec![
+            (0, 30, TokenKind::Attribute),
+            (8, 14, TokenKind::Type),
+        ]);
+        assert_eq!(
+            flat(&out),
+            vec![
+                (0, 8, TokenKind::Attribute),
+                (8, 14, TokenKind::Type),
+                (14, 30, TokenKind::Attribute),
+            ]
+        );
+    }
+
+    #[test]
+    fn flatten_equal_range_later_capture_wins() {
+        // Two captures on the same node. Tree-sitter convention:
+        // later-declared pattern overrides. We preserve iteration
+        // order; the later one opens on top of the stack → wins.
+        let out = flatten_nested(vec![
+            (5, 10, TokenKind::Type),
+            (5, 10, TokenKind::Function),
+        ]);
+        assert_eq!(flat(&out), vec![(5, 10, TokenKind::Function)]);
+    }
+
+    #[test]
+    fn flatten_adjacent_same_kind_coalesces() {
+        // Two peers of the same kind touching at a boundary should
+        // merge into one run (avoids unnecessary style-toggle emits).
+        let out = flatten_nested(vec![
+            (0, 5, TokenKind::Keyword),
+            (5, 10, TokenKind::Keyword),
+        ]);
+        assert_eq!(flat(&out), vec![(0, 10, TokenKind::Keyword)]);
+    }
+
+    #[test]
+    fn flatten_preserves_non_overlapping_runs() {
+        let out = flatten_nested(vec![
+            (0, 2, TokenKind::Keyword),
+            (3, 7, TokenKind::Function),
+        ]);
+        assert_eq!(
+            flat(&out),
+            vec![(0, 2, TokenKind::Keyword), (3, 7, TokenKind::Function)]
+        );
     }
 }
