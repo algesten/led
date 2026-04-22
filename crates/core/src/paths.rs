@@ -44,6 +44,56 @@ impl UserPath {
     }
 }
 
+impl UserPath {
+    /// Walk the symlink chain starting from this path. Returns a
+    /// [`PathChain`] with the user-typed path at the head,
+    /// symlink intermediates in between, and the final canonical
+    /// path at the tail.
+    ///
+    /// Used by language detection — legacy led routes
+    /// `Language::from_chain` over every link in the chain
+    /// (user → intermediaries → resolved), first match wins. That
+    /// way `foo.rs` symlinked to `bar` still detects Rust off the
+    /// user-typed name, and `.profile` → `dotfiles/profile` still
+    /// detects Bash.
+    ///
+    /// Failed reads at any step collapse the remainder to the
+    /// canonicalized path and return early — on a broken link the
+    /// chain still yields a usable tail.
+    pub fn resolve_chain(&self) -> PathChain {
+        let mut intermediates: Vec<PathBuf> = Vec::new();
+        let mut cursor = self.0.clone();
+        // Bounded to avoid runaway on a cyclic symlink (POSIX's
+        // own link-chain limit is usually 40).
+        for _ in 0..40 {
+            match std::fs::read_link(&cursor) {
+                Ok(target) => {
+                    // Symlink targets may be relative to the
+                    // symlink's parent dir — resolve as such.
+                    let next = if target.is_absolute() {
+                        target
+                    } else if let Some(parent) = cursor.parent() {
+                        parent.join(target)
+                    } else {
+                        target
+                    };
+                    intermediates.push(next.clone());
+                    cursor = next;
+                }
+                Err(_) => break,
+            }
+        }
+        let resolved = std::fs::canonicalize(&self.0)
+            .or_else(|_| std::fs::canonicalize(&cursor))
+            .unwrap_or_else(|_| cursor.clone());
+        PathChain {
+            user: self.clone(),
+            intermediates,
+            resolved: CanonPath(resolved),
+        }
+    }
+}
+
 impl AsRef<Path> for UserPath {
     fn as_ref(&self) -> &Path {
         &self.0
@@ -95,6 +145,40 @@ impl std::fmt::Display for CanonPath {
     }
 }
 
+/// The full symlink resolution story for one user-typed path.
+///
+/// Legacy led uses this triple for language detection — and for
+/// the rewrite's mirror, see
+/// [`led_state_syntax::Language::from_chain`]. Walks in order
+/// `user → intermediates → resolved`; the first entry whose
+/// filename tells us the language wins. Keeping the user-typed
+/// name at the head means `foo.rs` symlinked to `bar` still
+/// renders as Rust, not as "plain text".
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PathChain {
+    pub user: UserPath,
+    /// Symlink targets between `user` and `resolved`. Empty when
+    /// the user-typed path is not a symlink. Each entry is a
+    /// `PathBuf` (not a newtype) because the intermediates are
+    /// themselves raw fs paths — they're neither the canonical id
+    /// nor user-typed.
+    pub intermediates: Vec<PathBuf>,
+    pub resolved: CanonPath,
+}
+
+impl PathChain {
+    /// Iterate every path in the chain from head to tail —
+    /// `user`, each intermediate symlink target, then `resolved`.
+    /// The order matters: callers that pick the "first match
+    /// wins" (e.g. language detection) rely on the user-typed
+    /// name being tried before any symlink target.
+    pub fn iter_paths(&self) -> impl Iterator<Item = &Path> {
+        std::iter::once(self.user.as_path())
+            .chain(self.intermediates.iter().map(|p| p.as_path()))
+            .chain(std::iter::once(self.resolved.as_path()))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -119,5 +203,64 @@ mod tests {
         let _u: UserPath = UserPath::new("a");
         let _c: CanonPath = UserPath::new("a").canonicalize();
         // let _: UserPath = _c;  // would not compile
+    }
+
+    #[test]
+    fn resolve_chain_yields_only_self_for_non_symlink() {
+        use std::fs;
+        let base = std::env::temp_dir().join(format!(
+            "led-pathchain-test.{}.nonlink",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(&base).unwrap();
+        let real = base.join("file.rs");
+        fs::write(&real, b"").unwrap();
+
+        let user = UserPath::new(&real);
+        let chain = user.resolve_chain();
+        assert!(chain.intermediates.is_empty(), "got {:?}", chain.intermediates);
+        assert_eq!(chain.user.as_path(), &real);
+        // Canonical resolves symlinks in parents (e.g. macOS
+        // /var → /private/var) so we just assert the basename.
+        assert_eq!(chain.resolved.as_path().file_name(), Some(OsStr::new("file.rs")));
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn resolve_chain_walks_one_symlink_hop() {
+        use std::fs;
+        let base = std::env::temp_dir().join(format!(
+            "led-pathchain-test.{}.onelink",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(&base).unwrap();
+        let real = base.join("bar");
+        fs::write(&real, b"").unwrap();
+        let link = base.join("foo.rs");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        let user = UserPath::new(&link);
+        let chain = user.resolve_chain();
+        assert_eq!(chain.user.as_path(), &link);
+        assert_eq!(chain.intermediates.len(), 1, "got {:?}", chain.intermediates);
+        assert_eq!(
+            chain.intermediates[0].file_name(),
+            Some(OsStr::new("bar"))
+        );
+        assert_eq!(
+            chain.resolved.as_path().file_name(),
+            Some(OsStr::new("bar"))
+        );
+        // iter_paths hits head, intermediate, then tail.
+        let names: Vec<_> = chain
+            .iter_paths()
+            .map(|p| p.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string())
+            .collect();
+        assert_eq!(names, vec!["foo.rs", "bar", "bar"]);
+
+        let _ = fs::remove_dir_all(&base);
     }
 }

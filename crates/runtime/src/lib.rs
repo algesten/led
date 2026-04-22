@@ -30,7 +30,7 @@ use led_driver_clipboard_core::{
     ClipboardAction, ClipboardDriver, ClipboardResult,
 };
 use led_driver_clipboard_native::ClipboardNative;
-use led_core::Notifier;
+use led_core::{CanonPath, Notifier, PathChain};
 use led_driver_terminal_core::{Dims, Frame, KeyEvent, TermEvent, Terminal, TerminalInputDriver};
 use led_driver_terminal_native::{TerminalInputNative, TerminalOutputDriver};
 use led_driver_file_search_core::{FileSearchCmd, FileSearchDriver};
@@ -172,6 +172,14 @@ pub struct Atoms {
     /// load completes and the path's extension matches a known
     /// language; otherwise the buffer has no syntax highlighting.
     pub syntax: SyntaxStates,
+    /// Symlink resolution chain for every path the user has
+    /// opened, keyed by canonical path. Populated at tab-open
+    /// time (main.rs CLI, find-file commit, browser open) so the
+    /// load-completion handler can detect the language from the
+    /// user-typed name even when canonicalization has stripped
+    /// the informative extension. Mirrors legacy led's
+    /// `PathChain` → `LanguageId::from_chain` routing.
+    pub path_chains: std::collections::HashMap<CanonPath, PathChain>,
 }
 
 /// Run-time seam: the single thing the main loop sees. Owns nothing
@@ -205,6 +213,7 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
         isearch,
         file_search,
         syntax,
+        path_chains,
     } = &mut *world.atoms;
     let drivers = world.drivers;
     let wake = world.wake;
@@ -237,12 +246,16 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
         // alloc on the happy path.
         let completions = drivers.file.process(store);
         for completion in completions {
-            // Detect a syntax language for this path *before* the
-            // seed call, because we want to attach a `SyntaxState`
-            // entry even when `seed_edit_from_load` discards the
-            // completion (i.e. the buffer was already edited — the
-            // state entry may already exist but we seed it idempotently).
-            let detected = Language::from_path(&completion.path);
+            // Language detection prefers the symlink chain stashed
+            // at tab-open time: walking `user → intermediates →
+            // resolved` matches legacy's rule that the user-typed
+            // name wins. Falls back to the bare canonical-path
+            // detector when no chain is recorded (e.g. an internal
+            // open that didn't come through a UserPath).
+            let detected = path_chains
+                .get(&completion.path)
+                .and_then(Language::from_chain)
+                .or_else(|| Language::from_path(&completion.path));
             seed_edit_from_load(edits, completion.path.clone(), completion.rope);
             if let Some(lang) = detected {
                 syntax

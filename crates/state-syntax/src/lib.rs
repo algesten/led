@@ -15,7 +15,7 @@
 use std::sync::Arc;
 
 use imbl::HashMap;
-use led_core::CanonPath;
+use led_core::{CanonPath, PathChain};
 use tree_sitter::Tree;
 
 /// Programming language identity. One per grammar the rewrite
@@ -39,11 +39,38 @@ pub enum Language {
 }
 
 impl Language {
-    /// Best-effort language detection from a path's extension.
-    /// Legacy also checks shebang / modeline — those are deferred.
+    /// Best-effort language detection from one path: try the
+    /// extension, fall back to the well-known-filename table
+    /// (`Makefile`, `Gemfile`, `.bashrc`, …). Prefer
+    /// [`Language::from_chain`] when a [`PathChain`] is available —
+    /// that walks the user-typed name first and handles the
+    /// symlink case correctly.
     pub fn from_path(path: &CanonPath) -> Option<Self> {
-        let ext = path.as_path().extension()?.to_str()?.to_ascii_lowercase();
-        Some(match ext.as_str() {
+        Self::from_fs_path(path.as_path())
+    }
+
+    /// Walk a [`PathChain`] in its canonical order
+    /// (`user → intermediates → resolved`) and return the language
+    /// of the first path that resolves — matches legacy led's
+    /// `LanguageId::from_chain`. This makes user-typed names win
+    /// over symlink targets: `foo.rs` → `bar` still renders as
+    /// Rust even though the canonical tail has no extension.
+    pub fn from_chain(chain: &PathChain) -> Option<Self> {
+        chain.iter_paths().find_map(Self::from_fs_path)
+    }
+
+    fn from_fs_path(path: &std::path::Path) -> Option<Self> {
+        if let Some(ext) = path.extension().and_then(|e| e.to_str())
+            && let Some(lang) = Self::from_extension(ext)
+        {
+            return Some(lang);
+        }
+        let filename = path.file_name().and_then(|n| n.to_str())?;
+        Self::from_filename(filename)
+    }
+
+    pub fn from_extension(ext: &str) -> Option<Self> {
+        Some(match ext.to_ascii_lowercase().as_str() {
             "rs" => Self::Rust,
             "ts" | "tsx" => Self::TypeScript,
             "js" | "mjs" | "cjs" | "jsx" => Self::JavaScript,
@@ -57,6 +84,31 @@ impl Language {
             "rb" => Self::Ruby,
             "swift" => Self::Swift,
             "makefile" | "mk" => Self::Make,
+            _ => return None,
+        })
+    }
+
+    /// Well-known filenames that stand in for an extension. Ports
+    /// legacy led's `filename_to_extension` table (crates/core/src/language.rs
+    /// on main, circa line 158) — case-sensitive comparisons
+    /// because most of these are conventional spellings users
+    /// expect to match (`Makefile`, not `makefile`).
+    pub fn from_filename(name: &str) -> Option<Self> {
+        Some(match name {
+            // Make
+            "Makefile" | "makefile" | "GNUmakefile" | "BSDmakefile" => Self::Make,
+            // Ruby project files
+            "Gemfile" | "Rakefile" | "Guardfile" | "Capfile" | "Vagrantfile" | "Podfile"
+            | "Brewfile" | "Fastfile" => Self::Ruby,
+            // Bash dotfiles + scripts-with-no-ext
+            ".bashrc" | ".bash_profile" | ".bash_aliases" | ".profile" | ".zshrc"
+            | ".zprofile" | ".envrc" | "PKGBUILD" | ".bash_logout" => Self::Bash,
+            // Python scripts-with-no-ext
+            "SConstruct" | "SConscript" | "Snakefile" | "wscript" => Self::Python,
+            // JSON-ish dotfiles
+            ".babelrc" | ".eslintrc" | ".prettierrc" => Self::Json,
+            // TOML-ish
+            "Pipfile" | "Cargo.lock" => Self::Toml,
             _ => return None,
         })
     }
@@ -343,6 +395,67 @@ mod tests {
     fn language_from_path_returns_none_for_unknown_extensions() {
         assert_eq!(Language::from_path(&canon("notes.unknownext")), None);
         assert_eq!(Language::from_path(&canon("no-extension")), None);
+    }
+
+    #[test]
+    fn well_known_filenames_detect_without_extension() {
+        assert_eq!(Language::from_filename("Makefile"), Some(Language::Make));
+        assert_eq!(Language::from_filename("GNUmakefile"), Some(Language::Make));
+        assert_eq!(Language::from_filename("Gemfile"), Some(Language::Ruby));
+        assert_eq!(Language::from_filename("Rakefile"), Some(Language::Ruby));
+        assert_eq!(Language::from_filename(".bashrc"), Some(Language::Bash));
+        assert_eq!(Language::from_filename(".profile"), Some(Language::Bash));
+        assert_eq!(Language::from_filename("PKGBUILD"), Some(Language::Bash));
+        assert_eq!(Language::from_filename("Snakefile"), Some(Language::Python));
+        assert_eq!(Language::from_filename("Pipfile"), Some(Language::Toml));
+        assert_eq!(Language::from_filename("notafile.xyz"), None);
+    }
+
+    #[test]
+    fn language_from_path_recognises_well_known_basename_without_ext() {
+        // Path has no extension → fall through to filename table.
+        assert_eq!(Language::from_path(&canon("/etc/Makefile")), Some(Language::Make));
+        assert_eq!(Language::from_path(&canon("/home/u/.bashrc")), Some(Language::Bash));
+    }
+
+    #[test]
+    fn from_chain_prefers_user_path_extension_over_symlink_target() {
+        // User typed `foo.rs` which symlinks to `bar` (no ext).
+        // Legacy + rewrite: detect Rust from the user name.
+        use led_core::PathChain;
+        let chain = PathChain {
+            user: led_core::UserPath::new("foo.rs"),
+            intermediates: Vec::new(),
+            resolved: canon("bar"),
+        };
+        assert_eq!(Language::from_chain(&chain), Some(Language::Rust));
+    }
+
+    #[test]
+    fn from_chain_falls_through_when_user_has_no_match() {
+        // `local_script` → `/usr/local/bin/python3.11` — user path
+        // has nothing useful, resolved path's extension matches.
+        use led_core::PathChain;
+        let chain = PathChain {
+            user: led_core::UserPath::new("local_script"),
+            intermediates: Vec::new(),
+            resolved: canon("/usr/bin/python3.py"),
+        };
+        assert_eq!(Language::from_chain(&chain), Some(Language::Python));
+    }
+
+    #[test]
+    fn from_chain_intermediate_wins_when_user_and_tail_are_mute() {
+        // `edit` → `Makefile` → `/abs/Makefile.real` — neither
+        // the user nor the resolved path has an ext, but an
+        // intermediate has a well-known filename.
+        use led_core::PathChain;
+        let chain = PathChain {
+            user: led_core::UserPath::new("edit"),
+            intermediates: vec![std::path::PathBuf::from("/abs/Makefile")],
+            resolved: canon("/abs/Makefile.real"),
+        };
+        assert_eq!(Language::from_chain(&chain), Some(Language::Make));
     }
 
     #[test]

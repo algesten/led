@@ -113,12 +113,18 @@ fn main() -> io::Result<()> {
     // Seed tabs from CLI args. Each open path auto-expands its
     // ancestor directories in the browser so the tree reveals the
     // file — matches legacy's `reveal_active_buffer` side of
-    // open-time expansion.
+    // open-time expansion. Walking the symlink chain HERE (while
+    // we still hold the user-typed path) lets the language
+    // detector route `foo.rs → bar` to Rust even though the canon
+    // tail has no extension.
     let mut ids = TabIdGen::default();
     for f in &cli.files {
         let id = ids.issue();
-        let canon = UserPath::new(f).canonicalize();
+        let user = UserPath::new(f);
+        let chain = user.resolve_chain();
+        let canon = chain.resolved.clone();
         reveal_ancestors(&mut atoms.browser, &atoms.fs, &canon);
+        atoms.path_chains.insert(canon.clone(), chain);
         atoms.tabs.open.push_back(Tab {
             id,
             path: canon,
