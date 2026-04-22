@@ -637,6 +637,18 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
             BrowserUiInput::new(browser),
         );
         let find_file_actions = find_file_action(FindFileInput::new(find_file));
+        // Spinner frame clock — current millis since UNIX epoch,
+        // quantised to 80ms buckets. Pinned to `0` when no LSP
+        // server is busy so the render_frame memo stays warm
+        // instead of invalidating every tick.
+        let render_tick = if lsp_status.any_busy() {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64 / 80)
+                .unwrap_or(0)
+        } else {
+            0
+        };
         let frame = render_frame(query::RenderInputs {
             term: TerminalDimsInput::new(terminal),
             edits: EditedBuffersInput::new(edits),
@@ -648,6 +660,7 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
             syntax: query::SyntaxStatesInput::new(syntax),
             diagnostics: query::DiagnosticsStatesInput::new(diagnostics),
             lsp: query::LspStatusesInput::new(lsp_status),
+            render_tick,
         });
 
         // ── Execute ─────────────────────────────────────────────
@@ -914,7 +927,7 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
         // without getting its work done; the next key would then
         // wait the full timeout. That was the visible stutter when
         // holding a key — key-repeat events race with the drain.
-        let timeout = nearest_deadline(alerts, find_file)
+        let timeout = nearest_deadline(alerts, find_file, lsp_status)
             .and_then(|d| d.checked_duration_since(Instant::now()))
             .unwrap_or(Duration::from_secs(60));
         use std::sync::mpsc::RecvTimeoutError;
@@ -944,6 +957,7 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
 pub fn nearest_deadline(
     alerts: &AlertState,
     find_file: &Option<FindFileState>,
+    lsp_status: &LspStatuses,
 ) -> Option<Instant> {
     let mut soonest: Option<Instant> = None;
     let consider = |soonest: &mut Option<Instant>, candidate: Option<Instant>| {
@@ -959,7 +973,16 @@ pub fn nearest_deadline(
         &mut soonest,
         find_file.as_ref().and_then(|ff| ff.input.hint_expires_at),
     );
-    // Future timer sources: add `consider(...)` lines here.
+    // LSP spinner animation — 80ms cadence while any server is
+    // busy. Matches legacy's `format_lsp_status` spinner (10
+    // braille frames, each 80ms). Without this wake source the
+    // status-bar spinner would freeze between user events.
+    if lsp_status.any_busy() {
+        consider(
+            &mut soonest,
+            Some(Instant::now() + std::time::Duration::from_millis(80)),
+        );
+    }
     soonest
 }
 

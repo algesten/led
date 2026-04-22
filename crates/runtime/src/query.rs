@@ -821,6 +821,7 @@ pub fn status_bar_model<'a, 'b, 'c, 'o, 'd, 'l>(
     overlays: OverlaysInput<'o>,
     diagnostics: DiagnosticsStatesInput<'d>,
     lsp: LspStatusesInput<'l>,
+    render_tick: u64,
 ) -> StatusBarModel {
     // Priority 0a — in-buffer isearch prompt.
     if let Some(state) = overlays.isearch.as_ref() {
@@ -918,7 +919,7 @@ pub fn status_bar_model<'a, 'b, 'c, 'o, 'd, 'l>(
     // Priority 4 — LSP progress ("rust-analyzer: indexing"
     // etc.). First busy server wins; legacy displayed this on
     // the left when no alert overrode it.
-    if let Some(msg) = lsp_progress_message(lsp) {
+    if let Some(msg) = lsp_progress_message(lsp, render_tick) {
         return StatusBarModel {
             left: Arc::from(msg),
             right,
@@ -957,26 +958,73 @@ fn active_is_dirty(tabs: TabsActiveInput<'_>, edits: EditedBuffersInput<'_>) -> 
         .unwrap_or(false)
 }
 
-/// First busy LSP server's status line, formatted for the left
-/// of the status bar. Returns `None` when every server is idle
-/// / ready — the bar then falls through to the default
-/// dirty-marker path.
-fn lsp_progress_message(lsp: LspStatusesInput<'_>) -> Option<String> {
+/// Format one LSP server's status line matching legacy's
+/// `format_lsp_status` (`/crates/ui/src/display.rs:803` on
+/// main). Shape:
+///
+/// - Busy, no detail:    `  ⠋ rust-analyzer`
+/// - Busy, with detail:  `  ⠋ rust-analyzer  ⠹ indexing crates`
+/// - Idle, with detail:  `  rust-analyzer  indexing crates`
+/// - Idle, no detail:    `  rust-analyzer`
+/// - Empty server name:  `""` (no row)
+///
+/// `render_tick` is the current time in 80ms buckets so the
+/// spinner animates across frames: each 80ms bucket advances
+/// one frame in a 10-frame braille cycle. Two spinners are used
+/// when detail is present, with an offset between them so they
+/// animate out of phase (matches legacy's 400-bucket offset).
+fn format_lsp_status(server_name: &str, busy: bool, detail: Option<&str>, render_tick: u64) -> String {
+    if server_name.is_empty() {
+        return String::new();
+    }
+    const FRAMES: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+    let spinner_char = |offset: u64| -> char {
+        FRAMES[((render_tick + offset) as usize) % FRAMES.len()]
+    };
+    let spinner = if busy {
+        format!("{} ", spinner_char(0))
+    } else {
+        String::new()
+    };
+    let detail_str = detail
+        .filter(|d| !d.is_empty())
+        .map(|d| {
+            if busy {
+                // Legacy offsets by 400ms-worth (= 5 buckets) so
+                // the two spinners animate staggered.
+                format!("  {} {d}", spinner_char(5))
+            } else {
+                format!("  {d}")
+            }
+        })
+        .unwrap_or_default();
+    format!("  {spinner}{server_name}{detail_str}")
+}
+
+/// First busy LSP server (or any with a non-empty detail)
+/// rendered for the status bar's left half. Returns `None`
+/// when there's nothing worth showing — no servers registered
+/// yet, or all of them idle with no detail.
+fn lsp_progress_message(lsp: LspStatusesInput<'_>, render_tick: u64) -> Option<String> {
+    // Prefer a busy server; fall back to an idle-with-detail
+    // one so the last status line stays visible for a beat.
     let (server, status) = lsp
         .by_server
         .iter()
         .find(|(_, s)| s.busy)
+        .or_else(|| {
+            lsp.by_server
+                .iter()
+                .find(|(_, s)| s.detail.as_deref().is_some_and(|d| !d.is_empty()))
+        })
         .map(|(name, s)| (name.clone(), s.clone()))?;
-    let mut out = String::with_capacity(server.len() + 32);
-    out.push(' ');
-    out.push_str(&server);
-    out.push_str(": ");
-    if let Some(detail) = status.detail.as_deref() {
-        out.push_str(detail);
+    let formatted =
+        format_lsp_status(&server, status.busy, status.detail.as_deref(), render_tick);
+    if formatted.is_empty() {
+        None
     } else {
-        out.push_str("working");
+        Some(formatted)
     }
-    Some(out)
 }
 
 fn position_string(
@@ -1421,6 +1469,12 @@ pub struct RenderInputs<'a> {
     pub syntax: SyntaxStatesInput<'a>,
     pub diagnostics: DiagnosticsStatesInput<'a>,
     pub lsp: LspStatusesInput<'a>,
+    /// Current frame in 80ms buckets. Used by the status-bar
+    /// spinner formatter; the main loop quantises wall-clock
+    /// millis to 80 so the memo only invalidates once per
+    /// spinner frame, not on every recompute. Pin to `0` when
+    /// no LSP server is busy so the memo stays warm.
+    pub render_tick: u64,
 }
 
 pub fn render_frame(inputs: RenderInputs<'_>) -> Option<Frame> {
@@ -1435,6 +1489,7 @@ pub fn render_frame(inputs: RenderInputs<'_>) -> Option<Frame> {
         inputs.syntax,
         inputs.diagnostics,
         inputs.lsp,
+        inputs.render_tick,
     )
 }
 
@@ -1450,12 +1505,13 @@ fn render_frame_memo<'t, 'e, 'b, 'a, 'al, 'br, 'ov, 'sx, 'dx, 'lsp>(
     syntax: SyntaxStatesInput<'sx>,
     diagnostics: DiagnosticsStatesInput<'dx>,
     lsp: LspStatusesInput<'lsp>,
+    render_tick: u64,
 ) -> Option<Frame> {
     let dims = (*term.dims)?;
     let layout = Layout::compute(dims, *browser.visible);
     let tab_bar = tab_bar_model(tabs, edits);
     let body = body_model(edits, store, tabs, overlays, syntax, diagnostics, layout.editor_area);
-    let status_bar = status_bar_model(alerts, tabs, edits, overlays, diagnostics, lsp);
+    let status_bar = status_bar_model(alerts, tabs, edits, overlays, diagnostics, lsp, render_tick);
     let side_panel = layout
         .side_area
         .map(|area| side_panel_model(browser, overlays, area.rows));
@@ -1622,6 +1678,7 @@ mod tests {
             syntax: SyntaxStatesInput::new(&syntax),
             diagnostics: DiagnosticsStatesInput::new(&diags),
             lsp: LspStatusesInput::new(&lsp),
+            render_tick: 0,
         })
     }
 
@@ -1681,6 +1738,7 @@ mod tests {
             syntax: SyntaxStatesInput::new(&syntax),
             diagnostics: DiagnosticsStatesInput::new(&diags),
             lsp: LspStatusesInput::new(&lsp),
+            render_tick: 0,
         })
         .expect("dims set");
 
@@ -1722,6 +1780,7 @@ mod tests {
             syntax: SyntaxStatesInput::new(&syntax),
             diagnostics: DiagnosticsStatesInput::new(&diags),
             lsp: LspStatusesInput::new(&lsp),
+            render_tick: 0,
         })
         .expect("dims set");
         assert_eq!(frame.cursor, None);
@@ -2088,6 +2147,7 @@ mod tests {
             OverlaysInput::new(&ff, &is, &None),
             DiagnosticsStatesInput::new(&diags),
             LspStatusesInput::new(&lsp),
+            0,
         )
     }
 
@@ -2640,5 +2700,60 @@ mod tests {
         let spans = tokens_to_line_spans(&tokens, 0, 20, 5);
         assert_eq!(spans.len(), 1);
         assert_eq!(spans[0].col_end, (5 + GUTTER_WIDTH) as u16);
+    }
+
+    // ── LSP status formatter (matches legacy's
+    // `format_lsp_status` at /crates/ui/src/display.rs:803) ──
+
+    #[test]
+    fn format_lsp_status_empty_server_returns_empty() {
+        assert_eq!(format_lsp_status("", true, Some("indexing"), 0), "");
+    }
+
+    #[test]
+    fn format_lsp_status_busy_no_detail_shows_spinner_and_name() {
+        // Tick=0 → frame 0 = '⠋'. Two leading spaces + spinner + space + name.
+        assert_eq!(format_lsp_status("rust-analyzer", true, None, 0), "  ⠋ rust-analyzer");
+    }
+
+    #[test]
+    fn format_lsp_status_busy_with_detail_has_two_spinners() {
+        // Tick=0 → main spinner frame 0 = '⠋'. Detail spinner
+        // offset by 5 (≈ 400ms out of phase) → frame 5 = '⠴'.
+        // Separator: two spaces between name and detail.
+        let s = format_lsp_status("rust-analyzer", true, Some("indexing crates"), 0);
+        assert_eq!(s, "  ⠋ rust-analyzer  ⠴ indexing crates");
+    }
+
+    #[test]
+    fn format_lsp_status_idle_with_detail_omits_spinners() {
+        let s = format_lsp_status("rust-analyzer", false, Some("indexing crates"), 0);
+        assert_eq!(s, "  rust-analyzer  indexing crates");
+    }
+
+    #[test]
+    fn format_lsp_status_idle_no_detail_just_name() {
+        let s = format_lsp_status("rust-analyzer", false, None, 0);
+        assert_eq!(s, "  rust-analyzer");
+    }
+
+    #[test]
+    fn format_lsp_status_empty_detail_treated_as_none() {
+        // Legacy's `.filter(|d| !d.is_empty())` drops empty detail.
+        let s = format_lsp_status("rust-analyzer", true, Some(""), 0);
+        assert_eq!(s, "  ⠋ rust-analyzer");
+    }
+
+    #[test]
+    fn format_lsp_status_spinner_advances_with_tick() {
+        // Each tick bucket (80ms) advances the main spinner by
+        // one frame in the 10-frame cycle.
+        let t0 = format_lsp_status("ra", true, None, 0);
+        let t1 = format_lsp_status("ra", true, None, 1);
+        let t2 = format_lsp_status("ra", true, None, 2);
+        assert_ne!(t0, t1);
+        assert_ne!(t1, t2);
+        // After 10 buckets the cycle wraps.
+        assert_eq!(t0, format_lsp_status("ra", true, None, 10));
     }
 }

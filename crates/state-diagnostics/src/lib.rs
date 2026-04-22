@@ -130,6 +130,15 @@ pub struct LspStatuses {
     pub by_server: HashMap<String, LspServerStatus>,
 }
 
+impl LspStatuses {
+    /// `true` if any server is currently mid-task. The main
+    /// loop uses this to decide whether to schedule an 80ms
+    /// wake so the status-bar spinner animates.
+    pub fn any_busy(&self) -> bool {
+        self.by_server.values().any(|s| s.busy)
+    }
+}
+
 impl BufferDiagnostics {
     pub fn new(version: BufferVersion, diagnostics: Vec<Diagnostic>) -> Self {
         Self {
