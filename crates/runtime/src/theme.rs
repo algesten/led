@@ -428,14 +428,30 @@ fn parse_color(v: &toml::Value, aliases: &Aliases) -> Option<Color> {
 ///
 /// `visited` guards against cycles in the alias table. Unresolved /
 /// malformed values return `None`; the caller emits a warning.
+///
+/// **Short-circuit for `$xNNN`.** Legacy themes define each palette
+/// index with both an alias (`x032 = "#0087d7"`) AND use it via
+/// `$x032`. If we chase the alias, we end up with a 24-bit RGB
+/// colour — which Apple Terminal can't render and paints as
+/// garbage. Detect the `xNNN` alias name and emit
+/// `Color::Indexed` directly so crossterm uses the
+/// `ESC[38;5;Nm` escape the terminal understands.
 fn resolve_color_name(name: &str, aliases: &Aliases, visited: &mut HashSet<String>) -> Option<Color> {
     if let Some(key) = name.strip_prefix('$') {
+        // `$xNNN` — short-circuit on the alias NAME before chasing
+        // its value, preserving the 256-colour index form.
+        if let Some(digits) = key.strip_prefix('x')
+            && let Ok(n) = digits.parse::<u16>()
+            && n <= 255
+            && digits.len() == 3
+        {
+            return Some(Color::Indexed(n as u8));
+        }
         if !visited.insert(key.to_string()) {
             // Cycle in the alias table — bail.
             return None;
         }
         let target = aliases.get(key)?;
-        // Strip quotes defensively — legacy writes `"$name"` values.
         return resolve_color_name(target, aliases, visited);
     }
     if let Some(digits) = name.strip_prefix('x') {
@@ -805,9 +821,12 @@ fg = "$syntax_keyword"
 "##,
         );
         let loaded = load_theme(None, Some(&path)).unwrap();
+        // $x032 short-circuits to Indexed(32) rather than chasing
+        // the [COLORS] entry's RGB hex — see `resolve_color_name`
+        // for why (Apple Terminal can't do truecolor).
         assert_eq!(
             loaded.theme.syntax.keyword.fg,
-            Some(Color::rgb(0x00, 0x87, 0xd7)),
+            Some(Color::Indexed(32)),
             "warnings: {:?}",
             loaded.warnings,
         );
@@ -915,6 +934,91 @@ fg = "$a"
             "warnings: {:?}",
             loaded.warnings,
         );
+    }
+
+    #[test]
+    fn users_legacy_theme_resolves_every_syntax_slot() {
+        // A minimised but representative slice of the user's real
+        // ~/.config/led/theme.toml — same [COLORS] chaining and
+        // [syntax] entries that were painting everything pink.
+        // Lock every resolved slot against its legacy value.
+        let tmp = tempdir();
+        let path = write_theme(
+            &tmp,
+            r##"
+[COLORS]
+magenta = "ansi_magenta"
+x030 = "#008787"
+x032 = "#0087d7"
+x034 = "#00af00"
+x098 = "#875faf"
+x160 = "#d70000"
+x172 = "#d78700"
+x237 = "#3a3a3a"
+
+syntax_keyword   = "$x032"
+syntax_type      = "$x030"
+syntax_string    = "$x034"
+syntax_number    = "$magenta"
+syntax_comment   = "$x237"
+syntax_attribute = "$x098"
+syntax_tag       = "$x160"
+syntax_label     = "$x172"
+
+[syntax]
+keyword            = "$syntax_keyword"
+function           = "$syntax_keyword"
+module             = "$syntax_keyword"
+conditional        = "$syntax_keyword"
+include            = "$syntax_keyword"
+repeat             = "$syntax_keyword"
+exception          = "$syntax_keyword"
+
+type               = "$syntax_type"
+"type.builtin"     = "$syntax_type"
+constructor        = "$syntax_type"
+
+string             = "$syntax_string"
+"string.regex"     = "$syntax_string"
+"text.literal"     = "$syntax_string"
+
+number             = "$syntax_number"
+boolean            = "$syntax_number"
+constant           = "$syntax_number"
+"constant.builtin" = "$syntax_number"
+escape             = "$syntax_number"
+"string.special"   = "$syntax_number"
+
+comment            = "$syntax_comment"
+
+"variable.builtin"   = "$syntax_attribute"
+"variable.parameter" = "$syntax_attribute"
+"variable.member"    = "$syntax_attribute"
+property             = "$syntax_attribute"
+attribute            = "$syntax_attribute"
+
+tag                = "$syntax_tag"
+label              = "$syntax_label"
+"##,
+        );
+        let loaded = load_theme(None, Some(&path)).unwrap();
+        let s = &loaded.theme.syntax;
+        // Every `$xNNN` short-circuits to the 256-colour index, not
+        // the RGB hex in [COLORS]. Apple Terminal doesn't speak
+        // truecolor; going through indexed escapes keeps it working.
+        assert_eq!(s.keyword.fg, Some(Color::Indexed(32)), "keyword");
+        assert_eq!(s.function.fg, Some(Color::Indexed(32)), "function");
+        assert_eq!(s.type_.fg, Some(Color::Indexed(30)), "type");
+        assert_eq!(s.string.fg, Some(Color::Indexed(34)), "string");
+        assert_eq!(s.number.fg, Some(Color::MAGENTA), "number");
+        assert_eq!(s.boolean.fg, Some(Color::MAGENTA), "boolean");
+        assert_eq!(s.constant.fg, Some(Color::MAGENTA), "constant");
+        assert_eq!(s.escape.fg, Some(Color::MAGENTA), "escape");
+        assert_eq!(s.comment.fg, Some(Color::Indexed(237)), "comment");
+        assert_eq!(s.attribute.fg, Some(Color::Indexed(98)), "attribute");
+        assert_eq!(s.property.fg, Some(Color::Indexed(98)), "property");
+        assert_eq!(s.tag.fg, Some(Color::Indexed(160)), "tag");
+        assert_eq!(s.label.fg, Some(Color::Indexed(172)), "label");
     }
 
     #[test]
