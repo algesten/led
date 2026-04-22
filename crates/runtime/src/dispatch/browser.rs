@@ -11,12 +11,63 @@
 //! behaviour.
 
 use std::cmp::Ordering;
+use std::collections::HashMap;
 
-use led_core::CanonPath;
-use led_state_browser::{BrowserUi, Focus, FsTree, TreeEntryKind};
+use led_core::{CanonPath, PathChain};
+use led_state_browser::{BrowserUi, Focus, FsTree, TreeEntry, TreeEntryKind};
 use led_state_tabs::Tabs;
 
 use super::shared::open_or_focus_tab;
+
+/// Find the TreeEntry that contains `selected_idx` in the flat
+/// tree view — walks backward for the first entry with depth
+/// `selected.depth - 1`. Returns `None` for depth-0 rows (their
+/// parent is the workspace root, handled by the caller).
+fn parent_tree_entry<'a>(
+    entries: &'a [TreeEntry],
+    selected_idx: usize,
+) -> Option<&'a TreeEntry> {
+    let selected = entries.get(selected_idx)?;
+    if selected.depth == 0 {
+        return None;
+    }
+    entries[..selected_idx]
+        .iter()
+        .rev()
+        .find(|e| e.depth + 1 == selected.depth)
+}
+
+/// Build the user-typed [`PathChain`] for a browser entry and
+/// stash it on `path_chains`. For a symlinked `.profile` sitting
+/// under `~/`, this reconstructs `<canonical-~>/.profile` — the
+/// path the user WOULD have typed — so the chain walker then
+/// follows the symlink to the real target, but language detection
+/// wins off the user-facing basename.
+fn stash_browser_chain(
+    browser: &BrowserUi,
+    fs: &FsTree,
+    path_chains: &mut HashMap<CanonPath, PathChain>,
+    selected_idx: usize,
+) {
+    let Some(entry) = browser.entries.get(selected_idx) else {
+        return;
+    };
+    let parent_dir = match parent_tree_entry(&browser.entries, selected_idx) {
+        Some(p) => p.path.as_path().to_path_buf(),
+        None => {
+            // depth-0 → parent is workspace root.
+            let Some(root) = fs.root.as_ref() else { return };
+            root.as_path().to_path_buf()
+        }
+    };
+    let user_pathbuf = parent_dir.join(&entry.name);
+    let chain = led_core::UserPath::new(user_pathbuf).resolve_chain();
+    // The chain's resolved canonical path should equal the tree
+    // entry's stored canonical path. Stash under THAT key so the
+    // load-completion handler finds it when the file driver
+    // reports on `entry.path`.
+    path_chains.insert(entry.path.clone(), chain);
+}
 
 /// Toggle `browser.visible`. When toggling off while focus is Side,
 /// auto-swap focus back to Main so the next keystroke lands in the
@@ -116,7 +167,13 @@ pub(super) fn collapse_all(browser: &mut BrowserUi, fs: &FsTree) {
 /// - **Directory**: toggle expand/collapse (Enter as "drill in" / out).
 /// - **File**: promote an existing preview at that path, replace the
 ///   preview with this file, or create a fresh preview. Focus → Main.
-pub(super) fn open_selected(browser: &mut BrowserUi, fs: &FsTree, tabs: &mut Tabs) {
+pub(super) fn open_selected(
+    browser: &mut BrowserUi,
+    fs: &FsTree,
+    tabs: &mut Tabs,
+    path_chains: &mut HashMap<CanonPath, PathChain>,
+) {
+    let selected_idx = browser.selected;
     let Some(entry) = browser.selected_entry().cloned() else {
         return;
     };
@@ -129,7 +186,8 @@ pub(super) fn open_selected(browser: &mut BrowserUi, fs: &FsTree, tabs: &mut Tab
             }
         }
         TreeEntryKind::File => {
-            open_file_from_browser(browser, tabs, &entry.path, /* promote= */ true);
+            stash_browser_chain(browser, fs, path_chains, selected_idx);
+            open_or_focus_tab(tabs, &entry.path, /* promote= */ true);
             browser.focus = Focus::Main;
         }
     }
@@ -138,23 +196,20 @@ pub(super) fn open_selected(browser: &mut BrowserUi, fs: &FsTree, tabs: &mut Tab
 /// `Alt-Enter` — open without stealing focus from the browser.
 /// Legacy declared this as "open in background"; for M11 we treat
 /// it as an open that leaves focus on Side.
-pub(super) fn open_selected_bg(browser: &mut BrowserUi, tabs: &mut Tabs) {
+pub(super) fn open_selected_bg(
+    browser: &mut BrowserUi,
+    fs: &FsTree,
+    tabs: &mut Tabs,
+    path_chains: &mut HashMap<CanonPath, PathChain>,
+) {
+    let selected_idx = browser.selected;
     let Some(entry) = browser.selected_entry().cloned() else {
         return;
     };
     if let TreeEntryKind::File = entry.kind {
-        open_file_from_browser(browser, tabs, &entry.path, /* promote= */ false);
+        stash_browser_chain(browser, fs, path_chains, selected_idx);
+        open_or_focus_tab(tabs, &entry.path, /* promote= */ false);
     }
-}
-
-/// Core open logic — delegates to the shared `open_or_focus_tab`.
-fn open_file_from_browser(
-    _browser: &BrowserUi,
-    tabs: &mut Tabs,
-    path: &CanonPath,
-    promote: bool,
-) {
-    open_or_focus_tab(tabs, path, promote);
 }
 
 /// Browser-context selection move (Up/Down in focus=Side). Delta +1
@@ -316,10 +371,11 @@ mod tests {
     fn open_selected_on_dir_toggles_expand() {
         let (mut b, fs) = seeded();
         let mut tabs = Tabs::default();
+        let mut pc = HashMap::new();
         b.selected = 0;
-        open_selected(&mut b, &fs, &mut tabs);
+        open_selected(&mut b, &fs, &mut tabs, &mut pc);
         assert!(b.expanded_dirs.contains(&canon("/project/sub")));
-        open_selected(&mut b, &fs, &mut tabs);
+        open_selected(&mut b, &fs, &mut tabs, &mut pc);
         assert!(!b.expanded_dirs.contains(&canon("/project/sub")));
     }
 
@@ -327,9 +383,10 @@ mod tests {
     fn open_selected_on_file_creates_real_tab_and_focuses_main() {
         let (mut b, fs) = seeded();
         let mut tabs = Tabs::default();
+        let mut pc = HashMap::new();
         b.selected = 1;
         b.focus = Focus::Side;
-        open_selected(&mut b, &fs, &mut tabs);
+        open_selected(&mut b, &fs, &mut tabs, &mut pc);
         assert_eq!(tabs.open.len(), 1);
         assert!(!tabs.open[0].preview);
         assert_eq!(tabs.active, Some(tabs.open[0].id));
@@ -338,11 +395,12 @@ mod tests {
 
     #[test]
     fn open_selected_bg_creates_preview_and_keeps_side_focus() {
-        let (mut b, _fs) = seeded();
+        let (mut b, fs) = seeded();
         let mut tabs = Tabs::default();
+        let mut pc = HashMap::new();
         b.selected = 1;
         b.focus = Focus::Side;
-        open_selected_bg(&mut b, &mut tabs);
+        open_selected_bg(&mut b, &fs, &mut tabs, &mut pc);
         assert_eq!(tabs.open.len(), 1);
         assert!(tabs.open[0].preview);
         assert_eq!(b.focus, Focus::Side);
@@ -352,6 +410,7 @@ mod tests {
     fn open_selected_on_preview_promotes_it() {
         let (mut b, fs) = seeded();
         let mut tabs = Tabs::default();
+        let mut pc = HashMap::new();
         tabs.open.push_back(Tab {
             id: TabId(1),
             path: canon("/project/alpha.txt"),
@@ -360,15 +419,16 @@ mod tests {
         });
         tabs.active = Some(TabId(1));
         b.selected = 1;
-        open_selected(&mut b, &fs, &mut tabs);
+        open_selected(&mut b, &fs, &mut tabs, &mut pc);
         assert_eq!(tabs.open.len(), 1);
         assert!(!tabs.open[0].preview);
     }
 
     #[test]
     fn open_selected_on_different_file_replaces_preview_path() {
-        let (mut b, _fs) = seeded();
+        let (mut b, fs) = seeded();
         let mut tabs = Tabs::default();
+        let mut pc = HashMap::new();
         tabs.open.push_back(Tab {
             id: TabId(1),
             path: canon("/project/alpha.txt"),
@@ -377,7 +437,7 @@ mod tests {
         });
         tabs.active = Some(TabId(1));
         b.selected = 2;
-        open_selected_bg(&mut b, &mut tabs);
+        open_selected_bg(&mut b, &fs, &mut tabs, &mut pc);
         assert_eq!(tabs.open.len(), 1);
         assert_eq!(tabs.open[0].path, canon("/project/beta.txt"));
         assert!(tabs.open[0].preview);

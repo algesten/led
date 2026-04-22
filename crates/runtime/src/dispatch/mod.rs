@@ -574,11 +574,11 @@ fn run_command(
             DispatchOutcome::Continue
         }
         Command::OpenSelected => {
-            open_selected(browser, fs, tabs);
+            open_selected(browser, fs, tabs, path_chains);
             DispatchOutcome::Continue
         }
         Command::OpenSelectedBg => {
-            open_selected_bg(browser, tabs);
+            open_selected_bg(browser, fs, tabs, path_chains);
             DispatchOutcome::Continue
         }
         Command::ToggleSidePanel => {
