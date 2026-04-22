@@ -196,6 +196,36 @@ pub struct Theme {
     /// default fg show through — useful for the catch-all
     /// `Default` kind.
     pub syntax: SyntaxTheme,
+
+    // ── LSP diagnostics ─────────────────────────────────────
+    /// Severity → style for gutter markers and inline underlines.
+    pub diagnostics: DiagnosticsTheme,
+}
+
+/// Per-severity styles for LSP diagnostic rendering. Defaults
+/// mirror legacy's xterm palette: error red (x196), warning
+/// yellow (x178), info blue (x033), hint grey (x245).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct DiagnosticsTheme {
+    pub error: Style,
+    pub warning: Style,
+    pub info: Style,
+    pub hint: Style,
+}
+
+impl Default for DiagnosticsTheme {
+    fn default() -> Self {
+        let fg = |c: Color| Style {
+            fg: Some(c),
+            ..Style::default()
+        };
+        Self {
+            error: fg(Color::Indexed(196)),
+            warning: fg(Color::Indexed(178)),
+            info: fg(Color::Indexed(33)),
+            hint: fg(Color::Indexed(245)),
+        }
+    }
 }
 
 /// Per-token-kind colour slots. Field names match the
@@ -407,6 +437,7 @@ impl Default for Theme {
             // users of different editor widths (sidebar on/off).
             ruler_column: None,
             syntax: SyntaxTheme::default(),
+            diagnostics: DiagnosticsTheme::default(),
         }
     }
 }

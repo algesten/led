@@ -17,4 +17,6 @@ led-driver-terminal-core = { workspace = true }
 # `SyntaxTheme`. Only the enum is touched here; the terminal driver
 # stays unaware of trees / parses.
 led-state-syntax = { workspace = true }
+# `DiagnosticSeverity` for the gutter + underline colour lookup.
+led-state-diagnostics = { workspace = true }
 crossterm = { workspace = true }

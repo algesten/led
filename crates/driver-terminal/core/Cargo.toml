@@ -19,3 +19,7 @@ drv = { workspace = true }
 # each token run. The runtime produces the spans and hands them
 # to the terminal driver via `BodyModel::Content::lines`.
 led-state-syntax = { workspace = true }
+# `BodyLine` also carries per-row diagnostic markers — gutter
+# severity indicator + inline underline ranges. Pulled in for
+# `DiagnosticSeverity`.
+led-state-diagnostics = { workspace = true }

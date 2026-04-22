@@ -15,7 +15,7 @@ use std::sync::mpsc::Receiver;
 use std::sync::Arc;
 
 mod theme;
-pub use theme::{Attrs, Color, Style, SyntaxTheme, Theme};
+pub use theme::{Attrs, Color, DiagnosticsTheme, Style, SyntaxTheme, Theme};
 
 // ── Mirror types — the ABI boundary ────────────────────────────────────
 
@@ -218,17 +218,34 @@ pub enum BodyModel {
     },
 }
 
-/// One rendered body row: the already-truncated row text plus the
-/// list of syntax token spans inside it. Spans' `col_*` values are
-/// relative to the start of `text` (gutter included), so the
-/// painter doesn't need to know the gutter width. Empty `spans`
-/// means "paint the row with no syntax styling" — used for
-/// past-EOF rows and for rows in buffers that have no syntax
-/// highlighting.
+/// One rendered body row: the already-truncated row text plus
+/// the list of syntax token spans inside it, plus any diagnostic
+/// markers that land on this row. Spans' and diagnostics'
+/// `col_*` values are relative to the start of `text` (gutter
+/// included).
+///
+/// `gutter_diagnostic` is the highest-severity diagnostic whose
+/// range intersects this row — the painter colours the `~` / two-
+/// char gutter with the matching `theme.diagnostics.*` style.
+/// `diagnostics` are the per-row underline ranges (in column
+/// coordinates). Empty vectors mean "no styling" and the painter
+/// takes its default path.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct BodyLine {
     pub text: String,
     pub spans: Vec<LineSpan>,
+    pub gutter_diagnostic: Option<led_state_diagnostics::DiagnosticSeverity>,
+    pub diagnostics: Vec<BodyDiagnostic>,
+}
+
+/// A single diagnostic underline on one body row. Coordinates are
+/// in column units relative to the row's `text` (so gutter
+/// offset is already applied upstream). `col_end` is exclusive.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BodyDiagnostic {
+    pub col_start: u16,
+    pub col_end: u16,
+    pub severity: led_state_diagnostics::DiagnosticSeverity,
 }
 
 impl From<String> for BodyLine {
@@ -236,6 +253,8 @@ impl From<String> for BodyLine {
         Self {
             text,
             spans: Vec::new(),
+            gutter_diagnostic: None,
+            diagnostics: Vec::new(),
         }
     }
 }

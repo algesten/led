@@ -24,6 +24,7 @@ use led_state_alerts::AlertState;
 use led_state_browser::{BrowserUi, Focus, TreeEntry, TreeEntryKind};
 use led_state_clipboard::ClipboardState;
 use led_state_buffer_edits::{BufferEdits, EditedBuffer};
+use led_state_diagnostics::{BufferDiagnostics, Diagnostic, DiagnosticSeverity, DiagnosticsStates};
 use led_state_syntax::{SyntaxState, SyntaxStates, TokenKind, TokenSpan};
 use led_state_tabs::{Cursor, Scroll, Tab, TabId, Tabs};
 use ropey::Rope;
@@ -133,6 +134,25 @@ impl<'a> SyntaxStatesInput<'a> {
     pub fn new(s: &'a SyntaxStates) -> Self {
         Self {
             by_path: &s.by_path,
+        }
+    }
+}
+
+// ── Input on DiagnosticsStates ─────────────────────────────────────────
+
+/// Per-buffer diagnostic projection. `body_model` consumes this
+/// to paint gutter markers + inline underlines on the rendered
+/// rows. `imbl::HashMap` keeps projection identity pointer-cheap.
+#[drv::input]
+#[derive(Copy, Clone)]
+pub struct DiagnosticsStatesInput<'a> {
+    pub by_path: &'a imbl::HashMap<CanonPath, BufferDiagnostics>,
+}
+
+impl<'a> DiagnosticsStatesInput<'a> {
+    pub fn new(d: &'a DiagnosticsStates) -> Self {
+        Self {
+            by_path: &d.by_path,
         }
     }
 }
@@ -425,12 +445,13 @@ const GUTTER_WIDTH: usize = 2;
 /// BufferEdits seed, plus Pending / Error paths that never made it
 /// to `Ready`.
 #[drv::memo(single)]
-pub fn body_model<'e, 'a, 'b, 'o, 's>(
+pub fn body_model<'e, 'a, 'b, 'o, 's, 'd>(
     edits: EditedBuffersInput<'e>,
     store: StoreLoadedInput<'a>,
     tabs: TabsActiveInput<'b>,
     overlays: OverlaysInput<'o>,
     syntax: SyntaxStatesInput<'s>,
+    diagnostics: DiagnosticsStatesInput<'d>,
     area: Rect,
 ) -> BodyModel {
     let Some(id) = *tabs.active else {
@@ -442,11 +463,23 @@ pub fn body_model<'e, 'a, 'b, 'o, 's>(
     let highlight = active_body_match(&overlays, &tab.path, tab.scroll, area);
     if let Some(eb) = edits.buffers.get(&tab.path) {
         let spans = rebased_line_spans(syntax.by_path.get(&tab.path), eb);
-        return render_content(&eb.rope, tab.cursor, tab.scroll, area, highlight, spans.as_deref());
+        // No-smear rule: diagnostics render only when their
+        // stamped version matches the buffer's current version.
+        let diags = diagnostics
+            .by_path
+            .get(&tab.path)
+            .filter(|bd| bd.version.0 == eb.version)
+            .map(|bd| bd.diagnostics.as_slice());
+        return render_content(
+            &eb.rope,
+            tab.cursor,
+            tab.scroll,
+            area,
+            highlight,
+            spans.as_deref(),
+            diags,
+        );
     }
-    // Only the Pending / Error paths need a rendered path string, and
-    // even then we allocate only once per recompute; `Arc<str>` keeps
-    // cache-hit clones O(1).
     match store.loaded.get(&tab.path) {
         None | Some(LoadState::Pending) => BodyModel::Pending {
             path_display: path_display(tab),
@@ -455,9 +488,15 @@ pub fn body_model<'e, 'a, 'b, 'o, 's>(
             path_display: path_display(tab),
             message: Arc::<str>::from(msg.as_str()),
         },
-        Some(LoadState::Ready(rope)) => {
-            render_content(rope, tab.cursor, tab.scroll, area, highlight, None)
-        }
+        Some(LoadState::Ready(rope)) => render_content(
+            rope,
+            tab.cursor,
+            tab.scroll,
+            area,
+            highlight,
+            None,
+            None,
+        ),
     }
 }
 
@@ -543,6 +582,7 @@ fn render_content(
     area: Rect,
     match_highlight: Option<led_driver_terminal_core::BodyMatch>,
     rebased_tokens: Option<&[TokenSpan]>,
+    diagnostics: Option<&[Diagnostic]>,
 ) -> BodyModel {
     use led_driver_terminal_core::BodyLine;
 
@@ -561,9 +601,6 @@ fn render_content(
             let line_char_start = rope.line_to_char(ln);
             let mut content = rope.line(ln).to_string();
             strip_trailing_newline(&mut content);
-            // Count the full line's chars *before* truncating — the
-            // token slicer below clamps to `content_cols` so tokens
-            // past the right edge are naturally trimmed.
             let line_char_len = content.chars().count();
             truncate_to_cols_in_place(&mut content, content_cols);
             s.push_str(&content);
@@ -577,13 +614,21 @@ fn render_content(
                     )
                 })
                 .unwrap_or_default();
-            lines.push(BodyLine { text: s, spans });
+            let (gutter_diag, row_diagnostics) = diagnostics
+                .map(|diags| diagnostics_for_row(diags, ln, line_char_len, content_cols))
+                .unwrap_or_default();
+            lines.push(BodyLine {
+                text: s,
+                spans,
+                gutter_diagnostic: gutter_diag,
+                diagnostics: row_diagnostics,
+            });
         } else {
-            // Past-EOF sentinel: tilde in gutter col 0. Painter's
-            // clear-to-EOL blanks the rest of the row.
             lines.push(BodyLine {
                 text: "~ ".to_string(),
                 spans: Vec::new(),
+                gutter_diagnostic: None,
+                diagnostics: Vec::new(),
             });
         }
     }
@@ -593,6 +638,69 @@ fn render_content(
         cursor: visible_cursor(cursor, scroll, area),
         match_highlight,
     }
+}
+
+/// Project the buffer-wide diagnostic list onto one rendered
+/// row: pick the highest-severity diagnostic whose range
+/// intersects the row for the gutter mark, and emit an
+/// underline for each diagnostic whose range touches the row.
+///
+/// Severity ordering for the gutter: Error > Warning > Info > Hint.
+fn diagnostics_for_row(
+    diags: &[Diagnostic],
+    line_num: usize,
+    line_char_len: usize,
+    content_cols: usize,
+) -> (
+    Option<DiagnosticSeverity>,
+    Vec<led_driver_terminal_core::BodyDiagnostic>,
+) {
+    let mut gutter: Option<DiagnosticSeverity> = None;
+    let mut out = Vec::new();
+    for d in diags {
+        if line_num < d.start_line || line_num > d.end_line {
+            continue;
+        }
+        // Update gutter to highest severity seen.
+        gutter = Some(match gutter {
+            Some(existing) => higher(existing, d.severity),
+            None => d.severity,
+        });
+        // Compute this row's visible column range.
+        let col_start = if line_num == d.start_line { d.start_col } else { 0 };
+        let col_end = if line_num == d.end_line {
+            d.end_col
+        } else {
+            line_char_len
+        };
+        if col_end <= col_start {
+            continue;
+        }
+        let vis_start = col_start.min(content_cols) + GUTTER_WIDTH;
+        let vis_end = col_end.min(content_cols) + GUTTER_WIDTH;
+        if vis_end <= vis_start {
+            continue;
+        }
+        out.push(led_driver_terminal_core::BodyDiagnostic {
+            col_start: vis_start as u16,
+            col_end: vis_end as u16,
+            severity: d.severity,
+        });
+    }
+    (gutter, out)
+}
+
+fn higher(a: DiagnosticSeverity, b: DiagnosticSeverity) -> DiagnosticSeverity {
+    use DiagnosticSeverity::*;
+    fn rank(s: DiagnosticSeverity) -> u8 {
+        match s {
+            Error => 3,
+            Warning => 2,
+            Info => 1,
+            Hint => 0,
+        }
+    }
+    if rank(a) >= rank(b) { a } else { b }
 }
 
 /// Slice the buffer-wide token list into the subset that falls on a
@@ -1236,6 +1344,7 @@ pub struct RenderInputs<'a> {
     pub browser: BrowserUiInput<'a>,
     pub overlays: OverlaysInput<'a>,
     pub syntax: SyntaxStatesInput<'a>,
+    pub diagnostics: DiagnosticsStatesInput<'a>,
 }
 
 pub fn render_frame(inputs: RenderInputs<'_>) -> Option<Frame> {
@@ -1248,11 +1357,12 @@ pub fn render_frame(inputs: RenderInputs<'_>) -> Option<Frame> {
         inputs.browser,
         inputs.overlays,
         inputs.syntax,
+        inputs.diagnostics,
     )
 }
 
 #[drv::memo(single)]
-fn render_frame_memo<'t, 'e, 'b, 'a, 'al, 'br, 'ov, 'sx>(
+fn render_frame_memo<'t, 'e, 'b, 'a, 'al, 'br, 'ov, 'sx, 'dx>(
     term: TerminalDimsInput<'t>,
     edits: EditedBuffersInput<'e>,
     store: StoreLoadedInput<'b>,
@@ -1261,11 +1371,12 @@ fn render_frame_memo<'t, 'e, 'b, 'a, 'al, 'br, 'ov, 'sx>(
     browser: BrowserUiInput<'br>,
     overlays: OverlaysInput<'ov>,
     syntax: SyntaxStatesInput<'sx>,
+    diagnostics: DiagnosticsStatesInput<'dx>,
 ) -> Option<Frame> {
     let dims = (*term.dims)?;
     let layout = Layout::compute(dims, *browser.visible);
     let tab_bar = tab_bar_model(tabs, edits);
-    let body = body_model(edits, store, tabs, overlays, syntax, layout.editor_area);
+    let body = body_model(edits, store, tabs, overlays, syntax, diagnostics, layout.editor_area);
     let status_bar = status_bar_model(alerts, tabs, edits, overlays);
     let side_panel = layout
         .side_area
@@ -1420,6 +1531,7 @@ mod tests {
         let ff = None;
         let is = None;
         let syntax = SyntaxStates::default();
+        let diags = DiagnosticsStates::default();
         render_frame(RenderInputs {
             term: TerminalDimsInput::new(term),
             edits: EditedBuffersInput::new(e),
@@ -1429,6 +1541,7 @@ mod tests {
             browser: BrowserUiInput::new(&browser),
             overlays: OverlaysInput::new(&ff, &is, &None),
             syntax: SyntaxStatesInput::new(&syntax),
+            diagnostics: DiagnosticsStatesInput::new(&diags),
         })
     }
 
@@ -1475,6 +1588,7 @@ mod tests {
         let is = None;
 
         let syntax = SyntaxStates::default();
+        let diags = DiagnosticsStates::default();
         let frame = render_frame(RenderInputs {
             term: TerminalDimsInput::new(&term),
             edits: EditedBuffersInput::new(&e),
@@ -1484,6 +1598,7 @@ mod tests {
             browser: BrowserUiInput::new(&browser),
             overlays: OverlaysInput::new(&ff, &is, &None),
             syntax: SyntaxStatesInput::new(&syntax),
+            diagnostics: DiagnosticsStatesInput::new(&diags),
         })
         .expect("dims set");
 
@@ -1512,6 +1627,7 @@ mod tests {
         let ff = None;
         let is = None;
         let syntax = SyntaxStates::default();
+        let diags = DiagnosticsStates::default();
         let frame = render_frame(RenderInputs {
             term: TerminalDimsInput::new(&term),
             edits: EditedBuffersInput::new(&e),
@@ -1521,6 +1637,7 @@ mod tests {
             browser: BrowserUiInput::new(&browser),
             overlays: OverlaysInput::new(&ff, &is, &None),
             syntax: SyntaxStatesInput::new(&syntax),
+            diagnostics: DiagnosticsStatesInput::new(&diags),
         })
         .expect("dims set");
         assert_eq!(frame.cursor, None);
@@ -2106,12 +2223,14 @@ mod tests {
         let is = None;
 
         let syntax = SyntaxStates::default();
+        let diags = DiagnosticsStates::default();
         let model = body_model(
             EditedBuffersInput::new(&e),
             StoreLoadedInput::new(&s),
             TabsActiveInput::new(&t),
             OverlaysInput::new(&None, &is, &fs),
             SyntaxStatesInput::new(&syntax),
+            DiagnosticsStatesInput::new(&diags),
             Rect { x: 0, y: 0, cols: 40, rows: 5 },
         );
         match model {
@@ -2176,12 +2295,14 @@ mod tests {
         let is = None;
 
         let syntax = SyntaxStates::default();
+        let diags = DiagnosticsStates::default();
         let model = body_model(
             EditedBuffersInput::new(&e),
             StoreLoadedInput::new(&s),
             TabsActiveInput::new(&t),
             OverlaysInput::new(&None, &is, &fs),
             SyntaxStatesInput::new(&syntax),
+            DiagnosticsStatesInput::new(&diags),
             Rect { x: 0, y: 0, cols: 40, rows: 5 },
         );
         match model {

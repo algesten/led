@@ -612,6 +612,7 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
             browser: BrowserUiInput::new(browser),
             overlays: query::OverlaysInput::new(find_file, isearch, file_search),
             syntax: query::SyntaxStatesInput::new(syntax),
+            diagnostics: query::DiagnosticsStatesInput::new(diagnostics),
         });
 
         // ── Execute ─────────────────────────────────────────────

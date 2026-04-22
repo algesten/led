@@ -320,26 +320,37 @@ fn paint_body(
 
     for row in 0..area.rows {
         queue!(out, cursor::MoveTo(area.x, area.y + row))?;
-        // Resolve the row's text plus (for `Content` rows) the syntax
-        // spans that colour it. Non-Content variants never carry spans.
-        let (line, spans): (Option<&str>, &[led_driver_terminal_core::LineSpan]) = match body {
-            BodyModel::Empty => (None, &[]),
+        // Resolve the row's text + (for Content) syntax spans +
+        // gutter-diagnostic severity + inline underlines. Non-
+        // Content variants carry none of the extras.
+        let (line, spans, gutter_diag, row_diags): (
+            Option<&str>,
+            &[led_driver_terminal_core::LineSpan],
+            Option<led_state_diagnostics::DiagnosticSeverity>,
+            &[led_driver_terminal_core::BodyDiagnostic],
+        ) = match body {
+            BodyModel::Empty => (None, &[], None, &[]),
             BodyModel::Pending { path_display } => match row {
-                0 => (Some(path_display.as_ref()), &[]),
-                1 => (Some("loading..."), &[]),
-                _ => (None, &[]),
+                0 => (Some(path_display.as_ref()), &[], None, &[]),
+                1 => (Some("loading..."), &[], None, &[]),
+                _ => (None, &[], None, &[]),
             },
             BodyModel::Error {
                 path_display,
                 message,
             } => match row {
-                0 => (Some(path_display.as_ref()), &[]),
-                1 => (Some(message.as_ref()), &[]),
-                _ => (None, &[]),
+                0 => (Some(path_display.as_ref()), &[], None, &[]),
+                1 => (Some(message.as_ref()), &[], None, &[]),
+                _ => (None, &[], None, &[]),
             },
             BodyModel::Content { lines, .. } => match lines.get(row as usize) {
-                Some(bl) => (Some(bl.text.as_str()), bl.spans.as_slice()),
-                None => (None, &[]),
+                Some(bl) => (
+                    Some(bl.text.as_str()),
+                    bl.spans.as_slice(),
+                    bl.gutter_diagnostic,
+                    bl.diagnostics.as_slice(),
+                ),
+                None => (None, &[], None, &[]),
             },
         };
         if let Some(line) = line {
@@ -350,6 +361,45 @@ fn paint_body(
             }
         }
         queue!(out, terminal::Clear(terminal::ClearType::UntilNewLine))?;
+
+        // Diagnostic gutter marker: a single ● in gutter col 0,
+        // coloured by the highest-severity diagnostic that lives
+        // on this row. Overpaint after the row text so it's not
+        // clobbered by syntax styling.
+        if let Some(severity) = gutter_diag {
+            let style = severity_style(&theme.diagnostics, severity);
+            queue!(out, cursor::MoveTo(area.x, area.y + row))?;
+            apply_style(out, style)?;
+            queue!(out, style::Print("●"))?;
+            reset_style(out, style)?;
+        }
+
+        // Diagnostic underlines: for each row-diagnostic, overpaint
+        // the ranged cells with the severity style + underline attr.
+        for d in row_diags {
+            if d.col_end <= d.col_start {
+                continue;
+            }
+            let Some(line) = line else { continue };
+            let slice: String = line
+                .chars()
+                .skip(d.col_start as usize)
+                .take((d.col_end - d.col_start) as usize)
+                .collect();
+            if slice.is_empty() {
+                continue;
+            }
+            let base = *severity_style(&theme.diagnostics, d.severity);
+            let mut underlined = base;
+            underlined.attrs.underline = true;
+            queue!(
+                out,
+                cursor::MoveTo(area.x + d.col_start, area.y + row)
+            )?;
+            apply_style(out, &underlined)?;
+            queue!(out, style::Print(slice))?;
+            reset_style(out, &underlined)?;
+        }
 
         // File-search match highlight: a single run of cells inside
         // one row. Overpaint the matched substring with
@@ -604,6 +654,20 @@ fn paint_file_search_header(
         queue!(out, style::Print(" "))?;
     }
     Ok(())
+}
+
+/// Look up the style for a diagnostic severity.
+fn severity_style<'a>(
+    theme: &'a led_driver_terminal_core::DiagnosticsTheme,
+    severity: led_state_diagnostics::DiagnosticSeverity,
+) -> &'a Style {
+    use led_state_diagnostics::DiagnosticSeverity::*;
+    match severity {
+        Error => &theme.error,
+        Warning => &theme.warning,
+        Info => &theme.info,
+        Hint => &theme.hint,
+    }
 }
 
 /// Print one body row slicing it into styled runs according to the
