@@ -161,6 +161,7 @@ pub fn spawn(
                     trace,
                     workspace_root: None,
                     deferred_cmds: VecDeque::new(),
+                    skipped_languages: std::collections::HashSet::new(),
                 };
                 mgr.run();
             }
@@ -221,6 +222,12 @@ struct Manager {
     /// Cmds stashed here while any server's diag window is
     /// frozen. Drained FIFO once every server unfreezes.
     deferred_cmds: VecDeque<LspCmd>,
+    /// Languages whose LSP binary isn't installed, or whose
+    /// spawn failed unrecoverably. Prevents re-trying the
+    /// spawn on every `BufferOpened` for that language — once
+    /// we've decided "this language has no server", stay
+    /// decided for the session.
+    skipped_languages: std::collections::HashSet<Language>,
 }
 
 impl Manager {
@@ -340,7 +347,16 @@ impl Manager {
         if self.servers.contains_key(&language) {
             return;
         }
+        if self.skipped_languages.contains(&language) {
+            // We've already decided this language has no server
+            // available. Don't retry on every BufferOpened.
+            return;
+        }
         let Some(config) = self.registry.config_for(language) else {
+            // No registry entry for this language — also "no
+            // server", permanently. Mark so we skip future
+            // spawn calls cheaply.
+            self.skipped_languages.insert(language);
             return;
         };
         let name = format!("{:?}", language);
@@ -353,11 +369,23 @@ impl Manager {
         ) {
             Ok(s) => s,
             Err(e) => {
-                let _ = self.lsp_event_tx.send(LspEvent::Error {
-                    server: name,
-                    message: format!("spawn failed: {e}"),
-                });
-                self.notify.notify();
+                // `NotFound` = binary not in `$PATH`. Legacy
+                // (registry.rs + manager.rs) treats this as a
+                // silent skip: the user just doesn't have this
+                // LSP installed, which is the normal case for
+                // most languages. No alert, no log.
+                //
+                // Anything else (permission denied, malformed
+                // binary, etc.) IS surfaced as a warn alert so
+                // the user can act on it.
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    let _ = self.lsp_event_tx.send(LspEvent::Error {
+                        server: name,
+                        message: format!("spawn failed: {e}"),
+                    });
+                    self.notify.notify();
+                }
+                self.skipped_languages.insert(language);
                 return;
             }
         };
