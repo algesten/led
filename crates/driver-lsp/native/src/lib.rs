@@ -12,4 +12,8 @@
 //! `DiagnosticSource` state machine live in
 //! [`led_driver_lsp_core`] — this crate only adds the async parts.
 
+pub mod classify;
 pub mod framing;
+
+pub use classify::{Incoming, JsonRpcError, RequestId, classify};
+pub use framing::{FrameError, encode_frame, try_parse_frame};
