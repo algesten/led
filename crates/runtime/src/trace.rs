@@ -21,6 +21,7 @@ use std::sync::{Arc, Mutex};
 use led_core::CanonPath;
 use led_driver_find_file_core::FindFileCmd;
 use led_driver_terminal_core::{Dims, KeyEvent};
+use led_state_diagnostics::BufferVersion;
 use led_state_syntax::Language;
 use ropey::Rope;
 
@@ -72,6 +73,21 @@ pub trait Trace: Send + Sync {
     /// Completion back from the worker. Not currently serialized
     /// to dispatched.snap — kept for symmetry + future debug traces.
     fn syntax_parse_done(&self, path: &CanonPath, version: u64, ok: bool);
+    /// An LSP language server subprocess started successfully
+    /// (named after its `Language`). Emitted once per language
+    /// per session. Legacy golden name: `LspServerStarted`.
+    fn lsp_server_started(&self, server: &str);
+    /// Runtime asked the LSP manager to open a diagnostic window.
+    /// Fires on every buffer/save version delta — the manager
+    /// coalesces via its DiagnosticSource state machine.
+    fn lsp_request_diagnostics(&self);
+    /// A diagnostic delivery reached the runtime, stamped with
+    /// the buffer version the server was reasoning about.
+    fn lsp_diagnostics_done(&self, path: &CanonPath, n: usize, version: BufferVersion);
+    /// Server fell back from pull mode to push mode
+    /// (`publishDiagnostics` arrived while in Pull). One-way;
+    /// emitted once per server.
+    fn lsp_mode_fallback(&self);
     /// Emitted when the find-file driver receives a completion
     /// command. Legacy's dispatched.snap name is `FsFindFile`.
     fn find_file_start(&self, cmd: &FindFileCmd);
@@ -253,6 +269,16 @@ impl Trace for FileTrace {
     // no-op preserves the trait for future debug traces / assertions.
     fn syntax_parse_start(&self, _: &CanonPath, _: u64, _: Language) {}
     fn syntax_parse_done(&self, _: &CanonPath, _: u64, _: bool) {}
+    fn lsp_server_started(&self, server: &str) {
+        self.write_line(&format!("LspServerStarted\tserver={server}"));
+    }
+    // Request-diagnostics fires per version delta; too noisy for
+    // the intent log.
+    fn lsp_request_diagnostics(&self) {}
+    fn lsp_diagnostics_done(&self, _: &CanonPath, _: usize, _: BufferVersion) {}
+    fn lsp_mode_fallback(&self) {
+        self.write_line("LspModeFallback");
+    }
     fn find_file_start(&self, cmd: &FindFileCmd) {
         // Legacy format: `FsFindFile\tdir=<p> prefix="<s>" show_hidden=<bool>`.
         self.write_line(&format!(
@@ -326,6 +352,10 @@ impl Trace for NoopTrace {
     fn file_search_single_replace_start(&self, _: &CanonPath, _: usize) {}
     fn syntax_parse_start(&self, _: &CanonPath, _: u64, _: Language) {}
     fn syntax_parse_done(&self, _: &CanonPath, _: u64, _: bool) {}
+    fn lsp_server_started(&self, _: &str) {}
+    fn lsp_request_diagnostics(&self) {}
+    fn lsp_diagnostics_done(&self, _: &CanonPath, _: usize, _: BufferVersion) {}
+    fn lsp_mode_fallback(&self) {}
     fn find_file_start(&self, _: &FindFileCmd) {}
     fn find_file_done(&self, _: &CanonPath, _: &str, _: bool) {}
     fn workspace_clear_undo(&self, _: &CanonPath) {}

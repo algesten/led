@@ -41,6 +41,8 @@ use led_driver_fs_list_core::FsListDriver;
 use led_driver_fs_list_native::FsListNative;
 use led_driver_syntax_core::{SyntaxCmd, SyntaxDriver};
 use led_driver_syntax_native::SyntaxNative;
+use led_driver_lsp_core::{LspCmd, LspDriver, LspEvent};
+use led_driver_lsp_native::LspNative;
 use led_state_alerts::AlertState;
 use led_state_browser::{BrowserUi, FsTree, rebuild_entries};
 use led_state_buffer_edits::{BufferEdits, EditedBuffer};
@@ -50,6 +52,7 @@ use led_state_find_file::FindFileState;
 use led_state_isearch::IsearchState;
 use led_state_jumps::JumpListState;
 use led_state_kill_ring::KillRing;
+use led_state_diagnostics::{BufferDiagnostics, BufferVersion, DiagnosticsStates};
 use led_state_syntax::{Language, SyntaxState, SyntaxStates};
 use led_state_tabs::{TabId, Tabs};
 
@@ -117,6 +120,7 @@ pub struct Drivers {
     pub find_file: FindFileDriver,
     pub file_search: FileSearchDriver,
     pub syntax: SyntaxDriver,
+    pub lsp: LspDriver,
 
     // Held only for lifetime management; detached on drop.
     _file_native: FileReadNative,
@@ -127,6 +131,7 @@ pub struct Drivers {
     _find_file_native: FindFileNative,
     _file_search_native: FileSearchNative,
     _syntax_native: SyntaxNative,
+    _lsp_native: LspNative,
 }
 
 /// Allocator for fresh `TabId`s. Counter only; ids are never reused.
@@ -172,6 +177,25 @@ pub struct Atoms {
     /// load completes and the path's extension matches a known
     /// language; otherwise the buffer has no syntax highlighting.
     pub syntax: SyntaxStates,
+    /// Per-buffer LSP diagnostics. Populated when a version-
+    /// matched `LspEvent::Diagnostics` arrives; cleared on stale
+    /// delivery (no-smear rule — see `feedback_lsp_no_smear.md`).
+    pub diagnostics: DiagnosticsStates,
+    /// Per-buffer tracker of the last `BufferVersion` we notified
+    /// the LSP driver about. Used by the execute phase to decide
+    /// whether to emit another `BufferChanged`. Separate from
+    /// `edits.buffers[path].version` because one driver lags
+    /// independently of another.
+    pub lsp_notified: std::collections::HashMap<CanonPath, BufferVersion>,
+    /// Running sum of `(version + saved_version)` across all
+    /// buffers. The execute phase fires `LspCmd::RequestDiagnostics`
+    /// whenever this sum changes — the "edit or save happened"
+    /// coalescing signal. Legacy used a content-hash projection
+    /// for the same purpose.
+    pub lsp_state_sum: u64,
+    /// `true` once `LspCmd::Init` has been emitted. Prevents
+    /// re-issuing the handshake on every tick.
+    pub lsp_init_sent: bool,
     /// Symlink resolution chain for every path the user has
     /// opened, keyed by canonical path. Populated at tab-open
     /// time (main.rs CLI, find-file commit, browser open) so the
@@ -214,6 +238,10 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
         file_search,
         syntax,
         path_chains,
+        diagnostics,
+        lsp_notified,
+        lsp_state_sum,
+        lsp_init_sent,
     } = &mut *world.atoms;
     let drivers = world.drivers;
     let wake = world.wake;
@@ -256,12 +284,72 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
                 .get(&completion.path)
                 .and_then(Language::from_chain)
                 .or_else(|| Language::from_path(&completion.path));
-            seed_edit_from_load(edits, completion.path.clone(), completion.rope);
+            let inserted = seed_edit_from_load(
+                edits,
+                completion.path.clone(),
+                completion.rope.clone(),
+            );
             if let Some(lang) = detected {
                 syntax
                     .by_path
-                    .entry(completion.path)
+                    .entry(completion.path.clone())
                     .or_insert_with(|| SyntaxState::new(lang));
+            }
+            // Tell the LSP driver about the new buffer. The driver
+            // ignores languages it doesn't have a registry entry
+            // for, so sending unconditionally is fine.
+            if inserted {
+                let version = edits
+                    .buffers
+                    .get(&completion.path)
+                    .map(|eb| BufferVersion(eb.version))
+                    .unwrap_or_default();
+                drivers.lsp.execute(std::iter::once(&LspCmd::BufferOpened {
+                    path: completion.path.clone(),
+                    language: detected,
+                    rope: completion.rope.clone(),
+                    version,
+                }));
+                lsp_notified.insert(completion.path, version);
+            }
+        }
+
+        // Apply LSP driver completions. Per `feedback_lsp_no_smear.md`:
+        // accept only when the stamped version matches the buffer's
+        // current version; stale deliveries drop silently. Empty
+        // deliveries clear the atom for that path.
+        for ev in drivers.lsp.process() {
+            match ev {
+                LspEvent::Diagnostics {
+                    path,
+                    version,
+                    diagnostics: diags,
+                } => {
+                    let current = edits
+                        .buffers
+                        .get(&path)
+                        .map(|eb| BufferVersion(eb.version))
+                        .unwrap_or_default();
+                    if version != current {
+                        // Stale — drop. Next RequestDiagnostics
+                        // re-pulls against the current version.
+                        continue;
+                    }
+                    if diags.is_empty() {
+                        diagnostics.by_path.remove(&path);
+                    } else {
+                        diagnostics
+                            .by_path
+                            .insert(path, BufferDiagnostics::new(version, diags));
+                    }
+                }
+                LspEvent::Ready { .. }
+                | LspEvent::Progress { .. }
+                | LspEvent::Error { .. } => {
+                    // Progress / error / quiescence surfacing is
+                    // stage 6 (status bar integration). Drop
+                    // quietly for now.
+                }
             }
         }
 
@@ -694,6 +782,54 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
             drivers.syntax.execute(syntax_cmds.iter());
         }
 
+        // ── LSP dispatch ──────────────────────────────────────
+        //
+        // One-time `Init` once the workspace root is known; then
+        // on each tick: emit `BufferChanged` for any buffer whose
+        // `version` has moved since the last notification, and a
+        // single `RequestDiagnostics` if the state-sum
+        // (Σ version + saved_version) moved. Manager-side window
+        // discipline coalesces spammy request calls, so being
+        // eager here is fine.
+        if !*lsp_init_sent
+            && let Some(root) = fs.root.as_ref()
+        {
+            drivers.lsp.execute(std::iter::once(&LspCmd::Init {
+                root: root.clone(),
+            }));
+            *lsp_init_sent = true;
+        }
+
+        let mut lsp_cmds: Vec<LspCmd> = Vec::new();
+        let mut new_state_sum: u64 = 0;
+        for (path, eb) in edits.buffers.iter() {
+            new_state_sum = new_state_sum
+                .wrapping_add(eb.version)
+                .wrapping_add(eb.saved_version);
+            let current = BufferVersion(eb.version);
+            let last = lsp_notified.get(path).copied().unwrap_or_default();
+            if current.0 > last.0 {
+                // `is_save` is true on the tick the writer
+                // confirmed the buffer landed on disk — detected
+                // by `saved_version == version`.
+                let is_save = eb.saved_version == eb.version && eb.saved_version > 0;
+                lsp_cmds.push(LspCmd::BufferChanged {
+                    path: path.clone(),
+                    rope: eb.rope.clone(),
+                    version: current,
+                    is_save,
+                });
+                lsp_notified.insert(path.clone(), current);
+            }
+        }
+        if new_state_sum != *lsp_state_sum {
+            lsp_cmds.push(LspCmd::RequestDiagnostics);
+            *lsp_state_sum = new_state_sum;
+        }
+        if !lsp_cmds.is_empty() {
+            drivers.lsp.execute(lsp_cmds.iter());
+        }
+
         // Clipboard actions: a Read when a yank is pending (no read
         // already in flight), a Write when a kill queued clipboard
         // text. Both flags cleared synchronously per the execute
@@ -863,6 +999,11 @@ pub fn spawn_drivers(trace: SharedTrace, wake: &Wake) -> io::Result<Drivers> {
         trace.clone().as_syntax_trace(),
         wake.notifier.clone(),
     );
+    let (lsp, lsp_native) = led_driver_lsp_native::spawn(
+        trace.clone().as_lsp_trace(),
+        wake.notifier.clone(),
+        None, // no --test-lsp-server override yet (wired in stage 6)
+    );
     let (input, input_native) = led_driver_terminal_native::spawn(
         trace.clone().as_terminal_trace(),
         wake.notifier.clone(),
@@ -878,6 +1019,7 @@ pub fn spawn_drivers(trace: SharedTrace, wake: &Wake) -> io::Result<Drivers> {
         find_file,
         file_search,
         syntax,
+        lsp,
         _file_native: file_native,
         _file_write_native: file_write_native,
         _input_native: input_native,
@@ -886,6 +1028,7 @@ pub fn spawn_drivers(trace: SharedTrace, wake: &Wake) -> io::Result<Drivers> {
         _find_file_native: find_file_native,
         _file_search_native: file_search_native,
         _syntax_native: syntax_native,
+        _lsp_native: lsp_native,
     })
 }
 
@@ -912,6 +1055,7 @@ pub(crate) mod trace_adapter {
     pub(crate) struct FindFileTraceAdapter(pub Arc<dyn Trace>);
     pub(crate) struct FileSearchTraceAdapter(pub Arc<dyn Trace>);
     pub(crate) struct SyntaxTraceAdapter(pub Arc<dyn Trace>);
+    pub(crate) struct LspTraceAdapter(pub Arc<dyn Trace>);
 
     impl led_driver_buffers_core::Trace for FileTraceAdapter {
         fn file_load_start(&self, path: &CanonPath) {
@@ -997,6 +1141,26 @@ pub(crate) mod trace_adapter {
         }
     }
 
+    impl led_driver_lsp_core::Trace for LspTraceAdapter {
+        fn lsp_server_started(&self, server: &str) {
+            self.0.lsp_server_started(server);
+        }
+        fn lsp_request_diagnostics(&self) {
+            self.0.lsp_request_diagnostics();
+        }
+        fn lsp_diagnostics_done(
+            &self,
+            path: &CanonPath,
+            n: usize,
+            version: led_state_diagnostics::BufferVersion,
+        ) {
+            self.0.lsp_diagnostics_done(path, n, version);
+        }
+        fn lsp_mode_fallback(&self) {
+            self.0.lsp_mode_fallback();
+        }
+    }
+
     impl led_driver_file_search_core::Trace for FileSearchTraceAdapter {
         fn file_search_start(&self, cmd: &led_driver_file_search_core::FileSearchCmd) {
             self.0.file_search_start(
@@ -1060,6 +1224,9 @@ impl SharedTrace {
     }
     pub(crate) fn as_syntax_trace(&self) -> Arc<dyn led_driver_syntax_core::Trace> {
         Arc::new(trace_adapter::SyntaxTraceAdapter(self.inner()))
+    }
+    pub(crate) fn as_lsp_trace(&self) -> Arc<dyn led_driver_lsp_core::Trace> {
+        Arc::new(trace_adapter::LspTraceAdapter(self.inner()))
     }
 }
 
