@@ -141,6 +141,9 @@ fn apply_toml(
     if let Some(syntax_value) = root.get("syntax") {
         apply_syntax(loaded, path, syntax_value, &aliases)?;
     }
+    if let Some(diag_value) = root.get("diagnostics") {
+        apply_diagnostics(loaded, path, diag_value, &aliases)?;
+    }
 
     let Some(chrome) = root.get("chrome") else {
         return Ok(());
@@ -308,6 +311,46 @@ fn resolve_syntax_style(
             None
         }
     }
+}
+
+/// Ingest the `[diagnostics]` table. Four fixed severity keys —
+/// `error`, `warning`, `info`, `hint`. Each accepts either the
+/// table form (`{ fg = "x196", bold = true }`) or the bare-color
+/// shorthand (`"$error"`), matching `[syntax]`. Unknown keys
+/// warn and skip.
+fn apply_diagnostics(
+    loaded: &mut LoadedTheme,
+    path: &Path,
+    diag: &toml::Value,
+    aliases: &Aliases,
+) -> Result<(), ThemeError> {
+    let table = match diag {
+        toml::Value::Table(t) => t,
+        _ => {
+            return Err(ThemeError::SchemaMismatch {
+                path: path.to_path_buf(),
+                message: "`diagnostics` must be a table".into(),
+            });
+        }
+    };
+    for (key, value) in table {
+        let Some(style) = resolve_syntax_style(key, value, aliases, &mut loaded.warnings)
+        else {
+            continue;
+        };
+        match key.as_str() {
+            "error" => loaded.theme.diagnostics.error = style,
+            "warning" => loaded.theme.diagnostics.warning = style,
+            "info" => loaded.theme.diagnostics.info = style,
+            "hint" => loaded.theme.diagnostics.hint = style,
+            other => {
+                loaded.warnings.push(format!(
+                    "[diagnostics] `{other}`: unknown severity (skipped)"
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Flatten `[COLORS]` into a `HashMap<name, value-string>`. Values
@@ -1019,6 +1062,69 @@ label              = "$syntax_label"
         assert_eq!(s.property.fg, Some(Color::Indexed(98)), "property");
         assert_eq!(s.tag.fg, Some(Color::Indexed(160)), "tag");
         assert_eq!(s.label.fg, Some(Color::Indexed(172)), "label");
+    }
+
+    #[test]
+    fn diagnostics_section_populates_severity_styles() {
+        let tmp = tempdir();
+        let path = write_theme(
+            &tmp,
+            r##"
+[diagnostics]
+error = "x196"
+warning = { fg = "x178", bold = true }
+info = "x033"
+hint = "x245"
+"##,
+        );
+        let loaded = load_theme(None, Some(&path)).unwrap();
+        assert_eq!(loaded.theme.diagnostics.error.fg, Some(Color::Indexed(196)));
+        assert_eq!(
+            loaded.theme.diagnostics.warning.fg,
+            Some(Color::Indexed(178))
+        );
+        assert!(loaded.theme.diagnostics.warning.attrs.bold);
+        assert_eq!(loaded.theme.diagnostics.info.fg, Some(Color::Indexed(33)));
+        assert_eq!(loaded.theme.diagnostics.hint.fg, Some(Color::Indexed(245)));
+    }
+
+    #[test]
+    fn unknown_diagnostics_key_warns_and_skips() {
+        let tmp = tempdir();
+        let path = write_theme(
+            &tmp,
+            r##"
+[diagnostics]
+error = "x196"
+neon = "x201"
+"##,
+        );
+        let loaded = load_theme(None, Some(&path)).unwrap();
+        assert_eq!(loaded.theme.diagnostics.error.fg, Some(Color::Indexed(196)));
+        assert!(
+            loaded.warnings.iter().any(|w| w.contains("neon")),
+            "warnings: {:?}",
+            loaded.warnings
+        );
+    }
+
+    #[test]
+    fn diagnostics_via_alias_chain_resolves() {
+        // Legacy pattern: aliases defined in [COLORS], then
+        // [diagnostics] references them as bare strings.
+        let tmp = tempdir();
+        let path = write_theme(
+            &tmp,
+            r##"
+[COLORS]
+err_color = "$x196"
+
+[diagnostics]
+error = "$err_color"
+"##,
+        );
+        let loaded = load_theme(None, Some(&path)).unwrap();
+        assert_eq!(loaded.theme.diagnostics.error.fg, Some(Color::Indexed(196)));
     }
 
     #[test]

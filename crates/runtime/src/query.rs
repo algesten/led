@@ -793,11 +793,12 @@ fn truncate_to_cols_in_place(s: &mut String, cols: usize) {
 /// All strings are `Arc<str>` so cache-hit clones of
 /// [`StatusBarModel`] are a pointer copy.
 #[drv::memo(single)]
-pub fn status_bar_model<'a, 'b, 'c, 'o>(
+pub fn status_bar_model<'a, 'b, 'c, 'o, 'd>(
     alerts: AlertsInput<'a>,
     tabs: TabsActiveInput<'b>,
     edits: EditedBuffersInput<'c>,
     overlays: OverlaysInput<'o>,
+    diagnostics: DiagnosticsStatesInput<'d>,
 ) -> StatusBarModel {
     // Priority 0a — in-buffer isearch prompt.
     if let Some(state) = overlays.isearch.as_ref() {
@@ -866,7 +867,7 @@ pub fn status_bar_model<'a, 'b, 'c, 'o>(
         };
     }
 
-    let right = position_string(tabs, edits);
+    let right = position_string(tabs, edits, diagnostics);
 
     // Priority 2 — info alert.
     if let Some(msg) = alerts.info.as_deref() {
@@ -923,14 +924,33 @@ fn active_is_dirty(tabs: TabsActiveInput<'_>, edits: EditedBuffersInput<'_>) -> 
         .unwrap_or(false)
 }
 
-fn position_string(tabs: TabsActiveInput<'_>, _edits: EditedBuffersInput<'_>) -> Arc<str> {
+fn position_string(
+    tabs: TabsActiveInput<'_>,
+    _edits: EditedBuffersInput<'_>,
+    diagnostics: DiagnosticsStatesInput<'_>,
+) -> Arc<str> {
     let Some(tab) = active_tab(tabs) else {
         return Arc::from("");
     };
     // 1-indexed for human display — matches legacy goldens.
     let row = tab.cursor.line + 1;
     let col = tab.cursor.col + 1;
-    Arc::from(format!("L{row}:C{col} "))
+    // Diagnostic count prefix: `E:N W:M` when the active buffer
+    // has any errors or warnings. Info / hint counts are omitted
+    // to keep the bar tidy — user runs the diag-list command to
+    // see them individually.
+    let mut prefix = String::new();
+    if let Some(bd) = diagnostics.by_path.get(&tab.path) {
+        let errors = bd.count(DiagnosticSeverity::Error);
+        let warnings = bd.count(DiagnosticSeverity::Warning);
+        if errors > 0 {
+            prefix.push_str(&format!("E:{errors} "));
+        }
+        if warnings > 0 {
+            prefix.push_str(&format!("W:{warnings} "));
+        }
+    }
+    Arc::from(format!("{prefix}L{row}:C{col} "))
 }
 
 /// Side-panel slice of the render frame. Walks the visible window
@@ -1377,7 +1397,7 @@ fn render_frame_memo<'t, 'e, 'b, 'a, 'al, 'br, 'ov, 'sx, 'dx>(
     let layout = Layout::compute(dims, *browser.visible);
     let tab_bar = tab_bar_model(tabs, edits);
     let body = body_model(edits, store, tabs, overlays, syntax, diagnostics, layout.editor_area);
-    let status_bar = status_bar_model(alerts, tabs, edits, overlays);
+    let status_bar = status_bar_model(alerts, tabs, edits, overlays, diagnostics);
     let side_panel = layout
         .side_area
         .map(|area| side_panel_model(browser, overlays, area.rows));
@@ -1995,11 +2015,13 @@ mod tests {
     fn status(a: &AlertState, t: &Tabs, e: &BufferEdits) -> StatusBarModel {
         let ff = None;
         let is = None;
+        let diags = DiagnosticsStates::default();
         status_bar_model(
             AlertsInput::new(a),
             TabsActiveInput::new(t),
             EditedBuffersInput::new(e),
             OverlaysInput::new(&ff, &is, &None),
+            DiagnosticsStatesInput::new(&diags),
         )
     }
 
