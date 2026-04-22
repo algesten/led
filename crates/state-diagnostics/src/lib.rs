@@ -10,19 +10,27 @@
 //! quiet side: "what diagnostics does buffer X have right now, if
 //! any". The runtime's painter reads from here.
 //!
-//! # Version stamping
+//! # Version stamping — hard gate, no smear
 //!
 //! Each delivery carries a `BufferVersion` — the `eb.version` the
 //! buffer was at when the pull was dispatched. The runtime accepts
-//! a delivery only if:
+//! a delivery only if the stamped version matches the buffer's
+//! **current** version. Anything else is dropped silently; the
+//! next `RequestDiagnostics` cycle re-pulls against the new
+//! version.
 //!
-//! 1. the stamped version matches the buffer's current version
-//!    (fast path), or
-//! 2. the intervening edits can be rebased over the diagnostic
-//!    positions (replay path, landing in stage 3).
+//! The painter also hides `BufferDiagnostics` whose `version` no
+//! longer matches the buffer's current version — the gutter
+//! blanks the instant the user edits and fills back in only when
+//! the fresh pull response lands.
 //!
-//! A stale delivery that can't be reconciled is dropped silently —
-//! the next `RequestDiagnostics` cycle will re-pull.
+//! No rebase. No save-point markers. No replay-through-edits. The
+//! tradeoff is explicit: showing diagnostics for a version the
+//! user has already edited past is actively misleading (it claims
+//! errors on lines that have moved). Invisible is safer than
+//! misleading. Syntax highlighting makes the opposite choice
+//! because slightly-wrong colour beats flicker; diagnostics
+//! because slightly-wrong error markers don't.
 
 use imbl::HashMap;
 use led_core::CanonPath;
@@ -82,14 +90,9 @@ pub struct DiagnosticsStates {
 }
 
 /// One buffer's diagnostic roster plus the version the roster was
-/// computed against.
-///
-/// `version` matters because the painter may be rendering the
-/// buffer at a later version than the diagnostics were stamped
-/// for — the rebase logic (stage 3) transforms stored positions
-/// forward through interim edits. Until that lands, positions are
-/// frozen at `version`; slightly-wrong rendering is acceptable
-/// flicker until the next pull cycle.
+/// computed against. The painter renders these ONLY when the
+/// stored version equals the buffer's current version — see the
+/// module docs for the "no smear" rationale.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct BufferDiagnostics {
     pub version: BufferVersion,
