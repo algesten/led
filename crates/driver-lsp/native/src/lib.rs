@@ -1,16 +1,20 @@
-//! Desktop tokio-backed LSP worker.
+//! Desktop LSP worker. Same `std::thread` + `std::sync::mpsc`
+//! pattern as the rest of the rewrite's `*-native` crates — no
+//! tokio, no async runtime. Subprocess I/O blocks per-thread;
+//! reader + writer threads per server feed a central mpsc the
+//! manager thread drains.
 //!
 //! M16 is built in pieces:
 //!
-//! - [`framing`] — pure Content-Length JSON-RPC framing, no I/O.
-//!   Exhaustively unit-tested.
-//! - [Future] subprocess manager, per-language spawn, stdin / stdout
-//!   pumps, response-id correlation, notification routing, and the
-//!   `DiagnosticSource` event loop. Lands incrementally.
+//! - [`framing`] — pure Content-Length JSON-RPC framing. No I/O.
+//! - [`classify`] — pure classifier over decoded frame bodies
+//!   (response / server-request / notification / malformed).
+//! - [Future] subprocess spawn, stdin / stdout pumps, server
+//!   registry, `DiagnosticSource` event loop. Land incrementally.
 //!
 //! The sync-side ABI (`LspCmd`, `LspEvent`, `LspDriver`) and the
 //! `DiagnosticSource` state machine live in
-//! [`led_driver_lsp_core`] — this crate only adds the async parts.
+//! [`led_driver_lsp_core`]; this crate adds the platform wiring.
 
 pub mod classify;
 pub mod framing;
