@@ -803,6 +803,15 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
 
         let mut lsp_cmds: Vec<LspCmd> = Vec::new();
         let mut new_state_sum: u64 = 0;
+        // Also track whether we emitted any lifecycle command
+        // this tick — BufferChanged OR a fresh BufferOpened that
+        // was queued in the load-completion block above. Either
+        // is a reason to request diagnostics, even when the
+        // state-sum happens to land at the same value (e.g.
+        // initial load: eb.version == 0, saved_version == 0 →
+        // sum 0 → no delta, but diagnostics definitely want to
+        // fire).
+        let mut any_lifecycle_cmd = false;
         for (path, eb) in edits.buffers.iter() {
             new_state_sum = new_state_sum
                 .wrapping_add(eb.version)
@@ -821,11 +830,16 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
                     is_save,
                 });
                 lsp_notified.insert(path.clone(), current);
+                any_lifecycle_cmd = true;
             }
         }
-        if new_state_sum != *lsp_state_sum {
+        // Also fire a RequestDiagnostics on the first tick any
+        // buffer has entered `lsp_notified` (catches the
+        // BufferOpened → ready-for-pull transition).
+        let fresh_open = !lsp_notified.is_empty() && *lsp_state_sum == 0;
+        if new_state_sum != *lsp_state_sum || fresh_open || any_lifecycle_cmd {
             lsp_cmds.push(LspCmd::RequestDiagnostics);
-            *lsp_state_sum = new_state_sum;
+            *lsp_state_sum = new_state_sum.max(1); // guard: never re-enter the fresh-open branch
         }
         if !lsp_cmds.is_empty() {
             drivers.lsp.execute(lsp_cmds.iter());
@@ -973,7 +987,11 @@ fn auto_advance_arrow_follow(
 /// using the desktop `*-native` implementations. Every driver gets a
 /// clone of the wake [`Notifier`]; each completion signals the main
 /// loop so it wakes immediately.
-pub fn spawn_drivers(trace: SharedTrace, wake: &Wake) -> io::Result<Drivers> {
+pub fn spawn_drivers(
+    trace: SharedTrace,
+    wake: &Wake,
+    lsp_server_override: Option<String>,
+) -> io::Result<Drivers> {
     let (file, file_native) =
         led_driver_buffers_native::spawn(trace.clone().as_file_trace(), wake.notifier.clone());
     let (file_write, file_write_native) = led_driver_buffers_native::spawn_write(
@@ -1003,7 +1021,7 @@ pub fn spawn_drivers(trace: SharedTrace, wake: &Wake) -> io::Result<Drivers> {
     let (lsp, lsp_native) = led_driver_lsp_native::spawn(
         trace.clone().as_lsp_trace(),
         wake.notifier.clone(),
-        None, // no --test-lsp-server override yet (wired in stage 6)
+        lsp_server_override,
     );
     let (input, input_native) = led_driver_terminal_native::spawn(
         trace.clone().as_terminal_trace(),

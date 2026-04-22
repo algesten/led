@@ -142,7 +142,11 @@ fn main() -> io::Result<()> {
     let _raw = RawModeGuard::acquire()?;
 
     let wake = Wake::new();
-    let drivers = spawn_drivers(trace.clone(), &wake)?;
+    let lsp_override = cli
+        .test_lsp_server
+        .as_deref()
+        .map(|p| p.to_string_lossy().into_owned());
+    let drivers = spawn_drivers(trace.clone(), &wake, lsp_override)?;
 
     let mut stdout = io::stdout();
     let mut world = World {

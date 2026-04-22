@@ -362,13 +362,14 @@ fn paint_body(
         }
         queue!(out, terminal::Clear(terminal::ClearType::UntilNewLine))?;
 
-        // Diagnostic gutter marker: a single ● in gutter col 0,
-        // coloured by the highest-severity diagnostic that lives
-        // on this row. Overpaint after the row text so it's not
-        // clobbered by syntax styling.
+        // Diagnostic gutter marker: a single ● in gutter col 1
+        // (the second of the two gutter cells — matches legacy
+        // display.rs positioning, so goldens line up). Overpaint
+        // after the row text so it's not clobbered by syntax
+        // styling.
         if let Some(severity) = gutter_diag {
             let style = severity_style(&theme.diagnostics, severity);
-            queue!(out, cursor::MoveTo(area.x, area.y + row))?;
+            queue!(out, cursor::MoveTo(area.x + 1, area.y + row))?;
             apply_style(out, style)?;
             queue!(out, style::Print("●"))?;
             reset_style(out, style)?;
