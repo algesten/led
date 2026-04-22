@@ -1,0 +1,23 @@
+[package]
+name = "led-driver-lsp-core"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Sync core of the LSP driver — strictly isolated.
+#
+# Holds the command / event ABI the runtime and the native async
+# manager share, plus the `DiagnosticSource` state machine that
+# decides push-vs-pull / window lifecycle / freeze discipline. The
+# state machine is pure (no tokio, no subprocess) so it can be
+# unit-tested exhaustively in isolation; the native side composes
+# it into its event loop.
+
+[dependencies]
+led-core = { workspace = true }
+led-state-diagnostics = { workspace = true }
+# `Language` identifier on `BufferOpened` — the LSP manager picks
+# the server binary off this. Same enum the syntax driver uses to
+# pick a tree-sitter grammar.
+led-state-syntax = { workspace = true }
+ropey = { workspace = true }
