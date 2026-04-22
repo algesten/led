@@ -652,7 +652,14 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
             let Some(eb) = edits.buffers.get(path) else {
                 continue;
             };
-            if eb.version <= state.version {
+            // Needs a parse if we've never parsed this buffer OR the
+            // rope has moved past the last-applied tokens. The
+            // initial load sits at `eb.version == state.version == 0`,
+            // so without the `tree.is_none()` branch the first parse
+            // would never fire — colours would only appear after the
+            // user typed their first character.
+            let needs_parse = state.tree.is_none() || eb.version > state.version;
+            if !needs_parse {
                 continue;
             }
             if state.in_flight_version == Some(eb.version) {
