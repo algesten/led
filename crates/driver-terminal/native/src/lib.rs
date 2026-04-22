@@ -19,8 +19,9 @@ use crossterm::event::{
 };
 use led_core::Notifier;
 use led_driver_terminal_core::{
-    Attrs, BodyModel, Color, Dims, Frame, KeyCode, KeyEvent, KeyModifiers, Rect, SidePanelModel,
-    StatusBarModel, Style, TabBarModel, TermEvent, Theme, TerminalInputDriver, Trace,
+    Attrs, BodyModel, Color, Dims, Frame, KeyCode, KeyEvent, KeyModifiers, PopoverModel,
+    PopoverSeverity, Rect, SidePanelModel, StatusBarModel, Style, TabBarModel, TermEvent,
+    Theme, TerminalInputDriver, Trace,
 };
 
 #[cfg(test)]
@@ -203,8 +204,17 @@ pub fn paint(
         }
     }
 
-    if force || last.map(|l| &l.body) != Some(&frame.body) {
+    // When the popover changes (appears / disappears / moves /
+    // content shifts), we must repaint the body too — the old box
+    // needs to be erased and the new one drawn on a fresh canvas.
+    let popover_changed = last.map(|l| &l.popover) != Some(&frame.popover);
+
+    if force || popover_changed || last.map(|l| &l.body) != Some(&frame.body) {
         paint_body(&frame.body, frame.layout.editor_area, theme, out)?;
+    }
+
+    if let Some(pop) = &frame.popover {
+        paint_popover(pop, frame.layout.editor_area, frame.dims, theme, out)?;
     }
 
     if force || last.map(|l| &l.tab_bar) != Some(&frame.tab_bar) {
@@ -450,6 +460,133 @@ fn paint_body(
     Ok(())
 }
 
+/// Draw the cursor-line diagnostic popover — a floating box anchored
+/// near the cursor. Matches legacy's UX exactly: dark-gray fill, no
+/// border, one inner-padding column on each side, Y prefers above the
+/// anchor line, X clamps so the box stays on screen.
+fn paint_popover(
+    pop: &PopoverModel,
+    editor_area: Rect,
+    dims: Dims,
+    theme: &Theme,
+    out: &mut impl Write,
+) -> io::Result<()> {
+    use crossterm::{cursor, queue, style};
+
+    if pop.lines.is_empty() {
+        return Ok(());
+    }
+
+    // Max content width across all non-rule lines; rule lines take
+    // the full content width implicitly.
+    let content_w = pop
+        .lines
+        .iter()
+        .filter(|l| l.severity.is_some())
+        .map(|l| l.text.chars().count())
+        .max()
+        .unwrap_or(1);
+    // Outer width = content + 1-char inner padding on each side.
+    let outer_w = (content_w + 2).min(editor_area.cols as usize).max(3);
+    let height = pop
+        .lines
+        .len()
+        .min(editor_area.rows as usize / 2)
+        .max(1);
+    let lines = &pop.lines[..height];
+
+    // X: clamp so the right edge doesn't leave the editor area.
+    let area_right = editor_area.x.saturating_add(editor_area.cols);
+    let max_x = area_right.saturating_sub(outer_w as u16);
+    let x = pop.anchor.0.min(max_x).max(editor_area.x);
+    // Y: prefer above the anchor row, fall back to below if there
+    // isn't room. The editor area's top edge is the clamp; rows
+    // above the editor (tab bar) never receive popover content.
+    let y = if pop.anchor.1 >= editor_area.y.saturating_add(height as u16) {
+        pop.anchor.1.saturating_sub(height as u16)
+    } else {
+        let below = pop.anchor.1.saturating_add(1);
+        let area_bottom = editor_area.y.saturating_add(editor_area.rows);
+        below
+            .min(area_bottom.saturating_sub(height as u16))
+            .max(editor_area.y)
+    };
+
+    // Guard: never overflow the physical terminal.
+    if x >= dims.cols || y >= dims.rows {
+        return Ok(());
+    }
+    let outer_w = outer_w.min((dims.cols.saturating_sub(x)) as usize);
+    if outer_w < 3 {
+        return Ok(());
+    }
+    let height = height.min((dims.rows.saturating_sub(y)) as usize);
+    if height == 0 {
+        return Ok(());
+    }
+
+    let bg = Color::Indexed(236); // dark gray, matches legacy
+    let pad_blank: String = " ".repeat(outer_w.saturating_sub(2));
+
+    for (i, line) in lines.iter().take(height).enumerate() {
+        queue!(out, cursor::MoveTo(x, y + i as u16))?;
+        match line.severity {
+            None => {
+                // Horizontal rule: fill outer width with ─.
+                let fg = Color::Indexed(245);
+                apply_style(
+                    out,
+                    &Style {
+                        fg: Some(fg),
+                        bg: Some(bg),
+                        attrs: Attrs::default(),
+                    },
+                )?;
+                let rule: String = "─".repeat(outer_w);
+                queue!(out, style::Print(rule))?;
+                reset_style(
+                    out,
+                    &Style {
+                        fg: Some(fg),
+                        bg: Some(bg),
+                        attrs: Attrs::default(),
+                    },
+                )?;
+            }
+            Some(sev) => {
+                let sev_style = match sev {
+                    PopoverSeverity::Error => theme.diagnostics.error,
+                    PopoverSeverity::Warning => theme.diagnostics.warning,
+                    PopoverSeverity::Info => theme.diagnostics.info,
+                    PopoverSeverity::Hint => theme.diagnostics.hint,
+                };
+                let style = Style {
+                    fg: sev_style.fg,
+                    bg: Some(bg),
+                    attrs: sev_style.attrs,
+                };
+                apply_style(out, &style)?;
+                // Clip text to inner width (outer_w - 2), then
+                // right-pad with spaces so the box fills even when
+                // the message is shorter than the widest line.
+                let inner_w = outer_w.saturating_sub(2);
+                let clipped: String = line.text.chars().take(inner_w).collect();
+                let pad = inner_w.saturating_sub(clipped.chars().count());
+                queue!(
+                    out,
+                    style::Print(" "),
+                    style::Print(&clipped),
+                    style::Print(&pad_blank[..pad]),
+                    style::Print(" "),
+                )?;
+                reset_style(out, &style)?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
 fn paint_side_panel(
     panel: &SidePanelModel,
     area: Rect,
@@ -520,13 +657,13 @@ fn paint_side_panel(
             }
             if entry.selected {
                 let sel_style = if panel.focused {
-                    &theme.browser_selected_focused
+                    theme.browser_selected_focused
                 } else {
-                    &theme.browser_selected_unfocused
+                    theme.browser_selected_unfocused
                 };
-                apply_style(out, sel_style)?;
+                apply_style(out, &sel_style)?;
                 queue!(out, style::Print(line))?;
-                reset_style(out, sel_style)?;
+                reset_style(out, &sel_style)?;
             } else if entry.replaced {
                 // Replaced hit rows stay visible so the user can
                 // Left-arrow back onto them to undo. Paint them
@@ -913,6 +1050,7 @@ mod tests {
             },
             status_bar: StatusBarModel::default(),
             side_panel: None,
+            popover: None,
             layout: Layout::compute(Dims { cols: 40, rows: 5 }, false),
             cursor: Some((0, 0)),
             dims: Dims { cols: 40, rows: 5 },
@@ -929,6 +1067,7 @@ mod tests {
             body: BodyModel::Empty,
             status_bar: StatusBarModel::default(),
             side_panel: None,
+            popover: None,
             layout: Layout::compute(Dims { cols: 40, rows: 5 }, false),
             cursor: None,
             dims: Dims { cols: 40, rows: 5 },
@@ -1028,6 +1167,7 @@ mod tests {
                 focused: false,
             mode: Default::default(),
             }),
+            popover: None,
             layout,
             cursor: Some((layout.editor_area.x + 2, 0)),
             dims,

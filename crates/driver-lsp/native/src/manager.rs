@@ -61,7 +61,8 @@ use serde_json::{Value, json};
 use crate::classify::{Incoming, RequestId};
 use crate::protocol::{
     InitializeCapabilities, build_initialize_request,
-    build_initialized_notification, language_id, parse_initialize_response,
+    build_did_change_configuration_notification, build_initialized_notification, language_id,
+    parse_initialize_response,
     path_from_uri, uri_from_path,
 };
 use crate::registry::LspRegistry;
@@ -123,6 +124,12 @@ struct ServerEntry {
     /// ready? Replayed on first quiescence. Matches legacy's
     /// `init_delayed_request` semantics.
     deferred_init_request: bool,
+    /// Previous rope snapshot per path — compared against the
+    /// new rope on `BufferChanged` to compute an incremental
+    /// `textDocument/didChange`. When absent (first change
+    /// post-open) we fall back to full-text. Small Arc clone, so
+    /// the cache cost is a pointer per path.
+    last_rope_sent: HashMap<CanonPath, Arc<Rope>>,
 }
 
 /// Lifecycle marker.
@@ -162,6 +169,10 @@ pub fn spawn(
                     workspace_root: None,
                     deferred_cmds: VecDeque::new(),
                     skipped_languages: std::collections::HashSet::new(),
+                    progress_tokens: HashMap::new(),
+                    quiescent: HashMap::new(),
+                    last_progress_sent_at: None,
+                    last_progress_busy: false,
                 };
                 mgr.run();
             }
@@ -228,7 +239,51 @@ struct Manager {
     /// we've decided "this language has no server", stay
     /// decided for the session.
     skipped_languages: std::collections::HashSet<Language>,
+
+    // ── Progress aggregation (unified source) ────────────────
+    //
+    // Two independent signals converge into a single
+    // `LspEvent::Progress` emission:
+    //
+    //   - `$/progress` tokens → `progress_tokens`.
+    //   - `experimental/serverStatus quiescent=bool` → `quiescent`.
+    //
+    // `is_busy()` returns true if ANY quiescent=false entry OR
+    // ANY open progress token exists. `progress_detail()`
+    // returns the first progress token's `"{title} {message}"`
+    // (or just `"{title}"`, or `None`) — serverStatus `message`
+    // does NOT contribute to detail, matching legacy's shape.
+    /// Open `$/progress` tokens, keyed by token id.
+    progress_tokens: HashMap<String, ProgressInfo>,
+    /// Per-server quiescence state. Absent = default-idle
+    /// (matches legacy's `unwrap_or(&true)`). Present = the last
+    /// value the server reported.
+    quiescent: HashMap<Language, bool>,
+    /// Last instant `send_progress_throttled` fired a
+    /// `LspEvent::Progress`. 200ms minimum gap between sends,
+    /// EXCEPT busy→idle transitions always fire (so the UI
+    /// never gets stuck showing a spinner after the server
+    /// went idle).
+    last_progress_sent_at: Option<Instant>,
+    /// Last `busy` value we actually emitted. Used by the
+    /// throttle's "busy→idle always fires" exception.
+    last_progress_busy: bool,
 }
+
+/// One open `$/progress` token's current title/message pair.
+/// Built from `begin`; updated by `report`; removed on `end`.
+#[derive(Debug, Clone, Default)]
+struct ProgressInfo {
+    title: Option<String>,
+    message: Option<String>,
+}
+
+/// Threshold: if the incremental `didChange` replacement would be
+/// larger than this many chars, fall back to full-text. Protects
+/// against pathological deltas (rebase, format-all) where the
+/// incremental form is actually larger / slower than a fresh
+/// sync.
+const DIDCHANGE_INCREMENTAL_MAX_CHARS: usize = 4096;
 
 impl Manager {
     fn run(&mut self) {
@@ -271,6 +326,79 @@ impl Manager {
 
     fn any_frozen(&self) -> bool {
         self.servers.values().any(|e| e.diag.is_frozen())
+    }
+
+    // ── Progress aggregation ─────────────────────────────────
+
+    /// True if any server has reported `quiescent=false` OR any
+    /// `$/progress` token is open. Matches legacy exactly —
+    /// either source independently keeps the spinner running.
+    fn is_busy(&self) -> bool {
+        self.progress_tokens_busy() || self.any_non_quiescent()
+    }
+
+    fn progress_tokens_busy(&self) -> bool {
+        !self.progress_tokens.is_empty()
+    }
+
+    fn any_non_quiescent(&self) -> bool {
+        self.quiescent.values().any(|q| !q)
+    }
+
+    /// Detail string for `LspEvent::Progress.detail`. Source is
+    /// exclusively `$/progress` — the first open token's
+    /// `"{title} {message}"`, or just `"{title}"` if no message.
+    /// Matches legacy `progress_lsp_in` (manager.rs:1689-1709).
+    fn progress_detail(&self) -> Option<String> {
+        let info = self.progress_tokens.values().next()?;
+        match (info.title.as_deref(), info.message.as_deref()) {
+            (Some(t), Some(m)) if !m.is_empty() => Some(format!("{t} {m}")),
+            (Some(t), _) => Some(t.to_string()),
+            (None, Some(m)) if !m.is_empty() => Some(m.to_string()),
+            _ => None,
+        }
+    }
+
+    /// First registered server's name — used as the `server`
+    /// field on emitted `LspEvent::Progress`. Matches legacy's
+    /// "show whichever server got started first" behaviour. An
+    /// empty string is returned when no server has spawned yet
+    /// (the caller skips the emission in that case).
+    fn first_server_name(&self) -> Option<String> {
+        self.servers.values().next().map(|e| e.server.name.clone())
+    }
+
+    /// Emit an aggregated `LspEvent::Progress` if the throttle
+    /// allows it. Throttle: 200ms minimum between sends, BUT
+    /// busy→idle transitions always fire (so the UI never gets
+    /// stuck with a stale spinner). Called by both the
+    /// `$/progress` and `experimental/serverStatus` handlers at
+    /// their tail — the two sources converge here.
+    fn send_progress_throttled(&mut self) {
+        let busy = self.is_busy();
+        let detail = self.progress_detail();
+        let transitioning_to_idle = self.last_progress_busy && !busy;
+
+        let now = Instant::now();
+        if !transitioning_to_idle
+            && let Some(last) = self.last_progress_sent_at
+            && now.duration_since(last) < std::time::Duration::from_millis(200)
+        {
+            return;
+        }
+
+        let Some(server_name) = self.first_server_name() else {
+            return;
+        };
+
+        let _ = self.lsp_event_tx.send(LspEvent::Progress {
+            server: server_name,
+            busy,
+            detail,
+        });
+        self.notify.notify();
+        self.last_progress_sent_at = Some(now);
+        self.last_progress_busy = busy;
     }
 
     fn earliest_deadline(&self) -> Option<Instant> {
@@ -359,7 +487,11 @@ impl Manager {
             self.skipped_languages.insert(language);
             return;
         };
-        let name = format!("{:?}", language);
+        // Server name = the binary command (e.g. "rust-analyzer",
+        // "taplo"). Matches legacy server.rs:95 so the status-bar
+        // text and trace output read the same shape regardless of
+        // which editor ran the workspace.
+        let name = config.command.to_string();
         let args: Vec<&str> = config.args.to_vec();
         let server = match crate::subprocess::spawn(
             name.clone(),
@@ -409,6 +541,7 @@ impl Manager {
             doc_versions: HashMap::new(),
             buffer_versions: HashMap::new(),
             deferred_init_request: false,
+            last_rope_sent: HashMap::new(),
         };
         entry.pending_requests.insert(id, PendingRequest::Initialize);
         self.servers.insert(language, entry);
@@ -470,6 +603,19 @@ impl Manager {
             *v += 1;
             *v
         };
+        // Incremental if we have a previous rope for this path
+        // AND the delta is small enough to justify it. Otherwise
+        // full-text. Matches legacy's "single-edit Range-based,
+        // else full-text" rule by outcome (ops.len() == 1 implies
+        // a single contiguous LCP/LCS-trim delta).
+        let incremental_change = entry
+            .last_rope_sent
+            .get(path)
+            .and_then(|old| incremental_content_change(old, rope));
+        let content_changes = match incremental_change {
+            Some(change) => json!([change]),
+            None => json!([{ "text": rope.to_string() }]),
+        };
         let body = json!({
             "jsonrpc": "2.0",
             "method": "textDocument/didChange",
@@ -478,15 +624,11 @@ impl Manager {
                     "uri": uri_from_path(path),
                     "version": lsp_version,
                 },
-                // Full-sync: the whole rope as one change. Legacy
-                // also uses full-sync here (incremental adds
-                // complexity for minimal win on small files).
-                "contentChanges": [
-                    { "text": rope.to_string() }
-                ],
+                "contentChanges": content_changes,
             },
         });
         let _ = entry.server.send_body(&serde_json::to_vec(&body).unwrap());
+        entry.last_rope_sent.insert(path.clone(), rope.clone());
 
         if is_save {
             let save_body = json!({
@@ -519,6 +661,7 @@ impl Manager {
         let _ = entry.server.send_body(&serde_json::to_vec(&body).unwrap());
         entry.doc_versions.remove(path);
         entry.buffer_versions.remove(path);
+        entry.last_rope_sent.remove(path);
         entry.diag.invalidate_cache(path);
     }
 
@@ -713,10 +856,22 @@ impl Manager {
                 if caps.diagnostic_provider {
                     entry.diag.set_mode(DiagMode::Pull);
                 }
-                if caps.has_quiescence {
-                    entry.diag.set_has_quiescence(true);
-                }
+                // Quiescence is NOT latched from the initialize
+                // response. Some servers advertise
+                // `serverStatusNotification` capability but never
+                // emit the notification; others emit it without
+                // advertising. Legacy detects at runtime on the
+                // first notification — see the handler for
+                // `experimental/serverStatus` below. The `caps.has_quiescence`
+                // bit is retained for logs only.
+                let _ = caps.has_quiescence;
                 let _ = entry.server.send_body(&build_initialized_notification());
+                // rust-analyzer waits for this before starting its cold-index
+                // phase. Empty settings is the right payload — we don't override
+                // any defaults. See docs/rewrite/lsp-patterns.md §2.5.
+                let _ = entry
+                    .server
+                    .send_body(&build_did_change_configuration_notification());
                 entry.initialized = true;
                 let queued = std::mem::take(&mut entry.queued_opens);
                 for open in queued {
@@ -808,65 +963,118 @@ impl Manager {
                 // rust-analyzer's custom status extension.
                 // `quiescent=false` = server is working (indexing,
                 // cachePriming, type-checking, …). `quiescent=true`
-                // = idle. `message` carries a human-readable tail.
+                // = idle. `message` carries a human-readable tail
+                // that we deliberately discard — detail is owned
+                // by `$/progress` exclusively, matching legacy
+                // `progress_lsp_in` (manager.rs:1689-1709).
                 //
-                // Fire a `Progress` event for BOTH states so the
-                // status-bar spinner animates throughout the
-                // busy phase. The quiescent-true case additionally
-                // runs `on_quiescence` to release any deferred
-                // init RequestDiagnostics.
+                // Quiescence detection is runtime-first: the very
+                // arrival of a `serverStatus` notification proves
+                // the server supports the extension, regardless of
+                // what its initialize capabilities advertised. On
+                // first arrival we latch `has_quiescence = true`
+                // (which also flips `lsp_ready = false` — the
+                // server is NOT ready until it emits
+                // `quiescent=true`).
                 let quiescent = params
                     .get("quiescent")
                     .and_then(|q| q.as_bool())
                     .unwrap_or(false);
-                let message = params
-                    .get("message")
-                    .and_then(|m| m.as_str())
-                    .map(|s| s.to_string());
                 let server_name = self.servers[&language].server.name.clone();
-                let _ = self.lsp_event_tx.send(LspEvent::Progress {
-                    server: server_name.clone(),
-                    busy: !quiescent,
-                    detail: message,
-                });
-                self.notify.notify();
+                // `was_busy` reads the PREVIOUS quiescent value —
+                // absent entry means default-idle (matches
+                // legacy's `unwrap_or(&true)` → `!true = false`).
+                let was_busy = !*self.quiescent.get(&language).unwrap_or(&true);
+                {
+                    let entry = self.servers.get_mut(&language).unwrap();
+                    if !entry.diag.has_quiescence() {
+                        entry.diag.set_has_quiescence(true);
+                    }
+                }
+                self.quiescent.insert(language, quiescent);
                 if quiescent {
                     let _ = self
                         .lsp_event_tx
                         .send(LspEvent::Ready { server: server_name });
                     self.notify.notify();
-                    let reissue = {
-                        let entry = self.servers.get_mut(&language).unwrap();
-                        let reissue = entry.diag.on_quiescence();
-                        entry.deferred_init_request = false;
-                        reissue
-                    };
-                    if reissue {
-                        self.request_diagnostics();
+                    // Triple-gate window open: prev-state was
+                    // busy AND now quiescent AND a deferred init
+                    // request was actually waiting. Prevents
+                    // re-pulls on idle→idle notifications.
+                    if was_busy {
+                        let reissue = {
+                            let entry = self.servers.get_mut(&language).unwrap();
+                            let reissue = entry.diag.on_quiescence();
+                            entry.deferred_init_request = false;
+                            reissue
+                        };
+                        if reissue {
+                            self.request_diagnostics();
+                        }
                     }
                 }
+                // Unified progress emission — both sources
+                // converge through `send_progress_throttled`.
+                self.send_progress_throttled();
             }
             "$/progress" => {
-                // Progress token stream — legacy surfaces as
-                // `LspEvent::Progress { busy, detail }`. For M16
-                // we keep this as a best-effort pass-through.
-                let title = params
-                    .pointer("/value/title")
-                    .or_else(|| params.pointer("/value/message"))
-                    .and_then(|t| t.as_str())
-                    .map(|s| s.to_string());
+                // Progress token lifecycle: `begin` inserts a new
+                // token with title+message; `report` updates; `end`
+                // removes. `report` with `percentage=100` is
+                // promoted to `end` (matches legacy's
+                // `classify_progress` at manager.rs:2042-2052).
+                let _ = language;
+                let token = params
+                    .get("token")
+                    .map(|t| match t {
+                        Value::String(s) => s.clone(),
+                        Value::Number(n) => n.to_string(),
+                        _ => String::new(),
+                    })
+                    .unwrap_or_default();
+                if token.is_empty() {
+                    return;
+                }
                 let kind = params
                     .pointer("/value/kind")
                     .and_then(|k| k.as_str())
                     .unwrap_or("");
-                let busy = matches!(kind, "begin" | "report");
-                let server_name = self.servers[&language].server.name.clone();
-                let _ = self.lsp_event_tx.send(LspEvent::Progress {
-                    server: server_name,
-                    busy,
-                    detail: title,
-                });
-                self.notify.notify();
+                let title = params
+                    .pointer("/value/title")
+                    .and_then(|t| t.as_str())
+                    .map(|s| s.to_string());
+                let message = params
+                    .pointer("/value/message")
+                    .and_then(|m| m.as_str())
+                    .map(|s| s.to_string());
+                let percentage = params
+                    .pointer("/value/percentage")
+                    .and_then(|p| p.as_u64());
+                let effective_kind = if kind == "report" && percentage == Some(100) {
+                    "end"
+                } else {
+                    kind
+                };
+                match effective_kind {
+                    "begin" => {
+                        self.progress_tokens
+                            .insert(token, ProgressInfo { title, message });
+                    }
+                    "report" => {
+                        let entry = self.progress_tokens.entry(token).or_default();
+                        if title.is_some() {
+                            entry.title = title;
+                        }
+                        if message.is_some() {
+                            entry.message = message;
+                        }
+                    }
+                    "end" => {
+                        self.progress_tokens.remove(&token);
+                    }
+                    _ => {}
+                }
+                self.send_progress_throttled();
             }
             "window/logMessage" | "window/showMessage" | "client/registerCapability" => {
                 // Ignored for now.
@@ -932,7 +1140,91 @@ fn send_did_open(entry: &mut ServerEntry, path: &CanonPath, rope: &Arc<Rope>) {
         },
     });
     entry.doc_versions.insert(path.clone(), 1);
+    // Seed the incremental-didChange cache so the FIRST
+    // didChange can go incremental instead of full-text.
+    entry.last_rope_sent.insert(path.clone(), rope.clone());
     let _ = entry.server.send_body(&serde_json::to_vec(&body).unwrap());
+}
+
+/// Compute an LSP Range-based `contentChange` entry from the
+/// char-delta between `old` and `new`. Returns `None` if the
+/// delta is too large (>`DIDCHANGE_INCREMENTAL_MAX_CHARS` chars
+/// of replacement text) — caller falls back to full-text. Also
+/// returns `None` when the ropes are identical; callers treat
+/// that as "nothing to send."
+///
+/// Positions are emitted as UTF-16 code units per LSP's default
+/// encoding (`general.positionEncodings` unspecified by us →
+/// server assumes UTF-16).
+fn incremental_content_change(old: &Rope, new: &Rope) -> Option<Value> {
+    let (prefix, old_end, new_end) = char_delta_bounds(old, new)?;
+    let replacement_len = new_end.saturating_sub(prefix);
+    if replacement_len > DIDCHANGE_INCREMENTAL_MAX_CHARS {
+        return None;
+    }
+    let (start_line, start_utf16) = char_idx_to_line_utf16(old, prefix);
+    let (end_line, end_utf16) = char_idx_to_line_utf16(old, old_end);
+    let new_text: String = new.slice(prefix..new_end).to_string();
+    Some(json!({
+        "range": {
+            "start": { "line": start_line, "character": start_utf16 },
+            "end":   { "line": end_line,   "character": end_utf16   },
+        },
+        "text": new_text,
+    }))
+}
+
+/// Longest-common-prefix / longest-common-suffix trim.
+/// Returns `(prefix_char_idx, old_end_char_idx, new_end_char_idx)`
+/// — the inclusive-start / exclusive-end range of chars that
+/// actually differ between the two ropes. `None` when the ropes
+/// are byte-for-byte identical.
+fn char_delta_bounds(old: &Rope, new: &Rope) -> Option<(usize, usize, usize)> {
+    let old_len = old.len_chars();
+    let new_len = new.len_chars();
+    if old_len == new_len {
+        // Cheap escape: identical ropes → no delta.
+        let old_cmp = old.slice(..).bytes().eq(new.slice(..).bytes());
+        if old_cmp {
+            return None;
+        }
+    }
+    let min_len = old_len.min(new_len);
+
+    // Common prefix via paired char iteration.
+    let mut prefix = 0usize;
+    let mut o_it = old.chars();
+    let mut n_it = new.chars();
+    while prefix < min_len {
+        match (o_it.next(), n_it.next()) {
+            (Some(o), Some(n)) if o == n => prefix += 1,
+            _ => break,
+        }
+    }
+
+    // Common suffix (indexed from the end, stopping at `prefix`).
+    let max_suffix = min_len - prefix;
+    let mut suffix = 0usize;
+    while suffix < max_suffix {
+        let o_idx = old_len - 1 - suffix;
+        let n_idx = new_len - 1 - suffix;
+        if old.char(o_idx) != new.char(n_idx) {
+            break;
+        }
+        suffix += 1;
+    }
+    Some((prefix, old_len - suffix, new_len - suffix))
+}
+
+/// Convert a char index into `(line, utf16_col)` — UTF-16 code
+/// units relative to the start of the containing line. LSP
+/// `Position` uses this encoding by default.
+fn char_idx_to_line_utf16(rope: &Rope, char_idx: usize) -> (usize, usize) {
+    let line = rope.char_to_line(char_idx);
+    let line_start = rope.line_to_char(line);
+    let utf16_at_line_start = rope.char_to_utf16_cu(line_start);
+    let utf16_at_char = rope.char_to_utf16_cu(char_idx);
+    (line, utf16_at_char - utf16_at_line_start)
 }
 
 /// Parse a `textDocument/diagnostic` pull-response body. LSP
@@ -1117,5 +1409,109 @@ mod tests {
             "code": 277,
         });
         assert_eq!(parse_diagnostic_entry(&v).unwrap().code.as_deref(), Some("277"));
+    }
+
+    // ── Incremental didChange diff ──────────────────────────
+
+    fn rope(s: &str) -> Rope {
+        Rope::from_str(s)
+    }
+
+    #[test]
+    fn char_delta_bounds_identical_ropes_returns_none() {
+        assert!(char_delta_bounds(&rope("abc"), &rope("abc")).is_none());
+    }
+
+    #[test]
+    fn char_delta_bounds_insert_in_middle() {
+        let old = rope("hello world");
+        let new = rope("hello big world");
+        let (prefix, old_end, new_end) =
+            char_delta_bounds(&old, &new).expect("differ");
+        assert_eq!(prefix, 6, "prefix stops before the first differing char");
+        assert_eq!(old_end, 6, "old end == prefix (pure insert)");
+        assert_eq!(new_end, 10, "new end covers 'big '");
+    }
+
+    #[test]
+    fn char_delta_bounds_delete_in_middle() {
+        let old = rope("hello big world");
+        let new = rope("hello world");
+        let (prefix, old_end, new_end) =
+            char_delta_bounds(&old, &new).expect("differ");
+        assert_eq!(prefix, 6);
+        assert_eq!(old_end, 10);
+        assert_eq!(new_end, 6);
+    }
+
+    #[test]
+    fn char_delta_bounds_append_at_eof() {
+        let old = rope("abc");
+        let new = rope("abcdef");
+        let (prefix, old_end, new_end) =
+            char_delta_bounds(&old, &new).expect("differ");
+        assert_eq!(prefix, 3);
+        assert_eq!(old_end, 3);
+        assert_eq!(new_end, 6);
+    }
+
+    #[test]
+    fn char_delta_bounds_prepend_at_start() {
+        let old = rope("world");
+        let new = rope("hello world");
+        let (prefix, old_end, new_end) =
+            char_delta_bounds(&old, &new).expect("differ");
+        assert_eq!(prefix, 0);
+        assert_eq!(old_end, 0);
+        assert_eq!(new_end, 6);
+    }
+
+    #[test]
+    fn incremental_content_change_emits_range_for_small_edit() {
+        let old = rope("line1\nline2\n");
+        let new = rope("line1 extra\nline2\n");
+        let change = incremental_content_change(&old, &new).expect("incremental");
+        let range = &change["range"];
+        assert_eq!(range["start"]["line"], 0);
+        assert_eq!(range["start"]["character"], 5);
+        assert_eq!(range["end"]["line"], 0);
+        assert_eq!(range["end"]["character"], 5);
+        assert_eq!(change["text"], " extra");
+    }
+
+    #[test]
+    fn incremental_content_change_emits_multiline_range_for_newline_delete() {
+        // Delete the line break between lines 1 and 2.
+        let old = rope("abc\ndef\n");
+        let new = rope("abcdef\n");
+        let change = incremental_content_change(&old, &new).expect("incremental");
+        let range = &change["range"];
+        assert_eq!(range["start"]["line"], 0);
+        assert_eq!(range["start"]["character"], 3);
+        assert_eq!(range["end"]["line"], 1);
+        assert_eq!(range["end"]["character"], 0);
+        assert_eq!(change["text"], "");
+    }
+
+    #[test]
+    fn incremental_content_change_falls_back_for_oversized_delta() {
+        let old = rope("");
+        let new_text: String = "x".repeat(DIDCHANGE_INCREMENTAL_MAX_CHARS + 1);
+        let new = rope(&new_text);
+        assert!(
+            incremental_content_change(&old, &new).is_none(),
+            "giant replacement must fall back to full-text"
+        );
+    }
+
+    #[test]
+    fn char_idx_to_line_utf16_counts_surrogate_pairs() {
+        // "🦀" is U+1F980 — outside the BMP, so it's 2 UTF-16
+        // code units but 1 char. An LSP position after the crab
+        // must report character=2, not 1.
+        let r = rope("🦀x");
+        assert_eq!(char_idx_to_line_utf16(&r, 0), (0, 0));
+        assert_eq!(char_idx_to_line_utf16(&r, 1), (0, 2));
+        assert_eq!(char_idx_to_line_utf16(&r, 2), (0, 3));
     }
 }

@@ -17,8 +17,8 @@ use led_driver_buffers_core::{BufferStore, LoadAction, LoadState, SaveAction};
 use led_driver_clipboard_core::ClipboardAction;
 use led_driver_fs_list_core::ListCmd;
 use led_driver_terminal_core::{
-    BodyModel, Dims, Frame, Layout, Rect, SidePanelModel, SidePanelRow, StatusBarModel,
-    TabBarModel, Terminal,
+    BodyModel, Dims, Frame, Layout, PopoverLine, PopoverModel, PopoverSeverity, Rect,
+    SidePanelModel, SidePanelRow, StatusBarModel, TabBarModel, Terminal,
 };
 use led_state_alerts::AlertState;
 use led_state_browser::{BrowserUi, Focus, TreeEntry, TreeEntryKind};
@@ -258,12 +258,14 @@ impl<'a> FsTreeInput<'a> {
 }
 
 /// User-decision projection for [`BrowserUi`]. Mutated by dispatch.
+/// Tree flattening + the resolved selection index are derived —
+/// they live in `browser_entries` and `browser_selected_idx`
+/// below, not on this struct.
 #[drv::input]
 #[derive(Copy, Clone)]
 pub struct BrowserUiInput<'a> {
     pub expanded_dirs: &'a imbl::HashSet<CanonPath>,
-    pub entries: &'a Arc<Vec<TreeEntry>>,
-    pub selected: &'a usize,
+    pub selected_path: &'a Option<CanonPath>,
     pub scroll_offset: &'a usize,
     pub visible: &'a bool,
     pub focus: &'a Focus,
@@ -273,8 +275,7 @@ impl<'a> BrowserUiInput<'a> {
     pub fn new(b: &'a BrowserUi) -> Self {
         Self {
             expanded_dirs: &b.expanded_dirs,
-            entries: &b.entries,
-            selected: &b.selected,
+            selected_path: &b.selected_path,
             scroll_offset: &b.scroll_offset,
             visible: &b.visible,
             focus: &b.focus,
@@ -362,6 +363,21 @@ pub fn file_load_action<'a, 'b>(
 /// that clear the next tick's query would emit the same saves again.
 ///
 /// Idle: `pending_saves` is empty → returns `Vec::new()` (no alloc).
+/// Σ(version + saved_version) across all edited buffers. The
+/// runtime compares this against `lsp_requested_state_sum` to
+/// decide when to fire `LspCmd::RequestDiagnostics`. Pure
+/// derivation of `BufferEdits.buffers` — the atom stores only
+/// the sum we last emitted for, not the current live sum.
+#[drv::memo(single)]
+pub fn buffer_state_sum<'b>(buffers: EditedBuffersInput<'b>) -> u64 {
+    buffers
+        .buffers
+        .values()
+        .fold(0u64, |acc, eb| {
+            acc.wrapping_add(eb.version).wrapping_add(eb.saved_version)
+        })
+}
+
 #[drv::memo(single)]
 pub fn file_save_action<'p, 'b>(
     pending: PendingSavesInput<'p>,
@@ -414,9 +430,6 @@ pub fn tab_bar_model<'a, 'b>(
     tabs: TabsActiveInput<'a>,
     edits: EditedBuffersInput<'b>,
 ) -> TabBarModel {
-    let active = tabs
-        .active
-        .and_then(|id| tabs.open.iter().position(|t| t.id == id));
     let labels: Vec<String> = tabs
         .open
         .iter()
@@ -441,6 +454,9 @@ pub fn tab_bar_model<'a, 'b>(
             s
         })
         .collect();
+    let active = tabs
+        .active
+        .and_then(|id| tabs.open.iter().position(|t| t.id == id));
     TabBarModel {
         labels: Arc::new(labels),
         active,
@@ -916,25 +932,17 @@ pub fn status_bar_model<'a, 'b, 'c, 'o, 'd, 'l>(
         };
     }
 
-    // Priority 4 — LSP progress ("rust-analyzer: indexing"
-    // etc.). First busy server wins; legacy displayed this on
-    // the left when no alert overrode it.
-    if let Some(msg) = lsp_progress_message(lsp, render_tick) {
-        return StatusBarModel {
-            left: Arc::from(msg),
-            right,
-            is_warn: false,
-        };
-    }
-
-    // Priority 5 — default. Dirty dot in cols 2–3 (padded for
-    // visual alignment with the gutter above).
+    // Priority 4 — default left half: ` {modified}{lsp}` —
+    // legacy composes this as ` {branch}{modified}{pr}{lsp}`
+    // and we build the same shape minus the git/PR pieces until
+    // those milestones land. `lsp_progress_message` always
+    // returns `Some` once a server is registered, so
+    // "rust-analyzer" stays visible both during indexing and
+    // idle.
     let dirty = active_is_dirty(tabs, edits);
-    let left: Arc<str> = if dirty {
-        Arc::from("  \u{25cf}")
-    } else {
-        Arc::from("")
-    };
+    let modified = if dirty { " \u{25cf}" } else { "" };
+    let lsp_str = lsp_progress_message(lsp, render_tick).unwrap_or_default();
+    let left: Arc<str> = Arc::from(format!(" {modified}{lsp_str}"));
     StatusBarModel {
         left,
         right,
@@ -1001,13 +1009,18 @@ fn format_lsp_status(server_name: &str, busy: bool, detail: Option<&str>, render
     format!("  {spinner}{server_name}{detail_str}")
 }
 
-/// First busy LSP server (or any with a non-empty detail)
-/// rendered for the status bar's left half. Returns `None`
-/// when there's nothing worth showing — no servers registered
-/// yet, or all of them idle with no detail.
+/// Rendered LSP status line for the status bar's left half.
+/// Returns `None` only when no server is registered yet;
+/// otherwise a server is picked and shown persistently — busy
+/// with detail, busy alone, idle with detail, or just the
+/// server name when idle with no detail. Legacy does the same:
+/// once rust-analyzer is up, its name stays visible in the
+/// status bar, spinner and detail come and go around it.
+///
+/// Selection: prefer a busy server; else a server that has a
+/// non-empty detail; else just pick one (iteration order is
+/// fine — typically there's only one).
 fn lsp_progress_message(lsp: LspStatusesInput<'_>, render_tick: u64) -> Option<String> {
-    // Prefer a busy server; fall back to an idle-with-detail
-    // one so the last status line stays visible for a beat.
     let (server, status) = lsp
         .by_server
         .iter()
@@ -1017,6 +1030,7 @@ fn lsp_progress_message(lsp: LspStatusesInput<'_>, render_tick: u64) -> Option<S
                 .iter()
                 .find(|(_, s)| s.detail.as_deref().is_some_and(|d| !d.is_empty()))
         })
+        .or_else(|| lsp.by_server.iter().next())
         .map(|(name, s)| (name.clone(), s.clone()))?;
     let formatted =
         format_lsp_status(&server, status.busy, status.detail.as_deref(), render_tick);
@@ -1067,9 +1081,11 @@ fn position_string(
 ///   completions list.
 /// - Otherwise → render the file-browser tree.
 #[drv::memo(single)]
-pub fn side_panel_model<'b, 'o>(
+pub fn side_panel_model<'f, 'b, 'o, 't>(
+    fs: FsTreeInput<'f>,
     browser: BrowserUiInput<'b>,
     overlays: OverlaysInput<'o>,
+    tabs: TabsActiveInput<'t>,
     rows: u16,
 ) -> SidePanelModel {
     if let Some(state) = overlays.file_search.as_ref() {
@@ -1080,13 +1096,14 @@ pub fn side_panel_model<'b, 'o>(
     {
         return completions_side_panel(state, rows);
     }
+    let entries = browser_entries(fs, browser, tabs);
+    let selected = browser_selected_idx(&entries, browser.selected_path.as_ref());
     let rows = rows as usize;
     let start = *browser.scroll_offset;
-    let end = start.saturating_add(rows).min(browser.entries.len());
-    let selected = *browser.selected;
+    let end = start.saturating_add(rows).min(entries.len());
     let focused = *browser.focus == Focus::Side;
     let mut out: Vec<SidePanelRow> = Vec::with_capacity(end.saturating_sub(start));
-    for (i, entry) in browser.entries[start..end].iter().enumerate() {
+    for (i, entry) in entries[start..end].iter().enumerate() {
         let chevron = match entry.kind {
             TreeEntryKind::File => None,
             TreeEntryKind::Directory { expanded } => Some(expanded),
@@ -1296,6 +1313,167 @@ fn file_search_side_panel(
     }
 }
 
+// ── Popover (diagnostic hover) ───────────────────────────────────────
+
+/// Max content width inside the popover box (excluding the 1-col
+/// padding on each side). Matches legacy's ceiling so the wrap
+/// looks identical in golden traces.
+const POPOVER_MAX_CONTENT: usize = 58;
+
+/// Build the cursor-line diagnostic popover.
+///
+/// Returns `None` (no popover) when any of:
+/// - An overlay has input focus (find-file / file-search / isearch).
+/// - The browser is focused.
+/// - No active tab, or the active buffer isn't loaded yet.
+/// - `DiagnosticsStates` has nothing for the active path.
+/// - The stamped `BufferVersion` doesn't match the current
+///   buffer version (no-smear: hide rather than show stale).
+/// - No Error/Warning diagnostic covers the cursor row
+///   (Info/Hint are silent, matching legacy).
+pub fn popover_model(
+    edits: EditedBuffersInput<'_>,
+    tabs: TabsActiveInput<'_>,
+    overlays: OverlaysInput<'_>,
+    browser: BrowserUiInput<'_>,
+    diagnostics: DiagnosticsStatesInput<'_>,
+    editor_area: Rect,
+) -> Option<PopoverModel> {
+    if overlays.find_file.is_some()
+        || overlays.file_search.is_some()
+        || overlays.isearch.is_some()
+    {
+        return None;
+    }
+    if *browser.focus == Focus::Side {
+        return None;
+    }
+    let id = (*tabs.active)?;
+    let tab = tabs.open.iter().find(|t| t.id == id)?;
+    let eb = edits.buffers.get(&tab.path)?;
+    let bd = diagnostics.by_path.get(&tab.path)?;
+    if bd.version.0 != eb.version {
+        return None;
+    }
+    let cursor_row = tab.cursor.line;
+    let mut hits: Vec<&Diagnostic> = bd
+        .diagnostics
+        .iter()
+        .filter(|d| {
+            cursor_row >= d.start_line
+                && cursor_row <= d.end_line
+                && matches!(
+                    d.severity,
+                    DiagnosticSeverity::Error | DiagnosticSeverity::Warning
+                )
+        })
+        .collect();
+    if hits.is_empty() {
+        return None;
+    }
+    // Stable order: error before warning, then by start position.
+    hits.sort_by_key(|d| (severity_rank(d.severity), d.start_line, d.start_col));
+
+    let max_content = POPOVER_MAX_CONTENT.min(editor_area.rows.saturating_sub(0) as usize);
+    // Cap width by editor area so the box never exceeds the edit
+    // region minus a 2-col margin (padding inside the box).
+    let max_content = max_content.min(
+        editor_area
+            .cols
+            .saturating_sub(4)
+            .max(1) as usize,
+    );
+
+    let mut lines: Vec<PopoverLine> = Vec::new();
+    for (i, d) in hits.iter().enumerate() {
+        if i > 0 {
+            lines.push(PopoverLine {
+                text: Arc::<str>::from(""),
+                severity: None,
+            });
+        }
+        let severity = Some(match d.severity {
+            DiagnosticSeverity::Error => PopoverSeverity::Error,
+            DiagnosticSeverity::Warning => PopoverSeverity::Warning,
+            DiagnosticSeverity::Info => PopoverSeverity::Info,
+            DiagnosticSeverity::Hint => PopoverSeverity::Hint,
+        });
+        for wrapped in word_wrap(&d.message, max_content) {
+            lines.push(PopoverLine {
+                text: Arc::<str>::from(wrapped.as_str()),
+                severity,
+            });
+        }
+    }
+
+    // Anchor in absolute terminal coords: cursor position inside
+    // the editor area. Compute from tab scroll / cursor row.
+    let scroll_row = tab.scroll.top;
+    if cursor_row < scroll_row {
+        return None;
+    }
+    let row_in_area = (cursor_row - scroll_row) as u16;
+    if row_in_area >= editor_area.rows {
+        return None;
+    }
+    let anchor_x = editor_area.x.saturating_add(tab.cursor.col as u16);
+    let anchor_y = editor_area.y.saturating_add(row_in_area);
+
+    Some(PopoverModel {
+        lines: Arc::new(lines),
+        anchor: (anchor_x, anchor_y),
+    })
+}
+
+fn severity_rank(s: DiagnosticSeverity) -> u8 {
+    match s {
+        DiagnosticSeverity::Error => 0,
+        DiagnosticSeverity::Warning => 1,
+        DiagnosticSeverity::Info => 2,
+        DiagnosticSeverity::Hint => 3,
+    }
+}
+
+/// Ratatui-compatible greedy word wrap. Breaks at ASCII spaces;
+/// long tokens with no whitespace are split at the width. Output
+/// lines have no trailing whitespace.
+fn word_wrap(text: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return vec![text.to_string()];
+    }
+    let mut out: Vec<String> = Vec::new();
+    let mut line = String::new();
+    for word in text.split_whitespace() {
+        let word_len = word.chars().count();
+        if word_len > width {
+            // Split oversized word across lines.
+            if !line.is_empty() {
+                out.push(std::mem::take(&mut line));
+            }
+            let chars: Vec<char> = word.chars().collect();
+            for chunk in chars.chunks(width) {
+                out.push(chunk.iter().collect());
+            }
+            continue;
+        }
+        let sep_len = if line.is_empty() { 0 } else { 1 };
+        if line.chars().count() + sep_len + word_len > width {
+            out.push(std::mem::take(&mut line));
+        }
+        if !line.is_empty() {
+            line.push(' ');
+        }
+        line.push_str(word);
+    }
+    if !line.is_empty() {
+        out.push(line);
+    }
+    if out.is_empty() {
+        out.push(String::new());
+    }
+    out
+}
+
 /// Context kept to the left of the match when the preview gets
 /// trimmed. 4 characters — enough to see "what identifier this is
 /// part of" without eating so much width that the match falls off
@@ -1414,15 +1592,89 @@ pub fn find_file_action<'f>(
     state.pending_find_file_list.clone()
 }
 
+/// Auto-expanded ancestor chain for the active tab, excluding
+/// user-pinned dirs. Pure derivation — no state written anywhere.
+/// Memoized so downstream consumers (entries walk, list-action
+/// emitter, painter) share the computation.
+#[drv::memo(single)]
+pub fn browser_auto_expanded<'f, 'u, 't>(
+    fs: FsTreeInput<'f>,
+    ui: BrowserUiInput<'u>,
+    tabs: TabsActiveInput<'t>,
+) -> Arc<imbl::HashSet<CanonPath>> {
+    let active_path = (*tabs.active)
+        .and_then(|id| tabs.open.iter().find(|t| t.id == id))
+        .map(|t| t.path.clone());
+    Arc::new(led_state_browser::ancestors_of(
+        &led_state_browser::FsTree {
+            root: fs.root.clone(),
+            dir_contents: fs.dir_contents.clone(),
+        },
+        ui.expanded_dirs,
+        active_path.as_ref(),
+    ))
+}
+
+/// Flattened browser tree — the single visible-row list every
+/// consumer walks. Pure derivation of
+/// `(fs, expanded_dirs ∪ auto_expanded_dirs)`. `Arc`-wrapped so
+/// the memo cache holds the same allocation across cache hits.
+#[drv::memo(single)]
+pub fn browser_entries<'f, 'u, 't>(
+    fs: FsTreeInput<'f>,
+    ui: BrowserUiInput<'u>,
+    tabs: TabsActiveInput<'t>,
+) -> Arc<Vec<TreeEntry>> {
+    let auto = browser_auto_expanded(fs, ui, tabs);
+    // Effective set = user-pinned ∪ auto-revealed. Reuse the
+    // user bucket directly when the auto set is empty, skipping
+    // the union allocation for the common idle case.
+    let fs_copy = led_state_browser::FsTree {
+        root: fs.root.clone(),
+        dir_contents: fs.dir_contents.clone(),
+    };
+    let entries = if auto.is_empty() {
+        led_state_browser::walk_tree(&fs_copy, ui.expanded_dirs)
+    } else {
+        let mut effective = ui.expanded_dirs.clone();
+        for p in auto.iter() {
+            effective.insert(p.clone());
+        }
+        led_state_browser::walk_tree(&fs_copy, &effective)
+    };
+    Arc::new(entries)
+}
+
+/// Resolve `selected_path` to a row index in the current
+/// entries. Used by dispatch (arrow nav, expand/collapse) and
+/// the painter (which row to highlight). Returns 0 when the
+/// selected path is absent, falls outside the current tree, or
+/// the entries list is empty — matching the historical
+/// `selected: usize = 0` default.
+pub fn browser_selected_idx(
+    entries: &[TreeEntry],
+    selected_path: Option<&CanonPath>,
+) -> usize {
+    let Some(target) = selected_path else {
+        return 0;
+    };
+    entries
+        .iter()
+        .position(|e| &e.path == target)
+        .unwrap_or(0)
+}
+
 /// "What directory listings do we still need?"
 ///
 /// Emits one `ListCmd::List` per path that's expected to have a
-/// listing (workspace root + every expanded dir) but isn't in
+/// listing (workspace root, every user-expanded dir, every
+/// auto-revealed ancestor of the active tab) but isn't in
 /// `dir_contents` yet. Used to drive `FsListDriver::execute`.
 #[drv::memo(single)]
-pub fn file_list_action<'f, 'u>(
+pub fn file_list_action<'f, 'u, 't>(
     fs: FsTreeInput<'f>,
     ui: BrowserUiInput<'u>,
+    tabs: TabsActiveInput<'t>,
 ) -> Vec<ListCmd> {
     let mut out: Vec<ListCmd> = Vec::new();
     if let Some(root) = fs.root.as_ref()
@@ -1432,6 +1684,15 @@ pub fn file_list_action<'f, 'u>(
     }
     for dir in ui.expanded_dirs.iter() {
         if !fs.dir_contents.contains_key(dir) {
+            out.push(ListCmd::List(dir.clone()));
+        }
+    }
+    // Auto-reveal also needs listings for any auto-expanded dir
+    // not yet cached — otherwise the tree reveal stalls until
+    // the user hits expand/collapse manually.
+    let auto = browser_auto_expanded(fs, ui, tabs);
+    for dir in auto.iter() {
+        if !fs.dir_contents.contains_key(dir) && !ui.expanded_dirs.contains(dir) {
             out.push(ListCmd::List(dir.clone()));
         }
     }
@@ -1465,6 +1726,7 @@ pub struct RenderInputs<'a> {
     pub tabs: TabsActiveInput<'a>,
     pub alerts: AlertsInput<'a>,
     pub browser: BrowserUiInput<'a>,
+    pub fs: FsTreeInput<'a>,
     pub overlays: OverlaysInput<'a>,
     pub syntax: SyntaxStatesInput<'a>,
     pub diagnostics: DiagnosticsStatesInput<'a>,
@@ -1485,6 +1747,7 @@ pub fn render_frame(inputs: RenderInputs<'_>) -> Option<Frame> {
         inputs.tabs,
         inputs.alerts,
         inputs.browser,
+        inputs.fs,
         inputs.overlays,
         inputs.syntax,
         inputs.diagnostics,
@@ -1494,13 +1757,14 @@ pub fn render_frame(inputs: RenderInputs<'_>) -> Option<Frame> {
 }
 
 #[drv::memo(single)]
-fn render_frame_memo<'t, 'e, 'b, 'a, 'al, 'br, 'ov, 'sx, 'dx, 'lsp>(
+fn render_frame_memo<'t, 'e, 'b, 'a, 'al, 'br, 'fs, 'ov, 'sx, 'dx, 'lsp>(
     term: TerminalDimsInput<'t>,
     edits: EditedBuffersInput<'e>,
     store: StoreLoadedInput<'b>,
     tabs: TabsActiveInput<'a>,
     alerts: AlertsInput<'al>,
     browser: BrowserUiInput<'br>,
+    fs: FsTreeInput<'fs>,
     overlays: OverlaysInput<'ov>,
     syntax: SyntaxStatesInput<'sx>,
     diagnostics: DiagnosticsStatesInput<'dx>,
@@ -1514,7 +1778,9 @@ fn render_frame_memo<'t, 'e, 'b, 'a, 'al, 'br, 'ov, 'sx, 'dx, 'lsp>(
     let status_bar = status_bar_model(alerts, tabs, edits, overlays, diagnostics, lsp, render_tick);
     let side_panel = layout
         .side_area
-        .map(|area| side_panel_model(browser, overlays, area.rows));
+        .map(|area| side_panel_model(fs, browser, overlays, tabs, area.rows));
+    let popover =
+        popover_model(edits, tabs, overlays, browser, diagnostics, layout.editor_area);
     // Cursor placement, in priority order:
     //
     // 1. Find-file overlay active → status-bar row, column = prompt
@@ -1554,6 +1820,7 @@ fn render_frame_memo<'t, 'e, 'b, 'a, 'al, 'br, 'ov, 'sx, 'dx, 'lsp>(
         body,
         status_bar,
         side_panel,
+        popover,
         layout,
         cursor,
         dims,
@@ -1674,6 +1941,7 @@ mod tests {
             tabs: TabsActiveInput::new(t),
             alerts: AlertsInput::new(&alerts),
             browser: BrowserUiInput::new(&browser),
+            fs: FsTreeInput::new(&led_state_browser::FsTree::default()),
             overlays: OverlaysInput::new(&ff, &is, &None),
             syntax: SyntaxStatesInput::new(&syntax),
             diagnostics: DiagnosticsStatesInput::new(&diags),
@@ -1734,6 +2002,7 @@ mod tests {
             tabs: TabsActiveInput::new(&t),
             alerts: AlertsInput::new(&alerts),
             browser: BrowserUiInput::new(&browser),
+            fs: FsTreeInput::new(&led_state_browser::FsTree::default()),
             overlays: OverlaysInput::new(&ff, &is, &None),
             syntax: SyntaxStatesInput::new(&syntax),
             diagnostics: DiagnosticsStatesInput::new(&diags),
@@ -1776,6 +2045,7 @@ mod tests {
             tabs: TabsActiveInput::new(&t),
             alerts: AlertsInput::new(&alerts),
             browser: BrowserUiInput::new(&browser),
+            fs: FsTreeInput::new(&led_state_browser::FsTree::default()),
             overlays: OverlaysInput::new(&ff, &is, &None),
             syntax: SyntaxStatesInput::new(&syntax),
             diagnostics: DiagnosticsStatesInput::new(&diags),
@@ -2153,8 +2423,11 @@ mod tests {
 
     #[test]
     fn status_bar_default_empty_when_no_tab() {
+        // Legacy shape: ` {branch}{modified}{pr}{lsp}` → always
+        // has the one leading space, even when every dynamic
+        // piece is empty.
         let s = status(&AlertState::default(), &Tabs::default(), &BufferEdits::default());
-        assert_eq!(&*s.left, "");
+        assert_eq!(&*s.left, " ");
         assert_eq!(&*s.right, "");
         assert!(!s.is_warn);
     }
@@ -2170,7 +2443,9 @@ mod tests {
         });
         tabs.active = Some(TabId(1));
         let s = status(&AlertState::default(), &tabs, &BufferEdits::default());
-        assert_eq!(&*s.left, "");
+        // Leading space from legacy's ` {modified}{lsp}` format
+        // prefix, even with nothing in the dynamic slots.
+        assert_eq!(&*s.left, " ");
         assert_eq!(&*s.right, "L1:C1 ");
         assert!(!s.is_warn);
     }
@@ -2745,6 +3020,30 @@ mod tests {
     }
 
     #[test]
+    fn lsp_progress_message_persists_server_name_while_idle() {
+        // Regression: an idle server with no progress detail
+        // must still surface its name. Legacy shows
+        // "  rust-analyzer" on the status bar for the entire
+        // lifetime of the server — busy/idle just toggles the
+        // spinner and detail *around* the name. A previous
+        // incarnation of this function returned `None` here,
+        // making "rust-analyzer" disappear the instant
+        // indexing finished.
+        let mut lsp = LspStatuses::default();
+        lsp.by_server.insert(
+            "rust-analyzer".into(),
+            LspServerStatus {
+                busy: false,
+                detail: None,
+                ready: true,
+            },
+        );
+        let msg = lsp_progress_message(LspStatusesInput::new(&lsp), 0)
+            .expect("server visible while idle");
+        assert!(msg.contains("rust-analyzer"), "got: {msg:?}");
+    }
+
+    #[test]
     fn format_lsp_status_spinner_advances_with_tick() {
         // Each tick bucket (80ms) advances the main spinner by
         // one frame in the 10-frame cycle.
@@ -2755,5 +3054,216 @@ mod tests {
         assert_ne!(t1, t2);
         // After 10 buckets the cycle wraps.
         assert_eq!(t0, format_lsp_status("ra", true, None, 10));
+    }
+
+    // ── popover_model ────────────────────────────────────────
+
+    fn popover_fixture(
+        cursor_line: usize,
+        diag_start_line: usize,
+        diag_end_line: usize,
+        severity: DiagnosticSeverity,
+        message: &str,
+        buf_version: u64,
+        diag_version: u64,
+    ) -> (
+        Tabs,
+        BufferEdits,
+        BrowserUi,
+        DiagnosticsStates,
+        Option<led_state_find_file::FindFileState>,
+        Option<led_state_isearch::IsearchState>,
+        Option<led_state_file_search::FileSearchState>,
+    ) {
+        let path = canon("a.rs");
+        let mut t = Tabs::default();
+        t.open.push_back(Tab {
+            id: TabId(1),
+            path: path.clone(),
+            cursor: Cursor {
+                line: cursor_line,
+                col: 0,
+                preferred_col: 0,
+            },
+            ..Default::default()
+        });
+        t.active = Some(TabId(1));
+
+        let mut e = BufferEdits::default();
+        let mut eb =
+            led_state_buffer_edits::EditedBuffer::fresh(Arc::new(Rope::from_str("line\n")));
+        eb.version = buf_version;
+        e.buffers.insert(path.clone(), eb);
+
+        let browser = BrowserUi {
+            visible: false,
+            ..Default::default()
+        };
+
+        let mut diags = DiagnosticsStates::default();
+        diags.by_path.insert(
+            path,
+            BufferDiagnostics::new(
+                led_state_diagnostics::BufferVersion(diag_version),
+                vec![Diagnostic {
+                    start_line: diag_start_line,
+                    start_col: 0,
+                    end_line: diag_end_line,
+                    end_col: 5,
+                    severity,
+                    message: message.to_string(),
+                    source: None,
+                    code: None,
+                }],
+            ),
+        );
+
+        (t, e, browser, diags, None, None, None)
+    }
+
+    fn call_popover(
+        t: &Tabs,
+        e: &BufferEdits,
+        browser: &BrowserUi,
+        diags: &DiagnosticsStates,
+        ff: &Option<led_state_find_file::FindFileState>,
+        is: &Option<led_state_isearch::IsearchState>,
+        fs: &Option<led_state_file_search::FileSearchState>,
+    ) -> Option<PopoverModel> {
+        popover_model(
+            EditedBuffersInput::new(e),
+            TabsActiveInput::new(t),
+            OverlaysInput::new(ff, is, fs),
+            BrowserUiInput::new(browser),
+            DiagnosticsStatesInput::new(diags),
+            Rect {
+                x: 0,
+                y: 0,
+                cols: 80,
+                rows: 24,
+            },
+        )
+    }
+
+    #[test]
+    fn popover_shows_for_error_on_cursor_row() {
+        let (t, e, br, d, ff, is, fs) = popover_fixture(
+            3,
+            3,
+            3,
+            DiagnosticSeverity::Error,
+            "expected `;`",
+            0,
+            0,
+        );
+        let pop = call_popover(&t, &e, &br, &d, &ff, &is, &fs).expect("popover");
+        assert_eq!(pop.lines.len(), 1);
+        assert_eq!(&*pop.lines[0].text, "expected `;`");
+        assert_eq!(pop.lines[0].severity, Some(PopoverSeverity::Error));
+    }
+
+    #[test]
+    fn popover_hidden_when_cursor_above_diagnostic_range() {
+        let (t, e, br, d, ff, is, fs) = popover_fixture(
+            1,
+            3,
+            3,
+            DiagnosticSeverity::Error,
+            "x",
+            0,
+            0,
+        );
+        assert!(call_popover(&t, &e, &br, &d, &ff, &is, &fs).is_none());
+    }
+
+    #[test]
+    fn popover_hidden_when_version_stale_no_smear() {
+        // Buffer at v=2, diagnostic stamped at v=1 — hide rather
+        // than show stale.
+        let (t, e, br, d, ff, is, fs) = popover_fixture(
+            3,
+            3,
+            3,
+            DiagnosticSeverity::Error,
+            "x",
+            2,
+            1,
+        );
+        assert!(call_popover(&t, &e, &br, &d, &ff, &is, &fs).is_none());
+    }
+
+    #[test]
+    fn popover_hidden_for_info_and_hint_severity() {
+        for sev in [DiagnosticSeverity::Info, DiagnosticSeverity::Hint] {
+            let (t, e, br, d, ff, is, fs) =
+                popover_fixture(3, 3, 3, sev, "x", 0, 0);
+            assert!(
+                call_popover(&t, &e, &br, &d, &ff, &is, &fs).is_none(),
+                "severity {sev:?} must be silent"
+            );
+        }
+    }
+
+    #[test]
+    fn popover_hidden_when_find_file_overlay_active() {
+        let (t, e, br, d, _, is, fs) = popover_fixture(
+            3,
+            3,
+            3,
+            DiagnosticSeverity::Error,
+            "x",
+            0,
+            0,
+        );
+        let ff = Some(led_state_find_file::FindFileState::open(String::new()));
+        assert!(call_popover(&t, &e, &br, &d, &ff, &is, &fs).is_none());
+    }
+
+    #[test]
+    fn popover_hidden_when_browser_focused() {
+        let (t, e, mut br, d, ff, is, fs) = popover_fixture(
+            3,
+            3,
+            3,
+            DiagnosticSeverity::Error,
+            "x",
+            0,
+            0,
+        );
+        br.focus = Focus::Side;
+        assert!(call_popover(&t, &e, &br, &d, &ff, &is, &fs).is_none());
+    }
+
+    #[test]
+    fn popover_wraps_long_message_into_multiple_lines() {
+        let msg = "this is a long diagnostic message that should wrap across several lines when rendered in the popover box";
+        let (t, e, br, d, ff, is, fs) = popover_fixture(
+            3,
+            3,
+            3,
+            DiagnosticSeverity::Error,
+            msg,
+            0,
+            0,
+        );
+        let pop = call_popover(&t, &e, &br, &d, &ff, &is, &fs).expect("popover");
+        assert!(pop.lines.len() >= 2, "wrap produces multiple lines");
+    }
+
+    #[test]
+    fn popover_shows_when_cursor_on_middle_of_multiline_diagnostic() {
+        // Diagnostic spans rows 3..=5; cursor on row 4 must still
+        // produce a popover.
+        let (t, e, br, d, ff, is, fs) = popover_fixture(
+            4,
+            3,
+            5,
+            DiagnosticSeverity::Warning,
+            "spans three lines",
+            0,
+            0,
+        );
+        let pop = call_popover(&t, &e, &br, &d, &ff, &is, &fs).expect("popover");
+        assert_eq!(pop.lines[0].severity, Some(PopoverSeverity::Warning));
     }
 }

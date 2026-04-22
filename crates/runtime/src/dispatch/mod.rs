@@ -431,7 +431,7 @@ fn run_command(
         }
         Command::CursorUp => {
             if browser_focused {
-                move_selection(browser, -1);
+                move_selection(browser, fs, tabs, path_chains, -1);
             } else {
                 move_cursor(tabs, edits, store, terminal, Move::Up);
             }
@@ -439,7 +439,7 @@ fn run_command(
         }
         Command::CursorDown => {
             if browser_focused {
-                move_selection(browser, 1);
+                move_selection(browser, fs, tabs, path_chains, 1);
             } else {
                 move_cursor(tabs, edits, store, terminal, Move::Down);
             }
@@ -467,7 +467,7 @@ fn run_command(
                 .map(|d| d.rows.saturating_sub(2) as usize)
                 .unwrap_or(1);
             if browser_focused {
-                page_selection(browser, page, /* down= */ false);
+                page_selection(browser, fs, tabs, path_chains, page, /* down= */ false);
             } else {
                 move_cursor(tabs, edits, store, terminal, Move::PageUp);
             }
@@ -479,7 +479,7 @@ fn run_command(
                 .map(|d| d.rows.saturating_sub(2) as usize)
                 .unwrap_or(1);
             if browser_focused {
-                page_selection(browser, page, /* down= */ true);
+                page_selection(browser, fs, tabs, path_chains, page, /* down= */ true);
             } else {
                 move_cursor(tabs, edits, store, terminal, Move::PageDown);
             }
@@ -487,7 +487,7 @@ fn run_command(
         }
         Command::CursorFileStart => {
             if browser_focused {
-                select_first(browser);
+                select_first(browser, fs, tabs, path_chains);
             } else {
                 move_cursor(tabs, edits, store, terminal, Move::FileStart);
             }
@@ -495,7 +495,7 @@ fn run_command(
         }
         Command::CursorFileEnd => {
             if browser_focused {
-                select_last(browser);
+                select_last(browser, fs, tabs, path_chains);
             } else {
                 move_cursor(tabs, edits, store, terminal, Move::FileEnd);
             }
@@ -562,15 +562,15 @@ fn run_command(
             DispatchOutcome::Continue
         }
         Command::ExpandDir => {
-            expand_dir(browser, fs);
+            expand_dir(browser, fs, tabs);
             DispatchOutcome::Continue
         }
         Command::CollapseDir => {
-            collapse_dir(browser, fs);
+            collapse_dir(browser, fs, tabs);
             DispatchOutcome::Continue
         }
         Command::CollapseAll => {
-            collapse_all(browser, fs);
+            collapse_all(browser);
             DispatchOutcome::Continue
         }
         Command::OpenSelected => {

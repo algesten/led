@@ -395,8 +395,12 @@ goldens; M14b adds dedicated theme-switching coverage.
 **Spec reference:** `lsp.md` § "Diagnostics", `docs/drivers/lsp.md`.
 
 **Goldens moved to green:** `smoke/lsp_diagnostic`,
-`driver_events/lsp/diagnostic*`, `features/lsp/diagnostics*`,
-`actions/next_issue` + `actions/prev_issue` (diagnostics portion).
+`driver_events/lsp/diagnostic*`, `features/lsp/diagnostics*`.
+`actions/next_issue` + `actions/prev_issue` are **NOT** moved here —
+the tiered nav cycle ships as a whole in M20a once all its issue
+sources (LSP, git, PR) are present. Shipping nav piecewise before
+then teaches users a behaviour that changes when each later tier
+lands.
 
 ### M17 — LSP completions
 
@@ -439,13 +443,13 @@ actions / Format / Inlay hints".
 - Per-line status (gutter marks: add / del / modify).
 - Current branch displayed in status bar.
 - Debounced scan; rebased through the edit log.
-- `NextIssue` / `PrevIssue` (`alt+.`/`alt+,`) now includes git hunks.
+
+`NextIssue` / `PrevIssue` is **not** extended here — see M20a.
 
 **Spec reference:** `git.md`, `docs/drivers/git.md`.
 
 **Goldens moved to green:** `driver_events/git/*`,
-`features/git/*`, `actions/next_issue` / `actions/prev_issue`
-(git-hunks portion).
+`features/git/*`.
 
 ### M20 — GitHub PR
 
@@ -453,12 +457,60 @@ actions / Format / Inlay hints".
 - ETag-driven polling.
 - PR comments rendered alongside git gutter marks.
 - `OpenPrUrl` (`ctrl+x ctrl+p`).
-- `NextIssue` / `PrevIssue` now also includes PR comments.
+
+`NextIssue` / `PrevIssue` is **not** extended here — see M20a.
 
 **Spec reference:** `gh-pr.md`, `docs/drivers/gh-pr.md`.
 
 **Goldens moved to green:** `driver_events/gh_pr/*`,
 `features/gh_pr/*`, `actions/open_pr_url`.
+
+### M20a — Tiered issue navigation (Alt-./Alt-,)
+
+The full `NextIssue` / `PrevIssue` cycle, deferred until all four
+issue sources exist so the user-visible behaviour doesn't mutate
+each time a later source lands.
+
+Tiered walk down `IssueCategory::NAV_LEVELS` (legacy's ordering):
+
+1. **LSP Error** — from `DiagnosticsStates`.
+2. **LSP Warning** — same atom, filtered by severity.
+3. **Git line status** — Unstaged / StagedModified / StagedNew /
+   Untracked.
+4. **PR** — PrComment + PrDiff (diff ranges gated by the
+   divergence check — hidden once the buffer drifts from the PR
+   head commit).
+
+The cycle **stays inside the first level with any items**. So
+errors-present means Alt-. only cycles errors until they're
+cleared; warnings + git + PR stay invisible to the cycle. This is
+the escape-hatch-from-error-rich-files UX legacy depends on.
+
+Scope:
+
+- `IssueCategory` enum + `NAV_LEVELS` const (mirror legacy's
+  ordering).
+- `collect_positions` lens in `runtime/src/query.rs` that joins
+  `DiagnosticsStates`, `GitState`, `GhPrState`, `BuffersState`
+  (for clamp-to-last-line) into a unified `Vec<Pos>` per level.
+- `pick_target_index`: forward / backward / wrap, with dedup on
+  `(path, row, col)` so multi-category same-line collapses.
+- Output Muts: alert text (`"Jumped to <label> X/N"`),
+  same-buffer cursor+scroll update, other-buffer (already open)
+  cursor+scroll, file-not-yet-open → `RequestOpen` +
+  `SetActiveTab` + `SetTabPendingCursor`.
+- `Action::NextIssue` / `Action::PrevIssue` wired to the new
+  dispatcher.
+
+Out: issue navigation within a single buffer via mouse click on a
+gutter mark (not present in legacy).
+
+**Spec reference:** `navigation.md` § "Issue navigation"
+(authored as part of this milestone, citing legacy
+`led/src/model/nav_of.rs` for the tiered walk + dedup rules).
+
+**Goldens moved to green:** `actions/next_issue`,
+`actions/prev_issue`, `features/issue_nav/*`.
 
 ### M21 — Persistence (session + undo)
 
@@ -556,12 +608,23 @@ legacy, not a regression fix.
 - On disk change for an open buffer: compare disk hash vs
   `saved_version` baseline. If user hasn't edited → reload silently.
   If dirty → prompt to discard or reload.
+- **LSP client-side `workspace/didChangeWatchedFiles`**: servers
+  (rust-analyzer in particular) register dynamic watch globs at
+  startup via `client/registerCapability`. Once M26's watcher
+  exists, the LSP driver subscribes to the same event stream and
+  forwards matching path changes as `DidChangeWatchedFiles`
+  notifications so the server can re-index (e.g. after
+  `cargo add` edits `Cargo.toml` out-of-editor). Without this,
+  rust-analyzer's error set goes stale whenever workspace files
+  change outside the editor — documented gap tracked in
+  `lsp-patterns.md` §7.2 until M26 closes it.
 
 **Spec reference:** `buffers.md` § "External change",
 `docs/drivers/fs.md`.
 
 **Goldens moved to green:** `smoke/external_change`,
-`features/external_change/*`.
+`features/external_change/*`,
+`driver_events/lsp/did_change_watched_files*`.
 
 ---
 

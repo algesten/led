@@ -12,7 +12,7 @@ use led_driver_terminal_native::RawModeGuard;
 use led_runtime::{
     load_keymap, load_theme, spawn_drivers, Atoms, SharedTrace, TabIdGen, Wake, World,
 };
-use led_state_browser::{reveal_ancestors, FsTree};
+use led_state_browser::FsTree;
 use led_state_tabs::Tab;
 
 #[derive(Parser, Debug)]
@@ -112,18 +112,19 @@ fn main() -> io::Result<()> {
 
     // Seed tabs from CLI args. Each open path auto-expands its
     // ancestor directories in the browser so the tree reveals the
-    // file — matches legacy's `reveal_active_buffer` side of
-    // open-time expansion. Walking the symlink chain HERE (while
-    // we still hold the user-typed path) lets the language
-    // detector route `foo.rs → bar` to Rust even though the canon
-    // tail has no extension.
+    // file — the runtime's active-tab reveal machinery
+    // (set_active_reveal, driven from the main-loop execute phase)
+    // auto-expands ancestors on every tab switch, so CLI startup
+    // doesn't need its own reveal pass. Walking the symlink chain
+    // HERE (while we still hold the user-typed path) lets the
+    // language detector route `foo.rs → bar` to Rust even though
+    // the canon tail has no extension.
     let mut ids = TabIdGen::default();
     for f in &cli.files {
         let id = ids.issue();
         let user = UserPath::new(f);
         let chain = user.resolve_chain();
         let canon = chain.resolved.clone();
-        reveal_ancestors(&mut atoms.browser, &atoms.fs, &canon);
         atoms.path_chains.insert(canon.clone(), chain);
         atoms.tabs.open.push_back(Tab {
             id,

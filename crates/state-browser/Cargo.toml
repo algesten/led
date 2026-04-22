@@ -5,11 +5,11 @@ edition = "2024"
 publish = false
 
 # Session-global user-decision source: the file-browser sidebar.
-# Holds the workspace root, per-directory listings cache, expansion
-# state, selection, and the flattened `entries` list the painter
-# consumes. No driver — the FS driver fills dir_contents; dispatch
-# mutates expansion/selection; rebuild_entries recomputes the flat
-# view.
+# Holds the workspace root, per-directory listings cache, user-
+# pinned expansion, and the path-based selection target. The
+# flattened entries list and the auto-reveal ancestor set are
+# NOT stored here — they're pure derivations, computed fresh
+# by `runtime::query` memos over (FsTree, BrowserUi, Tabs).
 
 [dependencies]
 led-core = { workspace = true }

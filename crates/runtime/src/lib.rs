@@ -44,7 +44,7 @@ use led_driver_syntax_native::SyntaxNative;
 use led_driver_lsp_core::{LspCmd, LspDriver, LspEvent};
 use led_driver_lsp_native::LspNative;
 use led_state_alerts::AlertState;
-use led_state_browser::{BrowserUi, FsTree, rebuild_entries};
+use led_state_browser::{BrowserUi, FsTree};
 use led_state_buffer_edits::{BufferEdits, EditedBuffer};
 use led_state_clipboard::ClipboardState;
 use led_state_file_search::FileSearchState;
@@ -189,14 +189,24 @@ pub struct Atoms {
     /// `edits.buffers[path].version` because one driver lags
     /// independently of another.
     pub lsp_notified: std::collections::HashMap<CanonPath, BufferVersion>,
-    /// Running sum of `(version + saved_version)` across all
-    /// buffers. The execute phase fires `LspCmd::RequestDiagnostics`
-    /// whenever this sum changes — the "edit or save happened"
-    /// coalescing signal. Legacy used a content-hash projection
-    /// for the same purpose.
-    pub lsp_state_sum: u64,
-    /// `true` once `LspCmd::Init` has been emitted. Prevents
-    /// re-issuing the handshake on every tick.
+    /// `Some(sum)` holds Σ(version + saved_version) at the last
+    /// `RequestDiagnostics` emission; `None` means we've never
+    /// fired one. Combined flag+sum because the two cases the
+    /// runtime needs to distinguish collapse naturally: "has the
+    /// sum moved?" → `memo(edits) != *lsp_requested_state_sum`,
+    /// where the `None` case handles the first-ever emission
+    /// regardless of the sum's raw value. The per-tick current
+    /// sum is derived by the `buffer_state_sum` memo.
+    ///
+    /// Driver-outbound bookkeeping: tracks a side-effect the
+    /// runtime emitted, not a user decision or external fact.
+    /// Same category as `lsp_notified` below — kept as a field
+    /// because we can't derive "what did I tell the driver" from
+    /// observations of current atom state.
+    pub lsp_requested_state_sum: Option<u64>,
+    /// `true` once `LspCmd::Init` has been emitted. Same
+    /// category as `lsp_notified` / `lsp_requested_state_sum`:
+    /// driver-outbound bookkeeping.
     pub lsp_init_sent: bool,
     /// Per-server LSP progress / ready status. Painter consumes
     /// via the status-bar model so the user sees when
@@ -246,7 +256,7 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
         path_chains,
         diagnostics,
         lsp_notified,
-        lsp_state_sum,
+        lsp_requested_state_sum,
         lsp_init_sent,
         lsp_status,
     } = &mut *world.atoms;
@@ -423,16 +433,15 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
         // browser view. Failures leave the dir unlisted; the user
         // can retry via CollapseAll-then-reopen.
         let fs_completions = drivers.fs_list.process();
-        let had_listing = !fs_completions.is_empty();
         for done in fs_completions {
             if let Ok(entries) = done.result {
                 fs.dir_contents
                     .insert(done.path, imbl::Vector::from_iter(entries));
             }
         }
-        if had_listing {
-            rebuild_entries(browser, fs);
-        }
+        // Tree rebuild is no longer imperative — the
+        // `browser_entries` memo derives from `fs.dir_contents`
+        // fresh on next access.
 
         // Apply find-file completions. Late arrivals whose `dir` +
         // `prefix` no longer match the overlay's current input are
@@ -623,6 +632,22 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
             break Ok(());
         }
 
+        // Browser selection snap: when the active tab changed,
+        // pin `selected_path` to its path. Path-based selection
+        // means the `browser_entries` memo resolves to the right
+        // row automatically once fs-list delivers the ancestor
+        // listings. Skip when focus is on the side panel — the
+        // user is arrow-navigating; don't yank the cursor.
+        if !matches!(browser.focus, led_state_browser::Focus::Side) {
+            let active_path_now = tabs
+                .active
+                .and_then(|id| tabs.open.iter().find(|t| t.id == id))
+                .map(|t| t.path.clone());
+            if active_path_now.is_some() && browser.selected_path != active_path_now {
+                browser.selected_path = active_path_now;
+            }
+        }
+
         // ── Query ───────────────────────────────────────────────
         let load_actions = file_load_action(
             StoreLoadedInput::new(store),
@@ -635,6 +660,7 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
         let list_actions = file_list_action(
             FsTreeInput::new(fs),
             BrowserUiInput::new(browser),
+            TabsActiveInput::new(tabs),
         );
         let find_file_actions = find_file_action(FindFileInput::new(find_file));
         // Spinner frame clock — current millis since UNIX epoch,
@@ -656,6 +682,7 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
             tabs: TabsActiveInput::new(tabs),
             alerts: AlertsInput::new(alerts),
             browser: BrowserUiInput::new(browser),
+            fs: FsTreeInput::new(fs),
             overlays: query::OverlaysInput::new(find_file, isearch, file_search),
             syntax: query::SyntaxStatesInput::new(syntax),
             diagnostics: query::DiagnosticsStatesInput::new(diagnostics),
@@ -850,20 +877,7 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
         }
 
         let mut lsp_cmds: Vec<LspCmd> = Vec::new();
-        let mut new_state_sum: u64 = 0;
-        // Also track whether we emitted any lifecycle command
-        // this tick — BufferChanged OR a fresh BufferOpened that
-        // was queued in the load-completion block above. Either
-        // is a reason to request diagnostics, even when the
-        // state-sum happens to land at the same value (e.g.
-        // initial load: eb.version == 0, saved_version == 0 →
-        // sum 0 → no delta, but diagnostics definitely want to
-        // fire).
-        let mut any_lifecycle_cmd = false;
         for (path, eb) in edits.buffers.iter() {
-            new_state_sum = new_state_sum
-                .wrapping_add(eb.version)
-                .wrapping_add(eb.saved_version);
             let current = BufferVersion(eb.version);
             let last = lsp_notified.get(path).copied().unwrap_or_default();
             if current.0 > last.0 {
@@ -878,16 +892,25 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
                     is_save,
                 });
                 lsp_notified.insert(path.clone(), current);
-                any_lifecycle_cmd = true;
             }
         }
-        // Also fire a RequestDiagnostics on the first tick any
-        // buffer has entered `lsp_notified` (catches the
-        // BufferOpened → ready-for-pull transition).
-        let fresh_open = !lsp_notified.is_empty() && *lsp_state_sum == 0;
-        if new_state_sum != *lsp_state_sum || fresh_open || any_lifecycle_cmd {
+        // RequestDiagnostics emission — unified version of
+        // legacy's two rx streams (hash-sum delta + phase→Running
+        // one-shot, see docs/rewrite/lsp-patterns.md §6.3).
+        //
+        // `buffer_state_sum` memo derives Σ(version + saved_version);
+        // `lsp_requested_state_sum` atom stores the sum at our
+        // last emission. `Some(current) != *lsp_requested_state_sum`
+        // covers both "sum moved" and "first ever fire" (None on
+        // startup → not equal to any Some). Gated on
+        // `!lsp_notified.is_empty()` so we don't fire diagnostic
+        // requests for a workspace with no buffers yet.
+        let current_sum = query::buffer_state_sum(EditedBuffersInput::new(edits));
+        let should_request_diag =
+            !lsp_notified.is_empty() && Some(current_sum) != *lsp_requested_state_sum;
+        if should_request_diag {
             lsp_cmds.push(LspCmd::RequestDiagnostics);
-            *lsp_state_sum = new_state_sum.max(1); // guard: never re-enter the fresh-open branch
+            *lsp_requested_state_sum = Some(current_sum);
         }
         if !lsp_cmds.is_empty() {
             drivers.lsp.execute(lsp_cmds.iter());

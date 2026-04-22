@@ -355,12 +355,61 @@ pub struct StatusBarModel {
     pub is_warn: bool,
 }
 
+/// Floating popover anchored near the cursor — currently the
+/// LSP diagnostic hover (one box per cursor-line diagnostic).
+///
+/// The popover floats above body content; it doesn't push any
+/// other region aside. The painter draws a solid-fill box (no
+/// border) with one `PopoverLine` per row. Multiple messages are
+/// separated by a horizontal rule line the painter inserts
+/// between entries. Positioning: prefer above the anchor row,
+/// fall back to below when there isn't room; X clamps to stay
+/// on-screen.
+///
+/// `lines` is `Arc`-wrapped so cache-hit `Frame` clones stay a
+/// pointer copy.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct PopoverModel {
+    pub lines: Arc<Vec<PopoverLine>>,
+    /// Absolute terminal `(col, row)` anchor — the cursor
+    /// position that triggered the popover. The painter derives
+    /// the actual box origin from this with the screen-edge clamp
+    /// and above/below fallback rules described on [`PopoverModel`].
+    pub anchor: (u16, u16),
+}
+
+/// One row inside a [`PopoverModel`]. `text` is already wrapped
+/// to the popover width; the painter does not re-wrap.
+///
+/// The painter resolves `severity` against `theme.diagnostics.*`
+/// at paint time — the model carries the domain enum, not a
+/// `Style`, so theme changes don't require a frame rebuild.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PopoverLine {
+    pub text: Arc<str>,
+    /// Which theme colour to use. `None` marks a separator row
+    /// (horizontal rule between messages); painter draws ─ fill.
+    pub severity: Option<PopoverSeverity>,
+}
+
+/// Mirror of `led_state_diagnostics::DiagnosticSeverity` without
+/// the cross-crate dependency. Driver-core intentionally depends
+/// on no state crates; the runtime translates before emitting.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PopoverSeverity {
+    Error,
+    Warning,
+    Info,
+    Hint,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct Frame {
     pub tab_bar: TabBarModel,
     pub body: BodyModel,
     pub status_bar: StatusBarModel,
     pub side_panel: Option<SidePanelModel>,
+    pub popover: Option<PopoverModel>,
     pub layout: Layout,
     /// Absolute terminal cursor position as `(col, row)` — matches
     /// crossterm's `cursor::MoveTo` argument order. `None` hides the

@@ -1,14 +1,19 @@
 //! File-browser primitives (M11).
 //!
 //! Exposed functions are called by `run_command` when a browser-level
-//! command resolves. Each mutates [`BrowserUi`] (and [`Tabs`] for
-//! open/preview) directly; the runtime's next tick re-renders the
-//! side panel from the updated state and fires any missing
-//! directory listings via the query layer.
+//! command resolves. They mutate only the user-owned fields on
+//! [`BrowserUi`] (`expanded_dirs`, `selected_path`, `scroll_offset`,
+//! `visible`, `focus`) and [`Tabs`] for open/preview side-effects.
+//!
+//! The flattened tree, the auto-reveal ancestor set, and the
+//! selection index all come from the query layer as memos — no
+//! imperative rebuild calls on the state atom.
 //!
 //! All functions are silent no-ops when preconditions fail (no root,
 //! no selection, closed tab, etc.) — matches legacy browser
 //! behaviour.
+//!
+//! [`BrowserUi`]: led_state_browser::BrowserUi
 
 use std::cmp::Ordering;
 use std::collections::HashMap;
@@ -17,42 +22,66 @@ use led_core::{CanonPath, PathChain};
 use led_state_browser::{BrowserUi, Focus, FsTree, TreeEntry, TreeEntryKind};
 use led_state_tabs::Tabs;
 
-use super::shared::open_or_focus_tab;
+use crate::query::{BrowserUiInput, FsTreeInput, TabsActiveInput, browser_entries, browser_selected_idx};
 
-/// Find the TreeEntry that contains `selected_idx` in the flat
-/// tree view — walks backward for the first entry with depth
-/// `selected.depth - 1`. Returns `None` for depth-0 rows (their
-/// parent is the workspace root, handled by the caller).
+use super::shared::{close_preview, open_or_focus_tab};
+
+/// Helper: call the `browser_entries` memo given raw state.
+fn entries_of(browser: &BrowserUi, fs: &FsTree, tabs: &Tabs) -> std::sync::Arc<Vec<TreeEntry>> {
+    browser_entries(
+        FsTreeInput::new(fs),
+        BrowserUiInput::new(browser),
+        TabsActiveInput::new(tabs),
+    )
+}
+
+/// Current selected row in today's entries. `0` on empty tree.
+fn current_idx(browser: &BrowserUi, fs: &FsTree, tabs: &Tabs) -> usize {
+    let entries = entries_of(browser, fs, tabs);
+    browser_selected_idx(&entries, browser.selected_path.as_ref())
+}
+
+/// Current selected entry (clone), or None on empty tree.
+fn current_entry(browser: &BrowserUi, fs: &FsTree, tabs: &Tabs) -> Option<TreeEntry> {
+    let entries = entries_of(browser, fs, tabs);
+    let idx = browser_selected_idx(&entries, browser.selected_path.as_ref());
+    entries.get(idx).cloned()
+}
+
+/// Find the TreeEntry that contains `idx` in the flat tree view —
+/// walks backward for the first entry with depth `selected.depth -
+/// 1`. Returns `None` for depth-0 rows (their parent is the
+/// workspace root, handled by the caller).
 fn parent_tree_entry<'a>(
     entries: &'a [TreeEntry],
-    selected_idx: usize,
+    idx: usize,
 ) -> Option<&'a TreeEntry> {
-    let selected = entries.get(selected_idx)?;
+    let selected = entries.get(idx)?;
     if selected.depth == 0 {
         return None;
     }
-    entries[..selected_idx]
+    entries[..idx]
         .iter()
         .rev()
         .find(|e| e.depth + 1 == selected.depth)
 }
 
-/// Build the user-typed [`PathChain`] for a browser entry and
-/// stash it on `path_chains`. For a symlinked `.profile` sitting
-/// under `~/`, this reconstructs `<canonical-~>/.profile` — the
-/// path the user WOULD have typed — so the chain walker then
+/// Build the user-typed [`PathChain`] for the selected browser
+/// entry and stash it on `path_chains`. For a symlinked `.profile`
+/// sitting under `~/`, this reconstructs `<canonical-~>/.profile` —
+/// the path the user WOULD have typed — so the chain walker then
 /// follows the symlink to the real target, but language detection
 /// wins off the user-facing basename.
 fn stash_browser_chain(
-    browser: &BrowserUi,
+    entries: &[TreeEntry],
     fs: &FsTree,
     path_chains: &mut HashMap<CanonPath, PathChain>,
-    selected_idx: usize,
+    idx: usize,
 ) {
-    let Some(entry) = browser.entries.get(selected_idx) else {
+    let Some(entry) = entries.get(idx) else {
         return;
     };
-    let parent_dir = match parent_tree_entry(&browser.entries, selected_idx) {
+    let parent_dir = match parent_tree_entry(entries, idx) {
         Some(p) => p.path.as_path().to_path_buf(),
         None => {
             // depth-0 → parent is workspace root.
@@ -62,10 +91,6 @@ fn stash_browser_chain(
     };
     let user_pathbuf = parent_dir.join(&entry.name);
     let chain = led_core::UserPath::new(user_pathbuf).resolve_chain();
-    // The chain's resolved canonical path should equal the tree
-    // entry's stored canonical path. Stash under THAT key so the
-    // load-completion handler finds it when the file driver
-    // reports on `entry.path`.
     path_chains.insert(entry.path.clone(), chain);
 }
 
@@ -92,18 +117,14 @@ pub(super) fn toggle_focus(browser: &mut BrowserUi) {
 }
 
 /// Expand the selected directory. No-op when the selection is a
-/// file or there's no selection.
-///
-/// The query-layer memo will notice the new `expanded_dirs` entry
-/// and emit a `ListCmd` for the directory on the next tick if
-/// `dir_contents` doesn't already have it.
-pub(super) fn expand_dir(browser: &mut BrowserUi, fs: &FsTree) {
-    let Some(entry) = browser.selected_entry() else {
+/// file or there's no selection. The query-layer memo picks up
+/// the new `expanded_dirs` entry on the next tick.
+pub(super) fn expand_dir(browser: &mut BrowserUi, fs: &FsTree, tabs: &Tabs) {
+    let Some(entry) = current_entry(browser, fs, tabs) else {
         return;
     };
     if matches!(entry.kind, TreeEntryKind::Directory { expanded: false }) {
-        let path = entry.path.clone();
-        browser.expand(path, fs);
+        browser.expanded_dirs.insert(entry.path);
     }
 }
 
@@ -111,55 +132,51 @@ pub(super) fn expand_dir(browser: &mut BrowserUi, fs: &FsTree) {
 /// collapse the file's parent instead (so `Left` in a deep tree
 /// "zooms out" one level). Selection moves to the collapsed dir's
 /// row.
-pub(super) fn collapse_dir(browser: &mut BrowserUi, fs: &FsTree) {
-    let Some(entry) = browser.selected_entry().cloned() else {
+pub(super) fn collapse_dir(browser: &mut BrowserUi, fs: &FsTree, tabs: &Tabs) {
+    let entries = entries_of(browser, fs, tabs);
+    let idx = browser_selected_idx(&entries, browser.selected_path.as_ref());
+    let Some(entry) = entries.get(idx).cloned() else {
         return;
     };
     let target_path = match entry.kind {
         TreeEntryKind::Directory { expanded: true } => entry.path.clone(),
         TreeEntryKind::Directory { expanded: false } => {
-            // Already collapsed — nothing to do.
             return;
         }
         TreeEntryKind::File => {
-            // Walk up to find the first expanded ancestor.
-            match find_expanded_ancestor(browser, &entry.path) {
+            match find_expanded_ancestor(&entries, &entry.path) {
                 Some(p) => p,
                 None => return,
             }
         }
     };
-    browser.collapse(target_path.clone(), fs);
-    // After collapse, re-select the row at the collapsed dir.
-    if let Some(idx) = browser.entries.iter().position(|e| e.path == target_path) {
-        browser.selected = idx;
-    }
+    browser.expanded_dirs.remove(&target_path);
+    // Selection jumps to the collapsed dir's row. Path-based so
+    // the next memo rebuild finds it at the right index.
+    browser.selected_path = Some(target_path);
 }
 
-fn find_expanded_ancestor(browser: &BrowserUi, child: &CanonPath) -> Option<CanonPath> {
-    // Walk up through child.ancestors(), but our CanonPath doesn't
-    // expose that directly — scan the flat `entries` for the latest
-    // dir above `child` whose path is a prefix and that's expanded.
-    let child_idx = browser.entries.iter().position(|e| &e.path == child)?;
-    // Latest dir row with a smaller depth than child is the immediate
-    // parent in the tree. That's the one to collapse.
-    let child_depth = browser.entries[child_idx].depth;
+fn find_expanded_ancestor(entries: &[TreeEntry], child: &CanonPath) -> Option<CanonPath> {
+    let child_idx = entries.iter().position(|e| &e.path == child)?;
+    let child_depth = entries[child_idx].depth;
     for i in (0..child_idx).rev() {
-        if browser.entries[i].depth < child_depth
+        if entries[i].depth < child_depth
             && matches!(
-                browser.entries[i].kind,
+                entries[i].kind,
                 TreeEntryKind::Directory { expanded: true }
             )
         {
-            return Some(browser.entries[i].path.clone());
+            return Some(entries[i].path.clone());
         }
     }
     None
 }
 
 /// Collapse every expanded directory + reset selection/scroll.
-pub(super) fn collapse_all(browser: &mut BrowserUi, fs: &FsTree) {
-    browser.collapse_all(fs);
+pub(super) fn collapse_all(browser: &mut BrowserUi) {
+    browser.expanded_dirs = imbl::HashSet::default();
+    browser.selected_path = None;
+    browser.scroll_offset = 0;
 }
 
 /// Open the selected entry.
@@ -173,21 +190,23 @@ pub(super) fn open_selected(
     tabs: &mut Tabs,
     path_chains: &mut HashMap<CanonPath, PathChain>,
 ) {
-    let selected_idx = browser.selected;
-    let Some(entry) = browser.selected_entry().cloned() else {
+    let entries = entries_of(browser, fs, tabs);
+    let idx = browser_selected_idx(&entries, browser.selected_path.as_ref());
+    let Some(entry) = entries.get(idx).cloned() else {
         return;
     };
     match entry.kind {
         TreeEntryKind::Directory { expanded } => {
             if expanded {
-                browser.collapse(entry.path, fs);
+                browser.expanded_dirs.remove(&entry.path);
             } else {
-                browser.expand(entry.path, fs);
+                browser.expanded_dirs.insert(entry.path);
             }
         }
         TreeEntryKind::File => {
-            stash_browser_chain(browser, fs, path_chains, selected_idx);
+            stash_browser_chain(&entries, fs, path_chains, idx);
             open_or_focus_tab(tabs, &entry.path, /* promote= */ true);
+            browser.selected_path = Some(entry.path);
             browser.focus = Focus::Main;
         }
     }
@@ -202,38 +221,106 @@ pub(super) fn open_selected_bg(
     tabs: &mut Tabs,
     path_chains: &mut HashMap<CanonPath, PathChain>,
 ) {
-    let selected_idx = browser.selected;
-    let Some(entry) = browser.selected_entry().cloned() else {
+    let entries = entries_of(browser, fs, tabs);
+    let idx = browser_selected_idx(&entries, browser.selected_path.as_ref());
+    let Some(entry) = entries.get(idx).cloned() else {
         return;
     };
     if let TreeEntryKind::File = entry.kind {
-        stash_browser_chain(browser, fs, path_chains, selected_idx);
+        stash_browser_chain(&entries, fs, path_chains, idx);
         open_or_focus_tab(tabs, &entry.path, /* promote= */ false);
     }
 }
 
+/// React to a browser-selection move.
+///
+/// - File row → open (or replace) the preview tab for that path.
+///   Arrow-nav through files reuses the single preview slot.
+/// - Directory row → close the open preview (if any).
+fn preview_current_selection(
+    browser: &BrowserUi,
+    entries: &[TreeEntry],
+    fs: &FsTree,
+    tabs: &mut Tabs,
+    path_chains: &mut HashMap<CanonPath, PathChain>,
+) {
+    let idx = browser_selected_idx(entries, browser.selected_path.as_ref());
+    let Some(entry) = entries.get(idx) else {
+        return;
+    };
+    match entry.kind {
+        TreeEntryKind::File => {
+            let path = entry.path.clone();
+            stash_browser_chain(entries, fs, path_chains, idx);
+            open_or_focus_tab(tabs, &path, /* promote= */ false);
+        }
+        TreeEntryKind::Directory { .. } => {
+            close_preview(tabs);
+        }
+    }
+}
+
 /// Browser-context selection move (Up/Down in focus=Side). Delta +1
-/// = one row down.
-pub(super) fn move_selection(browser: &mut BrowserUi, delta: isize) {
-    browser.move_selection(delta);
+/// = one row down. Path-based: clamps the new index into the
+/// current entries, writes back the path of that row. Also opens a
+/// preview tab for the file now under the cursor (closes preview on
+/// directory rows).
+pub(super) fn move_selection(
+    browser: &mut BrowserUi,
+    fs: &FsTree,
+    tabs: &mut Tabs,
+    path_chains: &mut HashMap<CanonPath, PathChain>,
+    delta: isize,
+) {
+    let entries = entries_of(browser, fs, tabs);
+    if entries.is_empty() {
+        browser.selected_path = None;
+        return;
+    }
+    let cur = browser_selected_idx(&entries, browser.selected_path.as_ref());
+    let n = entries.len() as isize;
+    let next = (cur as isize + delta).clamp(0, n - 1) as usize;
+    browser.selected_path = Some(entries[next].path.clone());
+    preview_current_selection(browser, &entries, fs, tabs, path_chains);
 }
 
 /// Browser-context page-move. `page_rows` is the visible window.
-pub(super) fn page_selection(browser: &mut BrowserUi, page_rows: usize, down: bool) {
+pub(super) fn page_selection(
+    browser: &mut BrowserUi,
+    fs: &FsTree,
+    tabs: &mut Tabs,
+    path_chains: &mut HashMap<CanonPath, PathChain>,
+    page_rows: usize,
+    down: bool,
+) {
     let delta = if down {
         page_rows as isize
     } else {
         -(page_rows as isize)
     };
-    browser.move_selection(delta);
+    move_selection(browser, fs, tabs, path_chains, delta);
 }
 
-pub(super) fn select_first(browser: &mut BrowserUi) {
-    browser.select_first();
+pub(super) fn select_first(
+    browser: &mut BrowserUi,
+    fs: &FsTree,
+    tabs: &mut Tabs,
+    path_chains: &mut HashMap<CanonPath, PathChain>,
+) {
+    let entries = entries_of(browser, fs, tabs);
+    browser.selected_path = entries.first().map(|e| e.path.clone());
+    preview_current_selection(browser, &entries, fs, tabs, path_chains);
 }
 
-pub(super) fn select_last(browser: &mut BrowserUi) {
-    browser.select_last();
+pub(super) fn select_last(
+    browser: &mut BrowserUi,
+    fs: &FsTree,
+    tabs: &mut Tabs,
+    path_chains: &mut HashMap<CanonPath, PathChain>,
+) {
+    let entries = entries_of(browser, fs, tabs);
+    browser.selected_path = entries.last().map(|e| e.path.clone());
+    preview_current_selection(browser, &entries, fs, tabs, path_chains);
 }
 
 /// Sort helper used by tests (tree-order comparator).
@@ -243,11 +330,9 @@ pub(super) fn _dummy_ordering() -> Ordering {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
     use imbl::Vector;
     use led_core::{CanonPath, UserPath};
-    use led_state_browser::{rebuild_entries, BrowserUi, DirEntry, DirEntryKind, Focus, FsTree};
+    use led_state_browser::{BrowserUi, DirEntry, DirEntryKind, Focus, FsTree};
     use led_state_tabs::{Tab, TabId, Tabs};
 
     use super::*;
@@ -282,9 +367,7 @@ mod tests {
             DirEntryKind::File,
         ));
         fs.dir_contents.insert(canon("/project/sub"), sub_children);
-        let mut ui = BrowserUi::default();
-        rebuild_entries(&mut ui, &fs);
-        (ui, fs)
+        (BrowserUi::default(), fs)
     }
 
     #[test]
@@ -321,49 +404,51 @@ mod tests {
     #[test]
     fn expand_dir_on_selected_dir_adds_to_expanded() {
         let (mut b, fs) = seeded();
-        b.selected = 0;
-        expand_dir(&mut b, &fs);
+        let tabs = Tabs::default();
+        b.selected_path = Some(canon("/project/sub"));
+        expand_dir(&mut b, &fs, &tabs);
         assert!(b.expanded_dirs.contains(&canon("/project/sub")));
-        assert_eq!(b.entries.len(), 4);
     }
 
     #[test]
     fn expand_dir_on_file_is_noop() {
         let (mut b, fs) = seeded();
-        b.selected = 1;
-        expand_dir(&mut b, &fs);
+        let tabs = Tabs::default();
+        b.selected_path = Some(canon("/project/alpha.txt"));
+        expand_dir(&mut b, &fs, &tabs);
         assert!(b.expanded_dirs.is_empty());
     }
 
     #[test]
     fn collapse_dir_on_expanded_collapses() {
         let (mut b, fs) = seeded();
-        b.expand(canon("/project/sub"), &fs);
-        b.selected = 0;
-        collapse_dir(&mut b, &fs);
+        let tabs = Tabs::default();
+        b.expanded_dirs.insert(canon("/project/sub"));
+        b.selected_path = Some(canon("/project/sub"));
+        collapse_dir(&mut b, &fs, &tabs);
         assert!(!b.expanded_dirs.contains(&canon("/project/sub")));
-        assert_eq!(b.entries.len(), 3);
     }
 
     #[test]
     fn collapse_dir_on_leaf_collapses_parent() {
         let (mut b, fs) = seeded();
-        b.expand(canon("/project/sub"), &fs);
-        b.selected = 1;
-        collapse_dir(&mut b, &fs);
+        let tabs = Tabs::default();
+        b.expanded_dirs.insert(canon("/project/sub"));
+        b.selected_path = Some(canon("/project/sub/inner.txt"));
+        collapse_dir(&mut b, &fs, &tabs);
         assert!(!b.expanded_dirs.contains(&canon("/project/sub")));
-        assert_eq!(b.selected, 0);
+        assert_eq!(b.selected_path, Some(canon("/project/sub")));
     }
 
     #[test]
     fn collapse_all_clears_expanded_and_resets_selection() {
-        let (mut b, fs) = seeded();
-        b.expand(canon("/project/sub"), &fs);
-        b.selected = 2;
+        let (mut b, _fs) = seeded();
+        b.expanded_dirs.insert(canon("/project/sub"));
+        b.selected_path = Some(canon("/project/beta.txt"));
         b.scroll_offset = 1;
-        collapse_all(&mut b, &fs);
+        collapse_all(&mut b);
         assert!(b.expanded_dirs.is_empty());
-        assert_eq!(b.selected, 0);
+        assert_eq!(b.selected_path, None);
         assert_eq!(b.scroll_offset, 0);
     }
 
@@ -372,7 +457,7 @@ mod tests {
         let (mut b, fs) = seeded();
         let mut tabs = Tabs::default();
         let mut pc = HashMap::new();
-        b.selected = 0;
+        b.selected_path = Some(canon("/project/sub"));
         open_selected(&mut b, &fs, &mut tabs, &mut pc);
         assert!(b.expanded_dirs.contains(&canon("/project/sub")));
         open_selected(&mut b, &fs, &mut tabs, &mut pc);
@@ -384,7 +469,7 @@ mod tests {
         let (mut b, fs) = seeded();
         let mut tabs = Tabs::default();
         let mut pc = HashMap::new();
-        b.selected = 1;
+        b.selected_path = Some(canon("/project/alpha.txt"));
         b.focus = Focus::Side;
         open_selected(&mut b, &fs, &mut tabs, &mut pc);
         assert_eq!(tabs.open.len(), 1);
@@ -398,7 +483,7 @@ mod tests {
         let (mut b, fs) = seeded();
         let mut tabs = Tabs::default();
         let mut pc = HashMap::new();
-        b.selected = 1;
+        b.selected_path = Some(canon("/project/alpha.txt"));
         b.focus = Focus::Side;
         open_selected_bg(&mut b, &fs, &mut tabs, &mut pc);
         assert_eq!(tabs.open.len(), 1);
@@ -418,7 +503,7 @@ mod tests {
             ..Default::default()
         });
         tabs.active = Some(TabId(1));
-        b.selected = 1;
+        b.selected_path = Some(canon("/project/alpha.txt"));
         open_selected(&mut b, &fs, &mut tabs, &mut pc);
         assert_eq!(tabs.open.len(), 1);
         assert!(!tabs.open[0].preview);
@@ -436,7 +521,7 @@ mod tests {
             ..Default::default()
         });
         tabs.active = Some(TabId(1));
-        b.selected = 2;
+        b.selected_path = Some(canon("/project/beta.txt"));
         open_selected_bg(&mut b, &fs, &mut tabs, &mut pc);
         assert_eq!(tabs.open.len(), 1);
         assert_eq!(tabs.open[0].path, canon("/project/beta.txt"));
@@ -445,21 +530,87 @@ mod tests {
 
     #[test]
     fn move_selection_moves_within_entries() {
-        let (mut b, _fs) = seeded();
-        move_selection(&mut b, 2);
-        assert_eq!(b.selected, 2);
-        move_selection(&mut b, -1);
-        assert_eq!(b.selected, 1);
+        let (mut b, fs) = seeded();
+        let mut tabs = Tabs::default();
+        let mut pc = HashMap::new();
+        // Starts with selected_path = None → idx 0 = sub/.
+        move_selection(&mut b, &fs, &mut tabs, &mut pc, 2);
+        assert_eq!(b.selected_path, Some(canon("/project/beta.txt")));
+        move_selection(&mut b, &fs, &mut tabs, &mut pc, -1);
+        assert_eq!(b.selected_path, Some(canon("/project/alpha.txt")));
+    }
+
+    #[test]
+    fn move_selection_opens_preview_for_file_row() {
+        let (mut b, fs) = seeded();
+        let mut tabs = Tabs::default();
+        let mut pc = HashMap::new();
+        // Start at idx 0 (sub/, directory). Move to alpha.txt (file).
+        move_selection(&mut b, &fs, &mut tabs, &mut pc, 1);
+        assert_eq!(tabs.open.len(), 1);
+        assert!(tabs.open[0].preview);
+        assert_eq!(tabs.open[0].path, canon("/project/alpha.txt"));
+    }
+
+    #[test]
+    fn move_selection_onto_directory_row_does_not_open_anything() {
+        let (mut b, fs) = seeded();
+        let mut tabs = Tabs::default();
+        let mut pc = HashMap::new();
+        b.selected_path = Some(canon("/project/alpha.txt"));
+        move_selection(&mut b, &fs, &mut tabs, &mut pc, -1);
+        assert_eq!(b.selected_path, Some(canon("/project/sub")));
+        assert!(tabs.open.is_empty());
+    }
+
+    #[test]
+    fn nav_onto_directory_closes_existing_preview() {
+        let (mut b, fs) = seeded();
+        let mut tabs = Tabs::default();
+        let mut pc = HashMap::new();
+        // sub/ → alpha.txt (preview).
+        move_selection(&mut b, &fs, &mut tabs, &mut pc, 1);
+        assert_eq!(tabs.open.len(), 1);
+        assert!(tabs.open[0].preview);
+        // Back to sub/ → preview closes.
+        move_selection(&mut b, &fs, &mut tabs, &mut pc, -1);
+        assert!(tabs.open.is_empty());
+        assert!(tabs.active.is_none());
+    }
+
+    #[test]
+    fn close_preview_restores_previous_tab() {
+        let (mut b, fs) = seeded();
+        let mut tabs = Tabs::default();
+        let mut pc = HashMap::new();
+        tabs.open.push_back(Tab {
+            id: TabId(7),
+            path: canon("/project/committed.rs"),
+            ..Default::default()
+        });
+        tabs.active = Some(TabId(7));
+
+        move_selection(&mut b, &fs, &mut tabs, &mut pc, 1); // alpha.txt (preview)
+        assert_eq!(tabs.open.len(), 2, "real + preview");
+        move_selection(&mut b, &fs, &mut tabs, &mut pc, -1); // back to sub/
+        assert_eq!(tabs.open.len(), 1, "preview removed");
+        assert_eq!(tabs.active, Some(TabId(7)), "real tab restored");
+    }
+
+    #[test]
+    fn successive_file_nav_replaces_the_same_preview_slot() {
+        let (mut b, fs) = seeded();
+        let mut tabs = Tabs::default();
+        let mut pc = HashMap::new();
+        move_selection(&mut b, &fs, &mut tabs, &mut pc, 1); // alpha.txt
+        move_selection(&mut b, &fs, &mut tabs, &mut pc, 1); // beta.txt
+        assert_eq!(tabs.open.len(), 1);
+        assert_eq!(tabs.open[0].path, canon("/project/beta.txt"));
+        assert!(tabs.open[0].preview);
     }
 
     #[test]
     fn _dummy_ordering_is_equal() {
         assert_eq!(_dummy_ordering(), Ordering::Equal);
-    }
-
-    #[test]
-    fn rebuild_preserves_entries_arc() {
-        let (b, _fs) = seeded();
-        let _ = Arc::clone(&b.entries);
     }
 }

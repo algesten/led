@@ -52,6 +52,13 @@ pub struct Tab {
     /// `OpenSelected`. M11. At most one preview tab exists at a time;
     /// dispatch enforces that invariant.
     pub preview: bool,
+    /// For preview tabs only: the tab id that was active when the
+    /// preview first opened. `close_preview` restores this on
+    /// directory-nav / abort so the user returns to whatever they
+    /// were looking at before arrow-scanning. Mirrors legacy's
+    /// `Tab::previous_tab` (`/led/led/src/model/action/preview.rs`).
+    /// `None` on non-preview tabs or when no tab was active.
+    pub previous_tab: Option<TabId>,
     /// Last committed isearch query for this tab. Stashed by
     /// `search_accept` / `search_cancel` so `Ctrl-s` on an empty
     /// query recalls it. Per-tab (not global) because users

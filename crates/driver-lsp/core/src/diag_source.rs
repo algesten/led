@@ -189,6 +189,14 @@ impl DiagnosticSource {
         }
     }
 
+    /// Accessor so callers can tell "have we already latched the
+    /// server into quiescence-gated mode?" Used by the manager to
+    /// avoid re-flipping `lsp_ready` on every serverStatus
+    /// notification — only the first arrival should matter.
+    pub fn has_quiescence(&self) -> bool {
+        self.has_quiescence
+    }
+
     /// Return `true` if the next `RequestDiagnostics` should be
     /// deferred until the server is ready. Only ever `true` for
     /// quiescence-gated servers before their first quiescent event.

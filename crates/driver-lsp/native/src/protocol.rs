@@ -131,6 +131,15 @@ pub fn build_initialize_request(id: i64, root: &CanonPath) -> Vec<u8> {
                         "relatedDocumentSupport": false,
                     },
                 },
+                "window": {
+                    // Opt into `$/progress` — rust-analyzer (and
+                    // most LSP servers) gate progress emission on
+                    // this capability. Without it the server
+                    // never sends `$/progress` notifications, so
+                    // the status bar has no detail to display
+                    // during indexing / building phases.
+                    "workDoneProgress": true,
+                },
                 "experimental": {
                     // rust-analyzer's non-spec quiescence extension.
                     // Other servers ignore unknown experimental keys.
@@ -151,6 +160,20 @@ pub fn build_initialized_notification() -> Vec<u8> {
         "params": {},
     }))
     .expect("serialize initialized")
+}
+
+/// Build a `workspace/didChangeConfiguration` notification with an
+/// empty settings object. rust-analyzer blocks its cold-index
+/// phase waiting for client configuration; sending an empty
+/// payload immediately after `initialized` releases it. Other
+/// servers tolerate the empty object.
+pub fn build_did_change_configuration_notification() -> Vec<u8> {
+    serde_json::to_vec(&json!({
+        "jsonrpc": "2.0",
+        "method": "workspace/didChangeConfiguration",
+        "params": { "settings": {} },
+    }))
+    .expect("serialize didChangeConfiguration")
 }
 
 /// What the initialize response tells us about delivery mode +
@@ -290,6 +313,19 @@ mod tests {
     }
 
     #[test]
+    fn initialize_request_advertises_work_done_progress() {
+        // rust-analyzer gates `$/progress` emission on this flag.
+        // Without it, the status bar shows only the server name
+        // (no indexing/building detail) during cold-start.
+        let body = build_initialize_request(1, &canon("/w"));
+        let v = parse_body(&body);
+        assert_eq!(
+            v["params"]["capabilities"]["window"]["workDoneProgress"],
+            true
+        );
+    }
+
+    #[test]
     fn initialize_request_advertises_quiescence_extension() {
         // rust-analyzer enables its serverStatus emission only when
         // the client opts into the experimental capability.
@@ -321,6 +357,16 @@ mod tests {
         assert_eq!(v["method"], "initialized");
         assert!(v.get("id").is_none(), "notifications have no id");
         assert_eq!(v["params"], json!({}));
+    }
+
+    #[test]
+    fn did_change_configuration_uses_empty_settings_object() {
+        let body = build_did_change_configuration_notification();
+        let v = parse_body(&body);
+        assert_eq!(v["jsonrpc"], "2.0");
+        assert_eq!(v["method"], "workspace/didChangeConfiguration");
+        assert!(v.get("id").is_none());
+        assert_eq!(v["params"]["settings"], json!({}));
     }
 
     // ── Initialize response parsing ────────────────────────

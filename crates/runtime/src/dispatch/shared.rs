@@ -25,8 +25,13 @@ pub(super) fn next_tab_id(tabs: &Tabs) -> TabId {
 ///   clear its preview flag so it becomes a pinned tab.
 /// - **Preview tab exists**: replace its path. Promote vs keep-preview
 ///   per the flag; reset cursor/scroll/mark (new buffer, fresh state).
+///   `previous_tab` is preserved across replacements — matches legacy's
+///   `set_preview`: the FIRST preview captures the restore target,
+///   subsequent previews inherit it.
 /// - **No preview**: create a fresh tab — preview if `!promote`, real
-///   otherwise.
+///   otherwise. On a new preview, `previous_tab` is seeded from the
+///   current `tabs.active` so `close_preview` can restore on Abort or
+///   directory-nav.
 ///
 /// Shared between M11 browser (`open_selected` / `open_selected_bg`)
 /// and M12 find-file commit.
@@ -36,27 +41,55 @@ pub fn open_or_focus_tab(tabs: &mut Tabs, path: &CanonPath, promote: bool) {
         tabs.active = Some(id);
         if promote {
             tabs.open[idx].preview = false;
+            tabs.open[idx].previous_tab = None;
         }
         return;
     }
     if let Some(idx) = tabs.open.iter().position(|t| t.preview) {
+        let previous = tabs.open[idx].previous_tab;
         let id = tabs.open[idx].id;
         tabs.open[idx].path = path.clone();
         tabs.open[idx].preview = !promote;
         tabs.open[idx].cursor = Default::default();
         tabs.open[idx].scroll = Default::default();
         tabs.open[idx].mark = None;
+        tabs.open[idx].previous_tab = if promote { None } else { previous };
         tabs.active = Some(id);
         return;
     }
     let id = next_tab_id(tabs);
+    // Capture the active tab as the restore target for the new
+    // preview. Real tabs don't need a restore target (they don't
+    // get implicitly closed).
+    let previous_tab = if promote { None } else { tabs.active };
     tabs.open.push_back(Tab {
         id,
         path: path.clone(),
         preview: !promote,
+        previous_tab,
         ..Default::default()
     });
     tabs.active = Some(id);
+}
+
+/// Remove the (single) preview tab if one exists. Restores
+/// `previous_tab` as the active tab when that tab still exists;
+/// otherwise falls back to the last remaining tab (or `None` if
+/// none remain). Matches legacy `close_preview`
+/// (`/led/led/src/model/action/preview.rs:100`).
+pub fn close_preview(tabs: &mut Tabs) {
+    let Some(idx) = tabs.open.iter().position(|t| t.preview) else {
+        return;
+    };
+    let restore = tabs.open[idx].previous_tab;
+    tabs.open.remove(idx);
+    if let Some(target) = restore
+        && tabs.open.iter().any(|t| t.id == target)
+    {
+        tabs.active = Some(target);
+        return;
+    }
+    tabs.active = tabs.open.back().map(|t| t.id);
 }
 
 /// Access the active tab and its edited buffer together. Bails if

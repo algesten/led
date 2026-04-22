@@ -27,8 +27,9 @@ pub use classify::{Incoming, JsonRpcError, RequestId, classify};
 pub use framing::{FrameError, encode_frame, try_parse_frame};
 pub use manager::{LspNative, spawn};
 pub use protocol::{
-    InitializeCapabilities, build_initialize_request, build_initialized_notification,
-    language_id, parse_initialize_response, path_from_uri, uri_from_path,
+    InitializeCapabilities, build_did_change_configuration_notification,
+    build_initialize_request, build_initialized_notification, language_id,
+    parse_initialize_response, path_from_uri, uri_from_path,
 };
 pub use registry::{LspRegistry, ServerConfig};
 pub use subprocess::{Server, ServerIncoming, reader_loop, writer_loop};

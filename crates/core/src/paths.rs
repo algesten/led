@@ -229,6 +229,44 @@ mod tests {
     }
 
     #[test]
+    fn resolve_chain_resolved_matches_canonicalize_for_real_file() {
+        // Regression: the rewrite's active-tab browser marker
+        // depends on `tab.path == browser_entry.path`. Tabs open
+        // via `UserPath::resolve_chain().resolved`; browser
+        // entries open via `UserPath::canonicalize()`. Both paths
+        // must produce byte-identical `CanonPath` for the same
+        // file or the marker never fires.
+        use std::fs;
+        let base = std::env::temp_dir().join(format!(
+            "led-pathchain-test.{}.canoneq",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(&base).unwrap();
+        let real = base.join("main.rs");
+        fs::write(&real, b"").unwrap();
+
+        // Tab-path style: resolve_chain → .resolved.
+        let chain = UserPath::new(&real).resolve_chain();
+        let tab_canon = chain.resolved.clone();
+
+        // Browser-path style: enumerate via readdir → canonicalize.
+        let browser_canon = fs::read_dir(&base)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .find(|e| e.file_name() == "main.rs")
+            .map(|e| UserPath::new(e.path()).canonicalize())
+            .expect("main.rs in the readdir");
+
+        assert_eq!(
+            tab_canon, browser_canon,
+            "tab + browser must produce identical CanonPath for the same file"
+        );
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
     fn resolve_chain_walks_one_symlink_hop() {
         use std::fs;
         let base = std::env::temp_dir().join(format!(
