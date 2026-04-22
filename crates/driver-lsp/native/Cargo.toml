@@ -22,4 +22,5 @@ led-state-diagnostics = { workspace = true }
 # driver-lsp/core pulls in; this one is separate only because
 # the registry lives on the native side.
 led-state-syntax = { workspace = true }
+ropey = { workspace = true }
 serde_json = { workspace = true }
