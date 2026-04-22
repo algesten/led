@@ -1157,4 +1157,80 @@ mod tests {
         auto_advance_arrow_follow(&mut ff, &mut tabs);
         assert_eq!(ff.selected, Some(1));
     }
+
+    // ── Syntax wiring ─────────────────────────────────────────────
+
+    /// Stage-3/4 wiring: the main loop spawns a real native worker,
+    /// seeds a Rust buffer, ticks the dispatch side, and waits for a
+    /// `SyntaxOut` to land + populate `Atoms.syntax`. Verifies the
+    /// three pieces composed properly:
+    /// (1) language detection on seed,
+    /// (2) cmd dispatch when buffer.version > state.version,
+    /// (3) ingest updates state.tokens with usable spans.
+    #[test]
+    fn syntax_pipeline_populates_tokens_for_loaded_rust_buffer() {
+        use std::time::{Duration, Instant};
+        let path = canon("pipeline.rs");
+        let rope = Arc::new(Rope::from_str("fn main() {}\n"));
+
+        // Kick the seed through the runtime helper so `edits.seq_gen`
+        // threads into the history, matching main-loop wiring.
+        let mut edits = BufferEdits::default();
+        seed_edit_from_load(&mut edits, path.clone(), rope.clone());
+
+        // Language detection + SyntaxState insert, mirroring the
+        // main loop's post-seed block.
+        let mut syntax = SyntaxStates::default();
+        let lang = Language::from_path(&path).expect("rust extension recognised");
+        syntax
+            .by_path
+            .insert(path.clone(), SyntaxState::new(lang));
+
+        // Spawn the real worker + issue a parse cmd.
+        let (drv, _native) = led_driver_syntax_native::spawn(
+            Arc::new(led_driver_syntax_core::NoopTrace),
+            Notifier::noop(),
+        );
+        let eb = edits.buffers.get(&path).unwrap();
+        let cmd = led_driver_syntax_core::SyntaxCmd {
+            path: path.clone(),
+            version: eb.version,
+            rope: eb.rope.clone(),
+            language: lang,
+            prev_tree: None,
+            edits_since_prev: Vec::new(),
+        };
+        drv.execute(std::iter::once(&cmd));
+        {
+            let state = syntax.by_path.get_mut(&path).unwrap();
+            state.in_flight_version = Some(eb.version);
+        }
+
+        // Wait (up to 5s) for a completion.
+        let start = Instant::now();
+        let mut applied = false;
+        while start.elapsed() < Duration::from_secs(5) && !applied {
+            for done in drv.process() {
+                let state = syntax.by_path.get_mut(&done.path).unwrap();
+                state.in_flight_version = None;
+                state.tree = Some(done.tree);
+                state.tokens = done.tokens;
+                state.version = done.version;
+                applied = true;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert!(applied, "expected SyntaxOut within 5s");
+        let state = &syntax.by_path[&path];
+        assert!(
+            !state.tokens.is_empty(),
+            "expected tokens for `fn main() {{}}`"
+        );
+        let kinds: std::collections::HashSet<_> =
+            state.tokens.iter().map(|t| t.kind).collect();
+        assert!(
+            kinds.contains(&led_state_syntax::TokenKind::Keyword),
+            "expected a Keyword token; got {kinds:?}",
+        );
+    }
 }

@@ -247,14 +247,11 @@ impl Trace for FileTrace {
             line,
         ));
     }
-    fn syntax_parse_start(&self, path: &CanonPath, version: u64, language: Language) {
-        self.write_line(&format!(
-            "SyntaxParse\tpath={} version={} language={:?}",
-            self.format_path(path),
-            version,
-            language,
-        ));
-    }
+    // Syntax parses aren't serialized to dispatched.snap — they'd
+    // fire on every buffer load and keystroke, drowning the signal
+    // of what user-level intent happened. Keeping the method as a
+    // no-op preserves the trait for future debug traces / assertions.
+    fn syntax_parse_start(&self, _: &CanonPath, _: u64, _: Language) {}
     fn syntax_parse_done(&self, _: &CanonPath, _: u64, _: bool) {}
     fn find_file_start(&self, cmd: &FindFileCmd) {
         // Legacy format: `FsFindFile\tdir=<p> prefix="<s>" show_hidden=<bool>`.

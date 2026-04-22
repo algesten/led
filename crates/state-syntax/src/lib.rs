@@ -316,6 +316,35 @@ mod tests {
         assert_eq!(out, vec![span(5, 12, TokenKind::String)]);
     }
 
+    fn canon(rel: &str) -> CanonPath {
+        led_core::UserPath::new(rel).canonicalize()
+    }
+
+    #[test]
+    fn language_from_path_maps_common_extensions() {
+        assert_eq!(Language::from_path(&canon("main.rs")), Some(Language::Rust));
+        assert_eq!(
+            Language::from_path(&canon("app.tsx")),
+            Some(Language::TypeScript)
+        );
+        assert_eq!(
+            Language::from_path(&canon("widget.jsx")),
+            Some(Language::JavaScript)
+        );
+        assert_eq!(
+            Language::from_path(&canon("script.py")),
+            Some(Language::Python)
+        );
+        assert_eq!(Language::from_path(&canon("setup.toml")), Some(Language::Toml));
+        assert_eq!(Language::from_path(&canon("README.md")), Some(Language::Markdown));
+    }
+
+    #[test]
+    fn language_from_path_returns_none_for_unknown_extensions() {
+        assert_eq!(Language::from_path(&canon("notes.unknownext")), None);
+        assert_eq!(Language::from_path(&canon("no-extension")), None);
+    }
+
     #[test]
     fn rebase_delete_fully_covering_span_drops_it() {
         let tokens = vec![

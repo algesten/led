@@ -2340,4 +2340,96 @@ mod tests {
         assert!(trimmed.starts_with('\u{2026}'), "got {trimmed:?}");
         assert!(trimmed.contains("needle"), "got {trimmed:?}");
     }
+
+    // ── Syntax span projection ───────────────────────────────────────
+
+    #[test]
+    fn tokens_to_line_spans_slices_on_a_single_line() {
+        // Rope: "fn main\n"  → line 0 starts at char 0, length 7.
+        // Pretend "fn" is a keyword (chars 0..2), "main" is a
+        // function (chars 3..7).
+        let tokens = vec![
+            TokenSpan {
+                char_start: 0,
+                char_end: 2,
+                kind: TokenKind::Keyword,
+            },
+            TokenSpan {
+                char_start: 3,
+                char_end: 7,
+                kind: TokenKind::Function,
+            },
+        ];
+        let spans = tokens_to_line_spans(&tokens, /* line_char_start */ 0, /* line_char_len */ 7, /* content_cols */ 40);
+        // GUTTER_WIDTH is 2 — columns shift right by 2.
+        assert_eq!(
+            spans,
+            vec![
+                led_driver_terminal_core::LineSpan {
+                    col_start: 2,
+                    col_end: 4,
+                    kind: TokenKind::Keyword,
+                },
+                led_driver_terminal_core::LineSpan {
+                    col_start: 5,
+                    col_end: 9,
+                    kind: TokenKind::Function,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn tokens_to_line_spans_clips_spans_crossing_line_boundaries() {
+        // Single token `char_start=3, char_end=9`; line starts at 5
+        // and has length 10. The [3, 9) overlap with [5, 15) is
+        // [5, 9) → rel_start=0, rel_end=4.
+        let tokens = vec![TokenSpan {
+            char_start: 3,
+            char_end: 9,
+            kind: TokenKind::String,
+        }];
+        let spans = tokens_to_line_spans(&tokens, 5, 10, 40);
+        assert_eq!(
+            spans,
+            vec![led_driver_terminal_core::LineSpan {
+                col_start: 2,
+                col_end: 6,
+                kind: TokenKind::String,
+            }]
+        );
+    }
+
+    #[test]
+    fn tokens_to_line_spans_drops_default_kind() {
+        let tokens = vec![
+            TokenSpan {
+                char_start: 0,
+                char_end: 5,
+                kind: TokenKind::Default,
+            },
+            TokenSpan {
+                char_start: 5,
+                char_end: 10,
+                kind: TokenKind::Keyword,
+            },
+        ];
+        let spans = tokens_to_line_spans(&tokens, 0, 10, 40);
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].kind, TokenKind::Keyword);
+    }
+
+    #[test]
+    fn tokens_to_line_spans_clamps_to_content_cols() {
+        // Span extends past the truncated row — clamp col_end.
+        let tokens = vec![TokenSpan {
+            char_start: 0,
+            char_end: 20,
+            kind: TokenKind::Comment,
+        }];
+        // line_char_len = 20 but content_cols = 5 → clip to col 5 + gutter.
+        let spans = tokens_to_line_spans(&tokens, 0, 20, 5);
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].col_end, (5 + GUTTER_WIDTH) as u16);
+    }
 }
