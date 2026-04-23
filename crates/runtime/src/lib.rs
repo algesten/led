@@ -183,12 +183,21 @@ pub struct Atoms {
     /// matched `LspEvent::Diagnostics` arrives; cleared on stale
     /// delivery (no-smear rule — see `feedback_lsp_no_smear.md`).
     pub diagnostics: DiagnosticsStates,
-    /// Per-buffer tracker of the last `BufferVersion` we notified
-    /// the LSP driver about. Used by the execute phase to decide
-    /// whether to emit another `BufferChanged`. Separate from
-    /// `edits.buffers[path].version` because one driver lags
-    /// independently of another.
-    pub lsp_notified: std::collections::HashMap<CanonPath, BufferVersion>,
+    /// Per-buffer tracker of the last `(version, saved_version)`
+    /// we told the LSP driver about. The execute phase emits
+    /// another `BufferChanged` when EITHER coordinate advanced —
+    /// version for edits, saved_version for saves. Tracking
+    /// saved_version separately is necessary because the
+    /// keyboard sequence "type … type … save" leaves the version
+    /// already matching `last` by save time (typing already sent
+    /// didChange for every keystroke); without the second gate
+    /// we'd never emit `BufferChanged{is_save=true}` and
+    /// rust-analyzer would never get `didSave`, so cargo check
+    /// wouldn't run.
+    pub lsp_notified: std::collections::HashMap<
+        CanonPath,
+        (BufferVersion, /* saved_version */ u64),
+    >,
     /// `Some(sum)` holds Σ(version + saved_version) at the last
     /// `RequestDiagnostics` emission; `None` means we've never
     /// fired one. Combined flag+sum because the two cases the
@@ -327,7 +336,12 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
                     rope: completion.rope.clone(),
                     version,
                 }));
-                lsp_notified.insert(completion.path, version);
+                let saved = edits
+                    .buffers
+                    .get(&completion.path)
+                    .map(|eb| eb.saved_version)
+                    .unwrap_or(0);
+                lsp_notified.insert(completion.path, (version, saved));
             }
         }
 
@@ -879,19 +893,26 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
         let mut lsp_cmds: Vec<LspCmd> = Vec::new();
         for (path, eb) in edits.buffers.iter() {
             let current = BufferVersion(eb.version);
-            let last = lsp_notified.get(path).copied().unwrap_or_default();
-            if current.0 > last.0 {
-                // `is_save` is true on the tick the writer
-                // confirmed the buffer landed on disk — detected
-                // by `saved_version == version`.
-                let is_save = eb.saved_version == eb.version && eb.saved_version > 0;
+            let (last_version, last_saved) = lsp_notified
+                .get(path)
+                .copied()
+                .unwrap_or_default();
+            let version_moved = current.0 > last_version.0;
+            let save_happened = eb.saved_version > last_saved;
+            if version_moved || save_happened {
+                // `is_save` = the writer reported this tick
+                // (saved_version advanced AND it has caught up
+                // to version). Separate from `version_moved`
+                // because a pure-save tick (no new edits) still
+                // needs `didSave` → cargo check.
+                let is_save = save_happened && eb.saved_version == eb.version;
                 lsp_cmds.push(LspCmd::BufferChanged {
                     path: path.clone(),
                     rope: eb.rope.clone(),
                     version: current,
                     is_save,
                 });
-                lsp_notified.insert(path.clone(), current);
+                lsp_notified.insert(path.clone(), (current, eb.saved_version));
             }
         }
         // RequestDiagnostics emission — unified version of
