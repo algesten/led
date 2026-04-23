@@ -1099,23 +1099,20 @@ impl Manager {
                 });
                 self.notify.notify();
             }
-            DiagPushResult::ForwardOutsideWindow(p, diags) => {
-                // Push arrived outside any window — stamp with
-                // the current buffer version so the runtime's
-                // version-gate drops it if the user has already
-                // edited past it. Covers clearing pushes and
-                // late cargo-check deliveries (both expect the
-                // current-version stamp).
+            DiagPushResult::ForwardClearing(p) => {
+                // Clearing push (empty list) outside a window.
+                // Legacy forwards with current buffer version —
+                // clearing is always safe; the runtime's
+                // no-smear gate applies either way.
                 let version = self.servers[&language]
                     .buffer_versions
                     .get(&p)
                     .copied()
                     .unwrap_or_default();
-                self.trace.lsp_diagnostics_done(&p, diags.len(), version);
                 let _ = self.lsp_event_tx.send(LspEvent::Diagnostics {
                     path: p,
                     version,
-                    diagnostics: diags,
+                    diagnostics: Vec::new(),
                 });
                 self.notify.notify();
             }

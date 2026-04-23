@@ -72,23 +72,29 @@ pub enum DiagMode {
 /// What the caller should do after `on_push`.
 pub enum DiagPushResult {
     /// Forward this diagnostic to the model, stamped with the
-    /// window's snapshot version for the path.
+    /// window's snapshot version for the path. Legacy's "late
+    /// cargo push" path goes through here: the window stays
+    /// open after pulls complete (only closed by actual content
+    /// divergence), so pushes arriving minutes later still hit
+    /// `Forward` and get the correct snapshot stamp.
     Forward(CanonPath, Vec<Diagnostic>, BufferVersion),
-    /// Push arrived outside any open window — forward with the
-    /// CURRENT buffer version the caller supplies. Covers both
-    /// clearing pushes (empty list) and non-empty pushes in pure
-    /// push mode with no window. The latter matters because
-    /// rust-analyzer's cargo-check diagnostics land as late
-    /// pushes; the rewrite gates `RequestDiagnostics` on save
-    /// only, so we can't rely on the next save to open a window
-    /// and drain the cache.
-    ForwardOutsideWindow(CanonPath, Vec<Diagnostic>),
-    /// Pull-mode server sent an unsolicited push. We've switched
-    /// permanently to push; the caller should close any open
-    /// pull window and issue a fresh `RequestDiagnostics` so the
-    /// window reopens in push mode.
+    /// Clearing push (empty list) arrived outside any window.
+    /// Forward with the CURRENT buffer version the caller
+    /// supplies — clearing is always safe to propagate (legacy
+    /// `on_push` lines 263-268).
+    ForwardClearing(CanonPath),
+    /// Pull-mode server sent an unsolicited push. We've
+    /// switched permanently to push; caller re-issues a
+    /// `RequestDiagnostics` so a push-mode window opens and
+    /// drains the cache (includes the push that just triggered
+    /// this).
     RestartWindow,
-    /// Nothing to do: wrong mode edge cases.
+    /// Nothing to do: non-clearing push outside a window. The
+    /// diagnostic is cached for the next window open. Matches
+    /// legacy's conservative behaviour — stamping a late push
+    /// with the current version when the user has already
+    /// edited past the snapshot would smear the diagnostic onto
+    /// the wrong lines.
     Ignore,
 }
 
@@ -370,19 +376,26 @@ impl DiagnosticSource {
             self.mode = DiagMode::Push;
             let had_window = self.window.is_some();
             self.window = None;
-            self.push_cache.insert(path.clone(), diags.clone());
+            self.push_cache.insert(path, diags);
             return if had_window {
                 DiagPushResult::RestartWindow
             } else {
-                // Pull → Push flip with no window in flight.
-                // Forward the push directly so the runtime
-                // doesn't wait for the next save to see these
-                // diagnostics. Matches the "push is eager"
-                // semantics pure-push-mode servers already get.
-                DiagPushResult::ForwardOutsideWindow(path, diags)
+                // Pull mode but no window: the push is cached
+                // for the next window open. Rare in practice —
+                // the save-gated `RequestDiagnostics` normally
+                // opens a window that stays open between saves.
+                DiagPushResult::Ignore
             };
         }
-        // Pure Push mode.
+        // Pure Push mode. Legacy's key trick: after pulls
+        // complete in a push-mode window, the window STAYS OPEN
+        // (only closed by actual content divergence via
+        // `should_close_window`). So this branch is where late
+        // cargo-check pushes typically land — window still
+        // open, `Forward` with the snapshot version that matches
+        // the buffer's current version (user hasn't typed), so
+        // the runtime's version gate accepts them.
+        let is_clearing = diags.is_empty();
         self.push_cache.insert(path.clone(), diags.clone());
         if let Some(window) = &self.window {
             let v = window
@@ -391,13 +404,17 @@ impl DiagnosticSource {
                 .copied()
                 .unwrap_or(BufferVersion(0));
             DiagPushResult::Forward(path, diags, v)
+        } else if is_clearing {
+            // Clearing push outside a window — forward with the
+            // current buffer version the caller supplies.
+            DiagPushResult::ForwardClearing(path)
         } else {
-            // No window → forward directly. Covers both clearing
-            // pushes and late cargo-check pushes that arrive
-            // long after the save-triggered pull finished. The
-            // runtime's version-gate drops any push stamped
-            // against a now-stale version.
-            DiagPushResult::ForwardOutsideWindow(path, diags)
+            // Non-clearing push outside a window: cached, not
+            // forwarded. The next RequestDiagnostics drains via
+            // `drain_cache_for_window`. Don't stamp with the
+            // current version — the diagnostic's line numbers
+            // are from whatever content the server analysed.
+            DiagPushResult::Ignore
         }
     }
 
@@ -532,35 +549,33 @@ mod tests {
 
 
     #[test]
-    fn push_clearing_without_window_forwards_for_current_hash() {
+    fn push_clearing_without_window_forwards_clearing() {
         let mut ds = push_source();
         let r = ds.on_push(p("/a.rs"), vec![]);
         match r {
-            DiagPushResult::ForwardOutsideWindow(path, diags) => {
+            DiagPushResult::ForwardClearing(path) => {
                 assert_eq!(path, p("/a.rs"));
-                assert!(diags.is_empty());
             }
-            _ => panic!("expected ForwardOutsideWindow"),
+            _ => panic!("expected ForwardClearing"),
         }
     }
 
     #[test]
-    fn push_non_clearing_without_window_also_forwards() {
-        // Regression: cargo-check diagnostics arrive long after
-        // the save-triggered pull, in pure push mode with no open
-        // window. Legacy "Ignore"'d these, relying on the next
-        // keystroke-triggered RequestDiagnostics to drain the
-        // cache. The rewrite gates RequestDiagnostics on save
-        // only, so we MUST forward here.
+    fn push_non_clearing_without_window_is_cached_not_forwarded() {
+        // Legacy behaviour: late cargo-check pushes land here
+        // when the user has typed past the snapshot (window
+        // closed). We do NOT stamp them with the current version
+        // because the diagnostic line numbers are from whatever
+        // the server analysed. The push stays cached for the
+        // next `RequestDiagnostics` → window open → drain.
         let mut ds = push_source();
-        let r = ds.on_push(p("/a.rs"), vec![diag("unused import")]);
-        match r {
-            DiagPushResult::ForwardOutsideWindow(path, diags) => {
-                assert_eq!(path, p("/a.rs"));
-                assert_eq!(diags.len(), 1);
-            }
-            _ => panic!("expected ForwardOutsideWindow"),
-        }
+        let r = ds.on_push(p("/a.rs"), vec![diag("err")]);
+        assert!(matches!(r, DiagPushResult::Ignore));
+        assert_eq!(
+            ds.push_cache.get(&p("/a.rs")).unwrap()[0].message,
+            "err",
+            "push is still cached for next window open"
+        );
     }
 
     #[test]
@@ -704,24 +719,15 @@ mod tests {
     }
 
     #[test]
-    fn pull_to_push_fallback_no_window_forwards_directly() {
+    fn pull_to_push_fallback_no_window_caches() {
         // Pull-capable server sends a push with no window in
-        // flight. Previously this returned `Ignore`, letting the
-        // cache wait for the next RequestDiagnostics. The rewrite
-        // gates RequestDiagnostics on save, so we now forward
-        // directly so the push isn't stranded until the user
-        // saves again.
+        // flight. Flips to push mode permanently and caches the
+        // push; next `RequestDiagnostics` opens a push-mode
+        // window and drains.
         let mut ds = pull_source();
         let r = ds.on_push(p("/a.rs"), vec![diag("pushed")]);
         assert_eq!(ds.mode, DiagMode::Push);
-        match r {
-            DiagPushResult::ForwardOutsideWindow(path, diags) => {
-                assert_eq!(path, p("/a.rs"));
-                assert_eq!(diags.len(), 1);
-                assert_eq!(diags[0].message, "pushed");
-            }
-            _ => panic!("expected ForwardOutsideWindow"),
-        }
+        assert!(matches!(r, DiagPushResult::Ignore));
         // Cache still populated so a subsequent
         // RequestDiagnostics opens a fresh window and drains.
         assert_eq!(
