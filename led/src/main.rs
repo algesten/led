@@ -14,6 +14,7 @@ use led_runtime::{
 };
 use led_state_browser::FsTree;
 use led_state_tabs::Tab;
+use std::time::Instant;
 
 #[derive(Parser, Debug)]
 #[command(name = "led", version, about = "led rewrite — milestone 1 skeleton")]

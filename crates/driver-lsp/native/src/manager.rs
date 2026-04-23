@@ -997,20 +997,29 @@ impl Manager {
                         .lsp_event_tx
                         .send(LspEvent::Ready { server: server_name });
                     self.notify.notify();
-                    // Triple-gate window open: prev-state was
-                    // busy AND now quiescent AND a deferred init
-                    // request was actually waiting. Prevents
-                    // re-pulls on idle→idle notifications.
+                    // Every busy→idle transition fires a fresh
+                    // `RequestDiagnostics`. This is the main path
+                    // by which late analysis results reach the
+                    // client when the server only delivers via
+                    // pull: `didSave` starts a new busy phase,
+                    // cargo-check / semantic re-analysis runs,
+                    // quiescent=true signals "here's the new
+                    // state". We pull to pick it up.
+                    //
+                    // Legacy did the equivalent by firing
+                    // `RequestDiagnostics` on every keystroke
+                    // (content_hash delta) — which would also
+                    // pick up cargo-check completion as a side
+                    // effect. The rewrite gates pulls on save,
+                    // so we need an explicit busy→idle trigger.
                     if was_busy {
-                        let reissue = {
-                            let entry = self.servers.get_mut(&language).unwrap();
-                            let reissue = entry.diag.on_quiescence();
-                            entry.deferred_init_request = false;
-                            reissue
-                        };
-                        if reissue {
-                            self.request_diagnostics();
-                        }
+                        // Consume the deferred-init flag if set,
+                        // so `should_defer_request` stops
+                        // blocking future requests.
+                        let entry = self.servers.get_mut(&language).unwrap();
+                        entry.diag.on_quiescence();
+                        entry.deferred_init_request = false;
+                        self.request_diagnostics();
                     }
                 }
                 // Unified progress emission — both sources
