@@ -308,6 +308,32 @@ pub struct SidePanelRow {
     pub selected: bool,
     pub match_range: Option<(u16, u16)>,
     pub replaced: bool,
+    /// Winning [`IssueCategory`] for this row + the letter the
+    /// painter draws in the right-aligned status column. For files:
+    /// the row's own categories resolved via `resolve_display`. For
+    /// directories: the union of every descendant file's categories
+    /// via `directory_categories`, resolved the same way.
+    ///
+    /// `None` = no category → no coloured name, no status glyph.
+    ///
+    /// The painter matches on the `IssueCategory` to pick a style
+    /// (`Theme::category_style`) and uses `letter` verbatim for the
+    /// right-column glyph (a bullet `•` for letterless categories,
+    /// always a bullet for directories — the resolver embeds that
+    /// fallback). Mirrors legacy's `StatusDisplay` in shape.
+    ///
+    /// [`IssueCategory`]: led_core::IssueCategory
+    pub status: Option<RowStatus>,
+}
+
+/// Displayable status for one browser row. The split from
+/// [`SidePanelRow`] lets the memo memoize Option<RowStatus>
+/// cheaply without pointer-comparing letters and categories
+/// separately.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RowStatus {
+    pub category: led_core::IssueCategory,
+    pub letter: char,
 }
 
 /// Which kind of content the side panel is displaying.

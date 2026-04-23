@@ -200,6 +200,25 @@ pub struct Theme {
     // ── LSP diagnostics ─────────────────────────────────────
     /// Severity → style for gutter markers and inline underlines.
     pub diagnostics: DiagnosticsTheme,
+
+    // ── Git (placeholder — M19 fills in) ───────────────────
+    /// Unstaged worktree changes — browser `M` letter and gutter
+    /// bar. Default matches legacy's `git.modified` (x178 yellow).
+    pub git_modified: Style,
+    /// Staged changes (both `M` and `A` letters map to this style).
+    /// Default matches legacy's `git.added` (x034 green).
+    pub git_added: Style,
+    /// Untracked files — browser `U` letter. Default matches
+    /// legacy's `git.untracked` (x039 cyan).
+    pub git_untracked: Style,
+
+    // ── GitHub PR (placeholder — M20 fills in) ─────────────
+    /// PR review comment marker. Default matches legacy's
+    /// `pr.comment` (blue).
+    pub pr_comment: Style,
+    /// PR diff range marker. Default matches legacy's `pr.diff`
+    /// (dim grey).
+    pub pr_diff: Style,
 }
 
 /// Per-severity styles for LSP diagnostic rendering. Defaults
@@ -211,6 +230,25 @@ pub struct DiagnosticsTheme {
     pub warning: Style,
     pub info: Style,
     pub hint: Style,
+}
+
+impl Theme {
+    /// Look up the `Style` that should paint an entry carrying the
+    /// given [`IssueCategory`]. The single choke point between the
+    /// category taxonomy (in `led-core`) and terminal styling — add
+    /// a new category variant and the compiler points you here.
+    pub fn category_style(&self, cat: led_core::IssueCategory) -> Style {
+        use led_core::IssueCategory::*;
+        match cat {
+            LspError => self.diagnostics.error,
+            LspWarning => self.diagnostics.warning,
+            Unstaged => self.git_modified,
+            StagedModified | StagedNew => self.git_added,
+            Untracked => self.git_untracked,
+            PrComment => self.pr_comment,
+            PrDiff => self.pr_diff,
+        }
+    }
 }
 
 impl Default for DiagnosticsTheme {
@@ -438,6 +476,31 @@ impl Default for Theme {
             ruler_column: None,
             syntax: SyntaxTheme::default(),
             diagnostics: DiagnosticsTheme::default(),
+            // Git / PR defaults — match legacy's built-in theme
+            // so a user with no theme.toml sees the same browser
+            // glyph colours on main and rewrite. The enum is
+            // populated but the memo only emits LSP categories
+            // until the git / PR atoms land (M19 / M20).
+            git_modified: Style {
+                fg: Some(Color::Indexed(178)),
+                ..Style::default()
+            },
+            git_added: Style {
+                fg: Some(Color::Indexed(34)),
+                ..Style::default()
+            },
+            git_untracked: Style {
+                fg: Some(Color::Indexed(39)),
+                ..Style::default()
+            },
+            pr_comment: Style {
+                fg: Some(Color::Indexed(33)),
+                ..Style::default()
+            },
+            pr_diff: Style {
+                fg: Some(Color::Indexed(244)),
+                ..Style::default()
+            },
         }
     }
 }

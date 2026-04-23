@@ -35,12 +35,6 @@ fn entries_of(browser: &BrowserUi, fs: &FsTree, tabs: &Tabs) -> std::sync::Arc<V
     )
 }
 
-/// Current selected row in today's entries. `0` on empty tree.
-fn current_idx(browser: &BrowserUi, fs: &FsTree, tabs: &Tabs) -> usize {
-    let entries = entries_of(browser, fs, tabs);
-    browser_selected_idx(&entries, browser.selected_path.as_ref())
-}
-
 /// Current selected entry (clone), or None on empty tree.
 fn current_entry(browser: &BrowserUi, fs: &FsTree, tabs: &Tabs) -> Option<TreeEntry> {
     let entries = entries_of(browser, fs, tabs);

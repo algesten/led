@@ -643,16 +643,25 @@ fn paint_side_panel(
                 }
             }
             line.push_str(&entry.name);
-            // Pad to full width so the reverse-video background
-            // covers the row end-to-end.
+            // Browser mode reserves the right-most column for the
+            // status letter (legacy display.rs:1396-1417). The
+            // name region fills the remaining `cols - 1`; status
+            // letter is painted separately below so it keeps the
+            // category style even on non-selected rows whose name
+            // is uncoloured.
+            let reserve_status = matches!(panel.mode, SidePanelMode::Browser);
+            let name_width = if reserve_status {
+                cols.saturating_sub(1)
+            } else {
+                cols
+            };
             let ch_count = line.chars().count();
-            if ch_count < cols {
-                for _ in 0..(cols - ch_count) {
+            if ch_count < name_width {
+                for _ in 0..(name_width - ch_count) {
                     line.push(' ');
                 }
-            } else {
-                // Truncate to fit.
-                let truncated: String = line.chars().take(cols).collect();
+            } else if ch_count > name_width {
+                let truncated: String = line.chars().take(name_width).collect();
                 line = truncated;
             }
             if entry.selected {
@@ -662,7 +671,7 @@ fn paint_side_panel(
                     theme.browser_selected_unfocused
                 };
                 apply_style(out, &sel_style)?;
-                queue!(out, style::Print(line))?;
+                queue!(out, style::Print(&line))?;
                 reset_style(out, &sel_style)?;
             } else if entry.replaced {
                 // Replaced hit rows stay visible so the user can
@@ -670,15 +679,70 @@ fn paint_side_panel(
                 // with the dim `search_hit_replaced` style so the
                 // distinction is obvious.
                 apply_style(out, &theme.search_hit_replaced)?;
-                queue!(out, style::Print(line))?;
+                queue!(out, style::Print(&line))?;
                 reset_style(out, &theme.search_hit_replaced)?;
             } else if let Some((start, end)) = entry.match_range {
                 // Split into three prints so the matched substring
                 // picks up `theme.search_match` styling without
                 // disturbing the surrounding row.
                 paint_row_with_match(&line, start as usize, end as usize, theme, out)?;
+            } else if let Some(status) = entry.status {
+                // Category colouring: the whole name is painted in
+                // the category's theme style so the user spots the
+                // error/warn/git/PR row even without the letter.
+                // Matches legacy display.rs:1387-1391 ("marker_style
+                // as the row colour when not selected").
+                let marker = theme.category_style(status.category);
+                apply_style(out, &marker)?;
+                queue!(out, style::Print(&line))?;
+                reset_style(out, &marker)?;
             } else {
-                queue!(out, style::Print(line))?;
+                queue!(out, style::Print(&line))?;
+            }
+
+            // Status letter in the right-most column (Browser mode
+            // only). When the row is selected, the letter keeps the
+            // selection-row style so the highlighted bar reads
+            // continuous across the whole row (legacy
+            // display.rs:1420-1425). Otherwise the letter uses the
+            // category style (coloured fg).
+            if reserve_status {
+                match entry.status {
+                    Some(status) => {
+                        if entry.selected {
+                            let sel_style = if panel.focused {
+                                theme.browser_selected_focused
+                            } else {
+                                theme.browser_selected_unfocused
+                            };
+                            apply_style(out, &sel_style)?;
+                            queue!(out, style::Print(status.letter))?;
+                            reset_style(out, &sel_style)?;
+                        } else {
+                            let marker = theme.category_style(status.category);
+                            apply_style(out, &marker)?;
+                            queue!(out, style::Print(status.letter))?;
+                            reset_style(out, &marker)?;
+                        }
+                    }
+                    None => {
+                        // No category. Still honour selection bg
+                        // so the highlight bar doesn't stop one
+                        // col short of the panel edge.
+                        if entry.selected {
+                            let sel_style = if panel.focused {
+                                theme.browser_selected_focused
+                            } else {
+                                theme.browser_selected_unfocused
+                            };
+                            apply_style(out, &sel_style)?;
+                            queue!(out, style::Print(' '))?;
+                            reset_style(out, &sel_style)?;
+                        } else {
+                            queue!(out, style::Print(' '))?;
+                        }
+                    }
+                }
             }
         } else {
             // Print `cols` spaces — scoped to the side-panel area.
@@ -1094,6 +1158,7 @@ mod tests {
                 selected: true,
                 match_range: None,
                 replaced: false,
+                status: None,
             }]),
             focused: true,
         mode: Default::default(),
@@ -1131,6 +1196,7 @@ mod tests {
                 selected: true,
                 match_range: None,
                 replaced: false,
+                status: None,
             },
             SidePanelRow {
                 depth: 0,
@@ -1139,6 +1205,7 @@ mod tests {
                 selected: false,
                 match_range: None,
                 replaced: false,
+                status: None,
             },
         ]);
         // Only two panel rows but editor_area.rows is 8 — six empty
@@ -1313,6 +1380,7 @@ mod tests {
                 selected: false,
                 match_range: Some((10, 16)),
                 replaced: false,
+                status: None,
             }]),
             focused: false,
             mode: SidePanelMode::Completions,

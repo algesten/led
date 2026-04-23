@@ -552,6 +552,9 @@ dependencies = [
 [[package]]
 name = "led-core"
 version = "0.0.0"
+dependencies = [
+ "imbl",
+]
 
 [[package]]
 name = "led-driver-buffers-core"
@@ -698,6 +701,7 @@ name = "led-driver-terminal-core"
 version = "0.0.0"
 dependencies = [
  "drv",
+ "led-core",
  "led-state-diagnostics",
  "led-state-syntax",
 ]

@@ -15,6 +15,10 @@ publish = false
 
 [dependencies]
 drv = { workspace = true }
+# `IssueCategory` — enum shared between the browser painter, gutter
+# painter, and the cross-atom `file_categories_map` memo. The terminal
+# driver paints categories into styles via `Theme::category_style`.
+led-core = { workspace = true }
 # `BodyModel` carries syntax token kinds so the painter can colour
 # each token run. The runtime produces the spans and hands them
 # to the terminal driver via `BodyModel::Content::lines`.

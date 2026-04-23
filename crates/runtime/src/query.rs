@@ -698,6 +698,15 @@ fn diagnostics_for_row(
         if line_num < d.start_line || line_num > d.end_line {
             continue;
         }
+        // Legacy filters Info / Hint out of both gutter dots and
+        // inline underlines (display.rs:357-365 for gutter,
+        // 506-508 for underlines). They're still available for
+        // diagnostic counts + cursor popover, but don't paint
+        // chrome — too noisy given how many info notes a typical
+        // LSP emits.
+        if !matches!(d.severity, DiagnosticSeverity::Error | DiagnosticSeverity::Warning) {
+            continue;
+        }
         // Update gutter to highest severity seen.
         gutter = Some(match gutter {
             Some(existing) => higher(existing, d.severity),
@@ -1081,11 +1090,12 @@ fn position_string(
 ///   completions list.
 /// - Otherwise → render the file-browser tree.
 #[drv::memo(single)]
-pub fn side_panel_model<'f, 'b, 'o, 't>(
+pub fn side_panel_model<'f, 'b, 'o, 't, 'd>(
     fs: FsTreeInput<'f>,
     browser: BrowserUiInput<'b>,
     overlays: OverlaysInput<'o>,
     tabs: TabsActiveInput<'t>,
+    diagnostics: DiagnosticsStatesInput<'d>,
     rows: u16,
 ) -> SidePanelModel {
     if let Some(state) = overlays.file_search.as_ref() {
@@ -1102,11 +1112,39 @@ pub fn side_panel_model<'f, 'b, 'o, 't>(
     let start = *browser.scroll_offset;
     let end = start.saturating_add(rows).min(entries.len());
     let focused = *browser.focus == Focus::Side;
+    // Per-file category map — used for both file rows (direct
+    // lookup) and directory rows (union over descendants).
+    let categories = file_categories_map(diagnostics);
     let mut out: Vec<SidePanelRow> = Vec::with_capacity(end.saturating_sub(start));
     for (i, entry) in entries[start..end].iter().enumerate() {
         let chevron = match entry.kind {
             TreeEntryKind::File => None,
             TreeEntryKind::Directory { expanded } => Some(expanded),
+        };
+        // Resolve category per legacy:
+        //  - Files look up their own categories.
+        //  - Directories aggregate child categories via
+        //    `directory_categories`, then always render as a
+        //    bullet (letter forced regardless of resolver).
+        let status = match entry.kind {
+            TreeEntryKind::File => categories
+                .get(&entry.path)
+                .and_then(|cats| led_core::resolve_display(cats))
+                .map(|d| led_driver_terminal_core::RowStatus {
+                    category: d.category,
+                    letter: d.letter,
+                }),
+            TreeEntryKind::Directory { .. } => {
+                let cats = led_core::directory_categories(&categories, &entry.path);
+                led_core::resolve_display(&cats).map(|d| {
+                    led_driver_terminal_core::RowStatus {
+                        category: d.category,
+                        // Directories always bullet — matches legacy
+                        // display.rs:1396-1402.
+                        letter: '\u{2022}',
+                    }
+                })
+            }
         };
         out.push(SidePanelRow {
             depth: entry.depth as u16,
@@ -1115,6 +1153,7 @@ pub fn side_panel_model<'f, 'b, 'o, 't>(
             selected: start + i == selected,
             match_range: None,
             replaced: false,
+            status,
         });
     }
     SidePanelModel {
@@ -1145,6 +1184,7 @@ fn completions_side_panel(
             selected: state.selected == Some(i),
             match_range: None,
             replaced: false,
+            status: None,
         });
     }
     SidePanelModel {
@@ -1198,6 +1238,7 @@ fn file_search_side_panel(
         selected: false,
         match_range: None,
         replaced: false,
+            status: None,
     });
 
     if total > out.len() {
@@ -1211,6 +1252,7 @@ fn file_search_side_panel(
             ),
             match_range: None,
             replaced: false,
+            status: None,
         });
     }
     if state.replace_mode && total > out.len() {
@@ -1224,6 +1266,7 @@ fn file_search_side_panel(
             ),
             match_range: None,
             replaced: false,
+            status: None,
         });
     }
 
@@ -1266,6 +1309,7 @@ fn file_search_side_panel(
                 selected: false,
                 match_range: None,
                 replaced: false,
+            status: None,
             });
         }
         for hit in &group.hits {
@@ -1300,6 +1344,7 @@ fn file_search_side_panel(
                         Some((match_start, match_end))
                     },
                     replaced: is_replaced,
+                    status: None,
                 });
             }
             hit_idx += 1;
@@ -1592,6 +1637,48 @@ pub fn find_file_action<'f>(
     state.pending_find_file_list.clone()
 }
 
+/// Per-file category set for the whole workspace. Mirrors legacy
+/// `led_state::annotations::file_categories_map` and feeds the
+/// browser painter + (later) the Alt-./ nav cycle.
+///
+/// **M16 scope:** only LSP Error / Warning populate the map.
+/// Info / Hint are filtered out per legacy — they never colour
+/// the browser. Git-file statuses (Unstaged / Staged* / Untracked)
+/// and PR membership (PrComment / PrDiff) are plumbed in the
+/// `IssueCategory` enum and the painter's `category_style`
+/// dispatch but produce nothing until their atoms land (M19 / M20).
+#[drv::memo(single)]
+pub fn file_categories_map<'d>(
+    diagnostics: DiagnosticsStatesInput<'d>,
+) -> Arc<imbl::HashMap<CanonPath, imbl::HashSet<led_core::IssueCategory>>> {
+    let mut map: imbl::HashMap<CanonPath, imbl::HashSet<led_core::IssueCategory>> =
+        imbl::HashMap::default();
+
+    // LSP diagnostics — Error/Warning only, Info/Hint silent.
+    for (path, bd) in diagnostics.by_path.iter() {
+        for d in bd.diagnostics.iter() {
+            let cat = match d.severity {
+                led_state_diagnostics::DiagnosticSeverity::Error => {
+                    led_core::IssueCategory::LspError
+                }
+                led_state_diagnostics::DiagnosticSeverity::Warning => {
+                    led_core::IssueCategory::LspWarning
+                }
+                _ => continue,
+            };
+            map.entry(path.clone())
+                .or_insert_with(imbl::HashSet::default)
+                .insert(cat);
+        }
+    }
+
+    // Git statuses + PR membership — future-proof branches. M19 and
+    // M20 each add their source; the signature of this memo already
+    // accepts extra inputs when they arrive.
+
+    Arc::new(map)
+}
+
 /// Auto-expanded ancestor chain for the active tab, excluding
 /// user-pinned dirs. Pure derivation — no state written anywhere.
 /// Memoized so downstream consumers (entries walk, list-action
@@ -1778,7 +1865,7 @@ fn render_frame_memo<'t, 'e, 'b, 'a, 'al, 'br, 'fs, 'ov, 'sx, 'dx, 'lsp>(
     let status_bar = status_bar_model(alerts, tabs, edits, overlays, diagnostics, lsp, render_tick);
     let side_panel = layout
         .side_area
-        .map(|area| side_panel_model(fs, browser, overlays, tabs, area.rows));
+        .map(|area| side_panel_model(fs, browser, overlays, tabs, diagnostics, area.rows));
     let popover =
         popover_model(edits, tabs, overlays, browser, diagnostics, layout.editor_area);
     // Cursor placement, in priority order:
@@ -3017,6 +3104,154 @@ mod tests {
         // Legacy's `.filter(|d| !d.is_empty())` drops empty detail.
         let s = format_lsp_status("rust-analyzer", true, Some(""), 0);
         assert_eq!(s, "  ⠋ rust-analyzer");
+    }
+
+    // ── file_categories_map / browser row status ──────────
+
+    #[test]
+    fn file_categories_map_emits_lsp_error_and_warning_only() {
+        let mut diags = DiagnosticsStates::default();
+        let mut items = Vec::new();
+        items.push(Diagnostic {
+            start_line: 0,
+            start_col: 0,
+            end_line: 0,
+            end_col: 3,
+            severity: DiagnosticSeverity::Error,
+            message: String::new(),
+            source: None,
+            code: None,
+        });
+        items.push(Diagnostic {
+            start_line: 1,
+            start_col: 0,
+            end_line: 1,
+            end_col: 3,
+            severity: DiagnosticSeverity::Warning,
+            message: String::new(),
+            source: None,
+            code: None,
+        });
+        items.push(Diagnostic {
+            start_line: 2,
+            start_col: 0,
+            end_line: 2,
+            end_col: 3,
+            severity: DiagnosticSeverity::Info,
+            message: String::new(),
+            source: None,
+            code: None,
+        });
+        items.push(Diagnostic {
+            start_line: 3,
+            start_col: 0,
+            end_line: 3,
+            end_col: 3,
+            severity: DiagnosticSeverity::Hint,
+            message: String::new(),
+            source: None,
+            code: None,
+        });
+        diags.by_path.insert(
+            canon("/p/a.rs"),
+            BufferDiagnostics::new(
+                led_state_diagnostics::BufferVersion(1),
+                items,
+            ),
+        );
+        let map = file_categories_map(DiagnosticsStatesInput::new(&diags));
+        let cats = map.get(&canon("/p/a.rs")).expect("entry");
+        assert!(cats.contains(&led_core::IssueCategory::LspError));
+        assert!(cats.contains(&led_core::IssueCategory::LspWarning));
+        // Info / Hint MUST NOT make it into the map.
+        assert_eq!(cats.len(), 2, "only Error + Warning colour the browser");
+    }
+
+    #[test]
+    fn file_categories_map_empty_when_no_diagnostics() {
+        let diags = DiagnosticsStates::default();
+        let map = file_categories_map(DiagnosticsStatesInput::new(&diags));
+        assert!(map.is_empty());
+    }
+
+    #[test]
+    fn side_panel_row_status_marks_error_file_and_parent_dir() {
+        use imbl::Vector;
+        use led_state_browser::{BrowserUi, DirEntry, DirEntryKind, FsTree};
+        // Tree: /p/sub/err.rs (with LspError), /p/sub/ok.rs (clean).
+        let mut fs = FsTree {
+            root: Some(canon("/p")),
+            ..Default::default()
+        };
+        let mut root_kids = Vector::new();
+        root_kids.push_back(DirEntry {
+            name: "sub".into(),
+            path: canon("/p/sub"),
+            kind: DirEntryKind::Directory,
+        });
+        fs.dir_contents.insert(canon("/p"), root_kids);
+        let mut sub_kids = Vector::new();
+        sub_kids.push_back(DirEntry {
+            name: "err.rs".into(),
+            path: canon("/p/sub/err.rs"),
+            kind: DirEntryKind::File,
+        });
+        sub_kids.push_back(DirEntry {
+            name: "ok.rs".into(),
+            path: canon("/p/sub/ok.rs"),
+            kind: DirEntryKind::File,
+        });
+        fs.dir_contents.insert(canon("/p/sub"), sub_kids);
+
+        let mut browser = BrowserUi::default();
+        browser.expanded_dirs.insert(canon("/p/sub"));
+
+        let mut diags = DiagnosticsStates::default();
+        diags.by_path.insert(
+            canon("/p/sub/err.rs"),
+            BufferDiagnostics::new(
+                led_state_diagnostics::BufferVersion(1),
+                vec![Diagnostic {
+                    start_line: 0,
+                    start_col: 0,
+                    end_line: 0,
+                    end_col: 3,
+                    severity: DiagnosticSeverity::Error,
+                    message: String::new(),
+                    source: None,
+                    code: None,
+                }],
+            ),
+        );
+
+        let tabs = Tabs::default();
+        let ff = None;
+        let is = None;
+        let fsrch = None;
+        let panel = side_panel_model(
+            FsTreeInput::new(&fs),
+            BrowserUiInput::new(&browser),
+            OverlaysInput::new(&ff, &is, &fsrch),
+            TabsActiveInput::new(&tabs),
+            DiagnosticsStatesInput::new(&diags),
+            10,
+        );
+        let rows: &Vec<SidePanelRow> = &panel.rows;
+        let by_name = |name: &str| rows.iter().find(|r| &*r.name == name).cloned();
+        // `/p/sub` (directory) — aggregates LspError from descendant.
+        let sub = by_name("sub").expect("sub row");
+        let sub_status = sub.status.expect("sub row inherits descendant error");
+        assert_eq!(sub_status.category, led_core::IssueCategory::LspError);
+        assert_eq!(sub_status.letter, '\u{2022}'); // directories always bullet
+        // `err.rs` (file) — direct LspError, bullet letter (Error
+        // has no `browser_letter`).
+        let err = by_name("err.rs").expect("err row");
+        let err_status = err.status.expect("err file has status");
+        assert_eq!(err_status.category, led_core::IssueCategory::LspError);
+        assert_eq!(err_status.letter, '\u{2022}');
+        // `ok.rs` (file) — no diagnostic → no status.
+        let ok = by_name("ok.rs").expect("ok row");
+        assert!(ok.status.is_none(), "clean file has no status");
     }
 
     #[test]

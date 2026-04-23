@@ -8,10 +8,14 @@
 //!   user-vs-canonical split
 
 pub mod ids;
+pub mod issue;
 pub mod notify;
 pub mod paths;
 pub mod text_input;
 
+pub use issue::{
+    CategoryInfo, IssueCategory, StatusDisplay, directory_categories, resolve_display,
+};
 pub use notify::Notifier;
 pub use paths::{CanonPath, PathChain, UserPath};
 pub use text_input::TextInput;
