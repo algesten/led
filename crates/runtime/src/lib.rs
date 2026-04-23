@@ -570,6 +570,7 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
             }
             state.language = done.language;
             state.tree = Some(done.tree);
+            state.tree_rope = Some(done.tree_rope);
             state.tokens = done.tokens;
             state.version = done.version;
             if let Some(applied) = pending_applied {
@@ -857,13 +858,41 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
             if state.in_flight_version == Some(eb.version) {
                 continue;
             }
+            // Collect edits between the last completed parse and
+            // the current buffer state, in char-offset form. The
+            // worker replays them against a mutable clone of
+            // `prev_rope` to derive tree-sitter's `InputEdit`
+            // positions; combined with `prev_tree` this enables
+            // incremental parsing (fast, and produces byte-stable
+            // token ranges for untouched regions — no flicker on
+            // rows away from the cursor).
+            let edits_since_prev: Vec<led_driver_syntax_core::RopeEdit> = eb
+                .history
+                .applied_ops()
+                .skip(state.applied_at_parse)
+                .map(|op| match op {
+                    led_state_buffer_edits::EditOp::Insert { at, text } => {
+                        led_driver_syntax_core::RopeEdit::Insert {
+                            char_start: *at,
+                            text: text.clone(),
+                        }
+                    }
+                    led_state_buffer_edits::EditOp::Delete { at, text } => {
+                        led_driver_syntax_core::RopeEdit::Delete {
+                            char_start: *at,
+                            removed_chars: text.chars().count(),
+                        }
+                    }
+                })
+                .collect();
             syntax_cmds.push(SyntaxCmd {
                 path: path.clone(),
                 version: eb.version,
                 rope: eb.rope.clone(),
                 language: state.language,
                 prev_tree: state.tree.clone(),
-                edits_since_prev: Vec::new(),
+                prev_rope: state.tree_rope.clone(),
+                edits_since_prev,
             });
             state.in_flight_version = Some(eb.version);
             state.in_flight_applied = Some(eb.history.applied_ops().count());
@@ -1507,6 +1536,7 @@ mod tests {
             rope: eb.rope.clone(),
             language: lang,
             prev_tree: None,
+            prev_rope: None,
             edits_since_prev: Vec::new(),
         };
         drv.execute(std::iter::once(&cmd));

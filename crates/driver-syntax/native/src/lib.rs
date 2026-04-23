@@ -92,6 +92,26 @@ fn run_parse(parser: &mut Parser, cursor: &mut QueryCursor, cmd: SyntaxCmd) -> S
     // enough that the copy is not the bottleneck.
     let bytes = rope_to_bytes(&cmd.rope);
 
+    // Incremental parse inputs. When all three are present, each
+    // grammar's parse call below reuses the previous tree and
+    // tree-sitter only re-walks affected sub-trees — 5-50×
+    // faster on typical edits and, more importantly, keeps
+    // unchanged regions' token byte ranges pointer-stable so
+    // the painter doesn't flicker on rows away from the cursor.
+    //
+    // Fallback: if any prerequisite is missing (first parse of
+    // the buffer, language change, no history between snapshots)
+    // we pass `None` and re-parse from scratch.
+    let incremental_base: Option<(Arc<tree_sitter::Tree>, Vec<tree_sitter::InputEdit>)> =
+        cmd.prev_tree
+            .as_ref()
+            .zip(cmd.prev_rope.as_ref())
+            .map(|(prev_tree, prev_rope)| {
+                let edits =
+                    build_input_edits(prev_rope, &cmd.edits_since_prev);
+                (prev_tree.clone(), edits)
+            });
+
     let mut primary_tree: Option<Arc<tree_sitter::Tree>> = None;
     let mut raw_captures: Vec<(usize, usize, TokenKind)> = Vec::new();
 
@@ -100,7 +120,21 @@ fn run_parse(parser: &mut Parser, cursor: &mut QueryCursor, cmd: SyntaxCmd) -> S
         // worker correct across language switches + between the
         // block / inline passes for the same cmd.
         let _ = parser.set_language(language);
-        let Some(tree) = parser.parse(&bytes, None) else {
+        // Apply edits to a fresh clone of prev_tree per grammar —
+        // tree-sitter's `edit` mutates the tree and the same
+        // tree shouldn't be edited twice.
+        let edited_tree = incremental_base.as_ref().map(|(tree, edits)| {
+            let mut t: tree_sitter::Tree = (**tree).clone();
+            for edit in edits {
+                t.edit(edit);
+            }
+            t
+        });
+        let parsed = match edited_tree.as_ref() {
+            Some(prev) => parser.parse(&bytes, Some(prev)),
+            None => parser.parse(&bytes, None),
+        };
+        let Some(tree) = parsed else {
             continue;
         };
         collect_raw_captures(
@@ -132,6 +166,7 @@ fn run_parse(parser: &mut Parser, cursor: &mut QueryCursor, cmd: SyntaxCmd) -> S
         language: cmd.language,
         tree,
         tokens: Arc::new(tokens),
+        tree_rope: cmd.rope,
     }
 }
 
@@ -141,6 +176,75 @@ fn rope_to_bytes(rope: &Rope) -> Vec<u8> {
         bytes.extend_from_slice(chunk.as_bytes());
     }
     bytes
+}
+
+/// Translate a sequence of [`RopeEdit`]s into tree-sitter
+/// [`tree_sitter::InputEdit`]s. Each edit's positions must be
+/// relative to the rope state after all prior edits, so we apply
+/// each edit to a mutable clone of `prev_rope` in lock-step.
+/// `tree-sitter` then calls `tree.edit(InputEdit)` on the
+/// previous tree in the same order, so the tree's byte view
+/// matches the rope's byte view at the moment the final parse
+/// is invoked.
+fn build_input_edits(
+    prev_rope: &Rope,
+    edits: &[led_driver_syntax_core::RopeEdit],
+) -> Vec<tree_sitter::InputEdit> {
+    let mut working = prev_rope.clone();
+    let mut out: Vec<tree_sitter::InputEdit> = Vec::with_capacity(edits.len());
+    for edit in edits {
+        match edit {
+            led_driver_syntax_core::RopeEdit::Insert { char_start, text } => {
+                let start_byte = working.char_to_byte(*char_start);
+                let start_point = point_of_byte(&working, start_byte);
+                let inserted_bytes = text.len();
+                // Apply to working rope so subsequent edits
+                // resolve against the correct coordinate space.
+                working.insert(*char_start, text);
+                let new_end_byte = start_byte + inserted_bytes;
+                let new_end_point = point_of_byte(&working, new_end_byte);
+                out.push(tree_sitter::InputEdit {
+                    start_byte,
+                    old_end_byte: start_byte,
+                    new_end_byte,
+                    start_position: start_point,
+                    old_end_position: start_point,
+                    new_end_position: new_end_point,
+                });
+            }
+            led_driver_syntax_core::RopeEdit::Delete {
+                char_start,
+                removed_chars,
+            } => {
+                let start_byte = working.char_to_byte(*char_start);
+                let start_point = point_of_byte(&working, start_byte);
+                let end_char = *char_start + *removed_chars;
+                let old_end_byte = working.char_to_byte(end_char);
+                let old_end_point = point_of_byte(&working, old_end_byte);
+                working.remove(*char_start..end_char);
+                out.push(tree_sitter::InputEdit {
+                    start_byte,
+                    old_end_byte,
+                    new_end_byte: start_byte,
+                    start_position: start_point,
+                    old_end_position: old_end_point,
+                    new_end_position: start_point,
+                });
+            }
+        }
+    }
+    out
+}
+
+/// Map a byte offset in `rope` to a `tree_sitter::Point`
+/// (row, byte-column within the line).
+fn point_of_byte(rope: &Rope, byte: usize) -> tree_sitter::Point {
+    let line = rope.byte_to_line(byte);
+    let line_start_byte = rope.line_to_byte(line);
+    tree_sitter::Point {
+        row: line,
+        column: byte - line_start_byte,
+    }
 }
 
 /// Run a single highlight query against a parsed tree, appending
@@ -446,6 +550,7 @@ mod tests {
             rope,
             language: Language::Rust,
             prev_tree: None,
+            prev_rope: None,
             edits_since_prev: Vec::new(),
         }));
 
@@ -481,6 +586,7 @@ mod tests {
                 rope: Arc::new(Rope::from_str(&format!("fn v{v}() {{}}\n"))),
                 language: Language::Rust,
                 prev_tree: None,
+            prev_rope: None,
                 edits_since_prev: Vec::new(),
             }));
         }

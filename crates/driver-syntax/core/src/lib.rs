@@ -15,13 +15,17 @@ use led_state_syntax::{Language, SyntaxOut};
 use ropey::Rope;
 use tree_sitter::Tree;
 
-/// One parse request. `prev_tree` when present enables
-/// tree-sitter's incremental parsing — the worker applies
-/// `tree.edit(InputEdit)` derived from the version delta before
-/// calling `Parser::parse(..., Some(prev_tree))`.
+/// One parse request. When `prev_tree`, `prev_rope`, and
+/// `edits_since_prev` are all present, the worker runs
+/// tree-sitter's incremental parse: it replays each edit
+/// against a mutable clone of `prev_rope` to derive the byte +
+/// point positions tree-sitter needs, calls `tree.edit(...)` for
+/// each, then `parser.parse(&new_bytes, Some(&edited_tree))`.
+/// Without the extras (e.g. first parse of a buffer), it falls
+/// back to `parser.parse(&new_bytes, None)` — a full parse.
 ///
-/// `rope` is an `Arc<Rope>` so shipping a request is a pointer
-/// clone; the worker reads the rope without copying.
+/// `rope` and `prev_rope` are `Arc<Rope>` so shipping a request
+/// is a pointer clone; the worker reads them without copying.
 #[derive(Debug, Clone)]
 pub struct SyntaxCmd {
     pub path: CanonPath,
@@ -29,25 +33,37 @@ pub struct SyntaxCmd {
     pub rope: Arc<Rope>,
     pub language: Language,
     pub prev_tree: Option<Arc<Tree>>,
-    /// Edits applied between the prev_tree's version and this
+    /// Rope snapshot the `prev_tree` was parsed from. Used by
+    /// the worker to map each edit's `char_start` to its byte
+    /// offset in `prev_tree`'s coordinate space.
+    pub prev_rope: Option<Arc<Rope>>,
+    /// Edits applied between `prev_tree`'s version and this
     /// cmd's version, in char-offset form. The worker translates
-    /// to tree-sitter's InputEdit (byte offsets + row/col) before
-    /// calling `tree.edit` on a mutable clone of `prev_tree`.
+    /// to tree-sitter's `InputEdit` (byte offsets + row/col)
+    /// before calling `tree.edit` on a mutable clone of
+    /// `prev_tree`. Carries the inserted text so the worker can
+    /// keep a mutable clone of `prev_rope` in lock-step, which
+    /// is how sequential-edit byte offsets get resolved
+    /// correctly (each edit's positions are relative to the rope
+    /// state after prior edits).
     pub edits_since_prev: Vec<RopeEdit>,
 }
 
 /// A rope edit, in char-offset form the runtime already carries
-/// in its history log. The worker converts to byte offsets +
-/// point coords at parse time.
+/// in its history log. `Insert` carries the actual text so the
+/// worker can compute byte length and mirror the edit onto its
+/// mutable `prev_rope` clone; `Delete` only needs the removed
+/// char count.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RopeEdit {
-    pub char_start: usize,
-    /// Character count of content removed at `char_start`. Zero
-    /// for pure inserts.
-    pub removed_chars: usize,
-    /// Character count of content inserted at `char_start`. Zero
-    /// for pure deletes.
-    pub inserted_chars: usize,
+pub enum RopeEdit {
+    Insert {
+        char_start: usize,
+        text: Arc<str>,
+    },
+    Delete {
+        char_start: usize,
+        removed_chars: usize,
+    },
 }
 
 /// Driver-scoped trace hook. The runtime's top-level Trace

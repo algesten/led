@@ -14,4 +14,5 @@ publish = false
 led-core = { workspace = true }
 led-state-buffer-edits = { workspace = true }
 imbl = { workspace = true }
+ropey = { workspace = true }
 tree-sitter = { workspace = true }

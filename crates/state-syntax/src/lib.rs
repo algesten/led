@@ -166,6 +166,11 @@ pub struct SyntaxOut {
     pub language: Language,
     pub tree: Arc<Tree>,
     pub tokens: Arc<Vec<TokenSpan>>,
+    /// Rope the parse was performed against. The runtime stores
+    /// this on `SyntaxState.tree_rope` so the next parse can
+    /// ship it as `SyntaxCmd.prev_rope` and tree-sitter can run
+    /// incremental parsing.
+    pub tree_rope: Arc<ropey::Rope>,
 }
 
 /// Per-buffer syntax state. `None` in the `Atoms.syntax` map when
@@ -177,6 +182,11 @@ pub struct SyntaxState {
     /// Most recent tree the parser returned. `None` until the
     /// first parse completes.
     pub tree: Option<Arc<Tree>>,
+    /// Rope snapshot `tree` was parsed from. Shipped back as
+    /// `SyntaxCmd.prev_rope` on the next dispatch so the worker
+    /// can resolve each edit's byte offset against the correct
+    /// coordinate space. `None` in lock-step with `tree`.
+    pub tree_rope: Option<Arc<ropey::Rope>>,
     /// Tokens extracted from `tree` via the language's highlight
     /// query. Empty until the first parse completes.
     pub tokens: Arc<Vec<TokenSpan>>,
@@ -210,6 +220,7 @@ impl SyntaxState {
         Self {
             language,
             tree: None,
+            tree_rope: None,
             tokens: Arc::new(Vec::new()),
             version: 0,
             in_flight_version: None,
