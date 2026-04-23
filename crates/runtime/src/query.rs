@@ -363,19 +363,27 @@ pub fn file_load_action<'a, 'b>(
 /// that clear the next tick's query would emit the same saves again.
 ///
 /// Idle: `pending_saves` is empty → returns `Vec::new()` (no alloc).
-/// Σ(version + saved_version) across all edited buffers. The
-/// runtime compares this against `lsp_requested_state_sum` to
-/// decide when to fire `LspCmd::RequestDiagnostics`. Pure
-/// derivation of `BufferEdits.buffers` — the atom stores only
-/// the sum we last emitted for, not the current live sum.
+/// Σ(saved_version) across all edited buffers. The runtime
+/// compares this against `lsp_requested_state_sum` to decide
+/// when to fire `LspCmd::RequestDiagnostics`. Pure derivation
+/// of `BufferEdits.buffers` — the atom stores only the sum we
+/// last emitted for.
+///
+/// **Only `saved_version` is summed**, not live `version`. This
+/// gates diagnostic requests to save events + the first
+/// `lsp_notified` tick (caught by the `Option<u64>` None → Some
+/// transition in the caller). Live-edit pulls would make
+/// rust-analyzer re-analyze on every keystroke, and the user
+/// would see error squiggles pop in mid-typing for transient
+/// parser failures that disappear once they finish the word.
+/// Save-gated pulls match the "errors appear after save" UX the
+/// user expects.
 #[drv::memo(single)]
 pub fn buffer_state_sum<'b>(buffers: EditedBuffersInput<'b>) -> u64 {
     buffers
         .buffers
         .values()
-        .fold(0u64, |acc, eb| {
-            acc.wrapping_add(eb.version).wrapping_add(eb.saved_version)
-        })
+        .fold(0u64, |acc, eb| acc.wrapping_add(eb.saved_version))
 }
 
 #[drv::memo(single)]
@@ -1418,6 +1426,11 @@ pub fn popover_model(
     }
     // Stable order: error before warning, then by start position.
     hits.sort_by_key(|d| (severity_rank(d.severity), d.start_line, d.start_col));
+    // Dedupe by `(severity, message)`. Parsers (especially
+    // rust-analyzer) cascade identical "expected X" errors across
+    // several positions on the same line — showing the same
+    // sentence three times in a vertical stack is noise.
+    hits.dedup_by(|a, b| a.severity == b.severity && a.message == b.message);
 
     let max_content = POPOVER_MAX_CONTENT.min(editor_area.rows.saturating_sub(0) as usize);
     // Cap width by editor area so the box never exceeds the edit

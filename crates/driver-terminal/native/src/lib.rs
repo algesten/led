@@ -665,10 +665,27 @@ fn paint_side_panel(
                 line = truncated;
             }
             if entry.selected {
-                let sel_style = if panel.focused {
+                // Selection + category composition (legacy
+                // display.rs:1381-1389):
+                //   - focused selection → pure selection style
+                //     (loud, wins over marker colour).
+                //   - unfocused selection → selection bg
+                //     patched with marker fg so the user still
+                //     sees "this errored file is selected".
+                let base_sel = if panel.focused {
                     theme.browser_selected_focused
                 } else {
                     theme.browser_selected_unfocused
+                };
+                let sel_style = if !panel.focused && let Some(status) = entry.status {
+                    let marker = theme.category_style(status.category);
+                    Style {
+                        fg: marker.fg.or(base_sel.fg),
+                        bg: base_sel.bg,
+                        attrs: base_sel.attrs,
+                    }
+                } else {
+                    base_sel
                 };
                 apply_style(out, &sel_style)?;
                 queue!(out, style::Print(&line))?;
