@@ -374,6 +374,14 @@ impl Manager {
     /// stuck with a stale spinner). Called by both the
     /// `$/progress` and `experimental/serverStatus` handlers at
     /// their tail — the two sources converge here.
+    ///
+    /// On a busy→idle transition the server has just finished
+    /// a round of analysis (cold-index, cargo check, semantic
+    /// re-check after save, …). Fire a fresh
+    /// `RequestDiagnostics` so the next pull picks up whatever
+    /// the server just produced. This is the main mechanism by
+    /// which late cargo-check warnings reach the client when the
+    /// runtime gates pulls on save (no keystroke-driven pulls).
     fn send_progress_throttled(&mut self) {
         let busy = self.is_busy();
         let detail = self.progress_detail();
@@ -399,6 +407,15 @@ impl Manager {
         self.notify.notify();
         self.last_progress_sent_at = Some(now);
         self.last_progress_busy = busy;
+
+        // Side effect: re-pull on every busy→idle edge. Covers
+        // both `$/progress end` (cargo check finishing) and
+        // `experimental/serverStatus quiescent=true` (ra's
+        // overall-done signal). rust-analyzer in pull-only mode
+        // wouldn't otherwise emit anything when cargo finishes.
+        if transitioning_to_idle {
+            self.request_diagnostics();
+        }
     }
 
     fn earliest_deadline(&self) -> Option<Instant> {
@@ -997,29 +1014,16 @@ impl Manager {
                         .lsp_event_tx
                         .send(LspEvent::Ready { server: server_name });
                     self.notify.notify();
-                    // Every busy→idle transition fires a fresh
-                    // `RequestDiagnostics`. This is the main path
-                    // by which late analysis results reach the
-                    // client when the server only delivers via
-                    // pull: `didSave` starts a new busy phase,
-                    // cargo-check / semantic re-analysis runs,
-                    // quiescent=true signals "here's the new
-                    // state". We pull to pick it up.
-                    //
-                    // Legacy did the equivalent by firing
-                    // `RequestDiagnostics` on every keystroke
-                    // (content_hash delta) — which would also
-                    // pick up cargo-check completion as a side
-                    // effect. The rewrite gates pulls on save,
-                    // so we need an explicit busy→idle trigger.
+                    // Consume the deferred-init flag so
+                    // `should_defer_request` stops blocking
+                    // future requests. The re-pull trigger on
+                    // busy→idle lives in `send_progress_throttled`
+                    // below, covering both this path and
+                    // `$/progress end` with one source of truth.
                     if was_busy {
-                        // Consume the deferred-init flag if set,
-                        // so `should_defer_request` stops
-                        // blocking future requests.
                         let entry = self.servers.get_mut(&language).unwrap();
                         entry.diag.on_quiescence();
                         entry.deferred_init_request = false;
-                        self.request_diagnostics();
                     }
                 }
                 // Unified progress emission — both sources
