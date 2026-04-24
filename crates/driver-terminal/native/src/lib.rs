@@ -219,6 +219,24 @@ impl TerminalOutputDriver {
         }
     }
 
+    /// Discard the painter's mirror of the on-screen grid.
+    ///
+    /// The cell-diff renderer compares each new frame against its
+    /// internal `prev_buf` and emits only the changed cells; after
+    /// a SIGTSTP round-trip the user's shell has overwritten the
+    /// alt-screen while we were parked, but the mirror still
+    /// thinks the old pixels are live — the next frame diffs
+    /// against that stale mirror and produces an empty byte
+    /// stream, which looks to the user like "suspend didn't
+    /// redraw". Resetting the stored `dims` to 0x0 forces the
+    /// next `execute` down the resize path: both internal buffers
+    /// get blanked, `Clear(All)` is queued, and every cell is
+    /// re-emitted from scratch.
+    pub fn invalidate(&self) {
+        let mut state = self.state.lock().expect("render state poisoned");
+        state.dims = Dims { cols: 0, rows: 0 };
+    }
+
     /// Paint a frame to `out` using a double-buffered cell diff.
     ///
     /// `last` still feeds the paint function's own component-level

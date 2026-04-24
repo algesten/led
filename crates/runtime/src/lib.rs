@@ -888,10 +888,15 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
                     // SIGTSTP round-trip. The helper leaves the
                     // alt-screen, raises SIGTSTP, and on `fg`
                     // re-enters + re-enables raw mode. Bumping
-                    // `force_redraw` clears the cached frame so
-                    // the next paint walks every cell (the
-                    // terminal's content was overwritten by the
-                    // user's shell during the suspended window).
+                    // `force_redraw` is the user-facing signal
+                    // ("we got suspended, redraw"); invalidating
+                    // the painter's internal mirror is what
+                    // actually makes it repaint. Without the
+                    // invalidate call, the cell-diff renderer
+                    // compares the post-resume frame against its
+                    // pre-suspend mirror, concludes nothing
+                    // changed, and emits zero bytes — the screen
+                    // stays at whatever the shell left behind.
                     lifecycle.phase = Phase::Suspended;
                     if let Err(e) =
                         led_driver_terminal_native::suspend_and_resume(stdout)
@@ -907,6 +912,7 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
                     }
                     lifecycle.phase = Phase::Running;
                     lifecycle.bump_redraw();
+                    drivers.output.invalidate();
                     last_frame = None;
                 }
             }
