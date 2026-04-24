@@ -222,6 +222,11 @@ pub struct Atoms {
     /// via the status-bar model so the user sees when
     /// rust-analyzer is mid-indexing.
     pub lsp_status: LspStatuses,
+    /// LSP completion popup. `session: Some` while a popup is
+    /// live for some tab; dispatch intercepts navigation + commit
+    /// keys. `seq_gen` is the monotonic request id — see
+    /// [`led_state_completions::CompletionsState`].
+    pub completions: led_state_completions::CompletionsState,
     /// Symlink resolution chain for every path the user has
     /// opened, keyed by canonical path. Populated at tab-open
     /// time (main.rs CLI, find-file commit, browser open) so the
@@ -269,6 +274,7 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
         lsp_requested_state_sum,
         lsp_init_sent,
         lsp_status,
+        completions: _completions,
     } = &mut *world.atoms;
     let drivers = world.drivers;
     let wake = world.wake;
@@ -420,6 +426,11 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
                         entry.busy = false;
                         entry.detail = None;
                     }
+                }
+                LspEvent::Completion { .. } | LspEvent::CompletionResolved { .. } => {
+                    // Wired in M17 stage 4 — until then the
+                    // driver never emits these, but the match
+                    // stays exhaustive.
                 }
             }
         }

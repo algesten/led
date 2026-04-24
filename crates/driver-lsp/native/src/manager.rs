@@ -486,6 +486,24 @@ impl Manager {
             LspCmd::RequestDiagnostics => {
                 self.request_diagnostics();
             }
+            LspCmd::RequestCompletion {
+                path,
+                seq,
+                line,
+                col,
+                trigger,
+            } => {
+                // Stage 3 fills this in with the real
+                // `textDocument/completion` request. Until then
+                // silently drop so the rest of M17 can land
+                // without forcing stage-3 order.
+                let _ = (path, seq, line, col, trigger);
+            }
+            LspCmd::ResolveCompletion { path, seq, item } => {
+                // Stage 3 fills this in with
+                // `completionItem/resolve`.
+                let _ = (path, seq, item);
+            }
         }
     }
 

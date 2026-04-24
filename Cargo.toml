@@ -14,6 +14,7 @@ members = [
     "crates/state-file-search",
     "crates/state-syntax",
     "crates/state-diagnostics",
+    "crates/state-completions",
     "crates/driver-buffers/core",
     "crates/driver-buffers/native",
     "crates/driver-terminal/core",
@@ -52,6 +53,7 @@ led-state-isearch = { path = "crates/state-isearch" }
 led-state-file-search = { path = "crates/state-file-search" }
 led-state-syntax = { path = "crates/state-syntax" }
 led-state-diagnostics = { path = "crates/state-diagnostics" }
+led-state-completions = { path = "crates/state-completions" }
 led-driver-buffers-core = { path = "crates/driver-buffers/core" }
 led-driver-buffers-native = { path = "crates/driver-buffers/native" }
 led-driver-terminal-core = { path = "crates/driver-terminal/core" }

@@ -1,10 +1,11 @@
 //! Sync core of the LSP driver.
 //!
-//! Diagnostics for M16; completions / hover / code-actions land
-//! in later milestones. The wire ABI (`LspCmd` / `LspEvent`) and
-//! the `DiagnosticSource` state machine both live here so the
-//! native driver and the runtime share the same vocabulary and
-//! the state machine is testable without tokio.
+//! Diagnostics for M16 and completions for M17; hover / code-
+//! actions land in later milestones. The wire ABI (`LspCmd` /
+//! `LspEvent`) and the `DiagnosticSource` state machine both
+//! live here so the native driver and the runtime share the
+//! same vocabulary and the state machine is testable without
+//! tokio.
 //!
 //! # Lifecycle sketch
 //!
@@ -88,6 +89,91 @@ pub enum LspCmd {
     /// opened buffer's version, and issues
     /// `textDocument/diagnostic` for each one.
     RequestDiagnostics,
+    /// Ask the server for completion items at `(line, col)` on
+    /// `path`. `seq` is a monotonic sequence id the runtime
+    /// allocates so the driver can drop stale responses and the
+    /// runtime can ignore a completion event whose seq is older
+    /// than the latest outstanding request. `trigger` is the
+    /// character that caused the request (if any); the worker
+    /// forwards it to the server as
+    /// `CompletionContext.triggerCharacter` when the char is in
+    /// the server-advertised `triggerCharacters` set, otherwise
+    /// `triggerKind` is `Invoked`.
+    RequestCompletion {
+        path: CanonPath,
+        seq: u64,
+        line: u32,
+        col: u32,
+        trigger: Option<char>,
+    },
+    /// Ask the server to fill in an item's `additionalTextEdits`
+    /// (and any other resolvable fields) via
+    /// `completionItem/resolve`. Fired on commit when the
+    /// selected item advertises `dataResolveNeeded`. `seq`
+    /// identifies the commit action so the runtime can drop
+    /// resolved edits that belong to a stale session.
+    ResolveCompletion {
+        path: CanonPath,
+        seq: u64,
+        item: CompletionItem,
+    },
+}
+
+/// One completion candidate from the server. Trimmed to the
+/// subset legacy's UI actually used: label + optional detail for
+/// display, `sort_text` for tie-break ordering, `kind` carried
+/// through so future milestones can style by category, and the
+/// insertion payload (`text_edit` preferred, `insert_text`
+/// fallback). `resolve_data` + `raw_json` carry the opaque
+/// `CompletionItem.data` the server expects back on
+/// `completionItem/resolve` — see legacy
+/// `crates/lsp/src/manager.rs:1046-1080`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompletionItem {
+    /// Primary display string + fuzzy-filter key.
+    pub label: Arc<str>,
+    /// Right-column hint (type signature, module path, …).
+    pub detail: Option<Arc<str>>,
+    /// LSP-advertised sort key. `None` falls back to `label`.
+    pub sort_text: Option<Arc<str>>,
+    /// What to insert when `text_edit` is absent. Falls back to
+    /// `label` when both are missing.
+    pub insert_text: Option<Arc<str>>,
+    /// Preferred insertion — a (line, col_start, col_end,
+    /// new_text) tuple. When present, overrides `insert_text`
+    /// and gives the precise replacement range the server wants
+    /// (e.g. "delete the typed prefix, insert full identifier").
+    /// Ranges are 0-indexed, exclusive end, row/col in chars.
+    pub text_edit: Option<CompletionTextEdit>,
+    /// LSP `CompletionItemKind` as the raw u8 (1=Text, 2=Method,
+    /// 3=Function, …). `None` when the server omits it. The
+    /// runtime keeps this opaque for now; future milestones can
+    /// use it for icon / colour.
+    pub kind: Option<u8>,
+    /// `true` when the server advertised
+    /// `completionProvider.resolveProvider` AND this item still
+    /// has unresolved fields (missing `additionalTextEdits` in
+    /// the initial response). Drives whether the runtime fires
+    /// `ResolveCompletion` on commit.
+    pub resolve_needed: bool,
+    /// Opaque server-specific identifier echoed on resolve. The
+    /// native driver stores this and threads it through the
+    /// resolve round-trip; the runtime never inspects it.
+    pub resolve_data: Option<Arc<str>>,
+}
+
+/// Range-based insertion. `line` is the logical-line the edit
+/// applies to (usually the cursor's current line); `col_start` /
+/// `col_end` are char offsets within that line (exclusive end).
+/// `new_text` is the literal replacement string. The runtime
+/// applies this at commit time when present, overriding any
+/// `insert_text` on the parent item.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompletionTextEdit {
+    pub line: u32,
+    pub col_start: u32,
+    pub col_end: u32,
+    pub new_text: Arc<str>,
 }
 
 /// Driver → runtime events. The runtime folds these into its
@@ -120,6 +206,33 @@ pub enum LspEvent {
     /// Non-fatal server error. The runtime surfaces this as a
     /// warn alert keyed by `server`.
     Error { server: String, message: String },
+    /// Completion response for a previous
+    /// [`LspCmd::RequestCompletion`]. `seq` echoes the request
+    /// id so the runtime can drop responses older than the
+    /// latest in-flight request (typing fast races the server
+    /// — stale completions would show obsolete items).
+    /// `prefix_start_col` is the char col where the user's
+    /// in-progress identifier starts; the runtime uses it to
+    /// refilter client-side as the user keeps typing without
+    /// re-hitting the server. `prefix_line` is the line the
+    /// identifier sits on (== cursor line when the request
+    /// fired).
+    Completion {
+        path: CanonPath,
+        seq: u64,
+        items: Arc<Vec<CompletionItem>>,
+        prefix_line: u32,
+        prefix_start_col: u32,
+    },
+    /// Response to [`LspCmd::ResolveCompletion`]. Carries the
+    /// server's additional edits to apply AFTER the primary
+    /// insertion landed (typically imports added at the top of
+    /// the file). `seq` matches the originating resolve id.
+    CompletionResolved {
+        path: CanonPath,
+        seq: u64,
+        additional_edits: Vec<CompletionTextEdit>,
+    },
 }
 
 // ── Trace ──────────────────────────────────────────────────────

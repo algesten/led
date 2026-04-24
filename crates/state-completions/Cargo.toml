@@ -1,0 +1,24 @@
+[package]
+name = "led-state-completions"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# LSP completion popup state.
+#
+# `Option<CompletionSession>` lives on `Atoms.completions.session`.
+# `Some` means a completion popup is active for some tab — dispatch
+# intercepts navigation + commit keys, the popover renders under the
+# cursor, and refilter runs on every keystroke. `None` means no
+# popup is showing; regular typing / navigation applies.
+#
+# Matches legacy "one completion session at a time, scoped to the
+# tab that triggered it" (crates/lsp/src/manager.rs around the
+# `CompletionState` fields). A second request on a different tab
+# replaces the session entirely; the runtime never multiplexes
+# popups.
+
+[dependencies]
+led-core = { workspace = true }
+led-driver-lsp-core = { workspace = true }
+led-state-tabs = { workspace = true }

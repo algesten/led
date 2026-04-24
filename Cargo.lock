@@ -746,6 +746,7 @@ dependencies = [
  "led-state-browser",
  "led-state-buffer-edits",
  "led-state-clipboard",
+ "led-state-completions",
  "led-state-diagnostics",
  "led-state-file-search",
  "led-state-find-file",
@@ -790,6 +791,15 @@ dependencies = [
 name = "led-state-clipboard"
 version = "0.0.0"
 dependencies = [
+ "led-state-tabs",
+]
+
+[[package]]
+name = "led-state-completions"
+version = "0.0.0"
+dependencies = [
+ "led-core",
+ "led-driver-lsp-core",
  "led-state-tabs",
 ]
 

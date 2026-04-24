@@ -32,6 +32,7 @@ led-state-file-search = { workspace = true }
 led-state-isearch = { workspace = true }
 led-state-syntax = { workspace = true }
 led-state-diagnostics = { workspace = true }
+led-state-completions = { workspace = true }
 led-driver-fs-list-core = { workspace = true }
 led-driver-fs-list-native = { workspace = true }
 led-driver-find-file-core = { workspace = true }
