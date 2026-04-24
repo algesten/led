@@ -68,6 +68,7 @@ use led_state_alerts::AlertState;
 use led_state_browser::{BrowserUi, Focus, FsTree};
 use led_state_buffer_edits::BufferEdits;
 use led_state_clipboard::ClipboardState;
+use led_state_completions::CompletionsState;
 use led_state_file_search::FileSearchState;
 use led_state_find_file::FindFileState;
 use led_state_isearch::IsearchState;
@@ -107,6 +108,7 @@ pub struct Dispatcher<'a> {
     pub find_file: &'a mut Option<FindFileState>,
     pub isearch: &'a mut Option<IsearchState>,
     pub file_search: &'a mut Option<FileSearchState>,
+    pub completions: &'a mut CompletionsState,
     /// Symlink-resolution chains keyed by canonical path. Dispatch
     /// populates this whenever a tab opens from a user-typed path
     /// (find-file commit, browser entry). Load-completion
@@ -155,6 +157,7 @@ impl<'a> Dispatcher<'a> {
             self.isearch,
             self.file_search,
             self.path_chains,
+            self.completions,
             self.keymap,
             self.chord,
         )
@@ -197,6 +200,7 @@ pub fn dispatch_key(
     isearch: &mut Option<IsearchState>,
     file_search: &mut Option<FileSearchState>,
     path_chains: &mut std::collections::HashMap<led_core::CanonPath, led_core::PathChain>,
+    completions: &mut CompletionsState,
     keymap: &Keymap,
     chord: &mut ChordState,
 ) -> DispatchOutcome {
@@ -247,9 +251,63 @@ pub fn dispatch_key(
             if is_edit_like(&cmd) {
                 refresh_active_preferred_col(tabs, edits, terminal, browser);
             }
+            // Auto-trigger LSP completion after an identifier-ish
+            // InsertChar. Matches legacy led editing_of.rs:69-75 —
+            // alphanumeric or `_` fires a fresh request, other
+            // commands either dismiss the live popup or pass
+            // through. When a session is already active, typing
+            // just queues another request (server seq-gating
+            // drops the older one); stage 6 will add client-side
+            // refilter so the popup updates without a round-trip
+            // for every keystroke.
+            handle_completion_trigger(&cmd, tabs, edits, completions);
             outcome
         }
         Resolved::PrefixStored | Resolved::Continue => DispatchOutcome::Continue,
+    }
+}
+
+/// Queue a `RequestCompletion` for the active tab when the user
+/// just typed an identifier char, OR dismiss the live session
+/// on a non-trigger key. Called from the dispatch boundary so
+/// every command path (direct, chord, implicit-insert) flows
+/// through the same logic.
+fn handle_completion_trigger(
+    cmd: &Command,
+    tabs: &Tabs,
+    edits: &BufferEdits,
+    completions: &mut CompletionsState,
+) {
+    match cmd {
+        Command::InsertChar(c) if c.is_alphanumeric() || *c == '_' => {
+            // Auto-trigger on identifier chars. Needs an active
+            // tab with a loaded buffer; otherwise silently drop.
+            let Some(id) = tabs.active else {
+                return;
+            };
+            let Some(tab) = tabs.open.iter().find(|t| t.id == id) else {
+                return;
+            };
+            if tab.preview {
+                return;
+            }
+            if edits.buffers.get(&tab.path).is_none() {
+                return;
+            }
+            let line = tab.cursor.line as u32;
+            let col = tab.cursor.col as u32;
+            completions.queue_request(tab.path.clone(), line, col, Some(*c));
+        }
+        // Any other command dismisses an active popup. The
+        // dispatch-action set (MoveUp, MoveDown, InsertNewline,
+        // etc.) is handled in stage 5 before the command even
+        // runs; reaching here means the command didn't get
+        // intercepted, so the popup is stale.
+        _ => {
+            if completions.session.is_some() {
+                completions.dismiss();
+            }
+        }
     }
 }
 
@@ -689,6 +747,7 @@ mod tests {
     use led_driver_terminal_core::{Dims, KeyCode, KeyModifiers, Terminal};
     use led_state_alerts::AlertState;
     use led_state_buffer_edits::{BufferEdits, EditedBuffer};
+    use led_state_completions::CompletionsState;
     use led_state_kill_ring::KillRing;
     use ropey::Rope;
 
@@ -711,6 +770,7 @@ mod tests {
         let keymap = default_keymap();
         let mut chord = ChordState::default();
         let mut path_chains = std::collections::HashMap::new();
+        let mut completions = CompletionsState::default();
 
         // First half of the chord: ctrl+x → pending, Continue.
         let mut find_file: Option<FindFileState> = None;
@@ -732,6 +792,7 @@ mod tests {
             &mut isearch,
             &mut file_search,
             &mut path_chains,
+            &mut completions,
             &keymap,
             &mut chord,);
         assert_eq!(outcome, DispatchOutcome::Continue);
@@ -757,6 +818,7 @@ mod tests {
             &mut isearch,
             &mut file_search,
             &mut path_chains,
+            &mut completions,
             &keymap,
             &mut chord,);
         assert_eq!(outcome, DispatchOutcome::Quit);
@@ -788,6 +850,7 @@ mod tests {
         let mut browser = BrowserUi::default();
         let fs = FsTree::default();
         let mut path_chains = std::collections::HashMap::new();
+        let mut completions = CompletionsState::default();
         // ctrl+x → pending.
         let mut find_file: Option<FindFileState> = None;
         let mut isearch: Option<IsearchState> = None;
@@ -808,6 +871,7 @@ mod tests {
             &mut isearch,
             &mut file_search,
             &mut path_chains,
+            &mut completions,
             &keymap,
             &mut chord,);
         assert!(chord.pending.is_some());
@@ -831,6 +895,7 @@ mod tests {
             &mut isearch,
             &mut file_search,
             &mut path_chains,
+            &mut completions,
             &keymap,
             &mut chord,);
         assert_eq!(outcome, DispatchOutcome::Continue);
@@ -862,6 +927,7 @@ mod tests {
         let fs = FsTree::default();
 
         let mut path_chains = std::collections::HashMap::new();
+        let mut completions = CompletionsState::default();
         let mut find_file: Option<FindFileState> = None;
         let mut isearch: Option<IsearchState> = None;
         let mut file_search: Option<FileSearchState> = None;
@@ -881,6 +947,7 @@ mod tests {
             &mut isearch,
             &mut file_search,
             &mut path_chains,
+            &mut completions,
             &km,
             &mut chord,);
         assert_eq!(outcome, DispatchOutcome::Quit);
@@ -905,6 +972,7 @@ mod tests {
             &mut isearch,
             &mut file_search,
             &mut path_chains,
+            &mut completions,
             &km,
             &mut chord,);
         assert_eq!(outcome, DispatchOutcome::Continue);
@@ -929,6 +997,7 @@ mod tests {
         let mut isearch: Option<IsearchState> = None;
         let mut file_search: Option<FileSearchState> = None;
         let mut path_chains = std::collections::HashMap::new();
+        let mut completions = CompletionsState::default();
         dispatch_key(
             key(KeyModifiers::NONE, KeyCode::Char('z')),
             &mut tabs,
@@ -945,6 +1014,7 @@ mod tests {
             &mut isearch,
             &mut file_search,
             &mut path_chains,
+            &mut completions,
             &km,
             &mut chord,);
         assert_eq!(rope_of(&edits, "file.rs").to_string(), "z");
@@ -970,6 +1040,7 @@ mod tests {
         let mut isearch: Option<IsearchState> = None;
         let mut file_search: Option<FileSearchState> = None;
         let mut path_chains = std::collections::HashMap::new();
+        let mut completions = CompletionsState::default();
         dispatch_key(
             key(KeyModifiers::CONTROL, KeyCode::Char('x')),
             &mut tabs,
@@ -986,6 +1057,7 @@ mod tests {
             &mut isearch,
             &mut file_search,
             &mut path_chains,
+            &mut completions,
             &km,
             &mut chord,);
         assert_eq!(rope_of(&edits, "file.rs").to_string(), "");

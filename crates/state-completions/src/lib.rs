@@ -28,6 +28,39 @@ pub struct CompletionsState {
     /// to the latest issued id so typing races can't display
     /// stale items.
     pub seq_gen: u64,
+    /// Execute-pattern outbox — dispatch pushes one request per
+    /// auto-trigger or explicit invoke, the driver-dispatch
+    /// phase drains them and ships as `LspCmd::RequestCompletion`.
+    /// `Vec` rather than `Option` so two tabs each triggering
+    /// on the same tick both get serviced, but the runtime
+    /// coalesces repeated requests for the same tab into the
+    /// latest (server seq-gating handles the rest).
+    pub pending_requests: Vec<PendingCompletionRequest>,
+    /// Execute-pattern outbox for `completionItem/resolve`
+    /// dispatched on commit. Drained into `LspCmd::ResolveCompletion`
+    /// by the driver-dispatch phase.
+    pub pending_resolves: Vec<PendingResolveRequest>,
+}
+
+/// Queued completion request waiting to be flushed to the LSP
+/// driver. `seq` is already allocated from `seq_gen` so the
+/// driver-dispatch phase just forwards.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PendingCompletionRequest {
+    pub path: CanonPath,
+    pub seq: u64,
+    pub line: u32,
+    pub col: u32,
+    pub trigger: Option<char>,
+}
+
+/// Queued resolve request — committed item whose
+/// `additional_text_edits` we want to fetch.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PendingResolveRequest {
+    pub path: CanonPath,
+    pub seq: u64,
+    pub item: CompletionItem,
 }
 
 /// One active popup. Created on the first matching
@@ -83,6 +116,39 @@ impl CompletionsState {
     /// Drop any active popup. Cheap no-op when already clear.
     pub fn dismiss(&mut self) {
         self.session = None;
+    }
+
+    /// Queue a completion request. Returns the allocated `seq`
+    /// so the caller can stash it in the session when the
+    /// corresponding response arrives.
+    pub fn queue_request(
+        &mut self,
+        path: CanonPath,
+        line: u32,
+        col: u32,
+        trigger: Option<char>,
+    ) -> u64 {
+        let seq = self.next_seq();
+        self.pending_requests.push(PendingCompletionRequest {
+            path,
+            seq,
+            line,
+            col,
+            trigger,
+        });
+        seq
+    }
+
+    /// Queue a resolve request for the item the user just
+    /// committed. Returns the allocated `seq`.
+    pub fn queue_resolve(&mut self, path: CanonPath, item: CompletionItem) -> u64 {
+        let seq = self.next_seq();
+        self.pending_resolves.push(PendingResolveRequest {
+            path,
+            seq,
+            item,
+        });
+        seq
     }
 }
 

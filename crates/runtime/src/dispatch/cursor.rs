@@ -405,6 +405,7 @@ fn scroll_forward(s: Scroll, rope: &Rope, content_cols: usize, steps: usize) -> 
 
 #[cfg(test)]
 mod tests {
+    use led_state_completions::CompletionsState;
     use led_state_file_search::FileSearchState;
     use led_state_find_file::FindFileState;
     use led_state_isearch::IsearchState;
@@ -926,6 +927,7 @@ mod tests {
         let mut isearch: Option<IsearchState> = None;
         let mut file_search: Option<FileSearchState> = None;
         let mut path_chains = std::collections::HashMap::new();
+        let mut completions = CompletionsState::default();
 
         let mut press = |k: KeyEvent,
                      tabs: &mut Tabs,
@@ -939,7 +941,7 @@ mod tests {
                      fs: &FsTree| {
             super::super::dispatch_key(
                 k, tabs, edits, kill_ring, clip, alerts, jumps, browser, fs, &store, &term,
-        &mut find_file, &mut isearch, &mut file_search, &mut path_chains, &km,
+        &mut find_file, &mut isearch, &mut file_search, &mut path_chains, &mut completions, &km,
                 chord,);
         };
 

@@ -274,7 +274,7 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
         lsp_requested_state_sum,
         lsp_init_sent,
         lsp_status,
-        completions: _completions,
+        completions,
     } = &mut *world.atoms;
     let drivers = world.drivers;
     let wake = world.wake;
@@ -305,8 +305,8 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
         // over a late-arriving load completion (course-correct #6).
         // `process` returns an empty Vec on idle ticks — no heap
         // alloc on the happy path.
-        let completions = drivers.file.process(store);
-        for completion in completions {
+        let file_completions = drivers.file.process(store);
+        for completion in file_completions {
             // Language detection prefers the symlink chain stashed
             // at tab-open time: walking `user → intermediates →
             // resolved` matches legacy's rule that the user-typed
@@ -427,10 +427,52 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
                         entry.detail = None;
                     }
                 }
-                LspEvent::Completion { .. } | LspEvent::CompletionResolved { .. } => {
-                    // Wired in M17 stage 4 — until then the
-                    // driver never emits these, but the match
-                    // stays exhaustive.
+                LspEvent::Completion {
+                    path,
+                    seq,
+                    items,
+                    prefix_line,
+                    prefix_start_col,
+                } => {
+                    // Stale-gate: the latest allocated `seq_gen`
+                    // is the id we'd echo back on the next new
+                    // request; any response older than that is
+                    // discarded. Exact-match is the live session;
+                    // we accept it and build / replace the
+                    // session to match.
+                    if seq != completions.seq_gen {
+                        continue;
+                    }
+                    // Find the tab id that corresponds to `path`.
+                    // If the user switched tabs (or closed the
+                    // tab) while the server was composing the
+                    // response, silently drop.
+                    let Some(tab) = tabs.open.iter().find(|t| t.path == path) else {
+                        continue;
+                    };
+                    if items.is_empty() {
+                        completions.dismiss();
+                        continue;
+                    }
+                    // Stage 6 replaces this with a proper fuzzy
+                    // refilter; for now we display the items in
+                    // server order unfiltered.
+                    let filtered: Vec<usize> = (0..items.len()).collect();
+                    completions.session =
+                        Some(led_state_completions::CompletionSession {
+                            tab: tab.id,
+                            path,
+                            seq,
+                            prefix_line,
+                            prefix_start_col,
+                            items,
+                            filtered: std::sync::Arc::new(filtered),
+                            selected: 0,
+                            scroll: 0,
+                        });
+                }
+                LspEvent::CompletionResolved { .. } => {
+                    // Stage 5 handles the post-commit apply.
                 }
             }
         }
@@ -662,6 +704,7 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
                 find_file,
                 isearch,
                 file_search,
+                completions,
                 path_chains,
                 keymap,
                 chord: &mut chord,
@@ -971,6 +1014,27 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
         if should_request_diag {
             lsp_cmds.push(LspCmd::RequestDiagnostics);
             *lsp_requested_state_sum = Some(current_sum);
+        }
+        // Drain queued completion requests. Dispatch populated
+        // `pending_requests` on identifier-char inserts; we flush
+        // each into `LspCmd::RequestCompletion` here, preserving
+        // the pre-allocated `seq` so server responses round-trip
+        // back to their originating session unambiguously.
+        for req in completions.pending_requests.drain(..) {
+            lsp_cmds.push(LspCmd::RequestCompletion {
+                path: req.path,
+                seq: req.seq,
+                line: req.line,
+                col: req.col,
+                trigger: req.trigger,
+            });
+        }
+        for resolve in completions.pending_resolves.drain(..) {
+            lsp_cmds.push(LspCmd::ResolveCompletion {
+                path: resolve.path,
+                seq: resolve.seq,
+                item: resolve.item,
+            });
         }
         if !lsp_cmds.is_empty() {
             drivers.lsp.execute(lsp_cmds.iter());

@@ -16,6 +16,7 @@ use led_state_alerts::AlertState;
 use led_state_browser::{BrowserUi, FsTree};
 use led_state_buffer_edits::{BufferEdits, EditedBuffer};
 use led_state_clipboard::ClipboardState;
+use led_state_completions::CompletionsState;
 use led_state_file_search::FileSearchState;
 use led_state_find_file::FindFileState;
 use led_state_isearch::IsearchState;
@@ -126,6 +127,7 @@ pub(super) fn dispatch_default(
     let mut isearch: Option<IsearchState> = None;
     let mut file_search: Option<FileSearchState> = None;
     let mut path_chains = std::collections::HashMap::new();
+    let mut completions = CompletionsState::default();
     dispatch_key(
         k,
         tabs,
@@ -142,6 +144,7 @@ pub(super) fn dispatch_default(
         &mut isearch,
         &mut file_search,
         &mut path_chains,
+        &mut completions,
         &default_keymap(),
         &mut chord,)
 }
@@ -169,6 +172,7 @@ pub(super) fn dispatch_chord_default(
     let mut isearch: Option<IsearchState> = None;
     let mut file_search: Option<FileSearchState> = None;
     let mut path_chains = std::collections::HashMap::new();
+    let mut completions = CompletionsState::default();
     dispatch_key(
         prefix,
         tabs,
@@ -185,6 +189,7 @@ pub(super) fn dispatch_chord_default(
         &mut isearch,
         &mut file_search,
         &mut path_chains,
+        &mut completions,
         &keymap,
         &mut chord,);
     let mut find_file: Option<FindFileState> = None;
@@ -206,6 +211,7 @@ pub(super) fn dispatch_chord_default(
         &mut isearch,
         &mut file_search,
         &mut path_chains,
+        &mut completions,
         &keymap,
         &mut chord,)
 }
@@ -230,6 +236,7 @@ pub(super) fn dispatch_with_ring(
     let mut isearch: Option<IsearchState> = None;
     let mut file_search: Option<FileSearchState> = None;
     let mut path_chains = std::collections::HashMap::new();
+    let mut completions = CompletionsState::default();
     dispatch_key(
         k,
         tabs,
@@ -246,6 +253,7 @@ pub(super) fn dispatch_with_ring(
         &mut isearch,
         &mut file_search,
         &mut path_chains,
+        &mut completions,
         &default_keymap(),
         &mut chord,)
 }
@@ -268,6 +276,7 @@ pub(super) fn noop_dispatch(k: KeyEvent, tabs: &mut Tabs) -> DispatchOutcome {
     let mut isearch: Option<IsearchState> = None;
     let mut file_search: Option<FileSearchState> = None;
     let mut path_chains = std::collections::HashMap::new();
+    let mut completions = CompletionsState::default();
     dispatch_key(
         k,
         tabs,
@@ -284,6 +293,7 @@ pub(super) fn noop_dispatch(k: KeyEvent, tabs: &mut Tabs) -> DispatchOutcome {
         &mut isearch,
         &mut file_search,
         &mut path_chains,
+        &mut completions,
         &keymap,
         &mut chord,)
 }

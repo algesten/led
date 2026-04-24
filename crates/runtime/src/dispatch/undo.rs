@@ -372,6 +372,7 @@ fn apply_mark_to_state(state: &mut FileSearchState, hit_idx: usize, target_repla
 
 #[cfg(test)]
 mod tests {
+    use led_state_completions::CompletionsState;
     use led_state_file_search::FileSearchState;
     use led_state_find_file::FindFileState;
     use led_state_isearch::IsearchState;
@@ -450,6 +451,7 @@ mod tests {
         let fs = FsTree::default();
 
         let mut path_chains = std::collections::HashMap::new();
+        let mut completions = CompletionsState::default();
         // Undo: ""
         let mut find_file: Option<FindFileState> = None;
         let mut isearch: Option<IsearchState> = None;
@@ -470,6 +472,7 @@ mod tests {
             &mut isearch,
             &mut file_search,
             &mut path_chains,
+            &mut completions,
             &km,
             &mut chord,);
         assert_eq!(rope_of(&edits, "file.rs").to_string(), "");
@@ -494,6 +497,7 @@ mod tests {
             &mut isearch,
             &mut file_search,
             &mut path_chains,
+            &mut completions,
             &km,
             &mut chord,);
         assert_eq!(rope_of(&edits, "file.rs").to_string(), "hi");
@@ -567,6 +571,7 @@ mod tests {
         let mut isearch: Option<IsearchState> = None;
         let mut file_search: Option<FileSearchState> = None;
         let mut path_chains = std::collections::HashMap::new();
+        let mut completions = CompletionsState::default();
         dispatch_key(
             key(KeyModifiers::CONTROL, KeyCode::Char('y')),
             &mut tabs,
@@ -583,6 +588,7 @@ mod tests {
             &mut isearch,
             &mut file_search,
             &mut path_chains,
+            &mut completions,
             &km,
             &mut chord,);
         // Still "x" — nothing to redo because the new edit dropped

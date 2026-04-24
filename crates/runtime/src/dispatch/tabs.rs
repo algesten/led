@@ -77,6 +77,7 @@ pub(super) fn force_kill(tabs: &mut Tabs, edits: &mut BufferEdits, id: TabId) {
 
 #[cfg(test)]
 mod tests {
+    use led_state_completions::CompletionsState;
     use led_state_file_search::FileSearchState;
     use led_state_find_file::FindFileState;
     use led_state_isearch::IsearchState;
@@ -198,6 +199,7 @@ mod tests {
         let keymap = default_keymap();
 
         let mut path_chains = std::collections::HashMap::new();
+        let mut completions = CompletionsState::default();
         // Ctrl-x k on dirty active tab → prompt set, tab still open.
         let mut find_file: Option<FindFileState> = None;
         let mut isearch: Option<IsearchState> = None;
@@ -218,6 +220,7 @@ mod tests {
             &mut isearch,
             &mut file_search,
             &mut path_chains,
+            &mut completions,
             &keymap,
             &mut chord,);
         let mut find_file: Option<FindFileState> = None;
@@ -239,6 +242,7 @@ mod tests {
             &mut isearch,
             &mut file_search,
             &mut path_chains,
+            &mut completions,
             &keymap,
             &mut chord,);
         assert_eq!(alerts.confirm_kill, Some(TabId(1)));
@@ -264,6 +268,7 @@ mod tests {
         let mut isearch: Option<IsearchState> = None;
         let mut file_search: Option<FileSearchState> = None;
         let mut path_chains = std::collections::HashMap::new();
+        let mut completions = CompletionsState::default();
         dispatch_key(
             key(KeyModifiers::NONE, KeyCode::Char('y')),
             &mut tabs,
@@ -280,6 +285,7 @@ mod tests {
             &mut isearch,
             &mut file_search,
             &mut path_chains,
+            &mut completions,
             &keymap,
             &mut chord,);
         assert!(alerts.confirm_kill.is_none());
@@ -309,6 +315,7 @@ mod tests {
         let mut isearch: Option<IsearchState> = None;
         let mut file_search: Option<FileSearchState> = None;
         let mut path_chains = std::collections::HashMap::new();
+        let mut completions = CompletionsState::default();
         dispatch_key(
             key(KeyModifiers::NONE, KeyCode::Char('Y')),
             &mut tabs,
@@ -325,6 +332,7 @@ mod tests {
             &mut isearch,
             &mut file_search,
             &mut path_chains,
+            &mut completions,
             &keymap,
             &mut chord,);
         assert!(alerts.confirm_kill.is_none());
@@ -350,6 +358,7 @@ mod tests {
         let mut isearch: Option<IsearchState> = None;
         let mut file_search: Option<FileSearchState> = None;
         let mut path_chains = std::collections::HashMap::new();
+        let mut completions = CompletionsState::default();
         dispatch_key(
             key(KeyModifiers::NONE, KeyCode::Char('n')),
             &mut tabs,
@@ -366,6 +375,7 @@ mod tests {
             &mut isearch,
             &mut file_search,
             &mut path_chains,
+            &mut completions,
             &keymap,
             &mut chord,);
         // Prompt dismissed.
@@ -401,6 +411,7 @@ mod tests {
         let mut isearch: Option<IsearchState> = None;
         let mut file_search: Option<FileSearchState> = None;
         let mut path_chains = std::collections::HashMap::new();
+        let mut completions = CompletionsState::default();
         dispatch_key(
             key(KeyModifiers::NONE, KeyCode::Esc),
             &mut tabs,
@@ -417,6 +428,7 @@ mod tests {
             &mut isearch,
             &mut file_search,
             &mut path_chains,
+            &mut completions,
             &keymap,
             &mut chord,);
         assert!(alerts.confirm_kill.is_none());
@@ -450,6 +462,7 @@ mod tests {
         let mut isearch: Option<IsearchState> = None;
         let mut file_search: Option<FileSearchState> = None;
         let mut path_chains = std::collections::HashMap::new();
+        let mut completions = CompletionsState::default();
         dispatch_key(
             key(KeyModifiers::CONTROL, KeyCode::Char('x')),
             &mut tabs,
@@ -466,6 +479,7 @@ mod tests {
             &mut isearch,
             &mut file_search,
             &mut path_chains,
+            &mut completions,
             &keymap,
             &mut chord,);
         let mut find_file: Option<FindFileState> = None;
@@ -487,6 +501,7 @@ mod tests {
             &mut isearch,
             &mut file_search,
             &mut path_chains,
+            &mut completions,
             &keymap,
             &mut chord,);
         assert!(alerts.confirm_kill.is_none());
