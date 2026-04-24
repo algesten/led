@@ -192,17 +192,17 @@ pub struct TabBarModel {
 /// Body view. All owned-string fields use `Arc<str>` / `Arc<Vec<BodyLine>>`
 /// so drv cache-hit clones (which happen on every idle tick through
 /// `render_frame`) never deep-copy the content.
+///
+/// There is deliberately **no** `Pending` or `Error` variant. Loads that
+/// haven't completed yet render as a blank `Content` body (tildes, no
+/// inline "loading..." placeholder); loads that failed with anything
+/// other than `NotFound` surface as status-bar alerts and also render
+/// blank. Inline load messages inside the editing canvas were a legacy-
+/// diverging experiment — the rewrite keeps the canvas clean.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum BodyModel {
     #[default]
     Empty,
-    Pending {
-        path_display: Arc<str>,
-    },
-    Error {
-        path_display: Arc<str>,
-        message: Arc<str>,
-    },
     Content {
         lines: Arc<Vec<BodyLine>>,
         /// Body-relative cursor position `(row, col)`. `None` when the

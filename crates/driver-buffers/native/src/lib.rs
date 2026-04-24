@@ -6,7 +6,7 @@
 //! both speak the same command/event types from `*-core`.
 
 use std::fs;
-use std::io::Write;
+use std::io::{self, Write};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
@@ -75,6 +75,17 @@ fn read_one(path: &CanonPath) -> Result<Arc<Rope>, String> {
     let p: PathBuf = path.as_path().to_path_buf();
     match fs::read_to_string(&p) {
         Ok(s) => Ok(Arc::new(Rope::from_str(&s))),
+        // Missing file: present as an empty buffer so the user can
+        // edit and save to create it. Matches legacy's docstore
+        // `create_if_missing=true` semantics — the dispatched.snap
+        // trace already always writes `create_if_missing=true`, so
+        // this aligns the driver behaviour with the stated
+        // contract. A later milestone can thread an explicit
+        // `create_if_missing=false` mode through the ABI if we
+        // ever need the strict-open flavour (SaveAs re-read path).
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            Ok(Arc::new(Rope::new()))
+        }
         Err(e) => Err(e.to_string()),
     }
 }
@@ -319,7 +330,12 @@ mod tests {
     }
 
     #[test]
-    fn spawn_reports_error_on_missing_file() {
+    fn spawn_treats_missing_file_as_empty_buffer() {
+        // `create_if_missing=true` semantics: opening a path that
+        // doesn't exist yields an empty rope so the user can edit
+        // and save to create it. Real error states (permission
+        // denied etc.) stay as `LoadState::Error`; this test only
+        // covers the common "new file" case.
         let tmp = tempdir();
         let path = canon(&tmp.path().join("does-not-exist.rs"));
 
@@ -329,14 +345,18 @@ mod tests {
         let acts = [LoadAction::Load(path.clone())];
         driver.execute(acts.iter(), &mut store);
 
-        let got_error = wait_until(
+        let got_ready = wait_until(
             || {
                 driver.process(&mut store);
-                matches!(store.loaded.get(&path), Some(LoadState::Error(_)))
+                matches!(store.loaded.get(&path), Some(LoadState::Ready(_)))
             },
             Duration::from_secs(5),
         );
-        assert!(got_error, "expected Error within 5s");
+        assert!(got_ready, "expected Ready(empty) within 5s");
+        let Some(LoadState::Ready(rope)) = store.loaded.get(&path) else {
+            panic!("expected Ready");
+        };
+        assert_eq!(rope.len_chars(), 0, "missing file should load as empty");
     }
 
     // ── Minimal tempdir without a dev-dep ──────────────────────────────

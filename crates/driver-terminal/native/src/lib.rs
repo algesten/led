@@ -503,19 +503,6 @@ fn paint_body(body: &BodyModel, area: Rect, theme: &Theme, buf: &mut Buffer) {
             &[led_driver_terminal_core::BodyDiagnostic],
         ) = match body {
             BodyModel::Empty => (None, &[], None, None, &[]),
-            BodyModel::Pending { path_display } => match row {
-                0 => (Some(path_display.as_ref()), &[], None, None, &[]),
-                1 => (Some("loading..."), &[], None, None, &[]),
-                _ => (None, &[], None, None, &[]),
-            },
-            BodyModel::Error {
-                path_display,
-                message,
-            } => match row {
-                0 => (Some(path_display.as_ref()), &[], None, None, &[]),
-                1 => (Some(message.as_ref()), &[], None, None, &[]),
-                _ => (None, &[], None, None, &[]),
-            },
             BodyModel::Content { lines, .. } => match lines.get(row as usize) {
                 Some(bl) => (
                     Some(bl.text.as_str()),

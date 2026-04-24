@@ -612,30 +612,31 @@ pub fn body_model<'a>(inputs: BodyInputs<'a>) -> BodyModel {
             line_statuses,
         );
     }
-    match store.loaded.get(&tab.path) {
-        None | Some(LoadState::Pending) => BodyModel::Pending {
-            path_display: path_display(tab),
-        },
-        Some(LoadState::Error(msg)) => BodyModel::Error {
-            path_display: path_display(tab),
-            message: Arc::<str>::from(msg.as_str()),
-        },
-        Some(LoadState::Ready(rope)) => {
-            let highlight =
-                active_body_match(&overlays, &tab.path, tab.scroll, area, rope);
-            let line_statuses = git.line_statuses.get(&tab.path).map(|v| v.as_slice());
-            render_content(
-                rope,
-                tab.cursor,
-                tab.scroll,
-                area,
-                highlight,
-                None,
-                None,
-                line_statuses,
-            )
-        }
-    }
+    // No BufferEdits entry yet — the load hasn't been seeded
+    // into the edit-view source. Fall back to what `BufferStore`
+    // knows. On Pending / Error / absent we render a blank body
+    // (tildes, no content), never an in-buffer placeholder or
+    // error message — matches legacy's "empty buffer during the
+    // brief load window" UX and keeps surface errors off the
+    // user's editing canvas. M21 will surface genuine load
+    // failures via the status-bar alert system instead.
+    let empty_rope: Arc<Rope> = Arc::new(Rope::new());
+    let rope_ref: &Rope = match store.loaded.get(&tab.path) {
+        Some(LoadState::Ready(rope)) => rope.as_ref(),
+        None | Some(LoadState::Pending) | Some(LoadState::Error(_)) => &empty_rope,
+    };
+    let highlight = active_body_match(&overlays, &tab.path, tab.scroll, area, rope_ref);
+    let line_statuses = git.line_statuses.get(&tab.path).map(|v| v.as_slice());
+    render_content(
+        rope_ref,
+        tab.cursor,
+        tab.scroll,
+        area,
+        highlight,
+        None,
+        None,
+        line_statuses,
+    )
 }
 
 /// Apply any edits the user made between the parse and now onto
@@ -767,10 +768,6 @@ fn active_body_match(
         col_start: (rel_start + GUTTER_WIDTH) as u16,
         col_end: (rel_end + GUTTER_WIDTH) as u16,
     })
-}
-
-fn path_display(tab: &Tab) -> Arc<str> {
-    Arc::<str>::from(tab.path.display().to_string())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2580,7 +2577,23 @@ mod tests {
         let frame = render(&t, &e, &s, &term).expect("dims set");
         assert_eq!(*frame.tab_bar.labels, vec![" a.rs".to_string()]);
         assert_eq!(frame.tab_bar.active, Some(0));
-        assert!(matches!(frame.body, BodyModel::Pending { .. }));
+        // Pre-load body renders as a blank Content frame: the
+        // single rope line (len_lines=1) paints as an empty body
+        // row, every row past it paints as a tilde. No inline
+        // "loading..." placeholder — we keep the editing canvas
+        // clean while the async read resolves.
+        match &frame.body {
+            BodyModel::Content { lines, .. } => {
+                // First body row is the empty content line.
+                assert_eq!(lines[0].text.trim_end(), "");
+                // Every row past line 0 is a tilde (past-EOF).
+                assert!(
+                    lines[1..].iter().all(|l| l.text.starts_with("~ ")),
+                    "rows past line 0 should all be tildes",
+                );
+            }
+            other => panic!("expected Content (blank), got {other:?}"),
+        }
     }
 
     #[test]
@@ -2904,7 +2917,11 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
     }
 
     #[test]
-    fn render_frame_shows_error_when_load_failed() {
+    fn render_frame_shows_blank_body_when_load_failed() {
+        // Legitimate load errors (permission denied, etc.) render as
+        // a blank body instead of painting the `io::Error` message
+        // inside the editing canvas. Future milestones surface the
+        // failure as a status-bar alert; the body stays clean.
         let (t, e, s, term) = fixture(
             &[("bad.rs", 1)],
             Some(1),
@@ -2912,9 +2929,25 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
             Some(Dims { cols: 80, rows: 24 }),
         );
         let frame = render(&t, &e, &s, &term).expect("dims set");
-        match frame.body {
-            BodyModel::Error { message, .. } => assert_eq!(&*message, "No such file"),
-            other => panic!("expected Error, got {other:?}"),
+        match &frame.body {
+            BodyModel::Content { lines, .. } => {
+                // Empty-rope body: first row blank, rest tildes.
+                assert_eq!(lines[0].text.trim_end(), "");
+                assert!(
+                    lines[1..].iter().all(|l| l.text.starts_with("~ ")),
+                    "error body should paint tildes, not inline the error message",
+                );
+                // The `io::Error` message must NOT appear anywhere
+                // in the body text.
+                for l in lines.iter() {
+                    assert!(
+                        !l.text.contains("No such file"),
+                        "body rendered the error message inline: {:?}",
+                        l.text,
+                    );
+                }
+            }
+            other => panic!("expected Content (blank), got {other:?}"),
         }
     }
 
