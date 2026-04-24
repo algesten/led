@@ -776,6 +776,7 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
             syntax: query::SyntaxStatesInput::new(syntax),
             diagnostics: query::DiagnosticsStatesInput::new(diagnostics),
             lsp: query::LspStatusesInput::new(lsp_status),
+            completions: query::CompletionsSessionInput::new(completions),
             render_tick,
         });
 

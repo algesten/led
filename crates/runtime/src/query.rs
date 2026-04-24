@@ -178,6 +178,24 @@ impl<'a> LspStatusesInput<'a> {
     }
 }
 
+// ── Input on CompletionsState ─────────────────────────────────────────
+
+/// Session-only projection of [`led_state_completions::CompletionsState`].
+/// The memo that renders the popup only cares about the active
+/// `session`; `seq_gen` and the pending outboxes mutate every tick
+/// and would invalidate the popup memo for no visible change.
+#[drv::input]
+#[derive(Copy, Clone)]
+pub struct CompletionsSessionInput<'a> {
+    pub session: &'a Option<led_state_completions::CompletionSession>,
+}
+
+impl<'a> CompletionsSessionInput<'a> {
+    pub fn new(s: &'a led_state_completions::CompletionsState) -> Self {
+        Self { session: &s.session }
+    }
+}
+
 // ── Input on Terminal ──────────────────────────────────────────────────
 
 /// Viewport dims only. A push to `Terminal.pending` is deliberately
@@ -1648,6 +1666,79 @@ pub fn popover_model(
     })
 }
 
+/// Maximum rows the completion popup displays at once. Matches
+/// legacy's fixed window — users scroll the list with
+/// Up/Down beyond this.
+const COMPLETION_MAX_ROWS: usize = 10;
+
+/// "What should the completion popup look like right now?"
+///
+/// Builds the visible window (`scroll..scroll + COMPLETION_MAX_ROWS`)
+/// from the active session's filtered items, computes the label /
+/// detail column widths the painter needs, and anchors the popup
+/// at the cursor's terminal position.
+///
+/// Returns `None` when no session is active, the session's tab
+/// isn't the current active tab (user navigated away), or the
+/// filtered list is empty (the dispatch-side dismiss should have
+/// caught this, but guard anyway so a stale frame doesn't paint
+/// an empty box).
+#[drv::memo(single)]
+pub fn completion_popup_model<'c, 't>(
+    completions: CompletionsSessionInput<'c>,
+    tabs: TabsActiveInput<'t>,
+    editor_area: Rect,
+) -> Option<led_driver_terminal_core::CompletionPopupModel> {
+    use led_driver_terminal_core::{CompletionPopupModel, CompletionRow};
+    let session = completions.session.as_ref()?;
+    let active = (*tabs.active)?;
+    if session.tab != active {
+        return None;
+    }
+    if session.filtered.is_empty() {
+        return None;
+    }
+    // Visible window — scroll..scroll + MAX, clamped to the
+    // filtered length. `selected` has already been scroll-
+    // adjusted by the overlay dispatch (ensure_visible); the
+    // memo just paints what it sees.
+    let total = session.filtered.len();
+    let scroll = session.scroll.min(total.saturating_sub(1));
+    let end = (scroll + COMPLETION_MAX_ROWS).min(total);
+    let mut rows: Vec<CompletionRow> = Vec::with_capacity(end - scroll);
+    let mut label_width: usize = 0;
+    let mut detail_width: usize = 0;
+    for &item_ix in &session.filtered[scroll..end] {
+        let item = &session.items[item_ix];
+        let label_cols = item.label.chars().count();
+        label_width = label_width.max(label_cols);
+        if let Some(d) = item.detail.as_ref() {
+            detail_width = detail_width.max(d.chars().count());
+        }
+        rows.push(CompletionRow {
+            label: item.label.clone(),
+            detail: item.detail.clone(),
+        });
+    }
+    // Anchor at cursor's terminal position. Painter flips above
+    // or below based on remaining rows below the cursor.
+    let tab = tabs.open.iter().find(|t| t.id == session.tab)?;
+    let cursor_col = tab.cursor.col as u16;
+    let cursor_row = tab.cursor.line as u16;
+    let anchor = (
+        editor_area.x.saturating_add(GUTTER_WIDTH as u16).saturating_add(cursor_col),
+        editor_area.y.saturating_add(cursor_row),
+    );
+    let selected_in_window = session.selected.saturating_sub(scroll);
+    Some(CompletionPopupModel {
+        rows: Arc::new(rows),
+        selected: selected_in_window,
+        anchor,
+        label_width: label_width.min(u16::MAX as usize) as u16,
+        detail_width: detail_width.min(u16::MAX as usize) as u16,
+    })
+}
+
 fn severity_rank(s: DiagnosticSeverity) -> u8 {
     match s {
         DiagnosticSeverity::Error => 0,
@@ -1996,6 +2087,7 @@ pub struct RenderInputs<'a> {
     pub syntax: SyntaxStatesInput<'a>,
     pub diagnostics: DiagnosticsStatesInput<'a>,
     pub lsp: LspStatusesInput<'a>,
+    pub completions: CompletionsSessionInput<'a>,
     /// Current frame in 80ms buckets. Used by the status-bar
     /// spinner formatter; the main loop quantises wall-clock
     /// millis to 80 so the memo only invalidates once per
@@ -2017,12 +2109,13 @@ pub fn render_frame(inputs: RenderInputs<'_>) -> Option<Frame> {
         inputs.syntax,
         inputs.diagnostics,
         inputs.lsp,
+        inputs.completions,
         inputs.render_tick,
     )
 }
 
 #[drv::memo(single)]
-fn render_frame_memo<'t, 'e, 'b, 'a, 'al, 'br, 'fs, 'ov, 'sx, 'dx, 'lsp>(
+fn render_frame_memo<'t, 'e, 'b, 'a, 'al, 'br, 'fs, 'ov, 'sx, 'dx, 'lsp, 'co>(
     term: TerminalDimsInput<'t>,
     edits: EditedBuffersInput<'e>,
     store: StoreLoadedInput<'b>,
@@ -2034,6 +2127,7 @@ fn render_frame_memo<'t, 'e, 'b, 'a, 'al, 'br, 'fs, 'ov, 'sx, 'dx, 'lsp>(
     syntax: SyntaxStatesInput<'sx>,
     diagnostics: DiagnosticsStatesInput<'dx>,
     lsp: LspStatusesInput<'lsp>,
+    completions: CompletionsSessionInput<'co>,
     render_tick: u64,
 ) -> Option<Frame> {
     let dims = (*term.dims)?;
@@ -2046,6 +2140,7 @@ fn render_frame_memo<'t, 'e, 'b, 'a, 'al, 'br, 'fs, 'ov, 'sx, 'dx, 'lsp>(
         .map(|area| side_panel_model(fs, browser, overlays, tabs, diagnostics, area.rows));
     let popover =
         popover_model(edits, tabs, overlays, browser, diagnostics, layout.editor_area);
+    let completion = completion_popup_model(completions, tabs, layout.editor_area);
     // Cursor placement, in priority order:
     //
     // 1. Find-file overlay active → status-bar row, column = prompt
@@ -2086,6 +2181,7 @@ fn render_frame_memo<'t, 'e, 'b, 'a, 'al, 'br, 'fs, 'ov, 'sx, 'dx, 'lsp>(
         status_bar,
         side_panel,
         popover,
+        completion,
         layout,
         cursor,
         dims,
@@ -2211,6 +2307,9 @@ mod tests {
             syntax: SyntaxStatesInput::new(&syntax),
             diagnostics: DiagnosticsStatesInput::new(&diags),
             lsp: LspStatusesInput::new(&lsp),
+            completions: CompletionsSessionInput::new(
+                &led_state_completions::CompletionsState::default(),
+            ),
             render_tick: 0,
         })
     }
@@ -2272,6 +2371,9 @@ mod tests {
             syntax: SyntaxStatesInput::new(&syntax),
             diagnostics: DiagnosticsStatesInput::new(&diags),
             lsp: LspStatusesInput::new(&lsp),
+            completions: CompletionsSessionInput::new(
+                &led_state_completions::CompletionsState::default(),
+            ),
             render_tick: 0,
         })
         .expect("dims set");
@@ -2315,6 +2417,9 @@ mod tests {
             syntax: SyntaxStatesInput::new(&syntax),
             diagnostics: DiagnosticsStatesInput::new(&diags),
             lsp: LspStatusesInput::new(&lsp),
+            completions: CompletionsSessionInput::new(
+                &led_state_completions::CompletionsState::default(),
+            ),
             render_tick: 0,
         })
         .expect("dims set");

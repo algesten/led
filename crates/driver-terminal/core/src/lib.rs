@@ -436,12 +436,57 @@ pub struct Frame {
     pub status_bar: StatusBarModel,
     pub side_panel: Option<SidePanelModel>,
     pub popover: Option<PopoverModel>,
+    /// LSP completion popup (M17). Disjoint from the diagnostic
+    /// `popover` because the two have different UX and can
+    /// theoretically co-exist; painter draws the completion on
+    /// top so it wins visually. `None` when no session is live.
+    pub completion: Option<CompletionPopupModel>,
     pub layout: Layout,
     /// Absolute terminal cursor position as `(col, row)` — matches
     /// crossterm's `cursor::MoveTo` argument order. `None` hides the
     /// cursor (no active content / cursor scrolled away).
     pub cursor: Option<(u16, u16)>,
     pub dims: Dims,
+}
+
+/// Visible state for an LSP completion popup.
+///
+/// The memo (`query::completion_popup_model`) builds this when
+/// `CompletionsState.session` is `Some`, stamping in the
+/// server-provided label / detail columns and the popup's
+/// anchor / selected-row state. The painter flips the popup
+/// above the cursor when it would overflow the body bottom,
+/// and clamps it to the editor area horizontally.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct CompletionPopupModel {
+    /// Visible rows (already windowed to `scroll..scroll + N`).
+    /// Each row carries its label + optional detail; the
+    /// painter pads to column widths at render time.
+    pub rows: Arc<Vec<CompletionRow>>,
+    /// Index into `rows` of the highlighted item. Painter draws
+    /// this row with the theme's selection style.
+    pub selected: usize,
+    /// Absolute terminal `(col, row)` anchor — the cursor
+    /// position that's driving the session. Painter chooses
+    /// "below the anchor" first, "above" on overflow.
+    pub anchor: (u16, u16),
+    /// Max width (in chars) of any row's label — the painter
+    /// left-pads every label to this before printing the
+    /// detail column.
+    pub label_width: u16,
+    /// Max width of any row's detail. Used alongside
+    /// `label_width` to compute the popup's outer width.
+    pub detail_width: u16,
+}
+
+/// One visible row in [`CompletionPopupModel`]. `label` is the
+/// primary identifier, `detail` the optional right-side hint
+/// (signature / type / module). Both pre-trimmed by the memo
+/// so the painter never re-measures.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CompletionRow {
+    pub label: Arc<str>,
+    pub detail: Option<Arc<str>>,
 }
 
 // ── Trace ──────────────────────────────────────────────────────────────
