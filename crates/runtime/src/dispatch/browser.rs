@@ -22,17 +22,20 @@ use led_core::{CanonPath, PathChain};
 use led_state_browser::{BrowserUi, Focus, FsTree, TreeEntry, TreeEntryKind};
 use led_state_tabs::Tabs;
 
-use crate::query::{BrowserUiInput, FsTreeInput, TabsActiveInput, browser_entries, browser_selected_idx};
+use crate::query::{
+    BrowserDerivedInputs, BrowserUiInput, FsTreeInput, TabsActiveInput, browser_entries,
+    browser_selected_idx,
+};
 
 use super::shared::{close_preview, open_or_focus_tab};
 
 /// Helper: call the `browser_entries` memo given raw state.
 fn entries_of(browser: &BrowserUi, fs: &FsTree, tabs: &Tabs) -> std::sync::Arc<Vec<TreeEntry>> {
-    browser_entries(
-        FsTreeInput::new(fs),
-        BrowserUiInput::new(browser),
-        TabsActiveInput::new(tabs),
-    )
+    browser_entries(BrowserDerivedInputs {
+        fs: FsTreeInput::new(fs),
+        ui: BrowserUiInput::new(browser),
+        tabs: TabsActiveInput::new(tabs),
+    })
 }
 
 /// Current selected entry (clone), or None on empty tree.

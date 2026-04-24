@@ -88,6 +88,8 @@ impl IsearchState {
     }
 }
 
+led_core::impl_identity_to_static!(IsearchState);
+
 #[cfg(test)]
 mod tests {
     use super::*;

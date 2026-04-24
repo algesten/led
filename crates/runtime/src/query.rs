@@ -36,8 +36,7 @@ use std::sync::Arc;
 // ── Inputs on Tabs ─────────────────────────────────────────────────────
 
 /// Open-tabs slice (for "what files do we need loaded?" queries).
-#[drv::input]
-#[derive(Copy, Clone)]
+#[derive(drv::Input, Copy, Clone)]
 pub struct TabsOpenInput<'a> {
     pub open: &'a imbl::Vector<Tab>,
 }
@@ -50,8 +49,7 @@ impl<'a> TabsOpenInput<'a> {
 
 /// Active-tab slice (for rendering: both `active` id and the `open`
 /// list so the memo can resolve the id to a Tab).
-#[drv::input]
-#[derive(Copy, Clone)]
+#[derive(drv::Input, Copy, Clone)]
 pub struct TabsActiveInput<'a> {
     pub open: &'a imbl::Vector<Tab>,
     pub active: &'a Option<TabId>,
@@ -71,8 +69,7 @@ impl<'a> TabsActiveInput<'a> {
 /// Full `buffers` map for memos that read rope contents (body_model).
 /// On cache hit the projection is a pointer copy; when an edit lands,
 /// the `HashMap` pointer changes and the cache invalidates.
-#[drv::input]
-#[derive(Copy, Clone)]
+#[derive(drv::Input, Copy, Clone)]
 pub struct EditedBuffersInput<'a> {
     pub buffers: &'a imbl::HashMap<CanonPath, EditedBuffer>,
 }
@@ -88,8 +85,7 @@ impl<'a> EditedBuffersInput<'a> {
 /// Pending-save requests. Narrow projection so a cursor move or a
 /// rope edit on `BufferEdits.buffers` doesn't invalidate save-related
 /// memo caches.
-#[drv::input]
-#[derive(Copy, Clone)]
+#[derive(drv::Input, Copy, Clone)]
 pub struct PendingSavesInput<'a> {
     pub paths: &'a imbl::HashSet<CanonPath>,
     pub save_as: &'a imbl::HashMap<CanonPath, CanonPath>,
@@ -107,8 +103,7 @@ impl<'a> PendingSavesInput<'a> {
 // ── Inputs on BufferStore ──────────────────────────────────────────────
 
 /// Whole-map projection over `BufferStore`'s single field.
-#[drv::input]
-#[derive(Copy, Clone)]
+#[derive(drv::Input, Copy, Clone)]
 pub struct StoreLoadedInput<'a> {
     pub loaded: &'a imbl::HashMap<CanonPath, LoadState>,
 }
@@ -127,8 +122,7 @@ impl<'a> StoreLoadedInput<'a> {
 /// that need per-buffer token spans (just `body_model`) lens through
 /// this; on cache hit the projection is a pointer copy because the
 /// map is an `imbl::HashMap`.
-#[drv::input]
-#[derive(Copy, Clone)]
+#[derive(drv::Input, Copy, Clone)]
 pub struct SyntaxStatesInput<'a> {
     pub by_path: &'a imbl::HashMap<CanonPath, SyntaxState>,
 }
@@ -146,8 +140,7 @@ impl<'a> SyntaxStatesInput<'a> {
 /// Per-buffer diagnostic projection. `body_model` consumes this
 /// to paint gutter markers + inline underlines on the rendered
 /// rows. `imbl::HashMap` keeps projection identity pointer-cheap.
-#[drv::input]
-#[derive(Copy, Clone)]
+#[derive(drv::Input, Copy, Clone)]
 pub struct DiagnosticsStatesInput<'a> {
     pub by_path: &'a imbl::HashMap<CanonPath, BufferDiagnostics>,
 }
@@ -164,8 +157,7 @@ impl<'a> DiagnosticsStatesInput<'a> {
 /// projection (not bundled with diagnostics) so progress
 /// churn doesn't invalidate the diagnostic-painter memo
 /// cache.
-#[drv::input]
-#[derive(Copy, Clone)]
+#[derive(drv::Input, Copy, Clone)]
 pub struct LspStatusesInput<'a> {
     pub by_server: &'a imbl::HashMap<String, LspServerStatus>,
 }
@@ -184,8 +176,7 @@ impl<'a> LspStatusesInput<'a> {
 /// The memo that renders the popup only cares about the active
 /// `session`; `seq_gen` and the pending outboxes mutate every tick
 /// and would invalidate the popup memo for no visible change.
-#[drv::input]
-#[derive(Copy, Clone)]
+#[derive(drv::Input, Copy, Clone)]
 pub struct CompletionsSessionInput<'a> {
     pub session: &'a Option<led_state_completions::CompletionSession>,
 }
@@ -203,8 +194,7 @@ impl<'a> CompletionsSessionInput<'a> {
 /// add code-actions + inlay hints here). Pending-request outboxes
 /// intentionally aren't part of this input so every outgoing RPC
 /// doesn't invalidate chrome memos.
-#[drv::input]
-#[derive(Copy, Clone)]
+#[derive(drv::Input, Copy, Clone)]
 pub struct LspExtrasOverlayInput<'a> {
     pub rename: &'a Option<led_state_lsp::RenameState>,
     pub code_actions: &'a Option<led_state_lsp::CodeActionPickerState>,
@@ -223,8 +213,7 @@ impl<'a> LspExtrasOverlayInput<'a> {
 
 /// Viewport dims only. A push to `Terminal.pending` is deliberately
 /// outside this input so incoming events don't invalidate `render_frame`.
-#[drv::input]
-#[derive(Copy, Clone)]
+#[derive(drv::Input, Copy, Clone)]
 pub struct TerminalDimsInput<'a> {
     pub dims: &'a Option<Dims>,
 }
@@ -237,8 +226,7 @@ impl<'a> TerminalDimsInput<'a> {
 
 // ── Input on ClipboardState ────────────────────────────────────────────
 
-#[drv::input]
-#[derive(Copy, Clone)]
+#[derive(drv::Input, Copy, Clone)]
 pub struct ClipboardStateInput<'a> {
     pub pending_yank: &'a Option<TabId>,
     pub read_in_flight: &'a bool,
@@ -260,8 +248,7 @@ impl<'a> ClipboardStateInput<'a> {
 /// Narrow projection — excludes `info_expires_at` since it changes
 /// every 10ms and would thrash the status-bar memo cache. The expiry
 /// is the runtime's concern, not the painter's.
-#[drv::input]
-#[derive(Copy, Clone)]
+#[derive(drv::Input, Copy, Clone)]
 pub struct AlertsInput<'a> {
     pub info: &'a Option<String>,
     pub warns: &'a Vec<(String, String)>,
@@ -282,8 +269,7 @@ impl<'a> AlertsInput<'a> {
 
 /// External-fact projection for [`FsTree`]. Written by the FS driver;
 /// consumed by `file_list_action` and (indirectly) `side_panel_model`.
-#[drv::input]
-#[derive(Copy, Clone)]
+#[derive(drv::Input, Copy, Clone)]
 pub struct FsTreeInput<'a> {
     pub root: &'a Option<CanonPath>,
     pub dir_contents: &'a imbl::HashMap<CanonPath, imbl::Vector<led_state_browser::DirEntry>>,
@@ -302,8 +288,7 @@ impl<'a> FsTreeInput<'a> {
 /// Tree flattening + the resolved selection index are derived —
 /// they live in `browser_entries` and `browser_selected_idx`
 /// below, not on this struct.
-#[drv::input]
-#[derive(Copy, Clone)]
+#[derive(drv::Input, Copy, Clone)]
 pub struct BrowserUiInput<'a> {
     pub expanded_dirs: &'a imbl::HashSet<CanonPath>,
     pub selected_path: &'a Option<CanonPath>,
@@ -327,8 +312,7 @@ impl<'a> BrowserUiInput<'a> {
 /// Projection for the find-file overlay. Still a named type so
 /// the find-file-specific memo (`find_file_action`) can take just
 /// this projection without dragging the whole overlay bundle.
-#[drv::input]
-#[derive(Copy, Clone)]
+#[derive(drv::Input, Copy, Clone)]
 pub struct FindFileInput<'a> {
     pub overlay: &'a Option<led_state_find_file::FindFileState>,
 }
@@ -351,8 +335,7 @@ impl<'a> FindFileInput<'a> {
 /// drv::input) is necessary because drv's input trait uses
 /// pointer-FastEq, which doesn't compose through nested input
 /// structs. Raw `&Option<...>` fields project fine.
-#[drv::input]
-#[derive(Copy, Clone)]
+#[derive(drv::Input, Copy, Clone)]
 pub struct OverlaysInput<'a> {
     pub find_file: &'a Option<led_state_find_file::FindFileState>,
     pub isearch: &'a Option<led_state_isearch::IsearchState>,
@@ -541,16 +524,32 @@ const TRAILING_RESERVED_COLS: usize = 0;
 /// window between a load completion and the runtime's next
 /// BufferEdits seed, plus Pending / Error paths that never made it
 /// to `Ready`.
+/// Bundled input for [`body_model`] — drv 0.4 nested-inputs
+/// shape. Reduces the memo signature from 7 positional args to
+/// 1. Callers build one labelled struct literal; drv's
+/// per-field equality walks into each projection normally.
+#[derive(Copy, Clone, drv::Input)]
+pub struct BodyInputs<'a> {
+    pub edits: EditedBuffersInput<'a>,
+    pub store: StoreLoadedInput<'a>,
+    pub tabs: TabsActiveInput<'a>,
+    pub overlays: OverlaysInput<'a>,
+    pub syntax: SyntaxStatesInput<'a>,
+    pub diagnostics: DiagnosticsStatesInput<'a>,
+    pub area: Rect,
+}
+
 #[drv::memo(single)]
-pub fn body_model<'e, 'a, 'b, 'o, 's, 'd>(
-    edits: EditedBuffersInput<'e>,
-    store: StoreLoadedInput<'a>,
-    tabs: TabsActiveInput<'b>,
-    overlays: OverlaysInput<'o>,
-    syntax: SyntaxStatesInput<'s>,
-    diagnostics: DiagnosticsStatesInput<'d>,
-    area: Rect,
-) -> BodyModel {
+pub fn body_model<'a>(inputs: BodyInputs<'a>) -> BodyModel {
+    let BodyInputs {
+        edits,
+        store,
+        tabs,
+        overlays,
+        syntax,
+        diagnostics,
+        area,
+    } = inputs;
     let Some(id) = *tabs.active else {
         return BodyModel::Empty;
     };
@@ -1051,17 +1050,33 @@ fn strip_trailing_newline(s: &mut String) {
 ///
 /// All strings are `Arc<str>` so cache-hit clones of
 /// [`StatusBarModel`] are a pointer copy.
+///
+/// Bundled input — drv 0.4 nested-inputs shape. Reduces the
+/// memo signature from 8 positional args to 1.
+#[derive(Copy, Clone, drv::Input)]
+pub struct StatusBarInputs<'a> {
+    pub alerts: AlertsInput<'a>,
+    pub tabs: TabsActiveInput<'a>,
+    pub edits: EditedBuffersInput<'a>,
+    pub overlays: OverlaysInput<'a>,
+    pub diagnostics: DiagnosticsStatesInput<'a>,
+    pub lsp: LspStatusesInput<'a>,
+    pub lsp_extras: LspExtrasOverlayInput<'a>,
+    pub render_tick: u64,
+}
+
 #[drv::memo(single)]
-pub fn status_bar_model<'a, 'b, 'c, 'o, 'd, 'l, 'le>(
-    alerts: AlertsInput<'a>,
-    tabs: TabsActiveInput<'b>,
-    edits: EditedBuffersInput<'c>,
-    overlays: OverlaysInput<'o>,
-    diagnostics: DiagnosticsStatesInput<'d>,
-    lsp: LspStatusesInput<'l>,
-    lsp_extras: LspExtrasOverlayInput<'le>,
-    render_tick: u64,
-) -> StatusBarModel {
+pub fn status_bar_model<'a>(inputs: StatusBarInputs<'a>) -> StatusBarModel {
+    let StatusBarInputs {
+        alerts,
+        tabs,
+        edits,
+        overlays,
+        diagnostics,
+        lsp,
+        lsp_extras,
+        render_tick,
+    } = inputs;
     // Priority 0a — LSP rename overlay prompt (M18).
     if let Some(state) = lsp_extras.rename.as_ref() {
         let mut left = String::with_capacity(state.input.text.len() + 10);
@@ -1314,15 +1329,28 @@ fn position_string(
 /// - Find-file overlay active with `show_side=true` → render the
 ///   completions list.
 /// - Otherwise → render the file-browser tree.
+///
+/// Bundled input — drv 0.4 nested-inputs shape.
+#[derive(Copy, Clone, drv::Input)]
+pub struct SidePanelInputs<'a> {
+    pub fs: FsTreeInput<'a>,
+    pub browser: BrowserUiInput<'a>,
+    pub overlays: OverlaysInput<'a>,
+    pub tabs: TabsActiveInput<'a>,
+    pub diagnostics: DiagnosticsStatesInput<'a>,
+    pub rows: u16,
+}
+
 #[drv::memo(single)]
-pub fn side_panel_model<'f, 'b, 'o, 't, 'd>(
-    fs: FsTreeInput<'f>,
-    browser: BrowserUiInput<'b>,
-    overlays: OverlaysInput<'o>,
-    tabs: TabsActiveInput<'t>,
-    diagnostics: DiagnosticsStatesInput<'d>,
-    rows: u16,
-) -> SidePanelModel {
+pub fn side_panel_model<'a>(inputs: SidePanelInputs<'a>) -> SidePanelModel {
+    let SidePanelInputs {
+        fs,
+        browser,
+        overlays,
+        tabs,
+        diagnostics,
+        rows,
+    } = inputs;
     if let Some(state) = overlays.file_search.as_ref() {
         return file_search_side_panel(state, rows);
     }
@@ -1331,7 +1359,11 @@ pub fn side_panel_model<'f, 'b, 'o, 't, 'd>(
     {
         return completions_side_panel(state, rows);
     }
-    let entries = browser_entries(fs, browser, tabs);
+    let entries = browser_entries(BrowserDerivedInputs {
+        fs,
+        ui: browser,
+        tabs,
+    });
     let selected = browser_selected_idx(&entries, browser.selected_path.as_ref());
     let rows = rows as usize;
     let start = *browser.scroll_offset;
@@ -2037,16 +2069,27 @@ pub fn file_categories_map<'d>(
     Arc::new(map)
 }
 
+/// Shared input for the three browser-derived memos
+/// (`browser_auto_expanded`, `browser_entries`, `file_list_action`).
+/// All three read the same triple — drv 0.4 nested-inputs shape
+/// lets them share the bundle instead of each taking three
+/// positional args.
+#[derive(Copy, Clone, drv::Input)]
+pub struct BrowserDerivedInputs<'a> {
+    pub fs: FsTreeInput<'a>,
+    pub ui: BrowserUiInput<'a>,
+    pub tabs: TabsActiveInput<'a>,
+}
+
 /// Auto-expanded ancestor chain for the active tab, excluding
 /// user-pinned dirs. Pure derivation — no state written anywhere.
 /// Memoized so downstream consumers (entries walk, list-action
 /// emitter, painter) share the computation.
 #[drv::memo(single)]
-pub fn browser_auto_expanded<'f, 'u, 't>(
-    fs: FsTreeInput<'f>,
-    ui: BrowserUiInput<'u>,
-    tabs: TabsActiveInput<'t>,
+pub fn browser_auto_expanded<'a>(
+    inputs: BrowserDerivedInputs<'a>,
 ) -> Arc<imbl::HashSet<CanonPath>> {
+    let BrowserDerivedInputs { fs, ui, tabs } = inputs;
     let active_path = (*tabs.active)
         .and_then(|id| tabs.open.iter().find(|t| t.id == id))
         .map(|t| t.path.clone());
@@ -2065,12 +2108,11 @@ pub fn browser_auto_expanded<'f, 'u, 't>(
 /// `(fs, expanded_dirs ∪ auto_expanded_dirs)`. `Arc`-wrapped so
 /// the memo cache holds the same allocation across cache hits.
 #[drv::memo(single)]
-pub fn browser_entries<'f, 'u, 't>(
-    fs: FsTreeInput<'f>,
-    ui: BrowserUiInput<'u>,
-    tabs: TabsActiveInput<'t>,
+pub fn browser_entries<'a>(
+    inputs: BrowserDerivedInputs<'a>,
 ) -> Arc<Vec<TreeEntry>> {
-    let auto = browser_auto_expanded(fs, ui, tabs);
+    let BrowserDerivedInputs { fs, ui, tabs: _ } = inputs;
+    let auto = browser_auto_expanded(inputs);
     // Effective set = user-pinned ∪ auto-revealed. Reuse the
     // user bucket directly when the auto set is empty, skipping
     // the union allocation for the common idle case.
@@ -2116,11 +2158,10 @@ pub fn browser_selected_idx(
 /// auto-revealed ancestor of the active tab) but isn't in
 /// `dir_contents` yet. Used to drive `FsListDriver::execute`.
 #[drv::memo(single)]
-pub fn file_list_action<'f, 'u, 't>(
-    fs: FsTreeInput<'f>,
-    ui: BrowserUiInput<'u>,
-    tabs: TabsActiveInput<'t>,
+pub fn file_list_action<'a>(
+    inputs: BrowserDerivedInputs<'a>,
 ) -> Vec<ListCmd> {
+    let BrowserDerivedInputs { fs, ui, tabs: _ } = inputs;
     let mut out: Vec<ListCmd> = Vec::new();
     if let Some(root) = fs.root.as_ref()
         && !fs.dir_contents.contains_key(root)
@@ -2135,7 +2176,7 @@ pub fn file_list_action<'f, 'u, 't>(
     // Auto-reveal also needs listings for any auto-expanded dir
     // not yet cached — otherwise the tree reveal stalls until
     // the user hits expand/collapse manually.
-    let auto = browser_auto_expanded(fs, ui, tabs);
+    let auto = browser_auto_expanded(inputs);
     for dir in auto.iter() {
         if !fs.dir_contents.contains_key(dir) && !ui.expanded_dirs.contains(dir) {
             out.push(ListCmd::List(dir.clone()));
@@ -2147,23 +2188,16 @@ pub fn file_list_action<'f, 'u, 't>(
 /// Top-level render model. Composes the per-region memos — each
 /// independently cached in its own per-memo thread-local cache.
 ///
-/// The call site pattern for a memo composing sibling memos: pass the
-/// same input values through — drv 0.3's input types are `Copy` over
-/// references, so forwarding is free.
-/// Bundle of every projection `render_frame` reads. Plain struct —
-/// not a `#[drv::input]`, since drv's input trait uses pointer-
-/// FastEq and doesn't compose through nested inputs. Instead this
-/// is a call-site convenience that the public `render_frame`
-/// wrapper explodes into the inner memo, so callers construct one
-/// labelled struct literal instead of positionally lining up seven
-/// arguments.
-///
-/// Future memos that also need "most of the runtime state" should
-/// take this same bundle. The inner memo arg count stays under the
-/// clippy `too_many_arguments` threshold because
-/// `OverlaysInput` already collapses the per-overlay projections
-/// (find-file, isearch, future LSP completion, ...) into one.
-#[derive(Copy, Clone)]
+/// Bundle of every projection the top-level render memo reads.
+/// Composed of 13 narrower projection inputs (plus the
+/// `render_tick` scalar), each of which is itself a
+/// `#[derive(drv::Input)]` — the drv 0.4 nested-inputs shape.
+/// Callers construct one labelled struct literal instead of
+/// positionally lining up fourteen arguments; the inner memo
+/// takes this whole bundle, and drv's per-field `eq_static`
+/// walks into each projection so a single-field change still
+/// invalidates correctly.
+#[derive(Copy, Clone, drv::Input)]
 pub struct RenderInputs<'a> {
     pub term: TerminalDimsInput<'a>,
     pub edits: EditedBuffersInput<'a>,
@@ -2186,52 +2220,58 @@ pub struct RenderInputs<'a> {
     pub render_tick: u64,
 }
 
-pub fn render_frame(inputs: RenderInputs<'_>) -> Option<Frame> {
-    render_frame_memo(
-        inputs.term,
-        inputs.edits,
-        inputs.store,
-        inputs.tabs,
-        inputs.alerts,
-        inputs.browser,
-        inputs.fs,
-        inputs.overlays,
-        inputs.syntax,
-        inputs.diagnostics,
-        inputs.lsp,
-        inputs.completions,
-        inputs.lsp_extras,
-        inputs.render_tick,
-    )
-}
-
 #[drv::memo(single)]
-fn render_frame_memo<'t, 'e, 'b, 'a, 'al, 'br, 'fs, 'ov, 'sx, 'dx, 'lsp, 'co, 'le>(
-    term: TerminalDimsInput<'t>,
-    edits: EditedBuffersInput<'e>,
-    store: StoreLoadedInput<'b>,
-    tabs: TabsActiveInput<'a>,
-    alerts: AlertsInput<'al>,
-    browser: BrowserUiInput<'br>,
-    fs: FsTreeInput<'fs>,
-    overlays: OverlaysInput<'ov>,
-    syntax: SyntaxStatesInput<'sx>,
-    diagnostics: DiagnosticsStatesInput<'dx>,
-    lsp: LspStatusesInput<'lsp>,
-    completions: CompletionsSessionInput<'co>,
-    lsp_extras: LspExtrasOverlayInput<'le>,
-    render_tick: u64,
-) -> Option<Frame> {
+pub fn render_frame<'a>(inputs: RenderInputs<'a>) -> Option<Frame> {
+    let RenderInputs {
+        term,
+        edits,
+        store,
+        tabs,
+        alerts,
+        browser,
+        fs,
+        overlays,
+        syntax,
+        diagnostics,
+        lsp,
+        completions,
+        lsp_extras,
+        render_tick,
+    } = inputs;
     let dims = (*term.dims)?;
     let layout = Layout::compute(dims, *browser.visible);
     let tab_bar = tab_bar_model(tabs, edits);
-    let body = body_model(edits, store, tabs, overlays, syntax, diagnostics, layout.editor_area);
-    let status_bar = status_bar_model(
-        alerts, tabs, edits, overlays, diagnostics, lsp, lsp_extras, render_tick,
-    );
+    let body = body_model(BodyInputs {
+        edits,
+        store,
+        tabs,
+        overlays,
+        syntax,
+        diagnostics,
+        area: layout.editor_area,
+    });
+    let status_bar = status_bar_model(StatusBarInputs {
+        alerts,
+        tabs,
+        edits,
+        overlays,
+        diagnostics,
+        lsp,
+        lsp_extras,
+        render_tick,
+    });
     let side_panel = layout
         .side_area
-        .map(|area| side_panel_model(fs, browser, overlays, tabs, diagnostics, area.rows));
+        .map(|area| {
+            side_panel_model(SidePanelInputs {
+                fs,
+                browser,
+                overlays,
+                tabs,
+                diagnostics,
+                rows: area.rows,
+            })
+        });
     let popover =
         popover_model(edits, tabs, overlays, browser, diagnostics, layout.editor_area);
     // Code-action picker wins when live — the rename overlay
@@ -3040,16 +3080,18 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
         let is = None;
         let diags = DiagnosticsStates::default();
         let lsp = LspStatuses::default();
-        status_bar_model(
-            AlertsInput::new(a),
-            TabsActiveInput::new(t),
-            EditedBuffersInput::new(e),
-            OverlaysInput::new(&ff, &is, &None),
-            DiagnosticsStatesInput::new(&diags),
-            LspStatusesInput::new(&lsp),
-            LspExtrasOverlayInput::new(&led_state_lsp::LspExtrasState::default()),
-            0,
-        )
+        status_bar_model(StatusBarInputs {
+            alerts: AlertsInput::new(a),
+            tabs: TabsActiveInput::new(t),
+            edits: EditedBuffersInput::new(e),
+            overlays: OverlaysInput::new(&ff, &is, &None),
+            diagnostics: DiagnosticsStatesInput::new(&diags),
+            lsp: LspStatusesInput::new(&lsp),
+            lsp_extras: LspExtrasOverlayInput::new(
+                &led_state_lsp::LspExtrasState::default(),
+            ),
+            render_tick: 0,
+        })
     }
 
     #[test]
@@ -3278,15 +3320,15 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
 
         let syntax = SyntaxStates::default();
         let diags = DiagnosticsStates::default();
-        let model = body_model(
-            EditedBuffersInput::new(&e),
-            StoreLoadedInput::new(&s),
-            TabsActiveInput::new(&t),
-            OverlaysInput::new(&None, &is, &fs),
-            SyntaxStatesInput::new(&syntax),
-            DiagnosticsStatesInput::new(&diags),
-            Rect { x: 0, y: 0, cols: 40, rows: 5 },
-        );
+        let model = body_model(BodyInputs {
+            edits: EditedBuffersInput::new(&e),
+            store: StoreLoadedInput::new(&s),
+            tabs: TabsActiveInput::new(&t),
+            overlays: OverlaysInput::new(&None, &is, &fs),
+            syntax: SyntaxStatesInput::new(&syntax),
+            diagnostics: DiagnosticsStatesInput::new(&diags),
+            area: Rect { x: 0, y: 0, cols: 40, rows: 5 },
+        });
         match model {
             BodyModel::Content {
                 match_highlight: Some(mh),
@@ -3350,15 +3392,15 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
 
         let syntax = SyntaxStates::default();
         let diags = DiagnosticsStates::default();
-        let model = body_model(
-            EditedBuffersInput::new(&e),
-            StoreLoadedInput::new(&s),
-            TabsActiveInput::new(&t),
-            OverlaysInput::new(&None, &is, &fs),
-            SyntaxStatesInput::new(&syntax),
-            DiagnosticsStatesInput::new(&diags),
-            Rect { x: 0, y: 0, cols: 40, rows: 5 },
-        );
+        let model = body_model(BodyInputs {
+            edits: EditedBuffersInput::new(&e),
+            store: StoreLoadedInput::new(&s),
+            tabs: TabsActiveInput::new(&t),
+            overlays: OverlaysInput::new(&None, &is, &fs),
+            syntax: SyntaxStatesInput::new(&syntax),
+            diagnostics: DiagnosticsStatesInput::new(&diags),
+            area: Rect { x: 0, y: 0, cols: 40, rows: 5 },
+        });
         match model {
             BodyModel::Content { match_highlight, .. } => {
                 assert_eq!(match_highlight, None);
@@ -3772,14 +3814,14 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
         let ff = None;
         let is = None;
         let fsrch = None;
-        let panel = side_panel_model(
-            FsTreeInput::new(&fs),
-            BrowserUiInput::new(&browser),
-            OverlaysInput::new(&ff, &is, &fsrch),
-            TabsActiveInput::new(&tabs),
-            DiagnosticsStatesInput::new(&diags),
-            10,
-        );
+        let panel = side_panel_model(SidePanelInputs {
+            fs: FsTreeInput::new(&fs),
+            browser: BrowserUiInput::new(&browser),
+            overlays: OverlaysInput::new(&ff, &is, &fsrch),
+            tabs: TabsActiveInput::new(&tabs),
+            diagnostics: DiagnosticsStatesInput::new(&diags),
+            rows: 10,
+        });
         let rows: &Vec<SidePanelRow> = &panel.rows;
         let by_name = |name: &str| rows.iter().find(|r| &*r.name == name).cloned();
         // `/p/sub` (directory) — aggregates LspError from descendant.

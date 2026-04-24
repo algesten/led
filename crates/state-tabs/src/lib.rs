@@ -75,7 +75,14 @@ pub struct Tab {
 /// Invariants (maintained by dispatch, debug-asserted in tests):
 /// - `active.is_some()` iff `!open.is_empty()`
 /// - when `Some`, `active` is the id of exactly one [`Tab`] in `open`
-#[derive(Debug, Clone, PartialEq, Default)]
+///
+/// Carries `#[derive(drv::Input)]` so it can be used as a memo
+/// input directly (see [`desired_loaded_paths`] below). A
+/// narrower projection (via its own `#[derive(drv::Input)]`
+/// struct in `runtime::query`) is still preferable when a memo
+/// only reads a subset of the fields — that path invalidates
+/// less often as other fields churn.
+#[derive(Debug, Clone, PartialEq, Default, drv::Input)]
 pub struct Tabs {
     pub open: imbl::Vector<Tab>,
     pub active: Option<TabId>,
@@ -85,9 +92,9 @@ pub struct Tabs {
 /// referenced by any open tab. Trivial for milestone 1 (every tab);
 /// later milestones may prune (e.g., active + neighbours only).
 ///
-/// Uses `&Tabs` as the memo input directly — the projection is the
-/// whole struct. A narrower `#[drv::input]` would be warranted only
-/// if memo-recompute on `active` changes becomes measurable.
+/// Uses `&Tabs` as the memo input directly — the projection is
+/// the whole struct. A narrower projection is warranted only if
+/// memo-recompute on `active` changes becomes measurable.
 #[drv::memo(single)]
 pub fn desired_loaded_paths(tabs: &Tabs) -> imbl::HashSet<CanonPath> {
     tabs.open.iter().map(|t| t.path.clone()).collect()

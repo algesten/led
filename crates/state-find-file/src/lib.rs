@@ -191,6 +191,8 @@ impl FindFileState {
     }
 }
 
+led_core::impl_identity_to_static!(FindFileState);
+
 /// Split `input` into `(dir_prefix, leaf_prefix)` for driver requests.
 ///
 /// - If `input` ends with `/`, the whole thing is the directory and

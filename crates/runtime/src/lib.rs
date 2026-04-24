@@ -843,11 +843,11 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
             PendingSavesInput::new(edits),
             EditedBuffersInput::new(edits),
         );
-        let list_actions = file_list_action(
-            FsTreeInput::new(fs),
-            BrowserUiInput::new(browser),
-            TabsActiveInput::new(tabs),
-        );
+        let list_actions = file_list_action(query::BrowserDerivedInputs {
+            fs: FsTreeInput::new(fs),
+            ui: BrowserUiInput::new(browser),
+            tabs: TabsActiveInput::new(tabs),
+        });
         let find_file_actions = find_file_action(FindFileInput::new(find_file));
         // Spinner frame clock — current millis since UNIX epoch,
         // quantised to 80ms buckets. Pinned to `0` when no LSP

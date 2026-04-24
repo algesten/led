@@ -28,6 +28,8 @@ pub enum Focus {
     Side,
 }
 
+led_core::impl_identity_to_static!(Focus);
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TreeEntryKind {
     File,

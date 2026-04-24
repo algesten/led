@@ -106,6 +106,8 @@ pub struct CompletionSession {
     pub scroll: usize,
 }
 
+led_core::impl_identity_to_static!(CompletionSession);
+
 impl CompletionsState {
     /// Allocate the next request / resolve sequence id.
     pub fn next_seq(&mut self) -> u64 {

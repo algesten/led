@@ -1041,15 +1041,15 @@ mod tests {
         let browser = BrowserUi::default();
         let dims = term.dims.expect("dims");
         let layout = Layout::compute(dims, browser.visible);
-        let _ = query::body_model(
-            EditedBuffersInput::new(&edits),
-            StoreLoadedInput::new(&store),
-            TabsActiveInput::new(&tabs),
-            OverlaysInput::new(&None, &None, &None),
-            SyntaxStatesInput::new(&syntax),
-            DiagnosticsStatesInput::new(&diags),
-            layout.editor_area,
-        );
+        let _ = query::body_model(query::BodyInputs {
+            edits: EditedBuffersInput::new(&edits),
+            store: StoreLoadedInput::new(&store),
+            tabs: TabsActiveInput::new(&tabs),
+            overlays: OverlaysInput::new(&None, &None, &None),
+            syntax: SyntaxStatesInput::new(&syntax),
+            diagnostics: DiagnosticsStatesInput::new(&diags),
+            area: layout.editor_area,
+        });
         // Reaching here == body_model didn't panic.
         let _: Rect = layout.editor_area;
     }

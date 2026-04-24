@@ -5,5 +5,6 @@ edition = "2024"
 publish = false
 
 [dependencies]
+drv = { workspace = true }
 imbl = { workspace = true }
 ropey = { workspace = true }

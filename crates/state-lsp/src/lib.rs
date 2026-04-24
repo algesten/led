@@ -176,6 +176,8 @@ impl RenameState {
     }
 }
 
+led_core::impl_identity_to_static!(RenameState);
+
 /// Queued rename request — the `new_name` is whatever the user
 /// had typed into `RenameState.input` at Enter time.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -204,6 +206,8 @@ pub struct CodeActionPickerState {
     pub selected: usize,
     pub scroll: usize,
 }
+
+led_core::impl_identity_to_static!(CodeActionPickerState);
 
 /// Queued `textDocument/codeAction` request. Range covers
 /// mark..cursor when a selection is active, else cursor..cursor.

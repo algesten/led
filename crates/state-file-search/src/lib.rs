@@ -155,6 +155,8 @@ impl FileSearchState {
     }
 }
 
+led_core::impl_identity_to_static!(FileSearchState);
+
 #[cfg(test)]
 mod tests {
     use super::*;
