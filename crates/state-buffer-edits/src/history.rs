@@ -117,10 +117,15 @@ impl History {
         !self.future.is_empty()
     }
 
-    /// Drop every recorded group (past, future, current). Called by
-    /// the runtime after a successful save — saved state becomes
-    /// the new baseline and the prior undo chain no longer matches
-    /// it. Matches legacy's `WorkspaceClearUndo` semantic.
+    /// Drop every recorded group (past, future, current).
+    ///
+    /// NOT called after save — legacy's `WorkspaceClearUndo` is a
+    /// workspace-driver command that drops the SQLite-persisted
+    /// undo entries for a path, NOT the in-memory stack. The
+    /// in-memory history survives saves so the user can still
+    /// Ctrl-/ a format-on-save back out. This helper is retained
+    /// for the `SaveAs` refresh path and for tests that need to
+    /// fabricate a pristine history.
     pub fn clear(&mut self) {
         self.past.clear();
         self.future.clear();

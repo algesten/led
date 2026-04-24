@@ -1085,9 +1085,14 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
         }
         drivers.file_write.execute(save_actions.iter());
 
-        // Saved state becomes the new baseline: truncate each saved
-        // buffer's undo history and emit the paired
-        // `WorkspaceClearUndo` trace. Matches legacy.
+        // Emit the paired `WorkspaceClearUndo` trace for every
+        // save. Legacy's semantic here is "drop the buffer's
+        // persisted undo entries from SQLite" — NOT "wipe the
+        // in-memory undo stack". The in-memory history stays
+        // intact across saves so the user can still Ctrl-/ a
+        // format-on-save or any other post-save state back out.
+        // M21 wires the disk-side drop against the real session
+        // DB; this trace line is the dispatched-intent record.
         //
         // SaveAs uses `from` (the source buffer whose content was
         // saved), not `to` — the target is a fresh file on disk
@@ -1101,9 +1106,6 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
                 led_driver_buffers_core::SaveAction::Save { path, .. } => (path, false),
                 led_driver_buffers_core::SaveAction::SaveAs { from, .. } => (from, true),
             };
-            if let Some(eb) = edits.buffers.get_mut(path) {
-                eb.history.clear();
-            }
             trace.workspace_clear_undo(path);
             if is_save_as {
                 trace.file_reopen_existing(path);
@@ -2489,6 +2491,55 @@ mod tests {
         assert!(lsp_extras.latest_rename_seq.is_none());
         assert!(
             alerts.info.as_ref().map_or(false, |m| m.contains("Renamed"))
+        );
+    }
+
+    #[test]
+    fn format_on_save_history_survives_for_undo() {
+        // Regression: saving a file that triggers an LSP format
+        // (which records history entries for each applied edit)
+        // must leave those entries in the buffer's history so the
+        // user can Ctrl-/ back to pre-format content. Legacy's
+        // `WorkspaceClearUndo` is a SQLite-side operation, not an
+        // in-memory wipe; the rewrite used to conflate the two.
+        use led_driver_lsp_core::{EditsOrigin, FileEdit, TextEditOp};
+        let path = canon("a.rs");
+        let mut edits = BufferEdits::default();
+        let mut eb = EditedBuffer::fresh(Arc::new(Rope::from_str("x")));
+        eb.version = 1;
+        edits.buffers.insert(path.clone(), eb);
+        let mut alerts = AlertState::default();
+        let mut lsp_extras = led_state_lsp::LspExtrasState::default();
+        lsp_extras.pending_save_after_format.insert(path.clone());
+        lsp_extras.latest_format_seq.insert(path.clone(), 1);
+
+        let file_edits = std::sync::Arc::new(vec![FileEdit {
+            path: path.clone(),
+            edits: vec![TextEditOp {
+                start_line: 0,
+                start_col: 0,
+                end_line: 0,
+                end_col: 1,
+                new_text: std::sync::Arc::<str>::from("X"),
+            }],
+        }]);
+        apply_lsp_edits(
+            &mut edits,
+            &mut alerts,
+            &mut lsp_extras,
+            1,
+            EditsOrigin::Format,
+            &file_edits,
+        );
+        // Format applied.
+        assert_eq!(edits.buffers[&path].rope.to_string(), "X");
+        // History MUST retain the record_replace entry so undo
+        // can revert it. Before the fix this was cleared by the
+        // save-action loop in run().
+        let eb = &edits.buffers[&path];
+        assert!(
+            eb.history.past_len() > 0,
+            "format edit should leave a history entry behind for Ctrl-/ to undo",
         );
     }
 
