@@ -62,7 +62,7 @@ use crate::classify::{Incoming, RequestId};
 use crate::protocol::{
     InitializeCapabilities, build_initialize_request,
     build_did_change_configuration_notification, build_initialized_notification, language_id,
-    parse_initialize_response,
+    parse_completion_response, parse_initialize_response, parse_resolve_additional_edits,
     path_from_uri, uri_from_path,
 };
 use crate::registry::LspRegistry;
@@ -101,6 +101,21 @@ enum PendingRequest {
     PullDiagnostic { path: CanonPath },
     /// Waiting on `shutdown` before we send `exit`.
     Shutdown,
+    /// Waiting on a `textDocument/completion` response. `seq`
+    /// echoes `LspCmd::RequestCompletion.seq` back to the runtime
+    /// in the resulting `LspEvent::Completion` so the runtime
+    /// can drop stale items. `line` is the cursor line at
+    /// request time (carried through because the LSP response
+    /// doesn't echo it and we need it for prefix extraction).
+    Completion {
+        path: CanonPath,
+        seq: u64,
+        line: u32,
+    },
+    /// Waiting on a `completionItem/resolve` response. `seq`
+    /// echoes `LspCmd::ResolveCompletion.seq` so the runtime
+    /// can ignore resolves from a stale session.
+    ResolveCompletion { path: CanonPath, seq: u64 },
 }
 
 struct ServerEntry {
@@ -131,6 +146,16 @@ struct ServerEntry {
     /// post-open) we fall back to full-text. Small Arc clone, so
     /// the cache cost is a pointer per path.
     last_rope_sent: HashMap<CanonPath, Arc<Rope>>,
+    /// Server-advertised completion support. `completion_provider`
+    /// gates `textDocument/completion`; `completion_trigger_chars`
+    /// informs the runtime which input chars should kick a fresh
+    /// request (the driver forwards them as-is — the runtime
+    /// decides per-keystroke). `completion_resolve_provider` is
+    /// future-proofing: controls whether `completionItem/resolve`
+    /// round-trips on commit.
+    completion_provider: bool,
+    completion_trigger_chars: Vec<char>,
+    completion_resolve_provider: bool,
 }
 
 /// Lifecycle marker.
@@ -493,16 +518,10 @@ impl Manager {
                 col,
                 trigger,
             } => {
-                // Stage 3 fills this in with the real
-                // `textDocument/completion` request. Until then
-                // silently drop so the rest of M17 can land
-                // without forcing stage-3 order.
-                let _ = (path, seq, line, col, trigger);
+                self.request_completion(path, seq, line, col, trigger);
             }
             LspCmd::ResolveCompletion { path, seq, item } => {
-                // Stage 3 fills this in with
-                // `completionItem/resolve`.
-                let _ = (path, seq, item);
+                self.resolve_completion(path, seq, item);
             }
         }
     }
@@ -578,6 +597,11 @@ impl Manager {
             buffer_hashes: HashMap::new(),
             deferred_init_request: false,
             last_rope_sent: HashMap::new(),
+            // Completion caps default to "no support"; parsed
+            // from the initialize response in `finish_initialize`.
+            completion_provider: false,
+            completion_trigger_chars: Vec::new(),
+            completion_resolve_provider: false,
         };
         entry.pending_requests.insert(id, PendingRequest::Initialize);
         self.servers.insert(language, entry);
@@ -788,6 +812,162 @@ impl Manager {
         }
     }
 
+    /// Send `textDocument/completion` for the cursor at
+    /// `(line, col)` on `path`. The runtime's `seq` is carried
+    /// into the `PendingRequest` so the eventual
+    /// `LspEvent::Completion` can echo it back — stale responses
+    /// (seq older than the latest live request) are dropped at
+    /// the ingest end. Silently no-ops when no server is attached
+    /// to the path's language or the server doesn't advertise
+    /// `completionProvider`.
+    fn request_completion(
+        &mut self,
+        path: CanonPath,
+        seq: u64,
+        line: u32,
+        col: u32,
+        trigger: Option<char>,
+    ) {
+        let Some(language) = self.language_for_path(&path) else {
+            return;
+        };
+        let id = self.fresh_id();
+        let entry = self.servers.get_mut(&language).expect("just resolved");
+        if !entry.completion_provider {
+            return;
+        }
+        // triggerCharacter is only set when the char was in the
+        // server-advertised list; otherwise report Invoked (2).
+        // Matches legacy `spawn_completion` exactly — legacy
+        // always sends Invoked with `trigger_character: None`,
+        // but we honour the char when we know the server asked
+        // for it so smart servers can tune the candidate set.
+        let (trigger_kind, trigger_char_json) = match trigger {
+            Some(c) if entry.completion_trigger_chars.contains(&c) => {
+                (2u8 /* TriggerCharacter */, json!(c.to_string()))
+            }
+            _ => (1u8 /* Invoked */, Value::Null),
+        };
+        let body = json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "textDocument/completion",
+            "params": {
+                "textDocument": { "uri": uri_from_path(&path) },
+                "position": { "line": line, "character": col },
+                "context": {
+                    "triggerKind": trigger_kind,
+                    "triggerCharacter": trigger_char_json,
+                },
+            },
+        });
+        let _ = entry
+            .server
+            .send_body(&serde_json::to_vec(&body).expect("serialize completion"));
+        entry
+            .pending_requests
+            .insert(id, PendingRequest::Completion { path, seq, line });
+    }
+
+    /// Send `completionItem/resolve` for the item the user just
+    /// committed. The opaque `data` field on the original
+    /// `CompletionItem` (stored as `resolve_data`) is echoed
+    /// back so the server can look up whatever index it was
+    /// carrying. Returns the server's `additionalTextEdits` via
+    /// `LspEvent::CompletionResolved`.
+    fn resolve_completion(
+        &mut self,
+        path: CanonPath,
+        seq: u64,
+        item: led_driver_lsp_core::CompletionItem,
+    ) {
+        let Some(language) = self.language_for_path(&path) else {
+            return;
+        };
+        let id = self.fresh_id();
+        let entry = self.servers.get_mut(&language).expect("just resolved");
+        if !entry.completion_resolve_provider {
+            return;
+        }
+        let mut payload = json!({
+            "label": item.label.as_ref(),
+        });
+        if let Some(data) = item.resolve_data.as_ref() {
+            // `data` is an opaque blob; we stored it as a JSON
+            // string in `resolve_data`. Round-tripping through
+            // serde_json::from_str restores the original shape
+            // so the server sees what it sent us.
+            if let Ok(v) = serde_json::from_str::<Value>(data) {
+                payload["data"] = v;
+            }
+        }
+        if let Some(detail) = item.detail.as_ref() {
+            payload["detail"] = json!(detail.as_ref());
+        }
+        let body = json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "completionItem/resolve",
+            "params": payload,
+        });
+        let _ = entry
+            .server
+            .send_body(&serde_json::to_vec(&body).expect("serialize resolve"));
+        entry
+            .pending_requests
+            .insert(id, PendingRequest::ResolveCompletion { path, seq });
+    }
+
+    /// Look up which server handles `path`. Matches legacy
+    /// `server_for_path` — a path is associated with whichever
+    /// language the runtime opened it under.
+    fn language_for_path(&self, path: &CanonPath) -> Option<Language> {
+        self.servers.iter().find_map(|(lang, entry)| {
+            entry.doc_versions.contains_key(path).then_some(*lang)
+        })
+    }
+
+    fn finish_completion(
+        &mut self,
+        path: CanonPath,
+        seq: u64,
+        line: u32,
+        payload: Result<Value, crate::classify::JsonRpcError>,
+    ) {
+        let result = match payload {
+            Ok(v) => v,
+            Err(_) => return, // server errored; drop silently.
+        };
+        let parsed = parse_completion_response(&result, line);
+        let _ = self.lsp_event_tx.send(LspEvent::Completion {
+            path,
+            seq,
+            items: Arc::new(parsed.items),
+            prefix_line: line,
+            prefix_start_col: parsed.prefix_start_col,
+        });
+        self.notify.notify();
+    }
+
+    fn finish_resolve_completion(
+        &mut self,
+        path: CanonPath,
+        seq: u64,
+        payload: Result<Value, crate::classify::JsonRpcError>,
+    ) {
+        let result = match payload {
+            Ok(v) => v,
+            Err(_) => return,
+        };
+        let edits = parse_resolve_additional_edits(&result);
+        let _ = self.lsp_event_tx.send(LspEvent::CompletionResolved {
+            path,
+            seq,
+            additional_edits: edits,
+        });
+        self.notify.notify();
+    }
+
     fn shutdown_all(&mut self) {
         // Simplified for now: send shutdown + exit, drop servers.
         // A proper implementation would await the shutdown reply
@@ -877,6 +1057,12 @@ impl Manager {
                 // Drop the entry to kill the subprocess.
                 self.servers.remove(&language);
             }
+            PendingRequest::Completion { path, seq, line } => {
+                self.finish_completion(path, seq, line, payload);
+            }
+            PendingRequest::ResolveCompletion { path, seq } => {
+                self.finish_resolve_completion(path, seq, payload);
+            }
         }
     }
 
@@ -892,6 +1078,9 @@ impl Manager {
                 if caps.diagnostic_provider {
                     entry.diag.set_mode(DiagMode::Pull);
                 }
+                entry.completion_provider = caps.completion_provider;
+                entry.completion_trigger_chars = caps.completion_trigger_chars.clone();
+                entry.completion_resolve_provider = caps.completion_resolve_provider;
                 // Quiescence is NOT latched from the initialize
                 // response. Some servers advertise
                 // `serverStatusNotification` capability but never

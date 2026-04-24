@@ -11,7 +11,10 @@
 //! dep graph lean. Field names match the spec exactly; deviations
 //! are documented at each call site.
 
+use std::sync::Arc;
+
 use led_core::CanonPath;
+use led_driver_lsp_core::{CompletionItem, CompletionTextEdit};
 use serde_json::{Value, json};
 
 // ── URI encoding ────────────────────────────────────────────────
@@ -176,10 +179,12 @@ pub fn build_did_change_configuration_notification() -> Vec<u8> {
     .expect("serialize didChangeConfiguration")
 }
 
-/// What the initialize response tells us about delivery mode +
-/// quiescence. Fed directly into `DiagnosticSource::set_mode` /
-/// `set_has_quiescence`.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+/// What the initialize response tells us about delivery mode,
+/// quiescence, and completion support. Fed directly into
+/// `DiagnosticSource::set_mode` / `set_has_quiescence`; the
+/// completion fields drive whether the manager honours
+/// `LspCmd::RequestCompletion` for a given server at all.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct InitializeCapabilities {
     /// Server advertised `capabilities.diagnosticProvider` — we
     /// enter pull mode. `false` keeps the default push mode.
@@ -189,6 +194,21 @@ pub struct InitializeCapabilities {
     /// `experimental/serverStatus quiescent=true` arrives, pull
     /// requests should be deferred.
     pub has_quiescence: bool,
+    /// Server advertised `capabilities.completionProvider` —
+    /// we can send `textDocument/completion` requests. Without
+    /// this, completion commands are dropped.
+    pub completion_provider: bool,
+    /// `capabilities.completionProvider.triggerCharacters`.
+    /// When the user's last-typed char matches one of these,
+    /// the dispatcher fires a fresh completion request; in
+    /// every other case a request only flies on explicit
+    /// invocation. Empty vec = no trigger chars (identifier-
+    /// only auto-trigger still applies).
+    pub completion_trigger_chars: Vec<char>,
+    /// Server advertised `capabilities.completionProvider.resolveProvider`.
+    /// Controls whether the runtime fires `completionItem/resolve`
+    /// on commit to fetch `additionalTextEdits`.
+    pub completion_resolve_provider: bool,
 }
 
 /// Parse the `result` body of an `initialize` response into the
@@ -197,13 +217,167 @@ pub struct InitializeCapabilities {
 /// valid and means push-only, no quiescence.
 pub fn parse_initialize_response(result: &Value) -> InitializeCapabilities {
     let caps = result.get("capabilities").unwrap_or(&Value::Null);
+    let completion = caps.get("completionProvider");
+    let completion_provider =
+        completion.is_some() && !completion.is_some_and(|v| v.is_null());
+    let completion_trigger_chars = completion
+        .and_then(|c| c.get("triggerCharacters"))
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str())
+                .filter_map(|s| s.chars().next())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let completion_resolve_provider = completion
+        .and_then(|c| c.get("resolveProvider"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     InitializeCapabilities {
         diagnostic_provider: caps.get("diagnosticProvider").is_some()
             && !caps.get("diagnosticProvider").is_some_and(|v| v.is_null()),
         has_quiescence: caps
             .pointer("/experimental/serverStatusNotification")
             .is_some_and(|v| v.as_bool().unwrap_or(false)),
+        completion_provider,
+        completion_trigger_chars,
+        completion_resolve_provider,
     }
+}
+
+/// Completion response parsed into the runtime's wire shape.
+/// `prefix_start_col` is the char col where the user's typed
+/// prefix begins — extracted from the first item's `textEdit`
+/// when present, otherwise set to the cursor col (caller's
+/// responsibility to fall back to identifier backtracking).
+#[derive(Debug, Clone)]
+pub struct CompletionResponse {
+    pub items: Vec<CompletionItem>,
+    pub prefix_start_col: u32,
+}
+
+/// Parse either `{"items": [...]}` (a `CompletionList`) or a raw
+/// `[...]` (a `CompletionItem[]`). Drops items without a `label`
+/// silently — they can't display anyway. `cursor_line` is the
+/// row the request was issued against; kept in the signature so
+/// future refinement (e.g. "use cursor line as textEdit.line
+/// default") doesn't need a breaking change. The current
+/// implementation relies on the caller (the manager) to thread
+/// the line through the `LspEvent::Completion.prefix_line`
+/// field directly.
+pub fn parse_completion_response(result: &Value, _cursor_line: u32) -> CompletionResponse {
+    let raw_items: &[Value] = match result {
+        Value::Array(arr) => arr.as_slice(),
+        Value::Object(_) => result
+            .get("items")
+            .and_then(|v| v.as_array())
+            .map(|v| v.as_slice())
+            .unwrap_or(&[]),
+        _ => &[],
+    };
+
+    let mut items: Vec<CompletionItem> = Vec::with_capacity(raw_items.len());
+    let mut prefix_start_col: Option<u32> = None;
+
+    for raw in raw_items {
+        let Some(label) = raw.get("label").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let detail = raw
+            .get("detail")
+            .and_then(|v| v.as_str())
+            .map(Arc::<str>::from);
+        let sort_text = raw
+            .get("sortText")
+            .and_then(|v| v.as_str())
+            .map(Arc::<str>::from);
+        let insert_text = raw
+            .get("insertText")
+            .and_then(|v| v.as_str())
+            .map(Arc::<str>::from);
+        let kind = raw.get("kind").and_then(|v| v.as_u64()).map(|n| n as u8);
+        let text_edit = raw.get("textEdit").and_then(parse_completion_text_edit);
+        if prefix_start_col.is_none() {
+            if let Some(te) = text_edit.as_ref() {
+                prefix_start_col = Some(te.col_start);
+            }
+        }
+        // Resolve flag: true when the server advertises
+        // completionProvider.resolveProvider AND the item
+        // doesn't already carry its additional edits. We err
+        // on the side of "ask" — the legacy driver does the
+        // same, and servers quick-reply with empty edits when
+        // there's nothing to add.
+        let has_additional = raw
+            .get("additionalTextEdits")
+            .and_then(|v| v.as_array())
+            .is_some_and(|a| !a.is_empty());
+        let resolve_needed = !has_additional;
+        let resolve_data = raw
+            .get("data")
+            .map(|v| Arc::<str>::from(v.to_string()));
+        items.push(CompletionItem {
+            label: Arc::<str>::from(label),
+            detail,
+            sort_text,
+            insert_text,
+            text_edit,
+            kind,
+            resolve_needed,
+            resolve_data,
+        });
+    }
+
+    CompletionResponse {
+        items,
+        // Fallback: cursor col is set on the runtime side via
+        // identifier backtracking. We can't do that here (no
+        // rope access), so we leave 0 and let the runtime
+        // refine. Most servers set textEdit.range, so this
+        // rarely hits.
+        prefix_start_col: prefix_start_col.unwrap_or(0),
+        // `cursor_line` threads through unchanged so the runtime
+        // knows which row the prefix lives on.
+    }
+    // `cursor_line` is carried by the `LspEvent::Completion`
+    // field the caller fills in from the request's stored
+    // `PendingRequest::Completion { line, .. }`; nothing to do
+    // here.
+    // (Reference kept alive for clarity.)
+    // _ = cursor_line; // intentional — see above.
+}
+
+/// Parse one LSP `TextEdit` (within a `CompletionItem`) into
+/// our wire type. Returns `None` when the shape is malformed.
+fn parse_completion_text_edit(v: &Value) -> Option<CompletionTextEdit> {
+    let range = v.get("range")?;
+    let start = range.get("start")?;
+    let end = range.get("end")?;
+    let line = start.get("line").and_then(|v| v.as_u64())? as u32;
+    let col_start = start.get("character").and_then(|v| v.as_u64())? as u32;
+    // LSP allows multi-line edit ranges, but we collapse to one
+    // line — legacy's `convert_completion_response` does the
+    // same. If a server wants multi-line replacement on commit
+    // it can do so via additionalTextEdits.
+    let col_end = end.get("character").and_then(|v| v.as_u64())? as u32;
+    let new_text = v.get("newText").and_then(|v| v.as_str()).unwrap_or("");
+    Some(CompletionTextEdit {
+        line,
+        col_start,
+        col_end,
+        new_text: Arc::<str>::from(new_text),
+    })
+}
+
+/// Extract `additionalTextEdits` from a `completionItem/resolve`
+/// response. Returns an empty `Vec` if the server omits them
+/// (common when there's nothing extra to apply).
+pub fn parse_resolve_additional_edits(result: &Value) -> Vec<CompletionTextEdit> {
+    let Some(arr) = result.get("additionalTextEdits").and_then(|v| v.as_array()) else {
+        return Vec::new();
+    };
+    arr.iter().filter_map(parse_completion_text_edit).collect()
 }
 
 #[cfg(test)]
@@ -417,5 +591,76 @@ mod tests {
         let c = parse_initialize_response(&json!({}));
         assert!(!c.diagnostic_provider);
         assert!(!c.has_quiescence);
+    }
+
+    #[test]
+    fn parse_response_extracts_completion_capabilities() {
+        let c = parse_initialize_response(&json!({
+            "capabilities": {
+                "completionProvider": {
+                    "triggerCharacters": [".", ":", "("],
+                    "resolveProvider": true,
+                }
+            }
+        }));
+        assert!(c.completion_provider);
+        assert_eq!(c.completion_trigger_chars, vec!['.', ':', '(']);
+        assert!(c.completion_resolve_provider);
+    }
+
+    #[test]
+    fn parse_response_defaults_completion_when_provider_absent() {
+        let c = parse_initialize_response(&json!({"capabilities": {}}));
+        assert!(!c.completion_provider);
+        assert!(c.completion_trigger_chars.is_empty());
+        assert!(!c.completion_resolve_provider);
+    }
+
+    #[test]
+    fn completion_response_accepts_list_and_array_forms() {
+        // LSP allows either `{"items": [...]}` (incomplete list)
+        // or a raw array; we must handle both.
+        let list = json!({
+            "isIncomplete": false,
+            "items": [
+                { "label": "foo", "sortText": "0foo" },
+                { "label": "bar" },
+            ]
+        });
+        let parsed = parse_completion_response(&list, 0);
+        assert_eq!(parsed.items.len(), 2);
+        assert_eq!(parsed.items[0].label.as_ref(), "foo");
+        assert_eq!(parsed.items[0].sort_text.as_ref().unwrap().as_ref(), "0foo");
+        assert_eq!(parsed.items[1].label.as_ref(), "bar");
+
+        let arr = json!([
+            { "label": "baz", "detail": "fn() -> Baz" },
+        ]);
+        let parsed = parse_completion_response(&arr, 0);
+        assert_eq!(parsed.items.len(), 1);
+        assert_eq!(parsed.items[0].detail.as_ref().unwrap().as_ref(), "fn() -> Baz");
+    }
+
+    #[test]
+    fn completion_response_extracts_prefix_start_col_from_text_edit() {
+        let resp = json!({
+            "items": [{
+                "label": "println!",
+                "textEdit": {
+                    "range": {
+                        "start": { "line": 0, "character": 5 },
+                        "end":   { "line": 0, "character": 7 }
+                    },
+                    "newText": "println!"
+                }
+            }]
+        });
+        let parsed = parse_completion_response(&resp, 0);
+        assert_eq!(parsed.prefix_start_col, 5);
+        assert_eq!(parsed.items.len(), 1);
+        let te = parsed.items[0].text_edit.as_ref().unwrap();
+        assert_eq!(te.col_start, 5);
+        assert_eq!(te.col_end, 7);
+        assert_eq!(te.new_text.as_ref(), "println!");
     }
 }
