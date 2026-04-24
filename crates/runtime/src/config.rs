@@ -419,6 +419,10 @@ mod tests {
         // with commands the rewrite doesn't know yet. The rewrite's
         // own defaults stay in effect, plus whatever the user wrote
         // that we *do* understand. All unknowns are warnings.
+        //
+        // `next_issue` / `prev_issue` became known commands in M20a;
+        // `open_file_search` in M14. None of the entries in this
+        // fixture are still unknown, so warnings = 0.
         let tmp = tempdir();
         write_config(
             &tmp,
@@ -431,9 +435,7 @@ mod tests {
 "#,
         );
         let loaded = load_keymap(Some(tmp.path())).unwrap();
-        // Two unknown commands → two warnings. `open_file_search`
-        // became a known command in M14 stage 1.
-        assert_eq!(loaded.warnings.len(), 2);
+        assert_eq!(loaded.warnings.len(), 0);
         // Known one applied.
         assert_eq!(
             loaded

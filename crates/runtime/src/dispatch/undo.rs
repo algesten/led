@@ -373,8 +373,10 @@ fn apply_mark_to_state(state: &mut FileSearchState, hit_idx: usize, target_repla
 #[cfg(test)]
 mod tests {
     use led_state_completions::CompletionsState;
+    use led_state_diagnostics::DiagnosticsStates;
     use led_state_file_search::FileSearchState;
     use led_state_find_file::FindFileState;
+    use led_state_git::GitState;
     use led_state_isearch::IsearchState;
 
 
@@ -476,6 +478,8 @@ mod tests {
             &mut path_chains,
             &mut completions,
             &mut lsp_extras,
+            &DiagnosticsStates::default(),
+            &GitState::default(),
             &km,
             &mut chord,);
         assert_eq!(rope_of(&edits, "file.rs").to_string(), "");
@@ -502,6 +506,8 @@ mod tests {
             &mut path_chains,
             &mut completions,
             &mut lsp_extras,
+            &DiagnosticsStates::default(),
+            &GitState::default(),
             &km,
             &mut chord,);
         assert_eq!(rope_of(&edits, "file.rs").to_string(), "hi");
@@ -595,6 +601,8 @@ mod tests {
             &mut path_chains,
             &mut completions,
             &mut lsp_extras,
+            &DiagnosticsStates::default(),
+            &GitState::default(),
             &km,
             &mut chord,);
         // Still "x" — nothing to redo because the new edit dropped

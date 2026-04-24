@@ -1,6 +1,6 @@
-//! Jump list + match-bracket (M10).
+//! Jump list + match-bracket (M10) + tiered issue navigation (M20a).
 //!
-//! Three primitives:
+//! Primitives:
 //! - [`match_bracket`] — scan forward (open) or backward (close) for
 //!   the matching bracket, move the cursor there, and record the
 //!   pre-jump position on the jump list.
@@ -8,15 +8,29 @@
 //!   cursor and activating the target tab. From head, saves the
 //!   current position first.
 //! - [`jump_forward`] — the mirror.
+//! - [`next_issue_active`] / [`prev_issue_active`] — walk the
+//!   `IssueCategory::NAV_LEVELS` tier ladder to find the next / prev
+//!   issue (LSP error, LSP warning, git unstaged, …) and jump there.
+//!   Stays inside the first non-empty tier so an error-rich file
+//!   doesn't teleport to a stray warning.
 //!
-//! All three are silent no-ops when there's no active tab, no
-//! buffer loaded, or (for navigation) nothing to do.
+//! All are silent no-ops when there's no active tab, no buffer
+//! loaded, or (for navigation) nothing to do.
 
+use std::time::{Duration, Instant};
+
+use led_core::{CanonPath, IssueCategory};
+use led_driver_terminal_core::Terminal;
+use led_state_alerts::AlertState;
+use led_state_browser::BrowserUi;
 use led_state_buffer_edits::BufferEdits;
+use led_state_diagnostics::{DiagnosticSeverity, DiagnosticsStates};
+use led_state_git::GitState;
 use led_state_jumps::{JumpListState, JumpPosition};
 use led_state_tabs::Tabs;
 
-use super::shared::{char_to_cursor, cursor_to_char, line_char_len};
+use super::cursor::center_on_cursor;
+use super::shared::{char_to_cursor, cursor_to_char, editor_content_cols, line_char_len};
 
 /// Jump to the matching bracket for the character at (or
 /// immediately before) the cursor. No-op if no bracket is in
@@ -168,6 +182,353 @@ fn find_match(rope: &ropey::Rope, at: usize) -> Option<usize> {
     None
 }
 
+// ── Issue navigation (M20a) ─────────────────────────────────────────
+
+/// One navigable position picked out of the `collect_positions`
+/// pool. Sorted by `(path, row, col)` in the caller; `category`
+/// rides along so the alert can say "Jumped to Error …" etc.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Pos {
+    path: CanonPath,
+    row: usize,
+    col: usize,
+    category: IssueCategory,
+}
+
+/// Pure result of computing where to jump to. Mirrors legacy's
+/// `NavOutcome`.
+#[derive(Clone, Debug)]
+struct NavOutcome {
+    target_path: CanonPath,
+    target_row: usize,
+    target_col: usize,
+    category: IssueCategory,
+    /// 1-based index in the cycle — the "X" in "X/N".
+    position: usize,
+    /// Total items at the chosen tier level.
+    total: usize,
+}
+
+/// Walk [`IssueCategory::NAV_LEVELS`] in order; first level with
+/// any matching positions wins the cycle. Returns `None` when no
+/// level has positions.
+fn compute_navigation(
+    tabs: &Tabs,
+    edits: &BufferEdits,
+    diagnostics: &DiagnosticsStates,
+    git: &GitState,
+    forward: bool,
+) -> Option<NavOutcome> {
+    for &level in IssueCategory::NAV_LEVELS {
+        let cats = IssueCategory::at_level(level);
+        if let Some(outcome) = scan_level(tabs, edits, diagnostics, git, forward, cats) {
+            return Some(outcome);
+        }
+    }
+    None
+}
+
+fn scan_level(
+    tabs: &Tabs,
+    edits: &BufferEdits,
+    diagnostics: &DiagnosticsStates,
+    git: &GitState,
+    forward: bool,
+    cats: &[IssueCategory],
+) -> Option<NavOutcome> {
+    let mut positions = collect_positions(edits, diagnostics, git, cats);
+    if positions.is_empty() {
+        return None;
+    }
+    positions.sort_by(|a, b| {
+        a.path
+            .cmp(&b.path)
+            .then(a.row.cmp(&b.row))
+            .then(a.col.cmp(&b.col))
+    });
+    // Dedup by (path, row, col) so multiple categories on one
+    // line collapse to a single navigation target. Without this
+    // `pick_target_index` would count each category separately
+    // and the "N" in "X/N" would desync from what the user sees.
+    positions.dedup_by(|a, b| a.path == b.path && a.row == b.row && a.col == b.col);
+
+    let cur = cursor_pos(tabs);
+    let target_idx = pick_target_index(&positions, cur, forward);
+    let pos = &positions[target_idx];
+
+    Some(NavOutcome {
+        target_path: pos.path.clone(),
+        target_row: pos.row,
+        target_col: pos.col,
+        category: pos.category,
+        position: target_idx + 1,
+        total: positions.len(),
+    })
+}
+
+fn cursor_pos(tabs: &Tabs) -> Option<(CanonPath, usize, usize)> {
+    let id = tabs.active?;
+    let tab = tabs.open.iter().find(|t| t.id == id)?;
+    Some((tab.path.clone(), tab.cursor.line, tab.cursor.col))
+}
+
+/// Find the next (or previous) position in the sorted cycle
+/// relative to the cursor. Wraps around on either end.
+fn pick_target_index(
+    positions: &[Pos],
+    cur: Option<(CanonPath, usize, usize)>,
+    forward: bool,
+) -> usize {
+    let total = positions.len();
+    let Some((cp, cr, cc)) = cur else {
+        return 0;
+    };
+    let key = (&cp, cr, cc);
+    if forward {
+        positions
+            .iter()
+            .position(|p| (&p.path, p.row, p.col) > key)
+            .unwrap_or(0)
+    } else {
+        positions
+            .iter()
+            .rposition(|p| (&p.path, p.row, p.col) < key)
+            .unwrap_or(total.saturating_sub(1))
+    }
+}
+
+fn collect_positions(
+    edits: &BufferEdits,
+    diagnostics: &DiagnosticsStates,
+    git: &GitState,
+    cats: &[IssueCategory],
+) -> Vec<Pos> {
+    let mut out: Vec<Pos> = Vec::new();
+    collect_diagnostic_positions(edits, diagnostics, cats, &mut out);
+    collect_git_positions(edits, git, cats, &mut out);
+    out
+}
+
+fn collect_diagnostic_positions(
+    edits: &BufferEdits,
+    diagnostics: &DiagnosticsStates,
+    cats: &[IssueCategory],
+    out: &mut Vec<Pos>,
+) {
+    for (path, bd) in diagnostics.by_path.iter() {
+        for d in bd.diagnostics.iter() {
+            let cat = match d.severity {
+                DiagnosticSeverity::Error => IssueCategory::LspError,
+                DiagnosticSeverity::Warning => IssueCategory::LspWarning,
+                // Info / Hint are never navigable — legacy parity.
+                _ => continue,
+            };
+            if !cats.contains(&cat) {
+                continue;
+            }
+            let row = clamp_row_to_buffer(edits, path, d.start_line);
+            out.push(Pos {
+                path: path.clone(),
+                row,
+                col: d.start_col,
+                category: cat,
+            });
+        }
+    }
+}
+
+fn collect_git_positions(
+    edits: &BufferEdits,
+    git: &GitState,
+    cats: &[IssueCategory],
+    out: &mut Vec<Pos>,
+) {
+    let any_git = cats.iter().any(|c| {
+        matches!(
+            c,
+            IssueCategory::Unstaged
+                | IssueCategory::StagedModified
+                | IssueCategory::StagedNew
+                | IssueCategory::Untracked,
+        )
+    });
+    if !any_git {
+        return;
+    }
+    for (path, file_cats) in git.file_statuses.iter() {
+        if !file_cats.iter().any(|c| cats.contains(c)) {
+            continue;
+        }
+        // Per-line ranges take precedence over the file-level
+        // fallback — a dirty tracked file typically carries both.
+        let line_statuses = git.line_statuses.get(path);
+        let matching: Vec<&led_core::git::LineStatus> = line_statuses
+            .map(|arc| arc.iter().filter(|ls| cats.contains(&ls.category)).collect())
+            .unwrap_or_default();
+        if matching.is_empty() {
+            // File-level fallback: untracked/staged-new have no
+            // per-line data. Pin to row 0.
+            let cat = file_cats
+                .iter()
+                .find(|c| cats.contains(c))
+                .copied()
+                .unwrap_or(IssueCategory::Unstaged);
+            out.push(Pos {
+                path: path.clone(),
+                row: 0,
+                col: 0,
+                category: cat,
+            });
+        } else {
+            for ls in matching {
+                out.push(Pos {
+                    path: path.clone(),
+                    row: clamp_row_to_buffer(edits, path, ls.rows.start),
+                    col: 0,
+                    category: ls.category,
+                });
+            }
+        }
+    }
+}
+
+/// Clamp `row` to the buffer's last line when the buffer is
+/// loaded, else return it unchanged. Raw diagnostic / git line
+/// numbers can point past the buffer if the server saw a stale
+/// version; clamping keeps the cursor in bounds.
+fn clamp_row_to_buffer(edits: &BufferEdits, path: &CanonPath, row: usize) -> usize {
+    edits
+        .buffers
+        .get(path)
+        .map(|eb| row.min(eb.rope.len_lines().saturating_sub(1)))
+        .unwrap_or(row)
+}
+
+const ISSUE_NAV_TTL: Duration = Duration::from_secs(2);
+
+/// Alt-. (forward) — jump to the next issue in the highest
+/// non-empty tier.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn next_issue_active(
+    tabs: &mut Tabs,
+    edits: &BufferEdits,
+    diagnostics: &DiagnosticsStates,
+    git: &GitState,
+    jumps: &mut JumpListState,
+    alerts: &mut AlertState,
+    terminal: &Terminal,
+    browser: &BrowserUi,
+) {
+    nav_issue(
+        tabs,
+        edits,
+        diagnostics,
+        git,
+        jumps,
+        alerts,
+        terminal,
+        browser,
+        true,
+    );
+}
+
+/// Alt-, (backward) — mirror of `next_issue_active`.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn prev_issue_active(
+    tabs: &mut Tabs,
+    edits: &BufferEdits,
+    diagnostics: &DiagnosticsStates,
+    git: &GitState,
+    jumps: &mut JumpListState,
+    alerts: &mut AlertState,
+    terminal: &Terminal,
+    browser: &BrowserUi,
+) {
+    nav_issue(
+        tabs,
+        edits,
+        diagnostics,
+        git,
+        jumps,
+        alerts,
+        terminal,
+        browser,
+        false,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn nav_issue(
+    tabs: &mut Tabs,
+    edits: &BufferEdits,
+    diagnostics: &DiagnosticsStates,
+    git: &GitState,
+    jumps: &mut JumpListState,
+    alerts: &mut AlertState,
+    terminal: &Terminal,
+    browser: &BrowserUi,
+    forward: bool,
+) {
+    let Some(outcome) = compute_navigation(tabs, edits, diagnostics, git, forward) else {
+        return;
+    };
+    // Target must correspond to a currently-open tab. M21's
+    // pending-cursor plumbing will light up the unopened-file
+    // branch; M20a silently skips to avoid a half-working
+    // "nothing visibly happened" UX.
+    let Some(target_idx) = tabs
+        .open
+        .iter()
+        .position(|t| t.path == outcome.target_path)
+    else {
+        return;
+    };
+    let Some(eb) = edits.buffers.get(&outcome.target_path) else {
+        return;
+    };
+
+    // Record the pre-jump position so Alt-b round-trips.
+    if let Some(current) = current_position(tabs) {
+        jumps.record(current);
+    }
+
+    // Clamp the target's (row, col) to the buffer's rope — the
+    // source atoms may have lagged the current edit stream by a
+    // few chars (diagnostic deliveries are content-hash-gated,
+    // but the buffer could still have grown / shrunk).
+    let rope = &eb.rope;
+    let line_count = rope.len_lines();
+    let line = outcome.target_row.min(line_count.saturating_sub(1));
+    let col = outcome.target_col.min(line_char_len(rope, line));
+
+    // Compute viewport dims for the recenter helper. Same
+    // `Layout` path the painter uses so the body_rows / content_cols
+    // match what the user sees.
+    let body_rows = terminal
+        .dims
+        .map(|d| {
+            led_driver_terminal_core::Layout::compute(d, browser.visible)
+                .editor_area
+                .rows as usize
+        })
+        .unwrap_or(0);
+    let content_cols = editor_content_cols(terminal, browser);
+
+    let tab = &mut tabs.open[target_idx];
+    tab.cursor.line = line;
+    tab.cursor.col = col;
+    tab.cursor.preferred_col = col;
+    tab.scroll = center_on_cursor(tab.scroll, tab.cursor, body_rows, rope, content_cols);
+    tabs.active = Some(tab.id);
+
+    let info = outcome.category.info();
+    let msg = format!(
+        " Jumped to {} {}/{}",
+        info.label, outcome.position, outcome.total,
+    );
+    alerts.set_info(msg, Instant::now(), ISSUE_NAV_TTL);
+}
+
 #[cfg(test)]
 mod tests {
     use led_driver_terminal_core::Dims;
@@ -317,6 +678,316 @@ mod tests {
         assert_eq!(jumps.entries.len(), 1);
         assert_eq!(jumps.entries[0].line, 3);
         assert_eq!(jumps.entries[0].col, 5);
+    }
+
+    // ── Issue navigation (M20a) ────────────────────────────────
+
+    use led_core::UserPath;
+    use led_state_alerts::AlertState as M20aAlertState;
+    use led_state_diagnostics::{
+        BufferDiagnostics, Diagnostic, DiagnosticSeverity, DiagnosticsStates,
+    };
+    use led_state_git::GitState as M20aGitState;
+    use led_state_tabs::{Scroll, Tab, TabId};
+    use std::sync::Arc;
+
+    fn canon_of(p: &str) -> led_core::CanonPath {
+        UserPath::new(p).canonicalize()
+    }
+
+    fn pos(path: &str, row: usize, col: usize) -> Pos {
+        Pos {
+            path: canon_of(path),
+            row,
+            col,
+            category: IssueCategory::Unstaged,
+        }
+    }
+
+    #[test]
+    fn pick_target_no_cursor_picks_first() {
+        let ps = vec![pos("/a", 1, 0), pos("/a", 5, 0), pos("/b", 0, 0)];
+        assert_eq!(pick_target_index(&ps, None, true), 0);
+        assert_eq!(pick_target_index(&ps, None, false), 0);
+    }
+
+    #[test]
+    fn pick_target_forward_picks_next_after_cursor() {
+        let ps = vec![pos("/a", 1, 0), pos("/a", 5, 0), pos("/a", 9, 0)];
+        let cur = Some((canon_of("/a"), 5, 0));
+        assert_eq!(pick_target_index(&ps, cur, true), 2);
+    }
+
+    #[test]
+    fn pick_target_forward_wraps_around() {
+        let ps = vec![pos("/a", 1, 0), pos("/a", 5, 0)];
+        let cur = Some((canon_of("/a"), 9, 0));
+        assert_eq!(pick_target_index(&ps, cur, true), 0);
+    }
+
+    #[test]
+    fn pick_target_backward_picks_prev_before_cursor() {
+        let ps = vec![pos("/a", 1, 0), pos("/a", 5, 0), pos("/a", 9, 0)];
+        let cur = Some((canon_of("/a"), 5, 0));
+        assert_eq!(pick_target_index(&ps, cur, false), 0);
+    }
+
+    #[test]
+    fn pick_target_backward_wraps_around() {
+        let ps = vec![pos("/a", 1, 0), pos("/a", 5, 0)];
+        let cur = Some((canon_of("/a"), 0, 0));
+        assert_eq!(pick_target_index(&ps, cur, false), 1);
+    }
+
+    #[test]
+    fn pick_target_crosses_files() {
+        let ps = vec![pos("/a", 5, 0), pos("/b", 1, 0)];
+        let cur = Some((canon_of("/a"), 5, 0));
+        assert_eq!(pick_target_index(&ps, cur, true), 1);
+    }
+
+    fn diag(severity: DiagnosticSeverity, start_line: usize, start_col: usize) -> Diagnostic {
+        Diagnostic {
+            start_line,
+            start_col,
+            end_line: start_line,
+            end_col: start_col + 1,
+            severity,
+            message: String::new(),
+            source: None,
+            code: None,
+        }
+    }
+
+    fn seed_tabs_and_edits(
+        path: &str,
+        rope_str: &str,
+    ) -> (Tabs, BufferEdits) {
+        let canon = canon_of(path);
+        let mut tabs = Tabs::default();
+        tabs.open.push_back(Tab {
+            id: TabId(1),
+            path: canon.clone(),
+            ..Default::default()
+        });
+        tabs.active = Some(TabId(1));
+        let mut edits = BufferEdits::default();
+        use led_state_buffer_edits::EditedBuffer;
+        edits.buffers.insert(
+            canon,
+            EditedBuffer::fresh(Arc::new(ropey::Rope::from_str(rope_str))),
+        );
+        (tabs, edits)
+    }
+
+    #[test]
+    fn errors_take_priority_over_warnings() {
+        // Level 1 = LspError, level 2 = LspWarning. `compute_navigation`
+        // returns the first non-empty level; with both present the
+        // cycle stays on errors.
+        let (tabs, edits) =
+            seed_tabs_and_edits("/p/a.rs", "aaaa\nbbbb\ncccc\ndddd\neeee\n");
+        let mut diags = DiagnosticsStates::default();
+        let canon = canon_of("/p/a.rs");
+        diags.by_path.insert(
+            canon.clone(),
+            BufferDiagnostics::new(
+                led_core::PersistedContentHash(1),
+                vec![
+                    diag(DiagnosticSeverity::Warning, 1, 0),
+                    diag(DiagnosticSeverity::Error, 3, 0),
+                ],
+            ),
+        );
+        let git = M20aGitState::default();
+        let outcome =
+            compute_navigation(&tabs, &edits, &diags, &git, true).expect("nav");
+        assert_eq!(outcome.category, IssueCategory::LspError);
+        assert_eq!(outcome.target_row, 3);
+        assert_eq!(outcome.total, 1);
+    }
+
+    #[test]
+    fn falls_through_to_warnings_when_no_errors() {
+        let (tabs, edits) =
+            seed_tabs_and_edits("/p/a.rs", "aaaa\nbbbb\ncccc\n");
+        let mut diags = DiagnosticsStates::default();
+        let canon = canon_of("/p/a.rs");
+        diags.by_path.insert(
+            canon.clone(),
+            BufferDiagnostics::new(
+                led_core::PersistedContentHash(1),
+                vec![diag(DiagnosticSeverity::Warning, 1, 0)],
+            ),
+        );
+        let git = M20aGitState::default();
+        let outcome = compute_navigation(&tabs, &edits, &diags, &git, true).unwrap();
+        assert_eq!(outcome.category, IssueCategory::LspWarning);
+        assert_eq!(outcome.target_row, 1);
+    }
+
+    #[test]
+    fn falls_through_to_git_when_no_diagnostics() {
+        let (tabs, edits) =
+            seed_tabs_and_edits("/p/a.rs", "aaaa\nbbbb\ncccc\n");
+        let diags = DiagnosticsStates::default();
+        let canon = canon_of("/p/a.rs");
+        let mut git = M20aGitState::default();
+        let mut cats = imbl::HashSet::default();
+        cats.insert(IssueCategory::Unstaged);
+        git.file_statuses.insert(canon.clone(), cats);
+        git.line_statuses.insert(
+            canon.clone(),
+            Arc::new(vec![led_core::git::LineStatus {
+                category: IssueCategory::Unstaged,
+                rows: 2..3,
+            }]),
+        );
+        let outcome = compute_navigation(&tabs, &edits, &diags, &git, true).unwrap();
+        assert_eq!(outcome.category, IssueCategory::Unstaged);
+        assert_eq!(outcome.target_row, 2);
+    }
+
+    #[test]
+    fn compute_returns_none_when_empty() {
+        let (tabs, edits) = seed_tabs_and_edits("/p/a.rs", "abc\n");
+        let diags = DiagnosticsStates::default();
+        let git = M20aGitState::default();
+        assert!(compute_navigation(&tabs, &edits, &diags, &git, true).is_none());
+        assert!(compute_navigation(&tabs, &edits, &diags, &git, false).is_none());
+    }
+
+    #[test]
+    fn next_issue_moves_cursor_and_records_jump_and_alert() {
+        use led_driver_terminal_core::{Dims, Terminal as TerminalAtom};
+        use led_state_browser::BrowserUi;
+        let (mut tabs, edits) =
+            seed_tabs_and_edits("/p/a.rs", "aaaa\nbbbb\ncccc\ndddd\neeee\n");
+        // Cursor at line 0, col 0.
+        let mut diags = DiagnosticsStates::default();
+        let canon = canon_of("/p/a.rs");
+        diags.by_path.insert(
+            canon.clone(),
+            BufferDiagnostics::new(
+                led_core::PersistedContentHash(1),
+                vec![diag(DiagnosticSeverity::Error, 3, 0)],
+            ),
+        );
+        let git = M20aGitState::default();
+        let mut jumps = JumpListState::default();
+        let mut alerts = M20aAlertState::default();
+        let term = TerminalAtom {
+            dims: Some(Dims { cols: 80, rows: 24 }),
+            ..Default::default()
+        };
+        let browser = BrowserUi {
+            visible: false,
+            ..Default::default()
+        };
+        next_issue_active(
+            &mut tabs,
+            &edits,
+            &diags,
+            &git,
+            &mut jumps,
+            &mut alerts,
+            &term,
+            &browser,
+        );
+        assert_eq!(tabs.open[0].cursor.line, 3);
+        assert_eq!(tabs.open[0].cursor.col, 0);
+        assert_eq!(jumps.entries.len(), 1);
+        assert!(
+            alerts
+                .info
+                .as_deref()
+                .is_some_and(|m| m.contains("Jumped to Error 1/1"))
+        );
+    }
+
+    #[test]
+    fn next_issue_wraps_within_level() {
+        use led_driver_terminal_core::{Dims, Terminal as TerminalAtom};
+        use led_state_browser::BrowserUi;
+        use led_state_tabs::Cursor as TabCursor;
+        let (mut tabs, edits) =
+            seed_tabs_and_edits("/p/a.rs", "aaaa\nbbbb\ncccc\ndddd\neeee\n");
+        // Two errors at lines 1 and 3.
+        let mut diags = DiagnosticsStates::default();
+        let canon = canon_of("/p/a.rs");
+        diags.by_path.insert(
+            canon.clone(),
+            BufferDiagnostics::new(
+                led_core::PersistedContentHash(1),
+                vec![
+                    diag(DiagnosticSeverity::Error, 1, 0),
+                    diag(DiagnosticSeverity::Error, 3, 0),
+                ],
+            ),
+        );
+        let git = M20aGitState::default();
+        let mut jumps = JumpListState::default();
+        let mut alerts = M20aAlertState::default();
+        let term = TerminalAtom {
+            dims: Some(Dims { cols: 80, rows: 24 }),
+            ..Default::default()
+        };
+        let browser = BrowserUi {
+            visible: false,
+            ..Default::default()
+        };
+        // Start cursor past both errors → wrap.
+        tabs.open[0].cursor = TabCursor {
+            line: 4,
+            col: 0,
+            preferred_col: 0,
+        };
+        tabs.open[0].scroll = Scroll::default();
+        next_issue_active(
+            &mut tabs,
+            &edits,
+            &diags,
+            &git,
+            &mut jumps,
+            &mut alerts,
+            &term,
+            &browser,
+        );
+        assert_eq!(tabs.open[0].cursor.line, 1, "wrapped back to first error");
+    }
+
+    #[test]
+    fn next_issue_skips_unopened_target() {
+        use led_driver_terminal_core::Terminal as TerminalAtom;
+        use led_state_browser::BrowserUi;
+        // Diagnostic on a path that isn't currently open.
+        let (mut tabs, edits) = seed_tabs_and_edits("/p/a.rs", "abc\n");
+        let mut diags = DiagnosticsStates::default();
+        diags.by_path.insert(
+            canon_of("/p/other.rs"),
+            BufferDiagnostics::new(
+                led_core::PersistedContentHash(1),
+                vec![diag(DiagnosticSeverity::Error, 0, 0)],
+            ),
+        );
+        let git = M20aGitState::default();
+        let mut jumps = JumpListState::default();
+        let mut alerts = M20aAlertState::default();
+        let before_line = tabs.open[0].cursor.line;
+        next_issue_active(
+            &mut tabs,
+            &edits,
+            &diags,
+            &git,
+            &mut jumps,
+            &mut alerts,
+            &TerminalAtom::default(),
+            &BrowserUi::default(),
+        );
+        // Cursor unchanged, no alert, no jump recorded.
+        assert_eq!(tabs.open[0].cursor.line, before_line);
+        assert!(jumps.entries.is_empty());
+        assert!(alerts.info.is_none());
     }
 }
 

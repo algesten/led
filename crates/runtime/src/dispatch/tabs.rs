@@ -78,8 +78,10 @@ pub(super) fn force_kill(tabs: &mut Tabs, edits: &mut BufferEdits, id: TabId) {
 #[cfg(test)]
 mod tests {
     use led_state_completions::CompletionsState;
+    use led_state_diagnostics::DiagnosticsStates;
     use led_state_file_search::FileSearchState;
     use led_state_find_file::FindFileState;
+    use led_state_git::GitState;
     use led_state_isearch::IsearchState;
     use std::sync::Arc;
 
@@ -224,6 +226,8 @@ mod tests {
             &mut path_chains,
             &mut completions,
             &mut lsp_extras,
+            &DiagnosticsStates::default(),
+            &GitState::default(),
             &keymap,
             &mut chord,);
         let mut find_file: Option<FindFileState> = None;
@@ -247,6 +251,8 @@ mod tests {
             &mut path_chains,
             &mut completions,
             &mut lsp_extras,
+            &DiagnosticsStates::default(),
+            &GitState::default(),
             &keymap,
             &mut chord,);
         assert_eq!(alerts.confirm_kill, Some(TabId(1)));
@@ -292,6 +298,8 @@ mod tests {
             &mut path_chains,
             &mut completions,
             &mut lsp_extras,
+            &DiagnosticsStates::default(),
+            &GitState::default(),
             &keymap,
             &mut chord,);
         assert!(alerts.confirm_kill.is_none());
@@ -341,6 +349,8 @@ mod tests {
             &mut path_chains,
             &mut completions,
             &mut lsp_extras,
+            &DiagnosticsStates::default(),
+            &GitState::default(),
             &keymap,
             &mut chord,);
         assert!(alerts.confirm_kill.is_none());
@@ -386,6 +396,8 @@ mod tests {
             &mut path_chains,
             &mut completions,
             &mut lsp_extras,
+            &DiagnosticsStates::default(),
+            &GitState::default(),
             &keymap,
             &mut chord,);
         // Prompt dismissed.
@@ -441,6 +453,8 @@ mod tests {
             &mut path_chains,
             &mut completions,
             &mut lsp_extras,
+            &DiagnosticsStates::default(),
+            &GitState::default(),
             &keymap,
             &mut chord,);
         assert!(alerts.confirm_kill.is_none());
@@ -494,6 +508,8 @@ mod tests {
             &mut path_chains,
             &mut completions,
             &mut lsp_extras,
+            &DiagnosticsStates::default(),
+            &GitState::default(),
             &keymap,
             &mut chord,);
         let mut find_file: Option<FindFileState> = None;
@@ -517,6 +533,8 @@ mod tests {
             &mut path_chains,
             &mut completions,
             &mut lsp_extras,
+            &DiagnosticsStates::default(),
+            &GitState::default(),
             &keymap,
             &mut chord,);
         assert!(alerts.confirm_kill.is_none());

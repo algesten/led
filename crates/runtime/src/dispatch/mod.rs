@@ -63,7 +63,7 @@ use cursor::{Move, move_cursor};
 use edit::{delete_back, delete_forward, insert_char, insert_newline};
 use kill::{kill_line, kill_region, request_yank};
 use mark::{clear_mark, set_mark_active};
-use nav::{jump_back, jump_forward, match_bracket};
+use nav::{jump_back, jump_forward, match_bracket, next_issue_active, prev_issue_active};
 use save::{request_save_active, request_save_all};
 use tabs::{cycle_active, force_kill, kill_active};
 use undo::{redo_active, undo_active};
@@ -125,6 +125,12 @@ pub struct Dispatcher<'a> {
     pub file_search: &'a mut Option<FileSearchState>,
     pub completions: &'a mut CompletionsState,
     pub lsp_extras: &'a mut LspExtrasState,
+    /// LSP diagnostics, read-only here — issue navigation
+    /// (Alt-./Alt-,) reads them to build the nav cycle.
+    pub diagnostics: &'a led_state_diagnostics::DiagnosticsStates,
+    /// Git state (branch + file/line statuses). Same consumer
+    /// as `diagnostics` — tiered issue nav walks both.
+    pub git: &'a led_state_git::GitState,
     /// Symlink-resolution chains keyed by canonical path. Dispatch
     /// populates this whenever a tab opens from a user-typed path
     /// (find-file commit, browser entry). Load-completion
@@ -175,6 +181,8 @@ impl<'a> Dispatcher<'a> {
             self.path_chains,
             self.completions,
             self.lsp_extras,
+            self.diagnostics,
+            self.git,
             self.keymap,
             self.chord,
         )
@@ -219,6 +227,8 @@ pub fn dispatch_key(
     path_chains: &mut std::collections::HashMap<led_core::CanonPath, led_core::PathChain>,
     completions: &mut CompletionsState,
     lsp_extras: &mut LspExtrasState,
+    diagnostics: &led_state_diagnostics::DiagnosticsStates,
+    git: &led_state_git::GitState,
     keymap: &Keymap,
     chord: &mut ChordState,
 ) -> DispatchOutcome {
@@ -246,6 +256,7 @@ pub fn dispatch_key(
             let outcome = run_command(
                 cmd, tabs, edits, kill_ring, clip, alerts, jumps, browser, fs, store, terminal,
                 find_file, isearch, file_search, path_chains, completions, lsp_extras,
+                diagnostics, git,
             );
             // Kill-ring coalescing: any non-KillLine command breaks
             // the flag, so the next KillLine starts a fresh entry.
@@ -602,6 +613,8 @@ fn run_command(
     path_chains: &mut std::collections::HashMap<led_core::CanonPath, led_core::PathChain>,
     completions: &mut CompletionsState,
     lsp_extras: &mut LspExtrasState,
+    diagnostics: &led_state_diagnostics::DiagnosticsStates,
+    git: &led_state_git::GitState,
 ) -> DispatchOutcome {
     // Find-file overlay intercept. When active, the overlay owns
     // input editing + its own command set; most commands route into
@@ -833,6 +846,32 @@ fn run_command(
             match_bracket(tabs, edits, jumps);
             DispatchOutcome::Continue
         }
+        Command::NextIssue => {
+            next_issue_active(
+                tabs,
+                edits,
+                diagnostics,
+                git,
+                jumps,
+                alerts,
+                terminal,
+                browser,
+            );
+            DispatchOutcome::Continue
+        }
+        Command::PrevIssue => {
+            prev_issue_active(
+                tabs,
+                edits,
+                diagnostics,
+                git,
+                jumps,
+                alerts,
+                terminal,
+                browser,
+            );
+            DispatchOutcome::Continue
+        }
         Command::ExpandDir => {
             expand_dir(browser, fs, tabs);
             DispatchOutcome::Continue
@@ -1032,6 +1071,8 @@ mod tests {
     use led_state_alerts::AlertState;
     use led_state_buffer_edits::{BufferEdits, EditedBuffer};
     use led_state_completions::CompletionsState;
+    use led_state_diagnostics::DiagnosticsStates;
+    use led_state_git::GitState;
     use led_state_kill_ring::KillRing;
     use led_state_lsp::LspExtrasState;
     use ropey::Rope;
@@ -1080,6 +1121,8 @@ mod tests {
             &mut path_chains,
             &mut completions,
             &mut lsp_extras,
+            &DiagnosticsStates::default(),
+            &GitState::default(),
             &keymap,
             &mut chord,);
         assert_eq!(outcome, DispatchOutcome::Continue);
@@ -1107,6 +1150,8 @@ mod tests {
             &mut path_chains,
             &mut completions,
             &mut lsp_extras,
+            &DiagnosticsStates::default(),
+            &GitState::default(),
             &keymap,
             &mut chord,);
         assert_eq!(outcome, DispatchOutcome::Quit);
@@ -1162,6 +1207,8 @@ mod tests {
             &mut path_chains,
             &mut completions,
             &mut lsp_extras,
+            &DiagnosticsStates::default(),
+            &GitState::default(),
             &keymap,
             &mut chord,);
         assert!(chord.pending.is_some());
@@ -1187,6 +1234,8 @@ mod tests {
             &mut path_chains,
             &mut completions,
             &mut lsp_extras,
+            &DiagnosticsStates::default(),
+            &GitState::default(),
             &keymap,
             &mut chord,);
         assert_eq!(outcome, DispatchOutcome::Continue);
@@ -1241,6 +1290,8 @@ mod tests {
             &mut path_chains,
             &mut completions,
             &mut lsp_extras,
+            &DiagnosticsStates::default(),
+            &GitState::default(),
             &km,
             &mut chord,);
         assert_eq!(outcome, DispatchOutcome::Quit);
@@ -1267,6 +1318,8 @@ mod tests {
             &mut path_chains,
             &mut completions,
             &mut lsp_extras,
+            &DiagnosticsStates::default(),
+            &GitState::default(),
             &km,
             &mut chord,);
         assert_eq!(outcome, DispatchOutcome::Continue);
@@ -1315,6 +1368,8 @@ mod tests {
             &mut path_chains,
             &mut completions,
             &mut lsp_extras,
+            &DiagnosticsStates::default(),
+            &GitState::default(),
             &km,
             &mut chord,
         );
@@ -1360,6 +1415,8 @@ mod tests {
             &mut path_chains,
             &mut completions,
             &mut lsp_extras,
+            &DiagnosticsStates::default(),
+            &GitState::default(),
             &km,
             &mut chord,);
         assert_eq!(rope_of(&edits, "file.rs").to_string(), "z");
@@ -1405,6 +1462,8 @@ mod tests {
             &mut path_chains,
             &mut completions,
             &mut lsp_extras,
+            &DiagnosticsStates::default(),
+            &GitState::default(),
             &km,
             &mut chord,);
         assert_eq!(rope_of(&edits, "file.rs").to_string(), "");
@@ -1506,6 +1565,8 @@ mod tests {
             &mut path_chains,
             &mut completions,
             &mut lsp_extras,
+            &DiagnosticsStates::default(),
+            &GitState::default(),
             &km,
             &mut chord,
         );
@@ -1556,6 +1617,8 @@ mod tests {
             &mut path_chains,
             &mut completions,
             &mut lsp_extras,
+            &DiagnosticsStates::default(),
+            &GitState::default(),
             &km,
             &mut chord,
         );

@@ -74,6 +74,12 @@ pub enum Command {
     JumpForward,
     MatchBracket,
 
+    // Tiered issue navigation (M20a) — Alt-./Alt-, cycles
+    // LSP errors → warnings → git hunks, staying inside the
+    // first non-empty tier.
+    NextIssue,
+    PrevIssue,
+
     // File browser (M11).
     ExpandDir,
     CollapseDir,
@@ -339,6 +345,11 @@ pub fn default_keymap() -> Keymap {
     m.bind("alt+f", Command::JumpForward);
     m.bind("alt+right", Command::JumpForward);
     m.bind("alt+]", Command::MatchBracket);
+
+    // Issue navigation (M20a). The cycle stays inside the
+    // first non-empty tier of `IssueCategory::NAV_LEVELS`.
+    m.bind("alt+.", Command::NextIssue);
+    m.bind("alt+,", Command::PrevIssue);
 
     // File browser (M11).
     m.bind("ctrl+b", Command::ToggleSidePanel);
@@ -619,6 +630,8 @@ pub fn parse_command(s: &str) -> Result<Command, String> {
         "jump_back" => Ok(Command::JumpBack),
         "jump_forward" => Ok(Command::JumpForward),
         "match_bracket" => Ok(Command::MatchBracket),
+        "next_issue" => Ok(Command::NextIssue),
+        "prev_issue" => Ok(Command::PrevIssue),
         "expand_dir" => Ok(Command::ExpandDir),
         "collapse_dir" => Ok(Command::CollapseDir),
         "collapse_all" => Ok(Command::CollapseAll),

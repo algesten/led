@@ -873,6 +873,8 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
                 file_search,
                 completions,
                 lsp_extras,
+                diagnostics,
+                git,
                 path_chains,
                 keymap,
                 chord: &mut chord,
@@ -1509,6 +1511,7 @@ fn completion_prefix(
 /// currently-open tabs is deferred to M21 (session / persistence
 /// will stash a pending cursor the same way find-file does);
 /// for M18 the jump silent-no-ops when the path isn't open.
+#[allow(clippy::too_many_arguments)]
 fn apply_goto_definition(
     tabs: &mut Tabs,
     edits: &BufferEdits,
@@ -2516,8 +2519,10 @@ mod tests {
         let mut alerts = AlertState::default();
         let mut lsp_extras = led_state_lsp::LspExtrasState::default();
         lsp_extras.latest_goto_seq = Some(1);
-        let mut term = Terminal::default();
-        term.dims = Some(Dims { cols: 80, rows: 14 }); // body ≈ 12 rows
+        let term = Terminal {
+            dims: Some(Dims { cols: 80, rows: 14 }), // body ≈ 12 rows
+            ..Default::default()
+        };
         apply_goto_definition(
             &mut tabs,
             &edits,
@@ -2569,8 +2574,10 @@ mod tests {
         let mut alerts = AlertState::default();
         let mut lsp_extras = led_state_lsp::LspExtrasState::default();
         lsp_extras.latest_goto_seq = Some(1);
-        let mut term = Terminal::default();
-        term.dims = Some(Dims { cols: 80, rows: 22 }); // body ≈ 20 rows
+        let term = Terminal {
+            dims: Some(Dims { cols: 80, rows: 22 }), // body ≈ 20 rows
+            ..Default::default()
+        };
         apply_goto_definition(
             &mut tabs,
             &edits,

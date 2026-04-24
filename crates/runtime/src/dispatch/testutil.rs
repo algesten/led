@@ -19,6 +19,8 @@ use led_state_clipboard::ClipboardState;
 use led_state_completions::CompletionsState;
 use led_state_file_search::FileSearchState;
 use led_state_find_file::FindFileState;
+use led_state_diagnostics::DiagnosticsStates;
+use led_state_git::GitState;
 use led_state_isearch::IsearchState;
 use led_state_jumps::JumpListState;
 use led_state_kill_ring::KillRing;
@@ -130,6 +132,8 @@ pub(super) fn dispatch_default(
     let mut path_chains = std::collections::HashMap::new();
     let mut completions = CompletionsState::default();
     let mut lsp_extras = LspExtrasState::default();
+    let diagnostics = DiagnosticsStates::default();
+    let git = GitState::default();
     dispatch_key(
         k,
         tabs,
@@ -148,6 +152,8 @@ pub(super) fn dispatch_default(
         &mut path_chains,
         &mut completions,
         &mut lsp_extras,
+        &diagnostics,
+        &git,
         &default_keymap(),
         &mut chord,)
 }
@@ -177,6 +183,8 @@ pub(super) fn dispatch_chord_default(
     let mut path_chains = std::collections::HashMap::new();
     let mut completions = CompletionsState::default();
     let mut lsp_extras = LspExtrasState::default();
+    let diagnostics = DiagnosticsStates::default();
+    let git = GitState::default();
     dispatch_key(
         prefix,
         tabs,
@@ -195,6 +203,8 @@ pub(super) fn dispatch_chord_default(
         &mut path_chains,
         &mut completions,
         &mut lsp_extras,
+        &diagnostics,
+        &git,
         &keymap,
         &mut chord,);
     let mut find_file: Option<FindFileState> = None;
@@ -218,6 +228,8 @@ pub(super) fn dispatch_chord_default(
         &mut path_chains,
         &mut completions,
         &mut lsp_extras,
+        &diagnostics,
+        &git,
         &keymap,
         &mut chord,)
 }
@@ -244,6 +256,8 @@ pub(super) fn dispatch_with_ring(
     let mut path_chains = std::collections::HashMap::new();
     let mut completions = CompletionsState::default();
     let mut lsp_extras = LspExtrasState::default();
+    let diagnostics = DiagnosticsStates::default();
+    let git = GitState::default();
     dispatch_key(
         k,
         tabs,
@@ -262,6 +276,8 @@ pub(super) fn dispatch_with_ring(
         &mut path_chains,
         &mut completions,
         &mut lsp_extras,
+        &diagnostics,
+        &git,
         &default_keymap(),
         &mut chord,)
 }
@@ -286,6 +302,8 @@ pub(super) fn noop_dispatch(k: KeyEvent, tabs: &mut Tabs) -> DispatchOutcome {
     let mut path_chains = std::collections::HashMap::new();
     let mut completions = CompletionsState::default();
     let mut lsp_extras = LspExtrasState::default();
+    let diagnostics = DiagnosticsStates::default();
+    let git = GitState::default();
     dispatch_key(
         k,
         tabs,
@@ -304,6 +322,8 @@ pub(super) fn noop_dispatch(k: KeyEvent, tabs: &mut Tabs) -> DispatchOutcome {
         &mut path_chains,
         &mut completions,
         &mut lsp_extras,
+        &diagnostics,
+        &git,
         &keymap,
         &mut chord,)
 }
