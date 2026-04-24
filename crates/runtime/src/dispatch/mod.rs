@@ -26,6 +26,7 @@
 //! (chord resolution, implicit-insert gating, quit chord, abort).
 
 mod browser;
+mod code_actions;
 #[path = "completions.rs"]
 mod completions_overlay;
 mod cursor;
@@ -36,6 +37,7 @@ mod isearch;
 mod kill;
 mod mark;
 mod nav;
+mod rename;
 mod save;
 mod shared;
 mod tabs;
@@ -46,6 +48,7 @@ mod testutil;
 
 // Public surface — kept tight so the runtime only reaches in for
 // the five externally-relevant names.
+pub use code_actions::install_picker as install_code_action_picker;
 pub use kill::apply_yank;
 pub use shared::editor_content_cols;
 pub use shared::open_or_focus_tab;
@@ -76,6 +79,7 @@ use led_state_find_file::FindFileState;
 use led_state_isearch::IsearchState;
 use led_state_jumps::JumpListState;
 use led_state_kill_ring::KillRing;
+use led_state_lsp::LspExtrasState;
 use led_state_tabs::Tabs;
 
 use crate::Event;
@@ -111,6 +115,7 @@ pub struct Dispatcher<'a> {
     pub isearch: &'a mut Option<IsearchState>,
     pub file_search: &'a mut Option<FileSearchState>,
     pub completions: &'a mut CompletionsState,
+    pub lsp_extras: &'a mut LspExtrasState,
     /// Symlink-resolution chains keyed by canonical path. Dispatch
     /// populates this whenever a tab opens from a user-typed path
     /// (find-file commit, browser entry). Load-completion
@@ -160,6 +165,7 @@ impl<'a> Dispatcher<'a> {
             self.file_search,
             self.path_chains,
             self.completions,
+            self.lsp_extras,
             self.keymap,
             self.chord,
         )
@@ -203,6 +209,7 @@ pub fn dispatch_key(
     file_search: &mut Option<FileSearchState>,
     path_chains: &mut std::collections::HashMap<led_core::CanonPath, led_core::PathChain>,
     completions: &mut CompletionsState,
+    lsp_extras: &mut LspExtrasState,
     keymap: &Keymap,
     chord: &mut ChordState,
 ) -> DispatchOutcome {
@@ -229,7 +236,7 @@ pub fn dispatch_key(
         Resolved::Command(cmd) => {
             let outcome = run_command(
                 cmd, tabs, edits, kill_ring, clip, alerts, jumps, browser, fs, store, terminal,
-                find_file, isearch, file_search, path_chains, completions,
+                find_file, isearch, file_search, path_chains, completions, lsp_extras,
             );
             // Kill-ring coalescing: any non-KillLine command breaks
             // the flag, so the next KillLine starts a fresh entry.
@@ -585,6 +592,7 @@ fn run_command(
     file_search: &mut Option<FileSearchState>,
     path_chains: &mut std::collections::HashMap<led_core::CanonPath, led_core::PathChain>,
     completions: &mut CompletionsState,
+    lsp_extras: &mut LspExtrasState,
 ) -> DispatchOutcome {
     // Find-file overlay intercept. When active, the overlay owns
     // input editing + its own command set; most commands route into
@@ -607,6 +615,20 @@ fn run_command(
     if let Some(outcome) = completions_overlay::run_overlay_command(
         cmd, completions, tabs, edits,
     ) {
+        return outcome;
+    }
+
+    // LSP rename overlay intercept (M18). Modal: every key
+    // lands in the input until Enter (commit) or Esc (abort).
+    // Quit passes through so the user can still ctrl+x ctrl+c
+    // out of the editor mid-rename.
+    if let Some(outcome) = rename::run_overlay_command(cmd, lsp_extras) {
+        return outcome;
+    }
+
+    // LSP code-action picker intercept (M18). Modal: Up/Down
+    // navigate, Enter commits, Esc dismisses.
+    if let Some(outcome) = code_actions::run_overlay_command(cmd, lsp_extras) {
         return outcome;
     }
 
@@ -645,7 +667,7 @@ fn run_command(
             DispatchOutcome::Continue
         }
         Command::Save => {
-            request_save_active(tabs, edits);
+            save_with_optional_format(tabs, edits, lsp_extras, alerts);
             DispatchOutcome::Continue
         }
         Command::SaveAll => {
@@ -653,8 +675,7 @@ fn run_command(
             DispatchOutcome::Continue
         }
         Command::SaveNoFormat => {
-            // Alias of Save in M6. M18 (LSP format) will differentiate:
-            // Save runs format first, SaveNoFormat skips it.
+            // Skip format; save directly.
             request_save_active(tabs, edits);
             DispatchOutcome::Continue
         }
@@ -864,7 +885,128 @@ fn run_command(
         | Command::ToggleSearchRegex
         | Command::ToggleSearchReplace
         | Command::ReplaceAll => DispatchOutcome::Continue,
+        // LSP extras (M18). Goto-definition queues a
+        // `RequestGotoDefinition`; the rest land in later stages.
+        Command::LspGotoDefinition => {
+            lsp_goto_definition(tabs, edits, lsp_extras);
+            DispatchOutcome::Continue
+        }
+        Command::LspRename => {
+            rename::activate(lsp_extras, tabs, edits);
+            DispatchOutcome::Continue
+        }
+        Command::LspCodeAction => {
+            code_actions::activate(lsp_extras, tabs, edits);
+            DispatchOutcome::Continue
+        }
+        Command::LspToggleInlayHints => {
+            let on = lsp_extras.toggle_inlay_hints();
+            let msg = if on {
+                "Inlay hints: on"
+            } else {
+                "Inlay hints: off"
+            };
+            alerts.set_info(
+                msg.to_string(),
+                std::time::Instant::now(),
+                std::time::Duration::from_secs(2),
+            );
+            DispatchOutcome::Continue
+        }
+        Command::LspFormat => {
+            request_format_active(tabs, edits, lsp_extras);
+            DispatchOutcome::Continue
+        }
+        Command::Outline => {
+            // Legacy orphan: `alt+o` was bound with no handler.
+            // Rewrite reserves the key so it doesn't fall
+            // through to InsertChar; the full symbol-outline
+            // UI (backed by `textDocument/documentSymbol`) is
+            // post-M18 polish.
+            alerts.set_info(
+                "Outline: not yet implemented".to_string(),
+                std::time::Instant::now(),
+                std::time::Duration::from_secs(2),
+            );
+            DispatchOutcome::Continue
+        }
     }
+}
+
+/// `Save` + format-on-save: if the active buffer is dirty and
+/// has a loaded rope, fire a format request and mark the path
+/// `pending_save_after_format`. The ingest side (applying
+/// `LspEvent::Edits { origin: Format }`) applies the edits and
+/// flips the path into `edits.pending_saves` so the save
+/// driver picks it up next tick. No LSP attached → format
+/// returns empty edits → save still fires.
+fn save_with_optional_format(
+    tabs: &Tabs,
+    edits: &mut BufferEdits,
+    lsp_extras: &mut LspExtrasState,
+    alerts: &mut AlertState,
+) {
+    let Some(id) = tabs.active else {
+        return;
+    };
+    let Some(tab) = tabs.open.iter().find(|t| t.id == id) else {
+        return;
+    };
+    let Some(eb) = edits.buffers.get(&tab.path) else {
+        return;
+    };
+    if !eb.dirty() {
+        return;
+    }
+    lsp_extras.queue_format(tab.path.clone());
+    lsp_extras.pending_save_after_format.insert(tab.path.clone());
+    alerts.set_info(
+        "Formatting...".to_string(),
+        std::time::Instant::now(),
+        std::time::Duration::from_secs(2),
+    );
+}
+
+fn request_format_active(
+    tabs: &Tabs,
+    edits: &BufferEdits,
+    lsp_extras: &mut LspExtrasState,
+) {
+    let Some(id) = tabs.active else {
+        return;
+    };
+    let Some(tab) = tabs.open.iter().find(|t| t.id == id) else {
+        return;
+    };
+    if edits.buffers.get(&tab.path).is_none() {
+        return;
+    }
+    lsp_extras.queue_format(tab.path.clone());
+}
+
+/// Queue a `textDocument/definition` request for the identifier
+/// under the active tab's cursor. Silent no-op when no active
+/// tab, no loaded buffer, or the tab is a preview viewer (legacy
+/// parity — definition from a preview would cross the
+/// modal-tab boundary in a confusing way).
+fn lsp_goto_definition(
+    tabs: &Tabs,
+    edits: &BufferEdits,
+    lsp_extras: &mut LspExtrasState,
+) {
+    let Some(id) = tabs.active else { return };
+    let Some(tab) = tabs.open.iter().find(|t| t.id == id) else {
+        return;
+    };
+    if tab.preview {
+        return;
+    }
+    if edits.buffers.get(&tab.path).is_none() {
+        return;
+    }
+    let line = tab.cursor.line as u32;
+    let col = tab.cursor.col as u32;
+    lsp_extras.queue_goto_definition(tab.path.clone(), line, col);
 }
 
 
@@ -878,6 +1020,7 @@ mod tests {
     use led_state_buffer_edits::{BufferEdits, EditedBuffer};
     use led_state_completions::CompletionsState;
     use led_state_kill_ring::KillRing;
+    use led_state_lsp::LspExtrasState;
     use ropey::Rope;
 
     use super::*;
@@ -900,6 +1043,7 @@ mod tests {
         let mut chord = ChordState::default();
         let mut path_chains = std::collections::HashMap::new();
         let mut completions = CompletionsState::default();
+        let mut lsp_extras = LspExtrasState::default();
 
         // First half of the chord: ctrl+x → pending, Continue.
         let mut find_file: Option<FindFileState> = None;
@@ -922,6 +1066,7 @@ mod tests {
             &mut file_search,
             &mut path_chains,
             &mut completions,
+            &mut lsp_extras,
             &keymap,
             &mut chord,);
         assert_eq!(outcome, DispatchOutcome::Continue);
@@ -948,6 +1093,7 @@ mod tests {
             &mut file_search,
             &mut path_chains,
             &mut completions,
+            &mut lsp_extras,
             &keymap,
             &mut chord,);
         assert_eq!(outcome, DispatchOutcome::Quit);
@@ -980,6 +1126,7 @@ mod tests {
         let fs = FsTree::default();
         let mut path_chains = std::collections::HashMap::new();
         let mut completions = CompletionsState::default();
+        let mut lsp_extras = LspExtrasState::default();
         // ctrl+x → pending.
         let mut find_file: Option<FindFileState> = None;
         let mut isearch: Option<IsearchState> = None;
@@ -1001,6 +1148,7 @@ mod tests {
             &mut file_search,
             &mut path_chains,
             &mut completions,
+            &mut lsp_extras,
             &keymap,
             &mut chord,);
         assert!(chord.pending.is_some());
@@ -1025,6 +1173,7 @@ mod tests {
             &mut file_search,
             &mut path_chains,
             &mut completions,
+            &mut lsp_extras,
             &keymap,
             &mut chord,);
         assert_eq!(outcome, DispatchOutcome::Continue);
@@ -1057,6 +1206,7 @@ mod tests {
 
         let mut path_chains = std::collections::HashMap::new();
         let mut completions = CompletionsState::default();
+        let mut lsp_extras = LspExtrasState::default();
         let mut find_file: Option<FindFileState> = None;
         let mut isearch: Option<IsearchState> = None;
         let mut file_search: Option<FileSearchState> = None;
@@ -1077,6 +1227,7 @@ mod tests {
             &mut file_search,
             &mut path_chains,
             &mut completions,
+            &mut lsp_extras,
             &km,
             &mut chord,);
         assert_eq!(outcome, DispatchOutcome::Quit);
@@ -1102,6 +1253,7 @@ mod tests {
             &mut file_search,
             &mut path_chains,
             &mut completions,
+            &mut lsp_extras,
             &km,
             &mut chord,);
         assert_eq!(outcome, DispatchOutcome::Continue);
@@ -1127,6 +1279,7 @@ mod tests {
         let mut file_search: Option<FileSearchState> = None;
         let mut path_chains = std::collections::HashMap::new();
         let mut completions = CompletionsState::default();
+        let mut lsp_extras = LspExtrasState::default();
         dispatch_key(
             key(KeyModifiers::NONE, KeyCode::Char('z')),
             &mut tabs,
@@ -1144,6 +1297,7 @@ mod tests {
             &mut file_search,
             &mut path_chains,
             &mut completions,
+            &mut lsp_extras,
             &km,
             &mut chord,);
         assert_eq!(rope_of(&edits, "file.rs").to_string(), "z");
@@ -1170,6 +1324,7 @@ mod tests {
         let mut file_search: Option<FileSearchState> = None;
         let mut path_chains = std::collections::HashMap::new();
         let mut completions = CompletionsState::default();
+        let mut lsp_extras = LspExtrasState::default();
         dispatch_key(
             key(KeyModifiers::CONTROL, KeyCode::Char('x')),
             &mut tabs,
@@ -1187,6 +1342,7 @@ mod tests {
             &mut file_search,
             &mut path_chains,
             &mut completions,
+            &mut lsp_extras,
             &km,
             &mut chord,);
         assert_eq!(rope_of(&edits, "file.rs").to_string(), "");
@@ -1218,9 +1374,13 @@ mod tests {
         let store = BufferStore::default();
         let term = terminal_with(Some(Dims { cols: 10, rows: 5 }));
 
+        // Use Ctrl-X Ctrl-D (SaveNoFormat) for this test — it
+        // enqueues `pending_saves` directly without going
+        // through the format-on-save round trip. The
+        // format-on-save path is covered by the M18 save tests.
         dispatch_chord_default(
             key(KeyModifiers::CONTROL, KeyCode::Char('x')),
-            key(KeyModifiers::CONTROL, KeyCode::Char('s')),
+            key(KeyModifiers::CONTROL, KeyCode::Char('d')),
             &mut tabs,
             &mut edits,
             &store,
@@ -1236,5 +1396,107 @@ mod tests {
         let mut tabs = tabs_with(&[("a", 1)], Some(1));
         let outcome = noop_dispatch(key(KeyModifiers::NONE, KeyCode::Esc), &mut tabs);
         assert_eq!(outcome, DispatchOutcome::Continue);
+    }
+
+    // ── M18 goto-definition ───────────────────────────────
+
+    #[test]
+    fn alt_enter_queues_goto_definition_at_cursor() {
+        // Fixture seeds a loaded "file.rs" buffer; move the cursor
+        // to (2, 4) then press Alt-Enter.
+        let (mut tabs, mut edits, store, term) =
+            fixture_with_content("line0\nline1\nline2 word", Dims { cols: 20, rows: 5 });
+        tabs.open[0].cursor = led_state_tabs::Cursor {
+            line: 2,
+            col: 4,
+            preferred_col: 4,
+        };
+
+        let mut lsp_extras = LspExtrasState::default();
+        let mut completions = CompletionsState::default();
+        let mut chord = ChordState::default();
+        let mut kr = KillRing::default();
+        let mut clip = ClipboardState::default();
+        let mut alerts = AlertState::default();
+        let mut jumps = JumpListState::default();
+        let mut browser = BrowserUi::default();
+        let fs = FsTree::default();
+        let mut find_file: Option<FindFileState> = None;
+        let mut isearch: Option<IsearchState> = None;
+        let mut file_search: Option<FileSearchState> = None;
+        let mut path_chains = std::collections::HashMap::new();
+        let km = default_keymap();
+        dispatch_key(
+            key(KeyModifiers::ALT, KeyCode::Enter),
+            &mut tabs,
+            &mut edits,
+            &mut kr,
+            &mut clip,
+            &mut alerts,
+            &mut jumps,
+            &mut browser,
+            &fs,
+            &store,
+            &term,
+            &mut find_file,
+            &mut isearch,
+            &mut file_search,
+            &mut path_chains,
+            &mut completions,
+            &mut lsp_extras,
+            &km,
+            &mut chord,
+        );
+        assert_eq!(lsp_extras.pending_goto.len(), 1);
+        let req = &lsp_extras.pending_goto[0];
+        assert_eq!(req.path, canon("file.rs"));
+        assert_eq!(req.line, 2);
+        assert_eq!(req.col, 4);
+        assert_eq!(lsp_extras.latest_goto_seq, Some(req.seq));
+    }
+
+    #[test]
+    fn alt_enter_is_noop_without_active_tab() {
+        let mut tabs = Tabs::default();
+        let mut edits = BufferEdits::default();
+        let store = BufferStore::default();
+        let term = terminal_with(Some(Dims { cols: 20, rows: 5 }));
+
+        let mut lsp_extras = LspExtrasState::default();
+        let mut completions = CompletionsState::default();
+        let mut chord = ChordState::default();
+        let mut kr = KillRing::default();
+        let mut clip = ClipboardState::default();
+        let mut alerts = AlertState::default();
+        let mut jumps = JumpListState::default();
+        let mut browser = BrowserUi::default();
+        let fs = FsTree::default();
+        let mut find_file: Option<FindFileState> = None;
+        let mut isearch: Option<IsearchState> = None;
+        let mut file_search: Option<FileSearchState> = None;
+        let mut path_chains = std::collections::HashMap::new();
+        let km = default_keymap();
+        dispatch_key(
+            key(KeyModifiers::ALT, KeyCode::Enter),
+            &mut tabs,
+            &mut edits,
+            &mut kr,
+            &mut clip,
+            &mut alerts,
+            &mut jumps,
+            &mut browser,
+            &fs,
+            &store,
+            &term,
+            &mut find_file,
+            &mut isearch,
+            &mut file_search,
+            &mut path_chains,
+            &mut completions,
+            &mut lsp_extras,
+            &km,
+            &mut chord,
+        );
+        assert!(lsp_extras.pending_goto.is_empty());
     }
 }

@@ -57,7 +57,11 @@ mod tests {
     // ── Save via legacy chord (ctrl+x ctrl+s) ───────────────────────────
 
     #[test]
-    fn ctrl_x_ctrl_s_queues_save_for_dirty_active_buffer() {
+    fn ctrl_x_ctrl_d_queues_direct_save_for_dirty_active_buffer() {
+        // Ctrl-X Ctrl-D is SaveNoFormat — M18's "skip format"
+        // path. Ctrl-X Ctrl-S now routes through format-on-save,
+        // so directly-populating `pending_saves` is the
+        // SaveNoFormat test's responsibility.
         let (mut tabs, mut edits, store, term) =
             fixture_with_content("hi", Dims { cols: 10, rows: 5 });
         // Force dirty by bumping version past saved_version.
@@ -67,7 +71,7 @@ mod tests {
 
         dispatch_chord_default(
             key(KeyModifiers::CONTROL, KeyCode::Char('x')),
-            key(KeyModifiers::CONTROL, KeyCode::Char('s')),
+            key(KeyModifiers::CONTROL, KeyCode::Char('d')),
             &mut tabs,
             &mut edits,
             &store,

@@ -1,11 +1,11 @@
 //! Sync core of the LSP driver.
 //!
-//! Diagnostics for M16 and completions for M17; hover / code-
-//! actions land in later milestones. The wire ABI (`LspCmd` /
-//! `LspEvent`) and the `DiagnosticSource` state machine both
-//! live here so the native driver and the runtime share the
-//! same vocabulary and the state machine is testable without
-//! tokio.
+//! Diagnostics for M16, completions for M17, and the
+//! goto-definition / rename / code-actions / format / inlay-hints
+//! trio for M18. The wire ABI (`LspCmd` / `LspEvent`) and the
+//! `DiagnosticSource` state machine both live here so the native
+//! driver and the runtime share the same vocabulary and the
+//! state machine is testable without tokio.
 //!
 //! # Lifecycle sketch
 //!
@@ -117,6 +117,68 @@ pub enum LspCmd {
         seq: u64,
         item: CompletionItem,
     },
+    /// `textDocument/definition` for the identifier at
+    /// `(line, col)` on `path`. Answered by
+    /// [`LspEvent::GotoDefinition`]; at most one location is
+    /// forwarded back (the first LSP Location in the response).
+    RequestGotoDefinition {
+        path: CanonPath,
+        seq: u64,
+        line: u32,
+        col: u32,
+    },
+    /// `textDocument/rename` — rename every occurrence of the
+    /// symbol at `(line, col)` to `new_name`. Resulting
+    /// `WorkspaceEdit` flattens to a `Vec<FileEdit>` delivered
+    /// via [`LspEvent::Edits`] tagged `EditsOrigin::Rename`.
+    RequestRename {
+        path: CanonPath,
+        seq: u64,
+        line: u32,
+        col: u32,
+        new_name: Arc<str>,
+    },
+    /// `textDocument/codeAction` for the range `(start..end)`
+    /// on `path`. Titles + resolve data come back as
+    /// [`LspEvent::CodeActions`]; committing one subsequently
+    /// fires [`LspCmd::SelectCodeAction`].
+    RequestCodeAction {
+        path: CanonPath,
+        seq: u64,
+        start_line: u32,
+        start_col: u32,
+        end_line: u32,
+        end_col: u32,
+    },
+    /// Commit a code action the user picked from the picker.
+    /// The summary carries whatever `resolve_data` the server
+    /// originally attached so the native driver can issue a
+    /// `codeAction/resolve` round-trip when `resolve_needed`
+    /// is true. Resulting edits land as
+    /// [`LspEvent::Edits { origin: CodeAction, .. }`].
+    SelectCodeAction {
+        path: CanonPath,
+        seq: u64,
+        action: CodeActionSummary,
+    },
+    /// `textDocument/formatting` for the whole file at `path`.
+    /// Edits come back as
+    /// [`LspEvent::Edits { origin: Format, .. }`]; an empty
+    /// `edits` vector is the "no-op format / already formatted"
+    /// signal that lets the dispatcher release any queued save.
+    RequestFormat { path: CanonPath, seq: u64 },
+    /// `textDocument/inlayHint` for the visible range.
+    /// `version` is the buffer version the request was
+    /// computed against — the runtime re-requests on version
+    /// bump or viewport scroll. The response arrives as
+    /// [`LspEvent::InlayHints`] stamped with the same version.
+    RequestInlayHints {
+        path: CanonPath,
+        seq: u64,
+        version: u64,
+        start_line: u32,
+        end_line: u32,
+    },
 }
 
 /// One completion candidate from the server. Trimmed to the
@@ -176,6 +238,89 @@ pub struct CompletionTextEdit {
     pub new_text: Arc<str>,
 }
 
+/// One point in a buffer. Used as the target of
+/// [`LspEvent::GotoDefinition`] and inside [`TextEditOp`].
+/// `line` / `col` are 0-indexed char offsets.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Location {
+    pub path: CanonPath,
+    pub line: u32,
+    pub col: u32,
+}
+
+/// One edit inside an LSP `WorkspaceEdit` or formatting
+/// response. Ranges are `[start..end)` in char coordinates;
+/// `new_text` replaces the range verbatim. Empty `new_text`
+/// means "delete the range"; empty range + non-empty text
+/// means "insert".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TextEditOp {
+    pub start_line: u32,
+    pub start_col: u32,
+    pub end_line: u32,
+    pub end_col: u32,
+    pub new_text: Arc<str>,
+}
+
+/// A per-file bundle of edits. Results of rename, format, or
+/// code-action resolve flatten to `Vec<FileEdit>`; the runtime
+/// applies them buffer-by-buffer (opening a buffer if the path
+/// isn't already loaded is out of scope for M18 — legacy
+/// parity).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileEdit {
+    pub path: CanonPath,
+    pub edits: Vec<TextEditOp>,
+}
+
+/// One LSP inlay hint — a short label the server wants the
+/// editor to render as ghost text at `(line, col)`. `padding_left` /
+/// `padding_right` are the spec's optional flags for controlling
+/// whether the label abuts or pads from the surrounding text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InlayHint {
+    pub line: u32,
+    pub col: u32,
+    pub label: Arc<str>,
+    pub padding_left: bool,
+    pub padding_right: bool,
+}
+
+/// Picker-facing summary of a `CodeAction` from the server.
+/// The native driver stores the server's raw item alongside so
+/// selection can round-trip through `codeAction/resolve`
+/// without the runtime having to understand LSP shapes.
+///
+/// `action_id` is an opaque string the native driver assigns
+/// so [`LspCmd::SelectCodeAction`] can look the raw item back
+/// up without threading `lsp_types::CodeActionOrCommand`
+/// values through the runtime.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodeActionSummary {
+    pub title: Arc<str>,
+    pub kind: Option<Arc<str>>,
+    /// `true` when the action ships without an `edit` field —
+    /// the native driver must issue `codeAction/resolve` on
+    /// selection to obtain the edits.
+    pub resolve_needed: bool,
+    /// Driver-internal id. Carried through
+    /// [`LspCmd::SelectCodeAction`] verbatim so the native
+    /// driver can match it to its stored
+    /// `lsp_types::CodeActionOrCommand`.
+    pub action_id: Arc<str>,
+}
+
+/// Which RPC produced an [`LspEvent::Edits`] delivery. Lets the
+/// runtime decide what post-edit bookkeeping is needed — save
+/// is unlocked on `Format` only, jump record is cleared on
+/// `Rename`, no-op otherwise for `CodeAction`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EditsOrigin {
+    Rename,
+    CodeAction,
+    Format,
+}
+
 /// Driver → runtime events. The runtime folds these into its
 /// atoms.
 #[derive(Debug, Clone)]
@@ -232,6 +377,46 @@ pub enum LspEvent {
         path: CanonPath,
         seq: u64,
         additional_edits: Vec<CompletionTextEdit>,
+    },
+    /// Response to [`LspCmd::RequestGotoDefinition`]. `location`
+    /// is `Some` when the server returned at least one
+    /// Location; we forward the first entry verbatim.
+    /// `None` signals "no match" so the dispatcher can surface
+    /// a "no definition found" alert.
+    GotoDefinition {
+        seq: u64,
+        location: Option<Location>,
+    },
+    /// Response to rename / code-action-select / format. The
+    /// runtime flattens each `FileEdit` into a buffer edit (and
+    /// records history) for the buffers it has open; edits for
+    /// unopened paths are intentionally skipped. `origin` is
+    /// opaque metadata the runtime uses to decide post-edit
+    /// bookkeeping (save unlock for `Format`, jump clear for
+    /// `Rename`).
+    Edits {
+        seq: u64,
+        origin: EditsOrigin,
+        edits: Arc<Vec<FileEdit>>,
+    },
+    /// Response to [`LspCmd::RequestCodeAction`]. Titles-only
+    /// surface — the native driver keeps raw items keyed by
+    /// `action_id` so selection round-trips through
+    /// [`LspCmd::SelectCodeAction`] without the runtime seeing
+    /// LSP shapes.
+    CodeActions {
+        path: CanonPath,
+        seq: u64,
+        actions: Arc<Vec<CodeActionSummary>>,
+    },
+    /// Response to [`LspCmd::RequestInlayHints`]. `version`
+    /// echoes the buffer version the request was issued
+    /// against so stale replies don't clobber hints painted
+    /// for a newer rope.
+    InlayHints {
+        path: CanonPath,
+        version: u64,
+        hints: Arc<Vec<InlayHint>>,
     },
 }
 

@@ -309,7 +309,9 @@ dependencies = [
 
 [[package]]
 name = "drv"
-version = "0.3.1"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4ff12bda9491623d286d66d438bfe63b4ed6c64479f7c56606bce3214a767e96"
 dependencies = [
  "drv-macros",
  "imbl",
@@ -317,7 +319,9 @@ dependencies = [
 
 [[package]]
 name = "drv-macros"
-version = "0.3.1"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b01e8c398dfe86af5af552fc0445a3a68ec7404eaba66f03cb97988e7fd553e5"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -753,6 +757,7 @@ dependencies = [
  "led-state-isearch",
  "led-state-jumps",
  "led-state-kill-ring",
+ "led-state-lsp",
  "led-state-syntax",
  "led-state-tabs",
  "regex",
@@ -849,6 +854,16 @@ dependencies = [
 [[package]]
 name = "led-state-kill-ring"
 version = "0.0.0"
+
+[[package]]
+name = "led-state-lsp"
+version = "0.0.0"
+dependencies = [
+ "imbl",
+ "led-core",
+ "led-driver-lsp-core",
+ "led-state-tabs",
+]
 
 [[package]]
 name = "led-state-syntax"

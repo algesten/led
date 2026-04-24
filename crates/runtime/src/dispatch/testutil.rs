@@ -22,6 +22,7 @@ use led_state_find_file::FindFileState;
 use led_state_isearch::IsearchState;
 use led_state_jumps::JumpListState;
 use led_state_kill_ring::KillRing;
+use led_state_lsp::LspExtrasState;
 use led_state_tabs::{Tab, TabId, Tabs};
 use ropey::Rope;
 
@@ -128,6 +129,7 @@ pub(super) fn dispatch_default(
     let mut file_search: Option<FileSearchState> = None;
     let mut path_chains = std::collections::HashMap::new();
     let mut completions = CompletionsState::default();
+    let mut lsp_extras = LspExtrasState::default();
     dispatch_key(
         k,
         tabs,
@@ -145,6 +147,7 @@ pub(super) fn dispatch_default(
         &mut file_search,
         &mut path_chains,
         &mut completions,
+        &mut lsp_extras,
         &default_keymap(),
         &mut chord,)
 }
@@ -173,6 +176,7 @@ pub(super) fn dispatch_chord_default(
     let mut file_search: Option<FileSearchState> = None;
     let mut path_chains = std::collections::HashMap::new();
     let mut completions = CompletionsState::default();
+    let mut lsp_extras = LspExtrasState::default();
     dispatch_key(
         prefix,
         tabs,
@@ -190,6 +194,7 @@ pub(super) fn dispatch_chord_default(
         &mut file_search,
         &mut path_chains,
         &mut completions,
+        &mut lsp_extras,
         &keymap,
         &mut chord,);
     let mut find_file: Option<FindFileState> = None;
@@ -212,6 +217,7 @@ pub(super) fn dispatch_chord_default(
         &mut file_search,
         &mut path_chains,
         &mut completions,
+        &mut lsp_extras,
         &keymap,
         &mut chord,)
 }
@@ -237,6 +243,7 @@ pub(super) fn dispatch_with_ring(
     let mut file_search: Option<FileSearchState> = None;
     let mut path_chains = std::collections::HashMap::new();
     let mut completions = CompletionsState::default();
+    let mut lsp_extras = LspExtrasState::default();
     dispatch_key(
         k,
         tabs,
@@ -254,6 +261,7 @@ pub(super) fn dispatch_with_ring(
         &mut file_search,
         &mut path_chains,
         &mut completions,
+        &mut lsp_extras,
         &default_keymap(),
         &mut chord,)
 }
@@ -277,6 +285,7 @@ pub(super) fn noop_dispatch(k: KeyEvent, tabs: &mut Tabs) -> DispatchOutcome {
     let mut file_search: Option<FileSearchState> = None;
     let mut path_chains = std::collections::HashMap::new();
     let mut completions = CompletionsState::default();
+    let mut lsp_extras = LspExtrasState::default();
     dispatch_key(
         k,
         tabs,
@@ -294,6 +303,7 @@ pub(super) fn noop_dispatch(k: KeyEvent, tabs: &mut Tabs) -> DispatchOutcome {
         &mut file_search,
         &mut path_chains,
         &mut completions,
+        &mut lsp_extras,
         &keymap,
         &mut chord,)
 }

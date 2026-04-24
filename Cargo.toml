@@ -15,6 +15,7 @@ members = [
     "crates/state-syntax",
     "crates/state-diagnostics",
     "crates/state-completions",
+    "crates/state-lsp",
     "crates/driver-buffers/core",
     "crates/driver-buffers/native",
     "crates/driver-terminal/core",
@@ -54,6 +55,7 @@ led-state-file-search = { path = "crates/state-file-search" }
 led-state-syntax = { path = "crates/state-syntax" }
 led-state-diagnostics = { path = "crates/state-diagnostics" }
 led-state-completions = { path = "crates/state-completions" }
+led-state-lsp = { path = "crates/state-lsp" }
 led-driver-buffers-core = { path = "crates/driver-buffers/core" }
 led-driver-buffers-native = { path = "crates/driver-buffers/native" }
 led-driver-terminal-core = { path = "crates/driver-terminal/core" }
@@ -73,7 +75,7 @@ led-driver-lsp-native = { path = "crates/driver-lsp/native" }
 led-runtime = { path = "crates/runtime" }
 
 # drv = the memoization / query primitive.
-drv = { path = "../drv/drv", features = ["imbl"] }
+drv = { version = "0.3", features = ["imbl"] }
 imbl = "7"
 
 # External dependencies carried over from the legacy workspace.

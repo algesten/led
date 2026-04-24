@@ -385,8 +385,9 @@ mod tests {
     use led_state_clipboard::ClipboardState;
     use led_state_jumps::JumpListState;
     use led_state_browser::{BrowserUi, FsTree};
-    
+
     use led_state_kill_ring::KillRing;
+    use led_state_lsp::LspExtrasState;
     use led_state_tabs::Cursor;
     
 
@@ -452,6 +453,7 @@ mod tests {
 
         let mut path_chains = std::collections::HashMap::new();
         let mut completions = CompletionsState::default();
+        let mut lsp_extras = LspExtrasState::default();
         // Undo: ""
         let mut find_file: Option<FindFileState> = None;
         let mut isearch: Option<IsearchState> = None;
@@ -473,6 +475,7 @@ mod tests {
             &mut file_search,
             &mut path_chains,
             &mut completions,
+            &mut lsp_extras,
             &km,
             &mut chord,);
         assert_eq!(rope_of(&edits, "file.rs").to_string(), "");
@@ -498,6 +501,7 @@ mod tests {
             &mut file_search,
             &mut path_chains,
             &mut completions,
+            &mut lsp_extras,
             &km,
             &mut chord,);
         assert_eq!(rope_of(&edits, "file.rs").to_string(), "hi");
@@ -572,6 +576,7 @@ mod tests {
         let mut file_search: Option<FileSearchState> = None;
         let mut path_chains = std::collections::HashMap::new();
         let mut completions = CompletionsState::default();
+        let mut lsp_extras = LspExtrasState::default();
         dispatch_key(
             key(KeyModifiers::CONTROL, KeyCode::Char('y')),
             &mut tabs,
@@ -589,6 +594,7 @@ mod tests {
             &mut file_search,
             &mut path_chains,
             &mut completions,
+            &mut lsp_extras,
             &km,
             &mut chord,);
         // Still "x" — nothing to redo because the new edit dropped

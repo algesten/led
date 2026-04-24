@@ -116,6 +116,40 @@ enum PendingRequest {
     /// echoes `LspCmd::ResolveCompletion.seq` so the runtime
     /// can ignore resolves from a stale session.
     ResolveCompletion { path: CanonPath, seq: u64 },
+    /// Waiting on a `textDocument/definition` response. `seq`
+    /// echoes the runtime's originating
+    /// `LspCmd::RequestGotoDefinition.seq`.
+    GotoDefinition { seq: u64 },
+    /// Waiting on a `textDocument/rename` response. `seq`
+    /// echoes `LspCmd::RequestRename.seq` so the runtime can
+    /// drop stale replies (e.g. after an abort).
+    Rename { seq: u64 },
+    /// Waiting on a `textDocument/codeAction` response. `seq`
+    /// echoes `LspCmd::RequestCodeAction.seq`; `path` is
+    /// carried through because the `LspEvent::CodeActions`
+    /// surface echoes it back.
+    CodeAction { seq: u64, path: CanonPath },
+    /// Waiting on a `codeAction/resolve` response initiated by
+    /// a picker commit. The raw pre-resolve action is stashed
+    /// here so if resolve succeeds without `edit`, we fall
+    /// back to the raw edit (if any).
+    ResolveCodeAction {
+        seq: u64,
+        raw: Value,
+    },
+    /// Waiting on `textDocument/inlayHint`. `path` + `version`
+    /// echo back in the `LspEvent::InlayHints` emission so the
+    /// runtime can version-gate the cache.
+    InlayHints {
+        path: CanonPath,
+        version: u64,
+    },
+    /// Waiting on `textDocument/formatting`. `seq` echoes
+    /// `LspCmd::RequestFormat.seq`; `path` is forwarded so the
+    /// format edit flattens into a `FileEdit` targeting the
+    /// right buffer even though the LSP response doesn't echo
+    /// the uri.
+    Format { seq: u64, path: CanonPath },
 }
 
 struct ServerEntry {
@@ -156,6 +190,15 @@ struct ServerEntry {
     completion_provider: bool,
     completion_trigger_chars: Vec<char>,
     completion_resolve_provider: bool,
+    /// Cache of raw `CodeAction`/`Command` items returned by
+    /// the last `textDocument/codeAction` request, keyed by
+    /// the `action_id` strings we surfaced on the
+    /// corresponding `CodeActionSummary`. The runtime's
+    /// `SelectCodeAction` echoes the chosen id back so we can
+    /// look up the opaque LSP object and issue
+    /// `codeAction/resolve` (if needed) or apply its `edit`
+    /// field directly.
+    code_action_cache: HashMap<Arc<str>, Value>,
 }
 
 /// Lifecycle marker.
@@ -523,6 +566,52 @@ impl Manager {
             LspCmd::ResolveCompletion { path, seq, item } => {
                 self.resolve_completion(path, seq, item);
             }
+            LspCmd::RequestGotoDefinition {
+                path,
+                seq,
+                line,
+                col,
+            } => {
+                self.request_goto_definition(path, seq, line, col);
+            }
+            LspCmd::RequestRename {
+                path,
+                seq,
+                line,
+                col,
+                new_name,
+            } => {
+                self.request_rename(path, seq, line, col, new_name);
+            }
+            LspCmd::RequestCodeAction {
+                path,
+                seq,
+                start_line,
+                start_col,
+                end_line,
+                end_col,
+            } => {
+                self.request_code_action(
+                    path, seq, start_line, start_col, end_line, end_col,
+                );
+            }
+            LspCmd::SelectCodeAction { path, seq, action } => {
+                self.select_code_action(path, seq, action);
+            }
+            LspCmd::RequestFormat { path, seq } => {
+                self.request_format(path, seq);
+            }
+            LspCmd::RequestInlayHints {
+                path,
+                seq,
+                version,
+                start_line,
+                end_line,
+            } => {
+                self.request_inlay_hints(
+                    path, seq, version, start_line, end_line,
+                );
+            }
         }
     }
 
@@ -602,6 +691,7 @@ impl Manager {
             completion_provider: false,
             completion_trigger_chars: Vec::new(),
             completion_resolve_provider: false,
+            code_action_cache: HashMap::new(),
         };
         entry.pending_requests.insert(id, PendingRequest::Initialize);
         self.servers.insert(language, entry);
@@ -918,6 +1008,416 @@ impl Manager {
             .insert(id, PendingRequest::ResolveCompletion { path, seq });
     }
 
+    // ── M18 stubs ─────────────────────────────────────────
+    //
+    // Each handler below lands as a fully-wired RPC in its own
+    // stage (2..=6). For now they're no-ops so the runtime can
+    // call the new `LspCmd` variants without the manager
+    // panicking or falling through.
+
+    fn request_goto_definition(
+        &mut self,
+        path: CanonPath,
+        seq: u64,
+        line: u32,
+        col: u32,
+    ) {
+        let Some(language) = self.language_for_path(&path) else {
+            self.emit_goto_none(seq);
+            return;
+        };
+        let id = self.fresh_id();
+        let entry = self.servers.get_mut(&language).expect("just resolved");
+        let body = json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "textDocument/definition",
+            "params": {
+                "textDocument": { "uri": uri_from_path(&path) },
+                "position": { "line": line, "character": col },
+            },
+        });
+        let _ = entry
+            .server
+            .send_body(&serde_json::to_vec(&body).expect("serialize goto-def"));
+        entry
+            .pending_requests
+            .insert(id, PendingRequest::GotoDefinition { seq });
+    }
+
+    fn emit_goto_none(&self, seq: u64) {
+        let _ = self.lsp_event_tx.send(LspEvent::GotoDefinition {
+            seq,
+            location: None,
+        });
+        self.notify.notify();
+    }
+
+    fn finish_goto_definition(
+        &mut self,
+        seq: u64,
+        payload: Result<Value, crate::classify::JsonRpcError>,
+    ) {
+        let location = payload.ok().and_then(parse_definition_location);
+        let _ = self
+            .lsp_event_tx
+            .send(LspEvent::GotoDefinition { seq, location });
+        self.notify.notify();
+    }
+
+    fn request_rename(
+        &mut self,
+        path: CanonPath,
+        seq: u64,
+        line: u32,
+        col: u32,
+        new_name: Arc<str>,
+    ) {
+        let Some(language) = self.language_for_path(&path) else {
+            self.emit_empty_edits(seq, led_driver_lsp_core::EditsOrigin::Rename);
+            return;
+        };
+        let id = self.fresh_id();
+        let entry = self.servers.get_mut(&language).expect("just resolved");
+        let body = json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "textDocument/rename",
+            "params": {
+                "textDocument": { "uri": uri_from_path(&path) },
+                "position": { "line": line, "character": col },
+                "newName": new_name.as_ref(),
+            },
+        });
+        let _ = entry
+            .server
+            .send_body(&serde_json::to_vec(&body).expect("serialize rename"));
+        entry
+            .pending_requests
+            .insert(id, PendingRequest::Rename { seq });
+    }
+
+    fn emit_empty_edits(
+        &self,
+        seq: u64,
+        origin: led_driver_lsp_core::EditsOrigin,
+    ) {
+        let _ = self.lsp_event_tx.send(LspEvent::Edits {
+            seq,
+            origin,
+            edits: Arc::new(Vec::new()),
+        });
+        self.notify.notify();
+    }
+
+    fn finish_rename(
+        &mut self,
+        seq: u64,
+        payload: Result<Value, crate::classify::JsonRpcError>,
+    ) {
+        let edits = match payload {
+            Ok(v) => parse_workspace_edit(&v),
+            Err(_) => Vec::new(),
+        };
+        let _ = self.lsp_event_tx.send(LspEvent::Edits {
+            seq,
+            origin: led_driver_lsp_core::EditsOrigin::Rename,
+            edits: Arc::new(edits),
+        });
+        self.notify.notify();
+    }
+
+    fn request_code_action(
+        &mut self,
+        path: CanonPath,
+        seq: u64,
+        start_line: u32,
+        start_col: u32,
+        end_line: u32,
+        end_col: u32,
+    ) {
+        let Some(language) = self.language_for_path(&path) else {
+            self.emit_empty_code_actions(path, seq);
+            return;
+        };
+        let id = self.fresh_id();
+        let entry = self.servers.get_mut(&language).expect("just resolved");
+        // Fresh request purges any stale cache from the
+        // previous session. A picker always pairs 1:1 with a
+        // most-recent request.
+        entry.code_action_cache.clear();
+        let body = json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "textDocument/codeAction",
+            "params": {
+                "textDocument": { "uri": uri_from_path(&path) },
+                "range": {
+                    "start": { "line": start_line, "character": start_col },
+                    "end":   { "line": end_line,   "character": end_col   },
+                },
+                "context": { "diagnostics": [] },
+            },
+        });
+        let _ = entry
+            .server
+            .send_body(&serde_json::to_vec(&body).expect("serialize codeAction"));
+        entry
+            .pending_requests
+            .insert(id, PendingRequest::CodeAction { seq, path });
+    }
+
+    fn emit_empty_code_actions(&self, path: CanonPath, seq: u64) {
+        let _ = self.lsp_event_tx.send(LspEvent::CodeActions {
+            path,
+            seq,
+            actions: Arc::new(Vec::new()),
+        });
+        self.notify.notify();
+    }
+
+    fn finish_code_action(
+        &mut self,
+        language: Language,
+        path: CanonPath,
+        seq: u64,
+        payload: Result<Value, crate::classify::JsonRpcError>,
+    ) {
+        let raw_items = match payload {
+            Ok(Value::Array(arr)) => arr,
+            _ => Vec::new(),
+        };
+        let entry = self.servers.get_mut(&language).unwrap();
+        entry.code_action_cache.clear();
+        let mut summaries: Vec<led_driver_lsp_core::CodeActionSummary> =
+            Vec::with_capacity(raw_items.len());
+        for (idx, raw) in raw_items.into_iter().enumerate() {
+            let Some(title) = raw
+                .get("title")
+                .and_then(|t| t.as_str())
+                .map(|s| Arc::<str>::from(s))
+            else {
+                continue;
+            };
+            let kind = raw
+                .get("kind")
+                .and_then(|k| k.as_str())
+                .map(|s| Arc::<str>::from(s));
+            // Pure Command variants have no `edit`; CodeAction
+            // objects with an `edit` present skip resolve.
+            let has_edit = raw.get("edit").is_some();
+            let resolve_needed = !has_edit;
+            let action_id: Arc<str> = Arc::<str>::from(format!("ca-{idx}"));
+            entry
+                .code_action_cache
+                .insert(action_id.clone(), raw);
+            summaries.push(led_driver_lsp_core::CodeActionSummary {
+                title,
+                kind,
+                resolve_needed,
+                action_id,
+            });
+        }
+        let _ = self.lsp_event_tx.send(LspEvent::CodeActions {
+            path,
+            seq,
+            actions: Arc::new(summaries),
+        });
+        self.notify.notify();
+    }
+
+    fn select_code_action(
+        &mut self,
+        path: CanonPath,
+        seq: u64,
+        action: led_driver_lsp_core::CodeActionSummary,
+    ) {
+        let Some(language) = self.language_for_path(&path) else {
+            self.emit_empty_edits(seq, led_driver_lsp_core::EditsOrigin::CodeAction);
+            return;
+        };
+        let raw = match self
+            .servers
+            .get(&language)
+            .and_then(|e| e.code_action_cache.get(&action.action_id).cloned())
+        {
+            Some(raw) => raw,
+            None => {
+                // Cache was purged between request and commit
+                // (another Alt-i fired). Legacy parity: drop.
+                self.emit_empty_edits(seq, led_driver_lsp_core::EditsOrigin::CodeAction);
+                return;
+            }
+        };
+        if !action.resolve_needed && raw.get("edit").is_some() {
+            // Edits are already in hand — parse + emit directly.
+            let edits = raw
+                .get("edit")
+                .map(parse_workspace_edit)
+                .unwrap_or_default();
+            let _ = self.lsp_event_tx.send(LspEvent::Edits {
+                seq,
+                origin: led_driver_lsp_core::EditsOrigin::CodeAction,
+                edits: Arc::new(edits),
+            });
+            self.notify.notify();
+            return;
+        }
+        // Otherwise issue `codeAction/resolve` for the full
+        // item. rust-analyzer and typescript both lazy-resolve
+        // so this is the common case.
+        let id = self.fresh_id();
+        let body = json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "codeAction/resolve",
+            "params": raw.clone(),
+        });
+        let entry = self.servers.get_mut(&language).expect("server exists");
+        let _ = entry
+            .server
+            .send_body(&serde_json::to_vec(&body).expect("serialize resolve"));
+        entry
+            .pending_requests
+            .insert(id, PendingRequest::ResolveCodeAction { seq, raw });
+    }
+
+    fn finish_resolve_code_action(
+        &mut self,
+        seq: u64,
+        raw: Value,
+        payload: Result<Value, crate::classify::JsonRpcError>,
+    ) {
+        let resolved = payload.ok().unwrap_or(raw);
+        let edits = resolved
+            .get("edit")
+            .map(parse_workspace_edit)
+            .unwrap_or_default();
+        let _ = self.lsp_event_tx.send(LspEvent::Edits {
+            seq,
+            origin: led_driver_lsp_core::EditsOrigin::CodeAction,
+            edits: Arc::new(edits),
+        });
+        self.notify.notify();
+    }
+
+    fn request_format(&mut self, path: CanonPath, seq: u64) {
+        let Some(language) = self.language_for_path(&path) else {
+            // No LSP for this language — emit empty edits so
+            // the runtime's post-format save unlocks.
+            self.emit_empty_edits(seq, led_driver_lsp_core::EditsOrigin::Format);
+            return;
+        };
+        let id = self.fresh_id();
+        let entry = self.servers.get_mut(&language).expect("just resolved");
+        let body = json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "textDocument/formatting",
+            "params": {
+                "textDocument": { "uri": uri_from_path(&path) },
+                "options": {
+                    "tabSize": 4,
+                    "insertSpaces": true,
+                },
+            },
+        });
+        let _ = entry
+            .server
+            .send_body(&serde_json::to_vec(&body).expect("serialize formatting"));
+        entry
+            .pending_requests
+            .insert(id, PendingRequest::Format { seq, path });
+    }
+
+    fn finish_format(
+        &mut self,
+        seq: u64,
+        path: CanonPath,
+        payload: Result<Value, crate::classify::JsonRpcError>,
+    ) {
+        let edits_vec = match payload {
+            Ok(Value::Array(arr)) => parse_text_edit_list(&arr),
+            _ => Vec::new(),
+        };
+        let file_edits = if edits_vec.is_empty() {
+            Vec::new()
+        } else {
+            vec![led_driver_lsp_core::FileEdit {
+                path,
+                edits: edits_vec,
+            }]
+        };
+        let _ = self.lsp_event_tx.send(LspEvent::Edits {
+            seq,
+            origin: led_driver_lsp_core::EditsOrigin::Format,
+            edits: Arc::new(file_edits),
+        });
+        self.notify.notify();
+    }
+
+    fn request_inlay_hints(
+        &mut self,
+        path: CanonPath,
+        seq: u64,
+        version: u64,
+        start_line: u32,
+        end_line: u32,
+    ) {
+        let _ = seq; // seq is internal-only (tracing); manager re-echoes version.
+        let Some(language) = self.language_for_path(&path) else {
+            self.emit_empty_inlay_hints(path, version);
+            return;
+        };
+        let id = self.fresh_id();
+        let entry = self.servers.get_mut(&language).expect("just resolved");
+        let body = json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "textDocument/inlayHint",
+            "params": {
+                "textDocument": { "uri": uri_from_path(&path) },
+                "range": {
+                    "start": { "line": start_line, "character": 0 },
+                    "end":   { "line": end_line,   "character": 0 },
+                },
+            },
+        });
+        let _ = entry
+            .server
+            .send_body(&serde_json::to_vec(&body).expect("serialize inlayHint"));
+        entry
+            .pending_requests
+            .insert(id, PendingRequest::InlayHints { path, version });
+    }
+
+    fn emit_empty_inlay_hints(&self, path: CanonPath, version: u64) {
+        let _ = self.lsp_event_tx.send(LspEvent::InlayHints {
+            path,
+            version,
+            hints: Arc::new(Vec::new()),
+        });
+        self.notify.notify();
+    }
+
+    fn finish_inlay_hints(
+        &mut self,
+        path: CanonPath,
+        version: u64,
+        payload: Result<Value, crate::classify::JsonRpcError>,
+    ) {
+        let hints = match payload {
+            Ok(Value::Array(arr)) => parse_inlay_hints(&arr),
+            _ => Vec::new(),
+        };
+        let _ = self.lsp_event_tx.send(LspEvent::InlayHints {
+            path,
+            version,
+            hints: Arc::new(hints),
+        });
+        self.notify.notify();
+    }
+
     /// Look up which server handles `path`. Matches legacy
     /// `server_for_path` — a path is associated with whichever
     /// language the runtime opened it under.
@@ -1062,6 +1562,24 @@ impl Manager {
             }
             PendingRequest::ResolveCompletion { path, seq } => {
                 self.finish_resolve_completion(path, seq, payload);
+            }
+            PendingRequest::GotoDefinition { seq } => {
+                self.finish_goto_definition(seq, payload);
+            }
+            PendingRequest::Rename { seq } => {
+                self.finish_rename(seq, payload);
+            }
+            PendingRequest::CodeAction { seq, path } => {
+                self.finish_code_action(language, path, seq, payload);
+            }
+            PendingRequest::ResolveCodeAction { seq, raw } => {
+                self.finish_resolve_code_action(seq, raw, payload);
+            }
+            PendingRequest::InlayHints { path, version } => {
+                self.finish_inlay_hints(path, version, payload);
+            }
+            PendingRequest::Format { seq, path } => {
+                self.finish_format(seq, path, payload);
             }
         }
     }
@@ -1464,6 +1982,166 @@ fn char_idx_to_line_utf16(rope: &Rope, char_idx: usize) -> (usize, usize) {
     (line, utf16_at_char - utf16_at_line_start)
 }
 
+/// Parse an `InlayHint[]` response into the compact wire
+/// shape led's painter consumes. Hints without a recognisable
+/// `position` + `label` are dropped. `label` may be either a
+/// bare string or an array of `InlayHintLabelPart` objects;
+/// we concatenate the parts' `value` fields.
+fn parse_inlay_hints(
+    items: &[Value],
+) -> Vec<led_driver_lsp_core::InlayHint> {
+    items
+        .iter()
+        .filter_map(|v| {
+            let pos = v.get("position")?;
+            let line = pos.get("line")?.as_u64()? as u32;
+            let col = pos.get("character")?.as_u64()? as u32;
+            let label_value = v.get("label")?;
+            let label = match label_value {
+                Value::String(s) => s.clone(),
+                Value::Array(parts) => {
+                    let mut acc = String::new();
+                    for p in parts {
+                        if let Some(s) = p.get("value").and_then(|vv| vv.as_str()) {
+                            acc.push_str(s);
+                        }
+                    }
+                    acc
+                }
+                _ => return None,
+            };
+            let padding_left = v
+                .get("paddingLeft")
+                .and_then(|p| p.as_bool())
+                .unwrap_or(false);
+            let padding_right = v
+                .get("paddingRight")
+                .and_then(|p| p.as_bool())
+                .unwrap_or(false);
+            Some(led_driver_lsp_core::InlayHint {
+                line,
+                col,
+                label: Arc::<str>::from(label),
+                padding_left,
+                padding_right,
+            })
+        })
+        .collect()
+}
+
+/// Parse a `WorkspaceEdit` response from `textDocument/rename`
+/// or a resolved code action into a flat `Vec<FileEdit>`. LSP
+/// has two shapes:
+///
+/// - `changes`: `{ uri: [TextEdit] }` — the legacy form.
+/// - `documentChanges`: `[{ textDocument: {uri,version},
+///   edits: [TextEdit] }, ...]` — the versioned form.
+///
+/// We flatten either shape into one `FileEdit` per distinct
+/// uri. Unknown shapes (pure-null, pure-errors) return an
+/// empty vec which the runtime treats as "no-op rename" —
+/// still surfaces the alert and dismisses.
+fn parse_workspace_edit(
+    result: &Value,
+) -> Vec<led_driver_lsp_core::FileEdit> {
+    let mut out: Vec<led_driver_lsp_core::FileEdit> = Vec::new();
+    if let Some(changes) = result.get("changes").and_then(|c| c.as_object()) {
+        for (uri, edits_json) in changes {
+            let Some(path) =
+                path_from_uri(uri).map(|p| led_core::UserPath::new(p).canonicalize())
+            else {
+                continue;
+            };
+            let Some(arr) = edits_json.as_array() else { continue };
+            let edits = parse_text_edit_list(arr);
+            if !edits.is_empty() {
+                out.push(led_driver_lsp_core::FileEdit { path, edits });
+            }
+        }
+    }
+    if let Some(doc_changes) =
+        result.get("documentChanges").and_then(|d| d.as_array())
+    {
+        for change in doc_changes {
+            let Some(uri) = change
+                .pointer("/textDocument/uri")
+                .and_then(|v| v.as_str())
+                .and_then(path_from_uri)
+                .map(|p| led_core::UserPath::new(p).canonicalize())
+            else {
+                continue;
+            };
+            let Some(arr) = change.get("edits").and_then(|e| e.as_array()) else {
+                continue;
+            };
+            let edits = parse_text_edit_list(arr);
+            if !edits.is_empty() {
+                out.push(led_driver_lsp_core::FileEdit { path: uri, edits });
+            }
+        }
+    }
+    out
+}
+
+fn parse_text_edit_list(arr: &[Value]) -> Vec<led_driver_lsp_core::TextEditOp> {
+    arr.iter().filter_map(parse_text_edit).collect()
+}
+
+fn parse_text_edit(v: &Value) -> Option<led_driver_lsp_core::TextEditOp> {
+    let range = v.get("range")?;
+    let start = range.get("start")?;
+    let end = range.get("end")?;
+    let start_line = start.get("line")?.as_u64()? as u32;
+    let start_col = start.get("character")?.as_u64()? as u32;
+    let end_line = end.get("line")?.as_u64()? as u32;
+    let end_col = end.get("character")?.as_u64()? as u32;
+    let new_text = v.get("newText").and_then(|t| t.as_str()).unwrap_or("");
+    Some(led_driver_lsp_core::TextEditOp {
+        start_line,
+        start_col,
+        end_line,
+        end_col,
+        new_text: Arc::<str>::from(new_text),
+    })
+}
+
+/// Parse a `textDocument/definition` response. The LSP shape
+/// is one of: `null`, a single `Location`, an array of
+/// `Location`, or an array of `LocationLink`. We only use the
+/// first entry and flatten to [`led_driver_lsp_core::Location`].
+///
+/// Returns `None` when the server has no answer, or when every
+/// entry is malformed.
+fn parse_definition_location(
+    result: Value,
+) -> Option<led_driver_lsp_core::Location> {
+    let entry = match result {
+        Value::Null => return None,
+        Value::Array(arr) => arr.into_iter().next()?,
+        v @ Value::Object(_) => v,
+        _ => return None,
+    };
+    // `LocationLink` uses `targetUri` + `targetSelectionRange`;
+    // `Location` uses `uri` + `range`. Try both.
+    let uri = entry
+        .get("uri")
+        .or_else(|| entry.get("targetUri"))
+        .and_then(|u| u.as_str())?;
+    let range = entry
+        .get("range")
+        .or_else(|| entry.get("targetSelectionRange"))
+        .or_else(|| entry.get("targetRange"))?;
+    let start = range.get("start")?;
+    let line = start.get("line").and_then(|v| v.as_u64())? as u32;
+    let col = start.get("character").and_then(|v| v.as_u64())? as u32;
+    let path = path_from_uri(uri)?;
+    Some(led_driver_lsp_core::Location {
+        path: led_core::UserPath::new(path).canonicalize(),
+        line,
+        col,
+    })
+}
+
 /// Parse a `textDocument/diagnostic` pull-response body. LSP
 /// documents two shapes: Full (report) and Unchanged. We only
 /// care about Full here; Unchanged yields an empty list.
@@ -1750,5 +2428,120 @@ mod tests {
         assert_eq!(char_idx_to_line_utf16(&r, 0), (0, 0));
         assert_eq!(char_idx_to_line_utf16(&r, 1), (0, 2));
         assert_eq!(char_idx_to_line_utf16(&r, 2), (0, 3));
+    }
+
+    // ── M18 goto-definition ───────────────────────────────
+
+    #[test]
+    fn parse_definition_null_returns_none() {
+        assert!(parse_definition_location(json!(null)).is_none());
+    }
+
+    #[test]
+    fn parse_definition_single_location_picks_start_position() {
+        let v = json!({
+            "uri": "file:///tmp/main.rs",
+            "range": {
+                "start": { "line": 4, "character": 7 },
+                "end":   { "line": 4, "character": 12 },
+            }
+        });
+        let loc = parse_definition_location(v).expect("location");
+        assert_eq!(loc.line, 4);
+        assert_eq!(loc.col, 7);
+    }
+
+    #[test]
+    fn parse_definition_array_takes_first_entry() {
+        let v = json!([
+            {
+                "uri": "file:///tmp/main.rs",
+                "range": {
+                    "start": { "line": 0, "character": 3 },
+                    "end":   { "line": 0, "character": 9 },
+                }
+            },
+            {
+                "uri": "file:///tmp/other.rs",
+                "range": {
+                    "start": { "line": 99, "character": 0 },
+                    "end":   { "line": 99, "character": 1 },
+                }
+            },
+        ]);
+        let loc = parse_definition_location(v).expect("first");
+        assert_eq!(loc.line, 0);
+        assert_eq!(loc.col, 3);
+    }
+
+    #[test]
+    fn parse_definition_location_link_uses_target_fields() {
+        let v = json!({
+            "targetUri": "file:///tmp/x.rs",
+            "targetSelectionRange": {
+                "start": { "line": 12, "character": 4 },
+                "end":   { "line": 12, "character": 10 },
+            }
+        });
+        let loc = parse_definition_location(v).expect("locationlink");
+        assert_eq!(loc.line, 12);
+        assert_eq!(loc.col, 4);
+    }
+
+    // ── M18 rename WorkspaceEdit parsing ──────────────────
+
+    #[test]
+    fn parse_workspace_edit_changes_shape_flattens_by_uri() {
+        let v = json!({
+            "changes": {
+                "file:///tmp/a.rs": [
+                    { "range": { "start": { "line": 1, "character": 4 },
+                                 "end":   { "line": 1, "character": 7 } },
+                      "newText": "bar" },
+                    { "range": { "start": { "line": 3, "character": 12 },
+                                 "end":   { "line": 3, "character": 15 } },
+                      "newText": "bar" },
+                ],
+                "file:///tmp/b.rs": [
+                    { "range": { "start": { "line": 0, "character": 0 },
+                                 "end":   { "line": 0, "character": 3 } },
+                      "newText": "bar" },
+                ],
+            }
+        });
+        let out = parse_workspace_edit(&v);
+        assert_eq!(out.len(), 2);
+        // Order across URIs is unspecified; sort for assertion.
+        let mut edits_by_name: Vec<_> = out
+            .iter()
+            .map(|fe| (fe.path.display().to_string(), fe.edits.len()))
+            .collect();
+        edits_by_name.sort();
+        assert!(edits_by_name.iter().any(|(n, k)| n.ends_with("a.rs") && *k == 2));
+        assert!(edits_by_name.iter().any(|(n, k)| n.ends_with("b.rs") && *k == 1));
+    }
+
+    #[test]
+    fn parse_workspace_edit_document_changes_shape() {
+        let v = json!({
+            "documentChanges": [{
+                "textDocument": { "uri": "file:///tmp/a.rs", "version": 3 },
+                "edits": [
+                    { "range": { "start": { "line": 0, "character": 0 },
+                                 "end":   { "line": 0, "character": 3 } },
+                      "newText": "bar" },
+                ]
+            }]
+        });
+        let out = parse_workspace_edit(&v);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].edits.len(), 1);
+        assert_eq!(out[0].edits[0].new_text.as_ref(), "bar");
+    }
+
+    #[test]
+    fn parse_workspace_edit_unknown_shape_is_empty() {
+        assert!(parse_workspace_edit(&json!({})).is_empty());
+        assert!(parse_workspace_edit(&Value::Null).is_empty());
     }
 }

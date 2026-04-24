@@ -227,6 +227,12 @@ pub struct Atoms {
     /// keys. `seq_gen` is the monotonic request id — see
     /// [`led_state_completions::CompletionsState`].
     pub completions: led_state_completions::CompletionsState,
+    /// LSP extras (M18): pending outbound requests + overlays +
+    /// inlay-hint caches for the goto-definition / rename /
+    /// code-action / format / inlay-hints quartet. Kept separate
+    /// from `completions` and `diagnostics` so its churn doesn't
+    /// invalidate unrelated memos.
+    pub lsp_extras: led_state_lsp::LspExtrasState,
     /// Symlink resolution chain for every path the user has
     /// opened, keyed by canonical path. Populated at tab-open
     /// time (main.rs CLI, find-file commit, browser open) so the
@@ -275,6 +281,7 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
         lsp_init_sent,
         lsp_status,
         completions,
+        lsp_extras,
     } = &mut *world.atoms;
     let drivers = world.drivers;
     let wake = world.wake;
@@ -501,6 +508,67 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
                 }
                 LspEvent::CompletionResolved { .. } => {
                     // Stage 5 handles the post-commit apply.
+                }
+                LspEvent::GotoDefinition { seq, location } => {
+                    apply_goto_definition(
+                        tabs, edits, jumps, alerts, lsp_extras, seq,
+                        location,
+                    );
+                }
+                LspEvent::Edits {
+                    seq,
+                    origin,
+                    edits: file_edits,
+                } => {
+                    apply_lsp_edits(
+                        edits, alerts, lsp_extras, seq, origin, &file_edits,
+                    );
+                }
+                LspEvent::CodeActions {
+                    path,
+                    seq,
+                    actions,
+                } => {
+                    if lsp_extras.latest_code_action_seq != Some(seq) {
+                        // Stale response; drop.
+                    } else if actions.is_empty() {
+                        alerts.set_info(
+                            "No code actions available".to_string(),
+                            std::time::Instant::now(),
+                            INFO_TTL,
+                        );
+                    } else {
+                        dispatch::install_code_action_picker(
+                            lsp_extras,
+                            path,
+                            seq,
+                            actions,
+                        );
+                    }
+                }
+                LspEvent::InlayHints {
+                    path,
+                    version,
+                    hints,
+                } => {
+                    if !lsp_extras.inlay_hints_enabled {
+                        continue;
+                    }
+                    // Only accept hints whose `version` matches
+                    // the buffer's current version. Stale
+                    // replies don't smear on a later rope.
+                    let current_version = edits
+                        .buffers
+                        .get(&path)
+                        .map(|eb| eb.version)
+                        .unwrap_or(0);
+                    if version != current_version {
+                        continue;
+                    }
+                    lsp_extras.inlay_hints_by_path.insert(
+                        path,
+                        led_state_lsp::BufferInlayHints { version, hints },
+                    );
                 }
             }
         }
@@ -733,6 +801,7 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
                 isearch,
                 file_search,
                 completions,
+                lsp_extras,
                 path_chains,
                 keymap,
                 chord: &mut chord,
@@ -805,6 +874,7 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
             diagnostics: query::DiagnosticsStatesInput::new(diagnostics),
             lsp: query::LspStatusesInput::new(lsp_status),
             completions: query::CompletionsSessionInput::new(completions),
+            lsp_extras: query::LspExtrasOverlayInput::new(lsp_extras),
             render_tick,
         });
 
@@ -1065,6 +1135,87 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
                 item: resolve.item,
             });
         }
+        // M18 goto-definition outbox.
+        for req in lsp_extras.pending_goto.drain(..) {
+            lsp_cmds.push(LspCmd::RequestGotoDefinition {
+                path: req.path,
+                seq: req.seq,
+                line: req.line,
+                col: req.col,
+            });
+        }
+        // M18 rename outbox.
+        for req in lsp_extras.pending_rename.drain(..) {
+            lsp_cmds.push(LspCmd::RequestRename {
+                path: req.path,
+                seq: req.seq,
+                line: req.line,
+                col: req.col,
+                new_name: req.new_name,
+            });
+        }
+        // M18 code-action request outbox.
+        for req in lsp_extras.pending_code_action.drain(..) {
+            lsp_cmds.push(LspCmd::RequestCodeAction {
+                path: req.path,
+                seq: req.seq,
+                start_line: req.start_line,
+                start_col: req.start_col,
+                end_line: req.end_line,
+                end_col: req.end_col,
+            });
+        }
+        // M18 code-action commit outbox.
+        for req in lsp_extras.pending_code_action_select.drain(..) {
+            lsp_cmds.push(LspCmd::SelectCodeAction {
+                path: req.path,
+                seq: req.seq,
+                action: req.action,
+            });
+        }
+        // M18 inlay-hints: queue a request per active buffer
+        // whose `(path, version)` hasn't been asked yet. The
+        // viewport range is whole-buffer for the first cut —
+        // legacy's scroll-bucket dedupe (viewport±10 rows,
+        // bucketed by scroll_row/5) stays parked. Hint
+        // rendering isn't wired in this stage so the server
+        // round-trip happens but the data sits unused; the
+        // painter pickup lands with the body-model refactor.
+        // M18 format outbox.
+        for req in lsp_extras.pending_format.drain(..) {
+            lsp_cmds.push(LspCmd::RequestFormat {
+                path: req.path,
+                seq: req.seq,
+            });
+        }
+        if lsp_extras.inlay_hints_enabled {
+            for (path, eb) in edits.buffers.iter() {
+                let version = eb.version;
+                if lsp_extras
+                    .inlay_hints_requested
+                    .contains(&(path.clone(), version))
+                {
+                    continue;
+                }
+                let end_line = eb
+                    .rope
+                    .len_lines()
+                    .saturating_sub(1)
+                    .min(u32::MAX as usize) as u32;
+                lsp_extras.queue_inlay_hints(path.clone(), version, 0, end_line);
+            }
+            for req in lsp_extras.pending_inlay_hint.drain(..) {
+                lsp_cmds.push(LspCmd::RequestInlayHints {
+                    path: req.path,
+                    seq: req.seq,
+                    version: req.version,
+                    start_line: req.start_line,
+                    end_line: req.end_line,
+                });
+            }
+        } else {
+            lsp_extras.pending_inlay_hint.clear();
+        }
         if !lsp_cmds.is_empty() {
             drivers.lsp.execute(lsp_cmds.iter());
         }
@@ -1193,6 +1344,315 @@ fn completion_prefix(
         return String::new();
     }
     eb.rope.slice(from..to).to_string()
+}
+
+/// Apply a goto-definition response: record a jump, switch to
+/// the target tab (when open), move the cursor. Dropped
+/// silently if the seq doesn't match the latest outstanding
+/// request (user navigated elsewhere). `None` location surfaces
+/// a warn alert so the user knows why the keystroke went
+/// nowhere.
+///
+/// Opening a fresh buffer when the target is outside the
+/// currently-open tabs is deferred to M21 (session / persistence
+/// will stash a pending cursor the same way find-file does);
+/// for M18 the jump silent-no-ops when the path isn't open.
+fn apply_goto_definition(
+    tabs: &mut Tabs,
+    edits: &BufferEdits,
+    jumps: &mut JumpListState,
+    alerts: &mut AlertState,
+    lsp_extras: &mut led_state_lsp::LspExtrasState,
+    seq: u64,
+    location: Option<led_driver_lsp_core::Location>,
+) {
+    if lsp_extras.latest_goto_seq != Some(seq) {
+        return;
+    }
+    lsp_extras.latest_goto_seq = None;
+    let Some(loc) = location else {
+        alerts.set_warn(
+            "lsp.goto".to_string(),
+            "No definition found".to_string(),
+        );
+        return;
+    };
+    // Capture the pre-jump position before applying the
+    // target, so Alt-b returns to where the user called the
+    // command from.
+    let Some(current) = current_jump_position(tabs) else {
+        return;
+    };
+    // Find (or skip) the target tab. Not-yet-open files go
+    // through `open_or_focus_tab` to match legacy's "open the
+    // file then jump" behaviour; the cursor is applied by a
+    // second pass once the load completes.
+    let Some(idx) = tabs.open.iter().position(|t| t.path == loc.path) else {
+        // Target is not currently open — skip silently for
+        // M18. M21 will thread a pending cursor through the
+        // open path.
+        return;
+    };
+    let Some(eb) = edits.buffers.get(&loc.path) else {
+        return;
+    };
+    jumps.record(current);
+    let line_count = eb.rope.len_lines();
+    let line = (loc.line as usize).min(line_count.saturating_sub(1));
+    let line_start = eb.rope.line_to_char(line);
+    let line_end = if line + 1 < line_count {
+        eb.rope.line_to_char(line + 1)
+    } else {
+        eb.rope.len_chars()
+    };
+    let line_len = line_end.saturating_sub(line_start);
+    let col = (loc.col as usize).min(line_len);
+
+    let tab = &mut tabs.open[idx];
+    tab.cursor.line = line;
+    tab.cursor.col = col;
+    tab.cursor.preferred_col = col;
+    tabs.active = Some(tab.id);
+    alerts.clear_warn("lsp.goto");
+}
+
+fn current_jump_position(tabs: &Tabs) -> Option<led_state_jumps::JumpPosition> {
+    let id = tabs.active?;
+    let tab = tabs.open.iter().find(|t| t.id == id)?;
+    Some(led_state_jumps::JumpPosition {
+        path: tab.path.clone(),
+        line: tab.cursor.line,
+        col: tab.cursor.col,
+    })
+}
+
+/// Apply an `LspEvent::Edits` delivery: walk `file_edits`, apply
+/// each `TextEditOp` to its target buffer (when currently open),
+/// and record history entries so Undo can revert. Edits for
+/// paths we don't have open are dropped silently — M18 parity
+/// with legacy, which writes disk-only edits from the manager
+/// side rather than through the buffer layer.
+///
+/// Stale seq (rename only, for now) drops the whole delivery.
+/// Edits arrive ordered by the server; we reapply per-file from
+/// latest range to earliest so later applies don't shift
+/// earlier ones. Alerts surface "Renamed N occurrence(s) in M
+/// file(s)" on success.
+fn apply_lsp_edits(
+    edits: &mut BufferEdits,
+    alerts: &mut AlertState,
+    lsp_extras: &mut led_state_lsp::LspExtrasState,
+    seq: u64,
+    origin: led_driver_lsp_core::EditsOrigin,
+    file_edits: &std::sync::Arc<Vec<led_driver_lsp_core::FileEdit>>,
+) {
+    // Stale-seq gate per origin.
+    match origin {
+        led_driver_lsp_core::EditsOrigin::Rename => {
+            if lsp_extras.latest_rename_seq != Some(seq) {
+                return;
+            }
+            lsp_extras.latest_rename_seq = None;
+        }
+        led_driver_lsp_core::EditsOrigin::CodeAction => {
+            if lsp_extras.latest_code_action_select_seq != Some(seq) {
+                return;
+            }
+            lsp_extras.latest_code_action_select_seq = None;
+        }
+        led_driver_lsp_core::EditsOrigin::Format => {
+            // Per-path stale gate: the most-recently-queued
+            // format for each path is the only reply whose
+            // edits the runtime accepts. Older replies (e.g.
+            // from a pre-reformat keystroke's follow-up)
+            // drop silently.
+            let mut keep = false;
+            for fe in file_edits.iter() {
+                if lsp_extras.latest_format_seq.get(&fe.path) == Some(&seq) {
+                    lsp_extras.latest_format_seq.remove(&fe.path);
+                    keep = true;
+                }
+            }
+            if !keep && file_edits.is_empty() {
+                // Empty-edit formats still need to release the
+                // save gate. Walk every `pending_save_after_format`
+                // path and if ANY has its latest_format_seq
+                // matching, accept this delivery as that path's
+                // completion.
+                let matching: Vec<CanonPath> = lsp_extras
+                    .pending_save_after_format
+                    .iter()
+                    .filter(|p| lsp_extras.latest_format_seq.get(*p) == Some(&seq))
+                    .cloned()
+                    .collect();
+                for p in &matching {
+                    lsp_extras.latest_format_seq.remove(p);
+                }
+                if matching.is_empty() {
+                    return;
+                }
+                // Post-format save trigger below still handles
+                // matching.
+            } else if !keep {
+                return;
+            }
+        }
+    }
+
+    let mut total_ops = 0usize;
+    let mut files_touched = 0usize;
+    for fe in file_edits.iter() {
+        let Some(eb) = edits.buffers.get_mut(&fe.path) else {
+            continue;
+        };
+        if fe.edits.is_empty() {
+            continue;
+        }
+        let applied = apply_file_edits(eb, &fe.edits);
+        if applied > 0 {
+            total_ops += applied;
+            files_touched += 1;
+        }
+    }
+
+    if total_ops > 0
+        && !matches!(origin, led_driver_lsp_core::EditsOrigin::Format)
+    {
+        let msg = match origin {
+            led_driver_lsp_core::EditsOrigin::Rename => {
+                if files_touched == 1 {
+                    format!(
+                        "Renamed {total_ops} occurrence{} in 1 file",
+                        if total_ops == 1 { "" } else { "s" },
+                    )
+                } else {
+                    format!(
+                        "Renamed {total_ops} occurrences in {files_touched} files"
+                    )
+                }
+            }
+            led_driver_lsp_core::EditsOrigin::CodeAction => {
+                format!("Applied code action ({total_ops} edit{})",
+                    if total_ops == 1 { "" } else { "s" })
+            }
+            led_driver_lsp_core::EditsOrigin::Format => unreachable!(),
+        };
+        alerts.set_info(msg, std::time::Instant::now(), INFO_TTL);
+    }
+
+    // Post-format save trigger: paths awaiting save after
+    // format now slot into `pending_saves`. Covers the
+    // format-arrived-empty case (no file_edits, nothing
+    // touched) as well as the format-with-edits case (edits
+    // applied above, now save).
+    if matches!(origin, led_driver_lsp_core::EditsOrigin::Format) {
+        // Collect paths associated with this format delivery:
+        // either referenced in `file_edits`, or in
+        // `pending_save_after_format` (fallback for empty
+        // deliveries where `file_edits` is empty).
+        let mut to_save: Vec<CanonPath> = file_edits
+            .iter()
+            .map(|fe| fe.path.clone())
+            .collect();
+        if to_save.is_empty() {
+            to_save = lsp_extras
+                .pending_save_after_format
+                .iter()
+                .cloned()
+                .collect();
+        }
+        for path in to_save {
+            if lsp_extras.pending_save_after_format.remove(&path).is_none() {
+                continue;
+            }
+            if let Some(eb) = edits.buffers.get(&path) {
+                if eb.dirty() {
+                    edits.pending_saves.insert(path);
+                }
+            }
+        }
+    }
+}
+
+/// Apply a sorted list of per-file `TextEditOp`s to a single
+/// buffer. Edits are applied from highest position to lowest so
+/// each apply's char indices remain valid for the next one.
+/// Each edit lands as one `record_replace` history entry — the
+/// user can undo occurrence-by-occurrence, matching legacy.
+///
+/// Returns the number of edits actually applied (skips any whose
+/// range is out of the rope's bounds).
+fn apply_file_edits(
+    eb: &mut EditedBuffer,
+    ops: &[led_driver_lsp_core::TextEditOp],
+) -> usize {
+    // Sort descending by (start_line, start_col) so later edits
+    // don't invalidate earlier ones' indices.
+    let mut sorted: Vec<&led_driver_lsp_core::TextEditOp> = ops.iter().collect();
+    sorted.sort_by(|a, b| {
+        (b.start_line, b.start_col)
+            .cmp(&(a.start_line, a.start_col))
+    });
+    let mut applied = 0usize;
+    for op in sorted {
+        if !apply_one_text_edit(eb, op) {
+            continue;
+        }
+        applied += 1;
+    }
+    applied
+}
+
+fn apply_one_text_edit(
+    eb: &mut EditedBuffer,
+    op: &led_driver_lsp_core::TextEditOp,
+) -> bool {
+    let rope = &eb.rope;
+    let line_count = rope.len_lines();
+    if (op.start_line as usize) >= line_count {
+        return false;
+    }
+    let start_line = op.start_line as usize;
+    let end_line = (op.end_line as usize).min(line_count.saturating_sub(1));
+    let start_line_char = rope.line_to_char(start_line);
+    let end_line_char = rope.line_to_char(end_line);
+    let start_line_len = if start_line + 1 < line_count {
+        rope.line_to_char(start_line + 1) - start_line_char
+    } else {
+        rope.len_chars() - start_line_char
+    };
+    let end_line_len = if end_line + 1 < line_count {
+        rope.line_to_char(end_line + 1) - end_line_char
+    } else {
+        rope.len_chars() - end_line_char
+    };
+    let start_char = start_line_char + (op.start_col as usize).min(start_line_len);
+    let end_char = end_line_char + (op.end_col as usize).min(end_line_len);
+    if end_char < start_char {
+        return false;
+    }
+
+    let mut new_rope = (*eb.rope).clone();
+    let removed: String = new_rope.slice(start_char..end_char).to_string();
+    new_rope.remove(start_char..end_char);
+    new_rope.insert(start_char, &op.new_text);
+
+    // Cursor bookkeeping: we don't move the active tab's cursor
+    // for LSP edits — legacy parity. Some clients move the
+    // cursor to the edit site; we match led's prior behaviour.
+    let cursor_before = led_state_tabs::Cursor::default();
+    let cursor_after = led_state_tabs::Cursor::default();
+    eb.rope = std::sync::Arc::new(new_rope);
+    eb.version = eb.version.saturating_add(1);
+    eb.history.record_replace(
+        start_char,
+        std::sync::Arc::<str>::from(removed),
+        std::sync::Arc::<str>::from(op.new_text.as_ref()),
+        cursor_before,
+        cursor_after,
+        None,
+    );
+    true
 }
 
 fn seed_edit_from_load(
@@ -1700,5 +2160,299 @@ mod tests {
             kinds.contains(&led_state_syntax::TokenKind::Keyword),
             "expected a Keyword token; got {kinds:?}",
         );
+    }
+
+    // ── M18 goto-definition ingest ────────────────────────
+
+    fn seed_tab(path: &str) -> led_state_tabs::Tabs {
+        let mut tabs = led_state_tabs::Tabs::default();
+        let id = led_state_tabs::TabId(1);
+        tabs.open.push_back(led_state_tabs::Tab {
+            id,
+            path: canon(path),
+            ..Default::default()
+        });
+        tabs.active = Some(id);
+        tabs
+    }
+
+    #[test]
+    fn apply_goto_definition_moves_cursor_and_records_jump() {
+        let mut tabs = seed_tab("main.rs");
+        tabs.open[0].cursor = led_state_tabs::Cursor {
+            line: 5,
+            col: 10,
+            preferred_col: 10,
+        };
+        let mut edits = BufferEdits::default();
+        edits.buffers.insert(
+            canon("main.rs"),
+            EditedBuffer::fresh(Arc::new(Rope::from_str(
+                "line0\nline1\nline2\nline3\nline4\nline5 longer\n",
+            ))),
+        );
+        let mut jumps = led_state_jumps::JumpListState::default();
+        let mut alerts = AlertState::default();
+        let mut lsp_extras = led_state_lsp::LspExtrasState::default();
+        // Caller allocates the seq via queue_*; simulate by
+        // setting latest_goto_seq to 42.
+        lsp_extras.latest_goto_seq = Some(42);
+        apply_goto_definition(
+            &mut tabs,
+            &edits,
+            &mut jumps,
+            &mut alerts,
+            &mut lsp_extras,
+            42,
+            Some(led_driver_lsp_core::Location {
+                path: canon("main.rs"),
+                line: 2,
+                col: 3,
+            }),
+        );
+        assert_eq!(tabs.open[0].cursor.line, 2);
+        assert_eq!(tabs.open[0].cursor.col, 3);
+        // Pre-jump recorded onto the jump list.
+        assert_eq!(jumps.entries.len(), 1);
+        assert_eq!(jumps.entries[0].line, 5);
+        assert_eq!(jumps.entries[0].col, 10);
+        // Seq consumed.
+        assert!(lsp_extras.latest_goto_seq.is_none());
+    }
+
+    #[test]
+    fn apply_goto_definition_drops_stale_seq() {
+        let mut tabs = seed_tab("main.rs");
+        let mut edits = BufferEdits::default();
+        edits.buffers.insert(
+            canon("main.rs"),
+            EditedBuffer::fresh(Arc::new(Rope::from_str("abc\n"))),
+        );
+        let mut jumps = led_state_jumps::JumpListState::default();
+        let mut alerts = AlertState::default();
+        let mut lsp_extras = led_state_lsp::LspExtrasState::default();
+        lsp_extras.latest_goto_seq = Some(99);
+        apply_goto_definition(
+            &mut tabs,
+            &edits,
+            &mut jumps,
+            &mut alerts,
+            &mut lsp_extras,
+            /* stale */ 7,
+            Some(led_driver_lsp_core::Location {
+                path: canon("main.rs"),
+                line: 0,
+                col: 2,
+            }),
+        );
+        assert_eq!(tabs.open[0].cursor.line, 0);
+        assert_eq!(tabs.open[0].cursor.col, 0);
+        assert!(jumps.entries.is_empty());
+        // The in-flight seq is preserved so the correct
+        // response can still land.
+        assert_eq!(lsp_extras.latest_goto_seq, Some(99));
+    }
+
+    #[test]
+    fn apply_goto_definition_no_match_surfaces_warn_alert() {
+        let mut tabs = seed_tab("main.rs");
+        let edits = BufferEdits::default();
+        let mut jumps = led_state_jumps::JumpListState::default();
+        let mut alerts = AlertState::default();
+        let mut lsp_extras = led_state_lsp::LspExtrasState::default();
+        lsp_extras.latest_goto_seq = Some(1);
+        apply_goto_definition(
+            &mut tabs,
+            &edits,
+            &mut jumps,
+            &mut alerts,
+            &mut lsp_extras,
+            1,
+            None,
+        );
+        assert!(alerts.warns.iter().any(|(k, _)| k == "lsp.goto"));
+    }
+
+    #[test]
+    fn apply_lsp_edits_rename_applies_and_bumps_version() {
+        use led_driver_lsp_core::{EditsOrigin, FileEdit, TextEditOp};
+        let path = canon("a.rs");
+        let mut edits = BufferEdits::default();
+        edits.buffers.insert(
+            path.clone(),
+            EditedBuffer::fresh(Arc::new(Rope::from_str("foo + foo"))),
+        );
+        let mut alerts = AlertState::default();
+        let mut lsp_extras = led_state_lsp::LspExtrasState::default();
+        lsp_extras.latest_rename_seq = Some(7);
+        let file_edits = std::sync::Arc::new(vec![FileEdit {
+            path: path.clone(),
+            edits: vec![
+                TextEditOp {
+                    start_line: 0,
+                    start_col: 0,
+                    end_line: 0,
+                    end_col: 3,
+                    new_text: std::sync::Arc::<str>::from("bar"),
+                },
+                TextEditOp {
+                    start_line: 0,
+                    start_col: 6,
+                    end_line: 0,
+                    end_col: 9,
+                    new_text: std::sync::Arc::<str>::from("bar"),
+                },
+            ],
+        }]);
+        apply_lsp_edits(
+            &mut edits,
+            &mut alerts,
+            &mut lsp_extras,
+            7,
+            EditsOrigin::Rename,
+            &file_edits,
+        );
+        let eb = edits.buffers.get(&path).unwrap();
+        assert_eq!(eb.rope.to_string(), "bar + bar");
+        assert!(eb.version > 0);
+        assert!(lsp_extras.latest_rename_seq.is_none());
+        assert!(
+            alerts.info.as_ref().map_or(false, |m| m.contains("Renamed"))
+        );
+    }
+
+    #[test]
+    fn apply_lsp_edits_format_triggers_save_when_pending() {
+        use led_driver_lsp_core::{EditsOrigin, FileEdit, TextEditOp};
+        let path = canon("a.rs");
+        let mut edits = BufferEdits::default();
+        let mut eb = EditedBuffer::fresh(Arc::new(Rope::from_str("x")));
+        eb.version = 1; // dirty (saved_version still 0)
+        edits.buffers.insert(path.clone(), eb);
+        let mut alerts = AlertState::default();
+        let mut lsp_extras = led_state_lsp::LspExtrasState::default();
+        lsp_extras.pending_save_after_format.insert(path.clone());
+        lsp_extras
+            .latest_format_seq
+            .insert(path.clone(), 42);
+        // Non-empty format edit (cosmetic: capitalise "x" → "X").
+        let file_edits = std::sync::Arc::new(vec![FileEdit {
+            path: path.clone(),
+            edits: vec![TextEditOp {
+                start_line: 0,
+                start_col: 0,
+                end_line: 0,
+                end_col: 1,
+                new_text: std::sync::Arc::<str>::from("X"),
+            }],
+        }]);
+        apply_lsp_edits(
+            &mut edits,
+            &mut alerts,
+            &mut lsp_extras,
+            42,
+            EditsOrigin::Format,
+            &file_edits,
+        );
+        assert_eq!(edits.buffers[&path].rope.to_string(), "X");
+        // Post-format save is queued.
+        assert!(edits.pending_saves.contains(&path));
+        assert!(!lsp_extras.pending_save_after_format.contains(&path));
+    }
+
+    #[test]
+    fn apply_lsp_edits_format_empty_still_triggers_save() {
+        use led_driver_lsp_core::{EditsOrigin};
+        let path = canon("a.rs");
+        let mut edits = BufferEdits::default();
+        let mut eb = EditedBuffer::fresh(Arc::new(Rope::from_str("x")));
+        eb.version = 1;
+        edits.buffers.insert(path.clone(), eb);
+        let mut alerts = AlertState::default();
+        let mut lsp_extras = led_state_lsp::LspExtrasState::default();
+        lsp_extras.pending_save_after_format.insert(path.clone());
+        lsp_extras
+            .latest_format_seq
+            .insert(path.clone(), 5);
+        let file_edits = std::sync::Arc::new(Vec::new());
+        apply_lsp_edits(
+            &mut edits,
+            &mut alerts,
+            &mut lsp_extras,
+            5,
+            EditsOrigin::Format,
+            &file_edits,
+        );
+        assert!(edits.pending_saves.contains(&path));
+    }
+
+    #[test]
+    fn apply_lsp_edits_rename_drops_stale_seq() {
+        use led_driver_lsp_core::{EditsOrigin, FileEdit, TextEditOp};
+        let path = canon("a.rs");
+        let mut edits = BufferEdits::default();
+        edits.buffers.insert(
+            path.clone(),
+            EditedBuffer::fresh(Arc::new(Rope::from_str("foo"))),
+        );
+        let mut alerts = AlertState::default();
+        let mut lsp_extras = led_state_lsp::LspExtrasState::default();
+        lsp_extras.latest_rename_seq = Some(99);
+        let file_edits = std::sync::Arc::new(vec![FileEdit {
+            path: path.clone(),
+            edits: vec![TextEditOp {
+                start_line: 0,
+                start_col: 0,
+                end_line: 0,
+                end_col: 3,
+                new_text: std::sync::Arc::<str>::from("bar"),
+            }],
+        }]);
+        apply_lsp_edits(
+            &mut edits,
+            &mut alerts,
+            &mut lsp_extras,
+            /* stale */ 5,
+            EditsOrigin::Rename,
+            &file_edits,
+        );
+        // Buffer unchanged, seq preserved.
+        assert_eq!(edits.buffers[&path].rope.to_string(), "foo");
+        assert_eq!(lsp_extras.latest_rename_seq, Some(99));
+    }
+
+    #[test]
+    fn apply_goto_definition_skips_unopened_target() {
+        // Target path isn't in the open tab set → no movement,
+        // no jump recorded. M21 will open-and-jump; M18 skips.
+        let mut tabs = seed_tab("main.rs");
+        let mut edits = BufferEdits::default();
+        edits.buffers.insert(
+            canon("main.rs"),
+            EditedBuffer::fresh(Arc::new(Rope::from_str("abc\n"))),
+        );
+        let mut jumps = led_state_jumps::JumpListState::default();
+        let mut alerts = AlertState::default();
+        let mut lsp_extras = led_state_lsp::LspExtrasState::default();
+        lsp_extras.latest_goto_seq = Some(1);
+        apply_goto_definition(
+            &mut tabs,
+            &edits,
+            &mut jumps,
+            &mut alerts,
+            &mut lsp_extras,
+            1,
+            Some(led_driver_lsp_core::Location {
+                path: canon("other.rs"),
+                line: 0,
+                col: 0,
+            }),
+        );
+        // Cursor unchanged, no jump recorded, but the
+        // latest_goto_seq is consumed (request retired).
+        assert_eq!(tabs.open[0].cursor.line, 0);
+        assert_eq!(tabs.open[0].cursor.col, 0);
+        assert!(jumps.entries.is_empty());
+        assert!(lsp_extras.latest_goto_seq.is_none());
     }
 }

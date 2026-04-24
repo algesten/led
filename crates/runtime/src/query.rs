@@ -196,6 +196,29 @@ impl<'a> CompletionsSessionInput<'a> {
     }
 }
 
+// ── Input on LspExtrasState (M18) ─────────────────────────────────────
+
+/// Overlay-only projection of [`led_state_lsp::LspExtrasState`] — just
+/// the chrome-relevant fields (rename overlay, later stages will
+/// add code-actions + inlay hints here). Pending-request outboxes
+/// intentionally aren't part of this input so every outgoing RPC
+/// doesn't invalidate chrome memos.
+#[drv::input]
+#[derive(Copy, Clone)]
+pub struct LspExtrasOverlayInput<'a> {
+    pub rename: &'a Option<led_state_lsp::RenameState>,
+    pub code_actions: &'a Option<led_state_lsp::CodeActionPickerState>,
+}
+
+impl<'a> LspExtrasOverlayInput<'a> {
+    pub fn new(s: &'a led_state_lsp::LspExtrasState) -> Self {
+        Self {
+            rename: &s.rename,
+            code_actions: &s.code_actions,
+        }
+    }
+}
+
 // ── Input on Terminal ──────────────────────────────────────────────────
 
 /// Viewport dims only. A push to `Terminal.pending` is deliberately
@@ -1029,16 +1052,28 @@ fn strip_trailing_newline(s: &mut String) {
 /// All strings are `Arc<str>` so cache-hit clones of
 /// [`StatusBarModel`] are a pointer copy.
 #[drv::memo(single)]
-pub fn status_bar_model<'a, 'b, 'c, 'o, 'd, 'l>(
+pub fn status_bar_model<'a, 'b, 'c, 'o, 'd, 'l, 'le>(
     alerts: AlertsInput<'a>,
     tabs: TabsActiveInput<'b>,
     edits: EditedBuffersInput<'c>,
     overlays: OverlaysInput<'o>,
     diagnostics: DiagnosticsStatesInput<'d>,
     lsp: LspStatusesInput<'l>,
+    lsp_extras: LspExtrasOverlayInput<'le>,
     render_tick: u64,
 ) -> StatusBarModel {
-    // Priority 0a — in-buffer isearch prompt.
+    // Priority 0a — LSP rename overlay prompt (M18).
+    if let Some(state) = lsp_extras.rename.as_ref() {
+        let mut left = String::with_capacity(state.input.text.len() + 10);
+        left.push_str(" Rename: ");
+        left.push_str(&state.input.text);
+        return StatusBarModel {
+            left: Arc::from(left),
+            right: Arc::from(""),
+            is_warn: false,
+        };
+    }
+    // Priority 0b — in-buffer isearch prompt.
     if let Some(state) = overlays.isearch.as_ref() {
         let hint_len = state.query.hint.as_ref().map(|h| h.len() + 1).unwrap_or(0);
         let mut left = String::with_capacity(state.query.text.len() + 10 + hint_len);
@@ -1739,6 +1774,60 @@ pub fn completion_popup_model<'c, 't>(
     })
 }
 
+/// Build the code-action picker popup. Reuses `CompletionPopupModel`
+/// because the painter for completion popups is the right
+/// visual shape (list of titles + right-side hint) and we
+/// don't want two popup paint paths.
+///
+/// Title → `label`, `kind` → `detail` (e.g. "refactor.inline").
+pub fn code_action_popup_model<'e, 't>(
+    lsp_extras: LspExtrasOverlayInput<'e>,
+    tabs: TabsActiveInput<'t>,
+    editor_area: Rect,
+) -> Option<led_driver_terminal_core::CompletionPopupModel> {
+    use led_driver_terminal_core::{CompletionPopupModel, CompletionRow};
+    let picker = lsp_extras.code_actions.as_ref()?;
+    if picker.items.is_empty() {
+        return None;
+    }
+    let total = picker.items.len();
+    let scroll = picker.scroll.min(total.saturating_sub(1));
+    let end = (scroll + COMPLETION_MAX_ROWS).min(total);
+    let mut rows: Vec<CompletionRow> = Vec::with_capacity(end - scroll);
+    let mut label_width: usize = 0;
+    let mut detail_width: usize = 0;
+    for item in &picker.items[scroll..end] {
+        let label_cols = item.title.chars().count();
+        label_width = label_width.max(label_cols);
+        if let Some(k) = item.kind.as_ref() {
+            detail_width = detail_width.max(k.chars().count());
+        }
+        rows.push(CompletionRow {
+            label: item.title.clone(),
+            detail: item.kind.clone(),
+        });
+    }
+    // Anchor at the active tab's cursor. The picker is a
+    // transient modal — rendering it where completions render
+    // is the most natural place.
+    let active = (*tabs.active)?;
+    let tab = tabs.open.iter().find(|t| t.id == active)?;
+    let cursor_col = tab.cursor.col as u16;
+    let cursor_row = tab.cursor.line as u16;
+    let anchor = (
+        editor_area.x.saturating_add(GUTTER_WIDTH as u16).saturating_add(cursor_col),
+        editor_area.y.saturating_add(cursor_row),
+    );
+    let selected_in_window = picker.selected.saturating_sub(scroll);
+    Some(CompletionPopupModel {
+        rows: Arc::new(rows),
+        selected: selected_in_window,
+        anchor,
+        label_width: label_width.min(u16::MAX as usize) as u16,
+        detail_width: detail_width.min(u16::MAX as usize) as u16,
+    })
+}
+
 fn severity_rank(s: DiagnosticSeverity) -> u8 {
     match s {
         DiagnosticSeverity::Error => 0,
@@ -2088,6 +2177,7 @@ pub struct RenderInputs<'a> {
     pub diagnostics: DiagnosticsStatesInput<'a>,
     pub lsp: LspStatusesInput<'a>,
     pub completions: CompletionsSessionInput<'a>,
+    pub lsp_extras: LspExtrasOverlayInput<'a>,
     /// Current frame in 80ms buckets. Used by the status-bar
     /// spinner formatter; the main loop quantises wall-clock
     /// millis to 80 so the memo only invalidates once per
@@ -2110,12 +2200,13 @@ pub fn render_frame(inputs: RenderInputs<'_>) -> Option<Frame> {
         inputs.diagnostics,
         inputs.lsp,
         inputs.completions,
+        inputs.lsp_extras,
         inputs.render_tick,
     )
 }
 
 #[drv::memo(single)]
-fn render_frame_memo<'t, 'e, 'b, 'a, 'al, 'br, 'fs, 'ov, 'sx, 'dx, 'lsp, 'co>(
+fn render_frame_memo<'t, 'e, 'b, 'a, 'al, 'br, 'fs, 'ov, 'sx, 'dx, 'lsp, 'co, 'le>(
     term: TerminalDimsInput<'t>,
     edits: EditedBuffersInput<'e>,
     store: StoreLoadedInput<'b>,
@@ -2128,19 +2219,28 @@ fn render_frame_memo<'t, 'e, 'b, 'a, 'al, 'br, 'fs, 'ov, 'sx, 'dx, 'lsp, 'co>(
     diagnostics: DiagnosticsStatesInput<'dx>,
     lsp: LspStatusesInput<'lsp>,
     completions: CompletionsSessionInput<'co>,
+    lsp_extras: LspExtrasOverlayInput<'le>,
     render_tick: u64,
 ) -> Option<Frame> {
     let dims = (*term.dims)?;
     let layout = Layout::compute(dims, *browser.visible);
     let tab_bar = tab_bar_model(tabs, edits);
     let body = body_model(edits, store, tabs, overlays, syntax, diagnostics, layout.editor_area);
-    let status_bar = status_bar_model(alerts, tabs, edits, overlays, diagnostics, lsp, render_tick);
+    let status_bar = status_bar_model(
+        alerts, tabs, edits, overlays, diagnostics, lsp, lsp_extras, render_tick,
+    );
     let side_panel = layout
         .side_area
         .map(|area| side_panel_model(fs, browser, overlays, tabs, diagnostics, area.rows));
     let popover =
         popover_model(edits, tabs, overlays, browser, diagnostics, layout.editor_area);
-    let completion = completion_popup_model(completions, tabs, layout.editor_area);
+    // Code-action picker wins when live — the rename overlay
+    // and code-action picker are mutually exclusive with
+    // completions (dispatch guards that in `run_command`), so
+    // whichever is populated paints into the shared
+    // `completion` slot of the frame.
+    let completion = code_action_popup_model(lsp_extras, tabs, layout.editor_area)
+        .or_else(|| completion_popup_model(completions, tabs, layout.editor_area));
     // Cursor placement, in priority order:
     //
     // 1. Find-file overlay active → status-bar row, column = prompt
@@ -2151,7 +2251,15 @@ fn render_frame_memo<'t, 'e, 'b, 'a, 'al, 'br, 'fs, 'ov, 'sx, 'dx, 'lsp, 'co>(
     // 2. Side-panel focus → no cursor (M11 cursor-hide rule).
     // 3. Otherwise, map the body cursor from editor-area-relative
     //    coords to absolute terminal coords.
-    let cursor = if let Some(state) = overlays.find_file.as_ref() {
+    let cursor = if let Some(state) = lsp_extras.rename.as_ref() {
+        // " Rename: " = 9 cols.
+        let prefix_cols: u16 = 9;
+        let input_col = state.input.text[..state.input.cursor].chars().count() as u16;
+        Some((
+            prefix_cols.saturating_add(input_col),
+            layout.status_bar.y,
+        ))
+    } else if let Some(state) = overlays.find_file.as_ref() {
         let prefix_cols: u16 = match state.mode {
             led_state_find_file::FindFileMode::Open => 12, // " Find file: "
             led_state_find_file::FindFileMode::SaveAs => 10, // " Save as: "
@@ -2310,6 +2418,7 @@ mod tests {
             completions: CompletionsSessionInput::new(
                 &led_state_completions::CompletionsState::default(),
             ),
+            lsp_extras: LspExtrasOverlayInput::new(&led_state_lsp::LspExtrasState::default()),
             render_tick: 0,
         })
     }
@@ -2374,6 +2483,7 @@ mod tests {
             completions: CompletionsSessionInput::new(
                 &led_state_completions::CompletionsState::default(),
             ),
+            lsp_extras: LspExtrasOverlayInput::new(&led_state_lsp::LspExtrasState::default()),
             render_tick: 0,
         })
         .expect("dims set");
@@ -2420,6 +2530,7 @@ mod tests {
             completions: CompletionsSessionInput::new(
                 &led_state_completions::CompletionsState::default(),
             ),
+            lsp_extras: LspExtrasOverlayInput::new(&led_state_lsp::LspExtrasState::default()),
             render_tick: 0,
         })
         .expect("dims set");
@@ -2936,6 +3047,7 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
             OverlaysInput::new(&ff, &is, &None),
             DiagnosticsStatesInput::new(&diags),
             LspStatusesInput::new(&lsp),
+            LspExtrasOverlayInput::new(&led_state_lsp::LspExtrasState::default()),
             0,
         )
     }

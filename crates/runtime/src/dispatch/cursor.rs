@@ -417,6 +417,7 @@ mod tests {
     use led_state_jumps::JumpListState;
     use led_state_browser::{BrowserUi, FsTree};
     use led_state_kill_ring::KillRing;
+    use led_state_lsp::LspExtrasState;
     use led_state_tabs::{Cursor, Scroll, Tabs};
     use ropey::Rope;
 
@@ -928,6 +929,7 @@ mod tests {
         let mut file_search: Option<FileSearchState> = None;
         let mut path_chains = std::collections::HashMap::new();
         let mut completions = CompletionsState::default();
+        let mut lsp_extras = LspExtrasState::default();
 
         let mut press = |k: KeyEvent,
                      tabs: &mut Tabs,
@@ -941,7 +943,7 @@ mod tests {
                      fs: &FsTree| {
             super::super::dispatch_key(
                 k, tabs, edits, kill_ring, clip, alerts, jumps, browser, fs, &store, &term,
-        &mut find_file, &mut isearch, &mut file_search, &mut path_chains, &mut completions, &km,
+        &mut find_file, &mut isearch, &mut file_search, &mut path_chains, &mut completions, &mut lsp_extras, &km,
                 chord,);
         };
 

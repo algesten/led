@@ -105,6 +105,34 @@ pub enum Command {
     ToggleSearchRegex,
     ToggleSearchReplace,
     ReplaceAll,
+
+    // LSP extras (M18).
+    /// `textDocument/definition` for the identifier at the
+    /// cursor; jumps the active tab (opens one if needed) to
+    /// the response location. Records a jump-list entry so
+    /// `JumpBack` round-trips.
+    LspGotoDefinition,
+    /// Open the rename overlay seeded with the identifier under
+    /// the cursor. Typing edits the new name; Enter submits,
+    /// Esc aborts.
+    LspRename,
+    /// Request `textDocument/codeAction` for the cursor (or
+    /// mark..cursor selection); response opens a picker overlay.
+    LspCodeAction,
+    /// Toggle LSP inlay-hint rendering. When on, the runtime
+    /// requests hints for visible buffers and stashes them
+    /// per-buffer for the painter.
+    LspToggleInlayHints,
+    /// Explicit `textDocument/formatting` request. Applies the
+    /// returned edits to the active buffer but does NOT save.
+    /// `Save` (ctrl+x ctrl+s) invokes format first then saves.
+    LspFormat,
+    /// Outline navigation (legacy orphan). Bound by default
+    /// to `alt+o`; no handler yet — stage 7 reserves the key
+    /// so pressing it doesn't fall through to `InsertChar('o')`.
+    /// Full outline (via `textDocument/documentSymbol`) lands
+    /// in a later polish pass.
+    Outline,
 }
 
 /// Two-level key → command binding set. `direct` maps single keys to
@@ -380,11 +408,26 @@ pub fn default_keymap() -> Keymap {
     m.bind("alt+1", Command::ToggleSearchCase);
     m.bind("alt+2", Command::ToggleSearchRegex);
     m.bind("alt+3", Command::ToggleSearchReplace);
-    m.bind("alt+enter", Command::ReplaceAll);
+    // `alt+enter` globally is LSP goto-definition (M18). Inside
+    // the file-search overlay it maps to `ReplaceAll` via the
+    // context overlay below — matches legacy's context-keyed
+    // override.
+    m.bind_file_search("alt+enter", Command::ReplaceAll);
     // Tab inside the overlay cycles SearchInput → ReplaceInput →
     // result rows (same direction as Down-arrow). Outside the
     // overlay, `tab` stays unbound (reserved for M23 `insert_tab`).
     m.bind_file_search("tab", Command::CursorDown);
+
+    // LSP extras (M18). The browser overlay also claims
+    // `alt+enter` for "open selected in background" — it sits
+    // in `browser_direct` and its lookup runs before global
+    // `direct`, so browser context wins there without an
+    // explicit shadow here.
+    m.bind("alt+enter", Command::LspGotoDefinition);
+    m.bind("ctrl+r", Command::LspRename);
+    m.bind("alt+i", Command::LspCodeAction);
+    m.bind("ctrl+t", Command::LspToggleInlayHints);
+    m.bind("alt+o", Command::Outline);
 
     m
 }
@@ -586,6 +629,12 @@ pub fn parse_command(s: &str) -> Result<Command, String> {
         "toggle_search_regex" => Ok(Command::ToggleSearchRegex),
         "toggle_search_replace" => Ok(Command::ToggleSearchReplace),
         "replace_all" => Ok(Command::ReplaceAll),
+        "lsp_goto_definition" => Ok(Command::LspGotoDefinition),
+        "lsp_rename" => Ok(Command::LspRename),
+        "lsp_code_action" => Ok(Command::LspCodeAction),
+        "lsp_toggle_inlay_hints" => Ok(Command::LspToggleInlayHints),
+        "lsp_format" => Ok(Command::LspFormat),
+        "outline" => Ok(Command::Outline),
         other => Err(format!("unknown command `{other}`")),
     }
 }
