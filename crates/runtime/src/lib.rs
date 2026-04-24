@@ -472,6 +472,20 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
                         completions.dismiss();
                         continue;
                     }
+                    // Suppress redundant popup: one remaining
+                    // candidate that the user has already typed
+                    // verbatim. The popup would correctly display
+                    // the match, but a committable item that
+                    // changes nothing is UX noise.
+                    if filtered.len() == 1
+                        && led_state_completions::is_identity_match(
+                            &items[filtered[0]],
+                            &prefix,
+                        )
+                    {
+                        completions.dismiss();
+                        continue;
+                    }
                     completions.session =
                         Some(led_state_completions::CompletionSession {
                             tab: tab.id,

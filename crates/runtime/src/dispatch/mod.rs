@@ -380,6 +380,19 @@ fn refresh_completion_filter(
         completions.dismiss();
         return;
     }
+    // Dismiss when the sole remaining candidate equals what the
+    // user has already typed — committing would be a no-op, so
+    // the popup is pure noise. Matches the same check on the
+    // ingest path in runtime/lib.rs.
+    if filtered.len() == 1
+        && led_state_completions::is_identity_match(
+            &session.items[filtered[0]],
+            &prefix,
+        )
+    {
+        completions.dismiss();
+        return;
+    }
     // Preserve the highlighted label across the refilter when
     // possible — matches the UX users expect (the item they were
     // aiming at shouldn't jump around as the list shrinks).

@@ -14,7 +14,7 @@
 use std::sync::Arc;
 
 use led_core::CanonPath;
-use led_driver_lsp_core::CompletionItem;
+use led_driver_lsp_core::{CompletionItem, CompletionTextEdit};
 use led_state_tabs::TabId;
 
 /// Per-session completion state. `session: None` means no popup
@@ -150,6 +150,26 @@ impl CompletionsState {
         });
         seq
     }
+}
+
+/// `true` when an item's effective insertion text exactly equals
+/// the user's typed prefix — i.e. committing would make no
+/// change. Dispatch uses this together with `filtered.len() == 1`
+/// to suppress the popup in the "only remaining suggestion is
+/// already fully typed" case: the completion is correct but
+/// pointless, and showing it distracts from surrounding code.
+///
+/// Effective insertion text is `text_edit.new_text` when
+/// present, else `insert_text`, else `label` — same precedence
+/// the commit path uses.
+pub fn is_identity_match(item: &CompletionItem, prefix: &str) -> bool {
+    let effective: &str = item
+        .text_edit
+        .as_ref()
+        .map(|te| te.new_text.as_ref())
+        .or_else(|| item.insert_text.as_deref())
+        .unwrap_or_else(|| item.label.as_ref());
+    effective == prefix
 }
 
 /// Rank + filter completion items against a typed prefix using
@@ -295,5 +315,50 @@ mod tests {
         let items = vec![item("foo", None), item("bar", None)];
         let out = refilter(&items, "xyz");
         assert!(out.is_empty());
+    }
+
+    #[test]
+    fn is_identity_match_uses_insert_text_then_label() {
+        // With insert_text present, the label is ignored.
+        let with_insert = CompletionItem {
+            label: Arc::<str>::from("show label"),
+            detail: None,
+            sort_text: None,
+            insert_text: Some(Arc::<str>::from("PathBuf")),
+            text_edit: None,
+            kind: None,
+            resolve_needed: false,
+            resolve_data: None,
+        };
+        assert!(is_identity_match(&with_insert, "PathBuf"));
+        assert!(!is_identity_match(&with_insert, "show label"));
+
+        // Without insert_text or text_edit, falls back to label.
+        let bare = item("PathBuf", None);
+        assert!(is_identity_match(&bare, "PathBuf"));
+        assert!(!is_identity_match(&bare, "Path"));
+    }
+
+    #[test]
+    fn is_identity_match_uses_text_edit_first() {
+        // text_edit.new_text wins over insert_text and label.
+        let with_edit = CompletionItem {
+            label: Arc::<str>::from("label"),
+            detail: None,
+            sort_text: None,
+            insert_text: Some(Arc::<str>::from("insert")),
+            text_edit: Some(CompletionTextEdit {
+                line: 0,
+                col_start: 0,
+                col_end: 5,
+                new_text: Arc::<str>::from("edit_text"),
+            }),
+            kind: None,
+            resolve_needed: false,
+            resolve_data: None,
+        };
+        assert!(is_identity_match(&with_edit, "edit_text"));
+        assert!(!is_identity_match(&with_edit, "insert"));
+        assert!(!is_identity_match(&with_edit, "label"));
     }
 }
