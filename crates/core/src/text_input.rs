@@ -23,7 +23,7 @@ use std::time::{Duration, Instant};
 ///
 /// `cursor` is a **byte offset** into `text`, always on a UTF-8 char
 /// boundary. All mutating methods maintain that invariant.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, drv::Input)]
 pub struct TextInput {
     pub text: String,
     pub cursor: usize,

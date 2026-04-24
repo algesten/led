@@ -16,7 +16,7 @@ use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
 /// A path as supplied by the user. Never used as an internal map key.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord, drv::Input)]
 pub struct UserPath(PathBuf);
 
 impl UserPath {
@@ -108,7 +108,7 @@ impl std::fmt::Display for UserPath {
 
 /// A canonical absolute path. The only way to construct one is via
 /// [`UserPath::canonicalize`].
-#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord, drv::Input)]
 pub struct CanonPath(PathBuf);
 
 impl CanonPath {
@@ -138,8 +138,6 @@ impl AsRef<Path> for CanonPath {
         &self.0
     }
 }
-
-crate::impl_identity_to_static!(CanonPath);
 
 impl std::fmt::Display for CanonPath {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

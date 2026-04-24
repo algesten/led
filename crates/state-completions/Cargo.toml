@@ -19,6 +19,7 @@ publish = false
 # popups.
 
 [dependencies]
+drv = { workspace = true }
 led-core = { workspace = true }
 led-driver-lsp-core = { workspace = true }
 led-state-tabs = { workspace = true }

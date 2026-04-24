@@ -26,7 +26,7 @@ use led_state_tabs::TabId;
 /// `SearchInput` / `ReplaceInput` address the input rows at the top
 /// of the overlay; `Result(i)` indexes into `flat_hits` and
 /// highlights the corresponding hit row.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, drv::Input)]
 pub enum FileSearchSelection {
     #[default]
     SearchInput,
@@ -34,7 +34,7 @@ pub enum FileSearchSelection {
     Result(usize),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, drv::Input)]
 pub struct FileSearchState {
     /// The user's search pattern.
     pub query: TextInput,
@@ -92,7 +92,7 @@ pub struct FileSearchState {
 /// One recorded per-hit replacement, carrying enough information
 /// to revert the edit. Stored at the same index the hit sits at in
 /// `flat_hits` — no `flat_hit_idx` field needed.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, drv::Input)]
 pub struct ReplaceEntry {
     /// The hit that was consumed. Carries its own path /
     /// position / preview + match span — we keep this around so
@@ -118,7 +118,7 @@ pub struct ReplaceEntry {
 /// One queued search request: the current query + toggle state at
 /// the moment of the edit. The driver snaps these into a ripgrep
 /// command; the runtime sync-clears the queue before execute.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, drv::Input)]
 pub struct PendingSearch {
     pub query: String,
     pub case_sensitive: bool,
@@ -155,7 +155,6 @@ impl FileSearchState {
     }
 }
 
-led_core::impl_identity_to_static!(FileSearchState);
 
 #[cfg(test)]
 mod tests {

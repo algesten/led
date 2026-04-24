@@ -11,6 +11,7 @@ publish = false
 # `driver-find-file` as prefix-filtered directory listings.
 
 [dependencies]
+drv = { workspace = true }
 led-core = { workspace = true }
 led-driver-find-file-core = { workspace = true }
 led-state-tabs = { workspace = true }

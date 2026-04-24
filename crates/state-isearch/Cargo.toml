@@ -15,5 +15,6 @@ publish = false
 # effectively singleton."
 
 [dependencies]
+drv = { workspace = true }
 led-core = { workspace = true }
 led-state-tabs = { workspace = true }

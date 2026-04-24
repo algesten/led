@@ -309,9 +309,9 @@ dependencies = [
 
 [[package]]
 name = "drv"
-version = "0.4.0"
+version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4ff12bda9491623d286d66d438bfe63b4ed6c64479f7c56606bce3214a767e96"
+checksum = "a8b6f3bc3429f3b2811322137dc15180bb9a180d44f6bbe149230285cc82f66c"
 dependencies = [
  "drv-macros",
  "imbl",
@@ -319,9 +319,9 @@ dependencies = [
 
 [[package]]
 name = "drv-macros"
-version = "0.4.0"
+version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b01e8c398dfe86af5af552fc0445a3a68ec7404eaba66f03cb97988e7fd553e5"
+checksum = "2de32ccf43b6ca0425d5bf6ded4fc61b612d98662898c32238a1ce7629d448f7"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -598,6 +598,7 @@ dependencies = [
 name = "led-driver-file-search-core"
 version = "0.0.0"
 dependencies = [
+ "drv",
  "led-core",
 ]
 
@@ -619,6 +620,7 @@ dependencies = [
 name = "led-driver-find-file-core"
 version = "0.0.0"
 dependencies = [
+ "drv",
  "led-core",
 ]
 
@@ -778,6 +780,7 @@ dependencies = [
 name = "led-state-browser"
 version = "0.0.0"
 dependencies = [
+ "drv",
  "imbl",
  "led-core",
  "led-driver-fs-list-core",
@@ -804,6 +807,7 @@ dependencies = [
 name = "led-state-completions"
 version = "0.0.0"
 dependencies = [
+ "drv",
  "led-core",
  "led-driver-lsp-core",
  "led-state-tabs",
@@ -822,6 +826,7 @@ dependencies = [
 name = "led-state-file-search"
 version = "0.0.0"
 dependencies = [
+ "drv",
  "led-core",
  "led-driver-file-search-core",
  "led-state-tabs",
@@ -832,6 +837,7 @@ name = "led-state-find-file"
 version = "0.0.0"
 dependencies = [
  "dirs",
+ "drv",
  "led-core",
  "led-driver-find-file-core",
  "led-state-tabs",
@@ -841,6 +847,7 @@ dependencies = [
 name = "led-state-isearch"
 version = "0.0.0"
 dependencies = [
+ "drv",
  "led-core",
  "led-state-tabs",
 ]
@@ -860,6 +867,7 @@ version = "0.0.0"
 name = "led-state-lsp"
 version = "0.0.0"
 dependencies = [
+ "drv",
  "imbl",
  "led-core",
  "led-driver-lsp-core",

@@ -20,7 +20,7 @@ use led_core::CanonPath;
 /// ripgrep's output conventions; `match_start` / `match_end` are
 /// byte offsets into `preview` (kept for later rendering of the
 /// hit inside the preview line, and for the replace flow).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, drv::Input)]
 pub struct FileSearchHit {
     pub path: CanonPath,
     /// 1-indexed line number.
@@ -38,7 +38,7 @@ pub struct FileSearchHit {
 /// All hits in a single file. `relative` is the file's path
 /// rendered relative to the search root; the UI shows this as the
 /// group header.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, drv::Input)]
 pub struct FileSearchGroup {
     pub path: CanonPath,
     pub relative: String,

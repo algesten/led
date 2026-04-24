@@ -20,7 +20,7 @@ use led_core::CanonPath;
 /// One completion-list entry. `name` has a trailing `/` for
 /// directories so the renderer doesn't need to inspect `is_dir`;
 /// `full` is the canonicalized target for open / save requests.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, drv::Input)]
 pub struct FindFileEntry {
     pub name: String,
     pub full: CanonPath,
@@ -30,7 +30,7 @@ pub struct FindFileEntry {
 /// Command to the worker: list `dir`, keep only leaves that
 /// case-insensitively start with `prefix`, optionally include
 /// dotfiles.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, drv::Input)]
 pub struct FindFileCmd {
     pub dir: CanonPath,
     pub prefix: String,

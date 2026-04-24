@@ -20,7 +20,7 @@ pub use led_driver_find_file_core::FindFileEntry;
 /// Which mode the overlay is in. Opens and Save-as share the same
 /// input editor + completions UI but differ in activation input
 /// seeding and Enter semantics.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, drv::Input)]
 pub enum FindFileMode {
     /// `Ctrl+x Ctrl+f`. Enter opens (or creates) a file.
     Open,
@@ -34,7 +34,7 @@ pub enum FindFileMode {
 /// All fields are mutated by dispatch on every keystroke while the
 /// overlay is active; the `Option<FindFileState>` on `Atoms` toggles
 /// the overlay off at the top level when dispatch deactivates.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, drv::Input)]
 pub struct FindFileState {
     pub mode: FindFileMode,
 
@@ -191,7 +191,6 @@ impl FindFileState {
     }
 }
 
-led_core::impl_identity_to_static!(FindFileState);
 
 /// Split `input` into `(dir_prefix, leaf_prefix)` for driver requests.
 ///

@@ -146,7 +146,7 @@ pub struct PendingGoto {
 /// seeded with (shown in the painter prompt as
 /// "Rename: <seed>"). Matches legacy's
 /// `RenameState.cursor_orig_word`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, drv::Input)]
 pub struct RenameState {
     pub input: TextInput,
     pub anchor_path: CanonPath,
@@ -176,8 +176,6 @@ impl RenameState {
     }
 }
 
-led_core::impl_identity_to_static!(RenameState);
-
 /// Queued rename request — the `new_name` is whatever the user
 /// had typed into `RenameState.input` at Enter time.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -192,7 +190,7 @@ pub struct PendingRename {
 /// Picker overlay for `textDocument/codeAction`. At most one
 /// picker is open at a time; `items` is ref-counted so paint +
 /// dispatch share without cloning.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, drv::Input)]
 pub struct CodeActionPickerState {
     /// Origin buffer — selection commits route back here on
     /// `SelectCodeAction` so the manager knows which server to
@@ -206,8 +204,6 @@ pub struct CodeActionPickerState {
     pub selected: usize,
     pub scroll: usize,
 }
-
-led_core::impl_identity_to_static!(CodeActionPickerState);
 
 /// Queued `textDocument/codeAction` request. Range covers
 /// mark..cursor when a selection is active, else cursor..cursor.

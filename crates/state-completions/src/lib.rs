@@ -66,7 +66,7 @@ pub struct PendingResolveRequest {
 /// One active popup. Created on the first matching
 /// `LspEvent::Completion` and cleared on commit / dismiss / tab
 /// switch.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, drv::Input)]
 pub struct CompletionSession {
     /// The tab the popup was triggered on. Used as a guard —
     /// switching tabs dismisses.
@@ -105,8 +105,6 @@ pub struct CompletionSession {
     /// to keep `selected` visible.
     pub scroll: usize,
 }
-
-led_core::impl_identity_to_static!(CompletionSession);
 
 impl CompletionsState {
     /// Allocate the next request / resolve sequence id.

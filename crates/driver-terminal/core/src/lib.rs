@@ -20,25 +20,21 @@ pub use theme::{Attrs, Color, DiagnosticsTheme, Style, SyntaxTheme, Theme};
 // ── Mirror types — the ABI boundary ────────────────────────────────────
 
 /// Viewport size in columns × rows.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, drv::Input)]
 pub struct Dims {
     pub cols: u16,
     pub rows: u16,
 }
 
-led_core::impl_identity_to_static!(Dims);
-
 /// Screen-coordinate rectangle. Inclusive `x` / `y`, exclusive
 /// `x + cols` / `y + rows`.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, drv::Input)]
 pub struct Rect {
     pub x: u16,
     pub y: u16,
     pub cols: u16,
     pub rows: u16,
 }
-
-led_core::impl_identity_to_static!(Rect);
 
 /// Pre-computed layout for a tick: where each chrome region goes.
 /// Painter consumes this; no painter code touches `dims` directly.

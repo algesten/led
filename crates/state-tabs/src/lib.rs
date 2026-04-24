@@ -21,7 +21,7 @@ led_core::id_newtype!(TabId);
 /// line and continuing onto a long line restores the original column.
 /// Any explicit horizontal move (`Left` / `Right` / `Home` / `End`)
 /// resets `preferred_col` to match the new `col`.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, drv::Input)]
 pub struct Cursor {
     pub line: usize,
     pub col: usize,
@@ -33,7 +33,7 @@ pub struct Cursor {
 /// anchor lives in logical-line × sub-line space so soft-wrapped
 /// buffers scroll one visual row at a time instead of jumping by
 /// whole logical lines. Persists per tab across tab switches.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, drv::Input)]
 pub struct Scroll {
     pub top: usize,
     pub top_sub_line: SubLine,

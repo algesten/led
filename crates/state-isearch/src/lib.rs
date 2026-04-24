@@ -28,14 +28,14 @@ use led_state_tabs::{Cursor, Scroll};
 /// highlighter / cursor jumper converts these to `Cursor { line,
 /// col }` as needed. Using char indices (not byte) is consistent
 /// with how `Cursor` itself counts columns.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, drv::Input)]
 pub struct IsearchMatch {
     pub char_start: usize,
     pub char_end: usize,
 }
 
 /// Whole-session state for an active isearch.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, drv::Input)]
 pub struct IsearchState {
     /// Editable query (text + cursor + transient hint via
     /// `TextInput`). Rendered after the `Search:` prompt in the
@@ -87,8 +87,6 @@ impl IsearchState {
         }
     }
 }
-
-led_core::impl_identity_to_static!(IsearchState);
 
 #[cfg(test)]
 mod tests {

@@ -13,6 +13,7 @@ publish = false
 # tree to file-search view.
 
 [dependencies]
+drv = { workspace = true }
 led-core = { workspace = true }
 led-driver-file-search-core = { workspace = true }
 led-state-tabs = { workspace = true }

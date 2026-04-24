@@ -12,6 +12,7 @@ publish = false
 # for those don't invalidate when an unrelated LSP feature fires.
 
 [dependencies]
+drv = { workspace = true }
 imbl = { workspace = true }
 led-core = { workspace = true }
 led-driver-lsp-core = { workspace = true }

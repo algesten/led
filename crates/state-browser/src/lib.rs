@@ -21,22 +21,20 @@ use imbl::{HashMap, HashSet, Vector};
 use led_core::CanonPath;
 pub use led_driver_fs_list_core::{DirEntry, DirEntryKind};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, drv::Input)]
 pub enum Focus {
     #[default]
     Main,
     Side,
 }
 
-led_core::impl_identity_to_static!(Focus);
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, drv::Input)]
 pub enum TreeEntryKind {
     File,
     Directory { expanded: bool },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, drv::Input)]
 pub struct TreeEntry {
     pub path: CanonPath,
     pub name: String,

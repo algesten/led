@@ -23,6 +23,7 @@ macro_rules! id_newtype {
             ::core::cmp::PartialOrd,
             ::core::hash::Hash,
             ::core::default::Default,
+            $crate::drv::Input,
         )]
         pub struct $name(pub u64);
 
@@ -41,20 +42,6 @@ macro_rules! id_newtype {
         impl ::core::convert::From<$name> for u64 {
             fn from(v: $name) -> u64 {
                 v.0
-            }
-        }
-
-        // Hand-rolled `ToStatic` impl so the newtype can be
-        // used directly as a `#[drv::memo]` input. drv's
-        // `#[derive(drv::Input)]` requires named fields, so
-        // tuple-struct id newtypes can't use the derive —
-        // luckily the impl is trivial for a `Copy` newtype
-        // around `u64`.
-        impl $crate::drv::ToStatic for $name {
-            type Static = $name;
-            fn to_static(&self) -> Self::Static { *self }
-            fn eq_static(&self, other: &Self::Static) -> bool {
-                self == other
             }
         }
     };

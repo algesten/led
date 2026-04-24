@@ -75,7 +75,7 @@ led-driver-lsp-native = { path = "crates/driver-lsp/native" }
 led-runtime = { path = "crates/runtime" }
 
 # drv = the memoization / query primitive.
-drv = { version = "0.4", features = ["imbl"] }
+drv = { version = "0.4.2", features = ["imbl"] }
 imbl = "7"
 
 # External dependencies carried over from the legacy workspace.
