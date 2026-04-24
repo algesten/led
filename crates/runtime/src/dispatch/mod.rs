@@ -26,6 +26,8 @@
 //! (chord resolution, implicit-insert gating, quit chord, abort).
 
 mod browser;
+#[path = "completions.rs"]
+mod completions_overlay;
 mod cursor;
 mod edit;
 mod file_search;
@@ -227,7 +229,7 @@ pub fn dispatch_key(
         Resolved::Command(cmd) => {
             let outcome = run_command(
                 cmd, tabs, edits, kill_ring, clip, alerts, jumps, browser, fs, store, terminal,
-                find_file, isearch, file_search, path_chains,
+                find_file, isearch, file_search, path_chains, completions,
             );
             // Kill-ring coalescing: any non-KillLine command breaks
             // the flag, so the next KillLine starts a fresh entry.
@@ -470,6 +472,7 @@ fn run_command(
     isearch: &mut Option<IsearchState>,
     file_search: &mut Option<FileSearchState>,
     path_chains: &mut std::collections::HashMap<led_core::CanonPath, led_core::PathChain>,
+    completions: &mut CompletionsState,
 ) -> DispatchOutcome {
     // Find-file overlay intercept. When active, the overlay owns
     // input editing + its own command set; most commands route into
@@ -478,6 +481,20 @@ fn run_command(
     if let Some(outcome) =
         find_file::run_overlay_command(cmd, find_file, tabs, edits, path_chains)
     {
+        return outcome;
+    }
+
+    // LSP completion popup intercept (M17). Fires before buffer
+    // editing so Up / Down navigate the list, Enter commits, Esc
+    // dismisses. InsertChar / DeleteBack fall through to the
+    // normal edit path; `handle_completion_trigger` at the
+    // dispatch boundary then refilters / queues the next request.
+    //
+    // (The submodule is aliased as `completions_overlay` to
+    // avoid shadowing the `completions` parameter.)
+    if let Some(outcome) = completions_overlay::run_overlay_command(
+        cmd, completions, tabs, edits,
+    ) {
         return outcome;
     }
 
