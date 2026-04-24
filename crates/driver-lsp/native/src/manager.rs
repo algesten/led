@@ -48,12 +48,12 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread::{self, JoinHandle};
 use std::time::Instant;
 
-use led_core::{CanonPath, Notifier};
+use led_core::{CanonPath, Notifier, PersistedContentHash};
 use led_driver_lsp_core::{
     DiagnosticSource, LspCmd, LspEvent, Trace,
     diag_source::{DiagMode, DiagPushResult},
 };
-use led_state_diagnostics::{BufferVersion, Diagnostic, DiagnosticSeverity};
+use led_state_diagnostics::{Diagnostic, DiagnosticSeverity};
 use led_state_syntax::Language;
 use ropey::Rope;
 use serde_json::{Value, json};
@@ -86,7 +86,7 @@ enum ManagerEvent {
 struct PendingOpen {
     path: CanonPath,
     rope: Arc<Rope>,
-    version: BufferVersion,
+    hash: PersistedContentHash,
 }
 
 /// A pending JSON-RPC request. Keyed by request-id on the
@@ -114,12 +114,13 @@ struct ServerEntry {
     initialized: bool,
     /// Per-doc LSP `textDocument.version` counter (1-based,
     /// monotonically increments each didChange). Separate from
-    /// our `BufferVersion` because LSP demands its own.
+    /// the content-hash tracking because the LSP spec demands a
+    /// monotonic counter on the wire.
     doc_versions: HashMap<CanonPath, i32>,
-    /// Current `BufferVersion` for each opened doc — the version
-    /// we stamp outgoing pulls with. Updated on every
-    /// `BufferOpened` / `BufferChanged`.
-    buffer_versions: HashMap<CanonPath, BufferVersion>,
+    /// Current content hash for each opened doc — the anchor we
+    /// snapshot into diagnostic windows and stamp outgoing pulls
+    /// with. Updated on every `BufferOpened` / `BufferChanged`.
+    buffer_hashes: HashMap<CanonPath, PersistedContentHash>,
     /// Was a RequestDiagnostics received before the server was
     /// ready? Replayed on first quiescence. Matches legacy's
     /// `init_delayed_request` semantics.
@@ -465,19 +466,19 @@ impl Manager {
                 path,
                 language,
                 rope,
-                version,
+                hash,
             } => {
                 let Some(lang) = language else { return };
                 self.ensure_server_spawned(lang);
-                self.open_buffer(lang, path, rope, version);
+                self.open_buffer(lang, path, rope, hash);
             }
             LspCmd::BufferChanged {
                 path,
                 rope,
-                version,
+                hash,
                 is_save,
             } => {
-                self.buffer_changed(&path, &rope, version, is_save);
+                self.buffer_changed(&path, &rope, hash, is_save);
             }
             LspCmd::BufferClosed { path } => {
                 self.buffer_closed(&path);
@@ -556,7 +557,7 @@ impl Manager {
             queued_opens: Vec::new(),
             initialized: false,
             doc_versions: HashMap::new(),
-            buffer_versions: HashMap::new(),
+            buffer_hashes: HashMap::new(),
             deferred_init_request: false,
             last_rope_sent: HashMap::new(),
         };
@@ -569,19 +570,19 @@ impl Manager {
         language: Language,
         path: CanonPath,
         rope: Arc<Rope>,
-        version: BufferVersion,
+        hash: PersistedContentHash,
     ) {
         let Some(entry) = self.servers.get_mut(&language) else {
             return;
         };
-        entry.buffer_versions.insert(path.clone(), version);
+        entry.buffer_hashes.insert(path.clone(), hash);
         if entry.initialized {
             send_did_open(entry, &path, &rope);
         } else {
             entry.queued_opens.push(PendingOpen {
                 path,
                 rope,
-                version,
+                hash,
             });
         }
     }
@@ -590,7 +591,7 @@ impl Manager {
         &mut self,
         path: &CanonPath,
         rope: &Arc<Rope>,
-        version: BufferVersion,
+        hash: PersistedContentHash,
         is_save: bool,
     ) {
         // Find the server that has this path open.
@@ -600,15 +601,15 @@ impl Manager {
         let Some(language) = language else { return };
         let entry = self.servers.get_mut(&language).expect("just found");
 
-        // Freeze discipline: the rope moved, so any open window
-        // that snapshotted this path is now stale. Close it so a
-        // later RequestDiagnostics opens a fresh window at the
-        // new version.
-        if entry.diag.should_close_window(path, version) {
+        // Freeze discipline: the rope moved to new content, so
+        // any open window that snapshotted this path's hash is
+        // now stale. Close it so a later RequestDiagnostics opens
+        // a fresh window at the current hash.
+        if entry.diag.should_close_window(path, hash) {
             entry.diag.close_window();
         }
 
-        entry.buffer_versions.insert(path.clone(), version);
+        entry.buffer_hashes.insert(path.clone(), hash);
         // Legacy push_cache invalidation: the cached push is
         // pinned to an earlier content; next push (if any) will
         // supersede, but in the meantime we don't want to forward
@@ -677,7 +678,7 @@ impl Manager {
         });
         let _ = entry.server.send_body(&serde_json::to_vec(&body).unwrap());
         entry.doc_versions.remove(path);
-        entry.buffer_versions.remove(path);
+        entry.buffer_hashes.remove(path);
         entry.last_rope_sent.remove(path);
         entry.diag.invalidate_cache(path);
     }
@@ -702,7 +703,7 @@ impl Manager {
                     entry.diag.defer_init_request();
                     continue;
                 }
-                let snap = entry.buffer_versions.clone();
+                let snap = entry.buffer_hashes.clone();
                 let opened = entry.doc_versions.keys().cloned().collect();
                 (snap, opened, false)
             };
@@ -714,7 +715,7 @@ impl Manager {
     fn open_diag_window(
         &mut self,
         lang: Language,
-        snapshot: HashMap<CanonPath, BufferVersion>,
+        snapshot: HashMap<CanonPath, PersistedContentHash>,
         opened: std::collections::HashSet<CanonPath>,
     ) {
         let pulls_and_cache = {
@@ -730,10 +731,10 @@ impl Manager {
         let (pulls, cache) = pulls_and_cache;
 
         // Forward cached push results immediately.
-        for (path, diags, version) in cache {
+        for (path, diags, hash) in cache {
             let _ = self.lsp_event_tx.send(LspEvent::Diagnostics {
                 path: path.clone(),
-                version,
+                hash,
                 diagnostics: diags,
             });
             self.trace.lsp_diagnostics_done(
@@ -744,7 +745,7 @@ impl Manager {
                     .ne(&DiagMode::Push)
                     .then_some(0)
                     .unwrap_or(0),
-                version,
+                hash,
             );
         }
         self.notify.notify();
@@ -893,7 +894,7 @@ impl Manager {
                 let queued = std::mem::take(&mut entry.queued_opens);
                 for open in queued {
                     send_did_open(entry, &open.path, &open.rope);
-                    entry.buffer_versions.insert(open.path.clone(), open.version);
+                    entry.buffer_hashes.insert(open.path.clone(), open.hash);
                 }
             }
             Err(err) => {
@@ -922,12 +923,12 @@ impl Manager {
         };
         let entry = self.servers.get_mut(&language).unwrap();
         let (forward, _all_done) = entry.diag.on_pull_response(path, diags);
-        if let Some((path, diagnostics, version)) = forward {
+        if let Some((path, diagnostics, hash)) = forward {
             self.trace
-                .lsp_diagnostics_done(&path, diagnostics.len(), version);
+                .lsp_diagnostics_done(&path, diagnostics.len(), hash);
             let _ = self.lsp_event_tx.send(LspEvent::Diagnostics {
                 path,
-                version,
+                hash,
                 diagnostics,
             });
             self.notify.notify();
@@ -972,7 +973,19 @@ impl Manager {
                     .unwrap_or_default();
                 let result = {
                     let entry = self.servers.get_mut(&language).unwrap();
-                    entry.diag.on_push(path.clone(), diags)
+                    // Stamp the push with the buffer's CURRENT
+                    // content hash — the hash we believe matches
+                    // the bytes rust-analyzer just analysed. That
+                    // lets the runtime's replay pipeline map the
+                    // diagnostic through any edits the user has
+                    // since landed instead of pinning it to
+                    // whichever hash a future drain happens to see.
+                    let current_hash = entry
+                        .buffer_hashes
+                        .get(&path)
+                        .copied()
+                        .unwrap_or_default();
+                    entry.diag.on_push(path.clone(), diags, current_hash)
                 };
                 self.dispatch_push_result(language, path, result);
             }
@@ -1103,28 +1116,28 @@ impl Manager {
         result: DiagPushResult,
     ) {
         match result {
-            DiagPushResult::Forward(p, diags, version) => {
-                self.trace.lsp_diagnostics_done(&p, diags.len(), version);
+            DiagPushResult::Forward(p, diags, hash) => {
+                self.trace.lsp_diagnostics_done(&p, diags.len(), hash);
                 let _ = self.lsp_event_tx.send(LspEvent::Diagnostics {
                     path: p,
-                    version,
+                    hash,
                     diagnostics: diags,
                 });
                 self.notify.notify();
             }
             DiagPushResult::ForwardClearing(p) => {
                 // Clearing push (empty list) outside a window.
-                // Legacy forwards with current buffer version —
+                // Legacy forwards with the current buffer hash —
                 // clearing is always safe; the runtime's
-                // no-smear gate applies either way.
-                let version = self.servers[&language]
-                    .buffer_versions
+                // hash-match / replay gate applies either way.
+                let hash = self.servers[&language]
+                    .buffer_hashes
                     .get(&p)
                     .copied()
                     .unwrap_or_default();
                 let _ = self.lsp_event_tx.send(LspEvent::Diagnostics {
                     path: p,
-                    version,
+                    hash,
                     diagnostics: Vec::new(),
                 });
                 self.notify.notify();

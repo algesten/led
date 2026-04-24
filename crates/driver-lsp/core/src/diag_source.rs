@@ -48,8 +48,8 @@
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
-use led_core::CanonPath;
-use led_state_diagnostics::{BufferVersion, Diagnostic};
+use led_core::{CanonPath, PersistedContentHash};
+use led_state_diagnostics::Diagnostic;
 
 /// Hard ceiling on how long a pull window stays frozen. Once
 /// reached, the freeze lifts unconditionally and any in-flight
@@ -77,7 +77,7 @@ pub enum DiagPushResult {
     /// open after pulls complete (only closed by actual content
     /// divergence), so pushes arriving minutes later still hit
     /// `Forward` and get the correct snapshot stamp.
-    Forward(CanonPath, Vec<Diagnostic>, BufferVersion),
+    Forward(CanonPath, Vec<Diagnostic>, PersistedContentHash),
     /// Clearing push (empty list) arrived outside any window.
     /// Forward with the CURRENT buffer version the caller
     /// supplies — clearing is always safe to propagate (legacy
@@ -101,10 +101,11 @@ pub enum DiagPushResult {
 /// One open propagation window's in-flight state. Closed = `None`
 /// on the parent `DiagnosticSource`.
 struct DiagWindow {
-    /// Version snapshot for every opened doc at window open time.
-    /// Every forwarded `Diagnostics` event is stamped with the
-    /// matching entry, so the model can version-gate.
-    version_snapshot: HashMap<CanonPath, BufferVersion>,
+    /// Content-hash snapshot for every opened doc at window open
+    /// time. Every forwarded `Diagnostics` event is stamped with
+    /// the matching entry so the model can content-hash-gate /
+    /// replay.
+    hash_snapshot: HashMap<CanonPath, PersistedContentHash>,
     /// Pull mode only: paths still awaiting their pull response.
     /// Populated at open time, drained in `on_pull_response`.
     pending_pulls: HashSet<CanonPath>,
@@ -142,10 +143,14 @@ pub struct DiagnosticSource {
     /// Replayed when `on_quiescence` finally fires.
     init_delayed_request: bool,
 
-    /// Latest push-delivered diagnostics per path. Updated on
-    /// every push, regardless of whether a window is open. A
-    /// freshly-opened push-mode window drains this verbatim.
-    push_cache: HashMap<CanonPath, Vec<Diagnostic>>,
+    /// Latest push-delivered diagnostics per path, paired with the
+    /// buffer content hash they were computed against. Drain keeps
+    /// the original stamp so the runtime can replay through later
+    /// edits; re-stamping with a newer snapshot would pin the
+    /// diagnostic to content the server never analysed — exactly
+    /// the bug that lets late cargo-check pushes smear the old
+    /// error onto the current buffer.
+    push_cache: HashMap<CanonPath, (PersistedContentHash, Vec<Diagnostic>)>,
 
     /// Open propagation window, or `None` when idle.
     window: Option<DiagWindow>,
@@ -253,18 +258,18 @@ impl DiagnosticSource {
 
     // ── Window open / close ──────────────────────────────────
 
-    /// Open a propagation window. `version_snapshot` must cover
-    /// every currently-opened buffer keyed by canonical path.
-    /// `opened` is just the set (same keys) — kept separate
-    /// because pull mode iterates it to decide which paths need
-    /// pulling; push mode iterates to decide which lack cache.
+    /// Open a propagation window. `hash_snapshot` must cover every
+    /// currently-opened buffer keyed by canonical path. `opened` is
+    /// just the set (same keys) — kept separate because pull mode
+    /// iterates it to decide which paths need pulling; push mode
+    /// iterates to decide which lack cache.
     ///
     /// Returns the paths to pull. Empty in push mode unless the
     /// server advertised pull capability (then it's just the
     /// paths without a push-cache hit).
     pub fn open_window(
         &mut self,
-        version_snapshot: HashMap<CanonPath, BufferVersion>,
+        hash_snapshot: HashMap<CanonPath, PersistedContentHash>,
         opened: &HashSet<CanonPath>,
     ) -> Vec<CanonPath> {
         match self.mode {
@@ -282,7 +287,7 @@ impl DiagnosticSource {
                     Vec::new()
                 };
                 self.window = Some(DiagWindow {
-                    version_snapshot,
+                    hash_snapshot,
                     pending_pulls: pull_paths.iter().cloned().collect(),
                     frozen: false,
                     deadline: None,
@@ -292,7 +297,7 @@ impl DiagnosticSource {
             DiagMode::Pull => {
                 let pull_paths: Vec<CanonPath> = opened.iter().cloned().collect();
                 self.window = Some(DiagWindow {
-                    version_snapshot,
+                    hash_snapshot,
                     pending_pulls: pull_paths.iter().cloned().collect(),
                     frozen: true,
                     deadline: Some(Instant::now() + PULL_FREEZE_DEADLINE),
@@ -303,25 +308,27 @@ impl DiagnosticSource {
     }
 
     /// Push mode: drain the current push cache through the
-    /// newly-opened window, stamping each entry with the
-    /// snapshot version. Safe to call with `None` window (returns
-    /// empty). Caller forwards each triple to the model.
+    /// newly-opened window, keeping each entry's ORIGINAL
+    /// content-hash stamp (the hash the buffer held when
+    /// the push landed). The runtime's `offer_diagnostics` runs
+    /// the fast-path / save-point-replay pipeline against that
+    /// hash; stamping with the window's current snapshot instead
+    /// would pin a stale cargo-check push to content the server
+    /// never analysed, which is the exact smear this layer
+    /// protects against.
+    ///
+    /// Safe to call with `None` window (returns empty). `_window`
+    /// parameter retained for API symmetry but unused — the old
+    /// re-stamping trick was the bug, not a feature.
     pub fn drain_cache_for_window(
         &self,
-    ) -> Vec<(CanonPath, Vec<Diagnostic>, BufferVersion)> {
-        let Some(window) = &self.window else {
+    ) -> Vec<(CanonPath, Vec<Diagnostic>, PersistedContentHash)> {
+        if self.window.is_none() {
             return Vec::new();
-        };
+        }
         self.push_cache
             .iter()
-            .map(|(path, diags)| {
-                let v = window
-                    .version_snapshot
-                    .get(path)
-                    .copied()
-                    .unwrap_or(BufferVersion(0));
-                (path.clone(), diags.clone(), v)
-            })
+            .map(|(path, (hash, diags))| (path.clone(), diags.clone(), *hash))
             .collect()
     }
 
@@ -333,18 +340,20 @@ impl DiagnosticSource {
     }
 
     /// Called by the native side when a `BufferChanged` arrives
-    /// and the buffer has moved past the window's version for
-    /// that path. Legacy used a content-hash comparison; we use
-    /// monotonic `BufferVersion` (any forward movement counts).
+    /// and the buffer's content hash no longer matches the
+    /// window's snapshot for that path. Matches legacy's exact
+    /// rule (`lsp/src/manager.rs:326-334`): content-hash-based so
+    /// a type-then-delete round trip back to the original bytes
+    /// does NOT close the window.
     pub fn should_close_window(
         &self,
         path: &CanonPath,
-        current: BufferVersion,
+        current: PersistedContentHash,
     ) -> bool {
         let Some(window) = &self.window else {
             return false;
         };
-        let Some(snap) = window.version_snapshot.get(path) else {
+        let Some(snap) = window.hash_snapshot.get(path) else {
             return false;
         };
         snap.0 != current.0
@@ -364,19 +373,23 @@ impl DiagnosticSource {
 
     // ── Incoming diagnostic events ───────────────────────────
 
-    /// A `publishDiagnostics` push arrived. Always updates the
-    /// cache. In pull mode, triggers the one-way fallback to push
-    /// mode. Returns instructions for the caller.
+    /// A `publishDiagnostics` push arrived. `current_hash` is the
+    /// buffer's content hash at the moment the push landed — we
+    /// stamp the cache entry with it, and forward with it, so
+    /// downstream replay can map the diagnostic back through any
+    /// subsequent edits. In pull mode, triggers the one-way
+    /// fallback to push mode. Returns instructions for the caller.
     pub fn on_push(
         &mut self,
         path: CanonPath,
         diags: Vec<Diagnostic>,
+        current_hash: PersistedContentHash,
     ) -> DiagPushResult {
         if self.mode == DiagMode::Pull {
             self.mode = DiagMode::Push;
             let had_window = self.window.is_some();
             self.window = None;
-            self.push_cache.insert(path, diags);
+            self.push_cache.insert(path, (current_hash, diags));
             return if had_window {
                 DiagPushResult::RestartWindow
             } else {
@@ -391,29 +404,21 @@ impl DiagnosticSource {
         // complete in a push-mode window, the window STAYS OPEN
         // (only closed by actual content divergence via
         // `should_close_window`). So this branch is where late
-        // cargo-check pushes typically land — window still
-        // open, `Forward` with the snapshot version that matches
-        // the buffer's current version (user hasn't typed), so
-        // the runtime's version gate accepts them.
+        // cargo-check pushes typically land — we stamp them with
+        // the hash they were computed against and forward.
         let is_clearing = diags.is_empty();
-        self.push_cache.insert(path.clone(), diags.clone());
-        if let Some(window) = &self.window {
-            let v = window
-                .version_snapshot
-                .get(&path)
-                .copied()
-                .unwrap_or(BufferVersion(0));
-            DiagPushResult::Forward(path, diags, v)
+        self.push_cache
+            .insert(path.clone(), (current_hash, diags.clone()));
+        if self.window.is_some() {
+            DiagPushResult::Forward(path, diags, current_hash)
         } else if is_clearing {
             // Clearing push outside a window — forward with the
-            // current buffer version the caller supplies.
+            // current hash the caller supplied.
             DiagPushResult::ForwardClearing(path)
         } else {
             // Non-clearing push outside a window: cached, not
             // forwarded. The next RequestDiagnostics drains via
-            // `drain_cache_for_window`. Don't stamp with the
-            // current version — the diagnostic's line numbers
-            // are from whatever content the server analysed.
+            // `drain_cache_for_window`, which keeps the stamp.
             DiagPushResult::Ignore
         }
     }
@@ -431,7 +436,7 @@ impl DiagnosticSource {
         path: CanonPath,
         pull_diags: Vec<Diagnostic>,
     ) -> (
-        Option<(CanonPath, Vec<Diagnostic>, BufferVersion)>,
+        Option<(CanonPath, Vec<Diagnostic>, PersistedContentHash)>,
         bool,
     ) {
         let Some(window) = &mut self.window else {
@@ -441,24 +446,31 @@ impl DiagnosticSource {
             // Either not expecting this path, or already answered.
             return (None, false);
         }
-        let v = window
-            .version_snapshot
+        let h = window
+            .hash_snapshot
             .get(&path)
             .copied()
-            .unwrap_or(BufferVersion(0));
+            .unwrap_or_default();
         let all_done = window.pending_pulls.is_empty();
         if all_done {
             window.frozen = false;
             window.deadline = None;
         }
 
-        let result = if let Some(cached) = self.push_cache.get(&path) {
-            cached.clone()
+        // Cache wins when present (legacy's "push is more detailed"
+        // rule). The cached tuple also carries its own hash, but
+        // we stamp with the window's snapshot here because the pull
+        // response IS synchronous against the window — both hashes
+        // refer to the same buffer content.
+        let result = if let Some((_cached_hash, cached_diags)) =
+            self.push_cache.get(&path)
+        {
+            cached_diags.clone()
         } else {
             pull_diags
         };
 
-        (Some((path, result, v)), all_done)
+        (Some((path, result, h)), all_done)
     }
 
     /// Drop the push cache entry for a path. Called when the
@@ -486,10 +498,10 @@ mod tests {
         UserPath::new(s).canonicalize()
     }
 
-    fn snap(paths: &[(&str, u64)]) -> HashMap<CanonPath, BufferVersion> {
+    fn snap(paths: &[(&str, u64)]) -> HashMap<CanonPath, PersistedContentHash> {
         paths
             .iter()
-            .map(|(s, v)| (p(s), BufferVersion(*v)))
+            .map(|(s, v)| (p(s), PersistedContentHash(*v)))
             .collect()
     }
 
@@ -527,31 +539,31 @@ mod tests {
     #[test]
     fn push_always_caches() {
         let mut ds = push_source();
-        ds.on_push(p("/a.rs"), vec![diag("err")]);
-        assert_eq!(ds.push_cache.get(&p("/a.rs")).unwrap()[0].message, "err");
+        ds.on_push(p("/a.rs"), vec![diag("err")], PersistedContentHash(7));
+        assert_eq!(ds.push_cache.get(&p("/a.rs")).unwrap().1[0].message, "err");
     }
 
     #[test]
     fn push_cache_updated_by_new_push() {
         let mut ds = push_source();
-        ds.on_push(p("/a.rs"), vec![diag("old")]);
-        ds.on_push(p("/a.rs"), vec![diag("new")]);
-        assert_eq!(ds.push_cache.get(&p("/a.rs")).unwrap()[0].message, "new");
+        ds.on_push(p("/a.rs"), vec![diag("old")], PersistedContentHash(7));
+        ds.on_push(p("/a.rs"), vec![diag("new")], PersistedContentHash(7));
+        assert_eq!(ds.push_cache.get(&p("/a.rs")).unwrap().1[0].message, "new");
     }
 
     #[test]
     fn empty_push_clears_cache_entry() {
         let mut ds = push_source();
-        ds.on_push(p("/a.rs"), vec![diag("err")]);
-        ds.on_push(p("/a.rs"), vec![]);
-        assert!(ds.push_cache.get(&p("/a.rs")).unwrap().is_empty());
+        ds.on_push(p("/a.rs"), vec![diag("err")], PersistedContentHash(7));
+        ds.on_push(p("/a.rs"), vec![], PersistedContentHash(0));
+        assert!(ds.push_cache.get(&p("/a.rs")).unwrap().1.is_empty());
     }
 
 
     #[test]
     fn push_clearing_without_window_forwards_clearing() {
         let mut ds = push_source();
-        let r = ds.on_push(p("/a.rs"), vec![]);
+        let r = ds.on_push(p("/a.rs"), vec![], PersistedContentHash(0));
         match r {
             DiagPushResult::ForwardClearing(path) => {
                 assert_eq!(path, p("/a.rs"));
@@ -569,49 +581,58 @@ mod tests {
         // the server analysed. The push stays cached for the
         // next `RequestDiagnostics` → window open → drain.
         let mut ds = push_source();
-        let r = ds.on_push(p("/a.rs"), vec![diag("err")]);
+        let r = ds.on_push(p("/a.rs"), vec![diag("err")], PersistedContentHash(7));
         assert!(matches!(r, DiagPushResult::Ignore));
         assert_eq!(
-            ds.push_cache.get(&p("/a.rs")).unwrap()[0].message,
+            ds.push_cache.get(&p("/a.rs")).unwrap().1[0].message,
             "err",
             "push is still cached for next window open"
         );
     }
 
     #[test]
-    fn push_forwarded_with_window() {
+    fn push_forwarded_with_push_hash_not_window_snapshot() {
+        // Legacy behaviour + the bug fix for stuck late-cargo
+        // diagnostics: Forward stamps with the hash the push was
+        // against, NOT the window's snapshot. Re-stamping would
+        // pin a stale cargo error to content the server never
+        // analysed.
         let mut ds = push_source();
         ds.open_window(snap(&[("/a.rs", 3)]), &opened(&["/a.rs"]));
-        let r = ds.on_push(p("/a.rs"), vec![diag("err")]);
+        let r = ds.on_push(p("/a.rs"), vec![diag("err")], PersistedContentHash(7));
         match r {
             DiagPushResult::Forward(path, diags, v) => {
                 assert_eq!(path, p("/a.rs"));
                 assert_eq!(diags.len(), 1);
-                assert_eq!(v, BufferVersion(3));
+                assert_eq!(v, PersistedContentHash(7));
             }
             _ => panic!("expected Forward"),
         }
     }
 
     #[test]
-    fn push_window_drains_cache_with_snapshot_version() {
+    fn push_window_drains_cache_with_original_push_hash() {
+        // Cache entries keep the hash from their push-time call;
+        // drain reports that (not the new window's snapshot), so
+        // offer_diagnostics downstream can replay or reject
+        // against the hash the server actually saw.
         let mut ds = push_source();
-        ds.on_push(p("/a.rs"), vec![diag("cached")]);
+        ds.on_push(p("/a.rs"), vec![diag("cached")], PersistedContentHash(7));
         ds.open_window(snap(&[("/a.rs", 11)]), &opened(&["/a.rs"]));
         let drained = ds.drain_cache_for_window();
         assert_eq!(drained.len(), 1);
         assert_eq!(drained[0].1[0].message, "cached");
-        assert_eq!(drained[0].2, BufferVersion(11));
+        assert_eq!(drained[0].2, PersistedContentHash(7));
     }
 
     #[test]
     fn push_cache_survives_window_close() {
         let mut ds = push_source();
-        ds.on_push(p("/a.rs"), vec![diag("cached")]);
+        ds.on_push(p("/a.rs"), vec![diag("cached")], PersistedContentHash(7));
         ds.open_window(snap(&[("/a.rs", 1)]), &opened(&["/a.rs"]));
         ds.close_window();
         assert_eq!(
-            ds.push_cache.get(&p("/a.rs")).unwrap()[0].message,
+            ds.push_cache.get(&p("/a.rs")).unwrap().1[0].message,
             "cached"
         );
     }
@@ -627,8 +648,8 @@ mod tests {
     fn should_close_window_fires_on_version_movement() {
         let mut ds = push_source();
         ds.open_window(snap(&[("/a.rs", 4)]), &opened(&["/a.rs"]));
-        assert!(!ds.should_close_window(&p("/a.rs"), BufferVersion(4)));
-        assert!(ds.should_close_window(&p("/a.rs"), BufferVersion(5)));
+        assert!(!ds.should_close_window(&p("/a.rs"), PersistedContentHash(4)));
+        assert!(ds.should_close_window(&p("/a.rs"), PersistedContentHash(5)));
     }
 
     // ── Pull mode ───────────────────────────────────────────
@@ -659,7 +680,7 @@ mod tests {
         let (path, diags, v) = out.expect("forward");
         assert_eq!(path, p("/a.rs"));
         assert_eq!(diags.len(), 1);
-        assert_eq!(v, BufferVersion(7));
+        assert_eq!(v, PersistedContentHash(7));
         assert!(all_done);
         assert!(!ds.is_frozen());
     }
@@ -705,7 +726,10 @@ mod tests {
         // "Push is more detailed" — legacy manager.rs:304-318.
         let mut ds = pull_source();
         // Prime the cache as if a push had won the race.
-        ds.push_cache.insert(p("/a.rs"), vec![diag("from_push")]);
+        ds.push_cache.insert(
+            p("/a.rs"),
+            (PersistedContentHash(0), vec![diag("from_push")]),
+        );
         ds.open_window(snap(&[("/a.rs", 1)]), &opened(&["/a.rs"]));
         let (out, _) = ds.on_pull_response(p("/a.rs"), vec![diag("from_pull")]);
         assert_eq!(out.unwrap().1[0].message, "from_push");
@@ -725,13 +749,13 @@ mod tests {
         // push; next `RequestDiagnostics` opens a push-mode
         // window and drains.
         let mut ds = pull_source();
-        let r = ds.on_push(p("/a.rs"), vec![diag("pushed")]);
+        let r = ds.on_push(p("/a.rs"), vec![diag("pushed")], PersistedContentHash(7));
         assert_eq!(ds.mode, DiagMode::Push);
         assert!(matches!(r, DiagPushResult::Ignore));
         // Cache still populated so a subsequent
         // RequestDiagnostics opens a fresh window and drains.
         assert_eq!(
-            ds.push_cache.get(&p("/a.rs")).unwrap()[0].message,
+            ds.push_cache.get(&p("/a.rs")).unwrap().1[0].message,
             "pushed"
         );
     }
@@ -741,7 +765,7 @@ mod tests {
         let mut ds = pull_source();
         ds.open_window(snap(&[("/a.rs", 1)]), &opened(&["/a.rs"]));
         assert!(ds.is_frozen());
-        let r = ds.on_push(p("/a.rs"), vec![diag("pushed")]);
+        let r = ds.on_push(p("/a.rs"), vec![diag("pushed")], PersistedContentHash(7));
         assert_eq!(ds.mode, DiagMode::Push);
         assert!(matches!(r, DiagPushResult::RestartWindow));
         assert!(!ds.has_window(), "window cleared by fallback");
@@ -780,7 +804,7 @@ mod tests {
     #[test]
     fn invalidate_cache_drops_entry() {
         let mut ds = push_source();
-        ds.on_push(p("/a.rs"), vec![diag("err")]);
+        ds.on_push(p("/a.rs"), vec![diag("err")], PersistedContentHash(7));
         ds.invalidate_cache(&p("/a.rs"));
         assert!(ds.push_cache.get(&p("/a.rs")).is_none());
     }

@@ -5,7 +5,7 @@
 //! own `#[drv::input]` projections + `new(&Tabs)` constructors (the
 //! drv pattern for cross-crate projections).
 
-use led_core::CanonPath;
+use led_core::{CanonPath, SubLine};
 
 led_core::id_newtype!(TabId);
 
@@ -28,11 +28,15 @@ pub struct Cursor {
     pub preferred_col: usize,
 }
 
-/// Viewport scroll offset. `top` is the first buffer row shown at the
-/// top of the body. Persists per tab across tab switches.
+/// Viewport scroll offset. `top` is the first logical line whose
+/// sub-line `top_sub_line` sits at the top of the body — the
+/// anchor lives in logical-line × sub-line space so soft-wrapped
+/// buffers scroll one visual row at a time instead of jumping by
+/// whole logical lines. Persists per tab across tab switches.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Scroll {
     pub top: usize,
+    pub top_sub_line: SubLine,
 }
 
 /// One open tab. Stored in-line inside [`Tabs::open`] rather than

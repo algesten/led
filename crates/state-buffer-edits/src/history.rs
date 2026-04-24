@@ -15,6 +15,7 @@
 //! git, PR) walk to translate position-stamped data through
 //! subsequent edits. See [`rebase_char_index`].
 
+use led_core::PersistedContentHash;
 use led_state_tabs::Cursor;
 use std::sync::Arc;
 
@@ -50,6 +51,12 @@ pub struct EditGroup {
     pub cursor_after: Cursor,
     pub seq: u64,
     pub file_search_mark: Option<FileSearchMark>,
+    /// `Some(hash)` on save-point marker groups: `ops` is empty,
+    /// the group was inserted via [`History::insert_save_point`]
+    /// when the buffer was written to disk. Used by the LSP
+    /// diagnostic-replay path to locate the history position the
+    /// buffer held when a given content hash was current.
+    pub save_point_hash: Option<PersistedContentHash>,
 }
 
 /// Payload attached to per-hit search-replace undo groups so the
@@ -146,9 +153,23 @@ impl History {
     }
 
     /// Record a single-char word-insert. If the open group's last
-    /// op is an adjacent word-char insert, append the char to its
-    /// text instead of opening a new op. Any new edit clears
-    /// `future`.
+    /// op is an adjacent word-char insert, APPEND a new single-char
+    /// Insert op to the same group (so undo still reverses the whole
+    /// word as one unit), rather than opening a fresh group. Any
+    /// new edit clears `future`.
+    ///
+    /// Earlier iterations of this method extended `last_text` in
+    /// place, keeping `applied_ops().count()` flat across a word.
+    /// That breaks the syntax-rebase path in the runtime: the
+    /// rebase iterator walks `applied_ops().skip(N)` to shift
+    /// tokens through the edits that landed after a dispatched
+    /// parse. When the last op's text grew in place, no new op
+    /// appeared in the iterator, the rebase did nothing, and the
+    /// row painted with tokens at pre-growth char positions —
+    /// visible as a one-character leftward smear of every span on
+    /// every row past the edit. One op per keystroke keeps the
+    /// iterator honest; undo still operates at group granularity
+    /// because every op in `group.ops` gets reversed as a unit.
     pub fn record_insert_char(
         &mut self,
         at: usize,
@@ -163,17 +184,17 @@ impl History {
             && let Some(EditOp::Insert {
                 at: last_at,
                 text: last_text,
-            }) = group.ops.last_mut()
+            }) = group.ops.last()
         {
             let last_len = last_text.chars().count();
             let is_adjacent = at == *last_at + last_len;
             let last_ends_word =
                 last_text.chars().last().is_some_and(is_word_char);
             if is_adjacent && last_ends_word {
-                let mut merged = String::with_capacity(last_text.len() + 1);
-                merged.push_str(last_text);
-                merged.push(ch);
-                *last_text = Arc::from(merged);
+                group.ops.push(EditOp::Insert {
+                    at,
+                    text: Arc::from(ch.to_string()),
+                });
                 group.cursor_after = cursor_after;
                 return;
             }
@@ -242,6 +263,7 @@ impl History {
             cursor_after,
             seq: self.seq_gen.next(),
             file_search_mark: mark,
+            save_point_hash: None,
         };
         self.past.push(group);
     }
@@ -260,11 +282,24 @@ impl History {
     /// Pop the most recent applied group for undo. Caller applies
     /// the inverse ops and pushes the group onto `future` via
     /// [`push_future`].
+    ///
+    /// Save-point markers (empty-ops groups with
+    /// `save_point_hash = Some`) are silently discarded during the
+    /// walk — they don't represent user edits and have nothing to
+    /// invert. The marker's state is no longer reachable once the
+    /// undo crosses it; a future save re-creates a marker for the
+    /// then-current hash.
     pub fn take_undo(&mut self) -> Option<EditGroup> {
         // Close any open group before popping so the user undoes
         // what they just typed (not a stale past entry).
         self.finalise();
-        self.past.pop()
+        while let Some(g) = self.past.pop() {
+            if g.save_point_hash.is_some() && g.ops.is_empty() {
+                continue;
+            }
+            return Some(g);
+        }
+        None
     }
 
     /// Pop the most recent undone group for redo.
@@ -298,7 +333,61 @@ impl History {
             // for the open-group state.
             seq: 0,
             file_search_mark: None,
+            save_point_hash: None,
         });
+    }
+
+    /// Record a save-point marker tagged with `hash`. Closes any
+    /// open group first so the marker sits AFTER the edits that
+    /// produced its content, then appends a no-op `EditGroup`
+    /// (empty `ops`) with `save_point_hash = Some(hash)` to `past`.
+    ///
+    /// The marker is inert w.r.t. content — its `ops` is empty so
+    /// `applied_ops()` skips over it, and [`take_undo`] drops
+    /// markers silently. [`find_save_point`] walks `past` to map a
+    /// hash back to its position so diagnostic replay knows which
+    /// edits have landed since that save.
+    ///
+    /// Mirrors legacy `UndoHistory::insert_save_point` — same
+    /// invariant, different container (groups vs flat entries).
+    pub fn insert_save_point(&mut self, hash: PersistedContentHash) {
+        self.finalise();
+        self.past.push(EditGroup {
+            ops: Vec::new(),
+            cursor_before: Cursor::default(),
+            cursor_after: Cursor::default(),
+            seq: self.seq_gen.next(),
+            file_search_mark: None,
+            save_point_hash: Some(hash),
+        });
+    }
+
+    /// Locate the most recent save-point marker tagged with `hash`
+    /// in `past`. Returns the group's index. Used by diagnostic
+    /// replay to decide which later edits to walk through when
+    /// transforming diagnostic positions forward from the saved
+    /// state. `None` when no marker for this hash exists — the
+    /// caller rejects the diagnostic.
+    pub fn find_save_point(&self, hash: PersistedContentHash) -> Option<usize> {
+        self.past
+            .iter()
+            .rposition(|g| g.save_point_hash == Some(hash))
+    }
+
+    /// Iterate groups after index `start` in `past`, then the
+    /// currently-open group if any. Used by diagnostic replay to
+    /// walk every edit that landed since a save-point forward
+    /// against a reconstructed save-time rope. `start` is
+    /// inclusive; pass `find_save_point(hash)? + 1` to skip the
+    /// marker itself. Save-point markers in the traversal are
+    /// still yielded (callers filter on `save_point_hash.is_some()`
+    /// if they want to skip them), matching legacy's
+    /// `entries_from` semantics.
+    pub fn groups_from(&self, start: usize) -> impl Iterator<Item = &EditGroup> {
+        self.past
+            .iter()
+            .skip(start)
+            .chain(self.current.iter())
     }
 
     /// Attach a `FileSearchMark` to the currently-open group. Must
@@ -395,19 +484,30 @@ mod tests {
     }
 
     #[test]
-    fn record_insert_char_coalesces_word_chars() {
+    fn record_insert_char_keeps_word_chars_in_single_group() {
         let mut h = History::default();
         h.record_insert_char(0, 'h', cur(0, 0), cur(0, 1));
         h.record_insert_char(1, 'i', cur(0, 1), cur(0, 2));
+        // Still one undo group…
         assert_eq!(h.past_len(), 0);
         assert_eq!(h.applied_count(), 2);
-        // Single group with merged "hi" text.
+        // …but each keystroke is its own Insert op inside the group.
+        // The syntax-rebase path needs this: `applied_ops()` must
+        // advance per keystroke so rebasing tokens after a dispatched
+        // parse shifts them by the right char delta.
         let ops: Vec<_> = h.applied_ops().collect();
-        assert_eq!(ops.len(), 1);
+        assert_eq!(ops.len(), 2);
         match ops[0] {
             EditOp::Insert { at, text } => {
                 assert_eq!(*at, 0);
-                assert_eq!(&**text, "hi");
+                assert_eq!(&**text, "h");
+            }
+            _ => panic!("expected Insert"),
+        }
+        match ops[1] {
+            EditOp::Insert { at, text } => {
+                assert_eq!(*at, 1);
+                assert_eq!(&**text, "i");
             }
             _ => panic!("expected Insert"),
         }
@@ -439,6 +539,42 @@ mod tests {
         h.record_delete(0, Arc::from("e"), cur(0, 1), cur(0, 0));
         h.finalise();
         assert_eq!(h.past_len(), 2);
+    }
+
+    #[test]
+    fn insert_save_point_appends_no_op_group_and_finds_by_hash() {
+        let mut h = History::default();
+        h.record_insert(0, Arc::from("hi"), cur(0, 0), cur(0, 2));
+        h.insert_save_point(PersistedContentHash(42));
+        assert_eq!(h.past_len(), 2);
+        assert_eq!(h.find_save_point(PersistedContentHash(42)), Some(1));
+        assert_eq!(h.find_save_point(PersistedContentHash(99)), None);
+    }
+
+    #[test]
+    fn groups_from_walks_past_then_current() {
+        let mut h = History::default();
+        h.record_insert(0, Arc::from("a"), cur(0, 0), cur(0, 1));
+        h.insert_save_point(PersistedContentHash(7));
+        h.record_insert_char(1, 'b', cur(0, 1), cur(0, 2));
+        let after_save = h.find_save_point(PersistedContentHash(7)).unwrap();
+        let groups: Vec<_> = h.groups_from(after_save + 1).collect();
+        // One real group walked: the 'b' insert still in `current`.
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].ops.len(), 1);
+    }
+
+    #[test]
+    fn take_undo_skips_save_point_markers() {
+        let mut h = History::default();
+        h.record_insert(0, Arc::from("a"), cur(0, 0), cur(0, 1));
+        h.insert_save_point(PersistedContentHash(7));
+        // Undo should pop the real edit, skipping the save-point.
+        let undone = h.take_undo().expect("past has a real edit");
+        assert_eq!(undone.ops.len(), 1);
+        // Save-point was discarded along the way.
+        assert!(h.find_save_point(PersistedContentHash(7)).is_none());
+        assert_eq!(h.past_len(), 0);
     }
 
     #[test]

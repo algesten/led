@@ -130,6 +130,81 @@ mod tests {
     
 
     #[test]
+    fn arrow_up_escapes_sub_line_after_typing_triggers_re_wrap() {
+        // Regression for: append to a soft-wrapped line until it
+        // re-wraps, arrow-up gets stuck bouncing on the last
+        // sub-line instead of walking up through the earlier ones.
+        //
+        // Root cause: `insert_char` set `preferred_col = col` (raw
+        // logical col), which on a wrapped line exceeds any sub-
+        // line's width. `land_on_sub_line` clamps to the sub-line
+        // width and lands on the wrap boundary col — which
+        // `col_to_sub_line` resolves as the START of the next
+        // sub-line, so the next arrow-up comes back to where it
+        // started. Fix: dispatch refreshes `preferred_col` to the
+        // within-sub-line col after edit-like commands.
+        //
+        // Geometry: `Dims { cols: 14, rows: 20 }`.
+        // `editor_area.cols` = 14 (no sidebar); content_cols = 14
+        // - GUTTER_WIDTH(2) - TRAILING_RESERVED_COLS(0) = 12. Wrap
+        // width = 11 (one trailing col per non-last sub: `\`).
+        //
+        // Start: 17 chars — sub 0=[0,11), sub 1=[11,17). Two
+        // sub-lines.
+        let (mut tabs, mut edits, store, term) = fixture_with_content(
+            "01234567890123456\n",
+            Dims { cols: 14, rows: 20 },
+        );
+        // Park the cursor at the end of the wrapped line (col 17
+        // = last sub-line, within=6).
+        tabs.open[0].cursor = Cursor {
+            line: 0,
+            col: 17,
+            preferred_col: 6,
+        };
+
+        // Type seven chars. That pushes the line to 24 chars which
+        // re-wraps to 3 sub-lines: sub 0=[0,11), sub 1=[11,22),
+        // sub 2=[22,24). Cursor ends at col 24, within sub-line 2
+        // at col 2.
+        for _ in 0..7 {
+            dispatch_default(
+                key(KeyModifiers::NONE, KeyCode::Char('X')),
+                &mut tabs,
+                &mut edits,
+                &store,
+                &term,
+            );
+        }
+        assert_eq!(tabs.open[0].cursor.col, 24);
+        // preferred_col must be the within-sub-line col (2), not
+        // the raw logical col (24) the buggy path produced.
+        assert_eq!(tabs.open[0].cursor.preferred_col, 2);
+
+        // Arrow-up: land on sub-line 1 at col 11 + 2 = 13.
+        dispatch_default(
+            key(KeyModifiers::NONE, KeyCode::Up),
+            &mut tabs,
+            &mut edits,
+            &store,
+            &term,
+        );
+        assert_eq!(tabs.open[0].cursor.line, 0);
+        assert_eq!(tabs.open[0].cursor.col, 13);
+
+        // Arrow-up again: land on sub-line 0 at col 0 + 2 = 2.
+        dispatch_default(
+            key(KeyModifiers::NONE, KeyCode::Up),
+            &mut tabs,
+            &mut edits,
+            &store,
+            &term,
+        );
+        assert_eq!(tabs.open[0].cursor.line, 0);
+        assert_eq!(tabs.open[0].cursor.col, 2);
+    }
+
+    #[test]
     fn insert_char_advances_cursor_and_bumps_version() {
         let (mut tabs, mut edits, store, term) =
             fixture_with_content("abc\n", Dims { cols: 10, rows: 5 });

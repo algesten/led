@@ -6,3 +6,4 @@ publish = false
 
 [dependencies]
 imbl = { workspace = true }
+ropey = { workspace = true }

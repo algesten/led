@@ -95,7 +95,7 @@ mod tests {
     #[test]
     fn start_seeds_empty_query_and_records_origin() {
         let origin = Cursor { line: 3, col: 7, preferred_col: 7 };
-        let scroll = Scroll { top: 0 };
+        let scroll = Scroll { top: 0, top_sub_line: led_core::SubLine(0) };
         let s = IsearchState::start(origin, scroll, Some("prev".into()));
         assert_eq!(s.query.text, "");
         assert_eq!(s.origin_cursor, origin);

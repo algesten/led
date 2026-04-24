@@ -14,6 +14,7 @@
 //! underneath, different wiring + different native workers.
 
 pub mod config;
+pub mod diag_offer;
 pub mod theme;
 pub mod dispatch;
 pub mod keymap;
@@ -53,7 +54,7 @@ use led_state_isearch::IsearchState;
 use led_state_jumps::JumpListState;
 use led_state_kill_ring::KillRing;
 use led_state_diagnostics::{
-    BufferDiagnostics, BufferVersion, DiagnosticsStates, LspServerStatus, LspStatuses,
+    BufferDiagnostics, DiagnosticsStates, LspServerStatus, LspStatuses,
 };
 use led_state_syntax::{Language, SyntaxState, SyntaxStates};
 use led_state_tabs::{TabId, Tabs};
@@ -196,7 +197,7 @@ pub struct Atoms {
     /// wouldn't run.
     pub lsp_notified: std::collections::HashMap<
         CanonPath,
-        (BufferVersion, /* saved_version */ u64),
+        (/* version */ u64, /* saved_version */ u64),
     >,
     /// `Some(sum)` holds Σ(version + saved_version) at the last
     /// `RequestDiagnostics` emission; `None` means we've never
@@ -325,53 +326,65 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
             // ignores languages it doesn't have a registry entry
             // for, so sending unconditionally is fine.
             if inserted {
-                let version = edits
+                let (version, saved, hash) = edits
                     .buffers
                     .get(&completion.path)
-                    .map(|eb| BufferVersion(eb.version))
+                    .map(|eb| {
+                        (
+                            eb.version,
+                            eb.saved_version,
+                            led_core::EphemeralContentHash::of_rope(&eb.rope).persist(),
+                        )
+                    })
                     .unwrap_or_default();
                 drivers.lsp.execute(std::iter::once(&LspCmd::BufferOpened {
                     path: completion.path.clone(),
                     language: detected,
                     rope: completion.rope.clone(),
-                    version,
+                    hash,
                 }));
-                let saved = edits
-                    .buffers
-                    .get(&completion.path)
-                    .map(|eb| eb.saved_version)
-                    .unwrap_or(0);
                 lsp_notified.insert(completion.path, (version, saved));
             }
         }
 
-        // Apply LSP driver completions. Per `feedback_lsp_no_smear.md`:
-        // accept only when the stamped version matches the buffer's
-        // current version; stale deliveries drop silently. Empty
-        // deliveries clear the atom for that path.
+        // Apply LSP driver completions. Each delivery carries a
+        // `PersistedContentHash` stamped when the pull window
+        // opened (pull) or when the push was cached (push); the
+        // runtime accepts via `diag_offer::offer_diagnostics`
+        // which handles two paths:
+        //   * fast: stamped hash matches the buffer's current
+        //     ephemeral hash verbatim (typical after save with no
+        //     subsequent edits, and after undo rewinds to save).
+        //   * replay: the history holds a save-point marker for
+        //     the stamped hash — we transform diagnostic positions
+        //     forward through the intervening edits (drop
+        //     same-row diagnostics, shift structural), mirroring
+        //     legacy `replay_diagnostics`.
+        // Mismatches drop silently; a later pull re-fetches.
+        // Empty accepted deliveries clear the atom for that path.
         for ev in drivers.lsp.process() {
             match ev {
                 LspEvent::Diagnostics {
                     path,
-                    version,
+                    hash,
                     diagnostics: diags,
                 } => {
-                    let current = edits
-                        .buffers
-                        .get(&path)
-                        .map(|eb| BufferVersion(eb.version))
-                        .unwrap_or_default();
-                    if version != current {
-                        // Stale — drop. Next RequestDiagnostics
-                        // re-pulls against the current version.
+                    let Some(eb) = edits.buffers.get(&path) else {
                         continue;
-                    }
-                    if diags.is_empty() {
+                    };
+                    let transformed = match diag_offer::offer_diagnostics(eb, hash, diags) {
+                        diag_offer::OfferOutcome::Accept(d) => d,
+                        diag_offer::OfferOutcome::Reject => continue,
+                    };
+                    let current_hash =
+                        led_core::EphemeralContentHash::of_rope(&eb.rope).persist();
+                    if transformed.is_empty() {
                         diagnostics.by_path.remove(&path);
                     } else {
-                        diagnostics
-                            .by_path
-                            .insert(path, BufferDiagnostics::new(version, diags));
+                        diagnostics.by_path.insert(
+                            path,
+                            BufferDiagnostics::new(current_hash, transformed),
+                        );
                     }
                 }
                 LspEvent::Ready { server } => {
@@ -430,6 +443,15 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
                         .insert(done.path.clone(), LoadState::Ready(rope));
                     if let Some(eb) = edits.buffers.get_mut(&done.path) {
                         eb.saved_version = eb.saved_version.max(done.version);
+                        // Anchor this save in the undo history so
+                        // late-arriving LSP diagnostics stamped
+                        // with this content hash can still replay
+                        // forward through any edits the user has
+                        // landed since. Direct port of legacy's
+                        // post-save `insert_save_point(doc.content_hash())`.
+                        let hash =
+                            led_core::EphemeralContentHash::of_rope(&eb.rope).persist();
+                        eb.history.insert_save_point(hash);
                     }
                     alerts.clear_warn(&basename);
                     alerts.set_info(format!("Saved {basename}"), Instant::now(), INFO_TTL);
@@ -545,21 +567,21 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
             alerts.set_info(msg, Instant::now(), INFO_TTL);
         }
 
-        // Apply syntax parse completions. The worker echoes the
-        // request's `version`; we drop completions whose version
-        // is older than the current buffer version (a stale parse
-        // from before the user typed more). When a completion
-        // applies, we also lift `in_flight_applied` into
-        // `applied_at_parse` — that's the anchor the painter uses
-        // to rebase tokens through any further edits that arrive
-        // after the parse.
+        // Apply syntax parse completions. The runtime stores the
+        // rope the parse was performed against as `tree_rope` —
+        // the next dispatch ships that back to the worker, which
+        // derives the edit purely from `(prev_rope, curr_rope)`.
+        // No applied-ops counter to drift through undo/redo.
         for done in drivers.syntax.process() {
             let Some(state) = syntax.by_path.get_mut(&done.path) else {
                 continue;
             };
-            let pending_applied = state.in_flight_applied;
-            state.in_flight_version = None;
-            state.in_flight_applied = None;
+            // Only clear `in_flight_version` if this completion
+            // matches what we're waiting on. A stale `v1`
+            // completion mustn't un-gate `v2` still in flight.
+            if state.in_flight_version == Some(done.version) {
+                state.in_flight_version = None;
+            }
             let current_version = edits
                 .buffers
                 .get(&done.path)
@@ -573,19 +595,17 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
             state.tree_rope = Some(done.tree_rope);
             state.tokens = done.tokens;
             state.version = done.version;
-            if let Some(applied) = pending_applied {
-                state.applied_at_parse = applied;
-            }
         }
 
         // Apply clipboard completions: either paste the text at the
         // tab the yank was issued from, or on empty/error fall back
         // to the kill ring. Writes only clear the in-flight bit.
         for done in drivers.clipboard.process() {
+            let content_cols = dispatch::editor_content_cols(terminal, browser);
             match done.result {
                 Ok(ClipboardResult::Text(Some(text))) => {
                     if let Some(target) = clip.pending_yank.take() {
-                        dispatch::apply_yank(tabs, edits, target, &text);
+                        dispatch::apply_yank(tabs, edits, target, &text, content_cols);
                     }
                     clip.read_in_flight = false;
                 }
@@ -595,7 +615,7 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
                     if let Some(target) = clip.pending_yank.take()
                         && let Some(fallback) = kill_ring.latest.clone()
                     {
-                        dispatch::apply_yank(tabs, edits, target, &fallback);
+                        dispatch::apply_yank(tabs, edits, target, &fallback, content_cols);
                     }
                     clip.read_in_flight = false;
                 }
@@ -858,33 +878,13 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
             if state.in_flight_version == Some(eb.version) {
                 continue;
             }
-            // Collect edits between the last completed parse and
-            // the current buffer state, in char-offset form. The
-            // worker replays them against a mutable clone of
-            // `prev_rope` to derive tree-sitter's `InputEdit`
-            // positions; combined with `prev_tree` this enables
-            // incremental parsing (fast, and produces byte-stable
-            // token ranges for untouched regions — no flicker on
-            // rows away from the cursor).
-            let edits_since_prev: Vec<led_driver_syntax_core::RopeEdit> = eb
-                .history
-                .applied_ops()
-                .skip(state.applied_at_parse)
-                .map(|op| match op {
-                    led_state_buffer_edits::EditOp::Insert { at, text } => {
-                        led_driver_syntax_core::RopeEdit::Insert {
-                            char_start: *at,
-                            text: text.clone(),
-                        }
-                    }
-                    led_state_buffer_edits::EditOp::Delete { at, text } => {
-                        led_driver_syntax_core::RopeEdit::Delete {
-                            char_start: *at,
-                            removed_chars: text.chars().count(),
-                        }
-                    }
-                })
-                .collect();
+            // Ship the previous tree + the rope it was parsed
+            // from. The worker derives the edit purely from
+            // `(prev_rope, cmd.rope)` — no history-counter
+            // bookkeeping, so undo/redo can't desynchronise the
+            // tree from the bytes. When `tree_rope` is absent
+            // (first parse, or the previous parse errored),
+            // the worker falls back to a full parse.
             syntax_cmds.push(SyntaxCmd {
                 path: path.clone(),
                 version: eb.version,
@@ -892,10 +892,8 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
                 language: state.language,
                 prev_tree: state.tree.clone(),
                 prev_rope: state.tree_rope.clone(),
-                edits_since_prev,
             });
             state.in_flight_version = Some(eb.version);
-            state.in_flight_applied = Some(eb.history.applied_ops().count());
         }
         if !syntax_cmds.is_empty() {
             drivers.syntax.execute(syntax_cmds.iter());
@@ -921,12 +919,12 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
 
         let mut lsp_cmds: Vec<LspCmd> = Vec::new();
         for (path, eb) in edits.buffers.iter() {
-            let current = BufferVersion(eb.version);
+            let current_version = eb.version;
             let (last_version, last_saved) = lsp_notified
                 .get(path)
                 .copied()
                 .unwrap_or_default();
-            let version_moved = current.0 > last_version.0;
+            let version_moved = current_version > last_version;
             let save_happened = eb.saved_version > last_saved;
             if version_moved || save_happened {
                 // `is_save` = the writer reported this tick
@@ -935,13 +933,14 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
                 // because a pure-save tick (no new edits) still
                 // needs `didSave` → cargo check.
                 let is_save = save_happened && eb.saved_version == eb.version;
+                let hash = led_core::EphemeralContentHash::of_rope(&eb.rope).persist();
                 lsp_cmds.push(LspCmd::BufferChanged {
                     path: path.clone(),
                     rope: eb.rope.clone(),
-                    version: current,
+                    hash,
                     is_save,
                 });
-                lsp_notified.insert(path.clone(), (current, eb.saved_version));
+                lsp_notified.insert(path.clone(), (current_version, eb.saved_version));
             }
         }
         // RequestDiagnostics emission — unified version of
@@ -1302,9 +1301,9 @@ pub(crate) mod trace_adapter {
             &self,
             path: &CanonPath,
             n: usize,
-            version: led_state_diagnostics::BufferVersion,
+            hash: led_core::PersistedContentHash,
         ) {
-            self.0.lsp_diagnostics_done(path, n, version);
+            self.0.lsp_diagnostics_done(path, n, hash);
         }
         fn lsp_mode_fallback(&self) {
             self.0.lsp_mode_fallback();
@@ -1537,7 +1536,6 @@ mod tests {
             language: lang,
             prev_tree: None,
             prev_rope: None,
-            edits_since_prev: Vec::new(),
         };
         drv.execute(std::iter::once(&cmd));
         {

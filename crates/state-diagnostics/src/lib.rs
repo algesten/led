@@ -10,30 +10,33 @@
 //! quiet side: "what diagnostics does buffer X have right now, if
 //! any". The runtime's painter reads from here.
 //!
-//! # Version stamping — hard gate, no smear
+//! # Content-hash stamping + replay
 //!
-//! Each delivery carries a `BufferVersion` — the `eb.version` the
-//! buffer was at when the pull was dispatched. The runtime accepts
-//! a delivery only if the stamped version matches the buffer's
-//! **current** version. Anything else is dropped silently; the
-//! next `RequestDiagnostics` cycle re-pulls against the new
-//! version.
+//! Each delivery carries a `PersistedContentHash` — a hash of the
+//! rope's byte content at the moment the pull was dispatched (or
+//! the push was cached). The runtime accepts a delivery when:
 //!
-//! The painter also hides `BufferDiagnostics` whose `version` no
-//! longer matches the buffer's current version — the gutter
-//! blanks the instant the user edits and fills back in only when
-//! the fresh pull response lands.
+//! - **Fast path**: the stamped hash equals the buffer's current
+//!   ephemeral hash. The rope still holds exactly the bytes the
+//!   server analysed; diagnostics are authoritative.
+//! - **Replay path**: the buffer's history holds a save-point
+//!   marker tagged with the stamped hash. The runtime reconstructs
+//!   the save-time rope by inverting every edit since that marker,
+//!   then walks forward to transform each diagnostic — dropping
+//!   any whose row was touched (content changed, diag is stale)
+//!   and shifting rows on structural edits.
+//! - Otherwise dropped silently; the next `RequestDiagnostics`
+//!   cycle re-pulls against the current hash.
 //!
-//! No rebase. No save-point markers. No replay-through-edits. The
-//! tradeoff is explicit: showing diagnostics for a version the
-//! user has already edited past is actively misleading (it claims
-//! errors on lines that have moved). Invisible is safer than
-//! misleading. Syntax highlighting makes the opposite choice
-//! because slightly-wrong colour beats flicker; diagnostics
-//! because slightly-wrong error markers don't.
+//! Why hash, not a monotonic version? Typing and then deleting
+//! restores the original hash. A late cargo-check push for the
+//! pre-typing content still lines up with the buffer and the
+//! runtime can accept it or cleanly replay through the typing.
+//! A counter-based version can never travel backwards, so late
+//! deliveries after any undo-style round-trip are lost.
 
 use imbl::HashMap;
-use led_core::CanonPath;
+use led_core::{CanonPath, PersistedContentHash};
 
 // ── Domain types (ABI-shared between driver-lsp-core + runtime) ──
 
@@ -66,20 +69,13 @@ pub struct Diagnostic {
     pub code: Option<String>,
 }
 
-/// Monotonic buffer version at pull-dispatch time. Same numeric
-/// space as `led_state_buffer_edits::EditedBuffer::version`.
-/// Wrapped so a stale stamp can't be confused with any other
-/// `u64` counter in the codebase.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub struct BufferVersion(pub u64);
-
 // ── Atom ──
 
 /// Per-buffer diagnostics, keyed by canonical path. Populated by
 /// the runtime when it accepts an [`LspEvent::Diagnostics`]
-/// delivery whose stamped version is still reachable from the
-/// current buffer state; cleared when the buffer closes or the
-/// set becomes empty.
+/// delivery whose stamped hash matches the buffer's current hash
+/// (fast path) or a save-point (replay path); cleared when the
+/// buffer closes or the set becomes empty.
 ///
 /// Wrapped in `imbl::HashMap` for the usual pointer-clone
 /// cheap-equality discipline — painter memos only re-render when
@@ -89,13 +85,13 @@ pub struct DiagnosticsStates {
     pub by_path: HashMap<CanonPath, BufferDiagnostics>,
 }
 
-/// One buffer's diagnostic roster plus the version the roster was
-/// computed against. The painter renders these ONLY when the
-/// stored version equals the buffer's current version — see the
-/// module docs for the "no smear" rationale.
+/// One buffer's diagnostic roster plus the content hash the
+/// roster was computed against. The painter renders these ONLY
+/// when the stored hash matches the buffer's current hash — see
+/// the module docs for the content-hash rationale.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct BufferDiagnostics {
-    pub version: BufferVersion,
+    pub hash: PersistedContentHash,
     pub diagnostics: Vec<Diagnostic>,
 }
 
@@ -140,11 +136,8 @@ impl LspStatuses {
 }
 
 impl BufferDiagnostics {
-    pub fn new(version: BufferVersion, diagnostics: Vec<Diagnostic>) -> Self {
-        Self {
-            version,
-            diagnostics,
-        }
+    pub fn new(hash: PersistedContentHash, diagnostics: Vec<Diagnostic>) -> Self {
+        Self { hash, diagnostics }
     }
 
     /// Count diagnostics matching a given severity — used by the
@@ -178,7 +171,7 @@ mod tests {
     #[test]
     fn count_per_severity() {
         let b = BufferDiagnostics::new(
-            BufferVersion(7),
+            PersistedContentHash(7),
             vec![
                 diag(DiagnosticSeverity::Error),
                 diag(DiagnosticSeverity::Error),
@@ -193,9 +186,9 @@ mod tests {
     }
 
     #[test]
-    fn default_is_empty_at_version_zero() {
+    fn default_is_empty_at_hash_zero() {
         let b = BufferDiagnostics::default();
         assert!(b.is_empty());
-        assert_eq!(b.version, BufferVersion(0));
+        assert_eq!(b.hash, PersistedContentHash(0));
     }
 }

@@ -554,6 +554,7 @@ name = "led-core"
 version = "0.0.0"
 dependencies = [
  "imbl",
+ "ropey",
 ]
 
 [[package]]

@@ -3,10 +3,13 @@
 //! Crossterm-specific: a background thread that polls
 //! `crossterm::event::read`, translates crossterm events to the
 //! `TermEvent` mirror types in `*-core`, and forwards them via mpsc.
-//! Also the `paint` free function (ANSI escape emitter) and the
-//! `RawModeGuard` RAII (raw mode + alternate screen). On mobile
-//! platforms nothing from this crate applies; a different UI driver
-//! takes over entirely.
+//! Also the `paint` free function (writes cells into a [`Buffer`])
+//! and the `RawModeGuard` RAII (raw mode + alternate screen). On
+//! mobile platforms nothing from this crate applies; a different UI
+//! driver takes over entirely.
+
+mod buffer;
+mod render;
 
 use std::io::{self, Write};
 use std::sync::mpsc::{self, Sender};
@@ -23,6 +26,8 @@ use led_driver_terminal_core::{
     PopoverSeverity, Rect, SidePanelModel, StatusBarModel, Style, TabBarModel, TermEvent,
     Theme, TerminalInputDriver, Trace,
 };
+
+use buffer::Buffer;
 
 #[cfg(test)]
 use led_driver_terminal_core::{Layout, SidePanelRow};
@@ -139,24 +144,91 @@ fn translate_mods(m: CtKeyModifiers) -> KeyModifiers {
 /// the runtime itself. Now it lives here like every other driver.
 pub struct TerminalOutputDriver {
     trace: Arc<dyn Trace>,
+    /// `LED_PAINT_LOG=<path>` — when set, every frame's emitted
+    /// bytes (post-diff) are appended here with a `=== FRAME N ===`
+    /// delimiter. Debug aid for diagnosing paint flicker.
+    log: Option<std::sync::Mutex<PaintLog>>,
+    /// Double-buffered cell grid that mirrors the terminal's visible
+    /// contents. Each `execute`:
+    ///
+    ///   1. Resizes both buffers + clears the real terminal when
+    ///      `frame.dims` changes.
+    ///   2. Paints the new frame into `buffers[current]`.
+    ///   3. Computes `buffer::diff(prev, current)` — the minimal
+    ///      per-cell update list — and streams it through
+    ///      `render::draw_diff` to the real terminal.
+    ///   4. Swaps `current = 1 - current` so next frame writes into
+    ///      the now-unused buffer and diffs against the one we just
+    ///      painted.
+    ///
+    /// Paint functions write cells by `(row, col)` so there's no
+    /// `Clear(UntilNewLine)` to worry about; each cell's state is
+    /// always explicit. Idle frames produce an empty diff and zero
+    /// output bytes.
+    ///
+    /// `Mutex` because the driver is `&self` in execute; only the
+    /// main loop paints today, but the trait requires interior
+    /// mutability for the shared reference pattern.
+    state: std::sync::Mutex<RenderState>,
+}
+
+struct PaintLog {
+    file: std::fs::File,
+    frame_n: u64,
+}
+
+struct RenderState {
+    /// Two buffers; `current` is the one paint writes into this
+    /// frame, `1 - current` holds the previous frame (what the
+    /// terminal currently shows). Swap is an index flip — no alloc,
+    /// no clone.
+    buffers: [Buffer; 2],
+    current: usize,
+    dims: Dims,
+}
+
+impl RenderState {
+    fn new() -> Self {
+        // Seed with 0x0 — the first `execute` will resize to the
+        // real terminal dims before painting, which will also emit
+        // `Clear(All)` so the real screen matches.
+        let dims = Dims { cols: 0, rows: 0 };
+        Self {
+            buffers: [Buffer::new(0, 0), Buffer::new(0, 0)],
+            current: 0,
+            dims,
+        }
+    }
 }
 
 impl TerminalOutputDriver {
     pub fn new(trace: Arc<dyn Trace>) -> Self {
-        Self { trace }
+        let log = std::env::var_os("LED_PAINT_LOG").and_then(|p| {
+            std::fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(true)
+                .open(&p)
+                .ok()
+                .map(|file| std::sync::Mutex::new(PaintLog { file, frame_n: 0 }))
+        });
+        Self {
+            trace,
+            log,
+            state: std::sync::Mutex::new(RenderState::new()),
+        }
     }
 
-    /// Paint a frame to `out`, skipping regions that match
-    /// `last_frame`. The `execute` name matches the shape every
-    /// other driver uses: a sync entry that accepts intent and
-    /// performs the I/O.
+    /// Paint a frame to `out` using a double-buffered cell diff.
     ///
-    /// Regions compared: `side_panel`, `body`, `tab_bar`,
-    /// `status_bar`. Each is `Arc`-wrapped so `PartialEq` is a
-    /// pointer check when the memo cache hit. Held-key scroll only
-    /// mutates `body` + `status_bar`; skipping the sidebar + tab
-    /// bar + border drops ~150 crossterm ops per frame, which is
-    /// where the stutter came from.
+    /// `last` still feeds the paint function's own component-level
+    /// dirty-diffing (skip `paint_side_panel` when Arc ptrs match,
+    /// etc.) — that keeps paint cheap on idle scroll. The cell-grid
+    /// diff then guarantees the emitted byte stream contains only
+    /// cells that actually changed, regardless of what paint decided
+    /// to re-render. On skipped regions the cells simply retain
+    /// their previous-frame values (paint only overwrites what it
+    /// touches), and the diff correctly finds no changes there.
     pub fn execute<W: Write>(
         &self,
         frame: &Frame,
@@ -164,27 +236,131 @@ impl TerminalOutputDriver {
         theme: &Theme,
         out: &mut W,
     ) -> io::Result<()> {
+        use crossterm::{cursor, queue, terminal};
+
         self.trace.render_tick();
-        paint(frame, last, theme, out)
+
+        let mut state = self.state.lock().expect("render state poisoned");
+
+        // Resize path: blow away both buffers + clear the real
+        // terminal so our mirror and the visible grid match again.
+        // A resize implies every cell needs repainting, which the
+        // diff against the freshly-blanked `prev` buffer gives us
+        // for free.
+        let resized = frame.dims != state.dims;
+        if resized {
+            state.buffers[0].resize(frame.dims.rows, frame.dims.cols);
+            state.buffers[1].resize(frame.dims.rows, frame.dims.cols);
+            state.dims = frame.dims;
+            queue!(
+                out,
+                terminal::Clear(terminal::ClearType::All),
+                cursor::MoveTo(0, 0),
+            )?;
+        }
+
+        // Partial-paint bookkeeping: the paint function only
+        // overwrites cells in regions that actually changed. For
+        // skipped regions the cells in `current` must already hold
+        // the previous frame's values — otherwise the diff would
+        // see blanks where the body was last frame.
+        //
+        // We maintain that invariant by copying `prev` into
+        // `current` before paint. A resize blanks both buffers,
+        // which also falls out of the copy: the source is the
+        // freshly-blanked `prev`, so `current` ends up blank too
+        // and the forced full repaint writes every cell.
+        //
+        // On resize we force a full repaint by treating `last` as
+        // `None`: the prior frame's regions may have been at
+        // different coordinates, so per-region dirty-diffing can't
+        // be trusted.
+        let current_idx = state.current;
+        let log_bytes: Option<Vec<u8>> = {
+            // Split-borrow so we can copy prev → current without
+            // cloning the whole Vec. `split_at_mut` yields disjoint
+            // mutable refs to the two buffer slots.
+            let (a, b) = state.buffers.split_at_mut(1);
+            let (current_buf, prev_buf) = if current_idx == 0 {
+                (&mut a[0], &b[0])
+            } else {
+                (&mut b[0], &a[0])
+            };
+            current_buf.copy_from(prev_buf);
+
+            let effective_last = if resized { None } else { last };
+            paint(frame, effective_last, theme, current_buf);
+
+            // Compute the minimal cell update list prev → current
+            // and stream it to the real terminal. When LED_PAINT_LOG
+            // is set, tee the output into a Vec<u8> so we can also
+            // write it to the log file after flushing.
+            let d = buffer::diff(prev_buf, current_buf);
+
+            if self.log.is_some() {
+                let mut capture: Vec<u8> = Vec::with_capacity(1024);
+                render::draw_diff(&d, &mut capture)?;
+                out.write_all(&capture)?;
+                Some(capture)
+            } else {
+                render::draw_diff(&d, out)?;
+                None
+            }
+        };
+
+        // Re-emit the frame's intended cursor placement (or a Hide
+        // when there's nothing to show) so the user's caret lines
+        // up with the rendered grid. `draw_diff` leaves the cursor
+        // wherever the last cell write landed; we always place it
+        // explicitly here.
+        match frame.cursor {
+            Some((col, row)) => {
+                queue!(out, cursor::MoveTo(col, row), cursor::Show)?;
+            }
+            None => {
+                queue!(out, cursor::Hide)?;
+            }
+        }
+
+        out.flush()?;
+
+        if let Some(log) = &self.log {
+            if let Ok(mut g) = log.lock() {
+                g.frame_n += 1;
+                let header = format!("\n=== FRAME {} ===\n", g.frame_n);
+                let _ = g.file.write_all(header.as_bytes());
+                if let Some(bytes) = &log_bytes {
+                    let _ = g.file.write_all(bytes);
+                }
+                let _ = g.file.flush();
+            }
+        }
+
+        // Swap buffers: next frame writes into the one we just used
+        // as `prev`, and diffs against what we just emitted.
+        state.current = 1 - state.current;
+
+        Ok(())
     }
 }
 
 // ── Painter ────────────────────────────────────────────────────────────
 
 /// Paint the regions of `frame` that differ from `last` (or all of
-/// them on first paint / layout change). At 120×40 a full repaint
-/// is ~4800 cells; dirty-diffing avoids that cost on tight scroll
-/// loops where only the body + status line change.
-pub fn paint(
+/// them on first paint / layout change) into `buf`. At 120×40 a
+/// full repaint touches ~4800 cells; dirty-diffing avoids that cost
+/// on tight scroll loops where only the body + status line change.
+///
+/// Skipped regions retain whatever cells `buf` already carried from
+/// the previous frame — the driver's double-buffer swap means `buf`
+/// comes in holding the last-frame snapshot of every cell, so the
+/// downstream cell diff correctly finds no changes there.
+pub(crate) fn paint(
     frame: &Frame,
     last: Option<&Frame>,
     theme: &Theme,
-    out: &mut impl Write,
-) -> io::Result<()> {
-    use crossterm::{cursor, queue};
-
-    queue!(out, cursor::Hide)?;
-
+    buf: &mut Buffer,
+) {
     // Layout change (resize, sidebar toggle) invalidates every
     // region — repaint in full. Otherwise diff sub-components.
     let layout_same = last.is_some_and(|l| l.layout == frame.layout);
@@ -194,13 +370,13 @@ pub fn paint(
         || last.map(|l| l.layout.side_area) != Some(frame.layout.side_area)
     {
         if let (Some(panel), Some(area)) = (&frame.side_panel, frame.layout.side_area) {
-            paint_side_panel(panel, area, theme, out)?;
+            paint_side_panel(panel, area, theme, buf);
         }
         // Border is layout-derived; repaint whenever layout changes
         // or when we're repainting the side panel anyway.
         if let Some(x) = frame.layout.side_border_x {
             let rows = frame.layout.editor_area.rows + frame.layout.tab_bar.rows;
-            paint_side_border(x, rows, theme, out)?;
+            paint_side_border(x, rows, theme, buf);
         }
     }
 
@@ -210,114 +386,87 @@ pub fn paint(
     let popover_changed = last.map(|l| &l.popover) != Some(&frame.popover);
 
     if force || popover_changed || last.map(|l| &l.body) != Some(&frame.body) {
-        paint_body(&frame.body, frame.layout.editor_area, theme, out)?;
+        paint_body(&frame.body, frame.layout.editor_area, theme, buf);
     }
 
+    // Paint ORDER matters: popover is drawn AFTER body so it
+    // overlays. With the Buffer model the last write wins per cell,
+    // so the popover's cells correctly sit on top of the body.
     if let Some(pop) = &frame.popover {
-        paint_popover(pop, frame.layout.editor_area, frame.dims, theme, out)?;
+        paint_popover(pop, frame.layout.editor_area, frame.dims, theme, buf);
     }
 
     if force || last.map(|l| &l.tab_bar) != Some(&frame.tab_bar) {
-        paint_tab_bar(&frame.tab_bar, frame.layout.tab_bar, theme, out)?;
+        paint_tab_bar(&frame.tab_bar, frame.layout.tab_bar, theme, buf);
     }
 
     if force || last.map(|l| &l.status_bar) != Some(&frame.status_bar) {
-        paint_status_bar(&frame.status_bar, frame.layout.status_bar, theme, out)?;
+        paint_status_bar(&frame.status_bar, frame.layout.status_bar, theme, buf);
     }
-
-    // Cursor placement last, on top of the finished frame. The
-    // per-frame `Hide` above prevents flicker while drawing; the
-    // trailing `Show` + `MoveTo` puts the cursor exactly where
-    // `render_frame` wants it, or leaves it hidden if the active
-    // view has no cursor (no content loaded, scrolled away, etc.).
-    if let Some((col, row)) = frame.cursor {
-        queue!(out, cursor::MoveTo(col, row), cursor::Show)?;
-    }
-    out.flush()
 }
 
-fn paint_tab_bar(
-    bar: &TabBarModel,
-    area: Rect,
-    theme: &Theme,
-    out: &mut impl Write,
-) -> io::Result<()> {
-    use crossterm::{cursor, queue, style, terminal};
-
+fn paint_tab_bar(bar: &TabBarModel, area: Rect, theme: &Theme, buf: &mut Buffer) {
     // Tab bar at the bottom of the editor area: second-to-last row.
     // Matches legacy led's ratatui layout + the goldens.
-    queue!(out, cursor::MoveTo(area.x, area.y))?;
-    let mut col: u16 = 0;
+    let row = area.y;
+    let mut col = area.x;
+    let right_edge = area.x.saturating_add(area.cols);
     for (i, label) in bar.labels.iter().enumerate() {
+        if col >= right_edge {
+            break;
+        }
         let active = bar.active == Some(i);
         let style = if active {
-            &theme.tab_active
+            theme.tab_active
         } else {
-            &theme.tab_inactive
+            theme.tab_inactive
         };
-        apply_style(out, style)?;
-        // No `format!(" {label} ")` — three Prints go straight through
-        // crossterm's buffered writer with zero allocation.
-        queue!(
-            out,
-            style::Print(" "),
-            style::Print(label),
-            style::Print(" ")
-        )?;
-        reset_style(out, style)?;
-        col = col.saturating_add(label.chars().count().saturating_add(2) as u16);
-        if col >= area.cols {
+        col = buf.put_str(row, col, " ", style);
+        col = buf.put_str(row, col, label, style);
+        col = buf.put_str(row, col, " ", style);
+        if col >= right_edge {
             break;
         }
     }
-    queue!(out, terminal::Clear(terminal::ClearType::UntilNewLine))?;
-    Ok(())
+    // Blank the rest of the row at the terminal default — matches
+    // the old `Clear(UntilNewLine)`.
+    buf.fill_row(row, col, right_edge, Style::default());
 }
 
-fn paint_status_bar(
-    s: &StatusBarModel,
-    area: Rect,
-    theme: &Theme,
-    out: &mut impl Write,
-) -> io::Result<()> {
-    use crossterm::{cursor, queue, style, terminal};
+fn paint_status_bar(s: &StatusBarModel, area: Rect, theme: &Theme, buf: &mut Buffer) {
+    let row = area.y;
+    let mut col = area.x;
+    let right_edge = area.x.saturating_add(area.cols);
 
-    queue!(out, cursor::MoveTo(area.x, area.y))?;
-
-    // Row-wide styling — set once before the first print, reset
-    // after. `status_normal` lets themers tint the happy-path bar
-    // too; the default is unstyled so unthemed goldens don't move.
+    // Row-wide styling — set on every painted cell. `status_normal`
+    // lets themers tint the happy-path bar too; the default is
+    // unstyled so unthemed goldens don't move.
     let row_style = if s.is_warn {
-        &theme.status_warn
+        theme.status_warn
     } else {
-        &theme.status_normal
+        theme.status_normal
     };
-    apply_style(out, row_style)?;
 
     let cols = area.cols as usize;
     let left_cols = s.left.chars().count().min(cols);
     let right_cols = s.right.chars().count().min(cols - left_cols);
     let pad = cols - left_cols - right_cols;
 
-    queue!(out, style::Print(s.left.as_ref()))?;
+    col = buf.put_str(row, col, s.left.as_ref(), row_style);
     for _ in 0..pad {
-        queue!(out, style::Print(" "))?;
+        if col >= right_edge {
+            break;
+        }
+        col = buf.put_str(row, col, " ", row_style);
     }
-    queue!(out, style::Print(s.right.as_ref()))?;
-
-    reset_style(out, row_style)?;
-    queue!(out, terminal::Clear(terminal::ClearType::UntilNewLine))?;
-    Ok(())
+    col = buf.put_str(row, col, s.right.as_ref(), row_style);
+    // Any trailing width gets blanked with the row's background
+    // style so a short right-side string still has the bar tint
+    // carry to the edge.
+    buf.fill_row(row, col, right_edge, row_style);
 }
 
-fn paint_body(
-    body: &BodyModel,
-    area: Rect,
-    theme: &Theme,
-    out: &mut impl Write,
-) -> io::Result<()> {
-    use crossterm::{cursor, queue, style, terminal};
-
+fn paint_body(body: &BodyModel, area: Rect, theme: &Theme, buf: &mut Buffer) {
     let ruler = theme
         .ruler_column
         .filter(|c| *c < area.cols)
@@ -328,8 +477,11 @@ fn paint_body(
         _ => None,
     };
 
+    let right_edge = area.x.saturating_add(area.cols);
+
     for row in 0..area.rows {
-        queue!(out, cursor::MoveTo(area.x, area.y + row))?;
+        let buf_row = area.y + row;
+        let mut col = area.x;
         // Resolve the row's text + (for Content) syntax spans +
         // gutter-diagnostic severity + inline underlines. Non-
         // Content variants carry none of the extras.
@@ -365,12 +517,14 @@ fn paint_body(
         };
         if let Some(line) = line {
             if spans.is_empty() {
-                queue!(out, style::Print(line))?;
+                col = buf.put_str(buf_row, col, line, Style::default());
             } else {
-                paint_syntax_line(line, spans, &theme.syntax, out)?;
+                col = paint_syntax_line(line, spans, &theme.syntax, buf_row, col, buf);
             }
         }
-        queue!(out, terminal::Clear(terminal::ClearType::UntilNewLine))?;
+        // Blank the rest of the row at terminal default — matches
+        // the old `Clear(UntilNewLine)`.
+        buf.fill_row(buf_row, col, right_edge, Style::default());
 
         // Diagnostic gutter marker: a single ● in gutter col 1
         // (the second of the two gutter cells — matches legacy
@@ -378,11 +532,8 @@ fn paint_body(
         // after the row text so it's not clobbered by syntax
         // styling.
         if let Some(severity) = gutter_diag {
-            let style = severity_style(&theme.diagnostics, severity);
-            queue!(out, cursor::MoveTo(area.x + 1, area.y + row))?;
-            apply_style(out, style)?;
-            queue!(out, style::Print("●"))?;
-            reset_style(out, style)?;
+            let style = *severity_style(&theme.diagnostics, severity);
+            buf.put_char(buf_row, area.x + 1, '●', style);
         }
 
         // Diagnostic underlines: for each row-diagnostic, overpaint
@@ -392,24 +543,19 @@ fn paint_body(
                 continue;
             }
             let Some(line) = line else { continue };
-            let slice: String = line
-                .chars()
-                .skip(d.col_start as usize)
-                .take((d.col_end - d.col_start) as usize)
-                .collect();
-            if slice.is_empty() {
-                continue;
-            }
             let base = *severity_style(&theme.diagnostics, d.severity);
             let mut underlined = base;
             underlined.attrs.underline = true;
-            queue!(
-                out,
-                cursor::MoveTo(area.x + d.col_start, area.y + row)
-            )?;
-            apply_style(out, &underlined)?;
-            queue!(out, style::Print(slice))?;
-            reset_style(out, &underlined)?;
+            let start_col = area.x + d.col_start;
+            let take = (d.col_end - d.col_start) as usize;
+            let mut c = start_col;
+            for ch in line.chars().skip(d.col_start as usize).take(take) {
+                if c >= right_edge {
+                    break;
+                }
+                buf.put_char(buf_row, c, ch, underlined);
+                c = c.saturating_add(1);
+            }
         }
 
         // File-search match highlight: a single run of cells inside
@@ -422,19 +568,15 @@ fn paint_body(
             && let Some(line) = line
             && mh.col_end > mh.col_start
         {
-            let matched: String = line
-                .chars()
-                .skip(mh.col_start as usize)
-                .take((mh.col_end - mh.col_start) as usize)
-                .collect();
-            if !matched.is_empty() {
-                queue!(
-                    out,
-                    cursor::MoveTo(area.x + mh.col_start, area.y + row)
-                )?;
-                apply_style(out, &theme.search_match)?;
-                queue!(out, style::Print(matched))?;
-                reset_style(out, &theme.search_match)?;
+            let start_col = area.x + mh.col_start;
+            let take = (mh.col_end - mh.col_start) as usize;
+            let mut c = start_col;
+            for ch in line.chars().skip(mh.col_start as usize).take(take) {
+                if c >= right_edge {
+                    break;
+                }
+                buf.put_char(buf_row, c, ch, theme.search_match);
+                c = c.saturating_add(1);
             }
         }
 
@@ -443,21 +585,17 @@ fn paint_body(
         // that column the original character keeps its slot and
         // picks up the ruler style; otherwise we print a plain
         // space so the ruler renders as a vertical stripe.
-        if let Some(col) = ruler {
+        if let Some(rc) = ruler {
             let glyph: char = line
-                .and_then(|l| l.chars().nth(col as usize))
+                .and_then(|l| l.chars().nth(rc as usize))
                 .unwrap_or(' ');
-            queue!(out, cursor::MoveTo(area.x + col, area.y + row))?;
-            apply_style(out, &theme.ruler)?;
-            // Skip repainting zero-width / control chars — safer to
-            // fall back to a plain space than emit something that
-            // might push the cursor.
+            // Skip zero-width / control chars — safer to fall back
+            // to a plain space than emit something that might push
+            // the cursor.
             let painted = if glyph.is_control() { ' ' } else { glyph };
-            queue!(out, style::Print(painted))?;
-            reset_style(out, &theme.ruler)?;
+            buf.put_char(buf_row, area.x + rc, painted, theme.ruler);
         }
     }
-    Ok(())
 }
 
 /// Draw the cursor-line diagnostic popover — a floating box anchored
@@ -469,12 +607,10 @@ fn paint_popover(
     editor_area: Rect,
     dims: Dims,
     theme: &Theme,
-    out: &mut impl Write,
-) -> io::Result<()> {
-    use crossterm::{cursor, queue, style};
-
+    buf: &mut Buffer,
+) {
     if pop.lines.is_empty() {
-        return Ok(());
+        return;
     }
 
     // Max content width across all non-rule lines; rule lines take
@@ -514,44 +650,34 @@ fn paint_popover(
 
     // Guard: never overflow the physical terminal.
     if x >= dims.cols || y >= dims.rows {
-        return Ok(());
+        return;
     }
     let outer_w = outer_w.min((dims.cols.saturating_sub(x)) as usize);
     if outer_w < 3 {
-        return Ok(());
+        return;
     }
     let height = height.min((dims.rows.saturating_sub(y)) as usize);
     if height == 0 {
-        return Ok(());
+        return;
     }
 
     let bg = Color::Indexed(236); // dark gray, matches legacy
-    let pad_blank: String = " ".repeat(outer_w.saturating_sub(2));
 
     for (i, line) in lines.iter().take(height).enumerate() {
-        queue!(out, cursor::MoveTo(x, y + i as u16))?;
+        let row = y + i as u16;
+        let mut col = x;
         match line.severity {
             None => {
                 // Horizontal rule: fill outer width with ─.
                 let fg = Color::Indexed(245);
-                apply_style(
-                    out,
-                    &Style {
-                        fg: Some(fg),
-                        bg: Some(bg),
-                        attrs: Attrs::default(),
-                    },
-                )?;
-                let rule: String = "─".repeat(outer_w);
-                queue!(out, style::Print(rule))?;
-                reset_style(
-                    out,
-                    &Style {
-                        fg: Some(fg),
-                        bg: Some(bg),
-                        attrs: Attrs::default(),
-                    },
-                )?;
+                let rule_style = Style {
+                    fg: Some(fg),
+                    bg: Some(bg),
+                    attrs: Attrs::default(),
+                };
+                for _ in 0..outer_w {
+                    col = buf.put_str(row, col, "─", rule_style);
+                }
             }
             Some(sev) => {
                 let sev_style = match sev {
@@ -565,43 +691,35 @@ fn paint_popover(
                     bg: Some(bg),
                     attrs: sev_style.attrs,
                 };
-                apply_style(out, &style)?;
                 // Clip text to inner width (outer_w - 2), then
                 // right-pad with spaces so the box fills even when
                 // the message is shorter than the widest line.
                 let inner_w = outer_w.saturating_sub(2);
-                let clipped: String = line.text.chars().take(inner_w).collect();
-                let pad = inner_w.saturating_sub(clipped.chars().count());
-                queue!(
-                    out,
-                    style::Print(" "),
-                    style::Print(&clipped),
-                    style::Print(&pad_blank[..pad]),
-                    style::Print(" "),
-                )?;
-                reset_style(out, &style)?;
+                col = buf.put_str(row, col, " ", style);
+                let mut written = 0usize;
+                for ch in line.text.chars().take(inner_w) {
+                    buf.put_char(row, col, ch, style);
+                    col = col.saturating_add(1);
+                    written += 1;
+                }
+                for _ in written..inner_w {
+                    buf.put_char(row, col, ' ', style);
+                    col = col.saturating_add(1);
+                }
+                buf.put_str(row, col, " ", style);
             }
         }
     }
-
-    Ok(())
 }
 
-fn paint_side_panel(
-    panel: &SidePanelModel,
-    area: Rect,
-    theme: &Theme,
-    out: &mut impl Write,
-) -> io::Result<()> {
-    use crossterm::{cursor, queue, style};
+fn paint_side_panel(panel: &SidePanelModel, area: Rect, theme: &Theme, buf: &mut Buffer) {
     use led_driver_terminal_core::SidePanelMode;
 
     let cols = area.cols as usize;
-    // Reused across rows so empty rows don't allocate.
-    let blanks: String = " ".repeat(cols);
 
     for row in 0..area.rows {
-        queue!(out, cursor::MoveTo(area.x, area.y + row))?;
+        let buf_row = area.y + row;
+        let row_x = area.x;
         // File-search mode: row 0 is the toggle header. Paint it
         // with per-glyph styling so users can tell which of
         // `Aa` / `.*` / `=>` are on, then skip the usual row-print
@@ -614,13 +732,15 @@ fn paint_side_panel(
             } = panel.mode
         {
             paint_file_search_header(
+                row_x,
+                buf_row,
                 cols,
                 case_sensitive,
                 use_regex,
                 replace_mode,
                 theme,
-                out,
-            )?;
+                buf,
+            );
             continue;
         }
         if let Some(entry) = panel.rows.get(row as usize) {
@@ -664,6 +784,7 @@ fn paint_side_panel(
                 let truncated: String = line.chars().take(name_width).collect();
                 line = truncated;
             }
+            let name_end_col = row_x + name_width as u16;
             if entry.selected {
                 // Selection + category composition (legacy
                 // display.rs:1381-1389):
@@ -687,22 +808,26 @@ fn paint_side_panel(
                 } else {
                     base_sel
                 };
-                apply_style(out, &sel_style)?;
-                queue!(out, style::Print(&line))?;
-                reset_style(out, &sel_style)?;
+                buf.put_str(buf_row, row_x, &line, sel_style);
             } else if entry.replaced {
                 // Replaced hit rows stay visible so the user can
                 // Left-arrow back onto them to undo. Paint them
                 // with the dim `search_hit_replaced` style so the
                 // distinction is obvious.
-                apply_style(out, &theme.search_hit_replaced)?;
-                queue!(out, style::Print(&line))?;
-                reset_style(out, &theme.search_hit_replaced)?;
+                buf.put_str(buf_row, row_x, &line, theme.search_hit_replaced);
             } else if let Some((start, end)) = entry.match_range {
-                // Split into three prints so the matched substring
-                // picks up `theme.search_match` styling without
-                // disturbing the surrounding row.
-                paint_row_with_match(&line, start as usize, end as usize, theme, out)?;
+                // Split into three styled runs so the matched
+                // substring picks up `theme.search_match` styling
+                // without disturbing the surrounding row.
+                paint_row_with_match(
+                    &line,
+                    start as usize,
+                    end as usize,
+                    theme,
+                    buf_row,
+                    row_x,
+                    buf,
+                );
             } else if let Some(status) = entry.status {
                 // Category colouring: the whole name is painted in
                 // the category's theme style so the user spots the
@@ -710,11 +835,9 @@ fn paint_side_panel(
                 // Matches legacy display.rs:1387-1391 ("marker_style
                 // as the row colour when not selected").
                 let marker = theme.category_style(status.category);
-                apply_style(out, &marker)?;
-                queue!(out, style::Print(&line))?;
-                reset_style(out, &marker)?;
+                buf.put_str(buf_row, row_x, &line, marker);
             } else {
-                queue!(out, style::Print(&line))?;
+                buf.put_str(buf_row, row_x, &line, Style::default());
             }
 
             // Status letter in the right-most column (Browser mode
@@ -732,14 +855,10 @@ fn paint_side_panel(
                             } else {
                                 theme.browser_selected_unfocused
                             };
-                            apply_style(out, &sel_style)?;
-                            queue!(out, style::Print(status.letter))?;
-                            reset_style(out, &sel_style)?;
+                            buf.put_char(buf_row, name_end_col, status.letter, sel_style);
                         } else {
                             let marker = theme.category_style(status.category);
-                            apply_style(out, &marker)?;
-                            queue!(out, style::Print(status.letter))?;
-                            reset_style(out, &marker)?;
+                            buf.put_char(buf_row, name_end_col, status.letter, marker);
                         }
                     }
                     None => {
@@ -752,25 +871,21 @@ fn paint_side_panel(
                             } else {
                                 theme.browser_selected_unfocused
                             };
-                            apply_style(out, &sel_style)?;
-                            queue!(out, style::Print(' '))?;
-                            reset_style(out, &sel_style)?;
+                            buf.put_char(buf_row, name_end_col, ' ', sel_style);
                         } else {
-                            queue!(out, style::Print(' '))?;
+                            buf.put_char(buf_row, name_end_col, ' ', Style::default());
                         }
                     }
                 }
             }
         } else {
-            // Print `cols` spaces — scoped to the side-panel area.
+            // Fill `cols` spaces — scoped to the side-panel area.
             // NOT `Clear(UntilNewLine)`: that would wipe the body
-            // columns too, and because `paint_body` is skipped on
-            // cache-hit (body Arc unchanged) the blanked cells would
-            // stay blank until something else forces a body repaint.
-            queue!(out, style::Print(&blanks))?;
+            // columns too. With the cell-grid model we can just
+            // blank the panel's cells directly.
+            buf.fill_row(buf_row, row_x, row_x + cols as u16, Style::default());
         }
     }
-    Ok(())
 }
 
 /// Split-print a non-selected hit row so the matched substring
@@ -783,44 +898,34 @@ fn paint_row_with_match(
     start: usize,
     end: usize,
     theme: &Theme,
-    out: &mut impl Write,
-) -> io::Result<()> {
-    use crossterm::{queue, style};
+    row: u16,
+    col_start: u16,
+    buf: &mut Buffer,
+) {
     let total = line.chars().count();
     let start = start.min(total);
     let end = end.min(total).max(start);
     if end == start {
-        queue!(out, style::Print(line))?;
-        return Ok(());
+        buf.put_str(row, col_start, line, Style::default());
+        return;
     }
     let prefix: String = line.chars().take(start).collect();
     let matched: String = line.chars().skip(start).take(end - start).collect();
     let suffix: String = line.chars().skip(end).collect();
+    let mut col = col_start;
     if !prefix.is_empty() {
-        queue!(out, style::Print(prefix))?;
+        col = buf.put_str(row, col, &prefix, Style::default());
     }
-    apply_style(out, &theme.search_match)?;
-    queue!(out, style::Print(matched))?;
-    reset_style(out, &theme.search_match)?;
+    col = buf.put_str(row, col, &matched, theme.search_match);
     if !suffix.is_empty() {
-        queue!(out, style::Print(suffix))?;
+        buf.put_str(row, col, &suffix, Style::default());
     }
-    Ok(())
 }
 
-fn paint_side_border(
-    x: u16,
-    rows: u16,
-    theme: &Theme,
-    out: &mut impl Write,
-) -> io::Result<()> {
-    use crossterm::{cursor, queue, style};
-    apply_style(out, &theme.browser_border)?;
+fn paint_side_border(x: u16, rows: u16, theme: &Theme, buf: &mut Buffer) {
     for row in 0..rows {
-        queue!(out, cursor::MoveTo(x, row), style::Print("\u{2502}"))?; // │
+        buf.put_char(row, x, '\u{2502}', theme.browser_border); // │
     }
-    reset_style(out, &theme.browser_border)?;
-    Ok(())
 }
 
 /// File-search header row. Prints `" Aa   .*   =>"` with each of
@@ -829,18 +934,20 @@ fn paint_side_border(
 /// space and gaps between glyphs stay unstyled so the eye can
 /// separate the three toggles at a glance. Pads with spaces to the
 /// full panel width.
+#[allow(clippy::too_many_arguments)]
 fn paint_file_search_header(
+    col_start: u16,
+    row: u16,
     cols: usize,
     case_sensitive: bool,
     use_regex: bool,
     replace_mode: bool,
     theme: &Theme,
-    out: &mut impl Write,
-) -> io::Result<()> {
-    use crossterm::{queue, style};
-
-    let on = &theme.search_toggle_on;
+    buf: &mut Buffer,
+) {
+    let on = theme.search_toggle_on;
     let mut printed = 0usize;
+    let mut col = col_start;
 
     // Matches the text query.rs builds for row 0 of the overlay
     // (`" Aa   .*   =>"`), segment-for-segment. If that text
@@ -859,20 +966,18 @@ fn paint_file_search_header(
         }
         let budget = cols - printed;
         let slice: String = text.chars().take(budget).collect();
-        if active {
-            apply_style(out, on)?;
-            queue!(out, style::Print(&slice))?;
-            reset_style(out, on)?;
-        } else {
-            queue!(out, style::Print(&slice))?;
+        let style = if active { on } else { Style::default() };
+        for ch in slice.chars() {
+            buf.put_char(row, col, ch, style);
+            col = col.saturating_add(1);
         }
         printed += slice.chars().count();
     }
     // Pad to the right edge so the row is fully repainted.
     for _ in printed..cols {
-        queue!(out, style::Print(" "))?;
+        buf.put_char(row, col, ' ', Style::default());
+        col = col.saturating_add(1);
     }
-    Ok(())
 }
 
 /// Look up the style for a diagnostic severity.
@@ -889,11 +994,12 @@ fn severity_style<'a>(
     }
 }
 
-/// Print one body row slicing it into styled runs according to the
-/// syntax spans the runtime computed. Gaps between spans (and any
-/// suffix after the last span) render with the syntax theme's
-/// `default` style so the gutter and any un-captured characters
-/// still respect user theming.
+/// Paint one body row into `buf` slicing it into styled runs
+/// according to the syntax spans the runtime computed. Gaps between
+/// spans (and any suffix after the last span) render with the
+/// syntax theme's `default` style so the gutter and any un-captured
+/// characters still respect user theming. Returns the column AFTER
+/// the last written cell so the caller can continue filling the row.
 ///
 /// Spans are assumed non-overlapping and ascending in `col_start`.
 /// The caller guarantees `col_end <= line_char_count` (runtime
@@ -902,9 +1008,10 @@ fn paint_syntax_line(
     line: &str,
     spans: &[led_driver_terminal_core::LineSpan],
     syntax: &led_driver_terminal_core::SyntaxTheme,
-    out: &mut impl Write,
-) -> io::Result<()> {
-    use crossterm::{queue, style};
+    row: u16,
+    col_start: u16,
+    buf: &mut Buffer,
+) -> u16 {
     use led_state_syntax::TokenKind;
 
     let style_for = |kind: TokenKind| -> &Style {
@@ -930,130 +1037,47 @@ fn paint_syntax_line(
     };
 
     let mut cursor_col: usize = 0;
+    let mut out_col = col_start;
     for span in spans {
-        let col_start = span.col_start as usize;
-        let col_end = span.col_end as usize;
-        if col_end <= cursor_col {
+        let span_col_start = span.col_start as usize;
+        let span_col_end = span.col_end as usize;
+        if span_col_end <= cursor_col {
             // Malformed / overlapping input — skip the offending span
             // so we don't go backwards.
             continue;
         }
-        if col_start > cursor_col {
+        if span_col_start > cursor_col {
             // Gap before this span: paint it with the default syntax
             // style (catches the gutter and any unclaimed glyphs).
-            let gap_text: String = line
+            let default_style = syntax.default;
+            for ch in line
                 .chars()
                 .skip(cursor_col)
-                .take(col_start - cursor_col)
-                .collect();
-            if !gap_text.is_empty() {
-                let default_style = &syntax.default;
-                apply_style(out, default_style)?;
-                queue!(out, style::Print(gap_text))?;
-                reset_style(out, default_style)?;
+                .take(span_col_start - cursor_col)
+            {
+                buf.put_char(row, out_col, ch, default_style);
+                out_col = out_col.saturating_add(1);
             }
-            cursor_col = col_start;
+            cursor_col = span_col_start;
         }
-        let span_text: String = line
+        let s = *style_for(span.kind);
+        for ch in line
             .chars()
             .skip(cursor_col)
-            .take(col_end - cursor_col)
-            .collect();
-        if !span_text.is_empty() {
-            let s = style_for(span.kind);
-            apply_style(out, s)?;
-            queue!(out, style::Print(span_text))?;
-            reset_style(out, s)?;
+            .take(span_col_end - cursor_col)
+        {
+            buf.put_char(row, out_col, ch, s);
+            out_col = out_col.saturating_add(1);
         }
-        cursor_col = col_end;
+        cursor_col = span_col_end;
     }
     // Trailing suffix past the last span.
-    let tail: String = line.chars().skip(cursor_col).collect();
-    if !tail.is_empty() {
-        let default_style = &syntax.default;
-        apply_style(out, default_style)?;
-        queue!(out, style::Print(tail))?;
-        reset_style(out, default_style)?;
+    let default_style = syntax.default;
+    for ch in line.chars().skip(cursor_col) {
+        buf.put_char(row, out_col, ch, default_style);
+        out_col = out_col.saturating_add(1);
     }
-    Ok(())
-}
-
-// ── Theme → ANSI helpers ───────────────────────────────────────────────
-
-/// Emit the SetForeground / SetBackground / SetAttribute escapes for
-/// a [`Style`]. No-op when the style is the default — the painter
-/// won't touch terminal state, so goldens stay pixel-identical with
-/// an unstyled theme.
-fn apply_style(out: &mut impl Write, s: &Style) -> io::Result<()> {
-    use crossterm::{queue, style};
-    if s.is_default() {
-        return Ok(());
-    }
-    if let Some(fg) = s.fg {
-        queue!(out, style::SetForegroundColor(to_ct_color(fg)))?;
-    }
-    if let Some(bg) = s.bg {
-        queue!(out, style::SetBackgroundColor(to_ct_color(bg)))?;
-    }
-    apply_attrs(out, s.attrs)?;
-    Ok(())
-}
-
-fn apply_attrs(out: &mut impl Write, a: Attrs) -> io::Result<()> {
-    use crossterm::{queue, style};
-    if a.bold {
-        queue!(out, style::SetAttribute(style::Attribute::Bold))?;
-    }
-    if a.reverse {
-        queue!(out, style::SetAttribute(style::Attribute::Reverse))?;
-    }
-    if a.underline {
-        queue!(out, style::SetAttribute(style::Attribute::Underlined))?;
-    }
-    Ok(())
-}
-
-/// Undo `apply_style`. A blanket `Attribute::Reset` + `ResetColor`
-/// covers every case including the mixed attr+color legacy status
-/// bar; a default style is a no-op.
-fn reset_style(out: &mut impl Write, s: &Style) -> io::Result<()> {
-    use crossterm::{queue, style};
-    if s.is_default() {
-        return Ok(());
-    }
-    queue!(
-        out,
-        style::SetAttribute(style::Attribute::Reset),
-        style::ResetColor,
-    )?;
-    Ok(())
-}
-
-fn to_ct_color(c: Color) -> crossterm::style::Color {
-    match c {
-        // Indexed 0-15 → crossterm's named variants, which emit
-        // the short `ESC[3Nm` / `ESC[4Nm` escapes terminals honour
-        // via the user's palette config. Indexed 16-255 → the
-        // `ESC[38;5;Nm` / `ESC[48;5;Nm` 256-color escapes.
-        Color::Indexed(0) => crossterm::style::Color::Black,
-        Color::Indexed(1) => crossterm::style::Color::DarkRed,
-        Color::Indexed(2) => crossterm::style::Color::DarkGreen,
-        Color::Indexed(3) => crossterm::style::Color::DarkYellow,
-        Color::Indexed(4) => crossterm::style::Color::DarkBlue,
-        Color::Indexed(5) => crossterm::style::Color::DarkMagenta,
-        Color::Indexed(6) => crossterm::style::Color::DarkCyan,
-        Color::Indexed(7) => crossterm::style::Color::Grey,
-        Color::Indexed(8) => crossterm::style::Color::DarkGrey,
-        Color::Indexed(9) => crossterm::style::Color::Red,
-        Color::Indexed(10) => crossterm::style::Color::Green,
-        Color::Indexed(11) => crossterm::style::Color::Yellow,
-        Color::Indexed(12) => crossterm::style::Color::Blue,
-        Color::Indexed(13) => crossterm::style::Color::Magenta,
-        Color::Indexed(14) => crossterm::style::Color::Cyan,
-        Color::Indexed(15) => crossterm::style::Color::White,
-        Color::Indexed(n) => crossterm::style::Color::AnsiValue(n),
-        Color::Rgb { r, g, b } => crossterm::style::Color::Rgb { r, g, b },
-    }
+    out_col
 }
 
 // ── Raw mode guard ─────────────────────────────────────────────────────
@@ -1079,10 +1103,11 @@ impl RawModeGuard {
 
 impl Drop for RawModeGuard {
     fn drop(&mut self) {
-        // `paint` emits `cursor::Hide` each frame; the Hide state
-        // persists across `LeaveAlternateScreen` on most terminals, so
-        // we'd leave the user's shell with an invisible cursor. Show it
-        // explicitly before handing the terminal back.
+        // The driver's final `execute` may leave the cursor hidden
+        // (frame.cursor = None); the Hide state persists across
+        // `LeaveAlternateScreen` on most terminals, so we'd leave the
+        // user's shell with an invisible cursor. Show it explicitly
+        // before handing the terminal back.
         let _ = crossterm::execute!(
             io::stdout(),
             crossterm::cursor::Show,
@@ -1096,6 +1121,21 @@ impl Drop for RawModeGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use led_driver_terminal_core::NoopTrace;
+
+    /// Paint a frame through the full driver path and return the
+    /// emitted bytes. The trace is a `NoopTrace` so tests don't need
+    /// to plumb in a real capture harness.
+    fn execute_frame(
+        frame: &Frame,
+        last: Option<&Frame>,
+        theme: &Theme,
+    ) -> (TerminalOutputDriver, Vec<u8>) {
+        let driver = TerminalOutputDriver::new(Arc::new(NoopTrace));
+        let mut out: Vec<u8> = Vec::new();
+        driver.execute(frame, last, theme, &mut out).expect("execute");
+        (driver, out)
+    }
 
     #[test]
     fn translate_tab_and_shift_tab() {
@@ -1136,8 +1176,7 @@ mod tests {
             cursor: Some((0, 0)),
             dims: Dims { cols: 40, rows: 5 },
         };
-        let mut out: Vec<u8> = Vec::new();
-        paint(&frame, None, &Theme::default(), &mut out).expect("paint to Vec<u8>");
+        let (_driver, out) = execute_frame(&frame, None, &Theme::default());
         assert!(!out.is_empty());
     }
 
@@ -1153,8 +1192,7 @@ mod tests {
             cursor: None,
             dims: Dims { cols: 40, rows: 5 },
         };
-        let mut out: Vec<u8> = Vec::new();
-        paint(&frame, None, &Theme::default(), &mut out).expect("paint to Vec<u8>");
+        let (_driver, out) = execute_frame(&frame, None, &Theme::default());
         // Empty frames still produce clear/hide sequences — just don't panic.
         assert!(!out.is_empty());
     }
@@ -1164,28 +1202,38 @@ mod tests {
         // Regression guard: `Clear(UntilNewLine)` at col 0 wipes the
         // body columns to the right of the panel, and because
         // `paint_body` skips on cache-hit the wipe stays visible
-        // until something else forces a body repaint. The fix prints
-        // `cols` spaces instead — no `\x1b[K` should escape.
+        // until something else forces a body repaint. The cell-grid
+        // renderer in `render.rs` never emits `\x1b[K`; this test
+        // verifies that property end-to-end through `execute`.
         use std::sync::Arc;
-        let panel = SidePanelModel {
-            rows: Arc::new(vec![SidePanelRow {
-                depth: 0,
-                chevron: None,
-                name: Arc::<str>::from("a.rs"),
-                selected: true,
-                match_range: None,
-                replaced: false,
-                status: None,
-            }]),
-            focused: true,
-        mode: Default::default(),
+        let dims = Dims { cols: 24, rows: 10 };
+        let layout = Layout::compute(dims, true);
+        let frame = Frame {
+            tab_bar: TabBarModel::default(),
+            body: BodyModel::Empty,
+            status_bar: StatusBarModel::default(),
+            side_panel: Some(SidePanelModel {
+                rows: Arc::new(vec![SidePanelRow {
+                    depth: 0,
+                    chevron: None,
+                    name: Arc::<str>::from("a.rs"),
+                    selected: true,
+                    match_range: None,
+                    replaced: false,
+                    status: None,
+                }]),
+                focused: true,
+                mode: Default::default(),
+            }),
+            popover: None,
+            layout,
+            cursor: None,
+            dims,
         };
-        let area = Rect { x: 0, y: 0, cols: 24, rows: 10 };
-        let mut out: Vec<u8> = Vec::new();
-        paint_side_panel(&panel, area, &Theme::default(), &mut out).expect("paint");
+        let (_driver, out) = execute_frame(&frame, None, &Theme::default());
         assert!(
             !out.windows(3).any(|w| w == b"\x1b[K"),
-            "paint_side_panel emitted Clear(UntilNewLine); bytes: {out:?}",
+            "execute emitted Clear(UntilNewLine); bytes: {out:?}",
         );
     }
 
@@ -1200,6 +1248,12 @@ mod tests {
         // (dirty-diff: body Arc is identical so `paint_body` is
         // skipped). Apply both byte streams to a small grid sim and
         // assert the body cells still contain the expected text.
+        //
+        // In the cell-grid model the body's cells in `buf` survive
+        // the skipped paint (they were written the previous frame
+        // and stay there), so the emitted diff touches only the
+        // panel cells — the body text must still read correctly in
+        // the grid sim.
         use std::sync::Arc;
 
         let dims = Dims { cols: 60, rows: 10 };
@@ -1249,7 +1303,7 @@ mod tests {
             side_panel: Some(SidePanelModel {
                 rows: side_rows.clone(),
                 focused: false,
-            mode: Default::default(),
+                mode: Default::default(),
             }),
             popover: None,
             layout,
@@ -1261,18 +1315,25 @@ mod tests {
             side_panel: Some(SidePanelModel {
                 rows: side_rows,
                 focused: true,
-            mode: Default::default(),
+                mode: Default::default(),
             }),
             cursor: None, // focus=Side hides editor cursor
             ..frame1.clone()
         };
 
+        // Same driver across both frames so the internal double
+        // buffer carries body cells forward — that's the whole
+        // point of the regression test.
+        let driver = TerminalOutputDriver::new(Arc::new(NoopTrace));
+        let theme = Theme::default();
         let mut grid = Grid::new(dims);
         let mut out: Vec<u8> = Vec::new();
-        paint(&frame1, None, &Theme::default(), &mut out).expect("paint frame1");
+        driver.execute(&frame1, None, &theme, &mut out).expect("frame1");
         grid.apply(&out);
         out.clear();
-        paint(&frame2, Some(&frame1), &Theme::default(), &mut out).expect("paint frame2");
+        driver
+            .execute(&frame2, Some(&frame1), &theme, &mut out)
+            .expect("frame2");
         grid.apply(&out);
 
         // Body column 25 ("  line NN" starts at editor_area.x=25).
@@ -1290,10 +1351,9 @@ mod tests {
         }
     }
 
-    /// Tiny ANSI sim — enough to execute what `paint` emits
-    /// (`MoveTo`, `Print`, `Clear(UntilNewLine)`, cursor hide/show,
-    /// SGR attributes). SGR is ignored: we care about cell contents,
-    /// not styling.
+    /// Tiny ANSI sim — enough to execute what the driver emits
+    /// (`MoveTo`, `Print`, cursor hide/show, SGR attributes). SGR
+    /// is ignored: we care about cell contents, not styling.
     struct Grid {
         cells: Vec<Vec<char>>,
         row: u16,
@@ -1323,9 +1383,9 @@ mod tests {
                 self.col = self.col.saturating_add(1);
             }
         }
-        fn clear_until_newline(&mut self) {
-            if let Some(r) = self.cells.get_mut(self.row as usize) {
-                for cell in r.iter_mut().skip(self.col as usize) {
+        fn clear_all(&mut self) {
+            for r in self.cells.iter_mut() {
+                for cell in r.iter_mut() {
                     *cell = ' ';
                 }
             }
@@ -1366,9 +1426,12 @@ mod tests {
                         self.row = r.saturating_sub(1);
                         self.col = c.saturating_sub(1);
                     }
-                    'K' => {
-                        // CSI n K — 0 (default) = from cursor to EOL.
-                        self.clear_until_newline();
+                    'J' => {
+                        // CSI n J — 2 = clear whole screen. The
+                        // driver emits `Clear(All)` on resize.
+                        if params == "2" {
+                            self.clear_all();
+                        }
                     }
                     _ => {
                         // Ignore SGR (`m`), cursor show/hide (`h`/`l` with `?25`), etc.
@@ -1381,47 +1444,169 @@ mod tests {
     #[test]
     fn hit_row_match_range_emits_three_styled_segments() {
         // A non-selected hit row with match_range. The painter
-        // should split the print into prefix + matched + suffix —
-        // detectable by scanning the raw ANSI output for the
-        // `search_match` bold + fg SGR between the prefix and the
-        // suffix text.
+        // should split the match into prefix + matched + suffix —
+        // detectable via the Grid sim + SGR scan. We pipe through
+        // the full driver path so we exercise the render.rs output.
         use std::sync::Arc;
         use led_driver_terminal_core::SidePanelMode;
+
         // Completions mode — painter doesn't prepend indent or
         // chevron, so match_range is relative to entry.name directly.
-        let panel = SidePanelModel {
-            rows: Arc::new(vec![SidePanelRow {
-                depth: 0,
-                chevron: None,
-                name: Arc::<str>::from("   1: foo_needle_bar"),
-                selected: false,
-                match_range: Some((10, 16)),
-                replaced: false,
-                status: None,
-            }]),
-            focused: false,
-            mode: SidePanelMode::Completions,
+        // Dims must be wide enough for the side panel to be visible
+        // (cols > 25 and remaining editor width >= 25).
+        let dims = Dims { cols: 60, rows: 3 };
+        let layout = Layout::compute(dims, true);
+        assert!(layout.side_area.is_some(), "side panel should be visible");
+        let frame = Frame {
+            tab_bar: TabBarModel::default(),
+            body: BodyModel::Empty,
+            status_bar: StatusBarModel::default(),
+            side_panel: Some(SidePanelModel {
+                rows: Arc::new(vec![SidePanelRow {
+                    depth: 0,
+                    chevron: None,
+                    name: Arc::<str>::from("   1: foo_needle_bar"),
+                    selected: false,
+                    match_range: Some((10, 16)),
+                    replaced: false,
+                    status: None,
+                }]),
+                focused: false,
+                mode: SidePanelMode::Completions,
+            }),
+            popover: None,
+            layout,
+            cursor: None,
+            dims,
         };
-        let area = Rect { x: 0, y: 0, cols: 24, rows: 1 };
-        let mut out: Vec<u8> = Vec::new();
-        paint_side_panel(&panel, area, &Theme::default(), &mut out).expect("paint");
+        let (_driver, out) = execute_frame(&frame, None, &Theme::default());
         let s = std::str::from_utf8(&out).expect("utf8");
-        // "needle" substring must appear after a bold SGR (1). The
-        // surrounding prefix / suffix come in on plain prints.
-        let bold_pos = s.find("\x1b[1m").expect("bold SGR emitted");
-        let needle_pos = s.find("needle").expect("match text printed");
+
+        // The default `theme.search_match` sets `bold` — a bold
+        // SGR must appear somewhere in the output (no match run
+        // without it).
         assert!(
-            bold_pos < needle_pos,
-            "bold should be set before printing the match; got raw = {s:?}"
+            s.contains("\x1b[1m"),
+            "bold SGR expected for match run; got raw = {s:?}"
         );
-        // After the match we emit a Reset; check that "bar" comes
-        // after a Reset SGR.
-        let reset_pos = s[needle_pos..].find("\x1b[0m").map(|i| needle_pos + i);
-        let bar_pos = s.find("_bar").expect("suffix printed");
-        assert!(
-            reset_pos.is_some_and(|r| r < bar_pos),
-            "reset should fire between match and suffix; got raw = {s:?}"
+        // The grid content must show "needle" at cols 10..16 of
+        // the panel row — verifies that the three-segment split
+        // actually paints the expected cells, regardless of how
+        // the cell-grid renderer orders its SGR emissions.
+        let mut grid = Grid::new(dims);
+        grid.apply(&out);
+        let row = layout.side_area.unwrap().y;
+        let got: String = grid.row_text(row, 10, 6);
+        assert_eq!(got, "needle", "grid cells should read 'needle'; raw = {s:?}");
+    }
+
+    #[test]
+    fn paint_body_keeps_wrap_glyph_when_full_width_syntax_span_ends_adjacent() {
+        // Regression for: on a wrapped markdown URL, the last
+        // visible sub's `\` glyph disappeared because a syntax
+        // span covered the entire content range up to the `\`
+        // position. paint_syntax_line emits the trailing suffix
+        // (`\`) after the last span — that one-char skip path
+        // was the bit that broke.
+        use std::sync::Arc;
+        let dims = Dims { cols: 12, rows: 5 };
+        let layout = Layout::compute(dims, false);
+        // `body_rows` = 3. Simulate a non-last sub: text is
+        // gutter + 9 content chars + `\` = 12 chars. One span
+        // covering the full 9 content chars (cols 2..11) — the
+        // situation the markdown grammar produces for a URL run.
+        let body = BodyModel::Content {
+            lines: Arc::new(vec![
+                led_driver_terminal_core::BodyLine {
+                    text: "  abcdefghi\\".to_string(),
+                    spans: vec![led_driver_terminal_core::LineSpan {
+                        col_start: 2,
+                        col_end: 11,
+                        kind: led_state_syntax::TokenKind::String,
+                    }],
+                    gutter_diagnostic: None,
+                    diagnostics: Vec::new(),
+                },
+                led_driver_terminal_core::BodyLine {
+                    text: "  jkl".to_string(),
+                    spans: Vec::new(),
+                    gutter_diagnostic: None,
+                    diagnostics: Vec::new(),
+                },
+                led_driver_terminal_core::BodyLine {
+                    text: "~ ".to_string(),
+                    spans: Vec::new(),
+                    gutter_diagnostic: None,
+                    diagnostics: Vec::new(),
+                },
+            ]),
+            cursor: None,
+            match_highlight: None,
+        };
+        let frame = Frame {
+            tab_bar: TabBarModel::default(),
+            body,
+            status_bar: StatusBarModel::default(),
+            side_panel: None,
+            popover: None,
+            layout,
+            cursor: None,
+            dims,
+        };
+        let (_driver, out) = execute_frame(&frame, None, &Theme::default());
+        let mut grid = Grid::new(dims);
+        grid.apply(&out);
+        let ex = layout.editor_area.x;
+        assert_eq!(
+            grid.char_at(0, ex + 11),
+            '\\',
+            "wrap glyph missing on sub-line with syntax span covering content",
         );
+    }
+
+    #[test]
+    fn paint_body_prints_soft_wrap_backslash_at_sub_line_end() {
+        // Regression guard for a reported bug where the `\`
+        // continuation glyph wasn't visible on wrapped rows.
+        // `body_model` appends `\` to non-last sub-lines; paint_body
+        // must carry that char through to the terminal output.
+        use std::sync::Arc;
+        let dims = Dims { cols: 12, rows: 5 };
+        let layout = Layout::compute(dims, false);
+        // body_rows = 3 here. A two-sub-line logical line produces
+        // two BodyLines; the first carries `\`, the second doesn't.
+        let body = BodyModel::Content {
+            lines: Arc::new(vec![
+                "  abcdefghi\\".into(),
+                "  jkl".into(),
+                "~ ".into(),
+            ]),
+            cursor: None,
+            match_highlight: None,
+        };
+        let frame = Frame {
+            tab_bar: TabBarModel::default(),
+            body,
+            status_bar: StatusBarModel::default(),
+            side_panel: None,
+            popover: None,
+            layout,
+            cursor: None,
+            dims,
+        };
+        let (_driver, out) = execute_frame(&frame, None, &Theme::default());
+
+        // Scan the grid: row 0 col 11 (editor_area.x + 11) must
+        // render as `\`, row 1 col 11 must NOT be `\`.
+        let mut grid = Grid::new(dims);
+        grid.apply(&out);
+        let ex = layout.editor_area.x;
+        assert_eq!(
+            grid.char_at(0, ex + 11),
+            '\\',
+            "wrap glyph missing on the sub-line's right edge",
+        );
+        assert_ne!(grid.char_at(1, ex + 11), '\\');
     }
 
     #[test]
@@ -1447,9 +1632,17 @@ mod tests {
             bg: Some(Color::rgb(0x22, 0x22, 0x22)),
             ..Style::default()
         };
-
-        let mut out: Vec<u8> = Vec::new();
-        paint_body(&body, layout.editor_area, &theme, &mut out).expect("paint_body");
+        let frame = Frame {
+            tab_bar: TabBarModel::default(),
+            body,
+            status_bar: StatusBarModel::default(),
+            side_panel: None,
+            popover: None,
+            layout,
+            cursor: None,
+            dims,
+        };
+        let (_driver, out) = execute_frame(&frame, None, &theme);
 
         let mut grid = Grid::new(dims);
         grid.apply(&out);

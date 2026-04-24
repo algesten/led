@@ -92,44 +92,50 @@ fn run_parse(parser: &mut Parser, cursor: &mut QueryCursor, cmd: SyntaxCmd) -> S
     // enough that the copy is not the bottleneck.
     let bytes = rope_to_bytes(&cmd.rope);
 
-    // Incremental parse inputs. When all three are present, each
-    // grammar's parse call below reuses the previous tree and
-    // tree-sitter only re-walks affected sub-trees — 5-50×
-    // faster on typical edits and, more importantly, keeps
-    // unchanged regions' token byte ranges pointer-stable so
-    // the painter doesn't flicker on rows away from the cursor.
-    //
-    // Fallback: if any prerequisite is missing (first parse of
-    // the buffer, language change, no history between snapshots)
-    // we pass `None` and re-parse from scratch.
-    let incremental_base: Option<(Arc<tree_sitter::Tree>, Vec<tree_sitter::InputEdit>)> =
+    // Incremental parse inputs. The worker DERIVES the edit
+    // from the two rope snapshots at parse time rather than
+    // trusting an edits-since-prev list stamped by the runtime.
+    // Deriving from the ropes themselves makes the tree a pure
+    // function of the current rope atom: undo/redo can't put
+    // the tree and the source bytes out of sync because there's
+    // no intermediate history counter to drift. `None` on either
+    // side (or ropes identical) → full parse.
+    let incremental_base: Option<(Arc<tree_sitter::Tree>, tree_sitter::InputEdit)> =
         cmd.prev_tree
             .as_ref()
             .zip(cmd.prev_rope.as_ref())
-            .map(|(prev_tree, prev_rope)| {
-                let edits =
-                    build_input_edits(prev_rope, &cmd.edits_since_prev);
-                (prev_tree.clone(), edits)
+            .and_then(|(prev_tree, prev_rope)| {
+                let diff = led_state_syntax::RopeDiff::between(prev_rope, &cmd.rope)?;
+                let input_edit = diff_to_input_edit(prev_rope, &cmd.rope, &diff);
+                Some((prev_tree.clone(), input_edit))
             });
 
     let mut primary_tree: Option<Arc<tree_sitter::Tree>> = None;
     let mut raw_captures: Vec<(usize, usize, TokenKind)> = Vec::new();
 
-    for (language, query) in &grammars {
+    for (grammar_idx, (language, query)) in grammars.iter().enumerate() {
         // set_language is cheap; doing it unconditionally keeps the
         // worker correct across language switches + between the
         // block / inline passes for the same cmd.
         let _ = parser.set_language(language);
-        // Apply edits to a fresh clone of prev_tree per grammar —
-        // tree-sitter's `edit` mutates the tree and the same
-        // tree shouldn't be edited twice.
-        let edited_tree = incremental_base.as_ref().map(|(tree, edits)| {
-            let mut t: tree_sitter::Tree = (**tree).clone();
-            for edit in edits {
+        // Incremental parse is only safe when `prev_tree` was parsed
+        // with the SAME grammar — node symbol IDs index into the
+        // grammar's parse tables, so reusing a block-grammar tree
+        // under the inline grammar walks into state/symbol combos
+        // that don't exist there and tree-sitter aborts (assertion
+        // in `ts_language_table_entry`). `primary_tree` is always
+        // the tree from `grammar_idx == 0`, so only that grammar
+        // gets the incremental fast path; secondary grammars
+        // (markdown's inline pass) fall back to a full parse.
+        let edited_tree = if grammar_idx == 0 {
+            incremental_base.as_ref().map(|(tree, edit)| {
+                let mut t: tree_sitter::Tree = (**tree).clone();
                 t.edit(edit);
-            }
-            t
-        });
+                t
+            })
+        } else {
+            None
+        };
         let parsed = match edited_tree.as_ref() {
             Some(prev) => parser.parse(&bytes, Some(prev)),
             None => parser.parse(&bytes, None),
@@ -178,62 +184,34 @@ fn rope_to_bytes(rope: &Rope) -> Vec<u8> {
     bytes
 }
 
-/// Translate a sequence of [`RopeEdit`]s into tree-sitter
-/// [`tree_sitter::InputEdit`]s. Each edit's positions must be
-/// relative to the rope state after all prior edits, so we apply
-/// each edit to a mutable clone of `prev_rope` in lock-step.
-/// `tree-sitter` then calls `tree.edit(InputEdit)` on the
-/// previous tree in the same order, so the tree's byte view
-/// matches the rope's byte view at the moment the final parse
-/// is invoked.
-fn build_input_edits(
+/// Translate a [`RopeDiff`] into tree-sitter's [`InputEdit`]
+/// coordinates — byte offsets and row/column points resolved
+/// against the correct rope on each side (`prev_rope` for the
+/// old endpoints, `curr_rope` for the new end point). A single
+/// diff is always a single `InputEdit`, even when the user
+/// replaced content: tree-sitter doesn't need the delete and
+/// insert split apart.
+fn diff_to_input_edit(
     prev_rope: &Rope,
-    edits: &[led_driver_syntax_core::RopeEdit],
-) -> Vec<tree_sitter::InputEdit> {
-    let mut working = prev_rope.clone();
-    let mut out: Vec<tree_sitter::InputEdit> = Vec::with_capacity(edits.len());
-    for edit in edits {
-        match edit {
-            led_driver_syntax_core::RopeEdit::Insert { char_start, text } => {
-                let start_byte = working.char_to_byte(*char_start);
-                let start_point = point_of_byte(&working, start_byte);
-                let inserted_bytes = text.len();
-                // Apply to working rope so subsequent edits
-                // resolve against the correct coordinate space.
-                working.insert(*char_start, text);
-                let new_end_byte = start_byte + inserted_bytes;
-                let new_end_point = point_of_byte(&working, new_end_byte);
-                out.push(tree_sitter::InputEdit {
-                    start_byte,
-                    old_end_byte: start_byte,
-                    new_end_byte,
-                    start_position: start_point,
-                    old_end_position: start_point,
-                    new_end_position: new_end_point,
-                });
-            }
-            led_driver_syntax_core::RopeEdit::Delete {
-                char_start,
-                removed_chars,
-            } => {
-                let start_byte = working.char_to_byte(*char_start);
-                let start_point = point_of_byte(&working, start_byte);
-                let end_char = *char_start + *removed_chars;
-                let old_end_byte = working.char_to_byte(end_char);
-                let old_end_point = point_of_byte(&working, old_end_byte);
-                working.remove(*char_start..end_char);
-                out.push(tree_sitter::InputEdit {
-                    start_byte,
-                    old_end_byte,
-                    new_end_byte: start_byte,
-                    start_position: start_point,
-                    old_end_position: old_end_point,
-                    new_end_position: start_point,
-                });
-            }
-        }
+    curr_rope: &Rope,
+    diff: &led_state_syntax::RopeDiff,
+) -> tree_sitter::InputEdit {
+    let start_byte = prev_rope.char_to_byte(diff.char_start);
+    let start_position = point_of_byte(prev_rope, start_byte);
+    let old_end_char = diff.char_start + diff.removed_chars;
+    let old_end_byte = prev_rope.char_to_byte(old_end_char);
+    let old_end_position = point_of_byte(prev_rope, old_end_byte);
+    let new_end_char = diff.char_start + diff.inserted_chars;
+    let new_end_byte = curr_rope.char_to_byte(new_end_char);
+    let new_end_position = point_of_byte(curr_rope, new_end_byte);
+    tree_sitter::InputEdit {
+        start_byte,
+        old_end_byte,
+        new_end_byte,
+        start_position,
+        old_end_position,
+        new_end_position,
     }
-    out
 }
 
 /// Map a byte offset in `rope` to a `tree_sitter::Point`
@@ -551,7 +529,6 @@ mod tests {
             language: Language::Rust,
             prev_tree: None,
             prev_rope: None,
-            edits_since_prev: Vec::new(),
         }));
 
         let out = wait_for_out(&drv, Duration::from_secs(5)).expect("parse within 5s");
@@ -586,8 +563,7 @@ mod tests {
                 rope: Arc::new(Rope::from_str(&format!("fn v{v}() {{}}\n"))),
                 language: Language::Rust,
                 prev_tree: None,
-            prev_rope: None,
-                edits_since_prev: Vec::new(),
+                prev_rope: None,
             }));
         }
 

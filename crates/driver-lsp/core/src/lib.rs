@@ -25,8 +25,8 @@
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender};
 
-use led_core::CanonPath;
-use led_state_diagnostics::{BufferVersion, Diagnostic};
+use led_core::{CanonPath, PersistedContentHash};
+use led_state_diagnostics::Diagnostic;
 use ropey::Rope;
 
 pub mod diag_source;
@@ -55,22 +55,28 @@ pub enum LspCmd {
     /// change). `language` is pre-resolved by the runtime's
     /// `Language::from_chain`; `None` means "no language server
     /// applies" and the driver ignores the buffer for LSP
-    /// purposes. `version` is `eb.version` at open time.
+    /// purposes. `hash` is the rope's content hash at open time
+    /// — used by the diagnostic-source machinery to stamp
+    /// deliveries with an anchor that's stable across undo /
+    /// redo round-trips.
     BufferOpened {
         path: CanonPath,
         language: Option<led_state_syntax::Language>,
         rope: Arc<Rope>,
-        version: BufferVersion,
+        hash: PersistedContentHash,
     },
     /// The rope changed. `is_save` is `true` when this change is
     /// the moment-of-save (dispatched by the save-handler after
     /// the writer confirms) — the driver uses it to emit
     /// `textDocument/didSave` in addition to the usual
-    /// `didChange`.
+    /// `didChange`. `hash` is the post-change content hash; the
+    /// driver uses it to close any open diagnostic window whose
+    /// snapshot no longer matches and, after saves, runs as the
+    /// save-point anchor for the runtime's replay path.
     BufferChanged {
         path: CanonPath,
         rope: Arc<Rope>,
-        version: BufferVersion,
+        hash: PersistedContentHash,
         is_save: bool,
     },
     /// Buffer killed. The driver emits `textDocument/didClose`
@@ -88,13 +94,14 @@ pub enum LspCmd {
 /// atoms.
 #[derive(Debug, Clone)]
 pub enum LspEvent {
-    /// Diagnostics for one path, stamped with the buffer version
+    /// Diagnostics for one path, stamped with the content hash
     /// they were pulled against. The runtime runs
-    /// `offer_diagnostics` (stage 3) to decide: accept as-is,
-    /// replay through the edit log, or drop silently.
+    /// `offer_diagnostics` to decide: accept as-is (hash matches
+    /// current), replay through the edit log since a save-point
+    /// marker with a matching hash, or drop silently.
     Diagnostics {
         path: CanonPath,
-        version: BufferVersion,
+        hash: PersistedContentHash,
         diagnostics: Vec<Diagnostic>,
     },
     /// First `quiescent=true` emitted by a server that supports
@@ -123,7 +130,7 @@ pub enum LspEvent {
 pub trait Trace: Send + Sync {
     fn lsp_server_started(&self, server: &str);
     fn lsp_request_diagnostics(&self);
-    fn lsp_diagnostics_done(&self, path: &CanonPath, n: usize, version: BufferVersion);
+    fn lsp_diagnostics_done(&self, path: &CanonPath, n: usize, hash: PersistedContentHash);
     fn lsp_mode_fallback(&self);
 }
 
@@ -131,7 +138,7 @@ pub struct NoopTrace;
 impl Trace for NoopTrace {
     fn lsp_server_started(&self, _: &str) {}
     fn lsp_request_diagnostics(&self) {}
-    fn lsp_diagnostics_done(&self, _: &CanonPath, _: usize, _: BufferVersion) {}
+    fn lsp_diagnostics_done(&self, _: &CanonPath, _: usize, _: PersistedContentHash) {}
     fn lsp_mode_fallback(&self) {}
 }
 
@@ -171,11 +178,11 @@ impl LspDriver {
             if let LspEvent::Diagnostics {
                 path,
                 diagnostics,
-                version,
+                hash,
             } = &ev
             {
                 self.trace
-                    .lsp_diagnostics_done(path, diagnostics.len(), *version);
+                    .lsp_diagnostics_done(path, diagnostics.len(), *hash);
             }
             out.push(ev);
         }

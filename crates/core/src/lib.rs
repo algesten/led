@@ -7,18 +7,25 @@
 //! - [`UserPath`] / [`CanonPath`] — path newtypes mirroring legacy led's
 //!   user-vs-canonical split
 
+pub mod content_hash;
 pub mod ids;
 pub mod issue;
 pub mod notify;
 pub mod paths;
 pub mod text_input;
+pub mod wrap;
 
+pub use content_hash::{EphemeralContentHash, PersistedContentHash};
 pub use issue::{
     CategoryInfo, IssueCategory, StatusDisplay, directory_categories, resolve_display,
 };
 pub use notify::Notifier;
 pub use paths::{CanonPath, PathChain, UserPath};
 pub use text_input::TextInput;
+pub use wrap::{
+    SubLine, col_to_sub_line, is_continued, sub_line_col_to_line_col, sub_line_count,
+    sub_line_range,
+};
 
 // `id_newtype!` is `#[macro_export]` so it's already callable as
 // `led_core::id_newtype!(...)` without a re-export line.

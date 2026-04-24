@@ -45,6 +45,7 @@ mod testutil;
 // Public surface — kept tight so the runtime only reaches in for
 // the five externally-relevant names.
 pub use kill::apply_yank;
+pub use shared::editor_content_cols;
 pub use shared::open_or_focus_tab;
 
 // Aliases used by `run_command`.
@@ -237,6 +238,15 @@ pub fn dispatch_key(
             if !is_coalescable_insert(&cmd) {
                 finalise_history(edits);
             }
+            // Edit-like commands leave `preferred_col` as the raw
+            // logical col — refresh to the within-sub-line col so
+            // subsequent vertical moves land on the right visual
+            // column. Pure cursor moves already set it correctly
+            // (horizontal moves) or deliberately preserve it across
+            // clamping (vertical moves), so we skip them.
+            if is_edit_like(&cmd) {
+                refresh_active_preferred_col(tabs, edits, terminal, browser);
+            }
             outcome
         }
         Resolved::PrefixStored | Resolved::Continue => DispatchOutcome::Continue,
@@ -245,6 +255,50 @@ pub fn dispatch_key(
 
 fn is_coalescable_insert(cmd: &Command) -> bool {
     matches!(cmd, Command::InsertChar(c) if c.is_alphanumeric() || *c == '_')
+}
+
+/// Commands whose primitive mutates the cursor via an edit (not a
+/// pure move). These leave `preferred_col` as the raw logical col;
+/// the dispatch boundary refreshes it to the within-sub-line col
+/// so vertical moves after the edit land on the right visual column.
+fn is_edit_like(cmd: &Command) -> bool {
+    matches!(
+        cmd,
+        Command::InsertChar(_)
+            | Command::InsertNewline
+            | Command::DeleteBack
+            | Command::DeleteForward
+            | Command::KillRegion
+            | Command::KillLine
+            | Command::Undo
+            | Command::Redo
+            | Command::JumpBack
+            | Command::JumpForward
+    )
+}
+
+/// Refresh the active tab's `preferred_col` after an edit-like
+/// command. Uses the painter's content-col geometry so the
+/// within-sub-line col agrees with what `body_model` will render.
+fn refresh_active_preferred_col(
+    tabs: &mut Tabs,
+    edits: &BufferEdits,
+    terminal: &Terminal,
+    browser: &BrowserUi,
+) {
+    use shared::{editor_content_cols, refresh_preferred_col};
+    let Some(id) = tabs.active else {
+        return;
+    };
+    let Some(idx) = tabs.open.iter().position(|t| t.id == id) else {
+        return;
+    };
+    let tab = &mut tabs.open[idx];
+    let Some(eb) = edits.buffers.get(&tab.path) else {
+        return;
+    };
+    let content_cols = editor_content_cols(terminal, browser);
+    refresh_preferred_col(&mut tab.cursor, &eb.rope, content_cols);
 }
 
 fn finalise_history(edits: &mut BufferEdits) {
@@ -433,7 +487,7 @@ fn run_command(
             if browser_focused {
                 move_selection(browser, fs, tabs, path_chains, -1);
             } else {
-                move_cursor(tabs, edits, store, terminal, Move::Up);
+                move_cursor(tabs, edits, store, terminal, browser, Move::Up);
             }
             DispatchOutcome::Continue
         }
@@ -441,24 +495,24 @@ fn run_command(
             if browser_focused {
                 move_selection(browser, fs, tabs, path_chains, 1);
             } else {
-                move_cursor(tabs, edits, store, terminal, Move::Down);
+                move_cursor(tabs, edits, store, terminal, browser, Move::Down);
             }
             DispatchOutcome::Continue
         }
         Command::CursorLeft => {
-            move_cursor(tabs, edits, store, terminal, Move::Left);
+            move_cursor(tabs, edits, store, terminal, browser, Move::Left);
             DispatchOutcome::Continue
         }
         Command::CursorRight => {
-            move_cursor(tabs, edits, store, terminal, Move::Right);
+            move_cursor(tabs, edits, store, terminal, browser, Move::Right);
             DispatchOutcome::Continue
         }
         Command::CursorLineStart => {
-            move_cursor(tabs, edits, store, terminal, Move::LineStart);
+            move_cursor(tabs, edits, store, terminal, browser, Move::LineStart);
             DispatchOutcome::Continue
         }
         Command::CursorLineEnd => {
-            move_cursor(tabs, edits, store, terminal, Move::LineEnd);
+            move_cursor(tabs, edits, store, terminal, browser, Move::LineEnd);
             DispatchOutcome::Continue
         }
         Command::CursorPageUp => {
@@ -469,7 +523,7 @@ fn run_command(
             if browser_focused {
                 page_selection(browser, fs, tabs, path_chains, page, /* down= */ false);
             } else {
-                move_cursor(tabs, edits, store, terminal, Move::PageUp);
+                move_cursor(tabs, edits, store, terminal, browser, Move::PageUp);
             }
             DispatchOutcome::Continue
         }
@@ -481,7 +535,7 @@ fn run_command(
             if browser_focused {
                 page_selection(browser, fs, tabs, path_chains, page, /* down= */ true);
             } else {
-                move_cursor(tabs, edits, store, terminal, Move::PageDown);
+                move_cursor(tabs, edits, store, terminal, browser, Move::PageDown);
             }
             DispatchOutcome::Continue
         }
@@ -489,7 +543,7 @@ fn run_command(
             if browser_focused {
                 select_first(browser, fs, tabs, path_chains);
             } else {
-                move_cursor(tabs, edits, store, terminal, Move::FileStart);
+                move_cursor(tabs, edits, store, terminal, browser, Move::FileStart);
             }
             DispatchOutcome::Continue
         }
@@ -497,16 +551,16 @@ fn run_command(
             if browser_focused {
                 select_last(browser, fs, tabs, path_chains);
             } else {
-                move_cursor(tabs, edits, store, terminal, Move::FileEnd);
+                move_cursor(tabs, edits, store, terminal, browser, Move::FileEnd);
             }
             DispatchOutcome::Continue
         }
         Command::CursorWordLeft => {
-            move_cursor(tabs, edits, store, terminal, Move::WordLeft);
+            move_cursor(tabs, edits, store, terminal, browser, Move::WordLeft);
             DispatchOutcome::Continue
         }
         Command::CursorWordRight => {
-            move_cursor(tabs, edits, store, terminal, Move::WordRight);
+            move_cursor(tabs, edits, store, terminal, browser, Move::WordRight);
             DispatchOutcome::Continue
         }
         Command::InsertNewline => {

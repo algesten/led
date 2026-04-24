@@ -574,7 +574,7 @@ mod tests {
     fn esc_restores_origin_cursor_and_scroll() {
         let mut tabs = tabs_with_active("/tmp/buf.txt");
         let origin_cursor = Cursor { line: 0, col: 3, preferred_col: 3 };
-        let origin_scroll = Scroll { top: 0 };
+        let origin_scroll = Scroll { top: 0, top_sub_line: led_core::SubLine(0) };
         tabs.open[0].cursor = origin_cursor;
         tabs.open[0].scroll = origin_scroll;
         let edits = edits_with_buffer("/tmp/buf.txt", "alpha beta\n");

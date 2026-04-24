@@ -4,11 +4,41 @@
 //! `undo`, …) can call them without re-exporting. Nothing here is part
 //! of the dispatch public API.
 
-use led_core::CanonPath;
+use led_core::{CanonPath, col_to_sub_line};
+use led_driver_terminal_core::{Layout, Terminal};
+use led_state_browser::BrowserUi;
 use led_state_buffer_edits::{BufferEdits, EditedBuffer};
 use led_state_tabs::{Cursor, Tab, TabId, Tabs};
 use ropey::Rope;
 use std::sync::Arc;
+
+/// Gutter column reserved by the painter before the first char of
+/// buffer content. Matches [`crate::query::GUTTER_WIDTH`].
+pub(super) const GUTTER_WIDTH: usize = 2;
+
+/// Trailing column the painter never writes to. Matches
+/// [`crate::query::TRAILING_RESERVED_COLS`]. Held at `0` now
+/// that the terminal-driver paint path uses a cell-grid diff
+/// (see `driver-terminal/native/src/{buffer,render}.rs`) — the
+/// renderer never emits `Clear(UntilNewLine)`, so the last col
+/// is safe to write and dispatch's `content_cols` derivation
+/// should match.
+pub(super) const TRAILING_RESERVED_COLS: usize = 0;
+
+/// Editor body content width in chars — the same `content_cols`
+/// the painter uses for sub-line geometry. Terminal dims absent
+/// → 0 (callers treat as "no wrap / no-op").
+pub fn editor_content_cols(terminal: &Terminal, browser: &BrowserUi) -> usize {
+    terminal
+        .dims
+        .map(|d| {
+            let layout = Layout::compute(d, browser.visible);
+            (layout.editor_area.cols as usize)
+                .saturating_sub(GUTTER_WIDTH)
+                .saturating_sub(TRAILING_RESERVED_COLS)
+        })
+        .unwrap_or(0)
+}
 
 /// Allocate the next unused `TabId` by scanning `tabs.open`. Dispatch
 /// doesn't hold the runtime's `TabIdGen` (that lives on the main
@@ -129,8 +159,10 @@ pub(super) fn cursor_to_char(c: &Cursor, rope: &Rope) -> usize {
     rope.line_to_char(line) + col
 }
 
-/// Absolute char index → `Cursor` with `preferred_col` anchored to
-/// the resulting column.
+/// Absolute char index → `Cursor`. `preferred_col` is set to the
+/// logical col; callers that care about visual semantics run
+/// [`refresh_preferred_col`] afterward (or at the dispatch boundary)
+/// to convert it to the within-sub-line column.
 pub(super) fn char_to_cursor(ch: usize, rope: &Rope) -> Cursor {
     let line = rope.char_to_line(ch);
     let col = ch - rope.line_to_char(line);
@@ -139,6 +171,20 @@ pub(super) fn char_to_cursor(ch: usize, rope: &Rope) -> Cursor {
         col,
         preferred_col: col,
     }
+}
+
+/// Recompute `preferred_col` as the within-sub-line column for
+/// the cursor's current `(line, col)` under the given `content_cols`.
+/// Dispatch calls this at the top-level boundary after any command
+/// that may have moved the cursor via an edit / kill / undo / redo /
+/// paste. Without it, edit primitives leave `preferred_col` as the
+/// raw logical col, which on a wrapped line exceeds any sub-line's
+/// width and pins subsequent vertical moves to whatever each
+/// sub-line clamps to — presenting as "arrow-up gets stuck" when
+/// the line re-wraps.
+pub(super) fn refresh_preferred_col(cursor: &mut Cursor, rope: &Rope, content_cols: usize) {
+    let (_, within) = col_to_sub_line(cursor.col, line_char_len(rope, cursor.line), content_cols);
+    cursor.preferred_col = within;
 }
 
 /// Character count of a buffer line, stripped of trailing `\n` /

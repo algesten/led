@@ -148,7 +148,19 @@ pub(super) fn request_yank(tabs: &Tabs, clip: &mut ClipboardState) {
 /// the yank. Clears `pending_yank`. No-op when the target tab no
 /// longer exists (closed while the clipboard read was in flight) or
 /// isn't materialised in `edits`.
-pub fn apply_yank(tabs: &mut Tabs, edits: &mut BufferEdits, target: TabId, text: &str) {
+///
+/// `content_cols` is the painter's editor body width — used to
+/// refresh `preferred_col` as the within-sub-line col so a later
+/// vertical move over the yanked range lands on the right visual
+/// column. Dispatch computes this from terminal + browser; the
+/// ingest-side caller mirrors that.
+pub fn apply_yank(
+    tabs: &mut Tabs,
+    edits: &mut BufferEdits,
+    target: TabId,
+    text: &str,
+    content_cols: usize,
+) {
     let Some(idx) = tabs.open.iter().position(|t| t.id == target) else {
         return;
     };
@@ -170,7 +182,7 @@ pub fn apply_yank(tabs: &mut Tabs, edits: &mut BufferEdits, target: TabId, text:
     let new_idx = char_idx + inserted_chars;
     let tab = &mut tabs.open[idx];
     tab.cursor = char_to_cursor(new_idx, &eb.rope);
-    tab.cursor.preferred_col = tab.cursor.col;
+    super::shared::refresh_preferred_col(&mut tab.cursor, &eb.rope, content_cols);
     let after = tab.cursor;
 
     eb.history
@@ -393,7 +405,7 @@ mod tests {
             col: 3,
             preferred_col: 3,
         };
-        apply_yank(&mut tabs, &mut edits, TabId(1), "XYZ");
+        apply_yank(&mut tabs, &mut edits, TabId(1), "XYZ", 18);
         assert_eq!(rope_of(&edits, "file.rs").to_string(), "helXYZlo");
         assert_eq!(tabs.open[0].cursor.col, 6);
     }

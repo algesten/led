@@ -203,16 +203,6 @@ pub struct SyntaxState {
     /// flight — queue a fresh parse if the buffer is ahead of
     /// `version`.
     pub in_flight_version: Option<u64>,
-    /// `history.applied_ops().count()` at the moment the parse
-    /// request was dispatched. The render pipeline subtracts this
-    /// from the current count to know which edit ops to rebase
-    /// through before painting. Advances in lock-step with
-    /// `version` on each applied `SyntaxOut`.
-    pub applied_at_parse: usize,
-    /// `history.applied_ops().count()` snapshotted at dispatch
-    /// time; pinned here while the parse is in flight and copied
-    /// to `applied_at_parse` when the matching completion arrives.
-    pub in_flight_applied: Option<usize>,
 }
 
 impl SyntaxState {
@@ -224,8 +214,6 @@ impl SyntaxState {
             tokens: Arc::new(Vec::new()),
             version: 0,
             in_flight_version: None,
-            applied_at_parse: 0,
-            in_flight_applied: None,
         }
     }
 }
@@ -321,29 +309,92 @@ pub enum RebaseOp {
     Delete { at: usize, len: usize },
 }
 
-/// Derive the sequence of `RebaseOp`s from an
-/// [`led_state_buffer_edits::History`]'s op log between two
-/// versions. Walks `applied_ops()` and emits an op per applied
-/// edit; callers that know the exact boundary pass the returned
-/// iterator through `rebase_tokens`.
-pub fn rebase_ops_since_version(
-    history: &led_state_buffer_edits::History,
-    since_applied_count: usize,
-) -> Vec<RebaseOp> {
-    history
-        .applied_ops()
-        .skip(since_applied_count)
-        .map(|op| match op {
-            led_state_buffer_edits::EditOp::Insert { at, text } => RebaseOp::Insert {
-                at: *at,
-                len: text.chars().count(),
-            },
-            led_state_buffer_edits::EditOp::Delete { at, text } => RebaseOp::Delete {
-                at: *at,
-                len: text.chars().count(),
-            },
+/// Minimal prefix/suffix-trimmed diff between two rope
+/// snapshots. The worker feeds this to tree-sitter as one
+/// `InputEdit`; the runtime uses it to rebase cached token
+/// positions through the user's edits between parses. Purely
+/// derived from `(prev, curr)` — no history counters, no
+/// stored "applied_at_parse" snapshot to drift across
+/// undo/redo.
+///
+/// Metadata-only: char positions and lengths. We never
+/// materialise the inserted text — both consumers
+/// (tree-sitter's `InputEdit` and `rebase_ops`) take only
+/// char counts, and the byte view of the insertion lives in
+/// `curr` already. Allocating an `Arc<str>` of the insertion
+/// per keystroke was pure waste.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RopeDiff {
+    /// Char offset in `prev` where the change begins —
+    /// equivalently, the length of the longest common prefix.
+    pub char_start: usize,
+    /// Chars of `prev` removed (0 for a pure insert).
+    pub removed_chars: usize,
+    /// Chars inserted at `char_start` (0 for a pure delete).
+    pub inserted_chars: usize,
+}
+
+impl RopeDiff {
+    /// Compute the diff. Returns `None` for byte-identical
+    /// ropes. O(N) worst case; in practice O(edit distance)
+    /// because the prefix/suffix scans stop at the first
+    /// divergent char.
+    pub fn between(prev: &ropey::Rope, curr: &ropey::Rope) -> Option<Self> {
+        let prev_len = prev.len_chars();
+        let curr_len = curr.len_chars();
+        if prev_len == curr_len && prev == curr {
+            return None;
+        }
+        let max_common = prev_len.min(curr_len);
+        let mut prefix = 0;
+        let mut pc = prev.chars();
+        let mut cc = curr.chars();
+        while prefix < max_common {
+            let p = pc.next();
+            let c = cc.next();
+            if p == c {
+                prefix += 1;
+            } else {
+                break;
+            }
+        }
+        let max_suffix = max_common - prefix;
+        let mut suffix = 0;
+        while suffix < max_suffix {
+            let p = prev.char(prev_len - 1 - suffix);
+            let c = curr.char(curr_len - 1 - suffix);
+            if p == c {
+                suffix += 1;
+            } else {
+                break;
+            }
+        }
+        let removed_chars = prev_len - prefix - suffix;
+        let inserted_chars = curr_len - prefix - suffix;
+        if removed_chars == 0 && inserted_chars == 0 {
+            return None;
+        }
+        Some(Self {
+            char_start: prefix,
+            removed_chars,
+            inserted_chars,
         })
-        .collect()
+    }
+
+    /// Express the diff as the `[Delete?, Insert?]` pair the
+    /// rebase walker consumes. Empty iterator for an identity
+    /// diff, one or two items otherwise.
+    pub fn rebase_ops(&self) -> impl Iterator<Item = RebaseOp> {
+        let del = (self.removed_chars > 0).then_some(RebaseOp::Delete {
+            at: self.char_start,
+            len: self.removed_chars,
+        });
+        let ins = (self.inserted_chars > 0).then_some(RebaseOp::Insert {
+            at: self.char_start,
+            len: self.inserted_chars,
+        });
+        del.into_iter().chain(ins)
+    }
 }
 
 #[cfg(test)]

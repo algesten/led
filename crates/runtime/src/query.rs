@@ -476,6 +476,17 @@ pub fn tab_bar_model<'a, 'b>(
 // col 1 with diagnostic severity.
 const GUTTER_WIDTH: usize = 2;
 
+/// Trailing column never written to on the right edge of the
+/// editor area. Held at `0` now that the painter is
+/// cell-grid-diff-based (see `driver-terminal/native/src/{buffer,render}.rs`):
+/// it never emits `Clear(UntilNewLine)`, so writing the last
+/// column is safe and the soft-wrap `\` lives in the true last
+/// col of the terminal. The constant survives as a nameable
+/// knob in case we ever need to reserve a gap again (e.g. for a
+/// scroll indicator column); keeping it at `0` matches legacy
+/// emacs/led behaviour.
+const TRAILING_RESERVED_COLS: usize = 0;
+
 /// Body slice of the render frame.
 ///
 /// Reads the active tab's cursor + scroll to produce the visible line
@@ -505,15 +516,19 @@ pub fn body_model<'e, 'a, 'b, 'o, 's, 'd>(
     let Some(tab) = tabs.open.iter().find(|t| t.id == id) else {
         return BodyModel::Empty;
     };
-    let highlight = active_body_match(&overlays, &tab.path, tab.scroll, area);
     if let Some(eb) = edits.buffers.get(&tab.path) {
-        let spans = rebased_line_spans(syntax.by_path.get(&tab.path), eb);
+        let highlight = active_body_match(&overlays, &tab.path, tab.scroll, area, &eb.rope);
+        let spans = rebased_line_spans(syntax, edits, tab.path.clone());
         // No-smear rule: diagnostics render only when their
-        // stamped version matches the buffer's current version.
+        // stamped hash matches the buffer's current content.
+        // Ingestion stamps at offer-time with the then-current
+        // hash, so a mismatch means the user has edited since.
+        let current_hash =
+            led_core::EphemeralContentHash::of_rope(&eb.rope).persist();
         let diags = diagnostics
             .by_path
             .get(&tab.path)
-            .filter(|bd| bd.version.0 == eb.version)
+            .filter(|bd| bd.hash == current_hash)
             .map(|bd| bd.diagnostics.as_slice());
         return render_content(
             &eb.rope,
@@ -521,7 +536,7 @@ pub fn body_model<'e, 'a, 'b, 'o, 's, 'd>(
             tab.scroll,
             area,
             highlight,
-            spans.as_deref(),
+            spans.as_deref().map(|v: &Vec<TokenSpan>| v.as_slice()),
             diags,
         );
     }
@@ -533,42 +548,75 @@ pub fn body_model<'e, 'a, 'b, 'o, 's, 'd>(
             path_display: path_display(tab),
             message: Arc::<str>::from(msg.as_str()),
         },
-        Some(LoadState::Ready(rope)) => render_content(
-            rope,
-            tab.cursor,
-            tab.scroll,
-            area,
-            highlight,
-            None,
-            None,
-        ),
+        Some(LoadState::Ready(rope)) => {
+            let highlight =
+                active_body_match(&overlays, &tab.path, tab.scroll, area, rope);
+            render_content(
+                rope,
+                tab.cursor,
+                tab.scroll,
+                area,
+                highlight,
+                None,
+                None,
+            )
+        }
     }
 }
 
-/// Apply any edits the user made between the parse and now onto the
-/// token list so spans still line up with current rope offsets. On
-/// an undo-style history regression (applied_ops count went below
-/// the parse snapshot) we show the raw tokens unchanged — the
-/// painter will render them at slightly stale offsets, which is the
-/// acceptable-flicker regime until the next parse lands.
+/// Apply any edits the user made between the parse and now onto
+/// the token list so spans still line up with current rope
+/// offsets. Memoised on `(SyntaxStatesInput, EditedBuffersInput,
+/// path)` — cursor moves, scrolls, overlay changes and resize
+/// all invalidate `body_model` but not this memo, so the
+/// rebased token list is reused as long as the tokens, the
+/// parse-anchor rope and the current rope haven't changed. The
+/// output is `Arc`-wrapped so a cache hit is a pointer clone.
 ///
-/// Returns `None` when there's no syntax state yet — caller
-/// interprets that as "render plain".
-fn rebased_line_spans(
-    state: Option<&SyntaxState>,
-    eb: &EditedBuffer,
-) -> Option<Vec<TokenSpan>> {
-    let state = state?;
+/// Returns `None` when there's no syntax state yet, no tokens,
+/// or no buffer for `path` — caller interprets each as
+/// "render plain".
+#[drv::memo(single)]
+pub fn rebased_line_spans<'s, 'b>(
+    syntax: SyntaxStatesInput<'s>,
+    edits: EditedBuffersInput<'b>,
+    path: CanonPath,
+) -> Option<Arc<Vec<TokenSpan>>> {
+    let state = syntax.by_path.get(&path)?;
+    let eb = edits.buffers.get(&path)?;
     if state.tokens.is_empty() {
         return None;
     }
-    let applied_now = eb.history.applied_ops().count();
-    if applied_now <= state.applied_at_parse {
-        return Some(state.tokens.as_ref().clone());
+    // Drv-pure rebase: derive the ops from the two rope
+    // snapshots the parser saw vs. the current rope. No
+    // history-index counter that could drift across undo/redo.
+    let Some(prev_rope) = state.tree_rope.as_ref() else {
+        return Some(state.tokens.clone());
+    };
+    if Arc::ptr_eq(prev_rope, &eb.rope) {
+        return Some(state.tokens.clone());
     }
-    let ops =
-        led_state_syntax::rebase_ops_since_version(&eb.history, state.applied_at_parse);
-    Some(led_state_syntax::rebase_tokens(&state.tokens, ops))
+    let Some(diff) = led_state_syntax::RopeDiff::between(prev_rope, &eb.rope) else {
+        return Some(state.tokens.clone());
+    };
+    // Append-past-last-token fast path: if the diff sits
+    // entirely past the last token's end (typing trailing
+    // whitespace, appending at EOF, editing the tail of the
+    // buffer past the highlighted region), no token positions
+    // move and the existing Arc<Vec<TokenSpan>> is still
+    // correct. Skip the to_vec() and the Arc::new wrap.
+    let last_token_end = state
+        .tokens
+        .last()
+        .map(|t| t.char_end)
+        .unwrap_or(0);
+    if diff.char_start >= last_token_end {
+        return Some(state.tokens.clone());
+    }
+    Some(Arc::new(led_state_syntax::rebase_tokens(
+        &state.tokens,
+        diff.rebase_ops(),
+    )))
 }
 
 /// Resolve the file-search overlay's current hit into a visible-row
@@ -582,7 +630,9 @@ fn active_body_match(
     active_path: &CanonPath,
     scroll: Scroll,
     area: Rect,
+    rope: &Rope,
 ) -> Option<led_driver_terminal_core::BodyMatch> {
+    use led_core::{SubLine, col_to_sub_line, sub_line_count};
     let state = overlays.file_search.as_ref()?;
     let led_state_file_search::FileSearchSelection::Result(i) = state.selection else {
         return None;
@@ -593,26 +643,55 @@ fn active_body_match(
     }
     let line = hit.line.saturating_sub(1);
     let body_rows = area.rows as usize;
-    if body_rows == 0 || line < scroll.top || line >= scroll.top + body_rows {
+    if body_rows == 0 || line < scroll.top {
         return None;
     }
     let cols = area.cols as usize;
-    let content_cols = cols.saturating_sub(GUTTER_WIDTH);
+    let content_cols = cols
+        .saturating_sub(GUTTER_WIDTH)
+        .saturating_sub(TRAILING_RESERVED_COLS);
     let match_char_len = chars_between(&hit.preview, hit.match_start, hit.match_end);
     let col_start_char = hit.col.saturating_sub(1);
-    let col_end_char = col_start_char + match_char_len;
-    // Buffer content truncated to `content_cols` — clamp the
-    // highlight to the visible slice so we don't emit a range past
-    // the right edge.
-    let col_start = col_start_char.min(content_cols);
-    let col_end = col_end_char.min(content_cols);
-    if col_end <= col_start {
+    // Pin the match to the sub-line containing its starting col;
+    // wrapped matches (that straddle a sub-line boundary) paint
+    // only on their first sub-line — consistent with legacy,
+    // which didn't split match highlights across visual rows.
+    let hit_line_len = line_char_len_rope(rope, line);
+    let (match_sub, col_within) =
+        col_to_sub_line(col_start_char, hit_line_len, content_cols);
+    // Walk sub-line counts to find the visible-row index for
+    // (line, match_sub).
+    let mut row: usize = 0;
+    let mut ln = scroll.top;
+    let mut sub_start = scroll.top_sub_line.0;
+    while ln < line {
+        let len = line_char_len_rope(rope, ln);
+        let subs = sub_line_count(len, content_cols);
+        let remaining = subs.saturating_sub(sub_start);
+        row = row.saturating_add(remaining);
+        ln += 1;
+        sub_start = 0;
+    }
+    if match_sub.0 < sub_start {
         return None;
     }
+    row = row.saturating_add(match_sub.0 - sub_start);
+    if row >= body_rows {
+        return None;
+    }
+    // Columns of the match *within this sub-line*, clamped to
+    // the sub-line's content width.
+    let within_end = col_within.saturating_add(match_char_len);
+    let rel_start = col_within.min(content_cols);
+    let rel_end = within_end.min(content_cols);
+    if rel_end <= rel_start {
+        return None;
+    }
+    let _ = SubLine(0); // keep import without warning in edge conditions
     Some(led_driver_terminal_core::BodyMatch {
-        row: (line - scroll.top) as u16,
-        col_start: (col_start + GUTTER_WIDTH) as u16,
-        col_end: (col_end + GUTTER_WIDTH) as u16,
+        row: row as u16,
+        col_start: (rel_start + GUTTER_WIDTH) as u16,
+        col_end: (rel_end + GUTTER_WIDTH) as u16,
     })
 }
 
@@ -630,71 +709,106 @@ fn render_content(
     diagnostics: Option<&[Diagnostic]>,
 ) -> BodyModel {
     use led_driver_terminal_core::BodyLine;
+    use led_core::{SubLine, sub_line_count, sub_line_range};
 
     let body_rows = area.rows as usize;
     let line_count = rope.len_lines();
     let cols = area.cols as usize;
-    let content_cols = cols.saturating_sub(GUTTER_WIDTH);
+    let content_cols = cols
+        .saturating_sub(GUTTER_WIDTH)
+        .saturating_sub(TRAILING_RESERVED_COLS);
 
     let mut lines: Vec<BodyLine> = Vec::with_capacity(body_rows);
-    for i in 0..body_rows {
-        let ln = scroll.top.saturating_add(i);
-        if ln < line_count {
-            // Content row: 2-space gutter, then truncated buffer line.
-            let mut s = String::with_capacity(cols);
-            s.push_str("  ");
-            let line_char_start = rope.line_to_char(ln);
-            let mut content = rope.line(ln).to_string();
-            strip_trailing_newline(&mut content);
-            let line_char_len = content.chars().count();
-            truncate_to_cols_in_place(&mut content, content_cols);
-            s.push_str(&content);
-            let spans = rebased_tokens
-                .map(|tokens| {
-                    tokens_to_line_spans(
-                        tokens,
-                        line_char_start,
-                        line_char_len,
-                        content_cols,
-                    )
-                })
-                .unwrap_or_default();
-            let (gutter_diag, row_diagnostics) = diagnostics
-                .map(|diags| diagnostics_for_row(diags, ln, line_char_len, content_cols))
-                .unwrap_or_default();
-            lines.push(BodyLine {
-                text: s,
-                spans,
-                gutter_diagnostic: gutter_diag,
-                diagnostics: row_diagnostics,
-            });
-        } else {
+    let mut ln = scroll.top;
+    let mut sub = scroll.top_sub_line;
+    for _ in 0..body_rows {
+        if ln >= line_count {
             lines.push(BodyLine {
                 text: "~ ".to_string(),
                 spans: Vec::new(),
                 gutter_diagnostic: None,
                 diagnostics: Vec::new(),
             });
+            continue;
+        }
+        let line_char_start = rope.line_to_char(ln);
+        let mut full_line = rope.line(ln).to_string();
+        strip_trailing_newline(&mut full_line);
+        let line_char_len = full_line.chars().count();
+        let max_sub = sub_line_count(line_char_len, content_cols);
+        // Clamp `sub` to a valid range; a previous width change
+        // could have left `scroll.top_sub_line` past the end of
+        // the current line. Render the first sub-line instead
+        // of producing an empty row.
+        if sub.0 >= max_sub {
+            sub = SubLine(0);
+        }
+        let (col_start, col_end) = sub_line_range(sub, line_char_len, content_cols);
+        let slice: String = full_line.chars().skip(col_start).take(col_end - col_start).collect();
+        let sub_char_start = line_char_start + col_start;
+        let is_continued = led_core::is_continued(sub, line_char_len, content_cols);
+        let mut s = String::with_capacity(cols);
+        s.push_str("  ");
+        s.push_str(&slice);
+        if is_continued {
+            // Non-last sub-line: emit `<content><\>`. Wrap
+            // geometry reserves exactly one trailing col for the
+            // glyph (wrap_width = content_cols - 1), so `\` lands
+            // at the editor area's last column, flush against the
+            // terminal's right edge — no interior blank, no
+            // trailing blank. Matches emacs's display.
+            s.push('\\');
+        }
+        let spans = rebased_tokens
+            .map(|tokens| {
+                tokens_to_line_spans(
+                    tokens,
+                    sub_char_start,
+                    col_end - col_start,
+                    content_cols,
+                )
+            })
+            .unwrap_or_default();
+        let (gutter_diag, row_diagnostics) = diagnostics
+            .map(|diags| diagnostics_for_sub_line(diags, ln, col_start, col_end, content_cols))
+            .unwrap_or_default();
+        lines.push(BodyLine {
+            text: s,
+            spans,
+            gutter_diagnostic: gutter_diag,
+            diagnostics: row_diagnostics,
+        });
+        // Advance to the next visible sub-line; cross into the
+        // next logical line when we run past the current one's
+        // sub-line count.
+        sub = SubLine(sub.0 + 1);
+        if sub.0 >= max_sub {
+            ln += 1;
+            sub = SubLine(0);
         }
     }
 
     BodyModel::Content {
         lines: Arc::new(lines),
-        cursor: visible_cursor(cursor, scroll, area),
+        cursor: visible_cursor(cursor, scroll, area, rope, content_cols),
         match_highlight,
     }
 }
 
 /// Project the buffer-wide diagnostic list onto one rendered
-/// row: pick the highest-severity diagnostic whose range
-/// intersects the row for the gutter mark, and emit an
-/// underline for each diagnostic whose range touches the row.
+/// sub-line: pick the highest-severity diagnostic whose range
+/// intersects the logical line for the gutter mark (so every
+/// sub-line of a wrapped line carries the dot), and emit an
+/// underline clipped to the sub-line's `[sub_col_start, sub_col_end)`
+/// range — diagnostics that fall outside the sub-line simply
+/// don't appear on that row.
 ///
 /// Severity ordering for the gutter: Error > Warning > Info > Hint.
-fn diagnostics_for_row(
+fn diagnostics_for_sub_line(
     diags: &[Diagnostic],
     line_num: usize,
-    line_char_len: usize,
+    sub_col_start: usize,
+    sub_col_end: usize,
     content_cols: usize,
 ) -> (
     Option<DiagnosticSeverity>,
@@ -715,23 +829,31 @@ fn diagnostics_for_row(
         if !matches!(d.severity, DiagnosticSeverity::Error | DiagnosticSeverity::Warning) {
             continue;
         }
-        // Update gutter to highest severity seen.
+        // Gutter tracks "any Err/Warn on this logical line" — a
+        // wrapped line shows a dot on every sub-line so the user
+        // sees it no matter which part of the line they're on.
         gutter = Some(match gutter {
             Some(existing) => higher(existing, d.severity),
             None => d.severity,
         });
-        // Compute this row's visible column range.
-        let col_start = if line_num == d.start_line { d.start_col } else { 0 };
-        let col_end = if line_num == d.end_line {
+        // Diagnostic column range ON THIS LOGICAL LINE.
+        let line_col_start = if line_num == d.start_line { d.start_col } else { 0 };
+        let line_col_end = if line_num == d.end_line {
             d.end_col
         } else {
-            line_char_len
+            sub_col_end // clamped to sub-line end; spans run off visually
         };
-        if col_end <= col_start {
+        // Clip against the sub-line's column range, then make it
+        // relative to the sub-line's own col 0.
+        let clip_start = line_col_start.max(sub_col_start);
+        let clip_end = line_col_end.min(sub_col_end);
+        if clip_end <= clip_start {
             continue;
         }
-        let vis_start = col_start.min(content_cols) + GUTTER_WIDTH;
-        let vis_end = col_end.min(content_cols) + GUTTER_WIDTH;
+        let rel_start = clip_start - sub_col_start;
+        let rel_end = clip_end - sub_col_start;
+        let vis_start = rel_start.min(content_cols) + GUTTER_WIDTH;
+        let vis_end = rel_end.min(content_cols) + GUTTER_WIDTH;
         if vis_end <= vis_start {
             continue;
         }
@@ -801,18 +923,68 @@ fn tokens_to_line_spans(
     out
 }
 
-fn visible_cursor(c: Cursor, s: Scroll, area: Rect) -> Option<(u16, u16)> {
+/// Count how many visible body rows sit between the scroll
+/// anchor and the cursor's sub-line. Returns `None` when the
+/// cursor is above the scroll anchor or past the body bottom.
+///
+/// Walks logical lines one at a time — on soft-wrap buffers each
+/// logical line may contribute multiple visible rows. Cheap in
+/// practice because `body_rows` is tiny (20-50) and the walk
+/// short-circuits as soon as we pass the cursor's line.
+fn visible_cursor(
+    c: Cursor,
+    s: Scroll,
+    area: Rect,
+    rope: &Rope,
+    content_cols: usize,
+) -> Option<(u16, u16)> {
+    use led_core::{col_to_sub_line, sub_line_count};
     let body_rows = area.rows as usize;
-    if body_rows == 0 {
+    if body_rows == 0 || c.line < s.top {
         return None;
     }
-    if c.line < s.top || c.line >= s.top.saturating_add(body_rows) {
+    // Cursor's own sub-line + column within that sub-line.
+    let cur_line_len = line_char_len_rope(rope, c.line);
+    let (cur_sub, col_within) = col_to_sub_line(c.col, cur_line_len, content_cols);
+    // Count visible rows from (s.top, s.top_sub_line) to (c.line, cur_sub).
+    let mut row: usize = 0;
+    let line_count = rope.len_lines();
+    let mut ln = s.top;
+    let mut sub_start = s.top_sub_line.0;
+    while ln < c.line {
+        if ln >= line_count {
+            return None;
+        }
+        let len = line_char_len_rope(rope, ln);
+        let subs = sub_line_count(len, content_cols);
+        let remaining = subs.saturating_sub(sub_start);
+        row = row.saturating_add(remaining);
+        ln += 1;
+        sub_start = 0;
+    }
+    // Same logical line: add the sub-line offset, clamped to 0
+    // if scroll started past this cursor's sub-line (caller's
+    // adjust_scroll should prevent that).
+    if cur_sub.0 < sub_start {
         return None;
     }
-    let row = (c.line - s.top) as u16;
+    row = row.saturating_add(cur_sub.0 - sub_start);
+    if row >= body_rows {
+        return None;
+    }
     let max_col = (area.cols as usize).saturating_sub(1);
-    let col = (c.col + GUTTER_WIDTH).min(max_col) as u16;
-    Some((row, col))
+    let col = (col_within + GUTTER_WIDTH).min(max_col) as u16;
+    Some((row as u16, col))
+}
+
+fn line_char_len_rope(rope: &Rope, line: usize) -> usize {
+    let line_count = rope.len_lines();
+    if line >= line_count {
+        return 0;
+    }
+    let mut s = rope.line(line).to_string();
+    strip_trailing_newline(&mut s);
+    s.chars().count()
 }
 
 fn strip_trailing_newline(s: &mut String) {
@@ -821,14 +993,6 @@ fn strip_trailing_newline(s: &mut String) {
         if s.ends_with('\r') {
             s.pop();
         }
-    }
-}
-
-/// Truncate `s` to at most `cols` Unicode characters, in place.
-/// No allocation when the string already fits.
-fn truncate_to_cols_in_place(s: &mut String, cols: usize) {
-    if let Some((byte_idx, _)) = s.char_indices().nth(cols) {
-        s.truncate(byte_idx);
     }
 }
 
@@ -1380,8 +1544,8 @@ const POPOVER_MAX_CONTENT: usize = 58;
 /// - The browser is focused.
 /// - No active tab, or the active buffer isn't loaded yet.
 /// - `DiagnosticsStates` has nothing for the active path.
-/// - The stamped `BufferVersion` doesn't match the current
-///   buffer version (no-smear: hide rather than show stale).
+/// - The stamped content hash doesn't match the buffer's current
+///   content (no-smear: hide rather than show stale).
 /// - No Error/Warning diagnostic covers the cursor row
 ///   (Info/Hint are silent, matching legacy).
 pub fn popover_model(
@@ -1405,7 +1569,8 @@ pub fn popover_model(
     let tab = tabs.open.iter().find(|t| t.id == id)?;
     let eb = edits.buffers.get(&tab.path)?;
     let bd = diagnostics.by_path.get(&tab.path)?;
-    if bd.version.0 != eb.version {
+    let current_hash = led_core::EphemeralContentHash::of_rope(&eb.rope).persist();
+    if bd.hash != current_hash {
         return None;
     }
     let cursor_row = tab.cursor.line;
@@ -2193,7 +2358,7 @@ mod tests {
         );
         // Place cursor at line 25 with scroll.top = 20 → cursor visible at row 5.
         t.open[0].cursor = Cursor { line: 25, col: 2, preferred_col: 2 };
-        t.open[0].scroll = Scroll { top: 20 };
+        t.open[0].scroll = Scroll { top: 20, top_sub_line: led_core::SubLine(0) };
 
         let frame = render(&t, &e, &s, &term).expect("dims set");
         match &frame.body {
@@ -2211,6 +2376,155 @@ mod tests {
     }
 
     #[test]
+    fn body_model_wraps_long_logical_line_across_multiple_body_rows() {
+        // cols=12 → editor_area.cols=12; minus 2 gutter + 0
+        // trailing reserved col = content_cols 10, wrap_width 9
+        // (one trailing col per non-last sub: `\`).
+        // A 50-char line splits into 6 sub-lines of widths
+        // 9/9/9/9/9/5.
+        let rope = Arc::new(Rope::from_str(
+            "abcdefghij0123456789ABCDEFGHIJ!@#$%^&*()qwertyuiop",
+        ));
+        let (mut t, e, s, term) = fixture(
+            &[("wide.rs", 1)],
+            Some(1),
+            &[("wide.rs", LoadState::Ready(rope))],
+            Some(Dims { cols: 12, rows: 11 }), // body_rows = 9
+        );
+        // Cursor at col 25 → sub 25/9 = 2, within 25 % 9 = 7.
+        t.open[0].cursor = Cursor { line: 0, col: 25, preferred_col: 7 };
+        t.open[0].scroll = Scroll { top: 0, top_sub_line: led_core::SubLine(0) };
+
+        let frame = render(&t, &e, &s, &term).expect("dims set");
+        match &frame.body {
+            BodyModel::Content { lines, cursor, .. } => {
+                assert_eq!(lines.len(), 9);
+                assert_eq!(lines[0].text, "  abcdefghi\\");
+                assert_eq!(lines[1].text, "  j01234567\\");
+                assert_eq!(lines[2].text, "  89ABCDEFG\\");
+                assert_eq!(lines[3].text, "  HIJ!@#$%^\\");
+                assert_eq!(lines[4].text, "  &*()qwert\\");
+                assert_eq!(lines[5].text, "  yuiop");
+                assert_eq!(lines[6].text, "~ ");
+                // Cursor on sub 2 within 7 → body row 2, screen col 2+7=9.
+                assert_eq!(*cursor, Some((2, 9)));
+            }
+            other => panic!("expected Content, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn body_model_renders_wrap_glyph_on_every_non_last_sub_of_long_line() {
+        // Regression guard for the README.md rendering bug where
+        // the last visible wrap row on a long logical line came
+        // out without its trailing `\` (the user saw `algesten/s`
+        // where `algesten/s\` was expected, with `tr0m).` on the
+        // next row). The line is the full M1 README warning
+        // paragraph (410 chars). At content_cols=102 it wraps
+        // into 5 sub-lines: 4 non-last + 1 last. Every non-last
+        // sub must carry `\` regardless of whether it's the final
+        // row the body rendered.
+        let line = "> **Vibe coded.** This project is an experiment in getting an \
+AI assistant to follow Functional Reactive Programming (FRP) principles and \
+produce reasonable code within that discipline. I've focused on the overall \
+architecture rather than reviewing the code output in detail. For projects \
+I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
+[str0m](https://github.com/algesten/str0m).";
+        assert_eq!(line.chars().count(), 410);
+        let rope = Arc::new(Rope::from_str(line));
+        let (t, e, s, term) = fixture(
+            &[("README.md", 1)],
+            Some(1),
+            &[("README.md", LoadState::Ready(rope))],
+            // cols=104 → editor_area.cols=104; content_cols=102;
+            // wrap_width=101 → 5 sub-lines (101/101/101/101/6).
+            // rows=8 gives body_rows=6, enough to show all 5 +
+            // one tilde row.
+            Some(Dims { cols: 104, rows: 8 }),
+        );
+        let frame = render(&t, &e, &s, &term).expect("dims set");
+        match &frame.body {
+            BodyModel::Content { lines, .. } => {
+                // Subs 0..3 are non-last → must end with `\`.
+                for i in 0..4 {
+                    assert!(
+                        lines[i].text.ends_with('\\'),
+                        "sub {i} missing wrap glyph: {:?}",
+                        lines[i].text
+                    );
+                }
+                // Sub 4 is last → no `\`.
+                assert!(!lines[4].text.ends_with('\\'));
+            }
+            other => panic!("expected Content, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn body_model_wrap_glyph_survives_full_paint_pipeline() {
+        // End-to-end regression for the reported `\ missing on
+        // wrapped rows` bug. A 100-char logical line at a realistic
+        // editor width should produce `\` at the right edge of each
+        // non-last sub-line, visible in the painted byte stream.
+        let text: String = (0..100).map(|i| (b'A' + (i % 26) as u8) as char).collect();
+        let rope = Arc::new(Rope::from_str(&text));
+        let (t, e, s, term) = fixture(
+            &[("long.md", 1)],
+            Some(1),
+            &[("long.md", LoadState::Ready(rope))],
+            // rows=8 → body_rows=6; cols=30 → editor_area.cols=30;
+            // content_cols=28, wrap_width=27 → sub-lines of 27/27/27/19.
+            Some(Dims { cols: 30, rows: 8 }),
+        );
+        let frame = render(&t, &e, &s, &term).expect("dims set");
+        match &frame.body {
+            BodyModel::Content { lines, .. } => {
+                // Sub 0/1/2 non-last → end in `\`; sub 3 last → no `\`.
+                assert!(
+                    lines[0].text.ends_with('\\'),
+                    "sub 0 missing wrap glyph: {:?}",
+                    lines[0].text
+                );
+                assert!(lines[1].text.ends_with('\\'));
+                assert!(lines[2].text.ends_with('\\'));
+                assert!(!lines[3].text.ends_with('\\'));
+            }
+            other => panic!("expected Content, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn body_model_honours_scroll_top_sub_line_on_wrapped_line() {
+        // Start scrolled past the first two sub-lines of the same
+        // logical line — body must show sub-line 2 onward.
+        // body_rows = 4, content_cols = 10, wrap_width = 9.
+        let rope = Arc::new(Rope::from_str(
+            "abcdefghij0123456789ABCDEFGHIJ!@#$%^&*()qwertyuiop",
+        ));
+        let (mut t, e, s, term) = fixture(
+            &[("wide.rs", 1)],
+            Some(1),
+            &[("wide.rs", LoadState::Ready(rope))],
+            Some(Dims { cols: 12, rows: 6 }),
+        );
+        t.open[0].cursor = Cursor { line: 0, col: 25, preferred_col: 7 };
+        t.open[0].scroll = Scroll { top: 0, top_sub_line: led_core::SubLine(2) };
+
+        let frame = render(&t, &e, &s, &term).expect("dims set");
+        match &frame.body {
+            BodyModel::Content { lines, cursor, .. } => {
+                assert_eq!(lines[0].text, "  89ABCDEFG\\");
+                assert_eq!(lines[1].text, "  HIJ!@#$%^\\");
+                assert_eq!(lines[2].text, "  &*()qwert\\");
+                assert_eq!(lines[3].text, "  yuiop");
+                // Cursor on sub 2 within 7 → body row 0, screen col 2+7=9.
+                assert_eq!(*cursor, Some((0, 9)));
+            }
+            other => panic!("expected Content, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn body_model_hides_cursor_when_scrolled_away() {
         let body = (0..50).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
         let (mut t, e, s, term) = fixture(
@@ -2221,7 +2535,7 @@ mod tests {
         );
         // Cursor far outside the scroll window.
         t.open[0].cursor = Cursor { line: 40, col: 0, preferred_col: 0 };
-        t.open[0].scroll = Scroll { top: 0 };
+        t.open[0].scroll = Scroll { top: 0, top_sub_line: led_core::SubLine(0) };
 
         let frame = render(&t, &e, &s, &term).expect("dims set");
         match &frame.body {
@@ -2708,7 +3022,7 @@ mod tests {
             id: TabId(1),
             path: path.clone(),
             cursor: Cursor::default(),
-            scroll: Scroll { top: 2 },
+            scroll: Scroll { top: 2, top_sub_line: led_core::SubLine(0) },
             ..Default::default()
         };
         let mut t = Tabs::default();
@@ -3168,7 +3482,7 @@ mod tests {
         diags.by_path.insert(
             canon("/p/a.rs"),
             BufferDiagnostics::new(
-                led_state_diagnostics::BufferVersion(1),
+                led_core::PersistedContentHash(1),
                 items,
             ),
         );
@@ -3223,7 +3537,7 @@ mod tests {
         diags.by_path.insert(
             canon("/p/sub/err.rs"),
             BufferDiagnostics::new(
-                led_state_diagnostics::BufferVersion(1),
+                led_core::PersistedContentHash(1),
                 vec![Diagnostic {
                     start_line: 0,
                     start_col: 0,
@@ -3313,7 +3627,10 @@ mod tests {
         severity: DiagnosticSeverity,
         message: &str,
         buf_version: u64,
-        diag_version: u64,
+        // `false` stamps the diagnostic with the buffer's actual
+        // content hash (popover-visible); `true` stamps with a
+        // deliberately-wrong hash so the no-smear gate hides it.
+        diag_hash_mismatches: bool,
     ) -> (
         Tabs,
         BufferEdits,
@@ -3337,9 +3654,10 @@ mod tests {
         });
         t.active = Some(TabId(1));
 
+        let rope = Arc::new(Rope::from_str("line\n"));
+        let buf_hash = led_core::EphemeralContentHash::of_rope(&rope).persist();
         let mut e = BufferEdits::default();
-        let mut eb =
-            led_state_buffer_edits::EditedBuffer::fresh(Arc::new(Rope::from_str("line\n")));
+        let mut eb = led_state_buffer_edits::EditedBuffer::fresh(rope);
         eb.version = buf_version;
         e.buffers.insert(path.clone(), eb);
 
@@ -3348,11 +3666,18 @@ mod tests {
             ..Default::default()
         };
 
+        let diag_hash = if diag_hash_mismatches {
+            // Force a deliberate mismatch by xor'ing the low bit.
+            led_core::PersistedContentHash(buf_hash.0 ^ 1)
+        } else {
+            buf_hash
+        };
+
         let mut diags = DiagnosticsStates::default();
         diags.by_path.insert(
             path,
             BufferDiagnostics::new(
-                led_state_diagnostics::BufferVersion(diag_version),
+                diag_hash,
                 vec![Diagnostic {
                     start_line: diag_start_line,
                     start_col: 0,
@@ -3402,7 +3727,7 @@ mod tests {
             DiagnosticSeverity::Error,
             "expected `;`",
             0,
-            0,
+            false,
         );
         let pop = call_popover(&t, &e, &br, &d, &ff, &is, &fs).expect("popover");
         assert_eq!(pop.lines.len(), 1);
@@ -3419,15 +3744,16 @@ mod tests {
             DiagnosticSeverity::Error,
             "x",
             0,
-            0,
+            false,
         );
         assert!(call_popover(&t, &e, &br, &d, &ff, &is, &fs).is_none());
     }
 
     #[test]
-    fn popover_hidden_when_version_stale_no_smear() {
-        // Buffer at v=2, diagnostic stamped at v=1 — hide rather
-        // than show stale.
+    fn popover_hidden_when_hash_stale_no_smear() {
+        // Diagnostic stamped with a content hash that doesn't
+        // match the buffer's current hash — hide rather than
+        // show stale.
         let (t, e, br, d, ff, is, fs) = popover_fixture(
             3,
             3,
@@ -3435,7 +3761,7 @@ mod tests {
             DiagnosticSeverity::Error,
             "x",
             2,
-            1,
+            true,
         );
         assert!(call_popover(&t, &e, &br, &d, &ff, &is, &fs).is_none());
     }
@@ -3444,7 +3770,7 @@ mod tests {
     fn popover_hidden_for_info_and_hint_severity() {
         for sev in [DiagnosticSeverity::Info, DiagnosticSeverity::Hint] {
             let (t, e, br, d, ff, is, fs) =
-                popover_fixture(3, 3, 3, sev, "x", 0, 0);
+                popover_fixture(3, 3, 3, sev, "x", 0, false);
             assert!(
                 call_popover(&t, &e, &br, &d, &ff, &is, &fs).is_none(),
                 "severity {sev:?} must be silent"
@@ -3461,7 +3787,7 @@ mod tests {
             DiagnosticSeverity::Error,
             "x",
             0,
-            0,
+            false,
         );
         let ff = Some(led_state_find_file::FindFileState::open(String::new()));
         assert!(call_popover(&t, &e, &br, &d, &ff, &is, &fs).is_none());
@@ -3476,7 +3802,7 @@ mod tests {
             DiagnosticSeverity::Error,
             "x",
             0,
-            0,
+            false,
         );
         br.focus = Focus::Side;
         assert!(call_popover(&t, &e, &br, &d, &ff, &is, &fs).is_none());
@@ -3492,7 +3818,7 @@ mod tests {
             DiagnosticSeverity::Error,
             msg,
             0,
-            0,
+            false,
         );
         let pop = call_popover(&t, &e, &br, &d, &ff, &is, &fs).expect("popover");
         assert!(pop.lines.len() >= 2, "wrap produces multiple lines");
@@ -3509,7 +3835,7 @@ mod tests {
             DiagnosticSeverity::Warning,
             "spans three lines",
             0,
-            0,
+            false,
         );
         let pop = call_popover(&t, &e, &br, &d, &ff, &is, &fs).expect("popover");
         assert_eq!(pop.lines[0].severity, Some(PopoverSeverity::Warning));

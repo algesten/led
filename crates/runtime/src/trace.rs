@@ -18,10 +18,9 @@ use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use led_core::CanonPath;
+use led_core::{CanonPath, PersistedContentHash};
 use led_driver_find_file_core::FindFileCmd;
 use led_driver_terminal_core::{Dims, KeyEvent};
-use led_state_diagnostics::BufferVersion;
 use led_state_syntax::Language;
 use ropey::Rope;
 
@@ -83,7 +82,7 @@ pub trait Trace: Send + Sync {
     fn lsp_request_diagnostics(&self);
     /// A diagnostic delivery reached the runtime, stamped with
     /// the buffer version the server was reasoning about.
-    fn lsp_diagnostics_done(&self, path: &CanonPath, n: usize, version: BufferVersion);
+    fn lsp_diagnostics_done(&self, path: &CanonPath, n: usize, hash: PersistedContentHash);
     /// Server fell back from pull mode to push mode
     /// (`publishDiagnostics` arrived while in Pull). One-way;
     /// emitted once per server.
@@ -275,7 +274,7 @@ impl Trace for FileTrace {
     // Request-diagnostics fires per version delta; too noisy for
     // the intent log.
     fn lsp_request_diagnostics(&self) {}
-    fn lsp_diagnostics_done(&self, _: &CanonPath, _: usize, _: BufferVersion) {}
+    fn lsp_diagnostics_done(&self, _: &CanonPath, _: usize, _: PersistedContentHash) {}
     fn lsp_mode_fallback(&self) {
         self.write_line("LspModeFallback");
     }
@@ -354,7 +353,7 @@ impl Trace for NoopTrace {
     fn syntax_parse_done(&self, _: &CanonPath, _: u64, _: bool) {}
     fn lsp_server_started(&self, _: &str) {}
     fn lsp_request_diagnostics(&self) {}
-    fn lsp_diagnostics_done(&self, _: &CanonPath, _: usize, _: BufferVersion) {}
+    fn lsp_diagnostics_done(&self, _: &CanonPath, _: usize, _: PersistedContentHash) {}
     fn lsp_mode_fallback(&self) {}
     fn find_file_start(&self, _: &FindFileCmd) {}
     fn find_file_done(&self, _: &CanonPath, _: &str, _: bool) {}
