@@ -5,8 +5,12 @@
 use led_state_buffer_edits::BufferEdits;
 use led_state_tabs::Tabs;
 
-/// Insert the active tab's path into `pending_saves` iff the buffer
-/// is loaded and dirty.
+/// Insert the active tab's path into `pending_saves` if the
+/// buffer is loaded. "Save should always save" — the dirty
+/// check is deliberately absent so Ctrl-X Ctrl-D (SaveNoFormat)
+/// on a clean buffer still touches disk, matching the Ctrl-X
+/// Ctrl-S (Save with format-on-save) behaviour and the user's
+/// explicit request.
 pub(super) fn request_save_active(tabs: &Tabs, edits: &mut BufferEdits) {
     let Some(id) = tabs.active else {
         return;
@@ -14,10 +18,7 @@ pub(super) fn request_save_active(tabs: &Tabs, edits: &mut BufferEdits) {
     let Some(tab) = tabs.open.iter().find(|t| t.id == id) else {
         return;
     };
-    let Some(eb) = edits.buffers.get(&tab.path) else {
-        return;
-    };
-    if eb.dirty() {
+    if edits.buffers.contains_key(&tab.path) {
         edits.pending_saves.insert(tab.path.clone());
     }
 }
@@ -82,10 +83,15 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_x_ctrl_s_on_clean_buffer_is_noop() {
+    fn ctrl_x_ctrl_s_on_clean_buffer_still_queues_format_round_trip() {
+        // "Save should always save": a clean buffer's Ctrl-X
+        // Ctrl-S still fires the format round-trip; the format
+        // response (empty or otherwise) is what slots the path
+        // into `pending_saves`. Pre-dispatch `pending_saves` is
+        // empty because the save-after-format step runs on the
+        // ingest side, not inline in dispatch.
         let (mut tabs, mut edits, store, term) =
             fixture_with_content("hi", Dims { cols: 10, rows: 5 });
-        // Buffer is fresh (version == saved_version == 0).
         dispatch_chord_default(
             key(KeyModifiers::CONTROL, KeyCode::Char('x')),
             key(KeyModifiers::CONTROL, KeyCode::Char('s')),
@@ -94,7 +100,27 @@ mod tests {
             &store,
             &term,
         );
+        // pending_saves is populated AFTER the format reply
+        // arrives — dispatch itself only primes the outbox.
         assert!(edits.pending_saves.is_empty());
+    }
+
+    #[test]
+    fn ctrl_x_ctrl_d_on_clean_buffer_still_queues_save() {
+        // SaveNoFormat skips the LSP format round-trip but still
+        // writes the buffer to disk — "save should always save"
+        // applies to both variants.
+        let (mut tabs, mut edits, store, term) =
+            fixture_with_content("hi", Dims { cols: 10, rows: 5 });
+        dispatch_chord_default(
+            key(KeyModifiers::CONTROL, KeyCode::Char('x')),
+            key(KeyModifiers::CONTROL, KeyCode::Char('d')),
+            &mut tabs,
+            &mut edits,
+            &store,
+            &term,
+        );
+        assert!(edits.pending_saves.contains(&canon("file.rs")));
     }
 
     #[test]

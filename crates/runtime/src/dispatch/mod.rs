@@ -942,13 +942,19 @@ fn run_command(
     }
 }
 
-/// `Save` + format-on-save: if the active buffer is dirty and
-/// has a loaded rope, fire a format request and mark the path
-/// `pending_save_after_format`. The ingest side (applying
+/// `Save` + format-on-save: fire a format request and mark the
+/// path `pending_save_after_format`. The ingest side (applying
 /// `LspEvent::Edits { origin: Format }`) applies the edits and
-/// flips the path into `edits.pending_saves` so the save
-/// driver picks it up next tick. No LSP attached → format
-/// returns empty edits → save still fires.
+/// unconditionally slots the path into `edits.pending_saves` so
+/// the save driver picks it up next tick. No LSP attached →
+/// format returns empty edits → save still fires.
+///
+/// A clean buffer is **not** a reason to bail here: format can
+/// mutate a buffer that was clean on disk (e.g. trailing
+/// whitespace the user didn't type but the server wants gone),
+/// and "save" should always write. Legacy Emacs behaviour
+/// ("(No changes need to be saved)") is intentionally diverged
+/// from for this reason.
 fn save_with_optional_format(
     tabs: &Tabs,
     edits: &mut BufferEdits,
@@ -961,10 +967,7 @@ fn save_with_optional_format(
     let Some(tab) = tabs.open.iter().find(|t| t.id == id) else {
         return;
     };
-    let Some(eb) = edits.buffers.get(&tab.path) else {
-        return;
-    };
-    if !eb.dirty() {
+    if edits.buffers.get(&tab.path).is_none() {
         return;
     }
     lsp_extras.queue_format(tab.path.clone());

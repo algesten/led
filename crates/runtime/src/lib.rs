@@ -1717,10 +1717,14 @@ fn apply_lsp_edits(
             if lsp_extras.pending_save_after_format.remove(&path).is_none() {
                 continue;
             }
-            if let Some(eb) = edits.buffers.get(&path) {
-                if eb.dirty() {
-                    edits.pending_saves.insert(path);
-                }
+            // Always save, even if the buffer looks clean: the
+            // user asked for Save, the format round-trip is
+            // complete, and writing a byte-identical file is
+            // cheap. Gating on `eb.dirty()` here would drop the
+            // save whenever format returned no edits on a clean
+            // buffer, contradicting "save should always save".
+            if edits.buffers.contains_key(&path) {
+                edits.pending_saves.insert(path);
             }
         }
     }
