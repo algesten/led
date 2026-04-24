@@ -14,7 +14,7 @@
 use std::sync::Arc;
 
 use led_core::CanonPath;
-use led_driver_lsp_core::{CompletionItem, CompletionTextEdit};
+use led_driver_lsp_core::CompletionItem;
 use led_state_tabs::TabId;
 
 /// Per-session completion state. `session: None` means no popup
@@ -229,6 +229,7 @@ pub fn refilter(items: &[CompletionItem], prefix: &str) -> Vec<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use led_driver_lsp_core::CompletionTextEdit;
     use std::sync::Arc;
 
     fn item(label: &str, sort: Option<&str>) -> CompletionItem {
