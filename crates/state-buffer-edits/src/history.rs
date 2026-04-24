@@ -273,6 +273,48 @@ impl History {
         self.past.push(group);
     }
 
+    /// Record a batch of replaces as a **single** undo group so one
+    /// Ctrl-/ reverses the whole batch atomically. Used by LSP
+    /// format / rename / code-action apply, where the server can
+    /// return multiple ops whose effects overlap (e.g. sort-imports
+    /// = "delete at X, insert at Y" pair). Undoing them one-at-a-
+    /// time leaves the rope in a duplicate-text intermediate state
+    /// and subsequent per-group undo uses stale positions — the
+    /// result is visible corruption.
+    ///
+    /// `ops` must be in apply-order: history's undo iterates them
+    /// in reverse, inverting each in turn. Matches the existing
+    /// `record_replace` contract for a single replace, just
+    /// generalised to N.
+    pub fn record_replace_batch(
+        &mut self,
+        replaces: Vec<(usize, Arc<str>, Arc<str>)>,
+        cursor_before: Cursor,
+        cursor_after: Cursor,
+    ) {
+        if replaces.is_empty() {
+            return;
+        }
+        self.future.clear();
+        self.finalise();
+        // Each replace contributes two ops (delete + insert).
+        self.applied += replaces.len() * 2;
+        let mut ops: Vec<EditOp> = Vec::with_capacity(replaces.len() * 2);
+        for (at, removed, inserted) in replaces {
+            ops.push(EditOp::Delete { at, text: removed });
+            ops.push(EditOp::Insert { at, text: inserted });
+        }
+        let group = EditGroup {
+            ops,
+            cursor_before,
+            cursor_after,
+            seq: self.seq_gen.next(),
+            file_search_mark: None,
+            save_point_hash: None,
+        };
+        self.past.push(group);
+    }
+
     /// Close the open group (if any) into `past`. Called by
     /// dispatch after every non-edit command so the next edit
     /// starts fresh. Stamps the closing group with the next

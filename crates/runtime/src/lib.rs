@@ -553,7 +553,7 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
                     edits: file_edits,
                 } => {
                     apply_lsp_edits(
-                        edits, alerts, lsp_extras, seq, origin, &file_edits,
+                        edits, tabs, alerts, lsp_extras, seq, origin, &file_edits,
                     );
                 }
                 LspEvent::CodeActions {
@@ -1592,6 +1592,7 @@ fn current_jump_position(tabs: &Tabs) -> Option<led_state_jumps::JumpPosition> {
 /// file(s)" on success.
 fn apply_lsp_edits(
     edits: &mut BufferEdits,
+    tabs: &led_state_tabs::Tabs,
     alerts: &mut AlertState,
     lsp_extras: &mut led_state_lsp::LspExtrasState,
     seq: u64,
@@ -1654,13 +1655,25 @@ fn apply_lsp_edits(
     let mut total_ops = 0usize;
     let mut files_touched = 0usize;
     for fe in file_edits.iter() {
+        // Capture the tab's cursor for this file (if any) before
+        // the edit runs, so the group's undo/redo bookends point
+        // at a meaningful location rather than (0, 0). When no
+        // tab is open for the path (shouldn't happen in
+        // practice — we only get edits for paths we asked about)
+        // we fall back to Default.
+        let cursor = tabs
+            .open
+            .iter()
+            .find(|t| t.path == fe.path)
+            .map(|t| t.cursor)
+            .unwrap_or_default();
         let Some(eb) = edits.buffers.get_mut(&fe.path) else {
             continue;
         };
         if fe.edits.is_empty() {
             continue;
         }
-        let applied = apply_file_edits(eb, &fe.edits);
+        let applied = apply_file_edits(eb, &fe.edits, cursor);
         if applied > 0 {
             total_ops += applied;
             files_touched += 1;
@@ -1730,17 +1743,29 @@ fn apply_lsp_edits(
     }
 }
 
-/// Apply a sorted list of per-file `TextEditOp`s to a single
-/// buffer. Edits are applied from highest position to lowest so
-/// each apply's char indices remain valid for the next one.
-/// Each edit lands as one `record_replace` history entry — the
-/// user can undo occurrence-by-occurrence, matching legacy.
+/// Apply a batch of per-file `TextEditOp`s to a single buffer
+/// and record them as a **single** undo group so one Ctrl-/
+/// reverses the whole batch atomically.
 ///
-/// Returns the number of edits actually applied (skips any whose
-/// range is out of the rope's bounds).
+/// Per-op groups (the previous approach) break whenever the
+/// server returns overlapping-by-effect edits — e.g. sort-imports
+/// is `(delete "foo, " at X, insert "foo, " at Y)`. Undoing them
+/// one at a time leaves a duplicate-text intermediate state, and
+/// the second undo then uses stale positions. Coalescing into
+/// one group keeps the intermediate state unobservable and keeps
+/// every op's recorded `at` valid relative to the rope at the
+/// moment of inversion.
+///
+/// Edits apply bottom-first (descending start position) so each
+/// apply's char indices stay valid for the next one. `cursor`
+/// is the active-tab cursor captured pre-apply; it doubles as
+/// `cursor_before` and `cursor_after` so undo/redo don't
+/// teleport the user to (0, 0). Returns the number of ops
+/// actually applied (skips any whose range is out of bounds).
 fn apply_file_edits(
     eb: &mut EditedBuffer,
     ops: &[led_driver_lsp_core::TextEditOp],
+    cursor: led_state_tabs::Cursor,
 ) -> usize {
     // Sort descending by (start_line, start_col) so later edits
     // don't invalidate earlier ones' indices.
@@ -1749,24 +1774,36 @@ fn apply_file_edits(
         (b.start_line, b.start_col)
             .cmp(&(a.start_line, a.start_col))
     });
-    let mut applied = 0usize;
+    let mut replaces: Vec<(
+        usize,
+        std::sync::Arc<str>,
+        std::sync::Arc<str>,
+    )> = Vec::with_capacity(sorted.len());
     for op in sorted {
-        if !apply_one_text_edit(eb, op) {
-            continue;
+        if let Some((at, removed, inserted)) = apply_one_text_edit(eb, op) {
+            replaces.push((at, removed, inserted));
         }
-        applied += 1;
+    }
+    let applied = replaces.len();
+    if applied > 0 {
+        eb.history
+            .record_replace_batch(replaces, cursor, cursor);
     }
     applied
 }
 
+/// Apply a single `TextEditOp` to the rope + bump version, and
+/// return the `(at, removed, inserted)` triple the caller needs
+/// to record in history. Returns `None` when the op's range is
+/// out of bounds; the caller skips those.
 fn apply_one_text_edit(
     eb: &mut EditedBuffer,
     op: &led_driver_lsp_core::TextEditOp,
-) -> bool {
+) -> Option<(usize, std::sync::Arc<str>, std::sync::Arc<str>)> {
     let rope = &eb.rope;
     let line_count = rope.len_lines();
     if (op.start_line as usize) >= line_count {
-        return false;
+        return None;
     }
     let start_line = op.start_line as usize;
     let end_line = (op.end_line as usize).min(line_count.saturating_sub(1));
@@ -1785,7 +1822,7 @@ fn apply_one_text_edit(
     let start_char = start_line_char + (op.start_col as usize).min(start_line_len);
     let end_char = end_line_char + (op.end_col as usize).min(end_line_len);
     if end_char < start_char {
-        return false;
+        return None;
     }
 
     let mut new_rope = (*eb.rope).clone();
@@ -1793,22 +1830,13 @@ fn apply_one_text_edit(
     new_rope.remove(start_char..end_char);
     new_rope.insert(start_char, &op.new_text);
 
-    // Cursor bookkeeping: we don't move the active tab's cursor
-    // for LSP edits — legacy parity. Some clients move the
-    // cursor to the edit site; we match led's prior behaviour.
-    let cursor_before = led_state_tabs::Cursor::default();
-    let cursor_after = led_state_tabs::Cursor::default();
     eb.rope = std::sync::Arc::new(new_rope);
     eb.version = eb.version.saturating_add(1);
-    eb.history.record_replace(
+    Some((
         start_char,
         std::sync::Arc::<str>::from(removed),
         std::sync::Arc::<str>::from(op.new_text.as_ref()),
-        cursor_before,
-        cursor_after,
-        None,
-    );
-    true
+    ))
 }
 
 fn seed_edit_from_load(
@@ -2483,6 +2511,7 @@ mod tests {
         }]);
         apply_lsp_edits(
             &mut edits,
+            &led_state_tabs::Tabs::default(),
             &mut alerts,
             &mut lsp_extras,
             7,
@@ -2529,6 +2558,7 @@ mod tests {
         }]);
         apply_lsp_edits(
             &mut edits,
+            &led_state_tabs::Tabs::default(),
             &mut alerts,
             &mut lsp_extras,
             1,
@@ -2544,6 +2574,92 @@ mod tests {
         assert!(
             eb.history.past_len() > 0,
             "format edit should leave a history entry behind for Ctrl-/ to undo",
+        );
+    }
+
+    #[test]
+    fn format_with_overlapping_edits_undoes_atomically() {
+        // Regression for the sort-imports bug: rust-analyzer's
+        // sort returns two edits — one deletes a run of names
+        // from the start of a list, the other inserts the same
+        // run at a later position. Per-op undo groups reverse
+        // one edit at a time, leaving a DUPLICATE-text
+        // intermediate state and using stale positions on the
+        // next pop. The batch-group approach fixes it: one
+        // Ctrl-/ reverts the whole format atomically.
+        use led_driver_lsp_core::{EditsOrigin, FileEdit, TextEditOp};
+        use led_state_buffer_edits::EditOp;
+        let path = canon("a.rs");
+        let original = "AAA|BBB|CCC\n";
+        let mut edits = BufferEdits::default();
+        let eb = EditedBuffer::fresh(Arc::new(Rope::from_str(original)));
+        edits.buffers.insert(path.clone(), eb);
+        let mut alerts = AlertState::default();
+        let mut lsp_extras = led_state_lsp::LspExtrasState::default();
+        lsp_extras.latest_format_seq.insert(path.clone(), 1);
+
+        // Two edits that together perform "move AAA| to the end":
+        //   * delete chars 0..4 ("AAA|")
+        //   * insert "AAA|" at char 11 (end of line, before '\n')
+        let file_edits = std::sync::Arc::new(vec![FileEdit {
+            path: path.clone(),
+            edits: vec![
+                TextEditOp {
+                    start_line: 0,
+                    start_col: 0,
+                    end_line: 0,
+                    end_col: 4,
+                    new_text: std::sync::Arc::<str>::from(""),
+                },
+                TextEditOp {
+                    start_line: 0,
+                    start_col: 11,
+                    end_line: 0,
+                    end_col: 11,
+                    new_text: std::sync::Arc::<str>::from("AAA|"),
+                },
+            ],
+        }]);
+        apply_lsp_edits(
+            &mut edits,
+            &led_state_tabs::Tabs::default(),
+            &mut alerts,
+            &mut lsp_extras,
+            1,
+            EditsOrigin::Format,
+            &file_edits,
+        );
+        let formatted = edits.buffers[&path].rope.to_string();
+        assert_eq!(formatted, "BBB|CCCAAA|\n", "sort applied correctly");
+
+        // ONE undo group for the whole batch.
+        assert_eq!(
+            edits.buffers[&path].history.past_len(),
+            1,
+            "format ops coalesce into a single undo group",
+        );
+
+        // Manually invert the group the way `undo_active` does —
+        // reverse-iterate and invert each op. This must restore
+        // the original rope exactly, with no duplicate text.
+        let mut eb = edits.buffers.remove(&path).unwrap();
+        let group = eb.history.take_undo().expect("one group");
+        let mut rope = (*eb.rope).clone();
+        for op in group.ops.iter().rev() {
+            match op {
+                EditOp::Insert { at, text } => {
+                    let len = text.chars().count();
+                    rope.remove(*at..*at + len);
+                }
+                EditOp::Delete { at, text } => {
+                    rope.insert(*at, text);
+                }
+            }
+        }
+        assert_eq!(
+            rope.to_string(),
+            original,
+            "undo reverses the entire format atomically",
         );
     }
 
@@ -2574,6 +2690,7 @@ mod tests {
         }]);
         apply_lsp_edits(
             &mut edits,
+            &led_state_tabs::Tabs::default(),
             &mut alerts,
             &mut lsp_extras,
             42,
@@ -2603,6 +2720,7 @@ mod tests {
         let file_edits = std::sync::Arc::new(Vec::new());
         apply_lsp_edits(
             &mut edits,
+            &led_state_tabs::Tabs::default(),
             &mut alerts,
             &mut lsp_extras,
             5,
@@ -2636,6 +2754,7 @@ mod tests {
         }]);
         apply_lsp_edits(
             &mut edits,
+            &led_state_tabs::Tabs::default(),
             &mut alerts,
             &mut lsp_extras,
             /* stale */ 5,
