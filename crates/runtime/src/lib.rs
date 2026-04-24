@@ -454,10 +454,24 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
                         completions.dismiss();
                         continue;
                     }
-                    // Stage 6 replaces this with a proper fuzzy
-                    // refilter; for now we display the items in
-                    // server order unfiltered.
-                    let filtered: Vec<usize> = (0..items.len()).collect();
+                    // Refilter against the user's current typed
+                    // prefix so the popup shows relevance-ranked
+                    // items on first paint — not the raw server
+                    // list. Prefix extends from
+                    // `prefix_start_col` to the cursor, scoped
+                    // to the row the request was issued for.
+                    let prefix = completion_prefix(
+                        edits,
+                        &path,
+                        tab,
+                        prefix_line as usize,
+                        prefix_start_col as usize,
+                    );
+                    let filtered = led_state_completions::refilter(&items, &prefix);
+                    if filtered.is_empty() {
+                        completions.dismiss();
+                        continue;
+                    }
                     completions.session =
                         Some(led_state_completions::CompletionSession {
                             tab: tab.id,
@@ -1140,6 +1154,33 @@ pub fn nearest_deadline(
 /// authoritative — a late load completion for the same path is
 /// discarded. Returns `true` when a new entry was inserted,
 /// `false` when the existing entry absorbed the discard.
+/// Extract the typed prefix the user's cursor is parked at for an
+/// incoming `LspEvent::Completion`. Used by ingest to refilter the
+/// server response against the current buffer state before
+/// installing the session — without this, items appear
+/// unfiltered for one frame until the next keystroke.
+fn completion_prefix(
+    edits: &BufferEdits,
+    path: &CanonPath,
+    tab: &led_state_tabs::Tab,
+    prefix_line: usize,
+    prefix_start_col: usize,
+) -> String {
+    let Some(eb) = edits.buffers.get(path) else {
+        return String::new();
+    };
+    if prefix_line >= eb.rope.len_lines() {
+        return String::new();
+    }
+    let line_start = eb.rope.line_to_char(prefix_line);
+    let from = line_start + prefix_start_col;
+    let to = line_start + tab.cursor.col;
+    if to < from || to > eb.rope.len_chars() {
+        return String::new();
+    }
+    eb.rope.slice(from..to).to_string()
+}
+
 fn seed_edit_from_load(
     edits: &mut BufferEdits,
     path: led_core::CanonPath,

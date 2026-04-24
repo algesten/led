@@ -95,6 +95,11 @@ fn lsp_diagnostic_next_issue() {
     run_scenario(&scenario_dir("features/lsp/diagnostic_next_issue"));
 }
 
+#[test]
+fn lsp_completion_popup_types_pr() {
+    run_scenario(&scenario_dir("features/lsp/completion_popup_types_pr"));
+}
+
 // === git ===
 
 #[test]
