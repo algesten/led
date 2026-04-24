@@ -24,7 +24,7 @@ use crate::CanonPath;
 ///
 /// Only `LspError` / `LspWarning` are populated today (M16 scope); git and
 /// PR variants are plumbed so the browser painter, category resolver, and
-/// nav-level machinery are ready when those milestones land (M19 + M20).
+/// nav-level machinery are ready when those milestones land (M19 + M27).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum IssueCategory {
     /// LSP error diagnostic.

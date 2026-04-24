@@ -1915,7 +1915,7 @@ pub fn find_file_action<'f>(
 /// the browser. Git-file statuses (Unstaged / Staged* / Untracked)
 /// and PR membership (PrComment / PrDiff) are plumbed in the
 /// `IssueCategory` enum and the painter's `category_style`
-/// dispatch but produce nothing until their atoms land (M19 / M20).
+/// dispatch but produce nothing until their atoms land (M19 / M27).
 #[drv::memo(single)]
 pub fn file_categories_map<'d>(
     diagnostics: DiagnosticsStatesInput<'d>,
@@ -1942,7 +1942,7 @@ pub fn file_categories_map<'d>(
     }
 
     // Git statuses + PR membership — future-proof branches. M19 and
-    // M20 each add their source; the signature of this memo already
+    // M27 each add their source; the signature of this memo already
     // accepts extra inputs when they arrive.
 
     Arc::new(map)

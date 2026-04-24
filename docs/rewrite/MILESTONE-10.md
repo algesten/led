@@ -122,7 +122,7 @@ $ cargo run -p led -- src/main.rs
   - `JumpBack` from head — as above.
 
   Nothing else auto-records. Issue navigation (M16 diagnostics,
-  M19 git, M20 PR) and isearch (M13) add their own record sites
+  M19 git, M27 PR) and isearch (M13) add their own record sites
   later, per legacy.
 
 ### Out
@@ -130,7 +130,7 @@ $ cargo run -p led -- src/main.rs
 Per `ROADMAP.md` and the scope decisions above:
 
 - **Issue navigation** (`next_issue` / `prev_issue`): LSP → M16,
-  git hunks → M19, PR comments → M20. The dispatch arms + alert
+  git hunks → M19, PR comments → M27. The dispatch arms + alert
   plumbing land with those features.
 - **Scroll-offset capture in `JumpPosition`**: legacy stores
   `scroll_offset` so the viewport returns to the saved position,
@@ -357,7 +357,7 @@ Expected: +15 tests.
 - **Syntax-aware bracket matching** (M15): swap the rope scan
   for a tree-sitter "pair" query so brackets in strings /
   comments are ignored.
-- **Issue navigation** (M16 / M19 / M20): `NextIssue` /
+- **Issue navigation** (M16 / M19 / M27): `NextIssue` /
   `PrevIssue` commands live in dispatch/nav.rs, share the same
   activate+cursor path.
 - **Scroll preservation** on jump: if feedback warrants,

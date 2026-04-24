@@ -117,7 +117,7 @@ Per `ROADMAP.md`:
   that's scheduled for it; the golden counter starts moving
   materially at M11.
 - **Branch / PR / LSP blocks** in the default status line →
-  M16 (LSP) / M19 (git) / M20 (gh pr). M9's default-left is
+  M16 (LSP) / M19 (git) / M27 (gh pr). M9's default-left is
   just the dirty dot.
 - **Macro recording indicator** → M14.
 - **Find-file / isearch prompt modes** (status-bar overrides 1
@@ -493,7 +493,7 @@ Expected: +25 tests.
 - **LSP status in default status line** (M16): extend
   `status_bar_model` to take an `LspInput` with server name,
   busy flag, progress message.
-- **Branch / PR tags** (M19 / M20): same pattern —
+- **Branch / PR tags** (M19 / M27): same pattern —
   `status_bar_model` grows optional `GitInput` / `PrInput`.
 - **Warn dead-letter cleanup**: `clear_warn` today requires
   the producer to know the key. A later pass may add a

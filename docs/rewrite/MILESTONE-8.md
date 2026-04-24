@@ -73,7 +73,7 @@ Per `ROADMAP.md`:
 
 - **Persisting undo across restarts** → M21 (session / undo DB).
   For M8 history lives in memory only.
-- **Rebase of diagnostics / hunks / PR comments** → M16 / M19 / M20.
+- **Rebase of diagnostics / hunks / PR comments** → M16 / M19 / M27.
   The rebase primitive is in place; consumers come with their
   features.
 - **Tree-sitter-aware coalescing** (legacy's semantic groups) —
@@ -397,7 +397,7 @@ Expected: +20 tests.
 - **LSP diagnostic rebase** (M16): first consumer of
   `rebase_char_index`. A diagnostic carries `(version, range)`;
   when the version is older than current, rebase the range.
-- **Git hunk rebase** (M19), **PR comment rebase** (M20): same.
+- **Git hunk rebase** (M19), **PR comment rebase** (M27): same.
 - **Semantic / AST-aware grouping** (maybe M23+ when syntax is
   integrated): a typed group boundary could split on statement
   boundaries or on tree-sitter node changes. Not scheduled.

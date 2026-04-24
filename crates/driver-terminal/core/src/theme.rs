@@ -212,7 +212,7 @@ pub struct Theme {
     /// legacy's `git.untracked` (x039 cyan).
     pub git_untracked: Style,
 
-    // ── GitHub PR (placeholder — M20 fills in) ─────────────
+    // ── GitHub PR (placeholder — M27 fills in) ─────────────
     /// PR review comment marker. Default matches legacy's
     /// `pr.comment` (blue).
     pub pr_comment: Style,
@@ -480,7 +480,7 @@ impl Default for Theme {
             // so a user with no theme.toml sees the same browser
             // glyph colours on main and rewrite. The enum is
             // populated but the memo only emits LSP categories
-            // until the git / PR atoms land (M19 / M20).
+            // until the git / PR atoms land (M19 / M27).
             git_modified: Style {
                 fg: Some(Color::Indexed(178)),
                 ..Style::default()

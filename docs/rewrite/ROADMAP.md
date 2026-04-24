@@ -129,7 +129,7 @@ into the rewrite worktree and wire it to invoke the new binary.
   parse-only). Virtual time lets scenarios with timers run
   deterministically.
 - Wire `--test-lsp-server` and `--test-gh-binary` CLI flags as
-  parse-only stubs; they resolve to real behaviour at M16 / M20.
+  parse-only stubs; they resolve to real behaviour at M16 / M27.
 - Initial baseline: running against M5's binary, expect ≈ the
   smoke subset passing (5 scenarios) plus a handful of the
   `actions/move_*` tree. All others fail — that's the starting
@@ -451,25 +451,31 @@ actions / Format / Inlay hints".
 **Goldens moved to green:** `driver_events/git/*`,
 `features/git/*`.
 
-### M20 — GitHub PR
+### M20 — Lifecycle: phases, quit, suspend
 
-- `GhPrState` + `driver-gh-pr/` (spawns `gh` CLI).
-- ETag-driven polling.
-- PR comments rendered alongside git gutter marks.
-- `OpenPrUrl` (`ctrl+x ctrl+p`).
+Most of this has been glossed over so far because we quit on Ctrl-C
+with no grace. M20 brings lifecycle discipline.
 
-`NextIssue` / `PrevIssue` is **not** extended here — see M20a.
+- `Phase` enum: `Starting`, `Running`, `Exiting`, `Suspended`.
+- `Quit` (`ctrl+x ctrl+c`): enter `Exiting`, flush session, then
+  break loop.
+- Dirty-buffer confirm: `confirm_kill` prompt on close of dirty tab.
+- `Suspend` (`ctrl+z`): restore cooked mode, `SIGTSTP`, on resume
+  re-enter raw mode + redraw.
+- Startup ordering matches legacy's 14-step sequence.
 
-**Spec reference:** `gh-pr.md`, `docs/drivers/gh-pr.md`.
+**Spec reference:** `lifecycle.md`.
 
-**Goldens moved to green:** `driver_events/gh_pr/*`,
-`features/gh_pr/*`, `actions/open_pr_url`.
+**Goldens moved to green:** `actions/quit`, `actions/suspend`,
+`features/lifecycle/*`, `keybindings/confirm_kill/*` (dirty-tab
+dismissal flow).
 
 ### M20a — Tiered issue navigation (Alt-./Alt-,)
 
-The full `NextIssue` / `PrevIssue` cycle, deferred until all four
-issue sources exist so the user-visible behaviour doesn't mutate
-each time a later source lands.
+The `NextIssue` / `PrevIssue` cycle over the issue sources that
+exist at this point (LSP diagnostics + git). PR gets added as a
+fourth tier when M27 lands; M20a is shaped so extending the
+source list is a one-line change to `IssueCategory::NAV_LEVELS`.
 
 Tiered walk down `IssueCategory::NAV_LEVELS` (legacy's ordering):
 
@@ -477,13 +483,12 @@ Tiered walk down `IssueCategory::NAV_LEVELS` (legacy's ordering):
 2. **LSP Warning** — same atom, filtered by severity.
 3. **Git line status** — Unstaged / StagedModified / StagedNew /
    Untracked.
-4. **PR** — PrComment + PrDiff (diff ranges gated by the
-   divergence check — hidden once the buffer drifts from the PR
-   head commit).
+4. **PR** — **deferred to M27.** Added to the cycle once
+   `GhPrState` exists; until then the walk stops after git.
 
 The cycle **stays inside the first level with any items**. So
 errors-present means Alt-. only cycles errors until they're
-cleared; warnings + git + PR stay invisible to the cycle. This is
+cleared; warnings + git stay invisible to the cycle. This is
 the escape-hatch-from-error-rich-files UX legacy depends on.
 
 Scope:
@@ -510,7 +515,8 @@ gutter mark (not present in legacy).
 `led/src/model/nav_of.rs` for the tiered walk + dedup rules).
 
 **Goldens moved to green:** `actions/next_issue`,
-`actions/prev_issue`, `features/issue_nav/*`.
+`actions/prev_issue`, `features/issue_nav/*` (PR-bearing
+scenarios among those land with M27).
 
 ### M21 — Persistence (session + undo)
 
@@ -562,25 +568,6 @@ All three rely on syntax (M15) for language-aware logic.
 `actions/reflow_paragraph`, `actions/sort_imports`,
 `features/auto_indent/*`.
 
-### M24 — Lifecycle: phases, quit, suspend
-
-Most of this has been glossed over so far because we quit on Ctrl-C
-with no grace. M24 brings lifecycle discipline.
-
-- `Phase` enum: `Starting`, `Running`, `Exiting`, `Suspended`.
-- `Quit` (`ctrl+x ctrl+c`): enter `Exiting`, flush session, then
-  break loop.
-- Dirty-buffer confirm: `confirm_kill` prompt on close of dirty tab.
-- `Suspend` (`ctrl+z`): restore cooked mode, `SIGTSTP`, on resume
-  re-enter raw mode + redraw.
-- Startup ordering matches legacy's 14-step sequence.
-
-**Spec reference:** `lifecycle.md`.
-
-**Goldens moved to green:** `actions/quit`, `actions/suspend`,
-`features/lifecycle/*`, `keybindings/confirm_kill/*` (dirty-tab
-dismissal flow).
-
 ### M25 — Grapheme-aware column math
 
 Promotes the M2/M3 deferral. Column arithmetic becomes
@@ -625,6 +612,23 @@ legacy, not a regression fix.
 **Goldens moved to green:** `smoke/external_change`,
 `features/external_change/*`,
 `driver_events/lsp/did_change_watched_files*`.
+
+### M27 — GitHub PR
+
+- `GhPrState` + `driver-gh-pr/` (spawns `gh` CLI).
+- ETag-driven polling.
+- PR comments rendered alongside git gutter marks.
+- `OpenPrUrl` (`ctrl+x ctrl+p`).
+- **Extends M20a's `NextIssue` / `PrevIssue` cycle** with a fourth
+  tier: `PrComment` + `PrDiff`, gated by the divergence check so
+  diff ranges hide once the buffer drifts from the PR head commit.
+  One-line addition to `IssueCategory::NAV_LEVELS`; every other
+  nav primitive stays as M20a built it.
+
+**Spec reference:** `gh-pr.md`, `docs/drivers/gh-pr.md`.
+
+**Goldens moved to green:** `driver_events/gh_pr/*`,
+`features/gh_pr/*`, `actions/open_pr_url`, `features/issue_nav/pr*`.
 
 ---
 
