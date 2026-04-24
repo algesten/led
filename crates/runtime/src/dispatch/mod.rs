@@ -271,9 +271,13 @@ pub fn dispatch_key(
 
 /// Queue a `RequestCompletion` for the active tab when the user
 /// just typed an identifier char, OR dismiss the live session
-/// on a non-trigger key. Called from the dispatch boundary so
-/// every command path (direct, chord, implicit-insert) flows
-/// through the same logic.
+/// on a non-trigger key. When a session is already active, also
+/// refilters the visible items against the new typed prefix —
+/// matches legacy `refilter_completion` at
+/// `/Users/martin/dev/led/crates/lsp/src/manager.rs:1735-1830`.
+///
+/// Called from the dispatch boundary so every command path
+/// (direct, chord, implicit-insert) flows through the same logic.
 fn handle_completion_trigger(
     cmd: &Command,
     tabs: &Tabs,
@@ -298,7 +302,21 @@ fn handle_completion_trigger(
             }
             let line = tab.cursor.line as u32;
             let col = tab.cursor.col as u32;
+            // Client-side refilter first — updates the popup
+            // instantly against the newly-typed prefix without
+            // waiting for a server round-trip. Also queues a
+            // fresh server request so delayed items can still
+            // arrive (server response replaces the session when
+            // its seq matches).
+            refilter_active_session(tabs, edits, completions);
             completions.queue_request(tab.path.clone(), line, col, Some(*c));
+        }
+        Command::DeleteBack | Command::DeleteForward => {
+            // Keep the session alive across backspace / delete
+            // within the prefix range. Refilter; if the cursor
+            // moved left of prefix_start_col (user deleted past
+            // the start of the identifier), dismiss.
+            refilter_active_session(tabs, edits, completions);
         }
         // Any other command dismisses an active popup. The
         // dispatch-action set (MoveUp, MoveDown, InsertNewline,
@@ -310,6 +328,87 @@ fn handle_completion_trigger(
                 completions.dismiss();
             }
         }
+    }
+}
+
+/// Rebuild `session.filtered` from the current typed prefix.
+/// Dismisses the session when the cursor has moved left of the
+/// prefix anchor or when no items match — both mean the popup
+/// has lost its context.
+fn refresh_completion_filter(
+    tabs: &Tabs,
+    edits: &BufferEdits,
+    completions: &mut CompletionsState,
+) {
+    let Some(session) = completions.session.as_ref() else {
+        return;
+    };
+    // Resolve the active tab + its buffer. If either is gone or
+    // the tab switched, dismiss.
+    let Some(tab) = tabs.open.iter().find(|t| t.id == session.tab) else {
+        completions.dismiss();
+        return;
+    };
+    let Some(eb) = edits.buffers.get(&tab.path) else {
+        completions.dismiss();
+        return;
+    };
+    if tab.cursor.line as u32 != session.prefix_line {
+        completions.dismiss();
+        return;
+    }
+    if (tab.cursor.col as u32) < session.prefix_start_col {
+        completions.dismiss();
+        return;
+    }
+    // Extract the typed prefix from the rope.
+    let line_idx = session.prefix_line as usize;
+    if line_idx >= eb.rope.len_lines() {
+        completions.dismiss();
+        return;
+    }
+    let line_start = eb.rope.line_to_char(line_idx);
+    let from = line_start + session.prefix_start_col as usize;
+    let to = line_start + tab.cursor.col;
+    if to < from || to > eb.rope.len_chars() {
+        completions.dismiss();
+        return;
+    }
+    let prefix: String = eb.rope.slice(from..to).to_string();
+    let filtered = led_state_completions::refilter(&session.items, &prefix);
+    if filtered.is_empty() {
+        completions.dismiss();
+        return;
+    }
+    // Preserve the highlighted label across the refilter when
+    // possible — matches the UX users expect (the item they were
+    // aiming at shouldn't jump around as the list shrinks).
+    let prev_selected_item = session
+        .filtered
+        .get(session.selected)
+        .copied();
+    let new_selected = prev_selected_item
+        .and_then(|item_ix| filtered.iter().position(|&i| i == item_ix))
+        .unwrap_or(0);
+    if let Some(session) = completions.session.as_mut() {
+        session.filtered = std::sync::Arc::new(filtered);
+        session.selected = new_selected;
+        // Scroll reset — ensure_visible semantics (in the
+        // overlay module) would re-clamp anyway, but starting
+        // at 0 keeps the popup predictable after a refilter.
+        if new_selected < session.scroll {
+            session.scroll = new_selected;
+        }
+    }
+}
+
+fn refilter_active_session(
+    tabs: &Tabs,
+    edits: &BufferEdits,
+    completions: &mut CompletionsState,
+) {
+    if completions.session.is_some() {
+        refresh_completion_filter(tabs, edits, completions);
     }
 }
 

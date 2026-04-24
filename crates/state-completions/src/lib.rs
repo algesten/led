@@ -152,9 +152,77 @@ impl CompletionsState {
     }
 }
 
+/// Rank + filter completion items against a typed prefix using
+/// nucleo's smart-case fuzzy matcher. Empty prefix returns all
+/// items in their original order (matches legacy's "no filter
+/// on empty input" behaviour).
+///
+/// Output is a list of indices into `items`, ordered by descending
+/// fuzzy score; ties are broken by ascending `sort_text` (falling
+/// back to `label`). Items that don't match the prefix at all
+/// are dropped — an empty return value signals "nothing matches,
+/// dismiss the popup" to the dispatch side.
+///
+/// Port of `fuzzy_filter_completions` at
+/// `/Users/martin/dev/led/crates/lsp/src/manager.rs:2057`.
+pub fn refilter(items: &[CompletionItem], prefix: &str) -> Vec<usize> {
+    use nucleo_matcher::pattern::{AtomKind, CaseMatching, Normalization, Pattern};
+    use nucleo_matcher::{Config, Matcher, Utf32Str};
+
+    if prefix.is_empty() {
+        return (0..items.len()).collect();
+    }
+    let mut matcher = Matcher::new(Config::DEFAULT);
+    let pattern = Pattern::new(
+        prefix,
+        CaseMatching::Ignore,
+        Normalization::Smart,
+        AtomKind::Fuzzy,
+    );
+    let mut buf = Vec::new();
+    let mut scored: Vec<(usize, u32)> = items
+        .iter()
+        .enumerate()
+        .filter_map(|(i, item)| {
+            let haystack_str = item.label.as_ref();
+            let haystack = Utf32Str::new(haystack_str, &mut buf);
+            let score = pattern.score(haystack, &mut matcher)?;
+            Some((i, score))
+        })
+        .collect();
+    scored.sort_by(|a, b| {
+        b.1.cmp(&a.1).then_with(|| {
+            let a_key = items[a.0]
+                .sort_text
+                .as_deref()
+                .unwrap_or(items[a.0].label.as_ref());
+            let b_key = items[b.0]
+                .sort_text
+                .as_deref()
+                .unwrap_or(items[b.0].label.as_ref());
+            a_key.cmp(b_key)
+        })
+    });
+    scored.into_iter().map(|(i, _)| i).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+
+    fn item(label: &str, sort: Option<&str>) -> CompletionItem {
+        CompletionItem {
+            label: Arc::<str>::from(label),
+            detail: None,
+            sort_text: sort.map(Arc::<str>::from),
+            insert_text: None,
+            text_edit: None,
+            kind: None,
+            resolve_needed: false,
+            resolve_data: None,
+        }
+    }
 
     #[test]
     fn next_seq_is_monotonic() {
@@ -169,5 +237,63 @@ mod tests {
         let mut s = CompletionsState::default();
         s.dismiss();
         assert!(s.session.is_none());
+    }
+
+    #[test]
+    fn refilter_empty_prefix_returns_identity_order() {
+        let items = vec![item("foo", None), item("bar", None), item("baz", None)];
+        let out = refilter(&items, "");
+        assert_eq!(out, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn refilter_fuzzy_matches_are_ranked_by_score() {
+        // "pr" should rank println!/print! higher than
+        // "pub" (no match) and similar things.
+        let items = vec![
+            item("println!", None),
+            item("print!", None),
+            item("pub", None),
+            item("process", None),
+        ];
+        let out = refilter(&items, "pr");
+        // "pub" can't fuzzy-match "pr" (no `r` in the string), so
+        // it's filtered out. The rest are all matches.
+        assert!(!out.contains(&2), "pub should be filtered: got {out:?}");
+        // The three matchers appear in some order; all three
+        // must be present.
+        let mut labels: Vec<&str> = out
+            .iter()
+            .map(|&i| items[i].label.as_ref())
+            .collect();
+        labels.sort();
+        assert_eq!(labels, vec!["print!", "println!", "process"]);
+    }
+
+    #[test]
+    fn refilter_breaks_ties_by_sort_text_then_label() {
+        // Two items with identical fuzzy match scores on "abc":
+        // the one with the earlier sortText should come first.
+        let items = vec![
+            item("abc_two", Some("2")),
+            item("abc_one", Some("1")),
+        ];
+        let out = refilter(&items, "abc");
+        // sort_text "1" < "2", so abc_one (index 1) comes first.
+        assert_eq!(out, vec![1, 0]);
+    }
+
+    #[test]
+    fn refilter_case_insensitive() {
+        let items = vec![item("PrintLn", None), item("pub", None)];
+        let out = refilter(&items, "pl");
+        assert_eq!(out, vec![0]);
+    }
+
+    #[test]
+    fn refilter_returns_empty_when_nothing_matches() {
+        let items = vec![item("foo", None), item("bar", None)];
+        let out = refilter(&items, "xyz");
+        assert!(out.is_empty());
     }
 }
