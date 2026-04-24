@@ -77,7 +77,7 @@ pub(super) fn run_overlay_command(
     lsp_extras: &mut LspExtrasState,
 ) -> Option<DispatchOutcome> {
     lsp_extras.rename.as_ref()?;
-    if matches!(cmd, Command::Quit) {
+    if matches!(cmd, Command::Quit | Command::Suspend) {
         return None;
     }
     match cmd {

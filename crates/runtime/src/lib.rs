@@ -59,6 +59,7 @@ use led_state_diagnostics::{
     BufferDiagnostics, DiagnosticsStates, LspServerStatus, LspStatuses,
 };
 use led_state_git::GitState;
+use led_state_lifecycle::{LifecycleState, Phase};
 use led_state_syntax::{Language, SyntaxState, SyntaxStates};
 use led_state_tabs::{TabId, Tabs};
 
@@ -254,6 +255,12 @@ pub struct Atoms {
     /// `GitCmd::ScanFiles` (a file save is the most common cause
     /// of git state changing, so rescanning is the right UX).
     pub git_scan_pending: bool,
+    /// Whole-process lifecycle: `Phase` state machine plus the
+    /// `force_redraw` repaint counter. Driven by the dispatch
+    /// outcomes (`Quit` → Exiting, `Suspend` → Suspended → back
+    /// to Running) and by the first-paint transition out of
+    /// Starting.
+    pub lifecycle: LifecycleState,
     /// Symlink resolution chain for every path the user has
     /// opened, keyed by canonical path. Populated at tab-open
     /// time (main.rs CLI, find-file commit, browser open) so the
@@ -306,6 +313,7 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
         git,
         git_scan_dispatched,
         git_scan_pending,
+        lifecycle,
     } = &mut *world.atoms;
     let drivers = world.drivers;
     let wake = world.wake;
@@ -872,8 +880,34 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
             match dispatcher.dispatch(ev) {
                 DispatchOutcome::Continue => {}
                 DispatchOutcome::Quit => {
+                    lifecycle.phase = Phase::Exiting;
                     quit = true;
                     break;
+                }
+                DispatchOutcome::Suspend => {
+                    // SIGTSTP round-trip. The helper leaves the
+                    // alt-screen, raises SIGTSTP, and on `fg`
+                    // re-enters + re-enables raw mode. Bumping
+                    // `force_redraw` clears the cached frame so
+                    // the next paint walks every cell (the
+                    // terminal's content was overwritten by the
+                    // user's shell during the suspended window).
+                    lifecycle.phase = Phase::Suspended;
+                    if let Err(e) =
+                        led_driver_terminal_native::suspend_and_resume(stdout)
+                    {
+                        // Terminal restoration failed — rare but
+                        // not fatal. Surface as a warn alert so
+                        // the user sees something went sideways;
+                        // the editor itself keeps running.
+                        alerts.set_warn(
+                            "suspend".to_string(),
+                            format!("suspend: {e}"),
+                        );
+                    }
+                    lifecycle.phase = Phase::Running;
+                    lifecycle.bump_redraw();
+                    last_frame = None;
                 }
             }
         }
@@ -1343,6 +1377,14 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
         if frame != last_frame {
             if let Some(f) = &frame {
                 drivers.output.execute(f, last_frame.as_ref(), theme, stdout)?;
+                // First successful paint graduates the process
+                // out of Starting. M21 reintroduces `Resuming`
+                // between Starting and Running to gate rendering
+                // on session-restore materialisation; for M20 the
+                // first frame IS the transition.
+                if lifecycle.phase == Phase::Starting {
+                    lifecycle.phase = Phase::Running;
+                }
             }
             last_frame = frame;
         }

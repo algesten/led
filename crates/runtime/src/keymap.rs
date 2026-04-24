@@ -25,6 +25,9 @@ pub enum Command {
     // Lifecycle
     Quit,
     Abort,
+    /// POSIX-stop the process (SIGTSTP). `fg` resumes in place
+    /// with a full redraw. Default binding: `ctrl+z`.
+    Suspend,
 
     // Tab management
     TabNext,
@@ -385,6 +388,9 @@ pub fn default_keymap() -> Keymap {
     m.bind("ctrl+_", Command::Undo);
     m.bind("ctrl+7", Command::Undo);
 
+    // Suspend (SIGTSTP). Single-key `ctrl+z` — matches legacy.
+    m.bind("ctrl+z", Command::Suspend);
+
     // File-write + buffer-management chords (ctrl+x prefix).
     m.bind_chord("ctrl+x", "ctrl+s", Command::Save);
     m.bind_chord("ctrl+x", "ctrl+c", Command::Quit);
@@ -582,6 +588,7 @@ pub fn parse_command(s: &str) -> Result<Command, String> {
     match s {
         "quit" => Ok(Command::Quit),
         "abort" => Ok(Command::Abort),
+        "suspend" => Ok(Command::Suspend),
         "save" => Ok(Command::Save),
         "save_all" => Ok(Command::SaveAll),
         "save_no_format" => Ok(Command::SaveNoFormat),
@@ -760,6 +767,7 @@ mod tests {
     fn parse_all_known_commands() {
         let cases = [
             ("quit", Command::Quit),
+            ("suspend", Command::Suspend),
             ("save", Command::Save),
             ("next_tab", Command::TabNext),
             ("prev_tab", Command::TabPrev),

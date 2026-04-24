@@ -956,6 +956,7 @@ dependencies = [
  "led-driver-terminal-core",
  "led-state-diagnostics",
  "led-state-syntax",
+ "libc",
 ]
 
 [[package]]
@@ -996,6 +997,7 @@ dependencies = [
  "led-state-isearch",
  "led-state-jumps",
  "led-state-kill-ring",
+ "led-state-lifecycle",
  "led-state-lsp",
  "led-state-syntax",
  "led-state-tabs",
@@ -1105,6 +1107,10 @@ dependencies = [
 
 [[package]]
 name = "led-state-kill-ring"
+version = "0.0.0"
+
+[[package]]
+name = "led-state-lifecycle"
 version = "0.0.0"
 
 [[package]]

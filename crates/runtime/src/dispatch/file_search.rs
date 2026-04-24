@@ -257,8 +257,9 @@ pub(super) fn run_overlay_command(
                 deactivate(file_search, browser, tabs);
             }
         }
-        // Quit passes through so `Ctrl-X Ctrl-C` still exits.
-        Command::Quit => return None,
+        // Quit + Suspend pass through so `Ctrl-X Ctrl-C` / `Ctrl-Z`
+        // still exit or suspend from inside the overlay.
+        Command::Quit | Command::Suspend => return None,
         // Everything else is absorbed while the overlay owns focus.
         _ => {}
     }

@@ -170,9 +170,10 @@ pub(super) fn run_overlay_command(
         | Command::CursorFileEnd
         | Command::CursorWordLeft
         | Command::CursorWordRight => {}
-        // Quit passes through so the user can still ctrl+x ctrl+c
-        // out of the editor.
-        Command::Quit => return None,
+        // Quit + Suspend pass through so the user can still
+        // ctrl+x ctrl+c out or ctrl+z to the shell from inside
+        // the overlay.
+        Command::Quit | Command::Suspend => return None,
         // Every other command is absorbed while the overlay owns
         // focus. Legacy's "unbound action deactivates" nuance lands
         // with the later stages.

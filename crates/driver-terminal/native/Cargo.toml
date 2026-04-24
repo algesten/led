@@ -20,3 +20,6 @@ led-state-syntax = { workspace = true }
 # `DiagnosticSeverity` for the gutter + underline colour lookup.
 led-state-diagnostics = { workspace = true }
 crossterm = { workspace = true }
+# SIGTSTP on suspend. Only used under `#[cfg(unix)]`; non-Unix
+# targets don't compile the raise call.
+libc = { workspace = true }

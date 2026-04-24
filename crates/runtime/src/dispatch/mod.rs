@@ -88,7 +88,15 @@ use crate::keymap::{ChordState, Command, Keymap};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DispatchOutcome {
     Continue,
+    /// User hit the quit chord (`Ctrl-X Ctrl-C` by default). The
+    /// main loop sets `lifecycle.phase = Exiting` and breaks. M21
+    /// gates the break on `session.saved`.
     Quit,
+    /// User hit the suspend binding (`Ctrl-Z` by default). The
+    /// main loop invokes `suspend_and_resume`, bumps
+    /// `force_redraw`, and continues from `Running` again on
+    /// SIGCONT return.
+    Suspend,
 }
 
 /// Bundle of mutable + shared references the dispatch loop needs.
@@ -657,6 +665,7 @@ fn run_command(
     let browser_focused = browser.focus == Focus::Side;
     match cmd {
         Command::Quit => DispatchOutcome::Quit,
+        Command::Suspend => DispatchOutcome::Suspend,
         Command::Abort => {
             // Isearch takes priority: Abort closes the overlay
             // without clearing the mark. Find-file Abort is already
@@ -1257,6 +1266,55 @@ mod tests {
             &km,
             &mut chord,);
         assert_eq!(outcome, DispatchOutcome::Continue);
+    }
+
+    #[test]
+    fn suspend_command_returns_dispatch_outcome_suspend() {
+        // M20: Ctrl-Z bound to Command::Suspend in the default
+        // keymap routes through to DispatchOutcome::Suspend so
+        // the main loop can invoke `suspend_and_resume`.
+        let mut tabs = tabs_with(&[("a", 1)], Some(1));
+        let mut edits = BufferEdits::default();
+        let store = BufferStore::default();
+        let term = terminal_with(Some(Dims { cols: 10, rows: 5 }));
+
+        let km = crate::keymap::default_keymap();
+        let mut chord = ChordState::default();
+        let mut kill_ring = KillRing::default();
+        let mut clip = ClipboardState::default();
+        let mut alerts = AlertState::default();
+        let mut jumps = JumpListState::default();
+        let mut browser = BrowserUi::default();
+        let fs = FsTree::default();
+
+        let mut path_chains = std::collections::HashMap::new();
+        let mut completions = CompletionsState::default();
+        let mut lsp_extras = LspExtrasState::default();
+        let mut find_file: Option<FindFileState> = None;
+        let mut isearch: Option<IsearchState> = None;
+        let mut file_search: Option<FileSearchState> = None;
+        let outcome = dispatch_key(
+            key(KeyModifiers::CONTROL, KeyCode::Char('z')),
+            &mut tabs,
+            &mut edits,
+            &mut kill_ring,
+            &mut clip,
+            &mut alerts,
+            &mut jumps,
+            &mut browser,
+            &fs,
+            &store,
+            &term,
+            &mut find_file,
+            &mut isearch,
+            &mut file_search,
+            &mut path_chains,
+            &mut completions,
+            &mut lsp_extras,
+            &km,
+            &mut chord,
+        );
+        assert_eq!(outcome, DispatchOutcome::Suspend);
     }
 
     #[test]

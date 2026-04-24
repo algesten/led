@@ -1272,6 +1272,50 @@ impl Drop for RawModeGuard {
     }
 }
 
+/// SIGTSTP → `fg` resume cycle.
+///
+/// Temporarily reverses the setup [`RawModeGuard`] performs on
+/// acquire: leaves the alternate screen, re-enables line wrap,
+/// shows the cursor, and disables raw mode. Then `raise(SIGTSTP)`
+/// POSIX-stops the process — the kernel parks us until the
+/// shell's `fg` (SIGCONT) wakes us up. On return the reverse of
+/// the reverse runs: re-enable raw mode, re-enter alt screen,
+/// disable line wrap. The caller is expected to bump the
+/// lifecycle `force_redraw` counter so the next paint emits
+/// every cell (the terminal's content is now whatever the user's
+/// shell left behind during the suspended window).
+///
+/// On non-Unix targets the syscall path compiles to a no-op —
+/// suspend silently does nothing, matching legacy behaviour.
+pub fn suspend_and_resume<W: Write>(out: &mut W) -> io::Result<()> {
+    crossterm::execute!(
+        out,
+        crossterm::cursor::Show,
+        crossterm::terminal::EnableLineWrap,
+        crossterm::terminal::LeaveAlternateScreen,
+    )?;
+    let _ = crossterm::terminal::disable_raw_mode();
+    out.flush()?;
+
+    #[cfg(unix)]
+    // SAFETY: `libc::raise` is async-signal-safe and takes a
+    // single `c_int`. SIGTSTP is defined by POSIX. The call
+    // either stops the process (handled by the kernel) or
+    // returns 0 on SIGCONT; no invariant we uphold can be
+    // violated by either path.
+    unsafe {
+        libc::raise(libc::SIGTSTP);
+    }
+
+    crossterm::terminal::enable_raw_mode()?;
+    crossterm::execute!(
+        out,
+        crossterm::terminal::EnterAlternateScreen,
+        crossterm::terminal::DisableLineWrap,
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

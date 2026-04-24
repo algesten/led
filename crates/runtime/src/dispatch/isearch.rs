@@ -143,9 +143,10 @@ pub(super) fn run_overlay_command(
         }
         // Everything else: "accept on passthrough". The current
         // match becomes the cursor's home; the command then runs
-        // normally in the outer dispatch path. Quit passes through
-        // without even the accept step (edge case matters less).
-        Command::Quit => None,
+        // normally in the outer dispatch path. Quit + Suspend pass
+        // through without even the accept step — they're system-
+        // level actions and the edge case matters less.
+        Command::Quit | Command::Suspend => None,
         _ => {
             accept(isearch, tabs, jumps);
             None

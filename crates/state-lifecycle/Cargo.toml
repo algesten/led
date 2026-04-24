@@ -1,0 +1,17 @@
+[package]
+name = "led-state-lifecycle"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Whole-process lifecycle state atom: the `Phase` enum that tracks
+# Starting / Running / Suspended / Exiting and a `force_redraw`
+# counter consumed by the painter to trigger a full repaint after
+# events like SIGTSTP return.
+#
+# Kept in a dedicated crate so its churn (roughly once per
+# lifecycle event) doesn't invalidate memos that care about other
+# state atoms. M21 extends it with a `session: SessionState`
+# cousin when session persistence lands.
+
+[dependencies]
