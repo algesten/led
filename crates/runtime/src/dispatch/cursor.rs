@@ -380,6 +380,47 @@ fn rows_between(
     row.saturating_add(to.1.0.saturating_sub(sub_start))
 }
 
+/// Recenter a cursor jump: if the cursor is already inside the
+/// current scroll window leave scroll alone, otherwise set the
+/// scroll anchor so the cursor lands roughly one-third from the
+/// top of the viewport. Used by goto-definition / jump-list
+/// targets where a small adjust-to-edge would plant the cursor
+/// right at the top or bottom line, losing context.
+pub(crate) fn center_on_cursor(
+    s: Scroll,
+    c: Cursor,
+    body_rows: usize,
+    rope: &Rope,
+    content_cols: usize,
+) -> Scroll {
+    if body_rows == 0 || rope.len_lines() == 0 {
+        return s;
+    }
+    // Cheap "already visible" check: does the cursor's logical
+    // line sit within the scroll anchor's line window? We don't
+    // account for sub-lines here — goto-def doesn't need pixel
+    // precision, and the target is rarely on a heavily-wrapped
+    // line. If it is, adjust_scroll after the jump catches any
+    // residual drift.
+    let near_top = c.line.saturating_sub(s.top);
+    let rows_from_top = near_top;
+    if c.line >= s.top && rows_from_top < body_rows {
+        // Already visible in the current window; don't jerk.
+        return s;
+    }
+    // Put cursor at body_rows / 3 from the top. Clamp at 0 so
+    // jumps near the file start don't over-scroll.
+    let third = body_rows / 3;
+    let new_top = c.line.saturating_sub(third);
+    // Normalise to a valid sub-line anchor for the chosen top
+    // line (always sub-line 0 — we just picked a whole line).
+    let _ = content_cols;
+    Scroll {
+        top: new_top,
+        top_sub_line: SubLine(0),
+    }
+}
+
 /// Advance `s` by `steps` visual rows, clamping to end-of-file.
 fn scroll_forward(s: Scroll, rope: &Rope, content_cols: usize, steps: usize) -> Scroll {
     let line_count = rope.len_lines().max(1);

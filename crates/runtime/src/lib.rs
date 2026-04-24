@@ -543,8 +543,8 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
                 }
                 LspEvent::GotoDefinition { seq, location } => {
                     apply_goto_definition(
-                        tabs, edits, jumps, alerts, lsp_extras, seq,
-                        location,
+                        tabs, edits, jumps, alerts, lsp_extras,
+                        terminal, browser, seq, location,
                     );
                 }
                 LspEvent::Edits {
@@ -1515,6 +1515,8 @@ fn apply_goto_definition(
     jumps: &mut JumpListState,
     alerts: &mut AlertState,
     lsp_extras: &mut led_state_lsp::LspExtrasState,
+    terminal: &led_driver_terminal_core::Terminal,
+    browser: &led_state_browser::BrowserUi,
     seq: u64,
     location: Option<led_driver_lsp_core::Location>,
 ) {
@@ -1560,10 +1562,35 @@ fn apply_goto_definition(
     let line_len = line_end.saturating_sub(line_start);
     let col = (loc.col as usize).min(line_len);
 
+    // Compute viewport dims (body rows + content cols) so we
+    // can recenter the scroll on the target. Use the same
+    // `Layout` the painter does.
+    let body_rows = terminal
+        .dims
+        .map(|d| {
+            led_driver_terminal_core::Layout::compute(d, browser.visible)
+                .editor_area
+                .rows as usize
+        })
+        .unwrap_or(0);
+    let content_cols = dispatch::editor_content_cols(terminal, browser);
+
     let tab = &mut tabs.open[idx];
     tab.cursor.line = line;
     tab.cursor.col = col;
     tab.cursor.preferred_col = col;
+    // Recenter scroll: leave it alone when the target line is
+    // already inside the window; otherwise pin the target
+    // roughly one-third from the top. Mirrors the jump-to-
+    // issue UX users expect — "I pressed a go-to; the thing
+    // is on screen now with breathing room above it."
+    tab.scroll = dispatch::center_on_cursor(
+        tab.scroll,
+        tab.cursor,
+        body_rows,
+        &eb.rope,
+        content_cols,
+    );
     tabs.active = Some(tab.id);
     alerts.clear_warn("lsp.goto");
 }
@@ -2408,6 +2435,8 @@ mod tests {
             &mut jumps,
             &mut alerts,
             &mut lsp_extras,
+            &led_driver_terminal_core::Terminal::default(),
+            &led_state_browser::BrowserUi::default(),
             42,
             Some(led_driver_lsp_core::Location {
                 path: canon("main.rs"),
@@ -2443,6 +2472,8 @@ mod tests {
             &mut jumps,
             &mut alerts,
             &mut lsp_extras,
+            &led_driver_terminal_core::Terminal::default(),
+            &led_state_browser::BrowserUi::default(),
             /* stale */ 7,
             Some(led_driver_lsp_core::Location {
                 path: canon("main.rs"),
@@ -2459,6 +2490,113 @@ mod tests {
     }
 
     #[test]
+    fn apply_goto_definition_recenters_scroll_when_target_off_screen() {
+        // Target line 60 with a 12-row viewport rooted at line 0:
+        // cursor is off-screen. Scroll should move so the target
+        // lands ~one-third from the top (60 - 12/3 = 56).
+        use led_driver_terminal_core::{Dims, Terminal};
+        let path = canon("main.rs");
+        let mut rope = String::new();
+        for i in 0..100 {
+            rope.push_str(&format!("line {i}\n"));
+        }
+        let mut edits = BufferEdits::default();
+        edits.buffers.insert(
+            path.clone(),
+            EditedBuffer::fresh(Arc::new(Rope::from_str(&rope))),
+        );
+        let mut tabs = seed_tab("main.rs");
+        tabs.open[0].cursor = led_state_tabs::Cursor {
+            line: 0,
+            col: 0,
+            preferred_col: 0,
+        };
+        tabs.open[0].scroll = led_state_tabs::Scroll::default();
+        let mut jumps = led_state_jumps::JumpListState::default();
+        let mut alerts = AlertState::default();
+        let mut lsp_extras = led_state_lsp::LspExtrasState::default();
+        lsp_extras.latest_goto_seq = Some(1);
+        let mut term = Terminal::default();
+        term.dims = Some(Dims { cols: 80, rows: 14 }); // body ≈ 12 rows
+        apply_goto_definition(
+            &mut tabs,
+            &edits,
+            &mut jumps,
+            &mut alerts,
+            &mut lsp_extras,
+            &term,
+            &led_state_browser::BrowserUi {
+                visible: false,
+                ..Default::default()
+            },
+            1,
+            Some(led_driver_lsp_core::Location {
+                path: path.clone(),
+                line: 60,
+                col: 0,
+            }),
+        );
+        assert_eq!(tabs.open[0].cursor.line, 60);
+        assert_eq!(
+            tabs.open[0].scroll.top, 56,
+            "scroll should position line 60 at ~body_rows/3 from top",
+        );
+    }
+
+    #[test]
+    fn apply_goto_definition_leaves_scroll_when_target_visible() {
+        // Target line 5 with scroll.top=0 and a 20-row viewport:
+        // already on screen, no scroll adjustment.
+        use led_driver_terminal_core::{Dims, Terminal};
+        let path = canon("main.rs");
+        let mut rope = String::new();
+        for i in 0..50 {
+            rope.push_str(&format!("line {i}\n"));
+        }
+        let mut edits = BufferEdits::default();
+        edits.buffers.insert(
+            path.clone(),
+            EditedBuffer::fresh(Arc::new(Rope::from_str(&rope))),
+        );
+        let mut tabs = seed_tab("main.rs");
+        tabs.open[0].cursor = led_state_tabs::Cursor {
+            line: 0,
+            col: 0,
+            preferred_col: 0,
+        };
+        tabs.open[0].scroll = led_state_tabs::Scroll::default();
+        let mut jumps = led_state_jumps::JumpListState::default();
+        let mut alerts = AlertState::default();
+        let mut lsp_extras = led_state_lsp::LspExtrasState::default();
+        lsp_extras.latest_goto_seq = Some(1);
+        let mut term = Terminal::default();
+        term.dims = Some(Dims { cols: 80, rows: 22 }); // body ≈ 20 rows
+        apply_goto_definition(
+            &mut tabs,
+            &edits,
+            &mut jumps,
+            &mut alerts,
+            &mut lsp_extras,
+            &term,
+            &led_state_browser::BrowserUi {
+                visible: false,
+                ..Default::default()
+            },
+            1,
+            Some(led_driver_lsp_core::Location {
+                path: path.clone(),
+                line: 5,
+                col: 0,
+            }),
+        );
+        assert_eq!(tabs.open[0].cursor.line, 5);
+        assert_eq!(
+            tabs.open[0].scroll.top, 0,
+            "scroll must not jerk when target is already visible",
+        );
+    }
+
+    #[test]
     fn apply_goto_definition_no_match_surfaces_warn_alert() {
         let mut tabs = seed_tab("main.rs");
         let edits = BufferEdits::default();
@@ -2472,6 +2610,8 @@ mod tests {
             &mut jumps,
             &mut alerts,
             &mut lsp_extras,
+            &led_driver_terminal_core::Terminal::default(),
+            &led_state_browser::BrowserUi::default(),
             1,
             None,
         );
@@ -2786,6 +2926,8 @@ mod tests {
             &mut jumps,
             &mut alerts,
             &mut lsp_extras,
+            &led_driver_terminal_core::Terminal::default(),
+            &led_state_browser::BrowserUi::default(),
             1,
             Some(led_driver_lsp_core::Location {
                 path: canon("other.rs"),

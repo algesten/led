@@ -49,6 +49,7 @@ mod testutil;
 // Public surface — kept tight so the runtime only reaches in for
 // the five externally-relevant names.
 pub use code_actions::install_picker as install_code_action_picker;
+pub(crate) use cursor::center_on_cursor;
 pub use kill::apply_yank;
 pub use shared::editor_content_cols;
 pub use shared::open_or_focus_tab;
