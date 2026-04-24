@@ -492,36 +492,39 @@ fn paint_body(body: &BodyModel, area: Rect, theme: &Theme, buf: &mut Buffer) {
         let buf_row = area.y + row;
         let mut col = area.x;
         // Resolve the row's text + (for Content) syntax spans +
-        // gutter-diagnostic severity + inline underlines. Non-
-        // Content variants carry none of the extras.
-        let (line, spans, gutter_diag, row_diags): (
+        // gutter-diagnostic severity + gutter-category (merged
+        // LSP/git bar) + inline underlines. Non-Content variants
+        // carry none of the extras.
+        let (line, spans, gutter_diag, gutter_cat, row_diags): (
             Option<&str>,
             &[led_driver_terminal_core::LineSpan],
             Option<led_state_diagnostics::DiagnosticSeverity>,
+            Option<led_core::IssueCategory>,
             &[led_driver_terminal_core::BodyDiagnostic],
         ) = match body {
-            BodyModel::Empty => (None, &[], None, &[]),
+            BodyModel::Empty => (None, &[], None, None, &[]),
             BodyModel::Pending { path_display } => match row {
-                0 => (Some(path_display.as_ref()), &[], None, &[]),
-                1 => (Some("loading..."), &[], None, &[]),
-                _ => (None, &[], None, &[]),
+                0 => (Some(path_display.as_ref()), &[], None, None, &[]),
+                1 => (Some("loading..."), &[], None, None, &[]),
+                _ => (None, &[], None, None, &[]),
             },
             BodyModel::Error {
                 path_display,
                 message,
             } => match row {
-                0 => (Some(path_display.as_ref()), &[], None, &[]),
-                1 => (Some(message.as_ref()), &[], None, &[]),
-                _ => (None, &[], None, &[]),
+                0 => (Some(path_display.as_ref()), &[], None, None, &[]),
+                1 => (Some(message.as_ref()), &[], None, None, &[]),
+                _ => (None, &[], None, None, &[]),
             },
             BodyModel::Content { lines, .. } => match lines.get(row as usize) {
                 Some(bl) => (
                     Some(bl.text.as_str()),
                     bl.spans.as_slice(),
                     bl.gutter_diagnostic,
+                    bl.gutter_category,
                     bl.diagnostics.as_slice(),
                 ),
-                None => (None, &[], None, &[]),
+                None => (None, &[], None, None, &[]),
             },
         };
         if let Some(line) = line {
@@ -534,6 +537,18 @@ fn paint_body(body: &BodyModel, area: Rect, theme: &Theme, buf: &mut Buffer) {
         // Blank the rest of the row at terminal default — matches
         // the old `Clear(UntilNewLine)`.
         buf.fill_row(buf_row, col, right_edge, Style::default());
+
+        // Git/PR/LSP change bar in gutter col 0: a single `▎`
+        // (U+258E LEFT ONE EIGHTH BLOCK) coloured via
+        // `category_style`. Matches legacy display.rs's col-1
+        // positioning (our col 0 is display.rs's col 1 because
+        // led's tab bar doesn't reserve the same leading column).
+        // Painted before the diagnostic dot so the two cells are
+        // independent.
+        if let Some(cat) = gutter_cat {
+            let style = theme.category_style(cat);
+            buf.put_char(buf_row, area.x, '\u{258E}', style);
+        }
 
         // Diagnostic gutter marker: a single ● in gutter col 1
         // (the second of the two gutter cells — matches legacy
@@ -1669,18 +1684,21 @@ mod tests {
                         kind: led_state_syntax::TokenKind::String,
                     }],
                     gutter_diagnostic: None,
+                    gutter_category: None,
                     diagnostics: Vec::new(),
                 },
                 led_driver_terminal_core::BodyLine {
                     text: "  jkl".to_string(),
                     spans: Vec::new(),
                     gutter_diagnostic: None,
+                    gutter_category: None,
                     diagnostics: Vec::new(),
                 },
                 led_driver_terminal_core::BodyLine {
                     text: "~ ".to_string(),
                     spans: Vec::new(),
                     gutter_diagnostic: None,
+                    gutter_category: None,
                     diagnostics: Vec::new(),
                 },
             ]),

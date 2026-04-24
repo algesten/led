@@ -201,23 +201,23 @@ pub struct Theme {
     /// Severity → style for gutter markers and inline underlines.
     pub diagnostics: DiagnosticsTheme,
 
-    // ── Git (placeholder — M19 fills in) ───────────────────
+    // ── Git ────────────────────────────────────────────────
     /// Unstaged worktree changes — browser `M` letter and gutter
-    /// bar. Default matches legacy's `git.modified` (x178 yellow).
+    /// bar. Default matches legacy's `git.modified` (x172 orange).
     pub git_modified: Style,
     /// Staged changes (both `M` and `A` letters map to this style).
     /// Default matches legacy's `git.added` (x034 green).
     pub git_added: Style,
     /// Untracked files — browser `U` letter. Default matches
-    /// legacy's `git.untracked` (x039 cyan).
+    /// legacy's `git.untracked` (x022 dark green).
     pub git_untracked: Style,
 
     // ── GitHub PR (placeholder — M27 fills in) ─────────────
     /// PR review comment marker. Default matches legacy's
-    /// `pr.comment` (blue).
+    /// `pr.comment` (x205 pink).
     pub pr_comment: Style,
     /// PR diff range marker. Default matches legacy's `pr.diff`
-    /// (dim grey).
+    /// (x245 dim grey).
     pub pr_diff: Style,
 }
 
@@ -482,7 +482,7 @@ impl Default for Theme {
             // populated but the memo only emits LSP categories
             // until the git / PR atoms land (M19 / M27).
             git_modified: Style {
-                fg: Some(Color::Indexed(178)),
+                fg: Some(Color::Indexed(172)),
                 ..Style::default()
             },
             git_added: Style {
@@ -490,15 +490,15 @@ impl Default for Theme {
                 ..Style::default()
             },
             git_untracked: Style {
-                fg: Some(Color::Indexed(39)),
+                fg: Some(Color::Indexed(22)),
                 ..Style::default()
             },
             pr_comment: Style {
-                fg: Some(Color::Indexed(33)),
+                fg: Some(Color::Indexed(205)),
                 ..Style::default()
             },
             pr_diff: Style {
-                fg: Some(Color::Indexed(244)),
+                fg: Some(Color::Indexed(245)),
                 ..Style::default()
             },
         }

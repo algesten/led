@@ -1034,10 +1034,12 @@ mod tests {
         };
         use led_state_browser::BrowserUi;
         use led_state_diagnostics::DiagnosticsStates;
+        use led_state_git::GitState;
         use led_state_syntax::SyntaxStates;
         use led_driver_terminal_core::{Layout, Rect};
         let syntax = SyntaxStates::default();
         let diags = DiagnosticsStates::default();
+        let git = GitState::default();
         let browser = BrowserUi::default();
         let dims = term.dims.expect("dims");
         let layout = Layout::compute(dims, browser.visible);
@@ -1048,6 +1050,7 @@ mod tests {
             overlays: OverlaysInput::new(&None, &None, &None),
             syntax: SyntaxStatesInput::new(&syntax),
             diagnostics: DiagnosticsStatesInput::new(&diags),
+            git: query::GitStateInput::new(&git),
             area: layout.editor_area,
         });
         // Reaching here == body_model didn't panic.

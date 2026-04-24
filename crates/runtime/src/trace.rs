@@ -76,6 +76,12 @@ pub trait Trace: Send + Sync {
     /// (named after its `Language`). Emitted once per language
     /// per session. Legacy golden name: `LspServerStarted`.
     fn lsp_server_started(&self, server: &str);
+    /// Runtime dispatched a git workspace scan. Emits as
+    /// `GitScan\troot=<p>` in `dispatched.snap`. Fires once per
+    /// `GitCmd::ScanFiles` — the git driver is stateless about
+    /// pending work, so this maps 1:1 with the execute-phase
+    /// emission.
+    fn git_scan_start(&self, root: &CanonPath);
     /// Runtime asked the LSP manager to open a diagnostic window.
     /// Fires on every buffer/save version delta — the manager
     /// coalesces via its DiagnosticSource state machine.
@@ -271,6 +277,9 @@ impl Trace for FileTrace {
     fn lsp_server_started(&self, server: &str) {
         self.write_line(&format!("LspServerStarted\tserver={server}"));
     }
+    fn git_scan_start(&self, root: &CanonPath) {
+        self.write_line(&format!("GitScan\troot={}", self.format_path(root)));
+    }
     // Request-diagnostics fires per version delta; too noisy for
     // the intent log.
     fn lsp_request_diagnostics(&self) {}
@@ -352,6 +361,7 @@ impl Trace for NoopTrace {
     fn syntax_parse_start(&self, _: &CanonPath, _: u64, _: Language) {}
     fn syntax_parse_done(&self, _: &CanonPath, _: u64, _: bool) {}
     fn lsp_server_started(&self, _: &str) {}
+    fn git_scan_start(&self, _: &CanonPath) {}
     fn lsp_request_diagnostics(&self) {}
     fn lsp_diagnostics_done(&self, _: &CanonPath, _: usize, _: PersistedContentHash) {}
     fn lsp_mode_fallback(&self) {}

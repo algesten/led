@@ -209,6 +209,34 @@ impl<'a> LspExtrasOverlayInput<'a> {
     }
 }
 
+// ── Input on GitState (M19) ───────────────────────────────────────────
+
+/// Projection of [`led_state_git::GitState`] for use from the
+/// browser memo (file-level categories), gutter memo (per-buffer
+/// line statuses), and status-bar memo (branch name).
+///
+/// Separate input so a branch-only change doesn't invalidate the
+/// body-model memo's per-row hot path, and a line-status change
+/// for one buffer doesn't invalidate the status-bar memo.
+#[derive(drv::Input, Copy, Clone)]
+pub struct GitStateInput<'a> {
+    pub branch: &'a Option<String>,
+    pub file_statuses:
+        &'a imbl::HashMap<CanonPath, imbl::HashSet<led_core::IssueCategory>>,
+    pub line_statuses:
+        &'a imbl::HashMap<CanonPath, Arc<Vec<led_core::git::LineStatus>>>,
+}
+
+impl<'a> GitStateInput<'a> {
+    pub fn new(g: &'a led_state_git::GitState) -> Self {
+        Self {
+            branch: &g.branch,
+            file_statuses: &g.file_statuses,
+            line_statuses: &g.line_statuses,
+        }
+    }
+}
+
 // ── Input on Terminal ──────────────────────────────────────────────────
 
 /// Viewport dims only. A push to `Terminal.pending` is deliberately
@@ -536,6 +564,7 @@ pub struct BodyInputs<'a> {
     pub overlays: OverlaysInput<'a>,
     pub syntax: SyntaxStatesInput<'a>,
     pub diagnostics: DiagnosticsStatesInput<'a>,
+    pub git: GitStateInput<'a>,
     pub area: Rect,
 }
 
@@ -548,6 +577,7 @@ pub fn body_model<'a>(inputs: BodyInputs<'a>) -> BodyModel {
         overlays,
         syntax,
         diagnostics,
+        git,
         area,
     } = inputs;
     let Some(id) = *tabs.active else {
@@ -570,6 +600,7 @@ pub fn body_model<'a>(inputs: BodyInputs<'a>) -> BodyModel {
             .get(&tab.path)
             .filter(|bd| bd.hash == current_hash)
             .map(|bd| bd.diagnostics.as_slice());
+        let line_statuses = git.line_statuses.get(&tab.path).map(|v| v.as_slice());
         return render_content(
             &eb.rope,
             tab.cursor,
@@ -578,6 +609,7 @@ pub fn body_model<'a>(inputs: BodyInputs<'a>) -> BodyModel {
             highlight,
             spans.as_deref().map(|v: &Vec<TokenSpan>| v.as_slice()),
             diags,
+            line_statuses,
         );
     }
     match store.loaded.get(&tab.path) {
@@ -591,6 +623,7 @@ pub fn body_model<'a>(inputs: BodyInputs<'a>) -> BodyModel {
         Some(LoadState::Ready(rope)) => {
             let highlight =
                 active_body_match(&overlays, &tab.path, tab.scroll, area, rope);
+            let line_statuses = git.line_statuses.get(&tab.path).map(|v| v.as_slice());
             render_content(
                 rope,
                 tab.cursor,
@@ -599,6 +632,7 @@ pub fn body_model<'a>(inputs: BodyInputs<'a>) -> BodyModel {
                 highlight,
                 None,
                 None,
+                line_statuses,
             )
         }
     }
@@ -739,6 +773,7 @@ fn path_display(tab: &Tab) -> Arc<str> {
     Arc::<str>::from(tab.path.display().to_string())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_content(
     rope: &Rope,
     cursor: Cursor,
@@ -747,6 +782,7 @@ fn render_content(
     match_highlight: Option<led_driver_terminal_core::BodyMatch>,
     rebased_tokens: Option<&[TokenSpan]>,
     diagnostics: Option<&[Diagnostic]>,
+    git_line_statuses: Option<&[led_core::git::LineStatus]>,
 ) -> BodyModel {
     use led_driver_terminal_core::BodyLine;
     use led_core::{SubLine, sub_line_count, sub_line_range};
@@ -767,6 +803,7 @@ fn render_content(
                 text: "~ ".to_string(),
                 spans: Vec::new(),
                 gutter_diagnostic: None,
+                gutter_category: None,
                 diagnostics: Vec::new(),
             });
             continue;
@@ -812,10 +849,22 @@ fn render_content(
         let (gutter_diag, row_diagnostics) = diagnostics
             .map(|diags| diagnostics_for_sub_line(diags, ln, col_start, col_end, content_cols))
             .unwrap_or_default();
+        // Merged gutter category (M19 D7): the highest-precedence
+        // `IssueCategory` across LSP diagnostics + git line
+        // statuses for this row. Only paints on the first sub-
+        // line of a wrapped row — matches legacy's "col 1 marker
+        // on chunk 0".
+        let is_first_sub = sub == SubLine(0);
+        let gutter_category = if is_first_sub {
+            merged_gutter_category(gutter_diag, git_line_statuses, ln)
+        } else {
+            None
+        };
         lines.push(BodyLine {
             text: s,
             spans,
             gutter_diagnostic: gutter_diag,
+            gutter_category,
             diagnostics: row_diagnostics,
         });
         // Advance to the next visible sub-line; cross into the
@@ -904,6 +953,31 @@ fn diagnostics_for_sub_line(
         });
     }
     (gutter, out)
+}
+
+/// Pick the precedence-winning `IssueCategory` for the gutter
+/// bar (col 0) at `row`, merging LSP diagnostic severity with
+/// git line statuses. Returns `None` if neither source covers
+/// the row. Matches the priority ladder documented in
+/// `docs/spec/git.md`:
+///
+///   LspError > LspWarning > Unstaged > StagedModified/New > PrComment/PrDiff
+fn merged_gutter_category(
+    diag_sev: Option<DiagnosticSeverity>,
+    line_statuses: Option<&[led_core::git::LineStatus]>,
+    row: usize,
+) -> Option<led_core::IssueCategory> {
+    let lsp = diag_sev.and_then(|s| match s {
+        DiagnosticSeverity::Error => Some(led_core::IssueCategory::LspError),
+        DiagnosticSeverity::Warning => Some(led_core::IssueCategory::LspWarning),
+        // Info / Hint never colour the gutter — legacy parity.
+        _ => None,
+    });
+    let git = line_statuses.and_then(|s| led_core::git::best_category_at(s, row));
+    [lsp, git]
+        .into_iter()
+        .flatten()
+        .min_by_key(|c| c.precedence())
 }
 
 fn higher(a: DiagnosticSeverity, b: DiagnosticSeverity) -> DiagnosticSeverity {
@@ -1062,6 +1136,7 @@ pub struct StatusBarInputs<'a> {
     pub diagnostics: DiagnosticsStatesInput<'a>,
     pub lsp: LspStatusesInput<'a>,
     pub lsp_extras: LspExtrasOverlayInput<'a>,
+    pub git: GitStateInput<'a>,
     pub render_tick: u64,
 }
 
@@ -1075,6 +1150,7 @@ pub fn status_bar_model<'a>(inputs: StatusBarInputs<'a>) -> StatusBarModel {
         diagnostics,
         lsp,
         lsp_extras,
+        git,
         render_tick,
     } = inputs;
     // Priority 0a — LSP rename overlay prompt (M18).
@@ -1181,17 +1257,24 @@ pub fn status_bar_model<'a>(inputs: StatusBarInputs<'a>) -> StatusBarModel {
         };
     }
 
-    // Priority 4 — default left half: ` {modified}{lsp}` —
-    // legacy composes this as ` {branch}{modified}{pr}{lsp}`
-    // and we build the same shape minus the git/PR pieces until
-    // those milestones land. `lsp_progress_message` always
-    // returns `Some` once a server is registered, so
-    // "rust-analyzer" stays visible both during indexing and
-    // idle.
+    // Priority 4 — default left half: ` {branch}{modified}{lsp}`.
+    // Legacy composes this as ` {branch}{modified}{pr}{lsp}`; PR
+    // lands at M27. `lsp_progress_message` always returns `Some`
+    // once a server is registered, so "rust-analyzer" stays
+    // visible both during indexing and idle. The branch segment
+    // is empty when `git.branch` is `None` (detached HEAD or
+    // non-repo workspace) so the bar collapses back to the
+    // pre-M19 shape automatically.
     let dirty = active_is_dirty(tabs, edits);
     let modified = if dirty { " \u{25cf}" } else { "" };
+    let branch = git.branch.as_deref().unwrap_or("");
+    let branch_segment = if branch.is_empty() {
+        String::new()
+    } else {
+        format!(" {branch}")
+    };
     let lsp_str = lsp_progress_message(lsp, render_tick).unwrap_or_default();
-    let left: Arc<str> = Arc::from(format!(" {modified}{lsp_str}"));
+    let left: Arc<str> = Arc::from(format!(" {branch_segment}{modified}{lsp_str}"));
     StatusBarModel {
         left,
         right,
@@ -1338,6 +1421,7 @@ pub struct SidePanelInputs<'a> {
     pub overlays: OverlaysInput<'a>,
     pub tabs: TabsActiveInput<'a>,
     pub diagnostics: DiagnosticsStatesInput<'a>,
+    pub git: GitStateInput<'a>,
     pub rows: u16,
 }
 
@@ -1349,6 +1433,7 @@ pub fn side_panel_model<'a>(inputs: SidePanelInputs<'a>) -> SidePanelModel {
         overlays,
         tabs,
         diagnostics,
+        git,
         rows,
     } = inputs;
     if let Some(state) = overlays.file_search.as_ref() {
@@ -1371,7 +1456,7 @@ pub fn side_panel_model<'a>(inputs: SidePanelInputs<'a>) -> SidePanelModel {
     let focused = *browser.focus == Focus::Side;
     // Per-file category map — used for both file rows (direct
     // lookup) and directory rows (union over descendants).
-    let categories = file_categories_map(diagnostics);
+    let categories = file_categories_map(diagnostics, git);
     let mut out: Vec<SidePanelRow> = Vec::with_capacity(end.saturating_sub(start));
     for (i, entry) in entries[start..end].iter().enumerate() {
         let chevron = match entry.kind {
@@ -2031,15 +2116,15 @@ pub fn find_file_action<'f>(
 /// `led_state::annotations::file_categories_map` and feeds the
 /// browser painter + (later) the Alt-./ nav cycle.
 ///
-/// **M16 scope:** only LSP Error / Warning populate the map.
+/// **M19 scope:** LSP Error / Warning, plus git file-level
+/// categories (Unstaged, StagedModified, StagedNew, Untracked).
 /// Info / Hint are filtered out per legacy — they never colour
-/// the browser. Git-file statuses (Unstaged / Staged* / Untracked)
-/// and PR membership (PrComment / PrDiff) are plumbed in the
-/// `IssueCategory` enum and the painter's `category_style`
-/// dispatch but produce nothing until their atoms land (M19 / M27).
+/// the browser. PR membership (PrComment / PrDiff) joins via the
+/// same `IssueCategory` pipeline at M27.
 #[drv::memo(single)]
 pub fn file_categories_map<'d>(
     diagnostics: DiagnosticsStatesInput<'d>,
+    git: GitStateInput<'d>,
 ) -> Arc<imbl::HashMap<CanonPath, imbl::HashSet<led_core::IssueCategory>>> {
     let mut map: imbl::HashMap<CanonPath, imbl::HashSet<led_core::IssueCategory>> =
         imbl::HashMap::default();
@@ -2062,9 +2147,18 @@ pub fn file_categories_map<'d>(
         }
     }
 
-    // Git statuses + PR membership — future-proof branches. M19 and
-    // M27 each add their source; the signature of this memo already
-    // accepts extra inputs when they arrive.
+    // Git file-level statuses. `IssueCategory::resolve_display`
+    // picks the winning letter / colour when a path carries both
+    // a diagnostic and a git category (LSP precedes git by
+    // `IssueCategory::precedence`).
+    for (path, cats) in git.file_statuses.iter() {
+        let entry = map.entry(path.clone()).or_default();
+        for c in cats.iter() {
+            entry.insert(*c);
+        }
+    }
+
+    // PR membership arrives at M27 via the same merge pattern.
 
     Arc::new(map)
 }
@@ -2212,6 +2306,7 @@ pub struct RenderInputs<'a> {
     pub lsp: LspStatusesInput<'a>,
     pub completions: CompletionsSessionInput<'a>,
     pub lsp_extras: LspExtrasOverlayInput<'a>,
+    pub git: GitStateInput<'a>,
     /// Current frame in 80ms buckets. Used by the status-bar
     /// spinner formatter; the main loop quantises wall-clock
     /// millis to 80 so the memo only invalidates once per
@@ -2236,6 +2331,7 @@ pub fn render_frame<'a>(inputs: RenderInputs<'a>) -> Option<Frame> {
         lsp,
         completions,
         lsp_extras,
+        git,
         render_tick,
     } = inputs;
     let dims = (*term.dims)?;
@@ -2248,6 +2344,7 @@ pub fn render_frame<'a>(inputs: RenderInputs<'a>) -> Option<Frame> {
         overlays,
         syntax,
         diagnostics,
+        git,
         area: layout.editor_area,
     });
     let status_bar = status_bar_model(StatusBarInputs {
@@ -2258,6 +2355,7 @@ pub fn render_frame<'a>(inputs: RenderInputs<'a>) -> Option<Frame> {
         diagnostics,
         lsp,
         lsp_extras,
+        git,
         render_tick,
     });
     let side_panel = layout
@@ -2269,6 +2367,7 @@ pub fn render_frame<'a>(inputs: RenderInputs<'a>) -> Option<Frame> {
                 overlays,
                 tabs,
                 diagnostics,
+                git,
                 rows: area.rows,
             })
         });
@@ -2459,6 +2558,7 @@ mod tests {
                 &led_state_completions::CompletionsState::default(),
             ),
             lsp_extras: LspExtrasOverlayInput::new(&led_state_lsp::LspExtrasState::default()),
+            git: GitStateInput::new(&led_state_git::GitState::default()),
             render_tick: 0,
         })
     }
@@ -2524,6 +2624,7 @@ mod tests {
                 &led_state_completions::CompletionsState::default(),
             ),
             lsp_extras: LspExtrasOverlayInput::new(&led_state_lsp::LspExtrasState::default()),
+            git: GitStateInput::new(&led_state_git::GitState::default()),
             render_tick: 0,
         })
         .expect("dims set");
@@ -2571,6 +2672,7 @@ mod tests {
                 &led_state_completions::CompletionsState::default(),
             ),
             lsp_extras: LspExtrasOverlayInput::new(&led_state_lsp::LspExtrasState::default()),
+            git: GitStateInput::new(&led_state_git::GitState::default()),
             render_tick: 0,
         })
         .expect("dims set");
@@ -3045,6 +3147,119 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
         );
     }
 
+    // ── M19: gutter category ─────────────────────────────────────────────
+
+    #[test]
+    fn merged_gutter_picks_lsp_error_over_git_unstaged() {
+        use led_core::IssueCategory;
+        use led_core::git::LineStatus;
+        let statuses = vec![LineStatus {
+            category: IssueCategory::Unstaged,
+            rows: 0..1,
+        }];
+        let cat = merged_gutter_category(
+            Some(DiagnosticSeverity::Error),
+            Some(&statuses),
+            0,
+        );
+        assert_eq!(cat, Some(IssueCategory::LspError));
+    }
+
+    #[test]
+    fn merged_gutter_falls_back_to_git_when_no_diagnostic() {
+        use led_core::IssueCategory;
+        use led_core::git::LineStatus;
+        let statuses = vec![LineStatus {
+            category: IssueCategory::Unstaged,
+            rows: 5..7,
+        }];
+        let cat = merged_gutter_category(None, Some(&statuses), 6);
+        assert_eq!(cat, Some(IssueCategory::Unstaged));
+    }
+
+    #[test]
+    fn merged_gutter_ignores_info_hint_diagnostics() {
+        // Info / Hint never colour the gutter; if git says nothing
+        // either the result is None.
+        assert_eq!(
+            merged_gutter_category(Some(DiagnosticSeverity::Info), None, 0),
+            None,
+        );
+        assert_eq!(
+            merged_gutter_category(Some(DiagnosticSeverity::Hint), None, 0),
+            None,
+        );
+    }
+
+    #[test]
+    fn body_model_paints_git_gutter_on_unstaged_line() {
+        // Two-line rope. Line 1 carries a git Unstaged range; the
+        // rendered row should carry `gutter_category = Some(Unstaged)`.
+        use led_core::git::LineStatus;
+        use led_core::IssueCategory;
+        let (t, e, s, term) = fixture(
+            &[("a.rs", 1)],
+            Some(1),
+            &[(
+                "a.rs",
+                LoadState::Ready(Arc::new(Rope::from_str("clean\ndirty"))),
+            )],
+            Some(Dims { cols: 20, rows: 5 }),
+        );
+        let path = &t.open[0].path;
+        let mut git = led_state_git::GitState::default();
+        git.line_statuses.insert(
+            path.clone(),
+            Arc::new(vec![LineStatus {
+                category: IssueCategory::Unstaged,
+                rows: 1..2,
+            }]),
+        );
+        let alerts = AlertState::default();
+        let browser = BrowserUi {
+            visible: false,
+            ..Default::default()
+        };
+        let ff = None;
+        let is = None;
+        let fsrch = None;
+        let syntax = SyntaxStates::default();
+        let diags = DiagnosticsStates::default();
+        let lsp = LspStatuses::default();
+        let frame = render_frame(RenderInputs {
+            term: TerminalDimsInput::new(&term),
+            edits: EditedBuffersInput::new(&e),
+            store: StoreLoadedInput::new(&s),
+            tabs: TabsActiveInput::new(&t),
+            alerts: AlertsInput::new(&alerts),
+            browser: BrowserUiInput::new(&browser),
+            fs: FsTreeInput::new(&led_state_browser::FsTree::default()),
+            overlays: OverlaysInput::new(&ff, &is, &fsrch),
+            syntax: SyntaxStatesInput::new(&syntax),
+            diagnostics: DiagnosticsStatesInput::new(&diags),
+            lsp: LspStatusesInput::new(&lsp),
+            completions: CompletionsSessionInput::new(
+                &led_state_completions::CompletionsState::default(),
+            ),
+            lsp_extras: LspExtrasOverlayInput::new(
+                &led_state_lsp::LspExtrasState::default(),
+            ),
+            git: GitStateInput::new(&git),
+            render_tick: 0,
+        })
+        .expect("dims");
+        match &frame.body {
+            BodyModel::Content { lines, .. } => {
+                assert!(lines[0].gutter_category.is_none());
+                assert_eq!(
+                    lines[1].gutter_category,
+                    Some(IssueCategory::Unstaged),
+                );
+            }
+            other => panic!("expected Content, got {other:?}"),
+        }
+    }
+
     // ── M9: past-EOF tildes ─────────────────────────────────────────────
 
     #[test]
@@ -3080,6 +3295,7 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
         let is = None;
         let diags = DiagnosticsStates::default();
         let lsp = LspStatuses::default();
+        let git = led_state_git::GitState::default();
         status_bar_model(StatusBarInputs {
             alerts: AlertsInput::new(a),
             tabs: TabsActiveInput::new(t),
@@ -3090,6 +3306,32 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
             lsp_extras: LspExtrasOverlayInput::new(
                 &led_state_lsp::LspExtrasState::default(),
             ),
+            git: GitStateInput::new(&git),
+            render_tick: 0,
+        })
+    }
+
+    fn status_with_git(
+        a: &AlertState,
+        t: &Tabs,
+        e: &BufferEdits,
+        g: &led_state_git::GitState,
+    ) -> StatusBarModel {
+        let ff = None;
+        let is = None;
+        let diags = DiagnosticsStates::default();
+        let lsp = LspStatuses::default();
+        status_bar_model(StatusBarInputs {
+            alerts: AlertsInput::new(a),
+            tabs: TabsActiveInput::new(t),
+            edits: EditedBuffersInput::new(e),
+            overlays: OverlaysInput::new(&ff, &is, &None),
+            diagnostics: DiagnosticsStatesInput::new(&diags),
+            lsp: LspStatusesInput::new(&lsp),
+            lsp_extras: LspExtrasOverlayInput::new(
+                &led_state_lsp::LspExtrasState::default(),
+            ),
+            git: GitStateInput::new(g),
             render_tick: 0,
         })
     }
@@ -3121,6 +3363,58 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
         assert_eq!(&*s.left, " ");
         assert_eq!(&*s.right, "L1:C1 ");
         assert!(!s.is_warn);
+    }
+
+    #[test]
+    fn status_bar_default_with_branch_prepends_name() {
+        // M19: a live workspace branch shows as ` main …`.
+        let mut tabs = Tabs::default();
+        tabs.open.push_back(Tab {
+            id: TabId(1),
+            path: canon("a.rs"),
+            cursor: Cursor { line: 0, col: 0, preferred_col: 0 },
+            ..Default::default()
+        });
+        tabs.active = Some(TabId(1));
+        let mut git = led_state_git::GitState::default();
+        git.branch = Some("main".into());
+        let s = status_with_git(
+            &AlertState::default(),
+            &tabs,
+            &BufferEdits::default(),
+            &git,
+        );
+        // Legacy shape: ` {branch}{modified}{pr}{lsp}` — leading
+        // space, then " main", nothing further.
+        assert_eq!(&*s.left, "  main");
+    }
+
+    #[test]
+    fn status_bar_default_with_branch_and_dirty() {
+        // Dirty buffer + branch.
+        let mut tabs = Tabs::default();
+        tabs.open.push_back(Tab {
+            id: TabId(1),
+            path: canon("a.rs"),
+            cursor: Cursor { line: 0, col: 0, preferred_col: 0 },
+            ..Default::default()
+        });
+        tabs.active = Some(TabId(1));
+        let mut edits = BufferEdits::default();
+        edits.buffers.insert(
+            canon("a.rs"),
+            EditedBuffer {
+                rope: Arc::new(Rope::from_str("x")),
+                version: 2,
+                saved_version: 1,
+                history: Default::default(),
+            },
+        );
+        let mut git = led_state_git::GitState::default();
+        git.branch = Some("feature/xyz".into());
+        let s = status_with_git(&AlertState::default(), &tabs, &edits, &git);
+        // ` ` + ` feature/xyz` + ` ●`.
+        assert_eq!(&*s.left, "  feature/xyz \u{25cf}");
     }
 
     #[test]
@@ -3327,6 +3621,7 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
             overlays: OverlaysInput::new(&None, &is, &fs),
             syntax: SyntaxStatesInput::new(&syntax),
             diagnostics: DiagnosticsStatesInput::new(&diags),
+            git: GitStateInput::new(&led_state_git::GitState::default()),
             area: Rect { x: 0, y: 0, cols: 40, rows: 5 },
         });
         match model {
@@ -3399,6 +3694,7 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
             overlays: OverlaysInput::new(&None, &is, &fs),
             syntax: SyntaxStatesInput::new(&syntax),
             diagnostics: DiagnosticsStatesInput::new(&diags),
+            git: GitStateInput::new(&led_state_git::GitState::default()),
             area: Rect { x: 0, y: 0, cols: 40, rows: 5 },
         });
         match model {
@@ -3745,7 +4041,11 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
                 items,
             ),
         );
-        let map = file_categories_map(DiagnosticsStatesInput::new(&diags));
+        let git = led_state_git::GitState::default();
+        let map = file_categories_map(
+            DiagnosticsStatesInput::new(&diags),
+            GitStateInput::new(&git),
+        );
         let cats = map.get(&canon("/p/a.rs")).expect("entry");
         assert!(cats.contains(&led_core::IssueCategory::LspError));
         assert!(cats.contains(&led_core::IssueCategory::LspWarning));
@@ -3756,8 +4056,71 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
     #[test]
     fn file_categories_map_empty_when_no_diagnostics() {
         let diags = DiagnosticsStates::default();
-        let map = file_categories_map(DiagnosticsStatesInput::new(&diags));
+        let git = led_state_git::GitState::default();
+        let map = file_categories_map(
+            DiagnosticsStatesInput::new(&diags),
+            GitStateInput::new(&git),
+        );
         assert!(map.is_empty());
+    }
+
+    #[test]
+    fn file_categories_map_merges_git_and_lsp() {
+        // Same file carries both an LSP error and a git Unstaged
+        // category. `resolve_display` should pick LspError by
+        // precedence (LspError < Unstaged in numeric value).
+        let p = canon("/p/a.rs");
+        let mut diags = DiagnosticsStates::default();
+        diags.by_path.insert(
+            p.clone(),
+            BufferDiagnostics::new(
+                led_core::PersistedContentHash(1),
+                vec![Diagnostic {
+                    start_line: 0,
+                    start_col: 0,
+                    end_line: 0,
+                    end_col: 3,
+                    severity: DiagnosticSeverity::Error,
+                    message: String::new(),
+                    source: None,
+                    code: None,
+                }],
+            ),
+        );
+        let mut git = led_state_git::GitState::default();
+        let mut cats_for_file = imbl::HashSet::default();
+        cats_for_file.insert(led_core::IssueCategory::Unstaged);
+        git.file_statuses.insert(p.clone(), cats_for_file);
+
+        let map = file_categories_map(
+            DiagnosticsStatesInput::new(&diags),
+            GitStateInput::new(&git),
+        );
+        let cats = map.get(&p).expect("merged");
+        assert!(cats.contains(&led_core::IssueCategory::LspError));
+        assert!(cats.contains(&led_core::IssueCategory::Unstaged));
+        // `resolve_display` selects the precedence-winning category
+        // (LspError) even though both are present.
+        let shown = led_core::resolve_display(cats).expect("some");
+        assert_eq!(shown.category, led_core::IssueCategory::LspError);
+    }
+
+    #[test]
+    fn file_categories_map_includes_git_only_file() {
+        // Untracked file with no diagnostics — carries through.
+        let p = canon("/p/new.rs");
+        let diags = DiagnosticsStates::default();
+        let mut git = led_state_git::GitState::default();
+        let mut cats_for_file = imbl::HashSet::default();
+        cats_for_file.insert(led_core::IssueCategory::Untracked);
+        git.file_statuses.insert(p.clone(), cats_for_file);
+
+        let map = file_categories_map(
+            DiagnosticsStatesInput::new(&diags),
+            GitStateInput::new(&git),
+        );
+        let cats = map.get(&p).expect("git-only file present");
+        assert!(cats.contains(&led_core::IssueCategory::Untracked));
     }
 
     #[test]
@@ -3814,12 +4177,14 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
         let ff = None;
         let is = None;
         let fsrch = None;
+        let git = led_state_git::GitState::default();
         let panel = side_panel_model(SidePanelInputs {
             fs: FsTreeInput::new(&fs),
             browser: BrowserUiInput::new(&browser),
             overlays: OverlaysInput::new(&ff, &is, &fsrch),
             tabs: TabsActiveInput::new(&tabs),
             diagnostics: DiagnosticsStatesInput::new(&diags),
+            git: GitStateInput::new(&git),
             rows: 10,
         });
         let rows: &Vec<SidePanelRow> = &panel.rows;

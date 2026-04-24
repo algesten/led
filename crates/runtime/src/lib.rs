@@ -44,6 +44,8 @@ use led_driver_syntax_core::{SyntaxCmd, SyntaxDriver};
 use led_driver_syntax_native::SyntaxNative;
 use led_driver_lsp_core::{LspCmd, LspDriver, LspEvent};
 use led_driver_lsp_native::LspNative;
+use led_driver_git_core::{GitCmd, GitDriver, GitEvent};
+use led_driver_git_native::GitNative;
 use led_state_alerts::AlertState;
 use led_state_browser::{BrowserUi, FsTree};
 use led_state_buffer_edits::{BufferEdits, EditedBuffer};
@@ -56,6 +58,7 @@ use led_state_kill_ring::KillRing;
 use led_state_diagnostics::{
     BufferDiagnostics, DiagnosticsStates, LspServerStatus, LspStatuses,
 };
+use led_state_git::GitState;
 use led_state_syntax::{Language, SyntaxState, SyntaxStates};
 use led_state_tabs::{TabId, Tabs};
 
@@ -124,6 +127,7 @@ pub struct Drivers {
     pub file_search: FileSearchDriver,
     pub syntax: SyntaxDriver,
     pub lsp: LspDriver,
+    pub git: GitDriver,
 
     // Held only for lifetime management; detached on drop.
     _file_native: FileReadNative,
@@ -135,6 +139,7 @@ pub struct Drivers {
     _file_search_native: FileSearchNative,
     _syntax_native: SyntaxNative,
     _lsp_native: LspNative,
+    _git_native: GitNative,
 }
 
 /// Allocator for fresh `TabId`s. Counter only; ids are never reused.
@@ -233,6 +238,22 @@ pub struct Atoms {
     /// from `completions` and `diagnostics` so its churn doesn't
     /// invalidate unrelated memos.
     pub lsp_extras: led_state_lsp::LspExtrasState,
+    /// Git state (M19): branch + per-file category map + per-
+    /// buffer line statuses. Folded from `GitEvent::FileStatuses`
+    /// and `GitEvent::LineStatuses` in the ingest phase; read by
+    /// the browser / gutter / status-bar query memos.
+    pub git: GitState,
+    /// `true` once the initial workspace scan has been dispatched.
+    /// Driver-outbound bookkeeping — same category as
+    /// `lsp_init_sent`: guards the startup one-shot so we don't
+    /// spam `GitScan` every tick when `fs.root` is `Some` but the
+    /// driver has nothing new to do.
+    pub git_scan_dispatched: bool,
+    /// Set by the ingest phase on every successful save
+    /// completion. Drained in the execute phase into a
+    /// `GitCmd::ScanFiles` (a file save is the most common cause
+    /// of git state changing, so rescanning is the right UX).
+    pub git_scan_pending: bool,
     /// Symlink resolution chain for every path the user has
     /// opened, keyed by canonical path. Populated at tab-open
     /// time (main.rs CLI, find-file commit, browser open) so the
@@ -282,6 +303,9 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
         lsp_status,
         completions,
         lsp_extras,
+        git,
+        git_scan_dispatched,
+        git_scan_pending,
     } = &mut *world.atoms;
     let drivers = world.drivers;
     let wake = world.wake;
@@ -604,6 +628,11 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
                     }
                     alerts.clear_warn(&basename);
                     alerts.set_info(format!("Saved {basename}"), Instant::now(), INFO_TTL);
+                    // Disk changed — ask git to rescan. The
+                    // workspace-root gate lives in the execute
+                    // phase; setting the flag here keeps the
+                    // intent local to the save site.
+                    *git_scan_pending = true;
                 }
                 Err(msg) => {
                     // Already traced inside FileWriteDriver::process.
@@ -746,6 +775,40 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
             state.version = done.version;
         }
 
+        // Apply git driver events. The driver emits a burst per
+        // scan: one FileStatuses (always), one LineStatuses per
+        // dirty path, then one empty LineStatuses per formerly-
+        // dirty path that has since gone clean. FileStatuses
+        // arrives first by construction so the reducer installs
+        // the new map before per-path line entries land.
+        for ev in drivers.git.process() {
+            match ev {
+                GitEvent::FileStatuses { statuses, branch } => {
+                    git.branch = branch;
+                    let mut imbl_map: imbl::HashMap<
+                        CanonPath,
+                        imbl::HashSet<led_core::IssueCategory>,
+                    > = imbl::HashMap::default();
+                    for (path, cats) in statuses {
+                        let mut imbl_set: imbl::HashSet<led_core::IssueCategory> =
+                            imbl::HashSet::default();
+                        for c in cats {
+                            imbl_set.insert(c);
+                        }
+                        imbl_map.insert(path, imbl_set);
+                    }
+                    git.file_statuses = imbl_map;
+                }
+                GitEvent::LineStatuses { path, statuses } => {
+                    if statuses.is_empty() {
+                        git.line_statuses.remove(&path);
+                    } else {
+                        git.line_statuses.insert(path, Arc::new(statuses));
+                    }
+                }
+            }
+        }
+
         // Apply clipboard completions: either paste the text at the
         // tab the yank was issued from, or on empty/error fall back
         // to the kill ring. Writes only clear the in-flight bit.
@@ -875,6 +938,7 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
             lsp: query::LspStatusesInput::new(lsp_status),
             completions: query::CompletionsSessionInput::new(completions),
             lsp_extras: query::LspExtrasOverlayInput::new(lsp_extras),
+            git: query::GitStateInput::new(git),
             render_tick,
         });
 
@@ -1218,6 +1282,44 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
         }
         if !lsp_cmds.is_empty() {
             drivers.lsp.execute(lsp_cmds.iter());
+        }
+
+        // ── Git dispatch ───────────────────────────────────────
+        //
+        // Startup one-shot (plus per-save re-fire) gated on a
+        // `.git/` entry existing under the workspace root. The
+        // gate matches legacy's "command is never emitted in
+        // standalone / no-workspace mode" contract (spec
+        // `git.md`): non-repo workspaces don't spam `GitScan`
+        // trace lines, and libgit2 doesn't churn on open-fail.
+        //
+        // When the timers driver lands (post-M19), insert a
+        // Replace(50ms) gate between the flag bump and the
+        // drain here — no other call-site changes. Until then,
+        // saves are user-paced so the at-most-one-per-save rate
+        // stays well below legacy's 50ms debounce target.
+        if let Some(root) = fs.root.as_ref() {
+            // Drain the per-save flag regardless of startup
+            // state so a save mid-session doesn't leave it
+            // sticky. Combine with the "never scanned yet"
+            // condition to decide whether to actually dispatch.
+            let save_pending = std::mem::take(git_scan_pending);
+            let want_scan = !*git_scan_dispatched || save_pending;
+            if want_scan && root.as_path().join(".git").exists() {
+                drivers.git.execute(std::iter::once(&GitCmd::ScanFiles {
+                    root: root.clone(),
+                }));
+                *git_scan_dispatched = true;
+            } else if want_scan {
+                // Not a repo — flip the latch so we don't
+                // re-check `.git/` every tick.
+                *git_scan_dispatched = true;
+            }
+        } else {
+            // No workspace root yet — discard the pending flag
+            // silently so a future workspace load doesn't
+            // double-fire.
+            *git_scan_pending = false;
         }
 
         // Clipboard actions: a Read when a yank is pending (no read
@@ -1744,6 +1846,10 @@ pub fn spawn_drivers(
         wake.notifier.clone(),
         lsp_server_override,
     );
+    let (git, git_native) = led_driver_git_native::spawn(
+        trace.clone().as_git_trace(),
+        wake.notifier.clone(),
+    );
     let (input, input_native) = led_driver_terminal_native::spawn(
         trace.clone().as_terminal_trace(),
         wake.notifier.clone(),
@@ -1760,6 +1866,7 @@ pub fn spawn_drivers(
         file_search,
         syntax,
         lsp,
+        git,
         _file_native: file_native,
         _file_write_native: file_write_native,
         _input_native: input_native,
@@ -1769,6 +1876,7 @@ pub fn spawn_drivers(
         _file_search_native: file_search_native,
         _syntax_native: syntax_native,
         _lsp_native: lsp_native,
+        _git_native: git_native,
     })
 }
 
@@ -1796,6 +1904,7 @@ pub(crate) mod trace_adapter {
     pub(crate) struct FileSearchTraceAdapter(pub Arc<dyn Trace>);
     pub(crate) struct SyntaxTraceAdapter(pub Arc<dyn Trace>);
     pub(crate) struct LspTraceAdapter(pub Arc<dyn Trace>);
+    pub(crate) struct GitTraceAdapter(pub Arc<dyn Trace>);
 
     impl led_driver_buffers_core::Trace for FileTraceAdapter {
         fn file_load_start(&self, path: &CanonPath) {
@@ -1901,6 +2010,17 @@ pub(crate) mod trace_adapter {
         }
     }
 
+    impl led_driver_git_core::Trace for GitTraceAdapter {
+        fn git_scan_start(&self, root: &CanonPath) {
+            self.0.git_scan_start(root);
+        }
+        fn git_scan_done(&self, _ok: bool, _n_files: usize) {
+            // Not surfaced in dispatched.snap — the intent log only
+            // tracks the dispatch side. Keep the hook so future
+            // debug traces can light it up.
+        }
+    }
+
     impl led_driver_file_search_core::Trace for FileSearchTraceAdapter {
         fn file_search_start(&self, cmd: &led_driver_file_search_core::FileSearchCmd) {
             self.0.file_search_start(
@@ -1967,6 +2087,9 @@ impl SharedTrace {
     }
     pub(crate) fn as_lsp_trace(&self) -> Arc<dyn led_driver_lsp_core::Trace> {
         Arc::new(trace_adapter::LspTraceAdapter(self.inner()))
+    }
+    pub(crate) fn as_git_trace(&self) -> Arc<dyn led_driver_git_core::Trace> {
+        Arc::new(trace_adapter::GitTraceAdapter(self.inner()))
     }
 }
 

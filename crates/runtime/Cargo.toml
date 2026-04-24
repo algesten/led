@@ -34,6 +34,7 @@ led-state-syntax = { workspace = true }
 led-state-diagnostics = { workspace = true }
 led-state-completions = { workspace = true }
 led-state-lsp = { workspace = true }
+led-state-git = { workspace = true }
 led-driver-fs-list-core = { workspace = true }
 led-driver-fs-list-native = { workspace = true }
 led-driver-find-file-core = { workspace = true }
@@ -50,6 +51,8 @@ led-driver-syntax-core = { workspace = true }
 led-driver-syntax-native = { workspace = true }
 led-driver-lsp-core = { workspace = true }
 led-driver-lsp-native = { workspace = true }
+led-driver-git-core = { workspace = true }
+led-driver-git-native = { workspace = true }
 drv = { workspace = true }
 imbl = { workspace = true }
 ropey = { workspace = true }

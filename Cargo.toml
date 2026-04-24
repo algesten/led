@@ -16,6 +16,7 @@ members = [
     "crates/state-diagnostics",
     "crates/state-completions",
     "crates/state-lsp",
+    "crates/state-git",
     "crates/driver-buffers/core",
     "crates/driver-buffers/native",
     "crates/driver-terminal/core",
@@ -32,6 +33,8 @@ members = [
     "crates/driver-syntax/native",
     "crates/driver-lsp/core",
     "crates/driver-lsp/native",
+    "crates/driver-git/core",
+    "crates/driver-git/native",
     "crates/runtime",
     "crates/fake-lsp",
     "crates/fake-gh",
@@ -56,6 +59,7 @@ led-state-syntax = { path = "crates/state-syntax" }
 led-state-diagnostics = { path = "crates/state-diagnostics" }
 led-state-completions = { path = "crates/state-completions" }
 led-state-lsp = { path = "crates/state-lsp" }
+led-state-git = { path = "crates/state-git" }
 led-driver-buffers-core = { path = "crates/driver-buffers/core" }
 led-driver-buffers-native = { path = "crates/driver-buffers/native" }
 led-driver-terminal-core = { path = "crates/driver-terminal/core" }
@@ -72,6 +76,8 @@ led-driver-syntax-core = { path = "crates/driver-syntax/core" }
 led-driver-syntax-native = { path = "crates/driver-syntax/native" }
 led-driver-lsp-core = { path = "crates/driver-lsp/core" }
 led-driver-lsp-native = { path = "crates/driver-lsp/native" }
+led-driver-git-core = { path = "crates/driver-git/core" }
+led-driver-git-native = { path = "crates/driver-git/native" }
 led-runtime = { path = "crates/runtime" }
 
 # drv = the memoization / query primitive.

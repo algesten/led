@@ -1,0 +1,19 @@
+[package]
+name = "led-driver-git-native"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Desktop-native worker for the git driver. Wraps libgit2 via the
+# `git2` crate. Runs on a single `std::thread` (per
+# `feedback_no_tokio_for_drivers`) that consumes GitCmds off an
+# mpsc inbox, runs the status + diff pass on every ScanFiles, and
+# posts the burst of GitEvents back.
+
+[dependencies]
+led-core = { workspace = true }
+led-driver-git-core = { workspace = true }
+git2 = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

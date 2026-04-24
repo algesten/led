@@ -8,6 +8,7 @@
 //!   user-vs-canonical split
 
 pub mod content_hash;
+pub mod git;
 pub mod ids;
 pub mod issue;
 pub mod notify;

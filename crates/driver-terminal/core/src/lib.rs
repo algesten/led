@@ -224,9 +224,20 @@ pub enum BodyModel {
 /// `col_*` values are relative to the start of `text` (gutter
 /// included).
 ///
-/// `gutter_diagnostic` is the highest-severity diagnostic whose
-/// range intersects this row — the painter colours the `~` / two-
-/// char gutter with the matching `theme.diagnostics.*` style.
+/// `gutter_diagnostic` is the highest-severity LSP diagnostic
+/// whose range intersects this row — the painter colours the
+/// second gutter cell (col 1) with a ● in the matching
+/// `theme.diagnostics.*` style.
+///
+/// `gutter_category` is the precedence-winning
+/// [`led_core::IssueCategory`] across git line statuses and LSP
+/// diagnostics for this row. The painter renders it as a left-
+/// eighth-block bar (`▎`) in the first gutter cell (col 0)
+/// coloured via `Theme::category_style`. `None` leaves col 0
+/// blank. The two fields are intentionally parallel — M19
+/// matches legacy's side-by-side gutter, keeping the LSP dot at
+/// col 1 even when col 0 already shows the same colour.
+///
 /// `diagnostics` are the per-row underline ranges (in column
 /// coordinates). Empty vectors mean "no styling" and the painter
 /// takes its default path.
@@ -235,6 +246,7 @@ pub struct BodyLine {
     pub text: String,
     pub spans: Vec<LineSpan>,
     pub gutter_diagnostic: Option<led_state_diagnostics::DiagnosticSeverity>,
+    pub gutter_category: Option<led_core::IssueCategory>,
     pub diagnostics: Vec<BodyDiagnostic>,
 }
 
@@ -254,6 +266,7 @@ impl From<String> for BodyLine {
             text,
             spans: Vec::new(),
             gutter_diagnostic: None,
+            gutter_category: None,
             diagnostics: Vec::new(),
         }
     }
