@@ -109,6 +109,18 @@ fn main() -> io::Result<()> {
         },
         ..Default::default()
     };
+    if cli.no_workspace {
+        // Standalone mode: skip session init / save entirely.
+        // Phase::Exiting still goes through the quit gate, which
+        // checks `session.saved || !session.primary` — pinning
+        // both to "done" lets quit fall straight through with no
+        // SaveSession dispatch. Mirrors legacy's no-workspace
+        // semantics: the file may be open and editable, but no
+        // workspace metadata is persisted.
+        atoms.session.init_done = true;
+        atoms.session.saved = true;
+        atoms.session.primary = false;
+    }
 
     // Seed tabs from CLI args. Each open path auto-expands its
     // ancestor directories in the browser so the tree reveals the

@@ -141,14 +141,21 @@ impl GoldenRunnerBuilder {
             std::fs::create_dir_all(workspace_dir.join(".git"))
                 .expect("create .git dir for workspace detection");
         }
-        if let Some(ref s) = self.config_keys {
-            std::fs::write(config_dir.join("keys.toml"), s)
-                .expect("write keys.toml");
-        }
-        if let Some(ref s) = self.config_theme {
-            std::fs::write(config_dir.join("theme.toml"), s)
-                .expect("write theme.toml");
-        }
+        // Same hermetic approach as theme.toml: always write a
+        // keys.toml (empty by default) so led's loader doesn't
+        // fall back to `~/.config/led/keys.toml` and dump host-
+        // specific warnings into the captured PTY.
+        let keys_payload: &str = self.config_keys.as_deref().unwrap_or("");
+        std::fs::write(config_dir.join("keys.toml"), keys_payload)
+            .expect("write keys.toml");
+        // Always seed config_dir/theme.toml so led's loader never
+        // walks up to `~/.config/led/theme.toml`. Without this,
+        // any warnings the host's real theme produces leak into
+        // the test's stderr (and on quit-without-clear scenarios,
+        // into the captured PTY frame).
+        let theme_payload: &str = self.config_theme.as_deref().unwrap_or("");
+        std::fs::write(config_dir.join("theme.toml"), theme_payload)
+            .expect("write theme.toml");
         // Always seed fake-lsp / fake-gh configs (even if empty) so the
         // real rust-analyzer / gh CLI on the host can never accidentally
         // attach to a workspace scenario. Determinism > convenience.
