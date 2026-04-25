@@ -108,7 +108,10 @@ impl std::fmt::Display for UserPath {
 
 /// A canonical absolute path. The only way to construct one is via
 /// [`UserPath::canonicalize`].
-#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord, drv::Input)]
+#[derive(
+    Clone, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord, drv::Input,
+    serde::Serialize, serde::Deserialize,
+)]
 pub struct CanonPath(PathBuf);
 
 impl CanonPath {

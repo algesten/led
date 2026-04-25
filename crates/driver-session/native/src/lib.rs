@@ -1,34 +1,15 @@
 //! Desktop SQLite worker for the session driver (M21).
 //!
-//! Single `std::thread` consuming `SessionCmd` off an mpsc inbox
-//! and posting `SessionEvent`s back. SQLite via `rusqlite`
-//! (bundled). Per-workspace primary flock via `libc::flock` on
-//! `<config_dir>/primary/<hash(root)>`.
-//!
-//! Schema (M21 baseline — schema_version = 1):
-//!
-//! ```sql
-//! CREATE TABLE workspaces (
-//!     root_path       TEXT PRIMARY KEY,
-//!     active_tab      INTEGER NOT NULL DEFAULT 0,
-//!     show_side_panel INTEGER NOT NULL DEFAULT 1
-//! );
-//! CREATE TABLE buffers (
-//!     root_path       TEXT NOT NULL REFERENCES workspaces(root_path) ON DELETE CASCADE,
-//!     file_path       TEXT NOT NULL,
-//!     tab_order       INTEGER NOT NULL,
-//!     cursor_row      INTEGER NOT NULL DEFAULT 0,
-//!     cursor_col      INTEGER NOT NULL DEFAULT 0,
-//!     scroll_row      INTEGER NOT NULL DEFAULT 0,
-//!     scroll_sub_line INTEGER NOT NULL DEFAULT 0,
-//!     PRIMARY KEY (root_path, file_path)
-//! );
-//! ```
-//!
-//! Migrations: `user_version` mismatch wipes both tables and
-//! recreates. Same drop-on-mismatch policy legacy follows.
+//! Schema, save / load, undo flush, undo clear all match legacy
+//! `led/crates/workspace/src/db.rs` (832 LOC) verbatim — same
+//! `SCHEMA_VERSION = 3`, same five tables + index, same SQL.
+//! The per-row `entry_data` BLOB is the one place we diverge:
+//! legacy stores rmp-serde of its single-op `UndoEntry`, we
+//! store rmp-serde of our multi-op `EditGroup`. Storage shape
+//! identical, payload shape ours; cross-binary DB compat is
+//! intentionally out of scope.
 
-use std::collections::hash_map::DefaultHasher;
+use std::collections::{HashMap, hash_map::DefaultHasher};
 use std::fs::{File, OpenOptions};
 use std::hash::{Hash, Hasher};
 use std::os::fd::AsRawFd;
@@ -40,7 +21,8 @@ use led_core::{CanonPath, Notifier, PersistedContentHash, SubLine, UserPath};
 use led_driver_session_core::{
     SessionCmd, SessionDriver, SessionEvent, Trace,
 };
-use led_state_session::{BufferStateSnapshot, SessionData, SessionTab};
+use led_state_buffer_edits::EditGroup;
+use led_state_session::{SessionBuffer, SessionData, UndoRestoreData};
 use led_state_tabs::{Cursor, Scroll};
 use rusqlite::{Connection, params};
 
@@ -70,9 +52,6 @@ pub fn spawn_worker(
     SessionNative { _marker: () }
 }
 
-/// Long-lived per-workspace state held by the worker between
-/// `Init` and `Shutdown`. `Connection` is the SQLite handle;
-/// `_flock` keeps the OS lock alive (drop releases it).
 struct Workspace {
     conn: Connection,
     root_path: String,
@@ -85,8 +64,7 @@ fn worker_loop(rx: Receiver<SessionCmd>, tx: Sender<SessionEvent>, notify: Notif
     while let Ok(cmd) = rx.recv() {
         match cmd {
             SessionCmd::Init { root, config_dir } => {
-                let result = init_workspace(&root, &config_dir);
-                match result {
+                match init_workspace(&root, &config_dir) {
                     Ok((ws, restored)) => {
                         let primary = ws.primary;
                         workspace = Some(ws);
@@ -101,7 +79,7 @@ fn worker_loop(rx: Receiver<SessionCmd>, tx: Sender<SessionEvent>, notify: Notif
                 }
                 notify.notify();
             }
-            SessionCmd::Save { data } => {
+            SessionCmd::SaveSession { data } => {
                 let Some(ws) = workspace.as_ref() else {
                     let _ = tx.send(SessionEvent::Failed {
                         message: "session not initialised".into(),
@@ -112,13 +90,13 @@ fn worker_loop(rx: Receiver<SessionCmd>, tx: Sender<SessionEvent>, notify: Notif
                 if !ws.primary {
                     // Secondaries don't write — but report success
                     // so the Quit gate can still clear.
-                    let _ = tx.send(SessionEvent::Saved);
+                    let _ = tx.send(SessionEvent::SessionSaved);
                     notify.notify();
                     continue;
                 }
                 match save_session(&ws.conn, &ws.root_path, &data) {
                     Ok(()) => {
-                        let _ = tx.send(SessionEvent::Saved);
+                        let _ = tx.send(SessionEvent::SessionSaved);
                     }
                     Err(e) => {
                         let _ = tx.send(SessionEvent::Failed {
@@ -128,32 +106,66 @@ fn worker_loop(rx: Receiver<SessionCmd>, tx: Sender<SessionEvent>, notify: Notif
                 }
                 notify.notify();
             }
-            SessionCmd::DropUndo { path } => {
+            SessionCmd::FlushUndo {
+                path,
+                chain_id,
+                content_hash,
+                undo_cursor,
+                distance_from_save,
+                entries,
+            } => {
                 let Some(ws) = workspace.as_ref() else {
                     continue;
                 };
                 if !ws.primary {
                     continue;
                 }
-                let _ = ws.conn.execute(
-                    "DELETE FROM undo_state
-                     WHERE root_path = ?1 AND file_path = ?2",
-                    params![
-                        ws.root_path,
-                        path.as_path().to_string_lossy(),
-                    ],
-                );
-                // No reply event — DropUndo is fire-and-forget.
-                // The intent record is the trace line emitted on
-                // dispatch; the disk effect is opportunistic.
+                let path_str = path.as_path().to_string_lossy().into_owned();
+                match flush_undo(
+                    &ws.conn,
+                    &ws.root_path,
+                    &path_str,
+                    &chain_id,
+                    content_hash,
+                    undo_cursor,
+                    distance_from_save,
+                    &entries,
+                ) {
+                    Ok(last_seq) => {
+                        let _ = tx.send(SessionEvent::UndoFlushed {
+                            path,
+                            chain_id,
+                            persisted_undo_len: undo_cursor,
+                            last_seq,
+                        });
+                    }
+                    Err(e) => {
+                        let _ = tx.send(SessionEvent::Failed {
+                            message: format!("flush_undo: {e}"),
+                        });
+                    }
+                }
+                notify.notify();
+            }
+            SessionCmd::ClearUndo { path } => {
+                let Some(ws) = workspace.as_ref() else {
+                    continue;
+                };
+                if !ws.primary {
+                    continue;
+                }
+                let path_str = path.as_path().to_string_lossy().into_owned();
+                let _ = clear_undo(&ws.conn, &ws.root_path, &path_str);
             }
             SessionCmd::Shutdown => {
-                drop(workspace.take()); // drops conn + flock
+                drop(workspace.take());
                 return;
             }
         }
     }
 }
+
+// ── Init / flock ─────────────────────────────────────────────
 
 fn init_workspace(
     root: &CanonPath,
@@ -162,27 +174,18 @@ fn init_workspace(
     let root_path = root.as_path().to_string_lossy().into_owned();
     let cfg = config_dir.as_path();
     std::fs::create_dir_all(cfg).map_err(|e| e.to_string())?;
-
-    // Acquire (or fail to acquire) the primary flock.
     let flock = try_acquire_primary_flock(cfg, root)?;
     let primary = flock.is_some();
-
-    // Open the DB regardless — secondaries still read for
-    // possible future cross-instance sync (M26).
     let db_path = cfg.join("db.sqlite");
     let conn = Connection::open(db_path).map_err(|e| e.to_string())?;
     conn.execute_batch("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;")
         .map_err(|e| e.to_string())?;
     run_schema(&conn).map_err(|e| e.to_string())?;
-
-    // Only primaries restore — secondaries get a clean session
-    // so two windows don't race on the same row.
     let restored = if primary {
         load_session(&conn, &root_path).map_err(|e| e.to_string())?
     } else {
         None
     };
-
     Ok((
         Workspace {
             conn,
@@ -211,29 +214,34 @@ fn try_acquire_primary_flock(
         .truncate(false)
         .open(&lock_path)
         .map_err(|e| e.to_string())?;
-    // SAFETY: `flock` is a thin POSIX syscall; we pass a valid
-    // fd from the freshly-opened file. The `LOCK_NB` flag means
-    // we never block the worker thread.
+    // SAFETY: `flock` is async-signal-safe and takes a valid fd.
+    // LOCK_NB ensures we never block the worker thread.
     let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
     if rc == 0 {
         Ok(Some(file))
     } else {
-        // Another led owns the workspace. Drop the file —
-        // releasing it won't release the other process's lock.
         Ok(None)
     }
 }
+
+// ── Schema (legacy-exact) ────────────────────────────────────
 
 fn run_schema(conn: &Connection) -> rusqlite::Result<()> {
     let version: i64 =
         conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
     if version != SCHEMA_VERSION {
+        // Legacy's drop list, including pre-v3 tables.
         conn.execute_batch(
             "
-            DROP TABLE IF EXISTS undo_state;
-            DROP TABLE IF EXISTS buffer_state;
+            DROP TABLE IF EXISTS undo_entries;
+            DROP TABLE IF EXISTS buffer_undo_state;
+            DROP TABLE IF EXISTS session_kv;
             DROP TABLE IF EXISTS buffers;
             DROP TABLE IF EXISTS workspaces;
+            DROP TABLE IF EXISTS session_buffers;
+            DROP TABLE IF EXISTS session_meta;
+            DROP TABLE IF EXISTS undo_state;
+            DROP TABLE IF EXISTS buffer_state;
             ",
         )?;
     }
@@ -244,6 +252,7 @@ fn run_schema(conn: &Connection) -> rusqlite::Result<()> {
             active_tab      INTEGER NOT NULL DEFAULT 0,
             show_side_panel INTEGER NOT NULL DEFAULT 1
         );
+
         CREATE TABLE IF NOT EXISTS buffers (
             root_path       TEXT NOT NULL REFERENCES workspaces(root_path) ON DELETE CASCADE,
             file_path       TEXT NOT NULL,
@@ -254,18 +263,39 @@ fn run_schema(conn: &Connection) -> rusqlite::Result<()> {
             scroll_sub_line INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY (root_path, file_path)
         );
-        CREATE TABLE IF NOT EXISTS buffer_state (
-            root_path        TEXT NOT NULL,
-            file_path        TEXT NOT NULL,
-            disk_anchor_hash INTEGER NOT NULL,
-            rope_content     TEXT NOT NULL,
-            history_blob     BLOB NOT NULL,
+
+        CREATE TABLE IF NOT EXISTS session_kv (
+            root_path   TEXT NOT NULL REFERENCES workspaces(root_path) ON DELETE CASCADE,
+            key         TEXT NOT NULL,
+            value       TEXT NOT NULL,
+            PRIMARY KEY (root_path, key)
+        );
+
+        CREATE TABLE IF NOT EXISTS buffer_undo_state (
+            root_path          TEXT NOT NULL,
+            file_path          TEXT NOT NULL,
+            chain_id           TEXT NOT NULL,
+            content_hash       INTEGER NOT NULL,
+            undo_cursor        INTEGER,
+            distance_from_save INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY (root_path, file_path)
         );
+
+        CREATE TABLE IF NOT EXISTS undo_entries (
+            seq         INTEGER PRIMARY KEY AUTOINCREMENT,
+            root_path   TEXT NOT NULL,
+            file_path   TEXT NOT NULL,
+            entry_data  BLOB NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_undo_entries_file
+            ON undo_entries(root_path, file_path, seq);
         ",
     )?;
     conn.pragma_update(None, "user_version", SCHEMA_VERSION)
 }
+
+// ── Save / load (legacy-exact) ───────────────────────────────
 
 fn save_session(
     conn: &Connection,
@@ -283,55 +313,52 @@ fn save_session(
     )?
     .execute(params![
         root_path,
-        data.active_tab_idx.unwrap_or(0) as i64,
-        data.show_side_panel as i64,
+        data.active_tab_order as i64,
+        data.show_side_panel as i64
     ])?;
 
     tx.prepare_cached("DELETE FROM buffers WHERE root_path = ?1")?
         .execute(params![root_path])?;
 
     let mut stmt = tx.prepare_cached(
-        "INSERT INTO buffers
-            (root_path, file_path, tab_order, cursor_row, cursor_col,
-             scroll_row, scroll_sub_line)
+        "INSERT INTO buffers (root_path, file_path, tab_order, cursor_row, cursor_col, scroll_row, scroll_sub_line)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
     )?;
-    for (idx, tab) in data.tabs.iter().enumerate() {
+    for buf in &data.buffers {
         stmt.execute(params![
             root_path,
-            tab.path.as_path().to_string_lossy(),
-            idx as i64,
-            tab.cursor.line as i64,
-            tab.cursor.col as i64,
-            tab.scroll.top as i64,
-            tab.scroll.top_sub_line.0 as i64,
+            buf.path.as_path().to_string_lossy(),
+            buf.tab_order as i64,
+            buf.cursor.line as i64,
+            buf.cursor.col as i64,
+            buf.scroll.top as i64,
+            buf.scroll.top_sub_line.0 as i64,
         ])?;
     }
     drop(stmt);
 
-    // Persist buffer states (rope + history + disk anchor).
-    // Drop everything for this workspace first so a buffer that
-    // was open last session but not this one (e.g. user killed
-    // the tab) doesn't keep stale rows; then INSERT the current
-    // snapshots. Hash is stored as a signed i64 — SQLite has no
-    // native u64; the round-trip is bit-exact (we cast both ways).
-    tx.prepare_cached("DELETE FROM buffer_state WHERE root_path = ?1")?
+    // Save KV pairs
+    tx.prepare_cached("DELETE FROM session_kv WHERE root_path = ?1")?
         .execute(params![root_path])?;
-    let mut state_stmt = tx.prepare_cached(
-        "INSERT INTO buffer_state
-            (root_path, file_path, disk_anchor_hash, rope_content, history_blob)
-         VALUES (?1, ?2, ?3, ?4, ?5)",
+    let mut kv_stmt = tx.prepare_cached(
+        "INSERT INTO session_kv (root_path, key, value) VALUES (?1, ?2, ?3)",
     )?;
-    for snap in &data.buffer_states {
-        state_stmt.execute(params![
-            root_path,
-            snap.path.as_path().to_string_lossy(),
-            snap.disk_anchor_hash.0 as i64,
-            snap.rope_content.as_str(),
-            snap.history_blob.as_slice(),
-        ])?;
+    for (k, v) in &data.kv {
+        kv_stmt.execute(params![root_path, k, v])?;
     }
-    drop(state_stmt);
+    drop(kv_stmt);
+
+    // Clean up undo state for files no longer in the session.
+    tx.prepare_cached(
+        "DELETE FROM undo_entries WHERE root_path = ?1
+           AND file_path NOT IN (SELECT file_path FROM buffers WHERE root_path = ?1)",
+    )?
+    .execute(params![root_path])?;
+    tx.prepare_cached(
+        "DELETE FROM buffer_undo_state WHERE root_path = ?1
+           AND file_path NOT IN (SELECT file_path FROM buffers WHERE root_path = ?1)",
+    )?
+    .execute(params![root_path])?;
 
     tx.commit()
 }
@@ -347,87 +374,189 @@ fn load_session(
         .query_row(params![root_path], |row| {
             let active_tab: i64 = row.get(0)?;
             let show_side_panel: i64 = row.get(1)?;
-            Ok((active_tab, show_side_panel))
+            Ok((active_tab as usize, show_side_panel != 0))
         });
-    let (active_tab, show_side_panel) = match workspace {
+    let (active_tab_order, show_side_panel) = match workspace {
         Ok(v) => v,
         Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(None),
         Err(e) => return Err(e),
     };
 
     let mut stmt = conn.prepare_cached(
-        "SELECT file_path, cursor_row, cursor_col, scroll_row, scroll_sub_line
-         FROM buffers
-         WHERE root_path = ?1
-         ORDER BY tab_order ASC",
+        "SELECT file_path, tab_order, cursor_row, cursor_col, scroll_row, scroll_sub_line
+         FROM buffers WHERE root_path = ?1 ORDER BY tab_order",
     )?;
-    let rows = stmt.query_map(params![root_path], |row| {
-        let path_str: String = row.get(0)?;
-        let cursor_row: i64 = row.get(1)?;
-        let cursor_col: i64 = row.get(2)?;
-        let scroll_row: i64 = row.get(3)?;
-        let scroll_sub: i64 = row.get(4)?;
-        let canon = UserPath::new(std::path::Path::new(&path_str)).canonicalize();
-        Ok(SessionTab {
-            path: canon,
-            cursor: Cursor {
-                line: cursor_row.max(0) as usize,
-                col: cursor_col.max(0) as usize,
-                preferred_col: cursor_col.max(0) as usize,
-            },
-            scroll: Scroll {
-                top: scroll_row.max(0) as usize,
-                top_sub_line: SubLine(scroll_sub.max(0) as usize),
-            },
-        })
-    })?;
+    let mut buffers: Vec<SessionBuffer> = stmt
+        .query_map(params![root_path], |row| {
+            let path_str: String = row.get(0)?;
+            Ok(SessionBuffer {
+                path: UserPath::new(std::path::Path::new(&path_str)).canonicalize(),
+                tab_order: row.get::<_, i64>(1)? as usize,
+                cursor: Cursor {
+                    line: row.get::<_, i64>(2)? as usize,
+                    col: row.get::<_, i64>(3)? as usize,
+                    preferred_col: row.get::<_, i64>(3)? as usize,
+                },
+                scroll: Scroll {
+                    top: row.get::<_, i64>(4)? as usize,
+                    top_sub_line: SubLine(row.get::<_, i64>(5)? as usize),
+                },
+                undo: None,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(stmt);
 
-    let mut tabs: Vec<SessionTab> = Vec::new();
-    for row in rows {
-        tabs.push(row?);
+    if buffers.is_empty() {
+        return Ok(None);
+    }
+
+    // Per-buffer undo restore: walk the buffer list and look up
+    // their persisted state. Mirrors the legacy lib.rs flow that
+    // populates `SessionBuffer::undo` in the workspace driver
+    // (legacy lib.rs:246-260).
+    for buf in &mut buffers {
+        let path_str = buf.path.as_path().to_string_lossy().into_owned();
+        if let Some(state) = load_undo_all(conn, root_path, &path_str)? {
+            buf.undo = Some(state);
+        }
+    }
+
+    let mut kv_stmt =
+        conn.prepare_cached("SELECT key, value FROM session_kv WHERE root_path = ?1")?;
+    let kv: HashMap<String, String> = kv_stmt
+        .query_map(params![root_path], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    Ok(Some(SessionData {
+        buffers,
+        active_tab_order,
+        show_side_panel,
+        kv,
+    }))
+}
+
+// ── Undo flush / clear / load (legacy-exact structure) ───────
+
+#[allow(clippy::too_many_arguments)]
+fn flush_undo(
+    conn: &Connection,
+    root_path: &str,
+    file_path: &str,
+    chain_id: &str,
+    content_hash: PersistedContentHash,
+    undo_cursor: usize,
+    distance_from_save: i32,
+    entries: &[EditGroup],
+) -> rusqlite::Result<i64> {
+    let tx = conn.unchecked_transaction()?;
+
+    tx.prepare_cached(
+        "INSERT OR REPLACE INTO buffer_undo_state
+         (root_path, file_path, chain_id, content_hash, undo_cursor, distance_from_save)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+    )?
+    .execute(params![
+        root_path,
+        file_path,
+        chain_id,
+        content_hash.0 as i64,
+        undo_cursor as i64,
+        distance_from_save,
+    ])?;
+
+    let mut stmt = tx.prepare_cached(
+        "INSERT INTO undo_entries (root_path, file_path, entry_data) VALUES (?1, ?2, ?3)",
+    )?;
+    for entry in entries {
+        let bytes = rmp_serde::to_vec(entry).map_err(|e| {
+            rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::other(e)))
+        })?;
+        stmt.execute(params![root_path, file_path, bytes])?;
     }
     drop(stmt);
 
-    // Load buffer states for this workspace.
-    let mut state_stmt = conn.prepare_cached(
-        "SELECT file_path, disk_anchor_hash, rope_content, history_blob
-         FROM buffer_state
-         WHERE root_path = ?1",
-    )?;
-    let state_rows = state_stmt.query_map(params![root_path], |row| {
-        let path_str: String = row.get(0)?;
-        let hash: i64 = row.get(1)?;
-        let rope_content: String = row.get(2)?;
-        let history_blob: Vec<u8> = row.get(3)?;
-        Ok(BufferStateSnapshot {
-            path: UserPath::new(std::path::Path::new(&path_str)).canonicalize(),
-            disk_anchor_hash: PersistedContentHash(hash as u64),
-            rope_content,
-            history_blob,
-        })
-    })?;
-    let mut buffer_states: Vec<BufferStateSnapshot> = Vec::new();
-    for row in state_rows {
-        buffer_states.push(row?);
-    }
-    drop(state_stmt);
+    let last_seq: i64 = tx
+        .prepare_cached(
+            "SELECT COALESCE(MAX(seq), 0) FROM undo_entries
+             WHERE root_path = ?1 AND file_path = ?2",
+        )?
+        .query_row(params![root_path, file_path], |row| row.get(0))?;
 
-    let active_tab_idx = if tabs.is_empty() {
-        None
-    } else {
-        Some((active_tab.max(0) as usize).min(tabs.len().saturating_sub(1)))
+    tx.commit()?;
+    Ok(last_seq)
+}
+
+fn clear_undo(
+    conn: &Connection,
+    root_path: &str,
+    file_path: &str,
+) -> rusqlite::Result<()> {
+    conn.prepare_cached(
+        "DELETE FROM undo_entries WHERE root_path = ?1 AND file_path = ?2",
+    )?
+    .execute(params![root_path, file_path])?;
+    conn.prepare_cached(
+        "DELETE FROM buffer_undo_state WHERE root_path = ?1 AND file_path = ?2",
+    )?
+    .execute(params![root_path, file_path])?;
+    Ok(())
+}
+
+fn load_undo_all(
+    conn: &Connection,
+    root_path: &str,
+    file_path: &str,
+) -> rusqlite::Result<Option<UndoRestoreData>> {
+    let state = conn
+        .prepare_cached(
+            "SELECT chain_id, content_hash, undo_cursor, distance_from_save
+             FROM buffer_undo_state WHERE root_path = ?1 AND file_path = ?2",
+        )?
+        .query_row(params![root_path, file_path], |row| {
+            Ok(UndoRestoreData {
+                chain_id: row.get(0)?,
+                content_hash: PersistedContentHash(row.get::<_, i64>(1)? as u64),
+                undo_cursor: row.get::<_, Option<i64>>(2)?.map(|v| v as usize),
+                distance_from_save: row.get(3)?,
+                entries: Vec::new(),
+                last_seq: 0,
+            })
+        });
+    let mut restore = match state {
+        Ok(v) => v,
+        Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(None),
+        Err(e) => return Err(e),
     };
-    Ok(Some(SessionData {
-        active_tab_idx,
-        show_side_panel: show_side_panel != 0,
-        tabs,
-        buffer_states,
-    }))
+
+    let mut stmt = conn.prepare_cached(
+        "SELECT seq, entry_data FROM undo_entries
+         WHERE root_path = ?1 AND file_path = ?2
+         ORDER BY seq",
+    )?;
+    let rows: Vec<(i64, Vec<u8>)> = stmt
+        .query_map(params![root_path, file_path], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    restore.last_seq = rows.last().map(|(seq, _)| *seq).unwrap_or(0);
+    restore.entries = rows
+        .into_iter()
+        .filter_map(|(_, data)| rmp_serde::from_slice::<EditGroup>(&data).ok())
+        .collect();
+    Ok(Some(restore))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use led_state_buffer_edits::EditOp;
+    use led_state_tabs::Cursor as TabCursor;
+    use std::path::Path;
+    use std::sync::Arc as StdArc;
     use std::time::{Duration, Instant};
 
     struct NoopTrace;
@@ -438,7 +567,7 @@ mod tests {
         fn session_drop_undo(&self, _: &CanonPath) {}
     }
 
-    fn canon_of(p: &std::path::Path) -> CanonPath {
+    fn canon_of(p: &Path) -> CanonPath {
         UserPath::new(p).canonicalize()
     }
 
@@ -454,13 +583,33 @@ mod tests {
         None
     }
 
+    fn group(at: usize, text: &str) -> EditGroup {
+        EditGroup {
+            ops: vec![
+                EditOp::Delete {
+                    at,
+                    text: StdArc::from(""),
+                },
+                EditOp::Insert {
+                    at,
+                    text: StdArc::from(text),
+                },
+            ],
+            cursor_before: TabCursor::default(),
+            cursor_after: TabCursor::default(),
+            seq: 1,
+            file_search_mark: None,
+            save_point_hash: None,
+        }
+    }
+
     #[test]
     fn fresh_workspace_returns_no_restored_data() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().join("workspace");
         std::fs::create_dir_all(&root).unwrap();
         let cfg = tmp.path().join("config");
-        let (drv, _native) = spawn(Arc::new(NoopTrace), Notifier::noop());
+        let (drv, _native) = spawn(StdArc::new(NoopTrace), Notifier::noop());
         drv.execute([&SessionCmd::Init {
             root: canon_of(&root),
             config_dir: canon_of(&cfg),
@@ -468,26 +617,29 @@ mod tests {
         let ev = drain_one(&drv, Duration::from_secs(5)).expect("Init replied");
         match ev {
             SessionEvent::Restored { primary, restored } => {
-                assert!(primary, "first instance should be primary");
-                assert!(restored.is_none(), "fresh DB has no session");
+                assert!(primary);
+                assert!(restored.is_none());
             }
-            other => panic!("unexpected event: {other:?}"),
+            other => panic!("unexpected: {other:?}"),
         }
     }
 
     #[test]
-    fn save_then_init_round_trips_session() {
+    fn save_then_init_round_trips_session_with_kv() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().join("workspace");
         std::fs::create_dir_all(&root).unwrap();
         let cfg = tmp.path().join("config");
-
+        let mut kv = HashMap::new();
+        kv.insert("browser.expanded_dirs".to_string(), "/a\n/b".to_string());
+        kv.insert("jump_list.index".to_string(), "3".to_string());
         let target = SessionData {
-            active_tab_idx: Some(1),
+            active_tab_order: 1,
             show_side_panel: true,
-            tabs: vec![
-                SessionTab {
+            buffers: vec![
+                SessionBuffer {
                     path: canon_of(&root.join("a.rs")),
+                    tab_order: 0,
                     cursor: Cursor {
                         line: 10,
                         col: 5,
@@ -497,80 +649,144 @@ mod tests {
                         top: 4,
                         top_sub_line: SubLine(0),
                     },
+                    undo: None,
                 },
-                SessionTab {
+                SessionBuffer {
                     path: canon_of(&root.join("b.rs")),
+                    tab_order: 1,
                     cursor: Cursor::default(),
                     scroll: Scroll::default(),
+                    undo: None,
                 },
             ],
-            buffer_states: vec![BufferStateSnapshot {
-                path: canon_of(&root.join("a.rs")),
-                disk_anchor_hash: PersistedContentHash(0xCAFE_F00D),
-                rope_content: "alpha\nbeta\n".to_string(),
-                history_blob: b"\x01\x02\x03\xff".to_vec(),
-            }],
+            kv: kv.clone(),
         };
 
-        // First spawn: Init, Save, Shutdown.
+        // First spawn: Init, SaveSession, Shutdown.
         {
-            let (drv, _native) = spawn(Arc::new(NoopTrace), Notifier::noop());
+            let (drv, _n) = spawn(StdArc::new(NoopTrace), Notifier::noop());
             drv.execute([&SessionCmd::Init {
                 root: canon_of(&root),
                 config_dir: canon_of(&cfg),
             }]);
             drain_one(&drv, Duration::from_secs(5)).expect("init");
-            drv.execute([&SessionCmd::Save {
+            drv.execute([&SessionCmd::SaveSession {
                 data: target.clone(),
             }]);
-            let saved =
-                drain_one(&drv, Duration::from_secs(5)).expect("save");
-            matches!(saved, SessionEvent::Saved);
+            drain_one(&drv, Duration::from_secs(5)).expect("save");
             drv.execute([&SessionCmd::Shutdown]);
         }
-
-        // Give the worker a moment to drop the flock.
         std::thread::sleep(Duration::from_millis(50));
 
-        // Second spawn: Init should restore exactly.
-        let (drv, _native) = spawn(Arc::new(NoopTrace), Notifier::noop());
+        // Second spawn: Init restores exactly.
+        let (drv, _n) = spawn(StdArc::new(NoopTrace), Notifier::noop());
         drv.execute([&SessionCmd::Init {
             root: canon_of(&root),
             config_dir: canon_of(&cfg),
         }]);
         let ev = drain_one(&drv, Duration::from_secs(5)).expect("re-init");
-        match ev {
-            SessionEvent::Restored { primary, restored } => {
-                assert!(primary);
-                let r = restored.expect("session restored");
-                assert_eq!(r.active_tab_idx, target.active_tab_idx);
-                assert_eq!(r.show_side_panel, target.show_side_panel);
-                assert_eq!(r.tabs.len(), target.tabs.len());
-                assert_eq!(r.tabs[0].cursor, target.tabs[0].cursor);
-                assert_eq!(r.tabs[0].scroll, target.tabs[0].scroll);
-                // Buffer-state snapshot round-trips with all
-                // four pieces (path, anchor hash, rope content,
-                // history blob) intact.
-                assert_eq!(r.buffer_states.len(), 1);
-                assert_eq!(
-                    r.buffer_states[0].path,
-                    target.buffer_states[0].path,
-                );
-                assert_eq!(
-                    r.buffer_states[0].disk_anchor_hash,
-                    target.buffer_states[0].disk_anchor_hash,
-                );
-                assert_eq!(
-                    r.buffer_states[0].rope_content,
-                    target.buffer_states[0].rope_content,
-                );
-                assert_eq!(
-                    r.buffer_states[0].history_blob,
-                    target.buffer_states[0].history_blob,
-                );
-            }
-            other => panic!("unexpected: {other:?}"),
-        }
+        let SessionEvent::Restored { primary, restored } = ev else {
+            panic!("unexpected event: {ev:?}");
+        };
+        assert!(primary);
+        let r = restored.expect("session restored");
+        assert_eq!(r.active_tab_order, 1);
+        assert!(r.show_side_panel);
+        assert_eq!(r.buffers.len(), 2);
+        assert_eq!(r.buffers[0].cursor, target.buffers[0].cursor);
+        assert_eq!(r.buffers[0].scroll, target.buffers[0].scroll);
+        assert_eq!(r.kv, kv);
+    }
+
+    #[test]
+    fn flush_load_clear_undo() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("workspace");
+        std::fs::create_dir_all(&root).unwrap();
+        let cfg = tmp.path().join("config");
+        let path = canon_of(&root.join("a.rs"));
+
+        let (drv, _n) = spawn(StdArc::new(NoopTrace), Notifier::noop());
+        drv.execute([&SessionCmd::Init {
+            root: canon_of(&root),
+            config_dir: canon_of(&cfg),
+        }]);
+        drain_one(&drv, Duration::from_secs(5)).expect("init");
+
+        // Need a workspace+buffers row before FK-protected undo
+        // rows can land. Save a session first.
+        drv.execute([&SessionCmd::SaveSession {
+            data: SessionData {
+                active_tab_order: 0,
+                show_side_panel: true,
+                buffers: vec![SessionBuffer {
+                    path: path.clone(),
+                    tab_order: 0,
+                    cursor: Cursor::default(),
+                    scroll: Scroll::default(),
+                    undo: None,
+                }],
+                kv: HashMap::new(),
+            },
+        }]);
+        drain_one(&drv, Duration::from_secs(5)).expect("save");
+
+        drv.execute([&SessionCmd::FlushUndo {
+            path: path.clone(),
+            chain_id: "chain-1".into(),
+            content_hash: PersistedContentHash(0xDEADBEEF),
+            undo_cursor: 2,
+            distance_from_save: 1,
+            entries: vec![group(0, "hello"), group(5, " world")],
+        }]);
+        let ev = drain_one(&drv, Duration::from_secs(5)).expect("flushed");
+        let SessionEvent::UndoFlushed { last_seq, .. } = ev else {
+            panic!("unexpected: {ev:?}");
+        };
+        assert!(last_seq > 0);
+
+        // Drop + re-init in a new spawn — the second instance
+        // should restore the entries via load_session.
+        drv.execute([&SessionCmd::Shutdown]);
+        std::thread::sleep(Duration::from_millis(50));
+
+        let (drv2, _n2) = spawn(StdArc::new(NoopTrace), Notifier::noop());
+        drv2.execute([&SessionCmd::Init {
+            root: canon_of(&root),
+            config_dir: canon_of(&cfg),
+        }]);
+        let ev = drain_one(&drv2, Duration::from_secs(5)).expect("re-init");
+        let SessionEvent::Restored { restored, .. } = ev else {
+            panic!("unexpected: {ev:?}");
+        };
+        let r = restored.expect("session restored");
+        let undo = r.buffers[0].undo.as_ref().expect("undo restored");
+        assert_eq!(undo.chain_id, "chain-1");
+        assert_eq!(undo.content_hash, PersistedContentHash(0xDEADBEEF));
+        assert_eq!(undo.undo_cursor, Some(2));
+        assert_eq!(undo.distance_from_save, 1);
+        assert_eq!(undo.entries.len(), 2);
+
+        // ClearUndo wipes them.
+        drv2.execute([&SessionCmd::ClearUndo { path: path.clone() }]);
+        std::thread::sleep(Duration::from_millis(50));
+        drv2.execute([&SessionCmd::Shutdown]);
+        std::thread::sleep(Duration::from_millis(50));
+
+        let (drv3, _n3) = spawn(StdArc::new(NoopTrace), Notifier::noop());
+        drv3.execute([&SessionCmd::Init {
+            root: canon_of(&root),
+            config_dir: canon_of(&cfg),
+        }]);
+        let ev = drain_one(&drv3, Duration::from_secs(5)).expect("re-init");
+        let SessionEvent::Restored { restored, .. } = ev else {
+            panic!("unexpected: {ev:?}");
+        };
+        let r = restored.expect("session restored");
+        assert!(
+            r.buffers[0].undo.is_none(),
+            "undo cleared after ClearUndo",
+        );
     }
 
     #[test]
@@ -579,34 +795,26 @@ mod tests {
         let root = tmp.path().join("workspace");
         std::fs::create_dir_all(&root).unwrap();
         let cfg = tmp.path().join("config");
-
-        // First instance: keep alive (don't Shutdown) so the
-        // flock stays held while we open a second.
-        let (drv1, _n1) = spawn(Arc::new(NoopTrace), Notifier::noop());
+        let (drv1, _n1) = spawn(StdArc::new(NoopTrace), Notifier::noop());
         drv1.execute([&SessionCmd::Init {
             root: canon_of(&root),
             config_dir: canon_of(&cfg),
         }]);
-        let ev1 = drain_one(&drv1, Duration::from_secs(5)).expect("first init");
+        let ev1 = drain_one(&drv1, Duration::from_secs(5)).expect("first");
         match ev1 {
             SessionEvent::Restored { primary, .. } => assert!(primary),
             other => panic!("unexpected: {other:?}"),
         }
-
-        // Second instance.
-        let (drv2, _n2) = spawn(Arc::new(NoopTrace), Notifier::noop());
+        let (drv2, _n2) = spawn(StdArc::new(NoopTrace), Notifier::noop());
         drv2.execute([&SessionCmd::Init {
             root: canon_of(&root),
             config_dir: canon_of(&cfg),
         }]);
-        let ev2 = drain_one(&drv2, Duration::from_secs(5)).expect("second init");
+        let ev2 = drain_one(&drv2, Duration::from_secs(5)).expect("second");
         match ev2 {
             SessionEvent::Restored { primary, restored } => {
-                assert!(!primary, "second instance must not be primary");
-                assert!(
-                    restored.is_none(),
-                    "secondary should not restore session",
-                );
+                assert!(!primary);
+                assert!(restored.is_none());
             }
             other => panic!("unexpected: {other:?}"),
         }

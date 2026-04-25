@@ -967,6 +967,7 @@ name = "led-driver-session-core"
 version = "0.0.0"
 dependencies = [
  "led-core",
+ "led-state-buffer-edits",
  "led-state-session",
 ]
 
@@ -976,9 +977,11 @@ version = "0.0.0"
 dependencies = [
  "led-core",
  "led-driver-session-core",
+ "led-state-buffer-edits",
  "led-state-session",
  "led-state-tabs",
  "libc",
+ "rmp-serde",
  "rusqlite",
  "tempfile",
 ]
@@ -1087,6 +1090,7 @@ dependencies = [
  "regex",
  "regex-syntax",
  "ropey",
+ "serde_json",
  "toml",
 ]
 
@@ -1188,6 +1192,7 @@ name = "led-state-jumps"
 version = "0.0.0"
 dependencies = [
  "led-core",
+ "serde",
 ]
 
 [[package]]
@@ -1215,6 +1220,7 @@ version = "0.0.0"
 dependencies = [
  "imbl",
  "led-core",
+ "led-state-buffer-edits",
  "led-state-tabs",
 ]
 

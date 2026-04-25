@@ -1,22 +1,24 @@
-//! Session persistence state atom (M21).
+//! Session persistence types — mirrors legacy
+//! `led_workspace::{SessionData, SessionBuffer, RestoredSession,
+//! UndoRestoreData}` exactly so the SQLite storage layout, save /
+//! load orchestration, and undo-flush lifecycle line up with
+//! legacy's design.
 //!
-//! The session is the cross-process editor state that survives a
-//! quit / restart cycle: which tabs were open, where each cursor
-//! sat, what the active tab was. The actual SQLite I/O lives in
-//! the session driver; this crate is the data shape the runtime
-//! folds the driver's events into and re-projects on quit.
-//!
-//! Three pieces:
-//!
-//! - [`SessionState`] — the live atom on `Atoms.session`.
-//! - [`SessionData`] — the serialisable session payload.
-//!   Crosses the driver ABI in both directions (Save command +
-//!   Restored event).
-//! - [`SessionTab`] — one entry inside a `SessionData`, the
-//!   per-buffer slice (path + cursor + scroll).
+//! The wire-format compatibility caveat: legacy's `UndoEntry` is a
+//! single-op type with `direction` flags ("Emacs-style linear
+//! history"). Our internal `History` uses past/future/current
+//! stacks of multi-op `EditGroup`s. The schema's `undo_entries`
+//! row carries an opaque BLOB; we put a serialised `EditGroup` in
+//! it (not a legacy-shaped `UndoEntry`). The storage *structure*
+//! is byte-for-byte legacy — separate metadata + append-only log
+//! + session_kv — but the per-entry payload is ours.
+//! Cross-binary compatibility with legacy DBs is therefore
+//! intentionally out-of-scope.
 
-use led_core::CanonPath;
-use led_core::PersistedContentHash;
+use std::collections::HashMap;
+
+use led_core::{CanonPath, PersistedContentHash};
+use led_state_buffer_edits::EditGroup;
 use led_state_tabs::{Cursor, Scroll};
 
 /// Live session state on `Atoms.session`. Driven by the
@@ -25,12 +27,13 @@ use led_state_tabs::{Cursor, Scroll};
 /// - `Init` outbound → `Restored` inbound flips `primary` to
 ///   the flock outcome and stamps `last_saved` with whatever
 ///   the DB held.
-/// - `Save` outbound → `Saved` inbound sets `saved = true`.
+/// - `SaveSession` outbound → `SessionSaved` inbound sets
+///   `saved = true`.
 /// - The Quit gate consults `(saved || !primary)` to decide
 ///   whether the loop can break.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct SessionState {
-    /// `true` when the most recent Save round-trip completed,
+    /// `true` when the most recent save round-trip completed,
     /// or when there was nothing to save (non-primary,
     /// standalone). The Quit gate consults this; while
     /// `phase == Exiting && !saved && primary` the main loop
@@ -46,79 +49,75 @@ pub struct SessionState {
     /// Starting` and avoids dispatching a second `Init`.
     pub init_done: bool,
     /// What was on disk at startup (or the last successful
-    /// Save). Used by the Quit-side derived to diff against the
-    /// current state and skip the `Save` dispatch when nothing
-    /// has changed.
+    /// save). Used by the Quit-side derived to diff against the
+    /// current state and skip the `SaveSession` dispatch when
+    /// nothing has changed.
     pub last_saved: Option<SessionData>,
-    /// Per-path buffer state stashed on `Restored` ingest,
-    /// keyed by canonical path. The load-completion hook reads
-    /// this when a buffer materialises: if the disk's hash
-    /// matches the snapshot's `disk_anchor_hash`, restore
-    /// `eb.rope` from `rope_content` and decode the history;
-    /// otherwise drop silently. The entry is always removed
-    /// after a load completion regardless of match.
-    pub pending_buffer_state: imbl::HashMap<CanonPath, BufferStateSnapshot>,
+    /// Per-path restored undo state, stashed on `Restored`
+    /// ingest and consumed by the load-completion hook to
+    /// install history into the freshly-loaded buffer.
+    pub pending_undo: imbl::HashMap<CanonPath, UndoRestoreData>,
 }
 
-/// One persisted snapshot of the editor's session for one
-/// workspace root. Crosses the session driver's ABI so it lives
-/// in `state-session` (the driver core depends on us, not the
-/// other way around).
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+/// Full session payload — written wholesale on
+/// `SessionCmd::SaveSession`, returned wholesale by
+/// `SessionEvent::Restored`. Mirrors legacy's `SessionData`.
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct SessionData {
     /// Index into `tabs` of the tab that was active when the
-    /// session was saved. `None` when no tabs were open.
-    pub active_tab_idx: Option<usize>,
+    /// session was saved.
+    pub active_tab_order: usize,
     /// Whether the file browser was visible when the session
     /// was saved — restored as-is on next launch.
     pub show_side_panel: bool,
-    /// Open tabs in display order. Position-sensitive: the same
-    /// order is restored.
-    pub tabs: Vec<SessionTab>,
-    /// Per-buffer state snapshots: dirty rope content + undo
-    /// history, stamped with the disk anchor hash. The runtime
-    /// only restores a snapshot when its `disk_anchor_hash`
-    /// matches the freshly-loaded rope's hash; mismatches drop
-    /// silently because the file changed externally between
-    /// sessions and the persisted state references different
-    /// bytes.
-    pub buffer_states: Vec<BufferStateSnapshot>,
+    /// Open buffers in display order. Position-sensitive: the
+    /// same order is restored.
+    pub buffers: Vec<SessionBuffer>,
+    /// Free-form key/value pairs for non-buffer state (browser
+    /// expanded dirs, jump list, isearch query, …). Legacy
+    /// stores these in the `session_kv` table.
+    pub kv: HashMap<String, String>,
 }
 
-/// One persisted buffer state. `rope_content` is the in-memory
-/// rope at quit time (which may carry unsaved edits relative to
-/// `disk_anchor_hash`); `history_blob` is opaque, owned by
-/// `state-buffer-edits::History::{encode,decode}`.
-///
-/// On restore: read the disk file, hash it. If the hash equals
-/// `disk_anchor_hash` (no external modification), install the
-/// snapshot — `eb.rope` becomes `rope_content` and `eb.history`
-/// becomes `decode(history_blob)`. Otherwise drop silently and
-/// fall back to the disk content with empty history.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BufferStateSnapshot {
+/// One persisted buffer entry. Mirrors legacy `SessionBuffer`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SessionBuffer {
     pub path: CanonPath,
-    /// Hash of the file's *disk* content at the moment we
-    /// persisted this snapshot. NOT the in-memory rope's hash —
-    /// `rope_content` may differ from disk by the user's
-    /// unsaved edits.
-    pub disk_anchor_hash: PersistedContentHash,
-    /// The in-memory rope at quit time. Restored verbatim into
-    /// `eb.rope` when the disk anchor matches.
-    pub rope_content: String,
-    /// Encoded `History`. Empty Vec when the buffer had no
-    /// recorded history (just stash the rope to survive quit).
-    pub history_blob: Vec<u8>,
-}
-
-/// One persisted tab entry. The path is the canonical form;
-/// re-mapping to the user-typed form (for symlinked dotfiles
-/// etc.) is a future refinement.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SessionTab {
-    pub path: CanonPath,
+    pub tab_order: usize,
     pub cursor: Cursor,
     pub scroll: Scroll,
+    /// Restored undo state — populated by `load_session` from
+    /// the `buffer_undo_state` + `undo_entries` tables. `None`
+    /// when no persisted undo exists for this buffer.
+    pub undo: Option<UndoRestoreData>,
+}
+
+/// Per-buffer undo restore payload. Mirrors legacy
+/// `UndoRestoreData`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct UndoRestoreData {
+    /// UUID-like identifier for this undo chain. Two sessions
+    /// referring to the same chain_id can extend each other's
+    /// history; a different chain_id means a fresh start.
+    pub chain_id: String,
+    /// Hash of the file content the chain was anchored against.
+    /// On restore: only install the entries when the freshly-
+    /// loaded rope's hash matches.
+    pub content_hash: PersistedContentHash,
+    /// Position in the past stack (== past.len()). `None`
+    /// means "head of history."
+    pub undo_cursor: Option<usize>,
+    /// Net distance from the save point — how many groups have
+    /// been applied since the last save. 0 = clean.
+    pub distance_from_save: i32,
+    /// All persisted EditGroups in append order. Restored as
+    /// `eb.history.past` after a hash check; future stays
+    /// empty (entries past undo_cursor are conceptually in
+    /// future, but our internal stacks are append-only-past).
+    pub entries: Vec<EditGroup>,
+    /// SQLite seq of the last entry — used by sync (M21+)
+    /// to fetch only entries newer than this.
+    pub last_seq: i64,
 }
 
 #[cfg(test)]
@@ -142,27 +141,21 @@ mod tests {
     #[test]
     fn session_data_clone_round_trips() {
         let d = SessionData {
-            active_tab_idx: Some(1),
+            active_tab_order: 1,
             show_side_panel: true,
-            buffer_states: Vec::new(),
-            tabs: vec![
-                SessionTab {
-                    path: canon("/p/a.rs"),
-                    cursor: Cursor {
-                        line: 4,
-                        col: 2,
-                        preferred_col: 2,
-                    },
-                    scroll: Scroll::default(),
+            buffers: vec![SessionBuffer {
+                path: canon("/p/a.rs"),
+                tab_order: 0,
+                cursor: Cursor {
+                    line: 4,
+                    col: 2,
+                    preferred_col: 2,
                 },
-                SessionTab {
-                    path: canon("/p/b.rs"),
-                    cursor: Cursor::default(),
-                    scroll: Scroll::default(),
-                },
-            ],
+                scroll: Scroll::default(),
+                undo: None,
+            }],
+            kv: HashMap::from([("browser.selected".into(), "2".into())]),
         };
-        let cloned = d.clone();
-        assert_eq!(d, cloned);
+        assert_eq!(d.clone(), d);
     }
 }

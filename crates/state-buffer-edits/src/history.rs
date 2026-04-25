@@ -140,6 +140,24 @@ impl History {
     pub fn rebind_seq_gen(&mut self, seq_gen: crate::SeqGen) {
         self.seq_gen = seq_gen;
     }
+
+    /// Install a vector of groups as the new past stack. Used by
+    /// session restore (M21): the persisted `undo_entries` rows
+    /// fold back into `past` in append order. Future + current
+    /// are cleared — the restored chain represents the user's
+    /// linear history at quit time, with no pending coalesce.
+    pub fn restore_past(&mut self, past: Vec<EditGroup>) {
+        self.past = past;
+        self.future.clear();
+        self.current = None;
+    }
+
+    /// Mutable access to the past stack — used by the runtime's
+    /// undo-flush bookkeeping to detect newly-finalised groups
+    /// since the last flush. Crate-internal helper.
+    pub fn past_groups(&self) -> &[EditGroup] {
+        &self.past
+    }
 }
 
 impl History {

@@ -50,7 +50,7 @@ use led_driver_session_core::{SessionCmd, SessionDriver, SessionEvent};
 use led_driver_session_native::SessionNative;
 use led_state_alerts::AlertState;
 use led_state_browser::{BrowserUi, FsTree};
-use led_state_buffer_edits::{BufferEdits, EditedBuffer};
+use led_state_buffer_edits::{BufferEdits, EditGroup, EditedBuffer};
 use led_state_clipboard::ClipboardState;
 use led_state_file_search::FileSearchState;
 use led_state_find_file::FindFileState;
@@ -62,7 +62,7 @@ use led_state_diagnostics::{
 };
 use led_state_git::GitState;
 use led_state_lifecycle::{LifecycleState, Phase};
-use led_state_session::{BufferStateSnapshot, SessionData, SessionState, SessionTab};
+use led_state_session::{SessionBuffer, SessionData, SessionState};
 use led_state_syntax::{Language, SyntaxState, SyntaxStates};
 use led_state_tabs::{TabId, Tabs};
 
@@ -284,6 +284,11 @@ pub struct Atoms {
     /// store it as a flag because we don't want to scan every
     /// tab every tick.
     pub resume_check_pending: bool,
+    /// Per-buffer undo persistence bookkeeping. Tracks how far
+    /// each path's `history.past` has been flushed to the
+    /// session DB so subsequent flushes ship only the newly-
+    /// finalised groups (mirrors legacy's incremental append).
+    pub undo_persistence: std::collections::HashMap<CanonPath, UndoPersistTracker>,
     /// Symlink resolution chain for every path the user has
     /// opened, keyed by canonical path. Populated at tab-open
     /// time (main.rs CLI, find-file commit, browser open) so the
@@ -292,6 +297,25 @@ pub struct Atoms {
     /// the informative extension. Mirrors legacy led's
     /// `PathChain` → `LanguageId::from_chain` routing.
     pub path_chains: std::collections::HashMap<CanonPath, PathChain>,
+}
+
+/// Per-buffer state tracking what we've shipped to the
+/// `undo_entries` table. Mirrors legacy's `BufferState::
+/// {chain_id, persisted_undo_len, last_seen_seq}` triple.
+#[derive(Debug, Clone, Default)]
+pub struct UndoPersistTracker {
+    /// UUID-ish chain id we generate on first flush per
+    /// buffer-session. Stable across the rest of the session;
+    /// regenerated on session restore (with a new chain) when
+    /// the disk content's hash differs from the persisted
+    /// `content_hash`.
+    pub chain_id: String,
+    /// `past.len()` we've already flushed. Next flush ships
+    /// `history.past_groups()[persisted_len..]`.
+    pub persisted_len: usize,
+    /// Latest `seq` returned by the session driver after a
+    /// successful flush. Used by future cross-instance sync.
+    pub last_seq: i64,
 }
 
 /// Run-time seam: the single thing the main loop sees. Owns nothing
@@ -340,6 +364,7 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
         session,
         session_save_dispatched,
         resume_check_pending,
+        undo_persistence,
     } = &mut *world.atoms;
     let drivers = world.drivers;
     let wake = world.wake;
@@ -388,48 +413,80 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
                 completion.rope.clone(),
             );
 
-            // M21 buffer-state restore: if a stashed snapshot
-            // exists for this path AND its `disk_anchor_hash`
-            // matches the freshly-loaded disk content, override
-            // `eb.rope` with the snapshot's `rope_content`
-            // (which may carry unsaved edits) and install the
-            // decoded history so Ctrl-/ rolls back across the
-            // prior session. Mismatch → drop silently; the file
-            // changed externally between sessions and the
-            // persisted state references different bytes.
+            // M21 undo restore (legacy-shaped): if a stashed
+            // UndoRestoreData exists for this path AND its
+            // `content_hash` matches the freshly-loaded disk
+            // content, install the entries into eb.history.past
+            // and replay them forward onto eb.rope so the
+            // dirty-edit state carries across the quit. Mismatch
+            // → drop silently; the file changed externally
+            // between sessions.
             if inserted
-                && let Some(snap) =
-                    session.pending_buffer_state.remove(&completion.path)
+                && let Some(restore) =
+                    session.pending_undo.remove(&completion.path)
             {
                 let disk_hash = led_core::EphemeralContentHash::of_rope(
                     &completion.rope,
                 )
                 .persist();
-                if disk_hash == snap.disk_anchor_hash
+                if disk_hash == restore.content_hash
                     && let Some(eb) = edits.buffers.get_mut(&completion.path)
                 {
-                    eb.rope = std::sync::Arc::new(ropey::Rope::from_str(
-                        &snap.rope_content,
-                    ));
-                    // Bump version when the restored rope
-                    // differs from disk. `dirty()` then reports
-                    // true (saved_version stays 0), matching
-                    // what the user would see if they'd just
-                    // typed those edits.
-                    if snap.rope_content
-                        != completion.rope.to_string()
-                    {
+                    // Replay each EditGroup's ops forward onto
+                    // the rope (in record order). Each group's
+                    // [Delete(at, removed), Insert(at, inserted)]
+                    // pair maps to: remove `removed` at `at`,
+                    // insert `inserted` at `at`. Skip
+                    // save-point markers (empty ops).
+                    let mut new_rope = (*eb.rope).clone();
+                    for group in &restore.entries {
+                        for op in &group.ops {
+                            use led_state_buffer_edits::EditOp;
+                            match op {
+                                EditOp::Delete { at, text } => {
+                                    let len = text.chars().count();
+                                    let end = (*at + len)
+                                        .min(new_rope.len_chars());
+                                    if *at < new_rope.len_chars() && end > *at
+                                    {
+                                        new_rope.remove(*at..end);
+                                    }
+                                }
+                                EditOp::Insert { at, text } => {
+                                    let pos = (*at)
+                                        .min(new_rope.len_chars());
+                                    new_rope.insert(pos, text);
+                                }
+                            }
+                        }
+                    }
+                    eb.rope = std::sync::Arc::new(new_rope);
+                    if !restore.entries.is_empty() {
                         eb.version = eb.version.saturating_add(1);
                     }
-                    if !snap.history_blob.is_empty()
-                        && let Ok(mut decoded) =
-                            led_state_buffer_edits::History::decode(
-                                &snap.history_blob,
-                            )
-                    {
-                        decoded.rebind_seq_gen(edits.seq_gen.clone());
-                        eb.history = decoded;
-                    }
+                    // Build the History from the entries: every
+                    // restored group lands in past. seq_gen is
+                    // a fresh shared counter — entries' embedded
+                    // seqs are kept as historical tags.
+                    let mut history =
+                        led_state_buffer_edits::History::with_seq_gen(
+                            edits.seq_gen.clone(),
+                        );
+                    history.restore_past(restore.entries.clone());
+                    eb.history = history;
+                    // Seed the per-buffer flush tracker so the
+                    // next `FlushUndo` resumes from the restored
+                    // tail rather than re-shipping every entry.
+                    // Reuse the persisted `chain_id` so legacy's
+                    // append-only invariant holds across restart.
+                    undo_persistence.insert(
+                        completion.path.clone(),
+                        UndoPersistTracker {
+                            chain_id: restore.chain_id.clone(),
+                            persisted_len: restore.entries.len(),
+                            last_seq: restore.last_seq,
+                        },
+                    );
                 }
             }
             if let Some(lang) = detected {
@@ -929,41 +986,33 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
                     session.primary = primary;
                     session.init_done = true;
                     if let Some(data) = restored {
-                        // Stash buffer-state snapshots for the
-                        // load-completion hook. Each snapshot
-                        // is stamped with the disk-anchor hash;
-                        // the hook only restores when the
-                        // freshly-loaded disk hash matches.
-                        for snap in &data.buffer_states {
-                            session
-                                .pending_buffer_state
-                                .insert(snap.path.clone(), snap.clone());
+                        // Stash per-buffer undo restore data.
+                        // The load-completion hook checks the
+                        // disk hash before applying.
+                        for sb in &data.buffers {
+                            if let Some(undo) = &sb.undo {
+                                session
+                                    .pending_undo
+                                    .insert(sb.path.clone(), undo.clone());
+                            }
                         }
-                        // Materialise restored tabs. Skip any
-                        // path the user already opened via the
-                        // CLI args — those tabs already exist
-                        // and shouldn't double-open.
+                        // Materialise restored tabs. CLI arg
+                        // tabs already in `tabs.open` get the
+                        // saved cursor + scroll merged onto
+                        // them as `pending_*`. New tabs spawn
+                        // for paths not already open.
                         let mut new_tabs: imbl::Vector<led_state_tabs::Tab> =
                             tabs.open.clone();
-                        for st in &data.tabs {
-                            // CLI arg already opened a tab for
-                            // this path: don't double-open, but
-                            // DO copy the saved cursor + scroll
-                            // onto it as `pending_*` so the
-                            // load-completion hook still applies
-                            // them. Without this the user would
-                            // restart at line 0 col 0 every time
-                            // they passed a CLI arg matching a
-                            // restored session entry.
+                        for sb in &data.buffers {
                             if let Some(existing) = new_tabs
                                 .iter_mut()
-                                .find(|t| t.path == st.path)
+                                .find(|t| t.path == sb.path)
                             {
                                 if existing.pending_cursor.is_none() {
-                                    existing.pending_cursor = Some(st.cursor);
+                                    existing.pending_cursor = Some(sb.cursor);
                                 }
                                 if existing.pending_scroll.is_none() {
-                                    existing.pending_scroll = Some(st.scroll);
+                                    existing.pending_scroll = Some(sb.scroll);
                                 }
                                 continue;
                             }
@@ -975,18 +1024,16 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
                                     .unwrap_or(0)
                                     + 1,
                             );
-                            // Stash a path-chain for language
-                            // detection on load.
                             let chain = led_core::UserPath::new(
-                                st.path.as_path(),
+                                sb.path.as_path(),
                             )
                             .resolve_chain();
-                            path_chains.insert(st.path.clone(), chain);
+                            path_chains.insert(sb.path.clone(), chain);
                             new_tabs.push_back(led_state_tabs::Tab {
                                 id,
-                                path: st.path.clone(),
-                                pending_cursor: Some(st.cursor),
-                                pending_scroll: Some(st.scroll),
+                                path: sb.path.clone(),
+                                pending_cursor: Some(sb.cursor),
+                                pending_scroll: Some(sb.scroll),
                                 ..Default::default()
                             });
                         }
@@ -994,20 +1041,46 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
                         // asked for via CLI args; otherwise
                         // honour the saved active index.
                         if tabs.active.is_none()
-                            && let Some(idx) = data.active_tab_idx
-                            && let Some(t) = new_tabs.get(idx)
+                            && let Some(t) =
+                                new_tabs.get(data.active_tab_order)
                         {
                             tabs.active = Some(t.id);
                         }
                         tabs.open = new_tabs;
+                        // Restore browser visibility + selection
+                        // + jump list from the kv slot. Mirrors
+                        // legacy's session_of consumer.
+                        browser.visible = data.show_side_panel;
+                        apply_session_kv(&data.kv, browser, jumps);
                         session.last_saved = Some(data);
                     } else {
                         session.last_saved = None;
                     }
                     session_just_restored = true;
                 }
-                SessionEvent::Saved => {
+                SessionEvent::SessionSaved => {
                     session.saved = true;
+                }
+                SessionEvent::UndoFlushed {
+                    path,
+                    chain_id,
+                    persisted_undo_len,
+                    last_seq,
+                } => {
+                    // Confirm the optimistic advance: pin
+                    // `persisted_len` to the value the driver
+                    // actually inserted, and record `last_seq` for
+                    // future cross-instance sync (M21+). If the
+                    // tracker has already rotated to a new
+                    // chain_id (post-save reset), ignore the
+                    // ack — those entries belong to a chain that
+                    // was just dropped from the DB.
+                    if let Some(tracker) = undo_persistence.get_mut(&path)
+                        && tracker.chain_id == chain_id
+                    {
+                        tracker.persisted_len = persisted_undo_len;
+                        tracker.last_seq = last_seq;
+                    }
                 }
                 SessionEvent::Failed { message } => {
                     alerts.set_warn(
@@ -1389,9 +1462,25 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
             // emits the `WorkspaceClearUndo` trace line.
             drivers
                 .session
-                .execute(std::iter::once(&SessionCmd::DropUndo {
+                .execute(std::iter::once(&SessionCmd::ClearUndo {
                     path: path.clone(),
                 }));
+            // Reset the per-buffer flush tracker: legacy's
+            // `save_completed` clears `chain_id` and sets
+            // `persisted_undo_len = entry_count`, so the existing
+            // past becomes the new disk baseline. The next user
+            // edit opens a fresh chain whose flushes start from
+            // the just-saved point.
+            if let Some(eb) = edits.buffers.get(path) {
+                undo_persistence.insert(
+                    path.clone(),
+                    UndoPersistTracker {
+                        chain_id: new_chain_id(),
+                        persisted_len: eb.history.past_groups().len(),
+                        last_seq: 0,
+                    },
+                );
+            }
             if is_save_as {
                 trace.file_reopen_existing(path);
             }
@@ -1497,8 +1586,8 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
             && !session.saved
             && !*session_save_dispatched
         {
-            let data = build_session_data(tabs, edits, store, browser);
-            drivers.session.execute(std::iter::once(&SessionCmd::Save {
+            let data = build_session_data(tabs, edits, store, browser, jumps);
+            drivers.session.execute(std::iter::once(&SessionCmd::SaveSession {
                 data,
             }));
             *session_save_dispatched = true;
@@ -1508,6 +1597,63 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
             // Secondaries and standalone runs have nothing to
             // save; clear the gate immediately.
             session.saved = true;
+        }
+
+        // FlushUndo: per-tick incremental append of newly-finalised
+        // undo groups. Mirrors legacy's `pending_undo_flush` query
+        // (`led/src/model/mod.rs` ~line 399). Only primaries own
+        // the SQLite file; secondaries are read-only. We cap the
+        // walk at `tabs.open` because legacy only persists undo
+        // for tabbed buffers (preview tabs are excluded; we don't
+        // surface a preview flag yet, so every open tab is fair
+        // game).
+        if session.primary && session.init_done {
+            for tab in tabs.open.iter() {
+                let path = &tab.path;
+                let Some(eb) = edits.buffers.get(path) else {
+                    continue;
+                };
+                let current_len = eb.history.past_groups().len();
+                let tracker = undo_persistence
+                    .entry(path.clone())
+                    .or_insert_with(|| UndoPersistTracker {
+                        chain_id: new_chain_id(),
+                        persisted_len: 0,
+                        last_seq: 0,
+                    });
+                if current_len <= tracker.persisted_len {
+                    continue;
+                }
+                let new_groups: Vec<EditGroup> = eb
+                    .history
+                    .past_groups()[tracker.persisted_len..current_len]
+                    .to_vec();
+                if new_groups.iter().all(|g| g.ops.is_empty()) {
+                    // Nothing but save-point markers since last
+                    // flush — advance the cursor so we don't
+                    // re-walk them, but don't ship an empty payload.
+                    tracker.persisted_len = current_len;
+                    continue;
+                }
+                let content_hash = disk_content_hash_for(eb);
+                let distance = distance_from_save_for(eb);
+                let chain_id = tracker.chain_id.clone();
+                drivers.session.execute(std::iter::once(
+                    &SessionCmd::FlushUndo {
+                        path: path.clone(),
+                        chain_id,
+                        content_hash,
+                        undo_cursor: current_len,
+                        distance_from_save: distance,
+                        entries: new_groups,
+                    },
+                ));
+                // Tentatively advance — `UndoFlushed` will confirm
+                // last_seq and re-pin persisted_len to the value
+                // the driver inserted (legacy treats the ack as
+                // authoritative).
+                tracker.persisted_len = current_len;
+            }
         }
 
         let mut lsp_cmds: Vec<LspCmd> = Vec::new();
@@ -1774,88 +1920,186 @@ fn config_dir_for_session() -> Option<CanonPath> {
 }
 
 /// Build the [`SessionData`] payload from the live atom set.
-/// Skips preview tabs (they're transient browser previews, not
-/// real session state) and orders by current `tabs.open` order.
+/// Mirrors legacy's session-on-quit assembly: one
+/// `SessionBuffer` per non-preview tab (cursor + scroll), plus
+/// the active-tab order, the side-panel toggle, and any kv pairs
+/// the runtime collected (browser state, jump list, etc. — those
+/// will arrive in a follow-up; the slot is here today).
 ///
-/// For every non-preview tab whose buffer is dirty OR has any
-/// history, captures a [`BufferStateSnapshot`] containing:
-/// - The disk-anchor hash (the hash of the file as it currently
-///   sits on disk; we read this from `BufferStore`).
-/// - The in-memory rope content (which may carry unsaved edits).
-/// - The encoded undo history.
-///
-/// Restore on next launch is gated on the disk-anchor hash
-/// matching the freshly-loaded disk content's hash. Mismatches
-/// (file modified externally between sessions) drop silently.
+/// The undo-flush + ClearUndo flow lives separately: legacy
+/// flushes undo on a debounce timer (and on any save) via a
+/// distinct WorkspaceOut::FlushUndo command; our `SaveSession`
+/// is just the workspaces / buffers / kv portion.
 fn build_session_data(
     tabs: &Tabs,
-    edits: &BufferEdits,
-    store: &led_driver_buffers_core::BufferStore,
+    _edits: &BufferEdits,
+    _store: &led_driver_buffers_core::BufferStore,
     browser: &led_state_browser::BrowserUi,
+    jumps: &led_state_jumps::JumpListState,
 ) -> SessionData {
-    let mut session_tabs: Vec<SessionTab> = Vec::with_capacity(tabs.open.len());
-    let mut buffer_states: Vec<BufferStateSnapshot> = Vec::new();
-    let mut active_idx: Option<usize> = None;
-    let mut seen_paths: std::collections::HashSet<CanonPath> =
-        std::collections::HashSet::new();
+    let mut session_buffers: Vec<SessionBuffer> =
+        Vec::with_capacity(tabs.open.len());
+    let mut active_tab_order: usize = 0;
     for tab in tabs.open.iter() {
         if tab.preview {
             continue;
         }
         if Some(tab.id) == tabs.active {
-            active_idx = Some(session_tabs.len());
+            active_tab_order = session_buffers.len();
         }
-        session_tabs.push(SessionTab {
+        session_buffers.push(SessionBuffer {
             path: tab.path.clone(),
+            tab_order: session_buffers.len(),
             cursor: tab.cursor,
             scroll: tab.scroll,
-        });
-
-        // Snapshot the buffer state exactly once per path
-        // (multi-tab on the same file would otherwise produce
-        // duplicate rows).
-        if !seen_paths.insert(tab.path.clone()) {
-            continue;
-        }
-        let Some(eb) = edits.buffers.get(&tab.path) else {
-            continue;
-        };
-        // Only persist when there's meaningful state to restore
-        // — the buffer is dirty (unsaved edits) OR the history
-        // has anything to undo / redo. A clean buffer with no
-        // history simply reloads from disk on relaunch.
-        if !eb.dirty() && !eb.history.can_undo() && !eb.history.can_redo() {
-            continue;
-        }
-        // Disk anchor: the hash of the file as it sits on disk
-        // RIGHT NOW, not the in-memory hash. The store holds
-        // the most recent disk read; if it's not Ready (loading
-        // / error), skip — we can't anchor.
-        let Some(disk_rope) = store.loaded.get(&tab.path).and_then(|s| {
-            if let led_driver_buffers_core::LoadState::Ready(r) = s {
-                Some(r.clone())
-            } else {
-                None
-            }
-        }) else {
-            continue;
-        };
-        let disk_anchor_hash =
-            led_core::EphemeralContentHash::of_rope(&disk_rope).persist();
-        let history_blob = eb.history.encode().unwrap_or_default();
-        buffer_states.push(BufferStateSnapshot {
-            path: tab.path.clone(),
-            disk_anchor_hash,
-            rope_content: eb.rope.to_string(),
-            history_blob,
+            undo: None,
         });
     }
     SessionData {
-        active_tab_idx: active_idx,
+        active_tab_order,
         show_side_panel: browser.visible,
-        tabs: session_tabs,
-        buffer_states,
+        buffers: session_buffers,
+        kv: build_session_kv(browser, jumps),
     }
+}
+
+/// Inverse of [`build_session_kv`]: re-hydrates the browser +
+/// jump-list atoms from the kv blob the driver loaded out of
+/// `session_kv`. Legacy's equivalent is `model::session_of`.
+/// Unknown keys are tolerated; type-mismatched values fall back
+/// to defaults so a corrupted row doesn't block the restore.
+fn apply_session_kv(
+    kv: &std::collections::HashMap<String, String>,
+    browser: &mut led_state_browser::BrowserUi,
+    jumps: &mut led_state_jumps::JumpListState,
+) {
+    if let Some(sel) = kv.get("browser.selected_path") {
+        browser.selected_path = Some(
+            led_core::UserPath::new(std::path::PathBuf::from(sel))
+                .canonicalize(),
+        );
+    }
+    if let Some(off) = kv.get("browser.scroll_offset")
+        && let Ok(n) = off.parse::<usize>()
+    {
+        browser.scroll_offset = n;
+    }
+    if let Some(dirs) = kv.get("browser.expanded_dirs") {
+        browser.expanded_dirs = dirs
+            .split('\n')
+            .filter(|s| !s.is_empty())
+            .map(|s| {
+                led_core::UserPath::new(std::path::PathBuf::from(s))
+                    .canonicalize()
+            })
+            .collect();
+    }
+    if let Some(json) = kv.get("jump_list.entries")
+        && let Ok(entries) =
+            serde_json::from_str::<std::collections::VecDeque<
+                led_state_jumps::JumpPosition,
+            >>(json)
+    {
+        jumps.entries = entries;
+        if let Some(idx) = kv.get("jump_list.index")
+            && let Ok(n) = idx.parse::<usize>()
+        {
+            jumps.index = n.min(jumps.entries.len());
+        } else {
+            jumps.index = jumps.entries.len();
+        }
+    }
+}
+
+/// Mirrors legacy's `build_session_kv` (`led/src/derived.rs`).
+/// Browser selection / scroll / expanded set + jump-list entries
+/// + index, encoded as plain string values so the schema row stays
+/// stable across rewrite-internal type churn.
+fn build_session_kv(
+    browser: &led_state_browser::BrowserUi,
+    jumps: &led_state_jumps::JumpListState,
+) -> std::collections::HashMap<String, String> {
+    let mut kv = std::collections::HashMap::new();
+    if let Some(sel) = &browser.selected_path {
+        kv.insert(
+            "browser.selected_path".into(),
+            sel.as_path().to_string_lossy().into_owned(),
+        );
+    }
+    kv.insert(
+        "browser.scroll_offset".into(),
+        browser.scroll_offset.to_string(),
+    );
+    let dirs: Vec<String> = browser
+        .expanded_dirs
+        .iter()
+        .map(|d| d.as_path().to_string_lossy().into_owned())
+        .collect();
+    if !dirs.is_empty() {
+        kv.insert("browser.expanded_dirs".into(), dirs.join("\n"));
+    }
+    if let Ok(json) = serde_json::to_string(&jumps.entries) {
+        kv.insert("jump_list.entries".into(), json);
+        kv.insert("jump_list.index".into(), jumps.index.to_string());
+    }
+    kv
+}
+
+/// Generate a unique `chain_id` for an undo persistence chain.
+/// Mirrors legacy's `led_workspace::new_chain_id` — 64-bit hash
+/// of (now, pid). Collision-safe enough for a per-buffer
+/// session marker; not cryptographic.
+fn new_chain_id() -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    use std::time::SystemTime;
+    let t = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let mut hasher = DefaultHasher::new();
+    t.hash(&mut hasher);
+    std::process::id().hash(&mut hasher);
+    UNDO_CHAIN_NONCE
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        .hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
+static UNDO_CHAIN_NONCE: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// Hash that anchors the chain to "what's on disk." Walks `past`
+/// for the most recent save-point marker; falls back to the
+/// current rope hash for never-saved buffers (the load itself
+/// stamps the rope as disk-equivalent at version 0).
+fn disk_content_hash_for(eb: &EditedBuffer) -> led_core::PersistedContentHash {
+    eb.history
+        .past_groups()
+        .iter()
+        .rev()
+        .find_map(|g| g.save_point_hash)
+        .unwrap_or_else(|| {
+            led_core::EphemeralContentHash::of_rope(&eb.rope).persist()
+        })
+}
+
+/// Distance (in finalised groups) between the current head and
+/// the most recent save-point marker. Used by legacy's `buffer_
+/// undo_state.distance_from_save` for on-restore conflict
+/// detection. We compute it on demand from `past`; legacy tracks
+/// it incrementally on the doc, but the values agree at flush
+/// time so the on-disk row is identical.
+fn distance_from_save_for(eb: &EditedBuffer) -> i32 {
+    let past = eb.history.past_groups();
+    let last_save_idx = past
+        .iter()
+        .rposition(|g| g.save_point_hash.is_some());
+    let after = match last_save_idx {
+        Some(idx) => &past[idx + 1..],
+        None => past,
+    };
+    after.iter().filter(|g| !g.ops.is_empty()).count() as i32
 }
 
 /// Min-fold over every currently-registered wake deadline.

@@ -22,7 +22,7 @@ use led_core::CanonPath;
 /// the oldest entry is dropped from the front.
 pub const MAX_ENTRIES: usize = 100;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct JumpPosition {
     pub path: CanonPath,
     pub line: usize,

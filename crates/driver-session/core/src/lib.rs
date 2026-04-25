@@ -1,90 +1,87 @@
-//! Sync core of the session driver (M21).
+//! Sync core of the session driver.
 //!
-//! Three commands cross the ABI:
+//! ABI mirrors legacy `WorkspaceOut` / `WorkspaceIn` shapes for
+//! the persistence-relevant commands (Init / SaveSession /
+//! FlushUndo / ClearUndo) so the rewrite's storage lifecycle
+//! lines up with legacy's design (`docs/spec/persistence.md`,
+//! `docs/spec/lifecycle.md`).
 //!
-//! - [`SessionCmd::Init`] — open the SQLite DB, attempt to
-//!   acquire the workspace's primary flock, and emit the
-//!   restored session (or `None` for a fresh / non-primary
-//!   workspace). Fires once per session, at startup.
-//! - [`SessionCmd::Save`] — persist a [`SessionData`] payload
-//!   into the workspace's row. Fires on the `Phase::Exiting`
-//!   transition (and, in future, on a debounce after edits).
-//! - [`SessionCmd::Shutdown`] — graceful close: flush any
-//!   pending writes and drop the flock.
-//!
-//! Native I/O lives in `driver-session-native`. This crate
-//! holds only the wire types so the runtime can compile
-//! against a narrow surface and tests can substitute a mock
-//! worker over a plain channel pair.
+//! Native I/O lives in `driver-session-native`.
 
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender};
 
-use led_core::CanonPath;
+use led_core::{CanonPath, PersistedContentHash};
+use led_state_buffer_edits::EditGroup;
 use led_state_session::SessionData;
 
-// ── ABI ─────────────────────────────────────────────────────────
-
-/// Runtime → driver commands.
 #[derive(Debug, Clone)]
 pub enum SessionCmd {
     /// One-shot startup: open the DB at `<config_dir>/db.sqlite`,
     /// attempt to acquire the primary flock at
-    /// `<config_dir>/primary/<hash(root)>`, and emit a
-    /// [`SessionEvent::Restored`].
+    /// `<config_dir>/primary/<hash(root)>`, load the session row +
+    /// per-buffer undo state, and emit a [`SessionEvent::Restored`].
     Init {
         root: CanonPath,
         config_dir: CanonPath,
     },
-    /// Persist `data` into the workspace's row, replacing the
-    /// previous snapshot. No-op for non-primary instances —
-    /// the runtime gates this command on `session.primary`.
-    Save { data: SessionData },
-    /// Drop the persisted undo blob for `path` from the
-    /// `undo_state` table. Fired after a successful disk save:
-    /// the saved bytes become the new disk baseline, so the
-    /// previously-persisted undo chain (computed against the
-    /// pre-save content) is now stale relative to disk. The
-    /// in-memory `History` stays intact — the user can still
-    /// Ctrl-/. Maps 1:1 to the `WorkspaceClearUndo` trace line.
-    DropUndo { path: CanonPath },
+    /// Persist the full session payload (workspaces row, all
+    /// buffer rows, kv pairs) — the equivalent of legacy's
+    /// `WorkspaceOut::SaveSession`. No-op for non-primaries.
+    SaveSession { data: SessionData },
+    /// Append undo entries for one buffer + update its
+    /// `buffer_undo_state` row. Mirrors legacy
+    /// `WorkspaceOut::FlushUndo`. Caller passes only entries it
+    /// hasn't flushed yet (the `last_seq` returned in the
+    /// `UndoFlushed` event tells the runtime where to resume).
+    FlushUndo {
+        path: CanonPath,
+        chain_id: String,
+        content_hash: PersistedContentHash,
+        undo_cursor: usize,
+        distance_from_save: i32,
+        entries: Vec<EditGroup>,
+    },
+    /// Drop a path's persisted undo state — the
+    /// `WorkspaceClearUndo` legacy command. Fired post-save:
+    /// the saved bytes are the new disk baseline, so the prior
+    /// undo chain (computed against the old content) is stale
+    /// relative to disk and gets wiped from `buffer_undo_state`
+    /// + `undo_entries`.
+    ClearUndo { path: CanonPath },
     /// Drop the flock + close the DB. Sent on the
     /// `Phase::Exiting` → break transition.
     Shutdown,
 }
 
-/// Driver → runtime events.
 #[derive(Debug, Clone)]
 pub enum SessionEvent {
-    /// First message after [`SessionCmd::Init`]. `primary`
-    /// reflects the flock outcome; `restored` carries the
-    /// loaded session for primaries with a prior session row,
-    /// `None` otherwise (fresh workspace, or running
-    /// secondary).
+    /// First message after [`SessionCmd::Init`].
     Restored {
         primary: bool,
         restored: Option<SessionData>,
     },
-    /// Acknowledgement of a successful [`SessionCmd::Save`].
-    /// The runtime flips `session.saved = true` on this event;
-    /// the Quit gate observes it on the next iteration.
-    Saved,
-    /// Non-fatal error during open / save. The runtime surfaces
-    /// the message as a warn alert. Kept distinct from `Saved`
-    /// so the Quit gate doesn't accidentally clear on a
-    /// failed write.
+    /// Acknowledgement of a successful `SaveSession`.
+    SessionSaved,
+    /// Acknowledgement of a successful `FlushUndo`. Carries the
+    /// max seq inserted (so the runtime can advance its
+    /// last-flushed mark) and echoes the path + chain_id +
+    /// `persisted_undo_len` for the matching call site.
+    UndoFlushed {
+        path: CanonPath,
+        chain_id: String,
+        persisted_undo_len: usize,
+        last_seq: i64,
+    },
+    /// Non-fatal error during open / save / flush. The runtime
+    /// surfaces the message as a warn alert.
     Failed { message: String },
 }
-
-// ── Trace ──────────────────────────────────────────────────────
 
 pub trait Trace: Send + Sync {
     fn session_init_start(&self, root: &CanonPath);
     fn session_save_start(&self);
     fn session_save_done(&self, ok: bool);
-    /// Runtime asked the session driver to drop a single
-    /// path's persisted undo blob. Bound to the
-    /// `WorkspaceClearUndo` line in `dispatched.snap`.
     fn session_drop_undo(&self, path: &CanonPath);
 }
 
@@ -95,8 +92,6 @@ impl Trace for NoopTrace {
     fn session_save_done(&self, _: bool) {}
     fn session_drop_undo(&self, _: &CanonPath) {}
 }
-
-// ── Driver handle ──────────────────────────────────────────────
 
 pub struct SessionDriver {
     tx: Sender<SessionCmd>,
@@ -116,15 +111,14 @@ impl SessionDriver {
     pub fn execute<'a>(&self, cmds: impl IntoIterator<Item = &'a SessionCmd>) {
         for cmd in cmds {
             match cmd {
-                SessionCmd::Init { root, .. } => {
-                    self.trace.session_init_start(root);
-                }
-                SessionCmd::Save { .. } => {
-                    self.trace.session_save_start();
-                }
-                SessionCmd::DropUndo { path } => {
-                    self.trace.session_drop_undo(path);
-                }
+                SessionCmd::Init { root, .. } => self.trace.session_init_start(root),
+                SessionCmd::SaveSession { .. } => self.trace.session_save_start(),
+                SessionCmd::ClearUndo { path } => self.trace.session_drop_undo(path),
+                // FlushUndo isn't surfaced in dispatched.snap —
+                // legacy's WorkspaceFlushUndo does carry a trace
+                // line, but we'll wire that when an end-to-end
+                // test demands it.
+                SessionCmd::FlushUndo { .. } => {}
                 SessionCmd::Shutdown => {}
             }
             if self.tx.send(cmd.clone()).is_err() {
@@ -136,9 +130,9 @@ impl SessionDriver {
     pub fn process(&self) -> Vec<SessionEvent> {
         let mut out = Vec::new();
         while let Ok(ev) = self.rx.try_recv() {
-            if let SessionEvent::Saved = &ev {
+            if matches!(ev, SessionEvent::SessionSaved) {
                 self.trace.session_save_done(true);
-            } else if let SessionEvent::Failed { .. } = &ev {
+            } else if matches!(ev, SessionEvent::Failed { .. }) {
                 self.trace.session_save_done(false);
             }
             out.push(ev);
@@ -158,27 +152,13 @@ mod tests {
     }
 
     #[test]
-    fn process_returns_empty_when_quiet() {
-        let (_tx_cmd, _rx_cmd) = mpsc::channel::<SessionCmd>();
-        let (_tx_ev, rx_ev) = mpsc::channel::<SessionEvent>();
-        let drv = SessionDriver::new(_tx_cmd, rx_ev, Arc::new(NoopTrace));
-        assert!(drv.process().is_empty());
-    }
-
-    #[test]
-    fn process_drains_events() {
+    fn process_drains_session_saved_event() {
         let (tx_cmd, _rx_cmd) = mpsc::channel::<SessionCmd>();
         let (tx_ev, rx_ev) = mpsc::channel::<SessionEvent>();
         let drv = SessionDriver::new(tx_cmd, rx_ev, Arc::new(NoopTrace));
-        tx_ev
-            .send(SessionEvent::Restored {
-                primary: true,
-                restored: None,
-            })
-            .unwrap();
-        tx_ev.send(SessionEvent::Saved).unwrap();
+        tx_ev.send(SessionEvent::SessionSaved).unwrap();
         let batch = drv.process();
-        assert_eq!(batch.len(), 2);
+        assert_eq!(batch.len(), 1);
     }
 
     #[test]

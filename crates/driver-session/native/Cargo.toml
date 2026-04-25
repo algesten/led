@@ -18,8 +18,10 @@ publish = false
 led-core = { workspace = true }
 led-state-session = { workspace = true }
 led-state-tabs = { workspace = true }
+led-state-buffer-edits = { workspace = true }
 led-driver-session-core = { workspace = true }
 rusqlite = { workspace = true }
+rmp-serde = { workspace = true }
 libc = { workspace = true }
 
 [dev-dependencies]

@@ -8,4 +8,4 @@ publish = false
 drv = { workspace = true }
 imbl = { workspace = true }
 ropey = { workspace = true }
-serde = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
