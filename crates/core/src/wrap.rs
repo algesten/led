@@ -22,7 +22,10 @@
 
 /// 0-based index of a sub-line within its enclosing logical line.
 /// `SubLine(0)` is the first sub-line, which always starts at col 0.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord, drv::Input)]
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord, drv::Input,
+    serde::Serialize, serde::Deserialize,
+)]
 pub struct SubLine(pub usize);
 
 /// Width of a non-last sub-line, in chars. Equals

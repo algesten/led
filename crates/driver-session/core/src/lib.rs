@@ -40,6 +40,14 @@ pub enum SessionCmd {
     /// previous snapshot. No-op for non-primary instances —
     /// the runtime gates this command on `session.primary`.
     Save { data: SessionData },
+    /// Drop the persisted undo blob for `path` from the
+    /// `undo_state` table. Fired after a successful disk save:
+    /// the saved bytes become the new disk baseline, so the
+    /// previously-persisted undo chain (computed against the
+    /// pre-save content) is now stale relative to disk. The
+    /// in-memory `History` stays intact — the user can still
+    /// Ctrl-/. Maps 1:1 to the `WorkspaceClearUndo` trace line.
+    DropUndo { path: CanonPath },
     /// Drop the flock + close the DB. Sent on the
     /// `Phase::Exiting` → break transition.
     Shutdown,
@@ -74,6 +82,10 @@ pub trait Trace: Send + Sync {
     fn session_init_start(&self, root: &CanonPath);
     fn session_save_start(&self);
     fn session_save_done(&self, ok: bool);
+    /// Runtime asked the session driver to drop a single
+    /// path's persisted undo blob. Bound to the
+    /// `WorkspaceClearUndo` line in `dispatched.snap`.
+    fn session_drop_undo(&self, path: &CanonPath);
 }
 
 pub struct NoopTrace;
@@ -81,6 +93,7 @@ impl Trace for NoopTrace {
     fn session_init_start(&self, _: &CanonPath) {}
     fn session_save_start(&self) {}
     fn session_save_done(&self, _: bool) {}
+    fn session_drop_undo(&self, _: &CanonPath) {}
 }
 
 // ── Driver handle ──────────────────────────────────────────────
@@ -108,6 +121,9 @@ impl SessionDriver {
                 }
                 SessionCmd::Save { .. } => {
                     self.trace.session_save_start();
+                }
+                SessionCmd::DropUndo { path } => {
+                    self.trace.session_drop_undo(path);
                 }
                 SessionCmd::Shutdown => {}
             }

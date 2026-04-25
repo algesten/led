@@ -8,3 +8,4 @@ publish = false
 led-core = { workspace = true }
 drv = { workspace = true }
 imbl = { workspace = true }
+serde = { workspace = true }

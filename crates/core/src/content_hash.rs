@@ -74,5 +74,8 @@ impl EphemeralContentHash {
 /// a diagnostic window's snapshot. Travels on LSP commands,
 /// events, and `BufferDiagnostics`. Never computed directly;
 /// obtained via [`EphemeralContentHash::persist`].
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, Hash,
+    serde::Serialize, serde::Deserialize,
+)]
 pub struct PersistedContentHash(pub u64);

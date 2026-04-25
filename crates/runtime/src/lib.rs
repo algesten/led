@@ -387,6 +387,30 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
                 completion.path.clone(),
                 completion.rope.clone(),
             );
+
+            // M21 undo persistence: if a stashed snapshot
+            // exists for this path AND its content_hash matches
+            // the loaded rope, decode + install the history so
+            // the user can Ctrl-/ across the prior session.
+            // Mismatches drop silently — the bytes on disk
+            // changed since the persisted undo was captured.
+            if inserted
+                && let Some(snap) = session.pending_undo.remove(&completion.path)
+            {
+                let disk_hash = led_core::EphemeralContentHash::of_rope(
+                    &completion.rope,
+                )
+                .persist();
+                if disk_hash == snap.content_hash
+                    && let Ok(mut decoded) =
+                        led_state_buffer_edits::History::decode(&snap.bytes)
+                {
+                    decoded.rebind_seq_gen(edits.seq_gen.clone());
+                    if let Some(eb) = edits.buffers.get_mut(&completion.path) {
+                        eb.history = decoded;
+                    }
+                }
+            }
             if let Some(lang) = detected {
                 syntax
                     .by_path
@@ -884,6 +908,15 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
                     session.primary = primary;
                     session.init_done = true;
                     if let Some(data) = restored {
+                        // Stash undo blobs for the load-completion
+                        // hook. Stamped with content_hash; the hook
+                        // only applies a blob whose hash matches
+                        // the loaded rope.
+                        for snap in &data.undo_snapshots {
+                            session
+                                .pending_undo
+                                .insert(snap.path.clone(), snap.clone());
+                        }
                         // Materialise restored tabs. Skip any
                         // path the user already opened via the
                         // CLI args — those tabs already exist
@@ -1307,7 +1340,18 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
                 led_driver_buffers_core::SaveAction::Save { path, .. } => (path, false),
                 led_driver_buffers_core::SaveAction::SaveAs { from, .. } => (from, true),
             };
-            trace.workspace_clear_undo(path);
+            // Drop the persisted undo blob for this path. The
+            // saved bytes are now the disk baseline, so the
+            // previously-stored undo (computed against the
+            // pre-save content) is stale relative to disk. The
+            // in-memory `eb.history` stays intact — the user
+            // can still Ctrl-/ as before. The driver's adapter
+            // emits the `WorkspaceClearUndo` trace line.
+            drivers
+                .session
+                .execute(std::iter::once(&SessionCmd::DropUndo {
+                    path: path.clone(),
+                }));
             if is_save_as {
                 trace.file_reopen_existing(path);
             }
@@ -1692,13 +1736,21 @@ fn config_dir_for_session() -> Option<CanonPath> {
 /// Build the [`SessionData`] payload from the live atom set.
 /// Skips preview tabs (they're transient browser previews, not
 /// real session state) and orders by current `tabs.open` order.
+///
+/// Also collects per-buffer undo blobs for every non-preview
+/// open path that has any history. Each blob is content-hash-
+/// stamped — restore on next launch only applies the blob if
+/// the disk content's hash matches.
 fn build_session_data(
     tabs: &Tabs,
-    _edits: &BufferEdits,
+    edits: &BufferEdits,
     browser: &led_state_browser::BrowserUi,
 ) -> SessionData {
     let mut session_tabs: Vec<SessionTab> = Vec::with_capacity(tabs.open.len());
+    let mut undo_snapshots: Vec<led_state_session::UndoSnapshot> = Vec::new();
     let mut active_idx: Option<usize> = None;
+    let mut seen_paths: std::collections::HashSet<CanonPath> =
+        std::collections::HashSet::new();
     for tab in tabs.open.iter() {
         if tab.preview {
             continue;
@@ -1711,11 +1763,35 @@ fn build_session_data(
             cursor: tab.cursor,
             scroll: tab.scroll,
         });
+
+        // Snapshot the buffer's history exactly once per path
+        // (multi-tab on the same file would otherwise produce
+        // duplicate rows). Skip empty histories — nothing to
+        // restore.
+        if !seen_paths.insert(tab.path.clone()) {
+            continue;
+        }
+        let Some(eb) = edits.buffers.get(&tab.path) else {
+            continue;
+        };
+        if !eb.history.can_undo() && !eb.history.can_redo() {
+            continue;
+        }
+        if let Ok(bytes) = eb.history.encode() {
+            let hash =
+                led_core::EphemeralContentHash::of_rope(&eb.rope).persist();
+            undo_snapshots.push(led_state_session::UndoSnapshot {
+                path: tab.path.clone(),
+                content_hash: hash,
+                bytes,
+            });
+        }
     }
     SessionData {
         active_tab_idx: active_idx,
         show_side_panel: browser.visible,
         tabs: session_tabs,
+        undo_snapshots,
     }
 }
 
@@ -2462,6 +2538,9 @@ pub(crate) mod trace_adapter {
         fn session_save_done(&self, _ok: bool) {
             // Successful save lands as the SessionEvent::Saved
             // ingest in the runtime; no separate trace line.
+        }
+        fn session_drop_undo(&self, path: &CanonPath) {
+            self.0.workspace_clear_undo(path);
         }
     }
 

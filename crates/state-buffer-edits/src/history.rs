@@ -23,7 +23,7 @@ use std::sync::Arc;
 /// inverses of each other: `Delete { at, text }` is the inverse of
 /// `Insert { at, text }` and vice versa. Undo applies the inverse;
 /// redo applies the forward op.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EditOp {
     Insert { at: usize, text: Arc<str> },
     Delete { at: usize, text: Arc<str> },
@@ -44,7 +44,7 @@ pub enum EditOp {
 /// undo/redo can resync `FileSearchState.hit_replacements` when
 /// the group represents a per-hit replace or its inverse. `None`
 /// on every group that wasn't issued through the file-search path.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct EditGroup {
     pub ops: Vec<EditOp>,
     pub cursor_before: Cursor,
@@ -74,14 +74,14 @@ pub struct EditGroup {
 ///   write disk, and kept `saved_version == version` so the
 ///   buffer stays clean. Undo/redo on this kind of group must
 ///   also flip the disk state via an inverse driver cmd.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct FileSearchMark {
     pub hit_idx: usize,
     pub forward_marks_replaced: bool,
     pub disk_write: bool,
 }
 
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct History {
     past: Vec<EditGroup>,
     future: Vec<EditGroup>,
@@ -96,6 +96,11 @@ pub struct History {
     /// `BufferEdits` on construction so every history stamps
     /// groups from the same counter. Defaulted for tests /
     /// standalone use.
+    ///
+    /// Skipped on serialise / deserialise: it's a process-wide
+    /// counter that doesn't carry meaning across restarts. The
+    /// rebound-after-load step injects a fresh shared SeqGen.
+    #[serde(skip)]
     seq_gen: crate::SeqGen,
 }
 
@@ -105,6 +110,35 @@ impl History {
             seq_gen,
             ..Default::default()
         }
+    }
+
+    /// Serialise the history into a stable binary blob suitable
+    /// for persistence (M21 undo persistence). The session
+    /// driver stores one blob per `(workspace, path)` keyed by
+    /// the rope's content hash; a later launch only restores
+    /// when the hash still matches.
+    ///
+    /// The `seq_gen` field is intentionally skipped — it's a
+    /// process-wide counter without cross-restart meaning. The
+    /// `rebind_seq_gen` call after `decode` re-attaches the new
+    /// process's shared counter.
+    pub fn encode(&self) -> Result<Vec<u8>, rmp_serde::encode::Error> {
+        rmp_serde::to_vec(self)
+    }
+
+    /// Deserialise a history blob produced by [`encode`]. The
+    /// returned `History` carries a default `seq_gen`; callers
+    /// should immediately call [`Self::rebind_seq_gen`] with
+    /// the session-wide counter.
+    pub fn decode(bytes: &[u8]) -> Result<Self, rmp_serde::decode::Error> {
+        rmp_serde::from_slice(bytes)
+    }
+
+    /// Replace `seq_gen` with a session-shared counter. Called
+    /// once after [`Self::decode`] so groups stamped during the
+    /// new session share an ordering tag with sibling buffers.
+    pub fn rebind_seq_gen(&mut self, seq_gen: crate::SeqGen) {
+        self.seq_gen = seq_gen;
     }
 }
 
@@ -689,5 +723,48 @@ mod tests {
         // Rebase from version 1 — skip the first op, apply second only.
         // idx=10, op2 inserts "de" at 3 → 3 <= 10, shift by 2 → 12.
         assert_eq!(rebase_char_index(10, 1, &h), 12);
+    }
+
+    // ── M21 undo persistence: encode / decode round-trip ────
+
+    #[test]
+    fn encode_decode_round_trips_preserves_undo_chain() {
+        // Record a couple of edits, encode, decode, and verify
+        // the undo chain still walks back correctly.
+        let mut h = History::default();
+        h.record_insert(0, Arc::from("hello"), cur(0, 0), cur(0, 5));
+        h.record_insert(5, Arc::from(", world"), cur(0, 5), cur(0, 12));
+        h.finalise();
+
+        let bytes = h.encode().expect("encode");
+        let mut decoded = History::decode(&bytes).expect("decode");
+        assert_eq!(decoded.past_len(), h.past_len());
+        // Inject a fresh seq_gen so the comparison ignores it
+        // (skipped on (de)serialise; defaulted on decode).
+        decoded.rebind_seq_gen(crate::SeqGen::new());
+
+        // Original and decoded should produce equivalent undo
+        // pops: same group ops, same cursor bookends.
+        let mut h2 = h.clone();
+        let g_a = h2.take_undo().expect("undo");
+        let g_b = decoded.take_undo().expect("undo");
+        assert_eq!(g_a.ops, g_b.ops);
+        assert_eq!(g_a.cursor_before, g_b.cursor_before);
+        assert_eq!(g_a.cursor_after, g_b.cursor_after);
+    }
+
+    #[test]
+    fn encode_decode_preserves_save_point_marker() {
+        let mut h = History::default();
+        h.record_insert(0, Arc::from("hello"), cur(0, 0), cur(0, 5));
+        h.insert_save_point(PersistedContentHash(0xCAFE));
+        h.record_insert(5, Arc::from("!"), cur(0, 5), cur(0, 6));
+        h.finalise();
+
+        let bytes = h.encode().unwrap();
+        let decoded = History::decode(&bytes).unwrap();
+        // Save-point marker survives the round-trip.
+        let saved = decoded.find_save_point(PersistedContentHash(0xCAFE));
+        assert!(saved.is_some(), "save point recovered after decode");
     }
 }

@@ -36,15 +36,15 @@ use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 
-use led_core::{CanonPath, Notifier, SubLine, UserPath};
+use led_core::{CanonPath, Notifier, PersistedContentHash, SubLine, UserPath};
 use led_driver_session_core::{
     SessionCmd, SessionDriver, SessionEvent, Trace,
 };
-use led_state_session::{SessionData, SessionTab};
+use led_state_session::{SessionData, SessionTab, UndoSnapshot};
 use led_state_tabs::{Cursor, Scroll};
 use rusqlite::{Connection, params};
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 pub struct SessionNative {
     _marker: (),
@@ -127,6 +127,25 @@ fn worker_loop(rx: Receiver<SessionCmd>, tx: Sender<SessionEvent>, notify: Notif
                     }
                 }
                 notify.notify();
+            }
+            SessionCmd::DropUndo { path } => {
+                let Some(ws) = workspace.as_ref() else {
+                    continue;
+                };
+                if !ws.primary {
+                    continue;
+                }
+                let _ = ws.conn.execute(
+                    "DELETE FROM undo_state
+                     WHERE root_path = ?1 AND file_path = ?2",
+                    params![
+                        ws.root_path,
+                        path.as_path().to_string_lossy(),
+                    ],
+                );
+                // No reply event — DropUndo is fire-and-forget.
+                // The intent record is the trace line emitted on
+                // dispatch; the disk effect is opportunistic.
             }
             SessionCmd::Shutdown => {
                 drop(workspace.take()); // drops conn + flock
@@ -211,6 +230,7 @@ fn run_schema(conn: &Connection) -> rusqlite::Result<()> {
     if version != SCHEMA_VERSION {
         conn.execute_batch(
             "
+            DROP TABLE IF EXISTS undo_state;
             DROP TABLE IF EXISTS buffers;
             DROP TABLE IF EXISTS workspaces;
             ",
@@ -231,6 +251,13 @@ fn run_schema(conn: &Connection) -> rusqlite::Result<()> {
             cursor_col      INTEGER NOT NULL DEFAULT 0,
             scroll_row      INTEGER NOT NULL DEFAULT 0,
             scroll_sub_line INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (root_path, file_path)
+        );
+        CREATE TABLE IF NOT EXISTS undo_state (
+            root_path     TEXT NOT NULL,
+            file_path     TEXT NOT NULL,
+            content_hash  INTEGER NOT NULL,
+            history_blob  BLOB NOT NULL,
             PRIMARY KEY (root_path, file_path)
         );
         ",
@@ -279,6 +306,29 @@ fn save_session(
         ])?;
     }
     drop(stmt);
+
+    // Persist undo blobs. Drop everything for this workspace
+    // first so a buffer that was open last session but not this
+    // one (e.g. user killed the tab) doesn't keep stale rows;
+    // then INSERT the current snapshots. Hash is stored as a
+    // signed i64 to avoid SQLite's lack of native u64 — the
+    // round-trip is bit-exact (we cast both ways).
+    tx.prepare_cached("DELETE FROM undo_state WHERE root_path = ?1")?
+        .execute(params![root_path])?;
+    let mut undo_stmt = tx.prepare_cached(
+        "INSERT INTO undo_state
+            (root_path, file_path, content_hash, history_blob)
+         VALUES (?1, ?2, ?3, ?4)",
+    )?;
+    for snap in &data.undo_snapshots {
+        undo_stmt.execute(params![
+            root_path,
+            snap.path.as_path().to_string_lossy(),
+            snap.content_hash.0 as i64,
+            snap.bytes.as_slice(),
+        ])?;
+    }
+    drop(undo_stmt);
 
     tx.commit()
 }
@@ -335,6 +385,28 @@ fn load_session(
     }
     drop(stmt);
 
+    // Load undo blobs for this workspace.
+    let mut undo_stmt = conn.prepare_cached(
+        "SELECT file_path, content_hash, history_blob
+         FROM undo_state
+         WHERE root_path = ?1",
+    )?;
+    let undo_rows = undo_stmt.query_map(params![root_path], |row| {
+        let path_str: String = row.get(0)?;
+        let hash: i64 = row.get(1)?;
+        let bytes: Vec<u8> = row.get(2)?;
+        Ok(UndoSnapshot {
+            path: UserPath::new(std::path::Path::new(&path_str)).canonicalize(),
+            content_hash: PersistedContentHash(hash as u64),
+            bytes,
+        })
+    })?;
+    let mut undo_snapshots: Vec<UndoSnapshot> = Vec::new();
+    for row in undo_rows {
+        undo_snapshots.push(row?);
+    }
+    drop(undo_stmt);
+
     let active_tab_idx = if tabs.is_empty() {
         None
     } else {
@@ -344,6 +416,7 @@ fn load_session(
         active_tab_idx,
         show_side_panel: show_side_panel != 0,
         tabs,
+        undo_snapshots,
     }))
 }
 
@@ -357,6 +430,7 @@ mod tests {
         fn session_init_start(&self, _: &CanonPath) {}
         fn session_save_start(&self) {}
         fn session_save_done(&self, _: bool) {}
+        fn session_drop_undo(&self, _: &CanonPath) {}
     }
 
     fn canon_of(p: &std::path::Path) -> CanonPath {
@@ -425,6 +499,11 @@ mod tests {
                     scroll: Scroll::default(),
                 },
             ],
+            undo_snapshots: vec![UndoSnapshot {
+                path: canon_of(&root.join("a.rs")),
+                content_hash: PersistedContentHash(0xCAFE_F00D),
+                bytes: b"\x01\x02\x03\xff".to_vec(),
+            }],
         };
 
         // First spawn: Init, Save, Shutdown.
@@ -463,6 +542,17 @@ mod tests {
                 assert_eq!(r.tabs.len(), target.tabs.len());
                 assert_eq!(r.tabs[0].cursor, target.tabs[0].cursor);
                 assert_eq!(r.tabs[0].scroll, target.tabs[0].scroll);
+                // Undo blob round-trips with hash + bytes intact.
+                assert_eq!(r.undo_snapshots.len(), 1);
+                assert_eq!(r.undo_snapshots[0].path, target.undo_snapshots[0].path);
+                assert_eq!(
+                    r.undo_snapshots[0].content_hash,
+                    target.undo_snapshots[0].content_hash,
+                );
+                assert_eq!(
+                    r.undo_snapshots[0].bytes,
+                    target.undo_snapshots[0].bytes,
+                );
             }
             other => panic!("unexpected: {other:?}"),
         }

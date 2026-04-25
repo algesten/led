@@ -16,6 +16,7 @@
 //!   per-buffer slice (path + cursor + scroll).
 
 use led_core::CanonPath;
+use led_core::PersistedContentHash;
 use led_state_tabs::{Cursor, Scroll};
 
 /// Live session state on `Atoms.session`. Driven by the
@@ -49,6 +50,14 @@ pub struct SessionState {
     /// current state and skip the `Save` dispatch when nothing
     /// has changed.
     pub last_saved: Option<SessionData>,
+    /// Per-path undo blobs stashed on `Restored` ingest, keyed
+    /// by canonical path. The load-completion hook reads this
+    /// when a buffer materialises: if the disk content's hash
+    /// matches the snapshot's `content_hash`, decode + install
+    /// the history; otherwise drop silently. The entry is
+    /// always removed after a load completion regardless of
+    /// match — a single-shot per path.
+    pub pending_undo: imbl::HashMap<CanonPath, UndoSnapshot>,
 }
 
 /// One persisted snapshot of the editor's session for one
@@ -66,6 +75,21 @@ pub struct SessionData {
     /// Open tabs in display order. Position-sensitive: the same
     /// order is restored.
     pub tabs: Vec<SessionTab>,
+    /// Per-buffer undo blobs, content-hash-stamped. The runtime
+    /// only restores a blob when its `content_hash` matches the
+    /// freshly-loaded rope's hash; mismatches drop silently
+    /// because the persisted undo references different bytes.
+    pub undo_snapshots: Vec<UndoSnapshot>,
+}
+
+/// One persisted undo blob. `bytes` is opaque to the session
+/// driver; `state-buffer-edits::History::{encode,decode}` owns
+/// the format.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UndoSnapshot {
+    pub path: CanonPath,
+    pub content_hash: PersistedContentHash,
+    pub bytes: Vec<u8>,
 }
 
 /// One persisted tab entry. The path is the canonical form;
@@ -101,6 +125,7 @@ mod tests {
         let d = SessionData {
             active_tab_idx: Some(1),
             show_side_panel: true,
+            undo_snapshots: Vec::new(),
             tabs: vec![
                 SessionTab {
                     path: canon("/p/a.rs"),
