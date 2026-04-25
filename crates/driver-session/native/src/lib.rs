@@ -40,11 +40,11 @@ use led_core::{CanonPath, Notifier, PersistedContentHash, SubLine, UserPath};
 use led_driver_session_core::{
     SessionCmd, SessionDriver, SessionEvent, Trace,
 };
-use led_state_session::{SessionData, SessionTab, UndoSnapshot};
+use led_state_session::{BufferStateSnapshot, SessionData, SessionTab};
 use led_state_tabs::{Cursor, Scroll};
 use rusqlite::{Connection, params};
 
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 
 pub struct SessionNative {
     _marker: (),
@@ -231,6 +231,7 @@ fn run_schema(conn: &Connection) -> rusqlite::Result<()> {
         conn.execute_batch(
             "
             DROP TABLE IF EXISTS undo_state;
+            DROP TABLE IF EXISTS buffer_state;
             DROP TABLE IF EXISTS buffers;
             DROP TABLE IF EXISTS workspaces;
             ",
@@ -253,11 +254,12 @@ fn run_schema(conn: &Connection) -> rusqlite::Result<()> {
             scroll_sub_line INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY (root_path, file_path)
         );
-        CREATE TABLE IF NOT EXISTS undo_state (
-            root_path     TEXT NOT NULL,
-            file_path     TEXT NOT NULL,
-            content_hash  INTEGER NOT NULL,
-            history_blob  BLOB NOT NULL,
+        CREATE TABLE IF NOT EXISTS buffer_state (
+            root_path        TEXT NOT NULL,
+            file_path        TEXT NOT NULL,
+            disk_anchor_hash INTEGER NOT NULL,
+            rope_content     TEXT NOT NULL,
+            history_blob     BLOB NOT NULL,
             PRIMARY KEY (root_path, file_path)
         );
         ",
@@ -307,28 +309,29 @@ fn save_session(
     }
     drop(stmt);
 
-    // Persist undo blobs. Drop everything for this workspace
-    // first so a buffer that was open last session but not this
-    // one (e.g. user killed the tab) doesn't keep stale rows;
-    // then INSERT the current snapshots. Hash is stored as a
-    // signed i64 to avoid SQLite's lack of native u64 — the
-    // round-trip is bit-exact (we cast both ways).
-    tx.prepare_cached("DELETE FROM undo_state WHERE root_path = ?1")?
+    // Persist buffer states (rope + history + disk anchor).
+    // Drop everything for this workspace first so a buffer that
+    // was open last session but not this one (e.g. user killed
+    // the tab) doesn't keep stale rows; then INSERT the current
+    // snapshots. Hash is stored as a signed i64 — SQLite has no
+    // native u64; the round-trip is bit-exact (we cast both ways).
+    tx.prepare_cached("DELETE FROM buffer_state WHERE root_path = ?1")?
         .execute(params![root_path])?;
-    let mut undo_stmt = tx.prepare_cached(
-        "INSERT INTO undo_state
-            (root_path, file_path, content_hash, history_blob)
-         VALUES (?1, ?2, ?3, ?4)",
+    let mut state_stmt = tx.prepare_cached(
+        "INSERT INTO buffer_state
+            (root_path, file_path, disk_anchor_hash, rope_content, history_blob)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
     )?;
-    for snap in &data.undo_snapshots {
-        undo_stmt.execute(params![
+    for snap in &data.buffer_states {
+        state_stmt.execute(params![
             root_path,
             snap.path.as_path().to_string_lossy(),
-            snap.content_hash.0 as i64,
-            snap.bytes.as_slice(),
+            snap.disk_anchor_hash.0 as i64,
+            snap.rope_content.as_str(),
+            snap.history_blob.as_slice(),
         ])?;
     }
-    drop(undo_stmt);
+    drop(state_stmt);
 
     tx.commit()
 }
@@ -385,27 +388,29 @@ fn load_session(
     }
     drop(stmt);
 
-    // Load undo blobs for this workspace.
-    let mut undo_stmt = conn.prepare_cached(
-        "SELECT file_path, content_hash, history_blob
-         FROM undo_state
+    // Load buffer states for this workspace.
+    let mut state_stmt = conn.prepare_cached(
+        "SELECT file_path, disk_anchor_hash, rope_content, history_blob
+         FROM buffer_state
          WHERE root_path = ?1",
     )?;
-    let undo_rows = undo_stmt.query_map(params![root_path], |row| {
+    let state_rows = state_stmt.query_map(params![root_path], |row| {
         let path_str: String = row.get(0)?;
         let hash: i64 = row.get(1)?;
-        let bytes: Vec<u8> = row.get(2)?;
-        Ok(UndoSnapshot {
+        let rope_content: String = row.get(2)?;
+        let history_blob: Vec<u8> = row.get(3)?;
+        Ok(BufferStateSnapshot {
             path: UserPath::new(std::path::Path::new(&path_str)).canonicalize(),
-            content_hash: PersistedContentHash(hash as u64),
-            bytes,
+            disk_anchor_hash: PersistedContentHash(hash as u64),
+            rope_content,
+            history_blob,
         })
     })?;
-    let mut undo_snapshots: Vec<UndoSnapshot> = Vec::new();
-    for row in undo_rows {
-        undo_snapshots.push(row?);
+    let mut buffer_states: Vec<BufferStateSnapshot> = Vec::new();
+    for row in state_rows {
+        buffer_states.push(row?);
     }
-    drop(undo_stmt);
+    drop(state_stmt);
 
     let active_tab_idx = if tabs.is_empty() {
         None
@@ -416,7 +421,7 @@ fn load_session(
         active_tab_idx,
         show_side_panel: show_side_panel != 0,
         tabs,
-        undo_snapshots,
+        buffer_states,
     }))
 }
 
@@ -499,10 +504,11 @@ mod tests {
                     scroll: Scroll::default(),
                 },
             ],
-            undo_snapshots: vec![UndoSnapshot {
+            buffer_states: vec![BufferStateSnapshot {
                 path: canon_of(&root.join("a.rs")),
-                content_hash: PersistedContentHash(0xCAFE_F00D),
-                bytes: b"\x01\x02\x03\xff".to_vec(),
+                disk_anchor_hash: PersistedContentHash(0xCAFE_F00D),
+                rope_content: "alpha\nbeta\n".to_string(),
+                history_blob: b"\x01\x02\x03\xff".to_vec(),
             }],
         };
 
@@ -542,16 +548,25 @@ mod tests {
                 assert_eq!(r.tabs.len(), target.tabs.len());
                 assert_eq!(r.tabs[0].cursor, target.tabs[0].cursor);
                 assert_eq!(r.tabs[0].scroll, target.tabs[0].scroll);
-                // Undo blob round-trips with hash + bytes intact.
-                assert_eq!(r.undo_snapshots.len(), 1);
-                assert_eq!(r.undo_snapshots[0].path, target.undo_snapshots[0].path);
+                // Buffer-state snapshot round-trips with all
+                // four pieces (path, anchor hash, rope content,
+                // history blob) intact.
+                assert_eq!(r.buffer_states.len(), 1);
                 assert_eq!(
-                    r.undo_snapshots[0].content_hash,
-                    target.undo_snapshots[0].content_hash,
+                    r.buffer_states[0].path,
+                    target.buffer_states[0].path,
                 );
                 assert_eq!(
-                    r.undo_snapshots[0].bytes,
-                    target.undo_snapshots[0].bytes,
+                    r.buffer_states[0].disk_anchor_hash,
+                    target.buffer_states[0].disk_anchor_hash,
+                );
+                assert_eq!(
+                    r.buffer_states[0].rope_content,
+                    target.buffer_states[0].rope_content,
+                );
+                assert_eq!(
+                    r.buffer_states[0].history_blob,
+                    target.buffer_states[0].history_blob,
                 );
             }
             other => panic!("unexpected: {other:?}"),

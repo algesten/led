@@ -50,14 +50,14 @@ pub struct SessionState {
     /// current state and skip the `Save` dispatch when nothing
     /// has changed.
     pub last_saved: Option<SessionData>,
-    /// Per-path undo blobs stashed on `Restored` ingest, keyed
-    /// by canonical path. The load-completion hook reads this
-    /// when a buffer materialises: if the disk content's hash
-    /// matches the snapshot's `content_hash`, decode + install
-    /// the history; otherwise drop silently. The entry is
-    /// always removed after a load completion regardless of
-    /// match — a single-shot per path.
-    pub pending_undo: imbl::HashMap<CanonPath, UndoSnapshot>,
+    /// Per-path buffer state stashed on `Restored` ingest,
+    /// keyed by canonical path. The load-completion hook reads
+    /// this when a buffer materialises: if the disk's hash
+    /// matches the snapshot's `disk_anchor_hash`, restore
+    /// `eb.rope` from `rope_content` and decode the history;
+    /// otherwise drop silently. The entry is always removed
+    /// after a load completion regardless of match.
+    pub pending_buffer_state: imbl::HashMap<CanonPath, BufferStateSnapshot>,
 }
 
 /// One persisted snapshot of the editor's session for one
@@ -75,21 +75,40 @@ pub struct SessionData {
     /// Open tabs in display order. Position-sensitive: the same
     /// order is restored.
     pub tabs: Vec<SessionTab>,
-    /// Per-buffer undo blobs, content-hash-stamped. The runtime
-    /// only restores a blob when its `content_hash` matches the
-    /// freshly-loaded rope's hash; mismatches drop silently
-    /// because the persisted undo references different bytes.
-    pub undo_snapshots: Vec<UndoSnapshot>,
+    /// Per-buffer state snapshots: dirty rope content + undo
+    /// history, stamped with the disk anchor hash. The runtime
+    /// only restores a snapshot when its `disk_anchor_hash`
+    /// matches the freshly-loaded rope's hash; mismatches drop
+    /// silently because the file changed externally between
+    /// sessions and the persisted state references different
+    /// bytes.
+    pub buffer_states: Vec<BufferStateSnapshot>,
 }
 
-/// One persisted undo blob. `bytes` is opaque to the session
-/// driver; `state-buffer-edits::History::{encode,decode}` owns
-/// the format.
+/// One persisted buffer state. `rope_content` is the in-memory
+/// rope at quit time (which may carry unsaved edits relative to
+/// `disk_anchor_hash`); `history_blob` is opaque, owned by
+/// `state-buffer-edits::History::{encode,decode}`.
+///
+/// On restore: read the disk file, hash it. If the hash equals
+/// `disk_anchor_hash` (no external modification), install the
+/// snapshot — `eb.rope` becomes `rope_content` and `eb.history`
+/// becomes `decode(history_blob)`. Otherwise drop silently and
+/// fall back to the disk content with empty history.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct UndoSnapshot {
+pub struct BufferStateSnapshot {
     pub path: CanonPath,
-    pub content_hash: PersistedContentHash,
-    pub bytes: Vec<u8>,
+    /// Hash of the file's *disk* content at the moment we
+    /// persisted this snapshot. NOT the in-memory rope's hash —
+    /// `rope_content` may differ from disk by the user's
+    /// unsaved edits.
+    pub disk_anchor_hash: PersistedContentHash,
+    /// The in-memory rope at quit time. Restored verbatim into
+    /// `eb.rope` when the disk anchor matches.
+    pub rope_content: String,
+    /// Encoded `History`. Empty Vec when the buffer had no
+    /// recorded history (just stash the rope to survive quit).
+    pub history_blob: Vec<u8>,
 }
 
 /// One persisted tab entry. The path is the canonical form;
@@ -125,7 +144,7 @@ mod tests {
         let d = SessionData {
             active_tab_idx: Some(1),
             show_side_panel: true,
-            undo_snapshots: Vec::new(),
+            buffer_states: Vec::new(),
             tabs: vec![
                 SessionTab {
                     path: canon("/p/a.rs"),

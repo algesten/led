@@ -62,7 +62,7 @@ use led_state_diagnostics::{
 };
 use led_state_git::GitState;
 use led_state_lifecycle::{LifecycleState, Phase};
-use led_state_session::{SessionData, SessionState, SessionTab};
+use led_state_session::{BufferStateSnapshot, SessionData, SessionState, SessionTab};
 use led_state_syntax::{Language, SyntaxState, SyntaxStates};
 use led_state_tabs::{TabId, Tabs};
 
@@ -388,25 +388,46 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
                 completion.rope.clone(),
             );
 
-            // M21 undo persistence: if a stashed snapshot
-            // exists for this path AND its content_hash matches
-            // the loaded rope, decode + install the history so
-            // the user can Ctrl-/ across the prior session.
-            // Mismatches drop silently — the bytes on disk
-            // changed since the persisted undo was captured.
+            // M21 buffer-state restore: if a stashed snapshot
+            // exists for this path AND its `disk_anchor_hash`
+            // matches the freshly-loaded disk content, override
+            // `eb.rope` with the snapshot's `rope_content`
+            // (which may carry unsaved edits) and install the
+            // decoded history so Ctrl-/ rolls back across the
+            // prior session. Mismatch → drop silently; the file
+            // changed externally between sessions and the
+            // persisted state references different bytes.
             if inserted
-                && let Some(snap) = session.pending_undo.remove(&completion.path)
+                && let Some(snap) =
+                    session.pending_buffer_state.remove(&completion.path)
             {
                 let disk_hash = led_core::EphemeralContentHash::of_rope(
                     &completion.rope,
                 )
                 .persist();
-                if disk_hash == snap.content_hash
-                    && let Ok(mut decoded) =
-                        led_state_buffer_edits::History::decode(&snap.bytes)
+                if disk_hash == snap.disk_anchor_hash
+                    && let Some(eb) = edits.buffers.get_mut(&completion.path)
                 {
-                    decoded.rebind_seq_gen(edits.seq_gen.clone());
-                    if let Some(eb) = edits.buffers.get_mut(&completion.path) {
+                    eb.rope = std::sync::Arc::new(ropey::Rope::from_str(
+                        &snap.rope_content,
+                    ));
+                    // Bump version when the restored rope
+                    // differs from disk. `dirty()` then reports
+                    // true (saved_version stays 0), matching
+                    // what the user would see if they'd just
+                    // typed those edits.
+                    if snap.rope_content
+                        != completion.rope.to_string()
+                    {
+                        eb.version = eb.version.saturating_add(1);
+                    }
+                    if !snap.history_blob.is_empty()
+                        && let Ok(mut decoded) =
+                            led_state_buffer_edits::History::decode(
+                                &snap.history_blob,
+                            )
+                    {
+                        decoded.rebind_seq_gen(edits.seq_gen.clone());
                         eb.history = decoded;
                     }
                 }
@@ -908,13 +929,14 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
                     session.primary = primary;
                     session.init_done = true;
                     if let Some(data) = restored {
-                        // Stash undo blobs for the load-completion
-                        // hook. Stamped with content_hash; the hook
-                        // only applies a blob whose hash matches
-                        // the loaded rope.
-                        for snap in &data.undo_snapshots {
+                        // Stash buffer-state snapshots for the
+                        // load-completion hook. Each snapshot
+                        // is stamped with the disk-anchor hash;
+                        // the hook only restores when the
+                        // freshly-loaded disk hash matches.
+                        for snap in &data.buffer_states {
                             session
-                                .pending_undo
+                                .pending_buffer_state
                                 .insert(snap.path.clone(), snap.clone());
                         }
                         // Materialise restored tabs. Skip any
@@ -924,7 +946,25 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
                         let mut new_tabs: imbl::Vector<led_state_tabs::Tab> =
                             tabs.open.clone();
                         for st in &data.tabs {
-                            if new_tabs.iter().any(|t| t.path == st.path) {
+                            // CLI arg already opened a tab for
+                            // this path: don't double-open, but
+                            // DO copy the saved cursor + scroll
+                            // onto it as `pending_*` so the
+                            // load-completion hook still applies
+                            // them. Without this the user would
+                            // restart at line 0 col 0 every time
+                            // they passed a CLI arg matching a
+                            // restored session entry.
+                            if let Some(existing) = new_tabs
+                                .iter_mut()
+                                .find(|t| t.path == st.path)
+                            {
+                                if existing.pending_cursor.is_none() {
+                                    existing.pending_cursor = Some(st.cursor);
+                                }
+                                if existing.pending_scroll.is_none() {
+                                    existing.pending_scroll = Some(st.scroll);
+                                }
                                 continue;
                             }
                             let id = TabId(
@@ -1457,7 +1497,7 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
             && !session.saved
             && !*session_save_dispatched
         {
-            let data = build_session_data(tabs, edits, browser);
+            let data = build_session_data(tabs, edits, store, browser);
             drivers.session.execute(std::iter::once(&SessionCmd::Save {
                 data,
             }));
@@ -1737,17 +1777,24 @@ fn config_dir_for_session() -> Option<CanonPath> {
 /// Skips preview tabs (they're transient browser previews, not
 /// real session state) and orders by current `tabs.open` order.
 ///
-/// Also collects per-buffer undo blobs for every non-preview
-/// open path that has any history. Each blob is content-hash-
-/// stamped — restore on next launch only applies the blob if
-/// the disk content's hash matches.
+/// For every non-preview tab whose buffer is dirty OR has any
+/// history, captures a [`BufferStateSnapshot`] containing:
+/// - The disk-anchor hash (the hash of the file as it currently
+///   sits on disk; we read this from `BufferStore`).
+/// - The in-memory rope content (which may carry unsaved edits).
+/// - The encoded undo history.
+///
+/// Restore on next launch is gated on the disk-anchor hash
+/// matching the freshly-loaded disk content's hash. Mismatches
+/// (file modified externally between sessions) drop silently.
 fn build_session_data(
     tabs: &Tabs,
     edits: &BufferEdits,
+    store: &led_driver_buffers_core::BufferStore,
     browser: &led_state_browser::BrowserUi,
 ) -> SessionData {
     let mut session_tabs: Vec<SessionTab> = Vec::with_capacity(tabs.open.len());
-    let mut undo_snapshots: Vec<led_state_session::UndoSnapshot> = Vec::new();
+    let mut buffer_states: Vec<BufferStateSnapshot> = Vec::new();
     let mut active_idx: Option<usize> = None;
     let mut seen_paths: std::collections::HashSet<CanonPath> =
         std::collections::HashSet::new();
@@ -1764,34 +1811,50 @@ fn build_session_data(
             scroll: tab.scroll,
         });
 
-        // Snapshot the buffer's history exactly once per path
+        // Snapshot the buffer state exactly once per path
         // (multi-tab on the same file would otherwise produce
-        // duplicate rows). Skip empty histories — nothing to
-        // restore.
+        // duplicate rows).
         if !seen_paths.insert(tab.path.clone()) {
             continue;
         }
         let Some(eb) = edits.buffers.get(&tab.path) else {
             continue;
         };
-        if !eb.history.can_undo() && !eb.history.can_redo() {
+        // Only persist when there's meaningful state to restore
+        // — the buffer is dirty (unsaved edits) OR the history
+        // has anything to undo / redo. A clean buffer with no
+        // history simply reloads from disk on relaunch.
+        if !eb.dirty() && !eb.history.can_undo() && !eb.history.can_redo() {
             continue;
         }
-        if let Ok(bytes) = eb.history.encode() {
-            let hash =
-                led_core::EphemeralContentHash::of_rope(&eb.rope).persist();
-            undo_snapshots.push(led_state_session::UndoSnapshot {
-                path: tab.path.clone(),
-                content_hash: hash,
-                bytes,
-            });
-        }
+        // Disk anchor: the hash of the file as it sits on disk
+        // RIGHT NOW, not the in-memory hash. The store holds
+        // the most recent disk read; if it's not Ready (loading
+        // / error), skip — we can't anchor.
+        let Some(disk_rope) = store.loaded.get(&tab.path).and_then(|s| {
+            if let led_driver_buffers_core::LoadState::Ready(r) = s {
+                Some(r.clone())
+            } else {
+                None
+            }
+        }) else {
+            continue;
+        };
+        let disk_anchor_hash =
+            led_core::EphemeralContentHash::of_rope(&disk_rope).persist();
+        let history_blob = eb.history.encode().unwrap_or_default();
+        buffer_states.push(BufferStateSnapshot {
+            path: tab.path.clone(),
+            disk_anchor_hash,
+            rope_content: eb.rope.to_string(),
+            history_blob,
+        });
     }
     SessionData {
         active_tab_idx: active_idx,
         show_side_panel: browser.visible,
         tabs: session_tabs,
-        undo_snapshots,
+        buffer_states,
     }
 }
 
