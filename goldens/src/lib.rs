@@ -401,9 +401,13 @@ impl GoldenRunner {
 
     pub fn assert_frame(&self, scenario_dir: &Path) {
         let normalized = normalize_paths(&self.frame(), &self.tmpdir_path);
-        assert_against_golden(
+        let golden_path = scenario_dir.join("frame.snap");
+        let expected = std::fs::read_to_string(&golden_path).unwrap_or_default();
+        let expected_normalized = normalize_paths(&expected, &self.tmpdir_path);
+        assert_against_golden_text(
             &normalized,
-            &scenario_dir.join("frame.snap"),
+            &expected_normalized,
+            &golden_path,
             "frame",
         );
     }
@@ -413,9 +417,13 @@ impl GoldenRunner {
     pub fn assert_trace(&self, scenario_dir: &Path) {
         let raw = std::fs::read_to_string(&self.trace_path).unwrap_or_default();
         let normalized = normalize_trace(&raw, &self.tmpdir_path);
-        assert_against_golden(
+        let golden_path = scenario_dir.join("dispatched.snap");
+        let expected = std::fs::read_to_string(&golden_path).unwrap_or_default();
+        let expected_normalized = normalize_trace(&expected, &self.tmpdir_path);
+        assert_against_golden_text(
             &normalized,
-            &scenario_dir.join("dispatched.snap"),
+            &expected_normalized,
+            &golden_path,
             "trace",
         );
     }
@@ -435,11 +443,31 @@ fn assert_against_golden(actual: &str, golden_path: &Path, kind: &str) {
             golden_path.display()
         )
     });
+    assert_against_golden_text(actual, &expected_raw, golden_path, kind);
+}
+
+/// Variant of [`assert_against_golden`] that takes the expected
+/// text already loaded — used when the caller has run an
+/// additional normalization (e.g. fake-binary path placeholders)
+/// over the golden before comparing.
+fn assert_against_golden_text(
+    actual: &str,
+    expected_raw: &str,
+    golden_path: &Path,
+    kind: &str,
+) {
+    if std::env::var("UPDATE_GOLDENS").is_ok() {
+        if let Some(parent) = golden_path.parent() {
+            std::fs::create_dir_all(parent).expect("create scenario dir");
+        }
+        std::fs::write(golden_path, actual).expect("write golden");
+        return;
+    }
     // vt100's `screen().contents()` already strips trailing whitespace
     // per row; committed goldens sometimes have it and sometimes don't.
     // Normalize both sides so the diff tests what the rendering
     // actually produces, not incidental whitespace.
-    let expected = strip_trailing_ws(&expected_raw);
+    let expected = strip_trailing_ws(expected_raw);
     let actual_n = strip_trailing_ws(actual);
     if actual_n != expected {
         panic!(
@@ -484,6 +512,48 @@ pub fn normalize_paths(s: &str, tmpdir: &Path) -> String {
         out = out.replace(c, "<TMPDIR>");
     }
     out = out.replace(&raw_tmp, "<TMPDIR>");
+    // Per-machine binary paths leak into snapshots when the
+    // editor renders the fake LSP / fake GH process names in its
+    // status line. Replace with stable placeholders so the goldens
+    // are portable across checkouts.
+    let bins = binaries();
+    out = out.replace(&bins.fake_lsp.to_string_lossy().to_string(), "<FAKE-LSP>");
+    out = out.replace(&bins.fake_gh.to_string_lossy().to_string(), "<FAKE-GH>");
+    // Collapse runs of 2+ spaces on lines containing these
+    // placeholders. The placeholder rendering rides on a status
+    // line that pads with spaces to right-align an `L<r>:C<c>`
+    // marker — and the padding width depends on the original
+    // path length, which differs between checkouts. Collapsing
+    // makes the comparison position-independent.
+    out = collapse_padding_on_placeholder_lines(&out);
+    out
+}
+
+fn collapse_padding_on_placeholder_lines(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for line in s.split_inclusive('\n') {
+        let (body, nl) = match line.strip_suffix('\n') {
+            Some(b) => (b, "\n"),
+            None => (line, ""),
+        };
+        if body.contains("<FAKE-LSP>") || body.contains("<FAKE-GH>") {
+            let mut prev_space = false;
+            for ch in body.chars() {
+                if ch == ' ' {
+                    if !prev_space {
+                        out.push(' ');
+                    }
+                    prev_space = true;
+                } else {
+                    out.push(ch);
+                    prev_space = false;
+                }
+            }
+        } else {
+            out.push_str(body);
+        }
+        out.push_str(nl);
+    }
     out
 }
 
@@ -493,6 +563,9 @@ pub fn normalize_trace(raw: &str, tmpdir: &Path) -> String {
         .canonicalize()
         .ok()
         .map(|p| p.to_string_lossy().to_string());
+    let bins = binaries();
+    let fake_lsp = bins.fake_lsp.to_string_lossy().to_string();
+    let fake_gh = bins.fake_gh.to_string_lossy().to_string();
     let mut out = String::new();
     for line in raw.lines() {
         let mut s = line.to_string();
@@ -500,6 +573,8 @@ pub fn normalize_trace(raw: &str, tmpdir: &Path) -> String {
             s = s.replace(c, "<TMPDIR>");
         }
         s = s.replace(&raw_tmp, "<TMPDIR>");
+        s = s.replace(&fake_lsp, "<FAKE-LSP>");
+        s = s.replace(&fake_gh, "<FAKE-GH>");
         // Drop wall-clock timestamp prefix `t=NNNms\t` for now. Re-add
         // when --test-clock is in place.
         if let Some(rest) = s.strip_prefix("t=") {
