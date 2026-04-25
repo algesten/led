@@ -83,6 +83,10 @@ pub trait Trace: Send + Sync {
     fn session_save_start(&self);
     fn session_save_done(&self, ok: bool);
     fn session_drop_undo(&self, path: &CanonPath);
+    /// Per-flush undo persist: emitted as
+    /// `WorkspaceFlushUndo\tpath=<p> chain=<id>` in
+    /// `dispatched.snap`. Mirrors legacy's same-named line.
+    fn session_flush_undo(&self, path: &CanonPath, chain_id: &str);
 }
 
 pub struct NoopTrace;
@@ -91,6 +95,7 @@ impl Trace for NoopTrace {
     fn session_save_start(&self) {}
     fn session_save_done(&self, _: bool) {}
     fn session_drop_undo(&self, _: &CanonPath) {}
+    fn session_flush_undo(&self, _: &CanonPath, _: &str) {}
 }
 
 pub struct SessionDriver {
@@ -114,10 +119,14 @@ impl SessionDriver {
                 SessionCmd::Init { root, .. } => self.trace.session_init_start(root),
                 SessionCmd::SaveSession { .. } => self.trace.session_save_start(),
                 SessionCmd::ClearUndo { path } => self.trace.session_drop_undo(path),
-                // FlushUndo isn't surfaced in dispatched.snap —
-                // legacy's WorkspaceFlushUndo does carry a trace
-                // line, but we'll wire that when an end-to-end
-                // test demands it.
+                // FlushUndo: trace API exists (for parity with
+                // legacy's WorkspaceFlushUndo line) but we don't
+                // call it here yet. Our flush is per-tick eager
+                // while legacy was debounced — emitting on every
+                // call adds spurious trace lines to short scripts
+                // (e.g. delete_backward) that legacy goldens
+                // captured before the debounce fired. Wire this
+                // call when the runtime grows the debounce.
                 SessionCmd::FlushUndo { .. } => {}
                 SessionCmd::Shutdown => {}
             }

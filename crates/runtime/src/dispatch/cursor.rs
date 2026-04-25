@@ -127,10 +127,24 @@ pub(super) fn apply_move(
     match m {
         Move::Up => visual_step_up(c, rope, content_cols, 1),
         Move::Down => visual_step_down(c, rope, content_cols, 1, last_line),
-        Move::PageUp => visual_step_up(c, rope, content_cols, body_rows.max(1)),
-        Move::PageDown => {
-            visual_step_down(c, rope, content_cols, body_rows.max(1), last_line)
-        }
+        // Legacy `mov::page_down` / `page_up` step by
+        // `body_rows - 1` (one row of overlap so the line at the
+        // page boundary stays visible). The `.max(1)` guards
+        // against degenerate viewport heights where the
+        // saturating_sub would go to zero.
+        Move::PageUp => visual_step_up(
+            c,
+            rope,
+            content_cols,
+            body_rows.saturating_sub(1).max(1),
+        ),
+        Move::PageDown => visual_step_down(
+            c,
+            rope,
+            content_cols,
+            body_rows.saturating_sub(1).max(1),
+            last_line,
+        ),
         Move::Left => {
             // Wrap to end of previous line when at col 0 — matches
             // legacy `model::mov::move_left`. No-op at (0, 0). Sub-

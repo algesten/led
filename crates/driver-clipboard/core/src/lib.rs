@@ -48,7 +48,11 @@ pub enum ClipboardResult {
 pub trait Trace: Send + Sync {
     fn clipboard_read_start(&self);
     fn clipboard_read_done(&self, ok: bool, empty: bool);
-    fn clipboard_write_start(&self, bytes: usize);
+    /// Outbound clipboard write. `text` is the full payload — the
+    /// implementation is expected to format a short `preview="…"`
+    /// from its first ~14 chars (legacy parity) without retaining
+    /// the buffer beyond the trace line.
+    fn clipboard_write_start(&self, text: &str);
     fn clipboard_write_done(&self, ok: bool);
 }
 
@@ -56,7 +60,7 @@ pub struct NoopTrace;
 impl Trace for NoopTrace {
     fn clipboard_read_start(&self) {}
     fn clipboard_read_done(&self, _ok: bool, _empty: bool) {}
-    fn clipboard_write_start(&self, _bytes: usize) {}
+    fn clipboard_write_start(&self, _text: &str) {}
     fn clipboard_write_done(&self, _ok: bool) {}
 }
 
@@ -115,7 +119,7 @@ impl ClipboardDriver {
                     let _ = self.tx_cmd.send(ClipboardCmd::Read);
                 }
                 ClipboardAction::Write(text) => {
-                    self.trace.clipboard_write_start(text.len());
+                    self.trace.clipboard_write_start(text);
                     let _ = self.tx_cmd.send(ClipboardCmd::Write(text.clone()));
                 }
             }

@@ -37,7 +37,11 @@ pub trait Trace: Send + Sync {
     fn file_save_as_done(&self, from: &CanonPath, to: &CanonPath, result: &Result<(), String>);
     fn clipboard_read_start(&self);
     fn clipboard_read_done(&self, ok: bool, empty: bool);
-    fn clipboard_write_start(&self, bytes: usize);
+    /// Outbound clipboard write. Trace receives the full payload
+    /// so it can derive both `len=` (in bytes) and `preview="…"`
+    /// (first 14 chars, legacy parity) without forcing every
+    /// caller to compute the preview itself.
+    fn clipboard_write_start(&self, text: &str);
     fn clipboard_write_done(&self, ok: bool);
     fn fs_list_start(&self, path: &CanonPath);
     fn fs_list_done(&self, path: &CanonPath, ok: bool);
@@ -112,6 +116,11 @@ pub trait Trace: Send + Sync {
     /// save (saved state becomes the new baseline). Legacy traces
     /// this immediately after `FileSave`.
     fn workspace_clear_undo(&self, path: &CanonPath);
+    /// Per-buffer undo flush. Emitted by the session driver when
+    /// the runtime ships newly-finalised undo groups to SQLite.
+    /// Legacy dispatched.snap line: `WorkspaceFlushUndo\tpath=<p>
+    /// chain=<id>`.
+    fn workspace_flush_undo(&self, path: &CanonPath, chain_id: &str);
     /// Emitted after a SaveAs completes: legacy re-opens the source
     /// buffer's on-disk file to refresh its pristine baseline, with
     /// `create_if_missing=false` because the file is known to exist
@@ -160,6 +169,9 @@ impl SharedTrace {
     }
     pub fn workspace_clear_undo(&self, path: &CanonPath) {
         self.0.workspace_clear_undo(path);
+    }
+    pub fn workspace_flush_undo(&self, path: &CanonPath, chain_id: &str) {
+        self.0.workspace_flush_undo(path, chain_id);
     }
     pub fn file_search_start(
         &self,
@@ -225,12 +237,18 @@ impl Trace for FileTrace {
         self.write_line("ClipboardRead");
     }
     fn clipboard_read_done(&self, _: bool, _: bool) {}
-    fn clipboard_write_start(&self, bytes: usize) {
-        // Legacy emitted a `preview=` of the first 14 chars too; we
-        // don't currently have the text here (the hook's signature
-        // only carries `bytes`). Emit `len=` alone — callers that
-        // care about preview can extend later.
-        self.write_line(&format!("ClipboardWrite\tlen={bytes}"));
+    fn clipboard_write_start(&self, text: &str) {
+        // Legacy parity: `len=<bytes>` + `preview="<first 14
+        // chars>"`. `chars().take(14)` keeps multi-byte boundaries
+        // intact; embedded `"` / `\` are escaped so the preview
+        // round-trips through a quoted shell-style field.
+        let preview: String = text.chars().take(14).collect();
+        let escaped = preview.replace('\\', "\\\\").replace('"', "\\\"");
+        self.write_line(&format!(
+            "ClipboardWrite\tlen={} preview=\"{}\"",
+            text.len(),
+            escaped,
+        ));
     }
     fn clipboard_write_done(&self, _: bool) {}
     fn fs_list_start(&self, path: &CanonPath) {
@@ -320,6 +338,13 @@ impl Trace for FileTrace {
             self.format_path(path)
         ));
     }
+    fn workspace_flush_undo(&self, path: &CanonPath, chain_id: &str) {
+        self.write_line(&format!(
+            "WorkspaceFlushUndo\tpath={} chain={}",
+            self.format_path(path),
+            chain_id,
+        ));
+    }
     fn file_reopen_existing(&self, path: &CanonPath) {
         self.write_line(&format!(
             "FileOpen\tpath={} create_if_missing=false",
@@ -360,7 +385,7 @@ impl Trace for NoopTrace {
     fn file_save_as_done(&self, _: &CanonPath, _: &CanonPath, _: &Result<(), String>) {}
     fn clipboard_read_start(&self) {}
     fn clipboard_read_done(&self, _ok: bool, _empty: bool) {}
-    fn clipboard_write_start(&self, _bytes: usize) {}
+    fn clipboard_write_start(&self, _text: &str) {}
     fn clipboard_write_done(&self, _ok: bool) {}
     fn fs_list_start(&self, _: &CanonPath) {}
     fn fs_list_done(&self, _: &CanonPath, _: bool) {}
@@ -387,6 +412,7 @@ impl Trace for NoopTrace {
     fn find_file_start(&self, _: &FindFileCmd) {}
     fn find_file_done(&self, _: &CanonPath, _: &str, _: bool) {}
     fn workspace_clear_undo(&self, _: &CanonPath) {}
+    fn workspace_flush_undo(&self, _: &CanonPath, _: &str) {}
     fn file_reopen_existing(&self, _: &CanonPath) {}
     fn render_tick(&self) {}
 }

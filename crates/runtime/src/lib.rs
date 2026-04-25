@@ -2793,8 +2793,8 @@ pub(crate) mod trace_adapter {
         fn clipboard_read_done(&self, ok: bool, empty: bool) {
             self.0.clipboard_read_done(ok, empty);
         }
-        fn clipboard_write_start(&self, bytes: usize) {
-            self.0.clipboard_write_start(bytes);
+        fn clipboard_write_start(&self, text: &str) {
+            self.0.clipboard_write_start(text);
         }
         fn clipboard_write_done(&self, ok: bool) {
             self.0.clipboard_write_done(ok);
@@ -2881,6 +2881,9 @@ pub(crate) mod trace_adapter {
         }
         fn session_drop_undo(&self, path: &CanonPath) {
             self.0.workspace_clear_undo(path);
+        }
+        fn session_flush_undo(&self, path: &CanonPath, chain_id: &str) {
+            self.0.workspace_flush_undo(path, chain_id);
         }
     }
 
