@@ -421,73 +421,13 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
             // dirty-edit state carries across the quit. Mismatch
             // → drop silently; the file changed externally
             // between sessions.
-            if inserted
-                && let Some(restore) =
-                    session.pending_undo.remove(&completion.path)
-            {
-                let disk_hash = led_core::EphemeralContentHash::of_rope(
-                    &completion.rope,
-                )
-                .persist();
-                if disk_hash == restore.content_hash
-                    && let Some(eb) = edits.buffers.get_mut(&completion.path)
-                {
-                    // Replay each EditGroup's ops forward onto
-                    // the rope (in record order). Each group's
-                    // [Delete(at, removed), Insert(at, inserted)]
-                    // pair maps to: remove `removed` at `at`,
-                    // insert `inserted` at `at`. Skip
-                    // save-point markers (empty ops).
-                    let mut new_rope = (*eb.rope).clone();
-                    for group in &restore.entries {
-                        for op in &group.ops {
-                            use led_state_buffer_edits::EditOp;
-                            match op {
-                                EditOp::Delete { at, text } => {
-                                    let len = text.chars().count();
-                                    let end = (*at + len)
-                                        .min(new_rope.len_chars());
-                                    if *at < new_rope.len_chars() && end > *at
-                                    {
-                                        new_rope.remove(*at..end);
-                                    }
-                                }
-                                EditOp::Insert { at, text } => {
-                                    let pos = (*at)
-                                        .min(new_rope.len_chars());
-                                    new_rope.insert(pos, text);
-                                }
-                            }
-                        }
-                    }
-                    eb.rope = std::sync::Arc::new(new_rope);
-                    if !restore.entries.is_empty() {
-                        eb.version = eb.version.saturating_add(1);
-                    }
-                    // Build the History from the entries: every
-                    // restored group lands in past. seq_gen is
-                    // a fresh shared counter — entries' embedded
-                    // seqs are kept as historical tags.
-                    let mut history =
-                        led_state_buffer_edits::History::with_seq_gen(
-                            edits.seq_gen.clone(),
-                        );
-                    history.restore_past(restore.entries.clone());
-                    eb.history = history;
-                    // Seed the per-buffer flush tracker so the
-                    // next `FlushUndo` resumes from the restored
-                    // tail rather than re-shipping every entry.
-                    // Reuse the persisted `chain_id` so legacy's
-                    // append-only invariant holds across restart.
-                    undo_persistence.insert(
-                        completion.path.clone(),
-                        UndoPersistTracker {
-                            chain_id: restore.chain_id.clone(),
-                            persisted_len: restore.entries.len(),
-                            last_seq: restore.last_seq,
-                        },
-                    );
-                }
+            if inserted {
+                apply_pending_undo_restore(
+                    &completion.path,
+                    edits,
+                    session,
+                    undo_persistence,
+                );
             }
             if let Some(lang) = detected {
                 syntax
@@ -999,6 +939,29 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
                                     .pending_undo
                                     .insert(sb.path.clone(), undo.clone());
                             }
+                        }
+                        // CLI-arg buffers may already be loaded by
+                        // the time the Init reply lands (the
+                        // file-read driver runs ahead of the
+                        // session worker). Walk the just-stashed
+                        // pending_undo set and apply to any path
+                        // whose buffer is already in `edits` —
+                        // the load-completion handler only fires
+                        // for first-time inserts, so we'd
+                        // otherwise leak the chain.
+                        let materialised: Vec<CanonPath> = session
+                            .pending_undo
+                            .keys()
+                            .filter(|p| edits.buffers.contains_key(*p))
+                            .cloned()
+                            .collect();
+                        for path in materialised {
+                            apply_pending_undo_restore(
+                                &path,
+                                edits,
+                                session,
+                                undo_persistence,
+                            );
                         }
                         // Materialise restored tabs. CLI arg
                         // tabs already in `tabs.open` get the
@@ -2047,6 +2010,76 @@ fn build_session_kv(
         kv.insert("jump_list.index".into(), jumps.index.to_string());
     }
     kv
+}
+
+/// Apply a stashed [`UndoRestoreData`] to a now-materialised
+/// buffer: replay each `EditGroup`'s ops forward onto the rope,
+/// install the restored chain into `eb.history.past`, and seed
+/// the per-buffer flush tracker so subsequent `FlushUndo`
+/// commands resume from the restored tail.
+///
+/// Two callers:
+/// - the load-completion ingest hook (first-time materialise
+///   path; runs once per buffer per session)
+/// - the `SessionEvent::Restored` arm (CLI-arg buffers that
+///   loaded BEFORE Init replied — `inserted` was true on a tick
+///   where `pending_undo` was still empty, so the restore data
+///   has to be applied retroactively here)
+///
+/// Returns silently when the disk-hash gate fails (file
+/// changed externally between sessions) — the chain stays in
+/// `pending_undo`'s now-removed slot, effectively dropped.
+fn apply_pending_undo_restore(
+    path: &CanonPath,
+    edits: &mut BufferEdits,
+    session: &mut led_state_session::SessionState,
+    undo_persistence: &mut std::collections::HashMap<CanonPath, UndoPersistTracker>,
+) {
+    let Some(restore) = session.pending_undo.remove(path) else {
+        return;
+    };
+    let Some(eb) = edits.buffers.get_mut(path) else {
+        return;
+    };
+    if eb.disk_content_hash != restore.content_hash {
+        return;
+    }
+    let mut new_rope = (*eb.rope).clone();
+    for group in &restore.entries {
+        for op in &group.ops {
+            use led_state_buffer_edits::EditOp;
+            match op {
+                EditOp::Delete { at, text } => {
+                    let len = text.chars().count();
+                    let end = (*at + len).min(new_rope.len_chars());
+                    if *at < new_rope.len_chars() && end > *at {
+                        new_rope.remove(*at..end);
+                    }
+                }
+                EditOp::Insert { at, text } => {
+                    let pos = (*at).min(new_rope.len_chars());
+                    new_rope.insert(pos, text);
+                }
+            }
+        }
+    }
+    eb.rope = std::sync::Arc::new(new_rope);
+    if !restore.entries.is_empty() {
+        eb.version = eb.version.saturating_add(1);
+    }
+    let mut history = led_state_buffer_edits::History::with_seq_gen(
+        edits.seq_gen.clone(),
+    );
+    history.restore_past(restore.entries.clone());
+    eb.history = history;
+    undo_persistence.insert(
+        path.clone(),
+        UndoPersistTracker {
+            chain_id: restore.chain_id.clone(),
+            persisted_len: restore.entries.len(),
+            last_seq: restore.last_seq,
+        },
+    );
 }
 
 /// Generate a unique `chain_id` for an undo persistence chain.
