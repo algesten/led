@@ -83,6 +83,18 @@ pub struct EditedBuffer {
     /// not clear the dirty flag, because `version > saved_version`
     /// still holds.
     pub saved_version: u64,
+    /// Hash of the bytes that are (or were last known to be) on
+    /// disk for this path. Set at load completion (the rope at
+    /// version 0 IS the disk content) and refreshed at save
+    /// completion (the just-written rope is the new disk
+    /// content). Used by the M21 undo persistence flush as the
+    /// `content_hash` anchor on `buffer_undo_state` — on next
+    /// restore, the disk file is re-hashed and matched against
+    /// this value before the chain is replayed, so an external
+    /// mod between sessions invalidates the chain rather than
+    /// re-applying it onto stale bytes. Mirrors legacy
+    /// `BufferState::content_hash`.
+    pub disk_content_hash: led_core::PersistedContentHash,
     /// Undo / redo history. See [`History`]. Grows unbounded for
     /// the session; persistence is deferred to M21.
     pub history: History,
@@ -109,10 +121,13 @@ impl EditedBuffer {
     /// new entry to `BufferEdits.buffers` so every buffer stamps
     /// from the same counter.
     pub fn fresh_with_seq_gen(rope: Arc<Rope>, seq_gen: SeqGen) -> Self {
+        let disk_content_hash =
+            led_core::EphemeralContentHash::of_rope(&rope).persist();
         Self {
             rope,
             version: 0,
             saved_version: 0,
+            disk_content_hash,
             history: History::with_seq_gen(seq_gen),
         }
     }

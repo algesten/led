@@ -822,6 +822,10 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
                         let hash =
                             led_core::EphemeralContentHash::of_rope(&eb.rope).persist();
                         eb.history.insert_save_point(hash);
+                        // Saved bytes are the new disk baseline —
+                        // refresh the anchor used by undo flushes
+                        // (legacy's `BufferState::content_hash`).
+                        eb.disk_content_hash = hash;
                     }
                     alerts.clear_warn(&basename);
                     alerts.set_info(format!("Saved {basename}"), Instant::now(), INFO_TTL);
@@ -2069,19 +2073,15 @@ fn new_chain_id() -> String {
 static UNDO_CHAIN_NONCE: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 
-/// Hash that anchors the chain to "what's on disk." Walks `past`
-/// for the most recent save-point marker; falls back to the
-/// current rope hash for never-saved buffers (the load itself
-/// stamps the rope as disk-equivalent at version 0).
+/// Hash that anchors the chain to "what's on disk." Returns
+/// `eb.disk_content_hash`, which is set at load completion (the
+/// rope at version 0 IS the disk content) and refreshed at save
+/// completion (the just-written rope is the new disk content).
+/// Mirrors legacy `BufferState::content_hash` — used so the
+/// next-launch restore can re-hash the disk file and refuse to
+/// replay if the bytes shifted between sessions.
 fn disk_content_hash_for(eb: &EditedBuffer) -> led_core::PersistedContentHash {
-    eb.history
-        .past_groups()
-        .iter()
-        .rev()
-        .find_map(|g| g.save_point_hash)
-        .unwrap_or_else(|| {
-            led_core::EphemeralContentHash::of_rope(&eb.rope).persist()
-        })
+    eb.disk_content_hash
 }
 
 /// Distance (in finalised groups) between the current head and

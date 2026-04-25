@@ -2980,6 +2980,7 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
                 rope: Arc::new(Rope::from_str("edited-version")),
                 version: 1,
                 saved_version: 0,
+                disk_content_hash: led_core::PersistedContentHash::default(),
                 history: Default::default(),
             },
         );
@@ -3038,6 +3039,7 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
                 rope: rope.clone(),
                 version: 3,
                 saved_version: 0,
+                disk_content_hash: led_core::PersistedContentHash::default(),
                 history: Default::default(),
             },
         );
@@ -3074,6 +3076,7 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
                 rope: rope.clone(),
                 version: 2,
                 saved_version: 2, // pristine — SaveAs still fires
+                disk_content_hash: led_core::PersistedContentHash::default(),
                 history: Default::default(),
             },
         );
@@ -3110,6 +3113,7 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
                 rope: Arc::new(Rope::from_str("x")),
                 version: 0,
                 saved_version: 0, // dirty() == false
+                disk_content_hash: led_core::PersistedContentHash::default(),
                 history: Default::default(),
             },
         );
@@ -3160,6 +3164,7 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
                 rope: Arc::new(Rope::from_str("x")),
                 version: 0,
                 saved_version: 0,
+                disk_content_hash: led_core::PersistedContentHash::default(),
                 history: Default::default(),
             },
         );
@@ -3169,6 +3174,7 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
                 rope: Arc::new(Rope::from_str("yy")),
                 version: 1,
                 saved_version: 0,
+                disk_content_hash: led_core::PersistedContentHash::default(),
                 history: Default::default(),
             },
         );
@@ -3440,6 +3446,7 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
                 rope: Arc::new(Rope::from_str("x")),
                 version: 2,
                 saved_version: 1,
+                disk_content_hash: led_core::PersistedContentHash::default(),
                 history: Default::default(),
             },
         );
@@ -3467,6 +3474,7 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
                 rope: Arc::new(Rope::from_str("x")),
                 version: 3,
                 saved_version: 1, // dirty
+                disk_content_hash: led_core::PersistedContentHash::default(),
                 history: Default::default(),
             },
         );

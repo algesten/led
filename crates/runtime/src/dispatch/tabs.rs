@@ -177,6 +177,7 @@ mod tests {
                 rope: Arc::new(Rope::from_str("A")),
                 version: 1,
                 saved_version: 0,
+                disk_content_hash: led_core::PersistedContentHash::default(),
                 history: Default::default(),
             },
         );
