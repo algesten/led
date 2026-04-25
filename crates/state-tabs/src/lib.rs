@@ -68,6 +68,21 @@ pub struct Tab {
     /// query recalls it. Per-tab (not global) because users
     /// typically want per-buffer search history. M13.
     pub last_search: Option<String>,
+    /// Cursor to apply once the buffer at this tab's path has
+    /// been loaded into [`led_state_buffer_edits::BufferEdits`].
+    /// Set when a tab is opened with a target the user wants
+    /// the cursor at — session restore (M21), Alt-Enter
+    /// goto-def into a not-yet-open file, Alt-./Alt-, into a
+    /// not-yet-open file. The load-completion ingest hook
+    /// applies this (clamped to the rope) and clears the
+    /// field. None on tabs that don't need a deferred cursor.
+    pub pending_cursor: Option<Cursor>,
+    /// Companion to `pending_cursor`: the scroll anchor to
+    /// apply at the same moment. Session restore carries the
+    /// exact pre-quit scroll; the goto-def / issue-nav paths
+    /// leave this `None` and let the load-completion hook
+    /// recenter via `dispatch::center_on_cursor`.
+    pub pending_scroll: Option<Scroll>,
 }
 
 /// Source: which tabs are open, which is active.

@@ -472,60 +472,69 @@ fn nav_issue(
     let Some(outcome) = compute_navigation(tabs, edits, diagnostics, git, forward) else {
         return;
     };
-    // Target must correspond to a currently-open tab. M21's
-    // pending-cursor plumbing will light up the unopened-file
-    // branch; M20a silently skips to avoid a half-working
-    // "nothing visibly happened" UX.
-    let Some(target_idx) = tabs
-        .open
-        .iter()
-        .position(|t| t.path == outcome.target_path)
-    else {
-        return;
-    };
-    let Some(eb) = edits.buffers.get(&outcome.target_path) else {
-        return;
-    };
 
-    // Record the pre-jump position so Alt-b round-trips.
+    // Always record the pre-jump position so Alt-b round-trips,
+    // regardless of whether the target is already open or not.
     if let Some(current) = current_position(tabs) {
         jumps.record(current);
     }
-
-    // Clamp the target's (row, col) to the buffer's rope — the
-    // source atoms may have lagged the current edit stream by a
-    // few chars (diagnostic deliveries are content-hash-gated,
-    // but the buffer could still have grown / shrunk).
-    let rope = &eb.rope;
-    let line_count = rope.len_lines();
-    let line = outcome.target_row.min(line_count.saturating_sub(1));
-    let col = outcome.target_col.min(line_char_len(rope, line));
-
-    // Compute viewport dims for the recenter helper. Same
-    // `Layout` path the painter uses so the body_rows / content_cols
-    // match what the user sees.
-    let body_rows = terminal
-        .dims
-        .map(|d| {
-            led_driver_terminal_core::Layout::compute(d, browser.visible)
-                .editor_area
-                .rows as usize
-        })
-        .unwrap_or(0);
-    let content_cols = editor_content_cols(terminal, browser);
-
-    let tab = &mut tabs.open[target_idx];
-    tab.cursor.line = line;
-    tab.cursor.col = col;
-    tab.cursor.preferred_col = col;
-    tab.scroll = center_on_cursor(tab.scroll, tab.cursor, body_rows, rope, content_cols);
-    tabs.active = Some(tab.id);
 
     let info = outcome.category.info();
     let msg = format!(
         " Jumped to {} {}/{}",
         info.label, outcome.position, outcome.total,
     );
+
+    // Two paths (M21):
+    //   * Buffer is already loaded → land cursor + recenter
+    //     scroll inline.
+    //   * Buffer not yet loaded → open / focus a tab at the
+    //     target path and stash the cursor as `pending_cursor`.
+    //     The load-completion ingest applies it once the rope
+    //     materialises.
+    if let Some(target_idx) = tabs
+        .open
+        .iter()
+        .position(|t| t.path == outcome.target_path)
+        && let Some(eb) = edits.buffers.get(&outcome.target_path)
+    {
+        let rope = &eb.rope;
+        let line_count = rope.len_lines();
+        let line = outcome.target_row.min(line_count.saturating_sub(1));
+        let col = outcome.target_col.min(line_char_len(rope, line));
+        let body_rows = terminal
+            .dims
+            .map(|d| {
+                led_driver_terminal_core::Layout::compute(d, browser.visible)
+                    .editor_area
+                    .rows as usize
+            })
+            .unwrap_or(0);
+        let content_cols = editor_content_cols(terminal, browser);
+        let tab = &mut tabs.open[target_idx];
+        tab.cursor.line = line;
+        tab.cursor.col = col;
+        tab.cursor.preferred_col = col;
+        tab.scroll = center_on_cursor(tab.scroll, tab.cursor, body_rows, rope, content_cols);
+        tabs.active = Some(tab.id);
+        alerts.set_info(msg, Instant::now(), ISSUE_NAV_TTL);
+        return;
+    }
+
+    // Open / focus a tab at the target path and stash the
+    // pending cursor; the load-completion hook does the apply.
+    super::shared::open_or_focus_tab(tabs, &outcome.target_path, true);
+    if let Some(tab) = tabs
+        .open
+        .iter_mut()
+        .find(|t| t.path == outcome.target_path)
+    {
+        tab.pending_cursor = Some(led_state_tabs::Cursor {
+            line: outcome.target_row,
+            col: outcome.target_col,
+            preferred_col: outcome.target_col,
+        });
+    }
     alerts.set_info(msg, Instant::now(), ISSUE_NAV_TTL);
 }
 
@@ -957,23 +966,25 @@ mod tests {
     }
 
     #[test]
-    fn next_issue_skips_unopened_target() {
+    fn next_issue_opens_unopened_target_with_pending_cursor() {
+        // M21: a diagnostic on an unopened path now opens the
+        // tab and stashes a pending cursor that the load
+        // completion will apply. Pre-M21 this silently no-op'd.
         use led_driver_terminal_core::Terminal as TerminalAtom;
         use led_state_browser::BrowserUi;
-        // Diagnostic on a path that isn't currently open.
         let (mut tabs, edits) = seed_tabs_and_edits("/p/a.rs", "abc\n");
+        let target = canon_of("/p/other.rs");
         let mut diags = DiagnosticsStates::default();
         diags.by_path.insert(
-            canon_of("/p/other.rs"),
+            target.clone(),
             BufferDiagnostics::new(
                 led_core::PersistedContentHash(1),
-                vec![diag(DiagnosticSeverity::Error, 0, 0)],
+                vec![diag(DiagnosticSeverity::Error, 7, 2)],
             ),
         );
         let git = M20aGitState::default();
         let mut jumps = JumpListState::default();
         let mut alerts = M20aAlertState::default();
-        let before_line = tabs.open[0].cursor.line;
         next_issue_active(
             &mut tabs,
             &edits,
@@ -984,10 +995,22 @@ mod tests {
             &TerminalAtom::default(),
             &BrowserUi::default(),
         );
-        // Cursor unchanged, no alert, no jump recorded.
-        assert_eq!(tabs.open[0].cursor.line, before_line);
-        assert!(jumps.entries.is_empty());
-        assert!(alerts.info.is_none());
+        let new_tab = tabs
+            .open
+            .iter()
+            .find(|t| t.path == target)
+            .expect("opened tab for issue target");
+        assert_eq!(tabs.active, Some(new_tab.id));
+        assert_eq!(
+            new_tab.pending_cursor,
+            Some(led_state_tabs::Cursor {
+                line: 7,
+                col: 2,
+                preferred_col: 2,
+            }),
+        );
+        assert_eq!(jumps.entries.len(), 1);
+        assert!(alerts.info.is_some(), "alert message set");
     }
 }
 

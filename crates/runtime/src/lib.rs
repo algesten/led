@@ -46,6 +46,8 @@ use led_driver_lsp_core::{LspCmd, LspDriver, LspEvent};
 use led_driver_lsp_native::LspNative;
 use led_driver_git_core::{GitCmd, GitDriver, GitEvent};
 use led_driver_git_native::GitNative;
+use led_driver_session_core::{SessionCmd, SessionDriver, SessionEvent};
+use led_driver_session_native::SessionNative;
 use led_state_alerts::AlertState;
 use led_state_browser::{BrowserUi, FsTree};
 use led_state_buffer_edits::{BufferEdits, EditedBuffer};
@@ -60,6 +62,7 @@ use led_state_diagnostics::{
 };
 use led_state_git::GitState;
 use led_state_lifecycle::{LifecycleState, Phase};
+use led_state_session::{SessionData, SessionState, SessionTab};
 use led_state_syntax::{Language, SyntaxState, SyntaxStates};
 use led_state_tabs::{TabId, Tabs};
 
@@ -129,6 +132,7 @@ pub struct Drivers {
     pub syntax: SyntaxDriver,
     pub lsp: LspDriver,
     pub git: GitDriver,
+    pub session: SessionDriver,
 
     // Held only for lifetime management; detached on drop.
     _file_native: FileReadNative,
@@ -141,6 +145,7 @@ pub struct Drivers {
     _syntax_native: SyntaxNative,
     _lsp_native: LspNative,
     _git_native: GitNative,
+    _session_native: SessionNative,
 }
 
 /// Allocator for fresh `TabId`s. Counter only; ids are never reused.
@@ -261,6 +266,24 @@ pub struct Atoms {
     /// to Running) and by the first-paint transition out of
     /// Starting.
     pub lifecycle: LifecycleState,
+    /// Session persistence (M21). Folded from `SessionEvent::
+    /// {Restored, Saved, Failed}` deliveries; consumed by the
+    /// Quit gate (`Exiting && (saved || !primary)`) and the
+    /// session-Save dispatch.
+    pub session: SessionState,
+    /// Driver-outbound bookkeeping: `true` once the runtime has
+    /// dispatched `SessionCmd::Save` for the active Exiting
+    /// transition, so we don't spam Save every tick while
+    /// waiting for the `Saved` event. Same category as
+    /// `lsp_init_sent`.
+    pub session_save_dispatched: bool,
+    /// Set by the Suspended → Running edge (M20) and the
+    /// session-restore complete edge (M21) — anything that
+    /// requires `Phase::Resuming` → `Phase::Running` to be
+    /// re-evaluated next tick. Always derivable from atoms; we
+    /// store it as a flag because we don't want to scan every
+    /// tab every tick.
+    pub resume_check_pending: bool,
     /// Symlink resolution chain for every path the user has
     /// opened, keyed by canonical path. Populated at tab-open
     /// time (main.rs CLI, find-file commit, browser open) so the
@@ -314,6 +337,9 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
         git_scan_dispatched,
         git_scan_pending,
         lifecycle,
+        session,
+        session_save_dispatched,
+        resume_check_pending,
     } = &mut *world.atoms;
     let drivers = world.drivers;
     let wake = world.wake;
@@ -388,7 +414,68 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
                     rope: completion.rope.clone(),
                     hash,
                 }));
-                lsp_notified.insert(completion.path, (version, saved));
+                lsp_notified.insert(completion.path.clone(), (version, saved));
+            }
+
+            // Apply pending cursor / scroll for any tab waiting
+            // on this path. Three call sites stash a pending
+            // cursor on tab-open: session restore (M21),
+            // Alt-Enter goto-def into an unopened file, and
+            // Alt-./Alt-, into an unopened file. Clamp to the
+            // rope so a stale (line, col) from disk doesn't
+            // land outside the buffer.
+            for tab in tabs.open.iter_mut() {
+                if tab.path != completion.path {
+                    continue;
+                }
+                let rope = &completion.rope;
+                let line_count = rope.len_lines();
+                if let Some(pc) = tab.pending_cursor.take() {
+                    let line = pc.line.min(line_count.saturating_sub(1));
+                    let line_start = rope.line_to_char(line);
+                    let line_end = if line + 1 < line_count {
+                        rope.line_to_char(line + 1)
+                    } else {
+                        rope.len_chars()
+                    };
+                    let line_len = line_end.saturating_sub(line_start);
+                    let col = pc.col.min(line_len);
+                    tab.cursor = led_state_tabs::Cursor {
+                        line,
+                        col,
+                        preferred_col: col,
+                    };
+                }
+                if let Some(ps) = tab.pending_scroll.take() {
+                    // Clamp scroll.top to the buffer's line
+                    // count — a stale snapshot may overshoot.
+                    let top = ps.top.min(line_count.saturating_sub(1));
+                    tab.scroll = led_state_tabs::Scroll {
+                        top,
+                        top_sub_line: ps.top_sub_line,
+                    };
+                }
+            }
+            // The Phase::Resuming → Running transition checks
+            // every tab; bookkeeping flag tells the loop to
+            // re-evaluate now that one buffer just settled.
+            *resume_check_pending = true;
+        }
+
+        // Phase::Resuming → Running once every tab with a
+        // pending cursor has had it applied (i.e. nothing left
+        // to wait for). Cheap O(tabs) scan, only runs when a
+        // load just completed.
+        if *resume_check_pending {
+            *resume_check_pending = false;
+            if matches!(lifecycle.phase, Phase::Resuming) {
+                let still_pending = tabs
+                    .open
+                    .iter()
+                    .any(|t| t.pending_cursor.is_some() || t.pending_scroll.is_some());
+                if !still_pending {
+                    lifecycle.phase = Phase::Running;
+                }
             }
         }
 
@@ -544,7 +631,7 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
                 LspEvent::GotoDefinition { seq, location } => {
                     apply_goto_definition(
                         tabs, edits, jumps, alerts, lsp_extras,
-                        terminal, browser, seq, location,
+                        terminal, browser, path_chains, seq, location,
                     );
                 }
                 LspEvent::Edits {
@@ -783,6 +870,100 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
             state.version = done.version;
         }
 
+        // Apply session driver events. The Init reply seeds
+        // `session.last_saved` with whatever the DB held;
+        // dispatch turns each restored tab into a new Tab with
+        // `pending_cursor` set so the load-completion ingest
+        // hook can land the cursor once the buffer materialises.
+        // Saved flips `session.saved` so the Quit gate clears.
+        // Failures degrade gracefully — surface a warn alert.
+        let mut session_just_restored = false;
+        for ev in drivers.session.process() {
+            match ev {
+                SessionEvent::Restored { primary, restored } => {
+                    session.primary = primary;
+                    session.init_done = true;
+                    if let Some(data) = restored {
+                        // Materialise restored tabs. Skip any
+                        // path the user already opened via the
+                        // CLI args — those tabs already exist
+                        // and shouldn't double-open.
+                        let mut new_tabs: imbl::Vector<led_state_tabs::Tab> =
+                            tabs.open.clone();
+                        for st in &data.tabs {
+                            if new_tabs.iter().any(|t| t.path == st.path) {
+                                continue;
+                            }
+                            let id = TabId(
+                                new_tabs
+                                    .iter()
+                                    .map(|t| t.id.0)
+                                    .max()
+                                    .unwrap_or(0)
+                                    + 1,
+                            );
+                            // Stash a path-chain for language
+                            // detection on load.
+                            let chain = led_core::UserPath::new(
+                                st.path.as_path(),
+                            )
+                            .resolve_chain();
+                            path_chains.insert(st.path.clone(), chain);
+                            new_tabs.push_back(led_state_tabs::Tab {
+                                id,
+                                path: st.path.clone(),
+                                pending_cursor: Some(st.cursor),
+                                pending_scroll: Some(st.scroll),
+                                ..Default::default()
+                            });
+                        }
+                        // Active tab: prefer whatever the user
+                        // asked for via CLI args; otherwise
+                        // honour the saved active index.
+                        if tabs.active.is_none()
+                            && let Some(idx) = data.active_tab_idx
+                            && let Some(t) = new_tabs.get(idx)
+                        {
+                            tabs.active = Some(t.id);
+                        }
+                        tabs.open = new_tabs;
+                        session.last_saved = Some(data);
+                    } else {
+                        session.last_saved = None;
+                    }
+                    session_just_restored = true;
+                }
+                SessionEvent::Saved => {
+                    session.saved = true;
+                }
+                SessionEvent::Failed { message } => {
+                    alerts.set_warn(
+                        "session".to_string(),
+                        format!("session: {message}"),
+                    );
+                    // Don't keep retrying; mark saved so the
+                    // Quit gate can still clear.
+                    session.saved = true;
+                    session.init_done = true;
+                }
+            }
+        }
+        if session_just_restored && !tabs.open.is_empty() {
+            // We just synthesised tabs with pending cursors —
+            // bookkeeping flag tells the loop to re-evaluate
+            // `Phase::Resuming` after the current execute pass.
+            *resume_check_pending = true;
+            if matches!(lifecycle.phase, Phase::Starting) {
+                lifecycle.phase = Phase::Resuming;
+            }
+        } else if session_just_restored {
+            // Restored with empty session OR non-primary — no
+            // tabs to wait for.
+            if matches!(lifecycle.phase, Phase::Starting | Phase::Resuming) {
+                lifecycle.phase = Phase::Running;
+            }
+        }
+
         // Apply git driver events. The driver emits a burst per
         // scan: one FileStatuses (always), one LineStatuses per
         // dirty path, then one empty LineStatuses per formerly-
@@ -851,7 +1032,6 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
         // each event by value, so the partial borrow of
         // `terminal.pending` is released before dispatch takes a full
         // `&Terminal`. No intermediate `Vec<Event>` per tick.
-        let mut quit = false;
         while let Some(term_ev) = terminal.pending.pop_front() {
             let ev = match term_ev {
                 TermEvent::Key(k) => Event::Key(k),
@@ -882,8 +1062,12 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
             match dispatcher.dispatch(ev) {
                 DispatchOutcome::Continue => {}
                 DispatchOutcome::Quit => {
+                    // M21: don't break here. Set the phase and
+                    // fall through to the execute pass, which
+                    // dispatches SessionCmd::Save. The next
+                    // iteration's gate (below the dispatch loop)
+                    // breaks once session.saved flips.
                     lifecycle.phase = Phase::Exiting;
-                    quit = true;
                     break;
                 }
                 DispatchOutcome::Suspend => {
@@ -919,7 +1103,22 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
                 }
             }
         }
-        if quit {
+        // M21 quit gate: we sit in `Phase::Exiting` until the
+        // session driver acknowledges the save (or we're not
+        // primary, in which case the ingest above already set
+        // `session.saved = true`). Standalone runs fall out
+        // immediately too — `init_done` defaults to true via
+        // the no-config-dir path, and `saved` is true by
+        // default.
+        if matches!(lifecycle.phase, Phase::Exiting)
+            && (session.saved || !session.primary)
+        {
+            // Drop the session driver cleanly. Sending Shutdown
+            // is best-effort — the worker also self-exits when
+            // its Sender hangs up at process exit.
+            drivers
+                .session
+                .execute(std::iter::once(&SessionCmd::Shutdown));
             break Ok(());
         }
 
@@ -1178,6 +1377,55 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
             *lsp_init_sent = true;
         }
 
+        // ── Session dispatch (M21) ─────────────────────────────
+        //
+        // Init: once per session, when fs.root is known. The
+        // `session.init_done` flag flips on the matching
+        // SessionEvent::Restored so we don't double-fire.
+        if !session.init_done
+            && let Some(root) = fs.root.as_ref()
+        {
+            // Config dir = ~/.config/led/ — same source as the
+            // keymap/theme loaders. We resolve it lazily here
+            // because the dispatcher doesn't see CLI flags.
+            if let Some(cfg) = config_dir_for_session() {
+                drivers.session.execute(std::iter::once(&SessionCmd::Init {
+                    root: root.clone(),
+                    config_dir: cfg,
+                }));
+                // Mark init_done eagerly so we don't re-fire
+                // before the reply arrives. The reply will set
+                // primary + last_saved when it lands.
+                session.init_done = true;
+            } else {
+                // No config dir resolvable — treat as no-op so
+                // the Quit gate can still clear.
+                session.init_done = true;
+                session.saved = true;
+            }
+        }
+
+        // Save: once per Phase::Exiting transition for primary
+        // workspaces. The flag prevents repeat dispatches while
+        // we wait for the SessionEvent::Saved ack.
+        if matches!(lifecycle.phase, Phase::Exiting)
+            && session.primary
+            && !session.saved
+            && !*session_save_dispatched
+        {
+            let data = build_session_data(tabs, edits, browser);
+            drivers.session.execute(std::iter::once(&SessionCmd::Save {
+                data,
+            }));
+            *session_save_dispatched = true;
+        } else if matches!(lifecycle.phase, Phase::Exiting)
+            && !session.primary
+        {
+            // Secondaries and standalone runs have nothing to
+            // save; clear the gate immediately.
+            session.saved = true;
+        }
+
         let mut lsp_cmds: Vec<LspCmd> = Vec::new();
         for (path, eb) in edits.buffers.iter() {
             let current_version = eb.version;
@@ -1423,6 +1671,54 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
     }
 }
 
+/// Resolve the per-user config directory the session driver
+/// stores `db.sqlite` and `primary/<hash>` under. Honours
+/// `XDG_CONFIG_HOME` like the keymap/theme loaders, otherwise
+/// `~/.config/led/`. Returns `None` when neither is resolvable
+/// (CI sandboxes, etc.) — the runtime treats that as
+/// "session is a no-op", same as standalone mode.
+fn config_dir_for_session() -> Option<CanonPath> {
+    if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME") {
+        let path = std::path::PathBuf::from(xdg).join("led");
+        std::fs::create_dir_all(&path).ok()?;
+        return Some(led_core::UserPath::new(path).canonicalize());
+    }
+    let home = std::env::var_os("HOME")?;
+    let path = std::path::PathBuf::from(home).join(".config").join("led");
+    std::fs::create_dir_all(&path).ok()?;
+    Some(led_core::UserPath::new(path).canonicalize())
+}
+
+/// Build the [`SessionData`] payload from the live atom set.
+/// Skips preview tabs (they're transient browser previews, not
+/// real session state) and orders by current `tabs.open` order.
+fn build_session_data(
+    tabs: &Tabs,
+    _edits: &BufferEdits,
+    browser: &led_state_browser::BrowserUi,
+) -> SessionData {
+    let mut session_tabs: Vec<SessionTab> = Vec::with_capacity(tabs.open.len());
+    let mut active_idx: Option<usize> = None;
+    for tab in tabs.open.iter() {
+        if tab.preview {
+            continue;
+        }
+        if Some(tab.id) == tabs.active {
+            active_idx = Some(session_tabs.len());
+        }
+        session_tabs.push(SessionTab {
+            path: tab.path.clone(),
+            cursor: tab.cursor,
+            scroll: tab.scroll,
+        });
+    }
+    SessionData {
+        active_tab_idx: active_idx,
+        show_side_panel: browser.visible,
+        tabs: session_tabs,
+    }
+}
+
 /// Min-fold over every currently-registered wake deadline.
 ///
 /// Course-correct #8: isolates the "when should the main loop next
@@ -1520,6 +1816,7 @@ fn apply_goto_definition(
     lsp_extras: &mut led_state_lsp::LspExtrasState,
     terminal: &led_driver_terminal_core::Terminal,
     browser: &led_state_browser::BrowserUi,
+    path_chains: &mut std::collections::HashMap<CanonPath, PathChain>,
     seq: u64,
     location: Option<led_driver_lsp_core::Location>,
 ) {
@@ -1540,61 +1837,76 @@ fn apply_goto_definition(
     let Some(current) = current_jump_position(tabs) else {
         return;
     };
-    // Find (or skip) the target tab. Not-yet-open files go
-    // through `open_or_focus_tab` to match legacy's "open the
-    // file then jump" behaviour; the cursor is applied by a
-    // second pass once the load completes.
-    let Some(idx) = tabs.open.iter().position(|t| t.path == loc.path) else {
-        // Target is not currently open — skip silently for
-        // M18. M21 will thread a pending cursor through the
-        // open path.
-        return;
-    };
-    let Some(eb) = edits.buffers.get(&loc.path) else {
-        return;
-    };
     jumps.record(current);
-    let line_count = eb.rope.len_lines();
-    let line = (loc.line as usize).min(line_count.saturating_sub(1));
-    let line_start = eb.rope.line_to_char(line);
-    let line_end = if line + 1 < line_count {
-        eb.rope.line_to_char(line + 1)
-    } else {
-        eb.rope.len_chars()
-    };
-    let line_len = line_end.saturating_sub(line_start);
-    let col = (loc.col as usize).min(line_len);
 
-    // Compute viewport dims (body rows + content cols) so we
-    // can recenter the scroll on the target. Use the same
-    // `Layout` the painter does.
-    let body_rows = terminal
-        .dims
-        .map(|d| {
-            led_driver_terminal_core::Layout::compute(d, browser.visible)
-                .editor_area
-                .rows as usize
-        })
-        .unwrap_or(0);
-    let content_cols = dispatch::editor_content_cols(terminal, browser);
+    // Two paths now (M21):
+    //   * Buffer is already loaded → land cursor + recenter
+    //     scroll inline, exactly like before.
+    //   * Buffer not yet loaded → open / focus a tab at the
+    //     target path and stash the cursor as `pending_cursor`.
+    //     The load-completion ingest applies it once the rope
+    //     materialises.
+    if let Some(idx) = tabs.open.iter().position(|t| t.path == loc.path)
+        && let Some(eb) = edits.buffers.get(&loc.path)
+    {
+        let line_count = eb.rope.len_lines();
+        let line = (loc.line as usize).min(line_count.saturating_sub(1));
+        let line_start = eb.rope.line_to_char(line);
+        let line_end = if line + 1 < line_count {
+            eb.rope.line_to_char(line + 1)
+        } else {
+            eb.rope.len_chars()
+        };
+        let line_len = line_end.saturating_sub(line_start);
+        let col = (loc.col as usize).min(line_len);
+        let body_rows = terminal
+            .dims
+            .map(|d| {
+                led_driver_terminal_core::Layout::compute(d, browser.visible)
+                    .editor_area
+                    .rows as usize
+            })
+            .unwrap_or(0);
+        let content_cols = dispatch::editor_content_cols(terminal, browser);
+        let tab = &mut tabs.open[idx];
+        tab.cursor.line = line;
+        tab.cursor.col = col;
+        tab.cursor.preferred_col = col;
+        tab.scroll = dispatch::center_on_cursor(
+            tab.scroll,
+            tab.cursor,
+            body_rows,
+            &eb.rope,
+            content_cols,
+        );
+        tabs.active = Some(tab.id);
+        alerts.clear_warn("lsp.goto");
+        return;
+    }
 
-    let tab = &mut tabs.open[idx];
-    tab.cursor.line = line;
-    tab.cursor.col = col;
-    tab.cursor.preferred_col = col;
-    // Recenter scroll: leave it alone when the target line is
-    // already inside the window; otherwise pin the target
-    // roughly one-third from the top. Mirrors the jump-to-
-    // issue UX users expect — "I pressed a go-to; the thing
-    // is on screen now with breathing room above it."
-    tab.scroll = dispatch::center_on_cursor(
-        tab.scroll,
-        tab.cursor,
-        body_rows,
-        &eb.rope,
-        content_cols,
-    );
-    tabs.active = Some(tab.id);
+    // Open a fresh tab at the target path with a pending
+    // cursor; the load-completion hook applies it. Stash the
+    // path-chain so the language detector picks up the
+    // user-typed extension on load.
+    let chain = led_core::UserPath::new(loc.path.as_path()).resolve_chain();
+    path_chains.insert(loc.path.clone(), chain);
+    dispatch::open_or_focus_tab(tabs, &loc.path, true);
+    if let Some(tab) = tabs
+        .open
+        .iter_mut()
+        .find(|t| t.path == loc.path)
+    {
+        tab.pending_cursor = Some(led_state_tabs::Cursor {
+            line: loc.line as usize,
+            col: loc.col as usize,
+            preferred_col: loc.col as usize,
+        });
+        // Don't pre-set a scroll — let the load-completion
+        // hook clear pending_scroll = None and the active tab
+        // tick recenter via the scroll-adjust pass on the next
+        // cursor move (or via a future "if pending_cursor and
+        // pending_scroll is None, recenter on apply" path).
+    }
     alerts.clear_warn("lsp.goto");
 }
 
@@ -1962,6 +2274,10 @@ pub fn spawn_drivers(
         trace.clone().as_git_trace(),
         wake.notifier.clone(),
     );
+    let (session, session_native) = led_driver_session_native::spawn(
+        trace.clone().as_session_trace(),
+        wake.notifier.clone(),
+    );
     let (input, input_native) = led_driver_terminal_native::spawn(
         trace.clone().as_terminal_trace(),
         wake.notifier.clone(),
@@ -1979,6 +2295,7 @@ pub fn spawn_drivers(
         syntax,
         lsp,
         git,
+        session,
         _file_native: file_native,
         _file_write_native: file_write_native,
         _input_native: input_native,
@@ -1989,6 +2306,7 @@ pub fn spawn_drivers(
         _syntax_native: syntax_native,
         _lsp_native: lsp_native,
         _git_native: git_native,
+        _session_native: session_native,
     })
 }
 
@@ -2017,6 +2335,7 @@ pub(crate) mod trace_adapter {
     pub(crate) struct SyntaxTraceAdapter(pub Arc<dyn Trace>);
     pub(crate) struct LspTraceAdapter(pub Arc<dyn Trace>);
     pub(crate) struct GitTraceAdapter(pub Arc<dyn Trace>);
+    pub(crate) struct SessionTraceAdapter(pub Arc<dyn Trace>);
 
     impl led_driver_buffers_core::Trace for FileTraceAdapter {
         fn file_load_start(&self, path: &CanonPath) {
@@ -2133,6 +2452,19 @@ pub(crate) mod trace_adapter {
         }
     }
 
+    impl led_driver_session_core::Trace for SessionTraceAdapter {
+        fn session_init_start(&self, root: &CanonPath) {
+            self.0.session_init_start(root);
+        }
+        fn session_save_start(&self) {
+            self.0.session_save_start();
+        }
+        fn session_save_done(&self, _ok: bool) {
+            // Successful save lands as the SessionEvent::Saved
+            // ingest in the runtime; no separate trace line.
+        }
+    }
+
     impl led_driver_file_search_core::Trace for FileSearchTraceAdapter {
         fn file_search_start(&self, cmd: &led_driver_file_search_core::FileSearchCmd) {
             self.0.file_search_start(
@@ -2202,6 +2534,9 @@ impl SharedTrace {
     }
     pub(crate) fn as_git_trace(&self) -> Arc<dyn led_driver_git_core::Trace> {
         Arc::new(trace_adapter::GitTraceAdapter(self.inner()))
+    }
+    pub(crate) fn as_session_trace(&self) -> Arc<dyn led_driver_session_core::Trace> {
+        Arc::new(trace_adapter::SessionTraceAdapter(self.inner()))
     }
 }
 
@@ -2432,6 +2767,8 @@ mod tests {
         // Caller allocates the seq via queue_*; simulate by
         // setting latest_goto_seq to 42.
         lsp_extras.latest_goto_seq = Some(42);
+        let mut _path_chains: std::collections::HashMap<CanonPath, PathChain> =
+            std::collections::HashMap::new();
         apply_goto_definition(
             &mut tabs,
             &edits,
@@ -2440,6 +2777,7 @@ mod tests {
             &mut lsp_extras,
             &led_driver_terminal_core::Terminal::default(),
             &led_state_browser::BrowserUi::default(),
+            &mut _path_chains,
             42,
             Some(led_driver_lsp_core::Location {
                 path: canon("main.rs"),
@@ -2469,6 +2807,8 @@ mod tests {
         let mut alerts = AlertState::default();
         let mut lsp_extras = led_state_lsp::LspExtrasState::default();
         lsp_extras.latest_goto_seq = Some(99);
+        let mut _path_chains: std::collections::HashMap<CanonPath, PathChain> =
+            std::collections::HashMap::new();
         apply_goto_definition(
             &mut tabs,
             &edits,
@@ -2477,6 +2817,7 @@ mod tests {
             &mut lsp_extras,
             &led_driver_terminal_core::Terminal::default(),
             &led_state_browser::BrowserUi::default(),
+            &mut _path_chains,
             /* stale */ 7,
             Some(led_driver_lsp_core::Location {
                 path: canon("main.rs"),
@@ -2523,6 +2864,8 @@ mod tests {
             dims: Some(Dims { cols: 80, rows: 14 }), // body ≈ 12 rows
             ..Default::default()
         };
+        let mut _path_chains: std::collections::HashMap<CanonPath, PathChain> =
+            std::collections::HashMap::new();
         apply_goto_definition(
             &mut tabs,
             &edits,
@@ -2534,6 +2877,7 @@ mod tests {
                 visible: false,
                 ..Default::default()
             },
+            &mut _path_chains,
             1,
             Some(led_driver_lsp_core::Location {
                 path: path.clone(),
@@ -2578,6 +2922,8 @@ mod tests {
             dims: Some(Dims { cols: 80, rows: 22 }), // body ≈ 20 rows
             ..Default::default()
         };
+        let mut _path_chains: std::collections::HashMap<CanonPath, PathChain> =
+            std::collections::HashMap::new();
         apply_goto_definition(
             &mut tabs,
             &edits,
@@ -2589,6 +2935,7 @@ mod tests {
                 visible: false,
                 ..Default::default()
             },
+            &mut _path_chains,
             1,
             Some(led_driver_lsp_core::Location {
                 path: path.clone(),
@@ -2611,6 +2958,8 @@ mod tests {
         let mut alerts = AlertState::default();
         let mut lsp_extras = led_state_lsp::LspExtrasState::default();
         lsp_extras.latest_goto_seq = Some(1);
+        let mut _path_chains: std::collections::HashMap<CanonPath, PathChain> =
+            std::collections::HashMap::new();
         apply_goto_definition(
             &mut tabs,
             &edits,
@@ -2619,6 +2968,7 @@ mod tests {
             &mut lsp_extras,
             &led_driver_terminal_core::Terminal::default(),
             &led_state_browser::BrowserUi::default(),
+            &mut _path_chains,
             1,
             None,
         );
@@ -2914,9 +3264,13 @@ mod tests {
     }
 
     #[test]
-    fn apply_goto_definition_skips_unopened_target() {
-        // Target path isn't in the open tab set → no movement,
-        // no jump recorded. M21 will open-and-jump; M18 skips.
+    fn apply_goto_definition_opens_unopened_target_with_pending_cursor() {
+        // M21: target path not in the open tab set used to
+        // silent-no-op. Now we open a tab at the target path,
+        // record the jump, and stash a pending cursor that the
+        // load-completion ingest will apply once the buffer
+        // lands. The tab promotes (preview = false) so the
+        // user gets a real, persistent tab — matches legacy.
         let mut tabs = seed_tab("main.rs");
         let mut edits = BufferEdits::default();
         edits.buffers.insert(
@@ -2927,6 +3281,9 @@ mod tests {
         let mut alerts = AlertState::default();
         let mut lsp_extras = led_state_lsp::LspExtrasState::default();
         lsp_extras.latest_goto_seq = Some(1);
+        let mut path_chains: std::collections::HashMap<CanonPath, PathChain> =
+            std::collections::HashMap::new();
+        let target = canon("other.rs");
         apply_goto_definition(
             &mut tabs,
             &edits,
@@ -2935,18 +3292,32 @@ mod tests {
             &mut lsp_extras,
             &led_driver_terminal_core::Terminal::default(),
             &led_state_browser::BrowserUi::default(),
+            &mut path_chains,
             1,
             Some(led_driver_lsp_core::Location {
-                path: canon("other.rs"),
-                line: 0,
-                col: 0,
+                path: target.clone(),
+                line: 7,
+                col: 3,
             }),
         );
-        // Cursor unchanged, no jump recorded, but the
-        // latest_goto_seq is consumed (request retired).
-        assert_eq!(tabs.open[0].cursor.line, 0);
-        assert_eq!(tabs.open[0].cursor.col, 0);
-        assert!(jumps.entries.is_empty());
+        // A new tab appears and is active; jump recorded; seq
+        // consumed; pending_cursor stashed for the
+        // load-completion hook to apply.
+        let new_tab = tabs
+            .open
+            .iter()
+            .find(|t| t.path == target)
+            .expect("opened tab for goto target");
+        assert_eq!(tabs.active, Some(new_tab.id));
+        assert_eq!(
+            new_tab.pending_cursor,
+            Some(led_state_tabs::Cursor {
+                line: 7,
+                col: 3,
+                preferred_col: 3,
+            }),
+        );
+        assert_eq!(jumps.entries.len(), 1);
         assert!(lsp_extras.latest_goto_seq.is_none());
     }
 }

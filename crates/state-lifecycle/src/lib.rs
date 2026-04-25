@@ -23,7 +23,7 @@
 //! so the cell-diff renderer doesn't assume pre-suspend content
 //! is still on screen.
 
-/// The four whole-process lifecycle states.
+/// The five whole-process lifecycle states.
 ///
 /// Adding a variant requires updating the main-loop match on
 /// `Atoms.lifecycle.phase` — the compiler enforces exhaustiveness.
@@ -31,6 +31,14 @@
 pub enum Phase {
     #[default]
     Starting,
+    /// Session is loaded and tabs were created with
+    /// `pending_cursor` set, but at least one buffer is still
+    /// materialising. Render runs (the user sees blank loading
+    /// frames per the post-M19 fix); commands that require a
+    /// fully-settled buffer can gate on `is_running()` if they
+    /// care. Transitions to `Running` once every restored tab's
+    /// buffer is loaded. M21.
+    Resuming,
     Running,
     Suspended,
     Exiting,
@@ -59,8 +67,8 @@ impl LifecycleState {
     }
 
     /// Is the process currently considered "actively running"?
-    /// `Running` only — `Starting`, `Suspended`, and `Exiting`
-    /// all return `false`.
+    /// `Running` only — `Starting`, `Resuming`, `Suspended`, and
+    /// `Exiting` all return `false`.
     pub fn is_running(&self) -> bool {
         matches!(self.phase, Phase::Running)
     }
@@ -89,6 +97,8 @@ mod tests {
     #[test]
     fn is_running_only_when_phase_is_running() {
         let mut s = LifecycleState::default();
+        assert!(!s.is_running());
+        s.phase = Phase::Resuming;
         assert!(!s.is_running());
         s.phase = Phase::Running;
         assert!(s.is_running());

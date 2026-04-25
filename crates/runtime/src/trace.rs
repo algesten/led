@@ -82,6 +82,14 @@ pub trait Trace: Send + Sync {
     /// pending work, so this maps 1:1 with the execute-phase
     /// emission.
     fn git_scan_start(&self, root: &CanonPath);
+    /// Runtime asked the session driver to open the DB +
+    /// flock and load the prior session. Emits as
+    /// `WorkspaceLoad\troot=<p>` in `dispatched.snap`. M21.
+    fn session_init_start(&self, root: &CanonPath);
+    /// Runtime dispatched a session save. Emits as
+    /// `WorkspaceSaveSession` in `dispatched.snap`. Fires
+    /// once on the Phase::Exiting transition for primaries.
+    fn session_save_start(&self);
     /// Runtime asked the LSP manager to open a diagnostic window.
     /// Fires on every buffer/save version delta — the manager
     /// coalesces via its DiagnosticSource state machine.
@@ -280,6 +288,15 @@ impl Trace for FileTrace {
     fn git_scan_start(&self, root: &CanonPath) {
         self.write_line(&format!("GitScan\troot={}", self.format_path(root)));
     }
+    fn session_init_start(&self, _: &CanonPath) {
+        // Legacy doesn't emit a dispatched-intent line for the
+        // workspace open — only for the explicit save. We
+        // match: keep the hook so future debug traces can light
+        // it up, but no `dispatched.snap` line.
+    }
+    fn session_save_start(&self) {
+        self.write_line("WorkspaceSaveSession");
+    }
     // Request-diagnostics fires per version delta; too noisy for
     // the intent log.
     fn lsp_request_diagnostics(&self) {}
@@ -362,6 +379,8 @@ impl Trace for NoopTrace {
     fn syntax_parse_done(&self, _: &CanonPath, _: u64, _: bool) {}
     fn lsp_server_started(&self, _: &str) {}
     fn git_scan_start(&self, _: &CanonPath) {}
+    fn session_init_start(&self, _: &CanonPath) {}
+    fn session_save_start(&self) {}
     fn lsp_request_diagnostics(&self) {}
     fn lsp_diagnostics_done(&self, _: &CanonPath, _: usize, _: PersistedContentHash) {}
     fn lsp_mode_fallback(&self) {}

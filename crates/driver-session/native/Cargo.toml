@@ -1,0 +1,26 @@
+[package]
+name = "led-driver-session-native"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Desktop SQLite implementation of the session driver. Uses
+# `rusqlite` (bundled feature already in the workspace) for the
+# session DB at `<config_dir>/db.sqlite` and `libc::flock` for
+# the per-workspace primary flock at
+# `<config_dir>/primary/<hash(root)>`.
+#
+# Runs on a single `std::thread` per the
+# `feedback_no_tokio_for_drivers` rule; mpsc is the channel,
+# blocking I/O is fine because the worker isn't on the main loop.
+
+[dependencies]
+led-core = { workspace = true }
+led-state-session = { workspace = true }
+led-state-tabs = { workspace = true }
+led-driver-session-core = { workspace = true }
+rusqlite = { workspace = true }
+libc = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

@@ -1,0 +1,15 @@
+[package]
+name = "led-state-session"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Session persistence state atom for M21: the live session shape
+# (saved flag, primary-flock outcome, last-saved snapshot) plus
+# the per-tab session payload the runtime persists on quit and
+# restores on launch. Just the data shapes — the SQLite I/O lives
+# in `driver-session/{core,native}`.
+
+[dependencies]
+led-core = { workspace = true }
+led-state-tabs = { workspace = true }
