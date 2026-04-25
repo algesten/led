@@ -110,6 +110,8 @@ pub(super) fn undo_global(
             .is_some_and(|m| m.disk_write);
         if disk_write {
             eb.saved_version = eb.version;
+            eb.disk_content_hash =
+                led_core::EphemeralContentHash::of_rope(&eb.rope).persist();
         }
         // Replacement bytes (Insert op's text length) for the
         // inverse driver cmd's match range.
@@ -216,6 +218,8 @@ pub(super) fn redo_global(
             .is_some_and(|m| m.disk_write);
         if disk_write {
             eb.saved_version = eb.version;
+            eb.disk_content_hash =
+                led_core::EphemeralContentHash::of_rope(&eb.rope).persist();
         }
         let original_bytes = group
             .ops

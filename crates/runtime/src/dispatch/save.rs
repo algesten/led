@@ -65,9 +65,11 @@ mod tests {
         // SaveNoFormat test's responsibility.
         let (mut tabs, mut edits, store, term) =
             fixture_with_content("hi", Dims { cols: 10, rows: 5 });
-        // Force dirty by bumping version past saved_version.
+        // Force dirty by bumping version + clearing the disk anchor
+        // so the rope's hash no longer matches.
         let eb = edits.buffers.get_mut(&canon("file.rs")).expect("seeded");
         eb.version = 1;
+        eb.disk_content_hash = led_core::PersistedContentHash::default();
         assert!(eb.dirty());
 
         dispatch_chord_default(

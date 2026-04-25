@@ -3107,13 +3107,14 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
     fn file_save_action_skips_clean_buffers() {
         let mut e = BufferEdits::default();
         let path = canon("clean.rs");
+        let rope = Arc::new(Rope::from_str("x"));
         e.buffers.insert(
             path.clone(),
             EditedBuffer {
-                rope: Arc::new(Rope::from_str("x")),
+                rope: rope.clone(),
                 version: 0,
                 saved_version: 0, // dirty() == false
-                disk_content_hash: led_core::PersistedContentHash::default(),
+                disk_content_hash: led_core::EphemeralContentHash::of_rope(&rope).persist(),
                 history: Default::default(),
             },
         );
@@ -3158,13 +3159,14 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
             Some(Dims { cols: 40, rows: 5 }),
         );
         // a.rs clean, b.rs dirty.
+        let a_rope = Arc::new(Rope::from_str("x"));
         e.buffers.insert(
             canon("a.rs"),
             EditedBuffer {
-                rope: Arc::new(Rope::from_str("x")),
+                rope: a_rope.clone(),
                 version: 0,
                 saved_version: 0,
-                disk_content_hash: led_core::PersistedContentHash::default(),
+                disk_content_hash: led_core::EphemeralContentHash::of_rope(&a_rope).persist(),
                 history: Default::default(),
             },
         );

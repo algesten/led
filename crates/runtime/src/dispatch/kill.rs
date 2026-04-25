@@ -19,19 +19,19 @@ pub(super) fn kill_region(
     edits: &mut BufferEdits,
     kill_ring: &mut KillRing,
     clip: &mut ClipboardState,
-) {
+) -> bool {
     let Some(id) = tabs.active else {
-        return;
+        return false;
     };
     let Some(idx) = tabs.open.iter().position(|t| t.id == id) else {
-        return;
+        return false;
     };
     let tab = &tabs.open[idx];
     let Some(eb) = edits.buffers.get(&tab.path) else {
-        return;
+        return false;
     };
     let Some((start, end)) = region_range(tab, &eb.rope) else {
-        return;
+        return false;
     };
     let before = tab.cursor;
 
@@ -54,6 +54,7 @@ pub(super) fn kill_region(
     clip.pending_write = Some(killed.clone());
 
     eb.history.record_delete(start, killed, before, after);
+    true
 }
 
 pub(super) fn kill_line(

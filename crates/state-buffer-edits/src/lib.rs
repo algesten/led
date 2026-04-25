@@ -102,9 +102,14 @@ pub struct EditedBuffer {
 
 impl EditedBuffer {
     /// True iff the rope has been modified since the last save /
-    /// load completion.
+    /// load completion. Compares the rope's current content hash
+    /// against the disk anchor — undoing back to disk-equivalent
+    /// content clears the flag the way legacy's `distance_from_
+    /// save() == 0` check does. Mirrors `BufferState::is_dirty`
+    /// in the legacy state crate.
     pub fn dirty(&self) -> bool {
-        self.version > self.saved_version
+        !led_core::EphemeralContentHash::of_rope(&self.rope)
+            .matches(self.disk_content_hash)
     }
 
     /// Fresh, clean seed for a buffer whose disk rope just arrived.
@@ -243,24 +248,32 @@ mod tests {
     }
 
     #[test]
-    fn dirty_flips_when_version_exceeds_saved_version() {
+    fn dirty_flips_when_rope_diverges_from_disk_anchor() {
         let mut eb = EditedBuffer::fresh(Arc::new(Rope::from_str("hi")));
-        eb.version = 3;
-        assert!(eb.dirty());
-        eb.saved_version = 3;
         assert!(!eb.dirty());
-        eb.version = 4; // user edited after save
+        // Mutate rope: hash diverges from disk anchor → dirty.
+        eb.rope = Arc::new(Rope::from_str("hi!"));
+        assert!(eb.dirty());
+        // Refresh anchor (simulating a save completion): clean again.
+        eb.disk_content_hash =
+            led_core::EphemeralContentHash::of_rope(&eb.rope).persist();
+        assert!(!eb.dirty());
+        // Mutate again: dirty flips back on.
+        eb.rope = Arc::new(Rope::from_str("hi!?"));
         assert!(eb.dirty());
     }
 
     #[test]
-    fn dirty_tracks_saved_version_not_a_flag() {
-        // A save at version 2 that completes after the user has
-        // edited to version 4 must leave the buffer dirty.
+    fn dirty_ignores_version_counters() {
+        // Legacy used `version > saved_version`; the rewrite uses
+        // a content hash so undoing back to disk-equivalent content
+        // clears the flag. version stays a memo input, never a
+        // dirty signal.
         let mut eb = EditedBuffer::fresh(Arc::new(Rope::from_str("x")));
         eb.version = 4;
-        eb.saved_version = 2; // write finished; recorded older version
-        assert!(eb.dirty());
+        eb.saved_version = 2;
+        // Rope still matches disk anchor → clean despite versions.
+        assert!(!eb.dirty());
     }
 
     #[test]

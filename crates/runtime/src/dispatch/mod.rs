@@ -453,7 +453,11 @@ fn refilter_active_session(
 }
 
 fn is_coalescable_insert(cmd: &Command) -> bool {
-    matches!(cmd, Command::InsertChar(c) if c.is_alphanumeric() || *c == '_')
+    // Every printable insert is coalescable — the actual word-
+    // boundary decision (close on whitespace-after-non-whitespace)
+    // lives in `History::record_insert_char` so a single group can
+    // span " appended" the way legacy does.
+    matches!(cmd, Command::InsertChar(_))
 }
 
 /// Commands whose primitive mutates the cursor via an edit (not a
@@ -812,10 +816,22 @@ fn run_command(
         }
         Command::SetMark => {
             set_mark_active(tabs);
+            alerts.set_info(
+                "Mark set".to_string(),
+                std::time::Instant::now(),
+                std::time::Duration::from_secs(2),
+            );
             DispatchOutcome::Continue
         }
         Command::KillRegion => {
-            kill_region(tabs, edits, kill_ring, clip);
+            let killed = kill_region(tabs, edits, kill_ring, clip);
+            if !killed {
+                alerts.set_info(
+                    "No region".to_string(),
+                    std::time::Instant::now(),
+                    std::time::Duration::from_secs(2),
+                );
+            }
             DispatchOutcome::Continue
         }
         Command::KillLine => {

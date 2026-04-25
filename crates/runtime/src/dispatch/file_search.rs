@@ -609,6 +609,8 @@ fn replace_selected(
         );
         super::shared::bump(eb, new_rope);
         eb.saved_version = eb.version;
+        eb.disk_content_hash =
+            led_core::EphemeralContentHash::of_rope(&eb.rope).persist();
         edits.pending_single_replace.push(
             led_state_buffer_edits::PendingSingleReplace {
                 path: hit.path.clone(),
@@ -751,6 +753,8 @@ fn unreplace_selected(
         );
         super::shared::bump(eb, new_rope);
         eb.saved_version = eb.version;
+        eb.disk_content_hash =
+            led_core::EphemeralContentHash::of_rope(&eb.rope).persist();
         let replacement_bytes = entry.replacement_text.len();
         let replacement_end_byte = entry.hit.match_start + replacement_bytes;
         edits.pending_single_replace.push(
@@ -919,6 +923,8 @@ fn apply_replace_all(
             // Preview stays clean — saved_version tracks the disk
             // state which the driver is about to write to match.
             eb.saved_version = eb.version;
+        eb.disk_content_hash =
+            led_core::EphemeralContentHash::of_rope(&eb.rope).persist();
             edits
                 .pending_replace_in_memory
                 .push(led_state_buffer_edits::InMemoryReplace {

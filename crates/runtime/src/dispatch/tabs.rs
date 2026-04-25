@@ -53,7 +53,19 @@ pub(super) fn kill_active(tabs: &mut Tabs, edits: &mut BufferEdits, alerts: &mut
         alerts.confirm_kill = Some(id);
         return;
     }
+    let basename = tabs.open[idx]
+        .path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
     force_kill(tabs, edits, id);
+    if !basename.is_empty() {
+        alerts.set_info(
+            format!("Killed {basename}"),
+            std::time::Instant::now(),
+            std::time::Duration::from_secs(2),
+        );
+    }
 }
 
 /// Unconditionally remove the tab with the given id. Drops its

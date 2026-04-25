@@ -236,8 +236,15 @@ impl History {
     ) {
         self.future.clear();
         self.applied += 1;
-        if is_word_char(ch)
-            && let Some(group) = self.current.as_mut()
+        // Legacy rule (`led/src/model/action/helpers.rs:62`,
+        // `maybe_close_group`): break the group on a word
+        // boundary, defined as "whitespace AFTER non-whitespace."
+        // Going from whitespace INTO non-whitespace (e.g. ' '
+        // then 'a') keeps the group open so " appended" undoes
+        // as one unit. Same rule for non-word punctuation —
+        // legacy doesn't break on punctuation, just on whitespace
+        // transitions.
+        if let Some(group) = self.current.as_mut()
             && let Some(EditOp::Insert {
                 at: last_at,
                 text: last_text,
@@ -245,9 +252,10 @@ impl History {
         {
             let last_len = last_text.chars().count();
             let is_adjacent = at == *last_at + last_len;
-            let last_ends_word =
-                last_text.chars().last().is_some_and(is_word_char);
-            if is_adjacent && last_ends_word {
+            let last_char = last_text.chars().last();
+            let break_on_boundary = ch.is_whitespace()
+                && last_char.is_some_and(|c| !c.is_whitespace());
+            if is_adjacent && !break_on_boundary {
                 group.ops.push(EditOp::Insert {
                     at,
                     text: Arc::from(ch.to_string()),
