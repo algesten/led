@@ -63,7 +63,7 @@ use cursor::{Move, move_cursor};
 use edit::{delete_back, delete_forward, insert_char, insert_newline};
 use kill::{kill_line, kill_region, request_yank};
 use mark::{clear_mark, set_mark_active};
-use nav::{jump_back, jump_forward, match_bracket, next_issue_active, prev_issue_active};
+use nav::{NavCtx, jump_back, jump_forward, match_bracket};
 use save::{request_save_active, request_save_all};
 use tabs::{cycle_active, force_kill, kill_active};
 use undo::{redo_active, undo_active};
@@ -1061,29 +1061,31 @@ impl<'a> Dispatcher<'a> {
                 DispatchOutcome::Continue
             }
             Command::NextIssue => {
-                next_issue_active(
-                    self.tabs,
-                    self.edits,
-                    self.diagnostics,
-                    self.git,
-                    self.jumps,
-                    self.alerts,
-                    self.terminal,
-                    self.browser,
-                );
+                NavCtx {
+                    tabs: self.tabs,
+                    edits: self.edits,
+                    diagnostics: self.diagnostics,
+                    git: self.git,
+                    jumps: self.jumps,
+                    alerts: self.alerts,
+                    terminal: self.terminal,
+                    browser: self.browser,
+                }
+                .next_issue();
                 DispatchOutcome::Continue
             }
             Command::PrevIssue => {
-                prev_issue_active(
-                    self.tabs,
-                    self.edits,
-                    self.diagnostics,
-                    self.git,
-                    self.jumps,
-                    self.alerts,
-                    self.terminal,
-                    self.browser,
-                );
+                NavCtx {
+                    tabs: self.tabs,
+                    edits: self.edits,
+                    diagnostics: self.diagnostics,
+                    git: self.git,
+                    jumps: self.jumps,
+                    alerts: self.alerts,
+                    terminal: self.terminal,
+                    browser: self.browser,
+                }
+                .prev_issue();
                 DispatchOutcome::Continue
             }
             Command::ExpandDir => {

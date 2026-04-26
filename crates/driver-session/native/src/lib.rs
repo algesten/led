@@ -123,13 +123,15 @@ fn worker_loop(rx: Receiver<SessionCmd>, tx: Sender<SessionEvent>, notify: Notif
                 let path_str = path.as_path().to_string_lossy().into_owned();
                 match flush_undo(
                     &ws.conn,
-                    &ws.root_path,
-                    &path_str,
-                    &chain_id,
-                    content_hash,
-                    undo_cursor,
-                    distance_from_save,
-                    &entries,
+                    &FlushUndoArgs {
+                        root_path: &ws.root_path,
+                        file_path: &path_str,
+                        chain_id: &chain_id,
+                        content_hash,
+                        undo_cursor,
+                        distance_from_save,
+                        entries: &entries,
+                    },
                 ) {
                     Ok(last_seq) => {
                         let _ = tx.send(SessionEvent::UndoFlushed {
@@ -441,17 +443,20 @@ fn load_session(
 
 // ── Undo flush / clear / load (legacy-exact structure) ───────
 
-#[allow(clippy::too_many_arguments)]
-fn flush_undo(
-    conn: &Connection,
-    root_path: &str,
-    file_path: &str,
-    chain_id: &str,
+/// Bundle of SQL params + entries slice for [`flush_undo`].
+/// Carved out so the helper takes a small `&FlushUndoArgs<'_>`
+/// instead of an 8-positional-arg list.
+struct FlushUndoArgs<'a> {
+    root_path: &'a str,
+    file_path: &'a str,
+    chain_id: &'a str,
     content_hash: PersistedContentHash,
     undo_cursor: usize,
     distance_from_save: i32,
-    entries: &[EditGroup],
-) -> rusqlite::Result<i64> {
+    entries: &'a [EditGroup],
+}
+
+fn flush_undo(conn: &Connection, args: &FlushUndoArgs<'_>) -> rusqlite::Result<i64> {
     let tx = conn.unchecked_transaction()?;
 
     tx.prepare_cached(
@@ -460,22 +465,22 @@ fn flush_undo(
          VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
     )?
     .execute(params![
-        root_path,
-        file_path,
-        chain_id,
-        content_hash.0 as i64,
-        undo_cursor as i64,
-        distance_from_save,
+        args.root_path,
+        args.file_path,
+        args.chain_id,
+        args.content_hash.0 as i64,
+        args.undo_cursor as i64,
+        args.distance_from_save,
     ])?;
 
     let mut stmt = tx.prepare_cached(
         "INSERT INTO undo_entries (root_path, file_path, entry_data) VALUES (?1, ?2, ?3)",
     )?;
-    for entry in entries {
+    for entry in args.entries {
         let bytes = rmp_serde::to_vec(entry).map_err(|e| {
             rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::other(e)))
         })?;
-        stmt.execute(params![root_path, file_path, bytes])?;
+        stmt.execute(params![args.root_path, args.file_path, bytes])?;
     }
     drop(stmt);
 
@@ -484,7 +489,7 @@ fn flush_undo(
             "SELECT COALESCE(MAX(seq), 0) FROM undo_entries
              WHERE root_path = ?1 AND file_path = ?2",
         )?
-        .query_row(params![root_path, file_path], |row| row.get(0))?;
+        .query_row(params![args.root_path, args.file_path], |row| row.get(0))?;
 
     tx.commit()?;
     Ok(last_seq)

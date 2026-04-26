@@ -1001,16 +1001,16 @@ fn paint_side_panel(panel: &SidePanelModel, area: Rect, theme: &Theme, buf: &mut
                 replace_mode,
             } = panel.mode
         {
-            paint_file_search_header(
-                row_x,
-                buf_row,
+            paint_file_search_header(FileSearchHeaderPaint {
+                col_start: row_x,
+                row: buf_row,
                 cols,
                 case_sensitive,
                 use_regex,
                 replace_mode,
                 theme,
                 buf,
-            );
+            });
             continue;
         }
         if let Some(entry) = panel.rows.get(row as usize) {
@@ -1204,17 +1204,31 @@ fn paint_side_border(x: u16, rows: u16, theme: &Theme, buf: &mut Buffer) {
 /// space and gaps between glyphs stay unstyled so the eye can
 /// separate the three toggles at a glance. Pads with spaces to the
 /// full panel width.
-#[allow(clippy::too_many_arguments)]
-fn paint_file_search_header(
+/// Bundle of layout coords + UI flags + theme + buffer for
+/// [`paint_file_search_header`]. Carved out so the helper takes
+/// a single argument instead of an 8-positional-arg list.
+struct FileSearchHeaderPaint<'a> {
     col_start: u16,
     row: u16,
     cols: usize,
     case_sensitive: bool,
     use_regex: bool,
     replace_mode: bool,
-    theme: &Theme,
-    buf: &mut Buffer,
-) {
+    theme: &'a Theme,
+    buf: &'a mut Buffer,
+}
+
+fn paint_file_search_header(args: FileSearchHeaderPaint<'_>) {
+    let FileSearchHeaderPaint {
+        col_start,
+        row,
+        cols,
+        case_sensitive,
+        use_regex,
+        replace_mode,
+        theme,
+        buf,
+    } = args;
     let on = theme.search_toggle_on;
     let mut printed = 0usize;
     let mut col = col_start;

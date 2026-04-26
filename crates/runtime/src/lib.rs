@@ -754,10 +754,17 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
                     // Stage 5 handles the post-commit apply.
                 }
                 LspEvent::GotoDefinition { seq, location } => {
-                    apply_goto_definition(
-                        tabs, edits, jumps, alerts, lsp_pending,
-                        terminal, browser, path_chains, seq, location,
-                    );
+                    LspGotoApply {
+                        tabs,
+                        edits,
+                        jumps,
+                        alerts,
+                        lsp_pending,
+                        terminal,
+                        browser,
+                        path_chains,
+                    }
+                    .apply(seq, location);
                 }
                 LspEvent::Edits {
                     seq,
@@ -2409,6 +2416,20 @@ fn completion_prefix(
     eb.rope.slice(from..to).to_string()
 }
 
+/// Bundle of references `LspGotoApply::apply` needs. Carved out
+/// of the runtime tick / test sites so the apply method can take
+/// a small `&mut self` instead of an 8-positional-arg list.
+struct LspGotoApply<'a> {
+    tabs: &'a mut Tabs,
+    edits: &'a BufferEdits,
+    jumps: &'a mut JumpListState,
+    alerts: &'a mut AlertState,
+    lsp_pending: &'a mut led_state_lsp::LspPending,
+    terminal: &'a led_driver_terminal_core::Terminal,
+    browser: &'a led_state_browser::BrowserUi,
+    path_chains: &'a mut std::collections::HashMap<CanonPath, PathChain>,
+}
+
 /// Apply a goto-definition response: record a jump, switch to
 /// the target tab (when open), move the cursor. Dropped
 /// silently if the seq doesn't match the latest outstanding
@@ -2420,107 +2441,106 @@ fn completion_prefix(
 /// currently-open tabs is deferred to M21 (session / persistence
 /// will stash a pending cursor the same way find-file does);
 /// for M18 the jump silent-no-ops when the path isn't open.
-#[allow(clippy::too_many_arguments)]
-fn apply_goto_definition(
-    tabs: &mut Tabs,
-    edits: &BufferEdits,
-    jumps: &mut JumpListState,
-    alerts: &mut AlertState,
-    lsp_pending: &mut led_state_lsp::LspPending,
-    terminal: &led_driver_terminal_core::Terminal,
-    browser: &led_state_browser::BrowserUi,
-    path_chains: &mut std::collections::HashMap<CanonPath, PathChain>,
-    seq: u64,
-    location: Option<led_driver_lsp_core::Location>,
-) {
-    if lsp_pending.latest_goto_seq != Some(seq) {
-        return;
-    }
-    lsp_pending.latest_goto_seq = None;
-    let Some(loc) = location else {
-        alerts.set_warn(
-            "lsp.goto".to_string(),
-            "No definition found".to_string(),
-        );
-        return;
-    };
-    // Capture the pre-jump position before applying the
-    // target, so Alt-b returns to where the user called the
-    // command from.
-    let Some(current) = current_jump_position(tabs) else {
-        return;
-    };
-    jumps.record(current);
+impl<'a> LspGotoApply<'a> {
+    fn apply(&mut self, seq: u64, location: Option<led_driver_lsp_core::Location>) {
+        let tabs = &mut *self.tabs;
+        let edits = self.edits;
+        let jumps = &mut *self.jumps;
+        let alerts = &mut *self.alerts;
+        let lsp_pending = &mut *self.lsp_pending;
+        let terminal = self.terminal;
+        let browser = self.browser;
+        let path_chains = &mut *self.path_chains;
 
-    // Two paths now (M21):
-    //   * Buffer is already loaded → land cursor + recenter
-    //     scroll inline, exactly like before.
-    //   * Buffer not yet loaded → open / focus a tab at the
-    //     target path and stash the cursor as `pending_cursor`.
-    //     The load-completion ingest applies it once the rope
-    //     materialises.
-    if let Some(idx) = tabs.open.iter().position(|t| t.path == loc.path)
-        && let Some(eb) = edits.buffers.get(&loc.path)
-    {
-        let line_count = eb.rope.len_lines();
-        let line = (loc.line as usize).min(line_count.saturating_sub(1));
-        let line_start = eb.rope.line_to_char(line);
-        let line_end = if line + 1 < line_count {
-            eb.rope.line_to_char(line + 1)
-        } else {
-            eb.rope.len_chars()
+        if lsp_pending.latest_goto_seq != Some(seq) {
+            return;
+        }
+        lsp_pending.latest_goto_seq = None;
+        let Some(loc) = location else {
+            alerts.set_warn(
+                "lsp.goto".to_string(),
+                "No definition found".to_string(),
+            );
+            return;
         };
-        let line_len = line_end.saturating_sub(line_start);
-        let col = (loc.col as usize).min(line_len);
-        let body_rows = terminal
-            .dims
-            .map(|d| {
-                led_driver_terminal_core::Layout::compute(d, browser.visible)
-                    .editor_area
-                    .rows as usize
-            })
-            .unwrap_or(0);
-        let content_cols = dispatch::editor_content_cols(terminal, browser);
-        let tab = &mut tabs.open[idx];
-        tab.cursor.line = line;
-        tab.cursor.col = col;
-        tab.cursor.preferred_col = col;
-        tab.scroll = dispatch::center_on_cursor(
-            tab.scroll,
-            tab.cursor,
-            body_rows,
-            &eb.rope,
-            content_cols,
-        );
-        tabs.active = Some(tab.id);
-        alerts.clear_warn("lsp.goto");
-        return;
-    }
+        // Capture the pre-jump position before applying the
+        // target, so Alt-b returns to where the user called the
+        // command from.
+        let Some(current) = current_jump_position(tabs) else {
+            return;
+        };
+        jumps.record(current);
 
-    // Open a fresh tab at the target path with a pending
-    // cursor; the load-completion hook applies it. Stash the
-    // path-chain so the language detector picks up the
-    // user-typed extension on load.
-    let chain = led_core::UserPath::new(loc.path.as_path()).resolve_chain();
-    path_chains.insert(loc.path.clone(), chain);
-    dispatch::open_or_focus_tab(tabs, &loc.path, true);
-    if let Some(tab) = tabs
-        .open
-        .iter_mut()
-        .find(|t| t.path == loc.path)
-    {
-        tab.pending_cursor = Some(led_state_tabs::Cursor {
-            line: loc.line as usize,
-            col: loc.col as usize,
-            preferred_col: loc.col as usize,
-        });
-        // Don't pre-set a scroll — let the load-completion
-        // hook clear pending_scroll = None and the active tab
-        // tick recenter via the scroll-adjust pass on the next
-        // cursor move (or via a future "if pending_cursor and
-        // pending_scroll is None, recenter on apply" path).
+        // Two paths now (M21):
+        //   * Buffer is already loaded → land cursor + recenter
+        //     scroll inline, exactly like before.
+        //   * Buffer not yet loaded → open / focus a tab at the
+        //     target path and stash the cursor as `pending_cursor`.
+        //     The load-completion ingest applies it once the rope
+        //     materialises.
+        if let Some(idx) = tabs.open.iter().position(|t| t.path == loc.path)
+            && let Some(eb) = edits.buffers.get(&loc.path)
+        {
+            let line_count = eb.rope.len_lines();
+            let line = (loc.line as usize).min(line_count.saturating_sub(1));
+            let line_start = eb.rope.line_to_char(line);
+            let line_end = if line + 1 < line_count {
+                eb.rope.line_to_char(line + 1)
+            } else {
+                eb.rope.len_chars()
+            };
+            let line_len = line_end.saturating_sub(line_start);
+            let col = (loc.col as usize).min(line_len);
+            let body_rows = terminal
+                .dims
+                .map(|d| {
+                    led_driver_terminal_core::Layout::compute(d, browser.visible)
+                        .editor_area
+                        .rows as usize
+                })
+                .unwrap_or(0);
+            let content_cols = dispatch::editor_content_cols(terminal, browser);
+            let tab = &mut tabs.open[idx];
+            tab.cursor.line = line;
+            tab.cursor.col = col;
+            tab.cursor.preferred_col = col;
+            tab.scroll = dispatch::center_on_cursor(
+                tab.scroll,
+                tab.cursor,
+                body_rows,
+                &eb.rope,
+                content_cols,
+            );
+            tabs.active = Some(tab.id);
+            alerts.clear_warn("lsp.goto");
+            return;
+        }
+
+        // Open a fresh tab at the target path with a pending
+        // cursor; the load-completion hook applies it. Stash the
+        // path-chain so the language detector picks up the
+        // user-typed extension on load.
+        let chain = led_core::UserPath::new(loc.path.as_path()).resolve_chain();
+        path_chains.insert(loc.path.clone(), chain);
+        dispatch::open_or_focus_tab(tabs, &loc.path, true);
+        if let Some(tab) = tabs
+            .open
+            .iter_mut()
+            .find(|t| t.path == loc.path)
+        {
+            tab.pending_cursor = Some(led_state_tabs::Cursor {
+                line: loc.line as usize,
+                col: loc.col as usize,
+                preferred_col: loc.col as usize,
+            });
+            // Don't pre-set a scroll — let the load-completion
+            // hook clear pending_scroll = None and the active tab
+            // tick recenter via the scroll-adjust pass on the next
+            // cursor move (or via a future "if pending_cursor and
+            // pending_scroll is None, recenter on apply" path).
+        }
+        alerts.clear_warn("lsp.goto");
     }
-    alerts.clear_warn("lsp.goto");
 }
 
 fn current_jump_position(tabs: &Tabs) -> Option<led_state_jumps::JumpPosition> {
@@ -3431,15 +3451,17 @@ mod tests {
         };
         let mut _path_chains: std::collections::HashMap<CanonPath, PathChain> =
             std::collections::HashMap::new();
-        apply_goto_definition(
-            &mut tabs,
-            &edits,
-            &mut jumps,
-            &mut alerts,
-            &mut lsp_pending,
-            &led_driver_terminal_core::Terminal::default(),
-            &led_state_browser::BrowserUi::default(),
-            &mut _path_chains,
+        LspGotoApply {
+            tabs: &mut tabs,
+            edits: &edits,
+            jumps: &mut jumps,
+            alerts: &mut alerts,
+            lsp_pending: &mut lsp_pending,
+            terminal: &led_driver_terminal_core::Terminal::default(),
+            browser: &led_state_browser::BrowserUi::default(),
+            path_chains: &mut _path_chains,
+        }
+        .apply(
             42,
             Some(led_driver_lsp_core::Location {
                 path: canon("main.rs"),
@@ -3473,15 +3495,17 @@ mod tests {
         };
         let mut _path_chains: std::collections::HashMap<CanonPath, PathChain> =
             std::collections::HashMap::new();
-        apply_goto_definition(
-            &mut tabs,
-            &edits,
-            &mut jumps,
-            &mut alerts,
-            &mut lsp_pending,
-            &led_driver_terminal_core::Terminal::default(),
-            &led_state_browser::BrowserUi::default(),
-            &mut _path_chains,
+        LspGotoApply {
+            tabs: &mut tabs,
+            edits: &edits,
+            jumps: &mut jumps,
+            alerts: &mut alerts,
+            lsp_pending: &mut lsp_pending,
+            terminal: &led_driver_terminal_core::Terminal::default(),
+            browser: &led_state_browser::BrowserUi::default(),
+            path_chains: &mut _path_chains,
+        }
+        .apply(
             /* stale */ 7,
             Some(led_driver_lsp_core::Location {
                 path: canon("main.rs"),
@@ -3532,18 +3556,20 @@ mod tests {
         };
         let mut _path_chains: std::collections::HashMap<CanonPath, PathChain> =
             std::collections::HashMap::new();
-        apply_goto_definition(
-            &mut tabs,
-            &edits,
-            &mut jumps,
-            &mut alerts,
-            &mut lsp_pending,
-            &term,
-            &led_state_browser::BrowserUi {
+        LspGotoApply {
+            tabs: &mut tabs,
+            edits: &edits,
+            jumps: &mut jumps,
+            alerts: &mut alerts,
+            lsp_pending: &mut lsp_pending,
+            terminal: &term,
+            browser: &led_state_browser::BrowserUi {
                 visible: false,
                 ..Default::default()
             },
-            &mut _path_chains,
+            path_chains: &mut _path_chains,
+        }
+        .apply(
             1,
             Some(led_driver_lsp_core::Location {
                 path: path.clone(),
@@ -3592,18 +3618,20 @@ mod tests {
         };
         let mut _path_chains: std::collections::HashMap<CanonPath, PathChain> =
             std::collections::HashMap::new();
-        apply_goto_definition(
-            &mut tabs,
-            &edits,
-            &mut jumps,
-            &mut alerts,
-            &mut lsp_pending,
-            &term,
-            &led_state_browser::BrowserUi {
+        LspGotoApply {
+            tabs: &mut tabs,
+            edits: &edits,
+            jumps: &mut jumps,
+            alerts: &mut alerts,
+            lsp_pending: &mut lsp_pending,
+            terminal: &term,
+            browser: &led_state_browser::BrowserUi {
                 visible: false,
                 ..Default::default()
             },
-            &mut _path_chains,
+            path_chains: &mut _path_chains,
+        }
+        .apply(
             1,
             Some(led_driver_lsp_core::Location {
                 path: path.clone(),
@@ -3630,18 +3658,17 @@ mod tests {
         };
         let mut _path_chains: std::collections::HashMap<CanonPath, PathChain> =
             std::collections::HashMap::new();
-        apply_goto_definition(
-            &mut tabs,
-            &edits,
-            &mut jumps,
-            &mut alerts,
-            &mut lsp_pending,
-            &led_driver_terminal_core::Terminal::default(),
-            &led_state_browser::BrowserUi::default(),
-            &mut _path_chains,
-            1,
-            None,
-        );
+        LspGotoApply {
+            tabs: &mut tabs,
+            edits: &edits,
+            jumps: &mut jumps,
+            alerts: &mut alerts,
+            lsp_pending: &mut lsp_pending,
+            terminal: &led_driver_terminal_core::Terminal::default(),
+            browser: &led_state_browser::BrowserUi::default(),
+            path_chains: &mut _path_chains,
+        }
+        .apply(1, None);
         assert!(alerts.warns.iter().any(|(k, _)| k == "lsp.goto"));
     }
 
@@ -3966,15 +3993,17 @@ mod tests {
         let mut path_chains: std::collections::HashMap<CanonPath, PathChain> =
             std::collections::HashMap::new();
         let target = canon("other.rs");
-        apply_goto_definition(
-            &mut tabs,
-            &edits,
-            &mut jumps,
-            &mut alerts,
-            &mut lsp_pending,
-            &led_driver_terminal_core::Terminal::default(),
-            &led_state_browser::BrowserUi::default(),
-            &mut path_chains,
+        LspGotoApply {
+            tabs: &mut tabs,
+            edits: &edits,
+            jumps: &mut jumps,
+            alerts: &mut alerts,
+            lsp_pending: &mut lsp_pending,
+            terminal: &led_driver_terminal_core::Terminal::default(),
+            browser: &led_state_browser::BrowserUi::default(),
+            path_chains: &mut path_chains,
+        }
+        .apply(
             1,
             Some(led_driver_lsp_core::Location {
                 path: target.clone(),

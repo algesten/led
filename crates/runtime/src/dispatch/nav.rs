@@ -8,7 +8,7 @@
 //!   cursor and activating the target tab. From head, saves the
 //!   current position first.
 //! - [`jump_forward`] — the mirror.
-//! - [`next_issue_active`] / [`prev_issue_active`] — walk the
+//! - [`NavCtx::next_issue`] / [`NavCtx::prev_issue`] — walk the
 //!   `IssueCategory::NAV_LEVELS` tier ladder to find the next / prev
 //!   issue (LSP error, LSP warning, git unstaged, …) and jump there.
 //!   Stays inside the first non-empty tier so an error-rich file
@@ -406,136 +406,110 @@ fn clamp_row_to_buffer(edits: &BufferEdits, path: &CanonPath, row: usize) -> usi
 
 const ISSUE_NAV_TTL: Duration = Duration::from_secs(2);
 
-/// Alt-. (forward) — jump to the next issue in the highest
-/// non-empty tier.
-#[allow(clippy::too_many_arguments)]
-pub(super) fn next_issue_active(
-    tabs: &mut Tabs,
-    edits: &BufferEdits,
-    diagnostics: &DiagnosticsStates,
-    git: &GitState,
-    jumps: &mut JumpListState,
-    alerts: &mut AlertState,
-    terminal: &Terminal,
-    browser: &BrowserUi,
-) {
-    nav_issue(
-        tabs,
-        edits,
-        diagnostics,
-        git,
-        jumps,
-        alerts,
-        terminal,
-        browser,
-        true,
-    );
+/// Bundle of references the issue-navigation helpers all share.
+/// Carved out so `next_issue` / `prev_issue` / `nav_issue` take
+/// a small `&mut self` instead of an 8-positional-arg list.
+pub(super) struct NavCtx<'a> {
+    pub(super) tabs: &'a mut Tabs,
+    pub(super) edits: &'a BufferEdits,
+    pub(super) diagnostics: &'a DiagnosticsStates,
+    pub(super) git: &'a GitState,
+    pub(super) jumps: &'a mut JumpListState,
+    pub(super) alerts: &'a mut AlertState,
+    pub(super) terminal: &'a Terminal,
+    pub(super) browser: &'a BrowserUi,
 }
 
-/// Alt-, (backward) — mirror of `next_issue_active`.
-#[allow(clippy::too_many_arguments)]
-pub(super) fn prev_issue_active(
-    tabs: &mut Tabs,
-    edits: &BufferEdits,
-    diagnostics: &DiagnosticsStates,
-    git: &GitState,
-    jumps: &mut JumpListState,
-    alerts: &mut AlertState,
-    terminal: &Terminal,
-    browser: &BrowserUi,
-) {
-    nav_issue(
-        tabs,
-        edits,
-        diagnostics,
-        git,
-        jumps,
-        alerts,
-        terminal,
-        browser,
-        false,
-    );
-}
-
-#[allow(clippy::too_many_arguments)]
-fn nav_issue(
-    tabs: &mut Tabs,
-    edits: &BufferEdits,
-    diagnostics: &DiagnosticsStates,
-    git: &GitState,
-    jumps: &mut JumpListState,
-    alerts: &mut AlertState,
-    terminal: &Terminal,
-    browser: &BrowserUi,
-    forward: bool,
-) {
-    let Some(outcome) = compute_navigation(tabs, edits, diagnostics, git, forward) else {
-        return;
-    };
-
-    // Always record the pre-jump position so Alt-b round-trips,
-    // regardless of whether the target is already open or not.
-    if let Some(current) = current_position(tabs) {
-        jumps.record(current);
+impl<'a> NavCtx<'a> {
+    /// Alt-. (forward) — jump to the next issue in the highest
+    /// non-empty tier.
+    pub(super) fn next_issue(&mut self) {
+        self.nav_issue(true);
     }
 
-    let info = outcome.category.info();
-    let msg = format!(
-        "Jumped to {} {}/{}",
-        info.label, outcome.position, outcome.total,
-    );
+    /// Alt-, (backward) — mirror of `next_issue`.
+    pub(super) fn prev_issue(&mut self) {
+        self.nav_issue(false);
+    }
 
-    // Two paths (M21):
-    //   * Buffer is already loaded → land cursor + recenter
-    //     scroll inline.
-    //   * Buffer not yet loaded → open / focus a tab at the
-    //     target path and stash the cursor as `pending_cursor`.
-    //     The load-completion ingest applies it once the rope
-    //     materialises.
-    if let Some(target_idx) = tabs
-        .open
-        .iter()
-        .position(|t| t.path == outcome.target_path)
-        && let Some(eb) = edits.buffers.get(&outcome.target_path)
-    {
-        let rope = &eb.rope;
-        let line_count = rope.len_lines();
-        let line = outcome.target_row.min(line_count.saturating_sub(1));
-        let col = outcome.target_col.min(line_char_len(rope, line));
-        let body_rows = terminal
-            .dims
-            .map(|d| {
-                led_driver_terminal_core::Layout::compute(d, browser.visible)
-                    .editor_area
-                    .rows as usize
-            })
-            .unwrap_or(0);
-        let content_cols = editor_content_cols(terminal, browser);
-        let tab = &mut tabs.open[target_idx];
-        tab.cursor.line = line;
-        tab.cursor.col = col;
-        tab.cursor.preferred_col = col;
-        tab.scroll = center_on_cursor(tab.scroll, tab.cursor, body_rows, rope, content_cols);
-        tabs.active = Some(tab.id);
+    fn nav_issue(&mut self, forward: bool) {
+        let tabs = &mut *self.tabs;
+        let edits = self.edits;
+        let diagnostics = self.diagnostics;
+        let git = self.git;
+        let jumps = &mut *self.jumps;
+        let alerts = &mut *self.alerts;
+        let terminal = self.terminal;
+        let browser = self.browser;
+
+        let Some(outcome) = compute_navigation(tabs, edits, diagnostics, git, forward) else {
+            return;
+        };
+
+        // Always record the pre-jump position so Alt-b round-trips,
+        // regardless of whether the target is already open or not.
+        if let Some(current) = current_position(tabs) {
+            jumps.record(current);
+        }
+
+        let info = outcome.category.info();
+        let msg = format!(
+            "Jumped to {} {}/{}",
+            info.label, outcome.position, outcome.total,
+        );
+
+        // Two paths (M21):
+        //   * Buffer is already loaded → land cursor + recenter
+        //     scroll inline.
+        //   * Buffer not yet loaded → open / focus a tab at the
+        //     target path and stash the cursor as `pending_cursor`.
+        //     The load-completion ingest applies it once the rope
+        //     materialises.
+        if let Some(target_idx) = tabs
+            .open
+            .iter()
+            .position(|t| t.path == outcome.target_path)
+            && let Some(eb) = edits.buffers.get(&outcome.target_path)
+        {
+            let rope = &eb.rope;
+            let line_count = rope.len_lines();
+            let line = outcome.target_row.min(line_count.saturating_sub(1));
+            let col = outcome.target_col.min(line_char_len(rope, line));
+            let body_rows = terminal
+                .dims
+                .map(|d| {
+                    led_driver_terminal_core::Layout::compute(d, browser.visible)
+                        .editor_area
+                        .rows as usize
+                })
+                .unwrap_or(0);
+            let content_cols = editor_content_cols(terminal, browser);
+            let tab = &mut tabs.open[target_idx];
+            tab.cursor.line = line;
+            tab.cursor.col = col;
+            tab.cursor.preferred_col = col;
+            tab.scroll = center_on_cursor(tab.scroll, tab.cursor, body_rows, rope, content_cols);
+            tabs.active = Some(tab.id);
+            alerts.set_info(msg, Instant::now(), ISSUE_NAV_TTL);
+            return;
+        }
+
+        // Open / focus a tab at the target path and stash the
+        // pending cursor; the load-completion hook does the apply.
+        super::shared::open_or_focus_tab(tabs, &outcome.target_path, true);
+        if let Some(tab) = tabs
+            .open
+            .iter_mut()
+            .find(|t| t.path == outcome.target_path)
+        {
+            tab.pending_cursor = Some(led_state_tabs::Cursor {
+                line: outcome.target_row,
+                col: outcome.target_col,
+                preferred_col: outcome.target_col,
+            });
+        }
         alerts.set_info(msg, Instant::now(), ISSUE_NAV_TTL);
-        return;
     }
-
-    // Open / focus a tab at the target path and stash the
-    // pending cursor; the load-completion hook does the apply.
-    super::shared::open_or_focus_tab(tabs, &outcome.target_path, true);
-    if let Some(tab) = tabs
-        .open
-        .iter_mut()
-        .find(|t| t.path == outcome.target_path)
-    {
-        tab.pending_cursor = Some(led_state_tabs::Cursor {
-            line: outcome.target_row,
-            col: outcome.target_col,
-            preferred_col: outcome.target_col,
-        });
-    }
-    alerts.set_info(msg, Instant::now(), ISSUE_NAV_TTL);
 }
 
 #[cfg(test)]
@@ -893,16 +867,17 @@ mod tests {
             visible: false,
             ..Default::default()
         };
-        next_issue_active(
-            &mut tabs,
-            &edits,
-            &diags,
-            &git,
-            &mut jumps,
-            &mut alerts,
-            &term,
-            &browser,
-        );
+        NavCtx {
+            tabs: &mut tabs,
+            edits: &edits,
+            diagnostics: &diags,
+            git: &git,
+            jumps: &mut jumps,
+            alerts: &mut alerts,
+            terminal: &term,
+            browser: &browser,
+        }
+        .next_issue();
         assert_eq!(tabs.open[0].cursor.line, 3);
         assert_eq!(tabs.open[0].cursor.col, 0);
         assert_eq!(jumps.entries.len(), 1);
@@ -952,16 +927,17 @@ mod tests {
             preferred_col: 0,
         };
         tabs.open[0].scroll = Scroll::default();
-        next_issue_active(
-            &mut tabs,
-            &edits,
-            &diags,
-            &git,
-            &mut jumps,
-            &mut alerts,
-            &term,
-            &browser,
-        );
+        NavCtx {
+            tabs: &mut tabs,
+            edits: &edits,
+            diagnostics: &diags,
+            git: &git,
+            jumps: &mut jumps,
+            alerts: &mut alerts,
+            terminal: &term,
+            browser: &browser,
+        }
+        .next_issue();
         assert_eq!(tabs.open[0].cursor.line, 1, "wrapped back to first error");
     }
 
@@ -985,16 +961,17 @@ mod tests {
         let git = M20aGitState::default();
         let mut jumps = JumpListState::default();
         let mut alerts = M20aAlertState::default();
-        next_issue_active(
-            &mut tabs,
-            &edits,
-            &diags,
-            &git,
-            &mut jumps,
-            &mut alerts,
-            &TerminalAtom::default(),
-            &BrowserUi::default(),
-        );
+        NavCtx {
+            tabs: &mut tabs,
+            edits: &edits,
+            diagnostics: &diags,
+            git: &git,
+            jumps: &mut jumps,
+            alerts: &mut alerts,
+            terminal: &TerminalAtom::default(),
+            browser: &BrowserUi::default(),
+        }
+        .next_issue();
         let new_tab = tabs
             .open
             .iter()

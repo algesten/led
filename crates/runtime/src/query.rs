@@ -625,16 +625,16 @@ pub fn body_model<'a>(inputs: BodyInputs<'a>) -> BodyModel {
             .filter(|bd| bd.hash == current_hash)
             .map(|bd| bd.diagnostics.as_slice());
         let line_statuses = git.line_statuses.get(&tab.path).map(|v| v.as_slice());
-        return render_content(
-            &eb.rope,
-            tab.cursor,
-            tab.scroll,
+        return render_content(RenderContentArgs {
+            rope: &eb.rope,
+            cursor: tab.cursor,
+            scroll: tab.scroll,
             area,
-            highlight,
-            spans.as_deref().map(|v: &Vec<TokenSpan>| v.as_slice()),
-            diags,
-            line_statuses,
-        );
+            match_highlight: highlight,
+            rebased_tokens: spans.as_deref().map(|v: &Vec<TokenSpan>| v.as_slice()),
+            diagnostics: diags,
+            git_line_statuses: line_statuses,
+        });
     }
     // No BufferEdits entry yet — the load hasn't been seeded
     // into the edit-view source. Fall back to what `BufferStore`
@@ -651,16 +651,16 @@ pub fn body_model<'a>(inputs: BodyInputs<'a>) -> BodyModel {
     };
     let highlight = active_body_match(&overlays, &tab.path, tab.scroll, area, rope_ref);
     let line_statuses = git.line_statuses.get(&tab.path).map(|v| v.as_slice());
-    render_content(
-        rope_ref,
-        tab.cursor,
-        tab.scroll,
+    render_content(RenderContentArgs {
+        rope: rope_ref,
+        cursor: tab.cursor,
+        scroll: tab.scroll,
         area,
-        highlight,
-        None,
-        None,
-        line_statuses,
-    )
+        match_highlight: highlight,
+        rebased_tokens: None,
+        diagnostics: None,
+        git_line_statuses: line_statuses,
+    })
 }
 
 /// Apply any edits the user made between the parse and now onto
@@ -794,19 +794,34 @@ fn active_body_match(
     })
 }
 
-#[allow(clippy::too_many_arguments)]
-fn render_content(
-    rope: &Rope,
+/// Bundle of inputs for [`render_content`]. Plain helper struct
+/// (not a `drv::Input` projection) — this is internal helper
+/// plumbing called by the `body_model` memo, not a memo itself.
+struct RenderContentArgs<'a> {
+    rope: &'a Rope,
     cursor: Cursor,
     scroll: Scroll,
     area: Rect,
     match_highlight: Option<led_driver_terminal_core::BodyMatch>,
-    rebased_tokens: Option<&[TokenSpan]>,
-    diagnostics: Option<&[Diagnostic]>,
-    git_line_statuses: Option<&[led_core::git::LineStatus]>,
-) -> BodyModel {
+    rebased_tokens: Option<&'a [TokenSpan]>,
+    diagnostics: Option<&'a [Diagnostic]>,
+    git_line_statuses: Option<&'a [led_core::git::LineStatus]>,
+}
+
+fn render_content(args: RenderContentArgs<'_>) -> BodyModel {
     use led_driver_terminal_core::BodyLine;
     use led_core::{SubLine, sub_line_count, sub_line_range};
+
+    let RenderContentArgs {
+        rope,
+        cursor,
+        scroll,
+        area,
+        match_highlight,
+        rebased_tokens,
+        diagnostics,
+        git_line_statuses,
+    } = args;
 
     let body_rows = area.rows as usize;
     let line_count = rope.len_lines();
