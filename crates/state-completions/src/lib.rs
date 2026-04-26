@@ -185,7 +185,7 @@ pub fn is_identity_match(item: &CompletionItem, prefix: &str) -> bool {
         .text_edit
         .as_ref()
         .map(|te| te.new_text.as_ref())
-        .or_else(|| item.insert_text.as_deref())
+        .or(item.insert_text.as_deref())
         .unwrap_or_else(|| item.label.as_ref());
     effective == prefix
 }

@@ -242,11 +242,10 @@ pub fn diff<'a>(prev: &Buffer, next: &'a Buffer) -> Vec<(u16, u16, &'a Cell)> {
         let mut out: Vec<(u16, u16, &Cell)> = Vec::with_capacity(next.cells.len());
         for row in 0..next.rows {
             for col in 0..next.cols {
-                if let Some(cell) = next.cell(row, col) {
-                    if *cell != Cell::BLANK {
+                if let Some(cell) = next.cell(row, col)
+                    && *cell != Cell::BLANK {
                         out.push((row, col, cell));
                     }
-                }
             }
         }
         return out;

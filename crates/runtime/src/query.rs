@@ -563,22 +563,9 @@ const GUTTER_WIDTH: usize = 2;
 /// emacs/led behaviour.
 const TRAILING_RESERVED_COLS: usize = 0;
 
-/// Body slice of the render frame.
-///
-/// Reads the active tab's cursor + scroll to produce the visible line
-/// slice and a body-relative cursor position. Scroll is source state
-/// on [`Tab`]; dispatch maintains the "keep cursor visible" invariant
-/// so the cursor is normally inside the returned window.
-///
-/// Prefers [`BufferEdits`] (the user-edited view) over [`BufferStore`]
-/// (the disk snapshot). In steady state — loaded + seeded — the
-/// edits branch always wins; the store fallback covers the brief
-/// window between a load completion and the runtime's next
-/// BufferEdits seed, plus Pending / Error paths that never made it
-/// to `Ready`.
 /// Bundled input for [`body_model`] — drv 0.4 nested-inputs
 /// shape. Reduces the memo signature from 7 positional args to
-/// 1. Callers build one labelled struct literal; drv's
+/// one. Callers build one labelled struct literal; drv's
 /// per-field equality walks into each projection normally.
 #[derive(Copy, Clone, drv::Input)]
 pub struct BodyInputs<'a> {
@@ -592,6 +579,19 @@ pub struct BodyInputs<'a> {
     pub area: Rect,
 }
 
+/// Body slice of the render frame.
+///
+/// Reads the active tab's cursor + scroll to produce the visible line
+/// slice and a body-relative cursor position. Scroll is source state
+/// on [`Tab`]; dispatch maintains the "keep cursor visible" invariant
+/// so the cursor is normally inside the returned window.
+///
+/// Prefers [`BufferEdits`] (the user-edited view) over [`BufferStore`]
+/// (the disk snapshot). In steady state — loaded + seeded — the
+/// edits branch always wins; the store fallback covers the brief
+/// window between a load completion and the runtime's next
+/// BufferEdits seed, plus Pending / Error paths that never made it
+/// to `Ready`.
 #[drv::memo(single)]
 pub fn body_model<'a>(inputs: BodyInputs<'a>) -> BodyModel {
     let BodyInputs {
@@ -1497,7 +1497,7 @@ pub fn side_panel_model<'a>(inputs: SidePanelInputs<'a>) -> SidePanelModel {
         let status = match entry.kind {
             TreeEntryKind::File => categories
                 .get(&entry.path)
-                .and_then(|cats| led_core::resolve_display(cats))
+                .and_then(led_core::resolve_display)
                 .map(|d| led_driver_terminal_core::RowStatus {
                     category: d.category,
                     letter: d.letter,
@@ -2245,7 +2245,7 @@ pub fn file_categories_map<'d>(
                 _ => continue,
             };
             map.entry(path.clone())
-                .or_insert_with(imbl::HashSet::default)
+                .or_default()
                 .insert(cat);
         }
     }
@@ -3568,8 +3568,10 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
             ..Default::default()
         });
         tabs.active = Some(TabId(1));
-        let mut git = led_state_git::GitState::default();
-        git.branch = Some("main".into());
+        let git = led_state_git::GitState {
+            branch: Some("main".into()),
+            ..Default::default()
+        };
         let s = status_with_git(
             &AlertState::default(),
             &tabs,
@@ -3603,8 +3605,10 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
                 history: Default::default(),
             },
         );
-        let mut git = led_state_git::GitState::default();
-        git.branch = Some("feature/xyz".into());
+        let git = led_state_git::GitState {
+            branch: Some("feature/xyz".into()),
+            ..Default::default()
+        };
         let s = status_with_git(&AlertState::default(), &tabs, &edits, &git);
         // ` ` + ` feature/xyz` + ` ●`.
         assert_eq!(&*s.left, "  feature/xyz \u{25cf}");
@@ -4276,47 +4280,48 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
     #[test]
     fn file_categories_map_emits_lsp_error_and_warning_only() {
         let mut diags = DiagnosticsStates::default();
-        let mut items = Vec::new();
-        items.push(Diagnostic {
-            start_line: 0,
-            start_col: 0,
-            end_line: 0,
-            end_col: 3,
-            severity: DiagnosticSeverity::Error,
-            message: String::new(),
-            source: None,
-            code: None,
-        });
-        items.push(Diagnostic {
-            start_line: 1,
-            start_col: 0,
-            end_line: 1,
-            end_col: 3,
-            severity: DiagnosticSeverity::Warning,
-            message: String::new(),
-            source: None,
-            code: None,
-        });
-        items.push(Diagnostic {
-            start_line: 2,
-            start_col: 0,
-            end_line: 2,
-            end_col: 3,
-            severity: DiagnosticSeverity::Info,
-            message: String::new(),
-            source: None,
-            code: None,
-        });
-        items.push(Diagnostic {
-            start_line: 3,
-            start_col: 0,
-            end_line: 3,
-            end_col: 3,
-            severity: DiagnosticSeverity::Hint,
-            message: String::new(),
-            source: None,
-            code: None,
-        });
+        let items = vec![
+            Diagnostic {
+                start_line: 0,
+                start_col: 0,
+                end_line: 0,
+                end_col: 3,
+                severity: DiagnosticSeverity::Error,
+                message: String::new(),
+                source: None,
+                code: None,
+            },
+            Diagnostic {
+                start_line: 1,
+                start_col: 0,
+                end_line: 1,
+                end_col: 3,
+                severity: DiagnosticSeverity::Warning,
+                message: String::new(),
+                source: None,
+                code: None,
+            },
+            Diagnostic {
+                start_line: 2,
+                start_col: 0,
+                end_line: 2,
+                end_col: 3,
+                severity: DiagnosticSeverity::Info,
+                message: String::new(),
+                source: None,
+                code: None,
+            },
+            Diagnostic {
+                start_line: 3,
+                start_col: 0,
+                end_line: 3,
+                end_col: 3,
+                severity: DiagnosticSeverity::Hint,
+                message: String::new(),
+                source: None,
+                code: None,
+            },
+        ];
         diags.by_path.insert(
             canon("/p/a.rs"),
             BufferDiagnostics::new(

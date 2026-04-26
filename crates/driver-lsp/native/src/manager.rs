@@ -685,7 +685,7 @@ impl Manager {
         let root = self
             .workspace_root
             .clone()
-            .unwrap_or_else(CanonPath::default);
+            .unwrap_or_default();
         let body = build_initialize_request(id, &root);
         let _ = server.send_body(&body);
         self.trace
@@ -907,16 +907,7 @@ impl Manager {
                 hash,
                 diagnostics: diags,
             });
-            self.trace.lsp_diagnostics_done(
-                &path,
-                self.servers[&lang]
-                    .diag
-                    .mode()
-                    .ne(&DiagMode::Push)
-                    .then_some(0)
-                    .unwrap_or(0),
-                hash,
-            );
+            self.trace.lsp_diagnostics_done(&path, 0, hash);
         }
         self.notify.notify();
 
@@ -1276,14 +1267,14 @@ impl Manager {
             let Some(title) = raw
                 .get("title")
                 .and_then(|t| t.as_str())
-                .map(|s| Arc::<str>::from(s))
+                .map(Arc::<str>::from)
             else {
                 continue;
             };
             let kind = raw
                 .get("kind")
                 .and_then(|k| k.as_str())
-                .map(|s| Arc::<str>::from(s));
+                .map(Arc::<str>::from);
             // Pure Command variants have no `edit`; CodeAction
             // objects with an `edit` present skip resolve.
             let has_edit = raw.get("edit").is_some();

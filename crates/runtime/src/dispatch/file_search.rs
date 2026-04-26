@@ -38,17 +38,19 @@ pub(super) fn activate(
         // Already open — Ctrl+F a second time is a no-op.
         return;
     }
-    let mut state = FileSearchState::default();
-    state.previous_tab = tabs.active;
     // Peek the shared seq counter WITHOUT bumping it. The floor
     // for overlay-scoped undo is "every group with seq > this"
     // — which naturally excludes all pre-overlay edits since
     // those got lower (or equal) seqs.
-    state.overlay_open_seq = edits
+    let overlay_open_seq = edits
         .seq_gen
         .0
         .load(std::sync::atomic::Ordering::Relaxed);
-    *file_search = Some(state);
+    *file_search = Some(FileSearchState {
+        previous_tab: tabs.active,
+        overlay_open_seq,
+        ..Default::default()
+    });
     // Overlay lives in the side panel slot; focus moves there so
     // keystrokes route through the overlay.
     browser.visible = true;

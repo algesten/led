@@ -298,11 +298,10 @@ pub fn parse_completion_response(result: &Value, _cursor_line: u32) -> Completio
             .map(Arc::<str>::from);
         let kind = raw.get("kind").and_then(|v| v.as_u64()).map(|n| n as u8);
         let text_edit = raw.get("textEdit").and_then(parse_completion_text_edit);
-        if prefix_start_col.is_none() {
-            if let Some(te) = text_edit.as_ref() {
+        if prefix_start_col.is_none()
+            && let Some(te) = text_edit.as_ref() {
                 prefix_start_col = Some(te.col_start);
             }
-        }
         // Resolve flag: true when the server advertises
         // completionProvider.resolveProvider AND the item
         // doesn't already carry its additional edits. We err

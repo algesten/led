@@ -12,6 +12,7 @@
 //! it (not a legacy-shaped `UndoEntry`). The storage *structure*
 //! is byte-for-byte legacy — separate metadata + append-only log
 //! + session_kv — but the per-entry payload is ours.
+//!
 //! Cross-binary compatibility with legacy DBs is therefore
 //! intentionally out-of-scope.
 

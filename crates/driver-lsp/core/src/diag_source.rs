@@ -806,6 +806,6 @@ mod tests {
         let mut ds = push_source();
         ds.on_push(p("/a.rs"), vec![diag("err")], PersistedContentHash(7));
         ds.invalidate_cache(&p("/a.rs"));
-        assert!(ds.push_cache.get(&p("/a.rs")).is_none());
+        assert!(!ds.push_cache.contains_key(&p("/a.rs")));
     }
 }

@@ -63,10 +63,10 @@ fn current_entry(
 /// walks backward for the first entry with depth `selected.depth -
 /// 1`. Returns `None` for depth-0 rows (their parent is the
 /// workspace root, handled by the caller).
-fn parent_tree_entry<'a>(
-    entries: &'a [TreeEntry],
+fn parent_tree_entry(
+    entries: &[TreeEntry],
     idx: usize,
-) -> Option<&'a TreeEntry> {
+) -> Option<&TreeEntry> {
     let selected = entries.get(idx)?;
     if selected.depth == 0 {
         return None;

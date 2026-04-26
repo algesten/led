@@ -203,7 +203,7 @@ mod tests {
         // → "\x1b[1;2H"
         assert!(s.contains("\x1b[1;2H"), "expected MoveTo, got {s:?}");
         // Only one MoveTo (no reposition between 'a' → 'b' → 'c').
-        assert_eq!(s.matches("\x1b[").count() >= 1, true);
+        assert!(s.matches("\x1b[").count() >= 1);
         assert!(s.contains("abc"), "expected contiguous 'abc' run in {s:?}");
     }
 

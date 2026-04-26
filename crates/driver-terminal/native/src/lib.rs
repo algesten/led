@@ -342,8 +342,8 @@ impl TerminalOutputDriver {
 
         out.flush()?;
 
-        if let Some(log) = &self.log {
-            if let Ok(mut g) = log.lock() {
+        if let Some(log) = &self.log
+            && let Ok(mut g) = log.lock() {
                 g.frame_n += 1;
                 let header = format!("\n=== FRAME {} ===\n", g.frame_n);
                 let _ = g.file.write_all(header.as_bytes());
@@ -352,7 +352,6 @@ impl TerminalOutputDriver {
                 }
                 let _ = g.file.flush();
             }
-        }
 
         // Swap buffers: next frame writes into the one we just used
         // as `prev`, and diffs against what we just emitted.
@@ -542,6 +541,14 @@ fn paint_status_bar(s: &StatusBarModel, area: Rect, theme: &Theme, buf: &mut Buf
     buf.fill_row(row, col, right_edge, row_style);
 }
 
+type BodyRow<'a> = (
+    Option<&'a str>,
+    &'a [led_driver_terminal_core::LineSpan],
+    Option<led_state_diagnostics::DiagnosticSeverity>,
+    Option<led_core::IssueCategory>,
+    &'a [led_driver_terminal_core::BodyDiagnostic],
+);
+
 fn paint_body(body: &BodyModel, area: Rect, theme: &Theme, buf: &mut Buffer) {
     let ruler = theme
         .ruler_column
@@ -562,13 +569,7 @@ fn paint_body(body: &BodyModel, area: Rect, theme: &Theme, buf: &mut Buffer) {
         // gutter-diagnostic severity + gutter-category (merged
         // LSP/git bar) + inline underlines. Non-Content variants
         // carry none of the extras.
-        let (line, spans, gutter_diag, gutter_cat, row_diags): (
-            Option<&str>,
-            &[led_driver_terminal_core::LineSpan],
-            Option<led_state_diagnostics::DiagnosticSeverity>,
-            Option<led_core::IssueCategory>,
-            &[led_driver_terminal_core::BodyDiagnostic],
-        ) = match body {
+        let (line, spans, gutter_diag, gutter_cat, row_diags): BodyRow<'_> = match body {
             BodyModel::Empty => (None, &[], None, None, &[]),
             BodyModel::Content { lines, .. } => match lines.get(row as usize) {
                 Some(bl) => (
@@ -1250,10 +1251,10 @@ fn paint_file_search_header(
 }
 
 /// Look up the style for a diagnostic severity.
-fn severity_style<'a>(
-    theme: &'a led_driver_terminal_core::DiagnosticsTheme,
+fn severity_style(
+    theme: &led_driver_terminal_core::DiagnosticsTheme,
     severity: led_state_diagnostics::DiagnosticSeverity,
-) -> &'a Style {
+) -> &Style {
     use led_state_diagnostics::DiagnosticSeverity::*;
     match severity {
         Error => &theme.error,
@@ -1747,13 +1748,12 @@ mod tests {
                         self.row = r.saturating_sub(1);
                         self.col = c.saturating_sub(1);
                     }
-                    'J' => {
+                    'J'
                         // CSI n J — 2 = clear whole screen. The
                         // driver emits `Clear(All)` on resize.
-                        if params == "2" {
+                        if params == "2" => {
                             self.clear_all();
                         }
-                    }
                     _ => {
                         // Ignore SGR (`m`), cursor show/hide (`h`/`l` with `?25`), etc.
                     }
@@ -1956,11 +1956,13 @@ mod tests {
             cursor: None,
             match_highlight: None,
         };
-        let mut theme = Theme::default();
-        theme.ruler_column = Some(5);
-        theme.ruler = Style {
-            bg: Some(Color::rgb(0x22, 0x22, 0x22)),
-            ..Style::default()
+        let theme = Theme {
+            ruler_column: Some(5),
+            ruler: Style {
+                bg: Some(Color::rgb(0x22, 0x22, 0x22)),
+                ..Style::default()
+            },
+            ..Default::default()
         };
         let frame = Frame {
             tab_bar: TabBarModel::default(),

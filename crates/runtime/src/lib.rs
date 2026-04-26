@@ -2124,7 +2124,7 @@ fn apply_session_kv(
 /// Mirrors legacy's `build_session_kv` (`led/src/derived.rs`).
 /// Browser selection / scroll / expanded set + jump-list entries
 /// + index, encoded as plain string values so the schema row stays
-/// stable across rewrite-internal type churn.
+///   stable across rewrite-internal type churn.
 fn build_session_kv(
     browser: &led_state_browser::BrowserUi,
     jumps: &led_state_jumps::JumpListState,
@@ -2541,6 +2541,9 @@ fn current_jump_position(tabs: &Tabs) -> Option<led_state_jumps::JumpPosition> {
 /// latest range to earliest so later applies don't shift
 /// earlier ones. Alerts surface "Renamed N occurrence(s) in M
 /// file(s)" on success.
+// Wide-arg dispatch pattern: each &mut state passed explicitly
+// (bundle refactor deferred — matches dispatch_key etc.).
+#[allow(clippy::too_many_arguments)]
 fn apply_lsp_edits(
     edits: &mut BufferEdits,
     tabs: &led_state_tabs::Tabs,
@@ -3407,10 +3410,12 @@ mod tests {
         );
         let mut jumps = led_state_jumps::JumpListState::default();
         let mut alerts = AlertState::default();
-        let mut lsp_pending = led_state_lsp::LspPending::default();
         // Caller allocates the seq via queue_*; simulate by
         // setting latest_goto_seq to 42.
-        lsp_pending.latest_goto_seq = Some(42);
+        let mut lsp_pending = led_state_lsp::LspPending {
+            latest_goto_seq: Some(42),
+            ..Default::default()
+        };
         let mut _path_chains: std::collections::HashMap<CanonPath, PathChain> =
             std::collections::HashMap::new();
         apply_goto_definition(
@@ -3449,8 +3454,10 @@ mod tests {
         );
         let mut jumps = led_state_jumps::JumpListState::default();
         let mut alerts = AlertState::default();
-        let mut lsp_pending = led_state_lsp::LspPending::default();
-        lsp_pending.latest_goto_seq = Some(99);
+        let mut lsp_pending = led_state_lsp::LspPending {
+            latest_goto_seq: Some(99),
+            ..Default::default()
+        };
         let mut _path_chains: std::collections::HashMap<CanonPath, PathChain> =
             std::collections::HashMap::new();
         apply_goto_definition(
@@ -3502,8 +3509,10 @@ mod tests {
         tabs.open[0].scroll = led_state_tabs::Scroll::default();
         let mut jumps = led_state_jumps::JumpListState::default();
         let mut alerts = AlertState::default();
-        let mut lsp_pending = led_state_lsp::LspPending::default();
-        lsp_pending.latest_goto_seq = Some(1);
+        let mut lsp_pending = led_state_lsp::LspPending {
+            latest_goto_seq: Some(1),
+            ..Default::default()
+        };
         let term = Terminal {
             dims: Some(Dims { cols: 80, rows: 14 }), // body ≈ 12 rows
             ..Default::default()
@@ -3560,8 +3569,10 @@ mod tests {
         tabs.open[0].scroll = led_state_tabs::Scroll::default();
         let mut jumps = led_state_jumps::JumpListState::default();
         let mut alerts = AlertState::default();
-        let mut lsp_pending = led_state_lsp::LspPending::default();
-        lsp_pending.latest_goto_seq = Some(1);
+        let mut lsp_pending = led_state_lsp::LspPending {
+            latest_goto_seq: Some(1),
+            ..Default::default()
+        };
         let term = Terminal {
             dims: Some(Dims { cols: 80, rows: 22 }), // body ≈ 20 rows
             ..Default::default()
@@ -3600,8 +3611,10 @@ mod tests {
         let edits = BufferEdits::default();
         let mut jumps = led_state_jumps::JumpListState::default();
         let mut alerts = AlertState::default();
-        let mut lsp_pending = led_state_lsp::LspPending::default();
-        lsp_pending.latest_goto_seq = Some(1);
+        let mut lsp_pending = led_state_lsp::LspPending {
+            latest_goto_seq: Some(1),
+            ..Default::default()
+        };
         let mut _path_chains: std::collections::HashMap<CanonPath, PathChain> =
             std::collections::HashMap::new();
         apply_goto_definition(
@@ -3630,8 +3643,10 @@ mod tests {
         );
         let mut alerts = AlertState::default();
         let mut lsp_extras = led_state_lsp::LspExtrasState::default();
-        let mut lsp_pending = led_state_lsp::LspPending::default();
-        lsp_pending.latest_rename_seq = Some(7);
+        let mut lsp_pending = led_state_lsp::LspPending {
+            latest_rename_seq: Some(7),
+            ..Default::default()
+        };
         let file_edits = std::sync::Arc::new(vec![FileEdit {
             path: path.clone(),
             edits: vec![
@@ -3666,7 +3681,7 @@ mod tests {
         assert!(eb.version > 0);
         assert!(lsp_pending.latest_rename_seq.is_none());
         assert!(
-            alerts.info.as_ref().map_or(false, |m| m.contains("Renamed"))
+            alerts.info.as_ref().is_some_and(|m| m.contains("Renamed"))
         );
     }
 
@@ -3892,8 +3907,10 @@ mod tests {
         );
         let mut alerts = AlertState::default();
         let mut lsp_extras = led_state_lsp::LspExtrasState::default();
-        let mut lsp_pending = led_state_lsp::LspPending::default();
-        lsp_pending.latest_rename_seq = Some(99);
+        let mut lsp_pending = led_state_lsp::LspPending {
+            latest_rename_seq: Some(99),
+            ..Default::default()
+        };
         let file_edits = std::sync::Arc::new(vec![FileEdit {
             path: path.clone(),
             edits: vec![TextEditOp {
@@ -3935,8 +3952,10 @@ mod tests {
         );
         let mut jumps = led_state_jumps::JumpListState::default();
         let mut alerts = AlertState::default();
-        let mut lsp_pending = led_state_lsp::LspPending::default();
-        lsp_pending.latest_goto_seq = Some(1);
+        let mut lsp_pending = led_state_lsp::LspPending {
+            latest_goto_seq: Some(1),
+            ..Default::default()
+        };
         let mut path_chains: std::collections::HashMap<CanonPath, PathChain> =
             std::collections::HashMap::new();
         let target = canon("other.rs");

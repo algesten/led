@@ -268,13 +268,15 @@ mod tests {
     #[test]
     fn activate_noop_when_overlay_already_open() {
         let (tabs, edits) = seed("foo bar", 1);
-        let mut lsp = LspExtrasState::default();
-        lsp.rename = Some(RenameState::open(
-            canon("main.rs"),
-            0,
-            0,
-            Arc::<str>::from("existing"),
-        ));
+        let mut lsp = LspExtrasState {
+            rename: Some(RenameState::open(
+                canon("main.rs"),
+                0,
+                0,
+                Arc::<str>::from("existing"),
+            )),
+            ..Default::default()
+        };
         activate(&mut lsp, &tabs, &edits);
         // Unchanged.
         assert_eq!(lsp.rename.as_ref().unwrap().seed_word.as_ref(), "existing");

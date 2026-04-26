@@ -371,6 +371,8 @@ pub(super) fn noop_dispatch(k: KeyEvent, tabs: &mut Tabs) -> DispatchOutcome {
 
 /// Dispatch a key with caller-controlled chord + kbd_macro state.
 /// Used by M22 tests that need to inspect / seed both across calls.
+// Wide-arg dispatch pattern (matches dispatch_key etc.).
+#[allow(clippy::too_many_arguments)]
 pub(super) fn dispatch_with_macro(
     k: KeyEvent,
     tabs: &mut Tabs,

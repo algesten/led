@@ -266,19 +266,19 @@ mod tests {
         });
         tabs.active = Some(tab_id);
         let filtered: Vec<usize> = (0..items.len()).collect();
-        let mut state = CompletionsState::default();
-        state.session = Some(CompletionSession {
-            tab: tab_id,
-            path,
-            seq: 1,
-            prefix_line: 0,
-            prefix_start_col,
-            items: Arc::new(items),
-            filtered: Arc::new(filtered),
-            selected: 0,
-            scroll: 0,
-        });
-        state
+        CompletionsState {
+            session: Some(CompletionSession {
+                tab: tab_id,
+                path,
+                seq: 1,
+                prefix_line: 0,
+                prefix_start_col,
+                items: Arc::new(items),
+                filtered: Arc::new(filtered),
+                selected: 0,
+                scroll: 0,
+            }),
+        }
     }
 
     fn mk_item(label: &str, insert: Option<&str>) -> CompletionItem {
@@ -351,18 +351,19 @@ mod tests {
             .buffers
             .insert(path.clone(), EditedBuffer::fresh(rope));
         let filtered: Vec<usize> = vec![0];
-        let mut state = CompletionsState::default();
-        state.session = Some(CompletionSession {
-            tab: TabId(1),
-            path: path.clone(),
-            seq: 1,
-            prefix_line: 0,
-            prefix_start_col: 0,
-            items: Arc::new(vec![mk_item("println!", Some("println!"))]),
-            filtered: Arc::new(filtered),
-            selected: 0,
-            scroll: 0,
-        });
+        let mut state = CompletionsState {
+            session: Some(CompletionSession {
+                tab: TabId(1),
+                path: path.clone(),
+                seq: 1,
+                prefix_line: 0,
+                prefix_start_col: 0,
+                items: Arc::new(vec![mk_item("println!", Some("println!"))]),
+                filtered: Arc::new(filtered),
+                selected: 0,
+                scroll: 0,
+            }),
+        };
 
         let mut pending = led_state_completions::CompletionsPending::default();
         let outcome = run_overlay_command(Command::InsertNewline, &mut state, &mut pending, &mut tabs, &mut edits);
