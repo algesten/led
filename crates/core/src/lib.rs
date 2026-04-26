@@ -7,6 +7,7 @@
 //! - [`UserPath`] / [`CanonPath`] — path newtypes mirroring legacy led's
 //!   user-vs-canonical split
 
+pub mod command;
 pub mod content_hash;
 pub mod git;
 pub mod ids;
@@ -24,6 +25,7 @@ pub mod wrap;
 #[doc(hidden)]
 pub use drv;
 
+pub use command::{Command, parse_command};
 pub use content_hash::{EphemeralContentHash, PersistedContentHash};
 pub use issue::{
     CategoryInfo, IssueCategory, StatusDisplay, directory_categories, resolve_display,
