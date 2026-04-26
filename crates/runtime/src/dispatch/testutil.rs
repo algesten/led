@@ -139,6 +139,7 @@ pub(super) fn dispatch_default(
     let lsp_status = led_state_diagnostics::LspStatuses::default();
     let git = GitState::default();
     let keymap = default_keymap();
+    let syntax = led_state_syntax::SyntaxStates::default();
     let mut dispatcher = Dispatcher {
         tabs,
         edits,
@@ -164,6 +165,7 @@ pub(super) fn dispatch_default(
         keymap: &keymap,
         chord: &mut chord,
         kbd_macro: &mut kbd_macro,
+        syntax: &syntax,
     };
     dispatcher.dispatch_key(k)
 }
@@ -199,6 +201,7 @@ pub(super) fn dispatch_chord_default(
     let diagnostics = DiagnosticsStates::default();
     let lsp_status = led_state_diagnostics::LspStatuses::default();
     let git = GitState::default();
+    let syntax = led_state_syntax::SyntaxStates::default();
     let mut dispatcher = Dispatcher {
         tabs,
         edits,
@@ -224,6 +227,7 @@ pub(super) fn dispatch_chord_default(
         keymap: &keymap,
         chord: &mut chord,
         kbd_macro: &mut kbd_macro,
+        syntax: &syntax,
     };
     dispatcher.dispatch_key(prefix);
     dispatcher.dispatch_key(second)
@@ -258,6 +262,7 @@ pub(super) fn dispatch_with_ring(
     let lsp_status = led_state_diagnostics::LspStatuses::default();
     let git = GitState::default();
     let keymap = default_keymap();
+    let syntax = led_state_syntax::SyntaxStates::default();
     let mut dispatcher = Dispatcher {
         tabs,
         edits,
@@ -283,6 +288,7 @@ pub(super) fn dispatch_with_ring(
         keymap: &keymap,
         chord: &mut chord,
         kbd_macro: &mut kbd_macro,
+        syntax: &syntax,
     };
     dispatcher.dispatch_key(k)
 }
@@ -313,6 +319,7 @@ pub(super) fn noop_dispatch(k: KeyEvent, tabs: &mut Tabs) -> DispatchOutcome {
     let diagnostics = DiagnosticsStates::default();
     let lsp_status = led_state_diagnostics::LspStatuses::default();
     let git = GitState::default();
+    let syntax = led_state_syntax::SyntaxStates::default();
     let mut dispatcher = Dispatcher {
         tabs,
         edits: &mut edits,
@@ -338,6 +345,7 @@ pub(super) fn noop_dispatch(k: KeyEvent, tabs: &mut Tabs) -> DispatchOutcome {
         keymap: &keymap,
         chord: &mut chord,
         kbd_macro: &mut kbd_macro,
+        syntax: &syntax,
     };
     dispatcher.dispatch_key(k)
 }
@@ -377,6 +385,7 @@ pub(super) struct MacroDispatcherFixture {
     lsp_status: led_state_diagnostics::LspStatuses,
     git: GitState,
     keymap: crate::keymap::Keymap,
+    pub syntax: led_state_syntax::SyntaxStates,
 }
 
 impl MacroDispatcherFixture {
@@ -414,6 +423,7 @@ impl MacroDispatcherFixture {
             lsp_status: led_state_diagnostics::LspStatuses::default(),
             git: GitState::default(),
             keymap: default_keymap(),
+            syntax: led_state_syntax::SyntaxStates::default(),
         }
     }
 
@@ -443,6 +453,7 @@ impl MacroDispatcherFixture {
             keymap: &self.keymap,
             chord: &mut self.chord,
             kbd_macro: &mut self.kbd_macro,
+            syntax: &self.syntax,
         };
         dispatcher.dispatch_key(k)
     }

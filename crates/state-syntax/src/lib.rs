@@ -18,6 +18,9 @@ use imbl::HashMap;
 use led_core::{CanonPath, PathChain};
 use tree_sitter::Tree;
 
+pub mod indent;
+pub mod import;
+
 /// Programming language identity. One per grammar the rewrite
 /// supports. Extended as grammars come online; unknown extensions
 /// map to `None` (no highlighting, falls back to plain body text).

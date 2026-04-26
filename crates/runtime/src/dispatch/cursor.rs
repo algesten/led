@@ -1054,6 +1054,7 @@ mod tests {
         let lsp_status = led_state_diagnostics::LspStatuses::default();
         let git = GitState::default();
         let mut kbd_macro = led_state_kbd_macro::KbdMacroState::default();
+        let syntax = led_state_syntax::SyntaxStates::default();
 
         let mut dispatcher = super::super::Dispatcher {
             tabs: &mut tabs,
@@ -1080,6 +1081,7 @@ mod tests {
             keymap: &km,
             chord: &mut chord,
             kbd_macro: &mut kbd_macro,
+            syntax: &syntax,
         };
         dispatcher.dispatch_key(key(KeyModifiers::ALT, KeyCode::Char('f')));
         assert_eq!(dispatcher.tabs.open[0].cursor.col, 3);

@@ -469,6 +469,7 @@ mod tests {
         let diagnostics = DiagnosticsStates::default();
         let lsp_status = led_state_diagnostics::LspStatuses::default();
         let git = GitState::default();
+        let syntax = led_state_syntax::SyntaxStates::default();
         {
             let mut dispatcher = Dispatcher {
                 tabs: &mut tabs,
@@ -495,6 +496,7 @@ mod tests {
                 keymap: &km,
                 chord: &mut chord,
                 kbd_macro: &mut kbd_macro,
+                syntax: &syntax,
             };
             // Undo: ""
             dispatcher.dispatch_key(key(KeyModifiers::CONTROL, KeyCode::Char('/')));
@@ -581,6 +583,7 @@ mod tests {
         let diagnostics = DiagnosticsStates::default();
         let lsp_status = led_state_diagnostics::LspStatuses::default();
         let git = GitState::default();
+        let syntax = led_state_syntax::SyntaxStates::default();
         {
             let mut dispatcher = Dispatcher {
                 tabs: &mut tabs,
@@ -607,6 +610,7 @@ mod tests {
                 keymap: &km,
                 chord: &mut chord,
                 kbd_macro: &mut kbd_macro,
+                syntax: &syntax,
             };
             dispatcher.dispatch_key(key(KeyModifiers::CONTROL, KeyCode::Char('y')));
         }

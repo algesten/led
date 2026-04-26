@@ -226,6 +226,7 @@ mod tests {
         let diagnostics = DiagnosticsStates::default();
         let lsp_status = led_state_diagnostics::LspStatuses::default();
         let git = GitState::default();
+        let syntax = led_state_syntax::SyntaxStates::default();
         {
             let mut dispatcher = Dispatcher {
                 tabs: &mut tabs,
@@ -252,6 +253,7 @@ mod tests {
                 keymap: &keymap,
                 chord: &mut chord,
                 kbd_macro: &mut kbd_macro,
+                syntax: &syntax,
             };
             // Ctrl-x k on dirty active tab → prompt set, tab still open.
             dispatcher.dispatch_key(key(KeyModifiers::CONTROL, KeyCode::Char('x')));
@@ -288,6 +290,7 @@ mod tests {
         let diagnostics = DiagnosticsStates::default();
         let lsp_status = led_state_diagnostics::LspStatuses::default();
         let git = GitState::default();
+        let syntax = led_state_syntax::SyntaxStates::default();
         {
             let mut dispatcher = Dispatcher {
                 tabs: &mut tabs,
@@ -314,6 +317,7 @@ mod tests {
                 keymap: &keymap,
                 chord: &mut chord,
                 kbd_macro: &mut kbd_macro,
+                syntax: &syntax,
             };
             dispatcher.dispatch_key(key(KeyModifiers::NONE, KeyCode::Char('y')));
         }
@@ -352,6 +356,7 @@ mod tests {
         let diagnostics = DiagnosticsStates::default();
         let lsp_status = led_state_diagnostics::LspStatuses::default();
         let git = GitState::default();
+        let syntax = led_state_syntax::SyntaxStates::default();
         {
             let mut dispatcher = Dispatcher {
                 tabs: &mut tabs,
@@ -378,6 +383,7 @@ mod tests {
                 keymap: &keymap,
                 chord: &mut chord,
                 kbd_macro: &mut kbd_macro,
+                syntax: &syntax,
             };
             dispatcher.dispatch_key(key(KeyModifiers::NONE, KeyCode::Char('Y')));
         }
@@ -412,6 +418,7 @@ mod tests {
         let diagnostics = DiagnosticsStates::default();
         let lsp_status = led_state_diagnostics::LspStatuses::default();
         let git = GitState::default();
+        let syntax = led_state_syntax::SyntaxStates::default();
         {
             let mut dispatcher = Dispatcher {
                 tabs: &mut tabs,
@@ -438,6 +445,7 @@ mod tests {
                 keymap: &keymap,
                 chord: &mut chord,
                 kbd_macro: &mut kbd_macro,
+                syntax: &syntax,
             };
             dispatcher.dispatch_key(key(KeyModifiers::NONE, KeyCode::Char('n')));
         }
@@ -482,6 +490,7 @@ mod tests {
         let diagnostics = DiagnosticsStates::default();
         let lsp_status = led_state_diagnostics::LspStatuses::default();
         let git = GitState::default();
+        let syntax = led_state_syntax::SyntaxStates::default();
         {
             let mut dispatcher = Dispatcher {
                 tabs: &mut tabs,
@@ -508,6 +517,7 @@ mod tests {
                 keymap: &keymap,
                 chord: &mut chord,
                 kbd_macro: &mut kbd_macro,
+                syntax: &syntax,
             };
             dispatcher.dispatch_key(key(KeyModifiers::NONE, KeyCode::Esc));
         }
@@ -550,6 +560,7 @@ mod tests {
         let diagnostics = DiagnosticsStates::default();
         let lsp_status = led_state_diagnostics::LspStatuses::default();
         let git = GitState::default();
+        let syntax = led_state_syntax::SyntaxStates::default();
         {
             let mut dispatcher = Dispatcher {
                 tabs: &mut tabs,
@@ -576,6 +587,7 @@ mod tests {
                 keymap: &keymap,
                 chord: &mut chord,
                 kbd_macro: &mut kbd_macro,
+                syntax: &syntax,
             };
             dispatcher.dispatch_key(key(KeyModifiers::CONTROL, KeyCode::Char('x')));
             dispatcher.dispatch_key(key(KeyModifiers::NONE, KeyCode::Char('k')));

@@ -161,9 +161,14 @@ fn lsp_diagnostic_empty_buffer() {
     run_scenario(&scenario_dir("edge/lsp_diagnostic_empty_buffer"));
 }
 
+// `edge/lsp_rebase_after_insert/` was the legacy-led capture of the
+// "smear stale diagnostic onto the new line" behaviour. The rewrite
+// has the opposite (and explicitly preferred) policy — see
+// `feedback_lsp_no_smear.md` and `edge/lsp_diagnostic_hides_after_insert/`.
+// The legacy fixture is retired.
 #[test]
-fn lsp_rebase_after_insert() {
-    run_scenario(&scenario_dir("edge/lsp_rebase_after_insert"));
+fn lsp_diagnostic_hides_after_insert() {
+    run_scenario(&scenario_dir("edge/lsp_diagnostic_hides_after_insert"));
 }
 
 // === External filesystem changes ===

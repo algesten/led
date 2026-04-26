@@ -1,0 +1,21 @@
+# 1. Wait for LSP initialize / didOpen / pull-diagnostics cycle.
+#    After this wait the gutter shows `●` on the `let unused`
+#    line (display row 2, version 1).
+# 2. Insert a new line at the top — bumps the buffer version
+#    from 1 to N. The diagnostic was stamped against version 1,
+#    so it now mismatches and must hide entirely (gutter blank,
+#    no inline underline) until the next pull arrives. Display
+#    line 3 (where `let unused` now sits) gets NO marker.
+# 3. Wait again to give the runtime room to issue another
+#    pull-diagnostic request and for the fake-lsp to respond.
+#    The fake-lsp config is static (one fixed diagnostic at
+#    line 1) — the next pull DOES land with severity 2 still
+#    pinned to line 1 (`fn main() {`), which doesn't visibly
+#    re-mark `let unused`. Either way, the marker on the OLD
+#    line-2 content is gone.
+wait 2s
+press Home
+press Enter
+press Up
+type // new comment at top
+wait 1s

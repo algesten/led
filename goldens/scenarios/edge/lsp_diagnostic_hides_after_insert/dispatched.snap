@@ -1,0 +1,45 @@
+FsListDir	path=<TMPDIR>
+FileOpen	path=<TMPDIR>/main.rs create_if_missing=true
+GitScan	root=<TMPDIR>
+LspSend	server=fake-lsp kind=request method=initialize id=1
+LspRecv	server=fake-lsp kind=response id=1
+LspSend	server=fake-lsp kind=notification method=initialized
+LspSend	server=fake-lsp kind=notification method=workspace/didChangeConfiguration
+LspSend	server=fake-lsp kind=notification method=textDocument/didOpen path=file://<TMPDIR>/main.rs version=1
+LspRecv	server=fake-lsp kind=notification method=textDocument/publishDiagnostics
+LspRecv	server=fake-lsp kind=notification method=$/progress
+LspRecv	server=fake-lsp kind=notification method=$/progress
+LspSend	server=fake-lsp kind=notification method=textDocument/didChange path=file://<TMPDIR>/main.rs version=2
+WorkspaceFlushUndo	path=<TMPDIR>/main.rs chain=<CHAIN>
+LspSend	server=fake-lsp kind=notification method=textDocument/didChange path=file://<TMPDIR>/main.rs version=3
+LspSend	server=fake-lsp kind=request method=textDocument/completion id=2 path=file://<TMPDIR>/main.rs
+LspSend	server=fake-lsp kind=request method=textDocument/completion id=3 path=file://<TMPDIR>/main.rs
+LspSend	server=fake-lsp kind=request method=textDocument/completion id=4 path=file://<TMPDIR>/main.rs
+LspSend	server=fake-lsp kind=request method=textDocument/completion id=5 path=file://<TMPDIR>/main.rs
+LspSend	server=fake-lsp kind=request method=textDocument/completion id=6 path=file://<TMPDIR>/main.rs
+LspSend	server=fake-lsp kind=request method=textDocument/completion id=7 path=file://<TMPDIR>/main.rs
+LspSend	server=fake-lsp kind=request method=textDocument/completion id=8 path=file://<TMPDIR>/main.rs
+LspSend	server=fake-lsp kind=request method=textDocument/completion id=9 path=file://<TMPDIR>/main.rs
+LspSend	server=fake-lsp kind=request method=textDocument/completion id=10 path=file://<TMPDIR>/main.rs
+LspSend	server=fake-lsp kind=request method=textDocument/completion id=11 path=file://<TMPDIR>/main.rs
+LspSend	server=fake-lsp kind=request method=textDocument/completion id=12 path=file://<TMPDIR>/main.rs
+LspSend	server=fake-lsp kind=request method=textDocument/completion id=13 path=file://<TMPDIR>/main.rs
+LspSend	server=fake-lsp kind=request method=textDocument/completion id=14 path=file://<TMPDIR>/main.rs
+LspSend	server=fake-lsp kind=request method=textDocument/completion id=15 path=file://<TMPDIR>/main.rs
+LspSend	server=fake-lsp kind=request method=textDocument/completion id=16 path=file://<TMPDIR>/main.rs
+LspRecv	server=fake-lsp kind=response id=2
+LspRecv	server=fake-lsp kind=response id=3
+LspRecv	server=fake-lsp kind=response id=4
+LspRecv	server=fake-lsp kind=response id=5
+LspRecv	server=fake-lsp kind=response id=6
+LspRecv	server=fake-lsp kind=response id=7
+LspRecv	server=fake-lsp kind=response id=8
+LspRecv	server=fake-lsp kind=response id=9
+LspRecv	server=fake-lsp kind=response id=10
+LspRecv	server=fake-lsp kind=response id=11
+LspRecv	server=fake-lsp kind=response id=12
+LspRecv	server=fake-lsp kind=response id=13
+LspRecv	server=fake-lsp kind=response id=14
+LspRecv	server=fake-lsp kind=response id=15
+LspRecv	server=fake-lsp kind=response id=16
+WorkspaceFlushUndo	path=<TMPDIR>/main.rs chain=<CHAIN>

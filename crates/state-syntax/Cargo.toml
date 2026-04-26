@@ -16,3 +16,20 @@ led-state-buffer-edits = { workspace = true }
 imbl = { workspace = true }
 ropey = { workspace = true }
 tree-sitter = { workspace = true }
+
+# Indent (M23) and import (M23) helpers compile per-language
+# queries against the matching grammar. We import the grammar
+# crates directly rather than reusing `tree.language()` —
+# `LanguageRef`'s deref'd Language pointer can hang `Query::new`
+# when the tree was parsed on a worker thread. Importing fresh
+# from the grammar crate side-steps the cross-thread pointer
+# issue and matches the pattern used by `driver-syntax/native`.
+tree-sitter-rust = { workspace = true }
+tree-sitter-typescript = { workspace = true }
+tree-sitter-javascript = { workspace = true }
+tree-sitter-python = { workspace = true }
+tree-sitter-bash = { workspace = true }
+tree-sitter-json = { workspace = true }
+tree-sitter-toml-ng = { workspace = true }
+tree-sitter-c = { workspace = true }
+tree-sitter-swift = { workspace = true }

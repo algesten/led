@@ -1,11 +1,23 @@
 //! Edit primitives (M3): insert_char, insert_newline, delete_back,
 //! delete_forward. Each records its op on `EditedBuffer.history`.
+//!
+//! M23 adds `insert_tab` and upgrades `insert_newline` to consult
+//! the tree-sitter indent suggestion (per-language `indents.scm`)
+//! before falling back to the M3 "match previous line's leading
+//! whitespace" rule.
 
 use led_state_buffer_edits::BufferEdits;
+use led_state_syntax::SyntaxStates;
 use led_state_tabs::Tabs;
 use std::sync::Arc;
 
 use super::shared::{bump, line_char_len, with_active};
+
+/// Width of the soft tab the InsertTab fallback inserts when no
+/// language / no syntax tree is available. Hard-coded to 4 to
+/// match legacy `Dimensions.tab_stop` (also 4) and the painter's
+/// `\t` expansion in `query.rs::body_model`.
+const TAB_STOP: usize = 4;
 
 pub(super) fn insert_char(tabs: &mut Tabs, edits: &mut BufferEdits, ch: char) {
     with_active(tabs, edits, |tab, eb| {
@@ -28,25 +40,54 @@ pub(super) fn insert_char(tabs: &mut Tabs, edits: &mut BufferEdits, ch: char) {
     });
 }
 
-pub(super) fn insert_newline(tabs: &mut Tabs, edits: &mut BufferEdits) {
+pub(super) fn insert_newline(tabs: &mut Tabs, edits: &mut BufferEdits, syntax: &SyntaxStates) {
     with_active(tabs, edits, |tab, eb| {
         if tab.preview {
             return;
         }
         let before = tab.cursor;
         let line_idx = tab.cursor.line;
-        // Copy the leading whitespace of the current line into the
-        // new line so common edit flows ("end of line, Enter")
-        // land at the same indent. Mirrors legacy
-        // `editing_of.rs::insert_newline_s` which schedules
-        // `request_indent` after the split; the simple "match the
-        // previous line" rule covers the same goldens without a
-        // syntax-tree dependency.
-        let line = eb.rope.line(line_idx);
-        let indent: String = line
-            .chars()
-            .take_while(|c| *c == ' ' || *c == '\t')
-            .collect();
+
+        // M23: ask the tree-sitter indent query what the *current*
+        // line's structural indent should be, and use that as the
+        // new line's leading whitespace.
+        //
+        // Asking for `line_idx + 1` (the about-to-be-created line)
+        // gets confused when the line below `line_idx` is itself
+        // a closing bracket (`}` / `)` / `]`): `suggest_indent`'s
+        // closing-bracket short-circuit kicks in and returns the
+        // OPENER's line indent (often empty), which would land
+        // the cursor flush-left. Asking for `line_idx` instead
+        // returns the structural indent of the line we're
+        // splitting — which is exactly what the new line wants
+        // (Enter at EOL preserves the current line's indent
+        // level).
+        //
+        // None falls through to the M3 literal-copy rule.
+        let suggested = syntax
+            .by_path
+            .get(&tab.path)
+            .and_then(|s| s.tree.as_ref().map(|t| (s.language, t)))
+            .and_then(|(lang, tree)| {
+                led_state_syntax::indent::suggest_indent(
+                    lang,
+                    tree,
+                    &eb.rope,
+                    line_idx,
+                )
+            });
+
+        let indent: String = if let Some(s) = suggested {
+            s
+        } else {
+            // Fallback: copy the current line's leading whitespace.
+            // Same shape as the M3 path before this milestone.
+            eb.rope
+                .line(line_idx)
+                .chars()
+                .take_while(|c| *c == ' ' || *c == '\t')
+                .collect()
+        };
         let indent_len = indent.chars().count();
         let mut inserted: String = String::with_capacity(1 + indent.len());
         inserted.push('\n');
@@ -65,6 +106,109 @@ pub(super) fn insert_newline(tabs: &mut Tabs, edits: &mut BufferEdits) {
         eb.history
             .record_insert(char_idx, Arc::<str>::from(inserted.as_str()), before, after);
         tab.cursor = after;
+    });
+}
+
+/// `Tab` (M23). Replaces the active line's leading whitespace
+/// with the tree-sitter-suggested indent when one is available;
+/// falls back to inserting spaces from the cursor's current
+/// column up to the next 4-col tab stop.
+///
+/// Mirrors legacy `Action::InsertTab` —
+/// `request_indent(cursor_row, tab_fallback=true)`. The two
+/// paths diverge in WHERE the inserted whitespace lands:
+/// tree-path replaces leading whitespace; fallback inserts at
+/// the cursor.
+pub(super) fn insert_tab(tabs: &mut Tabs, edits: &mut BufferEdits, syntax: &SyntaxStates) {
+    with_active(tabs, edits, |tab, eb| {
+        if tab.preview {
+            return;
+        }
+        let line_idx = tab.cursor.line;
+
+        let suggested = syntax
+            .by_path
+            .get(&tab.path)
+            .and_then(|s| s.tree.as_ref().map(|t| (s.language, t)))
+            .and_then(|(lang, tree)| {
+                led_state_syntax::indent::suggest_indent(lang, tree, &eb.rope, line_idx)
+            });
+
+        if let Some(target_indent) = suggested {
+            // Tree path — replace existing leading whitespace.
+            let line_start_char = eb.rope.line_to_char(line_idx);
+            let existing_indent: String = eb
+                .rope
+                .line(line_idx)
+                .chars()
+                .take_while(|c| *c == ' ' || *c == '\t')
+                .collect();
+            let existing_len = existing_indent.chars().count();
+            if target_indent == existing_indent {
+                // Already correctly indented. If the cursor
+                // sits inside the whitespace prefix, snap it
+                // to the indent boundary; otherwise the line
+                // is fine as-is and Tab is a no-op (legacy
+                // parity — Tab in the middle of typed content
+                // doesn't yank the cursor backwards).
+                if tab.cursor.col < existing_len {
+                    tab.cursor.col = existing_len;
+                    tab.cursor.preferred_col = existing_len;
+                }
+                return;
+            }
+            let before = tab.cursor;
+            let target_len = target_indent.chars().count();
+
+            // Build new rope: remove old indent, insert new.
+            let mut rope = (*eb.rope).clone();
+            let removed: String = if existing_len > 0 {
+                rope.slice(line_start_char..line_start_char + existing_len).to_string()
+            } else {
+                String::new()
+            };
+            if existing_len > 0 {
+                rope.remove(line_start_char..line_start_char + existing_len);
+            }
+            rope.insert(line_start_char, &target_indent);
+            bump(eb, rope);
+            tab.cursor.col = target_len;
+            tab.cursor.preferred_col = target_len;
+            let after = tab.cursor;
+
+            // Record one undo entry — replace existing indent
+            // with target indent. close_group around this so
+            // the next keystroke starts a fresh group.
+            eb.history.finalise();
+            eb.history.record_replace(
+                line_start_char,
+                Arc::<str>::from(removed.as_str()),
+                Arc::<str>::from(target_indent.as_str()),
+                before,
+                after,
+                None,
+            );
+            return;
+        }
+
+        // Fallback: insert spaces at the cursor up to the next
+        // 4-col tab stop. Cursor advances by the inserted span.
+        let before = tab.cursor;
+        let target_col = (tab.cursor.col / TAB_STOP + 1) * TAB_STOP;
+        let pad = target_col - tab.cursor.col;
+        let mut rope = (*eb.rope).clone();
+        let line_start = rope.line_to_char(line_idx);
+        let char_idx = line_start + tab.cursor.col;
+        let inserted: String = " ".repeat(pad);
+        rope.insert(char_idx, &inserted);
+        bump(eb, rope);
+        tab.cursor.col = target_col;
+        tab.cursor.preferred_col = target_col;
+        let after = tab.cursor;
+        eb.history.finalise();
+        eb.history
+            .record_insert(char_idx, Arc::<str>::from(inserted.as_str()), before, after);
+        eb.history.finalise();
     });
 }
 

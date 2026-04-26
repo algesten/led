@@ -1261,6 +1261,7 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
                 keymap,
                 chord: &mut chord,
                 kbd_macro,
+                syntax,
             };
             match dispatcher.dispatch(ev) {
                 DispatchOutcome::Continue => {}
@@ -2910,6 +2911,15 @@ pub fn spawn_drivers(
         trace.clone().as_file_search_trace(),
         wake.notifier.clone(),
     );
+    // M23: pre-compile every supported language's indent +
+    // imports tree-sitter query on the main thread BEFORE the
+    // syntax worker spawns. Without this warm-up, dispatch's
+    // first call to `Query::new` (when the user presses Tab /
+    // Ctrl-x i) races the worker thread's parser-bound query
+    // compilation and stalls in tree-sitter's FFI on macOS.
+    // Pre-warming costs ~10ms once and keeps the dispatch tick
+    // deadlock-free.
+    led_state_syntax::indent::precompile_all_queries();
     let (syntax, syntax_native) = led_driver_syntax_native::spawn(
         trace.clone().as_syntax_trace(),
         wake.notifier.clone(),

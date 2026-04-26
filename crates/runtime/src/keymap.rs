@@ -285,6 +285,17 @@ pub fn default_keymap() -> Keymap {
     m.bind("delete", Command::DeleteForward);
     m.bind("ctrl+d", Command::DeleteForward);
 
+    // Editing extensions (M23). `tab` is the editor-context
+    // binding for `insert_tab` — overlay contexts bind `tab`
+    // to their own commands (find_file, file_search) and those
+    // bindings are consulted before this one. `ctrl+q` rebinds
+    // to `CollapseAll` inside the browser context (already
+    // wired in `bind_browser` above). `ctrl+x i` is the chord
+    // for sort-imports.
+    m.bind("tab", Command::InsertTab);
+    m.bind("ctrl+q", Command::ReflowParagraph);
+    m.bind_chord("ctrl+x", "i", Command::SortImports);
+
     // Abort (modal overlays override behaviour in later milestones).
     m.bind("esc", Command::Abort);
     m.bind("ctrl+g", Command::Abort);

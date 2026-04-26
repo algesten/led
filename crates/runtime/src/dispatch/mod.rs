@@ -37,9 +37,11 @@ mod isearch;
 mod kill;
 mod mark;
 mod nav;
+mod reflow;
 mod rename;
 mod save;
 mod shared;
+mod sort_imports;
 mod tabs;
 mod undo;
 
@@ -60,7 +62,7 @@ use browser::{
     page_selection, select_first, select_last, toggle_focus, toggle_side_panel,
 };
 use cursor::{Move, move_cursor};
-use edit::{delete_back, delete_forward, insert_char, insert_newline};
+use edit::{delete_back, delete_forward, insert_char, insert_newline, insert_tab};
 use kill::{kill_line, kill_region, request_yank};
 use mark::{clear_mark, set_mark_active};
 use nav::{NavCtx, jump_back, jump_forward, match_bracket};
@@ -161,6 +163,12 @@ pub struct Dispatcher<'a> {
     /// `current` buffer, last completed macro, recursion depth,
     /// pending iteration count.
     pub kbd_macro: &'a mut KbdMacroState,
+    /// M23: per-buffer parse trees. Read-only here — the syntax
+    /// driver populates `Atoms.syntax` in the ingest phase; the
+    /// `InsertTab`, `InsertNewline` (auto-indent), and
+    /// `SortImports` arms read it sync to derive their effect
+    /// (no driver round-trip; see `MILESTONE-23.md` § D1).
+    pub syntax: &'a led_state_syntax::SyntaxStates,
 }
 
 impl<'a> Dispatcher<'a> {
@@ -997,7 +1005,29 @@ impl<'a> Dispatcher<'a> {
                 DispatchOutcome::Continue
             }
             Command::InsertNewline => {
-                insert_newline(self.tabs, self.edits);
+                insert_newline(self.tabs, self.edits, self.syntax);
+                DispatchOutcome::Continue
+            }
+            Command::InsertTab => {
+                insert_tab(self.tabs, self.edits, self.syntax);
+                DispatchOutcome::Continue
+            }
+            Command::ReflowParagraph => {
+                reflow::reflow_paragraph(
+                    self.tabs,
+                    self.edits,
+                    self.alerts,
+                    self.path_chains,
+                );
+                DispatchOutcome::Continue
+            }
+            Command::SortImports => {
+                sort_imports::sort_imports(
+                    self.tabs,
+                    self.edits,
+                    self.syntax,
+                    self.alerts,
+                );
                 DispatchOutcome::Continue
             }
             Command::DeleteBack => {
@@ -1441,6 +1471,7 @@ mod tests {
         let diagnostics = DiagnosticsStates::default();
         let lsp_status = led_state_diagnostics::LspStatuses::default();
         let git = GitState::default();
+        let syntax = led_state_syntax::SyntaxStates::default();
         let mut dispatcher = Dispatcher {
             tabs: &mut tabs,
             edits: &mut edits,
@@ -1466,6 +1497,7 @@ mod tests {
             keymap: &keymap,
             chord: &mut chord,
             kbd_macro: &mut kbd_macro,
+            syntax: &syntax,
         };
         // First half of the chord: ctrl+x → pending, Continue.
         let outcome = dispatcher.dispatch_key(key(KeyModifiers::CONTROL, KeyCode::Char('x')));
@@ -1514,6 +1546,7 @@ mod tests {
         let diagnostics = DiagnosticsStates::default();
         let lsp_status = led_state_diagnostics::LspStatuses::default();
         let git = GitState::default();
+        let syntax = led_state_syntax::SyntaxStates::default();
         let outcome = {
             let mut dispatcher = Dispatcher {
                 tabs: &mut tabs,
@@ -1540,6 +1573,7 @@ mod tests {
                 keymap: &keymap,
                 chord: &mut chord,
                 kbd_macro: &mut kbd_macro,
+                syntax: &syntax,
             };
             // ctrl+x → pending.
             dispatcher.dispatch_key(key(KeyModifiers::CONTROL, KeyCode::Char('x')));
@@ -1587,6 +1621,7 @@ mod tests {
         let diagnostics = DiagnosticsStates::default();
         let lsp_status = led_state_diagnostics::LspStatuses::default();
         let git = GitState::default();
+        let syntax = led_state_syntax::SyntaxStates::default();
         let mut dispatcher = Dispatcher {
             tabs: &mut tabs,
             edits: &mut edits,
@@ -1612,6 +1647,7 @@ mod tests {
             keymap: &km,
             chord: &mut chord,
             kbd_macro: &mut kbd_macro,
+            syntax: &syntax,
         };
         let outcome = dispatcher.dispatch_key(key(KeyModifiers::CONTROL, KeyCode::Char('q')));
         assert_eq!(outcome, DispatchOutcome::Quit);
@@ -1652,6 +1688,7 @@ mod tests {
         let diagnostics = DiagnosticsStates::default();
         let lsp_status = led_state_diagnostics::LspStatuses::default();
         let git = GitState::default();
+        let syntax = led_state_syntax::SyntaxStates::default();
         let mut dispatcher = Dispatcher {
             tabs: &mut tabs,
             edits: &mut edits,
@@ -1677,6 +1714,7 @@ mod tests {
             keymap: &km,
             chord: &mut chord,
             kbd_macro: &mut kbd_macro,
+            syntax: &syntax,
         };
         let outcome = dispatcher.dispatch_key(key(KeyModifiers::CONTROL, KeyCode::Char('z')));
         assert_eq!(outcome, DispatchOutcome::Suspend);
@@ -1709,6 +1747,7 @@ mod tests {
         let diagnostics = DiagnosticsStates::default();
         let lsp_status = led_state_diagnostics::LspStatuses::default();
         let git = GitState::default();
+        let syntax = led_state_syntax::SyntaxStates::default();
         {
             let mut dispatcher = Dispatcher {
                 tabs: &mut tabs,
@@ -1735,6 +1774,7 @@ mod tests {
                 keymap: &km,
                 chord: &mut chord,
                 kbd_macro: &mut kbd_macro,
+                syntax: &syntax,
             };
             dispatcher.dispatch_key(key(KeyModifiers::NONE, KeyCode::Char('z')));
         }
@@ -1769,6 +1809,7 @@ mod tests {
         let diagnostics = DiagnosticsStates::default();
         let lsp_status = led_state_diagnostics::LspStatuses::default();
         let git = GitState::default();
+        let syntax = led_state_syntax::SyntaxStates::default();
         {
             let mut dispatcher = Dispatcher {
                 tabs: &mut tabs,
@@ -1795,6 +1836,7 @@ mod tests {
                 keymap: &km,
                 chord: &mut chord,
                 kbd_macro: &mut kbd_macro,
+                syntax: &syntax,
             };
             dispatcher.dispatch_key(key(KeyModifiers::CONTROL, KeyCode::Char('x')));
         }
@@ -1894,6 +1936,7 @@ mod tests {
         );
         let diagnostics = DiagnosticsStates::default();
         let git = GitState::default();
+        let syntax = led_state_syntax::SyntaxStates::default();
         {
             let mut dispatcher = Dispatcher {
                 tabs: &mut tabs,
@@ -1920,6 +1963,7 @@ mod tests {
                 keymap: &km,
                 chord: &mut chord,
                 kbd_macro: &mut kbd_macro,
+                syntax: &syntax,
             };
             dispatcher.dispatch_key(key(KeyModifiers::ALT, KeyCode::Enter));
         }
@@ -1958,6 +2002,7 @@ mod tests {
         let diagnostics = DiagnosticsStates::default();
         let lsp_status = led_state_diagnostics::LspStatuses::default();
         let git = GitState::default();
+        let syntax = led_state_syntax::SyntaxStates::default();
         {
             let mut dispatcher = Dispatcher {
                 tabs: &mut tabs,
@@ -1984,6 +2029,7 @@ mod tests {
                 keymap: &km,
                 chord: &mut chord,
                 kbd_macro: &mut kbd_macro,
+                syntax: &syntax,
             };
             dispatcher.dispatch_key(key(KeyModifiers::ALT, KeyCode::Enter));
         }

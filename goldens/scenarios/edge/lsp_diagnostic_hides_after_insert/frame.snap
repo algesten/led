@@ -1,8 +1,7 @@
-  notes.md              │  This is a really long paragraph that definitely exceeds the default target reflow column wid\
-                        │  th and                                                                                       
-                        │  should therefore be wrapped by the dprint-based reflow pass when ctrl+q is pressed with the \
-                        │  cursor
-                        │  on this line.
+  main.rs              •│  // new comment at top
+                        │  fn main() {         
+                        │      let unused = 42;
+                        │  }
                         │ 
                         │~
                         │~
@@ -36,5 +35,6 @@
                         │~
                         │~
                         │~
-                        │ ●notes.md 
-  ●                                                                                                               L1:C1 
+                        │~
+                        │ ●main.rs 
+ ● <FAKE-LSP> L1:C22 

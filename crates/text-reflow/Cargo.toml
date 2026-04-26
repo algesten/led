@@ -1,0 +1,14 @@
+[package]
+name = "led-text-reflow"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# M23 — paragraph / line-comment / block-comment reflow via the
+# bundled dprint-plugin-markdown engine. Pure text-in / text-out
+# helpers; no source state, no async, no driver. Ported from
+# legacy `led/src/model/reflow.rs`.
+
+[dependencies]
+ropey = { workspace = true }
+dprint-plugin-markdown = { workspace = true }

@@ -51,7 +51,14 @@ pub(super) fn run_overlay_command(
             move_selection(completions, 1);
             Some(DispatchOutcome::Continue)
         }
-        Command::InsertNewline => {
+        Command::InsertNewline | Command::InsertTab => {
+            // Both `Enter` and `Tab` commit the highlighted item —
+            // matches legacy LSP completion popup keymap (Tab and
+            // Enter are the two "accept" keys; Esc / Up / Down are
+            // navigation). Without intercepting `InsertTab` here
+            // it would fall through to the M23 `insert_tab`
+            // primitive and re-indent the line instead of
+            // committing.
             commit_active(completions, completions_pending, tabs, edits);
             Some(DispatchOutcome::Continue)
         }

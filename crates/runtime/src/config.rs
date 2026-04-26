@@ -373,12 +373,15 @@ mod tests {
 
     #[test]
     fn unknown_command_is_a_warning_not_a_fatal() {
+        // `alt+u` is unbound by default — picked deliberately so
+        // the "bogus binding not applied" assertion below isn't
+        // confused with a default binding.
         let tmp = tempdir();
         write_config(
             &tmp,
             r#"
 [keys]
-"ctrl+q" = "explode"
+"alt+u" = "explode"
 "ctrl+w" = "next_tab"
 "#,
         );
@@ -395,11 +398,11 @@ mod tests {
                 .lookup_direct(&parse_key("ctrl+w").unwrap()),
             Some(Command::TabNext)
         );
-        // Bogus binding not applied.
+        // Bogus binding not applied — `alt+u` stays unbound.
         assert_eq!(
             loaded
                 .keymap
-                .lookup_direct(&parse_key("ctrl+q").unwrap()),
+                .lookup_direct(&parse_key("alt+u").unwrap()),
             None
         );
     }

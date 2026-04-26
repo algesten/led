@@ -58,6 +58,7 @@ led-driver-git-core = { workspace = true }
 led-driver-git-native = { workspace = true }
 led-driver-session-core = { workspace = true }
 led-driver-session-native = { workspace = true }
+led-text-reflow = { workspace = true }
 drv = { workspace = true }
 imbl = { workspace = true }
 ropey = { workspace = true }

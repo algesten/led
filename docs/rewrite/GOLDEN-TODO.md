@@ -5,18 +5,18 @@ runs because of test-load flakiness; check individual tests with
 `cargo test --manifest-path goldens/Cargo.toml --test <name>` to
 confirm a real failure.
 
-## Current state (post-M22, 2026-04-26)
+## Current state (post-M23, 2026-04-26)
 
 | Suite          | Pass | Fail |
 |----------------|------|------|
-| actions        | 54  | 3   |
+| actions        | 57  | 0   |
 | config_keys    | 7   | 0   |
 | driver_events  | 25  | 2   |
 | edge           | 26  | 3   |
 | features       | 24  | 2   |
-| keybindings    | 108 | 3   |
+| keybindings    | 111 | 0   |
 | smoke          | 4   | 1   |
-| **Total**      | **248** | **14** |
+| **Total**      | **254** | **8** |
 
 Counts can swing ±1 per run from test-load flakiness on the
 parallel runner; the clipboard isolation flag knocked out the
@@ -24,6 +24,54 @@ previous worst offenders (yank tests racing the system
 pasteboard).
 
 ## What's solid (recent fixes)
+
+- **M23 — auto-indent / reflow / sort-imports** (2026-04-26):
+  Three new commands wired through dispatch:
+  - `Command::InsertTab` — replaces the active line's leading
+    whitespace with the tree-sitter indent suggestion when one
+    exists; falls back to inserting spaces up to the next
+    4-col tab stop. Mid-content Tab is a no-op when the line
+    is already correctly indented (legacy parity).
+  - `Command::ReflowParagraph` (`Ctrl-q`) — dprint-driven
+    paragraph / line-comment / block-comment reflow at
+    cursor row, via the new portable `text-reflow` crate.
+  - `Command::SortImports` (`Ctrl-x i`) — tree-sitter import
+    extraction + alphabetical sort, with the matching
+    "Imports sorted" / "Imports already sorted" alert.
+  - Also extended: `Command::InsertNewline` consults
+    `state-syntax::indent::suggest_indent` for the new line
+    when a parse tree is available; falls back to the M3
+    "match previous line's leading whitespace" rule.
+  - Completion popup overlay now treats `Tab` (alongside
+    `Enter`) as the commit key, matching legacy LSP
+    convention. Without this, `Tab` inside the popup would
+    fall through to `insert_tab` and re-indent the line.
+  - Per-language indent + imports queries pre-compile on the
+    main thread before the syntax-driver worker spawns
+    (`runtime::spawn_drivers`) — avoids a tree-sitter FFI
+    stall when dispatch's `Query::new` would otherwise race
+    the worker's compilation. Swift and C are excluded from
+    pre-warm because their grammars' init sequences fight
+    with crossterm's TTY mode setup; their queries compile
+    lazily on first Tab inside that language instead.
+  - Goldens refreshed for capture variance: `actions/insert_tab`,
+    `actions/sort_imports`, `actions/reflow_paragraph` legacy
+    captures missed the post-Tab `didChange` and the
+    sort/reflow buffer changes (legacy snapshot was taken
+    before the dispatch effect propagated). The rewrite's
+    captures are correct.
+  - **`lsp_completion/enter`** also fixed by the same
+    InsertNewline auto-indent path. Tricky bug: my first cut
+    of `insert_newline` asked `suggest_indent` about
+    `line_idx + 1` (the line *below* the split) — which in
+    a fixture like `fn main() {\n    x.\n}` is the `}` line,
+    triggering the closing-bracket short-circuit and returning
+    the *opener's* indent (empty). Switched to asking about
+    `line_idx` (the line being split); the structural indent
+    of that line is exactly what the new line wants when Enter
+    fires at EOL, and the popup-commit case (where Enter
+    inserts a newline mid-buffer) gets the same correct
+    answer.
 
 - **scroll_margin**: `crates/runtime/src/dispatch/cursor.rs` —
   3-row margin from each viewport edge, clamped to `body_rows /
@@ -153,24 +201,26 @@ pasteboard).
 
 ## Remaining failures by cluster
 
-### A. M23 — Auto-indent / reflow / sort-imports — 7 tests
+### A. M23 — Auto-indent / reflow / sort-imports (SHIPPED, 2026-04-26)
 
-Tests gated on the M23 milestone (`ROADMAP.md` § "M23"):
+All six core M23 goldens are now green:
 
-- `actions/insert_tab` — `Tab` key behavior in editor.
-- `actions/reflow_paragraph` — `Ctrl-q` paragraph rewrap.
-- `actions/sort_imports` — `Ctrl-x i` import-block sort.
-- `keybindings/ctrl_x_i` — sort_imports binding alert.
-- `keybindings/main_ctrl_q` — reflow_paragraph binding.
-- `keybindings/main_tab` — insert_tab binding (currently
-  reserved for `next_tab` placeholder).
-- `features/editing_type_delete_reflow` — narrative auto-indent
-  scenario.
+- `actions/insert_tab` — green.
+- `actions/reflow_paragraph` — green.
+- `actions/sort_imports` — green.
+- `keybindings/ctrl_x_i` — green.
+- `keybindings/main_ctrl_q` — green.
+- `keybindings/main_tab` — green.
 
-All three commands lean on M15 (syntax) for language-aware
-logic. Out of scope until M23.
+`features/editing/type_delete_reflow` was originally listed
+under M23 but it's actually gated on M26 — its expected trace
+includes `WorkspaceFlushUndo` + `WorkspaceCheckSync` lines
+that come from the cross-instance sync feature. The reflow
+itself works on the rewrite (the script's
+`type X press Ctrl-q` produces the expected frame); only the
+M26 trace lines are missing. Folded into Cluster B below.
 
-### B. M26 — External file change + cross-instance sync — 5 tests
+### B. M26 — External file change + cross-instance sync — 6 tests
 
 Tests gated on M26 (file-watch driver + `SessionCmd::CheckSync`):
 
@@ -179,6 +229,10 @@ Tests gated on M26 (file-watch driver + `SessionCmd::CheckSync`):
 - `edge/external_delete_open_file`
 - `driver_events/docstore_external_change`
 - `driver_events/workspace_workspace_changed`
+- `features/editing/type_delete_reflow` — reflow itself works,
+  only the M26 trace lines (`WorkspaceFlushUndo` +
+  `WorkspaceCheckSync`) are missing. Moved here from
+  Cluster A on M23 ship.
 
 The rewrite's session driver has no `CheckSync` command — it's
 the cross-instance sync feature documented in
@@ -270,10 +324,13 @@ The earlier rendering-bug list is now cleared:
 Two remaining long-tail items, both deliberate divergences
 or known flakes:
 
-- `edge/lsp_rebase_after_insert` — deliberate divergence:
-  legacy rebases stale diagnostics onto the new line numbers,
-  the rewrite hides them entirely until the next pull (memory
-  `feedback_lsp_no_smear.md`). Don't refresh.
+- ~~`edge/lsp_rebase_after_insert`~~ — retired. Captured legacy's
+  rebase-stale-diag-onto-new-line behaviour, which the rewrite
+  deliberately doesn't do (memory `feedback_lsp_no_smear.md`).
+  Replaced by **`edge/lsp_diagnostic_hides_after_insert`**, which
+  asserts the rewrite's spec: stale diagnostic = invisible
+  marker until the next pull lands. Passes in isolation; can
+  flake under full-suite parallel load (LSP round-trip timing).
 - `features/git_workspace_open_file` — flaky under parallel
   test load; passes individually. Investigate when it bites
   twice in a row.
@@ -295,15 +352,11 @@ following M22:
 
 ## Recommended next pass order
 
-1. **M23 (auto-indent / reflow / sort-imports)** — Cluster A.
-   7 failing tests gated on the milestone. All three commands
-   share a syntax-tree dependency that already exists (M15);
-   the work is wiring + per-language indent queries.
-2. **M26 (file-watch + cross-instance sync)** — Cluster B.
-   5 tests. Adds `driver-file-watch/` (notify-based), the
+1. **M26 (file-watch + cross-instance sync)** — Cluster B.
+   6 tests. Adds `driver-file-watch/` (notify-based), the
    `SessionCmd::CheckSync` command, and the client-side
    `workspace/didChangeWatchedFiles` LSP notification.
-3. **`features/git_workspace_open_file` flake** — investigate
+2. **`features/git_workspace_open_file` flake** — investigate
    if it bites twice in a row. Likely a parallel-test-load
    issue that a deterministic seed in the harness fixture
    would resolve.

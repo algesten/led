@@ -52,6 +52,22 @@ pub enum Command {
     DeleteBack,
     DeleteForward,
     InsertChar(char),
+    /// `Tab` outside of any overlay (M23). Replaces the active line's
+    /// leading whitespace with the language-aware indent suggestion;
+    /// when no syntax tree is available, falls back to inserting
+    /// spaces up to the next 4-column tab stop. Default binding:
+    /// `tab`.
+    InsertTab,
+    /// Reflow the paragraph (or doc-comment block) at the cursor
+    /// using the bundled dprint markdown engine (M23). Default
+    /// binding: `ctrl+q`. Inside the file browser the same chord
+    /// rebinds to `CollapseAll`.
+    ReflowParagraph,
+    /// Sort the import block at the active buffer's top via tree-
+    /// sitter (M23). Languages without an `imports.scm` (or before
+    /// the parse has landed) get an "Imports already sorted"
+    /// alert. Default binding: `ctrl+x i`.
+    SortImports,
 
     // Mark / region / kill ring (M7).
     SetMark,
@@ -200,6 +216,9 @@ pub fn parse_command(s: &str) -> Result<Command, String> {
         "insert_newline" => Ok(Command::InsertNewline),
         "delete_backward" => Ok(Command::DeleteBack),
         "delete_forward" => Ok(Command::DeleteForward),
+        "insert_tab" => Ok(Command::InsertTab),
+        "reflow_paragraph" => Ok(Command::ReflowParagraph),
+        "sort_imports" => Ok(Command::SortImports),
         "set_mark" => Ok(Command::SetMark),
         "kill_region" => Ok(Command::KillRegion),
         "kill_line" => Ok(Command::KillLine),
@@ -267,6 +286,9 @@ mod tests {
             ("insert_newline", Command::InsertNewline),
             ("delete_backward", Command::DeleteBack),
             ("delete_forward", Command::DeleteForward),
+            ("insert_tab", Command::InsertTab),
+            ("reflow_paragraph", Command::ReflowParagraph),
+            ("sort_imports", Command::SortImports),
             ("kbd_macro_start", Command::KbdMacroStart),
             ("kbd_macro_end", Command::KbdMacroEnd),
             ("kbd_macro_execute", Command::KbdMacroExecute),

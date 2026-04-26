@@ -8,3 +8,4 @@ LspSend	server=fake-lsp kind=notification method=workspace/didChangeConfiguratio
 LspSend	server=fake-lsp kind=notification method=textDocument/didOpen path=file://<TMPDIR>/main.rs version=1
 LspRecv	server=fake-lsp kind=notification method=$/progress
 LspRecv	server=fake-lsp kind=notification method=$/progress
+LspSend	server=fake-lsp kind=notification method=textDocument/didChange path=file://<TMPDIR>/main.rs version=2

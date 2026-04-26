@@ -1,0 +1,30 @@
+git_init = true
+
+# No-smear scenario. The user-feedback memo
+# `feedback_lsp_no_smear.md` explicitly settled this trade-off:
+# stale LSP diagnostics disappear entirely when the buffer version
+# advances past the version they were stamped against. Legacy led
+# rebased the gutter marker forward through the edit (the
+# `edge/lsp_rebase_after_insert` golden encoded that legacy-only
+# behaviour and is retired); the rewrite hides the marker until
+# the next pull-diagnostic round-trip lands.
+#
+# Why hide instead of rebase: a marker that says "error here" on a
+# line the user just edited can be actively wrong — the underlying
+# tree may have shifted enough that the diagnostic no longer
+# applies. Better blank gutter than wrong gutter. (Syntax tokens
+# take the opposite trade — they smear forward — because colour
+# being slightly off is still useful.)
+[[file]]
+path = "main.rs"
+contents = """
+fn main() {
+    let unused = 42;
+}
+"""
+
+[fake_lsp]
+[fake_lsp.diagnostics]
+"main.rs" = [
+  { range = { start = { line = 1, character = 8 }, end = { line = 1, character = 14 } }, severity = 2, message = "unused variable: `unused`" },
+]
