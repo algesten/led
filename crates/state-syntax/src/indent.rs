@@ -53,27 +53,30 @@ fn indents_src(lang: Language) -> Option<&'static str> {
     })
 }
 
-/// Pre-compile every supported language's indent query on the
-/// caller's thread. Call this once at runtime startup before
-/// spawning the syntax-driver worker — pre-warming the per-
-/// language `OnceLock`s eliminates a contention window where
-/// concurrent `Query::new` calls (one in the driver compiling a
-/// highlight query, one in dispatch compiling an indent query)
-/// race in tree-sitter's FFI and stall.
 /// Pre-compile every supported language's indent + imports
 /// queries on the calling thread. Call this once at runtime
-/// startup before the syntax driver thread spawns. See
-/// `runtime::spawn_drivers` for the why.
+/// startup before the syntax driver thread spawns. Pre-warming
+/// the per-language `OnceLock`s eliminates a contention window
+/// where concurrent `Query::new` calls (one in the driver
+/// compiling a highlight query, one in dispatch compiling an
+/// indent query) race in tree-sitter's FFI and stall.
 ///
-/// Swift and C are deliberately excluded: their grammars'
-/// global-init sequences fight with crossterm's TTY mode setup
-/// and reliably break key handling on macOS (every
-/// non-printable key — Down / Right / Tab — gets dropped from
-/// the input stream). The rewrite still resolves their indent
-/// queries lazily on first Tab inside a Swift / C buffer; the
-/// only cost is a one-shot ~5ms compile when the user actually
-/// touches one of those languages, vs an immediate startup
-/// crash with them included here.
+/// Swift and C are deliberately excluded: under the goldens
+/// harness's `portable-pty`, calling `Query::new` for the Swift
+/// grammar at startup hangs the entire binary (key dispatch
+/// stops responding — Down / Right / Tab all get dropped). The
+/// same call works fine under a normal Terminal.app PTY, so
+/// this looks like a `portable-pty` × tree-sitter-swift
+/// static-init interaction rather than a problem with the Swift
+/// grammar itself. Lazy-compiling those two on first Tab inside
+/// the relevant buffer is the safe workaround; the cost is a
+/// one-time ~60ms hit per Swift / C file. If the harness PTY
+/// gets re-evaluated (e.g. switching to `expectrl`), this
+/// exclusion is the first thing to drop.
+///
+/// Adding a NEW language to the precompile list: verify under
+/// the goldens harness (`cd goldens && cargo test --release
+/// --test smoke -- move_cursor_down_right`) before merging.
 pub fn precompile_all_queries() {
     for lang in [
         Language::Rust,
