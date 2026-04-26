@@ -1,0 +1,12 @@
+[package]
+name = "led-state-kbd-macro"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Session-global user-decision source: the keyboard-macro state.
+# Matches legacy `led/crates/state/src/lib.rs::KbdMacroState`.
+# No driver — recording/playback are pure dispatch concerns.
+
+[dependencies]
+led-core = { workspace = true }

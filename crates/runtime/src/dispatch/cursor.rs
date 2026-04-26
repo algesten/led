@@ -1053,6 +1053,7 @@ mod tests {
         let diagnostics = DiagnosticsStates::default();
         let lsp_status = led_state_diagnostics::LspStatuses::default();
         let git = GitState::default();
+        let mut kbd_macro = led_state_kbd_macro::KbdMacroState::default();
 
         let mut press = |k: KeyEvent,
                      tabs: &mut Tabs,
@@ -1067,7 +1068,7 @@ mod tests {
             super::super::dispatch_key(
                 k, tabs, edits, kill_ring, clip, alerts, jumps, browser, fs, &store, &term,
         &mut find_file, &mut isearch, &mut file_search, &mut path_chains, &mut completions, &mut completions_pending, &mut lsp_extras, &mut lsp_pending, &diagnostics, &lsp_status, &git, &km,
-                chord,);
+                chord, &mut kbd_macro,);
         };
 
         press(

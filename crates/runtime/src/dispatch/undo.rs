@@ -450,6 +450,7 @@ mod tests {
         let mut km = default_keymap();
         km.bind("ctrl+y", Command::Redo); // override Yank for test
         let mut chord = ChordState::default();
+        let mut kbd_macro = led_state_kbd_macro::KbdMacroState::default();
         let mut kr = KillRing::default();
         let mut clip = ClipboardState::default();
         let mut alerts = AlertState::default();
@@ -490,7 +491,9 @@ mod tests {
             &led_state_diagnostics::LspStatuses::default(),
             &GitState::default(),
             &km,
-            &mut chord,);
+            &mut chord,
+            &mut kbd_macro,
+        );
         assert_eq!(rope_of(&edits, "file.rs").to_string(), "");
 
         // Redo: "hi"
@@ -521,7 +524,9 @@ mod tests {
             &led_state_diagnostics::LspStatuses::default(),
             &GitState::default(),
             &km,
-            &mut chord,);
+            &mut chord,
+            &mut kbd_macro,
+        );
         assert_eq!(rope_of(&edits, "file.rs").to_string(), "hi");
     }
 
@@ -583,6 +588,7 @@ mod tests {
         let mut km = default_keymap();
         km.bind("ctrl+y", Command::Redo);
         let mut chord = ChordState::default();
+        let mut kbd_macro = led_state_kbd_macro::KbdMacroState::default();
         let mut kr = KillRing::default();
         let mut clip = ClipboardState::default();
         let mut alerts = AlertState::default();
@@ -621,7 +627,9 @@ mod tests {
             &led_state_diagnostics::LspStatuses::default(),
             &GitState::default(),
             &km,
-            &mut chord,);
+            &mut chord,
+            &mut kbd_macro,
+        );
         // Still "x" — nothing to redo because the new edit dropped
         // the future branch.
         assert_eq!(rope_of(&edits, "file.rs").to_string(), "x");

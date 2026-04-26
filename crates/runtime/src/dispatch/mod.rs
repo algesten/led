@@ -79,6 +79,7 @@ use led_state_file_search::FileSearchState;
 use led_state_find_file::FindFileState;
 use led_state_isearch::IsearchState;
 use led_state_jumps::JumpListState;
+use led_state_kbd_macro::{KbdMacroState, RECURSION_LIMIT as KBD_MACRO_RECURSION_LIMIT};
 use led_state_kill_ring::KillRing;
 use led_state_lsp::LspExtrasState;
 use led_state_tabs::Tabs;
@@ -156,6 +157,10 @@ pub struct Dispatcher<'a> {
     >,
     pub keymap: &'a Keymap,
     pub chord: &'a mut ChordState,
+    /// M22: keyboard-macro state. Recording flag, in-progress
+    /// `current` buffer, last completed macro, recursion depth,
+    /// pending iteration count.
+    pub kbd_macro: &'a mut KbdMacroState,
 }
 
 impl<'a> Dispatcher<'a> {
@@ -201,6 +206,7 @@ impl<'a> Dispatcher<'a> {
             self.git,
             self.keymap,
             self.chord,
+            self.kbd_macro,
         )
     }
 }
@@ -250,6 +256,7 @@ pub fn dispatch_key(
     git: &led_state_git::GitState,
     keymap: &Keymap,
     chord: &mut ChordState,
+    kbd_macro: &mut KbdMacroState,
 ) -> DispatchOutcome {
     // Step 0 — confirm-kill gate.
     if let Some(target) = alerts.confirm_kill {
@@ -272,10 +279,38 @@ pub fn dispatch_key(
     );
     match resolved {
         Resolved::Command(cmd) => {
+            // M22 — Recording hook. While a macro recording is
+            // in progress, append the resolved command to
+            // `kbd_macro.current` BEFORE running it. The filter
+            // (`should_record`) excludes meta-actions (start,
+            // end, quit, suspend, wait). Mirrors legacy
+            // `led/src/model/action/mod.rs:23-43` (the pre-match
+            // guard that pushed onto `state.kbd_macro.current`).
+            if kbd_macro.recording && should_record(&cmd) {
+                kbd_macro.current.push(cmd);
+            }
+
+            // M22 — Count + repeat-mode coupling for execute.
+            // The chord-prefix digit accumulator lives in
+            // `chord.count`; it has to land in `kbd_macro.execute_count`
+            // before the execute arm runs `take()`. Also flip the
+            // `macro_repeat` latch the moment a `KbdMacroExecute`
+            // resolves so a subsequent bare `e` short-circuits to
+            // another execute. Legacy emits two `Mut`s
+            // (`KbdMacroSetCount` + `Mut::Action(KbdMacroExecute)`)
+            // which the reducer applies in order; the rewrite
+            // collapses that into this synchronous block.
+            if matches!(cmd, Command::KbdMacroExecute) {
+                if let Some(n) = chord.count.take() {
+                    kbd_macro.execute_count = Some(n);
+                }
+                chord.macro_repeat = true;
+            }
+
             let outcome = run_command(
                 cmd, tabs, edits, kill_ring, clip, alerts, jumps, browser, fs, store, terminal,
                 find_file, isearch, file_search, path_chains, completions, completions_pending,
-                lsp_extras, lsp_pending, diagnostics, lsp_status, git,
+                lsp_extras, lsp_pending, diagnostics, lsp_status, git, kbd_macro,
             );
             // Kill-ring coalescing: any non-KillLine command breaks
             // the flag, so the next KillLine starts a fresh entry.
@@ -472,6 +507,34 @@ fn refilter_active_session(
     }
 }
 
+/// M22 — Filter for the macro-recording hook. While
+/// `KbdMacroState.recording` is true, every resolved `Command`
+/// passes through this gate before being appended to `current`.
+///
+/// Excluded:
+/// - `Quit` / `Suspend` — environment actions; replay should
+///   never re-quit or re-suspend.
+/// - `Wait(_)` — harness-only timing primitive; legacy parity
+///   (`led/src/model/action/helpers.rs:104`).
+/// - `KbdMacroStart` — clears `current` and stays recording;
+///   the start itself is a meta-action, not part of the macro.
+/// - `KbdMacroEnd` — terminates recording; obviously not part
+///   of the macro it's ending.
+///
+/// `KbdMacroExecute` is **not** excluded — recording a macro
+/// that itself invokes the previously-saved macro is legal
+/// (legacy `docs/spec/macros.md` § "Edge cases").
+fn should_record(cmd: &Command) -> bool {
+    !matches!(
+        cmd,
+        Command::Quit
+            | Command::Suspend
+            | Command::Wait(_)
+            | Command::KbdMacroStart
+            | Command::KbdMacroEnd
+    )
+}
+
 fn is_coalescable_insert(cmd: &Command) -> bool {
     // Every printable insert is coalescable — the actual word-
     // boundary decision (close on whitespace-after-non-whitespace)
@@ -548,11 +611,45 @@ fn resolve_command(
     find_file_active: bool,
     file_search_active: bool,
 ) -> Resolved {
+    // M22 — Macro repeat-mode short-circuit. The moment a
+    // `KbdMacroExecute` resolves, `chord.macro_repeat` flips
+    // true; while it's set, a bare `e` (no Ctrl, no Alt)
+    // fires another execute without consulting the keymap.
+    // Any other key clears the flag and falls through to the
+    // normal resolution path. Mirrors legacy
+    // `actions_of.rs::map_key:67-74`.
+    if chord.macro_repeat {
+        if k.modifiers.is_empty() && matches!(k.code, KeyCode::Char('e')) {
+            return Resolved::Command(Command::KbdMacroExecute);
+        }
+        chord.macro_repeat = false;
+        // Fall through to normal resolution below.
+    }
+
     if let Some(prefix) = chord.pending.take() {
+        // M22 — Chord-prefix digit accumulator. While a chord
+        // prefix is pending, bare digits `0..=9` fold into a
+        // decimal count without consuming the prefix. The
+        // count is consumed (or dropped) when the chord
+        // resolves to a real command. Mirrors legacy
+        // `actions_of.rs::map_key:82-90`.
+        if k.modifiers.is_empty()
+            && let KeyCode::Char(c @ '0'..='9') = k.code
+        {
+            let prev = chord.count.unwrap_or(0);
+            chord.count = Some(prev * 10 + (c as usize - '0' as usize));
+            chord.pending = Some(prefix);
+            return Resolved::Continue;
+        }
+
         if let Some(cmd) = keymap.lookup_chord(&prefix, &k) {
             return Resolved::Command(cmd);
         }
-        // Silent cancel — matches legacy behaviour.
+        // Silent cancel — matches legacy behaviour. Drop any
+        // accumulated count too: legacy treats `Ctrl-x 3 ?` as
+        // "throw away the count along with the unrecognised
+        // chord" (see `keybindings.md:301-305`).
+        chord.count = None;
         return Resolved::Continue;
     }
     // Find-file context overlay wins over the global direct table
@@ -642,6 +739,7 @@ fn run_command(
     diagnostics: &led_state_diagnostics::DiagnosticsStates,
     lsp_status: &led_state_diagnostics::LspStatuses,
     git: &led_state_git::GitState,
+    kbd_macro: &mut KbdMacroState,
 ) -> DispatchOutcome {
     // Find-file overlay intercept. When active, the overlay owns
     // input editing + its own command set; most commands route into
@@ -1017,6 +1115,95 @@ fn run_command(
             );
             DispatchOutcome::Continue
         }
+        // ── Keyboard macros (M22) ──────────────────────────
+        Command::KbdMacroStart => {
+            // Begin a fresh recording. If we're already
+            // recording, this resets `current` and stays in
+            // record mode (legacy parity, `action/mod.rs:32-35`).
+            kbd_macro.recording = true;
+            kbd_macro.current.clear();
+            alerts.set_info(
+                "Defining kbd macro...".to_string(),
+                std::time::Instant::now(),
+                std::time::Duration::from_secs(2),
+            );
+            DispatchOutcome::Continue
+        }
+        Command::KbdMacroEnd => {
+            if kbd_macro.recording {
+                kbd_macro.recording = false;
+                let recorded = std::mem::take(&mut kbd_macro.current);
+                kbd_macro.last = Some(std::sync::Arc::new(recorded));
+                alerts.set_info(
+                    "Keyboard macro defined".to_string(),
+                    std::time::Instant::now(),
+                    std::time::Duration::from_secs(2),
+                );
+            } else {
+                alerts.set_info(
+                    "Not defining kbd macro".to_string(),
+                    std::time::Instant::now(),
+                    std::time::Duration::from_secs(2),
+                );
+            }
+            DispatchOutcome::Continue
+        }
+        Command::KbdMacroExecute => {
+            // Recursion guard: depth >= 100 surfaces an alert
+            // and aborts further playback up the stack
+            // (legacy `action/mod.rs:278-280`).
+            if kbd_macro.playback_depth >= KBD_MACRO_RECURSION_LIMIT {
+                alerts.set_info(
+                    "Keyboard macro recursion limit".to_string(),
+                    std::time::Instant::now(),
+                    std::time::Duration::from_secs(2),
+                );
+                return DispatchOutcome::Continue;
+            }
+            // Clone the Arc out of `kbd_macro.last` first so
+            // the recursive `run_command` calls below can take
+            // `&mut kbd_macro` again — `recorded` is a refcount
+            // bump, not a borrow.
+            let Some(recorded) = kbd_macro.last.clone() else {
+                alerts.set_info(
+                    "No kbd macro defined".to_string(),
+                    std::time::Instant::now(),
+                    std::time::Duration::from_secs(2),
+                );
+                return DispatchOutcome::Continue;
+            };
+            let count = kbd_macro.execute_count.take().unwrap_or(1);
+            let iterations = if count == 0 { usize::MAX } else { count };
+            kbd_macro.playback_depth += 1;
+            let mut last_outcome = DispatchOutcome::Continue;
+            'outer: for _ in 0..iterations {
+                for inner_cmd in recorded.iter() {
+                    let outcome = run_command(
+                        *inner_cmd, tabs, edits, kill_ring, clip, alerts, jumps, browser, fs,
+                        store, terminal, find_file, isearch, file_search, path_chains, completions,
+                        completions_pending, lsp_extras, lsp_pending, diagnostics, lsp_status, git,
+                        kbd_macro,
+                    );
+                    if !matches!(outcome, DispatchOutcome::Continue) {
+                        // Quit / Suspend mid-playback propagates
+                        // out so e.g. a macro that ends in Quit
+                        // exits cleanly. Legacy parity.
+                        last_outcome = outcome;
+                        break 'outer;
+                    }
+                }
+            }
+            kbd_macro.playback_depth -= 1;
+            last_outcome
+        }
+        Command::Wait(_) => {
+            // Harness primitive — no-op in the synchronous
+            // dispatch loop. The goldens harness handles waits
+            // at the script-step level; a `led_test_clock`-aware
+            // implementation can hang behaviour off this arm
+            // without changing the variant.
+            DispatchOutcome::Continue
+        }
     }
 }
 
@@ -1154,6 +1341,7 @@ mod tests {
         let term = Terminal::default();
         let keymap = default_keymap();
         let mut chord = ChordState::default();
+        let mut kbd_macro = led_state_kbd_macro::KbdMacroState::default();
         let mut path_chains = std::collections::HashMap::new();
         let mut completions = CompletionsState::default();
         let mut completions_pending = led_state_completions::CompletionsPending::default();
@@ -1188,7 +1376,9 @@ mod tests {
             &led_state_diagnostics::LspStatuses::default(),
             &GitState::default(),
             &keymap,
-            &mut chord,);
+            &mut chord,
+            &mut kbd_macro,
+        );
         assert_eq!(outcome, DispatchOutcome::Continue);
         assert!(chord.pending.is_some());
 
@@ -1220,7 +1410,9 @@ mod tests {
             &led_state_diagnostics::LspStatuses::default(),
             &GitState::default(),
             &keymap,
-            &mut chord,);
+            &mut chord,
+            &mut kbd_macro,
+        );
         assert_eq!(outcome, DispatchOutcome::Quit);
         assert!(chord.pending.is_none());
     }
@@ -1243,6 +1435,7 @@ mod tests {
             fixture_with_content("hi", Dims { cols: 10, rows: 5 });
         let keymap = default_keymap();
         let mut chord = ChordState::default();
+        let mut kbd_macro = led_state_kbd_macro::KbdMacroState::default();
         let mut kill_ring = KillRing::default();
         let mut clip = ClipboardState::default();
         let mut alerts = AlertState::default();
@@ -1282,7 +1475,9 @@ mod tests {
             &led_state_diagnostics::LspStatuses::default(),
             &GitState::default(),
             &keymap,
-            &mut chord,);
+            &mut chord,
+            &mut kbd_macro,
+        );
         assert!(chord.pending.is_some());
         // Second key `z` isn't bound under ctrl+x → silent cancel.
         let mut find_file: Option<FindFileState> = None;
@@ -1312,7 +1507,9 @@ mod tests {
             &led_state_diagnostics::LspStatuses::default(),
             &GitState::default(),
             &keymap,
-            &mut chord,);
+            &mut chord,
+            &mut kbd_macro,
+        );
         assert_eq!(outcome, DispatchOutcome::Continue);
         assert!(chord.pending.is_none());
         // `z` was NOT inserted — the printable fallback only fires
@@ -1334,6 +1531,7 @@ mod tests {
         let mut km = Keymap::empty();
         km.bind("ctrl+q", Command::Quit);
         let mut chord = ChordState::default();
+        let mut kbd_macro = led_state_kbd_macro::KbdMacroState::default();
         let mut kill_ring = KillRing::default();
         let mut clip = ClipboardState::default();
         let mut alerts = AlertState::default();
@@ -1373,7 +1571,9 @@ mod tests {
             &led_state_diagnostics::LspStatuses::default(),
             &GitState::default(),
             &km,
-            &mut chord,);
+            &mut chord,
+            &mut kbd_macro,
+        );
         assert_eq!(outcome, DispatchOutcome::Quit);
 
         // Ctrl-C not bound here → Continue (not Quit).
@@ -1404,7 +1604,9 @@ mod tests {
             &led_state_diagnostics::LspStatuses::default(),
             &GitState::default(),
             &km,
-            &mut chord,);
+            &mut chord,
+            &mut kbd_macro,
+        );
         assert_eq!(outcome, DispatchOutcome::Continue);
     }
 
@@ -1420,6 +1622,7 @@ mod tests {
 
         let km = crate::keymap::default_keymap();
         let mut chord = ChordState::default();
+        let mut kbd_macro = led_state_kbd_macro::KbdMacroState::default();
         let mut kill_ring = KillRing::default();
         let mut clip = ClipboardState::default();
         let mut alerts = AlertState::default();
@@ -1460,6 +1663,7 @@ mod tests {
             &GitState::default(),
             &km,
             &mut chord,
+            &mut kbd_macro,
         );
         assert_eq!(outcome, DispatchOutcome::Suspend);
     }
@@ -1473,6 +1677,7 @@ mod tests {
 
         let km = Keymap::empty(); // no bindings at all
         let mut chord = ChordState::default();
+        let mut kbd_macro = led_state_kbd_macro::KbdMacroState::default();
         let mut kill_ring = KillRing::default();
         let mut clip = ClipboardState::default();
         let mut alerts = AlertState::default();
@@ -1511,7 +1716,9 @@ mod tests {
             &led_state_diagnostics::LspStatuses::default(),
             &GitState::default(),
             &km,
-            &mut chord,);
+            &mut chord,
+            &mut kbd_macro,
+        );
         assert_eq!(rope_of(&edits, "file.rs").to_string(), "z");
     }
 
@@ -1525,6 +1732,7 @@ mod tests {
 
         let km = Keymap::empty();
         let mut chord = ChordState::default();
+        let mut kbd_macro = led_state_kbd_macro::KbdMacroState::default();
         let mut kill_ring = KillRing::default();
         let mut clip = ClipboardState::default();
         let mut alerts = AlertState::default();
@@ -1563,7 +1771,9 @@ mod tests {
             &led_state_diagnostics::LspStatuses::default(),
             &GitState::default(),
             &km,
-            &mut chord,);
+            &mut chord,
+            &mut kbd_macro,
+        );
         assert_eq!(rope_of(&edits, "file.rs").to_string(), "");
     }
 
@@ -1638,6 +1848,7 @@ mod tests {
         let mut completions = CompletionsState::default();
         let mut completions_pending = led_state_completions::CompletionsPending::default();
         let mut chord = ChordState::default();
+        let mut kbd_macro = led_state_kbd_macro::KbdMacroState::default();
         let mut kr = KillRing::default();
         let mut clip = ClipboardState::default();
         let mut alerts = AlertState::default();
@@ -1682,6 +1893,7 @@ mod tests {
             &GitState::default(),
             &km,
             &mut chord,
+            &mut kbd_macro,
         );
         assert_eq!(lsp_pending.pending_goto.len(), 1);
         let req = &lsp_pending.pending_goto[0];
@@ -1703,6 +1915,7 @@ mod tests {
         let mut completions = CompletionsState::default();
         let mut completions_pending = led_state_completions::CompletionsPending::default();
         let mut chord = ChordState::default();
+        let mut kbd_macro = led_state_kbd_macro::KbdMacroState::default();
         let mut kr = KillRing::default();
         let mut clip = ClipboardState::default();
         let mut alerts = AlertState::default();
@@ -1739,6 +1952,7 @@ mod tests {
             &GitState::default(),
             &km,
             &mut chord,
+            &mut kbd_macro,
         );
         assert!(lsp_pending.pending_goto.is_empty());
     }

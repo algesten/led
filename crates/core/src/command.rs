@@ -136,6 +136,33 @@ pub enum Command {
     /// Full outline (via `textDocument/documentSymbol`) lands
     /// in a later polish pass.
     Outline,
+
+    // Keyboard macros (M22).
+    /// Begin recording. Default binding: `ctrl+x (`. Clears
+    /// any in-progress recording and flips
+    /// `KbdMacroState.recording` to true. Re-issuing while
+    /// already recording resets `current` and stays in record
+    /// mode (legacy parity).
+    KbdMacroStart,
+    /// End recording. Default binding: `ctrl+x )`. Moves
+    /// `KbdMacroState.current` into `last`. Issuing while not
+    /// recording surfaces a "Not defining kbd macro" alert.
+    KbdMacroEnd,
+    /// Replay the last successfully recorded macro. Default
+    /// binding: `ctrl+x e`. Honours the chord-prefix digit
+    /// count via `KbdMacroState.execute_count`. Bare `e` after
+    /// a successful execute also routes here (repeat-mode
+    /// latch in `ChordState.macro_repeat`).
+    KbdMacroExecute,
+    /// Headless / harness wait primitive. Not bound by default;
+    /// reachable from a recorded macro that captured one (rare).
+    /// Excluded from `should_record` so a macro replay doesn't
+    /// stack waits. Currently a no-op in `run_command` — the
+    /// goldens harness handles waits at the script-step level
+    /// (`goldens/src/scenario.rs::ScriptStep::Wait`); a future
+    /// `led-test-clock`-aware impl can hang behaviour off this
+    /// arm without changing the variant.
+    Wait(u64),
 }
 
 // ── Command-string parsing ─────────────────────────────────────────────
@@ -207,6 +234,12 @@ pub fn parse_command(s: &str) -> Result<Command, String> {
         "lsp_toggle_inlay_hints" => Ok(Command::LspToggleInlayHints),
         "lsp_format" => Ok(Command::LspFormat),
         "outline" => Ok(Command::Outline),
+        "kbd_macro_start" => Ok(Command::KbdMacroStart),
+        "kbd_macro_end" => Ok(Command::KbdMacroEnd),
+        "kbd_macro_execute" => Ok(Command::KbdMacroExecute),
+        // `wait` deliberately omitted from the parser — Wait(u64) carries
+        // a payload, so user keymaps can't bind it via plain string lookup.
+        // Tests and a future harness-only path may construct it directly.
         other => Err(format!("unknown command `{other}`")),
     }
 }
@@ -234,6 +267,9 @@ mod tests {
             ("insert_newline", Command::InsertNewline),
             ("delete_backward", Command::DeleteBack),
             ("delete_forward", Command::DeleteForward),
+            ("kbd_macro_start", Command::KbdMacroStart),
+            ("kbd_macro_end", Command::KbdMacroEnd),
+            ("kbd_macro_execute", Command::KbdMacroExecute),
         ];
         for (s, expected) in cases {
             assert_eq!(parse_command(s).unwrap(), expected, "command `{s}`");

@@ -56,6 +56,7 @@ use led_state_file_search::FileSearchState;
 use led_state_find_file::FindFileState;
 use led_state_isearch::IsearchState;
 use led_state_jumps::JumpListState;
+use led_state_kbd_macro::KbdMacroState;
 use led_state_kill_ring::KillRing;
 use led_state_diagnostics::{
     BufferDiagnostics, DiagnosticsStates, LspServerStatus, LspStatuses,
@@ -176,6 +177,13 @@ pub struct Atoms {
     pub clip: ClipboardState,
     pub alerts: AlertState,
     pub jumps: JumpListState,
+    /// M22 — keyboard-macro state. Recording flag, in-progress
+    /// `current` buffer, last completed macro (Arc-wrapped),
+    /// recursion depth, pending iteration count. User-decision
+    /// source; mutated only by `dispatch`. Not persisted across
+    /// restarts (legacy parity, `docs/spec/macros.md` § "Session
+    /// persistence").
+    pub kbd_macro: KbdMacroState,
     pub browser: BrowserUi,
     pub fs: FsTree,
     /// `Some` while the find-file / save-as modal is active. See
@@ -371,6 +379,7 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
         clip,
         alerts,
         jumps,
+        kbd_macro,
         browser,
         fs,
         store,
@@ -1240,6 +1249,7 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
                 path_chains,
                 keymap,
                 chord: &mut chord,
+                kbd_macro,
             };
             match dispatcher.dispatch(ev) {
                 DispatchOutcome::Continue => {}
@@ -1364,6 +1374,7 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
             lsp_extras: query::LspExtrasOverlayInput::new(lsp_extras),
             git: query::GitStateInput::new(git),
             render_tick,
+            kbd_macro: query::KbdMacroRecordingInput::new(&kbd_macro),
         });
 
         // ── Execute ─────────────────────────────────────────────

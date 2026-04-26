@@ -180,9 +180,27 @@ impl Keymap {
 /// Runtime-only chord state. Carries a pending prefix between
 /// dispatch ticks. Not a drv source — lives in the `run` frame,
 /// threaded through `dispatch_key` by `&mut`.
+///
+/// `count` and `macro_repeat` are M22 additions: legacy keeps them
+/// as `Cell`s local to `actions_of.rs` because the FRP graph
+/// passes state by value; the rewrite has a `&mut ChordState` per
+/// dispatch, so plain fields are fine. Both are transient
+/// chord-resolution scratch state — not source data, not memoised.
 #[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ChordState {
     pub pending: Option<KeyEvent>,
+    /// Decimal accumulator for digits typed while a chord prefix
+    /// is pending. `Ctrl-x 4 2 ctrl+x e` → `Some(42)`. Cleared
+    /// when the chord resolves: consumed by `KbdMacroExecute`,
+    /// dropped silently for any other command.
+    pub count: Option<usize>,
+    /// Set true the moment a chord resolves to `KbdMacroExecute`.
+    /// While true, `dispatch_key` short-circuits a bare `e` (no
+    /// modifiers) to another `KbdMacroExecute`. Cleared on any
+    /// other key — even on a failed execute the flag stays set,
+    /// matching legacy `actions_of.rs:97`. See
+    /// `docs/spec/macros.md` § "Edge cases" for that quirk.
+    pub macro_repeat: bool,
 }
 
 /// Built-in keymap matching legacy `default_keys.toml` for every
@@ -198,8 +216,9 @@ pub struct ChordState {
 ///   `alt+,`, `alt+]`, `alt+enter`, `alt+i`, `alt+o`, `ctrl+space`,
 ///   `ctrl+w`, `ctrl+y`, `ctrl+k`, `ctrl+/`, `ctrl+_`, `ctrl+7`,
 ///   `ctrl+z`, `ctrl+q`, `ctrl+x ctrl+f`, `ctrl+x ctrl+w`,
-///   `ctrl+x ctrl+p`, `ctrl+x i`, `ctrl+x (`, `ctrl+x )`,
-///   `ctrl+x e`, `ctrl+h e` — each lands in its feature milestone.
+///   `ctrl+x ctrl+p`, `ctrl+x i`, `ctrl+h e` — each lands in its
+///   feature milestone. (`ctrl+x (`, `ctrl+x )`, `ctrl+x e` land
+///   in M22 below.)
 pub fn default_keymap() -> Keymap {
     let mut m = Keymap::empty();
 
@@ -297,6 +316,11 @@ pub fn default_keymap() -> Keymap {
     // Find-file / save-as (M12).
     m.bind_chord("ctrl+x", "ctrl+f", Command::FindFile);
     m.bind_chord("ctrl+x", "ctrl+w", Command::SaveAs);
+
+    // Keyboard macros (M22). Legacy `default_keys.toml`.
+    m.bind_chord("ctrl+x", "(", Command::KbdMacroStart);
+    m.bind_chord("ctrl+x", ")", Command::KbdMacroEnd);
+    m.bind_chord("ctrl+x", "e", Command::KbdMacroExecute);
     // Tab completion inside the overlay. Outside the overlay `Tab`
     // is unbound (reserved for `InsertTab` in M23).
     m.bind_find_file("tab", Command::FindFileTabComplete);

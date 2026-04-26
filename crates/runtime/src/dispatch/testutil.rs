@@ -120,6 +120,7 @@ pub(super) fn dispatch_default(
     terminal: &Terminal,
 ) -> DispatchOutcome {
     let mut chord = ChordState::default();
+    let mut kbd_macro = led_state_kbd_macro::KbdMacroState::default();
     let mut kill_ring = KillRing::default();
     let mut clip = ClipboardState::default();
     let mut alerts = AlertState::default();
@@ -161,7 +162,9 @@ pub(super) fn dispatch_default(
         &lsp_status,
         &git,
         &default_keymap(),
-        &mut chord,)
+        &mut chord,
+        &mut kbd_macro,
+    )
 }
 
 /// Press a chord sequence (prefix then second) with a fresh
@@ -177,6 +180,7 @@ pub(super) fn dispatch_chord_default(
 ) -> DispatchOutcome {
     let keymap = default_keymap();
     let mut chord = ChordState::default();
+    let mut kbd_macro = led_state_kbd_macro::KbdMacroState::default();
     let mut kill_ring = KillRing::default();
     let mut clip = ClipboardState::default();
     let mut alerts = AlertState::default();
@@ -218,7 +222,9 @@ pub(super) fn dispatch_chord_default(
         &lsp_status,
         &git,
         &keymap,
-        &mut chord,);
+        &mut chord,
+        &mut kbd_macro,
+    );
     let mut find_file: Option<FindFileState> = None;
     let mut isearch: Option<IsearchState> = None;
     let mut file_search: Option<FileSearchState> = None;
@@ -246,7 +252,9 @@ pub(super) fn dispatch_chord_default(
         &lsp_status,
         &git,
         &keymap,
-        &mut chord,)
+        &mut chord,
+        &mut kbd_macro,
+    )
 }
 
 /// Dispatch a key with a caller-provided kill ring. Used by M7 tests
@@ -261,6 +269,7 @@ pub(super) fn dispatch_with_ring(
     terminal: &Terminal,
 ) -> DispatchOutcome {
     let mut chord = ChordState::default();
+    let mut kbd_macro = led_state_kbd_macro::KbdMacroState::default();
     let mut alerts = AlertState::default();
     let mut jumps = JumpListState::default();
     let mut browser = BrowserUi::default();
@@ -300,7 +309,9 @@ pub(super) fn dispatch_with_ring(
         &lsp_status,
         &git,
         &default_keymap(),
-        &mut chord,)
+        &mut chord,
+        &mut kbd_macro,
+    )
 }
 
 /// Dispatch a key with everything ambient. Lightest wrapper — for
@@ -317,6 +328,7 @@ pub(super) fn noop_dispatch(k: KeyEvent, tabs: &mut Tabs) -> DispatchOutcome {
     let terminal = Terminal::default();
     let keymap = default_keymap();
     let mut chord = ChordState::default();
+    let mut kbd_macro = led_state_kbd_macro::KbdMacroState::default();
     let mut find_file: Option<FindFileState> = None;
     let mut isearch: Option<IsearchState> = None;
     let mut file_search: Option<FileSearchState> = None;
@@ -352,7 +364,9 @@ pub(super) fn noop_dispatch(k: KeyEvent, tabs: &mut Tabs) -> DispatchOutcome {
         &lsp_status,
         &git,
         &keymap,
-        &mut chord,)
+        &mut chord,
+        &mut kbd_macro,
+    )
 }
 
 /// Type a run of chars through the full keymap + implicit-insert

@@ -1,5 +1,8 @@
 # Define a one-char macro, then execute it.
+# `wait 500ms` lets the 200ms undo-flush debounce fire so the
+# WorkspaceFlushUndo trace lands inside the harness settle window.
 press Ctrl-x (
 type x
 press Ctrl-x )
 press Ctrl-x e
+wait 500ms

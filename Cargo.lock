@@ -1082,6 +1082,7 @@ dependencies = [
  "led-state-git",
  "led-state-isearch",
  "led-state-jumps",
+ "led-state-kbd-macro",
  "led-state-kill-ring",
  "led-state-lifecycle",
  "led-state-lsp",
@@ -1194,6 +1195,13 @@ version = "0.0.0"
 dependencies = [
  "led-core",
  "serde",
+]
+
+[[package]]
+name = "led-state-kbd-macro"
+version = "0.0.0"
+dependencies = [
+ "led-core",
 ]
 
 [[package]]

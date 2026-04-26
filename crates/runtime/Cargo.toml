@@ -37,6 +37,7 @@ led-state-lsp = { workspace = true }
 led-state-git = { workspace = true }
 led-state-lifecycle = { workspace = true }
 led-state-session = { workspace = true }
+led-state-kbd-macro = { workspace = true }
 led-driver-fs-list-core = { workspace = true }
 led-driver-fs-list-native = { workspace = true }
 led-driver-find-file-core = { workspace = true }

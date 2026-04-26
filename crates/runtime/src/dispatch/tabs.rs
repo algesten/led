@@ -212,6 +212,7 @@ mod tests {
         let mut browser = BrowserUi::default();
         let fs = FsTree::default();
         let mut chord = ChordState::default();
+        let mut kbd_macro = led_state_kbd_macro::KbdMacroState::default();
         let keymap = default_keymap();
 
         let mut path_chains = std::collections::HashMap::new();
@@ -247,7 +248,9 @@ mod tests {
             &led_state_diagnostics::LspStatuses::default(),
             &GitState::default(),
             &keymap,
-            &mut chord,);
+            &mut chord,
+            &mut kbd_macro,
+        );
         let mut find_file: Option<FindFileState> = None;
         let mut isearch: Option<IsearchState> = None;
         let mut file_search: Option<FileSearchState> = None;
@@ -275,7 +278,9 @@ mod tests {
             &led_state_diagnostics::LspStatuses::default(),
             &GitState::default(),
             &keymap,
-            &mut chord,);
+            &mut chord,
+            &mut kbd_macro,
+        );
         assert_eq!(alerts.confirm_kill, Some(TabId(1)));
         assert_eq!(tabs.open.len(), 2);
     }
@@ -293,6 +298,7 @@ mod tests {
         let mut browser = BrowserUi::default();
         let fs = FsTree::default();
         let mut chord = ChordState::default();
+        let mut kbd_macro = led_state_kbd_macro::KbdMacroState::default();
         let keymap = default_keymap();
 
         let mut find_file: Option<FindFileState> = None;
@@ -327,7 +333,9 @@ mod tests {
             &led_state_diagnostics::LspStatuses::default(),
             &GitState::default(),
             &keymap,
-            &mut chord,);
+            &mut chord,
+            &mut kbd_macro,
+        );
         assert!(alerts.confirm_kill.is_none());
         assert_eq!(tabs.open.len(), 1);
         assert_eq!(tabs.open[0].id, TabId(2));
@@ -349,6 +357,7 @@ mod tests {
         let mut browser = BrowserUi::default();
         let fs = FsTree::default();
         let mut chord = ChordState::default();
+        let mut kbd_macro = led_state_kbd_macro::KbdMacroState::default();
         let keymap = default_keymap();
 
         let mut find_file: Option<FindFileState> = None;
@@ -383,7 +392,9 @@ mod tests {
             &led_state_diagnostics::LspStatuses::default(),
             &GitState::default(),
             &keymap,
-            &mut chord,);
+            &mut chord,
+            &mut kbd_macro,
+        );
         assert!(alerts.confirm_kill.is_none());
         assert_eq!(tabs.open.len(), 1);
     }
@@ -401,6 +412,7 @@ mod tests {
         let mut browser = BrowserUi::default();
         let fs = FsTree::default();
         let mut chord = ChordState::default();
+        let mut kbd_macro = led_state_kbd_macro::KbdMacroState::default();
         let keymap = default_keymap();
 
         let mut find_file: Option<FindFileState> = None;
@@ -435,7 +447,9 @@ mod tests {
             &led_state_diagnostics::LspStatuses::default(),
             &GitState::default(),
             &keymap,
-            &mut chord,);
+            &mut chord,
+            &mut kbd_macro,
+        );
         // Prompt dismissed.
         assert!(alerts.confirm_kill.is_none());
         // Tab stays open.
@@ -463,6 +477,7 @@ mod tests {
         let mut browser = BrowserUi::default();
         let fs = FsTree::default();
         let mut chord = ChordState::default();
+        let mut kbd_macro = led_state_kbd_macro::KbdMacroState::default();
         let keymap = default_keymap();
 
         let mut find_file: Option<FindFileState> = None;
@@ -497,7 +512,9 @@ mod tests {
             &led_state_diagnostics::LspStatuses::default(),
             &GitState::default(),
             &keymap,
-            &mut chord,);
+            &mut chord,
+            &mut kbd_macro,
+        );
         assert!(alerts.confirm_kill.is_none());
         assert_eq!(tabs.open.len(), 2);
         // Esc's Abort command still ran → mark cleared.
@@ -523,6 +540,7 @@ mod tests {
         let mut browser = BrowserUi::default();
         let fs = FsTree::default();
         let mut chord = ChordState::default();
+        let mut kbd_macro = led_state_kbd_macro::KbdMacroState::default();
         let keymap = default_keymap();
 
         let mut find_file: Option<FindFileState> = None;
@@ -557,7 +575,9 @@ mod tests {
             &led_state_diagnostics::LspStatuses::default(),
             &GitState::default(),
             &keymap,
-            &mut chord,);
+            &mut chord,
+            &mut kbd_macro,
+        );
         let mut find_file: Option<FindFileState> = None;
         let mut isearch: Option<IsearchState> = None;
         let mut file_search: Option<FileSearchState> = None;
@@ -585,7 +605,9 @@ mod tests {
             &led_state_diagnostics::LspStatuses::default(),
             &GitState::default(),
             &keymap,
-            &mut chord,);
+            &mut chord,
+            &mut kbd_macro,
+        );
         assert!(alerts.confirm_kill.is_none());
         assert_eq!(tabs.open.len(), 1);
     }

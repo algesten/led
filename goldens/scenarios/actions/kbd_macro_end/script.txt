@@ -1,4 +1,7 @@
 # Start recording, type one char, end recording.
+# `wait 500ms` lets the per-buffer 200ms undo-flush debounce fire
+# deterministically before the harness's settle window closes.
 press Ctrl-x (
 type x
 press Ctrl-x )
+wait 500ms

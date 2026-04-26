@@ -21,6 +21,7 @@ use led_driver_terminal_core::{
     SidePanelModel, SidePanelRow, StatusBarModel, TabBarModel, Terminal,
 };
 use led_state_alerts::AlertState;
+use led_state_kbd_macro::KbdMacroState;
 use led_state_browser::{BrowserUi, Focus, TreeEntry, TreeEntryKind};
 use led_state_clipboard::ClipboardState;
 use led_state_buffer_edits::{BufferEdits, EditedBuffer};
@@ -60,6 +61,27 @@ impl<'a> TabsActiveInput<'a> {
         Self {
             open: &tabs.open,
             active: &tabs.active,
+        }
+    }
+}
+
+// ── Inputs on KbdMacroState ────────────────────────────────────────────
+
+/// Narrow projection over `KbdMacroState` for the status-bar
+/// recording indicator (M22). Exposes only `recording`, so
+/// pushes into `KbdMacroState.current` during a recording
+/// session don't invalidate the status-bar memo on every
+/// captured keystroke. Matches the EXAMPLE-ARCH guideline
+/// "project only the fields the memo actually reads."
+#[derive(drv::Input, Copy, Clone)]
+pub struct KbdMacroRecordingInput<'a> {
+    pub recording: &'a bool,
+}
+
+impl<'a> KbdMacroRecordingInput<'a> {
+    pub fn new(s: &'a KbdMacroState) -> Self {
+        Self {
+            recording: &s.recording,
         }
     }
 }
@@ -1137,6 +1159,11 @@ pub struct StatusBarInputs<'a> {
     pub lsp: LspStatusesInput<'a>,
     pub lsp_extras: LspExtrasOverlayInput<'a>,
     pub git: GitStateInput<'a>,
+    /// M22 — `kbd_macro.recording` for the macro-recording
+    /// indicator that replaces the default-left while
+    /// recording. Narrow projection so recorded-keystroke
+    /// pushes don't invalidate this memo.
+    pub kbd_macro: KbdMacroRecordingInput<'a>,
     pub render_tick: u64,
 }
 
@@ -1151,6 +1178,7 @@ pub fn status_bar_model<'a>(inputs: StatusBarInputs<'a>) -> StatusBarModel {
         lsp,
         lsp_extras,
         git,
+        kbd_macro,
         render_tick,
     } = inputs;
     // The rename overlay used to take the status-bar prompt slot
@@ -1247,6 +1275,21 @@ pub fn status_bar_model<'a>(inputs: StatusBarInputs<'a>) -> StatusBarModel {
             left: Arc::from(left),
             right,
             is_warn: true,
+        };
+    }
+
+    // M22 — Macro-recording indicator. Per `ui-chrome.md`
+    // § "Status bar" (table row "macro-recording indicator"),
+    // while `kbd_macro.recording` is true the default-left is
+    // *replaced* by a fixed " Defining kbd macro..." string.
+    // Lower priority than alerts and overlays so the transient
+    // start / end alerts still show through their TTL; higher
+    // priority than the branch / dirty / lsp composition below.
+    if *kbd_macro.recording {
+        return StatusBarModel {
+            left: Arc::from(" Defining kbd macro..."),
+            right,
+            is_warn: false,
         };
     }
 
@@ -2363,6 +2406,11 @@ pub struct RenderInputs<'a> {
     pub completions: CompletionsSessionInput<'a>,
     pub lsp_extras: LspExtrasOverlayInput<'a>,
     pub git: GitStateInput<'a>,
+    /// M22 — `kbd_macro.recording` for the status-bar
+    /// recording indicator. Narrow projection so per-keystroke
+    /// pushes into `KbdMacroState.current` don't invalidate
+    /// the render memo cache while a recording is in progress.
+    pub kbd_macro: KbdMacroRecordingInput<'a>,
     /// Current frame in 80ms buckets. Used by the status-bar
     /// spinner formatter; the main loop quantises wall-clock
     /// millis to 80 so the memo only invalidates once per
@@ -2388,6 +2436,7 @@ pub fn render_frame<'a>(inputs: RenderInputs<'a>) -> Option<Frame> {
         completions,
         lsp_extras,
         git,
+        kbd_macro,
         render_tick,
     } = inputs;
     let dims = (*term.dims)?;
@@ -2412,6 +2461,7 @@ pub fn render_frame<'a>(inputs: RenderInputs<'a>) -> Option<Frame> {
         lsp,
         lsp_extras,
         git,
+        kbd_macro,
         render_tick,
     });
     let side_panel = layout
@@ -2603,6 +2653,7 @@ mod tests {
         let syntax = SyntaxStates::default();
         let diags = DiagnosticsStates::default();
         let lsp = LspStatuses::default();
+        let kbd_macro_default = led_state_kbd_macro::KbdMacroState::default();
         render_frame(RenderInputs {
             term: TerminalDimsInput::new(term),
             edits: EditedBuffersInput::new(e),
@@ -2621,6 +2672,7 @@ mod tests {
             lsp_extras: LspExtrasOverlayInput::new(&led_state_lsp::LspExtrasState::default()),
             git: GitStateInput::new(&led_state_git::GitState::default()),
             render_tick: 0,
+            kbd_macro: KbdMacroRecordingInput::new(&kbd_macro_default),
         })
     }
 
@@ -2685,6 +2737,7 @@ mod tests {
         let syntax = SyntaxStates::default();
         let diags = DiagnosticsStates::default();
         let lsp = LspStatuses::default();
+        let kbd_macro_default = led_state_kbd_macro::KbdMacroState::default();
         let frame = render_frame(RenderInputs {
             term: TerminalDimsInput::new(&term),
             edits: EditedBuffersInput::new(&e),
@@ -2703,6 +2756,7 @@ mod tests {
             lsp_extras: LspExtrasOverlayInput::new(&led_state_lsp::LspExtrasState::default()),
             git: GitStateInput::new(&led_state_git::GitState::default()),
             render_tick: 0,
+            kbd_macro: KbdMacroRecordingInput::new(&kbd_macro_default),
         })
         .expect("dims set");
 
@@ -2733,6 +2787,7 @@ mod tests {
         let syntax = SyntaxStates::default();
         let diags = DiagnosticsStates::default();
         let lsp = LspStatuses::default();
+        let kbd_macro_default = led_state_kbd_macro::KbdMacroState::default();
         let frame = render_frame(RenderInputs {
             term: TerminalDimsInput::new(&term),
             edits: EditedBuffersInput::new(&e),
@@ -2751,6 +2806,7 @@ mod tests {
             lsp_extras: LspExtrasOverlayInput::new(&led_state_lsp::LspExtrasState::default()),
             git: GitStateInput::new(&led_state_git::GitState::default()),
             render_tick: 0,
+            kbd_macro: KbdMacroRecordingInput::new(&kbd_macro_default),
         })
         .expect("dims set");
         assert_eq!(frame.cursor, None);
@@ -3324,6 +3380,7 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
         let syntax = SyntaxStates::default();
         let diags = DiagnosticsStates::default();
         let lsp = LspStatuses::default();
+        let kbd_macro_default = led_state_kbd_macro::KbdMacroState::default();
         let frame = render_frame(RenderInputs {
             term: TerminalDimsInput::new(&term),
             edits: EditedBuffersInput::new(&e),
@@ -3344,6 +3401,7 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
             ),
             git: GitStateInput::new(&git),
             render_tick: 0,
+            kbd_macro: KbdMacroRecordingInput::new(&kbd_macro_default),
         })
         .expect("dims");
         match &frame.body {
@@ -3394,6 +3452,7 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
         let diags = DiagnosticsStates::default();
         let lsp = LspStatuses::default();
         let git = led_state_git::GitState::default();
+        let kbd_macro_default = led_state_kbd_macro::KbdMacroState::default();
         status_bar_model(StatusBarInputs {
             alerts: AlertsInput::new(a),
             tabs: TabsActiveInput::new(t),
@@ -3406,6 +3465,7 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
             ),
             git: GitStateInput::new(&git),
             render_tick: 0,
+            kbd_macro: KbdMacroRecordingInput::new(&kbd_macro_default),
         })
     }
 
@@ -3419,6 +3479,7 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
         let is = None;
         let diags = DiagnosticsStates::default();
         let lsp = LspStatuses::default();
+        let kbd_macro_default = led_state_kbd_macro::KbdMacroState::default();
         status_bar_model(StatusBarInputs {
             alerts: AlertsInput::new(a),
             tabs: TabsActiveInput::new(t),
@@ -3431,6 +3492,7 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
             ),
             git: GitStateInput::new(g),
             render_tick: 0,
+            kbd_macro: KbdMacroRecordingInput::new(&kbd_macro_default),
         })
     }
 

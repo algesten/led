@@ -19,6 +19,7 @@ members = [
     "crates/state-git",
     "crates/state-lifecycle",
     "crates/state-session",
+    "crates/state-kbd-macro",
     "crates/driver-buffers/core",
     "crates/driver-buffers/native",
     "crates/driver-terminal/core",
@@ -66,6 +67,7 @@ led-state-lsp = { path = "crates/state-lsp" }
 led-state-git = { path = "crates/state-git" }
 led-state-lifecycle = { path = "crates/state-lifecycle" }
 led-state-session = { path = "crates/state-session" }
+led-state-kbd-macro = { path = "crates/state-kbd-macro" }
 led-driver-buffers-core = { path = "crates/driver-buffers/core" }
 led-driver-buffers-native = { path = "crates/driver-buffers/native" }
 led-driver-terminal-core = { path = "crates/driver-terminal/core" }
