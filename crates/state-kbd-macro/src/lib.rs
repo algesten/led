@@ -78,14 +78,13 @@ mod tests {
 
     #[test]
     fn populated_state_round_trips_through_clone() {
-        let mut s = KbdMacroState::default();
-        s.recording = true;
-        s.current.push(Command::CursorDown);
-        s.current.push(Command::InsertChar('x'));
-        s.last = Some(Arc::new(vec![Command::CursorRight]));
-        s.playback_depth = 7;
-        s.execute_count = Some(42);
-
+        let s = KbdMacroState {
+            recording: true,
+            current: vec![Command::CursorDown, Command::InsertChar('x')],
+            last: Some(Arc::new(vec![Command::CursorRight])),
+            playback_depth: 7,
+            execute_count: Some(42),
+        };
         let copy = s.clone();
         assert_eq!(s, copy);
         assert!(copy.has_recorded());

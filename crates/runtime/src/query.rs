@@ -3469,6 +3469,35 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
         })
     }
 
+    /// Status-bar model with caller-controlled `KbdMacroState`.
+    /// Used by M22 tests to check the macro-recording indicator.
+    fn status_with_macro(
+        a: &AlertState,
+        t: &Tabs,
+        e: &BufferEdits,
+        km: &led_state_kbd_macro::KbdMacroState,
+    ) -> StatusBarModel {
+        let ff = None;
+        let is = None;
+        let diags = DiagnosticsStates::default();
+        let lsp = LspStatuses::default();
+        let git = led_state_git::GitState::default();
+        status_bar_model(StatusBarInputs {
+            alerts: AlertsInput::new(a),
+            tabs: TabsActiveInput::new(t),
+            edits: EditedBuffersInput::new(e),
+            overlays: OverlaysInput::new(&ff, &is, &None),
+            diagnostics: DiagnosticsStatesInput::new(&diags),
+            lsp: LspStatusesInput::new(&lsp),
+            lsp_extras: LspExtrasOverlayInput::new(
+                &led_state_lsp::LspExtrasState::default(),
+            ),
+            git: GitStateInput::new(&git),
+            render_tick: 0,
+            kbd_macro: KbdMacroRecordingInput::new(km),
+        })
+    }
+
     fn status_with_git(
         a: &AlertState,
         t: &Tabs,
@@ -3674,6 +3703,87 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
         let s = status(&a, &tabs, &BufferEdits::default());
         assert_eq!(&*s.left, " Kill buffer 'draft.txt'? (y/N) ");
         assert_eq!(&*s.right, "");
+    }
+
+    // ── M22 — macro-recording indicator ──────────────────────────────
+
+    #[test]
+    fn status_bar_recording_indicator_replaces_default_left() {
+        // Per `ui-chrome.md`: while `kbd_macro.recording` is true,
+        // the default-left content is replaced by the fixed
+        // " Defining kbd macro..." string. Position string still
+        // shows on the right.
+        let mut tabs = Tabs::default();
+        tabs.open.push_back(Tab {
+            id: TabId(1),
+            path: canon("a.rs"),
+            cursor: Cursor { line: 4, col: 11, preferred_col: 11 },
+            ..Default::default()
+        });
+        tabs.active = Some(TabId(1));
+        // Pre-populate `current` to confirm the projection ignores
+        // it (only `recording` is exposed).
+        let km = led_state_kbd_macro::KbdMacroState {
+            recording: true,
+            current: vec![led_core::Command::CursorDown],
+            ..Default::default()
+        };
+        let s = status_with_macro(
+            &AlertState::default(),
+            &tabs,
+            &BufferEdits::default(),
+            &km,
+        );
+        assert_eq!(&*s.left, " Defining kbd macro...");
+        assert_eq!(&*s.right, "L5:C12 ");
+        assert!(!s.is_warn);
+    }
+
+    #[test]
+    fn status_bar_recording_indicator_yields_to_info_alert() {
+        // Info alert (priority 2) wins over the recording
+        // indicator (priority 4 default). Until the alert TTL
+        // expires the user sees the alert text; after that the
+        // persistent indicator takes over again.
+        let a = AlertState {
+            info: Some("Saved a.rs".into()),
+            ..Default::default()
+        };
+        let mut tabs = Tabs::default();
+        tabs.open.push_back(Tab {
+            id: TabId(1),
+            path: canon("a.rs"),
+            ..Default::default()
+        });
+        tabs.active = Some(TabId(1));
+        let km = led_state_kbd_macro::KbdMacroState {
+            recording: true,
+            ..Default::default()
+        };
+        let s = status_with_macro(&a, &tabs, &BufferEdits::default(), &km);
+        assert_eq!(&*s.left, " Saved a.rs");
+    }
+
+    #[test]
+    fn status_bar_recording_indicator_off_when_flag_false() {
+        // When `recording` is false the default-left
+        // composition takes over. With no branch / dirty / lsp
+        // segments, that's just the leading space.
+        let mut tabs = Tabs::default();
+        tabs.open.push_back(Tab {
+            id: TabId(1),
+            path: canon("a.rs"),
+            ..Default::default()
+        });
+        tabs.active = Some(TabId(1));
+        let km = led_state_kbd_macro::KbdMacroState::default();
+        let s = status_with_macro(
+            &AlertState::default(),
+            &tabs,
+            &BufferEdits::default(),
+            &km,
+        );
+        assert_eq!(&*s.left, " ");
     }
 
     #[test]

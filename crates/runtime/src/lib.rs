@@ -1374,7 +1374,7 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
             lsp_extras: query::LspExtrasOverlayInput::new(lsp_extras),
             git: query::GitStateInput::new(git),
             render_tick,
-            kbd_macro: query::KbdMacroRecordingInput::new(&kbd_macro),
+            kbd_macro: query::KbdMacroRecordingInput::new(kbd_macro),
         });
 
         // ── Execute ─────────────────────────────────────────────

@@ -1956,4 +1956,432 @@ mod tests {
         );
         assert!(lsp_pending.pending_goto.is_empty());
     }
+
+    // ── M22 — keyboard macros ───────────────────────────────────────────
+
+    /// Build a buffer at "file.rs" with one line of content. M22
+    /// tests that exercise InsertChar / cursor moves need a real
+    /// rope so the edit primitives can mutate it.
+    fn macro_fixture() -> (
+        Tabs,
+        BufferEdits,
+        BufferStore,
+        Terminal,
+        ChordState,
+        led_state_kbd_macro::KbdMacroState,
+        AlertState,
+    ) {
+        let (tabs, edits, store, term) = fixture_with_content(
+            "abc\nxyz\n",
+            Dims { cols: 80, rows: 24 },
+        );
+        (
+            tabs,
+            edits,
+            store,
+            term,
+            ChordState::default(),
+            led_state_kbd_macro::KbdMacroState::default(),
+            AlertState::default(),
+        )
+    }
+
+    #[test]
+    fn should_record_excludes_meta_actions() {
+        // Recording filter should exclude the 5 commands per
+        // legacy `should_record` + the rewrite's M22 additions.
+        assert!(!should_record(&Command::Quit));
+        assert!(!should_record(&Command::Suspend));
+        assert!(!should_record(&Command::Wait(0)));
+        assert!(!should_record(&Command::KbdMacroStart));
+        assert!(!should_record(&Command::KbdMacroEnd));
+        // KbdMacroExecute *is* recordable: a macro that invokes
+        // the previous macro is legal (legacy parity).
+        assert!(should_record(&Command::KbdMacroExecute));
+        // Sanity: ordinary commands are recorded.
+        assert!(should_record(&Command::CursorDown));
+        assert!(should_record(&Command::InsertChar('x')));
+    }
+
+    #[test]
+    fn kbd_macro_start_seeds_recording_and_alert() {
+        let (mut tabs, mut edits, store, term, mut chord, mut km, mut alerts)
+            = macro_fixture();
+        // Press Ctrl-x ( as a chord (prefix then `(`).
+        dispatch_with_macro(
+            key(KeyModifiers::CONTROL, KeyCode::Char('x')),
+            &mut tabs, &mut edits, &mut chord, &mut km, &mut alerts, &store, &term,
+        );
+        assert!(chord.pending.is_some());
+        dispatch_with_macro(
+            key(KeyModifiers::NONE, KeyCode::Char('(')),
+            &mut tabs, &mut edits, &mut chord, &mut km, &mut alerts, &store, &term,
+        );
+        assert!(km.recording, "recording flag should flip to true");
+        assert!(km.current.is_empty(), "current starts empty");
+        assert_eq!(
+            alerts.info.as_deref(),
+            Some("Defining kbd macro..."),
+        );
+    }
+
+    #[test]
+    fn kbd_macro_start_while_recording_clears_current() {
+        // Restart-recording-without-ending path: Ctrl-x ( twice
+        // resets `current` and stays in record mode.
+        let (mut tabs, mut edits, store, term, mut chord, mut km, mut alerts)
+            = macro_fixture();
+        km.recording = true;
+        km.current.push(Command::CursorDown);
+        km.current.push(Command::InsertChar('a'));
+        // First half of chord (prefix).
+        dispatch_with_macro(
+            key(KeyModifiers::CONTROL, KeyCode::Char('x')),
+            &mut tabs, &mut edits, &mut chord, &mut km, &mut alerts, &store, &term,
+        );
+        // Second half resolves to KbdMacroStart.
+        dispatch_with_macro(
+            key(KeyModifiers::NONE, KeyCode::Char('(')),
+            &mut tabs, &mut edits, &mut chord, &mut km, &mut alerts, &store, &term,
+        );
+        assert!(km.recording);
+        assert!(km.current.is_empty());
+    }
+
+    #[test]
+    fn kbd_macro_end_while_recording_moves_current_to_last() {
+        let (mut tabs, mut edits, store, term, mut chord, mut km, mut alerts)
+            = macro_fixture();
+        km.recording = true;
+        km.current.push(Command::CursorDown);
+        km.current.push(Command::InsertChar('!'));
+        dispatch_with_macro(
+            key(KeyModifiers::CONTROL, KeyCode::Char('x')),
+            &mut tabs, &mut edits, &mut chord, &mut km, &mut alerts, &store, &term,
+        );
+        dispatch_with_macro(
+            key(KeyModifiers::NONE, KeyCode::Char(')')),
+            &mut tabs, &mut edits, &mut chord, &mut km, &mut alerts, &store, &term,
+        );
+        assert!(!km.recording);
+        assert!(km.current.is_empty());
+        let last = km.last.as_ref().expect("last set");
+        assert_eq!(
+            last.as_slice(),
+            &[Command::CursorDown, Command::InsertChar('!')],
+        );
+        assert_eq!(
+            alerts.info.as_deref(),
+            Some("Keyboard macro defined"),
+        );
+    }
+
+    #[test]
+    fn kbd_macro_end_without_start_alerts_only() {
+        let (mut tabs, mut edits, store, term, mut chord, mut km, mut alerts)
+            = macro_fixture();
+        assert!(!km.recording);
+        dispatch_with_macro(
+            key(KeyModifiers::CONTROL, KeyCode::Char('x')),
+            &mut tabs, &mut edits, &mut chord, &mut km, &mut alerts, &store, &term,
+        );
+        dispatch_with_macro(
+            key(KeyModifiers::NONE, KeyCode::Char(')')),
+            &mut tabs, &mut edits, &mut chord, &mut km, &mut alerts, &store, &term,
+        );
+        assert!(!km.recording);
+        assert!(km.last.is_none());
+        assert_eq!(
+            alerts.info.as_deref(),
+            Some("Not defining kbd macro"),
+        );
+    }
+
+    #[test]
+    fn kbd_macro_execute_with_no_macro_alerts() {
+        let (mut tabs, mut edits, store, term, mut chord, mut km, mut alerts)
+            = macro_fixture();
+        assert!(km.last.is_none());
+        dispatch_with_macro(
+            key(KeyModifiers::CONTROL, KeyCode::Char('x')),
+            &mut tabs, &mut edits, &mut chord, &mut km, &mut alerts, &store, &term,
+        );
+        dispatch_with_macro(
+            key(KeyModifiers::NONE, KeyCode::Char('e')),
+            &mut tabs, &mut edits, &mut chord, &mut km, &mut alerts, &store, &term,
+        );
+        assert_eq!(
+            alerts.info.as_deref(),
+            Some("No kbd macro defined"),
+        );
+    }
+
+    #[test]
+    fn recording_hook_pushes_resolved_commands() {
+        // While recording, every dispatched ordinary command is
+        // appended to `current` BEFORE running. The filter excludes
+        // meta-actions per `should_record`.
+        let (mut tabs, mut edits, store, term, mut chord, mut km, mut alerts)
+            = macro_fixture();
+        km.recording = true;
+        // CursorDown should be recorded.
+        dispatch_with_macro(
+            key(KeyModifiers::NONE, KeyCode::Down),
+            &mut tabs, &mut edits, &mut chord, &mut km, &mut alerts, &store, &term,
+        );
+        // InsertChar should be recorded.
+        dispatch_with_macro(
+            key(KeyModifiers::NONE, KeyCode::Char('z')),
+            &mut tabs, &mut edits, &mut chord, &mut km, &mut alerts, &store, &term,
+        );
+        assert_eq!(
+            km.current.as_slice(),
+            &[Command::CursorDown, Command::InsertChar('z')],
+        );
+    }
+
+    #[test]
+    fn kbd_macro_execute_replays_recorded_commands() {
+        let (mut tabs, mut edits, store, term, mut chord, mut km, mut alerts)
+            = macro_fixture();
+        // Pre-seed `last` so we can directly observe playback.
+        km.last = Some(Arc::new(vec![Command::CursorDown]));
+        // Cursor starts at L1; one KbdMacroExecute should advance
+        // it one line (recursive run_command calls).
+        let start_line = tabs.open[0].cursor.line;
+        dispatch_with_macro(
+            key(KeyModifiers::CONTROL, KeyCode::Char('x')),
+            &mut tabs, &mut edits, &mut chord, &mut km, &mut alerts, &store, &term,
+        );
+        dispatch_with_macro(
+            key(KeyModifiers::NONE, KeyCode::Char('e')),
+            &mut tabs, &mut edits, &mut chord, &mut km, &mut alerts, &store, &term,
+        );
+        assert_eq!(
+            tabs.open[0].cursor.line,
+            start_line + 1,
+            "playback should re-dispatch CursorDown",
+        );
+        assert_eq!(km.playback_depth, 0, "depth restored after replay");
+    }
+
+    #[test]
+    fn kbd_macro_execute_honours_count_prefix() {
+        // `Ctrl-x 3 e` should replay the macro 3×. We seed `last`
+        // and `execute_count` directly (the chord-prefix path is
+        // covered separately in `chord_count_accumulates_digits`).
+        let (mut tabs, mut edits, store, term, mut chord, mut km, mut alerts)
+            = macro_fixture();
+        // Start with cursor at L0 — buffer "abc\nxyz\n" has only 2
+        // lines, so 3× CursorDown clamps to last line. We use an
+        // edit (InsertChar) instead so each iteration is observable.
+        km.last = Some(Arc::new(vec![Command::InsertChar('!')]));
+        km.execute_count = Some(3);
+        let start_len = edits.buffers.values().next().unwrap().rope.len_chars();
+        dispatch_with_macro(
+            key(KeyModifiers::CONTROL, KeyCode::Char('x')),
+            &mut tabs, &mut edits, &mut chord, &mut km, &mut alerts, &store, &term,
+        );
+        dispatch_with_macro(
+            key(KeyModifiers::NONE, KeyCode::Char('e')),
+            &mut tabs, &mut edits, &mut chord, &mut km, &mut alerts, &store, &term,
+        );
+        let end_len = edits.buffers.values().next().unwrap().rope.len_chars();
+        assert_eq!(
+            end_len - start_len,
+            3,
+            "macro played 3× should insert 3 chars",
+        );
+        assert!(
+            km.execute_count.is_none(),
+            "execute_count consumed by take()",
+        );
+    }
+
+    #[test]
+    fn kbd_macro_execute_recursion_guard_aborts() {
+        // Hit the recursion limit by pre-bumping playback_depth
+        // to the cap. Execute should skip playback and surface
+        // the alert.
+        let (mut tabs, mut edits, store, term, mut chord, mut km, mut alerts)
+            = macro_fixture();
+        km.last = Some(Arc::new(vec![Command::InsertChar('!')]));
+        km.playback_depth = led_state_kbd_macro::RECURSION_LIMIT;
+        let start_len = edits.buffers.values().next().unwrap().rope.len_chars();
+        dispatch_with_macro(
+            key(KeyModifiers::CONTROL, KeyCode::Char('x')),
+            &mut tabs, &mut edits, &mut chord, &mut km, &mut alerts, &store, &term,
+        );
+        dispatch_with_macro(
+            key(KeyModifiers::NONE, KeyCode::Char('e')),
+            &mut tabs, &mut edits, &mut chord, &mut km, &mut alerts, &store, &term,
+        );
+        let end_len = edits.buffers.values().next().unwrap().rope.len_chars();
+        assert_eq!(end_len, start_len, "no chars inserted at the cap");
+        assert_eq!(
+            alerts.info.as_deref(),
+            Some("Keyboard macro recursion limit"),
+        );
+    }
+
+    #[test]
+    fn chord_count_accumulates_digits() {
+        // `Ctrl-x 4 2 e` → execute_count = 42.
+        let (mut tabs, mut edits, store, term, mut chord, mut km, mut alerts)
+            = macro_fixture();
+        km.last = Some(Arc::new(vec![Command::CursorRight]));
+        // Ctrl-x → prefix.
+        dispatch_with_macro(
+            key(KeyModifiers::CONTROL, KeyCode::Char('x')),
+            &mut tabs, &mut edits, &mut chord, &mut km, &mut alerts, &store, &term,
+        );
+        assert!(chord.pending.is_some());
+        // '4' → digit, prefix preserved, count=4.
+        dispatch_with_macro(
+            key(KeyModifiers::NONE, KeyCode::Char('4')),
+            &mut tabs, &mut edits, &mut chord, &mut km, &mut alerts, &store, &term,
+        );
+        assert!(chord.pending.is_some(), "prefix kept across digit");
+        assert_eq!(chord.count, Some(4));
+        // '2' → digit, count=42.
+        dispatch_with_macro(
+            key(KeyModifiers::NONE, KeyCode::Char('2')),
+            &mut tabs, &mut edits, &mut chord, &mut km, &mut alerts, &store, &term,
+        );
+        assert_eq!(chord.count, Some(42));
+        // 'e' → KbdMacroExecute. Count moves into kbd_macro
+        // before run_command runs, where take() consumes it.
+        dispatch_with_macro(
+            key(KeyModifiers::NONE, KeyCode::Char('e')),
+            &mut tabs, &mut edits, &mut chord, &mut km, &mut alerts, &store, &term,
+        );
+        // After execute, count is consumed (take()).
+        assert!(km.execute_count.is_none());
+        // Cursor advanced 42× CursorRight, but the rope only has
+        // 3 chars on line 0 — `apply_move` clamps. We just want
+        // to check the count was applied non-zero times.
+        // Simpler: check chord.count was cleared.
+        assert_eq!(chord.count, None);
+    }
+
+    #[test]
+    fn macro_repeat_latch_fires_bare_e() {
+        // After a successful KbdMacroExecute, bare `e` re-fires
+        // the macro without going through the keymap.
+        let (mut tabs, mut edits, store, term, mut chord, mut km, mut alerts)
+            = macro_fixture();
+        km.last = Some(Arc::new(vec![Command::CursorDown]));
+        // First execute via Ctrl-x e.
+        dispatch_with_macro(
+            key(KeyModifiers::CONTROL, KeyCode::Char('x')),
+            &mut tabs, &mut edits, &mut chord, &mut km, &mut alerts, &store, &term,
+        );
+        dispatch_with_macro(
+            key(KeyModifiers::NONE, KeyCode::Char('e')),
+            &mut tabs, &mut edits, &mut chord, &mut km, &mut alerts, &store, &term,
+        );
+        assert!(chord.macro_repeat, "latch set after execute");
+        // Bare `e` (no modifiers) should resolve to KbdMacroExecute,
+        // NOT InsertChar('e'). After dispatch, the latch is still
+        // set (each successive bare-e keeps it alive).
+        let buffer_before = edits.buffers.values().next().unwrap().rope.clone();
+        dispatch_with_macro(
+            key(KeyModifiers::NONE, KeyCode::Char('e')),
+            &mut tabs, &mut edits, &mut chord, &mut km, &mut alerts, &store, &term,
+        );
+        let buffer_after = edits.buffers.values().next().unwrap().rope.clone();
+        assert_eq!(
+            buffer_before.to_string(),
+            buffer_after.to_string(),
+            "bare e replayed CursorDown, did NOT insert 'e'",
+        );
+    }
+
+    #[test]
+    fn macro_repeat_latch_clears_on_other_key() {
+        let (mut tabs, mut edits, store, term, mut chord, mut km, mut alerts)
+            = macro_fixture();
+        km.last = Some(Arc::new(vec![Command::CursorDown]));
+        // Execute via Ctrl-x e.
+        dispatch_with_macro(
+            key(KeyModifiers::CONTROL, KeyCode::Char('x')),
+            &mut tabs, &mut edits, &mut chord, &mut km, &mut alerts, &store, &term,
+        );
+        dispatch_with_macro(
+            key(KeyModifiers::NONE, KeyCode::Char('e')),
+            &mut tabs, &mut edits, &mut chord, &mut km, &mut alerts, &store, &term,
+        );
+        assert!(chord.macro_repeat);
+        // Any non-`e` clears the latch.
+        dispatch_with_macro(
+            key(KeyModifiers::NONE, KeyCode::Down),
+            &mut tabs, &mut edits, &mut chord, &mut km, &mut alerts, &store, &term,
+        );
+        assert!(!chord.macro_repeat, "latch cleared on non-e key");
+        // Now bare `e` should InsertChar('e'), not replay.
+        let before = edits.buffers.values().next().unwrap().rope.to_string();
+        dispatch_with_macro(
+            key(KeyModifiers::NONE, KeyCode::Char('e')),
+            &mut tabs, &mut edits, &mut chord, &mut km, &mut alerts, &store, &term,
+        );
+        let after = edits.buffers.values().next().unwrap().rope.to_string();
+        assert!(
+            after.contains('e') && after.len() == before.len() + 1,
+            "bare e after latch cleared inserts 'e' literally",
+        );
+    }
+
+    #[test]
+    fn macro_repeat_latch_persists_after_failed_execute() {
+        // Per `docs/spec/macros.md` § Edge cases — latch is set at
+        // chord-resolve time, BEFORE the execute arm runs. If
+        // execute fails (no macro defined), latch is still set;
+        // next bare `e` retries. Legacy parity quirk; flagged
+        // as `[unclear — bug?]` in the spec but kept for golden
+        // alignment.
+        let (mut tabs, mut edits, store, term, mut chord, mut km, mut alerts)
+            = macro_fixture();
+        // No `last` defined; execute will fail.
+        assert!(km.last.is_none());
+        dispatch_with_macro(
+            key(KeyModifiers::CONTROL, KeyCode::Char('x')),
+            &mut tabs, &mut edits, &mut chord, &mut km, &mut alerts, &store, &term,
+        );
+        dispatch_with_macro(
+            key(KeyModifiers::NONE, KeyCode::Char('e')),
+            &mut tabs, &mut edits, &mut chord, &mut km, &mut alerts, &store, &term,
+        );
+        assert_eq!(
+            alerts.info.as_deref(),
+            Some("No kbd macro defined"),
+        );
+        assert!(
+            chord.macro_repeat,
+            "latch survives a failed execute (legacy parity)",
+        );
+    }
+
+    #[test]
+    fn nested_kbd_macro_execute_is_recordable() {
+        // Recording a macro that itself invokes the previous macro
+        // is legal. `should_record(KbdMacroExecute) = true`, so
+        // it lands in `current` like any other command.
+        let (mut tabs, mut edits, store, term, mut chord, mut km, mut alerts)
+            = macro_fixture();
+        km.recording = true;
+        // Ctrl-x e during recording: KbdMacroExecute resolves;
+        // the recording hook should append it to `current`.
+        dispatch_with_macro(
+            key(KeyModifiers::CONTROL, KeyCode::Char('x')),
+            &mut tabs, &mut edits, &mut chord, &mut km, &mut alerts, &store, &term,
+        );
+        dispatch_with_macro(
+            key(KeyModifiers::NONE, KeyCode::Char('e')),
+            &mut tabs, &mut edits, &mut chord, &mut km, &mut alerts, &store, &term,
+        );
+        assert_eq!(
+            km.current.as_slice(),
+            &[Command::KbdMacroExecute],
+        );
+    }
 }

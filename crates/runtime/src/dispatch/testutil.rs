@@ -369,6 +369,63 @@ pub(super) fn noop_dispatch(k: KeyEvent, tabs: &mut Tabs) -> DispatchOutcome {
     )
 }
 
+/// Dispatch a key with caller-controlled chord + kbd_macro state.
+/// Used by M22 tests that need to inspect / seed both across calls.
+pub(super) fn dispatch_with_macro(
+    k: KeyEvent,
+    tabs: &mut Tabs,
+    edits: &mut BufferEdits,
+    chord: &mut ChordState,
+    kbd_macro: &mut led_state_kbd_macro::KbdMacroState,
+    alerts: &mut AlertState,
+    store: &BufferStore,
+    terminal: &Terminal,
+) -> DispatchOutcome {
+    let mut kill_ring = KillRing::default();
+    let mut clip = ClipboardState::default();
+    let mut jumps = JumpListState::default();
+    let mut browser = BrowserUi::default();
+    let fs = FsTree::default();
+    let mut find_file: Option<FindFileState> = None;
+    let mut isearch: Option<IsearchState> = None;
+    let mut file_search: Option<FileSearchState> = None;
+    let mut path_chains = std::collections::HashMap::new();
+    let mut completions = CompletionsState::default();
+    let mut completions_pending = CompletionsPending::default();
+    let mut lsp_extras = LspExtrasState::default();
+    let mut lsp_pending = LspPending::default();
+    let diagnostics = DiagnosticsStates::default();
+    let lsp_status = led_state_diagnostics::LspStatuses::default();
+    let git = GitState::default();
+    dispatch_key(
+        k,
+        tabs,
+        edits,
+        &mut kill_ring,
+        &mut clip,
+        alerts,
+        &mut jumps,
+        &mut browser,
+        &fs,
+        store,
+        terminal,
+        &mut find_file,
+        &mut isearch,
+        &mut file_search,
+        &mut path_chains,
+        &mut completions,
+        &mut completions_pending,
+        &mut lsp_extras,
+        &mut lsp_pending,
+        &diagnostics,
+        &lsp_status,
+        &git,
+        &default_keymap(),
+        chord,
+        kbd_macro,
+    )
+}
+
 /// Type a run of chars through the full keymap + implicit-insert
 /// path so coalescing fires exactly as at runtime.
 pub(super) fn type_chars(
