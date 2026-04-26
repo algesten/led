@@ -1,0 +1,29 @@
+[package]
+name = "led-driver-terminal-native"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Desktop crossterm implementation of the terminal driver:
+# - Background reader thread that translates crossterm events into
+#   `TermEvent`s and forwards them to `*-core`.
+# - `paint` free fn that emits ANSI escape sequences for a `Frame`.
+# - `RawModeGuard` RAII for raw mode + alternate screen.
+
+[dependencies]
+led-core = { workspace = true }
+led-driver-terminal-core = { workspace = true }
+# The painter slices body rows by `TokenKind` to pick a style from
+# `SyntaxTheme`. Only the enum is touched here; the terminal driver
+# stays unaware of trees / parses.
+led-state-syntax = { workspace = true }
+# `DiagnosticSeverity` for the gutter + underline colour lookup.
+led-state-diagnostics = { workspace = true }
+crossterm = { workspace = true }
+# SIGTSTP on suspend. Only used under `#[cfg(unix)]`; non-Unix
+# targets don't compile the raise call.
+libc = { workspace = true }
+# East-Asian wide character widths so the painter knows to leave
+# a continuation cell after each CJK glyph (one logical char,
+# two terminal cells).
+unicode-width = "0.2"

@@ -1,0 +1,15 @@
+# Right-arrow then navigate back and Left-arrow to undo a specific
+# replace: the row stays visible after Right so the user can
+# arrow back onto it. The final buffer should be identical to
+# the input.
+wait 500ms
+press Ctrl-f
+type foo
+wait 300ms
+press Alt-3
+press Tab
+type BAR
+press Down
+press Right
+press Up
+press Left

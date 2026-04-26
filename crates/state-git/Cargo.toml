@@ -1,0 +1,18 @@
+[package]
+name = "led-state-git"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Git state atom for M19: the current branch name (or None for
+# detached HEAD / non-repos), the per-file IssueCategory set
+# (browser decoration), and the per-file list of per-line
+# statuses (gutter bars).
+#
+# Populated by the runtime from `GitEvent::FileStatuses` /
+# `GitEvent::LineStatuses`; read by the query memos that feed
+# the browser, gutter, and status-bar paints.
+
+[dependencies]
+led-core = { workspace = true }
+imbl = { workspace = true }

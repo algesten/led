@@ -1,0 +1,21 @@
+[package]
+name = "led-driver-find-file-core"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Find-file completion driver — sync core.
+#
+# ABI types (`FindFileCmd`, `FindFileEntry`, `FindFileListed`) plus
+# the trace hook and the main-loop-facing `FindFileDriver` that owns
+# the command `Sender` and the completion `Receiver`. The worker half
+# lives in `driver-find-file/native`.
+#
+# Distinct from `driver-fs-list`: the browser wants raw directory
+# entries for its tree cache; find-file wants prefix-filtered,
+# dir-first-sorted entries with display names and canonical paths
+# ready for the completions side panel.
+
+[dependencies]
+led-core = { workspace = true }
+drv = { workspace = true }

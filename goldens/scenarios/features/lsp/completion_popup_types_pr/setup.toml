@@ -1,0 +1,18 @@
+git_init = true
+
+[[file]]
+path = "main.rs"
+contents = """
+fn main() {
+
+}
+"""
+
+[fake_lsp]
+trigger_characters = ["."]
+completions = [
+    { label = "println!", kind = 3, insertText = "println!" },
+    { label = "print!", kind = 3, insertText = "print!" },
+    { label = "process", kind = 3, insertText = "process" },
+    { label = "panic!", kind = 3, insertText = "panic!" },
+]

@@ -1,40 +1,40 @@
-  main.rs               │  fn greet() {
-                        │   Rename: fn    42;
+  main.rs               │  fnnewname greet() {
+                        │      let name = 42;  
                         │      println!("{name}");
                         │  }
-                        │  
-                        │~ 
-                        │~ 
-                        │~ 
-                        │~ 
-                        │~ 
-                        │~ 
-                        │~ 
-                        │~ 
-                        │~ 
-                        │~ 
-                        │~ 
-                        │~ 
-                        │~ 
-                        │~ 
-                        │~ 
-                        │~ 
-                        │~ 
-                        │~ 
-                        │~ 
-                        │~ 
-                        │~ 
-                        │~ 
-                        │~ 
-                        │~ 
-                        │~ 
-                        │~ 
-                        │~ 
-                        │~ 
-                        │~ 
-                        │~ 
-                        │~ 
-                        │~ 
-                        │~ 
-                        │  main.rs 
-   /Users/martin/dev/led/target/debug/fake-lsp                                                                    L1:C1 
+                        │ 
+                        │~
+                        │~
+                        │~
+                        │~
+                        │~
+                        │~
+                        │~
+                        │~
+                        │~
+                        │~
+                        │~
+                        │~
+                        │~
+                        │~
+                        │~
+                        │~
+                        │~
+                        │~
+                        │~
+                        │~
+                        │~
+                        │~
+                        │~
+                        │~
+                        │~
+                        │~
+                        │~
+                        │~
+                        │~
+                        │~
+                        │~
+                        │~
+                        │~
+                        │ ●main.rs 
+ Renamed 1 occurrence in 1 file                                                                                   L1:C1 

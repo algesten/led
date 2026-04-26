@@ -1,0 +1,11 @@
+# Open file-search, type a query so the overlay renders a non-empty
+# results tree, then toggle all three flags. With the painter's
+# custom FileSearch-mode header path active, the frame must still
+# show ` Aa   .*   =>` verbatim at row 0 of the side panel.
+wait 200ms
+press Ctrl-f
+type foo
+wait 300ms
+press Alt-1
+press Alt-2
+press Alt-3

@@ -1,40 +1,40 @@
   main.rs               │  fn main() {
-                        │      let foo = 1;
-                        │      let _ Rename: foo   
+                        │      let foobar = 1;
+                        │      let _ = foobar;       
                         │  }
-                        │  
-                        │~ 
-                        │~ 
-                        │~ 
-                        │~ 
-                        │~ 
-                        │~ 
-                        │~ 
-                        │~ 
-                        │~ 
-                        │~ 
-                        │~ 
-                        │~ 
-                        │~ 
-                        │~ 
-                        │~ 
-                        │~ 
-                        │~ 
-                        │~ 
-                        │~ 
-                        │~ 
-                        │~ 
-                        │~ 
-                        │~ 
-                        │~ 
-                        │~ 
-                        │~ 
-                        │~ 
-                        │~ 
-                        │~ 
-                        │~ 
-                        │~ 
-                        │~ 
-                        │~ 
-                        │  main.rs 
-   /Users/martin/dev/led/target/debug/fake-lsp                                                                   L2:C10 
+                        │ 
+                        │~
+                        │~
+                        │~
+                        │~
+                        │~
+                        │~
+                        │~
+                        │~
+                        │~
+                        │~
+                        │~
+                        │~
+                        │~
+                        │~
+                        │~
+                        │~
+                        │~
+                        │~
+                        │~
+                        │~
+                        │~
+                        │~
+                        │~
+                        │~
+                        │~
+                        │~
+                        │~
+                        │~
+                        │~
+                        │~
+                        │~
+                        │~
+                        │~
+                        │ ●main.rs 
+ Renamed 2 occurrences in 1 file                                                                                 L2:C10 

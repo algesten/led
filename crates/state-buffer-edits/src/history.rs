@@ -1,0 +1,796 @@
+//! Undo / redo history for a single buffer.
+//!
+//! Three-stack model:
+//! - `past` holds groups already applied (undoable). Most-recent at
+//!   the end.
+//! - `future` holds groups that were undone but could still be
+//!   redone. Most-recent at the end.
+//! - `current` is an open group being accumulated by coalescing.
+//!   `finalise()` closes it into `past`.
+//!
+//! A fresh edit after an undo chain clears `future` — editing after
+//! undo breaks the redo branch (matches Emacs / Zed / most editors).
+//!
+//! The op log structure is also what future rebase queries (LSP,
+//! git, PR) walk to translate position-stamped data through
+//! subsequent edits. See [`rebase_char_index`].
+
+use led_core::PersistedContentHash;
+use led_state_tabs::Cursor;
+use std::sync::Arc;
+
+/// A single edit to the rope. `Insert` and `Delete` are exact
+/// inverses of each other: `Delete { at, text }` is the inverse of
+/// `Insert { at, text }` and vice versa. Undo applies the inverse;
+/// redo applies the forward op.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum EditOp {
+    Insert { at: usize, text: Arc<str> },
+    Delete { at: usize, text: Arc<str> },
+}
+
+/// A logically contiguous run of ops sharing a single undo step.
+/// Cursor bookends let undo/redo restore the cursor where the user
+/// would expect it.
+///
+/// `seq` is a session-monotonic sequence number stamped at
+/// `finalise()` — higher seq means "more recent across all
+/// buffers." Used by the global (cross-buffer) undo path (file-
+/// search overlay's Ctrl+_) to pick the newest group anywhere.
+/// Regular per-buffer undo/redo ignores it; it's just an
+/// ordering tag for the multi-buffer case.
+///
+/// `file_search_mark` carries overlay metadata so per-buffer
+/// undo/redo can resync `FileSearchState.hit_replacements` when
+/// the group represents a per-hit replace or its inverse. `None`
+/// on every group that wasn't issued through the file-search path.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct EditGroup {
+    pub ops: Vec<EditOp>,
+    pub cursor_before: Cursor,
+    pub cursor_after: Cursor,
+    pub seq: u64,
+    pub file_search_mark: Option<FileSearchMark>,
+    /// `Some(hash)` on save-point marker groups: `ops` is empty,
+    /// the group was inserted via [`History::insert_save_point`]
+    /// when the buffer was written to disk. Used by the LSP
+    /// diagnostic-replay path to locate the history position the
+    /// buffer held when a given content hash was current.
+    pub save_point_hash: Option<PersistedContentHash>,
+}
+
+/// Payload attached to per-hit search-replace undo groups so the
+/// overlay's hit_replacements Vec stays consistent across undo /
+/// redo. `hit_idx` is the position in FileSearchState.flat_hits;
+/// `forward_marks_replaced` tells which mark state the
+/// forward-apply of this group produces. Undo sets the opposite.
+///
+/// `disk_write` distinguishes two replace flavours:
+/// - `false`: the file is a real (non-preview) loaded buffer. The
+///   edit is in-memory only; dirty flag flips; user saves on their
+///   own schedule.
+/// - `true`: the file is a preview tab (or was unloaded when the
+///   replace fired). The runtime also queued a driver cmd to
+///   write disk, and kept `saved_version == version` so the
+///   buffer stays clean. Undo/redo on this kind of group must
+///   also flip the disk state via an inverse driver cmd.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct FileSearchMark {
+    pub hit_idx: usize,
+    pub forward_marks_replaced: bool,
+    pub disk_write: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct History {
+    past: Vec<EditGroup>,
+    future: Vec<EditGroup>,
+    current: Option<EditGroup>,
+    /// Monotonically-increasing count of record_* invocations that
+    /// landed on this history. Does NOT equal `applied_ops().count()`
+    /// when inserts coalesce — a `record_insert_char` call that
+    /// merged into an adjacent op still bumps this counter. Used as
+    /// a cheap "has anything changed since version V" test.
+    applied: usize,
+    /// Shared session-wide seq generator. Cloned from the owning
+    /// `BufferEdits` on construction so every history stamps
+    /// groups from the same counter. Defaulted for tests /
+    /// standalone use.
+    ///
+    /// Skipped on serialise / deserialise: it's a process-wide
+    /// counter that doesn't carry meaning across restarts. The
+    /// rebound-after-load step injects a fresh shared SeqGen.
+    #[serde(skip)]
+    seq_gen: crate::SeqGen,
+}
+
+impl History {
+    pub fn with_seq_gen(seq_gen: crate::SeqGen) -> Self {
+        Self {
+            seq_gen,
+            ..Default::default()
+        }
+    }
+
+    /// Serialise the history into a stable binary blob suitable
+    /// for persistence (M21 undo persistence). The session
+    /// driver stores one blob per `(workspace, path)` keyed by
+    /// the rope's content hash; a later launch only restores
+    /// when the hash still matches.
+    ///
+    /// The `seq_gen` field is intentionally skipped — it's a
+    /// process-wide counter without cross-restart meaning. The
+    /// `rebind_seq_gen` call after `decode` re-attaches the new
+    /// process's shared counter.
+    pub fn encode(&self) -> Result<Vec<u8>, rmp_serde::encode::Error> {
+        rmp_serde::to_vec(self)
+    }
+
+    /// Deserialise a history blob produced by [`encode`]. The
+    /// returned `History` carries a default `seq_gen`; callers
+    /// should immediately call [`Self::rebind_seq_gen`] with
+    /// the session-wide counter.
+    pub fn decode(bytes: &[u8]) -> Result<Self, rmp_serde::decode::Error> {
+        rmp_serde::from_slice(bytes)
+    }
+
+    /// Replace `seq_gen` with a session-shared counter. Called
+    /// once after [`Self::decode`] so groups stamped during the
+    /// new session share an ordering tag with sibling buffers.
+    pub fn rebind_seq_gen(&mut self, seq_gen: crate::SeqGen) {
+        self.seq_gen = seq_gen;
+    }
+
+    /// Install a vector of groups as the new past stack. Used by
+    /// session restore (M21): the persisted `undo_entries` rows
+    /// fold back into `past` in append order. Future + current
+    /// are cleared — the restored chain represents the user's
+    /// linear history at quit time, with no pending coalesce.
+    pub fn restore_past(&mut self, past: Vec<EditGroup>) {
+        self.past = past;
+        self.future.clear();
+        self.current = None;
+    }
+
+    /// Mutable access to the past stack — used by the runtime's
+    /// undo-flush bookkeeping to detect newly-finalised groups
+    /// since the last flush. Crate-internal helper.
+    pub fn past_groups(&self) -> &[EditGroup] {
+        &self.past
+    }
+}
+
+impl History {
+    pub fn can_undo(&self) -> bool {
+        !self.past.is_empty() || self.current.is_some()
+    }
+
+    pub fn can_redo(&self) -> bool {
+        !self.future.is_empty()
+    }
+
+    /// Drop every recorded group (past, future, current).
+    ///
+    /// NOT called after save — legacy's `WorkspaceClearUndo` is a
+    /// workspace-driver command that drops the SQLite-persisted
+    /// undo entries for a path, NOT the in-memory stack. The
+    /// in-memory history survives saves so the user can still
+    /// Ctrl-/ a format-on-save back out. This helper is retained
+    /// for the `SaveAs` refresh path and for tests that need to
+    /// fabricate a pristine history.
+    pub fn clear(&mut self) {
+        self.past.clear();
+        self.future.clear();
+        self.current = None;
+    }
+
+    /// Iterate every applied op in order (past + current). Used by
+    /// [`rebase_char_index`] and by tests that inspect the log.
+    pub fn applied_ops(&self) -> impl Iterator<Item = &EditOp> {
+        self.past
+            .iter()
+            .flat_map(|g| g.ops.iter())
+            .chain(self.current.iter().flat_map(|g| g.ops.iter()))
+    }
+
+    pub fn past_len(&self) -> usize {
+        self.past.len()
+    }
+
+    pub fn future_len(&self) -> usize {
+        self.future.len()
+    }
+
+    /// Total number of successful record_* calls since creation.
+    /// Matches the number of times `version` has been bumped. Not
+    /// the same as `applied_ops().count()` — coalescing can merge
+    /// two recorded inserts into one op.
+    pub fn applied_count(&self) -> usize {
+        self.applied
+    }
+
+    /// Record a single-char word-insert. If the open group's last
+    /// op is an adjacent word-char insert, APPEND a new single-char
+    /// Insert op to the same group (so undo still reverses the whole
+    /// word as one unit), rather than opening a fresh group. Any
+    /// new edit clears `future`.
+    ///
+    /// Earlier iterations of this method extended `last_text` in
+    /// place, keeping `applied_ops().count()` flat across a word.
+    /// That breaks the syntax-rebase path in the runtime: the
+    /// rebase iterator walks `applied_ops().skip(N)` to shift
+    /// tokens through the edits that landed after a dispatched
+    /// parse. When the last op's text grew in place, no new op
+    /// appeared in the iterator, the rebase did nothing, and the
+    /// row painted with tokens at pre-growth char positions —
+    /// visible as a one-character leftward smear of every span on
+    /// every row past the edit. One op per keystroke keeps the
+    /// iterator honest; undo still operates at group granularity
+    /// because every op in `group.ops` gets reversed as a unit.
+    pub fn record_insert_char(
+        &mut self,
+        at: usize,
+        ch: char,
+        cursor_before: Cursor,
+        cursor_after: Cursor,
+    ) {
+        self.future.clear();
+        self.applied += 1;
+        // Legacy rule (`led/src/model/action/helpers.rs:62`,
+        // `maybe_close_group`): break the group on a word
+        // boundary, defined as "whitespace AFTER non-whitespace."
+        // Going from whitespace INTO non-whitespace (e.g. ' '
+        // then 'a') keeps the group open so " appended" undoes
+        // as one unit. Same rule for non-word punctuation —
+        // legacy doesn't break on punctuation, just on whitespace
+        // transitions.
+        if let Some(group) = self.current.as_mut()
+            && let Some(EditOp::Insert {
+                at: last_at,
+                text: last_text,
+            }) = group.ops.last()
+        {
+            let last_len = last_text.chars().count();
+            let is_adjacent = at == *last_at + last_len;
+            let last_char = last_text.chars().last();
+            let break_on_boundary = ch.is_whitespace()
+                && last_char.is_some_and(|c| !c.is_whitespace());
+            if is_adjacent && !break_on_boundary {
+                group.ops.push(EditOp::Insert {
+                    at,
+                    text: Arc::from(ch.to_string()),
+                });
+                group.cursor_after = cursor_after;
+                return;
+            }
+        }
+        // New group.
+        let op = EditOp::Insert {
+            at,
+            text: Arc::from(ch.to_string()),
+        };
+        self.open_new_group(op, cursor_before, cursor_after);
+    }
+
+    /// Record a non-coalescing insert (newline, yank, multi-char
+    /// paste). Opens a new group.
+    pub fn record_insert(
+        &mut self,
+        at: usize,
+        text: Arc<str>,
+        cursor_before: Cursor,
+        cursor_after: Cursor,
+    ) {
+        self.future.clear();
+        self.applied += 1;
+        let op = EditOp::Insert { at, text };
+        self.open_new_group(op, cursor_before, cursor_after);
+    }
+
+    /// Record a deletion. Deletes are always their own group.
+    pub fn record_delete(
+        &mut self,
+        at: usize,
+        text: Arc<str>,
+        cursor_before: Cursor,
+        cursor_after: Cursor,
+    ) {
+        self.future.clear();
+        self.applied += 1;
+        let op = EditOp::Delete { at, text };
+        self.open_new_group(op, cursor_before, cursor_after);
+    }
+
+    /// Record a compound replace (delete + insert at the same
+    /// position) as a single undo group, optionally tagged with a
+    /// `FileSearchMark`. Closes any currently-open group first so
+    /// the replace stands alone — same discipline as a kill or a
+    /// delete. Stamps the new group's seq immediately because it
+    /// can't coalesce with anything.
+    pub fn record_replace(
+        &mut self,
+        at: usize,
+        removed: Arc<str>,
+        inserted: Arc<str>,
+        cursor_before: Cursor,
+        cursor_after: Cursor,
+        mark: Option<FileSearchMark>,
+    ) {
+        self.future.clear();
+        self.finalise();
+        self.applied += 2;
+        let group = EditGroup {
+            ops: vec![
+                EditOp::Delete { at, text: removed },
+                EditOp::Insert { at, text: inserted },
+            ],
+            cursor_before,
+            cursor_after,
+            seq: self.seq_gen.next(),
+            file_search_mark: mark,
+            save_point_hash: None,
+        };
+        self.past.push(group);
+    }
+
+    /// Record a batch of replaces as a **single** undo group so one
+    /// Ctrl-/ reverses the whole batch atomically. Used by LSP
+    /// format / rename / code-action apply, where the server can
+    /// return multiple ops whose effects overlap (e.g. sort-imports
+    /// = "delete at X, insert at Y" pair). Undoing them one-at-a-
+    /// time leaves the rope in a duplicate-text intermediate state
+    /// and subsequent per-group undo uses stale positions — the
+    /// result is visible corruption.
+    ///
+    /// `ops` must be in apply-order: history's undo iterates them
+    /// in reverse, inverting each in turn. Matches the existing
+    /// `record_replace` contract for a single replace, just
+    /// generalised to N.
+    pub fn record_replace_batch(
+        &mut self,
+        replaces: Vec<(usize, Arc<str>, Arc<str>)>,
+        cursor_before: Cursor,
+        cursor_after: Cursor,
+    ) {
+        if replaces.is_empty() {
+            return;
+        }
+        self.future.clear();
+        self.finalise();
+        // Each replace contributes two ops (delete + insert).
+        self.applied += replaces.len() * 2;
+        let mut ops: Vec<EditOp> = Vec::with_capacity(replaces.len() * 2);
+        for (at, removed, inserted) in replaces {
+            ops.push(EditOp::Delete { at, text: removed });
+            ops.push(EditOp::Insert { at, text: inserted });
+        }
+        let group = EditGroup {
+            ops,
+            cursor_before,
+            cursor_after,
+            seq: self.seq_gen.next(),
+            file_search_mark: None,
+            save_point_hash: None,
+        };
+        self.past.push(group);
+    }
+
+    /// Close the open group (if any) into `past`. Called by
+    /// dispatch after every non-edit command so the next edit
+    /// starts fresh. Stamps the closing group with the next
+    /// session seq so cross-buffer ordering is preserved.
+    pub fn finalise(&mut self) {
+        if let Some(mut group) = self.current.take() {
+            group.seq = self.seq_gen.next();
+            self.past.push(group);
+        }
+    }
+
+    /// Pop the most recent applied group for undo. Caller applies
+    /// the inverse ops and pushes the group onto `future` via
+    /// [`push_future`].
+    ///
+    /// Save-point markers (empty-ops groups with
+    /// `save_point_hash = Some`) are silently discarded during the
+    /// walk — they don't represent user edits and have nothing to
+    /// invert. The marker's state is no longer reachable once the
+    /// undo crosses it; a future save re-creates a marker for the
+    /// then-current hash.
+    pub fn take_undo(&mut self) -> Option<EditGroup> {
+        // Close any open group before popping so the user undoes
+        // what they just typed (not a stale past entry).
+        self.finalise();
+        while let Some(g) = self.past.pop() {
+            if g.save_point_hash.is_some() && g.ops.is_empty() {
+                continue;
+            }
+            return Some(g);
+        }
+        None
+    }
+
+    /// Pop the most recent undone group for redo.
+    pub fn take_redo(&mut self) -> Option<EditGroup> {
+        // An open current during a redo chain can happen only if
+        // the dispatcher forgot to finalise. Defensive close.
+        self.finalise();
+        self.future.pop()
+    }
+
+    /// Push a group back onto `future` (used by undo to stash what
+    /// was just undone).
+    pub fn push_future(&mut self, group: EditGroup) {
+        self.future.push(group);
+    }
+
+    /// Push a group onto `past` (used by redo to stash what was
+    /// just redone).
+    pub fn push_past(&mut self, group: EditGroup) {
+        self.past.push(group);
+    }
+
+    fn open_new_group(&mut self, op: EditOp, cursor_before: Cursor, cursor_after: Cursor) {
+        // Close any existing group so the new one stands alone.
+        self.finalise();
+        self.current = Some(EditGroup {
+            ops: vec![op],
+            cursor_before,
+            cursor_after,
+            // seq is stamped at finalise(); 0 is a placeholder
+            // for the open-group state.
+            seq: 0,
+            file_search_mark: None,
+            save_point_hash: None,
+        });
+    }
+
+    /// Record a save-point marker tagged with `hash`. Closes any
+    /// open group first so the marker sits AFTER the edits that
+    /// produced its content, then appends a no-op `EditGroup`
+    /// (empty `ops`) with `save_point_hash = Some(hash)` to `past`.
+    ///
+    /// The marker is inert w.r.t. content — its `ops` is empty so
+    /// `applied_ops()` skips over it, and [`take_undo`] drops
+    /// markers silently. [`find_save_point`] walks `past` to map a
+    /// hash back to its position so diagnostic replay knows which
+    /// edits have landed since that save.
+    ///
+    /// Mirrors legacy `UndoHistory::insert_save_point` — same
+    /// invariant, different container (groups vs flat entries).
+    pub fn insert_save_point(&mut self, hash: PersistedContentHash) {
+        self.finalise();
+        self.past.push(EditGroup {
+            ops: Vec::new(),
+            cursor_before: Cursor::default(),
+            cursor_after: Cursor::default(),
+            seq: self.seq_gen.next(),
+            file_search_mark: None,
+            save_point_hash: Some(hash),
+        });
+    }
+
+    /// Locate the most recent save-point marker tagged with `hash`
+    /// in `past`. Returns the group's index. Used by diagnostic
+    /// replay to decide which later edits to walk through when
+    /// transforming diagnostic positions forward from the saved
+    /// state. `None` when no marker for this hash exists — the
+    /// caller rejects the diagnostic.
+    pub fn find_save_point(&self, hash: PersistedContentHash) -> Option<usize> {
+        self.past
+            .iter()
+            .rposition(|g| g.save_point_hash == Some(hash))
+    }
+
+    /// Iterate groups after index `start` in `past`, then the
+    /// currently-open group if any. Used by diagnostic replay to
+    /// walk every edit that landed since a save-point forward
+    /// against a reconstructed save-time rope. `start` is
+    /// inclusive; pass `find_save_point(hash)? + 1` to skip the
+    /// marker itself. Save-point markers in the traversal are
+    /// still yielded (callers filter on `save_point_hash.is_some()`
+    /// if they want to skip them), matching legacy's
+    /// `entries_from` semantics.
+    pub fn groups_from(&self, start: usize) -> impl Iterator<Item = &EditGroup> {
+        self.past
+            .iter()
+            .skip(start)
+            .chain(self.current.iter())
+    }
+
+    /// Attach a `FileSearchMark` to the currently-open group. Must
+    /// be called before `finalise()` on that group. Used by the
+    /// file-search dispatch to tag per-hit replace + inverse
+    /// groups so undo/redo can resync the overlay's marks.
+    pub fn mark_current_as_file_search(&mut self, mark: FileSearchMark) {
+        if let Some(g) = self.current.as_mut() {
+            g.file_search_mark = Some(mark);
+        }
+    }
+
+    /// Seq of the top `past` group, if any. Used by the global
+    /// undo path to pick the max-seq buffer across the workspace.
+    /// Returns the in-flight `current` group's (still 0) seq when
+    /// no past is available — the caller treats 0 as "no meaningful
+    /// seq, don't pick this one."
+    pub fn past_top_seq(&self) -> Option<u64> {
+        self.past.last().map(|g| g.seq)
+    }
+
+    /// Seq of the top `future` group (the one that'd get redone
+    /// next), if any.
+    pub fn future_top_seq(&self) -> Option<u64> {
+        self.future.last().map(|g| g.seq)
+    }
+}
+
+fn is_word_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
+/// Walk applied ops in order and transform `idx` into its current
+/// char-index equivalent.
+///
+/// Conventions:
+/// - `Insert { at, text }` where `at <= idx` shifts `idx` right by
+///   `text.chars().count()`. `at > idx` is a no-op.
+/// - `Delete { at, text }`:
+///   - Removed range `[at, at + len)` entirely before `idx` shifts
+///     left by `len`.
+///   - Removed range entirely at/after `idx` is a no-op.
+///   - Removed range straddling `idx` clamps `idx` to `at`.
+///
+/// `from_version` refers to the version we're rebasing from: the
+/// function skips the first `from_version` ops (which were already
+/// applied before the caller's coord was recorded).
+pub fn rebase_char_index(idx: usize, from_version: u64, history: &History) -> usize {
+    let mut cur = idx;
+    let from = from_version as usize;
+    for (i, op) in history.applied_ops().enumerate() {
+        if i < from {
+            continue;
+        }
+        cur = rebase_one(cur, op);
+    }
+    cur
+}
+
+fn rebase_one(idx: usize, op: &EditOp) -> usize {
+    match op {
+        EditOp::Insert { at, text } => {
+            if *at <= idx {
+                idx + text.chars().count()
+            } else {
+                idx
+            }
+        }
+        EditOp::Delete { at, text } => {
+            let len = text.chars().count();
+            let end = *at + len;
+            if end <= idx {
+                idx - len
+            } else if *at >= idx {
+                idx
+            } else {
+                // Overlap: range contains idx, clamp to start.
+                *at
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cur(line: usize, col: usize) -> Cursor {
+        Cursor {
+            line,
+            col,
+            preferred_col: col,
+        }
+    }
+
+    #[test]
+    fn record_insert_char_keeps_word_chars_in_single_group() {
+        let mut h = History::default();
+        h.record_insert_char(0, 'h', cur(0, 0), cur(0, 1));
+        h.record_insert_char(1, 'i', cur(0, 1), cur(0, 2));
+        // Still one undo group…
+        assert_eq!(h.past_len(), 0);
+        assert_eq!(h.applied_count(), 2);
+        // …but each keystroke is its own Insert op inside the group.
+        // The syntax-rebase path needs this: `applied_ops()` must
+        // advance per keystroke so rebasing tokens after a dispatched
+        // parse shifts them by the right char delta.
+        let ops: Vec<_> = h.applied_ops().collect();
+        assert_eq!(ops.len(), 2);
+        match ops[0] {
+            EditOp::Insert { at, text } => {
+                assert_eq!(*at, 0);
+                assert_eq!(&**text, "h");
+            }
+            _ => panic!("expected Insert"),
+        }
+        match ops[1] {
+            EditOp::Insert { at, text } => {
+                assert_eq!(*at, 1);
+                assert_eq!(&**text, "i");
+            }
+            _ => panic!("expected Insert"),
+        }
+    }
+
+    #[test]
+    fn record_insert_char_breaks_on_non_word() {
+        let mut h = History::default();
+        h.record_insert_char(0, 'a', cur(0, 0), cur(0, 1));
+        h.record_insert_char(1, ' ', cur(0, 1), cur(0, 2));
+        // Space starts a new group.
+        h.finalise();
+        assert_eq!(h.past_len(), 2);
+    }
+
+    #[test]
+    fn record_insert_is_always_its_own_group() {
+        let mut h = History::default();
+        h.record_insert(0, Arc::from("hi"), cur(0, 0), cur(0, 2));
+        h.record_insert(2, Arc::from("there"), cur(0, 2), cur(0, 7));
+        h.finalise();
+        assert_eq!(h.past_len(), 2);
+    }
+
+    #[test]
+    fn record_delete_is_always_its_own_group() {
+        let mut h = History::default();
+        h.record_delete(0, Arc::from("h"), cur(0, 1), cur(0, 0));
+        h.record_delete(0, Arc::from("e"), cur(0, 1), cur(0, 0));
+        h.finalise();
+        assert_eq!(h.past_len(), 2);
+    }
+
+    #[test]
+    fn insert_save_point_appends_no_op_group_and_finds_by_hash() {
+        let mut h = History::default();
+        h.record_insert(0, Arc::from("hi"), cur(0, 0), cur(0, 2));
+        h.insert_save_point(PersistedContentHash(42));
+        assert_eq!(h.past_len(), 2);
+        assert_eq!(h.find_save_point(PersistedContentHash(42)), Some(1));
+        assert_eq!(h.find_save_point(PersistedContentHash(99)), None);
+    }
+
+    #[test]
+    fn groups_from_walks_past_then_current() {
+        let mut h = History::default();
+        h.record_insert(0, Arc::from("a"), cur(0, 0), cur(0, 1));
+        h.insert_save_point(PersistedContentHash(7));
+        h.record_insert_char(1, 'b', cur(0, 1), cur(0, 2));
+        let after_save = h.find_save_point(PersistedContentHash(7)).unwrap();
+        let groups: Vec<_> = h.groups_from(after_save + 1).collect();
+        // One real group walked: the 'b' insert still in `current`.
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].ops.len(), 1);
+    }
+
+    #[test]
+    fn take_undo_skips_save_point_markers() {
+        let mut h = History::default();
+        h.record_insert(0, Arc::from("a"), cur(0, 0), cur(0, 1));
+        h.insert_save_point(PersistedContentHash(7));
+        // Undo should pop the real edit, skipping the save-point.
+        let undone = h.take_undo().expect("past has a real edit");
+        assert_eq!(undone.ops.len(), 1);
+        // Save-point was discarded along the way.
+        assert!(h.find_save_point(PersistedContentHash(7)).is_none());
+        assert_eq!(h.past_len(), 0);
+    }
+
+    #[test]
+    fn take_undo_redo_round_trip() {
+        let mut h = History::default();
+        h.record_insert(0, Arc::from("hi"), cur(0, 0), cur(0, 2));
+        let undone = h.take_undo().expect("past has one");
+        h.push_future(undone);
+        assert!(!h.can_undo());
+        let redone = h.take_redo().expect("future has one");
+        h.push_past(redone);
+        assert!(h.can_undo());
+        assert!(!h.can_redo());
+    }
+
+    #[test]
+    fn editing_after_undo_clears_future() {
+        let mut h = History::default();
+        h.record_insert(0, Arc::from("hi"), cur(0, 0), cur(0, 2));
+        let undone = h.take_undo().expect("past has one");
+        h.push_future(undone);
+        assert!(h.can_redo());
+
+        h.record_insert(0, Arc::from("xx"), cur(0, 0), cur(0, 2));
+        assert!(!h.can_redo());
+    }
+
+    // ── rebase_char_index ──────────────────────────────────────────────
+
+    #[test]
+    fn rebase_insert_before_idx_shifts_right() {
+        let mut h = History::default();
+        h.record_insert(0, Arc::from("abc"), cur(0, 0), cur(0, 3));
+        let new = rebase_char_index(10, 0, &h);
+        assert_eq!(new, 13);
+    }
+
+    #[test]
+    fn rebase_insert_after_idx_no_op() {
+        let mut h = History::default();
+        h.record_insert(20, Arc::from("abc"), cur(0, 0), cur(0, 3));
+        assert_eq!(rebase_char_index(10, 0, &h), 10);
+    }
+
+    #[test]
+    fn rebase_delete_before_idx_shifts_left() {
+        let mut h = History::default();
+        h.record_delete(0, Arc::from("abc"), cur(0, 3), cur(0, 0));
+        assert_eq!(rebase_char_index(10, 0, &h), 7);
+    }
+
+    #[test]
+    fn rebase_delete_overlapping_idx_clamps() {
+        let mut h = History::default();
+        h.record_delete(5, Arc::from("abcde"), cur(0, 10), cur(0, 5));
+        // idx=8 is inside the deleted range → clamp to 5.
+        assert_eq!(rebase_char_index(8, 0, &h), 5);
+    }
+
+    #[test]
+    fn rebase_from_version_skips_already_applied() {
+        let mut h = History::default();
+        h.record_insert(0, Arc::from("abc"), cur(0, 0), cur(0, 3));
+        h.record_insert(3, Arc::from("de"), cur(0, 3), cur(0, 5));
+        // Rebase from version 1 — skip the first op, apply second only.
+        // idx=10, op2 inserts "de" at 3 → 3 <= 10, shift by 2 → 12.
+        assert_eq!(rebase_char_index(10, 1, &h), 12);
+    }
+
+    // ── M21 undo persistence: encode / decode round-trip ────
+
+    #[test]
+    fn encode_decode_round_trips_preserves_undo_chain() {
+        // Record a couple of edits, encode, decode, and verify
+        // the undo chain still walks back correctly.
+        let mut h = History::default();
+        h.record_insert(0, Arc::from("hello"), cur(0, 0), cur(0, 5));
+        h.record_insert(5, Arc::from(", world"), cur(0, 5), cur(0, 12));
+        h.finalise();
+
+        let bytes = h.encode().expect("encode");
+        let mut decoded = History::decode(&bytes).expect("decode");
+        assert_eq!(decoded.past_len(), h.past_len());
+        // Inject a fresh seq_gen so the comparison ignores it
+        // (skipped on (de)serialise; defaulted on decode).
+        decoded.rebind_seq_gen(crate::SeqGen::new());
+
+        // Original and decoded should produce equivalent undo
+        // pops: same group ops, same cursor bookends.
+        let mut h2 = h.clone();
+        let g_a = h2.take_undo().expect("undo");
+        let g_b = decoded.take_undo().expect("undo");
+        assert_eq!(g_a.ops, g_b.ops);
+        assert_eq!(g_a.cursor_before, g_b.cursor_before);
+        assert_eq!(g_a.cursor_after, g_b.cursor_after);
+    }
+
+    #[test]
+    fn encode_decode_preserves_save_point_marker() {
+        let mut h = History::default();
+        h.record_insert(0, Arc::from("hello"), cur(0, 0), cur(0, 5));
+        h.insert_save_point(PersistedContentHash(0xCAFE));
+        h.record_insert(5, Arc::from("!"), cur(0, 5), cur(0, 6));
+        h.finalise();
+
+        let bytes = h.encode().unwrap();
+        let decoded = History::decode(&bytes).unwrap();
+        // Save-point marker survives the round-trip.
+        let saved = decoded.find_save_point(PersistedContentHash(0xCAFE));
+        assert!(saved.is_some(), "save point recovered after decode");
+    }
+}

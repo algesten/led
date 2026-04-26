@@ -1,16 +1,11 @@
 [package]
 name = "led-core"
-version = "0.1.0"
+version = "0.0.0"
 edition = "2024"
+publish = false
 
 [dependencies]
-crossterm = { workspace = true }
-log = { workspace = true }
-notify = { workspace = true }
-serde = { workspace = true }
-tokio = { workspace = true }
-toml = { workspace = true }
+drv = { workspace = true }
+imbl = { workspace = true }
 ropey = { workspace = true }
-
-[dev-dependencies]
-tempfile = { workspace = true }
+serde = { workspace = true, features = ["derive"] }

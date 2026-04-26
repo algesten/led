@@ -1,0 +1,16 @@
+[package]
+name = "led-driver-buffers-native"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Desktop async side of the buffers driver: a background thread that
+# reads commands off `ReadCmd`, does `std::fs` blocking I/O, and sends
+# `ReadDone`s back. Replaceable across the ABI by a Swift/GCD or
+# Kotlin/coroutines implementation on mobile targets — that's the whole
+# point of the core/native split.
+
+[dependencies]
+led-core = { workspace = true }
+led-driver-buffers-core = { workspace = true }
+ropey = { workspace = true }

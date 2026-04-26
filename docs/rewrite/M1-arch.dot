@@ -1,0 +1,170 @@
+// Milestone 1 architecture graph — strict driver isolation.
+//
+// Render: `dot -Tsvg M1-arch.dot -o M1-arch.svg`
+// or paste into https://dreampuf.github.io/GraphvizOnline/
+//
+// Each "driver" owns: its source(s), its sync API (process/execute),
+// its ABI types, and (on desktop) its native async worker. Drivers do
+// NOT know about each other or about `state-tabs`. The RUNTIME crate
+// owns all cross-source composition — `#[drv::input]` projections
+// over each driver's source, plus the memos that combine them.
+//
+// Shapes:
+//   cylinder       = drv source (plain struct)
+//   ellipse dashed = #[drv::input] projection declared in runtime
+//   hexagon        = memoized function (`#[drv::memo(single)]`)
+//   box3d          = async native worker
+//   box            = sync driver API
+//   note           = external boundary
+//
+// Edge colours:
+//   black solid      source → input
+//   gray             input → memo
+//   bold blue        memo → memo (composition)
+//   red              sync driver → source
+//   dashed orange    memo → sync driver (query result → execute)
+//   dashed crimson   sync driver ↔ native (ABI boundary: mpsc — MOCK POINT)
+//   dashed purple    native ↔ external I/O
+//   dashed teal      memo → paint → tty
+
+digraph M1 {
+    rankdir=LR;
+    compound=true;
+    fontname="Helvetica";
+    node  [fontname="Helvetica", fontsize=11];
+    edge  [fontname="Helvetica", fontsize=9];
+
+    // ── External boundaries ──────────────────────────────────────────
+    cli     [label="CLI args\n(led FILE…)",      shape=note, fillcolor="#fdf6e3", style=filled];
+    tty_in  [label="tty stdin\n(raw keys)",      shape=note, fillcolor="#fdf6e3", style=filled];
+    tty_out [label="tty stdout\n(ANSI escapes)", shape=note, fillcolor="#fdf6e3", style=filled];
+    disk    [label="disk\n(files on FS)",        shape=note, fillcolor="#fdf6e3", style=filled];
+
+    // ── state-tabs (user-decision; no driver) ────────────────────────
+    subgraph cluster_state_tabs {
+        label="crates/state-tabs/";
+        style=filled; fillcolor="#eef5ff"; color="#4a90e2";
+        Tabs [label="Tabs\n(user-decision)", shape=cylinder, fillcolor="#4a90e2", fontcolor=white, style=filled];
+        desired_loaded_paths [label="desired_loaded_paths\n(takes &Tabs)", shape=hexagon, fillcolor="#c8f0c8", style=filled];
+    }
+
+    // ── driver-buffers (isolated) ────────────────────────────────────
+    subgraph cluster_driver_buffers {
+        label="crates/driver-buffers/";
+        style=dashed; color="#e07b3a"; fontsize=12;
+
+        subgraph cluster_dbc {
+            label="core/ (portable)";
+            style=filled; fillcolor="#fff4ee"; color="#e07b3a";
+            BufferStore    [label="BufferStore\n(external-fact)", shape=cylinder, fillcolor="#e07b3a", fontcolor=white, style=filled];
+            FileReadDriver [label="FileReadDriver\nprocess · execute", shape=box, fillcolor="#fae2cf", style=filled];
+        }
+
+        subgraph cluster_dbn {
+            label="native/ (desktop)";
+            style=filled; fillcolor="#ffeee0"; color="#c35a1e";
+            file_native [label="bg thread\nstd::fs read", shape=box3d, fillcolor="#f4b6b6", style=filled];
+        }
+    }
+
+    // ── driver-terminal (isolated) ───────────────────────────────────
+    subgraph cluster_driver_terminal {
+        label="crates/driver-terminal/";
+        style=dashed; color="#8b5cf6"; fontsize=12;
+
+        subgraph cluster_dtc {
+            label="core/ (portable)";
+            style=filled; fillcolor="#f4eefb"; color="#8b5cf6";
+            Terminal            [label="Terminal\n(external-fact)", shape=cylinder, fillcolor="#8b5cf6", fontcolor=white, style=filled];
+            TerminalInputDriver [label="TerminalInputDriver\nprocess", shape=box, fillcolor="#e8ddfa", style=filled];
+        }
+
+        subgraph cluster_dtn {
+            label="native/ (desktop — crossterm)";
+            style=filled; fillcolor="#ecdffc"; color="#6b3fb8";
+            term_native  [label="bg thread\ncrossterm::event", shape=box3d, fillcolor="#f4b6b6", style=filled];
+            paint        [label="paint()\nANSI escapes",       shape=box,   fillcolor="#f4b6b6", style=filled];
+            RawModeGuard [label="RawModeGuard\n(RAII)",        shape=box,   fillcolor="#f4b6b6", style=filled];
+        }
+    }
+
+    // ── runtime (the integration layer) ──────────────────────────────
+    subgraph cluster_runtime {
+        label="crates/runtime/";
+        style=filled; fillcolor="#f0f8f0"; color="#2a7d2a";
+
+        // #[drv::input] projections over every driver's source —
+        // declared here so consumer memos can name them in their
+        // signatures. Each carries a hand-written `::new(&source)`.
+        TabsOpenInput      [label="TabsOpenInput\n(on Tabs)",              shape=ellipse, style="filled,dashed", fillcolor="#d0ecd0"];
+        TabsActiveInput    [label="TabsActiveInput\n(on Tabs)",            shape=ellipse, style="filled,dashed", fillcolor="#d0ecd0"];
+        StoreLoadedInput   [label="StoreLoadedInput\n(on BufferStore)",    shape=ellipse, style="filled,dashed", fillcolor="#d0ecd0"];
+        TerminalDimsInput  [label="TerminalDimsInput\n(on Terminal)",      shape=ellipse, style="filled,dashed", fillcolor="#d0ecd0"];
+
+        file_load_action  [label="file_load_action",  shape=hexagon, fillcolor="#a8e6a8", style=filled];
+        tab_bar_model     [label="tab_bar_model",     shape=hexagon, fillcolor="#c8f0c8", style=filled];
+        body_model        [label="body_model",        shape=hexagon, fillcolor="#c8f0c8", style=filled];
+        render_frame      [label="render_frame",      shape=hexagon, fillcolor="#a8e6a8", style=filled];
+        dispatch          [label="dispatch\n(event handler)", shape=box, fillcolor="#d0ecd0", style=filled];
+        main_loop         [label="run()\ningest → query → execute → render", shape=box, fillcolor="#90c890", style=filled];
+    }
+
+    // ── Source → memo direct (&Source memo input) ──────────────────
+    Tabs -> desired_loaded_paths [color="#666"];
+
+    // ── Source → #[drv::input] projection (declared in runtime) ────
+    Tabs        -> TabsOpenInput     [style=dashed];
+    Tabs        -> TabsActiveInput   [style=dashed];
+    BufferStore -> StoreLoadedInput  [style=dashed];
+    Terminal    -> TerminalDimsInput [style=dashed];
+
+    // ── Input → memo (projection is read by memo) ───────────────────
+    TabsOpenInput       -> file_load_action     [color="#666"];
+    StoreLoadedInput    -> file_load_action     [color="#666"];
+    TabsActiveInput     -> tab_bar_model        [color="#666"];
+    TabsActiveInput     -> body_model           [color="#666"];
+    StoreLoadedInput    -> body_model           [color="#666"];
+    TerminalDimsInput   -> render_frame         [color="#666"];
+    TabsActiveInput     -> render_frame         [color="#666"];
+    StoreLoadedInput    -> render_frame         [color="#666"];
+
+    // ── Memo → memo (composition) ───────────────────────────────────
+    render_frame -> tab_bar_model [color="#2a6fdb", penwidth=2, label="calls"];
+    render_frame -> body_model    [color="#2a6fdb", penwidth=2, label="calls"];
+
+    // ── Sync driver → source (mutations) ────────────────────────────
+    FileReadDriver      -> BufferStore [color="#d94545", penwidth=2, label="process\nexecute"];
+    TerminalInputDriver -> Terminal    [color="#d94545", penwidth=2, label="process"];
+
+    // ── Runtime → driver sync API ───────────────────────────────────
+    main_loop -> FileReadDriver      [style=dashed, color="#2a7d2a"];
+    main_loop -> TerminalInputDriver [style=dashed, color="#2a7d2a"];
+    main_loop -> dispatch            [style=dashed, color="#2a7d2a"];
+
+    // ── Dispatch mutates Tabs ───────────────────────────────────────
+    dispatch -> Tabs [color="#d94545", penwidth=2, label="Tab / Ctrl-C"];
+
+    // ── Memo → sync driver ──────────────────────────────────────────
+    file_load_action -> FileReadDriver [style=dashed, color="#e08a2a", label="LoadAction"];
+
+    // ── ABI boundary (MOCK POINT: tests replace native with fakes) ──
+    FileReadDriver -> file_native       [style=dashed, color="#b22222", penwidth=1.5, label="ReadCmd"];
+    file_native    -> FileReadDriver    [style=dashed, color="#b22222", penwidth=1.5, label="ReadDone"];
+    term_native    -> TerminalInputDriver [style=dashed, color="#b22222", penwidth=1.5, label="TermEvent"];
+
+    // ── Native ↔ external I/O ───────────────────────────────────────
+    disk   -> file_native [style=dashed, color="#8a5fb8", label="read_to_string"];
+    tty_in -> term_native [style=dashed, color="#8a5fb8", label="crossterm::event"];
+
+    // ── Render path ─────────────────────────────────────────────────
+    render_frame -> paint   [style=dashed, color="#0a9a9a", label="Frame"];
+    paint        -> tty_out [style=dashed, color="#0a9a9a"];
+    RawModeGuard -> tty_out [style=dashed, color="#8a5fb8", label="raw · alt-screen"];
+
+    // ── CLI seeds tabs on startup ───────────────────────────────────
+    cli -> Tabs [style=dashed, color="#8a5fb8", label="seed on startup"];
+
+    // Layout hints
+    { rank=source; cli; tty_in; disk; }
+    { rank=sink;   tty_out; }
+}

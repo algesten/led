@@ -2,7 +2,17 @@
 
 This doc describes the **target architecture** for the led rewrite. It's the "what," not the "how" (see `REWRITE-PLAN.md` for execution).
 
-It assumes familiarity with the `drv` crate (see `../drv/README.md`). Read that first if you haven't.
+> **2026-04-19 note.** The generic query-driven patterns — driver shape, core/native split, cross-crate lens idiom, mock point — have been factored out into [`../../../drv/EXAMPLE-ARCH.md`](../../../drv/EXAMPLE-ARCH.md), which is now the canonical "how to organise query-driven apps on drv" doc. This file retains **led-specific** application of those patterns: the domain-atom plan for editor concerns (buffer / lsp / git / ui / …), the rebase-query pattern for version-sensitive data, and the mapping from the current FRP principles.
+>
+> Code samples below were written against the pre-0.2.0 drv API
+> (`#[drv::memo]` without cache strategy, `&Lens` params, `Atom<T>`
+> wrapper). The shape of the logic is still correct; the syntax is
+> stale. Current syntax: `#[drv::memo(single)]` or `#[drv::memo(lru = N)]`,
+> `impl Into<Lens<'_>>` params, plain atom structs (no wrapper). See
+> `../../../drv/README.md` and the actual M1 code under `crates/` for
+> the current form.
+
+It assumes familiarity with the `drv` crate (see `../drv/README.md`) and the generic architecture guide (`../drv/EXAMPLE-ARCH.md`). Read those first if you haven't.
 
 ---
 
@@ -356,6 +366,31 @@ Stored as `im::Vector<Edit>` per path; each applied edit appends and bumps `vers
 
 ## Cache-miss dispatch
 
+> **Pattern revised in M1.** The `request_load` thread-local / `Loaded<T>`
+> scheme described below was the original plan. M1 uses the
+> desired-state-plus-execute pattern from
+> [`../../../drv/EXAMPLE-ARCH.md`](../../../drv/EXAMPLE-ARCH.md)
+> § "Actions as diffs" instead:
+>
+> 1. A memo (e.g. `file_load_action`) diffs desired state (paths open
+>    in tabs) vs actual state (`BufferStore.loaded` map) and returns a
+>    `Vec<LoadAction>`.
+> 2. The main loop's execute phase calls `driver.execute(actions,
+>    &mut store)`, which writes `LoadState::Pending` into the atom
+>    **synchronously** (closing the re-trigger loop) and dispatches
+>    the async work.
+> 3. The async worker posts `ReadDone` back over mpsc; `driver.process`
+>    drains it and writes `Ready`/`Error` into the atom.
+>
+> Same effect, different plumbing. No thread-local side channel; the
+> query's return type *is* the work list. When to fall back to the
+> side-channel pattern: if a query deep in a render tree needs to
+> trigger a load as a side effect of being visited, without the list
+> bubbling up through every parent memo's return type. M1 hasn't hit
+> that; if it comes up in later milestones, revisit.
+>
+> The text below describes the original plan for reference.
+
 When a query reads a domain atom and finds data it needs marked `Idle` (or absent), it:
 
 1. Pushes a request onto a thread-local collector.
@@ -515,23 +550,48 @@ A new principle specific to the query architecture:
 
 ## Multi-crate organization
 
-Each atom and its memos must live in the same crate (`drv::assemble!()` requirement). One natural layout:
+**Superseded.** The original guidance below is inaccurate — drv's
+crate-local registry means cross-atom memos can't simply live "in the
+crate that naturally owns the integration" if that crate doesn't host
+every atom it touches. The correct pattern is documented in
+[`../../../drv/EXAMPLE-ARCH.md`](../../../drv/EXAMPLE-ARCH.md)
+§ "Organizing the code: crate layout" and demonstrated in the M1
+skeleton:
+
+- **One crate per driver, split into `core/` (portable sync + atom +
+  ABI types) and `native/` (platform-specific async worker).** Drivers
+  are strictly isolated — they know only their own atom.
+- **`state-<name>/` for user-decision atoms** with no async side.
+- **`runtime/`** owns every standalone lens that projects a foreign
+  atom (via a hand-written `From<&ForeignAtom>`) and every memo that
+  combines multiple drivers' atoms, plus `Event` + `dispatch` + the
+  main loop.
+
+Actual M1 layout (see `README.md` § "Current crate layout" for the tree
+and `M1-arch.svg` for a picture):
 
 ```
 crates/
-  state-buffer/   BufferState + buffer muts + rebase functions + buffer queries
-  state-git/      GitState + git muts + git queries
-  state-lsp/      LspState + lsp muts + lsp queries
-  state-ui/       UiState + ui muts + render queries
-  state-session/  SessionState + session muts + session queries
-  state-search/   SearchState + search muts + search queries
-  ...
-  runtime/        Event enum, apply_event, dispatch functions, Runtime
-  drivers/        driver implementations (each existing driver, rewritten or kept)
-  led-bin/        main()
+  core/                           UserPath, CanonPath, id_newtype!
+  state-tabs/                     Tabs atom (user-decision; no driver)
+  driver-buffers/
+    core/                         BufferStore + LoadAction + ReadCmd/ReadDone
+                                  + FileReadDriver sync API + Trace
+    native/                       desktop thread + std::fs
+  driver-terminal/
+    core/                         Terminal + KeyEvent mirrors + Frame models
+                                  + TerminalInputDriver sync API + Trace
+    native/                       crossterm reader + paint() + RawModeGuard
+  runtime/                        query.rs (standalone lenses + cross-atom memos
+                                  + drv::assemble!()), dispatch.rs, trace.rs,
+                                  lib.rs (Event + Drivers + run + spawn_drivers)
+led/                              thin main: CLI + RawModeGuard + run
 ```
 
-Cross-domain queries (like `render_frame` that touches buffer + lsp + git + ui) live in the crate that naturally owns the integration — probably `state-ui` since that's what the renderer cares about. Or a top-level `queries/` crate. TBD during execution.
+When later milestones add domains (LSP, git, syntax, config, session…)
+each gets a `driver-<name>/core/ + driver-<name>/native/` pair; the
+runtime's `query.rs` grows new standalone lenses + memos; no existing
+driver crate changes.
 
 ---
 

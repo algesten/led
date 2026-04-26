@@ -1,0 +1,15 @@
+[package]
+name = "led-state-diagnostics"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Per-buffer LSP diagnostics state atom + the diagnostic domain
+# types they carry (used by the driver-lsp ABI and by the painter).
+# Mirrors legacy led's `led_lsp::{Diagnostic, DiagnosticSeverity}`
+# at the domain level; the propagation state machine lives in the
+# driver crate so this atom stays a pure data source.
+
+[dependencies]
+led-core = { workspace = true }
+imbl = { workspace = true }

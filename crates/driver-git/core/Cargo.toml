@@ -1,0 +1,13 @@
+[package]
+name = "led-driver-git-core"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Sync core of the git driver: the ABI shared between runtime and
+# the native worker — GitCmd, GitEvent, Trace, and the handle. No
+# libgit2 in this crate — that lives in the native half so a mock
+# test driver can substitute a plain channel pair.
+
+[dependencies]
+led-core = { workspace = true }

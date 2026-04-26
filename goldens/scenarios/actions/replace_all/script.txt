@@ -1,6 +1,10 @@
-# Open file-search, type query, enter replace mode, Tab to replace
-# input, type replacement, then trigger ReplaceAll.
+# Two kinds of files live in the workspace:
+#   - a.txt, opened at startup (loaded buffer, matches in-memory path).
+#   - b.txt, written mid-scenario to disk only (on-disk driver path).
+# After Alt+Enter both should get "needle" replaced with "pin" —
+# the loaded buffer in-memory, the on-disk file via the driver walk.
 wait 500ms
+fs_write b.txt one needle\ntwo needle three\n
 press Ctrl-f
 type needle
 press Alt-3

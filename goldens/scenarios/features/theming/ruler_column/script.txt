@@ -1,0 +1,2 @@
+# Ruler column: no input needed, just capture the first-paint frame.
+wait 200ms

@@ -1,298 +1,189 @@
-use std::io;
+//! `led` — the binary entry point.
+//!
+//! Thin `main`: parse CLI, acquire raw mode, construct atoms + drivers,
+//! hand off to `led_runtime::run`.
+
+use std::io::{self, Write};
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use clap::Parser;
-use crossterm::event::DisableBracketedPaste;
-use crossterm::terminal::{LeaveAlternateScreen, disable_raw_mode};
-use led_config_file::TomlFile;
-use led_core::Startup;
-use led_core::keys::{KeyCombo, Keys, format_key_combo, parse_key_combo};
-use led_core::rx::Stream;
-use led_core::theme::Theme;
-use led_core::{CanonPath, UserPath};
-use led_terminal_in::TerminalInput;
-use tokio::sync::oneshot;
+use led_core::UserPath;
+use led_driver_terminal_native::RawModeGuard;
+use led_runtime::{
+    load_keymap, load_theme, spawn_drivers, Atoms, SharedTrace, TabIdGen, Wake, World,
+};
+use led_state_browser::FsTree;
+use led_state_tabs::Tab;
 
-#[derive(Parser)]
-#[command(name = "led", about = "A lightweight text editor")]
+#[derive(Parser, Debug)]
+#[command(name = "led", version, about = "led rewrite — milestone 1 skeleton")]
 struct Cli {
-    /// Files or directory to open
-    paths: Vec<String>,
+    /// File paths to open as tabs. First becomes active.
+    files: Vec<PathBuf>,
 
-    /// Write logs to FILE
-    #[arg(long, value_name = "FILE")]
-    log_file: Option<PathBuf>,
-
-    /// Reset keybinds/theme to defaults and clear session db
+    /// Append trace lines for each external event/execute.
     #[arg(long)]
-    reset_config: bool,
-
-    // Intended for `EDITOR="led --no-workspace"` single-file editing.
-    /// Standalone mode: no workspace, git, LSP, session or watchers
-    #[arg(long)]
-    no_workspace: bool,
-
-    /// Replay a key-combo file into terminal input (for profiling)
-    #[arg(long, value_name = "FILE")]
-    keys_file: Option<PathBuf>,
-
-    /// Record key presses to FILE (replay with --keys-file)
-    #[arg(long, value_name = "FILE")]
-    keys_record: Option<PathBuf>,
-
-    /// Append a normalized dispatch trace to FILE (test-only; used by goldens).
-    #[arg(long, value_name = "FILE")]
     golden_trace: Option<PathBuf>,
 
-    /// Override the config directory (defaults to ~/.config/led).
-    /// Used by tests to isolate session DB and config files; also useful
-    /// for users who want a non-default config location.
-    #[arg(long, value_name = "DIR")]
+    /// Directory containing `config.toml`. Defaults to
+    /// `~/.config/led/`. Missing file is not an error.
+    #[arg(long)]
     config_dir: Option<PathBuf>,
 
-    /// Override the LSP server command for ALL languages (test-only).
-    #[arg(long, value_name = "PATH", hide = true)]
+    /// Path to a `theme.toml`. Overrides the default resolution
+    /// (`<config_dir>/theme.toml` → `~/.config/led/theme.toml` →
+    /// built-in). Missing file at an explicit path is an error.
+    #[arg(long)]
+    theme: Option<PathBuf>,
+
+    // The goldens runner always passes these; parse-and-ignore so it
+    // doesn't trip on unknown-flag errors. Each wires up in its own
+    // later milestone (see docs/rewrite/ROADMAP.md).
+    #[arg(long, hide = true)]
+    test_clock: Option<PathBuf>,
+    #[arg(long, hide = true)]
     test_lsp_server: Option<PathBuf>,
-
-    /// Override the `gh` CLI binary path (test-only).
-    #[arg(long, value_name = "PATH", hide = true)]
+    #[arg(long, hide = true)]
     test_gh_binary: Option<PathBuf>,
+    /// Replace the system clipboard with a per-process in-memory
+    /// cell. Used by the goldens harness so parallel tests don't
+    /// trample each other through the OS pasteboard.
+    #[arg(long, hide = true)]
+    test_clipboard_isolated: bool,
+
+    /// Skip workspace root detection; treat the process's CWD as the
+    /// only directory relevant to this session. Used by the goldens
+    /// harness when a scenario only cares about individual files.
+    /// Currently parse-only — workspace scope lands in M11 / M21.
+    #[arg(long, hide = true)]
+    no_workspace: bool,
 }
 
-enum KeyScript {
-    Key(KeyCombo),
-    /// Jump to the first entry whose source line number is >= target.
-    Goto(usize),
-}
-
-fn parse_keys_script(content: &str) -> Vec<(usize, KeyScript)> {
-    let mut script = Vec::new();
-    for (line_no, line) in content.lines().enumerate() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            continue;
-        }
-        let lower = trimmed.to_ascii_lowercase();
-        if let Some(rest) = lower.strip_prefix("goto") {
-            let rest = rest.trim();
-            let target: usize = rest.parse().unwrap_or_else(|e| {
-                panic!("keys file line {line_no}: parse goto target '{rest}': {e}")
-            });
-            script.push((line_no, KeyScript::Goto(target)));
-            continue;
-        }
-        let combo = parse_key_combo(trimmed)
-            .unwrap_or_else(|e| panic!("keys file line {line_no}: parse '{trimmed}': {e}"));
-        script.push((line_no, KeyScript::Key(combo)));
-    }
-    script
-}
-
-#[tokio::main(flavor = "current_thread")]
-async fn main() {
+fn main() -> io::Result<()> {
     let cli = Cli::parse();
 
-    if let Some(ref log_path) = cli.log_file {
-        led::logging::init_file_logger(log_path);
+    // Load keymap before raw mode so parse errors and per-binding
+    // warnings land on a cooked terminal where the user can read
+    // them. Per-binding problems are non-fatal — they surface as
+    // warnings and that entry is skipped. Fatal (I/O, malformed
+    // TOML) exits with code 2.
+    let loaded = match load_keymap(cli.config_dir.as_deref()) {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("led: config error: {e}");
+            std::process::exit(2);
+        }
+    };
+    for w in &loaded.warnings {
+        eprintln!("led: config warning: {w}");
+    }
+    let keymap = loaded.keymap;
+
+    // Theme resolves the same way: fatal on I/O or malformed TOML,
+    // non-fatal warnings for per-region schema problems.
+    let loaded_theme = match load_theme(cli.config_dir.as_deref(), cli.theme.as_deref()) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("led: theme error: {e}");
+            std::process::exit(2);
+        }
+    };
+    for w in &loaded_theme.warnings {
+        eprintln!("led: theme warning: {w}");
+    }
+    let theme = loaded_theme.theme;
+
+    let trace = match cli.golden_trace {
+        Some(path) => {
+            let root = std::env::var_os("LED_TRACE_ROOT").map(PathBuf::from);
+            SharedTrace::file(path, root)?
+        }
+        None => SharedTrace::noop(),
+    };
+
+    // Build atoms as plain structs.
+    let mut atoms = Atoms {
+        // Workspace root = process cwd. M19 (git integration) will
+        // walk up for `.git` instead; for M11 the CWD convention
+        // matches the typical `cd <project> && led <file>` path.
+        fs: FsTree {
+            root: std::env::current_dir()
+                .ok()
+                .map(|p| UserPath::new(&p).canonicalize()),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    if cli.no_workspace {
+        // Standalone mode: skip session init / save entirely.
+        // Phase::Exiting still goes through the quit gate, which
+        // checks `session.saved || !session.primary` — pinning
+        // both to "done" lets quit fall straight through with no
+        // SaveSession dispatch. Mirrors legacy's no-workspace
+        // semantics: the file may be open and editable, but no
+        // workspace metadata is persisted.
+        atoms.session.init_done = true;
+        atoms.session.saved = true;
+        atoms.session.primary = false;
     }
 
-    let resolve_path = |p: &str| -> CanonPath {
-        // Build a UserPath then canonicalize. For non-existent files,
-        // canonicalize falls back to the original path.
-        let path = std::path::PathBuf::from(p);
-        let parent = path.parent().unwrap_or(std::path::Path::new("."));
-        let canonical_parent = UserPath::new(parent).canonicalize();
-        let joined = UserPath::new(
-            canonical_parent
-                .as_path()
-                .join(path.file_name().unwrap_or_default()),
-        );
-        joined.canonicalize()
-    };
-
-    // Build paired (user, canonical) so the filter that drops directories
-    // keeps the two vecs aligned. The user-typed names are needed downstream
-    // by `BufferState::new` to walk the symlink chain for language detection.
-    let resolved_pairs: Vec<(UserPath, CanonPath)> = cli
-        .paths
-        .iter()
-        .map(|p| (UserPath::new(p), resolve_path(p)))
-        .collect();
-
-    // Single directory: open in file browser, no files.
-    // Otherwise: filter out directories, open remaining files.
-    // Capture the user-provided start directory before canonicalization.
-    //
-    // Standalone mode (`--no-workspace`) always anchors on the process
-    // CWD: the file arg is typically something like `.git/COMMIT_EDITMSG`
-    // or a tempfile, and rooting the browser at that file's parent would
-    // show a hidden/temp dir. CWD is where the user *was* when they ran
-    // the command, which is almost always the useful "here".
-    let user_start_dir = if cli.no_workspace {
-        UserPath::new(std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")))
-    } else if cli.paths.len() == 1 {
-        UserPath::new(&cli.paths[0])
-    } else {
-        UserPath::new(std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")))
-    };
-
-    let (arg_dir, arg_user_paths, arg_paths, start_dir) = if cli.no_workspace {
-        let files: Vec<(UserPath, CanonPath)> = resolved_pairs
-            .into_iter()
-            .filter(|(_, c)| !c.is_dir())
-            .collect();
-        let (users, canons): (Vec<UserPath>, Vec<CanonPath>) = files.into_iter().unzip();
-        let start = UserPath::new(
-            std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/")),
-        )
-        .canonicalize();
-        (None, users, canons, start)
-    } else if resolved_pairs.len() == 1 && resolved_pairs[0].1.is_dir() {
-        let (_user, dir) = resolved_pairs.into_iter().next().unwrap();
-        let start = dir.clone();
-        (Some(dir), vec![], vec![], start)
-    } else {
-        let files: Vec<(UserPath, CanonPath)> = resolved_pairs
-            .into_iter()
-            .filter(|(_, c)| !c.is_dir())
-            .collect();
-        let (users, canons): (Vec<UserPath>, Vec<CanonPath>) = files.into_iter().unzip();
-        let start = canons.first().and_then(|p| p.parent()).unwrap_or_else(|| {
-            UserPath::new(std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/")))
-                .canonicalize()
+    // Seed tabs from CLI args. Each open path auto-expands its
+    // ancestor directories in the browser so the tree reveals the
+    // file — the runtime's active-tab reveal machinery
+    // (set_active_reveal, driven from the main-loop execute phase)
+    // auto-expands ancestors on every tab switch, so CLI startup
+    // doesn't need its own reveal pass. Walking the symlink chain
+    // HERE (while we still hold the user-typed path) lets the
+    // language detector route `foo.rs → bar` to Rust even though
+    // the canon tail has no extension.
+    let mut ids = TabIdGen::default();
+    for f in &cli.files {
+        let id = ids.issue();
+        let user = UserPath::new(f);
+        let chain = user.resolve_chain();
+        let canon = chain.resolved.clone();
+        atoms.path_chains.insert(canon.clone(), chain);
+        atoms.tabs.open.push_back(Tab {
+            id,
+            path: canon,
+            ..Default::default()
         });
-        (None, users, canons, start)
-    };
-
-    let config_dir = UserPath::new(cli.config_dir.clone().unwrap_or_else(|| {
-        dirs::home_dir()
-            .unwrap_or_default()
-            .join(".config")
-            .join("led")
-    }));
-
-    if cli.reset_config {
-        std::fs::create_dir_all(config_dir.as_path()).ok();
-
-        match std::fs::write(
-            config_dir.as_path().join(Keys::file_name()),
-            Keys::default_toml(),
-        ) {
-            Ok(()) => eprintln!("Config reset to defaults."),
-            Err(e) => eprintln!("Failed to reset config: {e}"),
-        }
-
-        match std::fs::write(
-            config_dir.as_path().join(Theme::file_name()),
-            Theme::default_toml(),
-        ) {
-            Ok(()) => eprintln!("Theme reset to defaults."),
-            Err(e) => eprintln!("Failed to reset theme: {e}"),
-        }
-
-        match std::fs::remove_file(config_dir.as_path().join("db.sqlite")) {
-            Ok(()) => eprintln!("Session database reset."),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                eprintln!("Session database reset.")
-            }
-            Err(e) => eprintln!("Failed to reset session database: {e}"),
-        }
-
-        return;
+        // Each CLI file supersedes as the active tab — the LAST path
+        // on the command line wins. Matches legacy and the goldens'
+        // `led a.txt b.txt` convention (b.txt becomes active).
+        atoms.tabs.active = Some(id);
     }
 
-    let startup = Startup {
-        headless: false,
-        enable_watchers: true,
-        arg_paths,
-        arg_user_paths,
-        arg_dir,
-        start_dir: Arc::new(start_dir),
-        user_start_dir,
-        config_dir,
-        test_lsp_server: cli.test_lsp_server.clone().map(UserPath::new),
-        test_gh_binary: cli.test_gh_binary.clone().map(UserPath::new),
-        golden_trace: cli.golden_trace.clone(),
-        no_workspace: cli.no_workspace,
+    // Raw mode *after* CLI parse so `--help` / parse errors still go to
+    // a cooked terminal. Held for the entire main loop lifetime; its
+    // `Drop` restores cooked mode on normal exit and on panic unwind.
+    let _raw = RawModeGuard::acquire()?;
+
+    let wake = Wake::new();
+    let lsp_override = cli
+        .test_lsp_server
+        .as_deref()
+        .map(|p| p.to_string_lossy().into_owned());
+    let drivers = spawn_drivers(
+        trace.clone(),
+        &wake,
+        lsp_override,
+        cli.test_clipboard_isolated,
+    )?;
+
+    let mut stdout = io::stdout();
+    let mut world = World {
+        atoms: &mut atoms,
+        drivers: &drivers,
+        keymap: &keymap,
+        theme: &theme,
+        wake: &wake,
+        trace: &trace,
+        stdout: &mut stdout,
+        cli_config_dir: cli.config_dir.as_deref(),
     };
+    led_runtime::run(&mut world)?;
+    stdout.flush()?;
 
-    let keys_script: Option<Vec<(usize, KeyScript)>> = cli.keys_file.as_ref().map(|path| {
-        let content = std::fs::read_to_string(path)
-            .unwrap_or_else(|e| panic!("read keys file {}: {e}", path.display()));
-        parse_keys_script(&content)
-    });
-
-    let local = tokio::task::LocalSet::new();
-    local
-        .run_until(async {
-            let (tx, rx) = oneshot::channel();
-
-            let terminal_in: Stream<TerminalInput> = Stream::new();
-            let actions_in: Stream<led_core::Action> = Stream::new();
-            let (_state, _guards) = led::run(startup, terminal_in.clone(), actions_in.clone(), tx);
-
-            if let Some(path) = cli.keys_record.clone() {
-                use std::io::Write;
-                let file = std::fs::File::create(&path)
-                    .unwrap_or_else(|e| panic!("create keys record file {}: {e}", path.display()));
-                let file = std::cell::RefCell::new(file);
-                terminal_in.on(move |opt: Option<&TerminalInput>| {
-                    let Some(TerminalInput::Key(combo)) = opt else {
-                        return;
-                    };
-                    let Some(line) = format_key_combo(combo) else {
-                        return;
-                    };
-                    let mut f = file.borrow_mut();
-                    let _ = writeln!(f, "{line}");
-                    let _ = f.flush();
-                });
-            }
-
-            if let Some(script) = keys_script {
-                let stream = terminal_in.clone();
-                tokio::task::spawn_local(async move {
-                    // Give startup (session restore, LSP warm-up) a moment to settle.
-                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-                    let mut i = 0;
-                    while i < script.len() {
-                        match script[i].1 {
-                            KeyScript::Key(combo) => {
-                                stream.push(TerminalInput::Key(combo));
-                                tokio::task::yield_now().await;
-                                i += 1;
-                            }
-                            KeyScript::Goto(target) => {
-                                i = script
-                                    .iter()
-                                    .position(|(line_no, _)| *line_no >= target)
-                                    .unwrap_or(script.len());
-                            }
-                        }
-                    }
-                });
-            }
-
-            let _ = rx.await;
-        })
-        .await;
-
-    // Restore terminal state on exit.
-    disable_raw_mode().ok();
-    crossterm::execute!(
-        io::stdout(),
-        crossterm::cursor::Show,
-        LeaveAlternateScreen,
-        DisableBracketedPaste
-    )
-    .ok();
-
-    // Force exit. Everything that had to be persisted (session, undo) was
-    // already flushed before `rx.await` returned. Don't wait politely for
-    // background `spawn_blocking` work (git scans, `gh` CLI, LSP shutdown
-    // handshakes) or the native file-watcher thread — otherwise the tokio
-    // current-thread runtime drop stalls until those finish, which is
-    // especially visible when quitting mid-startup.
-    std::process::exit(0);
+    Ok(())
 }

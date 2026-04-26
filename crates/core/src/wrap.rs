@@ -1,92 +1,183 @@
-/// Count display width of a line (tabs expand to 4 columns) without allocating.
-pub fn line_display_width(line: &str) -> usize {
-    line.chars().map(|ch| if ch == '\t' { 4 } else { 1 }).sum()
+//! Soft-line-wrap geometry — pure text math, no rope / driver deps.
+//!
+//! Rendering wraps each logical line into one or more **sub-lines**
+//! (visual rows). A sub-line is a contiguous character range within
+//! a logical line; rendering emits one `BodyLine` per sub-line so a
+//! 200-char logical line displays across several visible rows when
+//! the editor viewport is narrower.
+//!
+//! # Wrap policy (direct port of legacy `led_core::wrap`)
+//!
+//! - Lines that fit within `content_cols` chars produce one
+//!   sub-line holding the whole line.
+//! - Longer lines are split into chunks. Each **non-last** chunk
+//!   holds `content_cols - 1` chars — the painter uses the final
+//!   column for a `\` continuation glyph, so content that would
+//!   have been there spills onto the next sub-line.
+//! - The **last** chunk holds whatever's left, up to `content_cols`
+//!   chars (no continuation glyph — the line ends here).
+//!
+//! Leaving the final column for `\` matches legacy's visible
+//! behaviour: users see exactly where one logical line wraps.
+
+/// 0-based index of a sub-line within its enclosing logical line.
+/// `SubLine(0)` is the first sub-line, which always starts at col 0.
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord, drv::Input,
+    serde::Serialize, serde::Deserialize,
+)]
+pub struct SubLine(pub usize);
+
+/// Width of a non-last sub-line, in chars. Equals
+/// `content_cols - 1` — exactly one trailing col is reserved for
+/// the `\` continuation glyph, so content fills every column up
+/// to (but not including) the last. Matches emacs's display
+/// behaviour and the legacy led painter: no blank interior col
+/// before the glyph, no blank col after, `\` flush against the
+/// terminal's right edge. `content_cols <= 1` disables wrapping
+/// (degenerate narrow viewports render as a single row).
+const fn wrap_width(content_cols: usize) -> usize {
+    if content_cols <= 1 { content_cols } else { content_cols - 1 }
 }
 
-/// Expand tabs to 4 spaces, returning display chars and char-index-to-display-column map.
-/// The map has len = num_source_chars + 1 (sentinel at end == display.len()).
-/// Trailing `\n`/`\r` from rope lines are skipped.
-pub fn expand_tabs(line: &str) -> (Vec<char>, Vec<usize>) {
-    let mut display: Vec<char> = Vec::with_capacity(line.len());
-    let mut char_map = Vec::with_capacity(line.len() + 1);
-    for ch in line.chars() {
-        if ch == '\n' || ch == '\r' {
-            continue;
-        }
-        char_map.push(display.len());
-        if ch == '\t' {
-            display.extend([' ', ' ', ' ', ' ']);
-        } else {
-            display.push(ch);
-        }
-    }
-    char_map.push(display.len());
-    (display, char_map)
-}
-
-/// Collect a slice of chars into a String.
-pub fn chars_to_string(chars: &[char]) -> String {
-    chars.iter().collect()
-}
-
-/// How many screen rows a line of `display_width` occupies at the given `text_width`.
-pub fn visual_line_count(display_width: usize, text_width: usize) -> usize {
-    if text_width <= 1 || display_width <= text_width {
+/// How many sub-lines a logical line of `line_char_len` chars
+/// wraps to under `content_cols`. Always at least 1 — an empty
+/// line still shows up as a single blank visual row.
+///
+/// Every sub — last included — caps at `wrap_width` chars. A
+/// line that fits exactly in `wrap_width` chars renders as one
+/// sub with no glyph; one more char forces a second sub so the
+/// wrap marker (`\` at the rightmost col) and the overflow char
+/// can both be shown. This keeps the cursor always in a valid
+/// visible column: at EOL of a line whose length happens to equal
+/// `content_cols` (one past `wrap_width`), the previous version
+/// let the last sub fill the row and pushed the cursor off the
+/// right edge — the user then sees content ending without a `\`
+/// and no way to tell the line actually continues conceptually.
+pub fn sub_line_count(line_char_len: usize, content_cols: usize) -> usize {
+    if content_cols <= 1 {
         return 1;
     }
-    let wrap_width = text_width - 1;
+    let ww = wrap_width(content_cols);
+    if line_char_len <= ww {
+        return 1;
+    }
+    // Repeatedly shave `ww` off the remaining width, until what's
+    // left fits in one `wrap_width`-wide row. Always 1 more than
+    // the count of `ww`-sized chunks.
     let mut count = 0;
-    let mut remaining = display_width;
-    while remaining > text_width {
+    let mut remaining = line_char_len;
+    while remaining > ww {
         count += 1;
-        remaining -= wrap_width;
+        remaining -= ww;
     }
     count + 1
 }
 
-/// Split a line into (start, end) display-column char ranges per visual line.
-/// Non-last chunks have `wrap_width = text_width - 1` content columns (room for `\`).
-pub fn compute_chunks(display_width: usize, text_width: usize) -> Vec<(usize, usize)> {
-    if text_width <= 1 || display_width <= text_width {
-        return vec![(0, display_width)];
+/// The `[col_start, col_end)` char range of sub-line `sub` on a
+/// logical line of `line_char_len` chars, wrapped at
+/// `content_cols`. Non-last sub-lines span `content_cols - 1`
+/// chars; the last sub-line holds whatever's left.
+///
+/// Callers are responsible for clamping `sub` to the valid range
+/// reported by [`sub_line_count`]; out-of-range `sub` returns an
+/// empty range anchored at `line_char_len`.
+pub fn sub_line_range(
+    sub: SubLine,
+    line_char_len: usize,
+    content_cols: usize,
+) -> (usize, usize) {
+    if content_cols <= 1 {
+        return (0, line_char_len);
     }
-    let wrap_width = text_width - 1;
-    let mut chunks = Vec::new();
-    let mut start = 0;
-    while start < display_width {
-        let remaining = display_width - start;
-        if remaining <= text_width {
-            chunks.push((start, display_width));
-            break;
-        }
-        chunks.push((start, start + wrap_width));
-        start += wrap_width;
+    let ww = wrap_width(content_cols);
+    if line_char_len <= ww {
+        return (0, line_char_len);
     }
-    chunks
+    let start = sub.0.saturating_mul(ww);
+    if start >= line_char_len {
+        return (line_char_len, line_char_len);
+    }
+    let remaining = line_char_len - start;
+    let end = if remaining <= ww {
+        // Last chunk — takes the rest, up to `wrap_width` chars.
+        line_char_len
+    } else {
+        // Non-last chunk — exactly `wrap_width` chars of content.
+        start + ww
+    };
+    (start, end)
 }
 
-/// Find which sub-line (chunk index) contains display column `dcol`.
-pub fn find_sub_line(chunks: &[(usize, usize)], dcol: usize) -> usize {
-    for (i, &(_cs, ce)) in chunks.iter().enumerate() {
-        if dcol < ce || i == chunks.len() - 1 {
-            return i;
-        }
-    }
-    0
+/// `true` when `sub` is **not** the final sub-line of a logical
+/// line of `line_char_len` chars — i.e. the painter should draw
+/// a `\` continuation glyph on this visual row.
+pub fn is_continued(
+    sub: SubLine,
+    line_char_len: usize,
+    content_cols: usize,
+) -> bool {
+    sub.0 + 1 < sub_line_count(line_char_len, content_cols)
 }
 
-/// Reverse map from display column to logical char index.
-pub fn display_col_to_char_idx(char_map: &[usize], target_dcol: usize) -> usize {
-    let num_chars = char_map.len().saturating_sub(1);
-    if num_chars > 0 && target_dcol >= char_map[num_chars] {
-        return num_chars;
+/// Which sub-line a given column falls on, along with the column
+/// **within** that sub-line (0-based). Inverse of
+/// [`sub_line_range`].
+///
+/// Cursor at the exact wrap boundary (`col == k * wrap_width` for
+/// `k >= 1`) lives at the START of sub-line `k`, not at the
+/// visual end of sub-line `k-1`. Cursor past the end of the
+/// penultimate chunk but still within the logical line lives on
+/// the last sub-line.
+pub fn col_to_sub_line(
+    col: usize,
+    line_char_len: usize,
+    content_cols: usize,
+) -> (SubLine, usize) {
+    if content_cols <= 1 {
+        return (SubLine(0), col);
     }
-    for i in (0..num_chars).rev() {
-        if char_map[i] <= target_dcol {
-            return i;
-        }
+    let ww = wrap_width(content_cols);
+    if line_char_len <= ww {
+        return (SubLine(0), col);
     }
-    0
+    let count = sub_line_count(line_char_len, content_cols);
+    let last_start = (count - 1).saturating_mul(ww);
+    if col >= last_start {
+        // Last sub-line absorbs every col past the penultimate
+        // wrap boundary, including an end-of-line cursor.
+        return (SubLine(count - 1), col - last_start);
+    }
+    (SubLine(col / ww), col % ww)
+}
+
+/// Inverse of [`col_to_sub_line`]: given a sub-line and a column
+/// within it, return the logical-line column. Clamps
+/// `col_within` to the sub-line's width so invalid inputs still
+/// land on a valid boundary.
+pub fn sub_line_col_to_line_col(
+    sub: SubLine,
+    col_within: usize,
+    line_char_len: usize,
+    content_cols: usize,
+) -> usize {
+    if content_cols <= 1 {
+        return col_within.min(line_char_len);
+    }
+    let ww = wrap_width(content_cols);
+    if line_char_len <= ww {
+        return col_within.min(line_char_len);
+    }
+    let start = sub.0.saturating_mul(ww);
+    // Every sub — last included — caps at `ww` chars; the last
+    // one may be shorter when the line doesn't divide evenly.
+    let count = sub_line_count(line_char_len, content_cols);
+    let width = if sub.0 + 1 == count {
+        line_char_len.saturating_sub(start)
+    } else {
+        ww
+    };
+    start + col_within.min(width)
 }
 
 #[cfg(test)]
@@ -94,117 +185,87 @@ mod tests {
     use super::*;
 
     #[test]
-    fn line_display_width_basic() {
-        assert_eq!(line_display_width("abc"), 3);
-        assert_eq!(line_display_width("a\tb"), 6); // 1 + 4 + 1
-        assert_eq!(line_display_width(""), 0);
-        assert_eq!(line_display_width("\t\t"), 8);
+    fn empty_line_is_one_sub_line() {
+        assert_eq!(sub_line_count(0, 40), 1);
+        assert_eq!(sub_line_range(SubLine(0), 0, 40), (0, 0));
+        assert!(!is_continued(SubLine(0), 0, 40));
     }
 
     #[test]
-    fn expand_tabs_no_tabs() {
-        let (display, char_map) = expand_tabs("abc");
-        assert_eq!(chars_to_string(&display), "abc");
-        assert_eq!(char_map, vec![0, 1, 2, 3]);
+    fn short_line_fits_on_one_sub_line() {
+        assert_eq!(sub_line_count(10, 40), 1);
+        assert_eq!(sub_line_range(SubLine(0), 10, 40), (0, 10));
+        assert!(!is_continued(SubLine(0), 10, 40));
     }
 
     #[test]
-    fn expand_tabs_with_tab() {
-        let (display, char_map) = expand_tabs("a\tb");
-        assert_eq!(chars_to_string(&display), "a    b");
-        assert_eq!(char_map, vec![0, 1, 5, 6]);
+    fn line_exactly_wrap_width_wide_fits_in_one_sub_line() {
+        // A 9-char line at content_cols=10 (wrap_width=9) holds
+        // the whole line on one row — no continuation needed.
+        assert_eq!(sub_line_count(9, 10), 1);
+        assert_eq!(sub_line_range(SubLine(0), 9, 10), (0, 9));
+        assert!(!is_continued(SubLine(0), 9, 10));
     }
 
     #[test]
-    fn expand_tabs_empty() {
-        let (display, char_map) = expand_tabs("");
-        assert!(display.is_empty());
-        assert_eq!(char_map, vec![0]);
+    fn line_longer_than_wrap_width_wraps_even_when_short_of_content_cols() {
+        // A 10-char line at content_cols=10 (wrap_width=9) overflows
+        // `wrap_width` by one — wraps into a 9+1 split so the last
+        // char and the cursor-past-EOL position both stay visible.
+        assert_eq!(sub_line_count(10, 10), 2);
+        assert_eq!(sub_line_range(SubLine(0), 10, 10), (0, 9));
+        assert_eq!(sub_line_range(SubLine(1), 10, 10), (9, 10));
+        assert!(is_continued(SubLine(0), 10, 10));
+        assert!(!is_continued(SubLine(1), 10, 10));
     }
 
     #[test]
-    fn visual_line_count_no_wrap() {
-        assert_eq!(visual_line_count(10, 20), 1);
-        assert_eq!(visual_line_count(20, 20), 1);
+    fn wrapped_line_leaves_last_col_for_continuation_glyph() {
+        // 25 chars, content_cols=10, wrap_width=9. One trailing
+        // col reserved per non-last sub (the `\`).
+        // Sub 0 = [0, 9), sub 1 = [9, 18), sub 2 = [18, 25).
+        assert_eq!(sub_line_count(25, 10), 3);
+        assert_eq!(sub_line_range(SubLine(0), 25, 10), (0, 9));
+        assert_eq!(sub_line_range(SubLine(1), 25, 10), (9, 18));
+        assert_eq!(sub_line_range(SubLine(2), 25, 10), (18, 25));
+        assert!(is_continued(SubLine(0), 25, 10));
+        assert!(is_continued(SubLine(1), 25, 10));
+        assert!(!is_continued(SubLine(2), 25, 10));
     }
 
     #[test]
-    fn visual_line_count_wraps() {
-        // text_width=10, wrap_width=9
-        // 19 chars: first chunk 9, remaining 10 fits in text_width
-        assert_eq!(visual_line_count(19, 10), 2);
-        // 20 chars: first chunk 9, remaining 11 > text_width, so 9 + 2 = 3 chunks
-        assert_eq!(visual_line_count(20, 10), 3);
+    fn col_to_sub_line_uses_wrap_width_not_content_cols() {
+        // content_cols=10, wrap_width=9.
+        assert_eq!(col_to_sub_line(0, 25, 10), (SubLine(0), 0));
+        assert_eq!(col_to_sub_line(8, 25, 10), (SubLine(0), 8));
+        // Col 9 is the start of sub-line 1 (boundary → next sub).
+        assert_eq!(col_to_sub_line(9, 25, 10), (SubLine(1), 0));
+        assert_eq!(col_to_sub_line(17, 25, 10), (SubLine(1), 8));
+        // Col 18 is the start of the LAST sub-line, which holds
+        // the rest of the line (up to 10 chars wide).
+        assert_eq!(col_to_sub_line(18, 25, 10), (SubLine(2), 0));
+        // End-of-line cursor at col 25 lives on the last sub-line.
+        assert_eq!(col_to_sub_line(25, 25, 10), (SubLine(2), 7));
     }
 
     #[test]
-    fn visual_line_count_edge() {
-        assert_eq!(visual_line_count(0, 10), 1);
-        assert_eq!(visual_line_count(5, 0), 1);
-        assert_eq!(visual_line_count(5, 1), 1);
+    fn sub_line_col_round_trips() {
+        for col in [0, 5, 8, 9, 10, 17, 18, 24, 25] {
+            let (sub, within) = col_to_sub_line(col, 25, 10);
+            assert_eq!(
+                sub_line_col_to_line_col(sub, within, 25, 10),
+                col,
+                "round-trip failed for col {col}"
+            );
+        }
     }
 
     #[test]
-    fn compute_chunks_no_wrap() {
-        assert_eq!(compute_chunks(5, 10), vec![(0, 5)]);
-        assert_eq!(compute_chunks(10, 10), vec![(0, 10)]);
-    }
-
-    #[test]
-    fn compute_chunks_wraps() {
-        // text_width=10, wrap_width=9
-        // 19 chars: [0..9, 9..19]
-        assert_eq!(compute_chunks(19, 10), vec![(0, 9), (9, 19)]);
-    }
-
-    #[test]
-    fn compute_chunks_empty() {
-        assert_eq!(compute_chunks(0, 10), vec![(0, 0)]);
-    }
-
-    #[test]
-    fn find_sub_line_first() {
-        let chunks = vec![(0, 9), (9, 19)];
-        assert_eq!(find_sub_line(&chunks, 0), 0);
-        assert_eq!(find_sub_line(&chunks, 8), 0);
-    }
-
-    #[test]
-    fn find_sub_line_second() {
-        let chunks = vec![(0, 9), (9, 19)];
-        assert_eq!(find_sub_line(&chunks, 9), 1);
-        assert_eq!(find_sub_line(&chunks, 18), 1);
-    }
-
-    #[test]
-    fn find_sub_line_beyond_clamps_to_last() {
-        let chunks = vec![(0, 9), (9, 19)];
-        assert_eq!(find_sub_line(&chunks, 100), 1);
-    }
-
-    #[test]
-    fn display_col_to_char_idx_basic() {
-        // "abc" → char_map = [0, 1, 2, 3]
-        let char_map = vec![0, 1, 2, 3];
-        assert_eq!(display_col_to_char_idx(&char_map, 0), 0);
-        assert_eq!(display_col_to_char_idx(&char_map, 1), 1);
-        assert_eq!(display_col_to_char_idx(&char_map, 2), 2);
-        assert_eq!(display_col_to_char_idx(&char_map, 3), 3);
-    }
-
-    #[test]
-    fn display_col_to_char_idx_with_tab() {
-        // "a\tb" → char_map = [0, 1, 5, 6], display "a    b"
-        let char_map = vec![0, 1, 5, 6];
-        assert_eq!(display_col_to_char_idx(&char_map, 0), 0);
-        assert_eq!(display_col_to_char_idx(&char_map, 1), 1);
-        assert_eq!(display_col_to_char_idx(&char_map, 3), 1); // inside tab expansion
-        assert_eq!(display_col_to_char_idx(&char_map, 5), 2);
-    }
-
-    #[test]
-    fn display_col_to_char_idx_beyond_end() {
-        let char_map = vec![0, 1, 2, 3];
-        assert_eq!(display_col_to_char_idx(&char_map, 100), 3);
+    fn content_cols_one_or_zero_is_a_degenerate_no_op() {
+        assert_eq!(sub_line_count(50, 0), 1);
+        assert_eq!(sub_line_range(SubLine(0), 50, 0), (0, 50));
+        assert_eq!(col_to_sub_line(20, 50, 0), (SubLine(0), 20));
+        assert_eq!(sub_line_count(50, 1), 1);
+        assert_eq!(col_to_sub_line(20, 50, 1), (SubLine(0), 20));
     }
 }

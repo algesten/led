@@ -9,6 +9,6 @@ fn main() {
 """
 
 [fake_lsp]
-code_actions = [
+codeActions = [
   { title = "Inline variable `x`", kind = "refactor.inline" },
 ]

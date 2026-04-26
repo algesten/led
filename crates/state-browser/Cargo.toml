@@ -1,0 +1,18 @@
+[package]
+name = "led-state-browser"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Session-global user-decision source: the file-browser sidebar.
+# Holds the workspace root, per-directory listings cache, user-
+# pinned expansion, and the path-based selection target. The
+# flattened entries list and the auto-reveal ancestor set are
+# NOT stored here — they're pure derivations, computed fresh
+# by `runtime::query` memos over (FsTree, BrowserUi, Tabs).
+
+[dependencies]
+drv = { workspace = true }
+led-core = { workspace = true }
+led-driver-fs-list-core = { workspace = true }
+imbl = { workspace = true }

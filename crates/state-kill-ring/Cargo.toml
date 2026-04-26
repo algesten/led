@@ -1,0 +1,12 @@
+[package]
+name = "led-state-kill-ring"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Session-global user-decision source: the kill ring. No driver —
+# kill-ring entries are produced by dispatch (KillLine / KillRegion)
+# and consumed by dispatch (Yank). The clipboard driver lives
+# separately and is wired via the runtime.
+
+[dependencies]

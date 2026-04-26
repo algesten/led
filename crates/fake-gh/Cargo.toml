@@ -1,0 +1,13 @@
+[package]
+name = "fake-gh"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Scripted `gh` CLI stand-in used by `goldens/` — not part of the editor
+# runtime. Reads `.fake-gh.json` from the workspace root and replays canned
+# responses to `gh pr view`, `gh pr diff`, `gh api graphql`.
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }

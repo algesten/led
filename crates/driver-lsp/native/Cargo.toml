@@ -1,0 +1,26 @@
+[package]
+name = "led-driver-lsp-native"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Desktop LSP worker. Owns:
+# - JSON-RPC framing (Content-Length prefixed) as a pure parser,
+#   testable without threads or a real server.
+# - The subprocess manager: one reader thread per server stdout,
+#   one writer thread per server stdin, a single manager thread
+#   that drains a central mpsc queue merging `LspCmd` events +
+#   parsed `Incoming` messages, and runs the `DiagnosticSource`
+#   state machine. Same `std::thread` + `std::sync::mpsc` pattern
+#   as every other `*-native` crate in the rewrite — no tokio.
+
+[dependencies]
+led-core = { workspace = true }
+led-driver-lsp-core = { workspace = true }
+led-state-diagnostics = { workspace = true }
+# `Language` enum keyed on by the server registry. Same dep
+# driver-lsp/core pulls in; this one is separate only because
+# the registry lives on the native side.
+led-state-syntax = { workspace = true }
+ropey = { workspace = true }
+serde_json = { workspace = true }

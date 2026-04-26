@@ -1,0 +1,12 @@
+[package]
+name = "led-driver-fs-list-core"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Sync core of the directory-listing driver. Platform-agnostic ABI
+# (commands, completions, trace); no std::fs, no threads. The
+# desktop native implementation lives alongside in `native/`.
+
+[dependencies]
+led-core = { workspace = true }

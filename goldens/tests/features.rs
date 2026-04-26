@@ -95,6 +95,11 @@ fn lsp_diagnostic_next_issue() {
     run_scenario(&scenario_dir("features/lsp/diagnostic_next_issue"));
 }
 
+#[test]
+fn lsp_completion_popup_types_pr() {
+    run_scenario(&scenario_dir("features/lsp/completion_popup_types_pr"));
+}
+
 // === git ===
 
 #[test]
@@ -141,3 +146,35 @@ fn save_flows_save_no_format_then_save() {
 
 // save_flows_save_all_two_dirty — REMOVED. See edge.rs note on save_all
 // race; current led's save-all has non-deterministic completion order.
+
+// === theming (M14b) ===
+
+#[test]
+fn theming_ruler_column() {
+    run_scenario(&scenario_dir("features/theming/ruler_column"));
+}
+
+#[test]
+fn theming_toggle_header_preserved() {
+    run_scenario(&scenario_dir("features/theming/toggle_header_preserved"));
+}
+
+// === file_search (per-hit replace) ===
+
+#[test]
+fn file_search_per_hit_replace() {
+    run_scenario(&scenario_dir("features/file_search/per_hit_replace"));
+}
+
+#[test]
+fn file_search_per_hit_replace_undo() {
+    run_scenario(&scenario_dir("features/file_search/per_hit_replace_undo"));
+}
+
+// A dedicated on-disk scenario would be nice but hard to drive
+// reliably: arrowing into a hit previews the file (loading it as a
+// buffer), so by the time Right-arrow fires it's usually already in
+// `edits.buffers` and the loaded-buffer path wins. The on-disk
+// single-replace driver + dispatch queueing are covered directly
+// by the unit tests in `driver-file-search/native` and
+// `runtime::dispatch::file_search`.

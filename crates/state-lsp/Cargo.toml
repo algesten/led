@@ -1,0 +1,19 @@
+[package]
+name = "led-state-lsp"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# M18 LSP-extras state: pending requests for the non-diagnostic /
+# non-completion RPCs (goto-definition, rename, code-actions,
+# format, inlay-hints), the rename + code-action overlays, and
+# per-buffer inlay-hint caches. Deliberately kept separate from
+# `state-completions` and `state-diagnostics` so the painter memos
+# for those don't invalidate when an unrelated LSP feature fires.
+
+[dependencies]
+drv = { workspace = true }
+imbl = { workspace = true }
+led-core = { workspace = true }
+led-driver-lsp-core = { workspace = true }
+led-state-tabs = { workspace = true }

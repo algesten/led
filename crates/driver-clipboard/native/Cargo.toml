@@ -1,0 +1,14 @@
+[package]
+name = "led-driver-clipboard-native"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Desktop-native async half of the clipboard driver.
+# `arboard` is the cross-platform clipboard crate used by legacy led —
+# blocks on reads/writes, so it runs on a worker thread.
+
+[dependencies]
+led-core = { workspace = true }
+led-driver-clipboard-core = { workspace = true }
+arboard = { workspace = true }

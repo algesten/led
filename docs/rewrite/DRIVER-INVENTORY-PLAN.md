@@ -4,6 +4,27 @@ How to document each driver so the new arch can faithfully reproduce (or conscio
 
 Target output: `docs/drivers/<name>.md`, one file per driver in current led.
 
+> **2026-04-19 note.** The **new-arch driver shape** — strict
+> isolation, `driver-<name>/core/` + `driver-<name>/native/` split,
+> ABI types between sync and async, cross-atom memos living in the
+> runtime crate — is documented in [`../../../drv/EXAMPLE-ARCH.md`](../../../drv/EXAMPLE-ARCH.md)
+> § "Organizing the code: crate layout". Two drivers (`driver-buffers`,
+> `driver-terminal`) are built out in M1; use them as a template when
+> porting the current-led drivers listed below.
+>
+> When writing each `docs/drivers/<name>.md`, the "Translation to query
+> arch" section should now describe:
+>
+> 1. Which atom(s) the driver will own (goes in `*-core`).
+> 2. The `Cmd` / `Event` types that cross the ABI boundary.
+> 3. The sync API (`process` drains incoming events, `execute` issues
+>    commands) the main loop will call.
+> 4. Which platform(s) need a `*-native` — desktop is always needed;
+>    iOS/Android may or may not, depending on whether the driver
+>    concept exists there.
+> 5. Which cross-atom memos in `runtime/src/query.rs` will consume this
+>    atom (via a standalone `#[drv::lens]` + `From<&ThisAtom>` impl).
+
 ---
 
 ## Why this is its own artifact

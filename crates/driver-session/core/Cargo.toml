@@ -1,0 +1,15 @@
+[package]
+name = "led-driver-session-core"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Sync core of the session driver: ABI shared with the SQLite
+# native worker (SessionCmd / SessionEvent / Trace / handle). No
+# rusqlite or libc here — that lives in the native half so a
+# mock test driver can substitute a plain channel pair.
+
+[dependencies]
+led-core = { workspace = true }
+led-state-session = { workspace = true }
+led-state-buffer-edits = { workspace = true }

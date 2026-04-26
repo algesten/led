@@ -1,0 +1,15 @@
+# Auto-trigger completion by typing "pr" on the empty line inside
+# `fn main()`. Expected flow:
+#   - alphanumeric InsertChar fires LspCmd::RequestCompletion;
+#   - fake-lsp responds with the four items from setup.toml;
+#   - runtime installs a CompletionSession; popup renders under
+#     the cursor with the fuzzy-matched subset.
+wait 1500ms
+press Down
+press Down
+press Right
+press Right
+press Right
+press Right
+type pr
+wait 200ms

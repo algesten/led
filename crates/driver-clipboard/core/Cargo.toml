@@ -1,0 +1,14 @@
+[package]
+name = "led-driver-clipboard-core"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Sync core of the clipboard driver — portable, stateless. Holds the
+# ClipboardAction / ClipboardCmd / ClipboardDone / Trace types and the
+# main-loop-facing `ClipboardDriver` struct.
+#
+# Runtime owns the "read in flight" bit on KillRing; this driver has
+# no source of its own.
+
+[dependencies]

@@ -1,0 +1,13 @@
+[package]
+name = "led-state-buffer-edits"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+led-core = { workspace = true }
+led-state-tabs = { workspace = true }
+imbl = { workspace = true }
+ropey = { workspace = true }
+serde = { workspace = true }
+rmp-serde = { workspace = true }
