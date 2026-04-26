@@ -28,7 +28,7 @@ use led_state_lsp::{LspExtrasState, LspPending};
 use led_state_tabs::{Tab, TabId, Tabs};
 use ropey::Rope;
 
-use super::dispatch_key;
+use super::Dispatcher;
 use super::{ChordState, DispatchOutcome};
 use crate::keymap::default_keymap;
 
@@ -111,7 +111,7 @@ pub(super) fn dirty_of(edits: &BufferEdits, path: &str) -> bool {
 
 /// Dispatch a key with the default keymap + fresh auxiliaries. Tests
 /// that care about chord / kill-ring / alert state construct them
-/// themselves and call `dispatch_key` directly.
+/// themselves and build a `Dispatcher` directly.
 pub(super) fn dispatch_default(
     k: KeyEvent,
     tabs: &mut Tabs,
@@ -138,33 +138,34 @@ pub(super) fn dispatch_default(
     let diagnostics = DiagnosticsStates::default();
     let lsp_status = led_state_diagnostics::LspStatuses::default();
     let git = GitState::default();
-    dispatch_key(
-        k,
+    let keymap = default_keymap();
+    let mut dispatcher = Dispatcher {
         tabs,
         edits,
-        &mut kill_ring,
-        &mut clip,
-        &mut alerts,
-        &mut jumps,
-        &mut browser,
-        &fs,
+        kill_ring: &mut kill_ring,
+        clip: &mut clip,
+        alerts: &mut alerts,
+        jumps: &mut jumps,
+        browser: &mut browser,
+        fs: &fs,
         store,
         terminal,
-        &mut find_file,
-        &mut isearch,
-        &mut file_search,
-        &mut path_chains,
-        &mut completions,
-        &mut completions_pending,
-        &mut lsp_extras,
-        &mut lsp_pending,
-        &diagnostics,
-        &lsp_status,
-        &git,
-        &default_keymap(),
-        &mut chord,
-        &mut kbd_macro,
-    )
+        find_file: &mut find_file,
+        isearch: &mut isearch,
+        file_search: &mut file_search,
+        completions: &mut completions,
+        completions_pending: &mut completions_pending,
+        lsp_extras: &mut lsp_extras,
+        lsp_pending: &mut lsp_pending,
+        diagnostics: &diagnostics,
+        lsp_status: &lsp_status,
+        git: &git,
+        path_chains: &mut path_chains,
+        keymap: &keymap,
+        chord: &mut chord,
+        kbd_macro: &mut kbd_macro,
+    };
+    dispatcher.dispatch_key(k)
 }
 
 /// Press a chord sequence (prefix then second) with a fresh
@@ -198,63 +199,34 @@ pub(super) fn dispatch_chord_default(
     let diagnostics = DiagnosticsStates::default();
     let lsp_status = led_state_diagnostics::LspStatuses::default();
     let git = GitState::default();
-    dispatch_key(
-        prefix,
+    let mut dispatcher = Dispatcher {
         tabs,
         edits,
-        &mut kill_ring,
-        &mut clip,
-        &mut alerts,
-        &mut jumps,
-        &mut browser,
-        &fs,
+        kill_ring: &mut kill_ring,
+        clip: &mut clip,
+        alerts: &mut alerts,
+        jumps: &mut jumps,
+        browser: &mut browser,
+        fs: &fs,
         store,
         terminal,
-        &mut find_file,
-        &mut isearch,
-        &mut file_search,
-        &mut path_chains,
-        &mut completions,
-        &mut completions_pending,
-        &mut lsp_extras,
-        &mut lsp_pending,
-        &diagnostics,
-        &lsp_status,
-        &git,
-        &keymap,
-        &mut chord,
-        &mut kbd_macro,
-    );
-    let mut find_file: Option<FindFileState> = None;
-    let mut isearch: Option<IsearchState> = None;
-    let mut file_search: Option<FileSearchState> = None;
-    dispatch_key(
-        second,
-        tabs,
-        edits,
-        &mut kill_ring,
-        &mut clip,
-        &mut alerts,
-        &mut jumps,
-        &mut browser,
-        &fs,
-        store,
-        terminal,
-        &mut find_file,
-        &mut isearch,
-        &mut file_search,
-        &mut path_chains,
-        &mut completions,
-        &mut completions_pending,
-        &mut lsp_extras,
-        &mut lsp_pending,
-        &diagnostics,
-        &lsp_status,
-        &git,
-        &keymap,
-        &mut chord,
-        &mut kbd_macro,
-    )
+        find_file: &mut find_file,
+        isearch: &mut isearch,
+        file_search: &mut file_search,
+        completions: &mut completions,
+        completions_pending: &mut completions_pending,
+        lsp_extras: &mut lsp_extras,
+        lsp_pending: &mut lsp_pending,
+        diagnostics: &diagnostics,
+        lsp_status: &lsp_status,
+        git: &git,
+        path_chains: &mut path_chains,
+        keymap: &keymap,
+        chord: &mut chord,
+        kbd_macro: &mut kbd_macro,
+    };
+    dispatcher.dispatch_key(prefix);
+    dispatcher.dispatch_key(second)
 }
 
 /// Dispatch a key with a caller-provided kill ring. Used by M7 tests
@@ -285,33 +257,34 @@ pub(super) fn dispatch_with_ring(
     let diagnostics = DiagnosticsStates::default();
     let lsp_status = led_state_diagnostics::LspStatuses::default();
     let git = GitState::default();
-    dispatch_key(
-        k,
+    let keymap = default_keymap();
+    let mut dispatcher = Dispatcher {
         tabs,
         edits,
         kill_ring,
         clip,
-        &mut alerts,
-        &mut jumps,
-        &mut browser,
-        &fs,
+        alerts: &mut alerts,
+        jumps: &mut jumps,
+        browser: &mut browser,
+        fs: &fs,
         store,
         terminal,
-        &mut find_file,
-        &mut isearch,
-        &mut file_search,
-        &mut path_chains,
-        &mut completions,
-        &mut completions_pending,
-        &mut lsp_extras,
-        &mut lsp_pending,
-        &diagnostics,
-        &lsp_status,
-        &git,
-        &default_keymap(),
-        &mut chord,
-        &mut kbd_macro,
-    )
+        find_file: &mut find_file,
+        isearch: &mut isearch,
+        file_search: &mut file_search,
+        completions: &mut completions,
+        completions_pending: &mut completions_pending,
+        lsp_extras: &mut lsp_extras,
+        lsp_pending: &mut lsp_pending,
+        diagnostics: &diagnostics,
+        lsp_status: &lsp_status,
+        git: &git,
+        path_chains: &mut path_chains,
+        keymap: &keymap,
+        chord: &mut chord,
+        kbd_macro: &mut kbd_macro,
+    };
+    dispatcher.dispatch_key(k)
 }
 
 /// Dispatch a key with everything ambient. Lightest wrapper — for
@@ -340,92 +313,139 @@ pub(super) fn noop_dispatch(k: KeyEvent, tabs: &mut Tabs) -> DispatchOutcome {
     let diagnostics = DiagnosticsStates::default();
     let lsp_status = led_state_diagnostics::LspStatuses::default();
     let git = GitState::default();
-    dispatch_key(
-        k,
+    let mut dispatcher = Dispatcher {
         tabs,
-        &mut edits,
-        &mut kill_ring,
-        &mut clip,
-        &mut alerts,
-        &mut jumps,
-        &mut browser,
-        &fs,
-        &store,
-        &terminal,
-        &mut find_file,
-        &mut isearch,
-        &mut file_search,
-        &mut path_chains,
-        &mut completions,
-        &mut completions_pending,
-        &mut lsp_extras,
-        &mut lsp_pending,
-        &diagnostics,
-        &lsp_status,
-        &git,
-        &keymap,
-        &mut chord,
-        &mut kbd_macro,
-    )
+        edits: &mut edits,
+        kill_ring: &mut kill_ring,
+        clip: &mut clip,
+        alerts: &mut alerts,
+        jumps: &mut jumps,
+        browser: &mut browser,
+        fs: &fs,
+        store: &store,
+        terminal: &terminal,
+        find_file: &mut find_file,
+        isearch: &mut isearch,
+        file_search: &mut file_search,
+        completions: &mut completions,
+        completions_pending: &mut completions_pending,
+        lsp_extras: &mut lsp_extras,
+        lsp_pending: &mut lsp_pending,
+        diagnostics: &diagnostics,
+        lsp_status: &lsp_status,
+        git: &git,
+        path_chains: &mut path_chains,
+        keymap: &keymap,
+        chord: &mut chord,
+        kbd_macro: &mut kbd_macro,
+    };
+    dispatcher.dispatch_key(k)
 }
 
-/// Dispatch a key with caller-controlled chord + kbd_macro state.
-/// Used by M22 tests that need to inspect / seed both across calls.
-// Wide-arg dispatch pattern (matches dispatch_key etc.).
-#[allow(clippy::too_many_arguments)]
-pub(super) fn dispatch_with_macro(
-    k: KeyEvent,
-    tabs: &mut Tabs,
-    edits: &mut BufferEdits,
-    chord: &mut ChordState,
-    kbd_macro: &mut led_state_kbd_macro::KbdMacroState,
-    alerts: &mut AlertState,
-    store: &BufferStore,
-    terminal: &Terminal,
-) -> DispatchOutcome {
-    let mut kill_ring = KillRing::default();
-    let mut clip = ClipboardState::default();
-    let mut jumps = JumpListState::default();
-    let mut browser = BrowserUi::default();
-    let fs = FsTree::default();
-    let mut find_file: Option<FindFileState> = None;
-    let mut isearch: Option<IsearchState> = None;
-    let mut file_search: Option<FileSearchState> = None;
-    let mut path_chains = std::collections::HashMap::new();
-    let mut completions = CompletionsState::default();
-    let mut completions_pending = CompletionsPending::default();
-    let mut lsp_extras = LspExtrasState::default();
-    let mut lsp_pending = LspPending::default();
-    let diagnostics = DiagnosticsStates::default();
-    let lsp_status = led_state_diagnostics::LspStatuses::default();
-    let git = GitState::default();
-    dispatch_key(
-        k,
-        tabs,
-        edits,
-        &mut kill_ring,
-        &mut clip,
-        alerts,
-        &mut jumps,
-        &mut browser,
-        &fs,
-        store,
-        terminal,
-        &mut find_file,
-        &mut isearch,
-        &mut file_search,
-        &mut path_chains,
-        &mut completions,
-        &mut completions_pending,
-        &mut lsp_extras,
-        &mut lsp_pending,
-        &diagnostics,
-        &lsp_status,
-        &git,
-        &default_keymap(),
-        chord,
-        kbd_macro,
-    )
+/// Owns every piece of state a macro test needs. Tests construct
+/// one with `MacroDispatcherFixture::new(...)`, call `.dispatch(k)`
+/// any number of times, and inspect the public fields between calls
+/// (chord / kbd_macro / alerts / tabs / edits).
+///
+/// The fixture exists because building a `Dispatcher` per test
+/// requires ~20 `let mut` bindings; concentrating them here keeps
+/// every M22 test at five lines of setup. The struct itself owns
+/// the auxiliary state; the caller-supplied state (tabs, edits, etc.)
+/// passes through `new`.
+pub(super) struct MacroDispatcherFixture {
+    pub tabs: Tabs,
+    pub edits: BufferEdits,
+    pub chord: ChordState,
+    pub kbd_macro: led_state_kbd_macro::KbdMacroState,
+    pub alerts: AlertState,
+    pub store: BufferStore,
+    pub terminal: Terminal,
+    kill_ring: KillRing,
+    clip: ClipboardState,
+    jumps: JumpListState,
+    browser: BrowserUi,
+    fs: FsTree,
+    find_file: Option<FindFileState>,
+    isearch: Option<IsearchState>,
+    file_search: Option<FileSearchState>,
+    path_chains: std::collections::HashMap<led_core::CanonPath, led_core::PathChain>,
+    completions: CompletionsState,
+    completions_pending: CompletionsPending,
+    lsp_extras: LspExtrasState,
+    lsp_pending: LspPending,
+    diagnostics: DiagnosticsStates,
+    lsp_status: led_state_diagnostics::LspStatuses,
+    git: GitState,
+    keymap: crate::keymap::Keymap,
+}
+
+impl MacroDispatcherFixture {
+    pub(super) fn new(
+        tabs: Tabs,
+        edits: BufferEdits,
+        store: BufferStore,
+        terminal: Terminal,
+        chord: ChordState,
+        kbd_macro: led_state_kbd_macro::KbdMacroState,
+        alerts: AlertState,
+    ) -> Self {
+        Self {
+            tabs,
+            edits,
+            chord,
+            kbd_macro,
+            alerts,
+            store,
+            terminal,
+            kill_ring: KillRing::default(),
+            clip: ClipboardState::default(),
+            jumps: JumpListState::default(),
+            browser: BrowserUi::default(),
+            fs: FsTree::default(),
+            find_file: None,
+            isearch: None,
+            file_search: None,
+            path_chains: std::collections::HashMap::new(),
+            completions: CompletionsState::default(),
+            completions_pending: CompletionsPending::default(),
+            lsp_extras: LspExtrasState::default(),
+            lsp_pending: LspPending::default(),
+            diagnostics: DiagnosticsStates::default(),
+            lsp_status: led_state_diagnostics::LspStatuses::default(),
+            git: GitState::default(),
+            keymap: default_keymap(),
+        }
+    }
+
+    pub(super) fn dispatch(&mut self, k: KeyEvent) -> DispatchOutcome {
+        let mut dispatcher = Dispatcher {
+            tabs: &mut self.tabs,
+            edits: &mut self.edits,
+            kill_ring: &mut self.kill_ring,
+            clip: &mut self.clip,
+            alerts: &mut self.alerts,
+            jumps: &mut self.jumps,
+            browser: &mut self.browser,
+            fs: &self.fs,
+            store: &self.store,
+            terminal: &self.terminal,
+            find_file: &mut self.find_file,
+            isearch: &mut self.isearch,
+            file_search: &mut self.file_search,
+            completions: &mut self.completions,
+            completions_pending: &mut self.completions_pending,
+            lsp_extras: &mut self.lsp_extras,
+            lsp_pending: &mut self.lsp_pending,
+            diagnostics: &self.diagnostics,
+            lsp_status: &self.lsp_status,
+            git: &self.git,
+            path_chains: &mut self.path_chains,
+            keymap: &self.keymap,
+            chord: &mut self.chord,
+            kbd_macro: &mut self.kbd_macro,
+        };
+        dispatcher.dispatch_key(k)
+    }
 }
 
 /// Type a run of chars through the full keymap + implicit-insert

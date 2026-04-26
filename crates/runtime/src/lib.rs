@@ -97,7 +97,7 @@ const INFO_TTL: Duration = Duration::from_secs(2);
 
 pub use config::{load_keymap, ConfigError};
 pub use theme::{load_theme, LoadedTheme, ThemeError};
-pub use dispatch::{dispatch_key, DispatchOutcome, Dispatcher};
+pub use dispatch::{DispatchOutcome, Dispatcher};
 pub use keymap::{default_keymap, parse_command, parse_key, ChordState, Command, Keymap};
 pub use query::{
     body_model, clipboard_action, file_list_action, file_load_action, file_save_action,
@@ -764,10 +764,14 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
                     origin,
                     edits: file_edits,
                 } => {
-                    apply_lsp_edits(
-                        edits, tabs, alerts, lsp_extras, lsp_pending,
-                        seq, origin, &file_edits,
-                    );
+                    let _ = lsp_extras; // not needed by apply
+                    LspEditApply {
+                        edits,
+                        tabs,
+                        alerts,
+                        lsp_pending,
+                    }
+                    .apply(seq, origin, &file_edits);
                 }
                 LspEvent::CodeActions {
                     path,
@@ -2529,6 +2533,16 @@ fn current_jump_position(tabs: &Tabs) -> Option<led_state_jumps::JumpPosition> {
     })
 }
 
+/// Bundle of references `LspEditApply::apply` needs. Carved out
+/// of the runtime tick / test sites so the apply method can take
+/// a small `&mut self` instead of a 7-positional-arg list.
+struct LspEditApply<'a> {
+    edits: &'a mut BufferEdits,
+    tabs: &'a led_state_tabs::Tabs,
+    alerts: &'a mut AlertState,
+    lsp_pending: &'a mut led_state_lsp::LspPending,
+}
+
 /// Apply an `LspEvent::Edits` delivery: walk `file_edits`, apply
 /// each `TextEditOp` to its target buffer (when currently open),
 /// and record history entries so Undo can revert. Edits for
@@ -2541,19 +2555,17 @@ fn current_jump_position(tabs: &Tabs) -> Option<led_state_jumps::JumpPosition> {
 /// latest range to earliest so later applies don't shift
 /// earlier ones. Alerts surface "Renamed N occurrence(s) in M
 /// file(s)" on success.
-// Wide-arg dispatch pattern: each &mut state passed explicitly
-// (bundle refactor deferred — matches dispatch_key etc.).
-#[allow(clippy::too_many_arguments)]
-fn apply_lsp_edits(
-    edits: &mut BufferEdits,
-    tabs: &led_state_tabs::Tabs,
-    alerts: &mut AlertState,
-    _lsp_extras: &mut led_state_lsp::LspExtrasState,
-    lsp_pending: &mut led_state_lsp::LspPending,
-    seq: u64,
-    origin: led_driver_lsp_core::EditsOrigin,
-    file_edits: &std::sync::Arc<Vec<led_driver_lsp_core::FileEdit>>,
-) {
+impl<'a> LspEditApply<'a> {
+    fn apply(
+        &mut self,
+        seq: u64,
+        origin: led_driver_lsp_core::EditsOrigin,
+        file_edits: &std::sync::Arc<Vec<led_driver_lsp_core::FileEdit>>,
+    ) {
+        let edits = &mut *self.edits;
+        let tabs = self.tabs;
+        let alerts = &mut *self.alerts;
+        let lsp_pending = &mut *self.lsp_pending;
     // Stale-seq gate per origin.
     match origin {
         led_driver_lsp_core::EditsOrigin::Rename => {
@@ -2695,6 +2707,7 @@ fn apply_lsp_edits(
                 edits.pending_saves.insert(path);
             }
         }
+    }
     }
 }
 
@@ -3666,16 +3679,15 @@ mod tests {
                 },
             ],
         }]);
-        apply_lsp_edits(
-            &mut edits,
-            &led_state_tabs::Tabs::default(),
-            &mut alerts,
-            &mut lsp_extras,
-            &mut lsp_pending,
-            7,
-            EditsOrigin::Rename,
-            &file_edits,
-        );
+        let _ = &mut lsp_extras;
+        let tabs = led_state_tabs::Tabs::default();
+        LspEditApply {
+            edits: &mut edits,
+            tabs: &tabs,
+            alerts: &mut alerts,
+            lsp_pending: &mut lsp_pending,
+        }
+        .apply(7, EditsOrigin::Rename, &file_edits);
         let eb = edits.buffers.get(&path).unwrap();
         assert_eq!(eb.rope.to_string(), "bar + bar");
         assert!(eb.version > 0);
@@ -3715,16 +3727,15 @@ mod tests {
                 new_text: std::sync::Arc::<str>::from("X"),
             }],
         }]);
-        apply_lsp_edits(
-            &mut edits,
-            &led_state_tabs::Tabs::default(),
-            &mut alerts,
-            &mut lsp_extras,
-            &mut lsp_pending,
-            1,
-            EditsOrigin::Format,
-            &file_edits,
-        );
+        let _ = &mut lsp_extras;
+        let tabs = led_state_tabs::Tabs::default();
+        LspEditApply {
+            edits: &mut edits,
+            tabs: &tabs,
+            alerts: &mut alerts,
+            lsp_pending: &mut lsp_pending,
+        }
+        .apply(1, EditsOrigin::Format, &file_edits);
         // Format applied.
         assert_eq!(edits.buffers[&path].rope.to_string(), "X");
         // History MUST retain the record_replace entry so undo
@@ -3781,16 +3792,15 @@ mod tests {
                 },
             ],
         }]);
-        apply_lsp_edits(
-            &mut edits,
-            &led_state_tabs::Tabs::default(),
-            &mut alerts,
-            &mut lsp_extras,
-            &mut lsp_pending,
-            1,
-            EditsOrigin::Format,
-            &file_edits,
-        );
+        let _ = &mut lsp_extras;
+        let tabs = led_state_tabs::Tabs::default();
+        LspEditApply {
+            edits: &mut edits,
+            tabs: &tabs,
+            alerts: &mut alerts,
+            lsp_pending: &mut lsp_pending,
+        }
+        .apply(1, EditsOrigin::Format, &file_edits);
         let formatted = edits.buffers[&path].rope.to_string();
         assert_eq!(formatted, "BBB|CCCAAA|\n", "sort applied correctly");
 
@@ -3851,16 +3861,15 @@ mod tests {
                 new_text: std::sync::Arc::<str>::from("X"),
             }],
         }]);
-        apply_lsp_edits(
-            &mut edits,
-            &led_state_tabs::Tabs::default(),
-            &mut alerts,
-            &mut lsp_extras,
-            &mut lsp_pending,
-            42,
-            EditsOrigin::Format,
-            &file_edits,
-        );
+        let _ = &mut lsp_extras;
+        let tabs = led_state_tabs::Tabs::default();
+        LspEditApply {
+            edits: &mut edits,
+            tabs: &tabs,
+            alerts: &mut alerts,
+            lsp_pending: &mut lsp_pending,
+        }
+        .apply(42, EditsOrigin::Format, &file_edits);
         assert_eq!(edits.buffers[&path].rope.to_string(), "X");
         // Post-format save is queued.
         assert!(edits.pending_saves.contains(&path));
@@ -3883,16 +3892,15 @@ mod tests {
             .latest_format_seq
             .insert(path.clone(), 5);
         let file_edits = std::sync::Arc::new(Vec::new());
-        apply_lsp_edits(
-            &mut edits,
-            &led_state_tabs::Tabs::default(),
-            &mut alerts,
-            &mut lsp_extras,
-            &mut lsp_pending,
-            5,
-            EditsOrigin::Format,
-            &file_edits,
-        );
+        let _ = &mut lsp_extras;
+        let tabs = led_state_tabs::Tabs::default();
+        LspEditApply {
+            edits: &mut edits,
+            tabs: &tabs,
+            alerts: &mut alerts,
+            lsp_pending: &mut lsp_pending,
+        }
+        .apply(5, EditsOrigin::Format, &file_edits);
         assert!(edits.pending_saves.contains(&path));
     }
 
@@ -3921,16 +3929,15 @@ mod tests {
                 new_text: std::sync::Arc::<str>::from("bar"),
             }],
         }]);
-        apply_lsp_edits(
-            &mut edits,
-            &led_state_tabs::Tabs::default(),
-            &mut alerts,
-            &mut lsp_extras,
-            &mut lsp_pending,
-            /* stale */ 5,
-            EditsOrigin::Rename,
-            &file_edits,
-        );
+        let _ = &mut lsp_extras;
+        let tabs = led_state_tabs::Tabs::default();
+        LspEditApply {
+            edits: &mut edits,
+            tabs: &tabs,
+            alerts: &mut alerts,
+            lsp_pending: &mut lsp_pending,
+        }
+        .apply(/* stale */ 5, EditsOrigin::Rename, &file_edits);
         // Buffer unchanged, seq preserved.
         assert_eq!(edits.buffers[&path].rope.to_string(), "foo");
         assert_eq!(lsp_pending.latest_rename_seq, Some(99));

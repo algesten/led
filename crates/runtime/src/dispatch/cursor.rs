@@ -503,7 +503,7 @@ mod tests {
     use led_state_git::GitState;
     use led_state_isearch::IsearchState;
     use led_driver_buffers_core::BufferStore;
-    use led_driver_terminal_core::{Dims, KeyCode, KeyEvent, KeyModifiers};
+    use led_driver_terminal_core::{Dims, KeyCode, KeyModifiers};
     use led_state_alerts::AlertState;
     use led_state_clipboard::ClipboardState;
     use led_state_buffer_edits::BufferEdits;
@@ -511,7 +511,7 @@ mod tests {
     use led_state_browser::{BrowserUi, FsTree};
     use led_state_kill_ring::KillRing;
     use led_state_lsp::LspExtrasState;
-    use led_state_tabs::{Cursor, Scroll, Tabs};
+    use led_state_tabs::{Cursor, Scroll};
     use ropey::Rope;
 
     use super::super::testutil::*;
@@ -1055,74 +1055,40 @@ mod tests {
         let git = GitState::default();
         let mut kbd_macro = led_state_kbd_macro::KbdMacroState::default();
 
-        let mut press = |k: KeyEvent,
-                     tabs: &mut Tabs,
-                     edits: &mut BufferEdits,
-                     chord: &mut ChordState,
-                     kill_ring: &mut KillRing,
-                     clip: &mut ClipboardState,
-                     alerts: &mut AlertState,
-                     jumps: &mut JumpListState,
-                     browser: &mut BrowserUi,
-                     fs: &FsTree| {
-            super::super::dispatch_key(
-                k, tabs, edits, kill_ring, clip, alerts, jumps, browser, fs, &store, &term,
-        &mut find_file, &mut isearch, &mut file_search, &mut path_chains, &mut completions, &mut completions_pending, &mut lsp_extras, &mut lsp_pending, &diagnostics, &lsp_status, &git, &km,
-                chord, &mut kbd_macro,);
+        let mut dispatcher = super::super::Dispatcher {
+            tabs: &mut tabs,
+            edits: &mut edits,
+            kill_ring: &mut kill_ring,
+            clip: &mut clip,
+            alerts: &mut alerts,
+            jumps: &mut jumps,
+            browser: &mut browser,
+            fs: &fs,
+            store: &store,
+            terminal: &term,
+            find_file: &mut find_file,
+            isearch: &mut isearch,
+            file_search: &mut file_search,
+            completions: &mut completions,
+            completions_pending: &mut completions_pending,
+            lsp_extras: &mut lsp_extras,
+            lsp_pending: &mut lsp_pending,
+            diagnostics: &diagnostics,
+            lsp_status: &lsp_status,
+            git: &git,
+            path_chains: &mut path_chains,
+            keymap: &km,
+            chord: &mut chord,
+            kbd_macro: &mut kbd_macro,
         };
-
-        press(
-            key(KeyModifiers::ALT, KeyCode::Char('f')),
-            &mut tabs,
-            &mut edits,
-            &mut chord,
-            &mut kill_ring,
-            &mut clip,
-            &mut alerts,
-            &mut jumps,
-            &mut browser,
-            &fs,
-        );
-        assert_eq!(tabs.open[0].cursor.col, 3);
-        press(
-            key(KeyModifiers::ALT, KeyCode::Char('f')),
-            &mut tabs,
-            &mut edits,
-            &mut chord,
-            &mut kill_ring,
-            &mut clip,
-            &mut alerts,
-            &mut jumps,
-            &mut browser,
-            &fs,
-        );
-        assert_eq!(tabs.open[0].cursor.col, 7);
-        press(
-            key(KeyModifiers::ALT, KeyCode::Char('b')),
-            &mut tabs,
-            &mut edits,
-            &mut chord,
-            &mut kill_ring,
-            &mut clip,
-            &mut alerts,
-            &mut jumps,
-            &mut browser,
-            &fs,
-        );
-        assert_eq!(tabs.open[0].cursor.col, 4);
-        press(
-            key(KeyModifiers::ALT, KeyCode::Char('b')),
-            &mut tabs,
-            &mut edits,
-            &mut chord,
-            &mut kill_ring,
-            &mut clip,
-            &mut alerts,
-            &mut jumps,
-            &mut browser,
-            &fs,
-        );
-        assert_eq!(tabs.open[0].cursor.col, 0);
+        dispatcher.dispatch_key(key(KeyModifiers::ALT, KeyCode::Char('f')));
+        assert_eq!(dispatcher.tabs.open[0].cursor.col, 3);
+        dispatcher.dispatch_key(key(KeyModifiers::ALT, KeyCode::Char('f')));
+        assert_eq!(dispatcher.tabs.open[0].cursor.col, 7);
+        dispatcher.dispatch_key(key(KeyModifiers::ALT, KeyCode::Char('b')));
+        assert_eq!(dispatcher.tabs.open[0].cursor.col, 4);
+        dispatcher.dispatch_key(key(KeyModifiers::ALT, KeyCode::Char('b')));
+        assert_eq!(dispatcher.tabs.open[0].cursor.col, 0);
     }
 
     #[test]

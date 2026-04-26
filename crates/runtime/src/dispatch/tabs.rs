@@ -112,7 +112,7 @@ mod tests {
 
     
     use super::super::testutil::*;
-    use super::super::{dispatch_key, ChordState};
+    use super::super::{ChordState, Dispatcher};
     use crate::keymap::default_keymap;
 
     // ── Tab switching + quit (M1 behaviour, unchanged) ──────────────────
@@ -220,67 +220,43 @@ mod tests {
         let mut completions_pending = led_state_completions::CompletionsPending::default();
         let mut lsp_extras = LspExtrasState::default();
         let mut lsp_pending = led_state_lsp::LspPending::default();
-        // Ctrl-x k on dirty active tab → prompt set, tab still open.
         let mut find_file: Option<FindFileState> = None;
         let mut isearch: Option<IsearchState> = None;
         let mut file_search: Option<FileSearchState> = None;
-        dispatch_key(
-            key(KeyModifiers::CONTROL, KeyCode::Char('x')),
-            &mut tabs,
-            &mut edits,
-            &mut kill_ring,
-            &mut clip,
-            &mut alerts,
-            &mut jumps,
-            &mut browser,
-            &fs,
-            &store,
-            &term,
-        &mut find_file,
-            &mut isearch,
-            &mut file_search,
-            &mut path_chains,
-            &mut completions,
-            &mut completions_pending,
-            &mut lsp_extras,
-            &mut lsp_pending,
-            &DiagnosticsStates::default(),
-            &led_state_diagnostics::LspStatuses::default(),
-            &GitState::default(),
-            &keymap,
-            &mut chord,
-            &mut kbd_macro,
-        );
-        let mut find_file: Option<FindFileState> = None;
-        let mut isearch: Option<IsearchState> = None;
-        let mut file_search: Option<FileSearchState> = None;
-        dispatch_key(
-            key(KeyModifiers::NONE, KeyCode::Char('k')),
-            &mut tabs,
-            &mut edits,
-            &mut kill_ring,
-            &mut clip,
-            &mut alerts,
-            &mut jumps,
-            &mut browser,
-            &fs,
-            &store,
-            &term,
-        &mut find_file,
-            &mut isearch,
-            &mut file_search,
-            &mut path_chains,
-            &mut completions,
-            &mut completions_pending,
-            &mut lsp_extras,
-            &mut lsp_pending,
-            &DiagnosticsStates::default(),
-            &led_state_diagnostics::LspStatuses::default(),
-            &GitState::default(),
-            &keymap,
-            &mut chord,
-            &mut kbd_macro,
-        );
+        let diagnostics = DiagnosticsStates::default();
+        let lsp_status = led_state_diagnostics::LspStatuses::default();
+        let git = GitState::default();
+        {
+            let mut dispatcher = Dispatcher {
+                tabs: &mut tabs,
+                edits: &mut edits,
+                kill_ring: &mut kill_ring,
+                clip: &mut clip,
+                alerts: &mut alerts,
+                jumps: &mut jumps,
+                browser: &mut browser,
+                fs: &fs,
+                store: &store,
+                terminal: &term,
+                find_file: &mut find_file,
+                isearch: &mut isearch,
+                file_search: &mut file_search,
+                completions: &mut completions,
+                completions_pending: &mut completions_pending,
+                lsp_extras: &mut lsp_extras,
+                lsp_pending: &mut lsp_pending,
+                diagnostics: &diagnostics,
+                lsp_status: &lsp_status,
+                git: &git,
+                path_chains: &mut path_chains,
+                keymap: &keymap,
+                chord: &mut chord,
+                kbd_macro: &mut kbd_macro,
+            };
+            // Ctrl-x k on dirty active tab → prompt set, tab still open.
+            dispatcher.dispatch_key(key(KeyModifiers::CONTROL, KeyCode::Char('x')));
+            dispatcher.dispatch_key(key(KeyModifiers::NONE, KeyCode::Char('k')));
+        }
         assert_eq!(alerts.confirm_kill, Some(TabId(1)));
         assert_eq!(tabs.open.len(), 2);
     }
@@ -309,33 +285,38 @@ mod tests {
         let mut completions_pending = led_state_completions::CompletionsPending::default();
         let mut lsp_extras = LspExtrasState::default();
         let mut lsp_pending = led_state_lsp::LspPending::default();
-        dispatch_key(
-            key(KeyModifiers::NONE, KeyCode::Char('y')),
-            &mut tabs,
-            &mut edits,
-            &mut kill_ring,
-            &mut clip,
-            &mut alerts,
-            &mut jumps,
-            &mut browser,
-            &fs,
-            &store,
-            &term,
-        &mut find_file,
-            &mut isearch,
-            &mut file_search,
-            &mut path_chains,
-            &mut completions,
-            &mut completions_pending,
-            &mut lsp_extras,
-            &mut lsp_pending,
-            &DiagnosticsStates::default(),
-            &led_state_diagnostics::LspStatuses::default(),
-            &GitState::default(),
-            &keymap,
-            &mut chord,
-            &mut kbd_macro,
-        );
+        let diagnostics = DiagnosticsStates::default();
+        let lsp_status = led_state_diagnostics::LspStatuses::default();
+        let git = GitState::default();
+        {
+            let mut dispatcher = Dispatcher {
+                tabs: &mut tabs,
+                edits: &mut edits,
+                kill_ring: &mut kill_ring,
+                clip: &mut clip,
+                alerts: &mut alerts,
+                jumps: &mut jumps,
+                browser: &mut browser,
+                fs: &fs,
+                store: &store,
+                terminal: &term,
+                find_file: &mut find_file,
+                isearch: &mut isearch,
+                file_search: &mut file_search,
+                completions: &mut completions,
+                completions_pending: &mut completions_pending,
+                lsp_extras: &mut lsp_extras,
+                lsp_pending: &mut lsp_pending,
+                diagnostics: &diagnostics,
+                lsp_status: &lsp_status,
+                git: &git,
+                path_chains: &mut path_chains,
+                keymap: &keymap,
+                chord: &mut chord,
+                kbd_macro: &mut kbd_macro,
+            };
+            dispatcher.dispatch_key(key(KeyModifiers::NONE, KeyCode::Char('y')));
+        }
         assert!(alerts.confirm_kill.is_none());
         assert_eq!(tabs.open.len(), 1);
         assert_eq!(tabs.open[0].id, TabId(2));
@@ -368,33 +349,38 @@ mod tests {
         let mut completions_pending = led_state_completions::CompletionsPending::default();
         let mut lsp_extras = LspExtrasState::default();
         let mut lsp_pending = led_state_lsp::LspPending::default();
-        dispatch_key(
-            key(KeyModifiers::NONE, KeyCode::Char('Y')),
-            &mut tabs,
-            &mut edits,
-            &mut kill_ring,
-            &mut clip,
-            &mut alerts,
-            &mut jumps,
-            &mut browser,
-            &fs,
-            &store,
-            &term,
-        &mut find_file,
-            &mut isearch,
-            &mut file_search,
-            &mut path_chains,
-            &mut completions,
-            &mut completions_pending,
-            &mut lsp_extras,
-            &mut lsp_pending,
-            &DiagnosticsStates::default(),
-            &led_state_diagnostics::LspStatuses::default(),
-            &GitState::default(),
-            &keymap,
-            &mut chord,
-            &mut kbd_macro,
-        );
+        let diagnostics = DiagnosticsStates::default();
+        let lsp_status = led_state_diagnostics::LspStatuses::default();
+        let git = GitState::default();
+        {
+            let mut dispatcher = Dispatcher {
+                tabs: &mut tabs,
+                edits: &mut edits,
+                kill_ring: &mut kill_ring,
+                clip: &mut clip,
+                alerts: &mut alerts,
+                jumps: &mut jumps,
+                browser: &mut browser,
+                fs: &fs,
+                store: &store,
+                terminal: &term,
+                find_file: &mut find_file,
+                isearch: &mut isearch,
+                file_search: &mut file_search,
+                completions: &mut completions,
+                completions_pending: &mut completions_pending,
+                lsp_extras: &mut lsp_extras,
+                lsp_pending: &mut lsp_pending,
+                diagnostics: &diagnostics,
+                lsp_status: &lsp_status,
+                git: &git,
+                path_chains: &mut path_chains,
+                keymap: &keymap,
+                chord: &mut chord,
+                kbd_macro: &mut kbd_macro,
+            };
+            dispatcher.dispatch_key(key(KeyModifiers::NONE, KeyCode::Char('Y')));
+        }
         assert!(alerts.confirm_kill.is_none());
         assert_eq!(tabs.open.len(), 1);
     }
@@ -423,33 +409,38 @@ mod tests {
         let mut completions_pending = led_state_completions::CompletionsPending::default();
         let mut lsp_extras = LspExtrasState::default();
         let mut lsp_pending = led_state_lsp::LspPending::default();
-        dispatch_key(
-            key(KeyModifiers::NONE, KeyCode::Char('n')),
-            &mut tabs,
-            &mut edits,
-            &mut kill_ring,
-            &mut clip,
-            &mut alerts,
-            &mut jumps,
-            &mut browser,
-            &fs,
-            &store,
-            &term,
-        &mut find_file,
-            &mut isearch,
-            &mut file_search,
-            &mut path_chains,
-            &mut completions,
-            &mut completions_pending,
-            &mut lsp_extras,
-            &mut lsp_pending,
-            &DiagnosticsStates::default(),
-            &led_state_diagnostics::LspStatuses::default(),
-            &GitState::default(),
-            &keymap,
-            &mut chord,
-            &mut kbd_macro,
-        );
+        let diagnostics = DiagnosticsStates::default();
+        let lsp_status = led_state_diagnostics::LspStatuses::default();
+        let git = GitState::default();
+        {
+            let mut dispatcher = Dispatcher {
+                tabs: &mut tabs,
+                edits: &mut edits,
+                kill_ring: &mut kill_ring,
+                clip: &mut clip,
+                alerts: &mut alerts,
+                jumps: &mut jumps,
+                browser: &mut browser,
+                fs: &fs,
+                store: &store,
+                terminal: &term,
+                find_file: &mut find_file,
+                isearch: &mut isearch,
+                file_search: &mut file_search,
+                completions: &mut completions,
+                completions_pending: &mut completions_pending,
+                lsp_extras: &mut lsp_extras,
+                lsp_pending: &mut lsp_pending,
+                diagnostics: &diagnostics,
+                lsp_status: &lsp_status,
+                git: &git,
+                path_chains: &mut path_chains,
+                keymap: &keymap,
+                chord: &mut chord,
+                kbd_macro: &mut kbd_macro,
+            };
+            dispatcher.dispatch_key(key(KeyModifiers::NONE, KeyCode::Char('n')));
+        }
         // Prompt dismissed.
         assert!(alerts.confirm_kill.is_none());
         // Tab stays open.
@@ -488,33 +479,38 @@ mod tests {
         let mut completions_pending = led_state_completions::CompletionsPending::default();
         let mut lsp_extras = LspExtrasState::default();
         let mut lsp_pending = led_state_lsp::LspPending::default();
-        dispatch_key(
-            key(KeyModifiers::NONE, KeyCode::Esc),
-            &mut tabs,
-            &mut edits,
-            &mut kill_ring,
-            &mut clip,
-            &mut alerts,
-            &mut jumps,
-            &mut browser,
-            &fs,
-            &store,
-            &term,
-        &mut find_file,
-            &mut isearch,
-            &mut file_search,
-            &mut path_chains,
-            &mut completions,
-            &mut completions_pending,
-            &mut lsp_extras,
-            &mut lsp_pending,
-            &DiagnosticsStates::default(),
-            &led_state_diagnostics::LspStatuses::default(),
-            &GitState::default(),
-            &keymap,
-            &mut chord,
-            &mut kbd_macro,
-        );
+        let diagnostics = DiagnosticsStates::default();
+        let lsp_status = led_state_diagnostics::LspStatuses::default();
+        let git = GitState::default();
+        {
+            let mut dispatcher = Dispatcher {
+                tabs: &mut tabs,
+                edits: &mut edits,
+                kill_ring: &mut kill_ring,
+                clip: &mut clip,
+                alerts: &mut alerts,
+                jumps: &mut jumps,
+                browser: &mut browser,
+                fs: &fs,
+                store: &store,
+                terminal: &term,
+                find_file: &mut find_file,
+                isearch: &mut isearch,
+                file_search: &mut file_search,
+                completions: &mut completions,
+                completions_pending: &mut completions_pending,
+                lsp_extras: &mut lsp_extras,
+                lsp_pending: &mut lsp_pending,
+                diagnostics: &diagnostics,
+                lsp_status: &lsp_status,
+                git: &git,
+                path_chains: &mut path_chains,
+                keymap: &keymap,
+                chord: &mut chord,
+                kbd_macro: &mut kbd_macro,
+            };
+            dispatcher.dispatch_key(key(KeyModifiers::NONE, KeyCode::Esc));
+        }
         assert!(alerts.confirm_kill.is_none());
         assert_eq!(tabs.open.len(), 2);
         // Esc's Abort command still ran → mark cleared.
@@ -551,63 +547,39 @@ mod tests {
         let mut completions_pending = led_state_completions::CompletionsPending::default();
         let mut lsp_extras = LspExtrasState::default();
         let mut lsp_pending = led_state_lsp::LspPending::default();
-        dispatch_key(
-            key(KeyModifiers::CONTROL, KeyCode::Char('x')),
-            &mut tabs,
-            &mut edits,
-            &mut kill_ring,
-            &mut clip,
-            &mut alerts,
-            &mut jumps,
-            &mut browser,
-            &fs,
-            &store,
-            &term,
-        &mut find_file,
-            &mut isearch,
-            &mut file_search,
-            &mut path_chains,
-            &mut completions,
-            &mut completions_pending,
-            &mut lsp_extras,
-            &mut lsp_pending,
-            &DiagnosticsStates::default(),
-            &led_state_diagnostics::LspStatuses::default(),
-            &GitState::default(),
-            &keymap,
-            &mut chord,
-            &mut kbd_macro,
-        );
-        let mut find_file: Option<FindFileState> = None;
-        let mut isearch: Option<IsearchState> = None;
-        let mut file_search: Option<FileSearchState> = None;
-        dispatch_key(
-            key(KeyModifiers::NONE, KeyCode::Char('k')),
-            &mut tabs,
-            &mut edits,
-            &mut kill_ring,
-            &mut clip,
-            &mut alerts,
-            &mut jumps,
-            &mut browser,
-            &fs,
-            &store,
-            &term,
-        &mut find_file,
-            &mut isearch,
-            &mut file_search,
-            &mut path_chains,
-            &mut completions,
-            &mut completions_pending,
-            &mut lsp_extras,
-            &mut lsp_pending,
-            &DiagnosticsStates::default(),
-            &led_state_diagnostics::LspStatuses::default(),
-            &GitState::default(),
-            &keymap,
-            &mut chord,
-            &mut kbd_macro,
-        );
+        let diagnostics = DiagnosticsStates::default();
+        let lsp_status = led_state_diagnostics::LspStatuses::default();
+        let git = GitState::default();
+        {
+            let mut dispatcher = Dispatcher {
+                tabs: &mut tabs,
+                edits: &mut edits,
+                kill_ring: &mut kill_ring,
+                clip: &mut clip,
+                alerts: &mut alerts,
+                jumps: &mut jumps,
+                browser: &mut browser,
+                fs: &fs,
+                store: &store,
+                terminal: &term,
+                find_file: &mut find_file,
+                isearch: &mut isearch,
+                file_search: &mut file_search,
+                completions: &mut completions,
+                completions_pending: &mut completions_pending,
+                lsp_extras: &mut lsp_extras,
+                lsp_pending: &mut lsp_pending,
+                diagnostics: &diagnostics,
+                lsp_status: &lsp_status,
+                git: &git,
+                path_chains: &mut path_chains,
+                keymap: &keymap,
+                chord: &mut chord,
+                kbd_macro: &mut kbd_macro,
+            };
+            dispatcher.dispatch_key(key(KeyModifiers::CONTROL, KeyCode::Char('x')));
+            dispatcher.dispatch_key(key(KeyModifiers::NONE, KeyCode::Char('k')));
+        }
         assert!(alerts.confirm_kill.is_none());
         assert_eq!(tabs.open.len(), 1);
     }

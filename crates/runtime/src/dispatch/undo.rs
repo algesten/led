@@ -399,7 +399,7 @@ mod tests {
 
     
     use super::super::testutil::*;
-    use super::super::{dispatch_key, ChordState};
+    use super::super::{ChordState, Dispatcher};
     use crate::keymap::{default_keymap, Command};
 
     #[test]
@@ -463,70 +463,45 @@ mod tests {
         let mut completions_pending = led_state_completions::CompletionsPending::default();
         let mut lsp_extras = LspExtrasState::default();
         let mut lsp_pending = led_state_lsp::LspPending::default();
-        // Undo: ""
         let mut find_file: Option<FindFileState> = None;
         let mut isearch: Option<IsearchState> = None;
         let mut file_search: Option<FileSearchState> = None;
-        dispatch_key(
-            key(KeyModifiers::CONTROL, KeyCode::Char('/')),
-            &mut tabs,
-            &mut edits,
-            &mut kr,
-            &mut clip,
-            &mut alerts,
-            &mut jumps,
-            &mut browser,
-            &fs,
-            &store,
-            &term,
-        &mut find_file,
-            &mut isearch,
-            &mut file_search,
-            &mut path_chains,
-            &mut completions,
-            &mut completions_pending,
-            &mut lsp_extras,
-            &mut lsp_pending,
-            &DiagnosticsStates::default(),
-            &led_state_diagnostics::LspStatuses::default(),
-            &GitState::default(),
-            &km,
-            &mut chord,
-            &mut kbd_macro,
-        );
-        assert_eq!(rope_of(&edits, "file.rs").to_string(), "");
-
-        // Redo: "hi"
-        let mut find_file: Option<FindFileState> = None;
-        let mut isearch: Option<IsearchState> = None;
-        let mut file_search: Option<FileSearchState> = None;
-        dispatch_key(
-            key(KeyModifiers::CONTROL, KeyCode::Char('y')),
-            &mut tabs,
-            &mut edits,
-            &mut kr,
-            &mut clip,
-            &mut alerts,
-            &mut jumps,
-            &mut browser,
-            &fs,
-            &store,
-            &term,
-        &mut find_file,
-            &mut isearch,
-            &mut file_search,
-            &mut path_chains,
-            &mut completions,
-            &mut completions_pending,
-            &mut lsp_extras,
-            &mut lsp_pending,
-            &DiagnosticsStates::default(),
-            &led_state_diagnostics::LspStatuses::default(),
-            &GitState::default(),
-            &km,
-            &mut chord,
-            &mut kbd_macro,
-        );
+        let diagnostics = DiagnosticsStates::default();
+        let lsp_status = led_state_diagnostics::LspStatuses::default();
+        let git = GitState::default();
+        {
+            let mut dispatcher = Dispatcher {
+                tabs: &mut tabs,
+                edits: &mut edits,
+                kill_ring: &mut kr,
+                clip: &mut clip,
+                alerts: &mut alerts,
+                jumps: &mut jumps,
+                browser: &mut browser,
+                fs: &fs,
+                store: &store,
+                terminal: &term,
+                find_file: &mut find_file,
+                isearch: &mut isearch,
+                file_search: &mut file_search,
+                completions: &mut completions,
+                completions_pending: &mut completions_pending,
+                lsp_extras: &mut lsp_extras,
+                lsp_pending: &mut lsp_pending,
+                diagnostics: &diagnostics,
+                lsp_status: &lsp_status,
+                git: &git,
+                path_chains: &mut path_chains,
+                keymap: &km,
+                chord: &mut chord,
+                kbd_macro: &mut kbd_macro,
+            };
+            // Undo: ""
+            dispatcher.dispatch_key(key(KeyModifiers::CONTROL, KeyCode::Char('/')));
+            assert_eq!(dispatcher.edits.buffers.values().next().unwrap().rope.to_string(), "");
+            // Redo: "hi"
+            dispatcher.dispatch_key(key(KeyModifiers::CONTROL, KeyCode::Char('y')));
+        }
         assert_eq!(rope_of(&edits, "file.rs").to_string(), "hi");
     }
 
@@ -603,33 +578,38 @@ mod tests {
         let mut completions_pending = led_state_completions::CompletionsPending::default();
         let mut lsp_extras = LspExtrasState::default();
         let mut lsp_pending = led_state_lsp::LspPending::default();
-        dispatch_key(
-            key(KeyModifiers::CONTROL, KeyCode::Char('y')),
-            &mut tabs,
-            &mut edits,
-            &mut kr,
-            &mut clip,
-            &mut alerts,
-            &mut jumps,
-            &mut browser,
-            &fs,
-            &store,
-            &term,
-        &mut find_file,
-            &mut isearch,
-            &mut file_search,
-            &mut path_chains,
-            &mut completions,
-            &mut completions_pending,
-            &mut lsp_extras,
-            &mut lsp_pending,
-            &DiagnosticsStates::default(),
-            &led_state_diagnostics::LspStatuses::default(),
-            &GitState::default(),
-            &km,
-            &mut chord,
-            &mut kbd_macro,
-        );
+        let diagnostics = DiagnosticsStates::default();
+        let lsp_status = led_state_diagnostics::LspStatuses::default();
+        let git = GitState::default();
+        {
+            let mut dispatcher = Dispatcher {
+                tabs: &mut tabs,
+                edits: &mut edits,
+                kill_ring: &mut kr,
+                clip: &mut clip,
+                alerts: &mut alerts,
+                jumps: &mut jumps,
+                browser: &mut browser,
+                fs: &fs,
+                store: &store,
+                terminal: &term,
+                find_file: &mut find_file,
+                isearch: &mut isearch,
+                file_search: &mut file_search,
+                completions: &mut completions,
+                completions_pending: &mut completions_pending,
+                lsp_extras: &mut lsp_extras,
+                lsp_pending: &mut lsp_pending,
+                diagnostics: &diagnostics,
+                lsp_status: &lsp_status,
+                git: &git,
+                path_chains: &mut path_chains,
+                keymap: &km,
+                chord: &mut chord,
+                kbd_macro: &mut kbd_macro,
+            };
+            dispatcher.dispatch_key(key(KeyModifiers::CONTROL, KeyCode::Char('y')));
+        }
         // Still "x" — nothing to redo because the new edit dropped
         // the future branch.
         assert_eq!(rope_of(&edits, "file.rs").to_string(), "x");

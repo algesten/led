@@ -177,176 +177,125 @@ impl<'a> Dispatcher<'a> {
         }
     }
 
-    /// Resolve + run a single keystroke. Delegates to the free
-    /// [`dispatch_key`] so the submodule functions and tests that
-    /// already take individual args keep working unchanged.
+    /// Keymap-first dispatch with chord support. Algorithm:
+    ///
+    /// 0. If a confirm-kill prompt is live, intercept this keystroke:
+    ///    `y`/`Y` (no modifiers) confirms and force-kills the targeted
+    ///    tab; any other key clears the prompt and falls through to the
+    ///    normal resolution so e.g. `Esc` still clears the mark or an
+    ///    arrow key still moves.
+    /// 1. If a chord prefix is pending, consume it and look up the
+    ///    second key in that prefix's table. Unknown second key silently
+    ///    cancels. Matches legacy `keymap.md` § "Chord prefix with no
+    ///    second chord".
+    /// 2. Otherwise try the direct table.
+    /// 3. Otherwise, if the key is itself a prefix, store it as pending
+    ///    and return.
+    /// 4. Otherwise fall through to [`implicit_insert`] — printable chars
+    ///    with no Ctrl/Alt insert themselves.
+    ///
+    /// The pending prefix is always cleared before resolving the second
+    /// key so a failed chord never leaks state into the next press.
     pub fn dispatch_key(&mut self, k: KeyEvent) -> DispatchOutcome {
-        dispatch_key(
+        // Step 0 — confirm-kill gate.
+        if let Some(target) = self.alerts.confirm_kill {
+            self.alerts.confirm_kill = None;
+            if k.modifiers.is_empty()
+                && matches!(k.code, KeyCode::Char('y') | KeyCode::Char('Y'))
+            {
+                force_kill(self.tabs, self.edits, target);
+                return DispatchOutcome::Continue;
+            }
+            // Any other key: prompt dismissed; fall through so the key
+            // runs its normal binding / implicit-insert behaviour.
+        }
+
+        let resolved = resolve_command(
             k,
-            self.tabs,
-            self.edits,
-            self.kill_ring,
-            self.clip,
-            self.alerts,
-            self.jumps,
-            self.browser,
-            self.fs,
-            self.store,
-            self.terminal,
-            self.find_file,
-            self.isearch,
-            self.file_search,
-            self.path_chains,
-            self.completions,
-            self.completions_pending,
-            self.lsp_extras,
-            self.lsp_pending,
-            self.diagnostics,
-            self.lsp_status,
-            self.git,
             self.keymap,
             self.chord,
-            self.kbd_macro,
-        )
-    }
-}
-
-/// Keymap-first dispatch with chord support. Algorithm:
-///
-/// 0. If a confirm-kill prompt is live, intercept this keystroke:
-///    `y`/`Y` (no modifiers) confirms and force-kills the targeted
-///    tab; any other key clears the prompt and falls through to the
-///    normal resolution so e.g. `Esc` still clears the mark or an
-///    arrow key still moves.
-/// 1. If a chord prefix is pending, consume it and look up the
-///    second key in that prefix's table. Unknown second key silently
-///    cancels. Matches legacy `keymap.md` § "Chord prefix with no
-///    second chord".
-/// 2. Otherwise try the direct table.
-/// 3. Otherwise, if the key is itself a prefix, store it as pending
-///    and return.
-/// 4. Otherwise fall through to [`implicit_insert`] — printable chars
-///    with no Ctrl/Alt insert themselves.
-///
-/// The pending prefix is always cleared before resolving the second
-/// key so a failed chord never leaks state into the next press.
-#[allow(clippy::too_many_arguments)]
-pub fn dispatch_key(
-    k: KeyEvent,
-    tabs: &mut Tabs,
-    edits: &mut BufferEdits,
-    kill_ring: &mut KillRing,
-    clip: &mut ClipboardState,
-    alerts: &mut AlertState,
-    jumps: &mut JumpListState,
-    browser: &mut BrowserUi,
-    fs: &FsTree,
-    store: &BufferStore,
-    terminal: &Terminal,
-    find_file: &mut Option<FindFileState>,
-    isearch: &mut Option<IsearchState>,
-    file_search: &mut Option<FileSearchState>,
-    path_chains: &mut std::collections::HashMap<led_core::CanonPath, led_core::PathChain>,
-    completions: &mut CompletionsState,
-    completions_pending: &mut led_state_completions::CompletionsPending,
-    lsp_extras: &mut LspExtrasState,
-    lsp_pending: &mut led_state_lsp::LspPending,
-    diagnostics: &led_state_diagnostics::DiagnosticsStates,
-    lsp_status: &led_state_diagnostics::LspStatuses,
-    git: &led_state_git::GitState,
-    keymap: &Keymap,
-    chord: &mut ChordState,
-    kbd_macro: &mut KbdMacroState,
-) -> DispatchOutcome {
-    // Step 0 — confirm-kill gate.
-    if let Some(target) = alerts.confirm_kill {
-        alerts.confirm_kill = None;
-        if k.modifiers.is_empty() && matches!(k.code, KeyCode::Char('y') | KeyCode::Char('Y')) {
-            force_kill(tabs, edits, target);
-            return DispatchOutcome::Continue;
-        }
-        // Any other key: prompt dismissed; fall through so the key
-        // runs its normal binding / implicit-insert behaviour.
-    }
-
-    let resolved = resolve_command(
-        k,
-        keymap,
-        chord,
-        browser.focus == Focus::Side,
-        find_file.is_some(),
-        file_search.is_some(),
-    );
-    match resolved {
-        Resolved::Command(cmd) => {
-            // M22 — Recording hook. While a macro recording is
-            // in progress, append the resolved command to
-            // `kbd_macro.current` BEFORE running it. The filter
-            // (`should_record`) excludes meta-actions (start,
-            // end, quit, suspend, wait). Mirrors legacy
-            // `led/src/model/action/mod.rs:23-43` (the pre-match
-            // guard that pushed onto `state.kbd_macro.current`).
-            if kbd_macro.recording && should_record(&cmd) {
-                kbd_macro.current.push(cmd);
-            }
-
-            // M22 — Count + repeat-mode coupling for execute.
-            // The chord-prefix digit accumulator lives in
-            // `chord.count`; it has to land in `kbd_macro.execute_count`
-            // before the execute arm runs `take()`. Also flip the
-            // `macro_repeat` latch the moment a `KbdMacroExecute`
-            // resolves so a subsequent bare `e` short-circuits to
-            // another execute. Legacy emits two `Mut`s
-            // (`KbdMacroSetCount` + `Mut::Action(KbdMacroExecute)`)
-            // which the reducer applies in order; the rewrite
-            // collapses that into this synchronous block.
-            if matches!(cmd, Command::KbdMacroExecute) {
-                if let Some(n) = chord.count.take() {
-                    kbd_macro.execute_count = Some(n);
+            self.browser.focus == Focus::Side,
+            self.find_file.is_some(),
+            self.file_search.is_some(),
+        );
+        match resolved {
+            Resolved::Command(cmd) => {
+                // M22 — Recording hook. While a macro recording is
+                // in progress, append the resolved command to
+                // `kbd_macro.current` BEFORE running it. The filter
+                // (`should_record`) excludes meta-actions (start,
+                // end, quit, suspend, wait). Mirrors legacy
+                // `led/src/model/action/mod.rs:23-43` (the pre-match
+                // guard that pushed onto `state.kbd_macro.current`).
+                if self.kbd_macro.recording && should_record(&cmd) {
+                    self.kbd_macro.current.push(cmd);
                 }
-                chord.macro_repeat = true;
-            }
 
-            let outcome = run_command(
-                cmd, tabs, edits, kill_ring, clip, alerts, jumps, browser, fs, store, terminal,
-                find_file, isearch, file_search, path_chains, completions, completions_pending,
-                lsp_extras, lsp_pending, diagnostics, lsp_status, git, kbd_macro,
-            );
-            // Kill-ring coalescing: any non-KillLine command breaks
-            // the flag, so the next KillLine starts a fresh entry.
-            if !matches!(cmd, Command::KillLine) {
-                kill_ring.last_was_kill_line = false;
+                // M22 — Count + repeat-mode coupling for execute.
+                // The chord-prefix digit accumulator lives in
+                // `chord.count`; it has to land in `kbd_macro.execute_count`
+                // before the execute arm runs `take()`. Also flip the
+                // `macro_repeat` latch the moment a `KbdMacroExecute`
+                // resolves so a subsequent bare `e` short-circuits to
+                // another execute. Legacy emits two `Mut`s
+                // (`KbdMacroSetCount` + `Mut::Action(KbdMacroExecute)`)
+                // which the reducer applies in order; the rewrite
+                // collapses that into this synchronous block.
+                if matches!(cmd, Command::KbdMacroExecute) {
+                    if let Some(n) = self.chord.count.take() {
+                        self.kbd_macro.execute_count = Some(n);
+                    }
+                    self.chord.macro_repeat = true;
+                }
+
+                let outcome = self.run_command(cmd);
+                // Kill-ring coalescing: any non-KillLine command breaks
+                // the flag, so the next KillLine starts a fresh entry.
+                if !matches!(cmd, Command::KillLine) {
+                    self.kill_ring.last_was_kill_line = false;
+                }
+                // Undo coalescing: any command other than a coalescable
+                // InsertChar closes the open group. Non-edit commands
+                // finalise via the blanket path; edit commands that
+                // opened their own (non-coalescable) group already
+                // finalised inside their primitive.
+                if !is_coalescable_insert(&cmd) {
+                    finalise_history(self.edits);
+                }
+                // Edit-like commands leave `preferred_col` as the raw
+                // logical col — refresh to the within-sub-line col so
+                // subsequent vertical moves land on the right visual
+                // column. Pure cursor moves already set it correctly
+                // (horizontal moves) or deliberately preserve it across
+                // clamping (vertical moves), so we skip them.
+                if is_edit_like(&cmd) {
+                    refresh_active_preferred_col(
+                        self.tabs,
+                        self.edits,
+                        self.terminal,
+                        self.browser,
+                    );
+                }
+                // Auto-trigger LSP completion after an identifier-ish
+                // InsertChar. Matches legacy led editing_of.rs:69-75 —
+                // alphanumeric or `_` fires a fresh request, other
+                // commands either dismiss the live popup or pass
+                // through. When a session is already active, typing
+                // just queues another request (server seq-gating
+                // drops the older one); stage 6 will add client-side
+                // refilter so the popup updates without a round-trip
+                // for every keystroke.
+                handle_completion_trigger(
+                    &cmd,
+                    self.tabs,
+                    self.edits,
+                    self.completions,
+                    self.completions_pending,
+                );
+                outcome
             }
-            // Undo coalescing: any command other than a coalescable
-            // InsertChar closes the open group. Non-edit commands
-            // finalise via the blanket path; edit commands that
-            // opened their own (non-coalescable) group already
-            // finalised inside their primitive.
-            if !is_coalescable_insert(&cmd) {
-                finalise_history(edits);
-            }
-            // Edit-like commands leave `preferred_col` as the raw
-            // logical col — refresh to the within-sub-line col so
-            // subsequent vertical moves land on the right visual
-            // column. Pure cursor moves already set it correctly
-            // (horizontal moves) or deliberately preserve it across
-            // clamping (vertical moves), so we skip them.
-            if is_edit_like(&cmd) {
-                refresh_active_preferred_col(tabs, edits, terminal, browser);
-            }
-            // Auto-trigger LSP completion after an identifier-ish
-            // InsertChar. Matches legacy led editing_of.rs:69-75 —
-            // alphanumeric or `_` fires a fresh request, other
-            // commands either dismiss the live popup or pass
-            // through. When a session is already active, typing
-            // just queues another request (server seq-gating
-            // drops the older one); stage 6 will add client-side
-            // refilter so the popup updates without a round-trip
-            // for every keystroke.
-            handle_completion_trigger(&cmd, tabs, edits, completions, completions_pending);
-            outcome
+            Resolved::PrefixStored | Resolved::Continue => DispatchOutcome::Continue,
         }
-        Resolved::PrefixStored | Resolved::Continue => DispatchOutcome::Continue,
     }
 }
 
@@ -715,494 +664,630 @@ fn implicit_insert(k: &KeyEvent) -> Option<Command> {
     Some(Command::InsertChar(c))
 }
 
-#[allow(clippy::too_many_arguments)]
-fn run_command(
-    cmd: Command,
-    tabs: &mut Tabs,
-    edits: &mut BufferEdits,
-    kill_ring: &mut KillRing,
-    clip: &mut ClipboardState,
-    alerts: &mut AlertState,
-    jumps: &mut JumpListState,
-    browser: &mut BrowserUi,
-    fs: &FsTree,
-    store: &BufferStore,
-    terminal: &Terminal,
-    find_file: &mut Option<FindFileState>,
-    isearch: &mut Option<IsearchState>,
-    file_search: &mut Option<FileSearchState>,
-    path_chains: &mut std::collections::HashMap<led_core::CanonPath, led_core::PathChain>,
-    completions: &mut CompletionsState,
-    completions_pending: &mut led_state_completions::CompletionsPending,
-    lsp_extras: &mut LspExtrasState,
-    lsp_pending: &mut led_state_lsp::LspPending,
-    diagnostics: &led_state_diagnostics::DiagnosticsStates,
-    lsp_status: &led_state_diagnostics::LspStatuses,
-    git: &led_state_git::GitState,
-    kbd_macro: &mut KbdMacroState,
-) -> DispatchOutcome {
-    // Find-file overlay intercept. When active, the overlay owns
-    // input editing + its own command set; most commands route into
-    // `state.input` instead of the buffer. `Quit` passes through
-    // so `ctrl+x ctrl+c` still exits.
-    if let Some(outcome) =
-        find_file::run_overlay_command(cmd, find_file, tabs, edits, path_chains)
-    {
-        return outcome;
-    }
+impl<'a> Dispatcher<'a> {
+    fn run_command(&mut self, cmd: Command) -> DispatchOutcome {
+        // Find-file overlay intercept. When active, the overlay owns
+        // input editing + its own command set; most commands route into
+        // `state.input` instead of the buffer. `Quit` passes through
+        // so `ctrl+x ctrl+c` still exits.
+        if let Some(outcome) = find_file::run_overlay_command(
+            cmd,
+            self.find_file,
+            self.tabs,
+            self.edits,
+            self.path_chains,
+        ) {
+            return outcome;
+        }
 
-    // LSP completion popup intercept (M17). Fires before buffer
-    // editing so Up / Down navigate the list, Enter commits, Esc
-    // dismisses. InsertChar / DeleteBack fall through to the
-    // normal edit path; `handle_completion_trigger` at the
-    // dispatch boundary then refilters / queues the next request.
-    //
-    // (The submodule is aliased as `completions_overlay` to
-    // avoid shadowing the `completions` parameter.)
-    if let Some(outcome) = completions_overlay::run_overlay_command(
-        cmd, completions, completions_pending, tabs, edits,
-    ) {
-        return outcome;
-    }
+        // LSP completion popup intercept (M17). Fires before buffer
+        // editing so Up / Down navigate the list, Enter commits, Esc
+        // dismisses. InsertChar / DeleteBack fall through to the
+        // normal edit path; `handle_completion_trigger` at the
+        // dispatch boundary then refilters / queues the next request.
+        //
+        // (The submodule is aliased as `completions_overlay` to
+        // avoid shadowing the `completions` parameter.)
+        if let Some(outcome) = completions_overlay::run_overlay_command(
+            cmd,
+            self.completions,
+            self.completions_pending,
+            self.tabs,
+            self.edits,
+        ) {
+            return outcome;
+        }
 
-    // LSP rename overlay intercept (M18). Modal: every key
-    // lands in the input until Enter (commit) or Esc (abort).
-    // Quit passes through so the user can still ctrl+x ctrl+c
-    // out of the editor mid-rename.
-    if let Some(outcome) = rename::run_overlay_command(cmd, lsp_extras, lsp_pending) {
-        return outcome;
-    }
+        // LSP rename overlay intercept (M18). Modal: every key
+        // lands in the input until Enter (commit) or Esc (abort).
+        // Quit passes through so the user can still ctrl+x ctrl+c
+        // out of the editor mid-rename.
+        if let Some(outcome) =
+            rename::run_overlay_command(cmd, self.lsp_extras, self.lsp_pending)
+        {
+            return outcome;
+        }
 
-    // LSP code-action picker intercept (M18). Modal: Up/Down
-    // navigate, Enter commits, Esc dismisses.
-    if let Some(outcome) = code_actions::run_overlay_command(cmd, lsp_extras, lsp_pending) {
-        return outcome;
-    }
+        // LSP code-action picker intercept (M18). Modal: Up/Down
+        // navigate, Enter commits, Esc dismisses.
+        if let Some(outcome) =
+            code_actions::run_overlay_command(cmd, self.lsp_extras, self.lsp_pending)
+        {
+            return outcome;
+        }
 
-    // In-buffer isearch overlay intercept. Typing / backspace /
-    // Enter / Esc / another Ctrl-s are fully consumed; every other
-    // command triggers "accept on passthrough" — the current match
-    // becomes the cursor's home, then the command runs normally.
-    if let Some(outcome) = isearch::run_overlay_command(cmd, isearch, tabs, edits, jumps) {
-        return outcome;
-    }
+        // In-buffer isearch overlay intercept. Typing / backspace /
+        // Enter / Esc / another Ctrl-s are fully consumed; every other
+        // command triggers "accept on passthrough" — the current match
+        // becomes the cursor's home, then the command runs normally.
+        if let Some(outcome) = isearch::run_overlay_command(
+            cmd,
+            self.isearch,
+            self.tabs,
+            self.edits,
+            self.jumps,
+        ) {
+            return outcome;
+        }
 
-    // File-search overlay intercept (M14). Typing / toggles /
-    // Abort are fully consumed; other commands fall through.
-    if let Some(outcome) = file_search::run_overlay_command(
-        cmd,
-        file_search,
-        browser,
-        tabs,
-        edits,
-        terminal,
-        fs.root.as_ref(),
-    ) {
-        return outcome;
-    }
+        // File-search overlay intercept (M14). Typing / toggles /
+        // Abort are fully consumed; other commands fall through.
+        if let Some(outcome) = file_search::run_overlay_command(
+            cmd,
+            self.file_search,
+            self.browser,
+            self.tabs,
+            self.edits,
+            self.terminal,
+            self.fs.root.as_ref(),
+        ) {
+            return outcome;
+        }
 
-    let browser_focused = browser.focus == Focus::Side;
-    match cmd {
-        Command::Quit => DispatchOutcome::Quit,
-        Command::Suspend => DispatchOutcome::Suspend,
-        Command::Abort => {
-            // Isearch takes priority: Abort closes the overlay
-            // without clearing the mark. Find-file Abort is already
-            // consumed upstream in `find_file::run_overlay_command`.
-            // M17 / M18 will short-circuit their own modals before
-            // reaching here.
-            clear_mark(tabs);
-            DispatchOutcome::Continue
-        }
-        Command::Save => {
-            save_with_optional_format(tabs, edits, lsp_pending, alerts, lsp_status);
-            DispatchOutcome::Continue
-        }
-        Command::SaveAll => {
-            request_save_all(tabs, edits);
-            DispatchOutcome::Continue
-        }
-        Command::SaveNoFormat => {
-            // Skip format; save directly.
-            request_save_active(tabs, edits);
-            DispatchOutcome::Continue
-        }
-        Command::TabNext => {
-            cycle_active(tabs, jumps, 1);
-            DispatchOutcome::Continue
-        }
-        Command::TabPrev => {
-            cycle_active(tabs, jumps, -1);
-            DispatchOutcome::Continue
-        }
-        Command::KillBuffer => {
-            kill_active(tabs, edits, alerts);
-            DispatchOutcome::Continue
-        }
-        Command::CursorUp => {
-            if browser_focused {
-                move_selection(browser, fs, tabs, edits, path_chains, -1);
-            } else {
-                move_cursor(tabs, edits, store, terminal, browser, Move::Up);
+        let browser_focused = self.browser.focus == Focus::Side;
+        match cmd {
+            Command::Quit => DispatchOutcome::Quit,
+            Command::Suspend => DispatchOutcome::Suspend,
+            Command::Abort => {
+                // Isearch takes priority: Abort closes the overlay
+                // without clearing the mark. Find-file Abort is already
+                // consumed upstream in `find_file::run_overlay_command`.
+                // M17 / M18 will short-circuit their own modals before
+                // reaching here.
+                clear_mark(self.tabs);
+                DispatchOutcome::Continue
             }
-            DispatchOutcome::Continue
-        }
-        Command::CursorDown => {
-            if browser_focused {
-                move_selection(browser, fs, tabs, edits, path_chains, 1);
-            } else {
-                move_cursor(tabs, edits, store, terminal, browser, Move::Down);
-            }
-            DispatchOutcome::Continue
-        }
-        Command::CursorLeft => {
-            move_cursor(tabs, edits, store, terminal, browser, Move::Left);
-            DispatchOutcome::Continue
-        }
-        Command::CursorRight => {
-            move_cursor(tabs, edits, store, terminal, browser, Move::Right);
-            DispatchOutcome::Continue
-        }
-        Command::CursorLineStart => {
-            move_cursor(tabs, edits, store, terminal, browser, Move::LineStart);
-            DispatchOutcome::Continue
-        }
-        Command::CursorLineEnd => {
-            move_cursor(tabs, edits, store, terminal, browser, Move::LineEnd);
-            DispatchOutcome::Continue
-        }
-        Command::CursorPageUp => {
-            let page = terminal
-                .dims
-                .map(|d| d.rows.saturating_sub(2) as usize)
-                .unwrap_or(1);
-            if browser_focused {
-                page_selection(browser, fs, tabs, edits, path_chains, page, /* down= */ false);
-            } else {
-                move_cursor(tabs, edits, store, terminal, browser, Move::PageUp);
-            }
-            DispatchOutcome::Continue
-        }
-        Command::CursorPageDown => {
-            let page = terminal
-                .dims
-                .map(|d| d.rows.saturating_sub(2) as usize)
-                .unwrap_or(1);
-            if browser_focused {
-                page_selection(browser, fs, tabs, edits, path_chains, page, /* down= */ true);
-            } else {
-                move_cursor(tabs, edits, store, terminal, browser, Move::PageDown);
-            }
-            DispatchOutcome::Continue
-        }
-        Command::CursorFileStart => {
-            if browser_focused {
-                select_first(browser, fs, tabs, edits, path_chains);
-            } else {
-                move_cursor(tabs, edits, store, terminal, browser, Move::FileStart);
-            }
-            DispatchOutcome::Continue
-        }
-        Command::CursorFileEnd => {
-            if browser_focused {
-                select_last(browser, fs, tabs, edits, path_chains);
-            } else {
-                move_cursor(tabs, edits, store, terminal, browser, Move::FileEnd);
-            }
-            DispatchOutcome::Continue
-        }
-        Command::CursorWordLeft => {
-            move_cursor(tabs, edits, store, terminal, browser, Move::WordLeft);
-            DispatchOutcome::Continue
-        }
-        Command::CursorWordRight => {
-            move_cursor(tabs, edits, store, terminal, browser, Move::WordRight);
-            DispatchOutcome::Continue
-        }
-        Command::InsertNewline => {
-            insert_newline(tabs, edits);
-            DispatchOutcome::Continue
-        }
-        Command::DeleteBack => {
-            delete_back(tabs, edits);
-            DispatchOutcome::Continue
-        }
-        Command::DeleteForward => {
-            delete_forward(tabs, edits);
-            DispatchOutcome::Continue
-        }
-        Command::InsertChar(c) => {
-            insert_char(tabs, edits, c);
-            DispatchOutcome::Continue
-        }
-        Command::SetMark => {
-            set_mark_active(tabs);
-            alerts.set_info(
-                "Mark set".to_string(),
-                std::time::Instant::now(),
-                std::time::Duration::from_secs(2),
-            );
-            DispatchOutcome::Continue
-        }
-        Command::KillRegion => {
-            let killed = kill_region(tabs, edits, kill_ring, clip);
-            if !killed {
-                alerts.set_info(
-                    "No region".to_string(),
-                    std::time::Instant::now(),
-                    std::time::Duration::from_secs(2),
+            Command::Save => {
+                save_with_optional_format(
+                    self.tabs,
+                    self.edits,
+                    self.lsp_pending,
+                    self.alerts,
+                    self.lsp_status,
                 );
+                DispatchOutcome::Continue
             }
-            DispatchOutcome::Continue
-        }
-        Command::KillLine => {
-            kill_line(tabs, edits, kill_ring, clip);
-            DispatchOutcome::Continue
-        }
-        Command::Yank => {
-            request_yank(tabs, clip);
-            DispatchOutcome::Continue
-        }
-        Command::Undo => {
-            undo_active(tabs, edits);
-            DispatchOutcome::Continue
-        }
-        Command::Redo => {
-            redo_active(tabs, edits);
-            DispatchOutcome::Continue
-        }
-        Command::JumpBack => {
-            jump_back(tabs, edits, jumps);
-            DispatchOutcome::Continue
-        }
-        Command::JumpForward => {
-            jump_forward(tabs, edits, jumps);
-            DispatchOutcome::Continue
-        }
-        Command::MatchBracket => {
-            match_bracket(tabs, edits, jumps);
-            DispatchOutcome::Continue
-        }
-        Command::NextIssue => {
-            next_issue_active(
-                tabs,
-                edits,
-                diagnostics,
-                git,
-                jumps,
-                alerts,
-                terminal,
-                browser,
-            );
-            DispatchOutcome::Continue
-        }
-        Command::PrevIssue => {
-            prev_issue_active(
-                tabs,
-                edits,
-                diagnostics,
-                git,
-                jumps,
-                alerts,
-                terminal,
-                browser,
-            );
-            DispatchOutcome::Continue
-        }
-        Command::ExpandDir => {
-            expand_dir(browser, fs, tabs, edits);
-            DispatchOutcome::Continue
-        }
-        Command::CollapseDir => {
-            collapse_dir(browser, fs, tabs, edits);
-            DispatchOutcome::Continue
-        }
-        Command::CollapseAll => {
-            collapse_all(browser);
-            DispatchOutcome::Continue
-        }
-        Command::OpenSelected => {
-            open_selected(browser, fs, tabs, edits, path_chains);
-            DispatchOutcome::Continue
-        }
-        Command::OpenSelectedBg => {
-            open_selected_bg(browser, fs, tabs, edits, path_chains);
-            DispatchOutcome::Continue
-        }
-        Command::ToggleSidePanel => {
-            toggle_side_panel(browser);
-            DispatchOutcome::Continue
-        }
-        Command::ToggleFocus => {
-            toggle_focus(browser);
-            DispatchOutcome::Continue
-        }
-        Command::FindFile => {
-            find_file::activate_open(find_file, tabs, fs);
-            DispatchOutcome::Continue
-        }
-        Command::SaveAs => {
-            find_file::activate_save_as(find_file, tabs, fs);
-            DispatchOutcome::Continue
-        }
-        Command::FindFileTabComplete => {
-            // Stage 1: tab-complete is a no-op until M12 phase 4 lands.
-            // The keymap reserves the binding so `Tab` in the overlay
-            // doesn't fall through to `insert_tab` (M23).
-            DispatchOutcome::Continue
-        }
-        Command::InBufferSearch => {
-            isearch::in_buffer_search(isearch, tabs, edits);
-            DispatchOutcome::Continue
-        }
-        Command::OpenFileSearch => {
-            file_search::activate(file_search, browser, tabs, edits);
-            DispatchOutcome::Continue
-        }
-        Command::CloseFileSearch => {
-            file_search::deactivate(file_search, browser, tabs);
-            DispatchOutcome::Continue
-        }
-        // Toggles + ReplaceAll are only meaningful inside the
-        // overlay — `file_search::run_overlay_command` consumes
-        // them when active. If we get here, the overlay isn't
-        // open, and these are no-ops.
-        Command::ToggleSearchCase
-        | Command::ToggleSearchRegex
-        | Command::ToggleSearchReplace
-        | Command::ReplaceAll => DispatchOutcome::Continue,
-        // LSP extras (M18). Goto-definition queues a
-        // `RequestGotoDefinition`; the rest land in later stages.
-        Command::LspGotoDefinition => {
-            lsp_goto_definition(tabs, edits, lsp_pending, lsp_status);
-            DispatchOutcome::Continue
-        }
-        Command::LspRename => {
-            rename::activate(lsp_extras, tabs, edits);
-            DispatchOutcome::Continue
-        }
-        Command::LspCodeAction => {
-            code_actions::activate(lsp_extras, lsp_pending, tabs, edits);
-            DispatchOutcome::Continue
-        }
-        Command::LspToggleInlayHints => {
-            // Legacy parity: the toggle is a silent state flip —
-            // no info alert. Visible feedback is the appearance /
-            // disappearance of the hint markers themselves.
-            // Toggle-off also drops the per-buffer cache + the
-            // in-flight ledger on the bookkeeping source so the
-            // next toggle-on refetches.
-            let now_on = lsp_extras.toggle_inlay_hints();
-            if !now_on {
-                lsp_pending.clear_inlay_hint_cache();
+            Command::SaveAll => {
+                request_save_all(self.tabs, self.edits);
+                DispatchOutcome::Continue
             }
-            DispatchOutcome::Continue
-        }
-        Command::LspFormat => {
-            request_format_active(tabs, edits, lsp_pending);
-            DispatchOutcome::Continue
-        }
-        Command::Outline => {
-            // Legacy orphan: `alt+o` was bound with no handler.
-            // Rewrite reserves the key so it doesn't fall
-            // through to InsertChar; the full symbol-outline
-            // UI (backed by `textDocument/documentSymbol`) is
-            // post-M18 polish.
-            alerts.set_info(
-                "Outline: not yet implemented".to_string(),
-                std::time::Instant::now(),
-                std::time::Duration::from_secs(2),
-            );
-            DispatchOutcome::Continue
-        }
-        // ── Keyboard macros (M22) ──────────────────────────
-        Command::KbdMacroStart => {
-            // Begin a fresh recording. If we're already
-            // recording, this resets `current` and stays in
-            // record mode (legacy parity, `action/mod.rs:32-35`).
-            kbd_macro.recording = true;
-            kbd_macro.current.clear();
-            alerts.set_info(
-                "Defining kbd macro...".to_string(),
-                std::time::Instant::now(),
-                std::time::Duration::from_secs(2),
-            );
-            DispatchOutcome::Continue
-        }
-        Command::KbdMacroEnd => {
-            if kbd_macro.recording {
-                kbd_macro.recording = false;
-                let recorded = std::mem::take(&mut kbd_macro.current);
-                kbd_macro.last = Some(std::sync::Arc::new(recorded));
-                alerts.set_info(
-                    "Keyboard macro defined".to_string(),
-                    std::time::Instant::now(),
-                    std::time::Duration::from_secs(2),
-                );
-            } else {
-                alerts.set_info(
-                    "Not defining kbd macro".to_string(),
-                    std::time::Instant::now(),
-                    std::time::Duration::from_secs(2),
-                );
+            Command::SaveNoFormat => {
+                // Skip format; save directly.
+                request_save_active(self.tabs, self.edits);
+                DispatchOutcome::Continue
             }
-            DispatchOutcome::Continue
-        }
-        Command::KbdMacroExecute => {
-            // Recursion guard: depth >= 100 surfaces an alert
-            // and aborts further playback up the stack
-            // (legacy `action/mod.rs:278-280`).
-            if kbd_macro.playback_depth >= KBD_MACRO_RECURSION_LIMIT {
-                alerts.set_info(
-                    "Keyboard macro recursion limit".to_string(),
-                    std::time::Instant::now(),
-                    std::time::Duration::from_secs(2),
-                );
-                return DispatchOutcome::Continue;
+            Command::TabNext => {
+                cycle_active(self.tabs, self.jumps, 1);
+                DispatchOutcome::Continue
             }
-            // Clone the Arc out of `kbd_macro.last` first so
-            // the recursive `run_command` calls below can take
-            // `&mut kbd_macro` again — `recorded` is a refcount
-            // bump, not a borrow.
-            let Some(recorded) = kbd_macro.last.clone() else {
-                alerts.set_info(
-                    "No kbd macro defined".to_string(),
-                    std::time::Instant::now(),
-                    std::time::Duration::from_secs(2),
-                );
-                return DispatchOutcome::Continue;
-            };
-            let count = kbd_macro.execute_count.take().unwrap_or(1);
-            let iterations = if count == 0 { usize::MAX } else { count };
-            kbd_macro.playback_depth += 1;
-            let mut last_outcome = DispatchOutcome::Continue;
-            'outer: for _ in 0..iterations {
-                for inner_cmd in recorded.iter() {
-                    let outcome = run_command(
-                        *inner_cmd, tabs, edits, kill_ring, clip, alerts, jumps, browser, fs,
-                        store, terminal, find_file, isearch, file_search, path_chains, completions,
-                        completions_pending, lsp_extras, lsp_pending, diagnostics, lsp_status, git,
-                        kbd_macro,
+            Command::TabPrev => {
+                cycle_active(self.tabs, self.jumps, -1);
+                DispatchOutcome::Continue
+            }
+            Command::KillBuffer => {
+                kill_active(self.tabs, self.edits, self.alerts);
+                DispatchOutcome::Continue
+            }
+            Command::CursorUp => {
+                if browser_focused {
+                    move_selection(
+                        self.browser,
+                        self.fs,
+                        self.tabs,
+                        self.edits,
+                        self.path_chains,
+                        -1,
                     );
-                    if !matches!(outcome, DispatchOutcome::Continue) {
-                        // Quit / Suspend mid-playback propagates
-                        // out so e.g. a macro that ends in Quit
-                        // exits cleanly. Legacy parity.
-                        last_outcome = outcome;
-                        break 'outer;
+                } else {
+                    move_cursor(
+                        self.tabs,
+                        self.edits,
+                        self.store,
+                        self.terminal,
+                        self.browser,
+                        Move::Up,
+                    );
+                }
+                DispatchOutcome::Continue
+            }
+            Command::CursorDown => {
+                if browser_focused {
+                    move_selection(
+                        self.browser,
+                        self.fs,
+                        self.tabs,
+                        self.edits,
+                        self.path_chains,
+                        1,
+                    );
+                } else {
+                    move_cursor(
+                        self.tabs,
+                        self.edits,
+                        self.store,
+                        self.terminal,
+                        self.browser,
+                        Move::Down,
+                    );
+                }
+                DispatchOutcome::Continue
+            }
+            Command::CursorLeft => {
+                move_cursor(
+                    self.tabs,
+                    self.edits,
+                    self.store,
+                    self.terminal,
+                    self.browser,
+                    Move::Left,
+                );
+                DispatchOutcome::Continue
+            }
+            Command::CursorRight => {
+                move_cursor(
+                    self.tabs,
+                    self.edits,
+                    self.store,
+                    self.terminal,
+                    self.browser,
+                    Move::Right,
+                );
+                DispatchOutcome::Continue
+            }
+            Command::CursorLineStart => {
+                move_cursor(
+                    self.tabs,
+                    self.edits,
+                    self.store,
+                    self.terminal,
+                    self.browser,
+                    Move::LineStart,
+                );
+                DispatchOutcome::Continue
+            }
+            Command::CursorLineEnd => {
+                move_cursor(
+                    self.tabs,
+                    self.edits,
+                    self.store,
+                    self.terminal,
+                    self.browser,
+                    Move::LineEnd,
+                );
+                DispatchOutcome::Continue
+            }
+            Command::CursorPageUp => {
+                let page = self
+                    .terminal
+                    .dims
+                    .map(|d| d.rows.saturating_sub(2) as usize)
+                    .unwrap_or(1);
+                if browser_focused {
+                    page_selection(
+                        self.browser,
+                        self.fs,
+                        self.tabs,
+                        self.edits,
+                        self.path_chains,
+                        page,
+                        /* down= */ false,
+                    );
+                } else {
+                    move_cursor(
+                        self.tabs,
+                        self.edits,
+                        self.store,
+                        self.terminal,
+                        self.browser,
+                        Move::PageUp,
+                    );
+                }
+                DispatchOutcome::Continue
+            }
+            Command::CursorPageDown => {
+                let page = self
+                    .terminal
+                    .dims
+                    .map(|d| d.rows.saturating_sub(2) as usize)
+                    .unwrap_or(1);
+                if browser_focused {
+                    page_selection(
+                        self.browser,
+                        self.fs,
+                        self.tabs,
+                        self.edits,
+                        self.path_chains,
+                        page,
+                        /* down= */ true,
+                    );
+                } else {
+                    move_cursor(
+                        self.tabs,
+                        self.edits,
+                        self.store,
+                        self.terminal,
+                        self.browser,
+                        Move::PageDown,
+                    );
+                }
+                DispatchOutcome::Continue
+            }
+            Command::CursorFileStart => {
+                if browser_focused {
+                    select_first(
+                        self.browser,
+                        self.fs,
+                        self.tabs,
+                        self.edits,
+                        self.path_chains,
+                    );
+                } else {
+                    move_cursor(
+                        self.tabs,
+                        self.edits,
+                        self.store,
+                        self.terminal,
+                        self.browser,
+                        Move::FileStart,
+                    );
+                }
+                DispatchOutcome::Continue
+            }
+            Command::CursorFileEnd => {
+                if browser_focused {
+                    select_last(
+                        self.browser,
+                        self.fs,
+                        self.tabs,
+                        self.edits,
+                        self.path_chains,
+                    );
+                } else {
+                    move_cursor(
+                        self.tabs,
+                        self.edits,
+                        self.store,
+                        self.terminal,
+                        self.browser,
+                        Move::FileEnd,
+                    );
+                }
+                DispatchOutcome::Continue
+            }
+            Command::CursorWordLeft => {
+                move_cursor(
+                    self.tabs,
+                    self.edits,
+                    self.store,
+                    self.terminal,
+                    self.browser,
+                    Move::WordLeft,
+                );
+                DispatchOutcome::Continue
+            }
+            Command::CursorWordRight => {
+                move_cursor(
+                    self.tabs,
+                    self.edits,
+                    self.store,
+                    self.terminal,
+                    self.browser,
+                    Move::WordRight,
+                );
+                DispatchOutcome::Continue
+            }
+            Command::InsertNewline => {
+                insert_newline(self.tabs, self.edits);
+                DispatchOutcome::Continue
+            }
+            Command::DeleteBack => {
+                delete_back(self.tabs, self.edits);
+                DispatchOutcome::Continue
+            }
+            Command::DeleteForward => {
+                delete_forward(self.tabs, self.edits);
+                DispatchOutcome::Continue
+            }
+            Command::InsertChar(c) => {
+                insert_char(self.tabs, self.edits, c);
+                DispatchOutcome::Continue
+            }
+            Command::SetMark => {
+                set_mark_active(self.tabs);
+                self.alerts.set_info(
+                    "Mark set".to_string(),
+                    std::time::Instant::now(),
+                    std::time::Duration::from_secs(2),
+                );
+                DispatchOutcome::Continue
+            }
+            Command::KillRegion => {
+                let killed = kill_region(self.tabs, self.edits, self.kill_ring, self.clip);
+                if !killed {
+                    self.alerts.set_info(
+                        "No region".to_string(),
+                        std::time::Instant::now(),
+                        std::time::Duration::from_secs(2),
+                    );
+                }
+                DispatchOutcome::Continue
+            }
+            Command::KillLine => {
+                kill_line(self.tabs, self.edits, self.kill_ring, self.clip);
+                DispatchOutcome::Continue
+            }
+            Command::Yank => {
+                request_yank(self.tabs, self.clip);
+                DispatchOutcome::Continue
+            }
+            Command::Undo => {
+                undo_active(self.tabs, self.edits);
+                DispatchOutcome::Continue
+            }
+            Command::Redo => {
+                redo_active(self.tabs, self.edits);
+                DispatchOutcome::Continue
+            }
+            Command::JumpBack => {
+                jump_back(self.tabs, self.edits, self.jumps);
+                DispatchOutcome::Continue
+            }
+            Command::JumpForward => {
+                jump_forward(self.tabs, self.edits, self.jumps);
+                DispatchOutcome::Continue
+            }
+            Command::MatchBracket => {
+                match_bracket(self.tabs, self.edits, self.jumps);
+                DispatchOutcome::Continue
+            }
+            Command::NextIssue => {
+                next_issue_active(
+                    self.tabs,
+                    self.edits,
+                    self.diagnostics,
+                    self.git,
+                    self.jumps,
+                    self.alerts,
+                    self.terminal,
+                    self.browser,
+                );
+                DispatchOutcome::Continue
+            }
+            Command::PrevIssue => {
+                prev_issue_active(
+                    self.tabs,
+                    self.edits,
+                    self.diagnostics,
+                    self.git,
+                    self.jumps,
+                    self.alerts,
+                    self.terminal,
+                    self.browser,
+                );
+                DispatchOutcome::Continue
+            }
+            Command::ExpandDir => {
+                expand_dir(self.browser, self.fs, self.tabs, self.edits);
+                DispatchOutcome::Continue
+            }
+            Command::CollapseDir => {
+                collapse_dir(self.browser, self.fs, self.tabs, self.edits);
+                DispatchOutcome::Continue
+            }
+            Command::CollapseAll => {
+                collapse_all(self.browser);
+                DispatchOutcome::Continue
+            }
+            Command::OpenSelected => {
+                open_selected(
+                    self.browser,
+                    self.fs,
+                    self.tabs,
+                    self.edits,
+                    self.path_chains,
+                );
+                DispatchOutcome::Continue
+            }
+            Command::OpenSelectedBg => {
+                open_selected_bg(
+                    self.browser,
+                    self.fs,
+                    self.tabs,
+                    self.edits,
+                    self.path_chains,
+                );
+                DispatchOutcome::Continue
+            }
+            Command::ToggleSidePanel => {
+                toggle_side_panel(self.browser);
+                DispatchOutcome::Continue
+            }
+            Command::ToggleFocus => {
+                toggle_focus(self.browser);
+                DispatchOutcome::Continue
+            }
+            Command::FindFile => {
+                find_file::activate_open(self.find_file, self.tabs, self.fs);
+                DispatchOutcome::Continue
+            }
+            Command::SaveAs => {
+                find_file::activate_save_as(self.find_file, self.tabs, self.fs);
+                DispatchOutcome::Continue
+            }
+            Command::FindFileTabComplete => {
+                // Stage 1: tab-complete is a no-op until M12 phase 4 lands.
+                // The keymap reserves the binding so `Tab` in the overlay
+                // doesn't fall through to `insert_tab` (M23).
+                DispatchOutcome::Continue
+            }
+            Command::InBufferSearch => {
+                isearch::in_buffer_search(self.isearch, self.tabs, self.edits);
+                DispatchOutcome::Continue
+            }
+            Command::OpenFileSearch => {
+                file_search::activate(self.file_search, self.browser, self.tabs, self.edits);
+                DispatchOutcome::Continue
+            }
+            Command::CloseFileSearch => {
+                file_search::deactivate(self.file_search, self.browser, self.tabs);
+                DispatchOutcome::Continue
+            }
+            // Toggles + ReplaceAll are only meaningful inside the
+            // overlay — `file_search::run_overlay_command` consumes
+            // them when active. If we get here, the overlay isn't
+            // open, and these are no-ops.
+            Command::ToggleSearchCase
+            | Command::ToggleSearchRegex
+            | Command::ToggleSearchReplace
+            | Command::ReplaceAll => DispatchOutcome::Continue,
+            // LSP extras (M18). Goto-definition queues a
+            // `RequestGotoDefinition`; the rest land in later stages.
+            Command::LspGotoDefinition => {
+                lsp_goto_definition(self.tabs, self.edits, self.lsp_pending, self.lsp_status);
+                DispatchOutcome::Continue
+            }
+            Command::LspRename => {
+                rename::activate(self.lsp_extras, self.tabs, self.edits);
+                DispatchOutcome::Continue
+            }
+            Command::LspCodeAction => {
+                code_actions::activate(self.lsp_extras, self.lsp_pending, self.tabs, self.edits);
+                DispatchOutcome::Continue
+            }
+            Command::LspToggleInlayHints => {
+                // Legacy parity: the toggle is a silent state flip —
+                // no info alert. Visible feedback is the appearance /
+                // disappearance of the hint markers themselves.
+                // Toggle-off also drops the per-buffer cache + the
+                // in-flight ledger on the bookkeeping source so the
+                // next toggle-on refetches.
+                let now_on = self.lsp_extras.toggle_inlay_hints();
+                if !now_on {
+                    self.lsp_pending.clear_inlay_hint_cache();
+                }
+                DispatchOutcome::Continue
+            }
+            Command::LspFormat => {
+                request_format_active(self.tabs, self.edits, self.lsp_pending);
+                DispatchOutcome::Continue
+            }
+            Command::Outline => {
+                // Legacy orphan: `alt+o` was bound with no handler.
+                // Rewrite reserves the key so it doesn't fall
+                // through to InsertChar; the full symbol-outline
+                // UI (backed by `textDocument/documentSymbol`) is
+                // post-M18 polish.
+                self.alerts.set_info(
+                    "Outline: not yet implemented".to_string(),
+                    std::time::Instant::now(),
+                    std::time::Duration::from_secs(2),
+                );
+                DispatchOutcome::Continue
+            }
+            // ── Keyboard macros (M22) ──────────────────────────
+            Command::KbdMacroStart => {
+                // Begin a fresh recording. If we're already
+                // recording, this resets `current` and stays in
+                // record mode (legacy parity, `action/mod.rs:32-35`).
+                self.kbd_macro.recording = true;
+                self.kbd_macro.current.clear();
+                self.alerts.set_info(
+                    "Defining kbd macro...".to_string(),
+                    std::time::Instant::now(),
+                    std::time::Duration::from_secs(2),
+                );
+                DispatchOutcome::Continue
+            }
+            Command::KbdMacroEnd => {
+                if self.kbd_macro.recording {
+                    self.kbd_macro.recording = false;
+                    let recorded = std::mem::take(&mut self.kbd_macro.current);
+                    self.kbd_macro.last = Some(std::sync::Arc::new(recorded));
+                    self.alerts.set_info(
+                        "Keyboard macro defined".to_string(),
+                        std::time::Instant::now(),
+                        std::time::Duration::from_secs(2),
+                    );
+                } else {
+                    self.alerts.set_info(
+                        "Not defining kbd macro".to_string(),
+                        std::time::Instant::now(),
+                        std::time::Duration::from_secs(2),
+                    );
+                }
+                DispatchOutcome::Continue
+            }
+            Command::KbdMacroExecute => {
+                // Recursion guard: depth >= 100 surfaces an alert
+                // and aborts further playback up the stack
+                // (legacy `action/mod.rs:278-280`).
+                if self.kbd_macro.playback_depth >= KBD_MACRO_RECURSION_LIMIT {
+                    self.alerts.set_info(
+                        "Keyboard macro recursion limit".to_string(),
+                        std::time::Instant::now(),
+                        std::time::Duration::from_secs(2),
+                    );
+                    return DispatchOutcome::Continue;
+                }
+                // Clone the Arc out of `kbd_macro.last` first so
+                // the recursive `run_command` calls below can take
+                // `&mut kbd_macro` again — `recorded` is a refcount
+                // bump, not a borrow.
+                let Some(recorded) = self.kbd_macro.last.clone() else {
+                    self.alerts.set_info(
+                        "No kbd macro defined".to_string(),
+                        std::time::Instant::now(),
+                        std::time::Duration::from_secs(2),
+                    );
+                    return DispatchOutcome::Continue;
+                };
+                let count = self.kbd_macro.execute_count.take().unwrap_or(1);
+                let iterations = if count == 0 { usize::MAX } else { count };
+                self.kbd_macro.playback_depth += 1;
+                let mut last_outcome = DispatchOutcome::Continue;
+                'outer: for _ in 0..iterations {
+                    for inner_cmd in recorded.iter() {
+                        let outcome = self.run_command(*inner_cmd);
+                        if !matches!(outcome, DispatchOutcome::Continue) {
+                            // Quit / Suspend mid-playback propagates
+                            // out so e.g. a macro that ends in Quit
+                            // exits cleanly. Legacy parity.
+                            last_outcome = outcome;
+                            break 'outer;
+                        }
                     }
                 }
+                self.kbd_macro.playback_depth -= 1;
+                last_outcome
             }
-            kbd_macro.playback_depth -= 1;
-            last_outcome
-        }
-        Command::Wait(_) => {
-            // Harness primitive — no-op in the synchronous
-            // dispatch loop. The goldens harness handles waits
-            // at the script-step level; a `led_test_clock`-aware
-            // implementation can hang behaviour off this arm
-            // without changing the variant.
-            DispatchOutcome::Continue
+            Command::Wait(_) => {
+                // Harness primitive — no-op in the synchronous
+                // dispatch loop. The goldens harness handles waits
+                // at the script-step level; a `led_test_clock`-aware
+                // implementation can hang behaviour off this arm
+                // without changing the variant.
+                DispatchOutcome::Continue
+            }
         }
     }
 }
@@ -1348,73 +1433,47 @@ mod tests {
         let mut lsp_extras = LspExtrasState::default();
         let mut lsp_pending = led_state_lsp::LspPending::default();
 
-        // First half of the chord: ctrl+x → pending, Continue.
         let mut find_file: Option<FindFileState> = None;
         let mut isearch: Option<IsearchState> = None;
         let mut file_search: Option<FileSearchState> = None;
-        let outcome = dispatch_key(
-            key(KeyModifiers::CONTROL, KeyCode::Char('x')),
-            &mut tabs,
-            &mut edits,
-            &mut kill_ring,
-            &mut clip,
-            &mut alerts,
-            &mut jumps,
-            &mut browser,
-            &fs,
-            &store,
-            &term,
-        &mut find_file,
-            &mut isearch,
-            &mut file_search,
-            &mut path_chains,
-            &mut completions,
-            &mut completions_pending,
-            &mut lsp_extras,
-            &mut lsp_pending,
-            &DiagnosticsStates::default(),
-            &led_state_diagnostics::LspStatuses::default(),
-            &GitState::default(),
-            &keymap,
-            &mut chord,
-            &mut kbd_macro,
-        );
+        let diagnostics = DiagnosticsStates::default();
+        let lsp_status = led_state_diagnostics::LspStatuses::default();
+        let git = GitState::default();
+        let mut dispatcher = Dispatcher {
+            tabs: &mut tabs,
+            edits: &mut edits,
+            kill_ring: &mut kill_ring,
+            clip: &mut clip,
+            alerts: &mut alerts,
+            jumps: &mut jumps,
+            browser: &mut browser,
+            fs: &fs,
+            store: &store,
+            terminal: &term,
+            find_file: &mut find_file,
+            isearch: &mut isearch,
+            file_search: &mut file_search,
+            completions: &mut completions,
+            completions_pending: &mut completions_pending,
+            lsp_extras: &mut lsp_extras,
+            lsp_pending: &mut lsp_pending,
+            diagnostics: &diagnostics,
+            lsp_status: &lsp_status,
+            git: &git,
+            path_chains: &mut path_chains,
+            keymap: &keymap,
+            chord: &mut chord,
+            kbd_macro: &mut kbd_macro,
+        };
+        // First half of the chord: ctrl+x → pending, Continue.
+        let outcome = dispatcher.dispatch_key(key(KeyModifiers::CONTROL, KeyCode::Char('x')));
         assert_eq!(outcome, DispatchOutcome::Continue);
-        assert!(chord.pending.is_some());
+        assert!(dispatcher.chord.pending.is_some());
 
         // Second half: ctrl+c → chord fires Quit.
-        let mut find_file: Option<FindFileState> = None;
-        let mut isearch: Option<IsearchState> = None;
-        let mut file_search: Option<FileSearchState> = None;
-        let outcome = dispatch_key(
-            key(KeyModifiers::CONTROL, KeyCode::Char('c')),
-            &mut tabs,
-            &mut edits,
-            &mut kill_ring,
-            &mut clip,
-            &mut alerts,
-            &mut jumps,
-            &mut browser,
-            &fs,
-            &store,
-            &term,
-        &mut find_file,
-            &mut isearch,
-            &mut file_search,
-            &mut path_chains,
-            &mut completions,
-            &mut completions_pending,
-            &mut lsp_extras,
-            &mut lsp_pending,
-            &DiagnosticsStates::default(),
-            &led_state_diagnostics::LspStatuses::default(),
-            &GitState::default(),
-            &keymap,
-            &mut chord,
-            &mut kbd_macro,
-        );
+        let outcome = dispatcher.dispatch_key(key(KeyModifiers::CONTROL, KeyCode::Char('c')));
         assert_eq!(outcome, DispatchOutcome::Quit);
-        assert!(chord.pending.is_none());
+        assert!(dispatcher.chord.pending.is_none());
     }
 
     #[test]
@@ -1447,69 +1506,45 @@ mod tests {
         let mut completions_pending = led_state_completions::CompletionsPending::default();
         let mut lsp_extras = LspExtrasState::default();
         let mut lsp_pending = led_state_lsp::LspPending::default();
-        // ctrl+x → pending.
         let mut find_file: Option<FindFileState> = None;
         let mut isearch: Option<IsearchState> = None;
         let mut file_search: Option<FileSearchState> = None;
-        dispatch_key(
-            key(KeyModifiers::CONTROL, KeyCode::Char('x')),
-            &mut tabs,
-            &mut edits,
-            &mut kill_ring,
-            &mut clip,
-            &mut alerts,
-            &mut jumps,
-            &mut browser,
-            &fs,
-            &store,
-            &term,
-        &mut find_file,
-            &mut isearch,
-            &mut file_search,
-            &mut path_chains,
-            &mut completions,
-            &mut completions_pending,
-            &mut lsp_extras,
-            &mut lsp_pending,
-            &DiagnosticsStates::default(),
-            &led_state_diagnostics::LspStatuses::default(),
-            &GitState::default(),
-            &keymap,
-            &mut chord,
-            &mut kbd_macro,
-        );
-        assert!(chord.pending.is_some());
-        // Second key `z` isn't bound under ctrl+x → silent cancel.
-        let mut find_file: Option<FindFileState> = None;
-        let mut isearch: Option<IsearchState> = None;
-        let mut file_search: Option<FileSearchState> = None;
-        let outcome = dispatch_key(
-            key(KeyModifiers::NONE, KeyCode::Char('z')),
-            &mut tabs,
-            &mut edits,
-            &mut kill_ring,
-            &mut clip,
-            &mut alerts,
-            &mut jumps,
-            &mut browser,
-            &fs,
-            &store,
-            &term,
-        &mut find_file,
-            &mut isearch,
-            &mut file_search,
-            &mut path_chains,
-            &mut completions,
-            &mut completions_pending,
-            &mut lsp_extras,
-            &mut lsp_pending,
-            &DiagnosticsStates::default(),
-            &led_state_diagnostics::LspStatuses::default(),
-            &GitState::default(),
-            &keymap,
-            &mut chord,
-            &mut kbd_macro,
-        );
+        let diagnostics = DiagnosticsStates::default();
+        let lsp_status = led_state_diagnostics::LspStatuses::default();
+        let git = GitState::default();
+        let outcome = {
+            let mut dispatcher = Dispatcher {
+                tabs: &mut tabs,
+                edits: &mut edits,
+                kill_ring: &mut kill_ring,
+                clip: &mut clip,
+                alerts: &mut alerts,
+                jumps: &mut jumps,
+                browser: &mut browser,
+                fs: &fs,
+                store: &store,
+                terminal: &term,
+                find_file: &mut find_file,
+                isearch: &mut isearch,
+                file_search: &mut file_search,
+                completions: &mut completions,
+                completions_pending: &mut completions_pending,
+                lsp_extras: &mut lsp_extras,
+                lsp_pending: &mut lsp_pending,
+                diagnostics: &diagnostics,
+                lsp_status: &lsp_status,
+                git: &git,
+                path_chains: &mut path_chains,
+                keymap: &keymap,
+                chord: &mut chord,
+                kbd_macro: &mut kbd_macro,
+            };
+            // ctrl+x → pending.
+            dispatcher.dispatch_key(key(KeyModifiers::CONTROL, KeyCode::Char('x')));
+            assert!(dispatcher.chord.pending.is_some());
+            // Second key `z` isn't bound under ctrl+x → silent cancel.
+            dispatcher.dispatch_key(key(KeyModifiers::NONE, KeyCode::Char('z')))
+        };
         assert_eq!(outcome, DispatchOutcome::Continue);
         assert!(chord.pending.is_none());
         // `z` was NOT inserted — the printable fallback only fires
@@ -1547,66 +1582,40 @@ mod tests {
         let mut find_file: Option<FindFileState> = None;
         let mut isearch: Option<IsearchState> = None;
         let mut file_search: Option<FileSearchState> = None;
-        let outcome = dispatch_key(
-            key(KeyModifiers::CONTROL, KeyCode::Char('q')),
-            &mut tabs,
-            &mut edits,
-            &mut kill_ring,
-            &mut clip,
-            &mut alerts,
-            &mut jumps,
-            &mut browser,
-            &fs,
-            &store,
-            &term,
-        &mut find_file,
-            &mut isearch,
-            &mut file_search,
-            &mut path_chains,
-            &mut completions,
-            &mut completions_pending,
-            &mut lsp_extras,
-            &mut lsp_pending,
-            &DiagnosticsStates::default(),
-            &led_state_diagnostics::LspStatuses::default(),
-            &GitState::default(),
-            &km,
-            &mut chord,
-            &mut kbd_macro,
-        );
+        let diagnostics = DiagnosticsStates::default();
+        let lsp_status = led_state_diagnostics::LspStatuses::default();
+        let git = GitState::default();
+        let mut dispatcher = Dispatcher {
+            tabs: &mut tabs,
+            edits: &mut edits,
+            kill_ring: &mut kill_ring,
+            clip: &mut clip,
+            alerts: &mut alerts,
+            jumps: &mut jumps,
+            browser: &mut browser,
+            fs: &fs,
+            store: &store,
+            terminal: &term,
+            find_file: &mut find_file,
+            isearch: &mut isearch,
+            file_search: &mut file_search,
+            completions: &mut completions,
+            completions_pending: &mut completions_pending,
+            lsp_extras: &mut lsp_extras,
+            lsp_pending: &mut lsp_pending,
+            diagnostics: &diagnostics,
+            lsp_status: &lsp_status,
+            git: &git,
+            path_chains: &mut path_chains,
+            keymap: &km,
+            chord: &mut chord,
+            kbd_macro: &mut kbd_macro,
+        };
+        let outcome = dispatcher.dispatch_key(key(KeyModifiers::CONTROL, KeyCode::Char('q')));
         assert_eq!(outcome, DispatchOutcome::Quit);
 
         // Ctrl-C not bound here → Continue (not Quit).
-        let mut find_file: Option<FindFileState> = None;
-        let mut isearch: Option<IsearchState> = None;
-        let mut file_search: Option<FileSearchState> = None;
-        let outcome = dispatch_key(
-            key(KeyModifiers::CONTROL, KeyCode::Char('c')),
-            &mut tabs,
-            &mut edits,
-            &mut kill_ring,
-            &mut clip,
-            &mut alerts,
-            &mut jumps,
-            &mut browser,
-            &fs,
-            &store,
-            &term,
-        &mut find_file,
-            &mut isearch,
-            &mut file_search,
-            &mut path_chains,
-            &mut completions,
-            &mut completions_pending,
-            &mut lsp_extras,
-            &mut lsp_pending,
-            &DiagnosticsStates::default(),
-            &led_state_diagnostics::LspStatuses::default(),
-            &GitState::default(),
-            &km,
-            &mut chord,
-            &mut kbd_macro,
-        );
+        let outcome = dispatcher.dispatch_key(key(KeyModifiers::CONTROL, KeyCode::Char('c')));
         assert_eq!(outcome, DispatchOutcome::Continue);
     }
 
@@ -1638,33 +1647,36 @@ mod tests {
         let mut find_file: Option<FindFileState> = None;
         let mut isearch: Option<IsearchState> = None;
         let mut file_search: Option<FileSearchState> = None;
-        let outcome = dispatch_key(
-            key(KeyModifiers::CONTROL, KeyCode::Char('z')),
-            &mut tabs,
-            &mut edits,
-            &mut kill_ring,
-            &mut clip,
-            &mut alerts,
-            &mut jumps,
-            &mut browser,
-            &fs,
-            &store,
-            &term,
-            &mut find_file,
-            &mut isearch,
-            &mut file_search,
-            &mut path_chains,
-            &mut completions,
-            &mut completions_pending,
-            &mut lsp_extras,
-            &mut lsp_pending,
-            &DiagnosticsStates::default(),
-            &led_state_diagnostics::LspStatuses::default(),
-            &GitState::default(),
-            &km,
-            &mut chord,
-            &mut kbd_macro,
-        );
+        let diagnostics = DiagnosticsStates::default();
+        let lsp_status = led_state_diagnostics::LspStatuses::default();
+        let git = GitState::default();
+        let mut dispatcher = Dispatcher {
+            tabs: &mut tabs,
+            edits: &mut edits,
+            kill_ring: &mut kill_ring,
+            clip: &mut clip,
+            alerts: &mut alerts,
+            jumps: &mut jumps,
+            browser: &mut browser,
+            fs: &fs,
+            store: &store,
+            terminal: &term,
+            find_file: &mut find_file,
+            isearch: &mut isearch,
+            file_search: &mut file_search,
+            completions: &mut completions,
+            completions_pending: &mut completions_pending,
+            lsp_extras: &mut lsp_extras,
+            lsp_pending: &mut lsp_pending,
+            diagnostics: &diagnostics,
+            lsp_status: &lsp_status,
+            git: &git,
+            path_chains: &mut path_chains,
+            keymap: &km,
+            chord: &mut chord,
+            kbd_macro: &mut kbd_macro,
+        };
+        let outcome = dispatcher.dispatch_key(key(KeyModifiers::CONTROL, KeyCode::Char('z')));
         assert_eq!(outcome, DispatchOutcome::Suspend);
     }
 
@@ -1692,33 +1704,38 @@ mod tests {
         let mut completions_pending = led_state_completions::CompletionsPending::default();
         let mut lsp_extras = LspExtrasState::default();
         let mut lsp_pending = led_state_lsp::LspPending::default();
-        dispatch_key(
-            key(KeyModifiers::NONE, KeyCode::Char('z')),
-            &mut tabs,
-            &mut edits,
-            &mut kill_ring,
-            &mut clip,
-            &mut alerts,
-            &mut jumps,
-            &mut browser,
-            &fs,
-            &store,
-            &term,
-        &mut find_file,
-            &mut isearch,
-            &mut file_search,
-            &mut path_chains,
-            &mut completions,
-            &mut completions_pending,
-            &mut lsp_extras,
-            &mut lsp_pending,
-            &DiagnosticsStates::default(),
-            &led_state_diagnostics::LspStatuses::default(),
-            &GitState::default(),
-            &km,
-            &mut chord,
-            &mut kbd_macro,
-        );
+        let diagnostics = DiagnosticsStates::default();
+        let lsp_status = led_state_diagnostics::LspStatuses::default();
+        let git = GitState::default();
+        {
+            let mut dispatcher = Dispatcher {
+                tabs: &mut tabs,
+                edits: &mut edits,
+                kill_ring: &mut kill_ring,
+                clip: &mut clip,
+                alerts: &mut alerts,
+                jumps: &mut jumps,
+                browser: &mut browser,
+                fs: &fs,
+                store: &store,
+                terminal: &term,
+                find_file: &mut find_file,
+                isearch: &mut isearch,
+                file_search: &mut file_search,
+                completions: &mut completions,
+                completions_pending: &mut completions_pending,
+                lsp_extras: &mut lsp_extras,
+                lsp_pending: &mut lsp_pending,
+                diagnostics: &diagnostics,
+                lsp_status: &lsp_status,
+                git: &git,
+                path_chains: &mut path_chains,
+                keymap: &km,
+                chord: &mut chord,
+                kbd_macro: &mut kbd_macro,
+            };
+            dispatcher.dispatch_key(key(KeyModifiers::NONE, KeyCode::Char('z')));
+        }
         assert_eq!(rope_of(&edits, "file.rs").to_string(), "z");
     }
 
@@ -1747,33 +1764,38 @@ mod tests {
         let mut completions_pending = led_state_completions::CompletionsPending::default();
         let mut lsp_extras = LspExtrasState::default();
         let mut lsp_pending = led_state_lsp::LspPending::default();
-        dispatch_key(
-            key(KeyModifiers::CONTROL, KeyCode::Char('x')),
-            &mut tabs,
-            &mut edits,
-            &mut kill_ring,
-            &mut clip,
-            &mut alerts,
-            &mut jumps,
-            &mut browser,
-            &fs,
-            &store,
-            &term,
-        &mut find_file,
-            &mut isearch,
-            &mut file_search,
-            &mut path_chains,
-            &mut completions,
-            &mut completions_pending,
-            &mut lsp_extras,
-            &mut lsp_pending,
-            &DiagnosticsStates::default(),
-            &led_state_diagnostics::LspStatuses::default(),
-            &GitState::default(),
-            &km,
-            &mut chord,
-            &mut kbd_macro,
-        );
+        let diagnostics = DiagnosticsStates::default();
+        let lsp_status = led_state_diagnostics::LspStatuses::default();
+        let git = GitState::default();
+        {
+            let mut dispatcher = Dispatcher {
+                tabs: &mut tabs,
+                edits: &mut edits,
+                kill_ring: &mut kill_ring,
+                clip: &mut clip,
+                alerts: &mut alerts,
+                jumps: &mut jumps,
+                browser: &mut browser,
+                fs: &fs,
+                store: &store,
+                terminal: &term,
+                find_file: &mut find_file,
+                isearch: &mut isearch,
+                file_search: &mut file_search,
+                completions: &mut completions,
+                completions_pending: &mut completions_pending,
+                lsp_extras: &mut lsp_extras,
+                lsp_pending: &mut lsp_pending,
+                diagnostics: &diagnostics,
+                lsp_status: &lsp_status,
+                git: &git,
+                path_chains: &mut path_chains,
+                keymap: &km,
+                chord: &mut chord,
+                kbd_macro: &mut kbd_macro,
+            };
+            dispatcher.dispatch_key(key(KeyModifiers::CONTROL, KeyCode::Char('x')));
+        }
         assert_eq!(rope_of(&edits, "file.rs").to_string(), "");
     }
 
@@ -1868,33 +1890,37 @@ mod tests {
             "rust-analyzer".to_string(),
             led_state_diagnostics::LspServerStatus::default(),
         );
-        dispatch_key(
-            key(KeyModifiers::ALT, KeyCode::Enter),
-            &mut tabs,
-            &mut edits,
-            &mut kr,
-            &mut clip,
-            &mut alerts,
-            &mut jumps,
-            &mut browser,
-            &fs,
-            &store,
-            &term,
-            &mut find_file,
-            &mut isearch,
-            &mut file_search,
-            &mut path_chains,
-            &mut completions,
-            &mut completions_pending,
-            &mut lsp_extras,
-            &mut lsp_pending,
-            &DiagnosticsStates::default(),
-            &lsp_status,
-            &GitState::default(),
-            &km,
-            &mut chord,
-            &mut kbd_macro,
-        );
+        let diagnostics = DiagnosticsStates::default();
+        let git = GitState::default();
+        {
+            let mut dispatcher = Dispatcher {
+                tabs: &mut tabs,
+                edits: &mut edits,
+                kill_ring: &mut kr,
+                clip: &mut clip,
+                alerts: &mut alerts,
+                jumps: &mut jumps,
+                browser: &mut browser,
+                fs: &fs,
+                store: &store,
+                terminal: &term,
+                find_file: &mut find_file,
+                isearch: &mut isearch,
+                file_search: &mut file_search,
+                completions: &mut completions,
+                completions_pending: &mut completions_pending,
+                lsp_extras: &mut lsp_extras,
+                lsp_pending: &mut lsp_pending,
+                diagnostics: &diagnostics,
+                lsp_status: &lsp_status,
+                git: &git,
+                path_chains: &mut path_chains,
+                keymap: &km,
+                chord: &mut chord,
+                kbd_macro: &mut kbd_macro,
+            };
+            dispatcher.dispatch_key(key(KeyModifiers::ALT, KeyCode::Enter));
+        }
         assert_eq!(lsp_pending.pending_goto.len(), 1);
         let req = &lsp_pending.pending_goto[0];
         assert_eq!(req.path, canon("file.rs"));
@@ -1927,33 +1953,38 @@ mod tests {
         let mut file_search: Option<FileSearchState> = None;
         let mut path_chains = std::collections::HashMap::new();
         let km = default_keymap();
-        dispatch_key(
-            key(KeyModifiers::ALT, KeyCode::Enter),
-            &mut tabs,
-            &mut edits,
-            &mut kr,
-            &mut clip,
-            &mut alerts,
-            &mut jumps,
-            &mut browser,
-            &fs,
-            &store,
-            &term,
-            &mut find_file,
-            &mut isearch,
-            &mut file_search,
-            &mut path_chains,
-            &mut completions,
-            &mut completions_pending,
-            &mut lsp_extras,
-            &mut lsp_pending,
-            &DiagnosticsStates::default(),
-            &led_state_diagnostics::LspStatuses::default(),
-            &GitState::default(),
-            &km,
-            &mut chord,
-            &mut kbd_macro,
-        );
+        let diagnostics = DiagnosticsStates::default();
+        let lsp_status = led_state_diagnostics::LspStatuses::default();
+        let git = GitState::default();
+        {
+            let mut dispatcher = Dispatcher {
+                tabs: &mut tabs,
+                edits: &mut edits,
+                kill_ring: &mut kr,
+                clip: &mut clip,
+                alerts: &mut alerts,
+                jumps: &mut jumps,
+                browser: &mut browser,
+                fs: &fs,
+                store: &store,
+                terminal: &term,
+                find_file: &mut find_file,
+                isearch: &mut isearch,
+                file_search: &mut file_search,
+                completions: &mut completions,
+                completions_pending: &mut completions_pending,
+                lsp_extras: &mut lsp_extras,
+                lsp_pending: &mut lsp_pending,
+                diagnostics: &diagnostics,
+                lsp_status: &lsp_status,
+                git: &git,
+                path_chains: &mut path_chains,
+                keymap: &km,
+                chord: &mut chord,
+                kbd_macro: &mut kbd_macro,
+            };
+            dispatcher.dispatch_key(key(KeyModifiers::ALT, KeyCode::Enter));
+        }
         assert!(lsp_pending.pending_goto.is_empty());
     }
 
@@ -1962,20 +1993,12 @@ mod tests {
     /// Build a buffer at "file.rs" with one line of content. M22
     /// tests that exercise InsertChar / cursor moves need a real
     /// rope so the edit primitives can mutate it.
-    fn macro_fixture() -> (
-        Tabs,
-        BufferEdits,
-        BufferStore,
-        Terminal,
-        ChordState,
-        led_state_kbd_macro::KbdMacroState,
-        AlertState,
-    ) {
+    fn macro_fixture() -> super::testutil::MacroDispatcherFixture {
         let (tabs, edits, store, term) = fixture_with_content(
             "abc\nxyz\n",
             Dims { cols: 80, rows: 24 },
         );
-        (
+        super::testutil::MacroDispatcherFixture::new(
             tabs,
             edits,
             store,
@@ -2005,22 +2028,15 @@ mod tests {
 
     #[test]
     fn kbd_macro_start_seeds_recording_and_alert() {
-        let (mut tabs, mut edits, store, term, mut chord, mut km, mut alerts)
-            = macro_fixture();
+        let mut fx = macro_fixture();
         // Press Ctrl-x ( as a chord (prefix then `(`).
-        dispatch_with_macro(
-            key(KeyModifiers::CONTROL, KeyCode::Char('x')),
-            &mut tabs, &mut edits, &mut chord, &mut km, &mut alerts, &store, &term,
-        );
-        assert!(chord.pending.is_some());
-        dispatch_with_macro(
-            key(KeyModifiers::NONE, KeyCode::Char('(')),
-            &mut tabs, &mut edits, &mut chord, &mut km, &mut alerts, &store, &term,
-        );
-        assert!(km.recording, "recording flag should flip to true");
-        assert!(km.current.is_empty(), "current starts empty");
+        fx.dispatch(key(KeyModifiers::CONTROL, KeyCode::Char('x')));
+        assert!(fx.chord.pending.is_some());
+        fx.dispatch(key(KeyModifiers::NONE, KeyCode::Char('(')));
+        assert!(fx.kbd_macro.recording, "recording flag should flip to true");
+        assert!(fx.kbd_macro.current.is_empty(), "current starts empty");
         assert_eq!(
-            alerts.info.as_deref(),
+            fx.alerts.info.as_deref(),
             Some("Defining kbd macro..."),
         );
     }
@@ -2029,89 +2045,61 @@ mod tests {
     fn kbd_macro_start_while_recording_clears_current() {
         // Restart-recording-without-ending path: Ctrl-x ( twice
         // resets `current` and stays in record mode.
-        let (mut tabs, mut edits, store, term, mut chord, mut km, mut alerts)
-            = macro_fixture();
-        km.recording = true;
-        km.current.push(Command::CursorDown);
-        km.current.push(Command::InsertChar('a'));
+        let mut fx = macro_fixture();
+        fx.kbd_macro.recording = true;
+        fx.kbd_macro.current.push(Command::CursorDown);
+        fx.kbd_macro.current.push(Command::InsertChar('a'));
         // First half of chord (prefix).
-        dispatch_with_macro(
-            key(KeyModifiers::CONTROL, KeyCode::Char('x')),
-            &mut tabs, &mut edits, &mut chord, &mut km, &mut alerts, &store, &term,
-        );
+        fx.dispatch(key(KeyModifiers::CONTROL, KeyCode::Char('x')));
         // Second half resolves to KbdMacroStart.
-        dispatch_with_macro(
-            key(KeyModifiers::NONE, KeyCode::Char('(')),
-            &mut tabs, &mut edits, &mut chord, &mut km, &mut alerts, &store, &term,
-        );
-        assert!(km.recording);
-        assert!(km.current.is_empty());
+        fx.dispatch(key(KeyModifiers::NONE, KeyCode::Char('(')));
+        assert!(fx.kbd_macro.recording);
+        assert!(fx.kbd_macro.current.is_empty());
     }
 
     #[test]
     fn kbd_macro_end_while_recording_moves_current_to_last() {
-        let (mut tabs, mut edits, store, term, mut chord, mut km, mut alerts)
-            = macro_fixture();
-        km.recording = true;
-        km.current.push(Command::CursorDown);
-        km.current.push(Command::InsertChar('!'));
-        dispatch_with_macro(
-            key(KeyModifiers::CONTROL, KeyCode::Char('x')),
-            &mut tabs, &mut edits, &mut chord, &mut km, &mut alerts, &store, &term,
-        );
-        dispatch_with_macro(
-            key(KeyModifiers::NONE, KeyCode::Char(')')),
-            &mut tabs, &mut edits, &mut chord, &mut km, &mut alerts, &store, &term,
-        );
-        assert!(!km.recording);
-        assert!(km.current.is_empty());
-        let last = km.last.as_ref().expect("last set");
+        let mut fx = macro_fixture();
+        fx.kbd_macro.recording = true;
+        fx.kbd_macro.current.push(Command::CursorDown);
+        fx.kbd_macro.current.push(Command::InsertChar('!'));
+        fx.dispatch(key(KeyModifiers::CONTROL, KeyCode::Char('x')));
+        fx.dispatch(key(KeyModifiers::NONE, KeyCode::Char(')')));
+        assert!(!fx.kbd_macro.recording);
+        assert!(fx.kbd_macro.current.is_empty());
+        let last = fx.kbd_macro.last.as_ref().expect("last set");
         assert_eq!(
             last.as_slice(),
             &[Command::CursorDown, Command::InsertChar('!')],
         );
         assert_eq!(
-            alerts.info.as_deref(),
+            fx.alerts.info.as_deref(),
             Some("Keyboard macro defined"),
         );
     }
 
     #[test]
     fn kbd_macro_end_without_start_alerts_only() {
-        let (mut tabs, mut edits, store, term, mut chord, mut km, mut alerts)
-            = macro_fixture();
-        assert!(!km.recording);
-        dispatch_with_macro(
-            key(KeyModifiers::CONTROL, KeyCode::Char('x')),
-            &mut tabs, &mut edits, &mut chord, &mut km, &mut alerts, &store, &term,
-        );
-        dispatch_with_macro(
-            key(KeyModifiers::NONE, KeyCode::Char(')')),
-            &mut tabs, &mut edits, &mut chord, &mut km, &mut alerts, &store, &term,
-        );
-        assert!(!km.recording);
-        assert!(km.last.is_none());
+        let mut fx = macro_fixture();
+        assert!(!fx.kbd_macro.recording);
+        fx.dispatch(key(KeyModifiers::CONTROL, KeyCode::Char('x')));
+        fx.dispatch(key(KeyModifiers::NONE, KeyCode::Char(')')));
+        assert!(!fx.kbd_macro.recording);
+        assert!(fx.kbd_macro.last.is_none());
         assert_eq!(
-            alerts.info.as_deref(),
+            fx.alerts.info.as_deref(),
             Some("Not defining kbd macro"),
         );
     }
 
     #[test]
     fn kbd_macro_execute_with_no_macro_alerts() {
-        let (mut tabs, mut edits, store, term, mut chord, mut km, mut alerts)
-            = macro_fixture();
-        assert!(km.last.is_none());
-        dispatch_with_macro(
-            key(KeyModifiers::CONTROL, KeyCode::Char('x')),
-            &mut tabs, &mut edits, &mut chord, &mut km, &mut alerts, &store, &term,
-        );
-        dispatch_with_macro(
-            key(KeyModifiers::NONE, KeyCode::Char('e')),
-            &mut tabs, &mut edits, &mut chord, &mut km, &mut alerts, &store, &term,
-        );
+        let mut fx = macro_fixture();
+        assert!(fx.kbd_macro.last.is_none());
+        fx.dispatch(key(KeyModifiers::CONTROL, KeyCode::Char('x')));
+        fx.dispatch(key(KeyModifiers::NONE, KeyCode::Char('e')));
         assert_eq!(
-            alerts.info.as_deref(),
+            fx.alerts.info.as_deref(),
             Some("No kbd macro defined"),
         );
     }
@@ -2121,48 +2109,34 @@ mod tests {
         // While recording, every dispatched ordinary command is
         // appended to `current` BEFORE running. The filter excludes
         // meta-actions per `should_record`.
-        let (mut tabs, mut edits, store, term, mut chord, mut km, mut alerts)
-            = macro_fixture();
-        km.recording = true;
+        let mut fx = macro_fixture();
+        fx.kbd_macro.recording = true;
         // CursorDown should be recorded.
-        dispatch_with_macro(
-            key(KeyModifiers::NONE, KeyCode::Down),
-            &mut tabs, &mut edits, &mut chord, &mut km, &mut alerts, &store, &term,
-        );
+        fx.dispatch(key(KeyModifiers::NONE, KeyCode::Down));
         // InsertChar should be recorded.
-        dispatch_with_macro(
-            key(KeyModifiers::NONE, KeyCode::Char('z')),
-            &mut tabs, &mut edits, &mut chord, &mut km, &mut alerts, &store, &term,
-        );
+        fx.dispatch(key(KeyModifiers::NONE, KeyCode::Char('z')));
         assert_eq!(
-            km.current.as_slice(),
+            fx.kbd_macro.current.as_slice(),
             &[Command::CursorDown, Command::InsertChar('z')],
         );
     }
 
     #[test]
     fn kbd_macro_execute_replays_recorded_commands() {
-        let (mut tabs, mut edits, store, term, mut chord, mut km, mut alerts)
-            = macro_fixture();
+        let mut fx = macro_fixture();
         // Pre-seed `last` so we can directly observe playback.
-        km.last = Some(Arc::new(vec![Command::CursorDown]));
+        fx.kbd_macro.last = Some(Arc::new(vec![Command::CursorDown]));
         // Cursor starts at L1; one KbdMacroExecute should advance
         // it one line (recursive run_command calls).
-        let start_line = tabs.open[0].cursor.line;
-        dispatch_with_macro(
-            key(KeyModifiers::CONTROL, KeyCode::Char('x')),
-            &mut tabs, &mut edits, &mut chord, &mut km, &mut alerts, &store, &term,
-        );
-        dispatch_with_macro(
-            key(KeyModifiers::NONE, KeyCode::Char('e')),
-            &mut tabs, &mut edits, &mut chord, &mut km, &mut alerts, &store, &term,
-        );
+        let start_line = fx.tabs.open[0].cursor.line;
+        fx.dispatch(key(KeyModifiers::CONTROL, KeyCode::Char('x')));
+        fx.dispatch(key(KeyModifiers::NONE, KeyCode::Char('e')));
         assert_eq!(
-            tabs.open[0].cursor.line,
+            fx.tabs.open[0].cursor.line,
             start_line + 1,
             "playback should re-dispatch CursorDown",
         );
-        assert_eq!(km.playback_depth, 0, "depth restored after replay");
+        assert_eq!(fx.kbd_macro.playback_depth, 0, "depth restored after replay");
     }
 
     #[test]
@@ -2170,30 +2144,23 @@ mod tests {
         // `Ctrl-x 3 e` should replay the macro 3×. We seed `last`
         // and `execute_count` directly (the chord-prefix path is
         // covered separately in `chord_count_accumulates_digits`).
-        let (mut tabs, mut edits, store, term, mut chord, mut km, mut alerts)
-            = macro_fixture();
+        let mut fx = macro_fixture();
         // Start with cursor at L0 — buffer "abc\nxyz\n" has only 2
         // lines, so 3× CursorDown clamps to last line. We use an
         // edit (InsertChar) instead so each iteration is observable.
-        km.last = Some(Arc::new(vec![Command::InsertChar('!')]));
-        km.execute_count = Some(3);
-        let start_len = edits.buffers.values().next().unwrap().rope.len_chars();
-        dispatch_with_macro(
-            key(KeyModifiers::CONTROL, KeyCode::Char('x')),
-            &mut tabs, &mut edits, &mut chord, &mut km, &mut alerts, &store, &term,
-        );
-        dispatch_with_macro(
-            key(KeyModifiers::NONE, KeyCode::Char('e')),
-            &mut tabs, &mut edits, &mut chord, &mut km, &mut alerts, &store, &term,
-        );
-        let end_len = edits.buffers.values().next().unwrap().rope.len_chars();
+        fx.kbd_macro.last = Some(Arc::new(vec![Command::InsertChar('!')]));
+        fx.kbd_macro.execute_count = Some(3);
+        let start_len = fx.edits.buffers.values().next().unwrap().rope.len_chars();
+        fx.dispatch(key(KeyModifiers::CONTROL, KeyCode::Char('x')));
+        fx.dispatch(key(KeyModifiers::NONE, KeyCode::Char('e')));
+        let end_len = fx.edits.buffers.values().next().unwrap().rope.len_chars();
         assert_eq!(
             end_len - start_len,
             3,
             "macro played 3× should insert 3 chars",
         );
         assert!(
-            km.execute_count.is_none(),
+            fx.kbd_macro.execute_count.is_none(),
             "execute_count consumed by take()",
         );
     }
@@ -2203,23 +2170,16 @@ mod tests {
         // Hit the recursion limit by pre-bumping playback_depth
         // to the cap. Execute should skip playback and surface
         // the alert.
-        let (mut tabs, mut edits, store, term, mut chord, mut km, mut alerts)
-            = macro_fixture();
-        km.last = Some(Arc::new(vec![Command::InsertChar('!')]));
-        km.playback_depth = led_state_kbd_macro::RECURSION_LIMIT;
-        let start_len = edits.buffers.values().next().unwrap().rope.len_chars();
-        dispatch_with_macro(
-            key(KeyModifiers::CONTROL, KeyCode::Char('x')),
-            &mut tabs, &mut edits, &mut chord, &mut km, &mut alerts, &store, &term,
-        );
-        dispatch_with_macro(
-            key(KeyModifiers::NONE, KeyCode::Char('e')),
-            &mut tabs, &mut edits, &mut chord, &mut km, &mut alerts, &store, &term,
-        );
-        let end_len = edits.buffers.values().next().unwrap().rope.len_chars();
+        let mut fx = macro_fixture();
+        fx.kbd_macro.last = Some(Arc::new(vec![Command::InsertChar('!')]));
+        fx.kbd_macro.playback_depth = led_state_kbd_macro::RECURSION_LIMIT;
+        let start_len = fx.edits.buffers.values().next().unwrap().rope.len_chars();
+        fx.dispatch(key(KeyModifiers::CONTROL, KeyCode::Char('x')));
+        fx.dispatch(key(KeyModifiers::NONE, KeyCode::Char('e')));
+        let end_len = fx.edits.buffers.values().next().unwrap().rope.len_chars();
         assert_eq!(end_len, start_len, "no chars inserted at the cap");
         assert_eq!(
-            alerts.info.as_deref(),
+            fx.alerts.info.as_deref(),
             Some("Keyboard macro recursion limit"),
         );
     }
@@ -2227,69 +2187,46 @@ mod tests {
     #[test]
     fn chord_count_accumulates_digits() {
         // `Ctrl-x 4 2 e` → execute_count = 42.
-        let (mut tabs, mut edits, store, term, mut chord, mut km, mut alerts)
-            = macro_fixture();
-        km.last = Some(Arc::new(vec![Command::CursorRight]));
+        let mut fx = macro_fixture();
+        fx.kbd_macro.last = Some(Arc::new(vec![Command::CursorRight]));
         // Ctrl-x → prefix.
-        dispatch_with_macro(
-            key(KeyModifiers::CONTROL, KeyCode::Char('x')),
-            &mut tabs, &mut edits, &mut chord, &mut km, &mut alerts, &store, &term,
-        );
-        assert!(chord.pending.is_some());
+        fx.dispatch(key(KeyModifiers::CONTROL, KeyCode::Char('x')));
+        assert!(fx.chord.pending.is_some());
         // '4' → digit, prefix preserved, count=4.
-        dispatch_with_macro(
-            key(KeyModifiers::NONE, KeyCode::Char('4')),
-            &mut tabs, &mut edits, &mut chord, &mut km, &mut alerts, &store, &term,
-        );
-        assert!(chord.pending.is_some(), "prefix kept across digit");
-        assert_eq!(chord.count, Some(4));
+        fx.dispatch(key(KeyModifiers::NONE, KeyCode::Char('4')));
+        assert!(fx.chord.pending.is_some(), "prefix kept across digit");
+        assert_eq!(fx.chord.count, Some(4));
         // '2' → digit, count=42.
-        dispatch_with_macro(
-            key(KeyModifiers::NONE, KeyCode::Char('2')),
-            &mut tabs, &mut edits, &mut chord, &mut km, &mut alerts, &store, &term,
-        );
-        assert_eq!(chord.count, Some(42));
+        fx.dispatch(key(KeyModifiers::NONE, KeyCode::Char('2')));
+        assert_eq!(fx.chord.count, Some(42));
         // 'e' → KbdMacroExecute. Count moves into kbd_macro
         // before run_command runs, where take() consumes it.
-        dispatch_with_macro(
-            key(KeyModifiers::NONE, KeyCode::Char('e')),
-            &mut tabs, &mut edits, &mut chord, &mut km, &mut alerts, &store, &term,
-        );
+        fx.dispatch(key(KeyModifiers::NONE, KeyCode::Char('e')));
         // After execute, count is consumed (take()).
-        assert!(km.execute_count.is_none());
+        assert!(fx.kbd_macro.execute_count.is_none());
         // Cursor advanced 42× CursorRight, but the rope only has
         // 3 chars on line 0 — `apply_move` clamps. We just want
         // to check the count was applied non-zero times.
         // Simpler: check chord.count was cleared.
-        assert_eq!(chord.count, None);
+        assert_eq!(fx.chord.count, None);
     }
 
     #[test]
     fn macro_repeat_latch_fires_bare_e() {
         // After a successful KbdMacroExecute, bare `e` re-fires
         // the macro without going through the keymap.
-        let (mut tabs, mut edits, store, term, mut chord, mut km, mut alerts)
-            = macro_fixture();
-        km.last = Some(Arc::new(vec![Command::CursorDown]));
+        let mut fx = macro_fixture();
+        fx.kbd_macro.last = Some(Arc::new(vec![Command::CursorDown]));
         // First execute via Ctrl-x e.
-        dispatch_with_macro(
-            key(KeyModifiers::CONTROL, KeyCode::Char('x')),
-            &mut tabs, &mut edits, &mut chord, &mut km, &mut alerts, &store, &term,
-        );
-        dispatch_with_macro(
-            key(KeyModifiers::NONE, KeyCode::Char('e')),
-            &mut tabs, &mut edits, &mut chord, &mut km, &mut alerts, &store, &term,
-        );
-        assert!(chord.macro_repeat, "latch set after execute");
+        fx.dispatch(key(KeyModifiers::CONTROL, KeyCode::Char('x')));
+        fx.dispatch(key(KeyModifiers::NONE, KeyCode::Char('e')));
+        assert!(fx.chord.macro_repeat, "latch set after execute");
         // Bare `e` (no modifiers) should resolve to KbdMacroExecute,
         // NOT InsertChar('e'). After dispatch, the latch is still
         // set (each successive bare-e keeps it alive).
-        let buffer_before = edits.buffers.values().next().unwrap().rope.clone();
-        dispatch_with_macro(
-            key(KeyModifiers::NONE, KeyCode::Char('e')),
-            &mut tabs, &mut edits, &mut chord, &mut km, &mut alerts, &store, &term,
-        );
-        let buffer_after = edits.buffers.values().next().unwrap().rope.clone();
+        let buffer_before = fx.edits.buffers.values().next().unwrap().rope.clone();
+        fx.dispatch(key(KeyModifiers::NONE, KeyCode::Char('e')));
+        let buffer_after = fx.edits.buffers.values().next().unwrap().rope.clone();
         assert_eq!(
             buffer_before.to_string(),
             buffer_after.to_string(),
@@ -2299,32 +2236,19 @@ mod tests {
 
     #[test]
     fn macro_repeat_latch_clears_on_other_key() {
-        let (mut tabs, mut edits, store, term, mut chord, mut km, mut alerts)
-            = macro_fixture();
-        km.last = Some(Arc::new(vec![Command::CursorDown]));
+        let mut fx = macro_fixture();
+        fx.kbd_macro.last = Some(Arc::new(vec![Command::CursorDown]));
         // Execute via Ctrl-x e.
-        dispatch_with_macro(
-            key(KeyModifiers::CONTROL, KeyCode::Char('x')),
-            &mut tabs, &mut edits, &mut chord, &mut km, &mut alerts, &store, &term,
-        );
-        dispatch_with_macro(
-            key(KeyModifiers::NONE, KeyCode::Char('e')),
-            &mut tabs, &mut edits, &mut chord, &mut km, &mut alerts, &store, &term,
-        );
-        assert!(chord.macro_repeat);
+        fx.dispatch(key(KeyModifiers::CONTROL, KeyCode::Char('x')));
+        fx.dispatch(key(KeyModifiers::NONE, KeyCode::Char('e')));
+        assert!(fx.chord.macro_repeat);
         // Any non-`e` clears the latch.
-        dispatch_with_macro(
-            key(KeyModifiers::NONE, KeyCode::Down),
-            &mut tabs, &mut edits, &mut chord, &mut km, &mut alerts, &store, &term,
-        );
-        assert!(!chord.macro_repeat, "latch cleared on non-e key");
+        fx.dispatch(key(KeyModifiers::NONE, KeyCode::Down));
+        assert!(!fx.chord.macro_repeat, "latch cleared on non-e key");
         // Now bare `e` should InsertChar('e'), not replay.
-        let before = edits.buffers.values().next().unwrap().rope.to_string();
-        dispatch_with_macro(
-            key(KeyModifiers::NONE, KeyCode::Char('e')),
-            &mut tabs, &mut edits, &mut chord, &mut km, &mut alerts, &store, &term,
-        );
-        let after = edits.buffers.values().next().unwrap().rope.to_string();
+        let before = fx.edits.buffers.values().next().unwrap().rope.to_string();
+        fx.dispatch(key(KeyModifiers::NONE, KeyCode::Char('e')));
+        let after = fx.edits.buffers.values().next().unwrap().rope.to_string();
         assert!(
             after.contains('e') && after.len() == before.len() + 1,
             "bare e after latch cleared inserts 'e' literally",
@@ -2339,24 +2263,17 @@ mod tests {
         // next bare `e` retries. Legacy parity quirk; flagged
         // as `[unclear — bug?]` in the spec but kept for golden
         // alignment.
-        let (mut tabs, mut edits, store, term, mut chord, mut km, mut alerts)
-            = macro_fixture();
+        let mut fx = macro_fixture();
         // No `last` defined; execute will fail.
-        assert!(km.last.is_none());
-        dispatch_with_macro(
-            key(KeyModifiers::CONTROL, KeyCode::Char('x')),
-            &mut tabs, &mut edits, &mut chord, &mut km, &mut alerts, &store, &term,
-        );
-        dispatch_with_macro(
-            key(KeyModifiers::NONE, KeyCode::Char('e')),
-            &mut tabs, &mut edits, &mut chord, &mut km, &mut alerts, &store, &term,
-        );
+        assert!(fx.kbd_macro.last.is_none());
+        fx.dispatch(key(KeyModifiers::CONTROL, KeyCode::Char('x')));
+        fx.dispatch(key(KeyModifiers::NONE, KeyCode::Char('e')));
         assert_eq!(
-            alerts.info.as_deref(),
+            fx.alerts.info.as_deref(),
             Some("No kbd macro defined"),
         );
         assert!(
-            chord.macro_repeat,
+            fx.chord.macro_repeat,
             "latch survives a failed execute (legacy parity)",
         );
     }
@@ -2366,21 +2283,14 @@ mod tests {
         // Recording a macro that itself invokes the previous macro
         // is legal. `should_record(KbdMacroExecute) = true`, so
         // it lands in `current` like any other command.
-        let (mut tabs, mut edits, store, term, mut chord, mut km, mut alerts)
-            = macro_fixture();
-        km.recording = true;
+        let mut fx = macro_fixture();
+        fx.kbd_macro.recording = true;
         // Ctrl-x e during recording: KbdMacroExecute resolves;
         // the recording hook should append it to `current`.
-        dispatch_with_macro(
-            key(KeyModifiers::CONTROL, KeyCode::Char('x')),
-            &mut tabs, &mut edits, &mut chord, &mut km, &mut alerts, &store, &term,
-        );
-        dispatch_with_macro(
-            key(KeyModifiers::NONE, KeyCode::Char('e')),
-            &mut tabs, &mut edits, &mut chord, &mut km, &mut alerts, &store, &term,
-        );
+        fx.dispatch(key(KeyModifiers::CONTROL, KeyCode::Char('x')));
+        fx.dispatch(key(KeyModifiers::NONE, KeyCode::Char('e')));
         assert_eq!(
-            km.current.as_slice(),
+            fx.kbd_macro.current.as_slice(),
             &[Command::KbdMacroExecute],
         );
     }
