@@ -5,18 +5,18 @@ runs because of test-load flakiness; check individual tests with
 `cargo test --manifest-path goldens/Cargo.toml --test <name>` to
 confirm a real failure.
 
-## Current state
+## Current state (post-M22, 2026-04-26)
 
 | Suite          | Pass | Fail |
 |----------------|------|------|
-| actions        | 52  | 5   |
+| actions        | 54  | 3   |
 | config_keys    | 7   | 0   |
 | driver_events  | 25  | 2   |
 | edge           | 26  | 3   |
-| features       | 22  | 4   |
-| keybindings    | 104 | 7   |
+| features       | 24  | 2   |
+| keybindings    | 108 | 3   |
 | smoke          | 4   | 1   |
-| **Total**      | **240** | **22** |
+| **Total**      | **248** | **14** |
 
 Counts can swing ±1 per run from test-load flakiness on the
 parallel runner; the clipboard isolation flag knocked out the
@@ -153,20 +153,32 @@ pasteboard).
 
 ## Remaining failures by cluster
 
-### A. Unimplemented commands — 5 tests (M22)
+### A. M23 — Auto-indent / reflow / sort-imports — 7 tests
 
-`kbd_macro_start`, `kbd_macro_end`, `kbd_macro_execute`,
-`reflow_paragraph`, `insert_tab`. Each is a feature on its own
-(macro record/replay state machine, paragraph rewrap, Tab key
-behavior). Out-of-scope until M22.
+Tests gated on the M23 milestone (`ROADMAP.md` § "M23"):
 
-### B. Cross-instance sync (`WorkspaceCheckSync`) — ~6 tests
+- `actions/insert_tab` — `Tab` key behavior in editor.
+- `actions/reflow_paragraph` — `Ctrl-q` paragraph rewrap.
+- `actions/sort_imports` — `Ctrl-x i` import-block sort.
+- `keybindings/ctrl_x_i` — sort_imports binding alert.
+- `keybindings/main_ctrl_q` — reflow_paragraph binding.
+- `keybindings/main_tab` — insert_tab binding (currently
+  reserved for `next_tab` placeholder).
+- `features/editing_type_delete_reflow` — narrative auto-indent
+  scenario.
 
-Tests: `smoke/external_change`, `edge/external_change_while_dirty`,
-`edge/external_delete_open_file`,
-`driver_events/docstore/external_change`,
-`driver_events/workspace/workspace_changed`,
-several `lsp_*` features.
+All three commands lean on M15 (syntax) for language-aware
+logic. Out of scope until M23.
+
+### B. M26 — External file change + cross-instance sync — 5 tests
+
+Tests gated on M26 (file-watch driver + `SessionCmd::CheckSync`):
+
+- `smoke/external_change`
+- `edge/external_change_while_dirty`
+- `edge/external_delete_open_file`
+- `driver_events/docstore_external_change`
+- `driver_events/workspace_workspace_changed`
 
 The rewrite's session driver has no `CheckSync` command — it's
 the cross-instance sync feature documented in
@@ -174,9 +186,9 @@ the cross-instance sync feature documented in
 touch files watched by a non-recursive notify watcher,
 debounced 100ms; on Modify, the model bumps
 `pending_sync_check`, derived dispatches `CheckSync`, the
-driver runs `db::load_undo_after`. Real M22+ work; pretending
-to emit the trace without the underlying machinery would mask
-that the feature isn't there.
+driver runs `db::load_undo_after`. Pretending to emit the
+trace without the underlying machinery would mask that the
+feature isn't there.
 
 ### C. Completion / rename / code-action overlay rendering
 
@@ -195,20 +207,20 @@ in this neighbourhood are unrelated to the popups:
   rewrite never emitted; either drop the test or refresh
   with the current trace shape.
 
-### D. Chord prefix display
+### D. Chord prefix display (cleared)
 
-Earlier confusion — these tests were never about a missing
-"C-x …" status-bar render. They split into:
+Previously a mixed bag — now resolved:
 
 - **Position-string drop** (FIXED): `ctrl_x_k`,
   `confirm_kill_char_*` were missing the trailing `L1:C1`
   because `position_string` returned an empty `Arc` when no
   active tab existed. It now defaults to `L1:C1` (mirrors
   legacy `display.rs` reading the zero-init cursor row/col).
-- **Per-feature missing milestones**: `ctrl_x_i` (sort_imports
-  alert), `ctrl_x_e` / `ctrl_x_lparen` / `ctrl_x_rparen` (kbd
-  macro recording / playback) — each is its own
-  feature-milestone, not a render fix.
+- **Kbd-macro chord bindings** (FIXED in M22):
+  `ctrl_x_e` / `ctrl_x_lparen` / `ctrl_x_rparen` shipped
+  with M22.
+- **`ctrl_x_i`**: still pending; M23 (sort_imports alert).
+  Tracked in Cluster A above.
 
 ### E. (folded into D)
 
@@ -255,23 +267,46 @@ The earlier rendering-bug list is now cleared:
   `--test-clipboard-isolated` flag (in-memory clipboard per
   spawned `led`).
 
-`lsp_rebase_after_insert` is a deliberate divergence: legacy
-rebases stale diagnostics onto the new line numbers, the
-rewrite hides them entirely until the next pull (memory
-`feedback_lsp_no_smear.md`). Don't refresh.
+Two remaining long-tail items, both deliberate divergences
+or known flakes:
+
+- `edge/lsp_rebase_after_insert` — deliberate divergence:
+  legacy rebases stale diagnostics onto the new line numbers,
+  the rewrite hides them entirely until the next pull (memory
+  `feedback_lsp_no_smear.md`). Don't refresh.
+- `features/git_workspace_open_file` — flaky under parallel
+  test load; passes individually. Investigate when it bites
+  twice in a row.
+
+### I. M22 — Keyboard macros (SHIPPED, 2026-04-26)
+
+All seven previously-failing kbd_macro goldens are now green
+following M22:
+
+- `actions/kbd_macro_{start,end,execute}` (refreshed: `wait
+  500ms` added to make undo-flush debounce deterministic).
+- `keybindings/ctrl_x/{lparen,rparen,e}`.
+- `keybindings/kbd_macro/e_replay` (refreshed: cursor at
+  L4:C1 — legacy bug had it at L2:C1; see
+  `POST-REWRITE-REVIEW.md` § "Macro replay does not dispatch
+  editor cursor moves").
+- `features/macros/{record_and_replay,record_insert_play_twice}`
+  (refreshed for the same legacy macro-replay bug).
 
 ## Recommended next pass order
 
-1. **Cluster B (cross-instance sync)** — biggest standalone
-   feature-add. Specs are written in `docs/drivers/workspace.md`;
-   adding `SessionCmd::CheckSync` + the notify watcher mirrors
-   what's there. Likely unblocks ~5 tests.
-2. **M22 unimplemented** — macros, reflow_paragraph,
-   insert_tab, sort_imports. Eight or so failing tests gated
-   on the milestone landing.
-3. **Long-tail rendering bugs** — `mixed_tabs_spaces` and
-   `unicode_cjk` are isolated painter bugs worth fixing
-   independently of any milestone.
+1. **M23 (auto-indent / reflow / sort-imports)** — Cluster A.
+   7 failing tests gated on the milestone. All three commands
+   share a syntax-tree dependency that already exists (M15);
+   the work is wiring + per-language indent queries.
+2. **M26 (file-watch + cross-instance sync)** — Cluster B.
+   5 tests. Adds `driver-file-watch/` (notify-based), the
+   `SessionCmd::CheckSync` command, and the client-side
+   `workspace/didChangeWatchedFiles` LSP notification.
+3. **`features/git_workspace_open_file` flake** — investigate
+   if it bites twice in a row. Likely a parallel-test-load
+   issue that a deterministic seed in the harness fixture
+   would resolve.
 
 ## Don't refresh blindly
 
