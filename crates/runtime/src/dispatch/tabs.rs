@@ -216,7 +216,9 @@ mod tests {
 
         let mut path_chains = std::collections::HashMap::new();
         let mut completions = CompletionsState::default();
+        let mut completions_pending = led_state_completions::CompletionsPending::default();
         let mut lsp_extras = LspExtrasState::default();
+        let mut lsp_pending = led_state_lsp::LspPending::default();
         // Ctrl-x k on dirty active tab → prompt set, tab still open.
         let mut find_file: Option<FindFileState> = None;
         let mut isearch: Option<IsearchState> = None;
@@ -238,8 +240,11 @@ mod tests {
             &mut file_search,
             &mut path_chains,
             &mut completions,
+            &mut completions_pending,
             &mut lsp_extras,
+            &mut lsp_pending,
             &DiagnosticsStates::default(),
+            &led_state_diagnostics::LspStatuses::default(),
             &GitState::default(),
             &keymap,
             &mut chord,);
@@ -263,8 +268,11 @@ mod tests {
             &mut file_search,
             &mut path_chains,
             &mut completions,
+            &mut completions_pending,
             &mut lsp_extras,
+            &mut lsp_pending,
             &DiagnosticsStates::default(),
+            &led_state_diagnostics::LspStatuses::default(),
             &GitState::default(),
             &keymap,
             &mut chord,);
@@ -292,7 +300,9 @@ mod tests {
         let mut file_search: Option<FileSearchState> = None;
         let mut path_chains = std::collections::HashMap::new();
         let mut completions = CompletionsState::default();
+        let mut completions_pending = led_state_completions::CompletionsPending::default();
         let mut lsp_extras = LspExtrasState::default();
+        let mut lsp_pending = led_state_lsp::LspPending::default();
         dispatch_key(
             key(KeyModifiers::NONE, KeyCode::Char('y')),
             &mut tabs,
@@ -310,8 +320,11 @@ mod tests {
             &mut file_search,
             &mut path_chains,
             &mut completions,
+            &mut completions_pending,
             &mut lsp_extras,
+            &mut lsp_pending,
             &DiagnosticsStates::default(),
+            &led_state_diagnostics::LspStatuses::default(),
             &GitState::default(),
             &keymap,
             &mut chord,);
@@ -343,7 +356,9 @@ mod tests {
         let mut file_search: Option<FileSearchState> = None;
         let mut path_chains = std::collections::HashMap::new();
         let mut completions = CompletionsState::default();
+        let mut completions_pending = led_state_completions::CompletionsPending::default();
         let mut lsp_extras = LspExtrasState::default();
+        let mut lsp_pending = led_state_lsp::LspPending::default();
         dispatch_key(
             key(KeyModifiers::NONE, KeyCode::Char('Y')),
             &mut tabs,
@@ -361,8 +376,11 @@ mod tests {
             &mut file_search,
             &mut path_chains,
             &mut completions,
+            &mut completions_pending,
             &mut lsp_extras,
+            &mut lsp_pending,
             &DiagnosticsStates::default(),
+            &led_state_diagnostics::LspStatuses::default(),
             &GitState::default(),
             &keymap,
             &mut chord,);
@@ -390,7 +408,9 @@ mod tests {
         let mut file_search: Option<FileSearchState> = None;
         let mut path_chains = std::collections::HashMap::new();
         let mut completions = CompletionsState::default();
+        let mut completions_pending = led_state_completions::CompletionsPending::default();
         let mut lsp_extras = LspExtrasState::default();
+        let mut lsp_pending = led_state_lsp::LspPending::default();
         dispatch_key(
             key(KeyModifiers::NONE, KeyCode::Char('n')),
             &mut tabs,
@@ -408,8 +428,11 @@ mod tests {
             &mut file_search,
             &mut path_chains,
             &mut completions,
+            &mut completions_pending,
             &mut lsp_extras,
+            &mut lsp_pending,
             &DiagnosticsStates::default(),
+            &led_state_diagnostics::LspStatuses::default(),
             &GitState::default(),
             &keymap,
             &mut chord,);
@@ -447,7 +470,9 @@ mod tests {
         let mut file_search: Option<FileSearchState> = None;
         let mut path_chains = std::collections::HashMap::new();
         let mut completions = CompletionsState::default();
+        let mut completions_pending = led_state_completions::CompletionsPending::default();
         let mut lsp_extras = LspExtrasState::default();
+        let mut lsp_pending = led_state_lsp::LspPending::default();
         dispatch_key(
             key(KeyModifiers::NONE, KeyCode::Esc),
             &mut tabs,
@@ -465,8 +490,11 @@ mod tests {
             &mut file_search,
             &mut path_chains,
             &mut completions,
+            &mut completions_pending,
             &mut lsp_extras,
+            &mut lsp_pending,
             &DiagnosticsStates::default(),
+            &led_state_diagnostics::LspStatuses::default(),
             &GitState::default(),
             &keymap,
             &mut chord,);
@@ -502,7 +530,9 @@ mod tests {
         let mut file_search: Option<FileSearchState> = None;
         let mut path_chains = std::collections::HashMap::new();
         let mut completions = CompletionsState::default();
+        let mut completions_pending = led_state_completions::CompletionsPending::default();
         let mut lsp_extras = LspExtrasState::default();
+        let mut lsp_pending = led_state_lsp::LspPending::default();
         dispatch_key(
             key(KeyModifiers::CONTROL, KeyCode::Char('x')),
             &mut tabs,
@@ -520,8 +550,11 @@ mod tests {
             &mut file_search,
             &mut path_chains,
             &mut completions,
+            &mut completions_pending,
             &mut lsp_extras,
+            &mut lsp_pending,
             &DiagnosticsStates::default(),
+            &led_state_diagnostics::LspStatuses::default(),
             &GitState::default(),
             &keymap,
             &mut chord,);
@@ -545,8 +578,11 @@ mod tests {
             &mut file_search,
             &mut path_chains,
             &mut completions,
+            &mut completions_pending,
             &mut lsp_extras,
+            &mut lsp_pending,
             &DiagnosticsStates::default(),
+            &led_state_diagnostics::LspStatuses::default(),
             &GitState::default(),
             &keymap,
             &mut chord,);

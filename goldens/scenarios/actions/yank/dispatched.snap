@@ -1,4 +1,5 @@
 FsListDir	path=<TMPDIR>
 FileOpen	path=<TMPDIR>/buffer.txt create_if_missing=true
 ClipboardWrite	len=14 preview="kill this line"
+WorkspaceFlushUndo	path=<TMPDIR>/buffer.txt chain=<CHAIN>
 ClipboardRead

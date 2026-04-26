@@ -23,13 +23,20 @@ use std::io::{self, Write};
 use crossterm::{cursor, queue, style as ct};
 use led_driver_terminal_core::{Attrs, Color, Style};
 
-use crate::buffer::Cell;
+use crate::buffer::{Buffer, Cell};
 
 /// Emit the diff list produced by [`crate::buffer::diff`] to
 /// `out`. No-op when the list is empty — zero bytes go to the
 /// terminal on an idle tick, no SGR reset, nothing at all.
+///
+/// `next` is the post-paint buffer the diff was computed against;
+/// the renderer reads its combining-mark side map to ship
+/// zero-width chars (combining accents, ZWJ joiners) immediately
+/// after the corresponding base char without advancing the
+/// cursor — the terminal then attaches them to the right glyph.
 pub(crate) fn draw_diff<W: Write>(
     updates: &[(u16, u16, &Cell)],
+    next: &Buffer,
     out: &mut W,
 ) -> io::Result<()> {
     if updates.is_empty() {
@@ -62,6 +69,11 @@ pub(crate) fn draw_diff<W: Write>(
         }
 
         queue!(out, ct::Print(cell.ch))?;
+        if let Some(extras) = next.combiners_at(row, col) {
+            for ch in extras.chars() {
+                queue!(out, ct::Print(ch))?;
+            }
+        }
         last_pos = Some((row, col));
     }
 
@@ -170,7 +182,8 @@ mod tests {
     #[test]
     fn empty_diff_emits_nothing() {
         let mut out: Vec<u8> = Vec::new();
-        draw_diff(&[], &mut out).unwrap();
+        let next = Buffer::new(0, 0);
+        draw_diff(&[], &next, &mut out).unwrap();
         assert!(out.is_empty());
     }
 
@@ -181,7 +194,7 @@ mod tests {
         let prev = Buffer::new(1, 5);
         let d = crate::buffer::diff(&prev, &b);
         let mut out: Vec<u8> = Vec::new();
-        draw_diff(&d, &mut out).unwrap();
+        draw_diff(&d, &b, &mut out).unwrap();
         // One MoveTo at the start of the changed run, then 'a'
         // 'b' 'c' flowed without further repositioning, then
         // closing Reset + ResetColor.
@@ -202,7 +215,7 @@ mod tests {
         let prev = Buffer::new(1, 10);
         let d = crate::buffer::diff(&prev, &b);
         let mut out: Vec<u8> = Vec::new();
-        draw_diff(&d, &mut out).unwrap();
+        draw_diff(&d, &b, &mut out).unwrap();
         let s = String::from_utf8_lossy(&out).to_string();
         // Two MoveTo escapes — one per discontiguous cell.
         assert!(s.contains("\x1b[1;2H")); // row 0, col 1

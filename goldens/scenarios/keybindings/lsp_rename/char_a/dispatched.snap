@@ -1,5 +1,6 @@
 FsListDir	path=<TMPDIR>
 FileOpen	path=<TMPDIR>/main.rs create_if_missing=true
+GitScan	root=<TMPDIR>
 LspSend	server=fake-lsp kind=request method=initialize id=1
 LspRecv	server=fake-lsp kind=response id=1
 LspSend	server=fake-lsp kind=notification method=initialized
@@ -7,4 +8,5 @@ LspSend	server=fake-lsp kind=notification method=workspace/didChangeConfiguratio
 LspSend	server=fake-lsp kind=notification method=textDocument/didOpen path=file://<TMPDIR>/main.rs version=1
 LspRecv	server=fake-lsp kind=notification method=$/progress
 LspRecv	server=fake-lsp kind=notification method=$/progress
-GitScan	root=<TMPDIR>
+LspSend	server=fake-lsp kind=request method=textDocument/completion id=2 path=file://<TMPDIR>/main.rs
+LspRecv	server=fake-lsp kind=response id=2

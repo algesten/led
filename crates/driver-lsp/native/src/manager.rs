@@ -354,6 +354,19 @@ struct ProgressInfo {
 /// sync.
 const DIDCHANGE_INCREMENTAL_MAX_CHARS: usize = 4096;
 
+/// Friendly server name for trace lines. `Server.name` is the
+/// `command` field from the registry — `rust-analyzer` /
+/// `taplo` for real binaries, but the goldens harness overrides
+/// it with the absolute path to `fake-lsp`. Trim to the
+/// basename so traces read `server=fake-lsp` regardless of
+/// where the binary lives on disk.
+fn short_server_name(name: &str) -> &str {
+    std::path::Path::new(name)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(name)
+}
+
 impl Manager {
     fn run(&mut self) {
         loop {
@@ -666,6 +679,7 @@ impl Manager {
             }
         };
         self.trace.lsp_server_started(&server.name);
+        let server_name = short_server_name(&server.name).to_string();
 
         let id = self.fresh_id();
         let root = self
@@ -674,6 +688,8 @@ impl Manager {
             .unwrap_or_else(CanonPath::default);
         let body = build_initialize_request(id, &root);
         let _ = server.send_body(&body);
+        self.trace
+            .lsp_send_request(&server_name, "initialize", id, None);
 
         let mut entry = ServerEntry {
             language,
@@ -709,7 +725,7 @@ impl Manager {
         };
         entry.buffer_hashes.insert(path.clone(), hash);
         if entry.initialized {
-            send_did_open(entry, &path, &rope);
+            send_did_open(entry, &path, &rope, self.trace.as_ref());
         } else {
             entry.queued_opens.push(PendingOpen {
                 path,
@@ -766,18 +782,26 @@ impl Manager {
             Some(change) => json!([change]),
             None => json!([{ "text": rope.to_string() }]),
         };
+        let uri = uri_from_path(path);
+        let server_name = short_server_name(&entry.server.name).to_string();
         let body = json!({
             "jsonrpc": "2.0",
             "method": "textDocument/didChange",
             "params": {
                 "textDocument": {
-                    "uri": uri_from_path(path),
+                    "uri": uri.clone(),
                     "version": lsp_version,
                 },
                 "contentChanges": content_changes,
             },
         });
         let _ = entry.server.send_body(&serde_json::to_vec(&body).unwrap());
+        self.trace.lsp_send_notification(
+            &server_name,
+            "textDocument/didChange",
+            Some(&uri),
+            Some(lsp_version),
+        );
         entry.last_rope_sent.insert(path.clone(), rope.clone());
 
         if is_save {
@@ -785,12 +809,18 @@ impl Manager {
                 "jsonrpc": "2.0",
                 "method": "textDocument/didSave",
                 "params": {
-                    "textDocument": { "uri": uri_from_path(path) },
+                    "textDocument": { "uri": uri.clone() },
                 },
             });
             let _ = entry
                 .server
                 .send_body(&serde_json::to_vec(&save_body).unwrap());
+            self.trace.lsp_send_notification(
+                &server_name,
+                "textDocument/didSave",
+                Some(&uri),
+                None,
+            );
         }
     }
 
@@ -801,14 +831,22 @@ impl Manager {
         let Some(language) = language else { return };
         let entry = self.servers.get_mut(&language).expect("just found");
 
+        let uri = uri_from_path(path);
+        let server_name = short_server_name(&entry.server.name).to_string();
         let body = json!({
             "jsonrpc": "2.0",
             "method": "textDocument/didClose",
             "params": {
-                "textDocument": { "uri": uri_from_path(path) },
+                "textDocument": { "uri": uri.clone() },
             },
         });
         let _ = entry.server.send_body(&serde_json::to_vec(&body).unwrap());
+        self.trace.lsp_send_notification(
+            &server_name,
+            "textDocument/didClose",
+            Some(&uri),
+            None,
+        );
         entry.doc_versions.remove(path);
         entry.buffer_hashes.remove(path);
         entry.last_rope_sent.remove(path);
@@ -886,15 +924,23 @@ impl Manager {
         for path in pulls {
             let id = self.fresh_id();
             let entry = self.servers.get_mut(&lang).unwrap();
+            let uri = uri_from_path(&path);
+            let server_name = short_server_name(&entry.server.name).to_string();
             let body = json!({
                 "jsonrpc": "2.0",
                 "id": id,
                 "method": "textDocument/diagnostic",
                 "params": {
-                    "textDocument": { "uri": uri_from_path(&path) },
+                    "textDocument": { "uri": uri.clone() },
                 },
             });
             let _ = entry.server.send_body(&serde_json::to_vec(&body).unwrap());
+            self.trace.lsp_send_request(
+                &server_name,
+                "textDocument/diagnostic",
+                id,
+                Some(&uri),
+            );
             entry.pending_requests.insert(
                 id,
                 PendingRequest::PullDiagnostic { path: path.clone() },
@@ -938,12 +984,14 @@ impl Manager {
             }
             _ => (1u8 /* Invoked */, Value::Null),
         };
+        let uri = uri_from_path(&path);
+        let server_name = short_server_name(&entry.server.name).to_string();
         let body = json!({
             "jsonrpc": "2.0",
             "id": id,
             "method": "textDocument/completion",
             "params": {
-                "textDocument": { "uri": uri_from_path(&path) },
+                "textDocument": { "uri": uri.clone() },
                 "position": { "line": line, "character": col },
                 "context": {
                     "triggerKind": trigger_kind,
@@ -954,6 +1002,12 @@ impl Manager {
         let _ = entry
             .server
             .send_body(&serde_json::to_vec(&body).expect("serialize completion"));
+        self.trace.lsp_send_request(
+            &server_name,
+            "textDocument/completion",
+            id,
+            Some(&uri),
+        );
         entry
             .pending_requests
             .insert(id, PendingRequest::Completion { path, seq, line });
@@ -994,6 +1048,7 @@ impl Manager {
         if let Some(detail) = item.detail.as_ref() {
             payload["detail"] = json!(detail.as_ref());
         }
+        let server_name = short_server_name(&entry.server.name).to_string();
         let body = json!({
             "jsonrpc": "2.0",
             "id": id,
@@ -1003,6 +1058,8 @@ impl Manager {
         let _ = entry
             .server
             .send_body(&serde_json::to_vec(&body).expect("serialize resolve"));
+        self.trace
+            .lsp_send_request(&server_name, "completionItem/resolve", id, None);
         entry
             .pending_requests
             .insert(id, PendingRequest::ResolveCompletion { path, seq });
@@ -1028,18 +1085,26 @@ impl Manager {
         };
         let id = self.fresh_id();
         let entry = self.servers.get_mut(&language).expect("just resolved");
+        let uri = uri_from_path(&path);
+        let server_name = short_server_name(&entry.server.name).to_string();
         let body = json!({
             "jsonrpc": "2.0",
             "id": id,
             "method": "textDocument/definition",
             "params": {
-                "textDocument": { "uri": uri_from_path(&path) },
+                "textDocument": { "uri": uri.clone() },
                 "position": { "line": line, "character": col },
             },
         });
         let _ = entry
             .server
             .send_body(&serde_json::to_vec(&body).expect("serialize goto-def"));
+        self.trace.lsp_send_request(
+            &server_name,
+            "textDocument/definition",
+            id,
+            Some(&uri),
+        );
         entry
             .pending_requests
             .insert(id, PendingRequest::GotoDefinition { seq });
@@ -1079,12 +1144,14 @@ impl Manager {
         };
         let id = self.fresh_id();
         let entry = self.servers.get_mut(&language).expect("just resolved");
+        let uri = uri_from_path(&path);
+        let server_name = short_server_name(&entry.server.name).to_string();
         let body = json!({
             "jsonrpc": "2.0",
             "id": id,
             "method": "textDocument/rename",
             "params": {
-                "textDocument": { "uri": uri_from_path(&path) },
+                "textDocument": { "uri": uri.clone() },
                 "position": { "line": line, "character": col },
                 "newName": new_name.as_ref(),
             },
@@ -1092,6 +1159,12 @@ impl Manager {
         let _ = entry
             .server
             .send_body(&serde_json::to_vec(&body).expect("serialize rename"));
+        self.trace.lsp_send_request(
+            &server_name,
+            "textDocument/rename",
+            id,
+            Some(&uri),
+        );
         entry
             .pending_requests
             .insert(id, PendingRequest::Rename { seq });
@@ -1146,12 +1219,14 @@ impl Manager {
         // previous session. A picker always pairs 1:1 with a
         // most-recent request.
         entry.code_action_cache.clear();
+        let uri = uri_from_path(&path);
+        let server_name = short_server_name(&entry.server.name).to_string();
         let body = json!({
             "jsonrpc": "2.0",
             "id": id,
             "method": "textDocument/codeAction",
             "params": {
-                "textDocument": { "uri": uri_from_path(&path) },
+                "textDocument": { "uri": uri.clone() },
                 "range": {
                     "start": { "line": start_line, "character": start_col },
                     "end":   { "line": end_line,   "character": end_col   },
@@ -1162,6 +1237,12 @@ impl Manager {
         let _ = entry
             .server
             .send_body(&serde_json::to_vec(&body).expect("serialize codeAction"));
+        self.trace.lsp_send_request(
+            &server_name,
+            "textDocument/codeAction",
+            id,
+            Some(&uri),
+        );
         entry
             .pending_requests
             .insert(id, PendingRequest::CodeAction { seq, path });
@@ -1274,9 +1355,12 @@ impl Manager {
             "params": raw.clone(),
         });
         let entry = self.servers.get_mut(&language).expect("server exists");
+        let server_name = short_server_name(&entry.server.name).to_string();
         let _ = entry
             .server
             .send_body(&serde_json::to_vec(&body).expect("serialize resolve"));
+        self.trace
+            .lsp_send_request(&server_name, "codeAction/resolve", id, None);
         entry
             .pending_requests
             .insert(id, PendingRequest::ResolveCodeAction { seq, raw });
@@ -1310,12 +1394,14 @@ impl Manager {
         };
         let id = self.fresh_id();
         let entry = self.servers.get_mut(&language).expect("just resolved");
+        let uri = uri_from_path(&path);
+        let server_name = short_server_name(&entry.server.name).to_string();
         let body = json!({
             "jsonrpc": "2.0",
             "id": id,
             "method": "textDocument/formatting",
             "params": {
-                "textDocument": { "uri": uri_from_path(&path) },
+                "textDocument": { "uri": uri.clone() },
                 "options": {
                     "tabSize": 4,
                     "insertSpaces": true,
@@ -1325,6 +1411,12 @@ impl Manager {
         let _ = entry
             .server
             .send_body(&serde_json::to_vec(&body).expect("serialize formatting"));
+        self.trace.lsp_send_request(
+            &server_name,
+            "textDocument/formatting",
+            id,
+            Some(&uri),
+        );
         entry
             .pending_requests
             .insert(id, PendingRequest::Format { seq, path });
@@ -1371,12 +1463,14 @@ impl Manager {
         };
         let id = self.fresh_id();
         let entry = self.servers.get_mut(&language).expect("just resolved");
+        let uri = uri_from_path(&path);
+        let server_name = short_server_name(&entry.server.name).to_string();
         let body = json!({
             "jsonrpc": "2.0",
             "id": id,
             "method": "textDocument/inlayHint",
             "params": {
-                "textDocument": { "uri": uri_from_path(&path) },
+                "textDocument": { "uri": uri.clone() },
                 "range": {
                     "start": { "line": start_line, "character": 0 },
                     "end":   { "line": end_line,   "character": 0 },
@@ -1386,6 +1480,12 @@ impl Manager {
         let _ = entry
             .server
             .send_body(&serde_json::to_vec(&body).expect("serialize inlayHint"));
+        self.trace.lsp_send_request(
+            &server_name,
+            "textDocument/inlayHint",
+            id,
+            Some(&uri),
+        );
         entry
             .pending_requests
             .insert(id, PendingRequest::InlayHints { path, version });
@@ -1477,6 +1577,7 @@ impl Manager {
         for lang in languages {
             let id = self.fresh_id();
             let entry = self.servers.get_mut(&lang).unwrap();
+            let server_name = short_server_name(&entry.server.name).to_string();
             let shutdown_body = json!({
                 "jsonrpc": "2.0",
                 "id": id,
@@ -1486,6 +1587,9 @@ impl Manager {
             let _ = entry
                 .server
                 .send_body(&serde_json::to_vec(&shutdown_body).unwrap());
+            self.trace
+                .lsp_send_request(&server_name, "shutdown", id, None);
+            let entry = self.servers.get_mut(&lang).unwrap();
             entry.pending_requests.insert(id, PendingRequest::Shutdown);
             let exit_body = json!({
                 "jsonrpc": "2.0",
@@ -1495,6 +1599,8 @@ impl Manager {
             let _ = entry
                 .server
                 .send_body(&serde_json::to_vec(&exit_body).unwrap());
+            self.trace
+                .lsp_send_notification(&server_name, "exit", None, None);
         }
         self.servers.clear();
     }
@@ -1542,10 +1648,14 @@ impl Manager {
         payload: Result<Value, crate::classify::JsonRpcError>,
     ) {
         let RequestId::Int(n) = id else { return };
-        let pending = {
+        let (pending, server_name) = {
             let entry = self.servers.get_mut(&language).unwrap();
-            entry.pending_requests.remove(&n)
+            (
+                entry.pending_requests.remove(&n),
+                short_server_name(&entry.server.name).to_string(),
+            )
         };
+        self.trace.lsp_recv_response(&server_name, n);
         let Some(pending) = pending else { return };
 
         match pending {
@@ -1608,17 +1718,30 @@ impl Manager {
                 // `experimental/serverStatus` below. The `caps.has_quiescence`
                 // bit is retained for logs only.
                 let _ = caps.has_quiescence;
+                let server_name = short_server_name(&entry.server.name).to_string();
                 let _ = entry.server.send_body(&build_initialized_notification());
+                self.trace.lsp_send_notification(
+                    &server_name,
+                    "initialized",
+                    None,
+                    None,
+                );
                 // rust-analyzer waits for this before starting its cold-index
                 // phase. Empty settings is the right payload — we don't override
                 // any defaults. See docs/rewrite/lsp-patterns.md §2.5.
                 let _ = entry
                     .server
                     .send_body(&build_did_change_configuration_notification());
+                self.trace.lsp_send_notification(
+                    &server_name,
+                    "workspace/didChangeConfiguration",
+                    None,
+                    None,
+                );
                 entry.initialized = true;
                 let queued = std::mem::take(&mut entry.queued_opens);
                 for open in queued {
-                    send_did_open(entry, &open.path, &open.rope);
+                    send_did_open(entry, &open.path, &open.rope, self.trace.as_ref());
                     entry.buffer_hashes.insert(open.path.clone(), open.hash);
                 }
             }
@@ -1681,6 +1804,10 @@ impl Manager {
         method: String,
         params: Value,
     ) {
+        if let Some(entry) = self.servers.get(&language) {
+            let server_name = short_server_name(&entry.server.name).to_string();
+            self.trace.lsp_recv_notification(&server_name, &method);
+        }
         match method.as_str() {
             "textDocument/publishDiagnostics" => {
                 let Some(path) = params
@@ -1881,13 +2008,19 @@ impl Manager {
     }
 }
 
-fn send_did_open(entry: &mut ServerEntry, path: &CanonPath, rope: &Arc<Rope>) {
+fn send_did_open(
+    entry: &mut ServerEntry,
+    path: &CanonPath,
+    rope: &Arc<Rope>,
+    trace: &dyn Trace,
+) {
+    let uri = uri_from_path(path);
     let body = json!({
         "jsonrpc": "2.0",
         "method": "textDocument/didOpen",
         "params": {
             "textDocument": {
-                "uri": uri_from_path(path),
+                "uri": uri.clone(),
                 "languageId": language_id(entry.language),
                 "version": 1,
                 "text": rope.to_string(),
@@ -1899,6 +2032,12 @@ fn send_did_open(entry: &mut ServerEntry, path: &CanonPath, rope: &Arc<Rope>) {
     // didChange can go incremental instead of full-text.
     entry.last_rope_sent.insert(path.clone(), rope.clone());
     let _ = entry.server.send_body(&serde_json::to_vec(&body).unwrap());
+    trace.lsp_send_notification(
+        short_server_name(&entry.server.name),
+        "textDocument/didOpen",
+        Some(&uri),
+        Some(1),
+    );
 }
 
 /// Compute an LSP Range-based `contentChange` entry from the

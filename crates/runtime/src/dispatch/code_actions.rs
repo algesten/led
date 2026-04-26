@@ -31,6 +31,7 @@ const PICKER_ROWS: usize = 10;
 /// — users close the first before asking again).
 pub(super) fn activate(
     lsp_extras: &mut LspExtrasState,
+    lsp_pending: &mut led_state_lsp::LspPending,
     tabs: &Tabs,
     edits: &BufferEdits,
 ) {
@@ -65,7 +66,7 @@ pub(super) fn activate(
             tab.cursor.col as u32,
         ),
     };
-    lsp_extras.queue_code_action(
+    lsp_pending.queue_code_action(
         tab.path.clone(),
         start_line,
         start_col,
@@ -79,6 +80,7 @@ pub(super) fn activate(
 pub(super) fn run_overlay_command(
     cmd: Command,
     lsp_extras: &mut LspExtrasState,
+    lsp_pending: &mut led_state_lsp::LspPending,
 ) -> Option<DispatchOutcome> {
     lsp_extras.code_actions.as_ref()?;
     if matches!(cmd, Command::Quit | Command::Suspend) {
@@ -87,7 +89,7 @@ pub(super) fn run_overlay_command(
     match cmd {
         Command::CursorUp => move_selection(lsp_extras, -1),
         Command::CursorDown => move_selection(lsp_extras, 1),
-        Command::InsertNewline => commit(lsp_extras),
+        Command::InsertNewline => commit(lsp_extras, lsp_pending),
         Command::Abort => lsp_extras.dismiss_code_actions(),
         // Every other command is absorbed — the picker is
         // modal, matching legacy's `handle_code_actions_action`.
@@ -114,7 +116,10 @@ fn move_selection(lsp_extras: &mut LspExtrasState, delta: isize) {
     }
 }
 
-fn commit(lsp_extras: &mut LspExtrasState) {
+fn commit(
+    lsp_extras: &mut LspExtrasState,
+    lsp_pending: &mut led_state_lsp::LspPending,
+) {
     let Some(state) = lsp_extras.code_actions.as_ref() else {
         return;
     };
@@ -123,7 +128,7 @@ fn commit(lsp_extras: &mut LspExtrasState) {
         return;
     };
     let path = state.path.clone();
-    lsp_extras.queue_code_action_select(path, action);
+    lsp_pending.queue_code_action_select(path, action);
     lsp_extras.dismiss_code_actions();
 }
 
@@ -202,9 +207,10 @@ mod tests {
             None,
         );
         let mut lsp = LspExtrasState::default();
-        activate(&mut lsp, &tabs, &edits);
-        assert_eq!(lsp.pending_code_action.len(), 1);
-        let req = &lsp.pending_code_action[0];
+        let mut lsp_pending = led_state_lsp::LspPending::default();
+        activate(&mut lsp, &mut lsp_pending, &tabs, &edits);
+        assert_eq!(lsp_pending.pending_code_action.len(), 1);
+        let req = &lsp_pending.pending_code_action[0];
         assert_eq!(req.start_line, 1);
         assert_eq!(req.start_col, 2);
         assert_eq!(req.end_line, 1);
@@ -226,8 +232,9 @@ mod tests {
             }),
         );
         let mut lsp = LspExtrasState::default();
-        activate(&mut lsp, &tabs, &edits);
-        let req = &lsp.pending_code_action[0];
+        let mut lsp_pending = led_state_lsp::LspPending::default();
+        activate(&mut lsp, &mut lsp_pending, &tabs, &edits);
+        let req = &lsp_pending.pending_code_action[0];
         assert_eq!(req.start_line, 0);
         assert_eq!(req.start_col, 0);
         assert_eq!(req.end_line, 2);
@@ -259,46 +266,49 @@ mod tests {
     #[test]
     fn cursor_down_advances_selection_clamped_at_end() {
         let mut lsp = LspExtrasState::default();
+        let mut lsp_pending = led_state_lsp::LspPending::default();
         install_picker(
             &mut lsp,
             canon("a.rs"),
             1,
             Arc::new(vec![action("a", "a"), action("b", "b")]),
         );
-        run_overlay_command(Command::CursorDown, &mut lsp);
+        run_overlay_command(Command::CursorDown, &mut lsp, &mut lsp_pending);
         assert_eq!(lsp.code_actions.as_ref().unwrap().selected, 1);
-        run_overlay_command(Command::CursorDown, &mut lsp);
+        run_overlay_command(Command::CursorDown, &mut lsp, &mut lsp_pending);
         assert_eq!(lsp.code_actions.as_ref().unwrap().selected, 1);
     }
 
     #[test]
     fn enter_commits_queues_select_and_dismisses() {
         let mut lsp = LspExtrasState::default();
+        let mut lsp_pending = led_state_lsp::LspPending::default();
         install_picker(
             &mut lsp,
             canon("a.rs"),
             1,
             Arc::new(vec![action("a", "id-a"), action("b", "id-b")]),
         );
-        run_overlay_command(Command::CursorDown, &mut lsp);
-        run_overlay_command(Command::InsertNewline, &mut lsp);
+        run_overlay_command(Command::CursorDown, &mut lsp, &mut lsp_pending);
+        run_overlay_command(Command::InsertNewline, &mut lsp, &mut lsp_pending);
         assert!(lsp.code_actions.is_none());
-        assert_eq!(lsp.pending_code_action_select.len(), 1);
-        let sel = &lsp.pending_code_action_select[0];
+        assert_eq!(lsp_pending.pending_code_action_select.len(), 1);
+        let sel = &lsp_pending.pending_code_action_select[0];
         assert_eq!(sel.action.action_id.as_ref(), "id-b");
     }
 
     #[test]
     fn abort_dismisses_without_queuing_commit() {
         let mut lsp = LspExtrasState::default();
+        let mut lsp_pending = led_state_lsp::LspPending::default();
         install_picker(
             &mut lsp,
             canon("a.rs"),
             1,
             Arc::new(vec![action("a", "a")]),
         );
-        run_overlay_command(Command::Abort, &mut lsp);
+        run_overlay_command(Command::Abort, &mut lsp, &mut lsp_pending);
         assert!(lsp.code_actions.is_none());
-        assert!(lsp.pending_code_action_select.is_empty());
+        assert!(lsp_pending.pending_code_action_select.is_empty());
     }
 }

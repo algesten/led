@@ -80,6 +80,33 @@ pub trait Trace: Send + Sync {
     /// (named after its `Language`). Emitted once per language
     /// per session. Legacy golden name: `LspServerStarted`.
     fn lsp_server_started(&self, server: &str);
+    /// Outbound JSON-RPC request to a language server. Emitted
+    /// once per `LspSend\tserver=… kind=request method=… id=…`
+    /// line. `path_uri` (when set) is the `textDocument.uri`
+    /// the method targets — appended as `path=<uri>`.
+    fn lsp_send_request(
+        &self,
+        server: &str,
+        method: &str,
+        id: i64,
+        path_uri: Option<&str>,
+    );
+    /// Outbound JSON-RPC notification. `path_uri` + `version`
+    /// are `Some` for `textDocument/did*` notifications and
+    /// `None` for workspace-wide ones (`initialized`,
+    /// `workspace/didChangeConfiguration`, `exit`).
+    fn lsp_send_notification(
+        &self,
+        server: &str,
+        method: &str,
+        path_uri: Option<&str>,
+        version: Option<i32>,
+    );
+    /// Inbound JSON-RPC response. `id` correlates back to the
+    /// originating `lsp_send_request`.
+    fn lsp_recv_response(&self, server: &str, id: i64);
+    /// Inbound JSON-RPC notification from the server.
+    fn lsp_recv_notification(&self, server: &str, method: &str);
     /// Runtime dispatched a git workspace scan. Emits as
     /// `GitScan\troot=<p>` in `dispatched.snap`. Fires once per
     /// `GitCmd::ScanFiles` — the git driver is stateless about
@@ -238,11 +265,11 @@ impl Trace for FileTrace {
     }
     fn clipboard_read_done(&self, _: bool, _: bool) {}
     fn clipboard_write_start(&self, text: &str) {
-        // Legacy parity: `len=<bytes>` + `preview="<first 14
-        // chars>"`. `chars().take(14)` keeps multi-byte boundaries
+        // Legacy parity: `len=<bytes>` + `preview="<first 40
+        // chars>"`. `chars().take(40)` keeps multi-byte boundaries
         // intact; embedded `"` / `\` are escaped so the preview
         // round-trips through a quoted shell-style field.
-        let preview: String = text.chars().take(14).collect();
+        let preview: String = text.chars().take(40).collect();
         let escaped = preview.replace('\\', "\\\\").replace('"', "\\\"");
         self.write_line(&format!(
             "ClipboardWrite\tlen={} preview=\"{}\"",
@@ -300,8 +327,55 @@ impl Trace for FileTrace {
     // no-op preserves the trait for future debug traces / assertions.
     fn syntax_parse_start(&self, _: &CanonPath, _: u64, _: Language) {}
     fn syntax_parse_done(&self, _: &CanonPath, _: u64, _: bool) {}
-    fn lsp_server_started(&self, server: &str) {
-        self.write_line(&format!("LspServerStarted\tserver={server}"));
+    fn lsp_server_started(&self, _server: &str) {
+        // Legacy goldens don't surface this — the wire-level
+        // `LspSend method=initialize` line stamped by
+        // `lsp_send_request` is the canonical "server started"
+        // signal. Kept on the trait so future debug traces can
+        // light it up; FileTrace stays silent.
+    }
+    fn lsp_send_request(
+        &self,
+        server: &str,
+        method: &str,
+        id: i64,
+        path_uri: Option<&str>,
+    ) {
+        let mut line = format!(
+            "LspSend\tserver={server} kind=request method={method} id={id}",
+        );
+        if let Some(uri) = path_uri {
+            line.push_str(&format!(" path={uri}"));
+        }
+        self.write_line(&line);
+    }
+    fn lsp_send_notification(
+        &self,
+        server: &str,
+        method: &str,
+        path_uri: Option<&str>,
+        version: Option<i32>,
+    ) {
+        let mut line = format!(
+            "LspSend\tserver={server} kind=notification method={method}",
+        );
+        if let Some(uri) = path_uri {
+            line.push_str(&format!(" path={uri}"));
+        }
+        if let Some(v) = version {
+            line.push_str(&format!(" version={v}"));
+        }
+        self.write_line(&line);
+    }
+    fn lsp_recv_response(&self, server: &str, id: i64) {
+        self.write_line(&format!(
+            "LspRecv\tserver={server} kind=response id={id}",
+        ));
+    }
+    fn lsp_recv_notification(&self, server: &str, method: &str) {
+        self.write_line(&format!(
+            "LspRecv\tserver={server} kind=notification method={method}",
+        ));
     }
     fn git_scan_start(&self, root: &CanonPath) {
         self.write_line(&format!("GitScan\troot={}", self.format_path(root)));
@@ -403,6 +477,17 @@ impl Trace for NoopTrace {
     fn syntax_parse_start(&self, _: &CanonPath, _: u64, _: Language) {}
     fn syntax_parse_done(&self, _: &CanonPath, _: u64, _: bool) {}
     fn lsp_server_started(&self, _: &str) {}
+    fn lsp_send_request(&self, _: &str, _: &str, _: i64, _: Option<&str>) {}
+    fn lsp_send_notification(
+        &self,
+        _: &str,
+        _: &str,
+        _: Option<&str>,
+        _: Option<i32>,
+    ) {
+    }
+    fn lsp_recv_response(&self, _: &str, _: i64) {}
+    fn lsp_recv_notification(&self, _: &str, _: &str) {}
     fn git_scan_start(&self, _: &CanonPath) {}
     fn session_init_start(&self, _: &CanonPath) {}
     fn session_save_start(&self) {}

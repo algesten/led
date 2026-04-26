@@ -20,9 +20,35 @@ pub struct ClipboardNative {
 }
 
 pub fn spawn(trace: Arc<dyn Trace>, notify: Notifier) -> (ClipboardDriver, ClipboardNative) {
+    spawn_with_backend(trace, notify, Backend::System)
+}
+
+/// Variant for hermetic test runs: backs the clipboard with a
+/// per-worker in-memory cell instead of the system pasteboard.
+/// Without this, parallel goldens trample each other through the
+/// shared OS clipboard (one test's kill leaks into the next
+/// test's yank).
+pub fn spawn_isolated(
+    trace: Arc<dyn Trace>,
+    notify: Notifier,
+) -> (ClipboardDriver, ClipboardNative) {
+    spawn_with_backend(trace, notify, Backend::InMemory)
+}
+
+#[derive(Clone, Copy)]
+pub enum Backend {
+    System,
+    InMemory,
+}
+
+fn spawn_with_backend(
+    trace: Arc<dyn Trace>,
+    notify: Notifier,
+    backend: Backend,
+) -> (ClipboardDriver, ClipboardNative) {
     let (tx_cmd, rx_cmd) = mpsc::channel::<ClipboardCmd>();
     let (tx_done, rx_done) = mpsc::channel::<ClipboardDone>();
-    let native = spawn_worker(rx_cmd, tx_done, notify);
+    let native = spawn_worker(rx_cmd, tx_done, notify, backend);
     let driver = ClipboardDriver::new(tx_cmd, rx_done, trace);
     (driver, native)
 }
@@ -31,15 +57,28 @@ pub fn spawn_worker(
     rx_cmd: Receiver<ClipboardCmd>,
     tx_done: Sender<ClipboardDone>,
     notify: Notifier,
+    backend: Backend,
 ) -> ClipboardNative {
     thread::Builder::new()
         .name("led-clipboard".into())
-        .spawn(move || worker_loop(rx_cmd, tx_done, notify))
+        .spawn(move || worker_loop(rx_cmd, tx_done, notify, backend))
         .expect("spawning clipboard worker should succeed");
     ClipboardNative { _marker: () }
 }
 
 fn worker_loop(
+    rx_cmd: Receiver<ClipboardCmd>,
+    tx_done: Sender<ClipboardDone>,
+    notify: Notifier,
+    backend: Backend,
+) {
+    match backend {
+        Backend::System => system_loop(rx_cmd, tx_done, notify),
+        Backend::InMemory => in_memory_loop(rx_cmd, tx_done, notify),
+    }
+}
+
+fn system_loop(
     rx_cmd: Receiver<ClipboardCmd>,
     tx_done: Sender<ClipboardDone>,
     notify: Notifier,
@@ -52,6 +91,31 @@ fn worker_loop(
         let result = match cmd {
             ClipboardCmd::Read => read(&mut clip),
             ClipboardCmd::Write(text) => write(&mut clip, &text),
+        };
+        if tx_done.send(ClipboardDone { result }).is_err() {
+            return;
+        }
+        notify.notify();
+    }
+}
+
+fn in_memory_loop(
+    rx_cmd: Receiver<ClipboardCmd>,
+    tx_done: Sender<ClipboardDone>,
+    notify: Notifier,
+) {
+    let mut stored: Option<Arc<str>> = None;
+    while let Ok(cmd) = rx_cmd.recv() {
+        let result = match cmd {
+            ClipboardCmd::Read => Ok(ClipboardResult::Text(stored.clone())),
+            ClipboardCmd::Write(text) => {
+                stored = if text.is_empty() {
+                    None
+                } else {
+                    Some(Arc::<str>::from(text.as_ref()))
+                };
+                Ok(ClipboardResult::Written)
+            }
         };
         if tx_done.send(ClipboardDone { result }).is_err() {
             return;

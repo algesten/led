@@ -202,6 +202,13 @@ impl Keymap {
         self.direct.insert(key, cmd);
     }
 
+    /// Drop a direct binding (if any). Used by the config loader
+    /// when a user chord table shadows a default direct binding —
+    /// the key should behave as a chord prefix only.
+    pub fn remove_direct(&mut self, key: &KeyEvent) {
+        self.direct.remove(key);
+    }
+
     /// Insert an already-parsed chord binding.
     pub fn insert_chord(&mut self, prefix: KeyEvent, second: KeyEvent, cmd: Command) {
         self.chords.entry(prefix).or_default().insert(second, cmd);

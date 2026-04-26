@@ -23,8 +23,8 @@ use crossterm::event::{
 use led_core::Notifier;
 use led_driver_terminal_core::{
     Attrs, BodyModel, Color, CompletionPopupModel, Dims, Frame, KeyCode, KeyEvent, KeyModifiers,
-    PopoverModel, PopoverSeverity, Rect, SidePanelModel, StatusBarModel, Style, TabBarModel,
-    TermEvent, Theme, TerminalInputDriver, Trace,
+    PopoverModel, PopoverSeverity, Rect, RenamePopupModel, SidePanelModel, StatusBarModel, Style,
+    TabBarModel, TermEvent, Theme, TerminalInputDriver, Trace,
 };
 
 use buffer::Buffer;
@@ -317,11 +317,11 @@ impl TerminalOutputDriver {
 
             if self.log.is_some() {
                 let mut capture: Vec<u8> = Vec::with_capacity(1024);
-                render::draw_diff(&d, &mut capture)?;
+                render::draw_diff(&d, current_buf, &mut capture)?;
                 out.write_all(&capture)?;
                 Some(capture)
             } else {
-                render::draw_diff(&d, out)?;
+                render::draw_diff(&d, current_buf, out)?;
                 None
             }
         };
@@ -398,12 +398,20 @@ pub(crate) fn paint(
         }
     }
 
-    // When the popover changes (appears / disappears / moves /
-    // content shifts), we must repaint the body too — the old box
-    // needs to be erased and the new one drawn on a fresh canvas.
+    // When any in-body overlay changes (appears / disappears /
+    // moves / content shifts), we must repaint the body too — the
+    // old box needs to be erased and the new one drawn on a fresh
+    // canvas.
     let popover_changed = last.map(|l| &l.popover) != Some(&frame.popover);
+    let completion_changed = last.map(|l| &l.completion) != Some(&frame.completion);
+    let rename_changed = last.map(|l| &l.rename_popup) != Some(&frame.rename_popup);
 
-    if force || popover_changed || last.map(|l| &l.body) != Some(&frame.body) {
+    if force
+        || popover_changed
+        || completion_changed
+        || rename_changed
+        || last.map(|l| &l.body) != Some(&frame.body)
+    {
         paint_body(&frame.body, frame.layout.editor_area, theme, buf);
     }
 
@@ -423,6 +431,16 @@ pub(crate) fn paint(
         paint_completion_popup(comp, frame.layout.editor_area, frame.dims, theme, buf);
     }
 
+    // Rename popup (M18). Single-line in-buffer overlay anchored
+    // below the cursor. Mutually exclusive with the completion
+    // popup at the dispatch level — the runtime won't open both
+    // at the same time — but paint after completions so a stray
+    // race still leaves the rename prompt visible (it's the
+    // active focus when present).
+    if let Some(rp) = &frame.rename_popup {
+        paint_rename_popup(rp, frame.layout.editor_area, frame.dims, theme, buf);
+    }
+
     if force || last.map(|l| &l.tab_bar) != Some(&frame.tab_bar) {
         paint_tab_bar(&frame.tab_bar, frame.layout.tab_bar, theme, buf);
     }
@@ -436,9 +454,40 @@ fn paint_tab_bar(bar: &TabBarModel, area: Rect, theme: &Theme, buf: &mut Buffer)
     // Tab bar at the bottom of the editor area: second-to-last row.
     // Matches legacy led's ratatui layout + the goldens.
     let row = area.y;
+    let right_edge = area.x.saturating_sub(0).saturating_add(area.cols);
+    // Each label paints as ` <label> ` — three runs of `put_str`.
+    // Pre-compute the per-tab on-screen width so we can scroll the
+    // visible window when the labels overflow.
+    let widths: Vec<u16> = bar
+        .labels
+        .iter()
+        .map(|l| 2 + l.chars().count().min(area.cols as usize) as u16)
+        .collect();
+    // Scroll the start index leftward until the active tab fits
+    // within `area.cols`. Without this, long tab lists hide the
+    // active tab off the right edge — legacy keeps the active tab
+    // pinned in view.
+    let mut start = 0usize;
+    if let Some(active) = bar.active {
+        loop {
+            let mut used = 0u16;
+            let mut last_visible = start;
+            for (i, w) in widths.iter().enumerate().skip(start) {
+                let next = used.saturating_add(*w);
+                if next > area.cols {
+                    break;
+                }
+                used = next;
+                last_visible = i;
+            }
+            if active <= last_visible || start >= widths.len() {
+                break;
+            }
+            start += 1;
+        }
+    }
     let mut col = area.x;
-    let right_edge = area.x.saturating_add(area.cols);
-    for (i, label) in bar.labels.iter().enumerate() {
+    for (i, label) in bar.labels.iter().enumerate().skip(start) {
         if col >= right_edge {
             break;
         }
@@ -868,6 +917,67 @@ fn paint_completion_popup(
             buf.put_char(row_y, col, ' ', base);
             col = col.saturating_add(1);
         }
+    }
+}
+
+/// Draw the LSP rename overlay: a single-row box reading
+/// "<space>Rename: <input><space>" followed by trailing padding
+/// to `width`. Background: dark gray; foreground: bold white.
+/// Anchored at `model.anchor`; clamped to the editor area on
+/// the right so the box never overflows past the viewport edge.
+fn paint_rename_popup(
+    rp: &RenamePopupModel,
+    editor_area: Rect,
+    dims: Dims,
+    _theme: &Theme,
+    buf: &mut Buffer,
+) {
+    let (x, y) = rp.anchor;
+    if x >= dims.cols || y >= dims.rows {
+        return;
+    }
+    let area_right = editor_area.x.saturating_add(editor_area.cols);
+    let term_right = dims.cols;
+    let width = rp
+        .width
+        .min(area_right.saturating_sub(x))
+        .min(term_right.saturating_sub(x));
+    if width == 0 {
+        return;
+    }
+    let style = Style {
+        fg: Some(Color::Indexed(15)),
+        bg: Some(Color::Indexed(236)),
+        attrs: Attrs {
+            bold: true,
+            ..Attrs::default()
+        },
+    };
+    // Compose the visible content: leading " Rename: " label,
+    // the user's input, then space-fill out to `width`.
+    let mut col = x;
+    let right_edge = x.saturating_add(width);
+    let put = |buf: &mut Buffer, col: &mut u16, ch: char| {
+        if *col >= right_edge {
+            return false;
+        }
+        buf.put_char(y, *col, ch, style);
+        *col = col.saturating_add(1);
+        true
+    };
+    for ch in " Rename: ".chars() {
+        if !put(buf, &mut col, ch) {
+            return;
+        }
+    }
+    for ch in rp.input.chars() {
+        if !put(buf, &mut col, ch) {
+            return;
+        }
+    }
+    while col < right_edge {
+        buf.put_char(y, col, ' ', style);
+        col = col.saturating_add(1);
     }
 }
 
@@ -1376,6 +1486,7 @@ mod tests {
             side_panel: None,
             popover: None,
             completion: None,
+            rename_popup: None,
             layout: Layout::compute(Dims { cols: 40, rows: 5 }, false),
             cursor: Some((0, 0)),
             dims: Dims { cols: 40, rows: 5 },
@@ -1393,6 +1504,7 @@ mod tests {
             side_panel: None,
             popover: None,
             completion: None,
+            rename_popup: None,
             layout: Layout::compute(Dims { cols: 40, rows: 5 }, false),
             cursor: None,
             dims: Dims { cols: 40, rows: 5 },
@@ -1432,6 +1544,7 @@ mod tests {
             }),
             popover: None,
             completion: None,
+            rename_popup: None,
             layout,
             cursor: None,
             dims,
@@ -1513,6 +1626,7 @@ mod tests {
             }),
             popover: None,
             completion: None,
+            rename_popup: None,
             layout,
             cursor: Some((layout.editor_area.x + 2, 0)),
             dims,
@@ -1683,6 +1797,7 @@ mod tests {
             }),
             popover: None,
             completion: None,
+            rename_popup: None,
             layout,
             cursor: None,
             dims,
@@ -1761,6 +1876,7 @@ mod tests {
             side_panel: None,
             popover: None,
             completion: None,
+            rename_popup: None,
             layout,
             cursor: None,
             dims,
@@ -1803,6 +1919,7 @@ mod tests {
             side_panel: None,
             popover: None,
             completion: None,
+            rename_popup: None,
             layout,
             cursor: None,
             dims,
@@ -1852,6 +1969,7 @@ mod tests {
             side_panel: None,
             popover: None,
             completion: None,
+            rename_popup: None,
             layout,
             cursor: None,
             dims,

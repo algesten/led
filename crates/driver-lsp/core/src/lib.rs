@@ -357,17 +357,19 @@ pub enum LspEvent {
     /// latest in-flight request (typing fast races the server
     /// — stale completions would show obsolete items).
     /// `prefix_start_col` is the char col where the user's
-    /// in-progress identifier starts; the runtime uses it to
-    /// refilter client-side as the user keeps typing without
-    /// re-hitting the server. `prefix_line` is the line the
-    /// identifier sits on (== cursor line when the request
-    /// fired).
+    /// in-progress identifier starts when the server told us via
+    /// a `textEdit.range`; `None` means no item carried a range,
+    /// in which case the runtime backtracks through identifier
+    /// characters from the cursor to find the prefix start (the
+    /// driver doesn't have rope access to do this itself).
+    /// `prefix_line` is the line the identifier sits on (== cursor
+    /// line when the request fired).
     Completion {
         path: CanonPath,
         seq: u64,
         items: Arc<Vec<CompletionItem>>,
         prefix_line: u32,
-        prefix_start_col: u32,
+        prefix_start_col: Option<u32>,
     },
     /// Response to [`LspCmd::ResolveCompletion`]. Carries the
     /// server's additional edits to apply AFTER the primary
@@ -430,6 +432,33 @@ pub trait Trace: Send + Sync {
     fn lsp_request_diagnostics(&self);
     fn lsp_diagnostics_done(&self, path: &CanonPath, n: usize, hash: PersistedContentHash);
     fn lsp_mode_fallback(&self);
+    /// Outbound JSON-RPC request to the server. `path_uri` is the
+    /// `textDocument.uri` field when the method targets a single
+    /// document (definition, rename, codeAction, completion, …).
+    fn lsp_send_request(
+        &self,
+        server: &str,
+        method: &str,
+        id: i64,
+        path_uri: Option<&str>,
+    );
+    /// Outbound JSON-RPC notification. `path_uri` + `version` are
+    /// `Some` for `textDocument/didOpen` / `didChange` / `didSave`
+    /// / `didClose`; both `None` for workspace-wide notifications
+    /// (`initialized`, `workspace/didChangeConfiguration`, `exit`).
+    fn lsp_send_notification(
+        &self,
+        server: &str,
+        method: &str,
+        path_uri: Option<&str>,
+        version: Option<i32>,
+    );
+    /// Inbound JSON-RPC response correlated by `id` to a previous
+    /// `lsp_send_request`.
+    fn lsp_recv_response(&self, server: &str, id: i64);
+    /// Inbound JSON-RPC notification (`$/progress`,
+    /// `textDocument/publishDiagnostics`, server status, …).
+    fn lsp_recv_notification(&self, server: &str, method: &str);
 }
 
 pub struct NoopTrace;
@@ -438,6 +467,17 @@ impl Trace for NoopTrace {
     fn lsp_request_diagnostics(&self) {}
     fn lsp_diagnostics_done(&self, _: &CanonPath, _: usize, _: PersistedContentHash) {}
     fn lsp_mode_fallback(&self) {}
+    fn lsp_send_request(&self, _: &str, _: &str, _: i64, _: Option<&str>) {}
+    fn lsp_send_notification(
+        &self,
+        _: &str,
+        _: &str,
+        _: Option<&str>,
+        _: Option<i32>,
+    ) {
+    }
+    fn lsp_recv_response(&self, _: &str, _: i64) {}
+    fn lsp_recv_notification(&self, _: &str, _: &str) {}
 }
 
 // ── Driver handle ──────────────────────────────────────────────

@@ -5,6 +5,14 @@
 //! store second) and updates both cursor + scroll on the active tab.
 
 use led_core::{SubLine, col_to_sub_line, sub_line_count, sub_line_range};
+
+/// Minimum visual rows the cursor stays from either viewport edge.
+/// Hardcoded in legacy `Dimensions::new` (`crates/state/src/lib.rs:244`),
+/// surfaced through `dims.scroll_margin` and consumed by
+/// `mov::adjust_scroll`. Clamped to `body_rows / 2` so that on a
+/// shorter-than-`2 * margin` viewport the margin doesn't exceed half
+/// the height (`docs/spec/navigation.md` §"Scroll margin behavior").
+const SCROLL_MARGIN: usize = 3;
 use led_driver_buffers_core::{BufferStore, LoadState};
 use led_driver_terminal_core::{Layout, Terminal};
 use led_state_browser::BrowserUi;
@@ -339,10 +347,11 @@ fn word_boundary_back(rope: &Rope, mut line: usize, mut col: usize) -> (usize, u
     }
 }
 
-/// Move scroll's (line, sub-line) anchor so the cursor's visual
-/// row sits within `[0, body_rows)` relative to the scroll anchor.
+/// Move scroll's (line, sub-line) anchor so the cursor's visual row
+/// stays at least [`SCROLL_MARGIN`] rows from each viewport edge.
 /// Operates in sub-line space so scrolling through a wrapped
-/// paragraph advances one visual row at a time.
+/// paragraph advances one visual row at a time. Mirrors legacy
+/// `mov::adjust_scroll` (`led/src/model/mov.rs:11`).
 pub(super) fn adjust_scroll(
     s: Scroll,
     c: Cursor,
@@ -353,25 +362,75 @@ pub(super) fn adjust_scroll(
     if body_rows == 0 {
         return s;
     }
+    let margin = SCROLL_MARGIN.min(body_rows / 2);
     let cur_len = line_char_len(rope, c.line);
     let (cur_sub, _) = col_to_sub_line(c.col, cur_len, content_cols);
     let scroll_pos = (s.top, s.top_sub_line);
     let cur_pos = (c.line, cur_sub);
+
     if cur_pos < scroll_pos {
-        // Cursor is above the viewport: align scroll to it.
+        // Cursor is above the viewport: scroll up so the cursor
+        // lands `margin` rows from the top.
+        return scroll_to_place_cursor_at_vrow(c.line, cur_sub, margin, rope, content_cols);
+    }
+
+    let rows_to_cursor = rows_between(scroll_pos, cur_pos, rope, content_cols);
+    if rows_to_cursor < margin {
+        // Cursor inside the viewport but too close to the top edge.
+        return scroll_to_place_cursor_at_vrow(c.line, cur_sub, margin, rope, content_cols);
+    }
+    if rows_to_cursor >= body_rows.saturating_sub(margin) {
+        // Cursor at or past the bottom margin — scroll forward so
+        // it lands `margin` rows from the bottom edge.
+        let target_vrow = body_rows.saturating_sub(margin + 1);
+        return scroll_to_place_cursor_at_vrow(c.line, cur_sub, target_vrow, rope, content_cols);
+    }
+    s
+}
+
+/// Compute a scroll anchor that places the cursor at exactly
+/// `target_vrow` visual rows from the top of the viewport. Walks
+/// backward from the cursor in sub-line space, consuming whole
+/// preceding logical lines until `target_vrow` rows have been
+/// accounted for. Mirrors legacy
+/// `mov::scroll_to_place_cursor_at_vrow`.
+fn scroll_to_place_cursor_at_vrow(
+    cursor_line: usize,
+    cursor_sub: SubLine,
+    target_vrow: usize,
+    rope: &Rope,
+    content_cols: usize,
+) -> Scroll {
+    // 1. Walk up within the cursor's own logical line.
+    if cursor_sub.0 > target_vrow {
         return Scroll {
-            top: c.line,
-            top_sub_line: cur_sub,
+            top: cursor_line,
+            top_sub_line: SubLine(cursor_sub.0 - target_vrow),
         };
     }
-    // Count visible rows between scroll anchor and cursor, then
-    // scroll forward just enough to keep the cursor visible.
-    let rows_to_cursor = rows_between(scroll_pos, cur_pos, rope, content_cols);
-    if rows_to_cursor < body_rows {
-        return s;
+    let mut remaining = target_vrow - cursor_sub.0;
+    let mut new_top = cursor_line;
+    let mut new_sub = SubLine(0);
+
+    // 2. Walk up through preceding logical lines.
+    let mut li = cursor_line;
+    while li > 0 && remaining > 0 {
+        li -= 1;
+        let n = sub_line_count(line_char_len(rope, li), content_cols);
+        if n <= remaining {
+            remaining -= n;
+            new_top = li;
+            new_sub = SubLine(0);
+        } else {
+            new_top = li;
+            new_sub = SubLine(n - remaining);
+            break;
+        }
     }
-    let advance = rows_to_cursor + 1 - body_rows;
-    scroll_forward(s, rope, content_cols, advance)
+    Scroll {
+        top: new_top,
+        top_sub_line: new_sub,
+    }
 }
 
 /// Count the visual rows between `(from_line, from_sub)` and
@@ -435,29 +494,6 @@ pub(crate) fn center_on_cursor(
     }
 }
 
-/// Advance `s` by `steps` visual rows, clamping to end-of-file.
-fn scroll_forward(s: Scroll, rope: &Rope, content_cols: usize, steps: usize) -> Scroll {
-    let line_count = rope.len_lines().max(1);
-    let last_line = line_count - 1;
-    let mut line = s.top;
-    let mut sub = s.top_sub_line;
-    for _ in 0..steps {
-        let n = sub_line_count(line_char_len(rope, line), content_cols);
-        if sub.0 + 1 < n {
-            sub = SubLine(sub.0 + 1);
-        } else if line < last_line {
-            line += 1;
-            sub = SubLine(0);
-        } else {
-            break;
-        }
-    }
-    Scroll {
-        top: line,
-        top_sub_line: sub,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use led_state_completions::CompletionsState;
@@ -486,11 +522,15 @@ mod tests {
 
     #[test]
     fn down_moves_cursor_and_does_not_scroll_within_viewport() {
-        // body_rows = rows − 2 (tab bar + status bar); rows=6 → 4
-        // content rows. Cursor starts at (0,0); three Downs land on
-        // line 3, still inside the viewport.
+        // body_rows = rows − 2 (tab bar + status bar); rows=10 → 8
+        // content rows, scroll_margin clamps to 3. Cursor at line 3
+        // sits at vrow 3 — exactly the comfortable zone, no scroll.
+        let body = (0..12)
+            .map(|i| format!("{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
         let (mut tabs, mut edits, store, term) =
-            fixture_with_content("a\nb\nc\nd\ne\nf", Dims { cols: 10, rows: 6 });
+            fixture_with_content(&body, Dims { cols: 10, rows: 10 });
         for _ in 0..3 {
             dispatch_default(
                 key(KeyModifiers::NONE, KeyCode::Down),
@@ -513,11 +553,17 @@ mod tests {
 
     #[test]
     fn down_scrolls_when_cursor_would_leave_viewport() {
-        // body_rows = rows − 2; rows=5 → 3. Third Down lands on
-        // line 3, one row past the viewport, so scroll advances.
+        // body_rows = rows − 2 = 8 with rows=10; scroll_margin=3.
+        // Five Downs land cursor at line 5 — vrow=5, hits bottom
+        // margin (body_rows - margin = 5), scroll advances so the
+        // cursor sits at vrow body_rows-margin-1=4 → top=line 1.
+        let body = (0..12)
+            .map(|i| format!("{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
         let (mut tabs, mut edits, store, term) =
-            fixture_with_content("a\nb\nc\nd\ne\nf", Dims { cols: 10, rows: 5 });
-        for _ in 0..3 {
+            fixture_with_content(&body, Dims { cols: 10, rows: 10 });
+        for _ in 0..5 {
             dispatch_default(
                 key(KeyModifiers::NONE, KeyCode::Down),
                 &mut tabs,
@@ -529,7 +575,7 @@ mod tests {
         assert_eq!(
             tabs.open[0].cursor,
             Cursor {
-                line: 3,
+                line: 5,
                 col: 0,
                 preferred_col: 0,
             }
@@ -539,16 +585,23 @@ mod tests {
 
     #[test]
     fn up_scrolls_back_toward_the_top() {
+        // body_rows=8, scroll_margin=3. Cursor starts at line 7
+        // with scroll at top=5 (cursor at vrow=2, inside the top
+        // margin already). Three Ups land cursor at line 4; that's
+        // above the previous scroll anchor so we re-scroll to place
+        // cursor at vrow=margin=3 → top=line 1.
+        let body = (0..12)
+            .map(|i| format!("{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
         let (mut tabs, mut edits, store, term) =
-            fixture_with_content("a\nb\nc\nd\ne\nf", Dims { cols: 10, rows: 4 });
+            fixture_with_content(&body, Dims { cols: 10, rows: 10 });
         tabs.open[0].cursor = Cursor {
-            line: 5,
+            line: 7,
             col: 0,
             preferred_col: 0,
         };
-        tabs.open[0].scroll = Scroll { top: 3, top_sub_line: led_core::SubLine(0) };
-        // body_rows = 3. Moving up from line 5 to line 2 should leave view
-        // at the top.
+        tabs.open[0].scroll = Scroll { top: 5, top_sub_line: led_core::SubLine(0) };
         for _ in 0..3 {
             dispatch_default(
                 key(KeyModifiers::NONE, KeyCode::Up),
@@ -561,12 +614,12 @@ mod tests {
         assert_eq!(
             tabs.open[0].cursor,
             Cursor {
-                line: 2,
+                line: 4,
                 col: 0,
                 preferred_col: 0,
             }
         );
-        assert_eq!(tabs.open[0].scroll, Scroll { top: 2, top_sub_line: led_core::SubLine(0) });
+        assert_eq!(tabs.open[0].scroll, Scroll { top: 1, top_sub_line: led_core::SubLine(0) });
     }
 
     #[test]
@@ -705,8 +758,10 @@ mod tests {
             .map(|i| format!("line {i}"))
             .collect::<Vec<_>>()
             .join("\n");
-        // body_rows = rows − 2 = 10 with rows=12. PageDown moves
-        // the cursor down by 10 visual rows.
+        // body_rows = rows − 2 = 10 with rows=12. PageDown steps
+        // the cursor down by body_rows-1 = 9 visual rows. With
+        // scroll_margin=3 the cursor lands at vrow=body_rows-margin-1=6,
+        // so scroll top = cursor_line - 6 = 9 - 6 = 3.
         let (mut tabs, mut edits, store, term) =
             fixture_with_content(&body, Dims { cols: 40, rows: 12 });
         dispatch_default(
@@ -716,8 +771,8 @@ mod tests {
             &store,
             &term,
         );
-        assert_eq!(tabs.open[0].cursor.line, 10);
-        assert_eq!(tabs.open[0].scroll.top, 1);
+        assert_eq!(tabs.open[0].cursor.line, 9);
+        assert_eq!(tabs.open[0].scroll.top, 3);
     }
 
     #[test]
@@ -870,12 +925,14 @@ mod tests {
             col: 6,
             preferred_col: 6,
         };
-        // PageDown by 10 lands at line 10 ("line 010", len 8) — col 6 restored.
+        // PageDown steps by body_rows-1 = 9 (legacy's mov::page_down
+        // overlap), landing on line 9 ("line 009", len 8) — col 6
+        // restored from preferred_col.
         let c = apply_move(start, &rope, Move::PageDown, 10, 80);
         assert_eq!(
             c,
             Cursor {
-                line: 10,
+                line: 9,
                 col: 6,
                 preferred_col: 6,
             }
@@ -884,35 +941,39 @@ mod tests {
 
     #[test]
     fn adjust_scroll_pulls_cursor_back_into_view() {
-        // A rope with at least 9 lines so rows_between can walk
-        // from (0, 0) to (8, 0) through real sub-line counts.
-        let rope = Rope::from_str("\n\n\n\n\n\n\n\n\n");
+        // body_rows=10, scroll_margin=3. Cursor at line 9 well past
+        // the bottom edge (vrow=9 ≥ body_rows-margin=7), scrolls so
+        // cursor lands at vrow=body_rows-margin-1=6 → top=line 3.
+        let rope = Rope::from_str("\n\n\n\n\n\n\n\n\n\n\n");
         let s = adjust_scroll(
             Scroll { top: 0, top_sub_line: led_core::SubLine(0) },
             Cursor {
-                line: 8,
+                line: 9,
                 col: 0,
                 preferred_col: 0,
             },
-            4,
+            10,
             &rope,
             80,
         );
-        assert_eq!(s, Scroll { top: 5, top_sub_line: led_core::SubLine(0) });
+        assert_eq!(s, Scroll { top: 3, top_sub_line: led_core::SubLine(0) });
     }
 
     #[test]
     fn adjust_scroll_noop_when_cursor_inside_window() {
-        let rope = Rope::from_str("\n\n\n\n\n\n\n\n\n\n\n\n\n");
+        // body_rows=10, scroll_margin=3, comfortable zone vrow=[3, 7).
+        // Cursor at line 14 with top=10 sits at vrow=4 — inside the
+        // comfortable band, scroll left untouched.
+        let rope = Rope::from_str("\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n");
         let s0 = Scroll { top: 10, top_sub_line: led_core::SubLine(0) };
         let s = adjust_scroll(
             s0,
             Cursor {
-                line: 12,
+                line: 14,
                 col: 0,
                 preferred_col: 0,
             },
-            4,
+            10,
             &rope,
             80,
         );
@@ -986,8 +1047,11 @@ mod tests {
         let mut file_search: Option<FileSearchState> = None;
         let mut path_chains = std::collections::HashMap::new();
         let mut completions = CompletionsState::default();
+        let mut completions_pending = led_state_completions::CompletionsPending::default();
         let mut lsp_extras = LspExtrasState::default();
+        let mut lsp_pending = led_state_lsp::LspPending::default();
         let diagnostics = DiagnosticsStates::default();
+        let lsp_status = led_state_diagnostics::LspStatuses::default();
         let git = GitState::default();
 
         let mut press = |k: KeyEvent,
@@ -1002,7 +1066,7 @@ mod tests {
                      fs: &FsTree| {
             super::super::dispatch_key(
                 k, tabs, edits, kill_ring, clip, alerts, jumps, browser, fs, &store, &term,
-        &mut find_file, &mut isearch, &mut file_search, &mut path_chains, &mut completions, &mut lsp_extras, &diagnostics, &git, &km,
+        &mut find_file, &mut isearch, &mut file_search, &mut path_chains, &mut completions, &mut completions_pending, &mut lsp_extras, &mut lsp_pending, &diagnostics, &lsp_status, &git, &km,
                 chord,);
         };
 
@@ -1240,11 +1304,12 @@ mod tests {
     #[test]
     fn adjust_scroll_advances_by_sub_line_when_wrapped_line_fills_viewport() {
         // A single wrapped line with 60 chars at content_cols=10
-        // (wrap_width=9) produces 7 sub-lines. With body_rows=3
-        // and scroll top sitting at (0, sub 0), a cursor at (0,
-        // col 40) is sub-line 4 of that same logical line — the
-        // viewport needs to scroll forward two sub-lines so the
-        // cursor ends up at the bottom row.
+        // (wrap_width=9) produces 7 sub-lines. body_rows=3 →
+        // scroll_margin clamps to 1, comfortable zone vrow=[1, 2).
+        // Cursor at (0, col=40) sits on sub-line 4 of the wrapped
+        // line; that's vrow=4 with top at sub 0, well past the
+        // bottom margin. Scroll forward so cursor lands at
+        // vrow=body_rows-margin-1=1 → top sub-line 3.
         let rope = Rope::from_str("abcdefghijABCDEFGHIJ0123456789!@#$%^&*()qwertyuiopQWERTYUIOP");
         let s = adjust_scroll(
             Scroll { top: 0, top_sub_line: led_core::SubLine(0) },
@@ -1253,6 +1318,6 @@ mod tests {
             &rope,
             10,
         );
-        assert_eq!(s, Scroll { top: 0, top_sub_line: led_core::SubLine(2) });
+        assert_eq!(s, Scroll { top: 0, top_sub_line: led_core::SubLine(3) });
     }
 }

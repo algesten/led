@@ -249,12 +249,12 @@ pub fn parse_initialize_response(result: &Value) -> InitializeCapabilities {
 /// Completion response parsed into the runtime's wire shape.
 /// `prefix_start_col` is the char col where the user's typed
 /// prefix begins — extracted from the first item's `textEdit`
-/// when present, otherwise set to the cursor col (caller's
-/// responsibility to fall back to identifier backtracking).
+/// when present, otherwise `None` (caller falls back to
+/// identifier backtracking against the rope).
 #[derive(Debug, Clone)]
 pub struct CompletionResponse {
     pub items: Vec<CompletionItem>,
-    pub prefix_start_col: u32,
+    pub prefix_start_col: Option<u32>,
 }
 
 /// Parse either `{"items": [...]}` (a `CompletionList`) or a raw
@@ -331,21 +331,8 @@ pub fn parse_completion_response(result: &Value, _cursor_line: u32) -> Completio
 
     CompletionResponse {
         items,
-        // Fallback: cursor col is set on the runtime side via
-        // identifier backtracking. We can't do that here (no
-        // rope access), so we leave 0 and let the runtime
-        // refine. Most servers set textEdit.range, so this
-        // rarely hits.
-        prefix_start_col: prefix_start_col.unwrap_or(0),
-        // `cursor_line` threads through unchanged so the runtime
-        // knows which row the prefix lives on.
+        prefix_start_col,
     }
-    // `cursor_line` is carried by the `LspEvent::Completion`
-    // field the caller fills in from the request's stored
-    // `PendingRequest::Completion { line, .. }`; nothing to do
-    // here.
-    // (Reference kept alive for clarity.)
-    // _ = cursor_line; // intentional — see above.
 }
 
 /// Parse one LSP `TextEdit` (within a `CompletionItem`) into
@@ -656,7 +643,7 @@ mod tests {
             }]
         });
         let parsed = parse_completion_response(&resp, 0);
-        assert_eq!(parsed.prefix_start_col, 5);
+        assert_eq!(parsed.prefix_start_col, Some(5));
         assert_eq!(parsed.items.len(), 1);
         let te = parsed.items[0].text_edit.as_ref().unwrap();
         assert_eq!(te.col_start, 5);

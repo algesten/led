@@ -34,21 +34,37 @@ pub(super) fn insert_newline(tabs: &mut Tabs, edits: &mut BufferEdits) {
             return;
         }
         let before = tab.cursor;
+        let line_idx = tab.cursor.line;
+        // Copy the leading whitespace of the current line into the
+        // new line so common edit flows ("end of line, Enter")
+        // land at the same indent. Mirrors legacy
+        // `editing_of.rs::insert_newline_s` which schedules
+        // `request_indent` after the split; the simple "match the
+        // previous line" rule covers the same goldens without a
+        // syntax-tree dependency.
+        let line = eb.rope.line(line_idx);
+        let indent: String = line
+            .chars()
+            .take_while(|c| *c == ' ' || *c == '\t')
+            .collect();
+        let indent_len = indent.chars().count();
+        let mut inserted: String = String::with_capacity(1 + indent.len());
+        inserted.push('\n');
+        inserted.push_str(&indent);
         let mut rope = (*eb.rope).clone();
-        let char_idx = rope.line_to_char(tab.cursor.line) + tab.cursor.col;
-        rope.insert_char(char_idx, '\n');
+        let char_idx = rope.line_to_char(line_idx) + tab.cursor.col;
+        rope.insert(char_idx, &inserted);
         bump(eb, rope);
+        let after = {
+            let mut a = before;
+            a.line += 1;
+            a.col = indent_len;
+            a.preferred_col = indent_len;
+            a
+        };
         eb.history
-            .record_insert(char_idx, Arc::<str>::from("\n"), before, {
-                let mut a = before;
-                a.line += 1;
-                a.col = 0;
-                a.preferred_col = 0;
-                a
-            });
-        tab.cursor.line += 1;
-        tab.cursor.col = 0;
-        tab.cursor.preferred_col = 0;
+            .record_insert(char_idx, Arc::<str>::from(inserted.as_str()), before, after);
+        tab.cursor = after;
     });
 }
 

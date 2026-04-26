@@ -45,6 +45,11 @@ struct Cli {
     test_lsp_server: Option<PathBuf>,
     #[arg(long, hide = true)]
     test_gh_binary: Option<PathBuf>,
+    /// Replace the system clipboard with a per-process in-memory
+    /// cell. Used by the goldens harness so parallel tests don't
+    /// trample each other through the OS pasteboard.
+    #[arg(long, hide = true)]
+    test_clipboard_isolated: bool,
 
     /// Skip workspace root detection; treat the process's CWD as the
     /// only directory relevant to this session. Used by the goldens
@@ -159,7 +164,12 @@ fn main() -> io::Result<()> {
         .test_lsp_server
         .as_deref()
         .map(|p| p.to_string_lossy().into_owned());
-    let drivers = spawn_drivers(trace.clone(), &wake, lsp_override)?;
+    let drivers = spawn_drivers(
+        trace.clone(),
+        &wake,
+        lsp_override,
+        cli.test_clipboard_isolated,
+    )?;
 
     let mut stdout = io::stdout();
     let mut world = World {
@@ -170,6 +180,7 @@ fn main() -> io::Result<()> {
         wake: &wake,
         trace: &trace,
         stdout: &mut stdout,
+        cli_config_dir: cli.config_dir.as_deref(),
     };
     led_runtime::run(&mut world)?;
     stdout.flush()?;

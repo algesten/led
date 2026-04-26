@@ -454,12 +454,38 @@ pub struct Frame {
     /// theoretically co-exist; painter draws the completion on
     /// top so it wins visually. `None` when no session is live.
     pub completion: Option<CompletionPopupModel>,
+    /// LSP rename overlay (M18). Single-line `Rename: <input>`
+    /// box anchored just below the cursor. Painted on top of the
+    /// buffer, beneath the completion popup.
+    pub rename_popup: Option<RenamePopupModel>,
     pub layout: Layout,
     /// Absolute terminal cursor position as `(col, row)` — matches
     /// crossterm's `cursor::MoveTo` argument order. `None` hides the
     /// cursor (no active content / cursor scrolled away).
     pub cursor: Option<(u16, u16)>,
     pub dims: Dims,
+}
+
+/// In-buffer rename prompt: a single-row overlay that reads
+/// "Rename: <input>" anchored one row below the cursor, at the
+/// cursor's column. Matches legacy `OverlayContent::Rename`.
+///
+/// `input` is the editable text the user is typing; the painter
+/// renders a leading space, the literal label "Rename: ", the
+/// input, then trailing padding to `width`. The terminal cursor
+/// lands inside the popup at the input's edit position so the
+/// caret appears where typing inserts.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct RenamePopupModel {
+    /// Editable input contents.
+    pub input: Arc<str>,
+    /// Char-offset into `input` where the user's caret sits.
+    pub input_cursor: u16,
+    /// Absolute terminal `(col, row)` of the popup's left edge.
+    pub anchor: (u16, u16),
+    /// Total popup width in cols (including leading + trailing
+    /// padding). Painter clips to the editor area on the right.
+    pub width: u16,
 }
 
 /// Visible state for an LSP completion popup.

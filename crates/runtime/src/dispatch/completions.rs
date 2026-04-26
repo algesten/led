@@ -35,6 +35,7 @@ use crate::keymap::Command;
 pub(super) fn run_overlay_command(
     cmd: Command,
     completions: &mut CompletionsState,
+    completions_pending: &mut led_state_completions::CompletionsPending,
     tabs: &mut Tabs,
     edits: &mut BufferEdits,
 ) -> Option<DispatchOutcome> {
@@ -51,7 +52,7 @@ pub(super) fn run_overlay_command(
             Some(DispatchOutcome::Continue)
         }
         Command::InsertNewline => {
-            commit_active(completions, tabs, edits);
+            commit_active(completions, completions_pending, tabs, edits);
             Some(DispatchOutcome::Continue)
         }
         Command::Abort => {
@@ -111,6 +112,7 @@ fn ensure_visible(session: &mut CompletionSession) {
 /// ship its additional edits, then dismisses the popup.
 fn commit_active(
     completions: &mut CompletionsState,
+    completions_pending: &mut led_state_completions::CompletionsPending,
     tabs: &mut Tabs,
     edits: &mut BufferEdits,
 ) {
@@ -223,7 +225,7 @@ fn commit_active(
     // Queue resolve for additional edits (imports, etc.) if the
     // server said it could provide them.
     if item.resolve_needed {
-        completions.queue_resolve(path, item);
+        completions_pending.queue_resolve(path, item);
     }
 
     completions.dismiss();
@@ -296,6 +298,7 @@ mod tests {
     fn cursor_down_advances_selected_and_stops_at_last() {
         let mut tabs = Tabs::default();
         let mut edits = BufferEdits::default();
+        let mut pending = led_state_completions::CompletionsPending::default();
         let mut state = seed_session(
             &mut tabs,
             &mut edits,
@@ -303,13 +306,13 @@ mod tests {
             0,
             vec![mk_item("pr", None), mk_item("pub", None), mk_item("pop", None)],
         );
-        let outcome = run_overlay_command(Command::CursorDown, &mut state, &mut tabs, &mut edits);
+        let outcome = run_overlay_command(Command::CursorDown, &mut state, &mut pending, &mut tabs, &mut edits);
         assert_eq!(outcome, Some(DispatchOutcome::Continue));
         assert_eq!(state.session.as_ref().unwrap().selected, 1);
-        run_overlay_command(Command::CursorDown, &mut state, &mut tabs, &mut edits);
+        run_overlay_command(Command::CursorDown, &mut state, &mut pending, &mut tabs, &mut edits);
         assert_eq!(state.session.as_ref().unwrap().selected, 2);
         // Clamp at the last item — no wrap.
-        run_overlay_command(Command::CursorDown, &mut state, &mut tabs, &mut edits);
+        run_overlay_command(Command::CursorDown, &mut state, &mut pending, &mut tabs, &mut edits);
         assert_eq!(state.session.as_ref().unwrap().selected, 2);
     }
 
@@ -317,8 +320,9 @@ mod tests {
     fn abort_dismisses_the_session() {
         let mut tabs = Tabs::default();
         let mut edits = BufferEdits::default();
+        let mut pending = led_state_completions::CompletionsPending::default();
         let mut state = seed_session(&mut tabs, &mut edits, "p", 0, vec![mk_item("pr", None)]);
-        let outcome = run_overlay_command(Command::Abort, &mut state, &mut tabs, &mut edits);
+        let outcome = run_overlay_command(Command::Abort, &mut state, &mut pending, &mut tabs, &mut edits);
         assert_eq!(outcome, Some(DispatchOutcome::Continue));
         assert!(state.session.is_none());
     }
@@ -360,7 +364,8 @@ mod tests {
             scroll: 0,
         });
 
-        let outcome = run_overlay_command(Command::InsertNewline, &mut state, &mut tabs, &mut edits);
+        let mut pending = led_state_completions::CompletionsPending::default();
+        let outcome = run_overlay_command(Command::InsertNewline, &mut state, &mut pending, &mut tabs, &mut edits);
         assert_eq!(outcome, Some(DispatchOutcome::Continue));
         assert!(state.session.is_none());
         let eb = edits.buffers.get(&path).unwrap();
@@ -373,8 +378,9 @@ mod tests {
         let mut tabs = Tabs::default();
         let mut edits = BufferEdits::default();
         let mut state = CompletionsState::default();
+        let mut pending = led_state_completions::CompletionsPending::default();
         let outcome =
-            run_overlay_command(Command::CursorUp, &mut state, &mut tabs, &mut edits);
+            run_overlay_command(Command::CursorUp, &mut state, &mut pending, &mut tabs, &mut edits);
         assert_eq!(outcome, None);
     }
 }

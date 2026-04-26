@@ -119,15 +119,9 @@ impl SessionDriver {
                 SessionCmd::Init { root, .. } => self.trace.session_init_start(root),
                 SessionCmd::SaveSession { .. } => self.trace.session_save_start(),
                 SessionCmd::ClearUndo { path } => self.trace.session_drop_undo(path),
-                // FlushUndo: trace API exists (for parity with
-                // legacy's WorkspaceFlushUndo line) but we don't
-                // call it here yet. Our flush is per-tick eager
-                // while legacy was debounced — emitting on every
-                // call adds spurious trace lines to short scripts
-                // (e.g. delete_backward) that legacy goldens
-                // captured before the debounce fired. Wire this
-                // call when the runtime grows the debounce.
-                SessionCmd::FlushUndo { .. } => {}
+                SessionCmd::FlushUndo { path, chain_id, .. } => {
+                    self.trace.session_flush_undo(path, chain_id);
+                }
                 SessionCmd::Shutdown => {}
             }
             if self.tx.send(cmd.clone()).is_err() {

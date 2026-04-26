@@ -1,4 +1,4 @@
-  buffer.txt            │  kill this linehello
+  buffer.txt            │  hello
                         │ 
                         │~
                         │~
@@ -36,5 +36,5 @@
                         │~
                         │~
                         │~
-                        │ ●buffer.txt 
-  ●                                                                                                              L1:C15 
+                        │  buffer.txt 
+                                                                                                                  L1:C1 

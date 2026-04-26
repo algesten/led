@@ -6,6 +6,18 @@
 //! `selected` / `filtered` / `session` on navigation / commit /
 //! dismiss.
 //!
+//! Split into two sources per arch guideline 1:
+//!
+//! - [`CompletionsState`] — *user-decision*: which popup is open
+//!   ([`CompletionSession`]). Read by overlay rendering memos;
+//!   mutated by dispatch on commit / dismiss / arrow keys.
+//! - [`CompletionsPending`] — *driver-bookkeeping*: the
+//!   `seq_gen` counter and the request / resolve outboxes the
+//!   execute phase drains into `LspCmd::*`.
+//!
+//! Splitting keeps the popup-render memos from invalidating on
+//! every queued completion request.
+//!
 //! One session at a time — mirrors legacy's manager state and
 //! avoids the UX oddity of two popups fighting over the same
 //! cursor. Opening a new session (different tab, new trigger)
@@ -17,11 +29,15 @@ use led_core::CanonPath;
 use led_driver_lsp_core::CompletionItem;
 use led_state_tabs::TabId;
 
-/// Per-session completion state. `session: None` means no popup
-/// is open; every field below is implicitly reset at that point.
+/// User-decision side: which popup is open. None means no popup.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct CompletionsState {
     pub session: Option<CompletionSession>,
+}
+
+/// Driver-bookkeeping side: outboxes + seq counter.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct CompletionsPending {
     /// Monotonic sequence generator for request / resolve round
     /// trips. Handed to `LspCmd::RequestCompletion.seq` on
     /// dispatch; the runtime gates incoming events by comparing
@@ -107,15 +123,17 @@ pub struct CompletionSession {
 }
 
 impl CompletionsState {
+    /// Drop any active popup. Cheap no-op when already clear.
+    pub fn dismiss(&mut self) {
+        self.session = None;
+    }
+}
+
+impl CompletionsPending {
     /// Allocate the next request / resolve sequence id.
     pub fn next_seq(&mut self) -> u64 {
         self.seq_gen = self.seq_gen.wrapping_add(1);
         self.seq_gen
-    }
-
-    /// Drop any active popup. Cheap no-op when already clear.
-    pub fn dismiss(&mut self) {
-        self.session = None;
     }
 
     /// Queue a completion request. Returns the allocated `seq`
@@ -247,10 +265,10 @@ mod tests {
 
     #[test]
     fn next_seq_is_monotonic() {
-        let mut s = CompletionsState::default();
-        assert_eq!(s.next_seq(), 1);
-        assert_eq!(s.next_seq(), 2);
-        assert_eq!(s.next_seq(), 3);
+        let mut p = CompletionsPending::default();
+        assert_eq!(p.next_seq(), 1);
+        assert_eq!(p.next_seq(), 2);
+        assert_eq!(p.next_seq(), 3);
     }
 
     #[test]

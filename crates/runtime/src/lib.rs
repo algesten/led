@@ -238,12 +238,23 @@ pub struct Atoms {
     /// keys. `seq_gen` is the monotonic request id — see
     /// [`led_state_completions::CompletionsState`].
     pub completions: led_state_completions::CompletionsState,
-    /// LSP extras (M18): pending outbound requests + overlays +
-    /// inlay-hint caches for the goto-definition / rename /
-    /// code-action / format / inlay-hints quartet. Kept separate
-    /// from `completions` and `diagnostics` so its churn doesn't
-    /// invalidate unrelated memos.
+    /// LSP completions — driver-bookkeeping side: outboxes +
+    /// `seq_gen`. Split from `completions` per arch guideline 1
+    /// so popup-render memos don't recompute on every queued
+    /// completion request.
+    pub completions_pending: led_state_completions::CompletionsPending,
+    /// LSP extras (M18) — user-decision side: which overlay is
+    /// open (rename / code-action picker), the inlay-hints
+    /// toggle. Mutated by dispatch from key events.
     pub lsp_extras: led_state_lsp::LspExtrasState,
+    /// LSP extras (M18) — driver-bookkeeping side: outbound
+    /// request outboxes, per-request `latest_*_seq` gates, the
+    /// per-buffer inlay-hint cache. Mutated by ingest from
+    /// `LspEvent::*` and by dispatch's `queue_*` helpers;
+    /// drained by execute. Split from `lsp_extras` so its
+    /// per-request churn doesn't invalidate memos that only
+    /// read overlay state.
+    pub lsp_pending: led_state_lsp::LspPending,
     /// Git state (M19): branch + per-file category map + per-
     /// buffer line statuses. Folded from `GitEvent::FileStatuses`
     /// and `GitEvent::LineStatuses` in the ingest phase; read by
@@ -289,6 +300,17 @@ pub struct Atoms {
     /// session DB so subsequent flushes ship only the newly-
     /// finalised groups (mirrors legacy's incremental append).
     pub undo_persistence: std::collections::HashMap<CanonPath, UndoPersistTracker>,
+    /// Per-buffer debounce state for the undo-flush dispatch.
+    /// Each entry records the last buffer `version` we saw and
+    /// the wall-clock instant we first saw it. The flush fires
+    /// once 200ms have elapsed without the version moving —
+    /// mirrors legacy's `Schedule::KeepExisting` 200ms timer
+    /// (`docs/spec/persistence.md`). Without this debounce a
+    /// freshly-typed character would fire `WorkspaceFlushUndo`
+    /// on the very next tick, adding spurious trace lines to
+    /// short scripts (delete_backward, insert_newline, …) that
+    /// legacy goldens captured before the debounce fired.
+    pub undo_flush_debounce: std::collections::HashMap<CanonPath, (u64, Instant)>,
     /// Symlink resolution chain for every path the user has
     /// opened, keyed by canonical path. Populated at tab-open
     /// time (main.rs CLI, find-file commit, browser open) so the
@@ -330,6 +352,14 @@ pub struct World<'a, W: Write> {
     pub wake: &'a Wake,
     pub trace: &'a SharedTrace,
     pub stdout: &'a mut W,
+    /// CLI-supplied `--config-dir` override. When `None`, the
+    /// runtime falls back to `$XDG_CONFIG_HOME/led` then
+    /// `$HOME/.config/led` (`config_dir_for_session`). The
+    /// override is essential for the goldens harness so each
+    /// scenario uses an isolated `<tmpdir>/config/` and acquires
+    /// its own session flock; without it every test races on the
+    /// developer's real `~/.config/led/db.sqlite`.
+    pub cli_config_dir: Option<&'a std::path::Path>,
 }
 
 /// Run the main loop until dispatch signals quit.
@@ -356,7 +386,9 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
         lsp_init_sent,
         lsp_status,
         completions,
+        completions_pending,
         lsp_extras,
+        lsp_pending,
         git,
         git_scan_dispatched,
         git_scan_pending,
@@ -365,12 +397,14 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
         session_save_dispatched,
         resume_check_pending,
         undo_persistence,
+        undo_flush_debounce,
     } = &mut *world.atoms;
     let drivers = world.drivers;
     let wake = world.wake;
     let keymap = world.keymap;
     let theme = world.theme;
     let stdout = &mut *world.stdout;
+    let cli_config_dir = world.cli_config_dir;
     // `world.trace` is wired into every driver at spawn time; the
     // main loop also emits a `WorkspaceClearUndo` on each save,
     // so it holds a direct handle.
@@ -428,6 +462,29 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
                     session,
                     undo_persistence,
                 );
+                // Persist ancestor reveal once on first materialization
+                // of the ACTIVE tab, mirroring legacy `reveal_active_buffer`
+                // (`led/src/model/action/helpers.rs:36`) which fires
+                // from `Mut::ActivateBuffer` for the active path only.
+                // Writing into `expanded_dirs` (rather than re-deriving
+                // each tick) means a later collapse_dir / collapse_all
+                // sticks: the user's intent wins because nothing
+                // re-reveals on idle ticks. Background tabs that
+                // materialize later don't yank the tree open.
+                let is_active = tabs
+                    .active
+                    .and_then(|id| tabs.open.iter().find(|t| t.id == id))
+                    .is_some_and(|t| t.path == completion.path);
+                if is_active {
+                    let ancestors = led_state_browser::ancestors_of(
+                        fs,
+                        &browser.expanded_dirs,
+                        Some(&completion.path),
+                    );
+                    for p in ancestors {
+                        browser.expanded_dirs.insert(p);
+                    }
+                }
             }
             if let Some(lang) = detected {
                 syntax
@@ -608,7 +665,7 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
                     // discarded. Exact-match is the live session;
                     // we accept it and build / replace the
                     // session to match.
-                    if seq != completions.seq_gen {
+                    if seq != completions_pending.seq_gen {
                         continue;
                     }
                     // Find the tab id that corresponds to `path`.
@@ -622,6 +679,23 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
                         completions.dismiss();
                         continue;
                     }
+                    // Resolve `prefix_start_col`: when the server
+                    // gave us a `textEdit.range` we use that
+                    // verbatim; otherwise backtrack through
+                    // identifier characters from the cursor on
+                    // `prefix_line` (matches legacy
+                    // `convert_completion_response`). Keeps the
+                    // popup useful for servers that return
+                    // bare-label items (and our fake-lsp).
+                    let prefix_start_col = match prefix_start_col {
+                        Some(c) => c,
+                        None => identifier_start_col(
+                            edits,
+                            &path,
+                            prefix_line as usize,
+                            tab.cursor.col,
+                        ),
+                    };
                     // Refilter against the user's current typed
                     // prefix so the popup shows relevance-ranked
                     // items on first paint — not the raw server
@@ -672,7 +746,7 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
                 }
                 LspEvent::GotoDefinition { seq, location } => {
                     apply_goto_definition(
-                        tabs, edits, jumps, alerts, lsp_extras,
+                        tabs, edits, jumps, alerts, lsp_pending,
                         terminal, browser, path_chains, seq, location,
                     );
                 }
@@ -682,7 +756,8 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
                     edits: file_edits,
                 } => {
                     apply_lsp_edits(
-                        edits, tabs, alerts, lsp_extras, seq, origin, &file_edits,
+                        edits, tabs, alerts, lsp_extras, lsp_pending,
+                        seq, origin, &file_edits,
                     );
                 }
                 LspEvent::CodeActions {
@@ -690,15 +765,9 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
                     seq,
                     actions,
                 } => {
-                    if lsp_extras.latest_code_action_seq != Some(seq) {
+                    if lsp_pending.latest_code_action_seq != Some(seq) {
                         // Stale response; drop.
-                    } else if actions.is_empty() {
-                        alerts.set_info(
-                            "No code actions available".to_string(),
-                            std::time::Instant::now(),
-                            INFO_TTL,
-                        );
-                    } else {
+                    } else if !actions.is_empty() {
                         dispatch::install_code_action_picker(
                             lsp_extras,
                             path,
@@ -706,6 +775,10 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
                             actions,
                         );
                     }
+                    // Empty list silently drops — matches legacy
+                    // (`Mut::LspCodeActions` clears the picker
+                    // without surfacing any alert when actions
+                    // come back empty).
                 }
                 LspEvent::InlayHints {
                     path,
@@ -726,7 +799,7 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
                     if version != current_version {
                         continue;
                     }
-                    lsp_extras.inlay_hints_by_path.insert(
+                    lsp_pending.inlay_hints_by_path.insert(
                         path,
                         led_state_lsp::BufferInlayHints { version, hints },
                     );
@@ -864,26 +937,19 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
 
         // Apply replace-all completions. Combine the driver's
         // on-disk counts with the dispatch-side in-memory counts
-        // (staged in `edits.pending_replace_in_memory`) to produce
-        // a single "Replaced N occurrences in M files" alert.
+        // (staged in `edits.pending_replace_in_memory`) and surface
+        // a single `"Replaced N occurrence(s)"` alert (legacy
+        // format, `Mut::FileSearchReplaceComplete` in
+        // `led/src/model/mod.rs`).
         for done in drivers.file_search.process_replace() {
             let memory = std::mem::take(&mut edits.pending_replace_in_memory);
-            let memory_files = memory.len();
             let memory_total: usize = memory.iter().map(|m| m.count).sum();
-            let total_files = done.files_changed + memory_files;
             let total = done.total_replacements + memory_total;
-            let msg = if total == 0 {
-                format!("No occurrences of `{}`.", done.query)
-            } else {
-                format!(
-                    "Replaced {} occurrence{} in {} file{}.",
-                    total,
-                    if total == 1 { "" } else { "s" },
-                    total_files,
-                    if total_files == 1 { "" } else { "s" },
-                )
-            };
-            alerts.set_info(msg, Instant::now(), INFO_TTL);
+            alerts.set_info(
+                format!("Replaced {total} occurrence(s)"),
+                Instant::now(),
+                INFO_TTL,
+            );
         }
 
         // Apply syntax parse completions. The runtime stores the
@@ -1165,8 +1231,11 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
                 isearch,
                 file_search,
                 completions,
+                completions_pending,
                 lsp_extras,
+                lsp_pending,
                 diagnostics,
+                lsp_status,
                 git,
                 path_chains,
                 keymap,
@@ -1264,6 +1333,7 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
             fs: FsTreeInput::new(fs),
             ui: BrowserUiInput::new(browser),
             tabs: TabsActiveInput::new(tabs),
+            edits: EditedBuffersInput::new(edits),
         });
         let find_file_actions = find_file_action(FindFileInput::new(find_file));
         // Spinner frame clock — current millis since UNIX epoch,
@@ -1525,10 +1595,19 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
         if !session.init_done
             && let Some(root) = fs.root.as_ref()
         {
-            // Config dir = ~/.config/led/ — same source as the
-            // keymap/theme loaders. We resolve it lazily here
-            // because the dispatcher doesn't see CLI flags.
-            if let Some(cfg) = config_dir_for_session() {
+            // Config dir = `--config-dir` if the CLI supplied
+            // one (the goldens harness relies on this for
+            // hermetic per-test SQLite + flock isolation),
+            // otherwise `$XDG_CONFIG_HOME/led` →
+            // `$HOME/.config/led`. Same source as the keymap /
+            // theme loaders.
+            let cfg = cli_config_dir
+                .and_then(|p| {
+                    std::fs::create_dir_all(p).ok()?;
+                    Some(led_core::UserPath::new(p).canonicalize())
+                })
+                .or_else(config_dir_for_session);
+            if let Some(cfg) = cfg {
                 drivers.session.execute(std::iter::once(&SessionCmd::Init {
                     root: root.clone(),
                     config_dir: cfg,
@@ -1574,7 +1653,47 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
         // for tabbed buffers (preview tabs are excluded; we don't
         // surface a preview flag yet, so every open tab is fair
         // game).
-        if session.primary && session.init_done {
+        // Clipboard actions go BEFORE the per-tick FlushUndo so
+        // the trace order matches legacy: a kill_line trace
+        // sequence reads `ClipboardWrite … WorkspaceFlushUndo …
+        // ClipboardRead`. Legacy emits the clipboard write
+        // synchronously inside dispatch (i.e. before its
+        // debounced flush), so dispatching the clipboard side-
+        // effect ahead of flush in the same tick reproduces the
+        // same wire order. Read when a yank is pending (no read
+        // already in flight); Write when a kill queued clipboard
+        // text. Both flags cleared synchronously per the execute
+        // pattern.
+        let clip_action = clipboard_action(ClipboardStateInput::new(clip));
+        match clip_action {
+            Some(ClipboardAction::Read) => {
+                clip.read_in_flight = true;
+                drivers.clipboard.execute([&ClipboardAction::Read]);
+            }
+            Some(ClipboardAction::Write(_)) => {
+                let text = clip.pending_write.take().expect("memo agreed write");
+                drivers.clipboard.execute([&ClipboardAction::Write(text)]);
+            }
+            None => {}
+        }
+
+        // FlushUndo dispatches in BOTH primary and standalone
+        // modes — the trace fires unconditionally so goldens see
+        // the same `WorkspaceFlushUndo` lines on either side. The
+        // session driver's `FlushUndo` handler skips the SQLite
+        // write when we're not primary, so secondaries / standalone
+        // don't corrupt anyone's DB.
+        //
+        // Per-buffer 200ms debounce mirrors legacy's
+        // `KeepExisting` timer: the first version bump arms the
+        // window, subsequent bumps reset it, and the flush fires
+        // 200ms after the LAST edit. Short edit-then-quit scripts
+        // (delete_backward, insert_newline, …) settle before the
+        // window expires, so no FlushUndo trace fires — matching
+        // the legacy goldens that captured them.
+        let now = Instant::now();
+        let debounce = Duration::from_millis(200);
+        if session.init_done {
             for tab in tabs.open.iter() {
                 let path = &tab.path;
                 let Some(eb) = edits.buffers.get(path) else {
@@ -1591,6 +1710,17 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
                 if current_len <= tracker.persisted_len {
                     continue;
                 }
+                // Update the debounce window when the version
+                // moves; reuse the existing window on idle ticks.
+                let entry = undo_flush_debounce
+                    .entry(path.clone())
+                    .or_insert((eb.version, now));
+                if entry.0 != eb.version {
+                    *entry = (eb.version, now);
+                }
+                if now < entry.1 + debounce {
+                    continue;
+                }
                 let new_groups: Vec<EditGroup> = eb
                     .history
                     .past_groups()[tracker.persisted_len..current_len]
@@ -1600,6 +1730,7 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
                     // flush — advance the cursor so we don't
                     // re-walk them, but don't ship an empty payload.
                     tracker.persisted_len = current_len;
+                    undo_flush_debounce.remove(path);
                     continue;
                 }
                 let content_hash = disk_content_hash_for(eb);
@@ -1620,6 +1751,7 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
                 // the driver inserted (legacy treats the ack as
                 // authoritative).
                 tracker.persisted_len = current_len;
+                undo_flush_debounce.remove(path);
             }
         }
 
@@ -1672,7 +1804,7 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
         // each into `LspCmd::RequestCompletion` here, preserving
         // the pre-allocated `seq` so server responses round-trip
         // back to their originating session unambiguously.
-        for req in completions.pending_requests.drain(..) {
+        for req in completions_pending.pending_requests.drain(..) {
             lsp_cmds.push(LspCmd::RequestCompletion {
                 path: req.path,
                 seq: req.seq,
@@ -1681,7 +1813,7 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
                 trigger: req.trigger,
             });
         }
-        for resolve in completions.pending_resolves.drain(..) {
+        for resolve in completions_pending.pending_resolves.drain(..) {
             lsp_cmds.push(LspCmd::ResolveCompletion {
                 path: resolve.path,
                 seq: resolve.seq,
@@ -1689,7 +1821,7 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
             });
         }
         // M18 goto-definition outbox.
-        for req in lsp_extras.pending_goto.drain(..) {
+        for req in lsp_pending.pending_goto.drain(..) {
             lsp_cmds.push(LspCmd::RequestGotoDefinition {
                 path: req.path,
                 seq: req.seq,
@@ -1698,7 +1830,7 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
             });
         }
         // M18 rename outbox.
-        for req in lsp_extras.pending_rename.drain(..) {
+        for req in lsp_pending.pending_rename.drain(..) {
             lsp_cmds.push(LspCmd::RequestRename {
                 path: req.path,
                 seq: req.seq,
@@ -1708,7 +1840,7 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
             });
         }
         // M18 code-action request outbox.
-        for req in lsp_extras.pending_code_action.drain(..) {
+        for req in lsp_pending.pending_code_action.drain(..) {
             lsp_cmds.push(LspCmd::RequestCodeAction {
                 path: req.path,
                 seq: req.seq,
@@ -1719,7 +1851,7 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
             });
         }
         // M18 code-action commit outbox.
-        for req in lsp_extras.pending_code_action_select.drain(..) {
+        for req in lsp_pending.pending_code_action_select.drain(..) {
             lsp_cmds.push(LspCmd::SelectCodeAction {
                 path: req.path,
                 seq: req.seq,
@@ -1735,7 +1867,7 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
         // round-trip happens but the data sits unused; the
         // painter pickup lands with the body-model refactor.
         // M18 format outbox.
-        for req in lsp_extras.pending_format.drain(..) {
+        for req in lsp_pending.pending_format.drain(..) {
             lsp_cmds.push(LspCmd::RequestFormat {
                 path: req.path,
                 seq: req.seq,
@@ -1744,7 +1876,7 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
         if lsp_extras.inlay_hints_enabled {
             for (path, eb) in edits.buffers.iter() {
                 let version = eb.version;
-                if lsp_extras
+                if lsp_pending
                     .inlay_hints_requested
                     .contains(&(path.clone(), version))
                 {
@@ -1755,9 +1887,9 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
                     .len_lines()
                     .saturating_sub(1)
                     .min(u32::MAX as usize) as u32;
-                lsp_extras.queue_inlay_hints(path.clone(), version, 0, end_line);
+                lsp_pending.queue_inlay_hints(path.clone(), version, 0, end_line);
             }
-            for req in lsp_extras.pending_inlay_hint.drain(..) {
+            for req in lsp_pending.pending_inlay_hint.drain(..) {
                 lsp_cmds.push(LspCmd::RequestInlayHints {
                     path: req.path,
                     seq: req.seq,
@@ -1767,7 +1899,7 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
                 });
             }
         } else {
-            lsp_extras.pending_inlay_hint.clear();
+            lsp_pending.pending_inlay_hint.clear();
         }
         if !lsp_cmds.is_empty() {
             drivers.lsp.execute(lsp_cmds.iter());
@@ -1793,39 +1925,39 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
             // sticky. Combine with the "never scanned yet"
             // condition to decide whether to actually dispatch.
             let save_pending = std::mem::take(git_scan_pending);
+            // Hold the FIRST scan until pending CLI-arg loads have
+            // landed so any ancestor-reveal listing (driven by the
+            // file-completion handler above) shipped this tick wins
+            // the trace ordering — mirrors legacy's 50ms debounce
+            // (`docs/spec/git.md` §"Debounced rescan on activity"),
+            // which delays the initial scan past the workspace +
+            // arg-file load burst. After the latch flips, save-
+            // triggered scans fire on the same tick as the save.
+            let any_pending_load = tabs
+                .open
+                .iter()
+                .any(|t| !edits.buffers.contains_key(&t.path));
+            let initial_scan_ready = *git_scan_dispatched || !any_pending_load;
             let want_scan = !*git_scan_dispatched || save_pending;
-            if want_scan && root.as_path().join(".git").exists() {
+            if want_scan && initial_scan_ready && root.as_path().join(".git").exists() {
                 drivers.git.execute(std::iter::once(&GitCmd::ScanFiles {
                     root: root.clone(),
                 }));
                 *git_scan_dispatched = true;
-            } else if want_scan {
+            } else if want_scan && initial_scan_ready {
                 // Not a repo — flip the latch so we don't
                 // re-check `.git/` every tick.
                 *git_scan_dispatched = true;
+            } else if save_pending {
+                // Restore the save-pending flag if we deferred:
+                // the next tick will re-enter and try again.
+                *git_scan_pending = true;
             }
         } else {
             // No workspace root yet — discard the pending flag
             // silently so a future workspace load doesn't
             // double-fire.
             *git_scan_pending = false;
-        }
-
-        // Clipboard actions: a Read when a yank is pending (no read
-        // already in flight), a Write when a kill queued clipboard
-        // text. Both flags cleared synchronously per the execute
-        // pattern.
-        let clip_action = clipboard_action(ClipboardStateInput::new(clip));
-        match clip_action {
-            Some(ClipboardAction::Read) => {
-                clip.read_in_flight = true;
-                drivers.clipboard.execute([&ClipboardAction::Read]);
-            }
-            Some(ClipboardAction::Write(_)) => {
-                let text = clip.pending_write.take().expect("memo agreed write");
-                drivers.clipboard.execute([&ClipboardAction::Write(text)]);
-            }
-            None => {}
         }
 
         // ── Render ──────────────────────────────────────────────
@@ -1853,7 +1985,7 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
         // without getting its work done; the next key would then
         // wait the full timeout. That was the visible stutter when
         // holding a key — key-repeat events race with the drain.
-        let timeout = nearest_deadline(alerts, find_file, lsp_status)
+        let timeout = nearest_deadline(alerts, find_file, lsp_status, undo_flush_debounce)
             .and_then(|d| d.checked_duration_since(Instant::now()))
             .unwrap_or(Duration::from_secs(60));
         use std::sync::mpsc::RecvTimeoutError;
@@ -2151,6 +2283,7 @@ pub fn nearest_deadline(
     alerts: &AlertState,
     find_file: &Option<FindFileState>,
     lsp_status: &LspStatuses,
+    undo_flush_debounce: &std::collections::HashMap<CanonPath, (u64, Instant)>,
 ) -> Option<Instant> {
     let mut soonest: Option<Instant> = None;
     let consider = |soonest: &mut Option<Instant>, candidate: Option<Instant>| {
@@ -2176,6 +2309,17 @@ pub fn nearest_deadline(
             Some(Instant::now() + std::time::Duration::from_millis(80)),
         );
     }
+    // Undo-flush debounce — wake at the earliest pending window
+    // expiry so the per-tick flush check fires the trace on time
+    // even when no other event is in flight.
+    let debounce = std::time::Duration::from_millis(200);
+    if let Some(earliest) = undo_flush_debounce
+        .values()
+        .map(|(_, seen_at)| *seen_at + debounce)
+        .min()
+    {
+        consider(&mut soonest, Some(earliest));
+    }
     soonest
 }
 
@@ -2190,6 +2334,44 @@ pub fn nearest_deadline(
 /// server response against the current buffer state before
 /// installing the session — without this, items appear
 /// unfiltered for one frame until the next keystroke.
+/// Walk left from `cursor_col` on `prefix_line` while characters
+/// are identifier-like (alphanumeric or `_`). The returned col is
+/// the first identifier char — `cursor_col` itself when the char
+/// to the left isn't identifier-like, `0` when the line begins
+/// with an unbroken run. Used as the fallback for completion
+/// responses where the server didn't carry a `textEdit.range`
+/// (legacy `convert_completion_response`).
+fn identifier_start_col(
+    edits: &BufferEdits,
+    path: &CanonPath,
+    prefix_line: usize,
+    cursor_col: usize,
+) -> u32 {
+    let Some(eb) = edits.buffers.get(path) else {
+        return cursor_col as u32;
+    };
+    if prefix_line >= eb.rope.len_lines() {
+        return cursor_col as u32;
+    }
+    let line_start = eb.rope.line_to_char(prefix_line);
+    let line_end = if prefix_line + 1 < eb.rope.len_lines() {
+        eb.rope.line_to_char(prefix_line + 1)
+    } else {
+        eb.rope.len_chars()
+    };
+    let line_len = line_end - line_start;
+    let mut start = cursor_col.min(line_len);
+    while start > 0 {
+        let ch = eb.rope.char(line_start + start - 1);
+        if ch.is_alphanumeric() || ch == '_' {
+            start -= 1;
+        } else {
+            break;
+        }
+    }
+    start as u32
+}
+
 fn completion_prefix(
     edits: &BufferEdits,
     path: &CanonPath,
@@ -2229,17 +2411,17 @@ fn apply_goto_definition(
     edits: &BufferEdits,
     jumps: &mut JumpListState,
     alerts: &mut AlertState,
-    lsp_extras: &mut led_state_lsp::LspExtrasState,
+    lsp_pending: &mut led_state_lsp::LspPending,
     terminal: &led_driver_terminal_core::Terminal,
     browser: &led_state_browser::BrowserUi,
     path_chains: &mut std::collections::HashMap<CanonPath, PathChain>,
     seq: u64,
     location: Option<led_driver_lsp_core::Location>,
 ) {
-    if lsp_extras.latest_goto_seq != Some(seq) {
+    if lsp_pending.latest_goto_seq != Some(seq) {
         return;
     }
-    lsp_extras.latest_goto_seq = None;
+    lsp_pending.latest_goto_seq = None;
     let Some(loc) = location else {
         alerts.set_warn(
             "lsp.goto".to_string(),
@@ -2352,7 +2534,8 @@ fn apply_lsp_edits(
     edits: &mut BufferEdits,
     tabs: &led_state_tabs::Tabs,
     alerts: &mut AlertState,
-    lsp_extras: &mut led_state_lsp::LspExtrasState,
+    _lsp_extras: &mut led_state_lsp::LspExtrasState,
+    lsp_pending: &mut led_state_lsp::LspPending,
     seq: u64,
     origin: led_driver_lsp_core::EditsOrigin,
     file_edits: &std::sync::Arc<Vec<led_driver_lsp_core::FileEdit>>,
@@ -2360,16 +2543,16 @@ fn apply_lsp_edits(
     // Stale-seq gate per origin.
     match origin {
         led_driver_lsp_core::EditsOrigin::Rename => {
-            if lsp_extras.latest_rename_seq != Some(seq) {
+            if lsp_pending.latest_rename_seq != Some(seq) {
                 return;
             }
-            lsp_extras.latest_rename_seq = None;
+            lsp_pending.latest_rename_seq = None;
         }
         led_driver_lsp_core::EditsOrigin::CodeAction => {
-            if lsp_extras.latest_code_action_select_seq != Some(seq) {
+            if lsp_pending.latest_code_action_select_seq != Some(seq) {
                 return;
             }
-            lsp_extras.latest_code_action_select_seq = None;
+            lsp_pending.latest_code_action_select_seq = None;
         }
         led_driver_lsp_core::EditsOrigin::Format => {
             // Per-path stale gate: the most-recently-queued
@@ -2379,8 +2562,8 @@ fn apply_lsp_edits(
             // drop silently.
             let mut keep = false;
             for fe in file_edits.iter() {
-                if lsp_extras.latest_format_seq.get(&fe.path) == Some(&seq) {
-                    lsp_extras.latest_format_seq.remove(&fe.path);
+                if lsp_pending.latest_format_seq.get(&fe.path) == Some(&seq) {
+                    lsp_pending.latest_format_seq.remove(&fe.path);
                     keep = true;
                 }
             }
@@ -2390,14 +2573,14 @@ fn apply_lsp_edits(
                 // path and if ANY has its latest_format_seq
                 // matching, accept this delivery as that path's
                 // completion.
-                let matching: Vec<CanonPath> = lsp_extras
+                let matching: Vec<CanonPath> = lsp_pending
                     .pending_save_after_format
                     .iter()
-                    .filter(|p| lsp_extras.latest_format_seq.get(*p) == Some(&seq))
+                    .filter(|p| lsp_pending.latest_format_seq.get(*p) == Some(&seq))
                     .cloned()
                     .collect();
                 for p in &matching {
-                    lsp_extras.latest_format_seq.remove(p);
+                    lsp_pending.latest_format_seq.remove(p);
                 }
                 if matching.is_empty() {
                     return;
@@ -2478,14 +2661,14 @@ fn apply_lsp_edits(
             .map(|fe| fe.path.clone())
             .collect();
         if to_save.is_empty() {
-            to_save = lsp_extras
+            to_save = lsp_pending
                 .pending_save_after_format
                 .iter()
                 .cloned()
                 .collect();
         }
         for path in to_save {
-            if lsp_extras.pending_save_after_format.remove(&path).is_none() {
+            if lsp_pending.pending_save_after_format.remove(&path).is_none() {
                 continue;
             }
             // Always save, even if the buffer looks clean: the
@@ -2654,6 +2837,7 @@ pub fn spawn_drivers(
     trace: SharedTrace,
     wake: &Wake,
     lsp_server_override: Option<String>,
+    clipboard_isolated: bool,
 ) -> io::Result<Drivers> {
     let (file, file_native) =
         led_driver_buffers_native::spawn(trace.clone().as_file_trace(), wake.notifier.clone());
@@ -2661,10 +2845,12 @@ pub fn spawn_drivers(
         trace.clone().as_file_trace(),
         wake.notifier.clone(),
     );
-    let (clipboard, clipboard_native) = led_driver_clipboard_native::spawn(
-        trace.clone().as_clipboard_trace(),
-        wake.notifier.clone(),
-    );
+    let clip_trace = trace.clone().as_clipboard_trace();
+    let (clipboard, clipboard_native) = if clipboard_isolated {
+        led_driver_clipboard_native::spawn_isolated(clip_trace, wake.notifier.clone())
+    } else {
+        led_driver_clipboard_native::spawn(clip_trace, wake.notifier.clone())
+    };
     let (fs_list, fs_list_native) = led_driver_fs_list_native::spawn(
         trace.clone().as_fs_list_trace(),
         wake.notifier.clone(),
@@ -2854,6 +3040,31 @@ pub(crate) mod trace_adapter {
         }
         fn lsp_mode_fallback(&self) {
             self.0.lsp_mode_fallback();
+        }
+        fn lsp_send_request(
+            &self,
+            server: &str,
+            method: &str,
+            id: i64,
+            path_uri: Option<&str>,
+        ) {
+            self.0.lsp_send_request(server, method, id, path_uri);
+        }
+        fn lsp_send_notification(
+            &self,
+            server: &str,
+            method: &str,
+            path_uri: Option<&str>,
+            version: Option<i32>,
+        ) {
+            self.0
+                .lsp_send_notification(server, method, path_uri, version);
+        }
+        fn lsp_recv_response(&self, server: &str, id: i64) {
+            self.0.lsp_recv_response(server, id);
+        }
+        fn lsp_recv_notification(&self, server: &str, method: &str) {
+            self.0.lsp_recv_notification(server, method);
         }
     }
 
@@ -3185,10 +3396,10 @@ mod tests {
         );
         let mut jumps = led_state_jumps::JumpListState::default();
         let mut alerts = AlertState::default();
-        let mut lsp_extras = led_state_lsp::LspExtrasState::default();
+        let mut lsp_pending = led_state_lsp::LspPending::default();
         // Caller allocates the seq via queue_*; simulate by
         // setting latest_goto_seq to 42.
-        lsp_extras.latest_goto_seq = Some(42);
+        lsp_pending.latest_goto_seq = Some(42);
         let mut _path_chains: std::collections::HashMap<CanonPath, PathChain> =
             std::collections::HashMap::new();
         apply_goto_definition(
@@ -3196,7 +3407,7 @@ mod tests {
             &edits,
             &mut jumps,
             &mut alerts,
-            &mut lsp_extras,
+            &mut lsp_pending,
             &led_driver_terminal_core::Terminal::default(),
             &led_state_browser::BrowserUi::default(),
             &mut _path_chains,
@@ -3214,7 +3425,7 @@ mod tests {
         assert_eq!(jumps.entries[0].line, 5);
         assert_eq!(jumps.entries[0].col, 10);
         // Seq consumed.
-        assert!(lsp_extras.latest_goto_seq.is_none());
+        assert!(lsp_pending.latest_goto_seq.is_none());
     }
 
     #[test]
@@ -3227,8 +3438,8 @@ mod tests {
         );
         let mut jumps = led_state_jumps::JumpListState::default();
         let mut alerts = AlertState::default();
-        let mut lsp_extras = led_state_lsp::LspExtrasState::default();
-        lsp_extras.latest_goto_seq = Some(99);
+        let mut lsp_pending = led_state_lsp::LspPending::default();
+        lsp_pending.latest_goto_seq = Some(99);
         let mut _path_chains: std::collections::HashMap<CanonPath, PathChain> =
             std::collections::HashMap::new();
         apply_goto_definition(
@@ -3236,7 +3447,7 @@ mod tests {
             &edits,
             &mut jumps,
             &mut alerts,
-            &mut lsp_extras,
+            &mut lsp_pending,
             &led_driver_terminal_core::Terminal::default(),
             &led_state_browser::BrowserUi::default(),
             &mut _path_chains,
@@ -3252,7 +3463,7 @@ mod tests {
         assert!(jumps.entries.is_empty());
         // The in-flight seq is preserved so the correct
         // response can still land.
-        assert_eq!(lsp_extras.latest_goto_seq, Some(99));
+        assert_eq!(lsp_pending.latest_goto_seq, Some(99));
     }
 
     #[test]
@@ -3280,8 +3491,8 @@ mod tests {
         tabs.open[0].scroll = led_state_tabs::Scroll::default();
         let mut jumps = led_state_jumps::JumpListState::default();
         let mut alerts = AlertState::default();
-        let mut lsp_extras = led_state_lsp::LspExtrasState::default();
-        lsp_extras.latest_goto_seq = Some(1);
+        let mut lsp_pending = led_state_lsp::LspPending::default();
+        lsp_pending.latest_goto_seq = Some(1);
         let term = Terminal {
             dims: Some(Dims { cols: 80, rows: 14 }), // body ≈ 12 rows
             ..Default::default()
@@ -3293,7 +3504,7 @@ mod tests {
             &edits,
             &mut jumps,
             &mut alerts,
-            &mut lsp_extras,
+            &mut lsp_pending,
             &term,
             &led_state_browser::BrowserUi {
                 visible: false,
@@ -3338,8 +3549,8 @@ mod tests {
         tabs.open[0].scroll = led_state_tabs::Scroll::default();
         let mut jumps = led_state_jumps::JumpListState::default();
         let mut alerts = AlertState::default();
-        let mut lsp_extras = led_state_lsp::LspExtrasState::default();
-        lsp_extras.latest_goto_seq = Some(1);
+        let mut lsp_pending = led_state_lsp::LspPending::default();
+        lsp_pending.latest_goto_seq = Some(1);
         let term = Terminal {
             dims: Some(Dims { cols: 80, rows: 22 }), // body ≈ 20 rows
             ..Default::default()
@@ -3351,7 +3562,7 @@ mod tests {
             &edits,
             &mut jumps,
             &mut alerts,
-            &mut lsp_extras,
+            &mut lsp_pending,
             &term,
             &led_state_browser::BrowserUi {
                 visible: false,
@@ -3378,8 +3589,8 @@ mod tests {
         let edits = BufferEdits::default();
         let mut jumps = led_state_jumps::JumpListState::default();
         let mut alerts = AlertState::default();
-        let mut lsp_extras = led_state_lsp::LspExtrasState::default();
-        lsp_extras.latest_goto_seq = Some(1);
+        let mut lsp_pending = led_state_lsp::LspPending::default();
+        lsp_pending.latest_goto_seq = Some(1);
         let mut _path_chains: std::collections::HashMap<CanonPath, PathChain> =
             std::collections::HashMap::new();
         apply_goto_definition(
@@ -3387,7 +3598,7 @@ mod tests {
             &edits,
             &mut jumps,
             &mut alerts,
-            &mut lsp_extras,
+            &mut lsp_pending,
             &led_driver_terminal_core::Terminal::default(),
             &led_state_browser::BrowserUi::default(),
             &mut _path_chains,
@@ -3408,7 +3619,8 @@ mod tests {
         );
         let mut alerts = AlertState::default();
         let mut lsp_extras = led_state_lsp::LspExtrasState::default();
-        lsp_extras.latest_rename_seq = Some(7);
+        let mut lsp_pending = led_state_lsp::LspPending::default();
+        lsp_pending.latest_rename_seq = Some(7);
         let file_edits = std::sync::Arc::new(vec![FileEdit {
             path: path.clone(),
             edits: vec![
@@ -3433,6 +3645,7 @@ mod tests {
             &led_state_tabs::Tabs::default(),
             &mut alerts,
             &mut lsp_extras,
+            &mut lsp_pending,
             7,
             EditsOrigin::Rename,
             &file_edits,
@@ -3440,7 +3653,7 @@ mod tests {
         let eb = edits.buffers.get(&path).unwrap();
         assert_eq!(eb.rope.to_string(), "bar + bar");
         assert!(eb.version > 0);
-        assert!(lsp_extras.latest_rename_seq.is_none());
+        assert!(lsp_pending.latest_rename_seq.is_none());
         assert!(
             alerts.info.as_ref().map_or(false, |m| m.contains("Renamed"))
         );
@@ -3462,8 +3675,9 @@ mod tests {
         edits.buffers.insert(path.clone(), eb);
         let mut alerts = AlertState::default();
         let mut lsp_extras = led_state_lsp::LspExtrasState::default();
-        lsp_extras.pending_save_after_format.insert(path.clone());
-        lsp_extras.latest_format_seq.insert(path.clone(), 1);
+        let mut lsp_pending = led_state_lsp::LspPending::default();
+        lsp_pending.pending_save_after_format.insert(path.clone());
+        lsp_pending.latest_format_seq.insert(path.clone(), 1);
 
         let file_edits = std::sync::Arc::new(vec![FileEdit {
             path: path.clone(),
@@ -3480,6 +3694,7 @@ mod tests {
             &led_state_tabs::Tabs::default(),
             &mut alerts,
             &mut lsp_extras,
+            &mut lsp_pending,
             1,
             EditsOrigin::Format,
             &file_edits,
@@ -3515,7 +3730,8 @@ mod tests {
         edits.buffers.insert(path.clone(), eb);
         let mut alerts = AlertState::default();
         let mut lsp_extras = led_state_lsp::LspExtrasState::default();
-        lsp_extras.latest_format_seq.insert(path.clone(), 1);
+        let mut lsp_pending = led_state_lsp::LspPending::default();
+        lsp_pending.latest_format_seq.insert(path.clone(), 1);
 
         // Two edits that together perform "move AAA| to the end":
         //   * delete chars 0..4 ("AAA|")
@@ -3544,6 +3760,7 @@ mod tests {
             &led_state_tabs::Tabs::default(),
             &mut alerts,
             &mut lsp_extras,
+            &mut lsp_pending,
             1,
             EditsOrigin::Format,
             &file_edits,
@@ -3592,8 +3809,9 @@ mod tests {
         edits.buffers.insert(path.clone(), eb);
         let mut alerts = AlertState::default();
         let mut lsp_extras = led_state_lsp::LspExtrasState::default();
-        lsp_extras.pending_save_after_format.insert(path.clone());
-        lsp_extras
+        let mut lsp_pending = led_state_lsp::LspPending::default();
+        lsp_pending.pending_save_after_format.insert(path.clone());
+        lsp_pending
             .latest_format_seq
             .insert(path.clone(), 42);
         // Non-empty format edit (cosmetic: capitalise "x" → "X").
@@ -3612,6 +3830,7 @@ mod tests {
             &led_state_tabs::Tabs::default(),
             &mut alerts,
             &mut lsp_extras,
+            &mut lsp_pending,
             42,
             EditsOrigin::Format,
             &file_edits,
@@ -3619,7 +3838,7 @@ mod tests {
         assert_eq!(edits.buffers[&path].rope.to_string(), "X");
         // Post-format save is queued.
         assert!(edits.pending_saves.contains(&path));
-        assert!(!lsp_extras.pending_save_after_format.contains(&path));
+        assert!(!lsp_pending.pending_save_after_format.contains(&path));
     }
 
     #[test]
@@ -3632,8 +3851,9 @@ mod tests {
         edits.buffers.insert(path.clone(), eb);
         let mut alerts = AlertState::default();
         let mut lsp_extras = led_state_lsp::LspExtrasState::default();
-        lsp_extras.pending_save_after_format.insert(path.clone());
-        lsp_extras
+        let mut lsp_pending = led_state_lsp::LspPending::default();
+        lsp_pending.pending_save_after_format.insert(path.clone());
+        lsp_pending
             .latest_format_seq
             .insert(path.clone(), 5);
         let file_edits = std::sync::Arc::new(Vec::new());
@@ -3642,6 +3862,7 @@ mod tests {
             &led_state_tabs::Tabs::default(),
             &mut alerts,
             &mut lsp_extras,
+            &mut lsp_pending,
             5,
             EditsOrigin::Format,
             &file_edits,
@@ -3660,7 +3881,8 @@ mod tests {
         );
         let mut alerts = AlertState::default();
         let mut lsp_extras = led_state_lsp::LspExtrasState::default();
-        lsp_extras.latest_rename_seq = Some(99);
+        let mut lsp_pending = led_state_lsp::LspPending::default();
+        lsp_pending.latest_rename_seq = Some(99);
         let file_edits = std::sync::Arc::new(vec![FileEdit {
             path: path.clone(),
             edits: vec![TextEditOp {
@@ -3676,13 +3898,14 @@ mod tests {
             &led_state_tabs::Tabs::default(),
             &mut alerts,
             &mut lsp_extras,
+            &mut lsp_pending,
             /* stale */ 5,
             EditsOrigin::Rename,
             &file_edits,
         );
         // Buffer unchanged, seq preserved.
         assert_eq!(edits.buffers[&path].rope.to_string(), "foo");
-        assert_eq!(lsp_extras.latest_rename_seq, Some(99));
+        assert_eq!(lsp_pending.latest_rename_seq, Some(99));
     }
 
     #[test]
@@ -3701,8 +3924,8 @@ mod tests {
         );
         let mut jumps = led_state_jumps::JumpListState::default();
         let mut alerts = AlertState::default();
-        let mut lsp_extras = led_state_lsp::LspExtrasState::default();
-        lsp_extras.latest_goto_seq = Some(1);
+        let mut lsp_pending = led_state_lsp::LspPending::default();
+        lsp_pending.latest_goto_seq = Some(1);
         let mut path_chains: std::collections::HashMap<CanonPath, PathChain> =
             std::collections::HashMap::new();
         let target = canon("other.rs");
@@ -3711,7 +3934,7 @@ mod tests {
             &edits,
             &mut jumps,
             &mut alerts,
-            &mut lsp_extras,
+            &mut lsp_pending,
             &led_driver_terminal_core::Terminal::default(),
             &led_state_browser::BrowserUi::default(),
             &mut path_chains,
@@ -3740,6 +3963,6 @@ mod tests {
             }),
         );
         assert_eq!(jumps.entries.len(), 1);
-        assert!(lsp_extras.latest_goto_seq.is_none());
+        assert!(lsp_pending.latest_goto_seq.is_none());
     }
 }

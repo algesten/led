@@ -448,9 +448,11 @@ pub fn file_save_action<'p, 'b>(
         let Some(eb) = buffers.buffers.get(path) else {
             continue;
         };
-        if !eb.dirty() {
-            continue;
-        }
+        // No dirty filter: the user explicitly asked to Save (or
+        // SaveNoFormat); writing a byte-identical file is cheap
+        // and matches legacy. SaveAll's gating happens in the
+        // dispatch helper (`request_save_all`) which only adds
+        // dirty paths to `pending_saves` in the first place.
         out.push(SaveAction::Save {
             path: path.clone(),
             rope: eb.rope.clone(),
@@ -823,7 +825,18 @@ fn render_content(
         let is_continued = led_core::is_continued(sub, line_char_len, content_cols);
         let mut s = String::with_capacity(cols);
         s.push_str("  ");
-        s.push_str(&slice);
+        // Expand tabs to 4 spaces so the painter doesn't ship a
+        // raw `\t` byte to vt100 (which would jump the cursor to
+        // the next 8-col tab stop, leaving a one-cell gap and
+        // shifting everything right). Matches legacy
+        // `core/src/wrap.rs::expand_tabs` (also 4-space).
+        for ch in slice.chars() {
+            if ch == '\t' {
+                s.push_str("    ");
+            } else {
+                s.push(ch);
+            }
+        }
         if is_continued {
             // Non-last sub-line: emit `<content><\>`. Wrap
             // geometry reserves exactly one trailing col for the
@@ -847,13 +860,12 @@ fn render_content(
             .map(|diags| diagnostics_for_sub_line(diags, ln, col_start, col_end, content_cols))
             .unwrap_or_default();
         // Merged gutter category (M19 D7): the highest-precedence
-        // `IssueCategory` across LSP diagnostics + git line
-        // statuses for this row. Only paints on the first sub-
-        // line of a wrapped row — matches legacy's "col 1 marker
-        // on chunk 0".
+        // `IssueCategory` for the gutter bar (git / PR only). Only
+        // paints on the first sub-line of a wrapped row — matches
+        // legacy's "col 1 marker on chunk 0".
         let is_first_sub = sub == SubLine(0);
         let gutter_category = if is_first_sub {
-            merged_gutter_category(gutter_diag, git_line_statuses, ln)
+            merged_gutter_category(git_line_statuses, ln)
         } else {
             None
         };
@@ -953,28 +965,19 @@ fn diagnostics_for_sub_line(
 }
 
 /// Pick the precedence-winning `IssueCategory` for the gutter
-/// bar (col 0) at `row`, merging LSP diagnostic severity with
-/// git line statuses. Returns `None` if neither source covers
-/// the row. Matches the priority ladder documented in
-/// `docs/spec/git.md`:
-///
-///   LspError > LspWarning > Unstaged > StagedModified/New > PrComment/PrDiff
+/// bar (col 0) at `row` from git / PR line statuses. LSP severity
+/// is intentionally excluded — diagnostics get their own glyph in
+/// gutter col 1 (the `●`), so painting the bar from LSP too would
+/// double up the indicator. Mirrors legacy `display.rs:328` which
+/// queries only `buffer_line_annotations` (git + PR diff/comment,
+/// no LSP). The precedence ladder in `IssueCategory::precedence`
+/// still includes LSP because other consumers (browser
+/// `resolve_display`) tie-break across all categories.
 fn merged_gutter_category(
-    diag_sev: Option<DiagnosticSeverity>,
     line_statuses: Option<&[led_core::git::LineStatus]>,
     row: usize,
 ) -> Option<led_core::IssueCategory> {
-    let lsp = diag_sev.and_then(|s| match s {
-        DiagnosticSeverity::Error => Some(led_core::IssueCategory::LspError),
-        DiagnosticSeverity::Warning => Some(led_core::IssueCategory::LspWarning),
-        // Info / Hint never colour the gutter — legacy parity.
-        _ => None,
-    });
-    let git = line_statuses.and_then(|s| led_core::git::best_category_at(s, row));
-    [lsp, git]
-        .into_iter()
-        .flatten()
-        .min_by_key(|c| c.precedence())
+    line_statuses.and_then(|s| led_core::git::best_category_at(s, row))
 }
 
 fn higher(a: DiagnosticSeverity, b: DiagnosticSeverity) -> DiagnosticSeverity {
@@ -1150,32 +1153,25 @@ pub fn status_bar_model<'a>(inputs: StatusBarInputs<'a>) -> StatusBarModel {
         git,
         render_tick,
     } = inputs;
-    // Priority 0a — LSP rename overlay prompt (M18).
-    if let Some(state) = lsp_extras.rename.as_ref() {
-        let mut left = String::with_capacity(state.input.text.len() + 10);
-        left.push_str(" Rename: ");
-        left.push_str(&state.input.text);
-        return StatusBarModel {
-            left: Arc::from(left),
-            right: Arc::from(""),
-            is_warn: false,
-        };
-    }
-    // Priority 0b — in-buffer isearch prompt.
+    // The rename overlay used to take the status-bar prompt slot
+    // here; legacy renders it as an in-buffer popup anchored on
+    // the row below the cursor instead. See `rename_popup_model`.
+    let _ = lsp_extras;
+    // Priority 0b — in-buffer isearch prompt. Matches legacy
+    // `display.rs` "Failing search:" / "Search:" wording so the
+    // failed-state and live-state share a single prefix slot.
     if let Some(state) = overlays.isearch.as_ref() {
         let hint_len = state.query.hint.as_ref().map(|h| h.len() + 1).unwrap_or(0);
-        let mut left = String::with_capacity(state.query.text.len() + 10 + hint_len);
-        left.push_str(" Search: ");
+        let mut left = String::with_capacity(state.query.text.len() + 18 + hint_len);
+        if state.failed {
+            left.push_str(" Failing search: ");
+        } else {
+            left.push_str(" Search: ");
+        }
         left.push_str(&state.query.text);
         if let Some(hint) = state.query.hint.as_ref() {
             left.push(' ');
             left.push_str(hint);
-        }
-        // Failed-state marker — matches legacy UX of "query shows
-        // even when no match forward"; Stage 3/5 will style this
-        // differently in the painter.
-        if state.failed {
-            left.push_str("  [No match]");
         }
         return StatusBarModel {
             left: Arc::from(left),
@@ -1373,30 +1369,17 @@ fn lsp_progress_message(lsp: LspStatusesInput<'_>, render_tick: u64) -> Option<S
 fn position_string(
     tabs: TabsActiveInput<'_>,
     _edits: EditedBuffersInput<'_>,
-    diagnostics: DiagnosticsStatesInput<'_>,
+    _diagnostics: DiagnosticsStatesInput<'_>,
 ) -> Arc<str> {
-    let Some(tab) = active_tab(tabs) else {
-        return Arc::from("");
-    };
     // 1-indexed for human display — matches legacy goldens.
-    let row = tab.cursor.line + 1;
-    let col = tab.cursor.col + 1;
-    // Diagnostic count prefix: `E:N W:M` when the active buffer
-    // has any errors or warnings. Info / hint counts are omitted
-    // to keep the bar tidy — user runs the diag-list command to
-    // see them individually.
-    let mut prefix = String::new();
-    if let Some(bd) = diagnostics.by_path.get(&tab.path) {
-        let errors = bd.count(DiagnosticSeverity::Error);
-        let warnings = bd.count(DiagnosticSeverity::Warning);
-        if errors > 0 {
-            prefix.push_str(&format!("E:{errors} "));
-        }
-        if warnings > 0 {
-            prefix.push_str(&format!("W:{warnings} "));
-        }
-    }
-    Arc::from(format!("{prefix}L{row}:C{col} "))
+    // Falls back to `L1:C1` when no tab is active so post-kill /
+    // empty-workspace status bars still anchor a position
+    // string (legacy `display.rs` uses `s.cursor_row/col` which
+    // default to zero in the same case).
+    let (row, col) = active_tab(tabs)
+        .map(|t| (t.cursor.line + 1, t.cursor.col + 1))
+        .unwrap_or((1, 1));
+    Arc::from(format!("L{row}:C{col} "))
 }
 
 /// Side-panel slice of the render frame. Walks the visible window
@@ -1419,6 +1402,7 @@ pub struct SidePanelInputs<'a> {
     pub tabs: TabsActiveInput<'a>,
     pub diagnostics: DiagnosticsStatesInput<'a>,
     pub git: GitStateInput<'a>,
+    pub edits: EditedBuffersInput<'a>,
     pub rows: u16,
 }
 
@@ -1431,6 +1415,7 @@ pub fn side_panel_model<'a>(inputs: SidePanelInputs<'a>) -> SidePanelModel {
         tabs,
         diagnostics,
         git,
+        edits,
         rows,
     } = inputs;
     if let Some(state) = overlays.file_search.as_ref() {
@@ -1445,6 +1430,7 @@ pub fn side_panel_model<'a>(inputs: SidePanelInputs<'a>) -> SidePanelModel {
         fs,
         ui: browser,
         tabs,
+        edits,
     });
     let selected = browser_selected_idx(&entries, browser.selected_path.as_ref());
     let rows = rows as usize;
@@ -1663,8 +1649,13 @@ fn file_search_side_panel(
                     .get(hit_idx)
                     .and_then(|e| e.as_ref())
                     .is_some();
-                let (preview, match_preview_idx) = trimmed_preview(hit);
                 let prefix_chars = 3 + count_chars_of_usize(hit.line) + 2;
+                // Side panel content area is 24 cols (see Layout in
+                // driver-terminal/core); the prefix eats `prefix_chars`,
+                // the rest is what the preview can fill before the
+                // border. Trim only when the raw preview wouldn't fit.
+                let preview_budget = 24usize.saturating_sub(prefix_chars);
+                let (preview, match_preview_idx) = trimmed_preview(hit, preview_budget);
                 let match_len = chars_between(&hit.preview, hit.match_start, hit.match_end);
                 let match_start = (prefix_chars + match_preview_idx) as u16;
                 let match_end = match_start.saturating_add(match_len as u16);
@@ -1797,7 +1788,9 @@ pub fn popover_model(
     }
 
     // Anchor in absolute terminal coords: cursor position inside
-    // the editor area. Compute from tab scroll / cursor row.
+    // the editor area. Mirrors `visible_cursor` so the popover
+    // sits exactly over the cursor cell, gutter offset included
+    // and sub-line column for soft-wrapped lines.
     let scroll_row = tab.scroll.top;
     if cursor_row < scroll_row {
         return None;
@@ -1806,7 +1799,16 @@ pub fn popover_model(
     if row_in_area >= editor_area.rows {
         return None;
     }
-    let anchor_x = editor_area.x.saturating_add(tab.cursor.col as u16);
+    use led_core::col_to_sub_line;
+    let content_cols = (editor_area.cols as usize)
+        .saturating_sub(GUTTER_WIDTH)
+        .saturating_sub(TRAILING_RESERVED_COLS);
+    let cur_line_len = line_char_len_rope(&eb.rope, cursor_row);
+    let (_, col_within) = col_to_sub_line(tab.cursor.col, cur_line_len, content_cols);
+    let anchor_x = editor_area
+        .x
+        .saturating_add(GUTTER_WIDTH as u16)
+        .saturating_add(col_within as u16);
     let anchor_y = editor_area.y.saturating_add(row_in_area);
 
     Some(PopoverModel {
@@ -1890,10 +1892,12 @@ pub fn completion_popup_model<'c, 't>(
 
 /// Build the code-action picker popup. Reuses `CompletionPopupModel`
 /// because the painter for completion popups is the right
-/// visual shape (list of titles + right-side hint) and we
-/// don't want two popup paint paths.
+/// visual shape (list of titles) and we don't want two popup
+/// paint paths.
 ///
-/// Title → `label`, `kind` → `detail` (e.g. "refactor.inline").
+/// Only the title is surfaced — legacy hides `kind` from the
+/// picker (display.rs:972-983), so we follow suit and leave
+/// `detail` empty.
 pub fn code_action_popup_model<'e, 't>(
     lsp_extras: LspExtrasOverlayInput<'e>,
     tabs: TabsActiveInput<'t>,
@@ -1909,16 +1913,13 @@ pub fn code_action_popup_model<'e, 't>(
     let end = (scroll + COMPLETION_MAX_ROWS).min(total);
     let mut rows: Vec<CompletionRow> = Vec::with_capacity(end - scroll);
     let mut label_width: usize = 0;
-    let mut detail_width: usize = 0;
+    let detail_width: usize = 0;
     for item in &picker.items[scroll..end] {
         let label_cols = item.title.chars().count();
         label_width = label_width.max(label_cols);
-        if let Some(k) = item.kind.as_ref() {
-            detail_width = detail_width.max(k.chars().count());
-        }
         rows.push(CompletionRow {
             label: item.title.clone(),
-            detail: item.kind.clone(),
+            detail: None,
         });
     }
     // Anchor at the active tab's cursor. The picker is a
@@ -1939,6 +1940,60 @@ pub fn code_action_popup_model<'e, 't>(
         anchor,
         label_width: label_width.min(u16::MAX as usize) as u16,
         detail_width: detail_width.min(u16::MAX as usize) as u16,
+    })
+}
+
+/// Build the LSP rename overlay's in-buffer popup. Mirrors
+/// legacy `OverlayContent::Rename`: anchor at one row below the
+/// cursor (or the cursor row when there is no row below), at
+/// the cursor's screen column. Width is sized to fit
+/// `" Rename: <input> "` with a 2-col padding tail so the box
+/// reads cleanly even with short input.
+pub fn rename_popup_model(
+    lsp_extras: LspExtrasOverlayInput<'_>,
+    body: &BodyModel,
+    editor_area: Rect,
+) -> Option<led_driver_terminal_core::RenamePopupModel> {
+    use led_driver_terminal_core::RenamePopupModel;
+    let state = lsp_extras.rename.as_ref()?;
+    let (cur_row, cur_col) = match body {
+        BodyModel::Content {
+            cursor: Some((r, c)),
+            ..
+        } => (*r, *c),
+        _ => return None,
+    };
+    // Legacy width: " Rename: " (9) + input chars + 2 trailing
+    // padding cols. Keeps the box visibly distinct from
+    // surrounding buffer content even on empty input.
+    let input_chars = state.input.text.chars().count();
+    let label_cols: u16 = 9; // " Rename: "
+    let width_unclamped = label_cols
+        .saturating_add(input_chars as u16)
+        .saturating_add(2);
+    // Cursor offset within `input.text` measured in chars (not
+    // bytes) — `TextInput.cursor` is a byte index but always
+    // sits on a char boundary by construction.
+    let input_cursor_chars =
+        state.input.text[..state.input.cursor].chars().count() as u16;
+    let anchor_x = editor_area.x.saturating_add(cur_col);
+    let anchor_y_row = (cur_row as usize)
+        .saturating_add(1)
+        .min(editor_area.rows.saturating_sub(1) as usize) as u16;
+    let anchor_y = editor_area.y.saturating_add(anchor_y_row);
+    // Clamp width so the popup never spills past the editor's
+    // right edge.
+    let area_right = editor_area.x.saturating_add(editor_area.cols);
+    let max_width = area_right.saturating_sub(anchor_x);
+    let width = width_unclamped.min(max_width);
+    if width < label_cols {
+        return None;
+    }
+    Some(RenamePopupModel {
+        input: Arc::<str>::from(state.input.text.as_str()),
+        input_cursor: input_cursor_chars,
+        anchor: (anchor_x, anchor_y),
+        width,
     })
 }
 
@@ -1991,41 +2046,49 @@ fn word_wrap(text: &str, width: usize) -> Vec<String> {
     out
 }
 
-/// Context kept to the left of the match when the preview gets
-/// trimmed. 4 characters — enough to see "what identifier this is
-/// part of" without eating so much width that the match falls off
-/// the right edge.
-const PREVIEW_CONTEXT_CHARS: usize = 4;
-
-/// Leading-edge trim for a hit's preview so the matched text stays
-/// visible inside the narrow side-panel column. Returns both the
-/// trimmed preview and the 0-indexed char offset at which the match
-/// starts inside it — the painter needs the second value to draw
-/// the match-highlight segment.
+/// Center-window trim for a hit's preview so the match sits in
+/// the middle of the visible column. Returns the trimmed preview
+/// and the 0-indexed char offset at which the match starts inside
+/// it — the painter uses the second value to draw the match-
+/// highlight segment.
 ///
 /// Uses `hit.col` (1-indexed character offset) rather than
 /// `match_start` (byte offset), so multi-byte UTF-8 content doesn't
-/// miscount.
+/// miscount. Mirrors legacy `display.rs::file_search_hit_spans`
+/// (centers the match within `avail`, clamps the window to the
+/// preview length, no ellipsis — narrow column gets a literal
+/// substring slice).
 fn trimmed_preview(
     hit: &led_state_file_search::FileSearchHit,
+    budget: usize,
 ) -> (String, usize) {
     let match_char_idx = hit.col.saturating_sub(1);
-    if match_char_idx <= PREVIEW_CONTEXT_CHARS {
+    let preview_chars: Vec<char> = hit.preview.chars().collect();
+    let preview_len = preview_chars.len();
+    if preview_len <= budget {
         return (hit.preview.clone(), match_char_idx);
     }
-    let drop = match_char_idx - PREVIEW_CONTEXT_CHARS;
-    let mut out = String::with_capacity(hit.preview.len());
-    out.push('\u{2026}'); // …
-    out.extend(hit.preview.chars().skip(drop));
-    // After trim: ellipsis + CONTEXT chars = match sits at
-    // char index `1 + CONTEXT` in the new string.
-    (out, 1 + PREVIEW_CONTEXT_CHARS)
+    let match_len = chars_between(&hit.preview, hit.match_start, hit.match_end);
+    let context_before = budget.saturating_sub(match_len) / 2;
+    let mut win_start = match_char_idx.saturating_sub(context_before);
+    let win_end = (win_start + budget).min(preview_len);
+    if win_end.saturating_sub(budget) < win_start {
+        win_start = win_end.saturating_sub(budget);
+    }
+    let visible: String = preview_chars[win_start..win_end].iter().collect();
+    let match_in_window = match_char_idx.saturating_sub(win_start);
+    (visible, match_in_window)
 }
 
-/// Back-compat for tests that only care about the trimmed string.
+/// Test helper — accept the budget the caller wants so each
+/// test can verify the centering behaviour with a realistic
+/// (or deliberately tiny) column budget.
 #[cfg(test)]
-fn trim_preview_for_match(hit: &led_state_file_search::FileSearchHit) -> String {
-    trimmed_preview(hit).0
+fn trim_preview_at_budget(
+    hit: &led_state_file_search::FileSearchHit,
+    budget: usize,
+) -> String {
+    trimmed_preview(hit, budget).0
 }
 
 /// Char count of an unsigned integer rendered via `Display` — used
@@ -2170,17 +2233,25 @@ pub struct BrowserDerivedInputs<'a> {
     pub fs: FsTreeInput<'a>,
     pub ui: BrowserUiInput<'a>,
     pub tabs: TabsActiveInput<'a>,
+    pub edits: EditedBuffersInput<'a>,
 }
 
 /// Auto-expanded ancestor chain for the active tab, excluding
 /// user-pinned dirs. Pure derivation — no state written anywhere.
 /// Memoized so downstream consumers (entries walk, list-action
 /// emitter, painter) share the computation.
+///
+/// Persistent ancestor reveal is handled separately: the runtime
+/// writes ancestors of any newly-activated tab into
+/// `browser.expanded_dirs` once, mirroring legacy's
+/// `reveal_active_buffer` (`led/src/model/action/helpers.rs:36`).
+/// Once persisted there, the user can collapse them at will and
+/// the collapse sticks.
 #[drv::memo(single)]
 pub fn browser_auto_expanded<'a>(
     inputs: BrowserDerivedInputs<'a>,
 ) -> Arc<imbl::HashSet<CanonPath>> {
-    let BrowserDerivedInputs { fs, ui, tabs } = inputs;
+    let BrowserDerivedInputs { fs, ui, tabs, edits: _ } = inputs;
     let active_path = (*tabs.active)
         .and_then(|id| tabs.open.iter().find(|t| t.id == id))
         .map(|t| t.path.clone());
@@ -2202,24 +2273,16 @@ pub fn browser_auto_expanded<'a>(
 pub fn browser_entries<'a>(
     inputs: BrowserDerivedInputs<'a>,
 ) -> Arc<Vec<TreeEntry>> {
-    let BrowserDerivedInputs { fs, ui, tabs: _ } = inputs;
-    let auto = browser_auto_expanded(inputs);
-    // Effective set = user-pinned ∪ auto-revealed. Reuse the
-    // user bucket directly when the auto set is empty, skipping
-    // the union allocation for the common idle case.
+    let BrowserDerivedInputs { fs, ui, tabs: _, edits: _ } = inputs;
+    // Ancestor reveal lives in `expanded_dirs` itself — the runtime
+    // persists ancestors of any newly-activated tab on the
+    // file_load completion path (legacy `reveal_active_buffer`).
+    // No transient overlay; collapse_dir / collapse_all stick.
     let fs_copy = led_state_browser::FsTree {
         root: fs.root.clone(),
         dir_contents: fs.dir_contents.clone(),
     };
-    let entries = if auto.is_empty() {
-        led_state_browser::walk_tree(&fs_copy, ui.expanded_dirs)
-    } else {
-        let mut effective = ui.expanded_dirs.clone();
-        for p in auto.iter() {
-            effective.insert(p.clone());
-        }
-        led_state_browser::walk_tree(&fs_copy, &effective)
-    };
+    let entries = led_state_browser::walk_tree(&fs_copy, ui.expanded_dirs);
     Arc::new(entries)
 }
 
@@ -2252,7 +2315,7 @@ pub fn browser_selected_idx(
 pub fn file_list_action<'a>(
     inputs: BrowserDerivedInputs<'a>,
 ) -> Vec<ListCmd> {
-    let BrowserDerivedInputs { fs, ui, tabs: _ } = inputs;
+    let BrowserDerivedInputs { fs, ui, tabs: _, edits: _ } = inputs;
     let mut out: Vec<ListCmd> = Vec::new();
     if let Some(root) = fs.root.as_ref()
         && !fs.dir_contents.contains_key(root)
@@ -2264,15 +2327,11 @@ pub fn file_list_action<'a>(
             out.push(ListCmd::List(dir.clone()));
         }
     }
-    // Auto-reveal also needs listings for any auto-expanded dir
-    // not yet cached — otherwise the tree reveal stalls until
-    // the user hits expand/collapse manually.
-    let auto = browser_auto_expanded(inputs);
-    for dir in auto.iter() {
-        if !fs.dir_contents.contains_key(dir) && !ui.expanded_dirs.contains(dir) {
-            out.push(ListCmd::List(dir.clone()));
-        }
-    }
+    // Auto-reveal listings come for free here: the runtime
+    // persists ancestor expansions into `expanded_dirs` on the
+    // file_load completion path (mirrors legacy
+    // `reveal_active_buffer`), so the loop above already covers
+    // them. We don't need a separate auto-reveal pass.
     out
 }
 
@@ -2365,6 +2424,7 @@ pub fn render_frame<'a>(inputs: RenderInputs<'a>) -> Option<Frame> {
                 tabs,
                 diagnostics,
                 git,
+                edits,
                 rows: area.rows,
             })
         });
@@ -2377,6 +2437,7 @@ pub fn render_frame<'a>(inputs: RenderInputs<'a>) -> Option<Frame> {
     // `completion` slot of the frame.
     let completion = code_action_popup_model(lsp_extras, tabs, layout.editor_area)
         .or_else(|| completion_popup_model(completions, tabs, layout.editor_area));
+    let rename_popup = rename_popup_model(lsp_extras, &body, layout.editor_area);
     // Cursor placement, in priority order:
     //
     // 1. Find-file overlay active → status-bar row, column = prompt
@@ -2387,13 +2448,15 @@ pub fn render_frame<'a>(inputs: RenderInputs<'a>) -> Option<Frame> {
     // 2. Side-panel focus → no cursor (M11 cursor-hide rule).
     // 3. Otherwise, map the body cursor from editor-area-relative
     //    coords to absolute terminal coords.
-    let cursor = if let Some(state) = lsp_extras.rename.as_ref() {
-        // " Rename: " = 9 cols.
+    let cursor = if let Some(popup) = rename_popup.as_ref() {
+        // Inside the rename popup, after " Rename: " (9 cols) plus
+        // however many input chars precede the input cursor.
         let prefix_cols: u16 = 9;
-        let input_col = state.input.text[..state.input.cursor].chars().count() as u16;
         Some((
-            prefix_cols.saturating_add(input_col),
-            layout.status_bar.y,
+            popup.anchor.0
+                .saturating_add(prefix_cols)
+                .saturating_add(popup.input_cursor),
+            popup.anchor.1,
         ))
     } else if let Some(state) = overlays.find_file.as_ref() {
         let prefix_cols: u16 = match state.mode {
@@ -2426,6 +2489,7 @@ pub fn render_frame<'a>(inputs: RenderInputs<'a>) -> Option<Frame> {
         side_panel,
         popover,
         completion,
+        rename_popup,
         layout,
         cursor,
         dims,
@@ -3104,7 +3168,15 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
     }
 
     #[test]
-    fn file_save_action_skips_clean_buffers() {
+    fn file_save_action_emits_save_for_clean_buffer_too() {
+        // "Save should always save": dispatch only inserts a path
+        // into `pending_saves` when the user explicitly asks (Save
+        // / SaveNoFormat). The query honours that intent and emits
+        // a `Save` action even when the buffer is byte-identical
+        // to disk — a no-op on disk, but the user's request still
+        // round-trips through the file-write driver. SaveAll is
+        // the gated path; it filters dirty buffers in
+        // `request_save_all` before populating `pending_saves`.
         let mut e = BufferEdits::default();
         let path = canon("clean.rs");
         let rope = Arc::new(Rope::from_str("x"));
@@ -3118,13 +3190,17 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
                 history: Default::default(),
             },
         );
-        e.pending_saves.insert(path);
+        e.pending_saves.insert(path.clone());
 
         let actions = file_save_action(
             PendingSavesInput::new(&e),
             EditedBuffersInput::new(&e),
         );
-        assert!(actions.is_empty());
+        assert_eq!(actions.len(), 1);
+        match &actions[0] {
+            SaveAction::Save { path: p, .. } => assert_eq!(p, &path),
+            other => panic!("expected SaveAction::Save, got {:?}", other),
+        }
     }
 
     #[test]
@@ -3191,45 +3267,26 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
     // ── M19: gutter category ─────────────────────────────────────────────
 
     #[test]
-    fn merged_gutter_picks_lsp_error_over_git_unstaged() {
+    fn merged_gutter_picks_git_unstaged() {
+        // Bar is git/PR only — LSP severity is rendered separately
+        // as the diagnostic dot in gutter col 1, never as the bar.
         use led_core::IssueCategory;
         use led_core::git::LineStatus;
         let statuses = vec![LineStatus {
             category: IssueCategory::Unstaged,
             rows: 0..1,
         }];
-        let cat = merged_gutter_category(
-            Some(DiagnosticSeverity::Error),
-            Some(&statuses),
-            0,
-        );
-        assert_eq!(cat, Some(IssueCategory::LspError));
-    }
-
-    #[test]
-    fn merged_gutter_falls_back_to_git_when_no_diagnostic() {
-        use led_core::IssueCategory;
-        use led_core::git::LineStatus;
-        let statuses = vec![LineStatus {
-            category: IssueCategory::Unstaged,
-            rows: 5..7,
-        }];
-        let cat = merged_gutter_category(None, Some(&statuses), 6);
+        let cat = merged_gutter_category(Some(&statuses), 0);
         assert_eq!(cat, Some(IssueCategory::Unstaged));
     }
 
     #[test]
-    fn merged_gutter_ignores_info_hint_diagnostics() {
-        // Info / Hint never colour the gutter; if git says nothing
-        // either the result is None.
-        assert_eq!(
-            merged_gutter_category(Some(DiagnosticSeverity::Info), None, 0),
-            None,
-        );
-        assert_eq!(
-            merged_gutter_category(Some(DiagnosticSeverity::Hint), None, 0),
-            None,
-        );
+    fn merged_gutter_falls_back_to_none_without_git_status() {
+        // No git line status on the row → no bar, regardless of
+        // any LSP severity that may live there.
+        assert_eq!(merged_gutter_category(None, 0), None);
+        let statuses: Vec<led_core::git::LineStatus> = Vec::new();
+        assert_eq!(merged_gutter_category(Some(&statuses), 0), None);
     }
 
     #[test]
@@ -3381,10 +3438,13 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
     fn status_bar_default_empty_when_no_tab() {
         // Legacy shape: ` {branch}{modified}{pr}{lsp}` → always
         // has the one leading space, even when every dynamic
-        // piece is empty.
+        // piece is empty. The right-side position string falls
+        // back to `L1:C1 ` when no tab is active so the post-kill
+        // status bar still anchors a position (matches legacy
+        // `display.rs` reading the zero-init cursor row/col).
         let s = status(&AlertState::default(), &Tabs::default(), &BufferEdits::default());
         assert_eq!(&*s.left, " ");
-        assert_eq!(&*s.right, "");
+        assert_eq!(&*s.right, "L1:C1 ");
         assert!(!s.is_warn);
     }
 
@@ -3769,38 +3829,42 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
     }
 
     #[test]
-    fn trim_preview_keeps_match_visible_when_deep_in_the_line() {
+    fn trim_preview_centers_match_when_line_overflows_budget() {
         use led_state_file_search::FileSearchHit;
         let path = canon("a.rs");
-        // Match starts at col 21 (1-indexed) in a long line. With
-        // CONTEXT=4, the preview drops the first 16 chars and
-        // prepends … so `needle` stays in view.
+        // 28-char line, "needle" (6 chars) starts at col 18
+        // (char idx 17). With a 12-char budget the centering
+        // window picks up `needle` plus three chars of context
+        // on each side: matches legacy
+        // `display.rs::file_search_hit_spans` (`context_before
+        // = (avail - match_len) / 2`).
         let hit = FileSearchHit {
             path: path.clone(),
             line: 42,
-            col: 21,
+            col: 18,
             preview: "aaaabbbbccccdddd_needle_xxxx".into(),
-            match_start: 0,
-            match_end: 0,
+            match_start: 17,
+            match_end: 23,
         };
-        assert_eq!(trim_preview_for_match(&hit), "…_needle_xxxx");
+        assert_eq!(trim_preview_at_budget(&hit, 12), "dd_needle_xx");
     }
 
     #[test]
-    fn trim_preview_is_a_noop_when_match_starts_near_the_left_edge() {
+    fn trim_preview_is_a_noop_when_line_fits_in_the_budget() {
         use led_state_file_search::FileSearchHit;
         let path = canon("a.rs");
-        // Match at col 3 (chars before = 2, less than CONTEXT=4)
-        // → return the preview untouched.
+        // "  needle at start" is 17 chars; with a 24-char
+        // budget it fits whole, so the preview is returned
+        // untouched (no center, no ellipsis).
         let hit = FileSearchHit {
             path: path.clone(),
             line: 1,
             col: 3,
             preview: "  needle at start".into(),
-            match_start: 0,
-            match_end: 0,
+            match_start: 2,
+            match_end: 8,
         };
-        assert_eq!(trim_preview_for_match(&hit), "  needle at start");
+        assert_eq!(trim_preview_at_budget(&hit, 24), "  needle at start");
     }
 
     #[test]
@@ -3838,13 +3902,16 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
     }
 
     #[test]
-    fn hit_row_match_range_tracks_through_the_trim_ellipsis() {
+    fn hit_row_match_range_tracks_through_the_centered_window() {
         // Long line: "aaaabbbbccccdddd_needle_xxxx" — "needle"
-        // starts at char 17, col=18 (1-indexed), occupies 6 chars.
-        // Trim drops 13 chars (17 - CONTEXT=4), prepends …, leaves
-        // "…ddd_needle_xxxx" with the match at char 5. Row name
-        // prefix is `   1: ` = 6 chars, so match_range =
-        // (6 + 5, 6 + 5 + 6) = (11, 17).
+        // (6 chars) starts at char 17, col=18 (1-indexed). Side
+        // panel content cols = 24, prefix `   1: ` = 6 chars,
+        // preview budget = 18. Centering picks the rightmost
+        // 18-char window that contains the match: chars[10..28]
+        // = "ccdddd_needle_xxxx". Match offset in the window =
+        // 17 - 10 = 7, so the row's match_range =
+        // (6 + 7, 6 + 7 + 6) = (13, 19), and the chars at
+        // that range spell `needle`.
         use led_state_file_search::{FileSearchGroup, FileSearchHit};
 
         let path = canon("a.rs");
@@ -3868,7 +3935,7 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
         };
         let model = file_search_side_panel(&state, 20);
         let hit_row = &model.rows[3];
-        assert_eq!(hit_row.match_range, Some((11, 17)));
+        assert_eq!(hit_row.match_range, Some((13, 19)));
         // The chars at the computed range spell out "needle".
         let chars: Vec<char> = hit_row.name.chars().collect();
         let (s, e) = hit_row.match_range.unwrap();
@@ -3882,19 +3949,20 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
         let path = canon("a.rs");
         // "🎈🎈🎈🎈🎈 needle" — five balloons (1 char each, 4 bytes
         // each in UTF-8), a space, then "needle" starting at char
-        // index 6 (col=7 1-indexed). CONTEXT=4 → drop 2 chars,
-        // prepend …, keep the match visible.
+        // index 6 (col=7 1-indexed). 12-char preview, 8-char
+        // budget → centering window keeps `needle` visible while
+        // dropping balloons from the left.
         let hit = FileSearchHit {
             path,
             line: 1,
             col: 7,
             preview: "🎈🎈🎈🎈🎈 needle".into(),
-            match_start: 0,
-            match_end: 0,
+            match_start: "🎈🎈🎈🎈🎈 ".len(),
+            match_end: "🎈🎈🎈🎈🎈 needle".len(),
         };
-        let trimmed = trim_preview_for_match(&hit);
-        assert!(trimmed.starts_with('\u{2026}'), "got {trimmed:?}");
+        let trimmed = trim_preview_at_budget(&hit, 8);
         assert!(trimmed.contains("needle"), "got {trimmed:?}");
+        assert_eq!(trimmed.chars().count(), 8);
     }
 
     // ── Syntax span projection ───────────────────────────────────────
@@ -4221,6 +4289,7 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
         let is = None;
         let fsrch = None;
         let git = led_state_git::GitState::default();
+        let edits = led_state_buffer_edits::BufferEdits::default();
         let panel = side_panel_model(SidePanelInputs {
             fs: FsTreeInput::new(&fs),
             browser: BrowserUiInput::new(&browser),
@@ -4228,6 +4297,7 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
             tabs: TabsActiveInput::new(&tabs),
             diagnostics: DiagnosticsStatesInput::new(&diags),
             git: GitStateInput::new(&git),
+            edits: EditedBuffersInput::new(&edits),
             rows: 10,
         });
         let rows: &Vec<SidePanelRow> = &panel.rows;

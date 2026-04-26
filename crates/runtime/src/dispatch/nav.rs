@@ -481,7 +481,7 @@ fn nav_issue(
 
     let info = outcome.category.info();
     let msg = format!(
-        " Jumped to {} {}/{}",
+        "Jumped to {} {}/{}",
         info.label, outcome.position, outcome.total,
     );
 

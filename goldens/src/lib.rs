@@ -207,6 +207,11 @@ impl GoldenRunnerBuilder {
         cmd.arg(bins.fake_lsp.as_os_str());
         cmd.arg("--test-gh-binary");
         cmd.arg(bins.fake_gh.as_os_str());
+        // Hermetic clipboard: each spawned `led` keeps its yank /
+        // kill-ring state in-process instead of touching the OS
+        // pasteboard, so parallel goldens don't trample each
+        // other.
+        cmd.arg("--test-clipboard-isolated");
         for p in &file_paths {
             cmd.arg(p.as_os_str());
         }

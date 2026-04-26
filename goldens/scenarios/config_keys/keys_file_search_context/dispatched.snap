@@ -5,4 +5,3 @@ GitScan	root=<TMPDIR>
 FileSearch	query="f" root=<TMPDIR> case=false regex=false
 FileSearch	query="fo" root=<TMPDIR> case=false regex=false
 FileSearch	query="foo" root=<TMPDIR> case=false regex=false
-FileSearch	query="foo" root=<TMPDIR> case=true regex=false

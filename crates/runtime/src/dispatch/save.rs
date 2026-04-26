@@ -85,13 +85,14 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_x_ctrl_s_on_clean_buffer_still_queues_format_round_trip() {
-        // "Save should always save": a clean buffer's Ctrl-X
-        // Ctrl-S still fires the format round-trip; the format
-        // response (empty or otherwise) is what slots the path
-        // into `pending_saves`. Pre-dispatch `pending_saves` is
-        // empty because the save-after-format step runs on the
-        // ingest side, not inline in dispatch.
+    fn ctrl_x_ctrl_s_on_clean_buffer_writes_directly_when_no_lsp() {
+        // "Save should always save": Ctrl-X Ctrl-S on a clean
+        // buffer still writes to disk. With no LSP server seen
+        // (the testutil fixture seeds an empty `LspStatuses`),
+        // dispatch routes through the direct-save path —
+        // mirrors legacy `save_of.rs` `!has_active_lsp(s)`.
+        // pending_saves carries the path immediately so the
+        // execute phase ships a `SaveAction::Save`.
         let (mut tabs, mut edits, store, term) =
             fixture_with_content("hi", Dims { cols: 10, rows: 5 });
         dispatch_chord_default(
@@ -102,9 +103,7 @@ mod tests {
             &store,
             &term,
         );
-        // pending_saves is populated AFTER the format reply
-        // arrives — dispatch itself only primes the outbox.
-        assert!(edits.pending_saves.is_empty());
+        assert!(edits.pending_saves.contains(&canon("file.rs")));
     }
 
     #[test]

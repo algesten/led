@@ -75,6 +75,7 @@ pub(super) fn activate(
 pub(super) fn run_overlay_command(
     cmd: Command,
     lsp_extras: &mut LspExtrasState,
+    lsp_pending: &mut led_state_lsp::LspPending,
 ) -> Option<DispatchOutcome> {
     lsp_extras.rename.as_ref()?;
     if matches!(cmd, Command::Quit | Command::Suspend) {
@@ -121,7 +122,7 @@ pub(super) fn run_overlay_command(
                 state.input.kill_to_end();
             }
         }
-        Command::InsertNewline => commit(lsp_extras),
+        Command::InsertNewline => commit(lsp_extras, lsp_pending),
         Command::Abort => lsp_extras.dismiss_rename(),
         // Every other command is absorbed while the overlay has
         // focus — matches legacy's "rename overlay swallows all"
@@ -136,7 +137,10 @@ pub(super) fn run_overlay_command(
 /// text, then close the overlay. An empty input or one equal
 /// to the seed word is a silent no-op — no point churning the
 /// server for "rename foo to foo".
-fn commit(lsp_extras: &mut LspExtrasState) {
+fn commit(
+    lsp_extras: &mut LspExtrasState,
+    lsp_pending: &mut led_state_lsp::LspPending,
+) {
     let Some(state) = lsp_extras.rename.as_ref() else {
         return;
     };
@@ -149,7 +153,7 @@ fn commit(lsp_extras: &mut LspExtrasState) {
     let line = state.anchor_line;
     let col = state.anchor_col;
     let new_name: Arc<str> = Arc::<str>::from(trimmed);
-    lsp_extras.queue_rename(path, line, col, new_name);
+    lsp_pending.queue_rename(path, line, col, new_name);
     lsp_extras.dismiss_rename();
 }
 
@@ -279,13 +283,14 @@ mod tests {
     #[test]
     fn insert_char_appends_to_input() {
         let mut lsp = LspExtrasState::default();
+        let mut lsp_pending = led_state_lsp::LspPending::default();
         lsp.rename = Some(RenameState::open(
             canon("a.rs"),
             0,
             0,
             Arc::<str>::from("foo"),
         ));
-        let out = run_overlay_command(Command::InsertChar('x'), &mut lsp);
+        let out = run_overlay_command(Command::InsertChar('x'), &mut lsp, &mut lsp_pending);
         assert_eq!(out, Some(DispatchOutcome::Continue));
         assert_eq!(lsp.rename.as_ref().unwrap().input.text, "foox");
     }
@@ -293,75 +298,80 @@ mod tests {
     #[test]
     fn delete_back_trims_input() {
         let mut lsp = LspExtrasState::default();
+        let mut lsp_pending = led_state_lsp::LspPending::default();
         lsp.rename = Some(RenameState::open(
             canon("a.rs"),
             0,
             0,
             Arc::<str>::from("foo"),
         ));
-        run_overlay_command(Command::DeleteBack, &mut lsp);
+        run_overlay_command(Command::DeleteBack, &mut lsp, &mut lsp_pending);
         assert_eq!(lsp.rename.as_ref().unwrap().input.text, "fo");
     }
 
     #[test]
     fn enter_commits_queues_rename_and_dismisses() {
         let mut lsp = LspExtrasState::default();
+        let mut lsp_pending = led_state_lsp::LspPending::default();
         lsp.rename = Some(RenameState::open(
             canon("a.rs"),
             2,
             4,
             Arc::<str>::from("foo"),
         ));
-        run_overlay_command(Command::InsertChar('s'), &mut lsp);
-        run_overlay_command(Command::InsertNewline, &mut lsp);
+        run_overlay_command(Command::InsertChar('s'), &mut lsp, &mut lsp_pending);
+        run_overlay_command(Command::InsertNewline, &mut lsp, &mut lsp_pending);
         assert!(lsp.rename.is_none());
-        assert_eq!(lsp.pending_rename.len(), 1);
-        let req = &lsp.pending_rename[0];
+        assert_eq!(lsp_pending.pending_rename.len(), 1);
+        let req = &lsp_pending.pending_rename[0];
         assert_eq!(req.new_name.as_ref(), "foos");
         assert_eq!(req.line, 2);
         assert_eq!(req.col, 4);
-        assert_eq!(lsp.latest_rename_seq, Some(req.seq));
+        assert_eq!(lsp_pending.latest_rename_seq, Some(req.seq));
     }
 
     #[test]
     fn enter_with_unchanged_input_dismisses_without_queuing() {
         let mut lsp = LspExtrasState::default();
+        let mut lsp_pending = led_state_lsp::LspPending::default();
         lsp.rename = Some(RenameState::open(
             canon("a.rs"),
             0,
             0,
             Arc::<str>::from("foo"),
         ));
-        run_overlay_command(Command::InsertNewline, &mut lsp);
+        run_overlay_command(Command::InsertNewline, &mut lsp, &mut lsp_pending);
         assert!(lsp.rename.is_none());
-        assert!(lsp.pending_rename.is_empty());
+        assert!(lsp_pending.pending_rename.is_empty());
     }
 
     #[test]
     fn abort_dismisses_without_queuing() {
         let mut lsp = LspExtrasState::default();
+        let mut lsp_pending = led_state_lsp::LspPending::default();
         lsp.rename = Some(RenameState::open(
             canon("a.rs"),
             0,
             0,
             Arc::<str>::from("foo"),
         ));
-        run_overlay_command(Command::InsertChar('y'), &mut lsp);
-        run_overlay_command(Command::Abort, &mut lsp);
+        run_overlay_command(Command::InsertChar('y'), &mut lsp, &mut lsp_pending);
+        run_overlay_command(Command::Abort, &mut lsp, &mut lsp_pending);
         assert!(lsp.rename.is_none());
-        assert!(lsp.pending_rename.is_empty());
+        assert!(lsp_pending.pending_rename.is_empty());
     }
 
     #[test]
     fn quit_passes_through() {
         let mut lsp = LspExtrasState::default();
+        let mut lsp_pending = led_state_lsp::LspPending::default();
         lsp.rename = Some(RenameState::open(
             canon("a.rs"),
             0,
             0,
             Arc::<str>::from("foo"),
         ));
-        let out = run_overlay_command(Command::Quit, &mut lsp);
+        let out = run_overlay_command(Command::Quit, &mut lsp, &mut lsp_pending);
         assert_eq!(out, None);
     }
 }

@@ -16,5 +16,5 @@ publish = false
 # the `driver-*` model used by the rewrite.
 
 [dependencies]
-drv = { workspace = true }
 led-core = { workspace = true }
+drv = { workspace = true }

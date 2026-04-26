@@ -184,8 +184,14 @@ fn apply_toml(
                     "[keys] `{key_str}` = `{cmd_str}`: {message} (skipped)"
                 )),
             },
-            // Chord: [keys."ctrl+x"] "ctrl+s" = "save"
+            // Chord: [keys."ctrl+x"] "ctrl+s" = "save". When the
+            // user maps a chord table onto a key that the default
+            // keymap has a direct binding for, the user clearly
+            // wants the key to act as a chord prefix — drop the
+            // default direct binding so `is_prefix` returns true
+            // and the chord table is consulted.
             toml::Value::Table(chord_table) => {
+                loaded.keymap.remove_direct(&prefix_key);
                 for (second_str, second_value) in chord_table {
                     let cmd_str = match second_value.as_str() {
                         Some(s) => s,

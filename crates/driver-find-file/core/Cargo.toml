@@ -17,5 +17,5 @@ publish = false
 # ready for the completions side panel.
 
 [dependencies]
-drv = { workspace = true }
 led-core = { workspace = true }
+drv = { workspace = true }

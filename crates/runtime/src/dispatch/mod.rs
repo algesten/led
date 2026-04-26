@@ -124,10 +124,23 @@ pub struct Dispatcher<'a> {
     pub isearch: &'a mut Option<IsearchState>,
     pub file_search: &'a mut Option<FileSearchState>,
     pub completions: &'a mut CompletionsState,
+    /// Completions driver-bookkeeping side: outboxes + seq_gen.
+    /// Split from `completions` per arch guideline 1.
+    pub completions_pending: &'a mut led_state_completions::CompletionsPending,
     pub lsp_extras: &'a mut LspExtrasState,
+    /// LSP driver-bookkeeping side: outboxes + per-request
+    /// `latest_*_seq` gates + the inlay-hint cache. Split from
+    /// `lsp_extras` per arch guideline 1 so user-decision state
+    /// memos don't recompute on every queued LSP request.
+    pub lsp_pending: &'a mut led_state_lsp::LspPending,
     /// LSP diagnostics, read-only here — issue navigation
     /// (Alt-./Alt-,) reads them to build the nav cycle.
     pub diagnostics: &'a led_state_diagnostics::DiagnosticsStates,
+    /// Per-server LSP status (busy / ready / detail). Dispatch
+    /// reads it to gate "format-on-save" / "goto-definition" on
+    /// whether any LSP server has emitted at least one event,
+    /// instead of duplicating that bit on a user-decision source.
+    pub lsp_status: &'a led_state_diagnostics::LspStatuses,
     /// Git state (branch + file/line statuses). Same consumer
     /// as `diagnostics` — tiered issue nav walks both.
     pub git: &'a led_state_git::GitState,
@@ -180,8 +193,11 @@ impl<'a> Dispatcher<'a> {
             self.file_search,
             self.path_chains,
             self.completions,
+            self.completions_pending,
             self.lsp_extras,
+            self.lsp_pending,
             self.diagnostics,
+            self.lsp_status,
             self.git,
             self.keymap,
             self.chord,
@@ -226,8 +242,11 @@ pub fn dispatch_key(
     file_search: &mut Option<FileSearchState>,
     path_chains: &mut std::collections::HashMap<led_core::CanonPath, led_core::PathChain>,
     completions: &mut CompletionsState,
+    completions_pending: &mut led_state_completions::CompletionsPending,
     lsp_extras: &mut LspExtrasState,
+    lsp_pending: &mut led_state_lsp::LspPending,
     diagnostics: &led_state_diagnostics::DiagnosticsStates,
+    lsp_status: &led_state_diagnostics::LspStatuses,
     git: &led_state_git::GitState,
     keymap: &Keymap,
     chord: &mut ChordState,
@@ -255,8 +274,8 @@ pub fn dispatch_key(
         Resolved::Command(cmd) => {
             let outcome = run_command(
                 cmd, tabs, edits, kill_ring, clip, alerts, jumps, browser, fs, store, terminal,
-                find_file, isearch, file_search, path_chains, completions, lsp_extras,
-                diagnostics, git,
+                find_file, isearch, file_search, path_chains, completions, completions_pending,
+                lsp_extras, lsp_pending, diagnostics, lsp_status, git,
             );
             // Kill-ring coalescing: any non-KillLine command breaks
             // the flag, so the next KillLine starts a fresh entry.
@@ -289,7 +308,7 @@ pub fn dispatch_key(
             // drops the older one); stage 6 will add client-side
             // refilter so the popup updates without a round-trip
             // for every keystroke.
-            handle_completion_trigger(&cmd, tabs, edits, completions);
+            handle_completion_trigger(&cmd, tabs, edits, completions, completions_pending);
             outcome
         }
         Resolved::PrefixStored | Resolved::Continue => DispatchOutcome::Continue,
@@ -310,6 +329,7 @@ fn handle_completion_trigger(
     tabs: &Tabs,
     edits: &BufferEdits,
     completions: &mut CompletionsState,
+    completions_pending: &mut led_state_completions::CompletionsPending,
 ) {
     match cmd {
         Command::InsertChar(c) if c.is_alphanumeric() || *c == '_' => {
@@ -336,7 +356,7 @@ fn handle_completion_trigger(
             // arrive (server response replaces the session when
             // its seq matches).
             refilter_active_session(tabs, edits, completions);
-            completions.queue_request(tab.path.clone(), line, col, Some(*c));
+            completions_pending.queue_request(tab.path.clone(), line, col, Some(*c));
         }
         Command::DeleteBack | Command::DeleteForward => {
             // Keep the session alive across backspace / delete
@@ -616,8 +636,11 @@ fn run_command(
     file_search: &mut Option<FileSearchState>,
     path_chains: &mut std::collections::HashMap<led_core::CanonPath, led_core::PathChain>,
     completions: &mut CompletionsState,
+    completions_pending: &mut led_state_completions::CompletionsPending,
     lsp_extras: &mut LspExtrasState,
+    lsp_pending: &mut led_state_lsp::LspPending,
     diagnostics: &led_state_diagnostics::DiagnosticsStates,
+    lsp_status: &led_state_diagnostics::LspStatuses,
     git: &led_state_git::GitState,
 ) -> DispatchOutcome {
     // Find-file overlay intercept. When active, the overlay owns
@@ -639,7 +662,7 @@ fn run_command(
     // (The submodule is aliased as `completions_overlay` to
     // avoid shadowing the `completions` parameter.)
     if let Some(outcome) = completions_overlay::run_overlay_command(
-        cmd, completions, tabs, edits,
+        cmd, completions, completions_pending, tabs, edits,
     ) {
         return outcome;
     }
@@ -648,13 +671,13 @@ fn run_command(
     // lands in the input until Enter (commit) or Esc (abort).
     // Quit passes through so the user can still ctrl+x ctrl+c
     // out of the editor mid-rename.
-    if let Some(outcome) = rename::run_overlay_command(cmd, lsp_extras) {
+    if let Some(outcome) = rename::run_overlay_command(cmd, lsp_extras, lsp_pending) {
         return outcome;
     }
 
     // LSP code-action picker intercept (M18). Modal: Up/Down
     // navigate, Enter commits, Esc dismisses.
-    if let Some(outcome) = code_actions::run_overlay_command(cmd, lsp_extras) {
+    if let Some(outcome) = code_actions::run_overlay_command(cmd, lsp_extras, lsp_pending) {
         return outcome;
     }
 
@@ -694,7 +717,7 @@ fn run_command(
             DispatchOutcome::Continue
         }
         Command::Save => {
-            save_with_optional_format(tabs, edits, lsp_extras, alerts);
+            save_with_optional_format(tabs, edits, lsp_pending, alerts, lsp_status);
             DispatchOutcome::Continue
         }
         Command::SaveAll => {
@@ -720,7 +743,7 @@ fn run_command(
         }
         Command::CursorUp => {
             if browser_focused {
-                move_selection(browser, fs, tabs, path_chains, -1);
+                move_selection(browser, fs, tabs, edits, path_chains, -1);
             } else {
                 move_cursor(tabs, edits, store, terminal, browser, Move::Up);
             }
@@ -728,7 +751,7 @@ fn run_command(
         }
         Command::CursorDown => {
             if browser_focused {
-                move_selection(browser, fs, tabs, path_chains, 1);
+                move_selection(browser, fs, tabs, edits, path_chains, 1);
             } else {
                 move_cursor(tabs, edits, store, terminal, browser, Move::Down);
             }
@@ -756,7 +779,7 @@ fn run_command(
                 .map(|d| d.rows.saturating_sub(2) as usize)
                 .unwrap_or(1);
             if browser_focused {
-                page_selection(browser, fs, tabs, path_chains, page, /* down= */ false);
+                page_selection(browser, fs, tabs, edits, path_chains, page, /* down= */ false);
             } else {
                 move_cursor(tabs, edits, store, terminal, browser, Move::PageUp);
             }
@@ -768,7 +791,7 @@ fn run_command(
                 .map(|d| d.rows.saturating_sub(2) as usize)
                 .unwrap_or(1);
             if browser_focused {
-                page_selection(browser, fs, tabs, path_chains, page, /* down= */ true);
+                page_selection(browser, fs, tabs, edits, path_chains, page, /* down= */ true);
             } else {
                 move_cursor(tabs, edits, store, terminal, browser, Move::PageDown);
             }
@@ -776,7 +799,7 @@ fn run_command(
         }
         Command::CursorFileStart => {
             if browser_focused {
-                select_first(browser, fs, tabs, path_chains);
+                select_first(browser, fs, tabs, edits, path_chains);
             } else {
                 move_cursor(tabs, edits, store, terminal, browser, Move::FileStart);
             }
@@ -784,7 +807,7 @@ fn run_command(
         }
         Command::CursorFileEnd => {
             if browser_focused {
-                select_last(browser, fs, tabs, path_chains);
+                select_last(browser, fs, tabs, edits, path_chains);
             } else {
                 move_cursor(tabs, edits, store, terminal, browser, Move::FileEnd);
             }
@@ -889,11 +912,11 @@ fn run_command(
             DispatchOutcome::Continue
         }
         Command::ExpandDir => {
-            expand_dir(browser, fs, tabs);
+            expand_dir(browser, fs, tabs, edits);
             DispatchOutcome::Continue
         }
         Command::CollapseDir => {
-            collapse_dir(browser, fs, tabs);
+            collapse_dir(browser, fs, tabs, edits);
             DispatchOutcome::Continue
         }
         Command::CollapseAll => {
@@ -901,11 +924,11 @@ fn run_command(
             DispatchOutcome::Continue
         }
         Command::OpenSelected => {
-            open_selected(browser, fs, tabs, path_chains);
+            open_selected(browser, fs, tabs, edits, path_chains);
             DispatchOutcome::Continue
         }
         Command::OpenSelectedBg => {
-            open_selected_bg(browser, fs, tabs, path_chains);
+            open_selected_bg(browser, fs, tabs, edits, path_chains);
             DispatchOutcome::Continue
         }
         Command::ToggleSidePanel => {
@@ -953,7 +976,7 @@ fn run_command(
         // LSP extras (M18). Goto-definition queues a
         // `RequestGotoDefinition`; the rest land in later stages.
         Command::LspGotoDefinition => {
-            lsp_goto_definition(tabs, edits, lsp_extras);
+            lsp_goto_definition(tabs, edits, lsp_pending, lsp_status);
             DispatchOutcome::Continue
         }
         Command::LspRename => {
@@ -961,25 +984,24 @@ fn run_command(
             DispatchOutcome::Continue
         }
         Command::LspCodeAction => {
-            code_actions::activate(lsp_extras, tabs, edits);
+            code_actions::activate(lsp_extras, lsp_pending, tabs, edits);
             DispatchOutcome::Continue
         }
         Command::LspToggleInlayHints => {
-            let on = lsp_extras.toggle_inlay_hints();
-            let msg = if on {
-                "Inlay hints: on"
-            } else {
-                "Inlay hints: off"
-            };
-            alerts.set_info(
-                msg.to_string(),
-                std::time::Instant::now(),
-                std::time::Duration::from_secs(2),
-            );
+            // Legacy parity: the toggle is a silent state flip —
+            // no info alert. Visible feedback is the appearance /
+            // disappearance of the hint markers themselves.
+            // Toggle-off also drops the per-buffer cache + the
+            // in-flight ledger on the bookkeeping source so the
+            // next toggle-on refetches.
+            let now_on = lsp_extras.toggle_inlay_hints();
+            if !now_on {
+                lsp_pending.clear_inlay_hint_cache();
+            }
             DispatchOutcome::Continue
         }
         Command::LspFormat => {
-            request_format_active(tabs, edits, lsp_extras);
+            request_format_active(tabs, edits, lsp_pending);
             DispatchOutcome::Continue
         }
         Command::Outline => {
@@ -1014,8 +1036,9 @@ fn run_command(
 fn save_with_optional_format(
     tabs: &Tabs,
     edits: &mut BufferEdits,
-    lsp_extras: &mut LspExtrasState,
+    lsp_pending: &mut led_state_lsp::LspPending,
     alerts: &mut AlertState,
+    lsp_status: &led_state_diagnostics::LspStatuses,
 ) {
     let Some(id) = tabs.active else {
         return;
@@ -1026,8 +1049,19 @@ fn save_with_optional_format(
     if edits.buffers.get(&tab.path).is_none() {
         return;
     }
-    lsp_extras.queue_format(tab.path.clone());
-    lsp_extras.pending_save_after_format.insert(tab.path.clone());
+    // No LSP server has emitted anything yet — there's nothing
+    // to wait on for a format response, so save directly. Mirrors
+    // legacy `save_of.rs` which routes saves through the
+    // direct-save branch when `has_active_lsp(s)` is false.
+    // The driver-owned `lsp_status.by_server` is the source of
+    // truth here (sticky once a server has emitted), keeping
+    // user-decision state-lsp out of driver bookkeeping.
+    if lsp_status.by_server.is_empty() {
+        request_save_active(tabs, edits);
+        return;
+    }
+    lsp_pending.queue_format(tab.path.clone());
+    lsp_pending.pending_save_after_format.insert(tab.path.clone());
     alerts.set_info(
         "Formatting...".to_string(),
         std::time::Instant::now(),
@@ -1038,7 +1072,7 @@ fn save_with_optional_format(
 fn request_format_active(
     tabs: &Tabs,
     edits: &BufferEdits,
-    lsp_extras: &mut LspExtrasState,
+    lsp_pending: &mut led_state_lsp::LspPending,
 ) {
     let Some(id) = tabs.active else {
         return;
@@ -1049,7 +1083,7 @@ fn request_format_active(
     if edits.buffers.get(&tab.path).is_none() {
         return;
     }
-    lsp_extras.queue_format(tab.path.clone());
+    lsp_pending.queue_format(tab.path.clone());
 }
 
 /// Queue a `textDocument/definition` request for the identifier
@@ -1060,7 +1094,8 @@ fn request_format_active(
 fn lsp_goto_definition(
     tabs: &Tabs,
     edits: &BufferEdits,
-    lsp_extras: &mut LspExtrasState,
+    lsp_pending: &mut led_state_lsp::LspPending,
+    lsp_status: &led_state_diagnostics::LspStatuses,
 ) {
     let Some(id) = tabs.active else { return };
     let Some(tab) = tabs.open.iter().find(|t| t.id == id) else {
@@ -1072,9 +1107,17 @@ fn lsp_goto_definition(
     if edits.buffers.get(&tab.path).is_none() {
         return;
     }
+    // No-op when no LSP server is around — legacy treats
+    // `lsp_goto_definition` as a silent no-op in standalone /
+    // unconfigured-language buffers (no request, no alert).
+    // Driver-owned `lsp_status.by_server` is the source of
+    // truth (populates only after a server emits an event).
+    if lsp_status.by_server.is_empty() {
+        return;
+    }
     let line = tab.cursor.line as u32;
     let col = tab.cursor.col as u32;
-    lsp_extras.queue_goto_definition(tab.path.clone(), line, col);
+    lsp_pending.queue_goto_definition(tab.path.clone(), line, col);
 }
 
 
@@ -1113,7 +1156,9 @@ mod tests {
         let mut chord = ChordState::default();
         let mut path_chains = std::collections::HashMap::new();
         let mut completions = CompletionsState::default();
+        let mut completions_pending = led_state_completions::CompletionsPending::default();
         let mut lsp_extras = LspExtrasState::default();
+        let mut lsp_pending = led_state_lsp::LspPending::default();
 
         // First half of the chord: ctrl+x → pending, Continue.
         let mut find_file: Option<FindFileState> = None;
@@ -1136,8 +1181,11 @@ mod tests {
             &mut file_search,
             &mut path_chains,
             &mut completions,
+            &mut completions_pending,
             &mut lsp_extras,
+            &mut lsp_pending,
             &DiagnosticsStates::default(),
+            &led_state_diagnostics::LspStatuses::default(),
             &GitState::default(),
             &keymap,
             &mut chord,);
@@ -1165,8 +1213,11 @@ mod tests {
             &mut file_search,
             &mut path_chains,
             &mut completions,
+            &mut completions_pending,
             &mut lsp_extras,
+            &mut lsp_pending,
             &DiagnosticsStates::default(),
+            &led_state_diagnostics::LspStatuses::default(),
             &GitState::default(),
             &keymap,
             &mut chord,);
@@ -1200,7 +1251,9 @@ mod tests {
         let fs = FsTree::default();
         let mut path_chains = std::collections::HashMap::new();
         let mut completions = CompletionsState::default();
+        let mut completions_pending = led_state_completions::CompletionsPending::default();
         let mut lsp_extras = LspExtrasState::default();
+        let mut lsp_pending = led_state_lsp::LspPending::default();
         // ctrl+x → pending.
         let mut find_file: Option<FindFileState> = None;
         let mut isearch: Option<IsearchState> = None;
@@ -1222,8 +1275,11 @@ mod tests {
             &mut file_search,
             &mut path_chains,
             &mut completions,
+            &mut completions_pending,
             &mut lsp_extras,
+            &mut lsp_pending,
             &DiagnosticsStates::default(),
+            &led_state_diagnostics::LspStatuses::default(),
             &GitState::default(),
             &keymap,
             &mut chord,);
@@ -1249,8 +1305,11 @@ mod tests {
             &mut file_search,
             &mut path_chains,
             &mut completions,
+            &mut completions_pending,
             &mut lsp_extras,
+            &mut lsp_pending,
             &DiagnosticsStates::default(),
+            &led_state_diagnostics::LspStatuses::default(),
             &GitState::default(),
             &keymap,
             &mut chord,);
@@ -1284,7 +1343,9 @@ mod tests {
 
         let mut path_chains = std::collections::HashMap::new();
         let mut completions = CompletionsState::default();
+        let mut completions_pending = led_state_completions::CompletionsPending::default();
         let mut lsp_extras = LspExtrasState::default();
+        let mut lsp_pending = led_state_lsp::LspPending::default();
         let mut find_file: Option<FindFileState> = None;
         let mut isearch: Option<IsearchState> = None;
         let mut file_search: Option<FileSearchState> = None;
@@ -1305,8 +1366,11 @@ mod tests {
             &mut file_search,
             &mut path_chains,
             &mut completions,
+            &mut completions_pending,
             &mut lsp_extras,
+            &mut lsp_pending,
             &DiagnosticsStates::default(),
+            &led_state_diagnostics::LspStatuses::default(),
             &GitState::default(),
             &km,
             &mut chord,);
@@ -1333,8 +1397,11 @@ mod tests {
             &mut file_search,
             &mut path_chains,
             &mut completions,
+            &mut completions_pending,
             &mut lsp_extras,
+            &mut lsp_pending,
             &DiagnosticsStates::default(),
+            &led_state_diagnostics::LspStatuses::default(),
             &GitState::default(),
             &km,
             &mut chord,);
@@ -1362,7 +1429,9 @@ mod tests {
 
         let mut path_chains = std::collections::HashMap::new();
         let mut completions = CompletionsState::default();
+        let mut completions_pending = led_state_completions::CompletionsPending::default();
         let mut lsp_extras = LspExtrasState::default();
+        let mut lsp_pending = led_state_lsp::LspPending::default();
         let mut find_file: Option<FindFileState> = None;
         let mut isearch: Option<IsearchState> = None;
         let mut file_search: Option<FileSearchState> = None;
@@ -1383,8 +1452,11 @@ mod tests {
             &mut file_search,
             &mut path_chains,
             &mut completions,
+            &mut completions_pending,
             &mut lsp_extras,
+            &mut lsp_pending,
             &DiagnosticsStates::default(),
+            &led_state_diagnostics::LspStatuses::default(),
             &GitState::default(),
             &km,
             &mut chord,
@@ -1412,7 +1484,9 @@ mod tests {
         let mut file_search: Option<FileSearchState> = None;
         let mut path_chains = std::collections::HashMap::new();
         let mut completions = CompletionsState::default();
+        let mut completions_pending = led_state_completions::CompletionsPending::default();
         let mut lsp_extras = LspExtrasState::default();
+        let mut lsp_pending = led_state_lsp::LspPending::default();
         dispatch_key(
             key(KeyModifiers::NONE, KeyCode::Char('z')),
             &mut tabs,
@@ -1430,8 +1504,11 @@ mod tests {
             &mut file_search,
             &mut path_chains,
             &mut completions,
+            &mut completions_pending,
             &mut lsp_extras,
+            &mut lsp_pending,
             &DiagnosticsStates::default(),
+            &led_state_diagnostics::LspStatuses::default(),
             &GitState::default(),
             &km,
             &mut chord,);
@@ -1459,7 +1536,9 @@ mod tests {
         let mut file_search: Option<FileSearchState> = None;
         let mut path_chains = std::collections::HashMap::new();
         let mut completions = CompletionsState::default();
+        let mut completions_pending = led_state_completions::CompletionsPending::default();
         let mut lsp_extras = LspExtrasState::default();
+        let mut lsp_pending = led_state_lsp::LspPending::default();
         dispatch_key(
             key(KeyModifiers::CONTROL, KeyCode::Char('x')),
             &mut tabs,
@@ -1477,8 +1556,11 @@ mod tests {
             &mut file_search,
             &mut path_chains,
             &mut completions,
+            &mut completions_pending,
             &mut lsp_extras,
+            &mut lsp_pending,
             &DiagnosticsStates::default(),
+            &led_state_diagnostics::LspStatuses::default(),
             &GitState::default(),
             &km,
             &mut chord,);
@@ -1552,7 +1634,9 @@ mod tests {
         };
 
         let mut lsp_extras = LspExtrasState::default();
+        let mut lsp_pending = led_state_lsp::LspPending::default();
         let mut completions = CompletionsState::default();
+        let mut completions_pending = led_state_completions::CompletionsPending::default();
         let mut chord = ChordState::default();
         let mut kr = KillRing::default();
         let mut clip = ClipboardState::default();
@@ -1565,6 +1649,14 @@ mod tests {
         let mut file_search: Option<FileSearchState> = None;
         let mut path_chains = std::collections::HashMap::new();
         let km = default_keymap();
+        // Seed an LSP server entry so the no-LSP gate in
+        // `lsp_goto_definition` doesn't short-circuit. Mirrors
+        // legacy `has_active_lsp(s)` returning true.
+        let mut lsp_status = led_state_diagnostics::LspStatuses::default();
+        lsp_status.by_server.insert(
+            "rust-analyzer".to_string(),
+            led_state_diagnostics::LspServerStatus::default(),
+        );
         dispatch_key(
             key(KeyModifiers::ALT, KeyCode::Enter),
             &mut tabs,
@@ -1582,18 +1674,21 @@ mod tests {
             &mut file_search,
             &mut path_chains,
             &mut completions,
+            &mut completions_pending,
             &mut lsp_extras,
+            &mut lsp_pending,
             &DiagnosticsStates::default(),
+            &lsp_status,
             &GitState::default(),
             &km,
             &mut chord,
         );
-        assert_eq!(lsp_extras.pending_goto.len(), 1);
-        let req = &lsp_extras.pending_goto[0];
+        assert_eq!(lsp_pending.pending_goto.len(), 1);
+        let req = &lsp_pending.pending_goto[0];
         assert_eq!(req.path, canon("file.rs"));
         assert_eq!(req.line, 2);
         assert_eq!(req.col, 4);
-        assert_eq!(lsp_extras.latest_goto_seq, Some(req.seq));
+        assert_eq!(lsp_pending.latest_goto_seq, Some(req.seq));
     }
 
     #[test]
@@ -1604,7 +1699,9 @@ mod tests {
         let term = terminal_with(Some(Dims { cols: 20, rows: 5 }));
 
         let mut lsp_extras = LspExtrasState::default();
+        let mut lsp_pending = led_state_lsp::LspPending::default();
         let mut completions = CompletionsState::default();
+        let mut completions_pending = led_state_completions::CompletionsPending::default();
         let mut chord = ChordState::default();
         let mut kr = KillRing::default();
         let mut clip = ClipboardState::default();
@@ -1634,12 +1731,15 @@ mod tests {
             &mut file_search,
             &mut path_chains,
             &mut completions,
+            &mut completions_pending,
             &mut lsp_extras,
+            &mut lsp_pending,
             &DiagnosticsStates::default(),
+            &led_state_diagnostics::LspStatuses::default(),
             &GitState::default(),
             &km,
             &mut chord,
         );
-        assert!(lsp_extras.pending_goto.is_empty());
+        assert!(lsp_pending.pending_goto.is_empty());
     }
 }

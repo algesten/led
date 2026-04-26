@@ -62,6 +62,11 @@ pub struct Buffer {
     rows: u16,
     cols: u16,
     cells: Vec<Cell>,
+    /// Zero-width chars (combining marks, ZWJ) attached to a base
+    /// cell. Sparse — only populated for the rare cells that need
+    /// them, so every-frame allocation stays at zero on plain
+    /// ASCII / single-codepoint workloads.
+    combiners: std::collections::HashMap<(u16, u16), String>,
 }
 
 #[allow(dead_code)] // public API of the buffer module — driver uses a subset; keep the rest nameable for tests + future paint sites.
@@ -72,6 +77,7 @@ impl Buffer {
             rows,
             cols,
             cells: vec![Cell::BLANK; len],
+            combiners: std::collections::HashMap::new(),
         }
     }
 
@@ -97,6 +103,7 @@ impl Buffer {
         let len = usize::from(rows) * usize::from(cols);
         self.cells.clear();
         self.cells.resize(len, Cell::BLANK);
+        self.combiners.clear();
     }
 
     /// Reset every cell to BLANK without changing dims.
@@ -104,6 +111,7 @@ impl Buffer {
         for c in self.cells.iter_mut() {
             *c = Cell::BLANK;
         }
+        self.combiners.clear();
     }
 
     /// Overwrite every cell with `other`'s cells. Dims must match
@@ -119,6 +127,10 @@ impl Buffer {
             "copy_from requires matching dims",
         );
         self.cells.copy_from_slice(&other.cells);
+        self.combiners.clear();
+        self.combiners.extend(
+            other.combiners.iter().map(|(k, v)| (*k, v.clone())),
+        );
     }
 
     fn idx(&self, row: u16, col: u16) -> Option<usize> {
@@ -140,10 +152,13 @@ impl Buffer {
     }
 
     /// Write one cell. Out-of-range writes are silently dropped so
-    /// paint code can be a little sloppy about area bounds.
+    /// paint code can be a little sloppy about area bounds. Any
+    /// combining marks previously attached to this cell are
+    /// dropped — overwriting the base char invalidates them.
     pub fn put_char(&mut self, row: u16, col: u16, ch: char, style: Style) {
         if let Some(i) = self.idx(row, col) {
             self.cells[i] = Cell { ch, style };
+            self.combiners.remove(&(row, col));
         }
     }
 
@@ -151,16 +166,52 @@ impl Buffer {
     /// column AFTER the last written cell — callers chain this to
     /// track where to write next (gutter → content → continuation
     /// glyph, etc.). Chars past the row's right edge are dropped.
+    ///
+    /// Width handling, per `unicode-width`:
+    /// - Wide chars (CJK, etc., width 2) land in their cell and
+    ///   the column advances by 2; the continuation cell is left
+    ///   untouched so the terminal's own wide-glyph drawing fills
+    ///   it without a competing single-char print.
+    /// - Zero-width chars (combining marks, ZWJ, …) attach to the
+    ///   previous base cell via the `combiners` side map so the
+    ///   diff renderer can ship them as a plain `Print(ch)`
+    ///   immediately after the base — that's how a terminal (and
+    ///   vt100) attaches a combining mark to the right glyph
+    ///   without us trying to cram multiple chars into one cell.
     pub fn put_str(&mut self, row: u16, col: u16, s: &str, style: Style) -> u16 {
+        use unicode_width::UnicodeWidthChar;
         let mut c = col;
+        // Track the last base-char cell we wrote so width-0 chars
+        // can attach to it instead of to a continuation cell that
+        // we never actually `put_char`-ed (and that the diff
+        // therefore doesn't visit).
+        let mut last_base: Option<u16> = None;
         for ch in s.chars() {
+            let width = ch.width().unwrap_or(0);
+            if width == 0 {
+                if let Some(base_col) = last_base {
+                    self.combiners
+                        .entry((row, base_col))
+                        .or_default()
+                        .push(ch);
+                }
+                continue;
+            }
             if c >= self.cols {
                 break;
             }
             self.put_char(row, c, ch, style);
-            c = c.saturating_add(1);
+            last_base = Some(c);
+            c = c.saturating_add(width as u16);
         }
         c
+    }
+
+    /// Combining marks (and other zero-width chars) attached to a
+    /// base cell. Read by the diff renderer to emit follow-on
+    /// `Print(ch)` calls after the base char.
+    pub fn combiners_at(&self, row: u16, col: u16) -> Option<&str> {
+        self.combiners.get(&(row, col)).map(|s| s.as_str())
     }
 
     /// Fill `[col_start, col_end)` on `row` with blank cells at

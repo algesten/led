@@ -565,6 +565,7 @@ mod tests {
         fn session_save_start(&self) {}
         fn session_save_done(&self, _: bool) {}
         fn session_drop_undo(&self, _: &CanonPath) {}
+        fn session_flush_undo(&self, _: &CanonPath, _: &str) {}
     }
 
     fn canon_of(p: &Path) -> CanonPath {

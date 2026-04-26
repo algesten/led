@@ -23,24 +23,38 @@ use led_state_browser::{BrowserUi, Focus, FsTree, TreeEntry, TreeEntryKind};
 use led_state_tabs::Tabs;
 
 use crate::query::{
-    BrowserDerivedInputs, BrowserUiInput, FsTreeInput, TabsActiveInput, browser_entries,
-    browser_selected_idx,
+    BrowserDerivedInputs, BrowserUiInput, EditedBuffersInput, FsTreeInput, TabsActiveInput,
+    browser_entries, browser_selected_idx,
 };
+use led_state_buffer_edits::BufferEdits;
 
 use super::shared::{close_preview, open_or_focus_tab};
 
 /// Helper: call the `browser_entries` memo given raw state.
-fn entries_of(browser: &BrowserUi, fs: &FsTree, tabs: &Tabs) -> std::sync::Arc<Vec<TreeEntry>> {
+/// `edits` feeds the materialized-tab ancestor auto-reveal — see
+/// [`crate::query::browser_auto_expanded`].
+fn entries_of(
+    browser: &BrowserUi,
+    fs: &FsTree,
+    tabs: &Tabs,
+    edits: &BufferEdits,
+) -> std::sync::Arc<Vec<TreeEntry>> {
     browser_entries(BrowserDerivedInputs {
         fs: FsTreeInput::new(fs),
         ui: BrowserUiInput::new(browser),
         tabs: TabsActiveInput::new(tabs),
+        edits: EditedBuffersInput::new(edits),
     })
 }
 
 /// Current selected entry (clone), or None on empty tree.
-fn current_entry(browser: &BrowserUi, fs: &FsTree, tabs: &Tabs) -> Option<TreeEntry> {
-    let entries = entries_of(browser, fs, tabs);
+fn current_entry(
+    browser: &BrowserUi,
+    fs: &FsTree,
+    tabs: &Tabs,
+    edits: &BufferEdits,
+) -> Option<TreeEntry> {
+    let entries = entries_of(browser, fs, tabs, edits);
     let idx = browser_selected_idx(&entries, browser.selected_path.as_ref());
     entries.get(idx).cloned()
 }
@@ -116,8 +130,13 @@ pub(super) fn toggle_focus(browser: &mut BrowserUi) {
 /// Expand the selected directory. No-op when the selection is a
 /// file or there's no selection. The query-layer memo picks up
 /// the new `expanded_dirs` entry on the next tick.
-pub(super) fn expand_dir(browser: &mut BrowserUi, fs: &FsTree, tabs: &Tabs) {
-    let Some(entry) = current_entry(browser, fs, tabs) else {
+pub(super) fn expand_dir(
+    browser: &mut BrowserUi,
+    fs: &FsTree,
+    tabs: &Tabs,
+    edits: &BufferEdits,
+) {
+    let Some(entry) = current_entry(browser, fs, tabs, edits) else {
         return;
     };
     if matches!(entry.kind, TreeEntryKind::Directory { expanded: false }) {
@@ -129,8 +148,13 @@ pub(super) fn expand_dir(browser: &mut BrowserUi, fs: &FsTree, tabs: &Tabs) {
 /// collapse the file's parent instead (so `Left` in a deep tree
 /// "zooms out" one level). Selection moves to the collapsed dir's
 /// row.
-pub(super) fn collapse_dir(browser: &mut BrowserUi, fs: &FsTree, tabs: &Tabs) {
-    let entries = entries_of(browser, fs, tabs);
+pub(super) fn collapse_dir(
+    browser: &mut BrowserUi,
+    fs: &FsTree,
+    tabs: &Tabs,
+    edits: &BufferEdits,
+) {
+    let entries = entries_of(browser, fs, tabs, edits);
     let idx = browser_selected_idx(&entries, browser.selected_path.as_ref());
     let Some(entry) = entries.get(idx).cloned() else {
         return;
@@ -185,9 +209,10 @@ pub(super) fn open_selected(
     browser: &mut BrowserUi,
     fs: &FsTree,
     tabs: &mut Tabs,
+    edits: &BufferEdits,
     path_chains: &mut HashMap<CanonPath, PathChain>,
 ) {
-    let entries = entries_of(browser, fs, tabs);
+    let entries = entries_of(browser, fs, tabs, edits);
     let idx = browser_selected_idx(&entries, browser.selected_path.as_ref());
     let Some(entry) = entries.get(idx).cloned() else {
         return;
@@ -216,9 +241,10 @@ pub(super) fn open_selected_bg(
     browser: &mut BrowserUi,
     fs: &FsTree,
     tabs: &mut Tabs,
+    edits: &BufferEdits,
     path_chains: &mut HashMap<CanonPath, PathChain>,
 ) {
-    let entries = entries_of(browser, fs, tabs);
+    let entries = entries_of(browser, fs, tabs, edits);
     let idx = browser_selected_idx(&entries, browser.selected_path.as_ref());
     let Some(entry) = entries.get(idx).cloned() else {
         return;
@@ -266,10 +292,11 @@ pub(super) fn move_selection(
     browser: &mut BrowserUi,
     fs: &FsTree,
     tabs: &mut Tabs,
+    edits: &BufferEdits,
     path_chains: &mut HashMap<CanonPath, PathChain>,
     delta: isize,
 ) {
-    let entries = entries_of(browser, fs, tabs);
+    let entries = entries_of(browser, fs, tabs, edits);
     if entries.is_empty() {
         browser.selected_path = None;
         return;
@@ -286,6 +313,7 @@ pub(super) fn page_selection(
     browser: &mut BrowserUi,
     fs: &FsTree,
     tabs: &mut Tabs,
+    edits: &BufferEdits,
     path_chains: &mut HashMap<CanonPath, PathChain>,
     page_rows: usize,
     down: bool,
@@ -295,16 +323,17 @@ pub(super) fn page_selection(
     } else {
         -(page_rows as isize)
     };
-    move_selection(browser, fs, tabs, path_chains, delta);
+    move_selection(browser, fs, tabs, edits, path_chains, delta);
 }
 
 pub(super) fn select_first(
     browser: &mut BrowserUi,
     fs: &FsTree,
     tabs: &mut Tabs,
+    edits: &BufferEdits,
     path_chains: &mut HashMap<CanonPath, PathChain>,
 ) {
-    let entries = entries_of(browser, fs, tabs);
+    let entries = entries_of(browser, fs, tabs, edits);
     browser.selected_path = entries.first().map(|e| e.path.clone());
     preview_current_selection(browser, &entries, fs, tabs, path_chains);
 }
@@ -313,9 +342,10 @@ pub(super) fn select_last(
     browser: &mut BrowserUi,
     fs: &FsTree,
     tabs: &mut Tabs,
+    edits: &BufferEdits,
     path_chains: &mut HashMap<CanonPath, PathChain>,
 ) {
-    let entries = entries_of(browser, fs, tabs);
+    let entries = entries_of(browser, fs, tabs, edits);
     browser.selected_path = entries.last().map(|e| e.path.clone());
     preview_current_selection(browser, &entries, fs, tabs, path_chains);
 }
@@ -402,8 +432,9 @@ mod tests {
     fn expand_dir_on_selected_dir_adds_to_expanded() {
         let (mut b, fs) = seeded();
         let tabs = Tabs::default();
+        let edits = BufferEdits::default();
         b.selected_path = Some(canon("/project/sub"));
-        expand_dir(&mut b, &fs, &tabs);
+        expand_dir(&mut b, &fs, &tabs, &edits);
         assert!(b.expanded_dirs.contains(&canon("/project/sub")));
     }
 
@@ -411,8 +442,9 @@ mod tests {
     fn expand_dir_on_file_is_noop() {
         let (mut b, fs) = seeded();
         let tabs = Tabs::default();
+        let edits = BufferEdits::default();
         b.selected_path = Some(canon("/project/alpha.txt"));
-        expand_dir(&mut b, &fs, &tabs);
+        expand_dir(&mut b, &fs, &tabs, &edits);
         assert!(b.expanded_dirs.is_empty());
     }
 
@@ -420,9 +452,10 @@ mod tests {
     fn collapse_dir_on_expanded_collapses() {
         let (mut b, fs) = seeded();
         let tabs = Tabs::default();
+        let edits = BufferEdits::default();
         b.expanded_dirs.insert(canon("/project/sub"));
         b.selected_path = Some(canon("/project/sub"));
-        collapse_dir(&mut b, &fs, &tabs);
+        collapse_dir(&mut b, &fs, &tabs, &edits);
         assert!(!b.expanded_dirs.contains(&canon("/project/sub")));
     }
 
@@ -430,9 +463,10 @@ mod tests {
     fn collapse_dir_on_leaf_collapses_parent() {
         let (mut b, fs) = seeded();
         let tabs = Tabs::default();
+        let edits = BufferEdits::default();
         b.expanded_dirs.insert(canon("/project/sub"));
         b.selected_path = Some(canon("/project/sub/inner.txt"));
-        collapse_dir(&mut b, &fs, &tabs);
+        collapse_dir(&mut b, &fs, &tabs, &edits);
         assert!(!b.expanded_dirs.contains(&canon("/project/sub")));
         assert_eq!(b.selected_path, Some(canon("/project/sub")));
     }
@@ -453,11 +487,12 @@ mod tests {
     fn open_selected_on_dir_toggles_expand() {
         let (mut b, fs) = seeded();
         let mut tabs = Tabs::default();
+        let edits = BufferEdits::default();
         let mut pc = HashMap::new();
         b.selected_path = Some(canon("/project/sub"));
-        open_selected(&mut b, &fs, &mut tabs, &mut pc);
+        open_selected(&mut b, &fs, &mut tabs, &edits, &mut pc);
         assert!(b.expanded_dirs.contains(&canon("/project/sub")));
-        open_selected(&mut b, &fs, &mut tabs, &mut pc);
+        open_selected(&mut b, &fs, &mut tabs, &edits, &mut pc);
         assert!(!b.expanded_dirs.contains(&canon("/project/sub")));
     }
 
@@ -465,10 +500,11 @@ mod tests {
     fn open_selected_on_file_creates_real_tab_and_focuses_main() {
         let (mut b, fs) = seeded();
         let mut tabs = Tabs::default();
+        let edits = BufferEdits::default();
         let mut pc = HashMap::new();
         b.selected_path = Some(canon("/project/alpha.txt"));
         b.focus = Focus::Side;
-        open_selected(&mut b, &fs, &mut tabs, &mut pc);
+        open_selected(&mut b, &fs, &mut tabs, &edits, &mut pc);
         assert_eq!(tabs.open.len(), 1);
         assert!(!tabs.open[0].preview);
         assert_eq!(tabs.active, Some(tabs.open[0].id));
@@ -479,10 +515,11 @@ mod tests {
     fn open_selected_bg_creates_preview_and_keeps_side_focus() {
         let (mut b, fs) = seeded();
         let mut tabs = Tabs::default();
+        let edits = BufferEdits::default();
         let mut pc = HashMap::new();
         b.selected_path = Some(canon("/project/alpha.txt"));
         b.focus = Focus::Side;
-        open_selected_bg(&mut b, &fs, &mut tabs, &mut pc);
+        open_selected_bg(&mut b, &fs, &mut tabs, &edits, &mut pc);
         assert_eq!(tabs.open.len(), 1);
         assert!(tabs.open[0].preview);
         assert_eq!(b.focus, Focus::Side);
@@ -492,6 +529,7 @@ mod tests {
     fn open_selected_on_preview_promotes_it() {
         let (mut b, fs) = seeded();
         let mut tabs = Tabs::default();
+        let edits = BufferEdits::default();
         let mut pc = HashMap::new();
         tabs.open.push_back(Tab {
             id: TabId(1),
@@ -501,7 +539,7 @@ mod tests {
         });
         tabs.active = Some(TabId(1));
         b.selected_path = Some(canon("/project/alpha.txt"));
-        open_selected(&mut b, &fs, &mut tabs, &mut pc);
+        open_selected(&mut b, &fs, &mut tabs, &edits, &mut pc);
         assert_eq!(tabs.open.len(), 1);
         assert!(!tabs.open[0].preview);
     }
@@ -510,6 +548,7 @@ mod tests {
     fn open_selected_on_different_file_replaces_preview_path() {
         let (mut b, fs) = seeded();
         let mut tabs = Tabs::default();
+        let edits = BufferEdits::default();
         let mut pc = HashMap::new();
         tabs.open.push_back(Tab {
             id: TabId(1),
@@ -519,7 +558,7 @@ mod tests {
         });
         tabs.active = Some(TabId(1));
         b.selected_path = Some(canon("/project/beta.txt"));
-        open_selected_bg(&mut b, &fs, &mut tabs, &mut pc);
+        open_selected_bg(&mut b, &fs, &mut tabs, &edits, &mut pc);
         assert_eq!(tabs.open.len(), 1);
         assert_eq!(tabs.open[0].path, canon("/project/beta.txt"));
         assert!(tabs.open[0].preview);
@@ -529,11 +568,12 @@ mod tests {
     fn move_selection_moves_within_entries() {
         let (mut b, fs) = seeded();
         let mut tabs = Tabs::default();
+        let edits = BufferEdits::default();
         let mut pc = HashMap::new();
         // Starts with selected_path = None → idx 0 = sub/.
-        move_selection(&mut b, &fs, &mut tabs, &mut pc, 2);
+        move_selection(&mut b, &fs, &mut tabs, &edits, &mut pc, 2);
         assert_eq!(b.selected_path, Some(canon("/project/beta.txt")));
-        move_selection(&mut b, &fs, &mut tabs, &mut pc, -1);
+        move_selection(&mut b, &fs, &mut tabs, &edits, &mut pc, -1);
         assert_eq!(b.selected_path, Some(canon("/project/alpha.txt")));
     }
 
@@ -541,9 +581,10 @@ mod tests {
     fn move_selection_opens_preview_for_file_row() {
         let (mut b, fs) = seeded();
         let mut tabs = Tabs::default();
+        let edits = BufferEdits::default();
         let mut pc = HashMap::new();
         // Start at idx 0 (sub/, directory). Move to alpha.txt (file).
-        move_selection(&mut b, &fs, &mut tabs, &mut pc, 1);
+        move_selection(&mut b, &fs, &mut tabs, &edits, &mut pc, 1);
         assert_eq!(tabs.open.len(), 1);
         assert!(tabs.open[0].preview);
         assert_eq!(tabs.open[0].path, canon("/project/alpha.txt"));
@@ -553,9 +594,10 @@ mod tests {
     fn move_selection_onto_directory_row_does_not_open_anything() {
         let (mut b, fs) = seeded();
         let mut tabs = Tabs::default();
+        let edits = BufferEdits::default();
         let mut pc = HashMap::new();
         b.selected_path = Some(canon("/project/alpha.txt"));
-        move_selection(&mut b, &fs, &mut tabs, &mut pc, -1);
+        move_selection(&mut b, &fs, &mut tabs, &edits, &mut pc, -1);
         assert_eq!(b.selected_path, Some(canon("/project/sub")));
         assert!(tabs.open.is_empty());
     }
@@ -564,13 +606,14 @@ mod tests {
     fn nav_onto_directory_closes_existing_preview() {
         let (mut b, fs) = seeded();
         let mut tabs = Tabs::default();
+        let edits = BufferEdits::default();
         let mut pc = HashMap::new();
         // sub/ → alpha.txt (preview).
-        move_selection(&mut b, &fs, &mut tabs, &mut pc, 1);
+        move_selection(&mut b, &fs, &mut tabs, &edits, &mut pc, 1);
         assert_eq!(tabs.open.len(), 1);
         assert!(tabs.open[0].preview);
         // Back to sub/ → preview closes.
-        move_selection(&mut b, &fs, &mut tabs, &mut pc, -1);
+        move_selection(&mut b, &fs, &mut tabs, &edits, &mut pc, -1);
         assert!(tabs.open.is_empty());
         assert!(tabs.active.is_none());
     }
@@ -579,6 +622,7 @@ mod tests {
     fn close_preview_restores_previous_tab() {
         let (mut b, fs) = seeded();
         let mut tabs = Tabs::default();
+        let edits = BufferEdits::default();
         let mut pc = HashMap::new();
         tabs.open.push_back(Tab {
             id: TabId(7),
@@ -587,9 +631,9 @@ mod tests {
         });
         tabs.active = Some(TabId(7));
 
-        move_selection(&mut b, &fs, &mut tabs, &mut pc, 1); // alpha.txt (preview)
+        move_selection(&mut b, &fs, &mut tabs, &edits, &mut pc, 1); // alpha.txt (preview)
         assert_eq!(tabs.open.len(), 2, "real + preview");
-        move_selection(&mut b, &fs, &mut tabs, &mut pc, -1); // back to sub/
+        move_selection(&mut b, &fs, &mut tabs, &edits, &mut pc, -1); // back to sub/
         assert_eq!(tabs.open.len(), 1, "preview removed");
         assert_eq!(tabs.active, Some(TabId(7)), "real tab restored");
     }
@@ -598,9 +642,10 @@ mod tests {
     fn successive_file_nav_replaces_the_same_preview_slot() {
         let (mut b, fs) = seeded();
         let mut tabs = Tabs::default();
+        let edits = BufferEdits::default();
         let mut pc = HashMap::new();
-        move_selection(&mut b, &fs, &mut tabs, &mut pc, 1); // alpha.txt
-        move_selection(&mut b, &fs, &mut tabs, &mut pc, 1); // beta.txt
+        move_selection(&mut b, &fs, &mut tabs, &edits, &mut pc, 1); // alpha.txt
+        move_selection(&mut b, &fs, &mut tabs, &edits, &mut pc, 1); // beta.txt
         assert_eq!(tabs.open.len(), 1);
         assert_eq!(tabs.open[0].path, canon("/project/beta.txt"));
         assert!(tabs.open[0].preview);

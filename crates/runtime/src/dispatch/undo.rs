@@ -459,7 +459,9 @@ mod tests {
 
         let mut path_chains = std::collections::HashMap::new();
         let mut completions = CompletionsState::default();
+        let mut completions_pending = led_state_completions::CompletionsPending::default();
         let mut lsp_extras = LspExtrasState::default();
+        let mut lsp_pending = led_state_lsp::LspPending::default();
         // Undo: ""
         let mut find_file: Option<FindFileState> = None;
         let mut isearch: Option<IsearchState> = None;
@@ -481,8 +483,11 @@ mod tests {
             &mut file_search,
             &mut path_chains,
             &mut completions,
+            &mut completions_pending,
             &mut lsp_extras,
+            &mut lsp_pending,
             &DiagnosticsStates::default(),
+            &led_state_diagnostics::LspStatuses::default(),
             &GitState::default(),
             &km,
             &mut chord,);
@@ -509,8 +514,11 @@ mod tests {
             &mut file_search,
             &mut path_chains,
             &mut completions,
+            &mut completions_pending,
             &mut lsp_extras,
+            &mut lsp_pending,
             &DiagnosticsStates::default(),
+            &led_state_diagnostics::LspStatuses::default(),
             &GitState::default(),
             &km,
             &mut chord,);
@@ -586,7 +594,9 @@ mod tests {
         let mut file_search: Option<FileSearchState> = None;
         let mut path_chains = std::collections::HashMap::new();
         let mut completions = CompletionsState::default();
+        let mut completions_pending = led_state_completions::CompletionsPending::default();
         let mut lsp_extras = LspExtrasState::default();
+        let mut lsp_pending = led_state_lsp::LspPending::default();
         dispatch_key(
             key(KeyModifiers::CONTROL, KeyCode::Char('y')),
             &mut tabs,
@@ -604,8 +614,11 @@ mod tests {
             &mut file_search,
             &mut path_chains,
             &mut completions,
+            &mut completions_pending,
             &mut lsp_extras,
+            &mut lsp_pending,
             &DiagnosticsStates::default(),
+            &led_state_diagnostics::LspStatuses::default(),
             &GitState::default(),
             &km,
             &mut chord,);

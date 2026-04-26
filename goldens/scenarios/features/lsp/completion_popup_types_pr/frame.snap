@@ -1,5 +1,5 @@
-  main.rs               │  fn main() {                                                                        
-                        │          
+  main.rs               │  fn main() {
+                        │ 
                         │  }
                         │  pr
                         │~    print!   
@@ -37,4 +37,4 @@
                         │~
                         │~
                         │ ●main.rs 
-  ●  /Users/martin/dev/led-rewrite/target/debug/fake-lsp                                                          L4:C3 
+ ● <FAKE-LSP> L4:C3 
