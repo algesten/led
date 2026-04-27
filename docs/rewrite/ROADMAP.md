@@ -97,7 +97,7 @@ point; expect it to grow as the porting surfaces more.
 
 ---
 
-## Shipped (milestones 1–5)
+## Shipped (milestones 1–23 + 25)
 
 | M | Ships | Spec reference |
 |---|---|---|
@@ -106,16 +106,37 @@ point; expect it to grow as the porting surfaces more.
 | M3 | Printable-char insert, `Enter`, `Backspace`, `Delete`, dirty indicator (`*`) | `editing.md` (basic insert/delete) |
 | M4 | `Ctrl-S` save with atomic tmp-file + rename; `saved_version` tracking | `buffers.md` (save), `docstore.md` (write path) |
 | M5 | Keymap (`Command` enum), TOML `[keys]` at `~/.config/led/config.toml`, printable-char fallback | `keymap.md` (layer 1 only — flat table, no chords/contexts) |
+| M6 | Chord bindings + richer keymap (`ctrl+x` prefix, `Cmd::SaveAll/KillBuffer/PrevTab/NextTab/FileStart/FileEnd/WordLeft/WordRight/Abort/SaveNoFormat/Quit`) | `keymap.md` § "Compilation", "Chord prefix" |
+| M7 | Mark, region, kill ring, clipboard (`SetMark`, `KillRegion`, `KillLine`, `Yank`, `driver-clipboard`) | `editing.md` § "Mark and region", `editing.md` § "Kill ring", `docs/drivers/clipboard.md` |
+| M8 | Undo / redo, per-buffer edit log, edit coalescing | `editing.md` § "Undo groups" |
+| M9 | UI chrome: status bar, gutter, alerts (`AlertState`, three-region layout, mode string) | `ui-chrome.md` |
+| M10 | Extended navigation: word move, prev/next tab, match-bracket, jump list | `navigation.md` |
+| M11 | File browser sidebar (`BrowserState`, `driver-fs-list`, browser context overlay) | `file-browser.md`, `docs/drivers/fs.md` |
+| M12 | Find-file picker + Save-as | `find-file.md` |
+| M13 | Incremental in-buffer search | `search.md` § "In-buffer isearch" |
+| M14 | Project-wide file search (`driver-file-search`, ripgrep-backed) | `search.md` § "File-search overlay", `docs/drivers/file-search.md` |
+| M14b | Chrome theming pipeline (`theme.toml`, `[chrome]` section, ruler column) | `docs/rewrite/specs/theming.md` |
+| M15 | Syntax highlighting (`driver-syntax`, tree-sitter, `[syntax]` theme block) | `syntax.md`, `docs/drivers/syntax.md` |
+| M16 | LSP core (`driver-lsp`, pull diagnostics, freeze-on-version) | `lsp.md` § "Diagnostics", `docs/drivers/lsp.md` |
+| M17 | LSP completions (popup overlay, refilter, trigger chars) | `lsp.md` § "Completions" |
+| M18 | LSP extras: goto-def, rename, code-actions, format, inlay hints | `lsp.md` § "Goto / Rename / Code actions / Format / Inlay hints" |
+| M19 | Git (`driver-git`, libgit2, file + line statuses, gutter bars) | `git.md`, `docs/drivers/git.md` |
+| M20 | Lifecycle: `Phase` enum, `Quit`, `Suspend`, `confirm_kill` flow | `lifecycle.md` |
+| M20a | Tiered issue navigation (`NextIssue` / `PrevIssue`, `IssueCategory::NAV_LEVELS`) | `navigation.md` § "Issue navigation" |
+| M21 | SQLite-backed session persistence + undo persistence + pending-cursor primitive | `persistence.md`, `docs/drivers/docstore.md` |
+| M22 | Keyboard macros (record / replay, count prefix, `e`-repeat latch) | `macros.md` |
+| M23 | Auto-indent / reflow / sort-imports (tree-sitter indent queries, dprint, imports.scm) | `editing.md` § "Auto-indent", "Reflow", "Sort imports" |
+| M25 | Grapheme-aware column math (`Cursor::col` = grapheme cluster, `preferred_col` = display cells, LSP UTF-16 boundary conversion) | [`MILESTONE-25.md`](MILESTONE-25.md) |
 
 ---
 
-## Planned (milestones 6+)
+## Planned (M26 + M27)
 
 The order below is *dependency order* where dependencies exist, and
 *visibility order* where they don't — i.e. ship features that unlock
 daily use before specialties.
 
-### Mα — Goldens harness integration (prerequisite)
+### Mα — Goldens harness integration (prerequisite) (SHIPPED)
 
 Not a feature; a quality gate. Pull the `goldens/` crate from `main`
 into the rewrite worktree and wire it to invoke the new binary.
@@ -140,7 +161,7 @@ into the rewrite worktree and wire it to invoke the new binary.
 `actions/delete_forward`, `actions/insert_newline`,
 `actions/save`, `actions/quit`, `keybindings/main/<basic keys>`.
 
-### M6 — Chord bindings + richer keymap
+### M6 — Chord bindings + richer keymap (SHIPPED)
 
 Catches the keymap up to legacy's two-layer scheme.
 
@@ -177,7 +198,7 @@ parked until those features land (M11, M14).
 until M9), `actions/prev_tab`, `actions/next_tab`, `actions/abort`,
 `actions/file_start`, `actions/file_end`.
 
-### M7 — Mark, region, kill ring, clipboard
+### M7 — Mark, region, kill ring, clipboard (SHIPPED)
 
 - `Mark` field on `Tab.cursor` state (the second anchor).
 - `SetMark` command (`ctrl+space`).
@@ -196,7 +217,7 @@ until M9), `actions/prev_tab`, `actions/next_tab`, `actions/abort`,
 `actions/kill_line` (including accumulate), `actions/yank`,
 `driver_events/clipboard/*`.
 
-### M8 — Undo / redo
+### M8 — Undo / redo (SHIPPED)
 
 Closes out the long-deferred **edit log**. Same milestone introduces
 it because undo is the first consumer.
@@ -220,7 +241,7 @@ evolve when the first async consumer lands (M16).
 **Goldens moved to green:** `actions/undo`, `actions/redo`,
 `edge/*edit*` scenarios that previously relied on undo.
 
-### M9 — UI chrome: status bar, gutter, alerts
+### M9 — UI chrome: status bar, gutter, alerts (SHIPPED)
 
 - Three-region layout: tab bar (row 0) + body + status bar (last row).
 - 2-column gutter for future git/lsp marks (starts empty; reserved).
@@ -237,7 +258,7 @@ status-bar snapshots, `actions/open_messages`,
 `keybindings/confirm_kill/*` (M9 introduces the confirm-kill
 infrastructure via the alert system).
 
-### M10 — Extended navigation
+### M10 — Extended navigation (SHIPPED)
 
 - Word move (`alt+f` / `alt+b`, or `ctrl+left/right` if config prefers).
 - `PrevTab` / `NextTab` via keymap commands.
@@ -253,7 +274,7 @@ infrastructure via the alert system).
 `actions/match_bracket`, remaining `actions/move_*` (word / bracket
 variants), `keybindings/main/alt_*` for `alt+b`/`alt+f`.
 
-### M11 — File browser sidebar
+### M11 — File browser sidebar (SHIPPED)
 
 - `BrowserState` user-decision + `driver-fs-list/` for directory
   enumeration.
@@ -271,7 +292,7 @@ variants), `keybindings/main/alt_*` for `alt+b`/`alt+f`.
 `actions/toggle_focus`, `actions/toggle_side_panel`,
 `driver_events/fs/list_dir*`, `features/browser/*`.
 
-### M12 — Find-file picker (+ Save-as)
+### M12 — Find-file picker (+ Save-as) (SHIPPED)
 
 - `FindFileState` overlay.
 - `FindFile` (`ctrl+x ctrl+f`) / `SaveAs` (`ctrl+x ctrl+w`).
@@ -283,7 +304,7 @@ variants), `keybindings/main/alt_*` for `alt+b`/`alt+f`.
 **Goldens moved to green:** `keybindings/find_file/*`,
 `actions/find_file`, `actions/save_as`, `features/find_file/*`.
 
-### M13 — Incremental in-buffer search
+### M13 — Incremental in-buffer search (SHIPPED)
 
 - `IsearchState` on Tab.
 - `InBufferSearch` (`ctrl+s`) starts search; repeat advances.
@@ -297,7 +318,7 @@ variants), `keybindings/main/alt_*` for `alt+b`/`alt+f`.
 **Goldens moved to green:** `actions/in_buffer_search`,
 `features/isearch/*`.
 
-### M14 — Project-wide file search
+### M14 — Project-wide file search (SHIPPED)
 
 - `FileSearchState` overlay; driven by `driver-file-search/` (ripgrep).
 - Case/regex/replace toggles (`alt+1/2/3`).
@@ -313,7 +334,7 @@ variants), `keybindings/main/alt_*` for `alt+b`/`alt+f`.
 `actions/toggle_search_replace`, `actions/replace_all`,
 `driver_events/file_search/*`, `features/file_search/*`.
 
-### M14b — Chrome theming
+### M14b — Chrome theming (SHIPPED)
 
 Introduces the theme pipeline and replaces the hard-coded chrome
 styles currently emitted by `crates/driver-terminal/native/src/lib.rs`
@@ -361,7 +382,7 @@ authored as part of this milestone).
 Chrome-theme assertions currently ride inside individual feature
 goldens; M14b adds dedicated theme-switching coverage.
 
-### M15 — Syntax highlighting (tree-sitter)
+### M15 — Syntax highlighting (tree-sitter) (SHIPPED)
 
 - `SyntaxState` per buffer: `Arc<Tree>` + `language` + version.
 - `driver-syntax/` core + native: tree-sitter parse in a worker.
@@ -378,7 +399,7 @@ goldens; M14b adds dedicated theme-switching coverage.
 **Goldens moved to green:** `driver_events/syntax/*`,
 `features/syntax/*`.
 
-### M16 — LSP core: client bootstrap + pull diagnostics
+### M16 — LSP core: client bootstrap + pull diagnostics (SHIPPED)
 
 - `LspState` per language server + `driver-lsp/` (stdio child process,
   JSON-RPC framing).
@@ -402,7 +423,7 @@ sources (LSP, git, PR) are present. Shipping nav piecewise before
 then teaches users a behaviour that changes when each later tier
 lands.
 
-### M17 — LSP completions
+### M17 — LSP completions (SHIPPED)
 
 - `CompletionState` overlay.
 - Trigger-char + identifier-prefix triggers.
@@ -416,7 +437,7 @@ lands.
 `features/lsp/completion*`,
 `driver_events/lsp/completion*`.
 
-### M18 — LSP extras
+### M18 — LSP extras (SHIPPED)
 
 - `LspGotoDefinition` (`alt+enter`).
 - `LspRename` (`ctrl+r`) with overlay.
@@ -436,7 +457,7 @@ actions / Format / Inlay hints".
 `features/lsp/code_actions*`, `features/lsp/format*`,
 `features/lsp/inlay_hints*`.
 
-### M19 — Git integration
+### M19 — Git integration (SHIPPED)
 
 - `GitState` + `driver-git/` (libgit2 via `git2` crate).
 - Per-file status (untracked / modified / staged).
@@ -451,7 +472,7 @@ actions / Format / Inlay hints".
 **Goldens moved to green:** `driver_events/git/*`,
 `features/git/*`.
 
-### M20 — Lifecycle: phases, quit, suspend
+### M20 — Lifecycle: phases, quit, suspend (SHIPPED)
 
 Most of this has been glossed over so far because we quit on Ctrl-C
 with no grace. M20 brings lifecycle discipline.
@@ -470,7 +491,7 @@ with no grace. M20 brings lifecycle discipline.
 `features/lifecycle/*`, `keybindings/confirm_kill/*` (dirty-tab
 dismissal flow).
 
-### M20a — Tiered issue navigation (Alt-./Alt-,)
+### M20a — Tiered issue navigation (Alt-./Alt-,) (SHIPPED)
 
 The `NextIssue` / `PrevIssue` cycle over the issue sources that
 exist at this point (LSP diagnostics + git). PR gets added as a
@@ -518,7 +539,7 @@ gutter mark (not present in legacy).
 `actions/prev_issue`, `features/issue_nav/*` (PR-bearing
 scenarios among those land with M27).
 
-### M21 — Persistence (session + undo)
+### M21 — Persistence (session + undo) (SHIPPED)
 
 - SQLite-backed `SessionState` (`driver-session/` + `rusqlite`).
 - Primary-flock per workspace (one editor process owns a workspace
@@ -534,7 +555,7 @@ scenarios among those land with M27).
 `driver_events/workspace/*`, `features/persistence/*`,
 `smoke/external_change` (needs this milestone + M26).
 
-### M22 — Keyboard macros
+### M22 — Keyboard macros (SHIPPED)
 
 - `MacroState`: recording flag + current record + last slot.
 - `KbdMacroStart` (`ctrl+x (`) / `KbdMacroEnd` (`ctrl+x )`) /
@@ -550,7 +571,7 @@ scenarios among those land with M27).
 `actions/kbd_macro_execute`, `actions/wait`,
 `features/kbd_macro/*`.
 
-### M23 — Auto-indent, reflow, sort-imports
+### M23 — Auto-indent, reflow, sort-imports (SHIPPED)
 
 All three rely on syntax (M15) for language-aware logic.
 

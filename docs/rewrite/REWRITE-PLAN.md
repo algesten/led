@@ -5,7 +5,8 @@ How to actually carry out the rewrite from FRP → query-driven.
 Prerequisite reading: `README.md`, `QUERY-ARCH.md`, and (authoritative
 for the code organisation) `../../../drv/EXAMPLE-ARCH.md`.
 
-> **Status (2026-04-19).** Phases 0–3 are done.
+> **Status (2026-04-27).** Phases 0–3 done; Phase 4 deep into the
+> domain-by-domain port.
 >
 > - **Phase 0 (harness).** `goldens/` crate: PTY spawn via
 >   `portable-pty`, `vt100` parser, scripted fakes. Excluded from
@@ -19,12 +20,11 @@ for the code organisation) `../../../drv/EXAMPLE-ARCH.md`.
 > - **Phase 3 (skeleton).** `rewrite` branch; worktree at
 >   `../led-rewrite/`; M1 skeleton (tabs + buffer-loads + render)
 >   runs end-to-end.
->
-> **Phase 4 (domain-by-domain port) is the next ~multi-milestone
-> effort.** Progress is measured as `% goldens green` when run against
-> the rewrite binary. M1 implements a small slice — Ctrl-C / Tab /
-> Shift-Tab / first-render — so most goldens fail against it today.
-> Each milestone adds a domain and turns more green.
+> - **Phase 4 (port).** Shipped: M1–M23 + M25. Remaining: M26
+>   (file-watch + cross-instance sync) and M27 (GitHub PR). ~254 /
+>   264 goldens green single-threaded; the open failures are M26-
+>   gated (6 tests) plus a couple of pre-existing parallel-load
+>   harness flakes. Workspace + goldens clippy clean at 0 warnings.
 
 ---
 

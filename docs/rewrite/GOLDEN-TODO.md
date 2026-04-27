@@ -5,25 +5,41 @@ runs because of test-load flakiness; check individual tests with
 `cargo test --manifest-path goldens/Cargo.toml --test <name>` to
 confirm a real failure.
 
-## Current state (post-M25, 2026-04-26)
+## Current state (post-M25 + tail, 2026-04-27)
 
 | Suite          | Pass | Fail |
 |----------------|------|------|
 | actions        | 57  | 0   |
 | config_keys    | 7   | 0   |
-| driver_events  | 24  | 3   |
-| edge           | 27  | 2   |
+| driver_events  | 23  | 4   |
+| edge           | 29  | 2   |
 | features       | 24  | 2   |
 | keybindings    | 111 | 0   |
 | smoke          | 4   | 1   |
-| **Total**      | **254** | **8** |
+| **Total**      | **255** | **9** |
 
-Counts can swing ±1 per run from test-load flakiness on the
-parallel runner; the clipboard isolation flag knocked out the
-previous worst offenders (yank tests racing the system
-pasteboard). M25's grapheme walks added a small per-render
-allocation that nudged the parallel-run flake count up — single-
-threaded runs still match the table above.
+(Single-threaded `cargo test --manifest-path goldens/Cargo.toml
+--test <suite> -- --test-threads=1`. Counts can swing ±1–3 per
+parallel run from test-load flakiness; single-threaded is the
+authoritative baseline.)
+
+The 9 single-threaded failures break down as:
+
+- **M26-gated (6)** — file-watch + cross-instance sync:
+  `smoke/external_change`, `edge/external_change_while_dirty`,
+  `edge/external_delete_open_file`,
+  `driver_events/docstore/external_change`,
+  `driver_events/workspace/workspace_changed`,
+  `features/editing/type_delete_reflow`.
+- **Pre-existing harness flake (3)** — `wait_ready` exits on the
+  first PTY byte (often a raw-mode-setup byte) rather than on
+  the first painted body row, so "no script, capture initial
+  frame" scenarios race the file load: `driver_events/
+  docstore_opened`, `driver_events/syntax_buffer_parsed`,
+  `features/git_workspace_open_file`. All three pass
+  individually 70–100 % of the time. A goldens-harness fix
+  (poll for actual content rather than first byte) is the
+  proper resolution; not an M25 correctness issue.
 
 ## What's solid (recent fixes)
 

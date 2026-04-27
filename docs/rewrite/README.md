@@ -4,7 +4,7 @@
 
 `led` is being rewritten from its current **FRP (functional reactive programming)** architecture to a **query-driven** architecture (the rust-analyzer / salsa pattern, plus some extensions). These docs capture the decisions and plan so the work can continue in a fresh context without losing details.
 
-**Status (2026-04-19):** Phases 0–2 (PTY harness + ~280 goldens + narrative spec + per-driver inventory) completed on `main` and merged into `rewrite`. Phase 3 (clean-slate skeleton) also complete — Milestone 1 (tabs + buffer-loads + basic render) runs end-to-end. Phase 4 (domain-by-domain port driven by goldens) is the next ~multi-milestone effort.
+**Status (2026-04-27):** Phases 0–2 (PTY harness + ~280 goldens + narrative spec + per-driver inventory) completed on `main` and merged into `rewrite`. Phase 3 (clean-slate skeleton) also complete. Phase 4 (domain-by-domain port driven by goldens) shipped through **M25 — grapheme-aware column math**: M1 (skeleton) → M5 (keymap) → M6–M14b (chord/mark/undo/UI/nav/browser/find-file/isearch/file-search/theming) → M15 (syntax) → M16–M18 (LSP core/completions/extras) → M19 (git) → M20/M20a (lifecycle/issue-nav) → M21 (session) → M22 (macros) → M23 (auto-indent / reflow / sort-imports) → M25 (grapheme col math). Remaining: M26 (file-watch + cross-instance sync, ~6 goldens gated on it) and M27 (GitHub PR). ~254 / 264 goldens pass single-threaded; clippy clean (workspace + goldens) at 0 warnings. See [`GOLDEN-TODO.md`](GOLDEN-TODO.md) for the open-failure list.
 
 ## The decision in one paragraph
 
@@ -18,8 +18,8 @@ The current led architecture has a single `model()` function with a large combin
 4. **[MILESTONE-1.md](MILESTONE-1.md)** — the first vertical slice (tabs + file reads + render). Partly shipped; see the Status block at the top.
 5. **[MILESTONE-2-SCOPE.md](MILESTONE-2-SCOPE.md)** — short scope-bookmark for M2 (cursor + arrow-key movement + viewport scrolling). Not a design; the first task of M2 is to write the full MILESTONE-2.md.
 6. **[M1-arch.svg](M1-arch.svg)** — graphviz of the actual M1 shape (atoms, lenses, memos, drivers, the ABI boundary). [`.dot`](M1-arch.dot) and [`.png`](M1-arch.png) alongside.
-7. **[REWRITE-PLAN.md](REWRITE-PLAN.md)** — phased execution plan. Phases 0–3 done; Phase 4 (domain port against goldens) pending.
-8. **[ROADMAP.md](ROADMAP.md)** — concrete milestone schedule: M1–M5 shipped, Mα–M26 planned. Every `[Out]` bullet in a milestone doc points here. Includes golden-review discipline (don't carry legacy bugs forward).
+7. **[REWRITE-PLAN.md](REWRITE-PLAN.md)** — phased execution plan. Phases 0–3 done; Phase 4 in progress (M1–M23 + M25 shipped, M26 + M27 to go).
+8. **[ROADMAP.md](ROADMAP.md)** — concrete milestone schedule: M1–M23 + M25 shipped, M26 + M27 planned. Every `[Out]` bullet in a milestone doc points here. Includes golden-review discipline (don't carry legacy bugs forward).
 9. **[SPEC-PLAN.md](SPEC-PLAN.md)** — methodology used to produce the spec; artefacts in `docs/spec/` and `docs/extract/`.
 10. **[DRIVER-INVENTORY-PLAN.md](DRIVER-INVENTORY-PLAN.md)** — template used for per-driver docs; artefacts in `docs/drivers/`.
 11. **[GOLDENS-PLAN.md](GOLDENS-PLAN.md)** — golden-test strategy. Harness lives in `goldens/` (excluded from the workspace; black-box subprocess tests). ~280 scenarios authored.
