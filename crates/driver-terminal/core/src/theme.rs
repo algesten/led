@@ -211,14 +211,6 @@ pub struct Theme {
     /// Untracked files — browser `U` letter. Default matches
     /// legacy's `git.untracked` (x022 dark green).
     pub git_untracked: Style,
-
-    // ── GitHub PR (placeholder — M27 fills in) ─────────────
-    /// PR review comment marker. Default matches legacy's
-    /// `pr.comment` (x205 pink).
-    pub pr_comment: Style,
-    /// PR diff range marker. Default matches legacy's `pr.diff`
-    /// (x245 dim grey).
-    pub pr_diff: Style,
 }
 
 /// Per-severity styles for LSP diagnostic rendering. Defaults
@@ -245,8 +237,6 @@ impl Theme {
             Unstaged => self.git_modified,
             StagedModified | StagedNew => self.git_added,
             Untracked => self.git_untracked,
-            PrComment => self.pr_comment,
-            PrDiff => self.pr_diff,
         }
     }
 }
@@ -491,14 +481,6 @@ impl Default for Theme {
             },
             git_untracked: Style {
                 fg: Some(Color::Indexed(22)),
-                ..Style::default()
-            },
-            pr_comment: Style {
-                fg: Some(Color::Indexed(205)),
-                ..Style::default()
-            },
-            pr_diff: Style {
-                fg: Some(Color::Indexed(245)),
                 ..Style::default()
             },
         }

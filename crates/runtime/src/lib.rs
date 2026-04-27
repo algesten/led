@@ -512,8 +512,11 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
         // never installed any watches (the dispatch site below
         // is also gated on `!no_workspace`), so there's nothing
         // to react to.
-        if !no_workspace && session.init_done && fs.root.is_some() {
-            let refresh = compute_workspace_tree_refresh(file_watch, edits, fs.root.as_ref().unwrap());
+        if let Some(root) = fs.root.as_ref()
+            && !no_workspace
+            && session.init_done
+        {
+            let refresh = compute_workspace_tree_refresh(file_watch, edits, root);
             if refresh.git_scan {
                 *git_scan_pending = true;
             }
@@ -3890,7 +3893,7 @@ pub(crate) mod trace_adapter {
     pub(crate) struct LspTraceAdapter(pub Arc<dyn Trace>);
     pub(crate) struct GitTraceAdapter(pub Arc<dyn Trace>);
     pub(crate) struct SessionTraceAdapter(pub Arc<dyn Trace>);
-    pub(crate) struct FileWatchTraceAdapter(pub Arc<dyn Trace>);
+    pub(crate) struct FileWatchTraceAdapter;
 
     impl led_driver_buffers_core::Trace for FileTraceAdapter {
         fn file_load_start(&self, path: &CanonPath) {
@@ -4143,7 +4146,7 @@ impl SharedTrace {
         Arc::new(trace_adapter::GitTraceAdapter(self.inner()))
     }
     pub(crate) fn as_file_watch_trace(&self) -> Arc<dyn led_driver_file_watch_core::Trace> {
-        Arc::new(trace_adapter::FileWatchTraceAdapter(self.inner()))
+        Arc::new(trace_adapter::FileWatchTraceAdapter)
     }
     pub(crate) fn as_session_trace(&self) -> Arc<dyn led_driver_session_core::Trace> {
         Arc::new(trace_adapter::SessionTraceAdapter(self.inner()))

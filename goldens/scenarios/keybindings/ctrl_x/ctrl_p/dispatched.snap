@@ -1,2 +1,0 @@
-FsListDir	path=<TMPDIR>
-FileOpen	path=<TMPDIR>/buffer.txt create_if_missing=true

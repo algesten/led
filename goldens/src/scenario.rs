@@ -31,9 +31,6 @@ pub struct Setup {
     /// `--test-lsp-server <fake-lsp-path>`.
     #[serde(default)]
     pub fake_lsp: Option<toml::Value>,
-    /// Inline TOML representation of `.fake-gh.json`.
-    #[serde(default)]
-    pub fake_gh: Option<toml::Value>,
     /// User-config files to seed in the isolated config dir before led
     /// starts. Lets axis-4 (per-config-key) goldens override defaults.
     /// NOTE: led replaces defaults wholesale (no merge), so a custom
@@ -183,9 +180,6 @@ pub fn run(scenario_dir: &Path) {
     }
     if let Some(v) = &setup.fake_lsp {
         builder = builder.with_fake_lsp_json(toml_to_json(v));
-    }
-    if let Some(v) = &setup.fake_gh {
-        builder = builder.with_fake_gh_json(toml_to_json(v));
     }
     if let Some(s) = &setup.config.keys {
         builder = builder.with_config_keys(s.clone());

@@ -112,27 +112,6 @@ fn git_file_statuses() {
 // command `git-cmd <args...>` is flagged in the inventory as the
 // unblocker.
 
-// === gh_pr ===
-
-#[test]
-fn gh_pr_pr_loaded() {
-    run_scenario(&scenario_dir("driver_events/gh_pr/pr_loaded"));
-}
-
-#[test]
-fn gh_pr_no_pr() {
-    run_scenario(&scenario_dir("driver_events/gh_pr/no_pr"));
-}
-
-// SKIP gh_pr_pr_unchanged — needs fake-gh extension: fake-gh lacks
-// If-None-Match handling and a generic `api` subcommand, so 304 path
-// never fires.
-// SKIP gh_pr_gh_unavailable — needs new mechanism: runner always
-// supplies --test-gh-binary pointing at fake-gh. Needs a
-// `gh_binary_override = "/nonexistent"` setup flag.
-// SKIP gh_pr_pr_errored — flagged "needs fake-gh extension" in the
-// inventory.
-
 // === file_search ===
 
 #[test]

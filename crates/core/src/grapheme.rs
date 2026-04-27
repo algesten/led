@@ -161,14 +161,9 @@ pub fn display_col_to_grapheme(line: RopeSlice<'_>, cells: usize) -> usize {
 pub fn grapheme_col_to_utf16_units(line: RopeSlice<'_>, grapheme_col: usize) -> u32 {
     let s = line_content(line);
     let mut units = 0u32;
-    let mut chars_taken = 0usize;
     let target_chars = grapheme_col_to_char(line, grapheme_col);
-    for c in s.chars() {
-        if chars_taken >= target_chars {
-            break;
-        }
+    for c in s.chars().take(target_chars) {
         units += if (c as u32) < 0x10000 { 1 } else { 2 };
-        chars_taken += 1;
     }
     units
 }

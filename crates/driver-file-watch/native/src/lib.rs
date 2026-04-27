@@ -173,13 +173,12 @@ fn handle_cmd(
         } => {
             // Idempotent: if already registered with the same
             // shape, no-op.
-            if let Some(existing) = regs.get(&id) {
-                if existing.path == path
-                    && existing.recursive == recursive
-                    && existing.debounce_ms == debounce_ms
-                {
-                    return;
-                }
+            if let Some(existing) = regs.get(&id)
+                && existing.path == path
+                && existing.recursive == recursive
+                && existing.debounce_ms == debounce_ms
+            {
+                return;
             }
             // Lazy notify::Watcher construction: skip the
             // FSEvents / inotify init until the runtime actually
@@ -240,12 +239,11 @@ fn handle_cmd(
             regs.insert(id, info);
         }
         FileWatchCmd::Unwatch { id } => {
-            if let Some(info) = regs.remove(&id) {
-                if info.watching
-                    && let Some(w) = watcher.as_mut()
-                {
-                    let _ = w.unwatch(info.path.as_path());
-                }
+            if let Some(info) = regs.remove(&id)
+                && info.watching
+                && let Some(w) = watcher.as_mut()
+            {
+                let _ = w.unwatch(info.path.as_path());
             }
         }
     }

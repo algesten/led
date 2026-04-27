@@ -1,3 +1,0 @@
-FsListDir	path=<TMPDIR>
-FileOpen	path=<TMPDIR>/a.txt create_if_missing=true
-GitScan	root=<TMPDIR>

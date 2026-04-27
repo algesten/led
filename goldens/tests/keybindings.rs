@@ -275,10 +275,6 @@ fn ctrl_x_rparen() {
 fn ctrl_x_e() {
     run_scenario(&scenario_dir("keybindings/ctrl_x/e"));
 }
-#[test]
-fn ctrl_x_ctrl_p() {
-    run_scenario(&scenario_dir("keybindings/ctrl_x/ctrl_p"));
-}
 // Ctrl-x 0..9 (count accumulators) — skipped; covered by macro execute.
 
 // === ctrl_h prefix ===

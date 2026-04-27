@@ -37,14 +37,11 @@ struct Cli {
     theme: Option<PathBuf>,
 
     // The goldens runner always passes these; parse-and-ignore so it
-    // doesn't trip on unknown-flag errors. Each wires up in its own
-    // later milestone (see docs/rewrite/ROADMAP.md).
+    // doesn't trip on unknown-flag errors.
     #[arg(long, hide = true)]
     test_clock: Option<PathBuf>,
     #[arg(long, hide = true)]
     test_lsp_server: Option<PathBuf>,
-    #[arg(long, hide = true)]
-    test_gh_binary: Option<PathBuf>,
     /// Replace the system clipboard with a per-process in-memory
     /// cell. Used by the goldens harness so parallel tests don't
     /// trample each other through the OS pasteboard.
@@ -54,7 +51,6 @@ struct Cli {
     /// Skip workspace root detection; treat the process's CWD as the
     /// only directory relevant to this session. Used by the goldens
     /// harness when a scenario only cares about individual files.
-    /// Currently parse-only — workspace scope lands in M11 / M21.
     #[arg(long, hide = true)]
     no_workspace: bool,
 }

@@ -2,15 +2,10 @@
 //!
 //! Used by:
 //! - Alt-./Alt-, NextIssue navigation (via [`IssueCategory::NAV_LEVELS`] +
-//!   [`IssueCategory::at_level`]) — lands in M20a once git+PR are present.
+//!   [`IssueCategory::at_level`]).
 //! - File browser coloring / letters (`CategoryInfo::browser_letter`).
 //! - Editor gutter line coloring.
 //! - Cross-pane display of the winning category via [`resolve_display`].
-//!
-//! Ported from legacy `/Users/martin/dev/led/crates/core/src/issue.rs`. The
-//! enum shape, precedence, letters, nav levels, and aggregation semantics
-//! match legacy **verbatim**, so ported paint/nav behaviour lines up cell-
-//! for-cell with the main branch binary.
 //!
 //! Adding a variant requires updating [`IssueCategory::info`],
 //! [`IssueCategory::precedence`], and [`IssueCategory::at_level`] — the
@@ -21,10 +16,6 @@ use imbl::{HashMap as ImblHashMap, HashSet as ImblHashSet};
 use crate::CanonPath;
 
 /// The single canonical category enum.
-///
-/// Only `LspError` / `LspWarning` are populated today (M16 scope); git and
-/// PR variants are plumbed so the browser painter, category resolver, and
-/// nav-level machinery are ready when those milestones land (M19 + M27).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum IssueCategory {
     /// LSP error diagnostic.
@@ -39,10 +30,6 @@ pub enum IssueCategory {
     StagedNew,
     /// File is unknown to git.
     Untracked,
-    /// PR review comment on a line.
-    PrComment,
-    /// Line is part of the PR diff.
-    PrDiff,
 }
 
 /// Static per-category metadata. The `theme_key` is kept as a `&'static str`
@@ -103,18 +90,6 @@ impl IssueCategory {
                 nav_level: None,
                 label: "Untracked",
             },
-            PrComment => CategoryInfo {
-                theme_key: "pr.comment",
-                browser_letter: None,
-                nav_level: Some(5),
-                label: "Comment",
-            },
-            PrDiff => CategoryInfo {
-                theme_key: "pr.diff",
-                browser_letter: None,
-                nav_level: Some(5),
-                label: "PR diff",
-            },
         }
     }
 
@@ -125,22 +100,21 @@ impl IssueCategory {
             2 => &[IssueCategory::LspWarning],
             3 => &[IssueCategory::Unstaged],
             4 => &[IssueCategory::StagedModified, IssueCategory::StagedNew],
-            5 => &[IssueCategory::PrComment, IssueCategory::PrDiff],
             _ => &[],
         }
     }
 
     /// All defined nav levels in order.
-    pub const NAV_LEVELS: &'static [u8] = &[1, 2, 3, 4, 5];
+    pub const NAV_LEVELS: &'static [u8] = &[1, 2, 3, 4];
 
     /// Priority for tie-breaking when multiple categories apply to the same
     /// file or line. Lower number = higher precedence (wins both letter +
     /// colour).
     ///
     /// Order (highest precedence first): `LspError` > `LspWarning` >
-    /// `Unstaged` > `StagedNew` > `StagedModified` > `Untracked` >
-    /// `PrComment` > `PrDiff`. `Unstaged` outranks the staged variants
-    /// because it's the most recent / loudest action item.
+    /// `Unstaged` > `StagedNew` > `StagedModified` > `Untracked`. `Unstaged`
+    /// outranks the staged variants because it's the most recent / loudest
+    /// action item.
     pub const fn precedence(self) -> u8 {
         use IssueCategory::*;
         match self {
@@ -150,8 +124,6 @@ impl IssueCategory {
             StagedNew => 3,
             StagedModified => 4,
             Untracked => 5,
-            PrComment => 6,
-            PrDiff => 7,
         }
     }
 }
@@ -207,14 +179,12 @@ mod tests {
     }
 
     #[test]
-    fn precedence_ordering_matches_legacy_exactly() {
+    fn precedence_ordering() {
         assert!(IssueCategory::LspError.precedence() < IssueCategory::LspWarning.precedence());
         assert!(IssueCategory::LspWarning.precedence() < IssueCategory::Unstaged.precedence());
         assert!(IssueCategory::Unstaged.precedence() < IssueCategory::StagedNew.precedence());
         assert!(IssueCategory::StagedNew.precedence() < IssueCategory::StagedModified.precedence());
         assert!(IssueCategory::StagedModified.precedence() < IssueCategory::Untracked.precedence());
-        assert!(IssueCategory::Untracked.precedence() < IssueCategory::PrComment.precedence());
-        assert!(IssueCategory::PrComment.precedence() < IssueCategory::PrDiff.precedence());
     }
 
     #[test]

@@ -2249,15 +2249,12 @@ pub fn find_file_action<'f>(
     state.pending_find_file_list.clone()
 }
 
-/// Per-file category set for the whole workspace. Mirrors legacy
-/// `led_state::annotations::file_categories_map` and feeds the
-/// browser painter + (later) the Alt-./ nav cycle.
+/// Per-file category set for the whole workspace. Feeds the
+/// browser painter + the Alt-./ nav cycle.
 ///
-/// **M19 scope:** LSP Error / Warning, plus git file-level
-/// categories (Unstaged, StagedModified, StagedNew, Untracked).
-/// Info / Hint are filtered out per legacy — they never colour
-/// the browser. PR membership (PrComment / PrDiff) joins via the
-/// same `IssueCategory` pipeline at M27.
+/// LSP Error / Warning, plus git file-level categories (Unstaged,
+/// StagedModified, StagedNew, Untracked). Info / Hint are filtered
+/// out — they never colour the browser.
 #[drv::memo(single)]
 pub fn file_categories_map<'d>(
     diagnostics: DiagnosticsStatesInput<'d>,

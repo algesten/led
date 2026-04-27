@@ -215,6 +215,8 @@ mod tests {
 
     #[test]
     fn activate_no_mark_uses_cursor_collapsed_range() {
+        // Cursor at col=2 on a 1-grapheme line ("b") — UTF-16
+        // conversion clamps to the line length (1).
         let (tabs, edits) = seed_tab(
             Cursor {
                 line: 1,
@@ -229,9 +231,9 @@ mod tests {
         assert_eq!(lsp_pending.pending_code_action.len(), 1);
         let req = &lsp_pending.pending_code_action[0];
         assert_eq!(req.start_line, 1);
-        assert_eq!(req.start_col, 2);
+        assert_eq!(req.start_col, 1);
         assert_eq!(req.end_line, 1);
-        assert_eq!(req.end_col, 2);
+        assert_eq!(req.end_col, 1);
     }
 
     #[test]

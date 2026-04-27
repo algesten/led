@@ -3,9 +3,9 @@
 A lightweight, fast text editor for the terminal, written in Rust.
 
 > [!WARNING]
-> **Vibe coded.** This project is an experiment in getting an AI assistant to follow Functional Reactive Programming (FRP) principles and produce reasonable code within that discipline. I've focused on the overall architecture rather than reviewing the code output in detail. For projects I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and [str0m](https://github.com/algesten/str0m).
+> **Vibe coded.** This project is an experiment in getting an AI assistant to produce reasonable code within a strict architecture. I've focused on the overall architecture rather than reviewing the code output in detail. For projects I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and [str0m](https://github.com/algesten/str0m).
 
-led is built on a functional reactive programming (FRP) architecture where the model is a pure reducer, all side effects live in drivers, and the UI is a derived function of state. The result is a responsive editor with rich features and a small footprint.
+led is built on a query-driven architecture (the rust-analyzer / salsa pattern): driver-owned sources hold mutable state, a sync non-blocking event handler mutates them, and a memoized query layer derives views on demand. The result is a responsive editor with rich features and a small footprint.
 
 <p align="center">
   <img src="https://github.com/user-attachments/assets/11f1c8a1-3e75-4c13-8dc7-2a811cb83dac" width="900" alt="led editor — Rust file with syntax highlighting, file browser, tabs, and status bar">
@@ -288,15 +288,7 @@ In replace mode, the search input, replace input, and results form a single vert
 | `Alt+.` | Next issue    |
 | `Alt+,` | Previous issue |
 
-"Issue" navigation cycles through LSP errors and warnings, unstaged and staged git changes, and PR diff lines and review comments — in that priority order.
-
-### Git & GitHub
-
-| Key             | Action                    |
-|-----------------|---------------------------|
-| `Ctrl+x Ctrl+p` | Open PR / comment URL     |
-
-`Ctrl+x Ctrl+p` opens the current pull request in the browser. If the cursor is on a line with a PR review comment, that comment's URL is opened instead.
+"Issue" navigation cycles through LSP errors and warnings, then unstaged and staged git changes — in that priority order.
 
 ### Jump List
 
@@ -329,18 +321,14 @@ In replace mode, the search input, replace input, and results form a single vert
 
 ## Architecture
 
-led follows a strict FRP cycle:
+led follows a query-driven architecture (the rust-analyzer / salsa pattern):
 
-```
-State → Derived → Drivers → Model → State
-```
+- **Sources** — driver-owned plain structs holding mutable state (`Tabs`, `BufferStore`, `LspState`, `GitState`, …). Each driver owns its own source and never touches another's.
+- **Sync handler** — a non-blocking event loop that mutates sources on each tick. No async in the dispatch path.
+- **Query layer** — memoized derived views built on top of [`drv`](https://crates.io/crates/drv). Cross-source composition lives in the `runtime` crate; idle ticks are zero-allocation cache hits.
+- **Drivers** — split into `core/` (portable sync API + ABI types) and `native/` (platform async worker, `std::thread` + `std::sync::mpsc`). The mpsc between them is the test mock point.
 
-- **State** — a single immutable `AppState` containing all editor state
-- **Derived** — pure transforms from state into driver commands (no business logic)
-- **Drivers** — handle side effects: terminal I/O, file system, LSP, git, syntax parsing, clipboard, timers, session persistence
-- **Model** — a pure reducer `(State, Mutation) → State` composed from combinator chains
-
-The codebase is organized as a Cargo workspace with 15 crates — each driver (LSP, git, syntax, file search, clipboard, etc.) is its own crate with a clean boundary.
+Side effects (terminal I/O, file system, LSP, git, syntax parsing, clipboard, session persistence, file watching) live in their own driver crates with strict isolation enforced by `Cargo.toml`. Black-box PTY golden tests in `goldens/` exercise the compiled binary against ~260 scripted scenarios.
 
 ## License
 

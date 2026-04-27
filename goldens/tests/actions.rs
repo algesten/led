@@ -302,11 +302,6 @@ fn open_selected() {
 // but no handler).
 
 #[test]
-fn open_pr_url() {
-    run_scenario(&scenario_dir("actions/open_pr_url"));
-}
-
-#[test]
 fn abort() {
     run_scenario(&scenario_dir("actions/abort"));
 }

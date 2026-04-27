@@ -22,11 +22,10 @@ pub use scenario::run as run_scenario;
 pub struct Binaries {
     pub led: PathBuf,
     pub fake_lsp: PathBuf,
-    pub fake_gh: PathBuf,
 }
 
 /// Build led + the fake binaries on first use; cache for the test process
-/// lifetime. One cargo invocation builds all three (cheap when up-to-date).
+/// lifetime. One cargo invocation builds both (cheap when up-to-date).
 fn binaries() -> &'static Binaries {
     static BINS: OnceLock<Binaries> = OnceLock::new();
     BINS.get_or_init(|| {
@@ -34,7 +33,7 @@ fn binaries() -> &'static Binaries {
             .parent()
             .expect("goldens crate has parent dir");
         let status = Command::new("cargo")
-            .args(["build", "-p", "led", "-p", "fake-lsp", "-p", "fake-gh"])
+            .args(["build", "-p", "led", "-p", "fake-lsp"])
             .current_dir(workspace_root)
             .status()
             .expect("invoke cargo build");
@@ -43,13 +42,8 @@ fn binaries() -> &'static Binaries {
         let bins = Binaries {
             led: target.join("led"),
             fake_lsp: target.join("fake-lsp"),
-            fake_gh: target.join("fake-gh"),
         };
-        for (name, p) in [
-            ("led", &bins.led),
-            ("fake-lsp", &bins.fake_lsp),
-            ("fake-gh", &bins.fake_gh),
-        ] {
+        for (name, p) in [("led", &bins.led), ("fake-lsp", &bins.fake_lsp)] {
             assert!(p.exists(), "{name} binary not found at {}", p.display());
         }
         bins
@@ -62,7 +56,6 @@ pub struct GoldenRunnerBuilder {
     no_workspace: bool,
     git_init: bool,
     fake_lsp_json: Option<String>,
-    fake_gh_json: Option<String>,
     config_keys: Option<String>,
     config_theme: Option<String>,
 }
@@ -75,7 +68,6 @@ impl GoldenRunnerBuilder {
             no_workspace: false,
             git_init: false,
             fake_lsp_json: None,
-            fake_gh_json: None,
             config_keys: None,
             config_theme: None,
         }
@@ -107,13 +99,6 @@ impl GoldenRunnerBuilder {
     /// When set, led runs with `--test-lsp-server <fake-lsp-binary>`.
     pub fn with_fake_lsp_json(mut self, json: String) -> Self {
         self.fake_lsp_json = Some(json);
-        self
-    }
-
-    /// JSON content for `.fake-gh.json` (the fake gh CLI's config).
-    /// When set, led runs with `--test-gh-binary <fake-gh-binary>`.
-    pub fn with_fake_gh_json(mut self, json: String) -> Self {
-        self.fake_gh_json = Some(json);
         self
     }
 
@@ -156,15 +141,12 @@ impl GoldenRunnerBuilder {
         let theme_payload: &str = self.config_theme.as_deref().unwrap_or("");
         std::fs::write(config_dir.join("theme.toml"), theme_payload)
             .expect("write theme.toml");
-        // Always seed fake-lsp / fake-gh configs (even if empty) so the
-        // real rust-analyzer / gh CLI on the host can never accidentally
-        // attach to a workspace scenario. Determinism > convenience.
+        // Always seed the fake-lsp config (even if empty) so the real
+        // rust-analyzer on the host can never accidentally attach to a
+        // workspace scenario. Determinism > convenience.
         let lsp_json = self.fake_lsp_json.as_deref().unwrap_or("{}");
         std::fs::write(workspace_dir.join(".fake-lsp.json"), lsp_json)
             .expect("write .fake-lsp.json");
-        let gh_json = self.fake_gh_json.as_deref().unwrap_or("{}");
-        std::fs::write(workspace_dir.join(".fake-gh.json"), gh_json)
-            .expect("write .fake-gh.json");
 
         // Trace file lives OUTSIDE the workspace dir so the file browser
         // doesn't show it as a workspace file.
@@ -201,12 +183,10 @@ impl GoldenRunnerBuilder {
         if self.no_workspace {
             cmd.arg("--no-workspace");
         }
-        // Always pass the fake binaries (configs are seeded above) — see
+        // Always pass the fake binary (config is seeded above) — see
         // the comment there.
         cmd.arg("--test-lsp-server");
         cmd.arg(bins.fake_lsp.as_os_str());
-        cmd.arg("--test-gh-binary");
-        cmd.arg(bins.fake_gh.as_os_str());
         // Hermetic clipboard: each spawned `led` keeps its yank /
         // kill-ring state in-process instead of touching the OS
         // pasteboard, so parallel goldens don't trample each
@@ -508,12 +488,11 @@ pub fn normalize_paths(s: &str, tmpdir: &Path) -> String {
     }
     out = out.replace(&raw_tmp, "<TMPDIR>");
     // Per-machine binary paths leak into snapshots when the
-    // editor renders the fake LSP / fake GH process names in its
-    // status line. Replace with stable placeholders so the goldens
+    // editor renders the fake LSP process name in its status
+    // line. Replace with a stable placeholder so the goldens
     // are portable across checkouts.
     let bins = binaries();
     out = out.replace(&bins.fake_lsp.to_string_lossy().to_string(), "<FAKE-LSP>");
-    out = out.replace(&bins.fake_gh.to_string_lossy().to_string(), "<FAKE-GH>");
     // Collapse runs of 2+ spaces on lines containing these
     // placeholders. The placeholder rendering rides on a status
     // line that pads with spaces to right-align an `L<r>:C<c>`
@@ -531,7 +510,7 @@ fn collapse_padding_on_placeholder_lines(s: &str) -> String {
             Some(b) => (b, "\n"),
             None => (line, ""),
         };
-        if body.contains("<FAKE-LSP>") || body.contains("<FAKE-GH>") {
+        if body.contains("<FAKE-LSP>") {
             let mut prev_space = false;
             for ch in body.chars() {
                 if ch == ' ' {
@@ -560,7 +539,6 @@ pub fn normalize_trace(raw: &str, tmpdir: &Path) -> String {
         .map(|p| p.to_string_lossy().to_string());
     let bins = binaries();
     let fake_lsp = bins.fake_lsp.to_string_lossy().to_string();
-    let fake_gh = bins.fake_gh.to_string_lossy().to_string();
     let mut out = String::new();
     for line in raw.lines() {
         let mut s = line.to_string();
@@ -569,7 +547,6 @@ pub fn normalize_trace(raw: &str, tmpdir: &Path) -> String {
         }
         s = s.replace(&raw_tmp, "<TMPDIR>");
         s = s.replace(&fake_lsp, "<FAKE-LSP>");
-        s = s.replace(&fake_gh, "<FAKE-GH>");
         // Drop wall-clock timestamp prefix `t=NNNms\t` for now. Re-add
         // when --test-clock is in place.
         if let Some(rest) = s.strip_prefix("t=")

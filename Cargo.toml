@@ -45,13 +45,12 @@ members = [
     "crates/runtime",
     "crates/text-reflow",
     "crates/fake-lsp",
-    "crates/fake-gh",
     "led",
 ]
 exclude = ["goldens"]
 
 [workspace.dependencies]
-# Internal crates (per docs/rewrite/MILESTONE-1.md § "Crate layout").
+# Internal crates.
 led-core = { path = "crates/core" }
 led-state-tabs = { path = "crates/state-tabs" }
 led-state-buffer-edits = { path = "crates/state-buffer-edits" }
@@ -100,8 +99,7 @@ led-text-reflow = { path = "crates/text-reflow" }
 drv = { version = "0.4.2", features = ["imbl"] }
 imbl = "7"
 
-# External dependencies carried over from the legacy workspace.
-# Trim or update as the rewrite actually uses them.
+# External dependencies.
 arboard = { version = "3", default-features = false }
 clap = { version = "4.5.60", features = ["derive"] }
 crossterm = { version = "0.29" }
