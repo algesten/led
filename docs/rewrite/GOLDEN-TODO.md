@@ -377,12 +377,13 @@ The remaining failure:
   same fix that unblocks the three other harness-flake
   tests below.
 
-LSP `workspace/didChangeWatchedFiles` is a separate orphan
-(M26-followup): the runtime infrastructure to fan
-`FileWatchEvent`s out as `LspCmd::DidChangeWatchedFiles` is
-designed but not wired. None of the M26-gated goldens
-exercise this; tracked under the `lsp_did_change_watched_files`
-follow-up.
+LSP `workspace/didChangeWatchedFiles` shipped alongside the
+M26 core. The runtime's `compute_lsp_watched_file_notifications`
+helper fans matching `FileWatchEvent`s out as per-server
+`LspCmd::DidChangeWatchedFiles`. Coverage:
+`features/lsp/did_change_watched_files` (server registers
+`**/*.toml`, harness writes a Cargo.toml, trace asserts one
+`LspDidChangeWatchedFiles`).
 
 The goldens harness already supports `fs_write` and
 `fs_delete` script commands
@@ -508,12 +509,13 @@ following M22:
    `GhPrState` + `driver-gh-pr/`, ETag-driven polling, PR
    comments alongside git gutter, fourth tier on the M20a
    `IssueCategory::NAV_LEVELS` issue-nav cycle.
-3. **LSP `workspace/didChangeWatchedFiles`** — M26-followup.
-   Wire the LSP manager to parse `client/registerCapability`
-   payloads via `globset` and the runtime to fan matching
-   `FileWatchEvent`s out as `LspCmd::DidChangeWatchedFiles`.
-   Closes the rust-analyzer-goes-stale-on-`Cargo.toml`-edit
-   gap. No M26 golden exercises this; needs a new scenario.
+3. ~~**LSP `workspace/didChangeWatchedFiles`** — M26-followup.~~
+   Shipped alongside M26. `client/registerCapability` payloads
+   are parsed via `globset`, the runtime memo
+   `compute_lsp_watched_file_notifications` fans matching
+   `FileWatchEvent`s out as `LspCmd::DidChangeWatchedFiles`,
+   and `features/lsp/did_change_watched_files` covers the
+   end-to-end path.
 
 ## Don't refresh blindly
 

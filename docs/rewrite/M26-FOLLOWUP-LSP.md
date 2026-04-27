@@ -1,32 +1,35 @@
 # M26 follow-up — LSP `workspace/didChangeWatchedFiles`
 
-Hand-off doc for the deferred half of M26. M26 itself shipped
-2026-04-27 with all six core goldens green-able; this
-follow-up wires LSP servers' dynamic file-watch registrations
-through the new `driver-file-watch` infrastructure so
+> **Status (2026-04-27): SHIPPED.** Originally deferred when M26
+> shipped its file-watch + cross-instance sync core; landed in
+> the same commit window once the substrate stabilised. This
+> doc has been refactored from "what to build" into a record of
+> what's wired and where, for future readers tracing the LSP
+> fan-out path.
+
+This piece wires LSP servers' dynamic file-watch registrations
+through the `driver-file-watch` infrastructure so
 rust-analyzer (and other servers that rely on
-`workspace/didChangeWatchedFiles`) stop going stale when
-project files are edited outside led.
+`workspace/didChangeWatchedFiles`) stay current when project
+files are edited outside led — closes the
+rust-analyzer-goes-stale gap from `lsp-patterns.md` §7.2.
 
-The full design is already written; this doc tells a fresh
-agent **what's done, what isn't, and where to start**.
-
-## Why deferred
+## Why it shipped late
 
 None of the six M26-gated goldens exercise this path. Shipping
-M26 without it left zero green-able goldens red, so it slid
-out of scope to keep the M26 PR focused. The gap remains
-real: rust-analyzer doesn't see `Cargo.toml` edits made by
-`cargo add` from a sibling shell.
+the M26 core without it left zero green-able goldens red, so
+it slid out of the initial M26 cut to keep that PR focused.
+The gap was real (rust-analyzer didn't see `Cargo.toml` edits
+made by `cargo add` from a sibling shell) so the work landed
+right after.
 
 Tracked in:
 
 - `ROADMAP.md` § "Orphan items worth a concrete home" —
-  named entry pointing at this doc.
+  the named entry now points at this as-shipped doc.
 - `MILESTONE-26.md` § In, "LSP `workspace/didChangeWatchedFiles`"
-  block — design lives there, prefixed with a "DEFERRED"
-  marker pointing back here.
-- `lsp-patterns.md` §7.2 — the original gap report.
+  block — design lives there, prefixed with a "SHIPPED" marker.
+- `lsp-patterns.md` §7.2 — the original gap report (now closed).
 
 ## What's already shipped
 
@@ -37,10 +40,12 @@ The substrate this follow-up plugs into:
   change under the workspace root (id `WATCHER_ID_ROOT`,
   recursive). Globbing happens runtime-side, against the LSP
   server's registered glob set.
-- `driver-lsp/native/classify.rs:159` — already routes
-  `client/registerCapability` as a notification with
+- `driver-lsp/native/classify.rs:159` — routes
+  `client/registerCapability` (and now also
+  `client/unregisterCapability`) as a notification with
   `forward_as_notification: true` and auto-replies `null`. The
-  payload is currently dropped on the floor.
+  payload is parsed by `handle_server_request` (see "How it's
+  wired" below).
 - `lsp_pending` outbox pattern — every other LSP request /
   notification (init, didOpen, didChange, didSave,
   pull-diagnostic, completion, …) is dispatched the same way:
@@ -50,9 +55,9 @@ The substrate this follow-up plugs into:
   `imbl::HashMap<WatcherId, Vector<FileWatchEvent>>`. Cleared
   at end of each execute phase.
 
-## What's missing
+## How it's wired
 
-In dependency order, the four things that need to land:
+In dependency order, the four pieces that landed:
 
 ### 1. `state-lsp::LspWatchedGlobs` source
 

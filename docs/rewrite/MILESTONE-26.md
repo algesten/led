@@ -1,14 +1,14 @@
 # Milestone 26 — File-watch + cross-instance sync
 
-> **Status (2026-04-27): SHIPPED, with one follow-up.**
+> **Status (2026-04-27): SHIPPED, including the LSP follow-up.**
 > Five of the six M26-gated goldens are green; the sixth
 > (`edge/external_change_while_dirty`) fails on a pre-existing
 > harness `wait_ready` race independent of M26 (verified by
 > stashing). The LSP `workspace/didChangeWatchedFiles` fan-out
-> was **deferred** at ship time and lives as a documented
-> follow-up at [`M26-FOLLOWUP-LSP.md`](M26-FOLLOWUP-LSP.md).
-> The design below remains the authoritative blueprint for
-> both shipped and deferred halves.
+> was originally deferred at ship time and landed in the same
+> commit window — see [`M26-FOLLOWUP-LSP.md`](M26-FOLLOWUP-LSP.md)
+> for the as-shipped breakdown of that piece. The design below
+> remains the authoritative blueprint.
 
 After M26, led notices when files on disk change underneath
 it: external edits to an open buffer reload silently when the
@@ -795,20 +795,21 @@ moves.
   `apply_undo_chain` helper in `runtime/src/lib.rs`; same
   shape, walking each group's `EditOp` against the rope.
 
-- **LSP `workspace/didChangeWatchedFiles`** — **DEFERRED at
-  ship time, 2026-04-27** to a follow-up. None of the six
-  M26-gated goldens exercise this path, so shipping the
-  file-watch + cross-instance sync core without it doesn't
-  leave any green-able golden red. The full hand-off
-  (concrete next-steps + entry points) lives at
-  [`M26-FOLLOWUP-LSP.md`](M26-FOLLOWUP-LSP.md). The design
-  below stays as the authoritative blueprint for that
-  follow-up — when picked up, implement against this spec.
+- **LSP `workspace/didChangeWatchedFiles`** — **SHIPPED
+  alongside the M26 core, 2026-04-27.** Originally deferred
+  at ship time because none of the six M26-gated goldens
+  exercise the path; landed in the same commit window once
+  the file-watch substrate stabilised. The
+  [`M26-FOLLOWUP-LSP.md`](M26-FOLLOWUP-LSP.md) breakdown
+  reflects the as-shipped wiring; the design below remains
+  the authoritative spec.
 
-  Registration payload lands on `state-lsp`'s new
+  Registration payload lands on `state-lsp`'s
   `LspWatchedGlobs` source; the runtime's
-  `lsp_watched_file_notifications` memo (above) computes the
-  per-tick fan-out.
+  `compute_lsp_watched_file_notifications` helper (above)
+  computes the per-tick fan-out. New scenario
+  `goldens/scenarios/features/lsp/did_change_watched_files`
+  exercises the end-to-end path.
 
   - **`driver-lsp/native/classify.rs`** — extend the
     existing `client/registerCapability` arm. Today it

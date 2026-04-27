@@ -697,15 +697,15 @@ can either ship them properly or explicitly drop them:
   `SaveNoFormat` (M6) covers the documented intent.
 
 - **`workspace/didChangeWatchedFiles` LSP fan-out** —
-  M26-followup. M26 ships the `driver-file-watch` infrastructure
-  but does NOT wire LSP servers' dynamic file-watch
-  registrations through it. Rust-analyzer therefore goes stale
-  when `Cargo.toml` is edited outside the editor — same gap
-  documented in `lsp-patterns.md` §7.2.
-  Hand-off: [`M26-FOLLOWUP-LSP.md`](M26-FOLLOWUP-LSP.md).
-  No M26 golden exercises this; needs a new
-  `features/lsp/did_change_watched_files` scenario authored
-  on `main` first.
+  shipped alongside the M26 core. The
+  `driver-file-watch` workspace-root recursive watch feeds the
+  runtime's `compute_lsp_watched_file_notifications` helper,
+  which matches events against per-server compiled glob sets
+  registered via `client/registerCapability` and dispatches
+  per-server `LspCmd::DidChangeWatchedFiles`. Closed the
+  rust-analyzer-stale gap from `lsp-patterns.md` §7.2.
+  As-shipped record: [`M26-FOLLOWUP-LSP.md`](M26-FOLLOWUP-LSP.md);
+  golden: `features/lsp/did_change_watched_files`.
 
 ---
 
