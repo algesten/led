@@ -500,28 +500,30 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
         // diff's job).
         drivers.file_watch.process(file_watch);
 
-        // M26 — apply workspace-tree-refresh effects in ingest
-        // so the query phase's `file_list_action` memo sees the
-        // cleared `fs.dir_contents` and emits fresh ListDir
-        // cmds in the SAME tick. Goldens expect FsListDir
-        // before GitScan after a workspace-tree change; doing
-        // this in execute would push the FsListDir to the next
-        // tick and reverse the order.
+        // M26 — apply file-watch deltas to the cached browser
+        // listings in ingest. This must run before the rest of
+        // the file-watch fan-out (reread / sync_check / LSP
+        // didChangeWatchedFiles) so `git_scan_pending` is set
+        // in the same tick the events arrived.
+        //
+        // The delta path mutates `fs.dir_contents` directly —
+        // one entry inserted on CREATE, one removed on REMOVE,
+        // entire subtree dropped when a cached dir disappears.
+        // Events under non-cached parents (collapsed dirs like
+        // `target/`) cost zero stats. See
+        // `apply_workspace_tree_delta` for the full filter rules
+        // and rationale.
         //
         // Skipped in `--no-workspace` mode: standalone runs
         // never installed any watches (the dispatch site below
         // is also gated on `!no_workspace`), so there's nothing
         // to react to.
-        if let Some(root) = fs.root.as_ref()
+        if let Some(_root) = fs.root.as_ref()
             && !no_workspace
             && session.init_done
         {
-            let refresh = compute_workspace_tree_refresh(file_watch, edits, root);
-            if refresh.git_scan {
+            if apply_workspace_tree_delta(file_watch, edits, fs) {
                 *git_scan_pending = true;
-            }
-            if refresh.refresh_listings {
-                fs.dir_contents.clear();
             }
             // Dispatch reread / sync_check here too — same
             // rationale: keeps "what fired in tick T because of
@@ -3005,57 +3007,212 @@ fn kind_priority(k: led_driver_lsp_core::FileEventKind) -> u8 {
     }
 }
 
-/// Workspace-tree refresh signal: any CREATED or REMOVED on the
-/// root recursive watch flags a git rescan and a sidebar refresh.
-struct WorkspaceTreeRefresh {
-    git_scan: bool,
-    refresh_listings: bool,
-}
-
-fn compute_workspace_tree_refresh(
+/// Walk the root-recursive watcher's recent events and apply
+/// per-event deltas to `fs.dir_contents` directly. Returns
+/// `true` if any event signalled an external git command
+/// (`.git/index|HEAD|refs/*`) and a git rescan should run.
+///
+/// # Why a delta, not a full clear+relist
+///
+/// The first cut of this code did `fs.dir_contents.clear()` on
+/// every burst, then leaned on the `file_list_action` memo to
+/// re-issue `ListDir` for every visible directory. That has
+/// two problems for real projects:
+///
+/// 1. **Flicker.** Every event blanked the sidebar between
+///    clear and the round-trip to fs-list.
+/// 2. **Scale.** A burst of N events relisted every visible
+///    directory, even those untouched by the burst — so a
+///    cargo `target/` build with the workspace root expanded
+///    re-scanned the entire root + every expanded subdir per
+///    debounce window. Doesn't fly for repos with thousands
+///    of files.
+///
+/// The delta apply only touches the cached parent vector for
+/// each event — O(1) work per CREATE/REMOVE. Events whose
+/// parent dir isn't cached (e.g. anything under `target/` when
+/// `target/` is collapsed) cost nothing.
+///
+/// # Filter rules
+///
+/// - **`.git/` internal paths** are dropped before any cache
+///   work: `.git/index|HEAD|refs/*` ⇒ request a git rescan,
+///   nothing else; any other `.git/*` (objects/, locks, pack/)
+///   ⇒ ignored entirely. Without this filter FSEvents history
+///   replay alone would keep the sidebar churning at startup.
+/// - **MODIFIED-only events** never affect listings. The
+///   external-reread path consumes them separately.
+/// - **CREATED for an already-open buffer's path** is a known
+///   FSEvents quirk (Create-on-install for a file that already
+///   existed when the watch came up). Skipped — the
+///   `compute_external_reread_targets` path handles real
+///   content changes.
+/// - **Events whose parent dir isn't in `dir_contents`** are
+///   dropped: nobody is looking at that listing, so updating
+///   it would cost stats with no UI benefit.
+fn apply_workspace_tree_delta(
     file_watch: &led_driver_file_watch_core::FileWatchState,
     edits: &BufferEdits,
-    _root: &CanonPath,
-) -> WorkspaceTreeRefresh {
+    fs: &mut FsTree,
+) -> bool {
     use led_driver_file_watch_core::{ChangeKinds, FileWatchEvent};
-    let mut out = WorkspaceTreeRefresh {
-        git_scan: false,
-        refresh_listings: false,
-    };
+    use led_driver_fs_list_core::DirEntry;
     let Some(queue) = file_watch.recent_events.get(&WATCHER_ID_ROOT) else {
-        return out;
+        return false;
     };
+    let mut git_scan = false;
     for ev in queue {
         let FileWatchEvent::Changed { path, kinds, .. } = ev else {
             continue;
         };
-        if !kinds.contains_any(ChangeKinds::CREATED | ChangeKinds::REMOVED) {
+
+        // `.git/` filter — see fn-doc above.
+        if is_git_internal(path) {
+            if is_git_sentinel(path) {
+                git_scan = true;
+            }
             continue;
         }
-        // Filter rule (per `docs/spec/buffers.md` § "External
-        // filesystem change" + legacy parity):
-        //
-        // - CREATED for an already-open buffer: ignore. macOS
-        //   FSEvents synthesises Create-on-install for files
-        //   that already existed when the watch came up; the
-        //   reread path handles real content changes.
-        // - REMOVED for an open buffer: keep. The sidebar
-        //   listing shifted (file disappeared); the buffer
-        //   itself stays open with stale content per legacy
-        //   (the reread path filter for REMOVED guarantees we
-        //   don't clobber the rope).
-        // - Any kind for a path NOT in open buffers: keep.
-        //   Sidebar add/remove for non-open files.
-        let is_open = edits.buffers.contains_key(path);
-        let only_created =
-            kinds.contains_any(ChangeKinds::CREATED) && !kinds.contains_any(ChangeKinds::REMOVED);
-        if is_open && only_created {
+
+        // Listings only move on CREATE / REMOVE. MODIFIED-only
+        // belongs to the reread path.
+        let created = kinds.contains_any(ChangeKinds::CREATED);
+        let removed = kinds.contains_any(ChangeKinds::REMOVED);
+        if !created && !removed {
             continue;
         }
-        out.git_scan = true;
-        out.refresh_listings = true;
+
+        let Some(parent) = path.as_path().parent() else {
+            continue;
+        };
+        let parent = led_core::UserPath::new(parent.to_path_buf()).canonicalize();
+
+        // REMOVED first, so a coalesced create+remove (rare on
+        // 0 ms debounce, but FSEvents can do it) settles to the
+        // post-create state when both bits are set.
+        if removed {
+            // Drop the entry from the parent's listing if cached.
+            if let Some(children) = fs.dir_contents.get_mut(&parent) {
+                children.retain(|e| &e.path != path);
+            }
+            // The removed path itself may have been an expanded
+            // directory whose listing we cached. Drop that key
+            // and any cached descendants — every cached entry
+            // under it is now stale.
+            invalidate_subtree(fs, path);
+        }
+
+        if created {
+            // Already-open buffer + CREATE: legacy quirk filter
+            // (`docs/spec/buffers.md` § "External filesystem
+            // change"). Skip the listing insert; the reread
+            // path handles real content changes.
+            if !removed && edits.buffers.contains_key(path) {
+                continue;
+            }
+            // Hidden filter mirrors the fs-list driver native worker.
+            let Some(name) = path.as_path().file_name() else {
+                continue;
+            };
+            let name = name.to_string_lossy().into_owned();
+            if name.starts_with('.') {
+                continue;
+            }
+            // Parent must be currently cached for the insert to
+            // matter. If the user hasn't expanded `parent`, no
+            // visible state changes — cheapest possible no-op.
+            let Some(children) = fs.dir_contents.get_mut(&parent) else {
+                continue;
+            };
+            // Dedup by path: FSEvents commonly delivers the
+            // same Create twice (once for the open, once on
+            // close), and our 0 ms debounce passes both.
+            if children.iter().any(|e| &e.path == path) {
+                continue;
+            }
+            // Stat to determine file vs directory. A failed
+            // stat means the path was created and removed
+            // before we got to it — drop the event.
+            let Some(kind) = stat_kind(path) else {
+                continue;
+            };
+            children.push_back(DirEntry {
+                name,
+                path: path.clone(),
+                kind,
+            });
+            // Sort happens at render time
+            // (`emit_children_of`), so push order doesn't
+            // matter here. Avoiding the sort on the hot path
+            // keeps a 10k-file burst at O(1) per event.
+        }
     }
-    out
+    git_scan
+}
+
+/// Drop `path` and every cached descendant from `fs.dir_contents`.
+/// Called when a path is removed: any listing we had under it is
+/// stale. Cheap because cached entries are typed `imbl::HashMap` —
+/// retain walks the keys but the values are pointer copies.
+fn invalidate_subtree(fs: &mut FsTree, root: &CanonPath) {
+    let prefix = root.as_path();
+    fs.dir_contents
+        .retain(|p, _| p != root && !p.as_path().starts_with(prefix));
+}
+
+/// Stat `path` and classify it as file or directory. Returns
+/// `None` for any I/O error or unsupported file type — caller
+/// treats those as "drop this event".
+fn stat_kind(path: &CanonPath) -> Option<led_driver_fs_list_core::DirEntryKind> {
+    use led_driver_fs_list_core::DirEntryKind;
+    let meta = std::fs::metadata(path.as_path()).ok()?;
+    if meta.is_dir() {
+        Some(DirEntryKind::Directory)
+    } else if meta.is_file() {
+        Some(DirEntryKind::File)
+    } else {
+        None
+    }
+}
+
+/// True if any component of `path` is literally `.git`.
+/// Matches every path inside a git metadata dir (the workspace
+/// root's `.git/` and any nested submodule's `.git/`).
+fn is_git_internal(path: &CanonPath) -> bool {
+    use std::path::Component;
+    path.as_path().components().any(|c| {
+        matches!(c, Component::Normal(name) if name == std::ffi::OsStr::new(".git"))
+    })
+}
+
+/// True if `path` is one of the git sentinel files whose
+/// modification means an external git command has run:
+/// `.git/index`, `.git/HEAD`, or `.git/refs/**`. Other paths
+/// under `.git/` (objects/, lock files, pack/) are suppressed
+/// entirely by the caller — they fire continuously and do not
+/// signify a user-visible state change.
+fn is_git_sentinel(path: &CanonPath) -> bool {
+    use std::path::Component;
+    let mut comps = path.as_path().components().peekable();
+    while let Some(c) = comps.next() {
+        let Component::Normal(name) = c else { continue };
+        if name != std::ffi::OsStr::new(".git") {
+            continue;
+        }
+        let Some(Component::Normal(child)) = comps.next() else {
+            return false;
+        };
+        if child == std::ffi::OsStr::new("index") || child == std::ffi::OsStr::new("HEAD") {
+            return comps.next().is_none();
+        }
+        if child == std::ffi::OsStr::new("refs") {
+            // Anything under `refs/` (heads/, tags/, remotes/, …)
+            // is a sentinel.
+            return comps.next().is_some();
+        }
+        return false;
+    }
+    false
 }
 
 /// M26 — three-branch reconcile of an external-change reread.
@@ -4963,5 +5120,263 @@ mod tests {
         );
         assert_eq!(jumps.entries.len(), 1);
         assert!(lsp_pending.latest_goto_seq.is_none());
+    }
+
+    // ── workspace_tree_delta — surgical refresh ───────────────────
+
+    fn make_event(path: &CanonPath, kinds_bits: u8) -> led_driver_file_watch_core::FileWatchEvent {
+        use led_driver_file_watch_core::{ChangeKinds, FileWatchEvent};
+        FileWatchEvent::Changed {
+            id: WATCHER_ID_ROOT,
+            path: path.clone(),
+            kinds: ChangeKinds::from_bits(kinds_bits),
+        }
+    }
+
+    fn fw_with(events: Vec<led_driver_file_watch_core::FileWatchEvent>)
+        -> led_driver_file_watch_core::FileWatchState
+    {
+        use led_driver_file_watch_core::FileWatchState;
+        let mut s = FileWatchState::default();
+        let q = s.recent_events.entry(WATCHER_ID_ROOT).or_default();
+        for e in events {
+            q.push_back(e);
+        }
+        s
+    }
+
+    /// Real-disk fixture so `stat_kind` works.
+    fn workspace_fs(root: &std::path::Path) -> FsTree {
+        let canon_root = led_core::UserPath::new(root.to_path_buf()).canonicalize();
+        let mut fs = FsTree {
+            root: Some(canon_root.clone()),
+            ..FsTree::default()
+        };
+        // Empty initial listing — caller seeds whatever entries
+        // the test cares about.
+        fs.dir_contents.insert(canon_root, imbl::Vector::new());
+        fs
+    }
+
+    #[test]
+    fn delta_suppresses_git_objects_no_listing_change() {
+        use led_driver_file_watch_core::ChangeKinds;
+        let dir = tempfile::tempdir().unwrap();
+        let mut fs = workspace_fs(dir.path());
+        let edits = BufferEdits::default();
+
+        let p = canon(dir.path().join(".git/objects/ab/cdef").to_str().unwrap());
+        let fw = fw_with(vec![make_event(&p, ChangeKinds::CREATED | ChangeKinds::REMOVED)]);
+
+        let git_scan = apply_workspace_tree_delta(&fw, &edits, &mut fs);
+        assert!(!git_scan, ".git/objects must not request a rescan");
+        // Root listing untouched.
+        let root_canon = led_core::UserPath::new(dir.path().to_path_buf()).canonicalize();
+        assert!(fs.dir_contents[&root_canon].is_empty());
+    }
+
+    #[test]
+    fn delta_git_sentinel_triggers_scan_only() {
+        use led_driver_file_watch_core::ChangeKinds;
+        let dir = tempfile::tempdir().unwrap();
+        let mut fs = workspace_fs(dir.path());
+        let edits = BufferEdits::default();
+        let root_canon = led_core::UserPath::new(dir.path().to_path_buf()).canonicalize();
+
+        let cases = [
+            ".git/index",
+            ".git/HEAD",
+            ".git/refs/heads/main",
+        ];
+        for rel in cases {
+            let p = canon(dir.path().join(rel).to_str().unwrap());
+            let fw = fw_with(vec![make_event(&p, ChangeKinds::CREATED)]);
+            let git_scan = apply_workspace_tree_delta(&fw, &edits, &mut fs);
+            assert!(git_scan, "sentinel {rel} must request a rescan");
+            assert!(
+                fs.dir_contents[&root_canon].is_empty(),
+                "sentinel {rel} must not touch root listing"
+            );
+        }
+    }
+
+    #[test]
+    fn delta_create_inserts_entry_into_cached_parent() {
+        use led_driver_file_watch_core::ChangeKinds;
+        let dir = tempfile::tempdir().unwrap();
+        let new_file = dir.path().join("hello.txt");
+        std::fs::write(&new_file, b"x").unwrap();
+        let mut fs = workspace_fs(dir.path());
+        let edits = BufferEdits::default();
+        let root_canon = led_core::UserPath::new(dir.path().to_path_buf()).canonicalize();
+        let new_canon = canon(new_file.to_str().unwrap());
+
+        let fw = fw_with(vec![make_event(&new_canon, ChangeKinds::CREATED)]);
+        let _ = apply_workspace_tree_delta(&fw, &edits, &mut fs);
+
+        let entries = &fs.dir_contents[&root_canon];
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "hello.txt");
+        assert_eq!(entries[0].path, new_canon);
+    }
+
+    #[test]
+    fn delta_create_skipped_when_parent_not_cached() {
+        // Mirrors the "thousands of cargo target/ events while
+        // target/ is collapsed" scenario: we must NOT stat or
+        // insert anything for events whose parent listing we
+        // never expanded.
+        use led_driver_file_watch_core::ChangeKinds;
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target");
+        std::fs::create_dir(&target).unwrap();
+        let buried = target.join("debug").join("foo");
+        std::fs::create_dir_all(buried.parent().unwrap()).unwrap();
+        std::fs::write(&buried, b"x").unwrap();
+
+        let mut fs = workspace_fs(dir.path());
+        // Note: target/ NOT in dir_contents — collapsed.
+        let edits = BufferEdits::default();
+        let root_canon = led_core::UserPath::new(dir.path().to_path_buf()).canonicalize();
+
+        let fw = fw_with(vec![make_event(
+            &canon(buried.to_str().unwrap()),
+            ChangeKinds::CREATED,
+        )]);
+        let _ = apply_workspace_tree_delta(&fw, &edits, &mut fs);
+
+        // Root unchanged. No magical stats happened in target/.
+        assert!(fs.dir_contents[&root_canon].is_empty());
+        let target_canon = led_core::UserPath::new(target.clone()).canonicalize();
+        assert!(!fs.dir_contents.contains_key(&target_canon));
+    }
+
+    #[test]
+    fn delta_remove_drops_entry_and_invalidates_subtree() {
+        use led_driver_file_watch_core::ChangeKinds;
+        use led_driver_fs_list_core::{DirEntry, DirEntryKind};
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("src");
+        std::fs::create_dir(&sub).unwrap();
+
+        let mut fs = workspace_fs(dir.path());
+        let root_canon = led_core::UserPath::new(dir.path().to_path_buf()).canonicalize();
+        let sub_canon = led_core::UserPath::new(sub.clone()).canonicalize();
+
+        // Seed: root contains "src", and src/ has a cached
+        // listing of one file.
+        fs.dir_contents.insert(
+            root_canon.clone(),
+            imbl::Vector::from_iter([DirEntry {
+                name: "src".into(),
+                path: sub_canon.clone(),
+                kind: DirEntryKind::Directory,
+            }]),
+        );
+        fs.dir_contents.insert(
+            sub_canon.clone(),
+            imbl::Vector::from_iter([DirEntry {
+                name: "main.rs".into(),
+                path: canon(sub.join("main.rs").to_str().unwrap()),
+                kind: DirEntryKind::File,
+            }]),
+        );
+
+        let edits = BufferEdits::default();
+        let fw = fw_with(vec![make_event(&sub_canon, ChangeKinds::REMOVED)]);
+        let _ = apply_workspace_tree_delta(&fw, &edits, &mut fs);
+
+        // src removed from root listing.
+        assert!(fs.dir_contents[&root_canon].is_empty());
+        // Cached subtree invalidated.
+        assert!(!fs.dir_contents.contains_key(&sub_canon));
+    }
+
+    #[test]
+    fn delta_create_dedup_when_event_repeats() {
+        use led_driver_file_watch_core::ChangeKinds;
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("a.txt");
+        std::fs::write(&f, b"x").unwrap();
+        let mut fs = workspace_fs(dir.path());
+        let edits = BufferEdits::default();
+        let root_canon = led_core::UserPath::new(dir.path().to_path_buf()).canonicalize();
+        let p = canon(f.to_str().unwrap());
+
+        let fw = fw_with(vec![
+            make_event(&p, ChangeKinds::CREATED),
+            make_event(&p, ChangeKinds::CREATED),
+        ]);
+        let _ = apply_workspace_tree_delta(&fw, &edits, &mut fs);
+        assert_eq!(fs.dir_contents[&root_canon].len(), 1);
+    }
+
+    #[test]
+    fn delta_create_skips_hidden_dotfile() {
+        use led_driver_file_watch_core::ChangeKinds;
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join(".secret");
+        std::fs::write(&f, b"x").unwrap();
+        let mut fs = workspace_fs(dir.path());
+        let edits = BufferEdits::default();
+        let root_canon = led_core::UserPath::new(dir.path().to_path_buf()).canonicalize();
+        let p = canon(f.to_str().unwrap());
+
+        let fw = fw_with(vec![make_event(&p, ChangeKinds::CREATED)]);
+        let _ = apply_workspace_tree_delta(&fw, &edits, &mut fs);
+        assert!(fs.dir_contents[&root_canon].is_empty());
+    }
+
+    #[test]
+    fn delta_create_failed_stat_is_dropped() {
+        // Path doesn't actually exist on disk (file deleted
+        // before we got to the stat). We must not insert a
+        // ghost entry.
+        use led_driver_file_watch_core::ChangeKinds;
+        let dir = tempfile::tempdir().unwrap();
+        let mut fs = workspace_fs(dir.path());
+        let edits = BufferEdits::default();
+        let root_canon = led_core::UserPath::new(dir.path().to_path_buf()).canonicalize();
+        let ghost = canon(dir.path().join("ghost").to_str().unwrap());
+
+        let fw = fw_with(vec![make_event(&ghost, ChangeKinds::CREATED)]);
+        let _ = apply_workspace_tree_delta(&fw, &edits, &mut fs);
+        assert!(fs.dir_contents[&root_canon].is_empty());
+    }
+
+    #[test]
+    fn delta_modified_only_event_is_dropped() {
+        use led_driver_file_watch_core::ChangeKinds;
+        let dir = tempfile::tempdir().unwrap();
+        let mut fs = workspace_fs(dir.path());
+        let edits = BufferEdits::default();
+        let root_canon = led_core::UserPath::new(dir.path().to_path_buf()).canonicalize();
+        let p = canon(dir.path().join("a.txt").to_str().unwrap());
+
+        let fw = fw_with(vec![make_event(&p, ChangeKinds::MODIFIED)]);
+        let git = apply_workspace_tree_delta(&fw, &edits, &mut fs);
+        assert!(!git);
+        assert!(fs.dir_contents[&root_canon].is_empty());
+    }
+
+    #[test]
+    fn is_git_internal_walks_components() {
+        assert!(is_git_internal(&canon("/proj/.git/objects/ab")));
+        assert!(is_git_internal(&canon("/proj/sub/.git/HEAD")));
+        assert!(!is_git_internal(&canon("/proj/src/main.rs")));
+        // A file literally named ".gitignore" is NOT inside `.git/`.
+        assert!(!is_git_internal(&canon("/proj/.gitignore")));
+    }
+
+    #[test]
+    fn is_git_sentinel_matches_index_head_refs_only() {
+        assert!(is_git_sentinel(&canon("/proj/.git/index")));
+        assert!(is_git_sentinel(&canon("/proj/.git/HEAD")));
+        assert!(is_git_sentinel(&canon("/proj/.git/refs/heads/main")));
+        assert!(is_git_sentinel(&canon("/proj/.git/refs/tags/v1")));
+        assert!(!is_git_sentinel(&canon("/proj/.git/index.lock")));
+        assert!(!is_git_sentinel(&canon("/proj/.git/objects/ab/cd")));
+        assert!(!is_git_sentinel(&canon("/proj/.git/refs"))); // refs/ itself
+        assert!(!is_git_sentinel(&canon("/proj/src/main.rs")));
     }
 }

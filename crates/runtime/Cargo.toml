@@ -76,3 +76,6 @@ unicode-segmentation = { workspace = true }
 # `driver-lsp-core` (no direct globset reference here, but the
 # dep is transitive — listed for clarity).
 globset = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
