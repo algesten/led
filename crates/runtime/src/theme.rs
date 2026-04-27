@@ -32,12 +32,39 @@ use std::path::{Path, PathBuf};
 
 use led_driver_terminal_core::{Color, Style, SyntaxTheme, Theme};
 
-/// Alias table built from `[COLORS]` in `theme.toml`. Legacy led
-/// lets each region reference named aliases via `$name`, which can
-/// chain (`$syntax_keyword` → `$x032` → `#0087d7`). Values are kept
-/// as raw strings — we resolve them recursively at lookup time so
-/// circular chains can be detected per-call.
-type Aliases = HashMap<String, String>;
+/// One named style in the `[COLORS]` table.
+///
+/// Every entry in `[COLORS]` is a [`Style`]. The bare-string form
+/// (`name = "red"` / `name = "$other"`) is shorthand for a Style
+/// with `fg` set and nothing else — i.e. `{ fg = "red" }`. The
+/// inline-table form carries full Style semantics (`bg`, `bold`,
+/// `reverse`, `underline`).
+///
+/// Field values stay raw so `$ref` references resolve recursively
+/// at lookup time and cycles can be detected per-call.
+#[derive(Clone, Debug)]
+enum StyleSpec {
+    /// `name = "value"` — fg-only Style. `value` is either a color
+    /// literal (`xNNN`, `#rgb`, named ANSI) or a `$other` reference.
+    Shorthand(String),
+    /// `name = { fg = "...", bg = "...", bold = ... }` — full Style.
+    /// `fg` / `bg` strings follow the same grammar as `Shorthand`.
+    Full {
+        fg: Option<String>,
+        bg: Option<String>,
+        bold: Option<bool>,
+        reverse: Option<bool>,
+        underline: Option<bool>,
+    },
+}
+
+/// Table of named styles built from `[COLORS]` in `theme.toml`.
+/// Each region in the rest of the theme can reference an entry via
+/// `$name`, which chains (`$syntax_keyword` → `$x032` → `#0087d7`).
+///
+/// The section is named `[COLORS]` for historical reasons — every
+/// entry is in fact a Style (see [`StyleSpec`]).
+type StyleTable = HashMap<String, StyleSpec>;
 
 /// Result of [`load_theme`]: the resolved theme plus any non-fatal
 /// parse warnings. Unknown region names / unknown color names /
@@ -136,13 +163,13 @@ fn apply_toml(
             })
         }
     };
-    let aliases = extract_aliases(root.get("COLORS"), &mut loaded.warnings);
+    let styles = extract_styles(root.get("COLORS"), &mut loaded.warnings);
 
     if let Some(syntax_value) = root.get("syntax") {
-        apply_syntax(loaded, path, syntax_value, &aliases)?;
+        apply_syntax(loaded, path, syntax_value, &styles)?;
     }
     if let Some(diag_value) = root.get("diagnostics") {
-        apply_diagnostics(loaded, path, diag_value, &aliases)?;
+        apply_diagnostics(loaded, path, diag_value, &styles)?;
     }
 
     let Some(chrome) = root.get("chrome") else {
@@ -189,7 +216,7 @@ fn apply_toml(
             style_table,
             "chrome",
             region,
-            &aliases,
+            &styles,
             &mut loaded.warnings,
         ) {
             Some(s) => s,
@@ -225,7 +252,7 @@ fn apply_syntax(
     loaded: &mut LoadedTheme,
     path: &Path,
     syntax: &toml::Value,
-    aliases: &Aliases,
+    styles: &StyleTable,
 ) -> Result<(), ThemeError> {
     let table = match syntax {
         toml::Value::Table(t) => t,
@@ -236,45 +263,58 @@ fn apply_syntax(
             });
         }
     };
-    let mut explicit_bases: HashSet<String> = HashSet::new();
-    // Pass 1: non-dotted keys. These are the authoritative
-    // assignments for each TokenKind.
+    // Two-pass write so a non-dotted entry wins over a dotted
+    // sibling that resolves to the same `TokenKind` slot.
+    //
+    // Pass 1 — authoritative assignments for non-dotted keys
+    // (`string`, `keyword`, …). Each one's resolved
+    // `TokenKind` is captured so Pass 2 can skip dotted entries
+    // that target the same slot.
+    //
+    // Pass 2 — dotted keys (`string.regex`, `text.title`, …).
+    // Both passes route through
+    // `led_state_syntax::capture_name_to_kind` — the same
+    // dispatch the syntax driver uses — so a theme entry lands
+    // in the slot the painter actually reads. Dotted captures
+    // that map to a slot already explicitly set in Pass 1 are
+    // skipped (legacy parity: `string` wins over `string.regex`).
+    let mut explicit_kinds: HashSet<led_state_syntax::TokenKind> = HashSet::new();
     for (kind, style_value) in table {
         if kind.contains('.') {
             continue;
         }
-        let Some(style) = resolve_syntax_style(kind, style_value, aliases, &mut loaded.warnings)
+        let Some(style) = resolve_syntax_style(kind, style_value, styles, &mut loaded.warnings)
         else {
             continue;
         };
         if assign_syntax_kind(&mut loaded.theme.syntax, kind, style) {
-            explicit_bases.insert(kind.clone());
+            if let Some(tk) = led_state_syntax::capture_name_to_kind(kind) {
+                explicit_kinds.insert(tk);
+            }
         } else {
             loaded
                 .warnings
                 .push(format!("[syntax] `{kind}`: unknown token kind (skipped)"));
         }
     }
-    // Pass 2: dotted keys fill in bases that weren't explicitly set
-    // above. If the user set `string` directly, don't let
-    // `string.special` clobber it.
     for (kind, style_value) in table {
         if !kind.contains('.') {
             continue;
         }
-        let base_kind = kind.split('.').next().unwrap_or(kind.as_str()).to_string();
-        if explicit_bases.contains(&base_kind) {
-            continue;
-        }
-        let Some(style) = resolve_syntax_style(kind, style_value, aliases, &mut loaded.warnings)
-        else {
-            continue;
-        };
-        if !assign_syntax_kind(&mut loaded.theme.syntax, &base_kind, style) {
+        let Some(target_kind) = led_state_syntax::capture_name_to_kind(kind) else {
             loaded
                 .warnings
                 .push(format!("[syntax] `{kind}`: unknown token kind (skipped)"));
+            continue;
+        };
+        if explicit_kinds.contains(&target_kind) {
+            continue;
         }
+        let Some(style) = resolve_syntax_style(kind, style_value, styles, &mut loaded.warnings)
+        else {
+            continue;
+        };
+        *loaded.theme.syntax.style_mut(target_kind) = style;
     }
     Ok(())
 }
@@ -286,27 +326,23 @@ fn apply_syntax(
 fn resolve_syntax_style(
     kind: &str,
     style_value: &toml::Value,
-    aliases: &Aliases,
+    styles: &StyleTable,
     warnings: &mut Vec<String>,
 ) -> Option<Style> {
     match style_value {
-        toml::Value::Table(t) => parse_style(t, "syntax", kind, aliases, warnings),
-        toml::Value::String(_) => {
-            let Some(color) = parse_color(style_value, aliases) else {
+        toml::Value::Table(t) => parse_style(t, "syntax", kind, styles, warnings),
+        toml::Value::String(s) => {
+            let Some(style) = resolve_string_to_style(s, styles, &mut HashSet::new()) else {
                 warnings.push(format!(
-                    "[syntax] `{kind}`: unknown color `{}` (skipped)",
-                    style_value.as_str().unwrap_or(""),
+                    "[syntax] `{kind}`: unknown style `{s}` (skipped)",
                 ));
                 return None;
             };
-            Some(Style {
-                fg: Some(color),
-                ..Style::default()
-            })
+            Some(style)
         }
         _ => {
             warnings.push(format!(
-                "[syntax] `{kind}`: expected table or color string (skipped)"
+                "[syntax] `{kind}`: expected table or style string (skipped)"
             ));
             None
         }
@@ -322,7 +358,7 @@ fn apply_diagnostics(
     loaded: &mut LoadedTheme,
     path: &Path,
     diag: &toml::Value,
-    aliases: &Aliases,
+    styles: &StyleTable,
 ) -> Result<(), ThemeError> {
     let table = match diag {
         toml::Value::Table(t) => t,
@@ -334,7 +370,7 @@ fn apply_diagnostics(
         }
     };
     for (key, value) in table {
-        let Some(style) = resolve_syntax_style(key, value, aliases, &mut loaded.warnings)
+        let Some(style) = resolve_syntax_style(key, value, styles, &mut loaded.warnings)
         else {
             continue;
         };
@@ -353,12 +389,19 @@ fn apply_diagnostics(
     Ok(())
 }
 
-/// Flatten `[COLORS]` into a `HashMap<name, value-string>`. Values
-/// are stored raw; resolution (recursive `$alias` lookup, `ansi_*`
-/// name expansion) happens in `resolve_color_name` at read time so
-/// cycles can be detected per-call.
-fn extract_aliases(value: Option<&toml::Value>, warnings: &mut Vec<String>) -> Aliases {
-    let mut out: Aliases = HashMap::new();
+/// Flatten `[COLORS]` into the alias table.
+///
+/// Two valid forms per entry:
+/// - `name = "value"` — a fg-only Style ([`StyleSpec::Shorthand`]).
+/// - `name = { fg = ..., bg = ..., bold = ..., ... }` — a full
+///   Style ([`StyleSpec::Full`]). Same fields as a styled-region
+///   table.
+///
+/// Field values stay raw; `resolve_alias_style` /
+/// `resolve_color_value` chase `$alias` references at lookup time
+/// with cycle detection.
+fn extract_styles(value: Option<&toml::Value>, warnings: &mut Vec<String>) -> StyleTable {
+    let mut out: StyleTable = HashMap::new();
     let Some(value) = value else {
         return out;
     };
@@ -370,42 +413,92 @@ fn extract_aliases(value: Option<&toml::Value>, warnings: &mut Vec<String>) -> A
         }
     };
     for (name, v) in table {
-        match v.as_str() {
-            Some(s) => {
-                out.insert(name.clone(), s.to_string());
+        match v {
+            toml::Value::String(s) => {
+                out.insert(name.clone(), StyleSpec::Shorthand(s.clone()));
             }
-            None => warnings.push(format!(
-                "[COLORS] `{name}`: value must be a string (skipped)"
+            toml::Value::Table(t) => {
+                let mut fg: Option<String> = None;
+                let mut bg: Option<String> = None;
+                let mut bold: Option<bool> = None;
+                let mut reverse: Option<bool> = None;
+                let mut underline: Option<bool> = None;
+                for (k, vv) in t {
+                    match k.as_str() {
+                        "fg" => match vv.as_str() {
+                            Some(s) => fg = Some(s.to_string()),
+                            None => warnings.push(format!(
+                                "[COLORS.{name}] `fg`: must be a string (skipped this field)"
+                            )),
+                        },
+                        "bg" => match vv.as_str() {
+                            Some(s) => bg = Some(s.to_string()),
+                            None => warnings.push(format!(
+                                "[COLORS.{name}] `bg`: must be a string (skipped this field)"
+                            )),
+                        },
+                        "bold" => match vv.as_bool() {
+                            Some(b) => bold = Some(b),
+                            None => warnings.push(format!(
+                                "[COLORS.{name}] `bold`: expected boolean (skipped)"
+                            )),
+                        },
+                        "reverse" => match vv.as_bool() {
+                            Some(b) => reverse = Some(b),
+                            None => warnings.push(format!(
+                                "[COLORS.{name}] `reverse`: expected boolean (skipped)"
+                            )),
+                        },
+                        "underline" => match vv.as_bool() {
+                            Some(b) => underline = Some(b),
+                            None => warnings.push(format!(
+                                "[COLORS.{name}] `underline`: expected boolean (skipped)"
+                            )),
+                        },
+                        other => warnings.push(format!(
+                            "[COLORS.{name}] `{other}`: unknown field (skipped)"
+                        )),
+                    }
+                }
+                out.insert(
+                    name.clone(),
+                    StyleSpec::Full {
+                        fg,
+                        bg,
+                        bold,
+                        reverse,
+                        underline,
+                    },
+                );
+            }
+            _ => warnings.push(format!(
+                "[COLORS] `{name}`: expected color string or style table (skipped)"
             )),
         }
     }
     out
 }
 
+/// Route a TOML `[syntax].<kind>` entry into the matching
+/// [`SyntaxTheme`] slot. Routes via
+/// `led_state_syntax::capture_name_to_kind` — the same dispatch
+/// the syntax driver uses to bucket tree-sitter captures into
+/// [`TokenKind`]s — so a theme entry lights the slot the painter
+/// actually reads.
+///
+/// `type_` is also accepted as a spelling of `type` because Rust
+/// reserves `type`; some users carry the underscore form from
+/// experimenting in code-shaped editors.
 fn assign_syntax_kind(syntax: &mut SyntaxTheme, kind: &str, style: Style) -> bool {
-    // `type` is a reserved word in Rust, so the struct field is
-    // `type_`; accept both the natural `type` spelling and the
-    // underscore variant from TOML for consistency.
-    match kind {
-        "keyword" => syntax.keyword = style,
-        "type" | "type_" => syntax.type_ = style,
-        "function" => syntax.function = style,
-        "string" => syntax.string = style,
-        "number" => syntax.number = style,
-        "boolean" => syntax.boolean = style,
-        "comment" => syntax.comment = style,
-        "operator" => syntax.operator = style,
-        "punctuation" => syntax.punctuation = style,
-        "variable" => syntax.variable = style,
-        "property" => syntax.property = style,
-        "attribute" => syntax.attribute = style,
-        "tag" => syntax.tag = style,
-        "label" => syntax.label = style,
-        "constant" => syntax.constant = style,
-        "escape" => syntax.escape = style,
-        "default" => syntax.default = style,
-        _ => return false,
-    }
+    let resolved = if kind == "type_" {
+        Some(led_state_syntax::TokenKind::Type)
+    } else {
+        led_state_syntax::capture_name_to_kind(kind)
+    };
+    let Some(token_kind) = resolved else {
+        return false;
+    };
+    *syntax.style_mut(token_kind) = style;
     true
 }
 
@@ -413,19 +506,19 @@ fn parse_style(
     table: &toml::map::Map<String, toml::Value>,
     section: &str,
     region: &str,
-    aliases: &Aliases,
+    styles: &StyleTable,
     warnings: &mut Vec<String>,
 ) -> Option<Style> {
     let mut style = Style::default();
     for (k, v) in table {
         match k.as_str() {
-            "fg" => match parse_color(v, aliases) {
+            "fg" => match parse_color(v, styles) {
                 Some(c) => style.fg = Some(c),
                 None => warnings.push(format!(
                     "[{section}.{region}] `fg`: unknown color (skipped this field)"
                 )),
             },
-            "bg" => match parse_color(v, aliases) {
+            "bg" => match parse_color(v, styles) {
                 Some(c) => style.bg = Some(c),
                 None => warnings.push(format!(
                     "[{section}.{region}] `bg`: unknown color (skipped this field)"
@@ -457,47 +550,128 @@ fn parse_style(
     Some(style)
 }
 
-fn parse_color(v: &toml::Value, aliases: &Aliases) -> Option<Color> {
+fn parse_color(v: &toml::Value, styles: &StyleTable) -> Option<Color> {
     let s = v.as_str()?;
-    resolve_color_name(s, aliases, &mut HashSet::new())
+    resolve_color_value(s, styles, &mut HashSet::new())
 }
 
-/// Recursively resolve a color-value string. The grammar accepts:
+/// Resolve a value-string for a `fg=` / `bg=` slot to a [`Color`].
+/// Grammar:
 ///
-/// - `$name` — look `name` up in `[COLORS]` and resolve its value.
 /// - `xNNN` — xterm 256-colour palette index.
 /// - `#rrggbb` — 24-bit hex.
 /// - `ansi_<name>` or `<name>` — named ANSI colour.
+/// - `$name` — look `name` up in `[COLORS]` and adopt the named
+///   style's colour: a [`StyleSpec::Shorthand`] expands recursively;
+///   a [`StyleSpec::Full`] contributes its `fg` (the only colour a
+///   colour-slot can use from a full Style).
 ///
-/// `visited` guards against cycles in the alias table. Unresolved /
-/// malformed values return `None`; the caller emits a warning.
+/// `visited` guards against cycles. Returns `None` for unresolved
+/// or malformed values.
 ///
-/// **Short-circuit for `$xNNN`.** Legacy themes define each palette
-/// index with both an alias (`x032 = "#0087d7"`) AND use it via
-/// `$x032`. If we chase the alias, we end up with a 24-bit RGB
-/// colour — which Apple Terminal can't render and paints as
-/// garbage. Detect the `xNNN` alias name and emit
-/// `Color::Indexed` directly so crossterm uses the
-/// `ESC[38;5;Nm` escape the terminal understands.
-fn resolve_color_name(name: &str, aliases: &Aliases, visited: &mut HashSet<String>) -> Option<Color> {
-    if let Some(key) = name.strip_prefix('$') {
-        // `$xNNN` — short-circuit on the alias NAME before chasing
-        // its value, preserving the 256-colour index form.
-        if let Some(digits) = key.strip_prefix('x')
-            && let Ok(n) = digits.parse::<u16>()
-            && n <= 255
-            && digits.len() == 3
-        {
-            return Some(Color::Indexed(n as u8));
+/// **Short-circuit for `$xNNN`.** Legacy themes define each
+/// palette index with both an entry (`x032 = "#0087d7"`) AND
+/// reference it via `$x032`. Chasing the entry would produce 24-bit
+/// RGB — which Apple Terminal can't render and paints as garbage.
+/// We detect the `xNNN` reference name and emit `Color::Indexed`
+/// directly so crossterm uses the `ESC[38;5;Nm` escape the
+/// terminal understands.
+fn resolve_color_value(value: &str, styles: &StyleTable, visited: &mut HashSet<String>) -> Option<Color> {
+    if let Some(name) = value.strip_prefix('$') {
+        if let Some(c) = xterm_index_color(name) {
+            return Some(c);
         }
-        if !visited.insert(key.to_string()) {
-            // Cycle in the alias table — bail.
-            return None;
+        if !visited.insert(name.to_string()) {
+            return None; // cycle
         }
-        let target = aliases.get(key)?;
-        return resolve_color_name(target, aliases, visited);
+        return match styles.get(name)? {
+            StyleSpec::Shorthand(v) => resolve_color_value(v, styles, visited),
+            StyleSpec::Full { fg, .. } => {
+                // Style reference in a colour slot — use its fg.
+                resolve_color_value(fg.as_deref()?, styles, visited)
+            }
+        };
     }
-    if let Some(digits) = name.strip_prefix('x') {
+    parse_color_literal(value)
+}
+
+/// Resolve the bare-string shorthand at a styled-region site
+/// (`keyword = "$syntax_keyword"` or `keyword = "red"`) to a full
+/// [`Style`]. A `$ref` to a [`StyleSpec::Full`] adopts the entire
+/// style; a `$ref` to a [`StyleSpec::Shorthand`] or a colour
+/// literal becomes a fg-only Style.
+fn resolve_string_to_style(value: &str, styles: &StyleTable, visited: &mut HashSet<String>) -> Option<Style> {
+    if let Some(name) = value.strip_prefix('$') {
+        return resolve_style(name, styles, visited);
+    }
+    let color = parse_color_literal(value)?;
+    Some(Style {
+        fg: Some(color),
+        ..Style::default()
+    })
+}
+
+/// Resolve a `$name` reference to the named [`Style`]. Used when a
+/// styled region adopts a whole entry (`tab_active = "$selected"`).
+fn resolve_style(name: &str, styles: &StyleTable, visited: &mut HashSet<String>) -> Option<Style> {
+    if let Some(c) = xterm_index_color(name) {
+        return Some(Style {
+            fg: Some(c),
+            ..Style::default()
+        });
+    }
+    if !visited.insert(name.to_string()) {
+        return None; // cycle
+    }
+    match styles.get(name)? {
+        StyleSpec::Shorthand(value) => resolve_string_to_style(value, styles, visited),
+        StyleSpec::Full {
+            fg,
+            bg,
+            bold,
+            reverse,
+            underline,
+        } => {
+            let mut style = Style::default();
+            if let Some(s) = fg.as_deref() {
+                style.fg = resolve_color_value(s, styles, visited);
+            }
+            if let Some(s) = bg.as_deref() {
+                style.bg = resolve_color_value(s, styles, visited);
+            }
+            if let Some(b) = bold {
+                style.attrs.bold = *b;
+            }
+            if let Some(b) = reverse {
+                style.attrs.reverse = *b;
+            }
+            if let Some(b) = underline {
+                style.attrs.underline = *b;
+            }
+            Some(style)
+        }
+    }
+}
+
+/// `xNNN` (3-digit index, 0..=255) → `Color::Indexed`. None for
+/// any other shape. Used for the `$xNNN` short-circuit in both
+/// resolvers.
+fn xterm_index_color(name: &str) -> Option<Color> {
+    let digits = name.strip_prefix('x')?;
+    if digits.len() != 3 {
+        return None;
+    }
+    let n: u16 = digits.parse().ok()?;
+    if n > 255 {
+        return None;
+    }
+    Some(Color::Indexed(n as u8))
+}
+
+/// Color literals only — no `$ref` chasing. Used after `$ref`
+/// chains have terminated.
+fn parse_color_literal(value: &str) -> Option<Color> {
+    if let Some(digits) = value.strip_prefix('x') {
         if let Ok(n) = digits.parse::<u16>()
             && n <= 255
         {
@@ -505,10 +679,10 @@ fn resolve_color_name(name: &str, aliases: &Aliases, visited: &mut HashSet<Strin
         }
         return None;
     }
-    if let Some(hex) = name.strip_prefix('#') {
+    if let Some(hex) = value.strip_prefix('#') {
         return parse_hex_color(hex);
     }
-    parse_named_color(name)
+    parse_named_color(value)
 }
 
 fn parse_hex_color(hex: &str) -> Option<Color> {
@@ -545,6 +719,11 @@ fn parse_named_color(name: &str) -> Option<Color> {
         "bright_magenta" => Some(Color::BRIGHT_MAGENTA),
         "bright_cyan" => Some(Color::BRIGHT_CYAN),
         "bright_white" => Some(Color::BRIGHT_WHITE),
+        // Inherit the terminal's default fg/bg. The painter emits
+        // `Reset` for `Color::Default`, identical to leaving the
+        // field at `None`. `term_reset` is the legacy spelling
+        // that long-standing user themes already carry.
+        "term_reset" | "reset" => Some(Color::Default),
         _ => None,
     }
 }
@@ -953,7 +1132,7 @@ fg = "$magenta"
     }
 
     #[test]
-    fn cycle_in_colors_aliases_yields_unknown_color() {
+    fn cycle_in_colors_styles_yields_unknown_color() {
         let tmp = tempdir();
         let path = write_theme(
             &tmp,
@@ -1110,7 +1289,7 @@ neon = "x201"
 
     #[test]
     fn diagnostics_via_alias_chain_resolves() {
-        // Legacy pattern: aliases defined in [COLORS], then
+        // Legacy pattern: styles defined in [COLORS], then
         // [diagnostics] references them as bare strings.
         let tmp = tempdir();
         let path = write_theme(
@@ -1133,5 +1312,312 @@ error = "$err_color"
         let path = write_theme(&tmp, "[chrome\n");
         let err = load_theme(None, Some(&path)).unwrap_err();
         assert!(matches!(err, ThemeError::Toml { .. }), "got {err:?}");
+    }
+
+    // ── inline-table style entries in [COLORS] ────────────────────
+
+    #[test]
+    fn inline_table_style_entry_parses_with_no_warning() {
+        let tmp = tempdir();
+        let path = write_theme(
+            &tmp,
+            r##"
+[COLORS]
+my_pair = { fg = "x232", bg = "x024", bold = true }
+"##,
+        );
+        let loaded = load_theme(None, Some(&path)).unwrap();
+        assert!(
+            loaded.warnings.is_empty(),
+            "no warnings expected, got: {:?}",
+            loaded.warnings,
+        );
+    }
+
+    #[test]
+    fn full_style_ref_adopts_fg_bg_and_attrs() {
+        // The user's pattern: a [COLORS] entry holds a full Style,
+        // a styled-region key references it as a bare string and
+        // gets the entire Style (not just the fg).
+        let tmp = tempdir();
+        let path = write_theme(
+            &tmp,
+            r##"
+[COLORS]
+inverse_bold = { fg = "x232", bg = "x223", bold = true }
+
+[syntax]
+keyword = "$inverse_bold"
+"##,
+        );
+        let loaded = load_theme(None, Some(&path)).unwrap();
+        let kw = loaded.theme.syntax.keyword;
+        assert_eq!(kw.fg, Some(Color::Indexed(232)));
+        assert_eq!(kw.bg, Some(Color::Indexed(223)));
+        assert!(kw.attrs.bold);
+        assert!(loaded.warnings.is_empty(), "warnings: {:?}", loaded.warnings);
+    }
+
+    #[test]
+    fn full_style_ref_chains_through_shorthand_in_colors() {
+        // theme_bold_i is a Full style; inverse_bold is a Shorthand
+        // pointing at it. Bare-string at use-site must adopt the
+        // full Style of theme_bold_i.
+        let tmp = tempdir();
+        let path = write_theme(
+            &tmp,
+            r##"
+[COLORS]
+theme_bold_i = { fg = "x232", bg = "x223" }
+inverse_bold = "$theme_bold_i"
+
+[syntax]
+keyword = "$inverse_bold"
+"##,
+        );
+        let loaded = load_theme(None, Some(&path)).unwrap();
+        let kw = loaded.theme.syntax.keyword;
+        assert_eq!(kw.fg, Some(Color::Indexed(232)));
+        assert_eq!(kw.bg, Some(Color::Indexed(223)));
+    }
+
+    #[test]
+    fn full_style_used_in_color_slot_extracts_fg() {
+        // `fg = "$some_full_style"` — caller wants a Color, so the
+        // resolver takes the entry's fg.
+        let tmp = tempdir();
+        let path = write_theme(
+            &tmp,
+            r##"
+[COLORS]
+warn_pair = { fg = "x196", bg = "x232" }
+
+[chrome.status_warn]
+fg = "$warn_pair"
+bg = "x024"
+"##,
+        );
+        let loaded = load_theme(None, Some(&path)).unwrap();
+        assert_eq!(loaded.theme.status_warn.fg, Some(Color::Indexed(196)));
+        assert_eq!(loaded.theme.status_warn.bg, Some(Color::Indexed(24)));
+    }
+
+    #[test]
+    fn full_style_cycle_yields_no_panic_and_unknown() {
+        // Two Full entries that reference each other via fg —
+        // resolver must terminate via the visited set.
+        let tmp = tempdir();
+        let path = write_theme(
+            &tmp,
+            r##"
+[COLORS]
+a = { fg = "$b" }
+b = { fg = "$a" }
+
+[syntax]
+keyword = "$a"
+"##,
+        );
+        let loaded = load_theme(None, Some(&path)).unwrap();
+        // Cycle bails — fg never resolves.
+        assert!(loaded.theme.syntax.keyword.fg.is_none());
+    }
+
+    // ── term_reset / Color::Default ──────────────────────────────
+
+    #[test]
+    fn term_reset_resolves_to_color_default_no_warning() {
+        let tmp = tempdir();
+        let path = write_theme(
+            &tmp,
+            r##"
+[COLORS]
+normal = "term_reset"
+
+[syntax]
+operator = "$normal"
+punctuation = "reset"
+"##,
+        );
+        let loaded = load_theme(None, Some(&path)).unwrap();
+        assert_eq!(loaded.theme.syntax.operator.fg, Some(Color::Default));
+        assert_eq!(loaded.theme.syntax.punctuation.fg, Some(Color::Default));
+        assert!(
+            loaded.warnings.is_empty(),
+            "no warnings expected for term_reset, got {:?}",
+            loaded.warnings,
+        );
+    }
+
+    #[test]
+    fn term_reset_in_full_style_fg_works() {
+        let tmp = tempdir();
+        let path = write_theme(
+            &tmp,
+            r##"
+[COLORS]
+selected = { fg = "term_reset", bg = "x053" }
+
+[chrome.cursor_line]
+fg = "term_reset"
+bg = "x053"
+"##,
+        );
+        let loaded = load_theme(None, Some(&path)).unwrap();
+        assert_eq!(loaded.theme.cursor_line.fg, Some(Color::Default));
+        assert_eq!(loaded.theme.cursor_line.bg, Some(Color::Indexed(53)));
+        assert!(loaded.warnings.is_empty(), "warnings: {:?}", loaded.warnings);
+    }
+
+    // ── tree-sitter capture aliases ───────────────────────────────
+
+    #[test]
+    fn theme_and_painter_share_capture_name_dispatch() {
+        // Round-trip property: a TOML `[syntax].<name>` entry must
+        // light the same slot that `style_for(capture_name_to_kind(<name>))`
+        // resolves to. If the theme writer and painter ever drift
+        // again, this fails.
+        for &name in &[
+            "conditional",
+            "repeat",
+            "include",
+            "exception",
+            "module",
+            "namespace",
+            "constructor",
+            "method",
+            "field",
+            "annotation",
+            "text.title",
+            "text.literal",
+            "text.uri",
+        ] {
+            let body = format!("[syntax]\n\"{name}\" = \"x099\"\n");
+            let tmp = tempdir();
+            let path = write_theme(&tmp, &body);
+            let loaded = load_theme(None, Some(&path)).unwrap();
+            let kind = led_state_syntax::capture_name_to_kind(name)
+                .unwrap_or_else(|| panic!("`{name}` must map to a TokenKind"));
+            assert_eq!(
+                loaded.theme.syntax.style_for(kind).fg,
+                Some(Color::Indexed(99)),
+                "theme entry for `{name}` should land in the slot the painter reads",
+            );
+        }
+    }
+
+    #[test]
+    fn tree_sitter_keyword_aliases_route_to_keyword_slot() {
+        let tmp = tempdir();
+        let path = write_theme(
+            &tmp,
+            r##"
+[syntax]
+conditional = "x032"
+repeat = "x032"
+include = "x032"
+exception = "x032"
+import = "x032"
+"##,
+        );
+        let loaded = load_theme(None, Some(&path)).unwrap();
+        // Last write wins (alphabetical, via toml's BTreeMap).
+        assert_eq!(loaded.theme.syntax.keyword.fg, Some(Color::Indexed(32)));
+        assert!(
+            loaded
+                .warnings
+                .iter()
+                .all(|w| !w.contains("unknown token kind")),
+            "no unknown-token warnings expected, got {:?}",
+            loaded.warnings,
+        );
+    }
+
+    #[test]
+    fn tree_sitter_type_aliases_route_to_type_slot() {
+        // `module` and `namespace` route to Type per the canonical
+        // mapping. `constructor` deliberately routes to Function
+        // (matching the rewrite's pre-refactor painter) and is
+        // covered separately.
+        let tmp = tempdir();
+        let path = write_theme(
+            &tmp,
+            r##"
+[syntax]
+module = "x030"
+namespace = "x030"
+"##,
+        );
+        let loaded = load_theme(None, Some(&path)).unwrap();
+        assert_eq!(loaded.theme.syntax.type_.fg, Some(Color::Indexed(30)));
+        assert!(
+            loaded
+                .warnings
+                .iter()
+                .all(|w| !w.contains("unknown token kind")),
+            "warnings: {:?}",
+            loaded.warnings,
+        );
+    }
+
+    #[test]
+    fn tree_sitter_constructor_routes_to_function_slot() {
+        let tmp = tempdir();
+        let path = write_theme(&tmp, "[syntax]\nconstructor = \"x033\"\n");
+        let loaded = load_theme(None, Some(&path)).unwrap();
+        assert_eq!(loaded.theme.syntax.function.fg, Some(Color::Indexed(33)));
+    }
+
+    #[test]
+    fn markdown_text_kinds_route_to_per_subname_slots() {
+        // `text.*` captures don't collapse to a single slot — each
+        // subname routes per the canonical mapping (markdown
+        // titles → label, code spans → string, links → attribute,
+        // urls → keyword, emphasis/strong → label).
+        let tmp = tempdir();
+        let path = write_theme(
+            &tmp,
+            r##"
+[syntax]
+"text.title" = "x010"
+"text.literal" = "x011"
+"text.reference" = "x012"
+"text.uri" = "x013"
+"##,
+        );
+        let loaded = load_theme(None, Some(&path)).unwrap();
+        assert_eq!(loaded.theme.syntax.label.fg, Some(Color::Indexed(10)));
+        assert_eq!(loaded.theme.syntax.string.fg, Some(Color::Indexed(11)));
+        assert_eq!(loaded.theme.syntax.attribute.fg, Some(Color::Indexed(12)));
+        assert_eq!(loaded.theme.syntax.keyword.fg, Some(Color::Indexed(13)));
+        assert!(
+            loaded
+                .warnings
+                .iter()
+                .all(|w| !w.contains("unknown token kind")),
+            "warnings: {:?}",
+            loaded.warnings,
+        );
+    }
+
+    #[test]
+    fn full_style_unknown_field_warns_with_table_path() {
+        let tmp = tempdir();
+        let path = write_theme(
+            &tmp,
+            r##"
+[COLORS]
+weird = { fg = "x232", strange = true }
+"##,
+        );
+        let loaded = load_theme(None, Some(&path)).unwrap();
+        assert!(
+            loaded
+                .warnings
+                .iter()
+                .any(|w| w.contains("[COLORS.weird]") && w.contains("strange")),
+            "expected warning naming the offending field, got {:?}",
+            loaded.warnings,
+        );
     }
 }

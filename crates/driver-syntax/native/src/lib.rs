@@ -19,7 +19,7 @@ use std::thread;
 
 use led_core::{CanonPath, Notifier};
 use led_driver_syntax_core::{SyntaxCmd, SyntaxDriver, Trace};
-use led_state_syntax::{Language, SyntaxOut, TokenKind, TokenSpan};
+use led_state_syntax::{capture_name_to_kind, Language, SyntaxOut, TokenKind, TokenSpan};
 use ropey::Rope;
 use tree_sitter::{Parser, Query, QueryCursor, StreamingIterator};
 
@@ -326,56 +326,9 @@ fn flatten_nested(captures: Vec<(usize, usize, TokenKind)>) -> Vec<TokenSpan> {
     out
 }
 
-/// Map a tree-sitter highlight capture name to a `TokenKind`. The
-/// taxonomy follows nvim-treesitter conventions: dot-separated
-/// classes from most to least specific (`keyword.return`,
-/// `function.method.builtin`, …). We match on the top-level class
-/// and ignore modifiers — except for the `text.*` family used by
-/// the markdown grammar, where each sub-kind has a different
-/// semantic colour (title / literal / uri / reference all
-/// distinct), so those are matched on the full dotted name first.
-///
-/// Returning `None` drops the capture (e.g. auxiliary captures
-/// starting with `_` that highlight queries use as scaffolding).
-fn capture_name_to_kind(name: &str) -> Option<TokenKind> {
-    if name.starts_with('_') {
-        return None;
-    }
-    // Markdown-specific: `text.*` captures route to distinct colour
-    // slots (legacy behaviour: title→label, literal→string,
-    // reference→attribute, uri→keyword). Checked before the head-
-    // based match because the head `"text"` alone is ambiguous.
-    match name {
-        "text.title" => return Some(TokenKind::Label),
-        "text.literal" => return Some(TokenKind::String),
-        "text.reference" => return Some(TokenKind::Attribute),
-        "text.uri" => return Some(TokenKind::Keyword),
-        "text.strong" | "text.emphasis" => return Some(TokenKind::Label),
-        _ => {}
-    }
-    let head = name.split('.').next().unwrap_or(name);
-    Some(match head {
-        "keyword" | "conditional" | "repeat" | "include" | "exception" | "storageclass" => {
-            TokenKind::Keyword
-        }
-        "type" | "class" | "struct" | "enum" | "interface" | "trait" => TokenKind::Type,
-        "function" | "method" | "constructor" => TokenKind::Function,
-        "string" | "character" => TokenKind::String,
-        "number" | "float" => TokenKind::Number,
-        "boolean" => TokenKind::Boolean,
-        "comment" => TokenKind::Comment,
-        "operator" => TokenKind::Operator,
-        "punctuation" => TokenKind::Punctuation,
-        "variable" | "parameter" | "field" => TokenKind::Variable,
-        "property" => TokenKind::Property,
-        "attribute" | "annotation" => TokenKind::Attribute,
-        "tag" => TokenKind::Tag,
-        "label" => TokenKind::Label,
-        "constant" | "constant.builtin" | "symbol" => TokenKind::Constant,
-        "escape" => TokenKind::Escape,
-        _ => return None,
-    })
-}
+// Capture-name → TokenKind mapping lives in `state-syntax` so the
+// theme parser and the painter share one dispatch — see
+// `led_state_syntax::capture_name_to_kind`.
 
 /// Per-language list of `(grammar, highlight query)` pairs. Each
 /// pair is compiled once per session behind a `OnceLock`. Most

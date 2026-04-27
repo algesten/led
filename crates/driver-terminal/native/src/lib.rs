@@ -1279,11 +1279,21 @@ fn severity_style(
 }
 
 /// Paint one body row into `buf` slicing it into styled runs
-/// according to the syntax spans the runtime computed. Gaps between
-/// spans (and any suffix after the last span) render with the
-/// syntax theme's `default` style so the gutter and any un-captured
-/// characters still respect user theming. Returns the column AFTER
-/// the last written cell so the caller can continue filling the row.
+/// according to the syntax spans the runtime computed. Gaps
+/// between spans (and any suffix past the last span) render
+/// **unstyled** — `Style::default()`, terminal default fg/bg —
+/// so glyphs tree-sitter didn't capture inherit the user's
+/// terminal palette rather than borrowing from `syntax.default`.
+///
+/// `syntax.default` is the slot for explicit `TokenKind::Default`
+/// captures (`@text`, `@embedded`, etc.). It is NOT the body-text
+/// fill colour: a theme might set it to flag those captures
+/// distinctly, and using it as a gap fill would smear that into
+/// every un-captured identifier in the file. Decoupling these two
+/// concerns keeps user themes predictable.
+///
+/// Returns the column AFTER the last written cell so the caller
+/// can continue filling the row.
 ///
 /// Spans are assumed non-overlapping and ascending in `col_start`.
 /// The caller guarantees `col_end <= line_char_count` (runtime
@@ -1296,29 +1306,8 @@ fn paint_syntax_line(
     col_start: u16,
     buf: &mut Buffer,
 ) -> u16 {
-    use led_state_syntax::TokenKind;
-
-    let style_for = |kind: TokenKind| -> &Style {
-        match kind {
-            TokenKind::Keyword => &syntax.keyword,
-            TokenKind::Type => &syntax.type_,
-            TokenKind::Function => &syntax.function,
-            TokenKind::String => &syntax.string,
-            TokenKind::Number => &syntax.number,
-            TokenKind::Boolean => &syntax.boolean,
-            TokenKind::Comment => &syntax.comment,
-            TokenKind::Operator => &syntax.operator,
-            TokenKind::Punctuation => &syntax.punctuation,
-            TokenKind::Variable => &syntax.variable,
-            TokenKind::Property => &syntax.property,
-            TokenKind::Attribute => &syntax.attribute,
-            TokenKind::Tag => &syntax.tag,
-            TokenKind::Label => &syntax.label,
-            TokenKind::Constant => &syntax.constant,
-            TokenKind::Escape => &syntax.escape,
-            TokenKind::Default => &syntax.default,
-        }
-    };
+    let style_for = |kind: led_state_syntax::TokenKind| -> &Style { syntax.style_for(kind) };
+    let gap_style = Style::default();
 
     let mut cursor_col: usize = 0;
     let mut out_col = col_start;
@@ -1331,15 +1320,12 @@ fn paint_syntax_line(
             continue;
         }
         if span_col_start > cursor_col {
-            // Gap before this span: paint it with the default syntax
-            // style (catches the gutter and any unclaimed glyphs).
-            let default_style = syntax.default;
             for ch in line
                 .chars()
                 .skip(cursor_col)
                 .take(span_col_start - cursor_col)
             {
-                buf.put_char(row, out_col, ch, default_style);
+                buf.put_char(row, out_col, ch, gap_style);
                 out_col = out_col.saturating_add(1);
             }
             cursor_col = span_col_start;
@@ -1355,10 +1341,8 @@ fn paint_syntax_line(
         }
         cursor_col = span_col_end;
     }
-    // Trailing suffix past the last span.
-    let default_style = syntax.default;
     for ch in line.chars().skip(cursor_col) {
-        buf.put_char(row, out_col, ch, default_style);
+        buf.put_char(row, out_col, ch, gap_style);
         out_col = out_col.saturating_add(1);
     }
     out_col
@@ -1835,6 +1819,49 @@ mod tests {
         let row = layout.side_area.unwrap().y;
         let got: String = grid.row_text(row, 10, 6);
         assert_eq!(got, "needle", "grid cells should read 'needle'; raw = {s:?}");
+    }
+
+    #[test]
+    fn paint_syntax_line_gap_fill_does_not_borrow_syntax_default_slot() {
+        // Regression: a theme that sets `[syntax].embedded` (or any
+        // capture that maps to TokenKind::Default) used to bleed
+        // into the gap-fill colour for un-captured glyphs because
+        // the painter pulled `syntax.default` for both. Result was
+        // every plain identifier in a Rust file rendering with the
+        // user's "embedded code" colour. Gap-fill must use
+        // Style::default() so un-captured text stays neutral.
+        use led_driver_terminal_core::{
+            Attrs, Color, LineSpan, Style as TermStyle, SyntaxTheme,
+        };
+        use led_state_syntax::TokenKind;
+        let mut buf = Buffer::new(3, 16);
+        let mut syntax = SyntaxTheme::plain();
+        // Stand-in for the user's `embedded = "$syntax_label"`
+        // theme entry: a vivid bg makes the bleed obvious.
+        syntax.default = TermStyle {
+            fg: Some(Color::Indexed(172)),
+            bg: None,
+            attrs: Attrs::default(),
+        };
+        let line = "ab cd";
+        let spans = vec![LineSpan {
+            col_start: 0,
+            col_end: 2,
+            kind: TokenKind::Keyword,
+        }];
+        paint_syntax_line(line, &spans, &syntax, 0, 0, &mut buf);
+        // Cell 2 is the un-captured space, cell 3-4 the un-captured
+        // `cd`. Each must read back as Style::default(), not the
+        // syntax.default slot's colour.
+        for col in 2..5u16 {
+            let cell = buf.cell(0, col).expect("cell present");
+            assert_eq!(
+                cell.style,
+                TermStyle::default(),
+                "col {col} gap-fill must be unstyled, got {:?}",
+                cell.style,
+            );
+        }
     }
 
     #[test]

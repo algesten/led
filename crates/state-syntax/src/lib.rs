@@ -148,6 +148,73 @@ pub enum TokenKind {
     Default,
 }
 
+/// Map a tree-sitter highlight capture name (`@keyword`,
+/// `@type.builtin`, `@text.title`, …) to a [`TokenKind`].
+///
+/// One source of truth for the rewrite's capture-name aliasing.
+/// Both the syntax driver (when emitting `TokenSpan`s after a
+/// parse) and the theme parser (when assigning a TOML
+/// `[syntax]` entry to a slot) must route through this so a
+/// theme entry like `[syntax].conditional = "..."` lights the
+/// same slot the painter reads when a `@conditional` capture
+/// fires.
+///
+/// Returns `None` for capture names the rewrite doesn't model.
+/// Underscore-prefixed captures (tree-sitter convention for
+/// "internal, don't theme") are also `None`.
+///
+/// The mapping aligns with legacy theme behavior: legacy stored
+/// styles per capture name and the painter looked them up
+/// verbatim. The rewrite collapses to the [`TokenKind`] enum;
+/// this function is where every capture-name → enum decision
+/// lives.
+pub fn capture_name_to_kind(name: &str) -> Option<TokenKind> {
+    if name.starts_with('_') {
+        return None;
+    }
+    // Markdown / prose captures route to distinct slots so a
+    // theme can colour titles, links, and inline code separately
+    // even though we don't have dedicated markup slots.
+    match name {
+        "text.title" => return Some(TokenKind::Label),
+        "text.literal" => return Some(TokenKind::String),
+        "text.reference" => return Some(TokenKind::Attribute),
+        "text.uri" => return Some(TokenKind::Keyword),
+        "text.strong" | "text.emphasis" => return Some(TokenKind::Label),
+        // Bare `text` head — markdown body text. No granular
+        // markup slot; fall through to the default style.
+        "text" => return Some(TokenKind::Default),
+        _ => {}
+    }
+    let head = name.split('.').next().unwrap_or(name);
+    Some(match head {
+        "keyword" | "conditional" | "repeat" | "include" | "import" | "exception"
+        | "storageclass" => TokenKind::Keyword,
+        "type" | "class" | "struct" | "enum" | "interface" | "trait" | "module" | "namespace" => {
+            TokenKind::Type
+        }
+        "function" | "method" | "constructor" => TokenKind::Function,
+        "string" | "character" => TokenKind::String,
+        "number" | "float" => TokenKind::Number,
+        "boolean" => TokenKind::Boolean,
+        "comment" => TokenKind::Comment,
+        "operator" => TokenKind::Operator,
+        "punctuation" => TokenKind::Punctuation,
+        "variable" | "parameter" | "field" => TokenKind::Variable,
+        "property" => TokenKind::Property,
+        "attribute" | "annotation" => TokenKind::Attribute,
+        "tag" => TokenKind::Tag,
+        "label" => TokenKind::Label,
+        "constant" | "symbol" => TokenKind::Constant,
+        "escape" => TokenKind::Escape,
+        // Embedded-language regions (`@embedded`) — the injection
+        // pipeline restyles them via the inner language's grammar,
+        // so the outer capture itself just falls back to body text.
+        "embedded" => TokenKind::Default,
+        _ => return None,
+    })
+}
+
 /// One contiguous run of characters in a buffer that share a
 /// single `TokenKind`. Offsets are 0-indexed char positions into
 /// the rope. `char_end` is exclusive.
@@ -535,5 +602,88 @@ mod tests {
         let out = rebase_tokens(&tokens, [RebaseOp::Delete { at: 3, len: 10 }]);
         // First span consumed; second shifts left by 10.
         assert_eq!(out, vec![span(5, 10, TokenKind::String)]);
+    }
+
+    // ── capture_name_to_kind ─────────────────────────────────────
+
+    #[test]
+    fn capture_name_underscore_prefix_skipped() {
+        assert_eq!(capture_name_to_kind("_internal"), None);
+    }
+
+    #[test]
+    fn capture_name_keyword_aliases_route_to_keyword() {
+        for n in [
+            "keyword",
+            "conditional",
+            "repeat",
+            "include",
+            "import",
+            "exception",
+            "storageclass",
+            "keyword.return",
+            "keyword.function",
+        ] {
+            assert_eq!(
+                capture_name_to_kind(n),
+                Some(TokenKind::Keyword),
+                "{n} should map to Keyword",
+            );
+        }
+    }
+
+    #[test]
+    fn capture_name_type_aliases_route_to_type() {
+        for n in [
+            "type",
+            "class",
+            "struct",
+            "enum",
+            "interface",
+            "trait",
+            "module",
+            "namespace",
+            "type.builtin",
+        ] {
+            assert_eq!(
+                capture_name_to_kind(n),
+                Some(TokenKind::Type),
+                "{n} should map to Type",
+            );
+        }
+    }
+
+    #[test]
+    fn capture_name_constructor_routes_to_function() {
+        // Same choice the painter has been making since M15;
+        // documented here as part of the canonical mapping.
+        assert_eq!(capture_name_to_kind("constructor"), Some(TokenKind::Function));
+        assert_eq!(capture_name_to_kind("method"), Some(TokenKind::Function));
+    }
+
+    #[test]
+    fn capture_name_text_family_routes_per_subname() {
+        assert_eq!(capture_name_to_kind("text.title"), Some(TokenKind::Label));
+        assert_eq!(capture_name_to_kind("text.literal"), Some(TokenKind::String));
+        assert_eq!(
+            capture_name_to_kind("text.reference"),
+            Some(TokenKind::Attribute),
+        );
+        assert_eq!(capture_name_to_kind("text.uri"), Some(TokenKind::Keyword));
+        assert_eq!(capture_name_to_kind("text.strong"), Some(TokenKind::Label));
+        assert_eq!(capture_name_to_kind("text.emphasis"), Some(TokenKind::Label));
+        // Bare `text` head — markdown body text.
+        assert_eq!(capture_name_to_kind("text"), Some(TokenKind::Default));
+    }
+
+    #[test]
+    fn capture_name_embedded_routes_to_default() {
+        assert_eq!(capture_name_to_kind("embedded"), Some(TokenKind::Default));
+    }
+
+    #[test]
+    fn capture_name_unknown_returns_none() {
+        assert_eq!(capture_name_to_kind("zzz_no_such"), None);
+        assert_eq!(capture_name_to_kind(""), None);
     }
 }

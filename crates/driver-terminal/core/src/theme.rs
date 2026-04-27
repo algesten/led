@@ -28,6 +28,13 @@
 pub enum Color {
     Indexed(u8),
     Rgb { r: u8, g: u8, b: u8 },
+    /// Inherit the terminal's default fg/bg. The painter emits the
+    /// terminal `Reset` escape — same wire effect as a Style with
+    /// `fg`/`bg` left at `None`. Distinct in the data model so a
+    /// theme can express *deliberately* "use the default colour
+    /// here" without it looking like a missing field. Spelled
+    /// `term_reset` (legacy name) or `reset` in `theme.toml`.
+    Default,
 }
 
 impl Color {
@@ -311,6 +318,59 @@ const SYN_TAG: Color = Color::Indexed(160);
 const SYN_LABEL: Color = Color::Indexed(172);
 
 impl SyntaxTheme {
+    /// Resolve a [`TokenKind`] to its slot. Used by the painter
+    /// per-span and by the theme writer when assigning a parsed
+    /// [`Style`] back into the right field — sharing this match
+    /// keeps the two from drifting.
+    pub fn style_for(&self, kind: led_state_syntax::TokenKind) -> &Style {
+        use led_state_syntax::TokenKind;
+        match kind {
+            TokenKind::Keyword => &self.keyword,
+            TokenKind::Type => &self.type_,
+            TokenKind::Function => &self.function,
+            TokenKind::String => &self.string,
+            TokenKind::Number => &self.number,
+            TokenKind::Boolean => &self.boolean,
+            TokenKind::Comment => &self.comment,
+            TokenKind::Operator => &self.operator,
+            TokenKind::Punctuation => &self.punctuation,
+            TokenKind::Variable => &self.variable,
+            TokenKind::Property => &self.property,
+            TokenKind::Attribute => &self.attribute,
+            TokenKind::Tag => &self.tag,
+            TokenKind::Label => &self.label,
+            TokenKind::Constant => &self.constant,
+            TokenKind::Escape => &self.escape,
+            TokenKind::Default => &self.default,
+        }
+    }
+
+    /// Mutable counterpart to [`Self::style_for`]. Used by the
+    /// theme parser to write a Style into the slot a
+    /// [`led_state_syntax::capture_name_to_kind`] lookup picked.
+    pub fn style_mut(&mut self, kind: led_state_syntax::TokenKind) -> &mut Style {
+        use led_state_syntax::TokenKind;
+        match kind {
+            TokenKind::Keyword => &mut self.keyword,
+            TokenKind::Type => &mut self.type_,
+            TokenKind::Function => &mut self.function,
+            TokenKind::String => &mut self.string,
+            TokenKind::Number => &mut self.number,
+            TokenKind::Boolean => &mut self.boolean,
+            TokenKind::Comment => &mut self.comment,
+            TokenKind::Operator => &mut self.operator,
+            TokenKind::Punctuation => &mut self.punctuation,
+            TokenKind::Variable => &mut self.variable,
+            TokenKind::Property => &mut self.property,
+            TokenKind::Attribute => &mut self.attribute,
+            TokenKind::Tag => &mut self.tag,
+            TokenKind::Label => &mut self.label,
+            TokenKind::Constant => &mut self.constant,
+            TokenKind::Escape => &mut self.escape,
+            TokenKind::Default => &mut self.default,
+        }
+    }
+
     /// Zero-colour syntax theme — every kind is
     /// [`Style::default`]. The painter emits no styling escapes for
     /// any token, so buffers render exactly as they did before M15.

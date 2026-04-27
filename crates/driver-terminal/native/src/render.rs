@@ -171,6 +171,7 @@ pub(crate) fn to_ct_color(c: Color) -> ct::Color {
         Color::Indexed(15) => ct::Color::White,
         Color::Indexed(n) => ct::Color::AnsiValue(n),
         Color::Rgb { r, g, b } => ct::Color::Rgb { r, g, b },
+        Color::Default => ct::Color::Reset,
     }
 }
 
