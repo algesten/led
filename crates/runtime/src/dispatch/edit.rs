@@ -6,12 +6,14 @@
 //! before falling back to the M3 "match previous line's leading
 //! whitespace" rule.
 
+use led_core::grapheme_col_to_char;
 use led_state_buffer_edits::BufferEdits;
 use led_state_syntax::SyntaxStates;
 use led_state_tabs::Tabs;
 use std::sync::Arc;
+use unicode_segmentation::UnicodeSegmentation;
 
-use super::shared::{bump, line_char_len, with_active};
+use super::shared::{bump, char_to_cursor, line_grapheme_len, with_active};
 
 /// Width of the soft tab the InsertTab fallback inserts when no
 /// language / no syntax tree is available. Hard-coded to 4 to
@@ -29,12 +31,20 @@ pub(super) fn insert_char(tabs: &mut Tabs, edits: &mut BufferEdits, ch: char) {
             return;
         }
         let before = tab.cursor;
+        // Convert the cursor's grapheme col to a rope char index.
+        let line_char_start = eb.rope.line_to_char(tab.cursor.line);
+        let cur_line_slice = eb.rope.line(tab.cursor.line);
+        let cur_char_in_line = grapheme_col_to_char(cur_line_slice, tab.cursor.col);
+        let char_idx = line_char_start + cur_char_in_line;
         let mut rope = (*eb.rope).clone();
-        let char_idx = rope.line_to_char(tab.cursor.line) + tab.cursor.col;
         rope.insert_char(char_idx, ch);
         bump(eb, rope);
-        tab.cursor.col += 1;
-        tab.cursor.preferred_col = tab.cursor.col;
+        // Re-derive the cursor from the new rope. If `ch` extended
+        // a preceding grapheme cluster (combining mark / ZWJ), col
+        // stays put; if it started a fresh cluster, col advances by
+        // one. `char_to_cursor` reads the post-edit line slice so
+        // the conversion is exact.
+        tab.cursor = char_to_cursor(char_idx + 1, &eb.rope);
         let after = tab.cursor;
         eb.history.record_insert_char(char_idx, ch, before, after);
     });
@@ -88,12 +98,19 @@ pub(super) fn insert_newline(tabs: &mut Tabs, edits: &mut BufferEdits, syntax: &
                 .take_while(|c| *c == ' ' || *c == '\t')
                 .collect()
         };
-        let indent_len = indent.chars().count();
+        // Indent length in graphemes (M25). For ASCII whitespace
+        // indent this equals the char count; for any future indent
+        // string with combining marks the grapheme count is what
+        // `Cursor::col` measures.
+        let indent_len = indent.graphemes(true).count();
         let mut inserted: String = String::with_capacity(1 + indent.len());
         inserted.push('\n');
         inserted.push_str(&indent);
         let mut rope = (*eb.rope).clone();
-        let char_idx = rope.line_to_char(line_idx) + tab.cursor.col;
+        let line_char_start = rope.line_to_char(line_idx);
+        let cur_line_slice = rope.line(line_idx);
+        let cur_char_in_line = grapheme_col_to_char(cur_line_slice, tab.cursor.col);
+        let char_idx = line_char_start + cur_char_in_line;
         rope.insert(char_idx, &inserted);
         bump(eb, rope);
         let after = {
@@ -143,6 +160,9 @@ pub(super) fn insert_tab(tabs: &mut Tabs, edits: &mut BufferEdits, syntax: &Synt
                 .chars()
                 .take_while(|c| *c == ' ' || *c == '\t')
                 .collect();
+            // Indent is whitespace-only — every char is its own
+            // grapheme cluster, so `chars().count()` and the
+            // grapheme count agree.
             let existing_len = existing_indent.chars().count();
             if target_indent == existing_indent {
                 // Already correctly indented. If the cursor
@@ -193,12 +213,23 @@ pub(super) fn insert_tab(tabs: &mut Tabs, edits: &mut BufferEdits, syntax: &Synt
 
         // Fallback: insert spaces at the cursor up to the next
         // 4-col tab stop. Cursor advances by the inserted span.
+        // The fallback is grapheme-bounded too — `tab.cursor.col`
+        // is a grapheme idx; converting to char idx via
+        // `grapheme_col_to_char` keeps the rope insert at the
+        // right position even when the line contains wide chars.
         let before = tab.cursor;
+        // Tab stops are display-cell stops; for the fallback path
+        // (no syntax tree) we treat one grapheme as one cell. The
+        // fallback only fires on language-less / tree-less buffers,
+        // which are typically ASCII anyway. Wide-char fallback
+        // tab-stop alignment is a follow-up if it ever surfaces.
         let target_col = (tab.cursor.col / TAB_STOP + 1) * TAB_STOP;
         let pad = target_col - tab.cursor.col;
         let mut rope = (*eb.rope).clone();
         let line_start = rope.line_to_char(line_idx);
-        let char_idx = line_start + tab.cursor.col;
+        let cur_line_slice = rope.line(line_idx);
+        let cur_char_in_line = grapheme_col_to_char(cur_line_slice, tab.cursor.col);
+        let char_idx = line_start + cur_char_in_line;
         let inserted: String = " ".repeat(pad);
         rope.insert(char_idx, &inserted);
         bump(eb, rope);
@@ -221,29 +252,41 @@ pub(super) fn delete_back(tabs: &mut Tabs, edits: &mut BufferEdits) {
             return;
         }
         let before = tab.cursor;
-        // Capture the join column *before* the remove. After the
-        // newline is gone the previous line grows to include the
-        // current one, so post-remove length is too large.
-        let join_col = if tab.cursor.col == 0 {
-            line_char_len(&eb.rope, tab.cursor.line - 1)
+        let line_char_start = eb.rope.line_to_char(tab.cursor.line);
+        let cur_line_slice = eb.rope.line(tab.cursor.line);
+
+        // Determine the char range to delete. M25 deletes the
+        // entire grapheme cluster before the cursor, even if
+        // multi-codepoint (e.g. `e` + combining acute → both
+        // chars vanish in one Backspace).
+        let (delete_start, delete_end) = if tab.cursor.col > 0 {
+            let prev_char_in_line =
+                grapheme_col_to_char(cur_line_slice, tab.cursor.col - 1);
+            let cur_char_in_line =
+                grapheme_col_to_char(cur_line_slice, tab.cursor.col);
+            (
+                line_char_start + prev_char_in_line,
+                line_char_start + cur_char_in_line,
+            )
         } else {
-            0
+            // At col 0 with line > 0: delete the line terminator
+            // at the end of the previous line, joining the two.
+            // line_char_start == 0 means line == 0 (caught above),
+            // so `line_char_start - 1` is safe.
+            (line_char_start - 1, line_char_start)
         };
         let mut rope = (*eb.rope).clone();
-        let char_idx = rope.line_to_char(tab.cursor.line) + tab.cursor.col;
-        let removed: String = rope.slice(char_idx - 1..char_idx).to_string();
-        rope.remove(char_idx - 1..char_idx);
-        if tab.cursor.col > 0 {
-            tab.cursor.col -= 1;
-        } else {
-            tab.cursor.line -= 1;
-            tab.cursor.col = join_col;
-        }
-        tab.cursor.preferred_col = tab.cursor.col;
-        let after = tab.cursor;
+        let removed: String = rope.slice(delete_start..delete_end).to_string();
+        rope.remove(delete_start..delete_end);
         bump(eb, rope);
+        // Re-derive cursor from the deletion's start position. The
+        // post-edit char_to_cursor walks the new rope's grapheme
+        // boundaries, landing at the correct grapheme col on the
+        // (possibly joined) line.
+        tab.cursor = char_to_cursor(delete_start, &eb.rope);
+        let after = tab.cursor;
         eb.history
-            .record_delete(char_idx - 1, Arc::from(removed), before, after);
+            .record_delete(delete_start, Arc::from(removed), before, after);
     });
 }
 
@@ -253,21 +296,50 @@ pub(super) fn delete_forward(tabs: &mut Tabs, edits: &mut BufferEdits) {
             return;
         }
         let line_count = eb.rope.len_lines();
+        let line_grapheme_count = line_grapheme_len(&eb.rope, tab.cursor.line);
         let on_last_line = tab.cursor.line + 1 >= line_count;
-        let at_line_end = tab.cursor.col >= line_char_len(&eb.rope, tab.cursor.line);
+        let at_line_end = tab.cursor.col >= line_grapheme_count;
         if on_last_line && at_line_end {
             return;
         }
         let before = tab.cursor;
+        let line_char_start = eb.rope.line_to_char(tab.cursor.line);
+        let cur_line_slice = eb.rope.line(tab.cursor.line);
+
+        let (delete_start, delete_end) = if tab.cursor.col < line_grapheme_count {
+            // In-line: delete the grapheme cluster at cursor.
+            let cur_char_in_line =
+                grapheme_col_to_char(cur_line_slice, tab.cursor.col);
+            let next_char_in_line =
+                grapheme_col_to_char(cur_line_slice, tab.cursor.col + 1);
+            (
+                line_char_start + cur_char_in_line,
+                line_char_start + next_char_in_line,
+            )
+        } else {
+            // At end-of-line: delete the trailing newline (1 char)
+            // to join with the next line. Mirrors M3 behaviour
+            // (legacy delete_forward removed exactly one char at
+            // EOL); proper `\r\n` handling is a separate concern.
+            let line_chars_total = cur_line_slice.len_chars();
+            if line_chars_total == 0 {
+                return;
+            }
+            let line_end = line_char_start + line_chars_total;
+            (line_end - 1, line_end)
+        };
         let mut rope = (*eb.rope).clone();
-        let char_idx = rope.line_to_char(tab.cursor.line) + tab.cursor.col;
-        let removed: String = rope.slice(char_idx..char_idx + 1).to_string();
-        rope.remove(char_idx..char_idx + 1);
+        let removed: String = rope.slice(delete_start..delete_end).to_string();
+        rope.remove(delete_start..delete_end);
         bump(eb, rope);
-        // Cursor stays put. preferred_col unchanged (col didn't move).
+        // Cursor stays put logically; re-derive in case the join
+        // changed line geometry (col may shift if a wide grapheme
+        // shifts forward — the post-edit char_to_cursor handles
+        // it cleanly).
+        tab.cursor = char_to_cursor(delete_start, &eb.rope);
         let after = tab.cursor;
         eb.history
-            .record_delete(char_idx, Arc::from(removed), before, after);
+            .record_delete(delete_start, Arc::from(removed), before, after);
     });
 }
 

@@ -26,4 +26,4 @@ libc = { workspace = true }
 # East-Asian wide character widths so the painter knows to leave
 # a continuation cell after each CJK glyph (one logical char,
 # two terminal cells).
-unicode-width = "0.2"
+unicode-width = { workspace = true }

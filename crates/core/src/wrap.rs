@@ -1,271 +1,426 @@
-//! Soft-line-wrap geometry — pure text math, no rope / driver deps.
+//! Soft-line-wrap geometry — rope-aware, display-cell-based.
 //!
 //! Rendering wraps each logical line into one or more **sub-lines**
-//! (visual rows). A sub-line is a contiguous character range within
-//! a logical line; rendering emits one `BodyLine` per sub-line so a
-//! 200-char logical line displays across several visible rows when
-//! the editor viewport is narrower.
+//! (visual rows). A sub-line is a contiguous **char range** within
+//! a logical line that occupies at most `wrap_width(content_cols)`
+//! **display cells**. Wide chars (CJK, emoji) are 2 cells; combining
+//! marks are 0 cells; tabs are next-tab-stop wide.
 //!
-//! # Wrap policy (direct port of legacy `led_core::wrap`)
+//! # Wrap policy
 //!
-//! - Lines that fit within `content_cols` chars produce one
-//!   sub-line holding the whole line.
+//! - Lines that fit within `wrap_width(content_cols)` cells produce
+//!   one sub-line covering every grapheme cluster in the line.
 //! - Longer lines are split into chunks. Each **non-last** chunk
-//!   holds `content_cols - 1` chars — the painter uses the final
-//!   column for a `\` continuation glyph, so content that would
-//!   have been there spills onto the next sub-line.
+//!   holds as many graphemes as fit in `wrap_width` cells (greedy);
+//!   the painter uses the final cell of the row for a `\`
+//!   continuation glyph, so what would have wrapped onto the
+//!   reserved cell spills onto the next sub-line.
 //! - The **last** chunk holds whatever's left, up to `content_cols`
-//!   chars (no continuation glyph — the line ends here).
+//!   cells.
 //!
-//! Leaving the final column for `\` matches legacy's visible
-//! behaviour: users see exactly where one logical line wraps.
+//! Leaving the final cell for `\` matches the legacy wrap UX: users
+//! see exactly where one logical line wraps. The `wrap_width` /
+//! `content_cols <= 1` short-circuits stay verbatim from the
+//! pre-M25 implementation.
+//!
+//! # Coordinates
+//!
+//! - **Grapheme col** — a 0-based count of grapheme clusters in
+//!   the line (`Cursor::col`'s unit).
+//! - **Char idx** — a 0-based char offset relative to the line's
+//!   start (rope-friendly).
+//! - **Display cell** — a 0-based count of terminal cells.
+//!
+//! [`SubLineRange`] returns char idx + cell count. Cursor placement
+//! uses [`col_to_sub_line`] (grapheme col → display cell within sub)
+//! and [`sub_line_cells_to_grapheme_col`] (display cell back to
+//! grapheme col).
+
+use crate::grapheme::grapheme_display_width;
+use ropey::RopeSlice;
+use unicode_segmentation::UnicodeSegmentation;
 
 /// 0-based index of a sub-line within its enclosing logical line.
-/// `SubLine(0)` is the first sub-line, which always starts at col 0.
 #[derive(
     Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord, drv::Input,
     serde::Serialize, serde::Deserialize,
 )]
 pub struct SubLine(pub usize);
 
-/// Width of a non-last sub-line, in chars. Equals
-/// `content_cols - 1` — exactly one trailing col is reserved for
-/// the `\` continuation glyph, so content fills every column up
-/// to (but not including) the last. Matches emacs's display
-/// behaviour and the legacy led painter: no blank interior col
-/// before the glyph, no blank col after, `\` flush against the
-/// terminal's right edge. `content_cols <= 1` disables wrapping
-/// (degenerate narrow viewports render as a single row).
+/// One sub-line's footprint.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SubLineRange {
+    /// First char index (in the line) covered by this sub-line.
+    pub char_start: usize,
+    /// One past the last char index covered.
+    pub char_end: usize,
+    /// Display cells the sub-line occupies. ≤ `wrap_width(content_cols)`
+    /// for non-last subs; ≤ `content_cols` for the last sub.
+    pub cells: usize,
+}
+
+/// Width of a non-last sub-line, in display cells.
 const fn wrap_width(content_cols: usize) -> usize {
     if content_cols <= 1 { content_cols } else { content_cols - 1 }
 }
 
-/// How many sub-lines a logical line of `line_char_len` chars
-/// wraps to under `content_cols`. Always at least 1 — an empty
-/// line still shows up as a single blank visual row.
+/// Walk a logical line's grapheme clusters and return one
+/// [`SubLineRange`] per visual row. The vector is non-empty: empty
+/// lines yield a single zero-width sub-line so cursor arithmetic
+/// always has a row to land on.
 ///
-/// Every sub — last included — caps at `wrap_width` chars. A
-/// line that fits exactly in `wrap_width` chars renders as one
-/// sub with no glyph; one more char forces a second sub so the
-/// wrap marker (`\` at the rightmost col) and the overflow char
-/// can both be shown. This keeps the cursor always in a valid
-/// visible column: at EOL of a line whose length happens to equal
-/// `content_cols` (one past `wrap_width`), the previous version
-/// let the last sub fill the row and pushed the cursor off the
-/// right edge — the user then sees content ending without a `\`
-/// and no way to tell the line actually continues conceptually.
-pub fn sub_line_count(line_char_len: usize, content_cols: usize) -> usize {
+/// Hot-loop callers (paint, scroll math, cursor placement) should
+/// call this **once** per logical line and reuse the result for
+/// every per-sub query (sub count, range, is-continued, cell
+/// width). The targeted single-shot helpers
+/// [`sub_line_count`] / [`sub_line_range`] / [`is_continued`] all
+/// re-walk internally — fine for one-off lookups, wasteful in a
+/// per-row loop.
+pub fn line_layout(line: RopeSlice<'_>, content_cols: usize) -> Vec<SubLineRange> {
+    // Materialise the line content (sans newline). Mirrors
+    // grapheme::line_content; kept inline so wrap doesn't pay a
+    // double-walk. The allocation is amortised across all
+    // per-line consumers via [`line_layout`].
+    let mut s: String = line.chars().collect();
+    if s.ends_with('\n') {
+        s.pop();
+        if s.ends_with('\r') {
+            s.pop();
+        }
+    }
+
     if content_cols <= 1 {
-        return 1;
+        // Degenerate viewport — render as one sub.
+        let chars = s.chars().count();
+        let cells = total_cells(&s);
+        return vec![SubLineRange {
+            char_start: 0,
+            char_end: chars,
+            cells,
+        }];
     }
+
     let ww = wrap_width(content_cols);
-    if line_char_len <= ww {
-        return 1;
+    let mut out = Vec::with_capacity(1);
+    let mut sub_start_char = 0usize;
+    let mut sub_cells = 0usize;
+    let mut chars_consumed = 0usize;
+
+    for g in s.graphemes(true) {
+        let g_chars = g.chars().count();
+        let g_cells = grapheme_display_width(g, sub_cells);
+        if sub_cells + g_cells > ww {
+            // Close the current sub before this grapheme.
+            out.push(SubLineRange {
+                char_start: sub_start_char,
+                char_end: chars_consumed,
+                cells: sub_cells,
+            });
+            sub_start_char = chars_consumed;
+            // Recompute g_cells for the new sub (matters for tabs:
+            // a tab's width depends on the running cell column).
+            sub_cells = grapheme_display_width(g, 0);
+            chars_consumed += g_chars;
+            continue;
+        }
+        sub_cells += g_cells;
+        chars_consumed += g_chars;
     }
-    // Repeatedly shave `ww` off the remaining width, until what's
-    // left fits in one `wrap_width`-wide row. Always 1 more than
-    // the count of `ww`-sized chunks.
-    let mut count = 0;
-    let mut remaining = line_char_len;
-    while remaining > ww {
-        count += 1;
-        remaining -= ww;
-    }
-    count + 1
+
+    // Always emit the trailing sub, even if empty (so an empty line
+    // still produces one row, and end-of-line cursors have somewhere
+    // to land).
+    out.push(SubLineRange {
+        char_start: sub_start_char,
+        char_end: chars_consumed,
+        cells: sub_cells,
+    });
+
+    out
 }
 
-/// The `[col_start, col_end)` char range of sub-line `sub` on a
-/// logical line of `line_char_len` chars, wrapped at
-/// `content_cols`. Non-last sub-lines span `content_cols - 1`
-/// chars; the last sub-line holds whatever's left.
-///
-/// Callers are responsible for clamping `sub` to the valid range
-/// reported by [`sub_line_count`]; out-of-range `sub` returns an
-/// empty range anchored at `line_char_len`.
+fn total_cells(s: &str) -> usize {
+    let mut acc = 0usize;
+    for g in s.graphemes(true) {
+        acc += grapheme_display_width(g, acc);
+    }
+    acc
+}
+
+/// How many sub-lines `line` wraps to under `content_cols`. Always
+/// ≥ 1. Single-shot — call [`line_layout`] when you need the count
+/// **plus** the per-sub ranges in the same loop.
+pub fn sub_line_count(line: RopeSlice<'_>, content_cols: usize) -> usize {
+    line_layout(line, content_cols).len()
+}
+
+/// The char-index range and cell width of sub-line `sub`. Out-of-
+/// range `sub` returns an empty range anchored at the line's char
+/// length. Single-shot — call [`line_layout`] when iterating
+/// multiple subs of the same logical line.
 pub fn sub_line_range(
     sub: SubLine,
-    line_char_len: usize,
+    line: RopeSlice<'_>,
     content_cols: usize,
-) -> (usize, usize) {
+) -> SubLineRange {
+    let subs = line_layout(line, content_cols);
+    if let Some(r) = subs.get(sub.0).copied() {
+        return r;
+    }
+    let last = subs.last().copied().unwrap_or_default();
+    SubLineRange {
+        char_start: last.char_end,
+        char_end: last.char_end,
+        cells: 0,
+    }
+}
+
+/// `true` when `sub` is **not** the final sub-line (painter draws
+/// `\` on this row). Single-shot — when `line_layout` is already
+/// in scope, use `sub.0 + 1 < layout.len()` directly.
+pub fn is_continued(sub: SubLine, line: RopeSlice<'_>, content_cols: usize) -> bool {
+    sub.0 + 1 < sub_line_count(line, content_cols)
+}
+
+/// Internal: build the full grapheme→(sub, cells_at_start) mapping.
+/// Each entry is `(sub, cells_at_start_within_sub)` for the cursor
+/// position immediately before grapheme `i`. Plus a final entry for
+/// the past-end cursor.
+fn cursor_positions(line: RopeSlice<'_>, content_cols: usize) -> Vec<(usize, usize)> {
+    let mut s: String = line.chars().collect();
+    if s.ends_with('\n') {
+        s.pop();
+        if s.ends_with('\r') {
+            s.pop();
+        }
+    }
+
+    let mut out = Vec::with_capacity(8);
     if content_cols <= 1 {
-        return (0, line_char_len);
+        // Degenerate — every cursor position lives on sub 0; cells
+        // equals the grapheme index (the painter clamps anyway).
+        for i in 0..=s.graphemes(true).count() {
+            out.push((0, i));
+        }
+        return out;
     }
+
     let ww = wrap_width(content_cols);
-    if line_char_len <= ww {
-        return (0, line_char_len);
+    let mut sub: usize = 0;
+    let mut sub_cells: usize = 0;
+
+    // Cursor before grapheme 0.
+    out.push((sub, sub_cells));
+
+    for g in s.graphemes(true) {
+        let g_cells_at_cur = grapheme_display_width(g, sub_cells);
+        if sub_cells + g_cells_at_cur > ww {
+            // This grapheme starts a new sub. The cursor "before"
+            // this grapheme is at the start of the new sub.
+            sub += 1;
+            sub_cells = 0;
+            // Adjust the just-pushed entry to be on the new sub.
+            *out.last_mut().expect("seeded entry") = (sub, sub_cells);
+            // Now consume the grapheme on the new sub.
+            sub_cells += grapheme_display_width(g, 0);
+        } else {
+            sub_cells += g_cells_at_cur;
+        }
+        out.push((sub, sub_cells));
     }
-    let start = sub.0.saturating_mul(ww);
-    if start >= line_char_len {
-        return (line_char_len, line_char_len);
-    }
-    let remaining = line_char_len - start;
-    let end = if remaining <= ww {
-        // Last chunk — takes the rest, up to `wrap_width` chars.
-        line_char_len
-    } else {
-        // Non-last chunk — exactly `wrap_width` chars of content.
-        start + ww
-    };
-    (start, end)
+    out
 }
 
-/// `true` when `sub` is **not** the final sub-line of a logical
-/// line of `line_char_len` chars — i.e. the painter should draw
-/// a `\` continuation glyph on this visual row.
-pub fn is_continued(
-    sub: SubLine,
-    line_char_len: usize,
-    content_cols: usize,
-) -> bool {
-    sub.0 + 1 < sub_line_count(line_char_len, content_cols)
-}
-
-/// Which sub-line a given column falls on, along with the column
-/// **within** that sub-line (0-based). Inverse of
-/// [`sub_line_range`].
+/// Where does grapheme col `gcol` fall? Returns the sub-line and the
+/// **display cell** offset within that sub-line.
 ///
-/// Cursor at the exact wrap boundary (`col == k * wrap_width` for
-/// `k >= 1`) lives at the START of sub-line `k`, not at the
-/// visual end of sub-line `k-1`. Cursor past the end of the
-/// penultimate chunk but still within the logical line lives on
-/// the last sub-line.
+/// At a wrap boundary, the cursor lives at the **start** of the next
+/// sub-line, not the end of the previous. End-of-line cursors past
+/// every wrap boundary live on the final sub-line at its end cell.
 pub fn col_to_sub_line(
-    col: usize,
-    line_char_len: usize,
+    gcol: usize,
+    line: RopeSlice<'_>,
     content_cols: usize,
 ) -> (SubLine, usize) {
-    if content_cols <= 1 {
-        return (SubLine(0), col);
-    }
-    let ww = wrap_width(content_cols);
-    if line_char_len <= ww {
-        return (SubLine(0), col);
-    }
-    let count = sub_line_count(line_char_len, content_cols);
-    let last_start = (count - 1).saturating_mul(ww);
-    if col >= last_start {
-        // Last sub-line absorbs every col past the penultimate
-        // wrap boundary, including an end-of-line cursor.
-        return (SubLine(count - 1), col - last_start);
-    }
-    (SubLine(col / ww), col % ww)
+    let positions = cursor_positions(line, content_cols);
+    let last_idx = positions.len().saturating_sub(1);
+    let (sub, cells) = positions
+        .get(gcol)
+        .copied()
+        .unwrap_or_else(|| positions[last_idx]);
+    (SubLine(sub), cells)
 }
 
-/// Inverse of [`col_to_sub_line`]: given a sub-line and a column
-/// within it, return the logical-line column. Clamps
-/// `col_within` to the sub-line's width so invalid inputs still
-/// land on a valid boundary.
-pub fn sub_line_col_to_line_col(
+/// Inverse of [`col_to_sub_line`]: given a sub-line and a target
+/// **display cell** offset within it, return the largest grapheme
+/// col whose cell prefix `≤ cells_within`. When the target cell
+/// falls in the middle of a wide glyph, snaps to the cluster start.
+pub fn sub_line_cells_to_grapheme_col(
     sub: SubLine,
-    col_within: usize,
-    line_char_len: usize,
+    cells_within: usize,
+    line: RopeSlice<'_>,
     content_cols: usize,
 ) -> usize {
-    if content_cols <= 1 {
-        return col_within.min(line_char_len);
+    let target_sub = sub.0;
+    let positions = cursor_positions(line, content_cols);
+
+    let mut best: Option<usize> = None;
+    for (g, (sub_at, cells_at)) in positions.iter().enumerate() {
+        if *sub_at == target_sub && *cells_at <= cells_within {
+            best = Some(g);
+        }
+        if *sub_at > target_sub {
+            break;
+        }
     }
-    let ww = wrap_width(content_cols);
-    if line_char_len <= ww {
-        return col_within.min(line_char_len);
-    }
-    let start = sub.0.saturating_mul(ww);
-    // Every sub — last included — caps at `ww` chars; the last
-    // one may be shorter when the line doesn't divide evenly.
-    let count = sub_line_count(line_char_len, content_cols);
-    let width = if sub.0 + 1 == count {
-        line_char_len.saturating_sub(start)
-    } else {
-        ww
-    };
-    start + col_within.min(width)
+    // Fallback: last position on or before target_sub.
+    best.unwrap_or_else(|| {
+        positions
+            .iter()
+            .enumerate()
+            .rfind(|(_, (s, _))| *s <= target_sub)
+            .map(|(g, _)| g)
+            .unwrap_or(0)
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ropey::Rope;
+
+    fn r(s: &str) -> Rope {
+        Rope::from_str(s)
+    }
 
     #[test]
     fn empty_line_is_one_sub_line() {
-        assert_eq!(sub_line_count(0, 40), 1);
-        assert_eq!(sub_line_range(SubLine(0), 0, 40), (0, 0));
-        assert!(!is_continued(SubLine(0), 0, 40));
+        let rope = r("");
+        let line = rope.line(0);
+        assert_eq!(sub_line_count(line, 40), 1);
+        assert_eq!(
+            sub_line_range(SubLine(0), line, 40),
+            SubLineRange { char_start: 0, char_end: 0, cells: 0 }
+        );
+        assert!(!is_continued(SubLine(0), line, 40));
     }
 
     #[test]
     fn short_line_fits_on_one_sub_line() {
-        assert_eq!(sub_line_count(10, 40), 1);
-        assert_eq!(sub_line_range(SubLine(0), 10, 40), (0, 10));
-        assert!(!is_continued(SubLine(0), 10, 40));
+        let rope = r("hello");
+        let line = rope.line(0);
+        assert_eq!(sub_line_count(line, 40), 1);
+        let r = sub_line_range(SubLine(0), line, 40);
+        assert_eq!(r.char_start, 0);
+        assert_eq!(r.char_end, 5);
+        assert_eq!(r.cells, 5);
+        assert!(!is_continued(SubLine(0), line, 40));
     }
 
     #[test]
-    fn line_exactly_wrap_width_wide_fits_in_one_sub_line() {
-        // A 9-char line at content_cols=10 (wrap_width=9) holds
-        // the whole line on one row — no continuation needed.
-        assert_eq!(sub_line_count(9, 10), 1);
-        assert_eq!(sub_line_range(SubLine(0), 9, 10), (0, 9));
-        assert!(!is_continued(SubLine(0), 9, 10));
+    fn line_exactly_wrap_width_wide_fits_one_sub_line() {
+        let rope = r("123456789"); // 9 chars, content_cols=10, ww=9.
+        let line = rope.line(0);
+        assert_eq!(sub_line_count(line, 10), 1);
     }
 
     #[test]
-    fn line_longer_than_wrap_width_wraps_even_when_short_of_content_cols() {
-        // A 10-char line at content_cols=10 (wrap_width=9) overflows
-        // `wrap_width` by one — wraps into a 9+1 split so the last
-        // char and the cursor-past-EOL position both stay visible.
-        assert_eq!(sub_line_count(10, 10), 2);
-        assert_eq!(sub_line_range(SubLine(0), 10, 10), (0, 9));
-        assert_eq!(sub_line_range(SubLine(1), 10, 10), (9, 10));
-        assert!(is_continued(SubLine(0), 10, 10));
-        assert!(!is_continued(SubLine(1), 10, 10));
+    fn line_one_past_wrap_width_wraps_to_two() {
+        let rope = r("1234567890"); // 10 chars, content_cols=10, ww=9.
+        let line = rope.line(0);
+        assert_eq!(sub_line_count(line, 10), 2);
+        let r0 = sub_line_range(SubLine(0), line, 10);
+        let r1 = sub_line_range(SubLine(1), line, 10);
+        assert_eq!((r0.char_start, r0.char_end, r0.cells), (0, 9, 9));
+        assert_eq!((r1.char_start, r1.char_end, r1.cells), (9, 10, 1));
+        assert!(is_continued(SubLine(0), line, 10));
+        assert!(!is_continued(SubLine(1), line, 10));
     }
 
     #[test]
-    fn wrapped_line_leaves_last_col_for_continuation_glyph() {
-        // 25 chars, content_cols=10, wrap_width=9. One trailing
-        // col reserved per non-last sub (the `\`).
-        // Sub 0 = [0, 9), sub 1 = [9, 18), sub 2 = [18, 25).
-        assert_eq!(sub_line_count(25, 10), 3);
-        assert_eq!(sub_line_range(SubLine(0), 25, 10), (0, 9));
-        assert_eq!(sub_line_range(SubLine(1), 25, 10), (9, 18));
-        assert_eq!(sub_line_range(SubLine(2), 25, 10), (18, 25));
-        assert!(is_continued(SubLine(0), 25, 10));
-        assert!(is_continued(SubLine(1), 25, 10));
-        assert!(!is_continued(SubLine(2), 25, 10));
+    fn wide_chars_wrap_at_cell_boundary() {
+        // 10 ASCII + 1 CJK glyph (2 cells). Total cells = 12.
+        // content_cols=12, ww=11. Cells 10 fit; +CJK=12 > 11 → wrap.
+        let rope = r("aaaaaaaaaa你");
+        let line = rope.line(0);
+        assert_eq!(sub_line_count(line, 12), 2);
+        let r0 = sub_line_range(SubLine(0), line, 12);
+        let r1 = sub_line_range(SubLine(1), line, 12);
+        assert_eq!((r0.char_start, r0.char_end, r0.cells), (0, 10, 10));
+        assert_eq!((r1.char_start, r1.char_end, r1.cells), (10, 11, 2));
     }
 
     #[test]
-    fn col_to_sub_line_uses_wrap_width_not_content_cols() {
-        // content_cols=10, wrap_width=9.
-        assert_eq!(col_to_sub_line(0, 25, 10), (SubLine(0), 0));
-        assert_eq!(col_to_sub_line(8, 25, 10), (SubLine(0), 8));
-        // Col 9 is the start of sub-line 1 (boundary → next sub).
-        assert_eq!(col_to_sub_line(9, 25, 10), (SubLine(1), 0));
-        assert_eq!(col_to_sub_line(17, 25, 10), (SubLine(1), 8));
-        // Col 18 is the start of the LAST sub-line, which holds
-        // the rest of the line (up to 10 chars wide).
-        assert_eq!(col_to_sub_line(18, 25, 10), (SubLine(2), 0));
-        // End-of-line cursor at col 25 lives on the last sub-line.
-        assert_eq!(col_to_sub_line(25, 25, 10), (SubLine(2), 7));
+    fn combining_marks_dont_force_wrap() {
+        // "cafe\u{0301}" — 5 chars, 4 graphemes, 4 cells.
+        let rope = r("cafe\u{0301}");
+        let line = rope.line(0);
+        assert_eq!(sub_line_count(line, 5), 1);
     }
 
     #[test]
-    fn sub_line_col_round_trips() {
-        for col in [0, 5, 8, 9, 10, 17, 18, 24, 25] {
-            let (sub, within) = col_to_sub_line(col, 25, 10);
-            assert_eq!(
-                sub_line_col_to_line_col(sub, within, 25, 10),
-                col,
-                "round-trip failed for col {col}"
-            );
+    fn col_to_sub_line_basic() {
+        let rope = r("1234567890abc"); // 13 chars, ww=9
+        let line = rope.line(0);
+        // Cursor at grapheme 0 → sub 0, cell 0
+        assert_eq!(col_to_sub_line(0, line, 10), (SubLine(0), 0));
+        // Cursor at grapheme 8 → sub 0, cell 8
+        assert_eq!(col_to_sub_line(8, line, 10), (SubLine(0), 8));
+        // Cursor at grapheme 9 → wraps; sub 1, cell 0
+        assert_eq!(col_to_sub_line(9, line, 10), (SubLine(1), 0));
+        // Cursor at grapheme 13 (end) → sub 1, cell 4
+        assert_eq!(col_to_sub_line(13, line, 10), (SubLine(1), 4));
+    }
+
+    #[test]
+    fn col_to_sub_line_with_cjk() {
+        // "abc你好def" — 8 graphemes, 10 cells.
+        // content_cols=10, ww=9. Cells per grapheme:
+        //   a=1, b=1, c=1, 你=2, 好=2, d=1, e=1, f=1
+        // Running cells before each: 0,1,2,3,5,7,8,9 (then f wraps).
+        let rope = r("abc你好def");
+        let line = rope.line(0);
+        assert_eq!(col_to_sub_line(0, line, 10), (SubLine(0), 0));
+        assert_eq!(col_to_sub_line(3, line, 10), (SubLine(0), 3));
+        assert_eq!(col_to_sub_line(4, line, 10), (SubLine(0), 5));
+        assert_eq!(col_to_sub_line(5, line, 10), (SubLine(0), 7));
+        // Grapheme 7 (`f`) — 9+1>9, wraps to sub 1, cell 0.
+        assert_eq!(col_to_sub_line(7, line, 10), (SubLine(1), 0));
+        // Past-end cursor lands at end of sub 1.
+        assert_eq!(col_to_sub_line(8, line, 10), (SubLine(1), 1));
+    }
+
+    fn grapheme_count(line: RopeSlice<'_>) -> usize {
+        let mut s: String = line.chars().collect();
+        if s.ends_with('\n') {
+            s.pop();
+            if s.ends_with('\r') {
+                s.pop();
+            }
+        }
+        s.graphemes(true).count()
+    }
+
+    #[test]
+    fn round_trip_col_to_sub_to_col() {
+        let rope = r("hello world this is a longer test line for wrapping");
+        let line = rope.line(0);
+        let cc = 20;
+        for g in 0..=grapheme_count(line) {
+            let (sub, within) = col_to_sub_line(g, line, cc);
+            let back = sub_line_cells_to_grapheme_col(sub, within, line, cc);
+            assert_eq!(back, g, "round-trip failed for g={g}");
         }
     }
 
     #[test]
     fn content_cols_one_or_zero_is_a_degenerate_no_op() {
-        assert_eq!(sub_line_count(50, 0), 1);
-        assert_eq!(sub_line_range(SubLine(0), 50, 0), (0, 50));
-        assert_eq!(col_to_sub_line(20, 50, 0), (SubLine(0), 20));
-        assert_eq!(sub_line_count(50, 1), 1);
-        assert_eq!(col_to_sub_line(20, 50, 1), (SubLine(0), 20));
+        let rope = r("hello");
+        let line = rope.line(0);
+        assert_eq!(sub_line_count(line, 0), 1);
+        assert_eq!(sub_line_count(line, 1), 1);
+        let r = sub_line_range(SubLine(0), line, 0);
+        assert_eq!(r.char_end, 5);
+        assert_eq!(col_to_sub_line(2, line, 0), (SubLine(0), 2));
     }
 }

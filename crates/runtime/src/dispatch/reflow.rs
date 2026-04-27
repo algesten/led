@@ -55,14 +55,16 @@ pub(super) fn reflow_paragraph(
 
         // Cursor: clamp to the new buffer's bounds. If the
         // cursor row would be past the new line count, drop to
-        // the last line; if the column would be past EOL, clamp.
+        // the last line; if the column would be past EOL, clamp
+        // to the line's grapheme count (M25 unit).
         let new_line_count = eb.rope.len_lines().max(1);
         let new_row = tab.cursor.line.min(new_line_count - 1);
-        let new_line_len = line_char_len(&eb.rope, new_row);
-        let new_col = tab.cursor.col.min(new_line_len);
+        let new_line_slice = eb.rope.line(new_row);
+        let new_grapheme_len = led_core::line_grapheme_len(new_line_slice);
+        let new_col = tab.cursor.col.min(new_grapheme_len);
         tab.cursor.line = new_row;
         tab.cursor.col = new_col;
-        tab.cursor.preferred_col = new_col;
+        tab.cursor.preferred_col = led_core::prefix_display_width(new_line_slice, new_col);
         let after = tab.cursor;
 
         eb.history.finalise();
@@ -104,20 +106,3 @@ fn file_extension(
         .map(|s| s.to_string())
 }
 
-fn line_char_len(rope: &ropey::Rope, line: usize) -> usize {
-    if line >= rope.len_lines() {
-        return 0;
-    }
-    let slice = rope.line(line);
-    let mut end = slice.len_chars();
-    if end == 0 {
-        return 0;
-    }
-    if slice.char(end - 1) == '\n' {
-        end -= 1;
-        if end > 0 && slice.char(end - 1) == '\r' {
-            end -= 1;
-        }
-    }
-    end
-}

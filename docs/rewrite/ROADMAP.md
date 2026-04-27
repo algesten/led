@@ -568,25 +568,33 @@ All three rely on syntax (M15) for language-aware logic.
 `actions/reflow_paragraph`, `actions/sort_imports`,
 `features/auto_indent/*`.
 
-### M25 — Grapheme-aware column math
+### M25 — Grapheme-aware column math (SHIPPED, 2026-04-26)
 
-Promotes the M2/M3 deferral. Column arithmetic becomes
-grapheme-cluster-indexed; rendering consults `unicode-width` for cell
-occupancy.
+Promoted the M2/M3 deferral. Column arithmetic is now grapheme-
+cluster-indexed; rendering consults `unicode-width` for cell
+occupancy. See [`MILESTONE-25.md`](MILESTONE-25.md) for the design.
 
-- Cursor `col` semantics shift: the units are grapheme clusters, not
-  chars. Requires rewriting `apply_move` / `body_model` to use
-  `unicode-segmentation` iteration over the rope.
-- Wide chars (CJK, emoji) render as two cells.
+- `Cursor::col` units are grapheme clusters (was: chars).
+  `Cursor::preferred_col` is in display cells (was: chars).
+- New `crates/core/src/grapheme.rs` (rope-walk helpers) +
+  refactored `wrap.rs` (rope-aware sub-line geometry).
+- `apply_move` / `body_model` walk graphemes; popover and
+  completion-popup anchors land on the correct display column.
+- Edit primitives (`delete_back` / `delete_forward`) operate on
+  whole grapheme clusters — one Backspace on `é` written as
+  `e + combining acute` removes both chars in one step.
+- Wide chars (CJK, emoji) render as two cells (already in place
+  from a prior pass; M25 connects buffer-coord cursor to
+  display-cell painter).
 - Combining marks / ZWJ sequences collapse into one cluster.
 
-**Spec reference:** none explicit — legacy mostly ignores this, we
-improve it. Golden tests must add wide-char + combining cases.
+**Spec reference:** [`MILESTONE-25.md`](MILESTONE-25.md). Legacy
+mostly ignores this; M25 is a behaviour improvement over legacy.
 
-**Goldens moved to green:** relevant `edge/unicode*` scenarios. New
-scenarios authored here also land on `main` first (the branch rule
-in `REWRITE-PLAN.md`), since M25 is a behaviour improvement over
-legacy, not a regression fix.
+**Goldens moved to green:** `edge/unicode_emoji`, `edge/unicode_rtl`.
+`edge/unicode_combining` snap refreshed to grapheme col semantics
+(legacy's char-indexed col was kept until M25 by accident — see
+`GOLDEN-TODO.md` for the refresh rationale).
 
 ### M26 — External file change detection
 

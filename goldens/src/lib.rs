@@ -441,25 +441,8 @@ impl GoldenRunner {
     }
 }
 
-fn assert_against_golden(actual: &str, golden_path: &Path, kind: &str) {
-    if std::env::var("UPDATE_GOLDENS").is_ok() {
-        if let Some(parent) = golden_path.parent() {
-            std::fs::create_dir_all(parent).expect("create scenario dir");
-        }
-        std::fs::write(golden_path, actual).expect("write golden");
-        return;
-    }
-    let expected_raw = std::fs::read_to_string(golden_path).unwrap_or_else(|e| {
-        panic!(
-            "{kind} golden missing at {} ({e}). Run with UPDATE_GOLDENS=1 to create.",
-            golden_path.display()
-        )
-    });
-    assert_against_golden_text(actual, &expected_raw, golden_path, kind);
-}
-
-/// Variant of [`assert_against_golden`] that takes the expected
-/// text already loaded — used when the caller has run an
+/// Compare `actual` to a golden file, supporting `UPDATE_GOLDENS=1`
+/// for first-time creation / refresh. Used when the caller has run an
 /// additional normalization (e.g. fake-binary path placeholders)
 /// over the golden before comparing.
 fn assert_against_golden_text(
@@ -589,19 +572,14 @@ pub fn normalize_trace(raw: &str, tmpdir: &Path) -> String {
         s = s.replace(&fake_gh, "<FAKE-GH>");
         // Drop wall-clock timestamp prefix `t=NNNms\t` for now. Re-add
         // when --test-clock is in place.
-        if let Some(rest) = s.strip_prefix("t=") {
-            if let Some(idx) = rest.find('\t') {
-                s = rest[idx + 1..].to_string();
-            }
+        if let Some(rest) = s.strip_prefix("t=")
+            && let Some(idx) = rest.find('\t')
+        {
+            s = rest[idx + 1..].to_string();
         }
-        // Mask non-deterministic per-field IDs. Each entry is a field-
-        // name prefix; everything from that prefix to the next whitespace
-        // (or end-of-line) is replaced with the placeholder.
-        for (prefix, placeholder) in [
-            ("chain=", "chain=<CHAIN>"),
-        ] {
-            s = mask_field(&s, prefix, placeholder);
-        }
+        // Mask non-deterministic per-field IDs. Single field for now;
+        // expand into a loop when a second masked field arrives.
+        s = mask_field(&s, "chain=", "chain=<CHAIN>");
         out.push_str(&s);
         out.push('\n');
     }

@@ -50,7 +50,6 @@ pub fn chord_to_bytes(chord: &str) -> Option<Vec<u8>> {
         "Backspace" => vec![0x7f],
         "Space" if ctrl => {
             // Ctrl-Space sends NUL.
-            ctrl = false;
             return Some(if alt { vec![0x1b, 0x00] } else { vec![0x00] });
         }
         "Space" => vec![b' '],
@@ -72,7 +71,6 @@ pub fn chord_to_bytes(chord: &str) -> Option<Vec<u8>> {
                 } else {
                     return None;
                 };
-                ctrl = false;
                 if alt {
                     return Some(vec![0x1b, byte]);
                 } else {

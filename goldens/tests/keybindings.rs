@@ -14,6 +14,7 @@
 //!      - Ctrl-Home, Ctrl-End, Ctrl-Left, Ctrl-Right
 //!      - Ctrl-Space
 //!      - Ctrl-/, Ctrl-_, Ctrl-7 (undo aliases)
+//!
 //!    Their bindings live in the inventory but cannot be sent through
 //!    the PTY at this layer. Covered indirectly by aliased chords
 //!    (Home/End/Alt-</> for navigation; there is no alternate chord for

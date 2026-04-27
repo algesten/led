@@ -1,0 +1,13 @@
+# M25 regression: Backspace on a multi-codepoint grapheme cluster
+# (e + combining acute) removes the whole cluster in one keystroke.
+# After End: cursor at L1:C5 (4 graphemes + past-end). After
+# Backspace: line shows `caf`, cursor at L1:C4. The legacy char-
+# indexed Backspace would have removed only U+0301 here, leaving
+# `cafe` on screen — the rewrite removes both codepoints together.
+#
+# `wait 200ms` ensures the FileOpen completion lands before End
+# fires; without it the keystroke can race the file load and
+# no-op against an unseeded `BufferEdits` entry.
+wait 200ms
+press End
+press Backspace

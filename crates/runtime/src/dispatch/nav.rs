@@ -474,7 +474,12 @@ impl<'a> NavCtx<'a> {
             let rope = &eb.rope;
             let line_count = rope.len_lines();
             let line = outcome.target_row.min(line_count.saturating_sub(1));
-            let col = outcome.target_col.min(line_char_len(rope, line));
+            // `outcome.target_col` originates from LSP diagnostics
+            // (UTF-16 code units) for LSP categories or from git
+            // line statuses (always 0). Convert via the actual line
+            // so the cursor lands on the right grapheme cluster.
+            let line_slice = rope.line(line);
+            let col = led_core::utf16_units_to_grapheme_col(line_slice, outcome.target_col as u32);
             let body_rows = terminal
                 .dims
                 .map(|d| {
@@ -487,7 +492,7 @@ impl<'a> NavCtx<'a> {
             let tab = &mut tabs.open[target_idx];
             tab.cursor.line = line;
             tab.cursor.col = col;
-            tab.cursor.preferred_col = col;
+            tab.cursor.preferred_col = led_core::prefix_display_width(line_slice, col);
             tab.scroll = center_on_cursor(tab.scroll, tab.cursor, body_rows, rope, content_cols);
             tabs.active = Some(tab.id);
             alerts.set_info(msg, Instant::now(), ISSUE_NAV_TTL);

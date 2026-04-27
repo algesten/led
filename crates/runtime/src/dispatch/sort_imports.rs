@@ -59,11 +59,16 @@ pub(super) fn sort_imports(
 
         // Cursor handling (D7): if the cursor was inside the
         // import block, snap it to the start of `start_char`'s
-        // row. Otherwise leave it alone.
-        let cursor_char = eb
-            .rope
-            .line_to_char(tab.cursor.line)
-            + tab.cursor.col.min(line_char_len(&eb.rope, tab.cursor.line));
+        // row. Otherwise leave it alone. `tab.cursor.col` is a
+        // grapheme col; convert to a char idx through the line
+        // before adding it to the line's char start.
+        let cursor_line_slice = if tab.cursor.line < eb.rope.len_lines() {
+            eb.rope.line(tab.cursor.line)
+        } else {
+            eb.rope.slice(eb.rope.len_chars()..eb.rope.len_chars())
+        };
+        let cursor_char = eb.rope.line_to_char(tab.cursor.line)
+            + led_core::grapheme_col_to_char(cursor_line_slice, tab.cursor.col);
         let new_end_char = plan.start_char + plan.replacement.chars().count();
         if cursor_char >= plan.start_char && cursor_char < new_end_char {
             let row = eb.rope.char_to_line(plan.start_char);
@@ -95,20 +100,3 @@ pub(super) fn sort_imports(
     }
 }
 
-fn line_char_len(rope: &ropey::Rope, line: usize) -> usize {
-    if line >= rope.len_lines() {
-        return 0;
-    }
-    let slice = rope.line(line);
-    let mut end = slice.len_chars();
-    if end == 0 {
-        return 0;
-    }
-    if slice.char(end - 1) == '\n' {
-        end -= 1;
-        if end > 0 && slice.char(end - 1) == '\r' {
-            end -= 1;
-        }
-    }
-    end
-}

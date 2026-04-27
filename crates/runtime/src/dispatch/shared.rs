@@ -4,7 +4,7 @@
 //! `undo`, …) can call them without re-exporting. Nothing here is part
 //! of the dispatch public API.
 
-use led_core::{CanonPath, col_to_sub_line};
+use led_core::{CanonPath, char_to_grapheme_col, col_to_sub_line, grapheme_col_to_char};
 use led_driver_terminal_core::{Layout, Terminal};
 use led_state_browser::BrowserUi;
 use led_state_buffer_edits::{BufferEdits, EditedBuffer};
@@ -150,22 +150,28 @@ pub(super) fn bump(eb: &mut EditedBuffer, new_rope: Rope) {
 }
 
 /// `Cursor { line, col }` → absolute char index in the rope, with
-/// bounds clamping (out-of-range lines / cols are pulled in).
+/// bounds clamping (out-of-range lines / grapheme cols are pulled
+/// in). `c.col` is a grapheme-cluster index per M25; this helper
+/// is the single boundary where dispatch consumers translate to
+/// rope-friendly char indices.
 pub(super) fn cursor_to_char(c: &Cursor, rope: &Rope) -> usize {
     let line_count = rope.len_lines().max(1);
     let line = c.line.min(line_count - 1);
-    let line_len = line_char_len(rope, line);
-    let col = c.col.min(line_len);
-    rope.line_to_char(line) + col
+    let line_grapheme_count = line_grapheme_len(rope, line);
+    let col = c.col.min(line_grapheme_count);
+    let slice = rope.line(line);
+    rope.line_to_char(line) + grapheme_col_to_char(slice, col)
 }
 
-/// Absolute char index → `Cursor`. `preferred_col` is set to the
-/// logical col; callers that care about visual semantics run
-/// [`refresh_preferred_col`] afterward (or at the dispatch boundary)
-/// to convert it to the within-sub-line column.
+/// Absolute char index → `Cursor`. `col` is set to the grapheme col
+/// containing `ch`. `preferred_col` is set to match `col`; callers
+/// that care about visual semantics run [`refresh_preferred_col`]
+/// afterward to convert it to the within-sub-line cell column.
 pub(super) fn char_to_cursor(ch: usize, rope: &Rope) -> Cursor {
     let line = rope.char_to_line(ch);
-    let col = ch - rope.line_to_char(line);
+    let line_char = rope.line_to_char(line);
+    let slice = rope.line(line);
+    let col = char_to_grapheme_col(slice, ch - line_char);
     Cursor {
         line,
         col,
@@ -173,25 +179,31 @@ pub(super) fn char_to_cursor(ch: usize, rope: &Rope) -> Cursor {
     }
 }
 
-/// Recompute `preferred_col` as the within-sub-line column for
-/// the cursor's current `(line, col)` under the given `content_cols`.
-/// Dispatch calls this at the top-level boundary after any command
-/// that may have moved the cursor via an edit / kill / undo / redo /
-/// paste. Without it, edit primitives leave `preferred_col` as the
-/// raw logical col, which on a wrapped line exceeds any sub-line's
-/// width and pins subsequent vertical moves to whatever each
-/// sub-line clamps to — presenting as "arrow-up gets stuck" when
-/// the line re-wraps.
+/// Recompute `preferred_col` as the within-sub-line **display cell**
+/// column for the cursor's current `(line, col)` under the given
+/// `content_cols`. Dispatch calls this at the top-level boundary
+/// after any command that may have moved the cursor via an edit /
+/// kill / undo / redo / paste. Without it, edit primitives leave
+/// `preferred_col` as the raw logical col, which on a wrapped line
+/// exceeds any sub-line's width and pins subsequent vertical moves
+/// to whatever each sub-line clamps to — presenting as "arrow-up
+/// gets stuck" when the line re-wraps.
 pub(super) fn refresh_preferred_col(cursor: &mut Cursor, rope: &Rope, content_cols: usize) {
-    let (_, within) = col_to_sub_line(cursor.col, line_char_len(rope, cursor.line), content_cols);
-    cursor.preferred_col = within;
+    if cursor.line >= rope.len_lines() {
+        cursor.preferred_col = 0;
+        return;
+    }
+    let slice = rope.line(cursor.line);
+    let (_, within_cells) = col_to_sub_line(cursor.col, slice, content_cols);
+    cursor.preferred_col = within_cells;
 }
 
 /// Character count of a buffer line, stripped of trailing `\n` /
 /// `\r\n`. Out-of-range lines yield 0.
 ///
-/// Walks the rope directly — no intermediate `String` allocation.
-/// Called on every cursor keystroke, so this needs to stay cheap.
+/// Used wherever code needs to slice the rope by char index. For
+/// **cursor**-bounded math (col clamps, end-of-line position),
+/// reach for [`line_grapheme_len`] instead.
 pub(super) fn line_char_len(rope: &Rope, line: usize) -> usize {
     if line >= rope.len_lines() {
         return 0;
@@ -208,6 +220,16 @@ pub(super) fn line_char_len(rope: &Rope, line: usize) -> usize {
         }
     }
     end
+}
+
+/// Grapheme-cluster count of a buffer line, stripped of trailing
+/// `\n` / `\r\n`. Use this when measuring cursor positions
+/// (`Cursor::col` clamping, end-of-line, line-bound visibility).
+pub(super) fn line_grapheme_len(rope: &Rope, line: usize) -> usize {
+    if line >= rope.len_lines() {
+        return 0;
+    }
+    led_core::line_grapheme_len(rope.line(line))
 }
 
 pub(super) fn is_word_char(c: char) -> bool {

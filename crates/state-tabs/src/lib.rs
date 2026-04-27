@@ -12,15 +12,22 @@ led_core::id_newtype!(TabId);
 /// Buffer-coordinate cursor position. Stored on [`Tab`] so two tabs
 /// viewing the same file can hold independent cursors.
 ///
-/// `line` / `col` are zero-based indices; `col` is a character index
-/// (not a display column — revisit for wide/combining characters when
-/// syntax work comes online).
+/// `line` and `col` are zero-based. **`col` is a grapheme-cluster
+/// index** (M25): one position past `e` + combining-acute is `col=1`,
+/// even though the rope holds two chars. Right moves `col` by one
+/// cluster; End sets `col = line_grapheme_len`. Conversion to a rope
+/// char index goes through `dispatch::shared::cursor_to_char`, which
+/// resolves grapheme col → char idx via the line's segmenter.
 ///
-/// `preferred_col` is the user's horizontal "goal" — preserved across
-/// `Up` / `Down` / `PageUp` / `PageDown` so that traversing a short
-/// line and continuing onto a long line restores the original column.
-/// Any explicit horizontal move (`Left` / `Right` / `Home` / `End`)
-/// resets `preferred_col` to match the new `col`.
+/// `preferred_col` is the user's horizontal goal in **display cells**
+/// (not graphemes). Up / Down / PageUp / PageDown walk to the cluster
+/// whose `prefix_display_width` is closest to (but not greater than)
+/// `preferred_col` on the destination line; the displayed cursor stays
+/// vertically aligned even when the destination line has a different
+/// grapheme density (CJK ↔ ASCII transitions). Any explicit
+/// horizontal move (Left / Right / Home / End / WordLeft / WordRight /
+/// FileStart / FileEnd) resets `preferred_col` to match the post-move
+/// display position.
 #[derive(
     Clone, Copy, Debug, Default, PartialEq, Eq, drv::Input,
     serde::Serialize, serde::Deserialize,

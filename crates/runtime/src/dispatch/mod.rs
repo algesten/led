@@ -336,11 +336,18 @@ fn handle_completion_trigger(
             if tab.preview {
                 return;
             }
-            if edits.buffers.get(&tab.path).is_none() {
+            let Some(eb) = edits.buffers.get(&tab.path) else {
                 return;
-            }
+            };
             let line = tab.cursor.line as u32;
-            let col = tab.cursor.col as u32;
+            // LSP completion request takes a `Position::character`
+            // in UTF-16 code units (per `PositionEncodingKind`). The
+            // cursor's grapheme col converts via the buffer line.
+            let col = if tab.cursor.line < eb.rope.len_lines() {
+                led_core::grapheme_col_to_utf16_units(eb.rope.line(tab.cursor.line), tab.cursor.col)
+            } else {
+                0
+            };
             // Client-side refilter first — updates the popup
             // instantly against the newly-typed prefix without
             // waiting for a server round-trip. Also queues a
@@ -400,15 +407,19 @@ fn refresh_completion_filter(
         completions.dismiss();
         return;
     }
-    // Extract the typed prefix from the rope.
+    // Extract the typed prefix from the rope. `session.prefix_start_col`
+    // and `tab.cursor.col` are grapheme cols (M25); convert each to a
+    // char idx via the line's segmentation before slicing.
     let line_idx = session.prefix_line as usize;
     if line_idx >= eb.rope.len_lines() {
         completions.dismiss();
         return;
     }
+    let line_slice = eb.rope.line(line_idx);
     let line_start = eb.rope.line_to_char(line_idx);
-    let from = line_start + session.prefix_start_col as usize;
-    let to = line_start + tab.cursor.col;
+    let from =
+        line_start + led_core::grapheme_col_to_char(line_slice, session.prefix_start_col as usize);
+    let to = line_start + led_core::grapheme_col_to_char(line_slice, tab.cursor.col);
     if to < from || to > eb.rope.len_chars() {
         completions.dismiss();
         return;
@@ -1408,9 +1419,9 @@ fn lsp_goto_definition(
     if tab.preview {
         return;
     }
-    if edits.buffers.get(&tab.path).is_none() {
+    let Some(eb) = edits.buffers.get(&tab.path) else {
         return;
-    }
+    };
     // No-op when no LSP server is around — legacy treats
     // `lsp_goto_definition` as a silent no-op in standalone /
     // unconfigured-language buffers (no request, no alert).
@@ -1420,7 +1431,12 @@ fn lsp_goto_definition(
         return;
     }
     let line = tab.cursor.line as u32;
-    let col = tab.cursor.col as u32;
+    // LSP positions are UTF-16 code units (per spec default).
+    let col = if (tab.cursor.line) < eb.rope.len_lines() {
+        led_core::grapheme_col_to_utf16_units(eb.rope.line(tab.cursor.line), tab.cursor.col)
+    } else {
+        0
+    };
     lsp_pending.queue_goto_definition(tab.path.clone(), line, col);
 }
 

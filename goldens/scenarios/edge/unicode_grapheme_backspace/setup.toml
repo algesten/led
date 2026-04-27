@@ -1,0 +1,11 @@
+no_workspace = true
+
+# Combining-mark fixture: 'é' written as `e + U+0301 (COMBINING ACUTE
+# ACCENT)`. Two chars, one grapheme cluster. M25's grapheme-aware
+# delete_back must remove the whole cluster on a single Backspace —
+# legacy's char-indexed delete would leave a dangling combiner.
+[[file]]
+path = "combining.txt"
+contents = """
+café
+"""

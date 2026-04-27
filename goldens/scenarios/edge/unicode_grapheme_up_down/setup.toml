@@ -1,0 +1,14 @@
+no_workspace = true
+
+# Mixed-width fixture: line 1 is four 2-cell CJK glyphs (8 cells, 4
+# graphemes); line 2 is eight ASCII chars (8 cells, 8 graphemes).
+# M25's `preferred_col` is in display cells, so End on L1 + Down to
+# L2 must land at the SAME cell column on the destination line —
+# i.e. the visible cursor stays vertically aligned even though the
+# grapheme density differs by 2x.
+[[file]]
+path = "mixed.txt"
+contents = """
+你好世界
+abcdefgh
+"""

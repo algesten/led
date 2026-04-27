@@ -15,6 +15,7 @@
 //! The activation path reads the active tab's cursor + mark;
 //! no active selection collapses to cursor..cursor.
 
+use led_core::grapheme_col_to_utf16_units;
 use led_state_buffer_edits::BufferEdits;
 use led_state_lsp::{CodeActionPickerState, LspExtrasState};
 use led_state_tabs::Tabs;
@@ -47,24 +48,40 @@ pub(super) fn activate(
     if tab.preview {
         return;
     }
-    if edits.buffers.get(&tab.path).is_none() {
+    let Some(eb) = edits.buffers.get(&tab.path) else {
         return;
-    }
+    };
+    // LSP `Position::character` is a UTF-16 code-unit count by spec
+    // (`PositionEncodingKind::UTF16`). Convert each cursor + mark
+    // grapheme col through the buffer's actual line bytes so emoji,
+    // surrogate pairs, and combining sequences land at the position
+    // the server expects.
+    let to_lsp = |line: usize, gcol: usize| -> (u32, u32) {
+        if line >= eb.rope.len_lines() {
+            return (line as u32, 0);
+        }
+        let units = grapheme_col_to_utf16_units(eb.rope.line(line), gcol);
+        (line as u32, units)
+    };
     let (start_line, start_col, end_line, end_col) = match tab.mark {
         Some(m) => {
             // Sort mark vs cursor so the LSP range always has
             // start <= end — the protocol assumes ordered.
-            let a = (m.line as u32, m.col as u32);
-            let b = (tab.cursor.line as u32, tab.cursor.col as u32);
-            let (s, e) = if a <= b { (a, b) } else { (b, a) };
-            (s.0, s.1, e.0, e.1)
+            let a = (m.line, m.col);
+            let b = (tab.cursor.line, tab.cursor.col);
+            let (s_l, s_c, e_l, e_c) = if a <= b {
+                (a.0, a.1, b.0, b.1)
+            } else {
+                (b.0, b.1, a.0, a.1)
+            };
+            let (sl, sc) = to_lsp(s_l, s_c);
+            let (el, ec) = to_lsp(e_l, e_c);
+            (sl, sc, el, ec)
         }
-        None => (
-            tab.cursor.line as u32,
-            tab.cursor.col as u32,
-            tab.cursor.line as u32,
-            tab.cursor.col as u32,
-        ),
+        None => {
+            let (l, c) = to_lsp(tab.cursor.line, tab.cursor.col);
+            (l, c, l, c)
+        }
     };
     lsp_pending.queue_code_action(
         tab.path.clone(),

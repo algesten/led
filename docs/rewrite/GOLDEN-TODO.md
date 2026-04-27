@@ -5,14 +5,14 @@ runs because of test-load flakiness; check individual tests with
 `cargo test --manifest-path goldens/Cargo.toml --test <name>` to
 confirm a real failure.
 
-## Current state (post-M23, 2026-04-26)
+## Current state (post-M25, 2026-04-26)
 
 | Suite          | Pass | Fail |
 |----------------|------|------|
 | actions        | 57  | 0   |
 | config_keys    | 7   | 0   |
-| driver_events  | 25  | 2   |
-| edge           | 26  | 3   |
+| driver_events  | 24  | 3   |
+| edge           | 27  | 2   |
 | features       | 24  | 2   |
 | keybindings    | 111 | 0   |
 | smoke          | 4   | 1   |
@@ -21,9 +21,51 @@ confirm a real failure.
 Counts can swing ±1 per run from test-load flakiness on the
 parallel runner; the clipboard isolation flag knocked out the
 previous worst offenders (yank tests racing the system
-pasteboard).
+pasteboard). M25's grapheme walks added a small per-render
+allocation that nudged the parallel-run flake count up — single-
+threaded runs still match the table above.
 
 ## What's solid (recent fixes)
+
+- **M25 — grapheme-aware column math** (2026-04-26):
+  `Cursor::col` now indexes grapheme clusters (was: chars);
+  `Cursor::preferred_col` is in display cells (was: chars). The
+  rewrite handles wide CJK / emoji / combining-mark / ZWJ
+  content end-to-end:
+  - New `crates/core/src/grapheme.rs`: rope-walk helpers
+    (`line_grapheme_len`, `grapheme_col_to_char`,
+    `char_to_grapheme_col`, `prefix_display_width`,
+    `display_col_to_grapheme`, `grapheme_display_width`).
+  - `crates/core/src/wrap.rs`: refactored to a rope-aware API.
+    `sub_line_count(line, content_cols)`, `sub_line_range`
+    returns `SubLineRange { char_start, char_end, cells }`,
+    `col_to_sub_line(gcol, line, content_cols)` returns
+    grapheme col + display cells, plus
+    `sub_line_cells_to_grapheme_col` for vertical-move landing.
+  - `apply_move`: every variant rewritten to step graphemes
+    horizontally and preserve `preferred_col` in cells across
+    Up/Down/PageUp/PageDown. Word-boundary helpers walk
+    grapheme clusters via `is_word_grapheme`.
+  - Edit primitives: `delete_back` and `delete_forward`
+    delete a full grapheme cluster (e.g. one Backspace on
+    `é` written as `e + combining acute` removes both chars).
+    `insert_char` re-derives `cursor.col` post-edit so a
+    combining mark naturally extends the prior cluster.
+    `insert_newline`/`insert_tab` use grapheme counts for
+    indent length.
+  - `body_model` cursor placement reroutes through display
+    cells; popover/completion-popup anchors land at the
+    correct visible column on wide-char lines.
+  - **Goldens moved to green:** `edge/unicode_emoji`,
+    `edge/unicode_rtl` (were failing pre-M25). 
+    `edge/unicode_combining` snap refreshed to the new
+    grapheme col semantics (cursor "C9" on `family 👨‍👩‍👧`
+    instead of legacy's "C13" — the cluster is one position,
+    not five). Per `ROADMAP.md` § "Golden-review discipline"
+    this is an *intentional behavior improvement* (M25's whole
+    point) and the refreshed snap reflects what users see:
+    one Backspace removes the whole emoji family, cursor
+    advances one position past the cluster, etc.
 
 - **M23 — auto-indent / reflow / sort-imports** (2026-04-26):
   Three new commands wired through dispatch:

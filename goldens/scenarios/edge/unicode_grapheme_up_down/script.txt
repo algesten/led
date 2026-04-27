@@ -1,0 +1,15 @@
+# M25 regression: vertical move preserves the cursor's display
+# column across grapheme-density transitions.
+#
+# After End on L1 (4 CJK glyphs, 8 cells): cursor at L1:C5
+# (4 graphemes + past-end), preferred_col=8 cells.
+# After Down to L2 (8 ASCII chars, 8 cells): cursor at L2:C9
+# (8 graphemes + past-end). The cursor visually stays in the
+# right-edge column — grapheme col jumps from 4 to 8 because the
+# character density doubled, not because the cursor moved
+# horizontally.
+#
+# `wait 200ms` lets FileOpen complete before End fires.
+wait 200ms
+press End
+press Down

@@ -886,6 +886,8 @@ dependencies = [
  "imbl",
  "ropey",
  "serde",
+ "unicode-segmentation",
+ "unicode-width 0.2.2",
 ]
 
 [[package]]
@@ -1146,6 +1148,7 @@ dependencies = [
  "ropey",
  "serde_json",
  "toml",
+ "unicode-segmentation",
 ]
 
 [[package]]

@@ -10,6 +10,7 @@
 pub mod command;
 pub mod content_hash;
 pub mod git;
+pub mod grapheme;
 pub mod ids;
 pub mod issue;
 pub mod notify;
@@ -27,6 +28,11 @@ pub use drv;
 
 pub use command::{Command, parse_command};
 pub use content_hash::{EphemeralContentHash, PersistedContentHash};
+pub use grapheme::{
+    TAB_STOP, char_to_grapheme_col, display_col_to_grapheme, grapheme_col_to_char,
+    grapheme_col_to_utf16_units, grapheme_display_width, line_grapheme_len,
+    prefix_display_width, utf16_units_to_grapheme_col,
+};
 pub use issue::{
     CategoryInfo, IssueCategory, StatusDisplay, directory_categories, resolve_display,
 };
@@ -34,8 +40,8 @@ pub use notify::Notifier;
 pub use paths::{CanonPath, PathChain, UserPath};
 pub use text_input::TextInput;
 pub use wrap::{
-    SubLine, col_to_sub_line, is_continued, sub_line_col_to_line_col, sub_line_count,
-    sub_line_range,
+    SubLine, SubLineRange, col_to_sub_line, is_continued, line_layout,
+    sub_line_cells_to_grapheme_col, sub_line_count, sub_line_range,
 };
 
 // `id_newtype!` is `#[macro_export]` so it's already callable as

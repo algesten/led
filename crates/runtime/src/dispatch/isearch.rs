@@ -371,14 +371,24 @@ fn active_rope(tabs: &Tabs, edits: &BufferEdits) -> Option<Rope> {
     edits.buffers.get(&tab.path).map(|eb| (*eb.rope).clone())
 }
 
+/// Convert a `(line, grapheme_col)` cursor to a rope char idx.
+/// `col` is grapheme units (M25); the conversion walks the line's
+/// grapheme clusters before adding the line-start char offset.
 fn cursor_to_char(rope: &Rope, line: usize, col: usize) -> usize {
     let line = line.min(rope.len_lines().saturating_sub(1));
-    rope.line_to_char(line) + col
+    if rope.len_lines() == 0 {
+        return 0;
+    }
+    let line_slice = rope.line(line);
+    rope.line_to_char(line) + led_core::grapheme_col_to_char(line_slice, col)
 }
 
+/// Inverse of [`cursor_to_char`]: char idx → `(line, grapheme_col)`.
 fn char_to_line_col(rope: &Rope, ch: usize) -> (usize, usize) {
     let line = rope.char_to_line(ch);
-    let col = ch - rope.line_to_char(line);
+    let line_slice = rope.line(line);
+    let char_in_line = ch - rope.line_to_char(line);
+    let col = led_core::char_to_grapheme_col(line_slice, char_in_line);
     (line, col)
 }
 

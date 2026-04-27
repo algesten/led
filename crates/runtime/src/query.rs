@@ -751,21 +751,24 @@ fn active_body_match(
         .saturating_sub(TRAILING_RESERVED_COLS);
     let match_char_len = chars_between(&hit.preview, hit.match_start, hit.match_end);
     let col_start_char = hit.col.saturating_sub(1);
-    // Pin the match to the sub-line containing its starting col;
-    // wrapped matches (that straddle a sub-line boundary) paint
-    // only on their first sub-line — consistent with legacy,
-    // which didn't split match highlights across visual rows.
-    let hit_line_len = line_char_len_rope(rope, line);
-    let (match_sub, col_within) =
-        col_to_sub_line(col_start_char, hit_line_len, content_cols);
+    if line >= rope.len_lines() {
+        return None;
+    }
+    let hit_slice = rope.line(line);
+    // The hit's `col` is a CHAR index from the file-search driver;
+    // convert to grapheme col before consulting wrap geometry.
+    let match_gcol = led_core::char_to_grapheme_col(hit_slice, col_start_char);
+    let match_end_gcol =
+        led_core::char_to_grapheme_col(hit_slice, col_start_char + match_char_len);
+    let (match_sub, cells_within) =
+        col_to_sub_line(match_gcol, hit_slice, content_cols);
     // Walk sub-line counts to find the visible-row index for
     // (line, match_sub).
     let mut row: usize = 0;
     let mut ln = scroll.top;
     let mut sub_start = scroll.top_sub_line.0;
     while ln < line {
-        let len = line_char_len_rope(rope, ln);
-        let subs = sub_line_count(len, content_cols);
+        let subs = sub_line_count(rope.line(ln), content_cols);
         let remaining = subs.saturating_sub(sub_start);
         row = row.saturating_add(remaining);
         ln += 1;
@@ -778,11 +781,13 @@ fn active_body_match(
     if row >= body_rows {
         return None;
     }
-    // Columns of the match *within this sub-line*, clamped to
-    // the sub-line's content width.
-    let within_end = col_within.saturating_add(match_char_len);
-    let rel_start = col_within.min(content_cols);
-    let rel_end = within_end.min(content_cols);
+    // Columns of the match *within this sub-line*, in display cells,
+    // clamped to the sub-line's content width.
+    let (_, end_cells_within) =
+        col_to_sub_line(match_end_gcol, hit_slice, content_cols);
+    // If the end is on a later sub, clamp to content_cols.
+    let rel_start = cells_within.min(content_cols);
+    let rel_end = end_cells_within.min(content_cols).max(rel_start);
     if rel_end <= rel_start {
         return None;
     }
@@ -810,7 +815,7 @@ struct RenderContentArgs<'a> {
 
 fn render_content(args: RenderContentArgs<'_>) -> BodyModel {
     use led_driver_terminal_core::BodyLine;
-    use led_core::{SubLine, sub_line_count, sub_line_range};
+    use led_core::{SubLine, line_layout};
 
     let RenderContentArgs {
         rope,
@@ -833,6 +838,14 @@ fn render_content(args: RenderContentArgs<'_>) -> BodyModel {
     let mut lines: Vec<BodyLine> = Vec::with_capacity(body_rows);
     let mut ln = scroll.top;
     let mut sub = scroll.top_sub_line;
+
+    // Per-logical-line layout cached so we walk graphemes once per
+    // line, not once per sub-line query. Refresh whenever `ln`
+    // advances past the cached line.
+    let mut layout_for: Option<usize> = None;
+    let mut layout: Vec<led_core::SubLineRange> = Vec::new();
+    let mut full_line: String = String::new();
+
     for _ in 0..body_rows {
         if ln >= line_count {
             lines.push(BodyLine {
@@ -844,11 +857,15 @@ fn render_content(args: RenderContentArgs<'_>) -> BodyModel {
             });
             continue;
         }
-        let line_char_start = rope.line_to_char(ln);
-        let mut full_line = rope.line(ln).to_string();
-        strip_trailing_newline(&mut full_line);
-        let line_char_len = full_line.chars().count();
-        let max_sub = sub_line_count(line_char_len, content_cols);
+        if layout_for != Some(ln) {
+            let line_slice = rope.line(ln);
+            layout = line_layout(line_slice, content_cols);
+            full_line.clear();
+            full_line.extend(line_slice.chars());
+            strip_trailing_newline(&mut full_line);
+            layout_for = Some(ln);
+        }
+        let max_sub = layout.len();
         // Clamp `sub` to a valid range; a previous width change
         // could have left `scroll.top_sub_line` past the end of
         // the current line. Render the first sub-line instead
@@ -856,10 +873,13 @@ fn render_content(args: RenderContentArgs<'_>) -> BodyModel {
         if sub.0 >= max_sub {
             sub = SubLine(0);
         }
-        let (col_start, col_end) = sub_line_range(sub, line_char_len, content_cols);
+        let range = layout[sub.0];
+        let col_start = range.char_start;
+        let col_end = range.char_end;
+        let line_char_start = rope.line_to_char(ln);
         let slice: String = full_line.chars().skip(col_start).take(col_end - col_start).collect();
         let sub_char_start = line_char_start + col_start;
-        let is_continued = led_core::is_continued(sub, line_char_len, content_cols);
+        let is_continued = sub.0 + 1 < max_sub;
         let mut s = String::with_capacity(cols);
         s.push_str("  ");
         // Expand tabs to 4 spaces so the painter doesn't ship a
@@ -1089,33 +1109,35 @@ fn visible_cursor(
     rope: &Rope,
     content_cols: usize,
 ) -> Option<(u16, u16)> {
-    use led_core::{col_to_sub_line, sub_line_count};
+    use led_core::{col_to_sub_line, line_layout};
     let body_rows = area.rows as usize;
     if body_rows == 0 || c.line < s.top {
         return None;
     }
-    // Cursor's own sub-line + column within that sub-line.
-    let cur_line_len = line_char_len_rope(rope, c.line);
-    let (cur_sub, col_within) = col_to_sub_line(c.col, cur_line_len, content_cols);
-    // Count visible rows from (s.top, s.top_sub_line) to (c.line, cur_sub).
-    let mut row: usize = 0;
     let line_count = rope.len_lines();
+    if c.line >= line_count {
+        return None;
+    }
+    // Cursor's own sub-line + display-cell column within that sub.
+    let cur_slice = rope.line(c.line);
+    let (cur_sub, cells_within) = col_to_sub_line(c.col, cur_slice, content_cols);
+    // Count visible rows from (s.top, s.top_sub_line) to (c.line, cur_sub).
+    // One layout walk per intervening logical line — `line_layout` is
+    // the same primitive `render_content` uses, so on cache-hit ticks
+    // both share the cost and we don't double-walk.
+    let mut row: usize = 0;
     let mut ln = s.top;
     let mut sub_start = s.top_sub_line.0;
     while ln < c.line {
         if ln >= line_count {
             return None;
         }
-        let len = line_char_len_rope(rope, ln);
-        let subs = sub_line_count(len, content_cols);
+        let subs = line_layout(rope.line(ln), content_cols).len();
         let remaining = subs.saturating_sub(sub_start);
         row = row.saturating_add(remaining);
         ln += 1;
         sub_start = 0;
     }
-    // Same logical line: add the sub-line offset, clamped to 0
-    // if scroll started past this cursor's sub-line (caller's
-    // adjust_scroll should prevent that).
     if cur_sub.0 < sub_start {
         return None;
     }
@@ -1124,19 +1146,10 @@ fn visible_cursor(
         return None;
     }
     let max_col = (area.cols as usize).saturating_sub(1);
-    let col = (col_within + GUTTER_WIDTH).min(max_col) as u16;
+    let col = (cells_within + GUTTER_WIDTH).min(max_col) as u16;
     Some((row as u16, col))
 }
 
-fn line_char_len_rope(rope: &Rope, line: usize) -> usize {
-    let line_count = rope.len_lines();
-    if line >= line_count {
-        return 0;
-    }
-    let mut s = rope.line(line).to_string();
-    strip_trailing_newline(&mut s);
-    s.chars().count()
-}
 
 fn strip_trailing_newline(s: &mut String) {
     if s.ends_with('\n') {
@@ -1861,12 +1874,18 @@ pub fn popover_model(
     let content_cols = (editor_area.cols as usize)
         .saturating_sub(GUTTER_WIDTH)
         .saturating_sub(TRAILING_RESERVED_COLS);
-    let cur_line_len = line_char_len_rope(&eb.rope, cursor_row);
-    let (_, col_within) = col_to_sub_line(tab.cursor.col, cur_line_len, content_cols);
+    // Cursor on a row past the rope's last line — anchor at col 0
+    // (no content to translate). Same-row diagnostics still pop.
+    let col_within_cells = if cursor_row >= eb.rope.len_lines() {
+        0
+    } else {
+        let (_, cells) = col_to_sub_line(tab.cursor.col, eb.rope.line(cursor_row), content_cols);
+        cells
+    };
     let anchor_x = editor_area
         .x
         .saturating_add(GUTTER_WIDTH as u16)
-        .saturating_add(col_within as u16);
+        .saturating_add(col_within_cells as u16);
     let anchor_y = editor_area.y.saturating_add(row_in_area);
 
     Some(PopoverModel {

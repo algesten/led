@@ -4,7 +4,9 @@
 //! dispatch-facing wrapper that reads the right rope (edits first,
 //! store second) and updates both cursor + scroll on the active tab.
 
-use led_core::{SubLine, col_to_sub_line, sub_line_count, sub_line_range};
+use led_core::{
+    SubLine, col_to_sub_line, sub_line_cells_to_grapheme_col, sub_line_count, sub_line_range,
+};
 
 /// Minimum visual rows the cursor stays from either viewport edge.
 /// Hardcoded in legacy `Dimensions::new` (`crates/state/src/lib.rs:244`),
@@ -22,7 +24,7 @@ use ropey::Rope;
 use std::sync::Arc;
 
 use super::shared::{
-    GUTTER_WIDTH, TRAILING_RESERVED_COLS, is_word_char, line_char_len, rope_char_at,
+    GUTTER_WIDTH, TRAILING_RESERVED_COLS, is_word_char, line_grapheme_len, rope_char_at,
 };
 
 /// Logical cursor moves. Built from key events in `dispatch_key` and
@@ -121,14 +123,16 @@ pub(super) fn apply_move(
     let last_line = line_count - 1;
 
     // Horizontal move: anchor preferred_col to the new visual
-    // column (column within the resulting sub-line).
+    // **display cell** column (the cells consumed within the
+    // resulting sub-line). `col` is a grapheme-cluster index per
+    // M25.
     let horizontal = |line: usize, col: usize| -> Cursor {
-        let len = line_char_len(rope, line);
-        let (_, within) = col_to_sub_line(col, len, content_cols);
+        let slice = rope.line(line.min(last_line));
+        let (_, within_cells) = col_to_sub_line(col, slice, content_cols);
         Cursor {
             line,
             col,
-            preferred_col: within,
+            preferred_col: within_cells,
         }
     };
 
@@ -162,7 +166,7 @@ pub(super) fn apply_move(
                 horizontal(c.line, c.col - 1)
             } else if c.line > 0 {
                 let prev = c.line - 1;
-                horizontal(prev, line_char_len(rope, prev))
+                horizontal(prev, line_grapheme_len(rope, prev))
             } else {
                 horizontal(0, 0)
             }
@@ -170,7 +174,7 @@ pub(super) fn apply_move(
         Move::Right => {
             // Wrap to start of next line when at line end — matches
             // legacy `model::mov::move_right`. No-op at end-of-file.
-            let len = line_char_len(rope, c.line);
+            let len = line_grapheme_len(rope, c.line);
             if c.col < len {
                 horizontal(c.line, c.col + 1)
             } else if c.line < last_line {
@@ -180,11 +184,11 @@ pub(super) fn apply_move(
             }
         }
         Move::LineStart => horizontal(c.line, 0),
-        Move::LineEnd => horizontal(c.line, line_char_len(rope, c.line)),
+        Move::LineEnd => horizontal(c.line, line_grapheme_len(rope, c.line)),
         Move::FileStart => horizontal(0, 0),
         Move::FileEnd => {
             let line = last_line;
-            horizontal(line, line_char_len(rope, line))
+            horizontal(line, line_grapheme_len(rope, line))
         }
         Move::WordLeft => {
             let (line, col) = word_boundary_back(rope, c.line, c.col);
@@ -199,18 +203,21 @@ pub(super) fn apply_move(
 
 /// Step the cursor up by `steps` visual rows. Crosses sub-line
 /// boundaries within a wrapped line before advancing to the
-/// previous logical line. Preserves `preferred_col`; the landing
-/// column is `sub_line_start + min(preferred_col, sub_line_width)`.
+/// previous logical line. Preserves `preferred_col` (display cells);
+/// the landing column is the largest grapheme col whose cell prefix
+/// fits in `min(preferred_col, sub_line_width)`.
 fn visual_step_up(c: Cursor, rope: &Rope, content_cols: usize, steps: usize) -> Cursor {
     let mut line = c.line;
-    let len = line_char_len(rope, line);
-    let (mut sub, _) = col_to_sub_line(c.col, len, content_cols);
+    if line >= rope.len_lines() {
+        return c;
+    }
+    let (mut sub, _) = col_to_sub_line(c.col, rope.line(line), content_cols);
     for _ in 0..steps {
         if sub.0 > 0 {
             sub = SubLine(sub.0 - 1);
         } else if line > 0 {
             line -= 1;
-            let n = sub_line_count(line_char_len(rope, line), content_cols);
+            let n = sub_line_count(rope.line(line), content_cols);
             sub = SubLine(n.saturating_sub(1));
         } else {
             break;
@@ -229,10 +236,12 @@ fn visual_step_down(
     last_line: usize,
 ) -> Cursor {
     let mut line = c.line;
-    let cur_len = line_char_len(rope, line);
-    let (mut sub, _) = col_to_sub_line(c.col, cur_len, content_cols);
+    if line >= rope.len_lines() {
+        return c;
+    }
+    let (mut sub, _) = col_to_sub_line(c.col, rope.line(line), content_cols);
     for _ in 0..steps {
-        let n = sub_line_count(line_char_len(rope, line), content_cols);
+        let n = sub_line_count(rope.line(line), content_cols);
         if sub.0 + 1 < n {
             sub = SubLine(sub.0 + 1);
         } else if line < last_line {
@@ -245,60 +254,61 @@ fn visual_step_down(
     land_on_sub_line(line, sub, c.preferred_col, rope, content_cols)
 }
 
-/// Place the cursor at `preferred_col` within `(line, sub)`, clamped
-/// to the sub-line's valid cursor range. Keeps `preferred_col`
-/// untouched so a subsequent move over a wider sub-line restores
-/// the goal column.
+/// Place the cursor at the grapheme col closest to `preferred_col`
+/// (display cells) within `(line, sub)`, clamped to the sub-line's
+/// valid cursor cells. Keeps `preferred_col` untouched so a
+/// subsequent move over a wider sub-line restores the goal column.
 ///
-/// Non-last subs cap at `width - 1`: col `start + width` is the
-/// wrap boundary which [`col_to_sub_line`] resolves as the **next**
-/// sub's col 0, so landing there would bounce the cursor onto the
-/// sub we were trying to leave. Last subs cap at `width` — that's
-/// the logical EOL and a valid cursor position.
-///
-/// The asymmetry matters when `preferred_col` was captured on a
-/// last sub (width up to `content_cols`) and we're landing on a
-/// non-last sub (width `wrap_width = content_cols - 1`): plain
-/// `min(preferred_col, width)` would leave us at the wrap
-/// boundary.
+/// Non-last subs cap at `cells - 1`: a cursor at the wrap boundary
+/// would resolve as the next sub's cell 0 via [`col_to_sub_line`],
+/// bouncing the cursor onto the sub we were trying to leave. Last
+/// subs cap at `cells` — that's the logical EOL and a valid cursor
+/// position.
 fn land_on_sub_line(
     line: usize,
     sub: SubLine,
-    preferred_col: usize,
+    preferred_col_cells: usize,
     rope: &Rope,
     content_cols: usize,
 ) -> Cursor {
-    let line_len = line_char_len(rope, line);
-    let (start, end) = sub_line_range(sub, line_len, content_cols);
-    let width = end.saturating_sub(start);
-    let count = sub_line_count(line_len, content_cols);
+    if line >= rope.len_lines() {
+        return Cursor {
+            line,
+            col: 0,
+            preferred_col: preferred_col_cells,
+        };
+    }
+    let slice = rope.line(line);
+    let range = sub_line_range(sub, slice, content_cols);
+    let count = sub_line_count(slice, content_cols);
     let is_last = sub.0 + 1 >= count;
-    let max_within = if is_last { width } else { width.saturating_sub(1) };
+    let max_within = if is_last { range.cells } else { range.cells.saturating_sub(1) };
+    let target_cells = preferred_col_cells.min(max_within);
+    let col = sub_line_cells_to_grapheme_col(sub, target_cells, slice, content_cols);
     Cursor {
         line,
-        col: start + preferred_col.min(max_within),
-        preferred_col,
+        col,
+        preferred_col: preferred_col_cells,
     }
 }
 
-/// Word = run of alphanumeric-or-underscore chars. `word_boundary_fwd`
-/// skips any trailing non-word chars from the current position, then
-/// skips word chars to land at the start of the next non-word run.
+/// Word = run of grapheme clusters whose first scalar is
+/// alphanumeric or underscore. `word_boundary_fwd` skips any trailing
+/// non-word clusters from the current position, then skips word
+/// clusters to land at the start of the next non-word run.
 ///
-/// Walks the rope directly with `RopeSlice::char_at`-style indexing —
-/// no intermediate allocation, matches the allocation-discipline rule
-/// for dispatch hot paths.
+/// `col` is a grapheme col per M25; the helper walks one cluster at
+/// a time using the line's grapheme count and `rope_char_at` against
+/// the cluster's leading scalar.
 fn word_boundary_fwd(rope: &Rope, mut line: usize, mut col: usize) -> (usize, usize) {
     let line_count = rope.len_lines().max(1);
     let last_line = line_count - 1;
     loop {
-        let len = line_char_len(rope, line);
-        // 1. Skip non-word chars on the current line.
-        while col < len && !is_word_char(rope_char_at(rope, line, col)) {
+        let len = line_grapheme_len(rope, line);
+        while col < len && !grapheme_is_word(rope, line, col) {
             col += 1;
         }
         if col >= len {
-            // Ran off the end; advance to the next line's start.
             if line == last_line {
                 return (line, len);
             }
@@ -306,8 +316,7 @@ fn word_boundary_fwd(rope: &Rope, mut line: usize, mut col: usize) -> (usize, us
             col = 0;
             continue;
         }
-        // 2. Skip word chars; we land at the first non-word after them.
-        while col < line_char_len(rope, line) && is_word_char(rope_char_at(rope, line, col)) {
+        while col < line_grapheme_len(rope, line) && grapheme_is_word(rope, line, col) {
             col += 1;
         }
         return (line, col);
@@ -321,30 +330,41 @@ fn word_boundary_back(rope: &Rope, mut line: usize, mut col: usize) -> (usize, u
                 return (0, 0);
             }
             line -= 1;
-            col = line_char_len(rope, line);
+            col = line_grapheme_len(rope, line);
             continue;
         }
-        // 1. Skip non-word chars immediately behind the cursor.
-        while col > 0 && !is_word_char(rope_char_at(rope, line, col - 1)) {
+        while col > 0 && !grapheme_is_word(rope, line, col - 1) {
             col -= 1;
         }
         if col == 0 {
-            // Line ran out to the left; check if we landed on a word
-            // boundary or need to cross to the previous line.
             if line == 0 {
                 return (0, 0);
             }
-            // Previous line hasn't been scanned yet; loop handles it.
             line -= 1;
-            col = line_char_len(rope, line);
+            col = line_grapheme_len(rope, line);
             continue;
         }
-        // 2. Skip the word run itself — we land at its start.
-        while col > 0 && is_word_char(rope_char_at(rope, line, col - 1)) {
+        while col > 0 && grapheme_is_word(rope, line, col - 1) {
             col -= 1;
         }
         return (line, col);
     }
+}
+
+/// `true` when the grapheme at `(line, col)` is a "word" cluster —
+/// its first scalar is alphanumeric or `_`. Combining marks attached
+/// to a word base inherit the classification (the base scalar is what
+/// gets checked).
+fn grapheme_is_word(rope: &Rope, line: usize, gcol: usize) -> bool {
+    if line >= rope.len_lines() {
+        return false;
+    }
+    let slice = rope.line(line);
+    let char_idx = led_core::grapheme_col_to_char(slice, gcol);
+    if char_idx >= rope.line(line).len_chars() {
+        return false;
+    }
+    is_word_char(rope_char_at(rope, line, char_idx))
 }
 
 /// Move scroll's (line, sub-line) anchor so the cursor's visual row
@@ -363,8 +383,12 @@ pub(super) fn adjust_scroll(
         return s;
     }
     let margin = SCROLL_MARGIN.min(body_rows / 2);
-    let cur_len = line_char_len(rope, c.line);
-    let (cur_sub, _) = col_to_sub_line(c.col, cur_len, content_cols);
+    let cur_slice = if c.line >= rope.len_lines() {
+        return s;
+    } else {
+        rope.line(c.line)
+    };
+    let (cur_sub, _) = col_to_sub_line(c.col, cur_slice, content_cols);
     let scroll_pos = (s.top, s.top_sub_line);
     let cur_pos = (c.line, cur_sub);
 
@@ -416,7 +440,7 @@ fn scroll_to_place_cursor_at_vrow(
     let mut li = cursor_line;
     while li > 0 && remaining > 0 {
         li -= 1;
-        let n = sub_line_count(line_char_len(rope, li), content_cols);
+        let n = sub_line_count(rope.line(li), content_cols);
         if n <= remaining {
             remaining -= n;
             new_top = li;
@@ -445,7 +469,7 @@ fn rows_between(
     let mut ln = from.0;
     let mut sub_start = from.1.0;
     while ln < to.0 {
-        let n = sub_line_count(line_char_len(rope, ln), content_cols);
+        let n = sub_line_count(rope.line(ln), content_cols);
         row = row.saturating_add(n.saturating_sub(sub_start));
         ln += 1;
         sub_start = 0;
@@ -1252,6 +1276,38 @@ mod tests {
             10,
         );
         assert_eq!(c.col, 16);
+    }
+
+    #[test]
+    fn cjk_down_end_advances_through_each_cjk_line() {
+        // M25 regression: with grapheme col + display-cell preferred,
+        // sequential Down + End should land on each line's visible
+        // end (cjk goldens fixture).
+        let rope = Rope::from_str(
+            "chinese 你好世界\njapanese こんにちは世界\nkorean 안녕하세요 세계\n",
+        );
+        let start = Cursor { line: 0, col: 0, preferred_col: 0 };
+
+        // 1st Down: land on L2 col 0 (preferred_col=0).
+        let c = apply_move(start, &rope, Move::Down, 38, 118);
+        assert_eq!(c.line, 1, "Down → line 1");
+
+        // 1st End: land on L2 grapheme end (16).
+        let c = apply_move(c, &rope, Move::LineEnd, 38, 118);
+        assert_eq!(c.line, 1);
+        assert_eq!(c.col, 16, "End on L2 → 16 graphemes");
+        assert_eq!(c.preferred_col, 23, "L2 display width = 23 cells");
+
+        // 2nd Down: land on L3 with col closest to 23 cells.
+        // L3 = "korean 안녕하세요 세계" → 22 cells, 15 graphemes.
+        let c = apply_move(c, &rope, Move::Down, 38, 118);
+        assert_eq!(c.line, 2, "Down → line 2");
+        assert_eq!(c.col, 15, "L3 short → land at end (15 graphemes)");
+
+        // 2nd End: stays at L3 grapheme end.
+        let c = apply_move(c, &rope, Move::LineEnd, 38, 118);
+        assert_eq!(c.line, 2);
+        assert_eq!(c.col, 15);
     }
 
     #[test]

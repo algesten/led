@@ -35,6 +35,19 @@ fn unicode_combining() {
     run_scenario(&scenario_dir("edge/unicode_combining"));
 }
 
+// M25 — grapheme-aware column math. Authored on `rewrite`
+// directly per `MILESTONE-25.md` D11: legacy's char-indexed col
+// has no meaningful "correct" answer for these.
+#[test]
+fn unicode_grapheme_backspace() {
+    run_scenario(&scenario_dir("edge/unicode_grapheme_backspace"));
+}
+
+#[test]
+fn unicode_grapheme_up_down() {
+    run_scenario(&scenario_dir("edge/unicode_grapheme_up_down"));
+}
+
 // === Empty / minimal files ===
 
 #[test]
