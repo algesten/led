@@ -36,6 +36,16 @@ struct Cli {
     #[arg(long)]
     theme: Option<PathBuf>,
 
+    /// Standalone mode: open the given files for editing without
+    /// touching workspace state. Disables session save/restore,
+    /// git status, LSP, and file watchers. Directory arguments
+    /// are silently ignored. Intended for `EDITOR="led
+    /// --no-workspace"` style use (commit messages, `crontab -e`,
+    /// temp files) where you want to edit one file and quit
+    /// without persisting anything about this run.
+    #[arg(long)]
+    no_workspace: bool,
+
     // The goldens runner always passes these; parse-and-ignore so it
     // doesn't trip on unknown-flag errors.
     #[arg(long, hide = true)]
@@ -47,12 +57,6 @@ struct Cli {
     /// trample each other through the OS pasteboard.
     #[arg(long, hide = true)]
     test_clipboard_isolated: bool,
-
-    /// Skip workspace root detection; treat the process's CWD as the
-    /// only directory relevant to this session. Used by the goldens
-    /// harness when a scenario only cares about individual files.
-    #[arg(long, hide = true)]
-    no_workspace: bool,
 }
 
 fn main() -> io::Result<()> {
@@ -134,6 +138,14 @@ fn main() -> io::Result<()> {
     // the canon tail has no extension.
     let mut ids = TabIdGen::default();
     for f in &cli.files {
+        // Standalone mode silently skips directory args — the
+        // typical `--no-workspace` invocation is a single file
+        // (commit message, temp file), and opening a directory
+        // as a buffer is meaningless when there's no workspace
+        // to anchor it to.
+        if cli.no_workspace && f.is_dir() {
+            continue;
+        }
         let id = ids.issue();
         let user = UserPath::new(f);
         let chain = user.resolve_chain();

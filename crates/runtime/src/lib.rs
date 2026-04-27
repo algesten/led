@@ -1782,7 +1782,13 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
         // (Σ version + saved_version) moved. Manager-side window
         // discipline coalesces spammy request calls, so being
         // eager here is fine.
+        // Standalone mode (`--no-workspace`) intentionally never
+        // spawns a language server — `EDITOR=led --no-workspace`
+        // for commit messages / temp files has no use for
+        // diagnostics or completions and shouldn't pay the
+        // startup cost or leave a server process behind.
         if !*lsp_init_sent
+            && !no_workspace
             && let Some(root) = fs.root.as_ref()
         {
             drivers.lsp.execute(std::iter::once(&LspCmd::Init {
@@ -2168,7 +2174,9 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
         // drain here — no other call-site changes. Until then,
         // saves are user-paced so the at-most-one-per-save rate
         // stays well below legacy's 50ms debounce target.
-        if let Some(root) = fs.root.as_ref() {
+        if let Some(root) = fs.root.as_ref()
+            && !no_workspace
+        {
             // Drain the per-save flag regardless of startup
             // state so a save mid-session doesn't leave it
             // sticky. Combine with the "never scanned yet"
@@ -2203,9 +2211,10 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
                 *git_scan_pending = true;
             }
         } else {
-            // No workspace root yet — discard the pending flag
-            // silently so a future workspace load doesn't
-            // double-fire.
+            // No workspace root yet, or standalone mode — discard
+            // the pending flag silently so a future workspace
+            // load doesn't double-fire (and so a save in
+            // `--no-workspace` doesn't leave the flag stuck).
             *git_scan_pending = false;
         }
 
