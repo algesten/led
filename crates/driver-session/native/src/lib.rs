@@ -19,7 +19,7 @@ use std::thread;
 
 use led_core::{CanonPath, Notifier, PersistedContentHash, SubLine, UserPath};
 use led_driver_session_core::{
-    SessionCmd, SessionDriver, SessionEvent, Trace,
+    SessionCmd, SessionDriver, SessionEvent, SyncResultKind, Trace,
 };
 use led_state_buffer_edits::EditGroup;
 use led_state_session::{SessionBuffer, SessionData, UndoRestoreData};
@@ -56,6 +56,11 @@ struct Workspace {
     conn: Connection,
     root_path: String,
     primary: bool,
+    /// Cached `<config_dir>/notify/` directory. Created on init
+    /// so the FlushUndo / ClearUndo arms can `std::fs::write` an
+    /// empty touch file at `<notify_dir>/<path_hash>` without
+    /// re-checking dir existence on every call.
+    notify_dir: std::path::PathBuf,
     _flock: Option<File>,
 }
 
@@ -134,6 +139,12 @@ fn worker_loop(rx: Receiver<SessionCmd>, tx: Sender<SessionEvent>, notify: Notif
                     },
                 ) {
                     Ok(last_seq) => {
+                        // M26: notify peers about the new undo
+                        // entries before sending the success
+                        // event. Touch happens unconditionally
+                        // for primaries — secondaries already
+                        // skipped above.
+                        touch_notify_file(&ws.notify_dir, &path);
                         let _ = tx.send(SessionEvent::UndoFlushed {
                             path,
                             chain_id,
@@ -158,12 +169,80 @@ fn worker_loop(rx: Receiver<SessionCmd>, tx: Sender<SessionEvent>, notify: Notif
                 }
                 let path_str = path.as_path().to_string_lossy().into_owned();
                 let _ = clear_undo(&ws.conn, &ws.root_path, &path_str);
+                // M26: peers see this clear via the notify-dir
+                // watch; without the touch a peer with the same
+                // file open would never reload after this
+                // primary's save.
+                touch_notify_file(&ws.notify_dir, &path);
+            }
+            SessionCmd::CheckSync {
+                path,
+                last_seen_seq,
+                current_chain_id,
+            } => {
+                let Some(ws) = workspace.as_ref() else {
+                    continue;
+                };
+                let path_str = path.as_path().to_string_lossy().into_owned();
+                let kind = match check_sync(
+                    &ws.conn,
+                    &ws.root_path,
+                    &path_str,
+                    last_seen_seq,
+                    &current_chain_id,
+                ) {
+                    Ok(kind) => kind,
+                    Err(e) => {
+                        let _ = tx.send(SessionEvent::Failed {
+                            message: format!("check_sync: {e}"),
+                        });
+                        notify.notify();
+                        continue;
+                    }
+                };
+                // Reattach the path to the result variant so the
+                // runtime can route by buffer.
+                let kind = attach_sync_path(kind, path);
+                let _ = tx.send(SessionEvent::SyncResult { kind });
+                notify.notify();
             }
             SessionCmd::Shutdown => {
                 drop(workspace.take());
                 return;
             }
         }
+    }
+}
+
+/// Touch `<notify_dir>/<path_hash>` so a peer's notify-dir
+/// watcher fires `Modify`. Empty file is enough; the watcher
+/// only cares about the inode mtime change.
+fn touch_notify_file(notify_dir: &std::path::Path, path: &CanonPath) {
+    let hash = path.path_hash();
+    let _ = std::fs::write(notify_dir.join(hash), []);
+}
+
+/// Helper that re-stamps `path` onto whichever
+/// [`SyncResultKind`] the SQL helper produced. The helper
+/// returns `Path*` variants without the path so the SQL layer
+/// stays cheap; this reattaches.
+fn attach_sync_path(kind: SyncResultKind, path: CanonPath) -> SyncResultKind {
+    match kind {
+        SyncResultKind::SyncEntries {
+            chain_id,
+            content_hash,
+            entries,
+            new_last_seen_seq,
+            ..
+        } => SyncResultKind::SyncEntries {
+            path,
+            chain_id,
+            content_hash,
+            entries,
+            new_last_seen_seq,
+        },
+        SyncResultKind::ExternalSave { .. } => SyncResultKind::ExternalSave { path },
+        SyncResultKind::NoChange { .. } => SyncResultKind::NoChange { path },
     }
 }
 
@@ -183,6 +262,10 @@ fn init_workspace(
     conn.execute_batch("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;")
         .map_err(|e| e.to_string())?;
     run_schema(&conn).map_err(|e| e.to_string())?;
+    // M26: precreate the notify dir so FlushUndo / ClearUndo
+    // touches cost a single fs::write.
+    let notify_dir = cfg.join("notify");
+    std::fs::create_dir_all(&notify_dir).map_err(|e| e.to_string())?;
     let restored = if primary {
         load_session(&conn, &root_path).map_err(|e| e.to_string())?
     } else {
@@ -193,6 +276,7 @@ fn init_workspace(
             conn,
             root_path,
             primary,
+            notify_dir,
             _flock: flock,
         },
         restored,
@@ -511,6 +595,114 @@ fn clear_undo(
     Ok(())
 }
 
+/// M26 — cross-instance sync probe.
+///
+/// Returns one of three [`SyncResultKind`]s, all with the path
+/// field left as a placeholder; the caller stamps the actual
+/// path via [`attach_sync_path`]. Branches:
+///
+/// - `buffer_undo_state` row missing → `ExternalSave` (peer
+///   saved + cleared its undo).
+/// - State row's `chain_id` differs from ours → treat as
+///   external (chain-id mismatch means a peer rewrote the
+///   timeline). Routed as `SyncEntries { … }` only when at
+///   least one row sits past `last_seen_seq`; otherwise
+///   `NoChange`.
+/// - State row's `chain_id` matches and there are new rows →
+///   `SyncEntries`.
+/// - State row matches and no new rows → `NoChange` (the
+///   common self-echo case).
+fn check_sync(
+    conn: &Connection,
+    root_path: &str,
+    file_path: &str,
+    last_seen_seq: i64,
+    current_chain_id: &str,
+) -> rusqlite::Result<SyncResultKind> {
+    let placeholder = CanonPath::default();
+    // Read the state row (if any).
+    let state: Option<(String, i64)> = conn
+        .prepare_cached(
+            "SELECT chain_id, content_hash FROM buffer_undo_state
+             WHERE root_path = ?1 AND file_path = ?2",
+        )?
+        .query_row(params![root_path, file_path], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })
+        .or_else(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => Ok(("".to_string(), 0)),
+            other => Err(other),
+        })
+        .map(|t| if t.0.is_empty() { None } else { Some(t) })?;
+
+    // Read entries past last_seen_seq.
+    let mut stmt = conn.prepare_cached(
+        "SELECT seq, entry_data FROM undo_entries
+         WHERE root_path = ?1 AND file_path = ?2 AND seq > ?3
+         ORDER BY seq ASC",
+    )?;
+    let mut rows = stmt.query(params![root_path, file_path, last_seen_seq])?;
+    let mut entries: Vec<EditGroup> = Vec::new();
+    let mut max_seq: i64 = last_seen_seq;
+    while let Some(row) = rows.next()? {
+        let seq: i64 = row.get(0)?;
+        let bytes: Vec<u8> = row.get(1)?;
+        let entry: EditGroup = rmp_serde::from_slice(&bytes).map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(
+                bytes.len(),
+                rusqlite::types::Type::Blob,
+                Box::new(std::io::Error::other(e)),
+            )
+        })?;
+        entries.push(entry);
+        if seq > max_seq {
+            max_seq = seq;
+        }
+    }
+    drop(rows);
+    drop(stmt);
+
+    let kind = match (state, entries.is_empty()) {
+        (None, true) => {
+            // No state row + no entries — peer saved + cleared.
+            SyncResultKind::ExternalSave { path: placeholder }
+        }
+        (None, false) => {
+            // No state row but entries present (race window).
+            // Treat as external save; the entries are stale.
+            SyncResultKind::ExternalSave { path: placeholder }
+        }
+        (Some((chain_id, hash)), false) => {
+            if chain_id == current_chain_id {
+                // Self-echo from our own flush — but new rows
+                // means a peer also flushed onto the same chain.
+                // Apply.
+                SyncResultKind::SyncEntries {
+                    path: placeholder,
+                    chain_id,
+                    content_hash: PersistedContentHash(hash as u64),
+                    entries,
+                    new_last_seen_seq: max_seq,
+                }
+            } else {
+                // Chain mismatch: peer rewrote the timeline.
+                // The runtime synthesises a reread.
+                SyncResultKind::ExternalSave { path: placeholder }
+            }
+        }
+        (Some((chain_id, _)), true) => {
+            if chain_id == current_chain_id {
+                SyncResultKind::NoChange { path: placeholder }
+            } else {
+                // Chain shifted but no new rows — peer cleared
+                // and rewrote nothing. External save.
+                SyncResultKind::ExternalSave { path: placeholder }
+            }
+        }
+    };
+    Ok(kind)
+}
+
 fn load_undo_all(
     conn: &Connection,
     root_path: &str,
@@ -571,6 +763,7 @@ mod tests {
         fn session_save_done(&self, _: bool) {}
         fn session_drop_undo(&self, _: &CanonPath) {}
         fn session_flush_undo(&self, _: &CanonPath, _: &str) {}
+        fn session_check_sync(&self, _: &CanonPath) {}
     }
 
     fn canon_of(p: &Path) -> CanonPath {

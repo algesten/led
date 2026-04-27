@@ -625,7 +625,37 @@ impl Manager {
                     path, seq, version, start_line, end_line,
                 );
             }
+            LspCmd::DidChangeWatchedFiles { server, changes } => {
+                self.did_change_watched_files(&server, &changes);
+            }
         }
+    }
+
+    /// Send `workspace/didChangeWatchedFiles` to the server whose
+    /// short name matches `server`. Silently no-ops when no
+    /// matching server exists (the server may have crashed
+    /// between the registration and the runtime's fan-out tick).
+    fn did_change_watched_files(
+        &mut self,
+        server: &str,
+        changes: &[led_driver_lsp_core::FileEvent],
+    ) {
+        if changes.is_empty() {
+            return;
+        }
+        let language = self.servers.iter().find_map(|(l, e)| {
+            (short_server_name(&e.server.name) == server).then_some(*l)
+        });
+        let Some(language) = language else { return };
+        let entry = self.servers.get_mut(&language).expect("just found");
+        let body = crate::protocol::build_did_change_watched_files_notification(changes);
+        let _ = entry.server.send_body(&body);
+        self.trace.lsp_send_notification(
+            server,
+            "workspace/didChangeWatchedFiles",
+            None,
+            None,
+        );
     }
 
     fn ensure_server_spawned(&mut self, language: Language) {
@@ -1612,12 +1642,20 @@ impl Manager {
                 self.handle_response(language, id, payload);
             }
             Incoming::Request {
+                id,
                 auto_reply,
                 forward_as_notification,
                 method,
                 params,
-                ..
             } => {
+                let id_int = match &id {
+                    RequestId::Int(n) => *n,
+                    RequestId::Str(_) => -1,
+                };
+                if let Some(entry) = self.servers.get(&language) {
+                    let server_name = short_server_name(&entry.server.name).to_string();
+                    self.trace.lsp_recv_request(&server_name, &method, id_int);
+                }
                 self.handle_server_request(
                     language,
                     method,
@@ -1777,16 +1815,51 @@ impl Manager {
     fn handle_server_request(
         &mut self,
         language: Language,
-        _method: String,
-        _params: Value,
+        method: String,
+        params: Value,
         auto_reply: Value,
-        _forward_as_notification: bool,
+        forward_as_notification: bool,
     ) {
-        let Some(entry) = self.servers.get_mut(&language) else {
-            return;
+        let server_name = {
+            let Some(entry) = self.servers.get_mut(&language) else {
+                return;
+            };
+            let body = serde_json::to_vec(&auto_reply).expect("auto-reply is valid");
+            let _ = entry.server.send_body(&body);
+            short_server_name(&entry.server.name).to_string()
         };
-        let body = serde_json::to_vec(&auto_reply).expect("auto-reply is valid");
-        let _ = entry.server.send_body(&body);
+        if !forward_as_notification {
+            return;
+        }
+        // Forwarded server-initiated requests we actually act on.
+        // `client/registerCapability` and its retraction sibling
+        // both narrow to `workspace/didChangeWatchedFiles` for now;
+        // other dynamic registrations (completion trigger chars,
+        // formatting, …) are out of scope.
+        match method.as_str() {
+            "client/registerCapability" => {
+                let regs = crate::protocol::parse_register_capability_watched_files(&params);
+                for reg in regs {
+                    let _ = self.lsp_event_tx.send(LspEvent::WatchedFilesRegistered {
+                        server: server_name.clone(),
+                        registration_id: reg.registration_id,
+                        globs: Arc::new(reg.globs),
+                    });
+                    self.notify.notify();
+                }
+            }
+            "client/unregisterCapability" => {
+                let regs = crate::protocol::parse_unregister_capability_watched_files(&params);
+                for reg in regs {
+                    let _ = self.lsp_event_tx.send(LspEvent::WatchedFilesUnregistered {
+                        server: server_name.clone(),
+                        registration_id: reg.registration_id,
+                    });
+                    self.notify.notify();
+                }
+            }
+            _ => {}
+        }
     }
 
     fn handle_notification(
@@ -1945,8 +2018,11 @@ impl Manager {
                 }
                 self.send_progress_throttled();
             }
-            "window/logMessage" | "window/showMessage" | "client/registerCapability" => {
-                // Ignored for now.
+            "window/logMessage" | "window/showMessage" => {
+                // Ignored for now. `client/registerCapability` is
+                // a request (id+method), not a notification, so it
+                // routes through `handle_server_request` —
+                // intentionally absent from this match.
             }
             _ => {}
         }

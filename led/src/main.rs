@@ -181,6 +181,7 @@ fn main() -> io::Result<()> {
         trace: &trace,
         stdout: &mut stdout,
         cli_config_dir: cli.config_dir.as_deref(),
+        no_workspace: cli.no_workspace,
     };
     led_runtime::run(&mut world)?;
     stdout.flush()?;

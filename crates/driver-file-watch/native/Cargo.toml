@@ -1,0 +1,23 @@
+[package]
+name = "led-driver-file-watch-native"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Desktop-native worker for the file-watch driver. Wraps the
+# `notify` crate (FSEvents on macOS, inotify on Linux,
+# ReadDirectoryChangesW on Windows) on a single `std::thread`
+# (per `feedback_no_tokio_for_drivers`). The worker owns one
+# `RecommendedWatcher` instance shared across all registrations
+# from the runtime — multiple watch intents (root recursive,
+# `<config>/notify/` non-recursive, per-buffer parent dirs) fan
+# out via per-id pending maps with their own debounce windows.
+
+[dependencies]
+led-core = { workspace = true }
+led-driver-file-watch-core = { workspace = true }
+log = { workspace = true }
+notify = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

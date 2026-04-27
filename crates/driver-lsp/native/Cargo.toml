@@ -24,3 +24,7 @@ led-state-diagnostics = { workspace = true }
 led-state-syntax = { workspace = true }
 ropey = { workspace = true }
 serde_json = { workspace = true }
+# Compile `workspace/didChangeWatchedFiles` registration globs as
+# they arrive on `client/registerCapability`. Same crate the
+# runtime uses to match events back against the compiled set.
+globset = { workspace = true }

@@ -134,6 +134,29 @@ impl CanonPath {
     pub fn display(&self) -> std::path::Display<'_> {
         self.0.display()
     }
+
+    /// Stable 16-char lowercase-hex hash of the canonical path.
+    ///
+    /// Two namespaces consume the same hash:
+    ///
+    /// 1. The session driver writes a touch file at
+    ///    `<config>/notify/<path_hash>` after every successful
+    ///    `FlushUndo` / `ClearUndo` so peers detect the change.
+    /// 2. The runtime watches `<config>/notify/` and reverse-maps
+    ///    a touched basename back to the open buffer it belongs
+    ///    to via the `notify_hash_index` memo.
+    ///
+    /// Both sites must agree byte-for-byte; the function is a
+    /// `DefaultHasher` (SipHash-1-3) over the canonical path bytes,
+    /// formatted `{:016x}`. Mirrors legacy
+    /// `led/crates/workspace/src/lib.rs:512-517`.
+    pub fn path_hash(&self) -> String {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut h = DefaultHasher::new();
+        self.0.hash(&mut h);
+        format!("{:016x}", h.finish())
+    }
 }
 
 impl AsRef<Path> for CanonPath {

@@ -100,6 +100,11 @@ fn lsp_completion_popup_types_pr() {
     run_scenario(&scenario_dir("features/lsp/completion_popup_types_pr"));
 }
 
+#[test]
+fn lsp_did_change_watched_files() {
+    run_scenario(&scenario_dir("features/lsp/did_change_watched_files"));
+}
+
 // === git ===
 
 #[test]

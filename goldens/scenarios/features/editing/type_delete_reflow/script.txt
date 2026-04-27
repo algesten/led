@@ -3,3 +3,8 @@ wait 500ms
 press End
 type  followed by extra content that will make this line wrap past the reflow target width once we trigger the reflow paragraph action.
 press Ctrl-q
+# Settle for FlushUndo (200 ms debounce) + CheckSync (100 ms
+# notify-dir debounce) + trace flush. Without this final wait
+# `settle()`'s 120 ms quiet window returns before the
+# debounce fires.
+wait 500ms

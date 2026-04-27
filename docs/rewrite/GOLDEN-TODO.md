@@ -5,32 +5,35 @@ runs because of test-load flakiness; check individual tests with
 `cargo test --manifest-path goldens/Cargo.toml --test <name>` to
 confirm a real failure.
 
-## Current state (post-M25 + tail, 2026-04-27)
+## Current state (post-M26, 2026-04-27)
 
 | Suite          | Pass | Fail |
 |----------------|------|------|
 | actions        | 57  | 0   |
 | config_keys    | 7   | 0   |
-| driver_events  | 23  | 4   |
-| edge           | 29  | 2   |
-| features       | 24  | 2   |
+| driver_events  | 25  | 2   |
+| edge           | 30  | 1   |
+| features       | 25  | 1   |
 | keybindings    | 111 | 0   |
-| smoke          | 4   | 1   |
-| **Total**      | **255** | **9** |
+| smoke          | 5   | 0   |
+| **Total**      | **260** | **4** |
 
 (Single-threaded `cargo test --manifest-path goldens/Cargo.toml
 --test <suite> -- --test-threads=1`. Counts can swing ±1–3 per
 parallel run from test-load flakiness; single-threaded is the
 authoritative baseline.)
 
-The 9 single-threaded failures break down as:
+The 4 single-threaded failures break down as:
 
-- **M26-gated (6)** — file-watch + cross-instance sync:
-  `smoke/external_change`, `edge/external_change_while_dirty`,
-  `edge/external_delete_open_file`,
-  `driver_events/docstore/external_change`,
-  `driver_events/workspace/workspace_changed`,
-  `features/editing/type_delete_reflow`.
+- **`edge/external_change_while_dirty`** — frame mismatch
+  (NOT trace mismatch): the script runs `press End` immediately
+  after spawn, before the buffer has materialised, so the
+  keystroke lands on an empty rope and the typed text ends up
+  at column 0 instead of after the original line. Same
+  pre-existing harness race documented below — confirmed
+  reproducible on rewrite HEAD without M26 by stashing
+  changes. M26's *trace* side passes (FlushUndo + CheckSync
+  fire correctly); only the frame check fails.
 - **Pre-existing harness flake (3)** — `wait_ready` exits on the
   first PTY byte (often a raw-mode-setup byte) rather than on
   the first painted body row, so "no script, capture initial
@@ -39,9 +42,71 @@ The 9 single-threaded failures break down as:
   `features/git_workspace_open_file`. All three pass
   individually 70–100 % of the time. A goldens-harness fix
   (poll for actual content rather than first byte) is the
-  proper resolution; not an M25 correctness issue.
+  proper resolution; this is what
+  `edge/external_change_while_dirty` is also ultimately
+  blocked on.
 
 ## What's solid (recent fixes)
+
+- **M26 — File-watch + cross-instance sync** (2026-04-27):
+  Per [`MILESTONE-26.md`](MILESTONE-26.md). New
+  `crates/driver-file-watch/{core,native}` crate pair wraps
+  `notify` (FSEvents on macOS, inotify on Linux). Goldens that
+  moved to green: `smoke/external_change`,
+  `edge/external_delete_open_file`,
+  `driver_events/docstore/external_change`,
+  `driver_events/workspace/workspace_changed`,
+  `features/editing/type_delete_reflow` (script gained a
+  trailing `wait 500ms` for the FlushUndo + CheckSync
+  debounce settle). M26 ships:
+  - `FileWatchState` driver-owned source (registry +
+    recent_events queue + backend status). Imbl-backed for
+    pointer-equality on idle ticks.
+  - Three watch intents keyed by `WatcherId`: workspace root
+    recursive (id `u64::MAX`), `<config>/notify/`
+    non-recursive 100 ms-debounced (id `u64::MAX-1`), per-buffer
+    parent dirs (allocated via `watch_id_seq`; skipped when the
+    parent is already covered by ROOT to avoid notify's
+    "double-watch" rejection).
+  - `SessionCmd::CheckSync` + `SessionEvent::SyncResult` (with
+    `SyncResultKind::SyncEntries|ExternalSave|NoChange`). The
+    session driver's native worker reads back from
+    `undo_entries` via `seq > last_seen_seq`. `FlushUndo` and
+    `ClearUndo` now `touch_notify_file($config/notify/<hash>)`
+    so peers' notify-dir watchers fire and dispatch CheckSync.
+  - `FileReadCmd::Reread` + `FileReadEvent::RereadDone` (with
+    `kind: ReadKind = Initial|Reread`). Reread uses a strict
+    read that returns Err on NotFound rather than empty rope
+    so an external delete doesn't silently clobber the buffer.
+  - Three-branch external-change reconcile in ingest (per
+    `EXAMPLE-ARCH.md` § "Invariant enforcement"):
+    - Clean + new content: replace rope, push one EditGroup
+      so undo restores prior content, refresh
+      `disk_content_hash`, advance version + saved_version.
+    - Dirty + new content: silent drop (legacy parity).
+    - Hash matches: no-op.
+    Both clean and dirty branches refresh the workspace tree
+    (clear `fs.dir_contents`, set `git_scan_pending`) since
+    the disk side moved either way.
+  - Memo-driven dispatch helpers: `compute_watch_actions`
+    (desired/actual diff → Watch/Unwatch cmds),
+    `compute_external_reread_targets`,
+    `compute_sync_check_targets`,
+    `compute_workspace_tree_refresh`. Watch-actions stays in
+    execute (output-side); event-fan-out helpers run in
+    ingest so the in-tick query memos see the cleared
+    `fs.dir_contents` and emit fresh ListDir cmds in the same
+    tick (otherwise FsListDir/GitScan would order-flip on
+    workspace tree changes).
+  - `--no-workspace` mode: file-watch driver constructs
+    lazily (the `notify::Watcher` itself only spawns on the
+    first `Watch` cmd), and the runtime gates dispatch on
+    `!no_workspace`. Standalone runs pay zero file-watch
+    overhead.
+  - New trace line: `WorkspaceCheckSync\tpath=<p>`.
+  - `led_core::CanonPath::path_hash()` — 16-char lowercase
+    hex of the canonical path. Mirrors legacy
+    `led/crates/workspace/src/lib.rs:512-517`.
 
 - **M25 — grapheme-aware column math** (2026-04-26):
   `Cursor::col` now indexes grapheme clusters (was: chars);
@@ -278,29 +343,51 @@ itself works on the rewrite (the script's
 `type X press Ctrl-q` produces the expected frame); only the
 M26 trace lines are missing. Folded into Cluster B below.
 
-### B. M26 — External file change + cross-instance sync — 6 tests
+### B. M26 — External file change + cross-instance sync (SHIPPED, 2026-04-27)
 
-Tests gated on M26 (file-watch driver + `SessionCmd::CheckSync`):
+5 of 6 M26-gated goldens are green. Design:
+[`MILESTONE-26.md`](MILESTONE-26.md). See "What's solid" above
+for the full landing summary.
 
-- `smoke/external_change`
-- `edge/external_change_while_dirty`
-- `edge/external_delete_open_file`
-- `driver_events/docstore_external_change`
-- `driver_events/workspace_workspace_changed`
-- `features/editing/type_delete_reflow` — reflow itself works,
-  only the M26 trace lines (`WorkspaceFlushUndo` +
-  `WorkspaceCheckSync`) are missing. Moved here from
-  Cluster A on M23 ship.
+- `smoke/external_change` — green.
+- `edge/external_delete_open_file` — green (snap refreshed:
+  legacy emitted two FsListDir from its multi-watcher setup;
+  the rewrite's single source of truth produces one. Per
+  `ROADMAP.md` § "Golden-review discipline" this is an
+  intentional behavioural improvement).
+- `driver_events/docstore/external_change` — green.
+- `driver_events/workspace/workspace_changed` — green.
+- `features/editing/type_delete_reflow` — green (script
+  gained a trailing `wait 500ms` so settle covers the
+  FlushUndo 200 ms debounce + CheckSync 100 ms debounce + the
+  notify-touch round-trip).
 
-The rewrite's session driver has no `CheckSync` command — it's
-the cross-instance sync feature documented in
-`docs/drivers/workspace.md` §"Inputs": `$config/notify/<hash>`
-touch files watched by a non-recursive notify watcher,
-debounced 100ms; on Modify, the model bumps
-`pending_sync_check`, derived dispatches `CheckSync`, the
-driver runs `db::load_undo_after`. Pretending to emit the
-trace without the underlying machinery would mask that the
-feature isn't there.
+The remaining failure:
+
+- `edge/external_change_while_dirty` — frame mismatch (NOT
+  trace mismatch). Pre-existing harness race: the script
+  runs `press End` immediately after spawn, before the
+  buffer has materialised, so the keystroke lands on an
+  empty rope and the typed text ends up at column 0.
+  Confirmed reproducible on rewrite HEAD without M26 by
+  stashing changes; M26's *trace* side (FlushUndo +
+  CheckSync after fs_write) passes correctly. The fix is
+  the goldens-harness `wait_ready` improvement (poll for
+  first painted body row rather than first PTY byte) —
+  same fix that unblocks the three other harness-flake
+  tests below.
+
+LSP `workspace/didChangeWatchedFiles` is a separate orphan
+(M26-followup): the runtime infrastructure to fan
+`FileWatchEvent`s out as `LspCmd::DidChangeWatchedFiles` is
+designed but not wired. None of the M26-gated goldens
+exercise this; tracked under the `lsp_did_change_watched_files`
+follow-up.
+
+The goldens harness already supports `fs_write` and
+`fs_delete` script commands
+(`goldens/src/scenario.rs:130, 141`); no harness change was
+needed for these six scenarios.
 
 ### C. Completion / rename / code-action overlay rendering
 
@@ -410,14 +497,23 @@ following M22:
 
 ## Recommended next pass order
 
-1. **M26 (file-watch + cross-instance sync)** — Cluster B.
-   6 tests. Adds `driver-file-watch/` (notify-based), the
-   `SessionCmd::CheckSync` command, and the client-side
-   `workspace/didChangeWatchedFiles` LSP notification.
-2. **`features/git_workspace_open_file` flake** — investigate
-   if it bites twice in a row. Likely a parallel-test-load
-   issue that a deterministic seed in the harness fixture
-   would resolve.
+1. **Goldens-harness `wait_ready` fix** — poll for first
+   painted body row rather than first PTY byte. Unblocks
+   `edge/external_change_while_dirty` (M26's last failure),
+   `driver_events/docstore_opened`,
+   `driver_events/syntax_buffer_parsed`, and
+   `features/git_workspace_open_file`. Same root cause across
+   all four.
+2. **M27 (GitHub PR)** — last remaining feature milestone.
+   `GhPrState` + `driver-gh-pr/`, ETag-driven polling, PR
+   comments alongside git gutter, fourth tier on the M20a
+   `IssueCategory::NAV_LEVELS` issue-nav cycle.
+3. **LSP `workspace/didChangeWatchedFiles`** — M26-followup.
+   Wire the LSP manager to parse `client/registerCapability`
+   payloads via `globset` and the runtime to fan matching
+   `FileWatchEvent`s out as `LspCmd::DidChangeWatchedFiles`.
+   Closes the rust-analyzer-goes-stale-on-`Cargo.toml`-edit
+   gap. No M26 golden exercises this; needs a new scenario.
 
 ## Don't refresh blindly
 

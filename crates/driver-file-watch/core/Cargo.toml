@@ -1,0 +1,15 @@
+[package]
+name = "led-driver-file-watch-core"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Sync core of the file-watch driver: the ABI shared between the
+# runtime and the native worker — FileWatchCmd / FileWatchEvent /
+# Trace / FileWatchDriver — plus the driver-owned source struct
+# FileWatchState. No `notify` crate here; that lives in the native
+# half so a mock test driver can substitute a plain channel pair.
+
+[dependencies]
+led-core = { workspace = true }
+imbl = { workspace = true }

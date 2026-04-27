@@ -41,6 +41,14 @@ struct Config {
     /// Completion trigger characters reported in server capabilities.
     #[serde(default)]
     trigger_characters: Vec<String>,
+
+    /// `workspace/didChangeWatchedFiles` glob patterns the server
+    /// registers via `client/registerCapability` after the client
+    /// sends `initialized`. When non-empty, fake-lsp pushes one
+    /// registration with id `watched-files-1` covering all
+    /// patterns. Each entry is a plain glob string.
+    #[serde(default)]
+    watched_file_globs: Vec<String>,
 }
 
 // ── Server state ──
@@ -50,6 +58,10 @@ struct FakeLsp {
     config: Config,
     /// URI → full text content.
     documents: HashMap<String, String>,
+    /// Counter for server-initiated requests
+    /// (`client/registerCapability`, …). The client auto-acks
+    /// with a `null` response we ignore on receive.
+    next_request_id: i64,
 }
 
 impl FakeLsp {
@@ -58,7 +70,14 @@ impl FakeLsp {
             root_path: PathBuf::new(),
             config: Config::default(),
             documents: HashMap::new(),
+            next_request_id: 1000,
         }
+    }
+
+    fn fresh_id(&mut self) -> i64 {
+        let id = self.next_request_id;
+        self.next_request_id += 1;
+        id
     }
 
     // ── Message dispatch ──
@@ -83,7 +102,10 @@ impl FakeLsp {
             "shutdown" => Some(response(id?, Value::Null)),
 
             // Notifications (no id)
-            "initialized" => None,
+            "initialized" => {
+                self.send_register_watched_files();
+                None
+            }
             "textDocument/didOpen" => {
                 self.did_open(&params);
                 None
@@ -331,6 +353,41 @@ impl FakeLsp {
                 "newText": formatted
             }]),
         )
+    }
+
+    // ── Dynamic registration ──
+
+    /// Push a `client/registerCapability` request for
+    /// `workspace/didChangeWatchedFiles` with the configured
+    /// glob set. No-op when the config has no globs. The client
+    /// auto-replies with `null`; the response is ignored on the
+    /// way back in.
+    fn send_register_watched_files(&mut self) {
+        if self.config.watched_file_globs.is_empty() {
+            return;
+        }
+        let id = self.fresh_id();
+        let watchers: Vec<Value> = self
+            .config
+            .watched_file_globs
+            .iter()
+            .map(|g| json!({ "globPattern": g }))
+            .collect();
+        write_message(
+            &mut io::stdout().lock(),
+            &json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "method": "client/registerCapability",
+                "params": {
+                    "registrations": [{
+                        "id": "watched-files-1",
+                        "method": "workspace/didChangeWatchedFiles",
+                        "registerOptions": { "watchers": watchers }
+                    }]
+                }
+            }),
+        );
     }
 
     // ── Progress ──

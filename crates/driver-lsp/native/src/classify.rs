@@ -153,10 +153,15 @@ fn classify_server_request(id: RequestId, method: String, params: Value) -> Inco
             (arr, false)
         }
         // rust-analyzer uses this to tell us dynamic trigger chars
-        // for completion. The manager needs to see it as a
-        // notification to reconcile; we auto-reply with null to
-        // ack the request.
+        // for completion AND to register `workspace/didChangeWatchedFiles`
+        // glob sets the manager fans filesystem events out for. The
+        // manager needs to see it as a notification to reconcile; we
+        // auto-reply with null to ack the request.
         "client/registerCapability" => (Value::Null, true),
+        // Symmetric retraction. Forwarded so the manager can drop
+        // the matching `LspWatchedGlobs` entry and stop fanning
+        // events for those globs.
+        "client/unregisterCapability" => (Value::Null, true),
         // Unrecognised — reply null. Servers tolerate this for
         // most optional requests.
         _ => (Value::Null, false),

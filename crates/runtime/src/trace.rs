@@ -107,6 +107,10 @@ pub trait Trace: Send + Sync {
     fn lsp_recv_response(&self, server: &str, id: i64);
     /// Inbound JSON-RPC notification from the server.
     fn lsp_recv_notification(&self, server: &str, method: &str);
+    /// Inbound JSON-RPC request from the server (server-
+    /// initiated). The transport auto-acks so a separate
+    /// `lsp_send_response` line isn't emitted.
+    fn lsp_recv_request(&self, server: &str, method: &str, id: i64);
     /// Runtime dispatched a git workspace scan. Emits as
     /// `GitScan\troot=<p>` in `dispatched.snap`. Fires once per
     /// `GitCmd::ScanFiles` — the git driver is stateless about
@@ -153,6 +157,28 @@ pub trait Trace: Send + Sync {
     /// `create_if_missing=false` because the file is known to exist
     /// (we just had it loaded).
     fn file_reopen_existing(&self, path: &CanonPath);
+    /// External-change reread (M26). Emitted when the runtime
+    /// dispatches a `LoadAction::Reread` because the file-watch
+    /// driver reported `MODIFIED` for a path that's already
+    /// materialised. Quiet by default — none of the M26-gated
+    /// goldens contain this line; the user-visible effect lands as
+    /// the post-reload `WorkspaceFlushUndo`.
+    fn file_reread_start(&self, path: &CanonPath);
+    /// Per-buffer cross-instance sync probe (M26). Emitted once
+    /// per dispatched `SessionCmd::CheckSync` cmd produced by the
+    /// `sync_check_targets` memo. Legacy line:
+    /// `WorkspaceCheckSync\tpath=<p>`.
+    fn workspace_check_sync(&self, path: &CanonPath);
+    /// Per fan-out of an LSP `workspace/didChangeWatchedFiles`
+    /// notification (M26-followup). Emitted once per
+    /// `LspCmd::DidChangeWatchedFiles` the runtime dispatches —
+    /// one line per server with a non-empty `changes` payload.
+    /// Legacy didn't trace this notification (its watcher fired
+    /// only on real fs events the goldens harness can't drive
+    /// scriptably); the line is rewrite-only and serialises as
+    /// `LspDidChangeWatchedFiles\tserver=<name> changes=<n>` in
+    /// `dispatched.snap`.
+    fn lsp_did_change_watched_files(&self, server: &str, n_changes: usize);
     fn render_tick(&self);
 }
 
@@ -212,6 +238,9 @@ impl SharedTrace {
     }
     pub fn file_reopen_existing(&self, path: &CanonPath) {
         self.0.file_reopen_existing(path);
+    }
+    pub fn lsp_did_change_watched_files(&self, server: &str, n_changes: usize) {
+        self.0.lsp_did_change_watched_files(server, n_changes);
     }
 }
 
@@ -377,6 +406,11 @@ impl Trace for FileTrace {
             "LspRecv\tserver={server} kind=notification method={method}",
         ));
     }
+    fn lsp_recv_request(&self, server: &str, method: &str, id: i64) {
+        self.write_line(&format!(
+            "LspRecv\tserver={server} kind=request method={method} id={id}",
+        ));
+    }
     fn git_scan_start(&self, root: &CanonPath) {
         self.write_line(&format!("GitScan\troot={}", self.format_path(root)));
     }
@@ -423,6 +457,23 @@ impl Trace for FileTrace {
         self.write_line(&format!(
             "FileOpen\tpath={} create_if_missing=false",
             self.format_path(path)
+        ));
+    }
+    fn file_reread_start(&self, _path: &CanonPath) {
+        // M26: quiet by default. None of the M26-gated goldens
+        // expect a `FileReread` line; the user-visible effect lands
+        // in the post-reload `WorkspaceFlushUndo`. Re-enable this by
+        // emitting `FileReread\tpath=<p>` when investigating.
+    }
+    fn workspace_check_sync(&self, path: &CanonPath) {
+        self.write_line(&format!(
+            "WorkspaceCheckSync\tpath={}",
+            self.format_path(path)
+        ));
+    }
+    fn lsp_did_change_watched_files(&self, server: &str, n_changes: usize) {
+        self.write_line(&format!(
+            "LspDidChangeWatchedFiles\tserver={server} changes={n_changes}",
         ));
     }
     fn render_tick(&self) {}
@@ -488,6 +539,7 @@ impl Trace for NoopTrace {
     }
     fn lsp_recv_response(&self, _: &str, _: i64) {}
     fn lsp_recv_notification(&self, _: &str, _: &str) {}
+    fn lsp_recv_request(&self, _: &str, _: &str, _: i64) {}
     fn git_scan_start(&self, _: &CanonPath) {}
     fn session_init_start(&self, _: &CanonPath) {}
     fn session_save_start(&self) {}
@@ -499,6 +551,9 @@ impl Trace for NoopTrace {
     fn workspace_clear_undo(&self, _: &CanonPath) {}
     fn workspace_flush_undo(&self, _: &CanonPath, _: &str) {}
     fn file_reopen_existing(&self, _: &CanonPath) {}
+    fn file_reread_start(&self, _: &CanonPath) {}
+    fn workspace_check_sync(&self, _: &CanonPath) {}
+    fn lsp_did_change_watched_files(&self, _: &str, _: usize) {}
     fn render_tick(&self) {}
 }
 

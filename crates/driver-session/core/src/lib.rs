@@ -52,6 +52,16 @@ pub enum SessionCmd {
     /// Drop the flock + close the DB. Sent on the
     /// `Phase::Exiting` → break transition.
     Shutdown,
+    /// Cross-instance sync probe (M26). Triggered when the
+    /// notify-dir watcher reports a touch on
+    /// `<config>/notify/<path_hash>` whose hash maps to an open
+    /// buffer. Reads `WHERE seq > last_seen_seq` and returns one
+    /// of three [`SyncResultKind`]s.
+    CheckSync {
+        path: CanonPath,
+        last_seen_seq: i64,
+        current_chain_id: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -76,6 +86,43 @@ pub enum SessionEvent {
     /// Non-fatal error during open / save / flush. The runtime
     /// surfaces the message as a warn alert.
     Failed { message: String },
+    /// Result of a [`SessionCmd::CheckSync`] probe. Carries one
+    /// of three discriminants (M26).
+    SyncResult { kind: SyncResultKind },
+}
+
+/// Discriminant for [`SessionEvent::SyncResult`]. The runtime
+/// reduces each variant differently:
+///
+/// - `SyncEntries` — peer wrote new undo entries since our
+///   `last_seen_seq`. Validate `chain_id` + `content_hash`
+///   against the live buffer; on match, apply each `EditGroup`
+///   to the rope; on mismatch, queue a synthetic
+///   `FileWatchEvent::Changed { kinds: MODIFIED }` so the
+///   next-tick reconcile arm picks it up.
+/// - `ExternalSave` — peer saved + cleared its undo state (the
+///   `buffer_undo_state` row vanished). Equivalent to "the disk
+///   bytes moved underneath us"; the runtime synthesises a
+///   reread the same way.
+/// - `NoChange` — chain matches and there are no new entries.
+///   Includes the common self-echo case (our own `FlushUndo`
+///   touched `<config>/notify/<hash>`, the watcher fired, we
+///   probed back and got NoChange).
+#[derive(Debug, Clone)]
+pub enum SyncResultKind {
+    SyncEntries {
+        path: CanonPath,
+        chain_id: String,
+        content_hash: PersistedContentHash,
+        entries: Vec<EditGroup>,
+        new_last_seen_seq: i64,
+    },
+    ExternalSave {
+        path: CanonPath,
+    },
+    NoChange {
+        path: CanonPath,
+    },
 }
 
 pub trait Trace: Send + Sync {
@@ -87,6 +134,9 @@ pub trait Trace: Send + Sync {
     /// `WorkspaceFlushUndo\tpath=<p> chain=<id>` in
     /// `dispatched.snap`. Mirrors legacy's same-named line.
     fn session_flush_undo(&self, path: &CanonPath, chain_id: &str);
+    /// Per cross-instance sync probe (M26). Emitted as
+    /// `WorkspaceCheckSync\tpath=<p>` in `dispatched.snap`.
+    fn session_check_sync(&self, path: &CanonPath);
 }
 
 pub struct NoopTrace;
@@ -96,6 +146,7 @@ impl Trace for NoopTrace {
     fn session_save_done(&self, _: bool) {}
     fn session_drop_undo(&self, _: &CanonPath) {}
     fn session_flush_undo(&self, _: &CanonPath, _: &str) {}
+    fn session_check_sync(&self, _: &CanonPath) {}
 }
 
 pub struct SessionDriver {
@@ -122,6 +173,7 @@ impl SessionDriver {
                 SessionCmd::FlushUndo { path, chain_id, .. } => {
                     self.trace.session_flush_undo(path, chain_id);
                 }
+                SessionCmd::CheckSync { path, .. } => self.trace.session_check_sync(path),
                 SessionCmd::Shutdown => {}
             }
             if self.tx.send(cmd.clone()).is_err() {

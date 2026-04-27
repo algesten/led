@@ -46,7 +46,20 @@ pub struct BufferStore {
 /// a memo in the runtime that diffs desired vs actual state.
 #[derive(Clone, Debug, PartialEq)]
 pub enum LoadAction {
+    /// Initial open. The driver writes `LoadState::Pending` into
+    /// `BufferStore`, dispatches the read, and the completion is
+    /// surfaced as a [`LoadCompletion`] for the runtime to seed
+    /// `BufferEdits`.
     Load(CanonPath),
+    /// External-change reread (M26). Triggered when the file-watch
+    /// driver reports `MODIFIED` for an already-materialised
+    /// buffer's path. Does **not** rewrite `BufferStore.loaded`
+    /// to `Pending` — that would visually flip the body to a
+    /// loading placeholder. Completion is surfaced as a
+    /// [`RereadCompletion`] for the runtime's three-branch
+    /// reconcile (clean reload / dirty silent drop / hash-match
+    /// no-op).
+    Reread(CanonPath),
 }
 
 // ── ABI boundary ───────────────────────────────────────────────────────
@@ -56,25 +69,65 @@ pub enum LoadAction {
 /// its `Sender` and the receiver returns `Err` on `recv`.
 #[derive(Clone, Debug)]
 pub enum ReadCmd {
+    /// Initial disk read (M1). Result writes into `BufferStore`.
     Read(CanonPath),
+    /// External-change reread (M26). Result is *not* written into
+    /// `BufferStore` — the runtime's reconcile branch consumes the
+    /// new rope directly and decides whether to update
+    /// `EditedBuffer.rope`.
+    Reread(CanonPath),
+}
+
+/// Whether a [`ReadDone`] is the completion of an initial open
+/// (`Initial`) or an external-change reread (`Reread`). The driver
+/// echoes this back from the originating [`ReadCmd`] so `process`
+/// can route the result to the right consumer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ReadKind {
+    #[default]
+    Initial,
+    Reread,
 }
 
 /// Completion posted by the async worker back to the sync driver.
 #[derive(Debug)]
 pub struct ReadDone {
     pub path: CanonPath,
+    pub kind: ReadKind,
     pub result: Result<Arc<Rope>, String>,
 }
 
-/// A successful load surfaced by [`FileReadDriver::process`] — the
-/// runtime uses this to seed the `BufferEdits` source with a clean,
-/// disk-matching rope. Failed loads are not surfaced here; they land
-/// in `BufferStore` as `LoadState::Error` and don't belong in
-/// `BufferEdits`.
+/// A successful initial load surfaced by [`FileReadDriver::process`]
+/// — the runtime uses this to seed the `BufferEdits` source with a
+/// clean, disk-matching rope. Failed loads are not surfaced here;
+/// they land in `BufferStore` as `LoadState::Error` and don't
+/// belong in `BufferEdits`.
 #[derive(Debug, Clone)]
 pub struct LoadCompletion {
     pub path: CanonPath,
     pub rope: Arc<Rope>,
+}
+
+/// External-change reread completion (M26). The runtime's
+/// reconcile branch reads the fresh rope, compares its content
+/// hash against `eb.disk_content_hash`, and decides whether to
+/// replace the in-memory rope (clean buffer + content diverges)
+/// or silently drop (dirty buffer protects local edits).
+#[derive(Debug, Clone)]
+pub struct RereadCompletion {
+    pub path: CanonPath,
+    pub result: Result<Arc<Rope>, String>,
+}
+
+/// What [`FileReadDriver::process`] hands back to the runtime:
+/// initial-open completions for the `BufferEdits` seeding flow,
+/// plus reread completions for the external-change reconcile.
+/// On idle ticks both vectors are empty (`Vec::new()` allocates
+/// nothing).
+#[derive(Debug, Default)]
+pub struct ReadCompletions {
+    pub initials: Vec<LoadCompletion>,
+    pub rereads: Vec<RereadCompletion>,
 }
 
 // ── Trace ──────────────────────────────────────────────────────────────
@@ -90,6 +143,12 @@ pub trait Trace: Send + Sync {
     /// different path (`to`). `FileSaveAs` in legacy's dispatched.snap.
     fn file_save_as_start(&self, from: &CanonPath, to: &CanonPath);
     fn file_save_as_done(&self, from: &CanonPath, to: &CanonPath, result: &Result<(), String>);
+    /// External-change reread start. Quiet by default in
+    /// dispatched.snap (none of the M26-gated goldens contain a
+    /// `FileReread` line — the user-visible effect is the
+    /// post-reload `WorkspaceFlushUndo`). Available for verbose
+    /// investigation builds.
+    fn file_reread_start(&self, path: &CanonPath);
 }
 
 /// No-op trace for tests or non-golden runs.
@@ -101,6 +160,7 @@ impl Trace for NoopTrace {
     fn file_save_done(&self, _: &CanonPath, _: u64, _: &Result<(), String>) {}
     fn file_save_as_start(&self, _: &CanonPath, _: &CanonPath) {}
     fn file_save_as_done(&self, _: &CanonPath, _: &CanonPath, _: &Result<(), String>) {}
+    fn file_reread_start(&self, _: &CanonPath) {}
 }
 
 // ── Sync driver API ────────────────────────────────────────────────────
@@ -129,44 +189,69 @@ impl FileReadDriver {
         }
     }
 
-    /// Drain completions from the async worker into `BufferStore`.
-    /// Main-thread, cheap.
+    /// Drain completions from the async worker.
     ///
-    /// Returns the list of paths whose load transitioned to `Ready`
-    /// on this tick so the runtime can seed sibling sources (notably
-    /// `BufferEdits`). On idle ticks the returned `Vec` is empty —
-    /// `Vec::new()` is zero-alloc.
-    pub fn process(&self, store: &mut BufferStore) -> Vec<LoadCompletion> {
-        let mut completions: Vec<LoadCompletion> = Vec::new();
+    /// Initial loads transition `BufferStore` entries to `Ready`
+    /// or `Error` and are surfaced as [`LoadCompletion`]s for the
+    /// runtime to seed `BufferEdits`.
+    ///
+    /// Reread completions (M26) do **not** touch `BufferStore` —
+    /// the buffer is already materialised; the runtime's
+    /// reconcile branch consumes the fresh rope directly.
+    ///
+    /// On idle ticks both vectors are empty (`Vec::new()` is
+    /// zero-alloc).
+    pub fn process(&self, store: &mut BufferStore) -> ReadCompletions {
+        let mut out = ReadCompletions::default();
         while let Ok(done) = self.rx_done.try_recv() {
             self.trace.file_load_done(&done.path, &done.result);
-            let entry = match &done.result {
-                Ok(rope) => {
-                    completions.push(LoadCompletion {
-                        path: done.path.clone(),
-                        rope: rope.clone(),
-                    });
-                    LoadState::Ready(rope.clone())
+            match done.kind {
+                ReadKind::Initial => {
+                    let entry = match &done.result {
+                        Ok(rope) => {
+                            out.initials.push(LoadCompletion {
+                                path: done.path.clone(),
+                                rope: rope.clone(),
+                            });
+                            LoadState::Ready(rope.clone())
+                        }
+                        Err(msg) => LoadState::Error(Arc::new(msg.clone())),
+                    };
+                    store.loaded.insert(done.path, entry);
                 }
-                Err(msg) => LoadState::Error(Arc::new(msg.clone())),
-            };
-            store.loaded.insert(done.path, entry);
+                ReadKind::Reread => {
+                    out.rereads.push(RereadCompletion {
+                        path: done.path,
+                        result: done.result,
+                    });
+                }
+            }
         }
-        completions
+        out
     }
 
     /// Act on `LoadAction`s (produced by the runtime's query layer).
-    /// Writes `Pending` synchronously into `BufferStore` before
-    /// dispatching async work — without the sync write, the next
-    /// tick's query would see the path as absent and re-trigger.
+    /// For `Load`: writes `Pending` synchronously into `BufferStore`
+    /// before dispatching async work — without the sync write, the
+    /// next tick's query would see the path as absent and re-trigger.
+    /// For `Reread`: the buffer is already materialised, so we
+    /// dispatch the read but leave `BufferStore` untouched.
     pub fn execute<'a, I>(&self, actions: I, store: &mut BufferStore)
     where
         I: IntoIterator<Item = &'a LoadAction>,
     {
-        for LoadAction::Load(path) in actions {
-            store.loaded.insert(path.clone(), LoadState::Pending);
-            self.trace.file_load_start(path);
-            let _ = self.tx_cmd.send(ReadCmd::Read(path.clone()));
+        for action in actions {
+            match action {
+                LoadAction::Load(path) => {
+                    store.loaded.insert(path.clone(), LoadState::Pending);
+                    self.trace.file_load_start(path);
+                    let _ = self.tx_cmd.send(ReadCmd::Read(path.clone()));
+                }
+                LoadAction::Reread(path) => {
+                    self.trace.file_reread_start(path);
+                    let _ = self.tx_cmd.send(ReadCmd::Reread(path.clone()));
+                }
+            }
         }
     }
 }
@@ -354,6 +439,7 @@ mod tests {
         // Command landed on the ABI boundary.
         match rx_cmd.try_recv().expect("expected a ReadCmd") {
             ReadCmd::Read(p) => assert_eq!(p, path),
+            ReadCmd::Reread(_) => panic!("expected initial Read, got Reread"),
         }
     }
 
@@ -370,6 +456,7 @@ mod tests {
         tx_done
             .send(ReadDone {
                 path: path.clone(),
+                kind: ReadKind::Initial,
                 result: Ok(rope.clone()),
             })
             .expect("send ReadDone");
@@ -393,6 +480,7 @@ mod tests {
         tx_done
             .send(ReadDone {
                 path: path.clone(),
+                kind: ReadKind::Initial,
                 result: Err("No such file".into()),
             })
             .expect("send ReadDone");

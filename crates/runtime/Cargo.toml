@@ -58,6 +58,8 @@ led-driver-git-core = { workspace = true }
 led-driver-git-native = { workspace = true }
 led-driver-session-core = { workspace = true }
 led-driver-session-native = { workspace = true }
+led-driver-file-watch-core = { workspace = true }
+led-driver-file-watch-native = { workspace = true }
 led-text-reflow = { workspace = true }
 drv = { workspace = true }
 imbl = { workspace = true }
@@ -68,3 +70,9 @@ toml = { workspace = true }
 dirs = { workspace = true }
 serde_json = { workspace = true }
 unicode-segmentation = { workspace = true }
+# Compiled `GlobMatcher` lives on `state-lsp::LspWatchedGlobs`
+# entries; the runtime memo `lsp_watched_file_notifications`
+# walks them per file-watch event. Type itself comes from
+# `driver-lsp-core` (no direct globset reference here, but the
+# dep is transitive — listed for clarity).
+globset = { workspace = true }

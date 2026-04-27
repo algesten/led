@@ -14,7 +14,7 @@ use std::thread;
 
 use led_core::{CanonPath, Notifier};
 use led_driver_buffers_core::{
-    FileReadDriver, FileWriteDriver, ReadCmd, ReadDone, Trace, WriteCmd, WriteDone,
+    FileReadDriver, FileWriteDriver, ReadCmd, ReadDone, ReadKind, Trace, WriteCmd, WriteDone,
 };
 use ropey::Rope;
 
@@ -59,15 +59,23 @@ pub fn spawn_worker(
 
 fn worker_loop(rx: Receiver<ReadCmd>, tx: Sender<ReadDone>, notify: Notifier) {
     while let Ok(cmd) = rx.recv() {
-        match cmd {
-            ReadCmd::Read(path) => {
-                let result = read_one(&path);
-                if tx.send(ReadDone { path, result }).is_err() {
-                    return;
-                }
-                notify.notify();
-            }
+        let (path, kind) = match cmd {
+            ReadCmd::Read(path) => (path, ReadKind::Initial),
+            ReadCmd::Reread(path) => (path, ReadKind::Reread),
+        };
+        // Initial: missing file → empty rope (`create_if_missing`
+        // semantics). Reread: missing file → Err so the
+        // reconcile arm silently drops (legacy parity for
+        // external-delete: keep buffer with stale content, no
+        // visible reload to empty).
+        let result = match kind {
+            ReadKind::Initial => read_one(&path),
+            ReadKind::Reread => read_one_strict(&path),
+        };
+        if tx.send(ReadDone { path, kind, result }).is_err() {
+            return;
         }
+        notify.notify();
     }
 }
 
@@ -88,6 +96,16 @@ fn read_one(path: &CanonPath) -> Result<Arc<Rope>, String> {
         }
         Err(e) => Err(e.to_string()),
     }
+}
+
+/// Strict read: NotFound returns Err. Used by `Reread` so the
+/// reconcile arm doesn't replace an open buffer's content with
+/// an empty rope when the file was deleted out from under us.
+fn read_one_strict(path: &CanonPath) -> Result<Arc<Rope>, String> {
+    let p: PathBuf = path.as_path().to_path_buf();
+    fs::read_to_string(&p)
+        .map(|s| Arc::new(Rope::from_str(&s)))
+        .map_err(|e| e.to_string())
 }
 
 // ── FileWriteDriver native worker ──────────────────────────────────────

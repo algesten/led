@@ -18,3 +18,4 @@ LspSend	server=fake-lsp kind=request method=textDocument/rename id=5 path=file:/
 LspRecv	server=fake-lsp kind=response id=5
 LspSend	server=fake-lsp kind=notification method=textDocument/didChange path=file://<TMPDIR>/main.rs version=2
 WorkspaceFlushUndo	path=<TMPDIR>/main.rs chain=<CHAIN>
+WorkspaceCheckSync	path=<TMPDIR>/main.rs

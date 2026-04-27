@@ -21,3 +21,8 @@ led-state-diagnostics = { workspace = true }
 # pick a tree-sitter grammar.
 led-state-syntax = { workspace = true }
 ropey = { workspace = true }
+# `RegistrationGlob` carries a compiled `GlobMatcher` so the
+# runtime memo can match watched paths without recompiling the
+# pattern on every event. ABI type per G13; the matcher lives on
+# the driver side of the JSON parse boundary.
+globset = { workspace = true }

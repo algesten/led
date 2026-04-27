@@ -1,0 +1,25 @@
+git_init = true
+
+[[file]]
+path = "main.rs"
+contents = """
+fn main() {
+    println!(\"hello\");
+}
+"""
+
+[fake_lsp]
+# Server registers `**/*.toml` via `client/registerCapability`
+# after the client sends `initialized`. The `fs_write Cargo.toml`
+# step in script.txt later in the run touches a file matching
+# this glob; the runtime's file-watch driver picks up the
+# Modify, the runtime memo matches it against the registered
+# globs, and dispatches one
+# `LspCmd::DidChangeWatchedFiles` to the server.
+#
+# The watched file is deliberately NOT listed in `[[file]]` so
+# led never opens it as a buffer (which would otherwise spawn a
+# second fake-lsp instance for the toml language and muddy the
+# trace). The Rust server is the only one initialised; it owns
+# the registration.
+watchedFileGlobs = ["**/*.toml"]

@@ -25,7 +25,9 @@ use std::io::{self, Write};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use led_driver_buffers_core::{BufferStore, FileReadDriver, FileWriteDriver, LoadState};
+use led_driver_buffers_core::{
+    BufferStore, FileReadDriver, FileWriteDriver, LoadState, RereadCompletion,
+};
 use led_driver_buffers_native::{FileReadNative, FileWriteNative};
 use led_driver_clipboard_core::{
     ClipboardAction, ClipboardDriver, ClipboardResult,
@@ -122,6 +124,16 @@ pub enum Event {
 /// sync driver drops first (closing its command `Sender`), then the
 /// native marker drops (no-op — the worker self-exits on hangup).
 pub struct Drivers {
+    /// M26 — declared *first* so its `Sender` drops *first*.
+    /// Reasoning per `EXAMPLE-ARCH.md` G12 + the M26 design doc:
+    /// the file-watch driver receives notify-touches that fire
+    /// from `FlushUndo` / `ClearUndo` writes still in flight on
+    /// the session driver. If the watcher were alive when the
+    /// session driver issued its final touch, we'd self-trigger
+    /// a CheckSync against a shutting-down session. Dropping the
+    /// Sender first lets the worker self-exit on hangup before
+    /// any other shutdown side-effects.
+    pub file_watch: led_driver_file_watch_core::FileWatchDriver,
     pub file: FileReadDriver,
     pub file_write: FileWriteDriver,
     pub input: TerminalInputDriver,
@@ -136,6 +148,7 @@ pub struct Drivers {
     pub session: SessionDriver,
 
     // Held only for lifetime management; detached on drop.
+    _file_watch_native: led_driver_file_watch_native::FileWatchNative,
     _file_native: FileReadNative,
     _file_write_native: FileWriteNative,
     _input_native: TerminalInputNative,
@@ -263,6 +276,16 @@ pub struct Atoms {
     /// per-request churn doesn't invalidate memos that only
     /// read overlay state.
     pub lsp_pending: led_state_lsp::LspPending,
+    /// M26-followup — server-registered
+    /// `workspace/didChangeWatchedFiles` glob sets keyed by
+    /// `(server, registration_id)`. External-fact source per G1
+    /// (the server told us); folded from
+    /// `LspEvent::WatchedFilesRegistered/Unregistered` in the
+    /// ingest phase. The `lsp_watched_file_notifications`
+    /// dispatch helper walks `file_watch.recent_events` against
+    /// these globs to fan out
+    /// `LspCmd::DidChangeWatchedFiles` per-server.
+    pub lsp_watched_globs: led_state_lsp::LspWatchedGlobs,
     /// Git state (M19): branch + per-file category map + per-
     /// buffer line statuses. Folded from `GitEvent::FileStatuses`
     /// and `GitEvent::LineStatuses` in the ingest phase; read by
@@ -327,6 +350,21 @@ pub struct Atoms {
     /// the informative extension. Mirrors legacy led's
     /// `PathChain` → `LanguageId::from_chain` routing.
     pub path_chains: std::collections::HashMap<CanonPath, PathChain>,
+    /// M26 — driver-owned source for the file-watch driver.
+    /// Holds the actual side of the desired/actual diff that
+    /// produces `FileWatchCmd::Watch` / `Unwatch`, plus the
+    /// queue of `FileWatchEvent`s the worker emitted since the
+    /// last drain. Memos in `query.rs` read this to derive the
+    /// per-tick reread / sync-check / browser-refresh
+    /// dispatches; the runtime calls
+    /// `FileWatchState::clear_events` at the end of each
+    /// Execute phase.
+    pub file_watch: led_driver_file_watch_core::FileWatchState,
+    /// M26 — monotonic id allocator for `WatcherId`. Bumped
+    /// whenever `desired_watch_set` introduces a path that
+    /// hasn't been seen this session. Persisted-in-memory only;
+    /// there's no on-disk catalog to reconcile against.
+    pub watch_id_seq: u64,
 }
 
 /// Per-buffer state tracking what we've shipped to the
@@ -368,6 +406,15 @@ pub struct World<'a, W: Write> {
     /// its own session flock; without it every test races on the
     /// developer's real `~/.config/led/db.sqlite`.
     pub cli_config_dir: Option<&'a std::path::Path>,
+    /// `--no-workspace` CLI flag. When `true` the runtime skips
+    /// session init AND the M26 file-watch dispatch — there's no
+    /// workspace root to track, no session DB to sync. The flag
+    /// is checked alongside `session.init_done` because
+    /// standalone mode short-circuits init by setting
+    /// `session.init_done = true` without ever dispatching
+    /// `SessionCmd::Init`, which the file-watch gate needs to
+    /// distinguish from a normal-mode init that completed.
+    pub no_workspace: bool,
 }
 
 /// Run the main loop until dispatch signals quit.
@@ -398,6 +445,7 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
         completions_pending,
         lsp_extras,
         lsp_pending,
+        lsp_watched_globs,
         git,
         git_scan_dispatched,
         git_scan_pending,
@@ -407,6 +455,11 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
         resume_check_pending,
         undo_persistence,
         undo_flush_debounce,
+        file_watch,
+        // Used by the watch-action diff to mint new WatcherIds
+        // for per-buffer registrations; held mutably so we can
+        // advance the counter when a fresh registration appears.
+        watch_id_seq,
     } = &mut *world.atoms;
     let drivers = world.drivers;
     let wake = world.wake;
@@ -414,6 +467,7 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
     let theme = world.theme;
     let stdout = &mut *world.stdout;
     let cli_config_dir = world.cli_config_dir;
+    let no_workspace = world.no_workspace;
     // `world.trace` is wired into every driver at spawn time; the
     // main loop also emits a `WorkspaceClearUndo` on each save,
     // so it holds a direct handle.
@@ -438,8 +492,96 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
         // over a late-arriving load completion (course-correct #6).
         // `process` returns an empty Vec on idle ticks — no heap
         // alloc on the happy path.
+        // M26 — drain file-watch events into FileWatchState
+        // before `drivers.file.process` so the reconcile arm can
+        // pick up rereads from this same tick. `process` only
+        // touches the recent_events queue; the registry is not
+        // mutated here (that's the execute-phase Watch/Unwatch
+        // diff's job).
+        drivers.file_watch.process(file_watch);
+
+        // M26 — apply workspace-tree-refresh effects in ingest
+        // so the query phase's `file_list_action` memo sees the
+        // cleared `fs.dir_contents` and emits fresh ListDir
+        // cmds in the SAME tick. Goldens expect FsListDir
+        // before GitScan after a workspace-tree change; doing
+        // this in execute would push the FsListDir to the next
+        // tick and reverse the order.
+        //
+        // Skipped in `--no-workspace` mode: standalone runs
+        // never installed any watches (the dispatch site below
+        // is also gated on `!no_workspace`), so there's nothing
+        // to react to.
+        if !no_workspace && session.init_done && fs.root.is_some() {
+            let refresh = compute_workspace_tree_refresh(file_watch, edits, fs.root.as_ref().unwrap());
+            if refresh.git_scan {
+                *git_scan_pending = true;
+            }
+            if refresh.refresh_listings {
+                fs.dir_contents.clear();
+            }
+            // Dispatch reread / sync_check here too — same
+            // rationale: keeps "what fired in tick T because of
+            // event T" tightly coupled. Watch-actions stays in
+            // execute because it's an output-side diff that
+            // depends on the post-dispatch buffer set.
+            let reread_paths = compute_external_reread_targets(file_watch, edits);
+            if !reread_paths.is_empty() {
+                let reread_cmds: Vec<led_driver_buffers_core::LoadAction> = reread_paths
+                    .iter()
+                    .map(|p| led_driver_buffers_core::LoadAction::Reread(p.clone()))
+                    .collect();
+                drivers.file.execute(reread_cmds.iter(), store);
+            }
+            // sync_check_targets requires `cli_config_dir` to
+            // resolve; bring it forward.
+            let cfg_for_sync = cli_config_dir
+                .and_then(|p| {
+                    std::fs::create_dir_all(p).ok()?;
+                    Some(led_core::UserPath::new(p).canonicalize())
+                })
+                .or_else(config_dir_for_session);
+            if let Some(cfg) = cfg_for_sync {
+                let sync_cmds = compute_sync_check_targets(
+                    file_watch,
+                    edits,
+                    &cfg,
+                    undo_persistence,
+                );
+                if !sync_cmds.is_empty() {
+                    drivers.session.execute(sync_cmds.iter());
+                }
+            }
+            // M26-followup — fan watched-file events out to
+            // language servers' registered globs. Same ingest-
+            // tick dispatch discipline as reread / sync_check:
+            // the cmds need to land before `clear_events()` in
+            // execute, and trace order matches whichever
+            // helper ran first (this one fires after sync, so
+            // `LspSend` lines for `workspace/didChangeWatchedFiles`
+            // sort after `WorkspaceCheckSync` in goldens).
+            let lsp_watch_cmds = compute_lsp_watched_file_notifications(
+                file_watch,
+                lsp_watched_globs,
+            );
+            for cmd in &lsp_watch_cmds {
+                if let LspCmd::DidChangeWatchedFiles { server, changes } = cmd {
+                    trace.lsp_did_change_watched_files(server, changes.len());
+                }
+            }
+            if !lsp_watch_cmds.is_empty() {
+                drivers.lsp.execute(lsp_watch_cmds.iter());
+            }
+        }
+
         let file_completions = drivers.file.process(store);
-        for completion in file_completions {
+        // External-change rereads (M26) — handled before the
+        // initial-load loop so the reconcile branch settles before
+        // sibling state-seeding runs.
+        for reread in &file_completions.rereads {
+            reconcile_external_change(reread, edits, fs, git_scan_pending);
+        }
+        for completion in file_completions.initials {
             // Language detection prefers the symlink chain stashed
             // at tab-open time: walking `user → intermediates →
             // resolved` matches legacy's rule that the user-typed
@@ -836,6 +978,25 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
                         led_state_lsp::BufferInlayHints { version, hints },
                     );
                 }
+                // M26-followup — fold dynamic
+                // `workspace/didChangeWatchedFiles` registrations
+                // into `lsp_watched_globs`. External-fact
+                // ingest per G1 — the field assignment is the
+                // only logic; matching against events runs as
+                // the dispatch helper later in this tick.
+                LspEvent::WatchedFilesRegistered {
+                    server,
+                    registration_id,
+                    globs,
+                } => {
+                    lsp_watched_globs.register(server, registration_id, globs);
+                }
+                LspEvent::WatchedFilesUnregistered {
+                    server,
+                    registration_id,
+                } => {
+                    lsp_watched_globs.unregister(&server, &registration_id);
+                }
             }
         }
 
@@ -1156,6 +1317,9 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
                     // Quit gate can still clear.
                     session.saved = true;
                     session.init_done = true;
+                }
+                SessionEvent::SyncResult { kind } => {
+                    apply_sync_result(kind, edits, undo_persistence, file_watch);
                 }
             }
         }
@@ -1680,6 +1844,51 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
             session.saved = true;
         }
 
+        // ── File-watch dispatch (M26) ──────────────────────────
+        //
+        // Compute the desired watch set (workspace root +
+        // <config>/notify/ + per-buffer parent dirs), diff against
+        // the driver's actual `registry`, dispatch the resulting
+        // Watch/Unwatch commands, then drain any inbound
+        // FileWatchEvents into per-tick reread / sync-check
+        // dispatches via `external_reread_targets` /
+        // `sync_check_targets` / `workspace_tree_refresh`.
+        //
+        // Gated on `session.init_done` so we don't dispatch
+        // watches before the session driver has resolved the
+        // config dir. The session-init path uses the same
+        // `cli_config_dir` lookup that the watch path needs, so
+        // gating saves a duplicate config-dir resolution and keeps
+        // the trace order deterministic.
+        if !no_workspace
+            && session.init_done
+            && let Some(root) = fs.root.as_ref()
+        {
+            let cfg = cli_config_dir
+                .and_then(|p| {
+                    std::fs::create_dir_all(p).ok()?;
+                    Some(led_core::UserPath::new(p).canonicalize())
+                })
+                .or_else(config_dir_for_session);
+            if let Some(cfg) = cfg {
+                // Watch-actions diff: only output-side dispatch
+                // that stays in execute. Event-driven
+                // dispatches (reread / sync_check / tree
+                // refresh) ran in ingest so the in-tick query
+                // memos saw their effects.
+                let watch_cmds = compute_watch_actions(
+                    root,
+                    &cfg,
+                    edits,
+                    file_watch,
+                    watch_id_seq,
+                );
+                if !watch_cmds.is_empty() {
+                    drivers.file_watch.execute(watch_cmds.iter(), file_watch);
+                }
+            }
+        }
+
         // FlushUndo: per-tick incremental append of newly-finalised
         // undo groups. Mirrors legacy's `pending_undo_flush` query
         // (`led/src/model/mod.rs` ~line 399). Only primaries own
@@ -1995,6 +2204,13 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
             *git_scan_pending = false;
         }
 
+        // M26 — `recent_events` is a per-tick queue; drain it now
+        // that all dispatch consumers (reread / sync_check /
+        // workspace_tree_refresh) have read it. Otherwise a single
+        // event would re-trigger dispatches on every subsequent
+        // tick.
+        file_watch.clear_events();
+
         // ── Render ──────────────────────────────────────────────
         if frame != last_frame {
             if let Some(f) = &frame {
@@ -2282,6 +2498,657 @@ static UNDO_CHAIN_NONCE: std::sync::atomic::AtomicU64 =
 /// replay if the bytes shifted between sessions.
 fn disk_content_hash_for(eb: &EditedBuffer) -> led_core::PersistedContentHash {
     eb.disk_content_hash
+}
+
+/// M26 — apply a `SessionEvent::SyncResult` arrival.
+///
+/// Three discriminants:
+///
+/// - `SyncEntries` with matching chain + content_hash: apply the
+///   peer's `EditGroup`s to the rope. Cursor stays put on M26;
+///   future polish can use `History::rebase_*` helpers.
+/// - `SyncEntries` with chain or hash mismatch: queue a synthetic
+///   `FileWatchEvent::Changed { kinds: MODIFIED }` into
+///   `FileWatchState.recent_events` so the next-tick
+///   `external_reread_targets` memo emits a `LoadAction::Reread`.
+///   The reconcile branch then takes over.
+/// - `ExternalSave`: same fallback — synthesize a reread.
+/// - `NoChange`: drop. Includes the self-echo case (our own
+///   `FlushUndo` → notify-touch → `CheckSync` round-trip).
+fn apply_sync_result(
+    kind: led_driver_session_core::SyncResultKind,
+    edits: &mut BufferEdits,
+    undo_persistence: &mut std::collections::HashMap<CanonPath, UndoPersistTracker>,
+    file_watch: &mut led_driver_file_watch_core::FileWatchState,
+) {
+    use led_driver_session_core::SyncResultKind;
+    match kind {
+        SyncResultKind::SyncEntries {
+            path,
+            chain_id,
+            content_hash,
+            entries,
+            new_last_seen_seq,
+        } => {
+            let chain_match = undo_persistence
+                .get(&path)
+                .is_some_and(|t| t.chain_id == chain_id);
+            let hash_match = edits
+                .buffers
+                .get(&path)
+                .is_some_and(|eb| eb.disk_content_hash == content_hash);
+            if !chain_match || !hash_match {
+                synthesize_reread(file_watch, &path);
+                return;
+            }
+            apply_remote_entries(edits, &path, &entries);
+            if let Some(tracker) = undo_persistence.get_mut(&path) {
+                tracker.last_seq = new_last_seen_seq;
+                tracker.persisted_len = tracker.persisted_len.saturating_add(entries.len());
+            }
+        }
+        SyncResultKind::ExternalSave { path } => {
+            synthesize_reread(file_watch, &path);
+        }
+        SyncResultKind::NoChange { .. } => {
+            // Drop. Includes the self-echo from FlushUndo →
+            // notify-touch → CheckSync round-trip on a single
+            // primary's own write.
+        }
+    }
+}
+
+/// Apply a peer's `EditGroup`s to the local rope. Each group's
+/// ops execute in declaration order; deletes carry their text so
+/// the local rope just removes the matching range, inserts
+/// substitute the new text. After applying, push the group into
+/// the local `History.past` so a local `Ctrl-/` can undo the
+/// peer-applied change exactly as if we'd typed it.
+fn apply_remote_entries(
+    edits: &mut BufferEdits,
+    path: &CanonPath,
+    entries: &[EditGroup],
+) {
+    let Some(eb) = edits.buffers.get_mut(path) else {
+        return;
+    };
+    if entries.is_empty() {
+        return;
+    }
+    let mut new_rope = (*eb.rope).clone();
+    for group in entries {
+        for op in &group.ops {
+            use led_state_buffer_edits::EditOp;
+            match op {
+                EditOp::Delete { at, text } => {
+                    let len = text.chars().count();
+                    let end = (*at + len).min(new_rope.len_chars());
+                    if *at < new_rope.len_chars() && end > *at {
+                        new_rope.remove(*at..end);
+                    }
+                }
+                EditOp::Insert { at, text } => {
+                    let pos = (*at).min(new_rope.len_chars());
+                    new_rope.insert(pos, text);
+                }
+            }
+        }
+    }
+    eb.rope = std::sync::Arc::new(new_rope);
+    eb.disk_content_hash =
+        led_core::EphemeralContentHash::of_rope(&eb.rope).persist();
+    eb.version = eb.version.saturating_add(1);
+    // Buffer stays clean: the peer's edits are now part of the
+    // shared chain, and our local view matches the disk snapshot
+    // the peer was writing against.
+    eb.saved_version = eb.version;
+    // Stash the peer's groups in our local history so undo
+    // walks them.
+    eb.history.restore_past(entries.to_vec());
+}
+
+/// Synthesize a `MODIFIED` event for `path` into the file-watch
+/// driver's `recent_events`. Chain/hash-mismatch SyncResults
+/// fall back through this so the existing
+/// `external_reread_targets` memo handles the recovery
+/// uniformly.
+fn synthesize_reread(
+    file_watch: &mut led_driver_file_watch_core::FileWatchState,
+    path: &CanonPath,
+) {
+    // Use a synthetic WatcherId distinct from any registration —
+    // memos that match against `registry` won't see it as
+    // matching a per-buffer parent watch, but the
+    // `external_reread_targets` memo can be written to handle
+    // this synthetic id specially. For M26, allocate a sentinel
+    // id derived from the path hash so the same path always
+    // produces the same id (deterministic across runs of the
+    // test suite).
+    let id = led_driver_file_watch_core::WatcherId(
+        std::collections::hash_map::DefaultHasher::new().pipe(|mut h| {
+            use std::hash::Hasher;
+            path.as_path().to_string_lossy().hash_into(&mut h);
+            h.finish()
+        }),
+    );
+    file_watch.synthesize_modified(id, path.clone());
+}
+
+/// Tiny pipe helper so the synthesize_reread call can build a
+/// hash inline without a let-mut sequence.
+trait PipeExt: Sized {
+    fn pipe<R, F: FnOnce(Self) -> R>(self, f: F) -> R {
+        f(self)
+    }
+}
+impl<T> PipeExt for T {}
+
+trait HashIntoExt {
+    fn hash_into(self, h: &mut std::collections::hash_map::DefaultHasher);
+}
+impl HashIntoExt for std::borrow::Cow<'_, str> {
+    fn hash_into(self, h: &mut std::collections::hash_map::DefaultHasher) {
+        use std::hash::Hasher;
+        h.write(self.as_bytes());
+    }
+}
+
+// ── M26 file-watch dispatch helpers ──────────────────────────
+
+/// Stable "kind tag" for our three baseline registrations. The
+/// runtime uses these as bit-pattern WatcherIds so memos /
+/// dispatch helpers can identify them without consulting the
+/// registry. Per-buffer ids are minted from `watch_id_seq`
+/// starting at 0.
+const WATCHER_ID_ROOT: led_driver_file_watch_core::WatcherId =
+    led_driver_file_watch_core::WatcherId(u64::MAX);
+const WATCHER_ID_NOTIFY_DIR: led_driver_file_watch_core::WatcherId =
+    led_driver_file_watch_core::WatcherId(u64::MAX - 1);
+
+/// Build the desired/actual diff and return the Vec of
+/// `FileWatchCmd`s to dispatch this tick.
+///
+/// Desired set (per the design doc):
+/// - `WATCHER_ID_ROOT` → workspace root, recursive, 0 ms debounce.
+/// - `WATCHER_ID_NOTIFY_DIR` → `<config>/notify/`, non-recursive,
+///   100 ms debounce.
+/// - One per open buffer → its parent directory, non-recursive,
+///   0 ms debounce. Same-id-same-path on subsequent ticks
+///   thanks to `watch_id_seq` allocation persistence in
+///   `FileWatchState.registry`.
+fn compute_watch_actions(
+    root: &CanonPath,
+    config_dir: &CanonPath,
+    edits: &BufferEdits,
+    file_watch: &led_driver_file_watch_core::FileWatchState,
+    watch_id_seq: &mut u64,
+) -> Vec<led_driver_file_watch_core::FileWatchCmd> {
+    use led_driver_file_watch_core::{FileWatchCmd, Registration, WatcherId};
+    // Belt-and-braces: ensure `<config>/notify/` exists before
+    // we ask the watcher to subscribe. The session driver's
+    // init also creates it, but on a separate thread; this
+    // local create_dir_all guarantees the watch installs cleanly
+    // even if the runtime races ahead of the session worker.
+    let notify_dir_raw = config_dir.as_path().join("notify");
+    let _ = std::fs::create_dir_all(&notify_dir_raw);
+    let notify_dir =
+        led_core::UserPath::new(notify_dir_raw).canonicalize();
+
+    // Desired: WatcherId → Registration.
+    let mut desired: std::collections::HashMap<WatcherId, Registration> =
+        std::collections::HashMap::new();
+    desired.insert(
+        WATCHER_ID_ROOT,
+        Registration {
+            path: root.clone(),
+            recursive: true,
+            debounce_ms: 0,
+        },
+    );
+    desired.insert(
+        WATCHER_ID_NOTIFY_DIR,
+        Registration {
+            path: notify_dir,
+            recursive: false,
+            debounce_ms: 100,
+        },
+    );
+
+    // For per-buffer parent dirs, we keep WatcherIds stable across
+    // ticks by reusing the id already in the registry whenever the
+    // path matches. New paths get a fresh id from `watch_id_seq`.
+    // Build a path → id reverse-lookup over the existing per-buffer
+    // entries (skipping the two sentinel ids).
+    let existing_per_buffer: std::collections::HashMap<CanonPath, WatcherId> = file_watch
+        .registry
+        .iter()
+        .filter(|(id, _)| **id != WATCHER_ID_ROOT && **id != WATCHER_ID_NOTIFY_DIR)
+        .map(|(id, reg)| (reg.path.clone(), *id))
+        .collect();
+
+    // Skip per-buffer parent registration when the parent is
+    // already covered by the ROOT recursive watch. notify
+    // refuses to watch the same path twice and the events would
+    // arrive on ROOT anyway. `compute_external_reread_targets`
+    // accepts MODIFIED events from ROOT for paths matching open
+    // buffers, so the reread dispatch still works.
+    let root_path = root.as_path();
+    for path in edits.buffers.keys() {
+        let Some(parent) = path.as_path().parent() else {
+            continue;
+        };
+        if parent == root_path || parent.starts_with(root_path) {
+            continue;
+        }
+        let parent_canon =
+            led_core::UserPath::new(parent.to_path_buf()).canonicalize();
+        let id = existing_per_buffer
+            .get(&parent_canon)
+            .copied()
+            .unwrap_or_else(|| {
+                let id = WatcherId(*watch_id_seq);
+                *watch_id_seq = watch_id_seq.saturating_add(1);
+                id
+            });
+        desired.insert(
+            id,
+            Registration {
+                path: parent_canon,
+                recursive: false,
+                debounce_ms: 0,
+            },
+        );
+    }
+
+    // Diff: emit Watch for desired-only, Unwatch for actual-only.
+    // Same id+same shape → skip (idempotent on the driver side anyway).
+    let mut cmds: Vec<FileWatchCmd> = Vec::new();
+    for (id, reg) in &desired {
+        match file_watch.registry.get(id) {
+            Some(existing) if *existing == *reg => {
+                // No change.
+            }
+            _ => cmds.push(FileWatchCmd::Watch {
+                id: *id,
+                path: reg.path.clone(),
+                recursive: reg.recursive,
+                debounce_ms: reg.debounce_ms,
+            }),
+        }
+    }
+    for id in file_watch.registry.keys() {
+        if !desired.contains_key(id) {
+            cmds.push(FileWatchCmd::Unwatch { id: *id });
+        }
+    }
+    cmds
+}
+
+/// Walk `recent_events` and pick out paths that:
+/// - Came from a per-buffer parent watch (id != ROOT, NOTIFY_DIR).
+/// - Carry MODIFIED.
+/// - Match an open buffer's path (by exact canonical equality).
+///
+/// The runtime dispatches a `LoadAction::Reread` for each. The
+/// reconcile arm in the next ingest pass writes the result into
+/// `EditedBuffer.rope`.
+fn compute_external_reread_targets(
+    file_watch: &led_driver_file_watch_core::FileWatchState,
+    edits: &BufferEdits,
+) -> Vec<CanonPath> {
+    use led_driver_file_watch_core::{ChangeKinds, FileWatchEvent};
+    let mut out: std::collections::HashSet<CanonPath> = std::collections::HashSet::new();
+    for (id, queue) in file_watch.recent_events.iter() {
+        // Skip notify-dir events (those drive sync_check, not
+        // reread). Per-buffer events AND root-recursive events
+        // both legitimately fire on open-buffer changes; accept
+        // them when the path matches an open buffer.
+        if *id == WATCHER_ID_NOTIFY_DIR {
+            continue;
+        }
+        for ev in queue {
+            let FileWatchEvent::Changed { path, kinds, .. } = ev else {
+                continue;
+            };
+            // Reread fires only on MODIFIED. Skip events that
+            // include REMOVED (legacy parity:
+            // `docs/spec/buffers.md` § "External delete is
+            // inert. The model ignores it"). Skip Create-only
+            // events too — those don't carry "new content"
+            // semantics for an already-open buffer; the
+            // reread on the subsequent Modify covers actual
+            // edits.
+            if kinds.contains_any(ChangeKinds::REMOVED) {
+                continue;
+            }
+            if !kinds.contains_any(ChangeKinds::MODIFIED) {
+                continue;
+            }
+            if edits.buffers.contains_key(path) {
+                out.insert(path.clone());
+            }
+        }
+    }
+    out.into_iter().collect()
+}
+
+/// Walk `recent_events` for the `WATCHER_ID_NOTIFY_DIR` queue,
+/// resolve each touched basename back to an open buffer via
+/// `path_hash`, and emit one `SessionCmd::CheckSync` per
+/// resolved buffer.
+fn compute_sync_check_targets(
+    file_watch: &led_driver_file_watch_core::FileWatchState,
+    edits: &BufferEdits,
+    _config_dir: &CanonPath,
+    undo_persistence: &std::collections::HashMap<CanonPath, UndoPersistTracker>,
+) -> Vec<SessionCmd> {
+    use led_driver_file_watch_core::FileWatchEvent;
+    // Build a hash → path index over open buffers.
+    let mut hash_index: std::collections::HashMap<String, CanonPath> =
+        std::collections::HashMap::new();
+    for path in edits.buffers.keys() {
+        hash_index.insert(path.path_hash(), path.clone());
+    }
+    let mut seen: std::collections::HashSet<CanonPath> =
+        std::collections::HashSet::new();
+    let mut cmds: Vec<SessionCmd> = Vec::new();
+    let Some(queue) = file_watch.recent_events.get(&WATCHER_ID_NOTIFY_DIR) else {
+        return cmds;
+    };
+    for ev in queue {
+        let FileWatchEvent::Changed { path, .. } = ev else {
+            continue;
+        };
+        // The notify-dir watch only fires for paths inside the
+        // notify dir, so just match the basename. We skip a
+        // parent-equality check because the registry already
+        // filtered the watch scope.
+        let basename = match path.as_path().file_name() {
+            Some(s) => s.to_string_lossy().into_owned(),
+            None => continue,
+        };
+        let Some(buf_path) = hash_index.get(&basename) else {
+            continue;
+        };
+        if !seen.insert(buf_path.clone()) {
+            continue;
+        }
+        let Some(tracker) = undo_persistence.get(buf_path) else {
+            continue;
+        };
+        cmds.push(SessionCmd::CheckSync {
+            path: buf_path.clone(),
+            last_seen_seq: tracker.last_seq,
+            current_chain_id: tracker.chain_id.clone(),
+        });
+    }
+    cmds
+}
+
+/// Walk `recent_events` for the root-recursive watch and fan
+/// each MODIFIED / CREATED / REMOVED event out to whichever
+/// servers have a registered glob covering that path. Returns
+/// one `LspCmd::DidChangeWatchedFiles` per server with a
+/// non-empty `changes` payload — same `(server, batch)` shape
+/// the native worker turns into a single LSP notification per
+/// server.
+///
+/// Only the workspace-root recursive watch is consulted: the
+/// per-buffer parent watches and the `<config>/notify/` watch
+/// are scoped to specific runtime concerns (reread / cross-
+/// instance sync), not to LSP fan-out. Servers register globs
+/// against the workspace, so root-recursive coverage matches.
+fn compute_lsp_watched_file_notifications(
+    file_watch: &led_driver_file_watch_core::FileWatchState,
+    globs: &led_state_lsp::LspWatchedGlobs,
+) -> Vec<LspCmd> {
+    use led_driver_file_watch_core::{ChangeKinds, FileWatchEvent};
+    use led_driver_lsp_core::{FileEvent, FileEventKind};
+    if globs.by_server.is_empty() {
+        return Vec::new();
+    }
+    let Some(queue) = file_watch.recent_events.get(&WATCHER_ID_ROOT) else {
+        return Vec::new();
+    };
+    // Per-server batches built up across the event queue.
+    // String key = short server name; preserved verbatim back
+    // into the cmd payload so the native worker matches it
+    // against `short_server_name(entry.server.name)`. Inner
+    // map dedupes same-path events within one tick (macOS
+    // FSEvents often delivers Create+Modify as two notify
+    // events; the LSP server gets one entry per path with the
+    // dominant kind).
+    let mut per_server: std::collections::HashMap<
+        String,
+        std::collections::HashMap<CanonPath, FileEventKind>,
+    > = std::collections::HashMap::new();
+    for ev in queue {
+        let FileWatchEvent::Changed { path, kinds, .. } = ev else {
+            continue;
+        };
+        // Pick the dominant LSP `FileChangeType` for this
+        // event. Delete wins over Modify wins over Create — a
+        // file that was created and then deleted in one tick
+        // is reported as Deleted; one that was created and
+        // modified collapses to Changed (the file exists in a
+        // new state).
+        let lsp_kind = if kinds.contains_any(ChangeKinds::REMOVED) {
+            FileEventKind::Deleted
+        } else if kinds.contains_any(ChangeKinds::MODIFIED) {
+            FileEventKind::Changed
+        } else if kinds.contains_any(ChangeKinds::CREATED) {
+            FileEventKind::Created
+        } else {
+            continue;
+        };
+        // Bit position the registration's `kinds` mask is
+        // checked against. Aligns with `RegistrationGlob.kinds`
+        // doc-comment in driver-lsp-core (1=Create, 2=Change,
+        // 4=Delete; same bits as ChangeKinds).
+        let kind_bit: u8 = match lsp_kind {
+            FileEventKind::Created => ChangeKinds::CREATED,
+            FileEventKind::Changed => ChangeKinds::MODIFIED,
+            FileEventKind::Deleted => ChangeKinds::REMOVED,
+        };
+        let path_for_match = path.as_path();
+        for (server, registrations) in globs.by_server.iter() {
+            // Within a server, hit on the first matching glob
+            // — duplicate notifications would be redundant.
+            // Walk every registration_id under the server.
+            let matched = registrations.values().any(|globs| {
+                globs.iter().any(|g| {
+                    g.kinds & kind_bit != 0 && g.matcher.is_match(path_for_match)
+                })
+            });
+            if !matched {
+                continue;
+            }
+            let entry = per_server.entry(server.clone()).or_default();
+            // Same Delete > Modify > Create precedence as
+            // above when two events for the same path arrive
+            // in this tick: the LATER, stronger kind wins.
+            let promote = match (entry.get(path), lsp_kind) {
+                (None, _) => true,
+                (Some(prev), new) => kind_priority(new) >= kind_priority(*prev),
+            };
+            if promote {
+                entry.insert(path.clone(), lsp_kind);
+            }
+        }
+    }
+    per_server
+        .into_iter()
+        .map(|(server, by_path)| {
+            // Sort by path so the FileEvent batch order is
+            // stable across runs — `HashMap` iteration order is
+            // randomised, which would make goldens flaky.
+            let mut changes: Vec<FileEvent> = by_path
+                .into_iter()
+                .map(|(path, kind)| FileEvent { path, kind })
+                .collect();
+            changes.sort_by(|a, b| a.path.as_path().cmp(b.path.as_path()));
+            LspCmd::DidChangeWatchedFiles { server, changes }
+        })
+        .collect()
+}
+
+/// Higher = takes precedence in same-tick path coalescing.
+fn kind_priority(k: led_driver_lsp_core::FileEventKind) -> u8 {
+    use led_driver_lsp_core::FileEventKind;
+    match k {
+        FileEventKind::Created => 1,
+        FileEventKind::Changed => 2,
+        FileEventKind::Deleted => 3,
+    }
+}
+
+/// Workspace-tree refresh signal: any CREATED or REMOVED on the
+/// root recursive watch flags a git rescan and a sidebar refresh.
+struct WorkspaceTreeRefresh {
+    git_scan: bool,
+    refresh_listings: bool,
+}
+
+fn compute_workspace_tree_refresh(
+    file_watch: &led_driver_file_watch_core::FileWatchState,
+    edits: &BufferEdits,
+    _root: &CanonPath,
+) -> WorkspaceTreeRefresh {
+    use led_driver_file_watch_core::{ChangeKinds, FileWatchEvent};
+    let mut out = WorkspaceTreeRefresh {
+        git_scan: false,
+        refresh_listings: false,
+    };
+    let Some(queue) = file_watch.recent_events.get(&WATCHER_ID_ROOT) else {
+        return out;
+    };
+    for ev in queue {
+        let FileWatchEvent::Changed { path, kinds, .. } = ev else {
+            continue;
+        };
+        if !kinds.contains_any(ChangeKinds::CREATED | ChangeKinds::REMOVED) {
+            continue;
+        }
+        // Filter rule (per `docs/spec/buffers.md` § "External
+        // filesystem change" + legacy parity):
+        //
+        // - CREATED for an already-open buffer: ignore. macOS
+        //   FSEvents synthesises Create-on-install for files
+        //   that already existed when the watch came up; the
+        //   reread path handles real content changes.
+        // - REMOVED for an open buffer: keep. The sidebar
+        //   listing shifted (file disappeared); the buffer
+        //   itself stays open with stale content per legacy
+        //   (the reread path filter for REMOVED guarantees we
+        //   don't clobber the rope).
+        // - Any kind for a path NOT in open buffers: keep.
+        //   Sidebar add/remove for non-open files.
+        let is_open = edits.buffers.contains_key(path);
+        let only_created =
+            kinds.contains_any(ChangeKinds::CREATED) && !kinds.contains_any(ChangeKinds::REMOVED);
+        if is_open && only_created {
+            continue;
+        }
+        out.git_scan = true;
+        out.refresh_listings = true;
+    }
+    out
+}
+
+/// M26 — three-branch reconcile of an external-change reread.
+///
+/// Application logic in the ingest phase per `EXAMPLE-ARCH.md` §
+/// "Invariant enforcement": cleans up the user-decision shadow
+/// source `EditedBuffer.rope` in response to disk content (an
+/// external fact) changing.
+///
+/// - **Clean buffer + new content** — replace the rope, refresh
+///   `disk_content_hash`, push one `EditGroup` so `Ctrl-/` takes
+///   the user back to the prior content, bump `version` and let
+///   `saved_version` catch up so the buffer stays clean. Also
+///   bump `git_scan_pending` and drop the parent dir from
+///   `fs.dir_contents` so the sidebar relists — same
+///   side-effects an in-editor save fires (the disk-side
+///   transition is identical).
+/// - **Dirty buffer + new content** — silently drop. Legacy
+///   parity (`docs/spec/buffers.md` § "External filesystem
+///   change") protects unsaved local edits. A future polish
+///   adds an `Alert::Warn` and an explicit `Action::Reload`.
+/// - **Hash matches our anchor** — no-op. This is either our own
+///   save echoing back through the watcher or a peer wrote
+///   identical bytes. If `dirty()` was somehow set despite the
+///   hash matching, that's already incoherent — skip silently.
+fn reconcile_external_change(
+    reread: &RereadCompletion,
+    edits: &mut BufferEdits,
+    fs: &mut FsTree,
+    git_scan_pending: &mut bool,
+) {
+    let new_rope = match &reread.result {
+        Ok(r) => r.clone(),
+        Err(_) => return, // Read failed; nothing to reconcile.
+    };
+    let Some(eb) = edits.buffers.get_mut(&reread.path) else {
+        return; // Buffer no longer materialised.
+    };
+    let new_hash = led_core::EphemeralContentHash::of_rope(&new_rope).persist();
+    let dirty = eb.dirty();
+    let hash_matches = new_hash == eb.disk_content_hash;
+    match (dirty, hash_matches) {
+        (false, false) => {
+            // Clean reload. Push one group so undo can restore the
+            // prior content; replace the rope; advance version and
+            // saved_version together so the buffer stays clean.
+            let prev_text: Arc<str> = Arc::from(eb.rope.to_string().as_str());
+            let new_text: Arc<str> = Arc::from(new_rope.to_string().as_str());
+            let cursor_before = led_state_tabs::Cursor::default();
+            let cursor_after = led_state_tabs::Cursor::default();
+            eb.history.record_replace(
+                0,
+                prev_text,
+                new_text,
+                cursor_before,
+                cursor_after,
+                None,
+            );
+            eb.rope = new_rope;
+            eb.disk_content_hash = new_hash;
+            eb.version = eb.version.saturating_add(1);
+            eb.saved_version = eb.version;
+            refresh_after_external_change(reread, fs, git_scan_pending);
+        }
+        (true, false) => {
+            // Dirty + content diverges. Legacy parity: silent
+            // drop — the user's local edits stay. But the disk
+            // *did* change, so we still refresh the
+            // workspace-tree side (sidebar listing + git scan)
+            // since downstream queries care about disk state.
+            refresh_after_external_change(reread, fs, git_scan_pending);
+        }
+        (_, true) => {
+            // Hash matches our anchor — our own save echoing back
+            // or a peer wrote identical bytes. No rope change.
+            // (Future: if dirty() is true here it means a local
+            //  edit converged with disk; nothing to do.)
+        }
+    }
+}
+
+/// Match the post-save side-effects after an external change:
+/// drop the parent dir's cached listing so the sidebar relists,
+/// and bump `git_scan_pending` so the next execute phase fires a
+/// rescan.
+fn refresh_after_external_change(
+    reread: &RereadCompletion,
+    fs: &mut FsTree,
+    git_scan_pending: &mut bool,
+) {
+    *git_scan_pending = true;
+    if let Some(parent) = reread.path.as_path().parent() {
+        let parent_canon =
+            led_core::UserPath::new(parent.to_path_buf()).canonicalize();
+        fs.dir_contents.remove(&parent_canon);
+    }
 }
 
 /// Distance (in finalised groups) between the current head and
@@ -2959,12 +3826,17 @@ pub fn spawn_drivers(
         trace.clone().as_session_trace(),
         wake.notifier.clone(),
     );
+    let (file_watch, file_watch_native) = led_driver_file_watch_native::spawn(
+        trace.clone().as_file_watch_trace(),
+        wake.notifier.clone(),
+    );
     let (input, input_native) = led_driver_terminal_native::spawn(
         trace.clone().as_terminal_trace(),
         wake.notifier.clone(),
     )?;
     let output = TerminalOutputDriver::new(trace.as_terminal_trace());
     Ok(Drivers {
+        file_watch,
         file,
         file_write,
         input,
@@ -2977,6 +3849,7 @@ pub fn spawn_drivers(
         lsp,
         git,
         session,
+        _file_watch_native: file_watch_native,
         _file_native: file_native,
         _file_write_native: file_write_native,
         _input_native: input_native,
@@ -3017,6 +3890,7 @@ pub(crate) mod trace_adapter {
     pub(crate) struct LspTraceAdapter(pub Arc<dyn Trace>);
     pub(crate) struct GitTraceAdapter(pub Arc<dyn Trace>);
     pub(crate) struct SessionTraceAdapter(pub Arc<dyn Trace>);
+    pub(crate) struct FileWatchTraceAdapter(pub Arc<dyn Trace>);
 
     impl led_driver_buffers_core::Trace for FileTraceAdapter {
         fn file_load_start(&self, path: &CanonPath) {
@@ -3036,6 +3910,9 @@ pub(crate) mod trace_adapter {
         }
         fn file_save_as_done(&self, from: &CanonPath, to: &CanonPath, result: &Result<(), String>) {
             self.0.file_save_as_done(from, to, result);
+        }
+        fn file_reread_start(&self, path: &CanonPath) {
+            self.0.file_reread_start(path);
         }
     }
 
@@ -3145,6 +4022,9 @@ pub(crate) mod trace_adapter {
         fn lsp_recv_notification(&self, server: &str, method: &str) {
             self.0.lsp_recv_notification(server, method);
         }
+        fn lsp_recv_request(&self, server: &str, method: &str, id: i64) {
+            self.0.lsp_recv_request(server, method, id);
+        }
     }
 
     impl led_driver_git_core::Trace for GitTraceAdapter {
@@ -3174,6 +4054,21 @@ pub(crate) mod trace_adapter {
         }
         fn session_flush_undo(&self, path: &CanonPath, chain_id: &str) {
             self.0.workspace_flush_undo(path, chain_id);
+        }
+        fn session_check_sync(&self, path: &CanonPath) {
+            self.0.workspace_check_sync(path);
+        }
+    }
+
+    impl led_driver_file_watch_core::Trace for FileWatchTraceAdapter {
+        fn file_watch_event(
+            &self,
+            _id: led_driver_file_watch_core::WatcherId,
+            _path: &CanonPath,
+            _kinds: led_driver_file_watch_core::ChangeKinds,
+        ) {
+            // Watch events are input-side; not traced in
+            // dispatched.snap.
         }
     }
 
@@ -3246,6 +4141,9 @@ impl SharedTrace {
     }
     pub(crate) fn as_git_trace(&self) -> Arc<dyn led_driver_git_core::Trace> {
         Arc::new(trace_adapter::GitTraceAdapter(self.inner()))
+    }
+    pub(crate) fn as_file_watch_trace(&self) -> Arc<dyn led_driver_file_watch_core::Trace> {
+        Arc::new(trace_adapter::FileWatchTraceAdapter(self.inner()))
     }
     pub(crate) fn as_session_trace(&self) -> Arc<dyn led_driver_session_core::Trace> {
         Arc::new(trace_adapter::SessionTraceAdapter(self.inner()))

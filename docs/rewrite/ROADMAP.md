@@ -127,10 +127,11 @@ point; expect it to grow as the porting surfaces more.
 | M22 | Keyboard macros (record / replay, count prefix, `e`-repeat latch) | `macros.md` |
 | M23 | Auto-indent / reflow / sort-imports (tree-sitter indent queries, dprint, imports.scm) | `editing.md` § "Auto-indent", "Reflow", "Sort imports" |
 | M25 | Grapheme-aware column math (`Cursor::col` = grapheme cluster, `preferred_col` = display cells, LSP UTF-16 boundary conversion) | [`MILESTONE-25.md`](MILESTONE-25.md) |
+| M26 | File-watch + cross-instance sync (`driver-file-watch/{core,native}`, `SessionCmd::CheckSync` + notify-touch, three-branch external-change reconcile, `--no-workspace` gate) | [`MILESTONE-26.md`](MILESTONE-26.md) |
 
 ---
 
-## Planned (M26 + M27)
+## Planned (M27)
 
 The order below is *dependency order* where dependencies exist, and
 *visibility order* where they don't — i.e. ship features that unlock
@@ -617,30 +618,48 @@ mostly ignores this; M25 is a behaviour improvement over legacy.
 (legacy's char-indexed col was kept until M25 by accident — see
 `GOLDEN-TODO.md` for the refresh rationale).
 
-### M26 — External file change detection
+### M26 — External file change + cross-instance sync (SHIPPED, 2026-04-27)
 
-- `driver-file-watch/` (FSEvents on macOS, inotify on Linux, etc. via
-  `notify`).
-- On disk change for an open buffer: compare disk hash vs
-  `saved_version` baseline. If user hasn't edited → reload silently.
-  If dirty → prompt to discard or reload.
-- **LSP client-side `workspace/didChangeWatchedFiles`**: servers
-  (rust-analyzer in particular) register dynamic watch globs at
-  startup via `client/registerCapability`. Once M26's watcher
-  exists, the LSP driver subscribes to the same event stream and
-  forwards matching path changes as `DidChangeWatchedFiles`
-  notifications so the server can re-index (e.g. after
-  `cargo add` edits `Cargo.toml` out-of-editor). Without this,
-  rust-analyzer's error set goes stale whenever workspace files
-  change outside the editor — documented gap tracked in
-  `lsp-patterns.md` §7.2 until M26 closes it.
+See [`MILESTONE-26.md`](MILESTONE-26.md) for the full design.
+In summary:
 
-**Spec reference:** `buffers.md` § "External change",
-`docs/drivers/fs.md`.
+- `driver-file-watch/{core,native}` (FSEvents on macOS, inotify on
+  Linux, etc. via `notify`). One driver, multiple watch intents
+  (workspace root recursive, `<config>/notify/` non-recursive,
+  per-buffer parent dirs) keyed by `WatcherId`.
+- On disk change for an open buffer: compare new content hash vs
+  `eb.disk_content_hash`. Clean buffer + new content → silent
+  reload, generating one `EditGroup` so `Ctrl-/` restores the
+  prior state. Dirty buffer + new content → silent drop (legacy
+  parity; alert UX deferred).
+- Cross-instance sync: extend `driver-session` with
+  `SessionCmd::CheckSync` + `SessionEvent::SyncResult`. After
+  every successful `FlushUndo` / `ClearUndo`, the session driver
+  touches `<config>/notify/<path_hash>`. The notify-dir watch
+  routes that into `pending_sync_check.set(path)`; the execute
+  phase dispatches `CheckSync`; the driver returns one of
+  `SyncEntries` / `ExternalSave` / `NoChange`.
+- **LSP client-side `workspace/didChangeWatchedFiles`**: the
+  manager parses `client/registerCapability` payloads, compiles
+  globs via `globset`, and the runtime fans matching
+  `FileWatchEvent`s out as `LspCmd::DidChangeWatchedFiles`. Closes
+  the gap documented in `lsp-patterns.md` §7.2 (rust-analyzer
+  going stale when `Cargo.toml` is edited outside the editor).
+
+**Spec reference:** [`MILESTONE-26.md`](MILESTONE-26.md),
+`buffers.md` § "External change", `persistence.md` §
+"Cross-instance sync", `docs/drivers/fs.md`,
+`docs/drivers/workspace.md`.
 
 **Goldens moved to green:** `smoke/external_change`,
-`features/external_change/*`,
-`driver_events/lsp/did_change_watched_files*`.
+`edge/external_change_while_dirty`,
+`edge/external_delete_open_file`,
+`driver_events/docstore/external_change`,
+`driver_events/workspace/workspace_changed`,
+`features/editing/type_delete_reflow`. Two-process
+cross-instance scenarios (`sync_entries`, `sync_external_save`,
+`sync_no_change`) defer to a follow-up that adds a `sync-flush`
+script command to the goldens harness.
 
 ### M27 — GitHub PR
 
@@ -676,6 +695,17 @@ can either ship them properly or explicitly drop them:
   handler. Intent: open file in background tab. **Schedule: M11**.
 - `Action::SaveForce` — no handler, not bound. **Drop** — the new
   `SaveNoFormat` (M6) covers the documented intent.
+
+- **`workspace/didChangeWatchedFiles` LSP fan-out** —
+  M26-followup. M26 ships the `driver-file-watch` infrastructure
+  but does NOT wire LSP servers' dynamic file-watch
+  registrations through it. Rust-analyzer therefore goes stale
+  when `Cargo.toml` is edited outside the editor — same gap
+  documented in `lsp-patterns.md` §7.2.
+  Hand-off: [`M26-FOLLOWUP-LSP.md`](M26-FOLLOWUP-LSP.md).
+  No M26 golden exercises this; needs a new
+  `features/lsp/did_change_watched_files` scenario authored
+  on `main` first.
 
 ---
 

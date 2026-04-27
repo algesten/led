@@ -18,7 +18,7 @@
 use std::sync::Arc;
 
 use led_core::{CanonPath, TextInput};
-use led_driver_lsp_core::{CodeActionSummary, InlayHint};
+use led_driver_lsp_core::{CodeActionSummary, InlayHint, RegistrationGlob};
 
 // ── User-decision source ──────────────────────────────────────
 
@@ -418,6 +418,60 @@ pub struct BufferInlayHints {
 pub struct PendingFormat {
     pub path: CanonPath,
     pub seq: u64,
+}
+
+// ── External-fact source: server-registered file-watch globs ──
+
+/// Driver-owned external-fact source: the set of
+/// `workspace/didChangeWatchedFiles` glob registrations every
+/// language server has installed via `client/registerCapability`.
+///
+/// Nested map shape: `server → registration_id → Arc<Vec<glob>>`.
+/// rust-analyzer typically registers a single id with several
+/// globs (`**/Cargo.toml`, `**/*.rs`, …); other servers may
+/// register multiple ids over the lifecycle. The runtime ingest
+/// arm replaces a registration wholesale on
+/// [`LspEvent::WatchedFilesRegistered`] and removes by id on
+/// [`LspEvent::WatchedFilesUnregistered`].
+///
+/// `imbl::HashMap` for both layers keeps idle ticks pointer-equal
+/// per G14: the input projection in the runtime's
+/// `lsp_watched_file_notifications` memo is a cheap clone.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct LspWatchedGlobs {
+    pub by_server:
+        imbl::HashMap<String, imbl::HashMap<String, Arc<Vec<RegistrationGlob>>>>,
+}
+
+impl LspWatchedGlobs {
+    /// Install or replace one registration id's glob set for
+    /// `server`. Same shape regardless of whether the id existed
+    /// previously — registrations are immutable per LSP spec; a
+    /// re-registration with the same id replaces wholesale.
+    pub fn register(
+        &mut self,
+        server: String,
+        registration_id: String,
+        globs: Arc<Vec<RegistrationGlob>>,
+    ) {
+        let entry = self.by_server.entry(server).or_default();
+        entry.insert(registration_id, globs);
+    }
+
+    /// Drop one registration id from `server`. If the server's
+    /// last registration disappears, the per-server entry is
+    /// pruned too — keeps `by_server.is_empty()` meaningful.
+    pub fn unregister(&mut self, server: &str, registration_id: &str) {
+        let now_empty = if let Some(entry) = self.by_server.get_mut(server) {
+            entry.remove(registration_id);
+            entry.is_empty()
+        } else {
+            false
+        };
+        if now_empty {
+            self.by_server.remove(server);
+        }
+    }
 }
 
 #[cfg(test)]

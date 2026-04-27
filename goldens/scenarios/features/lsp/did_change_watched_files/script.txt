@@ -1,0 +1,8 @@
+# Open with main.rs in view, let the LSP init handshake settle so
+# the server has registered its `**/*.toml` watcher. Then touch
+# Cargo.toml on disk; the runtime's file-watch driver picks up the
+# Modify, the runtime memo matches it against the registered glob,
+# and dispatches one `LspCmd::DidChangeWatchedFiles` to fake-lsp.
+wait 1500ms
+fs_write Cargo.toml [package]\nname = "sample"\nversion = "0.2.0"\nedition = "2021"\n
+wait 1500ms

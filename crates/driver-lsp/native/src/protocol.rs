@@ -14,7 +14,9 @@
 use std::sync::Arc;
 
 use led_core::CanonPath;
-use led_driver_lsp_core::{CompletionItem, CompletionTextEdit};
+use led_driver_lsp_core::{
+    CompletionItem, CompletionTextEdit, FileEvent, FileEventKind, RegistrationGlob,
+};
 use serde_json::{Value, json};
 
 // ── URI encoding ────────────────────────────────────────────────
@@ -177,6 +179,161 @@ pub fn build_did_change_configuration_notification() -> Vec<u8> {
         "params": { "settings": {} },
     }))
     .expect("serialize didChangeConfiguration")
+}
+
+/// Build a `workspace/didChangeWatchedFiles` notification body.
+/// `changes` is the per-event payload the runtime memo already
+/// matched against the server's registered globs. LSP encodes
+/// `kind` as `1=Created | 2=Changed | 3=Deleted` (see spec
+/// `FileChangeType`); we serialise the enum's discriminant
+/// verbatim. `path` is percent-encoded into a `file://` URI on
+/// the wire — the runtime hands us a `CanonPath` so the URI
+/// rendering stays here, alongside every other LSP wire helper.
+pub fn build_did_change_watched_files_notification(changes: &[FileEvent]) -> Vec<u8> {
+    let arr: Vec<Value> = changes
+        .iter()
+        .map(|c| {
+            let kind = match c.kind {
+                FileEventKind::Created => 1,
+                FileEventKind::Changed => 2,
+                FileEventKind::Deleted => 3,
+            };
+            json!({ "uri": uri_from_path(&c.path), "type": kind })
+        })
+        .collect();
+    serde_json::to_vec(&json!({
+        "jsonrpc": "2.0",
+        "method": "workspace/didChangeWatchedFiles",
+        "params": { "changes": arr },
+    }))
+    .expect("serialize didChangeWatchedFiles")
+}
+
+// ── client/registerCapability parsing ────────────────────────────
+
+/// One parsed `Registration` entry from a
+/// `client/registerCapability` payload, narrowed to the
+/// `workspace/didChangeWatchedFiles` cases the runtime cares
+/// about. Other registration methods (completion trigger char
+/// updates, `textDocument/formatting`, …) are ignored — the
+/// runtime has nothing to do with them today.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WatchedFilesRegistration {
+    pub registration_id: String,
+    pub globs: Vec<RegistrationGlob>,
+}
+
+/// Parse a `client/registerCapability` params object into the
+/// subset of registrations the manager needs. Tolerant of
+/// missing optional fields per LSP spec; malformed entries
+/// drop silently. Multiple registrations in one payload are
+/// rare but spec-legal — the manager emits one
+/// `LspEvent::WatchedFilesRegistered` per id.
+pub fn parse_register_capability_watched_files(
+    params: &Value,
+) -> Vec<WatchedFilesRegistration> {
+    let Some(arr) = params.get("registrations").and_then(|v| v.as_array()) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for entry in arr {
+        let method = entry.get("method").and_then(|v| v.as_str()).unwrap_or("");
+        if method != "workspace/didChangeWatchedFiles" {
+            continue;
+        }
+        let id = entry
+            .get("id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let watchers = entry
+            .pointer("/registerOptions/watchers")
+            .and_then(|v| v.as_array());
+        let Some(watchers) = watchers else { continue };
+        let mut globs = Vec::with_capacity(watchers.len());
+        for w in watchers {
+            let pattern = match parse_watcher_glob_pattern(w) {
+                Some(p) => p,
+                None => continue,
+            };
+            // LSP `WatchKind` defaults to 7 (all three) when
+            // omitted. The bit positions are spec-stable
+            // (`Create=1 | Change=2 | Delete=4`) and match
+            // `driver-file-watch`'s `ChangeKinds` so the
+            // runtime memo can `&` them directly.
+            let kinds = w
+                .get("kind")
+                .and_then(|v| v.as_u64())
+                .map(|n| n as u8 & 0b111)
+                .unwrap_or(0b111);
+            let Ok(glob) = globset::Glob::new(&pattern) else {
+                continue;
+            };
+            globs.push(RegistrationGlob {
+                pattern,
+                matcher: glob.compile_matcher(),
+                kinds,
+            });
+        }
+        if globs.is_empty() {
+            continue;
+        }
+        out.push(WatchedFilesRegistration {
+            registration_id: id,
+            globs,
+        });
+    }
+    out
+}
+
+/// LSP's `globPattern` is either a plain string (relative or
+/// absolute glob) or a `RelativePattern { baseUri, pattern }`
+/// object. We extract just the pattern string here; the
+/// `globset` matcher we feed it into already handles relative
+/// matches against absolute paths via the `**/` prefix
+/// servers conventionally use.
+fn parse_watcher_glob_pattern(watcher: &Value) -> Option<String> {
+    let pat = watcher.get("globPattern")?;
+    if let Some(s) = pat.as_str() {
+        return Some(s.to_string());
+    }
+    pat.get("pattern")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+}
+
+/// One parsed `Unregistration` entry from a
+/// `client/unregisterCapability` payload. Same narrowing as
+/// `parse_register_capability_watched_files`: only entries
+/// whose method is `workspace/didChangeWatchedFiles` make it
+/// out.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WatchedFilesUnregistration {
+    pub registration_id: String,
+}
+
+pub fn parse_unregister_capability_watched_files(
+    params: &Value,
+) -> Vec<WatchedFilesUnregistration> {
+    let Some(arr) = params.get("unregisterations").and_then(|v| v.as_array()) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for entry in arr {
+        let method = entry.get("method").and_then(|v| v.as_str()).unwrap_or("");
+        if method != "workspace/didChangeWatchedFiles" {
+            continue;
+        }
+        let id = entry
+            .get("id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        out.push(WatchedFilesUnregistration {
+            registration_id: id,
+        });
+    }
+    out
 }
 
 /// What the initialize response tells us about delivery mode,
@@ -444,6 +601,97 @@ mod tests {
 
     fn parse_body(body: &[u8]) -> Value {
         serde_json::from_slice(body).expect("valid JSON")
+    }
+
+    // ── client/registerCapability parsing ────────────────────
+
+    #[test]
+    fn parse_register_capability_extracts_globs() {
+        let params = json!({
+            "registrations": [{
+                "id": "watched-files-1",
+                "method": "workspace/didChangeWatchedFiles",
+                "registerOptions": {
+                    "watchers": [
+                        { "globPattern": "**/Cargo.toml" },
+                        { "globPattern": "**/*.rs", "kind": 7 }
+                    ]
+                }
+            }]
+        });
+        let regs = parse_register_capability_watched_files(&params);
+        assert_eq!(regs.len(), 1);
+        assert_eq!(regs[0].registration_id, "watched-files-1");
+        assert_eq!(regs[0].globs.len(), 2);
+        assert_eq!(regs[0].globs[0].pattern, "**/Cargo.toml");
+        // Kind defaults to 7 when omitted.
+        assert_eq!(regs[0].globs[0].kinds, 0b111);
+        assert_eq!(regs[0].globs[1].kinds, 0b111);
+    }
+
+    #[test]
+    fn parse_register_capability_skips_unrelated_methods() {
+        let params = json!({
+            "registrations": [{
+                "id": "x",
+                "method": "textDocument/completion",
+                "registerOptions": {}
+            }]
+        });
+        assert!(parse_register_capability_watched_files(&params).is_empty());
+    }
+
+    #[test]
+    fn parse_unregister_capability_extracts_ids() {
+        let params = json!({
+            "unregisterations": [{
+                "id": "watched-files-1",
+                "method": "workspace/didChangeWatchedFiles"
+            }, {
+                "id": "trigger-chars",
+                "method": "textDocument/completion"
+            }]
+        });
+        let unregs = parse_unregister_capability_watched_files(&params);
+        assert_eq!(unregs.len(), 1);
+        assert_eq!(unregs[0].registration_id, "watched-files-1");
+    }
+
+    #[test]
+    fn registration_glob_matches_absolute_path() {
+        let params = json!({
+            "registrations": [{
+                "id": "w1",
+                "method": "workspace/didChangeWatchedFiles",
+                "registerOptions": {
+                    "watchers": [{ "globPattern": "**/*.toml" }]
+                }
+            }]
+        });
+        let regs = parse_register_capability_watched_files(&params);
+        let g = &regs[0].globs[0];
+        assert!(g.matcher.is_match("/private/tmp/x/Cargo.toml"));
+        assert!(g.matcher.is_match("Cargo.toml"));
+        assert!(!g.matcher.is_match("/private/tmp/x/main.rs"));
+    }
+
+    // ── didChangeWatchedFiles outbound notification ──────────
+
+    #[test]
+    fn build_did_change_watched_files_renders_uri_and_kind() {
+        let p = canon("/tmp/x/Cargo.toml");
+        let body = build_did_change_watched_files_notification(&[FileEvent {
+            path: p.clone(),
+            kind: FileEventKind::Changed,
+        }]);
+        let v: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["method"], "workspace/didChangeWatchedFiles");
+        let changes = v["params"]["changes"].as_array().unwrap();
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0]["type"], 2);
+        let uri = changes[0]["uri"].as_str().unwrap();
+        assert!(uri.starts_with("file://"));
+        assert!(uri.ends_with("Cargo.toml"));
     }
 
     #[test]

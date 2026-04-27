@@ -179,6 +179,16 @@ pub enum LspCmd {
         start_line: u32,
         end_line: u32,
     },
+    /// `workspace/didChangeWatchedFiles` notification — fan-out
+    /// of filesystem changes the server registered globs for.
+    /// `server` is the short server name (e.g. `rust-analyzer`)
+    /// the runtime memo resolved when matching paths against the
+    /// per-server glob set. `changes` is the LSP `FileEvent[]`
+    /// payload, already filtered to the matching server's globs.
+    DidChangeWatchedFiles {
+        server: String,
+        changes: Vec<FileEvent>,
+    },
 }
 
 /// One completion candidate from the server. Trimmed to the
@@ -285,6 +295,56 @@ pub struct InlayHint {
     pub padding_left: bool,
     pub padding_right: bool,
 }
+
+/// One filesystem change crossing as an LSP
+/// `workspace/didChangeWatchedFiles` notification entry. The
+/// runtime fan-out memo emits these on a per-server basis; the
+/// native worker percent-encodes `path` into a `file://` URI
+/// when serialising to the wire (URI rendering is platform-
+/// adjacent, lives in `driver-lsp/native`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileEvent {
+    pub path: CanonPath,
+    pub kind: FileEventKind,
+}
+
+/// LSP `FileChangeType` (1=Created, 2=Changed, 3=Deleted). The
+/// numeric values are wire-stable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileEventKind {
+    Created = 1,
+    Changed = 2,
+    Deleted = 3,
+}
+
+/// One server-registered file-watch glob, parsed from the
+/// `client/registerCapability` payload for
+/// `workspace/didChangeWatchedFiles`. The compiled
+/// `GlobMatcher` is held on the runtime atom so per-event
+/// matching is alloc-free; `pattern` round-trips for cheap
+/// `PartialEq` (the matcher itself doesn't implement it).
+///
+/// `kinds` is a bitset of LSP `WatchKind` values: `Create=1`,
+/// `Change=2`, `Delete=4`. These bit positions are
+/// deliberately the same as `driver-file-watch`'s
+/// `ChangeKinds` (`CREATED=0b001`, `MODIFIED=0b010`,
+/// `REMOVED=0b100`) so the runtime memo can `&` them directly
+/// without translation. LSP's `WatchKind` field defaults to all
+/// three when absent, so `kinds = 0b111` is the typical value.
+#[derive(Debug, Clone)]
+pub struct RegistrationGlob {
+    pub pattern: String,
+    pub matcher: globset::GlobMatcher,
+    pub kinds: u8,
+}
+
+impl PartialEq for RegistrationGlob {
+    fn eq(&self, other: &Self) -> bool {
+        self.pattern == other.pattern && self.kinds == other.kinds
+    }
+}
+
+impl Eq for RegistrationGlob {}
 
 /// Picker-facing summary of a `CodeAction` from the server.
 /// The native driver stores the server's raw item alongside so
@@ -420,6 +480,24 @@ pub enum LspEvent {
         version: u64,
         hints: Arc<Vec<InlayHint>>,
     },
+    /// Server registered a fresh `workspace/didChangeWatchedFiles`
+    /// glob set via `client/registerCapability`. The runtime
+    /// folds this into `LspWatchedGlobs.by_server`, replacing the
+    /// list keyed by `(server, registration_id)`. Multiple
+    /// registrations per server are valid (different globs for
+    /// different concerns); each one carries its own id.
+    WatchedFilesRegistered {
+        server: String,
+        registration_id: String,
+        globs: Arc<Vec<RegistrationGlob>>,
+    },
+    /// Server retracted a prior registration via
+    /// `client/unregisterCapability`. Symmetric to
+    /// [`LspEvent::WatchedFilesRegistered`].
+    WatchedFilesUnregistered {
+        server: String,
+        registration_id: String,
+    },
 }
 
 // ── Trace ──────────────────────────────────────────────────────
@@ -459,6 +537,15 @@ pub trait Trace: Send + Sync {
     /// Inbound JSON-RPC notification (`$/progress`,
     /// `textDocument/publishDiagnostics`, server status, …).
     fn lsp_recv_notification(&self, server: &str, method: &str);
+    /// Inbound JSON-RPC request from the server
+    /// (`client/registerCapability`,
+    /// `client/unregisterCapability`,
+    /// `workspace/configuration`, `window/workDoneProgress/create`,
+    /// …). Symmetric to `lsp_recv_notification`; the reply ships
+    /// via the auto-reply path on `lsp_send_response`-equivalent
+    /// machinery (we currently emit the auto-ack inline without
+    /// a separate trace line).
+    fn lsp_recv_request(&self, server: &str, method: &str, id: i64);
 }
 
 pub struct NoopTrace;
@@ -478,6 +565,7 @@ impl Trace for NoopTrace {
     }
     fn lsp_recv_response(&self, _: &str, _: i64) {}
     fn lsp_recv_notification(&self, _: &str, _: &str) {}
+    fn lsp_recv_request(&self, _: &str, _: &str, _: i64) {}
 }
 
 // ── Driver handle ──────────────────────────────────────────────
