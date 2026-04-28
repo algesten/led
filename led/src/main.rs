@@ -21,40 +21,21 @@ struct Cli {
     /// File paths to open as tabs. First becomes active.
     files: Vec<PathBuf>,
 
-    /// Append trace lines for each external event/execute.
-    #[arg(long)]
-    golden_trace: Option<PathBuf>,
-
-    /// Directory containing `config.toml`. Defaults to
-    /// `~/.config/led/`. Missing file is not an error.
+    /// Config directory (default: `~/.config/led/`). Holds `keys.toml` and `theme.toml`.
     #[arg(long)]
     config_dir: Option<PathBuf>,
 
-    /// Path to a `theme.toml`. Overrides the default resolution
-    /// (`<config_dir>/theme.toml` → `~/.config/led/theme.toml` →
-    /// built-in). Missing file at an explicit path is an error.
-    #[arg(long)]
-    theme: Option<PathBuf>,
-
-    /// Standalone mode: open the given files for editing without
-    /// touching workspace state. Disables session save/restore,
-    /// git status, LSP, and file watchers. Directory arguments
-    /// are silently ignored. Intended for `EDITOR="led
-    /// --no-workspace"` style use (commit messages, `crontab -e`,
-    /// temp files) where you want to edit one file and quit
-    /// without persisting anything about this run.
+    /// Standalone mode for `$EDITOR` use. Disables session, git, LSP, and file watchers.
     #[arg(long)]
     no_workspace: bool,
 
-    // The goldens runner always passes these; parse-and-ignore so it
-    // doesn't trip on unknown-flag errors.
+    // Test/goldens-only flags. Hidden from --help.
+    #[arg(long, hide = true)]
+    golden_trace: Option<PathBuf>,
     #[arg(long, hide = true)]
     test_clock: Option<PathBuf>,
     #[arg(long, hide = true)]
     test_lsp_server: Option<PathBuf>,
-    /// Replace the system clipboard with a per-process in-memory
-    /// cell. Used by the goldens harness so parallel tests don't
-    /// trample each other through the OS pasteboard.
     #[arg(long, hide = true)]
     test_clipboard_isolated: bool,
 }
@@ -80,8 +61,11 @@ fn main() -> io::Result<()> {
     let keymap = loaded.keymap;
 
     // Theme resolves the same way: fatal on I/O or malformed TOML,
-    // non-fatal warnings for per-region schema problems.
-    let loaded_theme = match load_theme(cli.config_dir.as_deref(), cli.theme.as_deref()) {
+    // non-fatal warnings for per-region schema problems. Always
+    // discovered from `<config_dir>/theme.toml` (no explicit-path
+    // override) — `--config-dir` is the only way to point led at a
+    // non-default theme.
+    let loaded_theme = match load_theme(cli.config_dir.as_deref(), None) {
         Ok(t) => t,
         Err(e) => {
             eprintln!("led: theme error: {e}");
