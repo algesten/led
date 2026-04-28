@@ -1,0 +1,15 @@
+# Repro for syntax-highlight-gone after kill+reopen.
+# After Ctrl-x k closes the tab, opening the same file via find-file
+# must reseed the BufferEdits entry + re-fire syntax tokenisation
+# — without that the body memo's "no edits entry" fallback paints
+# the rope without spans.
+#
+# The dispatched.snap below pins the second `FileOpen` so the fix
+# can't quietly drop back to "served from cache" without anyone
+# noticing.
+wait 200ms
+press Ctrl-x k
+press Ctrl-x Ctrl-f
+type main.rs
+press Enter
+wait 200ms

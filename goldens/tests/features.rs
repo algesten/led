@@ -20,6 +20,17 @@ fn buffers_open_edit_kill_tab() {
     run_scenario(&scenario_dir("features/buffers/open_edit_kill_tab"));
 }
 
+/// Regression: kill an open buffer, reopen the same path via find-file,
+/// the renderer's body must still carry syntax tokens. Pre-fix,
+/// `force_kill` left `store.loaded` populated, so `file_load_action`
+/// skipped the reload and the buffer never re-seeded into
+/// `edits.buffers` — `body_model`'s "no edits entry" fallback rendered
+/// the rope without spans.
+#[test]
+fn buffers_kill_then_reopen_keeps_syntax() {
+    run_scenario(&scenario_dir("features/buffers/kill_then_reopen"));
+}
+
 // === editing ===
 
 #[test]

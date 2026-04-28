@@ -1604,6 +1604,32 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
                 }
             }
         }
+        // Cleanup orphaned per-buffer state for paths no longer
+        // in `tabs.open`. `force_kill` drops `edits.buffers` and
+        // `pending_saves`, but driver-owned state (store, syntax,
+        // diagnostics, git, lsp_notified, …) is the runtime's
+        // concern — without this, a kill+reopen cycle would
+        // serve the path from `store.loaded` instead of dispatching
+        // a fresh `Load`, leaving `edits.buffers` empty and
+        // `body_model` falling back to the no-syntax branch.
+        //
+        // Cheap on idle: when no kill happened, `tabs.open` is
+        // unchanged, and the four `retain` walks each touch
+        // every entry but do no work past their existence check.
+        let open_paths: std::collections::HashSet<&CanonPath> =
+            tabs.open.iter().map(|t| &t.path).collect();
+        store.loaded.retain(|p, _| open_paths.contains(p));
+        syntax.by_path.retain(|p, _| open_paths.contains(p));
+        diagnostics.by_path.retain(|p, _| open_paths.contains(p));
+        git.line_statuses.retain(|p, _| open_paths.contains(p));
+        lsp_notified.retain(|p, _| open_paths.contains(p));
+        path_chains.retain(|p, _| open_paths.contains(p));
+        lsp_pending
+            .inlay_hints_requested
+            .retain(|p, _| open_paths.contains(p));
+        lsp_pending
+            .inlay_hints_by_path
+            .retain(|p, _| open_paths.contains(p));
         // M21 quit gate: we sit in `Phase::Exiting` until the
         // session driver acknowledges the save (or we're not
         // primary, in which case the ingest above already set
