@@ -277,7 +277,7 @@ mod tests {
             session: Some(CompletionSession {
                 tab: tab_id,
                 path,
-                seq: 1,
+                seq: led_core::LspRequestSeq(1),
                 prefix_line: 0,
                 prefix_start_col,
                 items: Arc::new(items),
@@ -362,7 +362,7 @@ mod tests {
             session: Some(CompletionSession {
                 tab: TabId(1),
                 path: path.clone(),
-                seq: 1,
+                seq: led_core::LspRequestSeq(1),
                 prefix_line: 0,
                 prefix_start_col: 0,
                 items: Arc::new(vec![mk_item("println!", Some("println!"))]),

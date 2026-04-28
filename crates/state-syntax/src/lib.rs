@@ -15,7 +15,7 @@
 use std::sync::Arc;
 
 use imbl::HashMap;
-use led_core::{CanonPath, PathChain};
+use led_core::{BufferVersion, CanonPath, PathChain};
 use tree_sitter::Tree;
 
 pub mod indent;
@@ -232,7 +232,7 @@ pub struct TokenSpan {
 #[derive(Debug, Clone)]
 pub struct SyntaxOut {
     pub path: CanonPath,
-    pub version: u64,
+    pub version: BufferVersion,
     pub language: Language,
     pub tree: Arc<Tree>,
     pub tokens: Arc<Vec<TokenSpan>>,
@@ -264,7 +264,7 @@ pub struct SyntaxState {
     /// runtime rebases token positions through any edits between
     /// this version and the buffer's current version before the
     /// painter consumes them.
-    pub version: u64,
+    pub version: BufferVersion,
     /// The buffer version currently being parsed by the worker, if
     /// any. Set by the runtime when a `SyntaxCmd` is dispatched,
     /// cleared when a `SyntaxOut` at or past that version arrives.
@@ -272,7 +272,7 @@ pub struct SyntaxState {
     /// while the worker is still busy. `None` means nothing is in
     /// flight — queue a fresh parse if the buffer is ahead of
     /// `version`.
-    pub in_flight_version: Option<u64>,
+    pub in_flight_version: Option<BufferVersion>,
 }
 
 impl SyntaxState {
@@ -282,7 +282,7 @@ impl SyntaxState {
             tree: None,
             tree_rope: None,
             tokens: Arc::new(Vec::new()),
-            version: 0,
+            version: BufferVersion::default(),
             in_flight_version: None,
         }
     }

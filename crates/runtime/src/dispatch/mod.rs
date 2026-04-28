@@ -1868,8 +1868,8 @@ mod tests {
             canon("a"),
             EditedBuffer {
                 rope: Arc::new(Rope::from_str("A")),
-                version: 1,
-                saved_version: 0,
+                version: led_core::BufferVersion(1),
+                saved_version: led_core::SavedVersion(0),
                 disk_content_hash: led_core::PersistedContentHash::default(),
                 history: Default::default(),
             },
@@ -1878,8 +1878,8 @@ mod tests {
             canon("b"),
             EditedBuffer {
                 rope: Arc::new(Rope::from_str("B")),
-                version: 1,
-                saved_version: 0,
+                version: led_core::BufferVersion(1),
+                saved_version: led_core::SavedVersion(0),
                 disk_content_hash: led_core::PersistedContentHash::default(),
                 history: Default::default(),
             },
@@ -1947,7 +1947,7 @@ mod tests {
         // legacy `has_active_lsp(s)` returning true.
         let mut lsp_status = led_state_diagnostics::LspStatuses::default();
         lsp_status.by_server.insert(
-            "rust-analyzer".to_string(),
+            led_core::ServerId::new("rust-analyzer"),
             led_state_diagnostics::LspServerStatus::default(),
         );
         let diagnostics = DiagnosticsStates::default();

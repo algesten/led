@@ -48,7 +48,7 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread::{self, JoinHandle};
 use std::time::Instant;
 
-use led_core::{CanonPath, Notifier, PersistedContentHash};
+use led_core::{BufferVersion, CanonPath, LspRequestSeq, Notifier, PersistedContentHash, ServerId};
 use led_driver_lsp_core::{
     DiagnosticSource, LspCmd, LspEvent, Trace,
     diag_source::{DiagMode, DiagPushResult},
@@ -109,32 +109,32 @@ enum PendingRequest {
     /// doesn't echo it and we need it for prefix extraction).
     Completion {
         path: CanonPath,
-        seq: u64,
+        seq: LspRequestSeq,
         line: u32,
     },
     /// Waiting on a `completionItem/resolve` response. `seq`
     /// echoes `LspCmd::ResolveCompletion.seq` so the runtime
     /// can ignore resolves from a stale session.
-    ResolveCompletion { path: CanonPath, seq: u64 },
+    ResolveCompletion { path: CanonPath, seq: LspRequestSeq },
     /// Waiting on a `textDocument/definition` response. `seq`
     /// echoes the runtime's originating
     /// `LspCmd::RequestGotoDefinition.seq`.
-    GotoDefinition { seq: u64 },
+    GotoDefinition { seq: LspRequestSeq },
     /// Waiting on a `textDocument/rename` response. `seq`
     /// echoes `LspCmd::RequestRename.seq` so the runtime can
     /// drop stale replies (e.g. after an abort).
-    Rename { seq: u64 },
+    Rename { seq: LspRequestSeq },
     /// Waiting on a `textDocument/codeAction` response. `seq`
     /// echoes `LspCmd::RequestCodeAction.seq`; `path` is
     /// carried through because the `LspEvent::CodeActions`
     /// surface echoes it back.
-    CodeAction { seq: u64, path: CanonPath },
+    CodeAction { seq: LspRequestSeq, path: CanonPath },
     /// Waiting on a `codeAction/resolve` response initiated by
     /// a picker commit. The raw pre-resolve action is stashed
     /// here so if resolve succeeds without `edit`, we fall
     /// back to the raw edit (if any).
     ResolveCodeAction {
-        seq: u64,
+        seq: LspRequestSeq,
         raw: Value,
     },
     /// Waiting on `textDocument/inlayHint`. `path` + `version`
@@ -142,14 +142,14 @@ enum PendingRequest {
     /// runtime can version-gate the cache.
     InlayHints {
         path: CanonPath,
-        version: u64,
+        version: BufferVersion,
     },
     /// Waiting on `textDocument/formatting`. `seq` echoes
     /// `LspCmd::RequestFormat.seq`; `path` is forwarded so the
     /// format edit flattens into a `FileEdit` targeting the
     /// right buffer even though the LSP response doesn't echo
     /// the uri.
-    Format { seq: u64, path: CanonPath },
+    Format { seq: LspRequestSeq, path: CanonPath },
 }
 
 struct ServerEntry {
@@ -367,6 +367,13 @@ fn short_server_name(name: &str) -> &str {
         .unwrap_or(name)
 }
 
+/// Convenience: build a [`ServerId`] from `Server.name` by
+/// trimming with [`short_server_name`]. Used everywhere the
+/// driver crosses an event boundary (trace, `LspEvent`).
+fn short_server_id(name: &str) -> ServerId {
+    ServerId::new(short_server_name(name))
+}
+
 impl Manager {
     fn run(&mut self) {
         loop {
@@ -441,13 +448,19 @@ impl Manager {
         }
     }
 
-    /// First registered server's name — used as the `server`
+    /// First registered server's id — used as the `server`
     /// field on emitted `LspEvent::Progress`. Matches legacy's
-    /// "show whichever server got started first" behaviour. An
-    /// empty string is returned when no server has spawned yet
-    /// (the caller skips the emission in that case).
-    fn first_server_name(&self) -> Option<String> {
-        self.servers.values().next().map(|e| e.server.name.clone())
+    /// "show whichever server got started first" behaviour.
+    /// `None` when no server has spawned yet (the caller skips
+    /// the emission in that case). Carries the registry-spawn
+    /// `name` (full binary path) so the runtime's status-bar
+    /// rendering matches what the user typed at the command
+    /// line / shell-substituted PATH lookup.
+    fn first_server_name(&self) -> Option<ServerId> {
+        self.servers
+            .values()
+            .next()
+            .map(|e| ServerId::new(e.server.name.clone()))
     }
 
     /// Emit an aggregated `LspEvent::Progress` if the throttle
@@ -637,14 +650,14 @@ impl Manager {
     /// between the registration and the runtime's fan-out tick).
     fn did_change_watched_files(
         &mut self,
-        server: &str,
+        server: &ServerId,
         changes: &[led_driver_lsp_core::FileEvent],
     ) {
         if changes.is_empty() {
             return;
         }
         let language = self.servers.iter().find_map(|(l, e)| {
-            (short_server_name(&e.server.name) == server).then_some(*l)
+            (short_server_name(&e.server.name) == server.as_str()).then_some(*l)
         });
         let Some(language) = language else { return };
         let entry = self.servers.get_mut(&language).expect("just found");
@@ -699,7 +712,7 @@ impl Manager {
                 // the user can act on it.
                 if e.kind() != std::io::ErrorKind::NotFound {
                     let _ = self.lsp_event_tx.send(LspEvent::Error {
-                        server: name,
+                        server: ServerId::new(name),
                         message: format!("spawn failed: {e}"),
                     });
                     self.notify.notify();
@@ -708,8 +721,8 @@ impl Manager {
                 return;
             }
         };
-        self.trace.lsp_server_started(&server.name);
-        let server_name = short_server_name(&server.name).to_string();
+        let server_name = short_server_id(&server.name);
+        self.trace.lsp_server_started(&server_name);
 
         let id = self.fresh_id();
         let root = self
@@ -813,7 +826,7 @@ impl Manager {
             None => json!([{ "text": rope.to_string() }]),
         };
         let uri = uri_from_path(path);
-        let server_name = short_server_name(&entry.server.name).to_string();
+        let server_name = short_server_id(&entry.server.name);
         let body = json!({
             "jsonrpc": "2.0",
             "method": "textDocument/didChange",
@@ -862,7 +875,7 @@ impl Manager {
         let entry = self.servers.get_mut(&language).expect("just found");
 
         let uri = uri_from_path(path);
-        let server_name = short_server_name(&entry.server.name).to_string();
+        let server_name = short_server_id(&entry.server.name);
         let body = json!({
             "jsonrpc": "2.0",
             "method": "textDocument/didClose",
@@ -946,7 +959,7 @@ impl Manager {
             let id = self.fresh_id();
             let entry = self.servers.get_mut(&lang).unwrap();
             let uri = uri_from_path(&path);
-            let server_name = short_server_name(&entry.server.name).to_string();
+            let server_name = short_server_id(&entry.server.name);
             let body = json!({
                 "jsonrpc": "2.0",
                 "id": id,
@@ -980,7 +993,7 @@ impl Manager {
     fn request_completion(
         &mut self,
         path: CanonPath,
-        seq: u64,
+        seq: LspRequestSeq,
         line: u32,
         col: u32,
         trigger: Option<char>,
@@ -1006,7 +1019,7 @@ impl Manager {
             _ => (1u8 /* Invoked */, Value::Null),
         };
         let uri = uri_from_path(&path);
-        let server_name = short_server_name(&entry.server.name).to_string();
+        let server_name = short_server_id(&entry.server.name);
         let body = json!({
             "jsonrpc": "2.0",
             "id": id,
@@ -1043,7 +1056,7 @@ impl Manager {
     fn resolve_completion(
         &mut self,
         path: CanonPath,
-        seq: u64,
+        seq: LspRequestSeq,
         item: led_driver_lsp_core::CompletionItem,
     ) {
         let Some(language) = self.language_for_path(&path) else {
@@ -1069,7 +1082,7 @@ impl Manager {
         if let Some(detail) = item.detail.as_ref() {
             payload["detail"] = json!(detail.as_ref());
         }
-        let server_name = short_server_name(&entry.server.name).to_string();
+        let server_name = short_server_id(&entry.server.name);
         let body = json!({
             "jsonrpc": "2.0",
             "id": id,
@@ -1096,7 +1109,7 @@ impl Manager {
     fn request_goto_definition(
         &mut self,
         path: CanonPath,
-        seq: u64,
+        seq: LspRequestSeq,
         line: u32,
         col: u32,
     ) {
@@ -1107,7 +1120,7 @@ impl Manager {
         let id = self.fresh_id();
         let entry = self.servers.get_mut(&language).expect("just resolved");
         let uri = uri_from_path(&path);
-        let server_name = short_server_name(&entry.server.name).to_string();
+        let server_name = short_server_id(&entry.server.name);
         let body = json!({
             "jsonrpc": "2.0",
             "id": id,
@@ -1131,7 +1144,7 @@ impl Manager {
             .insert(id, PendingRequest::GotoDefinition { seq });
     }
 
-    fn emit_goto_none(&self, seq: u64) {
+    fn emit_goto_none(&self, seq: LspRequestSeq) {
         let _ = self.lsp_event_tx.send(LspEvent::GotoDefinition {
             seq,
             location: None,
@@ -1141,7 +1154,7 @@ impl Manager {
 
     fn finish_goto_definition(
         &mut self,
-        seq: u64,
+        seq: LspRequestSeq,
         payload: Result<Value, crate::classify::JsonRpcError>,
     ) {
         let location = payload.ok().and_then(parse_definition_location);
@@ -1154,7 +1167,7 @@ impl Manager {
     fn request_rename(
         &mut self,
         path: CanonPath,
-        seq: u64,
+        seq: LspRequestSeq,
         line: u32,
         col: u32,
         new_name: Arc<str>,
@@ -1166,7 +1179,7 @@ impl Manager {
         let id = self.fresh_id();
         let entry = self.servers.get_mut(&language).expect("just resolved");
         let uri = uri_from_path(&path);
-        let server_name = short_server_name(&entry.server.name).to_string();
+        let server_name = short_server_id(&entry.server.name);
         let body = json!({
             "jsonrpc": "2.0",
             "id": id,
@@ -1193,7 +1206,7 @@ impl Manager {
 
     fn emit_empty_edits(
         &self,
-        seq: u64,
+        seq: LspRequestSeq,
         origin: led_driver_lsp_core::EditsOrigin,
     ) {
         let _ = self.lsp_event_tx.send(LspEvent::Edits {
@@ -1206,7 +1219,7 @@ impl Manager {
 
     fn finish_rename(
         &mut self,
-        seq: u64,
+        seq: LspRequestSeq,
         payload: Result<Value, crate::classify::JsonRpcError>,
     ) {
         let edits = match payload {
@@ -1224,7 +1237,7 @@ impl Manager {
     fn request_code_action(
         &mut self,
         path: CanonPath,
-        seq: u64,
+        seq: LspRequestSeq,
         start_line: u32,
         start_col: u32,
         end_line: u32,
@@ -1241,7 +1254,7 @@ impl Manager {
         // most-recent request.
         entry.code_action_cache.clear();
         let uri = uri_from_path(&path);
-        let server_name = short_server_name(&entry.server.name).to_string();
+        let server_name = short_server_id(&entry.server.name);
         let body = json!({
             "jsonrpc": "2.0",
             "id": id,
@@ -1269,7 +1282,7 @@ impl Manager {
             .insert(id, PendingRequest::CodeAction { seq, path });
     }
 
-    fn emit_empty_code_actions(&self, path: CanonPath, seq: u64) {
+    fn emit_empty_code_actions(&self, path: CanonPath, seq: LspRequestSeq) {
         let _ = self.lsp_event_tx.send(LspEvent::CodeActions {
             path,
             seq,
@@ -1282,7 +1295,7 @@ impl Manager {
         &mut self,
         language: Language,
         path: CanonPath,
-        seq: u64,
+        seq: LspRequestSeq,
         payload: Result<Value, crate::classify::JsonRpcError>,
     ) {
         let raw_items = match payload {
@@ -1331,7 +1344,7 @@ impl Manager {
     fn select_code_action(
         &mut self,
         path: CanonPath,
-        seq: u64,
+        seq: LspRequestSeq,
         action: led_driver_lsp_core::CodeActionSummary,
     ) {
         let Some(language) = self.language_for_path(&path) else {
@@ -1376,7 +1389,7 @@ impl Manager {
             "params": raw.clone(),
         });
         let entry = self.servers.get_mut(&language).expect("server exists");
-        let server_name = short_server_name(&entry.server.name).to_string();
+        let server_name = short_server_id(&entry.server.name);
         let _ = entry
             .server
             .send_body(&serde_json::to_vec(&body).expect("serialize resolve"));
@@ -1389,7 +1402,7 @@ impl Manager {
 
     fn finish_resolve_code_action(
         &mut self,
-        seq: u64,
+        seq: LspRequestSeq,
         raw: Value,
         payload: Result<Value, crate::classify::JsonRpcError>,
     ) {
@@ -1406,7 +1419,7 @@ impl Manager {
         self.notify.notify();
     }
 
-    fn request_format(&mut self, path: CanonPath, seq: u64) {
+    fn request_format(&mut self, path: CanonPath, seq: LspRequestSeq) {
         let Some(language) = self.language_for_path(&path) else {
             // No LSP for this language — emit empty edits so
             // the runtime's post-format save unlocks.
@@ -1416,7 +1429,7 @@ impl Manager {
         let id = self.fresh_id();
         let entry = self.servers.get_mut(&language).expect("just resolved");
         let uri = uri_from_path(&path);
-        let server_name = short_server_name(&entry.server.name).to_string();
+        let server_name = short_server_id(&entry.server.name);
         let body = json!({
             "jsonrpc": "2.0",
             "id": id,
@@ -1445,7 +1458,7 @@ impl Manager {
 
     fn finish_format(
         &mut self,
-        seq: u64,
+        seq: LspRequestSeq,
         path: CanonPath,
         payload: Result<Value, crate::classify::JsonRpcError>,
     ) {
@@ -1472,8 +1485,8 @@ impl Manager {
     fn request_inlay_hints(
         &mut self,
         path: CanonPath,
-        seq: u64,
-        version: u64,
+        seq: LspRequestSeq,
+        version: BufferVersion,
         start_line: u32,
         end_line: u32,
     ) {
@@ -1485,7 +1498,7 @@ impl Manager {
         let id = self.fresh_id();
         let entry = self.servers.get_mut(&language).expect("just resolved");
         let uri = uri_from_path(&path);
-        let server_name = short_server_name(&entry.server.name).to_string();
+        let server_name = short_server_id(&entry.server.name);
         let body = json!({
             "jsonrpc": "2.0",
             "id": id,
@@ -1512,7 +1525,7 @@ impl Manager {
             .insert(id, PendingRequest::InlayHints { path, version });
     }
 
-    fn emit_empty_inlay_hints(&self, path: CanonPath, version: u64) {
+    fn emit_empty_inlay_hints(&self, path: CanonPath, version: BufferVersion) {
         let _ = self.lsp_event_tx.send(LspEvent::InlayHints {
             path,
             version,
@@ -1524,7 +1537,7 @@ impl Manager {
     fn finish_inlay_hints(
         &mut self,
         path: CanonPath,
-        version: u64,
+        version: BufferVersion,
         payload: Result<Value, crate::classify::JsonRpcError>,
     ) {
         let hints = match payload {
@@ -1551,7 +1564,7 @@ impl Manager {
     fn finish_completion(
         &mut self,
         path: CanonPath,
-        seq: u64,
+        seq: LspRequestSeq,
         line: u32,
         payload: Result<Value, crate::classify::JsonRpcError>,
     ) {
@@ -1573,7 +1586,7 @@ impl Manager {
     fn finish_resolve_completion(
         &mut self,
         path: CanonPath,
-        seq: u64,
+        seq: LspRequestSeq,
         payload: Result<Value, crate::classify::JsonRpcError>,
     ) {
         let result = match payload {
@@ -1598,7 +1611,7 @@ impl Manager {
         for lang in languages {
             let id = self.fresh_id();
             let entry = self.servers.get_mut(&lang).unwrap();
-            let server_name = short_server_name(&entry.server.name).to_string();
+            let server_name = short_server_id(&entry.server.name);
             let shutdown_body = json!({
                 "jsonrpc": "2.0",
                 "id": id,
@@ -1653,7 +1666,7 @@ impl Manager {
                     RequestId::Str(_) => -1,
                 };
                 if let Some(entry) = self.servers.get(&language) {
-                    let server_name = short_server_name(&entry.server.name).to_string();
+                    let server_name = short_server_id(&entry.server.name);
                     self.trace.lsp_recv_request(&server_name, &method, id_int);
                 }
                 self.handle_server_request(
@@ -1681,7 +1694,7 @@ impl Manager {
             let entry = self.servers.get_mut(&language).unwrap();
             (
                 entry.pending_requests.remove(&n),
-                short_server_name(&entry.server.name).to_string(),
+                short_server_id(&entry.server.name),
             )
         };
         self.trace.lsp_recv_response(&server_name, n);
@@ -1747,7 +1760,7 @@ impl Manager {
                 // `experimental/serverStatus` below. The `caps.has_quiescence`
                 // bit is retained for logs only.
                 let _ = caps.has_quiescence;
-                let server_name = short_server_name(&entry.server.name).to_string();
+                let server_name = short_server_id(&entry.server.name);
                 let _ = entry.server.send_body(&build_initialized_notification());
                 self.trace.lsp_send_notification(
                     &server_name,
@@ -1775,7 +1788,7 @@ impl Manager {
                 }
             }
             Err(err) => {
-                let server_name = entry.server.name.clone();
+                let server_name = ServerId::new(entry.server.name.clone());
                 let _ = self.lsp_event_tx.send(LspEvent::Error {
                     server: server_name,
                     message: format!(
@@ -1826,7 +1839,7 @@ impl Manager {
             };
             let body = serde_json::to_vec(&auto_reply).expect("auto-reply is valid");
             let _ = entry.server.send_body(&body);
-            short_server_name(&entry.server.name).to_string()
+            short_server_id(&entry.server.name)
         };
         if !forward_as_notification {
             return;
@@ -1869,7 +1882,7 @@ impl Manager {
         params: Value,
     ) {
         if let Some(entry) = self.servers.get(&language) {
-            let server_name = short_server_name(&entry.server.name).to_string();
+            let server_name = short_server_id(&entry.server.name);
             self.trace.lsp_recv_notification(&server_name, &method);
         }
         match method.as_str() {
@@ -1926,7 +1939,7 @@ impl Manager {
                     .get("quiescent")
                     .and_then(|q| q.as_bool())
                     .unwrap_or(false);
-                let server_name = self.servers[&language].server.name.clone();
+                let server_name = ServerId::new(self.servers[&language].server.name.clone());
                 // `was_busy` reads the PREVIOUS quiescent value —
                 // absent entry means default-idle (matches
                 // legacy's `unwrap_or(&true)` → `!true = false`).
@@ -2100,7 +2113,7 @@ fn send_did_open(
     entry.last_rope_sent.insert(path.clone(), rope.clone());
     let _ = entry.server.send_body(&serde_json::to_vec(&body).unwrap());
     trace.lsp_send_notification(
-        short_server_name(&entry.server.name),
+        &short_server_id(&entry.server.name),
         "textDocument/didOpen",
         Some(&uri),
         Some(1),

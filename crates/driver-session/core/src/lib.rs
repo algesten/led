@@ -11,7 +11,7 @@
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender};
 
-use led_core::{CanonPath, PersistedContentHash};
+use led_core::{CanonPath, ChainId, PersistedContentHash, UndoDbSeq};
 use led_state_buffer_edits::EditGroup;
 use led_state_session::SessionData;
 
@@ -36,7 +36,7 @@ pub enum SessionCmd {
     /// `UndoFlushed` event tells the runtime where to resume).
     FlushUndo {
         path: CanonPath,
-        chain_id: String,
+        chain_id: ChainId,
         content_hash: PersistedContentHash,
         undo_cursor: usize,
         distance_from_save: i32,
@@ -59,8 +59,8 @@ pub enum SessionCmd {
     /// of three [`SyncResultKind`]s.
     CheckSync {
         path: CanonPath,
-        last_seen_seq: i64,
-        current_chain_id: String,
+        last_seen_seq: UndoDbSeq,
+        current_chain_id: ChainId,
     },
 }
 
@@ -79,9 +79,9 @@ pub enum SessionEvent {
     /// `persisted_undo_len` for the matching call site.
     UndoFlushed {
         path: CanonPath,
-        chain_id: String,
+        chain_id: ChainId,
         persisted_undo_len: usize,
-        last_seq: i64,
+        last_seq: UndoDbSeq,
     },
     /// Non-fatal error during open / save / flush. The runtime
     /// surfaces the message as a warn alert.
@@ -112,10 +112,10 @@ pub enum SessionEvent {
 pub enum SyncResultKind {
     SyncEntries {
         path: CanonPath,
-        chain_id: String,
+        chain_id: ChainId,
         content_hash: PersistedContentHash,
         entries: Vec<EditGroup>,
-        new_last_seen_seq: i64,
+        new_last_seen_seq: UndoDbSeq,
     },
     ExternalSave {
         path: CanonPath,
@@ -133,7 +133,7 @@ pub trait Trace: Send + Sync {
     /// Per-flush undo persist: emitted as
     /// `WorkspaceFlushUndo\tpath=<p> chain=<id>` in
     /// `dispatched.snap`. Mirrors legacy's same-named line.
-    fn session_flush_undo(&self, path: &CanonPath, chain_id: &str);
+    fn session_flush_undo(&self, path: &CanonPath, chain_id: &ChainId);
     /// Per cross-instance sync probe (M26). Emitted as
     /// `WorkspaceCheckSync\tpath=<p>` in `dispatched.snap`.
     fn session_check_sync(&self, path: &CanonPath);
@@ -145,7 +145,7 @@ impl Trace for NoopTrace {
     fn session_save_start(&self) {}
     fn session_save_done(&self, _: bool) {}
     fn session_drop_undo(&self, _: &CanonPath) {}
-    fn session_flush_undo(&self, _: &CanonPath, _: &str) {}
+    fn session_flush_undo(&self, _: &CanonPath, _: &ChainId) {}
     fn session_check_sync(&self, _: &CanonPath) {}
 }
 

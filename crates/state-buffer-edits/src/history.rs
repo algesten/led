@@ -15,7 +15,7 @@
 //! git, PR) walk to translate position-stamped data through
 //! subsequent edits. See [`rebase_char_index`].
 
-use led_core::PersistedContentHash;
+use led_core::{EditSeq, PersistedContentHash};
 use led_state_tabs::Cursor;
 use std::sync::Arc;
 
@@ -49,7 +49,7 @@ pub struct EditGroup {
     pub ops: Vec<EditOp>,
     pub cursor_before: Cursor,
     pub cursor_after: Cursor,
-    pub seq: u64,
+    pub seq: EditSeq,
     pub file_search_mark: Option<FileSearchMark>,
     /// `Some(hash)` on save-point marker groups: `ops` is empty,
     /// the group was inserted via [`History::insert_save_point`]
@@ -438,7 +438,7 @@ impl History {
             cursor_after,
             // seq is stamped at finalise(); 0 is a placeholder
             // for the open-group state.
-            seq: 0,
+            seq: EditSeq::default(),
             file_search_mark: None,
             save_point_hash: None,
         });
@@ -512,13 +512,13 @@ impl History {
     /// Returns the in-flight `current` group's (still 0) seq when
     /// no past is available — the caller treats 0 as "no meaningful
     /// seq, don't pick this one."
-    pub fn past_top_seq(&self) -> Option<u64> {
+    pub fn past_top_seq(&self) -> Option<EditSeq> {
         self.past.last().map(|g| g.seq)
     }
 
     /// Seq of the top `future` group (the one that'd get redone
     /// next), if any.
-    pub fn future_top_seq(&self) -> Option<u64> {
+    pub fn future_top_seq(&self) -> Option<EditSeq> {
         self.future.last().map(|g| g.seq)
     }
 }

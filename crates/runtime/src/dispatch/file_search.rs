@@ -18,6 +18,7 @@
 //!
 //! Replace (`Alt+Enter`) lands in stage 7.
 
+use led_core::SavedVersion;
 use led_state_browser::{BrowserUi, Focus};
 use led_state_buffer_edits::BufferEdits;
 use led_state_file_search::{FileSearchHit, FileSearchSelection, FileSearchState};
@@ -42,10 +43,7 @@ pub(super) fn activate(
     // for overlay-scoped undo is "every group with seq > this"
     // — which naturally excludes all pre-overlay edits since
     // those got lower (or equal) seqs.
-    let overlay_open_seq = edits
-        .seq_gen
-        .0
-        .load(std::sync::atomic::Ordering::Relaxed);
+    let overlay_open_seq = edits.seq_gen.peek();
     *file_search = Some(FileSearchState {
         previous_tab: tabs.active,
         overlay_open_seq,
@@ -230,7 +228,7 @@ pub(super) fn run_overlay_command(
             let floor = file_search
                 .as_ref()
                 .map(|s| s.overlay_open_seq)
-                .unwrap_or(0);
+                .unwrap_or_default();
             super::undo::undo_global(
                 tabs,
                 edits,
@@ -243,7 +241,7 @@ pub(super) fn run_overlay_command(
             let floor = file_search
                 .as_ref()
                 .map(|s| s.overlay_open_seq)
-                .unwrap_or(0);
+                .unwrap_or_default();
             super::undo::redo_global(
                 tabs,
                 edits,
@@ -610,7 +608,7 @@ fn replace_selected(
             }),
         );
         super::shared::bump(eb, new_rope);
-        eb.saved_version = eb.version;
+        eb.saved_version = SavedVersion(eb.version.0);
         eb.disk_content_hash =
             led_core::EphemeralContentHash::of_rope(&eb.rope).persist();
         edits.pending_single_replace.push(
@@ -754,7 +752,7 @@ fn unreplace_selected(
             }),
         );
         super::shared::bump(eb, new_rope);
-        eb.saved_version = eb.version;
+        eb.saved_version = SavedVersion(eb.version.0);
         eb.disk_content_hash =
             led_core::EphemeralContentHash::of_rope(&eb.rope).persist();
         let replacement_bytes = entry.replacement_text.len();
@@ -924,7 +922,7 @@ fn apply_replace_all(
             super::shared::bump(eb, ropey::Rope::from_str(replaced.as_ref()));
             // Preview stays clean — saved_version tracks the disk
             // state which the driver is about to write to match.
-            eb.saved_version = eb.version;
+            eb.saved_version = SavedVersion(eb.version.0);
         eb.disk_content_hash =
             led_core::EphemeralContentHash::of_rope(&eb.rope).persist();
             edits
@@ -1731,14 +1729,14 @@ mod tests {
         assert!(state.hit_replacements[idx_b].is_some());
 
         // Global undo → pops B (higher seq).
-        undo_global(&mut tabs, &mut edits, Some(&mut state), 0, 40);
+        undo_global(&mut tabs, &mut edits, Some(&mut state), led_core::EditSeq::default(), 40);
         assert_eq!(edits.buffers[&b].rope.to_string(), "foo in b\n");
         assert_eq!(edits.buffers[&a].rope.to_string(), "BAR in a\n");
         assert!(state.hit_replacements[idx_a].is_some());
         assert!(state.hit_replacements[idx_b].is_none());
 
         // Again → pops A.
-        undo_global(&mut tabs, &mut edits, Some(&mut state), 0, 40);
+        undo_global(&mut tabs, &mut edits, Some(&mut state), led_core::EditSeq::default(), 40);
         assert_eq!(edits.buffers[&a].rope.to_string(), "foo in a\n");
         assert!(state.hit_replacements[idx_a].is_none());
 
@@ -1746,7 +1744,7 @@ mod tests {
         // one > floor=0 initially... actually A's future now has
         // the A-replace with seq < B's. redo picks max, so B's
         // replace comes back first).
-        redo_global(&mut tabs, &mut edits, Some(&mut state), 0, 40);
+        redo_global(&mut tabs, &mut edits, Some(&mut state), led_core::EditSeq::default(), 40);
         // Future's max seq is B's; but wait A was popped second
         // so A went to future LATER — higher seq on future is A.
         // Actually take_undo/push_future preserves group.seq. A
@@ -1891,7 +1889,7 @@ mod tests {
         // body_rows = 6 → 3 input rows (header + query +
         // replace) → 3 tree rows visible. Stream 3 < scroll=8
         // → off-screen. Undo triggers scroll-follow.
-        undo_global(&mut tabs, &mut edits, Some(&mut state), 0, 6);
+        undo_global(&mut tabs, &mut edits, Some(&mut state), led_core::EditSeq::default(), 6);
 
         assert_eq!(state.selection, FileSearchSelection::Result(2));
         // tree_visible = 3, third = 1 → stream 3 - 1 = 2.
@@ -1952,7 +1950,7 @@ mod tests {
 
         // body_rows = 10 → plenty visible; stream idx for hit 1
         // = 2, well within viewport.
-        undo_global(&mut tabs, &mut edits, Some(&mut state), 0, 10);
+        undo_global(&mut tabs, &mut edits, Some(&mut state), led_core::EditSeq::default(), 10);
 
         assert_eq!(state.selection, FileSearchSelection::Result(1));
         assert_eq!(state.scroll_offset, 0);
@@ -2024,7 +2022,7 @@ mod tests {
 
         // Global undo → rope back to "foo", stays clean, inverse
         // driver cmd queued.
-        undo_global(&mut tabs, &mut edits, Some(&mut state), 0, 10);
+        undo_global(&mut tabs, &mut edits, Some(&mut state), led_core::EditSeq::default(), 10);
         assert_eq!(edits.buffers[&path].rope.to_string(), "foo\n");
         assert!(!edits.buffers[&path].dirty());
         assert_eq!(edits.pending_single_replace.len(), 1);
@@ -2066,10 +2064,7 @@ mod tests {
 
         // Floor = current seq (overlay just opened). Any undo
         // with seq <= floor is refused. Nothing happens.
-        let floor = edits
-            .seq_gen
-            .0
-            .load(std::sync::atomic::Ordering::Relaxed);
+        let floor = edits.seq_gen.peek();
 
         let mut tabs = Tabs::default();
         let past_len_before = edits.buffers[&a].history.past_len();

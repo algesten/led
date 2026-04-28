@@ -33,7 +33,10 @@ use led_driver_clipboard_core::{
     ClipboardAction, ClipboardDriver, ClipboardResult,
 };
 use led_driver_clipboard_native::ClipboardNative;
-use led_core::{CanonPath, Notifier, PathChain};
+use led_core::{
+    BufferStateSum, BufferVersion, CanonPath, ChainId, Notifier, PathChain, SavedVersion,
+    ServerId, UndoDbSeq, WatchSeq,
+};
 use led_driver_terminal_core::{Dims, Frame, KeyEvent, TermEvent, Terminal, TerminalInputDriver};
 use led_driver_terminal_native::{TerminalInputNative, TerminalOutputDriver};
 use led_driver_file_search_core::{FileSearchCmd, FileSearchDriver};
@@ -227,10 +230,7 @@ pub struct Atoms {
     /// we'd never emit `BufferChanged{is_save=true}` and
     /// rust-analyzer would never get `didSave`, so cargo check
     /// wouldn't run.
-    pub lsp_notified: std::collections::HashMap<
-        CanonPath,
-        (/* version */ u64, /* saved_version */ u64),
-    >,
+    pub lsp_notified: std::collections::HashMap<CanonPath, LspNotified>,
     /// `Some(sum)` holds Σ(version + saved_version) at the last
     /// `RequestDiagnostics` emission; `None` means we've never
     /// fired one. Combined flag+sum because the two cases the
@@ -245,7 +245,7 @@ pub struct Atoms {
     /// Same category as `lsp_notified` below — kept as a field
     /// because we can't derive "what did I tell the driver" from
     /// observations of current atom state.
-    pub lsp_requested_state_sum: Option<u64>,
+    pub lsp_requested_state_sum: Option<BufferStateSum>,
     /// `true` once `LspCmd::Init` has been emitted. Same
     /// category as `lsp_notified` / `lsp_requested_state_sum`:
     /// driver-outbound bookkeeping.
@@ -341,7 +341,7 @@ pub struct Atoms {
     /// on the very next tick, adding spurious trace lines to
     /// short scripts (delete_backward, insert_newline, …) that
     /// legacy goldens captured before the debounce fired.
-    pub undo_flush_debounce: std::collections::HashMap<CanonPath, (u64, Instant)>,
+    pub undo_flush_debounce: std::collections::HashMap<CanonPath, UndoFlushDebounce>,
     /// Symlink resolution chain for every path the user has
     /// opened, keyed by canonical path. Populated at tab-open
     /// time (main.rs CLI, find-file commit, browser open) so the
@@ -360,11 +360,30 @@ pub struct Atoms {
     /// `FileWatchState::clear_events` at the end of each
     /// Execute phase.
     pub file_watch: led_driver_file_watch_core::FileWatchState,
-    /// M26 — monotonic id allocator for `WatcherId`. Bumped
+    /// M26 — monotonic id allocator for `WatchSeq`. Bumped
     /// whenever `desired_watch_set` introduces a path that
     /// hasn't been seen this session. Persisted-in-memory only;
     /// there's no on-disk catalog to reconcile against.
-    pub watch_id_seq: u64,
+    pub watch_id_seq: WatchSeq,
+}
+
+/// Per-buffer record of the last `(version, saved_version)`
+/// pair the runtime told the LSP driver about. The execute
+/// phase emits another `BufferChanged` whenever either
+/// coordinate has advanced past this record.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct LspNotified {
+    pub version: BufferVersion,
+    pub saved_version: SavedVersion,
+}
+
+/// Per-buffer debounce state for the undo-flush dispatch. The
+/// flush fires once 200ms have elapsed without `last_version`
+/// changing.
+#[derive(Debug, Clone, Copy)]
+pub struct UndoFlushDebounce {
+    pub last_version: BufferVersion,
+    pub first_seen: Instant,
 }
 
 /// Per-buffer state tracking what we've shipped to the
@@ -377,13 +396,13 @@ pub struct UndoPersistTracker {
     /// regenerated on session restore (with a new chain) when
     /// the disk content's hash differs from the persisted
     /// `content_hash`.
-    pub chain_id: String,
+    pub chain_id: ChainId,
     /// `past.len()` we've already flushed. Next flush ships
     /// `history.past_groups()[persisted_len..]`.
     pub persisted_len: usize,
     /// Latest `seq` returned by the session driver after a
     /// successful flush. Used by future cross-instance sync.
-    pub last_seq: i64,
+    pub last_seq: UndoDbSeq,
 }
 
 /// Run-time seam: the single thing the main loop sees. Owns nothing
@@ -456,9 +475,10 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
         undo_persistence,
         undo_flush_debounce,
         file_watch,
-        // Used by the watch-action diff to mint new WatcherIds
-        // for per-buffer registrations; held mutably so we can
-        // advance the counter when a fresh registration appears.
+        // Used by the watch-action diff to mint new WatchSeq
+        // ids for per-buffer registrations; held mutably so we
+        // can advance the counter when a fresh registration
+        // appears.
         watch_id_seq,
     } = &mut *world.atoms;
     let drivers = world.drivers;
@@ -669,7 +689,13 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
                     rope: completion.rope.clone(),
                     hash,
                 }));
-                lsp_notified.insert(completion.path.clone(), (version, saved));
+                lsp_notified.insert(
+                    completion.path.clone(),
+                    LspNotified {
+                        version,
+                        saved_version: saved,
+                    },
+                );
             }
 
             // Apply pending cursor / scroll for any tab waiting
@@ -802,7 +828,7 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
                     // than stacks. Also clear progress so the
                     // status bar stops saying "indexing" when
                     // the server's actually dead.
-                    alerts.set_warn(server.clone(), format!("LSP {server}: {message}"));
+                    alerts.set_warn(server.to_string(), format!("LSP {server}: {message}"));
                     if let Some(entry) = lsp_status.by_server.get_mut(&server) {
                         entry.busy = false;
                         entry.detail = None;
@@ -974,13 +1000,16 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
                         .buffers
                         .get(&path)
                         .map(|eb| eb.version)
-                        .unwrap_or(0);
+                        .unwrap_or_default();
                     if version != current_version {
                         continue;
                     }
                     lsp_pending.inlay_hints_by_path.insert(
                         path,
-                        led_state_lsp::BufferInlayHints { version, hints },
+                        led_state_lsp::BufferInlayHints {
+                            version,
+                            hints,
+                        },
                     );
                 }
                 // M26-followup — fold dynamic
@@ -1023,7 +1052,8 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
                         .loaded
                         .insert(done.path.clone(), LoadState::Ready(rope));
                     if let Some(eb) = edits.buffers.get_mut(&done.path) {
-                        eb.saved_version = eb.saved_version.max(done.version);
+                        eb.saved_version =
+                            eb.saved_version.max(SavedVersion(done.version.0));
                         // Anchor this save in the undo history so
                         // late-arriving LSP diagnostics stamped
                         // with this content hash can still replay
@@ -1169,7 +1199,7 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
                 .buffers
                 .get(&done.path)
                 .map(|eb| eb.version)
-                .unwrap_or(0);
+                .unwrap_or_default();
             if done.version < state.version || done.version > current_version {
                 continue;
             }
@@ -1718,7 +1748,7 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
                     UndoPersistTracker {
                         chain_id: new_chain_id(),
                         persisted_len: eb.history.past_groups().len(),
-                        last_seq: 0,
+                        last_seq: UndoDbSeq(0),
                     },
                 );
             }
@@ -1960,7 +1990,7 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
                     .or_insert_with(|| UndoPersistTracker {
                         chain_id: new_chain_id(),
                         persisted_len: 0,
-                        last_seq: 0,
+                        last_seq: UndoDbSeq(0),
                     });
                 if current_len <= tracker.persisted_len {
                     continue;
@@ -1969,11 +1999,17 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
                 // moves; reuse the existing window on idle ticks.
                 let entry = undo_flush_debounce
                     .entry(path.clone())
-                    .or_insert((eb.version, now));
-                if entry.0 != eb.version {
-                    *entry = (eb.version, now);
+                    .or_insert(UndoFlushDebounce {
+                        last_version: eb.version,
+                        first_seen: now,
+                    });
+                if entry.last_version != eb.version {
+                    *entry = UndoFlushDebounce {
+                        last_version: eb.version,
+                        first_seen: now,
+                    };
                 }
-                if now < entry.1 + debounce {
+                if now < entry.first_seen + debounce {
                     continue;
                 }
                 let new_groups: Vec<EditGroup> = eb
@@ -2013,19 +2049,17 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
         let mut lsp_cmds: Vec<LspCmd> = Vec::new();
         for (path, eb) in edits.buffers.iter() {
             let current_version = eb.version;
-            let (last_version, last_saved) = lsp_notified
-                .get(path)
-                .copied()
-                .unwrap_or_default();
-            let version_moved = current_version > last_version;
-            let save_happened = eb.saved_version > last_saved;
+            let last = lsp_notified.get(path).copied().unwrap_or_default();
+            let version_moved = current_version > last.version;
+            let save_happened = eb.saved_version > last.saved_version;
             if version_moved || save_happened {
                 // `is_save` = the writer reported this tick
                 // (saved_version advanced AND it has caught up
                 // to version). Separate from `version_moved`
                 // because a pure-save tick (no new edits) still
                 // needs `didSave` → cargo check.
-                let is_save = save_happened && eb.saved_version == eb.version;
+                let is_save =
+                    save_happened && eb.saved_version.0 == eb.version.0;
                 let hash = led_core::EphemeralContentHash::of_rope(&eb.rope).persist();
                 lsp_cmds.push(LspCmd::BufferChanged {
                     path: path.clone(),
@@ -2033,7 +2067,13 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
                     hash,
                     is_save,
                 });
-                lsp_notified.insert(path.clone(), (current_version, eb.saved_version));
+                lsp_notified.insert(
+                    path.clone(),
+                    LspNotified {
+                        version: current_version,
+                        saved_version: eb.saved_version,
+                    },
+                );
             }
         }
         // RequestDiagnostics emission — unified version of
@@ -2462,7 +2502,7 @@ fn apply_pending_undo_restore(
     }
     eb.rope = std::sync::Arc::new(new_rope);
     if !restore.entries.is_empty() {
-        eb.version = eb.version.saturating_add(1);
+        eb.version.0 = eb.version.0.saturating_add(1);
     }
     let mut history = led_state_buffer_edits::History::with_seq_gen(
         edits.seq_gen.clone(),
@@ -2483,7 +2523,7 @@ fn apply_pending_undo_restore(
 /// Mirrors legacy's `led_workspace::new_chain_id` — 64-bit hash
 /// of (now, pid). Collision-safe enough for a per-buffer
 /// session marker; not cryptographic.
-fn new_chain_id() -> String {
+fn new_chain_id() -> ChainId {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
     use std::time::SystemTime;
@@ -2497,7 +2537,7 @@ fn new_chain_id() -> String {
     UNDO_CHAIN_NONCE
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         .hash(&mut hasher);
-    format!("{:016x}", hasher.finish())
+    ChainId::new(format!("{:016x}", hasher.finish()))
 }
 
 static UNDO_CHAIN_NONCE: std::sync::atomic::AtomicU64 =
@@ -2611,11 +2651,11 @@ fn apply_remote_entries(
     eb.rope = std::sync::Arc::new(new_rope);
     eb.disk_content_hash =
         led_core::EphemeralContentHash::of_rope(&eb.rope).persist();
-    eb.version = eb.version.saturating_add(1);
+    eb.version.0 = eb.version.0.saturating_add(1);
     // Buffer stays clean: the peer's edits are now part of the
     // shared chain, and our local view matches the disk snapshot
     // the peer was writing against.
-    eb.saved_version = eb.version;
+    eb.saved_version = SavedVersion(eb.version.0);
     // Stash the peer's groups in our local history so undo
     // walks them.
     eb.history.restore_past(entries.to_vec());
@@ -2630,7 +2670,7 @@ fn synthesize_reread(
     file_watch: &mut led_driver_file_watch_core::FileWatchState,
     path: &CanonPath,
 ) {
-    // Use a synthetic WatcherId distinct from any registration —
+    // Use a synthetic WatchSeq distinct from any registration —
     // memos that match against `registry` won't see it as
     // matching a per-buffer parent watch, but the
     // `external_reread_targets` memo can be written to handle
@@ -2638,7 +2678,7 @@ fn synthesize_reread(
     // id derived from the path hash so the same path always
     // produces the same id (deterministic across runs of the
     // test suite).
-    let id = led_driver_file_watch_core::WatcherId(
+    let id = WatchSeq(
         std::collections::hash_map::DefaultHasher::new().pipe(|mut h| {
             use std::hash::Hasher;
             path.as_path().to_string_lossy().hash_into(&mut h);
@@ -2670,14 +2710,12 @@ impl HashIntoExt for std::borrow::Cow<'_, str> {
 // ── M26 file-watch dispatch helpers ──────────────────────────
 
 /// Stable "kind tag" for our three baseline registrations. The
-/// runtime uses these as bit-pattern WatcherIds so memos /
+/// runtime uses these as bit-pattern WatchSeq ids so memos /
 /// dispatch helpers can identify them without consulting the
 /// registry. Per-buffer ids are minted from `watch_id_seq`
 /// starting at 0.
-const WATCHER_ID_ROOT: led_driver_file_watch_core::WatcherId =
-    led_driver_file_watch_core::WatcherId(u64::MAX);
-const WATCHER_ID_NOTIFY_DIR: led_driver_file_watch_core::WatcherId =
-    led_driver_file_watch_core::WatcherId(u64::MAX - 1);
+const WATCHER_ID_ROOT: WatchSeq = WatchSeq(u64::MAX);
+const WATCHER_ID_NOTIFY_DIR: WatchSeq = WatchSeq(u64::MAX - 1);
 
 /// Build the desired/actual diff and return the Vec of
 /// `FileWatchCmd`s to dispatch this tick.
@@ -2695,9 +2733,9 @@ fn compute_watch_actions(
     config_dir: &CanonPath,
     edits: &BufferEdits,
     file_watch: &led_driver_file_watch_core::FileWatchState,
-    watch_id_seq: &mut u64,
+    watch_id_seq: &mut WatchSeq,
 ) -> Vec<led_driver_file_watch_core::FileWatchCmd> {
-    use led_driver_file_watch_core::{FileWatchCmd, Registration, WatcherId};
+    use led_driver_file_watch_core::{FileWatchCmd, Registration};
     // Belt-and-braces: ensure `<config>/notify/` exists before
     // we ask the watcher to subscribe. The session driver's
     // init also creates it, but on a separate thread; this
@@ -2708,8 +2746,8 @@ fn compute_watch_actions(
     let notify_dir =
         led_core::UserPath::new(notify_dir_raw).canonicalize();
 
-    // Desired: WatcherId → Registration.
-    let mut desired: std::collections::HashMap<WatcherId, Registration> =
+    // Desired: WatchSeq → Registration.
+    let mut desired: std::collections::HashMap<WatchSeq, Registration> =
         std::collections::HashMap::new();
     desired.insert(
         WATCHER_ID_ROOT,
@@ -2728,12 +2766,12 @@ fn compute_watch_actions(
         },
     );
 
-    // For per-buffer parent dirs, we keep WatcherIds stable across
-    // ticks by reusing the id already in the registry whenever the
-    // path matches. New paths get a fresh id from `watch_id_seq`.
-    // Build a path → id reverse-lookup over the existing per-buffer
-    // entries (skipping the two sentinel ids).
-    let existing_per_buffer: std::collections::HashMap<CanonPath, WatcherId> = file_watch
+    // For per-buffer parent dirs, we keep WatchSeq ids stable
+    // across ticks by reusing the id already in the registry
+    // whenever the path matches. New paths get a fresh id from
+    // `watch_id_seq`. Build a path → id reverse-lookup over the
+    // existing per-buffer entries (skipping the two sentinel ids).
+    let existing_per_buffer: std::collections::HashMap<CanonPath, WatchSeq> = file_watch
         .registry
         .iter()
         .filter(|(id, _)| **id != WATCHER_ID_ROOT && **id != WATCHER_ID_NOTIFY_DIR)
@@ -2760,8 +2798,8 @@ fn compute_watch_actions(
             .get(&parent_canon)
             .copied()
             .unwrap_or_else(|| {
-                let id = WatcherId(*watch_id_seq);
-                *watch_id_seq = watch_id_seq.saturating_add(1);
+                let id = *watch_id_seq;
+                watch_id_seq.0 = watch_id_seq.0.saturating_add(1);
                 id
             });
         desired.insert(
@@ -2925,15 +2963,15 @@ fn compute_lsp_watched_file_notifications(
         return Vec::new();
     };
     // Per-server batches built up across the event queue.
-    // String key = short server name; preserved verbatim back
-    // into the cmd payload so the native worker matches it
+    // `ServerId` key = short server name; preserved verbatim
+    // back into the cmd payload so the native worker matches it
     // against `short_server_name(entry.server.name)`. Inner
     // map dedupes same-path events within one tick (macOS
     // FSEvents often delivers Create+Modify as two notify
     // events; the LSP server gets one entry per path with the
     // dominant kind).
     let mut per_server: std::collections::HashMap<
-        String,
+        ServerId,
         std::collections::HashMap<CanonPath, FileEventKind>,
     > = std::collections::HashMap::new();
     for ev in queue {
@@ -3282,8 +3320,8 @@ fn reconcile_external_change(
             );
             eb.rope = new_rope;
             eb.disk_content_hash = new_hash;
-            eb.version = eb.version.saturating_add(1);
-            eb.saved_version = eb.version;
+            eb.version.0 = eb.version.0.saturating_add(1);
+            eb.saved_version = SavedVersion(eb.version.0);
             refresh_after_external_change(reread, fs, git_scan_pending);
         }
         (true, false) => {
@@ -3354,7 +3392,7 @@ pub fn nearest_deadline(
     alerts: &AlertState,
     find_file: &Option<FindFileState>,
     lsp_status: &LspStatuses,
-    undo_flush_debounce: &std::collections::HashMap<CanonPath, (u64, Instant)>,
+    undo_flush_debounce: &std::collections::HashMap<CanonPath, UndoFlushDebounce>,
 ) -> Option<Instant> {
     let mut soonest: Option<Instant> = None;
     let consider = |soonest: &mut Option<Instant>, candidate: Option<Instant>| {
@@ -3386,7 +3424,7 @@ pub fn nearest_deadline(
     let debounce = std::time::Duration::from_millis(200);
     if let Some(earliest) = undo_flush_debounce
         .values()
-        .map(|(_, seen_at)| *seen_at + debounce)
+        .map(|entry| entry.first_seen + debounce)
         .min()
     {
         consider(&mut soonest, Some(earliest));
@@ -3503,7 +3541,11 @@ struct LspGotoApply<'a> {
 /// will stash a pending cursor the same way find-file does);
 /// for M18 the jump silent-no-ops when the path isn't open.
 impl<'a> LspGotoApply<'a> {
-    fn apply(&mut self, seq: u64, location: Option<led_driver_lsp_core::Location>) {
+    fn apply(
+        &mut self,
+        seq: led_core::LspRequestSeq,
+        location: Option<led_driver_lsp_core::Location>,
+    ) {
         let tabs = &mut *self.tabs;
         let edits = self.edits;
         let jumps = &mut *self.jumps;
@@ -3637,7 +3679,7 @@ struct LspEditApply<'a> {
 impl<'a> LspEditApply<'a> {
     fn apply(
         &mut self,
-        seq: u64,
+        seq: led_core::LspRequestSeq,
         origin: led_driver_lsp_core::EditsOrigin,
         file_edits: &std::sync::Arc<Vec<led_driver_lsp_core::FileEdit>>,
     ) {
@@ -3878,7 +3920,7 @@ fn apply_one_text_edit(
     new_rope.insert(start_char, &op.new_text);
 
     eb.rope = std::sync::Arc::new(new_rope);
-    eb.version = eb.version.saturating_add(1);
+    eb.version.0 = eb.version.0.saturating_add(1);
     Some((
         start_char,
         std::sync::Arc::<str>::from(removed),
@@ -4043,7 +4085,7 @@ pub fn spawn_drivers(
 pub(crate) mod trace_adapter {
     use std::sync::Arc;
 
-    use led_core::CanonPath;
+    use led_core::{BufferVersion, CanonPath, ChainId, SavedVersion, ServerId};
     use led_driver_terminal_core::{Dims, KeyEvent};
     use ropey::Rope;
 
@@ -4068,11 +4110,17 @@ pub(crate) mod trace_adapter {
         fn file_load_done(&self, path: &CanonPath, result: &Result<Arc<Rope>, String>) {
             self.0.file_load_done(path, result);
         }
-        fn file_save_start(&self, path: &CanonPath, version: u64) {
-            self.0.file_save_start(path, version);
+        fn file_save_start(&self, path: &CanonPath, version: BufferVersion) {
+            self.0.file_save_start(path, SavedVersion(version.0));
         }
-        fn file_save_done(&self, path: &CanonPath, version: u64, result: &Result<(), String>) {
-            self.0.file_save_done(path, version, result);
+        fn file_save_done(
+            &self,
+            path: &CanonPath,
+            version: BufferVersion,
+            result: &Result<(), String>,
+        ) {
+            self.0
+                .file_save_done(path, SavedVersion(version.0), result);
         }
         fn file_save_as_start(&self, from: &CanonPath, to: &CanonPath) {
             self.0.file_save_as_start(from, to);
@@ -4138,18 +4186,18 @@ pub(crate) mod trace_adapter {
         fn syntax_parse_start(
             &self,
             path: &CanonPath,
-            version: u64,
+            version: BufferVersion,
             language: led_state_syntax::Language,
         ) {
             self.0.syntax_parse_start(path, version, language);
         }
-        fn syntax_parse_done(&self, path: &CanonPath, version: u64, ok: bool) {
+        fn syntax_parse_done(&self, path: &CanonPath, version: BufferVersion, ok: bool) {
             self.0.syntax_parse_done(path, version, ok);
         }
     }
 
     impl led_driver_lsp_core::Trace for LspTraceAdapter {
-        fn lsp_server_started(&self, server: &str) {
+        fn lsp_server_started(&self, server: &ServerId) {
             self.0.lsp_server_started(server);
         }
         fn lsp_request_diagnostics(&self) {
@@ -4168,7 +4216,7 @@ pub(crate) mod trace_adapter {
         }
         fn lsp_send_request(
             &self,
-            server: &str,
+            server: &ServerId,
             method: &str,
             id: i64,
             path_uri: Option<&str>,
@@ -4177,7 +4225,7 @@ pub(crate) mod trace_adapter {
         }
         fn lsp_send_notification(
             &self,
-            server: &str,
+            server: &ServerId,
             method: &str,
             path_uri: Option<&str>,
             version: Option<i32>,
@@ -4185,13 +4233,13 @@ pub(crate) mod trace_adapter {
             self.0
                 .lsp_send_notification(server, method, path_uri, version);
         }
-        fn lsp_recv_response(&self, server: &str, id: i64) {
+        fn lsp_recv_response(&self, server: &ServerId, id: i64) {
             self.0.lsp_recv_response(server, id);
         }
-        fn lsp_recv_notification(&self, server: &str, method: &str) {
+        fn lsp_recv_notification(&self, server: &ServerId, method: &str) {
             self.0.lsp_recv_notification(server, method);
         }
-        fn lsp_recv_request(&self, server: &str, method: &str, id: i64) {
+        fn lsp_recv_request(&self, server: &ServerId, method: &str, id: i64) {
             self.0.lsp_recv_request(server, method, id);
         }
     }
@@ -4221,7 +4269,7 @@ pub(crate) mod trace_adapter {
         fn session_drop_undo(&self, path: &CanonPath) {
             self.0.workspace_clear_undo(path);
         }
-        fn session_flush_undo(&self, path: &CanonPath, chain_id: &str) {
+        fn session_flush_undo(&self, path: &CanonPath, chain_id: &ChainId) {
             self.0.workspace_flush_undo(path, chain_id);
         }
         fn session_check_sync(&self, path: &CanonPath) {
@@ -4232,7 +4280,7 @@ pub(crate) mod trace_adapter {
     impl led_driver_file_watch_core::Trace for FileWatchTraceAdapter {
         fn file_watch_event(
             &self,
-            _id: led_driver_file_watch_core::WatcherId,
+            _id: led_core::WatchSeq,
             _path: &CanonPath,
             _kinds: led_driver_file_watch_core::ChangeKinds,
         ) {
@@ -4545,7 +4593,7 @@ mod tests {
         // Caller allocates the seq via queue_*; simulate by
         // setting latest_goto_seq to 42.
         let mut lsp_pending = led_state_lsp::LspPending {
-            latest_goto_seq: Some(42),
+            latest_goto_seq: Some(led_core::LspRequestSeq(42)),
             ..Default::default()
         };
         let mut _path_chains: std::collections::HashMap<CanonPath, PathChain> =
@@ -4561,7 +4609,7 @@ mod tests {
             path_chains: &mut _path_chains,
         }
         .apply(
-            42,
+            led_core::LspRequestSeq(42),
             Some(led_driver_lsp_core::Location {
                 path: canon("main.rs"),
                 line: 2,
@@ -4589,7 +4637,7 @@ mod tests {
         let mut jumps = led_state_jumps::JumpListState::default();
         let mut alerts = AlertState::default();
         let mut lsp_pending = led_state_lsp::LspPending {
-            latest_goto_seq: Some(99),
+            latest_goto_seq: Some(led_core::LspRequestSeq(99)),
             ..Default::default()
         };
         let mut _path_chains: std::collections::HashMap<CanonPath, PathChain> =
@@ -4605,7 +4653,7 @@ mod tests {
             path_chains: &mut _path_chains,
         }
         .apply(
-            /* stale */ 7,
+            /* stale */ led_core::LspRequestSeq(7),
             Some(led_driver_lsp_core::Location {
                 path: canon("main.rs"),
                 line: 0,
@@ -4617,7 +4665,7 @@ mod tests {
         assert!(jumps.entries.is_empty());
         // The in-flight seq is preserved so the correct
         // response can still land.
-        assert_eq!(lsp_pending.latest_goto_seq, Some(99));
+        assert_eq!(lsp_pending.latest_goto_seq, Some(led_core::LspRequestSeq(99)));
     }
 
     #[test]
@@ -4646,7 +4694,7 @@ mod tests {
         let mut jumps = led_state_jumps::JumpListState::default();
         let mut alerts = AlertState::default();
         let mut lsp_pending = led_state_lsp::LspPending {
-            latest_goto_seq: Some(1),
+            latest_goto_seq: Some(led_core::LspRequestSeq(1)),
             ..Default::default()
         };
         let term = Terminal {
@@ -4669,7 +4717,7 @@ mod tests {
             path_chains: &mut _path_chains,
         }
         .apply(
-            1,
+            led_core::LspRequestSeq(1),
             Some(led_driver_lsp_core::Location {
                 path: path.clone(),
                 line: 60,
@@ -4708,7 +4756,7 @@ mod tests {
         let mut jumps = led_state_jumps::JumpListState::default();
         let mut alerts = AlertState::default();
         let mut lsp_pending = led_state_lsp::LspPending {
-            latest_goto_seq: Some(1),
+            latest_goto_seq: Some(led_core::LspRequestSeq(1)),
             ..Default::default()
         };
         let term = Terminal {
@@ -4731,7 +4779,7 @@ mod tests {
             path_chains: &mut _path_chains,
         }
         .apply(
-            1,
+            led_core::LspRequestSeq(1),
             Some(led_driver_lsp_core::Location {
                 path: path.clone(),
                 line: 5,
@@ -4752,7 +4800,7 @@ mod tests {
         let mut jumps = led_state_jumps::JumpListState::default();
         let mut alerts = AlertState::default();
         let mut lsp_pending = led_state_lsp::LspPending {
-            latest_goto_seq: Some(1),
+            latest_goto_seq: Some(led_core::LspRequestSeq(1)),
             ..Default::default()
         };
         let mut _path_chains: std::collections::HashMap<CanonPath, PathChain> =
@@ -4767,7 +4815,7 @@ mod tests {
             browser: &led_state_browser::BrowserUi::default(),
             path_chains: &mut _path_chains,
         }
-        .apply(1, None);
+        .apply(led_core::LspRequestSeq(1), None);
         assert!(alerts.warns.iter().any(|(k, _)| k == "lsp.goto"));
     }
 
@@ -4783,7 +4831,7 @@ mod tests {
         let mut alerts = AlertState::default();
         let mut lsp_extras = led_state_lsp::LspExtrasState::default();
         let mut lsp_pending = led_state_lsp::LspPending {
-            latest_rename_seq: Some(7),
+            latest_rename_seq: Some(led_core::LspRequestSeq(7)),
             ..Default::default()
         };
         let file_edits = std::sync::Arc::new(vec![FileEdit {
@@ -4813,10 +4861,10 @@ mod tests {
             alerts: &mut alerts,
             lsp_pending: &mut lsp_pending,
         }
-        .apply(7, EditsOrigin::Rename, &file_edits);
+        .apply(led_core::LspRequestSeq(7), EditsOrigin::Rename, &file_edits);
         let eb = edits.buffers.get(&path).unwrap();
         assert_eq!(eb.rope.to_string(), "bar + bar");
-        assert!(eb.version > 0);
+        assert!(eb.version.0 > 0);
         assert!(lsp_pending.latest_rename_seq.is_none());
         assert!(
             alerts.info.as_ref().is_some_and(|m| m.contains("Renamed"))
@@ -4835,13 +4883,15 @@ mod tests {
         let path = canon("a.rs");
         let mut edits = BufferEdits::default();
         let mut eb = EditedBuffer::fresh(Arc::new(Rope::from_str("x")));
-        eb.version = 1;
+        eb.version = BufferVersion(1);
         edits.buffers.insert(path.clone(), eb);
         let mut alerts = AlertState::default();
         let mut lsp_extras = led_state_lsp::LspExtrasState::default();
         let mut lsp_pending = led_state_lsp::LspPending::default();
         lsp_pending.pending_save_after_format.insert(path.clone());
-        lsp_pending.latest_format_seq.insert(path.clone(), 1);
+        lsp_pending
+            .latest_format_seq
+            .insert(path.clone(), led_core::LspRequestSeq(1));
 
         let file_edits = std::sync::Arc::new(vec![FileEdit {
             path: path.clone(),
@@ -4861,7 +4911,7 @@ mod tests {
             alerts: &mut alerts,
             lsp_pending: &mut lsp_pending,
         }
-        .apply(1, EditsOrigin::Format, &file_edits);
+        .apply(led_core::LspRequestSeq(1), EditsOrigin::Format, &file_edits);
         // Format applied.
         assert_eq!(edits.buffers[&path].rope.to_string(), "X");
         // History MUST retain the record_replace entry so undo
@@ -4894,7 +4944,9 @@ mod tests {
         let mut alerts = AlertState::default();
         let mut lsp_extras = led_state_lsp::LspExtrasState::default();
         let mut lsp_pending = led_state_lsp::LspPending::default();
-        lsp_pending.latest_format_seq.insert(path.clone(), 1);
+        lsp_pending
+            .latest_format_seq
+            .insert(path.clone(), led_core::LspRequestSeq(1));
 
         // Two edits that together perform "move AAA| to the end":
         //   * delete chars 0..4 ("AAA|")
@@ -4926,7 +4978,7 @@ mod tests {
             alerts: &mut alerts,
             lsp_pending: &mut lsp_pending,
         }
-        .apply(1, EditsOrigin::Format, &file_edits);
+        .apply(led_core::LspRequestSeq(1), EditsOrigin::Format, &file_edits);
         let formatted = edits.buffers[&path].rope.to_string();
         assert_eq!(formatted, "BBB|CCCAAA|\n", "sort applied correctly");
 
@@ -4967,7 +5019,7 @@ mod tests {
         let path = canon("a.rs");
         let mut edits = BufferEdits::default();
         let mut eb = EditedBuffer::fresh(Arc::new(Rope::from_str("x")));
-        eb.version = 1; // dirty (saved_version still 0)
+        eb.version = BufferVersion(1); // dirty (saved_version still 0)
         edits.buffers.insert(path.clone(), eb);
         let mut alerts = AlertState::default();
         let mut lsp_extras = led_state_lsp::LspExtrasState::default();
@@ -4975,7 +5027,7 @@ mod tests {
         lsp_pending.pending_save_after_format.insert(path.clone());
         lsp_pending
             .latest_format_seq
-            .insert(path.clone(), 42);
+            .insert(path.clone(), led_core::LspRequestSeq(42));
         // Non-empty format edit (cosmetic: capitalise "x" → "X").
         let file_edits = std::sync::Arc::new(vec![FileEdit {
             path: path.clone(),
@@ -4995,7 +5047,7 @@ mod tests {
             alerts: &mut alerts,
             lsp_pending: &mut lsp_pending,
         }
-        .apply(42, EditsOrigin::Format, &file_edits);
+        .apply(led_core::LspRequestSeq(42), EditsOrigin::Format, &file_edits);
         assert_eq!(edits.buffers[&path].rope.to_string(), "X");
         // Post-format save is queued.
         assert!(edits.pending_saves.contains(&path));
@@ -5008,7 +5060,7 @@ mod tests {
         let path = canon("a.rs");
         let mut edits = BufferEdits::default();
         let mut eb = EditedBuffer::fresh(Arc::new(Rope::from_str("x")));
-        eb.version = 1;
+        eb.version = BufferVersion(1);
         edits.buffers.insert(path.clone(), eb);
         let mut alerts = AlertState::default();
         let mut lsp_extras = led_state_lsp::LspExtrasState::default();
@@ -5016,7 +5068,7 @@ mod tests {
         lsp_pending.pending_save_after_format.insert(path.clone());
         lsp_pending
             .latest_format_seq
-            .insert(path.clone(), 5);
+            .insert(path.clone(), led_core::LspRequestSeq(5));
         let file_edits = std::sync::Arc::new(Vec::new());
         let _ = &mut lsp_extras;
         let tabs = led_state_tabs::Tabs::default();
@@ -5026,7 +5078,7 @@ mod tests {
             alerts: &mut alerts,
             lsp_pending: &mut lsp_pending,
         }
-        .apply(5, EditsOrigin::Format, &file_edits);
+        .apply(led_core::LspRequestSeq(5), EditsOrigin::Format, &file_edits);
         assert!(edits.pending_saves.contains(&path));
     }
 
@@ -5042,7 +5094,7 @@ mod tests {
         let mut alerts = AlertState::default();
         let mut lsp_extras = led_state_lsp::LspExtrasState::default();
         let mut lsp_pending = led_state_lsp::LspPending {
-            latest_rename_seq: Some(99),
+            latest_rename_seq: Some(led_core::LspRequestSeq(99)),
             ..Default::default()
         };
         let file_edits = std::sync::Arc::new(vec![FileEdit {
@@ -5063,10 +5115,14 @@ mod tests {
             alerts: &mut alerts,
             lsp_pending: &mut lsp_pending,
         }
-        .apply(/* stale */ 5, EditsOrigin::Rename, &file_edits);
+        .apply(
+            /* stale */ led_core::LspRequestSeq(5),
+            EditsOrigin::Rename,
+            &file_edits,
+        );
         // Buffer unchanged, seq preserved.
         assert_eq!(edits.buffers[&path].rope.to_string(), "foo");
-        assert_eq!(lsp_pending.latest_rename_seq, Some(99));
+        assert_eq!(lsp_pending.latest_rename_seq, Some(led_core::LspRequestSeq(99)));
     }
 
     #[test]
@@ -5086,7 +5142,7 @@ mod tests {
         let mut jumps = led_state_jumps::JumpListState::default();
         let mut alerts = AlertState::default();
         let mut lsp_pending = led_state_lsp::LspPending {
-            latest_goto_seq: Some(1),
+            latest_goto_seq: Some(led_core::LspRequestSeq(1)),
             ..Default::default()
         };
         let mut path_chains: std::collections::HashMap<CanonPath, PathChain> =
@@ -5103,7 +5159,7 @@ mod tests {
             path_chains: &mut path_chains,
         }
         .apply(
-            1,
+            led_core::LspRequestSeq(1),
             Some(led_driver_lsp_core::Location {
                 path: target.clone(),
                 line: 7,

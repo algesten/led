@@ -17,7 +17,7 @@
 
 use std::sync::Arc;
 
-use led_core::{CanonPath, TextInput};
+use led_core::{BufferVersion, CanonPath, LspRequestSeq, ServerId, TextInput};
 use led_driver_lsp_core::{CodeActionSummary, InlayHint, RegistrationGlob};
 
 // ── User-decision source ──────────────────────────────────────
@@ -83,7 +83,7 @@ pub struct LspPending {
     /// responses can be matched up and stale replies dropped.
     /// Shared across concerns to keep the id space flat and so
     /// round-trip tests don't have to juggle per-concern counters.
-    pub seq_gen: u64,
+    pub seq_gen: LspRequestSeq,
 
     // ── Goto-definition ────────────────────────────────────────
 
@@ -97,7 +97,7 @@ pub struct LspPending {
     /// `LspEvent::GotoDefinition` whose seq doesn't match — the
     /// user has since navigated elsewhere and applying the stale
     /// target would be a jarring jump.
-    pub latest_goto_seq: Option<u64>,
+    pub latest_goto_seq: Option<LspRequestSeq>,
 
     // ── Rename ─────────────────────────────────────────────────
 
@@ -108,7 +108,7 @@ pub struct LspPending {
     /// origin: Rename, seq }` is dropped when `seq` doesn't
     /// match — the user has since aborted or kicked off another
     /// rename and applying the stale edit batch would be confusing.
-    pub latest_rename_seq: Option<u64>,
+    pub latest_rename_seq: Option<LspRequestSeq>,
 
     // ── Code action picker ────────────────────────────────────
 
@@ -118,7 +118,7 @@ pub struct LspPending {
     /// `LspEvent::CodeActions` whose seq doesn't match. Not the
     /// same as `latest_code_action_select_seq` — picker install
     /// and commit are distinct round trips.
-    pub latest_code_action_seq: Option<u64>,
+    pub latest_code_action_seq: Option<LspRequestSeq>,
     /// Pending `codeAction/resolve + apply` selects. Populated
     /// on Enter-commit from the picker overlay; drained by the
     /// execute phase into `LspCmd::SelectCodeAction`.
@@ -127,7 +127,7 @@ pub struct LspPending {
     /// `LspEvent::Edits { origin: CodeAction }` whose seq
     /// doesn't match. A fresh Alt-i session invalidates any
     /// in-flight commit — legacy parity.
-    pub latest_code_action_select_seq: Option<u64>,
+    pub latest_code_action_select_seq: Option<LspRequestSeq>,
 
     // ── Inlay hints ────────────────────────────────────────────
 
@@ -143,7 +143,7 @@ pub struct LspPending {
     /// The execute phase consults this so repeated ticks with
     /// the same version don't spam the server. Cleared on
     /// toggle-off or buffer version bump.
-    pub inlay_hints_requested: imbl::HashSet<(CanonPath, u64)>,
+    pub inlay_hints_requested: imbl::HashSet<(CanonPath, BufferVersion)>,
 
     // ── Format + format-on-save ────────────────────────────────
 
@@ -159,13 +159,13 @@ pub struct LspPending {
     /// Latest format seq per path so stale format responses
     /// drop — a double Ctrl-S in quick succession issues two
     /// formats; only the latest reply unlocks the save.
-    pub latest_format_seq: imbl::HashMap<CanonPath, u64>,
+    pub latest_format_seq: imbl::HashMap<CanonPath, LspRequestSeq>,
 }
 
 impl LspPending {
     /// Allocate the next request sequence id.
-    pub fn next_seq(&mut self) -> u64 {
-        self.seq_gen = self.seq_gen.wrapping_add(1);
+    pub fn next_seq(&mut self) -> LspRequestSeq {
+        self.seq_gen = LspRequestSeq(self.seq_gen.0.wrapping_add(1));
         self.seq_gen
     }
 
@@ -177,7 +177,7 @@ impl LspPending {
         path: CanonPath,
         line: u32,
         col: u32,
-    ) -> u64 {
+    ) -> LspRequestSeq {
         let seq = self.next_seq();
         self.latest_goto_seq = Some(seq);
         self.pending_goto.push(PendingGoto {
@@ -198,7 +198,7 @@ impl LspPending {
         line: u32,
         col: u32,
         new_name: Arc<str>,
-    ) -> u64 {
+    ) -> LspRequestSeq {
         let seq = self.next_seq();
         self.latest_rename_seq = Some(seq);
         self.pending_rename.push(PendingRename {
@@ -220,7 +220,7 @@ impl LspPending {
         start_col: u32,
         end_line: u32,
         end_col: u32,
-    ) -> u64 {
+    ) -> LspRequestSeq {
         let seq = self.next_seq();
         self.latest_code_action_seq = Some(seq);
         self.pending_code_action.push(PendingCodeActionRequest {
@@ -242,7 +242,7 @@ impl LspPending {
         &mut self,
         path: CanonPath,
         action: CodeActionSummary,
-    ) -> u64 {
+    ) -> LspRequestSeq {
         let seq = self.next_seq();
         self.latest_code_action_select_seq = Some(seq);
         self.pending_code_action_select
@@ -252,7 +252,7 @@ impl LspPending {
 
     /// Queue a `textDocument/formatting` request. Returns the
     /// allocated seq.
-    pub fn queue_format(&mut self, path: CanonPath) -> u64 {
+    pub fn queue_format(&mut self, path: CanonPath) -> LspRequestSeq {
         let seq = self.next_seq();
         self.latest_format_seq.insert(path.clone(), seq);
         self.pending_format.push(PendingFormat { path, seq });
@@ -263,10 +263,10 @@ impl LspPending {
     pub fn queue_inlay_hints(
         &mut self,
         path: CanonPath,
-        version: u64,
+        version: BufferVersion,
         start_line: u32,
         end_line: u32,
-    ) -> u64 {
+    ) -> LspRequestSeq {
         let seq = self.next_seq();
         self.pending_inlay_hint.push(PendingInlayHintRequest {
             path: path.clone(),
@@ -296,7 +296,7 @@ impl LspPending {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingGoto {
     pub path: CanonPath,
-    pub seq: u64,
+    pub seq: LspRequestSeq,
     pub line: u32,
     pub col: u32,
 }
@@ -345,7 +345,7 @@ impl RenameState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingRename {
     pub path: CanonPath,
-    pub seq: u64,
+    pub seq: LspRequestSeq,
     pub line: u32,
     pub col: u32,
     pub new_name: Arc<str>,
@@ -363,7 +363,7 @@ pub struct CodeActionPickerState {
     /// Seq of the `LspEvent::CodeActions` delivery that
     /// populated this picker. A later delivery with a higher
     /// seq replaces the whole picker wholesale.
-    pub seq: u64,
+    pub seq: LspRequestSeq,
     pub items: Arc<Vec<CodeActionSummary>>,
     pub selected: usize,
     pub scroll: usize,
@@ -374,7 +374,7 @@ pub struct CodeActionPickerState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingCodeActionRequest {
     pub path: CanonPath,
-    pub seq: u64,
+    pub seq: LspRequestSeq,
     pub start_line: u32,
     pub start_col: u32,
     pub end_line: u32,
@@ -387,7 +387,7 @@ pub struct PendingCodeActionRequest {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingCodeActionSelect {
     pub path: CanonPath,
-    pub seq: u64,
+    pub seq: LspRequestSeq,
     pub action: CodeActionSummary,
 }
 
@@ -397,8 +397,8 @@ pub struct PendingCodeActionSelect {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingInlayHintRequest {
     pub path: CanonPath,
-    pub seq: u64,
-    pub version: u64,
+    pub seq: LspRequestSeq,
+    pub version: BufferVersion,
     pub start_line: u32,
     pub end_line: u32,
 }
@@ -409,7 +409,7 @@ pub struct PendingInlayHintRequest {
 /// smear on stale data).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct BufferInlayHints {
-    pub version: u64,
+    pub version: BufferVersion,
     pub hints: Arc<Vec<InlayHint>>,
 }
 
@@ -417,7 +417,7 @@ pub struct BufferInlayHints {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingFormat {
     pub path: CanonPath,
-    pub seq: u64,
+    pub seq: LspRequestSeq,
 }
 
 // ── External-fact source: server-registered file-watch globs ──
@@ -440,7 +440,7 @@ pub struct PendingFormat {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct LspWatchedGlobs {
     pub by_server:
-        imbl::HashMap<String, imbl::HashMap<String, Arc<Vec<RegistrationGlob>>>>,
+        imbl::HashMap<ServerId, imbl::HashMap<String, Arc<Vec<RegistrationGlob>>>>,
 }
 
 impl LspWatchedGlobs {
@@ -450,7 +450,7 @@ impl LspWatchedGlobs {
     /// re-registration with the same id replaces wholesale.
     pub fn register(
         &mut self,
-        server: String,
+        server: ServerId,
         registration_id: String,
         globs: Arc<Vec<RegistrationGlob>>,
     ) {
@@ -461,7 +461,7 @@ impl LspWatchedGlobs {
     /// Drop one registration id from `server`. If the server's
     /// last registration disappears, the per-server entry is
     /// pruned too — keeps `by_server.is_empty()` meaningful.
-    pub fn unregister(&mut self, server: &str, registration_id: &str) {
+    pub fn unregister(&mut self, server: &ServerId, registration_id: &str) {
         let now_empty = if let Some(entry) = self.by_server.get_mut(server) {
             entry.remove(registration_id);
             entry.is_empty()
@@ -486,23 +486,23 @@ mod tests {
     #[test]
     fn next_seq_is_monotonic() {
         let mut p = LspPending::default();
-        assert_eq!(p.next_seq(), 1);
-        assert_eq!(p.next_seq(), 2);
-        assert_eq!(p.next_seq(), 3);
+        assert_eq!(p.next_seq(), LspRequestSeq(1));
+        assert_eq!(p.next_seq(), LspRequestSeq(2));
+        assert_eq!(p.next_seq(), LspRequestSeq(3));
     }
 
     #[test]
     fn queue_goto_tracks_latest_seq_and_pushes_request() {
         let mut p = LspPending::default();
         let seq = p.queue_goto_definition(canon("a.rs"), 3, 7);
-        assert_eq!(seq, 1);
-        assert_eq!(p.latest_goto_seq, Some(1));
+        assert_eq!(seq, LspRequestSeq(1));
+        assert_eq!(p.latest_goto_seq, Some(LspRequestSeq(1)));
         assert_eq!(p.pending_goto.len(), 1);
         let req = &p.pending_goto[0];
         assert_eq!(req.path, canon("a.rs"));
         assert_eq!(req.line, 3);
         assert_eq!(req.col, 7);
-        assert_eq!(req.seq, 1);
+        assert_eq!(req.seq, LspRequestSeq(1));
     }
 
     #[test]
@@ -510,8 +510,8 @@ mod tests {
         let mut p = LspPending::default();
         p.queue_goto_definition(canon("a.rs"), 0, 0);
         let seq2 = p.queue_goto_definition(canon("a.rs"), 1, 1);
-        assert_eq!(seq2, 2);
-        assert_eq!(p.latest_goto_seq, Some(2));
+        assert_eq!(seq2, LspRequestSeq(2));
+        assert_eq!(p.latest_goto_seq, Some(LspRequestSeq(2)));
         assert_eq!(p.pending_goto.len(), 2);
     }
 
@@ -532,8 +532,8 @@ mod tests {
     fn queue_rename_tracks_latest_seq_and_pushes_request() {
         let mut p = LspPending::default();
         let seq = p.queue_rename(canon("a.rs"), 2, 4, Arc::<str>::from("bar"));
-        assert_eq!(seq, 1);
-        assert_eq!(p.latest_rename_seq, Some(1));
+        assert_eq!(seq, LspRequestSeq(1));
+        assert_eq!(p.latest_rename_seq, Some(LspRequestSeq(1)));
         assert_eq!(p.pending_rename.len(), 1);
         assert_eq!(p.pending_rename[0].new_name.as_ref(), "bar");
     }
@@ -546,11 +546,12 @@ mod tests {
         p.inlay_hints_by_path.insert(
             canon("a.rs"),
             BufferInlayHints {
-                version: 3,
+                version: BufferVersion(3),
                 hints: Arc::new(Vec::new()),
             },
         );
-        p.inlay_hints_requested.insert((canon("a.rs"), 3));
+        p.inlay_hints_requested
+            .insert((canon("a.rs"), BufferVersion(3)));
         p.clear_inlay_hint_cache();
         assert!(p.inlay_hints_by_path.is_empty());
         assert!(p.inlay_hints_requested.is_empty());
@@ -559,10 +560,13 @@ mod tests {
     #[test]
     fn queue_inlay_hints_records_requested_marker() {
         let mut p = LspPending::default();
-        let seq = p.queue_inlay_hints(canon("a.rs"), 5, 0, 20);
-        assert_eq!(seq, 1);
+        let seq = p.queue_inlay_hints(canon("a.rs"), BufferVersion(5), 0, 20);
+        assert_eq!(seq, LspRequestSeq(1));
         assert_eq!(p.pending_inlay_hint.len(), 1);
-        assert!(p.inlay_hints_requested.contains(&(canon("a.rs"), 5)));
+        assert!(
+            p.inlay_hints_requested
+                .contains(&(canon("a.rs"), BufferVersion(5)))
+        );
     }
 
     #[test]
@@ -581,6 +585,6 @@ mod tests {
         assert!(s.rename.is_none());
         // Abort still wants to see the completion so the edits
         // land; we don't clear latest_rename_seq here.
-        assert_eq!(p.latest_rename_seq, Some(1));
+        assert_eq!(p.latest_rename_seq, Some(LspRequestSeq(1)));
     }
 }

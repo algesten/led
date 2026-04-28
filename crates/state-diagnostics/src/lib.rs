@@ -36,7 +36,7 @@
 //! deliveries after any undo-style round-trip are lost.
 
 use imbl::HashMap;
-use led_core::{CanonPath, PersistedContentHash};
+use led_core::{CanonPath, PersistedContentHash, ServerId};
 
 // ── Domain types (ABI-shared between driver-lsp-core + runtime) ──
 
@@ -114,16 +114,16 @@ pub struct LspServerStatus {
     pub ready: bool,
 }
 
-/// Per-server LSP status map, keyed by the server name the
-/// driver assigned (`format!("{:?}", language)` — e.g.
-/// `"Rust"`, `"TypeScript"`). Kept separate from
+/// Per-server LSP status map, keyed by [`ServerId`] (the
+/// short server name the driver assigned — e.g.
+/// `"rust-analyzer"`, `"pyright"`). Kept separate from
 /// `DiagnosticsStates` because its identity churns on a
 /// different cadence (progress events, not diagnostic cycles)
 /// and bundling would invalidate the diagnostic memos on every
 /// keystroke.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LspStatuses {
-    pub by_server: HashMap<String, LspServerStatus>,
+    pub by_server: HashMap<ServerId, LspServerStatus>,
 }
 
 impl LspStatuses {

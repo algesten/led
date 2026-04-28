@@ -68,7 +68,7 @@ mod tests {
         // Force dirty by bumping version + clearing the disk anchor
         // so the rope's hash no longer matches.
         let eb = edits.buffers.get_mut(&canon("file.rs")).expect("seeded");
-        eb.version = 1;
+        eb.version = led_core::BufferVersion(1);
         eb.disk_content_hash = led_core::PersistedContentHash::default();
         assert!(eb.dirty());
 
@@ -149,8 +149,8 @@ mod tests {
             canon("a"),
             EditedBuffer {
                 rope: Arc::new(Rope::from_str("A")),
-                version: 1,
-                saved_version: 0,
+                version: led_core::BufferVersion(1),
+                saved_version: led_core::SavedVersion(0),
                 disk_content_hash: led_core::PersistedContentHash::default(),
                 history: Default::default(),
             },
@@ -164,8 +164,8 @@ mod tests {
             canon("c"),
             EditedBuffer {
                 rope: Arc::new(Rope::from_str("C")),
-                version: 2,
-                saved_version: 0,
+                version: led_core::BufferVersion(2),
+                saved_version: led_core::SavedVersion(0),
                 disk_content_hash: led_core::PersistedContentHash::default(),
                 history: Default::default(),
             },

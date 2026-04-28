@@ -5,7 +5,7 @@
 //! an mpsc inbox. Watch intents (workspace root recursive, the
 //! `<config>/notify/` non-recursive watch, per-buffer parent dirs)
 //! all share the same watcher; fan-out to the originating
-//! [`WatcherId`] is done by walking the runtime-supplied
+//! [`WatchSeq`] is done by walking the runtime-supplied
 //! `registrations` map on each notify event.
 //!
 //! # Debounce
@@ -36,7 +36,7 @@ use std::time::{Duration, Instant};
 
 use led_core::{CanonPath, Notifier};
 use led_driver_file_watch_core::{
-    ChangeKinds, FileWatchCmd, FileWatchDriver, FileWatchEvent, Trace, WatcherId,
+    ChangeKinds, FileWatchCmd, FileWatchDriver, FileWatchEvent, Trace, WatchSeq,
 };
 use notify::{Config, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 
@@ -116,11 +116,11 @@ fn worker_loop(rx_cmd: Receiver<FileWatchCmd>, tx_ev: Sender<FileWatchEvent>, no
     let tx_raw = tx_in.clone();
     let mut watcher: Option<RecommendedWatcher> = None;
 
-    let mut regs: HashMap<WatcherId, RegInfo> = HashMap::new();
+    let mut regs: HashMap<WatchSeq, RegInfo> = HashMap::new();
     // Pending coalescer: keyed by (id, canonical-path-of-event).
     // Holds the running union of ChangeKinds bits and the timestamp
     // of the FIRST observation in the current quiet window.
-    let mut pending: HashMap<(WatcherId, CanonPath), (ChangeKinds, Instant)> = HashMap::new();
+    let mut pending: HashMap<(WatchSeq, CanonPath), (ChangeKinds, Instant)> = HashMap::new();
 
     loop {
         // Adaptive timeout: when something is pending, wake at the
@@ -158,7 +158,7 @@ fn worker_loop(rx_cmd: Receiver<FileWatchCmd>, tx_ev: Sender<FileWatchEvent>, no
 
 fn handle_cmd(
     cmd: FileWatchCmd,
-    regs: &mut HashMap<WatcherId, RegInfo>,
+    regs: &mut HashMap<WatchSeq, RegInfo>,
     watcher: &mut Option<RecommendedWatcher>,
     tx_raw: &Sender<Internal>,
     tx_ev: &Sender<FileWatchEvent>,
@@ -251,8 +251,8 @@ fn handle_cmd(
 
 fn handle_raw_event(
     ev: notify::Event,
-    regs: &HashMap<WatcherId, RegInfo>,
-    pending: &mut HashMap<(WatcherId, CanonPath), (ChangeKinds, Instant)>,
+    regs: &HashMap<WatchSeq, RegInfo>,
+    pending: &mut HashMap<(WatchSeq, CanonPath), (ChangeKinds, Instant)>,
     tx_ev: &Sender<FileWatchEvent>,
     notify: &Notifier,
 ) {
@@ -285,8 +285,8 @@ fn handle_raw_event(
 }
 
 fn drain_pending(
-    pending: &mut HashMap<(WatcherId, CanonPath), (ChangeKinds, Instant)>,
-    regs: &HashMap<WatcherId, RegInfo>,
+    pending: &mut HashMap<(WatchSeq, CanonPath), (ChangeKinds, Instant)>,
+    regs: &HashMap<WatchSeq, RegInfo>,
     tx_ev: &Sender<FileWatchEvent>,
     notify: &Notifier,
 ) {
@@ -317,8 +317,8 @@ fn drain_pending(
 /// `None` means there's nothing waiting and the worker can block
 /// indefinitely.
 fn next_drain_deadline(
-    pending: &HashMap<(WatcherId, CanonPath), (ChangeKinds, Instant)>,
-    regs: &HashMap<WatcherId, RegInfo>,
+    pending: &HashMap<(WatchSeq, CanonPath), (ChangeKinds, Instant)>,
+    regs: &HashMap<WatchSeq, RegInfo>,
 ) -> Option<Instant> {
     pending
         .iter()
@@ -449,7 +449,7 @@ mod tests {
         let (tx_ev, rx_ev) = mpsc::channel::<FileWatchEvent>();
         let _native = spawn_worker(rx_cmd, tx_ev, Notifier::noop());
 
-        let id = WatcherId(1);
+        let id = WatchSeq(1);
         let parent = canon(dir.path().to_str().unwrap());
         tx_cmd
             .send(FileWatchCmd::Watch {

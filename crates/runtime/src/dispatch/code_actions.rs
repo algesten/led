@@ -156,7 +156,7 @@ fn commit(
 pub fn install_picker(
     lsp_extras: &mut LspExtrasState,
     path: led_core::CanonPath,
-    seq: u64,
+    seq: led_core::LspRequestSeq,
     items: std::sync::Arc<Vec<led_driver_lsp_core::CodeActionSummary>>,
 ) {
     if items.is_empty() {
@@ -266,19 +266,24 @@ mod tests {
         install_picker(
             &mut lsp,
             canon("a.rs"),
-            3,
+            led_core::LspRequestSeq(3),
             Arc::new(vec![action("one", "id1"), action("two", "id2")]),
         );
         let p = lsp.code_actions.as_ref().expect("picker installed");
         assert_eq!(p.items.len(), 2);
         assert_eq!(p.selected, 0);
-        assert_eq!(p.seq, 3);
+        assert_eq!(p.seq, led_core::LspRequestSeq(3));
     }
 
     #[test]
     fn install_picker_empty_items_is_noop() {
         let mut lsp = LspExtrasState::default();
-        install_picker(&mut lsp, canon("a.rs"), 1, Arc::new(vec![]));
+        install_picker(
+            &mut lsp,
+            canon("a.rs"),
+            led_core::LspRequestSeq(1),
+            Arc::new(vec![]),
+        );
         assert!(lsp.code_actions.is_none());
     }
 
@@ -289,7 +294,7 @@ mod tests {
         install_picker(
             &mut lsp,
             canon("a.rs"),
-            1,
+            led_core::LspRequestSeq(1),
             Arc::new(vec![action("a", "a"), action("b", "b")]),
         );
         run_overlay_command(Command::CursorDown, &mut lsp, &mut lsp_pending);
@@ -305,7 +310,7 @@ mod tests {
         install_picker(
             &mut lsp,
             canon("a.rs"),
-            1,
+            led_core::LspRequestSeq(1),
             Arc::new(vec![action("a", "id-a"), action("b", "id-b")]),
         );
         run_overlay_command(Command::CursorDown, &mut lsp, &mut lsp_pending);
@@ -323,7 +328,7 @@ mod tests {
         install_picker(
             &mut lsp,
             canon("a.rs"),
-            1,
+            led_core::LspRequestSeq(1),
             Arc::new(vec![action("a", "a")]),
         );
         run_overlay_command(Command::Abort, &mut lsp, &mut lsp_pending);

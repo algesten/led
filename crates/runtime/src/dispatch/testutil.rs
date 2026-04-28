@@ -99,7 +99,7 @@ pub(super) fn rope_of(edits: &BufferEdits, path: &str) -> Arc<Rope> {
         .clone()
 }
 
-pub(super) fn version_of(edits: &BufferEdits, path: &str) -> u64 {
+pub(super) fn version_of(edits: &BufferEdits, path: &str) -> led_core::BufferVersion {
     edits.buffers.get(&canon(path)).expect("seeded").version
 }
 

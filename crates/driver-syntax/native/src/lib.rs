@@ -477,7 +477,7 @@ mod tests {
 
         drv.execute(std::iter::once(&SyntaxCmd {
             path: path.clone(),
-            version: 1,
+            version: led_core::BufferVersion(1),
             rope,
             language: Language::Rust,
             prev_tree: None,
@@ -486,7 +486,7 @@ mod tests {
 
         let out = wait_for_out(&drv, Duration::from_secs(5)).expect("parse within 5s");
         assert_eq!(out.path, path);
-        assert_eq!(out.version, 1);
+        assert_eq!(out.version, led_core::BufferVersion(1));
         assert_eq!(out.language, Language::Rust);
         // `fn` is a keyword, `hello` is a function name.
         let kinds: Vec<TokenKind> = out.tokens.iter().map(|t| t.kind).collect();
@@ -512,7 +512,7 @@ mod tests {
         for v in 1..=3u64 {
             drv.execute(std::iter::once(&SyntaxCmd {
                 path: path.clone(),
-                version: v,
+                version: led_core::BufferVersion(v),
                 rope: Arc::new(Rope::from_str(&format!("fn v{v}() {{}}\n"))),
                 language: Language::Rust,
                 prev_tree: None,
@@ -524,7 +524,7 @@ mod tests {
         let mut seen_latest = false;
         while start.elapsed() < Duration::from_secs(5) && !seen_latest {
             for out in drv.process() {
-                if out.version == 3 {
+                if out.version == led_core::BufferVersion(3) {
                     seen_latest = true;
                 }
             }

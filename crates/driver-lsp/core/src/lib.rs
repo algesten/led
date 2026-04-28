@@ -26,7 +26,7 @@
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender};
 
-use led_core::{CanonPath, PersistedContentHash};
+use led_core::{BufferVersion, CanonPath, LspRequestSeq, PersistedContentHash, ServerId};
 use led_state_diagnostics::Diagnostic;
 use ropey::Rope;
 
@@ -101,7 +101,7 @@ pub enum LspCmd {
     /// `triggerKind` is `Invoked`.
     RequestCompletion {
         path: CanonPath,
-        seq: u64,
+        seq: LspRequestSeq,
         line: u32,
         col: u32,
         trigger: Option<char>,
@@ -114,7 +114,7 @@ pub enum LspCmd {
     /// resolved edits that belong to a stale session.
     ResolveCompletion {
         path: CanonPath,
-        seq: u64,
+        seq: LspRequestSeq,
         item: CompletionItem,
     },
     /// `textDocument/definition` for the identifier at
@@ -123,7 +123,7 @@ pub enum LspCmd {
     /// forwarded back (the first LSP Location in the response).
     RequestGotoDefinition {
         path: CanonPath,
-        seq: u64,
+        seq: LspRequestSeq,
         line: u32,
         col: u32,
     },
@@ -133,7 +133,7 @@ pub enum LspCmd {
     /// via [`LspEvent::Edits`] tagged `EditsOrigin::Rename`.
     RequestRename {
         path: CanonPath,
-        seq: u64,
+        seq: LspRequestSeq,
         line: u32,
         col: u32,
         new_name: Arc<str>,
@@ -144,7 +144,7 @@ pub enum LspCmd {
     /// fires [`LspCmd::SelectCodeAction`].
     RequestCodeAction {
         path: CanonPath,
-        seq: u64,
+        seq: LspRequestSeq,
         start_line: u32,
         start_col: u32,
         end_line: u32,
@@ -158,7 +158,7 @@ pub enum LspCmd {
     /// [`LspEvent::Edits { origin: CodeAction, .. }`].
     SelectCodeAction {
         path: CanonPath,
-        seq: u64,
+        seq: LspRequestSeq,
         action: CodeActionSummary,
     },
     /// `textDocument/formatting` for the whole file at `path`.
@@ -166,7 +166,7 @@ pub enum LspCmd {
     /// [`LspEvent::Edits { origin: Format, .. }`]; an empty
     /// `edits` vector is the "no-op format / already formatted"
     /// signal that lets the dispatcher release any queued save.
-    RequestFormat { path: CanonPath, seq: u64 },
+    RequestFormat { path: CanonPath, seq: LspRequestSeq },
     /// `textDocument/inlayHint` for the visible range.
     /// `version` is the buffer version the request was
     /// computed against — the runtime re-requests on version
@@ -174,8 +174,8 @@ pub enum LspCmd {
     /// [`LspEvent::InlayHints`] stamped with the same version.
     RequestInlayHints {
         path: CanonPath,
-        seq: u64,
-        version: u64,
+        seq: LspRequestSeq,
+        version: BufferVersion,
         start_line: u32,
         end_line: u32,
     },
@@ -186,7 +186,7 @@ pub enum LspCmd {
     /// per-server glob set. `changes` is the LSP `FileEvent[]`
     /// payload, already filtered to the matching server's globs.
     DidChangeWatchedFiles {
-        server: String,
+        server: ServerId,
         changes: Vec<FileEvent>,
     },
 }
@@ -399,18 +399,18 @@ pub enum LspEvent {
     /// `experimental/serverStatus`. One-shot per server — the
     /// runtime unblocks its init-deferred `RequestDiagnostics` on
     /// this event. See `DiagnosticSource::on_quiescence`.
-    Ready { server: String },
+    Ready { server: ServerId },
     /// Progress breadcrumb for the status bar. `busy` is `false`
     /// when the server is idle; `detail` is the human-readable
     /// message the server reports (e.g. "indexing crates").
     Progress {
-        server: String,
+        server: ServerId,
         busy: bool,
         detail: Option<String>,
     },
     /// Non-fatal server error. The runtime surfaces this as a
     /// warn alert keyed by `server`.
-    Error { server: String, message: String },
+    Error { server: ServerId, message: String },
     /// Completion response for a previous
     /// [`LspCmd::RequestCompletion`]. `seq` echoes the request
     /// id so the runtime can drop responses older than the
@@ -426,7 +426,7 @@ pub enum LspEvent {
     /// line when the request fired).
     Completion {
         path: CanonPath,
-        seq: u64,
+        seq: LspRequestSeq,
         items: Arc<Vec<CompletionItem>>,
         prefix_line: u32,
         prefix_start_col: Option<u32>,
@@ -437,7 +437,7 @@ pub enum LspEvent {
     /// the file). `seq` matches the originating resolve id.
     CompletionResolved {
         path: CanonPath,
-        seq: u64,
+        seq: LspRequestSeq,
         additional_edits: Vec<CompletionTextEdit>,
     },
     /// Response to [`LspCmd::RequestGotoDefinition`]. `location`
@@ -446,7 +446,7 @@ pub enum LspEvent {
     /// `None` signals "no match" so the dispatcher can surface
     /// a "no definition found" alert.
     GotoDefinition {
-        seq: u64,
+        seq: LspRequestSeq,
         location: Option<Location>,
     },
     /// Response to rename / code-action-select / format. The
@@ -457,7 +457,7 @@ pub enum LspEvent {
     /// bookkeeping (save unlock for `Format`, jump clear for
     /// `Rename`).
     Edits {
-        seq: u64,
+        seq: LspRequestSeq,
         origin: EditsOrigin,
         edits: Arc<Vec<FileEdit>>,
     },
@@ -468,7 +468,7 @@ pub enum LspEvent {
     /// LSP shapes.
     CodeActions {
         path: CanonPath,
-        seq: u64,
+        seq: LspRequestSeq,
         actions: Arc<Vec<CodeActionSummary>>,
     },
     /// Response to [`LspCmd::RequestInlayHints`]. `version`
@@ -477,7 +477,7 @@ pub enum LspEvent {
     /// for a newer rope.
     InlayHints {
         path: CanonPath,
-        version: u64,
+        version: BufferVersion,
         hints: Arc<Vec<InlayHint>>,
     },
     /// Server registered a fresh `workspace/didChangeWatchedFiles`
@@ -487,7 +487,7 @@ pub enum LspEvent {
     /// registrations per server are valid (different globs for
     /// different concerns); each one carries its own id.
     WatchedFilesRegistered {
-        server: String,
+        server: ServerId,
         registration_id: String,
         globs: Arc<Vec<RegistrationGlob>>,
     },
@@ -495,7 +495,7 @@ pub enum LspEvent {
     /// `client/unregisterCapability`. Symmetric to
     /// [`LspEvent::WatchedFilesRegistered`].
     WatchedFilesUnregistered {
-        server: String,
+        server: ServerId,
         registration_id: String,
     },
 }
@@ -506,7 +506,7 @@ pub enum LspEvent {
 /// unified `Trace` delegates through an adapter, matching every
 /// other driver's pattern.
 pub trait Trace: Send + Sync {
-    fn lsp_server_started(&self, server: &str);
+    fn lsp_server_started(&self, server: &ServerId);
     fn lsp_request_diagnostics(&self);
     fn lsp_diagnostics_done(&self, path: &CanonPath, n: usize, hash: PersistedContentHash);
     fn lsp_mode_fallback(&self);
@@ -515,7 +515,7 @@ pub trait Trace: Send + Sync {
     /// document (definition, rename, codeAction, completion, …).
     fn lsp_send_request(
         &self,
-        server: &str,
+        server: &ServerId,
         method: &str,
         id: i64,
         path_uri: Option<&str>,
@@ -526,17 +526,17 @@ pub trait Trace: Send + Sync {
     /// (`initialized`, `workspace/didChangeConfiguration`, `exit`).
     fn lsp_send_notification(
         &self,
-        server: &str,
+        server: &ServerId,
         method: &str,
         path_uri: Option<&str>,
         version: Option<i32>,
     );
     /// Inbound JSON-RPC response correlated by `id` to a previous
     /// `lsp_send_request`.
-    fn lsp_recv_response(&self, server: &str, id: i64);
+    fn lsp_recv_response(&self, server: &ServerId, id: i64);
     /// Inbound JSON-RPC notification (`$/progress`,
     /// `textDocument/publishDiagnostics`, server status, …).
-    fn lsp_recv_notification(&self, server: &str, method: &str);
+    fn lsp_recv_notification(&self, server: &ServerId, method: &str);
     /// Inbound JSON-RPC request from the server
     /// (`client/registerCapability`,
     /// `client/unregisterCapability`,
@@ -545,27 +545,27 @@ pub trait Trace: Send + Sync {
     /// via the auto-reply path on `lsp_send_response`-equivalent
     /// machinery (we currently emit the auto-ack inline without
     /// a separate trace line).
-    fn lsp_recv_request(&self, server: &str, method: &str, id: i64);
+    fn lsp_recv_request(&self, server: &ServerId, method: &str, id: i64);
 }
 
 pub struct NoopTrace;
 impl Trace for NoopTrace {
-    fn lsp_server_started(&self, _: &str) {}
+    fn lsp_server_started(&self, _: &ServerId) {}
     fn lsp_request_diagnostics(&self) {}
     fn lsp_diagnostics_done(&self, _: &CanonPath, _: usize, _: PersistedContentHash) {}
     fn lsp_mode_fallback(&self) {}
-    fn lsp_send_request(&self, _: &str, _: &str, _: i64, _: Option<&str>) {}
+    fn lsp_send_request(&self, _: &ServerId, _: &str, _: i64, _: Option<&str>) {}
     fn lsp_send_notification(
         &self,
-        _: &str,
+        _: &ServerId,
         _: &str,
         _: Option<&str>,
         _: Option<i32>,
     ) {
     }
-    fn lsp_recv_response(&self, _: &str, _: i64) {}
-    fn lsp_recv_notification(&self, _: &str, _: &str) {}
-    fn lsp_recv_request(&self, _: &str, _: &str, _: i64) {}
+    fn lsp_recv_response(&self, _: &ServerId, _: i64) {}
+    fn lsp_recv_notification(&self, _: &ServerId, _: &str) {}
+    fn lsp_recv_request(&self, _: &ServerId, _: &str, _: i64) {}
 }
 
 // ── Driver handle ──────────────────────────────────────────────

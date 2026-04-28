@@ -17,7 +17,7 @@ use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 
-use led_core::{CanonPath, Notifier, PersistedContentHash, SubLine, UserPath};
+use led_core::{CanonPath, ChainId, Notifier, PersistedContentHash, SubLine, UndoDbSeq, UserPath};
 use led_driver_session_core::{
     SessionCmd, SessionDriver, SessionEvent, SyncResultKind, Trace,
 };
@@ -131,7 +131,7 @@ fn worker_loop(rx: Receiver<SessionCmd>, tx: Sender<SessionEvent>, notify: Notif
                     &FlushUndoArgs {
                         root_path: &ws.root_path,
                         file_path: &path_str,
-                        chain_id: &chain_id,
+                        chain_id: chain_id.as_str(),
                         content_hash,
                         undo_cursor,
                         distance_from_save,
@@ -149,7 +149,7 @@ fn worker_loop(rx: Receiver<SessionCmd>, tx: Sender<SessionEvent>, notify: Notif
                             path,
                             chain_id,
                             persisted_undo_len: undo_cursor,
-                            last_seq,
+                            last_seq: UndoDbSeq(last_seq),
                         });
                     }
                     Err(e) => {
@@ -188,8 +188,8 @@ fn worker_loop(rx: Receiver<SessionCmd>, tx: Sender<SessionEvent>, notify: Notif
                     &ws.conn,
                     &ws.root_path,
                     &path_str,
-                    last_seen_seq,
-                    &current_chain_id,
+                    last_seen_seq.0,
+                    current_chain_id.as_str(),
                 ) {
                     Ok(kind) => kind,
                     Err(e) => {
@@ -679,10 +679,10 @@ fn check_sync(
                 // Apply.
                 SyncResultKind::SyncEntries {
                     path: placeholder,
-                    chain_id,
+                    chain_id: ChainId::new(chain_id),
                     content_hash: PersistedContentHash(hash as u64),
                     entries,
-                    new_last_seen_seq: max_seq,
+                    new_last_seen_seq: UndoDbSeq(max_seq),
                 }
             } else {
                 // Chain mismatch: peer rewrote the timeline.
@@ -715,12 +715,12 @@ fn load_undo_all(
         )?
         .query_row(params![root_path, file_path], |row| {
             Ok(UndoRestoreData {
-                chain_id: row.get(0)?,
+                chain_id: ChainId::new(row.get::<_, String>(0)?),
                 content_hash: PersistedContentHash(row.get::<_, i64>(1)? as u64),
                 undo_cursor: row.get::<_, Option<i64>>(2)?.map(|v| v as usize),
                 distance_from_save: row.get(3)?,
                 entries: Vec::new(),
-                last_seq: 0,
+                last_seq: UndoDbSeq(0),
             })
         });
     let mut restore = match state {
@@ -739,7 +739,7 @@ fn load_undo_all(
             Ok((row.get(0)?, row.get(1)?))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    restore.last_seq = rows.last().map(|(seq, _)| *seq).unwrap_or(0);
+    restore.last_seq = UndoDbSeq(rows.last().map(|(seq, _)| *seq).unwrap_or(0));
     restore.entries = rows
         .into_iter()
         .filter_map(|(_, data)| rmp_serde::from_slice::<EditGroup>(&data).ok())
@@ -762,7 +762,7 @@ mod tests {
         fn session_save_start(&self) {}
         fn session_save_done(&self, _: bool) {}
         fn session_drop_undo(&self, _: &CanonPath) {}
-        fn session_flush_undo(&self, _: &CanonPath, _: &str) {}
+        fn session_flush_undo(&self, _: &CanonPath, _: &ChainId) {}
         fn session_check_sync(&self, _: &CanonPath) {}
     }
 
@@ -796,7 +796,7 @@ mod tests {
             ],
             cursor_before: TabCursor::default(),
             cursor_after: TabCursor::default(),
-            seq: 1,
+            seq: led_core::EditSeq(1),
             file_search_mark: None,
             save_point_hash: None,
         }
@@ -932,7 +932,7 @@ mod tests {
 
         drv.execute([&SessionCmd::FlushUndo {
             path: path.clone(),
-            chain_id: "chain-1".into(),
+            chain_id: ChainId::new("chain-1"),
             content_hash: PersistedContentHash(0xDEADBEEF),
             undo_cursor: 2,
             distance_from_save: 1,
@@ -942,7 +942,7 @@ mod tests {
         let SessionEvent::UndoFlushed { last_seq, .. } = ev else {
             panic!("unexpected: {ev:?}");
         };
-        assert!(last_seq > 0);
+        assert!(last_seq.0 > 0);
 
         // Drop + re-init in a new spawn — the second instance
         // should restore the entries via load_session.
@@ -960,7 +960,7 @@ mod tests {
         };
         let r = restored.expect("session restored");
         let undo = r.buffers[0].undo.as_ref().expect("undo restored");
-        assert_eq!(undo.chain_id, "chain-1");
+        assert_eq!(undo.chain_id.as_str(), "chain-1");
         assert_eq!(undo.content_hash, PersistedContentHash(0xDEADBEEF));
         assert_eq!(undo.undo_cursor, Some(2));
         assert_eq!(undo.distance_from_save, 1);

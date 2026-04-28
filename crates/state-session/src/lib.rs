@@ -18,7 +18,7 @@
 
 use std::collections::HashMap;
 
-use led_core::{CanonPath, PersistedContentHash};
+use led_core::{CanonPath, ChainId, PersistedContentHash, UndoDbSeq};
 use led_state_buffer_edits::EditGroup;
 use led_state_tabs::{Cursor, Scroll};
 
@@ -100,7 +100,7 @@ pub struct UndoRestoreData {
     /// UUID-like identifier for this undo chain. Two sessions
     /// referring to the same chain_id can extend each other's
     /// history; a different chain_id means a fresh start.
-    pub chain_id: String,
+    pub chain_id: ChainId,
     /// Hash of the file content the chain was anchored against.
     /// On restore: only install the entries when the freshly-
     /// loaded rope's hash matches.
@@ -118,7 +118,7 @@ pub struct UndoRestoreData {
     pub entries: Vec<EditGroup>,
     /// SQLite seq of the last entry — used by sync (M21+)
     /// to fetch only entries newer than this.
-    pub last_seq: i64,
+    pub last_seq: UndoDbSeq,
 }
 
 #[cfg(test)]

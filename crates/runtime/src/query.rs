@@ -12,7 +12,7 @@
 //!   `Frame`s for `paint` to render.
 
 #[allow(unused_imports)]
-use led_core::CanonPath;
+use led_core::{BufferStateSum, BufferVersion, CanonPath, SavedVersion, ServerId};
 use led_driver_buffers_core::{BufferStore, LoadAction, LoadState, SaveAction};
 use led_driver_clipboard_core::ClipboardAction;
 use led_driver_fs_list_core::ListCmd;
@@ -181,7 +181,7 @@ impl<'a> DiagnosticsStatesInput<'a> {
 /// cache.
 #[derive(drv::Input, Copy, Clone)]
 pub struct LspStatusesInput<'a> {
-    pub by_server: &'a imbl::HashMap<String, LspServerStatus>,
+    pub by_server: &'a imbl::HashMap<ServerId, LspServerStatus>,
 }
 
 impl<'a> LspStatusesInput<'a> {
@@ -453,11 +453,13 @@ pub fn file_load_action<'a, 'b>(
 /// Save-gated pulls match the "errors appear after save" UX the
 /// user expects.
 #[drv::memo(single)]
-pub fn buffer_state_sum<'b>(buffers: EditedBuffersInput<'b>) -> u64 {
-    buffers
-        .buffers
-        .values()
-        .fold(0u64, |acc, eb| acc.wrapping_add(eb.saved_version))
+pub fn buffer_state_sum<'b>(buffers: EditedBuffersInput<'b>) -> BufferStateSum {
+    BufferStateSum(
+        buffers
+            .buffers
+            .values()
+            .fold(0u64, |acc, eb| acc.wrapping_add(eb.saved_version.0)),
+    )
 }
 
 #[drv::memo(single)]
@@ -1429,7 +1431,7 @@ fn lsp_progress_message(lsp: LspStatusesInput<'_>, render_tick: u64) -> Option<S
         .or_else(|| lsp.by_server.iter().next())
         .map(|(name, s)| (name.clone(), s.clone()))?;
     let formatted =
-        format_lsp_status(&server, status.busy, status.detail.as_deref(), render_tick);
+        format_lsp_status(server.as_str(), status.busy, status.detail.as_deref(), render_tick);
     if formatted.is_empty() {
         None
     } else {
@@ -3129,8 +3131,8 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
             canon("a.rs"),
             EditedBuffer {
                 rope: Arc::new(Rope::from_str("edited-version")),
-                version: 1,
-                saved_version: 0,
+                version: BufferVersion(1),
+                saved_version: SavedVersion(0),
                 disk_content_hash: led_core::PersistedContentHash::default(),
                 history: Default::default(),
             },
@@ -3188,8 +3190,8 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
             path.clone(),
             EditedBuffer {
                 rope: rope.clone(),
-                version: 3,
-                saved_version: 0,
+                version: BufferVersion(3),
+                saved_version: SavedVersion(0),
                 disk_content_hash: led_core::PersistedContentHash::default(),
                 history: Default::default(),
             },
@@ -3209,7 +3211,7 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
             } => {
                 assert_eq!(p, &path);
                 assert!(Arc::ptr_eq(r, &rope));
-                assert_eq!(*version, 3);
+                assert_eq!(*version, BufferVersion(3));
             }
             SaveAction::SaveAs { .. } => panic!("unexpected SaveAs"),
         }
@@ -3225,8 +3227,8 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
             from.clone(),
             EditedBuffer {
                 rope: rope.clone(),
-                version: 2,
-                saved_version: 2, // pristine — SaveAs still fires
+                version: BufferVersion(2),
+                saved_version: SavedVersion(2), // pristine — SaveAs still fires
                 disk_content_hash: led_core::PersistedContentHash::default(),
                 history: Default::default(),
             },
@@ -3248,7 +3250,7 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
                 assert_eq!(f, &from);
                 assert_eq!(t, &to);
                 assert!(Arc::ptr_eq(r, &rope));
-                assert_eq!(*version, 2);
+                assert_eq!(*version, BufferVersion(2));
             }
             SaveAction::Save { .. } => panic!("unexpected Save"),
         }
@@ -3271,8 +3273,8 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
             path.clone(),
             EditedBuffer {
                 rope: rope.clone(),
-                version: 0,
-                saved_version: 0, // dirty() == false
+                version: BufferVersion(0),
+                saved_version: SavedVersion(0), // dirty() == false
                 disk_content_hash: led_core::EphemeralContentHash::of_rope(&rope).persist(),
                 history: Default::default(),
             },
@@ -3327,8 +3329,8 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
             canon("a.rs"),
             EditedBuffer {
                 rope: a_rope.clone(),
-                version: 0,
-                saved_version: 0,
+                version: BufferVersion(0),
+                saved_version: SavedVersion(0),
                 disk_content_hash: led_core::EphemeralContentHash::of_rope(&a_rope).persist(),
                 history: Default::default(),
             },
@@ -3337,8 +3339,8 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
             canon("b.rs"),
             EditedBuffer {
                 rope: Arc::new(Rope::from_str("yy")),
-                version: 1,
-                saved_version: 0,
+                version: BufferVersion(1),
+                saved_version: SavedVersion(0),
                 disk_content_hash: led_core::PersistedContentHash::default(),
                 history: Default::default(),
             },
@@ -3630,8 +3632,8 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
             canon("a.rs"),
             EditedBuffer {
                 rope: Arc::new(Rope::from_str("x")),
-                version: 2,
-                saved_version: 1,
+                version: BufferVersion(2),
+                saved_version: SavedVersion(1),
                 disk_content_hash: led_core::PersistedContentHash::default(),
                 history: Default::default(),
             },
@@ -3660,8 +3662,8 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
             canon("a.rs"),
             EditedBuffer {
                 rope: Arc::new(Rope::from_str("x")),
-                version: 3,
-                saved_version: 1, // dirty
+                version: BufferVersion(3),
+                saved_version: SavedVersion(1), // dirty
                 disk_content_hash: led_core::PersistedContentHash::default(),
                 history: Default::default(),
             },
@@ -4571,7 +4573,7 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
         diag_end_line: usize,
         severity: DiagnosticSeverity,
         message: &str,
-        buf_version: u64,
+        buf_version: BufferVersion,
         // `false` stamps the diagnostic with the buffer's actual
         // content hash (popover-visible); `true` stamps with a
         // deliberately-wrong hash so the no-smear gate hides it.
@@ -4671,7 +4673,7 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
             3,
             DiagnosticSeverity::Error,
             "expected `;`",
-            0,
+            BufferVersion(0),
             false,
         );
         let pop = call_popover(&t, &e, &br, &d, &ff, &is, &fs).expect("popover");
@@ -4688,7 +4690,7 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
             3,
             DiagnosticSeverity::Error,
             "x",
-            0,
+            BufferVersion(0),
             false,
         );
         assert!(call_popover(&t, &e, &br, &d, &ff, &is, &fs).is_none());
@@ -4705,7 +4707,7 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
             3,
             DiagnosticSeverity::Error,
             "x",
-            2,
+            BufferVersion(2),
             true,
         );
         assert!(call_popover(&t, &e, &br, &d, &ff, &is, &fs).is_none());
@@ -4715,7 +4717,7 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
     fn popover_hidden_for_info_and_hint_severity() {
         for sev in [DiagnosticSeverity::Info, DiagnosticSeverity::Hint] {
             let (t, e, br, d, ff, is, fs) =
-                popover_fixture(3, 3, 3, sev, "x", 0, false);
+                popover_fixture(3, 3, 3, sev, "x", BufferVersion(0), false);
             assert!(
                 call_popover(&t, &e, &br, &d, &ff, &is, &fs).is_none(),
                 "severity {sev:?} must be silent"
@@ -4731,7 +4733,7 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
             3,
             DiagnosticSeverity::Error,
             "x",
-            0,
+            BufferVersion(0),
             false,
         );
         let ff = Some(led_state_find_file::FindFileState::open(String::new()));
@@ -4746,7 +4748,7 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
             3,
             DiagnosticSeverity::Error,
             "x",
-            0,
+            BufferVersion(0),
             false,
         );
         br.focus = Focus::Side;
@@ -4762,7 +4764,7 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
             3,
             DiagnosticSeverity::Error,
             msg,
-            0,
+            BufferVersion(0),
             false,
         );
         let pop = call_popover(&t, &e, &br, &d, &ff, &is, &fs).expect("popover");
@@ -4779,7 +4781,7 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
             5,
             DiagnosticSeverity::Warning,
             "spans three lines",
-            0,
+            BufferVersion(0),
             false,
         );
         let pop = call_popover(&t, &e, &br, &d, &ff, &is, &fs).expect("popover");

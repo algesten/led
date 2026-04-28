@@ -3,7 +3,9 @@
 //! Everything here is cross-cutting and atom-free — no `drv::atom`,
 //! no drivers, no app logic. Currently:
 //!
-//! - [`id_newtype!`] — macro for strongly-typed u64 identifier newtypes
+//! - [`id_newtype!`] / [`string_newtype!`] — macros for strongly-typed
+//!   primitive and string newtypes (`TabId`, `BufferVersion`,
+//!   `LspRequestSeq`, `ChainId`, `ServerId`, …)
 //! - [`UserPath`] / [`CanonPath`] — path newtypes mirroring legacy led's
 //!   user-vs-canonical split
 
@@ -28,6 +30,10 @@ pub use drv;
 
 pub use command::{Command, parse_command};
 pub use content_hash::{EphemeralContentHash, PersistedContentHash};
+pub use ids::{
+    BufferStateSum, BufferVersion, ChainId, EditSeq, LspRequestSeq, SavedVersion, ServerId,
+    UndoDbSeq, WatchSeq,
+};
 pub use grapheme::{
     TAB_STOP, char_to_grapheme_col, display_col_to_grapheme, grapheme_col_to_char,
     grapheme_col_to_utf16_units, grapheme_display_width, line_grapheme_len,

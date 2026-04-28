@@ -12,7 +12,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
 use std::thread;
 
-use led_core::{CanonPath, Notifier};
+use led_core::{BufferVersion, CanonPath, Notifier};
 use led_driver_buffers_core::{
     FileReadDriver, FileWriteDriver, ReadCmd, ReadDone, ReadKind, Trace, WriteCmd, WriteDone,
 };
@@ -189,7 +189,7 @@ fn write_worker_loop(rx: Receiver<WriteCmd>, tx: Sender<WriteDone>, notify: Noti
 /// Atomic write: dump rope to `<dir>/.led.<basename>.v<version>.tmp`,
 /// then rename onto the target. Power loss or crash mid-write leaves
 /// either the old file or the new one intact, never a torn write.
-fn write_atomic(path: &CanonPath, rope: &Rope, version: u64) -> Result<(), String> {
+fn write_atomic(path: &CanonPath, rope: &Rope, version: BufferVersion) -> Result<(), String> {
     let target: PathBuf = path.as_path().to_path_buf();
     let dir = target
         .parent()
@@ -199,7 +199,7 @@ fn write_atomic(path: &CanonPath, rope: &Rope, version: u64) -> Result<(), Strin
         .ok_or_else(|| "save target has no filename".to_string())?;
     let mut tmp_name = std::ffi::OsString::from(".led.");
     tmp_name.push(base);
-    tmp_name.push(format!(".v{version}.tmp"));
+    tmp_name.push(format!(".v{}.tmp", version.0));
     let tmp_path = dir.join(&tmp_name);
 
     // Scope the File so it's closed (and flushed) before the rename.
@@ -307,14 +307,14 @@ mod tests {
         driver.execute([&SaveAction::Save {
             path: path.clone(),
             rope: rope.clone(),
-            version: 1,
+            version: BufferVersion(1),
         }]);
 
         let completions = drain_write_completions(&driver, Duration::from_secs(5));
         assert_eq!(completions.len(), 1);
         let done = &completions[0];
         assert_eq!(done.path, path);
-        assert_eq!(done.version, 1);
+        assert_eq!(done.version, BufferVersion(1));
         assert!(done.result.is_ok());
 
         // File contains what we wrote, and no `.tmp` detritus remains.
@@ -339,7 +339,7 @@ mod tests {
         driver.execute([&SaveAction::Save {
             path,
             rope: Arc::new(Rope::from_str("x")),
-            version: 1,
+            version: BufferVersion(1),
         }]);
 
         let completions = drain_write_completions(&driver, Duration::from_secs(5));

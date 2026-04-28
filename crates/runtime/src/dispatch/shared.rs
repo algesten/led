@@ -146,7 +146,7 @@ where
 /// saved_version`.
 pub(super) fn bump(eb: &mut EditedBuffer, new_rope: Rope) {
     eb.rope = Arc::new(new_rope);
-    eb.version = eb.version.saturating_add(1);
+    eb.version.0 = eb.version.0.saturating_add(1);
 }
 
 /// `Cursor { line, col }` → absolute char index in the rope, with

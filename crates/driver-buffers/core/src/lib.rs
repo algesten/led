@@ -17,7 +17,7 @@
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::Arc;
 
-use led_core::CanonPath;
+use led_core::{BufferVersion, CanonPath};
 use ropey::Rope;
 
 // ── Atom ───────────────────────────────────────────────────────────────
@@ -137,8 +137,8 @@ pub struct ReadCompletions {
 pub trait Trace: Send + Sync {
     fn file_load_start(&self, path: &CanonPath);
     fn file_load_done(&self, path: &CanonPath, result: &Result<Arc<Rope>, String>);
-    fn file_save_start(&self, path: &CanonPath, version: u64);
-    fn file_save_done(&self, path: &CanonPath, version: u64, result: &Result<(), String>);
+    fn file_save_start(&self, path: &CanonPath, version: BufferVersion);
+    fn file_save_done(&self, path: &CanonPath, version: BufferVersion, result: &Result<(), String>);
     /// `Ctrl+x Ctrl+w` commit: write the active buffer (`from`) to a
     /// different path (`to`). `FileSaveAs` in legacy's dispatched.snap.
     fn file_save_as_start(&self, from: &CanonPath, to: &CanonPath);
@@ -156,8 +156,8 @@ pub struct NoopTrace;
 impl Trace for NoopTrace {
     fn file_load_start(&self, _: &CanonPath) {}
     fn file_load_done(&self, _: &CanonPath, _: &Result<Arc<Rope>, String>) {}
-    fn file_save_start(&self, _: &CanonPath, _: u64) {}
-    fn file_save_done(&self, _: &CanonPath, _: u64, _: &Result<(), String>) {}
+    fn file_save_start(&self, _: &CanonPath, _: BufferVersion) {}
+    fn file_save_done(&self, _: &CanonPath, _: BufferVersion, _: &Result<(), String>) {}
     fn file_save_as_start(&self, _: &CanonPath, _: &CanonPath) {}
     fn file_save_as_done(&self, _: &CanonPath, _: &CanonPath, _: &Result<(), String>) {}
     fn file_reread_start(&self, _: &CanonPath) {}
@@ -271,7 +271,7 @@ pub enum SaveAction {
     Save {
         path: CanonPath,
         rope: Arc<Rope>,
-        version: u64,
+        version: BufferVersion,
     },
     SaveAs {
         /// The path of the buffer being saved (tab stays here). The
@@ -283,7 +283,7 @@ pub enum SaveAction {
         /// disk at `to`; the existing tab at `from` is untouched.
         to: CanonPath,
         rope: Arc<Rope>,
-        version: u64,
+        version: BufferVersion,
     },
 }
 
@@ -293,13 +293,13 @@ pub enum WriteCmd {
     Write {
         path: CanonPath,
         rope: Arc<Rope>,
-        version: u64,
+        version: BufferVersion,
     },
     WriteAs {
         from: CanonPath,
         to: CanonPath,
         rope: Arc<Rope>,
-        version: u64,
+        version: BufferVersion,
     },
 }
 
@@ -313,7 +313,7 @@ pub enum WriteCmd {
 #[derive(Debug)]
 pub struct WriteDone {
     pub path: CanonPath,
-    pub version: u64,
+    pub version: BufferVersion,
     pub result: Result<Arc<Rope>, String>,
     /// `Some(original_path)` for `SaveAs` completions; `None` for
     /// plain `Save`. The runtime uses this to clear the source
@@ -505,7 +505,7 @@ mod tests {
         let action = SaveAction::Save {
             path: path.clone(),
             rope: rope.clone(),
-            version: 7,
+            version: BufferVersion(7),
         };
 
         driver.execute([&action]);
@@ -518,7 +518,7 @@ mod tests {
             } => {
                 assert_eq!(p, path);
                 assert!(Arc::ptr_eq(&r, &rope));
-                assert_eq!(version, 7);
+                assert_eq!(version, BufferVersion(7));
             }
             WriteCmd::WriteAs { .. } => panic!("unexpected WriteAs"),
         }
@@ -536,7 +536,7 @@ mod tests {
         tx_done
             .send(WriteDone {
                 path: path.clone(),
-                version: 3,
+                version: BufferVersion(3),
                 result: Ok(rope.clone()),
                 from: None,
             })
@@ -546,7 +546,7 @@ mod tests {
         assert_eq!(completions.len(), 1);
         let done = completions.pop().unwrap();
         assert_eq!(done.path, path);
-        assert_eq!(done.version, 3);
+        assert_eq!(done.version, BufferVersion(3));
         match done.result {
             Ok(r) => assert!(Arc::ptr_eq(&r, &rope)),
             Err(_) => panic!("expected Ok"),
@@ -562,7 +562,7 @@ mod tests {
         tx_done
             .send(WriteDone {
                 path: canon("ro.txt"),
-                version: 1,
+                version: BufferVersion(1),
                 result: Err("Permission denied".into()),
                 from: None,
             })
@@ -589,13 +589,13 @@ mod tests {
             from: from.clone(),
             to: to.clone(),
             rope,
-            version: 7,
+            version: BufferVersion(7),
         }));
         match rx_cmd.try_recv() {
             Ok(WriteCmd::WriteAs { from: f, to: t, version, .. }) => {
                 assert_eq!(f, from);
                 assert_eq!(t, to);
-                assert_eq!(version, 7);
+                assert_eq!(version, BufferVersion(7));
             }
             other => panic!("expected WriteAs, got {other:?}"),
         }
@@ -612,7 +612,7 @@ mod tests {
         tx_done
             .send(WriteDone {
                 path: to.clone(),
-                version: 1,
+                version: BufferVersion(1),
                 result: Ok(Arc::new(Rope::from_str(""))),
                 from: Some(from.clone()),
             })

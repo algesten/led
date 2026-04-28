@@ -10,7 +10,7 @@
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender};
 
-use led_core::CanonPath;
+use led_core::{BufferVersion, CanonPath};
 use led_state_syntax::{Language, SyntaxOut};
 use ropey::Rope;
 use tree_sitter::Tree;
@@ -35,7 +35,7 @@ use tree_sitter::Tree;
 #[derive(Debug, Clone)]
 pub struct SyntaxCmd {
     pub path: CanonPath,
-    pub version: u64,
+    pub version: BufferVersion,
     pub rope: Arc<Rope>,
     pub language: Language,
     pub prev_tree: Option<Arc<Tree>>,
@@ -53,14 +53,14 @@ pub use led_state_syntax::RopeDiff;
 /// Driver-scoped trace hook. The runtime's top-level Trace
 /// delegates here via an adapter, matching every other driver.
 pub trait Trace: Send + Sync {
-    fn syntax_parse_start(&self, path: &CanonPath, version: u64, language: Language);
-    fn syntax_parse_done(&self, path: &CanonPath, version: u64, ok: bool);
+    fn syntax_parse_start(&self, path: &CanonPath, version: BufferVersion, language: Language);
+    fn syntax_parse_done(&self, path: &CanonPath, version: BufferVersion, ok: bool);
 }
 
 pub struct NoopTrace;
 impl Trace for NoopTrace {
-    fn syntax_parse_start(&self, _: &CanonPath, _: u64, _: Language) {}
-    fn syntax_parse_done(&self, _: &CanonPath, _: u64, _: bool) {}
+    fn syntax_parse_start(&self, _: &CanonPath, _: BufferVersion, _: Language) {}
+    fn syntax_parse_done(&self, _: &CanonPath, _: BufferVersion, _: bool) {}
 }
 
 /// Main-loop-facing half of the driver. Holds the `Sender` for

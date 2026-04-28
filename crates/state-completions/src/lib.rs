@@ -25,7 +25,7 @@
 
 use std::sync::Arc;
 
-use led_core::CanonPath;
+use led_core::{CanonPath, LspRequestSeq};
 use led_driver_lsp_core::CompletionItem;
 use led_state_tabs::TabId;
 
@@ -43,7 +43,7 @@ pub struct CompletionsPending {
     /// dispatch; the runtime gates incoming events by comparing
     /// to the latest issued id so typing races can't display
     /// stale items.
-    pub seq_gen: u64,
+    pub seq_gen: LspRequestSeq,
     /// Execute-pattern outbox — dispatch pushes one request per
     /// auto-trigger or explicit invoke, the driver-dispatch
     /// phase drains them and ships as `LspCmd::RequestCompletion`.
@@ -64,7 +64,7 @@ pub struct CompletionsPending {
 #[derive(Debug, Clone, PartialEq)]
 pub struct PendingCompletionRequest {
     pub path: CanonPath,
-    pub seq: u64,
+    pub seq: LspRequestSeq,
     pub line: u32,
     pub col: u32,
     pub trigger: Option<char>,
@@ -75,7 +75,7 @@ pub struct PendingCompletionRequest {
 #[derive(Debug, Clone, PartialEq)]
 pub struct PendingResolveRequest {
     pub path: CanonPath,
-    pub seq: u64,
+    pub seq: LspRequestSeq,
     pub item: CompletionItem,
 }
 
@@ -93,7 +93,7 @@ pub struct CompletionSession {
     pub path: CanonPath,
     /// `seq` of the `LspCmd::RequestCompletion` that produced
     /// these items. Responses older than this are dropped.
-    pub seq: u64,
+    pub seq: LspRequestSeq,
     /// Cursor line at request time. The popup dismisses if the
     /// cursor moves to a different line (legacy behaviour —
     /// completions rarely span lines and matching LSP servers
@@ -131,8 +131,8 @@ impl CompletionsState {
 
 impl CompletionsPending {
     /// Allocate the next request / resolve sequence id.
-    pub fn next_seq(&mut self) -> u64 {
-        self.seq_gen = self.seq_gen.wrapping_add(1);
+    pub fn next_seq(&mut self) -> LspRequestSeq {
+        self.seq_gen = LspRequestSeq(self.seq_gen.0.wrapping_add(1));
         self.seq_gen
     }
 
@@ -145,7 +145,7 @@ impl CompletionsPending {
         line: u32,
         col: u32,
         trigger: Option<char>,
-    ) -> u64 {
+    ) -> LspRequestSeq {
         let seq = self.next_seq();
         self.pending_requests.push(PendingCompletionRequest {
             path,
@@ -159,7 +159,7 @@ impl CompletionsPending {
 
     /// Queue a resolve request for the item the user just
     /// committed. Returns the allocated `seq`.
-    pub fn queue_resolve(&mut self, path: CanonPath, item: CompletionItem) -> u64 {
+    pub fn queue_resolve(&mut self, path: CanonPath, item: CompletionItem) -> LspRequestSeq {
         let seq = self.next_seq();
         self.pending_resolves.push(PendingResolveRequest {
             path,
@@ -266,9 +266,9 @@ mod tests {
     #[test]
     fn next_seq_is_monotonic() {
         let mut p = CompletionsPending::default();
-        assert_eq!(p.next_seq(), 1);
-        assert_eq!(p.next_seq(), 2);
-        assert_eq!(p.next_seq(), 3);
+        assert_eq!(p.next_seq(), LspRequestSeq(1));
+        assert_eq!(p.next_seq(), LspRequestSeq(2));
+        assert_eq!(p.next_seq(), LspRequestSeq(3));
     }
 
     #[test]

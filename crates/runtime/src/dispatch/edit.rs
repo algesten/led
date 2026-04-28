@@ -457,7 +457,7 @@ mod tests {
         assert_eq!(rope_of(&edits, "file.rs").to_string(), "aXbc\n");
         assert_eq!(tabs.open[0].cursor.col, 2);
         assert_eq!(tabs.open[0].cursor.preferred_col, 2);
-        assert_eq!(version_of(&edits, "file.rs"), 1);
+        assert_eq!(version_of(&edits, "file.rs"), led_core::BufferVersion(1));
         assert!(dirty_of(&edits, "file.rs"));
     }
 

@@ -9,7 +9,7 @@
 //! - **Per-buffer parent-dir watches** — open-file external-change
 //!   detection for the docstore reload-or-prompt branch.
 //!
-//! Each registration is keyed by a [`WatcherId`] minted by the
+//! Each registration is keyed by a [`WatchSeq`] minted by the
 //! runtime; the driver internally fans events out to the requesting
 //! id only. The `notify::Watcher` instance is shared across all
 //! registrations on the native side.
@@ -37,15 +37,9 @@ use std::sync::mpsc::{Receiver, Sender};
 
 use imbl::HashMap;
 use led_core::CanonPath;
+pub use led_core::WatchSeq;
 
 // ── ABI ─────────────────────────────────────────────────────────
-
-/// Stable id assigned by the runtime to each registered watch.
-/// Lets one driver service multiple watch intents without coupling
-/// the registrants. Per `EXAMPLE-ARCH.md` G13 (ABI types in driver
-/// core): defined here, never on the consumer side.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct WatcherId(pub u64);
 
 /// Per-event filesystem change kinds, packed into a `u8` bitmask.
 /// `notify` can fire `Created+Modified` within one debounce
@@ -87,7 +81,7 @@ pub enum FileWatchCmd {
     /// descendants. Idempotent: re-issuing the same `(id, path)`
     /// is a no-op.
     Watch {
-        id: WatcherId,
+        id: WatchSeq,
         path: CanonPath,
         recursive: bool,
         /// 0 = no debounce. Otherwise the worker waits this many
@@ -98,7 +92,7 @@ pub enum FileWatchCmd {
         debounce_ms: u32,
     },
     /// Drop a previously-registered watch. Idempotent.
-    Unwatch { id: WatcherId },
+    Unwatch { id: WatchSeq },
 }
 
 /// Driver → runtime events.
@@ -106,7 +100,7 @@ pub enum FileWatchCmd {
 pub enum FileWatchEvent {
     /// One filesystem change, post-debounce + path-filter.
     Changed {
-        id: WatcherId,
+        id: WatchSeq,
         path: CanonPath,
         kinds: ChangeKinds,
     },
@@ -114,7 +108,7 @@ pub enum FileWatchEvent {
     /// watcher running out of fds). Per-id so the runtime can
     /// decide whether to fall back per-registration.
     Failed {
-        id: WatcherId,
+        id: WatchSeq,
         message: String,
     },
 }
@@ -140,8 +134,8 @@ pub enum FileWatchEvent {
 /// pointer copies, idle ticks cache-hit (G14).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct FileWatchState {
-    pub registry: HashMap<WatcherId, Registration>,
-    pub recent_events: HashMap<WatcherId, imbl::Vector<FileWatchEvent>>,
+    pub registry: HashMap<WatchSeq, Registration>,
+    pub recent_events: HashMap<WatchSeq, imbl::Vector<FileWatchEvent>>,
     pub backend: BackendStatus,
 }
 
@@ -158,7 +152,7 @@ impl FileWatchState {
     /// through the same source the watcher writes to means the
     /// `external_reread_targets` memo handles both cases
     /// uniformly.
-    pub fn synthesize_modified(&mut self, id: WatcherId, path: CanonPath) {
+    pub fn synthesize_modified(&mut self, id: WatchSeq, path: CanonPath) {
         let entry = self.recent_events.entry(id).or_default();
         entry.push_back(FileWatchEvent::Changed {
             id,
@@ -197,12 +191,12 @@ pub enum BackendStatus {
 /// events are input-side and *not* emitted into the goldens'
 /// dispatched.snap.
 pub trait Trace: Send + Sync {
-    fn file_watch_event(&self, id: WatcherId, path: &CanonPath, kinds: ChangeKinds);
+    fn file_watch_event(&self, id: WatchSeq, path: &CanonPath, kinds: ChangeKinds);
 }
 
 pub struct NoopTrace;
 impl Trace for NoopTrace {
-    fn file_watch_event(&self, _: WatcherId, _: &CanonPath, _: ChangeKinds) {}
+    fn file_watch_event(&self, _: WatchSeq, _: &CanonPath, _: ChangeKinds) {}
 }
 
 // ── Driver handle ──────────────────────────────────────────────
@@ -304,7 +298,7 @@ mod tests {
         let drv = FileWatchDriver::new(tx_cmd, rx_ev, Arc::new(NoopTrace));
         let mut state = FileWatchState::default();
 
-        let id = WatcherId(7);
+        let id = WatchSeq(7);
         drv.execute(
             [&FileWatchCmd::Watch {
                 id,
@@ -329,7 +323,7 @@ mod tests {
         let (_tx_ev, rx_ev) = mpsc::channel::<FileWatchEvent>();
         let drv = FileWatchDriver::new(tx_cmd, rx_ev, Arc::new(NoopTrace));
         let mut state = FileWatchState::default();
-        let id = WatcherId(3);
+        let id = WatchSeq(3);
         state.registry.insert(
             id,
             Registration {
@@ -352,7 +346,7 @@ mod tests {
         let drv = FileWatchDriver::new(_tx_cmd, rx_ev, Arc::new(NoopTrace));
         let mut state = FileWatchState::default();
 
-        let id = WatcherId(1);
+        let id = WatchSeq(1);
         tx_ev
             .send(FileWatchEvent::Changed {
                 id,
@@ -388,7 +382,7 @@ mod tests {
     #[test]
     fn synthesize_modified_routes_into_recent_events() {
         let mut state = FileWatchState::default();
-        let id = WatcherId(2);
+        let id = WatchSeq(2);
         state.synthesize_modified(id, canon("/y"));
         let queue = state.recent_events.get(&id).unwrap();
         assert_eq!(queue.len(), 1);
@@ -403,8 +397,8 @@ mod tests {
     #[test]
     fn clear_events_drops_all_queued() {
         let mut state = FileWatchState::default();
-        state.synthesize_modified(WatcherId(1), canon("/a"));
-        state.synthesize_modified(WatcherId(2), canon("/b"));
+        state.synthesize_modified(WatchSeq(1), canon("/a"));
+        state.synthesize_modified(WatchSeq(2), canon("/b"));
         assert_eq!(state.recent_events.len(), 2);
         state.clear_events();
         assert!(state.recent_events.is_empty());

@@ -18,7 +18,7 @@ use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use led_core::{CanonPath, PersistedContentHash};
+use led_core::{BufferVersion, CanonPath, ChainId, PersistedContentHash, SavedVersion, ServerId};
 use led_driver_find_file_core::FindFileCmd;
 use led_driver_terminal_core::{Dims, KeyEvent};
 use led_state_syntax::Language;
@@ -31,8 +31,13 @@ pub trait Trace: Send + Sync {
     fn resize(&self, dims: Dims);
     fn file_load_start(&self, path: &CanonPath);
     fn file_load_done(&self, path: &CanonPath, result: &Result<Arc<Rope>, String>);
-    fn file_save_start(&self, path: &CanonPath, version: u64);
-    fn file_save_done(&self, path: &CanonPath, version: u64, result: &Result<(), String>);
+    fn file_save_start(&self, path: &CanonPath, version: SavedVersion);
+    fn file_save_done(
+        &self,
+        path: &CanonPath,
+        version: SavedVersion,
+        result: &Result<(), String>,
+    );
     fn file_save_as_start(&self, from: &CanonPath, to: &CanonPath);
     fn file_save_as_done(&self, from: &CanonPath, to: &CanonPath, result: &Result<(), String>);
     fn clipboard_read_start(&self);
@@ -72,21 +77,21 @@ pub trait Trace: Send + Sync {
     /// off to the tree-sitter worker. Not in legacy's
     /// dispatched.snap (M15 rewrite-only), but follows the same
     /// `<Command>\t<args>` shape.
-    fn syntax_parse_start(&self, path: &CanonPath, version: u64, language: Language);
+    fn syntax_parse_start(&self, path: &CanonPath, version: BufferVersion, language: Language);
     /// Completion back from the worker. Not currently serialized
     /// to dispatched.snap — kept for symmetry + future debug traces.
-    fn syntax_parse_done(&self, path: &CanonPath, version: u64, ok: bool);
+    fn syntax_parse_done(&self, path: &CanonPath, version: BufferVersion, ok: bool);
     /// An LSP language server subprocess started successfully
     /// (named after its `Language`). Emitted once per language
     /// per session. Legacy golden name: `LspServerStarted`.
-    fn lsp_server_started(&self, server: &str);
+    fn lsp_server_started(&self, server: &ServerId);
     /// Outbound JSON-RPC request to a language server. Emitted
     /// once per `LspSend\tserver=… kind=request method=… id=…`
     /// line. `path_uri` (when set) is the `textDocument.uri`
     /// the method targets — appended as `path=<uri>`.
     fn lsp_send_request(
         &self,
-        server: &str,
+        server: &ServerId,
         method: &str,
         id: i64,
         path_uri: Option<&str>,
@@ -97,20 +102,20 @@ pub trait Trace: Send + Sync {
     /// `workspace/didChangeConfiguration`, `exit`).
     fn lsp_send_notification(
         &self,
-        server: &str,
+        server: &ServerId,
         method: &str,
         path_uri: Option<&str>,
         version: Option<i32>,
     );
     /// Inbound JSON-RPC response. `id` correlates back to the
     /// originating `lsp_send_request`.
-    fn lsp_recv_response(&self, server: &str, id: i64);
+    fn lsp_recv_response(&self, server: &ServerId, id: i64);
     /// Inbound JSON-RPC notification from the server.
-    fn lsp_recv_notification(&self, server: &str, method: &str);
+    fn lsp_recv_notification(&self, server: &ServerId, method: &str);
     /// Inbound JSON-RPC request from the server (server-
     /// initiated). The transport auto-acks so a separate
     /// `lsp_send_response` line isn't emitted.
-    fn lsp_recv_request(&self, server: &str, method: &str, id: i64);
+    fn lsp_recv_request(&self, server: &ServerId, method: &str, id: i64);
     /// Runtime dispatched a git workspace scan. Emits as
     /// `GitScan\troot=<p>` in `dispatched.snap`. Fires once per
     /// `GitCmd::ScanFiles` — the git driver is stateless about
@@ -151,7 +156,7 @@ pub trait Trace: Send + Sync {
     /// the runtime ships newly-finalised undo groups to SQLite.
     /// Legacy dispatched.snap line: `WorkspaceFlushUndo\tpath=<p>
     /// chain=<id>`.
-    fn workspace_flush_undo(&self, path: &CanonPath, chain_id: &str);
+    fn workspace_flush_undo(&self, path: &CanonPath, chain_id: &ChainId);
     /// Emitted after a SaveAs completes: legacy re-opens the source
     /// buffer's on-disk file to refresh its pristine baseline, with
     /// `create_if_missing=false` because the file is known to exist
@@ -178,7 +183,7 @@ pub trait Trace: Send + Sync {
     /// scriptably); the line is rewrite-only and serialises as
     /// `LspDidChangeWatchedFiles\tserver=<name> changes=<n>` in
     /// `dispatched.snap`.
-    fn lsp_did_change_watched_files(&self, server: &str, n_changes: usize);
+    fn lsp_did_change_watched_files(&self, server: &ServerId, n_changes: usize);
     fn render_tick(&self);
 }
 
@@ -223,7 +228,7 @@ impl SharedTrace {
     pub fn workspace_clear_undo(&self, path: &CanonPath) {
         self.0.workspace_clear_undo(path);
     }
-    pub fn workspace_flush_undo(&self, path: &CanonPath, chain_id: &str) {
+    pub fn workspace_flush_undo(&self, path: &CanonPath, chain_id: &ChainId) {
         self.0.workspace_flush_undo(path, chain_id);
     }
     pub fn file_search_start(
@@ -239,7 +244,7 @@ impl SharedTrace {
     pub fn file_reopen_existing(&self, path: &CanonPath) {
         self.0.file_reopen_existing(path);
     }
-    pub fn lsp_did_change_watched_files(&self, server: &str, n_changes: usize) {
+    pub fn lsp_did_change_watched_files(&self, server: &ServerId, n_changes: usize) {
         self.0.lsp_did_change_watched_files(server, n_changes);
     }
 }
@@ -277,10 +282,10 @@ impl Trace for FileTrace {
         ));
     }
     fn file_load_done(&self, _: &CanonPath, _: &Result<Arc<Rope>, String>) {}
-    fn file_save_start(&self, path: &CanonPath, _version: u64) {
+    fn file_save_start(&self, path: &CanonPath, _version: SavedVersion) {
         self.write_line(&format!("FileSave\tpath={}", self.format_path(path)));
     }
-    fn file_save_done(&self, _: &CanonPath, _: u64, _: &Result<(), String>) {}
+    fn file_save_done(&self, _: &CanonPath, _: SavedVersion, _: &Result<(), String>) {}
     fn file_save_as_start(&self, from: &CanonPath, to: &CanonPath) {
         self.write_line(&format!(
             "FileSaveAs\tpath={} new_path={}",
@@ -354,9 +359,9 @@ impl Trace for FileTrace {
     // fire on every buffer load and keystroke, drowning the signal
     // of what user-level intent happened. Keeping the method as a
     // no-op preserves the trait for future debug traces / assertions.
-    fn syntax_parse_start(&self, _: &CanonPath, _: u64, _: Language) {}
-    fn syntax_parse_done(&self, _: &CanonPath, _: u64, _: bool) {}
-    fn lsp_server_started(&self, _server: &str) {
+    fn syntax_parse_start(&self, _: &CanonPath, _: BufferVersion, _: Language) {}
+    fn syntax_parse_done(&self, _: &CanonPath, _: BufferVersion, _: bool) {}
+    fn lsp_server_started(&self, _server: &ServerId) {
         // Legacy goldens don't surface this — the wire-level
         // `LspSend method=initialize` line stamped by
         // `lsp_send_request` is the canonical "server started"
@@ -365,7 +370,7 @@ impl Trace for FileTrace {
     }
     fn lsp_send_request(
         &self,
-        server: &str,
+        server: &ServerId,
         method: &str,
         id: i64,
         path_uri: Option<&str>,
@@ -380,7 +385,7 @@ impl Trace for FileTrace {
     }
     fn lsp_send_notification(
         &self,
-        server: &str,
+        server: &ServerId,
         method: &str,
         path_uri: Option<&str>,
         version: Option<i32>,
@@ -396,17 +401,17 @@ impl Trace for FileTrace {
         }
         self.write_line(&line);
     }
-    fn lsp_recv_response(&self, server: &str, id: i64) {
+    fn lsp_recv_response(&self, server: &ServerId, id: i64) {
         self.write_line(&format!(
             "LspRecv\tserver={server} kind=response id={id}",
         ));
     }
-    fn lsp_recv_notification(&self, server: &str, method: &str) {
+    fn lsp_recv_notification(&self, server: &ServerId, method: &str) {
         self.write_line(&format!(
             "LspRecv\tserver={server} kind=notification method={method}",
         ));
     }
-    fn lsp_recv_request(&self, server: &str, method: &str, id: i64) {
+    fn lsp_recv_request(&self, server: &ServerId, method: &str, id: i64) {
         self.write_line(&format!(
             "LspRecv\tserver={server} kind=request method={method} id={id}",
         ));
@@ -446,11 +451,11 @@ impl Trace for FileTrace {
             self.format_path(path)
         ));
     }
-    fn workspace_flush_undo(&self, path: &CanonPath, chain_id: &str) {
+    fn workspace_flush_undo(&self, path: &CanonPath, chain_id: &ChainId) {
         self.write_line(&format!(
             "WorkspaceFlushUndo\tpath={} chain={}",
             self.format_path(path),
-            chain_id,
+            chain_id.as_str(),
         ));
     }
     fn file_reopen_existing(&self, path: &CanonPath) {
@@ -471,7 +476,7 @@ impl Trace for FileTrace {
             self.format_path(path)
         ));
     }
-    fn lsp_did_change_watched_files(&self, server: &str, n_changes: usize) {
+    fn lsp_did_change_watched_files(&self, server: &ServerId, n_changes: usize) {
         self.write_line(&format!(
             "LspDidChangeWatchedFiles\tserver={server} changes={n_changes}",
         ));
@@ -504,8 +509,8 @@ impl Trace for NoopTrace {
     fn resize(&self, _: Dims) {}
     fn file_load_start(&self, _: &CanonPath) {}
     fn file_load_done(&self, _: &CanonPath, _: &Result<Arc<Rope>, String>) {}
-    fn file_save_start(&self, _: &CanonPath, _: u64) {}
-    fn file_save_done(&self, _: &CanonPath, _: u64, _: &Result<(), String>) {}
+    fn file_save_start(&self, _: &CanonPath, _: SavedVersion) {}
+    fn file_save_done(&self, _: &CanonPath, _: SavedVersion, _: &Result<(), String>) {}
     fn file_save_as_start(&self, _: &CanonPath, _: &CanonPath) {}
     fn file_save_as_done(&self, _: &CanonPath, _: &CanonPath, _: &Result<(), String>) {}
     fn clipboard_read_start(&self) {}
@@ -525,21 +530,21 @@ impl Trace for NoopTrace {
     ) {
     }
     fn file_search_single_replace_start(&self, _: &CanonPath, _: usize) {}
-    fn syntax_parse_start(&self, _: &CanonPath, _: u64, _: Language) {}
-    fn syntax_parse_done(&self, _: &CanonPath, _: u64, _: bool) {}
-    fn lsp_server_started(&self, _: &str) {}
-    fn lsp_send_request(&self, _: &str, _: &str, _: i64, _: Option<&str>) {}
+    fn syntax_parse_start(&self, _: &CanonPath, _: BufferVersion, _: Language) {}
+    fn syntax_parse_done(&self, _: &CanonPath, _: BufferVersion, _: bool) {}
+    fn lsp_server_started(&self, _: &ServerId) {}
+    fn lsp_send_request(&self, _: &ServerId, _: &str, _: i64, _: Option<&str>) {}
     fn lsp_send_notification(
         &self,
-        _: &str,
+        _: &ServerId,
         _: &str,
         _: Option<&str>,
         _: Option<i32>,
     ) {
     }
-    fn lsp_recv_response(&self, _: &str, _: i64) {}
-    fn lsp_recv_notification(&self, _: &str, _: &str) {}
-    fn lsp_recv_request(&self, _: &str, _: &str, _: i64) {}
+    fn lsp_recv_response(&self, _: &ServerId, _: i64) {}
+    fn lsp_recv_notification(&self, _: &ServerId, _: &str) {}
+    fn lsp_recv_request(&self, _: &ServerId, _: &str, _: i64) {}
     fn git_scan_start(&self, _: &CanonPath) {}
     fn session_init_start(&self, _: &CanonPath) {}
     fn session_save_start(&self) {}
@@ -549,11 +554,11 @@ impl Trace for NoopTrace {
     fn find_file_start(&self, _: &FindFileCmd) {}
     fn find_file_done(&self, _: &CanonPath, _: &str, _: bool) {}
     fn workspace_clear_undo(&self, _: &CanonPath) {}
-    fn workspace_flush_undo(&self, _: &CanonPath, _: &str) {}
+    fn workspace_flush_undo(&self, _: &CanonPath, _: &ChainId) {}
     fn file_reopen_existing(&self, _: &CanonPath) {}
     fn file_reread_start(&self, _: &CanonPath) {}
     fn workspace_check_sync(&self, _: &CanonPath) {}
-    fn lsp_did_change_watched_files(&self, _: &str, _: usize) {}
+    fn lsp_did_change_watched_files(&self, _: &ServerId, _: usize) {}
     fn render_tick(&self) {}
 }
 

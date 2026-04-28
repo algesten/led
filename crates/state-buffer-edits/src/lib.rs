@@ -17,7 +17,7 @@
 //! one for just the dirty flags — consumed by tab_bar_model).
 
 use imbl::{HashMap, HashSet};
-use led_core::CanonPath;
+use led_core::{BufferVersion, CanonPath, EditSeq, SavedVersion};
 use ropey::Rope;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
@@ -45,8 +45,15 @@ impl SeqGen {
     /// Return the next seq to assign (post-increment). Seq 0 is
     /// reserved for "unstamped / open group," so the first real
     /// seq is 1.
-    pub fn next(&self) -> u64 {
-        self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1
+    pub fn next(&self) -> EditSeq {
+        EditSeq(self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1)
+    }
+
+    /// Peek the current seq without bumping the counter. Used by
+    /// the file-search overlay to record an undo floor at the
+    /// moment the overlay opens.
+    pub fn peek(&self) -> EditSeq {
+        EditSeq(self.0.load(std::sync::atomic::Ordering::Relaxed))
     }
 }
 
@@ -75,14 +82,14 @@ pub struct EditedBuffer {
     /// (a) a cheap input-change key for memos that don't need the
     /// rope itself (dirty badge, status line) and (b) the anchor
     /// future rebase queries will translate coordinates against.
-    pub version: u64,
+    pub version: BufferVersion,
     /// The `version` value last persisted to disk. Starts at 0 —
     /// matching `version` on a fresh load, so a just-loaded buffer
     /// reports `dirty() == false`. Advances on every successful
     /// save completion. A save that races behind a newer edit does
     /// not clear the dirty flag, because `version > saved_version`
     /// still holds.
-    pub saved_version: u64,
+    pub saved_version: SavedVersion,
     /// Hash of the bytes that are (or were last known to be) on
     /// disk for this path. Set at load completion (the rope at
     /// version 0 IS the disk content) and refreshed at save
@@ -130,8 +137,8 @@ impl EditedBuffer {
             led_core::EphemeralContentHash::of_rope(&rope).persist();
         Self {
             rope,
-            version: 0,
-            saved_version: 0,
+            version: BufferVersion::default(),
+            saved_version: SavedVersion::default(),
             disk_content_hash,
             history: History::with_seq_gen(seq_gen),
         }
@@ -241,8 +248,8 @@ mod tests {
     fn fresh_is_clean() {
         let rope = Arc::new(Rope::from_str("hello"));
         let eb = EditedBuffer::fresh(rope.clone());
-        assert_eq!(eb.version, 0);
-        assert_eq!(eb.saved_version, 0);
+        assert_eq!(eb.version, BufferVersion(0));
+        assert_eq!(eb.saved_version, SavedVersion(0));
         assert!(!eb.dirty());
         assert!(Arc::ptr_eq(&eb.rope, &rope));
     }
@@ -270,8 +277,8 @@ mod tests {
         // clears the flag. version stays a memo input, never a
         // dirty signal.
         let mut eb = EditedBuffer::fresh(Arc::new(Rope::from_str("x")));
-        eb.version = 4;
-        eb.saved_version = 2;
+        eb.version = BufferVersion(4);
+        eb.saved_version = SavedVersion(2);
         // Rope still matches disk anchor → clean despite versions.
         assert!(!eb.dirty());
     }

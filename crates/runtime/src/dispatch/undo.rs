@@ -4,7 +4,7 @@
 //! buffer's history. Cursor is restored to the captured bookend
 //! (cursor_before for undo, cursor_after for redo).
 
-use led_core::CanonPath;
+use led_core::{CanonPath, EditSeq, SavedVersion};
 use led_state_buffer_edits::{BufferEdits, EditOp};
 use led_state_file_search::{FileSearchSelection, FileSearchState};
 use led_state_tabs::Tabs;
@@ -73,7 +73,7 @@ pub(super) fn undo_global(
     tabs: &mut Tabs,
     edits: &mut BufferEdits,
     file_search: Option<&mut FileSearchState>,
-    floor: u64,
+    floor: EditSeq,
     body_rows: usize,
 ) {
     let Some(target_path) = pick_max_past_seq(edits, floor) else {
@@ -109,7 +109,7 @@ pub(super) fn undo_global(
             .as_ref()
             .is_some_and(|m| m.disk_write);
         if disk_write {
-            eb.saved_version = eb.version;
+            eb.saved_version = SavedVersion(eb.version.0);
             eb.disk_content_hash =
                 led_core::EphemeralContentHash::of_rope(&eb.rope).persist();
         }
@@ -186,7 +186,7 @@ pub(super) fn redo_global(
     tabs: &mut Tabs,
     edits: &mut BufferEdits,
     file_search: Option<&mut FileSearchState>,
-    floor: u64,
+    floor: EditSeq,
     body_rows: usize,
 ) {
     let Some(target_path) = pick_max_future_seq(edits, floor) else {
@@ -217,7 +217,7 @@ pub(super) fn redo_global(
             .as_ref()
             .is_some_and(|m| m.disk_write);
         if disk_write {
-            eb.saved_version = eb.version;
+            eb.saved_version = SavedVersion(eb.version.0);
             eb.disk_content_hash =
                 led_core::EphemeralContentHash::of_rope(&eb.rope).persist();
         }
@@ -269,7 +269,7 @@ pub(super) fn redo_global(
     }
 }
 
-fn pick_max_past_seq(edits: &BufferEdits, floor: u64) -> Option<CanonPath> {
+fn pick_max_past_seq(edits: &BufferEdits, floor: EditSeq) -> Option<CanonPath> {
     edits
         .buffers
         .iter()
@@ -279,7 +279,7 @@ fn pick_max_past_seq(edits: &BufferEdits, floor: u64) -> Option<CanonPath> {
         .map(|(p, _)| p)
 }
 
-fn pick_max_future_seq(edits: &BufferEdits, floor: u64) -> Option<CanonPath> {
+fn pick_max_future_seq(edits: &BufferEdits, floor: EditSeq) -> Option<CanonPath> {
     edits
         .buffers
         .iter()

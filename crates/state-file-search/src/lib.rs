@@ -9,7 +9,7 @@
 //! See `docs/spec/search.md` § "File-search overlay" for legacy
 //! semantics.
 
-use led_core::{CanonPath, TextInput};
+use led_core::{CanonPath, EditSeq, TextInput};
 
 // Hit / group types are the driver ABI — re-exported so the overlay
 // state + renderer + dispatch use one shape end-to-end, matching the
@@ -74,7 +74,7 @@ pub struct FileSearchState {
     /// — the user shouldn't be able to undo buffer edits made
     /// before entering Ctrl+F. `0` means "no floor" (e.g. freshly
     /// constructed, or no edits had happened yet).
-    pub overlay_open_seq: u64,
+    pub overlay_open_seq: EditSeq,
 
     /// Per-hit replacement state, indexed parallel to `flat_hits`.
     /// `Some(entry)` means that hit has been replaced (Right-arrow);
