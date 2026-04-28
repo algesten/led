@@ -363,7 +363,12 @@ fn collect_git_positions(
         // fallback — a dirty tracked file typically carries both.
         let line_statuses = git.line_statuses.get(path);
         let matching: Vec<&led_core::git::LineStatus> = line_statuses
-            .map(|arc| arc.iter().filter(|ls| cats.contains(&ls.category)).collect())
+            .map(|gls| {
+                gls.statuses
+                    .iter()
+                    .filter(|ls| cats.contains(&ls.category))
+                    .collect()
+            })
             .unwrap_or_default();
         if matching.is_empty() {
             // File-level fallback: untracked/staged-new have no
@@ -826,10 +831,13 @@ mod tests {
         git.file_statuses.insert(canon.clone(), cats);
         git.line_statuses.insert(
             canon.clone(),
-            Arc::new(vec![led_core::git::LineStatus {
-                category: IssueCategory::Unstaged,
-                rows: 2..3,
-            }]),
+            led_state_git::GitLineStatuses {
+                anchor_hash: led_core::PersistedContentHash::default(),
+                statuses: Arc::new(vec![led_core::git::LineStatus {
+                    category: IssueCategory::Unstaged,
+                    rows: 2..3,
+                }]),
+            },
         );
         let outcome = compute_navigation(&tabs, &edits, &diags, &git, true).unwrap();
         assert_eq!(outcome.category, IssueCategory::Unstaged);

@@ -23,6 +23,9 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 
 pub mod history;
+pub mod row_delta;
+
+pub use row_delta::{RowDelta, RowShift};
 pub use history::{EditGroup, EditOp, FileSearchMark, History, rebase_char_index};
 
 /// Session-global edit sequence counter shared by every
@@ -117,6 +120,38 @@ impl EditedBuffer {
     pub fn dirty(&self) -> bool {
         !led_core::EphemeralContentHash::of_rope(&self.rope)
             .matches(self.disk_content_hash)
+    }
+
+    /// Sparse line-level delta from the buffer state stamped at
+    /// `anchor_hash` to the current rope. Returns `None` when no
+    /// save-point in `history` matches that hash.
+    ///
+    /// Stamped marker sources (LSP diagnostics, git line statuses)
+    /// pair their payload with the buffer hash they were computed
+    /// against; renderers consult this delta to filter / translate
+    /// markers per row. The 99% idle case (no edits since the
+    /// stamp) returns a `RowDelta` with empty `touched` and
+    /// `shifts`, so per-row lookups stay O(1).
+    pub fn row_delta_for(
+        &self,
+        anchor_hash: led_core::PersistedContentHash,
+    ) -> Option<row_delta::RowDelta> {
+        // Fast path: the rope still holds the stamped content. No
+        // edits since anchor → all rows untouched, no shifts.
+        let current = led_core::EphemeralContentHash::of_rope(&self.rope);
+        if current.matches(anchor_hash) {
+            return Some(row_delta::RowDelta {
+                current_version: self.version,
+                ..Default::default()
+            });
+        }
+        let save_idx = self.history.find_save_point(anchor_hash)?;
+        Some(row_delta::build_row_delta(
+            &self.history,
+            save_idx,
+            &self.rope,
+            self.version,
+        ))
     }
 
     /// Fresh, clean seed for a buffer whose disk rope just arrived.

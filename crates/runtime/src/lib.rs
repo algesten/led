@@ -1468,7 +1468,27 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
                     if statuses.is_empty() {
                         git.line_statuses.remove(&path);
                     } else {
-                        git.line_statuses.insert(path, Arc::new(statuses));
+                        // Anchor against the buffer's current
+                        // disk-content hash. Git scans against the
+                        // worktree, so the disk hash is what these
+                        // markers describe. If the buffer hasn't
+                        // been loaded yet, fall back to the default
+                        // hash — the row-delta lookup will fast-
+                        // path through `History::find_save_point`
+                        // (no save-point matches → no row-delta →
+                        // markers hide until next scan).
+                        let anchor_hash = edits
+                            .buffers
+                            .get(&path)
+                            .map(|eb| eb.disk_content_hash)
+                            .unwrap_or_default();
+                        git.line_statuses.insert(
+                            path,
+                            led_state_git::GitLineStatuses {
+                                anchor_hash,
+                                statuses: Arc::new(statuses),
+                            },
+                        );
                     }
                 }
             }

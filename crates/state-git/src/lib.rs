@@ -26,7 +26,22 @@ use std::sync::Arc;
 
 use imbl::{HashMap, HashSet};
 use led_core::git::LineStatus;
-use led_core::{CanonPath, IssueCategory};
+use led_core::{CanonPath, IssueCategory, PersistedContentHash};
+
+/// Per-path line-status payload plus the buffer hash the scan
+/// was computed against.
+///
+/// The runtime stamps `anchor_hash` with the buffer's
+/// `disk_content_hash` at the time the [`GitEvent::LineStatuses`]
+/// event arrives (git scans against the worktree, so disk hash
+/// IS what the markers describe). Renderers consult
+/// `EditedBuffer::row_delta_for(anchor_hash)` to invalidate /
+/// translate marker rows that have been edited since.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct GitLineStatuses {
+    pub anchor_hash: PersistedContentHash,
+    pub statuses: Arc<Vec<LineStatus>>,
+}
 
 /// Full git state surface in one atom. `imbl` collections so
 /// `Clone` is a pointer copy — the drv memos that project over
@@ -40,11 +55,11 @@ pub struct GitState {
     /// Keyed by canonical path so browser-row matching on file
     /// entries is trivial.
     pub file_statuses: HashMap<CanonPath, HashSet<IssueCategory>>,
-    /// Per-buffer line-level statuses. `Arc`-wrapped so the gutter
-    /// memo can pointer-equal-compare across ticks; replacing a
-    /// path's statuses produces a new `Arc` and invalidates
-    /// downstream memos, unchanged paths keep the same allocation.
-    pub line_statuses: HashMap<CanonPath, Arc<Vec<LineStatus>>>,
+    /// Per-buffer line-level statuses. `GitLineStatuses` carries
+    /// both the `Arc<Vec<LineStatus>>` payload and the buffer hash
+    /// the scan was computed against, so renderers can do
+    /// per-line invalidation against the current buffer state.
+    pub line_statuses: HashMap<CanonPath, GitLineStatuses>,
 }
 
 #[cfg(test)]
@@ -97,7 +112,13 @@ mod tests {
             category: IssueCategory::Unstaged,
             rows: 3..5,
         }];
-        s.line_statuses.insert(p.clone(), Arc::new(statuses));
+        s.line_statuses.insert(
+            p.clone(),
+            GitLineStatuses {
+                anchor_hash: PersistedContentHash::default(),
+                statuses: Arc::new(statuses),
+            },
+        );
         assert!(s.line_statuses.get(&p).is_some());
         s.line_statuses.remove(&p);
         assert!(s.line_statuses.get(&p).is_none());

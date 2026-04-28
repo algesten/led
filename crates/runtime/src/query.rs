@@ -253,7 +253,7 @@ pub struct GitStateInput<'a> {
     pub file_statuses:
         &'a imbl::HashMap<CanonPath, imbl::HashSet<led_core::IssueCategory>>,
     pub line_statuses:
-        &'a imbl::HashMap<CanonPath, Arc<Vec<led_core::git::LineStatus>>>,
+        &'a imbl::HashMap<CanonPath, led_state_git::GitLineStatuses>,
 }
 
 impl<'a> GitStateInput<'a> {
@@ -1248,18 +1248,24 @@ pub fn body_model<'a>(inputs: BodyInputs<'a>) -> BodyModel {
     if let Some(eb) = edits.buffers.get(&tab.path) {
         let highlight = active_body_match(&overlays, &tab.path, tab.scroll, area, &eb.rope);
         let spans = rebased_line_spans(syntax, edits, tab.path.clone());
-        // No-smear rule: diagnostics render only when their
-        // stamped hash matches the buffer's current content.
-        // Ingestion stamps at offer-time with the then-current
-        // hash, so a mismatch means the user has edited since.
-        let current_hash =
-            led_core::EphemeralContentHash::of_rope(&eb.rope).persist();
-        let diags = diagnostics
-            .by_path
-            .get(&tab.path)
-            .filter(|bd| bd.hash == current_hash)
-            .map(|bd| bd.diagnostics.as_slice());
-        let line_statuses = git.line_statuses.get(&tab.path).map(|v| v.as_slice());
+        // Diagnostics + git markers carry an anchor hash they were
+        // computed against. Renderer translates each marker's
+        // anchor-row to a current-row via `eb.row_delta_for(anchor)`,
+        // hiding markers whose anchor row was touched / deleted
+        // since stamp. The 99% case (no edits since stamp) returns
+        // an empty `RowDelta` and the lookup is O(1).
+        let bd = diagnostics.by_path.get(&tab.path);
+        let diag_row_delta = bd.and_then(|bd| eb.row_delta_for(bd.hash));
+        let diags = if diag_row_delta.is_some() {
+            bd.map(|bd| bd.diagnostics.as_slice())
+        } else {
+            None
+        };
+        let gls = git.line_statuses.get(&tab.path);
+        let git_row_delta = gls.and_then(|gls| eb.row_delta_for(gls.anchor_hash));
+        let line_statuses = gls
+            .filter(|_| git_row_delta.is_some())
+            .map(|gls| gls.statuses.as_slice());
         return render_content(RenderContentArgs {
             rope: &eb.rope,
             cursor: tab.cursor,
@@ -1268,7 +1274,9 @@ pub fn body_model<'a>(inputs: BodyInputs<'a>) -> BodyModel {
             match_highlight: highlight,
             rebased_tokens: spans.as_deref().map(|v: &Vec<TokenSpan>| v.as_slice()),
             diagnostics: diags,
+            diag_row_delta: diag_row_delta.as_ref(),
             git_line_statuses: line_statuses,
+            git_row_delta: git_row_delta.as_ref(),
         });
     }
     // No BufferEdits entry yet — the load hasn't been seeded
@@ -1285,7 +1293,12 @@ pub fn body_model<'a>(inputs: BodyInputs<'a>) -> BodyModel {
         None | Some(LoadState::Pending) | Some(LoadState::Error(_)) => &empty_rope,
     };
     let highlight = active_body_match(&overlays, &tab.path, tab.scroll, area, rope_ref);
-    let line_statuses = git.line_statuses.get(&tab.path).map(|v| v.as_slice());
+    // No EditedBuffer entry yet → no row_delta. The buffer hasn't
+    // accepted any edits, so anchor coords == current coords.
+    let line_statuses = git
+        .line_statuses
+        .get(&tab.path)
+        .map(|gls| gls.statuses.as_slice());
     render_content(RenderContentArgs {
         rope: rope_ref,
         cursor: tab.cursor,
@@ -1294,7 +1307,9 @@ pub fn body_model<'a>(inputs: BodyInputs<'a>) -> BodyModel {
         match_highlight: highlight,
         rebased_tokens: None,
         diagnostics: None,
+        diag_row_delta: None,
         git_line_statuses: line_statuses,
+        git_row_delta: None,
     })
 }
 
@@ -1445,7 +1460,17 @@ struct RenderContentArgs<'a> {
     match_highlight: Option<led_driver_terminal_core::BodyMatch>,
     rebased_tokens: Option<&'a [TokenSpan]>,
     diagnostics: Option<&'a [Diagnostic]>,
+    /// Sparse line-level invalidation for diagnostics. When set,
+    /// the renderer translates each diagnostic's anchor-row to a
+    /// current-row via `current_for_anchor`, dropping any whose
+    /// anchor row was touched / deleted since the diagnostic was
+    /// stamped. `None` means "no translation needed" (anchor
+    /// matched current verbatim, the fast path).
+    diag_row_delta: Option<&'a led_state_buffer_edits::RowDelta>,
     git_line_statuses: Option<&'a [led_core::git::LineStatus]>,
+    /// Same as `diag_row_delta` but anchored against the buffer's
+    /// disk-content hash at git-scan time.
+    git_row_delta: Option<&'a led_state_buffer_edits::RowDelta>,
 }
 
 fn render_content(args: RenderContentArgs<'_>) -> BodyModel {
@@ -1460,7 +1485,9 @@ fn render_content(args: RenderContentArgs<'_>) -> BodyModel {
         match_highlight,
         rebased_tokens,
         diagnostics,
+        diag_row_delta,
         git_line_statuses,
+        git_row_delta,
     } = args;
 
     let body_rows = area.rows as usize;
@@ -1549,7 +1576,16 @@ fn render_content(args: RenderContentArgs<'_>) -> BodyModel {
             })
             .unwrap_or_default();
         let (gutter_diag, row_diagnostics) = diagnostics
-            .map(|diags| diagnostics_for_sub_line(diags, ln, col_start, col_end, content_cols))
+            .map(|diags| {
+                diagnostics_for_sub_line(
+                    diags,
+                    diag_row_delta,
+                    ln,
+                    col_start,
+                    col_end,
+                    content_cols,
+                )
+            })
             .unwrap_or_default();
         // Merged gutter category (M19 D7): the highest-precedence
         // `IssueCategory` for the gutter bar (git / PR only). Only
@@ -1557,7 +1593,7 @@ fn render_content(args: RenderContentArgs<'_>) -> BodyModel {
         // legacy's "col 1 marker on chunk 0".
         let is_first_sub = sub == SubLine(0);
         let gutter_category = if is_first_sub {
-            merged_gutter_category(git_line_statuses, ln)
+            merged_gutter_category(git_line_statuses, git_row_delta, ln)
         } else {
             None
         };
@@ -1596,6 +1632,7 @@ fn render_content(args: RenderContentArgs<'_>) -> BodyModel {
 /// Severity ordering for the gutter: Error > Warning > Info > Hint.
 fn diagnostics_for_sub_line(
     diags: &[Diagnostic],
+    row_delta: Option<&led_state_buffer_edits::RowDelta>,
     line_num: usize,
     sub_col_start: usize,
     sub_col_end: usize,
@@ -1606,8 +1643,19 @@ fn diagnostics_for_sub_line(
 ) {
     let mut gutter: Option<DiagnosticSeverity> = None;
     let mut out = Vec::new();
+    // Translate the current-coordinate `line_num` back to its
+    // anchor-coordinate row. Diagnostics' `start_line` / `end_line`
+    // are stamped in anchor coordinates; we filter the entire row
+    // out if the anchor row was touched / deleted (no marker survives).
+    let anchor_line = match row_delta {
+        Some(delta) => match delta.anchor_for_current(line_num) {
+            Some(r) => r,
+            None => return (None, Vec::new()),
+        },
+        None => line_num,
+    };
     for d in diags {
-        if line_num < d.start_line || line_num > d.end_line {
+        if anchor_line < d.start_line || anchor_line > d.end_line {
             continue;
         }
         // Legacy filters Info / Hint out of both gutter dots and
@@ -1627,8 +1675,10 @@ fn diagnostics_for_sub_line(
             None => d.severity,
         });
         // Diagnostic column range ON THIS LOGICAL LINE.
-        let line_col_start = if line_num == d.start_line { d.start_col } else { 0 };
-        let line_col_end = if line_num == d.end_line {
+        // `d.start_line` / `d.end_line` are in anchor coords;
+        // compare against the row we translated above.
+        let line_col_start = if anchor_line == d.start_line { d.start_col } else { 0 };
+        let line_col_end = if anchor_line == d.end_line {
             d.end_col
         } else {
             sub_col_end // clamped to sub-line end; spans run off visually
@@ -1667,9 +1717,20 @@ fn diagnostics_for_sub_line(
 /// `resolve_display`) tie-break across all categories.
 fn merged_gutter_category(
     line_statuses: Option<&[led_core::git::LineStatus]>,
+    row_delta: Option<&led_state_buffer_edits::RowDelta>,
     row: usize,
 ) -> Option<led_core::IssueCategory> {
-    line_statuses.and_then(|s| led_core::git::best_category_at(s, row))
+    let statuses = line_statuses?;
+    // Translate the current-coordinate `row` back to its
+    // anchor-coordinate row before looking up. `None` means the
+    // row was touched / deleted since the marker batch was
+    // stamped — suppress the gutter glyph. When no delta is
+    // present (fast path), current row IS anchor row.
+    let anchor_row = match row_delta {
+        Some(delta) => delta.anchor_for_current(row)?,
+        None => row,
+    };
+    led_core::git::best_category_at(statuses, anchor_row)
 }
 
 fn higher(a: DiagnosticSeverity, b: DiagnosticSeverity) -> DiagnosticSeverity {
@@ -4045,7 +4106,7 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
             category: IssueCategory::Unstaged,
             rows: 0..1,
         }];
-        let cat = merged_gutter_category(Some(&statuses), 0);
+        let cat = merged_gutter_category(Some(&statuses), None, 0);
         assert_eq!(cat, Some(IssueCategory::Unstaged));
     }
 
@@ -4053,9 +4114,9 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
     fn merged_gutter_falls_back_to_none_without_git_status() {
         // No git line status on the row → no bar, regardless of
         // any LSP severity that may live there.
-        assert_eq!(merged_gutter_category(None, 0), None);
+        assert_eq!(merged_gutter_category(None, None, 0), None);
         let statuses: Vec<led_core::git::LineStatus> = Vec::new();
-        assert_eq!(merged_gutter_category(Some(&statuses), 0), None);
+        assert_eq!(merged_gutter_category(Some(&statuses), None, 0), None);
     }
 
     #[test]
@@ -4077,10 +4138,13 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
         let mut git = led_state_git::GitState::default();
         git.line_statuses.insert(
             path.clone(),
-            Arc::new(vec![LineStatus {
-                category: IssueCategory::Unstaged,
-                rows: 1..2,
-            }]),
+            led_state_git::GitLineStatuses {
+                anchor_hash: led_core::PersistedContentHash::default(),
+                statuses: Arc::new(vec![LineStatus {
+                    category: IssueCategory::Unstaged,
+                    rows: 1..2,
+                }]),
+            },
         );
         let alerts = AlertState::default();
         let browser = BrowserUi {
