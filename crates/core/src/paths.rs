@@ -14,6 +14,7 @@
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 /// A path as supplied by the user. Never used as an internal map key.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord, drv::Input)]
@@ -36,7 +37,7 @@ impl UserPath {
     /// canonicalization fails (e.g. the file does not exist yet).
     pub fn canonicalize(&self) -> CanonPath {
         let canonical = std::fs::canonicalize(&self.0).unwrap_or_else(|_| self.0.clone());
-        CanonPath(canonical)
+        CanonPath(Arc::new(canonical))
     }
 
     pub fn display(&self) -> std::path::Display<'_> {
@@ -89,7 +90,7 @@ impl UserPath {
         PathChain {
             user: self.clone(),
             intermediates,
-            resolved: CanonPath(resolved),
+            resolved: CanonPath(Arc::new(resolved)),
         }
     }
 }
@@ -108,19 +109,28 @@ impl std::fmt::Display for UserPath {
 
 /// A canonical absolute path. The only way to construct one is via
 /// [`UserPath::canonicalize`].
+///
+/// Internally `Arc<PathBuf>`: cloning is a refcount bump, not a
+/// fresh `PathBuf` allocation. Many runtime hot paths clone the
+/// same canonical path repeatedly (driver cmds, hashmap keys,
+/// memo outputs), and the per-clone `malloc` was a measurable
+/// chunk of per-tick allocation cost on the EXAMPLE-ARCH
+/// "do-nothing" idle audit.
 #[derive(
     Clone, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord, drv::Input,
     serde::Serialize, serde::Deserialize,
 )]
-pub struct CanonPath(PathBuf);
+pub struct CanonPath(Arc<PathBuf>);
 
 impl CanonPath {
     pub fn as_path(&self) -> &Path {
-        &self.0
+        self.0.as_path()
     }
 
+    /// Owned `PathBuf` snapshot. Allocates a fresh copy when the
+    /// underlying `Arc` is shared; consumes it cheaply when not.
     pub fn into_inner(self) -> PathBuf {
-        self.0
+        Arc::try_unwrap(self.0).unwrap_or_else(|arc| (*arc).clone())
     }
 
     pub fn file_name(&self) -> Option<&OsStr> {
@@ -129,6 +139,15 @@ impl CanonPath {
 
     pub fn extension(&self) -> Option<&OsStr> {
         self.0.extension()
+    }
+
+    /// Parent directory of this canonical path. Returns a fresh
+    /// [`CanonPath`] without a `std::fs::canonicalize` syscall —
+    /// safe because the receiver is already canonical, so its
+    /// parent is too. Used by file-watch dispatch to derive
+    /// per-buffer parent watches without re-canonicalizing.
+    pub fn parent_canon(&self) -> Option<CanonPath> {
+        self.0.parent().map(|p| CanonPath(Arc::new(p.to_path_buf())))
     }
 
     pub fn display(&self) -> std::path::Display<'_> {
@@ -161,7 +180,7 @@ impl CanonPath {
 
 impl AsRef<Path> for CanonPath {
     fn as_ref(&self) -> &Path {
-        &self.0
+        self.0.as_path()
     }
 }
 

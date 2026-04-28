@@ -35,7 +35,7 @@ use led_driver_clipboard_core::{
 use led_driver_clipboard_native::ClipboardNative;
 use led_core::{
     BufferStateSum, BufferVersion, CanonPath, ChainId, Notifier, PathChain, SavedVersion,
-    ServerId, UndoDbSeq, WatchSeq,
+    UndoDbSeq, WatchSeq,
 };
 use led_driver_terminal_core::{Dims, Frame, KeyEvent, TermEvent, Terminal, TerminalInputDriver};
 use led_driver_terminal_native::{TerminalInputNative, TerminalOutputDriver};
@@ -45,7 +45,7 @@ use led_driver_find_file_core::FindFileDriver;
 use led_driver_find_file_native::FindFileNative;
 use led_driver_fs_list_core::FsListDriver;
 use led_driver_fs_list_native::FsListNative;
-use led_driver_syntax_core::{SyntaxCmd, SyntaxDriver};
+use led_driver_syntax_core::SyntaxDriver;
 use led_driver_syntax_native::SyntaxNative;
 use led_driver_lsp_core::{LspCmd, LspDriver, LspEvent};
 use led_driver_lsp_native::LspNative;
@@ -230,7 +230,7 @@ pub struct Atoms {
     /// we'd never emit `BufferChanged{is_save=true}` and
     /// rust-analyzer would never get `didSave`, so cargo check
     /// wouldn't run.
-    pub lsp_notified: std::collections::HashMap<CanonPath, LspNotified>,
+    pub lsp_notified: imbl::HashMap<CanonPath, LspNotified>,
     /// `Some(sum)` holds Σ(version + saved_version) at the last
     /// `RequestDiagnostics` emission; `None` means we've never
     /// fired one. Combined flag+sum because the two cases the
@@ -330,7 +330,7 @@ pub struct Atoms {
     /// each path's `history.past` has been flushed to the
     /// session DB so subsequent flushes ship only the newly-
     /// finalised groups (mirrors legacy's incremental append).
-    pub undo_persistence: std::collections::HashMap<CanonPath, UndoPersistTracker>,
+    pub undo_persistence: imbl::HashMap<CanonPath, UndoPersistTracker>,
     /// Per-buffer debounce state for the undo-flush dispatch.
     /// Each entry records the last buffer `version` we saw and
     /// the wall-clock instant we first saw it. The flush fires
@@ -341,7 +341,7 @@ pub struct Atoms {
     /// on the very next tick, adding spurious trace lines to
     /// short scripts (delete_backward, insert_newline, …) that
     /// legacy goldens captured before the debounce fired.
-    pub undo_flush_debounce: std::collections::HashMap<CanonPath, UndoFlushDebounce>,
+    pub undo_flush_debounce: imbl::HashMap<CanonPath, UndoFlushDebounce>,
     /// Symlink resolution chain for every path the user has
     /// opened, keyed by canonical path. Populated at tab-open
     /// time (main.rs CLI, find-file commit, browser open) so the
@@ -365,13 +365,34 @@ pub struct Atoms {
     /// hasn't been seen this session. Persisted-in-memory only;
     /// there's no on-disk catalog to reconcile against.
     pub watch_id_seq: WatchSeq,
+    /// "Now" as a source field per the EXAMPLE-ARCH "Time is a
+    /// source field" prescription. Set once at the top of every
+    /// ingest tick from `Instant::now()`; everything downstream
+    /// reads via [`Clock::now`] or [`query::ClockInput`] so a
+    /// single syscall per tick covers every consumer and
+    /// time-dependent memos can cache-hit on idle.
+    pub clock: Clock,
+}
+
+/// Clock atom. One field, mutated once per tick.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Clock {
+    pub now: Instant,
+}
+
+impl Default for Clock {
+    fn default() -> Self {
+        Self {
+            now: Instant::now(),
+        }
+    }
 }
 
 /// Per-buffer record of the last `(version, saved_version)`
 /// pair the runtime told the LSP driver about. The execute
 /// phase emits another `BufferChanged` whenever either
 /// coordinate has advanced past this record.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct LspNotified {
     pub version: BufferVersion,
     pub saved_version: SavedVersion,
@@ -380,7 +401,7 @@ pub struct LspNotified {
 /// Per-buffer debounce state for the undo-flush dispatch. The
 /// flush fires once 200ms have elapsed without `last_version`
 /// changing.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UndoFlushDebounce {
     pub last_version: BufferVersion,
     pub first_seen: Instant,
@@ -389,7 +410,7 @@ pub struct UndoFlushDebounce {
 /// Per-buffer state tracking what we've shipped to the
 /// `undo_entries` table. Mirrors legacy's `BufferState::
 /// {chain_id, persisted_undo_len, last_seen_seq}` triple.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct UndoPersistTracker {
     /// UUID-ish chain id we generate on first flush per
     /// buffer-session. Stable across the rest of the session;
@@ -480,6 +501,7 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
         // can advance the counter when a fresh registration
         // appears.
         watch_id_seq,
+        clock,
     } = &mut *world.atoms;
     let drivers = world.drivers;
     let wake = world.wake;
@@ -524,14 +546,15 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
 
     loop {
         // ── Ingest ──────────────────────────────────────────────
-        // Clear expired info alerts at the top of each tick — one
-        // `Instant::now()` compare per tick, zero allocs when no
-        // alert is live. Find-file's transient "[No match]" hint
-        // follows the same TTL discipline.
-        let now = Instant::now();
-        alerts.expire_info(now);
+        // Update the Clock atom from the system clock — single
+        // `Instant::now()` per tick. Everything downstream
+        // (alerts/find-file/undo-flush expiry checks, time-bound
+        // memos) reads from `clock.now` so the syscall cost
+        // doesn't multiply.
+        clock.now = Instant::now();
+        alerts.expire_info(clock.now);
         if let Some(ff) = find_file.as_mut() {
-            ff.input.expire_hint(now);
+            ff.input.expire_hint(clock.now);
         }
 
         // Seed BufferEdits from newly-Ready loads. `seed_edit_from_load`
@@ -577,7 +600,10 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
             // event T" tightly coupled. Watch-actions stays in
             // execute because it's an output-side diff that
             // depends on the post-dispatch buffer set.
-            let reread_paths = compute_external_reread_targets(file_watch, edits);
+            let reread_paths = query::external_reread_targets(
+                query::FileWatchEventsInput::new(file_watch),
+                EditedBuffersInput::new(edits),
+            );
             if !reread_paths.is_empty() {
                 let reread_cmds: Vec<led_driver_buffers_core::LoadAction> = reread_paths
                     .iter()
@@ -585,14 +611,15 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
                     .collect();
                 drivers.file.execute(reread_cmds.iter(), store);
             }
-            // sync_check_targets needs the resolved config dir;
-            // we computed it once before the loop.
-            if let Some(cfg) = resolved_config_dir.as_ref() {
-                let sync_cmds = compute_sync_check_targets(
-                    file_watch,
-                    edits,
-                    cfg,
-                    undo_persistence,
+            // The resolved config dir gate stays as a "do we
+            // have a session at all" check — the memo itself
+            // doesn't take it as input.
+            if resolved_config_dir.is_some() {
+                let hash_index = query::notify_hash_index(EditedBuffersInput::new(edits));
+                let sync_cmds = query::sync_check_cmds(
+                    query::FileWatchEventsInput::new(file_watch),
+                    query::HashIndexInput::new(&hash_index),
+                    query::UndoPersistenceInput::new(undo_persistence),
                 );
                 if !sync_cmds.is_empty() {
                     drivers.session.execute(sync_cmds.iter());
@@ -606,11 +633,11 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
             // helper ran first (this one fires after sync, so
             // `LspSend` lines for `workspace/didChangeWatchedFiles`
             // sort after `WorkspaceCheckSync` in goldens).
-            let lsp_watch_cmds = compute_lsp_watched_file_notifications(
-                file_watch,
-                lsp_watched_globs,
+            let lsp_watch_cmds = query::lsp_watched_file_notifications(
+                query::FileWatchEventsInput::new(file_watch),
+                query::LspWatchedGlobsInput::new(lsp_watched_globs),
             );
-            for cmd in &lsp_watch_cmds {
+            for cmd in lsp_watch_cmds.iter() {
                 if let LspCmd::DidChangeWatchedFiles { server, changes } = cmd {
                     trace.lsp_did_change_watched_files(server, changes.len());
                 }
@@ -1090,7 +1117,7 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
                         eb.disk_content_hash = hash;
                     }
                     alerts.clear_warn(&basename);
-                    alerts.set_info(format!("Saved {basename}"), Instant::now(), INFO_TTL);
+                    alerts.set_info(format!("Saved {basename}"), clock.now, INFO_TTL);
                     // Disk changed — ask git to rescan. The
                     // workspace-root gate lives in the execute
                     // phase; setting the flag here keeps the
@@ -1214,7 +1241,7 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
             let total = done.total_replacements + memory_total;
             alerts.set_info(
                 format!("Replaced {total} occurrence(s)"),
-                Instant::now(),
+                clock.now,
                 INFO_TTL,
             );
         }
@@ -1582,13 +1609,18 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
         // row automatically once fs-list delivers the ancestor
         // listings. Skip when focus is on the side panel — the
         // user is arrow-navigating; don't yank the cursor.
+        //
+        // Compare references first so an unchanged active tab
+        // doesn't allocate a fresh `CanonPath` per tick.
         if !matches!(browser.focus, led_state_browser::Focus::Side) {
-            let active_path_now = tabs
+            let active_path_now: Option<&CanonPath> = tabs
                 .active
                 .and_then(|id| tabs.open.iter().find(|t| t.id == id))
-                .map(|t| t.path.clone());
-            if active_path_now.is_some() && browser.selected_path != active_path_now {
-                browser.selected_path = active_path_now;
+                .map(|t| &t.path);
+            if let Some(p) = active_path_now
+                && browser.selected_path.as_ref() != Some(p)
+            {
+                browser.selected_path = Some(p.clone());
             }
         }
 
@@ -1796,47 +1828,18 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
             }
         }
 
-        // Syntax parse dispatch. For every buffer whose language
-        // we've identified and whose current version is ahead of
-        // (a) the last-applied tokens' version AND (b) any parse
-        // currently in flight, ship a `SyntaxCmd` to the worker
-        // and mark `in_flight_version`. The worker coalesces stale
-        // cmds internally, but tracking in-flight on our side
-        // avoids stuffing the channel on idle ticks.
-        let mut syntax_cmds: Vec<SyntaxCmd> = Vec::new();
-        for (path, state) in syntax.by_path.iter_mut() {
-            let Some(eb) = edits.buffers.get(path) else {
-                continue;
-            };
-            // Needs a parse if we've never parsed this buffer OR the
-            // rope has moved past the last-applied tokens. The
-            // initial load sits at `eb.version == state.version == 0`,
-            // so without the `tree.is_none()` branch the first parse
-            // would never fire — colours would only appear after the
-            // user typed their first character.
-            let needs_parse = state.tree.is_none() || eb.version > state.version;
-            if !needs_parse {
-                continue;
+        // Syntax parse dispatch. The desired set is a memo over
+        // syntax + edits; this loop only marks `in_flight_version`
+        // for the chosen cmds and ships them. Idle ticks: empty
+        // cmds vec via cache-hit, no allocation.
+        let syntax_cmds = query::desired_syntax_parses(
+            query::SyntaxStatesInput::new(syntax),
+            EditedBuffersInput::new(edits),
+        );
+        for cmd in syntax_cmds.iter() {
+            if let Some(state) = syntax.by_path.get_mut(&cmd.path) {
+                state.in_flight_version = Some(cmd.version);
             }
-            if state.in_flight_version == Some(eb.version) {
-                continue;
-            }
-            // Ship the previous tree + the rope it was parsed
-            // from. The worker derives the edit purely from
-            // `(prev_rope, cmd.rope)` — no history-counter
-            // bookkeeping, so undo/redo can't desynchronise the
-            // tree from the bytes. When `tree_rope` is absent
-            // (first parse, or the previous parse errored),
-            // the worker falls back to a full parse.
-            syntax_cmds.push(SyntaxCmd {
-                path: path.clone(),
-                version: eb.version,
-                rope: eb.rope.clone(),
-                language: state.language,
-                prev_tree: state.tree.clone(),
-                prev_rope: state.tree_rope.clone(),
-            });
-            state.in_flight_version = Some(eb.version);
         }
         if !syntax_cmds.is_empty() {
             drivers.syntax.execute(syntax_cmds.iter());
@@ -1944,12 +1947,17 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
             // dispatches (reread / sync_check / tree
             // refresh) ran in ingest so the in-tick query
             // memos saw their effects.
-            let watch_cmds = compute_watch_actions(
-                root,
-                notify_dir,
-                edits,
+            let desired = query::desired_watches(
+                query::FsRootInput::new(fs),
+                query::NotifyDirInput::new(&resolved_notify_dir),
+                EditedBuffersInput::new(edits),
+            );
+            let watch_cmds = diff_watch_actions(
+                &desired,
                 file_watch,
                 watch_id_seq,
+                root,
+                notify_dir,
             );
             if !watch_cmds.is_empty() {
                 drivers.file_watch.execute(watch_cmds.iter(), file_watch);
@@ -2002,7 +2010,7 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
         // (delete_backward, insert_newline, …) settle before the
         // window expires, so no FlushUndo trace fires — matching
         // the legacy goldens that captured them.
-        let now = Instant::now();
+        let now = clock.now;
         let debounce = Duration::from_millis(200);
         if session.init_done {
             for tab in tabs.open.iter() {
@@ -2011,6 +2019,17 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
                     continue;
                 };
                 let current_len = eb.history.past_groups().len();
+                // Cheap-path check first: existing tracker lookup
+                // avoids a `path.clone()` per idle tick.
+                let persisted = undo_persistence
+                    .get(path)
+                    .map(|t| t.persisted_len)
+                    .unwrap_or(0);
+                if current_len <= persisted {
+                    // Common idle path: nothing past the last
+                    // flush, no tracker write needed.
+                    continue;
+                }
                 let tracker = undo_persistence
                     .entry(path.clone())
                     .or_insert_with(|| UndoPersistTracker {
@@ -2018,23 +2037,24 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
                         persisted_len: 0,
                         last_seq: UndoDbSeq(0),
                     });
-                if current_len <= tracker.persisted_len {
-                    continue;
-                }
                 // Update the debounce window when the version
                 // moves; reuse the existing window on idle ticks.
-                let entry = undo_flush_debounce
-                    .entry(path.clone())
-                    .or_insert(UndoFlushDebounce {
-                        last_version: eb.version,
-                        first_seen: now,
-                    });
-                if entry.last_version != eb.version {
-                    *entry = UndoFlushDebounce {
-                        last_version: eb.version,
-                        first_seen: now,
-                    };
+                // Same get-then-insert dance avoids the path.clone
+                // on the hot path.
+                let needs_window_init = match undo_flush_debounce.get(path) {
+                    Some(entry) => entry.last_version != eb.version,
+                    None => true,
+                };
+                if needs_window_init {
+                    undo_flush_debounce.insert(
+                        path.clone(),
+                        UndoFlushDebounce {
+                            last_version: eb.version,
+                            first_seen: now,
+                        },
+                    );
                 }
+                let entry = undo_flush_debounce.get(path).expect("just inserted");
                 if now < entry.first_seen + debounce {
                     continue;
                 }
@@ -2073,34 +2093,23 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
         }
 
         let mut lsp_cmds: Vec<LspCmd> = Vec::new();
-        for (path, eb) in edits.buffers.iter() {
-            let current_version = eb.version;
-            let last = lsp_notified.get(path).copied().unwrap_or_default();
-            let version_moved = current_version > last.version;
-            let save_happened = eb.saved_version > last.saved_version;
-            if version_moved || save_happened {
-                // `is_save` = the writer reported this tick
-                // (saved_version advanced AND it has caught up
-                // to version). Separate from `version_moved`
-                // because a pure-save tick (no new edits) still
-                // needs `didSave` → cargo check.
-                let is_save =
-                    save_happened && eb.saved_version.0 == eb.version.0;
-                let hash = led_core::EphemeralContentHash::of_rope(&eb.rope).persist();
-                lsp_cmds.push(LspCmd::BufferChanged {
-                    path: path.clone(),
-                    rope: eb.rope.clone(),
-                    hash,
-                    is_save,
-                });
+        let buffer_changed = query::desired_lsp_buffer_changed(
+            EditedBuffersInput::new(edits),
+            query::LspNotifiedInput::new(lsp_notified),
+        );
+        for cmd in buffer_changed.iter() {
+            if let LspCmd::BufferChanged { path, .. } = cmd
+                && let Some(eb) = edits.buffers.get(path)
+            {
                 lsp_notified.insert(
                     path.clone(),
                     LspNotified {
-                        version: current_version,
+                        version: eb.version,
                         saved_version: eb.saved_version,
                     },
                 );
             }
+            lsp_cmds.push(cmd.clone());
         }
         // RequestDiagnostics emission — unified version of
         // legacy's two rx streams (hash-sum delta + phase→Running
@@ -2194,21 +2203,19 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
                 seq: req.seq,
             });
         }
+        let inlay_requests = query::desired_inlay_hint_requests(
+            EditedBuffersInput::new(edits),
+            query::LspInlayHintsEnabledInput::new(lsp_extras),
+            query::LspInlayHintsRequestedInput::new(lsp_pending),
+        );
         if lsp_extras.inlay_hints_enabled {
-            for (path, eb) in edits.buffers.iter() {
-                let version = eb.version;
-                if lsp_pending
-                    .inlay_hints_requested
-                    .contains(&(path.clone(), version))
-                {
-                    continue;
-                }
-                let end_line = eb
-                    .rope
-                    .len_lines()
-                    .saturating_sub(1)
-                    .min(u32::MAX as usize) as u32;
-                lsp_pending.queue_inlay_hints(path.clone(), version, 0, end_line);
+            for (path, version, start_line, end_line) in inlay_requests.iter() {
+                lsp_pending.queue_inlay_hints(
+                    path.clone(),
+                    *version,
+                    *start_line,
+                    *end_line,
+                );
             }
             for req in lsp_pending.pending_inlay_hint.drain(..) {
                 lsp_cmds.push(LspCmd::RequestInlayHints {
@@ -2316,8 +2323,24 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
         // without getting its work done; the next key would then
         // wait the full timeout. That was the visible stutter when
         // holding a key — key-repeat events race with the drain.
-        let timeout = nearest_deadline(alerts, find_file, lsp_status, undo_flush_debounce)
-            .and_then(|d| d.checked_duration_since(Instant::now()))
+        // Static deadlines (alert TTL, find-file hint TTL,
+        // undo-flush debounce) are memoized; the LSP-spinner
+        // 80ms wake is `clock.now + 80ms` (clock is set fresh
+        // each ingest, so the wake is 80ms from the tick start —
+        // close enough for a 10-frame spinner cadence).
+        let static_dl = query::static_deadline(
+            query::AlertExpiryInput::new(alerts),
+            query::FindFileInput::new(find_file),
+            query::UndoFlushDebounceInput::new(undo_flush_debounce),
+        );
+        let deadline = if lsp_status.any_busy() {
+            let lsp_dl = clock.now + Duration::from_millis(80);
+            Some(static_dl.map(|d| d.min(lsp_dl)).unwrap_or(lsp_dl))
+        } else {
+            static_dl
+        };
+        let timeout = deadline
+            .and_then(|d| d.checked_duration_since(clock.now))
             .unwrap_or(Duration::from_secs(60));
         use std::sync::mpsc::RecvTimeoutError;
         match wake.rx.recv_timeout(timeout) {
@@ -2496,7 +2519,7 @@ fn apply_pending_undo_restore(
     path: &CanonPath,
     edits: &mut BufferEdits,
     session: &mut led_state_session::SessionState,
-    undo_persistence: &mut std::collections::HashMap<CanonPath, UndoPersistTracker>,
+    undo_persistence: &mut imbl::HashMap<CanonPath, UndoPersistTracker>,
 ) {
     let Some(restore) = session.pending_undo.remove(path) else {
         return;
@@ -2598,7 +2621,7 @@ fn disk_content_hash_for(eb: &EditedBuffer) -> led_core::PersistedContentHash {
 fn apply_sync_result(
     kind: led_driver_session_core::SyncResultKind,
     edits: &mut BufferEdits,
-    undo_persistence: &mut std::collections::HashMap<CanonPath, UndoPersistTracker>,
+    undo_persistence: &mut imbl::HashMap<CanonPath, UndoPersistTracker>,
     file_watch: &mut led_driver_file_watch_core::FileWatchState,
 ) {
     use led_driver_session_core::SyncResultKind;
@@ -2740,335 +2763,63 @@ impl HashIntoExt for std::borrow::Cow<'_, str> {
 /// dispatch helpers can identify them without consulting the
 /// registry. Per-buffer ids are minted from `watch_id_seq`
 /// starting at 0.
-const WATCHER_ID_ROOT: WatchSeq = WatchSeq(u64::MAX);
-const WATCHER_ID_NOTIFY_DIR: WatchSeq = WatchSeq(u64::MAX - 1);
+pub(crate) const WATCHER_ID_ROOT: WatchSeq = WatchSeq(u64::MAX);
+pub(crate) const WATCHER_ID_NOTIFY_DIR: WatchSeq = WatchSeq(u64::MAX - 1);
 
-/// Build the desired/actual diff and return the Vec of
-/// `FileWatchCmd`s to dispatch this tick.
+/// Diff the memoized `desired_watches` map against the driver's
+/// current registry; emit one `FileWatchCmd` per change.
 ///
-/// Desired set (per the design doc):
-/// - `WATCHER_ID_ROOT` → workspace root, recursive, 0 ms debounce.
-/// - `WATCHER_ID_NOTIFY_DIR` → `<config>/notify/`, non-recursive,
-///   100 ms debounce.
-/// - One per open buffer → its parent directory, non-recursive,
-///   0 ms debounce. Same-id-same-path on subsequent ticks
-///   thanks to `watch_id_seq` allocation persistence in
-///   `FileWatchState.registry`.
-fn compute_watch_actions(
-    root: &CanonPath,
-    notify_dir: &CanonPath,
-    edits: &BufferEdits,
+/// The desired-set computation is now a pure memo (`query::
+/// desired_watches`); this function only does the id-reconciling
+/// diff and `WatchSeq` minting that the memo can't (memos are
+/// pure). Idle ticks: desired == registry-by-path → no `cmds`
+/// pushed.
+fn diff_watch_actions(
+    desired: &imbl::HashMap<CanonPath, led_driver_file_watch_core::Registration>,
     file_watch: &led_driver_file_watch_core::FileWatchState,
     watch_id_seq: &mut WatchSeq,
+    root: &CanonPath,
+    notify_dir: &CanonPath,
 ) -> Vec<led_driver_file_watch_core::FileWatchCmd> {
-    use led_driver_file_watch_core::{FileWatchCmd, Registration};
+    use led_driver_file_watch_core::FileWatchCmd;
 
-    // Desired: WatchSeq → Registration.
-    let mut desired: std::collections::HashMap<WatchSeq, Registration> =
-        std::collections::HashMap::new();
-    desired.insert(
-        WATCHER_ID_ROOT,
-        Registration {
-            path: root.clone(),
-            recursive: true,
-            debounce_ms: 0,
-        },
-    );
-    desired.insert(
-        WATCHER_ID_NOTIFY_DIR,
-        Registration {
-            path: notify_dir.clone(),
-            recursive: false,
-            debounce_ms: 100,
-        },
-    );
-
-    // For per-buffer parent dirs, we keep WatchSeq ids stable
-    // across ticks by reusing the id already in the registry
-    // whenever the path matches. New paths get a fresh id from
-    // `watch_id_seq`. Build a path → id reverse-lookup over the
-    // existing per-buffer entries (skipping the two sentinel ids).
-    let existing_per_buffer: std::collections::HashMap<CanonPath, WatchSeq> = file_watch
-        .registry
-        .iter()
-        .filter(|(id, _)| **id != WATCHER_ID_ROOT && **id != WATCHER_ID_NOTIFY_DIR)
-        .map(|(id, reg)| (reg.path.clone(), *id))
-        .collect();
-
-    // Skip per-buffer parent registration when the parent is
-    // already covered by the ROOT recursive watch. notify
-    // refuses to watch the same path twice and the events would
-    // arrive on ROOT anyway. `compute_external_reread_targets`
-    // accepts MODIFIED events from ROOT for paths matching open
-    // buffers, so the reread dispatch still works.
-    let root_path = root.as_path();
-    for path in edits.buffers.keys() {
-        let Some(parent) = path.as_path().parent() else {
-            continue;
-        };
-        if parent == root_path || parent.starts_with(root_path) {
-            continue;
-        }
-        let parent_canon =
-            led_core::UserPath::new(parent.to_path_buf()).canonicalize();
-        let id = existing_per_buffer
-            .get(&parent_canon)
-            .copied()
-            .unwrap_or_else(|| {
-                let id = *watch_id_seq;
-                watch_id_seq.0 = watch_id_seq.0.saturating_add(1);
-                id
-            });
-        desired.insert(
-            id,
-            Registration {
-                path: parent_canon,
-                recursive: false,
-                debounce_ms: 0,
-            },
-        );
-    }
-
-    // Diff: emit Watch for desired-only, Unwatch for actual-only.
-    // Same id+same shape → skip (idempotent on the driver side anyway).
     let mut cmds: Vec<FileWatchCmd> = Vec::new();
-    for (id, reg) in &desired {
-        match file_watch.registry.get(id) {
-            Some(existing) if *existing == *reg => {
-                // No change.
-            }
+    for (path, reg) in desired.iter() {
+        // Sentinel paths get fixed ids; per-buffer parents
+        // reuse whatever id already covers the same path so
+        // `Registration` shape comparisons stay stable.
+        let id = if path == root {
+            WATCHER_ID_ROOT
+        } else if path == notify_dir {
+            WATCHER_ID_NOTIFY_DIR
+        } else {
+            file_watch
+                .registry
+                .iter()
+                .find(|(_, r)| &r.path == path)
+                .map(|(id, _)| *id)
+                .unwrap_or_else(|| {
+                    let id = *watch_id_seq;
+                    watch_id_seq.0 = watch_id_seq.0.saturating_add(1);
+                    id
+                })
+        };
+        match file_watch.registry.get(&id) {
+            Some(existing) if existing == reg => {}
             _ => cmds.push(FileWatchCmd::Watch {
-                id: *id,
+                id,
                 path: reg.path.clone(),
                 recursive: reg.recursive,
                 debounce_ms: reg.debounce_ms,
             }),
         }
     }
-    for id in file_watch.registry.keys() {
-        if !desired.contains_key(id) {
+    for (id, reg) in file_watch.registry.iter() {
+        if !desired.contains_key(&reg.path) {
             cmds.push(FileWatchCmd::Unwatch { id: *id });
         }
     }
     cmds
-}
-
-/// Walk `recent_events` and pick out paths that:
-/// - Came from a per-buffer parent watch (id != ROOT, NOTIFY_DIR).
-/// - Carry MODIFIED.
-/// - Match an open buffer's path (by exact canonical equality).
-///
-/// The runtime dispatches a `LoadAction::Reread` for each. The
-/// reconcile arm in the next ingest pass writes the result into
-/// `EditedBuffer.rope`.
-fn compute_external_reread_targets(
-    file_watch: &led_driver_file_watch_core::FileWatchState,
-    edits: &BufferEdits,
-) -> Vec<CanonPath> {
-    use led_driver_file_watch_core::{ChangeKinds, FileWatchEvent};
-    let mut out: std::collections::HashSet<CanonPath> = std::collections::HashSet::new();
-    for (id, queue) in file_watch.recent_events.iter() {
-        // Skip notify-dir events (those drive sync_check, not
-        // reread). Per-buffer events AND root-recursive events
-        // both legitimately fire on open-buffer changes; accept
-        // them when the path matches an open buffer.
-        if *id == WATCHER_ID_NOTIFY_DIR {
-            continue;
-        }
-        for ev in queue {
-            let FileWatchEvent::Changed { path, kinds, .. } = ev else {
-                continue;
-            };
-            // Reread fires only on MODIFIED. Skip events that
-            // include REMOVED (legacy parity:
-            // `docs/spec/buffers.md` § "External delete is
-            // inert. The model ignores it"). Skip Create-only
-            // events too — those don't carry "new content"
-            // semantics for an already-open buffer; the
-            // reread on the subsequent Modify covers actual
-            // edits.
-            if kinds.contains_any(ChangeKinds::REMOVED) {
-                continue;
-            }
-            if !kinds.contains_any(ChangeKinds::MODIFIED) {
-                continue;
-            }
-            if edits.buffers.contains_key(path) {
-                out.insert(path.clone());
-            }
-        }
-    }
-    out.into_iter().collect()
-}
-
-/// Walk `recent_events` for the `WATCHER_ID_NOTIFY_DIR` queue,
-/// resolve each touched basename back to an open buffer via
-/// `path_hash`, and emit one `SessionCmd::CheckSync` per
-/// resolved buffer.
-fn compute_sync_check_targets(
-    file_watch: &led_driver_file_watch_core::FileWatchState,
-    edits: &BufferEdits,
-    _config_dir: &CanonPath,
-    undo_persistence: &std::collections::HashMap<CanonPath, UndoPersistTracker>,
-) -> Vec<SessionCmd> {
-    use led_driver_file_watch_core::FileWatchEvent;
-    // Build a hash → path index over open buffers.
-    let mut hash_index: std::collections::HashMap<String, CanonPath> =
-        std::collections::HashMap::new();
-    for path in edits.buffers.keys() {
-        hash_index.insert(path.path_hash(), path.clone());
-    }
-    let mut seen: std::collections::HashSet<CanonPath> =
-        std::collections::HashSet::new();
-    let mut cmds: Vec<SessionCmd> = Vec::new();
-    let Some(queue) = file_watch.recent_events.get(&WATCHER_ID_NOTIFY_DIR) else {
-        return cmds;
-    };
-    for ev in queue {
-        let FileWatchEvent::Changed { path, .. } = ev else {
-            continue;
-        };
-        // The notify-dir watch only fires for paths inside the
-        // notify dir, so just match the basename. We skip a
-        // parent-equality check because the registry already
-        // filtered the watch scope.
-        let basename = match path.as_path().file_name() {
-            Some(s) => s.to_string_lossy().into_owned(),
-            None => continue,
-        };
-        let Some(buf_path) = hash_index.get(&basename) else {
-            continue;
-        };
-        if !seen.insert(buf_path.clone()) {
-            continue;
-        }
-        let Some(tracker) = undo_persistence.get(buf_path) else {
-            continue;
-        };
-        cmds.push(SessionCmd::CheckSync {
-            path: buf_path.clone(),
-            last_seen_seq: tracker.last_seq,
-            current_chain_id: tracker.chain_id.clone(),
-        });
-    }
-    cmds
-}
-
-/// Walk `recent_events` for the root-recursive watch and fan
-/// each MODIFIED / CREATED / REMOVED event out to whichever
-/// servers have a registered glob covering that path. Returns
-/// one `LspCmd::DidChangeWatchedFiles` per server with a
-/// non-empty `changes` payload — same `(server, batch)` shape
-/// the native worker turns into a single LSP notification per
-/// server.
-///
-/// Only the workspace-root recursive watch is consulted: the
-/// per-buffer parent watches and the `<config>/notify/` watch
-/// are scoped to specific runtime concerns (reread / cross-
-/// instance sync), not to LSP fan-out. Servers register globs
-/// against the workspace, so root-recursive coverage matches.
-fn compute_lsp_watched_file_notifications(
-    file_watch: &led_driver_file_watch_core::FileWatchState,
-    globs: &led_state_lsp::LspWatchedGlobs,
-) -> Vec<LspCmd> {
-    use led_driver_file_watch_core::{ChangeKinds, FileWatchEvent};
-    use led_driver_lsp_core::{FileEvent, FileEventKind};
-    if globs.by_server.is_empty() {
-        return Vec::new();
-    }
-    let Some(queue) = file_watch.recent_events.get(&WATCHER_ID_ROOT) else {
-        return Vec::new();
-    };
-    // Per-server batches built up across the event queue.
-    // `ServerId` key = short server name; preserved verbatim
-    // back into the cmd payload so the native worker matches it
-    // against `short_server_name(entry.server.name)`. Inner
-    // map dedupes same-path events within one tick (macOS
-    // FSEvents often delivers Create+Modify as two notify
-    // events; the LSP server gets one entry per path with the
-    // dominant kind).
-    let mut per_server: std::collections::HashMap<
-        ServerId,
-        std::collections::HashMap<CanonPath, FileEventKind>,
-    > = std::collections::HashMap::new();
-    for ev in queue {
-        let FileWatchEvent::Changed { path, kinds, .. } = ev else {
-            continue;
-        };
-        // Pick the dominant LSP `FileChangeType` for this
-        // event. Delete wins over Modify wins over Create — a
-        // file that was created and then deleted in one tick
-        // is reported as Deleted; one that was created and
-        // modified collapses to Changed (the file exists in a
-        // new state).
-        let lsp_kind = if kinds.contains_any(ChangeKinds::REMOVED) {
-            FileEventKind::Deleted
-        } else if kinds.contains_any(ChangeKinds::MODIFIED) {
-            FileEventKind::Changed
-        } else if kinds.contains_any(ChangeKinds::CREATED) {
-            FileEventKind::Created
-        } else {
-            continue;
-        };
-        // Bit position the registration's `kinds` mask is
-        // checked against. Aligns with `RegistrationGlob.kinds`
-        // doc-comment in driver-lsp-core (1=Create, 2=Change,
-        // 4=Delete; same bits as ChangeKinds).
-        let kind_bit: u8 = match lsp_kind {
-            FileEventKind::Created => ChangeKinds::CREATED,
-            FileEventKind::Changed => ChangeKinds::MODIFIED,
-            FileEventKind::Deleted => ChangeKinds::REMOVED,
-        };
-        let path_for_match = path.as_path();
-        for (server, registrations) in globs.by_server.iter() {
-            // Within a server, hit on the first matching glob
-            // — duplicate notifications would be redundant.
-            // Walk every registration_id under the server.
-            let matched = registrations.values().any(|globs| {
-                globs.iter().any(|g| {
-                    g.kinds & kind_bit != 0 && g.matcher.is_match(path_for_match)
-                })
-            });
-            if !matched {
-                continue;
-            }
-            let entry = per_server.entry(server.clone()).or_default();
-            // Same Delete > Modify > Create precedence as
-            // above when two events for the same path arrive
-            // in this tick: the LATER, stronger kind wins.
-            let promote = match (entry.get(path), lsp_kind) {
-                (None, _) => true,
-                (Some(prev), new) => kind_priority(new) >= kind_priority(*prev),
-            };
-            if promote {
-                entry.insert(path.clone(), lsp_kind);
-            }
-        }
-    }
-    per_server
-        .into_iter()
-        .map(|(server, by_path)| {
-            // Sort by path so the FileEvent batch order is
-            // stable across runs — `HashMap` iteration order is
-            // randomised, which would make goldens flaky.
-            let mut changes: Vec<FileEvent> = by_path
-                .into_iter()
-                .map(|(path, kind)| FileEvent { path, kind })
-                .collect();
-            changes.sort_by(|a, b| a.path.as_path().cmp(b.path.as_path()));
-            LspCmd::DidChangeWatchedFiles { server, changes }
-        })
-        .collect()
-}
-
-/// Higher = takes precedence in same-tick path coalescing.
-fn kind_priority(k: led_driver_lsp_core::FileEventKind) -> u8 {
-    use led_driver_lsp_core::FileEventKind;
-    match k {
-        FileEventKind::Created => 1,
-        FileEventKind::Changed => 2,
-        FileEventKind::Deleted => 3,
-    }
 }
 
 /// Walk the root-recursive watcher's recent events and apply
@@ -3432,62 +3183,6 @@ fn distance_from_save_for(eb: &EditedBuffer) -> i32 {
         None => past,
     };
     after.iter().filter(|g| !g.ops.is_empty()).count() as i32
-}
-
-/// Min-fold over every currently-registered wake deadline.
-///
-/// Course-correct #8: isolates the "when should the main loop next
-/// wake up?" decision from `alerts.info_expires_at` so future
-/// timer sources (diagnostics debouncing M12, command-palette
-/// animation M13, LSP completion timeouts M18, file-watch debounce
-/// M26) plug in without touching the main-loop shape.
-///
-/// Takes individual `&` refs (not `&Atoms`) so call sites inside
-/// `run()` can use it alongside the disjoint-field `&mut` borrows
-/// that dispatch needs. Not a drv memo — the inputs change every
-/// tick and the fold is trivially cheap; caching would churn.
-pub fn nearest_deadline(
-    alerts: &AlertState,
-    find_file: &Option<FindFileState>,
-    lsp_status: &LspStatuses,
-    undo_flush_debounce: &std::collections::HashMap<CanonPath, UndoFlushDebounce>,
-) -> Option<Instant> {
-    let mut soonest: Option<Instant> = None;
-    let consider = |soonest: &mut Option<Instant>, candidate: Option<Instant>| {
-        if let Some(t) = candidate {
-            *soonest = match *soonest {
-                Some(cur) if cur < t => Some(cur),
-                _ => Some(t),
-            };
-        }
-    };
-    consider(&mut soonest, alerts.info_expires_at);
-    consider(
-        &mut soonest,
-        find_file.as_ref().and_then(|ff| ff.input.hint_expires_at),
-    );
-    // LSP spinner animation — 80ms cadence while any server is
-    // busy. Matches legacy's `format_lsp_status` spinner (10
-    // braille frames, each 80ms). Without this wake source the
-    // status-bar spinner would freeze between user events.
-    if lsp_status.any_busy() {
-        consider(
-            &mut soonest,
-            Some(Instant::now() + std::time::Duration::from_millis(80)),
-        );
-    }
-    // Undo-flush debounce — wake at the earliest pending window
-    // expiry so the per-tick flush check fires the trace on time
-    // even when no other event is in flight.
-    let debounce = std::time::Duration::from_millis(200);
-    if let Some(earliest) = undo_flush_debounce
-        .values()
-        .map(|entry| entry.first_seen + debounce)
-        .min()
-    {
-        consider(&mut soonest, Some(earliest));
-    }
-    soonest
 }
 
 /// Seed the edit-buffer map from a newly-Ready FS read. The

@@ -46,6 +46,29 @@ pub struct SyntaxCmd {
     pub prev_rope: Option<Arc<Rope>>,
 }
 
+// Manual PartialEq mirroring `SyntaxState`'s rationale:
+// `tree_sitter::Tree` doesn't impl `PartialEq`, and pointer-eq is
+// the right semantic for drv memo invalidation anyway.
+impl PartialEq for SyntaxCmd {
+    fn eq(&self, other: &Self) -> bool {
+        self.path == other.path
+            && self.version == other.version
+            && self.language == other.language
+            && Arc::ptr_eq(&self.rope, &other.rope)
+            && match (&self.prev_tree, &other.prev_tree) {
+                (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+                (None, None) => true,
+                _ => false,
+            }
+            && match (&self.prev_rope, &other.prev_rope) {
+                (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+                (None, None) => true,
+                _ => false,
+            }
+    }
+}
+impl Eq for SyntaxCmd {}
+
 // `RopeDiff` lives in `led-state-syntax` — it's the shape both
 // the driver worker and the runtime's rebase path consume.
 pub use led_state_syntax::RopeDiff;

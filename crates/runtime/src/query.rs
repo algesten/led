@@ -15,7 +15,14 @@
 use led_core::{BufferStateSum, BufferVersion, CanonPath, SavedVersion, ServerId};
 use led_driver_buffers_core::{BufferStore, LoadAction, LoadState, SaveAction};
 use led_driver_clipboard_core::ClipboardAction;
+use led_driver_file_watch_core::{
+    ChangeKinds, FileWatchEvent, FileWatchState, Registration, WatchSeq,
+};
 use led_driver_fs_list_core::ListCmd;
+use led_driver_lsp_core::{FileEvent, FileEventKind, LspCmd};
+use led_state_lsp::LspWatchedGlobs;
+use led_driver_session_core::SessionCmd;
+use led_driver_syntax_core::SyntaxCmd;
 use led_driver_terminal_core::{
     BodyModel, Dims, Frame, Layout, PopoverLine, PopoverModel, PopoverSeverity, Rect,
     SidePanelModel, SidePanelRow, StatusBarModel, TabBarModel, Terminal,
@@ -336,6 +343,35 @@ impl<'a> FsTreeInput<'a> {
     }
 }
 
+/// Workspace root only. A change to `dir_contents` (every fs-list
+/// reply) must NOT invalidate memos that only care about the root
+/// path — give them their own narrow projection.
+#[derive(drv::Input, Copy, Clone)]
+pub struct FsRootInput<'a> {
+    pub root: &'a Option<CanonPath>,
+}
+
+impl<'a> FsRootInput<'a> {
+    pub fn new(fs: &'a led_state_browser::FsTree) -> Self {
+        Self { root: &fs.root }
+    }
+}
+
+/// `<config>/notify/` resolved at startup. Not a source-backed
+/// value; the runtime's `run` loop computes it once and projects
+/// the local reference. Stable address across the loop lifetime
+/// makes drv's pointer-eq cache hit on idle ticks.
+#[derive(drv::Input, Copy, Clone)]
+pub struct NotifyDirInput<'a> {
+    pub notify_dir: &'a Option<CanonPath>,
+}
+
+impl<'a> NotifyDirInput<'a> {
+    pub fn new(notify_dir: &'a Option<CanonPath>) -> Self {
+        Self { notify_dir }
+    }
+}
+
 /// User-decision projection for [`BrowserUi`]. Mutated by dispatch.
 /// Tree flattening + the resolved selection index are derived —
 /// they live in `browser_entries` and `browser_selected_idx`
@@ -404,6 +440,140 @@ impl<'a> OverlaysInput<'a> {
             find_file,
             isearch,
             file_search,
+        }
+    }
+}
+
+// ── Input on FileWatchState ────────────────────────────────────────────
+
+/// Per-tick fan-out queue. The driver writes here during ingest;
+/// the runtime drains via memos during query.
+#[derive(drv::Input, Copy, Clone)]
+pub struct FileWatchEventsInput<'a> {
+    pub recent_events:
+        &'a imbl::HashMap<WatchSeq, imbl::Vector<FileWatchEvent>>,
+}
+
+impl<'a> FileWatchEventsInput<'a> {
+    pub fn new(s: &'a FileWatchState) -> Self {
+        Self {
+            recent_events: &s.recent_events,
+        }
+    }
+}
+
+/// Existing watch registrations. Read by the desired/actual diff.
+#[derive(drv::Input, Copy, Clone)]
+pub struct FileWatchRegistryInput<'a> {
+    pub registry: &'a imbl::HashMap<WatchSeq, Registration>,
+}
+
+impl<'a> FileWatchRegistryInput<'a> {
+    pub fn new(s: &'a FileWatchState) -> Self {
+        Self {
+            registry: &s.registry,
+        }
+    }
+}
+
+/// "Now" as memo input. Per EXAMPLE-ARCH "Time is a source
+/// field": the runtime writes `clock.now = Instant::now()` once
+/// per ingest tick, and time-dependent memos take this input so
+/// their cache invalidates whenever a tick's clock advances.
+#[derive(drv::Input, Copy, Clone)]
+pub struct ClockInput<'a> {
+    pub now: &'a std::time::Instant,
+}
+
+impl<'a> ClockInput<'a> {
+    pub fn new(c: &'a crate::Clock) -> Self {
+        Self { now: &c.now }
+    }
+}
+
+/// Narrow projection of [`AlertState`] for deadline memos. The
+/// painter's `AlertsInput` deliberately excludes
+/// `info_expires_at` (it churns by the millisecond and would
+/// invalidate the status-bar cache); deadlines need it.
+#[derive(drv::Input, Copy, Clone)]
+pub struct AlertExpiryInput<'a> {
+    pub info_expires_at: &'a Option<std::time::Instant>,
+}
+
+impl<'a> AlertExpiryInput<'a> {
+    pub fn new(a: &'a AlertState) -> Self {
+        Self {
+            info_expires_at: &a.info_expires_at,
+        }
+    }
+}
+
+/// Per-buffer undo-flush debounce timestamps. The deadline memo
+/// folds them into the earliest pending flush time so the runner
+/// wakes when one expires.
+#[derive(drv::Input, Copy, Clone)]
+pub struct UndoFlushDebounceInput<'a> {
+    pub entries: &'a imbl::HashMap<CanonPath, crate::UndoFlushDebounce>,
+}
+
+impl<'a> UndoFlushDebounceInput<'a> {
+    pub fn new(
+        m: &'a imbl::HashMap<CanonPath, crate::UndoFlushDebounce>,
+    ) -> Self {
+        Self { entries: m }
+    }
+}
+
+/// Narrow projection of [`LspExtrasState`] for the inlay-hints
+/// memo — just the toggle bit. A change to other extras (rename,
+/// code-actions) doesn't need to invalidate the request memo.
+#[derive(drv::Input, Copy, Clone)]
+pub struct LspInlayHintsEnabledInput<'a> {
+    pub enabled: &'a bool,
+}
+
+impl<'a> LspInlayHintsEnabledInput<'a> {
+    pub fn new(s: &'a led_state_lsp::LspExtrasState) -> Self {
+        Self {
+            enabled: &s.inlay_hints_enabled,
+        }
+    }
+}
+
+/// Narrow projection of [`LspPending`] for the inlay-hints memo —
+/// just the requested-set. Mutations on other LspPending fields
+/// (rename outboxes etc.) shouldn't invalidate the inlay-hints
+/// memo.
+#[derive(drv::Input, Copy, Clone)]
+pub struct LspInlayHintsRequestedInput<'a> {
+    pub by_path: &'a imbl::HashMap<CanonPath, BufferVersion>,
+}
+
+impl<'a> LspInlayHintsRequestedInput<'a> {
+    pub fn new(s: &'a led_state_lsp::LspPending) -> Self {
+        Self {
+            by_path: &s.inlay_hints_requested,
+        }
+    }
+}
+
+// ── Input on LspWatchedGlobs ──────────────────────────────────────────
+
+/// Per-server registered glob projection. Read by the
+/// `lsp_watched_file_notifications` memo to fan watch events out
+/// to language servers.
+#[derive(drv::Input, Copy, Clone)]
+pub struct LspWatchedGlobsInput<'a> {
+    pub by_server: &'a imbl::HashMap<
+        ServerId,
+        imbl::HashMap<String, Arc<Vec<led_driver_lsp_core::RegistrationGlob>>>,
+    >,
+}
+
+impl<'a> LspWatchedGlobsInput<'a> {
+    pub fn new(g: &'a LspWatchedGlobs) -> Self {
+        Self {
+            by_server: &g.by_server,
         }
     }
 }
@@ -500,6 +670,467 @@ pub fn file_save_action<'p, 'b>(
         });
     }
     out
+}
+
+// ── File-watch derived memos ──────────────────────────────────────────
+
+/// "Which open buffers had their on-disk content modified since
+/// the last drain?"
+///
+/// Walks the per-tick `recent_events` queue, drops Removed-only
+/// and Created-only entries (per legacy), and keeps Modified
+/// events whose path matches an open buffer. The runtime
+/// dispatches a `LoadAction::Reread` for each.
+///
+/// Idle ticks: `recent_events` empty → memo cache-hits the empty
+/// vector. Non-empty events with no buffer match → empty result;
+/// still cache-hits if the inputs haven't changed.
+#[drv::memo(single)]
+pub fn external_reread_targets<'a, 'b>(
+    events: FileWatchEventsInput<'a>,
+    edits: EditedBuffersInput<'b>,
+) -> Arc<Vec<CanonPath>> {
+    if events.recent_events.is_empty() {
+        return Arc::new(Vec::new());
+    }
+    let mut seen: std::collections::HashSet<&CanonPath> =
+        std::collections::HashSet::new();
+    let mut out: Vec<CanonPath> = Vec::new();
+    for (id, queue) in events.recent_events.iter() {
+        if *id == crate::WATCHER_ID_NOTIFY_DIR {
+            continue;
+        }
+        for ev in queue {
+            let FileWatchEvent::Changed { path, kinds, .. } = ev else {
+                continue;
+            };
+            // Reread fires only on MODIFIED. Skip events that
+            // include REMOVED (legacy parity: external delete is
+            // inert). Skip Create-only events too — those don't
+            // carry "new content" semantics for an already-open
+            // buffer.
+            if kinds.contains_any(ChangeKinds::REMOVED) {
+                continue;
+            }
+            if !kinds.contains_any(ChangeKinds::MODIFIED) {
+                continue;
+            }
+            if edits.buffers.contains_key(path) && seen.insert(path) {
+                out.push(path.clone());
+            }
+        }
+    }
+    Arc::new(out)
+}
+
+/// "Which open buffers' `path_hash()` map to which canonical
+/// path?" Used by the cross-instance sync-check fan-out: the
+/// notify-dir watcher reports basenames that are 16-char hex
+/// hashes; this memo provides the reverse lookup without rebuilding
+/// the index per tick.
+///
+/// Memoized over the buffer keyset only. The `path_hash()` String
+/// allocation now amortises across every idle tick.
+#[drv::memo(single)]
+pub fn notify_hash_index<'b>(
+    edits: EditedBuffersInput<'b>,
+) -> Arc<std::collections::HashMap<String, CanonPath>> {
+    let mut out: std::collections::HashMap<String, CanonPath> =
+        std::collections::HashMap::with_capacity(edits.buffers.len());
+    for path in edits.buffers.keys() {
+        out.insert(path.path_hash(), path.clone());
+    }
+    Arc::new(out)
+}
+
+/// Per-buffer record of the last `(version, saved_version)` pair
+/// pushed to the LSP driver. Read by the LSP buffer-changed memo
+/// to decide what's stale.
+#[derive(drv::Input, Copy, Clone)]
+pub struct LspNotifiedInput<'a> {
+    pub by_path: &'a imbl::HashMap<CanonPath, crate::LspNotified>,
+}
+
+impl<'a> LspNotifiedInput<'a> {
+    pub fn new(m: &'a imbl::HashMap<CanonPath, crate::LspNotified>) -> Self {
+        Self { by_path: m }
+    }
+}
+
+/// Projection over `undo_persistence` so the sync-check memo can
+/// read trackers without depending on the full HashMap.
+#[derive(drv::Input, Copy, Clone)]
+pub struct UndoPersistenceInput<'a> {
+    pub by_path:
+        &'a imbl::HashMap<CanonPath, crate::UndoPersistTracker>,
+}
+
+impl<'a> UndoPersistenceInput<'a> {
+    pub fn new(
+        m: &'a imbl::HashMap<CanonPath, crate::UndoPersistTracker>,
+    ) -> Self {
+        Self { by_path: m }
+    }
+}
+
+/// "Which open buffers were touched by another instance and need
+/// a sync-check?" One `SessionCmd::CheckSync` per open buffer
+/// whose hash was reported on the `<config>/notify/` dir. Returns
+/// an empty vector when no notify-dir events fired this tick.
+#[drv::memo(single)]
+pub fn sync_check_cmds<'a, 'b, 'u>(
+    events: FileWatchEventsInput<'a>,
+    index: HashIndexInput<'b>,
+    undo: UndoPersistenceInput<'u>,
+) -> Arc<Vec<SessionCmd>> {
+    let Some(queue) = events.recent_events.get(&crate::WATCHER_ID_NOTIFY_DIR)
+    else {
+        return Arc::new(Vec::new());
+    };
+    let mut seen: std::collections::HashSet<&CanonPath> =
+        std::collections::HashSet::new();
+    let mut cmds: Vec<SessionCmd> = Vec::new();
+    for ev in queue {
+        let FileWatchEvent::Changed { path, .. } = ev else {
+            continue;
+        };
+        let basename = match path.as_path().file_name() {
+            Some(s) => s.to_string_lossy(),
+            None => continue,
+        };
+        let Some(buf_path) = index.by_path.get(basename.as_ref()) else {
+            continue;
+        };
+        if !seen.insert(buf_path) {
+            continue;
+        }
+        let Some(tracker) = undo.by_path.get(buf_path) else {
+            continue;
+        };
+        cmds.push(SessionCmd::CheckSync {
+            path: buf_path.clone(),
+            last_seen_seq: tracker.last_seq,
+            current_chain_id: tracker.chain_id.clone(),
+        });
+    }
+    Arc::new(cmds)
+}
+
+/// Wraps a `notify_hash_index` result so it can pass back into
+/// another memo as a `drv::Input`. Without this the consumer
+/// would need to project an `Arc<HashMap>` directly, which the
+/// projection trait doesn't grant pointer-eq on.
+#[derive(drv::Input, Copy, Clone)]
+pub struct HashIndexInput<'a> {
+    pub by_path: &'a std::collections::HashMap<String, CanonPath>,
+}
+
+impl<'a> HashIndexInput<'a> {
+    pub fn new(
+        m: &'a std::collections::HashMap<String, CanonPath>,
+    ) -> Self {
+        Self { by_path: m }
+    }
+}
+
+/// "What's the next non-LSP-spinner deadline the runner should
+/// wake at?"
+///
+/// Folds three time-bound state machines: the info-alert TTL,
+/// the find-file hint TTL, and per-buffer undo-flush debounce
+/// windows. The LSP-spinner 80ms wake stays in `run` because it
+/// depends on `Instant::now()` (which would invalidate the memo
+/// every tick); the runner takes `min(static_deadline, now+80ms)`
+/// when any server is busy.
+///
+/// Idle ticks: empty inputs → `None` via cache-hit, the runner
+/// sleeps the full 60-second default.
+#[drv::memo(single)]
+pub fn static_deadline<'a, 'f, 'u>(
+    alert: AlertExpiryInput<'a>,
+    find_file: FindFileInput<'f>,
+    undo: UndoFlushDebounceInput<'u>,
+) -> Option<std::time::Instant> {
+    use std::time::{Duration, Instant};
+    let mut soonest: Option<Instant> = None;
+    let mut consider = |t: Instant| {
+        soonest = Some(match soonest {
+            Some(cur) if cur < t => cur,
+            _ => t,
+        });
+    };
+    if let Some(t) = *alert.info_expires_at {
+        consider(t);
+    }
+    if let Some(ff) = find_file.overlay.as_ref()
+        && let Some(t) = ff.input.hint_expires_at
+    {
+        consider(t);
+    }
+    let debounce_window = Duration::from_millis(200);
+    if let Some(earliest) = undo
+        .entries
+        .values()
+        .map(|e| e.first_seen + debounce_window)
+        .min()
+    {
+        consider(earliest);
+    }
+    soonest
+}
+
+/// "Which buffers need a fresh inlay-hint request?"
+///
+/// Returns one tuple `(path, version, start_line, end_line)` per
+/// open buffer whose latest version hasn't been requested yet.
+/// Toggle off → empty vec. Idle ticks → cache-hit empty vec.
+///
+/// Pure: doesn't allocate seqs (that's execute-side via
+/// `LspPending::queue_inlay_hints`).
+#[drv::memo(single)]
+pub fn desired_inlay_hint_requests<'a, 'e, 'r>(
+    edits: EditedBuffersInput<'a>,
+    extras: LspInlayHintsEnabledInput<'e>,
+    requested: LspInlayHintsRequestedInput<'r>,
+) -> Arc<Vec<(CanonPath, BufferVersion, u32, u32)>> {
+    if !*extras.enabled {
+        return Arc::new(Vec::new());
+    }
+    let mut out: Vec<(CanonPath, BufferVersion, u32, u32)> = Vec::new();
+    for (path, eb) in edits.buffers.iter() {
+        if requested.by_path.get(path) == Some(&eb.version) {
+            continue;
+        }
+        let end_line = eb
+            .rope
+            .len_lines()
+            .saturating_sub(1)
+            .min(u32::MAX as usize) as u32;
+        out.push((path.clone(), eb.version, 0, end_line));
+    }
+    Arc::new(out)
+}
+
+/// "Which buffers need a fresh tree-sitter parse?"
+///
+/// Skips buffers without a known language, buffers whose tokens
+/// already track the current rope version, and buffers with an
+/// in-flight parse at the same version. Idle ticks return an
+/// empty Vec via cache-hit.
+#[drv::memo(single)]
+pub fn desired_syntax_parses<'s, 'b>(
+    syntax: SyntaxStatesInput<'s>,
+    edits: EditedBuffersInput<'b>,
+) -> Arc<Vec<SyntaxCmd>> {
+    let mut out: Vec<SyntaxCmd> = Vec::new();
+    for (path, state) in syntax.by_path.iter() {
+        let Some(eb) = edits.buffers.get(path) else {
+            continue;
+        };
+        // Needs a parse if we've never parsed this buffer OR the
+        // rope has moved past the last-applied tokens. The
+        // initial load sits at `eb.version == state.version == 0`,
+        // so without the `tree.is_none()` branch the first parse
+        // would never fire.
+        let needs_parse = state.tree.is_none() || eb.version > state.version;
+        if !needs_parse {
+            continue;
+        }
+        if state.in_flight_version == Some(eb.version) {
+            continue;
+        }
+        out.push(SyntaxCmd {
+            path: path.clone(),
+            version: eb.version,
+            rope: eb.rope.clone(),
+            language: state.language,
+            prev_tree: state.tree.clone(),
+            prev_rope: state.tree_rope.clone(),
+        });
+    }
+    Arc::new(out)
+}
+
+/// "Which buffers need a `BufferChanged` push to LSP?"
+///
+/// One `LspCmd::BufferChanged` per buffer whose `version` or
+/// `saved_version` has moved past what `lsp_notified` records.
+/// Idle ticks (no version moves): empty Arc<Vec>.
+///
+/// Memoised so the per-buffer `EphemeralContentHash::of_rope`
+/// walk doesn't re-fire when nothing has changed.
+#[drv::memo(single)]
+pub fn desired_lsp_buffer_changed<'a, 'b>(
+    edits: EditedBuffersInput<'a>,
+    notified: LspNotifiedInput<'b>,
+) -> Arc<Vec<LspCmd>> {
+    let mut out: Vec<LspCmd> = Vec::new();
+    for (path, eb) in edits.buffers.iter() {
+        let last = notified.by_path.get(path).copied().unwrap_or_default();
+        let version_moved = eb.version > last.version;
+        let save_happened = eb.saved_version > last.saved_version;
+        if !(version_moved || save_happened) {
+            continue;
+        }
+        // `is_save` = the writer reported this tick (saved_version
+        // advanced AND it has caught up to version). Separate from
+        // `version_moved` because a pure-save tick (no new edits)
+        // still needs `didSave` → cargo check.
+        let is_save = save_happened && eb.saved_version.0 == eb.version.0;
+        let hash = led_core::EphemeralContentHash::of_rope(&eb.rope).persist();
+        out.push(LspCmd::BufferChanged {
+            path: path.clone(),
+            rope: eb.rope.clone(),
+            hash,
+            is_save,
+        });
+    }
+    Arc::new(out)
+}
+
+/// "What watches do we want active right now?"
+///
+/// Returns a path-keyed map: workspace root recursive, the
+/// `<config>/notify/` directory, and one parent dir per open
+/// buffer whose parent isn't already covered by the root watch.
+///
+/// Pure: no `std::fs::canonicalize` syscalls (per-buffer parents
+/// inherit canonical-ness from the buffer path itself), no
+/// `WatchSeq` allocation (id minting is execute-side concern).
+/// Idle ticks cache-hit.
+#[drv::memo(single)]
+pub fn desired_watches<'r, 'n, 'b>(
+    root: FsRootInput<'r>,
+    notify_dir: NotifyDirInput<'n>,
+    edits: EditedBuffersInput<'b>,
+) -> Arc<imbl::HashMap<CanonPath, Registration>> {
+    let mut out: imbl::HashMap<CanonPath, Registration> = imbl::HashMap::new();
+    let (Some(root_path), Some(notify_path)) = (root.root.as_ref(), notify_dir.notify_dir.as_ref())
+    else {
+        return Arc::new(out);
+    };
+    out.insert(
+        root_path.clone(),
+        Registration {
+            path: root_path.clone(),
+            recursive: true,
+            debounce_ms: 0,
+        },
+    );
+    out.insert(
+        notify_path.clone(),
+        Registration {
+            path: notify_path.clone(),
+            recursive: false,
+            debounce_ms: 100,
+        },
+    );
+    let root_p = root_path.as_path();
+    for path in edits.buffers.keys() {
+        let Some(parent) = path.parent_canon() else {
+            continue;
+        };
+        // notify refuses to watch the same path twice; events
+        // already arrive on the root watch when the parent is
+        // covered there.
+        if parent.as_path() == root_p || parent.as_path().starts_with(root_p) {
+            continue;
+        }
+        out.insert(
+            parent.clone(),
+            Registration {
+                path: parent,
+                recursive: false,
+                debounce_ms: 0,
+            },
+        );
+    }
+    Arc::new(out)
+}
+
+/// "Which language servers should be notified of which file
+/// changes this tick?" Walks the root-recursive watcher's events,
+/// drops `.git/` internal noise, and matches each surviving event
+/// against every server's registered globs. Returns one
+/// `LspCmd::DidChangeWatchedFiles` per affected server with a
+/// stable-sorted batch.
+///
+/// Idle / no-event ticks: empty `recent_events` → cache-hit the
+/// empty Vec.
+#[drv::memo(single)]
+pub fn lsp_watched_file_notifications<'a, 'b>(
+    events: FileWatchEventsInput<'a>,
+    globs: LspWatchedGlobsInput<'b>,
+) -> Arc<Vec<LspCmd>> {
+    if globs.by_server.is_empty() {
+        return Arc::new(Vec::new());
+    }
+    let Some(queue) = events.recent_events.get(&crate::WATCHER_ID_ROOT)
+    else {
+        return Arc::new(Vec::new());
+    };
+    let mut per_server: std::collections::HashMap<
+        ServerId,
+        std::collections::HashMap<CanonPath, FileEventKind>,
+    > = std::collections::HashMap::new();
+    for ev in queue {
+        let FileWatchEvent::Changed { path, kinds, .. } = ev else {
+            continue;
+        };
+        let lsp_kind = if kinds.contains_any(ChangeKinds::REMOVED) {
+            FileEventKind::Deleted
+        } else if kinds.contains_any(ChangeKinds::MODIFIED) {
+            FileEventKind::Changed
+        } else if kinds.contains_any(ChangeKinds::CREATED) {
+            FileEventKind::Created
+        } else {
+            continue;
+        };
+        let kind_bit: u8 = match lsp_kind {
+            FileEventKind::Created => ChangeKinds::CREATED,
+            FileEventKind::Changed => ChangeKinds::MODIFIED,
+            FileEventKind::Deleted => ChangeKinds::REMOVED,
+        };
+        let path_for_match = path.as_path();
+        for (server, registrations) in globs.by_server.iter() {
+            let matched = registrations.values().any(|globs| {
+                globs.iter().any(|g| {
+                    g.kinds & kind_bit != 0 && g.matcher.is_match(path_for_match)
+                })
+            });
+            if !matched {
+                continue;
+            }
+            let entry = per_server.entry(server.clone()).or_default();
+            let promote = match (entry.get(path), lsp_kind) {
+                (None, _) => true,
+                (Some(prev), new) => kind_priority(new) >= kind_priority(*prev),
+            };
+            if promote {
+                entry.insert(path.clone(), lsp_kind);
+            }
+        }
+    }
+    let cmds = per_server
+        .into_iter()
+        .map(|(server, by_path)| {
+            let mut changes: Vec<FileEvent> = by_path
+                .into_iter()
+                .map(|(path, kind)| FileEvent { path, kind })
+                .collect();
+            changes.sort_by(|a, b| a.path.as_path().cmp(b.path.as_path()));
+            LspCmd::DidChangeWatchedFiles { server, changes }
+        })
+        .collect();
+    Arc::new(cmds)
+}
+
+fn kind_priority(k: FileEventKind) -> u8 {
+    match k {
+        FileEventKind::Created => 1,
+        FileEventKind::Changed => 2,
+        FileEventKind::Deleted => 3,
+    }
 }
 
 /// Tab-bar slice of the render frame.

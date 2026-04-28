@@ -139,11 +139,14 @@ pub struct LspPending {
     /// edit invalidates the cache by not matching, and a
     /// fresh request fires on the next tick.
     pub inlay_hints_by_path: imbl::HashMap<CanonPath, BufferInlayHints>,
-    /// `(path, version)` pairs we've issued requests for.
-    /// The execute phase consults this so repeated ticks with
-    /// the same version don't spam the server. Cleared on
-    /// toggle-off or buffer version bump.
-    pub inlay_hints_requested: imbl::HashSet<(CanonPath, BufferVersion)>,
+    /// Path → latest version we've issued an inlay-hint
+    /// request for. The execute phase consults this so repeated
+    /// ticks with the same version don't spam the server.
+    /// Cleared on toggle-off; per-buffer entries are overwritten
+    /// when a fresh version is queued. Map (not set) so the
+    /// per-tick contains-check is `get(path) == Some(&version)`
+    /// — no path clone.
+    pub inlay_hints_requested: imbl::HashMap<CanonPath, BufferVersion>,
 
     // ── Format + format-on-save ────────────────────────────────
 
@@ -275,7 +278,7 @@ impl LspPending {
             start_line,
             end_line,
         });
-        self.inlay_hints_requested.insert((path, version));
+        self.inlay_hints_requested.insert(path, version);
         seq
     }
 
@@ -551,7 +554,7 @@ mod tests {
             },
         );
         p.inlay_hints_requested
-            .insert((canon("a.rs"), BufferVersion(3)));
+            .insert(canon("a.rs"), BufferVersion(3));
         p.clear_inlay_hint_cache();
         assert!(p.inlay_hints_by_path.is_empty());
         assert!(p.inlay_hints_requested.is_empty());
@@ -563,9 +566,9 @@ mod tests {
         let seq = p.queue_inlay_hints(canon("a.rs"), BufferVersion(5), 0, 20);
         assert_eq!(seq, LspRequestSeq(1));
         assert_eq!(p.pending_inlay_hint.len(), 1);
-        assert!(
-            p.inlay_hints_requested
-                .contains(&(canon("a.rs"), BufferVersion(5)))
+        assert_eq!(
+            p.inlay_hints_requested.get(&canon("a.rs")),
+            Some(&BufferVersion(5))
         );
     }
 
