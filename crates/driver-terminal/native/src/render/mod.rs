@@ -18,6 +18,14 @@
 //! which is exactly what lets the soft-wrap `\` live in the
 //! last column without being wiped.
 
+pub(crate) mod body;
+pub(crate) mod completion;
+pub(crate) mod popover;
+pub(crate) mod rename;
+pub(crate) mod side_panel;
+pub(crate) mod status_bar;
+pub(crate) mod tab_bar;
+
 use std::io::{self, Write};
 
 use crossterm::{cursor, queue, style as ct};
