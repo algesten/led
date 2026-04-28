@@ -323,6 +323,7 @@ impl<'a> AlertsInput<'a> {
 pub struct FsTreeInput<'a> {
     pub root: &'a Option<CanonPath>,
     pub dir_contents: &'a imbl::HashMap<CanonPath, imbl::Vector<led_state_browser::DirEntry>>,
+    pub failed_dirs: &'a imbl::HashSet<CanonPath>,
 }
 
 impl<'a> FsTreeInput<'a> {
@@ -330,6 +331,7 @@ impl<'a> FsTreeInput<'a> {
         Self {
             root: &fs.root,
             dir_contents: &fs.dir_contents,
+            failed_dirs: &fs.failed_dirs,
         }
     }
 }
@@ -2335,6 +2337,7 @@ pub fn browser_auto_expanded<'a>(
         &led_state_browser::FsTree {
             root: fs.root.clone(),
             dir_contents: fs.dir_contents.clone(),
+            failed_dirs: fs.failed_dirs.clone(),
         },
         ui.expanded_dirs,
         active_path.as_ref(),
@@ -2357,6 +2360,7 @@ pub fn browser_entries<'a>(
     let fs_copy = led_state_browser::FsTree {
         root: fs.root.clone(),
         dir_contents: fs.dir_contents.clone(),
+        failed_dirs: fs.failed_dirs.clone(),
     };
     let entries = led_state_browser::walk_tree(&fs_copy, ui.expanded_dirs);
     Arc::new(entries)
@@ -2393,13 +2397,21 @@ pub fn file_list_action<'a>(
 ) -> Vec<ListCmd> {
     let BrowserDerivedInputs { fs, ui, tabs: _, edits: _ } = inputs;
     let mut out: Vec<ListCmd> = Vec::new();
+    // `failed_dirs` is the "we tried, it didn't work, don't ask
+    // again until something changes" set. Without it, a stale
+    // `expanded_dirs` entry pointing at a deleted directory would
+    // re-fire `ListCmd::List` every tick — the runtime drops the
+    // `Err` result silently, so the path never enters `dir_contents`,
+    // so the next tick re-emits, so the worker re-fails, so the
+    // wake notifier fires, and the main loop sits at 100 % CPU.
     if let Some(root) = fs.root.as_ref()
         && !fs.dir_contents.contains_key(root)
+        && !fs.failed_dirs.contains(root)
     {
         out.push(ListCmd::List(root.clone()));
     }
     for dir in ui.expanded_dirs.iter() {
-        if !fs.dir_contents.contains_key(dir) {
+        if !fs.dir_contents.contains_key(dir) && !fs.failed_dirs.contains(dir) {
             out.push(ListCmd::List(dir.clone()));
         }
     }
@@ -2644,6 +2656,43 @@ mod tests {
             TabsOpenInput::new(&tabs),
         );
         assert_eq!(acts.len(), 2);
+    }
+
+    #[test]
+    fn list_action_skips_failed_dirs() {
+        // The spin-bug regression test: a path in `expanded_dirs`
+        // but not in `dir_contents` would normally re-emit
+        // `ListCmd::List` every tick; with the path also recorded
+        // in `failed_dirs` (the runtime's marker for "we tried,
+        // it didn't work"), the memo must skip it. Without this
+        // gate the main loop sat at 100 % CPU as the fs-list
+        // worker fail-loop signalled the wake notifier on every
+        // attempt.
+        let mut fs = led_state_browser::FsTree {
+            root: Some(canon("/proj")),
+            ..Default::default()
+        };
+        // Root listing already cached so the root itself doesn't
+        // contribute a List action — we want the test to isolate
+        // the `expanded_dirs` path.
+        fs.dir_contents.insert(canon("/proj"), imbl::Vector::new());
+        // One healthy expansion (no listing yet → should be
+        // emitted) and one failed expansion (should be skipped).
+        let mut ui = led_state_browser::BrowserUi::default();
+        ui.expanded_dirs.insert(canon("/proj/healthy"));
+        ui.expanded_dirs.insert(canon("/proj/missing"));
+        fs.failed_dirs.insert(canon("/proj/missing"));
+
+        let tabs = Tabs::default();
+        let edits = BufferEdits::default();
+        let acts = file_list_action(BrowserDerivedInputs {
+            fs: FsTreeInput::new(&fs),
+            ui: BrowserUiInput::new(&ui),
+            tabs: TabsActiveInput::new(&tabs),
+            edits: EditedBuffersInput::new(&edits),
+        });
+        assert_eq!(acts.len(), 1, "only the healthy path should emit");
+        assert_eq!(acts[0], ListCmd::List(canon("/proj/healthy")));
     }
 
     #[test]

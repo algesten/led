@@ -50,6 +50,20 @@ pub struct FsTree {
     pub root: Option<CanonPath>,
     /// Per-directory listing cache, filled by the FS driver.
     pub dir_contents: HashMap<CanonPath, Vector<DirEntry>>,
+    /// Directories whose last listing attempt failed (missing,
+    /// permission denied, etc). Mirrors `BufferStore`'s
+    /// `LoadState::Error` discipline: keeping the failure tracked
+    /// here is what lets `file_list_action` skip the path on
+    /// subsequent ticks instead of re-firing forever. In-memory
+    /// only — never persisted, so a transient failure (network
+    /// mount, etc.) gets one fresh attempt per session, and a
+    /// stale persisted `expanded_dirs` entry pointing at a deleted
+    /// dir burns one `read_dir` call per session instead of
+    /// spinning the loop. Cleared by `invalidate_subtree` and by
+    /// the `apply_workspace_tree_delta` CREATE path so a re-mkdir
+    /// or git checkout under the recursive root recovers without
+    /// user action.
+    pub failed_dirs: HashSet<CanonPath>,
 }
 
 /// **User-decision** source: the browser's UI state. Every field

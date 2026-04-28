@@ -495,6 +495,33 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
     let mut last_frame: Option<Frame> = None;
     let mut chord = ChordState::default();
 
+    // Resolve the per-user config dir + watcher's `notify/`
+    // subdir once. Both are inputs to the file-watch and
+    // session-init dispatch paths, and both involve
+    // `create_dir_all` + `realpath` syscalls. Doing them per-tick
+    // (the original code called `cli_config_dir.or_else(
+    // config_dir_for_session)` from three sites inside `loop {}`)
+    // dominated the main thread on the profiler — `__getattrlist`
+    // accounted for ~70 % of main-thread samples on an idle
+    // editor. Resolving once here amortises the syscalls over
+    // process lifetime; nothing here changes at runtime.
+    let resolved_config_dir: Option<CanonPath> = cli_config_dir
+        .and_then(|p| {
+            std::fs::create_dir_all(p).ok()?;
+            Some(led_core::UserPath::new(p).canonicalize())
+        })
+        .or_else(config_dir_for_session);
+    let resolved_notify_dir: Option<CanonPath> = resolved_config_dir.as_ref().map(|cfg| {
+        let raw = cfg.as_path().join("notify");
+        // Same belt-and-braces as the original
+        // `compute_watch_actions` body: ensure `<config>/notify/`
+        // exists before the watcher subscribes. Idempotent — the
+        // session driver's init will hit the same path on its
+        // own thread.
+        let _ = std::fs::create_dir_all(&raw);
+        led_core::UserPath::new(raw).canonicalize()
+    });
+
     loop {
         // ── Ingest ──────────────────────────────────────────────
         // Clear expired info alerts at the top of each tick — one
@@ -558,19 +585,13 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
                     .collect();
                 drivers.file.execute(reread_cmds.iter(), store);
             }
-            // sync_check_targets requires `cli_config_dir` to
-            // resolve; bring it forward.
-            let cfg_for_sync = cli_config_dir
-                .and_then(|p| {
-                    std::fs::create_dir_all(p).ok()?;
-                    Some(led_core::UserPath::new(p).canonicalize())
-                })
-                .or_else(config_dir_for_session);
-            if let Some(cfg) = cfg_for_sync {
+            // sync_check_targets needs the resolved config dir;
+            // we computed it once before the loop.
+            if let Some(cfg) = resolved_config_dir.as_ref() {
                 let sync_cmds = compute_sync_check_targets(
                     file_watch,
                     edits,
-                    &cfg,
+                    cfg,
                     undo_persistence,
                 );
                 if !sync_cmds.is_empty() {
@@ -1086,13 +1107,31 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
 
         // Apply fs-list completions: round-trip entries into the
         // `FsTree.dir_contents` cache and rebuild the flattened
-        // browser view. Failures leave the dir unlisted; the user
-        // can retry via CollapseAll-then-reopen.
+        // browser view. Failures land in `failed_dirs` so
+        // `file_list_action` stops re-emitting `ListCmd::List` for
+        // them — without that gate, a stale `expanded_dirs` entry
+        // pointing at a deleted directory pegs the main loop at
+        // 100 % CPU. Recovery (re-mkdir, git checkout) is automatic
+        // via the file watcher's CREATE path, which clears ancestor
+        // entries from `failed_dirs` so the next tick relists.
         let fs_completions = drivers.fs_list.process();
         for done in fs_completions {
-            if let Ok(entries) = done.result {
-                fs.dir_contents
-                    .insert(done.path, imbl::Vector::from_iter(entries));
+            match done.result {
+                Ok(entries) => {
+                    fs.failed_dirs.remove(&done.path);
+                    fs.dir_contents
+                        .insert(done.path, imbl::Vector::from_iter(entries));
+                }
+                Err(_) => {
+                    // Drop any stale cached listing too — the path
+                    // must have been readable when we last cached
+                    // it, and an Err now means whatever we have is
+                    // gone. Keeping the stale vector would leave
+                    // the sidebar showing children for a dir that
+                    // no longer reads.
+                    fs.dir_contents.remove(&done.path);
+                    fs.failed_dirs.insert(done.path);
+                }
             }
         }
         // Tree rebuild is no longer imperative — the
@@ -1841,13 +1880,7 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
             // otherwise `$XDG_CONFIG_HOME/led` →
             // `$HOME/.config/led`. Same source as the keymap /
             // theme loaders.
-            let cfg = cli_config_dir
-                .and_then(|p| {
-                    std::fs::create_dir_all(p).ok()?;
-                    Some(led_core::UserPath::new(p).canonicalize())
-                })
-                .or_else(config_dir_for_session);
-            if let Some(cfg) = cfg {
+            if let Some(cfg) = resolved_config_dir.clone() {
                 drivers.session.execute(std::iter::once(&SessionCmd::Init {
                     root: root.clone(),
                     config_dir: cfg,
@@ -1904,29 +1937,22 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
         if !no_workspace
             && session.init_done
             && let Some(root) = fs.root.as_ref()
+            && let Some(notify_dir) = resolved_notify_dir.as_ref()
         {
-            let cfg = cli_config_dir
-                .and_then(|p| {
-                    std::fs::create_dir_all(p).ok()?;
-                    Some(led_core::UserPath::new(p).canonicalize())
-                })
-                .or_else(config_dir_for_session);
-            if let Some(cfg) = cfg {
-                // Watch-actions diff: only output-side dispatch
-                // that stays in execute. Event-driven
-                // dispatches (reread / sync_check / tree
-                // refresh) ran in ingest so the in-tick query
-                // memos saw their effects.
-                let watch_cmds = compute_watch_actions(
-                    root,
-                    &cfg,
-                    edits,
-                    file_watch,
-                    watch_id_seq,
-                );
-                if !watch_cmds.is_empty() {
-                    drivers.file_watch.execute(watch_cmds.iter(), file_watch);
-                }
+            // Watch-actions diff: only output-side dispatch
+            // that stays in execute. Event-driven
+            // dispatches (reread / sync_check / tree
+            // refresh) ran in ingest so the in-tick query
+            // memos saw their effects.
+            let watch_cmds = compute_watch_actions(
+                root,
+                notify_dir,
+                edits,
+                file_watch,
+                watch_id_seq,
+            );
+            if !watch_cmds.is_empty() {
+                drivers.file_watch.execute(watch_cmds.iter(), file_watch);
             }
         }
 
@@ -2730,21 +2756,12 @@ const WATCHER_ID_NOTIFY_DIR: WatchSeq = WatchSeq(u64::MAX - 1);
 ///   `FileWatchState.registry`.
 fn compute_watch_actions(
     root: &CanonPath,
-    config_dir: &CanonPath,
+    notify_dir: &CanonPath,
     edits: &BufferEdits,
     file_watch: &led_driver_file_watch_core::FileWatchState,
     watch_id_seq: &mut WatchSeq,
 ) -> Vec<led_driver_file_watch_core::FileWatchCmd> {
     use led_driver_file_watch_core::{FileWatchCmd, Registration};
-    // Belt-and-braces: ensure `<config>/notify/` exists before
-    // we ask the watcher to subscribe. The session driver's
-    // init also creates it, but on a separate thread; this
-    // local create_dir_all guarantees the watch installs cleanly
-    // even if the runtime races ahead of the session worker.
-    let notify_dir_raw = config_dir.as_path().join("notify");
-    let _ = std::fs::create_dir_all(&notify_dir_raw);
-    let notify_dir =
-        led_core::UserPath::new(notify_dir_raw).canonicalize();
 
     // Desired: WatchSeq → Registration.
     let mut desired: std::collections::HashMap<WatchSeq, Registration> =
@@ -2760,7 +2777,7 @@ fn compute_watch_actions(
     desired.insert(
         WATCHER_ID_NOTIFY_DIR,
         Registration {
-            path: notify_dir,
+            path: notify_dir.clone(),
             recursive: false,
             debounce_ms: 100,
         },
@@ -3150,6 +3167,18 @@ fn apply_workspace_tree_delta(
         }
 
         if created {
+            // Recovery path for `failed_dirs`: a CREATE under
+            // `path` (or for `path` itself) proves the dir tree
+            // up to `path`'s parent now exists. Walk every
+            // ancestor up to the workspace root and drop any
+            // matching `failed_dirs` entry so the next tick's
+            // `file_list_action` re-emits `ListCmd::List` for
+            // the recovered dir. Without this hook, a re-mkdir
+            // or git checkout under the recursive root would
+            // leave the failure marker in place forever and the
+            // sidebar would never re-populate.
+            clear_ancestor_failures(fs, path);
+
             // Already-open buffer + CREATE: legacy quirk filter
             // (`docs/spec/buffers.md` § "External filesystem
             // change"). Skip the listing insert; the reread
@@ -3197,14 +3226,43 @@ fn apply_workspace_tree_delta(
     git_scan
 }
 
-/// Drop `path` and every cached descendant from `fs.dir_contents`.
-/// Called when a path is removed: any listing we had under it is
-/// stale. Cheap because cached entries are typed `imbl::HashMap` —
-/// retain walks the keys but the values are pointer copies.
+/// Drop `path` and every cached descendant from `fs.dir_contents`
+/// and `fs.failed_dirs`. Called when a path is removed: any
+/// listing we had under it is stale, and any cached "this
+/// listing failed" verdict is also stale (the dir doesn't exist
+/// at all now, no point gating future attempts on a verdict that
+/// applied to a different inode). Cheap because cached entries
+/// are typed `imbl::HashMap` / `imbl::HashSet` — retain walks
+/// the keys but the values are pointer copies.
 fn invalidate_subtree(fs: &mut FsTree, root: &CanonPath) {
     let prefix = root.as_path();
     fs.dir_contents
         .retain(|p, _| p != root && !p.as_path().starts_with(prefix));
+    fs.failed_dirs
+        .retain(|p| p != root && !p.as_path().starts_with(prefix));
+}
+
+/// Walk from `path` up through every ancestor (stopping at the
+/// workspace root, or the filesystem root if there's no
+/// workspace) and remove each one from `fs.failed_dirs`. Called
+/// from the watcher's CREATE branch — a fresh entry anywhere
+/// proves the dir chain leading to it is readable now. The walk
+/// includes `path` itself so a `mkdir crates/timers` event
+/// (where the new path equals the failed entry) recovers.
+fn clear_ancestor_failures(fs: &mut FsTree, path: &CanonPath) {
+    if fs.failed_dirs.is_empty() {
+        return;
+    }
+    let stop = fs.root.as_ref().map(|r| r.as_path());
+    let mut cur: Option<&std::path::Path> = Some(path.as_path());
+    while let Some(p) = cur {
+        let canon = led_core::UserPath::new(p.to_path_buf()).canonicalize();
+        fs.failed_dirs.remove(&canon);
+        if Some(p) == stop {
+            break;
+        }
+        cur = p.parent();
+    }
 }
 
 /// Stat `path` and classify it as file or directory. Returns
@@ -5422,6 +5480,70 @@ mod tests {
         let git = apply_workspace_tree_delta(&fw, &edits, &mut fs);
         assert!(!git);
         assert!(fs.dir_contents[&root_canon].is_empty());
+    }
+
+    #[test]
+    fn invalidate_subtree_clears_failed_dirs_too() {
+        // The companion to `dir_contents` cleanup: a subtree
+        // removal must also drop any "we tried, it failed"
+        // markers under that prefix, otherwise the failure
+        // verdict outlives the inode it was about and a later
+        // re-mkdir can't get past the gate.
+        let mut fs = workspace_fs(std::path::Path::new("/proj"));
+        fs.failed_dirs.insert(canon("/proj/sub"));
+        fs.failed_dirs.insert(canon("/proj/sub/inner"));
+        fs.failed_dirs.insert(canon("/proj/keepme"));
+
+        invalidate_subtree(&mut fs, &canon("/proj/sub"));
+
+        assert!(!fs.failed_dirs.contains(&canon("/proj/sub")));
+        assert!(!fs.failed_dirs.contains(&canon("/proj/sub/inner")));
+        assert!(fs.failed_dirs.contains(&canon("/proj/keepme")));
+    }
+
+    #[test]
+    fn delta_create_clears_failed_ancestors() {
+        // Recovery path: when the watcher reports a CREATE for a
+        // path nested inside a previously-failed dir (a re-mkdir
+        // or git checkout that brings the tree back), every
+        // ancestor up to the workspace root must be dropped from
+        // `failed_dirs` so the next tick relists them. Without
+        // this hook a deleted-then-restored expansion would never
+        // re-populate the sidebar even though the watcher saw
+        // the recreation events.
+        use led_driver_file_watch_core::ChangeKinds;
+        let dir = tempfile::tempdir().unwrap();
+        // Build a real subtree on disk so the CREATE event has
+        // something to reference. The watcher delta only looks at
+        // event metadata, but we use canon paths under the temp
+        // root so the ancestor walk has somewhere to terminate.
+        let nested = dir.path().join("revived").join("inner");
+        std::fs::create_dir_all(&nested).unwrap();
+        let leaf = nested.join("file.txt");
+        std::fs::write(&leaf, b"x").unwrap();
+
+        let mut fs = workspace_fs(dir.path());
+        let revived_canon =
+            led_core::UserPath::new(dir.path().join("revived")).canonicalize();
+        let inner_canon = led_core::UserPath::new(nested.clone()).canonicalize();
+        // Pre-seed the failures to mimic "stale persisted
+        // expansions whose dirs were missing earlier this session".
+        fs.failed_dirs.insert(revived_canon.clone());
+        fs.failed_dirs.insert(inner_canon.clone());
+
+        let edits = BufferEdits::default();
+        let leaf_canon = canon(leaf.to_str().unwrap());
+        let fw = fw_with(vec![make_event(&leaf_canon, ChangeKinds::CREATED)]);
+        let _ = apply_workspace_tree_delta(&fw, &edits, &mut fs);
+
+        assert!(
+            !fs.failed_dirs.contains(&revived_canon),
+            "ancestor `revived/` must be cleared"
+        );
+        assert!(
+            !fs.failed_dirs.contains(&inner_canon),
+            "ancestor `revived/inner/` must be cleared"
+        );
     }
 
     #[test]
