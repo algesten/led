@@ -809,6 +809,11 @@ impl<'a> Dispatcher<'a> {
             }
             Command::CursorUp => {
                 if browser_focused {
+                    let body_rows = self
+                        .terminal
+                        .dims
+                        .map(|d| d.rows.saturating_sub(2) as usize)
+                        .unwrap_or(1);
                     move_selection(
                         self.browser,
                         self.fs,
@@ -816,6 +821,7 @@ impl<'a> Dispatcher<'a> {
                         self.edits,
                         self.path_chains,
                         -1,
+                        body_rows,
                     );
                 } else {
                     move_cursor(
@@ -831,6 +837,11 @@ impl<'a> Dispatcher<'a> {
             }
             Command::CursorDown => {
                 if browser_focused {
+                    let body_rows = self
+                        .terminal
+                        .dims
+                        .map(|d| d.rows.saturating_sub(2) as usize)
+                        .unwrap_or(1);
                     move_selection(
                         self.browser,
                         self.fs,
@@ -838,6 +849,7 @@ impl<'a> Dispatcher<'a> {
                         self.edits,
                         self.path_chains,
                         1,
+                        body_rows,
                     );
                 } else {
                     move_cursor(
@@ -974,12 +986,18 @@ impl<'a> Dispatcher<'a> {
             }
             Command::CursorFileEnd => {
                 if browser_focused {
+                    let body_rows = self
+                        .terminal
+                        .dims
+                        .map(|d| d.rows.saturating_sub(2) as usize)
+                        .unwrap_or(1);
                     select_last(
                         self.browser,
                         self.fs,
                         self.tabs,
                         self.edits,
                         self.path_chains,
+                        body_rows,
                     );
                 } else {
                     move_cursor(

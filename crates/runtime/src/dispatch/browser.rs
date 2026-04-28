@@ -287,7 +287,8 @@ fn preview_current_selection(
 /// = one row down. Path-based: clamps the new index into the
 /// current entries, writes back the path of that row. Also opens a
 /// preview tab for the file now under the cursor (closes preview on
-/// directory rows).
+/// directory rows). `visible_rows` is the panel's row budget — used
+/// to keep the new selection inside the viewport.
 pub(super) fn move_selection(
     browser: &mut BrowserUi,
     fs: &FsTree,
@@ -295,16 +296,19 @@ pub(super) fn move_selection(
     edits: &BufferEdits,
     path_chains: &mut HashMap<CanonPath, PathChain>,
     delta: isize,
+    visible_rows: usize,
 ) {
     let entries = entries_of(browser, fs, tabs, edits);
     if entries.is_empty() {
         browser.selected_path = None;
+        browser.scroll_offset = 0;
         return;
     }
     let cur = browser_selected_idx(&entries, browser.selected_path.as_ref());
     let n = entries.len() as isize;
     let next = (cur as isize + delta).clamp(0, n - 1) as usize;
     browser.selected_path = Some(entries[next].path.clone());
+    clamp_scroll_to_selection(browser, &entries, next, visible_rows);
     preview_current_selection(browser, &entries, fs, tabs, path_chains);
 }
 
@@ -323,7 +327,7 @@ pub(super) fn page_selection(
     } else {
         -(page_rows as isize)
     };
-    move_selection(browser, fs, tabs, edits, path_chains, delta);
+    move_selection(browser, fs, tabs, edits, path_chains, delta, page_rows);
 }
 
 pub(super) fn select_first(
@@ -335,6 +339,7 @@ pub(super) fn select_first(
 ) {
     let entries = entries_of(browser, fs, tabs, edits);
     browser.selected_path = entries.first().map(|e| e.path.clone());
+    browser.scroll_offset = 0;
     preview_current_selection(browser, &entries, fs, tabs, path_chains);
 }
 
@@ -344,10 +349,36 @@ pub(super) fn select_last(
     tabs: &mut Tabs,
     edits: &BufferEdits,
     path_chains: &mut HashMap<CanonPath, PathChain>,
+    visible_rows: usize,
 ) {
     let entries = entries_of(browser, fs, tabs, edits);
     browser.selected_path = entries.last().map(|e| e.path.clone());
+    let last = entries.len().saturating_sub(1);
+    clamp_scroll_to_selection(browser, &entries, last, visible_rows);
     preview_current_selection(browser, &entries, fs, tabs, path_chains);
+}
+
+/// Minimum-movement scroll clamp. If `idx` is above the viewport,
+/// pull `scroll_offset` up to it; if below, push it down so `idx`
+/// is the last visible row. Mirrors the file_search variant.
+fn clamp_scroll_to_selection(
+    browser: &mut BrowserUi,
+    entries: &[TreeEntry],
+    idx: usize,
+    visible_rows: usize,
+) {
+    if visible_rows == 0 || entries.is_empty() {
+        return;
+    }
+    if idx < browser.scroll_offset {
+        browser.scroll_offset = idx;
+    } else if idx >= browser.scroll_offset + visible_rows {
+        browser.scroll_offset = idx + 1 - visible_rows;
+    }
+    let max_scroll = entries.len().saturating_sub(visible_rows);
+    if browser.scroll_offset > max_scroll {
+        browser.scroll_offset = max_scroll;
+    }
 }
 
 /// Sort helper used by tests (tree-order comparator).
@@ -571,9 +602,9 @@ mod tests {
         let edits = BufferEdits::default();
         let mut pc = HashMap::new();
         // Starts with selected_path = None → idx 0 = sub/.
-        move_selection(&mut b, &fs, &mut tabs, &edits, &mut pc, 2);
+        move_selection(&mut b, &fs, &mut tabs, &edits, &mut pc, 2, 100);
         assert_eq!(b.selected_path, Some(canon("/project/beta.txt")));
-        move_selection(&mut b, &fs, &mut tabs, &edits, &mut pc, -1);
+        move_selection(&mut b, &fs, &mut tabs, &edits, &mut pc, -1, 100);
         assert_eq!(b.selected_path, Some(canon("/project/alpha.txt")));
     }
 
@@ -584,7 +615,7 @@ mod tests {
         let edits = BufferEdits::default();
         let mut pc = HashMap::new();
         // Start at idx 0 (sub/, directory). Move to alpha.txt (file).
-        move_selection(&mut b, &fs, &mut tabs, &edits, &mut pc, 1);
+        move_selection(&mut b, &fs, &mut tabs, &edits, &mut pc, 1, 100);
         assert_eq!(tabs.open.len(), 1);
         assert!(tabs.open[0].preview);
         assert_eq!(tabs.open[0].path, canon("/project/alpha.txt"));
@@ -597,7 +628,7 @@ mod tests {
         let edits = BufferEdits::default();
         let mut pc = HashMap::new();
         b.selected_path = Some(canon("/project/alpha.txt"));
-        move_selection(&mut b, &fs, &mut tabs, &edits, &mut pc, -1);
+        move_selection(&mut b, &fs, &mut tabs, &edits, &mut pc, -1, 100);
         assert_eq!(b.selected_path, Some(canon("/project/sub")));
         assert!(tabs.open.is_empty());
     }
@@ -609,11 +640,11 @@ mod tests {
         let edits = BufferEdits::default();
         let mut pc = HashMap::new();
         // sub/ → alpha.txt (preview).
-        move_selection(&mut b, &fs, &mut tabs, &edits, &mut pc, 1);
+        move_selection(&mut b, &fs, &mut tabs, &edits, &mut pc, 1, 100);
         assert_eq!(tabs.open.len(), 1);
         assert!(tabs.open[0].preview);
         // Back to sub/ → preview closes.
-        move_selection(&mut b, &fs, &mut tabs, &edits, &mut pc, -1);
+        move_selection(&mut b, &fs, &mut tabs, &edits, &mut pc, -1, 100);
         assert!(tabs.open.is_empty());
         assert!(tabs.active.is_none());
     }
@@ -631,9 +662,9 @@ mod tests {
         });
         tabs.active = Some(TabId(7));
 
-        move_selection(&mut b, &fs, &mut tabs, &edits, &mut pc, 1); // alpha.txt (preview)
+        move_selection(&mut b, &fs, &mut tabs, &edits, &mut pc, 1, 100); // alpha.txt (preview)
         assert_eq!(tabs.open.len(), 2, "real + preview");
-        move_selection(&mut b, &fs, &mut tabs, &edits, &mut pc, -1); // back to sub/
+        move_selection(&mut b, &fs, &mut tabs, &edits, &mut pc, -1, 100); // back to sub/
         assert_eq!(tabs.open.len(), 1, "preview removed");
         assert_eq!(tabs.active, Some(TabId(7)), "real tab restored");
     }
@@ -644,8 +675,8 @@ mod tests {
         let mut tabs = Tabs::default();
         let edits = BufferEdits::default();
         let mut pc = HashMap::new();
-        move_selection(&mut b, &fs, &mut tabs, &edits, &mut pc, 1); // alpha.txt
-        move_selection(&mut b, &fs, &mut tabs, &edits, &mut pc, 1); // beta.txt
+        move_selection(&mut b, &fs, &mut tabs, &edits, &mut pc, 1, 100); // alpha.txt
+        move_selection(&mut b, &fs, &mut tabs, &edits, &mut pc, 1, 100); // beta.txt
         assert_eq!(tabs.open.len(), 1);
         assert_eq!(tabs.open[0].path, canon("/project/beta.txt"));
         assert!(tabs.open[0].preview);
@@ -654,5 +685,100 @@ mod tests {
     #[test]
     fn _dummy_ordering_is_equal() {
         assert_eq!(_dummy_ordering(), Ordering::Equal);
+    }
+
+    /// FsTree with `n` files at the project root, no subdirs. Used
+    /// to exercise scroll-follow with a known flat list length.
+    fn flat_tree(n: usize) -> (BrowserUi, FsTree) {
+        let mut fs = FsTree {
+            root: Some(canon("/project")),
+            ..Default::default()
+        };
+        let mut children = Vector::new();
+        for i in 0..n {
+            let name = format!("f{i:02}.txt");
+            let path = format!("/project/{name}");
+            children.push_back(dir_entry(&name, &path, DirEntryKind::File));
+        }
+        fs.dir_contents.insert(canon("/project"), children);
+        (BrowserUi::default(), fs)
+    }
+
+    #[test]
+    fn move_down_at_bottom_of_viewport_scrolls() {
+        let (mut b, fs) = flat_tree(20);
+        let mut tabs = Tabs::default();
+        let edits = BufferEdits::default();
+        let mut pc = HashMap::new();
+        // Visible window of 5 rows. Selection starts at idx 0; nine
+        // down-moves should land on idx 9 with scroll_offset = 5
+        // (idx 9 is the last visible row of [5..10)).
+        for _ in 0..9 {
+            move_selection(&mut b, &fs, &mut tabs, &edits, &mut pc, 1, 5);
+        }
+        assert_eq!(b.selected_path, Some(canon("/project/f09.txt")));
+        assert_eq!(b.scroll_offset, 5);
+    }
+
+    #[test]
+    fn move_up_at_top_of_viewport_scrolls() {
+        let (mut b, fs) = flat_tree(20);
+        let mut tabs = Tabs::default();
+        let edits = BufferEdits::default();
+        let mut pc = HashMap::new();
+        b.selected_path = Some(canon("/project/f09.txt"));
+        b.scroll_offset = 9;
+        move_selection(&mut b, &fs, &mut tabs, &edits, &mut pc, -1, 5);
+        assert_eq!(b.selected_path, Some(canon("/project/f08.txt")));
+        assert_eq!(b.scroll_offset, 8);
+    }
+
+    #[test]
+    fn move_within_viewport_does_not_scroll() {
+        let (mut b, fs) = flat_tree(20);
+        let mut tabs = Tabs::default();
+        let edits = BufferEdits::default();
+        let mut pc = HashMap::new();
+        // 5-row window covers idx [0..5). Move from 0 to 3 stays in
+        // window — scroll_offset must not move.
+        move_selection(&mut b, &fs, &mut tabs, &edits, &mut pc, 3, 5);
+        assert_eq!(b.scroll_offset, 0);
+    }
+
+    #[test]
+    fn select_first_resets_scroll() {
+        let (mut b, fs) = flat_tree(20);
+        let mut tabs = Tabs::default();
+        let edits = BufferEdits::default();
+        let mut pc = HashMap::new();
+        b.scroll_offset = 9;
+        b.selected_path = Some(canon("/project/f09.txt"));
+        select_first(&mut b, &fs, &mut tabs, &edits, &mut pc);
+        assert_eq!(b.selected_path, Some(canon("/project/f00.txt")));
+        assert_eq!(b.scroll_offset, 0);
+    }
+
+    #[test]
+    fn select_last_scrolls_to_end() {
+        let (mut b, fs) = flat_tree(20);
+        let mut tabs = Tabs::default();
+        let edits = BufferEdits::default();
+        let mut pc = HashMap::new();
+        select_last(&mut b, &fs, &mut tabs, &edits, &mut pc, 5);
+        assert_eq!(b.selected_path, Some(canon("/project/f19.txt")));
+        // Last entry idx 19, viewport 5 rows → first visible = 15.
+        assert_eq!(b.scroll_offset, 15);
+    }
+
+    #[test]
+    fn page_down_scrolls_a_full_page() {
+        let (mut b, fs) = flat_tree(20);
+        let mut tabs = Tabs::default();
+        let edits = BufferEdits::default();
+        let mut pc = HashMap::new();
+        page_selection(&mut b, &fs, &mut tabs, &edits, &mut pc, 5, true);
+        assert_eq!(b.selected_path, Some(canon("/project/f05.txt")));
+        // idx 5 is one past the bottom of [0..5) → scroll = 1.
+        assert_eq!(b.scroll_offset, 1);
     }
 }
