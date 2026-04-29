@@ -300,9 +300,9 @@ machinery gates on `WatchersReady`, browser seeds on `Workspace`.
 ## State domain in new arch
 
 - `WorkspaceState { root, user_root, config, primary }` lives in its own
-  domain atom. Loaded via `Event::WorkspaceResolved`.
+  domain source. Loaded via `Event::WorkspaceResolved`.
 - `SessionState { buffers: Vec<SessionBuffer>, active_tab_order,
-  show_side_panel, kv }` lives in its own atom. Populated by
+  show_side_panel, kv }` lives in its own source. Populated by
   `Event::SessionLoaded`. `SessionState.saved: bool` set on
   `Event::SessionSaved`. `SessionState.watchers_ready: bool` set on
   `Event::WatchersReady`.

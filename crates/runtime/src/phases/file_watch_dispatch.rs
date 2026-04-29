@@ -17,11 +17,11 @@ use crate::apply::session::{disk_content_hash_for, new_chain_id};
 use crate::phases::TickEnv;
 use crate::query::{self, ClipboardStateInput};
 use crate::query::clipboard_action;
-use crate::{Atoms, LspNotified, UndoFlushDebounce, UndoPersistTracker};
+use crate::{Sources, LspNotified, UndoFlushDebounce, UndoPersistTracker};
 use led_core::UndoDbSeq;
 
-pub(crate) fn run(atoms: &mut Atoms, env: &TickEnv<'_>) {
-    let Atoms {
+pub(crate) fn run(sources: &mut Sources, env: &TickEnv<'_>) {
+    let Sources {
         tabs,
         edits,
         clip,
@@ -39,7 +39,7 @@ pub(crate) fn run(atoms: &mut Atoms, env: &TickEnv<'_>) {
         file_watch,
         watch_id_seq,
         ..
-    } = atoms;
+    } = sources;
 
     // ── M26 watch-actions diff ──────────────────────────────
     if !env.no_workspace

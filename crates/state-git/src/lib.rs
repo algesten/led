@@ -1,4 +1,4 @@
-//! Git state atom — branch, per-file `IssueCategory` sets, and
+//! Git state source — branch, per-file `IssueCategory` sets, and
 //! per-buffer line-status lists.
 //!
 //! Populated by the runtime when it folds in driver events:
@@ -43,7 +43,7 @@ pub struct GitLineStatuses {
     pub statuses: Arc<Vec<LineStatus>>,
 }
 
-/// Full git state surface in one atom. `imbl` collections so
+/// Full git state surface in one source. `imbl` collections so
 /// `Clone` is a pointer copy — the drv memos that project over
 /// `GitStateInput` only invalidate on identity change.
 #[derive(Debug, Clone, Default, PartialEq)]

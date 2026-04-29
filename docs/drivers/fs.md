@@ -143,7 +143,7 @@ into the fs input driver so there is **one place** that owns the
   `BrowserState.dir_contents` keyed by path.
 - `Request::FindFile` result lands as `Loaded<Vec<FindFileEntry>>` in
   `UiState.find_file.completions` (or a dedicated `FindFileState`).
-- `Event::FsChanged` is transient; applied to whichever domain atom cares:
+- `Event::FsChanged` is transient; applied to whichever domain source cares:
   `BufferState` for open‑file external change, `BrowserState.dir_contents`
   for tree refresh, `GitState` for `.git/`‑internal sentinel hits.
 

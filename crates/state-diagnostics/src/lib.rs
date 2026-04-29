@@ -1,4 +1,4 @@
-//! Per-buffer LSP diagnostics — the state atom plus the domain
+//! Per-buffer LSP diagnostics — the state source plus the domain
 //! types that cross the LSP driver's ABI.
 //!
 //! # Scope
@@ -69,7 +69,7 @@ pub struct Diagnostic {
     pub code: Option<String>,
 }
 
-// ── Atom ──
+// ── Source ──
 
 /// Per-buffer diagnostics, keyed by canonical path. Populated by
 /// the runtime when it accepts an [`LspEvent::Diagnostics`]

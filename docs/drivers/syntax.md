@@ -139,14 +139,14 @@ remains.
 
 ## State domain in new arch
 
-- `SyntaxState` (per-buffer, inside `BufferState` or a sibling atom):
+- `SyntaxState` (per-buffer, inside `BufferState` or a sibling source):
   `highlights: Loaded<Vec<(Row, HighlightSpan)>>`,
   `bracket_pairs: Vec<BracketPair>`,
   `reindent_chars: Arc<[char]>`,
   `last_parsed_version: DocVersion`.
 - Auto-indent is transient, not state — it's consumed once by the
   `ApplyIndent` reducer and the `pending_indent_row` on the buffer is
-  cleared. No atom slot needed.
+  cleared. No source slot needed.
 
 ## Versioned / position-sensitive data
 

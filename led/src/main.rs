@@ -1,6 +1,6 @@
 //! `led` — the binary entry point.
 //!
-//! Thin `main`: parse CLI, acquire raw mode, construct atoms + drivers,
+//! Thin `main`: parse CLI, acquire raw mode, construct sources + drivers,
 //! hand off to `led_runtime::run`.
 
 use std::io::{self, Write};
@@ -10,7 +10,7 @@ use clap::Parser;
 use led_core::UserPath;
 use led_driver_terminal_native::RawModeGuard;
 use led_runtime::{
-    load_keymap, load_theme, spawn_drivers, Atoms, SharedTrace, TabIdGen, Wake, World,
+    load_keymap, load_theme, spawn_drivers, Sources, SharedTrace, TabIdGen, Wake, World,
 };
 use led_state_browser::FsTree;
 use led_state_tabs::Tab;
@@ -85,8 +85,8 @@ fn main() -> io::Result<()> {
         None => SharedTrace::noop(),
     };
 
-    // Build atoms as plain structs.
-    let mut atoms = Atoms {
+    // Build sources as plain structs.
+    let mut sources = Sources {
         // Workspace root = process cwd. M19 (git integration) will
         // walk up for `.git` instead; for M11 the CWD convention
         // matches the typical `cd <project> && led <file>` path.
@@ -106,9 +106,9 @@ fn main() -> io::Result<()> {
         // SaveSession dispatch. Mirrors legacy's no-workspace
         // semantics: the file may be open and editable, but no
         // workspace metadata is persisted.
-        atoms.session.init_done = true;
-        atoms.session.saved = true;
-        atoms.session.primary = false;
+        sources.session.init_done = true;
+        sources.session.saved = true;
+        sources.session.primary = false;
     }
 
     // Seed tabs from CLI args. Each open path auto-expands its
@@ -134,8 +134,8 @@ fn main() -> io::Result<()> {
         let user = UserPath::new(f);
         let chain = user.resolve_chain();
         let canon = chain.resolved.clone();
-        atoms.path_chains.insert(canon.clone(), chain);
-        atoms.tabs.open.push_back(Tab {
+        sources.path_chains.insert(canon.clone(), chain);
+        sources.tabs.open.push_back(Tab {
             id,
             path: canon,
             ..Default::default()
@@ -143,7 +143,7 @@ fn main() -> io::Result<()> {
         // Each CLI file supersedes as the active tab — the LAST path
         // on the command line wins. Matches legacy and the goldens'
         // `led a.txt b.txt` convention (b.txt becomes active).
-        atoms.tabs.active = Some(id);
+        sources.tabs.active = Some(id);
     }
 
     // Raw mode *after* CLI parse so `--help` / parse errors still go to
@@ -165,7 +165,7 @@ fn main() -> io::Result<()> {
 
     let mut stdout = io::stdout();
     let mut world = World {
-        atoms: &mut atoms,
+        sources: &mut sources,
         drivers: &drivers,
         keymap: &keymap,
         theme: &theme,

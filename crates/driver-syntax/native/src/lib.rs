@@ -96,7 +96,7 @@ fn run_parse(parser: &mut Parser, cursor: &mut QueryCursor, cmd: SyntaxCmd) -> S
     // from the two rope snapshots at parse time rather than
     // trusting an edits-since-prev list stamped by the runtime.
     // Deriving from the ropes themselves makes the tree a pure
-    // function of the current rope atom: undo/redo can't put
+    // function of the current rope source: undo/redo can't put
     // the tree and the source bytes out of sync because there's
     // no intermediate history counter to drift. `None` on either
     // side (or ropes identical) → full parse.

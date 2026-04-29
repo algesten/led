@@ -1,7 +1,7 @@
-//! Dispatch: applies `Event`s to atoms.
+//! Dispatch: applies `Event`s to sources.
 //!
 //! Kept deliberately small per QUERY-ARCH § "The event handler". Each
-//! function mutates atoms directly; no memos, no queries. Returns a
+//! function mutates sources directly; no memos, no queries. Returns a
 //! [`DispatchOutcome`] so the main loop can learn that a quit was
 //! requested without looking for a sentinel in state.
 //!
@@ -21,7 +21,7 @@
 //! - [`save`] — request_save_active, request_save_all.
 //!
 //! Each submodule owns its own `#[cfg(test)] mod tests`. Shared
-//! fixtures (atom builders, dispatch wrappers) live in [`testutil`];
+//! fixtures (source builders, dispatch wrappers) live in [`testutil`];
 //! `mod tests` in this file covers only the dispatch-level concerns
 //! (chord resolution, implicit-insert gating, quit chord, abort).
 
@@ -164,7 +164,7 @@ pub struct Dispatcher<'a> {
     /// pending iteration count.
     pub kbd_macro: &'a mut KbdMacroState,
     /// M23: per-buffer parse trees. Read-only here — the syntax
-    /// driver populates `Atoms.syntax` in the ingest phase; the
+    /// driver populates `Sources.syntax` in the ingest phase; the
     /// `InsertTab`, `InsertNewline` (auto-indent), and
     /// `SortImports` arms read it sync to derive their effect
     /// (no driver round-trip; see `MILESTONE-23.md` § D1).

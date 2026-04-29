@@ -7,10 +7,10 @@ use led_state_lifecycle::Phase;
 
 use crate::apply::session::build_session_data;
 use crate::phases::TickEnv;
-use crate::Atoms;
+use crate::Sources;
 
-pub(crate) fn run(atoms: &mut Atoms, env: &TickEnv<'_>) {
-    let Atoms {
+pub(crate) fn run(sources: &mut Sources, env: &TickEnv<'_>) {
+    let Sources {
         tabs,
         edits,
         store,
@@ -21,7 +21,7 @@ pub(crate) fn run(atoms: &mut Atoms, env: &TickEnv<'_>) {
         session_save_dispatched,
         lifecycle,
         ..
-    } = atoms;
+    } = sources;
 
     if !session.init_done
         && let Some(root) = fs.root.as_ref()

@@ -1,6 +1,6 @@
 //! Find-file / save-as overlay state.
 //!
-//! `FindFileState` is held behind an `Option` on `Atoms`. `None` means
+//! `FindFileState` is held behind an `Option` on `Sources`. `None` means
 //! the overlay isn't active; `Some` means dispatch is in overlay mode —
 //! the `[find_file]` keymap context takes over, the status bar shows
 //! the prompt (`Find file:` / `Save as:`), and the side panel displays
@@ -32,7 +32,7 @@ pub enum FindFileMode {
 /// Overlay state.
 ///
 /// All fields are mutated by dispatch on every keystroke while the
-/// overlay is active; the `Option<FindFileState>` on `Atoms` toggles
+/// overlay is active; the `Option<FindFileState>` on `Sources` toggles
 /// the overlay off at the top level when dispatch deactivates.
 #[derive(Debug, Clone, PartialEq, Eq, drv::Input)]
 pub struct FindFileState {

@@ -3,7 +3,7 @@
 //! Knows only its own ABI: `ListCmd`, `ListDone`, `DirEntry` (re-
 //! exported from `state-browser` so the worker can emit them
 //! directly), and the `Trace` hook. The runtime wires it up and
-//! owns whatever cross-atom logic decides *when* to list.
+//! owns whatever cross-source logic decides *when* to list.
 
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender};

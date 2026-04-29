@@ -91,15 +91,15 @@ The renderer absorbs into the runtime loop. Instead of a driver emitting frames 
 
 | Current behavior                                     | New classification                                                             |
 |------------------------------------------------------|--------------------------------------------------------------------------------|
-| 7 derived projections × `.dedupe()` → `combine!` → draw | Single memoized render query over the state domain atoms; ratatui handles diffing |
-| `force_redraw: RedrawSeq` in `AppState`              | Dropped. The query always returns the full frame; ratatui/clear logic moves into the runtime. POST-REWRITE-REVIEW.md § "Fields that belong in a domain atom" marks `force_redraw` as "drop". |
+| 7 derived projections × `.dedupe()` → `combine!` → draw | Single memoized render query over the state domain sources; ratatui handles diffing |
+| `force_redraw: RedrawSeq` in `AppState`              | Dropped. The query always returns the full frame; ratatui/clear logic moves into the runtime. POST-REWRITE-REVIEW.md § "Fields that belong in a domain source" marks `force_redraw` as "drop". |
 | `CachedSizeBackend`                                  | Stays — it's a ratatui integration detail, not a domain concern                |
 | Tab overflow → `UiIn::EvictOneBuffer`                | Open question [unclear]. Three options: (a) eviction becomes a pure query that returns a `Request::EvictBuffer` when overflow is detected; (b) the renderer retains a narrow event-back-channel for this one signal; (c) width-sum moves into model as a derived `UiState::tabs_overflow: bool`, and a reducer listens for the transition. (c) duplicates layout math currently owned by render; (a) is cleanest but requires the runtime to route renderer-computed requests, which no other resource driver needs. |
 
 ## State domain in new arch
 
 - No input events beyond the optional `EvictOneBuffer` variant above.
-- Reads from every domain atom — this is the confluence point.
+- Reads from every domain source — this is the confluence point.
 - No resource results land here.
 
 ## Versioned / position-sensitive data

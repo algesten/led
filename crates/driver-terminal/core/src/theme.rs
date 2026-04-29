@@ -530,7 +530,7 @@ impl Default for Theme {
             // so a user with no theme.toml sees the same browser
             // glyph colours on main and rewrite. The enum is
             // populated but the memo only emits LSP categories
-            // until the git / PR atoms land (M19 / M27).
+            // until the git / PR sources land (M19 / M27).
             git_modified: Style {
                 fg: Some(Color::Indexed(172)),
                 ..Style::default()

@@ -107,7 +107,7 @@ event, even for empty clipboards (`Event::ClipboardRead(String::new())`).
 
 ## State domain in new arch
 
-- Nothing persistent lands in any atom. `Event::ClipboardRead` is
+- Nothing persistent lands in any source. `Event::ClipboardRead` is
   consumed transiently by the yank saga, which then updates
   `BufferState` (cursor, rope contents) and `EditState::kill_ring`.
 - The kill-ring lives in `EditState` (per the AppState translation

@@ -33,7 +33,7 @@ pub(crate) fn config_dir_for_session() -> Option<CanonPath> {
     Some(led_core::UserPath::new(path).canonicalize())
 }
 
-/// Build the [`SessionData`] payload from the live atom set.
+/// Build the [`SessionData`] payload from the live source set.
 /// Mirrors legacy's session-on-quit assembly: one
 /// `SessionBuffer` per non-preview tab (cursor + scroll), plus
 /// the active-tab order, the side-panel toggle, and any kv pairs
@@ -78,7 +78,7 @@ pub(crate) fn build_session_data(
 }
 
 /// Inverse of [`build_session_kv`]: re-hydrates the browser +
-/// jump-list atoms from the kv blob the driver loaded out of
+/// jump-list sources from the kv blob the driver loaded out of
 /// `session_kv`. Legacy's equivalent is `model::session_of`.
 /// Unknown keys are tolerated; type-mismatched values fall back
 /// to defaults so a corrupted row doesn't block the restore.

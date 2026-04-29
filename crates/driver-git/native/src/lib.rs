@@ -16,7 +16,7 @@
 //!
 //! A failed `Repository::open` (not a repo, permissions, etc.)
 //! returns *no* events — silent no-op per `docs/spec/git.md`
-//! "Error paths". The runtime's atom keeps its previous values.
+//! "Error paths". The runtime's source keeps its previous values.
 //!
 //! The port of `scan_file_statuses` and `scan_line_statuses` is
 //! verbatim from legacy `led/crates/git/src/lib.rs`, translated

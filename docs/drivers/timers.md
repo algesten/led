@@ -128,7 +128,7 @@ semantics up to the call sites.
 ## State domain in new arch
 
 None. Timer state is driver-internal (or dispatcher-internal) and
-never lands in a domain atom. `spinner_tick: u32` in `LspState` is
+never lands in a domain source. `spinner_tick: u32` in `LspState` is
 state derived from timer fires, but the timer itself is not.
 
 ## Versioned / position-sensitive data

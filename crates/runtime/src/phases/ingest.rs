@@ -1,6 +1,6 @@
 //! Ingest phase, decomposed into per-source sub-phases.
 //!
-//! Each `ingest_*` function destructures only the `Atoms` fields
+//! Each `ingest_*` function destructures only the `Sources` fields
 //! it actually touches, keeping the borrow checker happy without
 //! threading 40 arguments through.
 
@@ -26,16 +26,16 @@ use crate::apply::session::{apply_pending_undo_restore, apply_session_kv, apply_
 use crate::dispatch;
 use crate::phases::TickEnv;
 use crate::query::{self, EditedBuffersInput};
-use crate::{diag_offer, Atoms, LspNotified, INFO_TTL};
+use crate::{diag_offer, Sources, LspNotified, INFO_TTL};
 
 /// Tick-start clock update + per-tick expiry sweeps.
-pub(crate) fn ingest_clock(atoms: &mut Atoms) {
-    let Atoms {
+pub(crate) fn ingest_clock(sources: &mut Sources) {
+    let Sources {
         alerts,
         find_file,
         clock,
         ..
-    } = atoms;
+    } = sources;
     clock.now = std::time::Instant::now();
     alerts.expire_info(clock.now);
     if let Some(ff) = find_file.as_mut() {
@@ -46,8 +46,8 @@ pub(crate) fn ingest_clock(atoms: &mut Atoms) {
 /// File-watch ingest: drain events, apply browser-tree deltas, fan
 /// out reread / sync-check / LSP-watched-files dispatches in the
 /// same tick the events landed.
-pub(crate) fn ingest_file_watch(atoms: &mut Atoms, env: &TickEnv<'_>) {
-    let Atoms {
+pub(crate) fn ingest_file_watch(sources: &mut Sources, env: &TickEnv<'_>) {
+    let Sources {
         edits,
         store,
         fs,
@@ -57,7 +57,7 @@ pub(crate) fn ingest_file_watch(atoms: &mut Atoms, env: &TickEnv<'_>) {
         git_scan_pending,
         session,
         ..
-    } = atoms;
+    } = sources;
 
     env.drivers.file_watch.process(file_watch);
 
@@ -107,8 +107,8 @@ pub(crate) fn ingest_file_watch(atoms: &mut Atoms, env: &TickEnv<'_>) {
 
 /// File-read driver completions: rereads, then initial loads,
 /// then resume-check bookkeeping.
-pub(crate) fn ingest_file_completions(atoms: &mut Atoms, env: &TickEnv<'_>) {
-    let Atoms {
+pub(crate) fn ingest_file_completions(sources: &mut Sources, env: &TickEnv<'_>) {
+    let Sources {
         tabs,
         edits,
         store,
@@ -123,7 +123,7 @@ pub(crate) fn ingest_file_completions(atoms: &mut Atoms, env: &TickEnv<'_>) {
         lifecycle,
         git_scan_pending,
         ..
-    } = atoms;
+    } = sources;
 
     let file_completions = env.drivers.file.process(store);
     for reread in &file_completions.rereads {
@@ -244,8 +244,8 @@ pub(crate) fn ingest_file_completions(atoms: &mut Atoms, env: &TickEnv<'_>) {
 
 /// LSP event drain: diagnostics, status, completions, goto, edits,
 /// code-actions, inlay hints, dynamic watch registrations.
-pub(crate) fn ingest_lsp_events(atoms: &mut Atoms, env: &TickEnv<'_>) {
-    let Atoms {
+pub(crate) fn ingest_lsp_events(sources: &mut Sources, env: &TickEnv<'_>) {
+    let Sources {
         tabs,
         edits,
         alerts,
@@ -261,7 +261,7 @@ pub(crate) fn ingest_lsp_events(atoms: &mut Atoms, env: &TickEnv<'_>) {
         lsp_pending,
         lsp_watched_globs,
         ..
-    } = atoms;
+    } = sources;
 
     for ev in env.drivers.lsp.process() {
         match ev {
@@ -472,15 +472,15 @@ pub(crate) fn ingest_lsp_events(atoms: &mut Atoms, env: &TickEnv<'_>) {
 
 /// File-write driver completions: install saved rope as new disk
 /// baseline, surface alerts, mark git scan pending.
-pub(crate) fn ingest_file_writes(atoms: &mut Atoms, env: &TickEnv<'_>) {
-    let Atoms {
+pub(crate) fn ingest_file_writes(sources: &mut Sources, env: &TickEnv<'_>) {
+    let Sources {
         edits,
         store,
         alerts,
         clock,
         git_scan_pending,
         ..
-    } = atoms;
+    } = sources;
 
     for done in env.drivers.file_write.process() {
         let basename = done
@@ -514,8 +514,8 @@ pub(crate) fn ingest_file_writes(atoms: &mut Atoms, env: &TickEnv<'_>) {
 
 /// Fs-list driver completions: install entries (or failure marker)
 /// into the browser tree cache.
-pub(crate) fn ingest_fs_list(atoms: &mut Atoms, env: &TickEnv<'_>) {
-    let Atoms { fs, .. } = atoms;
+pub(crate) fn ingest_fs_list(sources: &mut Sources, env: &TickEnv<'_>) {
+    let Sources { fs, .. } = sources;
     let fs_completions = env.drivers.fs_list.process();
     for done in fs_completions {
         match done.result {
@@ -534,12 +534,12 @@ pub(crate) fn ingest_fs_list(atoms: &mut Atoms, env: &TickEnv<'_>) {
 
 /// Find-file driver completions: install matching listings into
 /// the overlay; auto-advance in arrow-follow mode.
-pub(crate) fn ingest_find_file(atoms: &mut Atoms, env: &TickEnv<'_>) {
-    let Atoms {
+pub(crate) fn ingest_find_file(sources: &mut Sources, env: &TickEnv<'_>) {
+    let Sources {
         tabs,
         find_file,
         ..
-    } = atoms;
+    } = sources;
     for done in env.drivers.find_file.process() {
         let Some(ff) = find_file.as_mut() else {
             continue;
@@ -563,14 +563,14 @@ pub(crate) fn ingest_find_file(atoms: &mut Atoms, env: &TickEnv<'_>) {
 /// File-search driver completions: install search results, then
 /// apply replace-all completions (alert with combined disk + memory
 /// counts).
-pub(crate) fn ingest_file_search(atoms: &mut Atoms, env: &TickEnv<'_>) {
-    let Atoms {
+pub(crate) fn ingest_file_search(sources: &mut Sources, env: &TickEnv<'_>) {
+    let Sources {
         edits,
         alerts,
         clock,
         file_search,
         ..
-    } = atoms;
+    } = sources;
     for done in env.drivers.file_search.process() {
         let Some(fs_state) = file_search.as_mut() else {
             continue;
@@ -609,8 +609,8 @@ pub(crate) fn ingest_file_search(atoms: &mut Atoms, env: &TickEnv<'_>) {
 
 /// Syntax driver completions: install fresh tree + tokens; clear
 /// stale `in_flight_version`.
-pub(crate) fn ingest_syntax(atoms: &mut Atoms, env: &TickEnv<'_>) {
-    let Atoms { edits, syntax, .. } = atoms;
+pub(crate) fn ingest_syntax(sources: &mut Sources, env: &TickEnv<'_>) {
+    let Sources { edits, syntax, .. } = sources;
     for done in env.drivers.syntax.process() {
         let Some(state) = syntax.by_path.get_mut(&done.path) else {
             continue;
@@ -637,8 +637,8 @@ pub(crate) fn ingest_syntax(atoms: &mut Atoms, env: &TickEnv<'_>) {
 /// Session driver events: Restored / SessionSaved / UndoFlushed /
 /// Failed / SyncResult. Promotes Phase::Starting → Resuming/Running
 /// based on whether tabs have any pending cursors to apply.
-pub(crate) fn ingest_session(atoms: &mut Atoms, env: &TickEnv<'_>) {
-    let Atoms {
+pub(crate) fn ingest_session(sources: &mut Sources, env: &TickEnv<'_>) {
+    let Sources {
         tabs,
         edits,
         alerts,
@@ -651,7 +651,7 @@ pub(crate) fn ingest_session(atoms: &mut Atoms, env: &TickEnv<'_>) {
         lifecycle,
         file_watch,
         ..
-    } = atoms;
+    } = sources;
 
     let mut session_just_restored = false;
     for ev in env.drivers.session.process() {
@@ -780,8 +780,8 @@ pub(crate) fn ingest_session(atoms: &mut Atoms, env: &TickEnv<'_>) {
 
 /// Git driver events: file statuses + per-path line statuses
 /// (anchored to the buffer's disk-content hash).
-pub(crate) fn ingest_git(atoms: &mut Atoms, env: &TickEnv<'_>) {
-    let Atoms { edits, git, .. } = atoms;
+pub(crate) fn ingest_git(sources: &mut Sources, env: &TickEnv<'_>) {
+    let Sources { edits, git, .. } = sources;
     for ev in env.drivers.git.process() {
         match ev {
             GitEvent::FileStatuses { statuses, branch } => {
@@ -824,8 +824,8 @@ pub(crate) fn ingest_git(atoms: &mut Atoms, env: &TickEnv<'_>) {
 
 /// Clipboard completions: paste-on-yank, kill-ring fallback,
 /// write acknowledgement.
-pub(crate) fn ingest_clipboard(atoms: &mut Atoms, env: &TickEnv<'_>) {
-    let Atoms {
+pub(crate) fn ingest_clipboard(sources: &mut Sources, env: &TickEnv<'_>) {
+    let Sources {
         tabs,
         edits,
         kill_ring,
@@ -833,7 +833,7 @@ pub(crate) fn ingest_clipboard(atoms: &mut Atoms, env: &TickEnv<'_>) {
         browser,
         terminal,
         ..
-    } = atoms;
+    } = sources;
     for done in env.drivers.clipboard.process() {
         let content_cols = dispatch::editor_content_cols(terminal, browser);
         match done.result {
@@ -859,8 +859,8 @@ pub(crate) fn ingest_clipboard(atoms: &mut Atoms, env: &TickEnv<'_>) {
 /// Browser-selection snap: pin the side-panel cursor to the active
 /// tab's path unless the user is currently arrow-navigating the
 /// side panel itself.
-pub(crate) fn ingest_browser_snap(atoms: &mut Atoms) {
-    let Atoms { tabs, browser, .. } = atoms;
+pub(crate) fn ingest_browser_snap(sources: &mut Sources) {
+    let Sources { tabs, browser, .. } = sources;
     if !matches!(browser.focus, led_state_browser::Focus::Side) {
         let active_path_now: Option<&CanonPath> = tabs
             .active

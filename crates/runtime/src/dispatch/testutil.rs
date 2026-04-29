@@ -32,7 +32,7 @@ use super::Dispatcher;
 use super::{ChordState, DispatchOutcome};
 use crate::keymap::default_keymap;
 
-// ── Atom + event builders ──────────────────────────────────────────────
+// ── Source + event builders ────────────────────────────────────────────
 
 pub(super) fn canon(s: &str) -> CanonPath {
     UserPath::new(s).canonicalize()

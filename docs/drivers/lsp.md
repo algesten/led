@@ -115,7 +115,7 @@ Inside each `LanguageServer`: `name`, `next_id: AtomicI32`, `outbound_tx` (stdin
 
 ## State domain in new arch
 
-Per `docs/rewrite/QUERY-ARCH.md:98-110`, `LspState` becomes its own domain atom owned by a single reducer. Current fields in `crates/state/src/lib.rs:1795-1813` map as follows:
+Per `docs/rewrite/QUERY-ARCH.md:98-110`, `LspState` becomes its own domain source owned by a single reducer. Current fields in `crates/state/src/lib.rs:1795-1813` map as follows:
 
 ```rust
 pub struct LspState {

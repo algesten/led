@@ -1,6 +1,6 @@
 //! Shared foundational types for the led rewrite.
 //!
-//! Everything here is cross-cutting and atom-free — no `drv::atom`,
+//! Everything here is cross-cutting and source-free — no `drv::Input` derive,
 //! no drivers, no app logic. Currently:
 //!
 //! - [`id_newtype!`] / [`string_newtype!`] — macros for strongly-typed

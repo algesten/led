@@ -6,10 +6,10 @@ publish = false
 
 # Desktop wiring crate. Owns:
 #
-# - The event enum + dispatch (which mutates driver atoms in response
+# - The event enum + dispatch (which mutates driver sources in response
 #   to input events).
 # - The query layer: standalone `#[drv::lens]` declarations projecting
-#   every driver's atom, and the cross-atom memos that combine them
+#   every driver's source, and the cross-source memos that combine them
 #   into `LoadAction`s and `Frame`s.
 # - The `Trace` trait + `SharedTrace` file sink.
 # - The `run` main loop: ingest → query → execute → render.

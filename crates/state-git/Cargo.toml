@@ -4,7 +4,7 @@ version = "0.0.0"
 edition = "2024"
 publish = false
 
-# Git state atom for M19: the current branch name (or None for
+# Git state source for M19: the current branch name (or None for
 # detached HEAD / non-repos), the per-file IssueCategory set
 # (browser decoration), and the per-file list of per-line
 # statuses (gutter bars).

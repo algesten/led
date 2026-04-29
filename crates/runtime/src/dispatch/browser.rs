@@ -7,7 +7,7 @@
 //!
 //! The flattened tree, the auto-reveal ancestor set, and the
 //! selection index all come from the query layer as memos — no
-//! imperative rebuild calls on the state atom.
+//! imperative rebuild calls on the state source.
 //!
 //! All functions are silent no-ops when preconditions fail (no root,
 //! no selection, closed tab, etc.) — matches legacy browser

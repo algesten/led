@@ -12,10 +12,10 @@
 use led_driver_git_core::GitCmd;
 
 use crate::phases::TickEnv;
-use crate::Atoms;
+use crate::Sources;
 
-pub(crate) fn run(atoms: &mut Atoms, env: &TickEnv<'_>) {
-    let Atoms {
+pub(crate) fn run(sources: &mut Sources, env: &TickEnv<'_>) {
+    let Sources {
         tabs,
         edits,
         fs,
@@ -23,7 +23,7 @@ pub(crate) fn run(atoms: &mut Atoms, env: &TickEnv<'_>) {
         git_scan_pending,
         file_watch,
         ..
-    } = atoms;
+    } = sources;
 
     if let Some(root) = fs.root.as_ref()
         && !env.no_workspace

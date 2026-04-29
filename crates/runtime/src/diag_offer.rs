@@ -8,7 +8,7 @@
 //! Kept in the runtime because it stitches together the buffer
 //! rope (`EditedBuffer.rope`), the edit history
 //! (`EditedBuffer.history`), the inbound LSP payload, and the
-//! diagnostic atom — three crates at once, which is the shape
+//! diagnostic source — three crates at once, which is the shape
 //! of every runtime-side query memo.
 
 use led_core::{EphemeralContentHash, PersistedContentHash};
@@ -19,7 +19,7 @@ use ropey::Rope;
 /// Outcome of offering a diagnostic delivery against a buffer.
 ///
 /// `Accept(diags)` — the caller should write a `BufferDiagnostics
-/// { hash, diagnostics }` record into the atom, stamped with the
+/// { hash, diagnostics }` record into the source, stamped with the
 /// buffer's CURRENT ephemeral hash (promoted to persisted). When
 /// the path is fast (stamp matches the rope directly) `diags` is
 /// the input unchanged; when the path is replay (stamp matches a

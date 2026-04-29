@@ -1,6 +1,6 @@
 //! `FileSearchState` — project-wide search + replace overlay (M14).
 //!
-//! `Option<FileSearchState>` on `Atoms` toggles the overlay on. When
+//! `Option<FileSearchState>` on `Sources` toggles the overlay on. When
 //! active, the sidebar shows a toggle row + query input + (optional)
 //! replace input + results tree, focus is on Side, and keystrokes
 //! route through the `[file_search]` keymap context.

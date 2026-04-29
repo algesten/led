@@ -8,16 +8,16 @@ use led_driver_terminal_core::Frame;
 use led_state_lifecycle::Phase;
 
 use crate::phases::TickEnv;
-use crate::Atoms;
+use crate::Sources;
 
 pub(crate) fn run<W: Write>(
-    atoms: &mut Atoms,
+    sources: &mut Sources,
     env: &TickEnv<'_>,
     stdout: &mut W,
     frame: Option<Frame>,
     last_frame: &mut Option<Frame>,
 ) -> std::io::Result<()> {
-    let Atoms { lifecycle, .. } = atoms;
+    let Sources { lifecycle, .. } = sources;
     if frame != *last_frame {
         if let Some(f) = &frame {
             env.drivers

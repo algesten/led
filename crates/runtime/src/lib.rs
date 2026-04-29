@@ -1,12 +1,12 @@
 //! The runtime: event enum, dispatch, query layer, trace, main loop.
 //!
-//! Each driver is strictly isolated — it knows only its own atom + its
+//! Each driver is strictly isolated — it knows only its own source + its
 //! own ABI types. This crate is where they're **combined**:
 //!
-//! - [`query`] defines the cross-atom lenses + memos that produce
+//! - [`query`] defines the cross-source lenses + memos that produce
 //!   `LoadAction`s (for `FileReadDriver::execute`) and `Frame`s (for
 //!   `paint`).
-//! - [`dispatch`] mutates driver atoms in response to input events.
+//! - [`dispatch`] mutates driver sources in response to input events.
 //! - [`run`] is the main loop: ingest → query → execute → render.
 //! - [`spawn_drivers`] wires up the desktop `*-native` workers.
 //!
@@ -174,15 +174,15 @@ impl TabIdGen {
     }
 }
 
-/// Every mutable state atom the main loop touches, bundled.
+/// Every mutable state source the main loop touches, bundled.
 ///
 /// Per course-correction #4: groups the nine per-domain state
 /// structs so the main loop signature stops growing with each new
 /// milestone. Rust allows disjoint-field `&mut` borrows at compile
-/// time, so dispatch + memo call sites still extract the atoms
+/// time, so dispatch + memo call sites still extract the sources
 /// they actually need without runtime cost.
 #[derive(Default)]
-pub struct Atoms {
+pub struct Sources {
     pub tabs: Tabs,
     pub edits: BufferEdits,
     pub store: BufferStore,
@@ -242,7 +242,7 @@ pub struct Atoms {
     /// runtime emitted, not a user decision or external fact.
     /// Same category as `lsp_notified` below — kept as a field
     /// because we can't derive "what did I tell the driver" from
-    /// observations of current atom state.
+    /// observations of current source state.
     pub lsp_requested_state_sum: Option<BufferStateSum>,
     /// `true` once `LspCmd::Init` has been emitted. Same
     /// category as `lsp_notified` / `lsp_requested_state_sum`:
@@ -320,7 +320,7 @@ pub struct Atoms {
     /// Set by the Suspended → Running edge (M20) and the
     /// session-restore complete edge (M21) — anything that
     /// requires `Phase::Resuming` → `Phase::Running` to be
-    /// re-evaluated next tick. Always derivable from atoms; we
+    /// re-evaluated next tick. Always derivable from sources; we
     /// store it as a flag because we don't want to scan every
     /// tab every tick.
     pub resume_check_pending: bool,
@@ -372,7 +372,7 @@ pub struct Atoms {
     pub clock: Clock,
 }
 
-/// Clock atom. One field, mutated once per tick.
+/// Clock source. One field, mutated once per tick.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Clock {
     pub now: Instant,
@@ -425,11 +425,11 @@ pub struct UndoPersistTracker {
 }
 
 /// Run-time seam: the single thing the main loop sees. Owns nothing
-/// — just bundles borrowed views of the atoms, drivers, config,
+/// — just bundles borrowed views of the sources, drivers, config,
 /// wake signal, trace sink, and stdout writer. Shrinks `run()` to
 /// a one-arg function.
 pub struct World<'a, W: Write> {
-    pub atoms: &'a mut Atoms,
+    pub sources: &'a mut Sources,
     pub drivers: &'a Drivers,
     pub keymap: &'a Keymap,
     pub theme: &'a led_driver_terminal_core::Theme,
@@ -500,57 +500,57 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
 
     loop {
         // ── Ingest ──────────────────────────────────────────────
-        phases::ingest::ingest_clock(world.atoms);
-        phases::ingest::ingest_file_watch(world.atoms, &env);
-        phases::ingest::ingest_file_completions(world.atoms, &env);
-        phases::ingest::ingest_lsp_events(world.atoms, &env);
-        phases::ingest::ingest_file_writes(world.atoms, &env);
-        phases::ingest::ingest_fs_list(world.atoms, &env);
-        phases::ingest::ingest_find_file(world.atoms, &env);
-        phases::ingest::ingest_file_search(world.atoms, &env);
-        phases::ingest::ingest_syntax(world.atoms, &env);
-        phases::ingest::ingest_session(world.atoms, &env);
-        phases::ingest::ingest_git(world.atoms, &env);
-        phases::ingest::ingest_clipboard(world.atoms, &env);
+        phases::ingest::ingest_clock(world.sources);
+        phases::ingest::ingest_file_watch(world.sources, &env);
+        phases::ingest::ingest_file_completions(world.sources, &env);
+        phases::ingest::ingest_lsp_events(world.sources, &env);
+        phases::ingest::ingest_file_writes(world.sources, &env);
+        phases::ingest::ingest_fs_list(world.sources, &env);
+        phases::ingest::ingest_find_file(world.sources, &env);
+        phases::ingest::ingest_file_search(world.sources, &env);
+        phases::ingest::ingest_syntax(world.sources, &env);
+        phases::ingest::ingest_session(world.sources, &env);
+        phases::ingest::ingest_git(world.sources, &env);
+        phases::ingest::ingest_clipboard(world.sources, &env);
         // Drain terminal events + dispatch each. Quit short-circuits
         // back to the next iteration's gate; Suspend handles its
         // alt-screen round-trip inline.
         let _ = phases::dispatch_phase::dispatch_input(
-            world.atoms,
+            world.sources,
             &env,
             stdout,
             &mut chord,
             &mut last_frame,
         );
-        phases::dispatch_phase::cleanup_orphans(world.atoms);
-        if phases::dispatch_phase::check_quit_gate(world.atoms, &env) {
+        phases::dispatch_phase::cleanup_orphans(world.sources);
+        if phases::dispatch_phase::check_quit_gate(world.sources, &env) {
             break Ok(());
         }
-        phases::ingest::ingest_browser_snap(world.atoms);
+        phases::ingest::ingest_browser_snap(world.sources);
 
         // ── Query ───────────────────────────────────────────────
-        let q = phases::query_phase::run(world.atoms);
+        let q = phases::query_phase::run(world.sources);
 
         // ── Execute ─────────────────────────────────────────────
-        phases::execute_phase::run(world.atoms, &env, &q);
+        phases::execute_phase::run(world.sources, &env, &q);
 
         // ── LSP dispatch ──────────────────────────────────────
-        phases::lsp_dispatch::run(world.atoms, &env);
+        phases::lsp_dispatch::run(world.sources, &env);
 
         // ── Session dispatch ──────────────────────────────────
-        phases::session_dispatch::run(world.atoms, &env);
+        phases::session_dispatch::run(world.sources, &env);
 
         // ── File-watch dispatch + clipboard + FlushUndo + LSP cmds ─
-        phases::file_watch_dispatch::run(world.atoms, &env);
+        phases::file_watch_dispatch::run(world.sources, &env);
 
         // ── Git dispatch + file-watch event drain ─────────────
-        phases::git_dispatch::run(world.atoms, &env);
+        phases::git_dispatch::run(world.sources, &env);
 
         // ── Render ──────────────────────────────────────────────
-        phases::render_phase::run(world.atoms, &env, stdout, q.frame, &mut last_frame)?;
+        phases::render_phase::run(world.sources, &env, stdout, q.frame, &mut last_frame)?;
 
         // ── Wait ──────────────────────────────────────────────
-        match phases::wait_phase::run(world.atoms, &env) {
+        match phases::wait_phase::run(world.sources, &env) {
             Some(()) => {}
             None => break Ok(()),
         }
@@ -1088,7 +1088,7 @@ mod tests {
 
     /// Stage-3/4 wiring: the main loop spawns a real native worker,
     /// seeds a Rust buffer, ticks the dispatch side, and waits for a
-    /// `SyntaxOut` to land + populate `Atoms.syntax`. Verifies the
+    /// `SyntaxOut` to land + populate `Sources.syntax`. Verifies the
     /// three pieces composed properly:
     /// (1) language detection on seed,
     /// (2) cmd dispatch when buffer.version > state.version,

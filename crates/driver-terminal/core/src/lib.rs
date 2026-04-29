@@ -1,6 +1,6 @@
 //! Sync core of the terminal driver — strictly isolated.
 //!
-//! Knows only about its own atom ([`Terminal`]), the mirror types the
+//! Knows only about its own source ([`Terminal`]), the mirror types the
 //! async reader translates crossterm events into ([`TermEvent`] /
 //! [`KeyEvent`] / ...), the render view-models [`paint`] consumes
 //! ([`Frame`], [`TabBarModel`], [`BodyModel`]), and the sync
@@ -8,7 +8,7 @@
 //!
 //! **Nothing** here references other drivers, `state-tabs`, or the
 //! runtime. The memo that builds a `Frame` from multiple drivers'
-//! atoms lives in `led-runtime`.
+//! sources lives in `led-runtime`.
 
 use std::collections::VecDeque;
 use std::sync::mpsc::Receiver;
@@ -163,7 +163,7 @@ impl std::ops::BitOr for KeyModifiers {
     }
 }
 
-// ── Atom ───────────────────────────────────────────────────────────────
+// ── Source ─────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Terminal {
@@ -177,7 +177,7 @@ pub struct Terminal {
 // ── Render view-models ─────────────────────────────────────────────────
 //
 // These are the shapes `paint` consumes. Building them — from whichever
-// driver atoms contribute — is the runtime's job; this crate only owns
+// driver sources contribute — is the runtime's job; this crate only owns
 // the *types*.
 
 /// Tab-bar labels. `labels` is wrapped in `Arc` so cache-hit clones of
@@ -564,7 +564,7 @@ impl TerminalInputDriver {
         Self { rx, trace }
     }
 
-    /// Drain events into the `Terminal` atom. Resize additionally
+    /// Drain events into the `Terminal` source. Resize additionally
     /// applies directly to `dims` (pure state, no dispatch needed);
     /// both variants land in `pending` for dispatch.
     pub fn process(&self, term: &mut Terminal) {
@@ -583,7 +583,7 @@ impl TerminalInputDriver {
 
 #[cfg(test)]
 mod tests {
-    //! Strictly self-contained: Terminal atom + its sync driver only.
+    //! Strictly self-contained: Terminal source + its sync driver only.
 
     use super::*;
     use std::sync::mpsc;

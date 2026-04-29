@@ -6,7 +6,7 @@ publish = false
 
 # Per-buffer syntax state: tree-sitter `Tree` + latest-known
 # highlight tokens + the rope version the parse was run against.
-# Lives on `Atoms.syntax` keyed by `CanonPath`, one entry per
+# Lives on `Sources.syntax` keyed by `CanonPath`, one entry per
 # loaded buffer. The runtime seeds entries on file load and
 # updates them when the syntax driver returns fresh parses.
 

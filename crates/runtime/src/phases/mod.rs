@@ -1,14 +1,14 @@
 //! Per-phase free functions extracted from the runtime's main `run()` loop.
 //!
-//! Each phase function takes `&mut Atoms` + (optionally) a borrowed
-//! `TickEnv` of read-only loop-invariants, then destructures `Atoms`
+//! Each phase function takes `&mut Sources` + (optionally) a borrowed
+//! `TickEnv` of read-only loop-invariants, then destructures `Sources`
 //! once at its top to obtain the disjoint `&mut` field references it
 //! needs. This sidesteps the borrow-check problems that arose from
 //! one giant top-level destructure threaded through every phase.
 //!
 //! Translation discipline: the bodies are verbatim moves from the
 //! original `run()` body. The only edits are the function-boundary
-//! plumbing (signature, the `let Atoms { … } = atoms;` destructure,
+//! plumbing (signature, the `let Sources { … } = sources;` destructure,
 //! and minor scoping fixes for locals that crossed phase boundaries).
 
 use led_core::CanonPath;

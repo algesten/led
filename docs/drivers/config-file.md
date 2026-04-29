@@ -103,19 +103,19 @@ Every `ConfigDir` dispatch performs a fresh blocking `read_to_string` and parse.
 | Parse result `Err(Alert)`                                 | Alert event or error variant on the same resource slot                          |
 | `ConfigFileOut::Persist` (no-op)                          | **Drop** unless hot-reload is explicitly in scope for the rewrite. POST-REWRITE-REVIEW.md calls for an explicit decision. If in scope: `Request::SaveConfig(kind, contents)`. |
 | (nonexistent) file watcher                                | Input driver → `Event::ConfigChanged(kind)` via `fs` watcher, dispatching `Request::LoadConfig` in response |
-| Dedup via `.dedupe()` in derived                          | Natural in query arch: re-dispatching the same Request with the same args is a no-op at the resource layer, or the domain atom already has a matching `Loaded<T>` and the reducer skips the re-fetch. |
+| Dedup via `.dedupe()` in derived                          | Natural in query arch: re-dispatching the same Request with the same args is a no-op at the resource layer, or the domain source already has a matching `Loaded<T>` and the reducer skips the re-fetch. |
 
 The two-driver-instances-sharing-one-command-stream pattern does not translate cleanly: the query arch would have one resource driver handling `Request::LoadConfig(Kind)` where `Kind` discriminates Keys vs Theme, returning a single `Event::ConfigLoaded(Kind, Result<...>)`. This is simpler than today's generic double-instantiation.
 
 ## State domain in new arch
 
-Config lives in a `ConfigState` domain atom (per POST-REWRITE-REVIEW.md § "Fields that currently live in AppState but belong in a domain atom"):
+Config lives in a `ConfigState` domain source (per POST-REWRITE-REVIEW.md § "Fields that currently live in AppState but belong in a domain source"):
 
 - `ConfigState::keys: Loaded<ConfigFile<Keys>>`
 - `ConfigState::theme: Loaded<ConfigFile<Theme>>`
 - Possibly `ConfigState::keymap: Derived<Keymap>` computed from `keys` (today's `AppState::keymap` is set by a separate stream `keymap_s`, which is essentially a query over `config_keys`).
 
-Startup flow: `WorkspaceState::Loaded` transition → dispatch `Request::LoadConfig(Keys)` + `Request::LoadConfig(Theme)` → driver reads, parses, emits results → domain atom populated. No `Versioned<T>` needed because config isn't rebased against edits; it's whole-file replace semantics.
+Startup flow: `WorkspaceState::Loaded` transition → dispatch `Request::LoadConfig(Keys)` + `Request::LoadConfig(Theme)` → driver reads, parses, emits results → domain source populated. No `Versioned<T>` needed because config isn't rebased against edits; it's whole-file replace semantics.
 
 ## Versioned / position-sensitive data
 

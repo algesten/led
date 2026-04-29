@@ -47,7 +47,7 @@ pub fn file_load_action<'a, 'b>(
 /// Σ(saved_version) across all edited buffers. The runtime
 /// compares this against `lsp_requested_state_sum` to decide
 /// when to fire `LspCmd::RequestDiagnostics`. Pure derivation
-/// of `BufferEdits.buffers` — the atom stores only the sum we
+/// of `BufferEdits.buffers` — the source stores only the sum we
 /// last emitted for.
 ///
 /// **Only `saved_version` is summed**, not live `version`. This

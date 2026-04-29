@@ -6,7 +6,7 @@ publish = false
 
 # In-buffer incremental search state.
 #
-# `Option<IsearchState>` lives on `Atoms`. When `Some`, the runtime
+# `Option<IsearchState>` lives on `Sources`. When `Some`, the runtime
 # is in isearch mode: dispatch routes typing + navigation through
 # the `[isearch]` keymap overlay, the status bar shows the `Search:`
 # prompt, and the active buffer's matches are highlighted. Only one

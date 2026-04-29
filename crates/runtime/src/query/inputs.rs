@@ -1,7 +1,7 @@
 //! Input projections for cross-source query memos.
 //!
 //! Every `*Input` newtype wrapper that projects a slice of a driver
-//! atom for consumption by a memo lives here. Each carries a
+//! source for consumption by a memo lives here. Each carries a
 //! `new(&source)` constructor the call site uses to project.
 
 #[allow(unused_imports)]

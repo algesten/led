@@ -2,7 +2,7 @@
 //!
 //! Glue between `led_state_syntax::import::sort_imports` and the
 //! dispatch surface. Pulls the active buffer's `Tree` from
-//! `Atoms.syntax`, runs the sort plan, applies the replacement,
+//! `Sources.syntax`, runs the sort plan, applies the replacement,
 //! and surfaces the matching alert ("Imports sorted" /
 //! "Imports already sorted").
 

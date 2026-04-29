@@ -14,7 +14,7 @@ use led_state_lifecycle::Phase;
 use crate::dispatch::{Dispatcher, DispatchOutcome};
 use crate::keymap::ChordState;
 use crate::phases::TickEnv;
-use crate::{Atoms, Event};
+use crate::{Sources, Event};
 
 /// What the dispatch loop wants the orchestrator to do next.
 pub(crate) enum DispatchOut {
@@ -32,13 +32,13 @@ pub(crate) enum DispatchOut {
 /// state, and apply the M21 quit gate (caller breaks the outer
 /// loop once it returns true).
 pub(crate) fn dispatch_input<W: Write>(
-    atoms: &mut Atoms,
+    sources: &mut Sources,
     env: &TickEnv<'_>,
     stdout: &mut W,
     chord: &mut ChordState,
     last_frame: &mut Option<led_driver_terminal_core::Frame>,
 ) -> DispatchOut {
-    let Atoms {
+    let Sources {
         tabs,
         edits,
         kill_ring,
@@ -64,7 +64,7 @@ pub(crate) fn dispatch_input<W: Write>(
         git,
         lifecycle,
         ..
-    } = atoms;
+    } = sources;
 
     env.drivers.input.process(terminal);
 
@@ -130,8 +130,8 @@ pub(crate) fn dispatch_input<W: Write>(
 /// Sweep driver-owned per-buffer state for paths that are no
 /// longer in `tabs.open`. Cheap on idle (the four `retain` walks
 /// only do work when a tab actually closed).
-pub(crate) fn cleanup_orphans(atoms: &mut Atoms) {
-    let Atoms {
+pub(crate) fn cleanup_orphans(sources: &mut Sources) {
+    let Sources {
         tabs,
         store,
         syntax,
@@ -141,7 +141,7 @@ pub(crate) fn cleanup_orphans(atoms: &mut Atoms) {
         path_chains,
         lsp_pending,
         ..
-    } = atoms;
+    } = sources;
 
     let open_paths: std::collections::HashSet<&led_core::CanonPath> =
         tabs.open.iter().map(|t| &t.path).collect();
@@ -160,10 +160,10 @@ pub(crate) fn cleanup_orphans(atoms: &mut Atoms) {
 }
 
 /// M21 quit gate. Returns `true` when the outer loop should break.
-pub(crate) fn check_quit_gate(atoms: &mut Atoms, env: &TickEnv<'_>) -> bool {
-    let Atoms {
+pub(crate) fn check_quit_gate(sources: &mut Sources, env: &TickEnv<'_>) -> bool {
+    let Sources {
         lifecycle, session, ..
-    } = atoms;
+    } = sources;
     if matches!(lifecycle.phase, Phase::Exiting)
         && (session.saved || !session.primary)
     {

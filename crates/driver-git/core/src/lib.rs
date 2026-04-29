@@ -115,7 +115,7 @@ impl GitDriver {
     }
 
     /// Drain completions. Caller folds `FileStatuses` then each
-    /// `LineStatuses` into the atom in arrival order.
+    /// `LineStatuses` into the source in arrival order.
     pub fn process(&self) -> Vec<GitEvent> {
         let mut out = Vec::new();
         while let Ok(ev) = self.rx.try_recv() {

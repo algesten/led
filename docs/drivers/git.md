@@ -105,7 +105,7 @@ replaces the prior `Loaded<GitScan>` wholesale.
 
 ## State domain in new arch
 
-- `GitState` (dedicated domain atom): `file_statuses: HashMap<CanonPath, HashSet<IssueCategory>>`,
+- `GitState` (dedicated domain source): `file_statuses: HashMap<CanonPath, HashSet<IssueCategory>>`,
   `branch: Option<String>`, `line_statuses: HashMap<CanonPath, Vec<LineStatus>>`,
   plus a `Loaded<GitScan>` latch with the last-completed scan's
   `scan_seq` or document-revision equivalent.

@@ -1,13 +1,13 @@
 //! Sync core of the buffers driver — strictly isolated.
 //!
-//! Knows only about its own atom ([`BufferStore`]) plus the ABI types
+//! Knows only about its own source ([`BufferStore`]) plus the ABI types
 //! it exchanges with the async worker ([`ReadCmd`], [`ReadDone`]) and
 //! the sync API the main loop calls ([`FileReadDriver::process`],
 //! [`FileReadDriver::execute`]).
 //!
 //! **Nothing** here references other drivers, `state-tabs`, render
 //! models, or the runtime. Cross-driver composition — memos that
-//! combine lenses from multiple atoms, the dispatch logic that issues
+//! combine lenses from multiple sources, the dispatch logic that issues
 //! driver operations — lives in `led-runtime`.
 //!
 //! Testing against this crate is independent: construct the channels,
@@ -20,7 +20,7 @@ use std::sync::Arc;
 use led_core::{BufferVersion, CanonPath};
 use ropey::Rope;
 
-// ── Atom ───────────────────────────────────────────────────────────────
+// ── Source ─────────────────────────────────────────────────────────────
 
 /// Load state for a single path.
 ///

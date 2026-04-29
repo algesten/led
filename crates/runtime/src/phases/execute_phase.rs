@@ -10,10 +10,10 @@ use led_driver_session_core::SessionCmd;
 use crate::apply::session::new_chain_id;
 use crate::phases::query_phase::QueryOut;
 use crate::phases::TickEnv;
-use crate::{Atoms, UndoPersistTracker};
+use crate::{Sources, UndoPersistTracker};
 
-pub(crate) fn run(atoms: &mut Atoms, env: &TickEnv<'_>, q: &QueryOut) {
-    let Atoms {
+pub(crate) fn run(sources: &mut Sources, env: &TickEnv<'_>, q: &QueryOut) {
+    let Sources {
         edits,
         store,
         fs,
@@ -22,7 +22,7 @@ pub(crate) fn run(atoms: &mut Atoms, env: &TickEnv<'_>, q: &QueryOut) {
         syntax,
         undo_persistence,
         ..
-    } = atoms;
+    } = sources;
 
     env.drivers.fs_list.execute(q.list_actions.iter());
 

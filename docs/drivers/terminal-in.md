@@ -84,7 +84,7 @@ No filesystem I/O, no network.
 
 Transient events, applied via reducer to `UiState`:
 - `Event::Resize` → `UiState::dims` (and any dependent wrapping / layout caches).
-- `Event::Key` → usually produces an `Action` via keymap lookup; the Action is the unit that reducers consume. The raw key does not land in any state atom.
+- `Event::Key` → usually produces an `Action` via keymap lookup; the Action is the unit that reducers consume. The raw key does not land in any state source.
 
 No resource-result slots needed — this driver has no resource role.
 

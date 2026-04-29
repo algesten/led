@@ -320,7 +320,7 @@ pub enum FileEventKind {
 /// One server-registered file-watch glob, parsed from the
 /// `client/registerCapability` payload for
 /// `workspace/didChangeWatchedFiles`. The compiled
-/// `GlobMatcher` is held on the runtime atom so per-event
+/// `GlobMatcher` is held on the runtime source so per-event
 /// matching is alloc-free; `pattern` round-trips for cheap
 /// `PartialEq` (the matcher itself doesn't implement it).
 ///
@@ -382,7 +382,7 @@ pub enum EditsOrigin {
 }
 
 /// Driver → runtime events. The runtime folds these into its
-/// atoms.
+/// sources.
 #[derive(Debug, Clone)]
 pub enum LspEvent {
     /// Diagnostics for one path, stamped with the content hash

@@ -22,7 +22,7 @@ use led_core::{CanonPath, ChainId, PersistedContentHash, UndoDbSeq};
 use led_state_buffer_edits::EditGroup;
 use led_state_tabs::{Cursor, Scroll};
 
-/// Live session state on `Atoms.session`. Driven by the
+/// Live session state on `Sources.session`. Driven by the
 /// session driver:
 ///
 /// - `Init` outbound → `Restored` inbound flips `primary` to

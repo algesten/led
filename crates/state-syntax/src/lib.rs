@@ -243,7 +243,7 @@ pub struct SyntaxOut {
     pub tree_rope: Arc<ropey::Rope>,
 }
 
-/// Per-buffer syntax state. `None` in the `Atoms.syntax` map when
+/// Per-buffer syntax state. `None` in the `Sources.syntax` map when
 /// the runtime hasn't seen a buffer yet OR the language couldn't
 /// be identified.
 #[derive(Debug, Clone)]
@@ -288,7 +288,7 @@ impl SyntaxState {
     }
 }
 
-/// The `Atoms.syntax` source — one `SyntaxState` per loaded
+/// The `Sources.syntax` source — one `SyntaxState` per loaded
 /// buffer, keyed by canonical path. `imbl::HashMap` for the usual
 /// pointer-clone cache-friendliness in memos.
 #[derive(Debug, Clone, Default, PartialEq)]

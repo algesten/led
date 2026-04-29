@@ -12,7 +12,7 @@ use crate::query::{
     FsTreeInput, PendingSavesInput, StoreLoadedInput, TabsActiveInput, TabsOpenInput,
     TerminalDimsInput,
 };
-use crate::Atoms;
+use crate::Sources;
 
 /// Cross-phase locals the Execute phase consumes.
 pub(crate) struct QueryOut {
@@ -24,8 +24,8 @@ pub(crate) struct QueryOut {
     pub syntax_cmds: std::sync::Arc<Vec<SyntaxCmd>>,
 }
 
-pub(crate) fn run(atoms: &Atoms) -> QueryOut {
-    let Atoms {
+pub(crate) fn run(sources: &Sources) -> QueryOut {
+    let Sources {
         tabs,
         edits,
         store,
@@ -44,7 +44,7 @@ pub(crate) fn run(atoms: &Atoms) -> QueryOut {
         git,
         kbd_macro,
         ..
-    } = atoms;
+    } = sources;
 
     let load_actions = file_load_action(
         StoreLoadedInput::new(store),

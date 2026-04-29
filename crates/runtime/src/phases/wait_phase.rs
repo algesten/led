@@ -11,17 +11,17 @@ use crate::phases::TickEnv;
 use crate::query::{
     self, AlertExpiryInput, FindFileInput, UndoFlushDebounceInput,
 };
-use crate::Atoms;
+use crate::Sources;
 
-pub(crate) fn run(atoms: &Atoms, env: &TickEnv<'_>) -> Option<()> {
-    let Atoms {
+pub(crate) fn run(sources: &Sources, env: &TickEnv<'_>) -> Option<()> {
+    let Sources {
         alerts,
         find_file,
         undo_flush_debounce,
         lsp_status,
         clock,
         ..
-    } = atoms;
+    } = sources;
 
     let static_dl = query::static_deadline(
         AlertExpiryInput::new(alerts),

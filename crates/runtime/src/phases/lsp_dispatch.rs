@@ -6,14 +6,14 @@
 use led_driver_lsp_core::LspCmd;
 
 use crate::phases::TickEnv;
-use crate::Atoms;
+use crate::Sources;
 
-pub(crate) fn run(atoms: &mut Atoms, env: &TickEnv<'_>) {
-    let Atoms {
+pub(crate) fn run(sources: &mut Sources, env: &TickEnv<'_>) {
+    let Sources {
         fs,
         lsp_init_sent,
         ..
-    } = atoms;
+    } = sources;
 
     if !*lsp_init_sent
         && !env.no_workspace

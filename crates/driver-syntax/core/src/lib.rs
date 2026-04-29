@@ -26,7 +26,7 @@ use tree_sitter::Tree;
 ///
 /// Deriving the diff from the two ropes rather than tracking
 /// a history counter keeps the tree a pure function of the
-/// current rope atom: undo/redo that shrinks or reshuffles
+/// current rope source: undo/redo that shrinks or reshuffles
 /// the op log can't put the tree and the source bytes out
 /// of sync.
 ///

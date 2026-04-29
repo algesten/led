@@ -26,7 +26,7 @@
 /// The five whole-process lifecycle states.
 ///
 /// Adding a variant requires updating the main-loop match on
-/// `Atoms.lifecycle.phase` — the compiler enforces exhaustiveness.
+/// `Sources.lifecycle.phase` — the compiler enforces exhaustiveness.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Phase {
     #[default]
@@ -44,11 +44,11 @@ pub enum Phase {
     Exiting,
 }
 
-/// Lifecycle atom. Lives on `Atoms.lifecycle` in the runtime.
+/// Lifecycle source. Lives on `Sources.lifecycle` in the runtime.
 ///
-/// Kept small on purpose — every memo that projects this atom
+/// Kept small on purpose — every memo that projects this source
 /// invalidates on any field change, so extra fields would force
-/// unrelated re-renders. M21 adds a cousin atom (`SessionState`)
+/// unrelated re-renders. M21 adds a cousin source (`SessionState`)
 /// for session persistence rather than stuffing it here.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LifecycleState {

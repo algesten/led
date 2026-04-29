@@ -6,7 +6,7 @@ publish = false
 
 # LSP completion popup state.
 #
-# `Option<CompletionSession>` lives on `Atoms.completions.session`.
+# `Option<CompletionSession>` lives on `Sources.completions.session`.
 # `Some` means a completion popup is active for some tab — dispatch
 # intercepts navigation + commit keys, the popover renders under the
 # cursor, and refilter runs on every keystroke. `None` means no
