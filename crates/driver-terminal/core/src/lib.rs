@@ -248,6 +248,27 @@ pub struct BodyLine {
     pub gutter_diagnostic: Option<led_state_diagnostics::DiagnosticSeverity>,
     pub gutter_category: Option<led_core::IssueCategory>,
     pub diagnostics: Vec<BodyDiagnostic>,
+    /// Active mark→cursor selection slice that lands on this row.
+    /// `col_start..col_end` is in the same gutter-included display
+    /// columns as `LineSpan` / `BodyDiagnostic`. `extends` flags
+    /// rows where the selection continues onto the next visible
+    /// row — the painter pads with selection bg out to the body's
+    /// right edge so the highlight reads as one continuous block.
+    pub selection: Option<BodySelection>,
+}
+
+/// One row's slice of the active mark→cursor selection, or `None`
+/// if no selection touches this rendered row. `col_end` is
+/// exclusive in display cells.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BodySelection {
+    pub col_start: u16,
+    pub col_end: u16,
+    /// `true` when the selection continues past this row's end onto
+    /// the next visible row. Painter fills from `col_end` to the
+    /// editor's right edge with `theme.selection` so wrap / multi-
+    /// line selections paint as one solid block.
+    pub extends: bool,
 }
 
 /// A single diagnostic underline on one body row. Coordinates are
@@ -268,6 +289,7 @@ impl From<String> for BodyLine {
             gutter_diagnostic: None,
             gutter_category: None,
             diagnostics: Vec::new(),
+            selection: None,
         }
     }
 }

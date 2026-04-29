@@ -400,7 +400,21 @@ impl<'a> LspEditApply<'a> {
             // cheap. Gating on `eb.dirty()` here would drop the
             // save whenever format returned no edits on a clean
             // buffer, contradicting "save should always save".
-            if edits.buffers.contains_key(&path) {
+            //
+            // Pre-save cleanup runs after the format edits land
+            // so trailing whitespace the formatter didn't touch
+            // (and the missing final newline) get fixed up in
+            // the same save. Recorded as one undo group so a
+            // post-save Ctrl-/ reverses both format and cleanup
+            // together.
+            if let Some(eb) = edits.buffers.get_mut(&path) {
+                let cursor = tabs
+                    .open
+                    .iter()
+                    .find(|t| t.path == path)
+                    .map(|t| t.cursor)
+                    .unwrap_or_default();
+                crate::dispatch::save::apply_save_cleanup(eb, cursor);
                 edits.pending_saves.insert(path);
             }
         }

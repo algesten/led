@@ -188,6 +188,14 @@ pub struct Theme {
     /// bg) is fine — the terminal's native cursor-row highlighting
     /// takes over.
     pub cursor_line: Style,
+    /// Active mark/selection region (Ctrl-Space → cursor). Painted
+    /// as an overlay on body cells: matches legacy
+    /// `theme_selected = { fg = term_reset, bg = x053 }` —
+    /// terminal-default fg over a dark-purple background. The
+    /// painter replaces the underlying cell style entirely so
+    /// syntax colours don't bleed through inside the highlight,
+    /// matching legacy display.rs's per-column overlay order.
+    pub selection: Style,
     /// Ruler column. Renders as a single-column background strip
     /// down the editor body. Only drawn when `ruler_column` is set.
     pub ruler: Style,
@@ -515,6 +523,13 @@ impl Default for Theme {
             },
 
             cursor_line: Style::default(),
+            // Match legacy `default_theme.toml`'s
+            // `theme_selected = { fg = term_reset, bg = x053 }`.
+            selection: Style {
+                fg: Some(Color::Default),
+                bg: Some(Color::Indexed(53)),
+                ..Style::default()
+            },
             ruler: Style {
                 bg: Some(RULER_GREY),
                 ..Style::default()

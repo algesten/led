@@ -8,6 +8,7 @@ type BodyRow<'a> = (
     Option<led_state_diagnostics::DiagnosticSeverity>,
     Option<led_core::IssueCategory>,
     &'a [led_driver_terminal_core::BodyDiagnostic],
+    Option<led_driver_terminal_core::BodySelection>,
 );
 
 pub(crate) fn paint_body(body: &BodyModel, area: Rect, theme: &Theme, buf: &mut Buffer) {
@@ -30,8 +31,9 @@ pub(crate) fn paint_body(body: &BodyModel, area: Rect, theme: &Theme, buf: &mut 
         // gutter-diagnostic severity + gutter-category (merged
         // LSP/git bar) + inline underlines. Non-Content variants
         // carry none of the extras.
-        let (line, spans, gutter_diag, gutter_cat, row_diags): BodyRow<'_> = match body {
-            BodyModel::Empty => (None, &[], None, None, &[]),
+        let (line, spans, gutter_diag, gutter_cat, row_diags, row_sel): BodyRow<'_> = match body
+        {
+            BodyModel::Empty => (None, &[], None, None, &[], None),
             BodyModel::Content { lines, .. } => match lines.get(row as usize) {
                 Some(bl) => (
                     Some(bl.text.as_str()),
@@ -39,8 +41,9 @@ pub(crate) fn paint_body(body: &BodyModel, area: Rect, theme: &Theme, buf: &mut 
                     bl.gutter_diagnostic,
                     bl.gutter_category,
                     bl.diagnostics.as_slice(),
+                    bl.selection,
                 ),
-                None => (None, &[], None, None, &[]),
+                None => (None, &[], None, None, &[], None),
             },
         };
         if let Some(line) = line {
@@ -74,6 +77,30 @@ pub(crate) fn paint_body(body: &BodyModel, area: Rect, theme: &Theme, buf: &mut 
         if let Some(severity) = gutter_diag {
             let style = *severity_style(&theme.diagnostics, severity);
             buf.put_char(buf_row, area.x + 1, '●', style);
+        }
+
+        // Active mark→cursor selection overlay. Painted after the
+        // text + gutter glyphs but before diagnostic underlines and
+        // file-search match — order matches legacy display.rs's
+        // per-column pipeline (selection sits on top of syntax,
+        // diagnostics + search win over selection). Replaces the
+        // cell style entirely; legacy ships the same semantics via
+        // `theme_selected = { fg = term_reset, bg = x053 }` so the
+        // highlighted run reads as a single solid block instead of
+        // syntax fg over a coloured bg. When `extends` is set the
+        // selection continues past this row, so we pad from
+        // `col_end` to the editor's right edge with a blank cell at
+        // the selection style — covers wrap / multi-line selections.
+        if let Some(sel) = row_sel {
+            let sel_start = area.x.saturating_add(sel.col_start);
+            let sel_end = area.x.saturating_add(sel.col_end).min(right_edge);
+            for c in sel_start..sel_end {
+                let existing = buf.cell(buf_row, c).copied().unwrap_or_default();
+                buf.put_char(buf_row, c, existing.ch, theme.selection);
+            }
+            if sel.extends {
+                buf.fill_row(buf_row, sel_end, right_edge, theme.selection);
+            }
         }
 
         // Diagnostic underlines: for each row-diagnostic, overpaint

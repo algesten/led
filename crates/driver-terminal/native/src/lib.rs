@@ -1003,6 +1003,7 @@ mod tests {
                     gutter_diagnostic: None,
                     gutter_category: None,
                     diagnostics: Vec::new(),
+                    selection: None,
                 },
                 led_driver_terminal_core::BodyLine {
                     text: "  jkl".to_string(),
@@ -1010,6 +1011,7 @@ mod tests {
                     gutter_diagnostic: None,
                     gutter_category: None,
                     diagnostics: Vec::new(),
+                    selection: None,
                 },
                 led_driver_terminal_core::BodyLine {
                     text: "~ ".to_string(),
@@ -1017,6 +1019,7 @@ mod tests {
                     gutter_diagnostic: None,
                     gutter_category: None,
                     diagnostics: Vec::new(),
+                    selection: None,
                 },
             ]),
             cursor: None,

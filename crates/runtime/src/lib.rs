@@ -1513,8 +1513,9 @@ mod tests {
             lsp_pending: &mut lsp_pending,
         }
         .apply(led_core::LspRequestSeq(1), EditsOrigin::Format, &file_edits);
-        // Format applied.
-        assert_eq!(edits.buffers[&path].rope.to_string(), "X");
+        // Format applied "x" → "X", then pre-save cleanup added
+        // the missing trailing newline.
+        assert_eq!(edits.buffers[&path].rope.to_string(), "X\n");
         // History MUST retain the record_replace entry so undo
         // can revert it. Before the fix this was cleared by the
         // save-action loop in run().
@@ -1649,7 +1650,9 @@ mod tests {
             lsp_pending: &mut lsp_pending,
         }
         .apply(led_core::LspRequestSeq(42), EditsOrigin::Format, &file_edits);
-        assert_eq!(edits.buffers[&path].rope.to_string(), "X");
+        // Format applied "x" → "X", then pre-save cleanup appended
+        // a final newline so the on-disk bytes end cleanly.
+        assert_eq!(edits.buffers[&path].rope.to_string(), "X\n");
         // Post-format save is queued.
         assert!(edits.pending_saves.contains(&path));
         assert!(!lsp_pending.pending_save_after_format.contains(&path));

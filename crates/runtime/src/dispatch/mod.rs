@@ -39,7 +39,7 @@ mod mark;
 mod nav;
 mod reflow;
 mod rename;
-mod save;
+pub(crate) mod save;
 mod shared;
 mod sort_imports;
 mod tabs;
@@ -1367,7 +1367,7 @@ impl<'a> Dispatcher<'a> {
 /// ("(No changes need to be saved)") is intentionally diverged
 /// from for this reason.
 fn save_with_optional_format(
-    tabs: &Tabs,
+    tabs: &mut Tabs,
     edits: &mut BufferEdits,
     lsp_pending: &mut led_state_lsp::LspPending,
     alerts: &mut AlertState,

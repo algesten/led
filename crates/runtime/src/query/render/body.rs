@@ -63,6 +63,7 @@ pub fn body_model<'a>(inputs: BodyInputs<'a>) -> BodyModel {
     if let Some(eb) = edits.buffers.get(&tab.path) {
         let highlight = active_body_match(&overlays, &tab.path, tab.scroll, area, &eb.rope);
         let spans = rebased_line_spans(syntax, edits, tab.path.clone());
+        let selection = normalized_selection(tab.mark, tab.cursor);
         // Diagnostics + git markers carry an anchor hash they were
         // computed against. Renderer translates each marker's
         // anchor-row to a current-row via `eb.row_delta_for(anchor)`,
@@ -84,6 +85,7 @@ pub fn body_model<'a>(inputs: BodyInputs<'a>) -> BodyModel {
         return render_content(RenderContentArgs {
             rope: &eb.rope,
             cursor: tab.cursor,
+            selection,
             scroll: tab.scroll,
             area,
             match_highlight: highlight,
@@ -117,6 +119,7 @@ pub fn body_model<'a>(inputs: BodyInputs<'a>) -> BodyModel {
     render_content(RenderContentArgs {
         rope: rope_ref,
         cursor: tab.cursor,
+        selection: normalized_selection(tab.mark, tab.cursor),
         scroll: tab.scroll,
         area,
         match_highlight: highlight,
@@ -126,6 +129,23 @@ pub fn body_model<'a>(inputs: BodyInputs<'a>) -> BodyModel {
         git_line_statuses: line_statuses,
         git_row_delta: None,
     })
+}
+
+/// Normalize `tab.mark` + `tab.cursor` to an ordered selection
+/// span. Returns `None` when no mark is set or the mark coincides
+/// with the cursor (empty region).
+fn normalized_selection(mark: Option<Cursor>, cursor: Cursor) -> Option<(Cursor, Cursor)> {
+    let mark = mark?;
+    let mk = (mark.line, mark.col);
+    let ck = (cursor.line, cursor.col);
+    if mk == ck {
+        return None;
+    }
+    if mk <= ck {
+        Some((mark, cursor))
+    } else {
+        Some((cursor, mark))
+    }
 }
 
 /// Apply any edits the user made between the parse and now onto
@@ -270,6 +290,11 @@ fn active_body_match(
 struct RenderContentArgs<'a> {
     rope: &'a Rope,
     cursor: Cursor,
+    /// Active mark→cursor selection, normalized so `.0 <= .1` in
+    /// `(line, grapheme_col)` order. `None` when no mark is set or
+    /// mark and cursor coincide. Per-row clipping happens inside
+    /// [`render_content`].
+    selection: Option<(Cursor, Cursor)>,
     scroll: Scroll,
     area: Rect,
     match_highlight: Option<led_driver_terminal_core::BodyMatch>,
@@ -295,6 +320,7 @@ fn render_content(args: RenderContentArgs<'_>) -> BodyModel {
     let RenderContentArgs {
         rope,
         cursor,
+        selection,
         scroll,
         area,
         match_highlight,
@@ -322,6 +348,11 @@ fn render_content(args: RenderContentArgs<'_>) -> BodyModel {
     let mut layout_for: Option<usize> = None;
     let mut layout: Vec<led_core::SubLineRange> = Vec::new();
     let mut full_line: String = String::new();
+    // Selection bounds projected onto the current logical line. `None`
+    // when this line falls outside the selection. Cached alongside
+    // `layout` so each sub-line lookup is O(1) instead of repeating
+    // the grapheme walk inside `col_to_sub_line`.
+    let mut line_sel: Option<LineSelectionBounds> = None;
 
     for _ in 0..body_rows {
         if ln >= line_count {
@@ -331,6 +362,7 @@ fn render_content(args: RenderContentArgs<'_>) -> BodyModel {
                 gutter_diagnostic: None,
                 gutter_category: None,
                 diagnostics: Vec::new(),
+                selection: None,
             });
             continue;
         }
@@ -340,6 +372,9 @@ fn render_content(args: RenderContentArgs<'_>) -> BodyModel {
             full_line.clear();
             full_line.extend(line_slice.chars());
             strip_trailing_newline(&mut full_line);
+            line_sel = selection.and_then(|(start, end)| {
+                project_selection_to_line(start, end, ln, &layout, line_slice, content_cols)
+            });
             layout_for = Some(ln);
         }
         let max_sub = layout.len();
@@ -412,12 +447,16 @@ fn render_content(args: RenderContentArgs<'_>) -> BodyModel {
         } else {
             None
         };
+        let row_selection = line_sel.and_then(|bounds| {
+            clip_selection_to_sub(&bounds, sub, &layout, area.cols as usize)
+        });
         lines.push(BodyLine {
             text: s,
             spans,
             gutter_diagnostic: gutter_diag,
             gutter_category,
             diagnostics: row_diagnostics,
+            selection: row_selection,
         });
         // Advance to the next visible sub-line; cross into the
         // next logical line when we run past the current one's
@@ -519,6 +558,111 @@ fn diagnostics_for_sub_line(
         });
     }
     (gutter, out)
+}
+
+/// Pre-resolved selection bounds for one logical line: where the
+/// selection enters and leaves expressed as `(sub_line, cells)`
+/// pairs, plus a flag that's true when the selection's logical end
+/// is on a later line. Computed once per logical line in the body
+/// loop and reused across every sub-line query for that line — the
+/// expensive grapheme walk in `col_to_sub_line` happens at most
+/// twice per logical line (one endpoint each), then sub-line
+/// clipping is constant time.
+#[derive(Clone, Copy)]
+struct LineSelectionBounds {
+    sub_at_start: led_core::SubLine,
+    cells_at_start: usize,
+    sub_at_end: led_core::SubLine,
+    cells_at_end: usize,
+    extends_past_line: bool,
+}
+
+/// Project the buffer-wide mark→cursor selection onto one logical
+/// line. Returns `None` when the line falls outside the selection;
+/// otherwise the bounds describe where the selection enters and
+/// leaves this line in `(sub_line, cells)` coordinates.
+fn project_selection_to_line(
+    sel_start: Cursor,
+    sel_end: Cursor,
+    ln: usize,
+    layout: &[led_core::SubLineRange],
+    line_slice: ropey::RopeSlice<'_>,
+    content_cols: usize,
+) -> Option<LineSelectionBounds> {
+    use led_core::{SubLine, col_to_sub_line};
+    if ln < sel_start.line || ln > sel_end.line {
+        return None;
+    }
+    let last_sub_idx = layout.len().saturating_sub(1);
+    let last_sub_cells = layout.get(last_sub_idx).map(|r| r.cells).unwrap_or(0);
+    let (sub_at_start, cells_at_start) = if ln == sel_start.line {
+        col_to_sub_line(sel_start.col, line_slice, content_cols)
+    } else {
+        (SubLine(0), 0)
+    };
+    let (sub_at_end, cells_at_end) = if ln == sel_end.line {
+        col_to_sub_line(sel_end.col, line_slice, content_cols)
+    } else {
+        (SubLine(last_sub_idx), last_sub_cells)
+    };
+    Some(LineSelectionBounds {
+        sub_at_start,
+        cells_at_start,
+        sub_at_end,
+        cells_at_end,
+        extends_past_line: ln < sel_end.line,
+    })
+}
+
+/// Clip pre-resolved [`LineSelectionBounds`] to one rendered
+/// sub-line. Returns the gutter-included display-cell range plus
+/// the `extends` flag the painter uses to pad multi-line
+/// selections out to the editor's right edge. Cells are clamped
+/// to the body area's right edge so a wide-grapheme selection
+/// past the viewport stops at the edge instead of overflowing.
+fn clip_selection_to_sub(
+    bounds: &LineSelectionBounds,
+    sub: led_core::SubLine,
+    layout: &[led_core::SubLineRange],
+    area_cols: usize,
+) -> Option<led_driver_terminal_core::BodySelection> {
+    let our_sub = sub.0;
+    if bounds.sub_at_start.0 > our_sub || bounds.sub_at_end.0 < our_sub {
+        return None;
+    }
+    let left_cells = if bounds.sub_at_start.0 == our_sub {
+        bounds.cells_at_start
+    } else {
+        0
+    };
+    let our_cells = layout.get(our_sub).map(|r| r.cells).unwrap_or(0);
+    let right_cells = if bounds.sub_at_end.0 == our_sub {
+        bounds.cells_at_end
+    } else {
+        our_cells
+    };
+    let col_start = (GUTTER_WIDTH + left_cells).min(area_cols) as u16;
+    let col_end = (GUTTER_WIDTH + right_cells.max(left_cells)).min(area_cols) as u16;
+    // `extends` only matters on the last sub-line of a logical
+    // line: non-last subs already carry the `\` continuation
+    // glyph in the trailing cells, so there's no gap to pad.
+    let last_sub_idx = layout.len().saturating_sub(1);
+    let is_last_sub_of_line = our_sub >= last_sub_idx;
+    let selection_continues = bounds.extends_past_line || bounds.sub_at_end.0 > our_sub;
+    let extends = is_last_sub_of_line && selection_continues;
+    // Suppress only when there's truly nothing to paint — no inline
+    // run AND no trailing pad. An empty line mid-selection has
+    // `col_start == col_end` but `extends == true`, so the painter
+    // still fills its row with `theme.selection`, matching legacy's
+    // "pad to text_width on selected-through lines" behaviour.
+    if col_end <= col_start && !extends {
+        return None;
+    }
+    Some(led_driver_terminal_core::BodySelection {
+        col_start,
+        col_end,
+        extends,
+    })
 }
 
 /// Pick the precedence-winning `IssueCategory` for the gutter
