@@ -366,12 +366,64 @@ fn run_search(cmd: &FileSearchCmd) -> (Vec<FileSearchGroup>, Vec<FileSearchHit>)
         }
     }
 
-    groups.sort_by(|a, b| a.relative.cmp(&b.relative));
+    // Relevance order, then alphabetical as tiebreak. Direct hits — a
+    // line that looks like a definition of the query, a file whose
+    // basename appears in the query, a source file vs a generated /
+    // doc file — surface above incidental matches.
+    groups.sort_by(|a, b| {
+        group_score(b, &cmd.query)
+            .cmp(&group_score(a, &cmd.query))
+            .then_with(|| a.relative.cmp(&b.relative))
+    });
     let flat: Vec<FileSearchHit> = groups
         .iter()
         .flat_map(|g| g.hits.iter().cloned())
         .collect();
     (groups, flat)
+}
+
+/// Heuristic relevance score for a hit group. Higher → ranked earlier.
+///
+/// Two language-agnostic signals: file-extension tier (source code beats
+/// generated/doc artefacts), and token overlap between the file's basename
+/// stem and the query (so e.g. `status_bar.rs` floats above `lib.rs` for
+/// query `status_bar_model` because they share the tokens `status` + `bar`).
+fn group_score(g: &FileSearchGroup, query: &str) -> i64 {
+    let mut s: i64 = 0;
+    let path = std::path::Path::new(&g.relative);
+    let ext = path
+        .extension()
+        .map(|e| e.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+    s += match ext.as_str() {
+        "rs" | "toml" => 200,
+        "py" | "ts" | "tsx" | "js" | "jsx" | "go" | "java" | "kt" | "swift"
+        | "c" | "h" | "cpp" | "hpp" | "rb" | "ex" | "exs" => 150,
+        "md" | "txt" | "adoc" => 50,
+        "html" | "svg" | "dot" | "lock" | "min.js" => -200,
+        _ => 0,
+    };
+    let basename = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    s += token_overlap(&basename, query) as i64 * 250;
+    s
+}
+
+/// Count tokens shared between two strings. Splits on any non-alphanumeric
+/// boundary and ignores 1-character noise tokens. Case-insensitive.
+fn token_overlap(a: &str, b: &str) -> usize {
+    fn tokens(s: &str) -> Vec<String> {
+        s.to_ascii_lowercase()
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|t| t.len() > 1)
+            .map(str::to_string)
+            .collect()
+    }
+    let at = tokens(a);
+    let bt = tokens(b);
+    at.iter().filter(|t| bt.iter().any(|u| u == *t)).count()
 }
 
 #[cfg(test)]
@@ -790,6 +842,56 @@ mod tests {
         assert_eq!(
             stdfs::read_to_string(dir.join("a.txt")).unwrap(),
             "line one with BAR\nline two\nBAR at end\n",
+        );
+    }
+
+    #[test]
+    fn rank_by_basename_token_overlap_then_extension() {
+        let dir = tempdir();
+        // Path tokens overlap query — should rank first regardless of
+        // alphabetical order or what the matched line looks like.
+        stdfs::write(
+            dir.join("z_status_bar.rs"),
+            b"some context status_bar_model elsewhere\n",
+        )
+        .unwrap();
+        // Plain re-export — same .rs ext, no token overlap.
+        stdfs::write(
+            dir.join("a_lib.rs"),
+            b"pub use query::status_bar_model;\n",
+        )
+        .unwrap();
+        // Generated / doc file — should rank last regardless of count.
+        stdfs::write(
+            dir.join("notes.html"),
+            b"<p>status_bar_model</p>\n<p>status_bar_model</p>\n",
+        )
+        .unwrap();
+
+        let (drv, _native) = spawn(Arc::new(NoopTraceImpl), Notifier::noop());
+        drv.execute(std::iter::once(&FileSearchCmd {
+            root: canon(&dir),
+            query: "status_bar_model".into(),
+            case_sensitive: false,
+            use_regex: false,
+        }));
+
+        let mut collected: Vec<FileSearchOut> = Vec::new();
+        wait_for(
+            || {
+                collected.extend(drv.process());
+                !collected.is_empty()
+            },
+            Duration::from_secs(2),
+        );
+
+        let order: Vec<&str> =
+            collected[0].groups.iter().map(|g| g.relative.as_str()).collect();
+        assert_eq!(
+            order,
+            vec!["z_status_bar.rs", "a_lib.rs", "notes.html"],
+            "basename-token-overlap should outrank alphabetical; \
+             html should rank last regardless of hit count",
         );
     }
 }
