@@ -261,6 +261,7 @@ impl TerminalOutputDriver {
         &self,
         frame: &Frame,
         last: Option<&Frame>,
+        scroll_hint: Option<&led_driver_terminal_core::ScrollHint>,
         theme: &Theme,
         out: &mut W,
     ) -> io::Result<()> {
@@ -286,6 +287,38 @@ impl TerminalOutputDriver {
                 cursor::MoveTo(0, 0),
             )?;
         }
+
+        // Scroll-region fast path. When the runtime tells us the
+        // new frame is just the previous one shifted by N visual
+        // rows in a known rect, emit a native scroll op so the
+        // terminal does the move in its own optimized path
+        // (often hardware-accelerated). We then shift our `prev`
+        // mirror to match the post-scroll terminal state — the
+        // subsequent cell diff produces the small set of writes
+        // that can't be expressed as a pure scroll (cursor-row
+        // highlight that moved, status-bar line counter, side
+        // panel cells the full-width scroll displaced).
+        //
+        // Skipped on resize: the prior frame's cells were laid
+        // out at different coordinates and a scroll op would
+        // shift garbage. The forced full repaint takes over.
+        let applied_scroll = if !resized {
+            scroll_hint.and_then(|h| {
+                if h.delta_rows == 0 {
+                    return None;
+                }
+                let prev_idx = 1 - state.current;
+                let buf = &mut state.buffers[prev_idx];
+                if !shift_buffer_region(buf, h) {
+                    return None;
+                }
+                let _ = emit_scroll_op(out, h);
+                Some(*h)
+            })
+        } else {
+            None
+        };
+        let _ = applied_scroll;
 
         // Partial-paint bookkeeping: the paint function only
         // overwrites cells in regions that actually changed. For
@@ -369,6 +402,62 @@ impl TerminalOutputDriver {
 
         Ok(())
     }
+}
+
+/// Translate the runtime's [`ScrollHint`] into an in-place buffer
+/// shift on `buf`. Returns `false` when the hint is degenerate or
+/// out of bounds — the caller skips the scroll-op emit and the
+/// renderer falls through to a plain full-frame diff.
+fn shift_buffer_region(
+    buf: &mut Buffer,
+    hint: &led_driver_terminal_core::ScrollHint,
+) -> bool {
+    buf.shift_region(
+        hint.region_top,
+        hint.region_bottom,
+        hint.region_left,
+        hint.region_right,
+        hint.delta_rows,
+    )
+}
+
+/// Emit the VT100 scroll sequence for `hint`. Uses DECLRMM
+/// (`CSI ? 69 h`) + DECSLRM (`CSI Pl;Pr s`) so the scroll only
+/// affects the editor body's columns and leaves the side panel
+/// alone. After the scroll, all margin state is reset so the rest
+/// of the paint pipeline issues absolute cursor moves with no
+/// surprises.
+///
+/// Apple Terminal supports DECLRMM in recent versions; older
+/// emulators that ignore the enable will scroll the full row.
+/// In that case the cell diff will repaint the side-panel cells
+/// the spurious scroll displaced — slower but visually correct.
+fn emit_scroll_op<W: Write>(
+    out: &mut W,
+    hint: &led_driver_terminal_core::ScrollHint,
+) -> io::Result<()> {
+    let top1 = hint.region_top + 1;
+    let bot1 = hint.region_bottom;
+    let left1 = hint.region_left + 1;
+    let right1 = hint.region_right;
+    // Enable DECLRMM (left/right margin mode) so DECSLRM works.
+    // On terminals that ignore this, CSI s would mean "save cursor"
+    // — we tolerate that path because the diff still corrects the
+    // resulting full-row scroll.
+    write!(out, "\x1b[?69h")?;
+    write!(out, "\x1b[{};{}r", top1, bot1)?;
+    write!(out, "\x1b[{};{}s", left1, right1)?;
+    if hint.delta_rows > 0 {
+        write!(out, "\x1b[{}S", hint.delta_rows)?;
+    } else {
+        write!(out, "\x1b[{}T", -hint.delta_rows)?;
+    }
+    // Reset vertical region first (so a follow-up paint with
+    // absolute moves isn't constrained), then disable DECLRMM.
+    // Disabling the mode resets horizontal margins implicitly.
+    write!(out, "\x1b[r")?;
+    write!(out, "\x1b[?69l")?;
+    Ok(())
 }
 
 // ── Painter ────────────────────────────────────────────────────────────
@@ -557,7 +646,7 @@ mod tests {
     ) -> (TerminalOutputDriver, Vec<u8>) {
         let driver = TerminalOutputDriver::new(Arc::new(NoopTrace));
         let mut out: Vec<u8> = Vec::new();
-        driver.execute(frame, last, theme, &mut out).expect("execute");
+        driver.execute(frame, last, None, theme, &mut out).expect("execute");
         (driver, out)
     }
 
@@ -760,11 +849,13 @@ mod tests {
         let theme = Theme::default();
         let mut grid = Grid::new(dims);
         let mut out: Vec<u8> = Vec::new();
-        driver.execute(&frame1, None, &theme, &mut out).expect("frame1");
+        driver
+            .execute(&frame1, None, None, &theme, &mut out)
+            .expect("frame1");
         grid.apply(&out);
         out.clear();
         driver
-            .execute(&frame2, Some(&frame1), &theme, &mut out)
+            .execute(&frame2, Some(&frame1), None, &theme, &mut out)
             .expect("frame2");
         grid.apply(&out);
 

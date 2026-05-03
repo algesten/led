@@ -133,6 +133,87 @@ impl Buffer {
         );
     }
 
+    /// Shift the rectangular region `[top..bottom) × [left..right)`
+    /// vertically by `delta_rows` rows, in place. Positive delta
+    /// scrolls content up (rows move toward smaller indices); the
+    /// vacated tail rows are cleared to `Cell::BLANK`. Negative
+    /// delta scrolls content down. Cells outside the region are
+    /// untouched.
+    ///
+    /// Returns `false` if the region is invalid or `|delta_rows|`
+    /// is ≥ the region height (caller falls back to a full repaint
+    /// since there'd be no surviving content to preserve).
+    pub fn shift_region(
+        &mut self,
+        top: u16,
+        bottom: u16,
+        left: u16,
+        right: u16,
+        delta_rows: i32,
+    ) -> bool {
+        if delta_rows == 0
+            || top >= bottom
+            || left >= right
+            || bottom > self.rows
+            || right > self.cols
+        {
+            return false;
+        }
+        let height = (bottom - top) as i32;
+        if delta_rows.abs() >= height {
+            return false;
+        }
+        let cols = usize::from(self.cols);
+        let region_left = usize::from(left);
+        let region_right = usize::from(right);
+        let span = region_right - region_left;
+
+        if delta_rows > 0 {
+            let n = delta_rows as u16;
+            // Copy each row from src=row+n down to dst=row, walking
+            // top→bottom so we never overwrite a source we still need.
+            for dst in top..(bottom - n) {
+                let src = dst + n;
+                let src_idx = usize::from(src) * cols + region_left;
+                let dst_idx = usize::from(dst) * cols + region_left;
+                self.cells.copy_within(src_idx..src_idx + span, dst_idx);
+            }
+            // Tail rows scrolled away from get blanked.
+            for r in (bottom - n)..bottom {
+                let row_idx = usize::from(r) * cols + region_left;
+                for c in 0..span {
+                    self.cells[row_idx + c] = Cell::BLANK;
+                }
+            }
+        } else {
+            let n = (-delta_rows) as u16;
+            // Walk bottom→top to preserve the upper source rows
+            // until they've been read.
+            for dst in ((top + n)..bottom).rev() {
+                let src = dst - n;
+                let src_idx = usize::from(src) * cols + region_left;
+                let dst_idx = usize::from(dst) * cols + region_left;
+                self.cells.copy_within(src_idx..src_idx + span, dst_idx);
+            }
+            for r in top..(top + n) {
+                let row_idx = usize::from(r) * cols + region_left;
+                for c in 0..span {
+                    self.cells[row_idx + c] = Cell::BLANK;
+                }
+            }
+        }
+        // Combiners attached to cells in the moved region are dropped:
+        // a base cell that just got overwritten by a copy_within can't
+        // legitimately keep its old combiners. Conservative; combiners
+        // are rare anyway.
+        self.combiners.retain(|(r, c), _| {
+            let r = *r;
+            let c = *c;
+            r < top || r >= bottom || c < left || c >= right
+        });
+        true
+    }
+
     fn idx(&self, row: u16, col: u16) -> Option<usize> {
         if row >= self.rows || col >= self.cols {
             return None;

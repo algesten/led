@@ -464,6 +464,29 @@ pub enum PopoverSeverity {
     Hint,
 }
 
+/// Hint to the terminal output driver: the new frame is the
+/// previous frame with the editor body region shifted by
+/// `delta_rows` visual rows. Lets the driver emit a native VT100
+/// scroll op (`CSI S/T`) within an explicit scroll region instead
+/// of repainting every cell of the body. The driver still does a
+/// cell diff over the post-shift state, so any incidental changes
+/// (cursor row highlight, status bar line counter) get fixed up
+/// correctly and a stale hint at worst degrades to a normal full
+/// paint with extra bytes.
+///
+/// Coordinates are absolute terminal rows/cols (0-indexed,
+/// half-open ranges). `delta_rows > 0` means content scrolled up
+/// (the user pressed Down, lines slid up the screen). `< 0`
+/// means content scrolled down.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ScrollHint {
+    pub delta_rows: i32,
+    pub region_top: u16,
+    pub region_bottom: u16,
+    pub region_left: u16,
+    pub region_right: u16,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct Frame {
     pub tab_bar: TabBarModel,

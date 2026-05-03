@@ -497,6 +497,7 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
     let stdout = &mut *world.stdout;
     let mut last_frame: Option<Frame> = None;
     let mut chord = ChordState::default();
+    let mut prev_view: Option<ViewSnapshot> = None;
 
     loop {
         // ── Ingest ──────────────────────────────────────────────
@@ -547,7 +548,22 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
         phases::git_dispatch::run(world.sources, &env);
 
         // ── Render ──────────────────────────────────────────────
-        phases::render_phase::run(world.sources, &env, stdout, q.frame, &mut last_frame)?;
+        // Compute scroll hint before render: pure-scroll case is
+        // when the same tab's scroll_offset advanced by N visual
+        // rows with no other body-affecting change. Lets the
+        // terminal driver emit a native CSI S/T inside a margin
+        // region instead of rewriting every body cell.
+        let cur_view = ViewSnapshot::capture(world.sources, q.frame.as_ref());
+        let scroll_hint = scroll_hint_from(prev_view.as_ref(), cur_view.as_ref());
+        phases::render_phase::run(
+            world.sources,
+            &env,
+            stdout,
+            q.frame,
+            &mut last_frame,
+            scroll_hint.as_ref(),
+        )?;
+        prev_view = cur_view;
 
         // ── Wait ──────────────────────────────────────────────
         match phases::wait_phase::run(world.sources, &env) {
@@ -555,6 +571,129 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
             None => break Ok(()),
         }
     }
+}
+
+/// Snapshot of the bits of source state the scroll-hint detector
+/// reads. Captured per-tick after the query phase produced its
+/// frame; comparing the previous tick's snapshot to this one tells
+/// us whether the only thing that changed is the active tab's
+/// scroll offset (which lets the renderer use a native scroll op).
+#[derive(Clone, Debug)]
+struct ViewSnapshot {
+    tab: led_state_tabs::TabId,
+    scroll_top: usize,
+    scroll_sub_line: led_core::SubLine,
+    buf_version: led_core::BufferVersion,
+    force_redraw: u64,
+    layout: led_driver_terminal_core::Layout,
+    /// Frame cursor — captures both visible row and side-panel /
+    /// status-bar shape. If anything off-body changed (overlay
+    /// opened, alert appeared) frame inequality propagates here
+    /// and we skip the hint.
+    frame_fingerprint: FrameFingerprint,
+}
+
+/// Cheap-to-hash identity for the frame's non-body regions.
+/// Comparing whole `Frame` clones per tick would defeat the
+/// optimization; this captures just the bits a held-down scroll
+/// must NOT have changed for the hint to be safe.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct FrameFingerprint {
+    tab_bar: led_driver_terminal_core::TabBarModel,
+    status_bar: led_driver_terminal_core::StatusBarModel,
+    side_panel: Option<led_driver_terminal_core::SidePanelModel>,
+    popover: Option<led_driver_terminal_core::PopoverModel>,
+    completion: Option<led_driver_terminal_core::CompletionPopupModel>,
+    rename_popup: Option<led_driver_terminal_core::RenamePopupModel>,
+}
+
+impl ViewSnapshot {
+    fn capture(
+        sources: &Sources,
+        frame: Option<&led_driver_terminal_core::Frame>,
+    ) -> Option<Self> {
+        let frame = frame?;
+        let active = sources.tabs.active?;
+        let tab = sources.tabs.open.iter().find(|t| t.id == active)?;
+        let buf_version = sources
+            .edits
+            .buffers
+            .get(&tab.path)
+            .map(|b| b.version)
+            .unwrap_or_default();
+        Some(Self {
+            tab: active,
+            scroll_top: tab.scroll.top,
+            scroll_sub_line: tab.scroll.top_sub_line,
+            buf_version,
+            force_redraw: sources.lifecycle.force_redraw,
+            layout: frame.layout,
+            frame_fingerprint: FrameFingerprint {
+                tab_bar: frame.tab_bar.clone(),
+                status_bar: frame.status_bar.clone(),
+                side_panel: frame.side_panel.clone(),
+                popover: frame.popover.clone(),
+                completion: frame.completion.clone(),
+                rename_popup: frame.rename_popup.clone(),
+            },
+        })
+    }
+}
+
+/// Pure-scroll detector. Returns a `ScrollHint` only when prev →
+/// cur is "same tab, same buffer, same overlays/status, scroll
+/// advanced by a small visual delta in line-aligned scroll" —
+/// the only case where shifting the previous frame's editor
+/// region is provably equivalent to a full repaint.
+///
+/// Conservative on purpose: any miss falls through to the
+/// existing cell-diff path, which is already correct (just
+/// slow). False positives would corrupt the screen, false
+/// negatives just don't speed things up.
+fn scroll_hint_from(
+    prev: Option<&ViewSnapshot>,
+    cur: Option<&ViewSnapshot>,
+) -> Option<led_driver_terminal_core::ScrollHint> {
+    let prev = prev?;
+    let cur = cur?;
+    if prev.tab != cur.tab
+        || prev.buf_version != cur.buf_version
+        || prev.force_redraw != cur.force_redraw
+        || prev.layout != cur.layout
+        || prev.frame_fingerprint != cur.frame_fingerprint
+    {
+        return None;
+    }
+    // Soft-wrapped scroll within a logical line transitions
+    // top_sub_line; the visual-row delta there isn't a simple
+    // top-line subtraction, so skip and let the cell diff handle
+    // it. Most cursor-down sessions outside of soft-wrapped views
+    // sit at sub_line 0 in both frames anyway.
+    if prev.scroll_sub_line.0 != 0 || cur.scroll_sub_line.0 != 0 {
+        return None;
+    }
+    let delta_lines = cur.scroll_top as i64 - prev.scroll_top as i64;
+    if delta_lines == 0 {
+        return None;
+    }
+    let body = cur.layout.editor_area;
+    let body_rows = body.rows;
+    if body_rows == 0 {
+        return None;
+    }
+    if delta_lines.abs() >= body_rows as i64 {
+        // Wholesale viewport replacement; scroll-op savings vanish
+        // because the surviving content is empty. Let cell-diff
+        // path repaint the lot.
+        return None;
+    }
+    Some(led_driver_terminal_core::ScrollHint {
+        delta_rows: delta_lines as i32,
+        region_top: body.y,
+        region_bottom: body.y + body.rows,
+        region_left: body.x,
+        region_right: body.x + body.cols,
+    })
 }
 
 // session / persistence helpers moved to `apply::session`.
