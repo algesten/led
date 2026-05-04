@@ -548,20 +548,20 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
         phases::git_dispatch::run(world.sources, &env);
 
         // ── Render ──────────────────────────────────────────────
-        // Compute scroll hint before render: pure-scroll case is
-        // when the same tab's scroll_offset advanced by N visual
-        // rows with no other body-affecting change. Lets the
-        // terminal driver emit a native CSI S/T inside a margin
-        // region instead of rewriting every body cell.
+        // Compute scroll hints before render: each region (editor
+        // body, file-browser sidebar) is checked independently for
+        // a "same content, just shifted by N rows" delta. Hints
+        // let the terminal driver emit native CSI S/T inside
+        // DECSLRM margins instead of rewriting every body cell.
         let cur_view = ViewSnapshot::capture(world.sources, q.frame.as_ref());
-        let scroll_hint = scroll_hint_from(prev_view.as_ref(), cur_view.as_ref());
+        let scroll_hints = scroll_hints_from(prev_view.as_ref(), cur_view.as_ref());
         phases::render_phase::run(
             world.sources,
             &env,
             stdout,
             q.frame,
             &mut last_frame,
-            scroll_hint.as_ref(),
+            &scroll_hints,
         )?;
         prev_view = cur_view;
 
@@ -575,33 +575,60 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
 
 /// Snapshot of the bits of source state the scroll-hint detector
 /// reads. Captured per-tick after the query phase produced its
-/// frame; comparing the previous tick's snapshot to this one tells
-/// us whether the only thing that changed is the active tab's
-/// scroll offset (which lets the renderer use a native scroll op).
+/// frame; comparing the previous tick's snapshot to this one
+/// tells us whether the editor body and/or sidebar shifted by N
+/// rows with no other body-affecting change.
+///
+/// Two detection scopes share this snapshot: the editor region
+/// (driven by the active tab's `scroll.top`) and the sidebar
+/// (driven by `BrowserUi.scroll_offset`). The fields are split
+/// so each detector can ignore the other's churn — a sidebar
+/// arrow-down doesn't invalidate the editor hint and vice versa.
 #[derive(Clone, Debug)]
 struct ViewSnapshot {
+    // Editor side
     tab: led_state_tabs::TabId,
     scroll_top: usize,
     scroll_sub_line: led_core::SubLine,
     buf_version: led_core::BufferVersion,
-    force_redraw: u64,
+
+    // Sidebar side — read only by the (currently disabled)
+    // sidebar-hint detector. Kept captured so reinstating that
+    // path is one-line, and so that an inadvertent change in
+    // sidebar state still propagates through the equality
+    // comparison via `other` rather than a missing field.
+    #[allow(dead_code)]
+    browser_scroll: usize,
+    #[allow(dead_code)]
+    browser_focus: led_state_browser::Focus,
+    /// Mode of the side panel as the painter would draw it. Hint
+    /// only fires when this is `Browser` (the only mode whose
+    /// scroll is a clean N-row shift). `None` when the panel is
+    /// not visible.
+    #[allow(dead_code)]
+    side_panel_mode: Option<led_driver_terminal_core::SidePanelMode>,
+    /// Hash of `expanded_dirs` so a tree reshape (collapse/expand)
+    /// blocks the sidebar hint without us cloning the whole set.
+    #[allow(dead_code)]
+    expanded_dirs_hash: u64,
+
+    // Common gates
     layout: led_driver_terminal_core::Layout,
-    /// Frame cursor — captures both visible row and side-panel /
-    /// status-bar shape. If anything off-body changed (overlay
-    /// opened, alert appeared) frame inequality propagates here
-    /// and we skip the hint.
-    frame_fingerprint: FrameFingerprint,
+    force_redraw: u64,
+    /// Frame regions outside both scrolled rects. Any inequality
+    /// blocks both hints — those cells need real cell-diff writes,
+    /// and emitting a scroll op would be a wasted byte stream.
+    other: OtherFrameFingerprint,
 }
 
-/// Cheap-to-hash identity for the frame's non-body regions.
-/// Comparing whole `Frame` clones per tick would defeat the
-/// optimization; this captures just the bits a held-down scroll
-/// must NOT have changed for the hint to be safe.
+/// Identity for the frame regions a scroll hint shouldn't touch:
+/// tab bar, status bar, popovers, completion / rename overlays.
+/// Cheap to compare because every field is either an Arc-backed
+/// model or an `Option<…>` of one.
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct FrameFingerprint {
+struct OtherFrameFingerprint {
     tab_bar: led_driver_terminal_core::TabBarModel,
     status_bar: led_driver_terminal_core::StatusBarModel,
-    side_panel: Option<led_driver_terminal_core::SidePanelModel>,
     popover: Option<led_driver_terminal_core::PopoverModel>,
     completion: Option<led_driver_terminal_core::CompletionPopupModel>,
     rename_popup: Option<led_driver_terminal_core::RenamePopupModel>,
@@ -621,17 +648,36 @@ impl ViewSnapshot {
             .get(&tab.path)
             .map(|b| b.version)
             .unwrap_or_default();
+        let expanded_dirs_hash = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            // Order-stable digest: XOR each path's individual
+            // hash so set order doesn't perturb the result.
+            let mut digest: u64 = 0;
+            for p in sources.browser.expanded_dirs.iter() {
+                let mut ph = std::collections::hash_map::DefaultHasher::new();
+                p.hash(&mut ph);
+                digest ^= ph.finish();
+            }
+            digest.hash(&mut h);
+            sources.browser.expanded_dirs.len().hash(&mut h);
+            h.finish()
+        };
+        let side_panel_mode = frame.side_panel.as_ref().map(|m| m.mode);
         Some(Self {
             tab: active,
             scroll_top: tab.scroll.top,
             scroll_sub_line: tab.scroll.top_sub_line,
             buf_version,
-            force_redraw: sources.lifecycle.force_redraw,
+            browser_scroll: sources.browser.scroll_offset,
+            browser_focus: sources.browser.focus,
+            side_panel_mode,
+            expanded_dirs_hash,
             layout: frame.layout,
-            frame_fingerprint: FrameFingerprint {
+            force_redraw: sources.lifecycle.force_redraw,
+            other: OtherFrameFingerprint {
                 tab_bar: frame.tab_bar.clone(),
                 status_bar: frame.status_bar.clone(),
-                side_panel: frame.side_panel.clone(),
                 popover: frame.popover.clone(),
                 completion: frame.completion.clone(),
                 rename_popup: frame.rename_popup.clone(),
@@ -640,60 +686,74 @@ impl ViewSnapshot {
     }
 }
 
-/// Pure-scroll detector. Returns a `ScrollHint` only when prev →
-/// cur is "same tab, same buffer, same overlays/status, scroll
-/// advanced by a small visual delta in line-aligned scroll" —
-/// the only case where shifting the previous frame's editor
-/// region is provably equivalent to a full repaint.
+/// Detect the disjoint regions that scrolled cleanly between
+/// `prev` and `cur`. Returns 0, 1, or 2 hints — the two regions
+/// (editor body, file-browser sidebar) are independent and can
+/// both shift in the same tick, though it's rare in practice.
 ///
 /// Conservative on purpose: any miss falls through to the
 /// existing cell-diff path, which is already correct (just
 /// slow). False positives would corrupt the screen, false
 /// negatives just don't speed things up.
-fn scroll_hint_from(
+fn scroll_hints_from(
     prev: Option<&ViewSnapshot>,
     cur: Option<&ViewSnapshot>,
-) -> Option<led_driver_terminal_core::ScrollHint> {
-    let prev = prev?;
-    let cur = cur?;
+) -> Vec<led_driver_terminal_core::ScrollHint> {
+    let mut out = Vec::new();
+    let (Some(prev), Some(cur)) = (prev, cur) else {
+        return out;
+    };
+    // Common-to-both gates. A layout change (resize, sidebar
+    // toggle) means region rects moved and a scroll op against
+    // the old rect would shift garbage. A force_redraw bump is
+    // an explicit "repaint everything" signal. Anything in the
+    // chrome regions that changed (status bar line counter, tab
+    // bar, popover open/close) needs cell-level writes.
     if prev.tab != cur.tab
-        || prev.buf_version != cur.buf_version
-        || prev.force_redraw != cur.force_redraw
         || prev.layout != cur.layout
-        || prev.frame_fingerprint != cur.frame_fingerprint
+        || prev.force_redraw != cur.force_redraw
+        || prev.other != cur.other
     {
-        return None;
+        return out;
     }
-    // Soft-wrapped scroll within a logical line transitions
-    // top_sub_line; the visual-row delta there isn't a simple
-    // top-line subtraction, so skip and let the cell diff handle
-    // it. Most cursor-down sessions outside of soft-wrapped views
-    // sit at sub_line 0 in both frames anyway.
-    if prev.scroll_sub_line.0 != 0 || cur.scroll_sub_line.0 != 0 {
-        return None;
+
+    // Editor hint. Held arrow-down on the buffer scrolls
+    // `scroll.top` by 1 each tick. Block on:
+    // - any buffer edit (lines re-shape, can't be a pure shift)
+    // - soft-wrap mid-line transitions (top stays, top_sub_line
+    //   changes — visual delta isn't `top` arithmetic)
+    if prev.buf_version == cur.buf_version
+        && prev.scroll_sub_line.0 == 0
+        && cur.scroll_sub_line.0 == 0
+    {
+        let delta_lines = cur.scroll_top as i64 - prev.scroll_top as i64;
+        let body = cur.layout.editor_area;
+        if delta_lines != 0
+            && body.rows > 0
+            && delta_lines.abs() < body.rows as i64
+        {
+            out.push(led_driver_terminal_core::ScrollHint {
+                delta_rows: delta_lines as i32,
+                region_top: body.y,
+                region_bottom: body.y + body.rows,
+                region_left: body.x,
+                region_right: body.x + body.cols,
+            });
+        }
     }
-    let delta_lines = cur.scroll_top as i64 - prev.scroll_top as i64;
-    if delta_lines == 0 {
-        return None;
-    }
-    let body = cur.layout.editor_area;
-    let body_rows = body.rows;
-    if body_rows == 0 {
-        return None;
-    }
-    if delta_lines.abs() >= body_rows as i64 {
-        // Wholesale viewport replacement; scroll-op savings vanish
-        // because the surviving content is empty. Let cell-diff
-        // path repaint the lot.
-        return None;
-    }
-    Some(led_driver_terminal_core::ScrollHint {
-        delta_rows: delta_lines as i32,
-        region_top: body.y,
-        region_bottom: body.y + body.rows,
-        region_left: body.x,
-        region_right: body.x + body.cols,
-    })
+
+    // Sidebar hint intentionally skipped. Without DECLRMM (Apple
+    // Terminal doesn't honor it), the scroll op runs full-width;
+    // the cell diff then has to repaint the entire editor area
+    // to undo the spurious shift, which more than wipes out the
+    // sidebar savings. Editor hint above survives because the
+    // editor body is the bulk of the painting cost — the sidebar
+    // restoration cost is the smaller side. Reinstate the
+    // sidebar branch here once we ship terminal-capability
+    // detection (CSI ? 69 $ p / DECRQM) and can confirm DECLRMM
+    // before emitting horizontal margins.
+
+    out
 }
 
 // session / persistence helpers moved to `apply::session`.

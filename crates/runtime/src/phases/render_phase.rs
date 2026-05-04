@@ -16,14 +16,14 @@ pub(crate) fn run<W: Write>(
     stdout: &mut W,
     frame: Option<Frame>,
     last_frame: &mut Option<Frame>,
-    scroll_hint: Option<&ScrollHint>,
+    scroll_hints: &[ScrollHint],
 ) -> std::io::Result<()> {
     let Sources { lifecycle, .. } = sources;
     if frame != *last_frame {
         if let Some(f) = &frame {
             env.drivers
                 .output
-                .execute(f, last_frame.as_ref(), scroll_hint, env.theme, stdout)?;
+                .execute(f, last_frame.as_ref(), scroll_hints, env.theme, stdout)?;
             if lifecycle.phase == Phase::Starting {
                 lifecycle.phase = Phase::Running;
             }

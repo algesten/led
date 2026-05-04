@@ -261,7 +261,7 @@ impl TerminalOutputDriver {
         &self,
         frame: &Frame,
         last: Option<&Frame>,
-        scroll_hint: Option<&led_driver_terminal_core::ScrollHint>,
+        scroll_hints: &[led_driver_terminal_core::ScrollHint],
         theme: &Theme,
         out: &mut W,
     ) -> io::Result<()> {
@@ -288,37 +288,36 @@ impl TerminalOutputDriver {
             )?;
         }
 
-        // Scroll-region fast path. When the runtime tells us the
-        // new frame is just the previous one shifted by N visual
-        // rows in a known rect, emit a native scroll op so the
-        // terminal does the move in its own optimized path
-        // (often hardware-accelerated). We then shift our `prev`
-        // mirror to match the post-scroll terminal state — the
-        // subsequent cell diff produces the small set of writes
-        // that can't be expressed as a pure scroll (cursor-row
-        // highlight that moved, status-bar line counter, side
-        // panel cells the full-width scroll displaced).
+        // Scroll-region fast path. The runtime emits one hint per
+        // disjoint rect that scrolled cleanly this tick (editor
+        // body when cursor scrolls; sidebar when file-browser
+        // selection scrolls; both at once is rare but supported).
+        // Each hint becomes a native CSI S/T inside DECSLRM
+        // margins so the terminal does the move in its own
+        // optimized path (often hardware-accelerated). The prev
+        // mirror is shifted to match the post-scroll terminal
+        // state — the subsequent cell diff produces the small
+        // set of writes that can't be expressed as pure scroll
+        // (cursor-row highlight that moved, status-bar line
+        // counter, anything inside the region that's not a
+        // uniform shift).
         //
         // Skipped on resize: the prior frame's cells were laid
         // out at different coordinates and a scroll op would
         // shift garbage. The forced full repaint takes over.
-        let applied_scroll = if !resized {
-            scroll_hint.and_then(|h| {
+        if !resized {
+            let prev_idx = 1 - state.current;
+            for h in scroll_hints {
                 if h.delta_rows == 0 {
-                    return None;
+                    continue;
                 }
-                let prev_idx = 1 - state.current;
                 let buf = &mut state.buffers[prev_idx];
                 if !shift_buffer_region(buf, h) {
-                    return None;
+                    continue;
                 }
                 let _ = emit_scroll_op(out, h);
-                Some(*h)
-            })
-        } else {
-            None
-        };
-        let _ = applied_scroll;
+            }
+        }
 
         // Partial-paint bookkeeping: the paint function only
         // overwrites cells in regions that actually changed. For
@@ -405,9 +404,12 @@ impl TerminalOutputDriver {
 }
 
 /// Translate the runtime's [`ScrollHint`] into an in-place buffer
-/// shift on `buf`. Returns `false` when the hint is degenerate or
-/// out of bounds — the caller skips the scroll-op emit and the
-/// renderer falls through to a plain full-frame diff.
+/// shift on `buf`. Always shifts the full row range — the scroll
+/// op below uses DECSTBM-only (no horizontal margins) since
+/// Apple Terminal doesn't reliably honor DECLRMM, so the prev
+/// mirror has to match the actual full-width scroll the terminal
+/// does. Returns `false` when the hint is degenerate or out of
+/// bounds — caller skips the scroll-op emit.
 fn shift_buffer_region(
     buf: &mut Buffer,
     hint: &led_driver_terminal_core::ScrollHint,
@@ -415,48 +417,41 @@ fn shift_buffer_region(
     buf.shift_region(
         hint.region_top,
         hint.region_bottom,
-        hint.region_left,
-        hint.region_right,
+        0,
+        buf.cols(),
         hint.delta_rows,
     )
 }
 
-/// Emit the VT100 scroll sequence for `hint`. Uses DECLRMM
-/// (`CSI ? 69 h`) + DECSLRM (`CSI Pl;Pr s`) so the scroll only
-/// affects the editor body's columns and leaves the side panel
-/// alone. After the scroll, all margin state is reset so the rest
-/// of the paint pipeline issues absolute cursor moves with no
-/// surprises.
+/// Emit the VT100 scroll sequence for `hint`. Uses only DECSTBM
+/// (`CSI Pt;Pb r`) — no horizontal margins. Apple Terminal
+/// silently drops DECLRMM (`CSI ? 69 h`) and falls back to
+/// full-row scroll, which corrupts cells outside the requested
+/// rect. By doing full-width scroll on every terminal and shifting
+/// prev_buf full-width to match, the cell diff produces the
+/// residual cells (sidebar restore for editor scroll, status-bar
+/// counter, cursor highlight). Net byte count for editor scroll:
+/// roughly 3-4x smaller than a full body repaint.
 ///
-/// Apple Terminal supports DECLRMM in recent versions; older
-/// emulators that ignore the enable will scroll the full row.
-/// In that case the cell diff will repaint the side-panel cells
-/// the spurious scroll displaced — slower but visually correct.
+/// `region_left` / `region_right` on the hint are advisory only
+/// in this implementation and ignored; kept on the type so a
+/// future capability-detect path can use them on terminals that
+/// honor DECLRMM.
 fn emit_scroll_op<W: Write>(
     out: &mut W,
     hint: &led_driver_terminal_core::ScrollHint,
 ) -> io::Result<()> {
     let top1 = hint.region_top + 1;
     let bot1 = hint.region_bottom;
-    let left1 = hint.region_left + 1;
-    let right1 = hint.region_right;
-    // Enable DECLRMM (left/right margin mode) so DECSLRM works.
-    // On terminals that ignore this, CSI s would mean "save cursor"
-    // — we tolerate that path because the diff still corrects the
-    // resulting full-row scroll.
-    write!(out, "\x1b[?69h")?;
     write!(out, "\x1b[{};{}r", top1, bot1)?;
-    write!(out, "\x1b[{};{}s", left1, right1)?;
     if hint.delta_rows > 0 {
         write!(out, "\x1b[{}S", hint.delta_rows)?;
     } else {
         write!(out, "\x1b[{}T", -hint.delta_rows)?;
     }
-    // Reset vertical region first (so a follow-up paint with
-    // absolute moves isn't constrained), then disable DECLRMM.
-    // Disabling the mode resets horizontal margins implicitly.
+    // Reset scroll region so subsequent absolute cursor moves
+    // don't get clipped.
     write!(out, "\x1b[r")?;
-    write!(out, "\x1b[?69l")?;
     Ok(())
 }
 
@@ -646,7 +641,7 @@ mod tests {
     ) -> (TerminalOutputDriver, Vec<u8>) {
         let driver = TerminalOutputDriver::new(Arc::new(NoopTrace));
         let mut out: Vec<u8> = Vec::new();
-        driver.execute(frame, last, None, theme, &mut out).expect("execute");
+        driver.execute(frame, last, &[], theme, &mut out).expect("execute");
         (driver, out)
     }
 
@@ -850,12 +845,12 @@ mod tests {
         let mut grid = Grid::new(dims);
         let mut out: Vec<u8> = Vec::new();
         driver
-            .execute(&frame1, None, None, &theme, &mut out)
+            .execute(&frame1, None, &[], &theme, &mut out)
             .expect("frame1");
         grid.apply(&out);
         out.clear();
         driver
-            .execute(&frame2, Some(&frame1), None, &theme, &mut out)
+            .execute(&frame2, Some(&frame1), &[], &theme, &mut out)
             .expect("frame2");
         grid.apply(&out);
 
@@ -933,12 +928,12 @@ mod tests {
         let mut grid = Grid::new(dims);
         let mut out: Vec<u8> = Vec::new();
         driver
-            .execute(&frame_visible, None, None, &theme, &mut out)
+            .execute(&frame_visible, None, &[], &theme, &mut out)
             .expect("frame_visible");
         grid.apply(&out);
         out.clear();
         driver
-            .execute(&frame_hidden, Some(&frame_visible), None, &theme, &mut out)
+            .execute(&frame_hidden, Some(&frame_visible), &[], &theme, &mut out)
             .expect("frame_hidden");
         grid.apply(&out);
         out.clear();
@@ -946,7 +941,7 @@ mod tests {
             .execute(
                 &frame_visible_again,
                 Some(&frame_hidden),
-                None,
+                &[],
                 &theme,
                 &mut out,
             )
