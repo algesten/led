@@ -22,7 +22,8 @@ use crossterm::event::{
 };
 use led_core::Notifier;
 use led_driver_terminal_core::{
-    Dims, Frame, KeyCode, KeyEvent, KeyModifiers, TermEvent, Theme, TerminalInputDriver, Trace,
+    Dims, Frame, KeyCode, KeyEvent, KeyModifiers, Style, TermEvent, Theme, TerminalInputDriver,
+    Trace,
 };
 
 use buffer::Buffer;
@@ -39,7 +40,7 @@ use render::body::paint_syntax_line;
 
 #[cfg(test)]
 use led_driver_terminal_core::{
-    BodyModel, Color, Layout, SidePanelModel, SidePanelRow, StatusBarModel, Style, TabBarModel,
+    BodyModel, Color, Layout, SidePanelModel, SidePanelRow, StatusBarModel, TabBarModel,
 };
 
 /// Lifecycle marker for the native reader thread.
@@ -493,6 +494,13 @@ pub(crate) fn paint(
         if let Some(x) = frame.layout.side_border_x {
             let rows = frame.layout.editor_area.rows + frame.layout.tab_bar.rows;
             paint_side_border(x, rows, theme, buf);
+            // The tab bar row to the left of the border isn't part
+            // of `side_area` (which only spans `body_rows`), but it
+            // also isn't covered by the editor's tab bar paint. Blank
+            // it explicitly: without this, hiding the panel and then
+            // re-showing it leaves the wide tab bar's stale labels
+            // visible under the side panel.
+            buf.fill_row(frame.layout.tab_bar.y, 0, x, Style::default());
         }
     }
 
@@ -871,6 +879,96 @@ mod tests {
                 want.chars().count() as u16,
             );
             assert_eq!(got, want, "body cells wiped at row {row}");
+        }
+    }
+
+    #[test]
+    fn toggling_side_panel_clears_stale_tab_bar_under_panel() {
+        // Regression: hiding the browser (Ctrl-B) widens the tab bar
+        // to the full terminal width, then re-showing the browser
+        // narrows it again. Without an explicit blank of the tab-bar
+        // row to the left of the side border, the wide bar's labels
+        // remain stuck under the side panel.
+        use std::sync::Arc;
+
+        let dims = Dims { cols: 60, rows: 10 };
+        let layout_visible = Layout::compute(dims, true);
+        let layout_hidden = Layout::compute(dims, false);
+
+        let many_tabs = TabBarModel {
+            labels: Arc::new(
+                (0..6).map(|i| format!("file_{i}.rs")).collect::<Vec<_>>(),
+            ),
+            active: Some(0),
+        };
+        let one_tab = TabBarModel {
+            labels: Arc::new(vec!["a.rs".into()]),
+            active: Some(0),
+        };
+        let panel = SidePanelModel {
+            rows: Arc::new(vec![]),
+            focused: false,
+            mode: Default::default(),
+        };
+
+        let frame_visible = Frame {
+            tab_bar: one_tab.clone(),
+            body: BodyModel::Empty,
+            status_bar: StatusBarModel::default(),
+            side_panel: Some(panel.clone()),
+            popover: None,
+            completion: None,
+            rename_popup: None,
+            layout: layout_visible,
+            cursor: None,
+            dims,
+        };
+        let frame_hidden = Frame {
+            tab_bar: many_tabs,
+            side_panel: None,
+            layout: layout_hidden,
+            ..frame_visible.clone()
+        };
+        let frame_visible_again = Frame {
+            tab_bar: one_tab,
+            side_panel: Some(panel),
+            layout: layout_visible,
+            ..frame_hidden.clone()
+        };
+
+        let driver = TerminalOutputDriver::new(Arc::new(NoopTrace));
+        let theme = Theme::default();
+        let mut grid = Grid::new(dims);
+        let mut out: Vec<u8> = Vec::new();
+        driver
+            .execute(&frame_visible, None, None, &theme, &mut out)
+            .expect("frame_visible");
+        grid.apply(&out);
+        out.clear();
+        driver
+            .execute(&frame_hidden, Some(&frame_visible), None, &theme, &mut out)
+            .expect("frame_hidden");
+        grid.apply(&out);
+        out.clear();
+        driver
+            .execute(
+                &frame_visible_again,
+                Some(&frame_hidden),
+                None,
+                &theme,
+                &mut out,
+            )
+            .expect("frame_visible_again");
+        grid.apply(&out);
+
+        let tab_row = layout_visible.tab_bar.y;
+        let border_x = layout_visible.side_border_x.expect("border");
+        for col in 0..border_x {
+            let ch = grid.char_at(tab_row, col);
+            assert_eq!(
+                ch, ' ',
+                "stale tab bar cell at row {tab_row} col {col}: {ch:?}",
+            );
         }
     }
 
