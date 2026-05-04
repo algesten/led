@@ -37,8 +37,12 @@ use crate::Language;
 fn indents_src(lang: Language) -> Option<&'static str> {
     Some(match lang {
         Language::Rust => include_str!("../queries/rust/indents.scm"),
-        Language::TypeScript => include_str!("../queries/typescript/indents.scm"),
-        Language::JavaScript => include_str!("../queries/javascript/indents.scm"),
+        Language::TypeScript | Language::Tsx => {
+            include_str!("../queries/typescript/indents.scm")
+        }
+        Language::JavaScript | Language::Jsx => {
+            include_str!("../queries/javascript/indents.scm")
+        }
         Language::Python => include_str!("../queries/python/indents.scm"),
         Language::Bash => include_str!("../queries/bash/indents.scm"),
         Language::Json => include_str!("../queries/json/indents.scm"),
@@ -81,7 +85,9 @@ pub fn precompile_all_queries() {
     for lang in [
         Language::Rust,
         Language::TypeScript,
+        Language::Tsx,
         Language::JavaScript,
+        Language::Jsx,
         Language::Python,
         Language::Bash,
         Language::Json,
@@ -104,7 +110,10 @@ pub(crate) fn ts_language(lang: Language) -> Option<tree_sitter::Language> {
     Some(match lang {
         Language::Rust => tree_sitter_rust::LANGUAGE.into(),
         Language::TypeScript => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
-        Language::JavaScript => tree_sitter_javascript::LANGUAGE.into(),
+        Language::Tsx => tree_sitter_typescript::LANGUAGE_TSX.into(),
+        // tree-sitter-javascript's grammar parses both JS and JSX,
+        // so `Jsx` reuses the same `LANGUAGE` handle.
+        Language::JavaScript | Language::Jsx => tree_sitter_javascript::LANGUAGE.into(),
         Language::Python => tree_sitter_python::LANGUAGE.into(),
         Language::Bash => tree_sitter_bash::LANGUAGE.into(),
         Language::Json => tree_sitter_json::LANGUAGE.into(),
@@ -139,7 +148,9 @@ fn config_for(lang: Language, ts_lang: &tree_sitter::Language) -> Option<&'stati
     let slot: &'static OnceLock<IndentsConfig> = match lang {
         Language::Rust => slot!(),
         Language::TypeScript => slot!(),
+        Language::Tsx => slot!(),
         Language::JavaScript => slot!(),
+        Language::Jsx => slot!(),
         Language::Python => slot!(),
         Language::Bash => slot!(),
         Language::Json => slot!(),

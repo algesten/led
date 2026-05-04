@@ -347,10 +347,38 @@ fn grammars_for(lang: Language) -> Vec<(tree_sitter::Language, &'static Query)> 
             vec![(l, q)]
         }
         Language::TypeScript => {
+            // tree-sitter-typescript's highlights.scm only contains
+            // TS-specific captures; upstream's `; inherits: javascript`
+            // means the JS query must be prepended. The TS grammar is
+            // a superset of JS so JS patterns compile against it.
             static Q: OnceLock<Query> = OnceLock::new();
             let l: tree_sitter::Language = tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into();
-            let q = Q
-                .get_or_init(|| compile(l.clone(), tree_sitter_typescript::HIGHLIGHTS_QUERY, "typescript"));
+            let q = Q.get_or_init(|| {
+                let src = format!(
+                    "{}\n{}",
+                    tree_sitter_javascript::HIGHLIGHT_QUERY,
+                    tree_sitter_typescript::HIGHLIGHTS_QUERY,
+                );
+                compile(l.clone(), &src, "typescript")
+            });
+            vec![(l, q)]
+        }
+        Language::Tsx => {
+            // TSX is its own grammar (`LANGUAGE_TSX`) — the plain TS
+            // grammar can't parse JSX. Inherit from both javascript
+            // and typescript and add JSX-specific captures from
+            // tree-sitter-javascript's `JSX_HIGHLIGHT_QUERY`.
+            static Q: OnceLock<Query> = OnceLock::new();
+            let l: tree_sitter::Language = tree_sitter_typescript::LANGUAGE_TSX.into();
+            let q = Q.get_or_init(|| {
+                let src = format!(
+                    "{}\n{}\n{}",
+                    tree_sitter_javascript::HIGHLIGHT_QUERY,
+                    tree_sitter_javascript::JSX_HIGHLIGHT_QUERY,
+                    tree_sitter_typescript::HIGHLIGHTS_QUERY,
+                );
+                compile(l.clone(), &src, "tsx")
+            });
             vec![(l, q)]
         }
         Language::JavaScript => {
@@ -358,6 +386,22 @@ fn grammars_for(lang: Language) -> Vec<(tree_sitter::Language, &'static Query)> 
             let l: tree_sitter::Language = tree_sitter_javascript::LANGUAGE.into();
             let q = Q
                 .get_or_init(|| compile(l.clone(), tree_sitter_javascript::HIGHLIGHT_QUERY, "javascript"));
+            vec![(l, q)]
+        }
+        Language::Jsx => {
+            // tree-sitter-javascript's grammar already parses JSX;
+            // the dedicated `JSX_HIGHLIGHT_QUERY` adds element/tag
+            // captures on top of the base JS query.
+            static Q: OnceLock<Query> = OnceLock::new();
+            let l: tree_sitter::Language = tree_sitter_javascript::LANGUAGE.into();
+            let q = Q.get_or_init(|| {
+                let src = format!(
+                    "{}\n{}",
+                    tree_sitter_javascript::HIGHLIGHT_QUERY,
+                    tree_sitter_javascript::JSX_HIGHLIGHT_QUERY,
+                );
+                compile(l.clone(), &src, "jsx")
+            });
             vec![(l, q)]
         }
         Language::Python => {
@@ -497,6 +541,79 @@ mod tests {
         assert!(
             kinds.contains(&TokenKind::Function),
             "expected a Function token; got {kinds:?}",
+        );
+    }
+
+    #[test]
+    fn typescript_parse_inherits_javascript_captures() {
+        // tree-sitter-typescript's highlights.scm only adds TS-specific
+        // patterns and inherits JS via `; inherits: javascript`. The
+        // driver must concatenate both queries — otherwise plain JS
+        // constructs in a .ts file get no captures (no @keyword for
+        // `const`, no @string for `'foo'`, etc.).
+        let (drv, _native) = spawn(Arc::new(NoopTrace), Notifier::noop());
+        let src = "import { x } from 'm';\nconst y: number = 1;\n";
+        let rope = Arc::new(Rope::from_str(src));
+        let path = canon_of("a.ts");
+
+        drv.execute(std::iter::once(&SyntaxCmd {
+            path: path.clone(),
+            version: led_core::BufferVersion(1),
+            rope,
+            language: Language::TypeScript,
+            prev_tree: None,
+            prev_rope: None,
+        }));
+
+        let out = wait_for_out(&drv, Duration::from_secs(5)).expect("parse within 5s");
+        let kinds: Vec<TokenKind> = out.tokens.iter().map(|t| t.kind).collect();
+        // Keyword (`import`, `const`, `from`) comes from the JS query.
+        assert!(
+            kinds.contains(&TokenKind::Keyword),
+            "expected a Keyword token from JS query; got {kinds:?}",
+        );
+        // String (`'m'`) comes from the JS query.
+        assert!(
+            kinds.contains(&TokenKind::String),
+            "expected a String token from JS query; got {kinds:?}",
+        );
+        // Type (`number` predefined_type) comes from the TS query.
+        assert!(
+            kinds.contains(&TokenKind::Type),
+            "expected a Type token from TS query; got {kinds:?}",
+        );
+    }
+
+    #[test]
+    fn tsx_parse_handles_jsx_and_typescript_captures() {
+        // .tsx files need the TSX grammar — the plain TypeScript
+        // grammar can't parse JSX. The query also needs the JSX
+        // captures from tree-sitter-javascript on top of the JS+TS
+        // base.
+        let (drv, _native) = spawn(Arc::new(NoopTrace), Notifier::noop());
+        let src = "const C = (): JSX.Element => <div>hi</div>;\n";
+        let rope = Arc::new(Rope::from_str(src));
+        let path = canon_of("a.tsx");
+
+        drv.execute(std::iter::once(&SyntaxCmd {
+            path: path.clone(),
+            version: led_core::BufferVersion(1),
+            rope,
+            language: Language::Tsx,
+            prev_tree: None,
+            prev_rope: None,
+        }));
+
+        let out = wait_for_out(&drv, Duration::from_secs(5)).expect("parse within 5s");
+        let kinds: Vec<TokenKind> = out.tokens.iter().map(|t| t.kind).collect();
+        assert!(
+            kinds.contains(&TokenKind::Keyword),
+            "expected a Keyword token; got {kinds:?}",
+        );
+        // `<div>` opens a JSX tag — JSX query produces a @tag capture.
+        assert!(
+            kinds.contains(&TokenKind::Tag),
+            "expected a Tag token from JSX query; got {kinds:?}",
         );
     }
 

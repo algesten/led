@@ -28,7 +28,16 @@ pub mod import;
 pub enum Language {
     Rust,
     TypeScript,
+    /// TypeScript with JSX. Distinct from `TypeScript` because
+    /// tree-sitter ships separate `LANGUAGE_TYPESCRIPT` and
+    /// `LANGUAGE_TSX` grammars — the TS grammar can't parse JSX
+    /// syntax.
+    Tsx,
     JavaScript,
+    /// JavaScript with JSX. Same grammar as plain JS (the JS
+    /// grammar parses JSX), but a dedicated highlight query
+    /// (`JSX_HIGHLIGHT_QUERY`) styles JSX-specific nodes.
+    Jsx,
     Python,
     Bash,
     Markdown,
@@ -75,8 +84,10 @@ impl Language {
     pub fn from_extension(ext: &str) -> Option<Self> {
         Some(match ext.to_ascii_lowercase().as_str() {
             "rs" => Self::Rust,
-            "ts" | "tsx" => Self::TypeScript,
-            "js" | "mjs" | "cjs" | "jsx" => Self::JavaScript,
+            "ts" => Self::TypeScript,
+            "tsx" => Self::Tsx,
+            "js" | "mjs" | "cjs" => Self::JavaScript,
+            "jsx" => Self::Jsx,
             "py" | "pyi" => Self::Python,
             "sh" | "bash" | "zsh" => Self::Bash,
             "md" | "markdown" => Self::Markdown,
@@ -508,12 +519,20 @@ mod tests {
     fn language_from_path_maps_common_extensions() {
         assert_eq!(Language::from_path(&canon("main.rs")), Some(Language::Rust));
         assert_eq!(
-            Language::from_path(&canon("app.tsx")),
+            Language::from_path(&canon("app.ts")),
             Some(Language::TypeScript)
         );
         assert_eq!(
-            Language::from_path(&canon("widget.jsx")),
+            Language::from_path(&canon("app.tsx")),
+            Some(Language::Tsx)
+        );
+        assert_eq!(
+            Language::from_path(&canon("widget.js")),
             Some(Language::JavaScript)
+        );
+        assert_eq!(
+            Language::from_path(&canon("widget.jsx")),
+            Some(Language::Jsx)
         );
         assert_eq!(
             Language::from_path(&canon("script.py")),

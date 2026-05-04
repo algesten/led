@@ -81,7 +81,12 @@ pub fn language_id(lang: led_state_syntax::Language) -> &'static str {
     match lang {
         Rust => "rust",
         TypeScript => "typescript",
+        // LSP spec: TSX/JSX have their own language IDs distinct
+        // from typescript/javascript so the server can engage the
+        // right parser branch (e.g. tsserver tracks .tsx separately).
+        Tsx => "typescriptreact",
         JavaScript => "javascript",
+        Jsx => "javascriptreact",
         Python => "python",
         Bash => "shellscript",
         Markdown => "markdown",

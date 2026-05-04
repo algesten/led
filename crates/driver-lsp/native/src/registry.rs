@@ -50,13 +50,25 @@ impl LspRegistry {
                     language: Language::TypeScript,
                     command: "typescript-language-server",
                     args: &["--stdio"],
-                    extensions: &["ts", "tsx"],
+                    extensions: &["ts"],
+                },
+                ServerConfig {
+                    language: Language::Tsx,
+                    command: "typescript-language-server",
+                    args: &["--stdio"],
+                    extensions: &["tsx"],
                 },
                 ServerConfig {
                     language: Language::JavaScript,
                     command: "typescript-language-server",
                     args: &["--stdio"],
-                    extensions: &["js", "mjs", "cjs", "jsx"],
+                    extensions: &["js", "mjs", "cjs"],
+                },
+                ServerConfig {
+                    language: Language::Jsx,
+                    command: "typescript-language-server",
+                    args: &["--stdio"],
+                    extensions: &["jsx"],
                 },
                 ServerConfig {
                     language: Language::Python,
@@ -149,15 +161,24 @@ mod tests {
     }
 
     #[test]
-    fn typescript_and_javascript_point_at_same_server() {
+    fn typescript_family_all_point_at_same_server() {
+        // typescript-language-server handles every TS/JS dialect;
+        // we register four separate `Language` entries so the
+        // syntax driver can pick the right grammar (TS vs TSX,
+        // JS vs JSX) without coupling that decision to LSP.
         let r = LspRegistry::new(None);
         let ts = r.config_for(Language::TypeScript).unwrap();
+        let tsx = r.config_for(Language::Tsx).unwrap();
         let js = r.config_for(Language::JavaScript).unwrap();
-        assert_eq!(ts.command, js.command);
-        assert_eq!(ts.args, js.args);
-        // But different extension sets — TS owns tsx, JS owns jsx.
-        assert!(ts.extensions.contains(&"ts"));
-        assert!(js.extensions.contains(&"js"));
+        let jsx = r.config_for(Language::Jsx).unwrap();
+        for c in [tsx, js, jsx] {
+            assert_eq!(ts.command, c.command);
+            assert_eq!(ts.args, c.args);
+        }
+        assert_eq!(ts.extensions, &["ts"]);
+        assert_eq!(tsx.extensions, &["tsx"]);
+        assert_eq!(js.extensions, &["js", "mjs", "cjs"]);
+        assert_eq!(jsx.extensions, &["jsx"]);
     }
 
     #[test]
