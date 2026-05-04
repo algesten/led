@@ -22,8 +22,7 @@ use crossterm::event::{
 };
 use led_core::Notifier;
 use led_driver_terminal_core::{
-    Dims, Frame, KeyCode, KeyEvent, KeyModifiers, Style, TermEvent, Theme, TerminalInputDriver,
-    Trace,
+    Dims, Frame, KeyCode, KeyEvent, KeyModifiers, TermEvent, Theme, TerminalInputDriver, Trace,
 };
 
 use buffer::Buffer;
@@ -494,13 +493,6 @@ pub(crate) fn paint(
         if let Some(x) = frame.layout.side_border_x {
             let rows = frame.layout.editor_area.rows + frame.layout.tab_bar.rows;
             paint_side_border(x, rows, theme, buf);
-            // The tab bar row to the left of the border isn't part
-            // of `side_area` (which only spans `body_rows`), but it
-            // also isn't covered by the editor's tab bar paint. Blank
-            // it explicitly: without this, hiding the panel and then
-            // re-showing it leaves the wide tab bar's stale labels
-            // visible under the side panel.
-            buf.fill_row(frame.layout.tab_bar.y, 0, x, Style::default());
         }
     }
 
@@ -642,7 +634,7 @@ pub fn suspend_and_resume<W: Write>(out: &mut W) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use led_driver_terminal_core::NoopTrace;
+    use led_driver_terminal_core::{NoopTrace, Style};
 
     /// Paint a frame through the full driver path and return the
     /// emitted bytes. The trace is a `NoopTrace` so tests don't need

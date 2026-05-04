@@ -337,7 +337,7 @@ fn tree_row_index_for_hit(
 }
 
 /// Visible-row budget for the side panel. Matches
-/// `Layout::compute`: side panel always gets `dims.rows - 2` rows
+/// `Layout::compute`: side panel always gets `dims.rows - 1` rows
 /// when visible; `0` when the terminal is too narrow or dims aren't
 /// known yet (the overlay isn't useful in those states).
 fn side_panel_rows(
@@ -345,7 +345,7 @@ fn side_panel_rows(
 ) -> usize {
     terminal
         .dims
-        .map(|d| d.rows.saturating_sub(2) as usize)
+        .map(|d| d.rows.saturating_sub(1) as usize)
         .unwrap_or(0)
 }
 

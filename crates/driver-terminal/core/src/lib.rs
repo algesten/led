@@ -53,12 +53,16 @@ impl Layout {
     /// gets a 25-col budget total (24 cols of content + 1 col
     /// border at the right edge), matching legacy goldens.
     /// `browser_visible` + sufficient terminal width are required
-    /// for the panel to show.
+    /// for the panel to show. Vertically the panel runs from the
+    /// top of the screen to just above the status bar — covering
+    /// the tab-bar row on the editor's left, since the tab bar is
+    /// editor-area-only.
     pub fn compute(dims: Dims, browser_visible: bool) -> Self {
         const SIDE_TOTAL: u16 = 25; // content + border
         const SIDE_CONTENT: u16 = SIDE_TOTAL - 1;
         const MIN_EDITOR_WIDTH: u16 = 25;
         let body_rows = dims.rows.saturating_sub(2);
+        let side_rows = dims.rows.saturating_sub(1);
 
         let side_visible = browser_visible
             && dims.cols > SIDE_TOTAL
@@ -69,7 +73,7 @@ impl Layout {
                     x: 0,
                     y: 0,
                     cols: SIDE_CONTENT,
-                    rows: body_rows,
+                    rows: side_rows,
                 }),
                 Some(SIDE_CONTENT),
                 SIDE_TOTAL,
