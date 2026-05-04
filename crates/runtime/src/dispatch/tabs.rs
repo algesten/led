@@ -28,6 +28,8 @@ pub(super) fn cycle_active(tabs: &mut Tabs, jumps: &mut JumpListState, delta: is
             path: prev.path.clone(),
             line: prev.cursor.line,
             col: prev.cursor.col,
+            top: prev.scroll.top,
+            top_sub_line: prev.scroll.top_sub_line,
         });
     }
 

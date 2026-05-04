@@ -103,6 +103,8 @@ fn accept(
             path: tab.path.clone(),
             line: state.origin_cursor.line,
             col: state.origin_cursor.col,
+            top: state.origin_scroll.top,
+            top_sub_line: state.origin_scroll.top_sub_line,
         });
     }
     stash_last_search(tab, &state);

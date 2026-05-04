@@ -66,6 +66,8 @@ pub(super) fn match_bracket(tabs: &mut Tabs, edits: &BufferEdits, jumps: &mut Ju
         path: tab.path.clone(),
         line: tab.cursor.line,
         col: tab.cursor.col,
+        top: tab.scroll.top,
+        top_sub_line: tab.scroll.top_sub_line,
     };
     jumps.record(current);
 
@@ -107,6 +109,8 @@ pub(super) fn current_position(tabs: &Tabs) -> Option<JumpPosition> {
         path: tab.path.clone(),
         line: tab.cursor.line,
         col: tab.cursor.col,
+        top: tab.scroll.top,
+        top_sub_line: tab.scroll.top_sub_line,
     })
 }
 
@@ -131,6 +135,10 @@ fn apply_jump(tabs: &mut Tabs, edits: &BufferEdits, pos: JumpPosition) {
     tab.cursor.line = line;
     tab.cursor.col = col;
     tab.cursor.preferred_col = col;
+    tab.scroll = led_state_tabs::Scroll {
+        top: pos.top.min(line_count.saturating_sub(1)),
+        top_sub_line: pos.top_sub_line,
+    };
     tabs.active = Some(tab.id);
 }
 
@@ -613,6 +621,8 @@ mod tests {
             path: canon("file.rs"),
             line: 0,
             col: 2,
+            top: 0,
+            top_sub_line: led_core::SubLine(0),
         });
         set_cursor(&mut tabs, 0, 9); // "current"
         jump_back(&mut tabs, &edits, &mut jumps);
@@ -631,6 +641,8 @@ mod tests {
             path: canon("file.rs"),
             line: 0,
             col: 3,
+            top: 0,
+            top_sub_line: led_core::SubLine(0),
         });
         set_cursor(&mut tabs, 0, 8);
         jump_back(&mut tabs, &edits, &mut jumps);
@@ -648,6 +660,8 @@ mod tests {
             path: canon("other.rs"), // not open
             line: 0,
             col: 0,
+            top: 0,
+            top_sub_line: led_core::SubLine(0),
         });
         set_cursor(&mut tabs, 0, 4);
         jump_back(&mut tabs, &edits, &mut jumps);

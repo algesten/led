@@ -15,7 +15,7 @@
 
 use std::collections::VecDeque;
 
-use led_core::CanonPath;
+use led_core::{CanonPath, SubLine};
 
 /// Maximum size of the jump deque. Matches legacy
 /// `led/src/model/jump.rs:3`. When a record would exceed this,
@@ -27,6 +27,17 @@ pub struct JumpPosition {
     pub path: CanonPath,
     pub line: usize,
     pub col: usize,
+    /// Scroll anchor at the moment the jump was recorded. Restored
+    /// on `jump_back` / `jump_forward` so the user returns to the
+    /// exact same view, not just the cursor location. Mirrors
+    /// `led_state_tabs::Scroll` inline (same reason `line`/`col`
+    /// inline `Cursor`: keeps `state-jumps` independent of
+    /// `state-tabs`). `#[serde(default)]` so older session files
+    /// without the field deserialise as `top = 0`.
+    #[serde(default)]
+    pub top: usize,
+    #[serde(default)]
+    pub top_sub_line: SubLine,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -114,6 +125,8 @@ mod tests {
             path: canon(path),
             line,
             col,
+            top: 0,
+            top_sub_line: SubLine(0),
         }
     }
 

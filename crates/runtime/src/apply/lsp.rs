@@ -227,6 +227,8 @@ pub(crate) fn current_jump_position(tabs: &Tabs) -> Option<led_state_jumps::Jump
         path: tab.path.clone(),
         line: tab.cursor.line,
         col: tab.cursor.col,
+        top: tab.scroll.top,
+        top_sub_line: tab.scroll.top_sub_line,
     })
 }
 
