@@ -38,6 +38,12 @@ pub struct StatusBarInputs<'a> {
     /// recording. Narrow projection so recorded-keystroke
     /// pushes don't invalidate this memo.
     pub kbd_macro: KbdMacroRecordingInput<'a>,
+    /// Session flock outcome — used to prefix the right half
+    /// with `(secondary) ` when this process didn't acquire the
+    /// primary flock for the workspace. The indicator stays
+    /// hidden until `init_done` so we don't flash it during the
+    /// brief startup window before `Restored` arrives.
+    pub session: SessionPrimaryInput<'a>,
     pub render_tick: u64,
 }
 
@@ -53,6 +59,7 @@ pub fn status_bar_model<'a>(inputs: StatusBarInputs<'a>) -> StatusBarModel {
         lsp_extras,
         git,
         kbd_macro,
+        session,
         render_tick,
     } = inputs;
     // The rename overlay used to take the status-bar prompt slot
@@ -126,7 +133,7 @@ pub fn status_bar_model<'a>(inputs: StatusBarInputs<'a>) -> StatusBarModel {
         };
     }
 
-    let right = position_string(tabs, edits, diagnostics);
+    let right = position_string(tabs, edits, diagnostics, session);
 
     // Priority 2 — info alert.
     if let Some(msg) = alerts.info.as_deref() {
@@ -287,6 +294,7 @@ fn position_string(
     tabs: TabsActiveInput<'_>,
     _edits: EditedBuffersInput<'_>,
     _diagnostics: DiagnosticsStatesInput<'_>,
+    session: SessionPrimaryInput<'_>,
 ) -> Arc<str> {
     // 1-indexed for human display — matches legacy goldens.
     // Falls back to `L1:C1` when no tab is active so post-kill /
@@ -296,5 +304,13 @@ fn position_string(
     let (row, col) = active_tab(tabs)
         .map(|t| (t.cursor.line + 1, t.cursor.col + 1))
         .unwrap_or((1, 1));
-    Arc::from(format!("L{row}:C{col} "))
+    // `(secondary) ` prefix only after Init has resolved — the
+    // default `primary == false` would otherwise flash for the
+    // first few ticks before `Restored` lands and stamps the
+    // real flock outcome.
+    if *session.init_done && !*session.primary {
+        Arc::from(format!("(secondary) L{row}:C{col} "))
+    } else {
+        Arc::from(format!("L{row}:C{col} "))
+    }
 }

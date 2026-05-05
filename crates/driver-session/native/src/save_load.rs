@@ -119,10 +119,6 @@ pub(crate) fn load_session(
         .collect::<rusqlite::Result<Vec<_>>>()?;
     drop(stmt);
 
-    if buffers.is_empty() {
-        return Ok(None);
-    }
-
     // Per-buffer undo restore: walk the buffer list and look up
     // their persisted state. Mirrors the legacy lib.rs flow that
     // populates `SessionBuffer::undo` in the workspace driver

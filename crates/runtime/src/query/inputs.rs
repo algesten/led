@@ -16,6 +16,7 @@ use led_driver_terminal_core::{
 };
 use led_state_alerts::AlertState;
 use led_state_kbd_macro::KbdMacroState;
+use led_state_session::SessionState;
 use led_state_browser::{BrowserUi, Focus};
 use led_state_clipboard::ClipboardState;
 use led_state_buffer_edits::{BufferEdits, EditedBuffer};
@@ -75,6 +76,30 @@ impl<'a> KbdMacroRecordingInput<'a> {
     pub fn new(s: &'a KbdMacroState) -> Self {
         Self {
             recording: &s.recording,
+        }
+    }
+}
+
+// ── Inputs on SessionState ────────────────────────────────────────────
+
+/// Narrow projection over `SessionState` for the status-bar
+/// "(secondary)" indicator. Exposes only `primary` and
+/// `init_done` — `init_done` gates the indicator so we don't flash
+/// "(secondary)" during the brief startup window before `Restored`
+/// arrives and sets the real flock outcome. The save/restore-state
+/// fields (`saved`, `last_saved`, `pending_undo`) churn and would
+/// invalidate the status-bar memo for no reason.
+#[derive(drv::Input, Copy, Clone)]
+pub struct SessionPrimaryInput<'a> {
+    pub primary: &'a bool,
+    pub init_done: &'a bool,
+}
+
+impl<'a> SessionPrimaryInput<'a> {
+    pub fn new(s: &'a SessionState) -> Self {
+        Self {
+            primary: &s.primary,
+            init_done: &s.init_done,
         }
     }
 }

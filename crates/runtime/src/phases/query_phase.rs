@@ -43,6 +43,7 @@ pub(crate) fn run(sources: &Sources) -> QueryOut {
         lsp_extras,
         git,
         kbd_macro,
+        session,
         ..
     } = sources;
 
@@ -86,6 +87,7 @@ pub(crate) fn run(sources: &Sources) -> QueryOut {
         git: query::GitStateInput::new(git),
         render_tick,
         kbd_macro: query::KbdMacroRecordingInput::new(kbd_macro),
+        session: query::SessionPrimaryInput::new(session),
     });
 
     let syntax_cmds = query::desired_syntax_parses(

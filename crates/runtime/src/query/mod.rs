@@ -37,9 +37,9 @@ pub use inputs::{
     FsTreeInput, GitStateInput, HashIndexInput, KbdMacroRecordingInput,
     LspExtrasOverlayInput, LspInlayHintsEnabledInput, LspInlayHintsRequestedInput,
     LspNotifiedInput, LspStatusesInput, LspWatchedGlobsInput, NotifyDirInput,
-    OverlaysInput, PendingSavesInput, StoreLoadedInput, SyntaxStatesInput,
-    TabsActiveInput, TabsOpenInput, TerminalDimsInput, UndoFlushDebounceInput,
-    UndoPersistenceInput,
+    OverlaysInput, PendingSavesInput, SessionPrimaryInput, StoreLoadedInput,
+    SyntaxStatesInput, TabsActiveInput, TabsOpenInput, TerminalDimsInput,
+    UndoFlushDebounceInput, UndoPersistenceInput,
 };
 pub use render::{
     body_model, code_action_popup_model, completion_popup_model, popover_model,
@@ -231,6 +231,7 @@ mod tests {
         let diags = DiagnosticsStates::default();
         let lsp = LspStatuses::default();
         let kbd_macro_default = led_state_kbd_macro::KbdMacroState::default();
+        let session_default = led_state_session::SessionState::default();
         render_frame(RenderInputs {
             term: TerminalDimsInput::new(term),
             edits: EditedBuffersInput::new(e),
@@ -250,6 +251,7 @@ mod tests {
             git: GitStateInput::new(&led_state_git::GitState::default()),
             render_tick: 0,
             kbd_macro: KbdMacroRecordingInput::new(&kbd_macro_default),
+            session: SessionPrimaryInput::new(&session_default),
         })
     }
 
@@ -315,6 +317,7 @@ mod tests {
         let diags = DiagnosticsStates::default();
         let lsp = LspStatuses::default();
         let kbd_macro_default = led_state_kbd_macro::KbdMacroState::default();
+        let session_default = led_state_session::SessionState::default();
         let frame = render_frame(RenderInputs {
             term: TerminalDimsInput::new(&term),
             edits: EditedBuffersInput::new(&e),
@@ -334,6 +337,7 @@ mod tests {
             git: GitStateInput::new(&led_state_git::GitState::default()),
             render_tick: 0,
             kbd_macro: KbdMacroRecordingInput::new(&kbd_macro_default),
+            session: SessionPrimaryInput::new(&session_default),
         })
         .expect("dims set");
 
@@ -365,6 +369,7 @@ mod tests {
         let diags = DiagnosticsStates::default();
         let lsp = LspStatuses::default();
         let kbd_macro_default = led_state_kbd_macro::KbdMacroState::default();
+        let session_default = led_state_session::SessionState::default();
         let frame = render_frame(RenderInputs {
             term: TerminalDimsInput::new(&term),
             edits: EditedBuffersInput::new(&e),
@@ -384,6 +389,7 @@ mod tests {
             git: GitStateInput::new(&led_state_git::GitState::default()),
             render_tick: 0,
             kbd_macro: KbdMacroRecordingInput::new(&kbd_macro_default),
+            session: SessionPrimaryInput::new(&session_default),
         })
         .expect("dims set");
         assert_eq!(frame.cursor, None);
@@ -961,6 +967,7 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
         let diags = DiagnosticsStates::default();
         let lsp = LspStatuses::default();
         let kbd_macro_default = led_state_kbd_macro::KbdMacroState::default();
+        let session_default = led_state_session::SessionState::default();
         let frame = render_frame(RenderInputs {
             term: TerminalDimsInput::new(&term),
             edits: EditedBuffersInput::new(&e),
@@ -982,6 +989,7 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
             git: GitStateInput::new(&git),
             render_tick: 0,
             kbd_macro: KbdMacroRecordingInput::new(&kbd_macro_default),
+            session: SessionPrimaryInput::new(&session_default),
         })
         .expect("dims");
         match &frame.body {
@@ -1033,6 +1041,7 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
         let lsp = LspStatuses::default();
         let git = led_state_git::GitState::default();
         let kbd_macro_default = led_state_kbd_macro::KbdMacroState::default();
+        let session_default = led_state_session::SessionState::default();
         status_bar_model(StatusBarInputs {
             alerts: AlertsInput::new(a),
             tabs: TabsActiveInput::new(t),
@@ -1046,6 +1055,7 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
             git: GitStateInput::new(&git),
             render_tick: 0,
             kbd_macro: KbdMacroRecordingInput::new(&kbd_macro_default),
+            session: SessionPrimaryInput::new(&session_default),
         })
     }
 
@@ -1062,6 +1072,7 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
         let diags = DiagnosticsStates::default();
         let lsp = LspStatuses::default();
         let git = led_state_git::GitState::default();
+        let session_default = led_state_session::SessionState::default();
         status_bar_model(StatusBarInputs {
             alerts: AlertsInput::new(a),
             tabs: TabsActiveInput::new(t),
@@ -1075,6 +1086,7 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
             git: GitStateInput::new(&git),
             render_tick: 0,
             kbd_macro: KbdMacroRecordingInput::new(km),
+            session: SessionPrimaryInput::new(&session_default),
         })
     }
 
@@ -1089,6 +1101,7 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
         let diags = DiagnosticsStates::default();
         let lsp = LspStatuses::default();
         let kbd_macro_default = led_state_kbd_macro::KbdMacroState::default();
+        let session_default = led_state_session::SessionState::default();
         status_bar_model(StatusBarInputs {
             alerts: AlertsInput::new(a),
             tabs: TabsActiveInput::new(t),
@@ -1102,7 +1115,88 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
             git: GitStateInput::new(g),
             render_tick: 0,
             kbd_macro: KbdMacroRecordingInput::new(&kbd_macro_default),
+            session: SessionPrimaryInput::new(&session_default),
         })
+    }
+
+    fn status_with_session(
+        a: &AlertState,
+        t: &Tabs,
+        e: &BufferEdits,
+        sess: &led_state_session::SessionState,
+    ) -> StatusBarModel {
+        let ff = None;
+        let is = None;
+        let diags = DiagnosticsStates::default();
+        let lsp = LspStatuses::default();
+        let git = led_state_git::GitState::default();
+        let kbd_macro_default = led_state_kbd_macro::KbdMacroState::default();
+        status_bar_model(StatusBarInputs {
+            alerts: AlertsInput::new(a),
+            tabs: TabsActiveInput::new(t),
+            edits: EditedBuffersInput::new(e),
+            overlays: OverlaysInput::new(&ff, &is, &None),
+            diagnostics: DiagnosticsStatesInput::new(&diags),
+            lsp: LspStatusesInput::new(&lsp),
+            lsp_extras: LspExtrasOverlayInput::new(
+                &led_state_lsp::LspExtrasState::default(),
+            ),
+            git: GitStateInput::new(&git),
+            render_tick: 0,
+            kbd_macro: KbdMacroRecordingInput::new(&kbd_macro_default),
+            session: SessionPrimaryInput::new(sess),
+        })
+    }
+
+    #[test]
+    fn status_bar_secondary_prefixes_position() {
+        // After Init resolves with `primary == false`, the right
+        // half should read `(secondary) L<row>:C<col> ` so the
+        // user can see they're attached to a workspace owned by
+        // another led process.
+        let sess = led_state_session::SessionState {
+            init_done: true,
+            primary: false,
+            ..Default::default()
+        };
+        let s = status_with_session(
+            &AlertState::default(),
+            &Tabs::default(),
+            &BufferEdits::default(),
+            &sess,
+        );
+        assert_eq!(&*s.right, "(secondary) L1:C1 ");
+    }
+
+    #[test]
+    fn status_bar_no_secondary_prefix_before_init() {
+        // Default `init_done == false` — the flock outcome hasn't
+        // arrived yet, so suppress the indicator instead of
+        // flashing it during the startup window.
+        let sess = led_state_session::SessionState::default();
+        let s = status_with_session(
+            &AlertState::default(),
+            &Tabs::default(),
+            &BufferEdits::default(),
+            &sess,
+        );
+        assert_eq!(&*s.right, "L1:C1 ");
+    }
+
+    #[test]
+    fn status_bar_no_secondary_prefix_when_primary() {
+        let sess = led_state_session::SessionState {
+            init_done: true,
+            primary: true,
+            ..Default::default()
+        };
+        let s = status_with_session(
+            &AlertState::default(),
+            &Tabs::default(),
+            &BufferEdits::default(),
+            &sess,
+        );
+        assert_eq!(&*s.right, "L1:C1 ");
     }
 
     #[test]

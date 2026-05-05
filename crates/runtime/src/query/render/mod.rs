@@ -102,6 +102,10 @@ pub struct RenderInputs<'a> {
     /// pushes into `KbdMacroState.current` don't invalidate
     /// the render memo cache while a recording is in progress.
     pub kbd_macro: KbdMacroRecordingInput<'a>,
+    /// Session flock outcome — drives the `(secondary)` prefix
+    /// in the status bar when this process is attached as a
+    /// non-primary instance.
+    pub session: SessionPrimaryInput<'a>,
     /// Current frame in 80ms buckets. Used by the status-bar
     /// spinner formatter; the main loop quantises wall-clock
     /// millis to 80 so the memo only invalidates once per
@@ -128,6 +132,7 @@ pub fn render_frame<'a>(inputs: RenderInputs<'a>) -> Option<Frame> {
         lsp_extras,
         git,
         kbd_macro,
+        session,
         render_tick,
     } = inputs;
     let dims = (*term.dims)?;
@@ -153,6 +158,7 @@ pub fn render_frame<'a>(inputs: RenderInputs<'a>) -> Option<Frame> {
         lsp_extras,
         git,
         kbd_macro,
+        session,
         render_tick,
     });
     let side_panel = layout

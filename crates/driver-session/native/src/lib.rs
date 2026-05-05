@@ -398,6 +398,58 @@ mod tests {
     }
 
     #[test]
+    fn save_with_no_buffers_still_restores_kv() {
+        // Repro: user opens led, navigates the file browser without
+        // promoting any preview to a real tab, then quits. The save
+        // writes a workspaces row + kv but no buffers row. The next
+        // Init must still surface the kv (browser.expanded_dirs,
+        // browser.selected_path, …) so the sidebar state survives.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("workspace");
+        std::fs::create_dir_all(&root).unwrap();
+        let cfg = tmp.path().join("config");
+        let mut kv = HashMap::new();
+        kv.insert(
+            "browser.selected_path".to_string(),
+            "/some/path".to_string(),
+        );
+        let target = SessionData {
+            active_tab_order: 0,
+            show_side_panel: false,
+            buffers: vec![],
+            kv: kv.clone(),
+        };
+        {
+            let (drv, _n) = spawn(StdArc::new(NoopTrace), Notifier::noop());
+            drv.execute([&SessionCmd::Init {
+                root: canon_of(&root),
+                config_dir: canon_of(&cfg),
+            }]);
+            drain_one(&drv, Duration::from_secs(5)).expect("init");
+            drv.execute([&SessionCmd::SaveSession {
+                data: target.clone(),
+            }]);
+            drain_one(&drv, Duration::from_secs(5)).expect("save");
+            drv.execute([&SessionCmd::Shutdown]);
+        }
+        std::thread::sleep(Duration::from_millis(50));
+
+        let (drv, _n) = spawn(StdArc::new(NoopTrace), Notifier::noop());
+        drv.execute([&SessionCmd::Init {
+            root: canon_of(&root),
+            config_dir: canon_of(&cfg),
+        }]);
+        let ev = drain_one(&drv, Duration::from_secs(5)).expect("re-init");
+        let SessionEvent::Restored { restored, .. } = ev else {
+            panic!("unexpected event: {ev:?}");
+        };
+        let r = restored.expect("session restored even with empty buffers");
+        assert!(r.buffers.is_empty());
+        assert!(!r.show_side_panel);
+        assert_eq!(r.kv, kv);
+    }
+
+    #[test]
     fn save_then_init_round_trips_session_with_kv() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().join("workspace");
