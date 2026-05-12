@@ -780,7 +780,12 @@ pub(crate) fn ingest_session(sources: &mut Sources, env: &TickEnv<'_>) {
         }
     } else if session_just_restored {
         // Restored with empty session OR non-primary — no
-        // tabs to wait for.
+        // tabs to wait for. With nothing in the editor pane to
+        // act on, land focus in the sidebar so the first
+        // keystroke navigates the tree (always the case for a
+        // secondary instance, which never gets session tabs).
+        browser.visible = true;
+        browser.focus = led_state_browser::Focus::Side;
         if matches!(lifecycle.phase, Phase::Starting | Phase::Resuming) {
             lifecycle.phase = Phase::Running;
         }
