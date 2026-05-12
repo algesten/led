@@ -22,7 +22,10 @@ use crate::apply::fs::{apply_workspace_tree_delta, reconcile_external_change};
 use crate::apply::lsp::{
     completion_prefix, identifier_start_col, LspEditApply, LspGotoApply,
 };
-use crate::apply::session::{apply_pending_undo_restore, apply_session_kv, apply_sync_result};
+use crate::apply::session::{
+    apply_pending_undo_restore, apply_session_kv, apply_sync_result,
+    restore_preview_from_selection,
+};
 use crate::dispatch;
 use crate::phases::TickEnv;
 use crate::query::{self, EditedBuffersInput};
@@ -726,6 +729,12 @@ pub(crate) fn ingest_session(sources: &mut Sources, env: &TickEnv<'_>) {
                     tabs.open = new_tabs;
                     browser.visible = data.show_side_panel;
                     apply_session_kv(&data.kv, browser, jumps);
+                    // Re-establish the "browser cursor on a file ⇒
+                    // preview tab" invariant. Runs after the
+                    // permanent-tab restore so the preview gets
+                    // the next free id and `previous_tab` points
+                    // at whatever was just made active.
+                    restore_preview_from_selection(browser, tabs, path_chains);
                     session.last_saved = Some(data);
                 } else {
                     session.last_saved = None;

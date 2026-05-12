@@ -37,8 +37,14 @@ pub(crate) fn config_dir_for_session() -> Option<CanonPath> {
 /// Mirrors legacy's session-on-quit assembly: one
 /// `SessionBuffer` per non-preview tab (cursor + scroll), plus
 /// the active-tab order, the side-panel toggle, and any kv pairs
-/// the runtime collected (browser state, jump list, etc. — those
-/// will arrive in a follow-up; the slot is here today).
+/// the runtime collected (browser state, jump list, etc.).
+///
+/// Preview tabs are not persisted explicitly — the browser's
+/// `selected_path` already records the same intent ("the user
+/// was hovering this file row"). On restore, the runtime
+/// re-establishes the navigation invariant ("cursor on a file
+/// row ⇒ preview tab for that file"), which recreates the
+/// preview without a separate persistence channel.
 ///
 /// The undo-flush + ClearUndo flow lives separately: legacy
 /// flushes undo on a debounce timer (and on any save) via a
@@ -75,6 +81,49 @@ pub(crate) fn build_session_data(
         buffers: session_buffers,
         kv: build_session_kv(browser, jumps),
     }
+}
+
+/// Re-establish the "browser cursor on a file ⇒ preview tab"
+/// invariant after a session restore. When the restored
+/// `browser.selected_path` points at a regular file that has
+/// no permanent tab, open a preview tab for it (and make it
+/// active, mirroring what the dispatch-side
+/// `preview_current_selection` does on every arrow-nav). The
+/// `selected_path` is the only thing persisted; preview tabs
+/// themselves are never written to the DB.
+///
+/// Returns the new preview's `TabId` when one was created.
+/// Filesystem check is `std::fs::metadata` — a single syscall
+/// at startup, fine on a cold cache. Bails on dirs, missing
+/// files, or symlink-to-dir without further fuss.
+pub(crate) fn restore_preview_from_selection(
+    browser: &led_state_browser::BrowserUi,
+    tabs: &mut Tabs,
+    path_chains: &mut std::collections::HashMap<CanonPath, led_core::PathChain>,
+) -> Option<led_state_tabs::TabId> {
+    let path = browser.selected_path.as_ref()?.clone();
+    if tabs.open.iter().any(|t| t.path == path) {
+        return None;
+    }
+    let meta = std::fs::metadata(path.as_path()).ok()?;
+    if !meta.is_file() {
+        return None;
+    }
+    let id = led_state_tabs::TabId(
+        tabs.open.iter().map(|t| t.id.0).max().unwrap_or(0) + 1,
+    );
+    let chain = led_core::UserPath::new(path.as_path()).resolve_chain();
+    path_chains.insert(path.clone(), chain);
+    let previous_tab = tabs.active;
+    tabs.open.push_back(led_state_tabs::Tab {
+        id,
+        path,
+        preview: true,
+        previous_tab,
+        ..Default::default()
+    });
+    tabs.active = Some(id);
+    Some(id)
 }
 
 /// Inverse of [`build_session_kv`]: re-hydrates the browser +
@@ -414,5 +463,93 @@ impl HashIntoExt for std::borrow::Cow<'_, str> {
     fn hash_into(self, h: &mut std::collections::hash_map::DefaultHasher) {
         use std::hash::Hasher;
         h.write(self.as_bytes());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use led_state_browser::BrowserUi;
+    use led_state_tabs::{Tab, TabId};
+
+    fn make_file(name: &str) -> (tempfile::TempDir, CanonPath) {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join(name);
+        std::fs::write(&p, b"x").unwrap();
+        let canon = led_core::UserPath::new(&p).canonicalize();
+        (tmp, canon)
+    }
+
+    #[test]
+    fn restore_preview_creates_active_preview_tab_for_selected_file() {
+        let (_tmp, path) = make_file("a.rs");
+        let mut tabs = Tabs::default();
+        let mut chains = std::collections::HashMap::new();
+        let browser = BrowserUi {
+            selected_path: Some(path.clone()),
+            ..Default::default()
+        };
+
+        let id = restore_preview_from_selection(&browser, &mut tabs, &mut chains)
+            .expect("preview created");
+        let tab = tabs.open.iter().find(|t| t.id == id).expect("tab present");
+        assert!(tab.preview);
+        assert_eq!(tab.path, path);
+        assert_eq!(tabs.active, Some(id));
+    }
+
+    #[test]
+    fn restore_preview_skips_when_path_already_a_tab() {
+        let (_tmp, path) = make_file("a.rs");
+        let mut tabs = Tabs::default();
+        tabs.open.push_back(Tab {
+            id: TabId(7),
+            path: path.clone(),
+            preview: false,
+            ..Default::default()
+        });
+        tabs.active = Some(TabId(7));
+        let mut chains = std::collections::HashMap::new();
+        let browser = BrowserUi {
+            selected_path: Some(path),
+            ..Default::default()
+        };
+
+        assert!(restore_preview_from_selection(&browser, &mut tabs, &mut chains).is_none());
+        // Existing permanent tab stays active and unchanged.
+        assert_eq!(tabs.open.len(), 1);
+        assert_eq!(tabs.active, Some(TabId(7)));
+        assert!(!tabs.open[0].preview);
+    }
+
+    #[test]
+    fn restore_preview_skips_directory_selection() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir_path = led_core::UserPath::new(tmp.path()).canonicalize();
+        let mut tabs = Tabs::default();
+        let mut chains = std::collections::HashMap::new();
+        let browser = BrowserUi {
+            selected_path: Some(dir_path),
+            ..Default::default()
+        };
+
+        assert!(restore_preview_from_selection(&browser, &mut tabs, &mut chains).is_none());
+        assert!(tabs.open.is_empty());
+    }
+
+    #[test]
+    fn restore_preview_skips_missing_path() {
+        let path =
+            led_core::UserPath::new(std::path::Path::new("/nonexistent/garbage.rs"))
+                .canonicalize();
+        let mut tabs = Tabs::default();
+        let mut chains = std::collections::HashMap::new();
+        let browser = BrowserUi {
+            selected_path: Some(path),
+            ..Default::default()
+        };
+
+        assert!(restore_preview_from_selection(&browser, &mut tabs, &mut chains).is_none());
+        assert!(tabs.open.is_empty());
     }
 }
