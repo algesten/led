@@ -1,5 +1,5 @@
-FsListDir	path=<TMPDIR>
 FileOpen	path=<TMPDIR>/hello.txt create_if_missing=true
+FsListDir	path=<TMPDIR>
 FsFindFile	dir=<TMPDIR> prefix="hello.txt" show_hidden=false
 FsFindFile	dir=<TMPDIR> prefix="hello.txtc" show_hidden=false
 FsFindFile	dir=<TMPDIR> prefix="hello.txtco" show_hidden=false

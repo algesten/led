@@ -1,2 +1,2 @@
-FsListDir	path=<TMPDIR>
 FileOpen	path=<TMPDIR>/combining.txt create_if_missing=true
+FsListDir	path=<TMPDIR>

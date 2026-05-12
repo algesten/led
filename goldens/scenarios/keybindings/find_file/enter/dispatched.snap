@@ -1,5 +1,5 @@
-FsListDir	path=<TMPDIR>
 FileOpen	path=<TMPDIR>/buffer.txt create_if_missing=true
+FsListDir	path=<TMPDIR>
 FsFindFile	dir=<TMPDIR> prefix="" show_hidden=false
 FsFindFile	dir=<TMPDIR> prefix="b" show_hidden=false
 FsFindFile	dir=<TMPDIR> prefix="bu" show_hidden=false

@@ -1,5 +1,5 @@
-FsListDir	path=<TMPDIR>
 FileOpen	path=<TMPDIR>/a.txt create_if_missing=true
+FsListDir	path=<TMPDIR>
 GitScan	root=<TMPDIR>
 FsFindFile	dir=<TMPDIR> prefix="" show_hidden=false
 FsFindFile	dir=<TMPDIR> prefix="z" show_hidden=false

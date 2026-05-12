@@ -1,5 +1,5 @@
-  buffer.txt            │  line three
-                        │  line four
+  buffer.txt            │  line three                                                                                   
+                        │  line four                                                                                    
                         │  line one  
                         │  line two 
                         │ 
@@ -37,4 +37,4 @@
                         │~
                         │~
                         │ ●buffer.txt 
- Mark set                                                                                                         L5:C1 
+ Mark set                                                                                             (secondary) L5:C1 

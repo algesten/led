@@ -340,7 +340,10 @@ impl GoldenRunner {
     /// without producing immediate PTY output — only after the response
     /// arrives does the frame change.
     pub fn settle(&mut self) {
-        let quiet = Duration::from_millis(120);
+        self.settle_for(Duration::from_millis(120));
+    }
+
+    fn settle_for(&mut self, quiet: Duration) {
         let min_wait = Duration::from_millis(40);
         let max_wait = Duration::from_secs(15);
         let start = Instant::now();
@@ -349,12 +352,14 @@ impl GoldenRunner {
             let pty_quiet =
                 self.last_byte_time.lock().unwrap().elapsed() >= quiet;
             let trace_quiet = self.trace_quiet_for(quiet);
-            if pty_quiet && trace_quiet {
+            let lsp_idle = self.lsp_in_flight() == 0;
+            if pty_quiet && trace_quiet && lsp_idle {
                 return;
             }
             if start.elapsed() > max_wait {
+                let in_flight = self.lsp_in_flight();
                 panic!(
-                    "settle timed out after {:?} — pty_quiet={pty_quiet} trace_quiet={trace_quiet}",
+                    "settle timed out after {:?} — pty_quiet={pty_quiet} trace_quiet={trace_quiet} lsp_in_flight={in_flight}",
                     start.elapsed()
                 );
             }
@@ -372,6 +377,35 @@ impl GoldenRunner {
         mtime.elapsed().map(|e| e >= quiet).unwrap_or(true)
     }
 
+    /// Outstanding LSP requests inferred from the trace.
+    ///
+    /// Counts `LspSend kind=request` minus `LspRecv kind=response`.
+    /// While > 0 the LSP server hasn't responded to every request
+    /// the runtime has issued, so any frame snapshot taken now
+    /// would be racing the next `LspRecv` → state-change → repaint
+    /// cycle. Notifications (both directions) are fire-and-forget
+    /// and don't count.
+    ///
+    /// Trace ids are unique per server, so a simple count suffices;
+    /// we don't need to track ids individually. Reads the trace
+    /// file each call — acceptable because settle only polls every
+    /// 20 ms, and trace files stay small for golden scenarios.
+    fn lsp_in_flight(&self) -> usize {
+        let Ok(content) = std::fs::read_to_string(&self.trace_path) else {
+            return 0;
+        };
+        let mut sends = 0usize;
+        let mut recvs = 0usize;
+        for line in content.lines() {
+            if line.starts_with("LspSend\t") && line.contains("kind=request") {
+                sends += 1;
+            } else if line.starts_with("LspRecv\t") && line.contains("kind=response") {
+                recvs += 1;
+            }
+        }
+        sends.saturating_sub(recvs)
+    }
+
     fn wait_ready(&mut self) {
         let max_wait = Duration::from_secs(15);
         let start = Instant::now();
@@ -381,7 +415,15 @@ impl GoldenRunner {
             }
             std::thread::sleep(Duration::from_millis(10));
         }
-        self.settle();
+        // Startup-only: the dispatch trace records intents (e.g.
+        // `FileOpen` at dispatch time), not completions. A buffer
+        // load that finishes 50–150 ms after the first paint can
+        // slip past `settle`'s 120 ms quiet window, leaving keys
+        // dispatched against an empty buffer. The wider window
+        // here covers the dispatch → driver-completion → ingest →
+        // render pipeline for CLI-seeded buffers; subsequent
+        // `settle()` calls (between presses) stay at 120 ms.
+        self.settle_for(Duration::from_millis(400));
     }
 
     /// Render the current vt100 screen to a plain-text grid suitable for
@@ -539,7 +581,7 @@ pub fn normalize_trace(raw: &str, tmpdir: &Path) -> String {
         .map(|p| p.to_string_lossy().to_string());
     let bins = binaries();
     let fake_lsp = bins.fake_lsp.to_string_lossy().to_string();
-    let mut out = String::new();
+    let mut lines: Vec<String> = Vec::new();
     for line in raw.lines() {
         let mut s = line.to_string();
         if let Some(ref c) = canon_tmp {
@@ -557,10 +599,102 @@ pub fn normalize_trace(raw: &str, tmpdir: &Path) -> String {
         // Mask non-deterministic per-field IDs. Single field for now;
         // expand into a loop when a second masked field arrives.
         s = mask_field(&s, "chain=", "chain=<CHAIN>");
-        out.push_str(&s);
+        lines.push(s);
+    }
+    // Canonicalise consecutive runs of order-independent startup
+    // events. The LSP driver thread races against runtime phases:
+    // `LspSend method=initialize` and `GitScan` can swap depending
+    // on thread scheduling, producing flaky goldens. These events
+    // have no causal dependency on each other, so we sort
+    // consecutive groups alphabetically.
+    sort_independent_runs(&mut lines);
+    // Collapse FSEvents-burst duplicates. macOS FSEvents emits
+    // multiple kernel events per logical `fs_write` (CREATE +
+    // MODIFY at the inode level), and the workspace-root watch
+    // registers with `debounce_ms: 0` (see
+    // `crates/driver-file-watch/native/src/lib.rs:270` and
+    // `crates/runtime/src/query/desired.rs:148`). Each event
+    // can re-trigger a whole downstream cycle, producing 1–N
+    // back-to-back identical lines (`GitScan`) or 1–N identical
+    // multi-line blocks (`LspDidChangeWatchedFiles` + the
+    // matching `LspSend workspace/didChangeWatchedFiles`)
+    // depending on how the kernel bundled the events. The
+    // duplicates carry no test signal — same scan, same
+    // notification, same result — so we collapse them rather
+    // than masking with a runtime debounce window (which would
+    // add real input-to-rescan latency for users). Runs after
+    // `sort_independent_runs` so sorted-then-duplicated lines
+    // also collapse.
+    dedupe_repeated_blocks(&mut lines);
+    let mut out = String::new();
+    for line in lines {
+        out.push_str(&line);
         out.push('\n');
     }
     out
+}
+
+/// Collapse adjacent repetitions of identical blocks. A block is
+/// any contiguous slice of 1–4 lines: this catches the GitScan
+/// case (1-line block, `Vec::dedup` would suffice) and the
+/// `LspDidChangeWatchedFiles` / `LspSend workspace/didChangeWatchedFiles`
+/// case (2-line block, interleaved so single-line dedup misses
+/// it). Block size 4 is an empirical ceiling — bigger logical
+/// units in the trace would be more likely to share lines with
+/// non-duplicated context and false-positive collapse.
+///
+/// Greedy at each block size: if `lines[i..i+size] ==
+/// lines[i+size..i+2*size]`, drop the second copy and re-test at
+/// the same `i` so triples collapse to one in two steps.
+fn dedupe_repeated_blocks(lines: &mut Vec<String>) {
+    for size in 1..=4 {
+        let mut i = 0;
+        while i + 2 * size <= lines.len() {
+            if lines[i..i + size] == lines[i + size..i + 2 * size] {
+                lines.drain(i + size..i + 2 * size);
+            } else {
+                i += 1;
+            }
+        }
+    }
+}
+
+/// Sort consecutive trace lines that have no causal dependency on
+/// each other. A line is "order-independent" when its event is
+/// emitted on its own driver thread or runtime phase with no
+/// happens-before relationship to its neighbours — see
+/// [`is_order_independent`].
+fn sort_independent_runs(lines: &mut Vec<String>) {
+    let mut i = 0;
+    while i < lines.len() {
+        if !is_order_independent(&lines[i]) {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < lines.len() && is_order_independent(&lines[i]) {
+            i += 1;
+        }
+        lines[start..i].sort();
+    }
+}
+
+/// Startup events that race against each other across the
+/// runtime↔driver thread boundary. They share no causal order:
+/// `GitScan` is dispatched on the runtime thread; the matching
+/// `LspSend method=initialize` is written by the LSP driver
+/// thread whenever it dequeues the `LspCmd::Init`. Their relative
+/// position in the trace flips run-to-run.
+///
+/// Lines outside this set (LspRecv responses, user-action
+/// dispatches like `textDocument/definition`, save / undo events)
+/// have meaningful order and stay put.
+fn is_order_independent(line: &str) -> bool {
+    line.starts_with("FsListDir\t")
+        || line.starts_with("FileOpen\t")
+        || line.starts_with("GitScan\t")
+        || line.contains("method=initialize ")
+        || line.ends_with("method=initialize")
 }
 
 fn mask_field(s: &str, prefix: &str, placeholder: &str) -> String {

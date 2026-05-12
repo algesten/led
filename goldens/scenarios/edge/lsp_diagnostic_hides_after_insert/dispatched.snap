@@ -1,5 +1,5 @@
-FsListDir	path=<TMPDIR>
 FileOpen	path=<TMPDIR>/main.rs create_if_missing=true
+FsListDir	path=<TMPDIR>
 GitScan	root=<TMPDIR>
 LspSend	server=fake-lsp kind=request method=initialize id=1
 LspRecv	server=fake-lsp kind=response id=1
@@ -8,9 +8,9 @@ LspSend	server=fake-lsp kind=notification method=workspace/didChangeConfiguratio
 LspSend	server=fake-lsp kind=notification method=textDocument/didOpen path=file://<TMPDIR>/main.rs version=1
 LspRecv	server=fake-lsp kind=notification method=textDocument/publishDiagnostics
 LspRecv	server=fake-lsp kind=notification method=$/progress
-LspRecv	server=fake-lsp kind=notification method=$/progress
 LspSend	server=fake-lsp kind=notification method=textDocument/didChange path=file://<TMPDIR>/main.rs version=2
 WorkspaceFlushUndo	path=<TMPDIR>/main.rs chain=<CHAIN>
+WorkspaceCheckSync	path=<TMPDIR>/main.rs
 LspSend	server=fake-lsp kind=notification method=textDocument/didChange path=file://<TMPDIR>/main.rs version=3
 LspSend	server=fake-lsp kind=request method=textDocument/completion id=2 path=file://<TMPDIR>/main.rs
 LspSend	server=fake-lsp kind=request method=textDocument/completion id=3 path=file://<TMPDIR>/main.rs
@@ -43,3 +43,4 @@ LspRecv	server=fake-lsp kind=response id=14
 LspRecv	server=fake-lsp kind=response id=15
 LspRecv	server=fake-lsp kind=response id=16
 WorkspaceFlushUndo	path=<TMPDIR>/main.rs chain=<CHAIN>
+WorkspaceCheckSync	path=<TMPDIR>/main.rs
