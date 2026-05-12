@@ -54,14 +54,15 @@ pub(crate) fn paint_side_panel(panel: &SidePanelModel, area: Rect, theme: &Theme
             }
             line.push_str(&entry.name);
             // Browser mode reserves the right-most column for the
-            // status letter (legacy display.rs:1396-1417). The
-            // name region fills the remaining `cols - 1`; status
-            // letter is painted separately below so it keeps the
-            // category style even on non-selected rows whose name
-            // is uncoloured.
+            // status letter (legacy display.rs:1396-1417), plus one
+            // blank gap column to its left so the letter doesn't sit
+            // flush against the file name. The name region fills the
+            // remaining `cols - 2`; status letter is painted
+            // separately below so it keeps the category style even on
+            // non-selected rows whose name is uncoloured.
             let reserve_status = matches!(panel.mode, SidePanelMode::Browser);
             let name_width = if reserve_status {
-                cols.saturating_sub(1)
+                cols.saturating_sub(2)
             } else {
                 cols
             };
@@ -135,20 +136,29 @@ pub(crate) fn paint_side_panel(panel: &SidePanelModel, area: Rect, theme: &Theme
             // selection-row style so the highlighted bar reads
             // continuous across the whole row (legacy
             // display.rs:1420-1425). Otherwise the letter uses the
-            // category style (coloured fg).
+            // category style (coloured fg). The column at
+            // `name_end_col` is a blank gap so the letter doesn't
+            // sit flush against the file name.
             if reserve_status {
+                let letter_col = name_end_col + 1;
+                let sel_style = if panel.focused {
+                    theme.browser_selected_focused
+                } else {
+                    theme.browser_selected_unfocused
+                };
+                let gap_style = if entry.selected {
+                    sel_style
+                } else {
+                    Style::default()
+                };
+                buf.put_char(buf_row, name_end_col, ' ', gap_style);
                 match entry.status {
                     Some(status) => {
                         if entry.selected {
-                            let sel_style = if panel.focused {
-                                theme.browser_selected_focused
-                            } else {
-                                theme.browser_selected_unfocused
-                            };
-                            buf.put_char(buf_row, name_end_col, status.letter, sel_style);
+                            buf.put_char(buf_row, letter_col, status.letter, sel_style);
                         } else {
                             let marker = theme.category_style(status.category);
-                            buf.put_char(buf_row, name_end_col, status.letter, marker);
+                            buf.put_char(buf_row, letter_col, status.letter, marker);
                         }
                     }
                     None => {
@@ -156,14 +166,9 @@ pub(crate) fn paint_side_panel(panel: &SidePanelModel, area: Rect, theme: &Theme
                         // so the highlight bar doesn't stop one
                         // col short of the panel edge.
                         if entry.selected {
-                            let sel_style = if panel.focused {
-                                theme.browser_selected_focused
-                            } else {
-                                theme.browser_selected_unfocused
-                            };
-                            buf.put_char(buf_row, name_end_col, ' ', sel_style);
+                            buf.put_char(buf_row, letter_col, ' ', sel_style);
                         } else {
-                            buf.put_char(buf_row, name_end_col, ' ', Style::default());
+                            buf.put_char(buf_row, letter_col, ' ', Style::default());
                         }
                     }
                 }
