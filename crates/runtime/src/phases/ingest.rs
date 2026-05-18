@@ -790,6 +790,14 @@ pub(crate) fn ingest_session(sources: &mut Sources, env: &TickEnv<'_>) {
             SessionEvent::SyncResult { kind } => {
                 apply_sync_result(kind, edits, undo_persistence, file_watch);
             }
+            SessionEvent::ChatsLoaded { .. } => {
+                // Folded into `ChatStore` by the chat ingest arm
+                // (added in a later stage — task #20 wires the
+                // memo and the AppState field). For now the
+                // event is ignored here so the workspace can
+                // still init; the rows are re-loadable from
+                // SQLite at any time.
+            }
         }
     }
     if session_just_restored && !tabs.open.is_empty() {
