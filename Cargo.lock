@@ -1011,6 +1011,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "led-driver-claude-core"
+version = "0.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "led-driver-clipboard-core"
 version = "0.0.0"
 dependencies = [
