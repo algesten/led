@@ -31,7 +31,7 @@ use serde::Deserialize;
 /// `total_prompt() / model_context_window`; the model window
 /// arrives on the `result.modelUsage.<model>.contextWindow` field
 /// (see [`ModelUsage`]). No hard-coded window table required.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, serde::Serialize, Default)]
 #[serde(default)]
 pub struct Usage {
     pub input_tokens: u32,
