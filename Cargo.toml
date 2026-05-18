@@ -48,6 +48,7 @@ members = [
     "crates/driver-file-watch/core",
     "crates/driver-file-watch/native",
     "crates/driver-claude/core",
+    "crates/driver-claude/native",
     "crates/runtime",
     "crates/text-layout",
     "crates/text-reflow",
@@ -105,6 +106,7 @@ led-driver-session-native = { path = "crates/driver-session/native" }
 led-driver-file-watch-core = { path = "crates/driver-file-watch/core" }
 led-driver-file-watch-native = { path = "crates/driver-file-watch/native" }
 led-driver-claude-core = { path = "crates/driver-claude/core" }
+led-driver-claude-native = { path = "crates/driver-claude/native" }
 led-runtime = { path = "crates/runtime" }
 led-text-layout = { path = "crates/text-layout" }
 led-text-reflow = { path = "crates/text-reflow" }
