@@ -21,5 +21,6 @@ publish = false
 # layer is independently unit-testable without spawning a subprocess.
 
 [dependencies]
+led-core = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

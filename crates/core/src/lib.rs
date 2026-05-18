@@ -28,7 +28,7 @@ pub use drv;
 pub use content_hash::{EphemeralContentHash, PersistedContentHash};
 pub use ids::{
     BufferStateSum, BufferVersion, ChainId, EditSeq, LspRequestSeq, SavedVersion, ServerId,
-    UndoDbSeq, WatchSeq,
+    SessionUuid, UndoDbSeq, WatchSeq,
 };
 pub use issue::{CategoryInfo, IssueCategory};
 pub use notify::Notifier;

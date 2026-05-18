@@ -1014,6 +1014,7 @@ dependencies = [
 name = "led-driver-claude-core"
 version = "0.0.0"
 dependencies = [
+ "led-core",
  "serde",
  "serde_json",
 ]
