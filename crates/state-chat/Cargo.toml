@@ -1,0 +1,17 @@
+[package]
+name = "led-state-chat"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# User-decision source for Claude chats: per-session option
+# overrides, the composer text the user is currently typing, and
+# the pending-send queue.
+#
+# No driver — chat user decisions are mutated by dispatch in the
+# runtime per EXAMPLE-ARCH §User-decision sources have no driver.
+# The driver-side concerns (subprocess lifecycle, transcript log)
+# live on driver-claude/core's sources.
+
+[dependencies]
+led-core = { workspace = true }

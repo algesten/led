@@ -1338,6 +1338,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "led-state-chat"
+version = "0.0.0"
+dependencies = [
+ "led-core",
+]
+
+[[package]]
 name = "led-state-clipboard"
 version = "0.0.0"
 dependencies = [

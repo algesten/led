@@ -16,65 +16,14 @@
 //! `SessionUuid` tags every cmd and event so the worker can fan
 //! out across multiple parallel subprocesses (one per chat tab).
 
+// Effort + PermissionMode now live on `led-core` so the
+// user-decision source (`state-chat`) can carry per-session
+// overrides without taking a dep on the driver crate. Re-export
+// here for crates that already import `led_driver_claude_core::*`.
+pub use led_core::{Effort, PermissionMode};
 use led_core::SessionUuid;
-use serde::{Deserialize, Serialize};
 
 use crate::parser::ParsedStdout;
-
-/// `--effort <level>` flag. Default is `XHigh` per project
-/// preference; users override per session via `state-chat`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Effort {
-    Low,
-    Medium,
-    High,
-    #[default]
-    XHigh,
-    Max,
-}
-
-impl Effort {
-    /// The exact string the CLI's `--effort` flag accepts.
-    pub fn as_flag(self) -> &'static str {
-        match self {
-            Effort::Low => "low",
-            Effort::Medium => "medium",
-            Effort::High => "high",
-            Effort::XHigh => "xhigh",
-            Effort::Max => "max",
-        }
-    }
-}
-
-/// `--permission-mode <mode>` flag. Default is `Auto` (the
-/// classifier-driven mode the CLI's `auto-mode` subcommand inspects).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum PermissionMode {
-    AcceptEdits,
-    #[default]
-    Auto,
-    BypassPermissions,
-    Default,
-    DontAsk,
-    Plan,
-}
-
-impl PermissionMode {
-    /// The exact string the CLI's `--permission-mode` flag accepts
-    /// (camelCase on the wire — note `acceptEdits` not `accept-edits`).
-    pub fn as_flag(self) -> &'static str {
-        match self {
-            PermissionMode::AcceptEdits => "acceptEdits",
-            PermissionMode::Auto => "auto",
-            PermissionMode::BypassPermissions => "bypassPermissions",
-            PermissionMode::Default => "default",
-            PermissionMode::DontAsk => "dontAsk",
-            PermissionMode::Plan => "plan",
-        }
-    }
-}
 
 /// How the worker should bring up the subprocess.
 ///
@@ -159,42 +108,8 @@ pub enum ClaudeEvent {
 mod tests {
     use super::*;
 
-    #[test]
-    fn effort_flag_strings_match_cli() {
-        // Verbatim choices from `claude --help`:
-        // "low|medium|high|xhigh|max".
-        for (e, s) in [
-            (Effort::Low, "low"),
-            (Effort::Medium, "medium"),
-            (Effort::High, "high"),
-            (Effort::XHigh, "xhigh"),
-            (Effort::Max, "max"),
-        ] {
-            assert_eq!(e.as_flag(), s);
-        }
-    }
-
-    #[test]
-    fn permission_mode_flag_strings_match_cli() {
-        // Verbatim choices from `claude --help`:
-        // "acceptEdits|auto|bypassPermissions|default|dontAsk|plan".
-        for (p, s) in [
-            (PermissionMode::AcceptEdits, "acceptEdits"),
-            (PermissionMode::Auto, "auto"),
-            (PermissionMode::BypassPermissions, "bypassPermissions"),
-            (PermissionMode::Default, "default"),
-            (PermissionMode::DontAsk, "dontAsk"),
-            (PermissionMode::Plan, "plan"),
-        ] {
-            assert_eq!(p.as_flag(), s);
-        }
-    }
-
-    #[test]
-    fn defaults_match_project_preference() {
-        assert_eq!(Effort::default(), Effort::XHigh);
-        assert_eq!(PermissionMode::default(), PermissionMode::Auto);
-    }
+    // Effort + PermissionMode flag-string round-trips are tested
+    // in `led_core::claude_opts` where the types live.
 
     #[test]
     fn exit_info_ok_only_for_zero_code() {
