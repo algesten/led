@@ -29,6 +29,11 @@ pub use browser::{
     diag_categories_map, file_categories_map, file_list_action, git_categories_map,
     BrowserDerivedInputs, PreviewIntent,
 };
+pub use claude::{
+    chat_picker_items, chat_tab_view, context_pct, desired_subprocesses, needs_auto_label,
+    orphan_status_actions, pending_persist_writes, subprocess_action, ChatViewMessage,
+    ChatViewModel, PickerItem, AUTO_LABEL_MIN_ROUNDS,
+};
 pub use desired::{
     compiled_query, completion_commit_plan, completion_refilter_outcome,
     completion_request_anchor, desired_indent_for_line, desired_inlay_hint_requests,
