@@ -23,6 +23,70 @@ use std::collections::{HashMap, VecDeque};
 
 use led_core::{Effort, PermissionMode, SessionUuid};
 
+// ── Open chat tabs ──────────────────────────────────────────────────
+
+/// Which chat sessions are currently "open as tabs" and which one
+/// is focused.
+///
+/// Sibling to the existing `Tabs` source (file tabs) rather than
+/// folded into it — the file-tab struct in `state-tabs` carries
+/// ~10 file-specific fields (cursor / scroll / mark / preview /
+/// pending_cursor / pending_scroll / last_search / ...) that
+/// don't apply to chats, and the dispatch layer accesses
+/// `tab.path` in 60+ places. A polymorphic union would force every
+/// one of those sites to handle the chat case explicitly —
+/// without much benefit, because the runtime's `subprocess_action`
+/// memo (task #19) reads chat tabs from *here* anyway.
+///
+/// The visual "single tab strip with files + chats interleaved"
+/// is reconstructed in the render layer (task #23) by reading
+/// both sources.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ChatTabs {
+    /// Open chat sessions in tab-strip order (most-recently-
+    /// opened on the right is the convention; dispatch enforces).
+    pub open: Vec<SessionUuid>,
+    /// Currently focused chat tab. `None` ⇒ no chat tab focused
+    /// (file tab might be focused instead, or no tabs at all).
+    pub focused: Option<SessionUuid>,
+}
+
+impl ChatTabs {
+    /// Open `uuid` as a new chat tab if not already open;
+    /// focus it either way. Idempotent.
+    pub fn open_or_focus(&mut self, uuid: SessionUuid) {
+        if !self.open.contains(&uuid) {
+            self.open.push(uuid.clone());
+        }
+        self.focused = Some(uuid);
+    }
+
+    /// Close `uuid`. If it was focused, focus the next open
+    /// chat (preferring the one to the right, falling back to
+    /// the left). Returns `true` if `uuid` was open.
+    pub fn close(&mut self, uuid: &SessionUuid) -> bool {
+        let Some(idx) = self.open.iter().position(|u| u == uuid) else {
+            return false;
+        };
+        self.open.remove(idx);
+        if self.focused.as_ref() == Some(uuid) {
+            self.focused = self
+                .open
+                .get(idx)
+                .cloned()
+                .or_else(|| idx.checked_sub(1).and_then(|i| self.open.get(i).cloned()));
+        }
+        true
+    }
+
+    /// True if `uuid` is currently in the open tab strip.
+    pub fn is_open(&self, uuid: &SessionUuid) -> bool {
+        self.open.contains(uuid)
+    }
+}
+
+// ── Per-session prefs / composer / pending sends ────────────────────
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ChatPrefs {
     pub overrides: HashMap<SessionUuid, SessionOverrides>,
@@ -168,5 +232,85 @@ mod tests {
     fn has_pending_false_for_unknown_session() {
         let prefs = ChatPrefs::default();
         assert!(!prefs.has_pending(&u()));
+    }
+
+    // ── ChatTabs ──────────────────────────────────────────────────
+
+    #[test]
+    fn open_or_focus_appends_and_focuses_new_uuid() {
+        let mut tabs = ChatTabs::default();
+        tabs.open_or_focus(SessionUuid::new("a"));
+        assert_eq!(tabs.open, vec![SessionUuid::new("a")]);
+        assert_eq!(tabs.focused, Some(SessionUuid::new("a")));
+
+        tabs.open_or_focus(SessionUuid::new("b"));
+        assert_eq!(
+            tabs.open,
+            vec![SessionUuid::new("a"), SessionUuid::new("b")]
+        );
+        assert_eq!(tabs.focused, Some(SessionUuid::new("b")));
+    }
+
+    #[test]
+    fn open_or_focus_existing_uuid_just_focuses() {
+        let mut tabs = ChatTabs::default();
+        tabs.open_or_focus(SessionUuid::new("a"));
+        tabs.open_or_focus(SessionUuid::new("b"));
+        tabs.open_or_focus(SessionUuid::new("a"));
+        assert_eq!(tabs.open.len(), 2);
+        assert_eq!(tabs.focused, Some(SessionUuid::new("a")));
+    }
+
+    #[test]
+    fn close_focuses_neighbour_to_the_right_by_default() {
+        let mut tabs = ChatTabs::default();
+        tabs.open_or_focus(SessionUuid::new("a"));
+        tabs.open_or_focus(SessionUuid::new("b"));
+        tabs.open_or_focus(SessionUuid::new("c"));
+        tabs.focused = Some(SessionUuid::new("b"));
+        assert!(tabs.close(&SessionUuid::new("b")));
+        // `c` takes b's slot (idx=1), so c is focused.
+        assert_eq!(tabs.focused, Some(SessionUuid::new("c")));
+        assert_eq!(
+            tabs.open,
+            vec![SessionUuid::new("a"), SessionUuid::new("c")]
+        );
+    }
+
+    #[test]
+    fn close_rightmost_focuses_left_neighbour() {
+        let mut tabs = ChatTabs::default();
+        tabs.open_or_focus(SessionUuid::new("a"));
+        tabs.open_or_focus(SessionUuid::new("b"));
+        // Focused = b (rightmost). Closing it falls back left to a.
+        assert!(tabs.close(&SessionUuid::new("b")));
+        assert_eq!(tabs.focused, Some(SessionUuid::new("a")));
+    }
+
+    #[test]
+    fn close_last_tab_clears_focus() {
+        let mut tabs = ChatTabs::default();
+        tabs.open_or_focus(SessionUuid::new("a"));
+        assert!(tabs.close(&SessionUuid::new("a")));
+        assert!(tabs.open.is_empty());
+        assert!(tabs.focused.is_none());
+    }
+
+    #[test]
+    fn close_unknown_uuid_is_noop_and_returns_false() {
+        let mut tabs = ChatTabs::default();
+        tabs.open_or_focus(SessionUuid::new("a"));
+        assert!(!tabs.close(&SessionUuid::new("nope")));
+        assert_eq!(tabs.open.len(), 1);
+        assert_eq!(tabs.focused, Some(SessionUuid::new("a")));
+    }
+
+    #[test]
+    fn is_open_predicate() {
+        let mut tabs = ChatTabs::default();
+        assert!(!tabs.is_open(&SessionUuid::new("a")));
+        tabs.open_or_focus(SessionUuid::new("a"));
+        assert!(tabs.is_open(&SessionUuid::new("a")));
+        assert!(!tabs.is_open(&SessionUuid::new("b")));
     }
 }
