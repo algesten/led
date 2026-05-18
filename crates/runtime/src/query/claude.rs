@@ -358,6 +358,46 @@ pub fn needs_auto_label(
     None
 }
 
+/// Bridge from lifecycle-failure-states (driver-claude) to
+/// persisted status (driver-session).
+///
+/// When a session's lifecycle transitions to `NotFound` (the CLI
+/// returned "No conversation found with session ID: …"), mark
+/// the corresponding `ChatStore` row as `Orphaned` so:
+/// - the picker can grey it out,
+/// - `subprocess_action` won't keep trying to respawn it,
+/// - led's UI can offer "delete" / "fork" actions.
+///
+/// Idempotent: emits an UpdateChatStatus cmd ONLY when the
+/// persisted status disagrees with the lifecycle state.
+/// `Exited` is NOT mapped to `Orphaned` — an exited session can
+/// be respawned on next tab activity, only a CLI-side
+/// "no conversation found" is permanent.
+pub fn orphan_status_actions(
+    lifecycle: &ChatLifecycle,
+    store: &ChatStore,
+) -> Vec<SessionCmd> {
+    if !store.loaded {
+        return Vec::new();
+    }
+    let mut cmds = Vec::new();
+    for (uuid, state) in lifecycle.per_session.iter() {
+        if !matches!(state, LifecycleState::NotFound) {
+            continue;
+        }
+        let Some(row) = store.rows.get(uuid) else {
+            continue;
+        };
+        if row.status != ChatStatus::Orphaned {
+            cmds.push(SessionCmd::UpdateChatStatus {
+                id: uuid.clone(),
+                status: ChatStatus::Orphaned,
+            });
+        }
+    }
+    cmds
+}
+
 /// Count `UserSent` → `AssistantText` pairs in order. Tool turns
 /// don't count toward "rounds" — they're sub-steps of the
 /// assistant's response, not separate turns.
@@ -923,6 +963,46 @@ mod tests {
         let mut r = row("a");
         r.short_label = Some("already".into());
         assert!(needs_auto_label(&ts, &ready_store(vec![r])).is_none());
+    }
+
+// ── orphan status ─────────────────────────────────────────────────
+
+    #[test]
+    fn orphan_actions_empty_when_store_not_loaded() {
+        let mut life = ChatLifecycle::default();
+        life.per_session.insert(u("a"), LifecycleState::NotFound);
+        assert!(orphan_status_actions(&life, &ChatStore::default()).is_empty());
+    }
+
+    #[test]
+    fn orphan_actions_emit_update_when_notfound_but_active() {
+        let mut life = ChatLifecycle::default();
+        life.per_session.insert(u("a"), LifecycleState::NotFound);
+        let cmds = orphan_status_actions(&life, &ready_store(vec![row("a")]));
+        assert_eq!(cmds.len(), 1);
+        assert!(matches!(
+            &cmds[0],
+            SessionCmd::UpdateChatStatus { id, status: ChatStatus::Orphaned } if id == &u("a")
+        ));
+    }
+
+    #[test]
+    fn orphan_actions_idempotent_when_already_orphaned() {
+        let mut life = ChatLifecycle::default();
+        life.per_session.insert(u("a"), LifecycleState::NotFound);
+        let mut r = row("a");
+        r.status = ChatStatus::Orphaned;
+        let cmds = orphan_status_actions(&life, &ready_store(vec![r]));
+        assert!(cmds.is_empty());
+    }
+
+    #[test]
+    fn orphan_actions_skip_exited_lifecycle() {
+        let mut life = ChatLifecycle::default();
+        life.per_session
+            .insert(u("a"), LifecycleState::Exited(ExitInfo::default()));
+        let cmds = orphan_status_actions(&life, &ready_store(vec![row("a")]));
+        assert!(cmds.is_empty());
     }
 
     // ── picker / view / context_pct ────────────────────────────────
