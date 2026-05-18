@@ -377,6 +377,179 @@ fn count_complete_rounds(events: &[TimelineEvent]) -> usize {
     rounds
 }
 
+// ── Picker / tab view / context % ───────────────────────────────────
+
+/// One row of the "Find chat:" picker.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PickerItem {
+    pub session: SessionUuid,
+    /// Short display label (≤14 chars by convention) — set after
+    /// the auto-label query returns. `None` ⇒ render a fallback
+    /// (e.g. first 14 chars of long_summary, or "untitled").
+    pub short_label: Option<String>,
+    /// One-sentence summary for the picker's preview row.
+    pub long_summary: Option<String>,
+    /// Seconds elapsed since last activity. Computed from
+    /// `ClockInput`; the picker renders this as "12s ago",
+    /// "5m ago", "2h ago", etc.
+    pub age_seconds: i64,
+    /// Display hint for orphaned rows — `--resume <id>` will
+    /// fail; the picker should grey it out.
+    pub orphaned: bool,
+}
+
+/// "Sorted picker list for the active workspace's chats."
+///
+/// Sorted by last_active_at DESC (most-recent first). Empty if
+/// the store isn't loaded yet (the picker can render a
+/// spinner). Orphans are included — the picker shows them so
+/// users can clean them up — but flagged.
+pub fn chat_picker_items(store: &ChatStore, now_unix: i64) -> Vec<PickerItem> {
+    if !store.loaded {
+        return Vec::new();
+    }
+    let mut items: Vec<PickerItem> = store
+        .rows
+        .values()
+        .map(|row| PickerItem {
+            session: row.id.clone(),
+            short_label: row.short_label.clone(),
+            long_summary: row.long_summary.clone(),
+            age_seconds: (now_unix - row.last_active_at).max(0),
+            orphaned: row.status == ChatStatus::Orphaned,
+        })
+        .collect();
+    items.sort_by_key(|i| i.age_seconds);
+    items
+}
+
+/// Render-model for one chat tab — what the scrollback area
+/// should display.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChatViewModel {
+    pub session: SessionUuid,
+    pub short_label: Option<String>,
+    pub model: Option<String>,
+    /// Events in display order: persisted rows first (from
+    /// ChatStore), then any live-only tail from ChatTranscripts
+    /// (events whose seq exceeds the persisted high-water).
+    pub messages: Vec<ChatViewMessage>,
+    /// `(used_tokens, context_window)` if both are known.
+    pub context: Option<(u32, u32)>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChatViewMessage {
+    pub role: ChatRole,
+    pub kind: ChatMessageKind,
+    /// JSON-encoded body — the renderer chooses how to draw
+    /// based on `kind` + decoded body shape.
+    pub body_json: String,
+}
+
+/// "Render model for the focused chat tab."
+///
+/// Returns `None` when the session is unknown to both ChatStore
+/// and ChatTranscripts (defensive — picker shouldn't allow it).
+pub fn chat_tab_view(
+    transcripts: &ChatTranscripts,
+    store: &ChatStore,
+    session: &SessionUuid,
+) -> Option<ChatViewModel> {
+    let row = store.rows.get(session);
+    let timeline = transcripts.per_session.get(session);
+    if row.is_none() && timeline.is_none() {
+        return None;
+    }
+    let short_label = row.and_then(|r| r.short_label.clone());
+    let model = row
+        .and_then(|r| r.model.clone())
+        .or_else(|| timeline.and_then(|t| t.model.clone()));
+
+    let mut messages: Vec<ChatViewMessage> = Vec::new();
+    // Persisted prefix.
+    if let Some(stored) = store.messages.get(session) {
+        for m in stored.iter() {
+            messages.push(ChatViewMessage {
+                role: m.role,
+                kind: m.kind,
+                body_json: m.body_json.clone(),
+            });
+        }
+    }
+    // Live tail beyond max_seq.
+    if let Some(t) = timeline {
+        let already = store.max_seq(session) as usize;
+        for ev in t.events.iter().skip(already) {
+            let (role, kind, body_json) = encode_timeline_event(ev);
+            messages.push(ChatViewMessage {
+                role,
+                kind,
+                body_json,
+            });
+        }
+    }
+
+    let context = context_pct_internal(transcripts, store, session);
+    Some(ChatViewModel {
+        session: session.clone(),
+        short_label,
+        model,
+        messages,
+        context,
+    })
+}
+
+/// "Context-window fill for the focused chat as a 0-100 percent,
+/// if both used and window are known."
+pub fn context_pct(
+    transcripts: &ChatTranscripts,
+    store: &ChatStore,
+    session: &SessionUuid,
+) -> Option<u8> {
+    let (used, window) = context_pct_internal(transcripts, store, session)?;
+    if window == 0 {
+        return None;
+    }
+    let pct = ((used as u64 * 100) / window as u64).min(100) as u8;
+    Some(pct)
+}
+
+/// Shared lookup of (used_tokens, context_window) for the given
+/// session, returning both raw numbers so the tab-view model can
+/// render either "12,345 / 200,000" or "6%" depending on space.
+fn context_pct_internal(
+    transcripts: &ChatTranscripts,
+    store: &ChatStore,
+    session: &SessionUuid,
+) -> Option<(u32, u32)> {
+    let timeline = transcripts.per_session.get(session)?;
+    let usage = timeline.latest_usage?;
+    let window = timeline.context_window.or_else(|| {
+        // Fallback to a hard-coded default when we haven't seen
+        // a Success event yet — better to show 0% than nothing.
+        store
+            .rows
+            .get(session)
+            .and_then(|r| r.model.as_deref())
+            .map(default_context_window)
+    })?;
+    Some((usage.total_prompt(), window))
+}
+
+/// Static fallback context-window for known model ids — used
+/// only as a backstop before the first `Success` event surfaces
+/// the actual `modelUsage[model].contextWindow`. Conservative
+/// numbers; the real value always wins.
+fn default_context_window(model: &str) -> u32 {
+    if model.contains("[1m]") {
+        1_000_000
+    } else {
+        // Sonnet / Haiku / default Opus 4.7 — all 200k.
+        200_000
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -750,6 +923,161 @@ mod tests {
         let mut r = row("a");
         r.short_label = Some("already".into());
         assert!(needs_auto_label(&ts, &ready_store(vec![r])).is_none());
+    }
+
+    // ── picker / view / context_pct ────────────────────────────────
+
+    fn row_with(id: &str, last_active: i64, short: Option<&str>) -> ChatRow {
+        let mut r = row(id);
+        r.last_active_at = last_active;
+        r.short_label = short.map(str::to_string);
+        r
+    }
+
+    #[test]
+    fn picker_items_empty_until_loaded() {
+        assert!(chat_picker_items(&ChatStore::default(), 100).is_empty());
+    }
+
+    #[test]
+    fn picker_items_sorted_most_recent_first() {
+        let store = ready_store(vec![
+            row_with("a", 50, None),
+            row_with("b", 90, None),
+            row_with("c", 70, None),
+        ]);
+        let items = chat_picker_items(&store, 100);
+        assert_eq!(items.len(), 3);
+        // last_active: b=90 (10s ago), c=70 (30s ago), a=50 (50s ago).
+        assert_eq!(items[0].session, u("b"));
+        assert_eq!(items[0].age_seconds, 10);
+        assert_eq!(items[1].session, u("c"));
+        assert_eq!(items[2].session, u("a"));
+    }
+
+    #[test]
+    fn picker_items_include_orphans_with_flag() {
+        let mut r = row("a");
+        r.status = ChatStatus::Orphaned;
+        let store = ready_store(vec![r]);
+        let items = chat_picker_items(&store, 100);
+        assert_eq!(items.len(), 1);
+        assert!(items[0].orphaned);
+    }
+
+    #[test]
+    fn tab_view_concatenates_persisted_then_live_tail() {
+        let mut store = ChatStore::default();
+        store.rows.insert(u("a"), row("a"));
+        store.messages.insert(
+            u("a"),
+            vec![ChatMessageRow {
+                session: u("a"),
+                seq: 1,
+                role: ChatRole::User,
+                kind: ChatMessageKind::Text,
+                body_json: r#""persisted""#.into(),
+                usage_json: None,
+                created_at: 0,
+            }],
+        );
+        store.loaded = true;
+
+        let mut ts = ChatTranscripts::default();
+        ts.per_session.insert(
+            u("a"),
+            timeline_with(vec![
+                TimelineEvent::UserSent { text: "persisted".into() },
+                TimelineEvent::AssistantText { text: "live".into() },
+            ]),
+        );
+
+        let vm = chat_tab_view(&ts, &store, &u("a")).expect("session known");
+        assert_eq!(vm.messages.len(), 2);
+        assert!(vm.messages[0].body_json.contains("persisted"));
+        assert_eq!(vm.messages[1].kind, ChatMessageKind::Text);
+        assert!(vm.messages[1].body_json.contains("live"));
+    }
+
+    #[test]
+    fn tab_view_returns_none_for_unknown_session() {
+        assert!(chat_tab_view(
+            &ChatTranscripts::default(),
+            &ready_store(vec![]),
+            &u("nope")
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn context_pct_uses_usage_and_observed_window() {
+        let mut ts = ChatTranscripts::default();
+        ts.per_session.insert(
+            u("a"),
+            led_driver_claude_core::SessionTimeline {
+                latest_usage: Some(led_driver_claude_core::Usage {
+                    input_tokens: 1000,
+                    cache_creation_input_tokens: 4000,
+                    cache_read_input_tokens: 5000,
+                    output_tokens: 100,
+                }),
+                context_window: Some(200_000),
+                ..Default::default()
+            },
+        );
+
+        let pct = context_pct(&ts, &ChatStore::default(), &u("a")).unwrap();
+        // total_prompt = 1000 + 4000 + 5000 = 10000; /200000 = 5.
+        assert_eq!(pct, 5);
+    }
+
+    #[test]
+    fn context_pct_uses_fallback_window_from_model_id() {
+        let mut ts = ChatTranscripts::default();
+        // No context_window observed yet — falls back to model
+        // id heuristic via the store row.
+        ts.per_session.insert(
+            u("a"),
+            led_driver_claude_core::SessionTimeline {
+                latest_usage: Some(led_driver_claude_core::Usage {
+                    input_tokens: 100_000,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        );
+        let mut r = row("a");
+        r.model = Some("claude-opus-4-7[1m]".into());
+        let pct = context_pct(&ts, &ready_store(vec![r]), &u("a")).unwrap();
+        // 100k / 1m = 10%.
+        assert_eq!(pct, 10);
+    }
+
+    #[test]
+    fn context_pct_caps_at_100_and_returns_none_without_usage() {
+        // No usage observed.
+        let mut ts = ChatTranscripts::default();
+        ts.per_session
+            .insert(u("a"), led_driver_claude_core::SessionTimeline::default());
+        assert!(context_pct(&ts, &ready_store(vec![row("a")]), &u("a")).is_none());
+
+        // Way over budget → capped at 100.
+        let mut ts = ChatTranscripts::default();
+        ts.per_session.insert(
+            u("a"),
+            led_driver_claude_core::SessionTimeline {
+                latest_usage: Some(led_driver_claude_core::Usage {
+                    input_tokens: 10_000_000,
+                    ..Default::default()
+                }),
+                context_window: Some(200_000),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            context_pct(&ts, &ChatStore::default(), &u("a")).unwrap(),
+            100
+        );
     }
 
     #[test]
