@@ -22,5 +22,6 @@ publish = false
 
 [dependencies]
 led-core = { workspace = true }
+imbl = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

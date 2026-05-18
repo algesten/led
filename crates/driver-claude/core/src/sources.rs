@@ -23,7 +23,7 @@
 //! out of AppState; the runtime declares its own `#[drv::input]`
 //! projections in `runtime/src/query/inputs.rs`.
 
-use std::collections::HashMap;
+use imbl::HashMap;
 
 use led_core::SessionUuid;
 

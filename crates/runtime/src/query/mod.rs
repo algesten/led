@@ -13,6 +13,7 @@
 
 pub mod actions;
 pub mod browser;
+pub mod claude;
 pub mod desired;
 pub mod inputs;
 pub mod issues;

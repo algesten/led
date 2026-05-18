@@ -19,7 +19,7 @@
 //! driver; dispatch in the runtime mutates these maps directly
 //! when the user types, presses Send, picks a new chat, etc.
 
-use std::collections::{HashMap, VecDeque};
+use imbl::{HashMap, Vector};
 
 use led_core::{Effort, PermissionMode, SessionUuid};
 
@@ -29,23 +29,15 @@ use led_core::{Effort, PermissionMode, SessionUuid};
 /// is focused.
 ///
 /// Sibling to the existing `Tabs` source (file tabs) rather than
-/// folded into it — the file-tab struct in `state-tabs` carries
-/// ~10 file-specific fields (cursor / scroll / mark / preview /
-/// pending_cursor / pending_scroll / last_search / ...) that
-/// don't apply to chats, and the dispatch layer accesses
-/// `tab.path` in 60+ places. A polymorphic union would force every
-/// one of those sites to handle the chat case explicitly —
-/// without much benefit, because the runtime's `subprocess_action`
-/// memo (task #19) reads chat tabs from *here* anyway.
+/// folded into it — see PR description for the trade-off.
 ///
-/// The visual "single tab strip with files + chats interleaved"
-/// is reconstructed in the render layer (task #23) by reading
-/// both sources.
+/// Backed by `imbl::Vector` so the runtime's `subprocess_action`
+/// memo can take a `#[drv::input]` projection over it without
+/// the `ToStatic` bounds that std collections fail.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ChatTabs {
-    /// Open chat sessions in tab-strip order (most-recently-
-    /// opened on the right is the convention; dispatch enforces).
-    pub open: Vec<SessionUuid>,
+    /// Open chat sessions in tab-strip order.
+    pub open: Vector<SessionUuid>,
     /// Currently focused chat tab. `None` ⇒ no chat tab focused
     /// (file tab might be focused instead, or no tabs at all).
     pub focused: Option<SessionUuid>,
@@ -55,8 +47,8 @@ impl ChatTabs {
     /// Open `uuid` as a new chat tab if not already open;
     /// focus it either way. Idempotent.
     pub fn open_or_focus(&mut self, uuid: SessionUuid) {
-        if !self.open.contains(&uuid) {
-            self.open.push(uuid.clone());
+        if !self.open.iter().any(|u| u == &uuid) {
+            self.open.push_back(uuid.clone());
         }
         self.focused = Some(uuid);
     }
@@ -81,7 +73,7 @@ impl ChatTabs {
 
     /// True if `uuid` is currently in the open tab strip.
     pub fn is_open(&self, uuid: &SessionUuid) -> bool {
-        self.open.contains(uuid)
+        self.open.iter().any(|u| u == uuid)
     }
 }
 
@@ -91,7 +83,7 @@ impl ChatTabs {
 pub struct ChatPrefs {
     pub overrides: HashMap<SessionUuid, SessionOverrides>,
     pub composer_text: HashMap<SessionUuid, String>,
-    pub pending_sends: HashMap<SessionUuid, VecDeque<String>>,
+    pub pending_sends: HashMap<SessionUuid, Vector<String>>,
 }
 
 /// Per-session override of the driver-wide defaults. `None` on
@@ -240,13 +232,13 @@ mod tests {
     fn open_or_focus_appends_and_focuses_new_uuid() {
         let mut tabs = ChatTabs::default();
         tabs.open_or_focus(SessionUuid::new("a"));
-        assert_eq!(tabs.open, vec![SessionUuid::new("a")]);
+        assert_eq!(tabs.open, imbl::vector![SessionUuid::new("a")]);
         assert_eq!(tabs.focused, Some(SessionUuid::new("a")));
 
         tabs.open_or_focus(SessionUuid::new("b"));
         assert_eq!(
             tabs.open,
-            vec![SessionUuid::new("a"), SessionUuid::new("b")]
+            imbl::vector![SessionUuid::new("a"), SessionUuid::new("b")]
         );
         assert_eq!(tabs.focused, Some(SessionUuid::new("b")));
     }
@@ -273,7 +265,7 @@ mod tests {
         assert_eq!(tabs.focused, Some(SessionUuid::new("c")));
         assert_eq!(
             tabs.open,
-            vec![SessionUuid::new("a"), SessionUuid::new("c")]
+            imbl::vector![SessionUuid::new("a"), SessionUuid::new("c")]
         );
     }
 
