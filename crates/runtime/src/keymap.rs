@@ -326,6 +326,13 @@ pub fn default_keymap() -> Keymap {
     m.bind_chord("ctrl+x", "ctrl+f", Command::FindFile);
     m.bind_chord("ctrl+x", "ctrl+w", Command::SaveAs);
 
+    // Find-chat picker (Claude). C-x C-r matches Emacs'
+    // `find-file-read-only` slot (rarely used) and "r" reads
+    // well for "resume" — though the picker also creates new
+    // chats. Designed for Apple Terminal: no Cmd shortcuts,
+    // no Ctrl+Shift+letter disambiguation.
+    m.bind_chord("ctrl+x", "ctrl+r", Command::FindChat);
+
     // Keyboard macros (M22). Legacy `default_keys.toml`.
     m.bind_chord("ctrl+x", "(", Command::KbdMacroStart);
     m.bind_chord("ctrl+x", ")", Command::KbdMacroEnd);
@@ -563,6 +570,7 @@ pub fn parse_command(s: &str) -> Result<Command, String> {
         "find_file" => Ok(Command::FindFile),
         "save_as" => Ok(Command::SaveAs),
         "find_file_tab_complete" => Ok(Command::FindFileTabComplete),
+        "find_chat" => Ok(Command::FindChat),
         "in_buffer_search" => Ok(Command::InBufferSearch),
         "open_file_search" => Ok(Command::OpenFileSearch),
         "close_file_search" => Ok(Command::CloseFileSearch),
@@ -789,6 +797,7 @@ mod tests {
             ("kbd_macro_start", Command::KbdMacroStart),
             ("kbd_macro_end", Command::KbdMacroEnd),
             ("kbd_macro_execute", Command::KbdMacroExecute),
+            ("find_chat", Command::FindChat),
         ];
         for (s, expected) in cases {
             assert_eq!(parse_command(s).unwrap(), expected, "command `{s}`");

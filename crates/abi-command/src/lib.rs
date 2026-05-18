@@ -108,6 +108,14 @@ pub enum Command {
     /// reserved for `InsertTab` (M23).
     FindFileTabComplete,
 
+    /// Open the "Find chat:" picker (Claude chat sessions).
+    /// Bound to `C-x C-r` by default. Lists existing sessions
+    /// for the current workspace (sorted by last-active DESC);
+    /// an unmatched name mints a new chat tab. Picker dispatch
+    /// and render land in a later stage; the binding lives now
+    /// so the keymap is locked-in early.
+    FindChat,
+
     // In-buffer incremental search (M13). `InBufferSearch` both
     // starts a fresh isearch and advances to the next match when
     // already active — see `docs/spec/search.md`.

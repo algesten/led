@@ -1253,6 +1253,16 @@ impl<'a> Dispatcher<'a> {
                 // without changing the variant.
                 DispatchOutcome::Continue
             }
+            Command::FindChat => {
+                // C-x C-r — open the "Find chat:" picker modal.
+                // The modal source + render driver land in a
+                // later stage; binding lives now so users can
+                // discover the key. The runtime memos for
+                // picker items (`chat_picker_items`) and chat
+                // tab view (`chat_tab_view`) are already in
+                // place in `runtime/src/query/claude.rs`.
+                DispatchOutcome::Continue
+            }
         };
         // Auto-trigger LSP completion after an identifier-ish
         // InsertChar reached the buffer-edit path. Matches legacy led
