@@ -284,22 +284,6 @@ impl<'a> Dispatcher<'a> {
                         self.browser,
                     );
                 }
-                // Auto-trigger LSP completion after an identifier-ish
-                // InsertChar. Matches legacy led editing_of.rs:69-75 —
-                // alphanumeric or `_` fires a fresh request, other
-                // commands either dismiss the live popup or pass
-                // through. When a session is already active, typing
-                // just queues another request (server seq-gating
-                // drops the older one); stage 6 will add client-side
-                // refilter so the popup updates without a round-trip
-                // for every keystroke.
-                handle_completion_trigger(
-                    &cmd,
-                    self.tabs,
-                    self.edits,
-                    self.completions,
-                    self.completions_pending,
-                );
                 outcome
             }
             Resolved::PrefixStored | Resolved::Continue => DispatchOutcome::Continue,
@@ -702,8 +686,8 @@ impl<'a> Dispatcher<'a> {
         // LSP completion popup intercept (M17). Fires before buffer
         // editing so Up / Down navigate the list, Enter commits, Esc
         // dismisses. InsertChar / DeleteBack fall through to the
-        // normal edit path; `handle_completion_trigger` at the
-        // dispatch boundary then refilters / queues the next request.
+        // normal edit path; the post-match trigger at the bottom of
+        // `run_command` then refilters / queues the next request.
         //
         // (The submodule is aliased as `completions_overlay` to
         // avoid shadowing the `completions` parameter.)
@@ -764,7 +748,7 @@ impl<'a> Dispatcher<'a> {
         }
 
         let browser_focused = self.browser.focus == Focus::Side;
-        match cmd {
+        let outcome = match cmd {
             Command::Quit => DispatchOutcome::Quit,
             Command::Suspend => DispatchOutcome::Suspend,
             Command::Abort => {
@@ -1349,7 +1333,31 @@ impl<'a> Dispatcher<'a> {
                 // without changing the variant.
                 DispatchOutcome::Continue
             }
-        }
+        };
+        // Auto-trigger LSP completion after an identifier-ish
+        // InsertChar reached the buffer-edit path. Matches legacy led
+        // editing_of.rs:69-75 — alphanumeric or `_` fires a fresh
+        // request; DeleteBack / DeleteForward refilter the live
+        // session. When a session is already active, typing just
+        // queues another request (server seq-gating drops the older
+        // one). Other commands are no-ops here; their dismissal /
+        // commit lands in `completions_overlay::run_overlay_command`
+        // above.
+        //
+        // Located here — after the overlay short-circuits but inside
+        // `run_command` — so the structure itself enforces the gate:
+        // when `find_file` / `file_search` / `isearch` absorbed the
+        // keystroke, control returned earlier and this never runs.
+        // The keystroke never reached the buffer, so the LSP popup
+        // must not pretend it did.
+        handle_completion_trigger(
+            &cmd,
+            self.tabs,
+            self.edits,
+            self.completions,
+            self.completions_pending,
+        );
+        outcome
     }
 }
 
@@ -2374,6 +2382,31 @@ mod tests {
         assert_eq!(
             fx.kbd_macro.current.as_slice(),
             &[Command::KbdMacroExecute],
+        );
+    }
+
+    #[test]
+    fn typing_into_find_file_overlay_does_not_queue_lsp_completion() {
+        // Repro: Ctrl-x Ctrl-f opens find-file; typing an identifier
+        // char into the minibuffer must NOT auto-trigger an LSP
+        // completion request against the active buffer. Before the
+        // structural fix, the keystroke was absorbed by the overlay
+        // but `handle_completion_trigger` still fired from the
+        // dispatch boundary, queueing a request whose response
+        // showed up as a stray popup on the buffer underneath.
+        //
+        // Structural guarantee: minibuffer overlays short-circuit
+        // `run_command` via early return BEFORE the trigger call,
+        // so the keystroke never reaches the buffer-edit path and
+        // the trigger never fires.
+        let mut fx = macro_fixture();
+        fx.find_file = Some(led_state_find_file::FindFileState::open(
+            "/tmp/".to_string(),
+        ));
+        fx.dispatch(key(KeyModifiers::NONE, KeyCode::Char('c')));
+        assert!(
+            fx.completions_pending.pending_requests.is_empty(),
+            "find-file minibuffer typing must not queue an LSP completion request",
         );
     }
 }

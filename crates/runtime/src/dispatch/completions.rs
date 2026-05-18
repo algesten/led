@@ -30,8 +30,8 @@ use crate::keymap::Command;
 ///
 /// Pass-through commands that land here while a session is live
 /// typically need a post-command refilter / dismiss; that's
-/// handled by `handle_completion_trigger` in the outer
-/// dispatch boundary.
+/// handled by `handle_completion_trigger` at the end of
+/// `run_command`, after the buffer-edit arms.
 pub(super) fn run_overlay_command(
     cmd: Command,
     completions: &mut CompletionsState,
