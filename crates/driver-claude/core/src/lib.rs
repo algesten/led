@@ -17,11 +17,13 @@
 //! and the `Trace` trait.
 
 pub mod abi;
+pub mod driver;
 pub mod parser;
 pub mod sources;
 
 pub use abi::{
     ClaudeCmd, ClaudeEvent, Effort, ExitInfo, PermissionMode, SpawnMode,
 };
+pub use driver::{ClaudeAction, ClaudeDriver, NoopTrace, Trace};
 pub use parser::{ModelUsage, ParsedStdout, Usage, parse_line};
 pub use sources::{ChatLifecycle, ChatTranscripts, LifecycleState, SessionTimeline, TimelineEvent};
