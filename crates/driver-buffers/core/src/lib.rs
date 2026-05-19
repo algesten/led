@@ -322,13 +322,37 @@ pub struct WriteDone {
     pub from: Option<CanonPath>,
 }
 
+// ── FileWriteState ──────────────────────────────────────────────────
+
+/// Driver-owned source for `FileWriteDriver` per `EXAMPLE-ARCH.md`
+/// § "Stateless drivers still need an in-flight source". The
+/// runtime's save query already gates re-emission via
+/// `pending_saves`, but the driver itself needs a synchronous
+/// "this version is being persisted" record so memos that look at
+/// the driver side don't fire a parallel save for the same
+/// `(path, version)` while the prior one is still en route. The
+/// runtime's existing reduction of save completions is kept
+/// untouched — `last_acked` is purely additive bookkeeping.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FileWriteState {
+    /// Per-path version currently being persisted. Bumped on
+    /// `execute(Save | SaveAs)`; removed on `process` when the
+    /// matching `WriteDone` arrives.
+    pub in_flight: imbl::HashMap<CanonPath, BufferVersion>,
+    /// Per-path most recent ack: `Ok(version_saved)` after a
+    /// successful write, `Err(message)` after a failed one.
+    pub last_acked: imbl::HashMap<CanonPath, Result<BufferVersion, Arc<str>>>,
+}
+
 /// Main-loop-facing half of the save driver.
 ///
-/// Unlike [`FileReadDriver`], `FileWriteDriver` owns no source: the
-/// intent-write side effects (clearing `pending_saves`, bumping
-/// `saved_version`, installing the saved rope into `BufferStore`)
-/// live in the runtime. Keeping the driver stateless also keeps it
-/// ignorant of sibling state crates — a strict-isolation win.
+/// Unlike [`FileReadDriver`], `FileWriteDriver` owns no buffer
+/// state: the runtime-visible side effects (clearing
+/// `pending_saves`, bumping `saved_version`, installing the saved
+/// rope into `BufferStore`) live in the runtime. The driver's
+/// own [`FileWriteState`] tracks only in-flight writes + the last
+/// ack per path — purely driver-internal bookkeeping that keeps it
+/// ignorant of sibling state crates.
 pub struct FileWriteDriver {
     tx_cmd: Sender<WriteCmd>,
     rx_done: Receiver<WriteDone>,
@@ -348,8 +372,10 @@ impl FileWriteDriver {
         }
     }
 
-    /// Drain write completions. `Vec::new()` on idle — no alloc.
-    pub fn process(&self) -> Vec<WriteDone> {
+    /// Drain write completions, moving entries from
+    /// `state.in_flight` into `state.last_acked` keyed by the
+    /// completion's `path`. `Vec::new()` on idle — no alloc.
+    pub fn process(&self, state: &mut FileWriteState) -> Vec<WriteDone> {
         let mut out: Vec<WriteDone> = Vec::new();
         while let Ok(done) = self.rx_done.try_recv() {
             let trace_result: Result<(), String> = match &done.result {
@@ -362,15 +388,24 @@ impl FileWriteDriver {
                     .trace
                     .file_save_as_done(from, &done.path, &trace_result),
             }
+            state.in_flight.remove(&done.path);
+            let ack = match &done.result {
+                Ok(_) => Ok(done.version),
+                Err(msg) => Err(Arc::from(msg.as_str())),
+            };
+            state.last_acked.insert(done.path.clone(), ack);
             out.push(done);
         }
         out
     }
 
-    /// Act on `SaveAction`s. Forwards a `WriteCmd` to the async
-    /// worker for each action; does not touch any source state
-    /// (that's the runtime's job — see the M4 design doc).
-    pub fn execute<'a, I>(&self, actions: I)
+    /// Act on `SaveAction`s. Writes the in-flight `(path,
+    /// version)` into `state` synchronously *before* the async
+    /// dispatch so same-tick downstream queries see the op as
+    /// outstanding. For `SaveAs` the in-flight key is the
+    /// destination path (`to`) — that's the path the completion's
+    /// `WriteDone.path` will echo.
+    pub fn execute<'a, I>(&self, actions: I, state: &mut FileWriteState)
     where
         I: IntoIterator<Item = &'a SaveAction>,
     {
@@ -381,6 +416,7 @@ impl FileWriteDriver {
                     rope,
                     version,
                 } => {
+                    state.in_flight.insert(path.clone(), *version);
                     self.trace.file_save_start(path, *version);
                     let _ = self.tx_cmd.send(WriteCmd::Write {
                         path: path.clone(),
@@ -394,6 +430,7 @@ impl FileWriteDriver {
                     rope,
                     version,
                 } => {
+                    state.in_flight.insert(to.clone(), *version);
                     self.trace.file_save_as_start(from, to);
                     let _ = self.tx_cmd.send(WriteCmd::WriteAs {
                         from: from.clone(),
@@ -495,10 +532,11 @@ mod tests {
     // ── FileWriteDriver ─────────────────────────────────────────────────
 
     #[test]
-    fn write_execute_sends_write_cmd() {
+    fn write_execute_sends_write_cmd_and_marks_in_flight() {
         let (tx_cmd, rx_cmd) = mpsc::channel::<WriteCmd>();
         let (_tx_done, rx_done) = mpsc::channel::<WriteDone>();
         let driver = FileWriteDriver::new(tx_cmd, rx_done, Arc::new(NoopTrace));
+        let mut state = FileWriteState::default();
 
         let path = canon("doc.txt");
         let rope = Arc::new(Rope::from_str("payload"));
@@ -508,7 +546,9 @@ mod tests {
             version: BufferVersion(7),
         };
 
-        driver.execute([&action]);
+        driver.execute([&action], &mut state);
+
+        assert_eq!(state.in_flight.get(&path), Some(&BufferVersion(7)));
 
         match rx_cmd.try_recv().expect("expected a WriteCmd") {
             WriteCmd::Write {
@@ -525,13 +565,15 @@ mod tests {
     }
 
     #[test]
-    fn write_process_surfaces_completion() {
+    fn write_process_surfaces_completion_and_records_ack() {
         let (tx_cmd, _rx_cmd) = mpsc::channel::<WriteCmd>();
         let (tx_done, rx_done) = mpsc::channel::<WriteDone>();
         let driver = FileWriteDriver::new(tx_cmd, rx_done, Arc::new(NoopTrace));
+        let mut state = FileWriteState::default();
 
         let path = canon("doc.txt");
         let rope = Arc::new(Rope::from_str("payload"));
+        state.in_flight.insert(path.clone(), BufferVersion(3));
 
         tx_done
             .send(WriteDone {
@@ -542,7 +584,7 @@ mod tests {
             })
             .expect("send WriteDone");
 
-        let mut completions = driver.process();
+        let mut completions = driver.process(&mut state);
         assert_eq!(completions.len(), 1);
         let done = completions.pop().unwrap();
         assert_eq!(done.path, path);
@@ -551,28 +593,41 @@ mod tests {
             Ok(r) => assert!(Arc::ptr_eq(&r, &rope)),
             Err(_) => panic!("expected Ok"),
         }
+        assert!(!state.in_flight.contains_key(&path));
+        assert_eq!(
+            state.last_acked.get(&path),
+            Some(&Ok(BufferVersion(3))),
+        );
     }
 
     #[test]
-    fn write_process_surfaces_error() {
+    fn write_process_surfaces_error_and_records_message() {
         let (tx_cmd, _rx_cmd) = mpsc::channel::<WriteCmd>();
         let (tx_done, rx_done) = mpsc::channel::<WriteDone>();
         let driver = FileWriteDriver::new(tx_cmd, rx_done, Arc::new(NoopTrace));
+        let mut state = FileWriteState::default();
+        let path = canon("ro.txt");
+        state.in_flight.insert(path.clone(), BufferVersion(1));
 
         tx_done
             .send(WriteDone {
-                path: canon("ro.txt"),
+                path: path.clone(),
                 version: BufferVersion(1),
                 result: Err("Permission denied".into()),
                 from: None,
             })
             .unwrap();
 
-        let completions = driver.process();
+        let completions = driver.process(&mut state);
         assert_eq!(completions.len(), 1);
         match &completions[0].result {
             Err(msg) => assert_eq!(msg, "Permission denied"),
             Ok(_) => panic!("expected Err"),
+        }
+        assert!(!state.in_flight.contains_key(&path));
+        match state.last_acked.get(&path) {
+            Some(Err(m)) => assert_eq!(m.as_ref(), "Permission denied"),
+            other => panic!("expected Err ack, got {other:?}"),
         }
     }
 
@@ -581,16 +636,22 @@ mod tests {
         let (tx_cmd, rx_cmd) = mpsc::channel::<WriteCmd>();
         let (_tx_done, rx_done) = mpsc::channel::<WriteDone>();
         let driver = FileWriteDriver::new(tx_cmd, rx_done, Arc::new(NoopTrace));
+        let mut state = FileWriteState::default();
 
         let from = canon("/tmp/orig.txt");
         let to = canon("/tmp/copy.txt");
         let rope = Arc::new(Rope::from_str("payload"));
-        driver.execute(std::iter::once(&SaveAction::SaveAs {
-            from: from.clone(),
-            to: to.clone(),
-            rope,
-            version: BufferVersion(7),
-        }));
+        driver.execute(
+            std::iter::once(&SaveAction::SaveAs {
+                from: from.clone(),
+                to: to.clone(),
+                rope,
+                version: BufferVersion(7),
+            }),
+            &mut state,
+        );
+        // For SaveAs the in-flight key is the destination path.
+        assert_eq!(state.in_flight.get(&to), Some(&BufferVersion(7)));
         match rx_cmd.try_recv() {
             Ok(WriteCmd::WriteAs { from: f, to: t, version, .. }) => {
                 assert_eq!(f, from);
@@ -606,9 +667,11 @@ mod tests {
         let (tx_cmd, _rx_cmd) = mpsc::channel::<WriteCmd>();
         let (tx_done, rx_done) = mpsc::channel::<WriteDone>();
         let driver = FileWriteDriver::new(tx_cmd, rx_done, Arc::new(NoopTrace));
+        let mut state = FileWriteState::default();
 
         let from = canon("/tmp/orig.txt");
         let to = canon("/tmp/copy.txt");
+        state.in_flight.insert(to.clone(), BufferVersion(1));
         tx_done
             .send(WriteDone {
                 path: to.clone(),
@@ -618,9 +681,10 @@ mod tests {
             })
             .unwrap();
 
-        let completions = driver.process();
+        let completions = driver.process(&mut state);
         assert_eq!(completions.len(), 1);
         assert_eq!(completions[0].path, to);
         assert_eq!(completions[0].from.as_ref(), Some(&from));
+        assert!(!state.in_flight.contains_key(&to));
     }
 }

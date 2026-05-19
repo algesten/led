@@ -186,6 +186,12 @@ pub struct Sources {
     pub tabs: Tabs,
     pub edits: BufferEdits,
     pub store: BufferStore,
+    /// Driver-owned in-flight tracking for the file-write driver
+    /// per EXAMPLE-ARCH § "Stateless drivers still need an
+    /// in-flight source". Records `(path -> version)` for saves
+    /// currently en route to the worker plus the most recent
+    /// ack (Ok with saved version, or Err with the error message).
+    pub file_write_driver: led_driver_buffers_core::FileWriteState,
     pub terminal: Terminal,
     pub kill_ring: KillRing,
     /// User-decision side of the yank/kill flow: pending_yank set by

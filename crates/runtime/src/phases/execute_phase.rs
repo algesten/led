@@ -22,6 +22,7 @@ pub(crate) fn run(sources: &mut Sources, env: &TickEnv<'_>, q: &QueryOut) {
         fs_list_driver,
         file_search,
         file_search_driver,
+        file_write_driver,
         session_driver,
         syntax,
         undo_persistence,
@@ -116,7 +117,9 @@ pub(crate) fn run(sources: &mut Sources, env: &TickEnv<'_>, q: &QueryOut) {
             }
         }
     }
-    env.drivers.file_write.execute(q.save_actions.iter());
+    env.drivers
+        .file_write
+        .execute(q.save_actions.iter(), file_write_driver);
 
     for action in &q.save_actions {
         let (path, is_save_as) = match action {

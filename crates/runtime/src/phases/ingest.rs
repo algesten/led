@@ -487,11 +487,12 @@ pub(crate) fn ingest_file_writes(sources: &mut Sources, env: &TickEnv<'_>) {
         store,
         alerts,
         clock,
+        file_write_driver,
         git_scan_pending,
         ..
     } = sources;
 
-    for done in env.drivers.file_write.process() {
+    for done in env.drivers.file_write.process(file_write_driver) {
         let basename = done
             .path
             .file_name()
