@@ -21,7 +21,8 @@ use led_state_tabs::TabId;
 use crate::apply::edit::{auto_advance_arrow_follow, seed_edit_from_load};
 use crate::apply::fs::{apply_workspace_tree_delta, reconcile_external_change};
 use crate::apply::lsp::{
-    completion_prefix, identifier_start_col, LspEditApply, LspGotoApply,
+    completion_prefix, identifier_start_col, lsp_completion_to_domain, LspEditApply,
+    LspGotoApply,
 };
 use crate::apply::session::{
     apply_pending_undo_restore, apply_session_kv, apply_sync_result,
@@ -282,6 +283,11 @@ pub(crate) fn ingest_lsp_events(sources: &mut Sources, env: &TickEnv<'_>) {
                     completions.dismiss();
                     continue;
                 }
+                // Translate driver-ABI items to domain `Completion`s
+                // at the ingest seam. `state-completions` never
+                // sees `led_driver_lsp_core::CompletionItem`.
+                let items: Arc<Vec<led_state_completions::Completion>> =
+                    Arc::new(items.iter().map(lsp_completion_to_domain).collect());
                 let prefix_start_col = match prefix_start_col {
                     Some(units) => {
                         let pl = prefix_line as usize;

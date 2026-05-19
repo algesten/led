@@ -13,6 +13,7 @@ use crate::query::EditedBuffersInput;
 
 use crate::apply::edit::distance_from_save_for;
 use crate::apply::fs::diff_watch_actions;
+use crate::apply::lsp::domain_completion_to_lsp;
 use crate::apply::session::{disk_content_hash_for, new_chain_id};
 use crate::phases::TickEnv;
 use crate::query::{self, ClipboardDriverInput, ClipboardIntentInput};
@@ -198,7 +199,7 @@ pub(crate) fn run(sources: &mut Sources, env: &TickEnv<'_>) {
         lsp_cmds.push(LspCmd::ResolveCompletion {
             path: resolve.path,
             seq: resolve.seq,
-            item: resolve.item,
+            item: domain_completion_to_lsp(&resolve.item),
         });
     }
     for req in lsp_pending.pending_goto.drain(..) {

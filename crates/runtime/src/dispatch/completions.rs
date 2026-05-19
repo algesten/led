@@ -242,9 +242,8 @@ fn commit_active(
 mod tests {
     use super::*;
     use led_core::{CanonPath, UserPath};
-    use led_driver_lsp_core::CompletionItem;
     use led_state_buffer_edits::{BufferEdits, EditedBuffer};
-    use led_state_completions::CompletionSession;
+    use led_state_completions::{Completion, CompletionSession};
     use led_state_tabs::{Tab, TabId, Tabs};
     use ropey::Rope;
     use std::sync::Arc;
@@ -258,7 +257,7 @@ mod tests {
         edits: &mut BufferEdits,
         rope: &str,
         prefix_start_col: u32,
-        items: Vec<CompletionItem>,
+        items: Vec<Completion>,
     ) -> CompletionsState {
         let path = canon("test.rs");
         let rope = Arc::new(Rope::from_str(rope));
@@ -288,8 +287,8 @@ mod tests {
         }
     }
 
-    fn mk_item(label: &str, insert: Option<&str>) -> CompletionItem {
-        CompletionItem {
+    fn mk_item(label: &str, insert: Option<&str>) -> Completion {
+        Completion {
             label: Arc::<str>::from(label),
             detail: None,
             sort_text: None,

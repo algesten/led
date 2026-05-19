@@ -523,3 +523,56 @@ pub(crate) fn apply_one_text_edit(
         std::sync::Arc::<str>::from(op.new_text.as_ref()),
     ))
 }
+
+/// Translate the driver-ABI `CompletionItem` to the domain
+/// `state_completions::Completion` at the ingest seam. Per the
+/// "No driver types in AppState" rule, `state-completions` carries
+/// only the domain type; the conversion happens here so state-side
+/// code never touches `led_driver_lsp_core`.
+pub(crate) fn lsp_completion_to_domain(
+    item: &led_driver_lsp_core::CompletionItem,
+) -> led_state_completions::Completion {
+    led_state_completions::Completion {
+        label: item.label.clone(),
+        detail: item.detail.clone(),
+        sort_text: item.sort_text.clone(),
+        insert_text: item.insert_text.clone(),
+        text_edit: item.text_edit.as_ref().map(|te| {
+            led_state_completions::CompletionEdit {
+                line: te.line,
+                col_start: te.col_start,
+                col_end: te.col_end,
+                new_text: te.new_text.clone(),
+            }
+        }),
+        kind: item.kind,
+        resolve_needed: item.resolve_needed,
+        resolve_data: item.resolve_data.clone(),
+    }
+}
+
+/// Inverse of [`lsp_completion_to_domain`]. Used by the execute
+/// phase when forming `LspCmd::ResolveCompletion` — the LSP driver
+/// needs the original `CompletionItem` shape on the resolve
+/// round-trip.
+pub(crate) fn domain_completion_to_lsp(
+    item: &led_state_completions::Completion,
+) -> led_driver_lsp_core::CompletionItem {
+    led_driver_lsp_core::CompletionItem {
+        label: item.label.clone(),
+        detail: item.detail.clone(),
+        sort_text: item.sort_text.clone(),
+        insert_text: item.insert_text.clone(),
+        text_edit: item.text_edit.as_ref().map(|te| {
+            led_driver_lsp_core::CompletionTextEdit {
+                line: te.line,
+                col_start: te.col_start,
+                col_end: te.col_end,
+                new_text: te.new_text.clone(),
+            }
+        }),
+        kind: item.kind,
+        resolve_needed: item.resolve_needed,
+        resolve_data: item.resolve_data.clone(),
+    }
+}
