@@ -1,0 +1,20 @@
+[package]
+name = "led-abi-lsp"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Shared ABI types for the LSP driver's user-decision-adjacent
+# deliveries. The runtime stashes these on `state-lsp` (inlay-hint
+# cache, code-action picker rows, watched-glob registrations) so the
+# overlay state can keep them across reconnects; both
+# `driver-lsp/core` (producer) and `state-lsp` (consumer) depend on
+# this leaf crate so the three-tier rule from EXAMPLE-ARCH stays
+# clean: `state-*` must not depend on `driver-*`.
+
+[dependencies]
+# `RegistrationGlob` carries a compiled `GlobMatcher` so the runtime
+# memo can match watched paths without recompiling the pattern on
+# every event. ABI type per G13; the matcher lives on the driver
+# side of the JSON parse boundary.
+globset = { workspace = true }

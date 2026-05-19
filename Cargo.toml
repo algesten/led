@@ -5,6 +5,7 @@ members = [
     "crates/abi-file-search",
     "crates/abi-find-file",
     "crates/abi-fs-list",
+    "crates/abi-lsp",
     "crates/core",
     "crates/state-tabs",
     "crates/state-buffer-edits",
@@ -60,6 +61,7 @@ led-abi-command = { path = "crates/abi-command" }
 led-abi-file-search = { path = "crates/abi-file-search" }
 led-abi-find-file = { path = "crates/abi-find-file" }
 led-abi-fs-list = { path = "crates/abi-fs-list" }
+led-abi-lsp = { path = "crates/abi-lsp" }
 led-core = { path = "crates/core" }
 led-state-tabs = { path = "crates/state-tabs" }
 led-state-buffer-edits = { path = "crates/state-buffer-edits" }

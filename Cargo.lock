@@ -973,6 +973,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "led-abi-lsp"
+version = "0.0.0"
+dependencies = [
+ "globset",
+]
+
+[[package]]
 name = "led-core"
 version = "0.0.0"
 dependencies = [
@@ -1119,6 +1126,7 @@ name = "led-driver-lsp-core"
 version = "0.0.0"
 dependencies = [
  "globset",
+ "led-abi-lsp",
  "led-core",
  "led-state-diagnostics",
  "led-state-syntax",
@@ -1405,8 +1413,8 @@ version = "0.0.0"
 dependencies = [
  "drv",
  "imbl",
+ "led-abi-lsp",
  "led-core",
- "led-driver-lsp-core",
  "led-state-tabs",
  "led-state-text-input",
 ]
