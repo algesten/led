@@ -1,3 +1,10 @@
+# Self-contained workspace marker. Lets Cargo run goldens from any
+# parent-workspace context (notably git worktrees, where the closest
+# `Cargo.toml` walking up is the main checkout's, whose `exclude`
+# array can't reference the worktree path). With this empty table the
+# crate is its own workspace and never tries to enroll in another.
+[workspace]
+
 [package]
 name = "led-goldens"
 version = "0.0.0"
