@@ -83,6 +83,20 @@ impl Trace for NoopTrace {
     fn git_scan_done(&self, _: bool, _: usize) {}
 }
 
+// ── Driver-owned source ────────────────────────────────────────
+
+/// Driver-owned in-flight tracking per EXAMPLE-ARCH § "Stateless
+/// drivers still need an in-flight source". `scan_in_flight` is
+/// `Some(root)` while a `ScanFiles` cmd is outstanding; cleared
+/// by `process` when the `FileStatuses` event arrives. The
+/// runtime can read this to gate "should I dispatch another
+/// scan?" against the current in-flight cmd.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GitDriverState {
+    pub scan_in_flight: Option<CanonPath>,
+    pub last_scan_ok: Option<bool>,
+}
+
 // ── Driver handle ──────────────────────────────────────────────
 
 /// Main-loop-facing half. Owns the `Sender` for commands and the
@@ -99,12 +113,17 @@ impl GitDriver {
         Self { tx, rx, trace }
     }
 
-    /// Ship a batch of commands. The worker is strictly serial —
-    /// scans queue up and process in order.
-    pub fn execute<'a>(&self, cmds: impl IntoIterator<Item = &'a GitCmd>) {
+    /// Ship a batch of commands, writing intent into `state`
+    /// before dispatching to the async worker.
+    pub fn execute<'a>(
+        &self,
+        cmds: impl IntoIterator<Item = &'a GitCmd>,
+        state: &mut GitDriverState,
+    ) {
         for cmd in cmds {
             match cmd {
                 GitCmd::ScanFiles { root } => {
+                    state.scan_in_flight = Some(root.clone());
                     self.trace.git_scan_start(root);
                 }
             }
@@ -114,12 +133,17 @@ impl GitDriver {
         }
     }
 
-    /// Drain completions. Caller folds `FileStatuses` then each
-    /// `LineStatuses` into the source in arrival order.
-    pub fn process(&self) -> Vec<GitEvent> {
+    /// Drain completions. Clears `scan_in_flight` when the
+    /// `FileStatuses` reply arrives (the worker emits at most one
+    /// `FileStatuses` per `ScanFiles`, and it's always first).
+    /// Caller folds `FileStatuses` then each `LineStatuses` into
+    /// the source in arrival order.
+    pub fn process(&self, state: &mut GitDriverState) -> Vec<GitEvent> {
         let mut out = Vec::new();
         while let Ok(ev) = self.rx.try_recv() {
             if let GitEvent::FileStatuses { statuses, .. } = &ev {
+                state.scan_in_flight = None;
+                state.last_scan_ok = Some(true);
                 self.trace.git_scan_done(true, statuses.len());
             }
             out.push(ev);
@@ -143,7 +167,8 @@ mod tests {
         let (_tx_cmd, _rx_cmd) = mpsc::channel::<GitCmd>();
         let (_tx_ev, rx_ev) = mpsc::channel::<GitEvent>();
         let drv = GitDriver::new(_tx_cmd, rx_ev, Arc::new(NoopTrace));
-        assert!(drv.process().is_empty());
+        let mut state = GitDriverState::default();
+        assert!(drv.process(&mut state).is_empty());
     }
 
     #[test]
@@ -161,7 +186,8 @@ mod tests {
                 branch: Some("main".to_string()),
             })
             .unwrap();
-        let batch = drv.process();
+        let mut state = GitDriverState::default();
+        let batch = drv.process(&mut state);
         assert_eq!(batch.len(), 1);
     }
 
@@ -170,9 +196,13 @@ mod tests {
         let (tx_cmd, rx_cmd) = mpsc::channel::<GitCmd>();
         let (_tx_ev, rx_ev) = mpsc::channel::<GitEvent>();
         let drv = GitDriver::new(tx_cmd, rx_ev, Arc::new(NoopTrace));
-        drv.execute([&GitCmd::ScanFiles {
-            root: canon("/root"),
-        }]);
+        let mut state = GitDriverState::default();
+        drv.execute(
+            [&GitCmd::ScanFiles {
+                root: canon("/root"),
+            }],
+            &mut state,
+        );
         let cmd = rx_cmd.try_recv().expect("cmd sent");
         matches!(cmd, GitCmd::ScanFiles { .. });
     }

@@ -306,6 +306,7 @@ fn collect_added_lines(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use led_driver_git_core::GitDriverState;
     use std::path::PathBuf;
     use std::process::Command;
     use std::time::{Duration, Instant};
@@ -356,12 +357,16 @@ mod tests {
     fn non_repo_produces_no_events() {
         let tmp = tempfile::tempdir().unwrap();
         let (drv, _n) = spawn(Arc::new(NoopTrace), Notifier::noop());
-        drv.execute([&GitCmd::ScanFiles {
-            root: canon_of(tmp.path()),
-        }]);
+        let mut state = GitDriverState::default();
+        drv.execute(
+            [&GitCmd::ScanFiles {
+                root: canon_of(tmp.path()),
+            }],
+            &mut state,
+        );
         // No events should arrive; wait a short window, expect none.
         std::thread::sleep(Duration::from_millis(200));
-        assert!(drv.process().is_empty());
+        assert!(drv.process(&mut state).is_empty());
     }
 
     #[test]
@@ -378,12 +383,16 @@ mod tests {
         write(dir, "untracked.txt", "new\n");
 
         let (drv, _n) = spawn(Arc::new(NoopTrace), Notifier::noop());
-        drv.execute([&GitCmd::ScanFiles { root: canon_of(dir) }]);
+        let mut state = GitDriverState::default();
+        drv.execute(
+            [&GitCmd::ScanFiles { root: canon_of(dir) }],
+            &mut state,
+        );
 
         let mut events: Vec<GitEvent> = Vec::new();
         let ok = drain_until(
             || {
-                let mut b = drv.process();
+                let mut b = drv.process(&mut state);
                 if !b.is_empty() {
                     events.append(&mut b);
                     true
@@ -397,7 +406,7 @@ mod tests {
         // Coalesce a second-round drain in case the LineStatuses
         // followed after the first drain exit.
         std::thread::sleep(Duration::from_millis(50));
-        events.extend(drv.process());
+        events.extend(drv.process(&mut state));
 
         // Expect one FileStatuses with both paths, then at least
         // one LineStatuses for tracked.txt.
@@ -454,15 +463,22 @@ mod tests {
         write(dir, "f.txt", "a\nb\n");
 
         let (drv, _n) = spawn(Arc::new(NoopTrace), Notifier::noop());
-        drv.execute([&GitCmd::ScanFiles { root: canon_of(dir) }]);
+        let mut state = GitDriverState::default();
+        drv.execute(
+            [&GitCmd::ScanFiles { root: canon_of(dir) }],
+            &mut state,
+        );
         std::thread::sleep(Duration::from_millis(200));
-        let _first = drv.process();
+        let _first = drv.process(&mut state);
 
         // Revert to clean.
         write(dir, "f.txt", "a\n");
-        drv.execute([&GitCmd::ScanFiles { root: canon_of(dir) }]);
+        drv.execute(
+            [&GitCmd::ScanFiles { root: canon_of(dir) }],
+            &mut state,
+        );
         std::thread::sleep(Duration::from_millis(200));
-        let second = drv.process();
+        let second = drv.process(&mut state);
 
         let target = canon_of(&dir.join("f.txt"));
         let has_clear = second.iter().any(|e| {

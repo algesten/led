@@ -21,6 +21,7 @@ pub(crate) fn run(sources: &mut Sources, env: &TickEnv<'_>) {
         fs,
         git_scan_dispatched,
         git_scan_pending,
+        git_driver,
         file_watch,
         ..
     } = sources;
@@ -36,9 +37,12 @@ pub(crate) fn run(sources: &mut Sources, env: &TickEnv<'_>) {
         let initial_scan_ready = *git_scan_dispatched || !any_pending_load;
         let want_scan = !*git_scan_dispatched || save_pending;
         if want_scan && initial_scan_ready && root.as_path().join(".git").exists() {
-            env.drivers.git.execute(std::iter::once(&GitCmd::ScanFiles {
-                root: root.clone(),
-            }));
+            env.drivers.git.execute(
+                std::iter::once(&GitCmd::ScanFiles {
+                    root: root.clone(),
+                }),
+                git_driver,
+            );
             *git_scan_dispatched = true;
         } else if want_scan && initial_scan_ready {
             *git_scan_dispatched = true;

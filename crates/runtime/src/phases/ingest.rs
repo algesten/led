@@ -800,8 +800,8 @@ pub(crate) fn ingest_session(sources: &mut Sources, env: &TickEnv<'_>) {
 /// Git driver events: file statuses + per-path line statuses
 /// (anchored to the buffer's disk-content hash).
 pub(crate) fn ingest_git(sources: &mut Sources, env: &TickEnv<'_>) {
-    let Sources { edits, git, .. } = sources;
-    for ev in env.drivers.git.process() {
+    let Sources { edits, git, git_driver, .. } = sources;
+    for ev in env.drivers.git.process(git_driver) {
         match ev {
             GitEvent::FileStatuses { statuses, branch } => {
                 git.branch = branch;

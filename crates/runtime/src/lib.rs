@@ -224,6 +224,11 @@ pub struct Sources {
     /// reads this set to gate re-emission of `ListCmd::List(p)`
     /// while p is outstanding.
     pub fs_list_driver: led_driver_fs_list_core::FsListState,
+    /// Driver-owned in-flight tracking for the git driver. While
+    /// `scan_in_flight` is `Some(root)`, the runtime should not
+    /// dispatch another `GitCmd::ScanFiles { root }` for the
+    /// same root.
+    pub git_driver: led_driver_git_core::GitDriverState,
     /// `Some` while in-buffer isearch is active. See
     /// [`led_state_isearch::IsearchState`].
     pub isearch: Option<IsearchState>,
