@@ -9,4 +9,6 @@ publish = false
 # desktop native implementation lives alongside in `native/`.
 
 [dependencies]
+drv = { workspace = true }
+imbl = { workspace = true }
 led-core = { workspace = true }

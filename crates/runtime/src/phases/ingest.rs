@@ -519,10 +519,11 @@ pub(crate) fn ingest_file_writes(sources: &mut Sources, env: &TickEnv<'_>) {
 }
 
 /// Fs-list driver completions: install entries (or failure marker)
-/// into the browser tree cache.
+/// into the browser tree cache. The driver's `process` clears its
+/// own `in_flight` set on each `Done`.
 pub(crate) fn ingest_fs_list(sources: &mut Sources, env: &TickEnv<'_>) {
-    let Sources { fs, .. } = sources;
-    let fs_completions = env.drivers.fs_list.process();
+    let Sources { fs, fs_list_driver, .. } = sources;
+    let fs_completions = env.drivers.fs_list.process(fs_list_driver);
     for done in fs_completions {
         match done.result {
             Ok(entries) => {

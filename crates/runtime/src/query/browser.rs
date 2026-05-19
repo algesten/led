@@ -144,28 +144,36 @@ pub fn browser_selected_idx(
 /// Emits one `ListCmd::List` per path that's expected to have a
 /// listing (workspace root, every user-expanded dir, every
 /// auto-revealed ancestor of the active tab) but isn't in
-/// `dir_contents` yet. Used to drive `FsListDriver::execute`.
+/// `dir_contents` yet AND isn't currently in-flight. Used to
+/// drive `FsListDriver::execute`.
 #[drv::memo(single)]
-pub fn file_list_action<'a>(
+pub fn file_list_action<'a, 'b>(
     inputs: BrowserDerivedInputs<'a>,
+    driver: FsListDriverInput<'b>,
 ) -> Vec<ListCmd> {
     let BrowserDerivedInputs { fs, ui, tabs: _, edits: _ } = inputs;
     let mut out: Vec<ListCmd> = Vec::new();
-    // `failed_dirs` is the "we tried, it didn't work, don't ask
-    // again until something changes" set. Without it, a stale
-    // `expanded_dirs` entry pointing at a deleted directory would
-    // re-fire `ListCmd::List` every tick — the runtime drops the
-    // `Err` result silently, so the path never enters `dir_contents`,
-    // so the next tick re-emits, so the worker re-fails, so the
-    // wake notifier fires, and the main loop sits at 100 % CPU.
+    // Three gates:
+    // - `dir_contents` covers "already listed successfully".
+    // - `failed_dirs` covers "tried, failed — don't loop". Without
+    //   it a stale `expanded_dirs` entry pointing at a deleted
+    //   directory would re-fire `ListCmd::List` every tick and the
+    //   wake notifier would peg the main loop at 100 % CPU.
+    // - `driver.in_flight` covers "asked, waiting for the worker
+    //   to answer" — without it the memo would queue duplicate
+    //   List(p)s between an `execute` and the matching `Done`.
+    let wanted = |p: &CanonPath| -> bool {
+        !fs.dir_contents.contains_key(p)
+            && !fs.failed_dirs.contains(p)
+            && !driver.in_flight.contains(p)
+    };
     if let Some(root) = fs.root.as_ref()
-        && !fs.dir_contents.contains_key(root)
-        && !fs.failed_dirs.contains(root)
+        && wanted(root)
     {
         out.push(ListCmd::List(root.clone()));
     }
     for dir in ui.expanded_dirs.iter() {
-        if !fs.dir_contents.contains_key(dir) && !fs.failed_dirs.contains(dir) {
+        if wanted(dir) {
             out.push(ListCmd::List(dir.clone()));
         }
     }

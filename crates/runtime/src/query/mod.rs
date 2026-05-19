@@ -33,7 +33,7 @@ pub use desired::{
 pub use inputs::{
     AlertExpiryInput, AlertsInput, BrowserUiInput, ClipboardDriverInput, ClipboardIntentInput, ClockInput,
     CompletionsSessionInput, DiagnosticsStatesInput, EditedBuffersInput,
-    FileWatchEventsInput, FileWatchRegistryInput, FindFileInput, FsRootInput,
+    FileWatchEventsInput, FileWatchRegistryInput, FindFileInput, FsListDriverInput, FsRootInput,
     FsTreeInput, GitStateInput, HashIndexInput, KbdMacroRecordingInput,
     LspExtrasOverlayInput, LspInlayHintsEnabledInput, LspInlayHintsRequestedInput,
     LspNotifiedInput, LspStatusesInput, LspWatchedGlobsInput, NotifyDirInput,
@@ -180,12 +180,16 @@ mod tests {
 
         let tabs = Tabs::default();
         let edits = BufferEdits::default();
-        let acts = file_list_action(BrowserDerivedInputs {
-            fs: FsTreeInput::new(&fs),
-            ui: BrowserUiInput::new(&ui),
-            tabs: TabsActiveInput::new(&tabs),
-            edits: EditedBuffersInput::new(&edits),
-        });
+        let fs_list_driver = led_driver_fs_list_core::FsListState::default();
+        let acts = file_list_action(
+            BrowserDerivedInputs {
+                fs: FsTreeInput::new(&fs),
+                ui: BrowserUiInput::new(&ui),
+                tabs: TabsActiveInput::new(&tabs),
+                edits: EditedBuffersInput::new(&edits),
+            },
+            FsListDriverInput::new(&fs_list_driver),
+        );
         assert_eq!(acts.len(), 1, "only the healthy path should emit");
         assert_eq!(acts[0], ListCmd::List(canon("/proj/healthy")));
     }

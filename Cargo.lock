@@ -1053,6 +1053,8 @@ dependencies = [
 name = "led-driver-fs-list-core"
 version = "0.0.0"
 dependencies = [
+ "drv",
+ "imbl",
  "led-core",
 ]
 

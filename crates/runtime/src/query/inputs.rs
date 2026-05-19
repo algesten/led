@@ -309,6 +309,21 @@ impl<'a> ClipboardIntentInput<'a> {
     }
 }
 
+// ── Input on driver-owned FsListState (in-flight tracking) ────────────
+
+#[derive(drv::Input, Copy, Clone)]
+pub struct FsListDriverInput<'a> {
+    pub in_flight: &'a imbl::HashSet<CanonPath>,
+}
+
+impl<'a> FsListDriverInput<'a> {
+    pub fn new(s: &'a led_driver_fs_list_core::FsListState) -> Self {
+        Self {
+            in_flight: &s.in_flight,
+        }
+    }
+}
+
 // ── Input on driver-owned ClipboardState (in-flight tracking) ──────────
 
 #[derive(drv::Input, Copy, Clone)]

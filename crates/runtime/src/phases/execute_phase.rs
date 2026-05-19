@@ -19,6 +19,7 @@ pub(crate) fn run(sources: &mut Sources, env: &TickEnv<'_>, q: &QueryOut) {
         fs,
         find_file,
         find_file_driver,
+        fs_list_driver,
         file_search,
         syntax,
         undo_persistence,
@@ -26,7 +27,9 @@ pub(crate) fn run(sources: &mut Sources, env: &TickEnv<'_>, q: &QueryOut) {
         ..
     } = sources;
 
-    env.drivers.fs_list.execute(q.list_actions.iter());
+    env.drivers
+        .fs_list
+        .execute(q.list_actions.iter(), fs_list_driver);
 
     env.drivers.file.execute(q.load_actions.iter(), store);
 

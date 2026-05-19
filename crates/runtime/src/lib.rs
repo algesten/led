@@ -217,6 +217,13 @@ pub struct Sources {
     /// the current cmd here synchronously; `process` clears it
     /// when the matching `Done` arrives.
     pub find_file_driver: led_driver_find_file_core::FindFileDriverState,
+    /// Driver-owned in-flight tracking for the FS-list driver per
+    /// EXAMPLE-ARCH § "Stateless drivers still need an in-flight
+    /// source". `execute` adds the path to `in_flight`; `process`
+    /// removes it on completion. The `file_list_action` memo
+    /// reads this set to gate re-emission of `ListCmd::List(p)`
+    /// while p is outstanding.
+    pub fs_list_driver: led_driver_fs_list_core::FsListState,
     /// `Some` while in-buffer isearch is active. See
     /// [`led_state_isearch::IsearchState`].
     pub isearch: Option<IsearchState>,

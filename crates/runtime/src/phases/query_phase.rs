@@ -45,6 +45,7 @@ pub(crate) fn run(sources: &Sources) -> QueryOut {
         kbd_macro,
         session,
         clock,
+        fs_list_driver,
         ..
     } = sources;
 
@@ -56,12 +57,15 @@ pub(crate) fn run(sources: &Sources) -> QueryOut {
         PendingSavesInput::new(edits),
         EditedBuffersInput::new(edits),
     );
-    let list_actions = file_list_action(query::BrowserDerivedInputs {
-        fs: FsTreeInput::new(fs),
-        ui: BrowserUiInput::new(browser),
-        tabs: TabsActiveInput::new(tabs),
-        edits: EditedBuffersInput::new(edits),
-    });
+    let list_actions = file_list_action(
+        query::BrowserDerivedInputs {
+            fs: FsTreeInput::new(fs),
+            ui: BrowserUiInput::new(browser),
+            tabs: TabsActiveInput::new(tabs),
+            edits: EditedBuffersInput::new(edits),
+        },
+        query::FsListDriverInput::new(fs_list_driver),
+    );
     let find_file_actions = find_file_action(FindFileInput::new(find_file));
     let render_tick = if lsp_status.any_busy() {
         clock
