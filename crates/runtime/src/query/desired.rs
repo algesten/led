@@ -6,6 +6,7 @@ use led_core::{BufferVersion, CanonPath, ServerId};
 use led_driver_file_watch_core::{ChangeKinds, FileWatchEvent, Registration};
 use led_driver_lsp_core::{FileEvent, FileEventKind, LspCmd};
 use led_driver_syntax_core::SyntaxCmd;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use super::inputs::*;
@@ -179,31 +180,23 @@ pub fn desired_watches<'r, 'n, 'b>(
     Arc::new(out)
 }
 
-/// "Which language servers should be notified of which file
-/// changes this tick?" Walks the root-recursive watcher's events,
-/// drops `.git/` internal noise, and matches each surviving event
-/// against every server's registered globs. Returns one
-/// `LspCmd::DidChangeWatchedFiles` per affected server with a
-/// stable-sorted batch.
+/// Stage 1 of [`lsp_watched_file_notifications`] — narrow each
+/// `FileWatchEvent::Changed` on the root watcher into a stable
+/// `(path, FileEventKind)` pair (or drop it).
 ///
-/// Idle / no-event ticks: empty `recent_events` → cache-hit the
-/// empty Vec.
+/// Returns the events in their original queue order. Idle ticks
+/// (no root-watch entry, or only non-`Changed` events) yield an
+/// empty Vec via cache-hit. Caches on `FileWatchEventsInput` only
+/// — a glob registration change does not invalidate this stage.
 #[drv::memo(single)]
-pub fn lsp_watched_file_notifications<'a, 'b>(
+pub fn filtered_watch_events<'a>(
     events: FileWatchEventsInput<'a>,
-    globs: LspWatchedGlobsInput<'b>,
-) -> Arc<Vec<LspCmd>> {
-    if globs.by_server.is_empty() {
-        return Arc::new(Vec::new());
-    }
+) -> Arc<Vec<(CanonPath, FileEventKind)>> {
     let Some(queue) = events.recent_events.get(&crate::WATCHER_ID_ROOT)
     else {
         return Arc::new(Vec::new());
     };
-    let mut per_server: std::collections::HashMap<
-        ServerId,
-        std::collections::HashMap<CanonPath, FileEventKind>,
-    > = std::collections::HashMap::new();
+    let mut out: Vec<(CanonPath, FileEventKind)> = Vec::new();
     for ev in queue {
         let FileWatchEvent::Changed { path, kinds, .. } = ev else {
             continue;
@@ -217,6 +210,34 @@ pub fn lsp_watched_file_notifications<'a, 'b>(
         } else {
             continue;
         };
+        out.push((path.clone(), lsp_kind));
+    }
+    Arc::new(out)
+}
+
+/// Stage 2 of [`lsp_watched_file_notifications`] — match each
+/// filtered event against every server's registered globs, applying
+/// the kind-priority promotion (`Deleted > Changed > Created`) when
+/// the same path appears multiple times in one tick.
+///
+/// Empty when no server has any matching glob. Calls
+/// [`filtered_watch_events`] internally so a glob-only change
+/// reuses the filtered list via that memo's cache.
+#[drv::memo(single)]
+pub fn per_server_matched<'a, 'b>(
+    events: FileWatchEventsInput<'a>,
+    globs: LspWatchedGlobsInput<'b>,
+) -> Arc<HashMap<ServerId, HashMap<CanonPath, FileEventKind>>> {
+    if globs.by_server.is_empty() {
+        return Arc::new(HashMap::new());
+    }
+    let filtered = filtered_watch_events(events);
+    if filtered.is_empty() {
+        return Arc::new(HashMap::new());
+    }
+    let mut per_server: HashMap<ServerId, HashMap<CanonPath, FileEventKind>> =
+        HashMap::new();
+    for (path, lsp_kind) in filtered.iter() {
         let kind_bit: u8 = match lsp_kind {
             FileEventKind::Created => ChangeKinds::CREATED,
             FileEventKind::Changed => ChangeKinds::MODIFIED,
@@ -233,24 +254,55 @@ pub fn lsp_watched_file_notifications<'a, 'b>(
                 continue;
             }
             let entry = per_server.entry(server.clone()).or_default();
-            let promote = match (entry.get(path), lsp_kind) {
+            let promote = match (entry.get(path), *lsp_kind) {
                 (None, _) => true,
                 (Some(prev), new) => kind_priority(new) >= kind_priority(*prev),
             };
             if promote {
-                entry.insert(path.clone(), lsp_kind);
+                entry.insert(path.clone(), *lsp_kind);
             }
         }
     }
+    Arc::new(per_server)
+}
+
+/// "Which language servers should be notified of which file
+/// changes this tick?" Walks the root-recursive watcher's events,
+/// drops `.git/` internal noise, and matches each surviving event
+/// against every server's registered globs. Returns one
+/// `LspCmd::DidChangeWatchedFiles` per affected server with a
+/// stable-sorted batch.
+///
+/// Composed from [`filtered_watch_events`] +
+/// [`per_server_matched`]. This top-level memo only re-runs when
+/// the per-server map actually changes (it Arc-clones that result
+/// from stage 2, then sorts each server's batch + wraps it as
+/// `LspCmd`). Idle / no-event ticks: empty `recent_events` →
+/// cache-hit the empty Vec all the way through.
+#[drv::memo(single)]
+pub fn lsp_watched_file_notifications<'a, 'b>(
+    events: FileWatchEventsInput<'a>,
+    globs: LspWatchedGlobsInput<'b>,
+) -> Arc<Vec<LspCmd>> {
+    let per_server = per_server_matched(events, globs);
+    if per_server.is_empty() {
+        return Arc::new(Vec::new());
+    }
     let cmds = per_server
-        .into_iter()
+        .iter()
         .map(|(server, by_path)| {
             let mut changes: Vec<FileEvent> = by_path
-                .into_iter()
-                .map(|(path, kind)| FileEvent { path, kind })
+                .iter()
+                .map(|(path, kind)| FileEvent {
+                    path: path.clone(),
+                    kind: *kind,
+                })
                 .collect();
             changes.sort_by(|a, b| a.path.as_path().cmp(b.path.as_path()));
-            LspCmd::DidChangeWatchedFiles { server, changes }
+            LspCmd::DidChangeWatchedFiles {
+                server: server.clone(),
+                changes,
+            }
         })
         .collect();
     Arc::new(cmds)

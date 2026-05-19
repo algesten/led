@@ -28,7 +28,8 @@ pub use browser::{
 };
 pub use desired::{
     desired_inlay_hint_requests, desired_lsp_buffer_changed, desired_syntax_parses,
-    desired_watches, lsp_watched_file_notifications,
+    desired_watches, filtered_watch_events, lsp_watched_file_notifications,
+    per_server_matched,
 };
 pub use inputs::{
     AlertExpiryInput, AlertsInput, BrowserUiInput, ClipboardDriverInput, ClipboardIntentInput, ClockInput,
