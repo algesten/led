@@ -18,3 +18,4 @@ publish = false
 [dependencies]
 led-core = { workspace = true }
 drv = { workspace = true }
+imbl = { workspace = true }

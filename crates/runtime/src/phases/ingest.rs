@@ -580,9 +580,10 @@ pub(crate) fn ingest_file_search(sources: &mut Sources, env: &TickEnv<'_>) {
         alerts,
         clock,
         file_search,
+        file_search_driver,
         ..
     } = sources;
-    for done in env.drivers.file_search.process() {
+    for done in env.drivers.file_search.process(file_search_driver) {
         let Some(fs_state) = file_search.as_mut() else {
             continue;
         };
@@ -606,7 +607,7 @@ pub(crate) fn ingest_file_search(sources: &mut Sources, env: &TickEnv<'_>) {
         fs_state.scroll_offset = 0;
     }
 
-    for done in env.drivers.file_search.process_replace() {
+    for done in env.drivers.file_search.process_replace(file_search_driver) {
         let memory = std::mem::take(&mut edits.pending_replace_in_memory);
         let memory_total: usize = memory.iter().map(|m| m.count).sum();
         let total = done.total_replacements + memory_total;

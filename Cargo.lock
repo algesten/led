@@ -997,6 +997,7 @@ name = "led-driver-file-search-core"
 version = "0.0.0"
 dependencies = [
  "drv",
+ "imbl",
  "led-core",
 ]
 

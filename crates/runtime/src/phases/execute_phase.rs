@@ -21,6 +21,7 @@ pub(crate) fn run(sources: &mut Sources, env: &TickEnv<'_>, q: &QueryOut) {
         find_file_driver,
         fs_list_driver,
         file_search,
+        file_search_driver,
         session_driver,
         syntax,
         undo_persistence,
@@ -57,7 +58,9 @@ pub(crate) fn run(sources: &mut Sources, env: &TickEnv<'_>, q: &QueryOut) {
                     use_regex: req.use_regex,
                 })
                 .collect();
-            env.drivers.file_search.execute(cmds.iter());
+            env.drivers
+                .file_search
+                .execute(cmds.iter(), file_search_driver);
         } else {
             fs_state.pending_search.clear();
         }
@@ -76,7 +79,9 @@ pub(crate) fn run(sources: &mut Sources, env: &TickEnv<'_>, q: &QueryOut) {
                 skip_paths: p.skip_paths,
             })
             .collect();
-        env.drivers.file_search.execute_replace(cmds.iter());
+        env.drivers
+            .file_search
+            .execute_replace(cmds.iter(), file_search_driver);
     }
 
     if !edits.pending_single_replace.is_empty() {
@@ -92,9 +97,14 @@ pub(crate) fn run(sources: &mut Sources, env: &TickEnv<'_>, q: &QueryOut) {
                 replacement: p.replacement,
             })
             .collect();
-        env.drivers.file_search.execute_single_replace(cmds.iter());
+        env.drivers
+            .file_search
+            .execute_single_replace(cmds.iter(), file_search_driver);
     }
-    let _ = env.drivers.file_search.process_single_replace();
+    let _ = env
+        .drivers
+        .file_search
+        .process_single_replace(file_search_driver);
 
     for action in &q.save_actions {
         match action {

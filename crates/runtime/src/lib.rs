@@ -235,6 +235,12 @@ pub struct Sources {
     /// `Some` while the project-wide file-search overlay is active.
     /// See [`led_state_file_search::FileSearchState`].
     pub file_search: Option<FileSearchState>,
+    /// Driver-owned in-flight tracking for the file-search driver
+    /// (live search / replace-all / single-replace lanes) per
+    /// EXAMPLE-ARCH § "Stateless drivers still need an in-flight
+    /// source". Memos can read this to gate against double-firing
+    /// queries while their counterpart is outstanding.
+    pub file_search_driver: led_driver_file_search_core::FileSearchDriverState,
     /// Per-buffer tree-sitter state. A buffer gains an entry when a
     /// load completes and the path's extension matches a known
     /// language; otherwise the buffer has no syntax highlighting.
