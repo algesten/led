@@ -80,6 +80,17 @@ pub(crate) fn run(sources: &mut Sources, env: &TickEnv<'_>, q: &QueryOut) {
         }
     }
 
+    // ── Shutdown dispatch (Theme E). The cmd is `Some` exactly
+    // when the orchestrator's `check_quit_gate` (run later in
+    // this tick, after every dispatch phase) will return `true`
+    // and break the outer loop. Co-located here so the driver
+    // gets `Shutdown` in the same tick the loop exits.
+    if let Some(cmd) = &q.shutdown_cmd {
+        env.drivers
+            .session
+            .execute(std::iter::once(cmd), session_driver);
+    }
+
     if !q.find_file_actions.is_empty()
         && let Some(ff) = find_file.as_mut()
     {

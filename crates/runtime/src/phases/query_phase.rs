@@ -54,6 +54,13 @@ pub(crate) struct QueryOut {
     /// into `lsp_notified` after dispatching the cmds.
     pub buffer_opened_notified:
         Vec<(led_core::CanonPath, led_core::BufferVersion, led_core::SavedVersion)>,
+    /// `SessionCmd::Shutdown` to dispatch this tick, or `None`.
+    /// `Some` when the lifecycle is `Exiting` and the session
+    /// either has been saved or is non-primary (no save was
+    /// needed). The gate condition is identical to
+    /// `check_quit_gate`'s break predicate, so Execute ships the
+    /// shutdown in the same tick the loop breaks.
+    pub shutdown_cmd: Option<SessionCmd>,
 }
 
 pub(crate) fn run(sources: &Sources, env: &TickEnv<'_>) -> QueryOut {
@@ -83,6 +90,7 @@ pub(crate) fn run(sources: &Sources, env: &TickEnv<'_>) -> QueryOut {
         lsp_notified,
         path_chains,
         undo_persistence,
+        lifecycle,
         ..
     } = sources;
 
@@ -191,6 +199,18 @@ pub(crate) fn run(sources: &Sources, env: &TickEnv<'_>) -> QueryOut {
     let (buffer_opened_cmds, buffer_opened_notified) =
         derive_buffer_opened(edits, lsp_notified, path_chains);
 
+    // ── Shutdown derived: the quit gate's predicate factored out
+    // so Execute can ship `SessionCmd::Shutdown` in the same tick
+    // the loop breaks. Lifecycle reaches `Exiting` via
+    // `dispatch_input` on the user's quit chord; `session.saved`
+    // flips true on the prior tick's `SessionSaved` ingest (or is
+    // bypassed entirely for non-primary instances). When the
+    // predicate is `Some`, the orchestrator's
+    // `check_quit_gate` call later in the same tick will return
+    // `true` and break — Execute will already have shipped the
+    // cmd by then.
+    let shutdown_cmd = desired_shutdown(lifecycle.phase, session);
+
     QueryOut {
         load_actions,
         save_actions,
@@ -203,8 +223,31 @@ pub(crate) fn run(sources: &Sources, env: &TickEnv<'_>) -> QueryOut {
         lsp_watch_cmds,
         buffer_opened_cmds,
         buffer_opened_notified,
+        shutdown_cmd,
     }
 }
+
+/// `Some(SessionCmd::Shutdown)` when the runtime is in `Phase::
+/// Exiting` and (the session has been saved OR the instance is
+/// non-primary so no save was ever required). The condition
+/// matches the predicate
+/// [`crate::phases::dispatch_phase::check_quit_gate`] uses to
+/// decide whether to break the outer loop — co-locating the cmd
+/// and the gate guarantees the driver receives `Shutdown` in the
+/// same tick the loop exits, with no extra latency.
+fn desired_shutdown(
+    phase: led_state_lifecycle::Phase,
+    session: &led_state_session::SessionState,
+) -> Option<SessionCmd> {
+    if matches!(phase, led_state_lifecycle::Phase::Exiting)
+        && (session.saved || !session.primary)
+    {
+        Some(SessionCmd::Shutdown)
+    } else {
+        None
+    }
+}
+
 
 /// Diff `edits.buffers` against `lsp_notified` and emit one
 /// `LspCmd::BufferOpened` per buffer that has not yet been

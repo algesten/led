@@ -579,9 +579,6 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
             &mut last_frame,
         );
         phases::dispatch_phase::cleanup_orphans(world.sources);
-        if phases::dispatch_phase::check_quit_gate(world.sources, &env) {
-            break Ok(());
-        }
         phases::ingest::ingest_browser_snap(world.sources);
 
         // ── Query ───────────────────────────────────────────────
@@ -601,6 +598,15 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
 
         // ── Git dispatch + file-watch event drain ─────────────
         phases::git_dispatch::run(world.sources, &env);
+
+        // ── Quit gate (Theme E). The Shutdown cmd has already
+        // shipped via execute_phase this tick (see
+        // `QueryOut.shutdown_cmd`); the gate is now a pure
+        // predicate that decides whether to break the outer
+        // loop. Skips render + wait when true.
+        if phases::dispatch_phase::check_quit_gate(world.sources) {
+            break Ok(());
+        }
 
         // ── Render ──────────────────────────────────────────────
         // Compute scroll hints before render: each region (editor
