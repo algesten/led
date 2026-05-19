@@ -721,9 +721,29 @@ impl Manager {
         path: CanonPath,
         payload: Result<Value, crate::classify::JsonRpcError>,
     ) {
+        // Record failures as explicit state per audit Finding 2.3:
+        // the old `Err(_) => Vec::new()` was indistinguishable from
+        // "no diagnostics", so the runtime's gate kept re-firing
+        // the same pull every tick. Surface the failure through
+        // `LspEvent::PullFailed { path, message }` so the driver
+        // source's `pull_state` for that path flips to Failed and
+        // the runtime stops re-firing until the next gate advance.
         let diags = match payload {
             Ok(result) => parse_diagnostic_result(&result),
-            Err(_) => Vec::new(),
+            Err(err) => {
+                let _ = self.lsp_event_tx.send(LspEvent::PullFailed {
+                    path: path.clone(),
+                    message: Arc::from(err.message.as_str()),
+                });
+                self.notify.notify();
+                // Still drain the on_pull_response so the
+                // DiagnosticSource window's `pending_pulls` set is
+                // cleared for this path — otherwise the freeze
+                // would never lift on an error-out.
+                let entry = self.servers.get_mut(&language).unwrap();
+                let _ = entry.diag.on_pull_response(path, Vec::new());
+                return;
+            }
         };
         let entry = self.servers.get_mut(&language).unwrap();
         let (forward, _all_done) = entry.diag.on_pull_response(path, diags);

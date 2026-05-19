@@ -424,6 +424,18 @@ pub(crate) fn ingest_lsp_events(sources: &mut Sources, env: &TickEnv<'_>) {
             } => {
                 lsp_watched_globs.unregister(&server, &registration_id);
             }
+            LspEvent::PullFailed { path, message } => {
+                // The driver source's `pull_state` is already
+                // updated by `LspDriver::process`. Surface the
+                // failure to the user via the alert state — same
+                // keying as `LspEvent::Error` so the warning
+                // collapses cleanly.
+                let key = path
+                    .file_name()
+                    .map(|os| os.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| path.display().to_string());
+                alerts.set_warn(key.clone(), format!("LSP pull {key}: {message}"));
+            }
         }
     }
 }

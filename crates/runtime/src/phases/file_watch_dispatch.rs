@@ -181,8 +181,27 @@ pub(crate) fn run(sources: &mut Sources, env: &TickEnv<'_>) {
         lsp_cmds.push(cmd.clone());
     }
     let current_sum = query::buffer_state_sum(EditedBuffersInput::new(edits));
-    let should_request_diag =
-        !lsp_notified.is_empty() && Some(current_sum) != *lsp_requested_state_sum;
+    let sum_advanced = Some(current_sum) != *lsp_requested_state_sum;
+    if sum_advanced {
+        // Per Theme L (B) audit Finding 2.3 — a saved-version
+        // advance is the user's "try again" signal. Any path
+        // whose last pull failed gets reset to Idle so the
+        // upcoming RequestDiagnostics re-dispatches it; without
+        // this, a transient pull failure would stick forever
+        // (the gate that NORMALLY suppresses a fresh sum-advance
+        // re-fire is per-buffer pull_state).
+        for path in lsp_notified.keys() {
+            if matches!(
+                lsp_driver.pull_state.get(path),
+                Some(led_driver_lsp_core::PullState::Failed(_))
+            ) {
+                lsp_driver
+                    .pull_state
+                    .insert(path.clone(), led_driver_lsp_core::PullState::Idle);
+            }
+        }
+    }
+    let should_request_diag = !lsp_notified.is_empty() && sum_advanced;
     if should_request_diag {
         lsp_cmds.push(LspCmd::RequestDiagnostics);
         *lsp_requested_state_sum = Some(current_sum);

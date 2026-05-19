@@ -533,6 +533,16 @@ pub enum LspEvent {
         server: ServerId,
         registration_id: String,
     },
+    /// A `textDocument/diagnostic` pull came back as an error
+    /// response (server reported a JSON-RPC error). The runtime
+    /// stamps the per-path `pull_state` to `Failed(message)` so
+    /// the gating memo stops re-firing the same pull. Distinct
+    /// from [`LspEvent::Error`] (which is a server-scoped status
+    /// surface) — `PullFailed` is per-path bookkeeping.
+    PullFailed {
+        path: CanonPath,
+        message: Arc<str>,
+    },
 }
 
 // ── Trace ──────────────────────────────────────────────────────
@@ -763,6 +773,12 @@ impl LspDriver {
                 }
                 LspEvent::CodeActions { seq, .. } => {
                     state.in_flight.remove(seq);
+                }
+                LspEvent::PullFailed { path, message } => {
+                    state
+                        .pull_state
+                        .insert(path.clone(), PullState::Failed(message.clone()));
+                    state.last_error = Some(message.clone());
                 }
                 LspEvent::InlayHints { .. }
                 | LspEvent::WatchedFilesRegistered { .. }
