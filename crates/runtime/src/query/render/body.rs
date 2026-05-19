@@ -26,6 +26,12 @@ pub struct BodyInputs<'a> {
     pub syntax: SyntaxStatesInput<'a>,
     pub diagnostics: DiagnosticsStatesInput<'a>,
     pub git: GitStateInput<'a>,
+    /// Theme — read for `ruler_column` + `ruler` so the
+    /// `BodyModel::Content::ruler_col` field can be resolved here
+    /// instead of in the painter. Pointer-stable across the
+    /// process lifetime, so the cache hit rate on
+    /// `body_model` matches the pre-theme shape.
+    pub theme: ThemeInput<'a>,
     pub area: Rect,
 }
 
@@ -112,8 +118,15 @@ pub fn body_model<'a>(inputs: BodyInputs<'a>) -> BodyModel {
         syntax,
         diagnostics,
         git,
+        theme,
         area,
     } = inputs;
+    // Ruler visibility — moved out of the painter so it's one
+    // resolved scalar rather than a chain of theme reads per
+    // paint. `None` when no `ruler_column` configured, the
+    // column would fall outside the editor area, or the ruler
+    // style is unset (no visible stripe).
+    let ruler_col = resolve_ruler_col(theme.theme, area);
     let Some(id) = *tabs.active else {
         return BodyModel::Empty;
     };
@@ -167,6 +180,7 @@ pub fn body_model<'a>(inputs: BodyInputs<'a>) -> BodyModel {
             diag_row_delta: diag_row_delta.as_ref(),
             git_line_statuses: line_statuses,
             git_row_delta: git_row_delta.as_ref(),
+            ruler_col,
         });
     }
     // No BufferEdits entry yet — the load hasn't been seeded
@@ -198,7 +212,25 @@ pub fn body_model<'a>(inputs: BodyInputs<'a>) -> BodyModel {
         diag_row_delta: None,
         git_line_statuses: line_statuses,
         git_row_delta: None,
+        ruler_col,
     })
+}
+
+/// Resolve `BodyModel::Content::ruler_col` from theme + editor
+/// area. Mirrors the legacy painter chain:
+///
+/// `theme.ruler_column.filter(|c| *c < area.cols).filter(|_| !theme.ruler.is_default())`
+///
+/// `None` is returned when the user hasn't opted into a ruler,
+/// the configured column would fall past the right edge of the
+/// editor area (e.g. user toggled the sidebar on a narrow
+/// terminal), or `theme.ruler` is the default unstyled slot (no
+/// visible stripe).
+fn resolve_ruler_col(theme: &led_driver_terminal_core::Theme, area: Rect) -> Option<u16> {
+    theme
+        .ruler_column
+        .filter(|c| *c < area.cols)
+        .filter(|_| !theme.ruler.is_default())
 }
 
 /// Normalize `tab.mark` + `tab.cursor` to an ordered selection
@@ -401,6 +433,9 @@ struct RenderContentArgs<'a> {
     /// Same as `diag_row_delta` but anchored against the buffer's
     /// disk-content hash at git-scan time.
     git_row_delta: Option<&'a led_state_buffer_edits::RowDelta>,
+    /// Pre-resolved ruler column from `resolve_ruler_col`. Stamped
+    /// straight onto `BodyModel::Content::ruler_col`.
+    ruler_col: Option<u16>,
 }
 
 fn render_content(args: RenderContentArgs<'_>) -> BodyModel {
@@ -419,6 +454,7 @@ fn render_content(args: RenderContentArgs<'_>) -> BodyModel {
         diag_row_delta,
         git_line_statuses,
         git_row_delta,
+        ruler_col,
     } = args;
 
     let body_rows = area.rows as usize;
@@ -562,6 +598,7 @@ fn render_content(args: RenderContentArgs<'_>) -> BodyModel {
         lines: Arc::new(lines),
         cursor: visible_cursor(cursor, scroll, area, rope, content_cols),
         match_highlight,
+        ruler_col,
     }
 }
 

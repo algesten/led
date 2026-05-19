@@ -1157,13 +1157,14 @@ mod tests {
         use led_driver_lsp_core::DiagnosticsStates;
         use led_state_git::GitState;
         use led_state_syntax::SyntaxStates;
-        use led_driver_terminal_core::{Layout, Rect};
+        use led_driver_terminal_core::{Layout, Rect, Theme};
         let syntax = SyntaxStates::default();
         let diags = DiagnosticsStates::default();
         let git = GitState::default();
         let browser = BrowserUi::default();
         let dims = term.dims.expect("dims");
         let layout = Layout::compute(dims, browser.visible);
+        let theme_default = Theme::default();
         let _ = query::body_model(query::BodyInputs {
             edits: EditedBuffersInput::new(&edits),
             store: StoreLoadedInput::new(&store),
@@ -1172,6 +1173,7 @@ mod tests {
             syntax: SyntaxStatesInput::new(&syntax),
             diagnostics: DiagnosticsStatesInput::new(&diags),
             git: query::GitStateInput::new(&git),
+            theme: query::ThemeInput::new(&theme_default),
             area: layout.editor_area,
         });
         // Reaching here == body_model didn't panic.

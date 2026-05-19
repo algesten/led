@@ -159,6 +159,7 @@ pub fn render_frame<'a>(inputs: RenderInputs<'a>) -> Option<Frame> {
         syntax,
         diagnostics,
         git,
+        theme,
         area: layout.editor_area,
     });
     let status_bar = status_bar_model(StatusBarInputs {

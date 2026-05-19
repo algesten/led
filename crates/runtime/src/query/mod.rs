@@ -1612,6 +1612,7 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
 
         let syntax = SyntaxStates::default();
         let diags = DiagnosticsStates::default();
+        let theme_default = Theme::default();
         let model = body_model(BodyInputs {
             edits: EditedBuffersInput::new(&e),
             store: StoreLoadedInput::new(&s),
@@ -1620,6 +1621,7 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
             syntax: SyntaxStatesInput::new(&syntax),
             diagnostics: DiagnosticsStatesInput::new(&diags),
             git: GitStateInput::new(&led_state_git::GitState::default()),
+            theme: ThemeInput::new(&theme_default),
             area: Rect { x: 0, y: 0, cols: 40, rows: 5 },
         });
         match model {
@@ -1685,6 +1687,7 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
 
         let syntax = SyntaxStates::default();
         let diags = DiagnosticsStates::default();
+        let theme_default = Theme::default();
         let model = body_model(BodyInputs {
             edits: EditedBuffersInput::new(&e),
             store: StoreLoadedInput::new(&s),
@@ -1693,6 +1696,7 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
             syntax: SyntaxStatesInput::new(&syntax),
             diagnostics: DiagnosticsStatesInput::new(&diags),
             git: GitStateInput::new(&led_state_git::GitState::default()),
+            theme: ThemeInput::new(&theme_default),
             area: Rect { x: 0, y: 0, cols: 40, rows: 5 },
         });
         match model {

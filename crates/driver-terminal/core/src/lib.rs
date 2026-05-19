@@ -270,6 +270,13 @@ pub enum BodyModel {
         /// looking at" on top of the buffer, mirroring the sidebar
         /// highlight.
         match_highlight: Option<BodyMatch>,
+        /// Editor-area-relative column to paint the ruler stripe at,
+        /// or `None` when the ruler is disabled (no `ruler_column`
+        /// set in theme, `ruler_column` >= area width, or the ruler
+        /// style is the default / unstyled). Resolved by the
+        /// runtime memo so the painter doesn't have to dig into
+        /// theme.
+        ruler_col: Option<u16>,
     },
 }
 

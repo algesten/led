@@ -723,6 +723,7 @@ mod tests {
                 lines: Arc::new(vec!["line 1".into(), "line 2".into()]),
                 cursor: Some((0, 0)),
                 match_highlight: None,
+                ruler_col: None,
             },
             status_bar: StatusBarModel::default(),
             side_panel: None,
@@ -864,6 +865,7 @@ mod tests {
             lines: body_lines.clone(),
             cursor: Some((0, 2)),
             match_highlight: None,
+            ruler_col: None,
         };
 
         let frame1 = Frame {
@@ -1320,6 +1322,7 @@ mod tests {
             ]),
             cursor: None,
             match_highlight: None,
+            ruler_col: None,
         };
         let frame = Frame {
             tab_bar: TabBarModel::default(),
@@ -1365,6 +1368,7 @@ mod tests {
             ]),
             cursor: None,
             match_highlight: None,
+            ruler_col: None,
         };
         let frame = Frame {
             tab_bar: TabBarModel::default(),
@@ -1411,6 +1415,7 @@ mod tests {
             ]),
             cursor: None,
             match_highlight: None,
+            ruler_col: None,
         };
         let theme = Theme {
             ruler_column: Some(5),
