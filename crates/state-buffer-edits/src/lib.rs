@@ -139,6 +139,15 @@ pub struct EditedBuffer {
     /// re-applying it onto stale bytes. Mirrors legacy
     /// `BufferState::content_hash`.
     pub disk_content_hash: led_core::PersistedContentHash,
+    /// Hash of the bytes currently in `rope` — stamped at every
+    /// rope mutation site (dispatch `bump`, reload, undo restore,
+    /// peer sync, LSP text edits, save cleanup). Lets memos that
+    /// need "current content identity" read a field instead of
+    /// walking the rope every tick. Invariant: equals
+    /// `EphemeralContentHash::of_rope(&rope).persist()` after
+    /// every mutation. On a fresh load this matches
+    /// `disk_content_hash` (buffer is clean).
+    pub live_content_hash: led_core::PersistedContentHash,
     /// Undo / redo history. See [`History`]. Grows unbounded for
     /// the session; persistence is deferred to M21.
     pub history: History,
@@ -151,9 +160,11 @@ impl EditedBuffer {
     /// content clears the flag the way legacy's `distance_from_
     /// save() == 0` check does. Mirrors `BufferState::is_dirty`
     /// in the legacy state crate.
+    ///
+    /// Reads the cached `live_content_hash` — every rope mutation
+    /// path must restamp this field, so the comparison is O(1).
     pub fn dirty(&self) -> bool {
-        !led_core::EphemeralContentHash::of_rope(&self.rope)
-            .matches(self.disk_content_hash)
+        self.live_content_hash != self.disk_content_hash
     }
 
     /// Sparse line-level delta from the buffer state stamped at
@@ -209,6 +220,7 @@ impl EditedBuffer {
             version: BufferVersion::default(),
             saved_version: SavedVersion::default(),
             disk_content_hash,
+            live_content_hash: disk_content_hash,
             history: History::with_seq_gen(seq_gen),
         }
     }
@@ -329,6 +341,8 @@ mod tests {
         assert!(!eb.dirty());
         // Mutate rope: hash diverges from disk anchor → dirty.
         eb.rope = Arc::new(Rope::from_str("hi!"));
+        eb.live_content_hash =
+            led_core::EphemeralContentHash::of_rope(&eb.rope).persist();
         assert!(eb.dirty());
         // Refresh anchor (simulating a save completion): clean again.
         eb.disk_content_hash =
@@ -336,6 +350,8 @@ mod tests {
         assert!(!eb.dirty());
         // Mutate again: dirty flips back on.
         eb.rope = Arc::new(Rope::from_str("hi!?"));
+        eb.live_content_hash =
+            led_core::EphemeralContentHash::of_rope(&eb.rope).persist();
         assert!(eb.dirty());
     }
 

@@ -292,6 +292,8 @@ pub(crate) fn apply_pending_undo_restore(
         }
     }
     eb.rope = std::sync::Arc::new(new_rope);
+    eb.live_content_hash =
+        led_core::EphemeralContentHash::of_rope(&eb.rope).persist();
     if !restore.entries.is_empty() {
         eb.version.0 = eb.version.0.saturating_add(1);
     }
@@ -441,8 +443,10 @@ pub(crate) fn apply_remote_entries(
         }
     }
     eb.rope = std::sync::Arc::new(new_rope);
-    eb.disk_content_hash =
+    let new_hash =
         led_core::EphemeralContentHash::of_rope(&eb.rope).persist();
+    eb.disk_content_hash = new_hash;
+    eb.live_content_hash = new_hash;
     eb.version.0 = eb.version.0.saturating_add(1);
     // Buffer stays clean: the peer's edits are now part of the
     // shared chain, and our local view matches the disk snapshot

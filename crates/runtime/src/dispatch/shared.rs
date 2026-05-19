@@ -142,10 +142,14 @@ where
 }
 
 /// Replace the buffer's rope with a new one and bump `version`.
-/// `saved_version` is untouched — `dirty()` derives as `version >
-/// saved_version`.
+/// `saved_version` is untouched — `dirty()` derives from the
+/// `live_content_hash` vs `disk_content_hash` comparison, which
+/// we restamp here so memos can read the cached value instead of
+/// walking the rope per tick.
 pub(super) fn bump(eb: &mut EditedBuffer, new_rope: Rope) {
     eb.rope = Arc::new(new_rope);
+    eb.live_content_hash =
+        led_core::EphemeralContentHash::of_rope(&eb.rope).persist();
     eb.version.0 = eb.version.0.saturating_add(1);
 }
 

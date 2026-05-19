@@ -413,6 +413,7 @@ pub(crate) fn reconcile_external_change(
             );
             eb.rope = new_rope;
             eb.disk_content_hash = new_hash;
+            eb.live_content_hash = new_hash;
             eb.version.0 = eb.version.0.saturating_add(1);
             eb.saved_version = SavedVersion(eb.version.0);
             refresh_after_external_change(reread, fs, git_scan_pending);

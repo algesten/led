@@ -1263,11 +1263,12 @@ mod tests {
             .buffers
             .insert(path.clone(), EditedBuffer::fresh(edited.clone()));
         // Mutate so the entry is visibly "the user's view".
-        edits
-            .buffers
-            .get_mut(&path)
-            .unwrap()
-            .rope = Arc::new(Rope::from_str("user typed more"));
+        {
+            let eb = edits.buffers.get_mut(&path).unwrap();
+            eb.rope = Arc::new(Rope::from_str("user typed more"));
+            eb.live_content_hash =
+                led_core::EphemeralContentHash::of_rope(&eb.rope).persist();
+        }
 
         let stale_disk = Arc::new(Rope::from_str("old disk\n"));
         let inserted = seed_edit_from_load(&mut edits, path.clone(), stale_disk);

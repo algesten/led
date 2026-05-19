@@ -1932,6 +1932,7 @@ mod tests {
                 version: led_core::BufferVersion(1),
                 saved_version: led_core::SavedVersion(0),
                 disk_content_hash: led_core::PersistedContentHash::default(),
+                live_content_hash: led_core::PersistedContentHash(1), // dirty
                 history: Default::default(),
             },
         );
@@ -1942,6 +1943,7 @@ mod tests {
                 version: led_core::BufferVersion(1),
                 saved_version: led_core::SavedVersion(0),
                 disk_content_hash: led_core::PersistedContentHash::default(),
+                live_content_hash: led_core::PersistedContentHash(1), // dirty
                 history: Default::default(),
             },
         );

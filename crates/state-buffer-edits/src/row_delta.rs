@@ -475,6 +475,7 @@ mod tests {
         let mut r: Rope = (*eb.rope).clone();
         r.insert_char(2, 'X');
         eb.rope = Arc::new(r);
+        eb.live_content_hash = EphemeralContentHash::of_rope(&eb.rope).persist();
         eb.version = BufferVersion(1);
         eb.history.record_insert_char(2, 'X', cur(0, 2), cur(0, 3));
         eb.history.finalise();
@@ -496,6 +497,7 @@ mod tests {
         let mut r: Rope = (*eb.rope).clone();
         r.insert(2, "X\n");
         eb.rope = Arc::new(r);
+        eb.live_content_hash = EphemeralContentHash::of_rope(&eb.rope).persist();
         eb.version = BufferVersion(1);
         eb.history
             .record_insert(2, Arc::<str>::from("X\n"), cur(1, 0), cur(2, 0));
@@ -542,6 +544,7 @@ mod tests {
         let mut r: Rope = (*eb.rope).clone();
         r.insert(2, "X\nY");
         eb.rope = Arc::new(r);
+        eb.live_content_hash = EphemeralContentHash::of_rope(&eb.rope).persist();
         eb.version = BufferVersion(1);
         eb.history
             .record_insert(2, Arc::<str>::from("X\nY"), cur(0, 2), cur(1, 1));
@@ -566,6 +569,7 @@ mod tests {
         let mut r: Rope = (*eb.rope).clone();
         r.remove(1..2);
         eb.rope = Arc::new(r);
+        eb.live_content_hash = EphemeralContentHash::of_rope(&eb.rope).persist();
         eb.version = BufferVersion(1);
         eb.history
             .record_delete(1, Arc::<str>::from("\n"), cur(0, 1), cur(0, 1));

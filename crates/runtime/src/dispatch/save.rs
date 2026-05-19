@@ -152,6 +152,8 @@ pub(crate) fn apply_save_cleanup(eb: &mut EditedBuffer, cursor_before: Cursor) -
         cursor_after.preferred_col = new_line_grapheme_count;
     }
     eb.rope = new_rope;
+    eb.live_content_hash =
+        led_core::EphemeralContentHash::of_rope(&eb.rope).persist();
     eb.version.0 = eb.version.0.saturating_add(1);
     eb.history
         .record_replace_batch(replaces, cursor_before, cursor_after);
@@ -274,6 +276,7 @@ mod tests {
                 version: led_core::BufferVersion(1),
                 saved_version: led_core::SavedVersion(0),
                 disk_content_hash: led_core::PersistedContentHash::default(),
+                live_content_hash: led_core::PersistedContentHash(1), // dirty
                 history: Default::default(),
             },
         );
@@ -289,6 +292,7 @@ mod tests {
                 version: led_core::BufferVersion(2),
                 saved_version: led_core::SavedVersion(0),
                 disk_content_hash: led_core::PersistedContentHash::default(),
+                live_content_hash: led_core::PersistedContentHash(1), // dirty
                 history: Default::default(),
             },
         );

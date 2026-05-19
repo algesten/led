@@ -514,6 +514,8 @@ pub(crate) fn apply_one_text_edit(
     new_rope.insert(start_char, &op.new_text);
 
     eb.rope = std::sync::Arc::new(new_rope);
+    eb.live_content_hash =
+        led_core::EphemeralContentHash::of_rope(&eb.rope).persist();
     eb.version.0 = eb.version.0.saturating_add(1);
     Some((
         start_char,

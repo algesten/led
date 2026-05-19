@@ -683,13 +683,16 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
             Some(Dims { cols: 40, rows: 5 }),
         );
         // Seed edits with a different rope — this is what the user sees.
+        let edited_rope = Arc::new(Rope::from_str("edited-version"));
         e.buffers.insert(
             canon("a.rs"),
             EditedBuffer {
-                rope: Arc::new(Rope::from_str("edited-version")),
+                rope: edited_rope.clone(),
                 version: BufferVersion(1),
                 saved_version: SavedVersion(0),
                 disk_content_hash: led_core::PersistedContentHash::default(),
+                live_content_hash:
+                    led_core::EphemeralContentHash::of_rope(&edited_rope).persist(),
                 history: Default::default(),
             },
         );
@@ -749,6 +752,8 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
                 version: BufferVersion(3),
                 saved_version: SavedVersion(0),
                 disk_content_hash: led_core::PersistedContentHash::default(),
+                live_content_hash:
+                    led_core::EphemeralContentHash::of_rope(&rope).persist(),
                 history: Default::default(),
             },
         );
@@ -785,7 +790,10 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
                 rope: rope.clone(),
                 version: BufferVersion(2),
                 saved_version: SavedVersion(2), // pristine — SaveAs still fires
-                disk_content_hash: led_core::PersistedContentHash::default(),
+                disk_content_hash:
+                    led_core::EphemeralContentHash::of_rope(&rope).persist(),
+                live_content_hash:
+                    led_core::EphemeralContentHash::of_rope(&rope).persist(),
                 history: Default::default(),
             },
         );
@@ -832,6 +840,7 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
                 version: BufferVersion(0),
                 saved_version: SavedVersion(0), // dirty() == false
                 disk_content_hash: led_core::EphemeralContentHash::of_rope(&rope).persist(),
+                live_content_hash: led_core::EphemeralContentHash::of_rope(&rope).persist(),
                 history: Default::default(),
             },
         );
@@ -881,23 +890,28 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
         );
         // a.rs clean, b.rs dirty.
         let a_rope = Arc::new(Rope::from_str("x"));
+        let a_hash = led_core::EphemeralContentHash::of_rope(&a_rope).persist();
         e.buffers.insert(
             canon("a.rs"),
             EditedBuffer {
                 rope: a_rope.clone(),
                 version: BufferVersion(0),
                 saved_version: SavedVersion(0),
-                disk_content_hash: led_core::EphemeralContentHash::of_rope(&a_rope).persist(),
+                disk_content_hash: a_hash,
+                live_content_hash: a_hash,
                 history: Default::default(),
             },
         );
+        let b_rope = Arc::new(Rope::from_str("yy"));
         e.buffers.insert(
             canon("b.rs"),
             EditedBuffer {
-                rope: Arc::new(Rope::from_str("yy")),
+                rope: b_rope.clone(),
                 version: BufferVersion(1),
                 saved_version: SavedVersion(0),
                 disk_content_hash: led_core::PersistedContentHash::default(),
+                live_content_hash:
+                    led_core::EphemeralContentHash::of_rope(&b_rope).persist(),
                 history: Default::default(),
             },
         );
@@ -1282,6 +1296,7 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
                 version: BufferVersion(2),
                 saved_version: SavedVersion(1),
                 disk_content_hash: led_core::PersistedContentHash::default(),
+                live_content_hash: led_core::PersistedContentHash(1), // dirty
                 history: Default::default(),
             },
         );
@@ -1312,6 +1327,7 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
                 version: BufferVersion(3),
                 saved_version: SavedVersion(1), // dirty
                 disk_content_hash: led_core::PersistedContentHash::default(),
+                live_content_hash: led_core::PersistedContentHash(1), // dirty
                 history: Default::default(),
             },
         );

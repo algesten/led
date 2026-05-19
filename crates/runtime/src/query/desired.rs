@@ -89,8 +89,9 @@ pub fn desired_syntax_parses<'s, 'b>(
 /// `saved_version` has moved past what `lsp_notified` records.
 /// Idle ticks (no version moves): empty Arc<Vec>.
 ///
-/// Memoised so the per-buffer `EphemeralContentHash::of_rope`
-/// walk doesn't re-fire when nothing has changed.
+/// Reads `eb.live_content_hash` — stamped at every rope mutation
+/// site (`bump()`, reload, undo restore, peer sync, LSP text
+/// edits, save cleanup) — so this memo never walks the rope.
 #[drv::memo(single)]
 pub fn desired_lsp_buffer_changed<'a, 'b>(
     edits: EditedBuffersInput<'a>,
@@ -109,11 +110,10 @@ pub fn desired_lsp_buffer_changed<'a, 'b>(
         // `version_moved` because a pure-save tick (no new edits)
         // still needs `didSave` → cargo check.
         let is_save = save_happened && eb.saved_version.0 == eb.version.0;
-        let hash = led_core::EphemeralContentHash::of_rope(&eb.rope).persist();
         out.push(LspCmd::BufferChanged {
             path: path.clone(),
             rope: eb.rope.clone(),
-            hash,
+            hash: eb.live_content_hash,
             is_save,
         });
     }
