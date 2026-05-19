@@ -2,7 +2,7 @@
 //! tick of inlay hints, syntax parses, LSP buffer-changed pushes,
 //! file watches, and watched-file LSP notifications.
 
-use led_core::{BufferVersion, CanonPath, ServerId};
+use led_core::{BufferVersion, CanonPath, EditSeq, ServerId};
 use led_driver_file_watch_core::{ChangeKinds, FileWatchEvent, Registration};
 use led_driver_lsp_core::{FileEvent, FileEventKind, LspCmd};
 use led_driver_syntax_core::SyntaxCmd;
@@ -843,4 +843,49 @@ pub fn desired_indent_for_line<'s, 'b>(
         .take_while(|c| *c == ' ' || *c == '\t')
         .collect();
     Some(DesiredIndent::Fallback(Arc::from(leading.as_str())))
+}
+
+/// "Which buffer should a cross-buffer undo target next?" — used
+/// by the file-search overlay's overlay-scoped undo (`Ctrl+/`
+/// while file-search has focus). The overlay pops the
+/// max-seq-`> floor` group across every loaded buffer; this memo
+/// names which buffer owns that group.
+///
+/// `floor` is `FileSearchState.overlay_open_seq`: groups whose
+/// seq is `<= floor` were committed before the overlay opened
+/// and must stay untouched. `EditSeq::default()` means "no floor"
+/// (the global path that ignores the overlay anchor).
+///
+/// Pure: walks `eb.history.past_top_seq()` per buffer. The
+/// reducer in `undo::undo_global` reads the result and pops the
+/// group itself (which mutates history).
+#[drv::memo(single)]
+pub fn undo_target_path<'b>(
+    edits: EditedBuffersInput<'b>,
+    floor: EditSeq,
+) -> Option<CanonPath> {
+    edits
+        .buffers
+        .iter()
+        .filter_map(|(p, eb)| eb.history.past_top_seq().map(|s| (p.clone(), s)))
+        .filter(|(_, s)| *s > floor)
+        .max_by_key(|(_, s)| *s)
+        .map(|(p, _)| p)
+}
+
+/// Mirror of [`undo_target_path`] for the redo side. The overlay's
+/// redo walks the `future` stack across all loaded buffers; this
+/// memo names which buffer owns the max-seq-`> floor` future group.
+#[drv::memo(single)]
+pub fn redo_target_path<'b>(
+    edits: EditedBuffersInput<'b>,
+    floor: EditSeq,
+) -> Option<CanonPath> {
+    edits
+        .buffers
+        .iter()
+        .filter_map(|(p, eb)| eb.history.future_top_seq().map(|s| (p.clone(), s)))
+        .filter(|(_, s)| *s > floor)
+        .max_by_key(|(_, s)| *s)
+        .map(|(p, _)| p)
 }

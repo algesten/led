@@ -4,12 +4,15 @@
 //! buffer's history. Cursor is restored to the captured bookend
 //! (cursor_before for undo, cursor_after for redo).
 
-use led_core::{CanonPath, EditSeq, SavedVersion};
+use led_core::{EditSeq, SavedVersion};
 use led_state_buffer_edits::{BufferEdits, EditOp};
 use led_state_file_search::{FileSearchSelection, FileSearchState};
 use led_state_tabs::Tabs;
 
 use super::shared::{bump, with_active};
+use crate::query::{
+    redo_target_path, undo_target_path, EditedBuffersInput,
+};
 
 pub(super) fn undo_active(tabs: &mut Tabs, edits: &mut BufferEdits) {
     with_active(tabs, edits, |tab, eb| {
@@ -76,7 +79,7 @@ pub(super) fn undo_global(
     floor: EditSeq,
     body_rows: usize,
 ) {
-    let Some(target_path) = pick_max_past_seq(edits, floor) else {
+    let Some(target_path) = undo_target_path(EditedBuffersInput::new(edits), floor) else {
         return;
     };
     // Pop the group, apply the rope inverse, pin saved_version
@@ -189,7 +192,7 @@ pub(super) fn redo_global(
     floor: EditSeq,
     body_rows: usize,
 ) {
-    let Some(target_path) = pick_max_future_seq(edits, floor) else {
+    let Some(target_path) = redo_target_path(EditedBuffersInput::new(edits), floor) else {
         return;
     };
     let (group, cursor_after, original_bytes, disk_write) = {
@@ -267,26 +270,6 @@ pub(super) fn redo_global(
     if let Some(eb) = edits.buffers.get_mut(&target_path) {
         eb.history.push_past(group);
     }
-}
-
-fn pick_max_past_seq(edits: &BufferEdits, floor: EditSeq) -> Option<CanonPath> {
-    edits
-        .buffers
-        .iter()
-        .filter_map(|(p, eb)| eb.history.past_top_seq().map(|s| (p.clone(), s)))
-        .filter(|(_, s)| *s > floor)
-        .max_by_key(|(_, s)| *s)
-        .map(|(p, _)| p)
-}
-
-fn pick_max_future_seq(edits: &BufferEdits, floor: EditSeq) -> Option<CanonPath> {
-    edits
-        .buffers
-        .iter()
-        .filter_map(|(p, eb)| eb.history.future_top_seq().map(|s| (p.clone(), s)))
-        .filter(|(_, s)| *s > floor)
-        .max_by_key(|(_, s)| *s)
-        .map(|(p, _)| p)
 }
 
 /// Move the overlay's selection onto the just-affected hit and,
