@@ -28,6 +28,40 @@ pub mod row_delta;
 pub use row_delta::{RowDelta, RowShift};
 pub use history::{EditGroup, EditOp, FileSearchMark, History, rebase_char_index};
 
+/// Newtype role wrapper marking a rope as "the user's edited
+/// (in-memory) draft." The `bump()` path on dispatch produces a
+/// `Draft`; reseed/save handoffs must NOT accept a `Draft` where a
+/// disk-anchored rope is required.
+///
+/// **Currently unused on `EditedBuffer.rope`** — the field stays
+/// `Arc<Rope>` because renaming the role is a 200+ callsite blast
+/// radius across `dispatch/`, `query/`, and `apply/`. This type
+/// exists so future seed/save API reworks can adopt it
+/// incrementally: a function that takes `Draft` cannot be passed a
+/// `Persisted` (or vice versa) without an explicit unwrap, which
+/// is exactly the compiler-enforced invariant Theme O calls out.
+///
+/// See `EXAMPLE-ARCH § "Shadow sources"` for the motivating
+/// pattern.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Draft(pub Arc<Rope>);
+
+/// Newtype role wrapper marking a rope as "the pristine on-disk
+/// snapshot, as last seen." Set at load completion (rope @ version
+/// 0 IS the disk content) and refreshed at save completion (the
+/// just-written rope is the new disk content). Reseed paths must
+/// only accept `Persisted`; dispatch's `bump()` must NEVER write
+/// here.
+///
+/// **Currently unused on `EditedBuffer.rope`** — see [`Draft`] for
+/// the scope rationale. This type exists for opt-in adoption on
+/// future seed/save API reworks.
+///
+/// See `EXAMPLE-ARCH § "Shadow sources"` for the motivating
+/// pattern.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Persisted(pub Arc<Rope>);
+
 /// Session-global edit sequence counter shared by every
 /// [`History`]. Each finalised group stamps `next_seq` and
 /// bumps the counter so every group across the workspace has a
@@ -325,5 +359,22 @@ mod tests {
         e.buffers
             .insert(p.clone(), EditedBuffer::fresh(Arc::new(Rope::from_str("x"))));
         assert!(e.buffers.contains_key(&p));
+    }
+
+    #[test]
+    fn draft_and_persisted_role_newtypes_are_distinct() {
+        // The whole point of the role newtypes is that the compiler
+        // refuses to mix them. This is a compile-time invariant
+        // verified at the type system level: writing
+        // `let _: Draft = Persisted(rope.clone());` would not compile.
+        // Here we just confirm both wrap an `Arc<Rope>` and round-trip
+        // the inner value.
+        let rope = Arc::new(Rope::from_str("hi"));
+        let draft = Draft(rope.clone());
+        let persisted = Persisted(rope.clone());
+        assert!(Arc::ptr_eq(&draft.0, &rope));
+        assert!(Arc::ptr_eq(&persisted.0, &rope));
+        assert_eq!(Draft::default(), Draft::default());
+        assert_eq!(Persisted::default(), Persisted::default());
     }
 }

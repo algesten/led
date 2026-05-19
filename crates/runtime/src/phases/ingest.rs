@@ -14,6 +14,7 @@ use led_driver_lsp_core::{LspCmd, LspEvent};
 use led_driver_session_core::SessionEvent;
 use led_state_diagnostics::{BufferDiagnostics, LspServerStatus};
 use led_state_lifecycle::Phase;
+use led_state_session::PersistedSession;
 use led_state_syntax::{Language, SyntaxState};
 use led_state_tabs::TabId;
 
@@ -709,7 +710,7 @@ pub(crate) fn ingest_session(sources: &mut Sources, env: &TickEnv<'_>) {
                     // the next free id and `previous_tab` points
                     // at whatever was just made active.
                     restore_preview_from_selection(browser, tabs, path_chains);
-                    session.last_saved = Some(data);
+                    session.last_saved = Some(PersistedSession(data));
                 } else {
                     session.last_saved = None;
                 }
