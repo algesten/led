@@ -38,9 +38,7 @@ pub use grapheme::{
     grapheme_col_to_utf16_units, grapheme_display_width, line_grapheme_len,
     prefix_display_width, utf16_units_to_grapheme_col,
 };
-pub use issue::{
-    CategoryInfo, IssueCategory, StatusDisplay, directory_categories, resolve_display,
-};
+pub use issue::{CategoryInfo, IssueCategory};
 pub use notify::Notifier;
 pub use paths::{CanonPath, PathChain, UserPath};
 pub use wrap::{

@@ -6,7 +6,6 @@ publish = false
 
 [dependencies]
 drv = { workspace = true }
-imbl = { workspace = true }
 ropey = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 unicode-segmentation = { workspace = true }

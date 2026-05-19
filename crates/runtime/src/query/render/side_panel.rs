@@ -160,14 +160,14 @@ pub fn side_panel_browser<'a, 'b, 'c, 'd, 'e, 'f>(
         let status = match entry.kind {
             TreeEntryKind::File => categories
                 .get(&entry.path)
-                .and_then(led_core::resolve_display)
+                .and_then(crate::query::resolve_display)
                 .map(|d| led_driver_terminal_core::RowStatus {
                     category: d.category,
                     letter: d.letter,
                 }),
             TreeEntryKind::Directory { .. } => {
-                let cats = led_core::directory_categories(&categories, &entry.path);
-                led_core::resolve_display(&cats).map(|d| {
+                let cats = crate::query::directory_categories(&categories, &entry.path);
+                crate::query::resolve_display(&cats).map(|d| {
                     led_driver_terminal_core::RowStatus {
                         category: d.category,
                         // Directories always bullet — matches legacy

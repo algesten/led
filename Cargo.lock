@@ -950,7 +950,6 @@ name = "led-core"
 version = "0.0.0"
 dependencies = [
  "drv",
- "imbl",
  "ropey",
  "serde",
  "unicode-segmentation",

@@ -15,6 +15,7 @@ pub mod actions;
 pub mod browser;
 pub mod desired;
 pub mod inputs;
+pub mod issues;
 pub mod render;
 
 pub use actions::{
@@ -31,6 +32,7 @@ pub use desired::{
     desired_watches, filtered_watch_events, lsp_watched_file_notifications,
     per_server_matched,
 };
+pub use issues::{StatusDisplay, directory_categories, resolve_display};
 pub use inputs::{
     AlertExpiryInput, AlertsInput, BrowserUiInput, ClipboardDriverInput, ClipboardIntentInput, ClockInput,
     CompletionsSessionInput, DiagnosticsStatesInput, EditedBuffersInput,
@@ -2085,7 +2087,7 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
         assert!(cats.contains(&led_core::IssueCategory::Unstaged));
         // `resolve_display` selects the precedence-winning category
         // (LspError) even though both are present.
-        let shown = led_core::resolve_display(cats).expect("some");
+        let shown = crate::query::resolve_display(cats).expect("some");
         assert_eq!(shown.category, led_core::IssueCategory::LspError);
     }
 
