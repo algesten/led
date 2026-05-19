@@ -1077,6 +1077,7 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
         let git = led_state_git::GitState::default();
         let kbd_macro_default = led_state_kbd_macro::KbdMacroState::default();
         let session_default = led_driver_session_core::SessionState::default();
+        let theme_default = Theme::default();
         status_bar_model(StatusBarInputs {
             alerts: AlertsInput::new(a),
             tabs: TabsActiveInput::new(t),
@@ -1088,6 +1089,7 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
                 &led_state_lsp::LspExtrasState::default(),
             ),
             git: GitStateInput::new(&git),
+            theme: ThemeInput::new(&theme_default),
             render_tick: 0,
             kbd_macro: KbdMacroRecordingInput::new(&kbd_macro_default),
             session: SessionPrimaryInput::new(&session_default),
@@ -1108,6 +1110,7 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
         let lsp = LspStatuses::default();
         let git = led_state_git::GitState::default();
         let session_default = led_driver_session_core::SessionState::default();
+        let theme_default = Theme::default();
         status_bar_model(StatusBarInputs {
             alerts: AlertsInput::new(a),
             tabs: TabsActiveInput::new(t),
@@ -1119,6 +1122,7 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
                 &led_state_lsp::LspExtrasState::default(),
             ),
             git: GitStateInput::new(&git),
+            theme: ThemeInput::new(&theme_default),
             render_tick: 0,
             kbd_macro: KbdMacroRecordingInput::new(km),
             session: SessionPrimaryInput::new(&session_default),
@@ -1137,6 +1141,7 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
         let lsp = LspStatuses::default();
         let kbd_macro_default = led_state_kbd_macro::KbdMacroState::default();
         let session_default = led_driver_session_core::SessionState::default();
+        let theme_default = Theme::default();
         status_bar_model(StatusBarInputs {
             alerts: AlertsInput::new(a),
             tabs: TabsActiveInput::new(t),
@@ -1148,6 +1153,7 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
                 &led_state_lsp::LspExtrasState::default(),
             ),
             git: GitStateInput::new(g),
+            theme: ThemeInput::new(&theme_default),
             render_tick: 0,
             kbd_macro: KbdMacroRecordingInput::new(&kbd_macro_default),
             session: SessionPrimaryInput::new(&session_default),
@@ -1166,6 +1172,7 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
         let lsp = LspStatuses::default();
         let git = led_state_git::GitState::default();
         let kbd_macro_default = led_state_kbd_macro::KbdMacroState::default();
+        let theme_default = Theme::default();
         status_bar_model(StatusBarInputs {
             alerts: AlertsInput::new(a),
             tabs: TabsActiveInput::new(t),
@@ -1177,6 +1184,7 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
                 &led_state_lsp::LspExtrasState::default(),
             ),
             git: GitStateInput::new(&git),
+            theme: ThemeInput::new(&theme_default),
             render_tick: 0,
             kbd_macro: KbdMacroRecordingInput::new(&kbd_macro_default),
             session: SessionPrimaryInput::new(sess),

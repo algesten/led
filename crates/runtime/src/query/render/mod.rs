@@ -172,6 +172,7 @@ pub fn render_frame<'a>(inputs: RenderInputs<'a>) -> Option<Frame> {
         git,
         kbd_macro,
         session,
+        theme,
         render_tick,
     });
     let side_panel = layout

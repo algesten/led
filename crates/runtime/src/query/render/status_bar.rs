@@ -70,6 +70,10 @@ pub struct StatusBarInputs<'a> {
     /// hidden until `init_done` so we don't flash it during the
     /// brief startup window before `Restored` arrives.
     pub session: SessionPrimaryInput<'a>,
+    /// Theme — supplies `status_warn` / `status_normal` so the
+    /// memo can stamp the resolved row style on `StatusBarModel`.
+    /// Painter no longer needs to pick between the two slots.
+    pub theme: ThemeInput<'a>,
     pub render_tick: u64,
 }
 
@@ -101,8 +105,16 @@ pub fn status_bar_model<'a>(inputs: StatusBarInputs<'a>) -> StatusBarModel {
         git,
         kbd_macro,
         session,
+        theme,
         render_tick,
     } = inputs;
+    // Resolved once; the warn-vs-normal pick used to live in
+    // the painter and re-fire on every paint, which meant the
+    // painter held a per-paint dependency on `theme.status_*`.
+    // Stamping the style here lets the painter loop without
+    // looking at theme.status_* at all.
+    let normal_style = theme.theme.status_normal;
+    let warn_style = theme.theme.status_warn;
     // The rename overlay used to take the status-bar prompt slot
     // here; legacy renders it as an in-buffer popup anchored on
     // the row below the cursor instead. See `rename_popup_model`.
@@ -116,6 +128,7 @@ pub fn status_bar_model<'a>(inputs: StatusBarInputs<'a>) -> StatusBarModel {
             left,
             right: empty_arc(),
             is_warn: false,
+            row_style: normal_style,
         };
     }
     // Priority 0 — find-file overlay prompt.
@@ -124,6 +137,7 @@ pub fn status_bar_model<'a>(inputs: StatusBarInputs<'a>) -> StatusBarModel {
             left,
             right: empty_arc(),
             is_warn: false,
+            row_style: normal_style,
         };
     }
     // Priority 1 — confirm-kill prompt.
@@ -132,6 +146,7 @@ pub fn status_bar_model<'a>(inputs: StatusBarInputs<'a>) -> StatusBarModel {
             left,
             right: empty_arc(),
             is_warn: false,
+            row_style: normal_style,
         };
     }
 
@@ -143,6 +158,7 @@ pub fn status_bar_model<'a>(inputs: StatusBarInputs<'a>) -> StatusBarModel {
             left,
             right,
             is_warn: false,
+            row_style: normal_style,
         };
     }
     // Priority 3 — warn alert (first-arrived).
@@ -151,6 +167,7 @@ pub fn status_bar_model<'a>(inputs: StatusBarInputs<'a>) -> StatusBarModel {
             left,
             right,
             is_warn: true,
+            row_style: warn_style,
         };
     }
     // M22 — Macro-recording indicator.
@@ -159,6 +176,7 @@ pub fn status_bar_model<'a>(inputs: StatusBarInputs<'a>) -> StatusBarModel {
             left,
             right,
             is_warn: false,
+            row_style: normal_style,
         };
     }
 
@@ -168,6 +186,7 @@ pub fn status_bar_model<'a>(inputs: StatusBarInputs<'a>) -> StatusBarModel {
         left,
         right,
         is_warn: false,
+        row_style: normal_style,
     }
 }
 

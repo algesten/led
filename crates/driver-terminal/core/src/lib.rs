@@ -486,9 +486,13 @@ pub struct SidePanelModel {
 }
 
 /// Bottom-row status bar. `left` is written from col 0; `right` is
-/// written right-aligned; the gap is cleared. `is_warn` asks the
-/// painter to use the warn (red-bg / white-fg / bold) style for the
-/// whole row.
+/// written right-aligned; the gap is cleared. `row_style` is the
+/// pre-resolved style the painter applies to every cell of the row
+/// — the runtime picks `theme.status_warn` for warn alerts and
+/// `theme.status_normal` otherwise. `is_warn` is kept for
+/// downstream consumers (tests, future overlays) that want to
+/// distinguish the two states semantically without comparing
+/// styles.
 ///
 /// Both strings are `Arc<str>` so cache-hit clones are a pointer
 /// copy even when nothing on the status bar changed.
@@ -497,6 +501,7 @@ pub struct StatusBarModel {
     pub left: Arc<str>,
     pub right: Arc<str>,
     pub is_warn: bool,
+    pub row_style: Style,
 }
 
 /// Floating popover anchored near the cursor — currently the

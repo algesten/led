@@ -2,19 +2,15 @@ use led_driver_terminal_core::{Rect, StatusBarModel, Theme};
 
 use crate::buffer::Buffer;
 
-pub(crate) fn paint_status_bar(s: &StatusBarModel, area: Rect, theme: &Theme, buf: &mut Buffer) {
+pub(crate) fn paint_status_bar(s: &StatusBarModel, area: Rect, _theme: &Theme, buf: &mut Buffer) {
     let row = area.y;
     let mut col = area.x;
     let right_edge = area.x.saturating_add(area.cols);
 
-    // Row-wide styling — set on every painted cell. `status_normal`
-    // lets themers tint the happy-path bar too; the default is
-    // unstyled so unthemed goldens don't move.
-    let row_style = if s.is_warn {
-        theme.status_warn
-    } else {
-        theme.status_normal
-    };
+    // Row-wide styling — the runtime memo picks the warn-vs-normal
+    // slot from theme and stamps it onto the model; the painter
+    // just writes the cells.
+    let row_style = s.row_style;
 
     let cols = area.cols as usize;
     let left_cols = s.left.chars().count().min(cols);
