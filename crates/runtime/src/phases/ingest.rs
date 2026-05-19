@@ -60,6 +60,7 @@ pub(crate) fn ingest_file_watch(sources: &mut Sources, env: &TickEnv<'_>) {
         undo_persistence,
         git_scan_pending,
         session,
+        session_driver,
         ..
     } = sources;
 
@@ -91,7 +92,9 @@ pub(crate) fn ingest_file_watch(sources: &mut Sources, env: &TickEnv<'_>) {
                 query::UndoPersistenceInput::new(undo_persistence),
             );
             if !sync_cmds.is_empty() {
-                env.drivers.session.execute(sync_cmds.iter());
+                env.drivers
+                    .session
+                    .execute(sync_cmds.iter(), session_driver);
             }
         }
         let lsp_watch_cmds = query::lsp_watched_file_notifications(
@@ -654,6 +657,7 @@ pub(crate) fn ingest_session(sources: &mut Sources, env: &TickEnv<'_>) {
         browser,
         path_chains,
         session,
+        session_driver,
         undo_persistence,
         resume_check_pending,
         lifecycle,
@@ -662,7 +666,7 @@ pub(crate) fn ingest_session(sources: &mut Sources, env: &TickEnv<'_>) {
     } = sources;
 
     let mut session_just_restored = false;
-    for ev in env.drivers.session.process() {
+    for ev in env.drivers.session.process(session_driver) {
         match ev {
             SessionEvent::Restored { primary, restored } => {
                 session.primary = primary;

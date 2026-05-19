@@ -166,14 +166,18 @@ pub(crate) fn cleanup_orphans(sources: &mut Sources) {
 /// M21 quit gate. Returns `true` when the outer loop should break.
 pub(crate) fn check_quit_gate(sources: &mut Sources, env: &TickEnv<'_>) -> bool {
     let Sources {
-        lifecycle, session, ..
+        lifecycle,
+        session,
+        session_driver,
+        ..
     } = sources;
     if matches!(lifecycle.phase, Phase::Exiting)
         && (session.saved || !session.primary)
     {
-        env.drivers
-            .session
-            .execute(std::iter::once(&led_driver_session_core::SessionCmd::Shutdown));
+        env.drivers.session.execute(
+            std::iter::once(&led_driver_session_core::SessionCmd::Shutdown),
+            session_driver,
+        );
         return true;
     }
     false

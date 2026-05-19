@@ -35,6 +35,7 @@ pub(crate) fn run(sources: &mut Sources, env: &TickEnv<'_>) {
         lsp_notified,
         lsp_requested_state_sum,
         session,
+        session_driver,
         undo_persistence,
         undo_flush_debounce,
         file_watch,
@@ -141,16 +142,17 @@ pub(crate) fn run(sources: &mut Sources, env: &TickEnv<'_>) {
             let content_hash = disk_content_hash_for(eb);
             let distance = distance_from_save_for(eb);
             let chain_id = tracker.chain_id.clone();
-            env.drivers.session.execute(std::iter::once(
-                &SessionCmd::FlushUndo {
+            env.drivers.session.execute(
+                std::iter::once(&SessionCmd::FlushUndo {
                     path: path.clone(),
                     chain_id,
                     content_hash,
                     undo_cursor: current_len,
                     distance_from_save: distance,
                     entries: new_groups,
-                },
-            ));
+                }),
+                session_driver,
+            );
             tracker.persisted_len = current_len;
             undo_flush_debounce.remove(path);
         }

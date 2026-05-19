@@ -13,3 +13,4 @@ publish = false
 led-core = { workspace = true }
 led-state-session = { workspace = true }
 led-state-buffer-edits = { workspace = true }
+imbl = { workspace = true }

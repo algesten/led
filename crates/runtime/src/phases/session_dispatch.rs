@@ -18,6 +18,7 @@ pub(crate) fn run(sources: &mut Sources, env: &TickEnv<'_>) {
         jumps,
         fs,
         session,
+        session_driver,
         session_save_dispatched,
         lifecycle,
         ..
@@ -27,10 +28,13 @@ pub(crate) fn run(sources: &mut Sources, env: &TickEnv<'_>) {
         && let Some(root) = fs.root.as_ref()
     {
         if let Some(cfg) = env.resolved_config_dir.clone() {
-            env.drivers.session.execute(std::iter::once(&SessionCmd::Init {
-                root: root.clone(),
-                config_dir: cfg,
-            }));
+            env.drivers.session.execute(
+                std::iter::once(&SessionCmd::Init {
+                    root: root.clone(),
+                    config_dir: cfg,
+                }),
+                session_driver,
+            );
             session.init_done = true;
         } else {
             session.init_done = true;
@@ -44,9 +48,10 @@ pub(crate) fn run(sources: &mut Sources, env: &TickEnv<'_>) {
         && !*session_save_dispatched
     {
         let data = build_session_data(tabs, edits, store, browser, jumps);
-        env.drivers.session.execute(std::iter::once(&SessionCmd::SaveSession {
-            data,
-        }));
+        env.drivers.session.execute(
+            std::iter::once(&SessionCmd::SaveSession { data }),
+            session_driver,
+        );
         *session_save_dispatched = true;
     } else if matches!(lifecycle.phase, Phase::Exiting)
         && !session.primary

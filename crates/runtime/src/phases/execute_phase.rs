@@ -21,6 +21,7 @@ pub(crate) fn run(sources: &mut Sources, env: &TickEnv<'_>, q: &QueryOut) {
         find_file_driver,
         fs_list_driver,
         file_search,
+        session_driver,
         syntax,
         undo_persistence,
         clock,
@@ -112,11 +113,12 @@ pub(crate) fn run(sources: &mut Sources, env: &TickEnv<'_>, q: &QueryOut) {
             SaveAction::Save { path, .. } => (path, false),
             SaveAction::SaveAs { from, .. } => (from, true),
         };
-        env.drivers
-            .session
-            .execute(std::iter::once(&SessionCmd::ClearUndo {
+        env.drivers.session.execute(
+            std::iter::once(&SessionCmd::ClearUndo {
                 path: path.clone(),
-            }));
+            }),
+            session_driver,
+        );
         if let Some(eb) = edits.buffers.get(path) {
             undo_persistence.insert(
                 path.clone(),

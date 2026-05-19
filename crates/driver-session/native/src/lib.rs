@@ -322,6 +322,7 @@ fn try_acquire_primary_flock(
 mod tests {
     use super::*;
     use led_core::{ChainId, PersistedContentHash, SubLine, UserPath};
+    use led_driver_session_core::SessionDriverState;
     use led_state_buffer_edits::{EditGroup, EditOp};
     use led_state_session::SessionBuffer;
     use led_state_tabs::{Cursor, Cursor as TabCursor, Scroll};
@@ -344,10 +345,14 @@ mod tests {
         UserPath::new(p).canonicalize()
     }
 
-    fn drain_one(drv: &SessionDriver, deadline: Duration) -> Option<SessionEvent> {
+    fn drain_one(
+        drv: &SessionDriver,
+        state: &mut SessionDriverState,
+        deadline: Duration,
+    ) -> Option<SessionEvent> {
         let start = Instant::now();
         while start.elapsed() < deadline {
-            let mut batch = drv.process();
+            let mut batch = drv.process(state);
             if let Some(ev) = batch.pop() {
                 return Some(ev);
             }
@@ -383,11 +388,15 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let cfg = tmp.path().join("config");
         let (drv, _native) = spawn(StdArc::new(NoopTrace), Notifier::noop());
-        drv.execute([&SessionCmd::Init {
-            root: canon_of(&root),
-            config_dir: canon_of(&cfg),
-        }]);
-        let ev = drain_one(&drv, Duration::from_secs(5)).expect("Init replied");
+        let mut state = SessionDriverState::default();
+        drv.execute(
+            [&SessionCmd::Init {
+                root: canon_of(&root),
+                config_dir: canon_of(&cfg),
+            }],
+            &mut state,
+        );
+        let ev = drain_one(&drv, &mut state, Duration::from_secs(5)).expect("Init replied");
         match ev {
             SessionEvent::Restored { primary, restored } => {
                 assert!(primary);
@@ -421,25 +430,36 @@ mod tests {
         };
         {
             let (drv, _n) = spawn(StdArc::new(NoopTrace), Notifier::noop());
-            drv.execute([&SessionCmd::Init {
-                root: canon_of(&root),
-                config_dir: canon_of(&cfg),
-            }]);
-            drain_one(&drv, Duration::from_secs(5)).expect("init");
-            drv.execute([&SessionCmd::SaveSession {
-                data: target.clone(),
-            }]);
-            drain_one(&drv, Duration::from_secs(5)).expect("save");
-            drv.execute([&SessionCmd::Shutdown]);
+            let mut state = SessionDriverState::default();
+            drv.execute(
+                [&SessionCmd::Init {
+                    root: canon_of(&root),
+                    config_dir: canon_of(&cfg),
+                }],
+                &mut state,
+            );
+            drain_one(&drv, &mut state, Duration::from_secs(5)).expect("init");
+            drv.execute(
+                [&SessionCmd::SaveSession {
+                    data: target.clone(),
+                }],
+                &mut state,
+            );
+            drain_one(&drv, &mut state, Duration::from_secs(5)).expect("save");
+            drv.execute([&SessionCmd::Shutdown], &mut state);
         }
         std::thread::sleep(Duration::from_millis(50));
 
         let (drv, _n) = spawn(StdArc::new(NoopTrace), Notifier::noop());
-        drv.execute([&SessionCmd::Init {
-            root: canon_of(&root),
-            config_dir: canon_of(&cfg),
-        }]);
-        let ev = drain_one(&drv, Duration::from_secs(5)).expect("re-init");
+        let mut state = SessionDriverState::default();
+        drv.execute(
+            [&SessionCmd::Init {
+                root: canon_of(&root),
+                config_dir: canon_of(&cfg),
+            }],
+            &mut state,
+        );
+        let ev = drain_one(&drv, &mut state, Duration::from_secs(5)).expect("re-init");
         let SessionEvent::Restored { restored, .. } = ev else {
             panic!("unexpected event: {ev:?}");
         };
@@ -490,26 +510,37 @@ mod tests {
         // First spawn: Init, SaveSession, Shutdown.
         {
             let (drv, _n) = spawn(StdArc::new(NoopTrace), Notifier::noop());
-            drv.execute([&SessionCmd::Init {
-                root: canon_of(&root),
-                config_dir: canon_of(&cfg),
-            }]);
-            drain_one(&drv, Duration::from_secs(5)).expect("init");
-            drv.execute([&SessionCmd::SaveSession {
-                data: target.clone(),
-            }]);
-            drain_one(&drv, Duration::from_secs(5)).expect("save");
-            drv.execute([&SessionCmd::Shutdown]);
+            let mut state = SessionDriverState::default();
+            drv.execute(
+                [&SessionCmd::Init {
+                    root: canon_of(&root),
+                    config_dir: canon_of(&cfg),
+                }],
+                &mut state,
+            );
+            drain_one(&drv, &mut state, Duration::from_secs(5)).expect("init");
+            drv.execute(
+                [&SessionCmd::SaveSession {
+                    data: target.clone(),
+                }],
+                &mut state,
+            );
+            drain_one(&drv, &mut state, Duration::from_secs(5)).expect("save");
+            drv.execute([&SessionCmd::Shutdown], &mut state);
         }
         std::thread::sleep(Duration::from_millis(50));
 
         // Second spawn: Init restores exactly.
         let (drv, _n) = spawn(StdArc::new(NoopTrace), Notifier::noop());
-        drv.execute([&SessionCmd::Init {
-            root: canon_of(&root),
-            config_dir: canon_of(&cfg),
-        }]);
-        let ev = drain_one(&drv, Duration::from_secs(5)).expect("re-init");
+        let mut state = SessionDriverState::default();
+        drv.execute(
+            [&SessionCmd::Init {
+                root: canon_of(&root),
+                config_dir: canon_of(&cfg),
+            }],
+            &mut state,
+        );
+        let ev = drain_one(&drv, &mut state, Duration::from_secs(5)).expect("re-init");
         let SessionEvent::Restored { primary, restored } = ev else {
             panic!("unexpected event: {ev:?}");
         };
@@ -532,39 +563,49 @@ mod tests {
         let path = canon_of(&root.join("a.rs"));
 
         let (drv, _n) = spawn(StdArc::new(NoopTrace), Notifier::noop());
-        drv.execute([&SessionCmd::Init {
-            root: canon_of(&root),
-            config_dir: canon_of(&cfg),
-        }]);
-        drain_one(&drv, Duration::from_secs(5)).expect("init");
+        let mut state = SessionDriverState::default();
+        drv.execute(
+            [&SessionCmd::Init {
+                root: canon_of(&root),
+                config_dir: canon_of(&cfg),
+            }],
+            &mut state,
+        );
+        drain_one(&drv, &mut state, Duration::from_secs(5)).expect("init");
 
         // Need a workspace+buffers row before FK-protected undo
         // rows can land. Save a session first.
-        drv.execute([&SessionCmd::SaveSession {
-            data: SessionData {
-                active_tab_order: 0,
-                show_side_panel: true,
-                buffers: vec![SessionBuffer {
-                    path: path.clone(),
-                    tab_order: 0,
-                    cursor: Cursor::default(),
-                    scroll: Scroll::default(),
-                    undo: None,
-                }],
-                kv: HashMap::new(),
-            },
-        }]);
-        drain_one(&drv, Duration::from_secs(5)).expect("save");
+        drv.execute(
+            [&SessionCmd::SaveSession {
+                data: SessionData {
+                    active_tab_order: 0,
+                    show_side_panel: true,
+                    buffers: vec![SessionBuffer {
+                        path: path.clone(),
+                        tab_order: 0,
+                        cursor: Cursor::default(),
+                        scroll: Scroll::default(),
+                        undo: None,
+                    }],
+                    kv: HashMap::new(),
+                },
+            }],
+            &mut state,
+        );
+        drain_one(&drv, &mut state, Duration::from_secs(5)).expect("save");
 
-        drv.execute([&SessionCmd::FlushUndo {
-            path: path.clone(),
-            chain_id: ChainId::new("chain-1"),
-            content_hash: PersistedContentHash(0xDEADBEEF),
-            undo_cursor: 2,
-            distance_from_save: 1,
-            entries: vec![group(0, "hello"), group(5, " world")],
-        }]);
-        let ev = drain_one(&drv, Duration::from_secs(5)).expect("flushed");
+        drv.execute(
+            [&SessionCmd::FlushUndo {
+                path: path.clone(),
+                chain_id: ChainId::new("chain-1"),
+                content_hash: PersistedContentHash(0xDEADBEEF),
+                undo_cursor: 2,
+                distance_from_save: 1,
+                entries: vec![group(0, "hello"), group(5, " world")],
+            }],
+            &mut state,
+        );
+        let ev = drain_one(&drv, &mut state, Duration::from_secs(5)).expect("flushed");
         let SessionEvent::UndoFlushed { last_seq, .. } = ev else {
             panic!("unexpected: {ev:?}");
         };
@@ -572,15 +613,19 @@ mod tests {
 
         // Drop + re-init in a new spawn — the second instance
         // should restore the entries via load_session.
-        drv.execute([&SessionCmd::Shutdown]);
+        drv.execute([&SessionCmd::Shutdown], &mut state);
         std::thread::sleep(Duration::from_millis(50));
 
         let (drv2, _n2) = spawn(StdArc::new(NoopTrace), Notifier::noop());
-        drv2.execute([&SessionCmd::Init {
-            root: canon_of(&root),
-            config_dir: canon_of(&cfg),
-        }]);
-        let ev = drain_one(&drv2, Duration::from_secs(5)).expect("re-init");
+        let mut state2 = SessionDriverState::default();
+        drv2.execute(
+            [&SessionCmd::Init {
+                root: canon_of(&root),
+                config_dir: canon_of(&cfg),
+            }],
+            &mut state2,
+        );
+        let ev = drain_one(&drv2, &mut state2, Duration::from_secs(5)).expect("re-init");
         let SessionEvent::Restored { restored, .. } = ev else {
             panic!("unexpected: {ev:?}");
         };
@@ -593,17 +638,24 @@ mod tests {
         assert_eq!(undo.entries.len(), 2);
 
         // ClearUndo wipes them.
-        drv2.execute([&SessionCmd::ClearUndo { path: path.clone() }]);
+        drv2.execute(
+            [&SessionCmd::ClearUndo { path: path.clone() }],
+            &mut state2,
+        );
         std::thread::sleep(Duration::from_millis(50));
-        drv2.execute([&SessionCmd::Shutdown]);
+        drv2.execute([&SessionCmd::Shutdown], &mut state2);
         std::thread::sleep(Duration::from_millis(50));
 
         let (drv3, _n3) = spawn(StdArc::new(NoopTrace), Notifier::noop());
-        drv3.execute([&SessionCmd::Init {
-            root: canon_of(&root),
-            config_dir: canon_of(&cfg),
-        }]);
-        let ev = drain_one(&drv3, Duration::from_secs(5)).expect("re-init");
+        let mut state3 = SessionDriverState::default();
+        drv3.execute(
+            [&SessionCmd::Init {
+                root: canon_of(&root),
+                config_dir: canon_of(&cfg),
+            }],
+            &mut state3,
+        );
+        let ev = drain_one(&drv3, &mut state3, Duration::from_secs(5)).expect("re-init");
         let SessionEvent::Restored { restored, .. } = ev else {
             panic!("unexpected: {ev:?}");
         };
@@ -621,21 +673,29 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let cfg = tmp.path().join("config");
         let (drv1, _n1) = spawn(StdArc::new(NoopTrace), Notifier::noop());
-        drv1.execute([&SessionCmd::Init {
-            root: canon_of(&root),
-            config_dir: canon_of(&cfg),
-        }]);
-        let ev1 = drain_one(&drv1, Duration::from_secs(5)).expect("first");
+        let mut state1 = SessionDriverState::default();
+        drv1.execute(
+            [&SessionCmd::Init {
+                root: canon_of(&root),
+                config_dir: canon_of(&cfg),
+            }],
+            &mut state1,
+        );
+        let ev1 = drain_one(&drv1, &mut state1, Duration::from_secs(5)).expect("first");
         match ev1 {
             SessionEvent::Restored { primary, .. } => assert!(primary),
             other => panic!("unexpected: {other:?}"),
         }
         let (drv2, _n2) = spawn(StdArc::new(NoopTrace), Notifier::noop());
-        drv2.execute([&SessionCmd::Init {
-            root: canon_of(&root),
-            config_dir: canon_of(&cfg),
-        }]);
-        let ev2 = drain_one(&drv2, Duration::from_secs(5)).expect("second");
+        let mut state2 = SessionDriverState::default();
+        drv2.execute(
+            [&SessionCmd::Init {
+                root: canon_of(&root),
+                config_dir: canon_of(&cfg),
+            }],
+            &mut state2,
+        );
+        let ev2 = drain_one(&drv2, &mut state2, Duration::from_secs(5)).expect("second");
         match ev2 {
             SessionEvent::Restored { primary, restored } => {
                 assert!(!primary);

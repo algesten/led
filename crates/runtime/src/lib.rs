@@ -337,6 +337,14 @@ pub struct Sources {
     /// Quit gate (`Exiting && (saved || !primary)`) and the
     /// session-Save dispatch.
     pub session: SessionState,
+    /// Driver-owned in-flight tracking for the session driver per
+    /// EXAMPLE-ARCH § "Stateless drivers still need an in-flight
+    /// source". `execute` writes intent (init / save / flush /
+    /// clear / check-sync / shutdown) before the SQLite worker
+    /// dispatch; `process` clears the relevant slot on each
+    /// matching event. Memos can read this to gate against
+    /// double-firing a still-outstanding op.
+    pub session_driver: led_driver_session_core::SessionDriverState,
     /// Driver-outbound bookkeeping: `true` once the runtime has
     /// dispatched `SessionCmd::Save` for the active Exiting
     /// transition, so we don't spam Save every tick while
