@@ -28,12 +28,13 @@ pub use browser::{
     file_categories_map, file_list_action, git_categories_map, BrowserDerivedInputs,
 };
 pub use desired::{
-    compiled_query, completion_refilter_outcome, completion_request_anchor,
-    desired_indent_for_line, desired_inlay_hint_requests, desired_lsp_buffer_changed,
-    desired_syntax_parses, desired_watches, filtered_watch_events,
-    lsp_watched_file_notifications, per_server_matched, redo_target_path,
-    replace_all_plan, save_cleanup_plan, undo_target_path, CompiledQuery,
-    CompletionAnchorOutcome, CompletionRefilterOutcome, DesiredIndent,
+    compiled_query, completion_commit_plan, completion_refilter_outcome,
+    completion_request_anchor, desired_indent_for_line, desired_inlay_hint_requests,
+    desired_lsp_buffer_changed, desired_syntax_parses, desired_watches,
+    filtered_watch_events, lsp_watched_file_notifications, per_server_matched,
+    redo_target_path, replace_all_plan, save_cleanup_plan, undo_target_path,
+    CompiledQuery, CompletionAnchorOutcome, CompletionCommitApply,
+    CompletionCommitPlan, CompletionRefilterOutcome, DesiredIndent,
     InMemoryReplacePlan, ReplaceAllPlan, SaveCleanupReplace,
 };
 pub use issues::{StatusDisplay, directory_categories, resolve_display};

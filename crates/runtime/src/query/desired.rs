@@ -889,3 +889,175 @@ pub fn redo_target_path<'b>(
         .max_by_key(|(_, s)| *s)
         .map(|(p, _)| p)
 }
+
+/// Payload of [`CompletionCommitPlan::Apply`]. Boxed by the
+/// outer enum so the `Dismiss` variant stays cheap and clippy's
+/// `large_enum_variant` lint is happy.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CompletionCommitApply {
+    pub path: CanonPath,
+    pub target_tab: led_state_tabs::TabId,
+    /// Char index in `eb.rope` where the replace begins
+    /// (inclusive).
+    pub replace_from: usize,
+    /// Char index in `eb.rope` where the replace ends
+    /// (exclusive). `replace_to >= replace_from`.
+    pub replace_to: usize,
+    /// Text to splice in at `replace_from` after the
+    /// `[replace_from, replace_to)` slice is removed.
+    pub new_text: Arc<str>,
+    /// The bytes that the splice removes. Empty when the
+    /// replace range is empty (no Delete history op needed).
+    pub removed_text: Arc<str>,
+    /// Pre-spliced rope. The reducer bumps the buffer to this
+    /// directly — the memo did the rope walk once so the
+    /// reducer doesn't have to repeat it.
+    pub new_rope: Arc<ropey::Rope>,
+    /// Cursor on the tab when the commit was issued — used as
+    /// `cursor_before` on both the Delete (when any) and
+    /// Insert history ops.
+    pub before_cursor: led_state_tabs::Cursor,
+    /// Cursor the reducer should land on after the splice.
+    /// Pre-computed here so the rope walk happens once.
+    pub after_cursor: led_state_tabs::Cursor,
+    /// `Some(item)` when the server advertised resolve support
+    /// AND this item still has unresolved fields. Reducer
+    /// queues `ResolveCompletion` for it before dismissing.
+    pub resolve_followup: Option<led_state_completions::Completion>,
+}
+
+/// What the completion-commit dispatch arm should do this tick.
+/// Pure data; the reducer in `dispatch::completions::commit_active`
+/// applies it.
+///
+/// `Dismiss` means "drop the popup without inserting" — every
+/// failed precondition (no session, lost tab, preview tab, buffer
+/// gone, bad item index, inverted replace range) lands here.
+///
+/// `Apply` is the happy path; carries every field the reducer needs
+/// so it doesn't have to re-derive anything between the memo call
+/// and the rope mutation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CompletionCommitPlan {
+    /// Caller dismisses the popup without rope mutation.
+    Dismiss,
+    Apply(Box<CompletionCommitApply>),
+}
+
+/// "Given the live completion session + the active tab's cursor +
+/// the buffer rope, what should commit do?" Single source of truth
+/// for the textEdit / insertText / label cascade and the
+/// rope-bounded clamp.
+///
+/// The reducer in `dispatch::completions::commit_active` reads the
+/// plan, applies it (rope splice + cursor move + history record),
+/// and queues a follow-up resolve when the plan says so. The
+/// derivation lives here so the "what should the commit insert?"
+/// decision isn't tangled with the rope mutation.
+#[drv::memo(single)]
+pub fn completion_commit_plan<'c, 't, 'b>(
+    completions: CompletionsSessionInput<'c>,
+    tabs: TabsActiveInput<'t>,
+    edits: EditedBuffersInput<'b>,
+) -> CompletionCommitPlan {
+    let Some(session) = completions.session.as_ref() else {
+        return CompletionCommitPlan::Dismiss;
+    };
+    let target_tab = session.tab;
+    let path = session.path.clone();
+    let prefix_line = session.prefix_line as usize;
+    let prefix_start_col = session.prefix_start_col as usize;
+    let Some(&item_ix) = session.filtered.get(session.selected) else {
+        return CompletionCommitPlan::Dismiss;
+    };
+    let item = session.items[item_ix].clone();
+
+    // Resolve target tab + its buffer.
+    let Some(tab) = tabs.open.iter().find(|t| t.id == target_tab) else {
+        return CompletionCommitPlan::Dismiss;
+    };
+    if tab.preview {
+        // Preview tabs are strict viewers; committing into one
+        // would create dirty state the user didn't ask for.
+        return CompletionCommitPlan::Dismiss;
+    }
+    let Some(eb) = edits.buffers.get(&path) else {
+        return CompletionCommitPlan::Dismiss;
+    };
+    let before = tab.cursor;
+
+    // Choose the replacement range + new text. textEdit wins
+    // (servers use it to delete the whole typed prefix + insert
+    // the full identifier); otherwise fall back to insertText /
+    // label.
+    let (replace_start_col, replace_end_col, new_text) = match item.text_edit.as_ref() {
+        Some(te) => (
+            te.col_start as usize,
+            te.col_end as usize,
+            te.new_text.clone(),
+        ),
+        None => {
+            let text = item
+                .insert_text
+                .clone()
+                .unwrap_or_else(|| item.label.clone());
+            (prefix_start_col, before.col, text)
+        }
+    };
+
+    // Clamp to the actual rope so a stale item (cursor moved
+    // since the session opened) can't panic on out-of-range
+    // indices.
+    let line_char_start = eb.rope.line_to_char(prefix_line);
+    let line_end_char = if prefix_line + 1 < eb.rope.len_lines() {
+        eb.rope.line_to_char(prefix_line + 1)
+    } else {
+        eb.rope.len_chars()
+    };
+    let replace_from = (line_char_start + replace_start_col).min(line_end_char);
+    let replace_to = (line_char_start + replace_end_col).min(line_end_char);
+    if replace_to < replace_from {
+        return CompletionCommitPlan::Dismiss;
+    }
+
+    // Removed span (Arc'd into the plan for the reducer's Delete
+    // history op).
+    let removed_text: String = eb.rope.slice(replace_from..replace_to).to_string();
+
+    // Splice once, here, and ship the new rope back to the
+    // reducer. ropey's tree is copy-on-write so the clone +
+    // remove + insert is cheap. Computing the post-splice cursor
+    // off the same rope handles multi-line textEdit insertions
+    // correctly (which line-local shortcuts wouldn't).
+    let mut spliced = (*eb.rope).clone();
+    spliced.remove(replace_from..replace_to);
+    spliced.insert(replace_from, new_text.as_ref());
+    let inserted_char_count = new_text.chars().count();
+    let new_cursor_char = replace_from + inserted_char_count;
+    let new_line = spliced.char_to_line(new_cursor_char);
+    let new_col = new_cursor_char - spliced.line_to_char(new_line);
+    let after = led_state_tabs::Cursor {
+        line: new_line,
+        col: new_col,
+        preferred_col: new_col,
+    };
+
+    let resolve_followup = if item.resolve_needed {
+        Some(item)
+    } else {
+        None
+    };
+
+    CompletionCommitPlan::Apply(Box::new(CompletionCommitApply {
+        path,
+        target_tab,
+        replace_from,
+        replace_to,
+        new_text,
+        removed_text: Arc::<str>::from(removed_text.as_str()),
+        new_rope: Arc::new(spliced),
+        before_cursor: before,
+        after_cursor: after,
+        resolve_followup,
+    }))
+}
