@@ -8,6 +8,7 @@ use led_driver_lsp_core::{FileEvent, FileEventKind, LspCmd};
 use led_driver_syntax_core::SyntaxCmd;
 use std::collections::HashMap;
 use std::sync::Arc;
+use unicode_segmentation::UnicodeSegmentation;
 
 use super::inputs::*;
 
@@ -314,4 +315,96 @@ fn kind_priority(k: FileEventKind) -> u8 {
         FileEventKind::Changed => 2,
         FileEventKind::Deleted => 3,
     }
+}
+
+/// The indent string the editor should use for `path`'s `line` —
+/// the tree-sitter `suggest_indent` result when a language and a
+/// parse tree are available, falling back to the line's existing
+/// leading whitespace otherwise.
+///
+/// Pure derivation: no rope mutation, no cursor read. The caller
+/// (`insert_newline` / `insert_tab` in dispatch) consumes the
+/// resolved indent string and applies it.
+///
+/// Returns `None` when the buffer is not loaded (the caller skips
+/// the edit entirely in that case). The `Indent` payload spells
+/// out which path produced the result so callers can branch on it
+/// without re-deriving — `InsertTab` replaces the existing indent
+/// when the tree path fired, but only when the cursor sits
+/// inside the indent prefix; the fallback path inserts at the
+/// cursor instead.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DesiredIndent {
+    /// The tree-sitter indent query produced this string. Caller
+    /// may use it both for newline (just splice it) and for tab
+    /// (replace existing leading whitespace).
+    FromTree(Arc<str>),
+    /// No tree available (no language / no parsed tree / no
+    /// suggestion at this line); the string is the verbatim copy
+    /// of the line's current leading whitespace.
+    Fallback(Arc<str>),
+}
+
+impl DesiredIndent {
+    /// The resolved indent string itself.
+    pub fn as_str(&self) -> &str {
+        match self {
+            DesiredIndent::FromTree(s) | DesiredIndent::Fallback(s) => s.as_ref(),
+        }
+    }
+
+    /// Indent length in grapheme clusters — what `Cursor::col`
+    /// measures.
+    pub fn grapheme_len(&self) -> usize {
+        self.as_str().graphemes(true).count()
+    }
+}
+
+/// "What's the desired leading indent for `path`'s line `line`?"
+///
+/// Single source of truth for the indent string used by Enter
+/// (insert at cursor → push current indent onto the new line) and
+/// Tab (replace existing indent with the structural one). The
+/// reducer in dispatch reads the answer and applies it; the
+/// derivation lives here so the "what should the indent be?"
+/// decision isn't tangled with the rope mutation.
+///
+/// Returns `None` when the buffer is unloaded.
+#[drv::memo(single)]
+pub fn desired_indent_for_line<'s, 'b>(
+    syntax: SyntaxStatesInput<'s>,
+    edits: EditedBuffersInput<'b>,
+    path: &CanonPath,
+    line: usize,
+) -> Option<DesiredIndent> {
+    let eb = edits.buffers.get(path)?;
+    // M23: ask the tree-sitter indent query what the *current*
+    // line's structural indent should be.
+    //
+    // Asking for `line + 1` (the about-to-be-created line) gets
+    // confused when the line below `line` is itself a closing
+    // bracket (`}` / `)` / `]`): `suggest_indent`'s closing-bracket
+    // short-circuit kicks in and returns the OPENER's line indent
+    // (often empty), which would land the cursor flush-left.
+    // Asking for `line` instead returns the structural indent of
+    // the line we're splitting — which is what Enter and Tab both
+    // want.
+    let tree_indent = syntax
+        .by_path
+        .get(path)
+        .and_then(|s| s.tree.as_ref().map(|t| (s.language, t)))
+        .and_then(|(lang, tree)| {
+            led_state_syntax::indent::suggest_indent(lang, tree, &eb.rope, line)
+        });
+    if let Some(s) = tree_indent {
+        return Some(DesiredIndent::FromTree(Arc::from(s.as_str())));
+    }
+    // Fallback: copy the line's leading whitespace verbatim.
+    let leading: String = eb
+        .rope
+        .line(line)
+        .chars()
+        .take_while(|c| *c == ' ' || *c == '\t')
+        .collect();
+    Some(DesiredIndent::Fallback(Arc::from(leading.as_str())))
 }
