@@ -1260,49 +1260,7 @@ impl<'a> Dispatcher<'a> {
                 }
                 DispatchOutcome::Continue
             }
-            Command::KbdMacroExecute => {
-                // Recursion guard: depth >= 100 surfaces an alert
-                // and aborts further playback up the stack
-                // (legacy `action/mod.rs:278-280`).
-                if self.kbd_macro.playback_depth >= KBD_MACRO_RECURSION_LIMIT {
-                    self.alerts.set_info(
-                        "Keyboard macro recursion limit".to_string(),
-                        self.clock.now,
-                        std::time::Duration::from_secs(2),
-                    );
-                    return DispatchOutcome::Continue;
-                }
-                // Clone the Arc out of `kbd_macro.last` first so
-                // the recursive `run_command` calls below can take
-                // `&mut kbd_macro` again — `recorded` is a refcount
-                // bump, not a borrow.
-                let Some(recorded) = self.kbd_macro.last.clone() else {
-                    self.alerts.set_info(
-                        "No kbd macro defined".to_string(),
-                        self.clock.now,
-                        std::time::Duration::from_secs(2),
-                    );
-                    return DispatchOutcome::Continue;
-                };
-                let count = self.kbd_macro.execute_count.take().unwrap_or(1);
-                let iterations = if count == 0 { usize::MAX } else { count };
-                self.kbd_macro.playback_depth += 1;
-                let mut last_outcome = DispatchOutcome::Continue;
-                'outer: for _ in 0..iterations {
-                    for inner_cmd in recorded.iter() {
-                        let outcome = self.run_command(*inner_cmd);
-                        if !matches!(outcome, DispatchOutcome::Continue) {
-                            // Quit / Suspend mid-playback propagates
-                            // out so e.g. a macro that ends in Quit
-                            // exits cleanly. Legacy parity.
-                            last_outcome = outcome;
-                            break 'outer;
-                        }
-                    }
-                }
-                self.kbd_macro.playback_depth -= 1;
-                last_outcome
-            }
+            Command::KbdMacroExecute => self.replay_macro(),
             Command::Wait(_) => {
                 // Harness primitive — no-op in the synchronous
                 // dispatch loop. The goldens harness handles waits
@@ -1312,6 +1270,68 @@ impl<'a> Dispatcher<'a> {
                 DispatchOutcome::Continue
             }
         }
+    }
+
+    /// Replay the last-recorded keyboard macro `execute_count`
+    /// times (default 1; `0` means "until quit").
+    ///
+    /// Lives in its own method so the `KbdMacroExecute` arm of
+    /// `run_command` stays a single line and the two nested
+    /// loops + depth bookkeeping aren't tangled with the rest of
+    /// the command match. Still recurses through `run_command`
+    /// per inner command — the recursion is what carries quit /
+    /// suspend / kbd-macro-execute through to legacy parity.
+    fn replay_macro(&mut self) -> DispatchOutcome {
+        // Recursion guard: depth >= 100 surfaces an alert and
+        // aborts further playback up the stack (legacy
+        // `action/mod.rs:278-280`).
+        if self.kbd_macro.playback_depth >= KBD_MACRO_RECURSION_LIMIT {
+            self.alerts.set_info(
+                "Keyboard macro recursion limit".to_string(),
+                self.clock.now,
+                std::time::Duration::from_secs(2),
+            );
+            return DispatchOutcome::Continue;
+        }
+        // Clone the Arc out of `kbd_macro.last` first so the
+        // recursive `run_command` calls below can take
+        // `&mut kbd_macro` again — `recorded` is a refcount
+        // bump, not a borrow.
+        let Some(recorded) = self.kbd_macro.last.clone() else {
+            self.alerts.set_info(
+                "No kbd macro defined".to_string(),
+                self.clock.now,
+                std::time::Duration::from_secs(2),
+            );
+            return DispatchOutcome::Continue;
+        };
+        let count = self.kbd_macro.execute_count.take().unwrap_or(1);
+        let iterations = if count == 0 { usize::MAX } else { count };
+        self.kbd_macro.playback_depth += 1;
+        let last_outcome = self.run_recorded(&recorded, iterations);
+        self.kbd_macro.playback_depth -= 1;
+        last_outcome
+    }
+
+    /// Inner loop of [`Self::replay_macro`]: run the recorded
+    /// command sequence `iterations` times, stopping early when
+    /// any inner command returns non-`Continue` (quit / suspend
+    /// in mid-playback propagates out so e.g. a macro that ends
+    /// in Quit exits cleanly — legacy parity).
+    fn run_recorded(
+        &mut self,
+        recorded: &[Command],
+        iterations: usize,
+    ) -> DispatchOutcome {
+        for _ in 0..iterations {
+            for inner_cmd in recorded.iter() {
+                let outcome = self.run_command(*inner_cmd);
+                if !matches!(outcome, DispatchOutcome::Continue) {
+                    return outcome;
+                }
+            }
+        }
+        DispatchOutcome::Continue
     }
 }
 
