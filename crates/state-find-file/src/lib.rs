@@ -14,8 +14,10 @@
 use std::path::{Path, PathBuf};
 
 // `FindFileEntry` is the driver ABI type — state re-exports it so
-// overlay consumers (dispatch, rendering) import a single name.
-pub use led_driver_find_file_core::FindFileEntry;
+// overlay consumers (dispatch, rendering) import a single name. The
+// type lives in the leaf crate `led-abi-find-file`; state and the
+// driver core both depend on it to keep the three-tier rule clean.
+pub use led_abi_find_file::FindFileEntry;
 
 /// Domain-typed completion request the overlay queues for the next
 /// tick. Translated to `FindFileCmd` at the driver boundary in

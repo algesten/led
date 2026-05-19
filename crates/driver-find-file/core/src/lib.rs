@@ -19,15 +19,7 @@ use std::sync::mpsc::{Receiver, Sender};
 
 use led_core::CanonPath;
 
-/// One completion-list entry. `name` has a trailing `/` for
-/// directories so the renderer doesn't need to inspect `is_dir`;
-/// `full` is the canonicalized target for open / save requests.
-#[derive(Debug, Clone, PartialEq, Eq, drv::Input)]
-pub struct FindFileEntry {
-    pub name: String,
-    pub full: CanonPath,
-    pub is_dir: bool,
-}
+pub use led_abi_find_file::FindFileEntry;
 
 /// Command to the worker: list `dir`, keep only leaves that
 /// case-insensitively start with `prefix`, optionally include

@@ -958,6 +958,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "led-abi-find-file"
+version = "0.0.0"
+dependencies = [
+ "drv",
+ "led-core",
+]
+
+[[package]]
 name = "led-abi-fs-list"
 version = "0.0.0"
 dependencies = [
@@ -1058,6 +1066,7 @@ name = "led-driver-find-file-core"
 version = "0.0.0"
 dependencies = [
  "drv",
+ "led-abi-find-file",
  "led-core",
 ]
 
@@ -1343,8 +1352,8 @@ version = "0.0.0"
 dependencies = [
  "dirs",
  "drv",
+ "led-abi-find-file",
  "led-core",
- "led-driver-find-file-core",
  "led-state-tabs",
  "led-state-text-input",
 ]
