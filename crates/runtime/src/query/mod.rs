@@ -1527,7 +1527,7 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
         selection: led_state_file_search::FileSearchSelection,
     ) -> led_state_file_search::FileSearchState {
         let flat: Vec<_> = groups.iter().flat_map(|g| g.hits.iter().cloned()).collect();
-        let mut query = led_core::TextInput::default();
+        let mut query = led_state_text_input::TextInput::default();
         query.set("needle");
         led_state_file_search::FileSearchState {
             query,

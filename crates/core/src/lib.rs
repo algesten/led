@@ -17,7 +17,6 @@ pub mod ids;
 pub mod issue;
 pub mod notify;
 pub mod paths;
-pub mod text_input;
 pub mod wrap;
 
 /// Re-export of the `drv` crate so the `id_newtype!` macro can
@@ -44,7 +43,6 @@ pub use issue::{
 };
 pub use notify::Notifier;
 pub use paths::{CanonPath, PathChain, UserPath};
-pub use text_input::TextInput;
 pub use wrap::{
     SubLine, SubLineRange, col_to_sub_line, is_continued, line_layout,
     sub_line_cells_to_grapheme_col, sub_line_count, sub_line_range,

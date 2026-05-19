@@ -9,7 +9,8 @@
 //! See `docs/spec/search.md` § "File-search overlay" for legacy
 //! semantics.
 
-use led_core::{CanonPath, EditSeq, TextInput};
+use led_core::{CanonPath, EditSeq};
+use led_state_text_input::TextInput;
 
 // Hit / group types are the driver ABI — re-exported so the overlay
 // state + renderer + dispatch use one shape end-to-end, matching the

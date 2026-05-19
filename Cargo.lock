@@ -1240,6 +1240,7 @@ dependencies = [
  "led-state-session",
  "led-state-syntax",
  "led-state-tabs",
+ "led-state-text-input",
  "led-text-reflow",
  "regex",
  "regex-syntax",
@@ -1312,6 +1313,7 @@ dependencies = [
  "led-core",
  "led-driver-file-search-core",
  "led-state-tabs",
+ "led-state-text-input",
 ]
 
 [[package]]
@@ -1323,6 +1325,7 @@ dependencies = [
  "led-core",
  "led-driver-find-file-core",
  "led-state-tabs",
+ "led-state-text-input",
 ]
 
 [[package]]
@@ -1340,6 +1343,7 @@ dependencies = [
  "drv",
  "led-core",
  "led-state-tabs",
+ "led-state-text-input",
 ]
 
 [[package]]
@@ -1374,6 +1378,7 @@ dependencies = [
  "led-core",
  "led-driver-lsp-core",
  "led-state-tabs",
+ "led-state-text-input",
 ]
 
 [[package]]
@@ -1414,6 +1419,13 @@ dependencies = [
  "imbl",
  "led-core",
  "serde",
+]
+
+[[package]]
+name = "led-state-text-input"
+version = "0.0.0"
+dependencies = [
+ "drv",
 ]
 
 [[package]]

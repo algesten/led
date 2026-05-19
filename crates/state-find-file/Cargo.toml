@@ -15,4 +15,5 @@ drv = { workspace = true }
 led-core = { workspace = true }
 led-driver-find-file-core = { workspace = true }
 led-state-tabs = { workspace = true }
+led-state-text-input = { workspace = true }
 dirs = { workspace = true }

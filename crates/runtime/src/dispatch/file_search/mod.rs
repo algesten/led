@@ -276,7 +276,7 @@ pub(super) fn run_overlay_command(
 /// Pick which `TextInput` the current selection points at.
 fn input_for_selection(
     state: &mut FileSearchState,
-) -> &mut led_core::TextInput {
+) -> &mut led_state_text_input::TextInput {
     match state.selection {
         FileSearchSelection::ReplaceInput => &mut state.replace,
         // Result rows don't have an input — typing there falls

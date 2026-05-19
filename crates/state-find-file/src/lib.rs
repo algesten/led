@@ -57,7 +57,7 @@ pub struct FindFileState {
     /// Editable input buffer (text + cursor + transient hint).
     /// Rendered after the `Find file: ` / `Save as: ` prompt in the
     /// status bar.
-    pub input: led_core::TextInput,
+    pub input: led_state_text_input::TextInput,
 
     /// `input.text` as it was before the user last arrow-navigated
     /// into the completions list. Arrow-nav rewrites the input to
@@ -118,7 +118,7 @@ impl FindFileState {
         Self {
             mode: FindFileMode::Open,
             base_input: initial.clone(),
-            input: led_core::TextInput::new(initial),
+            input: led_state_text_input::TextInput::new(initial),
             completions: Vec::new(),
             selected: None,
             show_side: false,
@@ -135,7 +135,7 @@ impl FindFileState {
         Self {
             mode: FindFileMode::SaveAs,
             base_input: initial.clone(),
-            input: led_core::TextInput::new(initial),
+            input: led_state_text_input::TextInput::new(initial),
             completions: Vec::new(),
             selected: None,
             show_side: false,

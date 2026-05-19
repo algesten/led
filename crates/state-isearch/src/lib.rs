@@ -19,8 +19,8 @@
 //!   `SearchAccept` *and* runs its normal handler on the same
 //!   tick ("accept on passthrough").
 
-use led_core::TextInput;
 use led_state_tabs::{Cursor, Scroll};
+use led_state_text_input::TextInput;
 
 /// A single byte-range match inside the active buffer's rope.
 ///

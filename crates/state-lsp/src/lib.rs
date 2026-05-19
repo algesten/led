@@ -17,8 +17,9 @@
 
 use std::sync::Arc;
 
-use led_core::{BufferVersion, CanonPath, LspRequestSeq, ServerId, TextInput};
+use led_core::{BufferVersion, CanonPath, LspRequestSeq, ServerId};
 use led_driver_lsp_core::{CodeActionSummary, InlayHint, RegistrationGlob};
+use led_state_text_input::TextInput;
 
 // ── User-decision source ──────────────────────────────────────
 
