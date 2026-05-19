@@ -360,6 +360,85 @@ impl DesiredIndent {
     }
 }
 
+/// One position-keyed replace in a save-cleanup batch. `at` is a
+/// char index into the rope; the dispatch reducer applies the
+/// batch in descending-`at` order so each remove + insert stays
+/// position-valid as the rope shrinks.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SaveCleanupReplace {
+    pub at: usize,
+    pub removed: Arc<str>,
+    pub inserted: Arc<str>,
+}
+
+/// "What pre-save cleanup edits should we apply to `path`?"
+///
+/// One memo call per save request. Returns the sorted list of
+/// `(at, removed, inserted)` replace ops the dispatcher should
+/// apply to the buffer — trailing-whitespace strips per line,
+/// plus a final-newline append when the rope doesn't end in
+/// one. Already-clean buffers (or unloaded paths) return an
+/// empty Vec → caller short-circuits.
+///
+/// The output is sorted descending by `at` so the caller's
+/// remove + insert loop stays index-valid (a higher-position
+/// edit doesn't shift any lower-position edit).
+///
+/// Pure: no rope mutation, no version bump, no history record.
+/// The dispatcher reads the plan and applies it (the apply must
+/// stay in dispatch because it touches multiple sources: rope,
+/// version, hash, history, cursor).
+#[drv::memo(single)]
+pub fn save_cleanup_plan<'b>(
+    edits: EditedBuffersInput<'b>,
+    path: &CanonPath,
+) -> Arc<Vec<SaveCleanupReplace>> {
+    let Some(eb) = edits.buffers.get(path) else {
+        return Arc::new(Vec::new());
+    };
+    let total_chars = eb.rope.len_chars();
+    if total_chars == 0 {
+        return Arc::new(Vec::new());
+    }
+    let line_count = eb.rope.len_lines();
+    let mut replaces: Vec<SaveCleanupReplace> = Vec::new();
+    if eb.rope.char(total_chars - 1) != '\n' {
+        replaces.push(SaveCleanupReplace {
+            at: total_chars,
+            removed: Arc::from(""),
+            inserted: Arc::from("\n"),
+        });
+    }
+    for line_idx in 0..line_count {
+        let line_slice = eb.rope.line(line_idx);
+        let line_str: String = line_slice.chars().collect();
+        let body = line_str.trim_end_matches(['\n', '\r']);
+        let body_chars = body.chars().count();
+        if body_chars == 0 {
+            continue;
+        }
+        let trimmed = body.trim_end_matches([' ', '\t']);
+        let trimmed_chars = trimmed.chars().count();
+        if trimmed_chars == body_chars {
+            continue;
+        }
+        let line_start_char = eb.rope.line_to_char(line_idx);
+        let strip_start = line_start_char + trimmed_chars;
+        let strip_end = line_start_char + body_chars;
+        let removed: String = eb.rope.slice(strip_start..strip_end).to_string();
+        replaces.push(SaveCleanupReplace {
+            at: strip_start,
+            removed: Arc::from(removed.as_str()),
+            inserted: Arc::from(""),
+        });
+    }
+    // Descending position so the highest-position edit applies
+    // first; strips at lower positions stay valid because the
+    // higher-position edits don't shift them.
+    replaces.sort_by_key(|r| std::cmp::Reverse(r.at));
+    Arc::new(replaces)
+}
+
 /// Outcome of running the completion refilter against the
 /// current cursor / rope. Pure data — the dispatch reducer
 /// applies it to `CompletionsState`.

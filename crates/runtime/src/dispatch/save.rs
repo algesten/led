@@ -8,6 +8,8 @@ use led_state_tabs::{Cursor, Tabs};
 use ropey::Rope;
 use std::sync::Arc;
 
+use crate::query::{save_cleanup_plan, EditedBuffersInput, SaveCleanupReplace};
+
 /// Insert the active tab's path into `pending_saves` if the
 /// buffer is loaded. "Save should always save" — the dirty
 /// check is deliberately absent so Ctrl-X Ctrl-D (SaveNoFormat)
@@ -31,8 +33,11 @@ pub(super) fn request_save_active(tabs: &mut Tabs, edits: &mut BufferEdits) {
         return;
     }
     let cursor = tabs.open[idx].cursor;
+    // Derive the cleanup plan from the immutable view, then
+    // apply it to the mutable buffer.
+    let plan = save_cleanup_plan(EditedBuffersInput::new(edits), &path);
     if let Some(eb) = edits.buffers.get_mut(&path) {
-        let new_cursor = apply_save_cleanup(eb, cursor);
+        let new_cursor = apply_save_cleanup(eb, &plan, cursor);
         if new_cursor != cursor {
             tabs.open[idx].cursor = new_cursor;
         }
@@ -61,8 +66,9 @@ pub(super) fn request_save_all(tabs: &mut Tabs, edits: &mut BufferEdits) {
         })
         .collect();
     for (idx, path, cursor) in dirty_paths {
+        let plan = save_cleanup_plan(EditedBuffersInput::new(edits), &path);
         if let Some(eb) = edits.buffers.get_mut(&path) {
-            let new_cursor = apply_save_cleanup(eb, cursor);
+            let new_cursor = apply_save_cleanup(eb, &plan, cursor);
             if new_cursor != cursor {
                 tabs.open[idx].cursor = new_cursor;
             }
@@ -71,6 +77,11 @@ pub(super) fn request_save_all(tabs: &mut Tabs, edits: &mut BufferEdits) {
     }
 }
 
+/// Apply a pre-derived pre-save cleanup plan to `eb`. The plan
+/// comes from [`crate::query::save_cleanup_plan`]; this function
+/// only performs the application — rope rewrite, version bump,
+/// hash bump, history record, cursor clamp.
+///
 /// Pre-save buffer cleanup: strip trailing whitespace from every
 /// line, append a trailing newline if the rope doesn't end in one.
 /// Lands as a single undo group via `record_replace_batch` so a
@@ -80,60 +91,26 @@ pub(super) fn request_save_all(tabs: &mut Tabs, edits: &mut BufferEdits) {
 /// length when its grapheme col landed inside stripped whitespace,
 /// unchanged otherwise. Caller writes it back onto the active tab.
 ///
-/// No-op when the rope is empty or already clean (no edit
-/// recorded, no version bump). Idempotent — saving twice in a row
-/// records exactly one cleanup group, not two.
-pub(crate) fn apply_save_cleanup(eb: &mut EditedBuffer, cursor_before: Cursor) -> Cursor {
-    let total_chars = eb.rope.len_chars();
-    if total_chars == 0 {
+/// No-op when `plan` is empty (rope already clean, or unloaded
+/// buffer). Idempotent — saving twice in a row records exactly
+/// one cleanup group, not two, because the second call's memo
+/// returns an empty plan.
+pub(crate) fn apply_save_cleanup(
+    eb: &mut EditedBuffer,
+    plan: &[SaveCleanupReplace],
+    cursor_before: Cursor,
+) -> Cursor {
+    if plan.is_empty() {
         return cursor_before;
     }
-    let line_count = eb.rope.len_lines();
-    // Build the (at, removed, inserted) batch in any order — we
-    // sort descending by `at` before applying so each strip's
-    // position stays valid at apply time.
-    let mut replaces: Vec<(usize, Arc<str>, Arc<str>)> = Vec::new();
-    if eb.rope.char(total_chars - 1) != '\n' {
-        replaces.push((total_chars, Arc::from(""), Arc::from("\n")));
-    }
-    for line_idx in 0..line_count {
-        let line_slice = eb.rope.line(line_idx);
-        let line_str: String = line_slice.chars().collect();
-        let body = line_str.trim_end_matches(['\n', '\r']);
-        let body_chars = body.chars().count();
-        if body_chars == 0 {
-            continue;
-        }
-        let trimmed = body.trim_end_matches([' ', '\t']);
-        let trimmed_chars = trimmed.chars().count();
-        if trimmed_chars == body_chars {
-            continue;
-        }
-        let line_start_char = eb.rope.line_to_char(line_idx);
-        let strip_start = line_start_char + trimmed_chars;
-        let strip_end = line_start_char + body_chars;
-        let removed: String = eb.rope.slice(strip_start..strip_end).to_string();
-        replaces.push((
-            strip_start,
-            Arc::<str>::from(removed.as_str()),
-            Arc::from(""),
-        ));
-    }
-    if replaces.is_empty() {
-        return cursor_before;
-    }
-    // Descending position so the highest-position edit applies
-    // first; strips at lower positions stay valid because the
-    // higher-position edits don't shift them.
-    replaces.sort_by_key(|r| std::cmp::Reverse(r.0));
     let mut new_rope: Rope = (*eb.rope).clone();
-    for (at, removed, inserted) in &replaces {
-        let len_removed = removed.chars().count();
+    for r in plan {
+        let len_removed = r.removed.chars().count();
         if len_removed > 0 {
-            new_rope.remove(*at..*at + len_removed);
+            new_rope.remove(r.at..r.at + len_removed);
         }
-        if !inserted.is_empty() {
-            new_rope.insert(*at, inserted);
+        if !r.inserted.is_empty() {
+            new_rope.insert(r.at, &r.inserted);
         }
     }
     let new_rope = Arc::new(new_rope);
@@ -155,8 +132,12 @@ pub(crate) fn apply_save_cleanup(eb: &mut EditedBuffer, cursor_before: Cursor) -
     eb.live_content_hash =
         led_core::EphemeralContentHash::of_rope(&eb.rope).persist();
     eb.version.0 = eb.version.0.saturating_add(1);
+    let history_batch: Vec<(usize, Arc<str>, Arc<str>)> = plan
+        .iter()
+        .map(|r| (r.at, r.removed.clone(), r.inserted.clone()))
+        .collect();
     eb.history
-        .record_replace_batch(replaces, cursor_before, cursor_after);
+        .record_replace_batch(history_batch, cursor_before, cursor_after);
     cursor_after
 }
 
@@ -318,11 +299,27 @@ mod tests {
         EditedBuffer::fresh(Arc::new(Rope::from_str(rope_str)))
     }
 
+    /// Test helper — derive the cleanup plan via the memo and
+    /// apply it. Mirrors what `request_save_active` / the LSP
+    /// `apply` path now do at runtime, but takes a single
+    /// `EditedBuffer` so existing rope-shape assertions read
+    /// unchanged.
+    fn run_cleanup(eb: &mut EditedBuffer, cursor: Cursor) -> Cursor {
+        let path = canon("test");
+        let mut edits = BufferEdits::default();
+        edits.buffers.insert(path.clone(), eb.clone());
+        let plan = crate::query::save_cleanup_plan(
+            crate::query::EditedBuffersInput::new(&edits),
+            &path,
+        );
+        super::apply_save_cleanup(eb, &plan, cursor)
+    }
+
     #[test]
     fn cleanup_strips_trailing_whitespace_per_line() {
         let mut eb = buffer_from("hello   \nworld\t\t\n");
         let cursor = Cursor::default();
-        super::apply_save_cleanup(&mut eb, cursor);
+        run_cleanup(&mut eb, cursor);
         assert_eq!(eb.rope.to_string(), "hello\nworld\n");
     }
 
@@ -330,7 +327,7 @@ mod tests {
     fn cleanup_appends_final_newline_when_missing() {
         let mut eb = buffer_from("no newline at end");
         let cursor = Cursor::default();
-        super::apply_save_cleanup(&mut eb, cursor);
+        run_cleanup(&mut eb, cursor);
         assert_eq!(eb.rope.to_string(), "no newline at end\n");
     }
 
@@ -338,7 +335,7 @@ mod tests {
     fn cleanup_strips_and_adds_newline_in_one_pass() {
         let mut eb = buffer_from("trailing   ");
         let cursor = Cursor::default();
-        super::apply_save_cleanup(&mut eb, cursor);
+        run_cleanup(&mut eb, cursor);
         assert_eq!(eb.rope.to_string(), "trailing\n");
     }
 
@@ -347,7 +344,7 @@ mod tests {
         let mut eb = buffer_from("hello\nworld\n");
         let v0 = eb.version;
         let cursor = Cursor::default();
-        super::apply_save_cleanup(&mut eb, cursor);
+        run_cleanup(&mut eb, cursor);
         assert_eq!(eb.rope.to_string(), "hello\nworld\n");
         assert_eq!(eb.version, v0, "no edit recorded on clean buffer");
     }
@@ -357,7 +354,7 @@ mod tests {
         let mut eb = buffer_from("");
         let v0 = eb.version;
         let cursor = Cursor::default();
-        super::apply_save_cleanup(&mut eb, cursor);
+        run_cleanup(&mut eb, cursor);
         assert_eq!(eb.rope.to_string(), "");
         assert_eq!(eb.version, v0);
     }
@@ -369,7 +366,7 @@ mod tests {
         // multiple blank lines or strip trailing blank lines.
         let mut eb = buffer_from("a\n   \n\nb\n");
         let cursor = Cursor::default();
-        super::apply_save_cleanup(&mut eb, cursor);
+        run_cleanup(&mut eb, cursor);
         assert_eq!(eb.rope.to_string(), "a\n\n\nb\n");
     }
 
@@ -383,7 +380,7 @@ mod tests {
             col: 5,
             preferred_col: 5,
         };
-        super::apply_save_cleanup(&mut eb, cursor);
+        run_cleanup(&mut eb, cursor);
         assert_eq!(eb.rope.to_string(), "hello\n");
 
         // Apply the inverse: reverse-walk the undo group's ops.
@@ -411,7 +408,7 @@ mod tests {
             col: 8, // sits past "hello", inside the trailing spaces
             preferred_col: 8,
         };
-        let after = super::apply_save_cleanup(&mut eb, cursor);
+        let after = run_cleanup(&mut eb, cursor);
         assert_eq!(eb.rope.to_string(), "hello\n");
         assert_eq!(after.col, 5);
         assert_eq!(after.preferred_col, 5);

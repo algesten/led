@@ -31,7 +31,8 @@ pub use desired::{
     completion_refilter_outcome, completion_request_anchor, desired_indent_for_line,
     desired_inlay_hint_requests, desired_lsp_buffer_changed, desired_syntax_parses,
     desired_watches, filtered_watch_events, lsp_watched_file_notifications,
-    per_server_matched, CompletionAnchorOutcome, CompletionRefilterOutcome, DesiredIndent,
+    per_server_matched, save_cleanup_plan, CompletionAnchorOutcome,
+    CompletionRefilterOutcome, DesiredIndent, SaveCleanupReplace,
 };
 pub use issues::{StatusDisplay, directory_categories, resolve_display};
 pub use inputs::{

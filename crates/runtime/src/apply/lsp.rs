@@ -411,14 +411,18 @@ impl<'a> LspEditApply<'a> {
             // the same save. Recorded as one undo group so a
             // post-save Ctrl-/ reverses both format and cleanup
             // together.
+            let cursor = tabs
+                .open
+                .iter()
+                .find(|t| t.path == path)
+                .map(|t| t.cursor)
+                .unwrap_or_default();
+            let plan = crate::query::save_cleanup_plan(
+                crate::query::EditedBuffersInput::new(edits),
+                &path,
+            );
             if let Some(eb) = edits.buffers.get_mut(&path) {
-                let cursor = tabs
-                    .open
-                    .iter()
-                    .find(|t| t.path == path)
-                    .map(|t| t.cursor)
-                    .unwrap_or_default();
-                crate::dispatch::save::apply_save_cleanup(eb, cursor);
+                crate::dispatch::save::apply_save_cleanup(eb, &plan, cursor);
                 edits.pending_saves.insert(path);
             }
         }
