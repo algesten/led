@@ -19,7 +19,10 @@ pub use popover::popover_model;
 pub use popups::{
     code_action_popup_model, completion_popup_model, rename_popup_model,
 };
-pub use side_panel::{side_panel_model, SidePanelInputs};
+pub use side_panel::{
+    side_panel_browser, side_panel_completions, side_panel_file_search,
+    side_panel_model, SidePanelInputs,
+};
 pub use status_bar::{status_bar_model, StatusBarInputs};
 pub use tab_bar::tab_bar_model;
 

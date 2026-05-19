@@ -1,4 +1,28 @@
 //! Side-panel slice of the render frame.
+//!
+//! Decomposed into three sibling memos — one per side-panel
+//! mode — plus the top-level [`side_panel_model`] composition.
+//! The composition is a plain `fn` (deliberately not annotated
+//! `#[drv::memo]`) so caching at this level can't re-introduce
+//! the mega-memo it exists to avoid. The sub-memos cache
+//! independently:
+//!
+//! - [`side_panel_file_search`] — file-search overlay mode.
+//!   Reads only `OverlaysInput` + `rows`, so a keystroke into
+//!   the browser-mode side panel (or any unrelated source) does
+//!   not invalidate this cache.
+//! - [`side_panel_completions`] — find-file overlay completions
+//!   list. Same narrow input shape.
+//! - [`side_panel_browser`] — the workspace file-tree mode. Takes
+//!   the full browser-derived bundle (fs / ui / tabs / edits) plus
+//!   diagnostics + git for status decoration.
+//!
+//! Why decompose? The original single memo took every input the
+//! three modes could read, so typing into the file-search box
+//! mutated `overlays.file_search` and invalidated the browser
+//! branch's cache (and vice versa) even though only one branch
+//! ever runs per frame. With siblings, each mode only re-fires
+//! when *its* narrow input changes.
 
 use led_driver_terminal_core::{SidePanelModel, SidePanelRow};
 use led_state_browser::{Focus, TreeEntryKind};
@@ -32,7 +56,11 @@ pub struct SidePanelInputs<'a> {
     pub rows: u16,
 }
 
-#[drv::memo(single)]
+/// Plain composition of the three per-mode memos.
+///
+/// Not annotated `#[drv::memo]` on purpose — caching at this
+/// level would defeat the decomposition. The sub-memos cache;
+/// this function is the cheap glue that picks the winning mode.
 pub fn side_panel_model<'a>(inputs: SidePanelInputs<'a>) -> SidePanelModel {
     let SidePanelInputs {
         fs,
@@ -44,14 +72,66 @@ pub fn side_panel_model<'a>(inputs: SidePanelInputs<'a>) -> SidePanelModel {
         edits,
         rows,
     } = inputs;
-    if let Some(state) = overlays.file_search.as_ref() {
-        return file_search_side_panel(state, rows);
+    if let Some(model) = side_panel_file_search(overlays, rows) {
+        return model;
     }
-    if let Some(state) = overlays.find_file.as_ref()
-        && state.show_side
-    {
-        return completions_side_panel(state, rows);
+    if let Some(model) = side_panel_completions(overlays, rows) {
+        return model;
     }
+    side_panel_browser(fs, browser, tabs, edits, diagnostics, git, rows)
+}
+
+/// File-search overlay mode. Returns `Some` when
+/// `overlays.file_search` is active.
+///
+/// Reads only `OverlaysInput` + `rows`, mirroring the status-bar
+/// slot pattern — taking the existing `OverlaysInput` projection
+/// (rather than minting a one-field input per overlay) keeps
+/// the projection surface small for marginal cache-hit gain.
+#[drv::memo(single)]
+pub fn side_panel_file_search<'a>(
+    overlays: OverlaysInput<'a>,
+    rows: u16,
+) -> Option<SidePanelModel> {
+    let state = overlays.file_search.as_ref()?;
+    Some(file_search_side_panel(state, rows))
+}
+
+/// Find-file overlay completions list. Returns `Some` when
+/// `overlays.find_file` is active *and* its `show_side` flag is
+/// set — the overlay starts with `show_side = false` (status-bar
+/// prompt only) and dispatch flips it to `true` after the first
+/// arrow key.
+#[drv::memo(single)]
+pub fn side_panel_completions<'a>(
+    overlays: OverlaysInput<'a>,
+    rows: u16,
+) -> Option<SidePanelModel> {
+    let state = overlays.find_file.as_ref()?;
+    if !state.show_side {
+        return None;
+    }
+    Some(completions_side_panel(state, rows))
+}
+
+/// Workspace browser-tree mode. Always returns a model (possibly
+/// empty when the tree has no entries) — this is the fallback
+/// slot the composition lands on when neither overlay is active.
+///
+/// Takes the full browser bundle (fs + ui + tabs + edits) plus
+/// diagnostics + git for per-row status decoration. `rows` is the
+/// side-panel area height as a Copy scalar so memo input equality
+/// is structural.
+#[drv::memo(single)]
+pub fn side_panel_browser<'a, 'b, 'c, 'd, 'e, 'f>(
+    fs: FsTreeInput<'a>,
+    browser: BrowserUiInput<'b>,
+    tabs: TabsActiveInput<'c>,
+    edits: EditedBuffersInput<'d>,
+    diagnostics: DiagnosticsStatesInput<'e>,
+    git: GitStateInput<'f>,
+    rows: u16,
+) -> SidePanelModel {
     let entries = browser_entries(BrowserDerivedInputs {
         fs,
         ui: browser,
