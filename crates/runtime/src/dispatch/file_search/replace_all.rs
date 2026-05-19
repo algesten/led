@@ -2,6 +2,11 @@ use led_core::SavedVersion;
 use led_state_file_search::{FileSearchSelection, FileSearchState};
 use led_state_tabs::Tabs;
 
+use crate::query::{
+    replace_all_plan, EditedBuffersInput, FileSearchQueryInput, FileSearchReplaceInput,
+    TabsActiveInput,
+};
+
 /// `Alt+Enter` — project-wide replace-all.
 ///
 /// Two paths, applied together:
@@ -71,127 +76,57 @@ pub(super) fn apply_replace_all(
     if state.query.text.is_empty() {
         return;
     }
-    let pattern = if state.use_regex {
-        state.query.text.clone()
-    } else {
-        regex_syntax::escape(&state.query.text)
-    };
-    let re = match regex::RegexBuilder::new(&pattern)
-        .case_insensitive(!state.case_sensitive)
-        .build()
-    {
-        Ok(r) => r,
-        Err(_) => return,
-    };
-    let replacement = state.replace.text.as_str();
 
-    // Tabs split into owned (non-preview) vs preview. Both get
-    // their rope updated in-memory so the view stays consistent;
-    // the difference is the dirty flag and who writes disk.
-    //   - Owned: in-memory + dirty, user saves explicitly.
-    //   - Preview: in-memory + saved_version=version (stays
-    //     clean). Added to skip_paths so the driver walk doesn't
-    //     also write the file — we already applied the edit
-    //     in-memory, and the driver writing on top of our edit
-    //     would be a race.
-    //   - Unloaded files: driver writes them (not in skip_paths).
-    let owned_paths: std::collections::HashSet<led_core::CanonPath> = tabs
-        .open
-        .iter()
-        .filter(|t| !t.preview)
-        .map(|t| t.path.clone())
-        .collect();
-    let preview_paths: std::collections::HashSet<led_core::CanonPath> = tabs
-        .open
-        .iter()
-        .filter(|t| t.preview)
-        .map(|t| t.path.clone())
-        .collect();
-
-    let mut skip_paths: Vec<led_core::CanonPath> = Vec::new();
-
-    // Owned buffers — in-memory + dirty.
-    let mut loaded_owned: Vec<led_core::CanonPath> = edits
-        .buffers
-        .keys()
-        .filter(|p| owned_paths.contains(p))
-        .cloned()
-        .collect();
-    loaded_owned.sort_by(|a, b| a.as_path().cmp(b.as_path()));
-    for path in loaded_owned {
-        let Some(eb) = edits.buffers.get_mut(&path) else {
-            continue;
-        };
-        let existing = eb.rope.to_string();
-        let count = re.find_iter(&existing).count();
-        if count == 0 {
-            skip_paths.push(path);
-            continue;
-        }
-        let replaced = re.replace_all(&existing, replacement);
-        if replaced.as_ref() != existing {
-            super::super::shared::bump(eb, ropey::Rope::from_str(replaced.as_ref()));
-            edits
-                .pending_replace_in_memory
-                .push(led_state_buffer_edits::InMemoryReplace {
-                    path: path.clone(),
-                    count,
-                });
-        }
-        skip_paths.push(path);
+    // Tabs split into owned (non-preview) vs preview inside the
+    // memo. Owned buffers land dirty; preview buffers stay clean
+    // (the driver writes them on disk and our in-memory rope
+    // mirrors the same regex result). Unloaded files are
+    // driver-only — the plan's skip_paths intentionally omits
+    // them so the driver walk processes them.
+    let plan = replace_all_plan(
+        FileSearchQueryInput::new(state),
+        FileSearchReplaceInput::new(state),
+        TabsActiveInput::new(tabs),
+        EditedBuffersInput::new(edits),
+    );
+    if plan.in_memory.is_empty() && plan.skip_paths.is_empty() {
+        // Empty plan also covers "compile failed / empty query"
+        // — short-circuit before queuing a `PendingReplaceAll`
+        // the driver would just no-op on.
+        return;
     }
 
-    // Preview buffers — in-memory but stays clean. Driver skips
-    // them via skip_paths; we wrote the content locally and
-    // pending_single_replace is not queued (the rope reflects the
-    // final state directly).
-    let mut loaded_preview: Vec<led_core::CanonPath> = edits
-        .buffers
-        .keys()
-        .filter(|p| preview_paths.contains(p))
-        .cloned()
-        .collect();
-    loaded_preview.sort_by(|a, b| a.as_path().cmp(b.as_path()));
-    for path in loaded_preview {
-        let Some(eb) = edits.buffers.get_mut(&path) else {
+    for entry in plan.in_memory.iter() {
+        let Some(eb) = edits.buffers.get_mut(&entry.path) else {
             continue;
         };
-        let existing = eb.rope.to_string();
-        let count = re.find_iter(&existing).count();
-        if count == 0 {
-            skip_paths.push(path);
-            continue;
-        }
-        let replaced = re.replace_all(&existing, replacement);
-        if replaced.as_ref() != existing {
-            super::super::shared::bump(eb, ropey::Rope::from_str(replaced.as_ref()));
-            // Preview stays clean — saved_version tracks the disk
-            // state which the driver is about to write to match.
+        // bump() takes ownership; clone the Arc'd rope's inner.
+        super::super::shared::bump(eb, (*entry.new_rope).clone());
+        if entry.preview {
+            // Preview stays clean — saved_version tracks the
+            // disk state which the driver is about to write.
             eb.saved_version = SavedVersion(eb.version.0);
-        eb.disk_content_hash =
-            led_core::EphemeralContentHash::of_rope(&eb.rope).persist();
-            edits
-                .pending_replace_in_memory
-                .push(led_state_buffer_edits::InMemoryReplace {
-                    path: path.clone(),
-                    count,
-                });
+            eb.disk_content_hash =
+                led_core::EphemeralContentHash::of_rope(&eb.rope).persist();
         }
-        // Preview paths NOT added to skip_paths — the driver
-        // writes disk, our in-memory rope mirrors the same regex
-        // result. Both converge on identical content.
+        edits
+            .pending_replace_in_memory
+            .push(led_state_buffer_edits::InMemoryReplace {
+                path: entry.path.clone(),
+                count: entry.count,
+            });
     }
 
     if let Some(root) = fs_root {
-        edits.pending_replace_all.push(
-            led_state_buffer_edits::PendingReplaceAll {
+        edits
+            .pending_replace_all
+            .push(led_state_buffer_edits::PendingReplaceAll {
                 root: root.clone(),
                 query: state.query.text.clone(),
-                replacement: replacement.to_string(),
+                replacement: state.replace.text.clone(),
                 case_sensitive: state.case_sensitive,
                 use_regex: state.use_regex,
-                skip_paths,
-            },
-        );
+                skip_paths: plan.skip_paths.clone(),
+            });
     }
 }

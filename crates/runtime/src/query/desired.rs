@@ -360,6 +360,208 @@ impl DesiredIndent {
     }
 }
 
+/// Compiled needle the project-wide replace-all walks. Wraps the
+/// [`regex::Regex`] together with the source pattern + flags so
+/// the memo's cache key can use a structural `PartialEq` (the
+/// regex crate's types are opaque).
+///
+/// Construction errors (invalid regex syntax) surface as `None`
+/// from [`compiled_query`]; the caller treats that as "skip the
+/// run".
+#[derive(Debug)]
+pub struct CompiledQuery {
+    pub regex: regex::Regex,
+    /// Verbatim user pattern. With `use_regex = false` the
+    /// effective regex was built from `regex_syntax::escape` of
+    /// this; we still key on the user-visible string.
+    pub pattern: String,
+    pub case_sensitive: bool,
+    pub use_regex: bool,
+}
+
+impl PartialEq for CompiledQuery {
+    fn eq(&self, other: &Self) -> bool {
+        self.pattern == other.pattern
+            && self.case_sensitive == other.case_sensitive
+            && self.use_regex == other.use_regex
+    }
+}
+
+impl Eq for CompiledQuery {}
+
+/// "Given the current file-search query, what regex should we
+/// match against?" Compiles the pattern (escaping it when
+/// `use_regex` is off), applies case-insensitive matching when
+/// `case_sensitive` is off.
+///
+/// Returns `None` when the query is empty or the compile fails;
+/// callers (file-search replace-all dispatch) treat both as
+/// "skip the run".
+#[drv::memo(single)]
+pub fn compiled_query<'q>(query: FileSearchQueryInput<'q>) -> Option<Arc<CompiledQuery>> {
+    if query.query_text.is_empty() {
+        return None;
+    }
+    let pattern_str = if *query.use_regex {
+        query.query_text.clone()
+    } else {
+        regex_syntax::escape(query.query_text)
+    };
+    let regex = regex::RegexBuilder::new(&pattern_str)
+        .case_insensitive(!*query.case_sensitive)
+        .build()
+        .ok()?;
+    Some(Arc::new(CompiledQuery {
+        regex,
+        pattern: query.query_text.clone(),
+        case_sensitive: *query.case_sensitive,
+        use_regex: *query.use_regex,
+    }))
+}
+
+/// One buffer's in-memory replace plan, as derived by
+/// [`replace_all_plan`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InMemoryReplacePlan {
+    pub path: CanonPath,
+    /// How the rope should read after applying the regex.
+    pub new_rope: Arc<ropey::Rope>,
+    /// Number of matches the regex hit on the pre-replace rope —
+    /// the figure surfaced in the post-replace alert.
+    pub count: usize,
+    /// `true` when this path is a preview tab. Preview buffers
+    /// land "clean" (saved_version == version) and aren't added
+    /// to the driver's skip_paths; owned buffers go the other
+    /// way.
+    pub preview: bool,
+}
+
+/// What the replace-all dispatch should do this tick. Pure
+/// data; the reducer in `dispatch::file_search::replace_all`
+/// applies it.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct ReplaceAllPlan {
+    /// Buffers to rewrite in-memory (owned + preview tabs that
+    /// were already loaded). Sorted by canonical path.
+    pub in_memory: Vec<InMemoryReplacePlan>,
+    /// Paths the on-disk driver walk must skip — owned buffers
+    /// (we already wrote them in-memory; the user saves
+    /// explicitly), and owned buffers with zero matches (no
+    /// in-memory edit, but the driver shouldn't rewrite either
+    /// since the in-memory view IS the truth for an open
+    /// buffer). Preview buffers are deliberately NOT in
+    /// `skip_paths`: the driver writes them on disk and the
+    /// in-memory rope mirrors the same regex result, so both
+    /// converge.
+    pub skip_paths: Vec<CanonPath>,
+}
+
+/// "What should the project-wide replace-all do this tick?"
+///
+/// Composes the compiled regex with the tabs + edits view to
+/// produce a `ReplaceAllPlan` — one entry per buffer that
+/// already has any matches, plus the on-disk-driver skip-paths
+/// list. The dispatcher reads the plan, applies each
+/// `InMemoryReplacePlan` (rope bump, dirty/preview bookkeeping,
+/// alert counter push), and ships a `PendingReplaceAll` with
+/// `plan.skip_paths`.
+///
+/// Returns `None` (default-empty plan) when no compiled regex
+/// is available — empty query or compile error.
+#[drv::memo(single)]
+pub fn replace_all_plan<'q, 'r, 't, 'b>(
+    query: FileSearchQueryInput<'q>,
+    replace: FileSearchReplaceInput<'r>,
+    tabs: TabsActiveInput<'t>,
+    edits: EditedBuffersInput<'b>,
+) -> Arc<ReplaceAllPlan> {
+    let Some(compiled) = compiled_query(query) else {
+        return Arc::new(ReplaceAllPlan::default());
+    };
+    let re = &compiled.regex;
+    let replacement = replace.replace_text.as_str();
+
+    let owned_paths: std::collections::HashSet<&CanonPath> = tabs
+        .open
+        .iter()
+        .filter(|t| !t.preview)
+        .map(|t| &t.path)
+        .collect();
+    let preview_paths: std::collections::HashSet<&CanonPath> = tabs
+        .open
+        .iter()
+        .filter(|t| t.preview)
+        .map(|t| &t.path)
+        .collect();
+
+    let mut in_memory: Vec<InMemoryReplacePlan> = Vec::new();
+    let mut skip_paths: Vec<CanonPath> = Vec::new();
+
+    // Owned buffers — in-memory + dirty.
+    let mut loaded_owned: Vec<&CanonPath> = edits
+        .buffers
+        .keys()
+        .filter(|p| owned_paths.contains(p))
+        .collect();
+    loaded_owned.sort_by(|a, b| a.as_path().cmp(b.as_path()));
+    for path in loaded_owned {
+        let Some(eb) = edits.buffers.get(path) else {
+            continue;
+        };
+        let existing = eb.rope.to_string();
+        let count = re.find_iter(&existing).count();
+        if count == 0 {
+            skip_paths.push(path.clone());
+            continue;
+        }
+        let replaced = re.replace_all(&existing, replacement);
+        if replaced.as_ref() != existing {
+            in_memory.push(InMemoryReplacePlan {
+                path: path.clone(),
+                new_rope: Arc::new(ropey::Rope::from_str(replaced.as_ref())),
+                count,
+                preview: false,
+            });
+        }
+        skip_paths.push(path.clone());
+    }
+
+    // Preview buffers — in-memory but stays clean. Driver writes
+    // disk; not added to skip_paths so the driver's walk does
+    // see the file.
+    let mut loaded_preview: Vec<&CanonPath> = edits
+        .buffers
+        .keys()
+        .filter(|p| preview_paths.contains(p))
+        .collect();
+    loaded_preview.sort_by(|a, b| a.as_path().cmp(b.as_path()));
+    for path in loaded_preview {
+        let Some(eb) = edits.buffers.get(path) else {
+            continue;
+        };
+        let existing = eb.rope.to_string();
+        let count = re.find_iter(&existing).count();
+        if count == 0 {
+            skip_paths.push(path.clone());
+            continue;
+        }
+        let replaced = re.replace_all(&existing, replacement);
+        if replaced.as_ref() != existing {
+            in_memory.push(InMemoryReplacePlan {
+                path: path.clone(),
+                new_rope: Arc::new(ropey::Rope::from_str(replaced.as_ref())),
+                count,
+                preview: true,
+            });
+        }
+    }
+
+    Arc::new(ReplaceAllPlan {
+        in_memory,
+        skip_paths,
+    })
+}
+
 /// One position-keyed replace in a save-cleanup batch. `at` is a
 /// char index into the rope; the dispatch reducer applies the
 /// batch in descending-`at` order so each remove + insert stays

@@ -449,6 +449,45 @@ impl<'a> FindFileInput<'a> {
     }
 }
 
+/// Narrow projection of [`FileSearchState`]'s query bits — the
+/// fields the regex compiler depends on. Result churn
+/// (`flat_hits`, `results`, `scroll_offset`, …) is deliberately
+/// excluded so a fresh ripgrep batch doesn't invalidate the
+/// compiled-regex cache.
+#[derive(drv::Input, Copy, Clone)]
+pub struct FileSearchQueryInput<'a> {
+    pub query_text: &'a String,
+    pub case_sensitive: &'a bool,
+    pub use_regex: &'a bool,
+}
+
+impl<'a> FileSearchQueryInput<'a> {
+    pub fn new(s: &'a led_state_file_search::FileSearchState) -> Self {
+        Self {
+            query_text: &s.query.text,
+            case_sensitive: &s.case_sensitive,
+            use_regex: &s.use_regex,
+        }
+    }
+}
+
+/// Narrow projection of [`FileSearchState.replace`] — just the
+/// replacement text. Lives on its own input so the replace_all
+/// plan memo can take query + replacement separately (the
+/// compiled regex only depends on the query side).
+#[derive(drv::Input, Copy, Clone)]
+pub struct FileSearchReplaceInput<'a> {
+    pub replace_text: &'a String,
+}
+
+impl<'a> FileSearchReplaceInput<'a> {
+    pub fn new(s: &'a led_state_file_search::FileSearchState) -> Self {
+        Self {
+            replace_text: &s.replace.text,
+        }
+    }
+}
+
 /// Unified projection over every currently-defined overlay.
 ///
 /// Render and status-bar memos read "whichever overlay is active"
