@@ -37,7 +37,6 @@ led-state-completions = { workspace = true }
 led-state-lsp = { workspace = true }
 led-state-git = { workspace = true }
 led-state-lifecycle = { workspace = true }
-led-state-session = { workspace = true }
 led-state-kbd-macro = { workspace = true }
 led-state-text-input = { workspace = true }
 led-driver-fs-list-core = { workspace = true }

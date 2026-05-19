@@ -1154,7 +1154,7 @@ dependencies = [
  "imbl",
  "led-core",
  "led-state-buffer-edits",
- "led-state-session",
+ "led-state-tabs",
 ]
 
 [[package]]
@@ -1164,7 +1164,6 @@ dependencies = [
  "led-core",
  "led-driver-session-core",
  "led-state-buffer-edits",
- "led-state-session",
  "led-state-tabs",
  "libc",
  "rmp-serde",
@@ -1276,7 +1275,6 @@ dependencies = [
  "led-state-kill-ring",
  "led-state-lifecycle",
  "led-state-lsp",
- "led-state-session",
  "led-state-syntax",
  "led-state-tabs",
  "led-state-text-input",
@@ -1417,16 +1415,6 @@ dependencies = [
  "led-core",
  "led-state-tabs",
  "led-state-text-input",
-]
-
-[[package]]
-name = "led-state-session"
-version = "0.0.0"
-dependencies = [
- "imbl",
- "led-core",
- "led-state-buffer-edits",
- "led-state-tabs",
 ]
 
 [[package]]

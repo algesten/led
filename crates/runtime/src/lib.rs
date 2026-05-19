@@ -67,7 +67,7 @@ use led_state_kill_ring::KillRing;
 use led_state_diagnostics::{DiagnosticsStates, LspStatuses};
 use led_state_git::GitState;
 use led_state_lifecycle::LifecycleState;
-use led_state_session::SessionState;
+use led_driver_session_core::SessionState;
 use led_state_syntax::SyntaxStates;
 use led_state_tabs::{TabId, Tabs};
 

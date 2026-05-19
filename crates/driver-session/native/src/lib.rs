@@ -19,9 +19,8 @@ use std::thread;
 
 use led_core::{CanonPath, Notifier, UndoDbSeq};
 use led_driver_session_core::{
-    SessionCmd, SessionDriver, SessionEvent, SyncResultKind, Trace,
+    SessionCmd, SessionData, SessionDriver, SessionEvent, SyncResultKind, Trace,
 };
-use led_state_session::SessionData;
 use rusqlite::Connection;
 
 mod save_load;
@@ -322,9 +321,8 @@ fn try_acquire_primary_flock(
 mod tests {
     use super::*;
     use led_core::{ChainId, PersistedContentHash, SubLine, UserPath};
-    use led_driver_session_core::SessionDriverState;
+    use led_driver_session_core::{SessionBuffer, SessionDriverState};
     use led_state_buffer_edits::{EditGroup, EditOp};
-    use led_state_session::SessionBuffer;
     use led_state_tabs::{Cursor, Cursor as TabCursor, Scroll};
     use std::collections::HashMap;
     use std::path::Path;

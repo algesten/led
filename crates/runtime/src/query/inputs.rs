@@ -16,7 +16,7 @@ use led_driver_terminal_core::{
 };
 use led_state_alerts::AlertState;
 use led_state_kbd_macro::KbdMacroState;
-use led_state_session::SessionState;
+use led_driver_session_core::SessionState;
 use led_state_browser::{BrowserUi, Focus};
 use led_state_clipboard::ClipboardIntent;
 use led_state_buffer_edits::{BufferEdits, EditedBuffer};

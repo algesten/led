@@ -4,6 +4,15 @@
 //! load orchestration, and undo-flush lifecycle line up with
 //! legacy's design.
 //!
+//! Relocated from the now-deleted `state-session` crate per the
+//! EXAMPLE-ARCH audit: every field on [`SessionState`] is
+//! driver-discovered (flock outcome, last-saved snapshot, restored
+//! undo payload, init handshake), so the source belongs alongside
+//! the driver that fills it. The shared payload types
+//! ([`SessionData`], [`SessionBuffer`], [`UndoRestoreData`],
+//! [`PersistedSession`], [`DraftSession`]) move with it because they
+//! are the driver's wire ABI.
+//!
 //! The wire-format compatibility caveat: legacy's `UndoEntry` is a
 //! single-op type with `direction` flags ("Emacs-style linear
 //! history"). Our internal `History` uses past/future/current

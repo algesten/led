@@ -10,7 +10,7 @@
 use led_core::{CanonPath, ChainId, SavedVersion, WatchSeq};
 use led_driver_buffers_core::BufferStore;
 use led_state_buffer_edits::{BufferEdits, EditGroup, EditedBuffer};
-use led_state_session::{SessionBuffer, SessionData};
+use led_driver_session_core::{SessionBuffer, SessionData};
 use led_state_tabs::Tabs;
 
 use crate::UndoPersistTracker;
@@ -260,7 +260,7 @@ pub(crate) fn build_session_kv(
 pub(crate) fn apply_pending_undo_restore(
     path: &CanonPath,
     edits: &mut BufferEdits,
-    session: &mut led_state_session::SessionState,
+    session: &mut led_driver_session_core::SessionState,
     undo_persistence: &mut imbl::HashMap<CanonPath, UndoPersistTracker>,
 ) {
     let Some(restore) = session.pending_undo.remove(path) else {

@@ -237,7 +237,7 @@ pub(crate) fn run(sources: &Sources, env: &TickEnv<'_>) -> QueryOut {
 /// same tick the loop exits, with no extra latency.
 fn desired_shutdown(
     phase: led_state_lifecycle::Phase,
-    session: &led_state_session::SessionState,
+    session: &led_driver_session_core::SessionState,
 ) -> Option<SessionCmd> {
     if matches!(phase, led_state_lifecycle::Phase::Exiting)
         && (session.saved || !session.primary)

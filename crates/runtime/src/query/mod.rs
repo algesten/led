@@ -239,7 +239,7 @@ mod tests {
         let diags = DiagnosticsStates::default();
         let lsp = LspStatuses::default();
         let kbd_macro_default = led_state_kbd_macro::KbdMacroState::default();
-        let session_default = led_state_session::SessionState::default();
+        let session_default = led_driver_session_core::SessionState::default();
         render_frame(RenderInputs {
             term: TerminalDimsInput::new(term),
             edits: EditedBuffersInput::new(e),
@@ -325,7 +325,7 @@ mod tests {
         let diags = DiagnosticsStates::default();
         let lsp = LspStatuses::default();
         let kbd_macro_default = led_state_kbd_macro::KbdMacroState::default();
-        let session_default = led_state_session::SessionState::default();
+        let session_default = led_driver_session_core::SessionState::default();
         let frame = render_frame(RenderInputs {
             term: TerminalDimsInput::new(&term),
             edits: EditedBuffersInput::new(&e),
@@ -377,7 +377,7 @@ mod tests {
         let diags = DiagnosticsStates::default();
         let lsp = LspStatuses::default();
         let kbd_macro_default = led_state_kbd_macro::KbdMacroState::default();
-        let session_default = led_state_session::SessionState::default();
+        let session_default = led_driver_session_core::SessionState::default();
         let frame = render_frame(RenderInputs {
             term: TerminalDimsInput::new(&term),
             edits: EditedBuffersInput::new(&e),
@@ -989,7 +989,7 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
         let diags = DiagnosticsStates::default();
         let lsp = LspStatuses::default();
         let kbd_macro_default = led_state_kbd_macro::KbdMacroState::default();
-        let session_default = led_state_session::SessionState::default();
+        let session_default = led_driver_session_core::SessionState::default();
         let frame = render_frame(RenderInputs {
             term: TerminalDimsInput::new(&term),
             edits: EditedBuffersInput::new(&e),
@@ -1063,7 +1063,7 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
         let lsp = LspStatuses::default();
         let git = led_state_git::GitState::default();
         let kbd_macro_default = led_state_kbd_macro::KbdMacroState::default();
-        let session_default = led_state_session::SessionState::default();
+        let session_default = led_driver_session_core::SessionState::default();
         status_bar_model(StatusBarInputs {
             alerts: AlertsInput::new(a),
             tabs: TabsActiveInput::new(t),
@@ -1094,7 +1094,7 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
         let diags = DiagnosticsStates::default();
         let lsp = LspStatuses::default();
         let git = led_state_git::GitState::default();
-        let session_default = led_state_session::SessionState::default();
+        let session_default = led_driver_session_core::SessionState::default();
         status_bar_model(StatusBarInputs {
             alerts: AlertsInput::new(a),
             tabs: TabsActiveInput::new(t),
@@ -1123,7 +1123,7 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
         let diags = DiagnosticsStates::default();
         let lsp = LspStatuses::default();
         let kbd_macro_default = led_state_kbd_macro::KbdMacroState::default();
-        let session_default = led_state_session::SessionState::default();
+        let session_default = led_driver_session_core::SessionState::default();
         status_bar_model(StatusBarInputs {
             alerts: AlertsInput::new(a),
             tabs: TabsActiveInput::new(t),
@@ -1145,7 +1145,7 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
         a: &AlertState,
         t: &Tabs,
         e: &BufferEdits,
-        sess: &led_state_session::SessionState,
+        sess: &led_driver_session_core::SessionState,
     ) -> StatusBarModel {
         let ff = None;
         let is = None;
@@ -1176,7 +1176,7 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
         // half should read `(secondary) L<row>:C<col> ` so the
         // user can see they're attached to a workspace owned by
         // another led process.
-        let sess = led_state_session::SessionState {
+        let sess = led_driver_session_core::SessionState {
             init_done: true,
             primary: false,
             ..Default::default()
@@ -1195,7 +1195,7 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
         // Default `init_done == false` — the flock outcome hasn't
         // arrived yet, so suppress the indicator instead of
         // flashing it during the startup window.
-        let sess = led_state_session::SessionState::default();
+        let sess = led_driver_session_core::SessionState::default();
         let s = status_with_session(
             &AlertState::default(),
             &Tabs::default(),
@@ -1207,7 +1207,7 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
 
     #[test]
     fn status_bar_no_secondary_prefix_when_primary() {
-        let sess = led_state_session::SessionState {
+        let sess = led_driver_session_core::SessionState {
             init_done: true,
             primary: true,
             ..Default::default()
