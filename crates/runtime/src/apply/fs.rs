@@ -268,6 +268,41 @@ pub(crate) fn clear_ancestor_failures(fs: &mut FsTree, path: &CanonPath) {
 /// Stat `path` and classify it as file or directory. Returns
 /// `None` for any I/O error or unsupported file type — caller
 /// treats those as "drop this event".
+///
+/// # Architecture exemption: synchronous read during Ingest
+///
+/// Per EXAMPLE-ARCH § "The main loop", Ingest phases must only
+/// write external facts in — no driver-side reads. This helper
+/// breaks that rule with a `std::fs::metadata` call from
+/// [`apply_workspace_tree_delta`]'s CREATE branch.
+///
+/// The architecturally clean alternative is a `FsListCmd::Stat`
+/// round-trip: queue a request from query/execute, surface the
+/// result as a `Done` event the next tick, and re-run the CREATE
+/// processing against the now-cached classification. Rejected
+/// for Theme E because:
+///
+/// - The CREATE branch is the hot path on a workspace burst
+///   (cargo `target/` build with the root expanded → thousands
+///   of events). Adding a per-event async round-trip would
+///   serialise the burst through the fs-list driver's channel
+///   instead of doing O(1) work in-line. The current syncronous
+///   stat is the original design's response to that scale
+///   problem (see the fn-doc on `apply_workspace_tree_delta`).
+///
+/// - The stat is read against the parent dir's cached listing —
+///   if the parent is collapsed, the call is skipped before we
+///   get here. The deferred path would still need that gate, so
+///   the architecture exemption only buys deferral for events
+///   the user is actively looking at.
+///
+/// - Adding a `Stat` command to the fs-list driver ABI is a
+///   significant surface change for a single caller. The
+///   driver's job is "list a directory"; statting a single path
+///   is a different responsibility.
+///
+/// Theme E commit message documents this exemption explicitly so
+/// future audits don't flag it again.
 pub(crate) fn stat_kind(path: &CanonPath) -> Option<led_driver_fs_list_core::DirEntryKind> {
     use led_driver_fs_list_core::DirEntryKind;
     let meta = std::fs::metadata(path.as_path()).ok()?;

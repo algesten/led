@@ -96,6 +96,38 @@ pub(crate) fn build_session_data(
 /// Filesystem check is `std::fs::metadata` — a single syscall
 /// at startup, fine on a cold cache. Bails on dirs, missing
 /// files, or symlink-to-dir without further fuss.
+///
+/// # Architecture exemption: synchronous read during Ingest
+///
+/// Per EXAMPLE-ARCH § "The main loop", Ingest must not read from
+/// outside sources. This helper runs from `ingest_session`'s
+/// `SessionEvent::Restored` branch and statss the persisted
+/// selection path before installing a preview tab.
+///
+/// The clean alternative is a `FsListCmd::Stat` round-trip:
+/// queue a stat for the selected_path, defer the preview tab
+/// creation to a later tick when the StatDone arrives. Rejected
+/// for Theme E because:
+///
+/// - This is a single, once-per-session call at startup. The
+///   architectural cost (per-tick state for "pending preview
+///   restoration", new driver cmd, new event variant) buys us
+///   one syscall on the startup cold path, which is the cheap
+///   case for file-cache anyway.
+///
+/// - Deferring the preview tab to a later tick means the UI
+///   would briefly show the restored session WITHOUT the
+///   preview, then redraw with it. That's a visible flicker
+///   on every primary-instance startup, which the current
+///   synchronous code avoids.
+///
+/// - The downstream effects (`previous_tab` pinning, focus
+///   landing) all happen in the same restore tick. Splitting
+///   them across two ticks would require either replaying the
+///   restore action or duplicating the bookkeeping.
+///
+/// Theme E commit message documents this exemption explicitly so
+/// future audits don't flag it again.
 pub(crate) fn restore_preview_from_selection(
     browser: &led_state_browser::BrowserUi,
     tabs: &mut Tabs,
