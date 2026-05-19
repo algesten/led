@@ -5,6 +5,7 @@
 use led_core::UndoDbSeq;
 use led_driver_buffers_core::SaveAction;
 use led_driver_file_search_core::{FileSearchCmd, FileSearchReplaceCmd, FileSearchSingleReplaceCmd};
+use led_driver_lsp_core::LspCmd;
 use led_driver_session_core::SessionCmd;
 
 use crate::apply::session::new_chain_id;
@@ -35,6 +36,29 @@ pub(crate) fn run(sources: &mut Sources, env: &TickEnv<'_>, q: &QueryOut) {
         .execute(q.list_actions.iter(), fs_list_driver);
 
     env.drivers.file.execute(q.load_actions.iter(), store);
+
+    // ── File-watch fan-out (moved out of Ingest per the phase
+    // contract: Ingest writes external facts in, Execute ships
+    // intent out). Empty vecs short-circuit; the workspace gate
+    // is folded into query_phase.
+    if !q.external_reread_cmds.is_empty() {
+        env.drivers
+            .file
+            .execute(q.external_reread_cmds.iter(), store);
+    }
+    if !q.session_sync_cmds.is_empty() {
+        env.drivers
+            .session
+            .execute(q.session_sync_cmds.iter(), session_driver);
+    }
+    for cmd in q.lsp_watch_cmds.iter() {
+        if let LspCmd::DidChangeWatchedFiles { server, changes } = cmd {
+            env.trace.lsp_did_change_watched_files(server, changes.len());
+        }
+    }
+    if !q.lsp_watch_cmds.is_empty() {
+        env.drivers.lsp.execute(q.lsp_watch_cmds.iter());
+    }
 
     if !q.find_file_actions.is_empty()
         && let Some(ff) = find_file.as_mut()

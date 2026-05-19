@@ -585,7 +585,7 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
         phases::ingest::ingest_browser_snap(world.sources);
 
         // ── Query ───────────────────────────────────────────────
-        let q = phases::query_phase::run(world.sources);
+        let q = phases::query_phase::run(world.sources, &env);
 
         // ── Execute ─────────────────────────────────────────────
         phases::execute_phase::run(world.sources, &env, &q);

@@ -28,7 +28,6 @@ use crate::apply::session::{
 };
 use crate::dispatch;
 use crate::phases::TickEnv;
-use crate::query::{self, EditedBuffersInput};
 use crate::{diag_offer, Sources, LspNotified, INFO_TTL};
 
 /// Tick-start clock update + per-tick expiry sweeps.
@@ -51,64 +50,28 @@ pub(crate) fn ingest_clock(sources: &mut Sources) {
 /// out reread / sync-check / LSP-watched-files dispatches in the
 /// same tick the events landed.
 pub(crate) fn ingest_file_watch(sources: &mut Sources, env: &TickEnv<'_>) {
+    // Per EXAMPLE-ARCH § "The main loop": Ingest writes (no reads).
+    // This phase only drains the file-watch worker queue into the
+    // source and applies workspace-tree deltas. The reread /
+    // sync-check / LSP-watched-files fan-out now lives in
+    // query_phase + execute_phase per Theme E.
     let Sources {
         edits,
-        store,
         fs,
         file_watch,
-        lsp_watched_globs,
-        undo_persistence,
         git_scan_pending,
         session,
-        session_driver,
         ..
     } = sources;
 
     env.drivers.file_watch.process(file_watch);
 
-    if let Some(_root) = fs.root.as_ref()
+    if fs.root.is_some()
         && !env.no_workspace
         && session.init_done
+        && apply_workspace_tree_delta(file_watch, edits, fs)
     {
-        if apply_workspace_tree_delta(file_watch, edits, fs) {
-            *git_scan_pending = true;
-        }
-        let reread_paths = query::external_reread_targets(
-            query::FileWatchEventsInput::new(file_watch),
-            EditedBuffersInput::new(edits),
-        );
-        if !reread_paths.is_empty() {
-            let reread_cmds: Vec<led_driver_buffers_core::LoadAction> = reread_paths
-                .iter()
-                .map(|p| led_driver_buffers_core::LoadAction::Reread(p.clone()))
-                .collect();
-            env.drivers.file.execute(reread_cmds.iter(), store);
-        }
-        if env.resolved_config_dir.is_some() {
-            let hash_index = query::notify_hash_index(EditedBuffersInput::new(edits));
-            let sync_cmds = query::sync_check_cmds(
-                query::FileWatchEventsInput::new(file_watch),
-                query::HashIndexInput::new(&hash_index),
-                query::UndoPersistenceInput::new(undo_persistence),
-            );
-            if !sync_cmds.is_empty() {
-                env.drivers
-                    .session
-                    .execute(sync_cmds.iter(), session_driver);
-            }
-        }
-        let lsp_watch_cmds = query::lsp_watched_file_notifications(
-            query::FileWatchEventsInput::new(file_watch),
-            query::LspWatchedGlobsInput::new(lsp_watched_globs),
-        );
-        for cmd in lsp_watch_cmds.iter() {
-            if let LspCmd::DidChangeWatchedFiles { server, changes } = cmd {
-                env.trace.lsp_did_change_watched_files(server, changes.len());
-            }
-        }
-        if !lsp_watch_cmds.is_empty() {
-            env.drivers.lsp.execute(lsp_watch_cmds.iter());
-        }
+        *git_scan_pending = true;
     }
 }
 
