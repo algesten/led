@@ -950,6 +950,14 @@ name = "led-abi-command"
 version = "0.0.0"
 
 [[package]]
+name = "led-abi-file-search"
+version = "0.0.0"
+dependencies = [
+ "drv",
+ "led-core",
+]
+
+[[package]]
 name = "led-abi-fs-list"
 version = "0.0.0"
 dependencies = [
@@ -1008,6 +1016,7 @@ version = "0.0.0"
 dependencies = [
  "drv",
  "imbl",
+ "led-abi-file-search",
  "led-core",
 ]
 
@@ -1322,8 +1331,8 @@ name = "led-state-file-search"
 version = "0.0.0"
 dependencies = [
  "drv",
+ "led-abi-file-search",
  "led-core",
- "led-driver-file-search-core",
  "led-state-tabs",
  "led-state-text-input",
 ]

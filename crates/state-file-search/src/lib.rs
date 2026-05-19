@@ -14,8 +14,10 @@ use led_state_text_input::TextInput;
 
 // Hit / group types are the driver ABI — re-exported so the overlay
 // state + renderer + dispatch use one shape end-to-end, matching the
-// pattern used by `state-find-file` with `FindFileEntry`.
-pub use led_driver_file_search_core::{FileSearchGroup, FileSearchHit};
+// pattern used by `state-find-file` with `FindFileEntry`. The types
+// live in the leaf crate `led-abi-file-search`; state and the driver
+// core both depend on it to keep the three-tier rule clean.
+pub use led_abi_file_search::{FileSearchGroup, FileSearchHit};
 
 // `TabId` reference is light — the state doesn't mutate `Tabs` itself,
 // it only remembers which tab was active when the overlay opened so

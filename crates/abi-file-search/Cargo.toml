@@ -1,0 +1,16 @@
+[package]
+name = "led-abi-file-search"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Shared ABI types for the project-wide file-search driver — the wire
+# shape returned by ripgrep. Lives in a leaf crate so `state-file-search`
+# and `driver-file-search/core` can both depend on the same
+# `FileSearchHit` / `FileSearchGroup` definitions without
+# `state-file-search` pulling in the driver crate (three-tier
+# dependency rule: `state-*` must not depend on `driver-*`).
+
+[dependencies]
+drv = { workspace = true }
+led-core = { workspace = true }

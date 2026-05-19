@@ -48,34 +48,7 @@ pub struct FileSearchDriverState {
     pub last_error: Option<Arc<str>>,
 }
 
-/// One match inside a file. Positions are all 1-indexed to match
-/// ripgrep's output conventions; `match_start` / `match_end` are
-/// byte offsets into `preview` (kept for later rendering of the
-/// hit inside the preview line, and for the replace flow).
-#[derive(Debug, Clone, PartialEq, Eq, drv::Input)]
-pub struct FileSearchHit {
-    pub path: CanonPath,
-    /// 1-indexed line number.
-    pub line: usize,
-    /// 1-indexed column of the first char of the match.
-    pub col: usize,
-    /// Single-line preview (the matched line with its newline
-    /// trimmed). The UI renders this as-is.
-    pub preview: String,
-    /// Byte offsets inside `preview` — the highlight span.
-    pub match_start: usize,
-    pub match_end: usize,
-}
-
-/// All hits in a single file. `relative` is the file's path
-/// rendered relative to the search root; the UI shows this as the
-/// group header.
-#[derive(Debug, Clone, PartialEq, Eq, drv::Input)]
-pub struct FileSearchGroup {
-    pub path: CanonPath,
-    pub relative: String,
-    pub hits: Vec<FileSearchHit>,
-}
+pub use led_abi_file_search::{FileSearchGroup, FileSearchHit};
 
 /// One search request, shaped exactly as the runtime dispatches it.
 #[derive(Debug, Clone, PartialEq, Eq)]
