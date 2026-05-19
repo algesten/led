@@ -1,8 +1,9 @@
 //! Completion / code-action / rename popups.
 
-use led_driver_terminal_core::{BodyModel, Rect};
+use led_driver_terminal_core::Rect;
 use std::sync::Arc;
 
+use super::body::body_cursor;
 use super::GUTTER_WIDTH;
 use crate::query::inputs::*;
 
@@ -87,6 +88,7 @@ pub fn completion_popup_model<'c, 't>(
 /// Only the title is surfaced — legacy hides `kind` from the
 /// picker (display.rs:972-983), so we follow suit and leave
 /// `detail` empty.
+#[drv::memo(single)]
 pub fn code_action_popup_model<'e, 't>(
     lsp_extras: LspExtrasOverlayInput<'e>,
     tabs: TabsActiveInput<'t>,
@@ -138,20 +140,24 @@ pub fn code_action_popup_model<'e, 't>(
 /// the cursor's screen column. Width is sized to fit
 /// `" Rename: <input> "` with a 2-col padding tail so the box
 /// reads cleanly even with short input.
-pub fn rename_popup_model(
-    lsp_extras: LspExtrasOverlayInput<'_>,
-    body: &BodyModel,
+///
+/// Reads the body-relative cursor via [`body_cursor`] — a
+/// separate memo that mirrors `body_model`'s cursor-resolution
+/// path. Both memos perform the same visible-cursor walk; the
+/// per-memo caches keep that cheap, and decoupling them
+/// preserves the rule that every render view-model takes only
+/// `drv::Input`-typed parameters.
+#[drv::memo(single)]
+pub fn rename_popup_model<'e, 'b, 's, 't>(
+    lsp_extras: LspExtrasOverlayInput<'e>,
+    edits: EditedBuffersInput<'b>,
+    store: StoreLoadedInput<'s>,
+    tabs: TabsActiveInput<'t>,
     editor_area: Rect,
 ) -> Option<led_driver_terminal_core::RenamePopupModel> {
     use led_driver_terminal_core::RenamePopupModel;
     let state = lsp_extras.rename.as_ref()?;
-    let (cur_row, cur_col) = match body {
-        BodyModel::Content {
-            cursor: Some((r, c)),
-            ..
-        } => (*r, *c),
-        _ => return None,
-    };
+    let (cur_row, cur_col) = body_cursor(edits, store, tabs, editor_area)?;
     // Legacy width: " Rename: " (9) + input chars + 2 trailing
     // padding cols. Keeps the box visibly distinct from
     // surrounding buffer content even on empty input.

@@ -26,12 +26,13 @@ const POPOVER_MAX_CONTENT: usize = 58;
 ///   content (no-smear: hide rather than show stale).
 /// - No Error/Warning diagnostic covers the cursor row
 ///   (Info/Hint are silent, matching legacy).
-pub fn popover_model(
-    edits: EditedBuffersInput<'_>,
-    tabs: TabsActiveInput<'_>,
-    overlays: OverlaysInput<'_>,
-    browser: BrowserUiInput<'_>,
-    diagnostics: DiagnosticsStatesInput<'_>,
+#[drv::memo(single)]
+pub fn popover_model<'a, 'b, 'c, 'd, 'e>(
+    edits: EditedBuffersInput<'a>,
+    tabs: TabsActiveInput<'b>,
+    overlays: OverlaysInput<'c>,
+    browser: BrowserUiInput<'d>,
+    diagnostics: DiagnosticsStatesInput<'e>,
     editor_area: Rect,
 ) -> Option<PopoverModel> {
     if overlays.find_file.is_some()

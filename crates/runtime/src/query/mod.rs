@@ -42,10 +42,10 @@ pub use inputs::{
     UndoFlushDebounceInput, UndoPersistenceInput,
 };
 pub use render::{
-    body_model, code_action_popup_model, completion_popup_model, popover_model,
-    rebased_line_spans, rename_popup_model, render_frame, side_panel_model,
-    status_bar_model, tab_bar_model, BodyInputs, RenderInputs, SidePanelInputs,
-    StatusBarInputs,
+    body_cursor, body_model, code_action_popup_model, completion_popup_model,
+    popover_model, rebased_line_spans, rename_popup_model, render_frame,
+    side_panel_model, status_bar_model, tab_bar_model, BodyInputs, RenderInputs,
+    SidePanelInputs, StatusBarInputs,
 };
 
 // Re-export internal constants and helpers needed by the in-tree

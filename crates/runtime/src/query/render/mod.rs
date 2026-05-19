@@ -14,7 +14,7 @@ use led_state_browser::Focus;
 
 use super::inputs::*;
 
-pub use body::{body_model, rebased_line_spans, BodyInputs};
+pub use body::{body_cursor, body_model, rebased_line_spans, BodyInputs};
 pub use popover::popover_model;
 pub use popups::{
     code_action_popup_model, completion_popup_model, rename_popup_model,
@@ -184,7 +184,8 @@ pub fn render_frame<'a>(inputs: RenderInputs<'a>) -> Option<Frame> {
     // `completion` slot of the frame.
     let completion = code_action_popup_model(lsp_extras, tabs, layout.editor_area)
         .or_else(|| completion_popup_model(completions, tabs, layout.editor_area));
-    let rename_popup = rename_popup_model(lsp_extras, &body, layout.editor_area);
+    let rename_popup =
+        rename_popup_model(lsp_extras, edits, store, tabs, layout.editor_area);
     // Cursor placement, in priority order:
     //
     // 1. Find-file overlay active → status-bar row, column = prompt

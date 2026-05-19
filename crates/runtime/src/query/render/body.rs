@@ -29,6 +29,44 @@ pub struct BodyInputs<'a> {
     pub area: Rect,
 }
 
+/// Body-relative cursor position for the active tab.
+///
+/// Mirrors [`body_model`]'s own cursor-resolution path so consumers
+/// that only need the cursor (e.g. `rename_popup_model`) can read
+/// it without taking `&BodyModel` as a parameter — keeping every
+/// view-model memo's inputs `drv::Input`-typed.
+///
+/// Returns `None` whenever [`body_model`] would emit
+/// `BodyModel::Empty` or `BodyModel::Content { cursor: None, .. }`:
+/// no active tab, tab not found, no rope source available, or the
+/// cursor sits outside the visible scroll window.
+#[drv::memo(single)]
+pub fn body_cursor<'a, 'b, 'c>(
+    edits: EditedBuffersInput<'a>,
+    store: StoreLoadedInput<'b>,
+    tabs: TabsActiveInput<'c>,
+    area: Rect,
+) -> Option<(u16, u16)> {
+    let id = (*tabs.active)?;
+    let tab = tabs.open.iter().find(|t| t.id == id)?;
+    let content_cols = (area.cols as usize)
+        .saturating_sub(GUTTER_WIDTH)
+        .saturating_sub(TRAILING_RESERVED_COLS);
+    if let Some(eb) = edits.buffers.get(&tab.path) {
+        return visible_cursor(tab.cursor, tab.scroll, area, &eb.rope, content_cols);
+    }
+    // Fallback to BufferStore (mirrors `body_model`'s second
+    // branch). Pending / Error / absent → render against an empty
+    // rope, which `visible_cursor` rejects via the `len_lines`
+    // bound, returning `None`.
+    let empty_rope: Arc<Rope> = Arc::new(Rope::new());
+    let rope_ref: &Rope = match store.loaded.get(&tab.path) {
+        Some(LoadState::Ready(rope)) => rope.as_ref(),
+        None | Some(LoadState::Pending) | Some(LoadState::Error(_)) => &empty_rope,
+    };
+    visible_cursor(tab.cursor, tab.scroll, area, rope_ref, content_cols)
+}
+
 /// Body slice of the render frame.
 ///
 /// Reads the active tab's cursor + scroll to produce the visible line
@@ -757,7 +795,7 @@ pub(crate) fn tokens_to_line_spans(
 /// logical line may contribute multiple visible rows. Cheap in
 /// practice because `body_rows` is tiny (20-50) and the walk
 /// short-circuits as soon as we pass the cursor's line.
-fn visible_cursor(
+pub(crate) fn visible_cursor(
     c: Cursor,
     s: Scroll,
     area: Rect,
