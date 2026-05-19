@@ -950,6 +950,13 @@ name = "led-abi-command"
 version = "0.0.0"
 
 [[package]]
+name = "led-abi-fs-list"
+version = "0.0.0"
+dependencies = [
+ "led-core",
+]
+
+[[package]]
 name = "led-core"
 version = "0.0.0"
 dependencies = [
@@ -1059,6 +1066,7 @@ version = "0.0.0"
 dependencies = [
  "drv",
  "imbl",
+ "led-abi-fs-list",
  "led-core",
 ]
 
@@ -1268,8 +1276,8 @@ version = "0.0.0"
 dependencies = [
  "drv",
  "imbl",
+ "led-abi-fs-list",
  "led-core",
- "led-driver-fs-list-core",
 ]
 
 [[package]]

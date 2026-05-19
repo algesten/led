@@ -1,15 +1,19 @@
 //! Sync core of the directory-listing driver — strictly isolated.
 //!
-//! Knows only its own ABI: `ListCmd`, `ListDone`, `DirEntry` (re-
-//! exported from `state-browser` so the worker can emit them
-//! directly), the driver-owned [`FsListState`] tracking in-flight
-//! listings, and the `Trace` hook. The runtime wires it up and
-//! owns whatever cross-source logic decides *when* to list.
+//! Knows only its own ABI: `ListCmd`, `ListDone`, the driver-owned
+//! [`FsListState`] tracking in-flight listings, and the `Trace`
+//! hook. The wire-shape entry types (`DirEntry`, `DirEntryKind`)
+//! live in the leaf crate `led-abi-fs-list` and are re-exported
+//! here so the worker + the runtime can keep importing them from
+//! the driver crate while `state-browser` consumes them directly
+//! from `abi-fs-list` (three-tier dependency rule).
 
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender};
 
 use led_core::CanonPath;
+
+pub use led_abi_fs_list::{DirEntry, DirEntryKind};
 
 /// Driver-owned in-flight tracking. Path is added on `execute`
 /// (sync, before tx.send) and removed on `process` when the
@@ -18,22 +22,6 @@ use led_core::CanonPath;
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FsListState {
     pub in_flight: imbl::HashSet<CanonPath>,
-}
-
-/// A single child entry from a directory listing. Structurally owned
-/// by this driver because it IS the driver's ABI — state / runtime
-/// consumers depend on this crate for the shape.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DirEntryKind {
-    File,
-    Directory,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct DirEntry {
-    pub name: String,
-    pub path: CanonPath,
-    pub kind: DirEntryKind,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

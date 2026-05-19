@@ -18,8 +18,8 @@
 //! names.
 
 use imbl::{HashMap, HashSet, Vector};
+pub use led_abi_fs_list::{DirEntry, DirEntryKind};
 use led_core::CanonPath;
-pub use led_driver_fs_list_core::{DirEntry, DirEntryKind};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default, drv::Input)]
 pub enum Focus {
