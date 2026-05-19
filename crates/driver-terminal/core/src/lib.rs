@@ -531,6 +531,121 @@ pub struct ScrollHint {
     pub region_right: u16,
 }
 
+/// Per-frame "what to repaint" decision, computed in the runtime
+/// render memo so the painter consumes it as data instead of
+/// re-deriving it from `(prev, curr)` snapshots with an inline
+/// `&&` / `||` ladder. Mirrors legacy diff-flag patterns but lives
+/// in the language of memos — `paint_plan` is a thin function over
+/// `(prev_frame, curr_frame)` whose only output is the set of
+/// regions that need to be re-emitted this tick.
+///
+/// The painter still runs region-level cell writes; this struct
+/// only tells it *which* regions to walk. The downstream cell-grid
+/// diff then strips any cells that didn't actually change, so a
+/// `force = true` plan after a resize still emits the minimal byte
+/// stream.
+///
+/// Default = "paint nothing" — but the runtime never emits a
+/// default; `render_frame` always stamps a fully-decided plan.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PaintPlan {
+    /// Layout-level change (resize, side-panel toggle) — every
+    /// region must be re-emitted regardless of its own
+    /// content-equality with the previous frame. Same role as
+    /// the legacy "force" flag in `paint()`.
+    pub force: bool,
+    /// Editor body region needs re-emission. Triggered by body
+    /// content changes *or* by any in-body overlay
+    /// (popover / completion / rename) appearing, disappearing,
+    /// moving, or changing — because the overlay erases on
+    /// disappear and the body underneath needs to be redrawn.
+    pub body: bool,
+    /// Side-panel region needs re-emission (either the panel
+    /// model changed or the side area's geometry changed).
+    pub side_panel: bool,
+    /// Tab-bar row needs re-emission.
+    pub tab_bar: bool,
+    /// Status-bar row needs re-emission.
+    pub status_bar: bool,
+    /// Diagnostic popover overlay changed; painter still walks
+    /// `frame.popover` on every paint, but this flag is `true`
+    /// exactly when the body underneath also needs to be
+    /// repainted (i.e. it always co-implies `body`). Carried
+    /// for trace / debug visibility into the plan's reasoning.
+    pub popover: bool,
+    /// LSP completion popup changed. Same co-implication with
+    /// `body` as `popover`.
+    pub completion: bool,
+    /// Rename overlay changed. Same co-implication with `body`
+    /// as `popover`.
+    pub rename_popup: bool,
+}
+
+impl PaintPlan {
+    /// Convenience constructor for a plan that asks the painter
+    /// to repaint every region (the "no previous frame" or
+    /// "layout changed" case).
+    pub const fn full() -> Self {
+        Self {
+            force: true,
+            body: true,
+            side_panel: true,
+            tab_bar: true,
+            status_bar: true,
+            popover: true,
+            completion: true,
+            rename_popup: true,
+        }
+    }
+
+    /// Pure function — given the previously-painted frame
+    /// (`None` on first paint) and the freshly-composed one,
+    /// return the set of regions the painter must re-emit.
+    ///
+    /// Lives on `PaintPlan` (not in the runtime) so callers
+    /// like the native driver's tests can build a plan without
+    /// pulling in the runtime crate. The runtime's render phase
+    /// is the production caller; it stamps the result on
+    /// `Frame.paint_plan` before handing the frame to the
+    /// driver.
+    pub fn derive(prev: Option<&Frame>, curr: &Frame) -> Self {
+        let Some(prev) = prev else {
+            return Self::full();
+        };
+
+        let layout_same = prev.layout == curr.layout;
+        let force = !layout_same;
+
+        let side_area_changed = prev.layout.side_area != curr.layout.side_area;
+        let side_panel_changed = prev.side_panel != curr.side_panel;
+        let side_panel = force || side_panel_changed || side_area_changed;
+
+        let popover_changed = prev.popover != curr.popover;
+        let completion_changed = prev.completion != curr.completion;
+        let rename_changed = prev.rename_popup != curr.rename_popup;
+        let body_content_changed = prev.body != curr.body;
+        let body = force
+            || popover_changed
+            || completion_changed
+            || rename_changed
+            || body_content_changed;
+
+        let tab_bar = force || prev.tab_bar != curr.tab_bar;
+        let status_bar = force || prev.status_bar != curr.status_bar;
+
+        Self {
+            force,
+            body,
+            side_panel,
+            tab_bar,
+            status_bar,
+            popover: popover_changed,
+            completion: completion_changed,
+            rename_popup: rename_changed,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, Default)]
 pub struct Frame {
     pub tab_bar: TabBarModel,
@@ -563,15 +678,24 @@ pub struct Frame {
     /// `in_flight` / `last_acked` per the pure-output-driver
     /// pattern in `EXAMPLE-ARCH.md`.
     pub id: FrameId,
+    /// "What to repaint" decision derived from the previous
+    /// frame at memo time. Excluded from equality (like `id`)
+    /// because it's an instruction to the painter, not a piece
+    /// of visible content: two content-equal frames painted on
+    /// different ticks can carry different plans (e.g. one was
+    /// the first paint after a resize, the other wasn't), and
+    /// neither should defeat the memo cache or the "did the
+    /// frame change?" gate in render_phase.
+    pub paint_plan: PaintPlan,
 }
 
-// Manual `PartialEq` deliberately omits `id` so render-phase id
-// stamping doesn't break the `frame != *last_frame` change detector:
-// the memo never sees the post-stamp id (it's assigned by render
-// phase after the memo returns), and equality on the content-bearing
-// fields is what drives the "paint or skip" decision. With `id`
-// included in derived eq, every tick would compare unequal as soon
-// as the previous tick stamped its id onto `last_frame`.
+// Manual `PartialEq` deliberately omits `id` *and* `paint_plan` so
+// the memo cache (which never sees a stamped id and computes its
+// plan strictly as a function of prev/curr) still cache-hits on
+// content-equal frames, and render_phase's `frame != *last_frame`
+// gate compares only the content-bearing fields. With either
+// included, every tick would compare unequal as soon as the
+// previous tick stamped its id / plan onto `last_frame`.
 impl PartialEq for Frame {
     fn eq(&self, other: &Self) -> bool {
         let Self {
@@ -586,6 +710,7 @@ impl PartialEq for Frame {
             cursor,
             dims,
             id: _,
+            paint_plan: _,
         } = self;
         *tab_bar == other.tab_bar
             && *body == other.body

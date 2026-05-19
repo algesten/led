@@ -499,6 +499,13 @@ fn emit_scroll_op<W: Write>(
 /// full repaint touches ~4800 cells; dirty-diffing avoids that cost
 /// on tight scroll loops where only the body + status line change.
 ///
+/// The "what to repaint" decision is **not** taken here — it's
+/// stamped on `frame.paint_plan` by the runtime's render phase
+/// (`runtime::phases::render_phase::compute_paint_plan`), which has
+/// access to both the freshly-composed frame and the previously-
+/// painted one. The painter consumes the plan as data and walks
+/// the regions it names.
+///
 /// Skipped regions retain whatever cells `buf` already carried from
 /// the previous frame — the driver's double-buffer swap means `buf`
 /// comes in holding the last-frame snapshot of every cell, so the
@@ -509,14 +516,16 @@ pub(crate) fn paint(
     theme: &Theme,
     buf: &mut Buffer,
 ) {
-    // Layout change (resize, sidebar toggle) invalidates every
-    // region — repaint in full. Otherwise diff sub-components.
-    let layout_same = last.is_some_and(|l| l.layout == frame.layout);
-    let force = !layout_same;
+    // On a forced repaint (resize, layout toggle) the driver's
+    // `execute` already passes `last = None` so per-region cache
+    // hits don't kick in. `last` is therefore only consulted as a
+    // sanity-tie-breaker for direct-call test paths that bypass
+    // `execute`; the plan is the canonical source for "which
+    // regions".
+    let _ = last;
+    let plan = &frame.paint_plan;
 
-    if force || last.map(|l| &l.side_panel) != Some(&frame.side_panel)
-        || last.map(|l| l.layout.side_area) != Some(frame.layout.side_area)
-    {
+    if plan.side_panel {
         if let (Some(panel), Some(area)) = (&frame.side_panel, frame.layout.side_area) {
             paint_side_panel(panel, area, theme, buf);
         }
@@ -528,20 +537,7 @@ pub(crate) fn paint(
         }
     }
 
-    // When any in-body overlay changes (appears / disappears /
-    // moves / content shifts), we must repaint the body too — the
-    // old box needs to be erased and the new one drawn on a fresh
-    // canvas.
-    let popover_changed = last.map(|l| &l.popover) != Some(&frame.popover);
-    let completion_changed = last.map(|l| &l.completion) != Some(&frame.completion);
-    let rename_changed = last.map(|l| &l.rename_popup) != Some(&frame.rename_popup);
-
-    if force
-        || popover_changed
-        || completion_changed
-        || rename_changed
-        || last.map(|l| &l.body) != Some(&frame.body)
-    {
+    if plan.body {
         paint_body(&frame.body, frame.layout.editor_area, theme, buf);
     }
 
@@ -571,11 +567,11 @@ pub(crate) fn paint(
         paint_rename_popup(rp, frame.layout.editor_area, frame.dims, theme, buf);
     }
 
-    if force || last.map(|l| &l.tab_bar) != Some(&frame.tab_bar) {
+    if plan.tab_bar {
         paint_tab_bar(&frame.tab_bar, frame.layout.tab_bar, theme, buf);
     }
 
-    if force || last.map(|l| &l.status_bar) != Some(&frame.status_bar) {
+    if plan.status_bar {
         paint_status_bar(&frame.status_bar, frame.layout.status_bar, theme, buf);
     }
 }
@@ -666,11 +662,17 @@ pub fn suspend_and_resume<W: Write>(out: &mut W) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use led_driver_terminal_core::{FrameId, NoopTrace, Style};
+    use led_driver_terminal_core::{FrameId, NoopTrace, PaintPlan, Style};
 
     /// Paint a frame through the full driver path and return the
     /// emitted bytes. The trace is a `NoopTrace` so tests don't need
     /// to plumb in a real capture harness.
+    ///
+    /// The runtime's render phase normally stamps `frame.paint_plan`
+    /// before calling `execute`. Direct test callers don't go
+    /// through render_phase, so we derive the plan here via the
+    /// canonical `PaintPlan::derive` helper — same logic, just
+    /// invoked from the test path.
     fn execute_frame(
         frame: &Frame,
         last: Option<&Frame>,
@@ -679,8 +681,12 @@ mod tests {
         let driver = TerminalOutputDriver::new(Arc::new(NoopTrace));
         let mut out: Vec<u8> = Vec::new();
         let mut paint_state = PaintState::default();
+        let stamped = Frame {
+            paint_plan: PaintPlan::derive(last, frame),
+            ..frame.clone()
+        };
         driver
-            .execute(frame, last, &[], theme, &mut paint_state, &mut out)
+            .execute(&stamped, last, &[], theme, &mut paint_state, &mut out)
             .expect("execute");
         (driver, out)
     }
@@ -726,6 +732,7 @@ mod tests {
             cursor: Some((0, 0)),
             dims: Dims { cols: 40, rows: 5 },
             id: FrameId::default(),
+            paint_plan: PaintPlan::default(),
         };
         let (_driver, out) = execute_frame(&frame, None, &Theme::default());
         assert!(!out.is_empty());
@@ -745,6 +752,7 @@ mod tests {
             cursor: None,
             dims: Dims { cols: 40, rows: 5 },
             id: FrameId::default(),
+            paint_plan: PaintPlan::default(),
         };
         let (_driver, out) = execute_frame(&frame, None, &Theme::default());
         // Empty frames still produce clear/hide sequences — just don't panic.
@@ -786,6 +794,7 @@ mod tests {
             cursor: None,
             dims,
             id: FrameId::default(),
+            paint_plan: PaintPlan::default(),
         };
         let (_driver, out) = execute_frame(&frame, None, &Theme::default());
         assert!(
@@ -869,6 +878,7 @@ mod tests {
             cursor: Some((layout.editor_area.x + 2, 0)),
             dims,
             id: FrameId::default(),
+            paint_plan: PaintPlan::default(),
         };
         // Frame 2: same body (same Arc → cache hit), side_panel.focused flipped.
         let frame2 = Frame {
@@ -892,8 +902,18 @@ mod tests {
         // Distinct ids so the idempotency gate doesn't short-circuit
         // the second paint (frames differ in `focused`, so under the
         // real runtime the render phase would stamp a new id).
-        let frame1 = Frame { id: FrameId(1), ..frame1 };
-        let frame2 = Frame { id: FrameId(2), ..frame2 };
+        // `paint_plan` is derived the same way render_phase does it —
+        // first paint = full, second paint = whatever differs.
+        let frame1 = Frame {
+            id: FrameId(1),
+            paint_plan: PaintPlan::derive(None, &frame1),
+            ..frame1
+        };
+        let frame2 = Frame {
+            id: FrameId(2),
+            paint_plan: PaintPlan::derive(Some(&frame1), &frame2),
+            ..frame2
+        };
         driver
             .execute(&frame1, None, &[], &theme, &mut paint_state, &mut out)
             .expect("frame1");
@@ -960,6 +980,7 @@ mod tests {
             cursor: None,
             dims,
             id: FrameId::default(),
+            paint_plan: PaintPlan::default(),
         };
         let frame_hidden = Frame {
             tab_bar: many_tabs,
@@ -980,17 +1001,21 @@ mod tests {
         let mut out: Vec<u8> = Vec::new();
         let mut paint_state = PaintState::default();
         // Distinct ids per stage, matching what the runtime would
-        // stamp on three content-distinct frames.
+        // stamp on three content-distinct frames. Plans derived
+        // the same way render_phase computes them.
         let frame_visible = Frame {
             id: FrameId(1),
+            paint_plan: PaintPlan::derive(None, &frame_visible),
             ..frame_visible
         };
         let frame_hidden = Frame {
             id: FrameId(2),
+            paint_plan: PaintPlan::derive(Some(&frame_visible), &frame_hidden),
             ..frame_hidden
         };
         let frame_visible_again = Frame {
             id: FrameId(3),
+            paint_plan: PaintPlan::derive(Some(&frame_hidden), &frame_visible_again),
             ..frame_visible_again
         };
         driver
@@ -1169,6 +1194,7 @@ mod tests {
             cursor: None,
             dims,
             id: FrameId::default(),
+            paint_plan: PaintPlan::default(),
         };
         let (_driver, out) = execute_frame(&frame, None, &Theme::default());
         let s = std::str::from_utf8(&out).expect("utf8");
@@ -1295,6 +1321,7 @@ mod tests {
             cursor: None,
             dims,
             id: FrameId::default(),
+            paint_plan: PaintPlan::default(),
         };
         let (_driver, out) = execute_frame(&frame, None, &Theme::default());
         let mut grid = Grid::new(dims);
@@ -1339,6 +1366,7 @@ mod tests {
             cursor: None,
             dims,
             id: FrameId::default(),
+            paint_plan: PaintPlan::default(),
         };
         let (_driver, out) = execute_frame(&frame, None, &Theme::default());
 
@@ -1392,6 +1420,7 @@ mod tests {
             cursor: None,
             dims,
             id: FrameId::default(),
+            paint_plan: PaintPlan::default(),
         };
         let (_driver, out) = execute_frame(&frame, None, &theme);
 

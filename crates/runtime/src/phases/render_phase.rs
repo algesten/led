@@ -4,7 +4,7 @@
 
 use std::io::Write;
 
-use led_driver_terminal_core::{Frame, FrameId, ScrollHint};
+use led_driver_terminal_core::{Frame, FrameId, PaintPlan, ScrollHint};
 use led_state_lifecycle::Phase;
 
 use crate::phases::TickEnv;
@@ -32,8 +32,19 @@ pub(crate) fn run<W: Write>(
             // Driver consumes the id to populate `paint_state.
             // in_flight` / `last_acked`.
             frame_id_seq.0 += 1;
+            // "What to repaint" decision lives here, in the render
+            // phase, because this is the only place that has both
+            // the freshly-composed frame and the previously-
+            // painted one. The painter used to re-derive this with
+            // an inline `&&` / `||` ladder over `last` field by
+            // field — co-locating the decision with the frame
+            // turns "given two snapshots, what to repaint?" into
+            // a small named function (`PaintPlan::derive`) instead
+            // of a comment-laden condition in `paint()`.
+            let plan = PaintPlan::derive(last_frame.as_ref(), &f);
             let stamped = Frame {
                 id: FrameId(frame_id_seq.0),
+                paint_plan: plan,
                 ..f
             };
             env.drivers.output.execute(
@@ -54,3 +65,4 @@ pub(crate) fn run<W: Write>(
     }
     Ok(())
 }
+

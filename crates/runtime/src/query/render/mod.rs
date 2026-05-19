@@ -252,6 +252,10 @@ pub fn render_frame<'a>(inputs: RenderInputs<'a>) -> Option<Frame> {
         // emits `FrameId::default()` so cache equality compares
         // only the content-bearing fields.
         id: led_driver_terminal_core::FrameId::default(),
+        // Same story for `paint_plan` — the render phase derives
+        // it from (prev_frame, curr_frame). The memo emits the
+        // default; the manual `PartialEq` excludes both fields.
+        paint_plan: led_driver_terminal_core::PaintPlan::default(),
     })
 }
 
