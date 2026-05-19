@@ -29,6 +29,7 @@ pub(super) fn reflow_paragraph(
     edits: &mut BufferEdits,
     alerts: &mut AlertState,
     path_chains: &HashMap<CanonPath, PathChain>,
+    clock: &crate::Clock,
 ) {
     let mut nothing = false;
     with_active(tabs, edits, |tab, eb| {
@@ -81,7 +82,7 @@ pub(super) fn reflow_paragraph(
     if nothing {
         alerts.set_info(
             "Nothing to reflow".to_string(),
-            std::time::Instant::now(),
+            clock.now,
             std::time::Duration::from_secs(ALERT_TTL_SECS),
         );
     }

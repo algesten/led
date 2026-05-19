@@ -44,6 +44,7 @@ pub(crate) fn run(sources: &Sources) -> QueryOut {
         git,
         kbd_macro,
         session,
+        clock,
         ..
     } = sources;
 
@@ -63,7 +64,8 @@ pub(crate) fn run(sources: &Sources) -> QueryOut {
     });
     let find_file_actions = find_file_action(FindFileInput::new(find_file));
     let render_tick = if lsp_status.any_busy() {
-        std::time::SystemTime::now()
+        clock
+            .wall_now
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64 / 80)
             .unwrap_or(0)

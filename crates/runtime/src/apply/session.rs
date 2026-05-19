@@ -282,11 +282,12 @@ pub(crate) fn apply_pending_undo_restore(
 /// Mirrors legacy's `led_workspace::new_chain_id` — 64-bit hash
 /// of (now, pid). Collision-safe enough for a per-buffer
 /// session marker; not cryptographic.
-pub(crate) fn new_chain_id() -> ChainId {
+pub(crate) fn new_chain_id(clock: &crate::Clock) -> ChainId {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
     use std::time::SystemTime;
-    let t = SystemTime::now()
+    let t = clock
+        .wall_now
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();

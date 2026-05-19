@@ -40,6 +40,7 @@ pub(crate) fn ingest_clock(sources: &mut Sources) {
         ..
     } = sources;
     clock.now = std::time::Instant::now();
+    clock.wall_now = std::time::SystemTime::now();
     alerts.expire_info(clock.now);
     if let Some(ff) = find_file.as_mut() {
         ff.input.expire_hint(clock.now);
@@ -263,6 +264,7 @@ pub(crate) fn ingest_lsp_events(sources: &mut Sources, env: &TickEnv<'_>) {
         lsp_extras,
         lsp_pending,
         lsp_watched_globs,
+        clock,
         ..
     } = sources;
 
@@ -413,6 +415,7 @@ pub(crate) fn ingest_lsp_events(sources: &mut Sources, env: &TickEnv<'_>) {
                     tabs,
                     alerts,
                     lsp_pending,
+                    clock,
                 }
                 .apply(seq, origin, &file_edits);
             }

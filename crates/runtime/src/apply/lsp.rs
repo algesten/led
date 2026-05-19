@@ -240,6 +240,7 @@ pub(crate) struct LspEditApply<'a> {
     pub(crate) tabs: &'a led_state_tabs::Tabs,
     pub(crate) alerts: &'a mut AlertState,
     pub(crate) lsp_pending: &'a mut led_state_lsp::LspPending,
+    pub(crate) clock: &'a crate::Clock,
 }
 
 /// Apply an `LspEvent::Edits` delivery: walk `file_edits`, apply
@@ -265,6 +266,7 @@ impl<'a> LspEditApply<'a> {
         let tabs = self.tabs;
         let alerts = &mut *self.alerts;
         let lsp_pending = &mut *self.lsp_pending;
+        let clock = self.clock;
     // Stale-seq gate per origin.
     match origin {
         led_driver_lsp_core::EditsOrigin::Rename => {
@@ -368,7 +370,7 @@ impl<'a> LspEditApply<'a> {
             }
             led_driver_lsp_core::EditsOrigin::Format => unreachable!(),
         };
-        alerts.set_info(msg, std::time::Instant::now(), INFO_TTL);
+        alerts.set_info(msg, clock.now, INFO_TTL);
     }
 
     // Post-format save trigger: paths awaiting save after

@@ -17,7 +17,7 @@
 //! All are silent no-ops when there's no active tab, no buffer
 //! loaded, or (for navigation) nothing to do.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use led_core::{CanonPath, IssueCategory};
 use led_driver_terminal_core::Terminal;
@@ -431,6 +431,7 @@ pub(super) struct NavCtx<'a> {
     pub(super) alerts: &'a mut AlertState,
     pub(super) terminal: &'a Terminal,
     pub(super) browser: &'a BrowserUi,
+    pub(super) clock: &'a crate::Clock,
 }
 
 impl<'a> NavCtx<'a> {
@@ -454,6 +455,7 @@ impl<'a> NavCtx<'a> {
         let alerts = &mut *self.alerts;
         let terminal = self.terminal;
         let browser = self.browser;
+        let clock = self.clock;
 
         let Some(outcome) = compute_navigation(tabs, edits, diagnostics, git, forward) else {
             return;
@@ -508,7 +510,7 @@ impl<'a> NavCtx<'a> {
             tab.cursor.preferred_col = led_core::prefix_display_width(line_slice, col);
             tab.scroll = center_on_cursor(tab.scroll, tab.cursor, body_rows, rope, content_cols);
             tabs.active = Some(tab.id);
-            alerts.set_info(msg, Instant::now(), ISSUE_NAV_TTL);
+            alerts.set_info(msg, clock.now, ISSUE_NAV_TTL);
             return;
         }
 
@@ -526,7 +528,7 @@ impl<'a> NavCtx<'a> {
                 preferred_col: outcome.target_col,
             });
         }
-        alerts.set_info(msg, Instant::now(), ISSUE_NAV_TTL);
+        alerts.set_info(msg, clock.now, ISSUE_NAV_TTL);
     }
 }
 
@@ -894,6 +896,7 @@ mod tests {
             visible: false,
             ..Default::default()
         };
+        let clock = crate::Clock::default();
         NavCtx {
             tabs: &mut tabs,
             edits: &edits,
@@ -903,6 +906,7 @@ mod tests {
             alerts: &mut alerts,
             terminal: &term,
             browser: &browser,
+            clock: &clock,
         }
         .next_issue();
         assert_eq!(tabs.open[0].cursor.line, 3);
@@ -954,6 +958,7 @@ mod tests {
             preferred_col: 0,
         };
         tabs.open[0].scroll = Scroll::default();
+        let clock = crate::Clock::default();
         NavCtx {
             tabs: &mut tabs,
             edits: &edits,
@@ -963,6 +968,7 @@ mod tests {
             alerts: &mut alerts,
             terminal: &term,
             browser: &browser,
+            clock: &clock,
         }
         .next_issue();
         assert_eq!(tabs.open[0].cursor.line, 1, "wrapped back to first error");
@@ -988,6 +994,7 @@ mod tests {
         let git = M20aGitState::default();
         let mut jumps = JumpListState::default();
         let mut alerts = M20aAlertState::default();
+        let clock = crate::Clock::default();
         NavCtx {
             tabs: &mut tabs,
             edits: &edits,
@@ -997,6 +1004,7 @@ mod tests {
             alerts: &mut alerts,
             terminal: &TerminalAtom::default(),
             browser: &BrowserUi::default(),
+            clock: &clock,
         }
         .next_issue();
         let new_tab = tabs

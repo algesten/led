@@ -21,6 +21,7 @@ pub(crate) fn run(sources: &mut Sources, env: &TickEnv<'_>, q: &QueryOut) {
         file_search,
         syntax,
         undo_persistence,
+        clock,
         ..
     } = sources;
 
@@ -114,7 +115,7 @@ pub(crate) fn run(sources: &mut Sources, env: &TickEnv<'_>, q: &QueryOut) {
             undo_persistence.insert(
                 path.clone(),
                 UndoPersistTracker {
-                    chain_id: new_chain_id(),
+                    chain_id: new_chain_id(clock),
                     persisted_len: eb.history.past_groups().len(),
                     last_seq: UndoDbSeq(0),
                 },

@@ -27,7 +27,7 @@ pub(crate) use apply::session::config_dir_for_session;
 
 use std::io::{self, Write};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use led_driver_buffers_core::{BufferStore, FileReadDriver, FileWriteDriver};
 use led_driver_buffers_native::{FileReadNative, FileWriteNative};
@@ -372,16 +372,25 @@ pub struct Sources {
     pub clock: Clock,
 }
 
-/// Clock source. One field, mutated once per tick.
+/// Clock source. Two fields, mutated together once per tick.
+///
+/// `now` is the monotonic `Instant` used for deadlines, TTLs, and
+/// elapsed-time arithmetic. `wall_now` is the `SystemTime` used by
+/// the rare consumers that need a wall-clock epoch reference —
+/// chain-id minting for entropy, and the LSP-spinner phase tick
+/// used as a memo input. Pulling both from one source keeps memo
+/// caches consistent within a tick.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Clock {
     pub now: Instant,
+    pub wall_now: SystemTime,
 }
 
 impl Default for Clock {
     fn default() -> Self {
         Self {
             now: Instant::now(),
+            wall_now: SystemTime::now(),
         }
     }
 }
@@ -1655,11 +1664,13 @@ mod tests {
         }]);
         let _ = &mut lsp_extras;
         let tabs = led_state_tabs::Tabs::default();
+        let clock = crate::Clock::default();
         LspEditApply {
             edits: &mut edits,
             tabs: &tabs,
             alerts: &mut alerts,
             lsp_pending: &mut lsp_pending,
+            clock: &clock,
         }
         .apply(led_core::LspRequestSeq(7), EditsOrigin::Rename, &file_edits);
         let eb = edits.buffers.get(&path).unwrap();
@@ -1705,11 +1716,13 @@ mod tests {
         }]);
         let _ = &mut lsp_extras;
         let tabs = led_state_tabs::Tabs::default();
+        let clock = crate::Clock::default();
         LspEditApply {
             edits: &mut edits,
             tabs: &tabs,
             alerts: &mut alerts,
             lsp_pending: &mut lsp_pending,
+            clock: &clock,
         }
         .apply(led_core::LspRequestSeq(1), EditsOrigin::Format, &file_edits);
         // Format applied "x" → "X", then pre-save cleanup added
@@ -1773,11 +1786,13 @@ mod tests {
         }]);
         let _ = &mut lsp_extras;
         let tabs = led_state_tabs::Tabs::default();
+        let clock = crate::Clock::default();
         LspEditApply {
             edits: &mut edits,
             tabs: &tabs,
             alerts: &mut alerts,
             lsp_pending: &mut lsp_pending,
+            clock: &clock,
         }
         .apply(led_core::LspRequestSeq(1), EditsOrigin::Format, &file_edits);
         let formatted = edits.buffers[&path].rope.to_string();
@@ -1842,11 +1857,13 @@ mod tests {
         }]);
         let _ = &mut lsp_extras;
         let tabs = led_state_tabs::Tabs::default();
+        let clock = crate::Clock::default();
         LspEditApply {
             edits: &mut edits,
             tabs: &tabs,
             alerts: &mut alerts,
             lsp_pending: &mut lsp_pending,
+            clock: &clock,
         }
         .apply(led_core::LspRequestSeq(42), EditsOrigin::Format, &file_edits);
         // Format applied "x" → "X", then pre-save cleanup appended
@@ -1875,11 +1892,13 @@ mod tests {
         let file_edits = std::sync::Arc::new(Vec::new());
         let _ = &mut lsp_extras;
         let tabs = led_state_tabs::Tabs::default();
+        let clock = crate::Clock::default();
         LspEditApply {
             edits: &mut edits,
             tabs: &tabs,
             alerts: &mut alerts,
             lsp_pending: &mut lsp_pending,
+            clock: &clock,
         }
         .apply(led_core::LspRequestSeq(5), EditsOrigin::Format, &file_edits);
         assert!(edits.pending_saves.contains(&path));
@@ -1912,11 +1931,13 @@ mod tests {
         }]);
         let _ = &mut lsp_extras;
         let tabs = led_state_tabs::Tabs::default();
+        let clock = crate::Clock::default();
         LspEditApply {
             edits: &mut edits,
             tabs: &tabs,
             alerts: &mut alerts,
             lsp_pending: &mut lsp_pending,
+            clock: &clock,
         }
         .apply(
             /* stale */ led_core::LspRequestSeq(5),

@@ -39,7 +39,12 @@ pub(super) fn cycle_active(tabs: &mut Tabs, jumps: &mut JumpListState, delta: is
 /// Close the active tab. If the buffer is dirty, raise a confirm-kill
 /// prompt (user must press `y`/`Y` to proceed); otherwise force-kill
 /// immediately.
-pub(super) fn kill_active(tabs: &mut Tabs, edits: &mut BufferEdits, alerts: &mut AlertState) {
+pub(super) fn kill_active(
+    tabs: &mut Tabs,
+    edits: &mut BufferEdits,
+    alerts: &mut AlertState,
+    clock: &crate::Clock,
+) {
     let Some(id) = tabs.active else {
         return;
     };
@@ -64,7 +69,7 @@ pub(super) fn kill_active(tabs: &mut Tabs, edits: &mut BufferEdits, alerts: &mut
     if !basename.is_empty() {
         alerts.set_info(
             format!("Killed {basename}"),
-            std::time::Instant::now(),
+            clock.now,
             std::time::Duration::from_secs(2),
         );
     }
@@ -229,6 +234,7 @@ mod tests {
         let lsp_status = led_state_diagnostics::LspStatuses::default();
         let git = GitState::default();
         let syntax = led_state_syntax::SyntaxStates::default();
+        let clock = crate::Clock::default();
         {
             let mut dispatcher = Dispatcher {
                 tabs: &mut tabs,
@@ -256,6 +262,7 @@ mod tests {
                 chord: &mut chord,
                 kbd_macro: &mut kbd_macro,
                 syntax: &syntax,
+                clock: &clock,
             };
             // Ctrl-x k on dirty active tab → prompt set, tab still open.
             dispatcher.dispatch_key(key(KeyModifiers::CONTROL, KeyCode::Char('x')));
@@ -293,6 +300,7 @@ mod tests {
         let lsp_status = led_state_diagnostics::LspStatuses::default();
         let git = GitState::default();
         let syntax = led_state_syntax::SyntaxStates::default();
+        let clock = crate::Clock::default();
         {
             let mut dispatcher = Dispatcher {
                 tabs: &mut tabs,
@@ -320,6 +328,7 @@ mod tests {
                 chord: &mut chord,
                 kbd_macro: &mut kbd_macro,
                 syntax: &syntax,
+                clock: &clock,
             };
             dispatcher.dispatch_key(key(KeyModifiers::NONE, KeyCode::Char('y')));
         }
@@ -359,6 +368,7 @@ mod tests {
         let lsp_status = led_state_diagnostics::LspStatuses::default();
         let git = GitState::default();
         let syntax = led_state_syntax::SyntaxStates::default();
+        let clock = crate::Clock::default();
         {
             let mut dispatcher = Dispatcher {
                 tabs: &mut tabs,
@@ -386,6 +396,7 @@ mod tests {
                 chord: &mut chord,
                 kbd_macro: &mut kbd_macro,
                 syntax: &syntax,
+                clock: &clock,
             };
             dispatcher.dispatch_key(key(KeyModifiers::NONE, KeyCode::Char('Y')));
         }
@@ -421,6 +432,7 @@ mod tests {
         let lsp_status = led_state_diagnostics::LspStatuses::default();
         let git = GitState::default();
         let syntax = led_state_syntax::SyntaxStates::default();
+        let clock = crate::Clock::default();
         {
             let mut dispatcher = Dispatcher {
                 tabs: &mut tabs,
@@ -448,6 +460,7 @@ mod tests {
                 chord: &mut chord,
                 kbd_macro: &mut kbd_macro,
                 syntax: &syntax,
+                clock: &clock,
             };
             dispatcher.dispatch_key(key(KeyModifiers::NONE, KeyCode::Char('n')));
         }
@@ -493,6 +506,7 @@ mod tests {
         let lsp_status = led_state_diagnostics::LspStatuses::default();
         let git = GitState::default();
         let syntax = led_state_syntax::SyntaxStates::default();
+        let clock = crate::Clock::default();
         {
             let mut dispatcher = Dispatcher {
                 tabs: &mut tabs,
@@ -520,6 +534,7 @@ mod tests {
                 chord: &mut chord,
                 kbd_macro: &mut kbd_macro,
                 syntax: &syntax,
+                clock: &clock,
             };
             dispatcher.dispatch_key(key(KeyModifiers::NONE, KeyCode::Esc));
         }
@@ -563,6 +578,7 @@ mod tests {
         let lsp_status = led_state_diagnostics::LspStatuses::default();
         let git = GitState::default();
         let syntax = led_state_syntax::SyntaxStates::default();
+        let clock = crate::Clock::default();
         {
             let mut dispatcher = Dispatcher {
                 tabs: &mut tabs,
@@ -590,6 +606,7 @@ mod tests {
                 chord: &mut chord,
                 kbd_macro: &mut kbd_macro,
                 syntax: &syntax,
+                clock: &clock,
             };
             dispatcher.dispatch_key(key(KeyModifiers::CONTROL, KeyCode::Char('x')));
             dispatcher.dispatch_key(key(KeyModifiers::NONE, KeyCode::Char('k')));

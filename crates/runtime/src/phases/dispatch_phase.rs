@@ -63,6 +63,7 @@ pub(crate) fn dispatch_input<W: Write>(
         lsp_pending,
         git,
         lifecycle,
+        clock,
         ..
     } = sources;
 
@@ -99,6 +100,7 @@ pub(crate) fn dispatch_input<W: Write>(
             chord,
             kbd_macro,
             syntax,
+            clock,
         };
         match dispatcher.dispatch(ev) {
             DispatchOutcome::Continue => {}

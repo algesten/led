@@ -24,6 +24,7 @@ pub(super) fn sort_imports(
     edits: &mut BufferEdits,
     syntax: &SyntaxStates,
     alerts: &mut AlertState,
+    clock: &crate::Clock,
 ) {
     let mut alert: Option<&'static str> = None;
     with_active(tabs, edits, |tab, eb| {
@@ -94,7 +95,7 @@ pub(super) fn sort_imports(
     if let Some(text) = alert {
         alerts.set_info(
             text.to_string(),
-            std::time::Instant::now(),
+            clock.now,
             std::time::Duration::from_secs(ALERT_TTL_SECS),
         );
     }

@@ -98,7 +98,7 @@ pub(crate) fn run(sources: &mut Sources, env: &TickEnv<'_>) {
             let tracker = undo_persistence
                 .entry(path.clone())
                 .or_insert_with(|| UndoPersistTracker {
-                    chain_id: new_chain_id(),
+                    chain_id: new_chain_id(clock),
                     persisted_len: 0,
                     last_seq: UndoDbSeq(0),
                 });

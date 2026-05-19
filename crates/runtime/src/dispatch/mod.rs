@@ -169,6 +169,13 @@ pub struct Dispatcher<'a> {
     /// `SortImports` arms read it sync to derive their effect
     /// (no driver round-trip; see `MILESTONE-23.md` § D1).
     pub syntax: &'a led_state_syntax::SyntaxStates,
+    /// Per-tick "now" source. Set once by ingest from
+    /// `Instant::now()` + `SystemTime::now()`; everything
+    /// time-dependent in dispatch reads via `self.clock.now`
+    /// (deadlines, TTLs) or `self.clock.wall_now` (entropy /
+    /// epoch references). Per EXAMPLE-ARCH § "Time is a source
+    /// field": no dispatch arm calls `Instant::now()` directly.
+    pub clock: &'a crate::Clock,
 }
 
 impl<'a> Dispatcher<'a> {
@@ -695,6 +702,7 @@ impl<'a> Dispatcher<'a> {
             self.tabs,
             self.edits,
             self.path_chains,
+            self.clock,
         ) {
             return outcome;
         }
@@ -783,6 +791,7 @@ impl<'a> Dispatcher<'a> {
                     self.lsp_pending,
                     self.alerts,
                     self.lsp_status,
+                    self.clock,
                 );
                 DispatchOutcome::Continue
             }
@@ -804,7 +813,7 @@ impl<'a> Dispatcher<'a> {
                 DispatchOutcome::Continue
             }
             Command::KillBuffer => {
-                kill_active(self.tabs, self.edits, self.alerts);
+                kill_active(self.tabs, self.edits, self.alerts, self.clock);
                 DispatchOutcome::Continue
             }
             Command::CursorUp => {
@@ -1047,6 +1056,7 @@ impl<'a> Dispatcher<'a> {
                     self.edits,
                     self.alerts,
                     self.path_chains,
+                    self.clock,
                 );
                 DispatchOutcome::Continue
             }
@@ -1056,6 +1066,7 @@ impl<'a> Dispatcher<'a> {
                     self.edits,
                     self.syntax,
                     self.alerts,
+                    self.clock,
                 );
                 DispatchOutcome::Continue
             }
@@ -1075,7 +1086,7 @@ impl<'a> Dispatcher<'a> {
                 set_mark_active(self.tabs);
                 self.alerts.set_info(
                     "Mark set".to_string(),
-                    std::time::Instant::now(),
+                    self.clock.now,
                     std::time::Duration::from_secs(2),
                 );
                 DispatchOutcome::Continue
@@ -1085,7 +1096,7 @@ impl<'a> Dispatcher<'a> {
                 if !killed {
                     self.alerts.set_info(
                         "No region".to_string(),
-                        std::time::Instant::now(),
+                        self.clock.now,
                         std::time::Duration::from_secs(2),
                     );
                 }
@@ -1129,6 +1140,7 @@ impl<'a> Dispatcher<'a> {
                     alerts: self.alerts,
                     terminal: self.terminal,
                     browser: self.browser,
+                    clock: self.clock,
                 }
                 .next_issue();
                 DispatchOutcome::Continue
@@ -1143,6 +1155,7 @@ impl<'a> Dispatcher<'a> {
                     alerts: self.alerts,
                     terminal: self.terminal,
                     browser: self.browser,
+                    clock: self.clock,
                 }
                 .prev_issue();
                 DispatchOutcome::Continue
@@ -1260,7 +1273,7 @@ impl<'a> Dispatcher<'a> {
                 // post-M18 polish.
                 self.alerts.set_info(
                     "Outline: not yet implemented".to_string(),
-                    std::time::Instant::now(),
+                    self.clock.now,
                     std::time::Duration::from_secs(2),
                 );
                 DispatchOutcome::Continue
@@ -1274,7 +1287,7 @@ impl<'a> Dispatcher<'a> {
                 self.kbd_macro.current.clear();
                 self.alerts.set_info(
                     "Defining kbd macro...".to_string(),
-                    std::time::Instant::now(),
+                    self.clock.now,
                     std::time::Duration::from_secs(2),
                 );
                 DispatchOutcome::Continue
@@ -1286,13 +1299,13 @@ impl<'a> Dispatcher<'a> {
                     self.kbd_macro.last = Some(std::sync::Arc::new(recorded));
                     self.alerts.set_info(
                         "Keyboard macro defined".to_string(),
-                        std::time::Instant::now(),
+                        self.clock.now,
                         std::time::Duration::from_secs(2),
                     );
                 } else {
                     self.alerts.set_info(
                         "Not defining kbd macro".to_string(),
-                        std::time::Instant::now(),
+                        self.clock.now,
                         std::time::Duration::from_secs(2),
                     );
                 }
@@ -1305,7 +1318,7 @@ impl<'a> Dispatcher<'a> {
                 if self.kbd_macro.playback_depth >= KBD_MACRO_RECURSION_LIMIT {
                     self.alerts.set_info(
                         "Keyboard macro recursion limit".to_string(),
-                        std::time::Instant::now(),
+                        self.clock.now,
                         std::time::Duration::from_secs(2),
                     );
                     return DispatchOutcome::Continue;
@@ -1317,7 +1330,7 @@ impl<'a> Dispatcher<'a> {
                 let Some(recorded) = self.kbd_macro.last.clone() else {
                     self.alerts.set_info(
                         "No kbd macro defined".to_string(),
-                        std::time::Instant::now(),
+                        self.clock.now,
                         std::time::Duration::from_secs(2),
                     );
                     return DispatchOutcome::Continue;
@@ -1372,6 +1385,7 @@ fn save_with_optional_format(
     lsp_pending: &mut led_state_lsp::LspPending,
     alerts: &mut AlertState,
     lsp_status: &led_state_diagnostics::LspStatuses,
+    clock: &crate::Clock,
 ) {
     let Some(id) = tabs.active else {
         return;
@@ -1397,7 +1411,7 @@ fn save_with_optional_format(
     lsp_pending.pending_save_after_format.insert(tab.path.clone());
     alerts.set_info(
         "Formatting...".to_string(),
-        std::time::Instant::now(),
+        clock.now,
         std::time::Duration::from_secs(2),
     );
 }
@@ -1506,6 +1520,7 @@ mod tests {
         let lsp_status = led_state_diagnostics::LspStatuses::default();
         let git = GitState::default();
         let syntax = led_state_syntax::SyntaxStates::default();
+        let clock = crate::Clock::default();
         let mut dispatcher = Dispatcher {
             tabs: &mut tabs,
             edits: &mut edits,
@@ -1532,6 +1547,7 @@ mod tests {
             chord: &mut chord,
             kbd_macro: &mut kbd_macro,
             syntax: &syntax,
+            clock: &clock,
         };
         // First half of the chord: ctrl+x → pending, Continue.
         let outcome = dispatcher.dispatch_key(key(KeyModifiers::CONTROL, KeyCode::Char('x')));
@@ -1581,6 +1597,7 @@ mod tests {
         let lsp_status = led_state_diagnostics::LspStatuses::default();
         let git = GitState::default();
         let syntax = led_state_syntax::SyntaxStates::default();
+        let clock = crate::Clock::default();
         let outcome = {
             let mut dispatcher = Dispatcher {
                 tabs: &mut tabs,
@@ -1608,6 +1625,7 @@ mod tests {
                 chord: &mut chord,
                 kbd_macro: &mut kbd_macro,
                 syntax: &syntax,
+                clock: &clock,
             };
             // ctrl+x → pending.
             dispatcher.dispatch_key(key(KeyModifiers::CONTROL, KeyCode::Char('x')));
@@ -1656,6 +1674,7 @@ mod tests {
         let lsp_status = led_state_diagnostics::LspStatuses::default();
         let git = GitState::default();
         let syntax = led_state_syntax::SyntaxStates::default();
+        let clock = crate::Clock::default();
         let mut dispatcher = Dispatcher {
             tabs: &mut tabs,
             edits: &mut edits,
@@ -1682,6 +1701,7 @@ mod tests {
             chord: &mut chord,
             kbd_macro: &mut kbd_macro,
             syntax: &syntax,
+            clock: &clock,
         };
         let outcome = dispatcher.dispatch_key(key(KeyModifiers::CONTROL, KeyCode::Char('q')));
         assert_eq!(outcome, DispatchOutcome::Quit);
@@ -1723,6 +1743,7 @@ mod tests {
         let lsp_status = led_state_diagnostics::LspStatuses::default();
         let git = GitState::default();
         let syntax = led_state_syntax::SyntaxStates::default();
+        let clock = crate::Clock::default();
         let mut dispatcher = Dispatcher {
             tabs: &mut tabs,
             edits: &mut edits,
@@ -1749,6 +1770,7 @@ mod tests {
             chord: &mut chord,
             kbd_macro: &mut kbd_macro,
             syntax: &syntax,
+            clock: &clock,
         };
         let outcome = dispatcher.dispatch_key(key(KeyModifiers::CONTROL, KeyCode::Char('z')));
         assert_eq!(outcome, DispatchOutcome::Suspend);
@@ -1782,6 +1804,7 @@ mod tests {
         let lsp_status = led_state_diagnostics::LspStatuses::default();
         let git = GitState::default();
         let syntax = led_state_syntax::SyntaxStates::default();
+        let clock = crate::Clock::default();
         {
             let mut dispatcher = Dispatcher {
                 tabs: &mut tabs,
@@ -1809,6 +1832,7 @@ mod tests {
                 chord: &mut chord,
                 kbd_macro: &mut kbd_macro,
                 syntax: &syntax,
+                clock: &clock,
             };
             dispatcher.dispatch_key(key(KeyModifiers::NONE, KeyCode::Char('z')));
         }
@@ -1844,6 +1868,7 @@ mod tests {
         let lsp_status = led_state_diagnostics::LspStatuses::default();
         let git = GitState::default();
         let syntax = led_state_syntax::SyntaxStates::default();
+        let clock = crate::Clock::default();
         {
             let mut dispatcher = Dispatcher {
                 tabs: &mut tabs,
@@ -1871,6 +1896,7 @@ mod tests {
                 chord: &mut chord,
                 kbd_macro: &mut kbd_macro,
                 syntax: &syntax,
+                clock: &clock,
             };
             dispatcher.dispatch_key(key(KeyModifiers::CONTROL, KeyCode::Char('x')));
         }
@@ -1971,6 +1997,7 @@ mod tests {
         let diagnostics = DiagnosticsStates::default();
         let git = GitState::default();
         let syntax = led_state_syntax::SyntaxStates::default();
+        let clock = crate::Clock::default();
         {
             let mut dispatcher = Dispatcher {
                 tabs: &mut tabs,
@@ -1998,6 +2025,7 @@ mod tests {
                 chord: &mut chord,
                 kbd_macro: &mut kbd_macro,
                 syntax: &syntax,
+                clock: &clock,
             };
             dispatcher.dispatch_key(key(KeyModifiers::ALT, KeyCode::Enter));
         }
@@ -2037,6 +2065,7 @@ mod tests {
         let lsp_status = led_state_diagnostics::LspStatuses::default();
         let git = GitState::default();
         let syntax = led_state_syntax::SyntaxStates::default();
+        let clock = crate::Clock::default();
         {
             let mut dispatcher = Dispatcher {
                 tabs: &mut tabs,
@@ -2064,6 +2093,7 @@ mod tests {
                 chord: &mut chord,
                 kbd_macro: &mut kbd_macro,
                 syntax: &syntax,
+                clock: &clock,
             };
             dispatcher.dispatch_key(key(KeyModifiers::ALT, KeyCode::Enter));
         }

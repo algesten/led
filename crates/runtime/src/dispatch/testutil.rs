@@ -140,6 +140,7 @@ pub(super) fn dispatch_default(
     let git = GitState::default();
     let keymap = default_keymap();
     let syntax = led_state_syntax::SyntaxStates::default();
+    let clock = crate::Clock::default();
     let mut dispatcher = Dispatcher {
         tabs,
         edits,
@@ -166,6 +167,7 @@ pub(super) fn dispatch_default(
         chord: &mut chord,
         kbd_macro: &mut kbd_macro,
         syntax: &syntax,
+        clock: &clock,
     };
     dispatcher.dispatch_key(k)
 }
@@ -202,6 +204,7 @@ pub(super) fn dispatch_chord_default(
     let lsp_status = led_state_diagnostics::LspStatuses::default();
     let git = GitState::default();
     let syntax = led_state_syntax::SyntaxStates::default();
+    let clock = crate::Clock::default();
     let mut dispatcher = Dispatcher {
         tabs,
         edits,
@@ -228,6 +231,7 @@ pub(super) fn dispatch_chord_default(
         chord: &mut chord,
         kbd_macro: &mut kbd_macro,
         syntax: &syntax,
+        clock: &clock,
     };
     dispatcher.dispatch_key(prefix);
     dispatcher.dispatch_key(second)
@@ -263,6 +267,7 @@ pub(super) fn dispatch_with_ring(
     let git = GitState::default();
     let keymap = default_keymap();
     let syntax = led_state_syntax::SyntaxStates::default();
+    let clock = crate::Clock::default();
     let mut dispatcher = Dispatcher {
         tabs,
         edits,
@@ -289,6 +294,7 @@ pub(super) fn dispatch_with_ring(
         chord: &mut chord,
         kbd_macro: &mut kbd_macro,
         syntax: &syntax,
+        clock: &clock,
     };
     dispatcher.dispatch_key(k)
 }
@@ -320,6 +326,7 @@ pub(super) fn noop_dispatch(k: KeyEvent, tabs: &mut Tabs) -> DispatchOutcome {
     let lsp_status = led_state_diagnostics::LspStatuses::default();
     let git = GitState::default();
     let syntax = led_state_syntax::SyntaxStates::default();
+    let clock = crate::Clock::default();
     let mut dispatcher = Dispatcher {
         tabs,
         edits: &mut edits,
@@ -346,6 +353,7 @@ pub(super) fn noop_dispatch(k: KeyEvent, tabs: &mut Tabs) -> DispatchOutcome {
         chord: &mut chord,
         kbd_macro: &mut kbd_macro,
         syntax: &syntax,
+        clock: &clock,
     };
     dispatcher.dispatch_key(k)
 }
@@ -386,6 +394,7 @@ pub(super) struct MacroDispatcherFixture {
     git: GitState,
     keymap: crate::keymap::Keymap,
     pub syntax: led_state_syntax::SyntaxStates,
+    pub clock: crate::Clock,
 }
 
 impl MacroDispatcherFixture {
@@ -424,6 +433,7 @@ impl MacroDispatcherFixture {
             git: GitState::default(),
             keymap: default_keymap(),
             syntax: led_state_syntax::SyntaxStates::default(),
+            clock: crate::Clock::default(),
         }
     }
 
@@ -454,6 +464,7 @@ impl MacroDispatcherFixture {
             chord: &mut self.chord,
             kbd_macro: &mut self.kbd_macro,
             syntax: &self.syntax,
+            clock: &self.clock,
         };
         dispatcher.dispatch_key(k)
     }
