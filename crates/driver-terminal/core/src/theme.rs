@@ -649,3 +649,28 @@ impl Default for Theme {
         }
     }
 }
+
+// `Theme` ships across the drv memo boundary as a borrowed input —
+// memos that resolve chrome styles (`side_panel_row_style`,
+// `status_bar_model`, `body_model::ruler_col`) read from a
+// `ThemeInput { theme: &'a Theme }` projection. drv requires every
+// input's element type to implement `ToStatic`; theme is owned by
+// the runtime crate and outlives every tick, so the snapshot is a
+// plain clone — equality is the derived field-by-field compare.
+//
+// Performance: Theme is 30-odd `Style` fields (each 5 bytes) plus a
+// `SyntaxTheme` (17 styles), `DiagnosticsTheme` (4 styles), and an
+// `Option<u16>` — ~250 bytes total, all `Copy` interior, so the
+// `clone()` is a fast `memcpy`. eq_static fires once on cache miss
+// and finds the cached snapshot pointer-equal to the previous one
+// whenever the user hasn't reloaded the theme — i.e. always, in
+// production.
+impl drv::ToStatic for Theme {
+    type Static = Theme;
+    fn to_static(&self) -> Theme {
+        self.clone()
+    }
+    fn eq_static(&self, other: &Theme) -> bool {
+        self == other
+    }
+}

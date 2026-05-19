@@ -24,7 +24,7 @@ pub use popups::{
 };
 pub use side_panel::{
     side_panel_browser, side_panel_completions, side_panel_file_search,
-    side_panel_model, SidePanelInputs,
+    side_panel_model, SidePanelBrowserInputs, SidePanelInputs,
 };
 pub use status_bar::{status_bar_model, StatusBarInputs};
 pub use tab_bar::tab_bar_model;
@@ -103,6 +103,12 @@ pub struct RenderInputs<'a> {
     pub completions: CompletionsSessionInput<'a>,
     pub lsp_extras: LspExtrasOverlayInput<'a>,
     pub git: GitStateInput<'a>,
+    /// Theme used for chrome-style memos (side-panel row styles,
+    /// status-bar row style, ruler visibility). Theme is set once
+    /// at startup so this projection is pointer-stable across the
+    /// process lifetime and the memos' style-resolution caches
+    /// stay warm.
+    pub theme: ThemeInput<'a>,
     /// M22 — `kbd_macro.recording` for the status-bar
     /// recording indicator. Narrow projection so per-keystroke
     /// pushes into `KbdMacroState.current` don't invalidate
@@ -137,6 +143,7 @@ pub fn render_frame<'a>(inputs: RenderInputs<'a>) -> Option<Frame> {
         completions,
         lsp_extras,
         git,
+        theme,
         kbd_macro,
         session,
         render_tick,
@@ -178,6 +185,7 @@ pub fn render_frame<'a>(inputs: RenderInputs<'a>) -> Option<Frame> {
                 diagnostics,
                 git,
                 edits,
+                theme,
                 rows: area.rows,
             })
         });

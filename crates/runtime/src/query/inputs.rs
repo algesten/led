@@ -12,7 +12,7 @@ use led_driver_file_watch_core::{
 };
 use led_state_lsp::LspWatchedGlobs;
 use led_driver_terminal_core::{
-    Dims, Terminal,
+    Dims, Terminal, Theme,
 };
 use led_state_alerts::AlertState;
 use led_state_kbd_macro::KbdMacroState;
@@ -271,6 +271,28 @@ impl<'a> GitStateInput<'a> {
             file_statuses: &g.file_statuses,
             line_statuses: &g.line_statuses,
         }
+    }
+}
+
+// ── Input on Theme ─────────────────────────────────────────────────────
+
+/// Whole-theme projection. Theme stays immutable across the
+/// process lifetime today (set once at startup from `theme.toml`)
+/// so the input value is a pointer-stable `&'a Theme`; drv's
+/// equality check finds it pointer-equal on every tick and the
+/// memo's style-resolution slot stays warm. Memos that resolve
+/// chrome styles (`side_panel_row_style`, `status_bar_model`,
+/// `body_model::ruler_col`) lens through this rather than holding
+/// a copy of the relevant slots — adding a new Style slot to
+/// `Theme` only requires touching the memo, not its input shape.
+#[derive(drv::Input, Copy, Clone)]
+pub struct ThemeInput<'a> {
+    pub theme: &'a Theme,
+}
+
+impl<'a> ThemeInput<'a> {
+    pub fn new(theme: &'a Theme) -> Self {
+        Self { theme }
     }
 }
 

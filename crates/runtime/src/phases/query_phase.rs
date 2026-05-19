@@ -136,6 +136,7 @@ pub(crate) fn run(sources: &Sources, env: &TickEnv<'_>) -> QueryOut {
         completions: query::CompletionsSessionInput::new(completions),
         lsp_extras: query::LspExtrasOverlayInput::new(lsp_extras),
         git: query::GitStateInput::new(git),
+        theme: query::ThemeInput::new(env.theme),
         render_tick,
         kbd_macro: query::KbdMacroRecordingInput::new(kbd_macro),
         session: query::SessionPrimaryInput::new(session),

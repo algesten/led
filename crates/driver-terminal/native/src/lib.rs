@@ -784,6 +784,8 @@ mod tests {
                     match_range: None,
                     replaced: false,
                     status: None,
+                    name_style: Style::default(),
+                    status_cell: None,
                 }]),
                 focused: true,
                 mode: Default::default(),
@@ -835,6 +837,8 @@ mod tests {
                 match_range: None,
                 replaced: false,
                 status: None,
+                name_style: Style::default(),
+                status_cell: None,
             },
             SidePanelRow {
                 depth: 0,
@@ -844,6 +848,8 @@ mod tests {
                 match_range: None,
                 replaced: false,
                 status: None,
+                name_style: Style::default(),
+                status_cell: None,
             },
         ]);
         // Only two panel rows but editor_area.rows is 8 — six empty
@@ -1187,6 +1193,8 @@ mod tests {
                     match_range: Some((10, 16)),
                     replaced: false,
                     status: None,
+                    name_style: Style::default(),
+                    status_cell: None,
                 }]),
                 focused: false,
                 mode: SidePanelMode::Completions,

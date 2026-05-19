@@ -48,14 +48,14 @@ pub use inputs::{
     LspNotifiedInput, LspStatusesInput, LspWatchedGlobsInput, NotifyDirInput,
     OverlaysInput, PendingSavesInput, SessionPrimaryInput, StoreLoadedInput,
     SyntaxStatesInput, TabsActiveInput, TabsOpenInput, TerminalDimsInput,
-    UndoFlushDebounceInput, UndoPersistenceInput,
+    ThemeInput, UndoFlushDebounceInput, UndoPersistenceInput,
 };
 pub use render::{
     body_cursor, body_model, code_action_popup_model, completion_popup_model,
     popover_model, rebased_line_spans, rename_popup_model, render_frame,
     side_panel_browser, side_panel_completions, side_panel_file_search,
     side_panel_model, status_bar_model, tab_bar_model, BodyInputs, RenderInputs,
-    SidePanelInputs, StatusBarInputs,
+    SidePanelBrowserInputs, SidePanelInputs, StatusBarInputs,
 };
 
 // Re-export internal constants and helpers needed by the in-tree
@@ -78,7 +78,7 @@ use led_driver_fs_list_core::ListCmd;
 #[cfg(test)]
 use led_driver_terminal_core::{
     BodyModel, Dims, Frame, PopoverModel, PopoverSeverity, Rect, SidePanelRow,
-    StatusBarModel, Terminal,
+    StatusBarModel, Terminal, Theme,
 };
 #[cfg(test)]
 use led_state_alerts::AlertState;
@@ -245,6 +245,7 @@ mod tests {
         let lsp = LspStatuses::default();
         let kbd_macro_default = led_state_kbd_macro::KbdMacroState::default();
         let session_default = led_driver_session_core::SessionState::default();
+        let theme_default = Theme::default();
         render_frame(RenderInputs {
             term: TerminalDimsInput::new(term),
             edits: EditedBuffersInput::new(e),
@@ -262,6 +263,7 @@ mod tests {
             ),
             lsp_extras: LspExtrasOverlayInput::new(&led_state_lsp::LspExtrasState::default()),
             git: GitStateInput::new(&led_state_git::GitState::default()),
+            theme: ThemeInput::new(&theme_default),
             render_tick: 0,
             kbd_macro: KbdMacroRecordingInput::new(&kbd_macro_default),
             session: SessionPrimaryInput::new(&session_default),
@@ -331,6 +333,7 @@ mod tests {
         let lsp = LspStatuses::default();
         let kbd_macro_default = led_state_kbd_macro::KbdMacroState::default();
         let session_default = led_driver_session_core::SessionState::default();
+        let theme_default = Theme::default();
         let frame = render_frame(RenderInputs {
             term: TerminalDimsInput::new(&term),
             edits: EditedBuffersInput::new(&e),
@@ -348,6 +351,7 @@ mod tests {
             ),
             lsp_extras: LspExtrasOverlayInput::new(&led_state_lsp::LspExtrasState::default()),
             git: GitStateInput::new(&led_state_git::GitState::default()),
+            theme: ThemeInput::new(&theme_default),
             render_tick: 0,
             kbd_macro: KbdMacroRecordingInput::new(&kbd_macro_default),
             session: SessionPrimaryInput::new(&session_default),
@@ -383,6 +387,7 @@ mod tests {
         let lsp = LspStatuses::default();
         let kbd_macro_default = led_state_kbd_macro::KbdMacroState::default();
         let session_default = led_driver_session_core::SessionState::default();
+        let theme_default = Theme::default();
         let frame = render_frame(RenderInputs {
             term: TerminalDimsInput::new(&term),
             edits: EditedBuffersInput::new(&e),
@@ -400,6 +405,7 @@ mod tests {
             ),
             lsp_extras: LspExtrasOverlayInput::new(&led_state_lsp::LspExtrasState::default()),
             git: GitStateInput::new(&led_state_git::GitState::default()),
+            theme: ThemeInput::new(&theme_default),
             render_tick: 0,
             kbd_macro: KbdMacroRecordingInput::new(&kbd_macro_default),
             session: SessionPrimaryInput::new(&session_default),
@@ -995,6 +1001,7 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
         let lsp = LspStatuses::default();
         let kbd_macro_default = led_state_kbd_macro::KbdMacroState::default();
         let session_default = led_driver_session_core::SessionState::default();
+        let theme_default = Theme::default();
         let frame = render_frame(RenderInputs {
             term: TerminalDimsInput::new(&term),
             edits: EditedBuffersInput::new(&e),
@@ -1014,6 +1021,7 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
                 &led_state_lsp::LspExtrasState::default(),
             ),
             git: GitStateInput::new(&git),
+            theme: ThemeInput::new(&theme_default),
             render_tick: 0,
             kbd_macro: KbdMacroRecordingInput::new(&kbd_macro_default),
             session: SessionPrimaryInput::new(&session_default),
@@ -1698,7 +1706,7 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
         );
         let mut state = state;
         state.scroll_offset = 4;
-        let model = file_search_side_panel(&state, 4);
+        let model = file_search_side_panel(&state, &Theme::default(), 4);
         let names: Vec<&str> = model.rows.iter().map(|r| &*r.name).collect();
         assert_eq!(
             names,
@@ -1773,7 +1781,7 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
             selection: led_state_file_search::FileSearchSelection::SearchInput,
             ..Default::default()
         };
-        let model = file_search_side_panel(&state, 20);
+        let model = file_search_side_panel(&state, &Theme::default(), 20);
         // Row 0 = header, row 1 = query, row 2 = group header, row 3 = hit.
         let hit_row = &model.rows[3];
         assert_eq!(&*hit_row.name, "   42: aaaabbbcccc");
@@ -1812,7 +1820,7 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
             selection: led_state_file_search::FileSearchSelection::SearchInput,
             ..Default::default()
         };
-        let model = file_search_side_panel(&state, 20);
+        let model = file_search_side_panel(&state, &Theme::default(), 20);
         let hit_row = &model.rows[3];
         assert_eq!(hit_row.match_range, Some((13, 19)));
         // The chars at the computed range spell out "needle".
@@ -2171,6 +2179,7 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
         let fsrch = None;
         let git = led_state_git::GitState::default();
         let edits = led_state_buffer_edits::BufferEdits::default();
+        let theme = Theme::default();
         let panel = side_panel_model(SidePanelInputs {
             fs: FsTreeInput::new(&fs),
             browser: BrowserUiInput::new(&browser),
@@ -2179,6 +2188,7 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
             diagnostics: DiagnosticsStatesInput::new(&diags),
             git: GitStateInput::new(&git),
             edits: EditedBuffersInput::new(&edits),
+            theme: ThemeInput::new(&theme),
             rows: 10,
         });
         let rows: &Vec<SidePanelRow> = &panel.rows;

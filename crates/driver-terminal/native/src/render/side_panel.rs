@@ -76,102 +76,41 @@ pub(crate) fn paint_side_panel(panel: &SidePanelModel, area: Rect, theme: &Theme
                 line = truncated;
             }
             let name_end_col = row_x + name_width as u16;
-            if entry.selected {
-                // Selection + category composition (legacy
-                // display.rs:1381-1389):
-                //   - focused selection → pure selection style
-                //     (loud, wins over marker colour).
-                //   - unfocused selection → selection bg
-                //     patched with marker fg so the user still
-                //     sees "this errored file is selected".
-                let base_sel = if panel.focused {
-                    theme.browser_selected_focused
-                } else {
-                    theme.browser_selected_unfocused
-                };
-                let sel_style = if !panel.focused && let Some(status) = entry.status {
-                    let marker = theme.category_style(status.category);
-                    Style {
-                        fg: marker.fg.or(base_sel.fg),
-                        bg: base_sel.bg,
-                        attrs: base_sel.attrs,
-                    }
-                } else {
-                    base_sel
-                };
-                buf.put_str(buf_row, row_x, &line, sel_style);
-            } else if entry.replaced {
-                // Replaced hit rows stay visible so the user can
-                // Left-arrow back onto them to undo. Paint them
-                // with the dim `search_hit_replaced` style so the
-                // distinction is obvious.
-                buf.put_str(buf_row, row_x, &line, theme.search_hit_replaced);
-            } else if let Some((start, end)) = entry.match_range {
-                // Split into three styled runs so the matched
-                // substring picks up `theme.search_match` styling
-                // without disturbing the surrounding row.
+            // The runtime memo has pre-resolved the row's base
+            // style; the painter just stamps it. The match-range
+            // overlay still happens here because it requires
+            // splitting the printed string into styled runs — the
+            // theme.search_match style is read from theme rather
+            // than stamped per-row to keep `SidePanelRow` from
+            // duplicating every theme slot.
+            if let Some((start, end)) = entry.match_range {
                 paint_row_with_match(
-                    &line,
-                    start as usize,
-                    end as usize,
-                    theme,
-                    buf_row,
-                    row_x,
+                    PaintMatchArgs {
+                        line: &line,
+                        start: start as usize,
+                        end: end as usize,
+                        base_style: entry.name_style,
+                        match_style: theme.search_match,
+                        row: buf_row,
+                        col_start: row_x,
+                    },
                     buf,
                 );
-            } else if let Some(status) = entry.status {
-                // Category colouring: the whole name is painted in
-                // the category's theme style so the user spots the
-                // error/warn/git/PR row even without the letter.
-                // Matches legacy display.rs:1387-1391 ("marker_style
-                // as the row colour when not selected").
-                let marker = theme.category_style(status.category);
-                buf.put_str(buf_row, row_x, &line, marker);
             } else {
-                buf.put_str(buf_row, row_x, &line, Style::default());
+                buf.put_str(buf_row, row_x, &line, entry.name_style);
             }
 
             // Status letter in the right-most column (Browser mode
-            // only). When the row is selected, the letter keeps the
-            // selection-row style so the highlighted bar reads
-            // continuous across the whole row (legacy
-            // display.rs:1420-1425). Otherwise the letter uses the
-            // category style (coloured fg). The column at
-            // `name_end_col` is a blank gap so the letter doesn't
-            // sit flush against the file name.
-            if reserve_status {
+            // only). The memo has pre-resolved gap + letter styles
+            // into `status_cell`; non-Browser modes leave it
+            // `None`. The column at `name_end_col` is a blank gap
+            // so the letter doesn't sit flush against the file
+            // name.
+            if let Some(cell) = entry.status_cell.as_ref() {
                 let letter_col = name_end_col + 1;
-                let sel_style = if panel.focused {
-                    theme.browser_selected_focused
-                } else {
-                    theme.browser_selected_unfocused
-                };
-                let gap_style = if entry.selected {
-                    sel_style
-                } else {
-                    Style::default()
-                };
-                buf.put_char(buf_row, name_end_col, ' ', gap_style);
-                match entry.status {
-                    Some(status) => {
-                        if entry.selected {
-                            buf.put_char(buf_row, letter_col, status.letter, sel_style);
-                        } else {
-                            let marker = theme.category_style(status.category);
-                            buf.put_char(buf_row, letter_col, status.letter, marker);
-                        }
-                    }
-                    None => {
-                        // No category. Still honour selection bg
-                        // so the highlight bar doesn't stop one
-                        // col short of the panel edge.
-                        if entry.selected {
-                            buf.put_char(buf_row, letter_col, ' ', sel_style);
-                        } else {
-                            buf.put_char(buf_row, letter_col, ' ', Style::default());
-                        }
-                    }
-                }
+                buf.put_char(buf_row, name_end_col, ' ', cell.gap_style);
+                let letter_ch = entry.status.map(|s| s.letter).unwrap_or(' ');
+                buf.put_char(buf_row, letter_col, letter_ch, cell.letter_style);
             }
         } else {
             // Fill `cols` spaces — scoped to the side-panel area.
@@ -184,24 +123,40 @@ pub(crate) fn paint_side_panel(panel: &SidePanelModel, area: Rect, theme: &Theme
 }
 
 /// Split-print a non-selected hit row so the matched substring
-/// picks up `theme.search_match` styling. `start` / `end` are char
-/// offsets inside `line` (the post-padded / post-truncated text the
-/// sidebar will print). Clamps gracefully when the range is out of
-/// bounds — mis-computed indices shouldn't crash the painter.
-fn paint_row_with_match(
-    line: &str,
+/// picks up the match-highlight style. `start` / `end` (in `args`)
+/// are char offsets inside `line` — clamps gracefully when the
+/// range is out of bounds so mis-computed indices don't crash the
+/// painter.
+///
+/// `base_style` paints the prefix + suffix runs (typically
+/// `Style::default()` for non-selected hit rows; the runtime memo
+/// pre-resolves this onto the row). `match_style` paints the
+/// matched substring (typically `theme.search_match`).
+struct PaintMatchArgs<'a> {
+    line: &'a str,
     start: usize,
     end: usize,
-    theme: &Theme,
+    base_style: Style,
+    match_style: Style,
     row: u16,
     col_start: u16,
-    buf: &mut Buffer,
-) {
+}
+
+fn paint_row_with_match(args: PaintMatchArgs<'_>, buf: &mut Buffer) {
+    let PaintMatchArgs {
+        line,
+        start,
+        end,
+        base_style,
+        match_style,
+        row,
+        col_start,
+    } = args;
     let total = line.chars().count();
     let start = start.min(total);
     let end = end.min(total).max(start);
     if end == start {
-        buf.put_str(row, col_start, line, Style::default());
+        buf.put_str(row, col_start, line, base_style);
         return;
     }
     let prefix: String = line.chars().take(start).collect();
@@ -209,11 +164,11 @@ fn paint_row_with_match(
     let suffix: String = line.chars().skip(end).collect();
     let mut col = col_start;
     if !prefix.is_empty() {
-        col = buf.put_str(row, col, &prefix, Style::default());
+        col = buf.put_str(row, col, &prefix, base_style);
     }
-    col = buf.put_str(row, col, &matched, theme.search_match);
+    col = buf.put_str(row, col, &matched, match_style);
     if !suffix.is_empty() {
-        buf.put_str(row, col, &suffix, Style::default());
+        buf.put_str(row, col, &suffix, base_style);
     }
 }
 

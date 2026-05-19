@@ -406,14 +406,42 @@ pub struct SidePanelRow {
     ///
     /// `None` = no category → no coloured name, no status glyph.
     ///
-    /// The painter matches on the `IssueCategory` to pick a style
-    /// (`Theme::category_style`) and uses `letter` verbatim for the
-    /// right-column glyph (a bullet `•` for letterless categories,
-    /// always a bullet for directories — the resolver embeds that
-    /// fallback). Mirrors legacy's `StatusDisplay` in shape.
+    /// The painter uses `letter` verbatim for the right-column
+    /// glyph (a bullet `•` for letterless categories, always a
+    /// bullet for directories — the resolver embeds that fallback).
+    /// Mirrors legacy's `StatusDisplay` in shape. Per-row styling
+    /// is pre-resolved into [`Self::name_style`] /
+    /// [`Self::status_cell`] so the painter never needs to look at
+    /// `category` itself.
     ///
     /// [`IssueCategory`]: led_core::IssueCategory
     pub status: Option<RowStatus>,
+    /// Resolved style for the name region (everything left of the
+    /// status column). Pre-computed by the runtime memo from
+    /// `(focused, selected, replaced, status, theme)` so the
+    /// painter just stamps it onto the cells without re-deriving
+    /// the selection / category / replaced cascade per frame. The
+    /// match-highlight overlay (`theme.search_match` on the
+    /// `match_range` substring) still happens in the painter
+    /// because it requires splitting the name into runs.
+    pub name_style: Style,
+    /// Resolved styles for the two right-most cells (gap + letter)
+    /// in Browser mode. `None` for Completions and FileSearch modes
+    /// — those don't reserve the status column.
+    pub status_cell: Option<SidePanelStatusCell>,
+}
+
+/// Pre-resolved gap + letter styles for the right-most two cells
+/// of a Browser-mode side-panel row. The painter writes the gap
+/// (a single space) at `name_end_col` and the letter (from
+/// [`SidePanelRow::status`], or a space when `status` is `None`)
+/// at `name_end_col + 1`. Both styles already encode the
+/// selection / category / focus decision, so the painter just
+/// puts the characters.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SidePanelStatusCell {
+    pub gap_style: Style,
+    pub letter_style: Style,
 }
 
 /// Displayable status for one browser row. The split from
