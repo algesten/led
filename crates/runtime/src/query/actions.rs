@@ -314,12 +314,23 @@ pub fn clipboard_action<'c, 'd>(
 pub fn find_file_action<'f>(
     ff: FindFileInput<'f>,
 ) -> Vec<led_driver_find_file_core::FindFileCmd> {
-    // Execute-pattern: dispatch pushed one `FindFileCmd` per input
-    // edit into the state's queue; the memo ships the whole queue,
-    // and the main loop drains it after execute. Inactive overlay
-    // or empty queue → empty Vec (zero alloc hot path).
+    // Execute-pattern: dispatch pushed one `FindFileRequest` per
+    // input edit into the state's queue; the memo translates each
+    // domain request to the driver ABI `FindFileCmd` and ships the
+    // whole queue, and the main loop drains it after execute.
+    // Inactive overlay or empty queue → empty Vec (zero alloc hot
+    // path). Translation is the field-rename boundary that keeps
+    // `state-find-file` from storing driver-ABI types as fields.
     let Some(state) = ff.overlay.as_ref() else {
         return Vec::new();
     };
-    state.pending_find_file_list.clone()
+    state
+        .pending_find_file_list
+        .iter()
+        .map(|r| led_driver_find_file_core::FindFileCmd {
+            dir: r.dir.clone(),
+            prefix: r.prefix.clone(),
+            show_hidden: r.show_hidden,
+        })
+        .collect()
 }
