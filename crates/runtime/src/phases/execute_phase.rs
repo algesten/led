@@ -11,7 +11,7 @@ use led_driver_session_core::SessionCmd;
 use crate::apply::session::new_chain_id;
 use crate::phases::query_phase::QueryOut;
 use crate::phases::TickEnv;
-use crate::{Sources, UndoPersistTracker};
+use crate::{LspNotified, Sources, UndoPersistTracker};
 
 pub(crate) fn run(sources: &mut Sources, env: &TickEnv<'_>, q: &QueryOut) {
     let Sources {
@@ -28,6 +28,7 @@ pub(crate) fn run(sources: &mut Sources, env: &TickEnv<'_>, q: &QueryOut) {
         syntax,
         undo_persistence,
         clock,
+        lsp_notified,
         ..
     } = sources;
 
@@ -58,6 +59,25 @@ pub(crate) fn run(sources: &mut Sources, env: &TickEnv<'_>, q: &QueryOut) {
     }
     if !q.lsp_watch_cmds.is_empty() {
         env.drivers.lsp.execute(q.lsp_watch_cmds.iter());
+    }
+
+    // ── LSP BufferOpened fan-out (moved out of Ingest per Theme E).
+    // Ship the cmds, then stamp `lsp_notified` so the next query
+    // tick's diff skips these paths. The (path, version,
+    // saved_version) trio is the tuple the LSP buffer-changed
+    // memo subsequently uses to decide whether further
+    // `BufferChanged` cmds are required.
+    if !q.buffer_opened_cmds.is_empty() {
+        env.drivers.lsp.execute(q.buffer_opened_cmds.iter());
+        for (path, version, saved_version) in &q.buffer_opened_notified {
+            lsp_notified.insert(
+                path.clone(),
+                LspNotified {
+                    version: *version,
+                    saved_version: *saved_version,
+                },
+            );
+        }
     }
 
     if !q.find_file_actions.is_empty()

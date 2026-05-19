@@ -40,6 +40,20 @@ pub(crate) struct QueryOut {
     /// to language servers, one per affected server. Empty when
     /// the workspace gate is closed.
     pub lsp_watch_cmds: Arc<Vec<LspCmd>>,
+    /// `LspCmd::BufferOpened` for every buffer that exists in
+    /// `edits.buffers` but has no entry in `lsp_notified`. The
+    /// execute phase ships them and writes the `lsp_notified`
+    /// record (so the next tick's diff is empty). Paired with
+    /// [`Self::buffer_opened_notified`] so execute can stamp the
+    /// `(version, saved_version)` it learnt this tick without
+    /// re-reading `edits` (no new buffers are added between
+    /// query and execute inside one tick).
+    pub buffer_opened_cmds: Vec<LspCmd>,
+    /// `(path, version, saved_version)` triples that correspond
+    /// 1:1 with [`Self::buffer_opened_cmds`]. Execute folds these
+    /// into `lsp_notified` after dispatching the cmds.
+    pub buffer_opened_notified:
+        Vec<(led_core::CanonPath, led_core::BufferVersion, led_core::SavedVersion)>,
 }
 
 pub(crate) fn run(sources: &Sources, env: &TickEnv<'_>) -> QueryOut {
@@ -66,6 +80,8 @@ pub(crate) fn run(sources: &Sources, env: &TickEnv<'_>) -> QueryOut {
         fs_list_driver,
         file_watch,
         lsp_watched_globs,
+        lsp_notified,
+        path_chains,
         undo_persistence,
         ..
     } = sources;
@@ -160,6 +176,21 @@ pub(crate) fn run(sources: &Sources, env: &TickEnv<'_>) -> QueryOut {
         Arc::new(Vec::new())
     };
 
+    // ── LSP BufferOpened derived: every path that has an
+    // `EditedBuffer` but no `lsp_notified` record is newly
+    // materialised this tick (the ingest_file_completions hook
+    // inserted the `EditedBuffer`; we never told the LSP driver
+    // about it). Execute ships one `BufferOpened` per path and
+    // stamps `lsp_notified` so subsequent ticks skip.
+    //
+    // `path_chains` is consulted for symlinked dotfiles
+    // (`feedback_language_detection_chain`) — the chain captures
+    // the user-typed basename, which `Language::from_chain`
+    // resolves before falling back to the canonical path's
+    // extension.
+    let (buffer_opened_cmds, buffer_opened_notified) =
+        derive_buffer_opened(edits, lsp_notified, path_chains);
+
     QueryOut {
         load_actions,
         save_actions,
@@ -170,5 +201,50 @@ pub(crate) fn run(sources: &Sources, env: &TickEnv<'_>) -> QueryOut {
         external_reread_cmds,
         session_sync_cmds,
         lsp_watch_cmds,
+        buffer_opened_cmds,
+        buffer_opened_notified,
     }
+}
+
+/// Diff `edits.buffers` against `lsp_notified` and emit one
+/// `LspCmd::BufferOpened` per buffer that has not yet been
+/// announced to the LSP driver. Returned in two arrays of equal
+/// length so the execute phase can stamp `lsp_notified` after
+/// dispatching, without re-reading `edits`.
+///
+/// Order follows `edits.buffers`' iteration order — stable per
+/// tick. The LSP driver de-duplicates per path inside its own
+/// state machine, so emit order is not observable from goldens.
+fn derive_buffer_opened(
+    edits: &led_state_buffer_edits::BufferEdits,
+    lsp_notified: &imbl::HashMap<led_core::CanonPath, crate::LspNotified>,
+    path_chains: &std::collections::HashMap<led_core::CanonPath, led_core::PathChain>,
+) -> (
+    Vec<LspCmd>,
+    Vec<(led_core::CanonPath, led_core::BufferVersion, led_core::SavedVersion)>,
+) {
+    let mut cmds: Vec<LspCmd> = Vec::new();
+    let mut notified: Vec<(
+        led_core::CanonPath,
+        led_core::BufferVersion,
+        led_core::SavedVersion,
+    )> = Vec::new();
+    for (path, eb) in edits.buffers.iter() {
+        if lsp_notified.contains_key(path) {
+            continue;
+        }
+        let language = path_chains
+            .get(path)
+            .and_then(led_state_syntax::Language::from_chain)
+            .or_else(|| led_state_syntax::Language::from_path(path));
+        let hash = led_core::EphemeralContentHash::of_rope(&eb.rope).persist();
+        cmds.push(LspCmd::BufferOpened {
+            path: path.clone(),
+            language,
+            rope: eb.rope.clone(),
+            hash,
+        });
+        notified.push((path.clone(), eb.version, eb.saved_version));
+    }
+    (cmds, notified)
 }

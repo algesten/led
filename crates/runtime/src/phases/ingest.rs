@@ -10,7 +10,7 @@ use led_core::{CanonPath, EphemeralContentHash, SavedVersion};
 use led_driver_buffers_core::LoadState;
 use led_driver_clipboard_core::ClipboardResult;
 use led_driver_git_core::GitEvent;
-use led_driver_lsp_core::{LspCmd, LspEvent};
+use led_driver_lsp_core::LspEvent;
 use led_driver_session_core::SessionEvent;
 use led_state_diagnostics::{BufferDiagnostics, LspServerStatus};
 use led_state_lifecycle::Phase;
@@ -29,7 +29,7 @@ use crate::apply::session::{
 };
 use crate::dispatch;
 use crate::phases::TickEnv;
-use crate::{diag_offer, Sources, LspNotified, INFO_TTL};
+use crate::{diag_offer, Sources, INFO_TTL};
 
 /// Tick-start clock update + per-tick expiry sweeps.
 pub(crate) fn ingest_clock(sources: &mut Sources) {
@@ -87,7 +87,6 @@ pub(crate) fn ingest_file_completions(sources: &mut Sources, env: &TickEnv<'_>) 
         fs,
         syntax,
         path_chains,
-        lsp_notified,
         session,
         undo_persistence,
         resume_check_pending,
@@ -139,32 +138,11 @@ pub(crate) fn ingest_file_completions(sources: &mut Sources, env: &TickEnv<'_>) 
                 .entry(completion.path.clone())
                 .or_insert_with(|| SyntaxState::new(lang));
         }
-        if inserted {
-            let (version, saved, hash) = edits
-                .buffers
-                .get(&completion.path)
-                .map(|eb| {
-                    (
-                        eb.version,
-                        eb.saved_version,
-                        EphemeralContentHash::of_rope(&eb.rope).persist(),
-                    )
-                })
-                .unwrap_or_default();
-            env.drivers.lsp.execute(std::iter::once(&LspCmd::BufferOpened {
-                path: completion.path.clone(),
-                language: detected,
-                rope: completion.rope.clone(),
-                hash,
-            }));
-            lsp_notified.insert(
-                completion.path.clone(),
-                LspNotified {
-                    version,
-                    saved_version: saved,
-                },
-            );
-        }
+        // BufferOpened dispatch moved to query_phase + execute_phase
+        // (Theme E). The query phase diffs `edits.buffers` against
+        // `lsp_notified` to find newly-materialised buffers and
+        // emits one `LspCmd::BufferOpened` per path; execute ships
+        // them and stamps `lsp_notified`. Empty diff = no work.
 
         for tab in tabs.open.iter_mut() {
             if tab.path != completion.path {
