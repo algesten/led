@@ -23,8 +23,8 @@ pub use actions::{
     sync_check_cmds,
 };
 pub use browser::{
-    browser_auto_expanded, browser_entries, browser_selected_idx, file_categories_map,
-    file_list_action, BrowserDerivedInputs,
+    browser_auto_expanded, browser_entries, browser_selected_idx, diag_categories_map,
+    file_categories_map, file_list_action, git_categories_map, BrowserDerivedInputs,
 };
 pub use desired::{
     desired_inlay_hint_requests, desired_lsp_buffer_changed, desired_syntax_parses,

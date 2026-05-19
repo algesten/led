@@ -7,21 +7,20 @@ use std::sync::Arc;
 
 use super::inputs::*;
 
-/// Per-file category set for the whole workspace. Feeds the
-/// browser painter + the Alt-./ nav cycle.
+/// Stage 1 of [`file_categories_map`] — LSP diagnostics → per-file
+/// category set. Error/Warning only; Info/Hint never colour the
+/// browser.
 ///
-/// LSP Error / Warning, plus git file-level categories (Unstaged,
-/// StagedModified, StagedNew, Untracked). Info / Hint are filtered
-/// out — they never colour the browser.
+/// Caches on `DiagnosticsStatesInput` only. A git status churn
+/// (file-statuses HashMap mutation) does not invalidate this
+/// stage, so the diagnostic→category walk runs only when
+/// diagnostics actually change.
 #[drv::memo(single)]
-pub fn file_categories_map<'d>(
+pub fn diag_categories_map<'d>(
     diagnostics: DiagnosticsStatesInput<'d>,
-    git: GitStateInput<'d>,
 ) -> Arc<imbl::HashMap<CanonPath, imbl::HashSet<led_core::IssueCategory>>> {
     let mut map: imbl::HashMap<CanonPath, imbl::HashSet<led_core::IssueCategory>> =
         imbl::HashMap::default();
-
-    // LSP diagnostics — Error/Warning only, Info/Hint silent.
     for (path, bd) in diagnostics.by_path.iter() {
         for d in bd.diagnostics.iter() {
             let cat = match d.severity {
@@ -38,12 +37,70 @@ pub fn file_categories_map<'d>(
                 .insert(cat);
         }
     }
+    Arc::new(map)
+}
 
-    // Git file-level statuses. `IssueCategory::resolve_display`
-    // picks the winning letter / colour when a path carries both
-    // a diagnostic and a git category (LSP precedes git by
-    // `IssueCategory::precedence`).
+/// Stage 2 of [`file_categories_map`] — git file statuses → per-file
+/// category set. `git.file_statuses` already arrives keyed by path
+/// with category sets per file; this stage clones it into the
+/// shared `imbl::HashMap<CanonPath, HashSet<IssueCategory>>` shape
+/// so the merge can union it with the diagnostic side.
+///
+/// Caches on `GitStateInput` only. A diagnostic churn (the
+/// other side of the merge) does not invalidate this stage.
+#[drv::memo(single)]
+pub fn git_categories_map<'g>(
+    git: GitStateInput<'g>,
+) -> Arc<imbl::HashMap<CanonPath, imbl::HashSet<led_core::IssueCategory>>> {
+    let mut map: imbl::HashMap<CanonPath, imbl::HashSet<led_core::IssueCategory>> =
+        imbl::HashMap::default();
     for (path, cats) in git.file_statuses.iter() {
+        map.insert(path.clone(), cats.clone());
+    }
+    Arc::new(map)
+}
+
+/// Per-file category set for the whole workspace. Feeds the
+/// browser painter + the Alt-./ nav cycle.
+///
+/// LSP Error / Warning, plus git file-level categories (Unstaged,
+/// StagedModified, StagedNew, Untracked). Info / Hint are filtered
+/// out — they never colour the browser.
+///
+/// Composed from [`diag_categories_map`] + [`git_categories_map`].
+/// Top-level memo continues to take the original `DiagnosticsStatesInput +
+/// GitStateInput` inputs because drv's `#[drv::memo]` requires `drv::Input`
+/// projection types — it cannot take `Arc<imbl::HashMap<...>>` from the
+/// intermediates as inputs directly. The cache-narrowing benefit accrues
+/// to the two intermediates: a diagnostic-only churn re-runs only the
+/// diag stage, a git-only churn re-runs only the git stage, and the
+/// merge re-runs only when one side's `Arc` identity actually changed
+/// (cheap union over two already-built maps).
+#[drv::memo(single)]
+pub fn file_categories_map<'d>(
+    diagnostics: DiagnosticsStatesInput<'d>,
+    git: GitStateInput<'d>,
+) -> Arc<imbl::HashMap<CanonPath, imbl::HashSet<led_core::IssueCategory>>> {
+    let diag_map = diag_categories_map(diagnostics);
+    let git_map = git_categories_map(git);
+
+    // Short-circuit when one side is empty — Arc-clone the other,
+    // avoiding both the unioning walk and the allocation. Idle
+    // ticks hit this path (no diagnostics, no git changes).
+    if diag_map.is_empty() {
+        return git_map;
+    }
+    if git_map.is_empty() {
+        return diag_map;
+    }
+
+    // Union the two maps. `IssueCategory::resolve_display` picks the
+    // winning letter / colour when a path carries both a diagnostic
+    // and a git category (LSP precedes git by
+    // `IssueCategory::precedence`).
+    let mut map: imbl::HashMap<CanonPath, imbl::HashSet<led_core::IssueCategory>> =
+        (*diag_map).clone();
+    for (path, cats) in git_map.iter() {
         let entry = map.entry(path.clone()).or_default();
         for c in cats.iter() {
             entry.insert(*c);
