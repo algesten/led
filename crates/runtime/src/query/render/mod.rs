@@ -143,7 +143,7 @@ pub fn render_frame<'a>(inputs: RenderInputs<'a>) -> Option<Frame> {
     } = inputs;
     let dims = (*term.dims)?;
     let layout = Layout::compute(dims, *browser.visible);
-    let tab_bar = tab_bar_model(tabs, edits);
+    let tab_bar = tab_bar_model(tabs, edits, layout.tab_bar.cols);
     let body = body_model(BodyInputs {
         edits,
         store,

@@ -717,6 +717,7 @@ mod tests {
             tab_bar: TabBarModel {
                 labels: Arc::new(vec!["a.rs".into(), "b.rs".into()]),
                 active: Some(0),
+                scroll_start: 0,
             },
             body: BodyModel::Content {
                 lines: Arc::new(vec!["line 1".into(), "line 2".into()]),
@@ -863,6 +864,7 @@ mod tests {
             tab_bar: TabBarModel {
                 labels: Arc::new(vec!["a.rs".into()]),
                 active: Some(0),
+                scroll_start: 0,
             },
             body: body.clone(),
             status_bar: StatusBarModel::default(),
@@ -957,10 +959,12 @@ mod tests {
                 (0..6).map(|i| format!("file_{i}.rs")).collect::<Vec<_>>(),
             ),
             active: Some(0),
+            scroll_start: 0,
         };
         let one_tab = TabBarModel {
             labels: Arc::new(vec!["a.rs".into()]),
             active: Some(0),
+            scroll_start: 0,
         };
         let panel = SidePanelModel {
             rows: Arc::new(vec![]),

@@ -227,10 +227,21 @@ pub struct Terminal {
 /// Tab-bar labels. `labels` is wrapped in `Arc` so cache-hit clones of
 /// [`TabBarModel`] (and its containing [`Frame`]) are a pointer copy
 /// rather than a deep clone of every label per tick.
+///
+/// `scroll_start` is the index of the first visible label after the
+/// runtime has applied "scroll the active tab into view": when the
+/// label widths overflow `area.cols`, we shift the window leftward
+/// until the active tab fits. The painter consumes this as data;
+/// the legacy inline `Vec<u16>` width pre-compute + O(n²) loop in
+/// `paint_tab_bar` was a per-frame allocation expressing derived
+/// state in the painter's language instead of as a memo.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct TabBarModel {
     pub labels: Arc<Vec<String>>,
     pub active: Option<usize>,
+    /// Index into `labels` of the first visible tab. `0` for the
+    /// common case where every tab fits within the tab-bar width.
+    pub scroll_start: usize,
 }
 
 /// Body view. All owned-string fields use `Arc<str>` / `Arc<Vec<BodyLine>>`
