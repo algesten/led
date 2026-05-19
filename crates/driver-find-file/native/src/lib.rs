@@ -162,18 +162,22 @@ mod tests {
         stdfs::write(dir.join(".hidden"), b"").unwrap();
 
         let (drv, _native) = spawn(Arc::new(NoopTraceImpl), Notifier::noop());
-        drv.execute(std::iter::once(&FindFileCmd {
-            dir: canon(&dir),
-            prefix: "a".into(),
-            show_hidden: false,
-        }));
+        let mut state = led_driver_find_file_core::FindFileDriverState::default();
+        drv.execute(
+            std::iter::once(&FindFileCmd {
+                dir: canon(&dir),
+                prefix: "a".into(),
+                show_hidden: false,
+            }),
+            &mut state,
+        );
 
         let deadline = Duration::from_secs(2);
         let mut collected: Vec<FindFileListed> = Vec::new();
         assert!(
             wait_for(
                 || {
-                    collected.extend(drv.process());
+                    collected.extend(drv.process(&mut state));
                     !collected.is_empty()
                 },
                 deadline
@@ -194,16 +198,20 @@ mod tests {
         stdfs::write(dir.join(".cache"), b"").unwrap();
 
         let (drv, _native) = spawn(Arc::new(NoopTraceImpl), Notifier::noop());
-        drv.execute(std::iter::once(&FindFileCmd {
-            dir: canon(&dir),
-            prefix: ".c".into(),
-            show_hidden: true,
-        }));
+        let mut state = led_driver_find_file_core::FindFileDriverState::default();
+        drv.execute(
+            std::iter::once(&FindFileCmd {
+                dir: canon(&dir),
+                prefix: ".c".into(),
+                show_hidden: true,
+            }),
+            &mut state,
+        );
 
         let mut collected: Vec<FindFileListed> = Vec::new();
         wait_for(
             || {
-                collected.extend(drv.process());
+                collected.extend(drv.process(&mut state));
                 !collected.is_empty()
             },
             Duration::from_secs(2),
@@ -217,16 +225,20 @@ mod tests {
     fn unreadable_dir_returns_empty_entries() {
         let missing = PathBuf::from("/nonexistent-led-find-file-dir");
         let (drv, _native) = spawn(Arc::new(NoopTraceImpl), Notifier::noop());
-        drv.execute(std::iter::once(&FindFileCmd {
-            dir: canon(&missing),
-            prefix: "".into(),
-            show_hidden: false,
-        }));
+        let mut state = led_driver_find_file_core::FindFileDriverState::default();
+        drv.execute(
+            std::iter::once(&FindFileCmd {
+                dir: canon(&missing),
+                prefix: "".into(),
+                show_hidden: false,
+            }),
+            &mut state,
+        );
 
         let mut collected: Vec<FindFileListed> = Vec::new();
         wait_for(
             || {
-                collected.extend(drv.process());
+                collected.extend(drv.process(&mut state));
                 !collected.is_empty()
             },
             Duration::from_secs(2),

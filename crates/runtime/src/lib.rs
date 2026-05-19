@@ -211,6 +211,12 @@ pub struct Sources {
     /// `Some` while the find-file / save-as modal is active. See
     /// [`led_state_find_file::FindFileState`].
     pub find_file: Option<FindFileState>,
+    /// Driver-owned in-flight tracking for the find-file
+    /// directory-listing driver, per EXAMPLE-ARCH § "Stateless
+    /// drivers still need an in-flight source". `execute` writes
+    /// the current cmd here synchronously; `process` clears it
+    /// when the matching `Done` arrives.
+    pub find_file_driver: led_driver_find_file_core::FindFileDriverState,
     /// `Some` while in-buffer isearch is active. See
     /// [`led_state_isearch::IsearchState`].
     pub isearch: Option<IsearchState>,

@@ -544,9 +544,10 @@ pub(crate) fn ingest_find_file(sources: &mut Sources, env: &TickEnv<'_>) {
     let Sources {
         tabs,
         find_file,
+        find_file_driver,
         ..
     } = sources;
-    for done in env.drivers.find_file.process() {
+    for done in env.drivers.find_file.process(find_file_driver) {
         let Some(ff) = find_file.as_mut() else {
             continue;
         };

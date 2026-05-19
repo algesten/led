@@ -18,6 +18,7 @@ pub(crate) fn run(sources: &mut Sources, env: &TickEnv<'_>, q: &QueryOut) {
         store,
         fs,
         find_file,
+        find_file_driver,
         file_search,
         syntax,
         undo_persistence,
@@ -34,7 +35,9 @@ pub(crate) fn run(sources: &mut Sources, env: &TickEnv<'_>, q: &QueryOut) {
     {
         ff.pending_find_file_list.clear();
     }
-    env.drivers.find_file.execute(q.find_file_actions.iter());
+    env.drivers
+        .find_file
+        .execute(q.find_file_actions.iter(), find_file_driver);
 
     if let Some(fs_state) = file_search.as_mut()
         && !fs_state.pending_search.is_empty()
