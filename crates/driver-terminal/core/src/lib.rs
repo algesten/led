@@ -19,6 +19,46 @@ pub use theme::{Attrs, Color, DiagnosticsTheme, Style, SyntaxTheme, Theme};
 
 // ── Mirror types — the ABI boundary ────────────────────────────────────
 
+/// Monotonic identifier the runtime stamps on every paint command.
+///
+/// `EXAMPLE-ARCH.md § "Pure output drivers"` calls for the same
+/// "execute writes intent sync, fire async, diff is Noop until Done"
+/// shape every other driver has. Even though `TerminalOutputDriver`
+/// is synchronous (the terminal is line-buffered, no separate ack
+/// channel), the in-flight artifact still needs to be addressable —
+/// otherwise idempotent re-fires of the same paint can't be detected
+/// in the source. `FrameId` is the address; [`PaintState`] is the
+/// driver-owned source that tracks it.
+///
+/// Generation is the runtime's job: the render phase bumps the
+/// per-process sequence whenever the composed frame is actually new
+/// (i.e. when `frame != *last_frame` ignoring the id field), stamps
+/// it on the frame, and feeds it to `execute`. The driver then writes
+/// `state.in_flight = Some(id)` synchronously before painting and
+/// `state.last_acked = Some(id)` after the byte stream has flushed.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, drv::Input)]
+pub struct FrameId(pub u64);
+
+/// Driver-owned source for [`TerminalOutputDriver`] per
+/// `EXAMPLE-ARCH.md § "Pure output drivers"`. The runtime reads this
+/// source like any other driver's bookkeeping; memos can gate on
+/// `in_flight` if they ever need to suppress a re-paint while one is
+/// outstanding (today the synchronous flush makes that a no-op, but
+/// the type carries the invariant for future async paths e.g. a
+/// vsync queue on a GPU backend).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PaintState {
+    /// `Some(id)` while a paint is mid-execute. Today this is only
+    /// visible to re-entrant `execute` callers (none exist) — but
+    /// the field maintains the same shape every other in-flight
+    /// driver source uses.
+    pub in_flight: Option<FrameId>,
+    /// Most recently acknowledged frame. Set at the end of every
+    /// `execute` once the byte stream has been flushed. `None` until
+    /// the first paint lands.
+    pub last_acked: Option<FrameId>,
+}
+
 /// Viewport size in columns × rows.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, drv::Input)]
 pub struct Dims {
@@ -491,7 +531,7 @@ pub struct ScrollHint {
     pub region_right: u16,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Default)]
+#[derive(Clone, Debug, Eq, Default)]
 pub struct Frame {
     pub tab_bar: TabBarModel,
     pub body: BodyModel,
@@ -513,6 +553,51 @@ pub struct Frame {
     /// cursor (no active content / cursor scrolled away).
     pub cursor: Option<(u16, u16)>,
     pub dims: Dims,
+    /// Runtime-assigned identity stamped in the render phase. Two
+    /// frames whose `id` differ are guaranteed to differ in some
+    /// other field (the render phase only bumps the id when the
+    /// content-bearing fields actually changed) — but `id` itself
+    /// is *excluded* from equality so the memo cache (which never
+    /// sees the post-stamp id) still cache-hits correctly. The
+    /// driver's [`PaintState`] tracks the latest stamped id as
+    /// `in_flight` / `last_acked` per the pure-output-driver
+    /// pattern in `EXAMPLE-ARCH.md`.
+    pub id: FrameId,
+}
+
+// Manual `PartialEq` deliberately omits `id` so render-phase id
+// stamping doesn't break the `frame != *last_frame` change detector:
+// the memo never sees the post-stamp id (it's assigned by render
+// phase after the memo returns), and equality on the content-bearing
+// fields is what drives the "paint or skip" decision. With `id`
+// included in derived eq, every tick would compare unequal as soon
+// as the previous tick stamped its id onto `last_frame`.
+impl PartialEq for Frame {
+    fn eq(&self, other: &Self) -> bool {
+        let Self {
+            tab_bar,
+            body,
+            status_bar,
+            side_panel,
+            popover,
+            completion,
+            rename_popup,
+            layout,
+            cursor,
+            dims,
+            id: _,
+        } = self;
+        *tab_bar == other.tab_bar
+            && *body == other.body
+            && *status_bar == other.status_bar
+            && *side_panel == other.side_panel
+            && *popover == other.popover
+            && *completion == other.completion
+            && *rename_popup == other.rename_popup
+            && *layout == other.layout
+            && *cursor == other.cursor
+            && *dims == other.dims
+    }
 }
 
 /// In-buffer rename prompt: a single-row overlay that reads

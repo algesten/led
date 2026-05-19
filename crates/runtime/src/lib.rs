@@ -416,6 +416,23 @@ pub struct Sources {
     /// single syscall per tick covers every consumer and
     /// time-dependent memos can cache-hit on idle.
     pub clock: Clock,
+    /// Driver-owned in-flight tracking for the terminal output
+    /// driver per `EXAMPLE-ARCH.md § "Pure output drivers"`.
+    /// Records the [`FrameId`] currently mid-paint and the most
+    /// recent ack. Mutated synchronously by
+    /// `TerminalOutputDriver::execute`; readable by memos that
+    /// want to gate on a paint still being outstanding (none
+    /// today — the synchronous flush makes that a no-op — but
+    /// the source carries the invariant so a future async paint
+    /// backend gets the right behaviour for free).
+    pub paint_state: led_driver_terminal_core::PaintState,
+    /// Monotonic sequence the render phase pulls from when
+    /// stamping [`FrameId`] on a content-changed frame. Bumped
+    /// only when the freshly composed frame differs from the
+    /// previously painted one (ignoring the id field) — so the
+    /// id space stays dense and `last_acked == frame.id` is the
+    /// natural "this paint already landed" predicate.
+    pub frame_id_seq: led_driver_terminal_core::FrameId,
 }
 
 /// Clock source. Two fields, mutated together once per tick.

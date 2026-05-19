@@ -22,7 +22,8 @@ use crossterm::event::{
 };
 use led_core::Notifier;
 use led_driver_terminal_core::{
-    Dims, Frame, KeyCode, KeyEvent, KeyModifiers, TermEvent, Theme, TerminalInputDriver, Trace,
+    Dims, Frame, KeyCode, KeyEvent, KeyModifiers, PaintState, TermEvent, Theme,
+    TerminalInputDriver, Trace,
 };
 
 use buffer::Buffer;
@@ -257,15 +258,45 @@ impl TerminalOutputDriver {
     /// to re-render. On skipped regions the cells simply retain
     /// their previous-frame values (paint only overwrites what it
     /// touches), and the diff correctly finds no changes there.
+    ///
+    /// `paint_state` is the driver-owned source per `EXAMPLE-ARCH.md
+    /// § "Pure output drivers"`. Sequencing on each call:
+    ///
+    ///   1. Idempotency gate — when `paint_state.in_flight == Some(
+    ///      frame.id)` (a re-fire of the same paint), return `Ok(())`
+    ///      without writing anything. Defensive: the runtime's
+    ///      render phase already gates on `frame != *last_frame`, so
+    ///      a duplicate id is currently impossible — but the source
+    ///      carries the invariant so a future async backend (vsync
+    ///      queue, GPU compositor) gets the right behaviour for free.
+    ///   2. Write intent — `paint_state.in_flight = Some(frame.id)`
+    ///      synchronously before painting.
+    ///   3. Paint + flush bytes.
+    ///   4. Acknowledge — `paint_state.last_acked = Some(frame.id);
+    ///      paint_state.in_flight = None;`. The terminal is line-
+    ///      buffered (no separate ack channel), so the ack is
+    ///      synchronous.
     pub fn execute<W: Write>(
         &self,
         frame: &Frame,
         last: Option<&Frame>,
         scroll_hints: &[led_driver_terminal_core::ScrollHint],
         theme: &Theme,
+        paint_state: &mut PaintState,
         out: &mut W,
     ) -> io::Result<()> {
         use crossterm::{cursor, queue, terminal};
+
+        if paint_state.in_flight == Some(frame.id) {
+            return Ok(());
+        }
+
+        // Mark the frame as the in-flight artifact synchronously
+        // before any byte hits the writer. Mirrors the
+        // `FileWriteState::in_flight.insert` step on the save path
+        // and every other driver's "write intent sync, fire async"
+        // discipline.
+        paint_state.in_flight = Some(frame.id);
 
         self.trace.render_tick();
 
@@ -398,6 +429,12 @@ impl TerminalOutputDriver {
         // Swap buffers: next frame writes into the one we just used
         // as `prev`, and diffs against what we just emitted.
         state.current = 1 - state.current;
+
+        // Ack the in-flight frame. Synchronous because the writer
+        // has already flushed — there's no separate "Done" channel
+        // for a terminal.
+        paint_state.last_acked = Some(frame.id);
+        paint_state.in_flight = None;
 
         Ok(())
     }
@@ -629,7 +666,7 @@ pub fn suspend_and_resume<W: Write>(out: &mut W) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use led_driver_terminal_core::{NoopTrace, Style};
+    use led_driver_terminal_core::{FrameId, NoopTrace, Style};
 
     /// Paint a frame through the full driver path and return the
     /// emitted bytes. The trace is a `NoopTrace` so tests don't need
@@ -641,7 +678,10 @@ mod tests {
     ) -> (TerminalOutputDriver, Vec<u8>) {
         let driver = TerminalOutputDriver::new(Arc::new(NoopTrace));
         let mut out: Vec<u8> = Vec::new();
-        driver.execute(frame, last, &[], theme, &mut out).expect("execute");
+        let mut paint_state = PaintState::default();
+        driver
+            .execute(frame, last, &[], theme, &mut paint_state, &mut out)
+            .expect("execute");
         (driver, out)
     }
 
@@ -685,6 +725,7 @@ mod tests {
             layout: Layout::compute(Dims { cols: 40, rows: 5 }, false),
             cursor: Some((0, 0)),
             dims: Dims { cols: 40, rows: 5 },
+            id: FrameId::default(),
         };
         let (_driver, out) = execute_frame(&frame, None, &Theme::default());
         assert!(!out.is_empty());
@@ -703,6 +744,7 @@ mod tests {
             layout: Layout::compute(Dims { cols: 40, rows: 5 }, false),
             cursor: None,
             dims: Dims { cols: 40, rows: 5 },
+            id: FrameId::default(),
         };
         let (_driver, out) = execute_frame(&frame, None, &Theme::default());
         // Empty frames still produce clear/hide sequences — just don't panic.
@@ -743,6 +785,7 @@ mod tests {
             layout,
             cursor: None,
             dims,
+            id: FrameId::default(),
         };
         let (_driver, out) = execute_frame(&frame, None, &Theme::default());
         assert!(
@@ -825,6 +868,7 @@ mod tests {
             layout,
             cursor: Some((layout.editor_area.x + 2, 0)),
             dims,
+            id: FrameId::default(),
         };
         // Frame 2: same body (same Arc → cache hit), side_panel.focused flipped.
         let frame2 = Frame {
@@ -844,13 +888,19 @@ mod tests {
         let theme = Theme::default();
         let mut grid = Grid::new(dims);
         let mut out: Vec<u8> = Vec::new();
+        let mut paint_state = PaintState::default();
+        // Distinct ids so the idempotency gate doesn't short-circuit
+        // the second paint (frames differ in `focused`, so under the
+        // real runtime the render phase would stamp a new id).
+        let frame1 = Frame { id: FrameId(1), ..frame1 };
+        let frame2 = Frame { id: FrameId(2), ..frame2 };
         driver
-            .execute(&frame1, None, &[], &theme, &mut out)
+            .execute(&frame1, None, &[], &theme, &mut paint_state, &mut out)
             .expect("frame1");
         grid.apply(&out);
         out.clear();
         driver
-            .execute(&frame2, Some(&frame1), &[], &theme, &mut out)
+            .execute(&frame2, Some(&frame1), &[], &theme, &mut paint_state, &mut out)
             .expect("frame2");
         grid.apply(&out);
 
@@ -909,6 +959,7 @@ mod tests {
             layout: layout_visible,
             cursor: None,
             dims,
+            id: FrameId::default(),
         };
         let frame_hidden = Frame {
             tab_bar: many_tabs,
@@ -927,13 +978,42 @@ mod tests {
         let theme = Theme::default();
         let mut grid = Grid::new(dims);
         let mut out: Vec<u8> = Vec::new();
+        let mut paint_state = PaintState::default();
+        // Distinct ids per stage, matching what the runtime would
+        // stamp on three content-distinct frames.
+        let frame_visible = Frame {
+            id: FrameId(1),
+            ..frame_visible
+        };
+        let frame_hidden = Frame {
+            id: FrameId(2),
+            ..frame_hidden
+        };
+        let frame_visible_again = Frame {
+            id: FrameId(3),
+            ..frame_visible_again
+        };
         driver
-            .execute(&frame_visible, None, &[], &theme, &mut out)
+            .execute(
+                &frame_visible,
+                None,
+                &[],
+                &theme,
+                &mut paint_state,
+                &mut out,
+            )
             .expect("frame_visible");
         grid.apply(&out);
         out.clear();
         driver
-            .execute(&frame_hidden, Some(&frame_visible), &[], &theme, &mut out)
+            .execute(
+                &frame_hidden,
+                Some(&frame_visible),
+                &[],
+                &theme,
+                &mut paint_state,
+                &mut out,
+            )
             .expect("frame_hidden");
         grid.apply(&out);
         out.clear();
@@ -943,6 +1023,7 @@ mod tests {
                 Some(&frame_hidden),
                 &[],
                 &theme,
+                &mut paint_state,
                 &mut out,
             )
             .expect("frame_visible_again");
@@ -1087,6 +1168,7 @@ mod tests {
             layout,
             cursor: None,
             dims,
+            id: FrameId::default(),
         };
         let (_driver, out) = execute_frame(&frame, None, &Theme::default());
         let s = std::str::from_utf8(&out).expect("utf8");
@@ -1212,6 +1294,7 @@ mod tests {
             layout,
             cursor: None,
             dims,
+            id: FrameId::default(),
         };
         let (_driver, out) = execute_frame(&frame, None, &Theme::default());
         let mut grid = Grid::new(dims);
@@ -1255,6 +1338,7 @@ mod tests {
             layout,
             cursor: None,
             dims,
+            id: FrameId::default(),
         };
         let (_driver, out) = execute_frame(&frame, None, &Theme::default());
 
@@ -1307,6 +1391,7 @@ mod tests {
             layout,
             cursor: None,
             dims,
+            id: FrameId::default(),
         };
         let (_driver, out) = execute_frame(&frame, None, &theme);
 

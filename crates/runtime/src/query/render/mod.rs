@@ -247,6 +247,11 @@ pub fn render_frame<'a>(inputs: RenderInputs<'a>) -> Option<Frame> {
         layout,
         cursor,
         dims,
+        // Stamped by the render phase after this memo returns —
+        // see the manual `PartialEq` on `Frame`. The memo always
+        // emits `FrameId::default()` so cache equality compares
+        // only the content-bearing fields.
+        id: led_driver_terminal_core::FrameId::default(),
     })
 }
 
