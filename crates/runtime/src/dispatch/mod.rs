@@ -144,12 +144,12 @@ pub struct Dispatcher<'a> {
     pub lsp_pending: &'a mut led_state_lsp::LspPending,
     /// LSP diagnostics, read-only here — issue navigation
     /// (Alt-./Alt-,) reads them to build the nav cycle.
-    pub diagnostics: &'a led_state_diagnostics::DiagnosticsStates,
+    pub diagnostics: &'a led_driver_lsp_core::DiagnosticsStates,
     /// Per-server LSP status (busy / ready / detail). Dispatch
     /// reads it to gate "format-on-save" / "goto-definition" on
     /// whether any LSP server has emitted at least one event,
     /// instead of duplicating that bit on a user-decision source.
-    pub lsp_status: &'a led_state_diagnostics::LspStatuses,
+    pub lsp_status: &'a led_driver_lsp_core::LspStatuses,
     /// Git state (branch + file/line statuses). Same consumer
     /// as `diagnostics` — tiered issue nav walks both.
     pub git: &'a led_state_git::GitState,
@@ -1390,7 +1390,7 @@ fn save_with_optional_format(
     edits: &mut BufferEdits,
     lsp_pending: &mut led_state_lsp::LspPending,
     alerts: &mut AlertState,
-    lsp_status: &led_state_diagnostics::LspStatuses,
+    lsp_status: &led_driver_lsp_core::LspStatuses,
     clock: &crate::Clock,
 ) {
     let Some(id) = tabs.active else {
@@ -1448,7 +1448,7 @@ fn lsp_goto_definition(
     tabs: &Tabs,
     edits: &BufferEdits,
     lsp_pending: &mut led_state_lsp::LspPending,
-    lsp_status: &led_state_diagnostics::LspStatuses,
+    lsp_status: &led_driver_lsp_core::LspStatuses,
 ) {
     let Some(id) = tabs.active else { return };
     let Some(tab) = tabs.open.iter().find(|t| t.id == id) else {
@@ -1488,7 +1488,7 @@ mod tests {
     use led_state_alerts::AlertState;
     use led_state_buffer_edits::{BufferEdits, EditedBuffer};
     use led_state_completions::CompletionsState;
-    use led_state_diagnostics::DiagnosticsStates;
+    use led_driver_lsp_core::DiagnosticsStates;
     use led_state_git::GitState;
     use led_state_kill_ring::KillRing;
     use led_state_lsp::LspExtrasState;
@@ -1524,7 +1524,7 @@ mod tests {
         let mut isearch: Option<IsearchState> = None;
         let mut file_search: Option<FileSearchState> = None;
         let diagnostics = DiagnosticsStates::default();
-        let lsp_status = led_state_diagnostics::LspStatuses::default();
+        let lsp_status = led_driver_lsp_core::LspStatuses::default();
         let git = GitState::default();
         let syntax = led_state_syntax::SyntaxStates::default();
         let clock = crate::Clock::default();
@@ -1603,7 +1603,7 @@ mod tests {
         let mut isearch: Option<IsearchState> = None;
         let mut file_search: Option<FileSearchState> = None;
         let diagnostics = DiagnosticsStates::default();
-        let lsp_status = led_state_diagnostics::LspStatuses::default();
+        let lsp_status = led_driver_lsp_core::LspStatuses::default();
         let git = GitState::default();
         let syntax = led_state_syntax::SyntaxStates::default();
         let clock = crate::Clock::default();
@@ -1682,7 +1682,7 @@ mod tests {
         let mut isearch: Option<IsearchState> = None;
         let mut file_search: Option<FileSearchState> = None;
         let diagnostics = DiagnosticsStates::default();
-        let lsp_status = led_state_diagnostics::LspStatuses::default();
+        let lsp_status = led_driver_lsp_core::LspStatuses::default();
         let git = GitState::default();
         let syntax = led_state_syntax::SyntaxStates::default();
         let clock = crate::Clock::default();
@@ -1753,7 +1753,7 @@ mod tests {
         let mut isearch: Option<IsearchState> = None;
         let mut file_search: Option<FileSearchState> = None;
         let diagnostics = DiagnosticsStates::default();
-        let lsp_status = led_state_diagnostics::LspStatuses::default();
+        let lsp_status = led_driver_lsp_core::LspStatuses::default();
         let git = GitState::default();
         let syntax = led_state_syntax::SyntaxStates::default();
         let clock = crate::Clock::default();
@@ -1816,7 +1816,7 @@ mod tests {
         let mut lsp_extras = LspExtrasState::default();
         let mut lsp_pending = led_state_lsp::LspPending::default();
         let diagnostics = DiagnosticsStates::default();
-        let lsp_status = led_state_diagnostics::LspStatuses::default();
+        let lsp_status = led_driver_lsp_core::LspStatuses::default();
         let git = GitState::default();
         let syntax = led_state_syntax::SyntaxStates::default();
         let clock = crate::Clock::default();
@@ -1882,7 +1882,7 @@ mod tests {
         let mut lsp_extras = LspExtrasState::default();
         let mut lsp_pending = led_state_lsp::LspPending::default();
         let diagnostics = DiagnosticsStates::default();
-        let lsp_status = led_state_diagnostics::LspStatuses::default();
+        let lsp_status = led_driver_lsp_core::LspStatuses::default();
         let git = GitState::default();
         let syntax = led_state_syntax::SyntaxStates::default();
         let clock = crate::Clock::default();
@@ -2010,10 +2010,10 @@ mod tests {
         // Seed an LSP server entry so the no-LSP gate in
         // `lsp_goto_definition` doesn't short-circuit. Mirrors
         // legacy `has_active_lsp(s)` returning true.
-        let mut lsp_status = led_state_diagnostics::LspStatuses::default();
+        let mut lsp_status = led_driver_lsp_core::LspStatuses::default();
         lsp_status.by_server.insert(
             led_core::ServerId::new("rust-analyzer"),
-            led_state_diagnostics::LspServerStatus::default(),
+            led_driver_lsp_core::LspServerStatus::default(),
         );
         let diagnostics = DiagnosticsStates::default();
         let git = GitState::default();
@@ -2085,7 +2085,7 @@ mod tests {
         let mut path_chains = std::collections::HashMap::new();
         let km = default_keymap();
         let diagnostics = DiagnosticsStates::default();
-        let lsp_status = led_state_diagnostics::LspStatuses::default();
+        let lsp_status = led_driver_lsp_core::LspStatuses::default();
         let git = GitState::default();
         let syntax = led_state_syntax::SyntaxStates::default();
         let clock = crate::Clock::default();

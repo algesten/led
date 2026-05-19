@@ -377,7 +377,7 @@ fn apply_mark_to_state(state: &mut FileSearchState, hit_idx: usize, target_repla
 #[cfg(test)]
 mod tests {
     use led_state_completions::CompletionsState;
-    use led_state_diagnostics::DiagnosticsStates;
+    use led_driver_lsp_core::DiagnosticsStates;
     use led_state_file_search::FileSearchState;
     use led_state_find_file::FindFileState;
     use led_state_git::GitState;
@@ -469,7 +469,7 @@ mod tests {
         let mut isearch: Option<IsearchState> = None;
         let mut file_search: Option<FileSearchState> = None;
         let diagnostics = DiagnosticsStates::default();
-        let lsp_status = led_state_diagnostics::LspStatuses::default();
+        let lsp_status = led_driver_lsp_core::LspStatuses::default();
         let git = GitState::default();
         let syntax = led_state_syntax::SyntaxStates::default();
         let clock = crate::Clock::default();
@@ -587,7 +587,7 @@ mod tests {
         let mut lsp_extras = LspExtrasState::default();
         let mut lsp_pending = led_state_lsp::LspPending::default();
         let diagnostics = DiagnosticsStates::default();
-        let lsp_status = led_state_diagnostics::LspStatuses::default();
+        let lsp_status = led_driver_lsp_core::LspStatuses::default();
         let git = GitState::default();
         let syntax = led_state_syntax::SyntaxStates::default();
         let clock = crate::Clock::default();

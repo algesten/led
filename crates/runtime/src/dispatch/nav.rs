@@ -24,7 +24,8 @@ use led_driver_terminal_core::Terminal;
 use led_state_alerts::AlertState;
 use led_state_browser::BrowserUi;
 use led_state_buffer_edits::BufferEdits;
-use led_state_diagnostics::{DiagnosticSeverity, DiagnosticsStates};
+use led_driver_lsp_core::DiagnosticsStates;
+use led_state_diagnostics::DiagnosticSeverity;
 use led_state_git::GitState;
 use led_state_jumps::{JumpListState, JumpPosition};
 use led_state_tabs::Tabs;
@@ -693,9 +694,8 @@ mod tests {
 
     use led_core::UserPath;
     use led_state_alerts::AlertState as M20aAlertState;
-    use led_state_diagnostics::{
-        BufferDiagnostics, Diagnostic, DiagnosticSeverity, DiagnosticsStates,
-    };
+    use led_driver_lsp_core::{BufferDiagnostics, DiagnosticsStates};
+    use led_state_diagnostics::{Diagnostic, DiagnosticSeverity};
     use led_state_git::GitState as M20aGitState;
     use led_state_tabs::{Scroll, Tab, TabId};
     use std::sync::Arc;

@@ -20,7 +20,7 @@ use led_state_clipboard::ClipboardIntent;
 use led_state_completions::{CompletionsPending, CompletionsState};
 use led_state_file_search::FileSearchState;
 use led_state_find_file::FindFileState;
-use led_state_diagnostics::DiagnosticsStates;
+use led_driver_lsp_core::DiagnosticsStates;
 use led_state_git::GitState;
 use led_state_isearch::IsearchState;
 use led_state_jumps::JumpListState;
@@ -138,7 +138,7 @@ pub(super) fn dispatch_default(
     let mut lsp_extras = LspExtrasState::default();
     let mut lsp_pending = LspPending::default();
     let diagnostics = DiagnosticsStates::default();
-    let lsp_status = led_state_diagnostics::LspStatuses::default();
+    let lsp_status = led_driver_lsp_core::LspStatuses::default();
     let git = GitState::default();
     let keymap = default_keymap();
     let syntax = led_state_syntax::SyntaxStates::default();
@@ -205,7 +205,7 @@ pub(super) fn dispatch_chord_default(
     let mut lsp_extras = LspExtrasState::default();
     let mut lsp_pending = LspPending::default();
     let diagnostics = DiagnosticsStates::default();
-    let lsp_status = led_state_diagnostics::LspStatuses::default();
+    let lsp_status = led_driver_lsp_core::LspStatuses::default();
     let git = GitState::default();
     let syntax = led_state_syntax::SyntaxStates::default();
     let clock = crate::Clock::default();
@@ -269,7 +269,7 @@ pub(super) fn dispatch_with_ring(
     let mut lsp_extras = LspExtrasState::default();
     let mut lsp_pending = LspPending::default();
     let diagnostics = DiagnosticsStates::default();
-    let lsp_status = led_state_diagnostics::LspStatuses::default();
+    let lsp_status = led_driver_lsp_core::LspStatuses::default();
     let git = GitState::default();
     let keymap = default_keymap();
     let syntax = led_state_syntax::SyntaxStates::default();
@@ -331,7 +331,7 @@ pub(super) fn noop_dispatch(k: KeyEvent, tabs: &mut Tabs) -> DispatchOutcome {
     let mut lsp_extras = LspExtrasState::default();
     let mut lsp_pending = LspPending::default();
     let diagnostics = DiagnosticsStates::default();
-    let lsp_status = led_state_diagnostics::LspStatuses::default();
+    let lsp_status = led_driver_lsp_core::LspStatuses::default();
     let git = GitState::default();
     let syntax = led_state_syntax::SyntaxStates::default();
     let clock = crate::Clock::default();
@@ -400,7 +400,7 @@ pub(super) struct MacroDispatcherFixture {
     lsp_extras: LspExtrasState,
     lsp_pending: LspPending,
     diagnostics: DiagnosticsStates,
-    lsp_status: led_state_diagnostics::LspStatuses,
+    lsp_status: led_driver_lsp_core::LspStatuses,
     git: GitState,
     keymap: crate::keymap::Keymap,
     pub syntax: led_state_syntax::SyntaxStates,
@@ -440,7 +440,7 @@ impl MacroDispatcherFixture {
             lsp_extras: LspExtrasState::default(),
             lsp_pending: LspPending::default(),
             diagnostics: DiagnosticsStates::default(),
-            lsp_status: led_state_diagnostics::LspStatuses::default(),
+            lsp_status: led_driver_lsp_core::LspStatuses::default(),
             git: GitState::default(),
             keymap: default_keymap(),
             syntax: led_state_syntax::SyntaxStates::default(),

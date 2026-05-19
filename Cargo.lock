@@ -1127,6 +1127,7 @@ name = "led-driver-lsp-core"
 version = "0.0.0"
 dependencies = [
  "globset",
+ "imbl",
  "led-abi-lsp",
  "led-core",
  "led-state-diagnostics",
@@ -1336,10 +1337,6 @@ dependencies = [
 [[package]]
 name = "led-state-diagnostics"
 version = "0.0.0"
-dependencies = [
- "imbl",
- "led-core",
-]
 
 [[package]]
 name = "led-state-file-search"

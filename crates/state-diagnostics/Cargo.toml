@@ -4,12 +4,12 @@ version = "0.0.0"
 edition = "2024"
 publish = false
 
-# Per-buffer LSP diagnostics state source + the diagnostic domain
-# types they carry (used by the driver-lsp ABI and by the painter).
-# Mirrors legacy led's `led_lsp::{Diagnostic, DiagnosticSeverity}`
-# at the domain level; the propagation state machine lives in the
-# driver crate so this state stays a pure data source.
+# Diagnostic ABI shapes shared between `driver-lsp/core` (producer)
+# and `driver-terminal/{core,native}` (renderer). The per-buffer
+# diagnostic roster + per-server status containers have moved into
+# `driver-lsp-core` per the EXAMPLE-ARCH audit; this crate now holds
+# only the wire-shape `Diagnostic` / `DiagnosticSeverity` so the
+# terminal driver can paint severities without taking a forbidden
+# driver-to-driver dependency on `driver-lsp-core`.
 
 [dependencies]
-led-core = { workspace = true }
-imbl = { workspace = true }

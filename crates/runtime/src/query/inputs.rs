@@ -19,11 +19,8 @@ use led_state_kbd_macro::KbdMacroState;
 use led_driver_session_core::SessionState;
 use led_state_browser::{BrowserUi, Focus};
 use led_state_clipboard::ClipboardIntent;
+use led_driver_lsp_core::{BufferDiagnostics, DiagnosticsStates, LspServerStatus, LspStatuses};
 use led_state_buffer_edits::{BufferEdits, EditedBuffer};
-use led_state_diagnostics::{
-    BufferDiagnostics, DiagnosticsStates, LspServerStatus,
-    LspStatuses,
-};
 use led_state_syntax::{SyntaxState, SyntaxStates};
 use led_state_tabs::{Tab, TabId, Tabs};
 use std::sync::Arc;

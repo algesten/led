@@ -31,8 +31,10 @@ use led_state_diagnostics::Diagnostic;
 use ropey::Rope;
 
 pub mod diag_source;
+pub mod diag_states;
 
 pub use diag_source::{DiagMode, DiagPushResult, DiagnosticSource};
+pub use diag_states::{BufferDiagnostics, DiagnosticsStates, LspServerStatus, LspStatuses};
 
 // ── ABI ─────────────────────────────────────────────────────────
 

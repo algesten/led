@@ -81,10 +81,9 @@ use led_state_browser::{BrowserUi, Focus};
 #[cfg(test)]
 use led_state_buffer_edits::{BufferEdits, EditedBuffer};
 #[cfg(test)]
-use led_state_diagnostics::{
-    BufferDiagnostics, Diagnostic, DiagnosticSeverity, DiagnosticsStates, LspServerStatus,
-    LspStatuses,
-};
+use led_driver_lsp_core::{BufferDiagnostics, DiagnosticsStates, LspServerStatus, LspStatuses};
+#[cfg(test)]
+use led_state_diagnostics::{Diagnostic, DiagnosticSeverity};
 #[cfg(test)]
 use led_state_syntax::{SyntaxStates, TokenKind, TokenSpan};
 #[cfg(test)]

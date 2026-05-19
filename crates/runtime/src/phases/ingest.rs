@@ -12,7 +12,7 @@ use led_driver_clipboard_core::ClipboardResult;
 use led_driver_git_core::GitEvent;
 use led_driver_lsp_core::LspEvent;
 use led_driver_session_core::SessionEvent;
-use led_state_diagnostics::{BufferDiagnostics, LspServerStatus};
+use led_driver_lsp_core::{BufferDiagnostics, LspServerStatus};
 use led_state_lifecycle::Phase;
 use led_driver_session_core::PersistedSession;
 use led_state_syntax::{Language, SyntaxState};
