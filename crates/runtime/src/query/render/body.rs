@@ -29,6 +29,34 @@ pub struct BodyInputs<'a> {
     pub area: Rect,
 }
 
+/// Pick the rope to render for the buffer at `path`. Prefers the
+/// user-edited view ([`BufferEdits`]) and falls back to the
+/// loaded disk snapshot ([`BufferStore`]); `None` when neither
+/// has rope content yet (pending load, load error, or no entry).
+///
+/// Memoised so downstream paint memos that take the resulting
+/// `Arc<Rope>` get pointer-equality on consecutive ticks: a
+/// keystroke in a *background* buffer changes the
+/// [`EditedBuffersInput`] map pointer (so this memo re-runs and
+/// the lookup re-executes — cheap), but the returned `Arc<Rope>`
+/// for the unchanged active path is the same pointer as last
+/// tick. Downstream memos keyed on `Arc<Rope>` then take the
+/// O(1) ptr-eq cache-hit path.
+#[drv::memo(single)]
+pub fn active_rope<'a, 'b>(
+    edits: EditedBuffersInput<'a>,
+    store: StoreLoadedInput<'b>,
+    path: CanonPath,
+) -> Option<Arc<Rope>> {
+    if let Some(eb) = edits.buffers.get(&path) {
+        return Some(eb.rope.clone());
+    }
+    match store.loaded.get(&path) {
+        Some(LoadState::Ready(rope)) => Some(rope.clone()),
+        None | Some(LoadState::Pending) | Some(LoadState::Error(_)) => None,
+    }
+}
+
 /// Body-relative cursor position for the active tab.
 ///
 /// Mirrors [`body_model`]'s own cursor-resolution path so consumers
@@ -52,18 +80,12 @@ pub fn body_cursor<'a, 'b, 'c>(
     let content_cols = (area.cols as usize)
         .saturating_sub(GUTTER_WIDTH)
         .saturating_sub(TRAILING_RESERVED_COLS);
-    if let Some(eb) = edits.buffers.get(&tab.path) {
-        return visible_cursor(tab.cursor, tab.scroll, area, &eb.rope, content_cols);
-    }
-    // Fallback to BufferStore (mirrors `body_model`'s second
-    // branch). Pending / Error / absent → render against an empty
-    // rope, which `visible_cursor` rejects via the `len_lines`
-    // bound, returning `None`.
+    // Same rope-resolution as `body_model` — share the memo so a
+    // keystroke in a background buffer leaves the resolved
+    // `Arc<Rope>` pointer-stable here too.
+    let rope_arc = active_rope(edits, store, tab.path.clone());
     let empty_rope: Arc<Rope> = Arc::new(Rope::new());
-    let rope_ref: &Rope = match store.loaded.get(&tab.path) {
-        Some(LoadState::Ready(rope)) => rope.as_ref(),
-        None | Some(LoadState::Pending) | Some(LoadState::Error(_)) => &empty_rope,
-    };
+    let rope_ref: &Rope = rope_arc.as_deref().unwrap_or(&empty_rope);
     visible_cursor(tab.cursor, tab.scroll, area, rope_ref, content_cols)
 }
 
@@ -98,10 +120,23 @@ pub fn body_model<'a>(inputs: BodyInputs<'a>) -> BodyModel {
     let Some(tab) = tabs.open.iter().find(|t| t.id == id) else {
         return BodyModel::Empty;
     };
+    let rope_arc = active_rope(edits, store, tab.path.clone());
+    // Active match highlight uses the resolved `Arc<Rope>`
+    // pointer — when a *background* buffer mutates, the active
+    // rope's `Arc` stays pointer-stable, so this memo's input
+    // cache key is byte-identical and the file-search overlay
+    // visible-row walk is skipped.
+    let highlight = active_match_highlight(
+        overlays,
+        rope_arc.clone(),
+        tab.path.clone(),
+        tab.scroll,
+        area,
+    );
+    let selection = normalized_selection(tab.mark, tab.cursor);
     if let Some(eb) = edits.buffers.get(&tab.path) {
-        let highlight = active_body_match(&overlays, &tab.path, tab.scroll, area, &eb.rope);
+        let rope_ref: &Rope = &eb.rope;
         let spans = rebased_line_spans(syntax, edits, tab.path.clone());
-        let selection = normalized_selection(tab.mark, tab.cursor);
         // Diagnostics + git markers carry an anchor hash they were
         // computed against. Renderer translates each marker's
         // anchor-row to a current-row via `eb.row_delta_for(anchor)`,
@@ -121,7 +156,7 @@ pub fn body_model<'a>(inputs: BodyInputs<'a>) -> BodyModel {
             .filter(|_| git_row_delta.is_some())
             .map(|gls| gls.statuses.as_slice());
         return render_content(RenderContentArgs {
-            rope: &eb.rope,
+            rope: rope_ref,
             cursor: tab.cursor,
             selection,
             scroll: tab.scroll,
@@ -136,18 +171,15 @@ pub fn body_model<'a>(inputs: BodyInputs<'a>) -> BodyModel {
     }
     // No BufferEdits entry yet — the load hasn't been seeded
     // into the edit-view source. Fall back to what `BufferStore`
-    // knows. On Pending / Error / absent we render a blank body
-    // (tildes, no content), never an in-buffer placeholder or
-    // error message — matches legacy's "empty buffer during the
-    // brief load window" UX and keeps surface errors off the
-    // user's editing canvas. M21 will surface genuine load
-    // failures via the status-bar alert system instead.
+    // knows via `active_rope`. On Pending / Error / absent we
+    // render a blank body (tildes, no content), never an
+    // in-buffer placeholder or error message — matches legacy's
+    // "empty buffer during the brief load window" UX and keeps
+    // surface errors off the user's editing canvas. M21 will
+    // surface genuine load failures via the status-bar alert
+    // system instead.
     let empty_rope: Arc<Rope> = Arc::new(Rope::new());
-    let rope_ref: &Rope = match store.loaded.get(&tab.path) {
-        Some(LoadState::Ready(rope)) => rope.as_ref(),
-        None | Some(LoadState::Pending) | Some(LoadState::Error(_)) => &empty_rope,
-    };
-    let highlight = active_body_match(&overlays, &tab.path, tab.scroll, area, rope_ref);
+    let rope_ref: &Rope = rope_arc.as_deref().unwrap_or(&empty_rope);
     // No EditedBuffer entry yet → no row_delta. The buffer hasn't
     // accepted any edits, so anchor coords == current coords.
     let line_statuses = git
@@ -157,7 +189,7 @@ pub fn body_model<'a>(inputs: BodyInputs<'a>) -> BodyModel {
     render_content(RenderContentArgs {
         rope: rope_ref,
         cursor: tab.cursor,
-        selection: normalized_selection(tab.mark, tab.cursor),
+        selection,
         scroll: tab.scroll,
         area,
         match_highlight: highlight,
@@ -239,6 +271,26 @@ pub fn rebased_line_spans<'s, 'b>(
         &state.tokens,
         diff.rebase_ops(),
     )))
+}
+
+/// Memoised wrapper around [`active_body_match`]. Takes the
+/// resolved active-rope `Arc<Rope>` so consecutive ticks where
+/// only background-buffer / syntax / diagnostics / git state
+/// changed find the cache key byte-identical (`Arc` ptr_eq on
+/// the rope; pointer-eq on the overlays projection) and skip the
+/// visible-row walk inside `active_body_match`. The walk is cheap
+/// per call but allocates nothing on cache-hit and avoids
+/// repeatedly indexing the rope's grapheme structure.
+#[drv::memo(single)]
+pub fn active_match_highlight<'a>(
+    overlays: OverlaysInput<'a>,
+    rope: Option<Arc<Rope>>,
+    active_path: CanonPath,
+    scroll: Scroll,
+    area: Rect,
+) -> Option<led_driver_terminal_core::BodyMatch> {
+    let rope = rope?;
+    active_body_match(&overlays, &active_path, scroll, area, &rope)
 }
 
 /// Resolve the file-search overlay's current hit into a visible-row

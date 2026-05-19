@@ -14,7 +14,10 @@ use led_state_browser::Focus;
 
 use super::inputs::*;
 
-pub use body::{body_cursor, body_model, rebased_line_spans, BodyInputs};
+pub use body::{
+    active_match_highlight, active_rope, body_cursor, body_model,
+    rebased_line_spans, BodyInputs,
+};
 pub use popover::popover_model;
 pub use popups::{
     code_action_popup_model, completion_popup_model, rename_popup_model,
