@@ -946,6 +946,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "led-abi-command"
+version = "0.0.0"
+
+[[package]]
 name = "led-core"
 version = "0.0.0"
 dependencies = [
@@ -1198,6 +1202,7 @@ dependencies = [
  "drv",
  "globset",
  "imbl",
+ "led-abi-command",
  "led-core",
  "led-driver-buffers-core",
  "led-driver-buffers-native",
@@ -1357,7 +1362,7 @@ dependencies = [
 name = "led-state-kbd-macro"
 version = "0.0.0"
 dependencies = [
- "led-core",
+ "led-abi-command",
 ]
 
 [[package]]

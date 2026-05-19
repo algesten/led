@@ -18,7 +18,7 @@
 
 use std::sync::Arc;
 
-use led_core::Command;
+use led_abi_command::Command;
 
 /// Hard cap on `KbdMacroExecute` recursion depth. Mirrors legacy
 /// `led/src/model/action/mod.rs:278`. Exceeding the cap surfaces

@@ -9,7 +9,6 @@
 //! - [`UserPath`] / [`CanonPath`] — path newtypes mirroring legacy led's
 //!   user-vs-canonical split
 
-pub mod command;
 pub mod content_hash;
 pub mod git;
 pub mod grapheme;
@@ -27,7 +26,6 @@ pub mod wrap;
 #[doc(hidden)]
 pub use drv;
 
-pub use command::{Command, parse_command};
 pub use content_hash::{EphemeralContentHash, PersistedContentHash};
 pub use ids::{
     BufferStateSum, BufferVersion, ChainId, EditSeq, LspRequestSeq, SavedVersion, ServerId,

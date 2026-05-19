@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/abi-command",
     "crates/core",
     "crates/state-tabs",
     "crates/state-buffer-edits",
@@ -52,6 +53,7 @@ exclude = ["goldens"]
 
 [workspace.dependencies]
 # Internal crates.
+led-abi-command = { path = "crates/abi-command" }
 led-core = { path = "crates/core" }
 led-state-tabs = { path = "crates/state-tabs" }
 led-state-buffer-edits = { path = "crates/state-buffer-edits" }

@@ -1427,7 +1427,7 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
         // it (only `recording` is exposed).
         let km = led_state_kbd_macro::KbdMacroState {
             recording: true,
-            current: vec![led_core::Command::CursorDown],
+            current: vec![led_abi_command::Command::CursorDown],
             ..Default::default()
         };
         let s = status_with_macro(

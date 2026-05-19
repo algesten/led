@@ -9,4 +9,4 @@ publish = false
 # No driver — recording/playback are pure dispatch concerns.
 
 [dependencies]
-led-core = { workspace = true }
+led-abi-command = { workspace = true }
