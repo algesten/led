@@ -6,7 +6,7 @@
 //! runtime calls it when the clipboard driver reports text.
 
 use led_state_buffer_edits::BufferEdits;
-use led_state_clipboard::ClipboardState;
+use led_state_clipboard::ClipboardIntent;
 use led_state_kill_ring::KillRing;
 use led_state_tabs::{TabId, Tabs};
 use std::sync::Arc;
@@ -18,7 +18,7 @@ pub(super) fn kill_region(
     tabs: &mut Tabs,
     edits: &mut BufferEdits,
     kill_ring: &mut KillRing,
-    clip: &mut ClipboardState,
+    clip: &mut ClipboardIntent,
 ) -> bool {
     let Some(id) = tabs.active else {
         return false;
@@ -61,7 +61,7 @@ pub(super) fn kill_line(
     tabs: &mut Tabs,
     edits: &mut BufferEdits,
     kill_ring: &mut KillRing,
-    clip: &mut ClipboardState,
+    clip: &mut ClipboardIntent,
 ) {
     let Some(id) = tabs.active else {
         return;
@@ -133,15 +133,15 @@ pub(super) fn kill_line(
 /// Mark a yank as pending against the currently-active tab. The
 /// runtime later fires a clipboard read; when it returns,
 /// [`apply_yank`] inserts at the pending tab's cursor.
-pub(super) fn request_yank(tabs: &Tabs, clip: &mut ClipboardState) {
+///
+/// Re-entrancy (double-tap yank) is gated downstream: the
+/// `clipboard_action` memo only emits a `Read` when the driver-owned
+/// read state is `Idle`, so a second `pending_yank` set during an
+/// in-flight read collapses into a no-op there.
+pub(super) fn request_yank(tabs: &Tabs, clip: &mut ClipboardIntent) {
     let Some(id) = tabs.active else {
         return;
     };
-    // Ignore if a read is already in flight — double-tap yank
-    // shouldn't kick off a second clipboard read.
-    if clip.read_in_flight {
-        return;
-    }
     clip.pending_yank = Some(id);
 }
 
@@ -223,7 +223,7 @@ mod tests {
             preferred_col: 6,
         });
         let mut kr = KillRing::default();
-        let mut clip = ClipboardState::default();
+        let mut clip = ClipboardIntent::default();
         dispatch_with_ring(
             key(KeyModifiers::CONTROL, KeyCode::Char('w')),
             &mut tabs,
@@ -255,7 +255,7 @@ mod tests {
             preferred_col: 2,
         });
         let mut kr = KillRing::default();
-        let mut clip = ClipboardState::default();
+        let mut clip = ClipboardIntent::default();
         dispatch_with_ring(
             key(KeyModifiers::CONTROL, KeyCode::Char('w')),
             &mut tabs,
@@ -281,7 +281,7 @@ mod tests {
             preferred_col: 4,
         };
         let mut kr = KillRing::default();
-        let mut clip = ClipboardState::default();
+        let mut clip = ClipboardIntent::default();
         dispatch_with_ring(
             key(KeyModifiers::CONTROL, KeyCode::Char('k')),
             &mut tabs,
@@ -306,7 +306,7 @@ mod tests {
             preferred_col: 3,
         };
         let mut kr = KillRing::default();
-        let mut clip = ClipboardState::default();
+        let mut clip = ClipboardIntent::default();
         dispatch_with_ring(
             key(KeyModifiers::CONTROL, KeyCode::Char('k')),
             &mut tabs,
@@ -325,7 +325,7 @@ mod tests {
         let (mut tabs, mut edits, store, term) =
             fixture_with_content("aaa\nbbb\nccc", Dims { cols: 20, rows: 5 });
         let mut kr = KillRing::default();
-        let mut clip = ClipboardState::default();
+        let mut clip = ClipboardIntent::default();
         // First kill: kill "aaa" on line 0.
         dispatch_with_ring(
             key(KeyModifiers::CONTROL, KeyCode::Char('k')),
@@ -355,7 +355,7 @@ mod tests {
         let (mut tabs, mut edits, store, term) =
             fixture_with_content("aaa\nbbb", Dims { cols: 20, rows: 5 });
         let mut kr = KillRing::default();
-        let mut clip = ClipboardState::default();
+        let mut clip = ClipboardIntent::default();
         dispatch_with_ring(
             key(KeyModifiers::CONTROL, KeyCode::Char('k')),
             &mut tabs,
@@ -384,7 +384,7 @@ mod tests {
         let (mut tabs, mut edits, store, term) =
             fixture_with_content("x", Dims { cols: 20, rows: 5 });
         let mut kr = KillRing::default();
-        let mut clip = ClipboardState::default();
+        let mut clip = ClipboardIntent::default();
         dispatch_with_ring(
             key(KeyModifiers::CONTROL, KeyCode::Char('y')),
             &mut tabs,
@@ -417,7 +417,7 @@ mod tests {
             fixture_with_content("abc", Dims { cols: 20, rows: 5 });
         assert!(tabs.open[0].mark.is_none());
         let mut kr = KillRing::default();
-        let mut clip = ClipboardState::default();
+        let mut clip = ClipboardIntent::default();
         dispatch_with_ring(
             key(KeyModifiers::CONTROL, KeyCode::Char('w')),
             &mut tabs,

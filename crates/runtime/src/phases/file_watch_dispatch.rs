@@ -15,7 +15,7 @@ use crate::apply::edit::distance_from_save_for;
 use crate::apply::fs::diff_watch_actions;
 use crate::apply::session::{disk_content_hash_for, new_chain_id};
 use crate::phases::TickEnv;
-use crate::query::{self, ClipboardStateInput};
+use crate::query::{self, ClipboardDriverInput, ClipboardIntentInput};
 use crate::query::clipboard_action;
 use crate::{Sources, LspNotified, UndoFlushDebounce, UndoPersistTracker};
 use led_core::UndoDbSeq;
@@ -25,6 +25,7 @@ pub(crate) fn run(sources: &mut Sources, env: &TickEnv<'_>) {
         tabs,
         edits,
         clip,
+        clipboard_driver,
         clock,
         fs,
         syntax: _,
@@ -65,15 +66,24 @@ pub(crate) fn run(sources: &mut Sources, env: &TickEnv<'_>) {
     }
 
     // ── Clipboard action (must run before FlushUndo) ────────
-    let clip_action = clipboard_action(ClipboardStateInput::new(clip));
+    let clip_action = clipboard_action(
+        ClipboardIntentInput::new(clip),
+        ClipboardDriverInput::new(clipboard_driver),
+    );
     match clip_action {
         Some(ClipboardAction::Read) => {
-            clip.read_in_flight = true;
-            env.drivers.clipboard.execute([&ClipboardAction::Read]);
+            // Driver writes `read = InFlight` synchronously in execute.
+            env.drivers
+                .clipboard
+                .execute([&ClipboardAction::Read], clipboard_driver);
         }
         Some(ClipboardAction::Write(_)) => {
+            // Consume the user intent that fired; driver writes
+            // `write = InFlight` synchronously in execute.
             let text = clip.pending_write.take().expect("memo agreed write");
-            env.drivers.clipboard.execute([&ClipboardAction::Write(text)]);
+            env.drivers
+                .clipboard
+                .execute([&ClipboardAction::Write(text)], clipboard_driver);
         }
         None => {}
     }

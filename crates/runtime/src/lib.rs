@@ -56,7 +56,7 @@ use led_driver_session_native::SessionNative;
 use led_state_alerts::AlertState;
 use led_state_browser::{BrowserUi, FsTree};
 use led_state_buffer_edits::BufferEdits;
-use led_state_clipboard::ClipboardState;
+use led_state_clipboard::ClipboardIntent;
 use led_state_file_search::FileSearchState;
 use led_state_find_file::FindFileState;
 use led_state_isearch::IsearchState;
@@ -105,7 +105,7 @@ pub use keymap::{default_keymap, parse_command, parse_key, ChordState, Command, 
 pub use query::{
     body_model, clipboard_action, file_list_action, file_load_action, file_save_action,
     find_file_action, render_frame, side_panel_model, status_bar_model, tab_bar_model,
-    AlertsInput, BrowserUiInput, ClipboardStateInput, EditedBuffersInput, FindFileInput,
+    AlertsInput, BrowserUiInput, ClipboardDriverInput, ClipboardIntentInput, EditedBuffersInput, FindFileInput,
     FsTreeInput, PendingSavesInput, StoreLoadedInput, TabsActiveInput, TabsOpenInput,
     TerminalDimsInput,
 };
@@ -188,7 +188,15 @@ pub struct Sources {
     pub store: BufferStore,
     pub terminal: Terminal,
     pub kill_ring: KillRing,
-    pub clip: ClipboardState,
+    /// User-decision side of the yank/kill flow: pending_yank set by
+    /// dispatch on Yank, pending_write set by dispatch on kill.
+    pub clip: ClipboardIntent,
+    /// Driver-owned side: read/write in-flight tracking and the most
+    /// recent error. Mutated by `clipboard.execute` (sync intent
+    /// write) and `clipboard.process` (Done acknowledgement) per
+    /// EXAMPLE-ARCH § "Stateless drivers still need an in-flight
+    /// source".
+    pub clipboard_driver: led_driver_clipboard_core::ClipboardState,
     pub alerts: AlertState,
     pub jumps: JumpListState,
     /// M22 — keyboard-macro state. Recording flag, in-progress

@@ -4,11 +4,15 @@ version = "0.0.0"
 edition = "2024"
 publish = false
 
-# Sync core of the clipboard driver — portable, stateless. Holds the
-# ClipboardAction / ClipboardCmd / ClipboardDone / Trace types and the
-# main-loop-facing `ClipboardDriver` struct.
+# Sync core of the clipboard driver — portable. Holds the
+# ClipboardAction / ClipboardCmd / ClipboardDone / Trace types, the
+# driver-owned ClipboardState source (in-flight tracking + last
+# error), and the main-loop-facing `ClipboardDriver` struct.
 #
-# Runtime owns the "read in flight" bit on KillRing; this driver has
-# no source of its own.
+# Per EXAMPLE-ARCH § "Stateless drivers still need an in-flight
+# source": this crate owns the in-flight bits so the user-decision
+# crate `state-clipboard` is purely user choices (pending_yank,
+# pending_write).
 
 [dependencies]
+drv = { workspace = true }

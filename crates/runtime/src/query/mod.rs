@@ -31,7 +31,7 @@ pub use desired::{
     desired_watches, lsp_watched_file_notifications,
 };
 pub use inputs::{
-    AlertExpiryInput, AlertsInput, BrowserUiInput, ClipboardStateInput, ClockInput,
+    AlertExpiryInput, AlertsInput, BrowserUiInput, ClipboardDriverInput, ClipboardIntentInput, ClockInput,
     CompletionsSessionInput, DiagnosticsStatesInput, EditedBuffersInput,
     FileWatchEventsInput, FileWatchRegistryInput, FindFileInput, FsRootInput,
     FsTreeInput, GitStateInput, HashIndexInput, KbdMacroRecordingInput,

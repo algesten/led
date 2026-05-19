@@ -75,7 +75,7 @@ use led_driver_terminal_core::{KeyCode, KeyEvent, KeyModifiers, Terminal};
 use led_state_alerts::AlertState;
 use led_state_browser::{BrowserUi, Focus, FsTree};
 use led_state_buffer_edits::BufferEdits;
-use led_state_clipboard::ClipboardState;
+use led_state_clipboard::ClipboardIntent;
 use led_state_completions::CompletionsState;
 use led_state_file_search::FileSearchState;
 use led_state_find_file::FindFileState;
@@ -116,7 +116,12 @@ pub struct Dispatcher<'a> {
     pub tabs: &'a mut Tabs,
     pub edits: &'a mut BufferEdits,
     pub kill_ring: &'a mut KillRing,
-    pub clip: &'a mut ClipboardState,
+    pub clip: &'a mut ClipboardIntent,
+    /// Driver-owned clipboard state (in-flight tracking + last
+    /// error). Read-only here — dispatch sets user intents on
+    /// `clip`; the execute phase wires them to the driver, which
+    /// mutates this source.
+    pub clipboard_driver: &'a led_driver_clipboard_core::ClipboardState,
     pub alerts: &'a mut AlertState,
     pub jumps: &'a mut JumpListState,
     pub browser: &'a mut BrowserUi,
@@ -1497,7 +1502,8 @@ mod tests {
         let mut tabs = tabs_with(&[("a", 1)], Some(1));
         let mut edits = BufferEdits::default();
         let mut kill_ring = KillRing::default();
-        let mut clip = ClipboardState::default();
+        let mut clip = ClipboardIntent::default();
+        let clipboard_driver = led_driver_clipboard_core::ClipboardState::default();
         let mut alerts = AlertState::default();
         let mut jumps = JumpListState::default();
         let mut browser = BrowserUi::default();
@@ -1526,6 +1532,7 @@ mod tests {
             edits: &mut edits,
             kill_ring: &mut kill_ring,
             clip: &mut clip,
+            clipboard_driver: &clipboard_driver,
             alerts: &mut alerts,
             jumps: &mut jumps,
             browser: &mut browser,
@@ -1580,7 +1587,8 @@ mod tests {
         let mut chord = ChordState::default();
         let mut kbd_macro = led_state_kbd_macro::KbdMacroState::default();
         let mut kill_ring = KillRing::default();
-        let mut clip = ClipboardState::default();
+        let mut clip = ClipboardIntent::default();
+        let clipboard_driver = led_driver_clipboard_core::ClipboardState::default();
         let mut alerts = AlertState::default();
         let mut jumps = JumpListState::default();
         let mut browser = BrowserUi::default();
@@ -1604,6 +1612,7 @@ mod tests {
                 edits: &mut edits,
                 kill_ring: &mut kill_ring,
                 clip: &mut clip,
+                clipboard_driver: &clipboard_driver,
                 alerts: &mut alerts,
                 jumps: &mut jumps,
                 browser: &mut browser,
@@ -1656,7 +1665,8 @@ mod tests {
         let mut chord = ChordState::default();
         let mut kbd_macro = led_state_kbd_macro::KbdMacroState::default();
         let mut kill_ring = KillRing::default();
-        let mut clip = ClipboardState::default();
+        let mut clip = ClipboardIntent::default();
+        let clipboard_driver = led_driver_clipboard_core::ClipboardState::default();
         let mut alerts = AlertState::default();
         let mut jumps = JumpListState::default();
         let mut browser = BrowserUi::default();
@@ -1680,6 +1690,7 @@ mod tests {
             edits: &mut edits,
             kill_ring: &mut kill_ring,
             clip: &mut clip,
+            clipboard_driver: &clipboard_driver,
             alerts: &mut alerts,
             jumps: &mut jumps,
             browser: &mut browser,
@@ -1725,7 +1736,8 @@ mod tests {
         let mut chord = ChordState::default();
         let mut kbd_macro = led_state_kbd_macro::KbdMacroState::default();
         let mut kill_ring = KillRing::default();
-        let mut clip = ClipboardState::default();
+        let mut clip = ClipboardIntent::default();
+        let clipboard_driver = led_driver_clipboard_core::ClipboardState::default();
         let mut alerts = AlertState::default();
         let mut jumps = JumpListState::default();
         let mut browser = BrowserUi::default();
@@ -1749,6 +1761,7 @@ mod tests {
             edits: &mut edits,
             kill_ring: &mut kill_ring,
             clip: &mut clip,
+            clipboard_driver: &clipboard_driver,
             alerts: &mut alerts,
             jumps: &mut jumps,
             browser: &mut browser,
@@ -1787,7 +1800,8 @@ mod tests {
         let mut chord = ChordState::default();
         let mut kbd_macro = led_state_kbd_macro::KbdMacroState::default();
         let mut kill_ring = KillRing::default();
-        let mut clip = ClipboardState::default();
+        let mut clip = ClipboardIntent::default();
+        let clipboard_driver = led_driver_clipboard_core::ClipboardState::default();
         let mut alerts = AlertState::default();
         let mut jumps = JumpListState::default();
         let mut browser = BrowserUi::default();
@@ -1811,6 +1825,7 @@ mod tests {
                 edits: &mut edits,
                 kill_ring: &mut kill_ring,
                 clip: &mut clip,
+                clipboard_driver: &clipboard_driver,
                 alerts: &mut alerts,
                 jumps: &mut jumps,
                 browser: &mut browser,
@@ -1851,7 +1866,8 @@ mod tests {
         let mut chord = ChordState::default();
         let mut kbd_macro = led_state_kbd_macro::KbdMacroState::default();
         let mut kill_ring = KillRing::default();
-        let mut clip = ClipboardState::default();
+        let mut clip = ClipboardIntent::default();
+        let clipboard_driver = led_driver_clipboard_core::ClipboardState::default();
         let mut alerts = AlertState::default();
         let mut jumps = JumpListState::default();
         let mut browser = BrowserUi::default();
@@ -1875,6 +1891,7 @@ mod tests {
                 edits: &mut edits,
                 kill_ring: &mut kill_ring,
                 clip: &mut clip,
+                clipboard_driver: &clipboard_driver,
                 alerts: &mut alerts,
                 jumps: &mut jumps,
                 browser: &mut browser,
@@ -1976,7 +1993,8 @@ mod tests {
         let mut chord = ChordState::default();
         let mut kbd_macro = led_state_kbd_macro::KbdMacroState::default();
         let mut kr = KillRing::default();
-        let mut clip = ClipboardState::default();
+        let mut clip = ClipboardIntent::default();
+        let clipboard_driver = led_driver_clipboard_core::ClipboardState::default();
         let mut alerts = AlertState::default();
         let mut jumps = JumpListState::default();
         let mut browser = BrowserUi::default();
@@ -2004,6 +2022,7 @@ mod tests {
                 edits: &mut edits,
                 kill_ring: &mut kr,
                 clip: &mut clip,
+                clipboard_driver: &clipboard_driver,
                 alerts: &mut alerts,
                 jumps: &mut jumps,
                 browser: &mut browser,
@@ -2051,7 +2070,8 @@ mod tests {
         let mut chord = ChordState::default();
         let mut kbd_macro = led_state_kbd_macro::KbdMacroState::default();
         let mut kr = KillRing::default();
-        let mut clip = ClipboardState::default();
+        let mut clip = ClipboardIntent::default();
+        let clipboard_driver = led_driver_clipboard_core::ClipboardState::default();
         let mut alerts = AlertState::default();
         let mut jumps = JumpListState::default();
         let mut browser = BrowserUi::default();
@@ -2072,6 +2092,7 @@ mod tests {
                 edits: &mut edits,
                 kill_ring: &mut kr,
                 clip: &mut clip,
+                clipboard_driver: &clipboard_driver,
                 alerts: &mut alerts,
                 jumps: &mut jumps,
                 browser: &mut browser,

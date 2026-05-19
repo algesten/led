@@ -279,13 +279,19 @@ pub fn static_deadline<'a, 'f, 'u>(
 /// clone on the Write path, which is the same as the driver's own
 /// execute.
 #[drv::memo(single)]
-pub fn clipboard_action<'c>(clip: ClipboardStateInput<'c>) -> Option<ClipboardAction> {
-    if clip.pending_yank.is_some() && !*clip.read_in_flight {
+pub fn clipboard_action<'c, 'd>(
+    clip: ClipboardIntentInput<'c>,
+    drv: ClipboardDriverInput<'d>,
+) -> Option<ClipboardAction> {
+    use led_driver_clipboard_core::{ReadState, WriteState};
+    if clip.pending_yank.is_some() && matches!(drv.read, ReadState::Idle) {
         Some(ClipboardAction::Read)
+    } else if let Some(text) = clip.pending_write.as_ref()
+        && matches!(drv.write, WriteState::Idle)
+    {
+        Some(ClipboardAction::Write(text.clone()))
     } else {
-        clip.pending_write
-            .as_ref()
-            .map(|text| ClipboardAction::Write(text.clone()))
+        None
     }
 }
 

@@ -18,7 +18,7 @@ use led_state_alerts::AlertState;
 use led_state_kbd_macro::KbdMacroState;
 use led_state_session::SessionState;
 use led_state_browser::{BrowserUi, Focus};
-use led_state_clipboard::ClipboardState;
+use led_state_clipboard::ClipboardIntent;
 use led_state_buffer_edits::{BufferEdits, EditedBuffer};
 use led_state_diagnostics::{
     BufferDiagnostics, DiagnosticsStates, LspServerStatus,
@@ -292,21 +292,36 @@ impl<'a> TerminalDimsInput<'a> {
     }
 }
 
-// ── Input on ClipboardState ────────────────────────────────────────────
+// ── Input on ClipboardIntent (user-decision) ───────────────────────────
 
 #[derive(drv::Input, Copy, Clone)]
-pub struct ClipboardStateInput<'a> {
+pub struct ClipboardIntentInput<'a> {
     pub pending_yank: &'a Option<TabId>,
-    pub read_in_flight: &'a bool,
     pub pending_write: &'a Option<Arc<str>>,
 }
 
-impl<'a> ClipboardStateInput<'a> {
-    pub fn new(c: &'a ClipboardState) -> Self {
+impl<'a> ClipboardIntentInput<'a> {
+    pub fn new(c: &'a ClipboardIntent) -> Self {
         Self {
             pending_yank: &c.pending_yank,
-            read_in_flight: &c.read_in_flight,
             pending_write: &c.pending_write,
+        }
+    }
+}
+
+// ── Input on driver-owned ClipboardState (in-flight tracking) ──────────
+
+#[derive(drv::Input, Copy, Clone)]
+pub struct ClipboardDriverInput<'a> {
+    pub read: &'a led_driver_clipboard_core::ReadState,
+    pub write: &'a led_driver_clipboard_core::WriteState,
+}
+
+impl<'a> ClipboardDriverInput<'a> {
+    pub fn new(c: &'a led_driver_clipboard_core::ClipboardState) -> Self {
+        Self {
+            read: &c.read,
+            write: &c.write,
         }
     }
 }

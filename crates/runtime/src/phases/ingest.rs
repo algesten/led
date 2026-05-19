@@ -840,25 +840,27 @@ pub(crate) fn ingest_git(sources: &mut Sources, env: &TickEnv<'_>) {
 }
 
 /// Clipboard completions: paste-on-yank, kill-ring fallback,
-/// write acknowledgement.
+/// write acknowledgement. The driver's `process` clears the
+/// in-flight bits on its own source; ingest only applies the
+/// downstream effects (paste into buffer, consume `pending_yank`).
 pub(crate) fn ingest_clipboard(sources: &mut Sources, env: &TickEnv<'_>) {
     let Sources {
         tabs,
         edits,
         kill_ring,
         clip,
+        clipboard_driver,
         browser,
         terminal,
         ..
     } = sources;
-    for done in env.drivers.clipboard.process() {
+    for done in env.drivers.clipboard.process(clipboard_driver) {
         let content_cols = dispatch::editor_content_cols(terminal, browser);
         match done.result {
             Ok(ClipboardResult::Text(Some(text))) => {
                 if let Some(target) = clip.pending_yank.take() {
                     dispatch::apply_yank(tabs, edits, target, &text, content_cols);
                 }
-                clip.read_in_flight = false;
             }
             Ok(ClipboardResult::Text(None)) | Err(_) => {
                 if let Some(target) = clip.pending_yank.take()
@@ -866,7 +868,6 @@ pub(crate) fn ingest_clipboard(sources: &mut Sources, env: &TickEnv<'_>) {
                 {
                     dispatch::apply_yank(tabs, edits, target, &fallback, content_cols);
                 }
-                clip.read_in_flight = false;
             }
             Ok(ClipboardResult::Written) => {}
         }

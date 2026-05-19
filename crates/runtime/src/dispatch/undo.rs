@@ -388,7 +388,7 @@ mod tests {
     
     use led_driver_terminal_core::{Dims, KeyCode, KeyModifiers};
     use led_state_alerts::AlertState;
-    use led_state_clipboard::ClipboardState;
+    use led_state_clipboard::ClipboardIntent;
     use led_state_jumps::JumpListState;
     use led_state_browser::{BrowserUi, FsTree};
 
@@ -452,7 +452,8 @@ mod tests {
         let mut chord = ChordState::default();
         let mut kbd_macro = led_state_kbd_macro::KbdMacroState::default();
         let mut kr = KillRing::default();
-        let mut clip = ClipboardState::default();
+        let mut clip = ClipboardIntent::default();
+        let clipboard_driver = led_driver_clipboard_core::ClipboardState::default();
         let mut alerts = AlertState::default();
         let mut jumps = JumpListState::default();
         let mut browser = BrowserUi::default();
@@ -477,6 +478,7 @@ mod tests {
                 edits: &mut edits,
                 kill_ring: &mut kr,
                 clip: &mut clip,
+                clipboard_driver: &clipboard_driver,
                 alerts: &mut alerts,
                 jumps: &mut jumps,
                 browser: &mut browser,
@@ -524,7 +526,7 @@ mod tests {
             preferred_col: 6,
         });
         let mut kr = KillRing::default();
-        let mut clip = ClipboardState::default();
+        let mut clip = ClipboardIntent::default();
         dispatch_with_ring(
             key(KeyModifiers::CONTROL, KeyCode::Char('w')),
             &mut tabs,
@@ -569,7 +571,8 @@ mod tests {
         let mut chord = ChordState::default();
         let mut kbd_macro = led_state_kbd_macro::KbdMacroState::default();
         let mut kr = KillRing::default();
-        let mut clip = ClipboardState::default();
+        let mut clip = ClipboardIntent::default();
+        let clipboard_driver = led_driver_clipboard_core::ClipboardState::default();
         let mut alerts = AlertState::default();
         let mut jumps = JumpListState::default();
         let mut browser = BrowserUi::default();
@@ -593,6 +596,7 @@ mod tests {
                 edits: &mut edits,
                 kill_ring: &mut kr,
                 clip: &mut clip,
+                clipboard_driver: &clipboard_driver,
                 alerts: &mut alerts,
                 jumps: &mut jumps,
                 browser: &mut browser,

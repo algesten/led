@@ -15,7 +15,7 @@ use led_driver_terminal_core::{Dims, KeyCode, KeyEvent, KeyModifiers, Terminal};
 use led_state_alerts::AlertState;
 use led_state_browser::{BrowserUi, FsTree};
 use led_state_buffer_edits::{BufferEdits, EditedBuffer};
-use led_state_clipboard::ClipboardState;
+use led_state_clipboard::ClipboardIntent;
 use led_state_completions::{CompletionsPending, CompletionsState};
 use led_state_file_search::FileSearchState;
 use led_state_find_file::FindFileState;
@@ -122,7 +122,8 @@ pub(super) fn dispatch_default(
     let mut chord = ChordState::default();
     let mut kbd_macro = led_state_kbd_macro::KbdMacroState::default();
     let mut kill_ring = KillRing::default();
-    let mut clip = ClipboardState::default();
+    let mut clip = ClipboardIntent::default();
+    let clipboard_driver = led_driver_clipboard_core::ClipboardState::default();
     let mut alerts = AlertState::default();
     let mut jumps = JumpListState::default();
     let mut browser = BrowserUi::default();
@@ -146,6 +147,7 @@ pub(super) fn dispatch_default(
         edits,
         kill_ring: &mut kill_ring,
         clip: &mut clip,
+        clipboard_driver: &clipboard_driver,
         alerts: &mut alerts,
         jumps: &mut jumps,
         browser: &mut browser,
@@ -187,7 +189,8 @@ pub(super) fn dispatch_chord_default(
     let mut chord = ChordState::default();
     let mut kbd_macro = led_state_kbd_macro::KbdMacroState::default();
     let mut kill_ring = KillRing::default();
-    let mut clip = ClipboardState::default();
+    let mut clip = ClipboardIntent::default();
+    let clipboard_driver = led_driver_clipboard_core::ClipboardState::default();
     let mut alerts = AlertState::default();
     let mut jumps = JumpListState::default();
     let mut browser = BrowserUi::default();
@@ -210,6 +213,7 @@ pub(super) fn dispatch_chord_default(
         edits,
         kill_ring: &mut kill_ring,
         clip: &mut clip,
+        clipboard_driver: &clipboard_driver,
         alerts: &mut alerts,
         jumps: &mut jumps,
         browser: &mut browser,
@@ -244,12 +248,13 @@ pub(super) fn dispatch_with_ring(
     tabs: &mut Tabs,
     edits: &mut BufferEdits,
     kill_ring: &mut KillRing,
-    clip: &mut ClipboardState,
+    clip: &mut ClipboardIntent,
     store: &BufferStore,
     terminal: &Terminal,
 ) -> DispatchOutcome {
     let mut chord = ChordState::default();
     let mut kbd_macro = led_state_kbd_macro::KbdMacroState::default();
+    let clipboard_driver = led_driver_clipboard_core::ClipboardState::default();
     let mut alerts = AlertState::default();
     let mut jumps = JumpListState::default();
     let mut browser = BrowserUi::default();
@@ -273,6 +278,7 @@ pub(super) fn dispatch_with_ring(
         edits,
         kill_ring,
         clip,
+        clipboard_driver: &clipboard_driver,
         alerts: &mut alerts,
         jumps: &mut jumps,
         browser: &mut browser,
@@ -304,7 +310,8 @@ pub(super) fn dispatch_with_ring(
 pub(super) fn noop_dispatch(k: KeyEvent, tabs: &mut Tabs) -> DispatchOutcome {
     let mut edits = BufferEdits::default();
     let mut kill_ring = KillRing::default();
-    let mut clip = ClipboardState::default();
+    let mut clip = ClipboardIntent::default();
+    let clipboard_driver = led_driver_clipboard_core::ClipboardState::default();
     let mut alerts = AlertState::default();
     let mut jumps = JumpListState::default();
     let mut browser = BrowserUi::default();
@@ -332,6 +339,7 @@ pub(super) fn noop_dispatch(k: KeyEvent, tabs: &mut Tabs) -> DispatchOutcome {
         edits: &mut edits,
         kill_ring: &mut kill_ring,
         clip: &mut clip,
+        clipboard_driver: &clipboard_driver,
         alerts: &mut alerts,
         jumps: &mut jumps,
         browser: &mut browser,
@@ -377,7 +385,8 @@ pub(super) struct MacroDispatcherFixture {
     pub store: BufferStore,
     pub terminal: Terminal,
     kill_ring: KillRing,
-    clip: ClipboardState,
+    clip: ClipboardIntent,
+    clipboard_driver: led_driver_clipboard_core::ClipboardState,
     jumps: JumpListState,
     browser: BrowserUi,
     fs: FsTree,
@@ -416,7 +425,8 @@ impl MacroDispatcherFixture {
             store,
             terminal,
             kill_ring: KillRing::default(),
-            clip: ClipboardState::default(),
+            clip: ClipboardIntent::default(),
+            clipboard_driver: led_driver_clipboard_core::ClipboardState::default(),
             jumps: JumpListState::default(),
             browser: BrowserUi::default(),
             fs: FsTree::default(),
@@ -443,6 +453,7 @@ impl MacroDispatcherFixture {
             edits: &mut self.edits,
             kill_ring: &mut self.kill_ring,
             clip: &mut self.clip,
+            clipboard_driver: &self.clipboard_driver,
             alerts: &mut self.alerts,
             jumps: &mut self.jumps,
             browser: &mut self.browser,
