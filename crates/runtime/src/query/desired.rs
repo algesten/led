@@ -360,6 +360,161 @@ impl DesiredIndent {
     }
 }
 
+/// Outcome of running the completion refilter against the
+/// current cursor / rope. Pure data — the dispatch reducer
+/// applies it to `CompletionsState`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CompletionRefilterOutcome {
+    /// No active session to refilter.
+    NoSession,
+    /// Session has lost its anchor (tab gone, cursor wandered off
+    /// the prefix line, rope desynced, every candidate dropped,
+    /// or the sole candidate equals the typed prefix). Caller
+    /// dismisses.
+    Dismiss,
+    /// Refilter result is non-empty and still meaningful. Caller
+    /// writes these back into the session.
+    Update {
+        filtered: Arc<Vec<usize>>,
+        selected: usize,
+        /// Caller should clamp `session.scroll` down to `selected`
+        /// when `selected < session.scroll`.
+        scroll_max: usize,
+    },
+}
+
+/// Outcome of inspecting an active tab for a completion request
+/// anchor (line + utf-16 col). Pure data; the caller queues the
+/// LSP request via its outbox.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CompletionAnchorOutcome {
+    /// No active tab, no loaded buffer, or the tab is a preview —
+    /// caller silently drops the trigger.
+    Skip,
+    /// Anchor resolved. `path` is the buffer's canonical path;
+    /// `line` and `col_utf16` are the LSP request coordinates.
+    Anchor {
+        path: CanonPath,
+        line: u32,
+        col_utf16: u32,
+    },
+}
+
+/// "Where would a fresh completion request anchor itself right
+/// now?" — single source of truth for the LSP request
+/// coordinates dispatch ships on identifier-char auto-trigger.
+///
+/// Reads the active tab + its buffer. Returns `Skip` when no
+/// active tab, no loaded buffer, or the tab is preview-only.
+/// Otherwise returns the canonical path plus the LSP
+/// `Position::character` (UTF-16 code units, per
+/// `PositionEncodingKind`) derived from the cursor's grapheme
+/// col.
+#[drv::memo(single)]
+pub fn completion_request_anchor<'t, 'b>(
+    tabs: TabsActiveInput<'t>,
+    edits: EditedBuffersInput<'b>,
+) -> CompletionAnchorOutcome {
+    let Some(id) = tabs.active else {
+        return CompletionAnchorOutcome::Skip;
+    };
+    let Some(tab) = tabs.open.iter().find(|t| t.id == *id) else {
+        return CompletionAnchorOutcome::Skip;
+    };
+    if tab.preview {
+        return CompletionAnchorOutcome::Skip;
+    }
+    let Some(eb) = edits.buffers.get(&tab.path) else {
+        return CompletionAnchorOutcome::Skip;
+    };
+    let line = tab.cursor.line as u32;
+    let col_utf16 = if tab.cursor.line < eb.rope.len_lines() {
+        led_core::grapheme_col_to_utf16_units(eb.rope.line(tab.cursor.line), tab.cursor.col)
+    } else {
+        0
+    };
+    CompletionAnchorOutcome::Anchor {
+        path: tab.path.clone(),
+        line,
+        col_utf16,
+    }
+}
+
+/// "Given the live completion session, the active tab's cursor,
+/// and the buffer rope — what should the popup look like after
+/// this keystroke?" Single source of truth for the refilter
+/// branch.
+///
+/// Pure derivation: walks the same dismissal checks
+/// `refresh_completion_filter` used to do inline (tab/buffer
+/// gone, cursor off the prefix line, cursor left of
+/// `prefix_start_col`, rope shorter than expected), runs the
+/// fuzzy refilter, and folds in the "sole candidate equals
+/// prefix" suppression. The reducer in dispatch reads the
+/// outcome and writes the corresponding mutation onto
+/// `CompletionsState`.
+///
+/// The cache here is most useful for idle ticks (cursor parked,
+/// session steady) — every keystroke moves the cursor and
+/// invalidates.
+#[drv::memo(single)]
+pub fn completion_refilter_outcome<'c, 't, 'b>(
+    completions: CompletionsSessionInput<'c>,
+    tabs: TabsActiveInput<'t>,
+    edits: EditedBuffersInput<'b>,
+) -> CompletionRefilterOutcome {
+    let Some(session) = completions.session.as_ref() else {
+        return CompletionRefilterOutcome::NoSession;
+    };
+    let Some(tab) = tabs.open.iter().find(|t| t.id == session.tab) else {
+        return CompletionRefilterOutcome::Dismiss;
+    };
+    let Some(eb) = edits.buffers.get(&tab.path) else {
+        return CompletionRefilterOutcome::Dismiss;
+    };
+    if tab.cursor.line as u32 != session.prefix_line {
+        return CompletionRefilterOutcome::Dismiss;
+    }
+    if (tab.cursor.col as u32) < session.prefix_start_col {
+        return CompletionRefilterOutcome::Dismiss;
+    }
+    let line_idx = session.prefix_line as usize;
+    if line_idx >= eb.rope.len_lines() {
+        return CompletionRefilterOutcome::Dismiss;
+    }
+    let line_slice = eb.rope.line(line_idx);
+    let line_start = eb.rope.line_to_char(line_idx);
+    let from =
+        line_start + led_core::grapheme_col_to_char(line_slice, session.prefix_start_col as usize);
+    let to = line_start + led_core::grapheme_col_to_char(line_slice, tab.cursor.col);
+    if to < from || to > eb.rope.len_chars() {
+        return CompletionRefilterOutcome::Dismiss;
+    }
+    let prefix: String = eb.rope.slice(from..to).to_string();
+    let filtered = led_state_completions::refilter(&session.items, &prefix);
+    if filtered.is_empty() {
+        return CompletionRefilterOutcome::Dismiss;
+    }
+    // Sole candidate equals the typed prefix — committing would
+    // be a no-op, so the popup is pure noise.
+    if filtered.len() == 1
+        && led_state_completions::is_identity_match(&session.items[filtered[0]], &prefix)
+    {
+        return CompletionRefilterOutcome::Dismiss;
+    }
+    // Preserve the highlighted label across the refilter when
+    // possible — matches the UX users expect.
+    let prev_selected_item = session.filtered.get(session.selected).copied();
+    let new_selected = prev_selected_item
+        .and_then(|item_ix| filtered.iter().position(|&i| i == item_ix))
+        .unwrap_or(0);
+    CompletionRefilterOutcome::Update {
+        filtered: Arc::new(filtered),
+        selected: new_selected,
+        scroll_max: new_selected,
+    }
+}
+
 /// "What's the desired leading indent for `path`'s line `line`?"
 ///
 /// Single source of truth for the indent string used by Enter

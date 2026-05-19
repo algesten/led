@@ -329,6 +329,17 @@ impl<'a> Dispatcher<'a> {
 ///
 /// Called from the dispatch boundary so every command path
 /// (direct, chord, implicit-insert) flows through the same logic.
+///
+/// Pure-derivation lives in `query::desired`:
+///
+/// - [`completion_request_anchor`] resolves the LSP `Position`
+///   for the active cursor.
+/// - [`completion_refilter_outcome`] decides whether a live
+///   session should keep / update / dismiss after the cursor or
+///   rope changed.
+///
+/// This function only mutates: it reads the memo outcomes and
+/// applies them.
 fn handle_completion_trigger(
     cmd: &Command,
     tabs: &Tabs,
@@ -338,28 +349,19 @@ fn handle_completion_trigger(
 ) {
     match cmd {
         Command::InsertChar(c) if c.is_alphanumeric() || *c == '_' => {
-            // Auto-trigger on identifier chars. Needs an active
-            // tab with a loaded buffer; otherwise silently drop.
-            let Some(id) = tabs.active else {
+            // Resolve the request anchor first — skip when no
+            // active tab / no buffer / preview tab.
+            let anchor = crate::query::completion_request_anchor(
+                crate::query::TabsActiveInput::new(tabs),
+                crate::query::EditedBuffersInput::new(edits),
+            );
+            let crate::query::CompletionAnchorOutcome::Anchor {
+                path,
+                line,
+                col_utf16,
+            } = anchor
+            else {
                 return;
-            };
-            let Some(tab) = tabs.open.iter().find(|t| t.id == id) else {
-                return;
-            };
-            if tab.preview {
-                return;
-            }
-            let Some(eb) = edits.buffers.get(&tab.path) else {
-                return;
-            };
-            let line = tab.cursor.line as u32;
-            // LSP completion request takes a `Position::character`
-            // in UTF-16 code units (per `PositionEncodingKind`). The
-            // cursor's grapheme col converts via the buffer line.
-            let col = if tab.cursor.line < eb.rope.len_lines() {
-                led_core::grapheme_col_to_utf16_units(eb.rope.line(tab.cursor.line), tab.cursor.col)
-            } else {
-                0
             };
             // Client-side refilter first — updates the popup
             // instantly against the newly-typed prefix without
@@ -367,15 +369,15 @@ fn handle_completion_trigger(
             // fresh server request so delayed items can still
             // arrive (server response replaces the session when
             // its seq matches).
-            refilter_active_session(tabs, edits, completions);
-            completions_pending.queue_request(tab.path.clone(), line, col, Some(*c));
+            apply_refilter_outcome(tabs, edits, completions);
+            completions_pending.queue_request(path, line, col_utf16, Some(*c));
         }
         Command::DeleteBack | Command::DeleteForward => {
             // Keep the session alive across backspace / delete
             // within the prefix range. Refilter; if the cursor
             // moved left of prefix_start_col (user deleted past
             // the start of the identifier), dismiss.
-            refilter_active_session(tabs, edits, completions);
+            apply_refilter_outcome(tabs, edits, completions);
         }
         // Any other command dismisses an active popup. The
         // dispatch-action set (MoveUp, MoveDown, InsertNewline,
@@ -390,101 +392,42 @@ fn handle_completion_trigger(
     }
 }
 
-/// Rebuild `session.filtered` from the current typed prefix.
-/// Dismisses the session when the cursor has moved left of the
-/// prefix anchor or when no items match — both mean the popup
-/// has lost its context.
-fn refresh_completion_filter(
+/// Apply the memo-derived refilter outcome onto
+/// [`CompletionsState`]. Pure write-side: every dismissal check,
+/// every refilter / identity-match decision lives in
+/// [`crate::query::completion_refilter_outcome`].
+fn apply_refilter_outcome(
     tabs: &Tabs,
     edits: &BufferEdits,
     completions: &mut CompletionsState,
 ) {
-    let Some(session) = completions.session.as_ref() else {
-        return;
-    };
-    // Resolve the active tab + its buffer. If either is gone or
-    // the tab switched, dismiss.
-    let Some(tab) = tabs.open.iter().find(|t| t.id == session.tab) else {
-        completions.dismiss();
-        return;
-    };
-    let Some(eb) = edits.buffers.get(&tab.path) else {
-        completions.dismiss();
-        return;
-    };
-    if tab.cursor.line as u32 != session.prefix_line {
-        completions.dismiss();
-        return;
-    }
-    if (tab.cursor.col as u32) < session.prefix_start_col {
-        completions.dismiss();
-        return;
-    }
-    // Extract the typed prefix from the rope. `session.prefix_start_col`
-    // and `tab.cursor.col` are grapheme cols (M25); convert each to a
-    // char idx via the line's segmentation before slicing.
-    let line_idx = session.prefix_line as usize;
-    if line_idx >= eb.rope.len_lines() {
-        completions.dismiss();
-        return;
-    }
-    let line_slice = eb.rope.line(line_idx);
-    let line_start = eb.rope.line_to_char(line_idx);
-    let from =
-        line_start + led_core::grapheme_col_to_char(line_slice, session.prefix_start_col as usize);
-    let to = line_start + led_core::grapheme_col_to_char(line_slice, tab.cursor.col);
-    if to < from || to > eb.rope.len_chars() {
-        completions.dismiss();
-        return;
-    }
-    let prefix: String = eb.rope.slice(from..to).to_string();
-    let filtered = led_state_completions::refilter(&session.items, &prefix);
-    if filtered.is_empty() {
-        completions.dismiss();
-        return;
-    }
-    // Dismiss when the sole remaining candidate equals what the
-    // user has already typed — committing would be a no-op, so
-    // the popup is pure noise. Matches the same check on the
-    // ingest path in runtime/lib.rs.
-    if filtered.len() == 1
-        && led_state_completions::is_identity_match(
-            &session.items[filtered[0]],
-            &prefix,
-        )
-    {
-        completions.dismiss();
-        return;
-    }
-    // Preserve the highlighted label across the refilter when
-    // possible — matches the UX users expect (the item they were
-    // aiming at shouldn't jump around as the list shrinks).
-    let prev_selected_item = session
-        .filtered
-        .get(session.selected)
-        .copied();
-    let new_selected = prev_selected_item
-        .and_then(|item_ix| filtered.iter().position(|&i| i == item_ix))
-        .unwrap_or(0);
-    if let Some(session) = completions.session.as_mut() {
-        session.filtered = std::sync::Arc::new(filtered);
-        session.selected = new_selected;
-        // Scroll reset — ensure_visible semantics (in the
-        // overlay module) would re-clamp anyway, but starting
-        // at 0 keeps the popup predictable after a refilter.
-        if new_selected < session.scroll {
-            session.scroll = new_selected;
+    let outcome = crate::query::completion_refilter_outcome(
+        crate::query::CompletionsSessionInput::new(completions),
+        crate::query::TabsActiveInput::new(tabs),
+        crate::query::EditedBuffersInput::new(edits),
+    );
+    match outcome {
+        crate::query::CompletionRefilterOutcome::NoSession => {}
+        crate::query::CompletionRefilterOutcome::Dismiss => {
+            completions.dismiss();
         }
-    }
-}
-
-fn refilter_active_session(
-    tabs: &Tabs,
-    edits: &BufferEdits,
-    completions: &mut CompletionsState,
-) {
-    if completions.session.is_some() {
-        refresh_completion_filter(tabs, edits, completions);
+        crate::query::CompletionRefilterOutcome::Update {
+            filtered,
+            selected,
+            scroll_max,
+        } => {
+            if let Some(session) = completions.session.as_mut() {
+                session.filtered = filtered;
+                session.selected = selected;
+                // Scroll clamp — ensure_visible semantics (in the
+                // overlay module) would re-clamp anyway, but
+                // keeping the scroll <= selected keeps the popup
+                // predictable after a refilter.
+                if scroll_max < session.scroll {
+                    session.scroll = scroll_max;
+                }
+            }
+        }
     }
 }
 
