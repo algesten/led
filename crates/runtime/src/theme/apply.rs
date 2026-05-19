@@ -209,6 +209,15 @@ pub(super) fn assign_region(theme: &mut Theme, region: &str, style: Style) -> bo
         "cursor_line" => theme.cursor_line = style,
         "selection" => theme.selection = style,
         "ruler" => theme.ruler = style,
+        "popover_bg" => theme.popover_bg = style,
+        "popover_rule" => theme.popover_rule = style,
+        "popover_text" => theme.popover_text = style,
+        "completion_bg_normal" => theme.completion_bg_normal = style,
+        "completion_bg_selected" => theme.completion_bg_selected = style,
+        "completion_text_normal" => theme.completion_text_normal = style,
+        "completion_text_selected" => theme.completion_text_selected = style,
+        "completion_detail" => theme.completion_detail = style,
+        "rename_popup" => theme.rename_popup = style,
         _ => return false,
     }
     true

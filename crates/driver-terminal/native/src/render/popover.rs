@@ -1,5 +1,5 @@
 use led_driver_terminal_core::{
-    Attrs, Color, Dims, PopoverModel, PopoverSeverity, Rect, Style, Theme,
+    Dims, PopoverModel, PopoverSeverity, Rect, Style, Theme,
 };
 
 use crate::buffer::Buffer;
@@ -67,7 +67,10 @@ pub(crate) fn paint_popover(
         return;
     }
 
-    let bg = Color::Indexed(236); // dark gray, matches legacy
+    // Background carries through every row of the box — pulled
+    // from theme so users can tint the popover via theme.toml.
+    let bg_style = theme.popover_bg;
+    let rule_style = theme.popover_rule;
 
     for (i, line) in lines.iter().take(height).enumerate() {
         let row = y + i as u16;
@@ -75,12 +78,6 @@ pub(crate) fn paint_popover(
         match line.severity {
             None => {
                 // Horizontal rule: fill outer width with ─.
-                let fg = Color::Indexed(245);
-                let rule_style = Style {
-                    fg: Some(fg),
-                    bg: Some(bg),
-                    attrs: Attrs::default(),
-                };
                 for _ in 0..outer_w {
                     col = buf.put_str(row, col, "─", rule_style);
                 }
@@ -92,9 +89,11 @@ pub(crate) fn paint_popover(
                     PopoverSeverity::Info => theme.diagnostics.info,
                     PopoverSeverity::Hint => theme.diagnostics.hint,
                 };
+                // Compose: per-severity fg (with popover_text fg as
+                // fallback) + per-severity attrs, on the popover bg.
                 let style = Style {
-                    fg: sev_style.fg,
-                    bg: Some(bg),
+                    fg: sev_style.fg.or(theme.popover_text.fg),
+                    bg: bg_style.bg,
                     attrs: sev_style.attrs,
                 };
                 // Clip text to inner width (outer_w - 2), then
