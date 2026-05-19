@@ -24,8 +24,9 @@
 //! ever runs per frame. With siblings, each mode only re-fires
 //! when *its* narrow input changes.
 
+use led_driver_fs_list_core::TreeEntryKind;
 use led_driver_terminal_core::{SidePanelModel, SidePanelRow};
-use led_state_browser::{Focus, TreeEntryKind};
+use led_state_browser::Focus;
 use std::sync::Arc;
 
 use super::{chars_between, count_chars_of_usize};

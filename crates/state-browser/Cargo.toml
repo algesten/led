@@ -13,6 +13,5 @@ publish = false
 
 [dependencies]
 drv = { workspace = true }
-led-abi-fs-list = { workspace = true }
-led-core = { workspace = true }
 imbl = { workspace = true }
+led-core = { workspace = true }

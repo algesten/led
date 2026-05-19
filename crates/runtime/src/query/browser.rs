@@ -1,8 +1,7 @@
 //! Browser tree and file-category derived memos.
 
 use led_core::CanonPath;
-use led_driver_fs_list_core::ListCmd;
-use led_state_browser::TreeEntry;
+use led_driver_fs_list_core::{ListCmd, TreeEntry};
 use std::sync::Arc;
 
 use super::inputs::*;
@@ -144,8 +143,8 @@ pub fn browser_auto_expanded<'a>(
     let active_path = (*tabs.active)
         .and_then(|id| tabs.open.iter().find(|t| t.id == id))
         .map(|t| t.path.clone());
-    Arc::new(led_state_browser::ancestors_of(
-        &led_state_browser::FsTree {
+    Arc::new(led_driver_fs_list_core::ancestors_of(
+        &led_driver_fs_list_core::FsTree {
             root: fs.root.clone(),
             dir_contents: fs.dir_contents.clone(),
             failed_dirs: fs.failed_dirs.clone(),
@@ -168,12 +167,12 @@ pub fn browser_entries<'a>(
     // persists ancestors of any newly-activated tab on the
     // file_load completion path (legacy `reveal_active_buffer`).
     // No transient overlay; collapse_dir / collapse_all stick.
-    let fs_copy = led_state_browser::FsTree {
+    let fs_copy = led_driver_fs_list_core::FsTree {
         root: fs.root.clone(),
         dir_contents: fs.dir_contents.clone(),
         failed_dirs: fs.failed_dirs.clone(),
     };
-    let entries = led_state_browser::walk_tree(&fs_copy, ui.expanded_dirs);
+    let entries = led_driver_fs_list_core::walk_tree(&fs_copy, ui.expanded_dirs);
     Arc::new(entries)
 }
 

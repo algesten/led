@@ -28,7 +28,7 @@
 use std::collections::HashMap;
 
 use led_core::{CanonPath, PathChain};
-use led_state_browser::FsTree;
+use led_driver_fs_list_core::FsTree;
 use led_state_find_file::{FindFileMode, FindFileState, abbreviate_home, expand_path};
 use led_state_tabs::Tabs;
 

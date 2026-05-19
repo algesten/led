@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use led_core::{CanonPath, SavedVersion, WatchSeq};
 use led_driver_buffers_core::RereadCompletion;
-use led_state_browser::FsTree;
+use led_driver_fs_list_core::FsTree;
 use led_state_buffer_edits::BufferEdits;
 
 /// Diff the memoized `desired_watches` map against the driver's

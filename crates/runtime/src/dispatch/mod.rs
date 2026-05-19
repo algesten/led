@@ -71,9 +71,10 @@ use tabs::{cycle_active, force_kill, kill_active};
 use undo::{redo_active, undo_active};
 
 use led_driver_buffers_core::BufferStore;
+use led_driver_fs_list_core::FsTree;
 use led_driver_terminal_core::{KeyCode, KeyEvent, KeyModifiers, Terminal};
 use led_state_alerts::AlertState;
-use led_state_browser::{BrowserUi, Focus, FsTree};
+use led_state_browser::{BrowserUi, Focus};
 use led_state_buffer_edits::BufferEdits;
 use led_state_clipboard::ClipboardIntent;
 use led_state_completions::CompletionsState;

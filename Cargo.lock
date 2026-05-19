@@ -934,6 +934,7 @@ dependencies = [
  "clap",
  "led-core",
  "led-driver-buffers-core",
+ "led-driver-fs-list-core",
  "led-driver-terminal-core",
  "led-driver-terminal-native",
  "led-runtime",
@@ -1302,7 +1303,6 @@ version = "0.0.0"
 dependencies = [
  "drv",
  "imbl",
- "led-abi-fs-list",
  "led-core",
 ]
 

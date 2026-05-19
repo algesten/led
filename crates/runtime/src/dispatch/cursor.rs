@@ -527,12 +527,13 @@ mod tests {
     use led_state_git::GitState;
     use led_state_isearch::IsearchState;
     use led_driver_buffers_core::BufferStore;
+    use led_driver_fs_list_core::FsTree;
     use led_driver_terminal_core::{Dims, KeyCode, KeyModifiers};
     use led_state_alerts::AlertState;
-    use led_state_clipboard::ClipboardIntent;
+    use led_state_browser::BrowserUi;
     use led_state_buffer_edits::BufferEdits;
+    use led_state_clipboard::ClipboardIntent;
     use led_state_jumps::JumpListState;
-    use led_state_browser::{BrowserUi, FsTree};
     use led_state_kill_ring::KillRing;
     use led_state_lsp::LspExtrasState;
     use led_state_tabs::{Cursor, Scroll};

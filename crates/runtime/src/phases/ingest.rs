@@ -123,7 +123,7 @@ pub(crate) fn ingest_file_completions(sources: &mut Sources, env: &TickEnv<'_>) 
                 .and_then(|id| tabs.open.iter().find(|t| t.id == id))
                 .is_some_and(|t| t.path == completion.path);
             if is_active {
-                let ancestors = led_state_browser::ancestors_of(
+                let ancestors = led_driver_fs_list_core::ancestors_of(
                     fs,
                     &browser.expanded_dirs,
                     Some(&completion.path),

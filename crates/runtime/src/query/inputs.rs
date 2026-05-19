@@ -370,12 +370,12 @@ impl<'a> AlertsInput<'a> {
 #[derive(drv::Input, Copy, Clone)]
 pub struct FsTreeInput<'a> {
     pub root: &'a Option<CanonPath>,
-    pub dir_contents: &'a imbl::HashMap<CanonPath, imbl::Vector<led_state_browser::DirEntry>>,
+    pub dir_contents: &'a imbl::HashMap<CanonPath, imbl::Vector<led_driver_fs_list_core::DirEntry>>,
     pub failed_dirs: &'a imbl::HashSet<CanonPath>,
 }
 
 impl<'a> FsTreeInput<'a> {
-    pub fn new(fs: &'a led_state_browser::FsTree) -> Self {
+    pub fn new(fs: &'a led_driver_fs_list_core::FsTree) -> Self {
         Self {
             root: &fs.root,
             dir_contents: &fs.dir_contents,
@@ -393,7 +393,7 @@ pub struct FsRootInput<'a> {
 }
 
 impl<'a> FsRootInput<'a> {
-    pub fn new(fs: &'a led_state_browser::FsTree) -> Self {
+    pub fn new(fs: &'a led_driver_fs_list_core::FsTree) -> Self {
         Self { root: &fs.root }
     }
 }

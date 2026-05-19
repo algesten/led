@@ -167,7 +167,7 @@ mod tests {
         // gate the main loop sat at 100 % CPU as the fs-list
         // worker fail-loop signalled the wake notifier on every
         // attempt.
-        let mut fs = led_state_browser::FsTree {
+        let mut fs = led_driver_fs_list_core::FsTree {
             root: Some(canon("/proj")),
             ..Default::default()
         };
@@ -247,7 +247,7 @@ mod tests {
             tabs: TabsActiveInput::new(t),
             alerts: AlertsInput::new(&alerts),
             browser: BrowserUiInput::new(&browser),
-            fs: FsTreeInput::new(&led_state_browser::FsTree::default()),
+            fs: FsTreeInput::new(&led_driver_fs_list_core::FsTree::default()),
             overlays: OverlaysInput::new(&ff, &is, &None),
             syntax: SyntaxStatesInput::new(&syntax),
             diagnostics: DiagnosticsStatesInput::new(&diags),
@@ -333,7 +333,7 @@ mod tests {
             tabs: TabsActiveInput::new(&t),
             alerts: AlertsInput::new(&alerts),
             browser: BrowserUiInput::new(&browser),
-            fs: FsTreeInput::new(&led_state_browser::FsTree::default()),
+            fs: FsTreeInput::new(&led_driver_fs_list_core::FsTree::default()),
             overlays: OverlaysInput::new(&ff, &is, &None),
             syntax: SyntaxStatesInput::new(&syntax),
             diagnostics: DiagnosticsStatesInput::new(&diags),
@@ -385,7 +385,7 @@ mod tests {
             tabs: TabsActiveInput::new(&t),
             alerts: AlertsInput::new(&alerts),
             browser: BrowserUiInput::new(&browser),
-            fs: FsTreeInput::new(&led_state_browser::FsTree::default()),
+            fs: FsTreeInput::new(&led_driver_fs_list_core::FsTree::default()),
             overlays: OverlaysInput::new(&ff, &is, &None),
             syntax: SyntaxStatesInput::new(&syntax),
             diagnostics: DiagnosticsStatesInput::new(&diags),
@@ -997,7 +997,7 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
             tabs: TabsActiveInput::new(&t),
             alerts: AlertsInput::new(&alerts),
             browser: BrowserUiInput::new(&browser),
-            fs: FsTreeInput::new(&led_state_browser::FsTree::default()),
+            fs: FsTreeInput::new(&led_driver_fs_list_core::FsTree::default()),
             overlays: OverlaysInput::new(&ff, &is, &fsrch),
             syntax: SyntaxStatesInput::new(&syntax),
             diagnostics: DiagnosticsStatesInput::new(&diags),
@@ -2112,7 +2112,8 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
     #[test]
     fn side_panel_row_status_marks_error_file_and_parent_dir() {
         use imbl::Vector;
-        use led_state_browser::{BrowserUi, DirEntry, DirEntryKind, FsTree};
+        use led_driver_fs_list_core::{DirEntry, DirEntryKind, FsTree};
+        use led_state_browser::BrowserUi;
         // Tree: /p/sub/err.rs (with LspError), /p/sub/ok.rs (clean).
         let mut fs = FsTree {
             root: Some(canon("/p")),

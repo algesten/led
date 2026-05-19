@@ -19,7 +19,8 @@ use std::cmp::Ordering;
 use std::collections::HashMap;
 
 use led_core::{CanonPath, PathChain};
-use led_state_browser::{BrowserUi, Focus, FsTree, TreeEntry, TreeEntryKind};
+use led_driver_fs_list_core::{FsTree, TreeEntry, TreeEntryKind};
+use led_state_browser::{BrowserUi, Focus};
 use led_state_tabs::Tabs;
 
 use crate::query::{
@@ -390,7 +391,8 @@ pub(super) fn _dummy_ordering() -> Ordering {
 mod tests {
     use imbl::Vector;
     use led_core::{CanonPath, UserPath};
-    use led_state_browser::{BrowserUi, DirEntry, DirEntryKind, Focus, FsTree};
+    use led_driver_fs_list_core::{DirEntry, DirEntryKind, FsTree};
+    use led_state_browser::{BrowserUi, Focus};
     use led_state_tabs::{Tab, TabId, Tabs};
 
     use super::*;
