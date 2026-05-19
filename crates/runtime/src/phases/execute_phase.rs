@@ -29,6 +29,7 @@ pub(crate) fn run(sources: &mut Sources, env: &TickEnv<'_>, q: &QueryOut) {
         undo_persistence,
         clock,
         lsp_notified,
+        lsp_driver,
         ..
     } = sources;
 
@@ -58,7 +59,7 @@ pub(crate) fn run(sources: &mut Sources, env: &TickEnv<'_>, q: &QueryOut) {
         }
     }
     if !q.lsp_watch_cmds.is_empty() {
-        env.drivers.lsp.execute(q.lsp_watch_cmds.iter());
+        env.drivers.lsp.execute(q.lsp_watch_cmds.iter(), lsp_driver);
     }
 
     // ── LSP BufferOpened fan-out (moved out of Ingest per Theme E).
@@ -68,7 +69,9 @@ pub(crate) fn run(sources: &mut Sources, env: &TickEnv<'_>, q: &QueryOut) {
     // memo subsequently uses to decide whether further
     // `BufferChanged` cmds are required.
     if !q.buffer_opened_cmds.is_empty() {
-        env.drivers.lsp.execute(q.buffer_opened_cmds.iter());
+        env.drivers
+            .lsp
+            .execute(q.buffer_opened_cmds.iter(), lsp_driver);
         for (path, version, saved_version) in &q.buffer_opened_notified {
             lsp_notified.insert(
                 path.clone(),

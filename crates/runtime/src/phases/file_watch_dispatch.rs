@@ -35,6 +35,7 @@ pub(crate) fn run(sources: &mut Sources, env: &TickEnv<'_>) {
         lsp_pending,
         lsp_notified,
         lsp_requested_state_sum,
+        lsp_driver,
         session,
         session_driver,
         undo_persistence,
@@ -269,6 +270,6 @@ pub(crate) fn run(sources: &mut Sources, env: &TickEnv<'_>) {
         lsp_pending.pending_inlay_hint.clear();
     }
     if !lsp_cmds.is_empty() {
-        env.drivers.lsp.execute(lsp_cmds.iter());
+        env.drivers.lsp.execute(lsp_cmds.iter(), lsp_driver);
     }
 }

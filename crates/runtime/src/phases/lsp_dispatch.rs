@@ -12,6 +12,7 @@ pub(crate) fn run(sources: &mut Sources, env: &TickEnv<'_>) {
     let Sources {
         fs,
         lsp_init_sent,
+        lsp_driver,
         ..
     } = sources;
 
@@ -19,9 +20,12 @@ pub(crate) fn run(sources: &mut Sources, env: &TickEnv<'_>) {
         && !env.no_workspace
         && let Some(root) = fs.root.as_ref()
     {
-        env.drivers.lsp.execute(std::iter::once(&LspCmd::Init {
-            root: root.clone(),
-        }));
+        env.drivers.lsp.execute(
+            std::iter::once(&LspCmd::Init {
+                root: root.clone(),
+            }),
+            lsp_driver,
+        );
         *lsp_init_sent = true;
     }
 }

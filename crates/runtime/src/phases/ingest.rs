@@ -210,11 +210,12 @@ pub(crate) fn ingest_lsp_events(sources: &mut Sources, env: &TickEnv<'_>) {
         lsp_extras,
         lsp_pending,
         lsp_watched_globs,
+        lsp_driver,
         clock,
         ..
     } = sources;
 
-    for ev in env.drivers.lsp.process() {
+    for ev in env.drivers.lsp.process(lsp_driver) {
         match ev {
             LspEvent::Diagnostics {
                 path,

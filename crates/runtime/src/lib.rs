@@ -47,7 +47,7 @@ use led_driver_fs_list_core::FsListDriver;
 use led_driver_fs_list_native::FsListNative;
 use led_driver_syntax_core::SyntaxDriver;
 use led_driver_syntax_native::SyntaxNative;
-use led_driver_lsp_core::LspDriver;
+use led_driver_lsp_core::{LspDriver, LspState};
 use led_driver_lsp_native::LspNative;
 use led_driver_git_core::GitDriver;
 use led_driver_git_native::GitNative;
@@ -287,6 +287,16 @@ pub struct Sources {
     /// category as `lsp_notified` / `lsp_requested_state_sum`:
     /// driver-outbound bookkeeping.
     pub lsp_init_sent: bool,
+    /// Driver-owned in-flight tracking for the LSP driver per
+    /// EXAMPLE-ARCH § "Stateless drivers still need an in-flight
+    /// source". `execute` records intent (init flag, in-flight
+    /// seqs, per-path pull state) before forwarding the command;
+    /// `process` reconciles when matching events arrive
+    /// (Diagnostics → pull_state=Done, Error → pull_state=Failed
+    /// for outstanding pulls + last_error). Memos may consult
+    /// this to gate re-firing while a request is outstanding or
+    /// after a path's pull has already failed.
+    pub lsp_driver: LspState,
     /// Per-server LSP progress / ready status. Painter consumes
     /// via the status-bar model so the user sees when
     /// rust-analyzer is mid-indexing.
