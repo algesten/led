@@ -151,20 +151,20 @@ pub(crate) fn paint_body(body: &BodyModel, area: Rect, theme: &Theme, buf: &mut 
             }
         }
 
-        // Overpaint the ruler column on top of the row. A single
-        // cell, styled with `theme.ruler`. If the row's text covers
-        // that column the original character keeps its slot and
-        // picks up the ruler style; otherwise we print a plain
-        // space so the ruler renders as a vertical stripe.
+        // Vertical ruler: a single `│` (U+2502) at the ruler column,
+        // matching legacy led. Only drawn in empty space — text and
+        // selection extensions take precedence, so the bar is
+        // visually hidden once a line passes through it. The cell
+        // check covers both: untouched cells are still `Cell::BLANK`
+        // from the `fill_row` above, anything painted since (text,
+        // selection, search match) leaves a non-blank cell.
         if let Some(rc) = ruler {
-            let glyph: char = line
-                .and_then(|l| l.chars().nth(rc as usize))
-                .unwrap_or(' ');
-            // Skip zero-width / control chars — safer to fall back
-            // to a plain space than emit something that might push
-            // the cursor.
-            let painted = if glyph.is_control() { ' ' } else { glyph };
-            buf.put_char(buf_row, area.x + rc, painted, theme.ruler);
+            let ruler_col = area.x + rc;
+            if ruler_col >= col
+                && buf.cell_or_blank(buf_row, ruler_col) == crate::buffer::Cell::BLANK
+            {
+                buf.put_char(buf_row, ruler_col, '\u{2502}', theme.ruler);
+            }
         }
     }
 }

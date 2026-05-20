@@ -1400,7 +1400,7 @@ mod tests {
     }
 
     #[test]
-    fn ruler_overpaints_single_column_when_theme_sets_ruler_column() {
+    fn ruler_draws_vertical_bar_past_end_of_text() {
         // Dims account for tab bar + status bar (each 1 row) so the
         // body gets `rows - 2`. 5 total = 3 body rows.
         use std::sync::Arc;
@@ -1415,12 +1415,11 @@ mod tests {
             ]),
             cursor: None,
             match_highlight: None,
-            ruler_col: None,
+            ruler_col: Some(5),
         };
         let theme = Theme {
-            ruler_column: Some(5),
             ruler: Style {
-                bg: Some(Color::rgb(0x22, 0x22, 0x22)),
+                fg: Some(Color::rgb(0x22, 0x22, 0x22)),
                 ..Style::default()
             },
             ..Default::default()
@@ -1444,12 +1443,12 @@ mod tests {
         let mut grid = Grid::new(dims);
         grid.apply(&out);
         let editor_x = layout.editor_area.x;
-        // Row 0 col 5 = '5' (from "01234567890...").
+        // Row 0: text "01234567890123456789" runs past col 5, so
+        // the ruler is hidden — the original glyph wins.
         assert_eq!(grid.char_at(0, editor_x + 5), '5');
-        // Row 1: "shorter" → s(0) h(1) o(2) r(3) t(4) e(5) r(6);
-        // col 5 = 'e'. The ruler keeps the char, just restyles it.
+        // Row 1: "shorter" (7 chars) also passes col 5 — text wins.
         assert_eq!(grid.char_at(1, editor_x + 5), 'e');
-        // Row 2: empty line → ruler paints a plain space.
-        assert_eq!(grid.char_at(2, editor_x + 5), ' ');
+        // Row 2: empty line → ruler paints '│' at col 5.
+        assert_eq!(grid.char_at(2, editor_x + 5), '\u{2502}');
     }
 }
