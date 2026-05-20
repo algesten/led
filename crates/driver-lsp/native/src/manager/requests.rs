@@ -52,7 +52,7 @@ impl Manager {
     ) {
         let pulls_and_cache = {
             let entry = self.servers.get_mut(&lang).unwrap();
-            let pulls = entry.diag.open_window(snapshot, &opened);
+            let pulls = entry.diag.open_window(snapshot, &opened, std::time::Instant::now());
             // Drain the push fallback cache in BOTH modes:
             //   - Push mode: cached pushes are the only diagnostic
             //     source for this window.

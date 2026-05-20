@@ -282,6 +282,7 @@ impl DiagnosticSource {
         &mut self,
         hash_snapshot: HashMap<CanonPath, PersistedContentHash>,
         opened: &HashSet<CanonPath>,
+        now: Instant,
     ) -> Vec<CanonPath> {
         match self.mode {
             DiagMode::Push => {
@@ -303,7 +304,7 @@ impl DiagnosticSource {
                     hash_snapshot,
                     pending_pulls: pull_paths.iter().cloned().collect(),
                     frozen: true,
-                    deadline: Some(Instant::now() + PULL_FREEZE_DEADLINE),
+                    deadline: Some(now + PULL_FREEZE_DEADLINE),
                 });
                 pull_paths
             }
@@ -495,6 +496,10 @@ mod tests {
         paths.iter().map(|s| p(s)).collect()
     }
 
+    fn now() -> Instant {
+        Instant::now()
+    }
+
     fn diag(msg: &str) -> Diagnostic {
         Diagnostic {
             start_line: 0,
@@ -587,7 +592,7 @@ mod tests {
         // against the hash the server actually saw.
         let mut ds = push_source();
         ds.on_push(p("/a.rs"), vec![diag("cached")], PersistedContentHash(7));
-        ds.open_window(snap(&[("/a.rs", 11)]), &opened(&["/a.rs"]));
+        ds.open_window(snap(&[("/a.rs", 11)]), &opened(&["/a.rs"]), now());
         let drained = ds.drain_cache_for_window();
         assert_eq!(drained.len(), 1);
         assert_eq!(drained[0].1[0].message, "cached");
@@ -598,7 +603,7 @@ mod tests {
     fn push_cache_survives_window_close() {
         let mut ds = push_source();
         ds.on_push(p("/a.rs"), vec![diag("cached")], PersistedContentHash(7));
-        ds.open_window(snap(&[("/a.rs", 1)]), &opened(&["/a.rs"]));
+        ds.open_window(snap(&[("/a.rs", 1)]), &opened(&["/a.rs"]), now());
         ds.close_window();
         assert_eq!(
             ds.push_cache.get(&p("/a.rs")).unwrap().1[0].message,
@@ -609,7 +614,7 @@ mod tests {
     #[test]
     fn push_window_not_frozen() {
         let mut ds = push_source();
-        ds.open_window(snap(&[("/a.rs", 1)]), &opened(&["/a.rs"]));
+        ds.open_window(snap(&[("/a.rs", 1)]), &opened(&["/a.rs"]), now());
         assert!(!ds.is_frozen());
     }
 
@@ -618,14 +623,14 @@ mod tests {
         // Push-only servers have no pull capability; the window
         // exists only to anchor the snapshot for `should_close_window`.
         let mut ds = push_source();
-        let pulls = ds.open_window(snap(&[("/a.rs", 1)]), &opened(&["/a.rs"]));
+        let pulls = ds.open_window(snap(&[("/a.rs", 1)]), &opened(&["/a.rs"]), now());
         assert!(pulls.is_empty());
     }
 
     #[test]
     fn should_close_window_fires_on_version_movement() {
         let mut ds = push_source();
-        ds.open_window(snap(&[("/a.rs", 4)]), &opened(&["/a.rs"]));
+        ds.open_window(snap(&[("/a.rs", 4)]), &opened(&["/a.rs"]), now());
         assert!(!ds.should_close_window(&p("/a.rs"), PersistedContentHash(4)));
         assert!(ds.should_close_window(&p("/a.rs"), PersistedContentHash(5)));
     }
@@ -635,7 +640,7 @@ mod tests {
     #[test]
     fn pull_window_is_frozen_and_has_deadline() {
         let mut ds = pull_source();
-        ds.open_window(snap(&[("/a.rs", 1)]), &opened(&["/a.rs"]));
+        ds.open_window(snap(&[("/a.rs", 1)]), &opened(&["/a.rs"]), now());
         assert!(ds.is_frozen());
         assert!(ds.deadline().is_some());
     }
@@ -646,6 +651,7 @@ mod tests {
         let pulls = ds.open_window(
             snap(&[("/a.rs", 1), ("/b.rs", 2)]),
             &opened(&["/a.rs", "/b.rs"]),
+            now(),
         );
         assert_eq!(pulls.len(), 2);
     }
@@ -653,7 +659,7 @@ mod tests {
     #[test]
     fn pull_response_forwards_with_snapshot_version() {
         let mut ds = pull_source();
-        ds.open_window(snap(&[("/a.rs", 7)]), &opened(&["/a.rs"]));
+        ds.open_window(snap(&[("/a.rs", 7)]), &opened(&["/a.rs"]), now());
         let (out, all_done) = ds.on_pull_response(p("/a.rs"), vec![diag("pulled")]);
         let (path, diags, v) = out.expect("forward");
         assert_eq!(path, p("/a.rs"));
@@ -669,6 +675,7 @@ mod tests {
         ds.open_window(
             snap(&[("/a.rs", 1), ("/b.rs", 1)]),
             &opened(&["/a.rs", "/b.rs"]),
+            now(),
         );
         assert!(ds.is_frozen());
         let (_, done) = ds.on_pull_response(p("/a.rs"), vec![]);
@@ -682,7 +689,7 @@ mod tests {
     #[test]
     fn pull_cancel_freeze_lifts_freeze_keeps_window() {
         let mut ds = pull_source();
-        ds.open_window(snap(&[("/a.rs", 1)]), &opened(&["/a.rs"]));
+        ds.open_window(snap(&[("/a.rs", 1)]), &opened(&["/a.rs"]), now());
         assert!(ds.is_frozen());
         ds.cancel_freeze();
         assert!(!ds.is_frozen());
@@ -692,7 +699,7 @@ mod tests {
     #[test]
     fn pull_response_for_unknown_path_is_dropped() {
         let mut ds = pull_source();
-        ds.open_window(snap(&[("/a.rs", 1)]), &opened(&["/a.rs"]));
+        ds.open_window(snap(&[("/a.rs", 1)]), &opened(&["/a.rs"]), now());
         let (out, done) = ds.on_pull_response(p("/ghost.rs"), vec![diag("stray")]);
         assert!(out.is_none());
         assert!(!done);
@@ -709,7 +716,7 @@ mod tests {
             p("/a.rs"),
             (PersistedContentHash(0), vec![diag("from_push")]),
         );
-        ds.open_window(snap(&[("/a.rs", 1)]), &opened(&["/a.rs"]));
+        ds.open_window(snap(&[("/a.rs", 1)]), &opened(&["/a.rs"]), now());
         let (out, _) = ds.on_pull_response(p("/a.rs"), vec![diag("from_pull")]);
         assert_eq!(out.unwrap().1[0].message, "from_pull");
         assert!(
@@ -724,7 +731,7 @@ mod tests {
         // dropped so it doesn't smear stale diagnostics ahead of
         // the authoritative pull response.
         let mut ds = pull_source();
-        ds.open_window(snap(&[("/a.rs", 1)]), &opened(&["/a.rs"]));
+        ds.open_window(snap(&[("/a.rs", 1)]), &opened(&["/a.rs"]), now());
         let r = ds.on_push(p("/a.rs"), vec![diag("race")], PersistedContentHash(7));
         assert!(matches!(r, DiagPushResult::Drop));
         assert!(
@@ -739,7 +746,7 @@ mod tests {
         // pull in flight for B). Cache + emit fallback so the
         // runtime can show data for B.
         let mut ds = pull_source();
-        ds.open_window(snap(&[("/a.rs", 1)]), &opened(&["/a.rs"]));
+        ds.open_window(snap(&[("/a.rs", 1)]), &opened(&["/a.rs"]), now());
         let r = ds.on_push(p("/b.rs"), vec![diag("b_push")], PersistedContentHash(2));
         assert!(matches!(r, DiagPushResult::CacheFallback(_, _, _)));
         assert!(ds.push_cache.contains_key(&p("/b.rs")));
