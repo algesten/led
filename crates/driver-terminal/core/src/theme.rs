@@ -618,15 +618,18 @@ impl Default for Theme {
                 bg: Some(Color::Indexed(53)),
                 ..Style::default()
             },
+            // Faint vertical bar (`│`, U+2502) painted in foreground —
+            // legacy led drew it as a character past the end of the
+            // line, not as a background strip. Indexed(236) reads as
+            // a near-black dark grey on most terminals.
             ruler: Style {
-                bg: Some(RULER_GREY),
+                fg: Some(RULER_GREY),
                 ..Style::default()
             },
-            // No ruler by default — users opt in from theme.toml
-            // with a `ruler_column = N` under `[chrome]`. Rendering
-            // it automatically would pick a number that'd surprise
-            // users of different editor widths (sidebar on/off).
-            ruler_column: None,
+            // Match legacy led's built-in default — a vertical line
+            // at column 110 marks the conventional max line width.
+            // Users override via `ruler_column = N` under `[chrome]`.
+            ruler_column: Some(110),
             syntax: SyntaxTheme::default(),
             diagnostics: DiagnosticsTheme::default(),
             // Git / PR defaults — match legacy's built-in theme
