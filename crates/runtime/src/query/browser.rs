@@ -1,7 +1,7 @@
 //! Browser tree and file-category derived memos.
 
 use led_core::CanonPath;
-use led_driver_fs_list_core::{ListCmd, TreeEntry};
+use led_driver_fs_list_core::{ListCmd, TreeEntry, TreeEntryKind};
 use std::sync::Arc;
 
 use super::inputs::*;
@@ -239,4 +239,46 @@ pub fn file_list_action<'a, 'b>(
     // `reveal_active_buffer`), so the loop above already covers
     // them. We don't need a separate auto-reveal pass.
     out
+}
+
+/// "What should happen to the file-browser's preview tab right
+/// now, given the current selection?"
+///
+/// Pure derivation — the syscall-bearing parts (path-chain
+/// resolution, `open_or_focus_tab` itself) stay in dispatch.
+/// The memo only decides which intent applies; dispatch reads
+/// the intent and applies it on the next selection-move.
+///
+/// - **File row** → `Open(path)`: open or replace the single
+///   preview slot with this file.
+/// - **Directory row** → `Close`: close any active preview.
+/// - **No selection** → `Keep`: leave whatever's open alone
+///   (mirrors `preview_current_selection`'s `return` when
+///   `entries.get(idx)` is `None`).
+#[drv::memo(single)]
+pub fn desired_preview_intent<'a>(
+    inputs: BrowserDerivedInputs<'a>,
+) -> PreviewIntent {
+    let entries = browser_entries(inputs);
+    let idx = browser_selected_idx(&entries, inputs.ui.selected_path.as_ref());
+    let Some(entry) = entries.get(idx) else {
+        return PreviewIntent::Keep;
+    };
+    match entry.kind {
+        TreeEntryKind::File => PreviewIntent::Open(entry.path.clone()),
+        TreeEntryKind::Directory { .. } => PreviewIntent::Close,
+    }
+}
+
+/// Outcome of [`desired_preview_intent`]. Dispatch reads this
+/// and applies it via `open_or_focus_tab` (Open) or
+/// `close_preview` (Close); `Keep` is a no-op.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PreviewIntent {
+    /// Open or replace the preview tab pointing at this path.
+    Open(CanonPath),
+    /// Close the active preview tab (if any).
+    Close,
+    /// No change — selection is empty / out of bounds.
+    Keep,
 }

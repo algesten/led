@@ -24,8 +24,8 @@ use led_state_browser::{BrowserUi, Focus};
 use led_state_tabs::Tabs;
 
 use crate::query::{
-    BrowserDerivedInputs, BrowserUiInput, EditedBuffersInput, FsTreeInput, TabsActiveInput,
-    browser_entries, browser_selected_idx,
+    BrowserDerivedInputs, BrowserUiInput, EditedBuffersInput, FsTreeInput, PreviewIntent,
+    TabsActiveInput, browser_entries, browser_selected_idx, desired_preview_intent,
 };
 use led_state_buffer_edits::BufferEdits;
 
@@ -258,29 +258,37 @@ pub(super) fn open_selected_bg(
 
 /// React to a browser-selection move.
 ///
-/// - File row → open (or replace) the preview tab for that path.
-///   Arrow-nav through files reuses the single preview slot.
-/// - Directory row → close the open preview (if any).
+/// Reads [`desired_preview_intent`] to decide what should happen,
+/// then applies the syscall-bearing side effects in dispatch:
+/// - `Open(path)` → resolve the user-typed chain (one
+///   `UserPath::resolve_chain` syscall) and stash it under
+///   `path_chains`, then open/replace the preview tab.
+/// - `Close` → close any active preview.
+/// - `Keep` → no-op (empty selection).
 fn preview_current_selection(
     browser: &BrowserUi,
     entries: &[TreeEntry],
     fs: &FsTree,
     tabs: &mut Tabs,
+    edits: &BufferEdits,
     path_chains: &mut HashMap<CanonPath, PathChain>,
 ) {
-    let idx = browser_selected_idx(entries, browser.selected_path.as_ref());
-    let Some(entry) = entries.get(idx) else {
-        return;
-    };
-    match entry.kind {
-        TreeEntryKind::File => {
-            let path = entry.path.clone();
+    let intent = desired_preview_intent(BrowserDerivedInputs {
+        fs: FsTreeInput::new(fs),
+        ui: BrowserUiInput::new(browser),
+        tabs: TabsActiveInput::new(tabs),
+        edits: EditedBuffersInput::new(edits),
+    });
+    match intent {
+        PreviewIntent::Open(path) => {
+            let idx = browser_selected_idx(entries, browser.selected_path.as_ref());
             stash_browser_chain(entries, fs, path_chains, idx);
             open_or_focus_tab(tabs, &path, /* promote= */ false);
         }
-        TreeEntryKind::Directory { .. } => {
+        PreviewIntent::Close => {
             close_preview(tabs);
         }
+        PreviewIntent::Keep => {}
     }
 }
 
@@ -310,7 +318,7 @@ pub(super) fn move_selection(
     let next = (cur as isize + delta).clamp(0, n - 1) as usize;
     browser.selected_path = Some(entries[next].path.clone());
     clamp_scroll_to_selection(browser, &entries, next, visible_rows);
-    preview_current_selection(browser, &entries, fs, tabs, path_chains);
+    preview_current_selection(browser, &entries, fs, tabs, edits, path_chains);
 }
 
 /// Browser-context page-move. `page_rows` is the visible window.
@@ -341,7 +349,7 @@ pub(super) fn select_first(
     let entries = entries_of(browser, fs, tabs, edits);
     browser.selected_path = entries.first().map(|e| e.path.clone());
     browser.scroll_offset = 0;
-    preview_current_selection(browser, &entries, fs, tabs, path_chains);
+    preview_current_selection(browser, &entries, fs, tabs, edits, path_chains);
 }
 
 pub(super) fn select_last(
@@ -356,7 +364,7 @@ pub(super) fn select_last(
     browser.selected_path = entries.last().map(|e| e.path.clone());
     let last = entries.len().saturating_sub(1);
     clamp_scroll_to_selection(browser, &entries, last, visible_rows);
-    preview_current_selection(browser, &entries, fs, tabs, path_chains);
+    preview_current_selection(browser, &entries, fs, tabs, edits, path_chains);
 }
 
 /// Minimum-movement scroll clamp. If `idx` is above the viewport,

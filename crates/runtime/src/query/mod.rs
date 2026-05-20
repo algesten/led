@@ -24,8 +24,9 @@ pub use actions::{
     sync_check_cmds,
 };
 pub use browser::{
-    browser_auto_expanded, browser_entries, browser_selected_idx, diag_categories_map,
-    file_categories_map, file_list_action, git_categories_map, BrowserDerivedInputs,
+    browser_auto_expanded, browser_entries, browser_selected_idx, desired_preview_intent,
+    diag_categories_map, file_categories_map, file_list_action, git_categories_map,
+    BrowserDerivedInputs, PreviewIntent,
 };
 pub use desired::{
     compiled_query, completion_commit_plan, completion_refilter_outcome,
