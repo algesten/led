@@ -110,6 +110,12 @@ pub struct GitDriverState {
     pub scan_in_flight: Option<CanonPath>,
     pub last_scan_ok: Option<bool>,
     pub last_error: Option<Arc<str>>,
+    /// `true` once the initial workspace scan has been dispatched.
+    /// Driver-outbound bookkeeping that lives on the driver source
+    /// rather than mirrored on AppState: guards the startup
+    /// one-shot so we don't spam `GitScan` every tick when
+    /// `fs.root` is `Some` but the driver has nothing new to do.
+    pub scan_dispatched: bool,
 }
 
 // ── Driver handle ──────────────────────────────────────────────
@@ -139,6 +145,7 @@ impl GitDriver {
             match cmd {
                 GitCmd::ScanFiles { root } => {
                     state.scan_in_flight = Some(root.clone());
+                    state.scan_dispatched = true;
                     self.trace.git_scan_start(root);
                 }
             }

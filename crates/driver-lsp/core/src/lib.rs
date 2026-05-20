@@ -26,7 +26,9 @@
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender};
 
-use led_core::{BufferVersion, CanonPath, LspRequestSeq, PersistedContentHash, ServerId};
+use led_core::{
+    BufferStateSum, BufferVersion, CanonPath, LspRequestSeq, PersistedContentHash, ServerId,
+};
 use led_state_diagnostics::Diagnostic;
 use led_state_syntax::Language;
 use ropey::Rope;
@@ -100,9 +102,10 @@ pub enum ServerStatus {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LspState {
     /// `true` once the runtime has dispatched [`LspCmd::Init`].
-    /// Mirror of the runtime's `lsp_init_sent` flag, kept here so
-    /// the driver source is the single point of truth for "has
-    /// the workspace been announced to the LSP layer?".
+    /// Driver source is the single point of truth for "has the
+    /// workspace been announced to the LSP layer?" — the runtime's
+    /// init-dispatch gate reads this directly rather than mirroring
+    /// it on AppState.
     pub init_sent: bool,
     /// Outstanding LSP RPCs keyed by sequence id. Cleared by
     /// `process` when the matching response (or `Error`) arrives.
@@ -129,6 +132,14 @@ pub struct LspState {
     /// avoid spamming the user with a stream of identical
     /// warnings — same pattern as the clipboard driver.
     pub last_error: Option<Arc<str>>,
+    /// `Some(sum)` holds Σ(version + saved_version) at the last
+    /// `RequestDiagnostics` emission; `None` means we've never
+    /// fired one. Driver-outbound bookkeeping: tracks a side-
+    /// effect the runtime emitted via this driver, so it lives
+    /// here rather than mirrored on AppState. The dispatch gate
+    /// compares the current buffer-state sum against this to
+    /// decide whether to re-fire.
+    pub requested_state_sum: Option<BufferStateSum>,
 }
 
 // ── ABI ─────────────────────────────────────────────────────────

@@ -34,7 +34,7 @@ use led_driver_buffers_native::{FileReadNative, FileWriteNative};
 use led_driver_clipboard_core::ClipboardDriver;
 use led_driver_clipboard_native::ClipboardNative;
 use led_core::{
-    BufferStateSum, BufferVersion, CanonPath, ChainId, Notifier, PathChain, SavedVersion,
+    BufferVersion, CanonPath, ChainId, Notifier, PathChain, SavedVersion,
     UndoDbSeq, WatchSeq,
 };
 use led_driver_terminal_core::{Dims, Frame, KeyEvent, Terminal, TerminalInputDriver};
@@ -268,25 +268,6 @@ pub struct Sources {
     /// rust-analyzer would never get `didSave`, so cargo check
     /// wouldn't run.
     pub lsp_notified: imbl::HashMap<CanonPath, LspNotified>,
-    /// `Some(sum)` holds Σ(version + saved_version) at the last
-    /// `RequestDiagnostics` emission; `None` means we've never
-    /// fired one. Combined flag+sum because the two cases the
-    /// runtime needs to distinguish collapse naturally: "has the
-    /// sum moved?" → `memo(edits) != *lsp_requested_state_sum`,
-    /// where the `None` case handles the first-ever emission
-    /// regardless of the sum's raw value. The per-tick current
-    /// sum is derived by the `buffer_state_sum` memo.
-    ///
-    /// Driver-outbound bookkeeping: tracks a side-effect the
-    /// runtime emitted, not a user decision or external fact.
-    /// Same category as `lsp_notified` below — kept as a field
-    /// because we can't derive "what did I tell the driver" from
-    /// observations of current source state.
-    pub lsp_requested_state_sum: Option<BufferStateSum>,
-    /// `true` once `LspCmd::Init` has been emitted. Same
-    /// category as `lsp_notified` / `lsp_requested_state_sum`:
-    /// driver-outbound bookkeeping.
-    pub lsp_init_sent: bool,
     /// Driver-owned in-flight tracking for the LSP driver per
     /// EXAMPLE-ARCH § "Stateless drivers still need an in-flight
     /// source". `execute` records intent (init flag, in-flight
@@ -338,12 +319,6 @@ pub struct Sources {
     /// and `GitEvent::LineStatuses` in the ingest phase; read by
     /// the browser / gutter / status-bar query memos.
     pub git: GitState,
-    /// `true` once the initial workspace scan has been dispatched.
-    /// Driver-outbound bookkeeping — same category as
-    /// `lsp_init_sent`: guards the startup one-shot so we don't
-    /// spam `GitScan` every tick when `fs.root` is `Some` but the
-    /// driver has nothing new to do.
-    pub git_scan_dispatched: bool,
     /// Set by the ingest phase on every successful save
     /// completion. Drained in the execute phase into a
     /// `GitCmd::ScanFiles` (a file save is the most common cause
@@ -368,12 +343,6 @@ pub struct Sources {
     /// matching event. Memos can read this to gate against
     /// double-firing a still-outstanding op.
     pub session_driver: led_driver_session_core::SessionDriverState,
-    /// Driver-outbound bookkeeping: `true` once the runtime has
-    /// dispatched `SessionCmd::Save` for the active Exiting
-    /// transition, so we don't spam Save every tick while
-    /// waiting for the `Saved` event. Same category as
-    /// `lsp_init_sent`.
-    pub session_save_dispatched: bool,
     /// Set by the Suspended → Running edge (M20) and the
     /// session-restore complete edge (M21) — anything that
     /// requires `Phase::Resuming` → `Phase::Running` to be

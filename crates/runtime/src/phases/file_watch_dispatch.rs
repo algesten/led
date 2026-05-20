@@ -34,7 +34,6 @@ pub(crate) fn run(sources: &mut Sources, env: &TickEnv<'_>) {
         lsp_extras,
         lsp_pending,
         lsp_notified,
-        lsp_requested_state_sum,
         lsp_driver,
         session,
         session_driver,
@@ -181,7 +180,7 @@ pub(crate) fn run(sources: &mut Sources, env: &TickEnv<'_>) {
         lsp_cmds.push(cmd.clone());
     }
     let current_sum = query::buffer_state_sum(EditedBuffersInput::new(edits));
-    let sum_advanced = Some(current_sum) != *lsp_requested_state_sum;
+    let sum_advanced = Some(current_sum) != lsp_driver.requested_state_sum;
     if sum_advanced {
         // Per Theme L (B) audit Finding 2.3 — a saved-version
         // advance is the user's "try again" signal. Any path
@@ -204,7 +203,7 @@ pub(crate) fn run(sources: &mut Sources, env: &TickEnv<'_>) {
     let should_request_diag = !lsp_notified.is_empty() && sum_advanced;
     if should_request_diag {
         lsp_cmds.push(LspCmd::RequestDiagnostics);
-        *lsp_requested_state_sum = Some(current_sum);
+        lsp_driver.requested_state_sum = Some(current_sum);
     }
     for req in completions_pending.pending_requests.drain(..) {
         lsp_cmds.push(LspCmd::RequestCompletion {

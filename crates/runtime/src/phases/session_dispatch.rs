@@ -19,7 +19,6 @@ pub(crate) fn run(sources: &mut Sources, env: &TickEnv<'_>) {
         fs,
         session,
         session_driver,
-        session_save_dispatched,
         lifecycle,
         ..
     } = sources;
@@ -45,14 +44,13 @@ pub(crate) fn run(sources: &mut Sources, env: &TickEnv<'_>) {
     if matches!(lifecycle.phase, Phase::Exiting)
         && session.primary
         && !session.saved
-        && !*session_save_dispatched
+        && !session_driver.save_dispatched
     {
         let data = build_session_data(tabs, edits, store, browser, jumps);
         env.drivers.session.execute(
             std::iter::once(&SessionCmd::SaveSession { data }),
             session_driver,
         );
-        *session_save_dispatched = true;
     } else if matches!(lifecycle.phase, Phase::Exiting)
         && !session.primary
     {

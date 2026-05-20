@@ -163,6 +163,12 @@ pub struct SessionDriverState {
     /// [`SyncResultKind`] variant (each carries `path`).
     pub check_sync_in_flight: imbl::HashSet<CanonPath>,
     pub last_error: Option<Arc<str>>,
+    /// `true` once the runtime has dispatched `SessionCmd::Save`
+    /// for the active Exiting transition, so we don't spam Save
+    /// every tick while waiting for the `Saved` event.
+    /// Driver-outbound bookkeeping on the driver source rather
+    /// than mirrored on AppState.
+    pub save_dispatched: bool,
 }
 
 pub trait Trace: Send + Sync {
@@ -220,6 +226,7 @@ impl SessionDriver {
                 }
                 SessionCmd::SaveSession { .. } => {
                     state.save_in_flight = true;
+                    state.save_dispatched = true;
                     self.trace.session_save_start();
                 }
                 SessionCmd::ClearUndo { path } => {
