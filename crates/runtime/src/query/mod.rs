@@ -782,11 +782,11 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
         match &actions[0] {
             SaveAction::Save {
                 path: p,
-                rope: r,
+                content,
                 version,
             } => {
                 assert_eq!(p, &path);
-                assert!(Arc::ptr_eq(r, &rope));
+                assert!(Arc::ptr_eq(content.as_rope(), &rope));
                 assert_eq!(*version, BufferVersion(3));
             }
             SaveAction::SaveAs { .. } => panic!("unexpected SaveAs"),
@@ -823,12 +823,12 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
             SaveAction::SaveAs {
                 from: f,
                 to: t,
-                rope: r,
+                content,
                 version,
             } => {
                 assert_eq!(f, &from);
                 assert_eq!(t, &to);
-                assert!(Arc::ptr_eq(r, &rope));
+                assert!(Arc::ptr_eq(content.as_rope(), &rope));
                 assert_eq!(*version, BufferVersion(2));
             }
             SaveAction::Save { .. } => panic!("unexpected Save"),

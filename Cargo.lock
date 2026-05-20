@@ -996,6 +996,7 @@ dependencies = [
  "drv",
  "imbl",
  "led-core",
+ "led-state-buffer-edits",
  "ropey",
 ]
 
@@ -1005,6 +1006,7 @@ version = "0.0.0"
 dependencies = [
  "led-core",
  "led-driver-buffers-core",
+ "led-state-buffer-edits",
  "ropey",
 ]
 

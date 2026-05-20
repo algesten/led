@@ -93,11 +93,9 @@ pub struct PersistedSession(pub SessionData);
 /// "stamp `last_saved` once the driver acks" handoff has to
 /// explicitly convert one to the other.
 ///
-/// **Currently produced opt-in** — the `build_session_data` helper
-/// still returns `SessionData` because the data flows straight
-/// into `SessionCmd::SaveSession` without an intermediate variable
-/// that would benefit from the newtype. Adopt this when the quit-
-/// gate diff lands.
+/// Produced by `build_session_data` and unwrapped at the
+/// `SessionCmd::SaveSession` seam so the driver ABI keeps the
+/// neutral [`SessionData`] payload.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct DraftSession(pub SessionData);
 

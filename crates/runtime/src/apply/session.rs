@@ -56,7 +56,7 @@ pub(crate) fn build_session_data(
     _store: &BufferStore,
     browser: &led_state_browser::BrowserUi,
     jumps: &led_state_jumps::JumpListState,
-) -> SessionData {
+) -> led_driver_session_core::DraftSession {
     let mut session_buffers: Vec<SessionBuffer> =
         Vec::with_capacity(tabs.open.len());
     let mut active_tab_order: usize = 0;
@@ -75,12 +75,12 @@ pub(crate) fn build_session_data(
             undo: None,
         });
     }
-    SessionData {
+    led_driver_session_core::DraftSession(SessionData {
         active_tab_order,
         show_side_panel: browser.visible,
         buffers: session_buffers,
         kv: build_session_kv(browser, jumps),
-    }
+    })
 }
 
 /// Re-establish the "browser cursor on a file ⇒ preview tab"

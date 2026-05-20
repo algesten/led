@@ -13,4 +13,5 @@ publish = false
 [dependencies]
 led-core = { workspace = true }
 led-driver-buffers-core = { workspace = true }
+led-state-buffer-edits = { workspace = true }
 ropey = { workspace = true }

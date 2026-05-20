@@ -233,6 +233,7 @@ mod tests {
     use led_driver_buffers_core::{
         BufferStore, FileWriteState, LoadAction, LoadState, NoopTrace, SaveAction, WriteDone,
     };
+    use led_state_buffer_edits::Persisted;
     use std::io::Write;
     use std::path::PathBuf;
     use std::time::{Duration, Instant};
@@ -309,7 +310,7 @@ mod tests {
         driver.execute(
             [&SaveAction::Save {
                 path: path.clone(),
-                rope: rope.clone(),
+                content: Persisted(rope.clone()),
                 version: BufferVersion(1),
             }],
             &mut state,
@@ -345,7 +346,7 @@ mod tests {
         driver.execute(
             [&SaveAction::Save {
                 path,
-                rope: Arc::new(Rope::from_str("x")),
+                content: Persisted(Arc::new(Rope::from_str("x"))),
                 version: BufferVersion(1),
             }],
             &mut state,

@@ -77,11 +77,9 @@ impl std::ops::Deref for Draft {
 /// Consumed by [`EditedBuffer::fresh`] / [`EditedBuffer::fresh_with_seq_gen`]
 /// so the load-completion code path's signature enforces the
 /// disk-anchored role at the type level. The save-driver protocol
-/// (`SaveAction::Save.rope: Arc<Rope>`) hasn't been migrated yet —
-/// that remains an unwrapped `Arc<Rope>` so the writer driver's
-/// interface stays neutral; the type wrap-up there is a future
-/// step when the driver returns the persisted rope back to the
-/// runtime.
+/// (`SaveAction::Save.content` / `SaveAs.content`) also wraps the
+/// rope as `Persisted` so the writer can't be handed an arbitrary
+/// [`Draft`] at the seam.
 ///
 /// See `EXAMPLE-ARCH § "Shadow sources"` for the motivating
 /// pattern.

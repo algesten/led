@@ -9,6 +9,7 @@ use led_driver_buffers_core::{LoadAction, SaveAction};
 use led_driver_clipboard_core::ClipboardAction;
 use led_driver_file_watch_core::{ChangeKinds, FileWatchEvent};
 use led_driver_session_core::SessionCmd;
+use led_state_buffer_edits::Persisted;
 use led_state_jumps::JumpPosition;
 use std::sync::Arc;
 
@@ -87,7 +88,7 @@ pub fn file_save_action<'p, 'b>(
         // dirty paths to `pending_saves` in the first place.
         out.push(SaveAction::Save {
             path: path.clone(),
-            rope: eb.draft.as_rope().clone(),
+            content: Persisted(eb.draft.as_rope().clone()),
             version: eb.version,
         });
     }
@@ -101,7 +102,7 @@ pub fn file_save_action<'p, 'b>(
         out.push(SaveAction::SaveAs {
             from: from.clone(),
             to: to.clone(),
-            rope: eb.draft.as_rope().clone(),
+            content: Persisted(eb.draft.as_rope().clone()),
             version: eb.version,
         });
     }

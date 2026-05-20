@@ -18,6 +18,7 @@ use std::sync::mpsc::{Receiver, Sender};
 use std::sync::Arc;
 
 use led_core::{BufferVersion, CanonPath};
+use led_state_buffer_edits::Persisted;
 use ropey::Rope;
 
 // ── Source ─────────────────────────────────────────────────────────────
@@ -266,11 +267,17 @@ impl FileReadDriver {
 /// content* to a **different** path, creating a new file on disk —
 /// the active tab itself stays pinned to `from`. Matches legacy
 /// `DocStoreOut::SaveAs` semantics.
+///
+/// `content` is wrapped as [`Persisted`] per Theme O: at the
+/// moment the runtime hands the rope to the writer, this is the
+/// rope that will be the new on-disk snapshot once the write
+/// lands. Wrapping it as `Persisted` at the SaveAction seam means
+/// the writer can't be handed an arbitrary [`Draft`] by accident.
 #[derive(Clone, Debug, PartialEq)]
 pub enum SaveAction {
     Save {
         path: CanonPath,
-        rope: Arc<Rope>,
+        content: Persisted,
         version: BufferVersion,
     },
     SaveAs {
@@ -282,7 +289,7 @@ pub enum SaveAction {
         /// Where the bytes are written. A fresh file is created on
         /// disk at `to`; the existing tab at `from` is untouched.
         to: CanonPath,
-        rope: Arc<Rope>,
+        content: Persisted,
         version: BufferVersion,
     },
 }
@@ -413,21 +420,21 @@ impl FileWriteDriver {
             match action {
                 SaveAction::Save {
                     path,
-                    rope,
+                    content,
                     version,
                 } => {
                     state.in_flight.insert(path.clone(), *version);
                     self.trace.file_save_start(path, *version);
                     let _ = self.tx_cmd.send(WriteCmd::Write {
                         path: path.clone(),
-                        rope: rope.clone(),
+                        rope: content.as_rope().clone(),
                         version: *version,
                     });
                 }
                 SaveAction::SaveAs {
                     from,
                     to,
-                    rope,
+                    content,
                     version,
                 } => {
                     state.in_flight.insert(to.clone(), *version);
@@ -435,7 +442,7 @@ impl FileWriteDriver {
                     let _ = self.tx_cmd.send(WriteCmd::WriteAs {
                         from: from.clone(),
                         to: to.clone(),
-                        rope: rope.clone(),
+                        rope: content.as_rope().clone(),
                         version: *version,
                     });
                 }
@@ -542,7 +549,7 @@ mod tests {
         let rope = Arc::new(Rope::from_str("payload"));
         let action = SaveAction::Save {
             path: path.clone(),
-            rope: rope.clone(),
+            content: Persisted(rope.clone()),
             version: BufferVersion(7),
         };
 
@@ -645,7 +652,7 @@ mod tests {
             std::iter::once(&SaveAction::SaveAs {
                 from: from.clone(),
                 to: to.clone(),
-                rope,
+                content: Persisted(rope),
                 version: BufferVersion(7),
             }),
             &mut state,

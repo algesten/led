@@ -46,9 +46,15 @@ pub(crate) fn run(sources: &mut Sources, env: &TickEnv<'_>) {
         && !session.saved
         && !session_driver.save_dispatched
     {
-        let data = build_session_data(tabs, edits, store, browser, jumps);
+        // build_session_data returns DraftSession (Theme O role
+        // newtype). The driver's wire ABI carries SessionData, so
+        // the explicit `.0` unwrap is the seam where draft ⇒
+        // about-to-be-persisted; the seal closes on the matching
+        // `Saved` event where `last_saved` reads it back as
+        // PersistedSession.
+        let draft = build_session_data(tabs, edits, store, browser, jumps);
         env.drivers.session.execute(
-            std::iter::once(&SessionCmd::SaveSession { data }),
+            std::iter::once(&SessionCmd::SaveSession { data: draft.0 }),
             session_driver,
         );
     } else if matches!(lifecycle.phase, Phase::Exiting)
