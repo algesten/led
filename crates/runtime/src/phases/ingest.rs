@@ -851,6 +851,12 @@ pub(crate) fn ingest_git(sources: &mut Sources, env: &TickEnv<'_>) {
                     );
                 }
             }
+            // Driver-side state already recorded last_error +
+            // last_scan_ok = Some(false). Nothing for the runtime
+            // app state to fold: the workspace's previous
+            // file/line maps stay valid (the failure is the
+            // open/scan, not a notification that paths changed).
+            GitEvent::ScanFailed { .. } => {}
         }
     }
 }

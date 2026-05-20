@@ -50,7 +50,7 @@ pub enum GitCmd {
 #[derive(Debug, Clone)]
 pub enum GitEvent {
     /// Repo-wide file status + branch. First message of every
-    /// scan.
+    /// successful scan.
     FileStatuses {
         statuses: HashMap<CanonPath, HashSet<IssueCategory>>,
         branch: Option<String>,
@@ -62,6 +62,17 @@ pub enum GitEvent {
     LineStatuses {
         path: CanonPath,
         statuses: Vec<LineStatus>,
+    },
+    /// Scan failed (e.g. `repo.open` returned Err — not a repo,
+    /// permissions, libgit2 corruption). Per
+    /// `feedback_driver_failure_state.md`, every "what's missing?"
+    /// memo must see explicit Err so it stops re-firing rather
+    /// than treating in-flight as permanent. Mirrors
+    /// `BufferStore::LoadState::Error` and
+    /// `LspState::PullState::Failed`.
+    ScanFailed {
+        root: CanonPath,
+        message: Arc<str>,
     },
 }
 
@@ -88,13 +99,17 @@ impl Trace for NoopTrace {
 /// Driver-owned in-flight tracking per EXAMPLE-ARCH § "Stateless
 /// drivers still need an in-flight source". `scan_in_flight` is
 /// `Some(root)` while a `ScanFiles` cmd is outstanding; cleared
-/// by `process` when the `FileStatuses` event arrives. The
-/// runtime can read this to gate "should I dispatch another
-/// scan?" against the current in-flight cmd.
+/// by `process` when the matching `FileStatuses` or `ScanFailed`
+/// event arrives. The runtime can read this to gate "should I
+/// dispatch another scan?" against the current in-flight cmd.
+///
+/// `last_error` records the most recent terminal failure so
+/// downstream "needs scan?" memos can stop re-firing.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct GitDriverState {
     pub scan_in_flight: Option<CanonPath>,
     pub last_scan_ok: Option<bool>,
+    pub last_error: Option<Arc<str>>,
 }
 
 // ── Driver handle ──────────────────────────────────────────────
@@ -134,17 +149,31 @@ impl GitDriver {
     }
 
     /// Drain completions. Clears `scan_in_flight` when the
-    /// `FileStatuses` reply arrives (the worker emits at most one
-    /// `FileStatuses` per `ScanFiles`, and it's always first).
-    /// Caller folds `FileStatuses` then each `LineStatuses` into
-    /// the source in arrival order.
+    /// `FileStatuses` reply (or terminal `ScanFailed`) arrives.
+    /// The worker emits at most one terminal event per
+    /// `ScanFiles`, and `FileStatuses` is always first on
+    /// success. Caller folds `FileStatuses` then each
+    /// `LineStatuses` into the source in arrival order; on
+    /// `ScanFailed` the caller can surface a diagnostic but the
+    /// driver-side state (`last_scan_ok = Some(false)`,
+    /// `last_error`) is already correct without further action.
     pub fn process(&self, state: &mut GitDriverState) -> Vec<GitEvent> {
         let mut out = Vec::new();
         while let Ok(ev) = self.rx.try_recv() {
-            if let GitEvent::FileStatuses { statuses, .. } = &ev {
-                state.scan_in_flight = None;
-                state.last_scan_ok = Some(true);
-                self.trace.git_scan_done(true, statuses.len());
+            match &ev {
+                GitEvent::FileStatuses { statuses, .. } => {
+                    state.scan_in_flight = None;
+                    state.last_scan_ok = Some(true);
+                    state.last_error = None;
+                    self.trace.git_scan_done(true, statuses.len());
+                }
+                GitEvent::ScanFailed { message, .. } => {
+                    state.scan_in_flight = None;
+                    state.last_scan_ok = Some(false);
+                    state.last_error = Some(message.clone());
+                    self.trace.git_scan_done(false, 0);
+                }
+                GitEvent::LineStatuses { .. } => {}
             }
             out.push(ev);
         }
