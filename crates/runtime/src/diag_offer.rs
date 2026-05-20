@@ -176,7 +176,7 @@ fn describe_op(doc: &Rope, op: &EditOp) -> (usize, isize) {
 mod tests {
     use super::*;
     use led_core::BufferVersion;
-    use led_state_buffer_edits::{Draft, EditedBuffer, Persisted};
+    use led_state_buffer_edits::{EditedBuffer, Persisted};
     use led_state_diagnostics::DiagnosticSeverity;
     use led_state_tabs::Cursor;
     use std::sync::Arc;
@@ -240,8 +240,7 @@ mod tests {
         // Apply a same-row edit: insert 'x' at char 2 ("fxn main()...").
         let mut rope2: Rope = (*eb.draft).clone();
         rope2.insert_char(2, 'x');
-        eb.draft = Draft(Arc::new(rope2));
-        eb.live_content_hash = EphemeralContentHash::of_rope(&eb.draft).persist();
+        eb.set_draft(Arc::new(rope2));
         eb.version = BufferVersion(1);
         eb.history.record_insert_char(2, 'x', cur(0, 2), cur(0, 3));
         eb.history.finalise();
@@ -269,8 +268,7 @@ mod tests {
         // Insert a newline at char 0 ("\na\nb\nc\n").
         let mut rope2: Rope = (*eb.draft).clone();
         rope2.insert_char(0, '\n');
-        eb.draft = Draft(Arc::new(rope2));
-        eb.live_content_hash = EphemeralContentHash::of_rope(&eb.draft).persist();
+        eb.set_draft(Arc::new(rope2));
         eb.version = BufferVersion(1);
         eb.history
             .record_insert(0, Arc::<str>::from("\n"), cur(0, 0), cur(1, 0));
@@ -300,16 +298,14 @@ mod tests {
         // Type 'x' then delete it, ending back at hello.
         let mut r: Rope = (*eb.draft).clone();
         r.insert_char(5, 'x');
-        eb.draft = Draft(Arc::new(r));
-        eb.live_content_hash = EphemeralContentHash::of_rope(&eb.draft).persist();
+        eb.set_draft(Arc::new(r));
         eb.version = BufferVersion(1);
         eb.history.record_insert_char(5, 'x', cur(0, 5), cur(0, 6));
         eb.history.finalise();
 
         let mut r: Rope = (*eb.draft).clone();
         r.remove(5..6);
-        eb.draft = Draft(Arc::new(r));
-        eb.live_content_hash = EphemeralContentHash::of_rope(&eb.draft).persist();
+        eb.set_draft(Arc::new(r));
         eb.version = BufferVersion(2);
         eb.history
             .record_delete(5, Arc::<str>::from("x"), cur(0, 6), cur(0, 5));

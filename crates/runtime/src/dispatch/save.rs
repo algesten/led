@@ -128,9 +128,7 @@ pub(crate) fn apply_save_cleanup(
         cursor_after.col = new_line_grapheme_count;
         cursor_after.preferred_col = new_line_grapheme_count;
     }
-    eb.draft = led_state_buffer_edits::Draft(new_rope);
-    eb.live_content_hash =
-        led_core::EphemeralContentHash::of_rope(&eb.draft).persist();
+    eb.set_draft(new_rope);
     eb.version.0 = eb.version.0.saturating_add(1);
     let history_batch: Vec<(usize, Arc<str>, Arc<str>)> = plan
         .iter()
@@ -252,14 +250,13 @@ mod tests {
         let mut edits = BufferEdits::default();
         edits.buffers.insert(
             canon("a"),
-            EditedBuffer {
-                draft: led_state_buffer_edits::Draft(Arc::new(Rope::from_str("A"))),
-                version: led_core::BufferVersion(1),
-                saved_version: led_core::SavedVersion(0),
-                disk_content_hash: led_core::PersistedContentHash::default(),
-                live_content_hash: led_core::PersistedContentHash(1), // dirty
-                history: Default::default(),
-            },
+            EditedBuffer::new_with_state(
+                Arc::new(Rope::from_str("A")),
+                led_core::BufferVersion(1),
+                led_core::SavedVersion(0),
+                led_core::PersistedContentHash::default(),
+                Default::default(),
+            ),
         );
         // b is clean.
         edits.buffers.insert(
@@ -268,14 +265,13 @@ mod tests {
         );
         edits.buffers.insert(
             canon("c"),
-            EditedBuffer {
-                draft: led_state_buffer_edits::Draft(Arc::new(Rope::from_str("C"))),
-                version: led_core::BufferVersion(2),
-                saved_version: led_core::SavedVersion(0),
-                disk_content_hash: led_core::PersistedContentHash::default(),
-                live_content_hash: led_core::PersistedContentHash(1), // dirty
-                history: Default::default(),
-            },
+            EditedBuffer::new_with_state(
+                Arc::new(Rope::from_str("C")),
+                led_core::BufferVersion(2),
+                led_core::SavedVersion(0),
+                led_core::PersistedContentHash::default(),
+                Default::default(),
+            ),
         );
         let store = BufferStore::default();
         let term = terminal_with(Some(Dims { cols: 10, rows: 5 }));

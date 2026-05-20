@@ -192,14 +192,13 @@ mod tests {
         let mut edits = BufferEdits::default();
         edits.buffers.insert(
             canon("a"),
-            EditedBuffer {
-                draft: led_state_buffer_edits::Draft(Arc::new(Rope::from_str("A"))),
-                version: led_core::BufferVersion(1),
-                saved_version: led_core::SavedVersion(0),
-                disk_content_hash: led_core::PersistedContentHash::default(),
-                live_content_hash: led_core::PersistedContentHash(1), // dirty
-                history: Default::default(),
-            },
+            EditedBuffer::new_with_state(
+                Arc::new(Rope::from_str("A")),
+                led_core::BufferVersion(1),
+                led_core::SavedVersion(0),
+                led_core::PersistedContentHash::default(),
+                Default::default(),
+            ),
         );
         edits.buffers.insert(
             canon("b"),

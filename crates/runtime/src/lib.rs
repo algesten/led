@@ -1268,9 +1268,7 @@ mod tests {
         // Mutate so the entry is visibly "the user's view".
         {
             let eb = edits.buffers.get_mut(&path).unwrap();
-            eb.draft = led_state_buffer_edits::Draft(Arc::new(Rope::from_str("user typed more")));
-            eb.live_content_hash =
-                led_core::EphemeralContentHash::of_rope(&eb.draft).persist();
+            eb.set_draft(Arc::new(Rope::from_str("user typed more")));
         }
 
         let stale_disk = Arc::new(Rope::from_str("old disk\n"));

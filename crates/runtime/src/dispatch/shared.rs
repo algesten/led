@@ -148,9 +148,7 @@ where
 /// we restamp here so memos can read the cached value instead of
 /// walking the rope per tick.
 pub(super) fn bump(eb: &mut EditedBuffer, new_rope: Rope) {
-    eb.draft = led_state_buffer_edits::Draft(Arc::new(new_rope));
-    eb.live_content_hash =
-        led_core::EphemeralContentHash::of_rope(&eb.draft).persist();
+    eb.set_draft(Arc::new(new_rope));
     eb.version.0 = eb.version.0.saturating_add(1);
 }
 

@@ -701,15 +701,13 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
         let edited_rope = Arc::new(Rope::from_str("edited-version"));
         e.buffers.insert(
             canon("a.rs"),
-            EditedBuffer {
-                draft: led_state_buffer_edits::Draft(edited_rope.clone()),
-                version: BufferVersion(1),
-                saved_version: SavedVersion(0),
-                disk_content_hash: led_core::PersistedContentHash::default(),
-                live_content_hash:
-                    led_core::EphemeralContentHash::of_rope(&edited_rope).persist(),
-                history: Default::default(),
-            },
+            EditedBuffer::new_with_state(
+                edited_rope.clone(),
+                BufferVersion(1),
+                SavedVersion(0),
+                led_core::PersistedContentHash::default(),
+                Default::default(),
+            ),
         );
 
         let frame = render(&t, &e, &s, &term).expect("dims set");
@@ -762,15 +760,13 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
         let rope = Arc::new(Rope::from_str("payload"));
         e.buffers.insert(
             path.clone(),
-            EditedBuffer {
-                draft: led_state_buffer_edits::Draft(rope.clone()),
-                version: BufferVersion(3),
-                saved_version: SavedVersion(0),
-                disk_content_hash: led_core::PersistedContentHash::default(),
-                live_content_hash:
-                    led_core::EphemeralContentHash::of_rope(&rope).persist(),
-                history: Default::default(),
-            },
+            EditedBuffer::new_with_state(
+                rope.clone(),
+                BufferVersion(3),
+                SavedVersion(0),
+                led_core::PersistedContentHash::default(),
+                Default::default(),
+            ),
         );
         e.pending_saves.insert(path.clone());
 
@@ -801,16 +797,13 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
         let rope = Arc::new(Rope::from_str("payload"));
         e.buffers.insert(
             from.clone(),
-            EditedBuffer {
-                draft: led_state_buffer_edits::Draft(rope.clone()),
-                version: BufferVersion(2),
-                saved_version: SavedVersion(2), // pristine — SaveAs still fires
-                disk_content_hash:
-                    led_core::EphemeralContentHash::of_rope(&rope).persist(),
-                live_content_hash:
-                    led_core::EphemeralContentHash::of_rope(&rope).persist(),
-                history: Default::default(),
-            },
+            EditedBuffer::new_with_state(
+                rope.clone(),
+                BufferVersion(2),
+                SavedVersion(2), // pristine — SaveAs still fires
+                led_core::EphemeralContentHash::of_rope(&rope).persist(),
+                Default::default(),
+            ),
         );
         e.pending_save_as.insert(from.clone(), to.clone());
 
@@ -850,14 +843,13 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
         let rope = Arc::new(Rope::from_str("x"));
         e.buffers.insert(
             path.clone(),
-            EditedBuffer {
-                draft: led_state_buffer_edits::Draft(rope.clone()),
-                version: BufferVersion(0),
-                saved_version: SavedVersion(0), // dirty() == false
-                disk_content_hash: led_core::EphemeralContentHash::of_rope(&rope).persist(),
-                live_content_hash: led_core::EphemeralContentHash::of_rope(&rope).persist(),
-                history: Default::default(),
-            },
+            EditedBuffer::new_with_state(
+                rope.clone(),
+                BufferVersion(0),
+                SavedVersion(0), // dirty() == false
+                led_core::EphemeralContentHash::of_rope(&rope).persist(),
+                Default::default(),
+            ),
         );
         e.pending_saves.insert(path.clone());
 
@@ -908,27 +900,24 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
         let a_hash = led_core::EphemeralContentHash::of_rope(&a_rope).persist();
         e.buffers.insert(
             canon("a.rs"),
-            EditedBuffer {
-                draft: led_state_buffer_edits::Draft(a_rope.clone()),
-                version: BufferVersion(0),
-                saved_version: SavedVersion(0),
-                disk_content_hash: a_hash,
-                live_content_hash: a_hash,
-                history: Default::default(),
-            },
+            EditedBuffer::new_with_state(
+                a_rope.clone(),
+                BufferVersion(0),
+                SavedVersion(0),
+                a_hash,
+                Default::default(),
+            ),
         );
         let b_rope = Arc::new(Rope::from_str("yy"));
         e.buffers.insert(
             canon("b.rs"),
-            EditedBuffer {
-                draft: led_state_buffer_edits::Draft(b_rope.clone()),
-                version: BufferVersion(1),
-                saved_version: SavedVersion(0),
-                disk_content_hash: led_core::PersistedContentHash::default(),
-                live_content_hash:
-                    led_core::EphemeralContentHash::of_rope(&b_rope).persist(),
-                history: Default::default(),
-            },
+            EditedBuffer::new_with_state(
+                b_rope.clone(),
+                BufferVersion(1),
+                SavedVersion(0),
+                led_core::PersistedContentHash::default(),
+                Default::default(),
+            ),
         );
 
         let frame = render(&t, &e, &s, &term).expect("dims set");
@@ -1316,14 +1305,13 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
         let mut edits = BufferEdits::default();
         edits.buffers.insert(
             canon("a.rs"),
-            EditedBuffer {
-                draft: led_state_buffer_edits::Draft(Arc::new(Rope::from_str("x"))),
-                version: BufferVersion(2),
-                saved_version: SavedVersion(1),
-                disk_content_hash: led_core::PersistedContentHash::default(),
-                live_content_hash: led_core::PersistedContentHash(1), // dirty
-                history: Default::default(),
-            },
+            EditedBuffer::new_with_state(
+                Arc::new(Rope::from_str("x")),
+                BufferVersion(2),
+                SavedVersion(1),
+                led_core::PersistedContentHash::default(),
+                Default::default(),
+            ),
         );
         let git = led_state_git::GitState {
             branch: Some("feature/xyz".into()),
@@ -1347,14 +1335,13 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
         let mut edits = BufferEdits::default();
         edits.buffers.insert(
             canon("a.rs"),
-            EditedBuffer {
-                draft: led_state_buffer_edits::Draft(Arc::new(Rope::from_str("x"))),
-                version: BufferVersion(3),
-                saved_version: SavedVersion(1), // dirty
-                disk_content_hash: led_core::PersistedContentHash::default(),
-                live_content_hash: led_core::PersistedContentHash(1), // dirty
-                history: Default::default(),
-            },
+            EditedBuffer::new_with_state(
+                Arc::new(Rope::from_str("x")),
+                BufferVersion(3),
+                SavedVersion(1), // dirty
+                led_core::PersistedContentHash::default(),
+                Default::default(),
+            ),
         );
         let s = status(&AlertState::default(), &tabs, &edits);
         assert_eq!(&*s.left, "  \u{25cf}");

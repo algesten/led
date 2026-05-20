@@ -47,7 +47,7 @@ pub use history::{EditGroup, EditOp, FileSearchMark, History, rebase_char_index}
 /// See `EXAMPLE-ARCH § "Shadow sources"` for the motivating
 /// pattern.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct Draft(pub Arc<Rope>);
+pub struct Draft(pub(crate) Arc<Rope>);
 
 impl Draft {
     /// Borrow the underlying `Arc<Rope>` — for clone-the-Arc and
@@ -274,6 +274,64 @@ impl EditedBuffer {
             disk_content_hash,
             live_content_hash: disk_content_hash,
             history: History::with_seq_gen(seq_gen),
+        }
+    }
+
+    /// Swap the draft rope and stamp `live_content_hash` from it
+    /// in one step. Per Nit #10: this is the only way external
+    /// crates can mutate the draft rope, because `Draft.0` is
+    /// `pub(crate)`. Forgetting the hash restamp is now a compile
+    /// error rather than a runtime invariant violation.
+    ///
+    /// `disk_content_hash` and `version` are untouched — callers
+    /// that also need to advance those fields do so explicitly.
+    /// Use [`set_persisted_content`] when the new rope IS the new
+    /// on-disk content (reload, peer-sync).
+    ///
+    /// [`set_persisted_content`]: EditedBuffer::set_persisted_content
+    pub fn set_draft(&mut self, new_rope: Arc<Rope>) {
+        self.live_content_hash =
+            led_core::EphemeralContentHash::of_rope(&new_rope).persist();
+        self.draft = Draft(new_rope);
+    }
+
+    /// Swap the draft rope AND mark the new content as the
+    /// disk-anchored snapshot. Stamps both `live_content_hash`
+    /// and `disk_content_hash` to the new hash — `dirty()` flips
+    /// to `false`. Used by reload-from-disk and peer-sync
+    /// convergence where the runtime treats the new bytes as the
+    /// canonical on-disk truth.
+    pub fn set_persisted_content(&mut self, new_rope: Arc<Rope>) {
+        let new_hash =
+            led_core::EphemeralContentHash::of_rope(&new_rope).persist();
+        self.live_content_hash = new_hash;
+        self.disk_content_hash = new_hash;
+        self.draft = Draft(new_rope);
+    }
+
+    /// Test-only constructor for setting up an `EditedBuffer`
+    /// with arbitrary state. Auto-computes `live_content_hash`
+    /// from `rope` so the cross-field invariant holds without the
+    /// caller having to re-hash. External callers can't construct
+    /// `Draft` directly (its inner is `pub(crate)`), so this is
+    /// the access point for test fixtures that need a
+    /// non-pristine buffer.
+    pub fn new_with_state(
+        rope: Arc<Rope>,
+        version: BufferVersion,
+        saved_version: SavedVersion,
+        disk_content_hash: led_core::PersistedContentHash,
+        history: History,
+    ) -> Self {
+        let live_content_hash =
+            led_core::EphemeralContentHash::of_rope(&rope).persist();
+        Self {
+            draft: Draft(rope),
+            version,
+            saved_version,
+            disk_content_hash,
+            live_content_hash,
+            history,
         }
     }
 }
