@@ -76,7 +76,10 @@ pub(super) fn fixture_with_content(
     let mut edits = BufferEdits::default();
     edits
         .buffers
-        .insert(canon("file.rs"), EditedBuffer::fresh(rope.clone()));
+        .insert(
+            canon("file.rs"),
+            EditedBuffer::fresh(led_state_buffer_edits::Persisted(rope.clone())),
+        );
     let mut store = BufferStore::default();
     store
         .loaded
@@ -96,7 +99,8 @@ pub(super) fn rope_of(edits: &BufferEdits, path: &str) -> Arc<Rope> {
         .buffers
         .get(&canon(path))
         .expect("seeded")
-        .rope
+        .draft
+        .as_rope()
         .clone()
 }
 

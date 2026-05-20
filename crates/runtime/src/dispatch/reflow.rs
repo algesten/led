@@ -37,7 +37,7 @@ pub(super) fn reflow_paragraph(
             return;
         }
         let extension = file_extension(&tab.path, path_chains);
-        let plan = led_text_reflow::reflow_at(&eb.rope, tab.cursor.line, extension.as_deref());
+        let plan = led_text_reflow::reflow_at(&eb.draft, tab.cursor.line, extension.as_deref());
 
         let Some(plan) = plan else {
             nothing = true;
@@ -48,7 +48,7 @@ pub(super) fn reflow_paragraph(
 
         // Apply the replacement: remove the old slice, insert
         // the replacement at the same start_char.
-        let mut rope = (*eb.rope).clone();
+        let mut rope = (*eb.draft).clone();
         let removed: String = rope.slice(plan.start_char..plan.end_char).chars().collect();
         rope.remove(plan.start_char..plan.end_char);
         rope.insert(plan.start_char, &plan.replacement);
@@ -58,9 +58,9 @@ pub(super) fn reflow_paragraph(
         // cursor row would be past the new line count, drop to
         // the last line; if the column would be past EOL, clamp
         // to the line's grapheme count (M25 unit).
-        let new_line_count = eb.rope.len_lines().max(1);
+        let new_line_count = eb.draft.len_lines().max(1);
         let new_row = tab.cursor.line.min(new_line_count - 1);
-        let new_line_slice = eb.rope.line(new_row);
+        let new_line_slice = eb.draft.line(new_row);
         let new_grapheme_len = led_text_layout::line_grapheme_len(new_line_slice);
         let new_col = tab.cursor.col.min(new_grapheme_len);
         tab.cursor.line = new_row;

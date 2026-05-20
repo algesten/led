@@ -33,18 +33,39 @@ pub use history::{EditGroup, EditOp, FileSearchMark, History, rebase_char_index}
 /// `Draft`; reseed/save handoffs must NOT accept a `Draft` where a
 /// disk-anchored rope is required.
 ///
-/// **Currently unused on `EditedBuffer.rope`** — the field stays
-/// `Arc<Rope>` because renaming the role is a 200+ callsite blast
-/// radius across `dispatch/`, `query/`, and `apply/`. This type
-/// exists so future seed/save API reworks can adopt it
-/// incrementally: a function that takes `Draft` cannot be passed a
-/// `Persisted` (or vice versa) without an explicit unwrap, which
-/// is exactly the compiler-enforced invariant Theme O calls out.
+/// Backs [`EditedBuffer::draft`]. The Draft / Persisted distinction
+/// is a compile-time invariant: a function that takes `Draft`
+/// cannot be passed a `Persisted` (or vice versa) without an
+/// explicit unwrap.
+///
+/// `Deref<Target = Rope>` is provided so the 200+ existing
+/// `eb.draft.method()` callsites (line / len_chars / slice / …)
+/// keep working without an `.as_rope()` everywhere. Sites that
+/// need `&Arc<Rope>` (clone, ptr_eq, ship to driver) call
+/// `as_rope()` explicitly.
 ///
 /// See `EXAMPLE-ARCH § "Shadow sources"` for the motivating
 /// pattern.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Draft(pub Arc<Rope>);
+
+impl Draft {
+    /// Borrow the underlying `Arc<Rope>` — for clone-the-Arc and
+    /// `Arc::ptr_eq` callsites that need to pass the Arc by
+    /// reference. Reading rope content directly (`.line(...)`,
+    /// `.len_chars()`) works via [`std::ops::Deref`] without
+    /// this helper.
+    pub fn as_rope(&self) -> &Arc<Rope> {
+        &self.0
+    }
+}
+
+impl std::ops::Deref for Draft {
+    type Target = Rope;
+    fn deref(&self) -> &Rope {
+        &self.0
+    }
+}
 
 /// Newtype role wrapper marking a rope as "the pristine on-disk
 /// snapshot, as last seen." Set at load completion (rope @ version
@@ -53,14 +74,34 @@ pub struct Draft(pub Arc<Rope>);
 /// only accept `Persisted`; dispatch's `bump()` must NEVER write
 /// here.
 ///
-/// **Currently unused on `EditedBuffer.rope`** — see [`Draft`] for
-/// the scope rationale. This type exists for opt-in adoption on
-/// future seed/save API reworks.
+/// Consumed by [`EditedBuffer::fresh`] / [`EditedBuffer::fresh_with_seq_gen`]
+/// so the load-completion code path's signature enforces the
+/// disk-anchored role at the type level. The save-driver protocol
+/// (`SaveAction::Save.rope: Arc<Rope>`) hasn't been migrated yet —
+/// that remains an unwrapped `Arc<Rope>` so the writer driver's
+/// interface stays neutral; the type wrap-up there is a future
+/// step when the driver returns the persisted rope back to the
+/// runtime.
 ///
 /// See `EXAMPLE-ARCH § "Shadow sources"` for the motivating
 /// pattern.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Persisted(pub Arc<Rope>);
+
+impl Persisted {
+    /// Borrow the underlying `Arc<Rope>`. Counterpart to
+    /// [`Draft::as_rope`].
+    pub fn as_rope(&self) -> &Arc<Rope> {
+        &self.0
+    }
+}
+
+impl std::ops::Deref for Persisted {
+    type Target = Rope;
+    fn deref(&self) -> &Rope {
+        &self.0
+    }
+}
 
 /// Session-global edit sequence counter shared by every
 /// [`History`]. Each finalised group stamps `next_seq` and
@@ -109,12 +150,16 @@ impl PartialEq for SeqGen {
 /// One open buffer's editable state.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EditedBuffer {
-    /// Current rope = disk base + all user edits applied.
+    /// Current rope = disk base + all user edits applied. The
+    /// [`Draft`] newtype tags this as "user-edited," distinct
+    /// from the [`Persisted`] role on `disk_content_hash`.
     ///
-    /// `Arc`-wrapped so the `body_model` memo input projection is a
-    /// pointer copy, and cache-hit clones of `Frame` don't deep-copy
-    /// the rope tree.
-    pub rope: Arc<Rope>,
+    /// `Arc`-wrapped inside `Draft` so the `body_model` memo
+    /// input projection is a pointer copy, and cache-hit clones
+    /// of `Frame` don't deep-copy the rope tree. `Draft`'s
+    /// `Deref<Target = Rope>` impl means existing
+    /// `eb.draft.line(...)` callsites work unchanged.
+    pub draft: Draft,
     /// Monotonically increasing; bumped on every edit. Doubles as
     /// (a) a cheap input-change key for memos that don't need the
     /// rope itself (dirty badge, status line) and (b) the anchor
@@ -139,7 +184,7 @@ pub struct EditedBuffer {
     /// re-applying it onto stale bytes. Mirrors legacy
     /// `BufferState::content_hash`.
     pub disk_content_hash: led_core::PersistedContentHash,
-    /// Hash of the bytes currently in `rope` — stamped at every
+    /// Hash of the bytes currently in `draft` — stamped at every
     /// rope mutation site (dispatch `bump`, reload, undo restore,
     /// peer sync, LSP text edits, save cleanup). Lets memos that
     /// need "current content identity" read a field instead of
@@ -183,7 +228,7 @@ impl EditedBuffer {
     ) -> Option<row_delta::RowDelta> {
         // Fast path: the rope still holds the stamped content. No
         // edits since anchor → all rows untouched, no shifts.
-        let current = led_core::EphemeralContentHash::of_rope(&self.rope);
+        let current = led_core::EphemeralContentHash::of_rope(self.draft.as_rope());
         if current.matches(anchor_hash) {
             return Some(row_delta::RowDelta {
                 current_version: self.version,
@@ -194,7 +239,7 @@ impl EditedBuffer {
         Some(row_delta::build_row_delta(
             &self.history,
             save_idx,
-            &self.rope,
+            self.draft.as_rope(),
             self.version,
         ))
     }
@@ -204,7 +249,14 @@ impl EditedBuffer {
     /// and standalone use, but the runtime prefers
     /// [`EditedBuffer::fresh_with_seq_gen`] so all buffers share
     /// one counter.
-    pub fn fresh(rope: Arc<Rope>) -> Self {
+    ///
+    /// Takes [`Persisted`] because the seed IS the disk-anchored
+    /// rope at load completion — the type signature refuses a
+    /// `Draft` rope here (a runtime/dispatch caller can't
+    /// accidentally seed from an edited buffer). Internally we
+    /// wrap the same `Arc<Rope>` as `Draft` for the in-memory
+    /// view.
+    pub fn fresh(rope: Persisted) -> Self {
         Self::fresh_with_seq_gen(rope, SeqGen::new())
     }
 
@@ -212,11 +264,13 @@ impl EditedBuffer {
     /// shared seq generator. Called by runtime code when adding a
     /// new entry to `BufferEdits.buffers` so every buffer stamps
     /// from the same counter.
-    pub fn fresh_with_seq_gen(rope: Arc<Rope>, seq_gen: SeqGen) -> Self {
+    ///
+    /// See [`EditedBuffer::fresh`] for the `Persisted` rationale.
+    pub fn fresh_with_seq_gen(rope: Persisted, seq_gen: SeqGen) -> Self {
         let disk_content_hash =
-            led_core::EphemeralContentHash::of_rope(&rope).persist();
+            led_core::EphemeralContentHash::of_rope(rope.as_rope()).persist();
         Self {
-            rope,
+            draft: Draft(rope.0),
             version: BufferVersion::default(),
             saved_version: SavedVersion::default(),
             disk_content_hash,
@@ -328,30 +382,30 @@ mod tests {
     #[test]
     fn fresh_is_clean() {
         let rope = Arc::new(Rope::from_str("hello"));
-        let eb = EditedBuffer::fresh(rope.clone());
+        let eb = EditedBuffer::fresh(Persisted(rope.clone()));
         assert_eq!(eb.version, BufferVersion(0));
         assert_eq!(eb.saved_version, SavedVersion(0));
         assert!(!eb.dirty());
-        assert!(Arc::ptr_eq(&eb.rope, &rope));
+        assert!(Arc::ptr_eq(eb.draft.as_rope(), &rope));
     }
 
     #[test]
     fn dirty_flips_when_rope_diverges_from_disk_anchor() {
-        let mut eb = EditedBuffer::fresh(Arc::new(Rope::from_str("hi")));
+        let mut eb = EditedBuffer::fresh(Persisted(Arc::new(Rope::from_str("hi"))));
         assert!(!eb.dirty());
         // Mutate rope: hash diverges from disk anchor → dirty.
-        eb.rope = Arc::new(Rope::from_str("hi!"));
+        eb.draft = Draft(Arc::new(Rope::from_str("hi!")));
         eb.live_content_hash =
-            led_core::EphemeralContentHash::of_rope(&eb.rope).persist();
+            led_core::EphemeralContentHash::of_rope(eb.draft.as_rope()).persist();
         assert!(eb.dirty());
         // Refresh anchor (simulating a save completion): clean again.
         eb.disk_content_hash =
-            led_core::EphemeralContentHash::of_rope(&eb.rope).persist();
+            led_core::EphemeralContentHash::of_rope(eb.draft.as_rope()).persist();
         assert!(!eb.dirty());
         // Mutate again: dirty flips back on.
-        eb.rope = Arc::new(Rope::from_str("hi!?"));
+        eb.draft = Draft(Arc::new(Rope::from_str("hi!?")));
         eb.live_content_hash =
-            led_core::EphemeralContentHash::of_rope(&eb.rope).persist();
+            led_core::EphemeralContentHash::of_rope(eb.draft.as_rope()).persist();
         assert!(eb.dirty());
     }
 
@@ -361,7 +415,7 @@ mod tests {
         // a content hash so undoing back to disk-equivalent content
         // clears the flag. version stays a memo input, never a
         // dirty signal.
-        let mut eb = EditedBuffer::fresh(Arc::new(Rope::from_str("x")));
+        let mut eb = EditedBuffer::fresh(Persisted(Arc::new(Rope::from_str("x"))));
         eb.version = BufferVersion(4);
         eb.saved_version = SavedVersion(2);
         // Rope still matches disk anchor → clean despite versions.
@@ -372,8 +426,10 @@ mod tests {
     fn entries_keyed_by_canon_path() {
         let mut e = BufferEdits::default();
         let p = canon("a.rs");
-        e.buffers
-            .insert(p.clone(), EditedBuffer::fresh(Arc::new(Rope::from_str("x"))));
+        e.buffers.insert(
+            p.clone(),
+            EditedBuffer::fresh(Persisted(Arc::new(Rope::from_str("x")))),
+        );
         assert!(e.buffers.contains_key(&p));
     }
 

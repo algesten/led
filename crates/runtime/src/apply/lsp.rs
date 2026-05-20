@@ -43,17 +43,17 @@ pub(crate) fn identifier_start_col(
     let Some(eb) = edits.buffers.get(path) else {
         return cursor_col as u32;
     };
-    if prefix_line >= eb.rope.len_lines() {
+    if prefix_line >= eb.draft.len_lines() {
         return cursor_col as u32;
     }
-    let line_slice = eb.rope.line(prefix_line);
+    let line_slice = eb.draft.line(prefix_line);
     let line_grapheme_count = led_text_layout::line_grapheme_len(line_slice);
     let mut start = cursor_col.min(line_grapheme_count);
     while start > 0 {
         // The cluster immediately before `start` (grapheme units).
         let prev_char_in_line = led_text_layout::grapheme_col_to_char(line_slice, start - 1);
-        let line_start_char = eb.rope.line_to_char(prefix_line);
-        let ch = eb.rope.char(line_start_char + prev_char_in_line);
+        let line_start_char = eb.draft.line_to_char(prefix_line);
+        let ch = eb.draft.char(line_start_char + prev_char_in_line);
         if ch.is_alphanumeric() || ch == '_' {
             start -= 1;
         } else {
@@ -73,11 +73,11 @@ pub(crate) fn completion_prefix(
     let Some(eb) = edits.buffers.get(path) else {
         return String::new();
     };
-    if prefix_line >= eb.rope.len_lines() {
+    if prefix_line >= eb.draft.len_lines() {
         return String::new();
     }
-    let line_slice = eb.rope.line(prefix_line);
-    let line_start = eb.rope.line_to_char(prefix_line);
+    let line_slice = eb.draft.line(prefix_line);
+    let line_start = eb.draft.line_to_char(prefix_line);
     // `prefix_start_col` and `tab.cursor.col` are both grapheme cols
     // (M25). Convert each to a char idx via the line's segmentation
     // before slicing the rope; the typed prefix may include emoji or
@@ -85,10 +85,10 @@ pub(crate) fn completion_prefix(
     // count.
     let from = line_start + led_text_layout::grapheme_col_to_char(line_slice, prefix_start_col);
     let to = line_start + led_text_layout::grapheme_col_to_char(line_slice, tab.cursor.col);
-    if to < from || to > eb.rope.len_chars() {
+    if to < from || to > eb.draft.len_chars() {
         return String::new();
     }
-    eb.rope.slice(from..to).to_string()
+    eb.draft.slice(from..to).to_string()
 }
 
 /// Bundle of references `LspGotoApply::apply` needs. Carved out
@@ -160,12 +160,12 @@ impl<'a> LspGotoApply<'a> {
         if let Some(idx) = tabs.open.iter().position(|t| t.path == loc.path)
             && let Some(eb) = edits.buffers.get(&loc.path)
         {
-            let line_count = eb.rope.len_lines();
+            let line_count = eb.draft.len_lines();
             let line = (loc.line as usize).min(line_count.saturating_sub(1));
             // `loc.col` is a UTF-16 code-unit count from the LSP
             // server; convert to grapheme col through the actual
             // line so we land on the same cluster the server picked.
-            let line_slice = eb.rope.line(line);
+            let line_slice = eb.draft.line(line);
             let col = led_text_layout::utf16_units_to_grapheme_col(line_slice, loc.col);
             let body_rows = terminal
                 .dims
@@ -185,7 +185,7 @@ impl<'a> LspGotoApply<'a> {
                 tab.scroll,
                 tab.cursor,
                 body_rows,
-                &eb.rope,
+                &eb.draft,
                 content_cols,
             );
             tabs.active = Some(tab.id);
@@ -487,7 +487,7 @@ pub(crate) fn apply_one_text_edit(
     eb: &mut EditedBuffer,
     op: &led_driver_lsp_core::TextEditOp,
 ) -> Option<(usize, std::sync::Arc<str>, std::sync::Arc<str>)> {
-    let rope = &eb.rope;
+    let rope = &eb.draft;
     let line_count = rope.len_lines();
     if (op.start_line as usize) >= line_count {
         return None;
@@ -512,14 +512,14 @@ pub(crate) fn apply_one_text_edit(
         return None;
     }
 
-    let mut new_rope = (*eb.rope).clone();
+    let mut new_rope = (*eb.draft).clone();
     let removed: String = new_rope.slice(start_char..end_char).to_string();
     new_rope.remove(start_char..end_char);
     new_rope.insert(start_char, &op.new_text);
 
-    eb.rope = std::sync::Arc::new(new_rope);
+    eb.draft = led_state_buffer_edits::Draft(std::sync::Arc::new(new_rope));
     eb.live_content_hash =
-        led_core::EphemeralContentHash::of_rope(&eb.rope).persist();
+        led_core::EphemeralContentHash::of_rope(&eb.draft).persist();
     eb.version.0 = eb.version.0.saturating_add(1);
     Some((
         start_char,

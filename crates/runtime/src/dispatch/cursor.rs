@@ -71,7 +71,7 @@ pub(super) fn move_cursor(
     };
     let path = &tabs.open[idx].path;
     let rope: Arc<Rope> = match edits.buffers.get(path) {
-        Some(eb) => eb.rope.clone(),
+        Some(eb) => eb.draft.as_rope().clone(),
         None => match store.loaded.get(path) {
             Some(LoadState::Ready(r)) => r.clone(),
             _ => return,
@@ -1144,7 +1144,7 @@ mod tests {
             &term,
         );
         let eb = edits.buffers.get(&tabs.open[0].path).expect("eb");
-        assert_eq!(eb.rope.to_string(), "hellox\nworld");
+        assert_eq!(eb.draft.to_string(), "hellox\nworld");
         assert_eq!(tabs.open[0].cursor.line, 0);
         assert_eq!(tabs.open[0].cursor.col, 6);
 

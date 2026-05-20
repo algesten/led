@@ -103,7 +103,7 @@ pub(crate) fn apply_save_cleanup(
     if plan.is_empty() {
         return cursor_before;
     }
-    let mut new_rope: Rope = (*eb.rope).clone();
+    let mut new_rope: Rope = (*eb.draft).clone();
     for r in plan {
         let len_removed = r.removed.chars().count();
         if len_removed > 0 {
@@ -128,9 +128,9 @@ pub(crate) fn apply_save_cleanup(
         cursor_after.col = new_line_grapheme_count;
         cursor_after.preferred_col = new_line_grapheme_count;
     }
-    eb.rope = new_rope;
+    eb.draft = led_state_buffer_edits::Draft(new_rope);
     eb.live_content_hash =
-        led_core::EphemeralContentHash::of_rope(&eb.rope).persist();
+        led_core::EphemeralContentHash::of_rope(&eb.draft).persist();
     eb.version.0 = eb.version.0.saturating_add(1);
     let history_batch: Vec<(usize, Arc<str>, Arc<str>)> = plan
         .iter()
@@ -253,7 +253,7 @@ mod tests {
         edits.buffers.insert(
             canon("a"),
             EditedBuffer {
-                rope: Arc::new(Rope::from_str("A")),
+                draft: led_state_buffer_edits::Draft(Arc::new(Rope::from_str("A"))),
                 version: led_core::BufferVersion(1),
                 saved_version: led_core::SavedVersion(0),
                 disk_content_hash: led_core::PersistedContentHash::default(),
@@ -264,12 +264,12 @@ mod tests {
         // b is clean.
         edits.buffers.insert(
             canon("b"),
-            EditedBuffer::fresh(Arc::new(Rope::from_str("B"))),
+            EditedBuffer::fresh(led_state_buffer_edits::Persisted(Arc::new(Rope::from_str("B")))),
         );
         edits.buffers.insert(
             canon("c"),
             EditedBuffer {
-                rope: Arc::new(Rope::from_str("C")),
+                draft: led_state_buffer_edits::Draft(Arc::new(Rope::from_str("C"))),
                 version: led_core::BufferVersion(2),
                 saved_version: led_core::SavedVersion(0),
                 disk_content_hash: led_core::PersistedContentHash::default(),
@@ -296,7 +296,7 @@ mod tests {
     // ── Save cleanup (trim trailing whitespace, ensure final newline) ──
 
     fn buffer_from(rope_str: &str) -> EditedBuffer {
-        EditedBuffer::fresh(Arc::new(Rope::from_str(rope_str)))
+        EditedBuffer::fresh(led_state_buffer_edits::Persisted(Arc::new(Rope::from_str(rope_str))))
     }
 
     /// Test helper — derive the cleanup plan via the memo and
@@ -320,7 +320,7 @@ mod tests {
         let mut eb = buffer_from("hello   \nworld\t\t\n");
         let cursor = Cursor::default();
         run_cleanup(&mut eb, cursor);
-        assert_eq!(eb.rope.to_string(), "hello\nworld\n");
+        assert_eq!(eb.draft.to_string(), "hello\nworld\n");
     }
 
     #[test]
@@ -328,7 +328,7 @@ mod tests {
         let mut eb = buffer_from("no newline at end");
         let cursor = Cursor::default();
         run_cleanup(&mut eb, cursor);
-        assert_eq!(eb.rope.to_string(), "no newline at end\n");
+        assert_eq!(eb.draft.to_string(), "no newline at end\n");
     }
 
     #[test]
@@ -336,7 +336,7 @@ mod tests {
         let mut eb = buffer_from("trailing   ");
         let cursor = Cursor::default();
         run_cleanup(&mut eb, cursor);
-        assert_eq!(eb.rope.to_string(), "trailing\n");
+        assert_eq!(eb.draft.to_string(), "trailing\n");
     }
 
     #[test]
@@ -345,7 +345,7 @@ mod tests {
         let v0 = eb.version;
         let cursor = Cursor::default();
         run_cleanup(&mut eb, cursor);
-        assert_eq!(eb.rope.to_string(), "hello\nworld\n");
+        assert_eq!(eb.draft.to_string(), "hello\nworld\n");
         assert_eq!(eb.version, v0, "no edit recorded on clean buffer");
     }
 
@@ -355,7 +355,7 @@ mod tests {
         let v0 = eb.version;
         let cursor = Cursor::default();
         run_cleanup(&mut eb, cursor);
-        assert_eq!(eb.rope.to_string(), "");
+        assert_eq!(eb.draft.to_string(), "");
         assert_eq!(eb.version, v0);
     }
 
@@ -367,7 +367,7 @@ mod tests {
         let mut eb = buffer_from("a\n   \n\nb\n");
         let cursor = Cursor::default();
         run_cleanup(&mut eb, cursor);
-        assert_eq!(eb.rope.to_string(), "a\n\n\nb\n");
+        assert_eq!(eb.draft.to_string(), "a\n\n\nb\n");
     }
 
     #[test]
@@ -381,11 +381,11 @@ mod tests {
             preferred_col: 5,
         };
         run_cleanup(&mut eb, cursor);
-        assert_eq!(eb.rope.to_string(), "hello\n");
+        assert_eq!(eb.draft.to_string(), "hello\n");
 
         // Apply the inverse: reverse-walk the undo group's ops.
         let group = eb.history.take_undo().expect("cleanup recorded a group");
-        let mut rope = (*eb.rope).clone();
+        let mut rope = (*eb.draft).clone();
         for op in group.ops.iter().rev() {
             match op {
                 led_state_buffer_edits::EditOp::Insert { at, text } => {
@@ -409,7 +409,7 @@ mod tests {
             preferred_col: 8,
         };
         let after = run_cleanup(&mut eb, cursor);
-        assert_eq!(eb.rope.to_string(), "hello\n");
+        assert_eq!(eb.draft.to_string(), "hello\n");
         assert_eq!(after.col, 5);
         assert_eq!(after.preferred_col, 5);
     }

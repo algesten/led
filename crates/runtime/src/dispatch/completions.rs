@@ -193,7 +193,10 @@ mod tests {
         let rope = Arc::new(Rope::from_str(rope));
         edits
             .buffers
-            .insert(path.clone(), EditedBuffer::fresh(rope.clone()));
+            .insert(
+                path.clone(),
+                EditedBuffer::fresh(led_state_buffer_edits::Persisted(rope.clone())),
+            );
         let tab_id = TabId(1);
         tabs.open.push_back(Tab {
             id: tab_id,
@@ -285,7 +288,10 @@ mod tests {
         let rope = Arc::new(Rope::from_str("pr"));
         edits
             .buffers
-            .insert(path.clone(), EditedBuffer::fresh(rope));
+            .insert(
+                path.clone(),
+                EditedBuffer::fresh(led_state_buffer_edits::Persisted(rope)),
+            );
         let filtered: Vec<usize> = vec![0];
         let mut state = CompletionsState {
             session: Some(CompletionSession {
@@ -306,7 +312,7 @@ mod tests {
         assert_eq!(outcome, Some(DispatchOutcome::Continue));
         assert!(state.session.is_none());
         let eb = edits.buffers.get(&path).unwrap();
-        assert_eq!(eb.rope.to_string(), "println!");
+        assert_eq!(eb.draft.to_string(), "println!");
         assert_eq!(tabs.open[0].cursor.col, 8);
     }
 

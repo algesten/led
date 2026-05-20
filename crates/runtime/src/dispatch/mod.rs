@@ -508,7 +508,7 @@ fn refresh_active_preferred_col(
         return;
     };
     let content_cols = editor_content_cols(terminal, browser);
-    refresh_preferred_col(&mut tab.cursor, &eb.rope, content_cols);
+    refresh_preferred_col(&mut tab.cursor, &eb.draft, content_cols);
 }
 
 fn finalise_history(edits: &mut BufferEdits) {
@@ -1469,8 +1469,8 @@ fn lsp_goto_definition(
     }
     let line = tab.cursor.line as u32;
     // LSP positions are UTF-16 code units (per spec default).
-    let col = if (tab.cursor.line) < eb.rope.len_lines() {
-        led_text_layout::grapheme_col_to_utf16_units(eb.rope.line(tab.cursor.line), tab.cursor.col)
+    let col = if (tab.cursor.line) < eb.draft.len_lines() {
+        led_text_layout::grapheme_col_to_utf16_units(eb.draft.line(tab.cursor.line), tab.cursor.col)
     } else {
         0
     };
@@ -1928,7 +1928,7 @@ mod tests {
         edits.buffers.insert(
             canon("a"),
             EditedBuffer {
-                rope: Arc::new(Rope::from_str("A")),
+                draft: led_state_buffer_edits::Draft(Arc::new(Rope::from_str("A"))),
                 version: led_core::BufferVersion(1),
                 saved_version: led_core::SavedVersion(0),
                 disk_content_hash: led_core::PersistedContentHash::default(),
@@ -1939,7 +1939,7 @@ mod tests {
         edits.buffers.insert(
             canon("b"),
             EditedBuffer {
-                rope: Arc::new(Rope::from_str("B")),
+                draft: led_state_buffer_edits::Draft(Arc::new(Rope::from_str("B"))),
                 version: led_core::BufferVersion(1),
                 saved_version: led_core::SavedVersion(0),
                 disk_content_hash: led_core::PersistedContentHash::default(),
@@ -2285,10 +2285,10 @@ mod tests {
         // edit (InsertChar) instead so each iteration is observable.
         fx.kbd_macro.last = Some(Arc::new(vec![Command::InsertChar('!')]));
         fx.kbd_macro.execute_count = Some(3);
-        let start_len = fx.edits.buffers.values().next().unwrap().rope.len_chars();
+        let start_len = fx.edits.buffers.values().next().unwrap().draft.len_chars();
         fx.dispatch(key(KeyModifiers::CONTROL, KeyCode::Char('x')));
         fx.dispatch(key(KeyModifiers::NONE, KeyCode::Char('e')));
-        let end_len = fx.edits.buffers.values().next().unwrap().rope.len_chars();
+        let end_len = fx.edits.buffers.values().next().unwrap().draft.len_chars();
         assert_eq!(
             end_len - start_len,
             3,
@@ -2308,10 +2308,10 @@ mod tests {
         let mut fx = macro_fixture();
         fx.kbd_macro.last = Some(Arc::new(vec![Command::InsertChar('!')]));
         fx.kbd_macro.playback_depth = led_state_kbd_macro::RECURSION_LIMIT;
-        let start_len = fx.edits.buffers.values().next().unwrap().rope.len_chars();
+        let start_len = fx.edits.buffers.values().next().unwrap().draft.len_chars();
         fx.dispatch(key(KeyModifiers::CONTROL, KeyCode::Char('x')));
         fx.dispatch(key(KeyModifiers::NONE, KeyCode::Char('e')));
-        let end_len = fx.edits.buffers.values().next().unwrap().rope.len_chars();
+        let end_len = fx.edits.buffers.values().next().unwrap().draft.len_chars();
         assert_eq!(end_len, start_len, "no chars inserted at the cap");
         assert_eq!(
             fx.alerts.info.as_deref(),
@@ -2359,9 +2359,9 @@ mod tests {
         // Bare `e` (no modifiers) should resolve to KbdMacroExecute,
         // NOT InsertChar('e'). After dispatch, the latch is still
         // set (each successive bare-e keeps it alive).
-        let buffer_before = fx.edits.buffers.values().next().unwrap().rope.clone();
+        let buffer_before = fx.edits.buffers.values().next().unwrap().draft.as_rope().clone();
         fx.dispatch(key(KeyModifiers::NONE, KeyCode::Char('e')));
-        let buffer_after = fx.edits.buffers.values().next().unwrap().rope.clone();
+        let buffer_after = fx.edits.buffers.values().next().unwrap().draft.as_rope().clone();
         assert_eq!(
             buffer_before.to_string(),
             buffer_after.to_string(),
@@ -2381,9 +2381,9 @@ mod tests {
         fx.dispatch(key(KeyModifiers::NONE, KeyCode::Down));
         assert!(!fx.chord.macro_repeat, "latch cleared on non-e key");
         // Now bare `e` should InsertChar('e'), not replay.
-        let before = fx.edits.buffers.values().next().unwrap().rope.to_string();
+        let before = fx.edits.buffers.values().next().unwrap().draft.to_string();
         fx.dispatch(key(KeyModifiers::NONE, KeyCode::Char('e')));
-        let after = fx.edits.buffers.values().next().unwrap().rope.to_string();
+        let after = fx.edits.buffers.values().next().unwrap().draft.to_string();
         assert!(
             after.contains('e') && after.len() == before.len() + 1,
             "bare e after latch cleared inserts 'e' literally",

@@ -55,7 +55,7 @@ pub fn active_rope<'a, 'b>(
     path: CanonPath,
 ) -> Option<Arc<Rope>> {
     if let Some(eb) = edits.buffers.get(&path) {
-        return Some(eb.rope.clone());
+        return Some(eb.draft.as_rope().clone());
     }
     match store.loaded.get(&path) {
         Some(LoadState::Ready(rope)) => Some(rope.clone()),
@@ -148,7 +148,7 @@ pub fn body_model<'a>(inputs: BodyInputs<'a>) -> BodyModel {
     );
     let selection = normalized_selection(tab.mark, tab.cursor);
     if let Some(eb) = edits.buffers.get(&tab.path) {
-        let rope_ref: &Rope = &eb.rope;
+        let rope_ref: &Rope = &eb.draft;
         let spans = rebased_line_spans(syntax, edits, tab.path.clone());
         // Diagnostics + git markers carry an anchor hash they were
         // computed against. Renderer translates each marker's
@@ -279,10 +279,10 @@ pub fn rebased_line_spans<'s, 'b>(
     let Some(prev_rope) = state.tree_rope.as_ref() else {
         return Some(state.tokens.clone());
     };
-    if Arc::ptr_eq(prev_rope, &eb.rope) {
+    if Arc::ptr_eq(prev_rope, eb.draft.as_rope()) {
         return Some(state.tokens.clone());
     }
-    let Some(diff) = led_state_syntax::RopeDiff::between(prev_rope, &eb.rope) else {
+    let Some(diff) = led_state_syntax::RopeDiff::between(prev_rope, eb.draft.as_rope()) else {
         return Some(state.tokens.clone());
     };
     // Append-past-last-token fast path: if the diff sits

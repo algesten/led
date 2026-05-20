@@ -352,7 +352,7 @@ fn find_all_matches(rope: &Rope, query: &str) -> Vec<IsearchMatch> {
 fn active_rope(tabs: &Tabs, edits: &BufferEdits) -> Option<Rope> {
     let active_id = tabs.active?;
     let tab = tabs.open.iter().find(|t| t.id == active_id)?;
-    edits.buffers.get(&tab.path).map(|eb| (*eb.rope).clone())
+    edits.buffers.get(&tab.path).map(|eb| (*eb.draft).clone())
 }
 
 /// Convert a `(line, grapheme_col)` cursor to a rope char idx.
@@ -405,7 +405,7 @@ mod tests {
         let mut e = BufferEdits::default();
         e.buffers.insert(
             canon(path),
-            EditedBuffer::fresh(Arc::new(Rope::from_str(body))),
+            EditedBuffer::fresh(led_state_buffer_edits::Persisted(Arc::new(Rope::from_str(body)))),
         );
         e
     }

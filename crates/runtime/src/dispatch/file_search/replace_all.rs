@@ -107,7 +107,7 @@ pub(super) fn apply_replace_all(
             // disk state which the driver is about to write.
             eb.saved_version = SavedVersion(eb.version.0);
             eb.disk_content_hash =
-                led_core::EphemeralContentHash::of_rope(&eb.rope).persist();
+                led_core::EphemeralContentHash::of_rope(&eb.draft).persist();
         }
         edits
             .pending_replace_in_memory

@@ -272,7 +272,7 @@ pub(crate) fn apply_pending_undo_restore(
     if eb.disk_content_hash != restore.content_hash {
         return;
     }
-    let mut new_rope = (*eb.rope).clone();
+    let mut new_rope = (*eb.draft).clone();
     for group in &restore.entries {
         for op in &group.ops {
             use led_state_buffer_edits::EditOp;
@@ -291,9 +291,9 @@ pub(crate) fn apply_pending_undo_restore(
             }
         }
     }
-    eb.rope = std::sync::Arc::new(new_rope);
+    eb.draft = led_state_buffer_edits::Draft(std::sync::Arc::new(new_rope));
     eb.live_content_hash =
-        led_core::EphemeralContentHash::of_rope(&eb.rope).persist();
+        led_core::EphemeralContentHash::of_rope(&eb.draft).persist();
     if !restore.entries.is_empty() {
         eb.version.0 = eb.version.0.saturating_add(1);
     }
@@ -423,7 +423,7 @@ pub(crate) fn apply_remote_entries(
     if entries.is_empty() {
         return;
     }
-    let mut new_rope = (*eb.rope).clone();
+    let mut new_rope = (*eb.draft).clone();
     for group in entries {
         for op in &group.ops {
             use led_state_buffer_edits::EditOp;
@@ -442,9 +442,9 @@ pub(crate) fn apply_remote_entries(
             }
         }
     }
-    eb.rope = std::sync::Arc::new(new_rope);
+    eb.draft = led_state_buffer_edits::Draft(std::sync::Arc::new(new_rope));
     let new_hash =
-        led_core::EphemeralContentHash::of_rope(&eb.rope).persist();
+        led_core::EphemeralContentHash::of_rope(&eb.draft).persist();
     eb.disk_content_hash = new_hash;
     eb.live_content_hash = new_hash;
     eb.version.0 = eb.version.0.saturating_add(1);

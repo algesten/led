@@ -50,7 +50,7 @@ pub fn popover_model<'a, 'b, 'c, 'd, 'e>(
     let tab = tabs.open.iter().find(|t| t.id == id)?;
     let eb = edits.buffers.get(&tab.path)?;
     let bd = diagnostics.by_path.get(&tab.path)?;
-    let current_hash = led_core::EphemeralContentHash::of_rope(&eb.rope).persist();
+    let current_hash = led_core::EphemeralContentHash::of_rope(&eb.draft).persist();
     if bd.hash != current_hash {
         return None;
     }
@@ -128,10 +128,10 @@ pub fn popover_model<'a, 'b, 'c, 'd, 'e>(
         .saturating_sub(TRAILING_RESERVED_COLS);
     // Cursor on a row past the rope's last line — anchor at col 0
     // (no content to translate). Same-row diagnostics still pop.
-    let col_within_cells = if cursor_row >= eb.rope.len_lines() {
+    let col_within_cells = if cursor_row >= eb.draft.len_lines() {
         0
     } else {
-        let (_, cells) = col_to_sub_line(tab.cursor.col, eb.rope.line(cursor_row), content_cols);
+        let (_, cells) = col_to_sub_line(tab.cursor.col, eb.draft.line(cursor_row), content_cols);
         cells
     };
     let anchor_x = editor_area

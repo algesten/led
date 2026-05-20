@@ -1275,7 +1275,7 @@ mod tests {
         let rope = Arc::new(Rope::from_str("disk\n"));
         let inserted = seed_edit_from_load(&mut edits, path.clone(), rope);
         assert!(inserted);
-        assert_eq!(edits.buffers[&path].rope.to_string(), "disk\n");
+        assert_eq!(edits.buffers[&path].draft.to_string(), "disk\n");
     }
 
     #[test]
@@ -1289,20 +1289,23 @@ mod tests {
         let edited = Arc::new(Rope::from_str("edited\n"));
         edits
             .buffers
-            .insert(path.clone(), EditedBuffer::fresh(edited.clone()));
+            .insert(
+                path.clone(),
+                EditedBuffer::fresh(led_state_buffer_edits::Persisted(edited.clone())),
+            );
         // Mutate so the entry is visibly "the user's view".
         {
             let eb = edits.buffers.get_mut(&path).unwrap();
-            eb.rope = Arc::new(Rope::from_str("user typed more"));
+            eb.draft = led_state_buffer_edits::Draft(Arc::new(Rope::from_str("user typed more")));
             eb.live_content_hash =
-                led_core::EphemeralContentHash::of_rope(&eb.rope).persist();
+                led_core::EphemeralContentHash::of_rope(&eb.draft).persist();
         }
 
         let stale_disk = Arc::new(Rope::from_str("old disk\n"));
         let inserted = seed_edit_from_load(&mut edits, path.clone(), stale_disk);
         assert!(!inserted);
         // User's rope preserved.
-        assert_eq!(edits.buffers[&path].rope.to_string(), "user typed more");
+        assert_eq!(edits.buffers[&path].draft.to_string(), "user typed more");
     }
 
     // ── arrow-follow auto-advance ─────────────────────────────────
@@ -1410,7 +1413,7 @@ mod tests {
         let cmd = led_driver_syntax_core::SyntaxCmd {
             path: path.clone(),
             version: eb.version,
-            rope: eb.rope.clone(),
+            rope: eb.draft.as_rope().clone(),
             language: lang,
             prev_tree: None,
             prev_rope: None,
@@ -1474,9 +1477,9 @@ mod tests {
         let mut edits = BufferEdits::default();
         edits.buffers.insert(
             canon("main.rs"),
-            EditedBuffer::fresh(Arc::new(Rope::from_str(
+            EditedBuffer::fresh(led_state_buffer_edits::Persisted(Arc::new(Rope::from_str(
                 "line0\nline1\nline2\nline3\nline4\nline5 longer\n",
-            ))),
+            )))),
         );
         let mut jumps = led_state_jumps::JumpListState::default();
         let mut alerts = AlertState::default();
@@ -1522,7 +1525,7 @@ mod tests {
         let mut edits = BufferEdits::default();
         edits.buffers.insert(
             canon("main.rs"),
-            EditedBuffer::fresh(Arc::new(Rope::from_str("abc\n"))),
+            EditedBuffer::fresh(led_state_buffer_edits::Persisted(Arc::new(Rope::from_str("abc\n")))),
         );
         let mut jumps = led_state_jumps::JumpListState::default();
         let mut alerts = AlertState::default();
@@ -1572,7 +1575,7 @@ mod tests {
         let mut edits = BufferEdits::default();
         edits.buffers.insert(
             path.clone(),
-            EditedBuffer::fresh(Arc::new(Rope::from_str(&rope))),
+            EditedBuffer::fresh(led_state_buffer_edits::Persisted(Arc::new(Rope::from_str(&rope)))),
         );
         let mut tabs = seed_tab("main.rs");
         tabs.open[0].cursor = led_state_tabs::Cursor {
@@ -1634,7 +1637,7 @@ mod tests {
         let mut edits = BufferEdits::default();
         edits.buffers.insert(
             path.clone(),
-            EditedBuffer::fresh(Arc::new(Rope::from_str(&rope))),
+            EditedBuffer::fresh(led_state_buffer_edits::Persisted(Arc::new(Rope::from_str(&rope)))),
         );
         let mut tabs = seed_tab("main.rs");
         tabs.open[0].cursor = led_state_tabs::Cursor {
@@ -1716,7 +1719,7 @@ mod tests {
         let mut edits = BufferEdits::default();
         edits.buffers.insert(
             path.clone(),
-            EditedBuffer::fresh(Arc::new(Rope::from_str("foo + foo"))),
+            EditedBuffer::fresh(led_state_buffer_edits::Persisted(Arc::new(Rope::from_str("foo + foo")))),
         );
         let mut alerts = AlertState::default();
         let mut lsp_extras = led_state_lsp::LspExtrasState::default();
@@ -1755,7 +1758,7 @@ mod tests {
         }
         .apply(led_core::LspRequestSeq(7), EditsOrigin::Rename, &file_edits);
         let eb = edits.buffers.get(&path).unwrap();
-        assert_eq!(eb.rope.to_string(), "bar + bar");
+        assert_eq!(eb.draft.to_string(), "bar + bar");
         assert!(eb.version.0 > 0);
         assert!(lsp_pending.latest_rename_seq.is_none());
         assert!(
@@ -1774,7 +1777,7 @@ mod tests {
         use led_driver_lsp_core::{EditsOrigin, FileEdit, TextEditOp};
         let path = canon("a.rs");
         let mut edits = BufferEdits::default();
-        let mut eb = EditedBuffer::fresh(Arc::new(Rope::from_str("x")));
+        let mut eb = EditedBuffer::fresh(led_state_buffer_edits::Persisted(Arc::new(Rope::from_str("x"))));
         eb.version = BufferVersion(1);
         edits.buffers.insert(path.clone(), eb);
         let mut alerts = AlertState::default();
@@ -1808,7 +1811,7 @@ mod tests {
         .apply(led_core::LspRequestSeq(1), EditsOrigin::Format, &file_edits);
         // Format applied "x" → "X", then pre-save cleanup added
         // the missing trailing newline.
-        assert_eq!(edits.buffers[&path].rope.to_string(), "X\n");
+        assert_eq!(edits.buffers[&path].draft.to_string(), "X\n");
         // History MUST retain the record_replace entry so undo
         // can revert it. Before the fix this was cleared by the
         // save-action loop in run().
@@ -1834,7 +1837,7 @@ mod tests {
         let path = canon("a.rs");
         let original = "AAA|BBB|CCC\n";
         let mut edits = BufferEdits::default();
-        let eb = EditedBuffer::fresh(Arc::new(Rope::from_str(original)));
+        let eb = EditedBuffer::fresh(led_state_buffer_edits::Persisted(Arc::new(Rope::from_str(original))));
         edits.buffers.insert(path.clone(), eb);
         let mut alerts = AlertState::default();
         let mut lsp_extras = led_state_lsp::LspExtrasState::default();
@@ -1876,7 +1879,7 @@ mod tests {
             clock: &clock,
         }
         .apply(led_core::LspRequestSeq(1), EditsOrigin::Format, &file_edits);
-        let formatted = edits.buffers[&path].rope.to_string();
+        let formatted = edits.buffers[&path].draft.to_string();
         assert_eq!(formatted, "BBB|CCCAAA|\n", "sort applied correctly");
 
         // ONE undo group for the whole batch.
@@ -1891,7 +1894,7 @@ mod tests {
         // the original rope exactly, with no duplicate text.
         let mut eb = edits.buffers.remove(&path).unwrap();
         let group = eb.history.take_undo().expect("one group");
-        let mut rope = (*eb.rope).clone();
+        let mut rope = (*eb.draft).clone();
         for op in group.ops.iter().rev() {
             match op {
                 EditOp::Insert { at, text } => {
@@ -1915,7 +1918,7 @@ mod tests {
         use led_driver_lsp_core::{EditsOrigin, FileEdit, TextEditOp};
         let path = canon("a.rs");
         let mut edits = BufferEdits::default();
-        let mut eb = EditedBuffer::fresh(Arc::new(Rope::from_str("x")));
+        let mut eb = EditedBuffer::fresh(led_state_buffer_edits::Persisted(Arc::new(Rope::from_str("x"))));
         eb.version = BufferVersion(1); // dirty (saved_version still 0)
         edits.buffers.insert(path.clone(), eb);
         let mut alerts = AlertState::default();
@@ -1949,7 +1952,7 @@ mod tests {
         .apply(led_core::LspRequestSeq(42), EditsOrigin::Format, &file_edits);
         // Format applied "x" → "X", then pre-save cleanup appended
         // a final newline so the on-disk bytes end cleanly.
-        assert_eq!(edits.buffers[&path].rope.to_string(), "X\n");
+        assert_eq!(edits.buffers[&path].draft.to_string(), "X\n");
         // Post-format save is queued.
         assert!(edits.pending_saves.contains(&path));
         assert!(!lsp_pending.pending_save_after_format.contains(&path));
@@ -1960,7 +1963,7 @@ mod tests {
         use led_driver_lsp_core::{EditsOrigin};
         let path = canon("a.rs");
         let mut edits = BufferEdits::default();
-        let mut eb = EditedBuffer::fresh(Arc::new(Rope::from_str("x")));
+        let mut eb = EditedBuffer::fresh(led_state_buffer_edits::Persisted(Arc::new(Rope::from_str("x"))));
         eb.version = BufferVersion(1);
         edits.buffers.insert(path.clone(), eb);
         let mut alerts = AlertState::default();
@@ -1992,7 +1995,7 @@ mod tests {
         let mut edits = BufferEdits::default();
         edits.buffers.insert(
             path.clone(),
-            EditedBuffer::fresh(Arc::new(Rope::from_str("foo"))),
+            EditedBuffer::fresh(led_state_buffer_edits::Persisted(Arc::new(Rope::from_str("foo")))),
         );
         let mut alerts = AlertState::default();
         let mut lsp_extras = led_state_lsp::LspExtrasState::default();
@@ -2026,7 +2029,7 @@ mod tests {
             &file_edits,
         );
         // Buffer unchanged, seq preserved.
-        assert_eq!(edits.buffers[&path].rope.to_string(), "foo");
+        assert_eq!(edits.buffers[&path].draft.to_string(), "foo");
         assert_eq!(lsp_pending.latest_rename_seq, Some(led_core::LspRequestSeq(99)));
     }
 
@@ -2042,7 +2045,7 @@ mod tests {
         let mut edits = BufferEdits::default();
         edits.buffers.insert(
             canon("main.rs"),
-            EditedBuffer::fresh(Arc::new(Rope::from_str("abc\n"))),
+            EditedBuffer::fresh(led_state_buffer_edits::Persisted(Arc::new(Rope::from_str("abc\n")))),
         );
         let mut jumps = led_state_jumps::JumpListState::default();
         let mut alerts = AlertState::default();

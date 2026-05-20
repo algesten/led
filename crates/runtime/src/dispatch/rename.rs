@@ -54,7 +54,7 @@ pub(super) fn activate(
     let Some(eb) = edits.buffers.get(&tab.path) else {
         return;
     };
-    let rope = &eb.rope;
+    let rope = &eb.draft;
     let line = tab.cursor.line;
     if line >= rope.len_lines() {
         return;
@@ -245,7 +245,7 @@ mod tests {
         let mut edits = BufferEdits::default();
         edits.buffers.insert(
             canon("main.rs"),
-            EditedBuffer::fresh(StdArc::new(Rope::from_str(content))),
+            EditedBuffer::fresh(led_state_buffer_edits::Persisted(StdArc::new(Rope::from_str(content)))),
         );
         (tabs, edits)
     }

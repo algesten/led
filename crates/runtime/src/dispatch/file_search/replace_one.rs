@@ -65,16 +65,16 @@ pub(super) fn replace_selected(
     let rope_char_start = if is_owned_buffer {
         let eb = edits.buffers.get_mut(&hit.path).expect("checked above");
         let line0 = hit.line.saturating_sub(1);
-        if line0 >= eb.rope.len_lines() {
+        if line0 >= eb.draft.len_lines() {
             return;
         }
-        let line_start = eb.rope.line_to_char(line0);
+        let line_start = eb.draft.line_to_char(line0);
         let match_char_start = line_start + hit.col.saturating_sub(1);
         let match_char_end = match_char_start + original_char_len;
-        if match_char_end > eb.rope.len_chars() {
+        if match_char_end > eb.draft.len_chars() {
             return;
         }
-        let mut new_rope = (*eb.rope).clone();
+        let mut new_rope = (*eb.draft).clone();
         new_rope.remove(match_char_start..match_char_end);
         if !replacement.is_empty() {
             new_rope.insert(match_char_start, &replacement);
@@ -106,16 +106,16 @@ pub(super) fn replace_selected(
         // clean. Also record a history group tagged `disk_write`
         // so undo/redo can fire the inverse driver cmd.
         let line0 = hit.line.saturating_sub(1);
-        if line0 >= eb.rope.len_lines() {
+        if line0 >= eb.draft.len_lines() {
             return;
         }
-        let line_start = eb.rope.line_to_char(line0);
+        let line_start = eb.draft.line_to_char(line0);
         let match_char_start = line_start + hit.col.saturating_sub(1);
         let match_char_end = match_char_start + original_char_len;
-        if match_char_end > eb.rope.len_chars() {
+        if match_char_end > eb.draft.len_chars() {
             return;
         }
-        let mut new_rope = (*eb.rope).clone();
+        let mut new_rope = (*eb.draft).clone();
         new_rope.remove(match_char_start..match_char_end);
         if !replacement.is_empty() {
             new_rope.insert(match_char_start, &replacement);
@@ -140,7 +140,7 @@ pub(super) fn replace_selected(
         super::super::shared::bump(eb, new_rope);
         eb.saved_version = SavedVersion(eb.version.0);
         eb.disk_content_hash =
-            led_core::EphemeralContentHash::of_rope(&eb.rope).persist();
+            led_core::EphemeralContentHash::of_rope(&eb.draft).persist();
         edits.pending_single_replace.push(
             led_state_buffer_edits::PendingSingleReplace {
                 path: hit.path.clone(),
@@ -209,7 +209,7 @@ pub(super) fn unreplace_selected(
             .any(|t| t.path == entry.path && !t.preview);
     if is_owned_buffer {
         let eb = edits.buffers.get_mut(&entry.path).expect("checked above");
-        let rope_len = eb.rope.len_chars();
+        let rope_len = eb.draft.len_chars();
         let replacement_end = entry
             .rope_char_start
             .saturating_add(entry.replacement_char_len);
@@ -217,7 +217,7 @@ pub(super) fn unreplace_selected(
             state.hit_replacements[idx] = Some(entry);
             return;
         }
-        let mut new_rope = (*eb.rope).clone();
+        let mut new_rope = (*eb.draft).clone();
         if entry.replacement_char_len > 0 {
             new_rope.remove(entry.rope_char_start..replacement_end);
         }
@@ -247,7 +247,7 @@ pub(super) fn unreplace_selected(
     } else if let Some(eb) = edits.buffers.get_mut(&entry.path) {
         // Preview inverse: same shape as owned-buffer inverse but
         // also fires driver cmd + keeps saved_version pinned.
-        let rope_len = eb.rope.len_chars();
+        let rope_len = eb.draft.len_chars();
         let replacement_end = entry
             .rope_char_start
             .saturating_add(entry.replacement_char_len);
@@ -255,7 +255,7 @@ pub(super) fn unreplace_selected(
             state.hit_replacements[idx] = Some(entry);
             return;
         }
-        let mut new_rope = (*eb.rope).clone();
+        let mut new_rope = (*eb.draft).clone();
         if entry.replacement_char_len > 0 {
             new_rope.remove(entry.rope_char_start..replacement_end);
         }
@@ -284,7 +284,7 @@ pub(super) fn unreplace_selected(
         super::super::shared::bump(eb, new_rope);
         eb.saved_version = SavedVersion(eb.version.0);
         eb.disk_content_hash =
-            led_core::EphemeralContentHash::of_rope(&eb.rope).persist();
+            led_core::EphemeralContentHash::of_rope(&eb.draft).persist();
         let replacement_bytes = entry.replacement_text.len();
         let replacement_end_byte = entry.hit.match_start + replacement_bytes;
         edits.pending_single_replace.push(

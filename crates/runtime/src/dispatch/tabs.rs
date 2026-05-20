@@ -162,11 +162,11 @@ mod tests {
         let mut edits = BufferEdits::default();
         edits.buffers.insert(
             canon("a"),
-            EditedBuffer::fresh(Arc::new(Rope::from_str("A"))),
+            EditedBuffer::fresh(led_state_buffer_edits::Persisted(Arc::new(Rope::from_str("A")))),
         );
         edits.buffers.insert(
             canon("b"),
-            EditedBuffer::fresh(Arc::new(Rope::from_str("B"))),
+            EditedBuffer::fresh(led_state_buffer_edits::Persisted(Arc::new(Rope::from_str("B")))),
         );
         let store = BufferStore::default();
         let term = terminal_with(Some(Dims { cols: 10, rows: 5 }));
@@ -193,7 +193,7 @@ mod tests {
         edits.buffers.insert(
             canon("a"),
             EditedBuffer {
-                rope: Arc::new(Rope::from_str("A")),
+                draft: led_state_buffer_edits::Draft(Arc::new(Rope::from_str("A"))),
                 version: led_core::BufferVersion(1),
                 saved_version: led_core::SavedVersion(0),
                 disk_content_hash: led_core::PersistedContentHash::default(),
@@ -203,7 +203,7 @@ mod tests {
         );
         edits.buffers.insert(
             canon("b"),
-            EditedBuffer::fresh(Arc::new(Rope::from_str("B"))),
+            EditedBuffer::fresh(led_state_buffer_edits::Persisted(Arc::new(Rope::from_str("B")))),
         );
         let store = BufferStore::default();
         let term = terminal_with(Some(Dims { cols: 10, rows: 5 }));
@@ -563,7 +563,7 @@ mod tests {
         let mut edits = BufferEdits::default();
         edits.buffers.insert(
             canon("a"),
-            EditedBuffer::fresh(Arc::new(Rope::from_str("A"))),
+            EditedBuffer::fresh(led_state_buffer_edits::Persisted(Arc::new(Rope::from_str("A")))),
         );
         let store = BufferStore::default();
         let term = terminal_with(Some(Dims { cols: 10, rows: 5 }));

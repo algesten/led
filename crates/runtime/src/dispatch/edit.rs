@@ -35,11 +35,11 @@ pub(super) fn insert_char(tabs: &mut Tabs, edits: &mut BufferEdits, ch: char) {
         }
         let before = tab.cursor;
         // Convert the cursor's grapheme col to a rope char index.
-        let line_char_start = eb.rope.line_to_char(tab.cursor.line);
-        let cur_line_slice = eb.rope.line(tab.cursor.line);
+        let line_char_start = eb.draft.line_to_char(tab.cursor.line);
+        let cur_line_slice = eb.draft.line(tab.cursor.line);
         let cur_char_in_line = grapheme_col_to_char(cur_line_slice, tab.cursor.col);
         let char_idx = line_char_start + cur_char_in_line;
-        let mut rope = (*eb.rope).clone();
+        let mut rope = (*eb.draft).clone();
         rope.insert_char(char_idx, ch);
         bump(eb, rope);
         // Re-derive the cursor from the new rope. If `ch` extended
@@ -47,7 +47,7 @@ pub(super) fn insert_char(tabs: &mut Tabs, edits: &mut BufferEdits, ch: char) {
         // stays put; if it started a fresh cluster, col advances by
         // one. `char_to_cursor` reads the post-edit line slice so
         // the conversion is exact.
-        tab.cursor = char_to_cursor(char_idx + 1, &eb.rope);
+        tab.cursor = char_to_cursor(char_idx + 1, &eb.draft);
         let after = tab.cursor;
         eb.history.record_insert_char(char_idx, ch, before, after);
     });
@@ -95,7 +95,7 @@ pub(super) fn insert_newline(tabs: &mut Tabs, edits: &mut BufferEdits, syntax: &
     let mut inserted: String = String::with_capacity(1 + indent_str.len());
     inserted.push('\n');
     inserted.push_str(indent_str);
-    let mut rope = (*eb.rope).clone();
+    let mut rope = (*eb.draft).clone();
     let line_char_start = rope.line_to_char(line_idx);
     let cur_line_slice = rope.line(line_idx);
     let cur_char_in_line = grapheme_col_to_char(cur_line_slice, cursor_before.col);
@@ -160,9 +160,9 @@ pub(super) fn insert_tab(tabs: &mut Tabs, edits: &mut BufferEdits, syntax: &Synt
             let Some(eb) = edits.buffers.get_mut(&path) else {
                 return;
             };
-            let line_start_char = eb.rope.line_to_char(line_idx);
+            let line_start_char = eb.draft.line_to_char(line_idx);
             let existing_indent: String = eb
-                .rope
+                .draft
                 .line(line_idx)
                 .chars()
                 .take_while(|c| *c == ' ' || *c == '\t')
@@ -189,7 +189,7 @@ pub(super) fn insert_tab(tabs: &mut Tabs, edits: &mut BufferEdits, syntax: &Synt
             let target_len = target_indent.chars().count();
 
             // Build new rope: remove old indent, insert new.
-            let mut rope = (*eb.rope).clone();
+            let mut rope = (*eb.draft).clone();
             let removed: String = if existing_len > 0 {
                 rope.slice(line_start_char..line_start_char + existing_len)
                     .to_string()
@@ -239,7 +239,7 @@ pub(super) fn insert_tab(tabs: &mut Tabs, edits: &mut BufferEdits, syntax: &Synt
             };
             let target_col = (cursor_before.col / TAB_STOP + 1) * TAB_STOP;
             let pad = target_col - cursor_before.col;
-            let mut rope = (*eb.rope).clone();
+            let mut rope = (*eb.draft).clone();
             let line_start = rope.line_to_char(line_idx);
             let cur_line_slice = rope.line(line_idx);
             let cur_char_in_line = grapheme_col_to_char(cur_line_slice, cursor_before.col);
@@ -272,8 +272,8 @@ pub(super) fn delete_back(tabs: &mut Tabs, edits: &mut BufferEdits) {
             return;
         }
         let before = tab.cursor;
-        let line_char_start = eb.rope.line_to_char(tab.cursor.line);
-        let cur_line_slice = eb.rope.line(tab.cursor.line);
+        let line_char_start = eb.draft.line_to_char(tab.cursor.line);
+        let cur_line_slice = eb.draft.line(tab.cursor.line);
 
         // Determine the char range to delete. M25 deletes the
         // entire grapheme cluster before the cursor, even if
@@ -295,7 +295,7 @@ pub(super) fn delete_back(tabs: &mut Tabs, edits: &mut BufferEdits) {
             // so `line_char_start - 1` is safe.
             (line_char_start - 1, line_char_start)
         };
-        let mut rope = (*eb.rope).clone();
+        let mut rope = (*eb.draft).clone();
         let removed: String = rope.slice(delete_start..delete_end).to_string();
         rope.remove(delete_start..delete_end);
         bump(eb, rope);
@@ -303,7 +303,7 @@ pub(super) fn delete_back(tabs: &mut Tabs, edits: &mut BufferEdits) {
         // post-edit char_to_cursor walks the new rope's grapheme
         // boundaries, landing at the correct grapheme col on the
         // (possibly joined) line.
-        tab.cursor = char_to_cursor(delete_start, &eb.rope);
+        tab.cursor = char_to_cursor(delete_start, &eb.draft);
         let after = tab.cursor;
         eb.history
             .record_delete(delete_start, Arc::from(removed), before, after);
@@ -315,16 +315,16 @@ pub(super) fn delete_forward(tabs: &mut Tabs, edits: &mut BufferEdits) {
         if tab.preview {
             return;
         }
-        let line_count = eb.rope.len_lines();
-        let line_grapheme_count = line_grapheme_len(&eb.rope, tab.cursor.line);
+        let line_count = eb.draft.len_lines();
+        let line_grapheme_count = line_grapheme_len(&eb.draft, tab.cursor.line);
         let on_last_line = tab.cursor.line + 1 >= line_count;
         let at_line_end = tab.cursor.col >= line_grapheme_count;
         if on_last_line && at_line_end {
             return;
         }
         let before = tab.cursor;
-        let line_char_start = eb.rope.line_to_char(tab.cursor.line);
-        let cur_line_slice = eb.rope.line(tab.cursor.line);
+        let line_char_start = eb.draft.line_to_char(tab.cursor.line);
+        let cur_line_slice = eb.draft.line(tab.cursor.line);
 
         let (delete_start, delete_end) = if tab.cursor.col < line_grapheme_count {
             // In-line: delete the grapheme cluster at cursor.
@@ -348,7 +348,7 @@ pub(super) fn delete_forward(tabs: &mut Tabs, edits: &mut BufferEdits) {
             let line_end = line_char_start + line_chars_total;
             (line_end - 1, line_end)
         };
-        let mut rope = (*eb.rope).clone();
+        let mut rope = (*eb.draft).clone();
         let removed: String = rope.slice(delete_start..delete_end).to_string();
         rope.remove(delete_start..delete_end);
         bump(eb, rope);
@@ -356,7 +356,7 @@ pub(super) fn delete_forward(tabs: &mut Tabs, edits: &mut BufferEdits) {
         // changed line geometry (col may shift if a wide grapheme
         // shifts forward — the post-edit char_to_cursor handles
         // it cleanly).
-        tab.cursor = char_to_cursor(delete_start, &eb.rope);
+        tab.cursor = char_to_cursor(delete_start, &eb.draft);
         let after = tab.cursor;
         eb.history
             .record_delete(delete_start, Arc::from(removed), before, after);
@@ -712,11 +712,11 @@ mod tests {
         let mut edits = BufferEdits::default();
         edits.buffers.insert(
             canon("a"),
-            EditedBuffer::fresh(Arc::new(Rope::from_str("a"))),
+            EditedBuffer::fresh(led_state_buffer_edits::Persisted(Arc::new(Rope::from_str("a")))),
         );
         edits.buffers.insert(
             canon("b"),
-            EditedBuffer::fresh(Arc::new(Rope::from_str("b"))),
+            EditedBuffer::fresh(led_state_buffer_edits::Persisted(Arc::new(Rope::from_str("b")))),
         );
         let store = BufferStore::default();
         let term = terminal_with(Some(Dims { cols: 10, rows: 5 }));

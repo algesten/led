@@ -170,7 +170,7 @@ fn apply_action_payload(
         if apply.disk_write_pending.is_some() {
             eb.saved_version = SavedVersion(eb.version.0);
             eb.disk_content_hash =
-                led_core::EphemeralContentHash::of_rope(&eb.rope).persist();
+                led_core::EphemeralContentHash::of_rope(&eb.draft).persist();
         }
     }
 
@@ -437,7 +437,7 @@ mod tests {
             };
             // Undo: ""
             dispatcher.dispatch_key(key(KeyModifiers::CONTROL, KeyCode::Char('/')));
-            assert_eq!(dispatcher.edits.buffers.values().next().unwrap().rope.to_string(), "");
+            assert_eq!(dispatcher.edits.buffers.values().next().unwrap().draft.to_string(), "");
             // Redo: "hi"
             dispatcher.dispatch_key(key(KeyModifiers::CONTROL, KeyCode::Char('y')));
         }

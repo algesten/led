@@ -35,7 +35,7 @@ pub fn desired_inlay_hint_requests<'a, 'e, 'r>(
             continue;
         }
         let end_line = eb
-            .rope
+            .draft
             .len_lines()
             .saturating_sub(1)
             .min(u32::MAX as usize) as u32;
@@ -75,7 +75,7 @@ pub fn desired_syntax_parses<'s, 'b>(
         out.push(SyntaxCmd {
             path: path.clone(),
             version: eb.version,
-            rope: eb.rope.clone(),
+            rope: eb.draft.as_rope().clone(),
             language: state.language,
             prev_tree: state.tree.clone(),
             prev_rope: state.tree_rope.clone(),
@@ -113,7 +113,7 @@ pub fn desired_lsp_buffer_changed<'a, 'b>(
         let is_save = save_happened && eb.saved_version.0 == eb.version.0;
         out.push(LspCmd::BufferChanged {
             path: path.clone(),
-            rope: eb.rope.clone(),
+            rope: eb.draft.as_rope().clone(),
             hash: eb.live_content_hash,
             is_save,
         });
@@ -508,7 +508,7 @@ pub fn replace_all_plan<'q, 'r, 't, 'b>(
         let Some(eb) = edits.buffers.get(path) else {
             continue;
         };
-        let existing = eb.rope.to_string();
+        let existing = eb.draft.to_string();
         let count = re.find_iter(&existing).count();
         if count == 0 {
             skip_paths.push(path.clone());
@@ -539,7 +539,7 @@ pub fn replace_all_plan<'q, 'r, 't, 'b>(
         let Some(eb) = edits.buffers.get(path) else {
             continue;
         };
-        let existing = eb.rope.to_string();
+        let existing = eb.draft.to_string();
         let count = re.find_iter(&existing).count();
         if count == 0 {
             skip_paths.push(path.clone());
@@ -598,13 +598,13 @@ pub fn save_cleanup_plan<'b>(
     let Some(eb) = edits.buffers.get(path) else {
         return Arc::new(Vec::new());
     };
-    let total_chars = eb.rope.len_chars();
+    let total_chars = eb.draft.len_chars();
     if total_chars == 0 {
         return Arc::new(Vec::new());
     }
-    let line_count = eb.rope.len_lines();
+    let line_count = eb.draft.len_lines();
     let mut replaces: Vec<SaveCleanupReplace> = Vec::new();
-    if eb.rope.char(total_chars - 1) != '\n' {
+    if eb.draft.char(total_chars - 1) != '\n' {
         replaces.push(SaveCleanupReplace {
             at: total_chars,
             removed: Arc::from(""),
@@ -612,7 +612,7 @@ pub fn save_cleanup_plan<'b>(
         });
     }
     for line_idx in 0..line_count {
-        let line_slice = eb.rope.line(line_idx);
+        let line_slice = eb.draft.line(line_idx);
         let line_str: String = line_slice.chars().collect();
         let body = line_str.trim_end_matches(['\n', '\r']);
         let body_chars = body.chars().count();
@@ -624,10 +624,10 @@ pub fn save_cleanup_plan<'b>(
         if trimmed_chars == body_chars {
             continue;
         }
-        let line_start_char = eb.rope.line_to_char(line_idx);
+        let line_start_char = eb.draft.line_to_char(line_idx);
         let strip_start = line_start_char + trimmed_chars;
         let strip_end = line_start_char + body_chars;
-        let removed: String = eb.rope.slice(strip_start..strip_end).to_string();
+        let removed: String = eb.draft.slice(strip_start..strip_end).to_string();
         replaces.push(SaveCleanupReplace {
             at: strip_start,
             removed: Arc::from(removed.as_str()),
@@ -709,8 +709,8 @@ pub fn completion_request_anchor<'t, 'b>(
         return CompletionAnchorOutcome::Skip;
     };
     let line = tab.cursor.line as u32;
-    let col_utf16 = if tab.cursor.line < eb.rope.len_lines() {
-        led_text_layout::grapheme_col_to_utf16_units(eb.rope.line(tab.cursor.line), tab.cursor.col)
+    let col_utf16 = if tab.cursor.line < eb.draft.len_lines() {
+        led_text_layout::grapheme_col_to_utf16_units(eb.draft.line(tab.cursor.line), tab.cursor.col)
     } else {
         0
     };
@@ -760,18 +760,18 @@ pub fn completion_refilter_outcome<'c, 't, 'b>(
         return CompletionRefilterOutcome::Dismiss;
     }
     let line_idx = session.prefix_line as usize;
-    if line_idx >= eb.rope.len_lines() {
+    if line_idx >= eb.draft.len_lines() {
         return CompletionRefilterOutcome::Dismiss;
     }
-    let line_slice = eb.rope.line(line_idx);
-    let line_start = eb.rope.line_to_char(line_idx);
+    let line_slice = eb.draft.line(line_idx);
+    let line_start = eb.draft.line_to_char(line_idx);
     let from =
         line_start + led_text_layout::grapheme_col_to_char(line_slice, session.prefix_start_col as usize);
     let to = line_start + led_text_layout::grapheme_col_to_char(line_slice, tab.cursor.col);
-    if to < from || to > eb.rope.len_chars() {
+    if to < from || to > eb.draft.len_chars() {
         return CompletionRefilterOutcome::Dismiss;
     }
-    let prefix: String = eb.rope.slice(from..to).to_string();
+    let prefix: String = eb.draft.slice(from..to).to_string();
     let filtered = led_state_completions::refilter(&session.items, &prefix);
     if filtered.is_empty() {
         return CompletionRefilterOutcome::Dismiss;
@@ -830,14 +830,14 @@ pub fn desired_indent_for_line<'s, 'b>(
         .get(path)
         .and_then(|s| s.tree.as_ref().map(|t| (s.language, t)))
         .and_then(|(lang, tree)| {
-            led_state_syntax::indent::suggest_indent(lang, tree, &eb.rope, line)
+            led_state_syntax::indent::suggest_indent(lang, tree, &eb.draft, line)
         });
     if let Some(s) = tree_indent {
         return Some(DesiredIndent::FromTree(Arc::from(s.as_str())));
     }
     // Fallback: copy the line's leading whitespace verbatim.
     let leading: String = eb
-        .rope
+        .draft
         .line(line)
         .chars()
         .take_while(|c| *c == ' ' || *c == '\t')
@@ -1019,7 +1019,7 @@ pub fn undo_action<'b>(
         return UndoAction::Noop;
     };
     // Apply ops in reverse order, as their inverses.
-    let mut rope = (*eb.rope).clone();
+    let mut rope = (*eb.draft).clone();
     for op in group.ops.iter().rev() {
         match op {
             led_state_buffer_edits::EditOp::Insert { at, text } => {
@@ -1087,7 +1087,7 @@ pub fn redo_action<'b>(
     let Some(group) = eb.history.peek_redo() else {
         return RedoAction::Noop;
     };
-    let mut rope = (*eb.rope).clone();
+    let mut rope = (*eb.draft).clone();
     for op in &group.ops {
         match op {
             led_state_buffer_edits::EditOp::Insert { at, text } => {
@@ -1160,10 +1160,10 @@ fn extract_delete_insert_texts(
 pub struct CompletionCommitApply {
     pub path: CanonPath,
     pub target_tab: led_state_tabs::TabId,
-    /// Char index in `eb.rope` where the replace begins
+    /// Char index in `eb.draft` where the replace begins
     /// (inclusive).
     pub replace_from: usize,
-    /// Char index in `eb.rope` where the replace ends
+    /// Char index in `eb.draft` where the replace ends
     /// (exclusive). `replace_to >= replace_from`.
     pub replace_to: usize,
     /// Text to splice in at `replace_from` after the
@@ -1271,11 +1271,11 @@ pub fn completion_commit_plan<'c, 't, 'b>(
     // Clamp to the actual rope so a stale item (cursor moved
     // since the session opened) can't panic on out-of-range
     // indices.
-    let line_char_start = eb.rope.line_to_char(prefix_line);
-    let line_end_char = if prefix_line + 1 < eb.rope.len_lines() {
-        eb.rope.line_to_char(prefix_line + 1)
+    let line_char_start = eb.draft.line_to_char(prefix_line);
+    let line_end_char = if prefix_line + 1 < eb.draft.len_lines() {
+        eb.draft.line_to_char(prefix_line + 1)
     } else {
-        eb.rope.len_chars()
+        eb.draft.len_chars()
     };
     let replace_from = (line_char_start + replace_start_col).min(line_end_char);
     let replace_to = (line_char_start + replace_end_col).min(line_end_char);
@@ -1285,14 +1285,14 @@ pub fn completion_commit_plan<'c, 't, 'b>(
 
     // Removed span (Arc'd into the plan for the reducer's Delete
     // history op).
-    let removed_text: String = eb.rope.slice(replace_from..replace_to).to_string();
+    let removed_text: String = eb.draft.slice(replace_from..replace_to).to_string();
 
     // Splice once, here, and ship the new rope back to the
     // reducer. ropey's tree is copy-on-write so the clone +
     // remove + insert is cheap. Computing the post-splice cursor
     // off the same rope handles multi-line textEdit insertions
     // correctly (which line-local shortcuts wouldn't).
-    let mut spliced = (*eb.rope).clone();
+    let mut spliced = (*eb.draft).clone();
     spliced.remove(replace_from..replace_to);
     spliced.insert(replace_from, new_text.as_ref());
     let inserted_char_count = new_text.chars().count();

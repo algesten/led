@@ -87,7 +87,7 @@ pub fn file_save_action<'p, 'b>(
         // dirty paths to `pending_saves` in the first place.
         out.push(SaveAction::Save {
             path: path.clone(),
-            rope: eb.rope.clone(),
+            rope: eb.draft.as_rope().clone(),
             version: eb.version,
         });
     }
@@ -101,7 +101,7 @@ pub fn file_save_action<'p, 'b>(
         out.push(SaveAction::SaveAs {
             from: from.clone(),
             to: to.clone(),
-            rope: eb.rope.clone(),
+            rope: eb.draft.as_rope().clone(),
             version: eb.version,
         });
     }

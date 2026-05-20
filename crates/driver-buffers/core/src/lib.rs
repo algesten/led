@@ -74,7 +74,7 @@ pub enum ReadCmd {
     /// External-change reread (M26). Result is *not* written into
     /// `BufferStore` — the runtime's reconcile branch consumes the
     /// new rope directly and decides whether to update
-    /// `EditedBuffer.rope`.
+    /// `EditedBuffer.draft`.
     Reread(CanonPath),
 }
 

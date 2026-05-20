@@ -47,7 +47,7 @@ pub(super) fn match_bracket(tabs: &mut Tabs, edits: &BufferEdits, jumps: &mut Ju
     let Some(eb) = edits.buffers.get(&tab.path) else {
         return;
     };
-    let rope = &eb.rope;
+    let rope = &eb.draft;
     let pos = cursor_to_char(&tab.cursor, rope);
 
     // Try char AT cursor first, then char BEFORE.
@@ -127,7 +127,7 @@ fn apply_jump(tabs: &mut Tabs, edits: &BufferEdits, pos: JumpPosition) {
     let Some(eb) = edits.buffers.get(&pos.path) else {
         return;
     };
-    let rope = &eb.rope;
+    let rope = &eb.draft;
     let line_count = rope.len_lines();
     let line = pos.line.min(line_count.saturating_sub(1));
     let col = pos.col.min(line_char_len(rope, line));
@@ -414,7 +414,7 @@ fn clamp_row_to_buffer(edits: &BufferEdits, path: &CanonPath, row: usize) -> usi
     edits
         .buffers
         .get(path)
-        .map(|eb| row.min(eb.rope.len_lines().saturating_sub(1)))
+        .map(|eb| row.min(eb.draft.len_lines().saturating_sub(1)))
         .unwrap_or(row)
 }
 
@@ -487,7 +487,7 @@ impl<'a> NavCtx<'a> {
             .position(|t| t.path == outcome.target_path)
             && let Some(eb) = edits.buffers.get(&outcome.target_path)
         {
-            let rope = &eb.rope;
+            let rope = &eb.draft;
             let line_count = rope.len_lines();
             let line = outcome.target_row.min(line_count.saturating_sub(1));
             // `outcome.target_col` originates from LSP diagnostics
@@ -784,7 +784,7 @@ mod tests {
         use led_state_buffer_edits::EditedBuffer;
         edits.buffers.insert(
             canon,
-            EditedBuffer::fresh(Arc::new(ropey::Rope::from_str(rope_str))),
+            EditedBuffer::fresh(led_state_buffer_edits::Persisted(Arc::new(ropey::Rope::from_str(rope_str)))),
         );
         (tabs, edits)
     }

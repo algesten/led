@@ -30,12 +30,12 @@ pub(super) fn kill_region(
     let Some(eb) = edits.buffers.get(&tab.path) else {
         return false;
     };
-    let Some((start, end)) = region_range(tab, &eb.rope) else {
+    let Some((start, end)) = region_range(tab, &eb.draft) else {
         return false;
     };
     let before = tab.cursor;
 
-    let mut rope = (*eb.rope).clone();
+    let mut rope = (*eb.draft).clone();
     let killed: Arc<str> = Arc::from(rope.slice(start..end).to_string());
     rope.remove(start..end);
 
@@ -44,7 +44,7 @@ pub(super) fn kill_region(
 
     let tab = &mut tabs.open[idx];
     // Cursor lands at the start of the killed region.
-    tab.cursor = char_to_cursor(start, &eb.rope);
+    tab.cursor = char_to_cursor(start, &eb.draft);
     tab.cursor.preferred_col = tab.cursor.col;
     tab.mark = None;
     let after = tab.cursor;
@@ -73,7 +73,7 @@ pub(super) fn kill_line(
     let Some(eb) = edits.buffers.get(&tab.path) else {
         return;
     };
-    let rope_arc = eb.rope.clone();
+    let rope_arc = eb.draft.as_rope().clone();
     let line_count = rope_arc.len_lines();
     let line = tab.cursor.line.min(line_count.saturating_sub(1));
     let line_len = line_char_len(&rope_arc, line);
@@ -116,7 +116,7 @@ pub(super) fn kill_line(
     bump(eb, rope);
     // Cursor stays at `start` — kill-to-EOL doesn't move it.
     let tab = &mut tabs.open[idx];
-    tab.cursor = char_to_cursor(start, &eb.rope);
+    tab.cursor = char_to_cursor(start, &eb.draft);
     tab.cursor.preferred_col = tab.cursor.col;
     let after = tab.cursor;
 
@@ -171,7 +171,7 @@ pub fn apply_yank(
     };
     let before = tab.cursor;
 
-    let mut rope = (*eb.rope).clone();
+    let mut rope = (*eb.draft).clone();
     let char_idx = cursor_to_char(&tab.cursor, &rope);
     rope.insert(char_idx, text);
 
@@ -182,8 +182,8 @@ pub fn apply_yank(
     let inserted_chars = text.chars().count();
     let new_idx = char_idx + inserted_chars;
     let tab = &mut tabs.open[idx];
-    tab.cursor = char_to_cursor(new_idx, &eb.rope);
-    super::shared::refresh_preferred_col(&mut tab.cursor, &eb.rope, content_cols);
+    tab.cursor = char_to_cursor(new_idx, &eb.draft);
+    super::shared::refresh_preferred_col(&mut tab.cursor, &eb.draft, content_cols);
     let after = tab.cursor;
 
     eb.history

@@ -359,7 +359,7 @@ pub(crate) fn is_git_sentinel(path: &CanonPath) -> bool {
 ///
 /// Application logic in the ingest phase per `EXAMPLE-ARCH.md` §
 /// "Invariant enforcement": cleans up the user-decision shadow
-/// source `EditedBuffer.rope` in response to disk content (an
+/// source `EditedBuffer.draft` in response to disk content (an
 /// external fact) changing.
 ///
 /// - **Clean buffer + new content** — replace the rope, refresh
@@ -399,7 +399,7 @@ pub(crate) fn reconcile_external_change(
             // Clean reload. Push one group so undo can restore the
             // prior content; replace the rope; advance version and
             // saved_version together so the buffer stays clean.
-            let prev_text: Arc<str> = Arc::from(eb.rope.to_string().as_str());
+            let prev_text: Arc<str> = Arc::from(eb.draft.to_string().as_str());
             let new_text: Arc<str> = Arc::from(new_rope.to_string().as_str());
             let cursor_before = led_state_tabs::Cursor::default();
             let cursor_after = led_state_tabs::Cursor::default();
@@ -411,7 +411,7 @@ pub(crate) fn reconcile_external_change(
                 cursor_after,
                 None,
             );
-            eb.rope = new_rope;
+            eb.draft = led_state_buffer_edits::Draft(new_rope);
             eb.disk_content_hash = new_hash;
             eb.live_content_hash = new_hash;
             eb.version.0 = eb.version.0.saturating_add(1);

@@ -41,7 +41,7 @@ pub(super) fn sort_imports(
             .get(&tab.path)
             .and_then(|s| s.tree.as_ref().map(|t| (s.language, t)))
             .and_then(|(lang, tree)| {
-                led_state_syntax::import::sort_imports(lang, tree, &eb.rope)
+                led_state_syntax::import::sort_imports(lang, tree, &eb.draft)
             });
 
         let Some(plan) = plan else {
@@ -52,7 +52,7 @@ pub(super) fn sort_imports(
         let before = tab.cursor;
 
         // Apply the replacement: remove old slice, insert new.
-        let mut rope = (*eb.rope).clone();
+        let mut rope = (*eb.draft).clone();
         let removed: String = rope.slice(plan.start_char..plan.end_char).chars().collect();
         rope.remove(plan.start_char..plan.end_char);
         rope.insert(plan.start_char, &plan.replacement);
@@ -63,16 +63,16 @@ pub(super) fn sort_imports(
         // row. Otherwise leave it alone. `tab.cursor.col` is a
         // grapheme col; convert to a char idx through the line
         // before adding it to the line's char start.
-        let cursor_line_slice = if tab.cursor.line < eb.rope.len_lines() {
-            eb.rope.line(tab.cursor.line)
+        let cursor_line_slice = if tab.cursor.line < eb.draft.len_lines() {
+            eb.draft.line(tab.cursor.line)
         } else {
-            eb.rope.slice(eb.rope.len_chars()..eb.rope.len_chars())
+            eb.draft.slice(eb.draft.len_chars()..eb.draft.len_chars())
         };
-        let cursor_char = eb.rope.line_to_char(tab.cursor.line)
+        let cursor_char = eb.draft.line_to_char(tab.cursor.line)
             + led_text_layout::grapheme_col_to_char(cursor_line_slice, tab.cursor.col);
         let new_end_char = plan.start_char + plan.replacement.chars().count();
         if cursor_char >= plan.start_char && cursor_char < new_end_char {
-            let row = eb.rope.char_to_line(plan.start_char);
+            let row = eb.draft.char_to_line(plan.start_char);
             tab.cursor.line = row;
             tab.cursor.col = 0;
             tab.cursor.preferred_col = 0;

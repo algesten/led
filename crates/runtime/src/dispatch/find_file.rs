@@ -1109,9 +1109,9 @@ mod tests {
         let mut edits = led_state_buffer_edits::BufferEdits::default();
         edits.buffers.insert(
             active_path.clone(),
-            led_state_buffer_edits::EditedBuffer::fresh(
+            led_state_buffer_edits::EditedBuffer::fresh(led_state_buffer_edits::Persisted(
                 std::sync::Arc::new(ropey::Rope::from_str("payload\n")),
-            ),
+            )),
         );
 
         let mut ff = Some(FindFileState::save_as("/tmp/copy.txt".to_string()));

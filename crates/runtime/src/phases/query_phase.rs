@@ -281,11 +281,11 @@ fn derive_buffer_opened(
             .get(path)
             .and_then(led_state_syntax::Language::from_chain)
             .or_else(|| led_state_syntax::Language::from_path(path));
-        let hash = led_core::EphemeralContentHash::of_rope(&eb.rope).persist();
+        let hash = led_core::EphemeralContentHash::of_rope(&eb.draft).persist();
         cmds.push(LspCmd::BufferOpened {
             path: path.clone(),
             language,
-            rope: eb.rope.clone(),
+            rope: eb.draft.as_rope().clone(),
             hash,
         });
         notified.push((path.clone(), eb.version, eb.saved_version));

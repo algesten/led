@@ -230,7 +230,7 @@ pub(crate) fn ingest_lsp_events(sources: &mut Sources, env: &TickEnv<'_>) {
                     diag_offer::OfferOutcome::Reject => continue,
                 };
                 let current_hash =
-                    EphemeralContentHash::of_rope(&eb.rope).persist();
+                    EphemeralContentHash::of_rope(&eb.draft).persist();
                 if transformed.is_empty() {
                     diagnostics.by_path.remove(&path);
                 } else {
@@ -277,7 +277,7 @@ pub(crate) fn ingest_lsp_events(sources: &mut Sources, env: &TickEnv<'_>) {
                     diag_offer::OfferOutcome::Reject => continue,
                 };
                 let current_hash =
-                    EphemeralContentHash::of_rope(&eb.rope).persist();
+                    EphemeralContentHash::of_rope(&eb.draft).persist();
                 if transformed.is_empty() {
                     diagnostics.by_path.remove(&path);
                 } else {
@@ -339,12 +339,12 @@ pub(crate) fn ingest_lsp_events(sources: &mut Sources, env: &TickEnv<'_>) {
                 let prefix_start_col = match prefix_start_col {
                     Some(units) => {
                         let pl = prefix_line as usize;
-                        if pl >= edits.buffers.get(&path).map_or(0, |eb| eb.rope.len_lines())
+                        if pl >= edits.buffers.get(&path).map_or(0, |eb| eb.draft.len_lines())
                         {
                             continue;
                         }
                         let eb = edits.buffers.get(&path).expect("checked above");
-                        led_text_layout::utf16_units_to_grapheme_col(eb.rope.line(pl), units) as u32
+                        led_text_layout::utf16_units_to_grapheme_col(eb.draft.line(pl), units) as u32
                     }
                     None => identifier_start_col(
                         edits,
@@ -515,7 +515,7 @@ pub(crate) fn ingest_file_writes(sources: &mut Sources, env: &TickEnv<'_>) {
                     eb.saved_version =
                         eb.saved_version.max(SavedVersion(done.version.0));
                     let hash =
-                        EphemeralContentHash::of_rope(&eb.rope).persist();
+                        EphemeralContentHash::of_rope(&eb.draft).persist();
                     eb.history.insert_save_point(hash);
                     eb.disk_content_hash = hash;
                 }

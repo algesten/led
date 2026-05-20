@@ -6,7 +6,7 @@
 //! Port of legacy led's `BufferState::offer_diagnostics` +
 //! `replay_diagnostics` (`crates/state/src/lib.rs:1203-1316`).
 //! Kept in the runtime because it stitches together the buffer
-//! rope (`EditedBuffer.rope`), the edit history
+//! rope (`EditedBuffer.draft`), the edit history
 //! (`EditedBuffer.history`), the inbound LSP payload, and the
 //! diagnostic source — three crates at once, which is the shape
 //! of every runtime-side query memo.
@@ -48,7 +48,7 @@ pub fn offer_diagnostics(
     stamped: PersistedContentHash,
     diags: Vec<Diagnostic>,
 ) -> OfferOutcome {
-    let current = EphemeralContentHash::of_rope(&eb.rope);
+    let current = EphemeralContentHash::of_rope(&eb.draft);
     // Fast path: the rope still holds exactly the bytes the
     // server analysed. Common after save, before any further
     // typing, and also the case where the user undid every edit
@@ -72,7 +72,7 @@ pub fn offer_diagnostics(
     // `save_idx + 1` forward, in reverse. The current rope IS
     // the post-application rope; walk backward applying each
     // op's inverse to get the pre-save-point state.
-    let mut doc: Rope = (*eb.rope).clone();
+    let mut doc: Rope = (*eb.draft).clone();
     let groups_forward: Vec<&EditGroup> = eb
         .history
         .groups_from(save_idx + 1)
@@ -176,7 +176,7 @@ fn describe_op(doc: &Rope, op: &EditOp) -> (usize, isize) {
 mod tests {
     use super::*;
     use led_core::BufferVersion;
-    use led_state_buffer_edits::EditedBuffer;
+    use led_state_buffer_edits::{Draft, EditedBuffer, Persisted};
     use led_state_diagnostics::DiagnosticSeverity;
     use led_state_tabs::Cursor;
     use std::sync::Arc;
@@ -205,7 +205,7 @@ mod tests {
     #[test]
     fn fast_path_accepts_when_hash_matches() {
         let rope = Arc::new(Rope::from_str("one\ntwo\nthree\n"));
-        let eb = EditedBuffer::fresh(rope.clone());
+        let eb = EditedBuffer::fresh(Persisted(rope.clone()));
         let h = EphemeralContentHash::of_rope(&rope).persist();
         let out = offer_diagnostics(&eb, h, vec![diag(1, "err")]);
         match out {
@@ -220,7 +220,7 @@ mod tests {
     #[test]
     fn reject_when_no_matching_save_point() {
         let rope = Arc::new(Rope::from_str("one\ntwo\n"));
-        let eb = EditedBuffer::fresh(rope);
+        let eb = EditedBuffer::fresh(Persisted(rope));
         let bogus = led_core::PersistedContentHash(0xDEADBEEF);
         let out = offer_diagnostics(&eb, bogus, vec![diag(0, "err")]);
         assert!(matches!(out, OfferOutcome::Reject));
@@ -234,14 +234,14 @@ mod tests {
         // no longer reflects the content the server analysed.
         let at_save = Arc::new(Rope::from_str("fn main() {}\n"));
         let save_hash = EphemeralContentHash::of_rope(&at_save).persist();
-        let mut eb = EditedBuffer::fresh(at_save);
+        let mut eb = EditedBuffer::fresh(Persisted(at_save));
         eb.history.insert_save_point(save_hash);
 
         // Apply a same-row edit: insert 'x' at char 2 ("fxn main()...").
-        let mut rope2: Rope = (*eb.rope).clone();
+        let mut rope2: Rope = (*eb.draft).clone();
         rope2.insert_char(2, 'x');
-        eb.rope = Arc::new(rope2);
-        eb.live_content_hash = EphemeralContentHash::of_rope(&eb.rope).persist();
+        eb.draft = Draft(Arc::new(rope2));
+        eb.live_content_hash = EphemeralContentHash::of_rope(&eb.draft).persist();
         eb.version = BufferVersion(1);
         eb.history.record_insert_char(2, 'x', cur(0, 2), cur(0, 3));
         eb.history.finalise();
@@ -263,14 +263,14 @@ mod tests {
         // on row 0 — row 2 becomes row 3 in the new rope.
         let at_save = Arc::new(Rope::from_str("a\nb\nc\n"));
         let save_hash = EphemeralContentHash::of_rope(&at_save).persist();
-        let mut eb = EditedBuffer::fresh(at_save);
+        let mut eb = EditedBuffer::fresh(Persisted(at_save));
         eb.history.insert_save_point(save_hash);
 
         // Insert a newline at char 0 ("\na\nb\nc\n").
-        let mut rope2: Rope = (*eb.rope).clone();
+        let mut rope2: Rope = (*eb.draft).clone();
         rope2.insert_char(0, '\n');
-        eb.rope = Arc::new(rope2);
-        eb.live_content_hash = EphemeralContentHash::of_rope(&eb.rope).persist();
+        eb.draft = Draft(Arc::new(rope2));
+        eb.live_content_hash = EphemeralContentHash::of_rope(&eb.draft).persist();
         eb.version = BufferVersion(1);
         eb.history
             .record_insert(0, Arc::<str>::from("\n"), cur(0, 0), cur(1, 0));
@@ -294,29 +294,29 @@ mod tests {
         // the save hash. Fast path matches; replay never runs.
         let rope = Arc::new(Rope::from_str("hello\n"));
         let save_hash = EphemeralContentHash::of_rope(&rope).persist();
-        let mut eb = EditedBuffer::fresh(rope);
+        let mut eb = EditedBuffer::fresh(Persisted(rope));
         eb.history.insert_save_point(save_hash);
 
         // Type 'x' then delete it, ending back at hello.
-        let mut r: Rope = (*eb.rope).clone();
+        let mut r: Rope = (*eb.draft).clone();
         r.insert_char(5, 'x');
-        eb.rope = Arc::new(r);
-        eb.live_content_hash = EphemeralContentHash::of_rope(&eb.rope).persist();
+        eb.draft = Draft(Arc::new(r));
+        eb.live_content_hash = EphemeralContentHash::of_rope(&eb.draft).persist();
         eb.version = BufferVersion(1);
         eb.history.record_insert_char(5, 'x', cur(0, 5), cur(0, 6));
         eb.history.finalise();
 
-        let mut r: Rope = (*eb.rope).clone();
+        let mut r: Rope = (*eb.draft).clone();
         r.remove(5..6);
-        eb.rope = Arc::new(r);
-        eb.live_content_hash = EphemeralContentHash::of_rope(&eb.rope).persist();
+        eb.draft = Draft(Arc::new(r));
+        eb.live_content_hash = EphemeralContentHash::of_rope(&eb.draft).persist();
         eb.version = BufferVersion(2);
         eb.history
             .record_delete(5, Arc::<str>::from("x"), cur(0, 6), cur(0, 5));
         eb.history.finalise();
 
         // Current hash should equal save_hash.
-        let current = EphemeralContentHash::of_rope(&eb.rope).persist();
+        let current = EphemeralContentHash::of_rope(&eb.draft).persist();
         assert_eq!(current, save_hash);
 
         let out = offer_diagnostics(&eb, save_hash, vec![diag(0, "err")]);

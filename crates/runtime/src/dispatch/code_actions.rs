@@ -57,10 +57,10 @@ pub(super) fn activate(
     // surrogate pairs, and combining sequences land at the position
     // the server expects.
     let to_lsp = |line: usize, gcol: usize| -> (u32, u32) {
-        if line >= eb.rope.len_lines() {
+        if line >= eb.draft.len_lines() {
             return (line as u32, 0);
         }
-        let units = grapheme_col_to_utf16_units(eb.rope.line(line), gcol);
+        let units = grapheme_col_to_utf16_units(eb.draft.line(line), gcol);
         (line as u32, units)
     };
     let (start_line, start_col, end_line, end_col) = match tab.mark {
@@ -208,7 +208,7 @@ mod tests {
         let mut edits = BufferEdits::default();
         edits.buffers.insert(
             canon("a.rs"),
-            EditedBuffer::fresh(Arc::new(Rope::from_str("a\nb\nc\n"))),
+            EditedBuffer::fresh(led_state_buffer_edits::Persisted(Arc::new(Rope::from_str("a\nb\nc\n")))),
         );
         (tabs, edits)
     }
