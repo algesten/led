@@ -119,11 +119,18 @@ pub fn subprocess_action(
         }
     }
 
-    // 3) Drain pending sends for Running sessions.
+    // 3) Drain pending sends for Spawning/Running sessions.
+    //
+    // The CLI doesn't emit `Init` until it reads the first
+    // stdin line — so "Spawning" is the earliest we can write,
+    // and gating on Running would deadlock (Init waits for a
+    // message, the memo waits for Init). The manager-thread's
+    // writer is a buffered std::mpsc channel; messages queue
+    // against the spawning child until its stdin is ready.
     for uuid in tabs.open.iter() {
         if !matches!(
             lifecycle.per_session.get(uuid),
-            Some(LifecycleState::Running)
+            Some(LifecycleState::Spawning | LifecycleState::Running)
         ) {
             continue;
         }
@@ -755,7 +762,11 @@ mod tests {
     }
 
     #[test]
-    fn pending_send_on_spawning_session_does_not_emit_user_message() {
+    fn pending_send_on_spawning_session_emits_user_message() {
+        // The CLI doesn't emit `Init` (which would flip the
+        // lifecycle to Running) until it reads its first stdin
+        // line. So we MUST send while still Spawning — gating
+        // on Running here would deadlock.
         let mut tabs = ChatTabs::default();
         tabs.open_or_focus(u("a"));
         let mut life = ChatLifecycle::default();
@@ -764,6 +775,25 @@ mod tests {
         prefs.queue_send(u("a"), "hello".into());
 
         let actions = subprocess_action(&tabs, &life, &prefs, &ready_store(vec![row("a")]));
+        assert!(matches!(
+            actions.as_slice(),
+            [ClaudeAction::UserMessage { uuid, text }]
+                if uuid == &u("a") && text == "hello"
+        ));
+    }
+
+    #[test]
+    fn pending_send_on_exiting_session_is_not_sent() {
+        let mut tabs = ChatTabs::default();
+        tabs.open_or_focus(u("a"));
+        let mut life = ChatLifecycle::default();
+        life.per_session.insert(u("a"), LifecycleState::Exiting);
+        let mut prefs = ChatPrefs::default();
+        prefs.queue_send(u("a"), "hello".into());
+
+        let actions = subprocess_action(&tabs, &life, &prefs, &ready_store(vec![row("a")]));
+        // Empty — Exiting is on its way out; sending more would
+        // race the Shutdown path.
         assert!(actions.is_empty());
     }
 
