@@ -725,10 +725,15 @@ impl Manager {
         path: CanonPath,
         result: DiagPushResult,
     ) {
+        let _ = path;
         match result {
-            DiagPushResult::Forward(p, diags, hash) => {
+            DiagPushResult::CacheFallback(p, diags, hash) => {
+                // Per audit Theme L Target C: push diagnostics no
+                // longer surface on the primary `Diagnostics`
+                // channel. They emit `PushFallback` so the runtime
+                // fold can gate them as lower priority than pulls.
                 self.trace.lsp_diagnostics_done(&p, diags.len(), hash);
-                let _ = self.lsp_event_tx.send(LspEvent::Diagnostics {
+                let _ = self.lsp_event_tx.send(LspEvent::PushFallback {
                     path: p,
                     hash,
                     diagnostics: diags,
@@ -736,32 +741,28 @@ impl Manager {
                 self.notify.notify();
             }
             DiagPushResult::ForwardClearing(p) => {
-                // Clearing push (empty list) outside a window.
-                // Legacy forwards with the current buffer hash —
-                // clearing is always safe; the runtime's
-                // hash-match / replay gate applies either way.
+                // Clearing push (empty list). Forward as a
+                // clearing `PushFallback` carrying the current
+                // buffer hash — clearing is safe in either mode
+                // (the runtime's hash-match / replay gate still
+                // applies) and routes through the same fallback
+                // channel as non-clearing pushes.
                 let hash = self.servers[&language]
                     .buffer_hashes
                     .get(&p)
                     .copied()
                     .unwrap_or_default();
-                let _ = self.lsp_event_tx.send(LspEvent::Diagnostics {
+                let _ = self.lsp_event_tx.send(LspEvent::PushFallback {
                     path: p,
                     hash,
                     diagnostics: Vec::new(),
                 });
                 self.notify.notify();
             }
-            DiagPushResult::RestartWindow => {
-                self.trace.lsp_mode_fallback();
-                // DiagnosticSource already closed the window in
-                // the pull→push fallback. Re-issue a synthetic
-                // RequestDiagnostics so push-mode windows drain
-                // the cache (now containing the offending push).
-                self.request_diagnostics();
-                let _ = path;
+            DiagPushResult::Drop | DiagPushResult::Ignore => {
+                // Drop: pull in flight for this path; pull wins.
+                // Ignore: no actionable cache update.
             }
-            DiagPushResult::Ignore => {}
         }
     }
 }

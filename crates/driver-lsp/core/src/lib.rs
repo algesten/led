@@ -421,11 +421,33 @@ pub enum EditsOrigin {
 #[derive(Debug, Clone)]
 pub enum LspEvent {
     /// Diagnostics for one path, stamped with the content hash
-    /// they were pulled against. The runtime runs
-    /// `offer_diagnostics` to decide: accept as-is (hash matches
-    /// current), replay through the edit log since a save-point
-    /// marker with a matching hash, or drop silently.
+    /// they were pulled against. **Primary channel: pull-only.**
+    /// Emitted by `textDocument/diagnostic` pull responses. The
+    /// runtime runs `offer_diagnostics` to decide: accept as-is
+    /// (hash matches current), replay through the edit log since
+    /// a save-point marker with a matching hash, or drop silently.
+    ///
+    /// Pushes never arrive on this channel — see
+    /// [`LspEvent::PushFallback`] for the push-fallback path.
     Diagnostics {
+        path: CanonPath,
+        hash: PersistedContentHash,
+        diagnostics: Vec<Diagnostic>,
+    },
+    /// Push-fallback diagnostics for one path. Emitted by
+    /// `textDocument/publishDiagnostics` pushes (either while the
+    /// server is in push-only mode, or while a pull-capable server
+    /// has no in-flight pull for this path). The runtime fold
+    /// accepts these only when no `LspEvent::Diagnostics` has
+    /// landed for the path — pull always wins. Carries the same
+    /// content-hash stamping discipline as `Diagnostics` so the
+    /// replay path works identically.
+    ///
+    /// Per audit Theme L Target C + the project rule "Pull
+    /// diagnostics only": this channel exists so push events
+    /// remain visible (push-only servers need it) without
+    /// contaminating the primary pull channel.
+    PushFallback {
         path: CanonPath,
         hash: PersistedContentHash,
         diagnostics: Vec<Diagnostic>,
@@ -554,6 +576,10 @@ pub trait Trace: Send + Sync {
     fn lsp_server_started(&self, server: &ServerId);
     fn lsp_request_diagnostics(&self);
     fn lsp_diagnostics_done(&self, path: &CanonPath, n: usize, hash: PersistedContentHash);
+    /// Legacy hook for pull→push mode-fallback. Per audit Theme L
+    /// Target C the runtime-time downgrade was removed; this hook
+    /// is no longer called from the driver but stays on the trait
+    /// for shape stability.
     fn lsp_mode_fallback(&self);
     /// Outbound JSON-RPC request to the server. `path_uri` is the
     /// `textDocument.uri` field when the method targets a single
@@ -779,6 +805,15 @@ impl LspDriver {
                         .pull_state
                         .insert(path.clone(), PullState::Failed(message.clone()));
                     state.last_error = Some(message.clone());
+                }
+                LspEvent::PushFallback { .. } => {
+                    // Push fallback never advances `pull_state` —
+                    // the primary `LspEvent::Diagnostics` channel
+                    // is the only one that records pull progress.
+                    // Leaving pull_state unchanged lets the runtime
+                    // memo gate further pulls correctly: a Pending
+                    // pull stays Pending until its own response
+                    // (or `PullFailed`) lands.
                 }
                 LspEvent::InlayHints { .. }
                 | LspEvent::WatchedFilesRegistered { .. }

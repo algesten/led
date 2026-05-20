@@ -137,9 +137,11 @@ pub trait Trace: Send + Sync {
     /// A diagnostic delivery reached the runtime, stamped with
     /// the buffer version the server was reasoning about.
     fn lsp_diagnostics_done(&self, path: &CanonPath, n: usize, hash: PersistedContentHash);
-    /// Server fell back from pull mode to push mode
-    /// (`publishDiagnostics` arrived while in Pull). One-way;
-    /// emitted once per server.
+    /// Legacy hook for the pull→push mode-fallback event. Per
+    /// audit Theme L Target C the runtime-time downgrade was
+    /// removed; this hook is retained for trait-shape stability
+    /// but no longer fires. Kept so adapter chains compile against
+    /// the same vocabulary.
     fn lsp_mode_fallback(&self);
     /// Emitted when the find-file driver receives a completion
     /// command. Legacy's dispatched.snap name is `FsFindFile`.

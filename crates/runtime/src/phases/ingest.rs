@@ -240,6 +240,53 @@ pub(crate) fn ingest_lsp_events(sources: &mut Sources, env: &TickEnv<'_>) {
                     );
                 }
             }
+            LspEvent::PushFallback {
+                path,
+                hash,
+                diagnostics: diags,
+            } => {
+                // Per audit Theme L Target C: push-fallback events
+                // are lower priority than primary `Diagnostics`.
+                // Accept only when no pull has answered for this
+                // path — `pull_state` is `None`/`Idle` (no pull
+                // ever issued or all paths drained) or `Failed`
+                // (the pull errored out, leaving push as the only
+                // surface).
+                //
+                // `Pending` is also accepted so the fallback can
+                // populate the slot pre-emptively while the pull
+                // is still in flight; the pull response will
+                // overwrite when it lands. `Done` means the pull
+                // already answered authoritatively and we must
+                // NOT regress to a stale push.
+                let pull_state = lsp_driver.pull_state.get(&path);
+                let accept = matches!(
+                    pull_state,
+                    None | Some(led_driver_lsp_core::PullState::Idle)
+                        | Some(led_driver_lsp_core::PullState::Pending(_))
+                        | Some(led_driver_lsp_core::PullState::Failed(_))
+                );
+                if !accept {
+                    continue;
+                }
+                let Some(eb) = edits.buffers.get(&path) else {
+                    continue;
+                };
+                let transformed = match crate::diag_offer::offer_diagnostics(eb, hash, diags) {
+                    diag_offer::OfferOutcome::Accept(d) => d,
+                    diag_offer::OfferOutcome::Reject => continue,
+                };
+                let current_hash =
+                    EphemeralContentHash::of_rope(&eb.rope).persist();
+                if transformed.is_empty() {
+                    diagnostics.by_path.remove(&path);
+                } else {
+                    diagnostics.by_path.insert(
+                        path,
+                        BufferDiagnostics::new(current_hash, transformed),
+                    );
+                }
+            }
             LspEvent::Ready { server } => {
                 let entry = lsp_status
                     .by_server

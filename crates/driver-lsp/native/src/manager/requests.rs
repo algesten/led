@@ -2,10 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use led_core::{BufferVersion, CanonPath, LspRequestSeq, PersistedContentHash};
-use led_driver_lsp_core::{
-    LspEvent,
-    diag_source::DiagMode,
-};
+use led_driver_lsp_core::LspEvent;
 use led_state_syntax::Language;
 use serde_json::{Value, json};
 
@@ -56,18 +53,24 @@ impl Manager {
         let pulls_and_cache = {
             let entry = self.servers.get_mut(&lang).unwrap();
             let pulls = entry.diag.open_window(snapshot, &opened);
-            let cache = if entry.diag.mode() == DiagMode::Push {
-                entry.diag.drain_cache_for_window()
-            } else {
-                Vec::new()
-            };
+            // Drain the push fallback cache in BOTH modes:
+            //   - Push mode: cached pushes are the only diagnostic
+            //     source for this window.
+            //   - Pull mode: cached pushes pre-populate fallback
+            //     entries the runtime can show while pulls are in
+            //     flight. The runtime fold gates them via
+            //     `pull_state` so a pull response supersedes the
+            //     fallback as soon as it lands.
+            let cache = entry.diag.drain_cache_for_window();
             (pulls, cache)
         };
         let (pulls, cache) = pulls_and_cache;
 
-        // Forward cached push results immediately.
+        // Surface cached push results as PushFallback events —
+        // never as primary `Diagnostics`. Pull responses (issued
+        // below) own that channel.
         for (path, diags, hash) in cache {
-            let _ = self.lsp_event_tx.send(LspEvent::Diagnostics {
+            let _ = self.lsp_event_tx.send(LspEvent::PushFallback {
                 path: path.clone(),
                 hash,
                 diagnostics: diags,
