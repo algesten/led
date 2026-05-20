@@ -1,6 +1,6 @@
 //! Completion / code-action / rename popups.
 
-use led_driver_terminal_core::Rect;
+use led_driver_terminal_core::{PopoverPlacement, PopoverPreferred, Rect};
 use std::sync::Arc;
 
 use super::body::body_cursor;
@@ -71,13 +71,35 @@ pub fn completion_popup_model<'c, 't>(
         editor_area.y.saturating_add(cursor_row),
     );
     let selected_in_window = session.selected.saturating_sub(scroll);
+    let label_w = label_width.min(u16::MAX as usize) as u16;
+    let detail_w = detail_width.min(u16::MAX as usize) as u16;
+    let outer_w = completion_outer_width(label_w, detail_w, editor_area);
+    let height = rows.len().min(u16::MAX as usize) as u16;
+    let placement = PopoverPlacement::derive(
+        anchor,
+        (outer_w, height),
+        editor_area,
+        PopoverPreferred::Below,
+    );
     Some(CompletionPopupModel {
         rows: Arc::new(rows),
         selected: selected_in_window,
         anchor,
-        label_width: label_width.min(u16::MAX as usize) as u16,
-        detail_width: detail_width.min(u16::MAX as usize) as u16,
+        placement,
+        outer_width: outer_w,
+        label_width: label_w,
+        detail_width: detail_w,
     })
+}
+
+/// Outer box width for a completion-shaped popup: label col +
+/// 2-col gap (when any row has a detail) + detail col + 1-col
+/// inner padding on each side. Clamped to the editor area so
+/// the popup never overflows the sidebar / tab-bar region.
+fn completion_outer_width(label_w: u16, detail_w: u16, area: Rect) -> u16 {
+    let gap: u16 = if detail_w > 0 { 2 } else { 0 };
+    let content_w = label_w.saturating_add(gap).saturating_add(detail_w);
+    content_w.saturating_add(2).min(area.cols).max(3)
 }
 
 /// Build the code-action picker popup. Reuses `CompletionPopupModel`
@@ -125,12 +147,24 @@ pub fn code_action_popup_model<'e, 't>(
         editor_area.y.saturating_add(cursor_row),
     );
     let selected_in_window = picker.selected.saturating_sub(scroll);
+    let label_w = label_width.min(u16::MAX as usize) as u16;
+    let detail_w = detail_width.min(u16::MAX as usize) as u16;
+    let outer_w = completion_outer_width(label_w, detail_w, editor_area);
+    let height = rows.len().min(u16::MAX as usize) as u16;
+    let placement = PopoverPlacement::derive(
+        anchor,
+        (outer_w, height),
+        editor_area,
+        PopoverPreferred::Below,
+    );
     Some(CompletionPopupModel {
         rows: Arc::new(rows),
         selected: selected_in_window,
         anchor,
-        label_width: label_width.min(u16::MAX as usize) as u16,
-        detail_width: detail_width.min(u16::MAX as usize) as u16,
+        placement,
+        outer_width: outer_w,
+        label_width: label_w,
+        detail_width: detail_w,
     })
 }
 

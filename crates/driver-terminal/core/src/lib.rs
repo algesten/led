@@ -528,10 +528,122 @@ pub struct StatusBarModel {
 pub struct PopoverModel {
     pub lines: Arc<Vec<PopoverLine>>,
     /// Absolute terminal `(col, row)` anchor — the cursor
-    /// position that triggered the popover. The painter derives
-    /// the actual box origin from this with the screen-edge clamp
-    /// and above/below fallback rules described on [`PopoverModel`].
+    /// position that triggered the popover. Retained for trace /
+    /// debug visibility; the painter consumes the resolved
+    /// [`placement`] instead.
     pub anchor: (u16, u16),
+    /// Resolved box origin (x, y) and flip flag, computed in the
+    /// render memo via [`PopoverPlacement::derive`]. The painter
+    /// reads `placement` directly — no inline above/below ladder.
+    pub placement: PopoverPlacement,
+    /// Outer box width in cols, computed in the render memo.
+    /// Includes 1-col inner padding on each side; clamped to the
+    /// editor area.
+    pub outer_width: u16,
+    /// Number of lines the painter should emit, computed in the
+    /// render memo (clamped to half the editor height).
+    pub height: u16,
+}
+
+/// Resolved on-screen placement for an in-buffer popup
+/// (diagnostic popover, LSP completion). Computed once in a
+/// runtime memo via [`PopoverPlacement::derive`]; painters
+/// consume `(x, y, flipped_above)` directly rather than
+/// recomputing the above/below ladder from the raw anchor.
+///
+/// `Default` = `(0, 0)` not-flipped — never used in production;
+/// the runtime always stamps a resolved placement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PopoverPlacement {
+    /// Absolute terminal column of the popup's left edge.
+    pub x: u16,
+    /// Absolute terminal row of the popup's top edge.
+    pub y: u16,
+    /// `true` when the popup landed above the anchor row
+    /// (i.e. the preferred direction was the OTHER one). Carried
+    /// for trace visibility — painters generally don't need it,
+    /// but golden tests do.
+    pub flipped_above: bool,
+}
+
+/// Vertical preference for [`PopoverPlacement::derive`] —
+/// diagnostic popovers prefer above the anchor (so the message
+/// doesn't cover the next code line), completion / code-action
+/// popups prefer below (the natural "dropdown" direction).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PopoverPreferred {
+    /// Try above the anchor first; fall back to below.
+    Above,
+    /// Try below the anchor first; fall back to above.
+    Below,
+}
+
+impl PopoverPlacement {
+    /// Compute on-screen placement for a popup of `content_size`
+    /// `(width, height)` anchored at terminal coords `anchor`
+    /// `(col, row)`, constrained to `area`.
+    ///
+    /// - **X**: clamped so the right edge doesn't leave `area`
+    ///   on the right; clamped to `area.x` on the left.
+    /// - **Y**: depends on `preferred` —
+    ///   `Above` puts the popup directly above the anchor row
+    ///   when there's room, else just below (clamped to fit);
+    ///   `Below` puts the popup one row below the anchor when
+    ///   there's room, else above. When neither has room the
+    ///   popup pins to the top of `area`.
+    ///
+    /// `flipped_above` is `true` when the chosen direction
+    /// landed above the anchor.
+    pub fn derive(
+        anchor: (u16, u16),
+        content_size: (u16, u16),
+        area: Rect,
+        preferred: PopoverPreferred,
+    ) -> Self {
+        let (w, h) = content_size;
+        // X clamp: stay inside the editor area on both edges.
+        let area_right = area.x.saturating_add(area.cols);
+        let max_x = area_right.saturating_sub(w);
+        let x = anchor.0.min(max_x).max(area.x);
+        // Y ladder: prefer above OR below per `preferred`, fall
+        // back to the other side if there isn't room.
+        let area_bottom = area.y.saturating_add(area.rows);
+        let fits_above = anchor.1 >= area.y.saturating_add(h);
+        let below_top = anchor.1.saturating_add(1);
+        let fits_below = below_top.saturating_add(h) <= area_bottom;
+        let (y, flipped_above) = match preferred {
+            PopoverPreferred::Above => {
+                if fits_above {
+                    (anchor.1.saturating_sub(h), true)
+                } else if fits_below {
+                    let y = below_top
+                        .min(area_bottom.saturating_sub(h))
+                        .max(area.y);
+                    (y, false)
+                } else {
+                    // Neither has room — pin to the top of the
+                    // area. This mirrors legacy's "paint what we
+                    // can" fallback.
+                    (area.y, false)
+                }
+            }
+            PopoverPreferred::Below => {
+                if fits_below {
+                    let y = below_top.min(area_bottom.saturating_sub(h));
+                    (y, false)
+                } else if fits_above {
+                    (anchor.1.saturating_sub(h), true)
+                } else {
+                    (area.y, false)
+                }
+            }
+        };
+        Self {
+            x,
+            y,
+            flipped_above,
+        }
+    }
 }
 
 /// One row inside a [`PopoverModel`]. `text` is already wrapped
@@ -816,9 +928,17 @@ pub struct CompletionPopupModel {
     /// this row with the theme's selection style.
     pub selected: usize,
     /// Absolute terminal `(col, row)` anchor — the cursor
-    /// position that's driving the session. Painter chooses
-    /// "below the anchor" first, "above" on overflow.
+    /// position that's driving the session. Retained for trace /
+    /// debug visibility; the painter consumes the resolved
+    /// [`placement`] instead.
     pub anchor: (u16, u16),
+    /// Resolved box origin (x, y) and flip flag, computed in
+    /// the render memo via [`PopoverPlacement::derive`].
+    pub placement: PopoverPlacement,
+    /// Outer box width in cols, computed in the render memo.
+    /// Includes 1-col inner padding on each side; clamped to
+    /// the editor area.
+    pub outer_width: u16,
     /// Max width (in chars) of any row's label — the painter
     /// left-pads every label to this before printing the
     /// detail column.

@@ -10,7 +10,7 @@ use crate::buffer::Buffer;
 /// anchor line, X clamps so the box stays on screen.
 pub(crate) fn paint_popover(
     pop: &PopoverModel,
-    editor_area: Rect,
+    _editor_area: Rect,
     dims: Dims,
     theme: &Theme,
     buf: &mut Buffer,
@@ -19,50 +19,25 @@ pub(crate) fn paint_popover(
         return;
     }
 
-    // Max content width across all non-rule lines; rule lines take
-    // the full content width implicitly.
-    let content_w = pop
-        .lines
-        .iter()
-        .filter(|l| l.severity.is_some())
-        .map(|l| l.text.chars().count())
-        .max()
-        .unwrap_or(1);
-    // Outer width = content + 1-char inner padding on each side.
-    let outer_w = (content_w + 2).min(editor_area.cols as usize).max(3);
-    let height = pop
-        .lines
-        .len()
-        .min(editor_area.rows as usize / 2)
-        .max(1);
-    let lines = &pop.lines[..height];
-
-    // X: clamp so the right edge doesn't leave the editor area.
-    let area_right = editor_area.x.saturating_add(editor_area.cols);
-    let max_x = area_right.saturating_sub(outer_w as u16);
-    let x = pop.anchor.0.min(max_x).max(editor_area.x);
-    // Y: prefer above the anchor row, fall back to below if there
-    // isn't room. The editor area's top edge is the clamp; rows
-    // above the editor (tab bar) never receive popover content.
-    let y = if pop.anchor.1 >= editor_area.y.saturating_add(height as u16) {
-        pop.anchor.1.saturating_sub(height as u16)
-    } else {
-        let below = pop.anchor.1.saturating_add(1);
-        let area_bottom = editor_area.y.saturating_add(editor_area.rows);
-        below
-            .min(area_bottom.saturating_sub(height as u16))
-            .max(editor_area.y)
-    };
+    // Placement (x, y, outer_w, height) is fully decided by the
+    // runtime memo. The painter only re-clamps to the physical
+    // terminal — the editor area is already accounted for by the
+    // memo, but the OS terminal might be smaller (mid-resize).
+    let x = pop.placement.x;
+    let y = pop.placement.y;
+    let outer_w_model = pop.outer_width as usize;
+    let height_model = pop.height as usize;
+    let lines = &pop.lines[..height_model.min(pop.lines.len())];
 
     // Guard: never overflow the physical terminal.
     if x >= dims.cols || y >= dims.rows {
         return;
     }
-    let outer_w = outer_w.min((dims.cols.saturating_sub(x)) as usize);
+    let outer_w = outer_w_model.min((dims.cols.saturating_sub(x)) as usize);
     if outer_w < 3 {
         return;
     }
-    let height = height.min((dims.rows.saturating_sub(y)) as usize);
+    let height = height_model.min((dims.rows.saturating_sub(y)) as usize);
     if height == 0 {
         return;
     }
