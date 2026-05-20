@@ -62,6 +62,12 @@ pub struct FileSearchCmd {
 /// One completion back from the worker. `query` + toggles are echoed
 /// so the runtime can drop late arrivals (user typed further or
 /// flipped a toggle since the request went out).
+///
+/// `error` is `Some(msg)` when the worker hit a terminal failure
+/// (bad regex, walker init error). Per
+/// `feedback_driver_failure_state.md` the driver records this on
+/// `FileSearchDriverState.last_error` rather than silently
+/// collapsing to "0 results."
 #[derive(Debug, Clone)]
 pub struct FileSearchOut {
     pub query: String,
@@ -72,6 +78,7 @@ pub struct FileSearchOut {
     /// runtime doesn't re-walk the tree when projecting the cursor
     /// between hits.
     pub flat: Vec<FileSearchHit>,
+    pub error: Option<Arc<str>>,
 }
 
 /// One-shot point replacement for a single hit on disk. Used when
@@ -264,7 +271,17 @@ impl FileSearchDriver {
             {
                 state.search_in_flight = None;
             }
-            self.trace.file_search_done(&done.query, true);
+            let ok = match &done.error {
+                Some(msg) => {
+                    state.last_error = Some(msg.clone());
+                    false
+                }
+                None => {
+                    state.last_error = None;
+                    true
+                }
+            };
+            self.trace.file_search_done(&done.query, ok);
             out.push(done);
         }
         out

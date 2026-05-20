@@ -33,12 +33,16 @@ pub struct FindFileCmd {
 
 /// Completion back to the runtime. `dir` + `prefix` are echoed so
 /// late-arriving results that no longer match the current input can
-/// be dropped (legacy's "expected_dir" discipline).
+/// be dropped (legacy's "expected_dir" discipline). `result` is
+/// `Err(msg)` when the worker hit a terminal failure
+/// (`read_dir` Err): per `feedback_driver_failure_state.md` the
+/// driver must record explicit error state, not collapse failures
+/// to empty entry lists.
 #[derive(Debug, Clone)]
 pub struct FindFileListed {
     pub dir: CanonPath,
     pub prefix: String,
-    pub entries: Vec<FindFileEntry>,
+    pub result: Result<Vec<FindFileEntry>, Arc<str>>,
 }
 
 /// Driver-owned in-flight tracking. `in_flight` is `Some` while a
@@ -118,7 +122,17 @@ impl FindFileDriver {
             {
                 state.in_flight = None;
             }
-            self.trace.find_file_done(&done.dir, &done.prefix, true);
+            let ok = match &done.result {
+                Ok(_) => {
+                    state.last_error = None;
+                    true
+                }
+                Err(msg) => {
+                    state.last_error = Some(msg.clone());
+                    false
+                }
+            };
+            self.trace.find_file_done(&done.dir, &done.prefix, ok);
             out.push(done);
         }
         out

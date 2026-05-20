@@ -575,7 +575,10 @@ pub(crate) fn ingest_find_file(sources: &mut Sources, env: &TickEnv<'_>) {
         if done.dir != expected_dir || done.prefix != prefix {
             continue;
         }
-        ff.completions = done.entries;
+        // Driver-side last_error is already stamped. On Err the
+        // overlay shows nothing rather than stale results (same UX
+        // as "directory empty"); user can retry by adjusting input.
+        ff.completions = done.result.unwrap_or_default();
         auto_advance_arrow_follow(ff, tabs);
     }
 }

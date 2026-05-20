@@ -98,13 +98,14 @@ fn search_worker_loop(
     notify: Notifier,
 ) {
     while let Ok(cmd) = rx.recv() {
-        let (groups, flat) = run_search(&cmd);
+        let (groups, flat, error) = run_search(&cmd);
         let out = FileSearchOut {
             query: cmd.query,
             case_sensitive: cmd.case_sensitive,
             use_regex: cmd.use_regex,
             groups,
             flat,
+            error,
         };
         if tx.send(out).is_err() {
             return;
@@ -276,7 +277,9 @@ fn write_atomic(path: &std::path::Path, content: &str) -> std::io::Result<()> {
     std::fs::rename(&tmp, path)
 }
 
-fn run_search(cmd: &FileSearchCmd) -> (Vec<FileSearchGroup>, Vec<FileSearchHit>) {
+fn run_search(
+    cmd: &FileSearchCmd,
+) -> (Vec<FileSearchGroup>, Vec<FileSearchHit>, Option<Arc<str>>) {
     let pattern = if cmd.use_regex {
         cmd.query.clone()
     } else {
@@ -287,7 +290,13 @@ fn run_search(cmd: &FileSearchCmd) -> (Vec<FileSearchGroup>, Vec<FileSearchHit>)
         .build(&pattern)
     {
         Ok(m) => m,
-        Err(_) => return (Vec::new(), Vec::new()),
+        Err(e) => {
+            return (
+                Vec::new(),
+                Vec::new(),
+                Some(Arc::from(format!("invalid pattern: {e}").as_str())),
+            );
+        }
     };
 
     let walker = WalkBuilder::new(cmd.root.as_path())
@@ -379,7 +388,7 @@ fn run_search(cmd: &FileSearchCmd) -> (Vec<FileSearchGroup>, Vec<FileSearchHit>)
         .iter()
         .flat_map(|g| g.hits.iter().cloned())
         .collect();
-    (groups, flat)
+    (groups, flat, None)
 }
 
 /// Heuristic relevance score for a hit group. Higher → ranked earlier.
