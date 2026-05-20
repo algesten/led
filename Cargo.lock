@@ -987,8 +987,6 @@ dependencies = [
  "drv",
  "ropey",
  "serde",
- "unicode-segmentation",
- "unicode-width 0.2.2",
 ]
 
 [[package]]
@@ -1279,6 +1277,7 @@ dependencies = [
  "led-state-syntax",
  "led-state-tabs",
  "led-state-text-input",
+ "led-text-layout",
  "led-text-reflow",
  "regex",
  "regex-syntax",
@@ -1449,6 +1448,17 @@ name = "led-state-text-input"
 version = "0.0.0"
 dependencies = [
  "drv",
+]
+
+[[package]]
+name = "led-text-layout"
+version = "0.0.0"
+dependencies = [
+ "drv",
+ "led-core",
+ "ropey",
+ "unicode-segmentation",
+ "unicode-width 0.2.2",
 ]
 
 [[package]]

@@ -47,11 +47,11 @@ pub(crate) fn identifier_start_col(
         return cursor_col as u32;
     }
     let line_slice = eb.rope.line(prefix_line);
-    let line_grapheme_count = led_core::line_grapheme_len(line_slice);
+    let line_grapheme_count = led_text_layout::line_grapheme_len(line_slice);
     let mut start = cursor_col.min(line_grapheme_count);
     while start > 0 {
         // The cluster immediately before `start` (grapheme units).
-        let prev_char_in_line = led_core::grapheme_col_to_char(line_slice, start - 1);
+        let prev_char_in_line = led_text_layout::grapheme_col_to_char(line_slice, start - 1);
         let line_start_char = eb.rope.line_to_char(prefix_line);
         let ch = eb.rope.char(line_start_char + prev_char_in_line);
         if ch.is_alphanumeric() || ch == '_' {
@@ -83,8 +83,8 @@ pub(crate) fn completion_prefix(
     // before slicing the rope; the typed prefix may include emoji or
     // combining marks whose char widths differ from their grapheme
     // count.
-    let from = line_start + led_core::grapheme_col_to_char(line_slice, prefix_start_col);
-    let to = line_start + led_core::grapheme_col_to_char(line_slice, tab.cursor.col);
+    let from = line_start + led_text_layout::grapheme_col_to_char(line_slice, prefix_start_col);
+    let to = line_start + led_text_layout::grapheme_col_to_char(line_slice, tab.cursor.col);
     if to < from || to > eb.rope.len_chars() {
         return String::new();
     }
@@ -166,7 +166,7 @@ impl<'a> LspGotoApply<'a> {
             // server; convert to grapheme col through the actual
             // line so we land on the same cluster the server picked.
             let line_slice = eb.rope.line(line);
-            let col = led_core::utf16_units_to_grapheme_col(line_slice, loc.col);
+            let col = led_text_layout::utf16_units_to_grapheme_col(line_slice, loc.col);
             let body_rows = terminal
                 .dims
                 .map(|d| {
@@ -180,7 +180,7 @@ impl<'a> LspGotoApply<'a> {
             tab.cursor.line = line;
             tab.cursor.col = col;
             tab.cursor.preferred_col =
-                led_core::prefix_display_width(line_slice, col);
+                led_text_layout::prefix_display_width(line_slice, col);
             tab.scroll = dispatch::center_on_cursor(
                 tab.scroll,
                 tab.cursor,

@@ -364,7 +364,7 @@ fn cursor_to_char(rope: &Rope, line: usize, col: usize) -> usize {
         return 0;
     }
     let line_slice = rope.line(line);
-    rope.line_to_char(line) + led_core::grapheme_col_to_char(line_slice, col)
+    rope.line_to_char(line) + led_text_layout::grapheme_col_to_char(line_slice, col)
 }
 
 /// Inverse of [`cursor_to_char`]: char idx → `(line, grapheme_col)`.
@@ -372,7 +372,7 @@ fn char_to_line_col(rope: &Rope, ch: usize) -> (usize, usize) {
     let line = rope.char_to_line(ch);
     let line_slice = rope.line(line);
     let char_in_line = ch - rope.line_to_char(line);
-    let col = led_core::char_to_grapheme_col(line_slice, char_in_line);
+    let col = led_text_layout::char_to_grapheme_col(line_slice, char_in_line);
     (line, col)
 }
 

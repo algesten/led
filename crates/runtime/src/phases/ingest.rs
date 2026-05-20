@@ -297,7 +297,7 @@ pub(crate) fn ingest_lsp_events(sources: &mut Sources, env: &TickEnv<'_>) {
                             continue;
                         }
                         let eb = edits.buffers.get(&path).expect("checked above");
-                        led_core::utf16_units_to_grapheme_col(eb.rope.line(pl), units) as u32
+                        led_text_layout::utf16_units_to_grapheme_col(eb.rope.line(pl), units) as u32
                     }
                     None => identifier_start_col(
                         edits,

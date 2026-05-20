@@ -710,7 +710,7 @@ pub fn completion_request_anchor<'t, 'b>(
     };
     let line = tab.cursor.line as u32;
     let col_utf16 = if tab.cursor.line < eb.rope.len_lines() {
-        led_core::grapheme_col_to_utf16_units(eb.rope.line(tab.cursor.line), tab.cursor.col)
+        led_text_layout::grapheme_col_to_utf16_units(eb.rope.line(tab.cursor.line), tab.cursor.col)
     } else {
         0
     };
@@ -766,8 +766,8 @@ pub fn completion_refilter_outcome<'c, 't, 'b>(
     let line_slice = eb.rope.line(line_idx);
     let line_start = eb.rope.line_to_char(line_idx);
     let from =
-        line_start + led_core::grapheme_col_to_char(line_slice, session.prefix_start_col as usize);
-    let to = line_start + led_core::grapheme_col_to_char(line_slice, tab.cursor.col);
+        line_start + led_text_layout::grapheme_col_to_char(line_slice, session.prefix_start_col as usize);
+    let to = line_start + led_text_layout::grapheme_col_to_char(line_slice, tab.cursor.col);
     if to < from || to > eb.rope.len_chars() {
         return CompletionRefilterOutcome::Dismiss;
     }

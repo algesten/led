@@ -122,7 +122,7 @@ pub fn popover_model<'a, 'b, 'c, 'd, 'e>(
     if row_in_area >= editor_area.rows {
         return None;
     }
-    use led_core::col_to_sub_line;
+    use led_text_layout::col_to_sub_line;
     let content_cols = (editor_area.cols as usize)
         .saturating_sub(GUTTER_WIDTH)
         .saturating_sub(TRAILING_RESERVED_COLS);

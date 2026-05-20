@@ -123,7 +123,7 @@ pub(crate) fn apply_save_cleanup(
         cursor_after.line = new_line_count.saturating_sub(1);
     }
     let new_line_grapheme_count =
-        led_core::line_grapheme_len(new_rope.line(cursor_after.line));
+        led_text_layout::line_grapheme_len(new_rope.line(cursor_after.line));
     if cursor_after.col > new_line_grapheme_count {
         cursor_after.col = new_line_grapheme_count;
         cursor_after.preferred_col = new_line_grapheme_count;

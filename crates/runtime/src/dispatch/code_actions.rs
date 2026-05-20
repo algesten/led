@@ -15,7 +15,7 @@
 //! The activation path reads the active tab's cursor + mark;
 //! no active selection collapses to cursor..cursor.
 
-use led_core::grapheme_col_to_utf16_units;
+use led_text_layout::grapheme_col_to_utf16_units;
 use led_state_buffer_edits::BufferEdits;
 use led_state_lsp::{CodeActionPickerState, LspExtrasState};
 use led_state_tabs::Tabs;

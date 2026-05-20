@@ -69,7 +69,7 @@ pub(super) fn sort_imports(
             eb.rope.slice(eb.rope.len_chars()..eb.rope.len_chars())
         };
         let cursor_char = eb.rope.line_to_char(tab.cursor.line)
-            + led_core::grapheme_col_to_char(cursor_line_slice, tab.cursor.col);
+            + led_text_layout::grapheme_col_to_char(cursor_line_slice, tab.cursor.col);
         let new_end_char = plan.start_char + plan.replacement.chars().count();
         if cursor_char >= plan.start_char && cursor_char < new_end_char {
             let row = eb.rope.char_to_line(plan.start_char);

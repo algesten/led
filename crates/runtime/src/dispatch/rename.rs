@@ -21,7 +21,7 @@
 
 use std::sync::Arc;
 
-use led_core::grapheme_col_to_char;
+use led_text_layout::grapheme_col_to_char;
 use led_state_buffer_edits::BufferEdits;
 use led_state_lsp::{LspExtrasState, RenameState};
 use led_state_tabs::Tabs;
@@ -73,7 +73,7 @@ pub(super) fn activate(
     // before stashing it in `RenameState`, so `commit` can send it
     // straight through to `queue_rename` without re-deriving.
     let word_start_units =
-        led_core::grapheme_col_to_utf16_units(line_slice, led_core::char_to_grapheme_col(line_slice, word_start_char));
+        led_text_layout::grapheme_col_to_utf16_units(line_slice, led_text_layout::char_to_grapheme_col(line_slice, word_start_char));
     lsp_extras.rename = Some(RenameState::open(
         tab.path.clone(),
         line as u32,

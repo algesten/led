@@ -48,6 +48,7 @@ members = [
     "crates/driver-file-watch/core",
     "crates/driver-file-watch/native",
     "crates/runtime",
+    "crates/text-layout",
     "crates/text-reflow",
     "crates/fake-lsp",
     "led",
@@ -103,6 +104,7 @@ led-driver-session-native = { path = "crates/driver-session/native" }
 led-driver-file-watch-core = { path = "crates/driver-file-watch/core" }
 led-driver-file-watch-native = { path = "crates/driver-file-watch/native" }
 led-runtime = { path = "crates/runtime" }
+led-text-layout = { path = "crates/text-layout" }
 led-text-reflow = { path = "crates/text-reflow" }
 
 # drv = the memoization / query primitive.

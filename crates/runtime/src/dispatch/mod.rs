@@ -1434,7 +1434,7 @@ fn lsp_goto_definition(
     let line = tab.cursor.line as u32;
     // LSP positions are UTF-16 code units (per spec default).
     let col = if (tab.cursor.line) < eb.rope.len_lines() {
-        led_core::grapheme_col_to_utf16_units(eb.rope.line(tab.cursor.line), tab.cursor.col)
+        led_text_layout::grapheme_col_to_utf16_units(eb.rope.line(tab.cursor.line), tab.cursor.col)
     } else {
         0
     };

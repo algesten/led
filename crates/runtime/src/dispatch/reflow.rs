@@ -61,11 +61,11 @@ pub(super) fn reflow_paragraph(
         let new_line_count = eb.rope.len_lines().max(1);
         let new_row = tab.cursor.line.min(new_line_count - 1);
         let new_line_slice = eb.rope.line(new_row);
-        let new_grapheme_len = led_core::line_grapheme_len(new_line_slice);
+        let new_grapheme_len = led_text_layout::line_grapheme_len(new_line_slice);
         let new_col = tab.cursor.col.min(new_grapheme_len);
         tab.cursor.line = new_row;
         tab.cursor.col = new_col;
-        tab.cursor.preferred_col = led_core::prefix_display_width(new_line_slice, new_col);
+        tab.cursor.preferred_col = led_text_layout::prefix_display_width(new_line_slice, new_col);
         let after = tab.cursor;
 
         eb.history.finalise();

@@ -4,8 +4,9 @@
 //! dispatch-facing wrapper that reads the right rope (edits first,
 //! store second) and updates both cursor + scroll on the active tab.
 
-use led_core::{
-    SubLine, col_to_sub_line, sub_line_cells_to_grapheme_col, sub_line_count, sub_line_range,
+use led_core::SubLine;
+use led_text_layout::{
+    col_to_sub_line, sub_line_cells_to_grapheme_col, sub_line_count, sub_line_range,
 };
 
 /// Minimum visual rows the cursor stays from either viewport edge.
@@ -360,7 +361,7 @@ fn grapheme_is_word(rope: &Rope, line: usize, gcol: usize) -> bool {
         return false;
     }
     let slice = rope.line(line);
-    let char_idx = led_core::grapheme_col_to_char(slice, gcol);
+    let char_idx = led_text_layout::grapheme_col_to_char(slice, gcol);
     if char_idx >= rope.line(line).len_chars() {
         return false;
     }

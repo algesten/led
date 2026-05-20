@@ -338,7 +338,8 @@ fn active_body_match(
     area: Rect,
     rope: &Rope,
 ) -> Option<led_driver_terminal_core::BodyMatch> {
-    use led_core::{SubLine, col_to_sub_line, sub_line_count};
+    use led_core::SubLine;
+    use led_text_layout::{col_to_sub_line, sub_line_count};
     let state = overlays.file_search.as_ref()?;
     let led_state_file_search::FileSearchSelection::Result(i) = state.selection else {
         return None;
@@ -364,9 +365,9 @@ fn active_body_match(
     let hit_slice = rope.line(line);
     // The hit's `col` is a CHAR index from the file-search driver;
     // convert to grapheme col before consulting wrap geometry.
-    let match_gcol = led_core::char_to_grapheme_col(hit_slice, col_start_char);
+    let match_gcol = led_text_layout::char_to_grapheme_col(hit_slice, col_start_char);
     let match_end_gcol =
-        led_core::char_to_grapheme_col(hit_slice, col_start_char + match_char_len);
+        led_text_layout::char_to_grapheme_col(hit_slice, col_start_char + match_char_len);
     let (match_sub, cells_within) =
         col_to_sub_line(match_gcol, hit_slice, content_cols);
     // Walk sub-line counts to find the visible-row index for
@@ -440,7 +441,8 @@ struct RenderContentArgs<'a> {
 
 fn render_content(args: RenderContentArgs<'_>) -> BodyModel {
     use led_driver_terminal_core::BodyLine;
-    use led_core::{SubLine, line_layout};
+    use led_core::SubLine;
+    use led_text_layout::line_layout;
 
     let RenderContentArgs {
         rope,
@@ -472,7 +474,7 @@ fn render_content(args: RenderContentArgs<'_>) -> BodyModel {
     // line, not once per sub-line query. Refresh whenever `ln`
     // advances past the cached line.
     let mut layout_for: Option<usize> = None;
-    let mut layout: Vec<led_core::SubLineRange> = Vec::new();
+    let mut layout: Vec<led_text_layout::SubLineRange> = Vec::new();
     let mut full_line: String = String::new();
     // Selection bounds projected onto the current logical line. `None`
     // when this line falls outside the selection. Cached alongside
@@ -712,11 +714,12 @@ fn project_selection_to_line(
     sel_start: Cursor,
     sel_end: Cursor,
     ln: usize,
-    layout: &[led_core::SubLineRange],
+    layout: &[led_text_layout::SubLineRange],
     line_slice: ropey::RopeSlice<'_>,
     content_cols: usize,
 ) -> Option<LineSelectionBounds> {
-    use led_core::{SubLine, col_to_sub_line};
+    use led_core::SubLine;
+    use led_text_layout::col_to_sub_line;
     if ln < sel_start.line || ln > sel_end.line {
         return None;
     }
@@ -750,7 +753,7 @@ fn project_selection_to_line(
 fn clip_selection_to_sub(
     bounds: &LineSelectionBounds,
     sub: led_core::SubLine,
-    layout: &[led_core::SubLineRange],
+    layout: &[led_text_layout::SubLineRange],
     area_cols: usize,
 ) -> Option<led_driver_terminal_core::BodySelection> {
     let our_sub = sub.0;
@@ -891,7 +894,7 @@ pub(crate) fn visible_cursor(
     rope: &Rope,
     content_cols: usize,
 ) -> Option<(u16, u16)> {
-    use led_core::{col_to_sub_line, line_layout};
+    use led_text_layout::{col_to_sub_line, line_layout};
     let body_rows = area.rows as usize;
     if body_rows == 0 || c.line < s.top {
         return None;

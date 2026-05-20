@@ -6,7 +6,7 @@
 //! before falling back to the M3 "match previous line's leading
 //! whitespace" rule.
 
-use led_core::grapheme_col_to_char;
+use led_text_layout::grapheme_col_to_char;
 use led_state_buffer_edits::BufferEdits;
 use led_state_syntax::SyntaxStates;
 use led_state_tabs::Tabs;
