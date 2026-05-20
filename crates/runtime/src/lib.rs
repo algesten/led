@@ -392,9 +392,12 @@ pub struct Sources {
     /// "Now" as a source field per the EXAMPLE-ARCH "Time is a
     /// source field" prescription. Set once at the top of every
     /// ingest tick from `Instant::now()`; everything downstream
-    /// reads via [`Clock::now`] or [`query::ClockInput`] so a
-    /// single syscall per tick covers every consumer and
-    /// time-dependent memos can cache-hit on idle.
+    /// reads via [`Clock::now`] so a single syscall per tick
+    /// covers every consumer. Time-dependent behaviour is realized
+    /// by ingest pre-clearing expired state (e.g.
+    /// `alerts.expire_info(clock.now)`) rather than by memos
+    /// taking `now` as an input — the latter would invalidate
+    /// every tick.
     pub clock: Clock,
     /// Driver-owned in-flight tracking for the terminal output
     /// driver per `EXAMPLE-ARCH.md § "Pure output drivers"`.

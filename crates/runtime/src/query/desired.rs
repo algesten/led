@@ -864,13 +864,7 @@ pub fn undo_target_path<'b>(
     edits: EditedBuffersInput<'b>,
     floor: EditSeq,
 ) -> Option<CanonPath> {
-    edits
-        .buffers
-        .iter()
-        .filter_map(|(p, eb)| eb.history.past_top_seq().map(|s| (p.clone(), s)))
-        .filter(|(_, s)| *s > floor)
-        .max_by_key(|(_, s)| *s)
-        .map(|(p, _)| p)
+    max_seq_path_above_floor(&edits, floor, |h| h.past_top_seq())
 }
 
 /// Mirror of [`undo_target_path`] for the redo side. The overlay's
@@ -881,13 +875,36 @@ pub fn redo_target_path<'b>(
     edits: EditedBuffersInput<'b>,
     floor: EditSeq,
 ) -> Option<CanonPath> {
-    edits
-        .buffers
-        .iter()
-        .filter_map(|(p, eb)| eb.history.future_top_seq().map(|s| (p.clone(), s)))
-        .filter(|(_, s)| *s > floor)
-        .max_by_key(|(_, s)| *s)
-        .map(|(p, _)| p)
+    max_seq_path_above_floor(&edits, floor, |h| h.future_top_seq())
+}
+
+/// Shared helper for [`undo_target_path`] / [`redo_target_path`].
+/// Walks every buffer, asks `top_seq` for that history's top stamp,
+/// and returns the path whose top-seq is the largest strictly
+/// greater than `floor`. Imperative form per
+/// `feedback_filter_map.md` — keeps the decision logic flat instead
+/// of a filter_map / filter / max_by_key chain.
+fn max_seq_path_above_floor<'b, F>(
+    edits: &EditedBuffersInput<'b>,
+    floor: EditSeq,
+    top_seq: F,
+) -> Option<CanonPath>
+where
+    F: Fn(&led_state_buffer_edits::History) -> Option<EditSeq>,
+{
+    let mut best: Option<(&CanonPath, EditSeq)> = None;
+    for (path, eb) in edits.buffers.iter() {
+        let Some(seq) = top_seq(&eb.history) else {
+            continue;
+        };
+        if seq <= floor {
+            continue;
+        }
+        if best.is_none_or(|(_, best_seq)| seq > best_seq) {
+            best = Some((path, seq));
+        }
+    }
+    best.map(|(p, _)| p.clone())
 }
 
 /// Payload of [`UndoAction::Apply`] / [`RedoAction::Apply`]. Carries

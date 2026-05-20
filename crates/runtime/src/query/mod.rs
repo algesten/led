@@ -41,7 +41,7 @@ pub use desired::{
 };
 pub use issues::{StatusDisplay, directory_categories, resolve_display};
 pub use inputs::{
-    AlertExpiryInput, AlertsInput, BrowserUiInput, ClipboardDriverInput, ClipboardIntentInput, ClockInput,
+    AlertExpiryInput, AlertsInput, BrowserUiInput, ClipboardDriverInput, ClipboardIntentInput,
     CompletionsSessionInput, DiagnosticsStatesInput, EditedBuffersInput,
     FileSearchQueryInput, FileSearchReplaceInput, FileWatchEventsInput,
     FileWatchRegistryInput, FindFileInput, FsListDriverInput, FsRootInput,

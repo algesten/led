@@ -575,21 +575,6 @@ impl<'a> FileWatchRegistryInput<'a> {
     }
 }
 
-/// "Now" as memo input. Per EXAMPLE-ARCH "Time is a source
-/// field": the runtime writes `clock.now = Instant::now()` once
-/// per ingest tick, and time-dependent memos take this input so
-/// their cache invalidates whenever a tick's clock advances.
-#[derive(drv::Input, Copy, Clone)]
-pub struct ClockInput<'a> {
-    pub now: &'a std::time::Instant,
-}
-
-impl<'a> ClockInput<'a> {
-    pub fn new(c: &'a crate::Clock) -> Self {
-        Self { now: &c.now }
-    }
-}
-
 /// Narrow projection of [`AlertState`] for deadline memos. The
 /// painter's `AlertsInput` deliberately excludes
 /// `info_expires_at` (it churns by the millisecond and would
