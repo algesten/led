@@ -33,10 +33,11 @@ pub use desired::{
     completion_request_anchor, desired_indent_for_line, desired_inlay_hint_requests,
     desired_lsp_buffer_changed, desired_syntax_parses, desired_watches,
     filtered_watch_events, lsp_watched_file_notifications, per_server_matched,
-    redo_target_path, replace_all_plan, save_cleanup_plan, undo_target_path,
-    CompiledQuery, CompletionAnchorOutcome, CompletionCommitApply,
-    CompletionCommitPlan, CompletionRefilterOutcome, DesiredIndent,
-    InMemoryReplacePlan, ReplaceAllPlan, SaveCleanupReplace,
+    redo_action, redo_target_path, replace_all_plan, save_cleanup_plan, undo_action,
+    undo_target_path, CompiledQuery, CompletionAnchorOutcome, CompletionCommitApply,
+    CompletionCommitPlan, CompletionRefilterOutcome, DesiredIndent, DiskWritePending,
+    InMemoryReplacePlan, RedoAction, ReplaceAllPlan, SaveCleanupReplace, UndoAction,
+    UndoApply, UndoMarkSync,
 };
 pub use issues::{StatusDisplay, directory_categories, resolve_display};
 pub use inputs::{

@@ -890,6 +890,269 @@ pub fn redo_target_path<'b>(
         .map(|(p, _)| p)
 }
 
+/// Payload of [`UndoAction::Apply`] / [`RedoAction::Apply`]. Carries
+/// every value the reducer needs to apply the undo/redo step:
+/// the path of the buffer to mutate, the pre-spliced new rope, the
+/// cursor bookend to restore (cursor_before for undo, cursor_after
+/// for redo), the disk-write side-effect, and the file-search
+/// overlay sync metadata.
+///
+/// `disk_write_pending` (when `Some`) tells the reducer to queue a
+/// `PendingSingleReplace` for `driver-file-search`: this is how
+/// file-search preview replaces stay consistent with the undo
+/// chain. The `original` / `replacement` fields are the bytes the
+/// driver should write at `[match_start, match_end)`.
+///
+/// `mark` (when `Some`) carries the file-search overlay sync data:
+/// which hit's `hit_replacements` entry to toggle, in which
+/// direction.
+///
+/// Boxed by the outer enum so the `Noop` variant stays cheap.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UndoApply {
+    /// Buffer that owns the group being undone / redone.
+    pub path: CanonPath,
+    /// Pre-spliced rope reflecting the inverted (undo) / re-applied
+    /// (redo) ops. Reducer hands it to `bump()`.
+    pub new_rope: Arc<ropey::Rope>,
+    /// Cursor to write back on the tab whose path == `path`.
+    /// For undo this is the group's `cursor_before`; for redo it's
+    /// `cursor_after`. Undefined when the target buffer isn't the
+    /// active tab — the reducer guards on the active-tab path
+    /// check, so this is only consumed when relevant.
+    pub cursor: led_state_tabs::Cursor,
+    /// Set when the group's `file_search_mark.disk_write == true`:
+    /// the forward replace was a preview-tab on-disk write, so the
+    /// undo/redo must also flip the disk state via an inverse /
+    /// forward driver cmd. The reducer also bumps `saved_version`
+    /// and `disk_content_hash` in this case so the buffer stays
+    /// clean.
+    pub disk_write_pending: Option<DiskWritePending>,
+    /// Set when the group carries a `FileSearchMark`: the reducer
+    /// updates `FileSearchState.hit_replacements` and scrolls the
+    /// affected hit into view.
+    pub mark: Option<UndoMarkSync>,
+}
+
+/// Payload for the pending on-disk replace queued when an undo/redo
+/// crosses a preview-tab on-disk-write group. The reducer pushes a
+/// `PendingSingleReplace` built from these fields by combining
+/// them with the affected hit's `(line, match_start)`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DiskWritePending {
+    /// Byte length of the range on disk that the driver should
+    /// replace. The reducer combines this with the hit's
+    /// `match_start` to produce the absolute `match_end`. For
+    /// undo this is the forward-replace's inserted bytes' length;
+    /// for redo it's the original bytes' length.
+    pub match_byte_len: usize,
+    /// Bytes currently on disk that the driver should remove. For
+    /// undo this is the forward-replace's inserted bytes; for redo
+    /// this is the original bytes.
+    pub original: String,
+    /// Bytes to write in place of `original`.
+    pub replacement: String,
+}
+
+/// File-search overlay sync metadata. The reducer calls
+/// `apply_mark_to_state` with `(hit_idx, target_replaced)` and then
+/// `focus_affected_hit(hit_idx, body_rows)`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UndoMarkSync {
+    pub hit_idx: usize,
+    /// Desired post-state of `hit_replacements[hit_idx].is_some()`.
+    /// For undo, this is `!forward_marks_replaced` (we're going
+    /// backwards). For redo, it's `forward_marks_replaced`.
+    pub target_replaced: bool,
+}
+
+/// What the cross-buffer undo dispatch arm should do this tick.
+/// Pure data; the reducer in `dispatch::undo::undo_global` applies
+/// it.
+///
+/// `Noop` means "no group to undo above floor" — the dispatch
+/// arm bails without mutating anything.
+///
+/// `Apply` is the happy path; carries every field the reducer
+/// needs so it doesn't have to re-walk the history or invert the
+/// ops itself.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum UndoAction {
+    Noop,
+    Apply(Box<UndoApply>),
+}
+
+/// Mirror of [`UndoAction`] for redo. Same shape; the
+/// `cursor` payload field is `cursor_after` instead of
+/// `cursor_before`, and the rope is built by applying ops forward
+/// (not their inverses).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RedoAction {
+    Noop,
+    Apply(Box<UndoApply>),
+}
+
+/// "Given a target buffer + the current edited state, what is the
+/// reverse step of its top undo group?" Single source of truth for
+/// the rope inversion, cursor bookend, and disk_write / file-search
+/// overlay sync derivations the reducer needs.
+///
+/// `path` selects the buffer to undo. The cross-buffer overlay
+/// path passes `undo_target_path`'s output; the per-buffer path
+/// passes the active tab's path.
+///
+/// Pure: peeks via [`led_state_buffer_edits::History::peek_undo`].
+/// The reducer in `dispatch::undo::{undo_active, undo_global}`
+/// pops the group via `take_undo()` after applying the action.
+#[drv::memo(single)]
+pub fn undo_action<'b>(
+    edits: EditedBuffersInput<'b>,
+    path: &Option<CanonPath>,
+) -> UndoAction {
+    let Some(target_path) = path.as_ref() else {
+        return UndoAction::Noop;
+    };
+    let Some(eb) = edits.buffers.get(target_path) else {
+        return UndoAction::Noop;
+    };
+    let Some(group) = eb.history.peek_undo() else {
+        return UndoAction::Noop;
+    };
+    // Apply ops in reverse order, as their inverses.
+    let mut rope = (*eb.rope).clone();
+    for op in group.ops.iter().rev() {
+        match op {
+            led_state_buffer_edits::EditOp::Insert { at, text } => {
+                let len = text.chars().count();
+                rope.remove(*at..*at + len);
+            }
+            led_state_buffer_edits::EditOp::Delete { at, text } => {
+                rope.insert(*at, text);
+            }
+        }
+    }
+    let disk_write = group
+        .file_search_mark
+        .as_ref()
+        .is_some_and(|m| m.disk_write);
+    let mark = group.file_search_mark.as_ref().map(|m| UndoMarkSync {
+        hit_idx: m.hit_idx,
+        // Undo reverses the forward direction.
+        target_replaced: !m.forward_marks_replaced,
+    });
+    let disk_write_pending = if disk_write {
+        // Forward replace was Delete(orig) + Insert(repl). On disk
+        // the bytes at [match_start, match_start + repl.len()) are
+        // currently `repl`; undo writes `orig` back over them.
+        let (orig, repl) = extract_delete_insert_texts(&group.ops);
+        match (orig, repl) {
+            (Some(orig), Some(repl)) => Some(DiskWritePending {
+                // line + match_start come from the hit; filled in
+                // by the reducer (memo doesn't see FileSearchState).
+                // We carry the bytes here so the rope walk + Arc
+                // alloc happen once.
+                match_byte_len: repl.len(),
+                original: repl,
+                replacement: orig,
+            }),
+            _ => None,
+        }
+    } else {
+        None
+    };
+    UndoAction::Apply(Box::new(UndoApply {
+        path: target_path.clone(),
+        new_rope: Arc::new(rope),
+        cursor: group.cursor_before,
+        disk_write_pending,
+        mark,
+    }))
+}
+
+/// Mirror of [`undo_action`] for the redo path. Applies ops forward
+/// against the current rope and returns the post-redo state. The
+/// reducer in `dispatch::undo::{redo_active, redo_global}` pops the
+/// group from `future` via `take_redo()` after applying the action.
+#[drv::memo(single)]
+pub fn redo_action<'b>(
+    edits: EditedBuffersInput<'b>,
+    path: &Option<CanonPath>,
+) -> RedoAction {
+    let Some(target_path) = path.as_ref() else {
+        return RedoAction::Noop;
+    };
+    let Some(eb) = edits.buffers.get(target_path) else {
+        return RedoAction::Noop;
+    };
+    let Some(group) = eb.history.peek_redo() else {
+        return RedoAction::Noop;
+    };
+    let mut rope = (*eb.rope).clone();
+    for op in &group.ops {
+        match op {
+            led_state_buffer_edits::EditOp::Insert { at, text } => {
+                rope.insert(*at, text);
+            }
+            led_state_buffer_edits::EditOp::Delete { at, text } => {
+                let len = text.chars().count();
+                rope.remove(*at..*at + len);
+            }
+        }
+    }
+    let disk_write = group
+        .file_search_mark
+        .as_ref()
+        .is_some_and(|m| m.disk_write);
+    let mark = group.file_search_mark.as_ref().map(|m| UndoMarkSync {
+        hit_idx: m.hit_idx,
+        // Redo applies forward.
+        target_replaced: m.forward_marks_replaced,
+    });
+    let disk_write_pending = if disk_write {
+        // Redo writes `repl` over `orig` (the forward direction).
+        let (orig, repl) = extract_delete_insert_texts(&group.ops);
+        match (orig, repl) {
+            (Some(orig), Some(repl)) => Some(DiskWritePending {
+                match_byte_len: orig.len(),
+                original: orig,
+                replacement: repl,
+            }),
+            _ => None,
+        }
+    } else {
+        None
+    };
+    RedoAction::Apply(Box::new(UndoApply {
+        path: target_path.clone(),
+        new_rope: Arc::new(rope),
+        cursor: group.cursor_after,
+        disk_write_pending,
+        mark,
+    }))
+}
+
+/// Pull the Delete + Insert text fields off a replace group's
+/// ops. Returns (original, replacement) strings. Both `None` when
+/// the group isn't shaped as (Delete, Insert).
+fn extract_delete_insert_texts(
+    ops: &[led_state_buffer_edits::EditOp],
+) -> (Option<String>, Option<String>) {
+    let mut del: Option<String> = None;
+    let mut ins: Option<String> = None;
+    for op in ops {
+        match op {
+            led_state_buffer_edits::EditOp::Delete { text, .. } if del.is_none() => {
+                del = Some(text.to_string())
+            }
+            led_state_buffer_edits::EditOp::Insert { text, .. } if ins.is_none() => {
+                ins = Some(text.to_string())
+            }
+            _ => {}
+        }
+    }
+    (del, ins)
+}
+
 /// Payload of [`CompletionCommitPlan::Apply`]. Boxed by the
 /// outer enum so the `Dismiss` variant stays cheap and clippy's
 /// `large_enum_variant` lint is happy.

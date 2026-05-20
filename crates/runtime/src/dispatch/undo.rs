@@ -3,64 +3,55 @@
 //! Each reverses / reapplies the most recent [`EditGroup`] in the
 //! buffer's history. Cursor is restored to the captured bookend
 //! (cursor_before for undo, cursor_after for redo).
+//!
+//! The "what does the reverse step look like?" derivation lives in
+//! the [`crate::query::undo_action`] / [`crate::query::redo_action`]
+//! memos: they peek the topmost group via
+//! [`led_state_buffer_edits::History::peek_undo`], invert the ops
+//! against the current rope, and return a structured
+//! [`crate::query::UndoApply`] payload. The reducers in this module
+//! consume that payload (rope bump, cursor move, file-search overlay
+//! sync, pending driver cmd) and then pop the group from history
+//! via `take_undo` / `take_redo`.
 
 use led_core::{EditSeq, SavedVersion};
-use led_state_buffer_edits::{BufferEdits, EditOp};
+use led_state_buffer_edits::BufferEdits;
 use led_state_file_search::{FileSearchSelection, FileSearchState};
 use led_state_tabs::Tabs;
 
-use super::shared::{bump, with_active};
+use super::shared::bump;
 use crate::query::{
-    redo_target_path, undo_target_path, EditedBuffersInput,
+    redo_action, redo_target_path, undo_action, undo_target_path, EditedBuffersInput,
+    RedoAction, UndoAction, UndoApply,
 };
 
 pub(super) fn undo_active(tabs: &mut Tabs, edits: &mut BufferEdits) {
-    with_active(tabs, edits, |tab, eb| {
-        let Some(group) = eb.history.take_undo() else {
-            return;
-        };
-        // Apply ops in reverse order, as their inverses.
-        let mut rope = (*eb.rope).clone();
-        for op in group.ops.iter().rev() {
-            match op {
-                EditOp::Insert { at, text } => {
-                    let len = text.chars().count();
-                    rope.remove(*at..*at + len);
-                }
-                EditOp::Delete { at, text } => {
-                    rope.insert(*at, text);
-                }
-            }
-        }
-        bump(eb, rope);
-        tab.cursor = group.cursor_before;
-        tab.cursor.preferred_col = tab.cursor.col;
-        eb.history.push_future(group);
-    });
+    // Finalise the open group on the active tab BEFORE peeking so
+    // the user undoes what they just typed (matching the legacy
+    // contract where `take_undo` does the finalise inline). The
+    // memo path uses `peek_undo`, which does NOT finalise — so we
+    // do it explicitly here.
+    let Some(id) = tabs.active else { return };
+    let Some(idx) = tabs.open.iter().position(|t| t.id == id) else {
+        return;
+    };
+    let path = tabs.open[idx].path.clone();
+    if let Some(eb) = edits.buffers.get_mut(&path) {
+        eb.history.finalise();
+    }
+    apply_undo(tabs, edits, None, 0, Some(path));
 }
 
 pub(super) fn redo_active(tabs: &mut Tabs, edits: &mut BufferEdits) {
-    with_active(tabs, edits, |tab, eb| {
-        let Some(group) = eb.history.take_redo() else {
-            return;
-        };
-        let mut rope = (*eb.rope).clone();
-        for op in &group.ops {
-            match op {
-                EditOp::Insert { at, text } => {
-                    rope.insert(*at, text);
-                }
-                EditOp::Delete { at, text } => {
-                    let len = text.chars().count();
-                    rope.remove(*at..*at + len);
-                }
-            }
-        }
-        bump(eb, rope);
-        tab.cursor = group.cursor_after;
-        tab.cursor.preferred_col = tab.cursor.col;
-        eb.history.push_past(group);
-    });
+    let Some(id) = tabs.active else { return };
+    let Some(idx) = tabs.open.iter().position(|t| t.id == id) else {
+        return;
+    };
+    let path = tabs.open[idx].path.clone();
+    if let Some(eb) = edits.buffers.get_mut(&path) {
+        eb.history.finalise();
+    }
+    apply_redo(tabs, edits, None, 0, Some(path));
 }
 
 /// Cross-buffer undo used by the file-search overlay. Pops the
@@ -79,108 +70,16 @@ pub(super) fn undo_global(
     floor: EditSeq,
     body_rows: usize,
 ) {
-    let Some(target_path) = undo_target_path(EditedBuffersInput::new(edits), floor) else {
-        return;
-    };
-    // Pop the group, apply the rope inverse, pin saved_version
-    // when the group came from a preview (disk_write). Collect
-    // what we need (cursor_before, replacement bytes) BEFORE
-    // releasing the &mut eb so the later push into
-    // pending_single_replace can take its own &mut edits.
-    let (group, cursor_before, replacement_bytes, disk_write) = {
-        let Some(eb) = edits.buffers.get_mut(&target_path) else {
-            return;
-        };
-        let Some(group) = eb.history.take_undo() else {
-            return;
-        };
-        let mut rope = (*eb.rope).clone();
-        for op in group.ops.iter().rev() {
-            match op {
-                EditOp::Insert { at, text } => {
-                    let len = text.chars().count();
-                    rope.remove(*at..*at + len);
-                }
-                EditOp::Delete { at, text } => {
-                    rope.insert(*at, text);
-                }
-            }
-        }
-        bump(eb, rope);
-        let disk_write = group
-            .file_search_mark
-            .as_ref()
-            .is_some_and(|m| m.disk_write);
-        if disk_write {
-            eb.saved_version = SavedVersion(eb.version.0);
-            eb.disk_content_hash =
-                led_core::EphemeralContentHash::of_rope(&eb.rope).persist();
-        }
-        // Replacement bytes (Insert op's text length) for the
-        // inverse driver cmd's match range.
-        let replacement_bytes = group
-            .ops
-            .iter()
-            .find_map(|op| match op {
-                EditOp::Insert { text, .. } => Some(text.len()),
-                _ => None,
-            })
-            .unwrap_or(0);
-        let cursor_before = group.cursor_before;
-        (group, cursor_before, replacement_bytes, disk_write)
-    };
-
-    // Cursor-follow when the undone buffer is the active tab.
-    if let Some(active_id) = tabs.active
-        && let Some(tab) = tabs.open.iter_mut().find(|t| t.id == active_id)
-        && tab.path == target_path
-    {
-        tab.cursor = cursor_before;
-        tab.cursor.preferred_col = tab.cursor.col;
-    }
-
-    // Overlay sync + inverse driver cmd for disk_write groups.
-    if let (Some(mark), Some(state)) = (&group.file_search_mark, file_search) {
-        apply_mark_to_state(state, mark.hit_idx, !mark.forward_marks_replaced);
-        focus_affected_hit(state, mark.hit_idx, body_rows);
-        if disk_write
-            && let Some(hit) = state.flat_hits.get(mark.hit_idx).cloned()
-        {
-            let (orig, repl) = extract_delete_insert_texts(&group.ops);
-            if let (Some(orig), Some(repl)) = (orig, repl) {
-                edits.pending_single_replace.push(
-                    led_state_buffer_edits::PendingSingleReplace {
-                        path: target_path.clone(),
-                        line: hit.line,
-                        match_start: hit.match_start,
-                        match_end: hit.match_start + replacement_bytes,
-                        original: repl,
-                        replacement: orig,
-                    },
-                );
-            }
-        }
-    }
-
-    if let Some(eb) = edits.buffers.get_mut(&target_path) {
-        eb.history.push_future(group);
-    }
-}
-
-/// Pull the Delete + Insert text fields off a replace group's
-/// ops. Returns (original, replacement) strings. Both `None` when
-/// the group isn't shaped as (Delete, Insert).
-fn extract_delete_insert_texts(ops: &[EditOp]) -> (Option<String>, Option<String>) {
-    let mut del: Option<String> = None;
-    let mut ins: Option<String> = None;
-    for op in ops {
-        match op {
-            EditOp::Delete { text, .. } if del.is_none() => del = Some(text.to_string()),
-            EditOp::Insert { text, .. } if ins.is_none() => ins = Some(text.to_string()),
-            _ => {}
-        }
-    }
-    (del, ins)
+    // Finalise every buffer's open current group so the seq picker
+    // sees a stable top-of-past. Without this, an in-flight
+    // typing-group on some buffer would get an unstamped seq=0
+    // (skipped by undo_target_path) but then immediately
+    // finalised + popped by the later take_undo call — the memo
+    // would have peeked at a different group than the one that
+    // actually gets popped.
+    finalise_all(edits);
+    let target = undo_target_path(EditedBuffersInput::new(edits), floor);
+    apply_undo(tabs, edits, file_search, body_rows, target);
 }
 
 /// Cross-buffer redo mirror of `undo_global`. Uses the
@@ -192,83 +91,133 @@ pub(super) fn redo_global(
     floor: EditSeq,
     body_rows: usize,
 ) {
-    let Some(target_path) = redo_target_path(EditedBuffersInput::new(edits), floor) else {
+    // See [`undo_global`] for the rationale; redo's take_redo also
+    // defensively finalises, so we mirror it here for symmetry.
+    finalise_all(edits);
+    let target = redo_target_path(EditedBuffersInput::new(edits), floor);
+    apply_redo(tabs, edits, file_search, body_rows, target);
+}
+
+/// Close every buffer's open `current` group into `past` before
+/// the seq-picker memo runs. `imbl::HashMap` doesn't expose
+/// `values_mut`, so we walk the keys + `get_mut` per entry.
+fn finalise_all(edits: &mut BufferEdits) {
+    let paths: Vec<led_core::CanonPath> = edits.buffers.keys().cloned().collect();
+    for path in paths {
+        if let Some(eb) = edits.buffers.get_mut(&path) {
+            eb.history.finalise();
+        }
+    }
+}
+
+/// Read the [`crate::query::undo_action`] memo for `target_path`
+/// and apply its payload. Pure assignment: rope swap, cursor
+/// follow, file-search overlay sync, queued driver cmd, then pop
+/// the group from `past` into `future`.
+fn apply_undo(
+    tabs: &mut Tabs,
+    edits: &mut BufferEdits,
+    file_search: Option<&mut FileSearchState>,
+    body_rows: usize,
+    target_path: Option<led_core::CanonPath>,
+) {
+    let action = undo_action(EditedBuffersInput::new(edits), &target_path);
+    let UndoAction::Apply(apply) = action else {
         return;
     };
-    let (group, cursor_after, original_bytes, disk_write) = {
+    apply_action_payload(tabs, edits, file_search, body_rows, *apply, UndoDir::Undo);
+}
+
+/// Mirror of [`apply_undo`] for the redo direction.
+fn apply_redo(
+    tabs: &mut Tabs,
+    edits: &mut BufferEdits,
+    file_search: Option<&mut FileSearchState>,
+    body_rows: usize,
+    target_path: Option<led_core::CanonPath>,
+) {
+    let action = redo_action(EditedBuffersInput::new(edits), &target_path);
+    let RedoAction::Apply(apply) = action else {
+        return;
+    };
+    apply_action_payload(tabs, edits, file_search, body_rows, *apply, UndoDir::Redo);
+}
+
+#[derive(Copy, Clone)]
+enum UndoDir {
+    Undo,
+    Redo,
+}
+
+/// Shared reducer body for undo + redo. The memo computes the
+/// payload; this fn just writes the new state.
+fn apply_action_payload(
+    tabs: &mut Tabs,
+    edits: &mut BufferEdits,
+    file_search: Option<&mut FileSearchState>,
+    body_rows: usize,
+    apply: UndoApply,
+    dir: UndoDir,
+) {
+    let target_path = apply.path.clone();
+    // Mutate the buffer: rope bump, optional disk-anchor refresh
+    // for preview disk_write groups.
+    {
         let Some(eb) = edits.buffers.get_mut(&target_path) else {
             return;
         };
-        let Some(group) = eb.history.take_redo() else {
-            return;
-        };
-        let mut rope = (*eb.rope).clone();
-        for op in &group.ops {
-            match op {
-                EditOp::Insert { at, text } => {
-                    rope.insert(*at, text);
-                }
-                EditOp::Delete { at, text } => {
-                    let len = text.chars().count();
-                    rope.remove(*at..*at + len);
-                }
-            }
-        }
-        bump(eb, rope);
-        let disk_write = group
-            .file_search_mark
-            .as_ref()
-            .is_some_and(|m| m.disk_write);
-        if disk_write {
+        bump(eb, (*apply.new_rope).clone());
+        if apply.disk_write_pending.is_some() {
             eb.saved_version = SavedVersion(eb.version.0);
             eb.disk_content_hash =
                 led_core::EphemeralContentHash::of_rope(&eb.rope).persist();
         }
-        let original_bytes = group
-            .ops
-            .iter()
-            .find_map(|op| match op {
-                EditOp::Delete { text, .. } => Some(text.len()),
-                _ => None,
-            })
-            .unwrap_or(0);
-        let cursor_after = group.cursor_after;
-        (group, cursor_after, original_bytes, disk_write)
-    };
+    }
 
+    // Cursor-follow when the affected buffer is the active tab.
     if let Some(active_id) = tabs.active
         && let Some(tab) = tabs.open.iter_mut().find(|t| t.id == active_id)
         && tab.path == target_path
     {
-        tab.cursor = cursor_after;
+        tab.cursor = apply.cursor;
         tab.cursor.preferred_col = tab.cursor.col;
     }
-    if let (Some(mark), Some(state)) = (&group.file_search_mark, file_search) {
-        apply_mark_to_state(state, mark.hit_idx, mark.forward_marks_replaced);
+
+    // File-search overlay sync + inverse / forward driver cmd for
+    // disk_write groups.
+    if let (Some(mark), Some(state)) = (&apply.mark, file_search) {
+        apply_mark_to_state(state, mark.hit_idx, mark.target_replaced);
         focus_affected_hit(state, mark.hit_idx, body_rows);
-        if disk_write
+        if let Some(pending) = apply.disk_write_pending.as_ref()
             && let Some(hit) = state.flat_hits.get(mark.hit_idx).cloned()
         {
-            let (orig, repl) = extract_delete_insert_texts(&group.ops);
-            if let (Some(orig), Some(repl)) = (orig, repl) {
-                // Forward again: replace `orig` bytes
-                // [hit.match_start..match_start + orig.len()]
-                // with `repl`.
-                edits.pending_single_replace.push(
-                    led_state_buffer_edits::PendingSingleReplace {
-                        path: target_path.clone(),
-                        line: hit.line,
-                        match_start: hit.match_start,
-                        match_end: hit.match_start + original_bytes,
-                        original: orig,
-                        replacement: repl,
-                    },
-                );
-            }
+            edits
+                .pending_single_replace
+                .push(led_state_buffer_edits::PendingSingleReplace {
+                    path: target_path.clone(),
+                    line: hit.line,
+                    match_start: hit.match_start,
+                    match_end: hit.match_start + pending.match_byte_len,
+                    original: pending.original.clone(),
+                    replacement: pending.replacement.clone(),
+                });
         }
     }
+
+    // Pop the group + transfer to the other stack. The memo
+    // peeked at exactly the group we're popping here, so the data
+    // we just applied IS this group's reverse / forward step.
     if let Some(eb) = edits.buffers.get_mut(&target_path) {
-        eb.history.push_past(group);
+        let popped = match dir {
+            UndoDir::Undo => eb.history.take_undo(),
+            UndoDir::Redo => eb.history.take_redo(),
+        };
+        if let Some(group) = popped {
+            match dir {
+                UndoDir::Undo => eb.history.push_future(group),
+                UndoDir::Redo => eb.history.push_past(group),
+            }
+        }
     }
 }
 
