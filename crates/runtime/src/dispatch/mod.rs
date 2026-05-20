@@ -1281,6 +1281,42 @@ impl<'a> Dispatcher<'a> {
     /// the command match. Still recurses through `run_command`
     /// per inner command — the recursion is what carries quit /
     /// suspend / kbd-macro-execute through to legacy parity.
+    ///
+    /// **Why this isn't a driver.** The audit (`ARCH-WRONG.md`,
+    /// Theme F Priority 7) flagged playback as a candidate for a
+    /// "kbd-macro driver" along the lines of `driver-find-file` /
+    /// `driver-file-search`. After review the driver shape was
+    /// rejected as ceremony without translation faithfulness:
+    ///
+    /// 1. **No async work.** Every existing `driver-*/native/`
+    ///    sits on std::thread + std::sync::mpsc because it owns
+    ///    a platform handle (FSEvents, LSP stdio, libgit2, the
+    ///    clipboard, etc.). Macro playback is pure in-memory
+    ///    iteration over `Arc<Vec<Command>>` — there is nothing
+    ///    to delegate off the dispatcher thread.
+    /// 2. **Splitting playback across ticks changes semantics.**
+    ///    A queue-based driver would push recorded commands into
+    ///    `terminal.pending` one tick at a time. That lets the
+    ///    paint pass run between recorded commands (the user
+    ///    would see the macro animate) and lets real keystrokes
+    ///    interleave with replayed ones — both are observable
+    ///    legacy-parity divergences, not cleanup.
+    /// 3. **The recursion is the spec.** "Macro that records
+    ///    itself executing another macro" (Emacs `Ctrl-x e`
+    ///    during recording) is legal; the `playback_depth < 100`
+    ///    guard mirrors `legacy led/src/model/action/mod.rs:278`
+    ///    exactly. A queue model would replace depth with a
+    ///    queue-size cap — a different invariant.
+    /// 4. **The reducer-purity win already landed.** The
+    ///    `KbdMacroExecute` match arm is a single line and the
+    ///    two nested loops live behind `run_recorded`, so the
+    ///    surface that the audit objected to (mega-reducer
+    ///    branch) is already gone.
+    ///
+    /// Per the user-memory rule "Never simplify, inline, or
+    /// restructure the user's architecture. Translate
+    /// faithfully", the driver wrapper is the wrong abstraction
+    /// here and the deferred item is closed.
     fn replay_macro(&mut self) -> DispatchOutcome {
         // Recursion guard: depth >= 100 surfaces an alert and
         // aborts further playback up the stack (legacy
