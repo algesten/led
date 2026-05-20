@@ -26,6 +26,7 @@
 //! (chord resolution, implicit-insert gating, quit chord, abort).
 
 mod browser;
+mod chat;
 mod code_actions;
 #[path = "completions.rs"]
 mod completions_overlay;
@@ -169,6 +170,16 @@ pub struct Dispatcher<'a> {
     /// `current` buffer, last completed macro, recursion depth,
     /// pending iteration count.
     pub kbd_macro: &'a mut KbdMacroState,
+    /// Per chat-buffer path → session metadata. Dispatch mutates
+    /// this on `NewChat` (inserts a new mapping) and `ChatSubmit`
+    /// (advances `submit_offset` / `response_anchor`). Other code
+    /// paths (e.g. the chat phase) re-seed entries for chat tabs
+    /// that came back from session restore.
+    pub chat_sessions: &'a mut led_state_chat::ChatSessions,
+    /// Per-session overrides + the pending-send queue. Dispatch
+    /// pushes onto the queue on `ChatSubmit`; the claude_phase's
+    /// `subprocess_action` memo drains it.
+    pub chat_prefs: &'a mut led_state_chat::ChatPrefs,
     /// M23: per-buffer parse trees. Read-only here — the syntax
     /// driver populates `Sources.syntax` in the ingest phase; the
     /// `InsertTab`, `InsertNewline` (auto-indent), and
@@ -231,6 +242,11 @@ impl<'a> Dispatcher<'a> {
             // runs its normal binding / implicit-insert behaviour.
         }
 
+        let chat_focused = self
+            .tabs
+            .active
+            .and_then(|id| self.tabs.open.iter().find(|t| t.id == id))
+            .is_some_and(|t| self.chat_sessions.is_chat(&t.path));
         let resolved = resolve_command(
             k,
             self.keymap,
@@ -238,6 +254,7 @@ impl<'a> Dispatcher<'a> {
             self.browser.focus == Focus::Side,
             self.find_file.is_some(),
             self.file_search.is_some(),
+            chat_focused,
         );
         match resolved {
             Resolved::Command(cmd) => {
@@ -518,6 +535,7 @@ fn resolve_command(
     browser_focused: bool,
     find_file_active: bool,
     file_search_active: bool,
+    chat_focused: bool,
 ) -> Resolved {
     // M22 — Macro repeat-mode short-circuit. The moment a
     // `KbdMacroExecute` resolves, `chord.macro_repeat` flips
@@ -565,6 +583,14 @@ fn resolve_command(
     // mutually exclusive — the overlay runs with main-pane focus.
     if find_file_active
         && let Some(cmd) = keymap.lookup_find_file(&k)
+    {
+        return Resolved::Command(cmd);
+    }
+    // Chat-tab overlay: when the active tab is a chat buffer,
+    // chat-context bindings shadow the global direct table so e.g.
+    // `Alt+Enter` submits instead of triggering LSP goto-def.
+    if chat_focused
+        && let Some(cmd) = keymap.lookup_chat(&k)
     {
         return Resolved::Command(cmd);
     }
@@ -1253,14 +1279,35 @@ impl<'a> Dispatcher<'a> {
                 // without changing the variant.
                 DispatchOutcome::Continue
             }
-            Command::FindChat => {
-                // C-x C-r — open the "Find chat:" picker modal.
-                // The modal source + render driver land in a
-                // later stage; binding lives now so users can
-                // discover the key. The runtime memos for
-                // picker items (`chat_picker_items`) and chat
-                // tab view (`chat_tab_view`) are already in
-                // place in `runtime/src/query/claude.rs`.
+            Command::FindChat | Command::NewChat => {
+                // C-x C-r / C-x C-t — until the picker overlay
+                // lands, both bindings mint a fresh chat tab. The
+                // picker dispatch + render are next-stage work;
+                // for now users get the new-chat fast path on
+                // either chord.
+                chat::new_chat(
+                    self.tabs,
+                    self.edits,
+                    self.chat_sessions,
+                    self.chat_prefs,
+                    self.alerts,
+                    self.clock,
+                );
+                DispatchOutcome::Continue
+            }
+            Command::ChatToggleFocus | Command::ChatSend => {
+                // Legacy stubs — kept reachable so older keymaps
+                // don't break, but no-ops while the editor lives
+                // inside the chat buffer.
+                DispatchOutcome::Continue
+            }
+            Command::ChatSubmit => {
+                chat::submit(
+                    self.tabs,
+                    self.edits,
+                    self.chat_sessions,
+                    self.chat_prefs,
+                );
                 DispatchOutcome::Continue
             }
         };
@@ -1531,6 +1578,8 @@ mod tests {
         let keymap = default_keymap();
         let mut chord = ChordState::default();
         let mut kbd_macro = led_state_kbd_macro::KbdMacroState::default();
+        let mut chat_sessions = led_state_chat::ChatSessions::default();
+        let mut chat_prefs = led_state_chat::ChatPrefs::default();
         let mut path_chains = std::collections::HashMap::new();
         let mut completions = CompletionsState::default();
         let mut completions_pending = led_state_completions::CompletionsPending::default();
@@ -1571,6 +1620,8 @@ mod tests {
             keymap: &keymap,
             chord: &mut chord,
             kbd_macro: &mut kbd_macro,
+            chat_sessions: &mut chat_sessions,
+            chat_prefs: &mut chat_prefs,
             syntax: &syntax,
             clock: &clock,
         };
@@ -1604,6 +1655,8 @@ mod tests {
         let keymap = default_keymap();
         let mut chord = ChordState::default();
         let mut kbd_macro = led_state_kbd_macro::KbdMacroState::default();
+        let mut chat_sessions = led_state_chat::ChatSessions::default();
+        let mut chat_prefs = led_state_chat::ChatPrefs::default();
         let mut kill_ring = KillRing::default();
         let mut clip = ClipboardIntent::default();
         let clipboard_driver = led_driver_clipboard_core::ClipboardState::default();
@@ -1651,6 +1704,8 @@ mod tests {
                 keymap: &keymap,
                 chord: &mut chord,
                 kbd_macro: &mut kbd_macro,
+                chat_sessions: &mut chat_sessions,
+                chat_prefs: &mut chat_prefs,
                 syntax: &syntax,
                 clock: &clock,
             };
@@ -1682,6 +1737,8 @@ mod tests {
         km.bind("ctrl+q", Command::Quit);
         let mut chord = ChordState::default();
         let mut kbd_macro = led_state_kbd_macro::KbdMacroState::default();
+        let mut chat_sessions = led_state_chat::ChatSessions::default();
+        let mut chat_prefs = led_state_chat::ChatPrefs::default();
         let mut kill_ring = KillRing::default();
         let mut clip = ClipboardIntent::default();
         let clipboard_driver = led_driver_clipboard_core::ClipboardState::default();
@@ -1729,6 +1786,8 @@ mod tests {
             keymap: &km,
             chord: &mut chord,
             kbd_macro: &mut kbd_macro,
+            chat_sessions: &mut chat_sessions,
+            chat_prefs: &mut chat_prefs,
             syntax: &syntax,
             clock: &clock,
         };
@@ -1753,6 +1812,8 @@ mod tests {
         let km = crate::keymap::default_keymap();
         let mut chord = ChordState::default();
         let mut kbd_macro = led_state_kbd_macro::KbdMacroState::default();
+        let mut chat_sessions = led_state_chat::ChatSessions::default();
+        let mut chat_prefs = led_state_chat::ChatPrefs::default();
         let mut kill_ring = KillRing::default();
         let mut clip = ClipboardIntent::default();
         let clipboard_driver = led_driver_clipboard_core::ClipboardState::default();
@@ -1800,6 +1861,8 @@ mod tests {
             keymap: &km,
             chord: &mut chord,
             kbd_macro: &mut kbd_macro,
+            chat_sessions: &mut chat_sessions,
+            chat_prefs: &mut chat_prefs,
             syntax: &syntax,
             clock: &clock,
         };
@@ -1817,6 +1880,8 @@ mod tests {
         let km = Keymap::empty(); // no bindings at all
         let mut chord = ChordState::default();
         let mut kbd_macro = led_state_kbd_macro::KbdMacroState::default();
+        let mut chat_sessions = led_state_chat::ChatSessions::default();
+        let mut chat_prefs = led_state_chat::ChatPrefs::default();
         let mut kill_ring = KillRing::default();
         let mut clip = ClipboardIntent::default();
         let clipboard_driver = led_driver_clipboard_core::ClipboardState::default();
@@ -1864,6 +1929,8 @@ mod tests {
                 keymap: &km,
                 chord: &mut chord,
                 kbd_macro: &mut kbd_macro,
+                chat_sessions: &mut chat_sessions,
+                chat_prefs: &mut chat_prefs,
                 syntax: &syntax,
                 clock: &clock,
             };
@@ -1883,6 +1950,8 @@ mod tests {
         let km = Keymap::empty();
         let mut chord = ChordState::default();
         let mut kbd_macro = led_state_kbd_macro::KbdMacroState::default();
+        let mut chat_sessions = led_state_chat::ChatSessions::default();
+        let mut chat_prefs = led_state_chat::ChatPrefs::default();
         let mut kill_ring = KillRing::default();
         let mut clip = ClipboardIntent::default();
         let clipboard_driver = led_driver_clipboard_core::ClipboardState::default();
@@ -1930,6 +1999,8 @@ mod tests {
                 keymap: &km,
                 chord: &mut chord,
                 kbd_macro: &mut kbd_macro,
+                chat_sessions: &mut chat_sessions,
+                chat_prefs: &mut chat_prefs,
                 syntax: &syntax,
                 clock: &clock,
             };
@@ -2010,6 +2081,8 @@ mod tests {
         let mut completions_pending = led_state_completions::CompletionsPending::default();
         let mut chord = ChordState::default();
         let mut kbd_macro = led_state_kbd_macro::KbdMacroState::default();
+        let mut chat_sessions = led_state_chat::ChatSessions::default();
+        let mut chat_prefs = led_state_chat::ChatPrefs::default();
         let mut kr = KillRing::default();
         let mut clip = ClipboardIntent::default();
         let clipboard_driver = led_driver_clipboard_core::ClipboardState::default();
@@ -2061,6 +2134,8 @@ mod tests {
                 keymap: &km,
                 chord: &mut chord,
                 kbd_macro: &mut kbd_macro,
+                chat_sessions: &mut chat_sessions,
+                chat_prefs: &mut chat_prefs,
                 syntax: &syntax,
                 clock: &clock,
             };
@@ -2087,6 +2162,8 @@ mod tests {
         let mut completions_pending = led_state_completions::CompletionsPending::default();
         let mut chord = ChordState::default();
         let mut kbd_macro = led_state_kbd_macro::KbdMacroState::default();
+        let mut chat_sessions = led_state_chat::ChatSessions::default();
+        let mut chat_prefs = led_state_chat::ChatPrefs::default();
         let mut kr = KillRing::default();
         let mut clip = ClipboardIntent::default();
         let clipboard_driver = led_driver_clipboard_core::ClipboardState::default();
@@ -2131,6 +2208,8 @@ mod tests {
                 keymap: &km,
                 chord: &mut chord,
                 kbd_macro: &mut kbd_macro,
+                chat_sessions: &mut chat_sessions,
+                chat_prefs: &mut chat_prefs,
                 syntax: &syntax,
                 clock: &clock,
             };

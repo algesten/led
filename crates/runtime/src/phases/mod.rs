@@ -18,6 +18,7 @@ use crate::keymap::Keymap;
 use crate::trace::SharedTrace;
 use crate::{Drivers, Wake};
 
+pub(crate) mod claude_phase;
 pub(crate) mod dispatch_phase;
 pub(crate) mod execute_phase;
 pub(crate) mod file_watch_dispatch;

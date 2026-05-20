@@ -384,6 +384,8 @@ mod tests {
         km.bind("ctrl+y", Command::Redo); // override Yank for test
         let mut chord = ChordState::default();
         let mut kbd_macro = led_state_kbd_macro::KbdMacroState::default();
+        let mut chat_sessions = led_state_chat::ChatSessions::default();
+        let mut chat_prefs = led_state_chat::ChatPrefs::default();
         let mut kr = KillRing::default();
         let mut clip = ClipboardIntent::default();
         let clipboard_driver = led_driver_clipboard_core::ClipboardState::default();
@@ -432,6 +434,8 @@ mod tests {
                 keymap: &km,
                 chord: &mut chord,
                 kbd_macro: &mut kbd_macro,
+                chat_sessions: &mut chat_sessions,
+                chat_prefs: &mut chat_prefs,
                 syntax: &syntax,
                 clock: &clock,
             };
@@ -503,6 +507,8 @@ mod tests {
         km.bind("ctrl+y", Command::Redo);
         let mut chord = ChordState::default();
         let mut kbd_macro = led_state_kbd_macro::KbdMacroState::default();
+        let mut chat_sessions = led_state_chat::ChatSessions::default();
+        let mut chat_prefs = led_state_chat::ChatPrefs::default();
         let mut kr = KillRing::default();
         let mut clip = ClipboardIntent::default();
         let clipboard_driver = led_driver_clipboard_core::ClipboardState::default();
@@ -550,6 +556,8 @@ mod tests {
                 keymap: &km,
                 chord: &mut chord,
                 kbd_macro: &mut kbd_macro,
+                chat_sessions: &mut chat_sessions,
+                chat_prefs: &mut chat_prefs,
                 syntax: &syntax,
                 clock: &clock,
             };

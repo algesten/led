@@ -1,93 +1,36 @@
-//! User-decision source for Claude chats.
+//! User-decision sources for Claude chats.
 //!
-//! Three maps keyed by [`SessionUuid`]:
+//! - [`ChatPrefs`]: per-session Effort / PermissionMode overrides and
+//!   the queue of user messages ready to ship to the subprocess. The
+//!   runtime's `subprocess_action` memo drains the queue when the
+//!   corresponding session is Running, one per turn (the CLI's
+//!   stream-json input expects one user message at a time per
+//!   session).
+//! - [`ChatSessions`]: the binding between a chat-buffer path (the
+//!   synthetic `<uuid>.chat` file backing the editor view of a chat)
+//!   and its session UUID + per-path offsets that track where the
+//!   user is typing vs. where assistant replies splice in.
 //!
-//! - [`ChatPrefs::overrides`]: per-session Effort / PermissionMode
-//!   overrides. `None` on either field means "use driver defaults"
-//!   (xhigh / auto). Stored here rather than on `ChatStore` because
-//!   the source-of-truth for *user choices* is the user-decision
-//!   tier; `ChatStore` persists them so they survive restart.
-//! - [`ChatPrefs::composer_text`]: the text the user is currently
-//!   typing in each chat tab's composer. Cleared on Send.
-//! - [`ChatPrefs::pending_sends`]: queue of user messages ready to
-//!   ship to the subprocess. The runtime's `subprocess_action`
-//!   memo drains this when the corresponding session is Running,
-//!   one per turn (the CLI's stream-json input expects one user
-//!   message at a time per session).
-//!
-//! No driver per EXAMPLE-ARCH §User-decision sources have no
-//! driver; dispatch in the runtime mutates these maps directly
-//! when the user types, presses Send, picks a new chat, etc.
+//! No driver — per EXAMPLE-ARCH §User-decision sources have no
+//! driver; dispatch in the runtime mutates these maps directly when
+//! the user types, presses Send, picks a new chat, etc.
 
-use imbl::{HashMap, Vector};
+use std::collections::HashMap;
 
-use led_core::{Effort, PermissionMode, SessionUuid};
+use imbl::{HashMap as IHashMap, Vector};
 
-// ── Open chat tabs ──────────────────────────────────────────────────
+use led_core::{CanonPath, Effort, PermissionMode, SessionUuid};
 
-/// Which chat sessions are currently "open as tabs" and which one
-/// is focused.
-///
-/// Sibling to the existing `Tabs` source (file tabs) rather than
-/// folded into it — see PR description for the trade-off.
-///
-/// Backed by `imbl::Vector` so the runtime's `subprocess_action`
-/// memo can take a `#[drv::input]` projection over it without
-/// the `ToStatic` bounds that std collections fail.
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct ChatTabs {
-    /// Open chat sessions in tab-strip order.
-    pub open: Vector<SessionUuid>,
-    /// Currently focused chat tab. `None` ⇒ no chat tab focused
-    /// (file tab might be focused instead, or no tabs at all).
-    pub focused: Option<SessionUuid>,
-}
-
-impl ChatTabs {
-    /// Open `uuid` as a new chat tab if not already open;
-    /// focus it either way. Idempotent.
-    pub fn open_or_focus(&mut self, uuid: SessionUuid) {
-        if !self.open.iter().any(|u| u == &uuid) {
-            self.open.push_back(uuid.clone());
-        }
-        self.focused = Some(uuid);
-    }
-
-    /// Close `uuid`. If it was focused, focus the next open
-    /// chat (preferring the one to the right, falling back to
-    /// the left). Returns `true` if `uuid` was open.
-    pub fn close(&mut self, uuid: &SessionUuid) -> bool {
-        let Some(idx) = self.open.iter().position(|u| u == uuid) else {
-            return false;
-        };
-        self.open.remove(idx);
-        if self.focused.as_ref() == Some(uuid) {
-            self.focused = self
-                .open
-                .get(idx)
-                .cloned()
-                .or_else(|| idx.checked_sub(1).and_then(|i| self.open.get(i).cloned()));
-        }
-        true
-    }
-
-    /// True if `uuid` is currently in the open tab strip.
-    pub fn is_open(&self, uuid: &SessionUuid) -> bool {
-        self.open.iter().any(|u| u == uuid)
-    }
-}
-
-// ── Per-session prefs / composer / pending sends ────────────────────
+// ── Per-session prefs / pending sends ────────────────────────────────
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ChatPrefs {
-    pub overrides: HashMap<SessionUuid, SessionOverrides>,
-    pub composer_text: HashMap<SessionUuid, String>,
-    pub pending_sends: HashMap<SessionUuid, Vector<String>>,
+    pub overrides: IHashMap<SessionUuid, SessionOverrides>,
+    pub pending_sends: IHashMap<SessionUuid, Vector<String>>,
 }
 
-/// Per-session override of the driver-wide defaults. `None` on
-/// a field means "fall through to default" (`Effort::XHigh` /
+/// Per-session override of the driver-wide defaults. `None` on a
+/// field means "fall through to default" (`Effort::XHigh` /
 /// `PermissionMode::Auto`).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct SessionOverrides {
@@ -96,8 +39,8 @@ pub struct SessionOverrides {
 }
 
 impl ChatPrefs {
-    /// Resolve the effort to use for a session — override, or
-    /// driver default if no override is set.
+    /// Resolve the effort to use for a session — override, or driver
+    /// default if no override is set.
     pub fn effort_for(&self, uuid: &SessionUuid) -> Effort {
         self.overrides
             .get(uuid)
@@ -113,20 +56,19 @@ impl ChatPrefs {
             .unwrap_or_default()
     }
 
-    /// Enqueue a user message for a session and clear the
-    /// composer for that session. Called from dispatch on Send.
+    /// Enqueue a user message for a session. Called from dispatch on
+    /// Submit.
     pub fn queue_send(&mut self, uuid: SessionUuid, text: String) {
-        self.composer_text.remove(&uuid);
         self.pending_sends.entry(uuid).or_default().push_back(text);
     }
 
-    /// Pop the next pending message for a session. Called from
-    /// the runtime's subprocess_action memo when the session is
-    /// Running and free to receive another turn.
+    /// Pop the next pending message for a session. Called from the
+    /// runtime's subprocess_action memo when the session is Running
+    /// and free to receive another turn.
     ///
-    /// Returns `None` if the queue is empty (or doesn't exist).
-    /// Empty queues are cleaned up so iteration over
-    /// `pending_sends` doesn't see ghosts.
+    /// Returns `None` if the queue is empty (or doesn't exist). Empty
+    /// queues are cleaned up so iteration over `pending_sends`
+    /// doesn't see ghosts.
     pub fn pop_pending(&mut self, uuid: &SessionUuid) -> Option<String> {
         let q = self.pending_sends.get_mut(uuid)?;
         let item = q.pop_front();
@@ -136,14 +78,82 @@ impl ChatPrefs {
         item
     }
 
-    /// True if `uuid` has at least one queued message ready to
-    /// send. Used by `subprocess_action` to decide whether to
-    /// emit a `UserMessage` action this iteration.
+    /// True if `uuid` has at least one queued message ready to send.
+    /// Used by `subprocess_action` to decide whether to emit a
+    /// `UserMessage` action this iteration.
     pub fn has_pending(&self, uuid: &SessionUuid) -> bool {
         self.pending_sends
             .get(uuid)
             .map(|q| !q.is_empty())
             .unwrap_or(false)
+    }
+}
+
+// ── Chat sessions (path → session metadata) ──────────────────────────
+
+/// Per chat-buffer path metadata. Tracks the session UUID, the
+/// rope-character offsets that separate "already submitted" from
+/// "user is still typing", the splice anchor for in-flight responses,
+/// and the watermark on the timeline event log so each event is
+/// rendered exactly once.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ChatSessionState {
+    pub session: SessionUuid,
+    /// Character offset where the next user submission begins.
+    /// Everything before it is already-submitted history.
+    pub submit_offset: usize,
+    /// Character offset where the next assistant-driven splice
+    /// inserts. Parked at end-of-rope after a submit; advanced past
+    /// each spliced chunk so subsequent events stack in order.
+    pub response_anchor: usize,
+    /// Each `(start, end)` pair is the rope-char range of a single
+    /// user submission, recorded BEFORE the trailing pad/separator.
+    /// Used by future colouring logic; mutated as splices shift
+    /// later ranges.
+    pub user_ranges: Vec<(usize, usize)>,
+    /// Watermark into `ChatTranscripts.per_session[uuid].events`.
+    /// `pending_chat_splices` skips events `[0, last_synced_event)`
+    /// when computing the next splice batch.
+    pub last_synced_event: usize,
+}
+
+/// Map from chat-buffer path → session metadata. Process-local —
+/// the session DB only restores `Tabs` + `EditedBuffers`; the chat
+/// path → uuid reseed happens in the chat phase's `execute` pass.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ChatSessions {
+    pub by_path: HashMap<CanonPath, ChatSessionState>,
+}
+
+impl ChatSessions {
+    /// Register `path` as a chat buffer bound to `session`. Offsets
+    /// start at 0; the caller (e.g. the reseed pass) may park them
+    /// at end-of-rope afterwards.
+    pub fn insert(&mut self, path: CanonPath, session: SessionUuid) {
+        self.by_path.insert(
+            path,
+            ChatSessionState {
+                session,
+                ..Default::default()
+            },
+        );
+    }
+
+    pub fn get(&self, path: &CanonPath) -> Option<&ChatSessionState> {
+        self.by_path.get(path)
+    }
+
+    pub fn get_mut(&mut self, path: &CanonPath) -> Option<&mut ChatSessionState> {
+        self.by_path.get_mut(path)
+    }
+
+    pub fn remove(&mut self, path: &CanonPath) -> Option<ChatSessionState> {
+        self.by_path.remove(path)
+    }
+
+    /// True if `path` is registered as a chat-buffer path.
+    pub fn is_chat(&self, path: &CanonPath) -> bool {
+        self.by_path.contains_key(path)
     }
 }
 
@@ -191,14 +201,11 @@ mod tests {
     }
 
     #[test]
-    fn queue_send_clears_composer_and_appends_to_queue() {
+    fn queue_send_appends_to_queue() {
         let mut prefs = ChatPrefs::default();
-        prefs.composer_text.insert(u(), "draft".into());
-
         prefs.queue_send(u(), "first".into());
         prefs.queue_send(u(), "second".into());
 
-        assert!(!prefs.composer_text.contains_key(&u()));
         assert_eq!(prefs.pending_sends[&u()].len(), 2);
         assert_eq!(prefs.pending_sends[&u()][0], "first");
         assert_eq!(prefs.pending_sends[&u()][1], "second");
@@ -226,83 +233,31 @@ mod tests {
         assert!(!prefs.has_pending(&u()));
     }
 
-    // ── ChatTabs ──────────────────────────────────────────────────
+    // ── ChatSessions ─────────────────────────────────────────────
 
-    #[test]
-    fn open_or_focus_appends_and_focuses_new_uuid() {
-        let mut tabs = ChatTabs::default();
-        tabs.open_or_focus(SessionUuid::new("a"));
-        assert_eq!(tabs.open, imbl::vector![SessionUuid::new("a")]);
-        assert_eq!(tabs.focused, Some(SessionUuid::new("a")));
-
-        tabs.open_or_focus(SessionUuid::new("b"));
-        assert_eq!(
-            tabs.open,
-            imbl::vector![SessionUuid::new("a"), SessionUuid::new("b")]
-        );
-        assert_eq!(tabs.focused, Some(SessionUuid::new("b")));
+    fn p(s: &str) -> CanonPath {
+        led_core::UserPath::new(s).canonicalize()
     }
 
     #[test]
-    fn open_or_focus_existing_uuid_just_focuses() {
-        let mut tabs = ChatTabs::default();
-        tabs.open_or_focus(SessionUuid::new("a"));
-        tabs.open_or_focus(SessionUuid::new("b"));
-        tabs.open_or_focus(SessionUuid::new("a"));
-        assert_eq!(tabs.open.len(), 2);
-        assert_eq!(tabs.focused, Some(SessionUuid::new("a")));
+    fn insert_and_get_round_trip() {
+        let mut s = ChatSessions::default();
+        s.insert(p("/tmp/x.chat"), u());
+        assert!(s.is_chat(&p("/tmp/x.chat")));
+        let state = s.get(&p("/tmp/x.chat")).unwrap();
+        assert_eq!(state.session, u());
+        assert_eq!(state.submit_offset, 0);
+        assert_eq!(state.response_anchor, 0);
+        assert!(state.user_ranges.is_empty());
+        assert_eq!(state.last_synced_event, 0);
     }
 
     #[test]
-    fn close_focuses_neighbour_to_the_right_by_default() {
-        let mut tabs = ChatTabs::default();
-        tabs.open_or_focus(SessionUuid::new("a"));
-        tabs.open_or_focus(SessionUuid::new("b"));
-        tabs.open_or_focus(SessionUuid::new("c"));
-        tabs.focused = Some(SessionUuid::new("b"));
-        assert!(tabs.close(&SessionUuid::new("b")));
-        // `c` takes b's slot (idx=1), so c is focused.
-        assert_eq!(tabs.focused, Some(SessionUuid::new("c")));
-        assert_eq!(
-            tabs.open,
-            imbl::vector![SessionUuid::new("a"), SessionUuid::new("c")]
-        );
-    }
-
-    #[test]
-    fn close_rightmost_focuses_left_neighbour() {
-        let mut tabs = ChatTabs::default();
-        tabs.open_or_focus(SessionUuid::new("a"));
-        tabs.open_or_focus(SessionUuid::new("b"));
-        // Focused = b (rightmost). Closing it falls back left to a.
-        assert!(tabs.close(&SessionUuid::new("b")));
-        assert_eq!(tabs.focused, Some(SessionUuid::new("a")));
-    }
-
-    #[test]
-    fn close_last_tab_clears_focus() {
-        let mut tabs = ChatTabs::default();
-        tabs.open_or_focus(SessionUuid::new("a"));
-        assert!(tabs.close(&SessionUuid::new("a")));
-        assert!(tabs.open.is_empty());
-        assert!(tabs.focused.is_none());
-    }
-
-    #[test]
-    fn close_unknown_uuid_is_noop_and_returns_false() {
-        let mut tabs = ChatTabs::default();
-        tabs.open_or_focus(SessionUuid::new("a"));
-        assert!(!tabs.close(&SessionUuid::new("nope")));
-        assert_eq!(tabs.open.len(), 1);
-        assert_eq!(tabs.focused, Some(SessionUuid::new("a")));
-    }
-
-    #[test]
-    fn is_open_predicate() {
-        let mut tabs = ChatTabs::default();
-        assert!(!tabs.is_open(&SessionUuid::new("a")));
-        tabs.open_or_focus(SessionUuid::new("a"));
-        assert!(tabs.is_open(&SessionUuid::new("a")));
-        assert!(!tabs.is_open(&SessionUuid::new("b")));
+    fn remove_drops_entry() {
+        let mut s = ChatSessions::default();
+        s.insert(p("/tmp/x.chat"), u());
+        let removed = s.remove(&p("/tmp/x.chat"));
+        assert!(removed.is_some());
+        assert!(!s.is_chat(&p("/tmp/x.chat")));
     }
 }

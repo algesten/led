@@ -40,6 +40,10 @@ pub struct Keymap {
     browser_direct: HashMap<KeyEvent, Command>,
     find_file_direct: HashMap<KeyEvent, Command>,
     file_search_direct: HashMap<KeyEvent, Command>,
+    /// Chat-tab context (focused chat tab). Bindings here shadow
+    /// the global table — used to rebind `Alt+Enter` to
+    /// `ChatSubmit` without stealing that key outside a chat tab.
+    chat_direct: HashMap<KeyEvent, Command>,
 }
 
 impl Keymap {
@@ -50,6 +54,7 @@ impl Keymap {
             browser_direct: HashMap::new(),
             find_file_direct: HashMap::new(),
             file_search_direct: HashMap::new(),
+            chat_direct: HashMap::new(),
         }
     }
 
@@ -145,6 +150,22 @@ impl Keymap {
 
     pub fn insert_file_search(&mut self, key: KeyEvent, cmd: Command) {
         self.file_search_direct.insert(key, cmd);
+    }
+
+    /// Chat-tab context lookup. Returns `Some` only when the key
+    /// is explicitly bound in the chat-focused overlay.
+    pub fn lookup_chat(&self, key: &KeyEvent) -> Option<Command> {
+        self.chat_direct.get(key).copied()
+    }
+
+    /// Bind a key in the chat-tab context overlay.
+    pub fn bind_chat(&mut self, key: &str, cmd: Command) {
+        let ev = parse_key(key).unwrap_or_else(|e| panic!("invalid default key `{key}`: {e}"));
+        self.chat_direct.insert(ev, cmd);
+    }
+
+    pub fn insert_chat(&mut self, key: KeyEvent, cmd: Command) {
+        self.chat_direct.insert(key, cmd);
     }
 
     pub fn lookup_chord(&self, prefix: &KeyEvent, second: &KeyEvent) -> Option<Command> {
@@ -332,6 +353,16 @@ pub fn default_keymap() -> Keymap {
     // chats. Designed for Apple Terminal: no Cmd shortcuts,
     // no Ctrl+Shift+letter disambiguation.
     m.bind_chord("ctrl+x", "ctrl+r", Command::FindChat);
+    // C-x C-t mints a brand-new chat without going through the
+    // picker (the picker fires C-x C-r). Useful when the user
+    // knows they want a fresh session and doesn't need to see
+    // existing ones.
+    m.bind_chord("ctrl+x", "ctrl+t", Command::NewChat);
+
+    // Chat-context overlay: while a chat tab is focused, Alt+Enter
+    // submits the user-typed text instead of triggering the global
+    // LSP goto-def binding.
+    m.bind_chat("alt+enter", Command::ChatSubmit);
 
     // Keyboard macros (M22). Legacy `default_keys.toml`.
     m.bind_chord("ctrl+x", "(", Command::KbdMacroStart);
@@ -571,6 +602,10 @@ pub fn parse_command(s: &str) -> Result<Command, String> {
         "save_as" => Ok(Command::SaveAs),
         "find_file_tab_complete" => Ok(Command::FindFileTabComplete),
         "find_chat" => Ok(Command::FindChat),
+        "new_chat" => Ok(Command::NewChat),
+        "chat_submit" => Ok(Command::ChatSubmit),
+        "chat_send" => Ok(Command::ChatSend),
+        "chat_toggle_focus" => Ok(Command::ChatToggleFocus),
         "in_buffer_search" => Ok(Command::InBufferSearch),
         "open_file_search" => Ok(Command::OpenFileSearch),
         "close_file_search" => Ok(Command::CloseFileSearch),
