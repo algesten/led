@@ -150,19 +150,16 @@ pub fn body_model<'a>(inputs: BodyInputs<'a>) -> BodyModel {
     if let Some(eb) = edits.buffers.get(&tab.path) {
         let rope_ref: &Rope = &eb.draft;
         let spans = rebased_line_spans(syntax, edits, tab.path.clone());
-        // Diagnostics + git markers carry an anchor hash they were
-        // computed against. Renderer translates each marker's
-        // anchor-row to a current-row via `eb.row_delta_for(anchor)`,
-        // hiding markers whose anchor row was touched / deleted
-        // since stamp. The 99% case (no edits since stamp) returns
-        // an empty `RowDelta` and the lookup is O(1).
+        // Diagnostics: strict hash-equality gate per
+        // `feedback_lsp_no_smear.md`. If the stamped hash doesn't
+        // match the live buffer hash, diagnostics hide entirely —
+        // no rebase, no save-point replay. (Git markers still use
+        // row-delta replay since their anchor is the disk-content
+        // hash; save-anchored replay is correct for that data.)
         let bd = diagnostics.by_path.get(&tab.path);
-        let diag_row_delta = bd.and_then(|bd| eb.row_delta_for(bd.hash));
-        let diags = if diag_row_delta.is_some() {
-            bd.map(|bd| bd.diagnostics.as_slice())
-        } else {
-            None
-        };
+        let diags = bd
+            .filter(|bd| bd.hash == eb.live_content_hash)
+            .map(|bd| bd.diagnostics.as_slice());
         let gls = git.line_statuses.get(&tab.path);
         let git_row_delta = gls.and_then(|gls| eb.row_delta_for(gls.anchor_hash));
         let line_statuses = gls
@@ -177,7 +174,10 @@ pub fn body_model<'a>(inputs: BodyInputs<'a>) -> BodyModel {
             match_highlight: highlight,
             rebased_tokens: spans.as_deref().map(|v: &Vec<TokenSpan>| v.as_slice()),
             diagnostics: diags,
-            diag_row_delta: diag_row_delta.as_ref(),
+            // No replay: strict hash equality means rows are
+            // already current-coords. An empty delta is the
+            // identity shift.
+            diag_row_delta: None,
             git_line_statuses: line_statuses,
             git_row_delta: git_row_delta.as_ref(),
             ruler_col,
