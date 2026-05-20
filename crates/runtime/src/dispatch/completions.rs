@@ -12,8 +12,6 @@
 //! InsertNewline, InsertTab, Abort, InsertChar, DeleteBack);
 //! everything else dismisses and falls through.
 
-use std::sync::Arc;
-
 use led_state_buffer_edits::BufferEdits;
 use led_state_completions::{CompletionSession, CompletionsState};
 use led_state_tabs::Tabs;
@@ -21,6 +19,10 @@ use led_state_tabs::Tabs;
 use super::shared::bump;
 use super::DispatchOutcome;
 use crate::keymap::Command;
+use crate::query::{
+    completion_commit_plan, CompletionCommitPlan, CompletionsSessionInput,
+    EditedBuffersInput, TabsActiveInput,
+};
 
 /// Attempt to consume `cmd` against an active completion popup.
 /// Returns `Some(Continue)` when the command was consumed (the
@@ -110,141 +112,68 @@ fn ensure_visible(session: &mut CompletionSession) {
 }
 
 /// Apply the currently-selected completion to the active tab's
-/// buffer. Replaces `[prefix_start_col, cursor_col)` on
-/// `prefix_line` with the item's `textEdit.new_text` (when
-/// present) or `insertText` (fallback) or `label` (last
-/// resort). Moves the cursor past the inserted text, records
-/// one history group, queues `ResolveCompletion` if the server
-/// advertised `resolveProvider` AND the item didn't already
-/// ship its additional edits, then dismisses the popup.
+/// buffer. The "what to insert and where" decision lives in the
+/// pure [`completion_commit_plan`] memo; this reducer just reads
+/// the plan and applies it (rope bump + cursor move + history
+/// record + optional resolve follow-up). Either way the popup
+/// dismisses.
 fn commit_active(
     completions: &mut CompletionsState,
     completions_pending: &mut led_state_completions::CompletionsPending,
     tabs: &mut Tabs,
     edits: &mut BufferEdits,
 ) {
-    let Some(session) = completions.session.as_ref() else {
-        return;
-    };
-    // Only commit into the tab the session was opened on. If
-    // the user switched tabs mid-request, the session would
-    // already have been dismissed — this is defensive.
-    let target_tab = session.tab;
-    let path = session.path.clone();
-    let prefix_line = session.prefix_line as usize;
-    let prefix_start_col = session.prefix_start_col as usize;
-    let Some(&item_ix) = session.filtered.get(session.selected) else {
-        completions.dismiss();
-        return;
-    };
-    let item = session.items[item_ix].clone();
-
-    // Resolve target tab + its buffer. Bail silently if either
-    // went away mid-flight.
-    let Some(tab_idx) = tabs.open.iter().position(|t| t.id == target_tab) else {
-        completions.dismiss();
-        return;
-    };
-    if tabs.open[tab_idx].preview {
-        // Preview tabs are strict viewers; committing into one
-        // would create dirty state the user didn't ask for.
-        completions.dismiss();
-        return;
-    }
-    if !edits.buffers.contains_key(&path) {
-        completions.dismiss();
-        return;
-    }
-
-    let tab = &mut tabs.open[tab_idx];
-    let before = tab.cursor;
-
-    // Choose the replacement range + new text. textEdit wins
-    // (servers use it to delete the whole typed prefix + insert
-    // the full identifier); otherwise fall back to
-    // insertText / label.
-    let (replace_start_col, replace_end_col, new_text) = match item.text_edit.as_ref() {
-        Some(te) => (
-            te.col_start as usize,
-            te.col_end as usize,
-            te.new_text.clone(),
-        ),
-        None => {
-            let text = item
-                .insert_text
-                .clone()
-                .unwrap_or_else(|| item.label.clone());
-            (prefix_start_col, before.col, text)
-        }
-    };
-
-    // Clamp to the actual rope so a stale item (cursor moved
-    // since the session opened) can't panic on out-of-range
-    // indices.
-    let eb = edits.buffers.get_mut(&path).expect("checked above");
-    let rope_len = eb.rope.len_chars();
-    let line_char_start = eb.rope.line_to_char(prefix_line);
-    let line_end_char = if prefix_line + 1 < eb.rope.len_lines() {
-        eb.rope.line_to_char(prefix_line + 1)
-    } else {
-        rope_len
-    };
-    let replace_from = (line_char_start + replace_start_col).min(line_end_char);
-    let replace_to = (line_char_start + replace_end_col).min(line_end_char);
-    if replace_to < replace_from {
-        completions.dismiss();
-        return;
-    }
-
-    let mut rope = (*eb.rope).clone();
-    let removed_text: String = rope.slice(replace_from..replace_to).to_string();
-    rope.remove(replace_from..replace_to);
-    rope.insert(replace_from, &new_text);
-    bump(eb, rope);
-
-    let inserted_char_count = new_text.chars().count();
-    let new_cursor_char = replace_from + inserted_char_count;
-    let new_line = eb.rope.char_to_line(new_cursor_char);
-    let new_col = new_cursor_char - eb.rope.line_to_char(new_line);
-    tab.cursor.line = new_line;
-    tab.cursor.col = new_col;
-    tab.cursor.preferred_col = new_col;
-    let after = tab.cursor;
-
-    // History: record the delete (if the typed prefix actually
-    // had content) then the insert. Two ops grouped so undo
-    // takes both back in one C-_.
-    if !removed_text.is_empty() {
-        eb.history.record_delete(
-            replace_from,
-            Arc::<str>::from(removed_text),
-            before,
-            before,
-        );
-    }
-    eb.history.record_insert(
-        replace_from,
-        Arc::<str>::from(new_text.as_ref()),
-        before,
-        after,
+    let plan = completion_commit_plan(
+        CompletionsSessionInput::new(completions),
+        TabsActiveInput::new(tabs),
+        EditedBuffersInput::new(edits),
     );
-
-    // Queue resolve for additional edits (imports, etc.) if the
-    // server said it could provide them.
-    if item.resolve_needed {
-        completions_pending.queue_resolve(path, item);
+    match plan {
+        CompletionCommitPlan::Dismiss => {
+            completions.dismiss();
+        }
+        CompletionCommitPlan::Apply(apply) => {
+            let Some(tab) = tabs.open.iter_mut().find(|t| t.id == apply.target_tab) else {
+                completions.dismiss();
+                return;
+            };
+            let Some(eb) = edits.buffers.get_mut(&apply.path) else {
+                completions.dismiss();
+                return;
+            };
+            bump(eb, (*apply.new_rope).clone());
+            tab.cursor = apply.after_cursor;
+            // History: record the delete (if the typed prefix
+            // actually had content) then the insert. Two ops
+            // grouped so undo takes both back in one C-_.
+            if !apply.removed_text.is_empty() {
+                eb.history.record_delete(
+                    apply.replace_from,
+                    apply.removed_text,
+                    apply.before_cursor,
+                    apply.before_cursor,
+                );
+            }
+            eb.history.record_insert(
+                apply.replace_from,
+                apply.new_text,
+                apply.before_cursor,
+                apply.after_cursor,
+            );
+            if let Some(item) = apply.resolve_followup {
+                completions_pending.queue_resolve(apply.path, item);
+            }
+            completions.dismiss();
+        }
     }
-
-    completions.dismiss();
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use led_core::{CanonPath, UserPath};
-    use led_driver_lsp_core::CompletionItem;
     use led_state_buffer_edits::{BufferEdits, EditedBuffer};
-    use led_state_completions::CompletionSession;
+    use led_state_completions::{Completion, CompletionSession};
     use led_state_tabs::{Tab, TabId, Tabs};
     use ropey::Rope;
     use std::sync::Arc;
@@ -258,13 +187,16 @@ mod tests {
         edits: &mut BufferEdits,
         rope: &str,
         prefix_start_col: u32,
-        items: Vec<CompletionItem>,
+        items: Vec<Completion>,
     ) -> CompletionsState {
         let path = canon("test.rs");
         let rope = Arc::new(Rope::from_str(rope));
         edits
             .buffers
-            .insert(path.clone(), EditedBuffer::fresh(rope.clone()));
+            .insert(
+                path.clone(),
+                EditedBuffer::fresh(led_state_buffer_edits::Persisted(rope.clone())),
+            );
         let tab_id = TabId(1);
         tabs.open.push_back(Tab {
             id: tab_id,
@@ -288,8 +220,8 @@ mod tests {
         }
     }
 
-    fn mk_item(label: &str, insert: Option<&str>) -> CompletionItem {
-        CompletionItem {
+    fn mk_item(label: &str, insert: Option<&str>) -> Completion {
+        Completion {
             label: Arc::<str>::from(label),
             detail: None,
             sort_text: None,
@@ -356,7 +288,10 @@ mod tests {
         let rope = Arc::new(Rope::from_str("pr"));
         edits
             .buffers
-            .insert(path.clone(), EditedBuffer::fresh(rope));
+            .insert(
+                path.clone(),
+                EditedBuffer::fresh(led_state_buffer_edits::Persisted(rope)),
+            );
         let filtered: Vec<usize> = vec![0];
         let mut state = CompletionsState {
             session: Some(CompletionSession {
@@ -377,7 +312,7 @@ mod tests {
         assert_eq!(outcome, Some(DispatchOutcome::Continue));
         assert!(state.session.is_none());
         let eb = edits.buffers.get(&path).unwrap();
-        assert_eq!(eb.rope.to_string(), "println!");
+        assert_eq!(eb.draft.to_string(), "println!");
         assert_eq!(tabs.open[0].cursor.col, 8);
     }
 

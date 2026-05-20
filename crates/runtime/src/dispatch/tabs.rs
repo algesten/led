@@ -4,8 +4,10 @@
 
 use led_state_alerts::AlertState;
 use led_state_buffer_edits::BufferEdits;
-use led_state_jumps::{JumpListState, JumpPosition};
+use led_state_jumps::JumpListState;
 use led_state_tabs::{Tab, TabId, Tabs};
+
+use crate::query::{TabsActiveInput, outgoing_jump_position};
 
 pub(super) fn cycle_active(tabs: &mut Tabs, jumps: &mut JumpListState, delta: isize) {
     if tabs.open.is_empty() {
@@ -18,28 +20,30 @@ pub(super) fn cycle_active(tabs: &mut Tabs, jumps: &mut JumpListState, delta: is
         .unwrap_or(0) as isize;
     let next_idx = (cur_idx + delta).rem_euclid(n) as usize;
 
-    // Record the outgoing tab's cursor so Alt-b returns here. Skip
-    // the no-op case where the tab doesn't actually change.
-    if let Some(prev_id) = tabs.active
-        && let Some(prev) = tabs.open.iter().find(|t| t.id == prev_id)
-        && prev.id != tabs.open[next_idx].id
+    // Record the outgoing tab's cursor so Alt-b returns here. The
+    // memo computes the position as a pure projection of the
+    // active Tab; dispatch decides whether to push (skip the
+    // no-op case where the cycle lands on the same tab).
+    let next_id = tabs.open[next_idx].id;
+    let outgoing_is_different = tabs.active != Some(next_id);
+    if outgoing_is_different
+        && let Some(pos) = outgoing_jump_position(TabsActiveInput::new(tabs))
     {
-        jumps.record(JumpPosition {
-            path: prev.path.clone(),
-            line: prev.cursor.line,
-            col: prev.cursor.col,
-            top: prev.scroll.top,
-            top_sub_line: prev.scroll.top_sub_line,
-        });
+        jumps.record(pos);
     }
 
-    tabs.active = Some(tabs.open[next_idx].id);
+    tabs.active = Some(next_id);
 }
 
 /// Close the active tab. If the buffer is dirty, raise a confirm-kill
 /// prompt (user must press `y`/`Y` to proceed); otherwise force-kill
 /// immediately.
-pub(super) fn kill_active(tabs: &mut Tabs, edits: &mut BufferEdits, alerts: &mut AlertState) {
+pub(super) fn kill_active(
+    tabs: &mut Tabs,
+    edits: &mut BufferEdits,
+    alerts: &mut AlertState,
+    clock: &crate::Clock,
+) {
     let Some(id) = tabs.active else {
         return;
     };
@@ -64,7 +68,7 @@ pub(super) fn kill_active(tabs: &mut Tabs, edits: &mut BufferEdits, alerts: &mut
     if !basename.is_empty() {
         alerts.set_info(
             format!("Killed {basename}"),
-            std::time::Instant::now(),
+            clock.now,
             std::time::Duration::from_secs(2),
         );
     }
@@ -92,7 +96,7 @@ pub(super) fn force_kill(tabs: &mut Tabs, edits: &mut BufferEdits, id: TabId) {
 #[cfg(test)]
 mod tests {
     use led_state_completions::CompletionsState;
-    use led_state_diagnostics::DiagnosticsStates;
+    use led_driver_lsp_core::DiagnosticsStates;
     use led_state_file_search::FileSearchState;
     use led_state_find_file::FindFileState;
     use led_state_git::GitState;
@@ -102,10 +106,11 @@ mod tests {
     
     use led_driver_buffers_core::BufferStore;
     use led_driver_terminal_core::{Dims, KeyCode, KeyModifiers, Terminal};
+    use led_driver_fs_list_core::FsTree;
     use led_state_alerts::AlertState;
-    use led_state_clipboard::ClipboardState;
+    use led_state_browser::BrowserUi;
+    use led_state_clipboard::ClipboardIntent;
     use led_state_jumps::JumpListState;
-    use led_state_browser::{BrowserUi, FsTree};
     use led_state_buffer_edits::{BufferEdits, EditedBuffer};
     use led_state_kill_ring::KillRing;
     use led_state_lsp::LspExtrasState;
@@ -157,11 +162,11 @@ mod tests {
         let mut edits = BufferEdits::default();
         edits.buffers.insert(
             canon("a"),
-            EditedBuffer::fresh(Arc::new(Rope::from_str("A"))),
+            EditedBuffer::fresh(led_state_buffer_edits::Persisted(Arc::new(Rope::from_str("A")))),
         );
         edits.buffers.insert(
             canon("b"),
-            EditedBuffer::fresh(Arc::new(Rope::from_str("B"))),
+            EditedBuffer::fresh(led_state_buffer_edits::Persisted(Arc::new(Rope::from_str("B")))),
         );
         let store = BufferStore::default();
         let term = terminal_with(Some(Dims { cols: 10, rows: 5 }));
@@ -187,17 +192,17 @@ mod tests {
         let mut edits = BufferEdits::default();
         edits.buffers.insert(
             canon("a"),
-            EditedBuffer {
-                rope: Arc::new(Rope::from_str("A")),
-                version: led_core::BufferVersion(1),
-                saved_version: led_core::SavedVersion(0),
-                disk_content_hash: led_core::PersistedContentHash::default(),
-                history: Default::default(),
-            },
+            EditedBuffer::new_with_state(
+                Arc::new(Rope::from_str("A")),
+                led_core::BufferVersion(1),
+                led_core::SavedVersion(0),
+                led_core::PersistedContentHash::default(),
+                Default::default(),
+            ),
         );
         edits.buffers.insert(
             canon("b"),
-            EditedBuffer::fresh(Arc::new(Rope::from_str("B"))),
+            EditedBuffer::fresh(led_state_buffer_edits::Persisted(Arc::new(Rope::from_str("B")))),
         );
         let store = BufferStore::default();
         let term = terminal_with(Some(Dims { cols: 10, rows: 5 }));
@@ -208,7 +213,8 @@ mod tests {
     fn kill_buffer_on_dirty_raises_confirm_prompt() {
         let (mut tabs, mut edits, store, term) = dirty_tabs_with_confirm_scenario();
         let mut kill_ring = KillRing::default();
-        let mut clip = ClipboardState::default();
+        let mut clip = ClipboardIntent::default();
+        let clipboard_driver = led_driver_clipboard_core::ClipboardState::default();
         let mut alerts = AlertState::default();
         let mut jumps = JumpListState::default();
         let mut browser = BrowserUi::default();
@@ -226,15 +232,17 @@ mod tests {
         let mut isearch: Option<IsearchState> = None;
         let mut file_search: Option<FileSearchState> = None;
         let diagnostics = DiagnosticsStates::default();
-        let lsp_status = led_state_diagnostics::LspStatuses::default();
+        let lsp_status = led_driver_lsp_core::LspStatuses::default();
         let git = GitState::default();
         let syntax = led_state_syntax::SyntaxStates::default();
+        let clock = crate::Clock::default();
         {
             let mut dispatcher = Dispatcher {
                 tabs: &mut tabs,
                 edits: &mut edits,
                 kill_ring: &mut kill_ring,
                 clip: &mut clip,
+                clipboard_driver: &clipboard_driver,
                 alerts: &mut alerts,
                 jumps: &mut jumps,
                 browser: &mut browser,
@@ -256,6 +264,7 @@ mod tests {
                 chord: &mut chord,
                 kbd_macro: &mut kbd_macro,
                 syntax: &syntax,
+                clock: &clock,
             };
             // Ctrl-x k on dirty active tab → prompt set, tab still open.
             dispatcher.dispatch_key(key(KeyModifiers::CONTROL, KeyCode::Char('x')));
@@ -269,7 +278,8 @@ mod tests {
     fn confirm_kill_y_force_kills_and_clears_prompt() {
         let (mut tabs, mut edits, store, term) = dirty_tabs_with_confirm_scenario();
         let mut kill_ring = KillRing::default();
-        let mut clip = ClipboardState::default();
+        let mut clip = ClipboardIntent::default();
+        let clipboard_driver = led_driver_clipboard_core::ClipboardState::default();
         let mut alerts = AlertState {
             confirm_kill: Some(TabId(1)),
             ..Default::default()
@@ -290,15 +300,17 @@ mod tests {
         let mut lsp_extras = LspExtrasState::default();
         let mut lsp_pending = led_state_lsp::LspPending::default();
         let diagnostics = DiagnosticsStates::default();
-        let lsp_status = led_state_diagnostics::LspStatuses::default();
+        let lsp_status = led_driver_lsp_core::LspStatuses::default();
         let git = GitState::default();
         let syntax = led_state_syntax::SyntaxStates::default();
+        let clock = crate::Clock::default();
         {
             let mut dispatcher = Dispatcher {
                 tabs: &mut tabs,
                 edits: &mut edits,
                 kill_ring: &mut kill_ring,
                 clip: &mut clip,
+                clipboard_driver: &clipboard_driver,
                 alerts: &mut alerts,
                 jumps: &mut jumps,
                 browser: &mut browser,
@@ -320,6 +332,7 @@ mod tests {
                 chord: &mut chord,
                 kbd_macro: &mut kbd_macro,
                 syntax: &syntax,
+                clock: &clock,
             };
             dispatcher.dispatch_key(key(KeyModifiers::NONE, KeyCode::Char('y')));
         }
@@ -335,7 +348,8 @@ mod tests {
     fn confirm_kill_capital_y_also_confirms() {
         let (mut tabs, mut edits, store, term) = dirty_tabs_with_confirm_scenario();
         let mut kill_ring = KillRing::default();
-        let mut clip = ClipboardState::default();
+        let mut clip = ClipboardIntent::default();
+        let clipboard_driver = led_driver_clipboard_core::ClipboardState::default();
         let mut alerts = AlertState {
             confirm_kill: Some(TabId(1)),
             ..Default::default()
@@ -356,15 +370,17 @@ mod tests {
         let mut lsp_extras = LspExtrasState::default();
         let mut lsp_pending = led_state_lsp::LspPending::default();
         let diagnostics = DiagnosticsStates::default();
-        let lsp_status = led_state_diagnostics::LspStatuses::default();
+        let lsp_status = led_driver_lsp_core::LspStatuses::default();
         let git = GitState::default();
         let syntax = led_state_syntax::SyntaxStates::default();
+        let clock = crate::Clock::default();
         {
             let mut dispatcher = Dispatcher {
                 tabs: &mut tabs,
                 edits: &mut edits,
                 kill_ring: &mut kill_ring,
                 clip: &mut clip,
+                clipboard_driver: &clipboard_driver,
                 alerts: &mut alerts,
                 jumps: &mut jumps,
                 browser: &mut browser,
@@ -386,6 +402,7 @@ mod tests {
                 chord: &mut chord,
                 kbd_macro: &mut kbd_macro,
                 syntax: &syntax,
+                clock: &clock,
             };
             dispatcher.dispatch_key(key(KeyModifiers::NONE, KeyCode::Char('Y')));
         }
@@ -397,7 +414,8 @@ mod tests {
     fn confirm_kill_n_dismisses_and_inserts() {
         let (mut tabs, mut edits, store, term) = dirty_tabs_with_confirm_scenario();
         let mut kill_ring = KillRing::default();
-        let mut clip = ClipboardState::default();
+        let mut clip = ClipboardIntent::default();
+        let clipboard_driver = led_driver_clipboard_core::ClipboardState::default();
         let mut alerts = AlertState {
             confirm_kill: Some(TabId(1)),
             ..Default::default()
@@ -418,15 +436,17 @@ mod tests {
         let mut lsp_extras = LspExtrasState::default();
         let mut lsp_pending = led_state_lsp::LspPending::default();
         let diagnostics = DiagnosticsStates::default();
-        let lsp_status = led_state_diagnostics::LspStatuses::default();
+        let lsp_status = led_driver_lsp_core::LspStatuses::default();
         let git = GitState::default();
         let syntax = led_state_syntax::SyntaxStates::default();
+        let clock = crate::Clock::default();
         {
             let mut dispatcher = Dispatcher {
                 tabs: &mut tabs,
                 edits: &mut edits,
                 kill_ring: &mut kill_ring,
                 clip: &mut clip,
+                clipboard_driver: &clipboard_driver,
                 alerts: &mut alerts,
                 jumps: &mut jumps,
                 browser: &mut browser,
@@ -448,6 +468,7 @@ mod tests {
                 chord: &mut chord,
                 kbd_macro: &mut kbd_macro,
                 syntax: &syntax,
+                clock: &clock,
             };
             dispatcher.dispatch_key(key(KeyModifiers::NONE, KeyCode::Char('n')));
         }
@@ -469,7 +490,8 @@ mod tests {
             preferred_col: 0,
         });
         let mut kill_ring = KillRing::default();
-        let mut clip = ClipboardState::default();
+        let mut clip = ClipboardIntent::default();
+        let clipboard_driver = led_driver_clipboard_core::ClipboardState::default();
         let mut alerts = AlertState {
             confirm_kill: Some(TabId(1)),
             ..Default::default()
@@ -490,15 +512,17 @@ mod tests {
         let mut lsp_extras = LspExtrasState::default();
         let mut lsp_pending = led_state_lsp::LspPending::default();
         let diagnostics = DiagnosticsStates::default();
-        let lsp_status = led_state_diagnostics::LspStatuses::default();
+        let lsp_status = led_driver_lsp_core::LspStatuses::default();
         let git = GitState::default();
         let syntax = led_state_syntax::SyntaxStates::default();
+        let clock = crate::Clock::default();
         {
             let mut dispatcher = Dispatcher {
                 tabs: &mut tabs,
                 edits: &mut edits,
                 kill_ring: &mut kill_ring,
                 clip: &mut clip,
+                clipboard_driver: &clipboard_driver,
                 alerts: &mut alerts,
                 jumps: &mut jumps,
                 browser: &mut browser,
@@ -520,6 +544,7 @@ mod tests {
                 chord: &mut chord,
                 kbd_macro: &mut kbd_macro,
                 syntax: &syntax,
+                clock: &clock,
             };
             dispatcher.dispatch_key(key(KeyModifiers::NONE, KeyCode::Esc));
         }
@@ -537,12 +562,13 @@ mod tests {
         let mut edits = BufferEdits::default();
         edits.buffers.insert(
             canon("a"),
-            EditedBuffer::fresh(Arc::new(Rope::from_str("A"))),
+            EditedBuffer::fresh(led_state_buffer_edits::Persisted(Arc::new(Rope::from_str("A")))),
         );
         let store = BufferStore::default();
         let term = terminal_with(Some(Dims { cols: 10, rows: 5 }));
         let mut kill_ring = KillRing::default();
-        let mut clip = ClipboardState::default();
+        let mut clip = ClipboardIntent::default();
+        let clipboard_driver = led_driver_clipboard_core::ClipboardState::default();
         let mut alerts = AlertState::default();
         let mut jumps = JumpListState::default();
         let mut browser = BrowserUi::default();
@@ -560,15 +586,17 @@ mod tests {
         let mut lsp_extras = LspExtrasState::default();
         let mut lsp_pending = led_state_lsp::LspPending::default();
         let diagnostics = DiagnosticsStates::default();
-        let lsp_status = led_state_diagnostics::LspStatuses::default();
+        let lsp_status = led_driver_lsp_core::LspStatuses::default();
         let git = GitState::default();
         let syntax = led_state_syntax::SyntaxStates::default();
+        let clock = crate::Clock::default();
         {
             let mut dispatcher = Dispatcher {
                 tabs: &mut tabs,
                 edits: &mut edits,
                 kill_ring: &mut kill_ring,
                 clip: &mut clip,
+                clipboard_driver: &clipboard_driver,
                 alerts: &mut alerts,
                 jumps: &mut jumps,
                 browser: &mut browser,
@@ -590,6 +618,7 @@ mod tests {
                 chord: &mut chord,
                 kbd_macro: &mut kbd_macro,
                 syntax: &syntax,
+                clock: &clock,
             };
             dispatcher.dispatch_key(key(KeyModifiers::CONTROL, KeyCode::Char('x')));
             dispatcher.dispatch_key(key(KeyModifiers::NONE, KeyCode::Char('k')));

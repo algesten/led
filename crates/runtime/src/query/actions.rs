@@ -9,6 +9,8 @@ use led_driver_buffers_core::{LoadAction, SaveAction};
 use led_driver_clipboard_core::ClipboardAction;
 use led_driver_file_watch_core::{ChangeKinds, FileWatchEvent};
 use led_driver_session_core::SessionCmd;
+use led_state_buffer_edits::Persisted;
+use led_state_jumps::JumpPosition;
 use std::sync::Arc;
 
 use super::inputs::*;
@@ -86,7 +88,7 @@ pub fn file_save_action<'p, 'b>(
         // dirty paths to `pending_saves` in the first place.
         out.push(SaveAction::Save {
             path: path.clone(),
-            rope: eb.rope.clone(),
+            content: Persisted(eb.draft.as_rope().clone()),
             version: eb.version,
         });
     }
@@ -100,7 +102,7 @@ pub fn file_save_action<'p, 'b>(
         out.push(SaveAction::SaveAs {
             from: from.clone(),
             to: to.clone(),
-            rope: eb.rope.clone(),
+            content: Persisted(eb.draft.as_rope().clone()),
             version: eb.version,
         });
     }
@@ -279,13 +281,19 @@ pub fn static_deadline<'a, 'f, 'u>(
 /// clone on the Write path, which is the same as the driver's own
 /// execute.
 #[drv::memo(single)]
-pub fn clipboard_action<'c>(clip: ClipboardStateInput<'c>) -> Option<ClipboardAction> {
-    if clip.pending_yank.is_some() && !*clip.read_in_flight {
+pub fn clipboard_action<'c, 'd>(
+    clip: ClipboardIntentInput<'c>,
+    drv: ClipboardDriverInput<'d>,
+) -> Option<ClipboardAction> {
+    use led_driver_clipboard_core::{ReadState, WriteState};
+    if clip.pending_yank.is_some() && matches!(drv.read, ReadState::Idle) {
         Some(ClipboardAction::Read)
+    } else if let Some(text) = clip.pending_write.as_ref()
+        && matches!(drv.write, WriteState::Idle)
+    {
+        Some(ClipboardAction::Write(text.clone()))
     } else {
-        clip.pending_write
-            .as_ref()
-            .map(|text| ClipboardAction::Write(text.clone()))
+        None
     }
 }
 
@@ -308,12 +316,51 @@ pub fn clipboard_action<'c>(clip: ClipboardStateInput<'c>) -> Option<ClipboardAc
 pub fn find_file_action<'f>(
     ff: FindFileInput<'f>,
 ) -> Vec<led_driver_find_file_core::FindFileCmd> {
-    // Execute-pattern: dispatch pushed one `FindFileCmd` per input
-    // edit into the state's queue; the memo ships the whole queue,
-    // and the main loop drains it after execute. Inactive overlay
-    // or empty queue → empty Vec (zero alloc hot path).
+    // Execute-pattern: dispatch pushed one `FindFileRequest` per
+    // input edit into the state's queue; the memo translates each
+    // domain request to the driver ABI `FindFileCmd` and ships the
+    // whole queue, and the main loop drains it after execute.
+    // Inactive overlay or empty queue → empty Vec (zero alloc hot
+    // path). Translation is the field-rename boundary that keeps
+    // `state-find-file` from storing driver-ABI types as fields.
     let Some(state) = ff.overlay.as_ref() else {
         return Vec::new();
     };
-    state.pending_find_file_list.clone()
+    state
+        .pending_find_file_list
+        .iter()
+        .map(|r| led_driver_find_file_core::FindFileCmd {
+            dir: r.dir.clone(),
+            prefix: r.prefix.clone(),
+            show_hidden: r.show_hidden,
+        })
+        .collect()
+}
+
+/// "If the active tab were about to lose focus (tab cycle,
+/// goto-def, …), what [`JumpPosition`] should we record onto
+/// the jump list?"
+///
+/// Pure projection of the active `Tab`'s `(path, cursor, scroll)`
+/// — the same shape `nav::current_position` /
+/// `apply::lsp::current_jump_position` compute non-memoized.
+/// Callers (tab cycle, future goto-def) read this memo and
+/// decide whether the resulting move actually warrants a push
+/// (e.g. tab cycle skips when the next tab is the same as
+/// the current one).
+///
+/// `None` when there's no active tab.
+#[drv::memo(single)]
+pub fn outgoing_jump_position<'t>(
+    tabs: TabsActiveInput<'t>,
+) -> Option<JumpPosition> {
+    let id = (*tabs.active)?;
+    let tab = tabs.open.iter().find(|t| t.id == id)?;
+    Some(JumpPosition {
+        path: tab.path.clone(),
+        line: tab.cursor.line,
+        col: tab.cursor.col,
+        top: tab.scroll.top,
+        top_sub_line: tab.scroll.top_sub_line,
+    })
 }

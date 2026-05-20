@@ -1,0 +1,20 @@
+[package]
+name = "led-state-text-input"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Single-line editable string with cursor + transient hint TTL.
+#
+# Shared by every overlay / minibuffer that prompts for text:
+# find-file, save-as, in-buffer isearch, file-search query / replace,
+# LSP rename, LSP completion prefix. Owns its own `Instant`-based
+# hint deadline (`[No match]`, `[Sole completion]`, …), folded into
+# `nearest_deadline` by the runtime so the loop wakes when a hint
+# should clear.
+#
+# Pulled out of `led-core` so that the foundational crate stays
+# primitives-only — no state structs, no time-bound fields.
+
+[dependencies]
+drv = { workspace = true }

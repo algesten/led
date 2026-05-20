@@ -14,6 +14,7 @@ publish = false
 [dependencies]
 drv = { workspace = true }
 imbl = { workspace = true }
+led-abi-lsp = { workspace = true }
 led-core = { workspace = true }
-led-driver-lsp-core = { workspace = true }
 led-state-tabs = { workspace = true }
+led-state-text-input = { workspace = true }

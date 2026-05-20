@@ -19,6 +19,7 @@ publish = false
 # around the same `*-core` crates.
 
 [dependencies]
+led-abi-command = { workspace = true }
 led-core = { workspace = true }
 led-state-tabs = { workspace = true }
 led-state-buffer-edits = { workspace = true }
@@ -36,8 +37,8 @@ led-state-completions = { workspace = true }
 led-state-lsp = { workspace = true }
 led-state-git = { workspace = true }
 led-state-lifecycle = { workspace = true }
-led-state-session = { workspace = true }
 led-state-kbd-macro = { workspace = true }
+led-state-text-input = { workspace = true }
 led-driver-fs-list-core = { workspace = true }
 led-driver-fs-list-native = { workspace = true }
 led-driver-find-file-core = { workspace = true }
@@ -60,6 +61,7 @@ led-driver-session-core = { workspace = true }
 led-driver-session-native = { workspace = true }
 led-driver-file-watch-core = { workspace = true }
 led-driver-file-watch-native = { workspace = true }
+led-text-layout = { workspace = true }
 led-text-reflow = { workspace = true }
 drv = { workspace = true }
 imbl = { workspace = true }

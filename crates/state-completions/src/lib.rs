@@ -26,8 +26,54 @@
 use std::sync::Arc;
 
 use led_core::{CanonPath, LspRequestSeq};
-use led_driver_lsp_core::CompletionItem;
 use led_state_tabs::TabId;
+
+/// Domain-typed completion candidate the popup renders + commits
+/// against. Mirrors LSP `CompletionItem` (label / detail / kind /
+/// insertion payload) so the driver's response can be translated
+/// 1:1 at the ingest seam without lossy projection — the resolve
+/// round-trip needs the full original shape to send back to the
+/// server.
+///
+/// Kept distinct from `led_driver_lsp_core::CompletionItem` so
+/// `state-completions` does not store driver-ABI types as fields
+/// — per the "No driver types in AppState" rule.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Completion {
+    /// Primary display string + fuzzy-filter key.
+    pub label: Arc<str>,
+    /// Right-column hint (type signature, module path, …).
+    pub detail: Option<Arc<str>>,
+    /// LSP-advertised sort key. `None` falls back to `label`.
+    pub sort_text: Option<Arc<str>>,
+    /// What to insert when `text_edit` is absent. Falls back to
+    /// `label` when both are missing.
+    pub insert_text: Option<Arc<str>>,
+    /// Preferred insertion — overrides `insert_text` when set.
+    pub text_edit: Option<CompletionEdit>,
+    /// LSP `CompletionItemKind` as the raw u8. Opaque to the
+    /// runtime — passed through to the painter for future
+    /// icon / colour styling.
+    pub kind: Option<u8>,
+    /// `true` when the server advertised resolve support AND this
+    /// item still has unresolved fields. Drives whether commit
+    /// fires a `ResolveCompletion` round-trip.
+    pub resolve_needed: bool,
+    /// Opaque server-specific identifier echoed on resolve.
+    /// Round-tripped verbatim to the driver on resolve commit.
+    pub resolve_data: Option<Arc<str>>,
+}
+
+/// Range-based insertion mirroring LSP `CompletionTextEdit`.
+/// `col_start` / `col_end` are 0-indexed char offsets on `line`,
+/// exclusive end.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompletionEdit {
+    pub line: u32,
+    pub col_start: u32,
+    pub col_end: u32,
+    pub new_text: Arc<str>,
+}
 
 /// User-decision side: which popup is open. None means no popup.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -76,7 +122,7 @@ pub struct PendingCompletionRequest {
 pub struct PendingResolveRequest {
     pub path: CanonPath,
     pub seq: LspRequestSeq,
-    pub item: CompletionItem,
+    pub item: Completion,
 }
 
 /// One active popup. Created on the first matching
@@ -108,7 +154,7 @@ pub struct CompletionSession {
     /// All items the server returned, unfiltered. Ref-counted so
     /// refilter + render can share the same Vec cheaply across
     /// frames.
-    pub items: Arc<Vec<CompletionItem>>,
+    pub items: Arc<Vec<Completion>>,
     /// Indices into `items`, in display order. Rebuilt on every
     /// keystroke (fuzzy-match + rank by nucleo); empty means
     /// "no items match the current prefix" → popup dismisses.
@@ -159,7 +205,7 @@ impl CompletionsPending {
 
     /// Queue a resolve request for the item the user just
     /// committed. Returns the allocated `seq`.
-    pub fn queue_resolve(&mut self, path: CanonPath, item: CompletionItem) -> LspRequestSeq {
+    pub fn queue_resolve(&mut self, path: CanonPath, item: Completion) -> LspRequestSeq {
         let seq = self.next_seq();
         self.pending_resolves.push(PendingResolveRequest {
             path,
@@ -180,7 +226,7 @@ impl CompletionsPending {
 /// Effective insertion text is `text_edit.new_text` when
 /// present, else `insert_text`, else `label` — same precedence
 /// the commit path uses.
-pub fn is_identity_match(item: &CompletionItem, prefix: &str) -> bool {
+pub fn is_identity_match(item: &Completion, prefix: &str) -> bool {
     let effective: &str = item
         .text_edit
         .as_ref()
@@ -203,7 +249,7 @@ pub fn is_identity_match(item: &CompletionItem, prefix: &str) -> bool {
 ///
 /// Port of `fuzzy_filter_completions` at
 /// `/Users/martin/dev/led/crates/lsp/src/manager.rs:2057`.
-pub fn refilter(items: &[CompletionItem], prefix: &str) -> Vec<usize> {
+pub fn refilter(items: &[Completion], prefix: &str) -> Vec<usize> {
     use nucleo_matcher::pattern::{AtomKind, CaseMatching, Normalization, Pattern};
     use nucleo_matcher::{Config, Matcher, Utf32Str};
 
@@ -247,11 +293,10 @@ pub fn refilter(items: &[CompletionItem], prefix: &str) -> Vec<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use led_driver_lsp_core::CompletionTextEdit;
     use std::sync::Arc;
 
-    fn item(label: &str, sort: Option<&str>) -> CompletionItem {
-        CompletionItem {
+    fn item(label: &str, sort: Option<&str>) -> Completion {
+        Completion {
             label: Arc::<str>::from(label),
             detail: None,
             sort_text: sort.map(Arc::<str>::from),
@@ -339,7 +384,7 @@ mod tests {
     #[test]
     fn is_identity_match_uses_insert_text_then_label() {
         // With insert_text present, the label is ignored.
-        let with_insert = CompletionItem {
+        let with_insert = Completion {
             label: Arc::<str>::from("show label"),
             detail: None,
             sort_text: None,
@@ -361,12 +406,12 @@ mod tests {
     #[test]
     fn is_identity_match_uses_text_edit_first() {
         // text_edit.new_text wins over insert_text and label.
-        let with_edit = CompletionItem {
+        let with_edit = Completion {
             label: Arc::<str>::from("label"),
             detail: None,
             sort_text: None,
             insert_text: Some(Arc::<str>::from("insert")),
-            text_edit: Some(CompletionTextEdit {
+            text_edit: Some(CompletionEdit {
                 line: 0,
                 col_start: 0,
                 col_end: 5,

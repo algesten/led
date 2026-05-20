@@ -1,4 +1,4 @@
-use led_driver_terminal_core::{Attrs, Color, CompletionPopupModel, Dims, Rect, Style, Theme};
+use led_driver_terminal_core::{CompletionPopupModel, Dims, Rect, Style, Theme};
 
 use crate::buffer::Buffer;
 
@@ -10,78 +10,51 @@ use crate::buffer::Buffer;
 /// both axes.
 pub(crate) fn paint_completion_popup(
     comp: &CompletionPopupModel,
-    editor_area: Rect,
+    _editor_area: Rect,
     dims: Dims,
-    _theme: &Theme,
+    theme: &Theme,
     buf: &mut Buffer,
 ) {
     if comp.rows.is_empty() {
         return;
     }
 
-    // Dimensions. Outer width = label col + 2 (gap) + detail
-    // col (when any row has a detail) + 2 (inner padding, 1 col
-    // each side). Cap at the editor area so the popup never
-    // overflows the sidebar / tab-bar region.
+    // Placement (x, y, outer_w) is fully decided by the runtime
+    // memo. The painter only re-clamps to the physical terminal
+    // — the editor area is already accounted for by the memo,
+    // but the OS terminal might be smaller (mid-resize).
     let label_w = comp.label_width as usize;
     let detail_w = comp.detail_width as usize;
     let gap = if detail_w > 0 { 2 } else { 0 };
-    let content_w = label_w + gap + detail_w;
-    let outer_w = (content_w + 2)
-        .min(editor_area.cols as usize)
-        .max(3);
-    let height = comp.rows.len();
-
-    // X: clamp so the right edge doesn't leave the editor area.
-    let area_right = editor_area.x.saturating_add(editor_area.cols);
-    let max_x = area_right.saturating_sub(outer_w as u16);
-    let x = comp.anchor.0.min(max_x).max(editor_area.x);
-    // Y: prefer below the anchor. If it'd overflow the bottom
-    // of the editor area, flip above.
-    let below = comp.anchor.1.saturating_add(1);
-    let area_bottom = editor_area.y.saturating_add(editor_area.rows);
-    let y_below = below.min(area_bottom.saturating_sub(height as u16));
-    let y = if below.saturating_add(height as u16) <= area_bottom {
-        y_below
-    } else if comp.anchor.1 >= editor_area.y.saturating_add(height as u16) {
-        comp.anchor.1.saturating_sub(height as u16)
-    } else {
-        // Neither above nor below has room — paint what we can
-        // starting at the top of the editor area.
-        editor_area.y
-    };
+    let outer_w_model = comp.outer_width as usize;
+    let x = comp.placement.x;
+    let y = comp.placement.y;
 
     // Guard: terminal smaller than our anchor.
     if x >= dims.cols || y >= dims.rows {
         return;
     }
-    let outer_w = outer_w.min((dims.cols.saturating_sub(x)) as usize);
+    let outer_w = outer_w_model.min((dims.cols.saturating_sub(x)) as usize);
     if outer_w < 3 {
         return;
     }
-    let height = height.min((dims.rows.saturating_sub(y)) as usize);
+    let height = comp.rows.len().min((dims.rows.saturating_sub(y)) as usize);
     if height == 0 {
         return;
     }
 
-    // Styles: dark-gray normal, blue-bg selected. Hardcoded to
-    // match legacy until `theme.completion_*` lands.
-    let bg_normal = Color::Indexed(236); // dark gray
-    let fg_normal = Color::Indexed(253); // near-white
-    let bg_selected = Color::Indexed(24); // muted blue
-    let fg_selected = Color::Indexed(231); // bright white
-    let fg_detail = Color::Indexed(244); // dim gray
+    // Per-row base style: the bg-style for normal vs selected
+    // rows is pulled from theme; the text style (label fg/attrs)
+    // overlays on top so users can tint label fg independently of
+    // the row's bg if they want.
+    let base_normal = compose_row_style(theme.completion_bg_normal, theme.completion_text_normal);
+    let base_selected =
+        compose_row_style(theme.completion_bg_selected, theme.completion_text_selected);
 
     for (i, row) in comp.rows.iter().take(height).enumerate() {
         let row_y = y + i as u16;
         let is_selected = i == comp.selected;
-        let bg = if is_selected { bg_selected } else { bg_normal };
-        let fg = if is_selected { fg_selected } else { fg_normal };
-        let base = Style {
-            fg: Some(fg),
-            bg: Some(bg),
-            attrs: Attrs::default(),
-        };
+        let base = if is_selected { base_selected } else { base_normal };
         // Leading inner-padding space, label, label padding,
         // gap, detail + its pad, trailing inner-padding space.
         let mut col = x;
@@ -106,10 +79,14 @@ pub(crate) fn paint_completion_popup(
         let detail_style = if is_selected {
             base
         } else {
+            // Detail-column fg overlays the normal row bg so the
+            // dim-grey reads cleanly against the dark fill. Falls
+            // back to the base fg if the user clears `completion_
+            // detail.fg` from theme.toml.
             Style {
-                fg: Some(fg_detail),
-                bg: Some(bg),
-                attrs: Attrs::default(),
+                fg: theme.completion_detail.fg.or(base.fg),
+                bg: base.bg,
+                attrs: theme.completion_detail.attrs,
             }
         };
         let detail_printed = if let Some(d) = row.detail.as_ref() {
@@ -129,5 +106,23 @@ pub(crate) fn paint_completion_popup(
             buf.put_char(row_y, col, ' ', base);
             col = col.saturating_add(1);
         }
+    }
+}
+
+/// Compose the bg-style and text-style for one completion row into
+/// a single [`Style`]. The bg-style owns the row's bg + the
+/// default fg; the text-style is an optional override that lets a
+/// theme set a label colour distinct from the row's bg, without
+/// having to repeat the bg in two slots. Attributes from the
+/// text-style are merged on top of the bg-style's attrs.
+fn compose_row_style(bg_style: Style, text_style: Style) -> Style {
+    Style {
+        fg: text_style.fg.or(bg_style.fg),
+        bg: bg_style.bg,
+        attrs: if text_style.attrs == Default::default() {
+            bg_style.attrs
+        } else {
+            text_style.attrs
+        },
     }
 }

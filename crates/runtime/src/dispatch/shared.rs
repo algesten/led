@@ -4,7 +4,8 @@
 //! `undo`, …) can call them without re-exporting. Nothing here is part
 //! of the dispatch public API.
 
-use led_core::{CanonPath, char_to_grapheme_col, col_to_sub_line, grapheme_col_to_char};
+use led_core::CanonPath;
+use led_text_layout::{char_to_grapheme_col, col_to_sub_line, grapheme_col_to_char};
 use led_driver_terminal_core::{Layout, Terminal};
 use led_state_browser::BrowserUi;
 use led_state_buffer_edits::{BufferEdits, EditedBuffer};
@@ -142,10 +143,12 @@ where
 }
 
 /// Replace the buffer's rope with a new one and bump `version`.
-/// `saved_version` is untouched — `dirty()` derives as `version >
-/// saved_version`.
+/// `saved_version` is untouched — `dirty()` derives from the
+/// `live_content_hash` vs `disk_content_hash` comparison, which
+/// we restamp here so memos can read the cached value instead of
+/// walking the rope per tick.
 pub(super) fn bump(eb: &mut EditedBuffer, new_rope: Rope) {
-    eb.rope = Arc::new(new_rope);
+    eb.set_draft(Arc::new(new_rope));
     eb.version.0 = eb.version.0.saturating_add(1);
 }
 
@@ -229,7 +232,7 @@ pub(super) fn line_grapheme_len(rope: &Rope, line: usize) -> usize {
     if line >= rope.len_lines() {
         return 0;
     }
-    led_core::line_grapheme_len(rope.line(line))
+    led_text_layout::line_grapheme_len(rope.line(line))
 }
 
 pub(super) fn is_word_char(c: char) -> bool {

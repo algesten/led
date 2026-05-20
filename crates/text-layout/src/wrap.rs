@@ -37,15 +37,9 @@
 //! grapheme col).
 
 use crate::grapheme::grapheme_display_width;
+use led_core::SubLine;
 use ropey::RopeSlice;
 use unicode_segmentation::UnicodeSegmentation;
-
-/// 0-based index of a sub-line within its enclosing logical line.
-#[derive(
-    Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord, drv::Input,
-    serde::Serialize, serde::Deserialize,
-)]
-pub struct SubLine(pub usize);
 
 /// One sub-line's footprint.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

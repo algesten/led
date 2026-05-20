@@ -11,15 +11,16 @@ use std::sync::Arc;
 
 use led_core::{CanonPath, UserPath};
 use led_driver_buffers_core::{BufferStore, LoadState};
+use led_driver_fs_list_core::FsTree;
 use led_driver_terminal_core::{Dims, KeyCode, KeyEvent, KeyModifiers, Terminal};
 use led_state_alerts::AlertState;
-use led_state_browser::{BrowserUi, FsTree};
+use led_state_browser::BrowserUi;
 use led_state_buffer_edits::{BufferEdits, EditedBuffer};
-use led_state_clipboard::ClipboardState;
+use led_state_clipboard::ClipboardIntent;
 use led_state_completions::{CompletionsPending, CompletionsState};
 use led_state_file_search::FileSearchState;
 use led_state_find_file::FindFileState;
-use led_state_diagnostics::DiagnosticsStates;
+use led_driver_lsp_core::DiagnosticsStates;
 use led_state_git::GitState;
 use led_state_isearch::IsearchState;
 use led_state_jumps::JumpListState;
@@ -75,7 +76,10 @@ pub(super) fn fixture_with_content(
     let mut edits = BufferEdits::default();
     edits
         .buffers
-        .insert(canon("file.rs"), EditedBuffer::fresh(rope.clone()));
+        .insert(
+            canon("file.rs"),
+            EditedBuffer::fresh(led_state_buffer_edits::Persisted(rope.clone())),
+        );
     let mut store = BufferStore::default();
     store
         .loaded
@@ -95,7 +99,8 @@ pub(super) fn rope_of(edits: &BufferEdits, path: &str) -> Arc<Rope> {
         .buffers
         .get(&canon(path))
         .expect("seeded")
-        .rope
+        .draft
+        .as_rope()
         .clone()
 }
 
@@ -122,7 +127,8 @@ pub(super) fn dispatch_default(
     let mut chord = ChordState::default();
     let mut kbd_macro = led_state_kbd_macro::KbdMacroState::default();
     let mut kill_ring = KillRing::default();
-    let mut clip = ClipboardState::default();
+    let mut clip = ClipboardIntent::default();
+    let clipboard_driver = led_driver_clipboard_core::ClipboardState::default();
     let mut alerts = AlertState::default();
     let mut jumps = JumpListState::default();
     let mut browser = BrowserUi::default();
@@ -136,15 +142,17 @@ pub(super) fn dispatch_default(
     let mut lsp_extras = LspExtrasState::default();
     let mut lsp_pending = LspPending::default();
     let diagnostics = DiagnosticsStates::default();
-    let lsp_status = led_state_diagnostics::LspStatuses::default();
+    let lsp_status = led_driver_lsp_core::LspStatuses::default();
     let git = GitState::default();
     let keymap = default_keymap();
     let syntax = led_state_syntax::SyntaxStates::default();
+    let clock = crate::Clock::default();
     let mut dispatcher = Dispatcher {
         tabs,
         edits,
         kill_ring: &mut kill_ring,
         clip: &mut clip,
+        clipboard_driver: &clipboard_driver,
         alerts: &mut alerts,
         jumps: &mut jumps,
         browser: &mut browser,
@@ -166,6 +174,7 @@ pub(super) fn dispatch_default(
         chord: &mut chord,
         kbd_macro: &mut kbd_macro,
         syntax: &syntax,
+        clock: &clock,
     };
     dispatcher.dispatch_key(k)
 }
@@ -185,7 +194,8 @@ pub(super) fn dispatch_chord_default(
     let mut chord = ChordState::default();
     let mut kbd_macro = led_state_kbd_macro::KbdMacroState::default();
     let mut kill_ring = KillRing::default();
-    let mut clip = ClipboardState::default();
+    let mut clip = ClipboardIntent::default();
+    let clipboard_driver = led_driver_clipboard_core::ClipboardState::default();
     let mut alerts = AlertState::default();
     let mut jumps = JumpListState::default();
     let mut browser = BrowserUi::default();
@@ -199,14 +209,16 @@ pub(super) fn dispatch_chord_default(
     let mut lsp_extras = LspExtrasState::default();
     let mut lsp_pending = LspPending::default();
     let diagnostics = DiagnosticsStates::default();
-    let lsp_status = led_state_diagnostics::LspStatuses::default();
+    let lsp_status = led_driver_lsp_core::LspStatuses::default();
     let git = GitState::default();
     let syntax = led_state_syntax::SyntaxStates::default();
+    let clock = crate::Clock::default();
     let mut dispatcher = Dispatcher {
         tabs,
         edits,
         kill_ring: &mut kill_ring,
         clip: &mut clip,
+        clipboard_driver: &clipboard_driver,
         alerts: &mut alerts,
         jumps: &mut jumps,
         browser: &mut browser,
@@ -228,6 +240,7 @@ pub(super) fn dispatch_chord_default(
         chord: &mut chord,
         kbd_macro: &mut kbd_macro,
         syntax: &syntax,
+        clock: &clock,
     };
     dispatcher.dispatch_key(prefix);
     dispatcher.dispatch_key(second)
@@ -240,12 +253,13 @@ pub(super) fn dispatch_with_ring(
     tabs: &mut Tabs,
     edits: &mut BufferEdits,
     kill_ring: &mut KillRing,
-    clip: &mut ClipboardState,
+    clip: &mut ClipboardIntent,
     store: &BufferStore,
     terminal: &Terminal,
 ) -> DispatchOutcome {
     let mut chord = ChordState::default();
     let mut kbd_macro = led_state_kbd_macro::KbdMacroState::default();
+    let clipboard_driver = led_driver_clipboard_core::ClipboardState::default();
     let mut alerts = AlertState::default();
     let mut jumps = JumpListState::default();
     let mut browser = BrowserUi::default();
@@ -259,15 +273,17 @@ pub(super) fn dispatch_with_ring(
     let mut lsp_extras = LspExtrasState::default();
     let mut lsp_pending = LspPending::default();
     let diagnostics = DiagnosticsStates::default();
-    let lsp_status = led_state_diagnostics::LspStatuses::default();
+    let lsp_status = led_driver_lsp_core::LspStatuses::default();
     let git = GitState::default();
     let keymap = default_keymap();
     let syntax = led_state_syntax::SyntaxStates::default();
+    let clock = crate::Clock::default();
     let mut dispatcher = Dispatcher {
         tabs,
         edits,
         kill_ring,
         clip,
+        clipboard_driver: &clipboard_driver,
         alerts: &mut alerts,
         jumps: &mut jumps,
         browser: &mut browser,
@@ -289,6 +305,7 @@ pub(super) fn dispatch_with_ring(
         chord: &mut chord,
         kbd_macro: &mut kbd_macro,
         syntax: &syntax,
+        clock: &clock,
     };
     dispatcher.dispatch_key(k)
 }
@@ -298,7 +315,8 @@ pub(super) fn dispatch_with_ring(
 pub(super) fn noop_dispatch(k: KeyEvent, tabs: &mut Tabs) -> DispatchOutcome {
     let mut edits = BufferEdits::default();
     let mut kill_ring = KillRing::default();
-    let mut clip = ClipboardState::default();
+    let mut clip = ClipboardIntent::default();
+    let clipboard_driver = led_driver_clipboard_core::ClipboardState::default();
     let mut alerts = AlertState::default();
     let mut jumps = JumpListState::default();
     let mut browser = BrowserUi::default();
@@ -317,14 +335,16 @@ pub(super) fn noop_dispatch(k: KeyEvent, tabs: &mut Tabs) -> DispatchOutcome {
     let mut lsp_extras = LspExtrasState::default();
     let mut lsp_pending = LspPending::default();
     let diagnostics = DiagnosticsStates::default();
-    let lsp_status = led_state_diagnostics::LspStatuses::default();
+    let lsp_status = led_driver_lsp_core::LspStatuses::default();
     let git = GitState::default();
     let syntax = led_state_syntax::SyntaxStates::default();
+    let clock = crate::Clock::default();
     let mut dispatcher = Dispatcher {
         tabs,
         edits: &mut edits,
         kill_ring: &mut kill_ring,
         clip: &mut clip,
+        clipboard_driver: &clipboard_driver,
         alerts: &mut alerts,
         jumps: &mut jumps,
         browser: &mut browser,
@@ -346,6 +366,7 @@ pub(super) fn noop_dispatch(k: KeyEvent, tabs: &mut Tabs) -> DispatchOutcome {
         chord: &mut chord,
         kbd_macro: &mut kbd_macro,
         syntax: &syntax,
+        clock: &clock,
     };
     dispatcher.dispatch_key(k)
 }
@@ -369,7 +390,8 @@ pub(super) struct MacroDispatcherFixture {
     pub store: BufferStore,
     pub terminal: Terminal,
     kill_ring: KillRing,
-    clip: ClipboardState,
+    clip: ClipboardIntent,
+    clipboard_driver: led_driver_clipboard_core::ClipboardState,
     jumps: JumpListState,
     browser: BrowserUi,
     fs: FsTree,
@@ -382,10 +404,11 @@ pub(super) struct MacroDispatcherFixture {
     lsp_extras: LspExtrasState,
     lsp_pending: LspPending,
     diagnostics: DiagnosticsStates,
-    lsp_status: led_state_diagnostics::LspStatuses,
+    lsp_status: led_driver_lsp_core::LspStatuses,
     git: GitState,
     keymap: crate::keymap::Keymap,
     pub syntax: led_state_syntax::SyntaxStates,
+    pub clock: crate::Clock,
 }
 
 impl MacroDispatcherFixture {
@@ -407,7 +430,8 @@ impl MacroDispatcherFixture {
             store,
             terminal,
             kill_ring: KillRing::default(),
-            clip: ClipboardState::default(),
+            clip: ClipboardIntent::default(),
+            clipboard_driver: led_driver_clipboard_core::ClipboardState::default(),
             jumps: JumpListState::default(),
             browser: BrowserUi::default(),
             fs: FsTree::default(),
@@ -420,10 +444,11 @@ impl MacroDispatcherFixture {
             lsp_extras: LspExtrasState::default(),
             lsp_pending: LspPending::default(),
             diagnostics: DiagnosticsStates::default(),
-            lsp_status: led_state_diagnostics::LspStatuses::default(),
+            lsp_status: led_driver_lsp_core::LspStatuses::default(),
             git: GitState::default(),
             keymap: default_keymap(),
             syntax: led_state_syntax::SyntaxStates::default(),
+            clock: crate::Clock::default(),
         }
     }
 
@@ -433,6 +458,7 @@ impl MacroDispatcherFixture {
             edits: &mut self.edits,
             kill_ring: &mut self.kill_ring,
             clip: &mut self.clip,
+            clipboard_driver: &self.clipboard_driver,
             alerts: &mut self.alerts,
             jumps: &mut self.jumps,
             browser: &mut self.browser,
@@ -454,6 +480,7 @@ impl MacroDispatcherFixture {
             chord: &mut self.chord,
             kbd_macro: &mut self.kbd_macro,
             syntax: &self.syntax,
+            clock: &self.clock,
         };
         dispatcher.dispatch_key(k)
     }

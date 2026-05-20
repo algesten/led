@@ -18,3 +18,4 @@ publish = false
 drv = { workspace = true }
 led-core = { workspace = true }
 led-state-tabs = { workspace = true }
+led-state-text-input = { workspace = true }

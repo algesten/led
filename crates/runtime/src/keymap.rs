@@ -14,13 +14,11 @@
 use led_driver_terminal_core::{KeyCode, KeyEvent, KeyModifiers};
 use std::collections::HashMap;
 
-// `Command` and the `parse_command` config parser live in
-// `led-core` so that crates which only need the command
-// vocabulary (e.g. `state-kbd-macro/`) can depend on `core/`
-// alone, avoiding a cyclic dep on `runtime/`. Re-exported here
-// so `use crate::keymap::{Command, parse_command};` keeps
-// working unchanged across the runtime.
-pub use led_core::{Command, parse_command};
+// `Command` lives in `led-abi-command` — a tiny leaf crate that
+// keyboard-macro state can depend on without dragging in the rest
+// of `led-core`. Re-exported here so `use crate::keymap::Command;`
+// keeps working unchanged across the runtime.
+pub use led_abi_command::Command;
 
 /// Two-level key → command binding set. `direct` maps single keys to
 /// commands; `chords` maps a prefix key to a nested table mapping
@@ -506,6 +504,88 @@ fn code_string(c: &KeyCode) -> String {
     }
 }
 
+// ── Command-string parsing ─────────────────────────────────────────────
+
+/// Parse a snake-case command string into a [`Command`].
+///
+/// Names match legacy led's Action enum: `move_up`, `line_start`,
+/// `delete_backward`, etc. — so user `keys.toml` files port over
+/// unchanged. Unknown strings are a parse error at config load time.
+/// `InsertChar` is deliberately not reachable via this parser — it
+/// exists only as the fallback path in dispatch.
+pub fn parse_command(s: &str) -> Result<Command, String> {
+    match s {
+        "quit" => Ok(Command::Quit),
+        "abort" => Ok(Command::Abort),
+        "suspend" => Ok(Command::Suspend),
+        "save" => Ok(Command::Save),
+        "save_all" => Ok(Command::SaveAll),
+        "save_no_format" => Ok(Command::SaveNoFormat),
+        "next_tab" => Ok(Command::TabNext),
+        "prev_tab" => Ok(Command::TabPrev),
+        "kill_buffer" => Ok(Command::KillBuffer),
+        "move_up" => Ok(Command::CursorUp),
+        "move_down" => Ok(Command::CursorDown),
+        "move_left" => Ok(Command::CursorLeft),
+        "move_right" => Ok(Command::CursorRight),
+        "line_start" => Ok(Command::CursorLineStart),
+        "line_end" => Ok(Command::CursorLineEnd),
+        "page_up" => Ok(Command::CursorPageUp),
+        "page_down" => Ok(Command::CursorPageDown),
+        "file_start" => Ok(Command::CursorFileStart),
+        "file_end" => Ok(Command::CursorFileEnd),
+        "word_left" => Ok(Command::CursorWordLeft),
+        "word_right" => Ok(Command::CursorWordRight),
+        "insert_newline" => Ok(Command::InsertNewline),
+        "delete_backward" => Ok(Command::DeleteBack),
+        "delete_forward" => Ok(Command::DeleteForward),
+        "insert_tab" => Ok(Command::InsertTab),
+        "reflow_paragraph" => Ok(Command::ReflowParagraph),
+        "sort_imports" => Ok(Command::SortImports),
+        "set_mark" => Ok(Command::SetMark),
+        "kill_region" => Ok(Command::KillRegion),
+        "kill_line" => Ok(Command::KillLine),
+        "yank" => Ok(Command::Yank),
+        "undo" => Ok(Command::Undo),
+        "redo" => Ok(Command::Redo),
+        "jump_back" => Ok(Command::JumpBack),
+        "jump_forward" => Ok(Command::JumpForward),
+        "match_bracket" => Ok(Command::MatchBracket),
+        "next_issue" => Ok(Command::NextIssue),
+        "prev_issue" => Ok(Command::PrevIssue),
+        "expand_dir" => Ok(Command::ExpandDir),
+        "collapse_dir" => Ok(Command::CollapseDir),
+        "collapse_all" => Ok(Command::CollapseAll),
+        "open_selected" => Ok(Command::OpenSelected),
+        "open_selected_bg" => Ok(Command::OpenSelectedBg),
+        "toggle_side_panel" => Ok(Command::ToggleSidePanel),
+        "toggle_focus" => Ok(Command::ToggleFocus),
+        "find_file" => Ok(Command::FindFile),
+        "save_as" => Ok(Command::SaveAs),
+        "find_file_tab_complete" => Ok(Command::FindFileTabComplete),
+        "in_buffer_search" => Ok(Command::InBufferSearch),
+        "open_file_search" => Ok(Command::OpenFileSearch),
+        "close_file_search" => Ok(Command::CloseFileSearch),
+        "toggle_search_case" => Ok(Command::ToggleSearchCase),
+        "toggle_search_regex" => Ok(Command::ToggleSearchRegex),
+        "toggle_search_replace" => Ok(Command::ToggleSearchReplace),
+        "replace_all" => Ok(Command::ReplaceAll),
+        "lsp_goto_definition" => Ok(Command::LspGotoDefinition),
+        "lsp_rename" => Ok(Command::LspRename),
+        "lsp_code_action" => Ok(Command::LspCodeAction),
+        "lsp_toggle_inlay_hints" => Ok(Command::LspToggleInlayHints),
+        "lsp_format" => Ok(Command::LspFormat),
+        "outline" => Ok(Command::Outline),
+        "kbd_macro_start" => Ok(Command::KbdMacroStart),
+        "kbd_macro_end" => Ok(Command::KbdMacroEnd),
+        "kbd_macro_execute" => Ok(Command::KbdMacroExecute),
+        // `wait` deliberately omitted from the parser — Wait(u64) carries
+        // a payload, so user keymaps can't bind it via plain string lookup.
+        // Tests and a future harness-only path may construct it directly.
+        other => Err(format!("unknown command `{other}`")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -680,5 +760,44 @@ mod tests {
     fn keymap_unknown_key_yields_none() {
         let m = default_keymap();
         assert_eq!(m.lookup_direct(&parse_key("f7").unwrap()), None);
+    }
+
+    // ── Command-string parsing ─────────────────────────────────────
+
+    #[test]
+    fn parse_all_known_commands() {
+        let cases = [
+            ("quit", Command::Quit),
+            ("suspend", Command::Suspend),
+            ("save", Command::Save),
+            ("next_tab", Command::TabNext),
+            ("prev_tab", Command::TabPrev),
+            ("move_up", Command::CursorUp),
+            ("move_down", Command::CursorDown),
+            ("move_left", Command::CursorLeft),
+            ("move_right", Command::CursorRight),
+            ("line_start", Command::CursorLineStart),
+            ("line_end", Command::CursorLineEnd),
+            ("page_up", Command::CursorPageUp),
+            ("page_down", Command::CursorPageDown),
+            ("insert_newline", Command::InsertNewline),
+            ("delete_backward", Command::DeleteBack),
+            ("delete_forward", Command::DeleteForward),
+            ("insert_tab", Command::InsertTab),
+            ("reflow_paragraph", Command::ReflowParagraph),
+            ("sort_imports", Command::SortImports),
+            ("kbd_macro_start", Command::KbdMacroStart),
+            ("kbd_macro_end", Command::KbdMacroEnd),
+            ("kbd_macro_execute", Command::KbdMacroExecute),
+        ];
+        for (s, expected) in cases {
+            assert_eq!(parse_command(s).unwrap(), expected, "command `{s}`");
+        }
+    }
+
+    #[test]
+    fn parse_command_rejects_unknown() {
+        let err = parse_command("explode").unwrap_err();
+        assert!(err.contains("unknown command"));
     }
 }

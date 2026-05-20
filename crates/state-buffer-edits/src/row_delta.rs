@@ -383,7 +383,7 @@ fn invert_op(doc: &mut Rope, op: &EditOp) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::EditedBuffer;
+    use crate::{Draft, EditedBuffer, Persisted};
     use led_core::EphemeralContentHash;
     use led_state_tabs::Cursor;
     use std::sync::Arc;
@@ -399,7 +399,7 @@ mod tests {
     #[test]
     fn empty_history_yields_unchanged() {
         let rope = Arc::new(Rope::from_str("a\nb\nc\n"));
-        let eb = EditedBuffer::fresh(rope.clone());
+        let eb = EditedBuffer::fresh(Persisted(rope.clone()));
         let h = EphemeralContentHash::of_rope(&rope).persist();
         let delta = eb.row_delta_for(h).expect("save-point would normally be set on save; the fresh buffer has none — skip via fast-path in caller");
         let _ = delta;
@@ -456,11 +456,11 @@ mod tests {
     #[test]
     fn build_no_groups_returns_default() {
         let rope = Arc::new(Rope::from_str("hello\n"));
-        let mut eb = EditedBuffer::fresh(rope.clone());
+        let mut eb = EditedBuffer::fresh(Persisted(rope.clone()));
         let h = EphemeralContentHash::of_rope(&rope).persist();
         eb.history.insert_save_point(h);
         let save_idx = eb.history.find_save_point(h).unwrap();
-        let delta = build_row_delta(&eb.history, save_idx, &eb.rope, eb.version);
+        let delta = build_row_delta(&eb.history, save_idx, eb.draft.as_rope(), eb.version);
         assert!(delta.is_unchanged());
     }
 
@@ -469,12 +469,13 @@ mod tests {
         // hello\n  → he-X-llo\n (insert 'X' at char 2)
         let rope = Arc::new(Rope::from_str("hello\n"));
         let h = EphemeralContentHash::of_rope(&rope).persist();
-        let mut eb = EditedBuffer::fresh(rope);
+        let mut eb = EditedBuffer::fresh(Persisted(rope));
         eb.history.insert_save_point(h);
 
-        let mut r: Rope = (*eb.rope).clone();
+        let mut r: Rope = (**eb.draft.as_rope()).clone();
         r.insert_char(2, 'X');
-        eb.rope = Arc::new(r);
+        eb.draft = Draft(Arc::new(r));
+        eb.live_content_hash = EphemeralContentHash::of_rope(eb.draft.as_rope()).persist();
         eb.version = BufferVersion(1);
         eb.history.record_insert_char(2, 'X', cur(0, 2), cur(0, 3));
         eb.history.finalise();
@@ -490,12 +491,13 @@ mod tests {
         // a\nb\n → a\nX\nb\n (insert "X\n" at char 2)
         let rope = Arc::new(Rope::from_str("a\nb\n"));
         let h = EphemeralContentHash::of_rope(&rope).persist();
-        let mut eb = EditedBuffer::fresh(rope);
+        let mut eb = EditedBuffer::fresh(Persisted(rope));
         eb.history.insert_save_point(h);
 
-        let mut r: Rope = (*eb.rope).clone();
+        let mut r: Rope = (**eb.draft.as_rope()).clone();
         r.insert(2, "X\n");
-        eb.rope = Arc::new(r);
+        eb.draft = Draft(Arc::new(r));
+        eb.live_content_hash = EphemeralContentHash::of_rope(eb.draft.as_rope()).persist();
         eb.version = BufferVersion(1);
         eb.history
             .record_insert(2, Arc::<str>::from("X\n"), cur(1, 0), cur(2, 0));
@@ -515,7 +517,7 @@ mod tests {
     #[test]
     fn no_save_point_returns_none() {
         let rope = Arc::new(Rope::from_str("hello\n"));
-        let eb = EditedBuffer::fresh(rope);
+        let eb = EditedBuffer::fresh(Persisted(rope));
         let bogus = led_core::PersistedContentHash(0xDEADBEEF);
         assert!(eb.row_delta_for(bogus).is_none());
     }
@@ -524,7 +526,7 @@ mod tests {
     fn fast_path_when_buffer_matches_anchor() {
         let rope = Arc::new(Rope::from_str("a\nb\n"));
         let h = EphemeralContentHash::of_rope(&rope).persist();
-        let eb = EditedBuffer::fresh(rope);
+        let eb = EditedBuffer::fresh(Persisted(rope));
         // No save-point set, but the rope still hashes to `h`,
         // so the fast path returns an unchanged delta.
         let delta = eb.row_delta_for(h).expect("fast path");
@@ -536,12 +538,13 @@ mod tests {
         // abc\n  → ab + X\n + Y + c\n
         let rope = Arc::new(Rope::from_str("abc\n"));
         let h = EphemeralContentHash::of_rope(&rope).persist();
-        let mut eb = EditedBuffer::fresh(rope);
+        let mut eb = EditedBuffer::fresh(Persisted(rope));
         eb.history.insert_save_point(h);
 
-        let mut r: Rope = (*eb.rope).clone();
+        let mut r: Rope = (**eb.draft.as_rope()).clone();
         r.insert(2, "X\nY");
-        eb.rope = Arc::new(r);
+        eb.draft = Draft(Arc::new(r));
+        eb.live_content_hash = EphemeralContentHash::of_rope(eb.draft.as_rope()).persist();
         eb.version = BufferVersion(1);
         eb.history
             .record_insert(2, Arc::<str>::from("X\nY"), cur(0, 2), cur(1, 1));
@@ -560,12 +563,13 @@ mod tests {
         // a\nb\n → ab\n  (delete '\n' at char 1)
         let rope = Arc::new(Rope::from_str("a\nb\n"));
         let h = EphemeralContentHash::of_rope(&rope).persist();
-        let mut eb = EditedBuffer::fresh(rope);
+        let mut eb = EditedBuffer::fresh(Persisted(rope));
         eb.history.insert_save_point(h);
 
-        let mut r: Rope = (*eb.rope).clone();
+        let mut r: Rope = (**eb.draft.as_rope()).clone();
         r.remove(1..2);
-        eb.rope = Arc::new(r);
+        eb.draft = Draft(Arc::new(r));
+        eb.live_content_hash = EphemeralContentHash::of_rope(eb.draft.as_rope()).persist();
         eb.version = BufferVersion(1);
         eb.history
             .record_delete(1, Arc::<str>::from("\n"), cur(0, 1), cur(0, 1));

@@ -276,7 +276,7 @@ pub(super) fn run_overlay_command(
 /// Pick which `TextInput` the current selection points at.
 fn input_for_selection(
     state: &mut FileSearchState,
-) -> &mut led_core::TextInput {
+) -> &mut led_state_text_input::TextInput {
     match state.selection {
         FileSearchSelection::ReplaceInput => &mut state.replace,
         // Result rows don't have an input — typing there falls
@@ -673,15 +673,15 @@ mod tests {
         let mut edits = BufferEdits::default();
         edits.buffers.insert(
             path_match.clone(),
-            EditedBuffer::fresh(std::sync::Arc::new(ropey::Rope::from_str(
+            EditedBuffer::fresh(led_state_buffer_edits::Persisted(std::sync::Arc::new(ropey::Rope::from_str(
                 "foo here\nand foo\n",
-            ))),
+            )))),
         );
         edits.buffers.insert(
             path_other.clone(),
-            EditedBuffer::fresh(std::sync::Arc::new(ropey::Rope::from_str(
+            EditedBuffer::fresh(led_state_buffer_edits::Persisted(std::sync::Arc::new(ropey::Rope::from_str(
                 "no match\n",
-            ))),
+            )))),
         );
 
         // Query/toggles that will match "foo" literally. results
@@ -731,10 +731,10 @@ mod tests {
 
         // In-memory: matched buffer got rewritten, stage counted 2.
         assert_eq!(
-            edits.buffers[&path_match].rope.to_string(),
+            edits.buffers[&path_match].draft.to_string(),
             "BAR here\nand BAR\n",
         );
-        assert_eq!(edits.buffers[&path_other].rope.to_string(), "no match\n");
+        assert_eq!(edits.buffers[&path_other].draft.to_string(), "no match\n");
         assert_eq!(edits.pending_replace_in_memory.len(), 1);
         assert_eq!(edits.pending_replace_in_memory[0].path, path_match);
         assert_eq!(edits.pending_replace_in_memory[0].count, 2);
@@ -762,9 +762,9 @@ mod tests {
         let mut edits = BufferEdits::default();
         edits.buffers.insert(
             path.clone(),
-            EditedBuffer::fresh(std::sync::Arc::new(ropey::Rope::from_str(
+            EditedBuffer::fresh(led_state_buffer_edits::Persisted(std::sync::Arc::new(ropey::Rope::from_str(
                 "alpha foo\n",
-            ))),
+            )))),
         );
 
         let mut state = FileSearchState::default();
@@ -785,7 +785,7 @@ mod tests {
 
         apply_replace_all(&state, &tabs, &mut edits, None);
 
-        assert_eq!(edits.buffers[&path].rope.to_string(), "alpha BAR\n");
+        assert_eq!(edits.buffers[&path].draft.to_string(), "alpha BAR\n");
         assert_eq!(edits.pending_replace_in_memory.len(), 1);
         assert!(edits.pending_replace_all.is_empty());
     }
@@ -830,9 +830,9 @@ mod tests {
         let mut edits = BufferEdits::default();
         edits.buffers.insert(
             path.clone(),
-            EditedBuffer::fresh(std::sync::Arc::new(ropey::Rope::from_str(
+            EditedBuffer::fresh(led_state_buffer_edits::Persisted(std::sync::Arc::new(ropey::Rope::from_str(
                 "alpha foo beta\n",
-            ))),
+            )))),
         );
 
         let mut state = fs_state_with_hit_in(
@@ -859,7 +859,7 @@ mod tests {
         replace_selected(&mut state, &mut tabs, &mut edits);
 
         // Rope mutated.
-        assert_eq!(edits.buffers[&path].rope.to_string(), "alpha BAR beta\n");
+        assert_eq!(edits.buffers[&path].draft.to_string(), "alpha BAR beta\n");
         // Hits list UNCHANGED in length — the replaced row stays
         // visible.
         assert_eq!(state.flat_hits.len(), 2);
@@ -878,9 +878,9 @@ mod tests {
         let mut edits = BufferEdits::default();
         edits.buffers.insert(
             path.clone(),
-            EditedBuffer::fresh(std::sync::Arc::new(ropey::Rope::from_str(
+            EditedBuffer::fresh(led_state_buffer_edits::Persisted(std::sync::Arc::new(ropey::Rope::from_str(
                 "alpha foo beta\n",
-            ))),
+            )))),
         );
         let mut state = fs_state_with_hit_in(
             &path,
@@ -894,7 +894,7 @@ mod tests {
 
         // Forward: replace.
         replace_selected(&mut state, &mut tabs, &mut edits);
-        assert_eq!(edits.buffers[&path].rope.to_string(), "alpha BAR beta\n");
+        assert_eq!(edits.buffers[&path].draft.to_string(), "alpha BAR beta\n");
         assert!(state.hit_replacements[0].is_some());
 
         // Selection wrapped back to 0 (the only hit, already
@@ -903,7 +903,7 @@ mod tests {
         assert_eq!(state.selection, FileSearchSelection::Result(0));
         unreplace_selected(&mut state, &mut tabs, &mut edits);
 
-        assert_eq!(edits.buffers[&path].rope.to_string(), "alpha foo beta\n");
+        assert_eq!(edits.buffers[&path].draft.to_string(), "alpha foo beta\n");
         assert!(state.hit_replacements[0].is_none());
         // flat_hits still contains the row — undo doesn't add or
         // remove rows.
@@ -1004,9 +1004,9 @@ mod tests {
         let mut edits = BufferEdits::default();
         edits.buffers.insert(
             path.clone(),
-            EditedBuffer::fresh(std::sync::Arc::new(ropey::Rope::from_str(
+            EditedBuffer::fresh(led_state_buffer_edits::Persisted(std::sync::Arc::new(ropey::Rope::from_str(
                 "alpha foo beta\n",
-            ))),
+            )))),
         );
         let mut state = fs_state_with_hit_in(
             &path,
@@ -1044,14 +1044,14 @@ mod tests {
         edits.buffers.insert(
             a_path.clone(),
             EditedBuffer::fresh_with_seq_gen(
-                std::sync::Arc::new(ropey::Rope::from_str(a_content)),
+                led_state_buffer_edits::Persisted(std::sync::Arc::new(ropey::Rope::from_str(a_content))),
                 sg.clone(),
             ),
         );
         edits.buffers.insert(
             b_path.clone(),
             EditedBuffer::fresh_with_seq_gen(
-                std::sync::Arc::new(ropey::Rope::from_str(b_content)),
+                led_state_buffer_edits::Persisted(std::sync::Arc::new(ropey::Rope::from_str(b_content))),
                 sg,
             ),
         );
@@ -1117,25 +1117,25 @@ mod tests {
         // Replace A.
         state.selection = FileSearchSelection::Result(idx_a);
         replace_selected(&mut state, &mut tabs, &mut edits);
-        assert_eq!(edits.buffers[&a].rope.to_string(), "BAR in a\n");
+        assert_eq!(edits.buffers[&a].draft.to_string(), "BAR in a\n");
 
         // Replace B.
         state.selection = FileSearchSelection::Result(idx_b);
         replace_selected(&mut state, &mut tabs, &mut edits);
-        assert_eq!(edits.buffers[&b].rope.to_string(), "BAR in b\n");
+        assert_eq!(edits.buffers[&b].draft.to_string(), "BAR in b\n");
         assert!(state.hit_replacements[idx_a].is_some());
         assert!(state.hit_replacements[idx_b].is_some());
 
         // Global undo → pops B (higher seq).
         undo_global(&mut tabs, &mut edits, Some(&mut state), led_core::EditSeq::default(), 40);
-        assert_eq!(edits.buffers[&b].rope.to_string(), "foo in b\n");
-        assert_eq!(edits.buffers[&a].rope.to_string(), "BAR in a\n");
+        assert_eq!(edits.buffers[&b].draft.to_string(), "foo in b\n");
+        assert_eq!(edits.buffers[&a].draft.to_string(), "BAR in a\n");
         assert!(state.hit_replacements[idx_a].is_some());
         assert!(state.hit_replacements[idx_b].is_none());
 
         // Again → pops A.
         undo_global(&mut tabs, &mut edits, Some(&mut state), led_core::EditSeq::default(), 40);
-        assert_eq!(edits.buffers[&a].rope.to_string(), "foo in a\n");
+        assert_eq!(edits.buffers[&a].draft.to_string(), "foo in a\n");
         assert!(state.hit_replacements[idx_a].is_none());
 
         // Redo once → restores A (smaller future seq is the only
@@ -1159,7 +1159,7 @@ mod tests {
         // the reverse of the undo sequence. That matches "redo
         // reapplies the last-applied forward edit that's now in
         // future" across buffers — the one with the largest seq.
-        assert_eq!(edits.buffers[&b].rope.to_string(), "BAR in b\n");
+        assert_eq!(edits.buffers[&b].draft.to_string(), "BAR in b\n");
     }
 
     #[test]
@@ -1176,9 +1176,9 @@ mod tests {
         let mut edits = BufferEdits::default();
         edits.buffers.insert(
             path.clone(),
-            EditedBuffer::fresh(std::sync::Arc::new(ropey::Rope::from_str(
+            EditedBuffer::fresh(led_state_buffer_edits::Persisted(std::sync::Arc::new(ropey::Rope::from_str(
                 "foo\n",
-            ))),
+            )))),
         );
 
         let mut tabs = Tabs {
@@ -1220,7 +1220,7 @@ mod tests {
         // Rope reflects the edit so the preview shows the new
         // content, but the buffer is clean (saved_version is
         // kept in lockstep with version).
-        assert_eq!(edits.buffers[&path].rope.to_string(), "BAR\n");
+        assert_eq!(edits.buffers[&path].draft.to_string(), "BAR\n");
         assert!(!edits.buffers[&path].dirty());
         // Driver cmd was queued so disk gets rewritten.
         assert_eq!(edits.pending_single_replace.len(), 1);
@@ -1247,7 +1247,7 @@ mod tests {
         edits.buffers.insert(
             path.clone(),
             EditedBuffer::fresh_with_seq_gen(
-                std::sync::Arc::new(ropey::Rope::from_str(&body)),
+                led_state_buffer_edits::Persisted(std::sync::Arc::new(ropey::Rope::from_str(&body))),
                 sg,
             ),
         );
@@ -1312,7 +1312,7 @@ mod tests {
         edits.buffers.insert(
             path.clone(),
             EditedBuffer::fresh_with_seq_gen(
-                std::sync::Arc::new(ropey::Rope::from_str(&body)),
+                led_state_buffer_edits::Persisted(std::sync::Arc::new(ropey::Rope::from_str(&body))),
                 sg,
             ),
         );
@@ -1370,7 +1370,7 @@ mod tests {
         edits.buffers.insert(
             path.clone(),
             EditedBuffer::fresh_with_seq_gen(
-                std::sync::Arc::new(ropey::Rope::from_str("foo\n")),
+                led_state_buffer_edits::Persisted(std::sync::Arc::new(ropey::Rope::from_str("foo\n"))),
                 sg,
             ),
         );
@@ -1409,7 +1409,7 @@ mod tests {
         // Forward: Right on preview → rope = "BAR", driver cmd
         // queued, saved_version pinned.
         replace_selected(&mut state, &mut tabs, &mut edits);
-        assert_eq!(edits.buffers[&path].rope.to_string(), "BAR\n");
+        assert_eq!(edits.buffers[&path].draft.to_string(), "BAR\n");
         assert!(!edits.buffers[&path].dirty());
         assert_eq!(edits.pending_single_replace.len(), 1);
 
@@ -1421,7 +1421,7 @@ mod tests {
         // Global undo → rope back to "foo", stays clean, inverse
         // driver cmd queued.
         undo_global(&mut tabs, &mut edits, Some(&mut state), led_core::EditSeq::default(), 10);
-        assert_eq!(edits.buffers[&path].rope.to_string(), "foo\n");
+        assert_eq!(edits.buffers[&path].draft.to_string(), "foo\n");
         assert!(!edits.buffers[&path].dirty());
         assert_eq!(edits.pending_single_replace.len(), 1);
         let inverse = &edits.pending_single_replace[0];
@@ -1443,7 +1443,7 @@ mod tests {
         edits.buffers.insert(
             a.clone(),
             EditedBuffer::fresh_with_seq_gen(
-                std::sync::Arc::new(ropey::Rope::from_str("hello\n")),
+                led_state_buffer_edits::Persisted(std::sync::Arc::new(ropey::Rope::from_str("hello\n"))),
                 sg,
             ),
         );

@@ -27,14 +27,14 @@ pub(crate) use apply::session::config_dir_for_session;
 
 use std::io::{self, Write};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use led_driver_buffers_core::{BufferStore, FileReadDriver, FileWriteDriver};
 use led_driver_buffers_native::{FileReadNative, FileWriteNative};
 use led_driver_clipboard_core::ClipboardDriver;
 use led_driver_clipboard_native::ClipboardNative;
 use led_core::{
-    BufferStateSum, BufferVersion, CanonPath, ChainId, Notifier, PathChain, SavedVersion,
+    BufferVersion, CanonPath, ChainId, Notifier, PathChain, SavedVersion,
     UndoDbSeq, WatchSeq,
 };
 use led_driver_terminal_core::{Dims, Frame, KeyEvent, Terminal, TerminalInputDriver};
@@ -47,26 +47,27 @@ use led_driver_fs_list_core::FsListDriver;
 use led_driver_fs_list_native::FsListNative;
 use led_driver_syntax_core::SyntaxDriver;
 use led_driver_syntax_native::SyntaxNative;
-use led_driver_lsp_core::LspDriver;
+use led_driver_lsp_core::{LspDriver, LspState};
 use led_driver_lsp_native::LspNative;
 use led_driver_git_core::GitDriver;
 use led_driver_git_native::GitNative;
 use led_driver_session_core::SessionDriver;
 use led_driver_session_native::SessionNative;
 use led_state_alerts::AlertState;
-use led_state_browser::{BrowserUi, FsTree};
+use led_driver_fs_list_core::FsTree;
+use led_state_browser::BrowserUi;
 use led_state_buffer_edits::BufferEdits;
-use led_state_clipboard::ClipboardState;
+use led_state_clipboard::ClipboardIntent;
 use led_state_file_search::FileSearchState;
 use led_state_find_file::FindFileState;
 use led_state_isearch::IsearchState;
 use led_state_jumps::JumpListState;
+use led_driver_lsp_core::{DiagnosticsStates, LspStatuses};
 use led_state_kbd_macro::KbdMacroState;
 use led_state_kill_ring::KillRing;
-use led_state_diagnostics::{DiagnosticsStates, LspStatuses};
 use led_state_git::GitState;
 use led_state_lifecycle::LifecycleState;
-use led_state_session::SessionState;
+use led_driver_session_core::SessionState;
 use led_state_syntax::SyntaxStates;
 use led_state_tabs::{TabId, Tabs};
 
@@ -105,7 +106,7 @@ pub use keymap::{default_keymap, parse_command, parse_key, ChordState, Command, 
 pub use query::{
     body_model, clipboard_action, file_list_action, file_load_action, file_save_action,
     find_file_action, render_frame, side_panel_model, status_bar_model, tab_bar_model,
-    AlertsInput, BrowserUiInput, ClipboardStateInput, EditedBuffersInput, FindFileInput,
+    AlertsInput, BrowserUiInput, ClipboardDriverInput, ClipboardIntentInput, EditedBuffersInput, FindFileInput,
     FsTreeInput, PendingSavesInput, StoreLoadedInput, TabsActiveInput, TabsOpenInput,
     TerminalDimsInput,
 };
@@ -186,9 +187,23 @@ pub struct Sources {
     pub tabs: Tabs,
     pub edits: BufferEdits,
     pub store: BufferStore,
+    /// Driver-owned in-flight tracking for the file-write driver
+    /// per EXAMPLE-ARCH § "Stateless drivers still need an
+    /// in-flight source". Records `(path -> version)` for saves
+    /// currently en route to the worker plus the most recent
+    /// ack (Ok with saved version, or Err with the error message).
+    pub file_write_driver: led_driver_buffers_core::FileWriteState,
     pub terminal: Terminal,
     pub kill_ring: KillRing,
-    pub clip: ClipboardState,
+    /// User-decision side of the yank/kill flow: pending_yank set by
+    /// dispatch on Yank, pending_write set by dispatch on kill.
+    pub clip: ClipboardIntent,
+    /// Driver-owned side: read/write in-flight tracking and the most
+    /// recent error. Mutated by `clipboard.execute` (sync intent
+    /// write) and `clipboard.process` (Done acknowledgement) per
+    /// EXAMPLE-ARCH § "Stateless drivers still need an in-flight
+    /// source".
+    pub clipboard_driver: led_driver_clipboard_core::ClipboardState,
     pub alerts: AlertState,
     pub jumps: JumpListState,
     /// M22 — keyboard-macro state. Recording flag, in-progress
@@ -203,12 +218,36 @@ pub struct Sources {
     /// `Some` while the find-file / save-as modal is active. See
     /// [`led_state_find_file::FindFileState`].
     pub find_file: Option<FindFileState>,
+    /// Driver-owned in-flight tracking for the find-file
+    /// directory-listing driver, per EXAMPLE-ARCH § "Stateless
+    /// drivers still need an in-flight source". `execute` writes
+    /// the current cmd here synchronously; `process` clears it
+    /// when the matching `Done` arrives.
+    pub find_file_driver: led_driver_find_file_core::FindFileDriverState,
+    /// Driver-owned in-flight tracking for the FS-list driver per
+    /// EXAMPLE-ARCH § "Stateless drivers still need an in-flight
+    /// source". `execute` adds the path to `in_flight`; `process`
+    /// removes it on completion. The `file_list_action` memo
+    /// reads this set to gate re-emission of `ListCmd::List(p)`
+    /// while p is outstanding.
+    pub fs_list_driver: led_driver_fs_list_core::FsListState,
+    /// Driver-owned in-flight tracking for the git driver. While
+    /// `scan_in_flight` is `Some(root)`, the runtime should not
+    /// dispatch another `GitCmd::ScanFiles { root }` for the
+    /// same root.
+    pub git_driver: led_driver_git_core::GitDriverState,
     /// `Some` while in-buffer isearch is active. See
     /// [`led_state_isearch::IsearchState`].
     pub isearch: Option<IsearchState>,
     /// `Some` while the project-wide file-search overlay is active.
     /// See [`led_state_file_search::FileSearchState`].
     pub file_search: Option<FileSearchState>,
+    /// Driver-owned in-flight tracking for the file-search driver
+    /// (live search / replace-all / single-replace lanes) per
+    /// EXAMPLE-ARCH § "Stateless drivers still need an in-flight
+    /// source". Memos can read this to gate against double-firing
+    /// queries while their counterpart is outstanding.
+    pub file_search_driver: led_driver_file_search_core::FileSearchDriverState,
     /// Per-buffer tree-sitter state. A buffer gains an entry when a
     /// load completes and the path's extension matches a known
     /// language; otherwise the buffer has no syntax highlighting.
@@ -229,25 +268,16 @@ pub struct Sources {
     /// rust-analyzer would never get `didSave`, so cargo check
     /// wouldn't run.
     pub lsp_notified: imbl::HashMap<CanonPath, LspNotified>,
-    /// `Some(sum)` holds Σ(version + saved_version) at the last
-    /// `RequestDiagnostics` emission; `None` means we've never
-    /// fired one. Combined flag+sum because the two cases the
-    /// runtime needs to distinguish collapse naturally: "has the
-    /// sum moved?" → `memo(edits) != *lsp_requested_state_sum`,
-    /// where the `None` case handles the first-ever emission
-    /// regardless of the sum's raw value. The per-tick current
-    /// sum is derived by the `buffer_state_sum` memo.
-    ///
-    /// Driver-outbound bookkeeping: tracks a side-effect the
-    /// runtime emitted, not a user decision or external fact.
-    /// Same category as `lsp_notified` below — kept as a field
-    /// because we can't derive "what did I tell the driver" from
-    /// observations of current source state.
-    pub lsp_requested_state_sum: Option<BufferStateSum>,
-    /// `true` once `LspCmd::Init` has been emitted. Same
-    /// category as `lsp_notified` / `lsp_requested_state_sum`:
-    /// driver-outbound bookkeeping.
-    pub lsp_init_sent: bool,
+    /// Driver-owned in-flight tracking for the LSP driver per
+    /// EXAMPLE-ARCH § "Stateless drivers still need an in-flight
+    /// source". `execute` records intent (init flag, in-flight
+    /// seqs, per-path pull state) before forwarding the command;
+    /// `process` reconciles when matching events arrive
+    /// (Diagnostics → pull_state=Done, Error → pull_state=Failed
+    /// for outstanding pulls + last_error). Memos may consult
+    /// this to gate re-firing while a request is outstanding or
+    /// after a path's pull has already failed.
+    pub lsp_driver: LspState,
     /// Per-server LSP progress / ready status. Painter consumes
     /// via the status-bar model so the user sees when
     /// rust-analyzer is mid-indexing.
@@ -289,12 +319,6 @@ pub struct Sources {
     /// and `GitEvent::LineStatuses` in the ingest phase; read by
     /// the browser / gutter / status-bar query memos.
     pub git: GitState,
-    /// `true` once the initial workspace scan has been dispatched.
-    /// Driver-outbound bookkeeping — same category as
-    /// `lsp_init_sent`: guards the startup one-shot so we don't
-    /// spam `GitScan` every tick when `fs.root` is `Some` but the
-    /// driver has nothing new to do.
-    pub git_scan_dispatched: bool,
     /// Set by the ingest phase on every successful save
     /// completion. Drained in the execute phase into a
     /// `GitCmd::ScanFiles` (a file save is the most common cause
@@ -311,12 +335,14 @@ pub struct Sources {
     /// Quit gate (`Exiting && (saved || !primary)`) and the
     /// session-Save dispatch.
     pub session: SessionState,
-    /// Driver-outbound bookkeeping: `true` once the runtime has
-    /// dispatched `SessionCmd::Save` for the active Exiting
-    /// transition, so we don't spam Save every tick while
-    /// waiting for the `Saved` event. Same category as
-    /// `lsp_init_sent`.
-    pub session_save_dispatched: bool,
+    /// Driver-owned in-flight tracking for the session driver per
+    /// EXAMPLE-ARCH § "Stateless drivers still need an in-flight
+    /// source". `execute` writes intent (init / save / flush /
+    /// clear / check-sync / shutdown) before the SQLite worker
+    /// dispatch; `process` clears the relevant slot on each
+    /// matching event. Memos can read this to gate against
+    /// double-firing a still-outstanding op.
+    pub session_driver: led_driver_session_core::SessionDriverState,
     /// Set by the Suspended → Running edge (M20) and the
     /// session-restore complete edge (M21) — anything that
     /// requires `Phase::Resuming` → `Phase::Running` to be
@@ -366,22 +392,51 @@ pub struct Sources {
     /// "Now" as a source field per the EXAMPLE-ARCH "Time is a
     /// source field" prescription. Set once at the top of every
     /// ingest tick from `Instant::now()`; everything downstream
-    /// reads via [`Clock::now`] or [`query::ClockInput`] so a
-    /// single syscall per tick covers every consumer and
-    /// time-dependent memos can cache-hit on idle.
+    /// reads via [`Clock::now`] so a single syscall per tick
+    /// covers every consumer. Time-dependent behaviour is realized
+    /// by ingest pre-clearing expired state (e.g.
+    /// `alerts.expire_info(clock.now)`) rather than by memos
+    /// taking `now` as an input — the latter would invalidate
+    /// every tick.
     pub clock: Clock,
+    /// Driver-owned in-flight tracking for the terminal output
+    /// driver per `EXAMPLE-ARCH.md § "Pure output drivers"`.
+    /// Records the [`FrameId`] currently mid-paint and the most
+    /// recent ack. Mutated synchronously by
+    /// `TerminalOutputDriver::execute`; readable by memos that
+    /// want to gate on a paint still being outstanding (none
+    /// today — the synchronous flush makes that a no-op — but
+    /// the source carries the invariant so a future async paint
+    /// backend gets the right behaviour for free).
+    pub paint_state: led_driver_terminal_core::PaintState,
+    /// Monotonic sequence the render phase pulls from when
+    /// stamping [`FrameId`] on a content-changed frame. Bumped
+    /// only when the freshly composed frame differs from the
+    /// previously painted one (ignoring the id field) — so the
+    /// id space stays dense and `last_acked == frame.id` is the
+    /// natural "this paint already landed" predicate.
+    pub frame_id_seq: led_driver_terminal_core::FrameId,
 }
 
-/// Clock source. One field, mutated once per tick.
+/// Clock source. Two fields, mutated together once per tick.
+///
+/// `now` is the monotonic `Instant` used for deadlines, TTLs, and
+/// elapsed-time arithmetic. `wall_now` is the `SystemTime` used by
+/// the rare consumers that need a wall-clock epoch reference —
+/// chain-id minting for entropy, and the LSP-spinner phase tick
+/// used as a memo input. Pulling both from one source keeps memo
+/// caches consistent within a tick.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Clock {
     pub now: Instant,
+    pub wall_now: SystemTime,
 }
 
 impl Default for Clock {
     fn default() -> Self {
         Self {
             now: Instant::now(),
+            wall_now: SystemTime::now(),
         }
     }
 }
@@ -524,13 +579,10 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
             &mut last_frame,
         );
         phases::dispatch_phase::cleanup_orphans(world.sources);
-        if phases::dispatch_phase::check_quit_gate(world.sources, &env) {
-            break Ok(());
-        }
         phases::ingest::ingest_browser_snap(world.sources);
 
         // ── Query ───────────────────────────────────────────────
-        let q = phases::query_phase::run(world.sources);
+        let q = phases::query_phase::run(world.sources, &env);
 
         // ── Execute ─────────────────────────────────────────────
         phases::execute_phase::run(world.sources, &env, &q);
@@ -546,6 +598,15 @@ pub fn run<W: Write>(world: &mut World<'_, W>) -> io::Result<()> {
 
         // ── Git dispatch + file-watch event drain ─────────────
         phases::git_dispatch::run(world.sources, &env);
+
+        // ── Quit gate (Theme E). The Shutdown cmd has already
+        // shipped via execute_phase this tick (see
+        // `QueryOut.shutdown_cmd`); the gate is now a pure
+        // predicate that decides whether to break the outer
+        // loop. Skips render + wait when true.
+        if phases::dispatch_phase::check_quit_gate(world.sources) {
+            break Ok(());
+        }
 
         // ── Render ──────────────────────────────────────────────
         // Compute scroll hints before render: each region (editor
@@ -1186,7 +1247,7 @@ mod tests {
         let rope = Arc::new(Rope::from_str("disk\n"));
         let inserted = seed_edit_from_load(&mut edits, path.clone(), rope);
         assert!(inserted);
-        assert_eq!(edits.buffers[&path].rope.to_string(), "disk\n");
+        assert_eq!(edits.buffers[&path].draft.to_string(), "disk\n");
     }
 
     #[test]
@@ -1200,19 +1261,21 @@ mod tests {
         let edited = Arc::new(Rope::from_str("edited\n"));
         edits
             .buffers
-            .insert(path.clone(), EditedBuffer::fresh(edited.clone()));
+            .insert(
+                path.clone(),
+                EditedBuffer::fresh(led_state_buffer_edits::Persisted(edited.clone())),
+            );
         // Mutate so the entry is visibly "the user's view".
-        edits
-            .buffers
-            .get_mut(&path)
-            .unwrap()
-            .rope = Arc::new(Rope::from_str("user typed more"));
+        {
+            let eb = edits.buffers.get_mut(&path).unwrap();
+            eb.set_draft(Arc::new(Rope::from_str("user typed more")));
+        }
 
         let stale_disk = Arc::new(Rope::from_str("old disk\n"));
         let inserted = seed_edit_from_load(&mut edits, path.clone(), stale_disk);
         assert!(!inserted);
         // User's rope preserved.
-        assert_eq!(edits.buffers[&path].rope.to_string(), "user typed more");
+        assert_eq!(edits.buffers[&path].draft.to_string(), "user typed more");
     }
 
     // ── arrow-follow auto-advance ─────────────────────────────────
@@ -1320,7 +1383,7 @@ mod tests {
         let cmd = led_driver_syntax_core::SyntaxCmd {
             path: path.clone(),
             version: eb.version,
-            rope: eb.rope.clone(),
+            rope: eb.draft.as_rope().clone(),
             language: lang,
             prev_tree: None,
             prev_rope: None,
@@ -1384,9 +1447,9 @@ mod tests {
         let mut edits = BufferEdits::default();
         edits.buffers.insert(
             canon("main.rs"),
-            EditedBuffer::fresh(Arc::new(Rope::from_str(
+            EditedBuffer::fresh(led_state_buffer_edits::Persisted(Arc::new(Rope::from_str(
                 "line0\nline1\nline2\nline3\nline4\nline5 longer\n",
-            ))),
+            )))),
         );
         let mut jumps = led_state_jumps::JumpListState::default();
         let mut alerts = AlertState::default();
@@ -1432,7 +1495,7 @@ mod tests {
         let mut edits = BufferEdits::default();
         edits.buffers.insert(
             canon("main.rs"),
-            EditedBuffer::fresh(Arc::new(Rope::from_str("abc\n"))),
+            EditedBuffer::fresh(led_state_buffer_edits::Persisted(Arc::new(Rope::from_str("abc\n")))),
         );
         let mut jumps = led_state_jumps::JumpListState::default();
         let mut alerts = AlertState::default();
@@ -1482,7 +1545,7 @@ mod tests {
         let mut edits = BufferEdits::default();
         edits.buffers.insert(
             path.clone(),
-            EditedBuffer::fresh(Arc::new(Rope::from_str(&rope))),
+            EditedBuffer::fresh(led_state_buffer_edits::Persisted(Arc::new(Rope::from_str(&rope)))),
         );
         let mut tabs = seed_tab("main.rs");
         tabs.open[0].cursor = led_state_tabs::Cursor {
@@ -1544,7 +1607,7 @@ mod tests {
         let mut edits = BufferEdits::default();
         edits.buffers.insert(
             path.clone(),
-            EditedBuffer::fresh(Arc::new(Rope::from_str(&rope))),
+            EditedBuffer::fresh(led_state_buffer_edits::Persisted(Arc::new(Rope::from_str(&rope)))),
         );
         let mut tabs = seed_tab("main.rs");
         tabs.open[0].cursor = led_state_tabs::Cursor {
@@ -1626,7 +1689,7 @@ mod tests {
         let mut edits = BufferEdits::default();
         edits.buffers.insert(
             path.clone(),
-            EditedBuffer::fresh(Arc::new(Rope::from_str("foo + foo"))),
+            EditedBuffer::fresh(led_state_buffer_edits::Persisted(Arc::new(Rope::from_str("foo + foo")))),
         );
         let mut alerts = AlertState::default();
         let mut lsp_extras = led_state_lsp::LspExtrasState::default();
@@ -1655,15 +1718,17 @@ mod tests {
         }]);
         let _ = &mut lsp_extras;
         let tabs = led_state_tabs::Tabs::default();
+        let clock = crate::Clock::default();
         LspEditApply {
             edits: &mut edits,
             tabs: &tabs,
             alerts: &mut alerts,
             lsp_pending: &mut lsp_pending,
+            clock: &clock,
         }
         .apply(led_core::LspRequestSeq(7), EditsOrigin::Rename, &file_edits);
         let eb = edits.buffers.get(&path).unwrap();
-        assert_eq!(eb.rope.to_string(), "bar + bar");
+        assert_eq!(eb.draft.to_string(), "bar + bar");
         assert!(eb.version.0 > 0);
         assert!(lsp_pending.latest_rename_seq.is_none());
         assert!(
@@ -1682,7 +1747,7 @@ mod tests {
         use led_driver_lsp_core::{EditsOrigin, FileEdit, TextEditOp};
         let path = canon("a.rs");
         let mut edits = BufferEdits::default();
-        let mut eb = EditedBuffer::fresh(Arc::new(Rope::from_str("x")));
+        let mut eb = EditedBuffer::fresh(led_state_buffer_edits::Persisted(Arc::new(Rope::from_str("x"))));
         eb.version = BufferVersion(1);
         edits.buffers.insert(path.clone(), eb);
         let mut alerts = AlertState::default();
@@ -1705,16 +1770,18 @@ mod tests {
         }]);
         let _ = &mut lsp_extras;
         let tabs = led_state_tabs::Tabs::default();
+        let clock = crate::Clock::default();
         LspEditApply {
             edits: &mut edits,
             tabs: &tabs,
             alerts: &mut alerts,
             lsp_pending: &mut lsp_pending,
+            clock: &clock,
         }
         .apply(led_core::LspRequestSeq(1), EditsOrigin::Format, &file_edits);
         // Format applied "x" → "X", then pre-save cleanup added
         // the missing trailing newline.
-        assert_eq!(edits.buffers[&path].rope.to_string(), "X\n");
+        assert_eq!(edits.buffers[&path].draft.to_string(), "X\n");
         // History MUST retain the record_replace entry so undo
         // can revert it. Before the fix this was cleared by the
         // save-action loop in run().
@@ -1740,7 +1807,7 @@ mod tests {
         let path = canon("a.rs");
         let original = "AAA|BBB|CCC\n";
         let mut edits = BufferEdits::default();
-        let eb = EditedBuffer::fresh(Arc::new(Rope::from_str(original)));
+        let eb = EditedBuffer::fresh(led_state_buffer_edits::Persisted(Arc::new(Rope::from_str(original))));
         edits.buffers.insert(path.clone(), eb);
         let mut alerts = AlertState::default();
         let mut lsp_extras = led_state_lsp::LspExtrasState::default();
@@ -1773,14 +1840,16 @@ mod tests {
         }]);
         let _ = &mut lsp_extras;
         let tabs = led_state_tabs::Tabs::default();
+        let clock = crate::Clock::default();
         LspEditApply {
             edits: &mut edits,
             tabs: &tabs,
             alerts: &mut alerts,
             lsp_pending: &mut lsp_pending,
+            clock: &clock,
         }
         .apply(led_core::LspRequestSeq(1), EditsOrigin::Format, &file_edits);
-        let formatted = edits.buffers[&path].rope.to_string();
+        let formatted = edits.buffers[&path].draft.to_string();
         assert_eq!(formatted, "BBB|CCCAAA|\n", "sort applied correctly");
 
         // ONE undo group for the whole batch.
@@ -1795,7 +1864,7 @@ mod tests {
         // the original rope exactly, with no duplicate text.
         let mut eb = edits.buffers.remove(&path).unwrap();
         let group = eb.history.take_undo().expect("one group");
-        let mut rope = (*eb.rope).clone();
+        let mut rope = (*eb.draft).clone();
         for op in group.ops.iter().rev() {
             match op {
                 EditOp::Insert { at, text } => {
@@ -1819,7 +1888,7 @@ mod tests {
         use led_driver_lsp_core::{EditsOrigin, FileEdit, TextEditOp};
         let path = canon("a.rs");
         let mut edits = BufferEdits::default();
-        let mut eb = EditedBuffer::fresh(Arc::new(Rope::from_str("x")));
+        let mut eb = EditedBuffer::fresh(led_state_buffer_edits::Persisted(Arc::new(Rope::from_str("x"))));
         eb.version = BufferVersion(1); // dirty (saved_version still 0)
         edits.buffers.insert(path.clone(), eb);
         let mut alerts = AlertState::default();
@@ -1842,16 +1911,18 @@ mod tests {
         }]);
         let _ = &mut lsp_extras;
         let tabs = led_state_tabs::Tabs::default();
+        let clock = crate::Clock::default();
         LspEditApply {
             edits: &mut edits,
             tabs: &tabs,
             alerts: &mut alerts,
             lsp_pending: &mut lsp_pending,
+            clock: &clock,
         }
         .apply(led_core::LspRequestSeq(42), EditsOrigin::Format, &file_edits);
         // Format applied "x" → "X", then pre-save cleanup appended
         // a final newline so the on-disk bytes end cleanly.
-        assert_eq!(edits.buffers[&path].rope.to_string(), "X\n");
+        assert_eq!(edits.buffers[&path].draft.to_string(), "X\n");
         // Post-format save is queued.
         assert!(edits.pending_saves.contains(&path));
         assert!(!lsp_pending.pending_save_after_format.contains(&path));
@@ -1862,7 +1933,7 @@ mod tests {
         use led_driver_lsp_core::{EditsOrigin};
         let path = canon("a.rs");
         let mut edits = BufferEdits::default();
-        let mut eb = EditedBuffer::fresh(Arc::new(Rope::from_str("x")));
+        let mut eb = EditedBuffer::fresh(led_state_buffer_edits::Persisted(Arc::new(Rope::from_str("x"))));
         eb.version = BufferVersion(1);
         edits.buffers.insert(path.clone(), eb);
         let mut alerts = AlertState::default();
@@ -1875,11 +1946,13 @@ mod tests {
         let file_edits = std::sync::Arc::new(Vec::new());
         let _ = &mut lsp_extras;
         let tabs = led_state_tabs::Tabs::default();
+        let clock = crate::Clock::default();
         LspEditApply {
             edits: &mut edits,
             tabs: &tabs,
             alerts: &mut alerts,
             lsp_pending: &mut lsp_pending,
+            clock: &clock,
         }
         .apply(led_core::LspRequestSeq(5), EditsOrigin::Format, &file_edits);
         assert!(edits.pending_saves.contains(&path));
@@ -1892,7 +1965,7 @@ mod tests {
         let mut edits = BufferEdits::default();
         edits.buffers.insert(
             path.clone(),
-            EditedBuffer::fresh(Arc::new(Rope::from_str("foo"))),
+            EditedBuffer::fresh(led_state_buffer_edits::Persisted(Arc::new(Rope::from_str("foo")))),
         );
         let mut alerts = AlertState::default();
         let mut lsp_extras = led_state_lsp::LspExtrasState::default();
@@ -1912,11 +1985,13 @@ mod tests {
         }]);
         let _ = &mut lsp_extras;
         let tabs = led_state_tabs::Tabs::default();
+        let clock = crate::Clock::default();
         LspEditApply {
             edits: &mut edits,
             tabs: &tabs,
             alerts: &mut alerts,
             lsp_pending: &mut lsp_pending,
+            clock: &clock,
         }
         .apply(
             /* stale */ led_core::LspRequestSeq(5),
@@ -1924,7 +1999,7 @@ mod tests {
             &file_edits,
         );
         // Buffer unchanged, seq preserved.
-        assert_eq!(edits.buffers[&path].rope.to_string(), "foo");
+        assert_eq!(edits.buffers[&path].draft.to_string(), "foo");
         assert_eq!(lsp_pending.latest_rename_seq, Some(led_core::LspRequestSeq(99)));
     }
 
@@ -1940,7 +2015,7 @@ mod tests {
         let mut edits = BufferEdits::default();
         edits.buffers.insert(
             canon("main.rs"),
-            EditedBuffer::fresh(Arc::new(Rope::from_str("abc\n"))),
+            EditedBuffer::fresh(led_state_buffer_edits::Persisted(Arc::new(Rope::from_str("abc\n")))),
         );
         let mut jumps = led_state_jumps::JumpListState::default();
         let mut alerts = AlertState::default();

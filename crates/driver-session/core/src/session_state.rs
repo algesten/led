@@ -4,6 +4,15 @@
 //! load orchestration, and undo-flush lifecycle line up with
 //! legacy's design.
 //!
+//! Relocated from the now-deleted `state-session` crate per the
+//! EXAMPLE-ARCH audit: every field on [`SessionState`] is
+//! driver-discovered (flock outcome, last-saved snapshot, restored
+//! undo payload, init handshake), so the source belongs alongside
+//! the driver that fills it. The shared payload types
+//! ([`SessionData`], [`SessionBuffer`], [`UndoRestoreData`],
+//! [`PersistedSession`], [`DraftSession`]) move with it because they
+//! are the driver's wire ABI.
+//!
 //! The wire-format compatibility caveat: legacy's `UndoEntry` is a
 //! single-op type with `direction` flags ("Emacs-style linear
 //! history"). Our internal `History` uses past/future/current
@@ -53,12 +62,42 @@ pub struct SessionState {
     /// save). Used by the Quit-side derived to diff against the
     /// current state and skip the `SaveSession` dispatch when
     /// nothing has changed.
-    pub last_saved: Option<SessionData>,
+    ///
+    /// Role-newtyped as [`PersistedSession`] so the compiler
+    /// refuses a confused assignment from a freshly-built
+    /// [`DraftSession`] at the dispatch site — see Theme O.
+    pub last_saved: Option<PersistedSession>,
     /// Per-path restored undo state, stashed on `Restored`
     /// ingest and consumed by the load-completion hook to
     /// install history into the freshly-loaded buffer.
     pub pending_undo: imbl::HashMap<CanonPath, UndoRestoreData>,
 }
+
+/// The last successfully-persisted session shape, as reported by
+/// `SessionEvent::SessionSaved` (or stamped at startup from
+/// `SessionEvent::Restored`). The quit gate diffs the live
+/// [`DraftSession`] against this to skip redundant saves.
+///
+/// Role newtype per Theme O: prevents a refactor from accidentally
+/// stamping `last_saved` with a fresh `DraftSession` payload that
+/// has not yet been written to disk.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct PersistedSession(pub SessionData);
+
+/// The live session shape computed from current sources at any
+/// tick. Flows into `SessionCmd::SaveSession` via dispatch (after
+/// unwrapping at the driver boundary).
+///
+/// Role newtype per Theme O: a `DraftSession` is unconditionally
+/// distinct from a [`PersistedSession`] at the type level, so the
+/// "stamp `last_saved` once the driver acks" handoff has to
+/// explicitly convert one to the other.
+///
+/// Produced by `build_session_data` and unwrapped at the
+/// `SessionCmd::SaveSession` seam so the driver ABI keeps the
+/// neutral [`SessionData`] payload.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct DraftSession(pub SessionData);
 
 /// Full session payload — written wholesale on
 /// `SessionCmd::SaveSession`, returned wholesale by
@@ -158,5 +197,38 @@ mod tests {
             kv: HashMap::from([("browser.selected".into(), "2".into())]),
         };
         assert_eq!(d.clone(), d);
+    }
+
+    #[test]
+    fn persisted_and_draft_session_role_newtypes_are_distinct() {
+        // The whole point of the role newtypes is that the compiler
+        // refuses to mix them. Writing
+        // `let _: PersistedSession = DraftSession(...);` would not
+        // compile.
+        let data = SessionData {
+            active_tab_order: 0,
+            show_side_panel: false,
+            buffers: vec![],
+            kv: HashMap::new(),
+        };
+        let persisted = PersistedSession(data.clone());
+        let draft = DraftSession(data.clone());
+        assert_eq!(persisted.0, data);
+        assert_eq!(draft.0, data);
+        assert_eq!(PersistedSession::default(), PersistedSession::default());
+        assert_eq!(DraftSession::default(), DraftSession::default());
+    }
+
+    #[test]
+    fn session_state_last_saved_takes_persisted_newtype() {
+        // Compile-time witness: `last_saved` only accepts
+        // `Option<PersistedSession>`. A bare `SessionData` or a
+        // `DraftSession` wouldn't typecheck here.
+        let data = SessionData::default();
+        let s = SessionState {
+            last_saved: Some(PersistedSession(data)),
+            ..Default::default()
+        };
+        assert!(s.last_saved.is_some());
     }
 }

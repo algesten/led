@@ -183,6 +183,48 @@ pub struct Theme {
     /// replace, so they need to stay visible but clearly distinct.
     pub search_hit_replaced: Style,
 
+    // ── Popover (diagnostic hover) ─────────────────────────
+    /// Background fill applied to every cell of the diagnostic
+    /// popover. Default = `Color::Indexed(236)` (dark grey),
+    /// matching the legacy popover box.
+    pub popover_bg: Style,
+    /// Style for the horizontal rule rows between separate
+    /// diagnostic messages inside the popover. Default fg =
+    /// `Color::Indexed(245)` (medium grey) on the popover bg.
+    pub popover_rule: Style,
+    /// Diagnostic-message text style: only used as a fallback when
+    /// the severity-coloured `theme.diagnostics.*` fg is `None`.
+    /// Default leaves fg unset so the per-severity diagnostic
+    /// colour wins.
+    pub popover_text: Style,
+    // ── LSP completion popup ──────────────────────────────
+    /// Background + fg for an unselected completion row.
+    /// Default = `bg=x236, fg=x253` (dark grey / near-white).
+    pub completion_bg_normal: Style,
+    /// Background + fg for the highlighted (selected) row.
+    /// Default = `bg=x024, fg=x231` (muted blue / bright white).
+    pub completion_bg_selected: Style,
+    /// Text-only style for the label column of unselected rows.
+    /// Default leaves fg unset so `completion_bg_normal.fg` wins;
+    /// painter combines fg from this with bg from
+    /// `completion_bg_normal` when explicitly set.
+    pub completion_text_normal: Style,
+    /// Text-only style for the label column of the selected row.
+    /// Default leaves fg unset so `completion_bg_selected.fg` wins.
+    pub completion_text_selected: Style,
+    /// Foreground for the detail column of unselected rows
+    /// (dim grey to keep the user's eye on the label). Default
+    /// fg = `Color::Indexed(244)`. Selected rows fall back to
+    /// `completion_bg_selected.fg` so the whole highlighted band
+    /// reads as one colour run.
+    pub completion_detail: Style,
+    // ── LSP rename overlay ─────────────────────────────────
+    /// Full style applied to every cell of the rename overlay.
+    /// Default = `fg=x015 (bright white), bg=x236 (dark grey),
+    /// bold`. Painter does not split fg/bg per cell — the whole
+    /// box paints in this one style.
+    pub rename_popup: Style,
+
     // ── Editor body ─────────────────────────────────────────
     /// Background applied to the row the cursor is on. Default (no
     /// bg) is fine — the terminal's native cursor-row highlighting
@@ -522,6 +564,52 @@ impl Default for Theme {
                 bg: None,
             },
 
+            // Popover (diagnostic hover) — dark-grey fill, medium-
+            // grey rule. Matches the pre-Theme-J hardcoded values
+            // in `paint_popover`. `popover_text` stays default so
+            // the painter falls back to per-severity diagnostic fg.
+            popover_bg: Style {
+                bg: Some(Color::Indexed(236)),
+                ..Style::default()
+            },
+            popover_rule: Style {
+                fg: Some(Color::Indexed(245)),
+                bg: Some(Color::Indexed(236)),
+                ..Style::default()
+            },
+            popover_text: Style::default(),
+            // LSP completion popup — dark-grey rows, blue
+            // highlight on the selected row, dim-grey detail
+            // column. Matches the pre-Theme-J hardcoded values
+            // in `paint_completion_popup`.
+            completion_bg_normal: Style {
+                fg: Some(Color::Indexed(253)),
+                bg: Some(Color::Indexed(236)),
+                ..Style::default()
+            },
+            completion_bg_selected: Style {
+                fg: Some(Color::Indexed(231)),
+                bg: Some(Color::Indexed(24)),
+                ..Style::default()
+            },
+            completion_text_normal: Style::default(),
+            completion_text_selected: Style::default(),
+            completion_detail: Style {
+                fg: Some(Color::Indexed(244)),
+                ..Style::default()
+            },
+            // LSP rename overlay — bright white on dark grey,
+            // bold. Matches the pre-Theme-J hardcoded values in
+            // `paint_rename_popup`.
+            rename_popup: Style {
+                fg: Some(Color::Indexed(15)),
+                bg: Some(Color::Indexed(236)),
+                attrs: Attrs {
+                    bold: true,
+                    ..Attrs::default()
+                },
+            },
+
             cursor_line: Style::default(),
             // Match legacy `default_theme.toml`'s
             // `theme_selected = { fg = term_reset, bg = x053 }`.
@@ -559,5 +647,30 @@ impl Default for Theme {
                 ..Style::default()
             },
         }
+    }
+}
+
+// `Theme` ships across the drv memo boundary as a borrowed input —
+// memos that resolve chrome styles (`side_panel_row_style`,
+// `status_bar_model`, `body_model::ruler_col`) read from a
+// `ThemeInput { theme: &'a Theme }` projection. drv requires every
+// input's element type to implement `ToStatic`; theme is owned by
+// the runtime crate and outlives every tick, so the snapshot is a
+// plain clone — equality is the derived field-by-field compare.
+//
+// Performance: Theme is 30-odd `Style` fields (each 5 bytes) plus a
+// `SyntaxTheme` (17 styles), `DiagnosticsTheme` (4 styles), and an
+// `Option<u16>` — ~250 bytes total, all `Copy` interior, so the
+// `clone()` is a fast `memcpy`. eq_static fires once on cache miss
+// and finds the cached snapshot pointer-equal to the previous one
+// whenever the user hasn't reloaded the theme — i.e. always, in
+// production.
+impl drv::ToStatic for Theme {
+    type Static = Theme;
+    fn to_static(&self) -> Theme {
+        self.clone()
+    }
+    fn eq_static(&self, other: &Theme) -> bool {
+        self == other
     }
 }

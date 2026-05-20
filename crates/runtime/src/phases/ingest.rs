@@ -10,17 +10,19 @@ use led_core::{CanonPath, EphemeralContentHash, SavedVersion};
 use led_driver_buffers_core::LoadState;
 use led_driver_clipboard_core::ClipboardResult;
 use led_driver_git_core::GitEvent;
-use led_driver_lsp_core::{LspCmd, LspEvent};
+use led_driver_lsp_core::LspEvent;
 use led_driver_session_core::SessionEvent;
-use led_state_diagnostics::{BufferDiagnostics, LspServerStatus};
+use led_driver_lsp_core::{BufferDiagnostics, LspServerStatus};
 use led_state_lifecycle::Phase;
+use led_driver_session_core::PersistedSession;
 use led_state_syntax::{Language, SyntaxState};
 use led_state_tabs::TabId;
 
 use crate::apply::edit::{auto_advance_arrow_follow, seed_edit_from_load};
 use crate::apply::fs::{apply_workspace_tree_delta, reconcile_external_change};
 use crate::apply::lsp::{
-    completion_prefix, identifier_start_col, LspEditApply, LspGotoApply,
+    completion_prefix, identifier_start_col, lsp_completion_to_domain, LspEditApply,
+    LspGotoApply,
 };
 use crate::apply::session::{
     apply_pending_undo_restore, apply_session_kv, apply_sync_result,
@@ -28,8 +30,7 @@ use crate::apply::session::{
 };
 use crate::dispatch;
 use crate::phases::TickEnv;
-use crate::query::{self, EditedBuffersInput};
-use crate::{diag_offer, Sources, LspNotified, INFO_TTL};
+use crate::{diag_offer, Sources, INFO_TTL};
 
 /// Tick-start clock update + per-tick expiry sweeps.
 pub(crate) fn ingest_clock(sources: &mut Sources) {
@@ -40,6 +41,7 @@ pub(crate) fn ingest_clock(sources: &mut Sources) {
         ..
     } = sources;
     clock.now = std::time::Instant::now();
+    clock.wall_now = std::time::SystemTime::now();
     alerts.expire_info(clock.now);
     if let Some(ff) = find_file.as_mut() {
         ff.input.expire_hint(clock.now);
@@ -50,13 +52,15 @@ pub(crate) fn ingest_clock(sources: &mut Sources) {
 /// out reread / sync-check / LSP-watched-files dispatches in the
 /// same tick the events landed.
 pub(crate) fn ingest_file_watch(sources: &mut Sources, env: &TickEnv<'_>) {
+    // Per EXAMPLE-ARCH § "The main loop": Ingest writes (no reads).
+    // This phase only drains the file-watch worker queue into the
+    // source and applies workspace-tree deltas. The reread /
+    // sync-check / LSP-watched-files fan-out now lives in
+    // query_phase + execute_phase per Theme E.
     let Sources {
         edits,
-        store,
         fs,
         file_watch,
-        lsp_watched_globs,
-        undo_persistence,
         git_scan_pending,
         session,
         ..
@@ -64,47 +68,12 @@ pub(crate) fn ingest_file_watch(sources: &mut Sources, env: &TickEnv<'_>) {
 
     env.drivers.file_watch.process(file_watch);
 
-    if let Some(_root) = fs.root.as_ref()
+    if fs.root.is_some()
         && !env.no_workspace
         && session.init_done
+        && apply_workspace_tree_delta(file_watch, edits, fs)
     {
-        if apply_workspace_tree_delta(file_watch, edits, fs) {
-            *git_scan_pending = true;
-        }
-        let reread_paths = query::external_reread_targets(
-            query::FileWatchEventsInput::new(file_watch),
-            EditedBuffersInput::new(edits),
-        );
-        if !reread_paths.is_empty() {
-            let reread_cmds: Vec<led_driver_buffers_core::LoadAction> = reread_paths
-                .iter()
-                .map(|p| led_driver_buffers_core::LoadAction::Reread(p.clone()))
-                .collect();
-            env.drivers.file.execute(reread_cmds.iter(), store);
-        }
-        if env.resolved_config_dir.is_some() {
-            let hash_index = query::notify_hash_index(EditedBuffersInput::new(edits));
-            let sync_cmds = query::sync_check_cmds(
-                query::FileWatchEventsInput::new(file_watch),
-                query::HashIndexInput::new(&hash_index),
-                query::UndoPersistenceInput::new(undo_persistence),
-            );
-            if !sync_cmds.is_empty() {
-                env.drivers.session.execute(sync_cmds.iter());
-            }
-        }
-        let lsp_watch_cmds = query::lsp_watched_file_notifications(
-            query::FileWatchEventsInput::new(file_watch),
-            query::LspWatchedGlobsInput::new(lsp_watched_globs),
-        );
-        for cmd in lsp_watch_cmds.iter() {
-            if let LspCmd::DidChangeWatchedFiles { server, changes } = cmd {
-                env.trace.lsp_did_change_watched_files(server, changes.len());
-            }
-        }
-        if !lsp_watch_cmds.is_empty() {
-            env.drivers.lsp.execute(lsp_watch_cmds.iter());
-        }
+        *git_scan_pending = true;
     }
 }
 
@@ -119,7 +88,6 @@ pub(crate) fn ingest_file_completions(sources: &mut Sources, env: &TickEnv<'_>) 
         fs,
         syntax,
         path_chains,
-        lsp_notified,
         session,
         undo_persistence,
         resume_check_pending,
@@ -155,7 +123,7 @@ pub(crate) fn ingest_file_completions(sources: &mut Sources, env: &TickEnv<'_>) 
                 .and_then(|id| tabs.open.iter().find(|t| t.id == id))
                 .is_some_and(|t| t.path == completion.path);
             if is_active {
-                let ancestors = led_state_browser::ancestors_of(
+                let ancestors = led_driver_fs_list_core::ancestors_of(
                     fs,
                     &browser.expanded_dirs,
                     Some(&completion.path),
@@ -171,32 +139,11 @@ pub(crate) fn ingest_file_completions(sources: &mut Sources, env: &TickEnv<'_>) 
                 .entry(completion.path.clone())
                 .or_insert_with(|| SyntaxState::new(lang));
         }
-        if inserted {
-            let (version, saved, hash) = edits
-                .buffers
-                .get(&completion.path)
-                .map(|eb| {
-                    (
-                        eb.version,
-                        eb.saved_version,
-                        EphemeralContentHash::of_rope(&eb.rope).persist(),
-                    )
-                })
-                .unwrap_or_default();
-            env.drivers.lsp.execute(std::iter::once(&LspCmd::BufferOpened {
-                path: completion.path.clone(),
-                language: detected,
-                rope: completion.rope.clone(),
-                hash,
-            }));
-            lsp_notified.insert(
-                completion.path.clone(),
-                LspNotified {
-                    version,
-                    saved_version: saved,
-                },
-            );
-        }
+        // BufferOpened dispatch moved to query_phase + execute_phase
+        // (Theme E). The query phase diffs `edits.buffers` against
+        // `lsp_notified` to find newly-materialised buffers and
+        // emits one `LspCmd::BufferOpened` per path; execute ships
+        // them and stamps `lsp_notified`. Empty diff = no work.
 
         for tab in tabs.open.iter_mut() {
             if tab.path != completion.path {
@@ -263,10 +210,12 @@ pub(crate) fn ingest_lsp_events(sources: &mut Sources, env: &TickEnv<'_>) {
         lsp_extras,
         lsp_pending,
         lsp_watched_globs,
+        lsp_driver,
+        clock,
         ..
     } = sources;
 
-    for ev in env.drivers.lsp.process() {
+    for ev in env.drivers.lsp.process(lsp_driver) {
         match ev {
             LspEvent::Diagnostics {
                 path,
@@ -281,7 +230,54 @@ pub(crate) fn ingest_lsp_events(sources: &mut Sources, env: &TickEnv<'_>) {
                     diag_offer::OfferOutcome::Reject => continue,
                 };
                 let current_hash =
-                    EphemeralContentHash::of_rope(&eb.rope).persist();
+                    EphemeralContentHash::of_rope(&eb.draft).persist();
+                if transformed.is_empty() {
+                    diagnostics.by_path.remove(&path);
+                } else {
+                    diagnostics.by_path.insert(
+                        path,
+                        BufferDiagnostics::new(current_hash, transformed),
+                    );
+                }
+            }
+            LspEvent::PushFallback {
+                path,
+                hash,
+                diagnostics: diags,
+            } => {
+                // Per audit Theme L Target C: push-fallback events
+                // are lower priority than primary `Diagnostics`.
+                // Accept only when no pull has answered for this
+                // path — `pull_state` is `None`/`Idle` (no pull
+                // ever issued or all paths drained) or `Failed`
+                // (the pull errored out, leaving push as the only
+                // surface).
+                //
+                // `Pending` is also accepted so the fallback can
+                // populate the slot pre-emptively while the pull
+                // is still in flight; the pull response will
+                // overwrite when it lands. `Done` means the pull
+                // already answered authoritatively and we must
+                // NOT regress to a stale push.
+                let pull_state = lsp_driver.pull_state.get(&path);
+                let accept = matches!(
+                    pull_state,
+                    None | Some(led_driver_lsp_core::PullState::Idle)
+                        | Some(led_driver_lsp_core::PullState::Pending(_))
+                        | Some(led_driver_lsp_core::PullState::Failed(_))
+                );
+                if !accept {
+                    continue;
+                }
+                let Some(eb) = edits.buffers.get(&path) else {
+                    continue;
+                };
+                let transformed = match crate::diag_offer::offer_diagnostics(eb, hash, diags) {
+                    diag_offer::OfferOutcome::Accept(d) => d,
+                    diag_offer::OfferOutcome::Reject => continue,
+                };
+                let current_hash =
+                    EphemeralContentHash::of_rope(&eb.draft).persist();
                 if transformed.is_empty() {
                     diagnostics.by_path.remove(&path);
                 } else {
@@ -335,15 +331,20 @@ pub(crate) fn ingest_lsp_events(sources: &mut Sources, env: &TickEnv<'_>) {
                     completions.dismiss();
                     continue;
                 }
+                // Translate driver-ABI items to domain `Completion`s
+                // at the ingest seam. `state-completions` never
+                // sees `led_driver_lsp_core::CompletionItem`.
+                let items: Arc<Vec<led_state_completions::Completion>> =
+                    Arc::new(items.iter().map(lsp_completion_to_domain).collect());
                 let prefix_start_col = match prefix_start_col {
                     Some(units) => {
                         let pl = prefix_line as usize;
-                        if pl >= edits.buffers.get(&path).map_or(0, |eb| eb.rope.len_lines())
+                        if pl >= edits.buffers.get(&path).map_or(0, |eb| eb.draft.len_lines())
                         {
                             continue;
                         }
                         let eb = edits.buffers.get(&path).expect("checked above");
-                        led_core::utf16_units_to_grapheme_col(eb.rope.line(pl), units) as u32
+                        led_text_layout::utf16_units_to_grapheme_col(eb.draft.line(pl), units) as u32
                     }
                     None => identifier_start_col(
                         edits,
@@ -413,6 +414,7 @@ pub(crate) fn ingest_lsp_events(sources: &mut Sources, env: &TickEnv<'_>) {
                     tabs,
                     alerts,
                     lsp_pending,
+                    clock,
                 }
                 .apply(seq, origin, &file_edits);
             }
@@ -469,6 +471,18 @@ pub(crate) fn ingest_lsp_events(sources: &mut Sources, env: &TickEnv<'_>) {
             } => {
                 lsp_watched_globs.unregister(&server, &registration_id);
             }
+            LspEvent::PullFailed { path, message } => {
+                // The driver source's `pull_state` is already
+                // updated by `LspDriver::process`. Surface the
+                // failure to the user via the alert state — same
+                // keying as `LspEvent::Error` so the warning
+                // collapses cleanly.
+                let key = path
+                    .file_name()
+                    .map(|os| os.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| path.display().to_string());
+                alerts.set_warn(key.clone(), format!("LSP pull {key}: {message}"));
+            }
         }
     }
 }
@@ -481,11 +495,12 @@ pub(crate) fn ingest_file_writes(sources: &mut Sources, env: &TickEnv<'_>) {
         store,
         alerts,
         clock,
+        file_write_driver,
         git_scan_pending,
         ..
     } = sources;
 
-    for done in env.drivers.file_write.process() {
+    for done in env.drivers.file_write.process(file_write_driver) {
         let basename = done
             .path
             .file_name()
@@ -500,7 +515,7 @@ pub(crate) fn ingest_file_writes(sources: &mut Sources, env: &TickEnv<'_>) {
                     eb.saved_version =
                         eb.saved_version.max(SavedVersion(done.version.0));
                     let hash =
-                        EphemeralContentHash::of_rope(&eb.rope).persist();
+                        EphemeralContentHash::of_rope(&eb.draft).persist();
                     eb.history.insert_save_point(hash);
                     eb.disk_content_hash = hash;
                 }
@@ -516,10 +531,11 @@ pub(crate) fn ingest_file_writes(sources: &mut Sources, env: &TickEnv<'_>) {
 }
 
 /// Fs-list driver completions: install entries (or failure marker)
-/// into the browser tree cache.
+/// into the browser tree cache. The driver's `process` clears its
+/// own `in_flight` set on each `Done`.
 pub(crate) fn ingest_fs_list(sources: &mut Sources, env: &TickEnv<'_>) {
-    let Sources { fs, .. } = sources;
-    let fs_completions = env.drivers.fs_list.process();
+    let Sources { fs, fs_list_driver, .. } = sources;
+    let fs_completions = env.drivers.fs_list.process(fs_list_driver);
     for done in fs_completions {
         match done.result {
             Ok(entries) => {
@@ -541,9 +557,10 @@ pub(crate) fn ingest_find_file(sources: &mut Sources, env: &TickEnv<'_>) {
     let Sources {
         tabs,
         find_file,
+        find_file_driver,
         ..
     } = sources;
-    for done in env.drivers.find_file.process() {
+    for done in env.drivers.find_file.process(find_file_driver) {
         let Some(ff) = find_file.as_mut() else {
             continue;
         };
@@ -558,7 +575,10 @@ pub(crate) fn ingest_find_file(sources: &mut Sources, env: &TickEnv<'_>) {
         if done.dir != expected_dir || done.prefix != prefix {
             continue;
         }
-        ff.completions = done.entries;
+        // Driver-side last_error is already stamped. On Err the
+        // overlay shows nothing rather than stale results (same UX
+        // as "directory empty"); user can retry by adjusting input.
+        ff.completions = done.result.unwrap_or_default();
         auto_advance_arrow_follow(ff, tabs);
     }
 }
@@ -572,9 +592,10 @@ pub(crate) fn ingest_file_search(sources: &mut Sources, env: &TickEnv<'_>) {
         alerts,
         clock,
         file_search,
+        file_search_driver,
         ..
     } = sources;
-    for done in env.drivers.file_search.process() {
+    for done in env.drivers.file_search.process(file_search_driver) {
         let Some(fs_state) = file_search.as_mut() else {
             continue;
         };
@@ -598,7 +619,7 @@ pub(crate) fn ingest_file_search(sources: &mut Sources, env: &TickEnv<'_>) {
         fs_state.scroll_offset = 0;
     }
 
-    for done in env.drivers.file_search.process_replace() {
+    for done in env.drivers.file_search.process_replace(file_search_driver) {
         let memory = std::mem::take(&mut edits.pending_replace_in_memory);
         let memory_total: usize = memory.iter().map(|m| m.count).sum();
         let total = done.total_replacements + memory_total;
@@ -649,6 +670,7 @@ pub(crate) fn ingest_session(sources: &mut Sources, env: &TickEnv<'_>) {
         browser,
         path_chains,
         session,
+        session_driver,
         undo_persistence,
         resume_check_pending,
         lifecycle,
@@ -657,7 +679,7 @@ pub(crate) fn ingest_session(sources: &mut Sources, env: &TickEnv<'_>) {
     } = sources;
 
     let mut session_just_restored = false;
-    for ev in env.drivers.session.process() {
+    for ev in env.drivers.session.process(session_driver) {
         match ev {
             SessionEvent::Restored { primary, restored } => {
                 session.primary = primary;
@@ -735,7 +757,7 @@ pub(crate) fn ingest_session(sources: &mut Sources, env: &TickEnv<'_>) {
                     // the next free id and `previous_tab` points
                     // at whatever was just made active.
                     restore_preview_from_selection(browser, tabs, path_chains);
-                    session.last_saved = Some(data);
+                    session.last_saved = Some(PersistedSession(data));
                 } else {
                     session.last_saved = None;
                 }
@@ -795,8 +817,8 @@ pub(crate) fn ingest_session(sources: &mut Sources, env: &TickEnv<'_>) {
 /// Git driver events: file statuses + per-path line statuses
 /// (anchored to the buffer's disk-content hash).
 pub(crate) fn ingest_git(sources: &mut Sources, env: &TickEnv<'_>) {
-    let Sources { edits, git, .. } = sources;
-    for ev in env.drivers.git.process() {
+    let Sources { edits, git, git_driver, .. } = sources;
+    for ev in env.drivers.git.process(git_driver) {
         match ev {
             GitEvent::FileStatuses { statuses, branch } => {
                 git.branch = branch;
@@ -832,30 +854,38 @@ pub(crate) fn ingest_git(sources: &mut Sources, env: &TickEnv<'_>) {
                     );
                 }
             }
+            // Driver-side state already recorded last_error +
+            // last_scan_ok = Some(false). Nothing for the runtime
+            // app state to fold: the workspace's previous
+            // file/line maps stay valid (the failure is the
+            // open/scan, not a notification that paths changed).
+            GitEvent::ScanFailed { .. } => {}
         }
     }
 }
 
 /// Clipboard completions: paste-on-yank, kill-ring fallback,
-/// write acknowledgement.
+/// write acknowledgement. The driver's `process` clears the
+/// in-flight bits on its own source; ingest only applies the
+/// downstream effects (paste into buffer, consume `pending_yank`).
 pub(crate) fn ingest_clipboard(sources: &mut Sources, env: &TickEnv<'_>) {
     let Sources {
         tabs,
         edits,
         kill_ring,
         clip,
+        clipboard_driver,
         browser,
         terminal,
         ..
     } = sources;
-    for done in env.drivers.clipboard.process() {
+    for done in env.drivers.clipboard.process(clipboard_driver) {
         let content_cols = dispatch::editor_content_cols(terminal, browser);
         match done.result {
             Ok(ClipboardResult::Text(Some(text))) => {
                 if let Some(target) = clip.pending_yank.take() {
                     dispatch::apply_yank(tabs, edits, target, &text, content_cols);
                 }
-                clip.read_in_flight = false;
             }
             Ok(ClipboardResult::Text(None)) | Err(_) => {
                 if let Some(target) = clip.pending_yank.take()
@@ -863,7 +893,6 @@ pub(crate) fn ingest_clipboard(sources: &mut Sources, env: &TickEnv<'_>) {
                 {
                     dispatch::apply_yank(tabs, edits, target, &fallback, content_cols);
                 }
-                clip.read_in_flight = false;
             }
             Ok(ClipboardResult::Written) => {}
         }

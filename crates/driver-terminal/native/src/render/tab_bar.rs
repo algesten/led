@@ -5,41 +5,16 @@ use crate::buffer::Buffer;
 pub(crate) fn paint_tab_bar(bar: &TabBarModel, area: Rect, theme: &Theme, buf: &mut Buffer) {
     // Tab bar at the bottom of the editor area: second-to-last row.
     // Matches legacy led's ratatui layout + the goldens.
+    //
+    // `bar.scroll_start` was derived by the runtime memo
+    // (`query::render::tab_bar::tab_bar_model`) so the painter no
+    // longer needs the per-frame `Vec<u16>` width pre-compute + O(n²)
+    // "scroll the active tab into view" loop. We just walk from the
+    // pre-computed start index until the bar's right edge.
     let row = area.y;
-    let right_edge = area.x.saturating_sub(0).saturating_add(area.cols);
-    // Each label paints as ` <label> ` — three runs of `put_str`.
-    // Pre-compute the per-tab on-screen width so we can scroll the
-    // visible window when the labels overflow.
-    let widths: Vec<u16> = bar
-        .labels
-        .iter()
-        .map(|l| 2 + l.chars().count().min(area.cols as usize) as u16)
-        .collect();
-    // Scroll the start index leftward until the active tab fits
-    // within `area.cols`. Without this, long tab lists hide the
-    // active tab off the right edge — legacy keeps the active tab
-    // pinned in view.
-    let mut start = 0usize;
-    if let Some(active) = bar.active {
-        loop {
-            let mut used = 0u16;
-            let mut last_visible = start;
-            for (i, w) in widths.iter().enumerate().skip(start) {
-                let next = used.saturating_add(*w);
-                if next > area.cols {
-                    break;
-                }
-                used = next;
-                last_visible = i;
-            }
-            if active <= last_visible || start >= widths.len() {
-                break;
-            }
-            start += 1;
-        }
-    }
+    let right_edge = area.x.saturating_add(area.cols);
     let mut col = area.x;
-    for (i, label) in bar.labels.iter().enumerate().skip(start) {
+    for (i, label) in bar.labels.iter().enumerate().skip(bar.scroll_start) {
         if col >= right_edge {
             break;
         }

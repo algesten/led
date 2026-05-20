@@ -26,7 +26,73 @@ pub struct BodyInputs<'a> {
     pub syntax: SyntaxStatesInput<'a>,
     pub diagnostics: DiagnosticsStatesInput<'a>,
     pub git: GitStateInput<'a>,
+    /// Theme — read for `ruler_column` + `ruler` so the
+    /// `BodyModel::Content::ruler_col` field can be resolved here
+    /// instead of in the painter. Pointer-stable across the
+    /// process lifetime, so the cache hit rate on
+    /// `body_model` matches the pre-theme shape.
+    pub theme: ThemeInput<'a>,
     pub area: Rect,
+}
+
+/// Pick the rope to render for the buffer at `path`. Prefers the
+/// user-edited view ([`BufferEdits`]) and falls back to the
+/// loaded disk snapshot ([`BufferStore`]); `None` when neither
+/// has rope content yet (pending load, load error, or no entry).
+///
+/// Memoised so downstream paint memos that take the resulting
+/// `Arc<Rope>` get pointer-equality on consecutive ticks: a
+/// keystroke in a *background* buffer changes the
+/// [`EditedBuffersInput`] map pointer (so this memo re-runs and
+/// the lookup re-executes — cheap), but the returned `Arc<Rope>`
+/// for the unchanged active path is the same pointer as last
+/// tick. Downstream memos keyed on `Arc<Rope>` then take the
+/// O(1) ptr-eq cache-hit path.
+#[drv::memo(single)]
+pub fn active_rope<'a, 'b>(
+    edits: EditedBuffersInput<'a>,
+    store: StoreLoadedInput<'b>,
+    path: CanonPath,
+) -> Option<Arc<Rope>> {
+    if let Some(eb) = edits.buffers.get(&path) {
+        return Some(eb.draft.as_rope().clone());
+    }
+    match store.loaded.get(&path) {
+        Some(LoadState::Ready(rope)) => Some(rope.clone()),
+        None | Some(LoadState::Pending) | Some(LoadState::Error(_)) => None,
+    }
+}
+
+/// Body-relative cursor position for the active tab.
+///
+/// Mirrors [`body_model`]'s own cursor-resolution path so consumers
+/// that only need the cursor (e.g. `rename_popup_model`) can read
+/// it without taking `&BodyModel` as a parameter — keeping every
+/// view-model memo's inputs `drv::Input`-typed.
+///
+/// Returns `None` whenever [`body_model`] would emit
+/// `BodyModel::Empty` or `BodyModel::Content { cursor: None, .. }`:
+/// no active tab, tab not found, no rope source available, or the
+/// cursor sits outside the visible scroll window.
+#[drv::memo(single)]
+pub fn body_cursor<'a, 'b, 'c>(
+    edits: EditedBuffersInput<'a>,
+    store: StoreLoadedInput<'b>,
+    tabs: TabsActiveInput<'c>,
+    area: Rect,
+) -> Option<(u16, u16)> {
+    let id = (*tabs.active)?;
+    let tab = tabs.open.iter().find(|t| t.id == id)?;
+    let content_cols = (area.cols as usize)
+        .saturating_sub(GUTTER_WIDTH)
+        .saturating_sub(TRAILING_RESERVED_COLS);
+    // Same rope-resolution as `body_model` — share the memo so a
+    // keystroke in a background buffer leaves the resolved
+    // `Arc<Rope>` pointer-stable here too.
+    let rope_arc = active_rope(edits, store, tab.path.clone());
+    let empty_rope: Arc<Rope> = Arc::new(Rope::new());
+    let rope_ref: &Rope = rope_arc.as_deref().unwrap_or(&empty_rope);
+    visible_cursor(tab.cursor, tab.scroll, area, rope_ref, content_cols)
 }
 
 /// Body slice of the render frame.
@@ -52,38 +118,55 @@ pub fn body_model<'a>(inputs: BodyInputs<'a>) -> BodyModel {
         syntax,
         diagnostics,
         git,
+        theme,
         area,
     } = inputs;
+    // Ruler visibility — moved out of the painter so it's one
+    // resolved scalar rather than a chain of theme reads per
+    // paint. `None` when no `ruler_column` configured, the
+    // column would fall outside the editor area, or the ruler
+    // style is unset (no visible stripe).
+    let ruler_col = resolve_ruler_col(theme.theme, area);
     let Some(id) = *tabs.active else {
         return BodyModel::Empty;
     };
     let Some(tab) = tabs.open.iter().find(|t| t.id == id) else {
         return BodyModel::Empty;
     };
+    let rope_arc = active_rope(edits, store, tab.path.clone());
+    // Active match highlight uses the resolved `Arc<Rope>`
+    // pointer — when a *background* buffer mutates, the active
+    // rope's `Arc` stays pointer-stable, so this memo's input
+    // cache key is byte-identical and the file-search overlay
+    // visible-row walk is skipped.
+    let highlight = active_match_highlight(
+        overlays,
+        rope_arc.clone(),
+        tab.path.clone(),
+        tab.scroll,
+        area,
+    );
+    let selection = normalized_selection(tab.mark, tab.cursor);
     if let Some(eb) = edits.buffers.get(&tab.path) {
-        let highlight = active_body_match(&overlays, &tab.path, tab.scroll, area, &eb.rope);
+        let rope_ref: &Rope = &eb.draft;
         let spans = rebased_line_spans(syntax, edits, tab.path.clone());
-        let selection = normalized_selection(tab.mark, tab.cursor);
-        // Diagnostics + git markers carry an anchor hash they were
-        // computed against. Renderer translates each marker's
-        // anchor-row to a current-row via `eb.row_delta_for(anchor)`,
-        // hiding markers whose anchor row was touched / deleted
-        // since stamp. The 99% case (no edits since stamp) returns
-        // an empty `RowDelta` and the lookup is O(1).
+        // Diagnostics: strict hash-equality gate per
+        // `feedback_lsp_no_smear.md`. If the stamped hash doesn't
+        // match the live buffer hash, diagnostics hide entirely —
+        // no rebase, no save-point replay. (Git markers still use
+        // row-delta replay since their anchor is the disk-content
+        // hash; save-anchored replay is correct for that data.)
         let bd = diagnostics.by_path.get(&tab.path);
-        let diag_row_delta = bd.and_then(|bd| eb.row_delta_for(bd.hash));
-        let diags = if diag_row_delta.is_some() {
-            bd.map(|bd| bd.diagnostics.as_slice())
-        } else {
-            None
-        };
+        let diags = bd
+            .filter(|bd| bd.hash == eb.live_content_hash)
+            .map(|bd| bd.diagnostics.as_slice());
         let gls = git.line_statuses.get(&tab.path);
         let git_row_delta = gls.and_then(|gls| eb.row_delta_for(gls.anchor_hash));
         let line_statuses = gls
             .filter(|_| git_row_delta.is_some())
             .map(|gls| gls.statuses.as_slice());
         return render_content(RenderContentArgs {
-            rope: &eb.rope,
+            rope: rope_ref,
             cursor: tab.cursor,
             selection,
             scroll: tab.scroll,
@@ -91,25 +174,26 @@ pub fn body_model<'a>(inputs: BodyInputs<'a>) -> BodyModel {
             match_highlight: highlight,
             rebased_tokens: spans.as_deref().map(|v: &Vec<TokenSpan>| v.as_slice()),
             diagnostics: diags,
-            diag_row_delta: diag_row_delta.as_ref(),
+            // No replay: strict hash equality means rows are
+            // already current-coords. An empty delta is the
+            // identity shift.
+            diag_row_delta: None,
             git_line_statuses: line_statuses,
             git_row_delta: git_row_delta.as_ref(),
+            ruler_col,
         });
     }
     // No BufferEdits entry yet — the load hasn't been seeded
     // into the edit-view source. Fall back to what `BufferStore`
-    // knows. On Pending / Error / absent we render a blank body
-    // (tildes, no content), never an in-buffer placeholder or
-    // error message — matches legacy's "empty buffer during the
-    // brief load window" UX and keeps surface errors off the
-    // user's editing canvas. M21 will surface genuine load
-    // failures via the status-bar alert system instead.
+    // knows via `active_rope`. On Pending / Error / absent we
+    // render a blank body (tildes, no content), never an
+    // in-buffer placeholder or error message — matches legacy's
+    // "empty buffer during the brief load window" UX and keeps
+    // surface errors off the user's editing canvas. M21 will
+    // surface genuine load failures via the status-bar alert
+    // system instead.
     let empty_rope: Arc<Rope> = Arc::new(Rope::new());
-    let rope_ref: &Rope = match store.loaded.get(&tab.path) {
-        Some(LoadState::Ready(rope)) => rope.as_ref(),
-        None | Some(LoadState::Pending) | Some(LoadState::Error(_)) => &empty_rope,
-    };
-    let highlight = active_body_match(&overlays, &tab.path, tab.scroll, area, rope_ref);
+    let rope_ref: &Rope = rope_arc.as_deref().unwrap_or(&empty_rope);
     // No EditedBuffer entry yet → no row_delta. The buffer hasn't
     // accepted any edits, so anchor coords == current coords.
     let line_statuses = git
@@ -119,7 +203,7 @@ pub fn body_model<'a>(inputs: BodyInputs<'a>) -> BodyModel {
     render_content(RenderContentArgs {
         rope: rope_ref,
         cursor: tab.cursor,
-        selection: normalized_selection(tab.mark, tab.cursor),
+        selection,
         scroll: tab.scroll,
         area,
         match_highlight: highlight,
@@ -128,7 +212,25 @@ pub fn body_model<'a>(inputs: BodyInputs<'a>) -> BodyModel {
         diag_row_delta: None,
         git_line_statuses: line_statuses,
         git_row_delta: None,
+        ruler_col,
     })
+}
+
+/// Resolve `BodyModel::Content::ruler_col` from theme + editor
+/// area. Mirrors the legacy painter chain:
+///
+/// `theme.ruler_column.filter(|c| *c < area.cols).filter(|_| !theme.ruler.is_default())`
+///
+/// `None` is returned when the user hasn't opted into a ruler,
+/// the configured column would fall past the right edge of the
+/// editor area (e.g. user toggled the sidebar on a narrow
+/// terminal), or `theme.ruler` is the default unstyled slot (no
+/// visible stripe).
+fn resolve_ruler_col(theme: &led_driver_terminal_core::Theme, area: Rect) -> Option<u16> {
+    theme
+        .ruler_column
+        .filter(|c| *c < area.cols)
+        .filter(|_| !theme.ruler.is_default())
 }
 
 /// Normalize `tab.mark` + `tab.cursor` to an ordered selection
@@ -177,10 +279,10 @@ pub fn rebased_line_spans<'s, 'b>(
     let Some(prev_rope) = state.tree_rope.as_ref() else {
         return Some(state.tokens.clone());
     };
-    if Arc::ptr_eq(prev_rope, &eb.rope) {
+    if Arc::ptr_eq(prev_rope, eb.draft.as_rope()) {
         return Some(state.tokens.clone());
     }
-    let Some(diff) = led_state_syntax::RopeDiff::between(prev_rope, &eb.rope) else {
+    let Some(diff) = led_state_syntax::RopeDiff::between(prev_rope, eb.draft.as_rope()) else {
         return Some(state.tokens.clone());
     };
     // Append-past-last-token fast path: if the diff sits
@@ -203,6 +305,26 @@ pub fn rebased_line_spans<'s, 'b>(
     )))
 }
 
+/// Memoised wrapper around [`active_body_match`]. Takes the
+/// resolved active-rope `Arc<Rope>` so consecutive ticks where
+/// only background-buffer / syntax / diagnostics / git state
+/// changed find the cache key byte-identical (`Arc` ptr_eq on
+/// the rope; pointer-eq on the overlays projection) and skip the
+/// visible-row walk inside `active_body_match`. The walk is cheap
+/// per call but allocates nothing on cache-hit and avoids
+/// repeatedly indexing the rope's grapheme structure.
+#[drv::memo(single)]
+pub fn active_match_highlight<'a>(
+    overlays: OverlaysInput<'a>,
+    rope: Option<Arc<Rope>>,
+    active_path: CanonPath,
+    scroll: Scroll,
+    area: Rect,
+) -> Option<led_driver_terminal_core::BodyMatch> {
+    let rope = rope?;
+    active_body_match(&overlays, &active_path, scroll, area, &rope)
+}
+
 /// Resolve the file-search overlay's current hit into a visible-row
 /// match highlight for the active tab. Returns `None` unless the
 /// overlay is open, has a Result selection pointing at a loaded hit,
@@ -216,7 +338,8 @@ fn active_body_match(
     area: Rect,
     rope: &Rope,
 ) -> Option<led_driver_terminal_core::BodyMatch> {
-    use led_core::{SubLine, col_to_sub_line, sub_line_count};
+    use led_core::SubLine;
+    use led_text_layout::{col_to_sub_line, sub_line_count};
     let state = overlays.file_search.as_ref()?;
     let led_state_file_search::FileSearchSelection::Result(i) = state.selection else {
         return None;
@@ -242,9 +365,9 @@ fn active_body_match(
     let hit_slice = rope.line(line);
     // The hit's `col` is a CHAR index from the file-search driver;
     // convert to grapheme col before consulting wrap geometry.
-    let match_gcol = led_core::char_to_grapheme_col(hit_slice, col_start_char);
+    let match_gcol = led_text_layout::char_to_grapheme_col(hit_slice, col_start_char);
     let match_end_gcol =
-        led_core::char_to_grapheme_col(hit_slice, col_start_char + match_char_len);
+        led_text_layout::char_to_grapheme_col(hit_slice, col_start_char + match_char_len);
     let (match_sub, cells_within) =
         col_to_sub_line(match_gcol, hit_slice, content_cols);
     // Walk sub-line counts to find the visible-row index for
@@ -311,11 +434,15 @@ struct RenderContentArgs<'a> {
     /// Same as `diag_row_delta` but anchored against the buffer's
     /// disk-content hash at git-scan time.
     git_row_delta: Option<&'a led_state_buffer_edits::RowDelta>,
+    /// Pre-resolved ruler column from `resolve_ruler_col`. Stamped
+    /// straight onto `BodyModel::Content::ruler_col`.
+    ruler_col: Option<u16>,
 }
 
 fn render_content(args: RenderContentArgs<'_>) -> BodyModel {
     use led_driver_terminal_core::BodyLine;
-    use led_core::{SubLine, line_layout};
+    use led_core::SubLine;
+    use led_text_layout::line_layout;
 
     let RenderContentArgs {
         rope,
@@ -329,6 +456,7 @@ fn render_content(args: RenderContentArgs<'_>) -> BodyModel {
         diag_row_delta,
         git_line_statuses,
         git_row_delta,
+        ruler_col,
     } = args;
 
     let body_rows = area.rows as usize;
@@ -346,7 +474,7 @@ fn render_content(args: RenderContentArgs<'_>) -> BodyModel {
     // line, not once per sub-line query. Refresh whenever `ln`
     // advances past the cached line.
     let mut layout_for: Option<usize> = None;
-    let mut layout: Vec<led_core::SubLineRange> = Vec::new();
+    let mut layout: Vec<led_text_layout::SubLineRange> = Vec::new();
     let mut full_line: String = String::new();
     // Selection bounds projected onto the current logical line. `None`
     // when this line falls outside the selection. Cached alongside
@@ -472,6 +600,7 @@ fn render_content(args: RenderContentArgs<'_>) -> BodyModel {
         lines: Arc::new(lines),
         cursor: visible_cursor(cursor, scroll, area, rope, content_cols),
         match_highlight,
+        ruler_col,
     }
 }
 
@@ -585,11 +714,12 @@ fn project_selection_to_line(
     sel_start: Cursor,
     sel_end: Cursor,
     ln: usize,
-    layout: &[led_core::SubLineRange],
+    layout: &[led_text_layout::SubLineRange],
     line_slice: ropey::RopeSlice<'_>,
     content_cols: usize,
 ) -> Option<LineSelectionBounds> {
-    use led_core::{SubLine, col_to_sub_line};
+    use led_core::SubLine;
+    use led_text_layout::col_to_sub_line;
     if ln < sel_start.line || ln > sel_end.line {
         return None;
     }
@@ -623,7 +753,7 @@ fn project_selection_to_line(
 fn clip_selection_to_sub(
     bounds: &LineSelectionBounds,
     sub: led_core::SubLine,
-    layout: &[led_core::SubLineRange],
+    layout: &[led_text_layout::SubLineRange],
     area_cols: usize,
 ) -> Option<led_driver_terminal_core::BodySelection> {
     let our_sub = sub.0;
@@ -757,14 +887,14 @@ pub(crate) fn tokens_to_line_spans(
 /// logical line may contribute multiple visible rows. Cheap in
 /// practice because `body_rows` is tiny (20-50) and the walk
 /// short-circuits as soon as we pass the cursor's line.
-fn visible_cursor(
+pub(crate) fn visible_cursor(
     c: Cursor,
     s: Scroll,
     area: Rect,
     rope: &Rope,
     content_cols: usize,
 ) -> Option<(u16, u16)> {
-    use led_core::{col_to_sub_line, line_layout};
+    use led_text_layout::{col_to_sub_line, line_layout};
     let body_rows = area.rows as usize;
     if body_rows == 0 || c.line < s.top {
         return None;

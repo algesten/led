@@ -12,18 +12,15 @@ use led_driver_file_watch_core::{
 };
 use led_state_lsp::LspWatchedGlobs;
 use led_driver_terminal_core::{
-    Dims, Terminal,
+    Dims, Terminal, Theme,
 };
 use led_state_alerts::AlertState;
 use led_state_kbd_macro::KbdMacroState;
-use led_state_session::SessionState;
+use led_driver_session_core::SessionState;
 use led_state_browser::{BrowserUi, Focus};
-use led_state_clipboard::ClipboardState;
+use led_state_clipboard::ClipboardIntent;
+use led_driver_lsp_core::{BufferDiagnostics, DiagnosticsStates, LspServerStatus, LspStatuses};
 use led_state_buffer_edits::{BufferEdits, EditedBuffer};
-use led_state_diagnostics::{
-    BufferDiagnostics, DiagnosticsStates, LspServerStatus,
-    LspStatuses,
-};
 use led_state_syntax::{SyntaxState, SyntaxStates};
 use led_state_tabs::{Tab, TabId, Tabs};
 use std::sync::Arc;
@@ -277,6 +274,28 @@ impl<'a> GitStateInput<'a> {
     }
 }
 
+// ── Input on Theme ─────────────────────────────────────────────────────
+
+/// Whole-theme projection. Theme stays immutable across the
+/// process lifetime today (set once at startup from `theme.toml`)
+/// so the input value is a pointer-stable `&'a Theme`; drv's
+/// equality check finds it pointer-equal on every tick and the
+/// memo's style-resolution slot stays warm. Memos that resolve
+/// chrome styles (`side_panel_row_style`, `status_bar_model`,
+/// `body_model::ruler_col`) lens through this rather than holding
+/// a copy of the relevant slots — adding a new Style slot to
+/// `Theme` only requires touching the memo, not its input shape.
+#[derive(drv::Input, Copy, Clone)]
+pub struct ThemeInput<'a> {
+    pub theme: &'a Theme,
+}
+
+impl<'a> ThemeInput<'a> {
+    pub fn new(theme: &'a Theme) -> Self {
+        Self { theme }
+    }
+}
+
 // ── Input on Terminal ──────────────────────────────────────────────────
 
 /// Viewport dims only. A push to `Terminal.pending` is deliberately
@@ -292,21 +311,51 @@ impl<'a> TerminalDimsInput<'a> {
     }
 }
 
-// ── Input on ClipboardState ────────────────────────────────────────────
+// ── Input on ClipboardIntent (user-decision) ───────────────────────────
 
 #[derive(drv::Input, Copy, Clone)]
-pub struct ClipboardStateInput<'a> {
+pub struct ClipboardIntentInput<'a> {
     pub pending_yank: &'a Option<TabId>,
-    pub read_in_flight: &'a bool,
     pub pending_write: &'a Option<Arc<str>>,
 }
 
-impl<'a> ClipboardStateInput<'a> {
-    pub fn new(c: &'a ClipboardState) -> Self {
+impl<'a> ClipboardIntentInput<'a> {
+    pub fn new(c: &'a ClipboardIntent) -> Self {
         Self {
             pending_yank: &c.pending_yank,
-            read_in_flight: &c.read_in_flight,
             pending_write: &c.pending_write,
+        }
+    }
+}
+
+// ── Input on driver-owned FsListState (in-flight tracking) ────────────
+
+#[derive(drv::Input, Copy, Clone)]
+pub struct FsListDriverInput<'a> {
+    pub in_flight: &'a imbl::HashSet<CanonPath>,
+}
+
+impl<'a> FsListDriverInput<'a> {
+    pub fn new(s: &'a led_driver_fs_list_core::FsListState) -> Self {
+        Self {
+            in_flight: &s.in_flight,
+        }
+    }
+}
+
+// ── Input on driver-owned ClipboardState (in-flight tracking) ──────────
+
+#[derive(drv::Input, Copy, Clone)]
+pub struct ClipboardDriverInput<'a> {
+    pub read: &'a led_driver_clipboard_core::ReadState,
+    pub write: &'a led_driver_clipboard_core::WriteState,
+}
+
+impl<'a> ClipboardDriverInput<'a> {
+    pub fn new(c: &'a led_driver_clipboard_core::ClipboardState) -> Self {
+        Self {
+            read: &c.read,
+            write: &c.write,
         }
     }
 }
@@ -340,12 +389,12 @@ impl<'a> AlertsInput<'a> {
 #[derive(drv::Input, Copy, Clone)]
 pub struct FsTreeInput<'a> {
     pub root: &'a Option<CanonPath>,
-    pub dir_contents: &'a imbl::HashMap<CanonPath, imbl::Vector<led_state_browser::DirEntry>>,
+    pub dir_contents: &'a imbl::HashMap<CanonPath, imbl::Vector<led_driver_fs_list_core::DirEntry>>,
     pub failed_dirs: &'a imbl::HashSet<CanonPath>,
 }
 
 impl<'a> FsTreeInput<'a> {
-    pub fn new(fs: &'a led_state_browser::FsTree) -> Self {
+    pub fn new(fs: &'a led_driver_fs_list_core::FsTree) -> Self {
         Self {
             root: &fs.root,
             dir_contents: &fs.dir_contents,
@@ -363,7 +412,7 @@ pub struct FsRootInput<'a> {
 }
 
 impl<'a> FsRootInput<'a> {
-    pub fn new(fs: &'a led_state_browser::FsTree) -> Self {
+    pub fn new(fs: &'a led_driver_fs_list_core::FsTree) -> Self {
         Self { root: &fs.root }
     }
 }
@@ -419,6 +468,45 @@ pub struct FindFileInput<'a> {
 impl<'a> FindFileInput<'a> {
     pub fn new(ff: &'a Option<led_state_find_file::FindFileState>) -> Self {
         Self { overlay: ff }
+    }
+}
+
+/// Narrow projection of [`FileSearchState`]'s query bits — the
+/// fields the regex compiler depends on. Result churn
+/// (`flat_hits`, `results`, `scroll_offset`, …) is deliberately
+/// excluded so a fresh ripgrep batch doesn't invalidate the
+/// compiled-regex cache.
+#[derive(drv::Input, Copy, Clone)]
+pub struct FileSearchQueryInput<'a> {
+    pub query_text: &'a String,
+    pub case_sensitive: &'a bool,
+    pub use_regex: &'a bool,
+}
+
+impl<'a> FileSearchQueryInput<'a> {
+    pub fn new(s: &'a led_state_file_search::FileSearchState) -> Self {
+        Self {
+            query_text: &s.query.text,
+            case_sensitive: &s.case_sensitive,
+            use_regex: &s.use_regex,
+        }
+    }
+}
+
+/// Narrow projection of [`FileSearchState.replace`] — just the
+/// replacement text. Lives on its own input so the replace_all
+/// plan memo can take query + replacement separately (the
+/// compiled regex only depends on the query side).
+#[derive(drv::Input, Copy, Clone)]
+pub struct FileSearchReplaceInput<'a> {
+    pub replace_text: &'a String,
+}
+
+impl<'a> FileSearchReplaceInput<'a> {
+    pub fn new(s: &'a led_state_file_search::FileSearchState) -> Self {
+        Self {
+            replace_text: &s.replace.text,
+        }
     }
 }
 
@@ -484,21 +572,6 @@ impl<'a> FileWatchRegistryInput<'a> {
         Self {
             registry: &s.registry,
         }
-    }
-}
-
-/// "Now" as memo input. Per EXAMPLE-ARCH "Time is a source
-/// field": the runtime writes `clock.now = Instant::now()` once
-/// per ingest tick, and time-dependent memos take this input so
-/// their cache invalidates whenever a tick's clock advances.
-#[derive(drv::Input, Copy, Clone)]
-pub struct ClockInput<'a> {
-    pub now: &'a std::time::Instant,
-}
-
-impl<'a> ClockInput<'a> {
-    pub fn new(c: &'a crate::Clock) -> Self {
-        Self { now: &c.now }
     }
 }
 

@@ -1,0 +1,18 @@
+[package]
+name = "led-abi-command"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Dispatch-level [`Command`] vocabulary — the shared ABI shape used
+# by:
+#  - `state-kbd-macro`: records `Vec<Command>` into `current`.
+#  - `runtime::keymap`: maps key events to `Command`.
+#  - `runtime::dispatch`: matches on `Command` variants.
+#
+# Lives in a standalone leaf crate (rather than `led-core`) so that
+# `led-core` can stay primitives-only and `state-kbd-macro` can
+# depend on the command vocabulary without pulling in
+# `led-core`'s grapheme / wrap / path types.
+
+[dependencies]

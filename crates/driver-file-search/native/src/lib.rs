@@ -98,13 +98,14 @@ fn search_worker_loop(
     notify: Notifier,
 ) {
     while let Ok(cmd) = rx.recv() {
-        let (groups, flat) = run_search(&cmd);
+        let (groups, flat, error) = run_search(&cmd);
         let out = FileSearchOut {
             query: cmd.query,
             case_sensitive: cmd.case_sensitive,
             use_regex: cmd.use_regex,
             groups,
             flat,
+            error,
         };
         if tx.send(out).is_err() {
             return;
@@ -276,7 +277,9 @@ fn write_atomic(path: &std::path::Path, content: &str) -> std::io::Result<()> {
     std::fs::rename(&tmp, path)
 }
 
-fn run_search(cmd: &FileSearchCmd) -> (Vec<FileSearchGroup>, Vec<FileSearchHit>) {
+fn run_search(
+    cmd: &FileSearchCmd,
+) -> (Vec<FileSearchGroup>, Vec<FileSearchHit>, Option<Arc<str>>) {
     let pattern = if cmd.use_regex {
         cmd.query.clone()
     } else {
@@ -287,7 +290,13 @@ fn run_search(cmd: &FileSearchCmd) -> (Vec<FileSearchGroup>, Vec<FileSearchHit>)
         .build(&pattern)
     {
         Ok(m) => m,
-        Err(_) => return (Vec::new(), Vec::new()),
+        Err(e) => {
+            return (
+                Vec::new(),
+                Vec::new(),
+                Some(Arc::from(format!("invalid pattern: {e}").as_str())),
+            );
+        }
     };
 
     let walker = WalkBuilder::new(cmd.root.as_path())
@@ -379,7 +388,7 @@ fn run_search(cmd: &FileSearchCmd) -> (Vec<FileSearchGroup>, Vec<FileSearchHit>)
         .iter()
         .flat_map(|g| g.hits.iter().cloned())
         .collect();
-    (groups, flat)
+    (groups, flat, None)
 }
 
 /// Heuristic relevance score for a hit group. Higher → ranked earlier.
@@ -430,6 +439,7 @@ fn token_overlap(a: &str, b: &str) -> usize {
 mod tests {
     use super::*;
     use led_core::CanonPath;
+    use led_driver_file_search_core::FileSearchDriverState;
     use std::fs as stdfs;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -479,18 +489,22 @@ mod tests {
             .unwrap();
 
         let (drv, _native) = spawn(Arc::new(NoopTraceImpl), Notifier::noop());
-        drv.execute(std::iter::once(&FileSearchCmd {
-            root: canon(&dir),
-            query: "needle".into(),
-            case_sensitive: false,
-            use_regex: false,
-        }));
+        let mut state = FileSearchDriverState::default();
+        drv.execute(
+            std::iter::once(&FileSearchCmd {
+                root: canon(&dir),
+                query: "needle".into(),
+                case_sensitive: false,
+                use_regex: false,
+            }),
+            &mut state,
+        );
 
         let mut collected: Vec<FileSearchOut> = Vec::new();
         assert!(
             wait_for(
                 || {
-                    collected.extend(drv.process());
+                    collected.extend(drv.process(&mut state));
                     !collected.is_empty()
                 },
                 Duration::from_secs(2),
@@ -521,17 +535,21 @@ mod tests {
         stdfs::write(dir.join("x.txt"), b"Needle\nneedle\n").unwrap();
 
         let (drv, _native) = spawn(Arc::new(NoopTraceImpl), Notifier::noop());
-        drv.execute(std::iter::once(&FileSearchCmd {
-            root: canon(&dir),
-            query: "needle".into(),
-            case_sensitive: true,
-            use_regex: false,
-        }));
+        let mut state = FileSearchDriverState::default();
+        drv.execute(
+            std::iter::once(&FileSearchCmd {
+                root: canon(&dir),
+                query: "needle".into(),
+                case_sensitive: true,
+                use_regex: false,
+            }),
+            &mut state,
+        );
 
         let mut collected: Vec<FileSearchOut> = Vec::new();
         wait_for(
             || {
-                collected.extend(drv.process());
+                collected.extend(drv.process(&mut state));
                 !collected.is_empty()
             },
             Duration::from_secs(2),
@@ -546,17 +564,21 @@ mod tests {
         stdfs::write(dir.join("x.txt"), b"foo123bar\nfoo456bar\nbaz\n").unwrap();
 
         let (drv, _native) = spawn(Arc::new(NoopTraceImpl), Notifier::noop());
-        drv.execute(std::iter::once(&FileSearchCmd {
-            root: canon(&dir),
-            query: "foo[0-9]+bar".into(),
-            case_sensitive: false,
-            use_regex: true,
-        }));
+        let mut state = FileSearchDriverState::default();
+        drv.execute(
+            std::iter::once(&FileSearchCmd {
+                root: canon(&dir),
+                query: "foo[0-9]+bar".into(),
+                case_sensitive: false,
+                use_regex: true,
+            }),
+            &mut state,
+        );
 
         let mut collected: Vec<FileSearchOut> = Vec::new();
         wait_for(
             || {
-                collected.extend(drv.process());
+                collected.extend(drv.process(&mut state));
                 !collected.is_empty()
             },
             Duration::from_secs(2),
@@ -570,17 +592,21 @@ mod tests {
         stdfs::write(dir.join("x.txt"), b"hi\n").unwrap();
 
         let (drv, _native) = spawn(Arc::new(NoopTraceImpl), Notifier::noop());
-        drv.execute(std::iter::once(&FileSearchCmd {
-            root: canon(&dir),
-            query: "[invalid".into(),
-            case_sensitive: false,
-            use_regex: true,
-        }));
+        let mut state = FileSearchDriverState::default();
+        drv.execute(
+            std::iter::once(&FileSearchCmd {
+                root: canon(&dir),
+                query: "[invalid".into(),
+                case_sensitive: false,
+                use_regex: true,
+            }),
+            &mut state,
+        );
 
         let mut collected: Vec<FileSearchOut> = Vec::new();
         wait_for(
             || {
-                collected.extend(drv.process());
+                collected.extend(drv.process(&mut state));
                 !collected.is_empty()
             },
             Duration::from_secs(2),
@@ -599,17 +625,21 @@ mod tests {
         stdfs::write(dir.join("kept.txt"), b"needle\n").unwrap();
 
         let (drv, _native) = spawn(Arc::new(NoopTraceImpl), Notifier::noop());
-        drv.execute(std::iter::once(&FileSearchCmd {
-            root: canon(&dir),
-            query: "needle".into(),
-            case_sensitive: false,
-            use_regex: false,
-        }));
+        let mut state = FileSearchDriverState::default();
+        drv.execute(
+            std::iter::once(&FileSearchCmd {
+                root: canon(&dir),
+                query: "needle".into(),
+                case_sensitive: false,
+                use_regex: false,
+            }),
+            &mut state,
+        );
 
         let mut collected: Vec<FileSearchOut> = Vec::new();
         wait_for(
             || {
-                collected.extend(drv.process());
+                collected.extend(drv.process(&mut state));
                 !collected.is_empty()
             },
             Duration::from_secs(2),
@@ -624,11 +654,12 @@ mod tests {
 
     fn wait_for_replace(
         drv: &FileSearchDriver,
+        state: &mut FileSearchDriverState,
         deadline: Duration,
     ) -> Option<FileSearchReplaceOut> {
         let start = Instant::now();
         while start.elapsed() < deadline {
-            let mut batch = drv.process_replace();
+            let mut batch = drv.process_replace(state);
             if let Some(first) = batch.drain(..).next() {
                 return Some(first);
             }
@@ -645,16 +676,20 @@ mod tests {
         stdfs::write(dir.join("c.txt"), b"triple foo foo foo\n").unwrap();
 
         let (drv, _native) = spawn(Arc::new(NoopTraceImpl), Notifier::noop());
-        drv.execute_replace(std::iter::once(&FileSearchReplaceCmd {
-            root: canon(&dir),
-            query: "foo".into(),
-            replacement: "QUX".into(),
-            case_sensitive: false,
-            use_regex: false,
-            skip_paths: Vec::new(),
-        }));
+        let mut state = FileSearchDriverState::default();
+        drv.execute_replace(
+            std::iter::once(&FileSearchReplaceCmd {
+                root: canon(&dir),
+                query: "foo".into(),
+                replacement: "QUX".into(),
+                case_sensitive: false,
+                use_regex: false,
+                skip_paths: Vec::new(),
+            }),
+            &mut state,
+        );
 
-        let out = wait_for_replace(&drv, Duration::from_secs(2))
+        let out = wait_for_replace(&drv, &mut state, Duration::from_secs(2))
             .expect("replace result within 2s");
         assert_eq!(out.files_changed, 2);
         assert_eq!(out.total_replacements, 5);
@@ -676,16 +711,20 @@ mod tests {
         let a_path = canon(&dir.join("a.txt"));
 
         let (drv, _native) = spawn(Arc::new(NoopTraceImpl), Notifier::noop());
-        drv.execute_replace(std::iter::once(&FileSearchReplaceCmd {
-            root: canon(&dir),
-            query: "foo".into(),
-            replacement: "QUX".into(),
-            case_sensitive: false,
-            use_regex: false,
-            skip_paths: vec![a_path],
-        }));
+        let mut state = FileSearchDriverState::default();
+        drv.execute_replace(
+            std::iter::once(&FileSearchReplaceCmd {
+                root: canon(&dir),
+                query: "foo".into(),
+                replacement: "QUX".into(),
+                case_sensitive: false,
+                use_regex: false,
+                skip_paths: vec![a_path],
+            }),
+            &mut state,
+        );
 
-        let out = wait_for_replace(&drv, Duration::from_secs(2))
+        let out = wait_for_replace(&drv, &mut state, Duration::from_secs(2))
             .expect("replace result within 2s");
         // Only b.txt got rewritten; a.txt stays on disk untouched
         // (the runtime would have applied the replace in-memory for
@@ -705,16 +744,20 @@ mod tests {
         stdfs::write(dir.join("a.txt"), b"foo\n").unwrap();
 
         let (drv, _native) = spawn(Arc::new(NoopTraceImpl), Notifier::noop());
-        drv.execute_replace(std::iter::once(&FileSearchReplaceCmd {
-            root: canon(&dir),
-            query: "[invalid".into(),
-            replacement: "x".into(),
-            case_sensitive: false,
-            use_regex: true,
-            skip_paths: Vec::new(),
-        }));
+        let mut state = FileSearchDriverState::default();
+        drv.execute_replace(
+            std::iter::once(&FileSearchReplaceCmd {
+                root: canon(&dir),
+                query: "[invalid".into(),
+                replacement: "x".into(),
+                case_sensitive: false,
+                use_regex: true,
+                skip_paths: Vec::new(),
+            }),
+            &mut state,
+        );
 
-        let out = wait_for_replace(&drv, Duration::from_secs(2))
+        let out = wait_for_replace(&drv, &mut state, Duration::from_secs(2))
             .expect("replace result within 2s");
         assert_eq!(out.files_changed, 0);
         assert_eq!(out.total_replacements, 0);
@@ -723,11 +766,12 @@ mod tests {
 
     fn wait_for_single_replace(
         drv: &FileSearchDriver,
+        state: &mut FileSearchDriverState,
         deadline: Duration,
     ) -> Option<FileSearchSingleReplaceOut> {
         let start = Instant::now();
         while start.elapsed() < deadline {
-            let mut batch = drv.process_single_replace();
+            let mut batch = drv.process_single_replace(state);
             if let Some(first) = batch.drain(..).next() {
                 return Some(first);
             }
@@ -747,17 +791,21 @@ mod tests {
         let path = canon(&dir.join("a.txt"));
 
         let (drv, _native) = spawn(Arc::new(NoopTraceImpl), Notifier::noop());
+        let mut state = FileSearchDriverState::default();
         // "foo" on line 2 at byte offset 12..15 of the line body.
-        drv.execute_single_replace(std::iter::once(&FileSearchSingleReplaceCmd {
-            path: path.clone(),
-            line: 2,
-            match_start: 12,
-            match_end: 15,
-            original: "foo".into(),
-            replacement: "BAR".into(),
-        }));
+        drv.execute_single_replace(
+            std::iter::once(&FileSearchSingleReplaceCmd {
+                path: path.clone(),
+                line: 2,
+                match_start: 12,
+                match_end: 15,
+                original: "foo".into(),
+                replacement: "BAR".into(),
+            }),
+            &mut state,
+        );
 
-        let out = wait_for_single_replace(&drv, Duration::from_secs(2))
+        let out = wait_for_single_replace(&drv, &mut state, Duration::from_secs(2))
             .expect("single replace within 2s");
         assert!(out.ok);
         // Only line 2's "foo" got rewritten — "foo" on line 3 is
@@ -775,17 +823,21 @@ mod tests {
         let path = canon(&dir.join("a.txt"));
 
         let (drv, _native) = spawn(Arc::new(NoopTraceImpl), Notifier::noop());
+        let mut state = FileSearchDriverState::default();
         // We claim "zzz" lives at bytes 6..9 (it doesn't — "beta" is there).
-        drv.execute_single_replace(std::iter::once(&FileSearchSingleReplaceCmd {
-            path: path.clone(),
-            line: 1,
-            match_start: 6,
-            match_end: 9,
-            original: "zzz".into(),
-            replacement: "BAR".into(),
-        }));
+        drv.execute_single_replace(
+            std::iter::once(&FileSearchSingleReplaceCmd {
+                path: path.clone(),
+                line: 1,
+                match_start: 6,
+                match_end: 9,
+                original: "zzz".into(),
+                replacement: "BAR".into(),
+            }),
+            &mut state,
+        );
 
-        let out = wait_for_single_replace(&drv, Duration::from_secs(2))
+        let out = wait_for_single_replace(&drv, &mut state, Duration::from_secs(2))
             .expect("single replace within 2s");
         assert!(!out.ok);
         // File untouched.
@@ -802,16 +854,20 @@ mod tests {
         let path = canon(&dir.join("a.txt"));
 
         let (drv, _native) = spawn(Arc::new(NoopTraceImpl), Notifier::noop());
-        drv.execute_single_replace(std::iter::once(&FileSearchSingleReplaceCmd {
-            path: path.clone(),
-            line: 10, // way past EOF
-            match_start: 0,
-            match_end: 3,
-            original: "foo".into(),
-            replacement: "BAR".into(),
-        }));
+        let mut state = FileSearchDriverState::default();
+        drv.execute_single_replace(
+            std::iter::once(&FileSearchSingleReplaceCmd {
+                path: path.clone(),
+                line: 10, // way past EOF
+                match_start: 0,
+                match_end: 3,
+                original: "foo".into(),
+                replacement: "BAR".into(),
+            }),
+            &mut state,
+        );
 
-        let out = wait_for_single_replace(&drv, Duration::from_secs(2))
+        let out = wait_for_single_replace(&drv, &mut state, Duration::from_secs(2))
             .expect("single replace within 2s");
         assert!(!out.ok);
     }
@@ -826,16 +882,20 @@ mod tests {
         .unwrap();
 
         let (drv, _native) = spawn(Arc::new(NoopTraceImpl), Notifier::noop());
-        drv.execute_replace(std::iter::once(&FileSearchReplaceCmd {
-            root: canon(&dir),
-            query: "foo".into(),
-            replacement: "BAR".into(),
-            case_sensitive: false,
-            use_regex: false,
-            skip_paths: Vec::new(),
-        }));
+        let mut state = FileSearchDriverState::default();
+        drv.execute_replace(
+            std::iter::once(&FileSearchReplaceCmd {
+                root: canon(&dir),
+                query: "foo".into(),
+                replacement: "BAR".into(),
+                case_sensitive: false,
+                use_regex: false,
+                skip_paths: Vec::new(),
+            }),
+            &mut state,
+        );
 
-        let out = wait_for_replace(&drv, Duration::from_secs(2))
+        let out = wait_for_replace(&drv, &mut state, Duration::from_secs(2))
             .expect("replace result within 2s");
         assert_eq!(out.files_changed, 1);
         assert_eq!(out.total_replacements, 2);
@@ -869,17 +929,21 @@ mod tests {
         .unwrap();
 
         let (drv, _native) = spawn(Arc::new(NoopTraceImpl), Notifier::noop());
-        drv.execute(std::iter::once(&FileSearchCmd {
-            root: canon(&dir),
-            query: "status_bar_model".into(),
-            case_sensitive: false,
-            use_regex: false,
-        }));
+        let mut state = FileSearchDriverState::default();
+        drv.execute(
+            std::iter::once(&FileSearchCmd {
+                root: canon(&dir),
+                query: "status_bar_model".into(),
+                case_sensitive: false,
+                use_regex: false,
+            }),
+            &mut state,
+        );
 
         let mut collected: Vec<FileSearchOut> = Vec::new();
         wait_for(
             || {
-                collected.extend(drv.process());
+                collected.extend(drv.process(&mut state));
                 !collected.is_empty()
             },
             Duration::from_secs(2),

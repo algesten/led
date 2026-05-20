@@ -8,11 +8,11 @@ use std::path::PathBuf;
 
 use clap::Parser;
 use led_core::UserPath;
+use led_driver_fs_list_core::FsTree;
 use led_driver_terminal_native::RawModeGuard;
 use led_runtime::{
     load_keymap, load_theme, spawn_drivers, Sources, SharedTrace, TabIdGen, Wake, World,
 };
-use led_state_browser::FsTree;
 use led_state_tabs::Tab;
 
 #[derive(Parser, Debug)]

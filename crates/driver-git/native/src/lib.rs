@@ -15,8 +15,11 @@
 //!    gutter-clear signal.
 //!
 //! A failed `Repository::open` (not a repo, permissions, etc.)
-//! returns *no* events — silent no-op per `docs/spec/git.md`
-//! "Error paths". The runtime's source keeps its previous values.
+//! emits a single [`GitEvent::ScanFailed`] so the driver's
+//! `scan_in_flight` slot clears and `last_scan_ok = Some(false)`.
+//! Failure-as-state per
+//! `feedback_driver_failure_state.md` — without this the runtime
+//! would believe the scan is permanently in flight.
 //!
 //! The port of `scan_file_statuses` and `scan_line_statuses` is
 //! verbatim from legacy `led/crates/git/src/lib.rs`, translated
@@ -65,9 +68,19 @@ fn worker_loop(rx: Receiver<GitCmd>, tx: Sender<GitEvent>, notify: Notifier) {
     while let Ok(cmd) = rx.recv() {
         match cmd {
             GitCmd::ScanFiles { root } => {
-                // Silent on repo.open failure per spec.
-                let Some((file_statuses, branch)) = scan_file_statuses(&root) else {
-                    continue;
+                // Failure-as-state: emit a `ScanFailed` so the
+                // driver's `scan_in_flight` slot clears and
+                // `last_scan_ok = Some(false)`.
+                let (file_statuses, branch) = match scan_file_statuses(&root) {
+                    Ok(v) => v,
+                    Err(msg) => {
+                        let _ = tx.send(GitEvent::ScanFailed {
+                            root: root.clone(),
+                            message: Arc::from(msg.as_str()),
+                        });
+                        notify.notify();
+                        continue;
+                    }
                 };
 
                 // Compute per-file line statuses for every dirty
@@ -133,9 +146,12 @@ type FileStatusMap = HashMap<CanonPath, HashSet<IssueCategory>>;
 
 /// Walk `repo.statuses()` and translate each entry onto zero or
 /// more `IssueCategory` values. Also returns the branch shorthand
-/// (or `None` for detached HEAD / missing HEAD).
-fn scan_file_statuses(root: &CanonPath) -> Option<(FileStatusMap, Option<String>)> {
-    let repo = git2::Repository::open(root.as_path()).ok()?;
+/// (or `None` for detached HEAD / missing HEAD). Returns Err with
+/// a human-readable message on terminal failure (no repo, libgit2
+/// error) so the worker can emit [`GitEvent::ScanFailed`].
+fn scan_file_statuses(root: &CanonPath) -> Result<(FileStatusMap, Option<String>), String> {
+    let repo = git2::Repository::open(root.as_path())
+        .map_err(|e| format!("Repository::open failed: {e}"))?;
 
     let branch = repo
         .head()
@@ -147,8 +163,14 @@ fn scan_file_statuses(root: &CanonPath) -> Option<(FileStatusMap, Option<String>
         .recurse_untracked_dirs(true)
         .exclude_submodules(true);
 
-    let git_statuses = repo.statuses(Some(&mut opts)).ok()?;
-    let workdir = UserPath::new(repo.workdir()?).canonicalize();
+    let git_statuses = repo
+        .statuses(Some(&mut opts))
+        .map_err(|e| format!("repo.statuses failed: {e}"))?;
+    let workdir = UserPath::new(
+        repo.workdir()
+            .ok_or_else(|| "bare repo has no workdir".to_string())?,
+    )
+    .canonicalize();
 
     let mut result: FileStatusMap = HashMap::new();
 
@@ -179,7 +201,7 @@ fn scan_file_statuses(root: &CanonPath) -> Option<(FileStatusMap, Option<String>
         }
     }
 
-    Some((result, branch))
+    Ok((result, branch))
 }
 
 /// Compute line-level statuses for a file via two diffs:
@@ -306,6 +328,7 @@ fn collect_added_lines(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use led_driver_git_core::GitDriverState;
     use std::path::PathBuf;
     use std::process::Command;
     use std::time::{Duration, Instant};
@@ -353,15 +376,39 @@ mod tests {
     }
 
     #[test]
-    fn non_repo_produces_no_events() {
+    fn non_repo_emits_scan_failed() {
         let tmp = tempfile::tempdir().unwrap();
         let (drv, _n) = spawn(Arc::new(NoopTrace), Notifier::noop());
-        drv.execute([&GitCmd::ScanFiles {
-            root: canon_of(tmp.path()),
-        }]);
-        // No events should arrive; wait a short window, expect none.
-        std::thread::sleep(Duration::from_millis(200));
-        assert!(drv.process().is_empty());
+        let mut state = GitDriverState::default();
+        drv.execute(
+            [&GitCmd::ScanFiles {
+                root: canon_of(tmp.path()),
+            }],
+            &mut state,
+        );
+        let mut events: Vec<GitEvent> = Vec::new();
+        let ok = drain_until(
+            || {
+                let mut b = drv.process(&mut state);
+                if !b.is_empty() {
+                    events.append(&mut b);
+                    true
+                } else {
+                    false
+                }
+            },
+            Duration::from_secs(2),
+        );
+        assert!(ok, "expected ScanFailed event");
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, GitEvent::ScanFailed { .. })),
+            "expected ScanFailed: {events:?}"
+        );
+        assert_eq!(state.last_scan_ok, Some(false));
+        assert!(state.last_error.is_some());
+        assert!(state.scan_in_flight.is_none());
     }
 
     #[test]
@@ -378,12 +425,16 @@ mod tests {
         write(dir, "untracked.txt", "new\n");
 
         let (drv, _n) = spawn(Arc::new(NoopTrace), Notifier::noop());
-        drv.execute([&GitCmd::ScanFiles { root: canon_of(dir) }]);
+        let mut state = GitDriverState::default();
+        drv.execute(
+            [&GitCmd::ScanFiles { root: canon_of(dir) }],
+            &mut state,
+        );
 
         let mut events: Vec<GitEvent> = Vec::new();
         let ok = drain_until(
             || {
-                let mut b = drv.process();
+                let mut b = drv.process(&mut state);
                 if !b.is_empty() {
                     events.append(&mut b);
                     true
@@ -397,7 +448,7 @@ mod tests {
         // Coalesce a second-round drain in case the LineStatuses
         // followed after the first drain exit.
         std::thread::sleep(Duration::from_millis(50));
-        events.extend(drv.process());
+        events.extend(drv.process(&mut state));
 
         // Expect one FileStatuses with both paths, then at least
         // one LineStatuses for tracked.txt.
@@ -454,15 +505,22 @@ mod tests {
         write(dir, "f.txt", "a\nb\n");
 
         let (drv, _n) = spawn(Arc::new(NoopTrace), Notifier::noop());
-        drv.execute([&GitCmd::ScanFiles { root: canon_of(dir) }]);
+        let mut state = GitDriverState::default();
+        drv.execute(
+            [&GitCmd::ScanFiles { root: canon_of(dir) }],
+            &mut state,
+        );
         std::thread::sleep(Duration::from_millis(200));
-        let _first = drv.process();
+        let _first = drv.process(&mut state);
 
         // Revert to clean.
         write(dir, "f.txt", "a\n");
-        drv.execute([&GitCmd::ScanFiles { root: canon_of(dir) }]);
+        drv.execute(
+            [&GitCmd::ScanFiles { root: canon_of(dir) }],
+            &mut state,
+        );
         std::thread::sleep(Duration::from_millis(200));
-        let second = drv.process();
+        let second = drv.process(&mut state);
 
         let target = canon_of(&dir.join("f.txt"));
         let has_clear = second.iter().any(|e| {

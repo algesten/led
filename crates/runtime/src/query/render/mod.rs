@@ -14,12 +14,18 @@ use led_state_browser::Focus;
 
 use super::inputs::*;
 
-pub use body::{body_model, rebased_line_spans, BodyInputs};
+pub use body::{
+    active_match_highlight, active_rope, body_cursor, body_model,
+    rebased_line_spans, BodyInputs,
+};
 pub use popover::popover_model;
 pub use popups::{
     code_action_popup_model, completion_popup_model, rename_popup_model,
 };
-pub use side_panel::{side_panel_model, SidePanelInputs};
+pub use side_panel::{
+    side_panel_browser, side_panel_completions, side_panel_file_search,
+    side_panel_model, SidePanelBrowserInputs, SidePanelInputs,
+};
 pub use status_bar::{status_bar_model, StatusBarInputs};
 pub use tab_bar::tab_bar_model;
 
@@ -97,6 +103,12 @@ pub struct RenderInputs<'a> {
     pub completions: CompletionsSessionInput<'a>,
     pub lsp_extras: LspExtrasOverlayInput<'a>,
     pub git: GitStateInput<'a>,
+    /// Theme used for chrome-style memos (side-panel row styles,
+    /// status-bar row style, ruler visibility). Theme is set once
+    /// at startup so this projection is pointer-stable across the
+    /// process lifetime and the memos' style-resolution caches
+    /// stay warm.
+    pub theme: ThemeInput<'a>,
     /// M22 — `kbd_macro.recording` for the status-bar
     /// recording indicator. Narrow projection so per-keystroke
     /// pushes into `KbdMacroState.current` don't invalidate
@@ -131,13 +143,14 @@ pub fn render_frame<'a>(inputs: RenderInputs<'a>) -> Option<Frame> {
         completions,
         lsp_extras,
         git,
+        theme,
         kbd_macro,
         session,
         render_tick,
     } = inputs;
     let dims = (*term.dims)?;
     let layout = Layout::compute(dims, *browser.visible);
-    let tab_bar = tab_bar_model(tabs, edits);
+    let tab_bar = tab_bar_model(tabs, edits, layout.tab_bar.cols);
     let body = body_model(BodyInputs {
         edits,
         store,
@@ -146,6 +159,7 @@ pub fn render_frame<'a>(inputs: RenderInputs<'a>) -> Option<Frame> {
         syntax,
         diagnostics,
         git,
+        theme,
         area: layout.editor_area,
     });
     let status_bar = status_bar_model(StatusBarInputs {
@@ -159,6 +173,7 @@ pub fn render_frame<'a>(inputs: RenderInputs<'a>) -> Option<Frame> {
         git,
         kbd_macro,
         session,
+        theme,
         render_tick,
     });
     let side_panel = layout
@@ -172,6 +187,7 @@ pub fn render_frame<'a>(inputs: RenderInputs<'a>) -> Option<Frame> {
                 diagnostics,
                 git,
                 edits,
+                theme,
                 rows: area.rows,
             })
         });
@@ -184,7 +200,8 @@ pub fn render_frame<'a>(inputs: RenderInputs<'a>) -> Option<Frame> {
     // `completion` slot of the frame.
     let completion = code_action_popup_model(lsp_extras, tabs, layout.editor_area)
         .or_else(|| completion_popup_model(completions, tabs, layout.editor_area));
-    let rename_popup = rename_popup_model(lsp_extras, &body, layout.editor_area);
+    let rename_popup =
+        rename_popup_model(lsp_extras, edits, store, tabs, layout.editor_area);
     // Cursor placement, in priority order:
     //
     // 1. Find-file overlay active → status-bar row, column = prompt
@@ -240,6 +257,15 @@ pub fn render_frame<'a>(inputs: RenderInputs<'a>) -> Option<Frame> {
         layout,
         cursor,
         dims,
+        // Stamped by the render phase after this memo returns —
+        // see the manual `PartialEq` on `Frame`. The memo always
+        // emits `FrameId::default()` so cache equality compares
+        // only the content-bearing fields.
+        id: led_driver_terminal_core::FrameId::default(),
+        // Same story for `paint_plan` — the render phase derives
+        // it from (prev_frame, curr_frame). The memo emits the
+        // default; the manual `PartialEq` excludes both fields.
+        paint_plan: led_driver_terminal_core::PaintPlan::default(),
     })
 }
 

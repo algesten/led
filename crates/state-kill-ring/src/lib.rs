@@ -2,9 +2,11 @@
 //!
 //! Pure user-decision state: dispatch writes `latest` on kill
 //! commands and reads it on `Yank`. Course-correct #5 pulled the
-//! async-adjacent fields (`pending_yank`, `read_in_flight`,
-//! `pending_clipboard_write`) out into [`led_state_clipboard`] —
-//! they belong to the driver, not the kill ring.
+//! async-adjacent fields (`pending_yank`, `pending_write`) out
+//! into [`led_state_clipboard::ClipboardIntent`] — they belong
+//! to the clipboard intent layer, not the kill ring. The
+//! in-flight read/write tracking lives further out still, in
+//! `led_driver_clipboard_core::ClipboardState`.
 //!
 //! M7 is single-slot: `latest: Option<Arc<str>>` holds the most
 //! recently killed text. The field name and shape anticipate a real

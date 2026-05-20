@@ -28,7 +28,7 @@
 use std::collections::HashMap;
 
 use led_core::{CanonPath, PathChain};
-use led_state_browser::FsTree;
+use led_driver_fs_list_core::FsTree;
 use led_state_find_file::{FindFileMode, FindFileState, abbreviate_home, expand_path};
 use led_state_tabs::Tabs;
 
@@ -134,6 +134,7 @@ pub(super) fn run_overlay_command(
     tabs: &mut Tabs,
     edits: &mut led_state_buffer_edits::BufferEdits,
     path_chains: &mut HashMap<CanonPath, PathChain>,
+    clock: &crate::Clock,
 ) -> Option<DispatchOutcome> {
     find_file.as_ref()?;
     // Any overlay interaction dismisses a lingering hint. The
@@ -157,7 +158,7 @@ pub(super) fn run_overlay_command(
         Command::CursorLineStart => find_file.as_mut()?.input.to_line_start(),
         Command::CursorLineEnd => find_file.as_mut()?.input.to_line_end(),
         Command::KillLine => kill_line(find_file.as_mut()?),
-        Command::FindFileTabComplete => tab_complete(find_file.as_mut()?),
+        Command::FindFileTabComplete => tab_complete(find_file.as_mut()?, clock),
         Command::CursorUp => move_selection(find_file, tabs, -1),
         Command::CursorDown => move_selection(find_file, tabs, 1),
         Command::InsertNewline => handle_enter(find_file, tabs, edits, path_chains),
@@ -457,7 +458,7 @@ fn kill_line(s: &mut FindFileState) {
 ///   case-insensitive longest common prefix across the matches'
 ///   leaf names (trailing `/` stripped for comparison).
 /// - **No matches**: no-op.
-fn tab_complete(s: &mut FindFileState) {
+fn tab_complete(s: &mut FindFileState, clock: &crate::Clock) {
     use led_state_find_file::dir_prefix;
 
     // Trailing slash + completions = explore mode.
@@ -472,7 +473,7 @@ fn tab_complete(s: &mut FindFileState) {
             // for a beat so the user sees why Tab was a no-op.
             s.input.set_hint(
                 "[No match]",
-                std::time::Instant::now(),
+                clock.now,
                 std::time::Duration::from_millis(1200),
             );
         }
@@ -675,7 +676,7 @@ mod tests {
     #[test]
     fn insert_char_extends_input_and_rearms_pending() {
         let mut ff = overlay("/tmp/", 5);
-        run_overlay_command(Command::InsertChar('a'), &mut ff, &mut Tabs::default(), &mut led_state_buffer_edits::BufferEdits::default(), &mut std::collections::HashMap::new());
+        run_overlay_command(Command::InsertChar('a'), &mut ff, &mut Tabs::default(), &mut led_state_buffer_edits::BufferEdits::default(), &mut std::collections::HashMap::new(), &crate::Clock::default());
         let s = ff.as_ref().unwrap();
         assert_eq!(s.input.text, "/tmp/a");
         assert_eq!(s.input.cursor, 6);
@@ -685,7 +686,7 @@ mod tests {
     #[test]
     fn delete_back_at_end_of_input() {
         let mut ff = overlay("/tmp/a", 6);
-        run_overlay_command(Command::DeleteBack, &mut ff, &mut Tabs::default(), &mut led_state_buffer_edits::BufferEdits::default(), &mut std::collections::HashMap::new());
+        run_overlay_command(Command::DeleteBack, &mut ff, &mut Tabs::default(), &mut led_state_buffer_edits::BufferEdits::default(), &mut std::collections::HashMap::new(), &crate::Clock::default());
         assert_eq!(ff.as_ref().unwrap().input.text, "/tmp/");
         assert_eq!(ff.as_ref().unwrap().input.cursor, 5);
     }
@@ -693,7 +694,7 @@ mod tests {
     #[test]
     fn delete_back_at_start_is_noop() {
         let mut ff = overlay("/tmp/", 0);
-        run_overlay_command(Command::DeleteBack, &mut ff, &mut Tabs::default(), &mut led_state_buffer_edits::BufferEdits::default(), &mut std::collections::HashMap::new());
+        run_overlay_command(Command::DeleteBack, &mut ff, &mut Tabs::default(), &mut led_state_buffer_edits::BufferEdits::default(), &mut std::collections::HashMap::new(), &crate::Clock::default());
         assert_eq!(ff.as_ref().unwrap().input.text, "/tmp/");
         assert!(ff.as_ref().unwrap().pending_find_file_list.is_empty());
     }
@@ -701,32 +702,32 @@ mod tests {
     #[test]
     fn delete_forward_at_middle() {
         let mut ff = overlay("/tmp/ab", 5);
-        run_overlay_command(Command::DeleteForward, &mut ff, &mut Tabs::default(), &mut led_state_buffer_edits::BufferEdits::default(), &mut std::collections::HashMap::new());
+        run_overlay_command(Command::DeleteForward, &mut ff, &mut Tabs::default(), &mut led_state_buffer_edits::BufferEdits::default(), &mut std::collections::HashMap::new(), &crate::Clock::default());
         assert_eq!(ff.as_ref().unwrap().input.text, "/tmp/b");
     }
 
     #[test]
     fn cursor_left_and_right_walk_char_boundaries() {
         let mut ff = overlay("/ä/", 3); // 'ä' is 2 bytes at byte 1..3
-        run_overlay_command(Command::CursorLeft, &mut ff, &mut Tabs::default(), &mut led_state_buffer_edits::BufferEdits::default(), &mut std::collections::HashMap::new());
+        run_overlay_command(Command::CursorLeft, &mut ff, &mut Tabs::default(), &mut led_state_buffer_edits::BufferEdits::default(), &mut std::collections::HashMap::new(), &crate::Clock::default());
         assert_eq!(ff.as_ref().unwrap().input.cursor, 1);
-        run_overlay_command(Command::CursorRight, &mut ff, &mut Tabs::default(), &mut led_state_buffer_edits::BufferEdits::default(), &mut std::collections::HashMap::new());
+        run_overlay_command(Command::CursorRight, &mut ff, &mut Tabs::default(), &mut led_state_buffer_edits::BufferEdits::default(), &mut std::collections::HashMap::new(), &crate::Clock::default());
         assert_eq!(ff.as_ref().unwrap().input.cursor, 3);
     }
 
     #[test]
     fn line_start_and_end() {
         let mut ff = overlay("/tmp/", 2);
-        run_overlay_command(Command::CursorLineStart, &mut ff, &mut Tabs::default(), &mut led_state_buffer_edits::BufferEdits::default(), &mut std::collections::HashMap::new());
+        run_overlay_command(Command::CursorLineStart, &mut ff, &mut Tabs::default(), &mut led_state_buffer_edits::BufferEdits::default(), &mut std::collections::HashMap::new(), &crate::Clock::default());
         assert_eq!(ff.as_ref().unwrap().input.cursor, 0);
-        run_overlay_command(Command::CursorLineEnd, &mut ff, &mut Tabs::default(), &mut led_state_buffer_edits::BufferEdits::default(), &mut std::collections::HashMap::new());
+        run_overlay_command(Command::CursorLineEnd, &mut ff, &mut Tabs::default(), &mut led_state_buffer_edits::BufferEdits::default(), &mut std::collections::HashMap::new(), &crate::Clock::default());
         assert_eq!(ff.as_ref().unwrap().input.cursor, 5);
     }
 
     #[test]
     fn kill_line_truncates_at_cursor() {
         let mut ff = overlay("/tmp/abc", 5);
-        run_overlay_command(Command::KillLine, &mut ff, &mut Tabs::default(), &mut led_state_buffer_edits::BufferEdits::default(), &mut std::collections::HashMap::new());
+        run_overlay_command(Command::KillLine, &mut ff, &mut Tabs::default(), &mut led_state_buffer_edits::BufferEdits::default(), &mut std::collections::HashMap::new(), &crate::Clock::default());
         assert_eq!(ff.as_ref().unwrap().input.text, "/tmp/");
         assert_eq!(ff.as_ref().unwrap().pending_find_file_list.len(), 1);
     }
@@ -734,7 +735,7 @@ mod tests {
     #[test]
     fn abort_closes_the_overlay() {
         let mut ff = overlay("/tmp/", 5);
-        let outcome = run_overlay_command(Command::Abort, &mut ff, &mut Tabs::default(), &mut led_state_buffer_edits::BufferEdits::default(), &mut std::collections::HashMap::new());
+        let outcome = run_overlay_command(Command::Abort, &mut ff, &mut Tabs::default(), &mut led_state_buffer_edits::BufferEdits::default(), &mut std::collections::HashMap::new(), &crate::Clock::default());
         assert_eq!(outcome, Some(DispatchOutcome::Continue));
         assert!(ff.is_none());
     }
@@ -742,7 +743,7 @@ mod tests {
     #[test]
     fn quit_passes_through() {
         let mut ff = overlay("/tmp/", 5);
-        let outcome = run_overlay_command(Command::Quit, &mut ff, &mut Tabs::default(), &mut led_state_buffer_edits::BufferEdits::default(), &mut std::collections::HashMap::new());
+        let outcome = run_overlay_command(Command::Quit, &mut ff, &mut Tabs::default(), &mut led_state_buffer_edits::BufferEdits::default(), &mut std::collections::HashMap::new(), &crate::Clock::default());
         // None == "fall through to the normal dispatch path", so
         // the outer `run_command` turns the Quit into a real exit.
         assert!(outcome.is_none());
@@ -752,14 +753,14 @@ mod tests {
     #[test]
     fn inactive_overlay_passes_everything_through() {
         let mut ff: Option<FindFileState> = None;
-        assert!(run_overlay_command(Command::InsertChar('a'), &mut ff, &mut Tabs::default(), &mut led_state_buffer_edits::BufferEdits::default(), &mut std::collections::HashMap::new()).is_none());
+        assert!(run_overlay_command(Command::InsertChar('a'), &mut ff, &mut Tabs::default(), &mut led_state_buffer_edits::BufferEdits::default(), &mut std::collections::HashMap::new(), &crate::Clock::default()).is_none());
     }
 
     #[test]
     fn enter_on_non_trailing_path_opens_and_deactivates() {
         let mut ff = overlay("/tmp/newfile.txt", 16);
         let mut tabs = Tabs::default();
-        run_overlay_command(Command::InsertNewline, &mut ff, &mut tabs, &mut led_state_buffer_edits::BufferEdits::default(), &mut std::collections::HashMap::new());
+        run_overlay_command(Command::InsertNewline, &mut ff, &mut tabs, &mut led_state_buffer_edits::BufferEdits::default(), &mut std::collections::HashMap::new(), &crate::Clock::default());
         assert!(ff.is_none(), "overlay closes on commit");
         assert_eq!(tabs.open.len(), 1);
         assert_eq!(tabs.active, Some(tabs.open[0].id));
@@ -771,7 +772,7 @@ mod tests {
     fn enter_on_trailing_slash_is_noop() {
         let mut ff = overlay("/tmp/", 5);
         let mut tabs = Tabs::default();
-        run_overlay_command(Command::InsertNewline, &mut ff, &mut tabs, &mut led_state_buffer_edits::BufferEdits::default(), &mut std::collections::HashMap::new());
+        run_overlay_command(Command::InsertNewline, &mut ff, &mut tabs, &mut led_state_buffer_edits::BufferEdits::default(), &mut std::collections::HashMap::new(), &crate::Clock::default());
         // Overlay stays open; no tab created.
         assert!(ff.is_some());
         assert!(tabs.open.is_empty());
@@ -781,7 +782,7 @@ mod tests {
     fn enter_on_empty_input_is_noop() {
         let mut ff = overlay("", 0);
         let mut tabs = Tabs::default();
-        run_overlay_command(Command::InsertNewline, &mut ff, &mut tabs, &mut led_state_buffer_edits::BufferEdits::default(), &mut std::collections::HashMap::new());
+        run_overlay_command(Command::InsertNewline, &mut ff, &mut tabs, &mut led_state_buffer_edits::BufferEdits::default(), &mut std::collections::HashMap::new(), &crate::Clock::default());
         assert!(ff.is_some());
         assert!(tabs.open.is_empty());
     }
@@ -805,7 +806,7 @@ mod tests {
     fn tab_lcp_empty_completions_is_noop() {
         let mut ff = overlay("/tmp/xyz", 8);
         let before = ff.as_ref().unwrap().input.text.clone();
-        run_overlay_command(Command::FindFileTabComplete, &mut ff, &mut Tabs::default(), &mut led_state_buffer_edits::BufferEdits::default(), &mut std::collections::HashMap::new());
+        run_overlay_command(Command::FindFileTabComplete, &mut ff, &mut Tabs::default(), &mut led_state_buffer_edits::BufferEdits::default(), &mut std::collections::HashMap::new(), &crate::Clock::default());
         assert_eq!(ff.as_ref().unwrap().input.text, before);
     }
 
@@ -821,6 +822,7 @@ mod tests {
             &mut Tabs::default(),
             &mut led_state_buffer_edits::BufferEdits::default(),
             &mut std::collections::HashMap::new(),
+            &crate::Clock::default(),
         );
         assert!(ff.as_ref().unwrap().input.hint.is_some());
 
@@ -830,6 +832,7 @@ mod tests {
             &mut Tabs::default(),
             &mut led_state_buffer_edits::BufferEdits::default(),
             &mut std::collections::HashMap::new(),
+            &crate::Clock::default(),
         );
         let s = ff.as_ref().unwrap();
         assert!(s.input.hint.is_none());
@@ -839,7 +842,7 @@ mod tests {
     #[test]
     fn tab_lcp_no_match_flashes_hint() {
         let mut ff = overlay("/tmp/xyz", 8);
-        run_overlay_command(Command::FindFileTabComplete, &mut ff, &mut Tabs::default(), &mut led_state_buffer_edits::BufferEdits::default(), &mut std::collections::HashMap::new());
+        run_overlay_command(Command::FindFileTabComplete, &mut ff, &mut Tabs::default(), &mut led_state_buffer_edits::BufferEdits::default(), &mut std::collections::HashMap::new(), &crate::Clock::default());
         let s = ff.as_ref().unwrap();
         assert_eq!(s.input.hint.as_deref(), Some("[No match]"));
         assert!(s.input.hint_expires_at.is_some());
@@ -849,7 +852,7 @@ mod tests {
     fn tab_lcp_single_file_match_completes_fully() {
         let mut ff = overlay("/tmp/mai", 8);
         ff.as_mut().unwrap().completions = vec![entry("main.rs", false)];
-        run_overlay_command(Command::FindFileTabComplete, &mut ff, &mut Tabs::default(), &mut led_state_buffer_edits::BufferEdits::default(), &mut std::collections::HashMap::new());
+        run_overlay_command(Command::FindFileTabComplete, &mut ff, &mut Tabs::default(), &mut led_state_buffer_edits::BufferEdits::default(), &mut std::collections::HashMap::new(), &crate::Clock::default());
         assert_eq!(ff.as_ref().unwrap().input.text, "/tmp/main.rs");
     }
 
@@ -857,7 +860,7 @@ mod tests {
     fn tab_lcp_single_dir_match_descends_with_trailing_slash() {
         let mut ff = overlay("/tmp/sr", 7);
         ff.as_mut().unwrap().completions = vec![entry("src", true)];
-        run_overlay_command(Command::FindFileTabComplete, &mut ff, &mut Tabs::default(), &mut led_state_buffer_edits::BufferEdits::default(), &mut std::collections::HashMap::new());
+        run_overlay_command(Command::FindFileTabComplete, &mut ff, &mut Tabs::default(), &mut led_state_buffer_edits::BufferEdits::default(), &mut std::collections::HashMap::new(), &crate::Clock::default());
         // `name` for dirs already carries the trailing `/`.
         assert_eq!(ff.as_ref().unwrap().input.text, "/tmp/src/");
         // Descent re-arms the request queue.
@@ -876,7 +879,7 @@ mod tests {
             entry("mailbox.rs", false),
             entry("make.rs", false),
         ];
-        run_overlay_command(Command::FindFileTabComplete, &mut ff, &mut Tabs::default(), &mut led_state_buffer_edits::BufferEdits::default(), &mut std::collections::HashMap::new());
+        run_overlay_command(Command::FindFileTabComplete, &mut ff, &mut Tabs::default(), &mut led_state_buffer_edits::BufferEdits::default(), &mut std::collections::HashMap::new(), &crate::Clock::default());
         // LCP of "main.rs", "mailbox.rs", "make.rs" is "ma".
         assert_eq!(ff.as_ref().unwrap().input.text, "/tmp/ma");
         assert!(ff.as_ref().unwrap().show_side);
@@ -886,7 +889,7 @@ mod tests {
     fn tab_lcp_trailing_slash_just_shows_panel() {
         let mut ff = overlay("/tmp/", 5);
         ff.as_mut().unwrap().completions = vec![entry("a.rs", false), entry("b.rs", false)];
-        run_overlay_command(Command::FindFileTabComplete, &mut ff, &mut Tabs::default(), &mut led_state_buffer_edits::BufferEdits::default(), &mut std::collections::HashMap::new());
+        run_overlay_command(Command::FindFileTabComplete, &mut ff, &mut Tabs::default(), &mut led_state_buffer_edits::BufferEdits::default(), &mut std::collections::HashMap::new(), &crate::Clock::default());
         assert!(ff.as_ref().unwrap().show_side);
         assert_eq!(ff.as_ref().unwrap().input.text, "/tmp/");
         assert!(ff.as_ref().unwrap().selected.is_none());
@@ -899,7 +902,7 @@ mod tests {
         let mut ff = overlay("/tmp/", 5);
         ff.as_mut().unwrap().completions = vec![entry("a.rs", false), entry("b.rs", false)];
         let mut tabs = Tabs::default();
-        run_overlay_command(Command::CursorDown, &mut ff, &mut tabs, &mut led_state_buffer_edits::BufferEdits::default(), &mut std::collections::HashMap::new());
+        run_overlay_command(Command::CursorDown, &mut ff, &mut tabs, &mut led_state_buffer_edits::BufferEdits::default(), &mut std::collections::HashMap::new(), &crate::Clock::default());
         let s = ff.as_ref().unwrap();
         assert_eq!(s.selected, Some(0));
         assert!(s.show_side);
@@ -915,7 +918,7 @@ mod tests {
     fn move_up_from_none_wraps_to_last() {
         let mut ff = overlay("/tmp/", 5);
         ff.as_mut().unwrap().completions = vec![entry("a.rs", false), entry("b.rs", false)];
-        run_overlay_command(Command::CursorUp, &mut ff, &mut Tabs::default(), &mut led_state_buffer_edits::BufferEdits::default(), &mut std::collections::HashMap::new());
+        run_overlay_command(Command::CursorUp, &mut ff, &mut Tabs::default(), &mut led_state_buffer_edits::BufferEdits::default(), &mut std::collections::HashMap::new(), &crate::Clock::default());
         assert_eq!(ff.as_ref().unwrap().selected, Some(1));
     }
 
@@ -924,7 +927,7 @@ mod tests {
         let mut ff = overlay("/tmp/", 5);
         ff.as_mut().unwrap().selected = Some(1);
         ff.as_mut().unwrap().completions = vec![entry("a.rs", false), entry("b.rs", false)];
-        run_overlay_command(Command::CursorDown, &mut ff, &mut Tabs::default(), &mut led_state_buffer_edits::BufferEdits::default(), &mut std::collections::HashMap::new());
+        run_overlay_command(Command::CursorDown, &mut ff, &mut Tabs::default(), &mut led_state_buffer_edits::BufferEdits::default(), &mut std::collections::HashMap::new(), &crate::Clock::default());
         assert_eq!(ff.as_ref().unwrap().selected, Some(0));
     }
 
@@ -933,7 +936,7 @@ mod tests {
         let mut ff = overlay("/tmp/", 5);
         ff.as_mut().unwrap().completions = vec![entry("src", true)];
         let mut tabs = Tabs::default();
-        run_overlay_command(Command::CursorDown, &mut ff, &mut tabs, &mut led_state_buffer_edits::BufferEdits::default(), &mut std::collections::HashMap::new());
+        run_overlay_command(Command::CursorDown, &mut ff, &mut tabs, &mut led_state_buffer_edits::BufferEdits::default(), &mut std::collections::HashMap::new(), &crate::Clock::default());
         assert_eq!(ff.as_ref().unwrap().selected, Some(0));
         // Dir preview isn't meaningful → no preview tab created.
         assert!(tabs.open.is_empty());
@@ -953,12 +956,12 @@ mod tests {
         tabs.active = Some(prev_id);
         ff.as_mut().unwrap().completions = vec![entry("a.rs", false)];
         // Arrow-down creates a preview + captures previous_tab.
-        run_overlay_command(Command::CursorDown, &mut ff, &mut tabs, &mut led_state_buffer_edits::BufferEdits::default(), &mut std::collections::HashMap::new());
+        run_overlay_command(Command::CursorDown, &mut ff, &mut tabs, &mut led_state_buffer_edits::BufferEdits::default(), &mut std::collections::HashMap::new(), &crate::Clock::default());
         assert_eq!(tabs.open.len(), 2);
         assert!(tabs.open.iter().any(|t| t.preview));
         assert_eq!(ff.as_ref().unwrap().previous_tab, Some(prev_id));
         // Abort closes the preview and restores the original tab.
-        run_overlay_command(Command::Abort, &mut ff, &mut tabs, &mut led_state_buffer_edits::BufferEdits::default(), &mut std::collections::HashMap::new());
+        run_overlay_command(Command::Abort, &mut ff, &mut tabs, &mut led_state_buffer_edits::BufferEdits::default(), &mut std::collections::HashMap::new(), &crate::Clock::default());
         assert!(ff.is_none());
         assert_eq!(tabs.open.len(), 1);
         assert_eq!(tabs.active, Some(prev_id));
@@ -981,7 +984,7 @@ mod tests {
             s.show_side = true;
         }
         let mut tabs = Tabs::default();
-        run_overlay_command(Command::InsertNewline, &mut ff, &mut tabs, &mut led_state_buffer_edits::BufferEdits::default(), &mut std::collections::HashMap::new());
+        run_overlay_command(Command::InsertNewline, &mut ff, &mut tabs, &mut led_state_buffer_edits::BufferEdits::default(), &mut std::collections::HashMap::new(), &crate::Clock::default());
         let s = ff.as_ref().expect("stays open after dir descent");
         assert_eq!(s.input.text, "/x/src/");
         assert!(s.show_side, "panel stays visible during descent");
@@ -997,7 +1000,7 @@ mod tests {
             s.completions = vec![entry("src", true)];
             s.show_side = true;
         }
-        run_overlay_command(Command::FindFileTabComplete, &mut ff, &mut Tabs::default(), &mut led_state_buffer_edits::BufferEdits::default(), &mut std::collections::HashMap::new());
+        run_overlay_command(Command::FindFileTabComplete, &mut ff, &mut Tabs::default(), &mut led_state_buffer_edits::BufferEdits::default(), &mut std::collections::HashMap::new(), &crate::Clock::default());
         let s = ff.as_ref().unwrap();
         assert_eq!(s.input.text, "/x/src/");
         assert!(s.show_side, "Tab-descent keeps the panel visible");
@@ -1018,7 +1021,7 @@ mod tests {
         }
         let mut tabs = Tabs::default();
         // Tab: single-dir match → descend.
-        run_overlay_command(Command::FindFileTabComplete, &mut ff, &mut tabs, &mut led_state_buffer_edits::BufferEdits::default(), &mut std::collections::HashMap::new());
+        run_overlay_command(Command::FindFileTabComplete, &mut ff, &mut tabs, &mut led_state_buffer_edits::BufferEdits::default(), &mut std::collections::HashMap::new(), &crate::Clock::default());
         assert_eq!(ff.as_ref().unwrap().input.text, "/x/docs/");
 
         // Simulate a fresh listing for /x/docs/ landing: runtime would
@@ -1028,7 +1031,7 @@ mod tests {
             s.completions = vec![entry("driver", true), entry("runtime", true)];
         }
         // Down: select "driver/".
-        run_overlay_command(Command::CursorDown, &mut ff, &mut tabs, &mut led_state_buffer_edits::BufferEdits::default(), &mut std::collections::HashMap::new());
+        run_overlay_command(Command::CursorDown, &mut ff, &mut tabs, &mut led_state_buffer_edits::BufferEdits::default(), &mut std::collections::HashMap::new(), &crate::Clock::default());
         // Before the fix: "/x/driver/". After: "/x/docs/driver/".
         assert_eq!(ff.as_ref().unwrap().input.text, "/x/docs/driver/");
     }
@@ -1051,7 +1054,7 @@ mod tests {
             s.selected = Some(0);
         }
         let mut tabs = Tabs::default();
-        run_overlay_command(Command::InsertNewline, &mut ff, &mut tabs, &mut led_state_buffer_edits::BufferEdits::default(), &mut std::collections::HashMap::new());
+        run_overlay_command(Command::InsertNewline, &mut ff, &mut tabs, &mut led_state_buffer_edits::BufferEdits::default(), &mut std::collections::HashMap::new(), &crate::Clock::default());
         // Descent keeps the overlay open, no tab opened.
         let s = ff.as_ref().expect("stays open");
         assert_eq!(s.input.text, "/tmp/src/");
@@ -1071,7 +1074,7 @@ mod tests {
             s.selected = Some(0);
         }
         let mut tabs = Tabs::default();
-        run_overlay_command(Command::InsertNewline, &mut ff, &mut tabs, &mut led_state_buffer_edits::BufferEdits::default(), &mut std::collections::HashMap::new());
+        run_overlay_command(Command::InsertNewline, &mut ff, &mut tabs, &mut led_state_buffer_edits::BufferEdits::default(), &mut std::collections::HashMap::new(), &crate::Clock::default());
         assert!(ff.is_none());
         assert_eq!(tabs.open.len(), 1);
         assert!(!tabs.open[0].preview);
@@ -1085,7 +1088,7 @@ mod tests {
             s.completions = vec![entry("src", true)];
         }
         let mut tabs = Tabs::default();
-        run_overlay_command(Command::InsertNewline, &mut ff, &mut tabs, &mut led_state_buffer_edits::BufferEdits::default(), &mut std::collections::HashMap::new());
+        run_overlay_command(Command::InsertNewline, &mut ff, &mut tabs, &mut led_state_buffer_edits::BufferEdits::default(), &mut std::collections::HashMap::new(), &crate::Clock::default());
         let s = ff.as_ref().expect("stays open");
         assert_eq!(s.input.text, "/tmp/src/");
     }
@@ -1106,15 +1109,15 @@ mod tests {
         let mut edits = led_state_buffer_edits::BufferEdits::default();
         edits.buffers.insert(
             active_path.clone(),
-            led_state_buffer_edits::EditedBuffer::fresh(
+            led_state_buffer_edits::EditedBuffer::fresh(led_state_buffer_edits::Persisted(
                 std::sync::Arc::new(ropey::Rope::from_str("payload\n")),
-            ),
+            )),
         );
 
         let mut ff = Some(FindFileState::save_as("/tmp/copy.txt".to_string()));
         ff.as_mut().unwrap().pending_find_file_list.clear();
         let mut path_chains = std::collections::HashMap::new();
-        run_overlay_command(Command::InsertNewline, &mut ff, &mut tabs, &mut edits, &mut path_chains);
+        run_overlay_command(Command::InsertNewline, &mut ff, &mut tabs, &mut edits, &mut path_chains, &crate::Clock::default());
 
         // Overlay closed.
         assert!(ff.is_none());
@@ -1134,7 +1137,7 @@ mod tests {
         let mut tabs = Tabs::default();
         let mut edits = led_state_buffer_edits::BufferEdits::default();
         let mut path_chains = std::collections::HashMap::new();
-        run_overlay_command(Command::InsertNewline, &mut ff, &mut tabs, &mut edits, &mut path_chains);
+        run_overlay_command(Command::InsertNewline, &mut ff, &mut tabs, &mut edits, &mut path_chains, &crate::Clock::default());
         assert!(ff.is_some());
         assert!(edits.pending_save_as.is_empty());
     }
@@ -1150,7 +1153,7 @@ mod tests {
             ..Default::default()
         });
         let mut ff = overlay("/tmp/existing.txt", 17);
-        run_overlay_command(Command::InsertNewline, &mut ff, &mut tabs, &mut led_state_buffer_edits::BufferEdits::default(), &mut std::collections::HashMap::new());
+        run_overlay_command(Command::InsertNewline, &mut ff, &mut tabs, &mut led_state_buffer_edits::BufferEdits::default(), &mut std::collections::HashMap::new(), &crate::Clock::default());
         // Same tab, now active + promoted.
         assert_eq!(tabs.open.len(), 1);
         assert_eq!(tabs.active, Some(id));

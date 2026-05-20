@@ -1,4 +1,4 @@
-use led_driver_terminal_core::{Attrs, Color, Dims, Rect, RenamePopupModel, Style, Theme};
+use led_driver_terminal_core::{Dims, Rect, RenamePopupModel, Theme};
 
 use crate::buffer::Buffer;
 
@@ -11,7 +11,7 @@ pub(crate) fn paint_rename_popup(
     rp: &RenamePopupModel,
     editor_area: Rect,
     dims: Dims,
-    _theme: &Theme,
+    theme: &Theme,
     buf: &mut Buffer,
 ) {
     let (x, y) = rp.anchor;
@@ -27,14 +27,7 @@ pub(crate) fn paint_rename_popup(
     if width == 0 {
         return;
     }
-    let style = Style {
-        fg: Some(Color::Indexed(15)),
-        bg: Some(Color::Indexed(236)),
-        attrs: Attrs {
-            bold: true,
-            ..Attrs::default()
-        },
-    };
+    let style = theme.rename_popup;
     // Compose the visible content: leading " Rename: " label,
     // the user's input, then space-fill out to `width`.
     let mut col = x;

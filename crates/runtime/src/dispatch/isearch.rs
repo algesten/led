@@ -20,17 +20,16 @@ use crate::keymap::Command;
 use super::DispatchOutcome;
 
 /// `Ctrl-s` handler. Starts a new search if inactive (seeding from
-/// the active buffer's current cursor); advances if already active
-/// (future stages); recalls `last_query` if active with an empty
-/// query (future stages).
+/// the active buffer's current cursor); re-triggering `Ctrl-s` while
+/// already open is a no-op (the overlay dispatcher's
+/// `Command::InBufferSearch` arm handles the advance/wrap/recall
+/// once the session is live).
 pub(super) fn in_buffer_search(
     isearch: &mut Option<IsearchState>,
     tabs: &Tabs,
     edits: &BufferEdits,
 ) {
     if isearch.is_some() {
-        // Stage 2+: advance / wrap / recall last_query. For now,
-        // re-triggering `Ctrl-s` while already open is a no-op.
         return;
     }
     let Some(active_id) = tabs.active else {
@@ -44,42 +43,29 @@ pub(super) fn in_buffer_search(
     if !edits.buffers.contains_key(&tab.path) {
         return;
     }
-    *isearch = Some(IsearchState::start(
-        tab.cursor,
-        tab.scroll,
-        tab.last_search.clone(),
-    ));
+    *isearch = Some(IsearchState::start(tab.cursor, tab.scroll));
 }
 
 /// Abort: restore origin cursor/scroll and close the overlay.
-/// Stashes the current query into `last_query` so a subsequent
-/// `Ctrl-s`-on-empty recalls it.
+/// `IsearchState::last_query` is the single source of truth for
+/// "what was the previous query in this session" — when the
+/// overlay closes, that history is lost (per audit Finding I2:
+/// no per-tab duplicate field).
 pub(super) fn deactivate(isearch: &mut Option<IsearchState>, tabs: &mut Tabs) {
     let Some(state) = isearch.take() else {
         return;
     };
-    // Restore the active tab to the origin + stash last_search.
+    // Restore the active tab to the origin.
     if let Some(active_id) = tabs.active
         && let Some(tab) = tabs.open.iter_mut().find(|t| t.id == active_id)
     {
         tab.cursor = state.origin_cursor;
         tab.scroll = state.origin_scroll;
-        stash_last_search(tab, &state);
     }
 }
 
-fn stash_last_search(tab: &mut led_state_tabs::Tab, state: &IsearchState) {
-    // Non-empty query wins; otherwise keep whatever was recalled.
-    if !state.query.text.is_empty() {
-        tab.last_search = Some(state.query.text.clone());
-    } else if state.last_query.is_some() {
-        tab.last_search = state.last_query.clone();
-    }
-}
-
-/// Accept: keep the current cursor where it is, stash the query
-/// into `last_query`, push a JumpRecord for the origin if the
-/// cursor moved, and close.
+/// Accept: keep the current cursor where it is, push a
+/// JumpRecord for the origin if the cursor moved, and close.
 fn accept(
     isearch: &mut Option<IsearchState>,
     tabs: &mut Tabs,
@@ -107,7 +93,6 @@ fn accept(
             top_sub_line: state.origin_scroll.top_sub_line,
         });
     }
-    stash_last_search(tab, &state);
 }
 
 /// Overlay dispatch. Returns `Some(Continue)` when isearch fully
@@ -208,7 +193,10 @@ fn pop_and_search(
 
 /// Second+ `Ctrl-s` while isearch is active.
 ///
-/// - Empty query → recall `last_query` (if any), re-run match find.
+/// - Empty query → no-op (per audit Finding I2 there is no
+///   last-query recall — the legacy `Tab::last_search` /
+///   `IsearchState::last_query` pair has been removed as
+///   duplicative).
 /// - `failed == true` → wrap to match index 0, clear `failed`,
 ///   jump the cursor there.
 /// - Otherwise → advance `match_idx` by one; if that walks past
@@ -222,12 +210,6 @@ fn advance(
         return;
     };
     if state.query.text.is_empty() {
-        // Recall last_query if present.
-        let recall = state.last_query.clone();
-        if let Some(q) = recall {
-            state.query.set(q);
-            recompute_and_jump(state, tabs, edits);
-        }
         return;
     }
     if state.failed {
@@ -370,7 +352,7 @@ fn find_all_matches(rope: &Rope, query: &str) -> Vec<IsearchMatch> {
 fn active_rope(tabs: &Tabs, edits: &BufferEdits) -> Option<Rope> {
     let active_id = tabs.active?;
     let tab = tabs.open.iter().find(|t| t.id == active_id)?;
-    edits.buffers.get(&tab.path).map(|eb| (*eb.rope).clone())
+    edits.buffers.get(&tab.path).map(|eb| (*eb.draft).clone())
 }
 
 /// Convert a `(line, grapheme_col)` cursor to a rope char idx.
@@ -382,7 +364,7 @@ fn cursor_to_char(rope: &Rope, line: usize, col: usize) -> usize {
         return 0;
     }
     let line_slice = rope.line(line);
-    rope.line_to_char(line) + led_core::grapheme_col_to_char(line_slice, col)
+    rope.line_to_char(line) + led_text_layout::grapheme_col_to_char(line_slice, col)
 }
 
 /// Inverse of [`cursor_to_char`]: char idx → `(line, grapheme_col)`.
@@ -390,7 +372,7 @@ fn char_to_line_col(rope: &Rope, ch: usize) -> (usize, usize) {
     let line = rope.char_to_line(ch);
     let line_slice = rope.line(line);
     let char_in_line = ch - rope.line_to_char(line);
-    let col = led_core::char_to_grapheme_col(line_slice, char_in_line);
+    let col = led_text_layout::char_to_grapheme_col(line_slice, char_in_line);
     (line, col)
 }
 
@@ -423,7 +405,7 @@ mod tests {
         let mut e = BufferEdits::default();
         e.buffers.insert(
             canon(path),
-            EditedBuffer::fresh(Arc::new(Rope::from_str(body))),
+            EditedBuffer::fresh(led_state_buffer_edits::Persisted(Arc::new(Rope::from_str(body)))),
         );
         e
     }
@@ -687,15 +669,18 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_s_on_empty_query_recalls_last_search() {
+    fn ctrl_s_on_empty_query_is_a_noop() {
+        // Per audit Finding I2 there is no last-query recall:
+        // the legacy `Tab::last_search` / `IsearchState::last_query`
+        // pair was duplicative and has been removed. `Ctrl-s` on
+        // an empty input keeps the overlay open with no query
+        // (rather than rehydrating from a stale stash).
         let mut tabs = tabs_with_active("/tmp/buf.txt");
         tabs.open[0].cursor = Cursor::default();
-        tabs.open[0].last_search = Some("beta".into());
         let edits = edits_with_buffer("/tmp/buf.txt", "alpha beta gamma\n");
         let mut isearch = None;
         in_buffer_search(&mut isearch, &tabs, &edits);
         let mut jumps = JumpListState::default();
-        // Ctrl-s on the (empty) query should pull in "beta".
         run_overlay_command(
             Command::InBufferSearch,
             &mut isearch,
@@ -704,37 +689,10 @@ mod tests {
             &mut jumps,
         );
         let s = isearch.as_ref().unwrap();
-        assert_eq!(s.query.text, "beta");
-        assert_eq!(s.match_idx, Some(0));
-        // Cursor on 'b' of "beta" — char index 6.
-        assert_eq!(tabs.open[0].cursor.col, 6);
-    }
-
-    #[test]
-    fn accept_stashes_query_into_tab_last_search() {
-        let mut tabs = tabs_with_active("/tmp/buf.txt");
-        tabs.open[0].cursor = Cursor::default();
-        let edits = edits_with_buffer("/tmp/buf.txt", "alpha\n");
-        let mut isearch = None;
-        in_buffer_search(&mut isearch, &tabs, &edits);
-        let mut jumps = JumpListState::default();
-        for c in "alpha".chars() {
-            run_overlay_command(
-                Command::InsertChar(c),
-                &mut isearch,
-                &mut tabs,
-                &edits,
-                &mut jumps,
-            );
-        }
-        run_overlay_command(
-            Command::InsertNewline,
-            &mut isearch,
-            &mut tabs,
-            &edits,
-            &mut jumps,
-        );
-        assert_eq!(tabs.open[0].last_search.as_deref(), Some("alpha"));
+        assert_eq!(s.query.text, "");
+        assert!(s.matches.is_empty());
+        // Cursor stayed at origin.
+        assert_eq!(tabs.open[0].cursor, Cursor::default());
     }
 
     #[test]

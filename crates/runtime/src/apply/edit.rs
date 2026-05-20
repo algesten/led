@@ -38,7 +38,13 @@ pub(crate) fn seed_edit_from_load(
     let seq_gen = edits.seq_gen.clone();
     match edits.buffers.entry(path) {
         Entry::Vacant(v) => {
-            v.insert(EditedBuffer::fresh_with_seq_gen(rope, seq_gen));
+            // The rope coming from `BufferStore::Ready` IS the disk
+            // snapshot — wrap as `Persisted` so the type signature
+            // refuses an accidentally-passed `Draft` here.
+            v.insert(EditedBuffer::fresh_with_seq_gen(
+                led_state_buffer_edits::Persisted(rope),
+                seq_gen,
+            ));
             true
         }
         Entry::Occupied(_) => false,

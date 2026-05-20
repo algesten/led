@@ -17,14 +17,15 @@
 //! All are silent no-ops when there's no active tab, no buffer
 //! loaded, or (for navigation) nothing to do.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use led_core::{CanonPath, IssueCategory};
 use led_driver_terminal_core::Terminal;
 use led_state_alerts::AlertState;
 use led_state_browser::BrowserUi;
 use led_state_buffer_edits::BufferEdits;
-use led_state_diagnostics::{DiagnosticSeverity, DiagnosticsStates};
+use led_driver_lsp_core::DiagnosticsStates;
+use led_state_diagnostics::DiagnosticSeverity;
 use led_state_git::GitState;
 use led_state_jumps::{JumpListState, JumpPosition};
 use led_state_tabs::Tabs;
@@ -46,7 +47,7 @@ pub(super) fn match_bracket(tabs: &mut Tabs, edits: &BufferEdits, jumps: &mut Ju
     let Some(eb) = edits.buffers.get(&tab.path) else {
         return;
     };
-    let rope = &eb.rope;
+    let rope = &eb.draft;
     let pos = cursor_to_char(&tab.cursor, rope);
 
     // Try char AT cursor first, then char BEFORE.
@@ -126,7 +127,7 @@ fn apply_jump(tabs: &mut Tabs, edits: &BufferEdits, pos: JumpPosition) {
     let Some(eb) = edits.buffers.get(&pos.path) else {
         return;
     };
-    let rope = &eb.rope;
+    let rope = &eb.draft;
     let line_count = rope.len_lines();
     let line = pos.line.min(line_count.saturating_sub(1));
     let col = pos.col.min(line_char_len(rope, line));
@@ -413,7 +414,7 @@ fn clamp_row_to_buffer(edits: &BufferEdits, path: &CanonPath, row: usize) -> usi
     edits
         .buffers
         .get(path)
-        .map(|eb| row.min(eb.rope.len_lines().saturating_sub(1)))
+        .map(|eb| row.min(eb.draft.len_lines().saturating_sub(1)))
         .unwrap_or(row)
 }
 
@@ -431,6 +432,7 @@ pub(super) struct NavCtx<'a> {
     pub(super) alerts: &'a mut AlertState,
     pub(super) terminal: &'a Terminal,
     pub(super) browser: &'a BrowserUi,
+    pub(super) clock: &'a crate::Clock,
 }
 
 impl<'a> NavCtx<'a> {
@@ -454,6 +456,7 @@ impl<'a> NavCtx<'a> {
         let alerts = &mut *self.alerts;
         let terminal = self.terminal;
         let browser = self.browser;
+        let clock = self.clock;
 
         let Some(outcome) = compute_navigation(tabs, edits, diagnostics, git, forward) else {
             return;
@@ -484,7 +487,7 @@ impl<'a> NavCtx<'a> {
             .position(|t| t.path == outcome.target_path)
             && let Some(eb) = edits.buffers.get(&outcome.target_path)
         {
-            let rope = &eb.rope;
+            let rope = &eb.draft;
             let line_count = rope.len_lines();
             let line = outcome.target_row.min(line_count.saturating_sub(1));
             // `outcome.target_col` originates from LSP diagnostics
@@ -492,7 +495,7 @@ impl<'a> NavCtx<'a> {
             // line statuses (always 0). Convert via the actual line
             // so the cursor lands on the right grapheme cluster.
             let line_slice = rope.line(line);
-            let col = led_core::utf16_units_to_grapheme_col(line_slice, outcome.target_col as u32);
+            let col = led_text_layout::utf16_units_to_grapheme_col(line_slice, outcome.target_col as u32);
             let body_rows = terminal
                 .dims
                 .map(|d| {
@@ -505,10 +508,10 @@ impl<'a> NavCtx<'a> {
             let tab = &mut tabs.open[target_idx];
             tab.cursor.line = line;
             tab.cursor.col = col;
-            tab.cursor.preferred_col = led_core::prefix_display_width(line_slice, col);
+            tab.cursor.preferred_col = led_text_layout::prefix_display_width(line_slice, col);
             tab.scroll = center_on_cursor(tab.scroll, tab.cursor, body_rows, rope, content_cols);
             tabs.active = Some(tab.id);
-            alerts.set_info(msg, Instant::now(), ISSUE_NAV_TTL);
+            alerts.set_info(msg, clock.now, ISSUE_NAV_TTL);
             return;
         }
 
@@ -526,7 +529,7 @@ impl<'a> NavCtx<'a> {
                 preferred_col: outcome.target_col,
             });
         }
-        alerts.set_info(msg, Instant::now(), ISSUE_NAV_TTL);
+        alerts.set_info(msg, clock.now, ISSUE_NAV_TTL);
     }
 }
 
@@ -691,9 +694,8 @@ mod tests {
 
     use led_core::UserPath;
     use led_state_alerts::AlertState as M20aAlertState;
-    use led_state_diagnostics::{
-        BufferDiagnostics, Diagnostic, DiagnosticSeverity, DiagnosticsStates,
-    };
+    use led_driver_lsp_core::{BufferDiagnostics, DiagnosticsStates};
+    use led_state_diagnostics::{Diagnostic, DiagnosticSeverity};
     use led_state_git::GitState as M20aGitState;
     use led_state_tabs::{Scroll, Tab, TabId};
     use std::sync::Arc;
@@ -782,7 +784,7 @@ mod tests {
         use led_state_buffer_edits::EditedBuffer;
         edits.buffers.insert(
             canon,
-            EditedBuffer::fresh(Arc::new(ropey::Rope::from_str(rope_str))),
+            EditedBuffer::fresh(led_state_buffer_edits::Persisted(Arc::new(ropey::Rope::from_str(rope_str)))),
         );
         (tabs, edits)
     }
@@ -894,6 +896,7 @@ mod tests {
             visible: false,
             ..Default::default()
         };
+        let clock = crate::Clock::default();
         NavCtx {
             tabs: &mut tabs,
             edits: &edits,
@@ -903,6 +906,7 @@ mod tests {
             alerts: &mut alerts,
             terminal: &term,
             browser: &browser,
+            clock: &clock,
         }
         .next_issue();
         assert_eq!(tabs.open[0].cursor.line, 3);
@@ -954,6 +958,7 @@ mod tests {
             preferred_col: 0,
         };
         tabs.open[0].scroll = Scroll::default();
+        let clock = crate::Clock::default();
         NavCtx {
             tabs: &mut tabs,
             edits: &edits,
@@ -963,6 +968,7 @@ mod tests {
             alerts: &mut alerts,
             terminal: &term,
             browser: &browser,
+            clock: &clock,
         }
         .next_issue();
         assert_eq!(tabs.open[0].cursor.line, 1, "wrapped back to first error");
@@ -988,6 +994,7 @@ mod tests {
         let git = M20aGitState::default();
         let mut jumps = JumpListState::default();
         let mut alerts = M20aAlertState::default();
+        let clock = crate::Clock::default();
         NavCtx {
             tabs: &mut tabs,
             edits: &edits,
@@ -997,6 +1004,7 @@ mod tests {
             alerts: &mut alerts,
             terminal: &TerminalAtom::default(),
             browser: &BrowserUi::default(),
+            clock: &clock,
         }
         .next_issue();
         let new_tab = tabs

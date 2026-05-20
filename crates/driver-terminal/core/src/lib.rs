@@ -19,6 +19,46 @@ pub use theme::{Attrs, Color, DiagnosticsTheme, Style, SyntaxTheme, Theme};
 
 // ── Mirror types — the ABI boundary ────────────────────────────────────
 
+/// Monotonic identifier the runtime stamps on every paint command.
+///
+/// `EXAMPLE-ARCH.md § "Pure output drivers"` calls for the same
+/// "execute writes intent sync, fire async, diff is Noop until Done"
+/// shape every other driver has. Even though `TerminalOutputDriver`
+/// is synchronous (the terminal is line-buffered, no separate ack
+/// channel), the in-flight artifact still needs to be addressable —
+/// otherwise idempotent re-fires of the same paint can't be detected
+/// in the source. `FrameId` is the address; [`PaintState`] is the
+/// driver-owned source that tracks it.
+///
+/// Generation is the runtime's job: the render phase bumps the
+/// per-process sequence whenever the composed frame is actually new
+/// (i.e. when `frame != *last_frame` ignoring the id field), stamps
+/// it on the frame, and feeds it to `execute`. The driver then writes
+/// `state.in_flight = Some(id)` synchronously before painting and
+/// `state.last_acked = Some(id)` after the byte stream has flushed.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, drv::Input)]
+pub struct FrameId(pub u64);
+
+/// Driver-owned source for [`TerminalOutputDriver`] per
+/// `EXAMPLE-ARCH.md § "Pure output drivers"`. The runtime reads this
+/// source like any other driver's bookkeeping; memos can gate on
+/// `in_flight` if they ever need to suppress a re-paint while one is
+/// outstanding (today the synchronous flush makes that a no-op, but
+/// the type carries the invariant for future async paths e.g. a
+/// vsync queue on a GPU backend).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PaintState {
+    /// `Some(id)` while a paint is mid-execute. Today this is only
+    /// visible to re-entrant `execute` callers (none exist) — but
+    /// the field maintains the same shape every other in-flight
+    /// driver source uses.
+    pub in_flight: Option<FrameId>,
+    /// Most recently acknowledged frame. Set at the end of every
+    /// `execute` once the byte stream has been flushed. `None` until
+    /// the first paint lands.
+    pub last_acked: Option<FrameId>,
+}
+
 /// Viewport size in columns × rows.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, drv::Input)]
 pub struct Dims {
@@ -187,10 +227,21 @@ pub struct Terminal {
 /// Tab-bar labels. `labels` is wrapped in `Arc` so cache-hit clones of
 /// [`TabBarModel`] (and its containing [`Frame`]) are a pointer copy
 /// rather than a deep clone of every label per tick.
+///
+/// `scroll_start` is the index of the first visible label after the
+/// runtime has applied "scroll the active tab into view": when the
+/// label widths overflow `area.cols`, we shift the window leftward
+/// until the active tab fits. The painter consumes this as data;
+/// the legacy inline `Vec<u16>` width pre-compute + O(n²) loop in
+/// `paint_tab_bar` was a per-frame allocation expressing derived
+/// state in the painter's language instead of as a memo.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct TabBarModel {
     pub labels: Arc<Vec<String>>,
     pub active: Option<usize>,
+    /// Index into `labels` of the first visible tab. `0` for the
+    /// common case where every tab fits within the tab-bar width.
+    pub scroll_start: usize,
 }
 
 /// Body view. All owned-string fields use `Arc<str>` / `Arc<Vec<BodyLine>>`
@@ -219,6 +270,13 @@ pub enum BodyModel {
         /// looking at" on top of the buffer, mirroring the sidebar
         /// highlight.
         match_highlight: Option<BodyMatch>,
+        /// Editor-area-relative column to paint the ruler stripe at,
+        /// or `None` when the ruler is disabled (no `ruler_column`
+        /// set in theme, `ruler_column` >= area width, or the ruler
+        /// style is the default / unstyled). Resolved by the
+        /// runtime memo so the painter doesn't have to dig into
+        /// theme.
+        ruler_col: Option<u16>,
     },
 }
 
@@ -355,14 +413,42 @@ pub struct SidePanelRow {
     ///
     /// `None` = no category → no coloured name, no status glyph.
     ///
-    /// The painter matches on the `IssueCategory` to pick a style
-    /// (`Theme::category_style`) and uses `letter` verbatim for the
-    /// right-column glyph (a bullet `•` for letterless categories,
-    /// always a bullet for directories — the resolver embeds that
-    /// fallback). Mirrors legacy's `StatusDisplay` in shape.
+    /// The painter uses `letter` verbatim for the right-column
+    /// glyph (a bullet `•` for letterless categories, always a
+    /// bullet for directories — the resolver embeds that fallback).
+    /// Mirrors legacy's `StatusDisplay` in shape. Per-row styling
+    /// is pre-resolved into [`Self::name_style`] /
+    /// [`Self::status_cell`] so the painter never needs to look at
+    /// `category` itself.
     ///
     /// [`IssueCategory`]: led_core::IssueCategory
     pub status: Option<RowStatus>,
+    /// Resolved style for the name region (everything left of the
+    /// status column). Pre-computed by the runtime memo from
+    /// `(focused, selected, replaced, status, theme)` so the
+    /// painter just stamps it onto the cells without re-deriving
+    /// the selection / category / replaced cascade per frame. The
+    /// match-highlight overlay (`theme.search_match` on the
+    /// `match_range` substring) still happens in the painter
+    /// because it requires splitting the name into runs.
+    pub name_style: Style,
+    /// Resolved styles for the two right-most cells (gap + letter)
+    /// in Browser mode. `None` for Completions and FileSearch modes
+    /// — those don't reserve the status column.
+    pub status_cell: Option<SidePanelStatusCell>,
+}
+
+/// Pre-resolved gap + letter styles for the right-most two cells
+/// of a Browser-mode side-panel row. The painter writes the gap
+/// (a single space) at `name_end_col` and the letter (from
+/// [`SidePanelRow::status`], or a space when `status` is `None`)
+/// at `name_end_col + 1`. Both styles already encode the
+/// selection / category / focus decision, so the painter just
+/// puts the characters.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SidePanelStatusCell {
+    pub gap_style: Style,
+    pub letter_style: Style,
 }
 
 /// Displayable status for one browser row. The split from
@@ -407,9 +493,13 @@ pub struct SidePanelModel {
 }
 
 /// Bottom-row status bar. `left` is written from col 0; `right` is
-/// written right-aligned; the gap is cleared. `is_warn` asks the
-/// painter to use the warn (red-bg / white-fg / bold) style for the
-/// whole row.
+/// written right-aligned; the gap is cleared. `row_style` is the
+/// pre-resolved style the painter applies to every cell of the row
+/// — the runtime picks `theme.status_warn` for warn alerts and
+/// `theme.status_normal` otherwise. `is_warn` is kept for
+/// downstream consumers (tests, future overlays) that want to
+/// distinguish the two states semantically without comparing
+/// styles.
 ///
 /// Both strings are `Arc<str>` so cache-hit clones are a pointer
 /// copy even when nothing on the status bar changed.
@@ -418,6 +508,7 @@ pub struct StatusBarModel {
     pub left: Arc<str>,
     pub right: Arc<str>,
     pub is_warn: bool,
+    pub row_style: Style,
 }
 
 /// Floating popover anchored near the cursor — currently the
@@ -437,10 +528,122 @@ pub struct StatusBarModel {
 pub struct PopoverModel {
     pub lines: Arc<Vec<PopoverLine>>,
     /// Absolute terminal `(col, row)` anchor — the cursor
-    /// position that triggered the popover. The painter derives
-    /// the actual box origin from this with the screen-edge clamp
-    /// and above/below fallback rules described on [`PopoverModel`].
+    /// position that triggered the popover. Retained for trace /
+    /// debug visibility; the painter consumes the resolved
+    /// [`placement`] instead.
     pub anchor: (u16, u16),
+    /// Resolved box origin (x, y) and flip flag, computed in the
+    /// render memo via [`PopoverPlacement::derive`]. The painter
+    /// reads `placement` directly — no inline above/below ladder.
+    pub placement: PopoverPlacement,
+    /// Outer box width in cols, computed in the render memo.
+    /// Includes 1-col inner padding on each side; clamped to the
+    /// editor area.
+    pub outer_width: u16,
+    /// Number of lines the painter should emit, computed in the
+    /// render memo (clamped to half the editor height).
+    pub height: u16,
+}
+
+/// Resolved on-screen placement for an in-buffer popup
+/// (diagnostic popover, LSP completion). Computed once in a
+/// runtime memo via [`PopoverPlacement::derive`]; painters
+/// consume `(x, y, flipped_above)` directly rather than
+/// recomputing the above/below ladder from the raw anchor.
+///
+/// `Default` = `(0, 0)` not-flipped — never used in production;
+/// the runtime always stamps a resolved placement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PopoverPlacement {
+    /// Absolute terminal column of the popup's left edge.
+    pub x: u16,
+    /// Absolute terminal row of the popup's top edge.
+    pub y: u16,
+    /// `true` when the popup landed above the anchor row
+    /// (i.e. the preferred direction was the OTHER one). Carried
+    /// for trace visibility — painters generally don't need it,
+    /// but golden tests do.
+    pub flipped_above: bool,
+}
+
+/// Vertical preference for [`PopoverPlacement::derive`] —
+/// diagnostic popovers prefer above the anchor (so the message
+/// doesn't cover the next code line), completion / code-action
+/// popups prefer below (the natural "dropdown" direction).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PopoverPreferred {
+    /// Try above the anchor first; fall back to below.
+    Above,
+    /// Try below the anchor first; fall back to above.
+    Below,
+}
+
+impl PopoverPlacement {
+    /// Compute on-screen placement for a popup of `content_size`
+    /// `(width, height)` anchored at terminal coords `anchor`
+    /// `(col, row)`, constrained to `area`.
+    ///
+    /// - **X**: clamped so the right edge doesn't leave `area`
+    ///   on the right; clamped to `area.x` on the left.
+    /// - **Y**: depends on `preferred` —
+    ///   `Above` puts the popup directly above the anchor row
+    ///   when there's room, else just below (clamped to fit);
+    ///   `Below` puts the popup one row below the anchor when
+    ///   there's room, else above. When neither has room the
+    ///   popup pins to the top of `area`.
+    ///
+    /// `flipped_above` is `true` when the chosen direction
+    /// landed above the anchor.
+    pub fn derive(
+        anchor: (u16, u16),
+        content_size: (u16, u16),
+        area: Rect,
+        preferred: PopoverPreferred,
+    ) -> Self {
+        let (w, h) = content_size;
+        // X clamp: stay inside the editor area on both edges.
+        let area_right = area.x.saturating_add(area.cols);
+        let max_x = area_right.saturating_sub(w);
+        let x = anchor.0.min(max_x).max(area.x);
+        // Y ladder: prefer above OR below per `preferred`, fall
+        // back to the other side if there isn't room.
+        let area_bottom = area.y.saturating_add(area.rows);
+        let fits_above = anchor.1 >= area.y.saturating_add(h);
+        let below_top = anchor.1.saturating_add(1);
+        let fits_below = below_top.saturating_add(h) <= area_bottom;
+        let (y, flipped_above) = match preferred {
+            PopoverPreferred::Above => {
+                if fits_above {
+                    (anchor.1.saturating_sub(h), true)
+                } else if fits_below {
+                    let y = below_top
+                        .min(area_bottom.saturating_sub(h))
+                        .max(area.y);
+                    (y, false)
+                } else {
+                    // Neither has room — pin to the top of the
+                    // area. This mirrors legacy's "paint what we
+                    // can" fallback.
+                    (area.y, false)
+                }
+            }
+            PopoverPreferred::Below => {
+                if fits_below {
+                    let y = below_top.min(area_bottom.saturating_sub(h));
+                    (y, false)
+                } else if fits_above {
+                    (anchor.1.saturating_sub(h), true)
+                } else {
+                    (area.y, false)
+                }
+            }
+        };
+        Self {
+            x,
+            y,
+            flipped_above,
+        }
+    }
 }
 
 /// One row inside a [`PopoverModel`]. `text` is already wrapped
@@ -491,7 +694,122 @@ pub struct ScrollHint {
     pub region_right: u16,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Default)]
+/// Per-frame "what to repaint" decision, computed in the runtime
+/// render memo so the painter consumes it as data instead of
+/// re-deriving it from `(prev, curr)` snapshots with an inline
+/// `&&` / `||` ladder. Mirrors legacy diff-flag patterns but lives
+/// in the language of memos — `paint_plan` is a thin function over
+/// `(prev_frame, curr_frame)` whose only output is the set of
+/// regions that need to be re-emitted this tick.
+///
+/// The painter still runs region-level cell writes; this struct
+/// only tells it *which* regions to walk. The downstream cell-grid
+/// diff then strips any cells that didn't actually change, so a
+/// `force = true` plan after a resize still emits the minimal byte
+/// stream.
+///
+/// Default = "paint nothing" — but the runtime never emits a
+/// default; `render_frame` always stamps a fully-decided plan.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PaintPlan {
+    /// Layout-level change (resize, side-panel toggle) — every
+    /// region must be re-emitted regardless of its own
+    /// content-equality with the previous frame. Same role as
+    /// the legacy "force" flag in `paint()`.
+    pub force: bool,
+    /// Editor body region needs re-emission. Triggered by body
+    /// content changes *or* by any in-body overlay
+    /// (popover / completion / rename) appearing, disappearing,
+    /// moving, or changing — because the overlay erases on
+    /// disappear and the body underneath needs to be redrawn.
+    pub body: bool,
+    /// Side-panel region needs re-emission (either the panel
+    /// model changed or the side area's geometry changed).
+    pub side_panel: bool,
+    /// Tab-bar row needs re-emission.
+    pub tab_bar: bool,
+    /// Status-bar row needs re-emission.
+    pub status_bar: bool,
+    /// Diagnostic popover overlay changed; painter still walks
+    /// `frame.popover` on every paint, but this flag is `true`
+    /// exactly when the body underneath also needs to be
+    /// repainted (i.e. it always co-implies `body`). Carried
+    /// for trace / debug visibility into the plan's reasoning.
+    pub popover: bool,
+    /// LSP completion popup changed. Same co-implication with
+    /// `body` as `popover`.
+    pub completion: bool,
+    /// Rename overlay changed. Same co-implication with `body`
+    /// as `popover`.
+    pub rename_popup: bool,
+}
+
+impl PaintPlan {
+    /// Convenience constructor for a plan that asks the painter
+    /// to repaint every region (the "no previous frame" or
+    /// "layout changed" case).
+    pub const fn full() -> Self {
+        Self {
+            force: true,
+            body: true,
+            side_panel: true,
+            tab_bar: true,
+            status_bar: true,
+            popover: true,
+            completion: true,
+            rename_popup: true,
+        }
+    }
+
+    /// Pure function — given the previously-painted frame
+    /// (`None` on first paint) and the freshly-composed one,
+    /// return the set of regions the painter must re-emit.
+    ///
+    /// Lives on `PaintPlan` (not in the runtime) so callers
+    /// like the native driver's tests can build a plan without
+    /// pulling in the runtime crate. The runtime's render phase
+    /// is the production caller; it stamps the result on
+    /// `Frame.paint_plan` before handing the frame to the
+    /// driver.
+    pub fn derive(prev: Option<&Frame>, curr: &Frame) -> Self {
+        let Some(prev) = prev else {
+            return Self::full();
+        };
+
+        let layout_same = prev.layout == curr.layout;
+        let force = !layout_same;
+
+        let side_area_changed = prev.layout.side_area != curr.layout.side_area;
+        let side_panel_changed = prev.side_panel != curr.side_panel;
+        let side_panel = force || side_panel_changed || side_area_changed;
+
+        let popover_changed = prev.popover != curr.popover;
+        let completion_changed = prev.completion != curr.completion;
+        let rename_changed = prev.rename_popup != curr.rename_popup;
+        let body_content_changed = prev.body != curr.body;
+        let body = force
+            || popover_changed
+            || completion_changed
+            || rename_changed
+            || body_content_changed;
+
+        let tab_bar = force || prev.tab_bar != curr.tab_bar;
+        let status_bar = force || prev.status_bar != curr.status_bar;
+
+        Self {
+            force,
+            body,
+            side_panel,
+            tab_bar,
+            status_bar,
+            popover: popover_changed,
+            completion: completion_changed,
+            rename_popup: rename_changed,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, Default)]
 pub struct Frame {
     pub tab_bar: TabBarModel,
     pub body: BodyModel,
@@ -513,6 +831,61 @@ pub struct Frame {
     /// cursor (no active content / cursor scrolled away).
     pub cursor: Option<(u16, u16)>,
     pub dims: Dims,
+    /// Runtime-assigned identity stamped in the render phase. Two
+    /// frames whose `id` differ are guaranteed to differ in some
+    /// other field (the render phase only bumps the id when the
+    /// content-bearing fields actually changed) — but `id` itself
+    /// is *excluded* from equality so the memo cache (which never
+    /// sees the post-stamp id) still cache-hits correctly. The
+    /// driver's [`PaintState`] tracks the latest stamped id as
+    /// `in_flight` / `last_acked` per the pure-output-driver
+    /// pattern in `EXAMPLE-ARCH.md`.
+    pub id: FrameId,
+    /// "What to repaint" decision derived from the previous
+    /// frame at memo time. Excluded from equality (like `id`)
+    /// because it's an instruction to the painter, not a piece
+    /// of visible content: two content-equal frames painted on
+    /// different ticks can carry different plans (e.g. one was
+    /// the first paint after a resize, the other wasn't), and
+    /// neither should defeat the memo cache or the "did the
+    /// frame change?" gate in render_phase.
+    pub paint_plan: PaintPlan,
+}
+
+// Manual `PartialEq` deliberately omits `id` *and* `paint_plan` so
+// the memo cache (which never sees a stamped id and computes its
+// plan strictly as a function of prev/curr) still cache-hits on
+// content-equal frames, and render_phase's `frame != *last_frame`
+// gate compares only the content-bearing fields. With either
+// included, every tick would compare unequal as soon as the
+// previous tick stamped its id / plan onto `last_frame`.
+impl PartialEq for Frame {
+    fn eq(&self, other: &Self) -> bool {
+        let Self {
+            tab_bar,
+            body,
+            status_bar,
+            side_panel,
+            popover,
+            completion,
+            rename_popup,
+            layout,
+            cursor,
+            dims,
+            id: _,
+            paint_plan: _,
+        } = self;
+        *tab_bar == other.tab_bar
+            && *body == other.body
+            && *status_bar == other.status_bar
+            && *side_panel == other.side_panel
+            && *popover == other.popover
+            && *completion == other.completion
+            && *rename_popup == other.rename_popup
+            && *layout == other.layout
+            && *cursor == other.cursor
+            && *dims == other.dims
+    }
 }
 
 /// In-buffer rename prompt: a single-row overlay that reads
@@ -555,9 +928,17 @@ pub struct CompletionPopupModel {
     /// this row with the theme's selection style.
     pub selected: usize,
     /// Absolute terminal `(col, row)` anchor — the cursor
-    /// position that's driving the session. Painter chooses
-    /// "below the anchor" first, "above" on overflow.
+    /// position that's driving the session. Retained for trace /
+    /// debug visibility; the painter consumes the resolved
+    /// [`placement`] instead.
     pub anchor: (u16, u16),
+    /// Resolved box origin (x, y) and flip flag, computed in
+    /// the render memo via [`PopoverPlacement::derive`].
+    pub placement: PopoverPlacement,
+    /// Outer box width in cols, computed in the render memo.
+    /// Includes 1-col inner padding on each side; clamped to
+    /// the editor area.
+    pub outer_width: u16,
     /// Max width (in chars) of any row's label — the painter
     /// left-pads every label to this before printing the
     /// detail column.

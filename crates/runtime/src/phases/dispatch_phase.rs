@@ -43,6 +43,7 @@ pub(crate) fn dispatch_input<W: Write>(
         edits,
         kill_ring,
         clip,
+        clipboard_driver,
         alerts,
         jumps,
         kbd_macro,
@@ -63,6 +64,7 @@ pub(crate) fn dispatch_input<W: Write>(
         lsp_pending,
         git,
         lifecycle,
+        clock,
         ..
     } = sources;
 
@@ -78,6 +80,7 @@ pub(crate) fn dispatch_input<W: Write>(
             edits,
             kill_ring,
             clip,
+            clipboard_driver,
             alerts,
             jumps,
             browser,
@@ -99,6 +102,7 @@ pub(crate) fn dispatch_input<W: Write>(
             chord,
             kbd_macro,
             syntax,
+            clock,
         };
         match dispatcher.dispatch(ev) {
             DispatchOutcome::Continue => {}
@@ -160,17 +164,16 @@ pub(crate) fn cleanup_orphans(sources: &mut Sources) {
 }
 
 /// M21 quit gate. Returns `true` when the outer loop should break.
-pub(crate) fn check_quit_gate(sources: &mut Sources, env: &TickEnv<'_>) -> bool {
-    let Sources {
-        lifecycle, session, ..
-    } = sources;
-    if matches!(lifecycle.phase, Phase::Exiting)
-        && (session.saved || !session.primary)
-    {
-        env.drivers
-            .session
-            .execute(std::iter::once(&led_driver_session_core::SessionCmd::Shutdown));
-        return true;
-    }
-    false
+///
+/// Per Theme E, this is a pure predicate — the `SessionCmd::
+/// Shutdown` it used to emit alongside the break decision now
+/// rides through `QueryOut.shutdown_cmd` and ships from
+/// `execute_phase` earlier in the same tick (see
+/// `query_phase::desired_shutdown` for the matching predicate).
+/// The orchestrator calls this gate after every dispatch phase
+/// has run, so the shutdown cmd has already been sent by the
+/// time we return `true`.
+pub(crate) fn check_quit_gate(sources: &Sources) -> bool {
+    matches!(sources.lifecycle.phase, Phase::Exiting)
+        && (sources.session.saved || !sources.session.primary)
 }

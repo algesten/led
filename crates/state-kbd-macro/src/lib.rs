@@ -15,10 +15,21 @@
 //! - `KbdMacroEnd` moves `current` into `last`.
 //! - `KbdMacroExecute` recursively replays `last` `execute_count`
 //!   times, gated by `playback_depth < 100`.
+//!
+//! The audit (`ARCH-WRONG.md` Theme F Priority 7) explored a
+//! `driver-kbd-macro` shape that would tick recorded commands
+//! through `terminal.pending` one per main-loop iteration; see
+//! `crates/runtime/src/dispatch/mod.rs::replay_macro` for the
+//! close-out rationale. Short version: no async work to
+//! delegate, splitting playback across ticks would let paint /
+//! real input interleave with replay, and the recursion is the
+//! literal spec for "macro records itself executing another
+//! macro". The reducer-purity win that motivated the audit
+//! landed via the `replay_macro` + `run_recorded` extraction.
 
 use std::sync::Arc;
 
-use led_core::Command;
+use led_abi_command::Command;
 
 /// Hard cap on `KbdMacroExecute` recursion depth. Mirrors legacy
 /// `led/src/model/action/mod.rs:278`. Exceeding the cap surfaces

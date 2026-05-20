@@ -1,6 +1,11 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/abi-command",
+    "crates/abi-file-search",
+    "crates/abi-find-file",
+    "crates/abi-fs-list",
+    "crates/abi-lsp",
     "crates/core",
     "crates/state-tabs",
     "crates/state-buffer-edits",
@@ -18,8 +23,8 @@ members = [
     "crates/state-lsp",
     "crates/state-git",
     "crates/state-lifecycle",
-    "crates/state-session",
     "crates/state-kbd-macro",
+    "crates/state-text-input",
     "crates/driver-buffers/core",
     "crates/driver-buffers/native",
     "crates/driver-terminal/core",
@@ -43,6 +48,7 @@ members = [
     "crates/driver-file-watch/core",
     "crates/driver-file-watch/native",
     "crates/runtime",
+    "crates/text-layout",
     "crates/text-reflow",
     "crates/fake-lsp",
     "led",
@@ -51,6 +57,11 @@ exclude = ["goldens"]
 
 [workspace.dependencies]
 # Internal crates.
+led-abi-command = { path = "crates/abi-command" }
+led-abi-file-search = { path = "crates/abi-file-search" }
+led-abi-find-file = { path = "crates/abi-find-file" }
+led-abi-fs-list = { path = "crates/abi-fs-list" }
+led-abi-lsp = { path = "crates/abi-lsp" }
 led-core = { path = "crates/core" }
 led-state-tabs = { path = "crates/state-tabs" }
 led-state-buffer-edits = { path = "crates/state-buffer-edits" }
@@ -68,8 +79,8 @@ led-state-completions = { path = "crates/state-completions" }
 led-state-lsp = { path = "crates/state-lsp" }
 led-state-git = { path = "crates/state-git" }
 led-state-lifecycle = { path = "crates/state-lifecycle" }
-led-state-session = { path = "crates/state-session" }
 led-state-kbd-macro = { path = "crates/state-kbd-macro" }
+led-state-text-input = { path = "crates/state-text-input" }
 led-driver-buffers-core = { path = "crates/driver-buffers/core" }
 led-driver-buffers-native = { path = "crates/driver-buffers/native" }
 led-driver-terminal-core = { path = "crates/driver-terminal/core" }
@@ -93,6 +104,7 @@ led-driver-session-native = { path = "crates/driver-session/native" }
 led-driver-file-watch-core = { path = "crates/driver-file-watch/core" }
 led-driver-file-watch-native = { path = "crates/driver-file-watch/native" }
 led-runtime = { path = "crates/runtime" }
+led-text-layout = { path = "crates/text-layout" }
 led-text-reflow = { path = "crates/text-reflow" }
 
 # drv = the memoization / query primitive.

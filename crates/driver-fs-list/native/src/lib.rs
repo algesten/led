@@ -140,12 +140,13 @@ mod tests {
         }
 
         let (drv, _native) = spawn(Arc::new(NoopTraceImpl), Notifier::noop());
-        drv.execute([&ListCmd::List(canon(&dir))]);
+        let mut state = led_driver_fs_list_core::FsListState::default();
+        drv.execute([&ListCmd::List(canon(&dir))], &mut state);
 
         let mut got: Vec<ListDone> = Vec::new();
         let ok = wait_for(
             || {
-                let mut batch = drv.process();
+                let mut batch = drv.process(&mut state);
                 if !batch.is_empty() {
                     got.append(&mut batch);
                     return true;
@@ -174,14 +175,18 @@ mod tests {
     #[test]
     fn listing_a_nonexistent_path_errors() {
         let (drv, _native) = spawn(Arc::new(NoopTraceImpl), Notifier::noop());
-        drv.execute([&ListCmd::List(canon(std::path::Path::new(
-            "/no/such/directory/definitely",
-        )))]);
+        let mut state = led_driver_fs_list_core::FsListState::default();
+        drv.execute(
+            [&ListCmd::List(canon(std::path::Path::new(
+                "/no/such/directory/definitely",
+            )))],
+            &mut state,
+        );
 
         let mut got: Vec<ListDone> = Vec::new();
         let ok = wait_for(
             || {
-                let mut batch = drv.process();
+                let mut batch = drv.process(&mut state);
                 if !batch.is_empty() {
                     got.append(&mut batch);
                     return true;

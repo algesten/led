@@ -14,8 +14,26 @@
 use std::path::{Path, PathBuf};
 
 // `FindFileEntry` is the driver ABI type — state re-exports it so
-// overlay consumers (dispatch, rendering) import a single name.
-pub use led_driver_find_file_core::FindFileEntry;
+// overlay consumers (dispatch, rendering) import a single name. The
+// type lives in the leaf crate `led-abi-find-file`; state and the
+// driver core both depend on it to keep the three-tier rule clean.
+pub use led_abi_find_file::FindFileEntry;
+
+/// Domain-typed completion request the overlay queues for the next
+/// tick. Translated to `FindFileCmd` at the driver boundary in
+/// `query::actions::find_file_action`.
+///
+/// Kept distinct from `led_driver_find_file_core::FindFileCmd` so
+/// state-find-file does not store driver-ABI types as fields — per
+/// the "No driver types in AppState" rule. The shape is identical
+/// today (one driver, one consumer); the boundary still matters so
+/// driver-side ABI changes don't ripple back into state.
+#[derive(Debug, Clone, PartialEq, Eq, drv::Input)]
+pub struct FindFileRequest {
+    pub dir: led_core::CanonPath,
+    pub prefix: String,
+    pub show_hidden: bool,
+}
 
 /// Which mode the overlay is in. Opens and Save-as share the same
 /// input editor + completions UI but differ in activation input
@@ -41,7 +59,7 @@ pub struct FindFileState {
     /// Editable input buffer (text + cursor + transient hint).
     /// Rendered after the `Find file: ` / `Save as: ` prompt in the
     /// status bar.
-    pub input: led_core::TextInput,
+    pub input: led_state_text_input::TextInput,
 
     /// `input.text` as it was before the user last arrow-navigated
     /// into the completions list. Arrow-nav rewrites the input to
@@ -63,8 +81,9 @@ pub struct FindFileState {
     pub show_side: bool,
 
     /// Queue of pending completion requests. Dispatch pushes one
-    /// `FindFileCmd` per activation / input edit; the main loop
-    /// drains + ships them to the driver + clears in order.
+    /// `FindFileRequest` per activation / input edit; the main loop
+    /// drains + ships them (translated to `FindFileCmd` at the
+    /// driver boundary) + clears in order.
     ///
     /// Using a queue (rather than a single-slot bit) lets us emit
     /// one `FsFindFile` trace line per keystroke when the runtime
@@ -73,7 +92,7 @@ pub struct FindFileState {
     /// runtime are dropped by `(dir, prefix)` match against the
     /// overlay's current input, so mid-tick re-fires don't paint
     /// stale data.
-    pub pending_find_file_list: Vec<led_driver_find_file_core::FindFileCmd>,
+    pub pending_find_file_list: Vec<FindFileRequest>,
 
     /// Captured on the first arrow-driven preview: the tab id that
     /// was active before the overlay started previewing
@@ -101,7 +120,7 @@ impl FindFileState {
         Self {
             mode: FindFileMode::Open,
             base_input: initial.clone(),
-            input: led_core::TextInput::new(initial),
+            input: led_state_text_input::TextInput::new(initial),
             completions: Vec::new(),
             selected: None,
             show_side: false,
@@ -118,7 +137,7 @@ impl FindFileState {
         Self {
             mode: FindFileMode::SaveAs,
             base_input: initial.clone(),
-            input: led_core::TextInput::new(initial),
+            input: led_state_text_input::TextInput::new(initial),
             completions: Vec::new(),
             selected: None,
             show_side: false,
@@ -182,12 +201,11 @@ impl FindFileState {
         };
         let dir = led_core::UserPath::new(expanded).canonicalize();
         let show_hidden = prefix.starts_with('.');
-        self.pending_find_file_list
-            .push(led_driver_find_file_core::FindFileCmd {
-                dir,
-                prefix: prefix.to_string(),
-                show_hidden,
-            });
+        self.pending_find_file_list.push(FindFileRequest {
+            dir,
+            prefix: prefix.to_string(),
+            show_hidden,
+        });
     }
 }
 

@@ -112,8 +112,14 @@ impl Manager {
         match payload {
             Ok(result) => {
                 let caps: InitializeCapabilities = parse_initialize_response(&result);
-                if caps.diagnostic_provider {
-                    entry.diag.set_mode(DiagMode::Pull);
+                // Default mode is Pull (per audit Theme L Target C
+                // — "Pull diagnostics only"). Downgrade to Push
+                // only when the server does NOT advertise
+                // `diagnosticProvider`; those servers (e.g. legacy
+                // typescript-language-server builds) deliver
+                // everything via `publishDiagnostics`.
+                if !caps.diagnostic_provider {
+                    entry.diag.set_mode(DiagMode::Push);
                 }
                 entry.completion_provider = caps.completion_provider;
                 entry.completion_trigger_chars = caps.completion_trigger_chars.clone();

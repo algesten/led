@@ -348,8 +348,12 @@ pub fn parse_unregister_capability_watched_files(
 /// `LspCmd::RequestCompletion` for a given server at all.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct InitializeCapabilities {
-    /// Server advertised `capabilities.diagnosticProvider` — we
-    /// enter pull mode. `false` keeps the default push mode.
+    /// Server advertised `capabilities.diagnosticProvider` — the
+    /// `DiagnosticSource` keeps its default Pull mode. `false`
+    /// downgrades to Push (the lifecycle layer calls
+    /// `set_mode(DiagMode::Push)` explicitly). Per audit Theme L
+    /// Target C, push servers' diagnostics flow through the
+    /// `PushFallback` channel.
     pub diagnostic_provider: bool,
     /// Server advertised `capabilities.experimental.serverStatusNotification`
     /// (rust-analyzer's quiescence extension). Until the first

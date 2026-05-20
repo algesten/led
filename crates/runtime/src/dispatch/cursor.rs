@@ -4,8 +4,9 @@
 //! dispatch-facing wrapper that reads the right rope (edits first,
 //! store second) and updates both cursor + scroll on the active tab.
 
-use led_core::{
-    SubLine, col_to_sub_line, sub_line_cells_to_grapheme_col, sub_line_count, sub_line_range,
+use led_core::SubLine;
+use led_text_layout::{
+    col_to_sub_line, sub_line_cells_to_grapheme_col, sub_line_count, sub_line_range,
 };
 
 /// Minimum visual rows the cursor stays from either viewport edge.
@@ -70,7 +71,7 @@ pub(super) fn move_cursor(
     };
     let path = &tabs.open[idx].path;
     let rope: Arc<Rope> = match edits.buffers.get(path) {
-        Some(eb) => eb.rope.clone(),
+        Some(eb) => eb.draft.as_rope().clone(),
         None => match store.loaded.get(path) {
             Some(LoadState::Ready(r)) => r.clone(),
             _ => return,
@@ -360,7 +361,7 @@ fn grapheme_is_word(rope: &Rope, line: usize, gcol: usize) -> bool {
         return false;
     }
     let slice = rope.line(line);
-    let char_idx = led_core::grapheme_col_to_char(slice, gcol);
+    let char_idx = led_text_layout::grapheme_col_to_char(slice, gcol);
     if char_idx >= rope.line(line).len_chars() {
         return false;
     }
@@ -521,18 +522,19 @@ pub(crate) fn center_on_cursor(
 #[cfg(test)]
 mod tests {
     use led_state_completions::CompletionsState;
-    use led_state_diagnostics::DiagnosticsStates;
+    use led_driver_lsp_core::DiagnosticsStates;
     use led_state_file_search::FileSearchState;
     use led_state_find_file::FindFileState;
     use led_state_git::GitState;
     use led_state_isearch::IsearchState;
     use led_driver_buffers_core::BufferStore;
+    use led_driver_fs_list_core::FsTree;
     use led_driver_terminal_core::{Dims, KeyCode, KeyModifiers};
     use led_state_alerts::AlertState;
-    use led_state_clipboard::ClipboardState;
+    use led_state_browser::BrowserUi;
     use led_state_buffer_edits::BufferEdits;
+    use led_state_clipboard::ClipboardIntent;
     use led_state_jumps::JumpListState;
-    use led_state_browser::{BrowserUi, FsTree};
     use led_state_kill_ring::KillRing;
     use led_state_lsp::LspExtrasState;
     use led_state_tabs::{Cursor, Scroll};
@@ -1061,7 +1063,8 @@ mod tests {
         km.bind("alt+b", Command::CursorWordLeft);
         let mut chord = ChordState::default();
         let mut kill_ring = KillRing::default();
-        let mut clip = ClipboardState::default();
+        let mut clip = ClipboardIntent::default();
+        let clipboard_driver = led_driver_clipboard_core::ClipboardState::default();
         let mut alerts = AlertState::default();
         let mut jumps = JumpListState::default();
         let mut browser = BrowserUi::default();
@@ -1075,16 +1078,18 @@ mod tests {
         let mut lsp_extras = LspExtrasState::default();
         let mut lsp_pending = led_state_lsp::LspPending::default();
         let diagnostics = DiagnosticsStates::default();
-        let lsp_status = led_state_diagnostics::LspStatuses::default();
+        let lsp_status = led_driver_lsp_core::LspStatuses::default();
         let git = GitState::default();
         let mut kbd_macro = led_state_kbd_macro::KbdMacroState::default();
         let syntax = led_state_syntax::SyntaxStates::default();
+        let clock = crate::Clock::default();
 
         let mut dispatcher = super::super::Dispatcher {
             tabs: &mut tabs,
             edits: &mut edits,
             kill_ring: &mut kill_ring,
             clip: &mut clip,
+            clipboard_driver: &clipboard_driver,
             alerts: &mut alerts,
             jumps: &mut jumps,
             browser: &mut browser,
@@ -1106,6 +1111,7 @@ mod tests {
             chord: &mut chord,
             kbd_macro: &mut kbd_macro,
             syntax: &syntax,
+            clock: &clock,
         };
         dispatcher.dispatch_key(key(KeyModifiers::ALT, KeyCode::Char('f')));
         assert_eq!(dispatcher.tabs.open[0].cursor.col, 3);
@@ -1138,7 +1144,7 @@ mod tests {
             &term,
         );
         let eb = edits.buffers.get(&tabs.open[0].path).expect("eb");
-        assert_eq!(eb.rope.to_string(), "hellox\nworld");
+        assert_eq!(eb.draft.to_string(), "hellox\nworld");
         assert_eq!(tabs.open[0].cursor.line, 0);
         assert_eq!(tabs.open[0].cursor.col, 6);
 
@@ -1149,16 +1155,17 @@ mod tests {
             OverlaysInput, StoreLoadedInput, SyntaxStatesInput, TabsActiveInput,
         };
         use led_state_browser::BrowserUi;
-        use led_state_diagnostics::DiagnosticsStates;
+        use led_driver_lsp_core::DiagnosticsStates;
         use led_state_git::GitState;
         use led_state_syntax::SyntaxStates;
-        use led_driver_terminal_core::{Layout, Rect};
+        use led_driver_terminal_core::{Layout, Rect, Theme};
         let syntax = SyntaxStates::default();
         let diags = DiagnosticsStates::default();
         let git = GitState::default();
         let browser = BrowserUi::default();
         let dims = term.dims.expect("dims");
         let layout = Layout::compute(dims, browser.visible);
+        let theme_default = Theme::default();
         let _ = query::body_model(query::BodyInputs {
             edits: EditedBuffersInput::new(&edits),
             store: StoreLoadedInput::new(&store),
@@ -1167,6 +1174,7 @@ mod tests {
             syntax: SyntaxStatesInput::new(&syntax),
             diagnostics: DiagnosticsStatesInput::new(&diags),
             git: query::GitStateInput::new(&git),
+            theme: query::ThemeInput::new(&theme_default),
             area: layout.editor_area,
         });
         // Reaching here == body_model didn't panic.

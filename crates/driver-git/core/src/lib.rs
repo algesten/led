@@ -50,7 +50,7 @@ pub enum GitCmd {
 #[derive(Debug, Clone)]
 pub enum GitEvent {
     /// Repo-wide file status + branch. First message of every
-    /// scan.
+    /// successful scan.
     FileStatuses {
         statuses: HashMap<CanonPath, HashSet<IssueCategory>>,
         branch: Option<String>,
@@ -62,6 +62,17 @@ pub enum GitEvent {
     LineStatuses {
         path: CanonPath,
         statuses: Vec<LineStatus>,
+    },
+    /// Scan failed (e.g. `repo.open` returned Err — not a repo,
+    /// permissions, libgit2 corruption). Per
+    /// `feedback_driver_failure_state.md`, every "what's missing?"
+    /// memo must see explicit Err so it stops re-firing rather
+    /// than treating in-flight as permanent. Mirrors
+    /// `BufferStore::LoadState::Error` and
+    /// `LspState::PullState::Failed`.
+    ScanFailed {
+        root: CanonPath,
+        message: Arc<str>,
     },
 }
 
@@ -83,6 +94,30 @@ impl Trace for NoopTrace {
     fn git_scan_done(&self, _: bool, _: usize) {}
 }
 
+// ── Driver-owned source ────────────────────────────────────────
+
+/// Driver-owned in-flight tracking per EXAMPLE-ARCH § "Stateless
+/// drivers still need an in-flight source". `scan_in_flight` is
+/// `Some(root)` while a `ScanFiles` cmd is outstanding; cleared
+/// by `process` when the matching `FileStatuses` or `ScanFailed`
+/// event arrives. The runtime can read this to gate "should I
+/// dispatch another scan?" against the current in-flight cmd.
+///
+/// `last_error` records the most recent terminal failure so
+/// downstream "needs scan?" memos can stop re-firing.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GitDriverState {
+    pub scan_in_flight: Option<CanonPath>,
+    pub last_scan_ok: Option<bool>,
+    pub last_error: Option<Arc<str>>,
+    /// `true` once the initial workspace scan has been dispatched.
+    /// Driver-outbound bookkeeping that lives on the driver source
+    /// rather than mirrored on AppState: guards the startup
+    /// one-shot so we don't spam `GitScan` every tick when
+    /// `fs.root` is `Some` but the driver has nothing new to do.
+    pub scan_dispatched: bool,
+}
+
 // ── Driver handle ──────────────────────────────────────────────
 
 /// Main-loop-facing half. Owns the `Sender` for commands and the
@@ -99,12 +134,18 @@ impl GitDriver {
         Self { tx, rx, trace }
     }
 
-    /// Ship a batch of commands. The worker is strictly serial —
-    /// scans queue up and process in order.
-    pub fn execute<'a>(&self, cmds: impl IntoIterator<Item = &'a GitCmd>) {
+    /// Ship a batch of commands, writing intent into `state`
+    /// before dispatching to the async worker.
+    pub fn execute<'a>(
+        &self,
+        cmds: impl IntoIterator<Item = &'a GitCmd>,
+        state: &mut GitDriverState,
+    ) {
         for cmd in cmds {
             match cmd {
                 GitCmd::ScanFiles { root } => {
+                    state.scan_in_flight = Some(root.clone());
+                    state.scan_dispatched = true;
                     self.trace.git_scan_start(root);
                 }
             }
@@ -114,13 +155,32 @@ impl GitDriver {
         }
     }
 
-    /// Drain completions. Caller folds `FileStatuses` then each
-    /// `LineStatuses` into the source in arrival order.
-    pub fn process(&self) -> Vec<GitEvent> {
+    /// Drain completions. Clears `scan_in_flight` when the
+    /// `FileStatuses` reply (or terminal `ScanFailed`) arrives.
+    /// The worker emits at most one terminal event per
+    /// `ScanFiles`, and `FileStatuses` is always first on
+    /// success. Caller folds `FileStatuses` then each
+    /// `LineStatuses` into the source in arrival order; on
+    /// `ScanFailed` the caller can surface a diagnostic but the
+    /// driver-side state (`last_scan_ok = Some(false)`,
+    /// `last_error`) is already correct without further action.
+    pub fn process(&self, state: &mut GitDriverState) -> Vec<GitEvent> {
         let mut out = Vec::new();
         while let Ok(ev) = self.rx.try_recv() {
-            if let GitEvent::FileStatuses { statuses, .. } = &ev {
-                self.trace.git_scan_done(true, statuses.len());
+            match &ev {
+                GitEvent::FileStatuses { statuses, .. } => {
+                    state.scan_in_flight = None;
+                    state.last_scan_ok = Some(true);
+                    state.last_error = None;
+                    self.trace.git_scan_done(true, statuses.len());
+                }
+                GitEvent::ScanFailed { message, .. } => {
+                    state.scan_in_flight = None;
+                    state.last_scan_ok = Some(false);
+                    state.last_error = Some(message.clone());
+                    self.trace.git_scan_done(false, 0);
+                }
+                GitEvent::LineStatuses { .. } => {}
             }
             out.push(ev);
         }
@@ -143,7 +203,8 @@ mod tests {
         let (_tx_cmd, _rx_cmd) = mpsc::channel::<GitCmd>();
         let (_tx_ev, rx_ev) = mpsc::channel::<GitEvent>();
         let drv = GitDriver::new(_tx_cmd, rx_ev, Arc::new(NoopTrace));
-        assert!(drv.process().is_empty());
+        let mut state = GitDriverState::default();
+        assert!(drv.process(&mut state).is_empty());
     }
 
     #[test]
@@ -161,7 +222,8 @@ mod tests {
                 branch: Some("main".to_string()),
             })
             .unwrap();
-        let batch = drv.process();
+        let mut state = GitDriverState::default();
+        let batch = drv.process(&mut state);
         assert_eq!(batch.len(), 1);
     }
 
@@ -170,9 +232,13 @@ mod tests {
         let (tx_cmd, rx_cmd) = mpsc::channel::<GitCmd>();
         let (_tx_ev, rx_ev) = mpsc::channel::<GitEvent>();
         let drv = GitDriver::new(tx_cmd, rx_ev, Arc::new(NoopTrace));
-        drv.execute([&GitCmd::ScanFiles {
-            root: canon("/root"),
-        }]);
+        let mut state = GitDriverState::default();
+        drv.execute(
+            [&GitCmd::ScanFiles {
+                root: canon("/root"),
+            }],
+            &mut state,
+        );
         let cmd = rx_cmd.try_recv().expect("cmd sent");
         matches!(cmd, GitCmd::ScanFiles { .. });
     }

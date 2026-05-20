@@ -934,6 +934,7 @@ dependencies = [
  "clap",
  "led-core",
  "led-driver-buffers-core",
+ "led-driver-fs-list-core",
  "led-driver-terminal-core",
  "led-driver-terminal-native",
  "led-runtime",
@@ -946,15 +947,46 @@ dependencies = [
 ]
 
 [[package]]
+name = "led-abi-command"
+version = "0.0.0"
+
+[[package]]
+name = "led-abi-file-search"
+version = "0.0.0"
+dependencies = [
+ "drv",
+ "led-core",
+]
+
+[[package]]
+name = "led-abi-find-file"
+version = "0.0.0"
+dependencies = [
+ "drv",
+ "led-core",
+]
+
+[[package]]
+name = "led-abi-fs-list"
+version = "0.0.0"
+dependencies = [
+ "led-core",
+]
+
+[[package]]
+name = "led-abi-lsp"
+version = "0.0.0"
+dependencies = [
+ "globset",
+]
+
+[[package]]
 name = "led-core"
 version = "0.0.0"
 dependencies = [
  "drv",
- "imbl",
  "ropey",
  "serde",
- "unicode-segmentation",
- "unicode-width 0.2.2",
 ]
 
 [[package]]
@@ -964,6 +996,7 @@ dependencies = [
  "drv",
  "imbl",
  "led-core",
+ "led-state-buffer-edits",
  "ropey",
 ]
 
@@ -973,12 +1006,16 @@ version = "0.0.0"
 dependencies = [
  "led-core",
  "led-driver-buffers-core",
+ "led-state-buffer-edits",
  "ropey",
 ]
 
 [[package]]
 name = "led-driver-clipboard-core"
 version = "0.0.0"
+dependencies = [
+ "drv",
+]
 
 [[package]]
 name = "led-driver-clipboard-native"
@@ -994,6 +1031,8 @@ name = "led-driver-file-search-core"
 version = "0.0.0"
 dependencies = [
  "drv",
+ "imbl",
+ "led-abi-file-search",
  "led-core",
 ]
 
@@ -1035,6 +1074,7 @@ name = "led-driver-find-file-core"
 version = "0.0.0"
 dependencies = [
  "drv",
+ "led-abi-find-file",
  "led-core",
 ]
 
@@ -1050,6 +1090,9 @@ dependencies = [
 name = "led-driver-fs-list-core"
 version = "0.0.0"
 dependencies = [
+ "drv",
+ "imbl",
+ "led-abi-fs-list",
  "led-core",
 ]
 
@@ -1084,6 +1127,8 @@ name = "led-driver-lsp-core"
 version = "0.0.0"
 dependencies = [
  "globset",
+ "imbl",
+ "led-abi-lsp",
  "led-core",
  "led-state-diagnostics",
  "led-state-syntax",
@@ -1107,9 +1152,10 @@ dependencies = [
 name = "led-driver-session-core"
 version = "0.0.0"
 dependencies = [
+ "imbl",
  "led-core",
  "led-state-buffer-edits",
- "led-state-session",
+ "led-state-tabs",
 ]
 
 [[package]]
@@ -1119,7 +1165,6 @@ dependencies = [
  "led-core",
  "led-driver-session-core",
  "led-state-buffer-edits",
- "led-state-session",
  "led-state-tabs",
  "libc",
  "rmp-serde",
@@ -1192,6 +1237,7 @@ dependencies = [
  "drv",
  "globset",
  "imbl",
+ "led-abi-command",
  "led-core",
  "led-driver-buffers-core",
  "led-driver-buffers-native",
@@ -1230,9 +1276,10 @@ dependencies = [
  "led-state-kill-ring",
  "led-state-lifecycle",
  "led-state-lsp",
- "led-state-session",
  "led-state-syntax",
  "led-state-tabs",
+ "led-state-text-input",
+ "led-text-layout",
  "led-text-reflow",
  "regex",
  "regex-syntax",
@@ -1257,7 +1304,6 @@ dependencies = [
  "drv",
  "imbl",
  "led-core",
- "led-driver-fs-list-core",
 ]
 
 [[package]]
@@ -1285,7 +1331,6 @@ version = "0.0.0"
 dependencies = [
  "drv",
  "led-core",
- "led-driver-lsp-core",
  "led-state-tabs",
  "nucleo-matcher",
 ]
@@ -1293,19 +1338,16 @@ dependencies = [
 [[package]]
 name = "led-state-diagnostics"
 version = "0.0.0"
-dependencies = [
- "imbl",
- "led-core",
-]
 
 [[package]]
 name = "led-state-file-search"
 version = "0.0.0"
 dependencies = [
  "drv",
+ "led-abi-file-search",
  "led-core",
- "led-driver-file-search-core",
  "led-state-tabs",
+ "led-state-text-input",
 ]
 
 [[package]]
@@ -1314,9 +1356,10 @@ version = "0.0.0"
 dependencies = [
  "dirs",
  "drv",
+ "led-abi-find-file",
  "led-core",
- "led-driver-find-file-core",
  "led-state-tabs",
+ "led-state-text-input",
 ]
 
 [[package]]
@@ -1334,6 +1377,7 @@ dependencies = [
  "drv",
  "led-core",
  "led-state-tabs",
+ "led-state-text-input",
 ]
 
 [[package]]
@@ -1348,7 +1392,7 @@ dependencies = [
 name = "led-state-kbd-macro"
 version = "0.0.0"
 dependencies = [
- "led-core",
+ "led-abi-command",
 ]
 
 [[package]]
@@ -1365,19 +1409,10 @@ version = "0.0.0"
 dependencies = [
  "drv",
  "imbl",
+ "led-abi-lsp",
  "led-core",
- "led-driver-lsp-core",
  "led-state-tabs",
-]
-
-[[package]]
-name = "led-state-session"
-version = "0.0.0"
-dependencies = [
- "imbl",
- "led-core",
- "led-state-buffer-edits",
- "led-state-tabs",
+ "led-state-text-input",
 ]
 
 [[package]]
@@ -1408,6 +1443,24 @@ dependencies = [
  "imbl",
  "led-core",
  "serde",
+]
+
+[[package]]
+name = "led-state-text-input"
+version = "0.0.0"
+dependencies = [
+ "drv",
+]
+
+[[package]]
+name = "led-text-layout"
+version = "0.0.0"
+dependencies = [
+ "drv",
+ "led-core",
+ "ropey",
+ "unicode-segmentation",
+ "unicode-width 0.2.2",
 ]
 
 [[package]]

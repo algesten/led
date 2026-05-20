@@ -1,6 +1,6 @@
 use led_core::{ChainId, PersistedContentHash, UndoDbSeq};
+use led_driver_session_core::UndoRestoreData;
 use led_state_buffer_edits::EditGroup;
-use led_state_session::UndoRestoreData;
 use rusqlite::{Connection, params};
 
 // ── Undo flush / clear / load (legacy-exact structure) ───────

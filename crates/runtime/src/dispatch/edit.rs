@@ -6,12 +6,15 @@
 //! before falling back to the M3 "match previous line's leading
 //! whitespace" rule.
 
-use led_core::grapheme_col_to_char;
+use led_text_layout::grapheme_col_to_char;
 use led_state_buffer_edits::BufferEdits;
 use led_state_syntax::SyntaxStates;
 use led_state_tabs::Tabs;
 use std::sync::Arc;
-use unicode_segmentation::UnicodeSegmentation;
+
+use crate::query::{
+    desired_indent_for_line, DesiredIndent, EditedBuffersInput, SyntaxStatesInput,
+};
 
 use super::shared::{bump, char_to_cursor, line_grapheme_len, with_active};
 
@@ -32,11 +35,11 @@ pub(super) fn insert_char(tabs: &mut Tabs, edits: &mut BufferEdits, ch: char) {
         }
         let before = tab.cursor;
         // Convert the cursor's grapheme col to a rope char index.
-        let line_char_start = eb.rope.line_to_char(tab.cursor.line);
-        let cur_line_slice = eb.rope.line(tab.cursor.line);
+        let line_char_start = eb.draft.line_to_char(tab.cursor.line);
+        let cur_line_slice = eb.draft.line(tab.cursor.line);
         let cur_char_in_line = grapheme_col_to_char(cur_line_slice, tab.cursor.col);
         let char_idx = line_char_start + cur_char_in_line;
-        let mut rope = (*eb.rope).clone();
+        let mut rope = (*eb.draft).clone();
         rope.insert_char(char_idx, ch);
         bump(eb, rope);
         // Re-derive the cursor from the new rope. If `ch` extended
@@ -44,86 +47,75 @@ pub(super) fn insert_char(tabs: &mut Tabs, edits: &mut BufferEdits, ch: char) {
         // stays put; if it started a fresh cluster, col advances by
         // one. `char_to_cursor` reads the post-edit line slice so
         // the conversion is exact.
-        tab.cursor = char_to_cursor(char_idx + 1, &eb.rope);
+        tab.cursor = char_to_cursor(char_idx + 1, &eb.draft);
         let after = tab.cursor;
         eb.history.record_insert_char(char_idx, ch, before, after);
     });
 }
 
 pub(super) fn insert_newline(tabs: &mut Tabs, edits: &mut BufferEdits, syntax: &SyntaxStates) {
-    with_active(tabs, edits, |tab, eb| {
-        if tab.preview {
-            return;
-        }
-        let before = tab.cursor;
-        let line_idx = tab.cursor.line;
+    // Step 1 — read the active tab's identity + cursor position.
+    // The query memo runs against the immutable view of `edits`
+    // and `syntax` here; the mutation happens in step 2.
+    let Some(id) = tabs.active else {
+        return;
+    };
+    let Some(idx) = tabs.open.iter().position(|t| t.id == id) else {
+        return;
+    };
+    if tabs.open[idx].preview {
+        return;
+    }
+    let path = tabs.open[idx].path.clone();
+    let cursor_before = tabs.open[idx].cursor;
+    let line_idx = cursor_before.line;
+    // `desired_indent_for_line` returns `None` when the buffer is
+    // unloaded — match the pre-refactor `with_active` early-out.
+    let Some(indent) = desired_indent_for_line(
+        SyntaxStatesInput::new(syntax),
+        EditedBuffersInput::new(edits),
+        &path,
+        line_idx,
+    ) else {
+        return;
+    };
 
-        // M23: ask the tree-sitter indent query what the *current*
-        // line's structural indent should be, and use that as the
-        // new line's leading whitespace.
-        //
-        // Asking for `line_idx + 1` (the about-to-be-created line)
-        // gets confused when the line below `line_idx` is itself
-        // a closing bracket (`}` / `)` / `]`): `suggest_indent`'s
-        // closing-bracket short-circuit kicks in and returns the
-        // OPENER's line indent (often empty), which would land
-        // the cursor flush-left. Asking for `line_idx` instead
-        // returns the structural indent of the line we're
-        // splitting — which is exactly what the new line wants
-        // (Enter at EOL preserves the current line's indent
-        // level).
-        //
-        // None falls through to the M3 literal-copy rule.
-        let suggested = syntax
-            .by_path
-            .get(&tab.path)
-            .and_then(|s| s.tree.as_ref().map(|t| (s.language, t)))
-            .and_then(|(lang, tree)| {
-                led_state_syntax::indent::suggest_indent(
-                    lang,
-                    tree,
-                    &eb.rope,
-                    line_idx,
-                )
-            });
-
-        let indent: String = if let Some(s) = suggested {
-            s
-        } else {
-            // Fallback: copy the current line's leading whitespace.
-            // Same shape as the M3 path before this milestone.
-            eb.rope
-                .line(line_idx)
-                .chars()
-                .take_while(|c| *c == ' ' || *c == '\t')
-                .collect()
-        };
-        // Indent length in graphemes (M25). For ASCII whitespace
-        // indent this equals the char count; for any future indent
-        // string with combining marks the grapheme count is what
-        // `Cursor::col` measures.
-        let indent_len = indent.graphemes(true).count();
-        let mut inserted: String = String::with_capacity(1 + indent.len());
-        inserted.push('\n');
-        inserted.push_str(&indent);
-        let mut rope = (*eb.rope).clone();
-        let line_char_start = rope.line_to_char(line_idx);
-        let cur_line_slice = rope.line(line_idx);
-        let cur_char_in_line = grapheme_col_to_char(cur_line_slice, tab.cursor.col);
-        let char_idx = line_char_start + cur_char_in_line;
-        rope.insert(char_idx, &inserted);
-        bump(eb, rope);
-        let after = {
-            let mut a = before;
-            a.line += 1;
-            a.col = indent_len;
-            a.preferred_col = indent_len;
-            a
-        };
-        eb.history
-            .record_insert(char_idx, Arc::<str>::from(inserted.as_str()), before, after);
-        tab.cursor = after;
-    });
+    // Step 2 — apply the splice. Indent string already decided;
+    // the rope mutation, history record, and cursor update stay in
+    // dispatch.
+    let Some(eb) = edits.buffers.get_mut(&path) else {
+        return;
+    };
+    let indent_str = indent.as_str();
+    // Indent length in graphemes (M25). For ASCII whitespace
+    // indent this equals the char count; for any future indent
+    // string with combining marks the grapheme count is what
+    // `Cursor::col` measures.
+    let indent_len = indent.grapheme_len();
+    let mut inserted: String = String::with_capacity(1 + indent_str.len());
+    inserted.push('\n');
+    inserted.push_str(indent_str);
+    let mut rope = (*eb.draft).clone();
+    let line_char_start = rope.line_to_char(line_idx);
+    let cur_line_slice = rope.line(line_idx);
+    let cur_char_in_line = grapheme_col_to_char(cur_line_slice, cursor_before.col);
+    let char_idx = line_char_start + cur_char_in_line;
+    rope.insert(char_idx, &inserted);
+    bump(eb, rope);
+    let after = {
+        let mut a = cursor_before;
+        a.line += 1;
+        a.col = indent_len;
+        a.preferred_col = indent_len;
+        a
+    };
+    eb.history.record_insert(
+        char_idx,
+        Arc::<str>::from(inserted.as_str()),
+        cursor_before,
+        after,
+    );
+    tabs.open[idx].cursor = after;
 }
 
 /// `Tab` (M23). Replaces the active line's leading whitespace
@@ -137,25 +129,40 @@ pub(super) fn insert_newline(tabs: &mut Tabs, edits: &mut BufferEdits, syntax: &
 /// tree-path replaces leading whitespace; fallback inserts at
 /// the cursor.
 pub(super) fn insert_tab(tabs: &mut Tabs, edits: &mut BufferEdits, syntax: &SyntaxStates) {
-    with_active(tabs, edits, |tab, eb| {
-        if tab.preview {
-            return;
-        }
-        let line_idx = tab.cursor.line;
+    // Step 1 — read the active tab + ask the memo what the line's
+    // structural indent should be. None → unloaded buffer; bail.
+    let Some(id) = tabs.active else {
+        return;
+    };
+    let Some(idx) = tabs.open.iter().position(|t| t.id == id) else {
+        return;
+    };
+    if tabs.open[idx].preview {
+        return;
+    }
+    let path = tabs.open[idx].path.clone();
+    let cursor_before = tabs.open[idx].cursor;
+    let line_idx = cursor_before.line;
+    let Some(desired) = desired_indent_for_line(
+        SyntaxStatesInput::new(syntax),
+        EditedBuffersInput::new(edits),
+        &path,
+        line_idx,
+    ) else {
+        return;
+    };
 
-        let suggested = syntax
-            .by_path
-            .get(&tab.path)
-            .and_then(|s| s.tree.as_ref().map(|t| (s.language, t)))
-            .and_then(|(lang, tree)| {
-                led_state_syntax::indent::suggest_indent(lang, tree, &eb.rope, line_idx)
-            });
-
-        if let Some(target_indent) = suggested {
-            // Tree path — replace existing leading whitespace.
-            let line_start_char = eb.rope.line_to_char(line_idx);
+    // Step 2 — apply. Tree path replaces leading whitespace;
+    // fallback path inserts spaces at the cursor up to the next
+    // tab stop.
+    match desired {
+        DesiredIndent::FromTree(target_indent) => {
+            let Some(eb) = edits.buffers.get_mut(&path) else {
+                return;
+            };
+            let line_start_char = eb.draft.line_to_char(line_idx);
             let existing_indent: String = eb
-                .rope
+                .draft
                 .line(line_idx)
                 .chars()
                 .take_while(|c| *c == ' ' || *c == '\t')
@@ -164,37 +171,40 @@ pub(super) fn insert_tab(tabs: &mut Tabs, edits: &mut BufferEdits, syntax: &Synt
             // grapheme cluster, so `chars().count()` and the
             // grapheme count agree.
             let existing_len = existing_indent.chars().count();
-            if target_indent == existing_indent {
+            if target_indent.as_ref() == existing_indent.as_str() {
                 // Already correctly indented. If the cursor
                 // sits inside the whitespace prefix, snap it
                 // to the indent boundary; otherwise the line
                 // is fine as-is and Tab is a no-op (legacy
                 // parity — Tab in the middle of typed content
                 // doesn't yank the cursor backwards).
-                if tab.cursor.col < existing_len {
-                    tab.cursor.col = existing_len;
-                    tab.cursor.preferred_col = existing_len;
+                if cursor_before.col < existing_len {
+                    let mut snapped = cursor_before;
+                    snapped.col = existing_len;
+                    snapped.preferred_col = existing_len;
+                    tabs.open[idx].cursor = snapped;
                 }
                 return;
             }
-            let before = tab.cursor;
             let target_len = target_indent.chars().count();
 
             // Build new rope: remove old indent, insert new.
-            let mut rope = (*eb.rope).clone();
+            let mut rope = (*eb.draft).clone();
             let removed: String = if existing_len > 0 {
-                rope.slice(line_start_char..line_start_char + existing_len).to_string()
+                rope.slice(line_start_char..line_start_char + existing_len)
+                    .to_string()
             } else {
                 String::new()
             };
             if existing_len > 0 {
                 rope.remove(line_start_char..line_start_char + existing_len);
             }
-            rope.insert(line_start_char, &target_indent);
+            rope.insert(line_start_char, target_indent.as_ref());
             bump(eb, rope);
-            tab.cursor.col = target_len;
-            tab.cursor.preferred_col = target_len;
-            let after = tab.cursor;
+            let mut after = cursor_before;
+            after.col = target_len;
+            after.preferred_col = target_len;
+            tabs.open[idx].cursor = after;
 
             // Record one undo entry — replace existing indent
             // with target indent. close_group around this so
@@ -203,44 +213,54 @@ pub(super) fn insert_tab(tabs: &mut Tabs, edits: &mut BufferEdits, syntax: &Synt
             eb.history.record_replace(
                 line_start_char,
                 Arc::<str>::from(removed.as_str()),
-                Arc::<str>::from(target_indent.as_str()),
-                before,
+                Arc::<str>::from(target_indent.as_ref()),
+                cursor_before,
                 after,
                 None,
             );
-            return;
         }
-
-        // Fallback: insert spaces at the cursor up to the next
-        // 4-col tab stop. Cursor advances by the inserted span.
-        // The fallback is grapheme-bounded too — `tab.cursor.col`
-        // is a grapheme idx; converting to char idx via
-        // `grapheme_col_to_char` keeps the rope insert at the
-        // right position even when the line contains wide chars.
-        let before = tab.cursor;
-        // Tab stops are display-cell stops; for the fallback path
-        // (no syntax tree) we treat one grapheme as one cell. The
-        // fallback only fires on language-less / tree-less buffers,
-        // which are typically ASCII anyway. Wide-char fallback
-        // tab-stop alignment is a follow-up if it ever surfaces.
-        let target_col = (tab.cursor.col / TAB_STOP + 1) * TAB_STOP;
-        let pad = target_col - tab.cursor.col;
-        let mut rope = (*eb.rope).clone();
-        let line_start = rope.line_to_char(line_idx);
-        let cur_line_slice = rope.line(line_idx);
-        let cur_char_in_line = grapheme_col_to_char(cur_line_slice, tab.cursor.col);
-        let char_idx = line_start + cur_char_in_line;
-        let inserted: String = " ".repeat(pad);
-        rope.insert(char_idx, &inserted);
-        bump(eb, rope);
-        tab.cursor.col = target_col;
-        tab.cursor.preferred_col = target_col;
-        let after = tab.cursor;
-        eb.history.finalise();
-        eb.history
-            .record_insert(char_idx, Arc::<str>::from(inserted.as_str()), before, after);
-        eb.history.finalise();
-    });
+        DesiredIndent::Fallback(_) => {
+            // No tree path — insert spaces at the cursor up to
+            // the next 4-col tab stop. Cursor advances by the
+            // inserted span. The fallback is grapheme-bounded too
+            // — `cursor.col` is a grapheme idx; converting to
+            // char idx via `grapheme_col_to_char` keeps the rope
+            // insert at the right position even when the line
+            // contains wide chars.
+            //
+            // Tab stops are display-cell stops; for the fallback
+            // path (no syntax tree) we treat one grapheme as one
+            // cell. The fallback only fires on language-less /
+            // tree-less buffers, which are typically ASCII
+            // anyway. Wide-char fallback tab-stop alignment is a
+            // follow-up if it ever surfaces.
+            let Some(eb) = edits.buffers.get_mut(&path) else {
+                return;
+            };
+            let target_col = (cursor_before.col / TAB_STOP + 1) * TAB_STOP;
+            let pad = target_col - cursor_before.col;
+            let mut rope = (*eb.draft).clone();
+            let line_start = rope.line_to_char(line_idx);
+            let cur_line_slice = rope.line(line_idx);
+            let cur_char_in_line = grapheme_col_to_char(cur_line_slice, cursor_before.col);
+            let char_idx = line_start + cur_char_in_line;
+            let inserted: String = " ".repeat(pad);
+            rope.insert(char_idx, &inserted);
+            bump(eb, rope);
+            let mut after = cursor_before;
+            after.col = target_col;
+            after.preferred_col = target_col;
+            tabs.open[idx].cursor = after;
+            eb.history.finalise();
+            eb.history.record_insert(
+                char_idx,
+                Arc::<str>::from(inserted.as_str()),
+                cursor_before,
+                after,
+            );
+            eb.history.finalise();
+        }
+    }
 }
 
 pub(super) fn delete_back(tabs: &mut Tabs, edits: &mut BufferEdits) {
@@ -252,8 +272,8 @@ pub(super) fn delete_back(tabs: &mut Tabs, edits: &mut BufferEdits) {
             return;
         }
         let before = tab.cursor;
-        let line_char_start = eb.rope.line_to_char(tab.cursor.line);
-        let cur_line_slice = eb.rope.line(tab.cursor.line);
+        let line_char_start = eb.draft.line_to_char(tab.cursor.line);
+        let cur_line_slice = eb.draft.line(tab.cursor.line);
 
         // Determine the char range to delete. M25 deletes the
         // entire grapheme cluster before the cursor, even if
@@ -275,7 +295,7 @@ pub(super) fn delete_back(tabs: &mut Tabs, edits: &mut BufferEdits) {
             // so `line_char_start - 1` is safe.
             (line_char_start - 1, line_char_start)
         };
-        let mut rope = (*eb.rope).clone();
+        let mut rope = (*eb.draft).clone();
         let removed: String = rope.slice(delete_start..delete_end).to_string();
         rope.remove(delete_start..delete_end);
         bump(eb, rope);
@@ -283,7 +303,7 @@ pub(super) fn delete_back(tabs: &mut Tabs, edits: &mut BufferEdits) {
         // post-edit char_to_cursor walks the new rope's grapheme
         // boundaries, landing at the correct grapheme col on the
         // (possibly joined) line.
-        tab.cursor = char_to_cursor(delete_start, &eb.rope);
+        tab.cursor = char_to_cursor(delete_start, &eb.draft);
         let after = tab.cursor;
         eb.history
             .record_delete(delete_start, Arc::from(removed), before, after);
@@ -295,16 +315,16 @@ pub(super) fn delete_forward(tabs: &mut Tabs, edits: &mut BufferEdits) {
         if tab.preview {
             return;
         }
-        let line_count = eb.rope.len_lines();
-        let line_grapheme_count = line_grapheme_len(&eb.rope, tab.cursor.line);
+        let line_count = eb.draft.len_lines();
+        let line_grapheme_count = line_grapheme_len(&eb.draft, tab.cursor.line);
         let on_last_line = tab.cursor.line + 1 >= line_count;
         let at_line_end = tab.cursor.col >= line_grapheme_count;
         if on_last_line && at_line_end {
             return;
         }
         let before = tab.cursor;
-        let line_char_start = eb.rope.line_to_char(tab.cursor.line);
-        let cur_line_slice = eb.rope.line(tab.cursor.line);
+        let line_char_start = eb.draft.line_to_char(tab.cursor.line);
+        let cur_line_slice = eb.draft.line(tab.cursor.line);
 
         let (delete_start, delete_end) = if tab.cursor.col < line_grapheme_count {
             // In-line: delete the grapheme cluster at cursor.
@@ -328,7 +348,7 @@ pub(super) fn delete_forward(tabs: &mut Tabs, edits: &mut BufferEdits) {
             let line_end = line_char_start + line_chars_total;
             (line_end - 1, line_end)
         };
-        let mut rope = (*eb.rope).clone();
+        let mut rope = (*eb.draft).clone();
         let removed: String = rope.slice(delete_start..delete_end).to_string();
         rope.remove(delete_start..delete_end);
         bump(eb, rope);
@@ -336,7 +356,7 @@ pub(super) fn delete_forward(tabs: &mut Tabs, edits: &mut BufferEdits) {
         // changed line geometry (col may shift if a wide grapheme
         // shifts forward — the post-edit char_to_cursor handles
         // it cleanly).
-        tab.cursor = char_to_cursor(delete_start, &eb.rope);
+        tab.cursor = char_to_cursor(delete_start, &eb.draft);
         let after = tab.cursor;
         eb.history
             .record_delete(delete_start, Arc::from(removed), before, after);
@@ -692,11 +712,11 @@ mod tests {
         let mut edits = BufferEdits::default();
         edits.buffers.insert(
             canon("a"),
-            EditedBuffer::fresh(Arc::new(Rope::from_str("a"))),
+            EditedBuffer::fresh(led_state_buffer_edits::Persisted(Arc::new(Rope::from_str("a")))),
         );
         edits.buffers.insert(
             canon("b"),
-            EditedBuffer::fresh(Arc::new(Rope::from_str("b"))),
+            EditedBuffer::fresh(led_state_buffer_edits::Persisted(Arc::new(Rope::from_str("b")))),
         );
         let store = BufferStore::default();
         let term = terminal_with(Some(Dims { cols: 10, rows: 5 }));

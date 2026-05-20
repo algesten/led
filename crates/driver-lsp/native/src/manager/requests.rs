@@ -2,10 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use led_core::{BufferVersion, CanonPath, LspRequestSeq, PersistedContentHash};
-use led_driver_lsp_core::{
-    LspEvent,
-    diag_source::DiagMode,
-};
+use led_driver_lsp_core::LspEvent;
 use led_state_syntax::Language;
 use serde_json::{Value, json};
 
@@ -55,19 +52,25 @@ impl Manager {
     ) {
         let pulls_and_cache = {
             let entry = self.servers.get_mut(&lang).unwrap();
-            let pulls = entry.diag.open_window(snapshot, &opened);
-            let cache = if entry.diag.mode() == DiagMode::Push {
-                entry.diag.drain_cache_for_window()
-            } else {
-                Vec::new()
-            };
+            let pulls = entry.diag.open_window(snapshot, &opened, std::time::Instant::now());
+            // Drain the push fallback cache in BOTH modes:
+            //   - Push mode: cached pushes are the only diagnostic
+            //     source for this window.
+            //   - Pull mode: cached pushes pre-populate fallback
+            //     entries the runtime can show while pulls are in
+            //     flight. The runtime fold gates them via
+            //     `pull_state` so a pull response supersedes the
+            //     fallback as soon as it lands.
+            let cache = entry.diag.drain_cache_for_window();
             (pulls, cache)
         };
         let (pulls, cache) = pulls_and_cache;
 
-        // Forward cached push results immediately.
+        // Surface cached push results as PushFallback events —
+        // never as primary `Diagnostics`. Pull responses (issued
+        // below) own that channel.
         for (path, diags, hash) in cache {
-            let _ = self.lsp_event_tx.send(LspEvent::Diagnostics {
+            let _ = self.lsp_event_tx.send(LspEvent::PushFallback {
                 path: path.clone(),
                 hash,
                 diagnostics: diags,
@@ -721,9 +724,29 @@ impl Manager {
         path: CanonPath,
         payload: Result<Value, crate::classify::JsonRpcError>,
     ) {
+        // Record failures as explicit state per audit Finding 2.3:
+        // the old `Err(_) => Vec::new()` was indistinguishable from
+        // "no diagnostics", so the runtime's gate kept re-firing
+        // the same pull every tick. Surface the failure through
+        // `LspEvent::PullFailed { path, message }` so the driver
+        // source's `pull_state` for that path flips to Failed and
+        // the runtime stops re-firing until the next gate advance.
         let diags = match payload {
             Ok(result) => parse_diagnostic_result(&result),
-            Err(_) => Vec::new(),
+            Err(err) => {
+                let _ = self.lsp_event_tx.send(LspEvent::PullFailed {
+                    path: path.clone(),
+                    message: Arc::from(err.message.as_str()),
+                });
+                self.notify.notify();
+                // Still drain the on_pull_response so the
+                // DiagnosticSource window's `pending_pulls` set is
+                // cleared for this path — otherwise the freeze
+                // would never lift on an error-out.
+                let entry = self.servers.get_mut(&language).unwrap();
+                let _ = entry.diag.on_pull_response(path, Vec::new());
+                return;
+            }
         };
         let entry = self.servers.get_mut(&language).unwrap();
         let (forward, _all_done) = entry.diag.on_pull_response(path, diags);

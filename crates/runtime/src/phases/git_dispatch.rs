@@ -19,8 +19,8 @@ pub(crate) fn run(sources: &mut Sources, env: &TickEnv<'_>) {
         tabs,
         edits,
         fs,
-        git_scan_dispatched,
         git_scan_pending,
+        git_driver,
         file_watch,
         ..
     } = sources;
@@ -33,15 +33,19 @@ pub(crate) fn run(sources: &mut Sources, env: &TickEnv<'_>) {
             .open
             .iter()
             .any(|t| !edits.buffers.contains_key(&t.path));
-        let initial_scan_ready = *git_scan_dispatched || !any_pending_load;
-        let want_scan = !*git_scan_dispatched || save_pending;
+        let initial_scan_ready = git_driver.scan_dispatched || !any_pending_load;
+        let want_scan = !git_driver.scan_dispatched || save_pending;
         if want_scan && initial_scan_ready && root.as_path().join(".git").exists() {
-            env.drivers.git.execute(std::iter::once(&GitCmd::ScanFiles {
-                root: root.clone(),
-            }));
-            *git_scan_dispatched = true;
+            env.drivers.git.execute(
+                std::iter::once(&GitCmd::ScanFiles {
+                    root: root.clone(),
+                }),
+                git_driver,
+            );
         } else if want_scan && initial_scan_ready {
-            *git_scan_dispatched = true;
+            // No .git/ yet — mark dispatched so we don't re-poll
+            // every tick. A subsequent save_pending will retry.
+            git_driver.scan_dispatched = true;
         } else if save_pending {
             *git_scan_pending = true;
         }

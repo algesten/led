@@ -16,34 +16,39 @@ use std::sync::mpsc::{Receiver, Sender};
 
 use led_core::CanonPath;
 
-/// One match inside a file. Positions are all 1-indexed to match
-/// ripgrep's output conventions; `match_start` / `match_end` are
-/// byte offsets into `preview` (kept for later rendering of the
-/// hit inside the preview line, and for the replace flow).
-#[derive(Debug, Clone, PartialEq, Eq, drv::Input)]
-pub struct FileSearchHit {
-    pub path: CanonPath,
-    /// 1-indexed line number.
-    pub line: usize,
-    /// 1-indexed column of the first char of the match.
-    pub col: usize,
-    /// Single-line preview (the matched line with its newline
-    /// trimmed). The UI renders this as-is.
-    pub preview: String,
-    /// Byte offsets inside `preview` — the highlight span.
-    pub match_start: usize,
-    pub match_end: usize,
+// ── Driver-owned source ────────────────────────────────────────
+
+/// Driver-owned source per `EXAMPLE-ARCH.md` § "Stateless drivers
+/// still need an in-flight source". Tracks the last-issued command
+/// in each of the three lanes (live search / replace-all / single
+/// on-disk point replace). Written synchronously by the matching
+/// `execute*` method; cleared by the matching `process*` method
+/// when its `Done` arrives.
+///
+/// For search + replace-all the slot is a single `Option` — the
+/// overlay never has more than one in flight at a time (a fresh
+/// keystroke or replace request supersedes the previous one).
+/// Single-replace can fan out across hits so its slot is a
+/// per-path count; the ABI's `FileSearchSingleReplaceOut` carries
+/// only `path` + `ok`, which is too coarse for a richer key.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FileSearchDriverState {
+    /// Last-issued live search. Cleared when a matching `Out`
+    /// arrives (same `query` + toggle echoes).
+    pub search_in_flight: Option<FileSearchCmd>,
+    /// Last-issued replace-all. Cleared when a matching `Out`
+    /// arrives (echoes the same `query`).
+    pub replace_in_flight: Option<FileSearchReplaceCmd>,
+    /// Per-path count of outstanding single-replace requests.
+    /// Bumped in `execute_single_replace`, decremented in
+    /// `process_single_replace`. A path with count == 0 is
+    /// removed from the map so memos can read `contains_key`
+    /// as "currently in flight".
+    pub single_in_flight: imbl::HashMap<CanonPath, usize>,
+    pub last_error: Option<Arc<str>>,
 }
 
-/// All hits in a single file. `relative` is the file's path
-/// rendered relative to the search root; the UI shows this as the
-/// group header.
-#[derive(Debug, Clone, PartialEq, Eq, drv::Input)]
-pub struct FileSearchGroup {
-    pub path: CanonPath,
-    pub relative: String,
-    pub hits: Vec<FileSearchHit>,
-}
+pub use led_abi_file_search::{FileSearchGroup, FileSearchHit};
 
 /// One search request, shaped exactly as the runtime dispatches it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -57,6 +62,12 @@ pub struct FileSearchCmd {
 /// One completion back from the worker. `query` + toggles are echoed
 /// so the runtime can drop late arrivals (user typed further or
 /// flipped a toggle since the request went out).
+///
+/// `error` is `Some(msg)` when the worker hit a terminal failure
+/// (bad regex, walker init error). Per
+/// `feedback_driver_failure_state.md` the driver records this on
+/// `FileSearchDriverState.last_error` rather than silently
+/// collapsing to "0 results."
 #[derive(Debug, Clone)]
 pub struct FileSearchOut {
     pub query: String,
@@ -67,6 +78,7 @@ pub struct FileSearchOut {
     /// runtime doesn't re-walk the tree when projecting the cursor
     /// between hits.
     pub flat: Vec<FileSearchHit>,
+    pub error: Option<Arc<str>>,
 }
 
 /// One-shot point replacement for a single hit on disk. Used when
@@ -195,54 +207,100 @@ impl FileSearchDriver {
         }
     }
 
-    /// Ship each search command to the worker. A `file_search_start`
-    /// trace fires per command. Failed sends (worker gone) silently
-    /// drop — mirrors every other driver's shutdown-race handling.
-    pub fn execute<'a>(&self, cmds: impl IntoIterator<Item = &'a FileSearchCmd>) {
+    /// Ship each search command to the worker. Writes the last cmd
+    /// into `state.search_in_flight` synchronously before the async
+    /// dispatch — the overlay only ever has one query outstanding,
+    /// so each new keystroke replaces the previous in-flight cmd.
+    pub fn execute<'a>(
+        &self,
+        cmds: impl IntoIterator<Item = &'a FileSearchCmd>,
+        state: &mut FileSearchDriverState,
+    ) {
         for cmd in cmds {
+            state.search_in_flight = Some(cmd.clone());
             self.trace.file_search_start(cmd);
             let _ = self.search_tx.send(cmd.clone());
         }
     }
 
-    /// Ship a replace-all request. One trace line per command.
+    /// Ship a replace-all request. Writes the last cmd into
+    /// `state.replace_in_flight` synchronously before the async
+    /// dispatch.
     pub fn execute_replace<'a>(
         &self,
         cmds: impl IntoIterator<Item = &'a FileSearchReplaceCmd>,
+        state: &mut FileSearchDriverState,
     ) {
         for cmd in cmds {
+            state.replace_in_flight = Some(cmd.clone());
             self.trace.file_search_replace_start(cmd);
             let _ = self.replace_tx.send(cmd.clone());
         }
     }
 
-    /// Ship a single on-disk point-replace. One trace line per cmd.
+    /// Ship a single on-disk point-replace. Bumps the per-path
+    /// in-flight count synchronously.
     pub fn execute_single_replace<'a>(
         &self,
         cmds: impl IntoIterator<Item = &'a FileSearchSingleReplaceCmd>,
+        state: &mut FileSearchDriverState,
     ) {
         for cmd in cmds {
+            *state
+                .single_in_flight
+                .entry(cmd.path.clone())
+                .or_insert(0) += 1;
             self.trace.file_search_single_replace_start(cmd);
             let _ = self.single_tx.send(cmd.clone());
         }
     }
 
-    /// Drain ready search results. Empty `Vec` on idle ticks — zero
-    /// heap alloc on the happy path.
-    pub fn process(&self) -> Vec<FileSearchOut> {
+    /// Drain ready search results. Clears `state.search_in_flight`
+    /// when the completed `(query, case_sensitive, use_regex)`
+    /// triple matches the latest outstanding cmd; stale results
+    /// from superseded queries still propagate to the caller (the
+    /// runtime's matching discipline handles drop semantics) but
+    /// don't clear the in-flight slot. Empty `Vec` on idle ticks.
+    pub fn process(&self, state: &mut FileSearchDriverState) -> Vec<FileSearchOut> {
         let mut out = Vec::new();
         while let Ok(done) = self.search_rx.try_recv() {
-            self.trace.file_search_done(&done.query, true);
+            if let Some(in_flight) = &state.search_in_flight
+                && in_flight.query == done.query
+                && in_flight.case_sensitive == done.case_sensitive
+                && in_flight.use_regex == done.use_regex
+            {
+                state.search_in_flight = None;
+            }
+            let ok = match &done.error {
+                Some(msg) => {
+                    state.last_error = Some(msg.clone());
+                    false
+                }
+                None => {
+                    state.last_error = None;
+                    true
+                }
+            };
+            self.trace.file_search_done(&done.query, ok);
             out.push(done);
         }
         out
     }
 
-    /// Drain ready replace completions. Same zero-alloc-on-idle
-    /// discipline as `process`.
-    pub fn process_replace(&self) -> Vec<FileSearchReplaceOut> {
+    /// Drain ready replace completions. Clears
+    /// `state.replace_in_flight` when the completed `query`
+    /// matches the latest outstanding cmd.
+    pub fn process_replace(
+        &self,
+        state: &mut FileSearchDriverState,
+    ) -> Vec<FileSearchReplaceOut> {
         let mut out = Vec::new();
         while let Ok(done) = self.replace_rx.try_recv() {
+            if let Some(in_flight) = &state.replace_in_flight
+                && in_flight.query == done.query
+            {
+                state.replace_in_flight = None;
+            }
             self.trace.file_search_replace_done(
                 &done.query,
                 done.files_changed,
@@ -253,10 +311,20 @@ impl FileSearchDriver {
         out
     }
 
-    /// Drain single-replace completions.
-    pub fn process_single_replace(&self) -> Vec<FileSearchSingleReplaceOut> {
+    /// Drain single-replace completions. Decrements the per-path
+    /// in-flight count, removing the entry when it reaches zero.
+    pub fn process_single_replace(
+        &self,
+        state: &mut FileSearchDriverState,
+    ) -> Vec<FileSearchSingleReplaceOut> {
         let mut out = Vec::new();
         while let Ok(done) = self.single_rx.try_recv() {
+            if let Some(count) = state.single_in_flight.get_mut(&done.path) {
+                *count = count.saturating_sub(1);
+                if *count == 0 {
+                    state.single_in_flight.remove(&done.path);
+                }
+            }
             self.trace
                 .file_search_single_replace_done(&done.path, done.ok);
             out.push(done);

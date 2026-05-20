@@ -15,37 +15,49 @@ pub mod actions;
 pub mod browser;
 pub mod desired;
 pub mod inputs;
+pub mod issues;
 pub mod render;
 
 pub use actions::{
     buffer_state_sum, clipboard_action, external_reread_targets, file_load_action,
-    file_save_action, find_file_action, notify_hash_index, static_deadline,
-    sync_check_cmds,
+    file_save_action, find_file_action, notify_hash_index, outgoing_jump_position,
+    static_deadline, sync_check_cmds,
 };
 pub use browser::{
-    browser_auto_expanded, browser_entries, browser_selected_idx, file_categories_map,
-    file_list_action, BrowserDerivedInputs,
+    browser_auto_expanded, browser_entries, browser_selected_idx, desired_preview_intent,
+    diag_categories_map, file_categories_map, file_list_action, git_categories_map,
+    BrowserDerivedInputs, PreviewIntent,
 };
 pub use desired::{
-    desired_inlay_hint_requests, desired_lsp_buffer_changed, desired_syntax_parses,
-    desired_watches, lsp_watched_file_notifications,
+    compiled_query, completion_commit_plan, completion_refilter_outcome,
+    completion_request_anchor, desired_indent_for_line, desired_inlay_hint_requests,
+    desired_lsp_buffer_changed, desired_syntax_parses, desired_watches,
+    filtered_watch_events, lsp_watched_file_notifications, per_server_matched,
+    redo_action, redo_target_path, replace_all_plan, save_cleanup_plan, undo_action,
+    undo_target_path, CompiledQuery, CompletionAnchorOutcome, CompletionCommitApply,
+    CompletionCommitPlan, CompletionRefilterOutcome, DesiredIndent, DiskWritePending,
+    InMemoryReplacePlan, RedoAction, ReplaceAllPlan, SaveCleanupReplace, UndoAction,
+    UndoApply, UndoMarkSync,
 };
+pub use issues::{StatusDisplay, directory_categories, resolve_display};
 pub use inputs::{
-    AlertExpiryInput, AlertsInput, BrowserUiInput, ClipboardStateInput, ClockInput,
+    AlertExpiryInput, AlertsInput, BrowserUiInput, ClipboardDriverInput, ClipboardIntentInput,
     CompletionsSessionInput, DiagnosticsStatesInput, EditedBuffersInput,
-    FileWatchEventsInput, FileWatchRegistryInput, FindFileInput, FsRootInput,
+    FileSearchQueryInput, FileSearchReplaceInput, FileWatchEventsInput,
+    FileWatchRegistryInput, FindFileInput, FsListDriverInput, FsRootInput,
     FsTreeInput, GitStateInput, HashIndexInput, KbdMacroRecordingInput,
     LspExtrasOverlayInput, LspInlayHintsEnabledInput, LspInlayHintsRequestedInput,
     LspNotifiedInput, LspStatusesInput, LspWatchedGlobsInput, NotifyDirInput,
     OverlaysInput, PendingSavesInput, SessionPrimaryInput, StoreLoadedInput,
     SyntaxStatesInput, TabsActiveInput, TabsOpenInput, TerminalDimsInput,
-    UndoFlushDebounceInput, UndoPersistenceInput,
+    ThemeInput, UndoFlushDebounceInput, UndoPersistenceInput,
 };
 pub use render::{
-    body_model, code_action_popup_model, completion_popup_model, popover_model,
-    rebased_line_spans, rename_popup_model, render_frame, side_panel_model,
-    status_bar_model, tab_bar_model, BodyInputs, RenderInputs, SidePanelInputs,
-    StatusBarInputs,
+    body_cursor, body_model, code_action_popup_model, completion_popup_model,
+    popover_model, rebased_line_spans, rename_popup_model, render_frame,
+    side_panel_browser, side_panel_completions, side_panel_file_search,
+    side_panel_model, status_bar_model, tab_bar_model, BodyInputs, RenderInputs,
+    SidePanelBrowserInputs, SidePanelInputs, StatusBarInputs,
 };
 
 // Re-export internal constants and helpers needed by the in-tree
@@ -68,7 +80,7 @@ use led_driver_fs_list_core::ListCmd;
 #[cfg(test)]
 use led_driver_terminal_core::{
     BodyModel, Dims, Frame, PopoverModel, PopoverSeverity, Rect, SidePanelRow,
-    StatusBarModel, Terminal,
+    StatusBarModel, Terminal, Theme,
 };
 #[cfg(test)]
 use led_state_alerts::AlertState;
@@ -77,10 +89,9 @@ use led_state_browser::{BrowserUi, Focus};
 #[cfg(test)]
 use led_state_buffer_edits::{BufferEdits, EditedBuffer};
 #[cfg(test)]
-use led_state_diagnostics::{
-    BufferDiagnostics, Diagnostic, DiagnosticSeverity, DiagnosticsStates, LspServerStatus,
-    LspStatuses,
-};
+use led_driver_lsp_core::{BufferDiagnostics, DiagnosticsStates, LspServerStatus, LspStatuses};
+#[cfg(test)]
+use led_state_diagnostics::{Diagnostic, DiagnosticSeverity};
 #[cfg(test)]
 use led_state_syntax::{SyntaxStates, TokenKind, TokenSpan};
 #[cfg(test)]
@@ -163,7 +174,7 @@ mod tests {
         // gate the main loop sat at 100 % CPU as the fs-list
         // worker fail-loop signalled the wake notifier on every
         // attempt.
-        let mut fs = led_state_browser::FsTree {
+        let mut fs = led_driver_fs_list_core::FsTree {
             root: Some(canon("/proj")),
             ..Default::default()
         };
@@ -180,12 +191,16 @@ mod tests {
 
         let tabs = Tabs::default();
         let edits = BufferEdits::default();
-        let acts = file_list_action(BrowserDerivedInputs {
-            fs: FsTreeInput::new(&fs),
-            ui: BrowserUiInput::new(&ui),
-            tabs: TabsActiveInput::new(&tabs),
-            edits: EditedBuffersInput::new(&edits),
-        });
+        let fs_list_driver = led_driver_fs_list_core::FsListState::default();
+        let acts = file_list_action(
+            BrowserDerivedInputs {
+                fs: FsTreeInput::new(&fs),
+                ui: BrowserUiInput::new(&ui),
+                tabs: TabsActiveInput::new(&tabs),
+                edits: EditedBuffersInput::new(&edits),
+            },
+            FsListDriverInput::new(&fs_list_driver),
+        );
         assert_eq!(acts.len(), 1, "only the healthy path should emit");
         assert_eq!(acts[0], ListCmd::List(canon("/proj/healthy")));
     }
@@ -231,7 +246,8 @@ mod tests {
         let diags = DiagnosticsStates::default();
         let lsp = LspStatuses::default();
         let kbd_macro_default = led_state_kbd_macro::KbdMacroState::default();
-        let session_default = led_state_session::SessionState::default();
+        let session_default = led_driver_session_core::SessionState::default();
+        let theme_default = Theme::default();
         render_frame(RenderInputs {
             term: TerminalDimsInput::new(term),
             edits: EditedBuffersInput::new(e),
@@ -239,7 +255,7 @@ mod tests {
             tabs: TabsActiveInput::new(t),
             alerts: AlertsInput::new(&alerts),
             browser: BrowserUiInput::new(&browser),
-            fs: FsTreeInput::new(&led_state_browser::FsTree::default()),
+            fs: FsTreeInput::new(&led_driver_fs_list_core::FsTree::default()),
             overlays: OverlaysInput::new(&ff, &is, &None),
             syntax: SyntaxStatesInput::new(&syntax),
             diagnostics: DiagnosticsStatesInput::new(&diags),
@@ -249,6 +265,7 @@ mod tests {
             ),
             lsp_extras: LspExtrasOverlayInput::new(&led_state_lsp::LspExtrasState::default()),
             git: GitStateInput::new(&led_state_git::GitState::default()),
+            theme: ThemeInput::new(&theme_default),
             render_tick: 0,
             kbd_macro: KbdMacroRecordingInput::new(&kbd_macro_default),
             session: SessionPrimaryInput::new(&session_default),
@@ -317,7 +334,8 @@ mod tests {
         let diags = DiagnosticsStates::default();
         let lsp = LspStatuses::default();
         let kbd_macro_default = led_state_kbd_macro::KbdMacroState::default();
-        let session_default = led_state_session::SessionState::default();
+        let session_default = led_driver_session_core::SessionState::default();
+        let theme_default = Theme::default();
         let frame = render_frame(RenderInputs {
             term: TerminalDimsInput::new(&term),
             edits: EditedBuffersInput::new(&e),
@@ -325,7 +343,7 @@ mod tests {
             tabs: TabsActiveInput::new(&t),
             alerts: AlertsInput::new(&alerts),
             browser: BrowserUiInput::new(&browser),
-            fs: FsTreeInput::new(&led_state_browser::FsTree::default()),
+            fs: FsTreeInput::new(&led_driver_fs_list_core::FsTree::default()),
             overlays: OverlaysInput::new(&ff, &is, &None),
             syntax: SyntaxStatesInput::new(&syntax),
             diagnostics: DiagnosticsStatesInput::new(&diags),
@@ -335,6 +353,7 @@ mod tests {
             ),
             lsp_extras: LspExtrasOverlayInput::new(&led_state_lsp::LspExtrasState::default()),
             git: GitStateInput::new(&led_state_git::GitState::default()),
+            theme: ThemeInput::new(&theme_default),
             render_tick: 0,
             kbd_macro: KbdMacroRecordingInput::new(&kbd_macro_default),
             session: SessionPrimaryInput::new(&session_default),
@@ -369,7 +388,8 @@ mod tests {
         let diags = DiagnosticsStates::default();
         let lsp = LspStatuses::default();
         let kbd_macro_default = led_state_kbd_macro::KbdMacroState::default();
-        let session_default = led_state_session::SessionState::default();
+        let session_default = led_driver_session_core::SessionState::default();
+        let theme_default = Theme::default();
         let frame = render_frame(RenderInputs {
             term: TerminalDimsInput::new(&term),
             edits: EditedBuffersInput::new(&e),
@@ -377,7 +397,7 @@ mod tests {
             tabs: TabsActiveInput::new(&t),
             alerts: AlertsInput::new(&alerts),
             browser: BrowserUiInput::new(&browser),
-            fs: FsTreeInput::new(&led_state_browser::FsTree::default()),
+            fs: FsTreeInput::new(&led_driver_fs_list_core::FsTree::default()),
             overlays: OverlaysInput::new(&ff, &is, &None),
             syntax: SyntaxStatesInput::new(&syntax),
             diagnostics: DiagnosticsStatesInput::new(&diags),
@@ -387,6 +407,7 @@ mod tests {
             ),
             lsp_extras: LspExtrasOverlayInput::new(&led_state_lsp::LspExtrasState::default()),
             git: GitStateInput::new(&led_state_git::GitState::default()),
+            theme: ThemeInput::new(&theme_default),
             render_tick: 0,
             kbd_macro: KbdMacroRecordingInput::new(&kbd_macro_default),
             session: SessionPrimaryInput::new(&session_default),
@@ -677,15 +698,16 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
             Some(Dims { cols: 40, rows: 5 }),
         );
         // Seed edits with a different rope — this is what the user sees.
+        let edited_rope = Arc::new(Rope::from_str("edited-version"));
         e.buffers.insert(
             canon("a.rs"),
-            EditedBuffer {
-                rope: Arc::new(Rope::from_str("edited-version")),
-                version: BufferVersion(1),
-                saved_version: SavedVersion(0),
-                disk_content_hash: led_core::PersistedContentHash::default(),
-                history: Default::default(),
-            },
+            EditedBuffer::new_with_state(
+                edited_rope.clone(),
+                BufferVersion(1),
+                SavedVersion(0),
+                led_core::PersistedContentHash::default(),
+                Default::default(),
+            ),
         );
 
         let frame = render(&t, &e, &s, &term).expect("dims set");
@@ -738,13 +760,13 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
         let rope = Arc::new(Rope::from_str("payload"));
         e.buffers.insert(
             path.clone(),
-            EditedBuffer {
-                rope: rope.clone(),
-                version: BufferVersion(3),
-                saved_version: SavedVersion(0),
-                disk_content_hash: led_core::PersistedContentHash::default(),
-                history: Default::default(),
-            },
+            EditedBuffer::new_with_state(
+                rope.clone(),
+                BufferVersion(3),
+                SavedVersion(0),
+                led_core::PersistedContentHash::default(),
+                Default::default(),
+            ),
         );
         e.pending_saves.insert(path.clone());
 
@@ -756,11 +778,11 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
         match &actions[0] {
             SaveAction::Save {
                 path: p,
-                rope: r,
+                content,
                 version,
             } => {
                 assert_eq!(p, &path);
-                assert!(Arc::ptr_eq(r, &rope));
+                assert!(Arc::ptr_eq(content.as_rope(), &rope));
                 assert_eq!(*version, BufferVersion(3));
             }
             SaveAction::SaveAs { .. } => panic!("unexpected SaveAs"),
@@ -775,13 +797,13 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
         let rope = Arc::new(Rope::from_str("payload"));
         e.buffers.insert(
             from.clone(),
-            EditedBuffer {
-                rope: rope.clone(),
-                version: BufferVersion(2),
-                saved_version: SavedVersion(2), // pristine — SaveAs still fires
-                disk_content_hash: led_core::PersistedContentHash::default(),
-                history: Default::default(),
-            },
+            EditedBuffer::new_with_state(
+                rope.clone(),
+                BufferVersion(2),
+                SavedVersion(2), // pristine — SaveAs still fires
+                led_core::EphemeralContentHash::of_rope(&rope).persist(),
+                Default::default(),
+            ),
         );
         e.pending_save_as.insert(from.clone(), to.clone());
 
@@ -794,12 +816,12 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
             SaveAction::SaveAs {
                 from: f,
                 to: t,
-                rope: r,
+                content,
                 version,
             } => {
                 assert_eq!(f, &from);
                 assert_eq!(t, &to);
-                assert!(Arc::ptr_eq(r, &rope));
+                assert!(Arc::ptr_eq(content.as_rope(), &rope));
                 assert_eq!(*version, BufferVersion(2));
             }
             SaveAction::Save { .. } => panic!("unexpected Save"),
@@ -821,13 +843,13 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
         let rope = Arc::new(Rope::from_str("x"));
         e.buffers.insert(
             path.clone(),
-            EditedBuffer {
-                rope: rope.clone(),
-                version: BufferVersion(0),
-                saved_version: SavedVersion(0), // dirty() == false
-                disk_content_hash: led_core::EphemeralContentHash::of_rope(&rope).persist(),
-                history: Default::default(),
-            },
+            EditedBuffer::new_with_state(
+                rope.clone(),
+                BufferVersion(0),
+                SavedVersion(0), // dirty() == false
+                led_core::EphemeralContentHash::of_rope(&rope).persist(),
+                Default::default(),
+            ),
         );
         e.pending_saves.insert(path.clone());
 
@@ -875,25 +897,27 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
         );
         // a.rs clean, b.rs dirty.
         let a_rope = Arc::new(Rope::from_str("x"));
+        let a_hash = led_core::EphemeralContentHash::of_rope(&a_rope).persist();
         e.buffers.insert(
             canon("a.rs"),
-            EditedBuffer {
-                rope: a_rope.clone(),
-                version: BufferVersion(0),
-                saved_version: SavedVersion(0),
-                disk_content_hash: led_core::EphemeralContentHash::of_rope(&a_rope).persist(),
-                history: Default::default(),
-            },
+            EditedBuffer::new_with_state(
+                a_rope.clone(),
+                BufferVersion(0),
+                SavedVersion(0),
+                a_hash,
+                Default::default(),
+            ),
         );
+        let b_rope = Arc::new(Rope::from_str("yy"));
         e.buffers.insert(
             canon("b.rs"),
-            EditedBuffer {
-                rope: Arc::new(Rope::from_str("yy")),
-                version: BufferVersion(1),
-                saved_version: SavedVersion(0),
-                disk_content_hash: led_core::PersistedContentHash::default(),
-                history: Default::default(),
-            },
+            EditedBuffer::new_with_state(
+                b_rope.clone(),
+                BufferVersion(1),
+                SavedVersion(0),
+                led_core::PersistedContentHash::default(),
+                Default::default(),
+            ),
         );
 
         let frame = render(&t, &e, &s, &term).expect("dims set");
@@ -967,7 +991,8 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
         let diags = DiagnosticsStates::default();
         let lsp = LspStatuses::default();
         let kbd_macro_default = led_state_kbd_macro::KbdMacroState::default();
-        let session_default = led_state_session::SessionState::default();
+        let session_default = led_driver_session_core::SessionState::default();
+        let theme_default = Theme::default();
         let frame = render_frame(RenderInputs {
             term: TerminalDimsInput::new(&term),
             edits: EditedBuffersInput::new(&e),
@@ -975,7 +1000,7 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
             tabs: TabsActiveInput::new(&t),
             alerts: AlertsInput::new(&alerts),
             browser: BrowserUiInput::new(&browser),
-            fs: FsTreeInput::new(&led_state_browser::FsTree::default()),
+            fs: FsTreeInput::new(&led_driver_fs_list_core::FsTree::default()),
             overlays: OverlaysInput::new(&ff, &is, &fsrch),
             syntax: SyntaxStatesInput::new(&syntax),
             diagnostics: DiagnosticsStatesInput::new(&diags),
@@ -987,6 +1012,7 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
                 &led_state_lsp::LspExtrasState::default(),
             ),
             git: GitStateInput::new(&git),
+            theme: ThemeInput::new(&theme_default),
             render_tick: 0,
             kbd_macro: KbdMacroRecordingInput::new(&kbd_macro_default),
             session: SessionPrimaryInput::new(&session_default),
@@ -1041,7 +1067,8 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
         let lsp = LspStatuses::default();
         let git = led_state_git::GitState::default();
         let kbd_macro_default = led_state_kbd_macro::KbdMacroState::default();
-        let session_default = led_state_session::SessionState::default();
+        let session_default = led_driver_session_core::SessionState::default();
+        let theme_default = Theme::default();
         status_bar_model(StatusBarInputs {
             alerts: AlertsInput::new(a),
             tabs: TabsActiveInput::new(t),
@@ -1053,6 +1080,7 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
                 &led_state_lsp::LspExtrasState::default(),
             ),
             git: GitStateInput::new(&git),
+            theme: ThemeInput::new(&theme_default),
             render_tick: 0,
             kbd_macro: KbdMacroRecordingInput::new(&kbd_macro_default),
             session: SessionPrimaryInput::new(&session_default),
@@ -1072,7 +1100,8 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
         let diags = DiagnosticsStates::default();
         let lsp = LspStatuses::default();
         let git = led_state_git::GitState::default();
-        let session_default = led_state_session::SessionState::default();
+        let session_default = led_driver_session_core::SessionState::default();
+        let theme_default = Theme::default();
         status_bar_model(StatusBarInputs {
             alerts: AlertsInput::new(a),
             tabs: TabsActiveInput::new(t),
@@ -1084,6 +1113,7 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
                 &led_state_lsp::LspExtrasState::default(),
             ),
             git: GitStateInput::new(&git),
+            theme: ThemeInput::new(&theme_default),
             render_tick: 0,
             kbd_macro: KbdMacroRecordingInput::new(km),
             session: SessionPrimaryInput::new(&session_default),
@@ -1101,7 +1131,8 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
         let diags = DiagnosticsStates::default();
         let lsp = LspStatuses::default();
         let kbd_macro_default = led_state_kbd_macro::KbdMacroState::default();
-        let session_default = led_state_session::SessionState::default();
+        let session_default = led_driver_session_core::SessionState::default();
+        let theme_default = Theme::default();
         status_bar_model(StatusBarInputs {
             alerts: AlertsInput::new(a),
             tabs: TabsActiveInput::new(t),
@@ -1113,6 +1144,7 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
                 &led_state_lsp::LspExtrasState::default(),
             ),
             git: GitStateInput::new(g),
+            theme: ThemeInput::new(&theme_default),
             render_tick: 0,
             kbd_macro: KbdMacroRecordingInput::new(&kbd_macro_default),
             session: SessionPrimaryInput::new(&session_default),
@@ -1123,7 +1155,7 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
         a: &AlertState,
         t: &Tabs,
         e: &BufferEdits,
-        sess: &led_state_session::SessionState,
+        sess: &led_driver_session_core::SessionState,
     ) -> StatusBarModel {
         let ff = None;
         let is = None;
@@ -1131,6 +1163,7 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
         let lsp = LspStatuses::default();
         let git = led_state_git::GitState::default();
         let kbd_macro_default = led_state_kbd_macro::KbdMacroState::default();
+        let theme_default = Theme::default();
         status_bar_model(StatusBarInputs {
             alerts: AlertsInput::new(a),
             tabs: TabsActiveInput::new(t),
@@ -1142,6 +1175,7 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
                 &led_state_lsp::LspExtrasState::default(),
             ),
             git: GitStateInput::new(&git),
+            theme: ThemeInput::new(&theme_default),
             render_tick: 0,
             kbd_macro: KbdMacroRecordingInput::new(&kbd_macro_default),
             session: SessionPrimaryInput::new(sess),
@@ -1154,7 +1188,7 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
         // half should read `(secondary) L<row>:C<col> ` so the
         // user can see they're attached to a workspace owned by
         // another led process.
-        let sess = led_state_session::SessionState {
+        let sess = led_driver_session_core::SessionState {
             init_done: true,
             primary: false,
             ..Default::default()
@@ -1173,7 +1207,7 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
         // Default `init_done == false` — the flock outcome hasn't
         // arrived yet, so suppress the indicator instead of
         // flashing it during the startup window.
-        let sess = led_state_session::SessionState::default();
+        let sess = led_driver_session_core::SessionState::default();
         let s = status_with_session(
             &AlertState::default(),
             &Tabs::default(),
@@ -1185,7 +1219,7 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
 
     #[test]
     fn status_bar_no_secondary_prefix_when_primary() {
-        let sess = led_state_session::SessionState {
+        let sess = led_driver_session_core::SessionState {
             init_done: true,
             primary: true,
             ..Default::default()
@@ -1271,13 +1305,13 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
         let mut edits = BufferEdits::default();
         edits.buffers.insert(
             canon("a.rs"),
-            EditedBuffer {
-                rope: Arc::new(Rope::from_str("x")),
-                version: BufferVersion(2),
-                saved_version: SavedVersion(1),
-                disk_content_hash: led_core::PersistedContentHash::default(),
-                history: Default::default(),
-            },
+            EditedBuffer::new_with_state(
+                Arc::new(Rope::from_str("x")),
+                BufferVersion(2),
+                SavedVersion(1),
+                led_core::PersistedContentHash::default(),
+                Default::default(),
+            ),
         );
         let git = led_state_git::GitState {
             branch: Some("feature/xyz".into()),
@@ -1301,13 +1335,13 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
         let mut edits = BufferEdits::default();
         edits.buffers.insert(
             canon("a.rs"),
-            EditedBuffer {
-                rope: Arc::new(Rope::from_str("x")),
-                version: BufferVersion(3),
-                saved_version: SavedVersion(1), // dirty
-                disk_content_hash: led_core::PersistedContentHash::default(),
-                history: Default::default(),
-            },
+            EditedBuffer::new_with_state(
+                Arc::new(Rope::from_str("x")),
+                BufferVersion(3),
+                SavedVersion(1), // dirty
+                led_core::PersistedContentHash::default(),
+                Default::default(),
+            ),
         );
         let s = status(&AlertState::default(), &tabs, &edits);
         assert_eq!(&*s.left, "  \u{25cf}");
@@ -1403,7 +1437,7 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
         // it (only `recording` is exposed).
         let km = led_state_kbd_macro::KbdMacroState {
             recording: true,
-            current: vec![led_core::Command::CursorDown],
+            current: vec![led_abi_command::Command::CursorDown],
             ..Default::default()
         };
         let s = status_with_macro(
@@ -1505,7 +1539,7 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
         selection: led_state_file_search::FileSearchSelection,
     ) -> led_state_file_search::FileSearchState {
         let flat: Vec<_> = groups.iter().flat_map(|g| g.hits.iter().cloned()).collect();
-        let mut query = led_core::TextInput::default();
+        let mut query = led_state_text_input::TextInput::default();
         query.set("needle");
         led_state_file_search::FileSearchState {
             query,
@@ -1538,7 +1572,7 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
         let mut e = BufferEdits::default();
         e.buffers.insert(
             path.clone(),
-            led_state_buffer_edits::EditedBuffer::fresh(rope.clone()),
+            led_state_buffer_edits::EditedBuffer::fresh(led_state_buffer_edits::Persisted(rope.clone())),
         );
         let s = BufferStore::default();
 
@@ -1567,6 +1601,7 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
 
         let syntax = SyntaxStates::default();
         let diags = DiagnosticsStates::default();
+        let theme_default = Theme::default();
         let model = body_model(BodyInputs {
             edits: EditedBuffersInput::new(&e),
             store: StoreLoadedInput::new(&s),
@@ -1575,6 +1610,7 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
             syntax: SyntaxStatesInput::new(&syntax),
             diagnostics: DiagnosticsStatesInput::new(&diags),
             git: GitStateInput::new(&led_state_git::GitState::default()),
+            theme: ThemeInput::new(&theme_default),
             area: Rect { x: 0, y: 0, cols: 40, rows: 5 },
         });
         match model {
@@ -1612,7 +1648,7 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
         let mut e = BufferEdits::default();
         e.buffers.insert(
             b.clone(),
-            led_state_buffer_edits::EditedBuffer::fresh(rope),
+            led_state_buffer_edits::EditedBuffer::fresh(led_state_buffer_edits::Persisted(rope)),
         );
         let s = BufferStore::default();
 
@@ -1640,6 +1676,7 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
 
         let syntax = SyntaxStates::default();
         let diags = DiagnosticsStates::default();
+        let theme_default = Theme::default();
         let model = body_model(BodyInputs {
             edits: EditedBuffersInput::new(&e),
             store: StoreLoadedInput::new(&s),
@@ -1648,6 +1685,7 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
             syntax: SyntaxStatesInput::new(&syntax),
             diagnostics: DiagnosticsStatesInput::new(&diags),
             git: GitStateInput::new(&led_state_git::GitState::default()),
+            theme: ThemeInput::new(&theme_default),
             area: Rect { x: 0, y: 0, cols: 40, rows: 5 },
         });
         match model {
@@ -1669,7 +1707,7 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
         );
         let mut state = state;
         state.scroll_offset = 4;
-        let model = file_search_side_panel(&state, 4);
+        let model = file_search_side_panel(&state, &Theme::default(), 4);
         let names: Vec<&str> = model.rows.iter().map(|r| &*r.name).collect();
         assert_eq!(
             names,
@@ -1744,7 +1782,7 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
             selection: led_state_file_search::FileSearchSelection::SearchInput,
             ..Default::default()
         };
-        let model = file_search_side_panel(&state, 20);
+        let model = file_search_side_panel(&state, &Theme::default(), 20);
         // Row 0 = header, row 1 = query, row 2 = group header, row 3 = hit.
         let hit_row = &model.rows[3];
         assert_eq!(&*hit_row.name, "   42: aaaabbbcccc");
@@ -1783,7 +1821,7 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
             selection: led_state_file_search::FileSearchSelection::SearchInput,
             ..Default::default()
         };
-        let model = file_search_side_panel(&state, 20);
+        let model = file_search_side_panel(&state, &Theme::default(), 20);
         let hit_row = &model.rows[3];
         assert_eq!(hit_row.match_range, Some((13, 19)));
         // The chars at the computed range spell out "needle".
@@ -2063,7 +2101,7 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
         assert!(cats.contains(&led_core::IssueCategory::Unstaged));
         // `resolve_display` selects the precedence-winning category
         // (LspError) even though both are present.
-        let shown = led_core::resolve_display(cats).expect("some");
+        let shown = crate::query::resolve_display(cats).expect("some");
         assert_eq!(shown.category, led_core::IssueCategory::LspError);
     }
 
@@ -2088,7 +2126,8 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
     #[test]
     fn side_panel_row_status_marks_error_file_and_parent_dir() {
         use imbl::Vector;
-        use led_state_browser::{BrowserUi, DirEntry, DirEntryKind, FsTree};
+        use led_driver_fs_list_core::{DirEntry, DirEntryKind, FsTree};
+        use led_state_browser::BrowserUi;
         // Tree: /p/sub/err.rs (with LspError), /p/sub/ok.rs (clean).
         let mut fs = FsTree {
             root: Some(canon("/p")),
@@ -2141,6 +2180,7 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
         let fsrch = None;
         let git = led_state_git::GitState::default();
         let edits = led_state_buffer_edits::BufferEdits::default();
+        let theme = Theme::default();
         let panel = side_panel_model(SidePanelInputs {
             fs: FsTreeInput::new(&fs),
             browser: BrowserUiInput::new(&browser),
@@ -2149,6 +2189,7 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
             diagnostics: DiagnosticsStatesInput::new(&diags),
             git: GitStateInput::new(&git),
             edits: EditedBuffersInput::new(&edits),
+            theme: ThemeInput::new(&theme),
             rows: 10,
         });
         let rows: &Vec<SidePanelRow> = &panel.rows;
@@ -2245,7 +2286,7 @@ I've mostly written by hand, see [ureq](https://github.com/algesten/ureq) and \
         let rope = Arc::new(Rope::from_str("line\n"));
         let buf_hash = led_core::EphemeralContentHash::of_rope(&rope).persist();
         let mut e = BufferEdits::default();
-        let mut eb = led_state_buffer_edits::EditedBuffer::fresh(rope);
+        let mut eb = led_state_buffer_edits::EditedBuffer::fresh(led_state_buffer_edits::Persisted(rope));
         eb.version = buf_version;
         e.buffers.insert(path.clone(), eb);
 

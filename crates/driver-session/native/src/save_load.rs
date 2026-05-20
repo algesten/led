@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use led_core::{SubLine, UserPath};
-use led_state_session::{SessionBuffer, SessionData};
+use led_driver_session_core::{SessionBuffer, SessionData};
 use led_state_tabs::{Cursor, Scroll};
 use rusqlite::{Connection, params};
 

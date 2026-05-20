@@ -231,8 +231,9 @@ mod tests {
     use super::*;
     use led_core::UserPath;
     use led_driver_buffers_core::{
-        BufferStore, LoadAction, LoadState, NoopTrace, SaveAction, WriteDone,
+        BufferStore, FileWriteState, LoadAction, LoadState, NoopTrace, SaveAction, WriteDone,
     };
+    use led_state_buffer_edits::Persisted;
     use std::io::Write;
     use std::path::PathBuf;
     use std::time::{Duration, Instant};
@@ -281,12 +282,13 @@ mod tests {
 
     fn drain_write_completions(
         driver: &FileWriteDriver,
+        state: &mut FileWriteState,
         deadline: Duration,
     ) -> Vec<WriteDone> {
         let mut all: Vec<WriteDone> = Vec::new();
         let start = Instant::now();
         while start.elapsed() < deadline {
-            let mut batch = driver.process();
+            let mut batch = driver.process(state);
             if !batch.is_empty() {
                 all.append(&mut batch);
                 return all;
@@ -304,13 +306,17 @@ mod tests {
         let rope = Arc::new(Rope::from_str("hello, save\n"));
 
         let (driver, _native) = spawn_write(Arc::new(NoopTrace), Notifier::noop());
-        driver.execute([&SaveAction::Save {
-            path: path.clone(),
-            rope: rope.clone(),
-            version: BufferVersion(1),
-        }]);
+        let mut state = FileWriteState::default();
+        driver.execute(
+            [&SaveAction::Save {
+                path: path.clone(),
+                content: Persisted(rope.clone()),
+                version: BufferVersion(1),
+            }],
+            &mut state,
+        );
 
-        let completions = drain_write_completions(&driver, Duration::from_secs(5));
+        let completions = drain_write_completions(&driver, &mut state, Duration::from_secs(5));
         assert_eq!(completions.len(), 1);
         let done = &completions[0];
         assert_eq!(done.path, path);
@@ -336,13 +342,17 @@ mod tests {
         let path = canon(&bogus);
 
         let (driver, _native) = spawn_write(Arc::new(NoopTrace), Notifier::noop());
-        driver.execute([&SaveAction::Save {
-            path,
-            rope: Arc::new(Rope::from_str("x")),
-            version: BufferVersion(1),
-        }]);
+        let mut state = FileWriteState::default();
+        driver.execute(
+            [&SaveAction::Save {
+                path,
+                content: Persisted(Arc::new(Rope::from_str("x"))),
+                version: BufferVersion(1),
+            }],
+            &mut state,
+        );
 
-        let completions = drain_write_completions(&driver, Duration::from_secs(5));
+        let completions = drain_write_completions(&driver, &mut state, Duration::from_secs(5));
         assert_eq!(completions.len(), 1);
         assert!(completions[0].result.is_err());
     }

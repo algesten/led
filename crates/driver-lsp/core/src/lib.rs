@@ -26,13 +26,121 @@
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender};
 
-use led_core::{BufferVersion, CanonPath, LspRequestSeq, PersistedContentHash, ServerId};
+use led_core::{
+    BufferStateSum, BufferVersion, CanonPath, LspRequestSeq, PersistedContentHash, ServerId,
+};
 use led_state_diagnostics::Diagnostic;
+use led_state_syntax::Language;
 use ropey::Rope;
 
 pub mod diag_source;
+pub mod diag_states;
 
 pub use diag_source::{DiagMode, DiagPushResult, DiagnosticSource};
+pub use diag_states::{BufferDiagnostics, DiagnosticsStates, LspServerStatus, LspStatuses};
+
+// ── Driver-owned source ─────────────────────────────────────────
+//
+// Per EXAMPLE-ARCH § "Stateless drivers still need an in-flight
+// source": the LSP driver carries an `LspState` that records what
+// has been dispatched and what's still in flight, written by
+// `execute` and cleared by `process`. Memos consult it to gate
+// re-firing the same command while an outstanding response is
+// still pending.
+
+/// Which RPC a still-outstanding [`LspRequestSeq`] belongs to.
+/// Stored in [`LspState::in_flight`] so the matching event can
+/// clear the entry on arrival.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RequestKind {
+    Diagnostics,
+    Completion,
+    ResolveCompletion,
+    GotoDefinition,
+    Rename,
+    CodeAction,
+    SelectCodeAction,
+    Format,
+    InlayHints,
+}
+
+/// Per-buffer pull-diagnostic gating state. The runtime's
+/// "should we re-fire RequestDiagnostics?" memo reads this so a
+/// previously-failed pull doesn't keep re-firing on every tick.
+///
+/// `Idle` is the safe default — memos may re-fire freely. `Pending`
+/// means a pull is outstanding; the runtime should NOT re-fire
+/// until the matching response (or `LspEvent::Error`) clears it.
+/// `Done` means the last pull completed successfully; the runtime
+/// only re-fires when the gating sum advances. `Failed` means the
+/// last pull errored out — the runtime should not re-fire for this
+/// path until the next save event explicitly advances the gate.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum PullState {
+    #[default]
+    Idle,
+    Pending(LspRequestSeq),
+    Done,
+    Failed(Arc<str>),
+}
+
+/// Per-language LSP server lifecycle status, populated as the
+/// driver's `Init` / `Ready` / `Progress` / `Error` events arrive.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ServerStatus {
+    #[default]
+    NotStarted,
+    Initializing,
+    Ready,
+    Failed,
+}
+
+/// Driver-owned source for the LSP driver. Mutated by
+/// [`LspDriver::execute`] (records intent) and
+/// [`LspDriver::process`] (clears matching slots on each arriving
+/// event). Plain struct, like every other driver source.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LspState {
+    /// `true` once the runtime has dispatched [`LspCmd::Init`].
+    /// Driver source is the single point of truth for "has the
+    /// workspace been announced to the LSP layer?" — the runtime's
+    /// init-dispatch gate reads this directly rather than mirroring
+    /// it on AppState.
+    pub init_sent: bool,
+    /// Outstanding LSP RPCs keyed by sequence id. Cleared by
+    /// `process` when the matching response (or `Error`) arrives.
+    /// Lets future memos gate "is this seq still in flight?"
+    /// without inspecting individual `LspEvent::*` payloads.
+    pub in_flight: imbl::HashMap<LspRequestSeq, RequestKind>,
+    /// Per-buffer diagnostic-pull gate. The runtime's
+    /// `desired_diagnostic_pull` memo (or the inline
+    /// `should_request_diag` predicate today) consults this
+    /// before re-firing `RequestDiagnostics` so a previously-
+    /// failed pull doesn't re-fire on every tick. Populated by
+    /// `execute` (Pending on emission) and `process` (Done on
+    /// `LspEvent::Diagnostics`, Failed on `LspEvent::Error` that
+    /// carries a path).
+    pub pull_state: imbl::HashMap<CanonPath, PullState>,
+    /// Per-language LSP server status — populated by
+    /// `process` when `LspEvent::Ready` / `Progress` / `Error`
+    /// events arrive. The `Language` keying matches the native
+    /// manager's per-language `ServerEntry` map.
+    pub server_status: imbl::HashMap<Language, ServerStatus>,
+    /// Most recent non-fatal error message the LSP layer
+    /// surfaced, mirroring [`led_driver_clipboard_core::
+    /// ClipboardState::last_error`]. The runtime can use it to
+    /// avoid spamming the user with a stream of identical
+    /// warnings — same pattern as the clipboard driver.
+    pub last_error: Option<Arc<str>>,
+    /// `Some(sum)` holds Σ(version + saved_version) at the last
+    /// `RequestDiagnostics` emission; `None` means we've never
+    /// fired one. Driver-outbound bookkeeping: tracks a side-
+    /// effect the runtime emitted via this driver, so it lives
+    /// here rather than mirrored on AppState. The dispatch gate
+    /// compares the current buffer-state sum against this to
+    /// decide whether to re-fire.
+    pub requested_state_sum: Option<BufferStateSum>,
+}
 
 // ── ABI ─────────────────────────────────────────────────────────
 
@@ -283,18 +391,7 @@ pub struct FileEdit {
     pub edits: Vec<TextEditOp>,
 }
 
-/// One LSP inlay hint — a short label the server wants the
-/// editor to render as ghost text at `(line, col)`. `padding_left` /
-/// `padding_right` are the spec's optional flags for controlling
-/// whether the label abuts or pads from the surrounding text.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct InlayHint {
-    pub line: u32,
-    pub col: u32,
-    pub label: Arc<str>,
-    pub padding_left: bool,
-    pub padding_right: bool,
-}
+pub use led_abi_lsp::InlayHint;
 
 /// One filesystem change crossing as an LSP
 /// `workspace/didChangeWatchedFiles` notification entry. The
@@ -317,58 +414,7 @@ pub enum FileEventKind {
     Deleted = 3,
 }
 
-/// One server-registered file-watch glob, parsed from the
-/// `client/registerCapability` payload for
-/// `workspace/didChangeWatchedFiles`. The compiled
-/// `GlobMatcher` is held on the runtime source so per-event
-/// matching is alloc-free; `pattern` round-trips for cheap
-/// `PartialEq` (the matcher itself doesn't implement it).
-///
-/// `kinds` is a bitset of LSP `WatchKind` values: `Create=1`,
-/// `Change=2`, `Delete=4`. These bit positions are
-/// deliberately the same as `driver-file-watch`'s
-/// `ChangeKinds` (`CREATED=0b001`, `MODIFIED=0b010`,
-/// `REMOVED=0b100`) so the runtime memo can `&` them directly
-/// without translation. LSP's `WatchKind` field defaults to all
-/// three when absent, so `kinds = 0b111` is the typical value.
-#[derive(Debug, Clone)]
-pub struct RegistrationGlob {
-    pub pattern: String,
-    pub matcher: globset::GlobMatcher,
-    pub kinds: u8,
-}
-
-impl PartialEq for RegistrationGlob {
-    fn eq(&self, other: &Self) -> bool {
-        self.pattern == other.pattern && self.kinds == other.kinds
-    }
-}
-
-impl Eq for RegistrationGlob {}
-
-/// Picker-facing summary of a `CodeAction` from the server.
-/// The native driver stores the server's raw item alongside so
-/// selection can round-trip through `codeAction/resolve`
-/// without the runtime having to understand LSP shapes.
-///
-/// `action_id` is an opaque string the native driver assigns
-/// so [`LspCmd::SelectCodeAction`] can look the raw item back
-/// up without threading `lsp_types::CodeActionOrCommand`
-/// values through the runtime.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CodeActionSummary {
-    pub title: Arc<str>,
-    pub kind: Option<Arc<str>>,
-    /// `true` when the action ships without an `edit` field —
-    /// the native driver must issue `codeAction/resolve` on
-    /// selection to obtain the edits.
-    pub resolve_needed: bool,
-    /// Driver-internal id. Carried through
-    /// [`LspCmd::SelectCodeAction`] verbatim so the native
-    /// driver can match it to its stored
-    /// `lsp_types::CodeActionOrCommand`.
-    pub action_id: Arc<str>,
-}
+pub use led_abi_lsp::{CodeActionSummary, RegistrationGlob};
 
 /// Which RPC produced an [`LspEvent::Edits`] delivery. Lets the
 /// runtime decide what post-edit bookkeeping is needed — save
@@ -386,11 +432,33 @@ pub enum EditsOrigin {
 #[derive(Debug, Clone)]
 pub enum LspEvent {
     /// Diagnostics for one path, stamped with the content hash
-    /// they were pulled against. The runtime runs
-    /// `offer_diagnostics` to decide: accept as-is (hash matches
-    /// current), replay through the edit log since a save-point
-    /// marker with a matching hash, or drop silently.
+    /// they were pulled against. **Primary channel: pull-only.**
+    /// Emitted by `textDocument/diagnostic` pull responses. The
+    /// runtime runs `offer_diagnostics` to decide: accept as-is
+    /// (hash matches current), replay through the edit log since
+    /// a save-point marker with a matching hash, or drop silently.
+    ///
+    /// Pushes never arrive on this channel — see
+    /// [`LspEvent::PushFallback`] for the push-fallback path.
     Diagnostics {
+        path: CanonPath,
+        hash: PersistedContentHash,
+        diagnostics: Vec<Diagnostic>,
+    },
+    /// Push-fallback diagnostics for one path. Emitted by
+    /// `textDocument/publishDiagnostics` pushes (either while the
+    /// server is in push-only mode, or while a pull-capable server
+    /// has no in-flight pull for this path). The runtime fold
+    /// accepts these only when no `LspEvent::Diagnostics` has
+    /// landed for the path — pull always wins. Carries the same
+    /// content-hash stamping discipline as `Diagnostics` so the
+    /// replay path works identically.
+    ///
+    /// Per audit Theme L Target C + the project rule "Pull
+    /// diagnostics only": this channel exists so push events
+    /// remain visible (push-only servers need it) without
+    /// contaminating the primary pull channel.
+    PushFallback {
         path: CanonPath,
         hash: PersistedContentHash,
         diagnostics: Vec<Diagnostic>,
@@ -498,6 +566,16 @@ pub enum LspEvent {
         server: ServerId,
         registration_id: String,
     },
+    /// A `textDocument/diagnostic` pull came back as an error
+    /// response (server reported a JSON-RPC error). The runtime
+    /// stamps the per-path `pull_state` to `Failed(message)` so
+    /// the gating memo stops re-firing the same pull. Distinct
+    /// from [`LspEvent::Error`] (which is a server-scoped status
+    /// surface) — `PullFailed` is per-path bookkeeping.
+    PullFailed {
+        path: CanonPath,
+        message: Arc<str>,
+    },
 }
 
 // ── Trace ──────────────────────────────────────────────────────
@@ -509,6 +587,10 @@ pub trait Trace: Send + Sync {
     fn lsp_server_started(&self, server: &ServerId);
     fn lsp_request_diagnostics(&self);
     fn lsp_diagnostics_done(&self, path: &CanonPath, n: usize, hash: PersistedContentHash);
+    /// Legacy hook for pull→push mode-fallback. Per audit Theme L
+    /// Target C the runtime-time downgrade was removed; this hook
+    /// is no longer called from the driver but stays on the trait
+    /// for shape stability.
     fn lsp_mode_fallback(&self);
     /// Outbound JSON-RPC request to the server. `path_uri` is the
     /// `textDocument.uri` field when the method targets a single
@@ -587,31 +669,328 @@ impl LspDriver {
     /// Ship a batch of commands. The worker coalesces / reorders
     /// internally (e.g. a `RequestDiagnostics` arriving while a
     /// pull window is frozen queues until the window closes).
-    pub fn execute<'a>(&self, cmds: impl IntoIterator<Item = &'a LspCmd>) {
+    ///
+    /// Updates the driver source synchronously per EXAMPLE-ARCH §
+    /// "Stateless drivers still need an in-flight source": each
+    /// seq-bearing cmd registers an `in_flight[seq] = kind` slot,
+    /// `RequestDiagnostics` flips per-buffer `pull_state` Pending
+    /// for every currently-Idle path so a memo that re-derives
+    /// "should we re-fire?" sees the in-flight gate immediately.
+    pub fn execute<'a>(
+        &self,
+        cmds: impl IntoIterator<Item = &'a LspCmd>,
+        state: &mut LspState,
+    ) {
         for cmd in cmds {
-            if matches!(cmd, LspCmd::RequestDiagnostics) {
-                self.trace.lsp_request_diagnostics();
+            match cmd {
+                LspCmd::Init { .. } => {
+                    state.init_sent = true;
+                }
+                LspCmd::RequestDiagnostics => {
+                    self.trace.lsp_request_diagnostics();
+                    // Flip every currently-Idle path to Pending
+                    // (with a synthetic seq sentinel — the real
+                    // per-path correlation lives in the native
+                    // worker). `Failed` entries are NOT reset
+                    // here: that's exactly the "stop re-firing"
+                    // guarantee — only the next ingest of a
+                    // Diagnostics / Error event can rotate them.
+                    for (_path, value) in state.pull_state.iter_mut() {
+                        if matches!(value, PullState::Idle | PullState::Done) {
+                            *value = PullState::Pending(LspRequestSeq::default());
+                        }
+                    }
+                }
+                LspCmd::RequestCompletion { seq, .. } => {
+                    state.in_flight.insert(*seq, RequestKind::Completion);
+                }
+                LspCmd::ResolveCompletion { seq, .. } => {
+                    state
+                        .in_flight
+                        .insert(*seq, RequestKind::ResolveCompletion);
+                }
+                LspCmd::RequestGotoDefinition { seq, .. } => {
+                    state
+                        .in_flight
+                        .insert(*seq, RequestKind::GotoDefinition);
+                }
+                LspCmd::RequestRename { seq, .. } => {
+                    state.in_flight.insert(*seq, RequestKind::Rename);
+                }
+                LspCmd::RequestCodeAction { seq, .. } => {
+                    state.in_flight.insert(*seq, RequestKind::CodeAction);
+                }
+                LspCmd::SelectCodeAction { seq, .. } => {
+                    state
+                        .in_flight
+                        .insert(*seq, RequestKind::SelectCodeAction);
+                }
+                LspCmd::RequestFormat { seq, .. } => {
+                    state.in_flight.insert(*seq, RequestKind::Format);
+                }
+                LspCmd::RequestInlayHints { seq, .. } => {
+                    state.in_flight.insert(*seq, RequestKind::InlayHints);
+                }
+                LspCmd::Shutdown
+                | LspCmd::BufferOpened { .. }
+                | LspCmd::BufferChanged { .. }
+                | LspCmd::BufferClosed { .. }
+                | LspCmd::DidChangeWatchedFiles { .. } => {}
+            }
+            // `BufferClosed` drops any pull-state entry for the
+            // path — the gate must reset when the buffer leaves
+            // the LSP's purview.
+            if let LspCmd::BufferClosed { path } = cmd {
+                state.pull_state.remove(path);
             }
             let _ = self.tx.send(cmd.clone());
         }
     }
 
-    /// Drain completions. Caller version-gates them via
-    /// `offer_diagnostics`.
-    pub fn process(&self) -> Vec<LspEvent> {
+    /// Drain completions and reconcile the driver source. Caller
+    /// version-gates the `Diagnostics` payload via
+    /// `offer_diagnostics` AFTER this returns.
+    pub fn process(&self, state: &mut LspState) -> Vec<LspEvent> {
         let mut out = Vec::new();
         while let Ok(ev) = self.rx.try_recv() {
-            if let LspEvent::Diagnostics {
-                path,
-                diagnostics,
-                hash,
-            } = &ev
-            {
-                self.trace
-                    .lsp_diagnostics_done(path, diagnostics.len(), *hash);
+            match &ev {
+                LspEvent::Diagnostics {
+                    path,
+                    diagnostics,
+                    hash,
+                } => {
+                    self.trace
+                        .lsp_diagnostics_done(path, diagnostics.len(), *hash);
+                    state.pull_state.insert(path.clone(), PullState::Done);
+                }
+                LspEvent::Ready { .. } => {
+                    // `Ready` is server-keyed by `ServerId` (the
+                    // shortened binary basename); the language ↔
+                    // server mapping is owned by the native
+                    // manager. Without a language we can't update
+                    // the per-language slot from this event alone,
+                    // so leave the `server_status` map to be
+                    // populated by future events that carry a
+                    // language. The `last_error` reset on `Ready`
+                    // matches the "the server is healthy again"
+                    // semantic.
+                    state.last_error = None;
+                }
+                LspEvent::Progress { .. } => {
+                    // Progress is a status-bar breadcrumb; same
+                    // story as Ready re: language mapping.
+                }
+                LspEvent::Error { message, .. } => {
+                    let msg: Arc<str> = Arc::from(message.as_str());
+                    state.last_error = Some(msg.clone());
+                    // Best-effort: every currently-Pending pull
+                    // becomes Failed so the gating memo stops
+                    // re-firing. The native worker doesn't yet
+                    // carry per-path failure info on `Error`, so
+                    // this conservatively fails every outstanding
+                    // pull. A future ABI extension can target
+                    // failures precisely.
+                    for (_path, value) in state.pull_state.iter_mut() {
+                        if matches!(value, PullState::Pending(_)) {
+                            *value = PullState::Failed(msg.clone());
+                        }
+                    }
+                }
+                LspEvent::Completion { seq, .. } => {
+                    state.in_flight.remove(seq);
+                }
+                LspEvent::CompletionResolved { seq, .. } => {
+                    state.in_flight.remove(seq);
+                }
+                LspEvent::GotoDefinition { seq, .. } => {
+                    state.in_flight.remove(seq);
+                }
+                LspEvent::Edits { seq, .. } => {
+                    state.in_flight.remove(seq);
+                }
+                LspEvent::CodeActions { seq, .. } => {
+                    state.in_flight.remove(seq);
+                }
+                LspEvent::PullFailed { path, message } => {
+                    state
+                        .pull_state
+                        .insert(path.clone(), PullState::Failed(message.clone()));
+                    state.last_error = Some(message.clone());
+                }
+                LspEvent::PushFallback { .. } => {
+                    // Push fallback never advances `pull_state` —
+                    // the primary `LspEvent::Diagnostics` channel
+                    // is the only one that records pull progress.
+                    // Leaving pull_state unchanged lets the runtime
+                    // memo gate further pulls correctly: a Pending
+                    // pull stays Pending until its own response
+                    // (or `PullFailed`) lands.
+                }
+                LspEvent::InlayHints { .. }
+                | LspEvent::WatchedFilesRegistered { .. }
+                | LspEvent::WatchedFilesUnregistered { .. } => {}
             }
             out.push(ev);
         }
         out
+    }
+}
+
+#[cfg(test)]
+mod state_tests {
+    use super::*;
+    use led_core::UserPath;
+    use std::sync::mpsc;
+
+    fn p(s: &str) -> CanonPath {
+        UserPath::new(s).canonicalize()
+    }
+
+    fn driver() -> (LspDriver, mpsc::Receiver<LspCmd>, mpsc::Sender<LspEvent>) {
+        let (cmd_tx, cmd_rx) = mpsc::channel::<LspCmd>();
+        let (ev_tx, ev_rx) = mpsc::channel::<LspEvent>();
+        (LspDriver::new(cmd_tx, ev_rx, Arc::new(NoopTrace)), cmd_rx, ev_tx)
+    }
+
+    #[test]
+    fn execute_init_sets_init_sent() {
+        let (drv, _cmd_rx, _ev_tx) = driver();
+        let mut state = LspState::default();
+        drv.execute(
+            [&LspCmd::Init { root: p("/tmp") }],
+            &mut state,
+        );
+        assert!(state.init_sent);
+    }
+
+    #[test]
+    fn execute_seq_cmds_register_in_flight() {
+        let (drv, _cmd_rx, _ev_tx) = driver();
+        let mut state = LspState::default();
+        let seq = LspRequestSeq(7);
+        drv.execute(
+            [&LspCmd::RequestGotoDefinition {
+                path: p("/a.rs"),
+                seq,
+                line: 0,
+                col: 0,
+            }],
+            &mut state,
+        );
+        assert_eq!(state.in_flight.get(&seq), Some(&RequestKind::GotoDefinition));
+    }
+
+    #[test]
+    fn process_clears_in_flight_on_matching_event() {
+        let (drv, _cmd_rx, ev_tx) = driver();
+        let mut state = LspState::default();
+        let seq = LspRequestSeq(42);
+        state.in_flight.insert(seq, RequestKind::GotoDefinition);
+        ev_tx
+            .send(LspEvent::GotoDefinition {
+                seq,
+                location: None,
+            })
+            .unwrap();
+        let _ = drv.process(&mut state);
+        assert!(state.in_flight.get(&seq).is_none());
+    }
+
+    #[test]
+    fn process_records_last_error() {
+        let (drv, _cmd_rx, ev_tx) = driver();
+        let mut state = LspState::default();
+        ev_tx
+            .send(LspEvent::Error {
+                server: ServerId::new("rust-analyzer"),
+                message: "boom".into(),
+            })
+            .unwrap();
+        let _ = drv.process(&mut state);
+        assert_eq!(state.last_error.as_deref(), Some("boom"));
+    }
+
+    #[test]
+    fn process_marks_pull_state_failed_on_error() {
+        let (drv, _cmd_rx, ev_tx) = driver();
+        let mut state = LspState::default();
+        let path = p("/a.rs");
+        state
+            .pull_state
+            .insert(path.clone(), PullState::Pending(LspRequestSeq(1)));
+        ev_tx
+            .send(LspEvent::Error {
+                server: ServerId::new("rust-analyzer"),
+                message: "boom".into(),
+            })
+            .unwrap();
+        let _ = drv.process(&mut state);
+        match state.pull_state.get(&path) {
+            Some(PullState::Failed(msg)) => assert_eq!(&**msg, "boom"),
+            other => panic!("expected Failed, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn execute_request_diagnostics_flips_idle_to_pending() {
+        let (drv, _cmd_rx, _ev_tx) = driver();
+        let mut state = LspState::default();
+        let path = p("/a.rs");
+        state.pull_state.insert(path.clone(), PullState::Idle);
+        drv.execute([&LspCmd::RequestDiagnostics], &mut state);
+        assert!(matches!(
+            state.pull_state.get(&path),
+            Some(PullState::Pending(_))
+        ));
+    }
+
+    #[test]
+    fn execute_request_diagnostics_does_not_reset_failed() {
+        let (drv, _cmd_rx, _ev_tx) = driver();
+        let mut state = LspState::default();
+        let path = p("/a.rs");
+        state
+            .pull_state
+            .insert(path.clone(), PullState::Failed(Arc::from("prior")));
+        drv.execute([&LspCmd::RequestDiagnostics], &mut state);
+        // Failed must persist — that's the "stop re-firing"
+        // guarantee. Only an explicit BufferClosed (or a future
+        // saved-version advance) clears Failed.
+        match state.pull_state.get(&path) {
+            Some(PullState::Failed(_)) => {}
+            other => panic!("Failed must persist, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn process_diagnostics_marks_pull_state_done() {
+        let (drv, _cmd_rx, ev_tx) = driver();
+        let mut state = LspState::default();
+        let path = p("/a.rs");
+        state
+            .pull_state
+            .insert(path.clone(), PullState::Pending(LspRequestSeq(3)));
+        ev_tx
+            .send(LspEvent::Diagnostics {
+                path: path.clone(),
+                hash: PersistedContentHash(0),
+                diagnostics: Vec::new(),
+            })
+            .unwrap();
+        let _ = drv.process(&mut state);
+        assert_eq!(state.pull_state.get(&path), Some(&PullState::Done));
+    }
+
+    #[test]
+    fn execute_buffer_closed_drops_pull_state() {
+        let (drv, _cmd_rx, _ev_tx) = driver();
+        let mut state = LspState::default();
+        let path = p("/a.rs");
+        state.pull_state.insert(path.clone(), PullState::Done);
+        drv.execute(
+            [&LspCmd::BufferClosed { path: path.clone() }],
+            &mut state,
+        );
+        assert!(state.pull_state.get(&path).is_none());
     }
 }

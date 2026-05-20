@@ -12,10 +12,14 @@ type BodyRow<'a> = (
 );
 
 pub(crate) fn paint_body(body: &BodyModel, area: Rect, theme: &Theme, buf: &mut Buffer) {
-    let ruler = theme
-        .ruler_column
-        .filter(|c| *c < area.cols)
-        .filter(|_| !theme.ruler.is_default());
+    // Ruler visibility is pre-resolved in the runtime memo; the
+    // painter just reads `BodyModel::Content::ruler_col`. `Empty`
+    // bodies never paint a ruler (no body content to overlay it
+    // onto).
+    let ruler = match body {
+        BodyModel::Content { ruler_col, .. } => *ruler_col,
+        BodyModel::Empty => None,
+    };
 
     let match_highlight = match body {
         BodyModel::Content { match_highlight, .. } => *match_highlight,

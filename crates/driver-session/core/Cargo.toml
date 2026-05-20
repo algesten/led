@@ -10,6 +10,7 @@ publish = false
 # mock test driver can substitute a plain channel pair.
 
 [dependencies]
+imbl = { workspace = true }
 led-core = { workspace = true }
-led-state-session = { workspace = true }
 led-state-buffer-edits = { workspace = true }
+led-state-tabs = { workspace = true }

@@ -43,17 +43,17 @@ pub(crate) fn identifier_start_col(
     let Some(eb) = edits.buffers.get(path) else {
         return cursor_col as u32;
     };
-    if prefix_line >= eb.rope.len_lines() {
+    if prefix_line >= eb.draft.len_lines() {
         return cursor_col as u32;
     }
-    let line_slice = eb.rope.line(prefix_line);
-    let line_grapheme_count = led_core::line_grapheme_len(line_slice);
+    let line_slice = eb.draft.line(prefix_line);
+    let line_grapheme_count = led_text_layout::line_grapheme_len(line_slice);
     let mut start = cursor_col.min(line_grapheme_count);
     while start > 0 {
         // The cluster immediately before `start` (grapheme units).
-        let prev_char_in_line = led_core::grapheme_col_to_char(line_slice, start - 1);
-        let line_start_char = eb.rope.line_to_char(prefix_line);
-        let ch = eb.rope.char(line_start_char + prev_char_in_line);
+        let prev_char_in_line = led_text_layout::grapheme_col_to_char(line_slice, start - 1);
+        let line_start_char = eb.draft.line_to_char(prefix_line);
+        let ch = eb.draft.char(line_start_char + prev_char_in_line);
         if ch.is_alphanumeric() || ch == '_' {
             start -= 1;
         } else {
@@ -73,22 +73,22 @@ pub(crate) fn completion_prefix(
     let Some(eb) = edits.buffers.get(path) else {
         return String::new();
     };
-    if prefix_line >= eb.rope.len_lines() {
+    if prefix_line >= eb.draft.len_lines() {
         return String::new();
     }
-    let line_slice = eb.rope.line(prefix_line);
-    let line_start = eb.rope.line_to_char(prefix_line);
+    let line_slice = eb.draft.line(prefix_line);
+    let line_start = eb.draft.line_to_char(prefix_line);
     // `prefix_start_col` and `tab.cursor.col` are both grapheme cols
     // (M25). Convert each to a char idx via the line's segmentation
     // before slicing the rope; the typed prefix may include emoji or
     // combining marks whose char widths differ from their grapheme
     // count.
-    let from = line_start + led_core::grapheme_col_to_char(line_slice, prefix_start_col);
-    let to = line_start + led_core::grapheme_col_to_char(line_slice, tab.cursor.col);
-    if to < from || to > eb.rope.len_chars() {
+    let from = line_start + led_text_layout::grapheme_col_to_char(line_slice, prefix_start_col);
+    let to = line_start + led_text_layout::grapheme_col_to_char(line_slice, tab.cursor.col);
+    if to < from || to > eb.draft.len_chars() {
         return String::new();
     }
-    eb.rope.slice(from..to).to_string()
+    eb.draft.slice(from..to).to_string()
 }
 
 /// Bundle of references `LspGotoApply::apply` needs. Carved out
@@ -160,13 +160,13 @@ impl<'a> LspGotoApply<'a> {
         if let Some(idx) = tabs.open.iter().position(|t| t.path == loc.path)
             && let Some(eb) = edits.buffers.get(&loc.path)
         {
-            let line_count = eb.rope.len_lines();
+            let line_count = eb.draft.len_lines();
             let line = (loc.line as usize).min(line_count.saturating_sub(1));
             // `loc.col` is a UTF-16 code-unit count from the LSP
             // server; convert to grapheme col through the actual
             // line so we land on the same cluster the server picked.
-            let line_slice = eb.rope.line(line);
-            let col = led_core::utf16_units_to_grapheme_col(line_slice, loc.col);
+            let line_slice = eb.draft.line(line);
+            let col = led_text_layout::utf16_units_to_grapheme_col(line_slice, loc.col);
             let body_rows = terminal
                 .dims
                 .map(|d| {
@@ -180,12 +180,12 @@ impl<'a> LspGotoApply<'a> {
             tab.cursor.line = line;
             tab.cursor.col = col;
             tab.cursor.preferred_col =
-                led_core::prefix_display_width(line_slice, col);
+                led_text_layout::prefix_display_width(line_slice, col);
             tab.scroll = dispatch::center_on_cursor(
                 tab.scroll,
                 tab.cursor,
                 body_rows,
-                &eb.rope,
+                &eb.draft,
                 content_cols,
             );
             tabs.active = Some(tab.id);
@@ -240,6 +240,7 @@ pub(crate) struct LspEditApply<'a> {
     pub(crate) tabs: &'a led_state_tabs::Tabs,
     pub(crate) alerts: &'a mut AlertState,
     pub(crate) lsp_pending: &'a mut led_state_lsp::LspPending,
+    pub(crate) clock: &'a crate::Clock,
 }
 
 /// Apply an `LspEvent::Edits` delivery: walk `file_edits`, apply
@@ -265,6 +266,7 @@ impl<'a> LspEditApply<'a> {
         let tabs = self.tabs;
         let alerts = &mut *self.alerts;
         let lsp_pending = &mut *self.lsp_pending;
+        let clock = self.clock;
     // Stale-seq gate per origin.
     match origin {
         led_driver_lsp_core::EditsOrigin::Rename => {
@@ -368,7 +370,7 @@ impl<'a> LspEditApply<'a> {
             }
             led_driver_lsp_core::EditsOrigin::Format => unreachable!(),
         };
-        alerts.set_info(msg, std::time::Instant::now(), INFO_TTL);
+        alerts.set_info(msg, clock.now, INFO_TTL);
     }
 
     // Post-format save trigger: paths awaiting save after
@@ -409,14 +411,18 @@ impl<'a> LspEditApply<'a> {
             // the same save. Recorded as one undo group so a
             // post-save Ctrl-/ reverses both format and cleanup
             // together.
+            let cursor = tabs
+                .open
+                .iter()
+                .find(|t| t.path == path)
+                .map(|t| t.cursor)
+                .unwrap_or_default();
+            let plan = crate::query::save_cleanup_plan(
+                crate::query::EditedBuffersInput::new(edits),
+                &path,
+            );
             if let Some(eb) = edits.buffers.get_mut(&path) {
-                let cursor = tabs
-                    .open
-                    .iter()
-                    .find(|t| t.path == path)
-                    .map(|t| t.cursor)
-                    .unwrap_or_default();
-                crate::dispatch::save::apply_save_cleanup(eb, cursor);
+                crate::dispatch::save::apply_save_cleanup(eb, &plan, cursor);
                 edits.pending_saves.insert(path);
             }
         }
@@ -481,7 +487,7 @@ pub(crate) fn apply_one_text_edit(
     eb: &mut EditedBuffer,
     op: &led_driver_lsp_core::TextEditOp,
 ) -> Option<(usize, std::sync::Arc<str>, std::sync::Arc<str>)> {
-    let rope = &eb.rope;
+    let rope = &eb.draft;
     let line_count = rope.len_lines();
     if (op.start_line as usize) >= line_count {
         return None;
@@ -506,16 +512,69 @@ pub(crate) fn apply_one_text_edit(
         return None;
     }
 
-    let mut new_rope = (*eb.rope).clone();
+    let mut new_rope = (*eb.draft).clone();
     let removed: String = new_rope.slice(start_char..end_char).to_string();
     new_rope.remove(start_char..end_char);
     new_rope.insert(start_char, &op.new_text);
 
-    eb.rope = std::sync::Arc::new(new_rope);
+    eb.set_draft(std::sync::Arc::new(new_rope));
     eb.version.0 = eb.version.0.saturating_add(1);
     Some((
         start_char,
         std::sync::Arc::<str>::from(removed),
         std::sync::Arc::<str>::from(op.new_text.as_ref()),
     ))
+}
+
+/// Translate the driver-ABI `CompletionItem` to the domain
+/// `state_completions::Completion` at the ingest seam. Per the
+/// "No driver types in AppState" rule, `state-completions` carries
+/// only the domain type; the conversion happens here so state-side
+/// code never touches `led_driver_lsp_core`.
+pub(crate) fn lsp_completion_to_domain(
+    item: &led_driver_lsp_core::CompletionItem,
+) -> led_state_completions::Completion {
+    led_state_completions::Completion {
+        label: item.label.clone(),
+        detail: item.detail.clone(),
+        sort_text: item.sort_text.clone(),
+        insert_text: item.insert_text.clone(),
+        text_edit: item.text_edit.as_ref().map(|te| {
+            led_state_completions::CompletionEdit {
+                line: te.line,
+                col_start: te.col_start,
+                col_end: te.col_end,
+                new_text: te.new_text.clone(),
+            }
+        }),
+        kind: item.kind,
+        resolve_needed: item.resolve_needed,
+        resolve_data: item.resolve_data.clone(),
+    }
+}
+
+/// Inverse of [`lsp_completion_to_domain`]. Used by the execute
+/// phase when forming `LspCmd::ResolveCompletion` — the LSP driver
+/// needs the original `CompletionItem` shape on the resolve
+/// round-trip.
+pub(crate) fn domain_completion_to_lsp(
+    item: &led_state_completions::Completion,
+) -> led_driver_lsp_core::CompletionItem {
+    led_driver_lsp_core::CompletionItem {
+        label: item.label.clone(),
+        detail: item.detail.clone(),
+        sort_text: item.sort_text.clone(),
+        insert_text: item.insert_text.clone(),
+        text_edit: item.text_edit.as_ref().map(|te| {
+            led_driver_lsp_core::CompletionTextEdit {
+                line: te.line,
+                col_start: te.col_start,
+                col_end: te.col_end,
+                new_text: te.new_text.clone(),
+            }
+        }),
+        kind: item.kind,
+        resolve_needed: item.resolve_needed,
+        resolve_data: item.resolve_data.clone(),
+    }
 }

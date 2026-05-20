@@ -10,7 +10,7 @@
 use led_core::{CanonPath, ChainId, SavedVersion, WatchSeq};
 use led_driver_buffers_core::BufferStore;
 use led_state_buffer_edits::{BufferEdits, EditGroup, EditedBuffer};
-use led_state_session::{SessionBuffer, SessionData};
+use led_driver_session_core::{SessionBuffer, SessionData};
 use led_state_tabs::Tabs;
 
 use crate::UndoPersistTracker;
@@ -56,7 +56,7 @@ pub(crate) fn build_session_data(
     _store: &BufferStore,
     browser: &led_state_browser::BrowserUi,
     jumps: &led_state_jumps::JumpListState,
-) -> SessionData {
+) -> led_driver_session_core::DraftSession {
     let mut session_buffers: Vec<SessionBuffer> =
         Vec::with_capacity(tabs.open.len());
     let mut active_tab_order: usize = 0;
@@ -75,12 +75,12 @@ pub(crate) fn build_session_data(
             undo: None,
         });
     }
-    SessionData {
+    led_driver_session_core::DraftSession(SessionData {
         active_tab_order,
         show_side_panel: browser.visible,
         buffers: session_buffers,
         kv: build_session_kv(browser, jumps),
-    }
+    })
 }
 
 /// Re-establish the "browser cursor on a file ⇒ preview tab"
@@ -96,6 +96,38 @@ pub(crate) fn build_session_data(
 /// Filesystem check is `std::fs::metadata` — a single syscall
 /// at startup, fine on a cold cache. Bails on dirs, missing
 /// files, or symlink-to-dir without further fuss.
+///
+/// # Architecture exemption: synchronous read during Ingest
+///
+/// Per EXAMPLE-ARCH § "The main loop", Ingest must not read from
+/// outside sources. This helper runs from `ingest_session`'s
+/// `SessionEvent::Restored` branch and statss the persisted
+/// selection path before installing a preview tab.
+///
+/// The clean alternative is a `FsListCmd::Stat` round-trip:
+/// queue a stat for the selected_path, defer the preview tab
+/// creation to a later tick when the StatDone arrives. Rejected
+/// for Theme E because:
+///
+/// - This is a single, once-per-session call at startup. The
+///   architectural cost (per-tick state for "pending preview
+///   restoration", new driver cmd, new event variant) buys us
+///   one syscall on the startup cold path, which is the cheap
+///   case for file-cache anyway.
+///
+/// - Deferring the preview tab to a later tick means the UI
+///   would briefly show the restored session WITHOUT the
+///   preview, then redraw with it. That's a visible flicker
+///   on every primary-instance startup, which the current
+///   synchronous code avoids.
+///
+/// - The downstream effects (`previous_tab` pinning, focus
+///   landing) all happen in the same restore tick. Splitting
+///   them across two ticks would require either replaying the
+///   restore action or duplicating the bookkeeping.
+///
+/// Theme E commit message documents this exemption explicitly so
+/// future audits don't flag it again.
 pub(crate) fn restore_preview_from_selection(
     browser: &led_state_browser::BrowserUi,
     tabs: &mut Tabs,
@@ -228,7 +260,7 @@ pub(crate) fn build_session_kv(
 pub(crate) fn apply_pending_undo_restore(
     path: &CanonPath,
     edits: &mut BufferEdits,
-    session: &mut led_state_session::SessionState,
+    session: &mut led_driver_session_core::SessionState,
     undo_persistence: &mut imbl::HashMap<CanonPath, UndoPersistTracker>,
 ) {
     let Some(restore) = session.pending_undo.remove(path) else {
@@ -240,7 +272,7 @@ pub(crate) fn apply_pending_undo_restore(
     if eb.disk_content_hash != restore.content_hash {
         return;
     }
-    let mut new_rope = (*eb.rope).clone();
+    let mut new_rope = (*eb.draft).clone();
     for group in &restore.entries {
         for op in &group.ops {
             use led_state_buffer_edits::EditOp;
@@ -259,7 +291,7 @@ pub(crate) fn apply_pending_undo_restore(
             }
         }
     }
-    eb.rope = std::sync::Arc::new(new_rope);
+    eb.set_draft(std::sync::Arc::new(new_rope));
     if !restore.entries.is_empty() {
         eb.version.0 = eb.version.0.saturating_add(1);
     }
@@ -282,11 +314,12 @@ pub(crate) fn apply_pending_undo_restore(
 /// Mirrors legacy's `led_workspace::new_chain_id` — 64-bit hash
 /// of (now, pid). Collision-safe enough for a per-buffer
 /// session marker; not cryptographic.
-pub(crate) fn new_chain_id() -> ChainId {
+pub(crate) fn new_chain_id(clock: &crate::Clock) -> ChainId {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
     use std::time::SystemTime;
-    let t = SystemTime::now()
+    let t = clock
+        .wall_now
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
@@ -388,7 +421,7 @@ pub(crate) fn apply_remote_entries(
     if entries.is_empty() {
         return;
     }
-    let mut new_rope = (*eb.rope).clone();
+    let mut new_rope = (*eb.draft).clone();
     for group in entries {
         for op in &group.ops {
             use led_state_buffer_edits::EditOp;
@@ -407,9 +440,7 @@ pub(crate) fn apply_remote_entries(
             }
         }
     }
-    eb.rope = std::sync::Arc::new(new_rope);
-    eb.disk_content_hash =
-        led_core::EphemeralContentHash::of_rope(&eb.rope).persist();
+    eb.set_persisted_content(std::sync::Arc::new(new_rope));
     eb.version.0 = eb.version.0.saturating_add(1);
     // Buffer stays clean: the peer's edits are now part of the
     // shared chain, and our local view matches the disk snapshot

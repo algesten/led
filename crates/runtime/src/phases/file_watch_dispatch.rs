@@ -13,9 +13,10 @@ use crate::query::EditedBuffersInput;
 
 use crate::apply::edit::distance_from_save_for;
 use crate::apply::fs::diff_watch_actions;
+use crate::apply::lsp::domain_completion_to_lsp;
 use crate::apply::session::{disk_content_hash_for, new_chain_id};
 use crate::phases::TickEnv;
-use crate::query::{self, ClipboardStateInput};
+use crate::query::{self, ClipboardDriverInput, ClipboardIntentInput};
 use crate::query::clipboard_action;
 use crate::{Sources, LspNotified, UndoFlushDebounce, UndoPersistTracker};
 use led_core::UndoDbSeq;
@@ -25,6 +26,7 @@ pub(crate) fn run(sources: &mut Sources, env: &TickEnv<'_>) {
         tabs,
         edits,
         clip,
+        clipboard_driver,
         clock,
         fs,
         syntax: _,
@@ -32,8 +34,9 @@ pub(crate) fn run(sources: &mut Sources, env: &TickEnv<'_>) {
         lsp_extras,
         lsp_pending,
         lsp_notified,
-        lsp_requested_state_sum,
+        lsp_driver,
         session,
+        session_driver,
         undo_persistence,
         undo_flush_debounce,
         file_watch,
@@ -65,15 +68,24 @@ pub(crate) fn run(sources: &mut Sources, env: &TickEnv<'_>) {
     }
 
     // ── Clipboard action (must run before FlushUndo) ────────
-    let clip_action = clipboard_action(ClipboardStateInput::new(clip));
+    let clip_action = clipboard_action(
+        ClipboardIntentInput::new(clip),
+        ClipboardDriverInput::new(clipboard_driver),
+    );
     match clip_action {
         Some(ClipboardAction::Read) => {
-            clip.read_in_flight = true;
-            env.drivers.clipboard.execute([&ClipboardAction::Read]);
+            // Driver writes `read = InFlight` synchronously in execute.
+            env.drivers
+                .clipboard
+                .execute([&ClipboardAction::Read], clipboard_driver);
         }
         Some(ClipboardAction::Write(_)) => {
+            // Consume the user intent that fired; driver writes
+            // `write = InFlight` synchronously in execute.
             let text = clip.pending_write.take().expect("memo agreed write");
-            env.drivers.clipboard.execute([&ClipboardAction::Write(text)]);
+            env.drivers
+                .clipboard
+                .execute([&ClipboardAction::Write(text)], clipboard_driver);
         }
         None => {}
     }
@@ -98,7 +110,7 @@ pub(crate) fn run(sources: &mut Sources, env: &TickEnv<'_>) {
             let tracker = undo_persistence
                 .entry(path.clone())
                 .or_insert_with(|| UndoPersistTracker {
-                    chain_id: new_chain_id(),
+                    chain_id: new_chain_id(clock),
                     persisted_len: 0,
                     last_seq: UndoDbSeq(0),
                 });
@@ -131,16 +143,17 @@ pub(crate) fn run(sources: &mut Sources, env: &TickEnv<'_>) {
             let content_hash = disk_content_hash_for(eb);
             let distance = distance_from_save_for(eb);
             let chain_id = tracker.chain_id.clone();
-            env.drivers.session.execute(std::iter::once(
-                &SessionCmd::FlushUndo {
+            env.drivers.session.execute(
+                std::iter::once(&SessionCmd::FlushUndo {
                     path: path.clone(),
                     chain_id,
                     content_hash,
                     undo_cursor: current_len,
                     distance_from_save: distance,
                     entries: new_groups,
-                },
-            ));
+                }),
+                session_driver,
+            );
             tracker.persisted_len = current_len;
             undo_flush_debounce.remove(path);
         }
@@ -167,11 +180,30 @@ pub(crate) fn run(sources: &mut Sources, env: &TickEnv<'_>) {
         lsp_cmds.push(cmd.clone());
     }
     let current_sum = query::buffer_state_sum(EditedBuffersInput::new(edits));
-    let should_request_diag =
-        !lsp_notified.is_empty() && Some(current_sum) != *lsp_requested_state_sum;
+    let sum_advanced = Some(current_sum) != lsp_driver.requested_state_sum;
+    if sum_advanced {
+        // Per Theme L (B) audit Finding 2.3 — a saved-version
+        // advance is the user's "try again" signal. Any path
+        // whose last pull failed gets reset to Idle so the
+        // upcoming RequestDiagnostics re-dispatches it; without
+        // this, a transient pull failure would stick forever
+        // (the gate that NORMALLY suppresses a fresh sum-advance
+        // re-fire is per-buffer pull_state).
+        for path in lsp_notified.keys() {
+            if matches!(
+                lsp_driver.pull_state.get(path),
+                Some(led_driver_lsp_core::PullState::Failed(_))
+            ) {
+                lsp_driver
+                    .pull_state
+                    .insert(path.clone(), led_driver_lsp_core::PullState::Idle);
+            }
+        }
+    }
+    let should_request_diag = !lsp_notified.is_empty() && sum_advanced;
     if should_request_diag {
         lsp_cmds.push(LspCmd::RequestDiagnostics);
-        *lsp_requested_state_sum = Some(current_sum);
+        lsp_driver.requested_state_sum = Some(current_sum);
     }
     for req in completions_pending.pending_requests.drain(..) {
         lsp_cmds.push(LspCmd::RequestCompletion {
@@ -186,7 +218,7 @@ pub(crate) fn run(sources: &mut Sources, env: &TickEnv<'_>) {
         lsp_cmds.push(LspCmd::ResolveCompletion {
             path: resolve.path,
             seq: resolve.seq,
-            item: resolve.item,
+            item: domain_completion_to_lsp(&resolve.item),
         });
     }
     for req in lsp_pending.pending_goto.drain(..) {
@@ -256,6 +288,6 @@ pub(crate) fn run(sources: &mut Sources, env: &TickEnv<'_>) {
         lsp_pending.pending_inlay_hint.clear();
     }
     if !lsp_cmds.is_empty() {
-        env.drivers.lsp.execute(lsp_cmds.iter());
+        env.drivers.lsp.execute(lsp_cmds.iter(), lsp_driver);
     }
 }

@@ -409,12 +409,40 @@ impl History {
         None
     }
 
+    /// Peek the most recent applied group without mutating state.
+    /// Mirrors [`take_undo`]'s save-point-marker discipline: skips
+    /// empty-ops groups tagged with `save_point_hash`, returning
+    /// the topmost *real* group. Used by the `undo_action` memo to
+    /// compute what the reverse step looks like before the reducer
+    /// commits.
+    ///
+    /// Pure: does not call `finalise()` (which mutates `current` →
+    /// `past`). Callers that need the in-flight open group to be
+    /// included in peek results must `finalise()` separately —
+    /// the runtime closes groups at dispatch boundaries already,
+    /// so this is rarely needed.
+    pub fn peek_undo(&self) -> Option<&EditGroup> {
+        self.past
+            .iter()
+            .rev()
+            .find(|g| !(g.save_point_hash.is_some() && g.ops.is_empty()))
+    }
+
     /// Pop the most recent undone group for redo.
     pub fn take_redo(&mut self) -> Option<EditGroup> {
         // An open current during a redo chain can happen only if
         // the dispatcher forgot to finalise. Defensive close.
         self.finalise();
         self.future.pop()
+    }
+
+    /// Peek the most recent undone group without mutating state.
+    /// Counterpart to [`peek_undo`] for the redo path. The future
+    /// stack doesn't accumulate save-point markers (markers are
+    /// only inserted on save, never undone), so this is a plain
+    /// `.last()`.
+    pub fn peek_redo(&self) -> Option<&EditGroup> {
+        self.future.last()
     }
 
     /// Push a group back onto `future` (used by undo to stash what

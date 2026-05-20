@@ -71,11 +71,12 @@ use tabs::{cycle_active, force_kill, kill_active};
 use undo::{redo_active, undo_active};
 
 use led_driver_buffers_core::BufferStore;
+use led_driver_fs_list_core::FsTree;
 use led_driver_terminal_core::{KeyCode, KeyEvent, KeyModifiers, Terminal};
 use led_state_alerts::AlertState;
-use led_state_browser::{BrowserUi, Focus, FsTree};
+use led_state_browser::{BrowserUi, Focus};
 use led_state_buffer_edits::BufferEdits;
-use led_state_clipboard::ClipboardState;
+use led_state_clipboard::ClipboardIntent;
 use led_state_completions::CompletionsState;
 use led_state_file_search::FileSearchState;
 use led_state_find_file::FindFileState;
@@ -116,7 +117,12 @@ pub struct Dispatcher<'a> {
     pub tabs: &'a mut Tabs,
     pub edits: &'a mut BufferEdits,
     pub kill_ring: &'a mut KillRing,
-    pub clip: &'a mut ClipboardState,
+    pub clip: &'a mut ClipboardIntent,
+    /// Driver-owned clipboard state (in-flight tracking + last
+    /// error). Read-only here — dispatch sets user intents on
+    /// `clip`; the execute phase wires them to the driver, which
+    /// mutates this source.
+    pub clipboard_driver: &'a led_driver_clipboard_core::ClipboardState,
     pub alerts: &'a mut AlertState,
     pub jumps: &'a mut JumpListState,
     pub browser: &'a mut BrowserUi,
@@ -138,12 +144,12 @@ pub struct Dispatcher<'a> {
     pub lsp_pending: &'a mut led_state_lsp::LspPending,
     /// LSP diagnostics, read-only here — issue navigation
     /// (Alt-./Alt-,) reads them to build the nav cycle.
-    pub diagnostics: &'a led_state_diagnostics::DiagnosticsStates,
+    pub diagnostics: &'a led_driver_lsp_core::DiagnosticsStates,
     /// Per-server LSP status (busy / ready / detail). Dispatch
     /// reads it to gate "format-on-save" / "goto-definition" on
     /// whether any LSP server has emitted at least one event,
     /// instead of duplicating that bit on a user-decision source.
-    pub lsp_status: &'a led_state_diagnostics::LspStatuses,
+    pub lsp_status: &'a led_driver_lsp_core::LspStatuses,
     /// Git state (branch + file/line statuses). Same consumer
     /// as `diagnostics` — tiered issue nav walks both.
     pub git: &'a led_state_git::GitState,
@@ -169,6 +175,13 @@ pub struct Dispatcher<'a> {
     /// `SortImports` arms read it sync to derive their effect
     /// (no driver round-trip; see `MILESTONE-23.md` § D1).
     pub syntax: &'a led_state_syntax::SyntaxStates,
+    /// Per-tick "now" source. Set once by ingest from
+    /// `Instant::now()` + `SystemTime::now()`; everything
+    /// time-dependent in dispatch reads via `self.clock.now`
+    /// (deadlines, TTLs) or `self.clock.wall_now` (entropy /
+    /// epoch references). Per EXAMPLE-ARCH § "Time is a source
+    /// field": no dispatch arm calls `Instant::now()` directly.
+    pub clock: &'a crate::Clock,
 }
 
 impl<'a> Dispatcher<'a> {
@@ -300,6 +313,17 @@ impl<'a> Dispatcher<'a> {
 ///
 /// Called from the dispatch boundary so every command path
 /// (direct, chord, implicit-insert) flows through the same logic.
+///
+/// Pure-derivation lives in `query::desired`:
+///
+/// - [`completion_request_anchor`] resolves the LSP `Position`
+///   for the active cursor.
+/// - [`completion_refilter_outcome`] decides whether a live
+///   session should keep / update / dismiss after the cursor or
+///   rope changed.
+///
+/// This function only mutates: it reads the memo outcomes and
+/// applies them.
 fn handle_completion_trigger(
     cmd: &Command,
     tabs: &Tabs,
@@ -309,28 +333,19 @@ fn handle_completion_trigger(
 ) {
     match cmd {
         Command::InsertChar(c) if c.is_alphanumeric() || *c == '_' => {
-            // Auto-trigger on identifier chars. Needs an active
-            // tab with a loaded buffer; otherwise silently drop.
-            let Some(id) = tabs.active else {
+            // Resolve the request anchor first — skip when no
+            // active tab / no buffer / preview tab.
+            let anchor = crate::query::completion_request_anchor(
+                crate::query::TabsActiveInput::new(tabs),
+                crate::query::EditedBuffersInput::new(edits),
+            );
+            let crate::query::CompletionAnchorOutcome::Anchor {
+                path,
+                line,
+                col_utf16,
+            } = anchor
+            else {
                 return;
-            };
-            let Some(tab) = tabs.open.iter().find(|t| t.id == id) else {
-                return;
-            };
-            if tab.preview {
-                return;
-            }
-            let Some(eb) = edits.buffers.get(&tab.path) else {
-                return;
-            };
-            let line = tab.cursor.line as u32;
-            // LSP completion request takes a `Position::character`
-            // in UTF-16 code units (per `PositionEncodingKind`). The
-            // cursor's grapheme col converts via the buffer line.
-            let col = if tab.cursor.line < eb.rope.len_lines() {
-                led_core::grapheme_col_to_utf16_units(eb.rope.line(tab.cursor.line), tab.cursor.col)
-            } else {
-                0
             };
             // Client-side refilter first — updates the popup
             // instantly against the newly-typed prefix without
@@ -338,15 +353,15 @@ fn handle_completion_trigger(
             // fresh server request so delayed items can still
             // arrive (server response replaces the session when
             // its seq matches).
-            refilter_active_session(tabs, edits, completions);
-            completions_pending.queue_request(tab.path.clone(), line, col, Some(*c));
+            apply_refilter_outcome(tabs, edits, completions);
+            completions_pending.queue_request(path, line, col_utf16, Some(*c));
         }
         Command::DeleteBack | Command::DeleteForward => {
             // Keep the session alive across backspace / delete
             // within the prefix range. Refilter; if the cursor
             // moved left of prefix_start_col (user deleted past
             // the start of the identifier), dismiss.
-            refilter_active_session(tabs, edits, completions);
+            apply_refilter_outcome(tabs, edits, completions);
         }
         // Any other command dismisses an active popup. The
         // dispatch-action set (MoveUp, MoveDown, InsertNewline,
@@ -361,101 +376,42 @@ fn handle_completion_trigger(
     }
 }
 
-/// Rebuild `session.filtered` from the current typed prefix.
-/// Dismisses the session when the cursor has moved left of the
-/// prefix anchor or when no items match — both mean the popup
-/// has lost its context.
-fn refresh_completion_filter(
+/// Apply the memo-derived refilter outcome onto
+/// [`CompletionsState`]. Pure write-side: every dismissal check,
+/// every refilter / identity-match decision lives in
+/// [`crate::query::completion_refilter_outcome`].
+fn apply_refilter_outcome(
     tabs: &Tabs,
     edits: &BufferEdits,
     completions: &mut CompletionsState,
 ) {
-    let Some(session) = completions.session.as_ref() else {
-        return;
-    };
-    // Resolve the active tab + its buffer. If either is gone or
-    // the tab switched, dismiss.
-    let Some(tab) = tabs.open.iter().find(|t| t.id == session.tab) else {
-        completions.dismiss();
-        return;
-    };
-    let Some(eb) = edits.buffers.get(&tab.path) else {
-        completions.dismiss();
-        return;
-    };
-    if tab.cursor.line as u32 != session.prefix_line {
-        completions.dismiss();
-        return;
-    }
-    if (tab.cursor.col as u32) < session.prefix_start_col {
-        completions.dismiss();
-        return;
-    }
-    // Extract the typed prefix from the rope. `session.prefix_start_col`
-    // and `tab.cursor.col` are grapheme cols (M25); convert each to a
-    // char idx via the line's segmentation before slicing.
-    let line_idx = session.prefix_line as usize;
-    if line_idx >= eb.rope.len_lines() {
-        completions.dismiss();
-        return;
-    }
-    let line_slice = eb.rope.line(line_idx);
-    let line_start = eb.rope.line_to_char(line_idx);
-    let from =
-        line_start + led_core::grapheme_col_to_char(line_slice, session.prefix_start_col as usize);
-    let to = line_start + led_core::grapheme_col_to_char(line_slice, tab.cursor.col);
-    if to < from || to > eb.rope.len_chars() {
-        completions.dismiss();
-        return;
-    }
-    let prefix: String = eb.rope.slice(from..to).to_string();
-    let filtered = led_state_completions::refilter(&session.items, &prefix);
-    if filtered.is_empty() {
-        completions.dismiss();
-        return;
-    }
-    // Dismiss when the sole remaining candidate equals what the
-    // user has already typed — committing would be a no-op, so
-    // the popup is pure noise. Matches the same check on the
-    // ingest path in runtime/lib.rs.
-    if filtered.len() == 1
-        && led_state_completions::is_identity_match(
-            &session.items[filtered[0]],
-            &prefix,
-        )
-    {
-        completions.dismiss();
-        return;
-    }
-    // Preserve the highlighted label across the refilter when
-    // possible — matches the UX users expect (the item they were
-    // aiming at shouldn't jump around as the list shrinks).
-    let prev_selected_item = session
-        .filtered
-        .get(session.selected)
-        .copied();
-    let new_selected = prev_selected_item
-        .and_then(|item_ix| filtered.iter().position(|&i| i == item_ix))
-        .unwrap_or(0);
-    if let Some(session) = completions.session.as_mut() {
-        session.filtered = std::sync::Arc::new(filtered);
-        session.selected = new_selected;
-        // Scroll reset — ensure_visible semantics (in the
-        // overlay module) would re-clamp anyway, but starting
-        // at 0 keeps the popup predictable after a refilter.
-        if new_selected < session.scroll {
-            session.scroll = new_selected;
+    let outcome = crate::query::completion_refilter_outcome(
+        crate::query::CompletionsSessionInput::new(completions),
+        crate::query::TabsActiveInput::new(tabs),
+        crate::query::EditedBuffersInput::new(edits),
+    );
+    match outcome {
+        crate::query::CompletionRefilterOutcome::NoSession => {}
+        crate::query::CompletionRefilterOutcome::Dismiss => {
+            completions.dismiss();
         }
-    }
-}
-
-fn refilter_active_session(
-    tabs: &Tabs,
-    edits: &BufferEdits,
-    completions: &mut CompletionsState,
-) {
-    if completions.session.is_some() {
-        refresh_completion_filter(tabs, edits, completions);
+        crate::query::CompletionRefilterOutcome::Update {
+            filtered,
+            selected,
+            scroll_max,
+        } => {
+            if let Some(session) = completions.session.as_mut() {
+                session.filtered = filtered;
+                session.selected = selected;
+                // Scroll clamp — ensure_visible semantics (in the
+                // overlay module) would re-clamp anyway, but
+                // keeping the scroll <= selected keeps the popup
+                // predictable after a refilter.
+                if scroll_max < session.scroll {
+                    session.scroll = scroll_max;
+                }
+            }
+        }
     }
 }
 
@@ -536,7 +492,7 @@ fn refresh_active_preferred_col(
         return;
     };
     let content_cols = editor_content_cols(terminal, browser);
-    refresh_preferred_col(&mut tab.cursor, &eb.rope, content_cols);
+    refresh_preferred_col(&mut tab.cursor, &eb.draft, content_cols);
 }
 
 fn finalise_history(edits: &mut BufferEdits) {
@@ -679,6 +635,7 @@ impl<'a> Dispatcher<'a> {
             self.tabs,
             self.edits,
             self.path_chains,
+            self.clock,
         ) {
             return outcome;
         }
@@ -767,6 +724,7 @@ impl<'a> Dispatcher<'a> {
                     self.lsp_pending,
                     self.alerts,
                     self.lsp_status,
+                    self.clock,
                 );
                 DispatchOutcome::Continue
             }
@@ -788,7 +746,7 @@ impl<'a> Dispatcher<'a> {
                 DispatchOutcome::Continue
             }
             Command::KillBuffer => {
-                kill_active(self.tabs, self.edits, self.alerts);
+                kill_active(self.tabs, self.edits, self.alerts, self.clock);
                 DispatchOutcome::Continue
             }
             Command::CursorUp => {
@@ -1031,6 +989,7 @@ impl<'a> Dispatcher<'a> {
                     self.edits,
                     self.alerts,
                     self.path_chains,
+                    self.clock,
                 );
                 DispatchOutcome::Continue
             }
@@ -1040,6 +999,7 @@ impl<'a> Dispatcher<'a> {
                     self.edits,
                     self.syntax,
                     self.alerts,
+                    self.clock,
                 );
                 DispatchOutcome::Continue
             }
@@ -1059,7 +1019,7 @@ impl<'a> Dispatcher<'a> {
                 set_mark_active(self.tabs);
                 self.alerts.set_info(
                     "Mark set".to_string(),
-                    std::time::Instant::now(),
+                    self.clock.now,
                     std::time::Duration::from_secs(2),
                 );
                 DispatchOutcome::Continue
@@ -1069,7 +1029,7 @@ impl<'a> Dispatcher<'a> {
                 if !killed {
                     self.alerts.set_info(
                         "No region".to_string(),
-                        std::time::Instant::now(),
+                        self.clock.now,
                         std::time::Duration::from_secs(2),
                     );
                 }
@@ -1113,6 +1073,7 @@ impl<'a> Dispatcher<'a> {
                     alerts: self.alerts,
                     terminal: self.terminal,
                     browser: self.browser,
+                    clock: self.clock,
                 }
                 .next_issue();
                 DispatchOutcome::Continue
@@ -1127,6 +1088,7 @@ impl<'a> Dispatcher<'a> {
                     alerts: self.alerts,
                     terminal: self.terminal,
                     browser: self.browser,
+                    clock: self.clock,
                 }
                 .prev_issue();
                 DispatchOutcome::Continue
@@ -1244,7 +1206,7 @@ impl<'a> Dispatcher<'a> {
                 // post-M18 polish.
                 self.alerts.set_info(
                     "Outline: not yet implemented".to_string(),
-                    std::time::Instant::now(),
+                    self.clock.now,
                     std::time::Duration::from_secs(2),
                 );
                 DispatchOutcome::Continue
@@ -1258,7 +1220,7 @@ impl<'a> Dispatcher<'a> {
                 self.kbd_macro.current.clear();
                 self.alerts.set_info(
                     "Defining kbd macro...".to_string(),
-                    std::time::Instant::now(),
+                    self.clock.now,
                     std::time::Duration::from_secs(2),
                 );
                 DispatchOutcome::Continue
@@ -1270,61 +1232,19 @@ impl<'a> Dispatcher<'a> {
                     self.kbd_macro.last = Some(std::sync::Arc::new(recorded));
                     self.alerts.set_info(
                         "Keyboard macro defined".to_string(),
-                        std::time::Instant::now(),
+                        self.clock.now,
                         std::time::Duration::from_secs(2),
                     );
                 } else {
                     self.alerts.set_info(
                         "Not defining kbd macro".to_string(),
-                        std::time::Instant::now(),
+                        self.clock.now,
                         std::time::Duration::from_secs(2),
                     );
                 }
                 DispatchOutcome::Continue
             }
-            Command::KbdMacroExecute => {
-                // Recursion guard: depth >= 100 surfaces an alert
-                // and aborts further playback up the stack
-                // (legacy `action/mod.rs:278-280`).
-                if self.kbd_macro.playback_depth >= KBD_MACRO_RECURSION_LIMIT {
-                    self.alerts.set_info(
-                        "Keyboard macro recursion limit".to_string(),
-                        std::time::Instant::now(),
-                        std::time::Duration::from_secs(2),
-                    );
-                    return DispatchOutcome::Continue;
-                }
-                // Clone the Arc out of `kbd_macro.last` first so
-                // the recursive `run_command` calls below can take
-                // `&mut kbd_macro` again — `recorded` is a refcount
-                // bump, not a borrow.
-                let Some(recorded) = self.kbd_macro.last.clone() else {
-                    self.alerts.set_info(
-                        "No kbd macro defined".to_string(),
-                        std::time::Instant::now(),
-                        std::time::Duration::from_secs(2),
-                    );
-                    return DispatchOutcome::Continue;
-                };
-                let count = self.kbd_macro.execute_count.take().unwrap_or(1);
-                let iterations = if count == 0 { usize::MAX } else { count };
-                self.kbd_macro.playback_depth += 1;
-                let mut last_outcome = DispatchOutcome::Continue;
-                'outer: for _ in 0..iterations {
-                    for inner_cmd in recorded.iter() {
-                        let outcome = self.run_command(*inner_cmd);
-                        if !matches!(outcome, DispatchOutcome::Continue) {
-                            // Quit / Suspend mid-playback propagates
-                            // out so e.g. a macro that ends in Quit
-                            // exits cleanly. Legacy parity.
-                            last_outcome = outcome;
-                            break 'outer;
-                        }
-                    }
-                }
-                self.kbd_macro.playback_depth -= 1;
-                last_outcome
-            }
+            Command::KbdMacroExecute => self.replay_macro(),
             Command::Wait(_) => {
                 // Harness primitive — no-op in the synchronous
                 // dispatch loop. The goldens harness handles waits
@@ -1359,6 +1279,104 @@ impl<'a> Dispatcher<'a> {
         );
         outcome
     }
+
+    /// Replay the last-recorded keyboard macro `execute_count`
+    /// times (default 1; `0` means "until quit").
+    ///
+    /// Lives in its own method so the `KbdMacroExecute` arm of
+    /// `run_command` stays a single line and the two nested
+    /// loops + depth bookkeeping aren't tangled with the rest of
+    /// the command match. Still recurses through `run_command`
+    /// per inner command — the recursion is what carries quit /
+    /// suspend / kbd-macro-execute through to legacy parity.
+    ///
+    /// **Why this isn't a driver.** The audit (`ARCH-WRONG.md`,
+    /// Theme F Priority 7) flagged playback as a candidate for a
+    /// "kbd-macro driver" along the lines of `driver-find-file` /
+    /// `driver-file-search`. After review the driver shape was
+    /// rejected as ceremony without translation faithfulness:
+    ///
+    /// 1. **No async work.** Every existing `driver-*/native/`
+    ///    sits on std::thread + std::sync::mpsc because it owns
+    ///    a platform handle (FSEvents, LSP stdio, libgit2, the
+    ///    clipboard, etc.). Macro playback is pure in-memory
+    ///    iteration over `Arc<Vec<Command>>` — there is nothing
+    ///    to delegate off the dispatcher thread.
+    /// 2. **Splitting playback across ticks changes semantics.**
+    ///    A queue-based driver would push recorded commands into
+    ///    `terminal.pending` one tick at a time. That lets the
+    ///    paint pass run between recorded commands (the user
+    ///    would see the macro animate) and lets real keystrokes
+    ///    interleave with replayed ones — both are observable
+    ///    legacy-parity divergences, not cleanup.
+    /// 3. **The recursion is the spec.** "Macro that records
+    ///    itself executing another macro" (Emacs `Ctrl-x e`
+    ///    during recording) is legal; the `playback_depth < 100`
+    ///    guard mirrors `legacy led/src/model/action/mod.rs:278`
+    ///    exactly. A queue model would replace depth with a
+    ///    queue-size cap — a different invariant.
+    /// 4. **The reducer-purity win already landed.** The
+    ///    `KbdMacroExecute` match arm is a single line and the
+    ///    two nested loops live behind `run_recorded`, so the
+    ///    surface that the audit objected to (mega-reducer
+    ///    branch) is already gone.
+    ///
+    /// Per the user-memory rule "Never simplify, inline, or
+    /// restructure the user's architecture. Translate
+    /// faithfully", the driver wrapper is the wrong abstraction
+    /// here and the deferred item is closed.
+    fn replay_macro(&mut self) -> DispatchOutcome {
+        // Recursion guard: depth >= 100 surfaces an alert and
+        // aborts further playback up the stack (legacy
+        // `action/mod.rs:278-280`).
+        if self.kbd_macro.playback_depth >= KBD_MACRO_RECURSION_LIMIT {
+            self.alerts.set_info(
+                "Keyboard macro recursion limit".to_string(),
+                self.clock.now,
+                std::time::Duration::from_secs(2),
+            );
+            return DispatchOutcome::Continue;
+        }
+        // Clone the Arc out of `kbd_macro.last` first so the
+        // recursive `run_command` calls below can take
+        // `&mut kbd_macro` again — `recorded` is a refcount
+        // bump, not a borrow.
+        let Some(recorded) = self.kbd_macro.last.clone() else {
+            self.alerts.set_info(
+                "No kbd macro defined".to_string(),
+                self.clock.now,
+                std::time::Duration::from_secs(2),
+            );
+            return DispatchOutcome::Continue;
+        };
+        let count = self.kbd_macro.execute_count.take().unwrap_or(1);
+        let iterations = if count == 0 { usize::MAX } else { count };
+        self.kbd_macro.playback_depth += 1;
+        let last_outcome = self.run_recorded(&recorded, iterations);
+        self.kbd_macro.playback_depth -= 1;
+        last_outcome
+    }
+
+    /// Inner loop of [`Self::replay_macro`]: run the recorded
+    /// command sequence `iterations` times, stopping early when
+    /// any inner command returns non-`Continue` (quit / suspend
+    /// in mid-playback propagates out so e.g. a macro that ends
+    /// in Quit exits cleanly — legacy parity).
+    fn run_recorded(
+        &mut self,
+        recorded: &[Command],
+        iterations: usize,
+    ) -> DispatchOutcome {
+        for _ in 0..iterations {
+            for inner_cmd in recorded.iter() {
+                let outcome = self.run_command(*inner_cmd);
+                if !matches!(outcome, DispatchOutcome::Continue) {
+                    return outcome;
+                }
+            }
+        }
+        DispatchOutcome::Continue
+    }
 }
 
 /// `Save` + format-on-save: fire a format request and mark the
@@ -1379,7 +1397,8 @@ fn save_with_optional_format(
     edits: &mut BufferEdits,
     lsp_pending: &mut led_state_lsp::LspPending,
     alerts: &mut AlertState,
-    lsp_status: &led_state_diagnostics::LspStatuses,
+    lsp_status: &led_driver_lsp_core::LspStatuses,
+    clock: &crate::Clock,
 ) {
     let Some(id) = tabs.active else {
         return;
@@ -1405,7 +1424,7 @@ fn save_with_optional_format(
     lsp_pending.pending_save_after_format.insert(tab.path.clone());
     alerts.set_info(
         "Formatting...".to_string(),
-        std::time::Instant::now(),
+        clock.now,
         std::time::Duration::from_secs(2),
     );
 }
@@ -1436,7 +1455,7 @@ fn lsp_goto_definition(
     tabs: &Tabs,
     edits: &BufferEdits,
     lsp_pending: &mut led_state_lsp::LspPending,
-    lsp_status: &led_state_diagnostics::LspStatuses,
+    lsp_status: &led_driver_lsp_core::LspStatuses,
 ) {
     let Some(id) = tabs.active else { return };
     let Some(tab) = tabs.open.iter().find(|t| t.id == id) else {
@@ -1458,8 +1477,8 @@ fn lsp_goto_definition(
     }
     let line = tab.cursor.line as u32;
     // LSP positions are UTF-16 code units (per spec default).
-    let col = if (tab.cursor.line) < eb.rope.len_lines() {
-        led_core::grapheme_col_to_utf16_units(eb.rope.line(tab.cursor.line), tab.cursor.col)
+    let col = if (tab.cursor.line) < eb.draft.len_lines() {
+        led_text_layout::grapheme_col_to_utf16_units(eb.draft.line(tab.cursor.line), tab.cursor.col)
     } else {
         0
     };
@@ -1476,7 +1495,7 @@ mod tests {
     use led_state_alerts::AlertState;
     use led_state_buffer_edits::{BufferEdits, EditedBuffer};
     use led_state_completions::CompletionsState;
-    use led_state_diagnostics::DiagnosticsStates;
+    use led_driver_lsp_core::DiagnosticsStates;
     use led_state_git::GitState;
     use led_state_kill_ring::KillRing;
     use led_state_lsp::LspExtrasState;
@@ -1491,7 +1510,8 @@ mod tests {
         let mut tabs = tabs_with(&[("a", 1)], Some(1));
         let mut edits = BufferEdits::default();
         let mut kill_ring = KillRing::default();
-        let mut clip = ClipboardState::default();
+        let mut clip = ClipboardIntent::default();
+        let clipboard_driver = led_driver_clipboard_core::ClipboardState::default();
         let mut alerts = AlertState::default();
         let mut jumps = JumpListState::default();
         let mut browser = BrowserUi::default();
@@ -1511,14 +1531,16 @@ mod tests {
         let mut isearch: Option<IsearchState> = None;
         let mut file_search: Option<FileSearchState> = None;
         let diagnostics = DiagnosticsStates::default();
-        let lsp_status = led_state_diagnostics::LspStatuses::default();
+        let lsp_status = led_driver_lsp_core::LspStatuses::default();
         let git = GitState::default();
         let syntax = led_state_syntax::SyntaxStates::default();
+        let clock = crate::Clock::default();
         let mut dispatcher = Dispatcher {
             tabs: &mut tabs,
             edits: &mut edits,
             kill_ring: &mut kill_ring,
             clip: &mut clip,
+            clipboard_driver: &clipboard_driver,
             alerts: &mut alerts,
             jumps: &mut jumps,
             browser: &mut browser,
@@ -1540,6 +1562,7 @@ mod tests {
             chord: &mut chord,
             kbd_macro: &mut kbd_macro,
             syntax: &syntax,
+            clock: &clock,
         };
         // First half of the chord: ctrl+x → pending, Continue.
         let outcome = dispatcher.dispatch_key(key(KeyModifiers::CONTROL, KeyCode::Char('x')));
@@ -1572,7 +1595,8 @@ mod tests {
         let mut chord = ChordState::default();
         let mut kbd_macro = led_state_kbd_macro::KbdMacroState::default();
         let mut kill_ring = KillRing::default();
-        let mut clip = ClipboardState::default();
+        let mut clip = ClipboardIntent::default();
+        let clipboard_driver = led_driver_clipboard_core::ClipboardState::default();
         let mut alerts = AlertState::default();
         let mut jumps = JumpListState::default();
         let mut browser = BrowserUi::default();
@@ -1586,15 +1610,17 @@ mod tests {
         let mut isearch: Option<IsearchState> = None;
         let mut file_search: Option<FileSearchState> = None;
         let diagnostics = DiagnosticsStates::default();
-        let lsp_status = led_state_diagnostics::LspStatuses::default();
+        let lsp_status = led_driver_lsp_core::LspStatuses::default();
         let git = GitState::default();
         let syntax = led_state_syntax::SyntaxStates::default();
+        let clock = crate::Clock::default();
         let outcome = {
             let mut dispatcher = Dispatcher {
                 tabs: &mut tabs,
                 edits: &mut edits,
                 kill_ring: &mut kill_ring,
                 clip: &mut clip,
+                clipboard_driver: &clipboard_driver,
                 alerts: &mut alerts,
                 jumps: &mut jumps,
                 browser: &mut browser,
@@ -1616,6 +1642,7 @@ mod tests {
                 chord: &mut chord,
                 kbd_macro: &mut kbd_macro,
                 syntax: &syntax,
+                clock: &clock,
             };
             // ctrl+x → pending.
             dispatcher.dispatch_key(key(KeyModifiers::CONTROL, KeyCode::Char('x')));
@@ -1646,7 +1673,8 @@ mod tests {
         let mut chord = ChordState::default();
         let mut kbd_macro = led_state_kbd_macro::KbdMacroState::default();
         let mut kill_ring = KillRing::default();
-        let mut clip = ClipboardState::default();
+        let mut clip = ClipboardIntent::default();
+        let clipboard_driver = led_driver_clipboard_core::ClipboardState::default();
         let mut alerts = AlertState::default();
         let mut jumps = JumpListState::default();
         let mut browser = BrowserUi::default();
@@ -1661,14 +1689,16 @@ mod tests {
         let mut isearch: Option<IsearchState> = None;
         let mut file_search: Option<FileSearchState> = None;
         let diagnostics = DiagnosticsStates::default();
-        let lsp_status = led_state_diagnostics::LspStatuses::default();
+        let lsp_status = led_driver_lsp_core::LspStatuses::default();
         let git = GitState::default();
         let syntax = led_state_syntax::SyntaxStates::default();
+        let clock = crate::Clock::default();
         let mut dispatcher = Dispatcher {
             tabs: &mut tabs,
             edits: &mut edits,
             kill_ring: &mut kill_ring,
             clip: &mut clip,
+            clipboard_driver: &clipboard_driver,
             alerts: &mut alerts,
             jumps: &mut jumps,
             browser: &mut browser,
@@ -1690,6 +1720,7 @@ mod tests {
             chord: &mut chord,
             kbd_macro: &mut kbd_macro,
             syntax: &syntax,
+            clock: &clock,
         };
         let outcome = dispatcher.dispatch_key(key(KeyModifiers::CONTROL, KeyCode::Char('q')));
         assert_eq!(outcome, DispatchOutcome::Quit);
@@ -1713,7 +1744,8 @@ mod tests {
         let mut chord = ChordState::default();
         let mut kbd_macro = led_state_kbd_macro::KbdMacroState::default();
         let mut kill_ring = KillRing::default();
-        let mut clip = ClipboardState::default();
+        let mut clip = ClipboardIntent::default();
+        let clipboard_driver = led_driver_clipboard_core::ClipboardState::default();
         let mut alerts = AlertState::default();
         let mut jumps = JumpListState::default();
         let mut browser = BrowserUi::default();
@@ -1728,14 +1760,16 @@ mod tests {
         let mut isearch: Option<IsearchState> = None;
         let mut file_search: Option<FileSearchState> = None;
         let diagnostics = DiagnosticsStates::default();
-        let lsp_status = led_state_diagnostics::LspStatuses::default();
+        let lsp_status = led_driver_lsp_core::LspStatuses::default();
         let git = GitState::default();
         let syntax = led_state_syntax::SyntaxStates::default();
+        let clock = crate::Clock::default();
         let mut dispatcher = Dispatcher {
             tabs: &mut tabs,
             edits: &mut edits,
             kill_ring: &mut kill_ring,
             clip: &mut clip,
+            clipboard_driver: &clipboard_driver,
             alerts: &mut alerts,
             jumps: &mut jumps,
             browser: &mut browser,
@@ -1757,6 +1791,7 @@ mod tests {
             chord: &mut chord,
             kbd_macro: &mut kbd_macro,
             syntax: &syntax,
+            clock: &clock,
         };
         let outcome = dispatcher.dispatch_key(key(KeyModifiers::CONTROL, KeyCode::Char('z')));
         assert_eq!(outcome, DispatchOutcome::Suspend);
@@ -1773,7 +1808,8 @@ mod tests {
         let mut chord = ChordState::default();
         let mut kbd_macro = led_state_kbd_macro::KbdMacroState::default();
         let mut kill_ring = KillRing::default();
-        let mut clip = ClipboardState::default();
+        let mut clip = ClipboardIntent::default();
+        let clipboard_driver = led_driver_clipboard_core::ClipboardState::default();
         let mut alerts = AlertState::default();
         let mut jumps = JumpListState::default();
         let mut browser = BrowserUi::default();
@@ -1787,15 +1823,17 @@ mod tests {
         let mut lsp_extras = LspExtrasState::default();
         let mut lsp_pending = led_state_lsp::LspPending::default();
         let diagnostics = DiagnosticsStates::default();
-        let lsp_status = led_state_diagnostics::LspStatuses::default();
+        let lsp_status = led_driver_lsp_core::LspStatuses::default();
         let git = GitState::default();
         let syntax = led_state_syntax::SyntaxStates::default();
+        let clock = crate::Clock::default();
         {
             let mut dispatcher = Dispatcher {
                 tabs: &mut tabs,
                 edits: &mut edits,
                 kill_ring: &mut kill_ring,
                 clip: &mut clip,
+                clipboard_driver: &clipboard_driver,
                 alerts: &mut alerts,
                 jumps: &mut jumps,
                 browser: &mut browser,
@@ -1817,6 +1855,7 @@ mod tests {
                 chord: &mut chord,
                 kbd_macro: &mut kbd_macro,
                 syntax: &syntax,
+                clock: &clock,
             };
             dispatcher.dispatch_key(key(KeyModifiers::NONE, KeyCode::Char('z')));
         }
@@ -1835,7 +1874,8 @@ mod tests {
         let mut chord = ChordState::default();
         let mut kbd_macro = led_state_kbd_macro::KbdMacroState::default();
         let mut kill_ring = KillRing::default();
-        let mut clip = ClipboardState::default();
+        let mut clip = ClipboardIntent::default();
+        let clipboard_driver = led_driver_clipboard_core::ClipboardState::default();
         let mut alerts = AlertState::default();
         let mut jumps = JumpListState::default();
         let mut browser = BrowserUi::default();
@@ -1849,15 +1889,17 @@ mod tests {
         let mut lsp_extras = LspExtrasState::default();
         let mut lsp_pending = led_state_lsp::LspPending::default();
         let diagnostics = DiagnosticsStates::default();
-        let lsp_status = led_state_diagnostics::LspStatuses::default();
+        let lsp_status = led_driver_lsp_core::LspStatuses::default();
         let git = GitState::default();
         let syntax = led_state_syntax::SyntaxStates::default();
+        let clock = crate::Clock::default();
         {
             let mut dispatcher = Dispatcher {
                 tabs: &mut tabs,
                 edits: &mut edits,
                 kill_ring: &mut kill_ring,
                 clip: &mut clip,
+                clipboard_driver: &clipboard_driver,
                 alerts: &mut alerts,
                 jumps: &mut jumps,
                 browser: &mut browser,
@@ -1879,6 +1921,7 @@ mod tests {
                 chord: &mut chord,
                 kbd_macro: &mut kbd_macro,
                 syntax: &syntax,
+                clock: &clock,
             };
             dispatcher.dispatch_key(key(KeyModifiers::CONTROL, KeyCode::Char('x')));
         }
@@ -1892,23 +1935,23 @@ mod tests {
         let mut edits = BufferEdits::default();
         edits.buffers.insert(
             canon("a"),
-            EditedBuffer {
-                rope: Arc::new(Rope::from_str("A")),
-                version: led_core::BufferVersion(1),
-                saved_version: led_core::SavedVersion(0),
-                disk_content_hash: led_core::PersistedContentHash::default(),
-                history: Default::default(),
-            },
+            EditedBuffer::new_with_state(
+                Arc::new(Rope::from_str("A")),
+                led_core::BufferVersion(1),
+                led_core::SavedVersion(0),
+                led_core::PersistedContentHash::default(),
+                Default::default(),
+            ),
         );
         edits.buffers.insert(
             canon("b"),
-            EditedBuffer {
-                rope: Arc::new(Rope::from_str("B")),
-                version: led_core::BufferVersion(1),
-                saved_version: led_core::SavedVersion(0),
-                disk_content_hash: led_core::PersistedContentHash::default(),
-                history: Default::default(),
-            },
+            EditedBuffer::new_with_state(
+                Arc::new(Rope::from_str("B")),
+                led_core::BufferVersion(1),
+                led_core::SavedVersion(0),
+                led_core::PersistedContentHash::default(),
+                Default::default(),
+            ),
         );
         let store = BufferStore::default();
         let term = terminal_with(Some(Dims { cols: 10, rows: 5 }));
@@ -1958,7 +2001,8 @@ mod tests {
         let mut chord = ChordState::default();
         let mut kbd_macro = led_state_kbd_macro::KbdMacroState::default();
         let mut kr = KillRing::default();
-        let mut clip = ClipboardState::default();
+        let mut clip = ClipboardIntent::default();
+        let clipboard_driver = led_driver_clipboard_core::ClipboardState::default();
         let mut alerts = AlertState::default();
         let mut jumps = JumpListState::default();
         let mut browser = BrowserUi::default();
@@ -1971,20 +2015,22 @@ mod tests {
         // Seed an LSP server entry so the no-LSP gate in
         // `lsp_goto_definition` doesn't short-circuit. Mirrors
         // legacy `has_active_lsp(s)` returning true.
-        let mut lsp_status = led_state_diagnostics::LspStatuses::default();
+        let mut lsp_status = led_driver_lsp_core::LspStatuses::default();
         lsp_status.by_server.insert(
             led_core::ServerId::new("rust-analyzer"),
-            led_state_diagnostics::LspServerStatus::default(),
+            led_driver_lsp_core::LspServerStatus::default(),
         );
         let diagnostics = DiagnosticsStates::default();
         let git = GitState::default();
         let syntax = led_state_syntax::SyntaxStates::default();
+        let clock = crate::Clock::default();
         {
             let mut dispatcher = Dispatcher {
                 tabs: &mut tabs,
                 edits: &mut edits,
                 kill_ring: &mut kr,
                 clip: &mut clip,
+                clipboard_driver: &clipboard_driver,
                 alerts: &mut alerts,
                 jumps: &mut jumps,
                 browser: &mut browser,
@@ -2006,6 +2052,7 @@ mod tests {
                 chord: &mut chord,
                 kbd_macro: &mut kbd_macro,
                 syntax: &syntax,
+                clock: &clock,
             };
             dispatcher.dispatch_key(key(KeyModifiers::ALT, KeyCode::Enter));
         }
@@ -2031,7 +2078,8 @@ mod tests {
         let mut chord = ChordState::default();
         let mut kbd_macro = led_state_kbd_macro::KbdMacroState::default();
         let mut kr = KillRing::default();
-        let mut clip = ClipboardState::default();
+        let mut clip = ClipboardIntent::default();
+        let clipboard_driver = led_driver_clipboard_core::ClipboardState::default();
         let mut alerts = AlertState::default();
         let mut jumps = JumpListState::default();
         let mut browser = BrowserUi::default();
@@ -2042,15 +2090,17 @@ mod tests {
         let mut path_chains = std::collections::HashMap::new();
         let km = default_keymap();
         let diagnostics = DiagnosticsStates::default();
-        let lsp_status = led_state_diagnostics::LspStatuses::default();
+        let lsp_status = led_driver_lsp_core::LspStatuses::default();
         let git = GitState::default();
         let syntax = led_state_syntax::SyntaxStates::default();
+        let clock = crate::Clock::default();
         {
             let mut dispatcher = Dispatcher {
                 tabs: &mut tabs,
                 edits: &mut edits,
                 kill_ring: &mut kr,
                 clip: &mut clip,
+                clipboard_driver: &clipboard_driver,
                 alerts: &mut alerts,
                 jumps: &mut jumps,
                 browser: &mut browser,
@@ -2072,6 +2122,7 @@ mod tests {
                 chord: &mut chord,
                 kbd_macro: &mut kbd_macro,
                 syntax: &syntax,
+                clock: &clock,
             };
             dispatcher.dispatch_key(key(KeyModifiers::ALT, KeyCode::Enter));
         }
@@ -2240,10 +2291,10 @@ mod tests {
         // edit (InsertChar) instead so each iteration is observable.
         fx.kbd_macro.last = Some(Arc::new(vec![Command::InsertChar('!')]));
         fx.kbd_macro.execute_count = Some(3);
-        let start_len = fx.edits.buffers.values().next().unwrap().rope.len_chars();
+        let start_len = fx.edits.buffers.values().next().unwrap().draft.len_chars();
         fx.dispatch(key(KeyModifiers::CONTROL, KeyCode::Char('x')));
         fx.dispatch(key(KeyModifiers::NONE, KeyCode::Char('e')));
-        let end_len = fx.edits.buffers.values().next().unwrap().rope.len_chars();
+        let end_len = fx.edits.buffers.values().next().unwrap().draft.len_chars();
         assert_eq!(
             end_len - start_len,
             3,
@@ -2263,10 +2314,10 @@ mod tests {
         let mut fx = macro_fixture();
         fx.kbd_macro.last = Some(Arc::new(vec![Command::InsertChar('!')]));
         fx.kbd_macro.playback_depth = led_state_kbd_macro::RECURSION_LIMIT;
-        let start_len = fx.edits.buffers.values().next().unwrap().rope.len_chars();
+        let start_len = fx.edits.buffers.values().next().unwrap().draft.len_chars();
         fx.dispatch(key(KeyModifiers::CONTROL, KeyCode::Char('x')));
         fx.dispatch(key(KeyModifiers::NONE, KeyCode::Char('e')));
-        let end_len = fx.edits.buffers.values().next().unwrap().rope.len_chars();
+        let end_len = fx.edits.buffers.values().next().unwrap().draft.len_chars();
         assert_eq!(end_len, start_len, "no chars inserted at the cap");
         assert_eq!(
             fx.alerts.info.as_deref(),
@@ -2314,9 +2365,9 @@ mod tests {
         // Bare `e` (no modifiers) should resolve to KbdMacroExecute,
         // NOT InsertChar('e'). After dispatch, the latch is still
         // set (each successive bare-e keeps it alive).
-        let buffer_before = fx.edits.buffers.values().next().unwrap().rope.clone();
+        let buffer_before = fx.edits.buffers.values().next().unwrap().draft.as_rope().clone();
         fx.dispatch(key(KeyModifiers::NONE, KeyCode::Char('e')));
-        let buffer_after = fx.edits.buffers.values().next().unwrap().rope.clone();
+        let buffer_after = fx.edits.buffers.values().next().unwrap().draft.as_rope().clone();
         assert_eq!(
             buffer_before.to_string(),
             buffer_after.to_string(),
@@ -2336,9 +2387,9 @@ mod tests {
         fx.dispatch(key(KeyModifiers::NONE, KeyCode::Down));
         assert!(!fx.chord.macro_repeat, "latch cleared on non-e key");
         // Now bare `e` should InsertChar('e'), not replay.
-        let before = fx.edits.buffers.values().next().unwrap().rope.to_string();
+        let before = fx.edits.buffers.values().next().unwrap().draft.to_string();
         fx.dispatch(key(KeyModifiers::NONE, KeyCode::Char('e')));
-        let after = fx.edits.buffers.values().next().unwrap().rope.to_string();
+        let after = fx.edits.buffers.values().next().unwrap().draft.to_string();
         assert!(
             after.contains('e') && after.len() == before.len() + 1,
             "bare e after latch cleared inserts 'e' literally",

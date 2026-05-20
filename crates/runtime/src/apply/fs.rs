@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use led_core::{CanonPath, SavedVersion, WatchSeq};
 use led_driver_buffers_core::RereadCompletion;
-use led_state_browser::FsTree;
+use led_driver_fs_list_core::FsTree;
 use led_state_buffer_edits::BufferEdits;
 
 /// Diff the memoized `desired_watches` map against the driver's
@@ -268,6 +268,41 @@ pub(crate) fn clear_ancestor_failures(fs: &mut FsTree, path: &CanonPath) {
 /// Stat `path` and classify it as file or directory. Returns
 /// `None` for any I/O error or unsupported file type — caller
 /// treats those as "drop this event".
+///
+/// # Architecture exemption: synchronous read during Ingest
+///
+/// Per EXAMPLE-ARCH § "The main loop", Ingest phases must only
+/// write external facts in — no driver-side reads. This helper
+/// breaks that rule with a `std::fs::metadata` call from
+/// [`apply_workspace_tree_delta`]'s CREATE branch.
+///
+/// The architecturally clean alternative is a `FsListCmd::Stat`
+/// round-trip: queue a request from query/execute, surface the
+/// result as a `Done` event the next tick, and re-run the CREATE
+/// processing against the now-cached classification. Rejected
+/// for Theme E because:
+///
+/// - The CREATE branch is the hot path on a workspace burst
+///   (cargo `target/` build with the root expanded → thousands
+///   of events). Adding a per-event async round-trip would
+///   serialise the burst through the fs-list driver's channel
+///   instead of doing O(1) work in-line. The current syncronous
+///   stat is the original design's response to that scale
+///   problem (see the fn-doc on `apply_workspace_tree_delta`).
+///
+/// - The stat is read against the parent dir's cached listing —
+///   if the parent is collapsed, the call is skipped before we
+///   get here. The deferred path would still need that gate, so
+///   the architecture exemption only buys deferral for events
+///   the user is actively looking at.
+///
+/// - Adding a `Stat` command to the fs-list driver ABI is a
+///   significant surface change for a single caller. The
+///   driver's job is "list a directory"; statting a single path
+///   is a different responsibility.
+///
+/// Theme E commit message documents this exemption explicitly so
+/// future audits don't flag it again.
 pub(crate) fn stat_kind(path: &CanonPath) -> Option<led_driver_fs_list_core::DirEntryKind> {
     use led_driver_fs_list_core::DirEntryKind;
     let meta = std::fs::metadata(path.as_path()).ok()?;
@@ -324,7 +359,7 @@ pub(crate) fn is_git_sentinel(path: &CanonPath) -> bool {
 ///
 /// Application logic in the ingest phase per `EXAMPLE-ARCH.md` §
 /// "Invariant enforcement": cleans up the user-decision shadow
-/// source `EditedBuffer.rope` in response to disk content (an
+/// source `EditedBuffer.draft` in response to disk content (an
 /// external fact) changing.
 ///
 /// - **Clean buffer + new content** — replace the rope, refresh
@@ -364,7 +399,7 @@ pub(crate) fn reconcile_external_change(
             // Clean reload. Push one group so undo can restore the
             // prior content; replace the rope; advance version and
             // saved_version together so the buffer stays clean.
-            let prev_text: Arc<str> = Arc::from(eb.rope.to_string().as_str());
+            let prev_text: Arc<str> = Arc::from(eb.draft.to_string().as_str());
             let new_text: Arc<str> = Arc::from(new_rope.to_string().as_str());
             let cursor_before = led_state_tabs::Cursor::default();
             let cursor_after = led_state_tabs::Cursor::default();
@@ -376,8 +411,7 @@ pub(crate) fn reconcile_external_change(
                 cursor_after,
                 None,
             );
-            eb.rope = new_rope;
-            eb.disk_content_hash = new_hash;
+            eb.set_persisted_content(new_rope);
             eb.version.0 = eb.version.0.saturating_add(1);
             eb.saved_version = SavedVersion(eb.version.0);
             refresh_after_external_change(reread, fs, git_scan_pending);

@@ -17,5 +17,6 @@ publish = false
 # ready for the completions side panel.
 
 [dependencies]
-led-core = { workspace = true }
 drv = { workspace = true }
+led-abi-find-file = { workspace = true }
+led-core = { workspace = true }

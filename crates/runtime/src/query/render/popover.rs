@@ -1,6 +1,8 @@
 //! Popover (diagnostic hover) slice of the render frame.
 
-use led_driver_terminal_core::{PopoverLine, PopoverModel, PopoverSeverity, Rect};
+use led_driver_terminal_core::{
+    PopoverLine, PopoverModel, PopoverPlacement, PopoverPreferred, PopoverSeverity, Rect,
+};
 use led_state_browser::Focus;
 use led_state_diagnostics::{Diagnostic, DiagnosticSeverity};
 use std::sync::Arc;
@@ -26,12 +28,13 @@ const POPOVER_MAX_CONTENT: usize = 58;
 ///   content (no-smear: hide rather than show stale).
 /// - No Error/Warning diagnostic covers the cursor row
 ///   (Info/Hint are silent, matching legacy).
-pub fn popover_model(
-    edits: EditedBuffersInput<'_>,
-    tabs: TabsActiveInput<'_>,
-    overlays: OverlaysInput<'_>,
-    browser: BrowserUiInput<'_>,
-    diagnostics: DiagnosticsStatesInput<'_>,
+#[drv::memo(single)]
+pub fn popover_model<'a, 'b, 'c, 'd, 'e>(
+    edits: EditedBuffersInput<'a>,
+    tabs: TabsActiveInput<'b>,
+    overlays: OverlaysInput<'c>,
+    browser: BrowserUiInput<'d>,
+    diagnostics: DiagnosticsStatesInput<'e>,
     editor_area: Rect,
 ) -> Option<PopoverModel> {
     if overlays.find_file.is_some()
@@ -47,7 +50,7 @@ pub fn popover_model(
     let tab = tabs.open.iter().find(|t| t.id == id)?;
     let eb = edits.buffers.get(&tab.path)?;
     let bd = diagnostics.by_path.get(&tab.path)?;
-    let current_hash = led_core::EphemeralContentHash::of_rope(&eb.rope).persist();
+    let current_hash = led_core::EphemeralContentHash::of_rope(&eb.draft).persist();
     if bd.hash != current_hash {
         return None;
     }
@@ -119,16 +122,16 @@ pub fn popover_model(
     if row_in_area >= editor_area.rows {
         return None;
     }
-    use led_core::col_to_sub_line;
+    use led_text_layout::col_to_sub_line;
     let content_cols = (editor_area.cols as usize)
         .saturating_sub(GUTTER_WIDTH)
         .saturating_sub(TRAILING_RESERVED_COLS);
     // Cursor on a row past the rope's last line — anchor at col 0
     // (no content to translate). Same-row diagnostics still pop.
-    let col_within_cells = if cursor_row >= eb.rope.len_lines() {
+    let col_within_cells = if cursor_row >= eb.draft.len_lines() {
         0
     } else {
-        let (_, cells) = col_to_sub_line(tab.cursor.col, eb.rope.line(cursor_row), content_cols);
+        let (_, cells) = col_to_sub_line(tab.cursor.col, eb.draft.line(cursor_row), content_cols);
         cells
     };
     let anchor_x = editor_area
@@ -137,9 +140,33 @@ pub fn popover_model(
         .saturating_add(col_within_cells as u16);
     let anchor_y = editor_area.y.saturating_add(row_in_area);
 
+    // Outer box dimensions: 1-col padding on each side; clamp to
+    // editor area on both axes. Mirrors the legacy painter's
+    // measurement so flipped/non-flipped placements match.
+    let content_w = lines
+        .iter()
+        .filter(|l| l.severity.is_some())
+        .map(|l| l.text.chars().count())
+        .max()
+        .unwrap_or(1);
+    let outer_w = (content_w + 2).min(editor_area.cols as usize).max(3) as u16;
+    let height = lines
+        .len()
+        .min((editor_area.rows as usize) / 2)
+        .max(1) as u16;
+    let placement = PopoverPlacement::derive(
+        (anchor_x, anchor_y),
+        (outer_w, height),
+        editor_area,
+        PopoverPreferred::Above,
+    );
+
     Some(PopoverModel {
         lines: Arc::new(lines),
         anchor: (anchor_x, anchor_y),
+        placement,
+        outer_width: outer_w,
+        height,
     })
 }
 

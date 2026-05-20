@@ -1,28 +1,22 @@
-//! `ClipboardState` — the driver-adjacent slice of the yank / kill
-//! flow.
+//! `ClipboardIntent` — user-decision side of the yank / kill flow.
 //!
-//! Course-correct #5: `read_in_flight` used to live on `KillRing`, a
-//! user-decision source. That was a category error — it's async-work
-//! tracking, not a user choice. This crate pulls it out alongside
-//! the small set of signals that bridge between dispatch
-//! (kill-produced text, yank request) and the clipboard driver.
+//! Per EXAMPLE-ARCH § "Stateless drivers still need an in-flight
+//! source", the in-flight bookkeeping moved off this crate and onto
+//! the driver-owned `driver_clipboard_core::ClipboardState`. This
+//! crate retains only the user-decided intents:
 //!
-//! Contents:
-//! - `pending_yank`: **user decision** — dispatch sets this on
-//!   `Yank`; the clipboard driver's Read completion consumes it.
-//! - `read_in_flight`: **driver state** — true between Read
-//!   execute and Read done. Prevents double-issue.
-//! - `pending_write`: **bridge** — kill-produced text queued for
-//!   async Write. Execute drains + clears.
+//! - `pending_yank`: dispatch sets it on `Yank`; ingest consumes it
+//!   when the clipboard driver's Read completes.
+//! - `pending_write`: dispatch sets it on kill; the execute phase
+//!   takes it when the driver's write slot is idle.
 
 use std::sync::Arc;
 
 use led_state_tabs::TabId;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct ClipboardState {
+pub struct ClipboardIntent {
     pub pending_yank: Option<TabId>,
-    pub read_in_flight: bool,
     pub pending_write: Option<Arc<str>>,
 }
 
@@ -32,9 +26,8 @@ mod tests {
 
     #[test]
     fn default_is_idle() {
-        let c = ClipboardState::default();
+        let c = ClipboardIntent::default();
         assert!(c.pending_yank.is_none());
-        assert!(!c.read_in_flight);
         assert!(c.pending_write.is_none());
     }
 }
