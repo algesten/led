@@ -76,11 +76,6 @@ pub struct Tab {
     /// `Tab::previous_tab` (`/led/led/src/model/action/preview.rs`).
     /// `None` on non-preview tabs or when no tab was active.
     pub previous_tab: Option<TabId>,
-    /// Last committed isearch query for this tab. Stashed by
-    /// `search_accept` / `search_cancel` so `Ctrl-s` on an empty
-    /// query recalls it. Per-tab (not global) because users
-    /// typically want per-buffer search history. M13.
-    pub last_search: Option<String>,
     /// Cursor to apply once the buffer at this tab's path has
     /// been loaded into [`led_state_buffer_edits::BufferEdits`].
     /// Set when a tab is opened with a target the user wants

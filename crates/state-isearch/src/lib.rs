@@ -1,6 +1,6 @@
 //! `IsearchState` — in-buffer incremental search.
 //!
-//! Legacy semantics (`docs/spec/search.md` § "In-buffer isearch"):
+//! Semantics (`docs/spec/search.md` § "In-buffer isearch"):
 //!
 //! - `Ctrl-s` starts the search, capturing the current cursor +
 //!   scroll as the `origin`.
@@ -9,15 +9,22 @@
 //!   at-or-after the current cursor position.
 //! - No forward match flips a `failed` flag. A second `Ctrl-s`
 //!   from `failed` wraps to match index 0.
-//! - `Ctrl-s` with an empty query recalls `last_query` (if any).
 //! - `Enter` accepts — clears the overlay, keeps cursor where it
-//!   is, stashes the query into `last_query`, and pushes a
-//!   `JumpRecord` for the origin if the cursor moved.
-//! - `Esc` / `Ctrl-g` aborts — restores the origin and saves
-//!   `last_query` for next time.
+//!   is, and pushes a `JumpRecord` for the origin if the cursor
+//!   moved.
+//! - `Esc` / `Ctrl-g` aborts — restores the origin.
 //! - Any editing key or arrow key while isearch is active emits
 //!   `SearchAccept` *and* runs its normal handler on the same
 //!   tick ("accept on passthrough").
+//!
+//! Per audit Finding I2 there is no last-query recall: legacy's
+//! `Tab::last_search` (the cross-session-but-actually-per-tab
+//! store) and `IsearchState::last_query` (its in-session
+//! companion) were duplicates of the same datum. The audit
+//! decided that having neither is simpler than keeping a
+//! single one — `Ctrl-s` with an empty query is now a no-op
+//! (rather than a recall from a possibly-stale stash). Users
+//! can still re-type a recent query if they want it back.
 
 use led_state_tabs::{Cursor, Scroll};
 use led_state_text_input::TextInput;
@@ -60,22 +67,12 @@ pub struct IsearchState {
     /// (all matches are before the cursor, or no matches at all).
     /// The next `Ctrl-s` wraps to match 0 and clears the flag.
     pub failed: bool,
-
-    /// Recalled on `Ctrl-s` with an empty query. Persists across
-    /// Esc/Enter so the user's previous search is available for
-    /// re-triggering.
-    pub last_query: Option<String>,
 }
 
 impl IsearchState {
     /// Start a fresh isearch session at `origin_cursor` /
-    /// `origin_scroll`. `last_query` carries over from a prior
-    /// session if the caller has one stashed.
-    pub fn start(
-        origin_cursor: Cursor,
-        origin_scroll: Scroll,
-        last_query: Option<String>,
-    ) -> Self {
+    /// `origin_scroll`.
+    pub fn start(origin_cursor: Cursor, origin_scroll: Scroll) -> Self {
         Self {
             query: TextInput::default(),
             origin_cursor,
@@ -83,7 +80,6 @@ impl IsearchState {
             matches: Vec::new(),
             match_idx: None,
             failed: false,
-            last_query,
         }
     }
 }
@@ -96,10 +92,9 @@ mod tests {
     fn start_seeds_empty_query_and_records_origin() {
         let origin = Cursor { line: 3, col: 7, preferred_col: 7 };
         let scroll = Scroll { top: 0, top_sub_line: led_core::SubLine(0) };
-        let s = IsearchState::start(origin, scroll, Some("prev".into()));
+        let s = IsearchState::start(origin, scroll);
         assert_eq!(s.query.text, "");
         assert_eq!(s.origin_cursor, origin);
-        assert_eq!(s.last_query.as_deref(), Some("prev"));
         assert!(s.matches.is_empty());
         assert!(!s.failed);
     }

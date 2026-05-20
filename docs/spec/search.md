@@ -43,8 +43,10 @@ the origin and clears the matches list — this is how the user can
 **Ctrl-s again** (`InBufferSearch` while isearch is active) advances
 to the next match via `search::search_next`. Semantics:
 
-- If the query is empty, recall `buf.last_search` (if any), populate
-  the query, re-run `update_search`.
+- If the query is empty, no-op. (Legacy recalled `buf.last_search`
+  here; per audit Finding I2 that field has been removed as a
+  duplicate of the in-session `last_query`, and both are gone — see
+  the State-touched section.)
 - If currently in `failed` state, **wrap to match index 0** and clear
   the failed flag. This is the wrap-around — it takes a second
   `Ctrl-s` press after hitting the end.
@@ -59,14 +61,15 @@ current match and moves the cursor up. `Resize`, `Quit`, `Suspend`
 and `InBufferSearch` itself are carved out of this "accept on
 passthrough" rule.
 
-**Enter** accepts the search — keeps the cursor where it is, stashes
-the query into `buf.last_search` for future `Ctrl-s`-on-empty
-recalls, clears the isearch state. Additionally, if the cursor moved
-from its origin, `isearch_of` emits `Mut::JumpRecord` with the origin
+**Enter** accepts the search — keeps the cursor where it is, clears
+the isearch state. Additionally, if the cursor moved from its
+origin, `isearch_of` emits `Mut::JumpRecord` with the origin
 position so the user can `Alt-Left` back (`isearch_of.rs:114-131`).
+(Legacy also stashed the query into `buf.last_search`; that field
+is gone per audit Finding I2.)
 
-**Esc / Ctrl-g** cancels: restores cursor and scroll to the origin,
-saves `last_search`, clears `isearch` (`search.rs:161-167`).
+**Esc / Ctrl-g** cancels: restores cursor and scroll to the origin
+and clears `isearch` (`search.rs:161-167`).
 
 ### File-search overlay
 
@@ -159,9 +162,9 @@ preview tab. Back to the overlay, `Alt-3` enters replace mode,
 
 - `BufferState.isearch: Option<ISearchState>` — owned by the buffer,
   set by `start_search`, cleared by `search_accept` / `search_cancel`
-  / `Mut::SearchAccept`.
-- `BufferState.last_search` — persisted across isearch sessions
-  within the buffer, recalled on `Ctrl-s` with empty query.
+  / `Mut::SearchAccept`. Per audit Finding I2 there is no longer a
+  separate `last_search` / `last_query` cross-session field — the
+  audit removed both as duplicative.
 - `AppState.file_search: Option<FileSearchState>` —
   `query`, `cursor_pos`, `case_sensitive`, `use_regex`, `results`,
   `flat_hits`, `selection`, `scroll_offset`, `replace_mode`,
@@ -194,13 +197,14 @@ preview tab. Back to the overlay, `Alt-3` enters replace mode,
 - Driver events: `FileSearchOut::Search`, `FileSearchOut::Replace`,
   `FileSearchIn::Results`, `FileSearchIn::ReplaceComplete` —
   `crates/file-search/src/lib.rs`.
-- Persisted: isearch `last_search` is in-process only; file-search
-  state is ephemeral (nothing persisted).
+- Persisted: nothing — isearch state is dropped on accept / abort
+  and there is no per-tab `last_search` recall (per audit I2);
+  file-search state is also ephemeral.
 
 ## Edge cases
 
-- **Isearch empty query + `Ctrl-s`**: recalls `buf.last_search`
-  (`search.rs:101-113`); still empty → no-op.
+- **Isearch empty query + `Ctrl-s`**: no-op (per audit Finding I2
+  the recall feature has been removed; users re-type their query).
 - **Isearch failed then typing**: `update_search` recomputes from
   current cursor, so the failed flag may clear without wrap.
 - **Unicode in queries**: both query and line are lowercased and
