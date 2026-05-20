@@ -4,8 +4,10 @@
 
 use led_state_alerts::AlertState;
 use led_state_buffer_edits::BufferEdits;
-use led_state_jumps::{JumpListState, JumpPosition};
+use led_state_jumps::JumpListState;
 use led_state_tabs::{Tab, TabId, Tabs};
+
+use crate::query::{TabsActiveInput, outgoing_jump_position};
 
 pub(super) fn cycle_active(tabs: &mut Tabs, jumps: &mut JumpListState, delta: isize) {
     if tabs.open.is_empty() {
@@ -18,22 +20,19 @@ pub(super) fn cycle_active(tabs: &mut Tabs, jumps: &mut JumpListState, delta: is
         .unwrap_or(0) as isize;
     let next_idx = (cur_idx + delta).rem_euclid(n) as usize;
 
-    // Record the outgoing tab's cursor so Alt-b returns here. Skip
-    // the no-op case where the tab doesn't actually change.
-    if let Some(prev_id) = tabs.active
-        && let Some(prev) = tabs.open.iter().find(|t| t.id == prev_id)
-        && prev.id != tabs.open[next_idx].id
+    // Record the outgoing tab's cursor so Alt-b returns here. The
+    // memo computes the position as a pure projection of the
+    // active Tab; dispatch decides whether to push (skip the
+    // no-op case where the cycle lands on the same tab).
+    let next_id = tabs.open[next_idx].id;
+    let outgoing_is_different = tabs.active != Some(next_id);
+    if outgoing_is_different
+        && let Some(pos) = outgoing_jump_position(TabsActiveInput::new(tabs))
     {
-        jumps.record(JumpPosition {
-            path: prev.path.clone(),
-            line: prev.cursor.line,
-            col: prev.cursor.col,
-            top: prev.scroll.top,
-            top_sub_line: prev.scroll.top_sub_line,
-        });
+        jumps.record(pos);
     }
 
-    tabs.active = Some(tabs.open[next_idx].id);
+    tabs.active = Some(next_id);
 }
 
 /// Close the active tab. If the buffer is dirty, raise a confirm-kill

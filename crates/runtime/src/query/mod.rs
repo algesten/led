@@ -20,8 +20,8 @@ pub mod render;
 
 pub use actions::{
     buffer_state_sum, clipboard_action, external_reread_targets, file_load_action,
-    file_save_action, find_file_action, notify_hash_index, static_deadline,
-    sync_check_cmds,
+    file_save_action, find_file_action, notify_hash_index, outgoing_jump_position,
+    static_deadline, sync_check_cmds,
 };
 pub use browser::{
     browser_auto_expanded, browser_entries, browser_selected_idx, desired_preview_intent,

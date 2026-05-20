@@ -9,6 +9,7 @@ use led_driver_buffers_core::{LoadAction, SaveAction};
 use led_driver_clipboard_core::ClipboardAction;
 use led_driver_file_watch_core::{ChangeKinds, FileWatchEvent};
 use led_driver_session_core::SessionCmd;
+use led_state_jumps::JumpPosition;
 use std::sync::Arc;
 
 use super::inputs::*;
@@ -333,4 +334,32 @@ pub fn find_file_action<'f>(
             show_hidden: r.show_hidden,
         })
         .collect()
+}
+
+/// "If the active tab were about to lose focus (tab cycle,
+/// goto-def, …), what [`JumpPosition`] should we record onto
+/// the jump list?"
+///
+/// Pure projection of the active `Tab`'s `(path, cursor, scroll)`
+/// — the same shape `nav::current_position` /
+/// `apply::lsp::current_jump_position` compute non-memoized.
+/// Callers (tab cycle, future goto-def) read this memo and
+/// decide whether the resulting move actually warrants a push
+/// (e.g. tab cycle skips when the next tab is the same as
+/// the current one).
+///
+/// `None` when there's no active tab.
+#[drv::memo(single)]
+pub fn outgoing_jump_position<'t>(
+    tabs: TabsActiveInput<'t>,
+) -> Option<JumpPosition> {
+    let id = (*tabs.active)?;
+    let tab = tabs.open.iter().find(|t| t.id == id)?;
+    Some(JumpPosition {
+        path: tab.path.clone(),
+        line: tab.cursor.line,
+        col: tab.cursor.col,
+        top: tab.scroll.top,
+        top_sub_line: tab.scroll.top_sub_line,
+    })
 }
