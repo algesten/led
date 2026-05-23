@@ -657,6 +657,68 @@ pub(crate) fn ingest_syntax(sources: &mut Sources, env: &TickEnv<'_>) {
     }
 }
 
+/// Rebuild `tabs.open` from a restored session, layered over any tabs
+/// already present (CLI-arg opens, seeded before restore — they survive
+/// regardless of disk state).
+///
+/// A *restore-only* buffer is kept only while its file still exists.
+/// Opening a vanished path would load an empty rope (`create_if_missing`
+/// on the initial read) and resurrect a file the user deleted between
+/// runs — wanted for explicit opens (CLI args, find-file), never for a
+/// workspace restore. CLI tabs are merged above (the `existing` branch),
+/// so the existence gate only ever drops session-resurrected buffers. We
+/// drop only on a definitive "not there"; a stat error (permission/IO)
+/// keeps the buffer. The once-per-restore `try_exists` matches the
+/// syscall the adjacent `resolve_chain` / `restore_preview_from_selection`
+/// already pay — see the latter's "Architecture exemption: synchronous
+/// read during Ingest".
+///
+/// `active_tab_order` indexes the *persisted* buffer list; dropped
+/// buffers shift those positions, so the active tab is resolved by path
+/// identity, falling back to the first surviving tab when the
+/// previously-active file was itself the one deleted.
+fn restore_open_tabs(
+    data: &led_driver_session_core::SessionData,
+    tabs: &mut led_state_tabs::Tabs,
+    path_chains: &mut std::collections::HashMap<CanonPath, led_core::PathChain>,
+) {
+    let mut new_tabs: imbl::Vector<led_state_tabs::Tab> = tabs.open.clone();
+    for sb in &data.buffers {
+        if let Some(existing) = new_tabs.iter_mut().find(|t| t.path == sb.path) {
+            if existing.pending_cursor.is_none() {
+                existing.pending_cursor = Some(sb.cursor);
+            }
+            if existing.pending_scroll.is_none() {
+                existing.pending_scroll = Some(sb.scroll);
+            }
+            continue;
+        }
+        if matches!(sb.path.as_path().try_exists(), Ok(false)) {
+            continue;
+        }
+        let id = TabId(new_tabs.iter().map(|t| t.id.0).max().unwrap_or(0) + 1);
+        let chain = led_core::UserPath::new(sb.path.as_path()).resolve_chain();
+        path_chains.insert(sb.path.clone(), chain);
+        new_tabs.push_back(led_state_tabs::Tab {
+            id,
+            path: sb.path.clone(),
+            pending_cursor: Some(sb.cursor),
+            pending_scroll: Some(sb.scroll),
+            ..Default::default()
+        });
+    }
+    if tabs.active.is_none() {
+        tabs.active = data
+            .buffers
+            .get(data.active_tab_order)
+            .map(|sb| &sb.path)
+            .and_then(|ap| new_tabs.iter().find(|t| &t.path == ap))
+            .or_else(|| new_tabs.front())
+            .map(|t| t.id);
+    }
+    tabs.open = new_tabs;
+}
+
 /// Session driver events: Restored / SessionSaved / UndoFlushed /
 /// Failed / SyncResult. Promotes Phase::Starting → Resuming/Running
 /// based on whether tabs have any pending cursors to apply.
@@ -705,49 +767,7 @@ pub(crate) fn ingest_session(sources: &mut Sources, env: &TickEnv<'_>) {
                             undo_persistence,
                         );
                     }
-                    let mut new_tabs: imbl::Vector<led_state_tabs::Tab> =
-                        tabs.open.clone();
-                    for sb in &data.buffers {
-                        if let Some(existing) = new_tabs
-                            .iter_mut()
-                            .find(|t| t.path == sb.path)
-                        {
-                            if existing.pending_cursor.is_none() {
-                                existing.pending_cursor = Some(sb.cursor);
-                            }
-                            if existing.pending_scroll.is_none() {
-                                existing.pending_scroll = Some(sb.scroll);
-                            }
-                            continue;
-                        }
-                        let id = TabId(
-                            new_tabs
-                                .iter()
-                                .map(|t| t.id.0)
-                                .max()
-                                .unwrap_or(0)
-                                + 1,
-                        );
-                        let chain = led_core::UserPath::new(
-                            sb.path.as_path(),
-                        )
-                        .resolve_chain();
-                        path_chains.insert(sb.path.clone(), chain);
-                        new_tabs.push_back(led_state_tabs::Tab {
-                            id,
-                            path: sb.path.clone(),
-                            pending_cursor: Some(sb.cursor),
-                            pending_scroll: Some(sb.scroll),
-                            ..Default::default()
-                        });
-                    }
-                    if tabs.active.is_none()
-                        && let Some(t) =
-                            new_tabs.get(data.active_tab_order)
-                    {
-                        tabs.active = Some(t.id);
-                    }
-                    tabs.open = new_tabs;
+                    restore_open_tabs(&data, tabs, path_chains);
                     browser.visible = data.show_side_panel;
                     apply_session_kv(&data.kv, browser, jumps);
                     // Re-establish the "browser cursor on a file ⇒
@@ -913,5 +933,120 @@ pub(crate) fn ingest_browser_snap(sources: &mut Sources) {
         {
             browser.selected_path = Some(p.clone());
         }
+    }
+}
+
+#[cfg(test)]
+mod restore_tests {
+    use super::*;
+    use led_core::UserPath;
+    use led_driver_session_core::{SessionBuffer, SessionData};
+    use led_state_tabs::{Cursor, Scroll, Tabs};
+    use std::collections::HashMap;
+
+    fn sbuf(path: &CanonPath, order: usize) -> SessionBuffer {
+        SessionBuffer {
+            path: path.clone(),
+            tab_order: order,
+            cursor: Cursor::default(),
+            scroll: Scroll::default(),
+            undo: None,
+        }
+    }
+
+    #[test]
+    fn restore_drops_deleted_buffers_and_keeps_existing() {
+        // Repro of: `led foo.txt` (new) -> save -> exit -> rm foo.txt
+        // -> `led`. The session persisted foo.txt as an open buffer;
+        // restore must NOT resurrect it as an empty create-if-missing
+        // buffer, while a sibling that still exists restores normally.
+        let dir = tempfile::tempdir().unwrap();
+        let keep = dir.path().join("keep.txt");
+        std::fs::write(&keep, b"k\n").unwrap();
+        let keep = UserPath::new(&keep).canonicalize();
+        let gone = UserPath::new(dir.path().join("foo.txt")).canonicalize();
+
+        let data = SessionData {
+            active_tab_order: 1, // points at the *deleted* buffer
+            show_side_panel: true,
+            buffers: vec![sbuf(&keep, 0), sbuf(&gone, 1)],
+            kv: HashMap::new(),
+        };
+
+        let mut tabs = Tabs::default();
+        let mut chains = HashMap::new();
+        restore_open_tabs(&data, &mut tabs, &mut chains);
+
+        let paths: Vec<_> = tabs.open.iter().map(|t| t.path.clone()).collect();
+        assert_eq!(paths, vec![keep.clone()], "deleted buffer must not be restored");
+        assert!(!chains.contains_key(&gone), "no path_chain for a dropped buffer");
+        assert!(chains.contains_key(&keep));
+        // The persisted-active buffer was the deleted one; active falls
+        // back to the surviving tab rather than leaving the pane blank.
+        assert_eq!(tabs.active, tabs.open.front().map(|t| t.id));
+    }
+
+    #[test]
+    fn restore_resolves_active_by_path_after_drop() {
+        // persisted order [gone, a, b] with active=b at index 2. Dropping
+        // `gone` shifts indices, so the active tab must be resolved by
+        // path identity, not by the stale persisted index.
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.txt");
+        std::fs::write(&a, b"a").unwrap();
+        let b = dir.path().join("b.txt");
+        std::fs::write(&b, b"b").unwrap();
+        let a = UserPath::new(&a).canonicalize();
+        let b = UserPath::new(&b).canonicalize();
+        let gone = UserPath::new(dir.path().join("gone.txt")).canonicalize();
+
+        let data = SessionData {
+            active_tab_order: 2,
+            show_side_panel: false,
+            buffers: vec![sbuf(&gone, 0), sbuf(&a, 1), sbuf(&b, 2)],
+            kv: HashMap::new(),
+        };
+        let mut tabs = Tabs::default();
+        let mut chains = HashMap::new();
+        restore_open_tabs(&data, &mut tabs, &mut chains);
+
+        let paths: Vec<_> = tabs.open.iter().map(|t| t.path.clone()).collect();
+        assert_eq!(paths, vec![a, b.clone()]);
+        let active_path = tabs
+            .active
+            .and_then(|id| tabs.open.iter().find(|t| t.id == id))
+            .map(|t| t.path.clone());
+        assert_eq!(active_path, Some(b), "active resolved by identity despite index shift");
+    }
+
+    #[test]
+    fn restore_keeps_cli_tab_for_missing_file() {
+        // A CLI-arg tab for a not-yet-existing file (`led new.txt`) is
+        // seeded into tabs.open before restore. Even though the file is
+        // missing, the existence gate must NOT drop it — create-if-missing
+        // is exactly what an explicit open wants.
+        let dir = tempfile::tempdir().unwrap();
+        let new = UserPath::new(dir.path().join("new.txt")).canonicalize();
+
+        let mut tabs = Tabs::default();
+        tabs.open.push_back(led_state_tabs::Tab {
+            id: TabId(1),
+            path: new.clone(),
+            ..Default::default()
+        });
+        tabs.active = Some(TabId(1));
+
+        // The session also remembers it (it was open last run).
+        let data = SessionData {
+            active_tab_order: 0,
+            show_side_panel: false,
+            buffers: vec![sbuf(&new, 0)],
+            kv: HashMap::new(),
+        };
+        let mut chains = HashMap::new();
+        restore_open_tabs(&data, &mut tabs, &mut chains);
+
+        let paths: Vec<_> = tabs.open.iter().map(|t| t.path.clone()).collect();
+        assert_eq!(paths, vec![new], "explicit CLI open of a missing file is preserved");
     }
 }
