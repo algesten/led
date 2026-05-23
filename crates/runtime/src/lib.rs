@@ -2106,12 +2106,11 @@ mod tests {
         use led_driver_file_watch_core::ChangeKinds;
         let dir = tempfile::tempdir().unwrap();
         let mut fs = workspace_fs(dir.path());
-        let edits = BufferEdits::default();
 
         let p = canon(dir.path().join(".git/objects/ab/cdef").to_str().unwrap());
         let fw = fw_with(vec![make_event(&p, ChangeKinds::CREATED | ChangeKinds::REMOVED)]);
 
-        let git_scan = apply_workspace_tree_delta(&fw, &edits, &mut fs);
+        let git_scan = apply_workspace_tree_delta(&fw, &mut fs);
         assert!(!git_scan, ".git/objects must not request a rescan");
         // Root listing untouched.
         let root_canon = led_core::UserPath::new(dir.path().to_path_buf()).canonicalize();
@@ -2123,7 +2122,6 @@ mod tests {
         use led_driver_file_watch_core::ChangeKinds;
         let dir = tempfile::tempdir().unwrap();
         let mut fs = workspace_fs(dir.path());
-        let edits = BufferEdits::default();
         let root_canon = led_core::UserPath::new(dir.path().to_path_buf()).canonicalize();
 
         let cases = [
@@ -2134,7 +2132,7 @@ mod tests {
         for rel in cases {
             let p = canon(dir.path().join(rel).to_str().unwrap());
             let fw = fw_with(vec![make_event(&p, ChangeKinds::CREATED)]);
-            let git_scan = apply_workspace_tree_delta(&fw, &edits, &mut fs);
+            let git_scan = apply_workspace_tree_delta(&fw, &mut fs);
             assert!(git_scan, "sentinel {rel} must request a rescan");
             assert!(
                 fs.dir_contents[&root_canon].is_empty(),
@@ -2150,17 +2148,55 @@ mod tests {
         let new_file = dir.path().join("hello.txt");
         std::fs::write(&new_file, b"x").unwrap();
         let mut fs = workspace_fs(dir.path());
-        let edits = BufferEdits::default();
         let root_canon = led_core::UserPath::new(dir.path().to_path_buf()).canonicalize();
         let new_canon = canon(new_file.to_str().unwrap());
 
         let fw = fw_with(vec![make_event(&new_canon, ChangeKinds::CREATED)]);
-        let _ = apply_workspace_tree_delta(&fw, &edits, &mut fs);
+        let _ = apply_workspace_tree_delta(&fw, &mut fs);
 
         let entries = &fs.dir_contents[&root_canon];
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].name, "hello.txt");
         assert_eq!(entries[0].path, new_canon);
+    }
+
+    #[test]
+    fn new_file_saved_appears_and_is_selected_in_browser() {
+        // Repro of `led xxx.txt` on a not-yet-existing file: type,
+        // save — the save writes the file and the recursive root
+        // watch reports a genuine CREATE. The new file must (1) show
+        // up in the browser tree and (2) be the resolved selection,
+        // since the side-panel cursor is pinned to the active tab's
+        // path. Regression: the listing delta used to drop the
+        // CREATE whenever a buffer was open for the path, so a
+        // freshly-saved new file never appeared and the selection
+        // fell back to row 0.
+        use led_driver_file_watch_core::ChangeKinds;
+        let dir = tempfile::tempdir().unwrap();
+        let new_file = dir.path().join("xxx.txt");
+        std::fs::write(&new_file, b"hi").unwrap(); // the save landed it
+        let mut fs = workspace_fs(dir.path());
+        let new_canon = canon(new_file.to_str().unwrap());
+
+        let fw = fw_with(vec![make_event(&new_canon, ChangeKinds::CREATED)]);
+        let _ = apply_workspace_tree_delta(&fw, &mut fs);
+
+        // (1) Present in the flattened browser tree.
+        let expanded = imbl::HashSet::new();
+        let entries = led_driver_fs_list_core::walk_tree(&fs, &expanded);
+        assert!(
+            entries.iter().any(|e| e.path == new_canon),
+            "newly-saved file must appear in the browser tree"
+        );
+
+        // (2) The active-tab-pinned selection resolves to its row,
+        //     not the row-0 fallback.
+        let idx =
+            crate::query::browser::browser_selected_idx(&entries, Some(&new_canon));
+        assert_eq!(
+            entries[idx].path, new_canon,
+            "browser must select the freshly-saved file"
+        );
     }
 
     #[test]
@@ -2179,14 +2215,13 @@ mod tests {
 
         let mut fs = workspace_fs(dir.path());
         // Note: target/ NOT in dir_contents — collapsed.
-        let edits = BufferEdits::default();
         let root_canon = led_core::UserPath::new(dir.path().to_path_buf()).canonicalize();
 
         let fw = fw_with(vec![make_event(
             &canon(buried.to_str().unwrap()),
             ChangeKinds::CREATED,
         )]);
-        let _ = apply_workspace_tree_delta(&fw, &edits, &mut fs);
+        let _ = apply_workspace_tree_delta(&fw, &mut fs);
 
         // Root unchanged. No magical stats happened in target/.
         assert!(fs.dir_contents[&root_canon].is_empty());
@@ -2225,9 +2260,8 @@ mod tests {
             }]),
         );
 
-        let edits = BufferEdits::default();
         let fw = fw_with(vec![make_event(&sub_canon, ChangeKinds::REMOVED)]);
-        let _ = apply_workspace_tree_delta(&fw, &edits, &mut fs);
+        let _ = apply_workspace_tree_delta(&fw, &mut fs);
 
         // src removed from root listing.
         assert!(fs.dir_contents[&root_canon].is_empty());
@@ -2242,7 +2276,6 @@ mod tests {
         let f = dir.path().join("a.txt");
         std::fs::write(&f, b"x").unwrap();
         let mut fs = workspace_fs(dir.path());
-        let edits = BufferEdits::default();
         let root_canon = led_core::UserPath::new(dir.path().to_path_buf()).canonicalize();
         let p = canon(f.to_str().unwrap());
 
@@ -2250,7 +2283,7 @@ mod tests {
             make_event(&p, ChangeKinds::CREATED),
             make_event(&p, ChangeKinds::CREATED),
         ]);
-        let _ = apply_workspace_tree_delta(&fw, &edits, &mut fs);
+        let _ = apply_workspace_tree_delta(&fw, &mut fs);
         assert_eq!(fs.dir_contents[&root_canon].len(), 1);
     }
 
@@ -2261,12 +2294,11 @@ mod tests {
         let f = dir.path().join(".secret");
         std::fs::write(&f, b"x").unwrap();
         let mut fs = workspace_fs(dir.path());
-        let edits = BufferEdits::default();
         let root_canon = led_core::UserPath::new(dir.path().to_path_buf()).canonicalize();
         let p = canon(f.to_str().unwrap());
 
         let fw = fw_with(vec![make_event(&p, ChangeKinds::CREATED)]);
-        let _ = apply_workspace_tree_delta(&fw, &edits, &mut fs);
+        let _ = apply_workspace_tree_delta(&fw, &mut fs);
         assert!(fs.dir_contents[&root_canon].is_empty());
     }
 
@@ -2278,12 +2310,11 @@ mod tests {
         use led_driver_file_watch_core::ChangeKinds;
         let dir = tempfile::tempdir().unwrap();
         let mut fs = workspace_fs(dir.path());
-        let edits = BufferEdits::default();
         let root_canon = led_core::UserPath::new(dir.path().to_path_buf()).canonicalize();
         let ghost = canon(dir.path().join("ghost").to_str().unwrap());
 
         let fw = fw_with(vec![make_event(&ghost, ChangeKinds::CREATED)]);
-        let _ = apply_workspace_tree_delta(&fw, &edits, &mut fs);
+        let _ = apply_workspace_tree_delta(&fw, &mut fs);
         assert!(fs.dir_contents[&root_canon].is_empty());
     }
 
@@ -2292,12 +2323,11 @@ mod tests {
         use led_driver_file_watch_core::ChangeKinds;
         let dir = tempfile::tempdir().unwrap();
         let mut fs = workspace_fs(dir.path());
-        let edits = BufferEdits::default();
         let root_canon = led_core::UserPath::new(dir.path().to_path_buf()).canonicalize();
         let p = canon(dir.path().join("a.txt").to_str().unwrap());
 
         let fw = fw_with(vec![make_event(&p, ChangeKinds::MODIFIED)]);
-        let git = apply_workspace_tree_delta(&fw, &edits, &mut fs);
+        let git = apply_workspace_tree_delta(&fw, &mut fs);
         assert!(!git);
         assert!(fs.dir_contents[&root_canon].is_empty());
     }
@@ -2351,10 +2381,9 @@ mod tests {
         fs.failed_dirs.insert(revived_canon.clone());
         fs.failed_dirs.insert(inner_canon.clone());
 
-        let edits = BufferEdits::default();
         let leaf_canon = canon(leaf.to_str().unwrap());
         let fw = fw_with(vec![make_event(&leaf_canon, ChangeKinds::CREATED)]);
-        let _ = apply_workspace_tree_delta(&fw, &edits, &mut fs);
+        let _ = apply_workspace_tree_delta(&fw, &mut fs);
 
         assert!(
             !fs.failed_dirs.contains(&revived_canon),
