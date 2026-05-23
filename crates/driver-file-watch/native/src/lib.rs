@@ -256,12 +256,23 @@ fn handle_raw_event(
     tx_ev: &Sender<FileWatchEvent>,
     notify: &Notifier,
 ) {
-    let kinds = classify_event_kind(ev.kind);
-    if kinds.bits() == 0 {
-        return; // Access events and friends — drop.
+    // `Access`, `Other`, and `Any` never carry listing/reread meaning —
+    // drop the whole event before the per-path work and the wake.
+    if matches!(
+        ev.kind,
+        EventKind::Access(_) | EventKind::Other | EventKind::Any
+    ) {
+        return;
     }
     let now = Instant::now();
     for raw_path in &ev.paths {
+        // Classify per-path: a rename (`Modify(Name(..))`) makes its
+        // destination appear and its source disappear, and a single
+        // `RenameMode::Both` event carries both paths at once.
+        let kinds = classify_event_kind(&ev.kind, raw_path);
+        if kinds.bits() == 0 {
+            continue;
+        }
         let canon = canon_for_event(raw_path);
         for (id, info) in regs.iter() {
             if !path_matches_registration(&canon, info) {
@@ -329,11 +340,30 @@ fn next_drain_deadline(
         .min()
 }
 
-fn classify_event_kind(kind: EventKind) -> ChangeKinds {
+fn classify_event_kind(kind: &EventKind, path: &Path) -> ChangeKinds {
+    use notify::event::ModifyKind;
     match kind {
         EventKind::Create(_) => ChangeKinds::from_bits(ChangeKinds::CREATED),
-        EventKind::Modify(_) => ChangeKinds::from_bits(ChangeKinds::MODIFIED),
         EventKind::Remove(_) => ChangeKinds::from_bits(ChangeKinds::REMOVED),
+        // A rename is reported as `Modify(Name(..))`, not `Create` /
+        // `Remove` — but for a listing it behaves exactly like one: the
+        // destination path appears, the source path vanishes. This is the
+        // shape every atomic save takes (write `foo.tmp`, rename it onto
+        // `foo`), so treating it as a plain MODIFIED would leave a
+        // freshly-saved new file out of the browser tree entirely (the
+        // tree delta ignores MODIFIED-only events). Decide create-vs-remove
+        // by what's on disk now: by the time the backend hands us the
+        // rename it has already completed, so the destination exists and
+        // the source does not. Works uniformly across the inotify
+        // `From`/`To`/`Both` split and the FSEvents `Any` lump.
+        EventKind::Modify(ModifyKind::Name(_)) => {
+            if path.exists() {
+                ChangeKinds::from_bits(ChangeKinds::CREATED)
+            } else {
+                ChangeKinds::from_bits(ChangeKinds::REMOVED)
+            }
+        }
+        EventKind::Modify(_) => ChangeKinds::from_bits(ChangeKinds::MODIFIED),
         // `Access`, `Other`, and `Any` aren't user-meaningful; drop.
         _ => ChangeKinds::empty(),
     }
@@ -390,18 +420,50 @@ mod tests {
     #[test]
     fn classify_create_modify_remove() {
         use notify::event::{CreateKind, ModifyKind, RemoveKind};
+        let any = Path::new("/does/not/matter");
         assert_eq!(
-            classify_event_kind(EventKind::Create(CreateKind::File)).bits(),
+            classify_event_kind(&EventKind::Create(CreateKind::File), any).bits(),
             ChangeKinds::CREATED
         );
         assert_eq!(
-            classify_event_kind(EventKind::Modify(ModifyKind::Any)).bits(),
+            classify_event_kind(&EventKind::Modify(ModifyKind::Any), any).bits(),
             ChangeKinds::MODIFIED
         );
         assert_eq!(
-            classify_event_kind(EventKind::Remove(RemoveKind::File)).bits(),
+            classify_event_kind(&EventKind::Remove(RemoveKind::File), any).bits(),
             ChangeKinds::REMOVED
         );
+    }
+
+    #[test]
+    fn rename_classified_by_destination_existence() {
+        // An atomic save is `write(foo.tmp); rename(foo.tmp, foo)`. The
+        // backend reports the rename as `Modify(Name(..))`, never
+        // `Create`/`Remove`. We must read it as: the rename *target*
+        // (exists on disk now) was CREATED, and the rename *source*
+        // (gone now) was REMOVED — otherwise a freshly-saved new file
+        // never reaches the browser tree (the tree delta ignores
+        // MODIFIED-only events). Covers every `RenameMode` the same way.
+        use notify::event::{ModifyKind, RenameMode};
+        let dir = tempdir().unwrap();
+        let present = dir.path().join("foo");
+        std::fs::write(&present, b"x").unwrap();
+        let absent = dir.path().join("foo.tmp"); // never created
+
+        for mode in [RenameMode::To, RenameMode::From, RenameMode::Both, RenameMode::Any] {
+            assert_eq!(
+                classify_event_kind(&EventKind::Modify(ModifyKind::Name(mode)), &present)
+                    .bits(),
+                ChangeKinds::CREATED,
+                "{mode:?}: existing rename target reads as CREATED",
+            );
+            assert_eq!(
+                classify_event_kind(&EventKind::Modify(ModifyKind::Name(mode)), &absent)
+                    .bits(),
+                ChangeKinds::REMOVED,
+                "{mode:?}: vanished rename source reads as REMOVED",
+            );
+        }
     }
 
     #[test]

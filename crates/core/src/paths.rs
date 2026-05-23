@@ -33,11 +33,20 @@ impl UserPath {
         self.0
     }
 
-    /// Canonicalize this path. Falls back to the original path if
-    /// canonicalization fails (e.g. the file does not exist yet).
+    /// Canonicalize this path into an internal [`CanonPath`] identity.
+    ///
+    /// When the path exists this is `std::fs::canonicalize` (absolute,
+    /// symlinks resolved). When it does *not* yet exist — the
+    /// `led new.txt`-before-first-save case — `std::fs::canonicalize`
+    /// errors, and we still return an **absolute** path rather than the
+    /// raw user input (see [`canonicalize_best_effort`]). A relative
+    /// `CanonPath` would both violate this type's documented
+    /// "absolute" contract and key the same file two ways — `new.txt`
+    /// while unsaved, `/abs/new.txt` once the watcher reports it on
+    /// disk — so a browser selection pinned to the tab's path could
+    /// never match the listing entry built from the watch event.
     pub fn canonicalize(&self) -> CanonPath {
-        let canonical = std::fs::canonicalize(&self.0).unwrap_or_else(|_| self.0.clone());
-        CanonPath(Arc::new(canonical))
+        CanonPath(Arc::new(canonicalize_best_effort(&self.0)))
     }
 
     pub fn display(&self) -> std::path::Display<'_> {
@@ -86,13 +95,46 @@ impl UserPath {
         }
         let resolved = std::fs::canonicalize(&self.0)
             .or_else(|_| std::fs::canonicalize(&cursor))
-            .unwrap_or_else(|_| cursor.clone());
+            .unwrap_or_else(|_| canonicalize_best_effort(&cursor));
         PathChain {
             user: self.clone(),
             intermediates,
             resolved: CanonPath(Arc::new(resolved)),
         }
     }
+}
+
+/// Canonicalize `p` into an absolute path, tolerating a target that
+/// doesn't exist yet.
+///
+/// `std::fs::canonicalize` resolves symlinks and absolutises, but
+/// errors the moment a trailing component isn't on disk. For a path
+/// the user is about to create we still want a stable absolute key.
+/// So: absolutise lexically (join the cwd, fold `.`/`..`), then
+/// canonicalize the longest **existing** ancestor — resolving any
+/// symlinks in the part that does exist — and re-attach the
+/// not-yet-existing tail. Once the tail is created (no new symlink
+/// introduced mid-path) `std::fs::canonicalize` returns exactly this,
+/// so the identity is stable across the file coming into existence.
+fn canonicalize_best_effort(p: &Path) -> PathBuf {
+    if let Ok(c) = std::fs::canonicalize(p) {
+        return c;
+    }
+    let abs = std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf());
+    // Walk up collecting the non-existing tail until an ancestor
+    // canonicalizes, then splice it back on.
+    let mut tail: Vec<std::ffi::OsString> = Vec::new();
+    let mut cursor: &Path = &abs;
+    while let Some(parent) = cursor.parent() {
+        let Some(name) = cursor.file_name() else { break };
+        tail.push(name.to_os_string());
+        if let Ok(mut base) = std::fs::canonicalize(parent) {
+            base.extend(tail.iter().rev());
+            return base;
+        }
+        cursor = parent;
+    }
+    abs
 }
 
 impl AsRef<Path> for UserPath {
@@ -229,10 +271,48 @@ mod tests {
     use super::*;
 
     #[test]
-    fn canonicalize_a_nonexistent_path_preserves_it() {
+    fn canonicalize_a_nonexistent_path_is_absolute_under_cwd() {
+        // A not-yet-existing path still canonicalizes to an absolute
+        // identity (it does not leak the raw relative input). This is
+        // the `led new.txt`-before-save case: the tab path must match
+        // the absolute listing entry the watcher reports once the file
+        // lands on disk, so a relative `CanonPath` would break browser
+        // selection. See `canonicalize_best_effort`.
         let up = UserPath::new("nonexistent-file-xyz");
         let cp = up.canonicalize();
-        assert_eq!(cp.as_path(), Path::new("nonexistent-file-xyz"));
+        assert!(
+            cp.as_path().is_absolute(),
+            "got non-absolute {:?}",
+            cp.as_path()
+        );
+        assert_eq!(cp.as_path().file_name(), Some(OsStr::new("nonexistent-file-xyz")));
+        let expected = std::fs::canonicalize(std::env::current_dir().unwrap())
+            .unwrap()
+            .join("nonexistent-file-xyz");
+        assert_eq!(cp.as_path(), expected);
+    }
+
+    #[test]
+    fn canonicalize_nonexistent_matches_real_after_create() {
+        // The whole point of the absolute fallback: the identity a path
+        // gets *before* it exists equals the one `std::fs::canonicalize`
+        // gives *after* it's created. Otherwise the same file keys two
+        // ways across a save.
+        use std::fs;
+        let dir = std::env::temp_dir().join(format!(
+            "led-pathchain-test.{}.preexist",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("new.txt");
+
+        let before = UserPath::new(&target).canonicalize();
+        fs::write(&target, b"x").unwrap();
+        let after = UserPath::new(&target).canonicalize();
+        assert_eq!(before.as_path(), after.as_path());
+
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
