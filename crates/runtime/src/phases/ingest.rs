@@ -58,7 +58,6 @@ pub(crate) fn ingest_file_watch(sources: &mut Sources, env: &TickEnv<'_>) {
     // sync-check / LSP-watched-files fan-out now lives in
     // query_phase + execute_phase per Theme E.
     let Sources {
-        edits,
         fs,
         file_watch,
         git_scan_pending,
@@ -71,7 +70,7 @@ pub(crate) fn ingest_file_watch(sources: &mut Sources, env: &TickEnv<'_>) {
     if fs.root.is_some()
         && !env.no_workspace
         && session.init_done
-        && apply_workspace_tree_delta(file_watch, edits, fs)
+        && apply_workspace_tree_delta(file_watch, fs)
     {
         *git_scan_pending = true;
     }

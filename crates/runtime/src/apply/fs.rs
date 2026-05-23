@@ -106,17 +106,21 @@ pub(crate) fn diff_watch_actions(
 ///   replay alone would keep the sidebar churning at startup.
 /// - **MODIFIED-only events** never affect listings. The
 ///   external-reread path consumes them separately.
-/// - **CREATED for an already-open buffer's path** is a known
-///   FSEvents quirk (Create-on-install for a file that already
-///   existed when the watch came up). Skipped — the
-///   `compute_external_reread_targets` path handles real
-///   content changes.
+/// - **Duplicate CREATEs** — an FSEvents "Create-on-install"
+///   replay for a file that already existed when the watch came
+///   up, or the same Create delivered twice — are absorbed by the
+///   dedup-by-path below: if the entry is already in the parent's
+///   listing it's left untouched. A *genuine* CREATE for a path
+///   not yet listed (e.g. a brand-new file just saved out of an
+///   open buffer) is inserted. The listing mirrors what's on disk;
+///   it does not consult which buffers happen to be open. Whether
+///   a buffer is open is a user decision; what files exist is an
+///   external fact, and only the latter drives this listing.
 /// - **Events whose parent dir isn't in `dir_contents`** are
 ///   dropped: nobody is looking at that listing, so updating
 ///   it would cost stats with no UI benefit.
 pub(crate) fn apply_workspace_tree_delta(
     file_watch: &led_driver_file_watch_core::FileWatchState,
-    edits: &BufferEdits,
     fs: &mut FsTree,
 ) -> bool {
     use led_driver_file_watch_core::{ChangeKinds, FileWatchEvent};
@@ -179,13 +183,6 @@ pub(crate) fn apply_workspace_tree_delta(
             // sidebar would never re-populate.
             clear_ancestor_failures(fs, path);
 
-            // Already-open buffer + CREATE: legacy quirk filter
-            // (`docs/spec/buffers.md` § "External filesystem
-            // change"). Skip the listing insert; the reread
-            // path handles real content changes.
-            if !removed && edits.buffers.contains_key(path) {
-                continue;
-            }
             // Hidden filter mirrors the fs-list driver native worker.
             let Some(name) = path.as_path().file_name() else {
                 continue;
