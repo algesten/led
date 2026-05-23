@@ -7,5 +7,3 @@ LspSend	server=fake-lsp kind=notification method=initialized
 LspSend	server=fake-lsp kind=notification method=workspace/didChangeConfiguration
 LspSend	server=fake-lsp kind=notification method=textDocument/didOpen path=file://<TMPDIR>/main.rs version=1
 LspRecv	server=fake-lsp kind=notification method=$/progress
-LspSend	server=fake-lsp kind=request method=textDocument/completion id=2 path=file://<TMPDIR>/main.rs
-LspRecv	server=fake-lsp kind=response id=2
