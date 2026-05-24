@@ -3,16 +3,21 @@
 //! Activation, query editing, advance-to-next-match, accept/abort
 //! semantics per `docs/spec/search.md` § "In-buffer isearch".
 //!
-//! Current scope (M13 stage 1): `InBufferSearch` toggles the
-//! overlay on (or re-triggers when already active but the query is
-//! empty — legacy last-query recall). Abort closes it. Typing,
-//! match-finding, advance-to-next, accept-on-passthrough, and
-//! visual highlighting land in subsequent stages.
+//! `InBufferSearch` starts the overlay (or advances to the next
+//! match when already active). Typing recomputes matches and jumps
+//! the cursor; the jump clamps scroll via [`clamp_scroll_to_cursor`]
+//! (co-located the way [`super::cursor::move_cursor`] runs
+//! `adjust_scroll`) so an off-screen match scrolls into view. The
+//! current match is highlighted via
+//! `query::render::body::active_isearch_match` (the same
+//! `theme.search_match` overlay as the file-search hit).
 
+use led_driver_terminal_core::Terminal;
+use led_state_browser::BrowserUi;
 use led_state_buffer_edits::BufferEdits;
 use led_state_isearch::{IsearchMatch, IsearchState};
 use led_state_jumps::{JumpListState, JumpPosition};
-use led_state_tabs::Tabs;
+use led_state_tabs::{Tab, Tabs};
 use ropey::Rope;
 
 use crate::keymap::Command;
@@ -105,15 +110,17 @@ pub(super) fn run_overlay_command(
     tabs: &mut Tabs,
     edits: &BufferEdits,
     jumps: &mut JumpListState,
+    terminal: &Terminal,
+    browser: &BrowserUi,
 ) -> Option<DispatchOutcome> {
     isearch.as_ref()?;
     match cmd {
         Command::InsertChar(c) => {
-            append_and_search(isearch, tabs, edits, c);
+            append_and_search(isearch, tabs, edits, terminal, browser, c);
             Some(DispatchOutcome::Continue)
         }
         Command::DeleteBack => {
-            pop_and_search(isearch, tabs, edits);
+            pop_and_search(isearch, tabs, edits, terminal, browser);
             Some(DispatchOutcome::Continue)
         }
         Command::InsertNewline => {
@@ -125,7 +132,7 @@ pub(super) fn run_overlay_command(
             Some(DispatchOutcome::Continue)
         }
         Command::InBufferSearch => {
-            advance(isearch, tabs, edits);
+            advance(isearch, tabs, edits, terminal, browser);
             Some(DispatchOutcome::Continue)
         }
         // Everything else: "accept on passthrough". The current
@@ -148,6 +155,8 @@ fn append_and_search(
     isearch: &mut Option<IsearchState>,
     tabs: &mut Tabs,
     edits: &BufferEdits,
+    terminal: &Terminal,
+    browser: &BrowserUi,
     c: char,
 ) {
     let state = match isearch.as_mut() {
@@ -155,7 +164,7 @@ fn append_and_search(
         None => return,
     };
     state.query.insert_char(c);
-    recompute_and_jump(state, tabs, edits);
+    recompute_and_jump(state, tabs, edits, terminal, browser);
 }
 
 /// Pop the last query char and re-run matching. If the query
@@ -165,6 +174,8 @@ fn pop_and_search(
     isearch: &mut Option<IsearchState>,
     tabs: &mut Tabs,
     edits: &BufferEdits,
+    terminal: &Terminal,
+    browser: &BrowserUi,
 ) {
     let state = match isearch.as_mut() {
         Some(s) => s,
@@ -183,12 +194,14 @@ fn pop_and_search(
         if let Some(active_id) = tabs.active
             && let Some(tab) = tabs.open.iter_mut().find(|t| t.id == active_id)
         {
+            // Origin scroll was valid for the origin cursor, so
+            // restore both verbatim — no clamp needed here.
             tab.cursor = origin_cursor;
             tab.scroll = origin_scroll;
         }
         return;
     }
-    recompute_and_jump(state, tabs, edits);
+    recompute_and_jump(state, tabs, edits, terminal, browser);
 }
 
 /// Second+ `Ctrl-s` while isearch is active.
@@ -205,6 +218,8 @@ fn advance(
     isearch: &mut Option<IsearchState>,
     tabs: &mut Tabs,
     edits: &BufferEdits,
+    terminal: &Terminal,
+    browser: &BrowserUi,
 ) {
     let Some(state) = isearch.as_mut() else {
         return;
@@ -220,13 +235,13 @@ fn advance(
         state.failed = false;
         state.match_idx = Some(0);
         let hit = state.matches[0];
-        jump_to_match(state, tabs, edits, hit);
+        jump_to_match(state, tabs, edits, terminal, browser, hit);
         return;
     }
     // Normal advance.
     let Some(idx) = state.match_idx else {
         // No current selection — act like typing: find first forward.
-        recompute_and_jump(state, tabs, edits);
+        recompute_and_jump(state, tabs, edits, terminal, browser);
         return;
     };
     if idx + 1 >= state.matches.len() {
@@ -237,15 +252,18 @@ fn advance(
     let next = idx + 1;
     state.match_idx = Some(next);
     let hit = state.matches[next];
-    jump_to_match(state, tabs, edits, hit);
+    jump_to_match(state, tabs, edits, terminal, browser, hit);
 }
 
-/// Move the active tab's cursor onto `hit`. Pure side-effect; the
-/// caller already updated `state.match_idx` / `state.failed`.
+/// Move the active tab's cursor onto `hit`, then clamp scroll so
+/// the match stays visible. The caller already updated
+/// `state.match_idx` / `state.failed`.
 fn jump_to_match(
     _state: &mut IsearchState,
     tabs: &mut Tabs,
     edits: &BufferEdits,
+    terminal: &Terminal,
+    browser: &BrowserUi,
     hit: IsearchMatch,
 ) {
     let Some(rope) = active_rope(tabs, edits) else {
@@ -258,7 +276,29 @@ fn jump_to_match(
         tab.cursor.line = line;
         tab.cursor.col = col;
         tab.cursor.preferred_col = col;
+        clamp_scroll_to_cursor(tab, &rope, terminal, browser);
     }
+}
+
+/// Clamp the active tab's scroll so the just-moved cursor stays
+/// visible — the isearch analogue of the `adjust_scroll` call
+/// [`super::cursor::move_cursor`] runs after every move. Co-located
+/// with the jump so cursor and scroll always advance together;
+/// without it an off-screen match leaves the screen frozen on a
+/// repeated `Ctrl-s`. No-op when terminal dims are absent (headless
+/// tests) — geometry is `(0, _)` and scroll can't be computed.
+fn clamp_scroll_to_cursor(
+    tab: &mut Tab,
+    rope: &Rope,
+    terminal: &Terminal,
+    browser: &BrowserUi,
+) {
+    let (body_rows, content_cols) = super::shared::editor_geometry(terminal, browser);
+    if body_rows == 0 {
+        return;
+    }
+    tab.scroll =
+        super::cursor::adjust_scroll(tab.scroll, tab.cursor, body_rows, rope, content_cols);
 }
 
 /// Rescan the active buffer's rope for the current query and
@@ -268,6 +308,8 @@ fn recompute_and_jump(
     state: &mut IsearchState,
     tabs: &mut Tabs,
     edits: &BufferEdits,
+    terminal: &Terminal,
+    browser: &BrowserUi,
 ) {
     let rope = match active_rope(tabs, edits) {
         Some(r) => r,
@@ -296,6 +338,7 @@ fn recompute_and_jump(
             tab.cursor.line = line;
             tab.cursor.col = col;
             tab.cursor.preferred_col = col;
+            clamp_scroll_to_cursor(tab, &rope, terminal, browser);
         }
         None => {
             state.match_idx = None;
@@ -410,6 +453,29 @@ mod tests {
         e
     }
 
+    /// Dispatch an overlay command with a headless terminal (no dims
+    /// → the scroll clamp is a no-op, so cursor-only assertions are
+    /// unaffected). `advance_to_offscreen_match_scrolls_viewport`
+    /// uses a real `Terminal` and calls `run_overlay_command`
+    /// directly to exercise scroll-follow.
+    fn run_overlay(
+        cmd: Command,
+        isearch: &mut Option<IsearchState>,
+        tabs: &mut Tabs,
+        edits: &BufferEdits,
+        jumps: &mut JumpListState,
+    ) -> Option<DispatchOutcome> {
+        run_overlay_command(
+            cmd,
+            isearch,
+            tabs,
+            edits,
+            jumps,
+            &Terminal::default(),
+            &BrowserUi::default(),
+        )
+    }
+
     #[test]
     fn in_buffer_search_activates_and_captures_origin() {
         let tabs = tabs_with_active("/tmp/buf.txt");
@@ -470,7 +536,7 @@ mod tests {
         let mut jumps = JumpListState::default();
         // Type 'a' 'l' 'p' 'h' 'a' → query = "alpha", first match is at 0.
         for c in "alpha".chars() {
-            run_overlay_command(
+            run_overlay(
                 Command::InsertChar(c),
                 &mut isearch,
                 &mut tabs,
@@ -497,7 +563,7 @@ mod tests {
         let mut isearch = None;
         in_buffer_search(&mut isearch, &tabs, &edits);
         let mut jumps = JumpListState::default();
-        run_overlay_command(
+        run_overlay(
             Command::InsertChar('a'),
             &mut isearch,
             &mut tabs,
@@ -513,7 +579,7 @@ mod tests {
         assert!(s.match_idx.is_some());
 
         // Now type 'q' (not in buffer) → no matches at all → failed.
-        run_overlay_command(
+        run_overlay(
             Command::InsertChar('q'),
             &mut isearch,
             &mut tabs,
@@ -534,10 +600,10 @@ mod tests {
         let mut isearch = None;
         in_buffer_search(&mut isearch, &tabs, &edits);
         let mut jumps = JumpListState::default();
-        run_overlay_command(Command::InsertChar('b'), &mut isearch, &mut tabs, &edits, &mut jumps);
+        run_overlay(Command::InsertChar('b'), &mut isearch, &mut tabs, &edits, &mut jumps);
         // 'b' is at char 6 (line 0 col 6).
         assert_eq!(tabs.open[0].cursor.col, 6);
-        run_overlay_command(Command::DeleteBack, &mut isearch, &mut tabs, &edits, &mut jumps);
+        run_overlay(Command::DeleteBack, &mut isearch, &mut tabs, &edits, &mut jumps);
         // Query empty → cursor back at origin.
         assert_eq!(tabs.open[0].cursor, origin);
     }
@@ -550,8 +616,8 @@ mod tests {
         let mut isearch = None;
         in_buffer_search(&mut isearch, &tabs, &edits);
         let mut jumps = JumpListState::default();
-        run_overlay_command(Command::InsertChar('b'), &mut isearch, &mut tabs, &edits, &mut jumps);
-        run_overlay_command(
+        run_overlay(Command::InsertChar('b'), &mut isearch, &mut tabs, &edits, &mut jumps);
+        run_overlay(
             Command::InsertNewline,
             &mut isearch,
             &mut tabs,
@@ -576,9 +642,9 @@ mod tests {
         let mut isearch = None;
         in_buffer_search(&mut isearch, &tabs, &edits);
         let mut jumps = JumpListState::default();
-        run_overlay_command(Command::InsertChar('b'), &mut isearch, &mut tabs, &edits, &mut jumps);
+        run_overlay(Command::InsertChar('b'), &mut isearch, &mut tabs, &edits, &mut jumps);
         assert_ne!(tabs.open[0].cursor, origin_cursor);
-        run_overlay_command(Command::Abort, &mut isearch, &mut tabs, &edits, &mut jumps);
+        run_overlay(Command::Abort, &mut isearch, &mut tabs, &edits, &mut jumps);
         assert!(isearch.is_none());
         assert_eq!(tabs.open[0].cursor, origin_cursor);
         assert_eq!(tabs.open[0].scroll, origin_scroll);
@@ -596,7 +662,7 @@ mod tests {
         in_buffer_search(&mut isearch, &tabs, &edits);
         let mut jumps = JumpListState::default();
         for c in "alpha".chars() {
-            run_overlay_command(
+            run_overlay(
                 Command::InsertChar(c),
                 &mut isearch,
                 &mut tabs,
@@ -607,7 +673,7 @@ mod tests {
         // Starts on match 0 (line 0).
         assert_eq!(isearch.as_ref().unwrap().match_idx, Some(0));
         // Ctrl-s: advance to match 1 (line 2).
-        run_overlay_command(
+        run_overlay(
             Command::InBufferSearch,
             &mut isearch,
             &mut tabs,
@@ -628,7 +694,7 @@ mod tests {
         in_buffer_search(&mut isearch, &tabs, &edits);
         let mut jumps = JumpListState::default();
         for c in "alpha".chars() {
-            run_overlay_command(
+            run_overlay(
                 Command::InsertChar(c),
                 &mut isearch,
                 &mut tabs,
@@ -637,7 +703,7 @@ mod tests {
             );
         }
         // Advance to match 1 (line 1).
-        run_overlay_command(
+        run_overlay(
             Command::InBufferSearch,
             &mut isearch,
             &mut tabs,
@@ -646,7 +712,7 @@ mod tests {
         );
         assert_eq!(isearch.as_ref().unwrap().match_idx, Some(1));
         // Advance again → past end → failed flag.
-        run_overlay_command(
+        run_overlay(
             Command::InBufferSearch,
             &mut isearch,
             &mut tabs,
@@ -655,7 +721,7 @@ mod tests {
         );
         assert!(isearch.as_ref().unwrap().failed);
         // Third press wraps to match 0 and clears failed.
-        run_overlay_command(
+        run_overlay(
             Command::InBufferSearch,
             &mut isearch,
             &mut tabs,
@@ -681,7 +747,7 @@ mod tests {
         let mut isearch = None;
         in_buffer_search(&mut isearch, &tabs, &edits);
         let mut jumps = JumpListState::default();
-        run_overlay_command(
+        run_overlay(
             Command::InBufferSearch,
             &mut isearch,
             &mut tabs,
@@ -693,6 +759,62 @@ mod tests {
         assert!(s.matches.is_empty());
         // Cursor stayed at origin.
         assert_eq!(tabs.open[0].cursor, Cursor::default());
+    }
+
+    #[test]
+    fn advance_to_offscreen_match_scrolls_viewport() {
+        use led_driver_terminal_core::Dims;
+        use led_state_browser::BrowserUi;
+        // Buffer taller than the viewport: a match on line 0 and
+        // another well below the fold (line 61).
+        let mut body = String::from("needle\n");
+        for i in 0..60 {
+            body.push_str(&format!("filler {i}\n"));
+        }
+        body.push_str("needle\n"); // line 61
+        let mut tabs = tabs_with_active("/tmp/tall.txt");
+        tabs.open[0].cursor = Cursor::default();
+        tabs.open[0].scroll = Scroll::default();
+        let edits = edits_with_buffer("/tmp/tall.txt", &body);
+        let mut isearch = None;
+        in_buffer_search(&mut isearch, &tabs, &edits);
+        let mut jumps = JumpListState::default();
+        // Real terminal dims so the co-located scroll clamp engages.
+        let terminal = super::super::testutil::terminal_with(Some(Dims { cols: 80, rows: 24 }));
+        let browser = BrowserUi::default();
+        for c in "needle".chars() {
+            run_overlay_command(
+                Command::InsertChar(c),
+                &mut isearch,
+                &mut tabs,
+                &edits,
+                &mut jumps,
+                &terminal,
+                &browser,
+            );
+        }
+        // First match is on line 0 — viewport already shows it.
+        assert_eq!(tabs.open[0].cursor.line, 0);
+        assert_eq!(tabs.open[0].scroll.top, 0);
+        // Ctrl-s advances to the match below the fold.
+        run_overlay_command(
+            Command::InBufferSearch,
+            &mut isearch,
+            &mut tabs,
+            &edits,
+            &mut jumps,
+            &terminal,
+            &browser,
+        );
+        assert_eq!(tabs.open[0].cursor.line, 61);
+        // The viewport followed: scroll advanced so the otherwise
+        // off-screen match is visible. Without the co-located clamp
+        // this stays 0 and the screen looks frozen (the bug).
+        assert!(
+            tabs.open[0].scroll.top > 0,
+            "scroll.top should advance to keep the off-screen match visible, got {}",
+            tabs.open[0].scroll.top
+        );
     }
 
     #[test]

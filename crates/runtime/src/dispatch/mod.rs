@@ -680,12 +680,17 @@ impl<'a> Dispatcher<'a> {
         // Enter / Esc / another Ctrl-s are fully consumed; every other
         // command triggers "accept on passthrough" — the current match
         // becomes the cursor's home, then the command runs normally.
+        // Isearch jumps the cursor and clamps scroll together (so an
+        // off-screen match scrolls into view on a repeated Ctrl-s);
+        // it needs the terminal/browser geometry for the scroll math.
         if let Some(outcome) = isearch::run_overlay_command(
             cmd,
             self.isearch,
             self.tabs,
             self.edits,
             self.jumps,
+            self.terminal,
+            self.browser,
         ) {
             return outcome;
         }

@@ -322,7 +322,12 @@ pub fn active_match_highlight<'a>(
     area: Rect,
 ) -> Option<led_driver_terminal_core::BodyMatch> {
     let rope = rope?;
+    // File-search and in-buffer isearch both paint into the single
+    // `BodyModel::Content::match_highlight` slot. They're mutually
+    // exclusive in practice; file-search wins if somehow both are
+    // live.
     active_body_match(&overlays, &active_path, scroll, area, &rope)
+        .or_else(|| active_isearch_match(&overlays, scroll, area, &rope))
 }
 
 /// Resolve the file-search overlay's current hit into a visible-row
@@ -338,8 +343,6 @@ fn active_body_match(
     area: Rect,
     rope: &Rope,
 ) -> Option<led_driver_terminal_core::BodyMatch> {
-    use led_core::SubLine;
-    use led_text_layout::{col_to_sub_line, sub_line_count};
     let state = overlays.file_search.as_ref()?;
     let led_state_file_search::FileSearchSelection::Result(i) = state.selection else {
         return None;
@@ -349,22 +352,62 @@ fn active_body_match(
         return None;
     }
     let line = hit.line.saturating_sub(1);
+    // The hit's `col` is a CHAR index from the file-search driver.
+    let col_start_char = hit.col.saturating_sub(1);
+    let match_char_len = chars_between(&hit.preview, hit.match_start, hit.match_end);
+    resolve_body_match(rope, line, col_start_char, match_char_len, scroll, area)
+}
+
+/// Resolve the active in-buffer isearch overlay's current match into
+/// a visible-row highlight — the isearch counterpart to
+/// [`active_body_match`]. Reads the match's absolute rope-char range
+/// (`IsearchMatch`) rather than a file-search hit's preview bytes.
+/// `None` when the overlay is closed, has no current match, or the
+/// match is scrolled out of view.
+fn active_isearch_match(
+    overlays: &OverlaysInput<'_>,
+    scroll: Scroll,
+    area: Rect,
+    rope: &Rope,
+) -> Option<led_driver_terminal_core::BodyMatch> {
+    let state = overlays.isearch.as_ref()?;
+    let m = state.matches.get(state.match_idx?)?;
+    if m.char_end > rope.len_chars() || m.char_end <= m.char_start {
+        return None;
+    }
+    // The query never contains a newline (Enter accepts), so a match
+    // is always within a single logical line.
+    let line = rope.char_to_line(m.char_start);
+    let col_start_char = m.char_start - rope.line_to_char(line);
+    let match_char_len = m.char_end - m.char_start;
+    resolve_body_match(rope, line, col_start_char, match_char_len, scroll, area)
+}
+
+/// Shared geometry for [`active_body_match`] / [`active_isearch_match`]:
+/// project a single-line match — `match_char_len` chars starting at
+/// char `col_start_char` within logical `line` (0-indexed) — onto a
+/// body-visible `BodyMatch` (post-scroll, post-gutter), accounting
+/// for soft-wrap sub-lines. `None` when the match is scrolled above
+/// the viewport or falls past the bottom row.
+fn resolve_body_match(
+    rope: &Rope,
+    line: usize,
+    col_start_char: usize,
+    match_char_len: usize,
+    scroll: Scroll,
+    area: Rect,
+) -> Option<led_driver_terminal_core::BodyMatch> {
+    use led_text_layout::{col_to_sub_line, sub_line_count};
     let body_rows = area.rows as usize;
-    if body_rows == 0 || line < scroll.top {
+    if body_rows == 0 || line < scroll.top || line >= rope.len_lines() {
         return None;
     }
     let cols = area.cols as usize;
     let content_cols = cols
         .saturating_sub(GUTTER_WIDTH)
         .saturating_sub(TRAILING_RESERVED_COLS);
-    let match_char_len = chars_between(&hit.preview, hit.match_start, hit.match_end);
-    let col_start_char = hit.col.saturating_sub(1);
-    if line >= rope.len_lines() {
-        return None;
-    }
     let hit_slice = rope.line(line);
-    // The hit's `col` is a CHAR index from the file-search driver;
-    // convert to grapheme col before consulting wrap geometry.
+    // Convert char cols to grapheme cols before consulting wrap geometry.
     let match_gcol = led_text_layout::char_to_grapheme_col(hit_slice, col_start_char);
     let match_end_gcol =
         led_text_layout::char_to_grapheme_col(hit_slice, col_start_char + match_char_len);
@@ -399,7 +442,6 @@ fn active_body_match(
     if rel_end <= rel_start {
         return None;
     }
-    let _ = SubLine(0); // keep import without warning in edge conditions
     Some(led_driver_terminal_core::BodyMatch {
         row: row as u16,
         col_start: (rel_start + GUTTER_WIDTH) as u16,
@@ -942,5 +984,75 @@ fn strip_trailing_newline(s: &mut String) {
         if s.ends_with('\r') {
             s.pop();
         }
+    }
+}
+
+#[cfg(test)]
+mod isearch_highlight_tests {
+    use super::*;
+    use led_state_isearch::{IsearchMatch, IsearchState};
+    use led_state_tabs::{Cursor, Scroll};
+
+    fn isearch_with_match(char_start: usize, char_end: usize) -> Option<IsearchState> {
+        let mut s = IsearchState::start(Cursor::default(), Scroll::default());
+        s.matches = vec![IsearchMatch { char_start, char_end }];
+        s.match_idx = Some(0);
+        Some(s)
+    }
+
+    #[test]
+    fn active_isearch_match_resolves_current_hit() {
+        // "needle" occupies chars 6..12 on line 0.
+        let rope = Rope::from_str("hello needle world\n");
+        let isearch = isearch_with_match(6, 12);
+        let no_ff = None;
+        let no_fs = None;
+        let overlays = OverlaysInput {
+            find_file: &no_ff,
+            isearch: &isearch,
+            file_search: &no_fs,
+        };
+        let area = Rect { x: 0, y: 0, cols: 80, rows: 24 };
+        let bm = active_isearch_match(&overlays, Scroll::default(), area, &rope)
+            .expect("isearch match should highlight");
+        assert_eq!(bm.row, 0);
+        // GUTTER_WIDTH (2) is added to the content cols.
+        assert_eq!(bm.col_start, (6 + GUTTER_WIDTH) as u16);
+        assert_eq!(bm.col_end, (12 + GUTTER_WIDTH) as u16);
+    }
+
+    #[test]
+    fn active_isearch_match_none_without_current_match() {
+        let rope = Rope::from_str("hello needle world\n");
+        let mut state = IsearchState::start(Cursor::default(), Scroll::default());
+        state.matches = vec![IsearchMatch { char_start: 6, char_end: 12 }];
+        state.match_idx = None; // failed / no current selection
+        let isearch = Some(state);
+        let no_ff = None;
+        let no_fs = None;
+        let overlays = OverlaysInput {
+            find_file: &no_ff,
+            isearch: &isearch,
+            file_search: &no_fs,
+        };
+        let area = Rect { x: 0, y: 0, cols: 80, rows: 24 };
+        assert!(active_isearch_match(&overlays, Scroll::default(), area, &rope).is_none());
+    }
+
+    #[test]
+    fn active_isearch_match_none_when_scrolled_past() {
+        let rope = Rope::from_str("hello needle world\n");
+        let isearch = isearch_with_match(6, 12);
+        let no_ff = None;
+        let no_fs = None;
+        let overlays = OverlaysInput {
+            find_file: &no_ff,
+            isearch: &isearch,
+            file_search: &no_fs,
+        };
+        let area = Rect { x: 0, y: 0, cols: 80, rows: 24 };
+        // Viewport scrolled below the match's line → not visible.
+        let scroll = Scroll { top: 5, top_sub_line: led_core::SubLine(0) };
+        assert!(active_isearch_match(&overlays, scroll, area, &rope).is_none());
     }
 }

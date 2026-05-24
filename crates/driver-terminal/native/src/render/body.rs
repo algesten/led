@@ -129,11 +129,12 @@ pub(crate) fn paint_body(body: &BodyModel, area: Rect, theme: &Theme, buf: &mut 
             }
         }
 
-        // File-search match highlight: a single run of cells inside
-        // one row. Overpaint the matched substring with
+        // Search match highlight: a single run of cells inside one
+        // row. Overpaint the matched substring with
         // `theme.search_match` so the hit stands out the way it
-        // does in the sidebar. Only active when the file-search
-        // overlay's selected hit lives on this visible row.
+        // does in the sidebar. Active for the file-search overlay's
+        // selected hit and for the in-buffer isearch current match,
+        // whichever lives on this visible row.
         if let Some(mh) = match_highlight
             && mh.row == row
             && let Some(line) = line

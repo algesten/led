@@ -41,6 +41,24 @@ pub fn editor_content_cols(terminal: &Terminal, browser: &BrowserUi) -> usize {
         .unwrap_or(0)
 }
 
+/// Editor body geometry — `(body_rows, content_cols)` — the same
+/// dims dispatch uses for scroll math (`cursor::adjust_scroll`).
+/// Terminal dims absent → `(0, 0)` (callers treat as a no-op).
+pub(super) fn editor_geometry(terminal: &Terminal, browser: &BrowserUi) -> (usize, usize) {
+    terminal
+        .dims
+        .map(|d| {
+            let layout = Layout::compute(d, browser.visible);
+            (
+                layout.editor_area.rows as usize,
+                (layout.editor_area.cols as usize)
+                    .saturating_sub(GUTTER_WIDTH)
+                    .saturating_sub(TRAILING_RESERVED_COLS),
+            )
+        })
+        .unwrap_or((0, 0))
+}
+
 /// Allocate the next unused `TabId` by scanning `tabs.open`. Dispatch
 /// doesn't hold the runtime's `TabIdGen` (that lives on the main
 /// stack frame), so each submodule that needs a new tab derives one
