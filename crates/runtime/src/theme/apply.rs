@@ -205,6 +205,7 @@ pub(super) fn assign_region(theme: &mut Theme, region: &str, style: Style) -> bo
         "browser_border" => theme.browser_border = style,
         "search_toggle_on" => theme.search_toggle_on = style,
         "search_match" => theme.search_match = style,
+        "body_match" => theme.body_match = style,
         "search_hit_replaced" => theme.search_hit_replaced = style,
         "cursor_line" => theme.cursor_line = style,
         "selection" => theme.selection = style,

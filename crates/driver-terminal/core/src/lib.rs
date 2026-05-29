@@ -264,11 +264,12 @@ pub enum BodyModel {
         /// cursor is outside the visible scroll window (defensive — the
         /// runtime's scroll invariant should keep it in view).
         cursor: Option<(u16, u16)>,
-        /// When set, the painter overlays `theme.search_match` on a
+        /// When set, the painter overlays `theme.body_match` on a
         /// single run of characters inside one visible row. Used by
         /// the file-search preview to show "this is the hit you're
-        /// looking at" on top of the buffer, mirroring the sidebar
-        /// highlight.
+        /// looking at" on top of the buffer, and by in-buffer isearch
+        /// for the current match. Default style is reverse video — an
+        /// inverted-selection look à la emacs isearch.
         match_highlight: Option<BodyMatch>,
         /// Editor-area-relative column to paint the ruler stripe at,
         /// or `None` when the ruler is disabled (no `ruler_column`

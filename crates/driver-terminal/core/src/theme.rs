@@ -176,6 +176,14 @@ pub struct Theme {
     /// Default = bright yellow + bold. Skipped on the currently-
     /// selected row (selection style takes the whole row).
     pub search_match: Style,
+    /// Style applied to the active search match *inside the buffer
+    /// body* — the file-search selected hit and the in-buffer
+    /// isearch current match both feed `BodyModel`'s `match_highlight`
+    /// slot. Default = reverse video, giving the match an inverted-
+    /// selection look à la emacs isearch. Distinct from
+    /// [`Self::search_match`], which styles the matched substring in
+    /// the file-search *sidebar* rows.
+    pub body_match: Style,
     /// Style applied to hit rows the user has already replaced
     /// via Right-arrow. Default = dim grey + strikethrough-ish
     /// (no strikethrough SGR in `Attrs` yet, so just fg dim).
@@ -563,6 +571,9 @@ impl Default for Theme {
                 attrs: Attrs::default(),
                 bg: None,
             },
+            // Inverted-selection look (emacs isearch): reverse video
+            // swaps the matched cells' fg/bg, theme-independently.
+            body_match: Style::REVERSE,
 
             // Popover (diagnostic hover) — dark-grey fill, medium-
             // grey rule. Matches the pre-Theme-J hardcoded values

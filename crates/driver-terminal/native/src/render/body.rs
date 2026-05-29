@@ -130,11 +130,12 @@ pub(crate) fn paint_body(body: &BodyModel, area: Rect, theme: &Theme, buf: &mut 
         }
 
         // Search match highlight: a single run of cells inside one
-        // row. Overpaint the matched substring with
-        // `theme.search_match` so the hit stands out the way it
-        // does in the sidebar. Active for the file-search overlay's
+        // row. Overpaint the matched substring with `theme.body_match`
+        // (reverse video by default — an inverted-selection look à la
+        // emacs isearch). Active for the file-search overlay's
         // selected hit and for the in-buffer isearch current match,
-        // whichever lives on this visible row.
+        // whichever lives on this visible row. Distinct from the
+        // sidebar's `theme.search_match` substring highlight.
         if let Some(mh) = match_highlight
             && mh.row == row
             && let Some(line) = line
@@ -147,7 +148,7 @@ pub(crate) fn paint_body(body: &BodyModel, area: Rect, theme: &Theme, buf: &mut 
                 if c >= right_edge {
                     break;
                 }
-                buf.put_char(buf_row, c, ch, theme.search_match);
+                buf.put_char(buf_row, c, ch, theme.body_match);
                 c = c.saturating_add(1);
             }
         }
