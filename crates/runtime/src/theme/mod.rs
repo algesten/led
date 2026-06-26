@@ -85,6 +85,7 @@ pub fn load_theme(
         theme: Theme::default(),
         warnings: Vec::new(),
     };
+    let explicit = explicit_path.is_some();
     let path = match explicit_path {
         Some(p) => Some(p.to_path_buf()),
         None => discover_theme(config_dir),
@@ -92,11 +93,33 @@ pub fn load_theme(
     let Some(path) = path else {
         return Ok(loaded);
     };
-    let source = fs::read_to_string(&path).map_err(|e| ThemeError::Io {
-        path: path.clone(),
-        message: e.to_string(),
-    })?;
-    apply_toml(&mut loaded, &path, &source)?;
+    let source = match fs::read_to_string(&path) {
+        Ok(source) => source,
+        Err(e) if !explicit => {
+            loaded.warnings.push(format!(
+                "{}: could not read theme, using built-in default: {e}",
+                path.display()
+            ));
+            return Ok(loaded);
+        }
+        Err(e) => {
+            return Err(ThemeError::Io {
+                path: path.clone(),
+                message: e.to_string(),
+            });
+        }
+    };
+    if let Err(e) = apply_toml(&mut loaded, &path, &source) {
+        if explicit {
+            return Err(e);
+        }
+        loaded.theme = Theme::default();
+        loaded.warnings.clear();
+        loaded.warnings.push(format!(
+            "{}: invalid theme, using built-in default: {e}",
+            path.display()
+        ));
+    }
     Ok(loaded)
 }
 
@@ -290,6 +313,22 @@ mod tests {
         let loaded = load_theme(Some(tmp.path()), None).unwrap();
         assert_eq!(loaded.theme, Theme::default());
         assert!(loaded.warnings.is_empty(), "warnings: {:?}", loaded.warnings);
+    }
+
+    #[test]
+    fn invalid_discovered_theme_falls_back_to_built_in_default() {
+        let tmp = tempdir();
+        write_theme(&tmp, "not = [valid");
+
+        let loaded = load_theme(Some(tmp.path()), None).unwrap();
+
+        assert_eq!(loaded.theme, Theme::default());
+        assert_eq!(loaded.warnings.len(), 1);
+        assert!(
+            loaded.warnings[0].contains("using built-in default"),
+            "warnings: {:?}",
+            loaded.warnings
+        );
     }
 
     #[test]

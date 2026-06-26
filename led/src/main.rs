@@ -122,12 +122,9 @@ fn main() -> io::Result<()> {
     // the canon tail has no extension.
     let mut ids = TabIdGen::default();
     for f in &cli.files {
-        // Standalone mode silently skips directory args — the
-        // typical `--no-workspace` invocation is a single file
-        // (commit message, temp file), and opening a directory
-        // as a buffer is meaningless when there's no workspace
-        // to anchor it to.
-        if cli.no_workspace && f.is_dir() {
+        // Directory args anchor the workspace/browser; they are not
+        // meaningful buffer tabs.
+        if f.is_dir() {
             continue;
         }
         let id = ids.issue();
